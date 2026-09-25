@@ -112,6 +112,12 @@ inline constexpr uint16_t port_pins(char port) {
 
 inline constexpr bool has_port(char port) { return port_pins(port) != 0U; }
 
+/// Whether AFIO's PD0PD1_RM hands the oscillator's two pads to port D as
+/// PD0 and PD1 (RM 10.2.11.2): no - "CH32V203RBT6 chip only has OSC_IN
+/// and OSC_OUT function pins, which cannot be reused as PD0 and PD1" (the
+/// datasheet's note 4).
+inline constexpr bool osc_pads_as_pd0_pd1 = false;
+
 /// The two pads the debug port owns from reset: a program that takes
 /// them for itself loses the probe until the next power cycle.
 inline constexpr char debug_swdio_port = 'A';
@@ -192,6 +198,15 @@ inline constexpr bool has_ethernet = true;
 /// 23) on PB6/PB7.
 inline constexpr bool has_usbd  = true;
 inline constexpr bool has_usbfs = true;
+
+/// The EXTI lines this part has, one bit per line (RM table 9-3 and its
+/// class notes): the sixteen pin lines, the PVD's (16) and the RTC
+/// alarm's (17) on every part, and above them only what a block of this
+/// part is wired to - here all twenty-two: the USB device controller's
+/// wake-up on 18, the Ethernet's on 19, the USBFS controller's on 20 and
+/// the internal 32 kHz calibration's on 21, which table 9-3 gives to the
+/// CH32V20x_D8.
+inline constexpr uint32_t exti_lines = 0x3FFFFFUL;
 
 // ---- the clock tree's edges (datasheet 2.1 and tables 4-9, 4-11) ----------
 /// The ceiling this part is rated for, that its package brings out the

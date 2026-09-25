@@ -15,8 +15,9 @@ reads `0x30300514`, `misa` `0x40901125` (I, M, A, F, C, user mode and
 WCH's own extension), the flash-capacity signature 288 KB.
 
 - **Clock**: HSI 8 MHz and a PLL to 144 MHz, which is what the apps
-  run. An **8 MHz crystal Y1 on PD0/PD1** (OSC_IN/OSC_OUT on this
-  package) and a **32.768 kHz crystal Y2 on PC14/PC15**; the clock
+  run. An **8 MHz crystal Y1 on OSC_IN/OSC_OUT** (pins 12 and 13 of the
+  LQFP100, which are not port D's: PD0 and PD1 are pins 81 and 82 of
+  their own, the V3.5 datasheet's note 4) and a **32.768 kHz crystal Y2 on PC14/PC15**; the clock
   suite runs the PLL from Y1 as well.
 - **Supply**: the USB connector P14 (USB-C, the two CC pads pulled down
   by 5.1 kOhm) or P4 in parallel with it, through a 500 mA fuse, the

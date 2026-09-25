@@ -2,10 +2,10 @@
 // pull that lives in the output register, every verb of a port and of a
 // pin, and the PwmChannel role a bare pin plays.
 //
-// WHICH PAD a TU may name is the part's, and this is where the nine
+// WHICH PAD a TU may name is the part's, and this is where the thirteen
 // packages differ most: port A is whole on some and full of holes on
-// others, port B keeps between two and sixteen pins, and ports C and D
-// reach no pad at all on two of them. So no pad is spelled as a literal
+// others, port B keeps between two and sixteen pins, ports C and D reach
+// no pad at all on two of them, and port E is the LQFP100's alone. So no pad is spelled as a literal
 // here - the table is asked for the lowest one each port bonds, which is
 // also what proves that asking works.
 #include "ch32vx03/pin.hpp"
@@ -15,6 +15,7 @@
 using namespace brio;
 
 static_assert(gpio_base_for('A') == 0x40010800 && gpio_base_for('D') == 0x40011400);
+static_assert(gpio_base_for('E') == 0x40011800 && gpio_clock_for('E') == rcc_pb2_gpioe);
 static_assert(gpio_base_for('Z') == 0);
 
 // RM 10.1.1: CNF above a TWO-BIT MODE, the F1's own nibble - where the
@@ -129,6 +130,7 @@ void pin_verbs() {
     // exercises port A twice rather than naming a pad it has not got.
     port_verbs<device::has_port('C') ? 'C' : 'A'>();
     port_verbs<device::has_port('D') ? 'D' : 'A'>();
+    port_verbs<device::has_port('E') ? 'E' : 'A'>();
 
     Lamp::show(Rgb{255, 0, 255});
     Lamp::off();

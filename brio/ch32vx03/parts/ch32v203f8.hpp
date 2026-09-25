@@ -105,6 +105,11 @@ inline constexpr uint16_t port_pins(char port) {
 
 inline constexpr bool has_port(char port) { return port_pins(port) != 0U; }
 
+/// Whether AFIO's PD0PD1_RM hands the oscillator's two pads to port D as
+/// PD0 and PD1 (RM 10.2.11.2): no - this package brings out no oscillator
+/// pad at all, so there is nothing to hand to port D.
+inline constexpr bool osc_pads_as_pd0_pd1 = false;
+
 /// The two pads the debug port owns from reset: a program that takes
 /// them for itself loses the probe until the next power cycle. On this
 /// package they are also the I2C bus's two pins (the file header).
@@ -188,6 +193,14 @@ inline constexpr bool has_ethernet = false;
 /// - on the QFN20 variant the two swap round (the file header).
 inline constexpr bool has_usbd  = false;
 inline constexpr bool has_usbfs = true;
+
+/// The EXTI lines this part has, one bit per line (RM table 9-3 and its
+/// class notes): the sixteen pin lines, the PVD's (16) and the RTC
+/// alarm's (17) on every part, and above them only what a block of this
+/// part is wired to - here lines 0..17 and 20: this part has no USB
+/// device controller to own line 18, and line 20 is the USBFS
+/// controller's.
+inline constexpr uint32_t exti_lines = 0x13FFFFUL;
 
 // ---- the clock tree's edges (datasheet 2.1 and tables 4-9, 4-11) ----------
 /// The ceiling this part is rated for, whether its package brings out

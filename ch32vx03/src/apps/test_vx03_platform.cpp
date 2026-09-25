@@ -76,6 +76,15 @@
 //      as a one-shot wake some two milliseconds later and no other
 //      interrupt enabled; the channel's remaining count says how much
 //      the DMA moved while the core slept, against the same span awake
+//   n  THE MASK'S SHADOW: a line raised by hand and, a swept number of
+//      instructions later, the global mask (the platform guard's own
+//      csrrci) or the line's own enable (PFIC_IRER) taken away - with and
+//      without a fence.i after it. The handler records mepc, so every
+//      trial says whether the interrupt was taken before the mask, INSIDE
+//      the masked region, or after the unmask; the count inside is what
+//      RM V2.5's note about a fence.i after a mask is asking about. The
+//      image says which way the hardware prologue was built, and the
+//      same letter on both builds is the measurement
 //
 //   i  (by name only) THREE REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a .noinit token, so it is NOT in
@@ -97,6 +106,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <utility>
 
 #include "ch32vx03/bus_activity.hpp"
 #include "ch32vx03/clock.hpp"
@@ -1192,6 +1202,237 @@ void tm_bus_in_sleep() {
                   true);
 }
 
+// ---------------------------------------------------------------------------
+// n - the mask's shadow
+// ---------------------------------------------------------------------------
+
+/// The line the trials raise: EXTI2's vector, pended by hand at the PFIC
+/// with no EXTI activity at all - a line no other letter of this suite
+/// uses, on every device class.
+constexpr Irq shadow_line = Irq::exti2;
+
+struct ShadowHit {
+    volatile uint32_t hits = 0;
+    volatile uint32_t mepc = 0;
+    volatile uint32_t mstatus = 0;
+};
+ShadowHit shadow;
+
+/// What one trial leaves: where the mask and the unmask instructions sit.
+struct ShadowMarks {
+    uint32_t mask;
+    uint32_t unmask;
+};
+
+/// How the program takes the line away: the platform guard's own csrrci
+/// on mstatus.MIE, or a store into the line's PFIC_IRER bit - each alone
+/// and each followed by a fence.i, which is what RM V2.5 asks for.
+enum class MaskWay : uint8_t { csr, csr_fence, irer, irer_fence };
+
+/// One trial: the line pended by a store into IPSR, N nops, the mask,
+/// eight nops inside the masked region, the unmask, eight nops more. The
+/// addresses of the mask and the unmask come back so the handler's mepc
+/// can be placed against them.
+template <unsigned N, MaskWay W>
+[[gnu::noinline]] ShadowMarks shadow_trial(volatile uint32_t* ipsr, volatile uint32_t* irer,
+                                           volatile uint32_t* ienr, uint32_t bit) {
+    uint32_t a = 0;
+    uint32_t c = 0;
+    uint32_t junk = 0;
+    if constexpr (W == MaskWay::csr || W == MaskWay::csr_fence) {
+        __asm__ volatile(
+            "la   %[a], 1f\n"
+            "la   %[c], 3f\n"
+            "sw   %[bit], 0(%[ipsr])\n"
+            ".rept %[n]\n"
+            "nop\n"
+            ".endr\n"
+            "1: csrrci %[j], mstatus, 8\n"
+            ".if %[f]\n"
+            "fence.i\n"
+            ".endif\n"
+            ".rept 8\n"
+            "nop\n"
+            ".endr\n"
+            "3: csrsi mstatus, 8\n"
+            ".rept 8\n"
+            "nop\n"
+            ".endr\n"
+            : [a] "=&r"(a), [c] "=&r"(c), [j] "=&r"(junk)
+            : [bit] "r"(bit), [ipsr] "r"(ipsr), [n] "i"(N),
+              [f] "i"(W == MaskWay::csr_fence ? 1 : 0)
+            : "memory");
+    } else {
+        __asm__ volatile(
+            "la   %[a], 1f\n"
+            "la   %[c], 3f\n"
+            "sw   %[bit], 0(%[ipsr])\n"
+            ".rept %[n]\n"
+            "nop\n"
+            ".endr\n"
+            "1: sw %[bit], 0(%[irer])\n"
+            ".if %[f]\n"
+            "fence.i\n"
+            ".endif\n"
+            ".rept 8\n"
+            "nop\n"
+            ".endr\n"
+            "3: sw %[bit], 0(%[ienr])\n"
+            ".rept 8\n"
+            "nop\n"
+            ".endr\n"
+            : [a] "=&r"(a), [c] "=&r"(c)
+            : [bit] "r"(bit), [ipsr] "r"(ipsr), [irer] "r"(irer), [ienr] "r"(ienr),
+              [n] "i"(N), [f] "i"(W == MaskWay::irer_fence ? 1 : 0)
+            : "memory");
+    }
+    (void)junk;
+    return {a, c};
+}
+
+/// Where a variant's trials landed.
+struct ShadowTally {
+    uint32_t before = 0;     ///< taken before the mask instruction ran
+    uint32_t inside = 0;     ///< taken INSIDE the masked region: the shadow
+    uint32_t after = 0;      ///< taken after the unmask
+    uint32_t lost = 0;       ///< never taken
+    uint32_t inside_mpie0 = 0;   ///< shadow hits whose MPIE says MIE was already clear
+    uint32_t first_n = 0xFFFFu;  ///< the smallest nop count that gave a shadow
+    uint32_t last_n = 0;
+    uint32_t min_depth = 0xFFFFu;   ///< bytes past the mask, the earliest shadow hit
+    uint32_t max_depth = 0;         ///< ... and the latest
+    uint32_t pend_n = 0xFFFFu;      ///< the smallest nop count taken before the mask
+    uint32_t after_min = 0xFFFFu;   ///< bytes past the unmask, the earliest late hit
+    uint32_t after_max = 0;         ///< ... and the latest
+};
+
+constexpr uint32_t shadow_reps = 250;
+
+using ShadowTrial = ShadowMarks (*)(volatile uint32_t*, volatile uint32_t*, volatile uint32_t*,
+                                    uint32_t);
+
+/// One nop count's trials, the classification written once for all of
+/// them - the trials are the only thing that has to be a template.
+[[gnu::noinline]] void shadow_run(ShadowTrial trial, uint32_t n, ShadowTally& t) {
+    const uint32_t line = static_cast<uint32_t>(shadow_line);
+    volatile uint32_t* ipsr = &pfic()->IPSR[line >> 5];
+    volatile uint32_t* irer = &pfic()->IRER[line >> 5];
+    volatile uint32_t* ienr = &pfic()->IENR[line >> 5];
+    const uint32_t bit = 1UL << (line & 31u);
+    for (uint32_t r = 0; r < shadow_reps; ++r) {
+        const uint32_t before = shadow.hits;
+        const ShadowMarks m = trial(ipsr, irer, ienr, bit);
+        for (uint32_t spin = 0; spin < 1000u && shadow.hits == before; ++spin) {
+        }
+        if (shadow.hits == before) {
+            ++t.lost;
+            Pfic::clear_pending(shadow_line);
+            continue;
+        }
+        const uint32_t pc = shadow.mepc;
+        if (pc <= m.mask) {
+            ++t.before;
+            if (n < t.pend_n) {
+                t.pend_n = n;
+            }
+        } else if (pc <= m.unmask) {
+            ++t.inside;
+            if (((shadow.mstatus >> 7) & 1u) == 0u) {
+                ++t.inside_mpie0;
+            }
+            if (n < t.first_n) {
+                t.first_n = n;
+            }
+            if (n > t.last_n) {
+                t.last_n = n;
+            }
+            if (pc - m.mask < t.min_depth) {
+                t.min_depth = pc - m.mask;
+            }
+            if (pc - m.mask > t.max_depth) {
+                t.max_depth = pc - m.mask;
+            }
+        } else {
+            ++t.after;
+            if (pc - m.unmask < t.after_min) {
+                t.after_min = pc - m.unmask;
+            }
+            if (pc - m.unmask > t.after_max) {
+                t.after_max = pc - m.unmask;
+            }
+        }
+    }
+}
+
+template <MaskWay W, unsigned... N>
+ShadowTally shadow_sweep(std::integer_sequence<unsigned, N...>) {
+    static constexpr ShadowTrial trials[] = {&shadow_trial<N, W>...};
+    ShadowTally t;
+    for (uint32_t n = 0; n < sizeof...(N); ++n) {
+        shadow_run(trials[n], n, t);
+    }
+    return t;
+}
+
+constexpr unsigned shadow_nops = 20;
+
+void report_shadow(const char* name, const ShadowTally& t) {
+    const uint32_t all = t.before + t.inside + t.after + t.lost;
+    print(serial, "  ", name, ": ", all, " trials - ", t.before, " taken before the mask, ",
+          t.inside, " INSIDE it (", t.inside * 1000u / (all == 0u ? 1u : all),
+          " per thousand), ", t.after, " after the unmask, ", t.lost, " never", crlf);
+    print(serial, "    the pend was taken ahead of the mask from ", t.pend_n,
+          " nops of lead on", crlf);
+    if (t.inside != 0u) {
+        print(serial, "    the shadow: at ", t.first_n, "..", t.last_n, " nops of lead, ",
+              t.min_depth, "..", t.max_depth, " bytes past the mask, ", t.inside_mpie0,
+              " of them with MPIE clear (MIE already cleared when the trap came)", crlf);
+    }
+    if (t.after != 0u) {
+        print(serial, "    held until the unmask, then taken ", t.after_min, "..", t.after_max,
+              " bytes past it", crlf);
+    }
+}
+
+void tn_shadow() {
+#if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
+    print(serial, "  built with the hardware prologue/epilogue (CH32VX03_HPE=ON)", crlf);
+#else
+    print(serial, "  built with gcc's own prologue/epilogue (CH32VX03_HPE=OFF)", crlf);
+#endif
+    console_drain();
+    Pfic::clear_pending(shadow_line);
+    Pfic::enable(shadow_line);
+    const auto seq = std::make_integer_sequence<unsigned, shadow_nops>{};
+    const ShadowTally csr = shadow_sweep<MaskWay::csr>(seq);
+    const ShadowTally csr_fence = shadow_sweep<MaskWay::csr_fence>(seq);
+    const ShadowTally irer = shadow_sweep<MaskWay::irer>(seq);
+    const ShadowTally irer_fence = shadow_sweep<MaskWay::irer_fence>(seq);
+    Pfic::disable(shadow_line);
+    Pfic::clear_pending(shadow_line);
+    report_shadow("csrrci on mstatus.MIE (the guard's own)", csr);
+    report_shadow("csrrci then fence.i", csr_fence);
+    report_shadow("a store into PFIC_IRER", irer);
+    report_shadow("a store into PFIC_IRER then fence.i", irer_fence);
+    const uint32_t each = shadow_reps * shadow_nops;
+    const auto whole = [each](const ShadowTally& t) {
+        return t.before + t.inside + t.after == each && t.lost == 0u;
+    };
+    bench.verdict("every trial's interrupt was taken once, before the mask, inside it or after "
+                  "the unmask, in all four variants",
+                  whole(csr) && whole(csr_fence) && whole(irer) && whole(irer_fence));
+    const auto straddles = [](const ShadowTally& t) {
+        return t.before != 0u && t.inside + t.after != 0u;
+    };
+    bench.verdict("the sweep straddled the mask: in every variant some trials were taken before "
+                  "it and some were not",
+                  straddles(csr) && straddles(csr_fence) && straddles(irer) &&
+                      straddles(irer_fence));
+    // The count inside is the finding, whichever it is: no threshold is
+    // the right one to judge it by.
+    bench.verdict("the shadow counted for each variant (the numbers above are the finding)", true);
+}
+
 void banner() {
     print(serial, crlf, "test_vx03_platform - ", device::part_name,
           " (clk=144 MHz PLL, tick=STK 1000 Hz)", crlf);
@@ -1232,6 +1473,20 @@ extern "C" BRIO_CH32_INTERRUPT void software_handler() {
 /// exception vector at index 3 and the breakpoint one at index 9 - so
 /// both are bound, each leaving its own index in the token before the
 /// shared body writes the record and resets.
+/// Letter n's line: where the trap came from (mepc) and what mstatus
+/// said about it, then the pending bit withdrawn - a leaf, so the
+/// prologue is the same one on every device class.
+extern "C" BRIO_CH32_INTERRUPT void exti2_handler() {
+    uint32_t pc;
+    uint32_t st;
+    __asm__ volatile("csrr %0, mepc" : "=r"(pc));
+    __asm__ volatile("csrr %0, mstatus" : "=r"(st));
+    shadow.mepc = pc;
+    shadow.mstatus = st;
+    brio::Pfic::clear_pending(shadow_line);
+    shadow.hits = shadow.hits + 1u;
+}
+
 extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
     token.vector = 3;
     brio::fault_reset<P>();
@@ -1271,6 +1526,8 @@ int main() {
     if constexpr (brio::device::dma_controller_count >= 1u) {
         bench.letter('m', "the bus in sleep: a DMA block across idle()", tm_bus_in_sleep);
     }
+    bench.letter('n', "the mask's shadow: a line taken after the instruction that masked it?",
+                 tn_shadow);
     bench.letter('i', "THREE REAL RESETS (reboots the board)", ti_resets, false);
 
     if (serial_ok && token.magic == token_magic && token.leg != 0) {

@@ -27,6 +27,8 @@ static_assert(Exti::implemented(Exti::line_usbfs_wakeup) == device::has_usbfs);
 static_assert(Exti::implemented(Exti::line_osc32k_wakeup) ==
               (device::device_class == DeviceClass::v20x_d8));
 static_assert(!Exti::implemented(22) && !Exti::implemented(31));
+// The part table states the set, and the verb reads it.
+static_assert(Exti::implemented_mask() == device::exti_lines);
 static_assert((Exti::implemented_mask() & 0xFFFFu) == 0xFFFFu);
 static_assert((Exti::implemented_mask() & (1UL << 22)) == 0u);
 
@@ -63,6 +65,11 @@ using PadA = Pin<'A', first_pin('A')>;
 using PadB = Pin<'B', first_pin('B')>;
 using LineA = ExtInt<PadA>;
 using LineB = ExtInt<PadB>;
+// Port E's code is four (10.3.2.3): the LQFP100 reaches it, every other
+// package names port A in its place.
+constexpr char last_port = device::has_port('E') ? 'E' : 'A';
+using LineE = ExtInt<Pin<last_port, first_pin(last_port)>>;
+static_assert(exti_port_code(LineE::port) == (device::has_port('E') ? 4u : 0u));
 
 static_assert(LineA::line == first_pin('A') && LineA::port == 'A');
 static_assert(LineA::mask == (1UL << first_pin('A')));
@@ -74,6 +81,19 @@ static_assert(exti_lines_distinct<LineA, LineB>() == (first_pin('A') != first_pi
 /// A line named as a constant: the PVD's, which every part has.
 using PvdLine = ExtiLine<Exti::line_pvd>;
 static_assert(PvdLine::mask == (1UL << 16));
+
+/// The USB wake-ups, where the part's table has them: line 18 on every
+/// part with a device controller and on the CH32V303, whose table gives
+/// it to the USBFS/OTG controller; line 20 wherever there is a USBFS one.
+/// On the CH32V303 they pend vectors 58 and 84.
+constexpr uint8_t wake18 = Exti::implemented(18) ? 18 : Exti::line_pvd;
+constexpr uint8_t wake20 = Exti::implemented(20) ? 20 : Exti::line_pvd;
+using Wake18 = ExtiLine<wake18>;
+using Wake20 = ExtiLine<wake20>;
+static_assert(device::device_class != DeviceClass::v30x_d8 ||
+              (Wake18::irq() == Irq::usb_wakeup && Wake20::irq() == Irq::usbfs_wakeup &&
+               static_cast<uint8_t>(Irq::usb_wakeup) == 58 &&
+               static_cast<uint8_t>(Irq::usbfs_wakeup) == 84));
 
 void exti_verbs() {
     // The block, over every line the part has.
@@ -116,6 +136,11 @@ void exti_verbs() {
         Pfic::enable(*PvdLine::irq());
         Pfic::disable(*PvdLine::irq());
     }
+
+    (void)Wake18::arm(true);
+    (void)Wake20::event(true);
+    (void)LineE::claim(PinPull::down);
+    LineE::release();
 
     // One line through its pad.
     (void)LineA::claim(PinPull::up);

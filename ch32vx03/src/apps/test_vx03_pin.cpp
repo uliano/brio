@@ -1,6 +1,6 @@
-// test_vx03_pin - the reference bench suite for the CH32V203's PADS and
-// its EXTERNAL INTERRUPT LINES: ch32vx03/pin.hpp and ch32vx03/afio.hpp
-// over RM ch. 10, ch32vx03/exti.hpp over 9.4.
+// test_vx03_pin - the reference bench suite for the PADS and the EXTERNAL
+// INTERRUPT LINES of the CH32V203 and the CH32V303: ch32vx03/pin.hpp and
+// ch32vx03/afio.hpp over RM ch. 10, ch32vx03/exti.hpp over 9.4.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -14,16 +14,23 @@
 // number - so edges, senses, flags and the event mode are all measurable
 // with the board bare. The one thing a program cannot do to itself is
 // press a button, which is why the KEY on PA0 is a letter by NAME (k)
-// and not part of z.
+// and not part of z. ONE OPTIONAL WIRE, PA6 to PA1, carries an edge from
+// one pad to another pad's line: letter j tests for it first (a plain
+// output on PA6 read on PA1, both levels) and says "no wire" otherwise.
 //
-// THE PADS. Free on this board and used here: PA1..PA4 (levels, pulls,
-// the open drain, EXTI line 1), PB3..PB8 (the whole-port verbs, EXTI
-// lines 5 and 6), PB12/PB13 (the high configuration register, EXTI lines
-// 12 and 13), PC13 (the configuration LOCK). Never touched: PA9/PA10
-// (the console), PA13/PA14 (the debug port - taking them loses the probe
-// until a power cycle), PA11/PA12 (the USB pads), PC14/PC15 (the 32 kHz
-// crystal), PD0/PD1 (the 8 MHz crystal, which this suite's tree does not
-// run on), and PB2, which carries the LED and is toggled per command as
+// THE PADS. Used here: PA1..PA4 (levels, pulls, the open drain, EXTI
+// line 1), PB3..PB8 (the whole-port verbs, EXTI lines 5 and 6), PB12/PB13
+// (the high configuration register, EXTI lines 12 and 13), PC13 (the
+// configuration LOCK), and on a package that bonds them every other pad
+// of ports C, D and E (letter i). A pad strapped to ANOTHER PAD of the
+// board is still usable here, the other end being a floating input while
+// this suite runs; a pad under a pull resistor is not a pull test's, and
+// PB4 is the pulls letter's fourth pad for that reason. Never touched:
+// PA9/PA10 (the console), PA13/PA14 (the debug port - taking them loses
+// the probe until a power cycle), PA11/PA12 (the USB pads), PC14/PC15
+// (the 32 kHz crystal, which the backup domain may own), the 8 MHz
+// crystal's pads where they are PD0/PD1 (this suite's tree does not run
+// on it), and PB2, which carries the LED and is toggled per command as
 // every suite of this target does, never as a test pad.
 //
 // THE TREE RUNS ON THE HSI on purpose: letter f writes the remap that
@@ -56,12 +63,20 @@
 //   h  THE EVENT MODE: a line in EVENR ending the platform's idle() with
 //      no handler and no flag, measured in cycles against an idle() that
 //      only the tick ends
+//   i  PORTS C, D AND E where the package bonds them: every free pad
+//      driven both ways and pulled both ways, read back through its own
+//      input - the IOPE gate opened by the verbs - and a line of port E
+//      raised through the multiplexer's fifth code
+//   j  THE WIRE PA6 to PA1, tested for first: edges written on PA6 by
+//      the port counted on PA1's line, and the latency from the store to
+//      the handler in core cycles, beside the same edge a pad raises on
+//      its own line
 //   e  THE CONFIGURATION LOCK on PC13 - LAST in z, because the pad stays
 //      locked until the next reset
 //   k  THE KEY on PA0, by name: ten seconds of levels at 10 ms while a
 //      person presses the button
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -228,7 +243,8 @@ void ta_nibble() {
     const uint32_t low = Port<'C'>::regs().CFGLR;
     const uint32_t high = Port<'C'>::regs().CFGHR;
     print(serial, "  GPIOC after its reset pulse: CFGLR=", hex(low), " CFGHR=", hex(high),
-          " OUTDR=", hex(Port<'C'>::regs().OUTDR), " (this package bonds PC13..PC15 of it)", crlf);
+          " OUTDR=", hex(Port<'C'>::regs().OUTDR), " (this package bonds the pins ",
+          hex(Port<'C'>::bonded), " of it)", crlf);
     bench.verdict("a reset port holds 0x4 - a floating input - in the nibble of every pin it "
                   "bonds (10.3.1.1)",
                   Port<'C'>::nibble(13) == 0x4u && Port<'C'>::nibble(14) == 0x4u &&
@@ -471,18 +487,32 @@ struct RemapCase {
 };
 
 /// Every field of the two remap registers this driver reaches, at a code
-/// that is not the reset one - with USART1's left out, since its other
-/// column carries this console's TX away to PB6.
+/// that is not the reset one - with USART1's left out, since each of its
+/// other columns carries this console's TX away from PA9. On the CH32V20x
+/// classes the CH32V303's fields are all refused; USART3's and TIM2_ITR1's
+/// are asked apart below, written raw, because on the CH32V203C8 the
+/// silicon ties them to zero.
 constexpr RemapCase remap_cases[] = {
     {"SPI1", Remap::spi1, 1},         {"I2C1", Remap::i2c1, 1},
     {"USART2", Remap::usart2, 1},     {"USART3", Remap::usart3, 1},
-    {"UART4", Remap::uart4, 1},       {"TIM1", Remap::tim1, 1},
+    {"UART4", Remap::uart4, 1},       {"UART4 on port E", Remap::uart4, 2},
+    {"TIM1", Remap::tim1, 1},         {"TIM1 on port E", Remap::tim1, 3},
     {"TIM2", Remap::tim2, 3},         {"TIM3", Remap::tim3, 2},
     {"TIM3 full", Remap::tim3, 3},    {"TIM4", Remap::tim4, 1},
     {"CAN1", Remap::can1, 2},         {"CAN1 on the crystal pads", Remap::can1, 3},
     {"PD0/PD1 as GPIO", Remap::pd0_pd1, 1},
     {"TIM5_CH4", Remap::tim5_ch4, 1}, {"TIM2_ITR1", Remap::tim2_itr1, 1},
-    {"PTP_PPS", Remap::ptp_pps, 1},
+    {"PTP_PPS", Remap::ptp_pps, 1},   {"SPI3", Remap::spi3, 1},
+    {"TIM8", Remap::tim8, 1},         {"TIM9", Remap::tim9, 1},
+    {"TIM9 on port D", Remap::tim9, 2}, {"TIM10", Remap::tim10, 1},
+    {"TIM10 on port D", Remap::tim10, 3}, {"UART5", Remap::uart5, 1},
+    {"UART6", Remap::uart6, 2},       {"UART7", Remap::uart7, 1},
+    {"UART8", Remap::uart8, 3},       {"ADC1 injected from TIM8", Remap::adc1_etrginj, 1},
+    {"ADC1 regular from TIM8", Remap::adc1_etrgreg, 1},
+    {"ADC2 injected from TIM8", Remap::adc2_etrginj, 1},
+    {"ADC2 regular from TIM8", Remap::adc2_etrgreg, 1},
+    {"FSMC_NADV off", Remap::fsmc_nadv, 1}, {"CAN2", Remap::can2, 1},
+    {"ETH", Remap::eth, 1},
 };
 
 void tf_remaps() {
@@ -528,21 +558,34 @@ void tf_remaps() {
                   "column it has not is refused with nothing written",
                   wrong == 0u && taken > 0u);
 
-    // THE TWO FIELDS THIS CLASS DOES NOT IMPLEMENT, written raw. The
-    // driver refuses both (afio.hpp), and this is why: the manual gives
-    // USART3 four columns and the internal-trigger bit to the whole
-    // series, and on this part the silicon holds both at zero.
+    // THE TWO FIELDS WHOSE CLASS NOTES ARE ASKED OF THE SILICON, written
+    // raw: the manual gives USART3 four columns and the internal-trigger
+    // bit to the whole series, the CH32V203C8 holds both at zero, and the
+    // driver offers them on the other classes (afio.hpp). What the
+    // silicon answers must be what the driver offers, on every part this
+    // suite runs on.
     Afio::clock_on();
     const uint32_t kept = Afio::regs().PCFR1 & ~((0x3UL << 4) | (1UL << 29));
     Afio::regs().PCFR1 = kept | (0x1UL << 4) | (1UL << 29);
     const uint32_t usart3_field = (Afio::regs().PCFR1 >> 4) & 0x3u;
     const uint32_t itr1_field = (Afio::regs().PCFR1 >> 29) & 0x1u;
     Afio::regs().PCFR1 = kept;
+    const bool usart3_offered = afio_remap_has_code(Remap::usart3, 1);
+    const bool itr1_offered = afio_remap_has_code(Remap::tim2_itr1, 1);
     print(serial, "  written raw: USART3_RM = 01 reads ", usart3_field,
-          ", TIM2_ITR1_RM = 1 reads ", itr1_field, crlf);
-    bench.verdict("the two fields the manual gives this series and the silicon does not "
-                  "implement are read-only at zero (USART3's columns, TIM2's internal trigger)",
-                  usart3_field == 0u && itr1_field == 0u);
+          ", TIM2_ITR1_RM = 1 reads ", itr1_field, "; the driver offers them: ", usart3_offered,
+          " / ", itr1_offered, crlf);
+    bench.verdict("USART3's remap and TIM2's internal-trigger bit are writable exactly where the "
+                  "driver offers them (read-only at zero on the CH32V20x_D6)",
+                  (usart3_field == 1u) == usart3_offered && (itr1_field == 1u) == itr1_offered);
+
+    // USART1's high code bit, PCFR2 bit 26, the CH32V303's: read and never
+    // written here - every column it selects takes this console's TX.
+    if constexpr (afio_usart1_high_bit) {
+        print(serial, "  USART1's code reads ", Afio::remap_code(Remap::usart1),
+              " across both registers (its upper columns are not written: they move PA9)",
+              crlf);
+    }
 
     // USART1's second column exists on this package - and is never
     // selected here, because PB6 is not where the probe listens.
@@ -818,6 +861,292 @@ void th_event() {
 }
 
 // ===========================================================================
+// i - ports C, D and E, where the package bonds them
+// ===========================================================================
+
+/// The pads of port L this letter may drive: what the package bonds, less
+/// the pads another job owns - PC13 the lock's (letter e freezes it), the
+/// 32 kHz crystal's PC14/PC15, and PD0/PD1 where they are the 8 MHz
+/// crystal's (device::osc_pads_as_pd0_pd1).
+template <char L>
+constexpr uint16_t free_pads() {
+    uint16_t m = device::port_pins(L);
+    if constexpr (L == 'C') {
+        m = static_cast<uint16_t>(m & ~0xE000u);
+    }
+    if constexpr (L == 'D') {
+        if constexpr (device::osc_pads_as_pd0_pd1) {
+            m = static_cast<uint16_t>(m & ~0x0003u);
+        }
+    }
+    return m;
+}
+
+struct PortReport {
+    uint16_t pads;
+    uint16_t high;       ///< read back, driven high
+    uint16_t low;        ///< read back, driven low (ones where a pad is NOT low)
+    uint16_t alt;        ///< the 0x5555 pattern read back
+    uint16_t up;         ///< pulled up
+    uint16_t down;       ///< pulled down (ones where a pad is NOT low)
+    bool gate_closed;
+    bool gate_opened;
+};
+
+template <char L>
+PortReport port_walk() {
+    using Pt = Port<L>;
+    constexpr uint16_t pads = free_pads<L>();
+    PortReport r{};
+    r.pads = pads;
+    const uint32_t gate = gpio_clock_for(L);
+    Rcc::disable(Bus::pb2, gate);
+    r.gate_closed = !Rcc::enabled(Bus::pb2, gate);
+    Pt::configure_pins(pads, pin_nibble(PinMode::output, PinDrive::push_pull, PinSpeed::fast));
+    r.gate_opened = Rcc::enabled(Bus::pb2, gate);
+    Pt::out_set(pads);
+    (void)delay_us(clock, 2);
+    r.high = static_cast<uint16_t>(Pt::in() & pads);
+    Pt::out_clear(pads);
+    (void)delay_us(clock, 2);
+    r.low = static_cast<uint16_t>(Pt::in() & pads);
+    Pt::out_clear(pads);
+    Pt::out_set(pads & 0x5555u);
+    (void)delay_us(clock, 2);
+    r.alt = static_cast<uint16_t>(Pt::in() & pads);
+    // The pulls, the direction in OUTDR (10.3.1.4): all ones, then all
+    // zeroes, under the pulled-input nibble.
+    Pt::out_set(pads);
+    Pt::configure_pins(pads, 0x8u);
+    (void)delay_us(clock, 5);
+    r.up = static_cast<uint16_t>(Pt::in() & pads);
+    Pt::out_clear(pads);
+    (void)delay_us(clock, 5);
+    r.down = static_cast<uint16_t>(Pt::in() & pads);
+    Pt::configure_pins(pads, pin_nibble(PinMode::input, PinDrive::push_pull, PinSpeed::fast));
+    return r;
+}
+
+template <char L>
+void report_port(const PortReport& r) {
+    print(serial, "  port ", L, ": pads ", hex(r.pads), " - driven high ", hex(r.high),
+          ", low ", hex(r.low), ", 0x5555 ", hex(r.alt), "; pulled up ", hex(r.up), ", down ",
+          hex(r.down), "; the gate closed ", r.gate_closed, " and opened by the verb ",
+          r.gate_opened, crlf);
+    const uint16_t p = r.pads;
+    bench.verdict(L == 'C'   ? "port C's free pads follow the output register both ways and the "
+                               "pulls both ways, read on their own input"
+                  : L == 'D' ? "port D's pads follow the output register both ways and the pulls "
+                               "both ways, read on their own input"
+                             : "port E's pads follow the output register both ways and the pulls "
+                               "both ways, read on their own input",
+                  r.high == p && r.low == 0u && r.alt == (p & 0x5555u) && r.up == p &&
+                      r.down == 0u && r.gate_closed && r.gate_opened);
+}
+
+/// What line 5's port-E pad counted (the 9..5 vector's body adds it).
+volatile uint32_t edges_line5e = 0;
+volatile bool line5_on_e = false;
+
+/// A line of port L (E, here): PL5 on line 5 and the 9..5 vector,
+/// through the multiplexer's code for that port. A template, so a
+/// package without the port never forms the pad.
+template <char L>
+void line_on_port() {
+    using PadE5 = Pin<L, 5>;
+    using Line5E = ExtInt<PadE5>;
+    (void)Exti::release(5);
+    PadE5::output(false);
+    const bool selected = Line5E::select();
+    const char source = Exti::selected(5);
+    (void)Line5E::configure(ExtiSense::rising);
+    (void)Line5E::clear();
+    edges_line5e = 0;
+    line5_on_e = true;
+    (void)Line5E::arm(true);
+    Pfic::clear_pending(Irq::exti9_5);
+    Pfic::enable(Irq::exti9_5);
+    for (uint8_t i = 0; i < 10u; ++i) {
+        PadE5::toggle();
+        (void)delay_us(clock, 2);
+    }
+    (void)delay_us(clock, 10);
+    // PB5, the line's usual pad, toggled now: nothing may arrive.
+    const uint32_t from_e = edges_line5e;
+    PadB5::output(false);
+    for (uint8_t i = 0; i < 4u; ++i) {
+        PadB5::toggle();
+        (void)delay_us(clock, 2);
+    }
+    (void)delay_us(clock, 10);
+    const uint32_t after_b = edges_line5e;
+    Pfic::disable(Irq::exti9_5);
+    line5_on_e = false;
+    Line5E::release();
+    (void)Exti::steal(5, 'A');
+    print(serial, "  line 5 pointed at port E: select ", selected, ", EXTICR names '", source,
+          "'; ten toggles of PE5 raised ", from_e, " rising edges, four of PB5 then ",
+          after_b - from_e, crlf);
+    bench.verdict("a pad of port E reaches the line of its number through the multiplexer's "
+                  "port-E code, and the line's other pads do not",
+                  selected && source == 'E' && from_e == 5u && after_b == from_e);
+}
+
+/// A template, so that the ports and the pads a package has not got are
+/// discarded and not merely skipped: an `if constexpr` outside a template
+/// still instantiates both branches.
+template <int = 0>
+void ti_ports() {
+    all_off();
+    uint8_t walked = 0;
+    if constexpr (free_pads<'C'>() != 0u) {
+        report_port<'C'>(port_walk<'C'>());
+        ++walked;
+    }
+    if constexpr (free_pads<'D'>() != 0u) {
+        report_port<'D'>(port_walk<'D'>());
+        ++walked;
+    }
+    if constexpr (free_pads<'E'>() != 0u) {
+        report_port<'E'>(port_walk<'E'>());
+        ++walked;
+    }
+    if (walked == 0u) {
+        print(serial, "  this package bonds no free pad of ports C, D or E: nothing to walk", crlf);
+        bench.verdict("the ports this package bonds were asked (none free here)", true);
+    }
+
+    // A LINE OF PORT E: the multiplexer's fifth code (0100, 10.3.2.3),
+    // which no other package can select - PE5's edges on line 5 and the
+    // 9..5 vector, and the old port's pad silent.
+    if constexpr (device::has_port('E')) {
+        line_on_port<'E'>();
+    }
+    all_off();
+}
+
+// ===========================================================================
+// j - the wire PA6 to PA1: an edge from one pad to another pad's line
+// ===========================================================================
+
+using WireSrc = Pin<'A', 6>;
+
+/// Is PA6 strapped to PA1? PA6 driven as a plain output, PA1 read with
+/// its own pull set against the level, both ways round.
+bool wire_present() {
+    WireSrc::output(false);
+    PadA::input(PinPull::up);
+    (void)delay_us(clock, 20);
+    const bool low_seen = !PadA::read();
+    WireSrc::set();
+    PadA::input(PinPull::down);
+    (void)delay_us(clock, 20);
+    const bool high_seen = PadA::read();
+    WireSrc::release();
+    PadA::release();
+    return low_seen && high_seen;
+}
+
+/// The core cycle count the line-1 vector read on entry.
+volatile uint32_t line1_entry_cycles = 0;
+
+void tj_wire() {
+    all_off();
+    const bool wired = wire_present();
+    print(serial, "  PA6 driven, PA1 read: the wire is ", wired ? "THERE" : "absent", crlf);
+    if (!wired) {
+        bench.verdict("the wire PA6 to PA1 was tested for (no wire: the edge over it is not "
+                      "measured)", true);
+        all_off();
+        return;
+    }
+
+    // Twenty edges of PA6, written by the PORT, on PA1's line 1 - the
+    // pad the line watches is a floating input the wire drives.
+    WireSrc::output(false);
+    (void)LineA::claim();
+    (void)LineA::configure(ExtiSense::both);
+    (void)LineA::clear();
+    edges_line1 = 0;
+    (void)LineA::arm(true);
+    Pfic::clear_pending(Irq::exti1);
+    Pfic::enable(Irq::exti1);
+    for (uint8_t i = 0; i < 20u; ++i) {
+        WireSrc::toggle();
+        (void)delay_us(clock, 5);
+    }
+    (void)delay_us(clock, 10);
+    const uint32_t over_wire = edges_line1;
+
+    // THE LATENCY: the core counter read right before the store that
+    // raises PA6, and again as the handler's first statement - 64 rising
+    // edges, a fresh tick before each so no tick lands in the window.
+    uint32_t best = 0xFFFFFFFFu;
+    uint32_t worst = 0;
+    uint32_t taken = 0;
+    (void)LineA::configure(ExtiSense::rising);
+    for (uint8_t i = 0; i < 64u; ++i) {
+        WireSrc::clear();
+        (void)delay_us(clock, 5);
+        (void)LineA::clear();
+        Pfic::clear_pending(Irq::exti1);
+        const uint32_t before = edges_line1;
+        const uint32_t t = Ticker::ticks();
+        while (Ticker::ticks() == t) {
+        }
+        const uint32_t c0 = cycles_now();
+        WireSrc::set();
+        for (uint32_t spin = 0; spin < 10000u && edges_line1 == before; ++spin) {
+        }
+        if (edges_line1 == before) {
+            continue;
+        }
+        ++taken;
+        const uint32_t d = line1_entry_cycles - c0;
+        if (d < best) { best = d; }
+        if (d > worst) { worst = d; }
+    }
+
+    // The same measurement with PA1 raising its own line - the reference
+    // that says what the wire and the other pad add.
+    WireSrc::release();
+    PadA::output(false);
+    uint32_t self_best = 0xFFFFFFFFu;
+    uint32_t self_worst = 0;
+    for (uint8_t i = 0; i < 64u; ++i) {
+        PadA::clear();
+        (void)delay_us(clock, 5);
+        (void)LineA::clear();
+        Pfic::clear_pending(Irq::exti1);
+        const uint32_t before = edges_line1;
+        const uint32_t t = Ticker::ticks();
+        while (Ticker::ticks() == t) {
+        }
+        const uint32_t c0 = cycles_now();
+        PadA::set();
+        for (uint32_t spin = 0; spin < 10000u && edges_line1 == before; ++spin) {
+        }
+        if (edges_line1 == before) {
+            continue;
+        }
+        const uint32_t d = line1_entry_cycles - c0;
+        if (d < self_best) { self_best = d; }
+        if (d > self_worst) { self_worst = d; }
+    }
+    Pfic::disable(Irq::exti1);
+    (void)LineA::arm(false);
+    print(serial, "  twenty toggles of PA6 counted ", over_wire, " edges on PA1's line; a rising "
+          "edge reached the handler's first statement ", best, "..", worst, " core cycles after "
+          "the store (", taken, " of 64), and ", self_best, "..", self_worst,
+          " when PA1 raised its own line", crlf);
+    bench.verdict("every edge PA6 made reached PA1's line over the wire, one interrupt each",
+                  over_wire == 20u);
+    bench.verdict("and the handler ran within a microsecond of the store that made the edge",
+                  taken == 64u && worst < SysClock::hz / 1'000'000u);
+    all_off();
+}
+
+// ===========================================================================
 // e - the configuration lock (last in z: the pad stays locked)
 // ===========================================================================
 
@@ -842,9 +1171,20 @@ void te_lock() {
                   "only a reset changes it back)",
                   after == before);
     // A mask with a pad this package does not bond is refused before
-    // anything is written.
-    bench.verdict("a lock mask naming a pad this package does not bond is refused",
-                  !Port<'C'>::lock(0x0001u));
+    // anything is written - asked of a port where the package leaves a
+    // pin out, if it has one.
+    constexpr char holed = Port<'C'>::bonded != 0xFFFFu ? 'C'
+                           : device::has_port('D') && device::port_pins('D') != 0xFFFFu ? 'D'
+                                                                                        : 'A';
+    constexpr uint16_t missing = static_cast<uint16_t>(~device::port_pins(holed));
+    if constexpr (missing != 0u) {
+        constexpr uint16_t absent = static_cast<uint16_t>(missing & (0u - missing));
+        bench.verdict("a lock mask naming a pad this package does not bond is refused",
+                      !Port<holed>::lock(absent));
+    } else {
+        print(serial, "  every pad of the lock's ports is bonded on this package: no mask to "
+              "refuse", crlf);
+    }
 }
 
 // ===========================================================================
@@ -896,7 +1236,8 @@ void tk_key() {
 void banner() {
     print(serial, crlf, "test_vx03_pin on ", device::part_name,
           " - the pads (RM ch. 10) and the EXTI lines (9.4)", crlf,
-          "  nothing to wire: a pad reads its own level and feeds its own line", crlf,
+          "  nothing to wire: a pad reads its own level and feeds its own line (j wants the", crlf,
+          "  optional PA6-PA1 strap and says whether it is there)", crlf,
           "  e runs LAST in z - it locks PC13 until the next reset; k wants a finger", crlf, crlf);
     bench.menu();
     print(serial, crlf);
@@ -913,6 +1254,7 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
 
 extern "C" BRIO_CH32_INTERRUPT void exti1_handler() {
+    line1_entry_cycles = brio::stk()->CNTL;
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti1));
     if (brio::Exti::served(fired, 1)) {
         edges_line1 = edges_line1 + 1u;
@@ -923,7 +1265,11 @@ extern "C" BRIO_CH32_INTERRUPT void exti9_5_handler() {
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti9_5));
     shared_entries = shared_entries + 1u;
     if (brio::Exti::served(fired, 5)) {
-        edges_line5 = edges_line5 + 1u;
+        if (line5_on_e) {
+            edges_line5e = edges_line5e + 1u;
+        } else {
+            edges_line5 = edges_line5 + 1u;
+        }
     }
     if (brio::Exti::served(fired, 6)) {
         edges_line6 = edges_line6 + 1u;
@@ -956,6 +1302,10 @@ int main() {
     bench.letter('f', "the remaps: every column this part has, USART1's left alone", tf_remaps);
     bench.letter('g', "the EXTI lines on the pads' own outputs", tg_edges);
     bench.letter('h', "the event mode ending idle()", th_event);
+    bench.letter('i', "ports C, D and E where the package bonds them, and a line of port E",
+                 ti_ports<>);
+    bench.letter('j', "the wire PA6 to PA1: an edge on another pad's line, and its latency",
+                 tj_wire);
     bench.letter('k', "THE KEY on PA0: ten seconds of levels while you press it", tk_key, false);
     bench.letter('e', "the configuration LOCK on PC13 (it stays locked until a reset)", te_lock);
 

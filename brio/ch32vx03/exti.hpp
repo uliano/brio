@@ -1,10 +1,10 @@
 /*
  * exti.hpp
  *
- * The external interrupt/event controller of the CH32V203 (RM 9.4, 9.5.1):
- * twenty-two lines, sixteen of them pins and the rest peripheral wake-ups,
- * with the edge detection, the two enables, the software trigger and one
- * flag apiece.
+ * The external interrupt/event controller of the CH32V203 and the
+ * CH32V303 (RM 9.4, 9.5.1): twenty-two lines, sixteen of them pins and the
+ * rest peripheral wake-ups, with the edge detection, the two enables, the
+ * software trigger and one flag apiece.
  *
  *   Exti           the block: the senses, the interrupt and event enables,
  *                  the software trigger, the flags, the multiplexer, the
@@ -68,15 +68,15 @@
  *    here has to be turned on, and a line's edge detection is asynchronous,
  *    which is what makes it a wake-up source with the clocks stopped.
  *
- * THE WAKE-UP PATH, stated and half built. 9.4.2 gives two ways to end a
- * WFE: a line in EVENR, which needs no handler and leaves no flag; or a
- * line in INTENR with the vector masked at the PFIC and SEVONPEND set, in
- * which case the flag and the pending bit must both be cleared afterwards.
- * The platform's idle() is a WFE with SEVONPEND and WFITOWFE already set
- * (platform.hpp), so an armed line ends it either way. What a real SLEEP
- * costs and how the clocks come back is the power chapter's, and there is
- * no SleepSite in this stratum yet: this file provides the source and
- * measures only that the event latches.
+ * THE WAKE-UP PATH. 9.4.2 gives two ways to end a WFE: a line in EVENR,
+ * which needs no handler and leaves no flag; or a line in INTENR with the
+ * vector masked at the PFIC and SEVONPEND set, in which case the flag and
+ * the pending bit must both be cleared afterwards. The platform's idle()
+ * is a WFE with SEVONPEND and WFITOWFE already set (platform.hpp), so an
+ * armed line ends it either way. What a real SLEEP costs and how the
+ * clocks come back is the power chapter's (sleep.hpp), which takes its
+ * wake from these lines: this file provides the source and measures only
+ * that the event latches.
  */
 
 #pragma once
@@ -130,11 +130,12 @@ public:
     static constexpr uint8_t gpio_lines = 16;
 
     /// The lines above them, by what is wired to each (table 9-3). Which
-    /// of them this part HAS follows the peripheral: the two USB
-    /// controllers and the Ethernet are per part, line 21 is the
-    /// CH32V20x_D8's 32 kHz calibration, and on the CH32V30x_D8, which
-    /// has no USBD, the table gives line 18 to the USBFS/OTG controller
-    /// as well as line 20.
+    /// of them this part HAS is the part table's `exti_lines`, and it
+    /// follows the peripheral: the two USB controllers and the Ethernet
+    /// are per part, line 21 is the CH32V20x_D8's 32 kHz calibration, and
+    /// on the CH32V30x_D8, which has no USBD, the table gives line 18 to
+    /// the USBFS/OTG controller as well as line 20 - the Ethernet's 19
+    /// and the USBHS controller's reading of 20 being the D8C's.
     static constexpr uint8_t line_pvd = 16;
     static constexpr uint8_t line_rtc_alarm = 17;
     static constexpr uint8_t line_usbd_wakeup = 18;
@@ -145,26 +146,23 @@ public:
 
     static ExtiRegs& regs() { return *exti(); }
 
-    /// Does this part have line `n`? The peripheral wired to it decides,
-    /// and the sixteen pin lines exist everywhere.
+    /// Does this part have line `n`? The part table states it
+    /// (`device::exti_lines`, table 9-3 with its class notes), and the
+    /// sixteen pin lines, the PVD's and the RTC alarm's exist everywhere
+    /// (asserted below). Written line by line and not as one shift, so
+    /// that a line asked for at run time costs the comparisons the four
+    /// lines above the seventeenth need and nothing else.
     static constexpr bool implemented(uint8_t line) {
         return line < gpio_lines || line == line_pvd || line == line_rtc_alarm ||
-               (line == line_usbd_wakeup &&
-                (device::has_usbd || device::device_class == DeviceClass::v30x_d8)) ||
-               (line == line_eth_wakeup && device::has_ethernet) ||
-               (line == line_usbfs_wakeup && device::has_usbfs) ||
-               (line == line_osc32k_wakeup && device::device_class == DeviceClass::v20x_d8);
+               (line == line_usbd_wakeup && has_line18) ||
+               (line == line_eth_wakeup && has_line19) ||
+               (line == line_usbfs_wakeup && has_line20) ||
+               (line == line_osc32k_wakeup && has_line21);
     }
 
     /// Every line this part has, as a mask.
     static constexpr uint32_t implemented_mask() {
-        uint32_t m = 0;
-        for (uint8_t line = 0; line < line_count; ++line) {
-            if (implemented(line)) {
-                m |= 1UL << line;
-            }
-        }
-        return m;
+        return device::exti_lines & ((1UL << line_count) - 1UL);
     }
 
     /// Is it one of the pin lines - the only ones with a multiplexer?
@@ -404,6 +402,22 @@ public:
 
 private:
     static constexpr uint32_t bit(uint8_t line) { return 1UL << (line & 31u); }
+
+    /// The four lines above the eighteenth, one bit of the part table's
+    /// mask each.
+    static constexpr bool has_line18 = (device::exti_lines & (1UL << 18)) != 0u;
+    static constexpr bool has_line19 = (device::exti_lines & (1UL << 19)) != 0u;
+    static constexpr bool has_line20 = (device::exti_lines & (1UL << 20)) != 0u;
+    static constexpr bool has_line21 = (device::exti_lines & (1UL << 21)) != 0u;
+
+    // What the mask may say: every part has the eighteen lowest lines,
+    // and no line above the twenty-second exists anywhere (9.5.1's
+    // registers carry bits [21:0]).
+    static_assert((device::exti_lines & 0x3FFFFUL) == 0x3FFFFUL,
+                  "brio Exti: the sixteen pin lines, the PVD's and the RTC alarm's are every "
+                  "part's (parts/<part>.hpp's exti_lines)");
+    static_assert((device::exti_lines & ~0x3FFFFFUL) == 0u,
+                  "brio Exti: the block has twenty-two lines (parts/<part>.hpp's exti_lines)");
 
     static bool mask_bit(volatile uint32_t& reg, uint8_t line, bool on) {
         if (!implemented(line)) {

@@ -110,6 +110,13 @@ inline constexpr uint16_t port_pins(char port) {
 
 inline constexpr bool has_port(char port) { return port_pins(port) != 0U; }
 
+/// Whether AFIO's PD0PD1_RM hands the oscillator's two pads to port D as
+/// PD0 and PD1 (RM 10.2.11.2): no - on the LQFP100 PD0 and PD1 are pins
+/// of their own (81 and 82) beside OSC_IN/OSC_OUT (12 and 13), "so there
+/// is no need to remap settings by software" (the datasheet's note 4),
+/// and the field is not this package's.
+inline constexpr bool osc_pads_as_pd0_pd1 = false;
+
 /// The two pads the debug port owns from reset: a program that takes
 /// them for itself loses the probe until the next power cycle.
 inline constexpr char debug_swdio_port = 'A';
@@ -194,6 +201,14 @@ inline constexpr bool has_ethernet = false;
 /// never a USBD.
 inline constexpr bool has_usbd  = false;
 inline constexpr bool has_usbfs = true;
+
+/// The EXTI lines this part has, one bit per line (RM table 9-3 and its
+/// class notes): the sixteen pin lines, the PVD's (16) and the RTC
+/// alarm's (17) on every part, and above them only what a block of this
+/// part is wired to - here lines 0..18 and 20: on this device class table
+/// 9-3 gives line 18 to the USBFS/OTG controller's wake-up (there is no
+/// USB device controller) and line 20 to the USBFS controller's.
+inline constexpr uint32_t exti_lines = 0x17FFFFUL;
 
 // ---- the clock tree's edges (datasheet 4.3.5 to 4.3.7) --------------------
 /// The ceiling this part is rated for, that its package brings out the

@@ -1,6 +1,7 @@
-// test_vx03_watchdog - the reference bench suite for the CH32V203's two
-// WATCHDOGS: ch32vx03/watchdog.hpp over RM ch. 7 (the independent one)
-// and ch. 8 (the window one).
+// test_vx03_watchdog - the reference bench suite for the two WATCHDOGS
+// of the CH32V203 and the CH32V303: ch32vx03/watchdog.hpp over RM ch. 7
+// (the independent one) and ch. 8 (the window one), both chapters every
+// device class's.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -55,7 +56,7 @@
 //      a refresh, a refresh BEFORE the window opens, and the early
 //      wake-up interrupt taken one tick before the reset
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

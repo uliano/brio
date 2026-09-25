@@ -1,9 +1,10 @@
 /*
  * tim.hpp
  *
- * The CH32V203's timers (RM ch. 14 for the advanced-control block, ch.
- * 15 for the general-purpose ones) in the two strata every brio target
- * uses (docs/design/overview.md, "Target strata"):
+ * The timers of the CH32V203 and the CH32V303 (RM ch. 14 for the
+ * advanced-control block, ch. 15 for the general-purpose ones, ch. 16 for
+ * the basic ones) in the two strata every brio target uses
+ * (docs/design/overview.md, "Target strata"):
  *
  *  Tim<n>          the RESOURCE - one TIMx block: the time base
  *                  (prescaler, counter, auto-reload and their shadow
@@ -11,8 +12,9 @@
  *                  capture/compare channels in both their faces, the
  *                  slave controller and the master TRGO, the external
  *                  trigger, the break and dead-time unit of the
- *                  advanced timer, the DMA burst engine, the flags and
- *                  the ISR bodies.
+ *                  advanced timers, the dual-edge capture of the
+ *                  CH32V303, the DMA burst engine, the flags and the ISR
+ *                  bodies.
  *
  *  TimPad<pad>     a pad handed to a timer signal, its Pad taken from
  *                  afio.hpp's remap COLUMN (below).
@@ -25,18 +27,27 @@
  *                  measuring another with no wire and no CPU),
  *                  TimPeriodicTick, TimOnePulse, TimEncoder.
  *
- * WHAT THIS FAMILY HAS, AND WHAT THE MANUAL HAS THAT IT HAS NOT. The
- * reference manual covers four families at once and its timer chapters
- * name TIM1/8/9/10 (advanced) and TIM2/3/4/5 (general-purpose). The
- * datasheet's table 2-1 is what says which of them a PART offers, and
- * for every part of the CH32V203 series the answer is the same: ONE
- * advanced-control timer (TIM1) and THREE general-purpose ones
- * (TIM2..TIM4), with a fourth - the 32-bit TIM5 - on the CH32V203RB
- * alone. NO PART OF THIS SERIES HAS A BASIC TIMER, so chapter 16
- * (TIM6/TIM7) describes silicon this stratum never addresses. Those
- * facts are read from `device::` (advanced_timer_count,
- * general_timer_count, has_tim5) and folded by `tim_present()`; no file
- * of this stratum but parts/ names a part.
+ * WHAT A PART HAS. The reference manual covers four families at once and
+ * its timer chapters name TIM1/8/9/10 (advanced), TIM2/3/4/5
+ * (general-purpose) and TIM6/7 (basic). The datasheets' tables 2-1 and
+ * 2-1-1 are what say which of them a PART offers: every CH32V203 and the
+ * two 128 KB CH32V303 have ONE advanced-control timer (TIM1) and THREE
+ * general-purpose ones (TIM2..TIM4), the CH32V203RB a fourth - the
+ * 32-bit TIM5 - and the CH32V303RC and VC the whole set: FOUR advanced
+ * ones (TIM1, TIM8, TIM9, TIM10), FOUR general-purpose ones (TIM2..TIM5,
+ * TIM5 sixteen bits there) and the TWO BASIC ones of chapter 16 (TIM6,
+ * TIM7), which no CH32V203 has. Those facts are the part table's MASKS
+ * (`device::advanced_timer_instances`, `general_timer_instances`,
+ * `basic_timer_instances`), read by `tim_present()` and its siblings; no
+ * file of this stratum but parts/ names a part.
+ *
+ * A BASIC TIMER IS A TIME BASE AND NOTHING ELSE (16.2.2): no channel, no
+ * slave controller, no external trigger, no down-counting, no burst
+ * engine - CTLR1, CTLR2's MMS, UIE/UDE, UIF, UG, CNT, PSC and ATRLR are
+ * its whole register file (16.4), and its TRGO goes to the DAC and, on
+ * this family, to TIM9's internal triggers. So `Tim<6>` and `Tim<7>` say
+ * `channels == 0`, and a channel verb on one of them does not compile:
+ * the registers it would write are not there.
  *
  * THE BLOCK IS THE STM32F1's, NOT THE CH32V00x's. Same register file,
  * same bit positions, WCH's names (CTLR1, SMCFGR, DMAINTENR, INTFR,
@@ -45,10 +56,15 @@
  * the CAPLVL/CAPOV bits that carry a capture's level, the OE_MODE bit -
  * IS NOT HERE: CTLR1 of this family ends at CKD, and a program ported
  * from the CH32V00x that wrote bits 13..15 of CTLR1 would write nothing
- * at all. What the manual's own chapter has and this CLASS has not is
- * the dual-edge capture register TIMx_AUX (14.3.11's note names the D8
- * and D8C lot numbers), so no verb reaches it and the register is not
- * spelled.
+ * at all. What the manual's own chapter adds for the CH32V30x_D8 is the
+ * DUAL-EDGE CAPTURE register TIMx_AUX (14.3.11, 15.3.9, 14.4.21): one
+ * channel capturing both edges of its input and holding the pulse WIDTH
+ * in its own register, on channels 2..4 of every timer but the basic
+ * ones - and only "for lot numbers where the penultimate sixth bit is not
+ * zero", so it is the class's verb and the silicon's answer:
+ * `dual_edge_capture()` writes the channel's bit into TIMx_AUX, reads it
+ * back and answers false, writing nothing else, where the lot kept no
+ * bit - which is what the CH32V303VCT6 the reference suite ran on did.
  *
  * SIX FACTS THAT SHAPE THIS FILE.
  *
@@ -91,13 +107,15 @@
  *    and `clock_hz_now(hclk)` reads the same number back out of RCC -
  *    the witness that stops this file from lying if a prescaler moves.
  *
- * 6. THERE IS NO BOTH-EDGE CAPTURE ON THIS FAMILY. CCER carries CCyP for
- *    the capture polarity and nothing else: CCyNP is the COMPLEMENTARY
- *    OUTPUT's polarity on the advanced timer (14.4.9) and Reserved on
+ * 6. THERE IS NO BOTH-EDGE CODE IN CCER. CCER carries CCyP for the
+ *    capture polarity and nothing else: CCyNP is the COMPLEMENTARY
+ *    OUTPUT's polarity on the advanced timers (14.4.9) and Reserved on
  *    the general-purpose ones (15.4.9). The later STM32 families' "11 =
  *    both edges" encoding does not exist here, so TimCapturePolarity has
  *    two values and a caller that wants both edges uses two channels on
- *    one input (TimPeriodMeter's arrangement).
+ *    one input (TimPeriodMeter's arrangement) - or, on the CH32V303, the
+ *    dual-edge capture above, which is a different register and not a
+ *    CCER code.
  *
  * MEASURING WITH NO WIRE. Three of this chapter's own features make a
  * timer observable with nothing attached, which is what the reference
@@ -161,11 +179,13 @@
 namespace brio {
 
 // =============================================================================
-// The registers (tables 14-3 and 15-3): sixteen-bit registers at a
-// four-byte stride, with the counter, the auto-reload and the four
-// capture/compare registers declared thirty-two bits wide - which is
-// what they are on the CH32V203RB's 32-bit TIM5 and what their upper
-// half reads as zero on every other instance.
+// The registers (tables 14-3..14-6, 15-3..15-6, 16-1, 16-2): sixteen-bit
+// registers at a four-byte stride, with the counter, the auto-reload and
+// the four capture/compare registers declared thirty-two bits wide -
+// which is what they are on the CH32V203RB's 32-bit TIM5 and what their
+// upper half reads as zero on every other instance. A basic timer has
+// the registers up to ATRLR but for SMCFGR and the channels' three; the
+// rest of its map is not there.
 // =============================================================================
 
 struct TimRegs {
@@ -200,11 +220,14 @@ struct TimRegs {
     uint16_t RESERVED12;
     volatile uint16_t DMAADR;     ///< 0x4c the one address a burst walks through
     uint16_t RESERVED13;
+    volatile uint16_t AUX;        ///< 0x50 the dual-edge capture (the CH32V30x_D8)
+    uint16_t RESERVED14;
 };
 
-/// The instances this family addresses (tables 14-3, 15-3..15-6). TIM1
-/// is the PB2 one; the rest are PB1's. WHICH of them a PART offers is
-/// `tim_present()`.
+/// The instances this family addresses (tables 14-3..14-6, 15-3..15-6,
+/// 16-1, 16-2). The four advanced-control timers are PB2's; the rest are
+/// PB1's. WHICH of them a PART offers is `tim_present()`; TIM6..TIM10's
+/// addresses are device.hpp's, where the CH32V303's blocks are named.
 inline constexpr uint32_t tim1_base = pb2_base + 0x2c00;
 inline constexpr uint32_t tim2_base = pb1_base + 0x0000;
 inline constexpr uint32_t tim3_base = pb1_base + 0x0400;
@@ -212,12 +235,17 @@ inline constexpr uint32_t tim4_base = pb1_base + 0x0800;
 inline constexpr uint32_t tim5_base = pb1_base + 0x0c00;
 
 constexpr uint32_t tim_base_for(uint8_t n) {
-    return n == 1   ? tim1_base
-           : n == 2 ? tim2_base
-           : n == 3 ? tim3_base
-           : n == 4 ? tim4_base
-           : n == 5 ? tim5_base
-                    : 0;
+    return n == 1    ? tim1_base
+           : n == 2  ? tim2_base
+           : n == 3  ? tim3_base
+           : n == 4  ? tim4_base
+           : n == 5  ? tim5_base
+           : n == 6  ? tim6_base
+           : n == 7  ? tim7_base
+           : n == 8  ? tim8_base
+           : n == 9  ? tim9_base
+           : n == 10 ? tim10_base
+                     : 0;
 }
 
 // ---- TIMx_CTLR1 (14.4.1, 15.4.1) -------------------------------------------
@@ -308,32 +336,44 @@ inline constexpr uint16_t tim_dba_mask  = 0x001Fu;
 inline constexpr uint16_t tim_dbl_mask  = 0x1F00u;
 inline constexpr uint8_t tim_dbl_shift  = 8;
 
+// ---- TIMx_AUX (14.4.21, 15.4.25): CAP_ED_CH2..CAP_ED_CH4 at bits 0..2 --------
+inline constexpr uint16_t tim_cap_ed_ch2 = 1u << 0;
+inline constexpr uint16_t tim_cap_ed_mask = 0x7u;
+
 // =============================================================================
 // What a timer IS on this part
 // =============================================================================
 
-/// The instances this PART offers, folded from the datasheet's own
-/// counts (table 2-1): TIM1 the advanced-control block, TIM2..TIM4 the
-/// general-purpose ones, TIM5 the CH32V203RB's fourth. No basic timer
-/// exists anywhere in the series, so chapter 16 has no instance here.
-constexpr bool tim_present(uint8_t n) {
-    return n == 1                ? device::advanced_timer_count >= 1u
-           : (n >= 2u && n <= 4u) ? device::general_timer_count >= static_cast<uint8_t>(n - 1u)
-           : n == 5              ? device::has_tim5
-                                 : false;
+/// The three KINDS of timer, each a mask of the part table's (the
+/// datasheets' tables 2-1 and 2-1-1): the advanced-control ones (TIM1,
+/// and TIM8..TIM10 on the CH32V303RC and VC), the general-purpose ones
+/// (TIM2..TIM4, and TIM5 on three parts) and the basic ones (TIM6 and
+/// TIM7, the CH32V303RC's and VC's alone).
+constexpr bool tim_advanced(uint8_t n) {
+    return n < 16u && (device::advanced_timer_instances & static_cast<uint16_t>(1U << n)) != 0u;
+}
+constexpr bool tim_general(uint8_t n) {
+    return n < 16u && (device::general_timer_instances & static_cast<uint16_t>(1U << n)) != 0u;
+}
+constexpr bool tim_basic(uint8_t n) {
+    return n < 16u && (device::basic_timer_instances & static_cast<uint16_t>(1U << n)) != 0u;
 }
 
-/// Four capture/compare channels on every timer of this family.
-constexpr uint8_t tim_channels(uint8_t n) { return tim_present(n) ? 4u : 0u; }
+/// The instances this PART offers.
+constexpr bool tim_present(uint8_t n) { return tim_advanced(n) || tim_general(n) || tim_basic(n); }
 
-/// The complementary outputs: channels 1..3 of the advanced timer, and
+/// Four capture/compare channels on every timer of this family but the
+/// basic ones, which have none (16.2.2).
+constexpr uint8_t tim_channels(uint8_t n) { return tim_present(n) && !tim_basic(n) ? 4u : 0u; }
+
+/// The complementary outputs: channels 1..3 of the advanced timers, and
 /// nowhere else (14.3.6).
-constexpr uint8_t tim_complementary_channels(uint8_t n) { return n == 1u ? 3u : 0u; }
+constexpr uint8_t tim_complementary_channels(uint8_t n) { return tim_advanced(n) ? 3u : 0u; }
 
 /// The break and dead-time unit, and the repetition counter: the
-/// advanced timer's alone (14.4.13, 14.4.18).
-constexpr bool tim_has_break(uint8_t n) { return n == 1u && tim_present(n); }
-constexpr bool tim_has_repetition(uint8_t n) { return n == 1u && tim_present(n); }
+/// advanced timers' alone (14.4.13, 14.4.18).
+constexpr bool tim_has_break(uint8_t n) { return tim_advanced(n); }
+constexpr bool tim_has_repetition(uint8_t n) { return tim_advanced(n); }
 
 /// The counter's width. Sixteen bits everywhere but the CH32V203RB's
 /// TIM5: chapter 15's opening note gives thirty-two to the TIM5 of the
@@ -347,46 +387,70 @@ constexpr uint32_t tim_max_period(uint8_t n) {
     return tim_counter_bits(n) == 32u ? 0xFFFFFFFFUL : 0xFFFFUL;
 }
 
-/// Every timer of this family has the whole slave controller, the
-/// encoder modes, the master output, the external trigger, the TI1 XOR
-/// and the DMA burst engine: the two chapters differ only in the break
-/// unit, the repetition counter and the complementary outputs.
-constexpr bool tim_has_slave_mode(uint8_t n) { return tim_present(n); }
-constexpr bool tim_has_encoder(uint8_t n) { return tim_present(n); }
+/// Every advanced and general-purpose timer of this family has the whole
+/// slave controller, the encoder modes, the master output, the external
+/// trigger, the TI1 XOR and the DMA burst engine: chapters 14 and 15
+/// differ only in the break unit, the repetition counter and the
+/// complementary outputs. A basic timer has none of them but the master
+/// output - three of its codes, the ones that need no channel - and one
+/// DMA request, the update's.
+constexpr bool tim_has_slave_mode(uint8_t n) { return tim_present(n) && !tim_basic(n); }
+constexpr bool tim_has_encoder(uint8_t n) { return tim_present(n) && !tim_basic(n); }
 constexpr bool tim_has_master_mode(uint8_t n) { return tim_present(n); }
-constexpr bool tim_has_external_trigger(uint8_t n) { return tim_present(n); }
-constexpr bool tim_has_ti1_xor(uint8_t n) { return tim_present(n); }
+constexpr bool tim_has_external_trigger(uint8_t n) { return tim_present(n) && !tim_basic(n); }
+constexpr bool tim_has_ti1_xor(uint8_t n) { return tim_present(n) && !tim_basic(n); }
 constexpr bool tim_has_dma(uint8_t n) { return tim_present(n); }
+constexpr bool tim_has_dma_burst(uint8_t n) { return tim_present(n) && !tim_basic(n); }
+/// Down-counting, the centre-aligned modes and CKD: not a basic timer's
+/// (16.4.1's CTLR1 has none of the three fields).
+constexpr bool tim_has_up_down(uint8_t n) { return tim_present(n) && !tim_basic(n); }
+/// The dual-edge capture register TIMx_AUX: the CH32V30x_D8's, on every
+/// timer with channels (14.4.21, 15.4.25).
+constexpr bool tim_has_dual_edge_capture(uint8_t n) {
+    return tim_channels(n) != 0u && device::device_class == DeviceClass::v30x_d8;
+}
 
 /// Which bus the instance sits on, and the gate bit RCC holds for it.
-constexpr Bus tim_bus(uint8_t n) { return n == 1u ? Bus::pb2 : Bus::pb1; }
+constexpr Bus tim_bus(uint8_t n) { return tim_advanced(n) ? Bus::pb2 : Bus::pb1; }
 constexpr uint32_t tim_gate(uint8_t n) {
-    return n == 1u   ? rcc_pb2_tim1
-           : n == 2u ? rcc_pb1_tim2
-           : n == 3u ? rcc_pb1_tim3
-           : n == 4u ? rcc_pb1_tim4
-           : n == 5u ? rcc_pb1_tim5
-                     : 0u;
+    return n == 1u    ? rcc_pb2_tim1
+           : n == 2u  ? rcc_pb1_tim2
+           : n == 3u  ? rcc_pb1_tim3
+           : n == 4u  ? rcc_pb1_tim4
+           : n == 5u  ? rcc_pb1_tim5
+           : n == 6u  ? rcc_pb1_tim6
+           : n == 7u  ? rcc_pb1_tim7
+           : n == 8u  ? rcc_pb2_tim8
+           : n == 9u  ? rcc_pb2_tim9
+           : n == 10u ? rcc_pb2_tim10
+                      : 0u;
 }
 
 /**
  * Which timer feeds ITR0..ITR3 of instance `n`, as an instance NUMBER;
- * 0 where the link's master is a timer THIS PART has not got.
+ * 0 where the link's master is a timer THIS PART has not got, and for a
+ * basic timer, which has no slave controller.
  *
- * Tables 14-2 and 15-2, whole. Three of their entries name timers no
- * part of this series carries - TIM1's ITR0 and TIM3's ITR2 are TIM5's
- * (the CH32V203RB's alone), TIM2's ITR1 and TIM4's ITR3 are TIM8's,
- * which belongs to the CH32V30x - so the presence fold is what removes
- * them, and no part is named here.
+ * Tables 14-2 and 15-2, whole: TIM1 listens to TIM5/2/3/4, TIM8 to
+ * TIM1/2/4/5, TIM9 to TIM10/5/6/7 - the one timer the two BASIC timers'
+ * TRGO reaches - TIM10 to TIM9/2/4/5, TIM2 to TIM1/8/3/4, TIM3 to
+ * TIM1/2/5/4, TIM4 to TIM1/2/3/8 and TIM5 to TIM2/3/4/8. Where the master
+ * is a timer the part has not got - TIM5 and TIM8 on most of the
+ * CH32V203, TIM8 on the CH32V203RB and the two 128 KB CH32V303 - the
+ * presence fold removes the link, and no part is named here.
  *
  * TIM2's ITR1 is also the one link an AFIO field could move (PCFR1's
- * TIM2ITR1_RM, to the Ethernet's time stamp or the USB frame marker);
- * that field is READ-ONLY AT ZERO on this device class, measured, and
- * afio.hpp refuses it - so this table describes the only connection
- * there is.
+ * TIM2ITR1_RM, to the Ethernet's time stamp or the USB frame marker, and
+ * table 15-2 writes "TIM8/USB/ETH" in its cell); that field is READ-ONLY
+ * AT ZERO on the CH32V20x_D6, measured, and afio.hpp refuses it there -
+ * so on that class this table describes the only connection there is.
+ * On the CH32V303VCT6 the field takes a write, and TIM2's ITR1 counts
+ * TIM8's TRGO at either value (measured, TIM8 as the master): this table
+ * holds there too, and what else the field's second value connects no
+ * measurement here has seen.
  */
 constexpr uint8_t tim_internal_trigger(uint8_t n, uint8_t itr) {
-    if (itr > 3u) {
+    if (itr > 3u || tim_basic(n)) {
         return 0u;
     }
     uint8_t src = 0;
@@ -396,6 +460,9 @@ constexpr uint8_t tim_internal_trigger(uint8_t n, uint8_t itr) {
         case 3: src = itr == 0u ? 1u : itr == 1u ? 2u : itr == 2u ? 5u : 4u; break;
         case 4: src = itr == 0u ? 1u : itr == 1u ? 2u : itr == 2u ? 3u : 8u; break;
         case 5: src = itr == 0u ? 2u : itr == 1u ? 3u : itr == 2u ? 4u : 8u; break;
+        case 8: src = itr == 0u ? 1u : itr == 1u ? 2u : itr == 2u ? 4u : 5u; break;
+        case 9: src = itr == 0u ? 10u : itr == 1u ? 5u : itr == 2u ? 6u : 7u; break;
+        case 10: src = itr == 0u ? 9u : itr == 1u ? 2u : itr == 2u ? 4u : 5u; break;
         default: return 0u;
     }
     return tim_present(src) ? src : 0u;
@@ -461,7 +528,9 @@ enum class TimSlaveMode : uint8_t {
     external_clock1 = 7,     ///< the trigger's rising edges ARE the counter clock
 };
 
-/// CTLR2.MMS - what this timer publishes on TRGO (14.4.2).
+/// CTLR2.MMS - what this timer publishes on TRGO (14.4.2). A basic
+/// timer has the first three codes and no more (16.4.2), having no
+/// channel to publish.
 enum class TimMasterMode : uint8_t {
     reset = 0,          ///< SWEVGR.UG
     enable = 1,         ///< the counter-enable signal
@@ -664,50 +733,66 @@ constexpr uint32_t tim_clock_hz(Clock, bool on_pb2) {
 // The pads
 // =============================================================================
 
+/// An advanced timer's column (TIM1, TIM8, TIM9, TIM10), from afio.hpp.
+constexpr AdvancedTimPads tim_advanced_pads(uint8_t n, uint8_t code) {
+    return !tim_advanced(n) ? AdvancedTimPads{}
+           : n == 1u        ? afio_tim1_pads(code)
+           : n == 8u        ? afio_tim8_pads(code)
+           : n == 9u        ? afio_tim9_pads(code)
+           : n == 10u       ? afio_tim10_pads(code)
+                            : AdvancedTimPads{};
+}
+
+/// A general-purpose timer's column. TIM5 has none - its four channels
+/// are PA0..PA3 under code 0 and nothing else (afio.hpp).
+constexpr TimPads tim_general_pads(uint8_t n, uint8_t code) {
+    return !tim_general(n) ? TimPads{}
+           : n == 2u       ? afio_tim2_pads(code)
+           : n == 3u       ? afio_tim3_pads(code)
+           : n == 4u       ? afio_tim4_pads(code)
+           : n == 5u       ? (code == 0u ? afio_tim5_pad_set : TimPads{})
+                           : TimPads{};
+}
+
 /// Which pad carries channel `ch` (0-based) of timer `n` under remap
 /// column `code`, from afio.hpp's own tables. An invalid Pad where the
-/// column does not exist or the signal has no pad in it.
+/// column does not exist, the signal has no pad in it, or the timer has
+/// no channel at all.
 constexpr Pad tim_channel_pad(uint8_t n, uint8_t code, uint8_t ch) {
-    if (ch >= 4u || !tim_present(n)) {
+    if (ch >= 4u || tim_channels(n) == 0u) {
         return Pad{};
     }
-    if (n == 1u) {
-        const Tim1Pads p = afio_tim1_pads(code);
+    if (tim_advanced(n)) {
+        const AdvancedTimPads p = tim_advanced_pads(n, code);
         return ch == 0u ? p.ch1 : ch == 1u ? p.ch2 : ch == 2u ? p.ch3 : p.ch4;
     }
-    const TimPads p = n == 2u ? afio_tim2_pads(code)
-                      : n == 3u ? afio_tim3_pads(code)
-                      : n == 4u ? afio_tim4_pads(code)
-                                : TimPads{};
+    const TimPads p = tim_general_pads(n, code);
     return ch == 0u ? p.ch1 : ch == 1u ? p.ch2 : ch == 2u ? p.ch3 : p.ch4;
 }
 
-/// The complementary output of channel `ch` - the advanced timer's
-/// channels 1..3 alone.
-constexpr Pad tim_complementary_pad(uint8_t code, uint8_t ch) {
-    if (ch >= 3u || !tim_present(1)) {
+/// The complementary output of channel `ch` of timer `n` - an advanced
+/// timer's channels 1..3 alone.
+constexpr Pad tim_complementary_pad(uint8_t n, uint8_t code, uint8_t ch) {
+    if (ch >= 3u || !tim_advanced(n)) {
         return Pad{};
     }
-    const Tim1Pads p = afio_tim1_pads(code);
+    const AdvancedTimPads p = tim_advanced_pads(n, code);
     return ch == 0u ? p.ch1n : ch == 1u ? p.ch2n : p.ch3n;
 }
 
 /// The external trigger's pad. TIM3's is PD2 in every column (table
-/// 10-17's note 1) and TIM4 has none that reaches a pin of this series.
+/// 10-17's note 1), TIM4's is PE0 in both (the CH32V303 datasheet's
+/// table 3-4), and TIM5 and the basic timers have none.
 constexpr Pad tim_etr_pad(uint8_t n, uint8_t code) {
     if (!tim_present(n)) {
         return Pad{};
     }
-    return n == 1u   ? afio_tim1_pads(code).etr
-           : n == 2u ? afio_tim2_pads(code).etr
-           : n == 3u ? afio_tim3_pads(code).etr
-           : n == 4u ? afio_tim4_pads(code).etr
-                     : Pad{};
+    return tim_advanced(n) ? tim_advanced_pads(n, code).etr : tim_general_pads(n, code).etr;
 }
 
-/// The break input's pad - the advanced timer's alone.
-constexpr Pad tim_break_pad(uint8_t code) {
-    return tim_present(1) ? afio_tim1_pads(code).bkin : Pad{};
+/// The break input's pad - the advanced timers' alone.
+constexpr Pad tim_break_pad(uint8_t n, uint8_t code) {
+    return tim_advanced(n) ? tim_advanced_pads(n, code).bkin : Pad{};
 }
 
 /**
@@ -771,10 +856,11 @@ public:
     Tim() = delete;
 
     static_assert(tim_present(n),
-                  "brio Tim: this part has no such timer - the series carries TIM1 "
-                  "(advanced-control) and TIM2..TIM4 (general-purpose), with TIM5 on "
-                  "the 128 KB part alone and no basic timer anywhere (datasheet table "
-                  "2-1)");
+                  "brio Tim: this part has no such timer - every part carries TIM1 "
+                  "(advanced-control) and TIM2..TIM4 (general-purpose); TIM5 is the "
+                  "CH32V203RB's and the 256 KB CH32V303's, and TIM6..TIM10 the "
+                  "CH32V303RC's and VC's alone (the datasheets' tables 2-1 and 2-1-1, "
+                  "parts/<part>.hpp's masks)");
 
     static constexpr uint8_t instance = n;
 
@@ -791,33 +877,74 @@ public:
     static constexpr bool has_external_trigger = tim_has_external_trigger(n);
     static constexpr bool has_ti1_xor = tim_has_ti1_xor(n);
     static constexpr bool has_dma = tim_has_dma(n);
-    static constexpr bool on_pb2 = (n == 1u);
-    /// Whether this timer's outputs and inputs move as a REMAP COLUMN
-    /// this part can select at all (afio.hpp answers for the package).
+    static constexpr bool has_dma_burst = tim_has_dma_burst(n);
+    static constexpr bool has_up_down = tim_has_up_down(n);
+    static constexpr bool has_dual_edge_capture = tim_has_dual_edge_capture(n);
+    static constexpr bool is_basic = tim_basic(n);
+    static constexpr bool on_pb2 = tim_bus(n) == Bus::pb2;
+    /// Whether this timer's outputs and inputs move as a REMAP COLUMN at
+    /// all: TIM5 has no column (its one field moves channel 4 to the LSI)
+    /// and the basic timers have no pad.
+    static constexpr bool has_remap = n <= 4u || n >= 8u;
+    /// The column's field, for the timers that have one (afio.hpp answers
+    /// for the device class and the package).
     static constexpr Remap remap_field = n == 1u   ? Remap::tim1
                                          : n == 2u ? Remap::tim2
                                          : n == 3u ? Remap::tim3
-                                                   : Remap::tim4;
+                                         : n == 8u ? Remap::tim8
+                                         : n == 9u ? Remap::tim9
+                                         : n == 10u ? Remap::tim10
+                                                    : Remap::tim4;
 
-    /// The vectors. The advanced timer has FOUR lines of its own on this
-    /// class - none of them shared, the bigger families' TIM8..TIM10
-    /// sitting past this table's end - and every other timer has one, so
-    /// all four accessors answer with it.
+    /// The vectors. Each advanced timer has FOUR lines of its own and
+    /// none of them is shared - TIM1's at 40..43, and on the CH32V303
+    /// TIM8's at 59..62, TIM9's at 90..93 and TIM10's at 94..97 - and
+    /// every other timer has one, so all four accessors answer with it.
     static constexpr Irq irq() {
         if constexpr (n == 1u) {
             return Irq::tim1_up;
+        } else if constexpr (n == 8u) {
+            return Irq::tim8_up;
+        } else if constexpr (n == 9u) {
+            return Irq::tim9_up;
+        } else if constexpr (n == 10u) {
+            return Irq::tim10_up;
         } else if constexpr (n == 2u) {
             return Irq::tim2;
         } else if constexpr (n == 3u) {
             return Irq::tim3;
-        } else {
+        } else if constexpr (n == 4u) {
             return Irq::tim4;
+        } else if constexpr (n == 5u) {
+            return Irq::tim5;
+        } else if constexpr (n == 6u) {
+            return Irq::tim6;
+        } else {
+            return Irq::tim7;
         }
     }
-    static constexpr Irq cc_irq() { return n == 1u ? Irq::tim1_cc : irq(); }
-    static constexpr Irq break_irq() { return n == 1u ? Irq::tim1_brk : irq(); }
-    static constexpr Irq trigger_irq() { return n == 1u ? Irq::tim1_trg_com : irq(); }
-    static constexpr bool has_split_vectors = (n == 1u);
+    static constexpr Irq cc_irq() {
+        return n == 1u    ? Irq::tim1_cc
+               : n == 8u  ? Irq::tim8_cc
+               : n == 9u  ? Irq::tim9_cc
+               : n == 10u ? Irq::tim10_cc
+                          : irq();
+    }
+    static constexpr Irq break_irq() {
+        return n == 1u    ? Irq::tim1_brk
+               : n == 8u  ? Irq::tim8_brk
+               : n == 9u  ? Irq::tim9_brk
+               : n == 10u ? Irq::tim10_brk
+                          : irq();
+    }
+    static constexpr Irq trigger_irq() {
+        return n == 1u    ? Irq::tim1_trg_com
+               : n == 8u  ? Irq::tim8_trg_com
+               : n == 9u  ? Irq::tim9_trg_com
+               : n == 10u ? Irq::tim10_trg_com
+                          : irq();
+    }
+    static constexpr bool has_split_vectors = tim_advanced(n);
 
     static TimRegs& regs() { return *reinterpret_cast<TimRegs*>(tim_base_for(n)); }
 
@@ -860,9 +987,10 @@ public:
     /// Select this timer's remap COLUMN (afio.hpp). False - and nothing
     /// written - for a code this device class or this package has not
     /// got. TIM5 has no column of its own: its channel 4 can be fed the
-    /// LSI instead of a pad, which is Remap::tim5_ch4's business.
+    /// LSI instead of a pad, which is Remap::tim5_ch4's business; and a
+    /// basic timer has no pad at all.
     static bool remap(uint8_t code) {
-        if constexpr (n == 5u) {
+        if constexpr (!has_remap) {
             (void)code;
             return false;
         } else {
@@ -870,7 +998,7 @@ public:
         }
     }
     static uint8_t remap() {
-        if constexpr (n == 5u) {
+        if constexpr (!has_remap) {
             return 0u;
         } else {
             return Afio::remap_code(remap_field);
@@ -883,10 +1011,10 @@ public:
         return tim_channel_pad(n, code, ch);
     }
     static constexpr Pad complementary_pad(uint8_t code, uint8_t ch) {
-        return n == 1u ? tim_complementary_pad(code, ch) : Pad{};
+        return tim_complementary_pad(n, code, ch);
     }
     static constexpr Pad etr_pad(uint8_t code) { return tim_etr_pad(n, code); }
-    static constexpr Pad break_pad(uint8_t code) { return n == 1u ? tim_break_pad(code) : Pad{}; }
+    static constexpr Pad break_pad(uint8_t code) { return tim_break_pad(n, code); }
 
     // ---- the counter's clock (fact 5) --------------------------------------
 
@@ -917,6 +1045,12 @@ public:
             return false;
         }
         if (static_cast<uint8_t>(c.clock_division) > 2u) {
+            return false;
+        }
+        // A basic timer counts up, edge-aligned, and has no CKD (16.4.1).
+        if (!has_up_down && (c.direction != TimDirection::up ||
+                             c.alignment != TimAlignment::edge ||
+                             c.clock_division != TimClockDivision::div1)) {
             return false;
         }
         return true;
@@ -1019,6 +1153,7 @@ public:
     /// one that reloads the shadow registers.
     static void update() { regs().SWEVGR = tim_ug; }
     static bool capture_compare_event(uint8_t ch) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         if (ch >= channels) {
             return false;
         }
@@ -1074,15 +1209,19 @@ public:
     /// The flags an INTERRUPT can be raised for - INTFR's low byte, at
     /// the very bit positions DMAINTENR's enables sit at. The
     /// overcapture flags are NOT among them: they have no enable and no
-    /// vector, and are read and cleared by whoever reads the capture.
+    /// vector, and are read and cleared by whoever reads the capture. A
+    /// basic timer has one flag, UIF (16.4.4).
     static constexpr uint16_t interrupt_flags =
-        static_cast<uint16_t>(tim_uif | tim_cc1if | (tim_cc1if << 1) | (tim_cc1if << 2) |
-                              (tim_cc1if << 3) |
-                              (has_break ? static_cast<uint16_t>(tim_comif | tim_bif) : 0u) |
-                              tim_tif);
+        is_basic ? tim_uif
+                 : static_cast<uint16_t>(
+                       tim_uif | tim_cc1if | (tim_cc1if << 1) | (tim_cc1if << 2) |
+                       (tim_cc1if << 3) |
+                       (has_break ? static_cast<uint16_t>(tim_comif | tim_bif) : 0u) | tim_tif);
     /// Every flag this chapter has, for flags() and clear_flags().
-    static constexpr uint16_t all_flags = static_cast<uint16_t>(
-        interrupt_flags | tim_cc1of | (tim_cc1of << 1) | (tim_cc1of << 2) | (tim_cc1of << 3));
+    static constexpr uint16_t all_flags =
+        is_basic ? tim_uif
+                 : static_cast<uint16_t>(interrupt_flags | tim_cc1of | (tim_cc1of << 1) |
+                                         (tim_cc1of << 2) | (tim_cc1of << 3));
 
     static uint16_t flags() { return regs().INTFR; }
     static bool flag(uint16_t mask) { return (regs().INTFR & mask) != 0u; }
@@ -1100,17 +1239,17 @@ public:
         if constexpr (!has_split_vectors) {
             return v == irq() ? interrupt_flags : static_cast<uint16_t>(0u);
         } else {
-            if (v == Irq::tim1_up) {
+            if (v == irq()) {
                 return tim_uif;
             }
-            if (v == Irq::tim1_cc) {
+            if (v == cc_irq()) {
                 return static_cast<uint16_t>(tim_cc1if | (tim_cc1if << 1) | (tim_cc1if << 2) |
                                              (tim_cc1if << 3));
             }
-            if (v == Irq::tim1_brk) {
+            if (v == break_irq()) {
                 return tim_bif;
             }
-            if (v == Irq::tim1_trg_com) {
+            if (v == trigger_irq()) {
                 return static_cast<uint16_t>(tim_tif | tim_comif);
             }
             return static_cast<uint16_t>(0u);
@@ -1157,6 +1296,14 @@ public:
      * exactly those. A flag whose interrupt is not enabled is left
      * standing for a poller to read - which is what makes every
      * measurement in this chapter possible with no handler at all.
+     *
+     * A BREAK INPUT HELD AT ITS ACTIVE LEVEL SETS BIF AGAIN AS SOON AS IT
+     * IS CLEARED (measured on the CH32V303VCT6's TIM8; 14.4.5 says only
+     * "cleared by software"), so a break vector whose body returns while
+     * the input stands is taken again at once, and the core does nothing
+     * else until the pad falls. A program whose break input can stand
+     * masks `break_interrupt` in its body until the input has returned;
+     * this body does not choose that policy for it.
      */
     [[gnu::always_inline]] static uint16_t isr(uint16_t mask = interrupt_flags) {
         TimRegs& t = regs();
@@ -1175,12 +1322,14 @@ public:
     /// the reading - a handler that clears the flag without reading
     /// throws the measurement away.
     static uint32_t compare(uint8_t ch) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         if (ch >= channels) {
             return 0;
         }
         return regs().CHCVR[ch] & max_period;
     }
     static bool set_compare(uint8_t ch, uint32_t v) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         if (ch >= channels || v > max_period) {
             return false;
         }
@@ -1202,6 +1351,9 @@ public:
      * driving.
      */
     static bool output_channel(uint8_t ch, const TimChannelConfig& c) {
+        static_assert(channels > 0u,
+                      "brio Tim: a basic timer has no capture/compare channel (RM 16.2.2) - "
+                      "the registers this verb writes are not in its map");
         if (ch >= channels || c.compare > max_period) {
             return false;
         }
@@ -1247,6 +1399,9 @@ public:
     /// CCER first, for 14.4.7's rule above - the silicon's, and the
     /// reason this is not one store.
     static bool capture_channel(uint8_t ch, const TimCaptureConfig& c) {
+        static_assert(channels > 0u,
+                      "brio Tim: a basic timer has no capture/compare channel (RM 16.2.2) - "
+                      "the registers this verb writes are not in its map");
         if (ch >= channels || c.select == TimChannelSelect::output || c.filter > 15u) {
             return false;
         }
@@ -1278,6 +1433,7 @@ public:
      * with no wire.
      */
     static bool output_mode(uint8_t ch, TimOutputMode m) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         if (ch >= channels) {
             return false;
         }
@@ -1289,6 +1445,7 @@ public:
         return true;
     }
     static TimOutputMode output_mode(uint8_t ch) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         if (ch >= channels) {
             return TimOutputMode::frozen;
         }
@@ -1299,6 +1456,7 @@ public:
 
     /// CCER.CCyE alone, for a channel already configured.
     static bool channel_enable(uint8_t ch, bool on) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         if (ch >= channels) {
             return false;
         }
@@ -1322,6 +1480,85 @@ public:
     static bool complementary_enabled(uint8_t ch) {
         return ch < complementary_channels &&
                (regs().CCER & static_cast<uint16_t>(tim_cc1ne << (4u * ch))) != 0u;
+    }
+
+    // ---- the dual-edge capture (14.3.11, 14.4.21, 15.3.9, 15.4.25) ---------
+    //
+    // THE CH32V30x_D8's, channels 2..4 (0-based 1..3). The chapter's own
+    // recipe: CCyS = 11 - the code that on every other channel means TRC -
+    // and TIMx_AUX's CAP_ED_CHy set; the channel's register then holds
+    // "the captured dual-edge pulse width value". And "only available for
+    // lot numbers where the penultimate sixth bit is not zero": a LOT
+    // rule, which no register states and the part number does not carry.
+    // What a die without the register does is measured - on a CH32V303VC
+    // TIMx_AUX reads zero whatever is written into it, on TIM1 and TIM2
+    // alike - so the verb ASKS the die: it sets the bit, reads it back,
+    // and answers false having written nothing else when the bit is not
+    // there. What the width then means - which input, which pulse, which
+    // unit - wants a die that has the register.
+
+    /// Channel `ch` (1..3) as a DUAL-EDGE capture: CAP_ED_CHy set and read
+    /// back, then the channel disabled in CCER, CCyS = 11 with the
+    /// prescaler and filter, and CCyE and CCyP as asked. False on a timer
+    /// or a channel that has not got the register - and on a DIE that has
+    /// not, which is what the read-back says.
+    static bool dual_edge_capture(uint8_t ch,
+                                  TimCapturePolarity polarity = TimCapturePolarity::rising,
+                                  uint8_t filter = 0,
+                                  TimCapturePrescaler prescaler = TimCapturePrescaler::every) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
+        if constexpr (!has_dual_edge_capture) {
+            (void)ch;
+            (void)polarity;
+            (void)filter;
+            (void)prescaler;
+            return false;
+        } else {
+            if (ch < 1u || ch >= channels || filter > 15u) {
+                return false;
+            }
+            TimRegs& t = regs();
+            const uint16_t bit = static_cast<uint16_t>(tim_cap_ed_ch2 << (ch - 1u));
+            t.AUX = static_cast<uint16_t>(t.AUX | bit);
+            if ((t.AUX & bit) == 0u) {
+                return false;   // this die's lot has no TIMx_AUX (the note above)
+            }
+            write_ccer(ch, false, false, false, false);
+            const uint8_t shift = static_cast<uint8_t>(8u * (ch & 1u));
+            uint16_t v = static_cast<uint16_t>(0x3u << shift);
+            v = static_cast<uint16_t>(v | (static_cast<uint16_t>(prescaler) << (shift + 2u)));
+            v = static_cast<uint16_t>(v | (static_cast<uint16_t>(filter) << (shift + 4u)));
+            write_chctlr(ch, v);
+            write_ccer(ch, true, polarity == TimCapturePolarity::falling, false, false);
+            return true;
+        }
+    }
+
+    /// CAP_ED_CHy cleared: the channel is an ordinary one again (its
+    /// CCyS is the caller's to rewrite).
+    static bool dual_edge_capture_off(uint8_t ch) {
+        if constexpr (!has_dual_edge_capture) {
+            (void)ch;
+            return false;
+        } else {
+            if (ch < 1u || ch >= channels) {
+                return false;
+            }
+            TimRegs& t = regs();
+            t.AUX = static_cast<uint16_t>(t.AUX & ~(tim_cap_ed_ch2 << (ch - 1u)));
+            return true;
+        }
+    }
+
+    /// Whether channel `ch` is in the dual-edge capture, read back.
+    static bool dual_edge(uint8_t ch) {
+        if constexpr (!has_dual_edge_capture) {
+            (void)ch;
+            return false;
+        } else {
+            return ch >= 1u && ch < channels &&
+                   (regs().AUX & static_cast<uint16_t>(tim_cap_ed_ch2 << (ch - 1u))) != 0u;
+        }
     }
 
     // ---- the slave controller and the master output (14.4.2, 14.4.3) --------
@@ -1380,6 +1617,9 @@ public:
             if (code > 7u) {
                 return false;
             }
+            if (code >= 3u && channels == 0u) {
+                return false;   // a basic timer publishes reset, enable or update (16.4.2)
+            }
             if (code >= 4u && static_cast<uint8_t>(code - 4u) >= channels) {
                 return false;   // no OCyREF to publish
             }
@@ -1436,7 +1676,7 @@ public:
     /// CTLR2.CCDS: a capture/compare DMA request is issued on the CC
     /// event (false, the reset state) or on the UPDATE event (true).
     static bool compare_dma_on_update(bool on) {
-        if constexpr (!has_dma) {
+        if constexpr (channels == 0u) {
             (void)on;
             return false;
         } else {
@@ -1539,7 +1779,7 @@ public:
     /// 14.4.19's DBL is the length MINUS ONE and this argument is the
     /// LENGTH, so nobody has to remember which.
     static bool dma_burst(TimBurstBase base, uint8_t length) {
-        if (!has_dma || length < 1u || length > 18u) {
+        if (!has_dma_burst || length < 1u || length > 18u) {
             return false;
         }
         const uint8_t dba = static_cast<uint8_t>(base);
@@ -1551,23 +1791,36 @@ public:
         return true;
     }
     static TimBurstBase burst_base() {
-        return static_cast<TimBurstBase>(regs().DMACFGR & tim_dba_mask);
+        if constexpr (!has_dma_burst) {
+            return TimBurstBase::ctlr1;
+        } else {
+            return static_cast<TimBurstBase>(regs().DMACFGR & tim_dba_mask);
+        }
     }
     static uint8_t burst_length() {
-        return static_cast<uint8_t>(((regs().DMACFGR & tim_dbl_mask) >> tim_dbl_shift) + 1u);
+        if constexpr (!has_dma_burst) {
+            return 0u;
+        } else {
+            return static_cast<uint8_t>(((regs().DMACFGR & tim_dbl_mask) >> tim_dbl_shift) + 1u);
+        }
     }
     /// The burst engine off: DBL and DBA back to zero, which is CTLR1
     /// with a length of one and is also the reset value.
-    static void dma_burst_off() { regs().DMACFGR = 0; }
+    static void dma_burst_off() {
+        if constexpr (has_dma_burst) {
+            regs().DMACFGR = 0;
+        }
+    }
 
     /// The ONE address a burst DMA is pointed at: every access to it
     /// lands on `base + index`, the index being the controller's own.
     static volatile void* dmaadr_address() {
-        return has_dma ? static_cast<volatile void*>(&regs().DMAADR) : nullptr;
+        return has_dma_burst ? static_cast<volatile void*>(&regs().DMAADR) : nullptr;
     }
     /// Where a DMA channel writes a duty into, and reads a capture
     /// from: CHxCVR itself.
     static volatile void* chcvr_address(uint8_t ch) {
+        static_assert(channels > 0u, "brio Tim: a basic timer has no capture/compare channel");
         return ch < channels ? static_cast<volatile void*>(&regs().CHCVR[ch]) : nullptr;
     }
     /// Where a DMA channel reads this counter from. The register is
@@ -1921,9 +2174,10 @@ struct TimGatedCounter {
 
 /**
  * TimPeriodicTick<T>: the plainest use of a timer - an update event
- * every `period + 1` counter ticks, and an interrupt on it. This family
- * has no basic timer, so a periodic tick costs one of the four timers
- * it does have; nothing else about it is different.
+ * every `period + 1` counter ticks, and an interrupt on it. It is what a
+ * BASIC timer is for, on the parts that have one (TIM6 and TIM7 of the
+ * CH32V303RC and VC); everywhere else it costs one of the timers with
+ * channels, and nothing else about it is different.
  */
 template <class T>
 struct TimPeriodicTick {

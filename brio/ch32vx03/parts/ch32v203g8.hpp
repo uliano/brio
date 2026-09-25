@@ -97,6 +97,11 @@ inline constexpr uint16_t port_pins(char port) {
 
 inline constexpr bool has_port(char port) { return port_pins(port) != 0U; }
 
+/// Whether AFIO's PD0PD1_RM hands the oscillator's two pads to port D as
+/// PD0 and PD1 (RM 10.2.11.2): no - this package brings out no oscillator
+/// pad at all, so there is nothing to hand to port D.
+inline constexpr bool osc_pads_as_pd0_pd1 = false;
+
 /// The two pads the debug port owns from reset: a program that takes
 /// them for itself loses the probe until the next power cycle. On this
 /// package they are not two pins - SWDIO shares pin 28 with PA12 and
@@ -177,6 +182,13 @@ inline constexpr bool has_ethernet = false;
 /// names U2DM and U2DP.
 inline constexpr bool has_usbd  = true;
 inline constexpr bool has_usbfs = true;
+
+/// The EXTI lines this part has, one bit per line (RM table 9-3 and its
+/// class notes): the sixteen pin lines, the PVD's (16) and the RTC
+/// alarm's (17) on every part, and above them only what a block of this
+/// part is wired to - here lines 0..18 and 20: the USB device
+/// controller's wake-up on 18 and the USBFS controller's on 20.
+inline constexpr uint32_t exti_lines = 0x17FFFFUL;
 
 // ---- the clock tree's edges (datasheet 2.1 and tables 4-9, 4-11) ----------
 /// The ceiling this part is rated for, whether its package brings out

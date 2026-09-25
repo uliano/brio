@@ -1,4 +1,4 @@
-# The two watchdogs (CH32V203)
+# The two watchdogs (CH32V203 and CH32V303)
 
 An INDEPENDENT watchdog on its own oscillator, which nothing but a reset
 stops, and a WINDOW watchdog on the peripheral bus, which resets the
@@ -6,10 +6,14 @@ chip both when it is refreshed too late and when it is refreshed too
 early. Documents of record: the CH32F/V20x_V30x_V31x reference manual
 V2.3 (chapter 7 for the independent watchdog, chapter 8 for the window
 one, 3.3.5.4 for the oscillator the first forces on, 3.4.10 for the
-reset flags both raise) and the CH32V203 datasheet V2.8 (table 2-1,
-whose "2 (WWDG + IWDG)" row spans every part of the series, and table
-4-14 for the LSI's rated spread). Both chapters apply to the whole
-family the manual covers, so neither is a device-class question. Driver:
+reset flags both raise), the CH32V203 datasheet V2.8 (table 2-1, whose
+"2 (WWDG + IWDG)" row spans every part of the series, and table 4-14
+for the LSI's rated spread) and the CH32V303/305/307/317 datasheet V3.5
+(table 2-1-1 and table 4-15, the same 25 to 60 kHz with 39 typical).
+Both chapters open with "this chapter applies to the whole family" and
+carry no device-class note, so the two blocks are the same on the
+CH32V20x_D6, the CH32V20x_D8 and the CH32V30x_D8, and neither is a
+device-class question. Driver:
 [brio/ch32vx03/watchdog.hpp](../../brio/ch32vx03/watchdog.hpp); the
 reset flags are [reset.hpp](../../brio/ch32vx03/reset.hpp)'s. Reference
 suite: `test_vx03_watchdog`.
@@ -33,28 +37,30 @@ suite: `test_vx03_watchdog`.
   reading: the oscillator ready while nothing in the program asked for
   it.
 - **THE REGISTERS LIVE IN THE OSCILLATOR'S DOMAIN, and the chapter never
-  says so.** Measured: with the LSI stopped, a prescaler or reload
-  written behind the unlock key NEVER ARRIVES - the registers keep their
-  reset values and STATR's PVU and RVU stand set for ever, since the
-  update they report is the crossing into that domain. With the LSI
-  running the same write lands and both flags clear within microseconds.
-  So the ORDER a program writes them in is not free: `arm()` starts the
-  watchdog FIRST, which forces the oscillator on, and writes the setting
-  afterwards - the reset setting (0x0FFF at /4, some four hundred milliseconds
-  at the nominal rate) being the budget it has to get there. A program that
-  wants the registers ready before it commits starts the LSI itself.
+  says so.** Measured on both parts: with the LSI stopped, a prescaler
+  or reload written behind the unlock key NEVER ARRIVES - the registers
+  keep their reset values and STATR's PVU and RVU stand set for ever,
+  since the update they report is the crossing into that domain. With
+  the LSI running the same write lands and both flags clear within
+  microseconds. So the ORDER a program writes them in is not free:
+  `arm()` starts the watchdog FIRST, which forces the oscillator on, and
+  writes the setting afterwards - the reset setting (0x0FFF at /4, some
+  four hundred milliseconds at the nominal rate) being the budget it has
+  to get there. A program that wants the registers ready before it
+  commits starts the LSI itself.
 - **The unlock STANDS until another key closes it** (7.3.1's "a write
   access to this register with a different value breaks the sequence").
-  Measured: after a keyed configuration a naked store into RLDR still
-  lands, and after a refresh the same store changes nothing. That is why
-  `arm()` ends with a refresh.
-- **Its time-out is the LSI's, and the LSI is an uncalibrated RC.** The
-  datasheet rates it 25 to 60 kHz with 39 kHz typical, better than two
-  to one - so every arithmetic helper here takes the RATE as an argument
-  (`device::lsi_min_hz`, `lsi_typ_hz`, `lsi_max_hz`) and a program that
-  must not be reset early computes its refresh interval from the FAST
-  corner. There is no window register in this chapter: the independent
-  watchdog has one edge and not two.
+  Measured on both parts: after a keyed configuration a naked store into
+  RLDR still lands, and after a refresh the same store changes nothing.
+  That is why `arm()` ends with a refresh.
+- **Its time-out is the LSI's, and the LSI is an uncalibrated RC.** Both
+  datasheets rate it 25 to 60 kHz with 39 kHz typical (the CH32V203RB's
+  to 45), a spread of 1.8 to one at the least - so every arithmetic
+  helper here takes the RATE as an argument (`device::lsi_min_hz`,
+  `lsi_typ_hz`, `lsi_max_hz`) and a program that must not be reset
+  early computes its refresh interval from the FAST corner. There is no
+  window register in this chapter: the independent watchdog has one
+  edge and not two.
 
 ### The window watchdog
 
@@ -65,18 +71,18 @@ suite: `test_vx03_watchdog`.
   3.6 ms to 29 ms at 72 MHz of PCLK1.
 - **THE COUNTER DOES NOT FREE-RUN**, against 8.2.1's own sentence ("no
   matter whether the watchdog function is enabled or not, the counter
-  keeps counting down"). Measured: with WDGA clear the counter holds
-  what the last write put in it for twenty milliseconds - 357 ticks of
-  its own clock - and starts falling the moment WDGA is set. The sister
-  family's block behaves the same way against the same sentence
-  ([the CH32V00x's own document](../ch32v00x/platform.md)), so this is WCH's
-  design and not this part's accident.
+  keeps counting down"). Measured on both parts: with WDGA clear the
+  counter holds what the last write put in it for twenty milliseconds -
+  357 ticks of its own clock - and starts falling the moment WDGA is
+  set. The sister family's block behaves the same way against the same
+  sentence ([the CH32V00x's own document](../ch32v00x/platform.md)), so
+  this is WCH's design and not one part's accident.
 - **Its clock gate is half a silence.** With RCC's WWDGEN clear the
   registers still READ their reset values (0x007F both) and a write is
-  DROPPED - measured both ways. What the gate holds is the block's
-  clock, which is what 8.2.1 offers it for: a way to suspend a watchdog
-  whose enable bit is one-way. The block's RESET LINE is the other way,
-  and the one this driver's `reset()` uses.
+  DROPPED - measured both ways, on both parts. What the gate holds is
+  the block's clock, which is what 8.2.1 offers it for: a way to
+  suspend a watchdog whose enable bit is one-way. The block's RESET
+  LINE is the other way, and the one this driver's `reset()` uses.
 - **WDGA is one-way in software** (8.3.1), like the other watchdog's
   start key - but unlike it, a peripheral reset really does clear it,
   which is what lets a suite arm this one and carry on.
@@ -88,8 +94,8 @@ suite: `test_vx03_watchdog`.
 - **The early-wake-up flag is raised at 0x40 whether or not its
   interrupt is enabled** (8.3.3), and what follows it is ONE TICK. With
   the interrupt enabled the vector is this block's own (entry 16 of the
-  table), and a handler that does not refresh does not prevent the reset
-  - measured, the handler running exactly once.
+  table on every class), and a handler that does not refresh does not
+  prevent the reset - measured, the handler running exactly once.
 - **EWI is one-way too**: 8.3.2 says the enable is cleared only by a
   reset, so a configuration that sets it cannot take it back.
 
@@ -199,10 +205,11 @@ if ((flags & brio::ResetFlag::independent_watchdog) != 0u) { ... }
 
 ## Bench findings
 
-`test_vx03_watchdog` on a CH32V203C8 at 144 MHz (PCLK1 72 MHz), nothing
-wired: **16 pass, 0 fail** in `z`, plus **4 pass** in letter `w` and
-**8 pass** in letter `v`, the two by-name letters that reboot the board
-four times between them.
+`test_vx03_watchdog` at 144 MHz (PCLK1 72 MHz), nothing wired, on the
+CH32V203C8T6 and on the CH32V303VCT6 - the same verdicts on both:
+**16 pass, 0 fail** in `z`, plus **4 pass** in letter `w` and **8 pass**
+in letter `v`, the two by-name letters that reboot the board four times
+between them. Every number below is both parts' where one is given.
 
 **The window watchdog's counter is frozen until it is armed.** With
 WDGA clear it read 127 and still read 127 twenty milliseconds later -
@@ -211,13 +218,14 @@ millisecond later.
 
 **Its tick is PCLK1 / 4096 / 2^WDGTB, to the microsecond.** The fall
 from 0x7F to 0x50 (47 ticks) measured **2628 us at /1 (2673 nominal),
-5346 us at /2 (5347) and 21389 us at /8 (21390)**, and the early-wakeup
-flag came up **28671 us after a refresh where 63 ticks at /8 are
-28672**.
+5346 and 5347 us at /2 (5347) and 21389 us at /8 (21390)**, and the
+early-wakeup flag came up **28671 us after a refresh where 63 ticks at
+/8 are 28672**.
 
-**Its clock gate holds the counter and not the registers.** With WWDGEN
-clear, CTLR and CFGR read 0x007F and a write of 0x006A into CFGR was
-dropped; with the gate open the same registers take it.
+**Its clock gate holds the block's clock and not the read path.** With
+WWDGEN clear, CTLR and CFGR read 0x007F and a write of 0x006A into CFGR
+was dropped; with the gate open the same registers take it, and the
+block's reset line puts both back to 0x007F.
 
 **Its three resets, each with the flag at the next boot.** Left
 unrefreshed at /8 it reset the board **29 ms** after the last refresh,
@@ -237,12 +245,13 @@ prescaler read /16 and STATR read zero.
 RLDR landed while the window was open; after a refresh, a naked store of
 0x789 changed nothing.
 
-**Its time-out, and what it says about this die's LSI.** Armed at /32
-with a reload of 249, refreshed ten times, then left: the board came
-back **206 and 207 ms** later in two runs, inside the part's rated 133
-to 320 ms, which puts this die's LSI at **38.8 kHz** against the
-datasheet's 39 kHz typical. IWDGRSTF stood alone at both boots, and the
-board had survived its ten refreshes before that.
+**Its time-out, and what it says about each die's LSI.** Armed at /32
+with a reload of 249, refreshed ten times, then left: the CH32V203C8T6
+came back **206 and 207 ms** later in two runs, which puts its LSI at
+**38.8 kHz**, and the CH32V303VCT6 **199 ms** later in two runs, which
+puts its LSI at **40.2 kHz** - both inside the parts' rated 133 to 320
+ms and beside the datasheets' 39 kHz typical. IWDGRSTF stood alone at
+every boot, and each board had survived its ten refreshes before that.
 
 ## Not covered yet
 
@@ -262,9 +271,9 @@ Driver gaps, each with its reason:
   running free, so none of them depends on which way they stand.
 - **The window watchdog through a low-power mode.** Its counter runs on
   the peripheral bus clock, which a Stop takes away, and what it does
-  across one is untested; the independent one IS measured there and the
-  answer is in [sleep.md](sleep.md) - it does NOT count through a Stop,
-  so it is no way back out of one.
+  across one is untested; the independent one IS measured there on the
+  CH32V203C8T6 and the answer is in [sleep.md](sleep.md) - it does NOT
+  count through a Stop, so it is no way back out of one.
 
 Implemented but not bench-verified:
 

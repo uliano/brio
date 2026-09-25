@@ -1,7 +1,8 @@
 /*
  * watchdog.hpp
  *
- * The CH32V203's two watchdogs: the INDEPENDENT one (RM ch. 7), a
+ * The two watchdogs of the CH32V203 and the CH32V303, the same two
+ * blocks on every device class: the INDEPENDENT one (RM ch. 7), a
  * twelve-bit down-counter on the LSI that nothing but a reset stops,
  * and the WINDOW one (ch. 8), a seven-bit down-counter on PCLK1 that
  * resets the chip both when it is refreshed too LATE and when it is
@@ -27,9 +28,10 @@
  * ON when the watchdog starts (3.3.5.4) whatever the program did with
  * LSION: that is also how a program can tell the watchdog is running,
  * there being no status bit that says so. And the LSI is an
- * uncalibrated RC - device::lsi_min_hz..lsi_max_hz, a spread of better
- * than two to one on this part - so a time-out computed from its
- * nominal rate is a nominal time-out. Every arithmetic helper here
+ * uncalibrated RC - device::lsi_min_hz..lsi_max_hz, a spread of 1.8 to
+ * one at the least on every part of the two series - so a time-out
+ * computed from its nominal rate is a nominal time-out. Every
+ * arithmetic helper here
  * therefore takes the LSI rate as an ARGUMENT: the caller decides
  * whether it is asking about the fast corner, the slow one or a
  * measured rate.
@@ -61,11 +63,12 @@
  * counts down "no matter whether the watchdog function is enabled or
  * not", and with WDGA clear it does not move at all - it holds what the
  * last write put in it, and starts falling when WDGA is set. (The
- * CH32V00x's block behaves the same way against the same sentence, so
- * this is WCH's design and not this part's accident.) AND ITS CLOCK
- * GATE DOES NOT SILENCE THE REGISTERS: with RCC's WWDGEN clear, CTLR
- * and CFGR still read their reset values and still take writes - what
- * the gate stops is the COUNTER, which is what 8.2.1 offers it for.
+ * CH32V00x's block behaves the same way against the same sentence, and
+ * so do the CH32V203's and the CH32V303's, so this is WCH's design and
+ * not one part's accident.) AND ITS CLOCK GATE IS HALF A SILENCE: with
+ * RCC's WWDGEN clear, CTLR and CFGR still READ their reset values and a
+ * write is dropped - what the gate holds is the block's clock, which is
+ * what 8.2.1 offers it for.
  *
  * WHAT IS NOT HERE. The option byte that starts the independent
  * watchdog at every boot without software (IWDG_SW): the option bytes
@@ -460,10 +463,10 @@ struct Wwdg {
     Wwdg() = delete;
 
     /// RCC_PB1PCENR's WWDGEN, clear at reset. What it gates is the
-    /// COUNTER and not the register file: with it closed CTLR and CFGR
-    /// still read and still take writes (measured), which is why
-    /// closing it is 8.2.1's own way to suspend a watchdog that cannot
-    /// otherwise be stopped.
+    /// block's CLOCK: with it closed CTLR and CFGR still read their
+    /// reset values and a write is dropped (measured on both series),
+    /// and closing it is 8.2.1's own way to suspend a watchdog that
+    /// cannot otherwise be stopped.
     static void bus_clock(bool on) {
         if (on) {
             Rcc::enable(Bus::pb1, rcc_pb1_wwdg);

@@ -1,13 +1,13 @@
 // Timer family smoke TU: the advanced-control block and the three
-// general-purpose ones, every verb of the resource, every task, and the
-// arithmetic that decides a dead time, an internal trigger and a
-// counter's clock.
+// general-purpose ones every part has, every verb of the resource, every
+// task, and the arithmetic that decides a dead time, an internal trigger
+// and a counter's clock.
 //
-// WHICH TIMERS A PART HAS is the datasheet's table 2-1, folded by
-// tim_present() from device:: - one advanced and three general-purpose
-// on every part of this series, plus the 32-bit TIM5 on the 128 KB one,
-// which is tim5.cpp's subject because eight of the nine parts have not
-// got it.
+// WHICH TIMERS A PART HAS is the datasheets' tables 2-1 and 2-1-1, the
+// part table's masks folded by tim_present() - one advanced and three
+// general-purpose on every part, plus the 32-bit TIM5 on the CH32V203RB
+// (tim5.cpp), and on the CH32V303RC and VC three more advanced timers, a
+// sixteen-bit TIM5 (tim8.cpp) and the two basic ones (tim6.cpp).
 //
 // NO PAD IS SPELLED AS A LITERAL. A remap column's pads are the
 // chapter's, the same on every part; WHICH of them a package brings out
@@ -24,7 +24,10 @@ using namespace brio;
 // ---- what a timer IS -------------------------------------------------------
 static_assert(tim_present(1) && tim_present(2) && tim_present(3) && tim_present(4));
 static_assert(tim_present(5) == device::has_tim5);
-static_assert(!tim_present(0) && !tim_present(6) && !tim_present(7) && !tim_present(8));
+static_assert(!tim_present(0) && !tim_present(11) && !tim_present(16));
+static_assert(tim_present(6) == tim_basic(6) && tim_present(7) == tim_basic(7));
+static_assert(tim_present(8) == tim_advanced(8) && tim_present(10) == tim_advanced(10));
+static_assert(tim_advanced(1) && tim_general(2) && !tim_basic(1) && !tim_advanced(2));
 
 static_assert(tim_channels(1) == 4 && tim_channels(4) == 4 && tim_channels(6) == 0);
 static_assert(tim_complementary_channels(1) == 3 && tim_complementary_channels(2) == 0);
@@ -33,18 +36,21 @@ static_assert(tim_has_repetition(1) && !tim_has_repetition(2));
 static_assert(tim_counter_bits(1) == 16 && tim_max_period(2) == 0xFFFFu);
 static_assert(tim_has_slave_mode(2) && tim_has_encoder(4) && tim_has_master_mode(3));
 static_assert(tim_has_external_trigger(1) && tim_has_ti1_xor(2) && tim_has_dma(4));
+static_assert(tim_has_dma_burst(3) && tim_has_up_down(2));
+static_assert(tim_has_dual_edge_capture(2) == (device::device_class == DeviceClass::v30x_d8));
 static_assert(tim_bus(1) == Bus::pb2 && tim_bus(2) == Bus::pb1);
 static_assert(tim_gate(1) == rcc_pb2_tim1 && tim_gate(4) == rcc_pb1_tim4);
 
 // ---- the internal trigger table (14-2, 15-2) -------------------------------
 // TIM1's ITR0 and TIM3's ITR2 are TIM5's, TIM2's ITR1 and TIM4's ITR3
-// are TIM8's: the first pair exists on the 128 KB part alone and the
-// second nowhere in this series, so the fold answers zero for them.
+// are TIM8's: where the part has not got the master, the fold answers
+// zero for the link.
 static_assert(tim_internal_trigger(1, 1) == 2 && tim_internal_trigger(1, 2) == 3);
 static_assert(tim_internal_trigger(1, 0) == (device::has_tim5 ? 5 : 0));
-static_assert(tim_internal_trigger(2, 0) == 1 && tim_internal_trigger(2, 1) == 0);
+static_assert(tim_internal_trigger(2, 0) == 1);
+static_assert(tim_internal_trigger(2, 1) == (tim_present(8) ? 8 : 0));
 static_assert(tim_internal_trigger(3, 2) == (device::has_tim5 ? 5 : 0));
-static_assert(tim_internal_trigger(4, 3) == 0);
+static_assert(tim_internal_trigger(4, 3) == (tim_present(8) ? 8 : 0));
 static_assert(tim_internal_trigger(2, 4) == 0);
 static_assert(tim_trigger_index_for(3, 1) == 0 && tim_trigger_index_for(3, 2) == 1);
 static_assert(tim_trigger_index_for(2, 4) == 3);
@@ -110,10 +116,13 @@ static_assert(Tim<1>::compare_dma(0) == tim_cc1de);
 static_assert(tim_channel_pad(3, 0, 0) == Pad{'A', 6});
 static_assert(tim_channel_pad(2, 0, 1) == Pad{'A', 1});
 static_assert(tim_channel_pad(1, 0, 0) == Pad{'A', 8});
-static_assert(tim_complementary_pad(0, 0) == Pad{'B', 13});
-static_assert(tim_complementary_pad(0, 3) == Pad{});
+static_assert(tim_complementary_pad(1, 0, 0) == Pad{'B', 13});
+static_assert(tim_complementary_pad(1, 0, 3) == Pad{});
+static_assert(tim_complementary_pad(2, 0, 0) == Pad{});
 static_assert(tim_etr_pad(3, 0) == Pad{'D', 2});
-static_assert(tim_break_pad(0) == Pad{'B', 12});
+static_assert(tim_etr_pad(4, 1) == afio_tim4_etr && pad_bonded(afio_tim4_etr) == device::has_port('E'));
+static_assert(tim_break_pad(1, 0) == Pad{'B', 12});
+static_assert(tim_break_pad(3, 0) == Pad{});
 static_assert(tim_channel_pad(2, 9, 0) == tim_channel_pad(2, 0, 0));   // a code past the table
 static_assert(tim_channel_pad(6, 0, 0) == Pad{});
 

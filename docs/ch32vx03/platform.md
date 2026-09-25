@@ -187,9 +187,10 @@ performs the reset.
 
 The reference suite is `test_vx03_platform`, at 144 MHz from the HSI:
 on the CH32V203C8T6 letters `a` to `g` (forty verdicts), on the
-CH32V303VCT6 fifty-nine in `z` - the same forty, the floating-point
-unit's three letters and the bus in sleep - and on both nine more in
-letter `i`, which reboots the board three times. What it measured:
+CH32V303VCT6 sixty-two in `z` - the same forty, the floating-point
+unit's three letters, the bus in sleep and the mask's shadow - and on
+both nine more in letter `i`, which reboots the board three times. What
+it measured:
 
 - **The idle hook wakes.** With the console silent, two `idle()` calls
   covered the 626 us to the next tick (on the CH32V303VCT6 two as well,
@@ -307,6 +308,36 @@ letter `i`, which reboots the board three times. What it measured:
   CH32V303 as on the CH32V203, the bus matrix serving the core alone.
   With the count standing, idle() over the working channel returned in
   16 cycles.
+- **The mask's shadow** (letter `n`, CH32V303VCT6): whether an
+  interrupt already on its way is taken AFTER the instruction that
+  masks it - the question behind the manual's V2.5 note asking for a
+  `fence.i` after a mask. A line (EXTI2's vector, pended by a store into
+  PFIC_IPSR with no EXTI activity) is raised, a swept number of `nop`s
+  later - zero to nineteen, 250 trials each - it is masked, eight
+  `nop`s run masked, and the mask is lifted; the handler records mepc,
+  so every trial says whether the interrupt came before the mask
+  instruction, inside the masked region, or after the unmask. A pend
+  takes three instructions to arrive: from three `nop`s of lead on,
+  every trial was taken before the mask. The other 750 trials of each
+  variant are the race, and they split cleanly by the kind of mask:
+
+  | the mask | taken inside the masked region | the rest |
+  |---|---|---|
+  | `csrrci` on mstatus.MIE, the platform guard's own | **0** of 5000 | held until the `csrsi`, taken on the instruction after it |
+  | `csrrci` then `fence.i` | **0** of 5000 | the same |
+  | a store into PFIC_IRER, the line's own disable | **750** of 5000 (150 per thousand: every trial of the race) | - |
+  | a store into PFIC_IRER then `fence.i` | **750** of 5000 | - |
+
+  The same numbers, trial for trial, from an image built with the
+  hardware prologue and one built without it. So on this core the
+  global mask has NO shadow - an interrupt pended but not yet taken
+  when the `csrrci` retires is never taken after it, with or without
+  a `fence.i` - while a line's own disable has one of up to three
+  instructions (mepc 2 to 6 bytes past the store, a compressed `sw`
+  and two compressed `nop`s, or the `sw` and the four-byte `fence.i`),
+  and the `fence.i` does not close it. The note names PFIC_IENRx, the
+  register that ENABLES a line; the store that disables one is
+  PFIC_IRER's, and that is the one measured.
 
 ## Not covered yet
 
@@ -350,6 +381,14 @@ Implemented but not bench-verified, each with what would measure it:
   part's own (the README's bare `wfi` against a DMA block), and the
   letter asks it again through the platform's idle(); what would run it
   there is that board.
+- **Letter `n` on the CH32V203C8**, the V4B's answer to the mask's
+  shadow: the letter builds for that part both ways the hardware
+  prologue can be built, and that board would run it.
+- **What closes a line's own disable.** Letter `n` shows that a store
+  into PFIC_IRER lets an interrupt already on its way through up to
+  three instructions later and that a `fence.i` does not stop it; a
+  read-back of the register, or of the line's enable status, after the
+  store is the next variant to time.
 - **Letter `g` timed on the CH32V303VCT6.** The console's host-timed
   bracket through that board's probe carries the probe's block
   forwarding; the rate of that die's HSI is the clock suite's

@@ -1,6 +1,7 @@
-// test_vx03_tim - the reference bench suite for the CH32V203's TIMERS:
-// ch32vx03/tim.hpp over RM ch. 14 (the advanced-control block) and ch.
-// 15 (the general-purpose ones).
+// test_vx03_tim - the reference bench suite for the TIMERS of the
+// CH32V203 and the CH32V303: ch32vx03/tim.hpp over RM ch. 14 (the
+// advanced-control blocks), ch. 15 (the general-purpose ones) and ch. 16
+// (the basic ones).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -8,27 +9,41 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// WHAT IT MEASURES WITH, AND WHAT ONE WIRE ADDS. Every letter runs with
+// WHAT IT MEASURES WITH, AND WHAT A WIRE ADDS. Every letter runs with
 // the board bare: a timer's channel drives its own pad through the
 // output stage and another channel of the SAME timer captures it (the
 // input path of a channel is live whatever CCyS says), the internal
 // triggers link two timers with no pad at all, and the core's own STK
-// counter is the ruler every number is weighed against. ONE OPTIONAL
-// JUMPER, PA6 to PA1 - TIM3's channel 1 to TIM2's channel 2 - lets a
-// SECOND timer measure the first one's waveform; letter j says whether
-// it is there (a plain output on one pad read on the other, both
-// levels) and the letters that need it say "no jumper" and pass when it
-// is not.
+// counter is the ruler every number is weighed against. TWO OPTIONAL
+// JUMPERS add what one timer cannot see of itself: PA6 to PA1 - TIM3's
+// channel 1 to TIM2's channel 2 - lets a SECOND timer measure the first
+// one's waveform, and carries the CH32V303's dual-edge capture; PC6 to
+// PB8 - TIM8's channel 1 to TIM4's channel 3 - carries the CH32V303's
+// extra advanced timer to a capture. Each letter that needs one tests
+// for it first (a plain output on one pad read on the other, both
+// levels) and says "no jumper" and passes when it is not there.
+//
+// THE CH32V303's TIMERS (letters k..s, compiled where the part has
+// them): TIM8, TIM9 and TIM10 with TIM1's shape and four vectors each,
+// TIM5 sixteen bits wide on that class, the two basic timers TIM6 and
+// TIM7, the dual-edge capture register, TIM3's external trigger on PD2
+// and the internal-trigger links the class adds.
 //
 // THE PADS. TIM3's column 0 is PA6/PA7/PB0/PB1, TIM2's is PA0..PA3,
 // TIM1's is PA8 with PB13 for its complementary output and PB12 for its
 // break input, TIM4's is PB6..PB9. Of those this suite drives PA1,
-// PA6, PA7, PA8, PB6..PB9, PB12 and PB13 - all free on this board.
+// PA6, PA7, PA8, PB6..PB9, PB12 and PB13; on the CH32V303 it adds PC6
+// and PA7 (TIM8's channel 1 and its complement, PA6 its break input),
+// PA4 (TIM9's channel 3), PC3 (TIM10's) and PD2 (TIM3's external
+// trigger). A pad strapped to another pad of the board is driven only
+// while the other end is an input, and a pad under a pull resistor is
+// judged against the level the resistor gives it (letter f).
 // NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port),
-// PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PB2
-// (the LED, toggled per command as every suite of this target does) and
-// PA0, which carries the KEY button and is TIM2's channel 1 - so this
-// suite uses TIM2's channel 2 and leaves its first channel alone.
+// PA11/PA12 (the USB pads), PC14/PC15 and the 8 MHz crystal's pads (the
+// crystals), PB2 (the LED, toggled per command as every suite of this
+// target does) and PA0, which carries the KEY button and is TIM2's
+// channel 1 - so this suite uses TIM2's channel 2 and leaves its first
+// channel alone.
 //
 // What is exercised, letter by letter:
 //   a  THE TIME BASE: the gate and the reset state, the prescaler and
@@ -70,8 +85,33 @@
 //   j  THE JUMPER: whether PA6 and PA1 are strapped together, and
 //      whether a pad in plain OUTPUT mode reaches a timer's capture
 //      input at all
+//   k  (the CH32V303) TIM8's PWM on PC6 CAPTURED BY TIM4 over the
+//      PC6-PB8 jumper: period and high time at five duties and four
+//      frequencies, rising and falling edges on two channels of one input
+//   l  (the CH32V303) TIM8's COMPLEMENTARY PAIR, PC6 and PA7: the dead
+//      time's ladder read back and the band timed as the gap it is
+//   m  (the CH32V303) TIM8's FOUR VECTORS: update and compare counted
+//      on two lines, the trigger and a commutation on the third, and the
+//      break raised by BKIN - PA6 driven by the port - on the fourth
+//   n  (the CH32V303) TIM9 AND TIM10 with no wire: the time base against
+//      the core's counter, a PWM captured by its own timer, and the two
+//      vectors of each that the letter arms
+//   o  (the CH32V303) TIM5's WIDTH: a 32-bit value written raw into the
+//      counter and the auto-reload, and the counter run across 0xFFFF
+//   p  (the CH32V303) THE BASIC TIMERS: TIM6 and TIM7 against the core's
+//      counter, their vectors, and their TRGO counted by TIM9 over the
+//      internal triggers table 14-2 gives them
+//   q  (the CH32V303) THE DUAL-EDGE CAPTURE over the PA6-PA1 jumper:
+//      TIM2's channel 2 holding a pulse's width in one register, beside
+//      the two-channel measurement of the same wave
+//   r  (a package with PD2) TIM3'S EXTERNAL TRIGGER on PD2, the pad
+//      driven by the port: external clock mode 2 counting its edges,
+//      inverted and prescaled
+//   s  (the CH32V303) THE INTERNAL TRIGGERS the class adds: every link
+//      into TIM8, TIM9 and TIM10, TIM8 and TIM5 as masters of the others,
+//      and TIM2's ITR1 with its AFIO field both ways
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -126,8 +166,8 @@ constexpr uint32_t ticks_per_us = tim_hz / 1'000'000u;
 constexpr Pad wave_ch1 = tim_channel_pad(3, 0, 0);     ///< PA6
 constexpr Pad meas_ch2 = tim_channel_pad(2, 0, 1);     ///< PA1
 constexpr Pad adv_ch1 = tim_channel_pad(1, 0, 0);      ///< PA8
-constexpr Pad adv_ch1n = tim_complementary_pad(0, 0);  ///< PB13
-constexpr Pad adv_bkin = tim_break_pad(0);             ///< PB12
+constexpr Pad adv_ch1n = tim_complementary_pad(1, 0, 0);  ///< PB13
+constexpr Pad adv_bkin = tim_break_pad(1, 0);             ///< PB12
 constexpr Pad quad_a = tim_channel_pad(4, 0, 0);       ///< PB6
 constexpr Pad quad_b = tim_channel_pad(4, 0, 1);       ///< PB7
 constexpr Pad quad_c = tim_channel_pad(4, 0, 2);       ///< PB8
@@ -500,6 +540,10 @@ void tb_pwm() {
               crlf);
         bench.verdict("the jumper's letters are skipped and say so", true);
     } else {
+        // The jumper's test released every timer of this suite, TIM3's
+        // gate with it: the wave is brought up again before it is made.
+        Wave::init();
+        (void)Wave::remap(0);
         (void)wave_self_capture(999, 300);
         Meas::init();
         (void)Meas::remap(0);
@@ -897,6 +941,19 @@ void tf_tasks() {
     (void)Quad::remap(0);
     QuadA::claim();
     QuadB::claim();
+    // WHERE THE PAD RESTS on its own: an input with its own pull-down
+    // reads high only if something outside the chip holds it - a board
+    // that puts a pull-up on PB6 (an I2C strap) - and the question below
+    // is then asked the other way round: whether the stage can pull the
+    // pad OFF its resting level.
+    QuadA::claim_input(PinPull::down);
+    wait_us(20);
+    const bool rests_high = QuadA::read();
+    QuadA::claim();
+    const TimOutputMode away = rests_high ? TimOutputMode::force_inactive
+                                          : TimOutputMode::force_active;
+    const TimOutputMode home = rests_high ? TimOutputMode::force_active
+                                          : TimOutputMode::force_inactive;
     // First, the stimulus on its own: a channel in forced output mode
     // with the timer in its ORDINARY mode, so that what the encoder
     // arrangement changes is the only thing left to explain.
@@ -910,11 +967,13 @@ void tf_tasks() {
     (void)Quad::output_mode(0, TimOutputMode::force_inactive);
     wait_us(2);
     const bool plain_low = !QuadA::read();
-    print(serial, "  outside encoder mode, the forced output stage drives PB6: ",
+    print(serial, "  PB6 rests ", rests_high ? "HIGH (a pull-up outside the chip)" : "low",
+          "; outside encoder mode, the forced output stage drives it: ",
           plain_high ? "high" : "LOW", " and ", plain_low ? "low" : "HIGH", crlf);
     bench.verdict("a channel's forced output mode puts a level on its pad - the stimulus "
                   "every wireless capture in this suite rests on",
                   plain_high && plain_low);
+    (void)Quad::output_mode(0, home);
     Quad::enable(false);
     if (!TimEncoder<Quad>::setup({.mode = TimSlaveMode::encoder3}, 0xFFFF)) {
         bench.verdict("the encoder was configured", false);
@@ -925,21 +984,22 @@ void tf_tasks() {
     // is where this family parts company with its relatives: with the
     // slave controller in an encoder mode the channel's output stage
     // no longer reaches the pad, whatever CCER and CHCTLRx say. The
-    // two measurements differ in SMS and in nothing else.
-    (void)Quad::output_channel(0, {.mode = TimOutputMode::force_inactive,
-                                   .preload = false});
+    // two measurements differ in SMS and in nothing else, and the stage
+    // is asked to take the pad AWAY from where it rests.
+    (void)Quad::output_channel(0, {.mode = home, .preload = false});
     (void)Quad::output_channel(1, {.mode = TimOutputMode::force_inactive,
                                    .preload = false});
-    (void)Quad::output_mode(0, TimOutputMode::force_active);
     wait_us(2);
-    const bool enc_high = QuadA::read();
-    (void)Quad::output_mode(0, TimOutputMode::force_inactive);
+    (void)Quad::output_mode(0, away);
+    wait_us(2);
+    const bool moved = QuadA::read() != rests_high;
+    (void)Quad::output_mode(0, home);
     print(serial, "  in encoder mode the same forced output leaves PB6 ",
-          enc_high ? "HIGH" : "low", " (SMCFGR=", hex(Quad::regs().SMCFGR), " CHCTLR1=",
-          hex(Quad::regs().CHCTLR1), " CCER=", hex(Quad::regs().CCER), ")", crlf);
+          moved ? "MOVED" : "where it rests", " (SMCFGR=", hex(Quad::regs().SMCFGR),
+          " CHCTLR1=", hex(Quad::regs().CHCTLR1), " CCER=", hex(Quad::regs().CCER), ")", crlf);
     bench.verdict("with the slave controller in an encoder mode a channel's output stage "
                   "does NOT reach its pad - the same registers that drove it a moment ago",
-                  !enc_high);
+                  !moved);
 
     // So the quadrature is written by the PORT, which this family's
     // input path does see (letter j): the pads go back to plain
@@ -1301,6 +1361,934 @@ void tj_jumper() {
     all_off();
 }
 
+// ===========================================================================
+// The CH32V303's timers. Every letter below is a TEMPLATE on the timer's
+// number, so that a part without the timer never forms the type: an
+// `if constexpr` outside a template still instantiates both branches.
+// ===========================================================================
+
+/// A strap between two pads, tested the way letter j tests PA6-PA1: the
+/// first driven as a plain output, the second read with its own pull set
+/// against the level, both ways round.
+template <Pad from, Pad to>
+bool strap_present() {
+    using Src = Pin<from.port, from.pin>;
+    using Dst = Pin<to.port, to.pin>;
+    Src::output(false);
+    Dst::input(PinPull::up);
+    wait_us(20);
+    const bool low_seen = !Dst::read();
+    Src::set();
+    Dst::input(PinPull::down);
+    wait_us(20);
+    const bool high_seen = Dst::read();
+    Src::release();
+    Dst::release();
+    return low_seen && high_seen;
+}
+
+/// Wait for a flag with a bound, and say whether it came.
+template <class T>
+bool wait_flag(uint16_t flag, uint32_t limit_us) {
+    Stopwatch w;
+    while (!T::flag(flag)) {
+        if (w.us() > limit_us) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// One timer back to reset, where the part has it - a template on the
+/// number, so a part without the timer never forms its type.
+template <uint8_t N>
+void release_if() {
+    if constexpr (tim_present(N)) {
+        Tim<N>::release();
+    }
+}
+
+/// One pad back to a floating input, where the package bonds it.
+template <Pad pad>
+void release_pad() {
+    if constexpr (pad_bonded(pad)) {
+        TimPad<pad>::release();
+    }
+}
+
+/// Everything the CH32V303's letters touch, back to reset.
+template <uint8_t A = 8>
+void v303_off() {
+    if constexpr (tim_present(A)) {
+        release_if<A>();
+        release_if<9>();
+        release_if<10>();
+        release_if<5>();
+        release_if<6>();
+        release_if<7>();
+        for (const Irq line : {Irq::tim8_brk, Irq::tim8_up, Irq::tim8_trg_com, Irq::tim8_cc,
+                               Irq::tim9_up, Irq::tim9_cc, Irq::tim10_up, Irq::tim10_cc,
+                               Irq::tim6, Irq::tim7}) {
+            Pfic::disable(line);
+            Pfic::clear_pending(line);
+        }
+        release_pad<tim_channel_pad(A, 0, 0)>();
+        release_pad<tim_complementary_pad(A, 0, 0)>();
+        release_pad<tim_break_pad(A, 0)>();
+        release_pad<tim_channel_pad(9, 0, 2)>();
+        release_pad<tim_channel_pad(10, 0, 2)>();
+    }
+}
+
+/// What the CH32V303's vectors counted.
+volatile uint32_t v8_up = 0;
+volatile uint32_t v8_cc = 0;
+volatile uint32_t v8_trg = 0;
+volatile uint32_t v8_brk = 0;
+volatile uint16_t v8_trg_mask = 0;
+volatile uint16_t v8_brk_mask = 0;
+/// Letter m's pad break: the break body masks its own interrupt, because
+/// a break input held active keeps BIF set - it cannot be cleared then -
+/// and the vector would otherwise re-enter until the program starves.
+volatile bool v8_brk_self_mask = false;
+volatile uint16_t v8_brk_flags_seen = 0;
+volatile uint32_t v9_up = 0;
+volatile uint32_t v9_cc = 0;
+volatile uint32_t v10_up = 0;
+volatile uint32_t v10_cc = 0;
+volatile uint32_t v6_up = 0;
+volatile uint32_t v7_up = 0;
+
+void clear_v303_counts() {
+    v8_up = 0;
+    v8_cc = 0;
+    v8_trg = 0;
+    v8_brk = 0;
+    v8_trg_mask = 0;
+    v8_brk_mask = 0;
+    v9_up = 0;
+    v9_cc = 0;
+    v10_up = 0;
+    v10_cc = 0;
+    v6_up = 0;
+    v7_up = 0;
+}
+
+// ---------------------------------------------------------------------------
+// k - TIM8's PWM captured by TIM4 over the PC6-PB8 jumper
+// ---------------------------------------------------------------------------
+
+struct CaptureCase {
+    uint16_t prescaler;
+    uint16_t period;     ///< ATRLR: the period is period + 1 counts
+    uint16_t compare;    ///< the high time, in counts
+};
+
+template <uint8_t A = 8>
+void tk_tim8_capture() {
+    if constexpr (tim_present(A)) {
+        using T8 = Tim<A>;
+        constexpr Pad out_pad = tim_channel_pad(A, 0, 0);   // PC6
+        constexpr Pad in_pad = tim_channel_pad(4, 0, 2);    // PB8, TIM4's channel 3
+        using Out = TimPad<out_pad>;
+        using In = TimPad<in_pad>;
+        all_off();
+        v303_off<A>();
+        const bool wired = strap_present<out_pad, in_pad>();
+        print(serial, "  PC6 driven, PB8 read: the jumper is ", wired ? "THERE" : "absent", crlf);
+        if (!wired) {
+            bench.verdict("the PC6-PB8 jumper was tested for (no jumper: TIM8's wave is not "
+                          "captured)", true);
+            return;
+        }
+        // Five duties at 1 kHz on a 1 MHz count, then three more rates -
+        // the last two on the undivided timer clock, 10 kHz and 100 kHz.
+        constexpr CaptureCase cases[] = {
+            {143, 999, 100},  {143, 999, 250},    {143, 999, 500}, {143, 999, 750},
+            {143, 999, 900},  {143, 499, 125},    {143, 199, 50},  {0, 14399, 3600},
+            {0, 1439, 720},
+        };
+        uint8_t exact = 0;
+        for (const CaptureCase& c : cases) {
+            T8::init();
+            (void)T8::remap(0);
+            (void)T8::configure({.prescaler = c.prescaler, .period = c.period,
+                                 .auto_reload_preload = true});
+            (void)T8::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = c.compare});
+            (void)T8::main_output(true);
+            T8::update();
+            T8::clear_flags(T8::all_flags);
+            Out::claim();
+
+            Quad::init();
+            (void)Quad::remap(0);
+            (void)Quad::configure({.prescaler = c.prescaler, .period = 0xFFFF});
+            (void)Quad::capture_channel(2, {.select = TimChannelSelect::direct,
+                                            .polarity = TimCapturePolarity::rising});
+            (void)Quad::capture_channel(3, {.select = TimChannelSelect::indirect,
+                                            .polarity = TimCapturePolarity::falling});
+            In::claim_input();
+            Quad::clear_flags(Quad::all_flags);
+            Quad::enable(true);
+            T8::enable(true);
+            wait_us(3000);
+
+            // A rising edge, the falling edge after it, the next rising.
+            Quad::clear_flags(Quad::all_flags);
+            bool ok = wait_flag<Quad>(Quad::compare_flag(2), 20000);
+            const uint32_t r1 = Quad::compare(2);
+            Quad::clear_flags(Quad::compare_flag(3));
+            ok = ok && wait_flag<Quad>(Quad::compare_flag(3), 20000);
+            const uint32_t f = Quad::compare(3);
+            ok = ok && wait_flag<Quad>(Quad::compare_flag(2), 20000);
+            const uint32_t r2 = Quad::compare(2);
+            T8::enable(false);
+            Quad::enable(false);
+            const uint32_t per = (r2 - r1) & 0xFFFFu;
+            const uint32_t high = (f - r1) & 0xFFFFu;
+            const uint32_t want_per = static_cast<uint32_t>(c.period) + 1u;
+            const bool good = ok && per + 1u >= want_per && per <= want_per + 1u &&
+                              high + 1u >= c.compare && high <= c.compare + 1u;
+            if (good) {
+                ++exact;
+            }
+            print(serial, "  TIM8 at ", SysClock::hz / (static_cast<uint32_t>(c.prescaler) + 1u) /
+                                         want_per,
+                  " Hz, high ", c.compare, " of ", want_per, " counts: TIM4 read a period of ",
+                  per, " and a high time of ", high, ok ? "" : " (an edge did not come)", crlf);
+            Out::release();
+            In::release();
+        }
+        bench.verdict("TIM4's capture on PB8 reads TIM8's period and high time to a count, at "
+                      "five duties and four frequencies up to 100 kHz",
+                      exact == sizeof(cases) / sizeof(cases[0]));
+        Quad::release();
+        v303_off<A>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// l - TIM8's complementary pair on PC6 and PA7
+// ---------------------------------------------------------------------------
+
+template <uint8_t A = 8>
+void tl_tim8_pair() {
+    if constexpr (tim_present(A)) {
+        using T8 = Tim<A>;
+        using Out = TimPad<tim_channel_pad(A, 0, 0)>;          // PC6
+        using OutN = TimPad<tim_complementary_pad(A, 0, 0)>;   // PA7
+        all_off();
+        v303_off<A>();
+        T8::init();
+        (void)T8::remap(0);
+
+        constexpr uint8_t codes[] = {0x20, 0x8F, 0xCF, 0xFF};
+        uint8_t ladder = 0;
+        for (const uint8_t code : codes) {
+            (void)T8::break_dead_time({.dead_time = code});
+            if (T8::dead_time_ticks() == tim_dead_time_ticks(code)) {
+                ++ladder;
+            }
+        }
+        bench.verdict("TIM8's dead-time register reads back through all four ranges of "
+                      "14.4.18's encoding", ladder == 4u);
+
+        constexpr uint8_t dtg = 0xFF;
+        (void)T8::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+                             .period = 999,
+                             .clock_division = TimClockDivision::div4,
+                             .auto_reload_preload = true});
+        (void)T8::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 500,
+                                     .complementary_enable = true});
+        (void)T8::break_dead_time({.dead_time = dtg, .main_output_enable = true});
+        Out::claim();
+        OutN::claim();
+        T8::update();
+        T8::enable(true);
+        const auto wait_for = [](auto read, bool level, uint32_t limit_us) -> uint32_t {
+            Stopwatch w;
+            while (read() != level) {
+                if (w.us() > limit_us) {
+                    return 0;
+                }
+            }
+            return w.cycles();
+        };
+        (void)wait_for([] { return Out::read(); }, true, 4000);
+        (void)wait_for([] { return Out::read(); }, false, 4000);
+        Stopwatch band;
+        while (!OutN::read() && band.us() < 4000u) {
+        }
+        const uint32_t gap_ns = band.cycles() * 1000u / ticks_per_us;
+        uint32_t both_high = 0;
+        uint32_t high_a = 0;
+        uint32_t high_n = 0;
+        constexpr uint32_t samples = 20000;
+        for (uint32_t i = 0; i < samples; ++i) {
+            const bool a = Out::read();
+            const bool nn = OutN::read();
+            if (a && nn) {
+                ++both_high;
+            } else if (a) {
+                ++high_a;
+            } else if (nn) {
+                ++high_n;
+            }
+        }
+        T8::enable(false);
+        (void)T8::main_output(false);
+        const uint32_t dead_ns = tim_dead_time_ticks(dtg) * 4u * 1000u / ticks_per_us;
+        print(serial, "  ", samples, " samples of PC6 and PA7: ", high_a, " / ", high_n,
+              " one high, ", both_high, " both high; the gap ", gap_ns, " ns measured, ", dead_ns,
+              " ns asked (DTG ", hex(dtg), ", tDTS = the timer clock over four)", crlf);
+        bench.verdict("TIM8's outputs are never both high, both are driven, and the band between "
+                      "them is the one the DTG code asks for, to a tenth of it",
+                      both_high == 0u && high_a > samples / 8u && high_n > samples / 8u &&
+                          gap_ns * 10u > dead_ns * 9u && gap_ns * 9u < dead_ns * 10u);
+        v303_off<A>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// m - TIM8's four vectors, the break through BKIN driven by the port
+// ---------------------------------------------------------------------------
+
+template <uint8_t A = 8>
+void tm_tim8_vectors() {
+    if constexpr (tim_present(A)) {
+        using T8 = Tim<A>;
+        constexpr Pad bkin = tim_break_pad(A, 0);   // PA6
+        using Bkin = Pin<bkin.port, bkin.pin>;
+        all_off();
+        v303_off<A>();
+        clear_v303_counts();
+        T8::init();
+        (void)T8::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+                             .period = 99});
+        (void)T8::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 50,
+                                     .enable = false});
+        T8::clear_flags(T8::all_flags);
+        const uint16_t all_four = static_cast<uint16_t>(
+            T8::update_interrupt | T8::compare_interrupt(0) | T8::trigger_interrupt |
+            T8::commutation_interrupt | T8::break_interrupt);
+        T8::interrupts(all_four, true);
+        for (const Irq line : {Irq::tim8_up, Irq::tim8_cc, Irq::tim8_brk, Irq::tim8_trg_com}) {
+            Pfic::clear_pending(line);
+            Pfic::enable(line);
+        }
+        T8::enable(true);
+        wait_us(2000);            // twenty periods of 100 us
+        T8::enable(false);
+        // The third line: a trigger event, then a COMMUTATION - the
+        // preloaded channel configuration moved by SWEVGR.COMG.
+        (void)T8::trigger_event();
+        wait_us(10);
+        (void)T8::preload_channels(true, false);
+        (void)T8::commutation_event();
+        wait_us(10);
+        const uint32_t trg_calls = v8_trg;
+        // The fourth: a break by software first - one flag, one call -
+        // then the BREAK INPUT, PA6 in column 0, driven by the PORT for a
+        // few microseconds (BIF cannot be cleared while the input stands
+        // active, so the line may run more than once while the pad is
+        // high). Declined if something outside holds the pad high.
+        (void)T8::break_dead_time({.main_output_enable = true});
+        (void)T8::break_event();
+        wait_us(10);
+        const uint32_t brk_soft = v8_brk;
+        const uint16_t soft_mask = v8_brk_mask;
+        Bkin::input(PinPull::down);
+        wait_us(20);
+        const bool held = Bkin::read();
+        bool pad_broke = false;
+        bool armed = false;
+        bool brk_flag_left = true;
+        if (!held) {
+            (void)T8::break_dead_time({.main_output_enable = true, .break_enable = true,
+                                       .break_active_high = true});
+            wait_us(2);
+            Bkin::output(false);
+            wait_us(10);
+            armed = T8::main_output();
+            // THE LEVEL IS THE BREAK: while BKIN stands active BIF cannot
+            // be cleared, so a vector that only acknowledges would run
+            // again the moment it returned and the loop below would never
+            // lower the pad (measured, exactly that way). The body masks
+            // its own interrupt for this pulse.
+            v8_brk_self_mask = true;
+            Bkin::set();
+            wait_us(10);
+            pad_broke = !T8::main_output();
+            Bkin::clear();
+            wait_us(10);
+            v8_brk_self_mask = false;
+            // BIF could not be cleared while the pad was high; with the
+            // pad low it can.
+            T8::clear_flags(T8::break_flag);
+            brk_flag_left = T8::flag(T8::break_flag);
+            // The break input OFF while the pad is still driven low: a
+            // released pad floats, and a break input that reads it active
+            // holds BIF for ever.
+            (void)T8::break_dead_time({});
+            wait_us(2);
+            Bkin::release();
+        }
+        const uint32_t brk_after_pad = v8_brk;
+        T8::interrupts(all_four, false);
+        for (const Irq line : {Irq::tim8_up, Irq::tim8_cc, Irq::tim8_brk, Irq::tim8_trg_com}) {
+            Pfic::disable(line);
+        }
+        print(serial, "  TIM8's four lines: ", v8_up, " update, ", v8_cc, " compare, ", trg_calls,
+              " trigger/commutation (last mask ", hex(v8_trg_mask), "), ", brk_soft,
+              " break by software (mask ", hex(soft_mask), ") and ", brk_after_pad - brk_soft,
+              " for a 2 us pulse on BKIN (", held ? "HELD HIGH outside" : "driven by the port",
+              ", MOE ", armed ? "set" : "CLEAR", " before it and ",
+              pad_broke ? "cleared" : "STILL SET", " after; BIF ", hex(v8_brk_flags_seen & tim_bif),
+              " in the body, cleared once the pad fell: ", !brk_flag_left, ")", crlf);
+        bench.verdict("TIM8's update and compare vectors ran for their own events - twenty "
+                      "each on two lines",
+                      v8_up >= 19u && v8_up <= 21u && v8_cc >= 19u && v8_cc <= 21u);
+        bench.verdict("its trigger/commutation vector ran once for a trigger and once for a "
+                      "commutation, its mask the pair of flags that line answers for",
+                      trg_calls == 2u && (v8_trg_mask & static_cast<uint16_t>(~(tim_tif | tim_comif))) == 0u);
+        bench.verdict("and the break vector ran for a software break alone, then for BKIN raised "
+                      "by the port - MOE set before the pulse and cleared by it",
+                      brk_soft == 1u && soft_mask == tim_bif && !held && armed && pad_broke &&
+                          brk_after_pad == brk_soft + 1u && !brk_flag_left);
+        v303_off<A>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// n - TIM9 and TIM10 with no wire
+// ---------------------------------------------------------------------------
+
+/// One advanced timer's wireless round: the time base against the core's
+/// counter, a PWM on channel 3 captured by channel 4 through the indirect
+/// mapping, and the update and compare vectors.
+template <uint8_t N>
+bool wireless_round(volatile uint32_t& up_calls, volatile uint32_t& cc_calls) {
+    using T = Tim<N>;
+    using Wave3 = TimPad<tim_channel_pad(N, 0, 2)>;
+    T::init();
+    (void)T::remap(0);
+    (void)T::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 999});
+    T::clear_flags(T::all_flags);
+    T::enable(true);
+    uint32_t updates = 0;
+    Stopwatch fifty;
+    while (fifty.us() < 50u * 1000u) {
+        if (T::flag(T::update_flag)) {
+            T::clear_flags(T::update_flag);
+            ++updates;
+        }
+    }
+    T::enable(false);
+
+    (void)T::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 999,
+                        .auto_reload_preload = true});
+    (void)T::output_channel(2, {.mode = TimOutputMode::pwm1, .compare = 300});
+    (void)T::capture_channel(3, {.select = TimChannelSelect::indirect,
+                                 .polarity = TimCapturePolarity::falling});
+    (void)T::main_output(true);
+    Wave3::claim();
+    T::update();
+    T::clear_flags(T::all_flags);
+    T::enable(true);
+    const bool came = wait_flag<T>(T::compare_flag(3), 50000);
+    T::clear_flags(T::compare_flag(3));
+    const bool came2 = wait_flag<T>(T::compare_flag(3), 50000);
+    const uint32_t high = T::compare(3);
+    const uint16_t chctlr2 = T::regs().CHCTLR2;
+    const uint16_t ccer = T::regs().CCER;
+    T::enable(false);
+
+    // The two vectors this letter arms: the update and the compare.
+    up_calls = 0;
+    cc_calls = 0;
+    (void)T::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 99});
+    (void)T::output_channel(0, {.mode = TimOutputMode::pwm1, .compare = 50, .enable = false});
+    T::clear_flags(T::all_flags);
+    T::interrupts(T::update_interrupt | T::compare_interrupt(0), true);
+    Pfic::clear_pending(T::irq());
+    Pfic::clear_pending(T::cc_irq());
+    Pfic::enable(T::irq());
+    Pfic::enable(T::cc_irq());
+    T::enable(true);
+    wait_us(2000);
+    T::enable(false);
+    T::interrupts(T::update_interrupt | T::compare_interrupt(0), false);
+    Pfic::disable(T::irq());
+    Pfic::disable(T::cc_irq());
+    Wave3::release();
+    print(serial, "  TIM", N, ": ", updates, " updates of a 1 kHz period in 50 ms; channel 3's "
+          "PWM (compare 300) captured by channel 4 at ", high, " us (CHCTLR2=", hex(chctlr2),
+          " CCER=", hex(ccer), "); its vectors ran ", up_calls, " update and ", cc_calls,
+          " compare in 2 ms of a 100 us period", crlf);
+    return updates >= 49u && updates <= 51u && came && came2 && high >= 299u && high <= 301u &&
+           up_calls >= 19u && up_calls <= 21u && cc_calls >= 19u && cc_calls <= 21u;
+}
+
+template <uint8_t A = 8>
+void tn_tim9_tim10() {
+    if constexpr (tim_present(A)) {
+        all_off();
+        v303_off<A>();
+        const bool nine = wireless_round<9>(v9_up, v9_cc);
+        bench.verdict("TIM9's time base keeps the core's time, its channel 3 makes a PWM its "
+                      "channel 4 captures to the microsecond, and its update and compare "
+                      "vectors are its own",
+                      nine);
+        const bool ten = wireless_round<10>(v10_up, v10_cc);
+        bench.verdict("and TIM10's the same", ten);
+        v303_off<A>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// o - TIM5's width
+// ---------------------------------------------------------------------------
+
+template <uint8_t N5 = 5>
+void to_tim5_width() {
+    if constexpr (tim_present(N5)) {
+        using T5 = Tim<N5>;
+        all_off();
+        T5::init();
+        (void)T5::configure({.prescaler = 0, .period = T5::max_period});
+        // Thirty-two bits written raw, around the driver's own width
+        // check: what the register keeps is the width.
+        T5::regs().ATRLR = 0x00012345u;
+        const uint32_t arr = T5::regs().ATRLR;
+        T5::regs().CNT = 0x0001FFF0u;
+        const uint32_t cnt = T5::regs().CNT;
+        T5::regs().CHCVR[0] = 0x00054321u;
+        const uint32_t ccr = T5::regs().CHCVR[0];
+        // The counter run from just below 0xFFFF with the auto-reload
+        // at its widest: past 0xFFFF a sixteen-bit counter wraps.
+        T5::regs().ATRLR = 0xFFFFFFFFu;
+        T5::regs().CNT = 0x0000FFF0u;
+        T5::enable(true);
+        wait_us(10);
+        T5::enable(false);
+        const uint32_t after = T5::regs().CNT;
+        const bool wrapped = after < 0xFFF0u;
+        const uint8_t measured = (arr == 0x2345u && cnt == 0xFFF0u && wrapped) ? 16u
+                                 : (arr == 0x12345u && cnt == 0x1FFF0u && !wrapped) ? 32u
+                                                                                     : 0u;
+        print(serial, "  TIM5 written raw: ATRLR 0x12345 reads ", hex(arr), ", CNT 0x1FFF0 reads ",
+              hex(cnt), ", CH1CVR 0x54321 reads ", hex(ccr), "; run from 0xFFF0 for 10 us: ",
+              hex(after), " - ", measured, " bits (the driver says ", T5::counter_bits, ")", crlf);
+        bench.verdict("TIM5's counter, auto-reload and compare are as wide as the driver says - "
+                      "chapter 15's class note, answered by the silicon",
+                      measured == T5::counter_bits);
+        T5::release();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// p - the basic timers
+// ---------------------------------------------------------------------------
+
+/// One basic timer: its update against the core's counter, its vector,
+/// and its TRGO counted by TIM9 over ITRx (S, a parameter so the type
+/// stays one of the template's own).
+template <uint8_t B, uint8_t S = 9>
+void basic_round(volatile uint32_t& calls) {
+    using T = Tim<B>;
+    using Slave = Tim<S>;
+    T::init();
+    (void)T::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 99});
+    T::clear_flags(T::all_flags);
+    T::enable(true);
+    uint32_t seen = 0;
+    Stopwatch w;
+    while (seen < 20u && w.us() < 100u * 1000u) {
+        if (T::flag(T::update_flag)) {
+            T::clear_flags(T::update_flag);
+            ++seen;
+        }
+    }
+    const uint32_t span = w.us();
+    T::enable(false);
+
+    calls = 0;
+    T::clear_flags(T::all_flags);
+    T::interrupts(T::update_interrupt, true);
+    Pfic::clear_pending(T::irq());
+    Pfic::enable(T::irq());
+    T::enable(true);
+    wait_us(5000);
+    T::enable(false);
+    T::interrupts(T::update_interrupt, false);
+    Pfic::disable(T::irq());
+    const uint32_t vector_calls = calls;
+
+    constexpr uint8_t itr = tim_trigger_index_for(S, B);
+    Slave::init();
+    (void)TimEventCounter<Slave>::setup(static_cast<TimTrigger>(itr));
+    TimEventCounter<Slave>::restart();
+    (void)T::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u), .period = 99});
+    (void)T::master(TimMasterMode::update);
+    T::enable(true);
+    wait_us(20000);
+    T::enable(false);
+    const uint32_t counted = TimEventCounter<Slave>::count();
+    Slave::release();
+    const bool refused = !T::master(TimMasterMode::oc1ref);
+    print(serial, "  TIM", B, ": twenty update periods of 100 us in ", span, " us, ", vector_calls,
+          " calls of its vector in 5 ms, and TIM9 on ITR", itr, " counted ", counted,
+          " of its TRGO updates in 20 ms (a channel's TRGO code refused: ", refused, ")", crlf);
+    bench.verdict(B == 6 ? "TIM6 keeps the core's time, its vector is its own, and its TRGO "
+                           "reaches TIM9's ITR2 - every update"
+                         : "TIM7 the same, over TIM9's ITR3",
+                  span + 20u >= 2000u && span <= 2020u && vector_calls >= 49u &&
+                      vector_calls <= 51u && counted >= 199u && counted <= 201u && refused);
+    T::release();
+}
+
+template <uint8_t B6 = 6>
+void tp_basic() {
+    if constexpr (tim_present(B6)) {
+        all_off();
+        v303_off<8>();
+        basic_round<B6>(v6_up);
+        basic_round<7>(v7_up);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// q - the dual-edge capture over the PA6-PA1 jumper
+// ---------------------------------------------------------------------------
+
+template <bool aux = Tim<2>::has_dual_edge_capture>
+void tq_dual_edge() {
+    if constexpr (aux) {
+        all_off();
+        need_jumper();
+        if (!jumper) {
+            print(serial, "  no jumper (PA6 to PA1): the dual-edge capture is not measured", crlf);
+            bench.verdict("the jumper was tested for (no jumper: nothing captured)", true);
+            return;
+        }
+        // FIRST, WHETHER THIS DIE HAS THE REGISTER: the class has it only
+        // "for lot numbers where the penultimate sixth bit is not zero",
+        // and the verb asks the die by reading its bit back.
+        Meas::init();
+        const uint16_t chctlr_before = Meas::regs().CHCTLR1;
+        const bool present = Meas::dual_edge_capture(1);
+        const uint16_t aux_read = Meas::regs().AUX;
+        const uint16_t chctlr_after = Meas::regs().CHCTLR1;
+        Meas::release();
+        if (!present) {
+            print(serial, "  TIM2's AUX reads ", hex(aux_read), " after CAP_ED_CH2 was written: this die's "
+                  "lot has no dual-edge capture; CHCTLR1 ", hex(chctlr_before), " before and ",
+                  hex(chctlr_after), " after", crlf);
+            bench.verdict("the dual-edge verb answers false on a die whose TIMx_AUX does not keep "
+                          "the bit, and writes nothing else",
+                          aux_read == 0u && chctlr_after == chctlr_before);
+            all_off();
+            return;
+        }
+        constexpr uint16_t duties[] = {100, 250, 500, 750};
+        uint8_t high_hits = 0;
+        uint8_t low_hits = 0;
+        uint8_t agree = 0;
+        for (const uint16_t d : duties) {
+            Wave::init();
+            (void)Wave::remap(0);
+            (void)wave_self_capture(999, d);
+            uint32_t by_pol[2] = {0, 0};
+            for (uint8_t pol = 0; pol < 2u; ++pol) {
+                Meas::init();
+                (void)Meas::remap(0);
+                (void)Meas::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+                                       .period = 0xFFFF});
+                (void)Meas::dual_edge_capture(1, pol == 0u ? TimCapturePolarity::rising
+                                                           : TimCapturePolarity::falling);
+                MeasPad::claim_input();
+                Meas::clear_flags(Meas::all_flags);
+                Meas::enable(true);
+                (void)wait_flag<Meas>(Meas::compare_flag(1), 20000);
+                (void)Meas::compare(1);
+                Meas::clear_flags(Meas::compare_flag(1));
+                const bool came = wait_flag<Meas>(Meas::compare_flag(1), 20000);
+                by_pol[pol] = came ? Meas::compare(1) : 0xFFFFFFFFu;
+                Meas::enable(false);
+            }
+            const bool on = Meas::dual_edge(1);
+            // The two-channel method on the same wave, for comparison.
+            Meas::init();
+            (void)Meas::remap(0);
+            (void)Meas::configure({.prescaler = static_cast<uint16_t>(ticks_per_us - 1u),
+                                   .period = 0xFFFF});
+            (void)Meas::capture_channel(1, {.select = TimChannelSelect::direct,
+                                            .polarity = TimCapturePolarity::rising});
+            (void)Meas::capture_channel(0, {.select = TimChannelSelect::indirect,
+                                            .polarity = TimCapturePolarity::falling});
+            (void)Meas::slave({.mode = TimSlaveMode::reset, .trigger = TimTrigger::ti2});
+            MeasPad::claim_input();
+            Meas::clear_flags(Meas::all_flags);
+            Meas::enable(true);
+            wait_us(5000);
+            const uint32_t two_ch = Meas::compare(0);
+            Meas::enable(false);
+            Wave::enable(false);
+            const uint32_t low = 1000u - d;
+            const auto near = [](uint32_t v, uint32_t want) { return v + 2u >= want && v <= want + 2u; };
+            if (near(by_pol[0], d)) { ++high_hits; }
+            if (near(by_pol[1], low)) { ++low_hits; }
+            if (near(two_ch, d)) { ++agree; }
+            print(serial, "  high ", d, " us of 1000: the dual-edge register read ", by_pol[0],
+                  " (CC2P clear) and ", by_pol[1], " (CC2P set); AUX's bit ", on,
+                  "; the two-channel method ", two_ch, " us", crlf);
+        }
+        bench.verdict("the two-channel method on the same wave reads its high time (the "
+                      "reference the dual-edge register is weighed against)",
+                      agree == 4u);
+        bench.verdict("the dual-edge capture holds the width of the HIGH pulse with CC2P clear "
+                      "and of the LOW pulse with it set, to two microseconds, in one register",
+                      high_hits == 4u && low_hits == 4u);
+        Meas::release();
+        all_off();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// r - TIM3's external trigger on PD2, driven by the port
+// ---------------------------------------------------------------------------
+
+template <Pad etr = tim_etr_pad(3, 0)>
+void tr_etr() {
+    if constexpr (pad_bonded(etr)) {
+        using Etr = Pin<etr.port, etr.pin>;
+        all_off();
+        Wave::init();
+        (void)Wave::configure({.prescaler = 0, .period = 0xFFFF});
+        const auto burst = [](uint8_t rising) {
+            for (uint8_t i = 0; i < rising; ++i) {
+                Etr::set();
+                wait_us(2);
+                Etr::clear();
+                wait_us(2);
+            }
+        };
+        struct Case {
+            const char* name;
+            TimEtrConfig cfg;
+            uint32_t want;
+        };
+        const Case cases[] = {
+            {"rising edges", {.clock_mode2 = true}, 40},
+            {"inverted (falling edges)", {.inverted = true, .clock_mode2 = true}, 40},
+            {"prescaled by two", {.prescaler = 1, .clock_mode2 = true}, 20},
+            {"prescaled by eight", {.prescaler = 3, .clock_mode2 = true}, 5},
+        };
+        uint8_t right = 0;
+        for (const Case& c : cases) {
+            Etr::output(false);
+            wait_us(5);
+            (void)Wave::external_trigger(c.cfg);
+            Wave::set_count(0);
+            Wave::enable(true);
+            wait_us(5);
+            const uint32_t before = Wave::count();
+            burst(40);
+            wait_us(5);
+            const uint32_t counted = Wave::count() - before;
+            Wave::enable(false);
+            if (counted == c.want) {
+                ++right;
+            }
+            print(serial, "  forty pulses on PD2, ", c.name, ": TIM3 counted ", counted, " (",
+                  c.want, " expected)", crlf);
+        }
+        // External clock mode 1 on ETRF: the same edges through the slave
+        // controller instead of ECE.
+        (void)Wave::external_trigger({});
+        (void)Wave::slave({.mode = TimSlaveMode::external_clock1, .trigger = TimTrigger::etr});
+        Wave::set_count(0);
+        Wave::enable(true);
+        wait_us(5);
+        burst(40);
+        wait_us(5);
+        const uint32_t mode1 = Wave::count();
+        Wave::enable(false);
+        Etr::release();
+        print(serial, "  the same forty through external clock mode 1 on ETRF: ", mode1, crlf);
+        bench.verdict("TIM3's external trigger on PD2 counts the pad's edges as the port writes "
+                      "them - both polarities, the prescaler, and both external clock modes",
+                      right == 4u && mode1 == 40u);
+        all_off();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// s - the internal triggers the CH32V303 adds
+// ---------------------------------------------------------------------------
+
+/// Slave S counts master M's update events over ITRx: the slave first,
+/// the master at 100 kHz for two milliseconds - two hundred events.
+template <uint8_t S, uint8_t M>
+uint32_t link_count() {
+    using Sl = Tim<S>;
+    using Ma = Tim<M>;
+    constexpr uint8_t itr = tim_trigger_index_for(S, M);
+    static_assert(itr != 0xFFu, "no such link in tables 14-2 and 15-2");
+    Sl::init();
+    Ma::init();
+    (void)TimEventCounter<Sl>::setup(static_cast<TimTrigger>(itr));
+    TimEventCounter<Sl>::restart();
+    (void)Ma::configure({.prescaler = 0, .period = 1439});
+    (void)Ma::master(TimMasterMode::update);
+    Stopwatch w;
+    Ma::enable(true);
+    while (w.us() < 2000u) {
+    }
+    Ma::enable(false);
+    const uint32_t counted = TimEventCounter<Sl>::count();
+    Sl::release();
+    Ma::release();
+    return counted;
+}
+
+template <uint8_t S, uint8_t M>
+bool link_line(uint8_t& good) {
+    const uint32_t c = link_count<S, M>();
+    const bool ok = c >= 199u && c <= 201u;
+    print(serial, "  TIM", S, " ITR", tim_trigger_index_for(S, M), " <- TIM", M, ": ", c,
+          ok ? "" : "  <- NOT the 200 the master made", crlf);
+    if (ok) {
+        ++good;
+    }
+    return ok;
+}
+
+template <uint8_t A = 8>
+void ts_links() {
+    if constexpr (tim_present(A)) {
+        all_off();
+        v303_off<A>();
+        uint8_t good = 0;
+        // Into the three extra advanced timers: table 14-2, whole.
+        (void)link_line<A, 1>(good);
+        (void)link_line<A, 2>(good);
+        (void)link_line<A, 4>(good);
+        (void)link_line<A, 5>(good);
+        (void)link_line<9, 10>(good);
+        (void)link_line<9, 5>(good);
+        (void)link_line<9, 6>(good);
+        (void)link_line<9, 7>(good);
+        (void)link_line<10, 9>(good);
+        (void)link_line<10, 2>(good);
+        (void)link_line<10, 4>(good);
+        (void)link_line<10, 5>(good);
+        // TIM8 and TIM5 as masters of the others (tables 14-2, 15-2).
+        (void)link_line<4, A>(good);
+        (void)link_line<5, A>(good);
+        (void)link_line<1, 5>(good);
+        (void)link_line<3, 5>(good);
+        (void)link_line<5, 2>(good);
+        (void)link_line<5, 3>(good);
+        (void)link_line<5, 4>(good);
+        bench.verdict("every link into TIM8, TIM9 and TIM10 and every link TIM8 and TIM5 master "
+                      "counts the master's two hundred updates - tables 14-2 and 15-2 as the "
+                      "driver folds them",
+                      good == 19u);
+        // TIM2's ITR1: "TIM8/USB/ETH" in table 15-2, and an AFIO field
+        // that chooses between the last two. Both settings of the field,
+        // with TIM8 as the master.
+        const uint8_t kept = Afio::remap_code(Remap::tim2_itr1);
+        (void)Afio::remap(Remap::tim2_itr1, 0);
+        const uint32_t at0 = link_count<2, A>();
+        const bool can1 = Afio::remap(Remap::tim2_itr1, 1);
+        const uint32_t at1 = can1 ? link_count<2, A>() : 0u;
+        (void)Afio::remap(Remap::tim2_itr1, kept);
+        print(serial, "  TIM2 ITR1 <- TIM8: ", at0, " with TIM2ITR1_RM at 0, ", at1,
+              " with it at 1", can1 ? "" : " (not writable)", crlf);
+        bench.verdict("TIM2's ITR1 carries TIM8's TRGO with its AFIO field at the reset value, "
+                      "which is the link the driver's table names",
+                      at0 >= 199u && at0 <= 201u);
+        v303_off<A>();
+    }
+}
+
+/// The CH32V303's letters, registered where the part has the timers - a
+/// template for the same reason as the letters.
+template <uint8_t A = 8>
+void register_v303_letters() {
+    if constexpr (tim_present(A)) {
+        bench.letter('k', "TIM8's PWM captured by TIM4 over the PC6-PB8 jumper",
+                     tk_tim8_capture<A>);
+        bench.letter('l', "TIM8's complementary pair on PC6/PA7 and its dead band",
+                     tl_tim8_pair<A>);
+        bench.letter('m', "TIM8's four vectors, the break from BKIN driven by the port",
+                     tm_tim8_vectors<A>);
+        bench.letter('n', "TIM9 and TIM10 with no wire: time base, PWM, vectors",
+                     tn_tim9_tim10<A>);
+        bench.letter('o', "TIM5's width, written raw", to_tim5_width<>);
+        bench.letter('p', "the basic timers TIM6 and TIM7, their TRGO on TIM9", tp_basic<>);
+        bench.letter('s', "the internal triggers the class adds", ts_links<A>);
+    }
+    if constexpr (Tim<2>::has_dual_edge_capture) {
+        bench.letter('q', "the dual-edge capture over the PA6-PA1 jumper", tq_dual_edge<>);
+    }
+    if constexpr (pad_bonded(tim_etr_pad(3, 0))) {
+        bench.letter('r', "TIM3's external trigger on PD2, driven by the port", tr_etr<>);
+    }
+}
+
+/// The CH32V303's vector bodies: templates, so that a part without the
+/// timer compiles an empty function that no table entry reaches.
+template <uint8_t A = 8>
+[[gnu::always_inline]] inline void tim8_body(Irq line) {
+    if constexpr (tim_present(A)) {
+        const uint16_t hit = Tim<A>::isr(Tim<A>::vector_flags(line));
+        if (hit == 0u) {
+            return;
+        }
+        if (line == Irq::tim8_up) {
+            v8_up = v8_up + 1u;
+        } else if (line == Irq::tim8_cc) {
+            v8_cc = v8_cc + 1u;
+        } else if (line == Irq::tim8_trg_com) {
+            v8_trg = v8_trg + 1u;
+            v8_trg_mask = hit;
+        } else {
+            v8_brk = v8_brk + 1u;
+            v8_brk_mask = hit;
+            if (v8_brk_self_mask) {
+                v8_brk_flags_seen = Tim<A>::flags();
+                Tim<A>::interrupts(Tim<A>::break_interrupt, false);
+            }
+        }
+    }
+}
+
+template <uint8_t N>
+[[gnu::always_inline]] inline void advanced_body(Irq line, volatile uint32_t& up,
+                                                 volatile uint32_t& cc) {
+    if constexpr (tim_present(N)) {
+        const uint16_t hit = Tim<N>::isr(Tim<N>::vector_flags(line));
+        if (hit != 0u) {
+            if (line == Tim<N>::irq()) {
+                up = up + 1u;
+            } else {
+                cc = cc + 1u;
+            }
+        }
+    }
+}
+
+template <uint8_t B>
+[[gnu::always_inline]] inline void basic_body(volatile uint32_t& calls) {
+    if constexpr (tim_present(B)) {
+        if (Tim<B>::isr() != 0u) {
+            calls = calls + 1u;
+        }
+    }
+}
+
 void banner() {
     print(serial, crlf, "test_vx03_tim on ", device::part_name,
           " - the timers (RM ch. 14 and 15) at ", tim_hz / 1'000'000u, " MHz", crlf,
@@ -1361,6 +2349,27 @@ extern "C" BRIO_CH32_INTERRUPT void tim3_handler() {
     }
 }
 
+extern "C" BRIO_CH32_INTERRUPT void tim8_up_handler() { tim8_body<>(brio::Irq::tim8_up); }
+extern "C" BRIO_CH32_INTERRUPT void tim8_cc_handler() { tim8_body<>(brio::Irq::tim8_cc); }
+extern "C" BRIO_CH32_INTERRUPT void tim8_brk_handler() { tim8_body<>(brio::Irq::tim8_brk); }
+extern "C" BRIO_CH32_INTERRUPT void tim8_trg_com_handler() {
+    tim8_body<>(brio::Irq::tim8_trg_com);
+}
+extern "C" BRIO_CH32_INTERRUPT void tim9_up_handler() {
+    advanced_body<9>(brio::Irq::tim9_up, v9_up, v9_cc);
+}
+extern "C" BRIO_CH32_INTERRUPT void tim9_cc_handler() {
+    advanced_body<9>(brio::Irq::tim9_cc, v9_up, v9_cc);
+}
+extern "C" BRIO_CH32_INTERRUPT void tim10_up_handler() {
+    advanced_body<10>(brio::Irq::tim10_up, v10_up, v10_cc);
+}
+extern "C" BRIO_CH32_INTERRUPT void tim10_cc_handler() {
+    advanced_body<10>(brio::Irq::tim10_cc, v10_up, v10_cc);
+}
+extern "C" BRIO_CH32_INTERRUPT void tim6_handler() { basic_body<6>(v6_up); }
+extern "C" BRIO_CH32_INTERRUPT void tim7_handler() { basic_body<7>(v7_up); }
+
 extern "C" BRIO_CH32_INTERRUPT void tim4_handler() {
     const uint16_t hit = Quad::isr();
     if (period_arm && (hit & Period::period_flag) != 0u) {
@@ -1390,6 +2399,7 @@ int main() {
     bench.letter('h', "the trigger chains: reset, trigger and gated modes", th_chains);
     bench.letter('i', "the vectors: four lines on TIM1, one on TIM3", ti_vectors);
     bench.letter('j', "the jumper, and what a plain output pad reaches", tj_jumper);
+    register_v303_letters<>();
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

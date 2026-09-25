@@ -1,9 +1,11 @@
 /*
  * pin.hpp
  *
- * Compile-time GPIO for the CH32V203: `Pin<'A', 9>` is a type, its port
- * and mask fold to constants, and every verb is a single register
- * access.
+ * Compile-time GPIO for the CH32V203 and the CH32V303: `Pin<'A', 9>` is
+ * a type, its port and mask fold to constants, and every verb is a
+ * single register access. The block is the same on the three device
+ * classes; what differs is how many ports a package bonds - A..E on the
+ * largest, whose port E has its own clock gate beside the other four.
  *
  * THE ENCODING IS THE STM32F1's, WHOLE (RM 10.1.1) - which is worth
  * saying because the sister family's is not. Four bits per pin, CNF
@@ -28,7 +30,8 @@
  * chapter prescribes.
  *
  * THE BONDING IS THE PART'S. A package brings out some of the sixteen
- * pins of each port - thirty-seven of them on the LQFP48 - and
+ * pins of each port - thirty-seven of them on the CH32V203C8T6's LQFP48,
+ * all eighty of ports A..E on the CH32V303VCT6's LQFP100 - and
  * `device::port_pins()` is that table; a Pin on a pad this part does not
  * bond does not compile. The block itself answers either way, which is
  * exactly why the check has to be here.
