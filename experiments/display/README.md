@@ -272,9 +272,15 @@ What building it found:
   leaves the case failing and shows a clean clock at the connector;
   on MOSI alone it makes it pass: MOSI's fast edge is the actor, the
   damage is beyond the connector. 6 MHz is exact at any class. OPEN: with
-  the pad at medium the probe lands 12 MHz requests exact and spi_duo,
-  under the kernel with the touch's requests interleaved, still did
-  not; it runs at 6 MHz, which on a printed board would not be needed.
+  a pad at medium the probe lands 12 MHz requests exact (the host's
+  `mosi_speed()` is the verb now) and spi_duo, under the kernel, still
+  does not - with the touch's requests switched off as well, and with
+  the probe's own passing pads (SCK `very_high`, MOSI `medium`): the
+  square reads back as the dummy byte and zeros. So the actor is this
+  program's request path - the arbiter over the engined host's
+  interrupt-style completion - and neither the pads nor the
+  interleaving; it runs at 6 MHz, which on a printed board would not be
+  needed, and the driver's own suite under the kernel is where to look.
 - **A reflash fills the GRAM with 0x54/0xA8 in alternate pages** (the
   MCU's reset leaves the panel's lines floating), so a census taken by
   the probe after flashing another program describes the reset, not

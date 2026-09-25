@@ -149,11 +149,14 @@ bool bus_live = false;
 bool host_ok = false;
 
 /// 6 MHz: byte-exact through the engines in this program (its own
-/// report reads the square back). 12 MHz needs the SCK pad at medium
-/// for an interrupt-style request (the probe's letter v, where it is
-/// exact) and still lands nothing HERE, under the kernel with the
-/// touch's requests interleaved - open; the pad is set to medium all
-/// the same, which costs nothing at 6 MHz.
+/// report reads the square back). 12 MHz needs a pad at medium for an
+/// interrupt-style request (the probe's letters j and m, where it is
+/// exact) and still lands nothing HERE - measured with the touch's
+/// requests switched off, and with the probe's own passing pads (SCK
+/// very_high, MOSI medium): the square reads back as the dummy byte
+/// and zeros. So the actor is this program's request path under the
+/// kernel and neither the pads nor the interleaving - open; both pads
+/// are set to medium all the same, which costs nothing at 6 MHz.
 constexpr SpiClock panel_rate = SpiClock::div16;
 constexpr SpiClock touch_rate = SpiClock::div64;  // 1.5 MHz
 constexpr bool touch_enabled = true;
@@ -1002,6 +1005,7 @@ int main() {
     BootHost::release();
     host_ok = Host::init(clock);
     Host::sck_speed(PinSpeed::medium);
+    Host::mosi_speed(PinSpeed::medium);
     Led::clear();
 
     // The banner waits for a terminal, at most two seconds: the
