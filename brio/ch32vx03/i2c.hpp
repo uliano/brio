@@ -52,12 +52,15 @@
  * target - where a write closed by a STOP delivered every byte; with the
  * START requested a byte earlier (WCH's own example does it there)
  * every byte arrives. A register write followed by a read of it is
- * exactly this shape, and a CH32 target would lose the register number.
- * The DMA path does the same: the transmit block's completion arms the
- * TxE that says its last byte left the data register. A TxE served later
- * than one byte time falls back to the BTF order - which a target of
- * another family takes (the CH32V203C8's peer measured it) and a CH32
- * target does not.
+ * exactly this shape, and such a target would lose the register number.
+ * A CH32V203C8T6 target on another board did not lose it under a
+ * CH32V303VCT6 host, at one to four bytes with the START requested at BTF
+ * and 20 us past it (docs/ch32vx03/i2c.md), so the loss is the
+ * CH32V303VCT6's as measured, with one core serving both ends. The DMA
+ * path does the same: the transmit block's completion arms the TxE that
+ * says its last byte left the data register. A TxE served later than one
+ * byte time falls back to the BTF order - which a target of another
+ * family takes, and a CH32V203C8T6 target too.
  *
  * THE BUS CLOCK IS PB1 AND THE CHAPTER PUTS A CEILING ON IT. CTLR2's
  * FREQ states that clock in whole megahertz and 19.12.2 confines the
@@ -101,15 +104,22 @@
  * with engines holds the program awake, exactly as usart.hpp's does.
  *
  * BUSY IS THE WIRE, AND IT CAN BE LEFT STANDING. 19.12.7 defines BUSY as
- * "SDA or SCL has a low level", cleared when a STOP is detected, so a
- * START set while the bus is busy is held by the hardware until it frees
- * - which is how two controllers' STARTs meet and the arbitration
- * decides - and a tenure that ends without the peripheral seeing its own
- * STOP leaves BUSY standing over an idle wire. That is 19.12.1's own
- * case for SWRST ("when no stop condition is detected on the bus but the
- * busy bit is 1"), it is real here after a DMA-served read (measured),
- * and `start()` answers it: when the bounded wait runs out AND BOTH
- * LINES READ HIGH the chapter's reset is taken and the whole
+ * "SDA or SCL has a low level", cleared when a STOP is detected. A START
+ * set while the bus is busy waits - for the STOP, or for the controller's
+ * own TICK, whichever comes first: with SCL standing high and SDA held
+ * low it reaches the wire about 85 us after the edge that made the bus
+ * busy, or a multiple of 80 us after that (measured on the CH32V303VCT6,
+ * and a CH32V203C8T6's START left on the same beat), which is why a
+ * tenure into a line a stuck target holds is answered and not parked. A
+ * START set on a free bus, or pending when a STOP frees it, is committed
+ * and reaches SDA some 5 us later whatever the wire does meanwhile - which
+ * is how two controllers' STARTs meet and the arbitration decides
+ * (docs/ch32vx03/i2c.md). And a tenure that ends without the peripheral
+ * seeing its own STOP leaves BUSY standing over an idle wire. That is
+ * 19.12.1's own case for SWRST ("when no stop condition is detected on
+ * the bus but the busy bit is 1"), it is real here after a DMA-served
+ * read (measured), and `start()` answers it: when the bounded wait runs
+ * out AND BOTH LINES READ HIGH the chapter's reset is taken and the whole
  * configuration written again, the wire being the guard that keeps
  * another master's busy bus out of it.
  *
@@ -847,10 +857,11 @@ public:
             return false;
         }
         // BUSY clears a moment after our STOP is seen; a bus still busy
-        // after bus_free_us is someone else's. A START into a busy bus is
-        // held by the hardware until the bus frees, which is where two
-        // controllers meet and the arbitration decides - so the wait is
-        // not an error, and what follows it is.
+        // after bus_free_us is someone else's. A START into a busy bus
+        // waits for the STOP that frees it or for the controller's tick
+        // (the file header) - where two controllers meet, or where a line
+        // a stuck target holds answers - so the wait is not an error, and
+        // what follows it is.
         if (!wait_for_us([] { return !S::busy(); }, bus_free_us)) {
             (void)unwedge_busy();
         }
@@ -1213,8 +1224,8 @@ private:
     /// EVT8_2: the last written byte is out. A repeated START opens the
     /// read half, or the STOP ends the tenure. The read half normally
     /// left through request_restart() a byte earlier; a TxE served later
-    /// than one byte time lands here instead, and a CH32 target then
-    /// loses that byte (the file header).
+    /// than one byte time lands here instead, and a CH32V303VCT6 target
+    /// then loses that byte (the file header).
     static bool end_of_write() {
         if (req_.rx_len != 0u) {
             phase_ = Phase::start_rx;

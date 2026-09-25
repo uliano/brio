@@ -1574,14 +1574,18 @@ void hold_bus_busy(uint16_t us) {
     inject_stop();
 }
 
-/// ONE TENURE STARTED INTO A BUSY BUS, which is the only way two
-/// controllers' STARTs can meet: a START set while the bus is busy is
-/// HELD BY THE HARDWARE until the bus frees, so this board makes a START
-/// condition by hand, waits for the peer to see BUSY and arm its own
-/// START behind ours, sets ours, and then makes the STOP that frees the
-/// bus - both STARTs leave together and the wired-AND decides. The
-/// engine's own stuck-BUSY remedy cannot interfere: it is refused while
-/// a line is low, which is exactly the state this arranges.
+/// ONE TENURE STARTED INTO A BUSY BUS, which is where two controllers'
+/// STARTs can meet: this board makes a START condition by hand, gives the
+/// peer time to see BUSY, sets its own START and then makes the STOP that
+/// frees the bus. A START set on a busy bus waits for that STOP or for its
+/// controller's tick (docs/ch32vx03/i2c.md); ours is set a microsecond
+/// before the STOP, so the STOP is what releases it, and the peer's leaves
+/// on the same STOP - held until it by a controller that holds a START,
+/// set on it by a CH32 peer, which watches the pads because its own tick
+/// would release it inside the window - and both reach the wire within
+/// the 5 us a released START takes, where the wired-AND decides. The
+/// engine's own stuck-BUSY remedy cannot interfere: it is refused while a
+/// line is low, which is exactly the state this arranges.
 uint8_t arb_tenure(uint8_t addr, const uint8_t* tx, uint8_t len, uint16_t lead_us) {
     Host::Request r{};
     r.addr = addr;

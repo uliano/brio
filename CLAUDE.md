@@ -533,8 +533,11 @@ gets its home in `docs/design/` when taken.
   the stack. Owed on a CH32V203C8 board: the suites whose V203 images
   the CH32V303's changes moved - platform (its mask-shadow letter on the
   V4B), clock, pin, tim, dma (its sleep letter now really sleeping),
-  adc, nvm (the C8's own tail, by name), rtc, serial, spi, i2c (with the
-  twi_peer board, for the repeated START's new timing), sleep (whole,
+  adc, nvm (the C8's own tail, by name), rtc, serial, spi, i2c (the
+  suite on the CH32V203C8 against a peer board, for the repeated START's
+  new timing - the CH32V303VC's run against a CH32V203C8 peer is green,
+  and the same swap would say whether a CH32V303 target polled by its
+  own core loses the byte before a late repeated START), sleep (whole,
   with its by-name letters) - and on the CH32V00x boards the three
   serial-bus suites the folding guard moved, the byte-identity gate
   standing for every other image. Decisions for the user: THE FPU TAX -
@@ -2041,19 +2044,22 @@ brio/                    the framework, one directory per stratum:
                            call, SMBus and PEC as bits, the two DMA rows with
                            LAST, two vectors an instance, THE REPEATED START of
                            a write-then-read requested while the last written
-                           byte still shifts - requested after BTF a CH32
-                           target loses that byte (measured on the
-                           CH32V303VCT6's two controllers on one bus) -, and
-                           BUSY as the WIRE (a START set into a busy bus is
-                           held by the hardware, and a tenure that ends with no
-                           STOP seen leaves BUSY standing over an idle wire -
-                           19.12.1's own case, taken out of the way by SWRST
-                           and only when both lines read high) + I2cPins
-                           carrying afio.hpp's COLUMN (I2C1 has two, I2C2 none)
-                           and I2cHost<n, pins, TxEngine, RxEngine> with the
-                           other strata's Request VERBATIM, its engines fixed
-                           to the channels table 11-5 wires to the instance,
-                           unstick() counting the clocks a stuck target took +
+                           byte still shifts - requested after BTF a
+                           CH32V303VCT6 target loses that byte (measured on its
+                           two controllers on one bus; a CH32V203C8T6 target on
+                           another board took every one) -, and BUSY as the
+                           WIRE (a START set into a busy bus waits for the STOP
+                           or for the controller's tick, about 85 us after the
+                           edge and every 80 us after, one set on a free bus is
+                           committed, and a tenure that ends with no STOP seen
+                           leaves BUSY standing over an idle wire - 19.12.1's
+                           own case, taken out of the way by SWRST and only
+                           when both lines read high) + I2cPins carrying
+                           afio.hpp's COLUMN (I2C1 has two, I2C2 none) and
+                           I2cHost<n, pins, TxEngine, RxEngine> with the other
+                           strata's Request VERBATIM, its engines fixed to the
+                           channels table 11-5 wires to the instance, unstick()
+                           counting the clocks a stuck target took +
                            I2cClient<n, pins> with a POLLED option and flush(),
                            the PE cycle that drops a byte the controller never
                            clocked

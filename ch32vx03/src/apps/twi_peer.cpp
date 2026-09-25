@@ -28,11 +28,44 @@
 //    the last byte's hold falls after the controller's own tenure is over.
 //  - A RECEIVED BYTE IS TAKEN BEFORE AN ADDRESS IS ANSWERED. A
 //    write-then-read's last written byte may still stand in DATAR when the
-//    repeated START's address match rises, and answering the match first
-//    would turn this end into a transmitter over a data register that is
-//    not empty. Every pass therefore asks for RxNE FIRST, and what a report
-//    counts is what the hardware delivered - which is the question the
-//    suite's late-START letter puts to a CH32 target.
+//    repeated START's address match rises, and every pass asks for RxNE
+//    FIRST so that a report counts what the hardware delivered - the
+//    question the suite's late-START letter puts to a CH32 target. A
+//    PRECAUTION ON THIS PART AND NOT A CURE: with the address answered
+//    first, a CH32V203C8T6 target still took every byte of that letter's
+//    twelve probes (measured under a CH32V303VCT6 host).
+//  - THE STUCK LINE IS TAKEN ONCE THE WIRE IS AT REST. `hold_sda` starts
+//    on the closing NACK of the read that collected its ack, a bit time
+//    before the DUT's STOP. Taken the moment the action started, the
+//    DUT's next tenure never reached the wire for the whole hold (measured:
+//    it was still parked when this end's deadline let the line go, so
+//    unstick() found nothing to clock); taken under the STOP, it keeps
+//    that STOP off the wire and the DUT's controller stays the bus's
+//    master with the STOP pending (measured on the CH32V303VCT6: CTLR1
+//    0x201, STAR2 MSL and BUSY), its next tenure waiting behind it. Taken
+//    after forty microseconds of quiet wire, it is a START condition the
+//    DUT sees like any other, the DUT's next START goes out at its
+//    controller's tick (below) into the held line and loses at its first
+//    one bit, and unstick() clocks the rest: the four falling edges the
+//    suite asks for are that START's and three pulses.
+//  - A START ON A BUSY BUS IS NOT HELD UNTIL THE BUS FREES. A CH32 START
+//    set while SDA is held low and SCL stands high reaches the wire at the
+//    controller's next TICK - about 85 us after the edge that made the bus
+//    busy, or a multiple of 80 us after that - without waiting for a STOP
+//    (measured on the CH32V303VCT6 alone, and this board's START inside
+//    the DUT's window left on the same beat, 325 us after the window
+//    opened), and PE dropped and raised by two consecutive stores does
+//    not stop it. A START set on a FREE bus - or pending when a STOP
+//    frees it - is committed: it reaches SDA some 5 us later, whatever
+//    the wire does meanwhile. So `arb` cannot do
+//    what the ST peers do, arm its START inside the DUT's window and let
+//    the DUT's STOP release it: armed there it goes out into the window,
+//    where the DUT's SDA wins every bit this end sends as a one. It
+//    watches the pads instead and runs the engine's start() the instant
+//    SDA rises under a high SCL, within the 5 us both controllers then
+//    spend before either drives SDA: the DUT's START, set just before its
+//    STOP, and this one leave together, and the wired-AND decides in both
+//    directions (measured: 0x2C won over 0x6B, 0x11 over 0x2C).
 //  - A TARGET CANNOT NACK ITS OWN ADDRESS: the address is acknowledged
 //    from CTLR1.ACK before ADDR rises, so "deaf" is a re-init at
 //    `deaf_addr`. Refusing a DATA byte is CTLR1.ACK too, and this chapter
@@ -188,6 +221,44 @@ void hold_us(uint32_t us) {
 /// which is what fits the protocol's one-byte status fields and is the
 /// half that says what a tenure was doing.
 uint8_t status_byte() { return static_cast<uint8_t>(Raw::status1() & 0xFFu); }
+
+/// The DUT's window, on the pads: `stop` false waits for SDA LOW under a
+/// high SCL (the START condition it makes by hand), `stop` true for SDA
+/// HIGH under a high SCL (the STOP that closes it). The deadline is read
+/// once every 4096 polls, so a polled edge is seen within a fraction of a
+/// microsecond.
+bool wait_wire(uint32_t t0, uint32_t ms, bool stop) {
+    uint16_t guard = 0;
+    for (;;) {
+        if (SdaPin::read() == stop && SclPin::read()) {
+            return true;
+        }
+        ++guard;
+        if ((guard & 0x0FFFu) == 0u && Ticker::millis() - t0 >= ms) {
+            return false;
+        }
+    }
+}
+
+/// THE WIRE AT REST: both lines high without a break for `quiet_us`
+/// microseconds, within `ms` of `t0`. The quiet span is longer than any
+/// SCL high half a controller on this bus makes (five microseconds at
+/// 100 kHz), so a tenure in flight never passes for an idle bus.
+bool wait_wire_quiet(uint32_t t0, uint32_t ms, uint16_t quiet_us) {
+    uint16_t quiet = 0;
+    while (Ticker::millis() - t0 < ms) {
+        if (SclPin::read() && SdaPin::read()) {
+            (void)delay_us(clock, 1);
+            ++quiet;
+            if (quiet >= quiet_us) {
+                return true;
+            }
+        } else {
+            quiet = 0;
+        }
+    }
+    return false;
+}
 
 // ---- the two standing configurations ----------------------------------------------
 
@@ -481,12 +552,12 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
 }
 
 /// THE HOST ACTION, and on this silicon it is a ROLE SWITCH and not a
-/// second half (the header). The rendezvous is the bus going BUSY - the
-/// DUT's own tenure, or a line it holds - and after the lead-in this end
-/// writes one tenure of its own; the engine's `start()` waits a moment for
-/// BUSY to fall and then sets START, which the hardware itself holds back
-/// until the bus is free, so the two controllers' STARTs meet where the
-/// arbitration is decided.
+/// second half (the header). The rendezvous is the DUT's window - SDA
+/// pulled low by hand under a high SCL, a START condition every controller
+/// on the wire sees - and the STOP that closes it. This end's START is set
+/// on that STOP and never inside the window, because a CH32 START on a busy
+/// bus whose clock stands still goes out at the controller's tick, into the
+/// window (the header).
 twilink::Report run_arb(const twilink::Params& a) {
     twilink::Report r{};
     host_live = true;
@@ -496,31 +567,43 @@ twilink::Report run_arb(const twilink::Params& a) {
         return r;
     }
 
-    // The rendezvous: the DUT makes the bus busy and this end catches it.
-    const uint32_t t0 = Ticker::millis();
-    bool armed = false;
-    while (Ticker::millis() - t0 < a.ms) {
-        if (Raw::busy()) {
-            armed = true;
-            break;
-        }
-    }
-    if (!armed) {
-        r.flags |= twilink::report_timed_out;
-        host_live = false;
-        (void)go_command();
-        return r;
-    }
-    if (a.aux16 != 0u) {
-        hold_us(a.aux16);
-    }
-
+    // The bytes first, so nothing but the start() itself stands between
+    // the STOP and the START.
     static uint8_t burst[32];
     const uint8_t n = a.count < sizeof burst ? static_cast<uint8_t>(a.count)
                                              : static_cast<uint8_t>(sizeof burst);
     for (uint8_t i = 0; i < n; ++i) {
         burst[i] = twilink::pattern_value(a.pattern, a.seed, i);
     }
+
+    // THE WIRE AT REST FIRST. This action starts on the closing NACK of the
+    // read that collected its ack, a bit time before the DUT's STOP: a
+    // window watched for from there would open on that tail. And a BUSY
+    // left standing over the idle wire by the role switch is 19.12.1's own
+    // case, taken out by the chapter's SWRST before the start() that reads
+    // it.
+    const uint32_t t0 = Ticker::millis();
+    bool window = false;
+    bool stop_seen = false;
+    if (wait_wire_quiet(t0, a.ms, 40u)) {
+        if (Raw::busy()) {
+            (void)Host::recover();
+        }
+        window = wait_wire(t0, a.ms, false);
+    }
+    if (window) {
+        if (a.aux16 != 0u) {
+            hold_us(a.aux16);
+        }
+        stop_seen = wait_wire(t0, a.ms, true);
+    }
+    if (!stop_seen) {
+        r.flags |= twilink::report_timed_out;
+        host_live = false;
+        (void)go_command();
+        return r;
+    }
+
     host_done = false;
     r.flags |= twilink::report_host_ran;
     const bool sync_done = Host::start({.addr = a.target,
@@ -568,10 +651,13 @@ twilink::Report run_hold_sda(const twilink::Params& a) {
     twilink::Report r{};
     Client::release();
     SclPin::input();
+    // SDA IS TAKEN ONCE THE WIRE IS AT REST: after the DUT's STOP, and
+    // not inside the ninth clock or under the STOP (the header).
+    const uint32_t t0 = Ticker::millis();
+    (void)wait_wire_quiet(t0, a.ms, 40u);
     SdaPin::output(false, PinDrive::open_drain);
     r.flags |= twilink::report_host_ran;
 
-    const uint32_t t0 = Ticker::millis();
     uint16_t falls = 0;
     bool prev = SclPin::read();
     uint16_t guard = 0;

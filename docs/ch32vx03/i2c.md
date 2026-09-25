@@ -19,9 +19,10 @@ classes read the chapter - CH32V20x_D6 for every part up to the
 CH32V203C8, CH32V20x_D8 for the CH32V203RB and CH32V30x_D8 for the four
 CH32V303 - and chapter 19 carries no class note: one block on all three.
 Driver: [brio/ch32vx03/i2c.hpp](../../brio/ch32vx03/i2c.hpp). Reference
-suite: `test_vx03_i2c`, which talks to a peer board running `twi_peer`
-on the CH32V203 and, on the CH32V303 evaluation board, makes the chip's
-two controllers talk to each other.
+suite: `test_vx03_i2c`, which talks to a peer board running `twi_peer` -
+a board of another family, or one of the other series of this stratum -
+and, on the CH32V303 evaluation board, makes the chip's two controllers
+talk to each other.
 
 ## What the silicon does
 
@@ -73,34 +74,67 @@ pump needs them.
 A write-then-read turns around on a repeated START, and WHEN it is
 requested is not free on this silicon. Requested at EVT8_2 - TxE and
 BTF, the last byte and its acknowledge done and the host holding SCL low
-- a CH32 TARGET loses that last byte: it acknowledges it and never
-raises RxNE for it, in silence (measured on the CH32V303VCT6 with its
-two controllers on one bus: the last of one, two, three and four
-written bytes, at both speeds, whichever instance was the target, while
-the same bytes closed by a STOP all arrived). A register write followed
-by a read of that register is exactly this shape, and the register
-number is what the target would lose. Requested a byte EARLIER - on the
-TxE that says the last byte went into the shifter, so the peripheral
+- a CH32V303VCT6 TARGET loses that last byte: it acknowledges it and
+never raises RxNE for it, in silence (measured with the chip's two
+controllers on one bus: the last of one, two, three and four written
+bytes, at both speeds, whichever instance was the target, while the
+same bytes closed by a STOP all arrived - the target polled by the core
+that also serves the host's vectors, through its ISR body's order, the
+address before a received byte). A CH32V203C8T6 target on another board
+under a CH32V303VCT6 host did NOT lose it: one to four written bytes
+with the START requested as soon as BTF was seen and 20 us past it,
+twelve probes and the last byte in every one, whether that target took
+a standing byte before answering the address or after. So the loss is
+measured on the one part and not on the family, and one core serving
+both ends is part of that measurement. A register write followed by a
+read of that register is exactly this shape, and the register number is
+what such a target would lose. Requested a byte EARLIER - on the TxE
+that says the last byte went into the shifter, so the peripheral
 generates the START at the end of that byte, which is where WCH's own
-interrupt example puts it - every byte arrives. So the engine requests
-it there, on the pump and on the DMA path alike (the transmit block's
-completion arms the TxE it waits for). A TxE served later than one byte
-time still falls back to the BTF order, which a target of another family
-takes - the CH32V203C8T6's peer board did - and a CH32 target does not.
+interrupt example puts it - every byte arrives, at both of those
+targets. So the engine requests it there, on the pump and on the DMA
+path alike (the transmit block's completion arms the TxE it waits for).
+A TxE served later than one byte time still falls back to the BTF
+order, which a target of another family takes, and a CH32V203C8T6
+target too.
 
 ### BUSY is the wire, and it can be left standing
 
 19.12.7 defines BUSY as "SDA or SCL has a low level", cleared when a
-STOP is detected. Two things follow. A START set while the bus is busy
-is HELD BY THE HARDWARE until the bus frees, which is where two
-controllers' STARTs meet and the arbitration decides. And a tenure that
-ends without the peripheral seeing its own STOP leaves BUSY standing
-over an idle wire - 19.12.1's own case for SWRST, "when no stop
-condition is detected on the bus but the busy bit is 1". The engine
-answers it: when its bounded wait for BUSY runs out AND BOTH LINES READ
-HIGH, it takes the chapter's reset, rewrites the timing and the
-interrupt enables, and issues the START. The wire is the guard - a bus
-another master really holds is never reset out from under it.
+STOP is detected. A tenure that ends without the peripheral seeing its
+own STOP therefore leaves BUSY standing over an idle wire - 19.12.1's
+own case for SWRST, "when no stop condition is detected on the bus but
+the busy bit is 1". The engine answers it: when its bounded wait for
+BUSY runs out AND BOTH LINES READ HIGH, it takes the chapter's reset,
+rewrites the timing and the interrupt enables, and issues the START. The
+wire is the guard - a bus another master really holds is never reset
+out from under it.
+
+### A START on a busy bus waits for a tick, a START on a free bus is committed
+
+A START set while BUSY stands does not wait for the STOP alone. With SCL
+standing high and SDA held low - a line held down, no clock on the wire
+- the pending START reaches the wire at the controller's next TICK:
+about 85 us after the edge that made the bus busy, or a multiple of 80
+us after that. Measured on the CH32V303VCT6, SDA held low by its own
+port: set 21 us and 41 us after that edge it left at 85 us, set 151 us
+after it at 165, set 259 us after it at 326; a CH32V203C8T6's START set
+inside another board's window left 325 us after the window opened. PE
+dropped and raised by two consecutive stores does not stop it, though
+19.12.1 has a cleared PE clear START - the one PE-low width measured;
+writing START back to zero withdraws it, which no verb of this driver
+does; and an edge on SCL releases it at once (the first pulse did,
+twice). A START set on a FREE bus, or pending when a STOP frees it, is
+COMMITTED: SDA falls 5.1 to 5.3 us later, whatever the wire does
+meanwhile - SDA pulled low again within half a microsecond of the STOP
+did not stop it: SCL fell 5.3 us after the STOP with the controller's
+SB up. Two controllers' STARTs therefore meet where both are pending
+when one STOP frees the bus, or where one is pending and the other is
+set within the 5 us that follow that STOP; a START set into a window
+longer than a tick goes out alone, into whatever holds the line. That
+is also why a tenure into a wire a foreign chip holds low is answered at
+once and not parked: its START leaves at the tick and loses at its first
+one bit.
 
 ### The pads are a column, the alert is not
 
@@ -361,12 +395,15 @@ measured on the pad that carries it, with no scope and no wire.
 
 ### On the CH32V303VCT6
 
-`test_vx03_i2c` at the same 96 MHz on WCH's evaluation board (28
-verdicts in `z`), which wires I2C2's pads to I2C1's - PB10 to PB6, PB11
-to PB7 - with a 4.7 kOhm pull-up on each line: the chip's two
-controllers share one bus, and there is no peer board. The letters that
-want the peer decline by name when they find the bus pulled up by that
-link and no peer answering; the rest measure:
+`test_vx03_i2c` at the same 96 MHz on WCH's evaluation board, in two
+arrangements. With the board's own two wires - I2C2's pads to I2C1's,
+PB10 to PB6 and PB11 to PB7, a 4.7 kOhm pull-up on each line - the
+chip's two controllers share one bus and no peer board is on it (28
+verdicts in `z`, the peer letters declining by name). With I2C1 wired
+to a CH32V203C8T6 board's I2C1 running `twi_peer`, a 4.7 kOhm pull-up on
+each line, a common ground and the board's own two wires off, every
+peer letter runs (69 verdicts in `z`, all passing, the self-link
+letters declining by name). What they measure:
 
 - **The block is the CH32V203's**: the same reset values, RTR 2 alone;
   the same three rungs on the pad during a probe - 9979 ns of period at
@@ -398,18 +435,48 @@ link and no peer answering; the rest measure:
   standing.
 - **I2C2 ON A WIRE AS THE HOST**, I2C1 its target: the same shapes,
   byte-exact at both speeds and both duties.
-- **The last written byte before a repeated START** (above): with the
-  START requested after BTF the target took none of one, one of two, two
-  of three and three of four written bytes; requested while the last byte
-  shifts, every one - the engine's order now, without a dummy byte in the
-  data register, with seven to ten event-vector entries for the whole
-  tenure.
+- **The last written byte before a repeated START** (above), the chip's
+  own second controller the target: with the START requested after BTF
+  it took none of one, one of two, two of three and three of four
+  written bytes; requested while the last byte shifts, every one - the
+  engine's order now, without a dummy byte in the data register, with
+  seven to ten event-vector entries for the whole tenure.
 - **A target stuck mid-byte, with no foreign chip**: a read of zeros cut
   off four bit times into its first byte by taking the host through its
   reset line leaves I2C2 holding SDA low with SCL released high;
   `unstick()` reported 4 pulses and TIM4 counted 4 rising edges on the
   pad, the bus came back free, and the same two controllers read four
   bytes byte-exact right after.
+- **Against a CH32V203C8T6 target** on another board, polled by its own
+  core: the command channel, the tenure shapes with the repeated START
+  counted at the far end, the four receive procedures, the general call,
+  the vocabulary (`i2c_nack_addr` from a deaf target, `i2c_nack_data` at
+  a commanded byte, 2 ms of stretch a byte priced), both DMA engines, the
+  kernel's arbiter with a held clock answered `i2c_timeout`, the flags
+  and ten seconds of stress all pass as they do on the CH32V203C8T6
+  against its peer. The three rungs carry 87, 254 and 249 kHz on the
+  wire, the high halves 4947, 781 and 885 ns: the polled target's
+  stretch, as there.
+- **A tenure into a wire a CH32V203C8T6 holds low is answered
+  `i2c_arb_lost`**: the START, still pending after the 100 us the engine
+  waits for BUSY, leaves at its tick into the held line and loses at the
+  address's first one bit. `unstick()` then reported 3 pulses and TIM4
+  counted 3 rising edges, the far end letting go at its fourth falling
+  edge - the first being that START's - in four runs of the letter.
+- **ARBITRATION BETWEEN TWO CH32 CONTROLLERS, in both directions**: this
+  controller aiming at 0x6B lost to the CH32V203C8T6's 0x2C
+  (`i2c_arb_lost` here, the far end going on to meet no target), and
+  aiming at 0x11 it kept the bus against 0x2C (`i2c_nack_addr` here,
+  `i2c_arb_lost` at the far end), in six runs of the letter - the far
+  controller setting its START on this board's hand-made STOP and not
+  inside the window before it, where its tick would have released it
+  alone (the section above).
+- **This controller as the target of the CH32V203C8T6's**: one address
+  match and six bytes byte-exact, closed on the far end's STOP.
+- **The late repeated START against a CH32V203C8T6 target** - the
+  suite's by-name letter: the last written byte in all twelve probes,
+  and in twelve more with that target answering the address before a
+  standing byte (the section above).
 
 ## Not covered yet
 
@@ -437,25 +504,21 @@ Driver gaps:
 
 Implemented, not bench-verified (each with what would measure it):
 
-- **The write-then-read's START against a target of another family**,
-  now that it is requested before BTF: measured against the CH32V303's
-  own two controllers; the CH32V203C8T6's peer board running the tenure
-  shapes again is what would measure it there.
-- **A CH32V203 target, and the two parts on one bus.** That a CH32 target
-  loses the last written byte before a late repeated START (above) was
-  measured on the CH32V303VCT6's own two controllers; whether a CH32V203
-  target does the same is not measured, and neither is either part as the
-  far end of the other's peer letters - the peer program the suite talks
-  to builds for the CH32V203C8 and the CH32V303VC too. What would measure
-  both is a CH32V203C8T6 and a CH32V303VCT6 with I2C1 on I2C1, a common
-  ground and one board's resistors on the wire, the suite on one part and
-  the peer on the other and then the roles swapped: letters c to k against
-  a CH32 target, and the suite's by-name letter `r`, which writes one to
-  four bytes and reads one with the repeated START requested after BTF -
-  as soon as BTF is seen and 20 us past it - and in the engine's own order
-  beside them, and prints how many of the written bytes the target took
-  and whether the last was among them. It judges nothing: the counts name
-  the target.
+- **The write-then-read's START from a CH32V203C8T6 host**, now that it
+  is requested before BTF: measured from the CH32V303VCT6 against its own
+  second controller and against a CH32V203C8T6 target; the CH32V203C8T6
+  as the host has not run the tenure shapes in this order - the suite on
+  that board against a peer, of this family or another, is what would
+  measure it.
+- **The CH32V303VCT6 as the far end of a CH32V203C8T6.** The
+  CH32V303VCT6 host against a CH32V203C8T6 target is measured (above);
+  the other way round - the suite on the CH32V203C8T6, the peer on the
+  CH32V303VCT6 - is not, and it is also what would say whether a
+  CH32V303VCT6 target polled by its own core loses the last written byte
+  before a late repeated START, as it does served by the core that drives
+  the host: the suite's by-name letter `r` against it, which prints how
+  many of one to four written bytes the target took with the START
+  requested after BTF, and judges nothing.
 - **NOSTRETCH, and the overrun it admits.** The option is written and
   read back; measuring it wants a controller that will not wait, which
   the peer's engine is not.
