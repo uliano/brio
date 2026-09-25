@@ -24,8 +24,10 @@ using namespace brio;
 
 using P = Ch32vx03Platform<>;
 
-using Source = DmaPingPongEngine<DmaRequestOf<DmaRequest::adc1>::channel, uint16_t>;
-using Player = DmaLoopEngine<DmaRequestOf<DmaRequest::tim1_up>::channel, uint16_t>;
+using AdcRow = DmaRequestOf<DmaRequest::adc1>;
+using TimRow = DmaRequestOf<DmaRequest::tim1_up>;
+using Source = DmaPingPongEngine<AdcRow::controller, AdcRow::channel, uint16_t>;
+using Player = DmaLoopEngine<TimRow::controller, TimRow::channel, uint16_t>;
 
 // ---- the concepts, which is what this file is for --------------------------
 static_assert(BlockSource<Source>);
@@ -37,9 +39,9 @@ static_assert(Source::present && Player::present);
 
 // A block of bytes and a block of words are the same engine with
 // another beat: the element type IS the beat (design/block-stream.md).
-static_assert(BlockSource<DmaPingPongEngine<2, uint8_t>>);
-static_assert(BlockSource<DmaPingPongEngine<3, uint32_t>>);
-static_assert(BlockPlayer<DmaLoopEngine<4, uint8_t>>);
+static_assert(BlockSource<DmaPingPongEngine<1, 2, uint8_t>>);
+static_assert(BlockSource<DmaPingPongEngine<1, 3, uint32_t>>);
+static_assert(BlockPlayer<DmaLoopEngine<1, 4, uint8_t>>);
 
 /// One subscriber for the relay's loans.
 struct Listener : Fsm<Listener, BlockReady<uint16_t>> {

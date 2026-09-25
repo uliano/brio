@@ -35,8 +35,10 @@ abbreviations", where the CH32V305 and the CH32V307 are the D8C and
 not this stratum's (the CH32V203K6, which the datasheet V2.8 adds and
 this older manual does not name, is D6 by the size rule). Several notes
 go one step finer and key a bit to the LOT NUMBER within a class (the
-fourth USB divider, ADC_DUTY_SEL, the RTC's HSE division): such a bit
-is a measurement of the die, never a fact of the part.
+fourth USB divider, ADC_DUTY_SEL, the converters' ADCx_AUX, the timers'
+TIMx_AUX, EXTEN_CTR2, ADC2's DMA request, DMA1's 64 KB boundary, the
+RTC's HSE division): such a bit is a measurement of the die, never a
+fact of the part.
 
 What is not ours is not implemented, and the document says so - but it
 says so per class and not per family, which is why reading every such
@@ -60,10 +62,10 @@ where it has already bitten:
 The chapters that are no part's of this stratum - the high-speed USB
 host/device block (22), DVP (25), and Ethernet (27) on every part but
 the CH32V203RB - are read only far enough to confirm the note, and
-nothing of them is spelled here. The DAC (17), the FSMC (26), SDIO (28)
-and the RNG (29) are the CH32V303's, and until their chapters are
-written the register map carries their bases and clock gates and
-nothing else.
+nothing of them is spelled here. The FSMC (26), SDIO (28) and the RNG
+(29) are the CH32V303's, and until their chapters are written the
+register map carries their bases and clock gates and nothing else; the
+DAC (17), the CH32V303's too, has its chapter, [../dac.md](../dac.md).
 
 ## No errata sheet
 

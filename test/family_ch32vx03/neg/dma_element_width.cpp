@@ -5,5 +5,5 @@
 // addresses could be checked against either.
 #include "ch32vx03/dma.hpp"
 
-using TooWide = brio::DmaTxEngine<7, unsigned long long>;
+using TooWide = brio::DmaTxEngine<1, 7, unsigned long long>;
 void f() { TooWide::stop(); }

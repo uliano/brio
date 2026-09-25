@@ -139,12 +139,12 @@ constexpr SpiPins moved_pins = spi_pins_for(1, 1);
 constexpr SpiPins peer_pins = spi_pins_for(peer_spi, 0);
 
 using Host1 = SpiHost<1, loop_pins>;
-using Dma1 = SpiHost<1, loop_pins, DmaTxEngine<S1::dma_tx_channel>,
-                     DmaRxEngine<S1::dma_rx_channel>>;
+using Dma1 = SpiHost<1, loop_pins, DmaTxEngine<1, S1::dma_tx_channel>,
+                     DmaRxEngine<1, S1::dma_rx_channel>>;
 using Moved = SpiHost<1, moved_pins>;
 using PeerHost = SpiHost<peer_spi, peer_pins>;
-using PeerDma = SpiHost<peer_spi, peer_pins, DmaTxEngine<S2::dma_tx_channel>,
-                        DmaRxEngine<S2::dma_rx_channel>>;
+using PeerDma = SpiHost<peer_spi, peer_pins, DmaTxEngine<1, S2::dma_tx_channel>,
+                        DmaRxEngine<1, S2::dma_rx_channel>>;
 using PeerClient = SpiClient<peer_spi, peer_pins>;
 
 using SckPad = Pin<loop_pins.sck.port, loop_pins.sck.pin>;
@@ -320,8 +320,8 @@ uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t
     }
     if (!host_done) {
         print(serial, "    STALL (dma): STATR=", hex(S1::status()),
-              " ch", S1::dma_rx_channel, " flags=", hex(DmaChannel<S1::dma_rx_channel>::flags()),
-              " ch", S1::dma_tx_channel, " flags=", hex(DmaChannel<S1::dma_tx_channel>::flags()),
+              " ch", S1::dma_rx_channel, " flags=", hex(DmaChannel<1, S1::dma_rx_channel>::flags()),
+              " ch", S1::dma_tx_channel, " flags=", hex(DmaChannel<1, S1::dma_tx_channel>::flags()),
               crlf);
         (void)Dma1::recover();
         return no_answer;
@@ -846,7 +846,7 @@ void tc_loop() {
     // ---- the DMA engines ----
     dma_host_live = true;
     bus_ao_live = false;
-    Dma::open();
+    Dma<1>::open();
     (void)Dma1::init(clock);
     fill_pattern(tx_buf, chunk, 0x3C);
     for (uint16_t i = 0; i < chunk; ++i) {
@@ -1611,7 +1611,7 @@ void td_peer() {
 
     // ---- the engines under an exchange ----
     {
-        Dma::open();
+        Dma<1>::open();
         spilink::Params a{};
         a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
         a.count = 16;

@@ -1,8 +1,8 @@
 /*
  * adc.hpp
  *
- * The analog-to-digital converters of the CH32V203 (RM ch. 12): TWO
- * 12-bit successive-approximation units over sixteen pads and two
+ * The analog-to-digital converters of the CH32V203 and the CH32V303 (RM
+ * ch. 12): TWO 12-bit successive-approximation units over sixteen pads and two
  * internal sources, a regular group of up to sixteen conversions and an
  * injected group of four that preempts it, scan, continuous and
  * discontinuous modes, an analog watchdog, external triggers from the
@@ -28,10 +28,12 @@
  *                  ONE bit (CTLR2.TSVREFE) and both ADC1's alone.
  *
  * HOW MANY CONVERTERS, AND HOW MANY CHANNELS, IS THE PART'S (datasheet
- * table 2-1, `device::adc_count` and `device::adc_channel_count`): two
- * converters and nine or ten bonded channels up to the CH32V203C8, ONE
- * converter and sixteen channels on the CH32V203RB. `Adc<2>` does not
- * compile there, and neither does a dual mode.
+ * tables 2-1 and 2-1-1, `device::adc_count` and `device::adc_channel_count`):
+ * two converters and nine or ten bonded channels up to the CH32V203C8, ONE
+ * converter and sixteen channels on the CH32V203RB, and two converters on
+ * every CH32V303 - ten channels bonded on the CB, sixteen on the RB, RC
+ * and VC. `Adc<2>` does not compile on the CH32V203RB, and neither does a
+ * dual mode.
  *
  * THE CLOCK IS THE ONE PLACE A LEGAL TREE LEAVES THIS PERIPHERAL OUT OF
  * SPECIFICATION. ADCCLK is PCLK2 divided by 2, 4, 6 or 8 and nothing
@@ -67,21 +69,46 @@
  * in this file writes them, and a program that wants them is writing
  * its own chapter.
  *
- * WHAT BELONGS TO ANOTHER CLASS AND IS NOT HERE. The AUX register at
- * offset 0x54 (the short sample times 2.5..5.5 cycles) names
- * CH32F20x_D8, CH32F20x_D8C, CH32V30x_D8, CH32V30x_D8C and
- * CH32V31x_D8C in its own note - no CH32V20x, so no part of this
- * family: the map carries the word, no verb writes it. The trigger
- * code 110 is EXTI's line on this family and nothing else: the TIM8
- * alternative, and the four AFIO remap bits that would select it
- * (ADC1/ADC2_ETRGREG_RM and _ETRGINJ_RM, 10.2.11.8), name the same
- * other classes - which is why there is no remap verb in this file and
- * the trigger enumerators say `exti11` and `exti15`.
+ * WHAT THE CH32V303 ADDS, which the notes of this chapter give to its
+ * class (CH32V30x_D8) among others and to no CH32V20x:
+ *  - THE SHORT SAMPLING TIMES. ADCx_AUX at offset 0x54 holds one bit per
+ *    channel, ADC_SMP_SELx, that switches the upper four codes of that
+ *    channel's SMPx from 41.5..239.5 cycles to 2.5, 3.5, 4.5 and 5.5
+ *    (12.3.4, 12.3.5, 12.3.15) - and only on lots whose penultimate sixth
+ *    digit is not zero, which a program cannot read. They are their own
+ *    enum, `AdcShortSampleTime`, whose verbs a part without the register
+ *    refuses at compile time and a DIE without it refuses at run time: the
+ *    bit is set and read back first, and on the CH32V303VCT6 of the
+ *    reference suite ADCx_AUX keeps nothing written into it, on either
+ *    converter. A long time written to a channel clears its bit, so the
+ *    two tables never mix on one channel.
+ *  - THE TIM8 TRIGGERS. Code 110 is EXTI line 11 (regular) or 15
+ *    (injected) until AFIO's ADCx_ETRGREG_RM / _ETRGINJ_RM hands it to
+ *    TIM8's TRGO or fourth capture (10.2.11.8) - a remap that exists only
+ *    where the part HAS a TIM8, which leaves the CH32V303RC and VC. So
+ *    `AdcTrigger::tim8_trgo` and `AdcInjectedTrigger::tim8_cc4` are code
+ *    110 with the remap bit, the trigger verbs write both (through
+ *    ch32vx03/afio.hpp), and elsewhere those two are refused.
+ *  - A DMA REQUEST FOR ADC2, on DMA2's channel 5 - table 11-3's row, whose
+ *    note gives it to this class "with the penultimate sixth digit of the
+ *    lot number not being zero", against 12.2.7's note 2, which says only
+ *    ADC1 has one; RM V2.5's DMA2 figure no longer draws it. The row is
+ *    offered as the table gives it (`Adc<2>::has_dma`) and the DIE is
+ *    asked: on the CH32V303VCT6 of the reference suite ADC2's CTLR2.DMA
+ *    keeps no bit written into it and no request reaches the channel, so
+ *    `dma()` reads the bit back and `init()` and `claim_stream()` answer
+ *    false there.
+ *  - A VREF+ PAD on the LQFP100 of the CH32V303VC (`Ref`, below).
+ * The second duty bit of the ADC's clock, ADC_DUTY_SEL, is the same
+ * class's too; it sits in RCC_CFGR0 and is the clock tree's verb
+ * (ch32vx03/clock.hpp's `Rcc::adc_duty_75()`), because ADCCLK is one clock
+ * for both converters.
  *
- * ONLY ADC1 HAS A DMA REQUEST (12.2.7's note 2) and only ADC1 has
- * TSVREFE and the dual-mode field; the injected group takes no DMA on
- * either converter (12.2.2's note). ADC2's data reaches memory in a
- * dual mode alone, in the upper half of ADC1's RDATAR.
+ * ONLY ADC1 HAS TSVREFE and the dual-mode field, and on the CH32V203 only
+ * ADC1 has a DMA request (12.2.7's note 2); the injected group takes no
+ * DMA on either converter (12.2.2's note). ADC2's data reaches memory in a
+ * dual mode through the upper half of ADC1's RDATAR - and on the
+ * CH32V303, by the table, through its own request as well.
  *
  * THE FLAGS ARE WRITE-ZERO-TO-CLEAR (STATR's RW0, the timers' INTFR
  * discipline), and EOC is cleared by READING RDATAR as well.
@@ -98,6 +125,7 @@
 
 #include <optional>
 
+#include "ch32vx03/afio.hpp"
 #include "ch32vx03/clock.hpp"
 #include "ch32vx03/device.hpp"
 #include "ch32vx03/dma_engine.hpp"
@@ -113,9 +141,9 @@ namespace brio {
 // =============================================================================
 
 /// One layout for both converters: the F1's block to RDATAR, the word
-/// the map leaves at 0x50, and at 0x54 the AUX register whose own note
-/// names other device classes (the file header) - carried so a reader
-/// can hold table 12-5 beside this, written by nothing.
+/// the map leaves at 0x50, and at 0x54 the AUX register of the short
+/// sampling times - the CH32V303's alone (the file header), reached by no
+/// verb on a part without it.
 struct AdcRegs {
     volatile uint32_t STATR;      ///< 0x00 write zero to clear
     volatile uint32_t CTLR1;      ///< 0x04
@@ -132,7 +160,7 @@ struct AdcRegs {
     volatile uint32_t IDATAR[4];  ///< 0x3c..0x48 the injected results
     volatile uint32_t RDATAR;     ///< 0x4c the regular result (and ADC2's, in dual mode)
     uint32_t RESERVED0;           ///< 0x50
-    volatile uint32_t AUX;        ///< 0x54 another class's short sample times
+    volatile uint32_t AUX;        ///< 0x54 ADC_SMP_SEL0..17 (CH32V30x_D8)
 };
 
 /// ADC1 at 0x40012400, ADC2 a kilobyte above it.
@@ -217,13 +245,18 @@ inline constexpr uint16_t adc_temperature_slope_uv_per_c = 4300;
 /// 12.2.6's recommended sampling time for the sensor.
 inline constexpr uint32_t adc_temperature_sample_ns = 17'100;
 
-/// util/analog.hpp's vocabulary on this target. No package of this
-/// series brings out a VREF+ pad - the datasheet's pin tables have VDDA
-/// and VSSA and nothing between them - so the converter's reference IS
-/// the analog supply, and what that supply is in millivolts is the
-/// BOARD's to state (the RP2040's and the STM32F4's arrangement).
-/// `Adc<1>::vdda_mv()` measures it from VREFINT instead of assuming it.
-enum class Ref : uint8_t { vdda };
+/// util/analog.hpp's vocabulary on this target: the converters' reference.
+/// No package of the CH32V203 and no CH32V303 below the LQFP100 brings out
+/// a VREF+ pad - the pin tables have VDDA and VSSA and nothing between them
+/// - so there the reference IS the analog supply; the CH32V303VC's LQFP100
+/// brings out VREF+ and VREF- (device::has_vref_pads), and there the
+/// reference is that pad, which the board ties. What either is in
+/// millivolts is the BOARD's to state (the RP2040's and the STM32F4's
+/// arrangement); `Adc<1>::vdda_mv()` measures it from VREFINT instead of
+/// assuming it.
+enum class Ref : uint8_t { vdda, vref_pad };
+/// Which of the two this part's conversions are made against.
+inline constexpr Ref adc_reference = device::has_vref_pads ? Ref::vref_pad : Ref::vdda;
 constexpr uint16_t ref_mv(Ref, uint16_t vdda_mv = 3300) { return vdda_mv; }
 
 /// The two internal sources, as TAGS (12.2.2). One bit wakes both.
@@ -240,19 +273,48 @@ enum class AdcSampleTime : uint8_t {
 inline constexpr AdcSampleTime adc_sample_shortest = AdcSampleTime::cycles1_5;
 inline constexpr AdcSampleTime adc_sample_longest = AdcSampleTime::cycles239_5;
 
+/// ADCx_AUX's four SHORT sampling times (12.3.15, and the second reading of
+/// SMPx in 12.3.4 and 12.3.5): SMPx codes 100..111 with the channel's
+/// ADC_SMP_SELx bit set. The CH32V30x_D8's alone - the register's note
+/// names that class among five and no CH32V20x - and there only on lots
+/// whose penultimate sixth digit is not zero, which a program cannot read.
+enum class AdcShortSampleTime : uint8_t {
+    cycles2_5 = 4, cycles3_5 = 5, cycles4_5 = 6, cycles5_5 = 7,
+};
+/// Whether this part's converters have ADCx_AUX at all.
+inline constexpr bool adc_has_short_sampling = device::device_class == DeviceClass::v30x_d8;
+/// The channels ADCx_AUX holds a bit for: 0..17.
+inline constexpr uint32_t adc_aux_mask = 0x3FFFFUL;
+
 /// The sampling time in HALF ADCCLK cycles, so the .5 stays exact.
 constexpr uint32_t adc_sample_half_cycles(AdcSampleTime t) {
     constexpr uint16_t table[8] = {3, 15, 27, 57, 83, 111, 143, 479};
     return table[static_cast<uint8_t>(t) & 7u];
 }
-/// tCONV = the sampling time + 11 ADCCLK cycles (12.2.2), in halves.
-inline constexpr uint32_t adc_conversion_tail_half_cycles = 22;
+constexpr uint32_t adc_sample_half_cycles(AdcShortSampleTime t) {
+    return 5u + 2u * (static_cast<uint32_t>(t) - 4u);   // 2.5, 3.5, 4.5, 5.5
+}
+/// tCONV = the sampling time + 12.5 ADCCLK cycles, in halves. NOT the
+/// manual's 11 (12.2.2's arithmetic): both datasheets give a conversion
+/// 14 cycles at 1.5 of sampling and 252 at 239.5, and on the CH32V303VCT6
+/// sixty-four back-to-back conversions at each of the four long codes took
+/// 12.5 cycles beyond their sampling time (docs/ch32vx03/adc.md).
+inline constexpr uint32_t adc_conversion_tail_half_cycles = 25;
 constexpr uint32_t adc_conversion_half_cycles(AdcSampleTime t) {
+    return adc_sample_half_cycles(t) + adc_conversion_tail_half_cycles;
+}
+constexpr uint32_t adc_conversion_half_cycles(AdcShortSampleTime t) {
     return adc_sample_half_cycles(t) + adc_conversion_tail_half_cycles;
 }
 /// The same in nanoseconds at a stated ADCCLK, for a program sizing a
 /// sequence against a trigger rate.
 constexpr uint32_t adc_conversion_ns(AdcSampleTime t, uint32_t adcclk_hz) {
+    if (adcclk_hz == 0u) {
+        return 0;
+    }
+    return static_cast<uint32_t>((adc_conversion_half_cycles(t) * 500'000'000ULL) / adcclk_hz);
+}
+constexpr uint32_t adc_conversion_ns(AdcShortSampleTime t, uint32_t adcclk_hz) {
     if (adcclk_hz == 0u) {
         return 0;
     }
@@ -284,18 +346,43 @@ constexpr uint8_t adc_gain_factor(AdcGain g) {
     return g == AdcGain::x1 ? 1u : g == AdcGain::x4 ? 4u : g == AdcGain::x16 ? 16u : 64u;
 }
 
+/// The flag above the three code bits that says "code 110, handed to TIM8"
+/// - AFIO's ADCx_ETRGREG_RM / _ETRGINJ_RM set (10.2.11.8).
+inline constexpr uint8_t adc_trigger_remap_flag = 0x10;
+
 /// Table 12-1, the regular group's triggers (CTLR2.EXTSEL). Code 110 is
-/// EXTI's line 11 on this family and nothing else (the file header).
+/// EXTI's line 11, or TIM8's TRGO on a part whose AFIO can hand it over
+/// (the file header): `tim8_trgo` is that code with the remap.
 enum class AdcTrigger : uint8_t {
     tim1_cc1 = 0, tim1_cc2 = 1, tim1_cc3 = 2, tim2_cc2 = 3,
     tim3_trgo = 4, tim4_cc4 = 5, exti11 = 6, software = 7,
+    tim8_trgo = 6 | adc_trigger_remap_flag,
 };
 /// Table 12-2, the injected group's (CTLR2.JEXTSEL). Code 110 is EXTI's
-/// line 15.
+/// line 15, or TIM8's fourth capture with the remap.
 enum class AdcInjectedTrigger : uint8_t {
     tim1_trgo = 0, tim1_cc4 = 1, tim2_trgo = 2, tim2_cc1 = 3,
     tim3_cc4 = 4, tim4_trgo = 5, exti15 = 6, software = 7,
+    tim8_cc4 = 6 | adc_trigger_remap_flag,
 };
+
+/// The three bits a trigger writes, and whether it wants the remap.
+constexpr uint8_t adc_trigger_code(AdcTrigger t) { return static_cast<uint8_t>(t) & 7u; }
+constexpr uint8_t adc_trigger_code(AdcInjectedTrigger t) { return static_cast<uint8_t>(t) & 7u; }
+constexpr bool adc_trigger_remapped(AdcTrigger t) {
+    return (static_cast<uint8_t>(t) & adc_trigger_remap_flag) != 0u;
+}
+constexpr bool adc_trigger_remapped(AdcInjectedTrigger t) {
+    return (static_cast<uint8_t>(t) & adc_trigger_remap_flag) != 0u;
+}
+/// Whether this part can hand code 110 to TIM8: the CH32V303RC and VC.
+inline constexpr bool adc_has_tim8_triggers = afio_adc_trigger_remap_exists();
+constexpr bool adc_trigger_valid(AdcTrigger t) {
+    return !adc_trigger_remapped(t) || adc_has_tim8_triggers;
+}
+constexpr bool adc_trigger_valid(AdcInjectedTrigger t) {
+    return !adc_trigger_remapped(t) || adc_has_tim8_triggers;
+}
 /// The EXTI lines those two codes name, for a program that has to
 /// configure the line before the trigger can arrive.
 inline constexpr uint8_t adc_regular_exti_line = 11;
@@ -336,7 +423,9 @@ struct AdcConfig {
     bool continuous = false;           ///< CTLR2.CONT
     bool scan = false;                 ///< CTLR1.SCAN: the whole group, conversion after conversion
     bool auto_injected = false;        ///< CTLR1.JAUTO: the injected group after the regular one
-    bool dma = false;                  ///< CTLR2.DMA: a request per regular conversion (ADC1's alone)
+    /// CTLR2.DMA: a request per regular conversion - ADC1's, and ADC2's on the
+    /// CH32V303 (table 11-3, lot permitting).
+    bool dma = false;
     bool input_buffer = false;         ///< CTLR1.BUFEN
     AdcGain gain = AdcGain::x1;        ///< CTLR1.PGA, which needs the buffer
     /// Discontinuous mode: 0 = off, 1..8 = the short sequence's length
@@ -410,7 +499,7 @@ constexpr uint8_t adc_channel_of(Pad p) {
 template <class P>
 struct AnalogIn {
     static_assert(adc_channel_of(P::pad) != 0xFFu,
-                  "brio AnalogIn: this pad is not an ADC input on the CH32V203 (PA0..PA7 are "
+                  "brio AnalogIn: this pad is not an ADC input on this family (PA0..PA7 are "
                   "channels 0..7, PB0 and PB1 are 8 and 9, PC0..PC5 are 10..15)");
     using pin = P;
     static constexpr uint8_t channel = adc_channel_of(P::pad);
@@ -452,20 +541,32 @@ public:
     static constexpr uint8_t channels = adc_channels;
     static constexpr uint32_t steps = adc_steps;
 
-    /// What this converter alone can do. Only ADC1 has a DMA request
-    /// (12.2.7's note 2), the internal sources (TSVREFE is "only applied
-    /// for ADC1") and the dual-mode field (reserved in ADC2's CTLR1).
-    static constexpr bool has_dma = (n == 1u);
+    /// The slot the regular group's request is wired to, asked of the one
+    /// place in this stratum that writes the request table
+    /// (ch32vx03/dma_engine.hpp): ADC1's on DMA1's channel 1 everywhere,
+    /// ADC2's on DMA2's channel 5 on the CH32V303 (table 11-3, lot
+    /// permitting) and nowhere on the CH32V203.
+    static constexpr DmaSlot dma_slot =
+        dma_request_channel(n == 1u ? DmaRequest::adc1 : DmaRequest::adc2);
+
+    /// What this converter alone can do. A DMA request where the table
+    /// gives it one (above); the internal sources (TSVREFE is "only
+    /// applied for ADC1") and the dual-mode field (reserved in ADC2's
+    /// CTLR1) are ADC1's.
+    static constexpr bool has_dma = dma_slot.present();
     static constexpr bool has_internal_sources = (n == 1u);
     static constexpr bool has_dual_mode = (n == 1u) && (device::adc_count >= 2u);
 
     /// ONE VECTOR SERVES BOTH CONVERTERS (table 9-2's entry 34), so a
     /// handler that owns both reads both status registers.
     static constexpr Irq irq() { return Irq::adc1_2; }
-    /// The channel the regular group's request is wired to, asked of
-    /// the one place in this stratum that writes table 11-5's rows
-    /// (ch32vx03/dma_engine.hpp) rather than repeated here.
-    static constexpr uint8_t dma_channel = DmaRequestOf<DmaRequest::adc1>::channel;
+    /// The channel number of that slot, 0 for none - what a message prints.
+    static constexpr uint8_t dma_channel = dma_slot.channel;
+    /// The AFIO fields that hand this converter's code 110 to TIM8.
+    static constexpr Remap regular_trigger_remap = n == 1u ? Remap::adc1_etrgreg
+                                                           : Remap::adc2_etrgreg;
+    static constexpr Remap injected_trigger_remap = n == 1u ? Remap::adc1_etrginj
+                                                            : Remap::adc2_etrginj;
 
     static AdcRegs& regs() { return *adc_regs(n); }
     /// The register a DMA engine reads: the regular data register, whose
@@ -545,6 +646,12 @@ public:
         if (c.continuous) { c2 |= adc_cont; }
         if (c.dma) { c2 |= adc_dma; }
         r.CTLR2 = c2;
+        if constexpr (n != 1u && has_dma) {
+            if (c.dma && (r.CTLR2 & adc_dma) == 0u) {
+                release();
+                return false;   // this die's lot raises no request for ADC2
+            }
+        }
 
         // One conversion of channel 0 until a select().
         r.RSQR1 = 0;
@@ -624,7 +731,9 @@ public:
 
     // ---- the sampling times ---------------------------------------------------
 
-    /// SMPx of one channel: SAMPTR2 holds 0..9, SAMPTR1 holds 10..17.
+    /// SMPx of one channel: SAMPTR2 holds 0..9, SAMPTR1 holds 10..17. On a
+    /// part with ADCx_AUX the channel's ADC_SMP_SELx is cleared too, so a
+    /// long time means the long table whatever a short one left behind.
     static bool sample_time(uint8_t ch, AdcSampleTime t) {
         if (ch >= channels) {
             return false;
@@ -637,7 +746,61 @@ public:
             const uint32_t shift = 3u * (ch - 10u);
             r.SAMPTR1 = (r.SAMPTR1 & ~(7UL << shift)) | (static_cast<uint32_t>(t) << shift);
         }
+        if constexpr (adc_has_short_sampling) {
+            r.AUX = r.AUX & ~(1UL << ch);
+        }
         return true;
+    }
+
+    /// A SHORT sampling time (12.3.15): the channel's ADC_SMP_SELx set and
+    /// read back, then the code in SMPx. Refused at compile time on a part
+    /// without ADCx_AUX - and on a DIE without it, which is what the
+    /// read-back says: the register is a lot's (the file header), and a
+    /// lot that kept no bit would turn codes 100..111 into 41.5..239.5
+    /// cycles in silence, so the verb answers false having written nothing
+    /// else and the channel keeps the time it had.
+    static bool sample_time(uint8_t ch, AdcShortSampleTime t) {
+        static_assert(adc_has_short_sampling && n != 0u,
+                      "brio Adc: the short sampling times are ADCx_AUX's, and its note names the "
+                      "CH32V30x_D8 among five classes and no CH32V20x (RM 12.3.15)");
+        if (ch >= channels) {
+            return false;
+        }
+        AdcRegs& r = regs();
+        r.AUX = r.AUX | (1UL << ch);
+        if ((r.AUX & (1UL << ch)) == 0u) {
+            return false;   // this die's lot has no ADCx_AUX
+        }
+        if (ch < 10u) {
+            const uint32_t shift = 3u * ch;
+            r.SAMPTR2 = (r.SAMPTR2 & ~(7UL << shift)) | (static_cast<uint32_t>(t) << shift);
+        } else {
+            const uint32_t shift = 3u * (ch - 10u);
+            r.SAMPTR1 = (r.SAMPTR1 & ~(7UL << shift)) | (static_cast<uint32_t>(t) << shift);
+        }
+        return true;
+    }
+
+    /// The short time a channel is set to, or nothing when its bit is
+    /// clear or its code is one of the four the bit leaves alone.
+    static std::optional<AdcShortSampleTime> short_sample_time(uint8_t ch) {
+        static_assert(adc_has_short_sampling && n != 0u,
+                      "brio Adc: ADCx_AUX is the CH32V30x_D8's (RM 12.3.15)");
+        if (ch >= channels || (regs().AUX & (1UL << ch)) == 0u) {
+            return std::nullopt;
+        }
+        const uint8_t code = static_cast<uint8_t>(sample_time(ch));
+        if (code < 4u) {
+            return std::nullopt;
+        }
+        return static_cast<AdcShortSampleTime>(code);
+    }
+
+    /// ADCx_AUX whole: bit ch set where channel ch reads the short table.
+    static uint32_t aux() {
+        static_assert(adc_has_short_sampling && n != 0u,
+                      "brio Adc: ADCx_AUX is the CH32V30x_D8's (RM 12.3.15)");
+        return regs().AUX & adc_aux_mask;
     }
     static AdcSampleTime sample_time(uint8_t ch) {
         const AdcRegs& r = regs();
@@ -656,9 +819,42 @@ public:
             v |= static_cast<uint32_t>(t) << (3u * i);
         }
         regs().SAMPTR1 = v;
+        if constexpr (adc_has_short_sampling) {
+            regs().AUX = 0;
+        }
     }
-    /// tCONV of channel `ch` as the registers stand, in half ADCCLK cycles.
+    /// Every channel at one short time - ADCx_AUX whole, read back first,
+    /// and false with nothing else written on a die that kept no bit.
+    static bool sample_time_all(AdcShortSampleTime t) {
+        static_assert(adc_has_short_sampling && n != 0u,
+                      "brio Adc: the short sampling times are ADCx_AUX's, the CH32V30x_D8's "
+                      "(RM 12.3.15)");
+        regs().AUX = adc_aux_mask;
+        if ((regs().AUX & adc_aux_mask) != adc_aux_mask) {
+            regs().AUX = 0;
+            return false;   // this die's lot has no ADCx_AUX
+        }
+        uint32_t v = 0;
+        for (uint8_t i = 0; i < 10u; ++i) {
+            v |= static_cast<uint32_t>(t) << (3u * i);
+        }
+        regs().SAMPTR2 = v;
+        v = 0;
+        for (uint8_t i = 0; i < 8u; ++i) {
+            v |= static_cast<uint32_t>(t) << (3u * i);
+        }
+        regs().SAMPTR1 = v;
+        return true;
+    }
+    /// tCONV of channel `ch` as the registers stand, in half ADCCLK cycles
+    /// - the short table's where the channel's ADCx_AUX bit selects it.
     static uint32_t conversion_half_cycles(uint8_t ch) {
+        if constexpr (adc_has_short_sampling) {
+            const uint8_t code = static_cast<uint8_t>(sample_time(ch));
+            if (ch < channels && code >= 4u && (regs().AUX & (1UL << ch)) != 0u) {
+                return adc_conversion_half_cycles(static_cast<AdcShortSampleTime>(code));
+            }
+        }
         return adc_conversion_half_cycles(sample_time(ch));
     }
 
@@ -787,11 +983,13 @@ public:
 
     // ---- what the internal sources are worth -----------------------------------
 
-    /// The analog supply in millivolts, from a reading of VREFINT: the
-    /// reference is 1.2 V nominal (datasheet table 4-26), so a reading
-    /// of `counts` says the full scale is that much. It is a
-    /// MEASUREMENT of a 1.17..1.23 V part, not a calibration: this
-    /// family's signature carries no trimmed word.
+    /// The reference in millivolts - the analog supply, or on the
+    /// CH32V303VC the VREF+ pad (`adc_reference`) - from a reading of
+    /// VREFINT: the internal reference is 1.2 V nominal (datasheet table
+    /// 4-26 of the CH32V203, 4-5 of the CH32V303), so a reading of
+    /// `counts` says the full scale is that much. It is a MEASUREMENT of a
+    /// 1.17..1.23 V part, not a calibration: this family's signature
+    /// carries no trimmed word.
     static uint16_t vdda_mv(uint16_t vrefint_counts) {
         if (vrefint_counts == 0u) {
             return 0;
@@ -825,14 +1023,43 @@ public:
     // ---- the triggers -----------------------------------------------------------
 
     /// The regular group's start source (table 12-1). EXTTRIG stays set:
-    /// software is a trigger too, code 111.
-    static void trigger(AdcTrigger t) {
+    /// software is a trigger too, code 111. Code 110 also writes this
+    /// converter's AFIO remap on a part that has one - `exti11` clears it,
+    /// `tim8_trgo` sets it - and `tim8_trgo` is refused, nothing written,
+    /// on a part without a TIM8 to hand the code to.
+    static bool trigger(AdcTrigger t) {
+        if constexpr (adc_has_tim8_triggers) {
+            if (adc_trigger_code(t) == 6u) {
+                (void)Afio::remap(regular_trigger_remap, adc_trigger_remapped(t) ? 1u : 0u);
+            }
+        } else {
+            if (adc_trigger_remapped(t)) {
+                return false;
+            }
+        }
         AdcRegs& r = regs();
         r.CTLR2 = (r.CTLR2 & ~adc_extsel_mask) |
-                  (static_cast<uint32_t>(t) << adc_extsel_shift) | adc_exttrig;
+                  (static_cast<uint32_t>(adc_trigger_code(t)) << adc_extsel_shift) | adc_exttrig;
+        return true;
+    }
+    /// The same where the trigger is a constant: TIM8's on a part without
+    /// one is a compile error.
+    template <AdcTrigger t>
+    static void trigger() {
+        static_assert(adc_trigger_valid(t),
+                      "brio Adc: code 110 reaches TIM8 only through AFIO's ADCx_ETRGREG_RM, which "
+                      "exists where the part has a TIM8 - the CH32V303RC and VC (RM 10.2.11.8)");
+        (void)trigger(t);
     }
     static AdcTrigger trigger() {
-        return static_cast<AdcTrigger>((regs().CTLR2 & adc_extsel_mask) >> adc_extsel_shift);
+        const uint8_t code =
+            static_cast<uint8_t>((regs().CTLR2 & adc_extsel_mask) >> adc_extsel_shift);
+        if constexpr (adc_has_tim8_triggers) {
+            if (code == 6u && Afio::remap_code(regular_trigger_remap) == 1u) {
+                return AdcTrigger::tim8_trgo;
+            }
+        }
+        return static_cast<AdcTrigger>(code);
     }
     /// CTLR2.EXTTRIG on its own: what a program drops to make the
     /// regular group answer to nothing while it reprograms.
@@ -841,15 +1068,40 @@ public:
         r.CTLR2 = on ? (r.CTLR2 | adc_exttrig) : (r.CTLR2 & ~adc_exttrig);
     }
 
-    /// The injected group's (table 12-2).
-    static void injected_trigger(AdcInjectedTrigger t) {
+    /// The injected group's (table 12-2), with the same remap rule for
+    /// code 110: EXTI line 15, or TIM8's fourth capture.
+    static bool injected_trigger(AdcInjectedTrigger t) {
+        if constexpr (adc_has_tim8_triggers) {
+            if (adc_trigger_code(t) == 6u) {
+                (void)Afio::remap(injected_trigger_remap, adc_trigger_remapped(t) ? 1u : 0u);
+            }
+        } else {
+            if (adc_trigger_remapped(t)) {
+                return false;
+            }
+        }
         AdcRegs& r = regs();
         r.CTLR2 = (r.CTLR2 & ~adc_jextsel_mask) |
-                  (static_cast<uint32_t>(t) << adc_jextsel_shift) | adc_jexttrig;
+                  (static_cast<uint32_t>(adc_trigger_code(t)) << adc_jextsel_shift) |
+                  adc_jexttrig;
+        return true;
+    }
+    template <AdcInjectedTrigger t>
+    static void injected_trigger() {
+        static_assert(adc_trigger_valid(t),
+                      "brio Adc: code 110 reaches TIM8 only through AFIO's ADCx_ETRGINJ_RM, which "
+                      "exists where the part has a TIM8 - the CH32V303RC and VC (RM 10.2.11.8)");
+        (void)injected_trigger(t);
     }
     static AdcInjectedTrigger injected_trigger() {
-        return static_cast<AdcInjectedTrigger>((regs().CTLR2 & adc_jextsel_mask) >>
-                                               adc_jextsel_shift);
+        const uint8_t code =
+            static_cast<uint8_t>((regs().CTLR2 & adc_jextsel_mask) >> adc_jextsel_shift);
+        if constexpr (adc_has_tim8_triggers) {
+            if (code == 6u && Afio::remap_code(injected_trigger_remap) == 1u) {
+                return AdcInjectedTrigger::tim8_cc4;
+            }
+        }
+        return static_cast<AdcInjectedTrigger>(code);
     }
     /// JAUTO forbids the injected group's external trigger (12.2.4):
     /// this is the bit to drop for it.
@@ -864,8 +1116,12 @@ public:
     }
     static bool continuous() { return (regs().CTLR2 & adc_cont) != 0u; }
 
-    /// CTLR2.DMA, ADC1's alone: a request per regular conversion. False
-    /// on ADC2, whose conversions reach memory in a dual mode only.
+    /// CTLR2.DMA: a request per regular conversion. False on a converter
+    /// the request table gives no slot - ADC2 on the CH32V203, whose
+    /// conversions reach memory in a dual mode only - and, on the
+    /// CH32V303, false for ADC2 on a DIE whose lot has not got the request:
+    /// the bit is read back there, because such a die keeps no bit written
+    /// into it (the file header).
     static bool dma(bool on) {
         if constexpr (!has_dma) {
             (void)on;
@@ -873,7 +1129,11 @@ public:
         } else {
             AdcRegs& r = regs();
             r.CTLR2 = on ? (r.CTLR2 | adc_dma) : (r.CTLR2 & ~adc_dma);
-            return true;
+            if constexpr (n != 1u) {
+                return ((r.CTLR2 & adc_dma) != 0u) == on;
+            } else {
+                return true;
+            }
         }
     }
     static bool dma() { return (regs().CTLR2 & adc_dma) != 0u; }
@@ -883,30 +1143,36 @@ public:
      * armed on this converter's data register and CTLR2.DMA is set, so
      * the two things every stream user must do are one verb.
      *
-     * REFUSED AT COMPILE TIME for an engine on the wrong channel. THE
-     * CHANNEL IS THE REQUEST on this controller (dma_engine.hpp): the
-     * regular group raises its request on channel 1 and nowhere else,
-     * so an engine named on any other channel would wait for a datum
-     * that never comes - which is a wedge, not an error, and therefore
-     * worth a refusal. Templated on the engine so that a program with
-     * no stream never drags the controller in: only the caller names an
-     * engine type, and only then is ch32vx03/dma.hpp included anywhere.
+     * REFUSED AT COMPILE TIME for an engine on the wrong slot. THE
+     * CHANNEL IS THE REQUEST on these controllers (dma_engine.hpp): ADC1's
+     * regular group raises its request on DMA1's channel 1 and nowhere
+     * else (and ADC2's, on the CH32V303, on DMA2's channel 5), so an
+     * engine named anywhere else would wait for a datum that never comes -
+     * which is a wedge, not an error, and therefore worth a refusal.
+     * Templated on the engine so that a program with no stream never drags
+     * the controller in: only the caller names an engine type, and only
+     * then is ch32vx03/dma.hpp included anywhere.
+     *
+     * False where the DIE answers no: ADC2's request on a CH32V303 whose
+     * lot has not got it, which `dma()` reads back (the file header). An
+     * engine armed there would wait for a conversion that never comes.
      */
     template <typename Engine>
-    static void claim_stream() {
+    static bool claim_stream() {
         static_assert(has_dma,
-                      "brio Adc: only ADC1 has a DMA request (12.2.7's note 2) - the second "
-                      "converter's data reaches memory in a dual mode, through the master's "
-                      "own register");
+                      "brio Adc: this converter has no DMA request on this part - on the "
+                      "CH32V203 only ADC1 has one (12.2.7's note 2), and the second converter's "
+                      "data reaches memory in a dual mode, through the master's own register");
         static_assert(Engine::present,
                       "brio Adc: an empty engine slot cannot carry a stream");
-        static_assert(Engine::channel == dma_channel,
-                      "brio Adc: the CHANNEL IS THE REQUEST on this controller (RM table "
-                      "11-5) and the ADC's regular group raises its request on channel 1 - "
-                      "an engine on any other channel would never see a conversion "
-                      "(DmaRequestOf<DmaRequest::adc1>::channel is how to spell it)");
+        static_assert(dma_engine_slot<Engine>() == dma_slot,
+                      "brio Adc: the CHANNEL IS THE REQUEST on these controllers (RM 11.2.3) - "
+                      "ADC1's regular group raises its request on DMA1's channel 1 (and ADC2's, "
+                      "on the CH32V303, on DMA2's channel 5); an engine on any other slot would "
+                      "never see a conversion (DmaRequestOf<DmaRequest::adc1> is how to spell "
+                      "it)");
         Engine::arm(data_address());
-        (void)dma(true);
+        return dma(true);
     }
 
     /// CTLR2.TSVREFE, ADC1's alone: ONE bit wakes both the temperature
@@ -1161,15 +1427,12 @@ private:
 static_assert(sizeof(AdcRegs) == 0x58);
 static_assert(adc_base_for(1) == 0x40012400UL && adc_base_for(2) == 0x40012800UL);
 static_assert(adc_steps == 4096u && adc_max_count == 4095u);
-// 12.2.2: tCONV = the sampling time + 11 cycles. The two ends of it.
-static_assert(adc_conversion_half_cycles(adc_sample_shortest) == 25u);    // 1.5 + 11 = 12.5
-static_assert(adc_conversion_half_cycles(adc_sample_longest) == 501u);    // 239.5 + 11 = 250.5
-// Datasheet table 4-27 gives the same two ends as 14 and 252 ADCCLK: the
-// manual's 11-cycle tail and the datasheet's totals differ by a cycle
-// and a half at each end, which is the sample-and-hold the datasheet
-// counts and the manual does not. Named here so a reader who checks is
-// not left wondering which document this file followed.
-static_assert(adc_conversion_ns(AdcSampleTime::cycles239_5, 12'000'000UL) == 20'875u);
+// tCONV = the sampling time + 12.5 cycles: the datasheets' two ends
+// (tables 4-27 and 4-41, 14 and 252 ADCCLK) and what the CH32V303VCT6
+// measured, where 12.2.2's arithmetic says 11 (the tail's comment above).
+static_assert(adc_conversion_half_cycles(adc_sample_shortest) == 28u);    // 1.5 + 12.5 = 14
+static_assert(adc_conversion_half_cycles(adc_sample_longest) == 504u);    // 239.5 + 12.5 = 252
+static_assert(adc_conversion_ns(AdcSampleTime::cycles239_5, 12'000'000UL) == 21'000u);
 static_assert(adc_max_source_ohms(AdcSampleTime::cycles1_5) == 400u);
 static_assert(adc_max_source_ohms(AdcSampleTime::cycles55_5) == 50'000u);
 static_assert(adc_max_source_ohms(AdcSampleTime::cycles239_5) == 0u);
@@ -1189,5 +1452,18 @@ static_assert(!adc_watchdog_config_valid(AdcWatchdogConfig{.high = adc_max_count
 static_assert(!adc_watchdog_config_valid(AdcWatchdogConfig{.channel = adc_channels}));
 static_assert(adc_watchdog_config_valid(AdcWatchdogConfig{.channel = adc_vrefint_channel}));
 static_assert(!adc_dual_mode_valid(static_cast<AdcDualMode>(10)));
+// The short times: 2.5..5.5 cycles, each plus the 11-cycle tail.
+static_assert(adc_sample_half_cycles(AdcShortSampleTime::cycles2_5) == 5u);
+static_assert(adc_sample_half_cycles(AdcShortSampleTime::cycles5_5) == 11u);
+static_assert(adc_conversion_half_cycles(AdcShortSampleTime::cycles3_5) == 32u);   // 16
+static_assert(adc_conversion_ns(AdcShortSampleTime::cycles2_5, 12'000'000UL) == 1'250u);
+// Code 110 and its remap.
+static_assert(adc_trigger_code(AdcTrigger::tim8_trgo) == 6u &&
+              adc_trigger_remapped(AdcTrigger::tim8_trgo));
+static_assert(adc_trigger_code(AdcTrigger::exti11) == 6u &&
+              !adc_trigger_remapped(AdcTrigger::exti11));
+static_assert(adc_trigger_code(AdcInjectedTrigger::tim8_cc4) == 6u);
+static_assert(adc_trigger_valid(AdcTrigger::tim8_trgo) == adc_has_tim8_triggers);
+static_assert(adc_trigger_valid(AdcTrigger::tim3_trgo));
 
 } // namespace brio

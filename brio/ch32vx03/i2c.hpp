@@ -182,13 +182,16 @@ constexpr Irq i2c_error_irq_for(uint8_t n) { return n == 1 ? Irq::i2c1_er : Irq:
 constexpr bool i2c_present(uint8_t n) { return n >= 1u && n <= device::i2c_count; }
 
 /// Table 11-5's two rows per instance, read through dma_engine.hpp so
-/// that the channel numbers live in exactly one place.
-constexpr uint8_t i2c_dma_tx_channel(uint8_t n) {
+/// that the slots live in exactly one place - and the channel numbers of
+/// those slots, which is what a message prints.
+constexpr DmaSlot i2c_dma_tx_slot(uint8_t n) {
     return dma_request_channel(n == 1 ? DmaRequest::i2c1_tx : DmaRequest::i2c2_tx);
 }
-constexpr uint8_t i2c_dma_rx_channel(uint8_t n) {
+constexpr DmaSlot i2c_dma_rx_slot(uint8_t n) {
     return dma_request_channel(n == 1 ? DmaRequest::i2c1_rx : DmaRequest::i2c2_rx);
 }
+constexpr uint8_t i2c_dma_tx_channel(uint8_t n) { return i2c_dma_tx_slot(n).channel; }
+constexpr uint8_t i2c_dma_rx_channel(uint8_t n) { return i2c_dma_rx_slot(n).channel; }
 
 // CTLR1 (19.12.1)
 inline constexpr uint16_t i2c_pe        = 1u << 0;
@@ -449,8 +452,10 @@ struct I2c {
     static constexpr uint8_t number = n;
     static constexpr Bus bus = i2c_bus_for(n);
     /// Table 11-5: the two channels this instance's requests reach.
-    static constexpr uint8_t dma_tx_channel = i2c_dma_tx_channel(n);
-    static constexpr uint8_t dma_rx_channel = i2c_dma_rx_channel(n);
+    static constexpr DmaSlot dma_tx_slot = i2c_dma_tx_slot(n);
+    static constexpr DmaSlot dma_rx_slot = i2c_dma_rx_slot(n);
+    static constexpr uint8_t dma_tx_channel = dma_tx_slot.channel;
+    static constexpr uint8_t dma_rx_channel = dma_rx_slot.channel;
 
     static I2cRegs& regs() { return *reinterpret_cast<I2cRegs*>(i2c_base_for(n)); }
     static constexpr Irq event_irq() { return i2c_event_irq_for(n); }
@@ -674,7 +679,8 @@ class I2cHost {
                   "brio I2cHost: the two engines must ride two different DMA channels");
     static_assert([] {
         if constexpr (TxEngine::present) {
-            return TxEngine::channel == S::dma_tx_channel && RxEngine::channel == S::dma_rx_channel;
+            return dma_engine_slot<TxEngine>() == S::dma_tx_slot &&
+                   dma_engine_slot<RxEngine>() == S::dma_rx_slot;
         } else {
             return true;
         }

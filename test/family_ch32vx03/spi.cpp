@@ -133,11 +133,11 @@ using Host2 = SpiHost<second_spi>;
 using Client2 = SpiClient<second_spi>;
 
 /// The engines, on the channels table 11-5 wires to each instance.
-using Host1Dma = SpiHost<1, spi_default_pins<1>, DmaTxEngine<Spi<1>::dma_tx_channel>,
-                         DmaRxEngine<Spi<1>::dma_rx_channel>>;
+using Host1Dma = SpiHost<1, spi_default_pins<1>, DmaTxEngine<1, Spi<1>::dma_tx_channel>,
+                         DmaRxEngine<1, Spi<1>::dma_rx_channel>>;
 using Host2Dma = SpiHost<second_spi, spi_default_pins<second_spi>,
-                         DmaTxEngine<Spi<second_spi>::dma_tx_channel>,
-                         DmaRxEngine<Spi<second_spi>::dma_rx_channel>>;
+                         DmaTxEngine<1, Spi<second_spi>::dma_tx_channel>,
+                         DmaRxEngine<1, Spi<second_spi>::dma_rx_channel>>;
 
 static_assert(!Host1::has_engines && Host1Dma::has_engines);
 static_assert(Client1::frames_ahead == 1, "one buffer, no FIFO (figure 20-1)");

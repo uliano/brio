@@ -184,7 +184,7 @@ With both DMA engines, which are the instance's own two channels:
 
 ```cpp
 using Dma = brio::I2cHost<1, brio::i2c_default_pins<1>,
-                          brio::DmaTxEngine<6>, brio::DmaRxEngine<7>>;
+                          brio::DmaTxEngine<1, 6>, brio::DmaRxEngine<1, 7>>;
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Dma::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Dma::dma_isr(); }
 ```

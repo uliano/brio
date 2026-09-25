@@ -6,6 +6,6 @@
 #include "ch32vx03/dma.hpp"
 #include "ch32vx03/i2c.hpp"
 
-using Wrong = brio::I2cHost<1, brio::i2c_default_pins<1>, brio::DmaTxEngine<4>,
-                            brio::DmaRxEngine<7>>;
+using Wrong = brio::I2cHost<1, brio::i2c_default_pins<1>, brio::DmaTxEngine<1, 4>,
+                            brio::DmaRxEngine<1, 7>>;
 void f() { (void)Wrong::status(); }

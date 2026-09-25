@@ -621,6 +621,16 @@ constexpr bool afio_advanced_timer(uint8_t n) {
     return n < 16u && (device::advanced_timer_instances & static_cast<uint16_t>(1U << n)) != 0u;
 }
 
+/// Whether a converter's trigger code 110 can be handed to TIM8 on this
+/// part: the four fields' note names the CH32F20x_D8/D8C and the CH32V30x
+/// and V31x (10.3.2.2), and 10.2.11.8's note that the remap "is only
+/// supported for products where TIM8 is present" leaves the CH32V303RC and
+/// VC - the 128 KB CH32V303 has no TIM8. Where this is false the four
+/// fields have no code at all, not even the default (afio_remap_has_code).
+constexpr bool afio_adc_trigger_remap_exists() {
+    return device::device_class == DeviceClass::v30x_d8 && afio_advanced_timer(8);
+}
+
 /**
  * Is `code` a column THIS PART can use? Two conditions, both from the
  * documents (see the file header):
@@ -1136,6 +1146,16 @@ static_assert(!afio_remap_has_code(Remap::usart2, 1) ||
               device::device_class != DeviceClass::v20x_d6);
 static_assert(!afio_remap_has_code(Remap::tim3, 1) && !afio_remap_has_code(Remap::can1, 1));
 static_assert(!afio_remap_has_code(Remap::can2, 0) && !afio_remap_has_code(Remap::eth, 1));
+// The ADC's trigger remaps: fields of the CH32V30x_D8's parts with a TIM8
+// alone, both codes - the EXTI default and TIM8's signal.
+static_assert(afio_remap_has_code(Remap::adc1_etrgreg, 0) == afio_adc_trigger_remap_exists() &&
+              afio_remap_has_code(Remap::adc1_etrgreg, 1) == afio_adc_trigger_remap_exists());
+static_assert(afio_remap_has_code(Remap::adc2_etrginj, 0) ==
+              (afio_adc_trigger_remap_exists() && device::adc_count >= 2u));
+static_assert(!afio_remap_has_code(Remap::adc1_etrginj, 2));
+static_assert(device::device_class != DeviceClass::v30x_d8 ||
+              (afio_field_of(Remap::adc2_etrgreg).shift == 20 &&
+               !afio_field_of(Remap::adc1_etrginj).second));
 
 // The multiplexer's codes are the chapter's.
 static_assert(exti_port_code('A') == 0 && exti_port_code('E') == 4 && exti_port_code('F') == 0xFF);

@@ -7,5 +7,5 @@
 #include "ch32vx03/adc.hpp"
 #include "ch32vx03/dma.hpp"
 
-using WrongChannel = brio::DmaPingPongEngine<3, uint16_t>;
+using WrongChannel = brio::DmaPingPongEngine<1, 3, uint16_t>;
 void f() { brio::Adc<1>::claim_stream<WrongChannel>(); }

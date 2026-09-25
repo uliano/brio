@@ -166,6 +166,9 @@ inline constexpr uint32_t rcc_mco_mask      = 0xFUL << 24;
 /// belongs to the classes that carry an Ethernet MAC, the CH32V203RB
 /// alone here (device::has_ethernet).
 inline constexpr uint32_t rcc_ethpre        = 1UL << 28;
+/// ADC_DUTY_SEL: the CH32V30x_D8's (and on lots whose penultimate sixth
+/// digit is not zero, 3.4.2's note) - 0 a 50 % duty, 1 a 75 % one.
+inline constexpr uint32_t rcc_adc_duty_sel  = 1UL << 30;
 inline constexpr uint32_t rcc_adcduty       = 1UL << 31;   ///< 1: the ADC clock's low level is longer
 
 /// PLLMUL codes. The ladder is x2..x16 in order and then x18 - the one

@@ -6,5 +6,5 @@
 #include "ch32vx03/dma.hpp"
 #include "ch32vx03/spi.hpp"
 
-using Half = brio::SpiHost<1, brio::spi_default_pins<1>, brio::DmaTxEngine<3>>;
+using Half = brio::SpiHost<1, brio::spi_default_pins<1>, brio::DmaTxEngine<1, 3>>;
 void f() { (void)Half::status(); }

@@ -1077,7 +1077,7 @@ void tl_fpu_trip() {
 // ---------------------------------------------------------------------------
 volatile uint32_t dma_src_word = 0xA5A5'5A5Au;
 volatile uint32_t dma_dst_word = 0;
-using SleepDma = DmaChannel<1>;
+using SleepDma = DmaChannel<1, 1>;
 
 DmaTransfer sleep_block() {
     return DmaTransfer{.peripheral = &dma_src_word,

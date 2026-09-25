@@ -134,7 +134,7 @@ using CrossRxPad = Pin<'B', 1>;
 
 /// The transport with both engines, for the loopback letter: USART2
 /// transmits on DMA channel 7 and receives on 6 (table 11-5).
-using Loop = Uart<2, P, 256, 256, UartFormat{}, DmaTxEngine<7>, DmaRxEngine<6>>;
+using Loop = Uart<2, P, 256, 256, UartFormat{}, DmaTxEngine<1, 7>, DmaRxEngine<1, 6>>;
 
 constexpr uint32_t pclk1 = SysClock::pclk1_hz;    ///< USART2's, USART4's
 constexpr uint32_t pclk2 = SysClock::pclk2_hz;    ///< USART1's, the console's
@@ -501,8 +501,8 @@ void bang_idle(uint8_t bits, uint32_t baud = 9600) {
 void all_off() {
     Pfic::disable(Irq::usart2);
     Pfic::disable(Irq::uart4);
-    Pfic::disable(dma_channel_irq(6));
-    Pfic::disable(dma_channel_irq(7));
+    Pfic::disable(dma_channel_irq(1, 6));
+    Pfic::disable(dma_channel_irq(1, 7));
     u2_transport = false;
     U2::bus_clock(true);
     U2::reset();

@@ -5,5 +5,5 @@
 // that is not there, on every part.
 #include "ch32vx03/dma.hpp"
 
-using Beyond = brio::DmaChannel<9>;
+using Beyond = brio::DmaChannel<1, 9>;
 void f() { Beyond::stop(); }

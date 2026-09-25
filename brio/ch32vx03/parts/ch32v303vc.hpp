@@ -157,6 +157,11 @@ inline constexpr uint8_t can_count = 1;
 /// 10..15 are PC0..PC5 - datasheet 3.2).
 inline constexpr uint8_t adc_count         = 2;
 inline constexpr uint8_t adc_channel_count = 16;
+/// Whether the package brings out the converters' reference pads: THIS ONE
+/// DOES - VREF- and VREF+ are pins 20 and 21 of the LQFP100 (datasheet
+/// table 3-1) - so the reference of the ADC and of the DAC is the VREF+
+/// pad, 2.4 V to VDDA (table 4-41), which the board ties.
+inline constexpr bool has_vref_pads = true;
 
 /// The operational amplifiers, one bit per instance number: all four, each
 /// with an input pair and an output on a pad this package bonds (OPA3 on

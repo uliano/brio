@@ -495,16 +495,18 @@ gets its home in `docs/design/` when taken.
   has NO USB device controller - its one full-speed controller is
   chapter 23's host/device block, on the board's own connector, whose
   driver is the next USB chapter's -, and a handler that calls out pays
-  twenty f-register saves. What the V203's silicon taught is in the same
-  README, and one finding shapes the power model: IN SLEEP THE BUS
-  MATRIX SERVES THE CORE ALONE - the USB controller cannot reach its
-  packet memory and a DMA stalls (measured with the vendor's own example
-  as the oracle, and no software mitigation short of staying awake
-  works), so a program that moves data through the bus does not SLEEP
-  here and slows down instead, to no less than 24 MHz of HCLK; the sleep
-  sites and the platform's idle path both read a COUNT of active bus
-  masters - a DMA channel while its EN is up, the USB controller from
-  its pull-up - and neither sleeps above zero.
+  twenty f-register saves; the bench die has none of the lot-keyed
+  registers its class's notes list (and one of them, EXTEN_CTR2, is a
+  mirror of EXTEN_CTR there) and DMA1's 64 KB wrap. What the V203's
+  silicon taught is in the same README, and one finding shapes the power
+  model: IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the USB
+  controller cannot reach its packet memory and a DMA stalls (measured
+  with the vendor's own example as the oracle, and no software
+  mitigation short of staying awake works), so a program that moves data
+  through the bus does not SLEEP here and slows down instead, to no less
+  than 24 MHz of HCLK; the sleep sites and the platform's idle path both
+  read a COUNT of active bus masters - a DMA channel while its EN is up,
+  the USB controller from its pull-up - and neither sleeps above zero.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1695,35 +1697,35 @@ brio/                    the framework, one directory per stratum:
                            (a mask configured in one store per register, the
                            port written whole) and LCKR - the configuration
                            lock whose only way back is a reset
-     afio.hpp               the remap columns of AFIO_PCFR1/PCFR2 as constexpr
-                            pad tables (the manual's, one per peripheral - the
-                            CH32V303's own among them: USART1's four columns,
-                            UART4's other table with its PC10/PC11 default,
-                            TIM8/TIM9/TIM10, UART5..UART8, SPI3 with I2S3, the
-                            ADC trigger remaps, FSMC_NADV; CAN2's and the
-                            Ethernet's refused), with Remap +
-                            afio_remap_has_code() judging a column by the
-                            DEVICE CLASS and by the part's own bonding -
-                            refused by static_assert where the code is a
-                            constant, by false where it is not; two fields the
-                            manual gives the whole family that the CH32V203
-                            holds at zero and the CH32V303 takes (USART3's
-                            remap, TIM2's internal-trigger bit); AFIO_EXTICR
-                            for exti.hpp, the event output, and SW_CFG read but
-                            never written: the debug port is the probe's
-     exti.hpp               Exti (the lines each part's table states -
-                            sixteen by PIN NUMBER with the port chosen per
-                            line, the PVD's, the RTC alarm's and the peripheral
-                            wake-ups, line 20 the USBFS controller's on every
-                            class and 19 and 21 refused on the CH32V303;
-                            edges, the two enables, the software trigger whose
-                            bit stands until the flag is cleared, write-one
-                            flags, five single vectors and two shared ones
-                            with isr() + served()) + ExtiLine<n> + ExtInt<Pin>
-                            (claim, select refusing a line another port holds,
-                            steal); an edge over a wire reaches its handler in
-                            17 to 20 cycles, a line event ends idle() in 15
-                            (V4B) and 34 (V4F) core cycles
+    afio.hpp               the remap columns of AFIO_PCFR1/PCFR2 as constexpr
+                           pad tables (the manual's, one per peripheral - the
+                           CH32V303's own among them: USART1's four columns,
+                           UART4's other table with its PC10/PC11 default,
+                           TIM8/TIM9/TIM10, UART5..UART8, SPI3 with I2S3, the
+                           ADC trigger remaps, FSMC_NADV; CAN2's and the
+                           Ethernet's refused), with Remap +
+                           afio_remap_has_code() judging a column by the
+                           DEVICE CLASS and by the part's own bonding -
+                           refused by static_assert where the code is a
+                           constant, by false where it is not; two fields the
+                           manual gives the whole family that the CH32V203
+                           holds at zero and the CH32V303 takes (USART3's
+                           remap, TIM2's internal-trigger bit); AFIO_EXTICR
+                           for exti.hpp, the event output, and SW_CFG read but
+                           never written: the debug port is the probe's
+    exti.hpp               Exti (the lines each part's table states -
+                           sixteen by PIN NUMBER with the port chosen per
+                           line, the PVD's, the RTC alarm's and the peripheral
+                           wake-ups, line 20 the USBFS controller's on every
+                           class and 19 and 21 refused on the CH32V303;
+                           edges, the two enables, the software trigger whose
+                           bit stands until the flag is cleared, write-one
+                           flags, five single vectors and two shared ones
+                           with isr() + served()) + ExtiLine<n> + ExtInt<Pin>
+                           (claim, select refusing a line another port holds,
+                           steal); an edge over a wire reaches its handler in
+                           17 to 20 cycles, a line event ends idle() in 15
+                           (V4B) and 34 (V4F) core cycles
     usart.hpp              the serial ports (ch. 18): Usart<n> the resource
                            over the whole chapter - four instances on two
                            buses with every divisor asked of the instance's
@@ -1775,31 +1777,31 @@ brio/                    the framework, one directory per stratum:
                            mcause - bound to BOTH trap entries, because an
                            ebreak lands on the breakpoint vector and not the
                            exception one
-     tim.hpp                the timers (ch. 14, 15, 16): Tim<n> over the F1's
-                            blocks under WCH's names, every timer the part
-                            HAS - TIM1 and TIM2..TIM4 everywhere, a 32-bit TIM5
-                            on the CH32V203RB, and on the CH32V303RC and VC the
-                            whole set: TIM8, TIM9 and TIM10 as advanced timers
-                            with TIM1's shape and four unshared vectors each, a
-                            sixteen-bit TIM5, TIM6 and TIM7 as BASIC timers on
-                            which a channel verb does not compile - the time
-                            base with its two shadow registers, the channels
-                            in both faces (CCyS writable only with the channel
-                            off), the slave controller and the master TRGO,
-                            the internal trigger table folded through what the
-                            part has, the repetition counter, complementary
-                            outputs, dead time and break of the advanced
-                            timers (a break input held at its level re-raises
-                            its flag at once: the program's handler masks it),
-                            the DMA burst engine with the class's DMA2
-                            requests as data, the rc_w0 flags, and the
-                            CH32V30x_D8's dual-edge capture as a verb that
-                            asks the die (a lot's register, absent on the
-                            bench part) + TimPad from afio.hpp's remap columns
-                            and the nine tasks (TimPwm/TimPairPwm,
-                            TimPeriodMeter/TimIntervalMeter, TimEventCounter/
-                            TimGatedCounter, TimPeriodicTick, TimOnePulse,
-                            TimEncoder)
+    tim.hpp                the timers (ch. 14, 15, 16): Tim<n> over the F1's
+                           blocks under WCH's names, every timer the part
+                           HAS - TIM1 and TIM2..TIM4 everywhere, a 32-bit TIM5
+                           on the CH32V203RB, and on the CH32V303RC and VC the
+                           whole set: TIM8, TIM9 and TIM10 as advanced timers
+                           with TIM1's shape and four unshared vectors each, a
+                           sixteen-bit TIM5, TIM6 and TIM7 as BASIC timers on
+                           which a channel verb does not compile - the time
+                           base with its two shadow registers, the channels
+                           in both faces (CCyS writable only with the channel
+                           off), the slave controller and the master TRGO,
+                           the internal trigger table folded through what the
+                           part has, the repetition counter, complementary
+                           outputs, dead time and break of the advanced
+                           timers (a break input held at its level re-raises
+                           its flag at once: the program's handler masks it),
+                           the DMA burst engine with the class's DMA2
+                           requests as data, the rc_w0 flags, and the
+                           CH32V30x_D8's dual-edge capture as a verb that
+                           asks the die (a lot's register, absent on the
+                           bench part) + TimPad from afio.hpp's remap columns
+                           and the nine tasks (TimPwm/TimPairPwm,
+                           TimPeriodMeter/TimIntervalMeter, TimEventCounter/
+                           TimGatedCounter, TimPeriodicTick, TimOnePulse,
+                           TimEncoder)
     watchdog.hpp           IWDG + WWDG (ch. 7, 8), a file of their own beside
                            reset.hpp's flags: Iwdg (the three keys, the
                            prescaler and reload that take a write only while
@@ -1813,66 +1815,75 @@ brio/                    the framework, one directory per stratum:
                            its vector, the block's reset line as the only way
                            back)
     dma_engine.hpp         NoDmaEngine, the empty slot's tag - and THE REQUEST
-                           TABLE (11.2.3's tables 11-5 and 11-6): DmaRequest,
-                           one enumerator a row, dma_request_channel() folding
-                           the PART (0 where the part has not got the
-                           peripheral that raises it) and DmaRequestOf<r>
-                           refusing it at compile time, so a transport can
-                           check a named engine against the table without
-                           including the controller
-    dma.hpp                the DMA (ch. 11): Dma (the gate, the flags,
-                           stop_all() because RCC_AHBRSTR has no bit for this
-                           block, any_enabled() the power model's one
-                           question) + DmaChannel<1..8> (THE CHANNEL IS THE
-                           REQUEST: prepare/load/trigger, every store refused
-                           while EN is set - which stays set after a completed
-                           block - and every address refused unless it is
-                           aligned to its own width, because 11.3.5 would
-                           align it in silence; remaining(), the four flags
-                           and the ISR body, one vector a channel with the
-                           eighth on the device class's own tail) +
-                           DmaTxEngine/DmaRxEngine<ch, Elem> for the
-                           transports' slots, and the rule that two engines of
-                           one transport name two channels; + the BLOCK ENGINES
-                           util/block_stream.hpp asks for - DmaLoopEngine (a
-                           BlockPlayer on the controller's own circular mode,
-                           the lap interrupt only counting) and
-                           DmaPingPongEngine (a BlockSource that does NOT use
-                           it: "skip rather than tear" cannot be decided on a
-                           channel that never stops, measured at three items
-                           past the edge, so it stops at every block and the
-                           handler re-arms the other buffer)
-    adc.hpp                the two converters (ch. 12): Adc<1|2> over the F1's
-                           ADC under WCH's names - the calibration run BEFORE
-                           the buffer and the internal sources (TSVREFE forces
-                           BUFEN on for good), the regular group of sixteen and
-                           the INJECTED four that preempt it with a signed
-                           offset, scan/continuous/discontinuous, the analog
-                           watchdog, the timers' triggers and AN EXTI LINE
-                           (code 110 is a line on this family; the TIM8
-                           alternative and the four AFIO bits that would select
-                           it are another class's), the DMA request handed to a
-                           block engine by claim_stream<Engine>() - refused at
-                           compile time off table 11-5's row -, the rc_w0 flags
-                           and ONE VECTOR FOR BOTH units, the DUAL modes as
-                           ADC1's verb alone (no util shape: one family does
-                           not make a contract), and WCH's own input buffer
-                           with a PGA of 1/4/16/64 + AnalogIn<Pin> from the
-                           family's pad map, AdcInput (the sensor on 16,
-                           VREFINT on 17, one bit waking both) and Ref/ref_mv -
-                           no package brings out a VREF+ pad, so the reference
-                           IS VDDA and vdda_mv() measures it
-    opa.hpp                the two amplifiers (ch. 30): Opa<1|2> over FOUR BITS
-                           EACH in one register that lives in the EXTEN block's
-                           window - an enable, one of two positive pads, one of
-                           two negative ones, one of two outputs, and nothing
-                           else: no key, no lock, no gain, no internal
-                           feedback, so with no wire strapped the block is an
-                           open-loop stage + OpaIn<n, which> / OpaOut<n, which>
-                           (the datasheet's pad map, every output pad an ADC
-                           input pad, which is this block's whole route to the
-                           converter); OPA3 and OPA4 belong to other device
-                           classes and the twenty-pin part has OPA2 alone
+                           TABLE (11.2.3's tables 11-2 to 11-6): DmaRequest,
+                           one enumerator a row, DmaSlot (a controller AND a
+                           channel, because on the CH32V303 a channel number
+                           names two), dma_request_channel() folding the PART
+                           (the empty slot where the part has not got the
+                           peripheral) and DmaRequestOf<r> refusing it at
+                           compile time, so a transport checks a named engine
+                           without including the controller
+    dma.hpp                the DMA (ch. 11): Dma<1|2> (DMA2 the CH32V303's, its
+                           channels 8..11 reporting in an extended flag pair;
+                           the gate, the flags, stop_all() because RCC_AHBRSTR
+                           has no bit for these blocks, any_enabled() asked of
+                           both) + DmaChannel<c, 1..11> (THE CHANNEL IS THE
+                           REQUEST, and a channel's rows an OR of its
+                           peripherals' requests: prepare/load/trigger, every
+                           store refused while EN is set, every address refused
+                           unless aligned to its own width, and on the
+                           CH32V303's DMA1 a span across a 64 KB boundary
+                           refused on every lot - measured to WRAP inside its
+                           page on the die the suite ran on) +
+                           DmaTxEngine/DmaRxEngine<c, ch, Elem>, two engines of
+                           one transport on two channels; + DmaLoopEngine (a
+                           BlockPlayer on circular mode) and DmaPingPongEngine
+                           (a BlockSource that stops at every block: two or
+                           three items land past the edge before the fastest
+                           handler acts)
+    adc.hpp                the two converters (ch. 12): Adc<1|2> - the
+                           calibration BEFORE the buffer and the internal
+                           sources, the regular sixteen and the INJECTED four
+                           with a signed offset, scan/continuous/discontinuous,
+                           a conversion 12.5 cycles longer than its sampling
+                           time (the datasheets', measured - not 12.2.2's 11),
+                           the watchdog, code 110 AN EXTI LINE handed to TIM8
+                           by AFIO's four bits on the CH32V303RC and VC, the
+                           DMA request handed to a block engine by
+                           claim_stream<Engine>(), ONE VECTOR FOR BOTH units,
+                           the DUAL modes as ADC1's verb, WCH's buffer with a
+                           PGA of 1/4/16/64, and the CH32V303's LOT-KEYED
+                           additions - the short sampling times of ADCx_AUX and
+                           ADC2's request on DMA2's channel 5 - as verbs that
+                           ASK THE DIE, reading their bit back before writing
+                           anything else + AnalogIn<Pin>, AdcInput and
+                           Ref/ref_mv (VDDA, or the CH32V303VC's VREF+ pad)
+                           with vdda_mv() measuring it
+    opa.hpp                the amplifiers (ch. 30): Opa<1..4> over FOUR BITS
+                           EACH in one register in the EXTEN block's window, no
+                           key, no gain, no internal feedback, an open-loop
+                           stage with no wire + OpaIn/OpaOut (every first
+                           output an ADC input pad, the CH32V303's second
+                           outputs port-E pads no converter reads); OPA3, OPA4
+                           and EXTEN_CTR2's high-speed bits are the CH32V303's
+                           - that register a lot's, and ON A DIE WITHOUT IT ITS
+                           ADDRESS MIRRORS EXTEN_CTR, so
+                           opa_high_speed_present() reads the word before any
+                           verb writes a bit; the twenty-pin CH32V203 has OPA2
+                           alone
+    dac.hpp                the DAC (ch. 17), the CH32V303's alone: Dac, a
+                           MONOSTATE (DacUnit<has> inside a template for both
+                           series) over two 12-bit channels whose only route
+                           out is a PAD - PA4 and PA5, the ADC's inputs 4 and 5
+                           - nine spellings of a holding register that is NOT
+                           the output register, the buffer DISABLED by a one,
+                           table 17-1's triggers with an absent timer refused,
+                           the noise generator (figure 17-5, measured trigger
+                           for trigger) and the triangle, the DMA request only
+                           a HARDWARE trigger raises on DMA2's channels 3 and
+                           4, claim_stream()/claim_dual_stream() - and no
+                           status register, no interrupt, no underrun +
+                           DacOut<1|2>
     spi.hpp                the two synchronous ports (ch. 20): Spi<1|2> the resource
                            over the whole chapter - TWO INSTANCES ON TWO BUSES, so one
                            BR code is two frequencies (SPI1 divides PB2, SPI2 PB1) and

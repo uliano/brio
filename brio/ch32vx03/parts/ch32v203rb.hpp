@@ -163,6 +163,11 @@ inline constexpr uint8_t can_count = 1;
 /// table 2-1's "16@1" against the others' "10@2").
 inline constexpr uint8_t adc_count         = 1;
 inline constexpr uint8_t adc_channel_count = 16;
+/// Whether the package brings out the converters' reference pads, VREF+
+/// and VREF-: no package of the CH32V203 does - its datasheet's pin tables
+/// have VDDA and VSSA and nothing between them - so the reference of every
+/// conversion is VDDA itself.
+inline constexpr bool has_vref_pads = false;
 
 /// The operational amplifiers, one bit per instance number: both, each
 /// with an input pair and an output on a bonded pad.

@@ -195,8 +195,8 @@ void resource() {
 // ---- the host engine, plain and with its two DMA slots ---------------------
 
 using Host = I2cHost<1>;
-using DmaHost = I2cHost<1, i2c_default_pins<1>, DmaTxEngine<I2c<1>::dma_tx_channel>,
-                        DmaRxEngine<I2c<1>::dma_rx_channel>>;
+using DmaHost = I2cHost<1, i2c_default_pins<1>, DmaTxEngine<1, I2c<1>::dma_tx_channel>,
+                        DmaRxEngine<1, I2c<1>::dma_rx_channel>>;
 using SecondHost = I2cHost<second_i2c, i2c_default_pins<second_i2c>>;
 
 static_assert(!Host::has_engines && DmaHost::has_engines);

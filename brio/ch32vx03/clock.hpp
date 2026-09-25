@@ -580,9 +580,7 @@ struct Rcc {
     /// The ADC's own divider off PCLK2 (2, 4, 6 or 8 by code), and the
     /// duty-cycle bit beside it: with ADCDUTY set the converter's clock
     /// spends longer low, which is a knob for a slow sample and not a
-    /// rate. The second duty bit of that register, ADC_DUTY_SEL, is the
-    /// CH32V30x_D8's and even there only by lot number (3.4.2's note);
-    /// it is not spelled here.
+    /// rate. The second duty bit of that register is below.
     static void adc_prescaler(uint8_t code) {
         rcc()->CFGR0 = (rcc()->CFGR0 & ~rcc_adcpre_mask) |
                        ((static_cast<uint32_t>(code) & 0x3u) << rcc_adcpre_shift);
@@ -598,6 +596,37 @@ struct Rcc {
         }
     }
     static bool adc_duty_extended() { return (rcc()->CFGR0 & rcc_adcduty) != 0u; }
+
+    /// ADC_DUTY_SEL (3.4.2, bit 30): the ADC clock's duty at 75 % instead
+    /// of 50 %. THE TREE'S VERB AND NOT THE CONVERTER'S: it sits in
+    /// RCC_CFGR0 beside ADCPRE and ADCDUTY, and ADCCLK is one clock for
+    /// both converters, so no Adc<n> owns it. The CH32V30x_D8's alone -
+    /// and there only on lots whose penultimate sixth digit is not zero,
+    /// which a program cannot read - so elsewhere this writes nothing and
+    /// answers false, and on the class the bit is READ BACK: a die whose
+    /// lot has not got it keeps nothing written there, which is what the
+    /// CH32V303VCT6 of the reference suite does, and the verb then answers
+    /// false. How it combines with ADCDUTY the chapter does not say.
+    static bool adc_duty_75(bool on) {
+        if constexpr (device::device_class == DeviceClass::v30x_d8) {
+            if (on) {
+                rcc()->CFGR0 |= rcc_adc_duty_sel;
+            } else {
+                rcc()->CFGR0 &= ~rcc_adc_duty_sel;
+            }
+            return adc_duty_75() == on;
+        } else {
+            (void)on;
+            return false;
+        }
+    }
+    static bool adc_duty_75() {
+        if constexpr (device::device_class == DeviceClass::v30x_d8) {
+            return (rcc()->CFGR0 & rcc_adc_duty_sel) != 0u;
+        } else {
+            return false;
+        }
+    }
 
     /// The Ethernet transceiver's own divider off HCLK, on the one part
     /// of this family that has a MAC (device::has_ethernet). The block

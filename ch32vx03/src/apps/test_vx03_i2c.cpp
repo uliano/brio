@@ -141,7 +141,7 @@ TestBench<Serial> bench;
 
 using H = I2c<1>;
 using Host = I2cHost<1>;
-using DmaHost = I2cHost<1, i2c_default_pins<1>, DmaTxEngine<6>, DmaRxEngine<7>>;
+using DmaHost = I2cHost<1, i2c_default_pins<1>, DmaTxEngine<1, 6>, DmaRxEngine<1, 7>>;
 using Client = I2cClient<1>;
 using SclPin = Pin<'B', 6>;
 using SdaPin = Pin<'B', 7>;
@@ -303,9 +303,9 @@ uint8_t dma_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
         print(serial, "    STALL (dma): STAR1=", hex(H::status1()), " STAR2=",
               hex(H::status2()), " CTLR2=", hex(H::regs().CTLR2), " SCL=",
               SclPin::read() ? "high" : "LOW", " SDA=", SdaPin::read() ? "high" : "LOW",
-              " ch6 flags=", hex(DmaChannel<6>::flags()), " ch7 flags=",
-              hex(DmaChannel<7>::flags()), " ch7 ", DmaChannel<7>::enabled() ? "on" : "OFF",
-              " with ", DmaChannel<7>::remaining(), " left; ev entries ", host_isr_entries,
+              " ch6 flags=", hex(DmaChannel<1, 6>::flags()), " ch7 flags=",
+              hex(DmaChannel<1, 7>::flags()), " ch7 ", DmaChannel<1, 7>::enabled() ? "on" : "OFF",
+              " with ", DmaChannel<1, 7>::remaining(), " left; ev entries ", host_isr_entries,
               crlf);
         print(serial, "      the clock, with this peripheral held in its reset: ",
               clock_held_by_the_far_end() ? "STILL LOW - the far end holds it"
@@ -1193,8 +1193,8 @@ void tg_dma() {
         tx_buf[i] = static_cast<uint8_t>(0x80u + i);
         rx_buf[i] = 0xEE;
     }
-    DmaTxEngine<6>::clear_faults();   // the counters live for the whole boot
-    DmaRxEngine<7>::clear_faults();
+    DmaTxEngine<1, 6>::clear_faults();   // the counters live for the whole boot
+    DmaRxEngine<1, 7>::clear_faults();
 
     // 1. sixteen bytes each way, the engines carrying both phases.
     PeerServe one = arm_serve(0x60);
@@ -1252,7 +1252,7 @@ void tg_dma() {
     print(serial, "  DMA: write16=", ws, " read16=", rs, " mism=", mism, " combined=", cs,
           " read2=", r2, " read1(pump)=", r1, "; the peer received ", received,
           " bytes and served ", served, " (20 and 23 on the wire), faults tx=",
-          DmaTxEngine<6>::faults(), " rx=", DmaRxEngine<7>::faults(), crlf);
+          DmaTxEngine<1, 6>::faults(), " rx=", DmaRxEngine<1, 7>::faults(), crlf);
     // 19.12.1's own case, counted: a DMA-served read can end with the
     // wire idle and BUSY standing, and the engine takes the chapter's
     // SWRST out of it before the next START.
@@ -1267,7 +1267,7 @@ void tg_dma() {
     bench.verdict("the peer received the 20 bytes the engines wrote, exactly, and served "
                   "the 23 they read, with no transfer fault on either channel",
                   got1 && got2 && got3 && got4 && received == 20u && served >= 23u &&
-                      DmaTxEngine<6>::faults() == 0u && DmaRxEngine<7>::faults() == 0u);
+                      DmaTxEngine<1, 6>::faults() == 0u && DmaRxEngine<1, 7>::faults() == 0u);
 }
 
 // ===========================================================================

@@ -7,5 +7,5 @@
 #include "ch32vx03/usart.hpp"
 
 using P = brio::Ch32vx03Platform<>;
-using Wrong = brio::Uart<2, P, 64, 64, brio::UartFormat{}, brio::DmaTxEngine<4>>;
+using Wrong = brio::Uart<2, P, 64, 64, brio::UartFormat{}, brio::DmaTxEngine<1, 4>>;
 void f() { (void)Wrong::write_byte('x'); }

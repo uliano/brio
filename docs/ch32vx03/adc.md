@@ -1,28 +1,35 @@
-# ADC (CH32V203)
+# ADC (CH32V203, CH32V303)
 
 Two 12-bit successive-approximation converters over sixteen pads and two
 internal sources, a regular group of up to sixteen conversions and an
 injected group of four that preempts it, scan, continuous and
 discontinuous modes, an analog watchdog, external triggers from the
-timers and from an EXTI line, one DMA request, a calibration the chapter
+timers and from an EXTI line, a DMA request, a calibration the chapter
 asks for at every power-up, and the DUAL modes in which one converter
 leads and the other follows - the STM32F1's ADC under WCH's register
 names, with an input buffer and a programmable gain of WCH's own in
-front of it. Documents of record: the CH32F/V20x_V30x_V31x reference
-manual V2.3 (12.2.2 for the power-up, the calibration, the sampling
-times and the alignments, 12.2.3 with tables 12-1 and 12-2 for the
-triggers, 12.2.4 with table 12-3 for the conversion modes, 12.2.5 with
-table 12-4 for the watchdog, 12.2.6 for the temperature sensor, 12.2.7
-for the dual modes, 12.3 for the registers, 3.4.2 for ADCPRE, 10.2.11.8
-for the trigger remaps that belong to other classes, 11.2.3's table 11-5
-for the DMA request, and 31 for the electronic signature that carries no
-calibration word) and the CH32V203 datasheet V2.8 (table 2-1 for how
-many converters and how many channels a part has, 3.2 for the pad map,
-table 4-19 for the weak pull, table 4-26 for VREFINT, table 4-27 for the
+front of it, and on the CH32V303 a trigger code that can be handed to
+TIM8 - and, on the dies of some lots, four sampling times shorter than
+the F1 ever had and a DMA request for the second converter too.
+Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
+(12.2.2 for the power-up, the calibration, the sampling times and the
+alignments, 12.2.3 with tables 12-1 and 12-2 for the triggers, 12.2.4
+with table 12-3 for the conversion modes, 12.2.5 with table 12-4 for the
+watchdog, 12.2.6 for the temperature sensor, 12.2.7 for the dual modes,
+12.3 for the registers with 12.3.15 for the short sampling times, 3.4.2
+for ADCPRE and the clock's two duty bits, 10.2.11.8 for the trigger
+remaps, 11.2.3's tables 11-5 and 11-2 for ADC1's DMA request and 11-3
+for ADC2's, and 31 for the electronic signature that carries no
+calibration word), the CH32V203 datasheet V2.8 (table 2-1 for how many
+converters and how many channels a part has, 3.2 for the pad map, table
+4-19 for the weak pull, table 4-26 for VREFINT, table 4-27 for the
 converter's own ratings, table 4-28 for the source impedance each
-sampling time settles, table 4-30 for the temperature sensor). Ours is
-the CH32V20x_D6 device class for every part up to the CH32V203C8 and
-CH32V20x_D8 for the CH32V203RB. Driver:
+sampling time settles, table 4-30 for the temperature sensor) and the
+CH32V303 datasheet V3.5 (table 2-1-1, the pin tables of 3.1, table 4-5
+for VREFINT, tables 4-41 to 4-44 for the converter, the sampling times,
+its errors and the sensor). Three device classes read the chapter: the
+CH32V20x_D6 for every CH32V203 up to the CH32V203C8, the CH32V20x_D8 for
+the CH32V203RB, and the CH32V30x_D8 for the four CH32V303 parts. Driver:
 [brio/ch32vx03/adc.hpp](../../brio/ch32vx03/adc.hpp), with the two block
 engines of [brio/ch32vx03/dma.hpp](../../brio/ch32vx03/dma.hpp) behind
 its stream. Reference suite: `test_vx03_adc`.
@@ -31,11 +38,13 @@ its stream. Reference suite: `test_vx03_adc`.
 
 ### How many converters, and how many channels
 
-Datasheet table 2-1 counts them together - "9@2", "10@2", "16@1" - and
-the two numbers are not independent: every part up to the CH32V203C8 has
-TWO converters with nine or ten of the sixteen channels bonded, and the
-128 KB part has ONE with all sixteen. So `Adc<2>` does not exist there,
-and neither does a dual mode.
+The CH32V203's table 2-1 counts them together - "9@2", "10@2", "16@1" -
+and the two numbers are not independent: every part up to the
+CH32V203C8 has TWO converters with nine or ten of the sixteen channels
+bonded, and the 128 KB part has ONE with all sixteen. So `Adc<2>` does
+not exist there, and neither does a dual mode. Every CH32V303 has two
+(table 2-1-1), with ten channels bonded on the LQFP48 of the CH32V303CB
+and all sixteen on the other three.
 
 The channel map is the family's and the same on every part: ADC_IN0 to
 ADC_IN7 are PA0 to PA7, 8 and 9 are PB0 and PB1, 10 to 15 are PC0 to
@@ -59,11 +68,13 @@ a tree that keeps it - the PLL on the HSI at 96 MHz gives 12 MHz, which
 is what the suite runs at - and one that does not is refused on the line
 that handed over the clock, not at run time and not in silence.
 
-A conversion is the sampling time plus 11 ADCCLK cycles (12.2.2). The
-datasheet's table 4-27 gives the two ends as 14 and 252 ADCCLK where the
-manual's arithmetic gives 12.5 and 250.5: a cycle and a half at each
-end, which is the sample-and-hold the datasheet counts and the manual
-does not. The driver follows the manual and says so.
+A conversion is the sampling time plus 12.5 ADCCLK cycles. 12.2.2's
+arithmetic says 11; the datasheets' tables 4-27 (CH32V203) and 4-41
+(CH32V303) give the two ends as 14 and 252 ADCCLK, which is 12.5 behind
+every sampling time - and the silicon sides with the datasheets:
+sixty-four back-to-back conversions at each of the four long codes took
+12.5 cycles beyond their sampling time on the CH32V303VCT6 (the findings
+below). The driver's arithmetic is the datasheets'.
 
 ### The power-up and the calibration
 
@@ -76,7 +87,8 @@ which `init()` arms - so `start()` is one spelling whatever the group.
 12.2.2 asks for a calibration at every power-up: RSTCAL until the
 hardware clears it, then CAL until the hardware clears it, the converter
 powered for at least two ADCCLK cycles first, and the code left behind
-in the regular data register.
+in the regular data register. The CH32V203's datasheet rates it at 100
+ADCCLK and the CH32V303's at 40 (tables 4-27 and 4-41).
 
 THE ORDER IS NOT OBVIOUS, and CTLR1.BUFEN's own note is where it hides:
 setting TSVREFE (or the TKEY enable) turns the input buffer ON and it
@@ -109,22 +121,40 @@ The injected group takes no DMA on either converter (12.2.2's note).
 
 Eight codes from 1.5 to 239.5 ADCCLK cycles, one per channel, in two
 registers (SAMPTR2 holds channels 0 to 9, SAMPTR1 the rest). What a
-sampling time buys is stated in datasheet table 4-28 as a SOURCE
-IMPEDANCE: 0.4 kOhm at 1.5 cycles, 5.9 at 7.5, 11.4 at 13.5, 25.2 at
-28.5, 37.2 at 41.5, 50 at 55.5, and "invalid" above that - the number
-the formula gives is past the 50 kOhm the converter is rated for at all.
+sampling time buys is stated in the datasheets' tables 4-28 and 4-42 as
+a SOURCE IMPEDANCE: 0.4 kOhm at 1.5 cycles, 5.9 at 7.5, 11.4 at 13.5,
+25.2 at 28.5, 37.2 at 41.5, 50 at 55.5, and "invalid" above that - the
+number the formula gives is past the 50 kOhm the converter is rated for
+at all.
 `adc_max_source_ohms()` is that table, and it is the one piece of the
 analog chapter a digital program can act on: the pads' own weak pull is
 30 to 50 kOhm (table 4-19), so a pad held by its own pull is a source
 only the longest times settle.
 
-MEASURED, AND WITH A TWIST THE TABLE DOES NOT MENTION: the
-sample-and-hold TRACKS the selected channel between conversions. With
+MEASURED, AND DIFFERENT ON THE TWO PARTS. On the CH32V203C8T6 the
+sample-and-hold TRACKS the selected channel between conversions: with
 the multiplexer parked on a pulled pad for the microseconds a polled
 read costs, every sampling time - the shortest included - reads the
-pull's own rail. The sampling time only bites when the multiplexer MOVES
-at the start of the conversion, which is what a scanned sequence does,
-and there the ladder is the physics (the findings below).
+pull's own rail, and the sampling time only bites when the multiplexer
+MOVES at the start of the conversion, which is what a scanned sequence
+does. The CH32V303VCT6 does not: the same polled read at 1.5 cycles
+reads a quarter of the scale, and parking the multiplexer on the pad for
+200 us before the start changes nothing. There the sampling time is what
+every conversion pays (the findings below).
+
+THE CH32V303 HAS FOUR MORE - on some dies. ADCx_AUX at offset 0x54
+holds one bit a channel, ADC_SMP_SELx for channels 0 to 17 (12.3.15),
+and with a channel's bit set its SMP codes 100 to 111 mean 2.5, 3.5, 4.5
+and 5.5 cycles instead of 41.5 to 239.5 (12.3.4, 12.3.5). The register's
+note gives it to the CH32V30x_D8 and the classes beside it and to no
+CH32V20x - and only on lots whose sixth digit from the end is not zero,
+which a program cannot read. So the DIE is asked: `sample_time(ch,
+AdcShortSampleTime)` sets the channel's bit and reads it back BEFORE it
+writes the code, and a die that kept nothing answers false with the
+channel's time as it was - because the code alone, on such a die, means
+41.5 to 239.5 cycles in silence. The CH32V303VCT6 of the bench is such a
+die: ADCx_AUX kept no bit written into it, on either converter. The long
+codes clear the bit again, and `conversion_half_cycles(ch)` reads both.
 
 ### The analog watchdog
 
@@ -145,13 +175,21 @@ the injected one takes TIM1's TRGO and fourth capture, TIM2's TRGO and
 first capture, TIM3's fourth, TIM4's TRGO, an EXTI line and JSWSTART.
 Only the RISING edge of a trigger starts a conversion (12.2.3's note).
 
-CODE 110 IS AN EXTI LINE ON THIS FAMILY AND NOTHING ELSE - line 11 for
-the regular group, line 15 for the injected one. The manual writes it
-"EXTI line11/TIM8_TRGO" because the same chapter serves families that
-have a TIM8, and the four AFIO bits that would select the timer instead
-(ADC1/ADC2_ETRGREG_RM and _ETRGINJ_RM) carry a note naming CH32F20x_D8,
-CH32F20x_D8C, CH32V30x and CH32V31x - no CH32V20x. So there is no remap
-verb in this driver and the enumerators say `exti11` and `exti15`.
+CODE 110 IS AN EXTI LINE - line 11 for the regular group, line 15 for
+the injected one - UNLESS AFIO HANDS IT TO TIM8. The manual writes it
+"EXTI line11/TIM8_TRGO", and four bits of AFIO_PCFR1 (ADC1_ETRGINJ_RM,
+ADC1_ETRGREG_RM, ADC2_ETRGINJ_RM, ADC2_ETRGREG_RM at 17 to 20) select
+the timer instead: TIM8's TRGO for a regular group, its fourth capture
+for an injected one. Their note names the CH32V30x among the classes and
+no CH32V20x, and 10.2.11.8 adds that the remap exists only where the
+part has a TIM8 - the CH32V303RC and VC. So `AdcTrigger::tim8_trgo` and
+`AdcInjectedTrigger::tim8_cc4` are code 110 with a flag above it:
+`trigger()` writes the converter's own AFIO field with it, `exti11`
+clears the field again, and on every other part the remapped codes are
+refused - by a static_assert where the trigger is a constant, by false
+where it is not. Measured on the CH32V303VCT6: with the field set EXTI
+line 11 started nothing and TIM8's TRGO paced the group; cleared, every
+edge of the line was a conversion again.
 
 What makes an EXTI line reach the converter is its EVENT enable and not
 its interrupt enable - measured, and stated nowhere in either chapter.
@@ -182,11 +220,17 @@ anything, which the configuration refuses without. The same register's
 TKEY bits (TKENABLE, TKITUNE) belong to RM ch. 13 and nothing here
 writes them.
 
-The AUX register at offset 0x54 - the short sampling times of 2.5 to 5.5
-cycles - names CH32F20x_D8, CH32F20x_D8C, CH32V30x_D8, CH32V30x_D8C and
-CH32V31x_D8C in its own note, and no CH32V20x: no part of this family
-has it. The register map carries the word so a reader can hold table
-12-5 beside the code; no verb writes it.
+The short sampling times of ADCx_AUX, the TIM8 remaps and ADC2's DMA
+request are the CH32V303's (the sections above and below). One more bit
+is the same class's and the same lots': ADC_DUTY_SEL in RCC_CFGR0
+(3.4.2), which gives ADCCLK a 75 % duty instead of 50, beside the older
+ADCDUTY that holds the clock low for longer. Both are the CLOCK TREE's
+and not a converter's - ADCCLK is one clock for both units - so the
+verbs are `Rcc::adc_duty_75()` and `Rcc::adc_duty_extended()`
+([clock.md](clock.md)); how the two combine, the chapter does not say.
+`adc_duty_75(on)` reads its bit back and answers what the die kept: the
+CH32V303VCT6 keeps nothing there. ADCDUTY takes its write on that die,
+and changes neither a reading nor a conversion's length.
 
 ### One vector, two converters
 
@@ -199,12 +243,21 @@ register, which a handler that takes the result does anyway.
 
 ### The stream, and why a block source does not ride circular mode
 
-Only ADC1 has a DMA request, on channel 1 (table 11-5), and the channel
-IS the request on this controller. `claim_stream<Engine>()` arms an
-engine on the data register and sets CTLR2.DMA in one verb, refusing at
-compile time an engine on any other channel: an engine on the wrong
-channel would wait for a datum that never comes, which is a wedge and
-not an error.
+ADC1's DMA request is DMA1's channel 1 on every part (tables 11-5, 11-6
+and 11-2), and the channel IS the request on this controller. On the
+CH32V303 ADC2 has one too, DMA2's channel 5 (table 11-3) - a row whose
+note gives it to lots whose sixth digit from the end is not zero, while
+12.2.7's note 2 still says only ADC1 has a DMA request; the table is
+followed and the DIE is asked. On a die without the request ADC2's
+CTLR2.DMA keeps no bit written into it - the CH32V303VCT6's does not,
+and no request reaches DMA2's channel 5 there - so `dma(on)` reads the
+bit back on ADC2, and `init()` refuses a configuration that asks for the
+request where the bit does not stay. `Adc<n>::dma_slot` is the table's
+slot and `has_dma` whether the table gives one. `claim_stream<Engine>()`
+arms an engine on the data register and sets CTLR2.DMA in one verb,
+refusing at compile time an engine on any other slot - an engine on the
+wrong channel would wait for a datum that never comes, which is a wedge
+and not an error - and answering false where the die kept no DMA bit.
 
 The engine behind it is `DmaPingPongEngine`, this family's realization
 of [util/block_stream.hpp](../../brio/util/block_stream.hpp)'s
@@ -228,12 +281,18 @@ whole sleep: a program that runs one holds itself awake.
 
 `AdcSampleTime` (the eight codes, with `adc_sample_shortest` and
 `adc_sample_longest` for a program that wants an end without naming a
-count), `adc_sample_half_cycles` and `adc_conversion_half_cycles` (the
-arithmetic in halves, so the .5 stays exact), `adc_conversion_ns` (the
-same against a stated ADCCLK), `adc_max_source_ohms` (table 4-28),
-`AdcGain` with `adc_gain_factor`, `AdcTrigger` and `AdcInjectedTrigger`
-(tables 12-1 and 12-2, with `adc_regular_exti_line` and
-`adc_injected_exti_line` beside them), `AdcDualMode` (the ten codes),
+count) and `AdcShortSampleTime` (the CH32V303's four, a type of their
+own because they share the codes of four long ones, with
+`adc_has_short_sampling` and `adc_aux_mask`), `adc_sample_half_cycles`
+and `adc_conversion_half_cycles` over both (the arithmetic in halves, so
+the .5 stays exact), `adc_conversion_ns` (the same against a stated
+ADCCLK), `adc_max_source_ohms` (table 4-28), `AdcGain` with
+`adc_gain_factor`, `AdcTrigger` and `AdcInjectedTrigger` (tables 12-1
+and 12-2, with `adc_regular_exti_line` and `adc_injected_exti_line`
+beside them, and the remapped codes `tim8_trgo` and `tim8_cc4` carrying
+`adc_trigger_remap_flag`; `adc_trigger_code`, `adc_trigger_remapped`,
+`adc_trigger_valid` and `adc_has_tim8_triggers` answer for them),
+`AdcDualMode` (the ten codes),
 `AdcFlag` (the five status bits by their meaning), `AdcConfig` and
 `AdcWatchdogConfig` with their `*_valid()` predicates, and the constants
 a program scales with: `adc_bits`, `adc_steps`, `adc_max_count`,
@@ -246,15 +305,20 @@ a program scales with: `adc_bits`, `adc_steps`, `adc_max_count`,
 `Adc<1|2>`: the gate and the reset line, `init(clock, config)` (which
 refuses a clock out of specification at compile time and a configuration
 the chapter forbids at run time), `calibrate` and `calibration_code`,
-`power`, the sampling times per channel and for all of them at once, the
-regular sequence and its read-back, the polled `read` / `read_settled`,
-`result` / `result_counts` / `data` / `follower_counts`, the injected
-sequence with its offsets and its signed results, the watchdog and its
-thresholds, the triggers and their enables, `continuous`, `dma`,
-`internal_sources`, `gain`, `dual`, the flags and their interrupts, the
-ISR body `isr()`, and `claim_stream<Engine>()`. What an instance HAS is
-published beside them: `has_dma`, `has_internal_sources`,
-`has_dual_mode`.
+`power`, the sampling times per channel and for all of them at once -
+long or short, with `short_sample_time(ch)` and `aux()` reading the
+CH32V303's bits back - the regular sequence and its read-back, the
+polled `read` / `read_settled`, `result` / `result_counts` / `data` /
+`follower_counts`, the injected sequence with its offsets and its signed
+results, the watchdog and its thresholds, the triggers (each a run-time
+verb that answers false for a remapped code the part cannot hand over,
+a compile-time one whose refusal is a static_assert, and a read-back)
+and their enables, `continuous`, `dma`, `internal_sources`, `gain`,
+`dual`, the flags and their interrupts, the ISR body `isr()`, and
+`claim_stream<Engine>()`. What an instance HAS is published beside
+them: `dma_slot` and `has_dma`, `has_internal_sources`,
+`has_dual_mode`, and the two AFIO fields its code 110 is handed over
+with, `regular_trigger_remap` and `injected_trigger_remap`.
 
 ### The inputs
 
@@ -265,10 +329,15 @@ Both are `input_code()`-able, which is what the sampler walks.
 
 ### The reference, and the arithmetic over it
 
-No package of this series brings out a VREF+ pad, so the converter's
-reference IS the analog supply: `Ref` has one enumerator, `vdda`, and
-`ref_mv()` takes the board's millivolts. `Adc<1>::vdda_mv(counts)`
-measures it instead of assuming it, from a conversion of VREFINT;
+No package of the CH32V203 brings out a VREF+ pad, so the converter's
+reference IS the analog supply; the CH32V303VC's LQFP100 does, VREF-
+and VREF+ on pins 20 and 21 (table 3-1), and the evaluation board ties
+VREF+ to VDDA through a zero-ohm link. `Ref` names both, `vdda` and
+`vref_pad`, `adc_reference` says which the part has (the part table's
+`has_vref_pads`), and `ref_mv()` takes the board's millivolts either
+way. `Adc<1>::vdda_mv(counts)` measures the reference instead of
+assuming it, from a conversion of VREFINT (1.2 V nominal on both
+series, tables 4-26 and 4-5);
 `millivolts()` is [util/analog.hpp](../../brio/util/analog.hpp)'s
 `adc_mv` over the converter's own full scale; and
 `temperature_centi_c(counts, vdda)` is 12.2.6's formula with the
@@ -314,8 +383,8 @@ A scanned sequence streamed into two caller-owned blocks, lent on by a
 relay:
 
 ```cpp
-using Source = brio::DmaPingPongEngine<
-    brio::DmaRequestOf<brio::DmaRequest::adc1>::channel, uint16_t>;
+using Row = brio::DmaRequestOf<brio::DmaRequest::adc1>;
+using Source = brio::DmaPingPongEngine<Row::controller, Row::channel, uint16_t>;
 using Relay = brio::BlockRelay<P, brio::Subscribers<Consumer>, Source>;
 
 (void)brio::Adc<1>::init(clock, {.scan = true, .dma = true});
@@ -350,6 +419,33 @@ brio::Adc<1>::trigger(brio::AdcTrigger::tim3_trgo);
 brio::Adc<1>::interrupts(brio::Adc<1>::converted_interrupt, true);
 brio::Pfic::enable(brio::Adc<1>::irq());
 brio::Tim<3>::enable(true);
+```
+
+On the CH32V303RC and VC, the same group paced by TIM8's TRGO - code 110
+handed over by AFIO, which `trigger()` writes:
+
+```cpp
+brio::Adc<1>::trigger<brio::AdcTrigger::tim8_trgo>();   // a compile error on a part without TIM8
+```
+
+The CH32V303's shortest sampling time on one channel, and ADC2's own
+stream on DMA2's channel 5 - each a question to the die, whose lot may
+have neither:
+
+```cpp
+if (!brio::Adc<1>::sample_time(1, brio::AdcShortSampleTime::cycles2_5)) {
+    // this die has no ADCx_AUX: channel 1 keeps the time it had
+}
+
+using Ch = brio::DmaChannel<brio::Adc<2>::dma_slot.controller, brio::Adc<2>::dma_slot.channel>;
+if (brio::Adc<2>::init(clock, {.dma = true})) {   // false: this die raises no request for ADC2
+    (void)Ch::load(brio::DmaTransfer{
+        .peripheral = brio::Adc<2>::data_address(), .memory = samples, .count = 8,
+        .config = {.peripheral_width = brio::DmaWidth::half,
+                   .memory_width = brio::DmaWidth::half}});
+    brio::Adc<2>::continuous(true);
+    brio::Adc<2>::start();
+}
 ```
 
 A pad's own edge pacing it instead - the line's EVENT enable is what
@@ -405,32 +501,41 @@ extern "C" BRIO_CH32_INTERRUPT void adc1_2_handler() {
 
 ## Bench findings
 
-`test_vx03_adc`, 57 verdicts in `z`, on the CH32V203C8T6 with the PLL on
-the HSI at 96 MHz and ADCCLK at 12 MHz. NOTHING OUTSIDE THE CHIP: the
-levels are a pad driven or pulled by its own port, the internal
-reference and the temperature sensor, and the core's own counter is the
-ruler.
+`test_vx03_adc` measures on both parts with the PLL on the HSI at 96
+MHz and ADCCLK at 12 MHz. NOTHING OUTSIDE THE CHIP: the levels are a pad
+driven or pulled by its own port, the internal reference and the
+temperature sensor - and on the CH32V303 its own DAC, whose first output
+is the converter's input 4 - and the core's own counter is the ruler. On
+the CH32V203C8T6 the ten letters of that part: **57 verdicts in `z`**.
+On the CH32V303VCT6 all fifteen: **73 pass, 0 fail**. Where one number
+is given below it is the CH32V203C8T6's unless the CH32V303VCT6 is
+named.
 
 - **The calibration costs eight microseconds and leaves a word behind.**
   ADON was acknowledged within the counter's own resolution, RSTCAL
   cleared itself in under a microsecond and CAL took 8 us - the
   datasheet's tCAL of 100 ADCCLK is 8.3 us at 12 MHz - and the data
   register went from 0 to 2049, which is the calibration code 12.2.2
-  says lands there.
-- **VREFINT reads 1489 counts, which puts the supply at 3301 mV.** The
-  reference is 1.2 V nominal, so the arithmetic is the whole measurement
-  of a board whose rail nobody has metered.
+  says lands there. On the CH32V303VCT6 CAL took 3 us, its datasheet's
+  40 ADCCLK being 3.3 us, and left 2044.
+- **VREFINT reads 1489 counts, which puts the supply at 3301 mV** - on
+  both boards, the CH32V303VC's evaluation board through its VREF+ pad,
+  which that board ties to VDDA. The reference is 1.2 V nominal, so the
+  arithmetic is the whole measurement of a board whose rail nobody has
+  metered.
 - **The temperature sensor reads 1742 counts = 1404 mV**, which the
   datasheet's typical V25 of 1.40 V and slope of 4.3 mV per degree make
   24.7 degrees Celsius, at a conversion of 20.8 us (12.2.6 asks for
-  17.1 us of sampling and the longest code gives 20 us of it). The
-  spread on those two numbers is worth about twelve degrees, so this is
-  a temperature CHANGE to be trusted and an absolute temperature to be
-  doubted.
+  17.1 us of sampling and the longest code gives 20 us of it); on the
+  CH32V303VCT6 1422 to 1425 mV, some 19 degrees, at a conversion of 21.0
+  us. The spread on those two numbers is worth about twelve degrees, so
+  this is a temperature CHANGE to be trusted and an absolute temperature
+  to be doubted.
 - **A pad driven by its own port is a hard source at either rail**: a
   push-pull output high reads 4095 counts = 3300 mV, the same pad low
-  reads 9. A pad held by its own PULL is not: those two facts are what
-  the whole of table 4-28 is about.
+  reads 9 (4092 to 4093 and 0 on the CH32V303VCT6). A pad held by its
+  own PULL is not: those two facts are what the whole of table 4-28 is
+  about.
 - **THE SAMPLING LADDER, AND WHEN IT BITES.** The pulled pad converted
   RIGHT AFTER the grounded one in a scanned sequence, so that the
   multiplexer moves at the start of the conversion: 1060, 4010, 4076,
@@ -440,14 +545,22 @@ ruler.
   and at the rail from 71.5. Table 4-28 puts a 40 kOhm source between
   its 41.5-cycle row (37.2 kOhm) and its 55.5-cycle one (50 kOhm),
   which is where the last counts arrive: the table is about a quarter
-  of an LSB and this ladder is about a reading.
-- **AND THE SAME SOURCE READS FULL SCALE AT EVERY SAMPLING TIME when
-  the multiplexer is parked on it**: 4019, 4074, 4087, 4093, 4094, 4094,
-  4095, 4095 across the same eight codes, taken with the two channels
-  selected separately so a polled read's own microseconds sit between
-  the selection and the conversion. The sample-and-hold TRACKS the
-  selected channel between conversions; the sampling time is what a
-  SEQUENCE pays and what a single parked channel does not.
+  of an LSB and this ladder is about a reading. The CH32V303VCT6's ladder
+  starts lower and ends the same: 7, 3862, 3999, 4065, 4080, 4085, 4087,
+  4093.
+- **AND ON THE CH32V203C8T6 THE SAME SOURCE READS FULL SCALE AT EVERY
+  SAMPLING TIME when the multiplexer is parked on it**: 4019, 4074, 4087,
+  4093, 4094, 4094, 4095, 4095 across the same eight codes, taken with
+  the two channels selected separately so a polled read's own
+  microseconds sit between the selection and the conversion. There the
+  sample-and-hold TRACKS the selected channel between conversions; the
+  sampling time is what a SEQUENCE pays and what a single parked channel
+  does not.
+- **THE CH32V303VCT6 DOES NOT TRACK.** The same polled reads there:
+  1053, 3993, 4037, 4074, 4083, 4085, 4084, 4093 - a quarter of the scale
+  at 1.5 cycles - and with the multiplexer parked on the pad 0, 2, 20
+  and 200 us before the start, 1050, 1054, 1054 and 1057: the park buys
+  nothing, and the sampling time is what every conversion pays.
 - **A pad in PULLED INPUT mode is an analog source.** Analog mode takes
   the pull away with the input driver (10.2.7), so a program that wants
   a pad's own pull as its level leaves the pad a pulled input and
@@ -460,7 +573,7 @@ ruler.
   conversion plus the sequence's own overhead - with zero overruns. The
   first block read 4095, 9, 1488, 1744, 4095, 9, 1488, 1743: the rail,
   ground, the reference and the sensor, twice, in the sequence's own
-  order.
+  order. The CH32V303VCT6 lent the same four blocks in 679 to 680 us.
 - **The overrun is the contract's, measured.** With nobody releasing,
   the second block filled, the engine counted one overrun, held two
   buffers and STOPPED rather than write into the block it had lent; one
@@ -468,15 +581,16 @@ ruler.
 - **AND THIS IS WHY IT IS NOT CIRCULAR.** A block at the CONTROLLER's
   own speed, stopped by the handler of its own half flag - a handler
   whose whole body is read-CNTR-and-disable - found THREE of the next
-  thirty-two items already written. On a channel that never stops,
-  "skip rather than tear" would be decided three items too late. The
-  STM32G0 measured 0 to 6; this is the third controller to say the same
-  thing.
+  thirty-two items already written, and two or three on the
+  CH32V303VCT6. On a channel that never stops, "skip rather than tear"
+  would be decided three items too late. The STM32G0 measured 0 to 6;
+  this is the third controller to say the same thing.
 - **The injected group preempts and gives back.** With a continuous
   regular conversion running, a two-channel injected group started,
   raised JSTRT, converted both and left the regular conversion running
   afterwards. Its first result was the rail LESS an offset of 2000 -
-  2095 counts - and its second, with no offset, was ground.
+  2095 counts, 2091 to 2093 on the CH32V303VCT6 - and its second, with no
+  offset, was ground.
 - **JEOC is the GROUP's flag, not the conversion's**: it reached its
   handler exactly once for a two-conversion injected group.
 - **The watchdog is a band and not a ceiling.** A conversion above the
@@ -487,18 +601,20 @@ ruler.
   dropped every regular channel was guarded.
 - **A timer's TRGO paces the converter at its own rate**: TIM3's update
   at 2 kHz produced 399 conversions in 200 ms, one short of the 400 the
-  window holds.
+  window holds, on both parts.
 - **AN EXTI LINE REACHES THE CONVERTER THROUGH ITS EVENT ENABLE AND NOT
   ITS INTERRUPT ENABLE.** Twenty rising edges on a pad of the line
   started 0 conversions with the line merely sensed, 20 with EXTI_EVENR
   set, and 0 with EXTI_INTENR set instead - and in that last pass the
-  line's own handler ran for every one of the twenty edges. Neither
-  chapter says which enable feeds a peripheral; this is the answer.
+  line's own handler ran for every one of the twenty edges - on both
+  parts, and the CH32V303's DAC takes its EXTI line 9 the same way
+  ([dac.md](dac.md)). Neither chapter says which enable feeds a
+  peripheral; this is the answer.
 - **The dual mode carries both converters in one register.** Regular
   simultaneous, the master on a pad at the rail and the follower on one
   at ground: the master's data register read 0x30FFF - 4095 in its low
-  half, 3 in its high one. All ten codes were written and read back and
-  an eleventh was refused.
+  half, 3 in its high one (0xFFD on the CH32V303VCT6: 4093 and 0). All
+  ten codes were written and read back and an eleventh was refused.
 - **The follower's datum is there with the DMA bit DROPPED too.**
   12.2.7's note 1 says the DMA must be enabled "to read the slave
   converted data on the master data register"; the upper half carried it
@@ -515,8 +631,47 @@ ruler.
   conversion.
 - **The sampler walks the list and the attribution holds.** Three inputs
   - a pad at the rail, VREFINT, a pad at ground - at a software pace:
-  indices 0, 1, 2 with 4095, 1488 and 10 counts, no result carrying a
-  code the list does not hold.
+  indices 0, 1, 2 with 4095, 1488 and 10 counts (4093, 1490 and 0 on the
+  CH32V303VCT6), no result carrying a code the list does not hold.
+- **A CONVERSION IS ITS SAMPLING TIME PLUS 12.5 CYCLES** (CH32V303VCT6).
+  Sixty-four conversions back to back in continuous mode, landed by the
+  DMA and timed by the core's counter, took 54.1, 68.1, 84.1 and 252.1
+  ADCCLK cycles each at SMP codes 100 to 111 - 41.5, 55.5, 71.5 and
+  239.5 cycles of sampling and 12.5 or 12.6 behind every one of them: the
+  datasheets' 14..252, not 12.2.2's 11. The driver's
+  `conversion_half_cycles()` predicts each to half a cycle.
+- **THE SHORT SAMPLING TIMES ARE A LOT'S, AND THIS DIE HAS NONE**
+  (CH32V303VCT6). ADC1_AUX with ADC_SMP_SEL1 written read back 0x0 - and
+  ADC2's the same - so the short-time verbs answered false and the
+  channel kept the 41.5 cycles it had; the four codes then measured as
+  the long ones above.
+- **THE DAC AS THE SOURCE, and the two converters' linearity**
+  (CH32V303VCT6). Thirty-one codes of DAC1, 128 apart, read on PA4
+  through util/analog_sampler.hpp four samples a code: 124, 252, 381 ...
+  2044 ... 3960, every step higher than the last. The line through them
+  has a gain of 0.99842 counts a code and an offset of -1.91 counts, and
+  no reading sits more than 2.54 counts off it - both converters'
+  integral nonlinearity together, against 4 LSB each in tables 4-43 and
+  4-45.
+- **The PGA multiplies** (CH32V303VCT6): the same DAC input read through
+  the buffer at x1 and at each gain gave 716 and 2872 at x4 (a ratio of
+  4.01), 177 and 2865 at x16 (16.18) and 43 and 2829 at x64 (65.79) - the
+  reading at x1 carrying the converter's own offset, which is what the
+  ratio's error is at the higher gains.
+- **Code 110 handed to TIM8** (CH32V303VCT6): with AFIO's ADC1_ETRGREG_RM
+  set, twenty edges of EXTI line 11 started no conversion and TIM8's TRGO
+  at 2 kHz started 200 in 100 ms; cleared, the twenty edges started
+  twenty. The injected group's field and ADC2's two are four separate
+  bits, each written and read back without touching the others.
+- **ADC2 HAS NO REQUEST ON THIS DIE** (CH32V303VCT6): its CTLR2.DMA read
+  back clear after a write, `init()` refused a configuration that asked
+  for the request, and with the bit written anyway DMA2's channel 5 still
+  held all eight items after 2 ms of continuous conversions of the rail.
+- **ADC_DUTY_SEL is not there either, and ADCDUTY moves nothing**
+  (CH32V303VCT6): the bit read back clear and its verb said so; under
+  the 50 % clock, under ADC_DUTY_SEL written and under ADCDUTY set, the
+  rail, ground and VREFINT read within 16 counts of each other and a
+  conversion took 41.0 to 41.1 cycles each time.
 
 ## Not covered yet
 
@@ -528,39 +683,29 @@ Driver gaps, each with its reason:
   the touch chapter - and what it produces is a key press, which is an
   application and not a driver. The bits are named in the register map
   and nothing writes them.
-- **The ADCx_AUX register and its short sampling times** (2.5 to 5.5
-  cycles): its own note gives it to CH32F20x_D8, CH32F20x_D8C,
-  CH32V30x_D8, CH32V30x_D8C and CH32V31x_D8C, none of which is a
-  CH32V20x. Not this family's, so not implemented.
-- **The trigger remaps** (AFIO's ADC1/ADC2_ETRGREG_RM and _ETRGINJ_RM):
-  the same note, the same reason. On this family trigger code 110 is an
-  EXTI line and the alternative does not exist.
-- **A real analog source.** Every level this document reports is a rail,
-  a weak pull or an internal reference; there is no DAC on this family
-  and no wire on the board. A voltage between the rails - a divider, an
-  external reference, a filtered PWM pad - is what would measure
-  linearity, the offset and gain errors of table 4-29, and the
-  converter's actual accuracy rather than its behaviour.
-- **The player engine's own driver.** `DmaLoopEngine` is written and
-  compiled (and concept-checked against `BlockPlayer`), but the
-  peripheral it would feed for ever on this family is a DAC, which this
-  series has not got. Its first user will be a timer's compare register
-  or a bus transmitter, and until then it is measured only by the
-  controller's circular mode under the DMA chapter's own suite.
+- **A real analog source on the CH32V203.** Every level this document
+  reports for that series is a rail, a weak pull or an internal
+  reference; it has no DAC and the board no wire. A voltage between the
+  rails - a divider, an external reference, a filtered PWM pad - is what
+  would measure its linearity, the offset and gain errors of its table
+  4-29, and its input buffer and gain.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The input buffer and the programmable gain** (BUFEN, PGA). The gain
-  amplifies a SMALL signal, and every source this board offers is a rail
-  or an internal reference: at a gain of four a 1.2 V reference is past
-  full scale and a rail is far past it. A source of a few tens of
-  millivolts - the same wire the linearity measurement needs - is what
-  would measure them.
+- **The short sampling times of ADCx_AUX, ADC2's DMA request and
+  ADC_DUTY_SEL on a die that has them.** The verbs ask the die, and the
+  CH32V303VCT6 answered no to all three; the short times, the request
+  landing conversions on DMA2's channel 5 and the 75 % duty are written
+  against the manual and wait for a die of a lot whose penultimate sixth
+  digit is not zero, where letters k, n and o measure them.
+- **The conversion's 12.5-cycle tail on the CH32V203.** Measured on the
+  CH32V303VCT6 and given by both datasheets; the letter that times it is
+  the CH32V303's, and the same timing on a CH32V203 would measure it.
 - **The interleaved and alternate-trigger dual modes.** All ten codes
   are written and read back; only regular simultaneous is measured
   converting. The others want two channels carrying a CHANGING signal to
-  tell a fast interleave from a slow one, which is the analog source
-  again.
+  tell a fast interleave from a slow one - the CH32V303's two DAC
+  channels are such a source, and no letter drives them that way yet.
 - **The second converter as a lone instrument.** ADC2 is brought up,
   converts and is read in the dual-mode letter; its own watchdog, its
   own injected group and its own triggers are the same registers at
@@ -569,9 +714,10 @@ Implemented but not bench-verified, each with what would measure it:
   and refused where the chapter forbids it, and not driven - the
   measurement is the same shape as the trigger letter's and waits for a
   program that wants twenty conversions in one start.
-- **The eight parts other than the CH32V203C8.** The converter count,
-  the channel count and the pad map fold through each part's own table
-  and the whole stratum compiles for all nine both ways the hardware
-  prologue can be built (`brio check ch32vx03`); the 128 KB part's six
-  extra channels and its single converter are asserted at compile time
-  and measured on none of them. What would measure them is a board.
+- **The parts other than the CH32V203C8 and the CH32V303VC.** The
+  converter count, the channel count and the pad map fold through each
+  part's own table and the whole stratum compiles for all thirteen both
+  ways the hardware prologue can be built (`brio check ch32vx03`); the
+  CH32V203RB's six extra channels and its single converter and the
+  CH32V303CB's ten channels are asserted at compile time and measured on
+  none of them. What would measure them is a board.

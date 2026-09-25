@@ -5,5 +5,5 @@
 // channel every CH32V203 has is refused here on the line that named it.
 #include "ch32vx03/dma.hpp"
 
-using Eighth = brio::DmaChannel<8>;
+using Eighth = brio::DmaChannel<1, 8>;
 void f() { Eighth::stop(); }

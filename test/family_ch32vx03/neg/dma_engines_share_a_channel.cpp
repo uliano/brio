@@ -4,5 +4,5 @@
 // two channels, which is what the request table gives them.
 #include "ch32vx03/dma.hpp"
 
-static_assert(brio::dma_engines_distinct<brio::DmaTxEngine<7>, brio::DmaRxEngine<7>>(),
+static_assert(brio::dma_engines_distinct<brio::DmaTxEngine<1, 7>, brio::DmaRxEngine<1, 7>>(),
               "two engines of one transport must not share a DMA channel");

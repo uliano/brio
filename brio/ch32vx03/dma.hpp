@@ -1,23 +1,30 @@
 /*
  * dma.hpp
  *
- * The DMA controller of the CH32V203 (RM ch. 11): EIGHT channels, each
- * wired to a fixed handful of peripheral requests, an arbiter over four
- * software priorities with the channel index deciding ties, and four
- * flag bits a channel - the STM32F1's DMA1 under WCH's names, with one
- * channel more than the ancestor and than the CH32V00x's seven. On the
- * CH32V303 the same block is DMA1 with SEVEN channels and a second
- * controller of eleven beside it (device::dma1_channel_count,
- * dma2_channel_count); this file drives DMA1 on every part, and DMA2 is
- * not reached by it.
+ * The DMA controllers of the CH32V203 and the CH32V303 (RM ch. 11): the
+ * STM32F1's DMA under WCH's names - channels each wired to a fixed handful
+ * of peripheral requests, an arbiter over four software priorities with
+ * the channel index deciding ties, and four flag bits a channel. How many
+ * of them a part has is its DEVICE CLASS's: ONE controller of EIGHT
+ * channels on every CH32V203 (one more than the F1 ancestor and than the
+ * CH32V00x's seven), and on the CH32V303 (CH32V30x_D8) TWO - DMA1 with
+ * SEVEN channels and DMA2 with eleven (device::dma_controller_count,
+ * dma1_channel_count, dma2_channel_count). Every type here names its
+ * CONTROLLER FIRST - `Dma<1|2>`, `DmaChannel<controller, n>`, the engines
+ * `<controller, n, Elem>` - because a channel number alone names two
+ * channels on the CH32V303.
  *
- * THE CHANNEL IS THE REQUEST. There is no request multiplexer: table
- * 11-5 (our class) and table 11-6 (the other one) wire each peripheral
- * event to ONE channel, and an engine is named by channel number with
- * that table in hand. The table itself is ch32vx03/dma_engine.hpp's,
- * because a transport must be able to refuse an engine on the wrong
- * channel without including this file; `DmaRequestOf<r>::channel` is
- * how a program names the request instead of the number.
+ * THE CHANNEL IS THE REQUEST. There is no request multiplexer: the tables
+ * of 11.2.3 wire each peripheral event to ONE channel of ONE controller,
+ * and an engine is named by that slot with the table in hand. The table
+ * itself is ch32vx03/dma_engine.hpp's, because a transport must be able
+ * to refuse an engine on the wrong slot without including this file;
+ * `DmaRequestOf<r>` is how a program names the request instead of the
+ * numbers. And the rows of one channel are an OR: every peripheral wired
+ * to it whose DMA bit is set drives whatever transfer the channel holds -
+ * measured, a receiver left running served a timer's transfer sixteen
+ * items at once - so stopping a channel withdraws no request, and a
+ * peripheral that is done with a channel is turned off.
  *
  * WHAT A CHANNEL IS. A configuration word (CFGR: direction, circular,
  * memory-to-memory, the two increments, the two widths, the priority,
@@ -27,6 +34,15 @@
  * where DIR says which side is the source: in memory-to-memory mode
  * both are memory and the names mean nothing.
  *
+ * DMA2'S LAST FOUR CHANNELS SIT ELSEWHERE. Channels 1..7 of either
+ * controller are twenty bytes apart from offset 0x08 of the block (table
+ * 11-7's stride, a reserved word after each channel), and so is DMA1's
+ * eighth; DMA2's channels 8..11 follow its seventh at SIXTEEN bytes apart
+ * from offset 0x90 (table 11-8, 11.3.7..11.3.10), and their four flags a
+ * channel live in a register pair of their own, DMA2_EXTEM_INTFR and
+ * DMA2_EXTEM_INTFCR at 0xD0 (11.3.11, 11.3.12). A channel knows which
+ * pair holds its flags; nothing above it has to.
+ *
  * THE ADDRESSES ARE ALIGNED BY THE SILICON, SILENTLY. 11.3.5 and 11.3.6
  * say the module IGNORES the low address bits of a 16- or 32-bit
  * access, so a half-word transfer pointed at an odd address moves the
@@ -35,41 +51,58 @@
  * round it: a transfer that quietly reads elsewhere is worse than one
  * that does not start.
  *
- * THE VECTORS ARE ONE PER CHANNEL, and the eighth is on the tail of the
- * table this DEVICE CLASS has - 62 here, 67 on the CH32V203RB (the crt
- * states the per-class truth, and device.hpp's Irq enum carries both).
- * So a channel's ISR body reads only its own flags and a handler needs
- * no "which channel" question. DMA1EN in RCC_HBPCENR is the block's one
- * gate and it is CLOSED at reset, so `Dma::open()` is the first thing
- * every channel verb does.
+ * AND ON THE CH32V303 DMA1 IS REFUSED A SPAN THAT CROSSES 64 KB. 11.2.3's
+ * note (1) gives the CH32V30x_D8 a DMA1 whose accesses must not cross a
+ * 64-kilobyte boundary on lots whose penultimate sixth digit is zero
+ * ("the DMA source address + the number of transmission data ... can only
+ * be in the 0-64K, or 64K-128K area"), and a program cannot read its lot
+ * number - so every transfer DMA1 is handed on that class is checked, end
+ * by end, and one that would cross is refused. The CH32V303VCT6 of the
+ * reference suite is such a lot, measured: with the refusal bypassed, the
+ * upper half of a span across 0x0801 0000 was read from the bottom of the
+ * page it started in - a wrap, reported as a completed block. DMA2 has "no
+ * restriction" (note (3)), and neither has a CH32V203, whose class the
+ * note does not name. The piecewise verbs (configure, set_count,
+ * set_peripheral, set_memory) never see a transfer whole and do not ask
+ * the rule; the verbs that take a DmaTransfer do.
+ *
+ * THE VECTORS ARE ONE PER CHANNEL: DMA1's seven consecutive from the
+ * table's entry 27 and its eighth, where there is one, on the tail of the
+ * table this DEVICE CLASS has (62, 67 on the CH32V203RB); DMA2's first
+ * five at 72..76 and its other six at 98..103 (the crt states the
+ * per-class truth, and device.hpp's Irq enum carries it). So a channel's
+ * ISR body reads only its own flags and a handler needs no "which
+ * channel" question. DMA1EN and DMA2EN in RCC_HBPCENR are the blocks'
+ * gates and both are CLOSED at reset, so `Dma<c>::open()` is the first
+ * thing every channel verb does.
  *
  * NO DMA-FED TRANSPORT SLEEPS ON THIS FAMILY. In the Sleep of RM 2.4 no
  * bus master but the core gets a cycle: a memory-to-memory block
  * started right before an idle() moves the handful of items already in
  * the pipeline and then nothing until the core wakes, while the timers
- * and the core's counter count the whole sleep (measured -
+ * and the core's counter count the whole sleep (measured on both parts -
  * docs/ch32vx03/dma.md, and it is the same starvation that kills the
- * USB controller in Sleep). SO A CHANNEL COUNTS ITSELF: the EN
- * transition is one bus master entering and leaving
+ * USB controller in Sleep). SO A CHANNEL COUNTS ITSELF, on either
+ * controller: the EN transition is one bus master entering and leaving
  * (ch32vx03/bus_activity.hpp), the kernel's idle path does not sleep
  * while the count stands, and a sleep site refuses to arm over it -
  * a program with an engine running holds itself awake without having
- * to know that it does. `Dma::any_enabled()` is the same question
- * asked of the registers instead, for a caller that wants the
- * silicon's own answer.
+ * to know that it does. `Dma<c>::any_enabled()` is the same question
+ * asked of the registers instead, of EVERY controller the part has, for
+ * a caller that wants the silicon's own answer.
  *
- * THE ENGINES. `DmaTxEngine<ch, Elem>` and `DmaRxEngine<ch, Elem>` are
- * the CH32V00x stratum's: a transmit engine pours a caller-owned run
- * into one peripheral register and reports how many items the block
- * carried when it completes; a receive engine fills a caller-owned run
- * from one register and answers how many items have arrived since it
- * was last asked (one CNTR read - nothing suspended, nothing refused).
- * ch32vx03/usart.hpp's two engine slots are built on them, and a driver
- * reaches its engines only through their published names (start,
- * service, flag_complete, flag_error) so that a driver with an empty
- * slot never includes this file. TWO ENGINES OF ONE TRANSPORT NAME TWO
- * CHANNELS: a channel moves data one way, and the table gives each
- * direction its own.
+ * THE ENGINES. `DmaTxEngine<c, ch, Elem>` and `DmaRxEngine<c, ch, Elem>`
+ * are the CH32V00x stratum's with a controller in front: a transmit engine
+ * pours a caller-owned run into one peripheral register and reports how
+ * many items the block carried when it completes; a receive engine fills
+ * a caller-owned run from one register and answers how many items have
+ * arrived since it was last asked (one CNTR read - nothing suspended,
+ * nothing refused). ch32vx03/usart.hpp's two engine slots are built on
+ * them, and a driver reaches its engines only through their published
+ * names (start, service, flag_complete, flag_error, controller, channel)
+ * so that a driver with an empty slot never includes this file. TWO
+ * ENGINES OF ONE TRANSPORT NAME TWO SLOTS: a channel moves data one way,
+ * and the table gives each direction its own.
  *
  * ONE THING THE SILICON DOES that the engines are built on: EN STAYS
  * SET when a non-circular block completes (CNTR at zero, TCIF up, the
@@ -79,10 +112,10 @@
  * thing that clears EN by itself (11.3.3).
  *
  * THE BLOCK ENGINES beside them are util/block_stream.hpp's two
- * concepts: `DmaLoopEngine<ch, Elem>` is a BlockPlayer, one
+ * concepts: `DmaLoopEngine<c, ch, Elem>` is a BlockPlayer, one
  * caller-owned table poured into a peripheral for ever on THE
  * CONTROLLER'S OWN CIRCULAR MODE, with the lap interrupt doing nothing
- * but count; `DmaPingPongEngine<ch, Elem>` is a BlockSource, two
+ * but count; `DmaPingPongEngine<c, ch, Elem>` is a BlockSource, two
  * caller-owned buffers filled in turn - and it does NOT use circular
  * mode, which is the one place this file departs from what the
  * controller offers. The reason is the contract's and not the API's: a
@@ -193,7 +226,9 @@ struct DmaProgress {
 // ---- the registers --------------------------------------------------------------
 
 /// One channel's four registers and the word the map leaves between
-/// them: table 11-7's stride is twenty bytes, not sixteen.
+/// them: table 11-7's stride is twenty bytes, not sixteen. DMA2's channels
+/// 8..11 are packed at sixteen (table 11-8), so for those the reserved
+/// word is the next channel's CFGR - it is declared and never touched.
 struct DmaChannelRegs {
     volatile uint32_t CFGR;    ///< 0x00
     volatile uint32_t CNTR;    ///< 0x04
@@ -202,13 +237,36 @@ struct DmaChannelRegs {
     uint32_t RESERVED0;        ///< 0x10
 };
 
+/// A controller's block: the flag pair and the channels at twenty bytes.
+/// DMA1 fills all eight slots on a CH32V203 and seven on a CH32V303; DMA2
+/// uses the first seven and keeps its last four elsewhere.
 struct DmaRegs {
     volatile uint32_t INTFR;         ///< 0x00 the flags, read-only
     volatile uint32_t INTFCR;        ///< 0x04 write 1 to clear
     DmaChannelRegs channel[8];       ///< 0x08 + 20 x (ch - 1)
 };
 
-inline DmaRegs* dma() { return reinterpret_cast<DmaRegs*>(hb_base + 0x0000); }
+/// DMA2's extended flag pair, channels 8..11 at 4 x (ch - 8) (11.3.11,
+/// 11.3.12): the CH32V30x_D8's alone.
+struct Dma2ExtendRegs {
+    volatile uint32_t INTFR;         ///< 0x4d0 DMA2_EXTEM_INTFR, read-only
+    volatile uint32_t INTFCR;        ///< 0x4d4 DMA2_EXTEM_INTFCR, write 1 to clear
+};
+
+/// The two blocks: DMA1 at the head of the HB bus, DMA2 a kilobyte above
+/// (device.hpp's dma2_base).
+constexpr uint32_t dma_base_for(uint8_t c) { return c == 2u ? dma2_base : hb_base + 0x0000; }
+inline DmaRegs* dma_regs(uint8_t c) { return reinterpret_cast<DmaRegs*>(dma_base_for(c)); }
+inline Dma2ExtendRegs* dma2_extend() {
+    return reinterpret_cast<Dma2ExtendRegs*>(dma2_base + 0xD0);
+}
+
+/// Where one channel's registers start: 0x08 + 20 x (ch - 1) from its
+/// block, but DMA2's 8..11 at 0x90 + 16 x (ch - 8).
+constexpr uint32_t dma_channel_address(uint8_t c, uint8_t ch) {
+    return (c == 2u && ch >= 8u) ? dma2_base + 0x90u + 16u * (ch - 8u)
+                                 : dma_base_for(c) + 0x08u + 20u * (ch - 1u);
+}
 
 inline constexpr uint32_t dma_cfgr_en      = 1UL << 0;
 inline constexpr uint32_t dma_cfgr_tcie    = 1UL << 1;
@@ -223,97 +281,224 @@ inline constexpr uint32_t dma_cfgr_msize_shift = 10;
 inline constexpr uint32_t dma_cfgr_pl_shift    = 12;
 inline constexpr uint32_t dma_cfgr_mem2mem = 1UL << 14;
 
-/// DMA1's channels on THIS part: eight on every CH32V203, whose two
-/// classes the register notes of 11.3.1 to 11.3.6 name among the five
-/// that have channel 8, and seven on the CH32V303, whose class they do
-/// not (device::dma1_channel_count).
-inline constexpr uint8_t dma_channel_count = device::dma1_channel_count;
+/// How many channels controller `c` has on THIS part: DMA1 eight on every
+/// CH32V203, whose two classes the register notes of 11.3.1 to 11.3.6 name
+/// among the five that have channel 8, and seven on the CH32V303, whose
+/// class they do not; DMA2 eleven on the CH32V303 and none anywhere else
+/// (11.3.7..11.3.12's notes name the CH32V30x_D8 and no CH32V20x).
+constexpr uint8_t dma_channels_of(uint8_t c) {
+    return c == 1u   ? device::dma1_channel_count
+           : c == 2u ? (device::dma_controller_count >= 2u ? device::dma2_channel_count : 0u)
+                     : 0u;
+}
 
-/// The line a channel reports on. Seven of them are consecutive from
-/// the table's entry 27; the eighth, where there is one, sits on the
-/// class's own tail, which device.hpp's Irq table places.
-constexpr Irq dma_channel_irq(uint8_t ch) {
+/// Whether channel `ch` of controller `c` exists on this part.
+constexpr bool dma_channel_exists(uint8_t c, uint8_t ch) {
+    return ch >= 1u && ch <= dma_channels_of(c);
+}
+
+/// The line a channel reports on. DMA1's first seven are consecutive from
+/// the table's entry 27 and its eighth, where there is one, sits on the
+/// class's own tail; DMA2's are 72..76 and 98..103 - all of which
+/// device.hpp's Irq table places.
+constexpr Irq dma_channel_irq(uint8_t c, uint8_t ch) {
+    if (c == 2u) {
+        return ch <= 5u ? static_cast<Irq>(static_cast<uint8_t>(Irq::dma2_channel1) + (ch - 1u))
+                        : static_cast<Irq>(static_cast<uint8_t>(Irq::dma2_channel6) + (ch - 6u));
+    }
     return ch == 8u ? Irq::dma1_channel8
                     : static_cast<Irq>(static_cast<uint8_t>(Irq::dma1_channel1) + (ch - 1u));
 }
 
+/// 11.2.3's note (1): DMA1 of the CH32V30x_D8 must not cross a 64 KB
+/// boundary on lots whose penultimate sixth digit is zero - which a
+/// program cannot read, so the rule is kept on every lot of the class.
+inline constexpr bool dma1_bounded_to_64k = device::device_class == DeviceClass::v30x_d8;
+
+/// Whether one end of a transfer crosses a 64-kilobyte boundary: its first
+/// and last access in different 64 KB pages. An end that does not
+/// increment touches one address and crosses nothing.
+constexpr bool dma_span_crosses_64k(uint32_t address, uint16_t count, DmaWidth w,
+                                    bool increment) {
+    if (!increment || count == 0u) {
+        return false;
+    }
+    const uint32_t last = address + static_cast<uint32_t>(count - 1u) * dma_width_bytes(w);
+    return (address >> 16) != (last >> 16);
+}
+
+/// The transfer as a whole, both ends.
+inline bool dma_transfer_crosses_64k(const DmaTransfer& t) {
+    const uint32_t p = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t.peripheral));
+    const uint32_t m = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(t.memory));
+    return dma_span_crosses_64k(p, t.count, t.config.peripheral_width,
+                                t.config.peripheral_increment) ||
+           dma_span_crosses_64k(m, t.count, t.config.memory_width, t.config.memory_increment);
+}
+
+/// Which channels of controller `c` have EN set, bit ch - 1 for channel
+/// ch - zero for a controller this part has not got, or whose gate is
+/// closed. A plain function over the addresses, so that a question about
+/// both controllers never names a controller type this part refuses.
+inline uint16_t dma_enabled_channels(uint8_t c) {
+    const uint8_t count = dma_channels_of(c);
+    if (count == 0u || !Rcc::enabled(Bus::hb, c == 1u ? rcc_hb_dma1 : rcc_hb_dma2)) {
+        return 0;
+    }
+    uint16_t mask = 0;
+    for (uint8_t ch = 1; ch <= count; ++ch) {
+        const DmaChannelRegs& r =
+            *reinterpret_cast<const DmaChannelRegs*>(dma_channel_address(c, ch));
+        if ((r.CFGR & dma_cfgr_en) != 0u) {
+            mask = static_cast<uint16_t>(mask | (1u << (ch - 1u)));
+        }
+    }
+    return mask;
+}
+
 /**
- * The block: its gate, its two flag registers, and the one question the
- * power model asks it.
+ * One controller: its gate, its flag registers, and the one question the
+ * power model asks.
  */
+template <uint8_t c>
 struct Dma {
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+
     Dma() = delete;
 
-    static void open() { Rcc::enable(Bus::hb, rcc_hb_dma1); }
-    static bool opened() { return Rcc::enabled(Bus::hb, rcc_hb_dma1); }
+    static constexpr uint8_t controller = c;
+    static constexpr uint8_t channel_count = dma_channels_of(c);
+    static constexpr uint32_t gate = c == 1u ? rcc_hb_dma1 : rcc_hb_dma2;
+    /// Whether this controller has the extended flag pair (DMA2 alone).
+    static constexpr bool has_extended_flags = (c == 2u);
+
+    static DmaRegs& regs() { return *dma_regs(c); }
+
+    static void open() { Rcc::enable(Bus::hb, gate); }
+    static bool opened() { return Rcc::enabled(Bus::hb, gate); }
 
     /**
-     * Every channel back to the chapter's own reset values, the gate
-     * left open.
+     * Every channel of this controller back to the chapter's own reset
+     * values, the gate left open.
      *
-     * THIS BLOCK HAS NO RESET LINE: RCC_AHBRSTR (3.4.11) reserves bits
+     * THESE BLOCKS HAVE NO RESET LINE: RCC_AHBRSTR (3.4.11) reserves bits
      * [11:0] and names only the Ethernet MAC, the DVP and the USB OTG
      * core, so the pulse every PB1 and PB2 peripheral of this stratum
      * is put back with does not exist here and software does the work.
      */
     static void stop_all() {
         open();
-        for (uint8_t ch = 0; ch < dma_channel_count; ++ch) {
-            const bool was = (dma()->channel[ch].CFGR & dma_cfgr_en) != 0u;
-            dma()->channel[ch].CFGR = 0;
-            if (was) {
-                BusActivity::left();
+        if constexpr (c == 1u) {
+            for (uint8_t ch = 0; ch < channel_count; ++ch) {
+                const bool was = (regs().channel[ch].CFGR & dma_cfgr_en) != 0u;
+                regs().channel[ch].CFGR = 0;
+                if (was) {
+                    BusActivity::left();
+                }
+                regs().channel[ch].CNTR = 0;
+                regs().channel[ch].PADDR = 0;
+                regs().channel[ch].MADDR = 0;
             }
-            dma()->channel[ch].CNTR = 0;
-            dma()->channel[ch].PADDR = 0;
-            dma()->channel[ch].MADDR = 0;
+            regs().INTFCR = 0xFFFFFFFFUL;
+        } else {
+            for (uint8_t ch = 1; ch <= channel_count; ++ch) {
+                DmaChannelRegs& r =
+                    *reinterpret_cast<DmaChannelRegs*>(dma_channel_address(c, ch));
+                const bool was = (r.CFGR & dma_cfgr_en) != 0u;
+                r.CFGR = 0;
+                if (was) {
+                    BusActivity::left();
+                }
+                r.CNTR = 0;
+                r.PADDR = 0;
+                r.MADDR = 0;
+            }
+            regs().INTFCR = 0xFFFFFFFFUL;
+            dma2_extend()->INTFCR = 0xFFFFUL;
         }
-        dma()->INTFCR = 0xFFFFFFFFUL;
     }
 
-    static uint32_t flags() { return dma()->INTFR; }
-    static void clear(uint32_t mask) { dma()->INTFCR = mask; }
+    /// INTFR whole: channels 1..8 of DMA1, 1..7 of DMA2.
+    static uint32_t flags() { return regs().INTFR; }
+    static void clear(uint32_t mask) { regs().INTFCR = mask; }
+
+    /// DMA2_EXTEM_INTFR whole: channels 8..11 at 4 x (ch - 8).
+    static uint32_t extended_flags() {
+        static_assert(has_extended_flags,
+                      "brio DMA: the extended flag pair is DMA2's (RM 11.3.11) - DMA1's channels "
+                      "all report in INTFR");
+        return dma2_extend()->INTFR;
+    }
+    static void clear_extended(uint32_t mask) {
+        static_assert(has_extended_flags,
+                      "brio DMA: the extended flag pair is DMA2's (RM 11.3.12)");
+        dma2_extend()->INTFCR = mask;
+    }
+
+    /// Which of THIS controller's channels have EN set, bit ch - 1 for
+    /// channel ch. Zero with the gate closed.
+    static uint16_t enabled_channels() { return dma_enabled_channels(c); }
 
     /**
-     * Is ANY channel enabled? The question the sleep site of this family
-     * has to ask before it arms a mode: in Sleep the bus matrix serves
-     * the core alone, so a channel that is up is a transfer that will
-     * stall for the whole sleep. Answers false with the gate closed,
-     * which is a block that cannot have a channel running.
+     * Is ANY channel enabled, on ANY controller this part has? The question
+     * the sleep site of this family asks before it arms a mode: in Sleep the
+     * bus matrix serves the core alone, so a channel that is up is a
+     * transfer that will stall for the whole sleep. It is asked of every
+     * controller whichever one it is spelled on, because the count
+     * ch32vx03/bus_activity.hpp keeps is fed by the channels of both and the
+     * silicon's answer has to mean the same thing. A closed gate answers
+     * false: a block that cannot have a channel running.
      */
     static bool any_enabled() {
-        if (!opened()) {
-            return false;
-        }
-        for (uint8_t ch = 0; ch < dma_channel_count; ++ch) {
-            if ((dma()->channel[ch].CFGR & dma_cfgr_en) != 0u) {
-                return true;
-            }
-        }
-        return false;
+        return dma_enabled_channels(1) != 0u ||
+               (device::dma_controller_count >= 2u && dma_enabled_channels(2) != 0u);
     }
 };
 
 /**
- * One channel, 1..8. Every configuring verb refuses while the channel
- * is enabled, because CFGR's fields, CNTR and the two addresses are
- * read-only then (11.2.1's note and each register's own): a store the
- * silicon ignores would be a lie the code told itself.
+ * One channel of one controller: n = 1..8 on DMA1 of a CH32V203, 1..7 on
+ * DMA1 of a CH32V303, 1..11 on its DMA2. Every configuring verb refuses
+ * while the channel is enabled, because CFGR's fields, CNTR and the two
+ * addresses are read-only then (11.2.1's note and each register's own): a
+ * store the silicon ignores would be a lie the code told itself.
  */
-template <uint8_t ch>
+template <uint8_t c, uint8_t ch>
 class DmaChannel {
-    static_assert(ch >= 1 && ch <= dma_channel_count,
-                  "DMA1 has channels 1..8 on the CH32V203 and 1..7 on the CH32V303 "
-                  "(device::dma1_channel_count)");
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+    static_assert(dma_channel_exists(c, ch),
+                  "brio DMA: no such channel - DMA1 has channels 1..8 on the CH32V203 and 1..7 on "
+                  "the CH32V303, DMA2 has 1..11 (device::dma1_channel_count, dma2_channel_count)");
 
 public:
     DmaChannel() = delete;
 
-    static constexpr uint8_t number = ch;
-    static constexpr uint32_t flag_shift = 4u * (ch - 1u);
+    using Controller = Dma<c>;
 
-    static DmaChannelRegs& regs() { return dma()->channel[ch - 1u]; }
-    static constexpr Irq irq() { return dma_channel_irq(ch); }
+    static constexpr uint8_t controller = c;
+    static constexpr uint8_t number = ch;
+    static constexpr DmaSlot slot{c, ch};
+    /// DMA2's channels 8..11 report in the extended flag pair.
+    static constexpr bool extended = (c == 2u && ch >= 8u);
+    static constexpr uint32_t flag_shift = extended ? 4u * (ch - 8u) : 4u * (ch - 1u);
+    /// Whether this channel is held to 11.2.3's 64 KB rule.
+    static constexpr bool bounded_to_64k = (c == 1u) && dma1_bounded_to_64k;
+
+    static DmaChannelRegs& regs() {
+        if constexpr (extended) {
+            return *reinterpret_cast<DmaChannelRegs*>(dma_channel_address(c, ch));
+        } else {
+            return Controller::regs().channel[ch - 1u];
+        }
+    }
+    static constexpr Irq irq() { return dma_channel_irq(c, ch); }
 
     static bool enabled() { return (regs().CFGR & dma_cfgr_en) != 0u; }
 
@@ -327,7 +512,7 @@ public:
     /// task goes through - never the enable itself, which would count an
     /// idempotent store twice.
     static void enable(bool on) {
-        Dma::open();
+        Controller::open();
         const bool was = enabled();
         if (on) {
             regs().CFGR |= dma_cfgr_en;
@@ -345,20 +530,20 @@ public:
 
     /// Everything but the addresses and the count. Refused while
     /// enabled, and for the configuration the chapter forbids.
-    static bool configure(const DmaChannelConfig& c) {
-        Dma::open();
-        if (enabled() || !dma_channel_config_valid(c)) {
+    static bool configure(const DmaChannelConfig& cfg) {
+        Controller::open();
+        if (enabled() || !dma_channel_config_valid(cfg)) {
             return false;
         }
         uint32_t v = regs().CFGR & (dma_cfgr_tcie | dma_cfgr_htie | dma_cfgr_teie);
-        if (c.direction == DmaDirection::memory_to_peripheral) { v |= dma_cfgr_dir; }
-        if (c.circular) { v |= dma_cfgr_circ; }
-        if (c.memory_to_memory) { v |= dma_cfgr_mem2mem; }
-        if (c.peripheral_increment) { v |= dma_cfgr_pinc; }
-        if (c.memory_increment) { v |= dma_cfgr_minc; }
-        v |= static_cast<uint32_t>(c.peripheral_width) << dma_cfgr_psize_shift;
-        v |= static_cast<uint32_t>(c.memory_width) << dma_cfgr_msize_shift;
-        v |= static_cast<uint32_t>(c.priority) << dma_cfgr_pl_shift;
+        if (cfg.direction == DmaDirection::memory_to_peripheral) { v |= dma_cfgr_dir; }
+        if (cfg.circular) { v |= dma_cfgr_circ; }
+        if (cfg.memory_to_memory) { v |= dma_cfgr_mem2mem; }
+        if (cfg.peripheral_increment) { v |= dma_cfgr_pinc; }
+        if (cfg.memory_increment) { v |= dma_cfgr_minc; }
+        v |= static_cast<uint32_t>(cfg.peripheral_width) << dma_cfgr_psize_shift;
+        v |= static_cast<uint32_t>(cfg.memory_width) << dma_cfgr_msize_shift;
+        v |= static_cast<uint32_t>(cfg.priority) << dma_cfgr_pl_shift;
         regs().CFGR = v;
         return true;
     }
@@ -367,17 +552,17 @@ public:
     /// compares against what it asked for.
     static DmaChannelConfig configuration() {
         const uint32_t v = regs().CFGR;
-        DmaChannelConfig c{};
-        c.direction = (v & dma_cfgr_dir) != 0u ? DmaDirection::memory_to_peripheral
-                                               : DmaDirection::peripheral_to_memory;
-        c.circular = (v & dma_cfgr_circ) != 0u;
-        c.memory_to_memory = (v & dma_cfgr_mem2mem) != 0u;
-        c.peripheral_increment = (v & dma_cfgr_pinc) != 0u;
-        c.memory_increment = (v & dma_cfgr_minc) != 0u;
-        c.peripheral_width = static_cast<DmaWidth>((v >> dma_cfgr_psize_shift) & 3u);
-        c.memory_width = static_cast<DmaWidth>((v >> dma_cfgr_msize_shift) & 3u);
-        c.priority = static_cast<DmaPriority>((v >> dma_cfgr_pl_shift) & 3u);
-        return c;
+        DmaChannelConfig cfg{};
+        cfg.direction = (v & dma_cfgr_dir) != 0u ? DmaDirection::memory_to_peripheral
+                                                 : DmaDirection::peripheral_to_memory;
+        cfg.circular = (v & dma_cfgr_circ) != 0u;
+        cfg.memory_to_memory = (v & dma_cfgr_mem2mem) != 0u;
+        cfg.peripheral_increment = (v & dma_cfgr_pinc) != 0u;
+        cfg.memory_increment = (v & dma_cfgr_minc) != 0u;
+        cfg.peripheral_width = static_cast<DmaWidth>((v >> dma_cfgr_psize_shift) & 3u);
+        cfg.memory_width = static_cast<DmaWidth>((v >> dma_cfgr_msize_shift) & 3u);
+        cfg.priority = static_cast<DmaPriority>((v >> dma_cfgr_pl_shift) & 3u);
+        return cfg;
     }
 
     static bool set_count(uint16_t count) {
@@ -413,12 +598,31 @@ public:
         return true;
     }
 
+    /// Whether this channel would take the transfer: its shape, its
+    /// alignment, and - on the CH32V303's DMA1 - the 64 KB rule.
+    static bool accepts(const DmaTransfer& t) {
+        if (!dma_transfer_valid(t) || !dma_transfer_aligned(t)) {
+            return false;
+        }
+        if constexpr (bounded_to_64k) {
+            if (dma_transfer_crosses_64k(t)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// Program the whole transfer WITHOUT starting it. The flags are
     /// cleared on the way in, so a poller cannot see the last block's.
     static bool prepare(const DmaTransfer& t) {
-        Dma::open();
+        Controller::open();
         if (enabled() || !dma_transfer_valid(t) || !dma_transfer_aligned(t)) {
             return false;
+        }
+        if constexpr (bounded_to_64k) {
+            if (dma_transfer_crosses_64k(t)) {
+                return false;
+            }
         }
         if (!configure(t.config)) {
             return false;
@@ -450,9 +654,21 @@ public:
         return true;
     }
 
-    static uint32_t flags() { return (dma()->INTFR >> flag_shift) & DmaFlag::all; }
+    static uint32_t flags() {
+        if constexpr (extended) {
+            return (dma2_extend()->INTFR >> flag_shift) & DmaFlag::all;
+        } else {
+            return (Controller::regs().INTFR >> flag_shift) & DmaFlag::all;
+        }
+    }
     static bool flag(uint32_t mask) { return (flags() & mask) != 0u; }
-    static void clear(uint32_t mask) { dma()->INTFCR = (mask & DmaFlag::all) << flag_shift; }
+    static void clear(uint32_t mask) {
+        if constexpr (extended) {
+            dma2_extend()->INTFCR = (mask & DmaFlag::all) << flag_shift;
+        } else {
+            Controller::regs().INTFCR = (mask & DmaFlag::all) << flag_shift;
+        }
+    }
 
     /// Arm the channel's interrupts (the PFIC line is the caller's).
     static void arm(uint32_t mask, bool on) {
@@ -500,7 +716,7 @@ public:
     /// Stop and clear everything of the channel's: EN off, the config
     /// zeroed, the flags cleared.
     static void stop() {
-        Dma::open();
+        Controller::open();
         const bool was = enabled();
         regs().CFGR = 0;
         if (was) {
@@ -514,21 +730,31 @@ public:
 
 /**
  * A transmit engine: one caller-owned run poured into one peripheral
- * register. The channel IS the request (table 11-5), so the channel
- * number is the whole of the engine's identity.
+ * register. The channel IS the request (11.2.3's tables), so the slot -
+ * the controller and its channel - is the whole of the engine's
+ * identity.
  */
-template <uint8_t ch, typename Elem = uint8_t>
+template <uint8_t c, uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
-    static_assert(ch >= 1 && ch <= dma_channel_count, "no such DMA channel for this engine");
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+    static_assert(dma_channel_exists(c, ch),
+                  "brio DMA: no such DMA channel for this engine - DMA1 has channels 1..8 on the "
+                  "CH32V203 and 1..7 on the CH32V303, DMA2 has 1..11");
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
-    using Channel = DmaChannel<ch>;
+    using Channel = DmaChannel<c, ch>;
 
 public:
     DmaTxEngine() = delete;
 
     static constexpr bool present = true;
+    static constexpr uint8_t controller = c;
     static constexpr uint8_t channel = ch;
+    static constexpr DmaSlot slot{c, ch};
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -656,18 +882,27 @@ private:
  * A receive engine: one caller-owned run filled from one peripheral
  * register, and asked how much has arrived.
  */
-template <uint8_t ch, typename Elem = uint8_t>
+template <uint8_t c, uint8_t ch, typename Elem = uint8_t>
 class DmaRxEngine {
-    static_assert(ch >= 1 && ch <= dma_channel_count, "no such DMA channel for this engine");
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+    static_assert(dma_channel_exists(c, ch),
+                  "brio DMA: no such DMA channel for this engine - DMA1 has channels 1..8 on the "
+                  "CH32V203 and 1..7 on the CH32V303, DMA2 has 1..11");
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
-    using Channel = DmaChannel<ch>;
+    using Channel = DmaChannel<c, ch>;
 
 public:
     DmaRxEngine() = delete;
 
     static constexpr bool present = true;
+    static constexpr uint8_t controller = c;
     static constexpr uint8_t channel = ch;
+    static constexpr DmaSlot slot{c, ch};
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -800,7 +1035,7 @@ private:
 // ---- the block engines ----------------------------------------------------------
 
 /**
- * DmaLoopEngine<ch, Elem> - "play one caller-owned table into a
+ * DmaLoopEngine<c, ch, Elem> - "play one caller-owned table into a
  * peripheral, for ever": util/block_stream.hpp's BlockPlayer.
  *
  * THIS ONE RIDES THE CONTROLLER'S CIRCULAR MODE (CFGR.CIRC, 11.2.1):
@@ -814,18 +1049,27 @@ private:
  * published per lap: an owner that wants a lap as an event arms its own
  * TimeEvent (design/block-stream.md).
  */
-template <uint8_t ch, typename Elem = uint16_t>
+template <uint8_t c, uint8_t ch, typename Elem = uint16_t>
 class DmaLoopEngine {
-    static_assert(ch >= 1 && ch <= dma_channel_count, "no such DMA channel for this engine");
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+    static_assert(dma_channel_exists(c, ch),
+                  "brio DMA: no such DMA channel for this engine - DMA1 has channels 1..8 on the "
+                  "CH32V203 and 1..7 on the CH32V303, DMA2 has 1..11");
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
-    using Channel = DmaChannel<ch>;
+    using Channel = DmaChannel<c, ch>;
 
 public:
     DmaLoopEngine() = delete;
 
     static constexpr bool present = true;
+    static constexpr uint8_t controller = c;
     static constexpr uint8_t channel = ch;
+    static constexpr DmaSlot slot{c, ch};
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -931,7 +1175,7 @@ private:
 };
 
 /**
- * DmaPingPongEngine<ch, Elem> - "fill one caller-owned buffer while the
+ * DmaPingPongEngine<c, ch, Elem> - "fill one caller-owned buffer while the
  * caller drains the other": util/block_stream.hpp's BlockSource.
  *
  * WHY IT IS *NOT* CIRCULAR, on a controller that has a circular mode
@@ -959,18 +1203,27 @@ private:
  * must outlive the stream. They are `volatile` because the controller
  * writes them and the compiler sees nothing.
  */
-template <uint8_t ch, typename Elem = uint16_t>
+template <uint8_t c, uint8_t ch, typename Elem = uint16_t>
 class DmaPingPongEngine {
-    static_assert(ch >= 1 && ch <= dma_channel_count, "no such DMA channel for this engine");
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+    static_assert(dma_channel_exists(c, ch),
+                  "brio DMA: no such DMA channel for this engine - DMA1 has channels 1..8 on the "
+                  "CH32V203 and 1..7 on the CH32V303, DMA2 has 1..11");
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
-    using Channel = DmaChannel<ch>;
+    using Channel = DmaChannel<c, ch>;
 
 public:
     DmaPingPongEngine() = delete;
 
     static constexpr bool present = true;
+    static constexpr uint8_t controller = c;
     static constexpr uint8_t channel = ch;
+    static constexpr DmaSlot slot{c, ch};
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 

@@ -6,6 +6,6 @@
 #include "ch32vx03/dma.hpp"
 #include "ch32vx03/spi.hpp"
 
-using Wrong = brio::SpiHost<1, brio::spi_default_pins<1>, brio::DmaTxEngine<4>,
-                            brio::DmaRxEngine<2>>;
+using Wrong = brio::SpiHost<1, brio::spi_default_pins<1>, brio::DmaTxEngine<1, 4>,
+                            brio::DmaRxEngine<1, 2>>;
 void f() { (void)Wrong::status(); }

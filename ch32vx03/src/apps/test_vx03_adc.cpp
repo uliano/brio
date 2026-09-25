@@ -1,7 +1,8 @@
-// test_vx03_adc - the reference bench suite for the CH32V203's two
-// analog-to-digital converters: ch32vx03/adc.hpp over RM ch. 12, and
-// the two block engines ch32vx03/dma.hpp grew for the stream this
-// chapter is the first user of.
+// test_vx03_adc - the reference bench suite for the two analog-to-digital
+// converters of the CH32V203 and the CH32V303: ch32vx03/adc.hpp over RM
+// ch. 12, and the two block engines ch32vx03/dma.hpp grew for the stream
+// this chapter is the first user of. Letters k..o are the CH32V303's: what
+// its device class adds to the chapter, and the DAC it has as a source.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -31,13 +32,18 @@
 // A pad in ANALOG mode has no pull at all (RM 10.2.7: the mode is the
 // input driver off, and the pull goes with it), so the pulled source is
 // a pad left a PULLED INPUT and converted through it. Whether that
-// works is itself a measurement, and letter c reports it.
+// works is itself a measurement, and letter c reports it. And on the
+// CH32V303 a fifth source: its own DAC, whose first output PA4 is also
+// the converter's input 4 - a known code behind a low impedance, which
+// is what makes a linearity measurable with no wire.
 //
 // THE PADS. PA1 and PA2 (channels 1 and 2) are the two levels; PB11 is
-// the EXTI pad of letter g, toggled by the CPU. NEVER TOUCHED: PA9/PA10
-// (the console), PA13/PA14 (the debug port), PA11/PA12 (the USB pads),
-// PC14/PC15 and PD0/PD1 (the crystals), PA0 (the KEY) - and PB2, the
-// LED, toggled per command as every suite of this target does.
+// the EXTI pad of letters g and m, toggled by the CPU; on the CH32V303
+// PA4 is DAC1's output in letter l. NEVER TOUCHED: PA9/PA10 (the
+// console), PA13/PA14 (the debug port), PA11/PA12 (the USB pads),
+// PC14/PC15 and PD0/PD1 (the crystals), PA0 (the CH32V203 board's KEY) -
+// and PB2, the CH32V203 board's LED, toggled per command as every suite
+// of this target does.
 //
 // What is exercised, letter by letter:
 //   a  THE POWER-UP AND THE CALIBRATION: the word the calibration
@@ -65,14 +71,35 @@
 //   i  DISCONTINUOUS MODE: a sequence of six stepped two at a time
 //   j  THE SAMPLER: util/analog_sampler.hpp walking three inputs at a
 //      software pace in a kernel, one AnalogSample published per input
+// and on the CH32V303 alone:
+//   k  THE SHORT SAMPLING TIMES AND THE TAIL: ADC_SMP_SEL asked of the
+//      die - the register is some lots' only, and a die without it keeps
+//      nothing written there - and the conversion's length beyond its
+//      sampling time at the four long codes, timed over 64 conversions
+//      landed by the DMA; the four short times where the die has them
+//   l  THE DAC AS THE SOURCE: util/analog_sampler.hpp walking PA4 while
+//      DAC1 steps through thirty-one codes - monotonic, gain, offset and
+//      the residual against tables 4-43 and 4-45 - then the PGA's three
+//      gains on the same pad
+//   m  CODE 110 HANDED TO TIM8: the AFIO field written with the trigger
+//      and read back, EXTI line 11 starting nothing while it is set,
+//      TIM8's TRGO pacing the group wherever this build drives TIM8, and
+//      the injected group's and ADC2's fields
+//   n  ADC2'S OWN REQUEST: asked of the die first - the row table 11-3's
+//      note gives to some lots only - then eight conversions landed by
+//      DMA2's channel 5 where it is there, and none reaching it where not
+//   o  THE ADC CLOCK'S TWO DUTY BITS: ADC_DUTY_SEL (asked of the die, a
+//      lot's too) and ADCDUTY each set in turn, the readings and the
+//      conversion time against the 50 % clock's
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
 #include "ch32vx03/adc.hpp"
 #include "ch32vx03/clock.hpp"
+#include "ch32vx03/dac.hpp"
 #include "ch32vx03/dma.hpp"
 #include "ch32vx03/exti.hpp"
 #include "ch32vx03/pfic.hpp"
@@ -173,8 +200,10 @@ void wait_us(uint32_t us) {
 // ---------------------------------------------------------------------------
 
 /// The engine on the channel the ADC's request is wired to - named
-/// through the request and not by its number (RM table 11-5).
-using Source = DmaPingPongEngine<DmaRequestOf<DmaRequest::adc1>::channel, uint16_t>;
+/// through the request and not by its number (RM table 11-5, and 11-2 on
+/// the CH32V303).
+using Source = DmaPingPongEngine<DmaRequestOf<DmaRequest::adc1>::controller,
+                                 DmaRequestOf<DmaRequest::adc1>::channel, uint16_t>;
 
 constexpr uint16_t block_elements = 8;   ///< two laps of a four-channel sequence
 volatile uint16_t block_a[block_elements];
@@ -235,10 +264,45 @@ using Sampler =
 using System = Tenuto<P, Consumer, Relay, Sampler>;
 
 // ---------------------------------------------------------------------------
+// Letter l's loop: the DAC on PA4 and a sampler of its own (the CH32V303's)
+// ---------------------------------------------------------------------------
+
+/// What the DAC loop's consumer keeps: the samples since the last reset.
+struct DacConsumer : Fsm<DacConsumer, AnalogSample> {
+    static inline EventQueue<Event, 8, P> queue;
+    static inline volatile uint32_t sum = 0;
+    static inline volatile uint16_t count = 0;
+
+    static void init() { start(&only); }
+    static void dispatch(const Event& e) { Fsm::dispatch(e); }
+    static void reset() {
+        sum = 0;
+        count = 0;
+    }
+
+    static Status only(const Event& e) {
+        return match(e,
+            [](Entry) { return handled(); },
+            [](Exit) { return handled(); },
+            [](AnalogSample s) {
+                sum = sum + s.value;
+                count = static_cast<uint16_t>(count + 1u);
+                return handled();
+            });
+    }
+};
+
+using DacPad = AnalogIn<Pin<'A', 4>>;
+using DacSampler = AnalogSampler<Adc<1>, P, Subscribers<DacConsumer>, DacPad{}>;
+/// A kernel of its own, so the pack every other letter runs is the one it
+/// always was.
+using DacKernel = Tenuto<P, DacConsumer, DacSampler>;
+
+// ---------------------------------------------------------------------------
 // The handlers' state
 // ---------------------------------------------------------------------------
 
-enum class AdcMode : uint8_t { counting, sampling };
+enum class AdcMode : uint8_t { counting, sampling, dac_sampling };
 volatile AdcMode adc_mode = AdcMode::counting;
 
 volatile uint16_t eoc_calls = 0;
@@ -267,12 +331,12 @@ void reset_counters() {
 void all_off() {
     Pfic::disable(Adc<1>::irq());
     Pfic::clear_pending(Adc<1>::irq());
-    Pfic::disable(dma_channel_irq(Source::channel));
+    Pfic::disable(dma_channel_irq(Source::controller, Source::channel));
     Pfic::disable(Irq::exti15_10);
     Pfic::clear_pending(Irq::exti15_10);
     Source::stop();
-    Dma::open();
-    Dma::stop_all();
+    Dma<1>::open();
+    Dma<1>::stop_all();
     Adc<1>::release();
     if constexpr (device::adc_count >= 2u) {
         Adc<2>::release();
@@ -319,7 +383,7 @@ alignas(4) volatile uint16_t pair[2];
  * on the channel for as long as the code between them takes.
  */
 uint16_t scan_pair(uint8_t first, uint8_t second, AdcSampleTime t) {
-    using Ch = DmaChannel<DmaRequestOf<DmaRequest::adc1>::channel>;
+    using Ch = DmaChannel<DmaRequestOf<DmaRequest::adc1>::controller, DmaRequestOf<DmaRequest::adc1>::channel>;
     (void)Adc<1>::sample_time(first, t);
     (void)Adc<1>::sample_time(second, t);
     const uint8_t order[2] = {first, second};
@@ -395,7 +459,10 @@ void ta_calibration() {
     const uint16_t code = static_cast<uint16_t>(r.RDATAR & 0xFFFFu);
 
     print(serial, "  ADON ack in ", power_us, " us; RSTCAL ", rstcal_us, " us, CAL ", cal_us,
-          " us (the datasheet's tCAL is 100 ADCCLK = 8 us at 12 MHz)", crlf);
+          device::device_class == DeviceClass::v30x_d8
+              ? " us (the datasheet's tCAL is 40 ADCCLK = 3.3 us at 12 MHz)"
+              : " us (the datasheet's tCAL is 100 ADCCLK = 8 us at 12 MHz)",
+          crlf);
     print(serial, "  the data register: ", before, " before the calibration, ", code, " after",
           crlf);
     bench.verdict("RSTCAL is cleared by the hardware when the calibration register is "
@@ -537,10 +604,35 @@ void tc_levels() {
                   "start of the conversion: a tenth of a microsecond does not charge a "
                   "sample-and-hold through 40 kOhm",
                   ladder[0] + 200u < ladder[7]);
-    bench.verdict("THE SAMPLE-AND-HOLD TRACKS THE SELECTED CHANNEL BETWEEN CONVERSIONS: with "
-                  "the mux parked on the pad the same source reads full scale at EVERY "
-                  "sampling time, the shortest included",
-                  parked[0] + 200u >= parked[7]);
+    if constexpr (device::device_class == DeviceClass::v30x_d8) {
+        // THE CH32V303 DOES NOT DO WHAT THE CH32V203C8 DID. The same polled
+        // read falls well short of full scale at 1.5 cycles here, and the
+        // time the multiplexer sits on the pad before the start is printed
+        // beside it: 0, 2, 20 and 200 us of it, after the grounded channel.
+        constexpr uint32_t dwell_us[4] = {0, 2, 20, 200};
+        uint16_t dwelt[4] = {};
+        (void)Adc<1>::sample_time(ch_high, AdcSampleTime::cycles1_5);
+        for (uint8_t i = 0; i < 4u; ++i) {
+            Adc<1>::select_channel(ch_low);
+            (void)Adc<1>::read();
+            Adc<1>::select_channel(ch_high);
+            wait_us(dwell_us[i]);
+            dwelt[i] = Adc<1>::read();
+        }
+        print(serial, "  at 1.5 cycles with the multiplexer parked on the pad 0, 2, 20 and 200 us "
+                      "before the start: ",
+              dwelt[0], " ", dwelt[1], " ", dwelt[2], " ", dwelt[3], crlf);
+        bench.verdict("ON THIS PART A PARKED MULTIPLEXER IS NO HELP: a polled read at 1.5 "
+                      "cycles right after the grounded channel falls short of the longest "
+                      "sampling time's reading by more than 200 counts, where the CH32V203C8's "
+                      "reached full scale",
+                      parked[0] + 200u < parked[7] && dwelt[0] + 200u < parked[7]);
+    } else {
+        bench.verdict("THE SAMPLE-AND-HOLD TRACKS THE SELECTED CHANNEL BETWEEN CONVERSIONS: with "
+                      "the mux parked on the pad the same source reads full scale at EVERY "
+                      "sampling time, the shortest included",
+                      parked[0] + 200u >= parked[7]);
+    }
 
     HighPin::input(PinPull::down);
     wait_us(1000);
@@ -576,7 +668,7 @@ void td_stream() {
 
     Adc<1>::claim_stream<Source>();
     const bool started = Source::start(block_a, block_b, block_elements);
-    Pfic::enable(dma_channel_irq(Source::channel));
+    Pfic::enable(dma_channel_irq(Source::controller, Source::channel));
     reset_counters();
 
     Adc<1>::continuous(true);
@@ -649,10 +741,10 @@ void td_stream() {
     // memory, with the half interrupt armed and a handler whose whole
     // body is read-and-disable.
     Source::stop();
-    Pfic::disable(dma_channel_irq(Source::channel));
+    Pfic::disable(dma_channel_irq(Source::controller, Source::channel));
     tear_left = 0;
     tear_seen = false;
-    using Tear = DmaChannel<2>;
+    using Tear = DmaChannel<1, 2>;
     Tear::stop();
     Tear::arm(DmaFlag::half, true);
     Pfic::enable(Tear::irq());
@@ -871,10 +963,10 @@ void tg_triggers() {
     bench.verdict("and it paces the converter at its own rate, within one per cent",
                   timed + expected / 100u >= expected && timed <= expected + expected / 100u);
 
-    // The EXTI line. Code 110 is EXTI line 11 on this family and not
-    // TIM8's TRGO - the remap that would make it so belongs to another
-    // device class. The pad raising it is one of our own, toggled by
-    // the CPU.
+    // The EXTI line. Code 110 is EXTI line 11 unless AFIO hands it to
+    // TIM8's TRGO, which the CH32V303RC and VC can and letter m
+    // measures; `exti11` is the spelling that clears that field. The pad
+    // raising it is one of our own, toggled by the CPU.
     Adc<1>::trigger(AdcTrigger::exti11);
     ExtiPin::output(false);
     const bool selected = Exti::select(adc_regular_exti_line, 'B');
@@ -1038,7 +1130,7 @@ void ti_discontinuous() {
 
     // The DMA is the instrument: one request per CONVERSION, so what
     // lands after each trigger says how far the sequence walked.
-    using Ch = DmaChannel<DmaRequestOf<DmaRequest::adc1>::channel>;
+    using Ch = DmaChannel<DmaRequestOf<DmaRequest::adc1>::controller, DmaRequestOf<DmaRequest::adc1>::channel>;
     for (uint8_t i = 0; i < 6u; ++i) {
         captured[i] = 0xFFFFu;
     }
@@ -1159,6 +1251,665 @@ void tj_sampler() {
 }
 
 // ===========================================================================
+// The CH32V303's letters (k..o)
+// ===========================================================================
+//
+// Every letter below is a template whose last parameter is the fact that
+// makes it meaningful, and does its work inside `if constexpr` on it: on a
+// CH32V203 the body is a discarded branch the compiler never instantiates,
+// and every class it names hangs on a template parameter for that reason.
+
+/// Letters k and o's instrument: `count` conversions of `ch` in continuous
+/// mode, landed by the DMA in `tear_dest`, timed from the start to the
+/// block's completion - in core cycles.
+template <uint8_t n = 1>
+uint32_t time_conversions(uint8_t ch, uint16_t count) {
+    using A = Adc<n>;
+    using Ch = DmaChannel<A::dma_slot.controller, A::dma_slot.channel>;
+    Ch::stop();
+    (void)Ch::load(DmaTransfer{
+        .peripheral = A::data_address(),
+        .memory = const_cast<uint16_t*>(tear_dest),
+        .count = count,
+        .config = {.direction = DmaDirection::peripheral_to_memory,
+                   .circular = false,
+                   .memory_to_memory = false,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::half,
+                   .memory_width = DmaWidth::half,
+                   .priority = DmaPriority::very_high},
+    });
+    (void)A::dma(true);
+    A::select_channel(ch);
+    A::continuous(true);
+    A::clear_flags(AdcFlag::all);
+    Stopwatch w;
+    A::start();
+    // The stopwatch folds one wrap of the tick counter per reading, so it
+    // is read on every pass: 64 of the longest conversions outlast a tick.
+    uint32_t cycles = 0;
+    uint32_t spins = 1'000'000UL;
+    while (!Ch::flag(DmaFlag::complete) && spins-- != 0u) {
+        cycles = w.cycles();
+    }
+    cycles = w.cycles();
+    A::continuous(false);
+    Ch::stop();
+    (void)A::dma(false);
+    return cycles;
+}
+
+constexpr uint16_t distance16(uint16_t a, uint16_t b) {
+    return a > b ? static_cast<uint16_t>(a - b) : static_cast<uint16_t>(b - a);
+}
+
+/// A conversion's length in tenths of a HALF ADCCLK cycle, from a count of
+/// core cycles over `count` conversions.
+constexpr uint32_t conversion_half_x10(uint32_t core_cycles, uint16_t count) {
+    constexpr uint32_t core_per_adc = SysClock::hz / SysClock::adc_hz;
+    return (core_cycles * 20u) / (core_per_adc * count);
+}
+
+// ===========================================================================
+// k - ADC_SMP_SEL: the four short sampling times
+// ===========================================================================
+template <uint8_t n = 1, bool on = adc_has_short_sampling>
+void tk_short_sampling() {
+    if constexpr (on) {
+        using A = Adc<n>;
+        all_off();
+        drive_levels();
+        (void)A::init(clock, AdcConfig{});
+        constexpr uint16_t count = tear_items;
+
+        // The register: ADC_SMP_SEL of the rail's channel, ASKED OF THE DIE.
+        // ADCx_AUX is the lot's (12.3.15's note), and the verb sets the bit
+        // and reads it back before it touches SMPx - so a die without the
+        // register answers false and the channel keeps the time it had.
+        (void)A::sample_time(ch_high, AdcSampleTime::cycles41_5);
+        const bool took = A::sample_time(ch_high, AdcShortSampleTime::cycles2_5);
+        const uint32_t aux = A::aux();
+        const std::optional<AdcShortSampleTime> back = A::short_sample_time(ch_high);
+        const bool kept = A::sample_time(ch_high) == AdcSampleTime::cycles41_5;
+        // Every channel at once, from a known long time: code 101 is 3.5
+        // cycles with the bit and 55.5 without, so a refusal that wrote SMPx
+        // anyway would show.
+        A::sample_time_all(AdcSampleTime::cycles41_5);
+        const bool all_took = A::sample_time_all(AdcShortSampleTime::cycles3_5);
+        const bool all_kept = A::sample_time(ch_low) == AdcSampleTime::cycles41_5;
+        A::sample_time_all(AdcSampleTime::cycles41_5);
+        print(serial, "  ADC1_AUX with ADC_SMP_SEL", ch_high, " written: ", hex(aux), " - ",
+              took ? "this die has the register" : "this die's lot has NOT got the register",
+              crlf);
+        if (took) {
+            bench.verdict("ADCx_AUX takes ADC_SMP_SELx and reads it back - the register 12.3.15's "
+                          "note gives to some lots of this class only",
+                          (aux & (1UL << ch_high)) != 0u && back.has_value() &&
+                              *back == AdcShortSampleTime::cycles2_5 && all_took);
+        } else {
+            bench.verdict("a die whose lot has no ADCx_AUX keeps nothing written there, and the "
+                          "short-time verbs answer false having written nothing else: the "
+                          "channel keeps the long time it had instead of a code that would mean "
+                          "41.5..239.5 cycles in silence",
+                          aux == 0u && !back.has_value() && kept && !all_took && all_kept);
+        }
+
+        // THE TAIL - what a conversion takes beyond its sampling time - at
+        // the four long codes, whatever the die: 64 back-to-back
+        // conversions landed by the DMA, timed by the core's counter.
+        constexpr AdcSampleTime longs[4] = {AdcSampleTime::cycles41_5, AdcSampleTime::cycles55_5,
+                                            AdcSampleTime::cycles71_5, AdcSampleTime::cycles239_5};
+        uint8_t long_right = 0;
+        uint8_t predicted = 0;
+        for (uint8_t i = 0; i < 4u; ++i) {
+            (void)A::sample_time(ch_high, longs[i]);
+            const uint32_t l = conversion_half_x10(time_conversions<n>(ch_high, count), count);
+            const uint32_t l_tail = l - adc_sample_half_cycles(longs[i]) * 10u;
+            print(serial, "  SMP code ", static_cast<uint8_t>(longs[i]), ": ", l / 20u, ".",
+                  (l / 2u) % 10u, " cycles a conversion, a tail of ", l_tail / 20u, ".",
+                  (l_tail / 2u) % 10u, " beyond the sampling time", crlf);
+            if (l > adc_sample_half_cycles(longs[i]) * 10u && l_tail >= 240u && l_tail <= 260u) {
+                ++long_right;
+            }
+            const uint32_t model = A::conversion_half_cycles(ch_high) * 10u;
+            if ((l > model ? l - model : model - l) <= 10u) {
+                ++predicted;
+            }
+        }
+        bench.verdict("a conversion is its sampling time plus 12.5 cycles at every long code - "
+                      "the datasheets' 14..252 cycles and not 12.2.2's 11",
+                      long_right == 4u);
+        bench.verdict("and the driver's conversion_half_cycles() predicts each of them to half a "
+                      "cycle",
+                      predicted == 4u);
+
+        if (took) {
+            // The four short times, where the die has them.
+            constexpr AdcShortSampleTime shorts[4] = {
+                AdcShortSampleTime::cycles2_5, AdcShortSampleTime::cycles3_5,
+                AdcShortSampleTime::cycles4_5, AdcShortSampleTime::cycles5_5};
+            uint8_t short_right = 0;
+            for (uint8_t i = 0; i < 4u; ++i) {
+                (void)A::sample_time(ch_high, shorts[i]);
+                const uint32_t s = conversion_half_x10(time_conversions<n>(ch_high, count), count);
+                const uint32_t s_tail = s - adc_sample_half_cycles(shorts[i]) * 10u;
+                print(serial, "  short code ", static_cast<uint8_t>(shorts[i]), ": ", s / 20u, ".",
+                      (s / 2u) % 10u, " cycles a conversion, a tail of ", s_tail / 20u, ".",
+                      (s_tail / 2u) % 10u, crlf);
+                if (s > adc_sample_half_cycles(shorts[i]) * 10u && s_tail >= 240u &&
+                    s_tail <= 260u) {
+                    ++short_right;
+                }
+            }
+            bench.verdict("with ADC_SMP_SELx set, SMP codes 100..111 sample for 2.5, 3.5, 4.5 "
+                          "and 5.5 cycles, the same 12.5-cycle tail behind them",
+                          short_right == 4u);
+
+            // A hard source at the shortest of them.
+            (void)A::sample_time(ch_high, AdcShortSampleTime::cycles2_5);
+            (void)A::sample_time(ch_low, AdcShortSampleTime::cycles2_5);
+            A::select_channel(ch_low);
+            (void)A::read();
+            A::select_channel(ch_high);
+            const uint16_t high = A::read_settled(2);
+            A::select_channel(ch_low);
+            const uint16_t low = A::read_settled(2);
+            print(serial, "  at 2.5 cycles the rail reads ", high, " counts and ground ", low,
+                  crlf);
+            bench.verdict("a pad driven by its own port reads true at 2.5 cycles: full scale at "
+                          "the rail, zero at ground",
+                          high >= 4060u && low <= 20u);
+        }
+        A::sample_time_all(adc_sample_longest);
+        all_off();
+    }
+}
+
+/// A value in hundredths, printed with both its decimals.
+inline void print_hundredths(int32_t v) {
+    if (v < 0) {
+        print(serial, "-");
+        v = -v;
+    }
+    print(serial, v / 100, ".", (v % 100) / 10, v % 10);
+}
+
+// ===========================================================================
+// l - the DAC as the source: linearity through the sampler, and the PGA
+// ===========================================================================
+template <typename Kernel = DacKernel, typename Sampler = DacSampler,
+          typename Consumer = DacConsumer, uint8_t n = 1, uint8_t ch = 1,
+          bool on = device::has_dac>
+void tl_dac_source() {
+    if constexpr (on) {
+        using D = DacUnit<on>;
+        using Out = DacOut<ch>;
+        using A = Adc<n>;
+        all_off();
+        // No internal sources: TSVREFE would force the input buffer on for
+        // good, and the PGA half of this letter wants it the program's.
+        (void)A::init(clock, AdcConfig{});
+        A::sample_time_all(adc_sample_longest);
+        D::init();
+        Out::claim();
+        (void)D::configure(ch, DacChannelConfig{});
+        (void)D::enable(ch, true);
+        wait_us(20);
+
+        Pfic::enable(A::irq());
+        A::interrupts(A::converted_interrupt, true);
+        adc_mode = AdcMode::dac_sampling;
+        Kernel::init_all();
+        Sampler::start_every(1);
+        const auto serve_until = [](uint16_t samples) {
+            Stopwatch w;
+            while (Consumer::count < samples && w.us() < 50'000UL) {
+                TimeEvents<P>::process();
+                (void)Kernel::step();
+            }
+        };
+
+        // Thirty-one codes 128 apart, four samples of each - the first
+        // one after a step thrown away, since its conversion may have
+        // started before it.
+        constexpr uint8_t steps = 31;
+        uint16_t reading[steps] = {};
+        for (uint8_t i = 0; i < steps; ++i) {
+            const uint16_t code = static_cast<uint16_t>(128u + 128u * i);
+            (void)D::write(ch, code);
+            wait_us(50);
+            Consumer::reset();
+            serve_until(1);
+            Consumer::reset();
+            serve_until(4);
+            reading[i] = Consumer::count != 0u
+                             ? static_cast<uint16_t>(Consumer::sum / Consumer::count)
+                             : uint16_t{0};
+        }
+        Sampler::stop();
+        adc_mode = AdcMode::counting;
+        A::interrupts(A::converted_interrupt, false);
+
+        // The line through them: gain in parts per million, offset in
+        // hundredths of a count, and the largest distance from it.
+        bool monotonic = true;
+        int64_t sx = 0;
+        int64_t sy = 0;
+        int64_t sxx = 0;
+        int64_t sxy = 0;
+        for (uint8_t i = 0; i < steps; ++i) {
+            const int64_t x = 128 + 128 * static_cast<int64_t>(i);
+            const int64_t y = reading[i];
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+            if (i != 0u && reading[i] <= reading[i - 1u]) {
+                monotonic = false;
+            }
+        }
+        const int64_t k = steps;
+        const int64_t den = k * sxx - sx * sx;
+        const int64_t gain_ppm = ((k * sxy - sx * sy) * 1'000'000) / den;
+        const int64_t offset_x100 = ((sy * sxx - sx * sxy) * 100) / den;
+        int64_t worst_x100 = 0;
+        for (uint8_t i = 0; i < steps; ++i) {
+            const int64_t x = 128 + 128 * static_cast<int64_t>(i);
+            const int64_t fit_x100 = offset_x100 + (gain_ppm * x) / 10'000;
+            const int64_t r = static_cast<int64_t>(reading[i]) * 100 - fit_x100;
+            const int64_t a = r < 0 ? -r : r;
+            if (a > worst_x100) {
+                worst_x100 = a;
+            }
+        }
+        const int32_t gain = static_cast<int32_t>(gain_ppm);
+        const int32_t offset = static_cast<int32_t>(offset_x100);
+        const int32_t worst = static_cast<int32_t>(worst_x100);
+        print(serial, "  31 codes of DAC1 read on PA4 through the sampler: ", reading[0], " ",
+              reading[1], " ", reading[2], " ... ", reading[15], " ... ", reading[steps - 1u],
+              crlf);
+        print(serial, "  the line through them: gain ", gain, " ppm of one count a code, offset ");
+        print_hundredths(offset);
+        print(serial, " counts; the largest residual ");
+        print_hundredths(worst);
+        print(serial, " counts", crlf);
+        bench.verdict("the sampler walks a pad the DAC drives, and every step of 128 codes reads "
+                      "higher than the last",
+                      monotonic && reading[0] != 0u);
+        bench.verdict("the two converters agree to 1 % in gain and 24 counts in offset (table "
+                      "4-43: offset 4 LSB; table 4-45: 12 mV and 0.4 %)",
+                      gain >= 990'000 && gain <= 1'010'000 && offset >= -2400 && offset <= 2400);
+        bench.verdict("and no code sits more than 10 counts off the line - both converters' "
+                      "integral nonlinearity together (4 LSB each, tables 4-43 and 4-45)",
+                      worst <= 1000);
+
+        // THE PGA: the input buffer on, and each gain against the same
+        // input read at x1 through the buffer.
+        struct GainStep {
+            AdcGain gain;
+            uint16_t code;
+            uint8_t tolerance_pct;
+        };
+        constexpr GainStep gains[3] = {{AdcGain::x4, 720, 5},
+                                       {AdcGain::x16, 180, 8},
+                                       {AdcGain::x64, 45, 15}};
+        uint8_t gains_right = 0;
+        A::select_channel(Out::adc_channel);
+        for (const GainStep& g : gains) {
+            (void)D::write(ch, g.code);
+            (void)A::gain(AdcGain::x1, true);
+            wait_us(100);
+            (void)A::read();
+            const uint16_t unity = A::read_settled(8);
+            (void)A::gain(g.gain, true);
+            wait_us(100);
+            (void)A::read();
+            const uint16_t amplified = A::read_settled(8);
+            const uint32_t ratio_x100 =
+                unity != 0u ? (static_cast<uint32_t>(amplified) * 100u) / unity : 0u;
+            const uint32_t nominal_x100 = static_cast<uint32_t>(adc_gain_factor(g.gain)) * 100u;
+            const uint32_t off = ratio_x100 > nominal_x100 ? ratio_x100 - nominal_x100
+                                                           : nominal_x100 - ratio_x100;
+            if (off * 100u <= nominal_x100 * g.tolerance_pct) {
+                ++gains_right;
+            }
+            print(serial, "  PGA x", adc_gain_factor(g.gain), ": code ", g.code, " reads ", unity,
+                  " at x1 and ", amplified, " amplified, a ratio of ");
+            print_hundredths(static_cast<int32_t>(ratio_x100));
+            print(serial, crlf);
+        }
+        (void)A::gain(AdcGain::x1, false);
+        bench.verdict("the PGA multiplies the same input by 4, 16 and 64 - to 5, 8 and 15 % "
+                      "(the reading at x1 carries the converter's own offset of 4 LSB)",
+                      gains_right == 3u);
+        D::release();
+        all_off();
+    }
+}
+
+// ===========================================================================
+// m - code 110 handed to TIM8
+// ===========================================================================
+/// TIM8's TRGO pacing the regular group, where this build's timer driver
+/// reaches TIM8: how many conversions 100 ms of it started.
+template <uint8_t t = 8>
+bool tim8_paced(uint16_t& conversions) {
+    if constexpr (tim_present(t)) {
+        using T = Tim<t>;
+        T::init();
+        (void)T::configure(TimConfig{
+            .prescaler = static_cast<uint16_t>(T::clock_hz(clock) / 1'000'000u - 1u),
+            .period = 499});   // 2 kHz
+        (void)T::master(TimMasterMode::update);
+        reset_counters();
+        T::enable(true);
+        wait_us(100'000);
+        T::enable(false);
+        conversions = eoc_calls;
+        T::release();
+        return true;
+    } else {
+        conversions = 0;
+        return false;
+    }
+}
+
+/// Twenty rising edges on EXTI line 11's pad: how many conversions they
+/// started.
+inline uint16_t exti11_edges() {
+    // Whatever the previous source started has ended before the count
+    // begins: a conversion is a few microseconds at this clock.
+    wait_us(50);
+    reset_counters();
+    for (uint8_t i = 0; i < 20u; ++i) {
+        ExtiPin::set();
+        wait_us(200);
+        ExtiPin::clear();
+        wait_us(200);
+    }
+    return eoc_calls;
+}
+
+template <uint8_t n = 1, uint8_t follower = 2, bool on = adc_has_tim8_triggers>
+void tm_tim8_remap() {
+    if constexpr (on) {
+        using A = Adc<n>;
+        using B = Adc<follower>;
+        all_off();
+        drive_levels();
+        (void)bring_up();
+        (void)A::sample_time(ch_high, AdcSampleTime::cycles28_5);
+        A::select_channel(ch_high);
+        Pfic::enable(A::irq());
+        A::interrupts(A::converted_interrupt, true);
+
+        // The line, sensed with its EVENT enable - letter g's path.
+        ExtiPin::output(false);
+        (void)Exti::select(adc_regular_exti_line, 'B');
+        (void)Exti::sense(adc_regular_exti_line, ExtiSense::rising);
+        (void)Exti::event(adc_regular_exti_line, true);
+
+        // Code 110 handed to TIM8: the AFIO field set with the trigger.
+        const bool took = A::trigger(AdcTrigger::tim8_trgo);
+        const bool reads_tim8 = A::trigger() == AdcTrigger::tim8_trgo;
+        const bool field_set = Afio::remap_code(A::regular_trigger_remap) == 1u;
+        const uint16_t with_remap = exti11_edges();
+        uint16_t paced = 0;
+        const bool driven = tim8_paced(paced);
+
+        // And back: `exti11` clears the field and the line starts it again.
+        (void)A::trigger(AdcTrigger::exti11);
+        const bool field_clear = Afio::remap_code(A::regular_trigger_remap) == 0u;
+        const uint16_t without_remap = exti11_edges();
+        (void)Exti::event(adc_regular_exti_line, false);
+
+        print(serial, "  code 110 with ADC1_ETRGREG_RM set: ", with_remap,
+              " conversions from 20 edges of EXTI line 11; with it clear: ", without_remap,
+              crlf);
+        bench.verdict("tim8_trgo writes code 110 with AFIO's ADC1_ETRGREG_RM and reads back as "
+                      "itself, and exti11 clears the field again",
+                      took && reads_tim8 && field_set && field_clear);
+        bench.verdict("while the field is set EXTI line 11 starts nothing; cleared, every edge "
+                      "is a conversion again (10.2.11.8's remap, measured without TIM8)",
+                      with_remap == 0u && without_remap == 20u);
+        if (driven) {
+            print(serial, "  TIM8's TRGO at 2 kHz started ", paced, " conversions in 100 ms", crlf);
+            bench.verdict("and TIM8's TRGO paces the group through the handed-over code",
+                          paced >= 195u && paced <= 205u);
+        } else {
+            print(serial, "  TIM8: this build's timer driver does not reach it, so its TRGO is "
+                          "not driven here",
+                  crlf);
+        }
+
+        // The injected group's field, and the follower's two.
+        const bool j_took = A::injected_trigger(AdcInjectedTrigger::tim8_cc4);
+        const bool j_back = A::injected_trigger() == AdcInjectedTrigger::tim8_cc4 &&
+                            Afio::remap_code(A::injected_trigger_remap) == 1u;
+        (void)A::injected_trigger(AdcInjectedTrigger::exti15);
+        const bool j_clear = Afio::remap_code(A::injected_trigger_remap) == 0u;
+        (void)B::init(clock);
+        const bool b_took = B::trigger(AdcTrigger::tim8_trgo) &&
+                            B::injected_trigger(AdcInjectedTrigger::tim8_cc4);
+        const bool b_back = Afio::remap_code(B::regular_trigger_remap) == 1u &&
+                            Afio::remap_code(B::injected_trigger_remap) == 1u &&
+                            Afio::remap_code(A::regular_trigger_remap) == 0u;
+        (void)B::trigger(AdcTrigger::exti11);
+        (void)B::injected_trigger(AdcInjectedTrigger::exti15);
+        bench.verdict("the injected group's TIM8_CC4 and ADC2's two fields are four separate bits "
+                      "of AFIO_PCFR1, each written and read back without touching the others",
+                      j_took && j_back && j_clear && b_took && b_back);
+        A::interrupts(A::converted_interrupt, false);
+        all_off();
+    }
+}
+
+// ===========================================================================
+// n - ADC2's own request, on DMA2's channel 5
+// ===========================================================================
+template <uint8_t n = 2, bool on = dma_request_channel(DmaRequest::adc2).present()>
+void tn_adc2_dma() {
+    if constexpr (on) {
+        using A = Adc<n>;
+        using Ch = DmaChannel<A::dma_slot.controller, A::dma_slot.channel>;
+        all_off();
+        drive_levels();
+        // THE DIE IS ASKED FIRST. The request is a lot's (table 11-3's
+        // note), and a die without it keeps no DMA bit in ADC2's CTLR2 - so
+        // init() refuses a configuration that asks for one there.
+        const bool up = A::init(clock, AdcConfig{.dma = true});
+        if (!up) {
+            const bool plain = A::init(clock, AdcConfig{});
+            const bool bit = A::dma(true);
+            const bool reads = A::dma();
+            A::sample_time_all(AdcSampleTime::cycles28_5);
+            A::select_channel(ch_high);
+            // And nothing reaches the channel either: the bit dma() wrote
+            // and the die dropped, the channel loaded, continuous
+            // conversions for 2 ms.
+            Ch::stop();
+            const bool loaded = Ch::load(DmaTransfer{
+                .peripheral = A::data_address(),
+                .memory = const_cast<uint16_t*>(captured),
+                .count = 8,
+                .config = {.peripheral_width = DmaWidth::half,
+                           .memory_width = DmaWidth::half,
+                           .priority = DmaPriority::high},
+            });
+            A::continuous(true);
+            A::start();
+            wait_us(2000);
+            const uint16_t left = Ch::remaining();
+            const bool converting = A::result_counts() >= 4000u;
+            A::continuous(false);
+            Ch::stop();
+            print(serial, "  ADC2's DMA bit read back ", reads ? "SET" : "clear",
+                  "; with it written anyway, DMA2 channel ", Ch::number, " still holds ", left,
+                  " of 8 after 2 ms of continuous conversions of the rail", crlf);
+            bench.verdict("on this die's lot ADC2 has no request: CTLR2.DMA keeps no bit written "
+                          "into it, init() refuses a configuration that asks for one and dma() "
+                          "answers false",
+                          plain && !bit && !reads);
+            bench.verdict("and no request reaches DMA2's channel 5 while the converter runs",
+                          loaded && converting && left == 8u);
+            all_off();
+            return;
+        }
+        A::sample_time_all(AdcSampleTime::cycles28_5);
+        A::select_channel(ch_high);
+        for (uint8_t i = 0; i < 8u; ++i) {
+            captured[i] = 0xFFFFu;
+        }
+        Ch::stop();
+        const bool loaded = Ch::load(DmaTransfer{
+            .peripheral = A::data_address(),
+            .memory = const_cast<uint16_t*>(captured),
+            .count = 8,
+            .config = {.direction = DmaDirection::peripheral_to_memory,
+                       .circular = false,
+                       .memory_to_memory = false,
+                       .peripheral_increment = false,
+                       .memory_increment = true,
+                       .peripheral_width = DmaWidth::half,
+                       .memory_width = DmaWidth::half,
+                       .priority = DmaPriority::high},
+        });
+        A::continuous(true);
+        A::clear_flags(AdcFlag::all);
+        A::start();
+        Stopwatch w;
+        while (!Ch::flag(DmaFlag::complete) && w.us() < 20'000UL) {
+        }
+        const bool done = Ch::flag(DmaFlag::complete);
+        const uint16_t left = Ch::remaining();
+        A::continuous(false);
+        Ch::stop();
+        (void)A::dma(false);
+        bool all_rail = done;
+        for (uint8_t i = 0; i < 8u && all_rail; ++i) {
+            all_rail = captured[i] >= 4000u;
+        }
+        print(serial, "  ADC2 on DMA", Ch::controller, " channel ", Ch::number, ": ",
+              done ? "the block completed" : "NO completion", ", ", left, " left; ",
+              captured[0], " ", captured[1], " ... ", captured[7], crlf);
+        bench.verdict("ADC2 comes up with its DMA bit, which only this class's table gives it",
+                      up && loaded);
+        bench.verdict("and its request reaches DMA2's channel 5: eight conversions of the rail "
+                      "land in memory (table 11-3's ADC2 row, which its note gives to some lots "
+                      "only)",
+                      all_rail);
+        all_off();
+    }
+}
+
+// ===========================================================================
+// o - the ADC clock's two duty bits
+// ===========================================================================
+template <uint8_t n = 1, bool on = device::device_class == DeviceClass::v30x_d8>
+void to_duty() {
+    if constexpr (on) {
+        using A = Adc<n>;
+        all_off();
+        drive_levels();
+        (void)bring_up();
+        A::sample_time_all(AdcSampleTime::cycles28_5);
+        struct Setting {
+            bool sel;
+            bool ext;
+            const char* name;
+        };
+        constexpr Setting settings[3] = {{false, false, "50 %"},
+                                         {true, false, "ADC_DUTY_SEL"},
+                                         {false, true, "ADCDUTY"}};
+        uint16_t high[3] = {};
+        uint16_t low[3] = {};
+        uint16_t vref[3] = {};
+        uint32_t length[3] = {};
+        bool sel_read_back = false;
+        bool sel_answer = false;
+        for (uint8_t i = 0; i < 3u; ++i) {
+            const bool answer = Rcc::adc_duty_75(settings[i].sel);
+            Rcc::adc_duty_extended(settings[i].ext);
+            if (settings[i].sel) {
+                sel_read_back = Rcc::adc_duty_75();
+                sel_answer = answer;
+            }
+            wait_us(100);
+            A::select_channel(ch_high);
+            (void)A::read();
+            high[i] = A::read_settled(4);
+            A::select_channel(ch_low);
+            (void)A::read();
+            low[i] = A::read_settled(4);
+            A::select(AdcInput::vrefint);
+            (void)A::read();
+            vref[i] = A::read_settled(4);
+            length[i] = conversion_half_x10(time_conversions<n>(ch_high, tear_items), tear_items);
+            print(serial, "  ", settings[i].name, ": the rail ", high[i], ", ground ", low[i],
+                  ", VREFINT ", vref[i], ", a conversion ", length[i] / 20u, ".",
+                  (length[i] / 2u) % 10u, " cycles", crlf);
+        }
+        (void)Rcc::adc_duty_75(false);
+        Rcc::adc_duty_extended(false);
+        print(serial, "  ADC_DUTY_SEL ", sel_read_back ? "read back as set" : "read back CLEAR",
+              " - the bit 3.4.2's note gives to some lots of this class only", crlf);
+        bench.verdict("the verb answers what the die kept: true where ADC_DUTY_SEL reads back "
+                      "set, false where the lot has not got the bit",
+                      sel_answer == sel_read_back);
+        bool same_readings = true;
+        bool same_length = true;
+        for (uint8_t i = 1; i < 3u; ++i) {
+            if (distance16(high[i], high[0]) > 16u || distance16(low[i], low[0]) > 16u ||
+                distance16(vref[i], vref[0]) > 16u) {
+                same_readings = false;
+            }
+            const uint32_t d = length[i] > length[0] ? length[i] - length[0] : length[0] - length[i];
+            if (d * 100u > length[0] * 3u) {
+                same_length = false;
+            }
+        }
+        bench.verdict("under either duty bit the converter still reads the rail, ground and "
+                      "VREFINT within 16 counts of the 50 % clock's readings",
+                      same_readings);
+        bench.verdict("and neither moves the conversion time: a duty cycle is not a period",
+                      same_length);
+        all_off();
+    }
+}
+
+/// The CH32V303's five letters, registered where the part is one: a
+/// template, so the other series carries neither their code nor their
+/// prose.
+template <bool on = device::device_class == DeviceClass::v30x_d8>
+void register_v303_letters() {
+    if constexpr (on) {
+        bench.letter('k', "ADC_SMP_SEL: the four short sampling times", tk_short_sampling<>);
+        bench.letter('l', "the DAC on PA4 through the sampler: linearity, and the PGA",
+                     tl_dac_source<>);
+        bench.letter('m', "code 110 handed to TIM8 through AFIO", tm_tim8_remap<>);
+        bench.letter('n', "ADC2's own request on DMA2's channel 5", tn_adc2_dma<>);
+        bench.letter('o', "the ADC clock's two duty bits", to_duty<>);
+    }
+}
+
+/// Letter l's ISR glue: the result handed to the DAC loop's sampler.
+/// False, and nothing, on a part without the DAC.
+template <typename Sampler = DacSampler, bool has = device::has_dac>
+bool dac_sample_isr() {
+    if constexpr (has) {
+        if (adc_mode == AdcMode::dac_sampling) {
+            const uint8_t in = Adc<1>::selected();
+            const uint16_t v = Adc<1>::result_counts();
+            (void)Adc<1>::isr();
+            post<Sampler>(Sampled{v, in});
+            return true;
+        }
+    }
+    return false;
+}
+
+// ===========================================================================
 // The menu
 // ===========================================================================
 void banner() {
@@ -1173,14 +1924,17 @@ void banner() {
 
 }  // namespace
 
-// The one vector both converters report on. In the sampler's letter it
-// carries the result into the kernel; everywhere else it counts.
+// The one vector both converters report on. In the samplers' letters it
+// carries the result into a kernel; everywhere else it counts.
 extern "C" BRIO_CH32_INTERRUPT void adc1_2_handler() {
     if (adc_mode == AdcMode::sampling) {
         const uint8_t in = brio::Adc<1>::selected();
         const uint16_t v = brio::Adc<1>::result_counts();
         (void)brio::Adc<1>::isr();
         brio::post<Sampler>(brio::Sampled{v, in});
+        return;
+    }
+    if (dac_sample_isr()) {
         return;
     }
     const uint32_t hit = brio::Adc<1>::isr();
@@ -1212,7 +1966,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
 
 /// Letter d's tear window: read CNTR and stop the channel, nothing else.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
-    using Tear = brio::DmaChannel<2>;
+    using Tear = brio::DmaChannel<1, 2>;
     const uint16_t left = Tear::remaining();
     Tear::enable(false);
     (void)Tear::isr();
@@ -1250,6 +2004,7 @@ int main() {
     bench.letter('h', "the dual mode: two converters, one register", th_dual);
     bench.letter('i', "discontinuous mode: a sequence stepped by twos", ti_discontinuous);
     bench.letter('j', "the sampler walking three inputs in a kernel", tj_sampler);
+    register_v303_letters();
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL96" : "FAILED",

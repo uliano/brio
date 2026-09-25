@@ -168,7 +168,9 @@ reference suite `test_vx03_serial`.
   `usart_gate_for()`, `usart_irq_for()`, `usart_remap_of()`,
   `usart_remap_valid()`, `usart_column_for()` / `usart_pads_for()` (the
   five pads of a column, and the two a transport claims),
-  `usart_dma_tx_channel()` / `usart_dma_rx_channel()`.
+  `usart_dma_tx_slot()` / `usart_dma_rx_slot()` (the controller and the
+  channel a direction's request lands in) with `usart_dma_tx_channel()`
+  / `usart_dma_rx_channel()` the channel alone.
 - `Usart<n>` is the resource: `bus_clock()`, `reset()`, `remap(code)`,
   `enable()`/`enabled()`, `transmitter()`, `receiver()`,
   `configure(UartFormat, brr)` (the frame and the divisor written whole
@@ -189,7 +191,8 @@ reference suite `test_vx03_serial`.
   `clear_by_read()`/`take_errors()`, `tx_empty()`/`tx_complete()`/
   `rx_ready()`, `write_data()`/`write_word()`/`read_data()`/
   `read_word()`; and the constants `number`, `bus`, `irq`, `pads`,
-  `dma_tx_channel`, `dma_rx_channel`, `is_full`. Every mode refuses the
+  `dma_tx_slot`, `dma_rx_slot`, `dma_tx_channel`, `dma_rx_channel`,
+  `is_full`. Every mode refuses the
   company the chapter forbids it, and a verb that is a full USART's
   answers false on an instance that is not one.
 - `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap,
@@ -233,7 +236,7 @@ requests are wired to:
 
 ```cpp
 using Loop = brio::Uart<2, P, 256, 256, brio::UartFormat{},
-                        brio::DmaTxEngine<7>, brio::DmaRxEngine<6>>;
+                        brio::DmaTxEngine<1, 7>, brio::DmaRxEngine<1, 6>>;
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Loop::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Loop::dma_isr(); }
 // ... and harvest() whenever the owner wants to publish what arrived

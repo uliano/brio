@@ -264,8 +264,8 @@ The DMA engines, on the two channels table 11-5 wires to the instance:
 
 ```cpp
 using Fast = brio::SpiHost<1, brio::spi_default_pins<1>,
-                           brio::DmaTxEngine<3>, brio::DmaRxEngine<2>>;
-brio::Dma::open();
+                           brio::DmaTxEngine<1, 3>, brio::DmaRxEngine<1, 2>>;
+brio::Dma<1>::open();
 Fast::init(clock);
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { (void)Fast::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { (void)Fast::dma_isr(); }

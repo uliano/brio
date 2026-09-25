@@ -148,7 +148,7 @@ TestBench<Serial> bench;
 using Plain = Ch32vx03SleepSite<SysClock>;
 using Timed = Ch32vx03TimedSleepSite<P, SysClock>;
 using Usb = Usbd<>;
-using Copier = DmaChannel<1>;
+using Copier = DmaChannel<1, 1>;
 
 /// The RTC's tick, and the prescaler under it: the site's own, because
 /// the site is what programmed the block.
@@ -543,7 +543,7 @@ void tc_sleep() {
     // A DMA channel is a bus master, and in a sleep of any depth here it
     // would get no cycle at all. So the channel counts itself, and the
     // idle path reads the count.
-    Dma::open();
+    Dma<1>::open();
     Copier::stop();
     source_cell = 0xA5;
     sink_cell = 0;
@@ -1014,7 +1014,7 @@ void tf_votes() {
                   Probe::last_ok && armed_at == SleepDepth::deep && sleepdeep);
 
     // And the refusal no vote can express: a bus master at work.
-    Dma::open();
+    Dma<1>::open();
     source_cell = 0x5A;
     const bool loaded = Copier::load(long_copy());
     const bool refused_by_silicon = !Timed::arm(SleepDepth::deep);

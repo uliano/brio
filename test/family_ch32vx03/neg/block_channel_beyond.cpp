@@ -5,5 +5,5 @@
 // line that named it.
 #include "ch32vx03/dma.hpp"
 
-using Beyond = brio::DmaLoopEngine<9, uint16_t>;
+using Beyond = brio::DmaLoopEngine<1, 9, uint16_t>;
 void f() { Beyond::stop(); }

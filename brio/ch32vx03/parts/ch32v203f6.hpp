@@ -150,6 +150,11 @@ inline constexpr uint8_t can_count = 1;
 /// being ADC_IN9 (PB0, which is channel 8, is not bonded here).
 inline constexpr uint8_t adc_count         = 2;
 inline constexpr uint8_t adc_channel_count = 9;
+/// Whether the package brings out the converters' reference pads, VREF+
+/// and VREF-: no package of the CH32V203 does - its datasheet's pin tables
+/// have VDDA and VSSA and nothing between them - so the reference of every
+/// conversion is VDDA itself.
+inline constexpr bool has_vref_pads = false;
 
 /// The one operational amplifier this part offers, and - as with the
 /// usart - the instance is not the first: OPA2's inputs (PA5, PA7) and

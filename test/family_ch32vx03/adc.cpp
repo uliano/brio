@@ -45,10 +45,10 @@ static_assert(adc_base_for(3) == 0u);
 static_assert(adc_sample_half_cycles(AdcSampleTime::cycles1_5) == 3u);
 static_assert(adc_sample_half_cycles(AdcSampleTime::cycles28_5) == 57u);
 static_assert(adc_sample_half_cycles(AdcSampleTime::cycles239_5) == 479u);
-static_assert(adc_conversion_half_cycles(AdcSampleTime::cycles1_5) == 25u);
-static_assert(adc_conversion_half_cycles(AdcSampleTime::cycles239_5) == 501u);
-static_assert(adc_conversion_ns(AdcSampleTime::cycles1_5, 12'000'000UL) == 1041u);
-static_assert(adc_conversion_ns(AdcSampleTime::cycles239_5, 12'000'000UL) == 20'875u);
+static_assert(adc_conversion_half_cycles(AdcSampleTime::cycles1_5) == 28u);
+static_assert(adc_conversion_half_cycles(AdcSampleTime::cycles239_5) == 504u);
+static_assert(adc_conversion_ns(AdcSampleTime::cycles1_5, 12'000'000UL) == 1166u);
+static_assert(adc_conversion_ns(AdcSampleTime::cycles239_5, 12'000'000UL) == 21'000u);
 static_assert(adc_conversion_ns(AdcSampleTime::cycles1_5, 0) == 0u);
 // Datasheet table 4-28: the source impedance each sampling time settles.
 static_assert(adc_max_source_ohms(AdcSampleTime::cycles1_5) == 400u);
@@ -117,7 +117,7 @@ static_assert(static_cast<uint8_t>(AdcDualMode::regular_simultaneous) == 6u);
 // ---- what a part decides ---------------------------------------------------
 static_assert(Adc<1>::instance == 1);
 static_assert(Adc<1>::has_dma && Adc<1>::has_internal_sources);
-static_assert(Adc<1>::dma_channel == dma_request_channel(DmaRequest::adc1));
+static_assert(Adc<1>::dma_channel == dma_request_channel(DmaRequest::adc1).channel);
 static_assert(Adc<1>::irq() == Irq::adc1_2);
 static_assert(Adc<1>::has_dual_mode == (device::adc_count >= 2u));
 // The datasheets' tables read back: nine, ten or sixteen bonded

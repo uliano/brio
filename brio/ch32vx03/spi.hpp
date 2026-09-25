@@ -151,13 +151,16 @@ constexpr bool spi_present(uint8_t n) {
 }
 
 /// Table 11-5's two rows per instance, read through dma_engine.hpp so
-/// that the channel numbers live in exactly one place.
-constexpr uint8_t spi_dma_rx_channel(uint8_t n) {
+/// that the slots live in exactly one place - and the channel numbers of
+/// those slots, which is what a message prints.
+constexpr DmaSlot spi_dma_rx_slot(uint8_t n) {
     return dma_request_channel(n == 1 ? DmaRequest::spi1_rx : DmaRequest::spi2_rx);
 }
-constexpr uint8_t spi_dma_tx_channel(uint8_t n) {
+constexpr DmaSlot spi_dma_tx_slot(uint8_t n) {
     return dma_request_channel(n == 1 ? DmaRequest::spi1_tx : DmaRequest::spi2_tx);
 }
+constexpr uint8_t spi_dma_rx_channel(uint8_t n) { return spi_dma_rx_slot(n).channel; }
+constexpr uint8_t spi_dma_tx_channel(uint8_t n) { return spi_dma_tx_slot(n).channel; }
 
 // CTLR1 (20.4.1)
 inline constexpr uint16_t spi_cpha     = 1u << 0;
@@ -472,8 +475,10 @@ struct Spi {
     static constexpr Bus bus = spi_bus_for(n);
     static constexpr Irq irq = spi_irq_for(n);
     /// Table 11-5: the two channels this instance's requests reach.
-    static constexpr uint8_t dma_rx_channel = spi_dma_rx_channel(n);
-    static constexpr uint8_t dma_tx_channel = spi_dma_tx_channel(n);
+    static constexpr DmaSlot dma_rx_slot = spi_dma_rx_slot(n);
+    static constexpr DmaSlot dma_tx_slot = spi_dma_tx_slot(n);
+    static constexpr uint8_t dma_rx_channel = dma_rx_slot.channel;
+    static constexpr uint8_t dma_tx_channel = dma_tx_slot.channel;
     /// SPI2 alone carries the I2S prescaler (table 20-2 has it, 20-1
     /// has not), which is what a master I2S would need.
     static constexpr bool has_i2s_prescaler = (n == 2);
@@ -851,11 +856,11 @@ class SpiHost {
                   "full-duplex and its completion is the RECEIVE block's");
     static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
                   "brio SpiHost: the two engines must ride two different DMA channels");
-    static_assert(!TxEngine::present || dma_engine_channel<TxEngine>() == S::dma_tx_channel,
+    static_assert(!TxEngine::present || dma_engine_slot<TxEngine>() == S::dma_tx_slot,
                   "brio SpiHost: on this family the channel IS the request (RM table 11-5) - "
                   "SPI1 transmits on DMA channel 3 and SPI2 on channel 5, and an engine on "
                   "any other channel would move nothing");
-    static_assert(!RxEngine::present || dma_engine_channel<RxEngine>() == S::dma_rx_channel,
+    static_assert(!RxEngine::present || dma_engine_slot<RxEngine>() == S::dma_rx_slot,
                   "brio SpiHost: on this family the channel IS the request (RM table 11-5) - "
                   "SPI1 receives on DMA channel 2 and SPI2 on channel 4, and an engine on "
                   "any other channel would move nothing");

@@ -5,5 +5,5 @@
 // per element with nothing in the controller to pair them.
 #include "ch32vx03/dma.hpp"
 
-using TooWide = brio::DmaPingPongEngine<1, uint64_t>;
+using TooWide = brio::DmaPingPongEngine<1, 1, uint64_t>;
 void f() { TooWide::stop(); }

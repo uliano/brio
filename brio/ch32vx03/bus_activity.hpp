@@ -36,7 +36,7 @@
  * it - so a channel whose owner has not disabled it still counts, and
  * a program that loads a channel and never takes it down does not
  * sleep again. That is the honest answer and not a leak: the count
- * says what the registers say, and `Dma::any_enabled()` asked of the
+ * says what the registers say, and `Dma<1>::any_enabled()` asked of the
  * silicon would say the same. The engines of dma.hpp disable at
  * completion, so a transport pays nothing for it.
  *
@@ -48,8 +48,10 @@
  * and a guarded increment inside verbs that are already storing to a
  * peripheral register.
  *
- * WHY A COUNT AND NOT A POLL. `Dma::any_enabled()` already answers the
- * DMA's half by reading eight configuration registers, but the USB's
+ * WHY A COUNT AND NOT A POLL. `Dma<1>::any_enabled()` already answers
+ * the DMA's half by reading the configuration register of every channel
+ * of every controller - eight on the CH32V203, eighteen on the
+ * CH32V303 - but the USB's
  * half is not one register's business (the pull-up lives in EXTEN and
  * the controller's state in its own block), and the idle path pays for
  * whichever answer it asks for on EVERY pass. One byte in RAM is the

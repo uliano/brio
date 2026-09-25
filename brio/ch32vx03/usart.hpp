@@ -310,23 +310,28 @@ constexpr UsartPads usart_pads_for(uint8_t n, uint8_t code = 0) {
     return UsartPads{p.tx, p.rx};
 }
 
-/// The DMA channel each direction of an instance answers on, read out
-/// of the one request table (ch32vx03/dma_engine.hpp): 0 where the part
-/// has not got the instance at all. THE CHANNEL IS THE REQUEST here, so
-/// these two numbers are what an engine slot is checked against.
-constexpr uint8_t usart_dma_tx_channel(uint8_t n) {
+/// The DMA slot each direction of an instance answers on - the controller
+/// and its channel - read out of the one request table
+/// (ch32vx03/dma_engine.hpp): the empty slot where the part has not got the
+/// instance at all. THE CHANNEL IS THE REQUEST here, so these two slots are
+/// what an engine is checked against; on the CH32V303 UART4's are DMA2's.
+constexpr DmaSlot usart_dma_tx_slot(uint8_t n) {
     return n == 1 ? dma_request_channel(DmaRequest::usart1_tx) :
            n == 2 ? dma_request_channel(DmaRequest::usart2_tx) :
            n == 3 ? dma_request_channel(DmaRequest::usart3_tx) :
-           n == 4 ? dma_request_channel(DmaRequest::uart4_tx) : 0;
+           n == 4 ? dma_request_channel(DmaRequest::uart4_tx) : DmaSlot{};
 }
 
-constexpr uint8_t usart_dma_rx_channel(uint8_t n) {
+constexpr DmaSlot usart_dma_rx_slot(uint8_t n) {
     return n == 1 ? dma_request_channel(DmaRequest::usart1_rx) :
            n == 2 ? dma_request_channel(DmaRequest::usart2_rx) :
            n == 3 ? dma_request_channel(DmaRequest::usart3_rx) :
-           n == 4 ? dma_request_channel(DmaRequest::uart4_rx) : 0;
+           n == 4 ? dma_request_channel(DmaRequest::uart4_rx) : DmaSlot{};
 }
+
+/// The channel numbers of those slots, 0 for none - what a message prints.
+constexpr uint8_t usart_dma_tx_channel(uint8_t n) { return usart_dma_tx_slot(n).channel; }
+constexpr uint8_t usart_dma_rx_channel(uint8_t n) { return usart_dma_rx_slot(n).channel; }
 
 // =============================================================================
 // Usart<n>: the resource
@@ -354,8 +359,10 @@ struct Usart {
     static constexpr Bus bus = usart_bus_for(n);
     static constexpr UsartPads pads = usart_pads_for(n);
     static constexpr Irq irq = usart_irq_for(n);
-    static constexpr uint8_t dma_tx_channel = usart_dma_tx_channel(n);
-    static constexpr uint8_t dma_rx_channel = usart_dma_rx_channel(n);
+    static constexpr DmaSlot dma_tx_slot = usart_dma_tx_slot(n);
+    static constexpr DmaSlot dma_rx_slot = usart_dma_rx_slot(n);
+    static constexpr uint8_t dma_tx_channel = dma_tx_slot.channel;
+    static constexpr uint8_t dma_rx_channel = dma_rx_slot.channel;
 
     /// Whether this instance is a full USART - the synchronous clock,
     /// the smartcard and the flow-control pair - or an asynchronous
@@ -831,13 +838,15 @@ struct Uart {
                   "the engine slots must name a complete type: a DmaTxEngine / DmaRxEngine from "
                   "ch32vx03/dma.hpp, or NoDmaEngine (the default)");
     static_assert(!TxEngine::present ||
-                      dma_engine_channel<TxEngine>() == usart_dma_tx_channel(instance),
-                  "brio Uart: table 11-5 - this instance transmits on its own DMA channel "
-                  "(USART1 on 4, USART2 on 7, USART3 on 2, UART4 on 1)");
+                      dma_engine_slot<TxEngine>() == usart_dma_tx_slot(instance),
+                  "brio Uart: RM 11.2.3 - this instance transmits on its own DMA slot, controller "
+                  "AND channel (USART1 on DMA1's 4, USART2 on 7, USART3 on 2; UART4 on DMA1's 1 "
+                  "on the CH32V203 and on DMA2's 5 on the CH32V303)");
     static_assert(!RxEngine::present ||
-                      dma_engine_channel<RxEngine>() == usart_dma_rx_channel(instance),
-                  "brio Uart: table 11-5 - this instance receives on its own DMA channel "
-                  "(USART1 on 5, USART2 on 6, USART3 on 3, UART4 on 8)");
+                      dma_engine_slot<RxEngine>() == usart_dma_rx_slot(instance),
+                  "brio Uart: RM 11.2.3 - this instance receives on its own DMA slot, controller "
+                  "AND channel (USART1 on DMA1's 5, USART2 on 6, USART3 on 3; UART4 on DMA1's 8 "
+                  "on the CH32V203 and on DMA2's 3 on the CH32V303)");
     static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
                   "the two engines of a Uart must not share a DMA channel");
 

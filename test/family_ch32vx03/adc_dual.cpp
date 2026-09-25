@@ -5,12 +5,14 @@
 // more channels, so Adc<2> is instantiated here and nowhere else, and a
 // neg TU proves that naming it on that part is a compile error.
 //
-// WHAT ADC2 IS NOT. Only ADC1 has a DMA request (12.2.7's note 2), only
-// ADC1 wakes the temperature sensor and VREFINT (CTLR2.TSVREFE, "only
-// applied for ADC1") and only ADC1 carries the dual-mode field (CTLR1's
-// DUALMOD, "these bits in ADC2 are reserved"). The three verbs exist on
-// both instances and answer FALSE on the second, which is what lets one
-// program name either converter without an #if.
+// WHAT ADC2 IS NOT. Only ADC1 wakes the temperature sensor and VREFINT
+// (CTLR2.TSVREFE, "only applied for ADC1") and only ADC1 carries the
+// dual-mode field (CTLR1's DUALMOD, "these bits in ADC2 are reserved");
+// on the CH32V203 only ADC1 has a DMA request (12.2.7's note 2), while
+// the CH32V303's table 11-3 gives ADC2 one on DMA2's channel 5. The verbs
+// exist on both instances and answer FALSE where the second has not got
+// the thing, which is what lets one program name either converter without
+// an #if.
 #include "ch32vx03/adc.hpp"
 #include "ch32vx03/platform.hpp"
 
@@ -20,7 +22,7 @@ using SysClock = Clock<ClockSource::pll, 96'000'000>;
 
 static_assert(device::adc_count == 2u);
 static_assert(Adc<2>::instance == 2);
-static_assert(!Adc<2>::has_dma);
+static_assert(Adc<2>::has_dma == (device::dma_controller_count == 2u));
 static_assert(!Adc<2>::has_internal_sources);
 static_assert(!Adc<2>::has_dual_mode);
 static_assert(Adc<1>::has_dual_mode);
@@ -35,8 +37,9 @@ static_assert(Adc<2>::channels == adc_channels);
 void adc2_verbs() {
     SysClock clock;
     (void)Adc<2>::init(clock);
-    // The three the second converter has not got: refused rather than
-    // written, and refused in init() too when a config asks for them.
+    // What the second converter has not got: refused rather than written,
+    // and refused in init() too when a config asks for it (the DMA request
+    // is refused on the CH32V203 and taken on the CH32V303).
     (void)Adc<2>::init(clock, AdcConfig{.dma = true});
     (void)Adc<2>::init(clock, AdcConfig{.internal_sources = true});
     (void)Adc<2>::dma(true);
