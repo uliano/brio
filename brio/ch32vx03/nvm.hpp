@@ -28,17 +28,21 @@
  * sister family's chapter promises 0xFF for the same verbs, so this is
  * not a WCH habit but this silicon's.
  *
- * AND THE CELLS DO NOT BEHAVE LIKE BITS THAT ONLY FALL. Two measured
- * consequences of that pattern, both of which a structure above the
- * medium would otherwise get wrong. A HALF-WORD CELL TAKES PASS AFTER
- * PASS between erases - five in a row read back EXACTLY what was
- * written, 0x0000 then 0xA5A5 among them, so bits come back as well as
- * go away, where every other flash in this project can only clear them.
- * And a PAGE PROGRAMMED TWICE with no erase between reports no error
- * and ends up holding NEITHER pattern and not their bitwise AND either,
- * so a torn write cannot be repaired by writing again: a medium erases
- * first, which is what `program()` in nvm_flash.hpp makes its caller
- * do.
+ * AND THE CELLS DO NOT BEHAVE LIKE BITS THAT ONLY FALL. Measured
+ * consequences of that pattern, all of which a structure above the
+ * medium would otherwise get wrong. A HALF-WORD CELL OF THE WINDOW
+ * TAKES PASS AFTER PASS between erases - five in a row read back
+ * EXACTLY what was written, 0x0000 then 0xA5A5 among them, on the
+ * CH32V203C8 and the CH32V303VC alike, so bits come back as well as go
+ * away, where every other flash in this project can only clear them. A
+ * half-word cell of the TAIL does not: programmed 0x9659 and then
+ * 0x0F0F with no erase between, it read 0x0E0F - neither value - on the
+ * CH32V303VC, so what the window's cells do is the window's and not the
+ * array's. And a PAGE PROGRAMMED TWICE with no erase between reports no
+ * error and ends up holding NEITHER pattern and not their bitwise AND
+ * either, so a torn write cannot be repaired by writing again: a medium
+ * erases first, which is what `program()` in nvm_flash.hpp makes its
+ * caller do.
  *
  * THREE LOCKS, AND A WRONG KEY LOCKS UNTIL RESET. The FPEC lock (KEYR,
  * CTLR.LOCK) guards CTLR and every standard operation; the FAST lock
@@ -82,13 +86,13 @@
  * program attempted while it stands WILL FAIL, so every erase and
  * program verb here refuses while FLASH_STATR.EHMODS reads back set
  * rather than starting an operation the chapter promises will not work.
- * MEASURED on the CH32V203C8: EHMOD takes the write and reads back, and
- * EHMODS NEVER FOLLOWS IT - the mode does not engage on this device
- * class, which fits 32.3's own premise (it is for a program whose code
- * outgrew the flash-and-RAM split RAM_CODE_MOD chooses, a field table
- * 32-4 gives to the other classes' option bytes). `enhanced_read(true)`
- * therefore answers false there, after a bounded wait, and the refusal
- * it guards is a path no program of this part can reach.
+ * MEASURED on the CH32V203C8 and on the CH32V303VC: EHMOD takes the
+ * write and reads back, and EHMODS NEVER FOLLOWS IT - on a part whose
+ * option byte carries the flash-and-RAM split 32.3 speaks of (table
+ * 32-4 gives it to the CH32V203RB and to the CH32V303RC and VC) as on
+ * one whose byte does not. `enhanced_read(true)` therefore answers
+ * false there, after a bounded wait, and the refusal it guards is a
+ * path no program on either part can reach.
  *
  * THE OPTION BYTES ARE READ ONLY HERE, and that is a decision rather
  * than an omission. Releasing read protection "will first cause the
@@ -103,6 +107,72 @@
  * WHAT IS NOT HERE: the system boot loader at 0x1FFF8000 (28 KB of
  * WCH's own, which this project does not call), and the "vendor
  * configuration word" 32.1's note names and locks before delivery.
+ *
+ * THE ARRAY IS A WINDOW AND A TAIL, and three numbers of the part
+ * table say where each ends. Both datasheets count a part's "flash
+ * bytes" as the ZERO-WAIT run area and give the die more above it:
+ * "for the V203 series, non-zero-wait area is (224K-R0WAIT)" (the
+ * CH32V203 datasheet's note 1 to table 2-1), and "the product of 256K
+ * FLASH+64K SRAM supports the non-zero waiting area of (480K-R0WAIT)
+ * bytes" (the CH32V303 datasheet's note 1 to table 2-1-1), which gives
+ * the tail to the CH32V303RC and VC and none to the CH32V303CB and RB.
+ * So `window_bytes` is `device::flash_bytes` - what every linker script
+ * and the medium reckon with - `tail_bytes` is the non-zero-wait area
+ * above it and `array_bytes` the die's whole code flash; `tail_base`
+ * and `tail_end` bound the tail, counted from zero like every address
+ * here. THE WINDOW IS READ THROUGH THE ALIAS the image runs at (`read()`,
+ * `erased()`), and THE TAIL THROUGH THE ARRAY'S OWN ADDRESS
+ * (`read_tail()`): the memory map gives 0x0800 0000 the whole code
+ * flash, "includes 0 wait and non-0 waiting areas", and says of the
+ * alias at zero only that it follows the BOOT pins. WHAT THE TAIL COSTS
+ * is the non-zero wait, MEASURED on the CH32V303VC: a word read out of
+ * it takes 20 core cycles at 96 MHz against the window's 5, the same 20
+ * at 48 MHz with SCKMOD at half and 12 with it whole - SCKMOD moves the
+ * tail's price and not the window's, which is 5 at every setting.
+ *
+ * THE TAIL TAKES BOTH METHODS. 32.2.1's note reads "Fast programming
+ * related functions can only be placed in the zero-wait area FLASH"
+ * (V2.5: "FLASH erase related functions"), and could be read as a
+ * statement about the TARGET those operations write. MEASURED on the
+ * CH32V303VC, it is not: a fast page program into the tail's last page
+ * landed there byte for byte, a fast page erase erased it and a 32 KB
+ * erase erased a block of the tail, each with BSY down and EOP up - so
+ * the note is about where the CODE running them sits, which an image
+ * linked into the window satisfies by construction, and every write
+ * verb here takes a tail address as it takes a window one.
+ *
+ * A TAIL READ WANTS THE RATE CONTRACT TOO. 32.1's note 2 lists "the
+ * non-zero-wait area FLASH" among the flash operations that want HCLK
+ * halved above 120 MHz, and the tail is read out of the array at the
+ * access clock SCKMOD sets - 72 MHz at 144, over the 60 the chapter
+ * allows. The window is not: the core executes out of it at the part's
+ * full 144 MHz with SCKMOD at its reset value, which is WCH's own
+ * configuration and every image here. So `read_tail()` takes the clock
+ * as the write verbs do and refuses the same rates the same two ways.
+ * A RATING AND NOT A MEASUREMENT: on the CH32V303VC a page of the tail
+ * read by hand at 144 MHz came back exact, twice, which says what one
+ * die did outside the rating and nothing about the rating itself.
+ *
+ * THE SPLIT IS AN OPTION BYTE, DECODED AND NEVER WRITTEN. USER[7:5]
+ * moves the line between the window and the SRAM on the parts table
+ * 32-4 names (`FlashSplitTable`, one per part in parts/), and
+ * `flash_split_of()` is its decode - five combinations on the CH32V303RC
+ * and VC, three on the CH32V203RB. FLASH_OBR carries the loaded USER
+ * byte WHOLE at bits [9:2], so the split is OBR[9:7]: 32.4.6's bit
+ * column prints [9:8] beside three-bit codes, and what settles it is
+ * the register itself - OBR 0x000000FC against a USER byte of 0x3F on
+ * a CH32V203C8, 0x0000027C against 0x9F on a CH32V303VC, whose code 4
+ * decodes to the 256 KB of window and 64 KB of SRAM its part table and
+ * linker script state. A program whose split is not the part table's
+ * has a linker script that is not its part's either;
+ * `split_matches_part()` is the check it can make at boot.
+ *
+ * ESIG_FLACAP IS NOT THE WINDOW IN FORCE. It reads 288 on a CH32V303VC
+ * whose option byte selects 256 KB of window: the LARGEST window table
+ * 32-4 offers that part, and on a part with no split the window itself
+ * (64 on the CH32V203C8) - both measured. `flash_window_max_bytes`
+ * states it, so a program comparing the signature with its build
+ * compares the right two numbers.
  */
 
 #pragma once
@@ -110,6 +180,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <optional>
 #include <span>
 
 #include "ch32vx03/clock.hpp"
@@ -171,6 +242,17 @@ inline constexpr uint32_t flash_obr_rdprt        = 1UL << 1;
 inline constexpr uint32_t flash_obr_iwdg_sw      = 1UL << 2;
 inline constexpr uint32_t flash_obr_stop_rst     = 1UL << 3;
 inline constexpr uint32_t flash_obr_standby_rst  = 1UL << 4;
+/// The loaded USER byte sits in FLASH_OBR WHOLE, bits [9:2] - the three
+/// bits above are USER[0..2], which is where the watchdog's and the two
+/// reset bits come from - so the memory split, USER[7:5], is OBR[9:7].
+/// 32.4.6's bit column prints the field as [9:8] beside codes three bits
+/// wide; the register says otherwise (the file header).
+inline constexpr uint32_t flash_obr_user_shift   = 2;
+inline constexpr uint32_t flash_obr_split_shift  = 7;
+inline constexpr uint32_t flash_obr_split_mask   = 0x7UL << flash_obr_split_shift;
+
+/// Where USER[7:5] sits in the USER option byte itself (table 32-4).
+inline constexpr uint8_t flash_user_split_shift = 5;
 
 /// The flash access clock's ceiling (datasheet table 4-17's Fprog, whose
 /// note says it covers "read operation, program operation and erase
@@ -185,12 +267,78 @@ inline constexpr uint32_t flash_access_max_hz = 60'000'000UL;
 inline constexpr uint8_t flash_rdpr_unprotected = 0xA5;
 
 // =============================================================================
+// The memory split (RM 32.4.6, table 32-4)
+// =============================================================================
+
+/// One combination of USER[7:5]: how much of the code flash is the
+/// zero-wait window, and how much SRAM is left beside it - the two
+/// numbers the chapter prints for each code.
+struct FlashSplit {
+    uint16_t code_kbytes;   ///< the zero-wait window
+    uint16_t ram_kbytes;    ///< the SRAM beside it
+
+    constexpr bool operator==(const FlashSplit&) const = default;
+};
+
+/**
+ * USER[7:5] as the table a part reads it by decodes it - nothing on a
+ * part with no split. Table 32-4, both halves:
+ *
+ *   the CH32V303RC and VC (note 1):   00x 192+128, 01x 224+96, 10x 256+64,
+ *                                     110 128+192, 111 288+32
+ *   the CH32V20x_D8 (the CH32V203RB): 00x 128+64, 01x 144+48, 1xx 160+32
+ *
+ * 110 on the first table is 128+192 only "where the penultimate sixth
+ * digit of the lot number is not zero" (note 2); what the other lots do
+ * with that code the chapter does not say, and this decode answers the
+ * table's row.
+ */
+constexpr std::optional<FlashSplit> flash_split_of(FlashSplitTable table, uint8_t code) {
+    const uint8_t c = static_cast<uint8_t>(code & 0x7u);
+    switch (table) {
+        case FlashSplitTable::code_128k_ram_64k:
+            if ((c & 0x4u) != 0u) {
+                return FlashSplit{160, 32};
+            }
+            return (c & 0x2u) != 0u ? FlashSplit{144, 48} : FlashSplit{128, 64};
+        case FlashSplitTable::code_256k_ram_64k:
+            switch (c >> 1) {
+                case 0: return FlashSplit{192, 128};
+                case 1: return FlashSplit{224, 96};
+                case 2: return FlashSplit{256, 64};
+                default: return c == 0x6u ? FlashSplit{128, 192} : FlashSplit{288, 32};
+            }
+        case FlashSplitTable::none:
+            break;
+    }
+    return std::nullopt;
+}
+
+/// The largest window a table can select, in kilobytes: 160 and 288 for
+/// the two tables, zero for a part with no split.
+constexpr uint16_t flash_split_max_kbytes(FlashSplitTable table) {
+    return table == FlashSplitTable::code_128k_ram_64k   ? 160u
+           : table == FlashSplitTable::code_256k_ram_64k ? 288u
+                                                         : 0u;
+}
+
+/// WHAT ESIG_FLACAP READS on this part: the largest zero-wait window its
+/// option byte can select, and on a part with no split the window
+/// itself. Measured on the CH32V303VC (288 while the split in force is
+/// 256) and on the CH32V203C8 (64); the CH32V203RB's 160 is the table's
+/// and not a measurement.
+inline constexpr uint32_t flash_window_max_bytes =
+    flash_split_max_kbytes(device::flash_split_table) != 0u
+        ? static_cast<uint32_t>(flash_split_max_kbytes(device::flash_split_table)) * 1024UL
+        : device::flash_bytes;
+
+// =============================================================================
 // The option bytes, decoded and read-only
 // =============================================================================
 
 /**
  * What the hardware loaded out of the option byte area at the last
- * system reset: FLASH_OBR's five bits and FLASH_WPR's thirty-two, which
+ * system reset: FLASH_OBR's bits and FLASH_WPR's thirty-two, which
  * together are what the silicon is ACTING ON. (What is written in flash
  * is `FlashOptionArea` below; the two differ for exactly as long as it
  * takes a reset to reload them.)
@@ -208,6 +356,7 @@ struct FlashOptions {
     bool resets_on_stop;        ///< the chip is reset when it enters Stop
     bool resets_on_standby;     ///< the chip is reset when it enters Standby
     uint32_t write_protection;  ///< FLASH_WPR as loaded: a CLEAR bit is a PROTECTED 4 KB sector
+    uint8_t split_code;         ///< USER[7:5] as loaded, OBR[9:7]: the memory split's code
 
     static FlashOptions read() {
         const uint32_t obr = flash_ctl()->OBR;
@@ -218,12 +367,14 @@ struct FlashOptions {
             (obr & flash_obr_stop_rst) == 0u,
             (obr & flash_obr_standby_rst) == 0u,
             flash_ctl()->WPR,
+            static_cast<uint8_t>((obr & flash_obr_split_mask) >> flash_obr_split_shift),
         };
     }
 
     /// Is the 4 KB sector at index `n` write-protected? A bit of WPR is
     /// one sector; the last bit covers sectors 31 to 127, which is why a
-    /// index above 30 asks about bit 31 (32.6's WRPR3 note).
+    /// index above 30 asks about bit 31 (32.6's WRPR3 note) - the whole
+    /// tail, on a part whose window is 128 KB or more.
     constexpr bool sector_protected(uint32_t n) const {
         const uint32_t bit = n > 30u ? 31u : n;
         return (write_protection & (1UL << bit)) == 0u;
@@ -233,6 +384,22 @@ struct FlashOptions {
     /// from zero as the image is linked.
     constexpr bool address_protected(uint32_t addr) const {
         return sector_protected(addr / device::flash_protect_bytes);
+    }
+
+    /// The memory split the loaded code names on THIS part, or nothing
+    /// where the part has no split (table 32-4).
+    constexpr std::optional<FlashSplit> split() const {
+        return flash_split_of(device::flash_split_table, split_code);
+    }
+
+    /// Does the window the option byte selected agree with the one the
+    /// part table - and so the linker script - states? True on a part
+    /// with no split, where the question does not arise.
+    constexpr bool split_matches_part() const {
+        const std::optional<FlashSplit> s = split();
+        return !s.has_value() ||
+               (static_cast<uint32_t>(s->code_kbytes) * 1024UL == device::flash_bytes &&
+                static_cast<uint32_t>(s->ram_kbytes) * 1024UL == device::sram_bytes);
     }
 };
 
@@ -250,7 +417,7 @@ struct FlashOptions {
  */
 struct FlashOptionArea {
     uint8_t rdpr;       ///< 0xA5 = the array is readable
-    uint8_t user;       ///< IWDGSW, STOPRST, STANDYRST and the bits other classes use
+    uint8_t user;       ///< IWDGSW, STOPRST, STANDYRST and the memory split in [7:5]
     uint8_t data0;      ///< two bytes of the user's own
     uint8_t data1;
     uint8_t wrpr[4];    ///< the write protection as it is stored
@@ -298,6 +465,16 @@ struct FlashOptionArea {
         }
         return true;
     }
+
+    /// USER[7:5] as it stands in flash - what the NEXT reset will load.
+    constexpr uint8_t split_code() const {
+        return static_cast<uint8_t>(user >> flash_user_split_shift);
+    }
+
+    /// The same decode `FlashOptions::split()` makes, of the stored byte.
+    constexpr std::optional<FlashSplit> split() const {
+        return flash_split_of(device::flash_split_table, split_code());
+    }
 };
 
 // =============================================================================
@@ -318,12 +495,12 @@ struct DeviceUid {
 };
 
 /**
- * ESIG_FLACAP: the user array's size in kilobytes, as the factory wrote
- * it (31.2.1). It is the DIE's answer to the same question
- * `device::flash_bytes` answers from the part table, so a program that
- * reads both has a check on its own build - and, the datasheet's note 1
- * to table 2-1 adds, what it counts is the ZERO-WAIT run area, which on
- * this series is the whole of what a user program may occupy.
+ * ESIG_FLACAP: "the capacity of the flash memory area" in kilobytes, as
+ * the factory wrote it (31.2.1). What it counts is not the window the
+ * option byte selected but the LARGEST one it can select - 288 on a
+ * CH32V303VC whose split is 256 - so the number it is compared with is
+ * `flash_window_max_bytes`, which on a part with no split is the window
+ * itself (the file header).
  */
 inline uint16_t flash_size_kbytes() { return esig_flash_kbytes(); }
 
@@ -352,9 +529,16 @@ enum class ChipErasePolicy : uint8_t {
  * bits are FLASH_STATR's own (`flash_wrprterr`, `flash_bsy` for an
  * operation that never finished) and the two top bits are this
  * driver's - `refused` for a contract the CALLER broke (an address that
- * is not aligned, a span that is not a page, a policy not passed) and
- * `refused_rate` for a rate the SILICON will not write at. They are
- * distinct on purpose: a refusal is never mistaken for a flash error.
+ * is not aligned, a span that is not a page, a run past the array or
+ * across the line between the window and the tail, a policy not
+ * passed) and `refused_rate` for a rate the SILICON will not write at.
+ * They are distinct on purpose: a refusal is never mistaken for a flash
+ * error.
+ *
+ * EVERY ADDRESS-TAKING VERB HAS A SECOND SPELLING with the address as a
+ * template argument - `erase_sector<a>(clock)` beside `erase_sector(clock,
+ * a)` - where the refusal is a COMPILE error: a tail address on a part
+ * that has none, a run past the array.
  *
  * THE UNLOCK WINDOW IS THE CALLER'S. unlock() and lock() are separate
  * verbs because a medium writing several pages wants one window for all
@@ -362,11 +546,13 @@ enum class ChipErasePolicy : uint8_t {
  * operations is making a decision worth seeing. No verb here unlocks
  * behind its caller's back.
  *
- * NO READ-WHILE-WRITE. This is the array the core executes from, and an
- * erase or a program stalls the instruction fetch for its whole
- * duration - milliseconds, by the datasheet's table 4-17. A write from
- * the main loop is a pause of the entire program and not a background
- * operation.
+ * A WRITE IS A WAIT AND NOT A STALL. Every erase and program polls BSY,
+ * so it blocks its CALLER for the milliseconds the datasheet's table
+ * 4-17 gives it - and nothing else: measured on the CH32V203C8 and the
+ * CH32V303VC, the core goes on executing out of the window while the
+ * engine erases a page of it or a sector of the tail, the kernel's tick
+ * advancing by what a timer measured across the erase, so interrupts
+ * keep being served throughout.
  */
 struct Flash {
     Flash() = delete;
@@ -383,8 +569,23 @@ struct Flash {
     /// address, and "when any non-halfword data is written, FPEC will
     /// generate a bus error".
     static constexpr uint32_t half_word_size = 2;
-    /// The user array this part carries, from its own table.
-    static constexpr uint32_t array_bytes = device::flash_bytes;
+
+    /// THE ARRAY'S THREE NUMBERS (the file header): the zero-wait window
+    /// every linker script and the medium reckon with, the non-zero-wait
+    /// tail above it, and the die's whole code flash.
+    static constexpr uint32_t window_bytes = device::flash_bytes;
+    static constexpr uint32_t tail_bytes = device::flash_tail_bytes;
+    static constexpr uint32_t array_bytes = device::flash_array_bytes;
+    static constexpr bool has_tail = tail_bytes != 0u;
+    /// The tail's first address and one past its last, counted from zero
+    /// like every address here: it starts where the window ends.
+    static constexpr uint32_t tail_base = window_bytes;
+    static constexpr uint32_t tail_end = window_bytes + tail_bytes;
+
+    static_assert(tail_end <= array_bytes,
+                  "brio Flash: the part table's window and tail do not fit its array");
+    static_assert(window_bytes % sector_size == 0u && tail_bytes % sector_size == 0u,
+                  "brio Flash: the window and the tail are whole sectors on every part");
 
     static constexpr uint32_t alias_base = flash_alias_base;   // 0x0000 0000, where the image runs
     static constexpr uint32_t array_base = flash_array_base;   // 0x0800 0000, where the engine writes
@@ -408,12 +609,13 @@ struct Flash {
     static constexpr uint32_t mode_spins = 64;
 
     /// The caller broke the contract: a misaligned address, a span that
-    /// is not a page, a chip erase with no policy. A bit no STATR flag
-    /// uses.
+    /// is not a page, a run past the array, a chip erase with no policy.
+    /// A bit no STATR flag uses.
     static constexpr uint32_t refused = 1UL << 31;
-    /// The RATE is too high for an erase or a program (32.1): HCLK above
-    /// `flash_safe_sysclk_hz` with a clock chosen at run time. Under a
-    /// static Clock the same condition is a compile error instead.
+    /// The RATE is too high for an erase, a program or a read of the
+    /// tail (32.1): HCLK above `flash_safe_sysclk_hz` with a clock chosen
+    /// at run time. Under a static Clock the same condition is a compile
+    /// error instead.
     static constexpr uint32_t refused_rate = 1UL << 30;
 
     /// The engine's registers, for a program that has to stage a
@@ -421,9 +623,29 @@ struct Flash {
     /// resource of this stratum carries.
     static FlashRegs& regs() { return *flash_ctl(); }
 
-    /// The address the ENGINE takes for the byte the image sees at
-    /// `addr`. Applied here and nowhere else.
+    /// The address the ENGINE takes for the byte at `addr`, counted from
+    /// the start of the array: the array's own address, 0x0800 0000
+    /// above it - which is where the image sees a byte of the window at
+    /// `addr` itself, and where the tail is read. Applied here and
+    /// nowhere else.
     static constexpr uint32_t alias_of(uint32_t addr) { return array_base + addr; }
+
+    /// Is the run [addr, addr + bytes) inside the zero-wait window?
+    static constexpr bool in_window(uint32_t addr, uint32_t bytes) {
+        return addr <= window_bytes && bytes <= window_bytes - addr;
+    }
+
+    /// Is it inside the non-zero-wait tail? Never on a part that has
+    /// none.
+    static constexpr bool in_tail(uint32_t addr, uint32_t bytes) {
+        return has_tail && addr >= tail_base && addr <= tail_end && bytes <= tail_end - addr;
+    }
+
+    /// Is it wholly in one of the two - where every write verb works?
+    /// A run across the line between them is in neither.
+    static constexpr bool in_array(uint32_t addr, uint32_t bytes) {
+        return in_window(addr, bytes) || in_tail(addr, bytes);
+    }
 
     // ---- the locks (32.5.2, 32.5.5, 32.6.1) --------------------------------
     static bool locked() { return (flash_ctl()->CTLR & flash_lock) != 0u; }
@@ -571,15 +793,17 @@ struct Flash {
     }
 
     // ---- reading ------------------------------------------------------------
-    /// The array is memory-mapped and answers at both addresses on any
-    /// width (32.5.1): this is a copy and nothing more.
+    /// The WINDOW, through the alias the image runs at. The array is
+    /// memory-mapped and answers on any width (32.5.1): this is a copy
+    /// and nothing more, at any rate. The tail is `read_tail()`'s.
     static void read(uint32_t addr, std::span<uint8_t> dst) {
         memcpy(dst.data(), reinterpret_cast<const void*>(alias_base + addr), dst.size());
     }
 
     /// Is the run at `addr` erased - that is, every word of it
     /// `erased_word`? The question a medium asks before it programs,
-    /// and the reason `erased_word` is published.
+    /// and the reason `erased_word` is published. The window's, like
+    /// `read()`.
     static bool erased(uint32_t addr, uint32_t bytes) {
         if ((addr % 4u) != 0u || (bytes % 4u) != 0u) {
             return false;
@@ -593,33 +817,83 @@ struct Flash {
         return true;
     }
 
+    /**
+     * A run of the TAIL, through the array's own address. `refused` for
+     * a run that is not wholly in the tail (and on a part that has
+     * none), `refused_rate` above `flash_safe_sysclk_hz` under a clock
+     * chosen at run time - a compile error under a static one - because
+     * the tail is read out of the array at the access clock (the file
+     * header). Zero, and the bytes copied, otherwise.
+     */
+    template <typename Clock>
+    static uint32_t read_tail(Clock clock, uint32_t addr, std::span<uint8_t> dst) {
+        if (!in_tail(addr, static_cast<uint32_t>(dst.size()))) {
+            return refused;
+        }
+        const uint32_t bad = tail_rate_refusal(clock);
+        if (bad != 0u) {
+            return bad;
+        }
+        memcpy(dst.data(), reinterpret_cast<const void*>(array_base + addr), dst.size());
+        return 0u;
+    }
+
+    /// The same with the address a constant: a run outside the tail - on
+    /// a part with no tail, any run - does not compile.
+    template <uint32_t addr, typename Clock>
+    static uint32_t read_tail(Clock clock, std::span<uint8_t> dst) {
+        static_assert(has_tail,
+                      "brio Flash: THIS PART HAS NO TAIL - its datasheet gives the non-zero-wait "
+                      "area to other products (parts/<part>.hpp's flash_tail_bytes)");
+        static_assert(in_tail(addr, 1u), "brio Flash: this address is not in the tail");
+        return read_tail(clock, addr, dst);
+    }
+
     // ---- erasing ------------------------------------------------------------
     /**
      * One 256-byte page, the fast way (32.5.7): FTER, the page's first
-     * address into FLASH_ADDR, STRT. Both locks open, the page aligned.
+     * address into FLASH_ADDR, STRT. Both locks open, the page aligned,
+     * in the window or the tail (the file header).
      */
     template <typename Clock>
     static uint32_t erase_page(Clock clock, uint32_t addr) {
-        if ((addr % page_size) != 0u || addr >= array_bytes) {
+        if ((addr % page_size) != 0u || !in_array(addr, page_size)) {
             return refused;
         }
         return run(clock, flash_fter, alias_of(addr), true, true);
     }
 
+    template <uint32_t addr, typename Clock>
+    static uint32_t erase_page(Clock clock) {
+        static_assert((addr % page_size) == 0u, "brio Flash: a page address is a multiple of 256");
+        reach<addr, page_size>();
+        return erase_page(clock, addr);
+    }
+
     /// One 4 KB sector, the standard way (32.5.4): PER, the sector's
     /// first address, STRT. Sixteen pages at a time, which is also one
     /// write-protection unit. A STANDARD verb, so the FPEC lock alone
-    /// has to be open (32.4.4's own note on the bit).
+    /// has to be open (32.4.4's own note on the bit). The window or the
+    /// tail.
     template <typename Clock>
     static uint32_t erase_sector(Clock clock, uint32_t addr) {
-        if ((addr % sector_size) != 0u || addr >= array_bytes) {
+        if ((addr % sector_size) != 0u || !in_array(addr, sector_size)) {
             return refused;
         }
         return run(clock, flash_per, alias_of(addr), true, false);
     }
 
+    template <uint32_t addr, typename Clock>
+    static uint32_t erase_sector(Clock clock) {
+        static_assert((addr % sector_size) == 0u,
+                      "brio Flash: a sector address is a multiple of 4096");
+        reach<addr, sector_size>();
+        return erase_sector(clock, addr);
+    }
+
     /**
-     * One 32 KB block, the fast way (32.5.7's second half): BER32.
+     * One 32 KB block, the fast way (32.5.7's second half): BER32. The
+     * window or the tail, whose 224 KB are seven whole blocks.
      *
      * NOTHING PROTECTS THE RUNNING IMAGE HERE but the address the caller
      * passes. On the 32 KB parts of this series there is exactly one
@@ -628,10 +902,18 @@ struct Flash {
      */
     template <typename Clock>
     static uint32_t erase_block32(Clock clock, uint32_t addr) {
-        if ((addr % block_size) != 0u || addr >= array_bytes) {
+        if ((addr % block_size) != 0u || !in_array(addr, block_size)) {
             return refused;
         }
         return run(clock, flash_ber32, alias_of(addr), true, true);
+    }
+
+    template <uint32_t addr, typename Clock>
+    static uint32_t erase_block32(Clock clock) {
+        static_assert((addr % block_size) == 0u,
+                      "brio Flash: a block address is a multiple of 32768");
+        reach<addr, block_size>();
+        return erase_block32(clock, addr);
     }
 
     /**
@@ -654,11 +936,11 @@ struct Flash {
      * at an even address, BSY watched. The store IS the operation -
      * there is no start bit in this one - and a store of any other width
      * is a bus error, which is why the argument is a `uint16_t` and the
-     * address is checked.
+     * address is checked. The window or the TAIL.
      */
     template <typename Clock>
     static uint32_t program_half_word(Clock clock, uint32_t addr, uint16_t value) {
-        if ((addr % half_word_size) != 0u || addr + half_word_size > array_bytes) {
+        if ((addr % half_word_size) != 0u || !in_array(addr, half_word_size)) {
             return refused;
         }
         const uint32_t bad = before_write(clock, false);
@@ -673,25 +955,33 @@ struct Flash {
         return err;
     }
 
+    template <uint32_t addr, typename Clock>
+    static uint32_t program_half_word(Clock clock, uint16_t value) {
+        static_assert((addr % half_word_size) == 0u,
+                      "brio Flash: a half-word is programmed at an even address (RM 32.5.3)");
+        reach<addr, half_word_size>();
+        return program_half_word(clock, addr, value);
+    }
+
     /**
      * ONE WHOLE PAGE, the fast way (32.5.6): FTPG set, then 64 words
      * stored into the array with WRBSY watched between them, then
      * PGSTRT. `src` is exactly `page_size` bytes and `addr` is page
-     * aligned.
+     * aligned, in the window or the tail (the file header).
      *
      * FLASH_ADDR IS WRITTEN BEFORE PGSTRT although 32.5.6 does not list
      * that step - the sister family's chapter does list it for the same
      * operation, and the register is what the erase verbs use to say
-     * WHERE. MEASURED, THE SILICON DOES NOT NEED IT: the same sequence
-     * with the store left out, and the register pointing at another
-     * erased page, wrote the page the sixty-four stores named and left
-     * the other one untouched. The store stays because it costs one
-     * instruction and makes the sequence the one both chapters
-     * describe.
+     * WHERE. MEASURED, THE SILICON DOES NOT NEED IT, on the CH32V203C8
+     * and the CH32V303VC: the same sequence with the store left out, and
+     * the register pointing at another erased page, wrote the page the
+     * sixty-four stores named and left the other one untouched. The
+     * store stays because it costs one instruction and makes the
+     * sequence the one both chapters describe.
      */
     template <typename Clock>
     static uint32_t program_page(Clock clock, uint32_t addr, std::span<const uint8_t> src) {
-        if (src.size() != page_size || (addr % page_size) != 0u || addr >= array_bytes) {
+        if (src.size() != page_size || (addr % page_size) != 0u || !in_array(addr, page_size)) {
             return refused;
         }
         const uint32_t bad = before_write(clock, true);
@@ -717,6 +1007,13 @@ struct Flash {
         return err;
     }
 
+    template <uint32_t addr, typename Clock>
+    static uint32_t program_page(Clock clock, std::span<const uint8_t> src) {
+        static_assert((addr % page_size) == 0u, "brio Flash: a page address is a multiple of 256");
+        reach<addr, page_size>();
+        return program_page(clock, addr, src);
+    }
+
     // ---- the option bytes and the signature, in one place -------------------
     static FlashOptions options() { return FlashOptions::read(); }
     /// FLASH_WPR as loaded: a CLEAR bit is a protected 4 KB sector.
@@ -724,6 +1021,9 @@ struct Flash {
     static bool read_protected() { return (flash_ctl()->OBR & flash_obr_rdprt) != 0u; }
     static DeviceUid uid() { return DeviceUid::read(); }
     static uint16_t size_kbytes() { return flash_size_kbytes(); }
+    /// The memory split in force, decoded - nothing on a part with no
+    /// split.
+    static std::optional<FlashSplit> split() { return FlashOptions::read().split(); }
 
     /// HCLK as the clock names it, whichever kind of clock it is: a
     /// constant for a static one, this moment's rate for a dynamic one.
@@ -737,6 +1037,19 @@ struct Flash {
     }
 
 private:
+    /// The compile-time reach (the struct's comment): the window and the
+    /// tail above it, for both methods alike.
+    template <uint32_t addr, uint32_t bytes>
+    static constexpr void reach() {
+        static_assert(has_tail || addr < window_bytes,
+                      "brio Flash: THIS PART HAS NO TAIL - its datasheet gives the non-zero-wait "
+                      "area to other products, so the window is the whole of what a program may "
+                      "write (parts/<part>.hpp's flash_tail_bytes)");
+        static_assert((!has_tail && addr >= window_bytes) || in_array(addr, bytes),
+                      "brio Flash: this run is past the array this part offers - the window and "
+                      "the tail above it");
+    }
+
     /// The rate half of the contract (the file header): a compile error
     /// under a static Clock that needs HCLK halved, a code under a
     /// dynamic one whose rate happens to be there now.
@@ -750,6 +1063,25 @@ private:
                           "not move the clock tree behind its caller's back. Run the operation "
                           "at or below brio::flash_safe_sysclk_hz, which a DynamicClock can "
                           "step down to");
+            (void)clock;
+            return 0u;
+        } else {
+            return hclk_of(clock) > flash_safe_sysclk_hz ? refused_rate : 0u;
+        }
+    }
+
+    /// The same rule for a READ of the tail, with its own words: the
+    /// window reads at any rate and the tail does not (the file header).
+    template <typename Clock>
+    static uint32_t tail_rate_refusal(Clock clock) {
+        if constexpr (Clock::is_static) {
+            static_assert(!Clock::flash_needs_halving,
+                          "brio Flash: a READ of the non-zero-wait tail at this rate wants HCLK "
+                          "HALVED around it (RM 32.1's note 2 names the non-zero-wait area among "
+                          "the flash operations that do, and the tail is read out of the array at "
+                          "the access clock, 60 MHz at most); the window reads at any rate. Read "
+                          "the tail at or below brio::flash_safe_sysclk_hz, which a DynamicClock "
+                          "can step down to");
             (void)clock;
             return 0u;
         } else {

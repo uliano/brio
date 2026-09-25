@@ -59,6 +59,13 @@ inline constexpr uint32_t flash_protect_bytes   = 4096UL;
 /// whole of what a program may occupy and the tail is stated as none.
 inline constexpr uint32_t flash_tail_bytes  = 0UL;
 inline constexpr uint32_t flash_array_bytes = 480UL * 1024UL;
+/// Which table of RM table 32-4 reads the option byte's USER[7:5]:
+/// none. The table of the CH32V303's five combinations is keyed by a
+/// list of parts (its note 1) that names the CH32V303RC and VC and not
+/// this one, and the datasheet's note 1 to table 2-1-1 gives the split
+/// to the 256K FLASH + 64K SRAM products alone - the same class, and
+/// not the same product.
+inline constexpr FlashSplitTable flash_split_table = FlashSplitTable::none;
 
 // ---- the device class and the core ----------------------------------------
 /// WCH's own family division, which several chapters are keyed by: this part

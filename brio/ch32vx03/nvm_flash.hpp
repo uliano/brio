@@ -1,9 +1,9 @@
 /*
  * nvm_flash.hpp
  *
- * The CH32V203's main flash as a FlashMedia (util/nv_heap.hpp's
- * contract): `MainFlashPartition`, where the line is drawn, and
- * `MainFlash<Clock>`, the medium itself.
+ * The main flash of the CH32V203 and the CH32V303 as a FlashMedia
+ * (util/nv_heap.hpp's contract): `MainFlashPartition`, where the line
+ * is drawn, and `MainFlash<Clock>`, the medium itself.
  *
  * A MEDIUM AND NOTHING ABOVE IT. The heap (util/nv_heap.hpp) and the
  * journal (util/nv_journal.hpp) stand on this contract on other
@@ -32,12 +32,19 @@
  *    half-word program costs more than the fast method spends on a
  *    whole page (2.6 ms against 1.5).
  *
- * A CONSTANT PARTITION, DRAWN ONCE, AT THE TOP. The zone is the LAST
- * 4 KB of the array on every part of the series - sixteen pages of 256
- * bytes, and exactly one WRITE-PROTECTION unit (RM 32.1's note 1), so
- * the storage can be protected or left open without touching the
- * image's own sectors. Every linker script of this project stops its
- * flash region 4 KB short of the array (ch32vx03/ld/<part>.ld), so
+ * A CONSTANT PARTITION, DRAWN ONCE, AT THE TOP OF THE WINDOW. The zone
+ * is the LAST 4 KB of the zero-wait window on every part of the two
+ * series - sixteen pages of 256 bytes, and exactly one WRITE-PROTECTION
+ * unit (RM 32.1's note 1), so the storage can be protected or left open
+ * without touching the image's own sectors. The window and not the
+ * tail above it, although both of the engine's methods reach the tail
+ * (measured on the CH32V303VC): a word of the tail costs four times a
+ * word of the window to read (nvm.hpp's header), a tail read carries
+ * the rate contract a window read does not, and the tail's half-word
+ * cells do not take a second pass the way the window's do - three
+ * reasons a medium read by its program is better off where the image
+ * is. Every linker script of this project stops its flash region 4 KB
+ * short of the window (ch32vx03/ld/<part>.ld), so
  * nothing the compiler emits can land there and the floor is a
  * CONSTANT rather than a symbol that moves with every build - the same
  * arrangement the sister family uses, and for the same reason:
@@ -48,13 +55,15 @@
  * ceiling, which every user of the contract refuses on) instead of
  * letting the two overlap.
  *
- *   0x0000 .. array - 4K   the image (the linker's)
- *   array - 4K .. array    MainFlash, 16 pages of 256 bytes
+ *   0x0000 .. window - 4K     the image (the linker's)
+ *   window - 4K .. window     MainFlash, 16 pages of 256 bytes
+ *   window .. tail_end        the non-zero-wait tail, nobody's by default
  *
  * ADDRESSES ARE THE ARRAY'S OWN, counted from zero - the addresses the
  * image runs at - and nvm.hpp adds the 0x0800 0000 alias where the
  * chapter wants it. util/nv_heap.hpp numbers erase units in a uint16_t:
- * the largest part of this series is 128 KB, 512 pages, no problem.
+ * the largest window of the two series is 256 KB, 1024 pages, no
+ * problem.
  *
  * THE CLOCK IS PART OF THE MEDIUM'S TYPE, and this is the one place
  * where this stratum's FlashMedia differs in shape from the others'.
@@ -77,6 +86,15 @@
  * program here is a
  * BLOCKING CALL for its caller (the driver polls BSY) and not a hole in
  * the program: interrupts keep being served throughout.
+ *
+ * ON THE CH32V303 the zone is the top 4 KB of THAT part's window - the
+ * 256 KB the option byte selects out of the factory on the RC and VC,
+ * whole 128 KB on the CB and RB - with the tail above it left to a
+ * program that asks nvm.hpp for it by name. MEASURED on the CH32V303VC:
+ * the zone at 0x3F000..0x40000, the linker's region ending exactly at
+ * its floor, a cell erased, programmed, read back and found again after
+ * a reset - and a page erase there taking 16.9 ms where the CH32V203C8
+ * takes 9.8, the page program 1.5 ms on both.
  */
 
 #pragma once
@@ -111,12 +129,16 @@ struct MainFlashPartition {
     /// standard erase grain: 4 KB, sixteen pages.
     static constexpr uint32_t zone_bytes = Flash::sector_size;    // 4096
     static constexpr uint32_t zone_pages = zone_bytes / page;     // 16
-    static constexpr uint32_t storage_end = Flash::array_bytes;   // the top of the array
+    static constexpr uint32_t storage_end = Flash::window_bytes;  // the top of the window
     static constexpr uint32_t storage_base = storage_end - zone_bytes;
 
     static_assert(storage_base % page == 0u);
     static_assert(zone_bytes % page == 0u);
-    static_assert(storage_base > 0u, "brio MainFlashPartition: the array is smaller than the zone");
+    static_assert(storage_base > 0u,
+                  "brio MainFlashPartition: the window is smaller than the zone");
+    static_assert(Flash::in_window(storage_base, zone_bytes),
+                  "brio MainFlashPartition: the zone lies at the top of the zero-wait window, "
+                  "where the program reads it at the window's price (the file header)");
 
     /// Does the linker script still stop where this partition assumes?
     /// A build whose `rom` region reaches into the zone answers false,

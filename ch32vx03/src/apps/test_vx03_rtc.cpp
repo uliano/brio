@@ -1,8 +1,9 @@
-// test_vx03_rtc - the reference bench suite for the CH32V203's REAL-TIME
-// CLOCK and the backup domain around it: ch32vx03/rtc.hpp over RM ch. 6
-// (the counter), ch. 4 (the backup registers and the tamper input),
-// 3.3.3 and 3.4.9 (the low-speed crystal and the clock select) and 2.4.1
-// (the one bit that unlocks all of it).
+// test_vx03_rtc - the reference bench suite for the REAL-TIME CLOCK of the
+// CH32V203 and the CH32V303, and the backup domain around it:
+// ch32vx03/rtc.hpp over RM ch. 6 (the counter), ch. 4 (the backup
+// registers and the tamper input), 3.3.3 and 3.4.9 (the low-speed
+// crystal and the clock select) and 2.4.1 (the one bit that unlocks all
+// of it).
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -52,6 +53,10 @@
 //      past the count refused, the calibration field, the block's own
 //      reset line against the domain's, and the two pad outputs that
 //      are exclusive with the tamper input
+//   k  (on a class with forty-two) THE SECOND BLOCK of data registers,
+//      BKP_DATAR11..42 above the tamper registers: every one written and
+//      read back under two patterns, and neither block reaching into the
+//      other
 //   w  (by name, WIPES THE DOMAIN) the domain reset, and the HSE
 //      division MEASURED - 512 or 128, which 3.4.9 keys on the lot
 //      number
@@ -59,7 +64,7 @@
 //   t  (by name, WIPES THE DATA REGISTERS) the tamper input, driven
 //      from PC13's own port
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -662,8 +667,9 @@ void th_backup() {
     print(serial, "  this device class carries ", Bkp::count, " backup data registers, and "
           "the tamper pad is ", Bkp::has_tamper_pad ? "bonded" : "not bonded", crlf);
     bench.verdict("the block opens with both bus clocks and DBP, and the count is the "
-                  "device class's: ten on the CH32V20x_D6",
-                  opened && Bkp::count == 10u);
+                  "device class's: ten on the CH32V20x_D6, forty-two on the other two",
+                  opened &&
+                      Bkp::count == (device::device_class == DeviceClass::v20x_d6 ? 10u : 42u));
 
     // Every register of this class, written and read back.
     bool all = true;
@@ -678,18 +684,18 @@ void th_backup() {
             all = false;
         }
     }
-    bench.verdict("all ten hold sixteen bits each, written and read back through the "
+    bench.verdict("every one of them holds sixteen bits, written and read back through the "
                   "chapter's own numbering, which starts at one",
                   all);
 
-    // The eleventh belongs to the other device class: refused at run
-    // time by an empty optional, and at compile time by a static_assert
-    // where the index is a constant (test/family_ch32vx03/neg).
+    // The one past the class's count is refused at run time by an empty
+    // optional, and at compile time by a static_assert where the index
+    // is a constant (test/family_ch32vx03/neg).
     const bool past = !Bkp::data(static_cast<uint8_t>(Bkp::count + 1u)).has_value();
     const bool zero = !Bkp::data(0).has_value();
     const bool past_write = !Bkp::data(static_cast<uint8_t>(Bkp::count + 1u), 0x1234u);
-    bench.verdict("the eleventh register and the zeroth are refused with an empty optional "
-                  "and nothing written - the second block of registers is the D8 class's",
+    bench.verdict("the register past the class's count and the zeroth are refused with an "
+                  "empty optional and nothing written",
                   past && zero && past_write);
 
     // The calibration field: seven bits that only SLOW the clock.
@@ -751,6 +757,55 @@ void th_backup() {
 }
 
 // ===========================================================================
+// k - the second block of data registers (a class with forty-two)
+// ===========================================================================
+/// BKP_DATAR11..42 sit in a second block above the tamper registers
+/// (RM 4.3, table 4-1), so a register numbered past ten is not simply
+/// the next word: every one is written and read back under two patterns,
+/// each block checked after the other was written, which catches a
+/// numbering that folds one block onto the other.
+template <uint8_t count = Bkp::count>
+void tk_second_block() {
+    if constexpr (count == 42u) {
+        (void)Bkp::open();
+        constexpr uint16_t patterns[2] = {0x5A00u, 0xA500u};
+        bool every = true;
+        bool first_block_kept = true;
+        for (const uint16_t base : patterns) {
+            for (uint8_t n = 1; n <= 10u; ++n) {
+                (void)Bkp::data(n, static_cast<uint16_t>(base | n));
+            }
+            // The second block, written with the OTHER pattern's bits.
+            for (uint8_t n = 11; n <= 42u; ++n) {
+                (void)Bkp::data(n, static_cast<uint16_t>((base ^ 0xFF00u) | n));
+            }
+            for (uint8_t n = 1; n <= 10u; ++n) {
+                if (Bkp::data(n).value_or(0) != static_cast<uint16_t>(base | n)) {
+                    first_block_kept = false;
+                }
+            }
+            for (uint8_t n = 11; n <= 42u; ++n) {
+                if (Bkp::data(n).value_or(0) != static_cast<uint16_t>((base ^ 0xFF00u) | n)) {
+                    every = false;
+                }
+            }
+        }
+        const auto eleventh = Bkp::data(11);
+        const auto last = Bkp::data(42);
+        const bool past = !Bkp::data(43).has_value();
+        print(serial, "  BKP_DATAR11 reads ", hex(eleventh.value_or(0)), ", BKP_DATAR42 ",
+              hex(last.value_or(0)), "; the forty-third ", past ? "refused" : "ANSWERED", crlf);
+        bench.verdict("the thirty-two registers of the second block hold sixteen bits each "
+                      "under two patterns, read back through their own numbers",
+                      every);
+        bench.verdict("and writing them leaves the first block's ten as they were - the two "
+                      "blocks are two sets of registers and not one numbered twice",
+                      first_block_kept);
+        bench.verdict("the forty-third is refused with nothing written", past);
+    }
+}
+
+// ===========================================================================
 // w - the domain reset, and the HSE division measured (WIPES THE DOMAIN)
 // ===========================================================================
 void tw_domain_reset() {
@@ -807,7 +862,7 @@ void tw_domain_reset() {
     print(serial, "  the domain reset again and re-opened on the crystal: ",
           back ? "ready" : "FAILED", crlf);
     bench.verdict("and a second domain reset is what lets the crystal be chosen again - "
-                  "the counter, the prescaler, the alarm and the ten data registers being "
+                  "the counter, the prescaler, the alarm and the data registers being "
                   "the price of every such change",
                   back);
     bench.end_letter();
@@ -829,8 +884,8 @@ void tv_across_reset() {
         (void)Bkp::data(n, static_cast<uint16_t>(token.wrote + n));
     }
     const uint32_t count = Rtc::count();
-    print(serial, "  ten registers written from ", hex(token.wrote), ", the counter at ",
-          hex(count), ", rebooting...", crlf);
+    print(serial, "  ", Bkp::count, " registers written from ", hex(token.wrote),
+          ", the counter at ", hex(count), ", rebooting...", crlf);
     Reset::software();
 }
 
@@ -847,7 +902,7 @@ void tv_resume() {
         }
     }
     print(serial, "  the block came up with its clocks ", shut ? "SHUT and DBP clear"
-          : "OPEN", "; re-opened, the ten registers read ",
+          : "OPEN", "; re-opened, the data registers read ",
           all ? "exactly what was written" : "WRONG", crlf);
     bench.verdict("the backup data registers survive a system reset - the domain is not "
                   "reset with the rest of the chip, which is what makes them the one place "
@@ -1044,6 +1099,9 @@ int main() {
     bench.letter('g', "the overflow, staged two ticks short of the top", tg_overflow);
     bench.letter('h', "the backup registers, the calibration and the pad's three uses",
                  th_backup);
+    if constexpr (brio::Bkp::count == 42u) {
+        bench.letter('k', "the second block of data registers, 11 to 42", tk_second_block<>);
+    }
     bench.letter('w', "THE DOMAIN RESET and the HSE division measured (wipes the domain)",
                  tw_domain_reset, false);
     bench.letter('v', "THE DATA REGISTERS ACROSS A SYSTEM RESET (reboots)", tv_across_reset,

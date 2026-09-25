@@ -55,13 +55,20 @@ inline constexpr uint32_t flash_protect_bytes   = 4096UL;
 /// and flash_bytes above is only its ZERO-WAIT WINDOW: the datasheet's
 /// note 1 to table 2-1 counts "Flash bytes" as the zero-wait run area
 /// and gives the V203 series a non-zero-wait area of (224K - R0WAIT)
-/// above it. The tail is stated and nothing uses it: no linker script
-/// places a byte there and what an access there costs is not measured.
+/// above it. No linker script places a byte in the tail; nvm.hpp
+/// reaches it with the standard method alone and with a read of its
+/// own, and what an access there costs is not measured on this part.
 /// This part's window is the factory split of note 2 (128K of flash
 /// with 64K of SRAM); the option byte that moves it moves the tail with
 /// it.
 inline constexpr uint32_t flash_tail_bytes  = 96UL * 1024UL;
 inline constexpr uint32_t flash_array_bytes = 224UL * 1024UL;
+/// Which table of RM table 32-4 reads the option byte's USER[7:5]: the
+/// one the manual gives the CH32V20x_D8 - 128K, 144K or 160K of window
+/// with 64K, 48K or 32K of SRAM, the three combinations the datasheet's
+/// note 2 names. The factory's is the first, which is what flash_bytes
+/// and ld/ch32v203rb.ld state.
+inline constexpr FlashSplitTable flash_split_table = FlashSplitTable::code_128k_ram_64k;
 
 // ---- the device class -----------------------------------------------------
 /// WCH's own family division, which several chapters are keyed by: this

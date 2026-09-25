@@ -1,7 +1,7 @@
-// test_vx03_misc - the reference bench suite for the CH32V203's small
-// blocks: ch32vx03/crc.hpp over RM ch. 5, the cyclic redundancy check
-// unit, and the pieces of a chapter that are too small to earn a suite
-// of their own.
+// test_vx03_misc - the reference bench suite for the small blocks of the
+// CH32V203 and the CH32V303: ch32vx03/crc.hpp over RM ch. 5, the cyclic
+// redundancy check unit, and the pieces of a chapter that are too small
+// to earn a suite of their own.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -49,7 +49,7 @@
 //   w  (by name) THE SCRATCH ACROSS A SYSTEM RESET: a byte written, the
 //      board rebooted, the register read at the next boot
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -403,10 +403,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The forty-two backup registers of the CH32V20x_D8.** The count
-  folds through the part table and the eleventh register is a compile
-  error on this class; what would measure it is a CH32V203RB on a
-  board.
+- **The forty-two backup registers of the CH32V20x_D8 and the
+  CH32V30x_D8.** The count folds through the part table and the
+  eleventh register is a compile error on the CH32V20x_D6;
+  `test_vx03_rtc`'s letter k writes and reads back the second block,
+  BKP_DATAR11..42, under two patterns on a part that has it. What would
+  measure it is that letter on a CH32V303VC, or a CH32V203RB on a board.
 - **The LSI as RTCCLK.** The third source is selected by the same verb
   and the watchdog chapter has measured that oscillator at 38.8 kHz on
   this die; what would measure this path is a run with RTCSEL on the

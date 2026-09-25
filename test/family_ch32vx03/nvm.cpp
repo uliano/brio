@@ -1,10 +1,11 @@
 // Flash family smoke TU: the program and erase engine, the option
 // bytes, the electronic signature and the FlashMedia over the top of
-// the array - every verb, on every part.
+// the zero-wait window - every verb, on every part. The tail above the
+// window is nvm_tail.cpp's and the option byte's split nvm_split.cpp's.
 //
 // Nothing here is per instance: there is one flash controller and one
-// signature block on every part of the series. What IS per part is the
-// ARRAY (32, 64 or 128 KB) and therefore where the medium's zone
+// signature block on every part of both series. What IS per part is the
+// WINDOW (32, 64, 128 or 256 KB) and therefore where the medium's zone
 // begins, so this file asks device:: for the size and checks the
 // partition's arithmetic against it rather than naming an address.
 #include <stddef.h>
@@ -29,7 +30,8 @@ static_assert(Flash::page_size == 256u);
 static_assert(Flash::sector_size == 4096u);
 static_assert(Flash::block_size == 32u * 1024u);
 static_assert(Flash::half_word_size == 2u);
-static_assert(Flash::array_bytes == device::flash_bytes);
+static_assert(Flash::window_bytes == device::flash_bytes);
+static_assert(Flash::array_bytes == device::flash_array_bytes);
 static_assert(Flash::array_base == 0x08000000u);
 static_assert(Flash::alias_base == 0x00000000u);
 static_assert(Flash::alias_of(0x1234u) == 0x08001234u);
@@ -66,10 +68,10 @@ static_assert(FlashOptionArea::base == 0x1FFFF800u);
 // The two reset-related bits are stated the way a reader thinks about
 // them, which is the INVERSE of the register's own sense (32.4.6: 0 =
 // "system will be reset when entering Stop mode").
-constexpr FlashOptions all_clear{false, false, false, false, false, 0xFFFFFFFFu};
+constexpr FlashOptions all_clear{false, false, false, false, false, 0xFFFFFFFFu, 0u};
 static_assert(!all_clear.sector_protected(0));
 static_assert(!all_clear.address_protected(0x1000u));
-constexpr FlashOptions first_locked{false, false, false, false, false, 0xFFFFFFFEu};
+constexpr FlashOptions first_locked{false, false, false, false, false, 0xFFFFFFFEu, 0u};
 static_assert(first_locked.sector_protected(0));
 static_assert(!first_locked.sector_protected(1));
 static_assert(first_locked.address_protected(0u));
@@ -77,7 +79,7 @@ static_assert(first_locked.address_protected(0x0FFFu));
 static_assert(!first_locked.address_protected(0x1000u));
 // The last bit of WPR covers sectors 31 to 127 (32.6's WRPR3 note), so
 // every index above 30 asks the same bit.
-constexpr FlashOptions top_locked{false, false, false, false, false, 0x7FFFFFFFu};
+constexpr FlashOptions top_locked{false, false, false, false, false, 0x7FFFFFFFu, 0u};
 static_assert(top_locked.sector_protected(31));
 static_assert(top_locked.sector_protected(127));
 static_assert(!top_locked.sector_protected(30));
@@ -89,6 +91,7 @@ static_assert(FlashMedia<Store>);
 static_assert(MainFlashPartition::zone_bytes == 4096u);
 static_assert(MainFlashPartition::zone_pages == 16u);
 static_assert(MainFlashPartition::storage_end == device::flash_bytes);
+static_assert(Flash::in_window(MainFlashPartition::storage_base, MainFlashPartition::zone_bytes));
 static_assert(MainFlashPartition::storage_base == device::flash_bytes - 4096u);
 static_assert(Store::erase_size == 256u && Store::write_cell == 256u);
 static_assert(Store::flash_end == MainFlashPartition::storage_end);

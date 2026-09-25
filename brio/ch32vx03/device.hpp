@@ -62,6 +62,20 @@ enum class DeviceClass : uint8_t {
     v30x_d8,   ///< CH32V30x_D8: the CH32V303CB/RB/RC/VC
 };
 
+/// Which of RM table 32-4's two tables reads the user option byte's
+/// USER[7:5] on a part - the field that moves the line between the
+/// code flash's zero-wait window and the SRAM. The two tables are keyed
+/// by the products they serve and not by one class alike: the first by
+/// a list of parts (the CH32V303RC and VC among them, and not the
+/// CH32V303CB or RB, which are the same class), the second by the
+/// CH32V20x_D8. What each code means is nvm.hpp's; every part file
+/// states which table is its own.
+enum class FlashSplitTable : uint8_t {
+    none,                ///< no split: the window is the part's flash_bytes, whatever USER holds
+    code_128k_ram_64k,   ///< the CH32V203RB's: 128/144/160 KB of window (table 32-4, CH32V20x_D8)
+    code_256k_ram_64k,   ///< the CH32V303RC's and VC's: 192/224/256/128/288 KB (table 32-4, note 1)
+};
+
 } // namespace brio
 
 // ---- the part -------------------------------------------------------------

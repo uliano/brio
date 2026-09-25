@@ -53,11 +53,19 @@ inline constexpr uint32_t flash_protect_bytes   = 4096UL;
 /// The code flash is ONE ARRAY of 480 KB (RM 32.1's table 32-1 runs to page
 /// 1919), and above the window lies its NON-ZERO-WAIT TAIL - 224 KB with the
 /// factory split, "(480K-R0WAIT)" in the datasheet's note 1. The linker
-/// script names the tail as a region and places nothing in it: what an access
-/// there costs is not measured, and fast programming does not reach it (RM
-/// 32.2.1).
+/// script names the tail as a region and places nothing in it; nvm.hpp
+/// reaches it with the standard method alone and with a read of its own -
+/// the fast method refused there on RM 32.2.1's note - and what an access
+/// there costs is not measured on this part.
 inline constexpr uint32_t flash_tail_bytes  = 224UL * 1024UL;
 inline constexpr uint32_t flash_array_bytes = 480UL * 1024UL;
+/// Which table of RM table 32-4 reads the option byte's USER[7:5]: the
+/// one its note 1 gives this part by name - 192K, 224K, 256K or 288K of
+/// window with 128K, 96K, 64K or 32K of SRAM, and 128K with 192K on the
+/// lots whose sixth digit from the end is not zero (note 2). The
+/// factory's is 256K with 64K, which is what flash_bytes, sram_bytes
+/// and the linker script state.
+inline constexpr FlashSplitTable flash_split_table = FlashSplitTable::code_256k_ram_64k;
 
 // ---- the device class and the core ----------------------------------------
 /// WCH's own family division, which several chapters are keyed by: this part
