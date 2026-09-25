@@ -389,6 +389,36 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   fast for a polling loop to count, and its pad read high on 1974 of
   4000 samples, which is what says it is a clock and not a level.
 
+- **On the STM32F411CE's SPI1 at PCLK2 = 96 MHz, against an ILI9481
+  panel on a breadboard: THE INTERRUPT-PUMPED REQUEST AT PCLK2/8 NEEDS
+  THE SCK PAD AT `medium` OR `low`.** Polled requests at 12 MHz are
+  byte-exact at every slew class, interrupt-pumped ones at 6 MHz too;
+  at 12 MHz with the pad at `high` or `very_high` the device takes
+  neither the command nor the data of an interrupt-pumped request (a
+  block written reads back as what was there before, a read comes back
+  all ones), and with the pad at `medium` or `low` every byte lands -
+  through the software pump and through the DMA engines alike, whose
+  interrupt-style request pumps its command byte the same way. IT IS
+  THE WIRE AND NOT THE DRIVER: slowing the MOSI pad alone to `medium`
+  with SCK left at `very_high` lands every byte too, the data pattern
+  makes no difference (all zeros fail as the pattern does), and with a
+  logic analyser's probes hung on the lines every case passes at every
+  slew class - the probes' capacitance slows the edges the way the pad
+  setting does. The analyser then said which wire: with its probe on
+  SCK alone the case still fails and the clock at the connector is
+  CLEAN (eight rising edges a byte, 82 to 84 ns periods, no pulse under
+  40 ns, no extra edge); with its probe on MOSI alone the case passes.
+  MOSI's fast edge is the actor and the damage is beyond the connector
+  - in the module's traces or the controller's input - where a logic
+  analyser cannot look. ES0287 2.11.4 is not involved (it asks for the
+  FASTER pad at a high APB). The rule for a breadboard: at PCLK2/8 keep
+  SCK or MOSI at `medium`; `sck_speed()` is the lever the driver has,
+  and MOSI's slew is set at init to `very_high` with no verb of its own
+  yet - the finding argues for one. Why the polled loop survives the
+  same edges on long requests and not on short ones was not resolved,
+  and does not need to be: the fix is on the pads, or on a printed
+  board's short traces.
+
 ## Not covered yet
 
 Driver gaps:
@@ -433,9 +463,10 @@ Driver gaps:
   chapter's.
 
 Implemented, not bench-verified (each with what would measure it):
-- The instances other than SPI5 and SPI2 (SPI1, SPI3, SPI4, SPI6 -
+- The instances other than SPI5, SPI2 and SPI1 (SPI3, SPI4, SPI6 -
   compiled on every header that has them, none driven): a wire between
-  two of them, or a device on one.
+  two of them, or a device on one. SPI1 is driven on the STM32F411CE
+  against a display and a touch controller (the finding above).
 - The receive-only and half-duplex-in configurations as a Request's
   `direction`: the engine's transactions are full duplex by
   construction, and the resource's simplex modes were driven by hand in

@@ -44,3 +44,200 @@ bench suites use SPI0 ALT1 (PE0..PE3) instead.
 Discovered by the avrdx project like any other app
 (`experiments/*/avrdx/*.cpp`): `cmake --build --preset
 avr128db48-release --target spi_duo` (or the other three).
+
+## The STM32F4 half: the panel's GRAM read back as an oracle
+
+`experiments/display/stm32f4/ili9481_probe.cpp` is the same module on a WeAct STM32F411CE
+black pill, and its point is different from the AVR apps': not whether
+the panel shows colours but whether the program can READ WHAT IT WROTE.
+A frame memory that answers is the bench plane of design/gfx.md's three
+planes of truth - a display driver and every primitive above it can be
+judged pixel for pixel against what the silicon holds, with no eye on
+the glass. The app is a letter menu over the board's own USB-C (CDC
+ACM, `brio run OU <letter>`): the controller's read registers, the read
+stream's alignment found by search, read_memory_continue, the whole
+frame written and read back and timed, the write and read rate ladders
+judged by read-back, the eight MADCTL scan orders, and brio/gfx drawing
+through a `Surface` over the panel with one word read back against the
+font. The bus is driven synchronously through `SpiHost::start()`
+(polled requests, the arbiter skipped: a device that owns its bus alone
+may).
+
+Predictions, written before the first run: the device code reads back
+`02 04 94 81` after ONE DUMMY BYTE (the datasheet lists a dummy read as
+the first parameter of every read command and the serial figures show
+no dummy clock); RAMRD returns three bytes a pixel with the six MSBs of
+each holding the colour and the two LSBs zero; a 12 MHz write (the
+datasheet's 12.5 MHz ceiling) reads back exact and 24 MHz does not; a
+6 MHz read (above the 4.17 MHz ceiling) is where the read path starts
+to fail; the whole frame (460800 bytes) writes in about 0.8 s at 6 MHz
+through the polled pump and reads back in about 1.5 s at 3 MHz.
+
+### What it found (35 verdicts, all passing; `brio run OU z`)
+
+- **The controller answers on SDO.** The device code (BFh) reads
+  `02 04 94 81` behind ONE DUMMY CLOCK - the stream is a bit late, so
+  the datasheet's "dummy read" is a clock and not a byte for that
+  command. The single-parameter registers (RDDPM 0x1C, RDDMADCTL 0x00,
+  RDDCOLMOD 0x66 = 18 bpp) arrive byte-aligned with no dummy at all;
+  RDDID (04h) and RDDST (09h) read all ones on this module. RDDPM's D7
+  reads 0 as the bit table says ("set to 0"), whatever the prose under
+  it says about the booster.
+- **The frame memory read (RAMRD, 2Eh) is ONE DUMMY BYTE (it reads
+  0x80) and then three bytes a pixel**, the six MSBs of each the colour
+  and the two LSBs zero - a different alignment from the device code's.
+  read_memory_continue (3Eh) has its own dummy byte and picks up at the
+  pixel after the last one clocked; a pixel cut short by spare clocks
+  is read again from its first byte. Clock exactly what you need.
+- **The whole frame (460800 bytes) reads back byte for byte** as
+  written: through the polled pump 1070 ms to write at 6 MHz (430 kB/s)
+  and 1845 ms to read at 3 MHz (249 kB/s); through SPI1's two DMA
+  engines 693 ms and 1499 ms at the same rates (664 and 307 kB/s, the
+  wire being 750 and 375), and 386 ms to write plus 573 ms to read at
+  12 MHz both ways (1193 and 804 kB/s), still exact.
+- **Rates.** A write at 12 MHz (the datasheet's 12.5 MHz ceiling) reads
+  back exact; 24 and 48 MHz leave garbage. A READ is exact at 6 and at
+  12 MHz - three times the datasheet's 4.17 MHz - and wrong at 24 MHz.
+  One module, one desk: printed, and the defaults stay inside the
+  datasheet.
+- **MADCTL's B5/B6/B7 change the order the address counter walks the
+  WINDOW, not the coordinate system**: under 40 (columns reversed)
+  logical (0,0) of a window (0..3, 0..1) is physical (3,0), not (319,0);
+  under 80 it is (0,1); under 20 columns and pages exchange, CASET then
+  takes the PAGES (0..479, a full column reaches page 479 with or
+  without B6) and PASET the columns (a PASET past 319 collapses to one
+  pixel). The write and the read agree under all eight codes, so a
+  read-back under the same MADCTL is an oracle in every orientation.
+  **The BGR bit (08) acts on writes only**: a pixel written under it is
+  stored with R and B exchanged and read back as stored.
+- **Two facts of this module, seen on the glass and not in the GRAM:**
+  it is wired BGR (the driver writes B, G, R and the read-back stays in
+  the driver's own order), and the glass shows MEMORY COLUMN 319 AT ITS
+  LEFT - a picture drawn under MADCTL 00 is mirrored. The rotation map
+  folds that mirror in: a rotation is the usual one in DISPLAY
+  coordinates, the memory column is 319 - d, and each rotation states
+  the walk bit along its runs (r0 = B6, r90 = B5, r180 = none, r270 =
+  B5 + B7); the bits ACROSS a run stay clear because the two Surface
+  verbs never send a multi-row block that is not uniform. Letter h
+  reads "brio" back through the same map under all four rotations,
+  byte-exact, and ALL FOUR ROTATIONS WERE JUDGED BY EYE against the
+  panel's own marking (the probe's letter o: a red square at the
+  logical origin, an arrow at the top, corner labels): r0 is the
+  panel's portrait, r90 the picture turned clockwise, r180 upside
+  down, r270 counter-clockwise, the text readable in each. The
+  display-side bits of MADCTL, changed with the memory untouched
+  (letter n): B1 (horizontal flip) and B4 (line address order) DO
+  NOTHING on this module; B0 (vertical flip) mirrors the glass top to
+  bottom - a mirror, so the text stays unreadable turned around. The
+  module's own horizontal mirror can therefore not be undone by B1 and
+  stays in the map.
+- **The overflow that cost an afternoon**: the row buffers were sized
+  by the physical row (320 pixels) while a run of the rotated surface
+  is 480 wide, and a clear() under r90 wrote 476 bytes past
+  `row_buf` - straight over the rotation and the CDC console's own
+  state (`configured_`, DTR, the counters). The board then spun in
+  print() with a console that thought itself unconfigured, the host's
+  open() blocked, and the half-drawn picture looked like a panel limit.
+  Diagnosed with OpenOCD on the halted board and `nm` for the
+  addresses; the buffers are sized by the panel's long side now.
+
+- **brio/gfx draws on it through a Surface of two verbs** (a window and
+  a row per fill_rect row, a window and a row per write_run): the word
+  "brio" in Font5x7 reads back with zero bytes differing from the font's
+  own rows, and a filled rectangle's pixel reads back its colour. A
+  clear costs 1002 ms and the whole test picture 1504 ms on the pump.
+
+Two desk notes. The panel needs INVON, as on the AVR. And a freshly
+enumerated CDC console can echo the boot banner back into the board as
+commands when something opens the tty before `brio run` does (the
+letters of "clk=PLL96" ran c and k once); harmless, and `brio run`'s
+wake swallows what follows.
+
+### Two devices on the bus: `experiments/display/stm32f4/spi_duo.cpp`
+
+The same module's XPT2046 shares SCK, MOSI and MISO with the panel, on
+its own chip select, and `spi_duo` puts both behind ONE `SpiBus` (the
+BusMaster arbiter) with the two DMA engines of SPI1 carrying every data
+phase at 6 MHz: a Painter that owns the glass and the F469 suite's game - a
+white square at ten random places, every tap's raw coordinates
+recorded against the square's centre, from the third tap the best of
+the two axis assignments with a least-squares line per axis marks
+where the tap was understood (a red cross), after the tenth the fit is
+printed and the pen paints dots with it - every mark a rectangle fill
+queued in a small FIFO, one row a request, and when the FIFO is empty a
+band of changing colour sweeps the bottom strip so the bus is never
+idle; and a Touch that polls every 20 ms at 1.5 MHz (a Z1 pressure
+gate with the chip powered down between polls - PD = 00, the only
+setting that leaves PENIRQ alive -, then X and Y as bursts of eight
+conversions, trimmed means, a tap after three idle polls and two
+pressed samples, never in the first half second). The arbiter is a
+FIFO and the Painter posts one request at a time, so a touch waits at
+most one row. Measured: about 500 rows a second painted at 6 MHz, 50
+touch conversions a second interleaved, zero requests rejected. The
+console (output only) prints every tap with its raw values, the two
+RESULT lines of the fit, and a report every two seconds that includes
+the square's own row read back through the bus. Wiring beyond the
+panel's: T_CLK PA5, T_DIN PA7, T_DO PA6, T_CS PA4, PEN (T_IRQ) PA1.
+
+The game's result on this module (ten taps, a terminal attached, the
+two farthest taps trimmed from the final fit): the axes are SWAPPED -
+the logical x of the landscape surface comes from the controller's Y
+reading and the logical y from its X reading, inverted -
+
+    x = raw_y * 0.1303 - 13      (raw_y 106 at x = 0, 3779 at x = 479)
+    y = raw_x * -0.0952 + 343    (raw_x 3603 at y = 0, 255 at y = 319)
+
+with 3 px rms and 5 px at worst over the ten, every tap on its square;
+the first game had two taps 180 px off, both taken while the finger
+was still landing, which is why a tap is now the fourth pressed sample
+of a stroke and the fit drops its two worst residuals.
+
+What building it found:
+
+- **The touch controller's select must be HIGH in every program on
+  this bus**: with PA4 left floating the XPT2046's DOUT talks over the
+  panel's answers and every read is garbage (the probe reads 7F 7E FE
+  FE for the device code). The probe drives PA4 high now.
+- **At 12 MHz the breadboard's wires are the limit, not the driver**
+  (docs/stm32f4/spi.md's finding): with SCK and MOSI both on
+  `very_high` pads the panel took nothing spi_duo sent at PCLK2/8
+  through the interrupt pump, whatever the data; slowing EITHER pad to
+  `medium` lands every byte, and hanging a logic analyser's probes on
+  the lines makes every case pass at every slew class - the probes'
+  capacitance does what the pad setting does. The analyser on SCK alone
+  leaves the case failing and shows a clean clock at the connector;
+  on MOSI alone it makes it pass: MOSI's fast edge is the actor, the
+  damage is beyond the connector. 6 MHz is exact at any class. OPEN: with
+  the pad at medium the probe lands 12 MHz requests exact and spi_duo,
+  under the kernel with the touch's requests interleaved, still did
+  not; it runs at 6 MHz, which on a printed board would not be needed.
+- **A reflash fills the GRAM with 0x54/0xA8 in alternate pages** (the
+  MCU's reset leaves the panel's lines floating), so a census taken by
+  the probe after flashing another program describes the reset, not
+  the program: a program verifies its own writes in the same run,
+  which is what spi_duo's report does.
+- A spin-wait on a flag an interrupt sets must be `volatile`: a probe
+  letter without it "measured" an interrupt path that never completed
+  and corrupted every write - two false verdicts for one missing word.
+
+### The wiring it needs (STM32F411CE black pill, rail at 3.3 V)
+
+| Signal | Pin |
+|--------|-----|
+| SPI1 SCK / MISO (module SDO) / MOSI (module SDI), AF5 | PA5 / PA6 / PA7 |
+| Display CS / RESET / DC-RS | PB2 / PB1 / PB0 |
+| VCC and LED (the backlight) | 3.3 V |
+| Touch controller (T_CLK, T_CS, T_DIN, T_DO, T_IRQ) | left open |
+| Console | the board's USB-C (CDC ACM 1209:0001) |
+| Probe | STLINK-V3 on the SWD header, no NRST |
+
+PB2 (the chip select) is BOOT1 on this part: sampled only with BOOT0
+high, a plain output afterwards. The board is powered from its USB-C; the STLINK-V3's target
+pin senses the rail and does not feed it.
+
+### Building
+
+Discovered by the stm32f4 project like any other app
+(`experiments/*/stm32f4/*.cpp`): `cmake --build --preset
+stm32f411ce-release --target ili9481_probe`, or `brio flash O
+ili9481_probe`.
