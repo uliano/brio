@@ -379,13 +379,17 @@ gets its home in `docs/design/` when taken.
   frame through the adapted command mode and READ BACK pixel for pixel,
   the tearing effect counted on the pin and pacing the refresh. What
   remains
-  is in the documents' gap lists, and three things outside them: the
+  is in the documents' gap lists, and four things outside them: the
   OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
   connector cabled, never enumerated); the frequency ladders of the four
   part classes whose manuals are not on the desk (a rate above 16 MHz
   refused there); the debugger driven from the command line as
   cortex-debug would (docs/stm32f4/README.md) and not yet from the
-  editor. Tenuto only, the equal-priority promise kept; Rubato and
+  editor; and the 32F469IDISCOVERY's audio side and card socket -
+  the CS43L22 over SAI1, the three MEMS microphones over a PDM line,
+  the microSD over SDIO - three chapters (SAI, I2S receive with a
+  decimation filter, SDIO) no driver exists for, stated on the board's
+  page and not started. Tenuto only, the equal-priority promise kept; Rubato and
   BASEPRI are another type and another day.
 - **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
   `supported` on the RP2040 (README.md's table) on a Raspberry Pi

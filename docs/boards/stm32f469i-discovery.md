@@ -59,10 +59,24 @@ connector CN10.
   JEDEC id 0x20BA18 it answers with is the MT25QL128's, its successor,
   and the MB1189's QSPI sheet names the MT25QL128ABA) on PF6..PF10 with
   PB6 as its select - the QUADSPI suite's instrument, found blank and
-  carrying the suite's pattern in its last 4 KB since; the CS43L22 audio
-  DAC on I2C2 (PH4/PH5) and SAI1; two
-  MP34DT05 MEMS microphones; a microSD socket on SDIO with its detect
-  on PG2; Arduino Uno headers and the 16-pin extension connector CN12.
+  carrying the suite's pattern in its last 4 KB since; Arduino Uno
+  headers and the 16-pin extension connector CN12.
+- **Not driven yet**, each waiting for a chapter the stratum has not
+  got: the **CS43L22** audio DAC (UM1932 4.5), controlled over I2C2
+  (PH4/PH5, address 0x94, 100 kHz at most, its reset on PE2, PE3
+  enabling the headphone and loudspeaker outputs) and fed over SAI1
+  block A (PE4 FS, PE5 SCK, PE6 SD, MCLK on PG7, the MB1189's audio
+  sheet) - no SAI driver exists, and the codec's control port alone is
+  the I2C document's open item for the third instance; the three
+  **MP34DT05** MEMS digital microphones (UM1932 4.6: U1, U2 and U6, U2
+  with U6 the stereo pair by default and U2 with U1 when SB17 is closed
+  and SB18 opened) on one PDM line - the clock PD13 (TIM4_CH2), the data
+  PD6 (I2S3_SD); the manual's DFSDM is another part's, this one has none
+  - no PDM receive path (I2S3 in its receive face plus a decimation
+  filter) is written; the microSD socket CN9 on SDIO (UM1932 4.8: four
+  data bits PC8..PC11, PC12 CLK, PD2 CMD) with its card detect on PG2,
+  low with a card in - no SDIO driver exists. None of the three is a
+  suite's peer today.
 - **Pads a suite uses that are the board's own**: PD0 (the SDRAM's D2,
   high impedance with the memory controller off) as CAN1_RX for the CAN
   letters, PB5 (CN12 pin 9) as CAN2_RX; PA6, PA8, PB13, PD12 and PD13 for
