@@ -699,7 +699,11 @@ Implemented but not bench-verified, each with what would measure it:
   Standby - which load the zero-wait area again, per the CH32V303
   datasheet's table 4-18 - is not measured. What would measure it is
   letter `q` with a Standby exit in place of the software reset, its
-  wake armed on the RTC's alarm or the WKUP pad, or a power cycle.
+  wake armed on the RTC's alarm or the WKUP pad, or a power cycle. One
+  reading exists: after a boot of the CH32V303VCT6 that came with SBF
+  clear - a power-on-class reset, the one kind that reloads the window -
+  the cell still read its second value; an observation with the reset's
+  kind unwitnessed, not the measurement.
 - **The flash interrupt raised by a real operation.** EOPIE and ERRIE
   arm, disarm and stay silent with nothing running, and `isr()` is
   written; what would measure it is an operation started with the

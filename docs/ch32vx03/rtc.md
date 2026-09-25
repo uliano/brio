@@ -356,6 +356,11 @@ board.
   CH32V303VCT6 (78091 us and the armed value, five runs of five, with
   the second flag standing beside the alarm's). On EXTI line 17 the
   handler ran with ALRIE CLEAR, 71 ms after arming.
+- **The second block, on the CH32V303VCT6** (letter `k`): the thirty-two
+  registers BKP_DATAR11..42 hold sixteen bits each under two patterns,
+  read back through their own numbers; writing them leaves the first
+  block's ten as they were - two sets of registers and not one numbered
+  twice - and the forty-third is refused with nothing written.
 - **The overflow.** Set two ticks short of 0xFFFFFFFF at 64 Hz, OWF
   stood 31.3 ms later - two ticks exactly - with the counter still
   reading 0xFFFFFFFF at that instant and the wrapped value appearing
@@ -412,15 +417,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The chapter on the CH32V303.** Its class carries the forty-two
-  backup registers of the CH32V20x_D8 - the count folds through the
-  part table and the eleventh register is a compile error on the
-  CH32V20x_D6 - and an HSE division of 128 with no lot rule, and
-  `test_vx03_rtc` builds for the CH32V303VC, its letter k writing and
-  reading back the second block, BKP_DATAR11..42, under two patterns.
-  What would measure the chapter there is that suite on WCH's
-  evaluation board; the CH32V203RB's forty-two, a board with that
-  part.
+- **The CH32V203RB's forty-two backup registers.** Its class carries the
+  forty-two of the CH32V20x_D8 - the count folds through the part table
+  and the eleventh register is a compile error on the CH32V20x_D6 - and
+  `test_vx03_rtc`'s letter k writes and reads back the second block,
+  BKP_DATAR11..42, under two patterns; it is measured on the
+  CH32V303VCT6 (above) and what would measure it on this part is a board
+  with it.
 - **The LSI as RTCCLK.** The third source is selected by the same verb
   and the watchdog chapter has measured that oscillator at 38.8 kHz on
   the CH32V203C8T6; what would measure this path is a run with RTCSEL on

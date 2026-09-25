@@ -61,10 +61,12 @@ already bitten:
   starting at PC10/PC11 is the bigger classes' - the CH32V303's - while
   the CH32V203C8's begins at PB0/PB1;
 - **the lot notes**: the CH32V303VCT6 of the bench is a lot they
-  RESTRICT - five of the registers they name are absent on it, one of
-  their addresses a MIRROR of another register, and DMA1's 64 KB wrap
-  present - so every lot-keyed feature is a verb that asks the die
-  ([../README.md](../README.md)).
+  RESTRICT - ten of the features they name are absent on it (TIMx_AUX,
+  ADCx_AUX, ADC_DUTY_SEL, ADC2's DMA request, EXTEN_CTR2, USART_CTLR4
+  with its MARK and SPACE parity and MS_ERR, M_EXT, RX_BUSY and SPI's
+  HSRXEN2), one of their addresses a MIRROR of another register, and
+  DMA1's 64 KB wrap present - so every lot-keyed feature is a verb that
+  asks the die ([../README.md](../README.md)).
 
 The chapters that are no part's of this stratum - the high-speed USB
 host/device block (22), DVP (25), and Ethernet (27) on every part but
@@ -73,8 +75,8 @@ nothing of them is spelled here. The FSMC (26, the CH32V303VC's) and
 SDIO (28, the CH32V303RC's and VC's) are the CH32V303's, and the
 register map carries their bases and clock gates and nothing else - a
 memory on the bus and a card socket are what their chapters want, and
-the evaluation board has neither ([../README.md](../README.md)); the
-DAC (17) and the RNG (29), the CH32V303's too, have their chapters,
+the evaluation board has neither ([../README.md](../README.md)); the DAC
+(17) and the RNG (29), the CH32V303's too, have their chapters,
 [../dac.md](../dac.md) and [../rng.md](../rng.md).
 
 ## No errata sheet
@@ -190,7 +192,11 @@ redrawn as text and spelling alone.
 - **Ch. 18, USART, and ch. 20, SPI/I2S.** Figures as text, the baud-rate
   example rewritten (9600 and 115200 bit/s from 12 MHz in place of
   115200 and 921600 from the top rate), a CRC example's value corrected;
-  no register or rule changes.
+  no register or rule changes. The silicon: on the CH32V303VCT6 CTLR4's
+  address reads empty and takes nothing, M_EXT is absent and not
+  write-only (the wire agrees), HSRXEN at BR /2 turns a one-bit-late
+  read at 36 MHz exact, and I2SxCLK is SYSCLK to the frame
+  ([../usart.md](../usart.md), [../spi.md](../spi.md)).
 - **Ch. 21, the USB device controller.** Unchanged in substance, and
   still applying itself to the whole family - where the CH32V303VCT6
   has no such controller, its clock gate absent

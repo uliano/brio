@@ -223,6 +223,10 @@ and two in the letter that reboots the board.
   and re-opening the gate found the block exactly as it had been left.
 
 ## Not covered yet
+- **The CH32V303VCT6** (`test_vx03_misc`, every letter of `z`): the
+  fourteen verdicts above hold on that part as they do on the
+  CH32V203C8T6.
+
 
 Driver gaps, each with its reason:
 
@@ -235,10 +239,8 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The twelve parts other than the CH32V203C8**, the CH32V303VC among
-  them. The block is not a per-part fact and this file asks the part
-  table nothing, and the whole stratum compiles for all thirteen both
-  ways the hardware prologue can be built (`brio check ch32vx03`);
-  `test_vx03_misc` builds for the CH32V303VC too. What would measure
-  them is a board - for the CH32V303VC, that suite on WCH's evaluation
-  board.
+- **The eleven parts other than the CH32V203C8 and the CH32V303VC.** The
+  block is not a per-part fact and this file asks the part table
+  nothing, and the whole stratum compiles for all thirteen both ways the
+  hardware prologue can be built (`brio check ch32vx03`); what would
+  measure them is a board.

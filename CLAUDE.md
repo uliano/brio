@@ -478,37 +478,67 @@ gets its home in `docs/design/` when taken.
   values, and whether a zone at a fixed address is worth a partition
   every image pays. Until that review, no FlashMedia on the STM32F4.
 - **The CH32V203/CH32V303 stratum.** `brio/ch32vx03/` and `ch32vx03/`
-  are `supported` on the CH32V203C8T6 (README.md's table: every chapter
-  of the reference manual's plan has its document and its suite green,
-  the two buses on the wire against a peer board; open there: CAN - its
-  driver written against the manual and kept for a pass across every
-  platform -, TKEY and the second USB block) and carry the CH32V303 as
-  their THIRD DEVICE CLASS, CH32V30x_D8: the QingKe V4F with its FPU
-  (rv32imafc_xw, ilp32f - the part table states each part's ISA and ABI,
-  thirteen parts under two), the class's vector table of 104 entries and
-  its own blocks (DMA2, TIM5..10, UART4..8, SPI3 with the I2S face, the
-  DAC, the RNG, four amplifiers). What the CH32V303VCT6 has proven on
-  WCH's evaluation board is in docs/ch32vx03/README.md's document map,
-  chapter by chapter, each closing on the silicon in the V203's order;
-  measured there so far: the bus stalls in Sleep as on the CH32V203 (a
-  memory-to-memory DMA moves 37 words across 1.9 ms of idle()), the part
-  has NO USB device controller - its one full-speed controller is
-  chapter 23's host/device block, on the board's own connector, driven
-  in device mode by usbfs.hpp with the console on the board's own
-  connector -, and a handler that calls out pays twenty f-register
-  saves; the bench die has none of the lot-keyed registers its class's
-  notes list (and one of them, EXTEN_CTR2, is a mirror of EXTEN_CTR
-  there) and DMA1's 64 KB wrap. What the V203's silicon taught is in the
-  same README, and one finding shapes the power model: IN SLEEP THE BUS
-  MATRIX SERVES THE CORE ALONE - the USB controller cannot reach its
-  packet memory and a DMA stalls (measured with the vendor's own example
-  as the oracle, and no software mitigation short of staying awake
-  works), so a program that moves data through the bus does not SLEEP
-  here and slows down instead, to no less than 24 MHz of HCLK under the
-  CH32V203's device controller and 12 MHz under the CH32V303's
-  host/device one; the sleep sites and the platform's idle path both
-  read a COUNT of active bus masters - a DMA channel while its EN is up,
-  a USB controller from its pull-up - and neither sleeps above zero.
+  are `supported` on the CH32V203C8T6 (a WeAct core board) and carry the
+  CH32V303VCT6 (WCH's evaluation board) `in bring-up` with every chapter
+  of the reference manual's plan green there too (README.md's table; the
+  promotion is one word): thirteen parts under three device classes in
+  one part table, two ISAs and two ABIs (rv32imac_xw/ilp32 on the QingKe
+  V4B, rv32imafc_xw/ilp32f on the V4F, the crt switching the FPU on for
+  an image built with F), and every chapter with its document and its
+  suite green on each part that carries the block - on the CH32V303 its
+  own blocks too: DMA2 behind the controller-first DMA API, TIM5..TIM10
+  with the basic timers, the DAC read back by the converter, OPA3/OPA4,
+  the RNG and the flash array's non-zero-wait tail, the eight serial
+  ports, SPI3 with its I2S face and the two I2C instances against each
+  other on the board's own wires, the power chapter and the USB
+  host/device block in device mode with the console on the board's own
+  connector. Excluded, each with its reason in docs/ch32vx03/README.md:
+  CAN (its driver written against the manual and kept for the
+  cross-platform pass), TKEY (a key press is an application), SDIO and
+  the FSMC (no card socket, no memory on the bus), I2S against a codec
+  (the two instances measured against each other), and the CH32V305/307
+  (the D8C class, no board); the host/device block on the CH32V203's
+  pads is implemented and unmeasured (no board wires PB6/PB7). Four
+  findings shape the stratum: IN A SLEEP OF ANY DEPTH THE BUS MATRIX
+  SERVES THE CORE ALONE, on both parts and both of the CH32V303's DMA
+  controllers, so the idle path and the sleep sites read a COUNT of
+  active bus masters - a DMA channel while its EN is up, a USB
+  controller from its pull-up - and neither sleeps above zero, a program
+  that moves data through the bus slowing down instead (no less than 24
+  MHz of HCLK under the CH32V203's device controller, 12 MHz under the
+  CH32V303's host/device one); the CH32V303 HAS NO USB DEVICE
+  CONTROLLER, its one full-speed controller being chapter 23's
+  host/device block; the CH32V303VCT6 of the bench is a LOT its class's
+  notes restrict - no TIMx_AUX, ADCx_AUX, ADC_DUTY_SEL, ADC2 DMA
+  request, USART_CTLR4, M_EXT, MS_ERR, RX_BUSY, HSRXEN2 or EXTEN_CTR2,
+  whose address mirrors EXTEN_CTR, and DMA1's 64 KB wrap present - so
+  every lot-keyed register is a verb that asks the die; and gcc FOLDS
+  TWO HANDLERS OF ONE BODY into a call that never returns (the first
+  ends in MRET), so BRIO_CH32_INTERRUPT carries no_icf on both WCH
+  strata - measured on the V4F, whose twenty f-register saves stayed on
+  the stack. Owed on a CH32V203C8 board: the suites whose V203 images
+  the CH32V303's changes moved - platform (its mask-shadow letter on the
+  V4B), clock, pin, tim, dma (its sleep letter now really sleeping),
+  adc, nvm (the C8's own tail, by name), rtc, serial, spi, i2c (with the
+  twi_peer board, for the repeated START's new timing), sleep (whole,
+  with its by-name letters) - and on the CH32V00x boards the three
+  serial-bus suites the folding guard moved, the byte-identity gate
+  standing for every other image. Decisions for the user: THE FPU TAX -
+  a non-leaf interrupt handler under ilp32f saves all twenty
+  caller-saved f-registers (101 cycles of round trip against 56; the
+  USART transport's handler and the USB host/device controller's, which
+  call out, pay some 45 cycles an interrupt), because gcc saves them in
+  any handler that calls a function; three ways out: a LEAF ISR path
+  (the ring's guard lambdas, bump and the kernel's post inlined through
+  - a kernel/util change), a soft-float configure for a program with no
+  float work (-DCH32VX03_ARCH=rv32imac_xw -DCH32VX03_ABI=ilp32, no new
+  preset), or the tax as it stands, the default staying ilp32f until
+  then; the kept copy of PWR_CTLR's retention bits starting at zero at
+  every boot (a program states its choice again after any reset; the
+  alternative seeds it from the register on a die that reads the bits
+  back); and the reference manual's V2.5, its changes listed against the
+  silicon in docs/ch32vx03/vendor/README.md, for promotion with the
+  datasheet's V3.9 and the QingKe manual's V1.5.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
