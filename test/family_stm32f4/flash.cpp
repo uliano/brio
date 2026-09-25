@@ -71,7 +71,8 @@ static_assert(flash_pcrop_mode_mask() != 0u,
 static_assert(flash_facts().has_pcrop_mode && flash_facts().wrp_bits == 8);
 static_assert(!flash_facts().dual_bank_capable && flash_bank2_mass_erase_mask() == 0u);
 #endif
-#if defined(STM32F429xx) || defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F439xx)
+#if defined(STM32F429xx) || defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F439xx) || \
+    defined(STM32F469xx) || defined(STM32F479xx)
 static_assert(flash_facts().dual_bank_capable && flash_facts().snb_bits == 5);
 static_assert(flash_bank2_mass_erase_mask() == FLASH_CR_MER2, "RM0090 calls the bit MER1");
 static_assert(flash_facts().has_option_register1 && flash_facts().max_sectors_per_bank == 12);

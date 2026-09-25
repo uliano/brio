@@ -171,7 +171,12 @@ The reference suite is `test_stm32f4_usb`, green on the STM32F411CE
 black pill whose USB-C connector is the part's OTG FS port: **ALL: 33
 pass, 0 fail** in the all-key and eight more verdicts in the five
 host-assisted letters, against a Linux host (cdc-acm bound to the port,
-pyserial as the host end).
+pyserial as the host end). The same 33 on the 32F469IDISCOVERY's
+micro-AB CN13 (the same OTG_FS core on PA11/PA12, the part at 168 MHz
+so that the PLL's Q output is 48 MHz): the host configures the device
+in 399 ms, address 5 after 27 setups and 6 stalls, and `console_usb`
+answers on its CDC port; the host-assisted letters were run on the
+black pill alone.
 
 - THE CONTROLLER: `init` in 34.4 ms - all but 200 us of it the 25 ms the
   chapter asks for after device mode is forced, spent in a counted loop

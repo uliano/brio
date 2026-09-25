@@ -73,7 +73,7 @@
 //          brio run <board> s --app test_stm32f4_power
 //                  --expect="pass," --timeout 60
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -106,6 +106,10 @@ using P = Stm32f4Platform<>;
 using Led = Pin<'G', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
+#elif defined(STM32F469xx)
+using Led = Pin<'G', 6>;   // LD1, lit when low
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
 #elif defined(STM32F411xE)
 using Led = Pin<'C', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
@@ -131,7 +135,7 @@ using R1 = Clock<ClockSource::pll_hse, 84'000'000, 25'000'000>;
 using R2 = Clock<ClockSource::pll_hse, 48'000'000, 25'000'000>;
 using R3 = Clock<ClockSource::hsi, 16'000'000>;
 using RatePack = Rates<R0, R1, R2, R3>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using R0 = Clock<ClockSource::pll_hse, 180'000'000, 8'000'000>;
 using R1 = Clock<ClockSource::pll_hse, 168'000'000, 8'000'000>;
 using R2 = Clock<ClockSource::pll_hse, 120'000'000, 8'000'000>;
@@ -1425,6 +1429,8 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 #if defined(STM32F446xx)
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+#elif defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
 #else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif

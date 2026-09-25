@@ -49,7 +49,7 @@
 //   k  CAN2: the shared filter block, the start bank that splits it, and
 //      the slave's own loopback
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -71,7 +71,7 @@
 
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -88,6 +88,10 @@ using P = Stm32f4Platform<>;
 using Led = Pin<'G', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
+#elif defined(STM32F469xx)
+using Led = Pin<'G', 6>;   // LD1, lit when low
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
 #elif defined(STM32F411xE)
 using Led = Pin<'C', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
@@ -358,13 +362,22 @@ void tb_rng() {
 // Which pad that is belongs to the board, so these letters exist only
 // where this file names one that the board leaves free. On the
 // Nucleo-F446RE that is PA11 (DS10693 table 11: CAN1_RX on AF9; UM1724
-// leaves the pad on the extension connector).
-#if defined(CAN1_BASE) && defined(STM32F446xx)
+// leaves the pad on the extension connector). On the 32F469IDISCOVERY
+// PA11 is the USB connector's D-, PB8 is I2C1's clock with the board's
+// own 1.5 k pull-up (which letter c cannot pull dominant), and the pad is
+// PD0 (DS11189 table 12: CAN1_RX on AF9) - the SDRAM's data line D2,
+// high impedance at both ends while the memory controller is off, so the
+// pad's own pull decides its level, which is exactly what letter c needs.
+#if defined(CAN1_BASE) && (defined(STM32F446xx) || defined(STM32F469xx))
 
 using Bus = Can<1>;
 
 constexpr uint32_t can_pclk = apb_hz(clock, false);
+#if defined(STM32F469xx)
+constexpr PinSel can_rx_pad{'D', 0, PinFunction::af9};
+#else
 constexpr PinSel can_rx_pad{'A', 11, PinFunction::af9};
+#endif
 
 /// Bring CAN1 up at `bitrate`, with an accept-all filter in bank 0 feeding
 /// FIFO 0. `loopback` and `silent` are CAN_BTR's two test bits.
@@ -1184,7 +1197,8 @@ using Slave = Can<2>;
 
 // CAN2's own receive pad, for the same reason CAN1 needs one: a node
 // leaves initialization mode only after eleven recessive bits on it. PB5
-// is CAN2_RX on AF9 (DS10693 table 11) and free on this board.
+// is CAN2_RX on AF9 (DS10693 table 11, DS11189 table 12) and free on both
+// boards (the Nucleo's extension connector, the Discovery's CN12).
 constexpr PinSel can2_rx_pad{'B', 5, PinFunction::af9};
 
 void tk_can2() {
@@ -1262,7 +1276,7 @@ void tk_can2() {
 }
 
 #endif // CAN2_BASE
-#endif // CAN1_BASE && STM32F446xx
+#endif // CAN1_BASE && (STM32F446xx || STM32F469xx)
 
 void banner() {
     print(serial, crlf,
@@ -1275,6 +1289,8 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 #if defined(STM32F446xx)
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+#elif defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
 #else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif
@@ -1291,7 +1307,7 @@ int main() {
 #if defined(RNG_BASE)
     bench.letter('b', "the random number generator", tb_rng);
 #endif
-#if defined(CAN1_BASE) && defined(STM32F446xx)
+#if defined(CAN1_BASE) && (defined(STM32F446xx) || defined(STM32F469xx))
     bench.letter('c', "the CAN block and its three modes", tc_can_modes);
     bench.letter('d', "the bit timing, searched and read back", td_can_timing);
     bench.letter('e', "a frame round-trips in loopback", te_can_loopback);

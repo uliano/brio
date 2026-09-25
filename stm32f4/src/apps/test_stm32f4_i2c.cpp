@@ -10,10 +10,15 @@
 // under it.
 //
 // THE INSTRUMENT IS A DEVICE SOLDERED TO THE BOARD, which is why this
-// suite builds for the STM32F429I-DISC1 alone: a bus driver measured
-// against nothing is a register read-back, and this board carries its
-// touch-screen controller on I2C3 -
+// suite builds for the two Discovery boards alone: a bus driver measured
+// against nothing is a register read-back, and each of them carries its
+// touch-screen controller on a bus of its own. The letters know a PEER -
+// an address, an identity register with the bytes its datasheet gives it,
+// one register they may write and read back with nothing moving on the
+// board, and the way the device is put back where its reset leaves it -
+// and nothing else of the device:
 //
+//   STM32F429I-DISC1
 //   I2C3   SCL PA8, SDA PC9 (AF4), the pull-ups the board's own
 //   the touch controller   an STMPE811 at the 7-bit address 0x41, whose
 //                          CHIP_ID at register 0x00 reads 0x0811 as two
@@ -23,14 +28,35 @@
 //                          SYS_CTRL1's soft reset puts every one of its
 //                          registers back
 //
+//   32F469IDISCOVERY
+//   I2C1   SCL PB8, SDA PB9 (AF4), the board's 1.5 k pull-ups (MB1189
+//          R140/R142); the panel and its touch controller share the
+//          reset line PH7 (UM1932 4.14), which this suite pulses before
+//          the scan and again to leave the device where its reset puts it
+//   the touch controller   the FocalTech capacitive controller of the
+//                          MB1166 display board, found by the scan at
+//                          the 7-bit address 0x38, tearing its INT line
+//                          on PJ5: its register map is FocalTech's
+//                          "Application Note for FT6x06 CTPM" (v1.0,
+//                          bound into the FT6236/FT6336/FT6436 series
+//                          datasheet v0.3), its pins and timings the
+//                          FT6x06 datasheet v0.1 and that series
+//                          datasheet - FOCALTECH_ID at 0xA8 (0x11 by the
+//                          note), CIPHER at 0xA3, FIRMID at 0xA6, LIB_VER
+//                          at 0xA1/0xA2, RELEASE_CODE_ID at 0xAF; TH_GROUP
+//                          at 0x80 is the touch threshold, written and
+//                          read back here; the reset is the shared line's
+//                          pulse, 300 ms before the first report
+//
 // and the parts of the chapter that need no device are measured anyway:
 // the timing arithmetic against the registers in force, the address scan
 // against every address nobody answers, and the SCL frequency counted on
 // the clock pad's OWN INPUT BUFFER while a DMA-carried read runs (an I2C
 // pad is an open-drain alternate function, so its IDR is the wire).
 //
-// The touch controller is left in ITS RESET STATE (the soft reset of
-// letter h is the last thing written to it).
+// The touch controller is left in ITS RESET STATE (the device's own
+// reset - the STMPE811's soft reset, the other board's reset line - is
+// the last thing the device letters do to it).
 //
 // What is exercised, letter by letter:
 //   a  the instances: presence, bus, the two vectors, the gate closed at
@@ -45,8 +71,12 @@
 //   i  THE KERNEL: I2cBus over I2cHost, the rejection, the sleep votes
 //   j  the same tenures through the two DMA engines
 //   k  the recovery verbs: SWRST, recover() and unstick()
+//   l  (the 32F469IDISCOVERY, by name only) A FINGER ON THE GLASS: the
+//      touch controller in interrupt trigger mode, its INT counted on
+//      EXTI line 5 and its touch data polled for eight seconds while a
+//      human touches the panel - coordinates, event flags, touch ids
 //
-// build: boards = f429zi
+// build: boards = f429zi,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -55,6 +85,7 @@
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/exti.hpp"
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/ticker.hpp"
@@ -77,47 +108,121 @@ using namespace brio;
 
 using P = Stm32f4Platform<>;
 
-// ---- the console ---------------------------------------------------------------------
+// ---- the board: the console, the bus, the peer -------------------------------------------
 
+/// What the letters know of the device beyond the bus: the address the
+/// board's schematic names, where its identity starts and what the
+/// datasheet says it reads (MSB first), a second register printed beside
+/// it, and one register that may be written and read back with nothing
+/// moving on the board. `id_len == 0` says the datasheet is NOT on the
+/// desk: the letters that need the identity or the scratch register then
+/// decline by name, and the bus is still measured on whatever the device
+/// answers at `id_reg`.
+struct PeerFacts {
+    const char* name;
+    uint8_t addr;
+    uint8_t id_reg;
+    uint8_t id_len;
+    uint8_t id_bytes[2];
+    const char* id_name;
+    uint8_t ver_reg;
+    const char* ver_name;
+    uint8_t scratch_reg;
+    const char* scratch_name;
+    uint8_t scratch_patterns[3];
+};
+
+#if defined(STM32F469xx)
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
+constexpr uint8_t bus_instance = 1;
+constexpr I2cPins bus_pins{.scl = {'B', 8, PinFunction::af4}, .sda = {'B', 9, PinFunction::af4}};
+using SclPad = Pin<'B', 8>;
+using SdaPad = Pin<'B', 9>;
+/// I2C1's transmit request is DMA1 stream 6 on channel 1 and its receive
+/// DMA1 stream 0 on channel 1 (RM0386 table 29) - the reserve checks these
+/// two cells at compile time.
+using TxEngine = DmaTxEngine<1, 6, 1>;
+using RxEngine = DmaRxEngine<1, 0, 1>;
+/// The line the panel and the touch controller are reset by (UM1932 4.14).
+using ResetLine = Pin<'H', 7>;
+/// FocalTech's application note for the FT6x06 CTPM: FOCALTECH_ID at
+/// 0xA8 (0x11), FIRMID at 0xA6, TH_GROUP at 0x80 - the threshold for
+/// touch detection, a plain read/write register that moves no pin.
+constexpr PeerFacts peer{.name = "the MB1166's touch controller",
+                         .addr = 0,   // found by the scan
+                         .id_reg = 0xA8,
+                         .id_len = 1,
+                         .id_bytes = {0x11, 0},
+                         .id_name = "FOCALTECH_ID (0xA8)",
+                         .ver_reg = 0xA6,
+                         .ver_name = "FIRMID (0xA6)",
+                         .scratch_reg = 0x80,
+                         .scratch_name = "TH_GROUP (0x80)",
+                         .scratch_patterns = {0x14, 0x40, 0x22}};
+/// The rest of the note's map the finger letter reads: the touch data
+/// block (TD_STATUS then the first point's XH/XL/YH/YL), the interrupt
+/// mode, the versions.
+constexpr uint8_t reg_td_status = 0x02;
+constexpr uint8_t reg_g_mode = 0xA4;
+constexpr uint8_t reg_lib_ver_h = 0xA1;
+constexpr uint8_t reg_cipher = 0xA3;
+constexpr uint8_t reg_release_code = 0xAF;
+constexpr uint8_t reg_ctrl = 0x86;
+constexpr uint8_t reg_period_active = 0x88;
+/// LCD_INT on PJ5 (UM1932 4.14): the controller's INT line, EXTI line 5.
+using TouchInt = Pin<'J', 5>;
+using TouchIrq = ExtInt<TouchInt>;
+volatile uint32_t touch_int_edges = 0;
+#else
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
-using Serial = Uart<1, console_pins>;
-constexpr Serial serial;
-
-TestBench<Serial> bench;
-
-// ---- the bus and the device -------------------------------------------------------------
-
-constexpr I2cPins i2c3_pins{.scl = {'A', 8, PinFunction::af4}, .sda = {'C', 9, PinFunction::af4}};
-
-using S = I2c<3>;
-using Host = I2cHost<3, i2c3_pins>;
-
+constexpr uint8_t console_instance = 1;
+constexpr uint8_t bus_instance = 3;
+constexpr I2cPins bus_pins{.scl = {'A', 8, PinFunction::af4}, .sda = {'C', 9, PinFunction::af4}};
+using SclPad = Pin<'A', 8>;
+using SdaPad = Pin<'C', 9>;
 /// I2C3's transmit request is DMA1 stream 4 on channel 3 and its receive
 /// DMA1 stream 2 on channel 3 (RM0090 table 43) - the reserve checks these
 /// two cells at compile time.
 using TxEngine = DmaTxEngine<1, 4, 3>;
 using RxEngine = DmaRxEngine<1, 2, 3>;
-using DmaHost = I2cHost<3, i2c3_pins, TxEngine, RxEngine>;
-
-/// The two pads, read as inputs: what the wire is doing. An I2C pad is an
-/// open-drain alternate function, so its input buffer reads the LINE even
-/// while the peripheral owns it.
-using SclPad = Pin<'A', 8>;
-using SdaPad = Pin<'C', 9>;
-
-/// The touch controller's address and the registers this suite touches.
-constexpr uint8_t touch_addr = 0x41;
-constexpr uint8_t reg_chip_id = 0x00;
-constexpr uint8_t reg_id_ver = 0x02;
+/// The STMPE811: CHIP_ID at 0x00 (0x0811, two bytes MSB first), ID_VER at
+/// 0x02, SYS_CTRL2 at 0x04 - four clock gates and nothing that moves a
+/// pin - and SYS_CTRL1's soft reset.
 constexpr uint8_t reg_sys_ctrl1 = 0x03;
-constexpr uint8_t reg_sys_ctrl2 = 0x04;
-constexpr uint16_t stmpe811_chip_id = 0x0811;
 constexpr uint8_t stmpe811_soft_reset = 0x02;
+constexpr PeerFacts peer{.name = "the STMPE811",
+                         .addr = 0x41,
+                         .id_reg = 0x00,
+                         .id_len = 2,
+                         .id_bytes = {0x08, 0x11},
+                         .id_name = "CHIP_ID (0x00, two bytes MSB first)",
+                         .ver_reg = 0x02,
+                         .ver_name = "ID_VER (0x02)",
+                         .scratch_reg = 0x04,
+                         .scratch_name = "SYS_CTRL2 (0x04)",
+                         .scratch_patterns = {0x00, 0x0F, 0x01}};
+#endif
+
+using Serial = Uart<console_instance, console_pins>;
+constexpr Serial serial;
+
+TestBench<Serial> bench;
+
+using S = I2c<bus_instance>;
+using Host = I2cHost<bus_instance, bus_pins>;
+using DmaHost = I2cHost<bus_instance, bus_pins, TxEngine, RxEngine>;
+
+/// The registers the letters read and write, by the peer's names.
+constexpr uint8_t reg_chip_id = peer.id_reg;
+constexpr uint8_t reg_id_ver = peer.ver_reg;
+constexpr uint8_t reg_sys_ctrl2 = peer.scratch_reg;
+constexpr bool peer_known = peer.id_len != 0u;
 
 /// What the boot-time scan found: which address answered, and whether the
-/// part behind it is the STMPE811 this board's schematic names.
+/// part behind it is the one this board's schematic names.
 uint8_t peer_addr = 0;
-bool peer_is_stmpe = false;
+bool peer_identified = false;
 uint8_t peer_sys_ctrl2_boot = 0;
 
 volatile bool bus_ao_live = false;
@@ -202,6 +307,38 @@ uint8_t write_reg(uint8_t reg, uint8_t value) {
 /// The empty Request: START, the address, STOP - the ACK is the answer.
 uint8_t probe(uint8_t addr) { return tenure<Host>(addr, nullptr, 0, nullptr, 0); }
 
+/// Whether `bytes` are the identity the datasheet gives the peer.
+bool is_peer_id(const uint8_t* bytes) { return peer_known && same(bytes, peer.id_bytes, peer.id_len); }
+
+#if defined(STM32F469xx)
+void spin_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::ticks();
+    while (Ticker::ticks() - t0 < ms) {
+    }
+}
+#endif
+
+/// The device put back where its reset leaves it, and the time it takes
+/// to answer again: the STMPE811's soft reset over the bus, the other
+/// board's reset LINE pulsed low - the panel behind it resets too, which
+/// is nothing this suite drew on it.
+uint8_t peer_reset() {
+#if defined(STM32F469xx)
+    ResetLine::output();
+    ResetLine::clear();
+    spin_ms(20);
+    ResetLine::set();
+    spin_ms(300);
+    return i2c_ok;
+#else
+    const uint8_t cmd[2] = {reg_sys_ctrl1, stmpe811_soft_reset};
+    const uint8_t st = tenure<Host>(peer_addr, cmd, 2, nullptr, 0);
+    for (uint32_t spins = 400'000u; spins != 0u; --spins) {
+    }
+    return st;
+#endif
+}
+
 // ---- what the registers held before this program touched them --------------------------------
 
 struct BootState {
@@ -217,7 +354,7 @@ BootState boot;
 // =============================================================================
 
 void ta_block() {
-    print(serial, "  I2C3 gate at reset: ", boot.gate ? "OPEN" : "closed", "; CR1 ", hex(boot.cr1),
+    print(serial, "  I2C", bus_instance, " gate at reset: ", boot.gate ? "OPEN" : "closed", "; CR1 ", hex(boot.cr1),
           " CR2 ", hex(boot.cr2), " OAR1 ", hex(boot.oar1), " OAR2 ", hex(boot.oar2), " SR1 ",
           hex(boot.sr1), " SR2 ", hex(boot.sr2), " CCR ", hex(boot.ccr), " TRISE ",
           hex(boot.trise), crlf);
@@ -265,7 +402,8 @@ void ta_block() {
                                                                             !i2c_on_apb2(1) &&
                                                                             !i2c_on_apb2(3));
     bench.verdict("each has TWO vectors of its own, the events on one and the errors on the other",
-                  S::event_irq == I2C3_EV_IRQn && S::error_irq == I2C3_ER_IRQn &&
+                  S::event_irq == i2c_event_irq(bus_instance) &&
+                      S::error_irq == i2c_error_irq(bus_instance) &&
                       i2c_event_irq(1) != i2c_error_irq(1));
     print(serial, "  the noise filter register: ", S::has_filter ? "present" : "absent",
           "; an FMPI2C1 on this part: ", fmpi2c_present() ? "yes" : "no", crlf);
@@ -445,8 +583,12 @@ void td_scan() {
     }
     print(serial, answered == 0u ? " (none)" : "", crlf);
     print(serial, "  ", answered, " answered, ", nacked, " NACKed, ", other,
-          " ended some other way; the STMPE811 this board's schematic names is at ",
-          hex(touch_addr), crlf);
+          " ended some other way; ", peer.name, " is ", crlf, "  ");
+    if (peer.addr != 0u) {
+        print(serial, "at ", hex(peer.addr), " by the board's schematic", crlf);
+    } else {
+        print(serial, "at the first address that answered, ", hex(peer_addr), crlf);
+    }
     bench.verdict("the probe - a Request with both spans empty - reaches the wire: at least one "
                   "device on this board answers its address",
                   answered != 0u);
@@ -473,16 +615,20 @@ void te_identity() {
     }
     uint8_t id[2] = {};
     const uint8_t st = read_regs(reg_chip_id, id, 2);
-    const uint16_t chip = static_cast<uint16_t>((static_cast<uint16_t>(id[0]) << 8) | id[1]);
     const uint8_t ver = read_reg(reg_id_ver);
-    print(serial, "  address ", hex(peer_addr), ": CHIP_ID (0x00, two bytes MSB first) reads ",
-          hex(chip), ", ID_VER (0x02) reads ", hex(ver), "; status ", st, crlf);
+    print(serial, "  address ", hex(peer_addr), ": ", peer.id_name, " reads ", hex(id[0]), " ",
+          hex(id[1]), ", ", peer.ver_name, " reads ", hex(ver), "; status ", st, crlf);
     bench.verdict("a write-then-read tenure - the index out, a repeated START, the value back - "
                   "answers i2c_ok",
                   st == i2c_ok);
-    bench.verdict("the device on this bus is the STMPE811 the board's schematic names, and it "
-                  "says so in its own identity register",
-                  chip == stmpe811_chip_id);
+    if constexpr (peer_known) {
+        bench.verdict("the device on this bus is the one the board's schematic names, and it says "
+                      "so in its own identity register",
+                      is_peer_id(id));
+    } else {
+        print(serial, "  the device's datasheet is not on the desk: its identity is printed and "
+                      "not judged (declined by name)", crlf);
+    }
 
     // The same read eight times running: a bus that is right is right
     // every time.
@@ -497,13 +643,20 @@ void te_identity() {
     bench.verdict("eight write-then-read tenures in a row give the same two bytes", stable);
 
     // A register that is not the identity reads as something else, which
-    // is what says the bytes above are the device's and not the wire's.
-    const uint8_t ctrl = read_reg(reg_sys_ctrl2);
-    print(serial, "  SYS_CTRL2 (0x04) reads ", hex(ctrl), " - a different register, a different "
-          "byte", crlf);
-    bench.verdict("a different register answers differently: the bytes come from the device and "
-                  "not from a pull-up",
-                  ctrl != id[0] || ctrl != id[1]);
+    // is what says the bytes above are the device's and not the wire's -
+    // a judgement that needs the datasheet to name a register that
+    // differs, so without it the line is printed and not judged.
+    if constexpr (peer_known) {
+        const uint8_t ctrl = read_reg(reg_sys_ctrl2);
+        print(serial, "  ", peer.scratch_name, " reads ", hex(ctrl),
+              " - a different register, a different byte", crlf);
+        bench.verdict("a different register answers differently: the bytes come from the device "
+                      "and not from a pull-up",
+                      ctrl != id[0] || ctrl != id[1]);
+    } else {
+        print(serial, "  which register would answer differently is the datasheet's to say: "
+                      "not judged here (declined by name)", crlf);
+    }
 }
 
 // =============================================================================
@@ -544,9 +697,13 @@ void tf_receive_shapes() {
     }
     print(serial, crlf);
 
+    // With the datasheet on the desk the bytes are the identity; without
+    // it the same one-byte read done again is what a right procedure owes.
+    uint8_t one_again = 0;
+    (void)read_regs(reg_chip_id, &one_again, 1);
     bench.verdict("the ONE-byte procedure - ACK cleared before ADDR, STOP right after - reads the "
                   "device",
-                  one[0] == 0x08u && one[1] == 0x11u);
+                  peer_known ? is_peer_id(one) : one_again == one[0]);
     bench.verdict("the TWO-byte procedure - POS with ACK, ACK off after ADDR, both bytes off one "
                   "BTF - agrees with it byte for byte",
                   same(one, two, 8));
@@ -560,7 +717,7 @@ void tf_receive_shapes() {
     uint8_t run[16] = {};
     const uint8_t long_st = read_regs(reg_chip_id, run, 16);
     bench.verdict("a sixteen-byte read is one tenure and ends i2c_ok",
-                  long_st == i2c_ok && run[0] == 0x08u && run[1] == 0x11u);
+                  long_st == i2c_ok && same(run, one, 8));
 }
 
 // =============================================================================
@@ -708,53 +865,61 @@ void th_write_back() {
         bench.verdict("the host came up and a device answered", false);
         return;
     }
-    // SYS_CTRL2 is four clock gates and nothing that moves a pin.
-    const uint8_t start = read_reg(reg_sys_ctrl2);
-    const uint8_t patterns[3] = {0x00u, 0x0Fu, 0x01u};
-    bool wrote = true;
-    for (uint8_t i = 0; i < 3u; ++i) {
-        const uint8_t st = write_reg(reg_sys_ctrl2, patterns[i]);
-        const uint8_t back = read_reg(reg_sys_ctrl2);
-        print(serial, "  SYS_CTRL2 <- ", hex(patterns[i]), " (status ", st, "), reads ", hex(back),
-              crlf);
-        if (st != i2c_ok || back != patterns[i]) {
-            wrote = false;
+    if constexpr (!peer_known) {
+        print(serial, "  the device's datasheet is not on the desk, so no register of its is "
+                      "written: the letter declines by name", crlf);
+        return;
+    } else {
+        // The scratch register is one the datasheet says moves no pin: the
+        // STMPE811's SYS_CTRL2 is four clock gates.
+        const uint8_t start = read_reg(reg_sys_ctrl2);
+        bool wrote = true;
+        for (uint8_t i = 0; i < 3u; ++i) {
+            const uint8_t st = write_reg(reg_sys_ctrl2, peer.scratch_patterns[i]);
+            const uint8_t back = read_reg(reg_sys_ctrl2);
+            print(serial, "  ", peer.scratch_name, " <- ", hex(peer.scratch_patterns[i]),
+                  " (status ", st, "), reads ", hex(back), crlf);
+            if (st != i2c_ok || back != peer.scratch_patterns[i]) {
+                wrote = false;
+            }
         }
-    }
-    bench.verdict("a register written over this bus reads back exactly - the write path and the "
-                  "read path are the same tenure with a repeated START between them",
-                  wrote);
-    // And one pattern the DEVICE masks: with its ADC gate open this part
-    // holds the temperature-sensor gate clear whatever is written. A
-    // device rule and not a bus one, so it is printed and not judged -
-    // what the bus owes is that the byte written is the byte that
-    // arrived, which the three above say.
-    const uint8_t masked_st = write_reg(reg_sys_ctrl2, 0x0Cu);
-    print(serial, "  SYS_CTRL2 <- 0xC (status ", masked_st, "), reads ", hex(read_reg(reg_sys_ctrl2)),
-          " - the device masks a bit of its own, and that is the device's business", crlf);
+        bench.verdict("a register written over this bus reads back exactly - the write path and "
+                      "the read path are the same tenure with a repeated START between them",
+                      wrote);
+#if !defined(STM32F469xx)
+        // And one pattern the DEVICE masks: with its ADC gate open this
+        // part holds the temperature-sensor gate clear whatever is
+        // written. A device rule and not a bus one, so it is printed and
+        // not judged - what the bus owes is that the byte written is the
+        // byte that arrived, which the three above say.
+        const uint8_t masked_st = write_reg(reg_sys_ctrl2, 0x0Cu);
+        print(serial, "  SYS_CTRL2 <- 0xC (status ", masked_st, "), reads ",
+              hex(read_reg(reg_sys_ctrl2)),
+              " - the device masks a bit of its own, and that is the device's business", crlf);
+#endif
 
-    // A two-byte write in one tenure: the index and the value are one
-    // span, so this is already what every write above did; what it proves
-    // here is that the tenure ends on BTF and not on TxE.
-    const uint8_t st = write_reg(reg_sys_ctrl2, start);
-    print(serial, "  SYS_CTRL2 back to the value found at boot, ", hex(start), " (status ", st,
-          ")", crlf);
-    bench.verdict("the boot value is restored", st == i2c_ok && read_reg(reg_sys_ctrl2) == start);
+        // A two-byte write in one tenure: the index and the value are one
+        // span, so this is already what every write above did; what it
+        // proves here is that the tenure ends on BTF and not on TxE.
+        const uint8_t st = write_reg(reg_sys_ctrl2, start);
+        print(serial, "  ", peer.scratch_name, " back to the value found at boot, ", hex(start),
+              " (status ", st, ")", crlf);
+        bench.verdict("the boot value is restored",
+                      st == i2c_ok && read_reg(reg_sys_ctrl2) == start);
 
-    // And the device's own soft reset, which is how this suite leaves it:
-    // every register of its back where its power-on put them.
-    const uint8_t reset_st = write_reg(reg_sys_ctrl1, stmpe811_soft_reset);
-    for (uint32_t spins = 400'000u; spins != 0u; --spins) {
+        // And the device's own reset, which is how this suite leaves it:
+        // every register of its back where its power-on put them.
+        const uint8_t reset_st = peer_reset();
+        uint8_t id[2] = {};
+        (void)read_regs(reg_chip_id, id, 2);
+        const uint8_t after = read_reg(reg_sys_ctrl2);
+        print(serial, "  after the device's reset: ", peer.id_name, " ", hex(id[0]), " ",
+              hex(id[1]), ", ", peer.scratch_name, " ", hex(after),
+              " (its reset value; boot found ", hex(peer_sys_ctrl2_boot), ")", crlf);
+        bench.verdict("the device's own reset goes out and the device comes back on the bus, its "
+                      "registers where its reset leaves them",
+                      reset_st == i2c_ok && is_peer_id(id));
     }
-    uint8_t id[2] = {};
-    (void)read_regs(reg_chip_id, id, 2);
-    const uint8_t after = read_reg(reg_sys_ctrl2);
-    print(serial, "  after SYS_CTRL1's soft reset: CHIP_ID ", hex(id[0]), " ", hex(id[1]),
-          ", SYS_CTRL2 ", hex(after), " (its reset value; boot found ", hex(peer_sys_ctrl2_boot),
-          ")", crlf);
-    bench.verdict("the device's own soft reset goes out over this bus and the device comes back "
-                  "on it, its registers where its reset leaves them",
-                  reset_st == i2c_ok && id[0] == 0x08u && id[1] == 0x11u);
 }
 
 // =============================================================================
@@ -860,7 +1025,7 @@ void ti_kernel() {
                   kl::Probe::replies[0] == i2c_ok && kl::Probe::replies[1] == i2c_ok &&
                       kl::Probe::replies[2] == i2c_ok && kl::Probe::replies[3] == i2c_ok);
     bench.verdict("and what the arbiter handed back is the device's own identity",
-                  kl::rx_a[0] == 0x08u && kl::rx_a[1] == 0x11u);
+                  (peer_known ? is_peer_id(kl::rx_a) : true));
 
     // The address NACK travels through the arbiter untouched: a probe of
     // an address nobody answers is the scanner's own result.
@@ -944,18 +1109,32 @@ void tj_engines() {
                   one_st == i2c_ok && one == reference[0]);
 
     // A write of two bytes through the transmit engine, read back on the
-    // pump: the engined write path really moves the bytes.
-    const uint8_t cmd[2] = {reg_sys_ctrl2, 0x00u};
-    const uint8_t wr = tenure<DmaHost>(peer_addr, cmd, 2, nullptr, 0);
-    dma_host_live = false;
-    DmaHost::release();
-    (void)host_ready();
-    const uint8_t back = read_reg(reg_sys_ctrl2);
-    print(serial, "  a two-byte write through the transmit engine: status ", wr,
-          ", the register reads ", hex(back), " (it held ", hex(start), " before)", crlf);
-    bench.verdict("the engined write phase reaches the device", wr == i2c_ok && back == 0x00u);
-    (void)write_reg(reg_sys_ctrl2, start);
-    (void)write_reg(reg_sys_ctrl1, stmpe811_soft_reset);
+    // pump: the engined write path really moves the bytes. Without the
+    // device's datasheet nothing of its is written, and the write phase
+    // is proved on the index byte every read above sent through the same
+    // engine.
+    if constexpr (peer_known) {
+        const uint8_t cmd[2] = {reg_sys_ctrl2, peer.scratch_patterns[0]};
+        const uint8_t wr = tenure<DmaHost>(peer_addr, cmd, 2, nullptr, 0);
+        dma_host_live = false;
+        DmaHost::release();
+        (void)host_ready();
+        const uint8_t back = read_reg(reg_sys_ctrl2);
+        print(serial, "  a two-byte write through the transmit engine: status ", wr,
+              ", the register reads ", hex(back), " (it held ", hex(start), " before)", crlf);
+        bench.verdict("the engined write phase reaches the device",
+                      wr == i2c_ok && back == peer.scratch_patterns[0]);
+        (void)write_reg(reg_sys_ctrl2, start);
+        (void)peer_reset();
+    } else {
+        dma_host_live = false;
+        DmaHost::release();
+        (void)host_ready();
+        (void)start;
+        print(serial, "  no register of the device is written (its datasheet is not on the desk): "
+                      "the engined write phase is the index byte of the reads above (declined by "
+                      "name)", crlf);
+    }
 }
 
 // =============================================================================
@@ -992,7 +1171,8 @@ void tk_recovery() {
                   recovered && S::enabled() && t.ccr == Host::timing_of(I2cSpeed::standard_100k).ccr);
     uint8_t id[2] = {};
     const uint8_t st = read_regs(reg_chip_id, id, 2);
-    bench.verdict("... and the bus works after it", st == i2c_ok && id[0] == 0x08u);
+    bench.verdict("... and the bus works after it",
+                  st == i2c_ok && (peer_known ? id[0] == peer.id_bytes[0] : true));
 
     // The unstick: nine clocks and a STOP by hand, only when SDA is
     // actually held low. A healthy wire is left alone and says 0.
@@ -1001,7 +1181,8 @@ void tk_recovery() {
           " pulses (0 = SDA was free and nothing was driven)", crlf);
     bench.verdict("unstick() finds this bus free and drives nothing", pulses == 0u);
     const uint8_t after = read_regs(reg_chip_id, id, 2);
-    bench.verdict("... and the pads come back to the peripheral", after == i2c_ok && id[1] == 0x11u);
+    bench.verdict("... and the pads come back to the peripheral",
+                  after == i2c_ok && (peer_known ? is_peer_id(id) : true));
 
     // The errata's own counter: how many BUS ERRORS were seen and ignored
     // while this side was the controller. RM0090 27.3.4 says a controller's
@@ -1019,8 +1200,108 @@ void tk_recovery() {
 // the menu
 // =============================================================================
 
+#if defined(STM32F469xx)
+// =============================================================================
+// l - a finger on the glass (by name only)
+// =============================================================================
+
+void tl_finger() {
+    if (!host_ready() || peer_addr == 0u) {
+        bench.verdict("the host came up and a device answered", false);
+        return;
+    }
+    // The versions, for the record.
+    uint8_t lib[2] = {0, 0};
+    (void)read_regs(reg_lib_ver_h, lib, 2);
+    print(serial, "  LIB_VER ", hex(lib[0]), " ", hex(lib[1]), ", CIPHER ", hex(read_reg(reg_cipher)), ", FIRMID ",
+          hex(read_reg(peer.ver_reg)), ", RELEASE_CODE_ID ", hex(read_reg(reg_release_code)), ", CTRL ",
+          hex(read_reg(reg_ctrl)), ", PERIODACTIVE ", hex(read_reg(reg_period_active)), ", G_MODE ",
+          hex(read_reg(reg_g_mode)), crlf);
+
+    // Interrupt trigger mode: a pulse on INT per report while a finger is
+    // down (the note's 1.2), counted on EXTI line 5.
+    const uint8_t g_before = read_reg(reg_g_mode);
+    (void)write_reg(reg_g_mode, 0x01);
+    const uint8_t g_trigger = read_reg(reg_g_mode);
+    bench.verdict("G_MODE takes the interrupt trigger mode and reads it back", g_trigger == 0x01u);
+    (void)TouchIrq::claim(PinPull::up);
+    (void)TouchIrq::configure(ExtiSense::falling);
+    (void)TouchIrq::clear();
+    touch_int_edges = 0;
+    (void)TouchIrq::arm(true);
+    Nvic::enable(TouchIrq::irq());
+    const bool int_idle_high = TouchInt::read();
+
+    // Up to twenty-five seconds for a finger to arrive, then eight
+    // seconds of it, the touch data polled every 10 ms.
+    print(serial, "  TOUCH THE GLASS - waiting up to 25 s for a finger, then eight seconds of it", crlf);
+    uint32_t samples = 0, touched = 0, twos = 0, errors = 0;
+    uint16_t x_min = 0xFFFF, x_max = 0, y_min = 0xFFFF, y_max = 0;
+    uint8_t flags_seen = 0, ids_seen = 0;
+    bool first_printed = false;
+    uint32_t start = Ticker::ticks();
+    uint32_t window = 25000u;
+    bool arrived = false;
+    while (Ticker::ticks() - start < window) {
+        if (!arrived && touched != 0u) {
+            arrived = true;
+            start = Ticker::ticks();
+            window = 8000u;
+            print(serial, "  a finger: eight seconds from now", crlf);
+        }
+        uint8_t td[5] = {0, 0, 0, 0, 0};
+        if (read_regs(reg_td_status, td, 5) != i2c_ok) {
+            ++errors;
+        } else {
+            ++samples;
+            const uint8_t points = td[0] & 0x0Fu;
+            if (points == 1u || points == 2u) {
+                ++touched;
+                if (points == 2u) {
+                    ++twos;
+                }
+                const uint8_t flag = static_cast<uint8_t>(td[1] >> 6);
+                const uint16_t x = static_cast<uint16_t>(((td[1] & 0x0Fu) << 8) | td[2]);
+                const uint16_t y = static_cast<uint16_t>(((td[3] & 0x0Fu) << 8) | td[4]);
+                const uint8_t id = static_cast<uint8_t>(td[3] >> 4);
+                flags_seen = static_cast<uint8_t>(flags_seen | (1u << flag));
+                ids_seen = static_cast<uint8_t>(ids_seen | (id < 8u ? (1u << id) : 0x80u));
+                x_min = x < x_min ? x : x_min;
+                x_max = x > x_max ? x : x_max;
+                y_min = y < y_min ? y : y_min;
+                y_max = y > y_max ? y : y_max;
+                if (!first_printed) {
+                    print(serial, "  first report: TD_STATUS ", hex(td[0]), ", event flag ", flag, ", id ", id, ", x ", x,
+                          ", y ", y, crlf);
+                    first_printed = true;
+                }
+            }
+        }
+        const uint32_t t = Ticker::ticks();
+        while (Ticker::ticks() - t < 10u) {
+        }
+    }
+    Nvic::disable(TouchIrq::irq());
+    (void)TouchIrq::arm(false);
+    const uint32_t edges = touch_int_edges;
+    (void)write_reg(reg_g_mode, g_before);
+    print(serial, "  ", samples, " samples, ", touched, " with a finger (", twos, " with two), ", errors, " bus errors; x ",
+          x_min, "..", x_max, ", y ", y_min, "..", y_max, "; event flags seen ", hex(flags_seen), " (bit 0 press, 1 lift, 2 contact, 3 none), ids ",
+          hex(ids_seen), "; INT idle ", int_idle_high ? "high" : "LOW", ", ", edges, " falling edges", crlf);
+    bench.verdict("a finger was reported: TD_STATUS counted one or two points", touched != 0u);
+    bench.verdict("the coordinates stayed inside a 800x800 frame (12 bits each, the panel 800 by 480)",
+                  touched != 0u && x_max < 800u && y_max < 800u);
+    bench.verdict("the contact event (10b) was among the flags seen", (flags_seen & 0x04u) != 0u);
+    bench.verdict("INT idles high with no finger and pulsed on the reports in trigger mode",
+                  int_idle_high && edges != 0u);
+    bench.verdict("no bus error over the polling", errors == 0u);
+    bench.verdict("G_MODE put back to what it was", read_reg(reg_g_mode) == g_before);
+}
+#endif
+
 void banner() {
-    print(serial, crlf, "test_stm32f4_i2c - I2C3 with the board's own touch controller", crlf);
+    print(serial, crlf, "test_stm32f4_i2c - I2C", bus_instance,
+          " with the board's own touch controller", crlf);
     bench.menu();
 }
 
@@ -1040,19 +1321,45 @@ void find_peer() {
     }
     uint8_t id[2] = {};
     (void)read_regs(reg_chip_id, id, 2);
-    peer_is_stmpe = peer_addr == touch_addr &&
-                    static_cast<uint16_t>((static_cast<uint16_t>(id[0]) << 8) | id[1]) ==
-                        stmpe811_chip_id;
-    peer_sys_ctrl2_boot = read_reg(reg_sys_ctrl2);
+    peer_identified = (peer.addr == 0u || peer_addr == peer.addr) && is_peer_id(id);
+    peer_sys_ctrl2_boot = peer_known ? read_reg(reg_sys_ctrl2) : 0u;
+}
+
+/// What the board wants before the first tenure: the other Discovery's
+/// touch controller sits behind the panel's reset line, left floating by
+/// the boot, so it is pulsed once here - the pull-ups then read an idle
+/// bus with a device on it.
+void board_prepare() {
+#if defined(STM32F469xx)
+    (void)peer_reset();
+#endif
 }
 
 }  // namespace
 
 // ---- the vectors ---------------------------------------------------------------------------
 
+#if defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
+extern "C" void EXTI9_5_IRQHandler() {
+    const uint32_t fired = brio::Exti::isr(TouchIrq::mask);
+    if (TouchIrq::served(fired)) {
+        touch_int_edges = touch_int_edges + 1u;
+    }
+}
+#define BRIO_I2C_EV_HANDLER I2C1_EV_IRQHandler
+#define BRIO_I2C_ER_HANDLER I2C1_ER_IRQHandler
+#define BRIO_I2C_TX_DMA_HANDLER DMA1_Stream6_IRQHandler
+#define BRIO_I2C_RX_DMA_HANDLER DMA1_Stream0_IRQHandler
+#else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
+#define BRIO_I2C_EV_HANDLER I2C3_EV_IRQHandler
+#define BRIO_I2C_ER_HANDLER I2C3_ER_IRQHandler
+#define BRIO_I2C_TX_DMA_HANDLER DMA1_Stream4_IRQHandler
+#define BRIO_I2C_RX_DMA_HANDLER DMA1_Stream2_IRQHandler
+#endif
 
-extern "C" void I2C3_EV_IRQHandler() {
+extern "C" void BRIO_I2C_EV_HANDLER() {
     if (dma_host_live) {
         if (DmaHost::isr()) {
             xfer_done = true;
@@ -1067,7 +1374,7 @@ extern "C" void I2C3_EV_IRQHandler() {
     }
 }
 
-extern "C" void I2C3_ER_IRQHandler() {
+extern "C" void BRIO_I2C_ER_HANDLER() {
     if (dma_host_live) {
         if (DmaHost::error_isr()) {
             xfer_done = true;
@@ -1082,12 +1389,12 @@ extern "C" void I2C3_ER_IRQHandler() {
     }
 }
 
-extern "C" void DMA1_Stream4_IRQHandler() {
+extern "C" void BRIO_I2C_TX_DMA_HANDLER() {
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }
 }
-extern "C" void DMA1_Stream2_IRQHandler() {
+extern "C" void BRIO_I2C_RX_DMA_HANDLER() {
     if (dma_host_live && DmaHost::dma_isr()) {
         xfer_done = true;
     }
@@ -1099,16 +1406,16 @@ int main() {
     // What the silicon held before a line of this program ran: the gate is
     // read out of the RCC (reading it does not open it), and the registers
     // behind it need the clock, so it is opened for the reading.
-    boot.gate = brio::I2c<3>::bus_clock();
-    brio::I2c<3>::bus_clock(true);
-    boot.cr1 = brio::I2c<3>::regs().CR1;
-    boot.cr2 = brio::I2c<3>::regs().CR2;
-    boot.oar1 = brio::I2c<3>::regs().OAR1;
-    boot.oar2 = brio::I2c<3>::regs().OAR2;
-    boot.sr1 = brio::I2c<3>::regs().SR1;
-    boot.sr2 = brio::I2c<3>::regs().SR2;
-    boot.ccr = brio::I2c<3>::regs().CCR;
-    boot.trise = brio::I2c<3>::regs().TRISE;
+    boot.gate = S::bus_clock();
+    S::bus_clock(true);
+    boot.cr1 = S::regs().CR1;
+    boot.cr2 = S::regs().CR2;
+    boot.oar1 = S::regs().OAR1;
+    boot.oar2 = S::regs().OAR2;
+    boot.sr1 = S::regs().SR1;
+    boot.sr2 = S::regs().SR2;
+    boot.ccr = S::regs().CCR;
+    boot.trise = S::regs().TRISE;
 
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
@@ -1122,8 +1429,9 @@ int main() {
     boot.scl = SclPad::read();
     boot.sda = SdaPad::read();
 
+    board_prepare();
     const bool host_ok = host_ready();
-    boot.sr2_ready = brio::I2c<3>::regs().SR2;
+    boot.sr2_ready = S::regs().SR2;
     find_peer();
 
     bench.letter('a', "the instances and the block", ta_block);
@@ -1137,12 +1445,15 @@ int main() {
     bench.letter('i', "THE KERNEL: I2cBus over I2cHost", ti_kernel);
     bench.letter('j', "the same tenures through the DMA engines", tj_engines);
     bench.letter('k', "the recovery verbs", tk_recovery);
+#if defined(STM32F469xx)
+    bench.letter('l', "a finger on the glass: the touch controller reporting", tl_finger, false);
+#endif
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",
-                    " tick=", tick_ok ? "SysTick" : "FAILED", " i2c3=", host_ok ? "host" : "FAILED",
-                    " peer=", brio::hex(peer_addr), peer_is_stmpe ? " (STMPE811)" : " (unknown)",
-                    brio::crlf);
+                    " tick=", tick_ok ? "SysTick" : "FAILED", " i2c", bus_instance, "=",
+                    host_ok ? "host" : "FAILED", " peer=", brio::hex(peer_addr),
+                    peer_identified ? " (identified)" : " (unknown)", brio::crlf);
         banner();
         bench.prompt();
     }

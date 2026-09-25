@@ -74,7 +74,7 @@ transfer function is VREF+ x DOR / 4096, and `Ref` lives in
 ### The errata, and how they are answered
 
 - **DMA request not automatically cleared by clearing DMAEN** (ES0206
-  2.6.1, ES0298 2.7.1): a request already asserted is not withdrawn by
+  2.6.1, ES0298 2.7.1, ES0321 2.7.1): a request already asserted is not withdrawn by
   clearing DMAENx or by closing the DAC's clock, and it will be served
   the moment the converter is enabled again. The workaround is a sequence
   over TWO peripherals; `stop_dma()` is the DAC's half of it (the flag
@@ -83,7 +83,7 @@ transfer function is VREF+ x DOR / 4096, and `Ref` lives in
   anything is enabled again - is still the caller's.
 - **DMA underrun flag not set when an internal trigger is detected on
   the clock cycle of the DMA request acknowledge** (ES0206 2.6.2, ES0298
-  2.7.2): no workaround, and it bites only where software and hardware
+  2.7.2, ES0321 2.7.2): no workaround, and it bites only where software and hardware
   triggers are used together. Stated on `underrun()`.
 
 ## Types and verbs
@@ -216,7 +216,9 @@ unless a part is named), with the DAC's own outputs read back through the
 pads they share with the ADC - one pad free on the board and one carrying
 a LOAD, which is the board's: on the Nucleo-64 PA4 is free and PA5 carries
 the LED; on the STM32F429I-DISC1 PA5 is free and PA4 is the display's
-VSYNC, pulled HIGH by the board.
+VSYNC, pulled HIGH by the board; on the 32F469IDISCOVERY both pads reach
+a header and nothing else, so the buffer's verdict is declined there by
+name and every other letter runs.
 
 **The holding register reaches the output by itself, and it is there
 before the first read of DOR** - 43 HCLK cycles for a write and a

@@ -8,14 +8,19 @@
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp). It is a REFERENCE test.
 //
-// THE CONSOLE IS THE PROBE'S UART BRIDGE on USART1; the board's own USB
-// connector goes to the host, which is the other end of every measure:
-// Linux enumerates the device (the pid.codes test identity 1209:0001),
-// binds cdc-acm, and the host letters talk to /dev/ttyACM* with pyserial.
+// THE CONSOLE IS THE PROBE'S UART BRIDGE on USART1 (the black pill) or
+// the ST-LINK's virtual COM port on USART3 (the 32F469IDISCOVERY); the
+// board's own USB connector - the black pill's USB-C, the Discovery's
+// micro-AB CN13 - goes to the host, which is the other end of every
+// measure: Linux enumerates the device (the pid.codes test identity
+// 1209:0001), binds cdc-acm, and the host letters talk to /dev/ttyACM*
+// with pyserial.
 //
-// THE CLOCK IS 96 MHz AND NOT THE PART'S 100: the controller wants 48 MHz
-// exactly on its own domain, which is the main PLL's Q output, and from a
-// 25 MHz crystal 96 MHz is the rate whose ratio gives it.
+// THE CLOCK IS NOT THE PART'S CEILING: the controller wants 48 MHz
+// exactly on its own domain, which is the main PLL's Q output, and only
+// some rates of a ladder divide to it - 96 MHz and not 100 from the
+// black pill's 25 MHz crystal, 168 MHz and not 180 from the Discovery's
+// 8 MHz one.
 //
 // What is exercised, letter by letter:
 //   a  the controller and the enumeration, no host action needed: the
@@ -55,7 +60,7 @@
 //      whole number of full packets - poured out, which the host's read
 //      only returns from because a zero-length packet closes the run
 //
-// build: boards = f411ce
+// build: boards = f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -78,17 +83,37 @@ namespace {
 using namespace brio;
 
 using P = Stm32f4Platform<>;
+#if defined(STM32F469xx)
+// 168 MHz from the 8 MHz crystal: the one rate of the F469's ladder whose
+// VCO (336 MHz) divides to 48 MHz exactly (Q = 7); 180 MHz would leave the
+// controller 45 MHz, and the reserve refuses it.
+using SysClock = Clock<ClockSource::pll_hse, 168'000'000, 8'000'000>;
+#else
 using SysClock = Clock<ClockSource::pll_hse, 96'000'000, 25'000'000>;
+#endif
 constexpr SysClock clock;
 static_assert(SysClock::usb_hz == otg_clock_hz, "this rate must give the controller 48 MHz");
 
+#if defined(STM32F469xx)
+constexpr UartPins console_pins{
+    .tx = {'B', 10, PinFunction::af7},   // USART3 on the ST-LINK's VCP (UM1932 4.11)
+    .rx = {'B', 11, PinFunction::af7},
+};
+constexpr uint8_t console_instance = 3;
+#else
 constexpr UartPins console_pins{
     .tx = {'A', 9, PinFunction::af7},
     .rx = {'A', 10, PinFunction::af7},
 };
-using Serial = Uart<1, console_pins>;
+constexpr uint8_t console_instance = 1;
+#endif
+using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
+#if defined(STM32F469xx)
+using Led = Pin<'G', 6>;    // LD1, lit when low
+#else
 using Led = Pin<'C', 13>;   // lit when low
+#endif
 using Usb = UsbFs;
 
 TestBench<Serial, 20> bench;
@@ -756,7 +781,11 @@ void banner() {
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
+#if defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
+#else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
+#endif
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void OTG_FS_IRQHandler() { Device::isr(); }
 

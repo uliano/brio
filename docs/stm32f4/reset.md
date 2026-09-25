@@ -7,9 +7,10 @@ Documents of record: RM0090 Rev 22 - 7.1 (the three kinds of reset),
 PM0214 Rev 10 4.3 (SHCSR, CCR, CFSR, HFSR, MMFAR, BFAR and AIRCR's
 SYSRESETREQ) for the core half, and the LSI's 17..47 kHz from each
 part's datasheet (the F429's is DocID024030 Rev 10 table 42). The
-errata carry ONE item of this chapter, and all three carry it on every
+errata carry ONE item of this chapter, and all four carry it on every
 silicon revision: **ES0206 Rev 24 2.8.1..2.8.4** (ES0298 Rev 8
-2.9.1..2.9.4, ES0287 Rev 6 2.7.1..2.7.4) - the IWDG's RVU and PVU flags
+2.9.1..2.9.4, ES0287 Rev 6 2.7.1..2.7.4, ES0321 Rev 14 2.10.1..2.10.4) -
+the IWDG's RVU and PVU flags
 are never cleared if the device enters Stop while one stands, or if the
 APB clock is below twice the IWDG clock. Neither can bite here: the
 driver's waits are bounded and report instead of hanging, and PCLK1 is
@@ -248,7 +249,9 @@ extern "C" void UsageFault_Handler() {
 `test_stm32f4_reset` on the STM32F429I-DISC1 at 180 MHz (PCLK1 45 MHz),
 nothing wired. Four letters in `z` (**44 verdicts**) and letter `i`
 outside it (**34 verdicts**), which reboots the board seven times and
-resumes from a `.noinit` token.
+resumes from a `.noinit` token. Both sets green on the 32F469IDISCOVERY
+too, whose LSI the IWDG leg weighs at 35275 Hz (the DISC1's 33.5 kHz
+below) and whose seven legs land the same flags.
 
 - **The flags accumulate, seen on real resets.** Leg 1 clears them and
   does a software reset: the next boot reads exactly `SFT | PIN`

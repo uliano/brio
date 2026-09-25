@@ -109,13 +109,14 @@ them with another peripheral.
 
 **THE ONE ERRATUM, AND IT IS LIVE.** Time-triggered communication mode
 "is not supported", no time stamp is available, and CAN_MCR.TTCM "must
-be kept cleared" - every revision of the F446 and of the F427/F437/
-F429/F439, no workaround. `Can<n>::options()` REFUSES a configuration
+be kept cleared" - every revision of the F446, of the F427/F437/
+F429/F439 and of the F469/F479 (ES0298 2.15.1, ES0206 2.13.1, ES0321
+2.15.1), no workaround. `Can<n>::options()` REFUSES a configuration
 that asks for TTCM on those part classes and writes nothing;
 `time_triggered_supported()` says whether it would. The TIME field a
 received frame carries is left in `CanFrame` and is meaningless without
 the mode. On the part classes whose errata sheet was not read (the F405,
-F412, F413/F423 and F469/F479) the bit is writable.
+F412 and F413/F423) the bit is writable.
 
 ## Types and verbs
 
@@ -264,7 +265,10 @@ const auto sce = Bus::sce_isr();    // ERRI/WKUI/SLAKI cleared, ESR reported
 From `test_stm32f4_misc` letters `c` to `k` on an STM32F446 at 180 MHz,
 PCLK1 45 MHz, with no transceiver, no peer and no wire - the receive
 pads claimed as inputs with their pull-ups and the transmit pads never
-claimed, so the chip drives nothing:
+claimed, so the chip drives nothing (the same nine letters green on the
+STM32F469, its CAN1_RX on PD0 - the SDRAM's idle D2 line, whose level
+the pad's own pull decides, which letter c needs and a pad with a board
+pull-up cannot give - and its CAN2_RX on PB5):
 
 - **A NODE IN LOOPBACK STILL NEEDS ELEVEN RECESSIVE BITS ON ITS RECEIVE
   PAD.** With CAN1_RX claimed and pulled DOWN the node never leaves

@@ -60,6 +60,26 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "STM32F4_MCU": "stm32f411ce"
             }
+        },
+        {
+            "name": "stm32f469ni-release",
+            "displayName": "STM32F469NI (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f469ni-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "STM32F4_MCU": "stm32f469ni"
+            }
+        },
+        {
+            "name": "stm32f469ni-debug",
+            "displayName": "STM32F469NI (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/stm32f469ni-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "STM32F4_MCU": "stm32f469ni"
+            }
         }
     ],
     "buildPresets": [
@@ -68,6 +88,8 @@
         { "name": "stm32f446re-release", "configurePreset": "stm32f446re-release" },
         { "name": "stm32f446re-debug",   "configurePreset": "stm32f446re-debug" },
         { "name": "stm32f411ce-release", "configurePreset": "stm32f411ce-release" },
-        { "name": "stm32f411ce-debug",   "configurePreset": "stm32f411ce-debug" }
+        { "name": "stm32f411ce-debug",   "configurePreset": "stm32f411ce-debug" },
+        { "name": "stm32f469ni-release", "configurePreset": "stm32f469ni-release" },
+        { "name": "stm32f469ni-debug",   "configurePreset": "stm32f469ni-debug" }
     ]
 }

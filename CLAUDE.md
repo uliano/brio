@@ -182,7 +182,8 @@ interface up itself), `stm32f4/` (everything that
 knows `stm32f4xx.h`: STM32F4, Cortex-M4F - brio's first ARMv7-M family,
 built with the hard-float ABI, the FPU enabled by the crt; bench chips
 STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
-STM32F411CE on a WeAct black pill), `host/` (the native test
+STM32F411CE on a WeAct black pill, STM32F469NI on a 32F469IDISCOVERY),
+`host/` (the native test
 target). Includes carry the stratum prefix
 (`#include "avrdx/usart.hpp"`). The builds are sibling CMake
 projects, PEERS - the repo root is not a CMake project: the CROSS ones
@@ -401,10 +402,10 @@ gets its home in `docs/design/` when taken.
   "A suite's image fits the family's smallest chip"). A `qingke/` core
   stratum only at a second QingKe family.
 - **The STM32F4 stratum.** `brio/stm32f4/` and `stm32f4/` are
-  `supported` on the STM32F429ZI, the STM32F446RE and the STM32F411CE
-  (README.md's table) on three boards (STM32F429I-DISC1, Nucleo-F446RE,
-  an STM32F411CE black pill on a standalone STLINK-V3) with kernel/ and
-  util/ untouched - the platform,
+  `supported` on the STM32F429ZI, the STM32F446RE, the STM32F411CE and
+  the STM32F469NI (README.md's table) on four boards (STM32F429I-DISC1,
+  Nucleo-F446RE, an STM32F411CE black pill on a standalone STLINK-V3,
+  a 32F469IDISCOVERY) with kernel/ and util/ untouched - the platform,
   the clock (the regulator scale and over-drive sequenced, the APB
   prescalers unpinned), the pins and the USART with their documents,
   the family check over all twenty-three headers; then chapter by
@@ -412,26 +413,38 @@ gets its home in `docs/design/` when taken.
   builds for: reset and the watchdogs, EXTI + SYSCFG, the RTC and the
   backup domain, the DMA (the Uart's engine slots filled), the timers,
   the ADC and the DAC (read back on the pad they share), SPI/I2S and I2C
-  (against the gyroscope and the touch controller a board carries), the
-  USB OTG core for util/usb (the console on the black pill's own
-  connector), PWR with the sleep sites and the dynamic clock, and the
+  (against the gyroscope and the touch controllers two boards carry), the
+  USB OTG core for util/usb (the console on the black pill's and the
+  32F469IDISCOVERY's own connectors), PWR with the sleep sites and the dynamic clock, and the
   flash interface as the ENGINE alone (no FlashMedia, by the NV review's
   decision below), the CRC unit, the RNG (written for the parts that
-  have one, measured on the STM32F429), the bxCAN in loopback and the FMPI2C1 of the
+  have one, measured on the STM32F429 and the STM32F469), the bxCAN in loopback and the FMPI2C1 of the
   F410/F412/F413/F446 - the STM32G0's I2C under another name, measured
   on a bus with no device on it, the FMC with the SDRAM a board
   carries (8 MB byte-exact, the two traps against the manual), and on
   the F429 alone the LTDC and the DMA2D - the memory-mapped display
   tier over that SDRAM, the panel driven in its RGB mode and the
   bandwidth the tier lives on measured (two layers of 32-bit pixels at
-  65 Hz plus the accelerator, some 160 MB/s over one bus). What remains
-  is in the documents' gap lists, and three things outside them: the
+  65 Hz plus the accelerator, some 160 MB/s over one bus), and on the
+  F469 the QUADSPI against the board's 16 MB flash (indirect, status
+  polling and memory-mapped; the window at 44.5 MB/s) and the DSI HOST
+  in front of that part's LTDC - the panel's controller read over the
+  link (an NT35510, a command interface), every DCS register written and
+  read back, the frame refreshed into the panel's memory in one LTDC
+  frame through the adapted command mode and READ BACK pixel for pixel,
+  the tearing effect counted on the pin and pacing the refresh. What
+  remains
+  is in the documents' gap lists, and four things outside them: the
   OTG HS core in full-speed mode on the STM32F429 (UsbHs compiled, its
-  connector cabled, never enumerated); the frequency ladders of the five
+  connector cabled, never enumerated); the frequency ladders of the four
   part classes whose manuals are not on the desk (a rate above 16 MHz
   refused there); the debugger driven from the command line as
   cortex-debug would (docs/stm32f4/README.md) and not yet from the
-  editor. Tenuto only, the equal-priority promise kept; Rubato and
+  editor; and the 32F469IDISCOVERY's audio side and card socket -
+  the CS43L22 over SAI1, the three MEMS microphones over a PDM line,
+  the microSD over SDIO - three chapters (SAI, I2S receive with a
+  decimation filter, SDIO) no driver exists for, stated on the board's
+  page and not started. Tenuto only, the equal-priority promise kept; Rubato and
   BASEPRI are another type and another day.
 - **The RP2040 stratum.** `brio/rp2040/` and `rp2040/` are
   `supported` on the RP2040 (README.md's table) on a Raspberry Pi
@@ -816,8 +829,8 @@ stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          PART TABLE (cmake/stm32f4-parts.cmake: the part number
                          -> ST's irregular device define, the crt stem, the
                          board type) instead of substring arithmetic; presets
-                         for the F429ZI, the F446RE and the F411CE; the hard-
-                         float flags; ld/<part>.ld (the F429's CCM a named
+                         for the F429ZI, the F446RE, the F411CE and the F469NI;
+                         the hard-float flags; ld/<part>.ld (the F429's CCM a named
                          region nothing is placed in); src/glue/startup_stm32f4
                          {29,46,11}.cpp - ST's handler names, the FPU's CPACR
                          enabled before .data, holes where another part has a
@@ -925,8 +938,8 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          v006k8/v003f4 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
                          v203c8/v303vc -> ch32vx03/the same fork/a WCH-Link on
                          two wires, pico/picow/weact2040 -> rp2040/OpenOCD/the Debug
-                         Probe, f429zi/f446re/f411ce -> stm32f4/OpenOCD/an
-                         ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
+                         Probe, f429zi/f446re/f411ce/f469ni -> stm32f4/OpenOCD/
+                         an ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
                          Raspberry Pi's OpenOCD fork/the Debug Probe: ONE BOARD
                          UNDER TWO TYPES, because the type carries the preset
                          and on this chip the preset carries the ARCHITECTURE),
@@ -2218,8 +2231,8 @@ brio/                    the framework, one directory per stratum:
                            1..10 (bus, gate, vector, FULL by the U(S)ART name),
                            the regulator's VOS width and over-drive pair, and
                            THE FREQUENCY LADDERS keyed on the device-select
-                           define - known for the F405, F42x/F43x, F446 and
-                           F411 classes, refused elsewhere; the watchdogs'
+                           define - known for the F405, F42x/F43x, F446, F411
+                           and F469/F479 classes, refused elsewhere; the watchdogs'
                            and the EXTI's per-part facts (implemented lines,
                            port codes, per-line vectors) appended by chapter;
                            the backup-register count read off RTC_TypeDef
@@ -2549,6 +2562,46 @@ brio/                    the framework, one directory per stratum:
                            controller's fetch. 11.3.11's blend and the output
                            packings are constexpr beside the registers, which
                            is what a test judges the silicon against
+    quadspi.hpp            the QUAD-SPI MEMORY INTERFACE (ch. 13): Quadspi, a
+                           monostate where the header declares the block -
+                           QspiCommand as the chapter's five phases on one,
+                           two or four lines, QspiConfig with the flash's
+                           size and NCS's high time as fields of the
+                           contract, the three faces as verbs (command/
+                           write/read pumping the FIFO, poll() on the
+                           automatic status-polling mode with its stop on
+                           match, map()/unmap()/window() over the
+                           0x9000 0000 the MANUAL gives and the header does
+                           not), four of the five errata as code (a write
+                           with dummy cycles refused, the AR cleared behind
+                           an abort before the window, no timeout counter,
+                           the FIFO drained after a read) and the blocking
+                           verbs completing on BUSY because TCF is the
+                           handler's flag; the device's opcodes stay with
+                           the device, in the suite
+    dsi.hpp                the DSI HOST (RM0386 ch. 18), on the F469/F479
+                           class alone: Dsi, a monostate over the wrapper
+                           (the regulator, the PLL solved exactly on the
+                           intersection of the manual's and the data
+                           sheet's ranges, the tearing effect from the pin),
+                           the D-PHY (the unit interval in quarter
+                           nanoseconds, the lane transition times from the
+                           data sheet's maxima, 2.8.2's equal clock-lane
+                           times) and the host (video mode from the LTDC's
+                           timing converted into lane byte clocks, the
+                           pattern generator, the generic interface as
+                           short/long writes and the two-packet read behind
+                           dcs_write/dcs_read, the error registers that clear
+                           on the read); every configuring verb refused
+                           while enabled; the panel's command set stays with
+                           the panel, in the suite. THE PANEL DECIDES
+                           between video mode and the adapted command mode
+                           (an LTDC frame as DCS memory writes, one refresh
+                           per frame, launched by a bit or by the tearing
+                           effect pulse); in video mode a command is sent
+                           inside the stream; and the clock lane goes to
+                           high speed only AFTER the panel's reset, because
+                           its receiver locks onto that entry
   rp2040/                everything that knows the RP2040 (Raspberry Pi's dual
                          Cortex-M0+): the pico-sdk's CMSIS header + regs headers
                          are the device description (third_party/pico-sdk/)
@@ -3091,9 +3144,14 @@ brio/                    the framework, one directory per stratum:
     draw.hpp               the primitives as free functions over the
                            write-only base: clear, set_pixel, fill_rect,
                            hline/vline, line, rect, circle, round_rect and the
-                           filled forms, plus isqrt
+                           filled forms, plus isqrt; rect, hline and vline
+                           also in a THICK form (a thickness argument: the
+                           outline grows inward, a line down or right, t = 1
+                           is the thin one, and all of it is fill_rect)
     font.hpp               the Font concept: a font is a TYPE, so the cell is
-                           a constant and the linker drops what is unnamed
+                           a constant and the linker drops what is unnamed; a
+                           glyph row in the font's own Row type; Scaled<F, n>,
+                           the size adapter that is a type and adds no data
     font_5x7.hpp           the whole printable ASCII in a six-by-eight cell,
                            stored BY ROWS (text is drawn as runs), a hollow
                            box outside the range

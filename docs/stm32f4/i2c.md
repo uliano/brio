@@ -5,7 +5,7 @@ RM0383 Rev 4 ch. 18 are its twins: one register description, three
 manuals), the datasheets' alternate-function tables for the pads,
 RM0090 table 43 with its RM0390 and RM0383 twins for the DMA request
 mapping, and the errata's I2C items - ES0206 2.10, ES0298 2.11,
-ES0287 2.9, the same six on all three parts: "spurious bus error
+ES0287 2.9, ES0321 2.12, the same six on all four parts: "spurious bus error
 detection in controller mode", "SMBus standard not fully supported",
 "start cannot be generated after a misplaced Stop", "mismatch on the
 setup time for a repeated Start condition", "data valid time violated
@@ -26,7 +26,12 @@ instance, one pad twice, a bus with no SDA, a pad on an absent port, an
 engine off the request map, an engine on a part class whose manual was
 not read, one engine of two, and an engine whose element is not a byte.
 Bench: `test_stm32f4_i2c` on the STM32F429I-DISC1, against the STMPE811
-touch-screen controller the board carries on I2C3.
+touch-screen controller the board carries on I2C3, and on the
+32F469IDISCOVERY, against the FocalTech capacitive touch controller of
+its MB1166 display board on I2C1 - whose register map is FocalTech's
+"Application Note for FT6x06 CTPM" (v1.0, the same document bound into
+the FT6236/FT6336/FT6436 series datasheet v0.3) and whose pins and
+timings are the FT6x06 datasheet v0.1.
 
 ## What the silicon does
 
@@ -385,6 +390,30 @@ board's STMPE811 touch controller. `z` is 63 verdicts.
   microsecond-wide window makes the target deaf to a controller that
   opens its next tenure at once.
 
+`test_stm32f4_i2c` on the 32F469IDISCOVERY, I2C1 on PB8/PB9 under the
+board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
+reset through the panel's shared line PH7. `z` is 63 verdicts, and one
+letter more, by name only, wants a finger.
+
+- **The scan finds one address of 112, 0x38**, and the device says
+  what it is in its own registers: FOCALTECH_ID (0xA8) reads 0x11 - the
+  note's value, the FT6x06 family - FIRMID (0xA6) 0x13, LIB_VER
+  0x05 0x01, CIPHER (0xA3) 0x64, RELEASE_CODE_ID (0xAF) 0x01, CTRL 0x01,
+  PERIODACTIVE 0x0A; eight identity reads running agree, and a second
+  register (TH_GROUP, 0x1C) answers differently.
+- **TH_GROUP, the touch threshold, written and read back** three
+  times, put back to its boot value, and read at its reset value again
+  after the shared reset line's pulse - 300 ms before the device's
+  first report, as both datasheets say.
+- **A finger on the glass** (the letter by name): in interrupt trigger
+  mode (G_MODE 0x01, read back) the touch data block polled every 10 ms
+  while a human touched the panel - 771 of 1418 samples with one point,
+  the coordinates x 41..474 and y 123..697 in the controller's own
+  frame, which is the module's PORTRAIT one (x across the 480, y along
+  the 800), the press and contact event flags seen, touch id 0; INT
+  idles high with no finger and gave 805 falling edges over the reports,
+  a pulse per report as the note's 1.2 draws it; G_MODE put back.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -416,8 +445,10 @@ Implemented, not bench-verified (each with what would measure it):
   instrument above uses one 7-bit address and the general call, so the
   dual address and ADDMODE are written, read back and never matched on
   the wire. A controller that addresses both would close it.
-- The instances other than I2C3 (I2C1 and I2C2, compiled everywhere and
-  driven nowhere): a device on one of them, or a wire between two.
+- I2C2 (compiled everywhere and driven nowhere): I2C1 and I2C3 each
+  have a board's touch controller; the 32F469IDISCOVERY's CS43L22 audio
+  DAC on I2C2 (PH4/PH5, 100 kHz at most, its identity register 01h
+  documented) is the device that would measure the third instance.
 - A NACK on a DATA byte (`i2c_nack_data`): the device on this bus
   acknowledges every byte it is sent. A device that refuses one - an
   EEPROM mid-write, a client that runs out of buffer - would measure

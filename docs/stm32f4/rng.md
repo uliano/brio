@@ -159,7 +159,10 @@ else if (e.ready)  { queue(brio::Rng::value()); }
 
 `test_stm32f4_misc`, letter `b`, on an STM32F429 at 180 MHz with the
 PLL's Q output at 45 MHz (the 48 MHz domain is not 48 here: HCLK/16 is
-11.25 MHz, and 24.4.2's ratio is what the chapter asks, so no CECS).
+11.25 MHz, and 24.4.2's ratio is what the chapter asks, so no CECS); the
+same letter green on the STM32F469 at the same rates, whose generator
+sits on the same domain (RM0386 19.3.6) and whose DCKCFGR.CK48MSEL is
+left at its reset choice, the PLL's Q output.
 
 **Ten thousand words in 10 ms** - 1000 words a millisecond, against the
 1125 the chapter's 40 RNG_CLK periods a word would allow at this rate;

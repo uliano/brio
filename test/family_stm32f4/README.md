@@ -24,11 +24,11 @@ its own set of headers), how many WKUPx pins are bonded (one, two or
 three) and which pads they are, the PVD's thresholds in volts, the
 backup SRAM behind BRE, the flash latency field's width, and THE
 FREQUENCY LADDERS -
-which the reserve knows for four part classes and refuses to guess for
-the rest: on an F401, F410, F412, F413 or F469 header a `Clock` above
-16 MHz is a compile error, and the positive TU proves the 16 MHz reset
-rate compiles there while the ladder-dependent rates compile where the
-ladder is known.
+which the reserve knows for five part classes and refuses to guess for
+the rest: on an F401, F410, F412 or F413 header a `Clock` above 16 MHz is
+a compile error, and the positive TU proves the 16 MHz reset rate
+compiles there while the ladder-dependent rates compile where the ladder
+is known.
 
 Neither `test/CMakeLists.txt` nor `stm32f4/CMakeLists.txt` sees this
 directory: the script alone builds these files.

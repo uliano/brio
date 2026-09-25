@@ -4,8 +4,9 @@
 #
 # Positive: every test/family_stm32f4/*.cpp must COMPILE for every device
 # header the CMSIS pack ships - ALL TWENTY-THREE, from the F401 to the
-# F479. The F429, F446 and F411 are the bench parts; for the twenty
-# headers no board here carries this sweep is the only check there is,
+# F479. The F429, F446, F411 and F469 are the bench parts; for the
+# nineteen headers no board here carries this sweep is the only check
+# there is,
 # and it is what makes the reserve's presence-keyed derivations a proven
 # claim rather than a plausible one - and what proves that a part whose
 # frequency ladder the reserve does not know is REFUSED above 16 MHz

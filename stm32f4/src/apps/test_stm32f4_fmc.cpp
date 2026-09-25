@@ -9,16 +9,17 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// THE INSTRUMENT IS EIGHT MEGABYTES OF DRAM SOLDERED TO THE BOARD, which
-// is why this suite builds for the STM32F429I-DISC1 alone: everything a
-// memory controller does is either byte-exact or it is nothing, and the
-// only honest measurement of it is a march over the whole array.
+// THE INSTRUMENT IS THE DRAM SOLDERED TO THE BOARD, which is why this
+// suite builds for the two Discovery boards alone: everything a memory
+// controller does is either byte-exact or it is nothing, and the only
+// honest measurement of it is a march over the whole array.
 //
+//   STM32F429I-DISC1
 //   the device   an ISSI IS42S16400J - 64 Mbit, 4 internal banks of
 //                4096 rows x 256 columns x 16 bits, so 8 MB, on FMC
 //                SDRAM bank 2 (FMC_SDNE1 / FMC_SDCKE1) at 0xD0000000
 //   the clock    HCLK/2 = 90 MHz with the core at 180 MHz
-//   the pads     AF12 throughout, from the board's schematic:
+//   the pads     AF12 throughout, from the board's schematic (MB1075):
 //                  D0..D15   PD14 PD15 PD0 PD1 PE7 PE8 PE9 PE10 PE11
 //                            PE12 PE13 PE14 PE15 PD8 PD9 PD10
 //                  A0..A11   PF0..PF5 PF12..PF15 PG0 PG1
@@ -27,8 +28,25 @@
 //                  SDCKE1 PB5    SDNE1 PB6
 //                  NBL0 PE0      NBL1 PE1
 //
+//   32F469IDISCOVERY
+//   the device   an ISSI IS42S32400F-6BL - 128 Mbit, 4 internal banks
+//                of 4096 rows x 256 columns x 32 bits, so 16 MB, on FMC
+//                SDRAM bank 1 (FMC_SDNE0 / FMC_SDCKE0) at 0xC0000000
+//   the clock    HCLK/2 = 90 MHz with the core at 180 MHz
+//   the pads     AF12 throughout, from the board's schematic (MB1189):
+//                  D0..D15, A0..A11, BA0, BA1, SDCLK, SDNRAS, SDNCAS,
+//                            SDNWE, NBL0, NBL1 on the DISC1's pads
+//                  D16..D23  PH8..PH15
+//                  D24..D27  PI0..PI3   D28 PI6   D29 PI7
+//                  D30 PI9   D31 PI10
+//                  SDCKE0 PH2    SDNE0 PH3
+//                  NBL2 PI4      NBL3 PI5
+//                its -6 grade (IS42S32400F Rev. D1, the AC table) asks
+//                the same seven cycle counts at 90 MHz as the DISC1's
+//                device - see the timing below
+//
 // None of those pads is the display's, the gyroscope's or the touch
-// controller's, so this suite and the SPI and I2C ones share the board
+// controller's, so this suite and the SPI and I2C ones share a board
 // without touching each other's wires. The LCD is left as the boot
 // found it: its controller is another chapter.
 //
@@ -44,7 +62,7 @@
 //   b  what the driver refuses, and that a refusal writes nothing
 //   c  the initialization sequence of 37.7.3, command by command, timed
 //   d  the address and data lines, one bit at a time
-//   e  the whole 8 MB in three access widths, byte-exact
+//   e  the whole array in three access widths, byte-exact
 //   f  checkerboard and moving inversion over the whole array
 //   g  the array held over ten seconds with the refresh running
 //   h  the refresh error flag at the counter's floor, and its interrupt
@@ -57,7 +75,7 @@
 //   m  the timing floor: each SDTR field tightened until the march fails
 //   n  the NOR/PSRAM controller, registers only
 //
-// build: boards = f429zi
+// build: boards = f429zi,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -83,22 +101,44 @@ using P = Stm32f4Platform<>;
 
 // ---- the console ---------------------------------------------------------------------
 
+#if defined(STM32F469xx)
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7},
+                                .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
+#else
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7},
                                 .rx = {'A', 10, PinFunction::af7}};
-using Serial = Uart<1, console_pins>;
+constexpr uint8_t console_instance = 1;
+#endif
+using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
 
 TestBench<Serial> bench;
 
 // ---- the board's memory ----------------------------------------------------------------
 
+#if defined(STM32F469xx)
+using Sdram = FmcSdram<1>;
+constexpr uint8_t sdram_bank = 1;
+constexpr SdramWidth device_width = SdramWidth::bits32;   // the IS42S32400F
+/// RM0386 12.1: the FMC of this class has no PC Card bank and one NAND
+/// bank (bank 3), beside the four static sub-banks and two SDRAM banks.
+constexpr uint8_t expected_nand_banks = 1;
+constexpr bool expected_pc_card = false;
+#else
 using Sdram = FmcSdram<2>;
+constexpr uint8_t sdram_bank = 2;
+constexpr SdramWidth device_width = SdramWidth::bits16;   // the IS42S16400J
+/// RM0090 37.1: the whole controller - both NAND banks and the PC Card.
+constexpr uint8_t expected_nand_banks = 2;
+constexpr bool expected_pc_card = true;
+#endif
 
-/// 4096 rows (12 bits) x 256 columns (8 bits) x 4 internal banks x 16
-/// bits: the IS42S16400J's shape, and 8 MB of it.
+/// 4096 rows (12 bits) x 256 columns (8 bits) x 4 internal banks, 16 or
+/// 32 bits wide: the two devices' shape, 8 or 16 MB of it.
 constexpr SdramConfig geometry{.columns = SdramColumns::eight,
                                .rows = SdramRows::twelve,
-                               .width = SdramWidth::bits16,
+                               .width = device_width,
                                .internal_banks = SdramInternalBanks::four,
                                .cas = SdramCas::three,
                                .write_protect = false,
@@ -106,11 +146,14 @@ constexpr SdramConfig geometry{.columns = SdramColumns::eight,
                                .read_burst = true,
                                .read_pipe = SdramPipe::none};
 
-/// The device's nanoseconds at 90 MHz (11.2 ns a cycle), rounded up:
-/// tRCD 15 ns and tRP 15 ns -> 2, tRAS 42 ns -> 4, tRC 60 ns -> 6,
-/// tXSR 70 ns -> 7, tMRD 2 cycles, tWR 2 cycles (which is also the
-/// least the chapter's two inequalities allow beside these). Letter m
-/// is what says how much of this is margin.
+/// The devices' nanoseconds at 90 MHz (11.1 ns a cycle), rounded up.
+/// The IS42S16400J: tRCD 15 ns and tRP 15 ns -> 2, tRAS 42 ns -> 4,
+/// tRC 60 ns -> 6, tXSR 70 ns -> 7, tMRD 2 cycles, tWR 2 cycles (which
+/// is also the least the chapter's two inequalities allow beside
+/// these). The IS42S32400F-6 (Rev. D1's AC table): tRCD 18 and tRP 18
+/// -> 2, tRAS 42 -> 4, tRC 60 -> 6, tXSR 70 -> 7, tMRD 12 ns -> 2, tDPL
+/// 12 ns -> 2 - the same seven numbers, so one table serves both
+/// boards. Letter m is what says how much of this is margin.
 constexpr SdramTiming timing{.load_mode_to_active = 2,
                              .exit_self_refresh = 7,
                              .self_refresh = 4,
@@ -141,8 +184,11 @@ constexpr uint32_t sdram_halfwords = sdram_bytes / 2u;
 constexpr uint32_t slice_words = 16u * 1024u;    // 64 KB
 constexpr uint32_t decay_words = 256u * 1024u;   // 1 MB
 
-/// The pads, per port, exactly as the schematic wires them.
-constexpr uint32_t pb_mask = (1u << 5) | (1u << 6);
+/// The pads, per port, exactly as the schematics wire them: the sixteen
+/// low data lines, the address and command lines on both boards; the
+/// DISC1's clock enable and chip select on port B, the Discovery's on
+/// port H with its upper sixteen data lines and two byte lanes on ports
+/// H and I.
 constexpr uint32_t pc_mask = (1u << 0);
 constexpr uint32_t pd_mask =
     (1u << 0) | (1u << 1) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 14) | (1u << 15);
@@ -150,6 +196,12 @@ constexpr uint32_t pe_mask = (1u << 0) | (1u << 1) | 0xFF80u;
 constexpr uint32_t pf_mask = 0x003Fu | (1u << 11) | 0xF000u;
 constexpr uint32_t pg_mask =
     (1u << 0) | (1u << 1) | (1u << 4) | (1u << 5) | (1u << 8) | (1u << 15);
+#if defined(STM32F469xx)
+constexpr uint32_t ph_mask = (1u << 2) | (1u << 3) | 0xFF00u;
+constexpr uint32_t pi_mask = 0x00FFu | (1u << 9) | (1u << 10);
+#else
+constexpr uint32_t pb_mask = (1u << 5) | (1u << 6);
+#endif
 
 /// A parallel bus clocked at 90 MHz wants the fastest output stage the
 /// pad has; the pull-up is what the board's own reference software uses
@@ -158,12 +210,17 @@ constexpr uint32_t pg_mask =
 void claim_pads() {
     constexpr PinConfig cfg{.pull = PinPull::up, .open_drain = false,
                             .speed = PinSpeed::very_high};
-    Port<'B'>::configure_mask(pb_mask, PinMode::alternate, cfg, PinFunction::af12);
     Port<'C'>::configure_mask(pc_mask, PinMode::alternate, cfg, PinFunction::af12);
     Port<'D'>::configure_mask(pd_mask, PinMode::alternate, cfg, PinFunction::af12);
     Port<'E'>::configure_mask(pe_mask, PinMode::alternate, cfg, PinFunction::af12);
     Port<'F'>::configure_mask(pf_mask, PinMode::alternate, cfg, PinFunction::af12);
     Port<'G'>::configure_mask(pg_mask, PinMode::alternate, cfg, PinFunction::af12);
+#if defined(STM32F469xx)
+    Port<'H'>::configure_mask(ph_mask, PinMode::alternate, cfg, PinFunction::af12);
+    Port<'I'>::configure_mask(pi_mask, PinMode::alternate, cfg, PinFunction::af12);
+#else
+    Port<'B'>::configure_mask(pb_mask, PinMode::alternate, cfg, PinFunction::af12);
+#endif
 }
 
 // ---- what the registers held before this program touched them ------------------------
@@ -295,9 +352,9 @@ void ta_block() {
           Fmc::sdram_banks, " SDRAM banks, ", Fmc::nand_banks, " NAND banks, PC Card ",
           Fmc::has_pc_card ? "yes" : "no", ", vector ",
           static_cast<uint32_t>(Fmc::irq_line), crlf);
-    bench.verdict("the F429 carries the whole controller",
-                  Fmc::static_banks == 4u && Fmc::sdram_banks == 2u && Fmc::nand_banks == 2u &&
-                      Fmc::has_pc_card);
+    bench.verdict("the controller has the shape the part's manual gives it",
+                  Fmc::static_banks == 4u && Fmc::sdram_banks == 2u &&
+                      Fmc::nand_banks == expected_nand_banks && Fmc::has_pc_card == expected_pc_card);
     print(serial, "  windows: NOR/PSRAM ", hex(Fmc::static_window(1)), "..",
           hex(Fmc::static_window(4)), " NAND ", hex(Fmc::nand_window(2)), "/",
           hex(Fmc::nand_window(3)), " PC Card ", hex(Fmc::pc_card_window()), " SDRAM ",
@@ -460,13 +517,15 @@ void tc_sequence() {
     // What the sequence left in the registers.
     const uint32_t cr2 = Sdram::control_word();
     const uint32_t tr2 = Sdram::timing_word();
-    print(serial, "  after: SDCR2=", hex(cr2), " SDTR2=", hex(tr2), " SDRTR=",
-          Sdram::refresh_rate(), " SDSR=", hex(static_cast<uint32_t>(Sdram::state())), crlf);
-    bench.verdict("the geometry is in SDCR2",
+    print(serial, "  after: SDCR", sdram_bank, "=", hex(cr2), " SDTR", sdram_bank, "=", hex(tr2),
+          " SDRTR=", Sdram::refresh_rate(), " SDSR=", hex(static_cast<uint32_t>(Sdram::state())),
+          crlf);
+    bench.verdict("the geometry is in the bank's own SDCR",
                   (cr2 & (FMC_SDCR1_NC | FMC_SDCR1_NR | FMC_SDCR1_MWID | FMC_SDCR1_NB |
                           FMC_SDCR1_CAS)) ==
                       ((0u << FMC_SDCR1_NC_Pos) | (1u << FMC_SDCR1_NR_Pos) |
-                       (1u << FMC_SDCR1_MWID_Pos) | FMC_SDCR1_NB | (3u << FMC_SDCR1_CAS_Pos)));
+                       (static_cast<uint32_t>(device_width) << FMC_SDCR1_MWID_Pos) | FMC_SDCR1_NB |
+                       (3u << FMC_SDCR1_CAS_Pos)));
     bench.verdict("and the bank is not write protected", (cr2 & FMC_SDCR1_WP) == 0u);
     // The three fields SDCR2 does not own went to SDCR1.
     const uint32_t cr1 = FmcSdram<1>::control_word();
@@ -491,30 +550,34 @@ void tc_sequence() {
 // ---- d  the address and data lines -----------------------------------------------------
 
 void td_lines() {
-    volatile uint16_t* m = halfwords();
+    volatile uint32_t* m = words();
 
-    // The data lines: sixteen walking ones at one address, plus both
-    // rails. A shorted or stuck line shows here and nowhere cheaper.
+    // The data lines: a walking one at one address across the device's
+    // whole width - sixteen lines or thirty-two - plus both rails. A
+    // shorted or stuck line shows here and nowhere cheaper.
+    constexpr uint8_t data_bits = static_cast<uint8_t>(8u << static_cast<uint8_t>(device_width));
+    constexpr uint32_t all_ones = data_bits == 32u ? 0xFFFF'FFFFu : (1u << data_bits) - 1u;
     bool data_ok = true;
-    for (uint8_t b = 0; b < 16; ++b) {
-        const uint16_t v = static_cast<uint16_t>(1u << b);
+    for (uint8_t b = 0; b < data_bits; ++b) {
+        const uint32_t v = 1u << b;
         m[0] = v;
         if (m[0] != v) {
             data_ok = false;
             print(serial, "  data line ", b, ": wrote ", hex(v), " read ", hex(m[0]), crlf);
         }
     }
-    m[0] = 0x0000;
-    data_ok = data_ok && m[0] == 0x0000;
-    m[0] = 0xFFFF;
-    data_ok = data_ok && m[0] == 0xFFFF;
-    bench.verdict("sixteen data lines, each on its own", data_ok);
+    m[0] = 0u;
+    data_ok = data_ok && m[0] == 0u;
+    m[0] = all_ones;
+    data_ok = data_ok && m[0] == all_ones;
+    print(serial, "  ", data_bits, " data lines walked", crlf);
+    bench.verdict("every data line of the device's width, each on its own", data_ok);
 
     // The address lines: a unique word at every power of two, then all
     // of them read back. A missing line aliases two addresses onto each
     // other and the second write is what the first one reads.
     volatile uint32_t* w = words();
-    constexpr uint8_t top_bit = 22;   // 8 MB is 1 << 23 bytes
+    constexpr uint8_t top_bit = static_cast<uint8_t>(31 - __builtin_clz(sdram_bytes) - 1);   // the array's highest address bit
     w[0] = 0xA5A5'0000u;
     for (uint8_t b = 2; b <= top_bit; ++b) {
         w[(1u << b) / 4u] = 0xA5A5'0000u | b;
@@ -1132,7 +1195,7 @@ void tm_timing_floor() {
     bool refused = false;
     bench.verdict("the configured timings are restored and the slice is exact",
                   march_at(timing, refused) && !refused);
-    bench.verdict("and SDTR2 holds them again", Sdram::timing_word() != 0u);
+    bench.verdict("and the bank's SDTR holds them again", Sdram::timing_word() != 0u);
     const MarchResult r = check_words(slice_words, 23);
     bench.verdict("the whole slice, one more time", r.bad == 0u);
 }
@@ -1227,7 +1290,11 @@ void banner() {
 
 }   // namespace
 
+#if defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
+#else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
+#endif
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
 /// The controller's one vector. Only the SDRAM's refresh error is armed

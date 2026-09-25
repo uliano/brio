@@ -88,7 +88,8 @@ static_assert(spi_i2s_facts().known && spi_i2s_capable(1) && spi_i2s_capable(5))
 static_assert(spi_i2s_facts().known && !spi_i2s_facts().ext_blocks);
 static_assert(spi_i2s_capable(2) && spi_i2s_capable(3) && !spi_i2s_capable(1));
 #elif defined(STM32F429xx) || defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F439xx) || \
-      defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx)
+      defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
+      defined(STM32F469xx) || defined(STM32F479xx)
 static_assert(spi_i2s_facts().known && spi_i2s_facts().ext_blocks);
 static_assert(spi_i2s_capable(2) && spi_i2s_capable(3) && !spi_i2s_capable(1));
 #else
@@ -103,7 +104,7 @@ static_assert(spi_dma_placements(4, false).count == 3 && spi_dma_placement_valid
 static_assert(spi_dma_placements(5, true).count == 3 && spi_dma_placement_valid(5, true, 2, 5, 5));
 #elif defined(STM32F429xx) || defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F439xx) || \
       defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
-      defined(STM32F446xx)
+      defined(STM32F446xx) || defined(STM32F469xx) || defined(STM32F479xx)
 static_assert(spi_dma_placements(1, true).count == 2 && !spi_dma_placement_valid(1, true, 2, 2, 2));
 static_assert(spi_dma_placement_valid(1, false, 2, 0, 3) && spi_dma_placement_valid(1, false, 2, 2, 3));
 static_assert(spi_dma_placement_valid(2, true, 1, 4, 0) && spi_dma_placement_valid(2, false, 1, 3, 0));
@@ -113,7 +114,7 @@ static_assert(!spi_dma_placements(1, true).known);
 static_assert(!spi_dma_placement_valid(1, true, 2, 3, 3));
 #endif
 #if defined(SPI5_BASE) && (defined(STM32F429xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
-                           defined(STM32F439xx))
+                           defined(STM32F439xx) || defined(STM32F469xx) || defined(STM32F479xx))
 static_assert(spi_dma_placement_valid(5, true, 2, 4, 2) && spi_dma_placement_valid(5, false, 2, 3, 2));
 static_assert(spi_dma_placement_valid(6, true, 2, 5, 1) && spi_dma_placement_valid(6, false, 2, 6, 1));
 #endif

@@ -22,6 +22,7 @@ the user's own manifest, below.
 | ST STM32F429I-DISC1 | `f429zi` | [stm32f429i-disc1.md](stm32f429i-disc1.md) |
 | ST Nucleo-F446RE | `f446re` | [nucleo-f446re.md](nucleo-f446re.md) |
 | a WeAct STM32F411CE black pill | `f411ce` | [blackpill-f411ce.md](blackpill-f411ce.md) |
+| ST 32F469IDISCOVERY | `f469ni` | [stm32f469i-discovery.md](stm32f469i-discovery.md) |
 
 ## How a board joins the bench
 
@@ -69,10 +70,10 @@ WCH's OpenOCD fork through a WCH-Link; `v203c8`/`v303vc` the CH32V203
 and CH32V303 boards built by `ch32vx03/` and written by WCH's OpenOCD
 fork through a WCH-Link; `pico`/`picow`/`weact2040` the RP2040 boards
 built by `rp2040/` and written by OpenOCD through a CMSIS-DAP probe, the
-Raspberry Pi Debug Probe; `f429zi`/`f446re`/`f411ce` the STM32F4 boards
-built by `stm32f4/` and written by OpenOCD through an ST-LINK (the
-boards' own, or a standalone V3). The table of types is `BOARD_TYPES` in
-`cli/bench/common.py`.
+Raspberry Pi Debug Probe; `f429zi`/`f446re`/`f411ce`/`f469ni` the
+STM32F4 boards built by `stm32f4/` and written by OpenOCD through an
+ST-LINK (the boards' own, or a standalone V3). The table of types is
+`BOARD_TYPES` in `cli/bench/common.py`.
 
 **And on one chip the type carries the ARCHITECTURE too.** The RP2350
 runs a pair of Cortex-M33 or a pair of Hazard3 RISC-V cores over one

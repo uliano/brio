@@ -2,8 +2,8 @@
 // reserve keys the serial slice on the part class - and a class whose
 // reference manual was not read has no table. An engine there is
 // REFUSED, never run on the neighbouring class's channel: this is the
-// same cell that is correct on the F429, F446 and F411.
-// mcu: stm32f412zx stm32f401xe stm32f469xx
+// same cell that is correct on the F429, F446, F411 and F469.
+// mcu: stm32f412zx stm32f401xe
 #include "stm32f4/dma.hpp"
 #include "stm32f4/usart.hpp"
 using namespace brio;

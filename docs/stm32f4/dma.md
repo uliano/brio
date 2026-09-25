@@ -280,7 +280,9 @@ if (Stream::abort()) {                       // waits for EN to read 0
 ## Bench findings
 
 Measured on the STM32F429ZI at 180 MHz (over-drive), `test_stm32f4_dma`,
-89 verdicts.
+89 verdicts; 88 in `z` on the STM32F469NI, where the console's engines
+sit on DMA1 (USART3: stream 3 out, stream 1 in, channel 4 both - RM0386
+table 29).
 
 **The enable does not read back in the load that follows its store.** This
 is the finding that shaped a verb. A store into SxNDTR is visible to the
@@ -440,9 +442,9 @@ Driver gaps, each with its reason:
   mechanism they will use - `DmaPlacement`, `usart_dma_placement_valid`'s
   shape - is here and checked.
 - **The part classes whose manual is not on the desk** (F401, F410, F412,
-  F413/F423, F469/F479) have no request table and an engine on them is
-  refused, exactly as a clock above the reset rate is: RM0368, RM0401,
-  RM0402, RM0430 and RM0386 would each add one entry.
+  F413/F423) have no request table and an engine on them is refused,
+  exactly as a clock above the reset rate is: RM0368, RM0401, RM0402 and
+  RM0430 would each add one entry.
 - **The block-stream engines** (`util/block_stream.hpp`'s `BlockPlayer` and
   `BlockSource`, which the SAM C21 and the STM32G0 have as
   `DmaLoopEngine` / `DmaPingPongEngine`) are not built here. This

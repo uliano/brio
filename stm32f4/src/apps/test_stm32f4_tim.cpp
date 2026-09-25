@@ -40,7 +40,7 @@
 //   n  the meter tasks against the ruler
 //   o  the vectors: four lines on one timer, one line for two timers
 //
-// build: boards = f411ce,f446re
+// build: boards = f411ce,f446re,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -59,6 +59,8 @@
 
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
+#elif defined(STM32F469xx)
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000,
                              brio::HseMode::bypass>;
@@ -75,13 +77,22 @@ using P = Stm32f4Platform<>;
 //
 // FIVE PADS, none of them the board's own: a waveform pad on a
 // general-purpose channel, the advanced-control timer's channel 1 and its
-// complement, and a quadrature pair. Every one is free on both boards
+// complement, and a quadrature pair. Every one is free on the three boards
 // this suite builds for, and the AF numbers are the datasheets' (DS10314
-// table 9, DS10693 table 11 - the same rows on both).
+// table 9, DS10693 table 11, DS11189 table 12 - the same rows on all
+// three). The quadrature pair alone moves: TIM4's channels 1 and 2 are
+// PB6/PB7 on the black pill and the Nucleo, and on the 32F469IDISCOVERY
+// those two pads are the QSPI flash's select and the USB power switch's
+// over-current input, so the pair takes the timer's other pads, PD12 and
+// PD13 (MB1189: PD12 unconnected, PD13 to an unfitted resistor).
 #if defined(STM32F411xE)
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 constexpr uint32_t hse_hz = 25'000'000u;
+#elif defined(STM32F469xx)
+constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
+constexpr uint8_t console_instance = 3;
+constexpr uint32_t hse_hz = 8'000'000u;
 #else
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 constexpr uint8_t console_instance = 2;
@@ -91,8 +102,13 @@ constexpr uint32_t hse_hz = 8'000'000u;
 constexpr PinSel wave_sel{'A', 6, PinFunction::af2};     // TIM3_CH1
 constexpr PinSel adv_sel{'A', 8, PinFunction::af1};      // TIM1_CH1
 constexpr PinSel advn_sel{'B', 13, PinFunction::af1};    // TIM1_CH1N
+#if defined(STM32F469xx)
+constexpr PinSel enc_a_sel{'D', 12, PinFunction::af2};   // TIM4_CH1
+constexpr PinSel enc_b_sel{'D', 13, PinFunction::af2};   // TIM4_CH2
+#else
 constexpr PinSel enc_a_sel{'B', 6, PinFunction::af2};    // TIM4_CH1
 constexpr PinSel enc_b_sel{'B', 7, PinFunction::af2};    // TIM4_CH2
+#endif
 
 using WavePad = TimPad<wave_sel>;
 using AdvPad = TimPad<adv_sel>;
@@ -1425,6 +1441,8 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 #if defined(STM32F446xx)
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+#elif defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() { (void)Serial::isr(); }
 #else
 extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif

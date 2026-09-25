@@ -141,12 +141,13 @@ verbs on the same instance.
 
 ## Bench findings
 
-- The console runs byte-exact on the three boards at 115200 8N1:
+- The console runs byte-exact on the four boards at 115200 8N1:
   USART2 on PCLK1 45 MHz with BRR 391 (115089 baud) on the
   Nucleo-F446RE, USART1 on PCLK2 90 MHz with BRR 781 (115236) on the
   DISC1, USART1 on PCLK2 100 MHz with BRR 868 (115207) on the black
-  pill - the `ERR` verb reporting every counter zero after the
-  platform suite's 36 verdicts and the console session.
+  pill, USART3 on PCLK1 45 MHz with BRR 391 (115089) on the
+  32F469IDISCOVERY - the `ERR` verb reporting every counter zero after
+  the platform suite's 36 verdicts and the console session.
 - The error counters count: a host sweeping other baud rates against
   the Nucleo's console left 36 frame errors and 2 noise flags on the
   receiver, no hardware overrun, and the bytes DROPPED (the line
@@ -195,6 +196,7 @@ them), the DMAT/DMAR bits (the DMA chapter), the IDLE/TC/PE/CTS/LBD
 interrupt enables, `set_baud` at run time (nothing changes the LINK's
 rate with the clock standing still), `write_bulk`/`read_bulk` (compiled, the
 console writes bytes), `release()`, the instances beyond the consoles'
-(USART3, USART6, the UARTs - compiled on every header that has them,
-none driven), the frame formats beyond 8N1 (parity and two stops
-compile; a peer measures them).
+(USART6 and the UARTs - compiled on every header that has them, none
+driven; USART1, USART2 and USART3 are the four boards' consoles), the
+frame formats beyond 8N1 (parity and two stops compile; a peer measures
+them).

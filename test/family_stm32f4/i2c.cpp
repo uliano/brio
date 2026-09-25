@@ -68,7 +68,8 @@ static_assert(i2c_dma_placements(3, false).count == 2 && i2c_dma_placement_valid
 static_assert(i2c_dma_placements(3, true).count == 1);
 #elif defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
-    defined(STM32F429xx) || defined(STM32F439xx)
+    defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F469xx) || \
+    defined(STM32F479xx)
 static_assert(i2c_dma_placements(3, false).known && i2c_dma_placements(3, false).count == 1);
 static_assert(!i2c_dma_placement_valid(3, false, 1, 1, 1));
 #else
@@ -81,7 +82,7 @@ static_assert(!i2c_dma_placement_valid(1, true, 1, 6, 1));
 #if defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || \
     defined(STM32F417xx) || defined(STM32F427xx) || defined(STM32F437xx) || \
     defined(STM32F429xx) || defined(STM32F439xx) || defined(STM32F446xx) || \
-    defined(STM32F411xE)
+    defined(STM32F411xE) || defined(STM32F469xx) || defined(STM32F479xx)
 // The cells every read class shares - all of them on DMA1, this block
 // having no request on the other controller.
 static_assert(i2c_dma_placement_valid(1, false, 1, 0, 1));

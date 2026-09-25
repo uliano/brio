@@ -19,17 +19,18 @@
 // Wiring: none on the ST boards - the console is the board's own
 // ST-LINK virtual COM port: USART1 on PA9 (TX) / PA10 (RX) at AF7 on the
 // STM32F429I-DISC1 (UM1670, through SB11/SB15), USART2 on PA2 (TX) /
-// PA3 (RX) at AF7 on the Nucleo-F446RE (UM1724). On the black pill the
-// console is USART1 on PA9/PA10 too, wired to a probe's UART bridge:
-// the board's PA9 to the bridge's RX, PA10 to its TX. The AF numbers are
-// the datasheets' (DS10693 table 11, the F429's table 12, the F411's
-// table 9). Connect at 115200 8N1 and type:
+// PA3 (RX) at AF7 on the Nucleo-F446RE (UM1724), USART3 on PB10 (TX) /
+// PB11 (RX) at AF7 on the 32F469IDISCOVERY (UM1932 4.11). On the black
+// pill the console is USART1 on PA9/PA10 too, wired to a probe's UART
+// bridge: the board's PA9 to the bridge's RX, PA10 to its TX. The AF
+// numbers are the datasheets' (DS10693 table 11, the F429's table 12,
+// the F411's table 9, DS11189 table 12). Connect at 115200 8N1 and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | CLK | ERR
 //
 // Between keystrokes the CPU sleeps in WFI, woken by the SysTick tick or
 // the USART interrupt. No polling anywhere.
 //
-// build: boards = f429zi,f446re,f411ce
+// build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -58,10 +59,11 @@ using P = brio::Stm32f4Platform<>;
 // the USART's divisor divides its own bus's. HSE is the ST-LINK's 8 MHz
 // MCO in bypass on the Nucleo-F446RE, the 8 MHz crystal X3 on the
 // STM32F429I-DISC1 (UM1670 7.12.1: the MCO route needs SB18, open by
-// default), the 25 MHz crystal on the black pill.
+// default), the 8 MHz crystal X2 on the 32F469IDISCOVERY (UM1932 4.3.1),
+// the 25 MHz crystal on the black pill.
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
-#elif defined(STM32F429xx)
+#elif defined(STM32F429xx) || defined(STM32F469xx)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
 #else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000, brio::HseMode::bypass>;
@@ -81,6 +83,14 @@ constexpr brio::UartPins console_pins{
 };
 constexpr uint8_t console_instance = 1;
 constexpr const char* banner_head = "STM32F429ZI brio console (clk=";
+#elif defined(STM32F469xx)
+using Led = brio::Pin<'G', 6>;    // LD1 on the 32F469IDISCOVERY, lit when low
+constexpr brio::UartPins console_pins{
+    .tx = {'B', 10, brio::PinFunction::af7},   // USART3_TX
+    .rx = {'B', 11, brio::PinFunction::af7},   // USART3_RX
+};
+constexpr uint8_t console_instance = 3;
+constexpr const char* banner_head = "STM32F469NI brio console (clk=";
 #elif defined(STM32F411xE)
 using Led = brio::Pin<'C', 13>;   // the black pill's LED, lit when low
 constexpr brio::UartPins console_pins{
@@ -268,6 +278,8 @@ void Console::cmd_err(const Cmd&, Serial s) {
 // part decides which one the console binds.
 #if defined(STM32F446xx)
 extern "C" void USART2_IRQHandler() {
+#elif defined(STM32F469xx)
+extern "C" void USART3_IRQHandler() {
 #else
 extern "C" void USART1_IRQHandler() {
 #endif

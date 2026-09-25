@@ -320,5 +320,6 @@ Implemented but not bench-verified:
   entry instead of four; the field is written and the suite loads
   ARGB8888 tables only.
 - **The parts with the accelerator other than the one on this desk** -
-  the family fixture compiles the whole driver on each of them; no
-  second board of that class is here.
+  the family fixture compiles the whole driver on each of them; the
+  32F469IDISCOVERY carries one, and the suite that exercises it is the
+  display suite, bound to the DISC1's panel and its memory.
