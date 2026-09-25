@@ -12,7 +12,10 @@ board itself is the sheet `CH32xx0xV_EVT` of `CH32V30xSCH.pdf` in WCH's
 CH32V307EVT package, whose `SCHPCB/CH32V303VCT6-R0` holds its sources.
 Silicon identity, read over the debug port: the chip id at 0x1FFFF704
 reads `0x30300514`, `misa` `0x40901125` (I, M, A, F, C, user mode and
-WCH's own extension), the flash-capacity signature 288 KB.
+WCH's own extension), the flash-capacity signature 288 KB, and the
+unique identifier's two factory words `0x0C9BABCD` `0x74B0BC48` - its
+third reads the array's erased pattern
+([../ch32vx03/nvm.md](../ch32vx03/nvm.md)).
 
 - **Clock**: HSI 8 MHz and a PLL to 144 MHz, which is what the apps
   run. An **8 MHz crystal Y1 on OSC_IN/OSC_OUT** (pins 12 and 13 of the
@@ -44,10 +47,12 @@ WCH's own extension), the flash-capacity signature 288 KB.
 - **LEDs and the KEY**: the row **P1** carries LED1 (blue), LED2 (red)
   and KEY, and a jumper takes each to a pad. Both LEDs hang from 3.3 V
   through 1 kOhm, so a LED lights with its pad driven LOW; the KEY S2
-  pulls its pin to GND through 10 kOhm and the board gives it no
-  pull-up. Every app of the project drives **PB2** as its LED, and this
-  board's LED1 is jumpered there - PB2 being BOOT1 as well, held low by
-  the board's own 10 kOhm - with the KEY jumpered to PA0.
+  ties its pin to GND through 10 kOhm when pressed and the board gives
+  it no pull-up. Every app of the project drives **PB2** as its LED,
+  active high as on the WeAct CH32V203 board, and this board's LED1 is
+  jumpered there - PB2 being BOOT1 as well, held low by the board's own
+  10 kOhm - with the KEY jumpered to PA0; so on this board an app's
+  `LED ON` darkens the LED.
 - **Buttons**: S3 is the reset; S4 (`Download`) raises BOOT0 for WCH's
   serial boot loader.
 - **What it shipped with**: WCH's demo, which prints
@@ -56,6 +61,17 @@ WCH's own extension), the flash-capacity signature 288 KB.
 - **Option bytes** as found: RDPR `0xA5`, the flash unprotected; USER
   `0x9F`, whose top three bits choose the 256 KB + 64 KB split of code
   flash and SRAM (RM table 32-4's note).
+- **What its chip adds to the stratum**, each with its document: the
+  V4F's floating-point unit ([../ch32vx03/platform.md](../ch32vx03/platform.md)),
+  a second DMA controller ([../ch32vx03/dma.md](../ch32vx03/dma.md)),
+  the DAC on PA4/PA5, read back by the converter on the same pads
+  ([../ch32vx03/dac.md](../ch32vx03/dac.md)), the RNG
+  ([../ch32vx03/rng.md](../ch32vx03/rng.md)), four amplifiers
+  ([../ch32vx03/opa.md](../ch32vx03/opa.md)), TIM5 to TIM10
+  ([../ch32vx03/tim.md](../ch32vx03/tim.md)) and five ports
+  ([../ch32vx03/pin.md](../ch32vx03/pin.md)); what its die lacks - the
+  registers a lot of its class may have - is in
+  [../ch32vx03/README.md](../ch32vx03/README.md).
 - **Storage**: the image gets the zero-wait window less its top 4 KB,
   which are the flash medium's zone
   ([../ch32vx03/nvm.md](../ch32vx03/nvm.md)); the 224 KB tail above the

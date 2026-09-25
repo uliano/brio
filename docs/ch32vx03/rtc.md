@@ -1,15 +1,16 @@
-# RTC and the backup domain (CH32V203)
+# RTC and the backup domain (CH32V203 and CH32V303)
 
 A 32-bit counter behind a 20-bit prescaler, the registers that survive
 what the rest of the chip does not, and the one pad the block can drive.
 Documents of record: the CH32F/V20x_V30x_V31x reference manual V2.3
 (chapter 6 for the counter, chapter 4 for the backup registers and the
 tamper input, 3.2.3 and 3.4.9 for the domain's reset and its clock
-select, 3.3.3 for the low-speed oscillators, 2.4.1 for the write
-enable - chapters 4 and 6 apply to the whole family, and the one
-per-class note in either is the COUNT of backup data registers) and the
-CH32V203 datasheet V2.8 (the pin tables of 3.2 for which packages bond
-PC13, PC14 and PC15). Driver:
+select, 3.3.3 for the low-speed oscillators, 2.4.1 for the write enable -
+chapters 4 and 6 apply to the whole family, and the one per-class note
+in either is the COUNT of backup data registers), the CH32V203 datasheet
+V2.8 (the pin tables of 3.2 for which packages bond PC13, PC14 and PC15)
+and the CH32V303/305/307/317 datasheet V3.5 (the same tables, which bond
+all three on every CH32V303 package). Driver:
 [brio/ch32vx03/rtc.hpp](../../brio/ch32vx03/rtc.hpp). Reference suite:
 `test_vx03_rtc`.
 
@@ -129,41 +130,42 @@ selection is ONE-WAY: "once the RTC clock source has been selected
 RTCEN itself is forced to zero by hardware while RTCSEL is `none`.
 
 The first two choices are plain - the crystal's own rate, and an RC
-whose spread the part table states as a range. The third is not,
-because 3.4.9 says the division is 512 on some dies of the CH32V20x_D6
-and 128 on others, keyed on "the penultimate 5th digit of the lot
-number". Neither number is knowable from the part number, so the part
-table states BOTH (`device::rtc_hse_div`), `rtc_hse_divider_known`
-answers whether they agree, and a program that clocks the RTC from the
-crystal on such a die measures which one it has - against the second
-event, which is the only ruler in the room. The CH32V203RB is named
-among the parts that divide by 512 and its entries agree. One
-CH32V203C8T6 measured on this bench divides by **128**: a reload asked
-for one hertz out of 15625 Hz ticked at four, which puts RTCCLK at
-62500 Hz out of the 8 MHz crystal. That is a fact of the die's lot and
-not of the part, which is why the driver measures instead of choosing.
+whose spread the part table states as a range. The third is not, because
+3.4.9 says the division is 512 on some dies of the CH32V20x_D6 and 128
+on others, keyed on "the penultimate 5th digit of the lot number".
+Neither number is knowable from the part number, so the part table
+states BOTH (`device::rtc_hse_div`), `rtc_hse_divider_known` answers
+whether they agree, and a program that clocks the RTC from the crystal
+on such a die measures which one it has - against the second event,
+which is the only ruler in the room. The CH32V203RB is named among the
+parts that divide by 512 and every CH32V303 among those that divide by
+128, with no lot rule, so their entries agree. One CH32V203C8T6 measured
+on this bench divides by **128**: a reload asked for one hertz out of
+15625 Hz ticked at four, which puts RTCCLK at 62500 Hz out of the 8 MHz
+crystal. That is a fact of the die's lot and not of the part, which is
+why the driver measures instead of choosing.
 
 ### The low-speed crystal
 
 Per 3.3.3 and 3.4.9: LSEON starts it, LSERDY says it is stable, LSEBYP
-takes an external square wave into OSC32_IN instead and is writable
-only while LSEON is clear. After LSEON is cleared "it takes 6 cycles of
-LSE clock" for LSERDY to fall. The pads are PC14 and PC15, which only
-the three parts of the series with a port C bring out.
+takes an external square wave into OSC32_IN instead and is writable only
+while LSEON is clear. After LSEON is cleared "it takes 6 cycles of LSE
+clock" for LSERDY to fall. The pads are PC14 and PC15, which only the
+three CH32V203 parts with a port C bring out, and every CH32V303.
 
 ### The backup registers, and what wipes them
 
 Per 4.3's note under table 4-1, the COUNT is the device class's: ten
-16-bit registers on the CH32V20x_D6, forty-two on the D8. They are
-written and read like any register while the three gates are open, and
-what clears them is a BACKUP DOMAIN reset (RCC_BDCTLR's BDRST) or a
-TAMPER event - explicitly NOT the block's own RCC reset line, which
-4.2.4 says "is not affected by the RCC peripheral interface control
-BKPRST bit". Measured, that line moves NOTHING in this register file:
-the calibration and the tamper pair survive it as well, so BKPRST
-resets the backup INTERFACE and everything behind it is the domain's.
-While the tamper event flag stands, every write to a data register is
-dropped (4.3.4).
+16-bit registers on the CH32V20x_D6, forty-two on the CH32V20x_D8 and
+the CH32V30x_D8. They are written and read like any register while the
+three gates are open, and what clears them is a BACKUP DOMAIN reset
+(RCC_BDCTLR's BDRST) or a TAMPER event - explicitly NOT the block's own
+RCC reset line, which 4.2.4 says "is not affected by the RCC peripheral
+interface control BKPRST bit". Measured, that line moves NOTHING in this
+register file: the calibration and the tamper pair survive it as well,
+so BKPRST resets the backup INTERFACE and everything behind it is the
+domain's. While the tamper event flag stands, every write to a data
+register is dropped (4.3.4).
 
 ### The tamper input, and the edge the hardware remembers
 
@@ -179,14 +181,15 @@ interrupt cannot wake the core from a low-power mode.
 
 ### The three things the pad can carry
 
-Per 4.2.3 and 4.3.2, PC13 is one pad with four jobs and they exclude
-one another: an ordinary I/O; the tamper input (TPE); RTCCLK divided by
-64 (CCO), which is what a program measures the oscillator against
-before it trims; or a pulse at every alarm or every second event (ASOE
-with ASOS). The calibration register CAL[6:0] SKIPS that many RTCCLK
-pulses every 2^20, so it can slow the clock by up to 121 ppm and can
-never speed it up. CCO and ASOE are refused by the driver while the
-tamper input holds the pad. PC13 is bonded on three parts of the nine.
+Per 4.2.3 and 4.3.2, PC13 is one pad with four jobs and they exclude one
+another: an ordinary I/O; the tamper input (TPE); RTCCLK divided by 64
+(CCO), which is what a program measures the oscillator against before it
+trims; or a pulse at every alarm or every second event (ASOE with ASOS).
+The calibration register CAL[6:0] SKIPS that many RTCCLK pulses every
+2^20, so it can slow the clock by up to 121 ppm and can never speed it
+up. CCO and ASOE are refused by the driver while the tamper input holds
+the pad. PC13 is bonded on three CH32V203 parts of the nine and on all
+four CH32V303.
 
 AND THE BLOCK TAKES THE PAD WHOLE. Measured: with TPE set the pad reads
 zero and neither its own output stage nor its pull reaches the
@@ -389,11 +392,11 @@ Driver gaps, each with its reason:
   the write dropped while TEF stands - is A WIRE from another pad or a
   peer board.
 - **A power cut.** What the backup domain is FOR is surviving the loss
-  of VDD on a battery, and the bench board has no VBAT cell fitted and
-  no way to cut VDD under program control. What the suite reaches is a
-  software reset, which is a weaker claim; a Standby wake is a weaker
-  one still, and that one the power chapter measures - the domain's
-  own crystal still running the alarm that ended it
+  of VDD on a battery, and the CH32V203C8T6's board has no VBAT cell
+  fitted and no way to cut VDD under program control. What the suite
+  reaches is a software reset, which is a weaker claim; a Standby wake
+  is a weaker one still, and that one the power chapter measures - the
+  domain's own crystal still running the alarm that ended it
   ([sleep.md](sleep.md)).
 - **The calibration trimmed against a reference.** CAL is written and
   read back, and it can only SLOW the clock - so trimming it means
@@ -403,22 +406,26 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The forty-two backup registers of the CH32V20x_D8 and the
-  CH32V30x_D8.** The count folds through the part table and the
-  eleventh register is a compile error on the CH32V20x_D6;
-  `test_vx03_rtc`'s letter k writes and reads back the second block,
-  BKP_DATAR11..42, under two patterns on a part that has it. What would
-  measure it is that letter on a CH32V303VC, or a CH32V203RB on a board.
+- **The chapter on the CH32V303.** Its class carries the forty-two
+  backup registers of the CH32V20x_D8 - the count folds through the
+  part table and the eleventh register is a compile error on the
+  CH32V20x_D6 - and an HSE division of 128 with no lot rule, and
+  `test_vx03_rtc` builds for the CH32V303VC, its letter k writing and
+  reading back the second block, BKP_DATAR11..42, under two patterns.
+  What would measure the chapter there is that suite on WCH's
+  evaluation board; the CH32V203RB's forty-two, a board with that
+  part.
 - **The LSI as RTCCLK.** The third source is selected by the same verb
   and the watchdog chapter has measured that oscillator at 38.8 kHz on
-  this die; what would measure this path is a run with RTCSEL on the
-  LSI, which costs a domain reset the suite spends on the HSE instead.
+  the CH32V203C8T6; what would measure this path is a run with RTCSEL on
+  the LSI, which costs a domain reset the suite spends on the HSE
+  instead.
 - **The pad's two outputs on the pad.** CCO and the alarm/second pulse
   are written and read back in BKP_OCTLR, and refused where the chapter
   refuses them; what would measure the waveform is a timer capturing
   PC13, which is a wire between two pads of this board.
 - **The six parts with no port C**, which bond neither the 32 kHz pads
   nor the TAMPER pad: `has_lse_pins` and `has_tamper_pad` are false
-  there and the whole stratum compiles for all nine both ways the
-  hardware prologue can be built (`brio check ch32vx03`). What would
+  there and the whole stratum compiles for all thirteen parts both ways
+  the hardware prologue can be built (`brio check ch32vx03`). What would
   measure them is a board.

@@ -629,8 +629,8 @@ named.
   last subgroup ends, exactly as 12.2.4's own example draws it - which
   is why a discontinuous group wants the DMA, whose request is per
   conversion.
-- **The sampler walks the list and the attribution holds.** Three inputs
-  - a pad at the rail, VREFINT, a pad at ground - at a software pace:
+- **The sampler walks the list and the attribution holds.** Three inputs -
+  a pad at the rail, VREFINT, a pad at ground - at a software pace:
   indices 0, 1, 2 with 4095, 1488 and 10 counts (4093, 1490 and 0 on the
   CH32V303VCT6), no result carrying a code the list does not hold.
 - **A CONVERSION IS ITS SAMPLING TIME PLUS 12.5 CYCLES** (CH32V303VCT6).

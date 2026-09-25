@@ -360,14 +360,16 @@ Implemented but not bench-verified, each with what would measure it:
 - **PINRSTF as the flag of an event**, rather than as the register's
   documented reset value: the NRST pin pulled low by hand, and a supply
   cycled, with the flags read at the boot that follows. PORRSTF is the
-  flag a Standby wake leaves ([sleep.md](sleep.md)), so that half is
-  measured.
+  flag a Standby wake leaves on the CH32V203C8T6 ([sleep.md](sleep.md)),
+  so that half is measured.
 - **LPWRRSTF**: nothing raises it. The two watchdog flags are measured
   in [watchdog.md](watchdog.md), and a Standby wake - the one event
   that might have been a "low-power reset" - leaves PORRSTF instead
-  ([sleep.md](sleep.md)), so what sets this flag is still unknown; the
-  option bytes that would arm one are decoded and never written, by the
-  flash chapter's own decision ([nvm.md](nvm.md)).
+  ([sleep.md](sleep.md)), so what sets this flag is still unknown - and
+  the reference manual's V2.5 revision marks the bit Reserved
+  ([vendor/README.md](vendor/README.md)); the option bytes that would
+  arm one are decoded and never written, by the flash chapter's own
+  decision ([nvm.md](nvm.md)).
 - **The idle hook's POWER.** `idle()` is proven to sleep and wake, not
   to sleep cheaply: whether the latched event is consumed by the `wfi`
   or leaves the loop spinning is a current measurement with the probe
@@ -394,7 +396,3 @@ Implemented but not bench-verified, each with what would measure it:
   forwarding; the rate of that die's HSI is the clock suite's
   measurement ([clock.md](clock.md)), and this letter's own number
   there would want a probe that forwards as bytes come.
-- Nothing else: the timebase's `advance()`, `pause()` and `resume()`
-  now have their user and their measurement in [sleep.md](sleep.md) -
-  the idle path pauses the tick across a deep sleep and the timed site
-  hands the frozen span back.

@@ -173,12 +173,12 @@ CH32V30x_D8 for the four CH32V303. Driver:
   the one timer the two basic timers' TRGO reaches - TIM10 to
   TIM9/2/4/5, TIM2 to TIM1/8/3/4, TIM3 to TIM1/2/5/4, TIM4 to TIM1/2/3/8
   and TIM5 to TIM2/3/4/8. The driver folds the table through the
-  presence of the master and answers zero for a link a part has not got
-  - TIM5 and TIM8 on most CH32V203, TIM8 on the CH32V203RB and the two
-  128 KB CH32V303. `tim_trigger_index_for(slave, master)` reads it the
-  way a caller thinks: name the master, get the index. Every link into
-  TIM5, TIM8, TIM9 and TIM10, and every link TIM8 and TIM5 master, is
-  measured on the CH32V303VCT6.
+  presence of the master and answers zero for a link a part has not got:
+  TIM5 and TIM8 on most CH32V203, TIM8 on the CH32V203RB and the two 128
+  KB CH32V303. `tim_trigger_index_for(slave, master)` reads it the way a
+  caller thinks: name the master, get the index. Every link into TIM5,
+  TIM8, TIM9 and TIM10, and every link TIM8 and TIM5 master, is measured
+  on the CH32V303VCT6.
 - **TIM2's ITR1 is "TIM8/USB/ETH" in table 15-2, and AFIO's
   TIM2ITR1_RM is the one field that could move it.** On the CH32V20x_D6
   the field is read-only at zero, measured ([pin.md](pin.md)), so the
@@ -240,9 +240,11 @@ CH32V30x_D8 for the four CH32V303. Driver:
   on 3, CH2 on 5; TIM9's UP on 6, CH1 on 7, CH4 on 8, CH2 on 9, TRIG and
   COM on 10, CH3 on 11; TIM10's CH4 on 6, TRIG and COM on 7, CH1 on 8,
   CH3 on 9, CH2 on 10, UP on 11. The CH32V203RB's TIM5 raises its own on
-  that part's single controller (table 11-6). They are stated here as
-  the manual's data; the enables (`*_dma`) are this driver's verbs and
-  the channel is the DMA chapter's.
+  that part's single controller (table 11-6). They are rows of the
+  request table ([dma_engine.hpp](../../brio/ch32vx03/dma_engine.hpp)),
+  the enables (`*_dma`) are this driver's verbs and the channel is the
+  DMA chapter's, which measures TIM5's, TIM6's and TIM7's updates on
+  DMA2 ([dma.md](dma.md)).
 
 ## Types and verbs
 
@@ -558,9 +560,8 @@ Driver gaps, each with its reason:
   engine walking four registers per request
   ([dma.md](dma.md)). What no task here does is OWN the channel: which
   one to spend is the program's choice on a family where the channel
-  IS the request, so the arrangement stays the caller's. The CH32V303's
-  DMA2 requests above are the manual's data until a DMA2 driver serves
-  them.
+  IS the request, so the arrangement stays the caller's - on the
+  CH32V303's second controller as on the first.
 - **A break vector's policy for a break that stands.** `isr()` clears
   BIF and returns, which on a break input held at its active level is a
   livelock (measured); masking the break interrupt until the input
@@ -614,3 +615,10 @@ Implemented but not bench-verified:
 - **The TI1 XOR as a Hall interface**: used here as a wireless path from
   one channel's output to TI1, which is not what it is for. Three
   sensors on three pads are.
+- **The parts other than the CH32V203C8 and the CH32V303VC.** Which
+  timers a part has, their width and their pads fold through its own
+  table, and the whole stratum compiles for all thirteen both ways the
+  hardware prologue can be built (`brio check ch32vx03`): the
+  CH32V303RC's four advanced timers on the LQFP64's pads, and the
+  CH32V303CB's and RB's TIM1..TIM4 alone, are asserted at compile time
+  and measured on none of them. What would measure them is a board.

@@ -110,8 +110,8 @@ CH32V30x_D8 for the four CH32V303. Drivers:
 - **Two of those class notes are the silicon's, not the manual's.**
   Measured on the CH32V203C8: USART3's two bits and TIM2's
   internal-trigger bit are READ-ONLY AT ZERO - a write of 01 into
-  USART3_RM reads back 00, and a write of 1 into TIM2ITR1_RM reads back
-  0. The first settles 10.3.2.2's ambiguous note (4), "default mapping
+  USART3_RM reads back 00, and a write of 1 into TIM2ITR1_RM reads back 0.
+  The first settles 10.3.2.2's ambiguous note (4), "default mapping
   (00b) only exists for CH32V20x_D6, CH32F20x_D6", in favour of "on this
   class the default mapping is all there is"; the second contradicts its
   note outright, which gives the bit to "CH32F2x, CH32V2x ... whole
@@ -419,10 +419,14 @@ already locked from the first.
 
 Driver gaps, each with its reason:
 
-- **What the KEY on PA0 does when pressed.** The letter exists and
-  wants a finger on the board; with nobody pressing, the pad read low a
-  thousand times in a row, which is consistent with the vendor's
-  "active high, no external resistor" and proves none of it.
+- **What the KEY on PA0 does when pressed**, on either board. The
+  letter exists and wants a finger; with nobody pressing, the WeAct
+  board's pad read low a thousand times in a row, which is consistent
+  with the vendor's "active high, no external resistor" and proves none
+  of it. The evaluation board's KEY, jumpered to the same pad, ties it
+  to ground through 10 kOhm when pressed and leaves it floating
+  otherwise (its schematic), so a program reads it through the pad's
+  own pull-up.
 - **PC14/PC15 as GPIO** (10.2.11.1: the LSE's pads are port C's pins
   with LSEON clear): both boards carry a 32 kHz crystal on them and the
   backup domain's own chapter runs on it ([rtc.md](rtc.md)), so
@@ -468,9 +472,9 @@ Implemented but not bench-verified, each with what would measure it:
 - **USART3's partial column 10b on the CH32V303.** The field takes the
   code and the driver offers the column where the package bonds it; its
   TX and RX are PA13 and PA14, the debug port's own pads, and the
-  manual's V2.5 revision makes the column depend on the lot number. A
-  program that gives the debug port away, on a die of a known lot,
-  would measure it.
+  manual gives the column to some lots alone - its V2.5 revision to
+  some lots of the D8 classes alone. A program that gives the debug
+  port away, on a die of a known lot, would measure it.
 - **The two USB wake-up lines as wake-ups.** `ExtiLine<n>` reaches each
   of the four peripheral lines, and two of them are measured by the
   chapter that owns the source - the PVD's through its software trigger

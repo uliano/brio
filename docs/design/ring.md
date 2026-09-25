@@ -70,7 +70,7 @@ the one constant it reads and therefore the path a given size takes.
 | samc21 | 4 | lock-free at every size this framework declares (a 32-bit index is one access) |
 | stm32g0 | 4 | the same |
 | ch32v00x | 4 | the same - a 32-bit index is one access on this core too |
-| ch32vx03 | 4 | the same on the bigger QingKe core (`ch32vx03/platform.hpp`), whose guard is a `csrrci` on mstatus.MIE |
+| ch32vx03 | 4 | the same on the bigger QingKe cores, the V4B and the V4F alike (`ch32vx03/platform.hpp`), whose guard is a `csrrci` on mstatus.MIE |
 | rp2040 | 4 | the same - but the guard is PRIMASK, which is PER CORE, so a ring shared BETWEEN the two cores is `util/inbox.hpp`'s and not this one ([kernel.md](kernel.md), section 12) |
 | rp2350 | 4 | the same, whichever of this chip's two processor architectures the image is built for - the guard is PRIMASK on the Cortex-M33 half and `mstatus.MIE` on the Hazard3 one, and PER CORE in both spellings, so a ring shared BETWEEN the cores is `util/inbox.hpp`'s and not this one |
 | stm32f4 | 4 | the same |

@@ -169,8 +169,12 @@ fixture concept-checks both engines. The contract is about blocks and
 not about DMA, proven the hard way - the controller's natural
 streaming mode is the one the contract cannot use for a source.
 
-The third: the CH32V203's, over a controller with the same circular
-mode, where the source's refusal of it was measured a second time -
-three items of the next half already written by the time the channel's
-own handler could disable it - and `test_vx03_adc`'s letter d runs the
-relay over a live four-channel capture stream in a real kernel.
+The third: the CH32V203's and the CH32V303's (two controllers on the
+CH32V303), with the same circular mode, where the source's refusal of it
+was measured a second time - three items of the next half already
+written by the time the channel's own handler could disable it, two or
+three on the CH32V303 - and `test_vx03_adc`'s letter d runs the relay
+over a live four-channel capture stream in a real kernel on both parts.
+The CH32V303 gave the player the peripheral it was written for:
+`test_vx03_dac` plays a table into the DAC for ever from DMA2's third
+channel, paced by a timer, and finds it on the pad level by level.

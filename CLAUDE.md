@@ -562,8 +562,8 @@ brio check ch32v00x [name]      # same for the ch32v00x stratum (one part today;
                                 # whole of kernel/ and util/ through WCH's gcc 15.2)
 brio check ch32vx03 [name]      # same for the ch32vx03 stratum (the thirteen parts of the two
                                 # series under TWO ISAs - the V4B's and the V4F's -, both
-                                # HPE ways; util_all.cpp = the whole of kernel/ and util/ over the
-                                # ilp32 ABI)
+                                # HPE ways; util_all.cpp = the whole of kernel/ and util/ over
+                                # both ABIs, ilp32 and ilp32f)
 brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
 brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE F4 headers; the ladder
                                 # refused by name where no manual was read)
@@ -577,8 +577,9 @@ brio prose [paths...]           # the prose net: no dates/process words/Doxygen 
 brio gate [--against REF]       # THE BYTE-IDENTITY GATE: reference and working tree each built
                                 # with mtimes pinned and build dirs wiped, images compared per
                                 # preset, movers named (the release presets cli/gate.py's
-                                # DEFAULT_PRESETS names: every build project, two of them on the
-                                # ch32v00x - one per part - and two on the rp2350, one per architecture)
+                                # DEFAULT_PRESETS names: every build project, two on the ch32v00x -
+                                # one per part - two on the ch32vx03 - one per series - and two on
+                                # the rp2350, one per architecture)
 brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--strings: ignoring
                                 # what string literals say) - the gate for a comments-only claim
 (cd avrdx && cmake --build --preset avr128db48-release --target <app>)         # AVR release build (-Os)
@@ -749,8 +750,11 @@ ch32vx03/                the CH32V203 and CH32V303 build project, the seventh
                          DEVICE CLASS'S (three tails: the V20x_D6's of 63
                          words, the V20x_D8's of 70, the V30x_D8's of 104) and
                          the FPU enabled where the image is built with F
-                         - ld/<part>.ld and a release preset for each of the nine
-                         parts, the C8's the only debug one; the C6 preset (the
+                         - ld/<part>.ld and a release preset for each of the thirteen
+                         parts, the C8's and the VC's the only debug ones, every
+                         script stopping its flash region 4 KB short of the
+                         zero-wait window and the CH32V303RC's and VC's naming
+                         the tail above it as a region nothing is placed in; the C6 preset (the
                          F6's memories, the C8's bonding) is the 32K/10K tier's
                          LINK GUARD, because the F6 bonds neither USART1 nor the
                          board's LED; the GROUP axis, as on the CH32V00x:
@@ -823,7 +827,8 @@ test/family_stm32f4/     stm32f4 family smoke TUs + neg/, brio check stm32f4 (AL
                          TWENTY-THREE F4 headers; the reset rate everywhere, the
                          ladder-dependent rates where the reserve knows the ladder)
 test/family_ch32vx03/    ch32vx03 family smoke TUs + neg/, brio check ch32vx03
-                         (every part of the series, both HPE ways; util_all.cpp)
+                         (the thirteen parts of the two series under two ISAs,
+                         both HPE ways; util_all.cpp over both ABIs)
 test/family_rp2350/      rp2350 family smoke TUs + neg/, brio check rp2350 - the
                          one fixture that crosses TWO COMPILERS: every TU built
                          four times (Cortex-M33 and Hazard3 x the two packages),
@@ -869,8 +874,8 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
                          v006k8/v003f4 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
-                         v203c8 -> ch32vx03/the same fork/the same probe on two
-                         wires, pico/picow/weact2040 -> rp2040/OpenOCD/the Debug
+                         v203c8/v303vc -> ch32vx03/the same fork/a WCH-Link on
+                         two wires, pico/picow/weact2040 -> rp2040/OpenOCD/the Debug
                          Probe, f429zi/f446re/f411ce -> stm32f4/OpenOCD/an
                          ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
                          Raspberry Pi's OpenOCD fork/the Debug Probe: ONE BOARD
@@ -1659,17 +1664,23 @@ brio/                    the framework, one directory per stratum:
                          RV32IMAFC/ilp32f): the STM32F1's peripheral generation
                          under WCH's names, and NO vendor header - the map is
                          the stratum's own; three device classes in one reserve
-    device.hpp             the register map read off the reference manual -
-                           the blocks more than one chapter reaches, RCC and
-                           PWR among them, live here and nowhere twice;
-                           asks the build's part definition ONCE and includes
+    device.hpp             the register map read off the reference manual - the
+                           blocks more than one chapter reaches, RCC and PWR
+                           among them, live here and nowhere twice; asks the
+                           build's part definition ONCE and includes
                            parts/<part>.hpp - THE RESERVE of this family:
-                           memories, bonded pads, instances, the device class
-                           and its vector tail, as constexpr facts every
-                           driver branches on with if constexpr
-    pfic.hpp               InterruptGuard (csrrci on mstatus.MIE), the PFIC's
-                           per-line verbs, BRIO_CH32_INTERRUPT - the handler
-                           attribute the CH32VX03_HPE option decides
+                           memories (the zero-wait window, the tail above it,
+                           the whole array), bonded pads, instances, the FPU,
+                           the device class and its vector tail - the Irq table
+                           per class, irq_none where a class has not the line
+                           and a static_assert at its use - as constexpr facts
+                           every driver branches on with if constexpr
+    pfic.hpp               InterruptGuard (csrrci on mstatus.MIE - measured
+                           with no shadow, where a store into a line's own
+                           PFIC_IRER lets a pend through for three
+                           instructions), the PFIC's per-line verbs,
+                           BRIO_CH32_INTERRUPT - the handler attribute the
+                           CH32VX03_HPE option decides
     ticker.hpp             BasicTicker over the core's 64-bit STK (Ticker =
                            1000 Hz)
     delay.hpp              delay_us on the STK counter: at least, never early,
@@ -1677,7 +1688,11 @@ brio/                    the framework, one directory per stratum:
     platform.hpp           Ch32vx03Platform<TB = Ticker>: the WFE-shaped idle
                            (WFITOWFE + SEVONPEND, this core's WFI wakes only
                            for a takeable interrupt), ebreak, the .noinit
-                           breadcrumb, atomic_width 4
+                           breadcrumb, atomic_width 4 - one type for the V4B
+                           and the V4F, whose FPU the crt switches on for an
+                           image built with F and whose hardware prologue saves
+                           integer registers only, so a handler that calls out
+                           saves twenty f-registers in software
     clock.hpp              Rcc + Clock<internal|pll|crystal|external, hz,
                            xtal_hz> + Rates<>/DynamicClock<Rates<...>,
                            Users...>: PARKS ON THE HSI before touching the PLL
@@ -1689,8 +1704,9 @@ brio/                    the framework, one directory per stratum:
                            arithmetic a rebased user uses, the USB and ADC
                            dividers part of the tree, the LSI, the clock
                            security system as the NMI's body, the ready
-                           interrupts, and Mco over the pad two packages have
-                           not got
+                           interrupts, Mco over the pad two packages have not
+                           got, and ADC_DUTY_SEL - the CH32V303's lot bit - as
+                           adc_duty_75(), a verb that asks the die
     pin.hpp                Pin<'A',5> / Port<'A'>: the F1's two-bit MODE over
                            two registers, the pull in the output register, the
                            bonding from the part table, the whole-port verbs
@@ -1778,27 +1794,27 @@ brio/                    the framework, one directory per stratum:
                            ebreak lands on the breakpoint vector and not the
                            exception one
     tim.hpp                the timers (ch. 14, 15, 16): Tim<n> over the F1's
-                           blocks under WCH's names, every timer the part
-                           HAS - TIM1 and TIM2..TIM4 everywhere, a 32-bit TIM5
-                           on the CH32V203RB, and on the CH32V303RC and VC the
-                           whole set: TIM8, TIM9 and TIM10 as advanced timers
-                           with TIM1's shape and four unshared vectors each, a
+                           blocks under WCH's names, every timer the part HAS -
+                           TIM1 and TIM2..TIM4 everywhere, a 32-bit TIM5 on the
+                           CH32V203RB, and on the CH32V303RC and VC the whole
+                           set: TIM8, TIM9 and TIM10 as advanced timers with
+                           TIM1's shape and four unshared vectors each, a
                            sixteen-bit TIM5, TIM6 and TIM7 as BASIC timers on
                            which a channel verb does not compile - the time
-                           base with its two shadow registers, the channels
-                           in both faces (CCyS writable only with the channel
-                           off), the slave controller and the master TRGO,
-                           the internal trigger table folded through what the
-                           part has, the repetition counter, complementary
-                           outputs, dead time and break of the advanced
-                           timers (a break input held at its level re-raises
-                           its flag at once: the program's handler masks it),
-                           the DMA burst engine with the class's DMA2
-                           requests as data, the rc_w0 flags, and the
-                           CH32V30x_D8's dual-edge capture as a verb that
-                           asks the die (a lot's register, absent on the
-                           bench part) + TimPad from afio.hpp's remap columns
-                           and the nine tasks (TimPwm/TimPairPwm,
+                           base with its two shadow registers, the channels in
+                           both faces (CCyS writable only with the channel
+                           off), the slave controller and the master TRGO, the
+                           internal trigger table folded through what the part
+                           has, the repetition counter, complementary outputs,
+                           dead time and break of the advanced timers (a break
+                           input held at its level re-raises its flag at once:
+                           the program's handler masks it), the DMA burst
+                           engine and the requests the DMA chapter serves on
+                           either controller, the rc_w0 flags, and the
+                           CH32V30x_D8's dual-edge capture as a verb that asks
+                           the die (a lot's register, absent on the bench part)
+                           + TimPad from afio.hpp's remap columns and the nine
+                           tasks (TimPwm/TimPairPwm,
                            TimPeriodMeter/TimIntervalMeter, TimEventCounter/
                            TimGatedCounter, TimPeriodicTick, TimOnePulse,
                            TimEncoder)
@@ -1931,39 +1947,49 @@ brio/                    the framework, one directory per stratum:
                            Flash, the engine - TWO programming methods (a
                            half-word behind PG, a whole 256-byte page behind
                            FTPG) and FOUR erase grains (the page, the 4 KB
-                           sector that is also the write-protection unit, a
-                           32 KB block, the chip behind a policy argument no
-                           suite passes), three locks each wanting its own key
-                           pair with a wrong one holding until the next system
-                           reset and raising no bus error (measured), AN ERASED
-                           PATTERN THAT IS NOT ALL ONES (0xE339E339) over cells
-                           that take pass after pass between erases, the
-                           enhanced read mode that would fail an erase in
-                           silence and that does not engage on this class, the
-                           status flags and the one error this family carries,
-                           the interrupt - and THE RATE AS PART OF THE CONTRACT:
-                           the access clock may not exceed 60 MHz and SCKMOD
-                           already halves the system clock, so above 120 MHz an
-                           erase or a program wants HCLK divided around it,
-                           which the engine REFUSES instead of doing behind its
-                           caller's back, at compile time under a static Clock
-                           and with a code under a dynamic one + FlashOptions
-                           and FlashOptionArea, every option byte decoded
-                           READ-ONLY with RDP written by no verb, and DeviceUid
-                           / flash_size_kbytes
+                           sector that is also the write-protection unit, a 32
+                           KB block, the chip behind a policy argument no suite
+                           passes), three locks each wanting its own key pair
+                           with a wrong one holding until the next system reset
+                           and raising no bus error (measured), AN ERASED
+                           PATTERN THAT IS NOT ALL ONES (0xE339E339) over
+                           window cells that take pass after pass between
+                           erases (a tail cell does not), the enhanced read
+                           mode that would fail an erase in silence and that
+                           engages on neither part, the status flags and the
+                           one error this family carries, the interrupt - and
+                           THE RATE AS PART OF THE CONTRACT: the access clock
+                           may not exceed 60 MHz and SCKMOD already halves the
+                           system clock, so above 120 MHz an erase or a program
+                           wants HCLK divided around it, which the engine
+                           REFUSES instead of doing behind its caller's back,
+                           at compile time under a static Clock and with a code
+                           under a dynamic one; THE ARRAY AS A WINDOW AND A
+                           TAIL - the zero-wait window the image runs from and
+                           the non-zero-wait tail above it, (224K - window) on
+                           every CH32V203 and (480K - window) on the CH32V303RC
+                           and VC, which both methods write (measured) and
+                           read_tail() reads under the same rate contract at
+                           four times a window word's cost + FlashOptions and
+                           FlashOptionArea, every option byte decoded READ-ONLY
+                           - the memory split among them, FLASH_OBR holding the
+                           USER byte whole at [9:2] - with RDP written by no
+                           verb, and DeviceUid / flash_size_kbytes, the largest
+                           window the split can select
     nvm_flash.hpp          MainFlashPartition (the LAST 4 KB of every part's
-                           array - sixteen pages, one write-protection unit -
-                           with all nine linker scripts stopping that far short)
-                           + MainFlash<Clock>, the FlashMedia over it with THE
-                           PAGE AS THE CELL (256 B) and THE CLOCK IN THE
-                           MEDIUM'S TYPE, because the contract's program() and
-                           erase() take an address and nothing else while an
-                           erase above 120 MHz is illegal; no heap and no
-                           journal stand on it here, by decision - and the
-                           journal could not without being taught an erased
-                           pattern that is not 0xFF. A write is a WAIT and not a
-                           stall: the core goes on running out of the array
-                           while the engine works
+                           zero-wait WINDOW - sixteen pages, one
+                           write-protection unit - with all thirteen linker
+                           scripts stopping that far short, and the tail above
+                           it nobody's) + MainFlash<Clock>, the FlashMedia over
+                           it with THE PAGE AS THE CELL (256 B) and THE CLOCK
+                           IN THE MEDIUM'S TYPE, because the contract's
+                           program() and erase() take an address and nothing
+                           else while an erase above 120 MHz is illegal; no
+                           heap and no journal stand on it here, by decision -
+                           and the journal could not without being taught an
+                           erased pattern that is not 0xFF. A write is a WAIT
+                           and not a stall: the core goes on running out of the
+                           array while the engine works
     crc.hpp                CRC (ch. 5): Crc, a monostate over three registers -
                            the Ethernet polynomial wired in (no polynomial, no
                            initial value, no reversal: the function IS
@@ -1977,38 +2003,57 @@ brio/                    the framework, one directory per stratum:
                            STM32F4 stratum spells it, and util/crc.hpp's
                            crc32_ethernet* is what the silicon is judged
                            against. No interrupt, no DMA row, no per-part fact
+    rng.hpp                RNG (ch. 29): Rng, a monostate on the CH32V303RC and
+                           VC alone (RngUnit<1>, so naming it on another part
+                           is the compile error) - three registers and one
+                           vector, the FIPS first-word discard and the
+                           continuous comparison inside read() (a restart
+                           discarding TWO words, the first after an enable
+                           being zero on the silicon), the seed error's
+                           recovery as a sequence, the two latched flags
+                           cleared by a zero because a one sets neither, no
+                           reset line - and SYSCLK, not the PLL48CLK the
+                           chapter names, running the block (measured), so no
+                           clock is refused. THE WORDS ARE NOT RANDOM BITS (900
+                           to 3350 distinct values in 4096, the FIPS poker and
+                           runs tests failing, neither monitor firing): the
+                           driver hands them out unconditioned and says so
     rtc.hpp                the real-time clock and the backup domain (ch. 6, 4,
                            with 3.4.9's clock select and 2.4.1's write enable):
                            RtcDomain (PWR_CTLR's DBP read back, the whole of
                            RCC_BDCTLR - the LSE with its bypass, RTCSEL one-way
-                           with BDRST the way back, RTCEN - and the HSE division
-                           that is 512 OR 128 BY LOT NUMBER, so the part table
-                           states the pair and a program measures which it has),
-                           Rtc (a NUMBER and not a calendar: a 32-bit counter
-                           behind a 20-bit prescaler, the CNF write window and
-                           the RSF read synchronization on every access, a
-                           prescaler reload and an alarm that cannot be read
-                           back, the counter's two halves read against a carry
-                           the chapter is silent about - and which the bus can
-                           answer with a copy up to three ticks stale - the
-                           second, alarm and overflow on one vector and the
-                           ALARM AGAIN on EXTI line 17, which fires with this
-                           block's own interrupt enable clear) and Bkp (the data
-                           registers, ten on this device class and forty-two on
-                           the other, wiped by a domain reset or a tamper and
-                           NOT by the block's own reset line, which moves
+                           with BDRST the way back, RTCEN - and the HSE
+                           division that is 512 OR 128 BY LOT NUMBER on the
+                           CH32V20x_D6 - 512 on the CH32V203RB, 128 on every
+                           CH32V303 - so the part table states the pair and a
+                           program measures which it has), Rtc (a NUMBER and
+                           not a calendar: a 32-bit counter behind a 20-bit
+                           prescaler, the CNF write window and the RSF read
+                           synchronization on every access, a prescaler reload
+                           and an alarm that cannot be read back, the counter's
+                           two halves read against a carry the chapter is
+                           silent about - and which the bus can answer with a
+                           copy up to three ticks stale - the second, alarm and
+                           overflow on one vector and the ALARM AGAIN on EXTI
+                           line 17, which fires with this block's own interrupt
+                           enable clear) and Bkp (the data registers, ten on
+                           the CH32V20x_D6 and forty-two on the CH32V20x_D8 and
+                           the CH32V30x_D8, wiped by a domain reset or a tamper
+                           and NOT by the block's own reset line, which moves
                            nothing at all; the tamper input that REMEMBERS an
                            edge it was not watching for and that no pad of this
-                           board can raise; and the three things PC13 can carry)
+                           board can raise; and the three things PC13 can
+                           carry)
     bus_activity.hpp       the count of BUS MASTERS OTHER THAN THE CORE, kept
                            by the drivers that make one work and read by the
                            idle path and by the sleep sites: in a sleep of any
-                           depth here no other master gets a cycle (measured),
-                           so a DMA channel while EN is up and the USB
-                           controller from its pull-up to its detach each hold
-                           one count, idle() sleeps only at zero and a site
-                           refuses to arm above it - the old rule "a program
-                           with USB never idles" as a mechanism
+                           depth here no other master gets a cycle (measured on
+                           both parts, both of the CH32V303's DMA controllers
+                           included), so a DMA channel while EN is up and the
+                           USB controller from its pull-up to its detach each
+                           hold one count, idle() sleeps only at zero and a
+                           site refuses to arm above it - the old rule "a
+                           program with USB never idles" as a mechanism
     pwr.hpp                the power controller (ch. 2): Pwr, the three modes
                            behind SLEEPDEEP and PDDS (the core's bit and this
                            block's, written and read as ONE PAIR), the Stop

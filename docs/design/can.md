@@ -104,9 +104,9 @@ verb - and a shared report needs a shared type before the AO does.
 - **The transmit outcome.** A bxCAN's mailbox flags (completed, sent and
   acknowledged, arbitration lost, error) and an M_CAN's transmit event
   (completed, or completed in spite of a cancellation, with the marker
-  the program gave the frame). The two bxCAN strata carry the same
-  struct; it becomes the vocabulary's if a third controller reports the
-  same four facts.
+  the program gave the frame). The bxCAN stratum carries it as
+  `CanTxResult`; it becomes the vocabulary's if another controller
+  reports the same four facts.
 - **The modes.** Loopback, silent, the M_CAN's restricted operation and
   its external loopback: instruments of each chapter's suite.
 
@@ -114,7 +114,7 @@ verb - and a shared report needs a shared type before the AO does.
 
 Every other shared bus in brio is served by `BusMaster`: one request,
 one reply. CAN does not fit that shape, for three reasons measured on
-the STM32G0's FDCAN and confirmed by the bxCAN strata:
+the STM32G0's FDCAN and confirmed by the STM32F4's bxCAN:
 
 - **Completion is not a reply.** A transmission completes, is cancelled,
   completes in spite of the cancellation, or loses arbitration and is
@@ -144,4 +144,5 @@ state is read.
 | stratum | realization | beyond the vocabulary |
 |---|---|---|
 | stm32g0 | `Fdcan` (`stm32g0/fdcan.hpp`) over the M_CAN | `FdcanFrame`, the FD superset (sixty-four bytes, FD, BRS, ESI, the marker, the non-matching flag) with its own codecs; `FdcanBitTiming` in REGISTER units for both phases and `fdcan_bit_timing_for` / `fdcan_data_timing_for` under the smallest-prescaler rule; the error state as three flags of `FdcanStatus` and `FdcanErrorCounters` with the receive-passive flag and the logging counter beside the two; `FdcanError` is `CanError` under the chapter's name ([../stm32g0/fdcan.md](../stm32g0/fdcan.md)) |
+| ch32vx03 | none | the bxCAN of the CH32V203 and the CH32V303 - the STM32F4's IP under WCH's names, one controller on each part - waits for the pass that brings every platform's CAN onto a bus with a second transceiver ([the target's page](../ch32vx03/README.md)) |
 | stm32f4 | `Can<1|2|3>` (`stm32f4/can.hpp`) over the bxCAN | `CanFrame` and `CanTiming` as the vocabulary has them; `can_timing_limits` from RM0390 30.9.7 (a ten-bit divider, four-, three- and two-bit segments, three to twenty-five quanta) bound into `can_timing_for` / `can_timing_valid`; the error state as `error_warning()` / `error_passive()` / `bus_off()` and the counters as `tec()` / `rec()`, with `error_state()` and `error_counters()` folding them into the vocabulary's types; `CanTxResult` the mailbox's four flags; the filter banks, the two FIFOs, the three modes ([../stm32f4/can.md](../stm32f4/can.md)) |

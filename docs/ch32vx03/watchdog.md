@@ -61,6 +61,12 @@ suite: `test_vx03_watchdog`.
   early computes its refresh interval from the FAST corner. There is no
   window register in this chapter: the independent watchdog has one
   edge and not two.
+- **It is no way out of a Stop.** On the CH32V203C8T6 it does not
+  count through one ([sleep.md](sleep.md)), and a program that sleeps
+  that deep arms the RTC's alarm as its way back, which is what the
+  timed sleep site does. Whether it ends a Standby, where RM 2.3.4
+  lists its reset among the exits, is not measured on either part
+  (below).
 
 ### The window watchdog
 
@@ -271,9 +277,8 @@ Driver gaps, each with its reason:
   running free, so none of them depends on which way they stand.
 - **The window watchdog through a low-power mode.** Its counter runs on
   the peripheral bus clock, which a Stop takes away, and what it does
-  across one is untested; the independent one IS measured there on the
-  CH32V203C8T6 and the answer is in [sleep.md](sleep.md) - it does NOT
-  count through a Stop, so it is no way back out of one.
+  across one is untested; the independent one is measured there, and
+  is no way back out of a Stop (above).
 
 Implemented but not bench-verified:
 
@@ -286,6 +291,14 @@ Implemented but not bench-verified:
   the reset letter arms one setting. The others would cost one reset
   each to measure, and what they would add is the same arithmetic at
   another rate.
+- **The independent watchdog through a Standby**: RM 2.3.4 lists its
+  reset among Standby's exits. One program on the CH32V303VCT6 that
+  armed it for some 200 ms and entered Standby with the debug probe
+  attached never answered its console again - an observation and not a
+  measurement, because nothing in that program could tell a watchdog
+  that never fired from one that did. What would measure it: a Standby
+  entered with the RTC's alarm armed as the way back and the watchdog's
+  reload shorter than the alarm, the boot reading which flag stands.
 - **`force_reset()` on either block**: both are one store away from what
   the by-name letters already prove, and neither is called by a suite -
   a program that wants a deliberate reset has `Reset::software()`

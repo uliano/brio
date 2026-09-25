@@ -1,10 +1,10 @@
-# CRC (CH32V203)
+# CRC (CH32V203 and CH32V303)
 
 A hardware CRC-32 with one polynomial wired in, three registers and no
 options at all. Documents of record: the CH32F/V20x_V30x_V31x reference
 manual V2.3, chapter 5 whole - which applies to the entire family and
-carries no per-class note, and which the datasheet's table 2-1 does not
-make a per-part fact either. Driver:
+carries no per-class note, and which neither datasheet's resource table
+makes a per-part fact either. Driver:
 [brio/ch32vx03/crc.hpp](../../brio/ch32vx03/crc.hpp), over the software
 twin in [brio/util/crc.hpp](../../brio/util/crc.hpp). Reference suite:
 `test_vx03_misc`.
@@ -60,12 +60,12 @@ WHETHER THE RESET LANDS INSTANTLY IS WHERE THIS BLOCK AND ITS RELATIVE
 DIFFER. The same design on an STM32F4 was measured taking a few cycles -
 a read of the data register in the next instruction returning the OLD
 running value, and a word written in the next instruction swallowed -
-and neither manual says so. Measured here: it lands before the next
-instruction can look. `Crc::reset()` waits for the initial value to
-appear and RETURNS how many extra reads that took, which is zero every
-time on this silicon, and a word stored in the very next instruction is
-TAKEN and not swallowed - so a checksum may be started and fed with
-nothing in between.
+and neither manual says so. Measured on the CH32V203C8T6: it lands
+before the next instruction can look. `Crc::reset()` waits for the
+initial value to appear and RETURNS how many extra reads that took,
+which is zero every time on that silicon, and a word stored in the very
+next instruction is TAKEN and not swallowed - so a checksum may be
+started and fed with nothing in between.
 
 ### The scratch register is not part of the checksum
 
@@ -102,12 +102,12 @@ block's and the gate is what stands between the bus and it.
 ### No interrupt, no DMA request, no event
 
 Per the manual, the chapter has no interrupt register; the vector table
-has no CRC line; and tables 11-5 and 11-6 map no DMA request to this
-block. A bulk checksum is a loop of stores and nothing else. What a DMA
-channel CAN do is memory-to-memory into CRC_DATAR with the destination
-not incremented - that is the DMA chapter's arrangement and
-[ch32vx03/dma.hpp](../../brio/ch32vx03/dma.hpp) already has every verb
-it needs, so nothing is added here for it.
+has no CRC line; and no table of 11.2.3 maps a DMA request to this
+block, on either series. A bulk checksum is a loop of stores and nothing
+else. What a DMA channel CAN do is memory-to-memory into CRC_DATAR with
+the destination not incremented - that is the DMA chapter's arrangement
+and [ch32vx03/dma.hpp](../../brio/ch32vx03/dma.hpp) already has every
+verb it needs, so nothing is added here for it.
 
 ### No ownership
 
@@ -235,8 +235,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The eight parts other than the CH32V203C8.** The block is not a
-  per-part fact and this file asks the part table nothing, and the
-  whole stratum compiles for all nine both ways the hardware prologue
-  can be built (`brio check ch32vx03`). What would measure them is a
+- **The twelve parts other than the CH32V203C8**, the CH32V303VC among
+  them. The block is not a per-part fact and this file asks the part
+  table nothing, and the whole stratum compiles for all thirteen both
+  ways the hardware prologue can be built (`brio check ch32vx03`);
+  `test_vx03_misc` builds for the CH32V303VC too. What would measure
+  them is a board - for the CH32V303VC, that suite on WCH's evaluation
   board.

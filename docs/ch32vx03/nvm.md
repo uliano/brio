@@ -661,12 +661,13 @@ Driver gaps, each with its reason:
 - **The system boot loader** at 0x1FFF 8000 and the vendor
   configuration word 32.1's note names: 28 KB of WCH's own, locked
   before delivery, and nothing in this project calls it.
-- **Code or data placed in the tail by the build.** Every linker script
-  names the tail as nobody's region, so what lives there is what a
-  program writes with the engine's verbs. A word of the tail costs four
-  times a word of the window to read (measured), so a section placed
-  there is a decision that trades speed for room, born with the first
-  program that needs the room.
+- **Code or data placed in the tail by the build.** The CH32V303RC's and
+  VC's linker scripts name the tail as a region nothing is placed in,
+  and the CH32V203's do not name it at all, so what lives there is what
+  a program writes with the engine's verbs. A word of the tail costs
+  four times a word of the window to read (measured), so a section
+  placed there is a decision that trades speed for room, born with the
+  first program that needs the room.
 
 Implemented but not bench-verified, each with what would measure it:
 

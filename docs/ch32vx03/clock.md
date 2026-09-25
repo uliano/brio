@@ -57,9 +57,12 @@ suite: `test_vx03_clock`.
 - **The ADC has a prescaler of its own** off PCLK2 (/2 /4 /6 /8) and a
   rating of 14 MHz, so a PCLK2 above eight times that has no code that
   keeps the converter in range. The duty-cycle bit beside the field
-  (ADCDUTY) belongs to every class; the second one (ADC_DUTY_SEL) is
-  the CH32V30x_D8's alone and even there only by lot number, and is not
-  implemented.
+  (ADCDUTY) belongs to every class; the second one (ADC_DUTY_SEL, a
+  75 % duty) is the CH32V30x_D8's alone and even there only by lot
+  number, so its verb writes the bit and READS IT BACK, answering what
+  the die kept - nothing, on the CH32V303VCT6 measured, where ADCDUTY
+  takes its write and moves neither a reading nor a conversion's length
+  ([adc.md](adc.md)).
 - **The USB controllers want exactly 48 MHz** from the PLL through
   USBPRE, and 3.4.2 asks for the divider to be written BEFORE the USB
   clock gates are opened. The codes are /1, /2 and /3 on the
@@ -143,13 +146,14 @@ the RCC still holds the old prescalers when the fan-out runs.
 `Rcc` is the resource under both. The roots: `hsi_enable`/`hsi_start`/
 `hsi_stop`/`hsi_ready`/`hsi_trim`/`hsi_calibration`, `hse_enable`/
 `hse_start`/`hse_stop`/`hse_ready`/`hse_in_low_power`, `lsi_enable`/
-`lsi_start`/`lsi_stop`/`lsi_ready` - the `enable` verb returning at
-once and the `start` verb waiting a bounded time, which is what lets a
+`lsi_start`/`lsi_stop`/`lsi_ready` - the `enable` verb returning at once
+and the `start` verb waiting a bounded time, which is what lets a
 program time a ramp. The PLL: `pll_start(from_hse, divided, mul)`,
 `pll_stop`, `pll_ready`, `pll_from_hse`, `pll_input_divided`,
 `pll_multiplier`. The switch and the dividers: `sysclk_select`,
 `sysclk_status`, `prescalers`, `hpre_code`, `ppre1_code`, `ppre2_code`,
-`adc_prescaler`, `adc_duty_extended`, `eth_prescaler`,
+`adc_prescaler`, `adc_duty_extended`, `adc_duty_75` (the lot's bit: on
+every other class it writes nothing and answers false), `eth_prescaler`,
 `usb_prescaler`. The security system: `clock_monitor`, `clock_failed`
 and `css_isr()`, the non-maskable interrupt's body - which clears the
 flag and says whether the CSS was the reason, leaving what to do about
@@ -319,10 +323,6 @@ Driver gaps, each with its reason:
   the D8C classes of other families; the one field of it a part of this
   stratum could use is the USBFS clock source, which belongs with that
   block.
-- **ADC_DUTY_SEL**, the second duty-cycle bit: the CH32V30x_D8's by lot
-  number (3.4.2's note), so whether a given CH32V303 has it is a
-  measurement of that die; it arrives with the converter chapter's
-  pass over the CH32V303.
 - **The oscillator calibration registers of table 3-2** (HSE_CAL_CTRL,
   the five LSI32K ones): the table's own note applies them to the
   CH32V20x_D8W, which is another family.
@@ -357,12 +357,17 @@ Implemented but not bench-verified:
 - **The USB divider at 48 and 96 MHz.** The /3 code is what the USB
   console runs on; the other two are arithmetic this suite reads back
   but no enumeration has used.
-- **`hse_in_low_power()` and `adc_duty_extended()`**: one is the
-  CH32V203RB's bit; the other writes the duty-cycle bit beside the
-  converter's prescaler, which no letter of that chapter's suite turns
-  on ([adc.md](adc.md)) - what would measure it is a conversion timed
-  with the bit both ways. Both are written and read back nowhere but a
-  family compile.
+- **`hse_in_low_power()`**, the CH32V203RB's bit: written and read
+  back nowhere but a family compile; what would measure it is that
+  part on a board.
+- **`adc_duty_extended()` on the CH32V203.** The converter chapter's
+  suite times a conversion with the bit both ways on the CH32V303VCT6
+  and finds nothing moved ([adc.md](adc.md)); the same timing on a
+  CH32V203 would measure it there.
+- **ADC_DUTY_SEL on a die that has it.** `adc_duty_75()` asks the die,
+  and the CH32V303VCT6 answered no; what would measure the 75 % duty is
+  a CH32V303 of a lot whose penultimate sixth digit is not zero, under
+  the converter suite's letter `o`.
 - **Every part but the CH32V203C8 and the CH32V303VC.** The whole
   chapter compiles for all thirteen both ways the hardware prologue can
   be built (`brio check ch32vx03`), including the CH32V203RB's own PLL
