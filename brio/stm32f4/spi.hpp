@@ -1069,7 +1069,12 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * a taste: the SCK pad's own feedback delay is what decides whether the
  * last received bit is captured, and the errata's table gives the APB
  * ceiling per speed class. `sck_speed()` moves it for a program that
- * wants to weigh the effect.
+ * wants to weigh the effect. `mosi_speed()` moves the DATA pad, which
+ * no erratum asks for and a bus of wires does: at PCLK2/8 on a
+ * breadboard the device took nothing of an interrupt-pumped request
+ * until SCK or MOSI was slowed to `medium` (docs/stm32f4/spi.md), and
+ * the pad a program can afford to slow is the one whose edge is not a
+ * correctness parameter of the silicon.
  */
 template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine>
@@ -1185,7 +1190,7 @@ public:
         // park undriven on the bus, and a client watching SCK cannot tell
         // a glitch from an edge. SPE is raised last.
         apply_sck_pad();
-        MosiPin::function(pins.mosi.function, {.speed = PinSpeed::very_high});
+        apply_mosi_pad();
         if constexpr (pins.miso.valid()) {
             MisoPin::function(pins.miso.function, {.pull = PinPull::up});
         }
@@ -1251,6 +1256,15 @@ public:
         apply_sck_pad();
     }
     static PinSpeed sck_speed() { return sck_speed_; }
+    /// The MOSI pad's slew class, `very_high` from init(). No erratum
+    /// names it; a bus of long wires does (the class comment), and it is
+    /// the pad a program slows first because ES0206 2.12.4 has nothing
+    /// to say about it.
+    static void mosi_speed(PinSpeed s) {
+        mosi_speed_ = s;
+        apply_mosi_pad();
+    }
+    static PinSpeed mosi_speed() { return mosi_speed_; }
     /// The APB ceiling this pad speed buys, from the errata's table - and
     /// whether the bus is running under it right now.
     static uint32_t errata_apb_ceiling_hz() { return spi_errata_apb_ceiling_hz(sck_speed_); }
@@ -1559,6 +1573,9 @@ private:
     static void apply_sck_pad() {
         SckPin::function(pins.sck.function, {.speed = sck_speed_});
     }
+    static void apply_mosi_pad() {
+        MosiPin::function(pins.mosi.function, {.speed = mosi_speed_});
+    }
 
     /// A slower rate is a LARGER code, so the ceiling clamps from below.
     static SpiClock clamp(SpiClock c) {
@@ -1646,6 +1663,7 @@ private:
     static inline std::optional<SpiClock> ceiling_{};
     static inline DelayRate cs_rate_{};
     static inline PinSpeed sck_speed_ = PinSpeed::very_high;
+    static inline PinSpeed mosi_speed_ = PinSpeed::very_high;
 };
 
 // =============================================================================

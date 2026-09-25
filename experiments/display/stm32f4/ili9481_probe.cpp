@@ -1828,9 +1828,9 @@ void tm_levers() {
     };
     Host::sck_speed(PinSpeed::very_high);
     // 1. the MOSI pad slowed to medium, SCK still very_high
-    Pin<'A', 7>::function(PinFunction::af5, {.speed = PinSpeed::medium});
+    Host::mosi_speed(PinSpeed::medium);
     print(serial, "  MOSI pad medium, SCK very_high, pattern data: ", block(0xA100, 0, false), " bytes wrong", crlf);
-    Pin<'A', 7>::function(PinFunction::af5, {.speed = PinSpeed::very_high});
+    Host::mosi_speed(PinSpeed::very_high);
     // 2. the data pattern, MOSI back at very_high
     print(serial, "  MOSI very_high, all 0x00: ", block(0, 0x00, true), " bytes wrong", crlf);
     print(serial, "  MOSI very_high, all 0xFC: ", block(0, 0xFC, true), " bytes wrong", crlf);
@@ -1838,9 +1838,9 @@ void tm_levers() {
     print(serial, "  MOSI very_high, the pattern: ", block(0xA200, 0, false), " bytes wrong", crlf);
     // 3. both pads medium
     Host::sck_speed(PinSpeed::medium);
-    Pin<'A', 7>::function(PinFunction::af5, {.speed = PinSpeed::medium});
+    Host::mosi_speed(PinSpeed::medium);
     print(serial, "  MOSI medium, SCK medium, the pattern: ", block(0xA300, 0, false), " bytes wrong", crlf);
-    Pin<'A', 7>::function(PinFunction::af5, {.speed = PinSpeed::very_high});
+    Host::mosi_speed(PinSpeed::medium);   // the probe's own setting, restored
     Host::sck_speed(PinSpeed::very_high);
 }
 
@@ -2494,6 +2494,11 @@ int main() {
     Tcs::output(true);
     Trigger::output(false);
     const bool spi_ok = Host::init(clock);
+    // The breadboard's rule (docs/stm32f4/spi.md): at PCLK2/8 the data
+    // pad's edge is too fast for these wires, so MOSI goes out at medium
+    // on both hosts and SCK keeps the slew the errata ask for.
+    Host::mosi_speed(PinSpeed::medium);
+    DmaHost::mosi_speed(PinSpeed::medium);
     const bool usb_ok = Usb::init(clock);
     if (usb_ok) {
         Device::start();

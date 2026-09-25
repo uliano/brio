@@ -191,10 +191,12 @@ strata's `Request` field for field. `init(clock, max_sck_hz)`,
 `rebase(sysclk)`, `clock_for`, `sck_hz`, `max_sck_hz`,
 `ceiling_clock`, `reference_hz` (the instance's APB clock), `prime`,
 `bit_order`, `lsb_first`, `start`, `isr`, `dma_isr`, `status`,
-`recover`, `release`, `claim_nss_pad` - and this stratum's two of its
-own, `sck_speed` and `errata_apb_ceiling_hz`/`within_errata_ceiling`,
+`recover`, `release`, `claim_nss_pad` - and this stratum's three of its
+own: `sck_speed` and `errata_apb_ceiling_hz`/`within_errata_ceiling`,
 because on this family the SCK pad's slew class is a correctness
-parameter and not a taste.
+parameter and not a taste, and `mosi_speed`, because on a bus of wires
+the data pad's edge is one too and no erratum speaks for it (the
+breadboard finding below).
 
 `SpiClient<n, pins>` - a polled surface with an ISR body: `init`,
 `enable(first)`, `disable`, `write`, `writable`, `poll`, `selected`,
@@ -412,9 +414,12 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   - in the module's traces or the controller's input - where a logic
   analyser cannot look. ES0287 2.11.4 is not involved (it asks for the
   FASTER pad at a high APB). The rule for a breadboard: at PCLK2/8 keep
-  SCK or MOSI at `medium`; `sck_speed()` is the lever the driver has,
-  and MOSI's slew is set at init to `very_high` with no verb of its own
-  yet - the finding argues for one. Why the polled loop survives the
+  SCK or MOSI at `medium`, and `mosi_speed()` is the lever to pull
+  first: no erratum names the data pad, so slowing it costs the errata's
+  table nothing, where `sck_speed()` at `medium` lowers the APB ceiling
+  2.12.4 allows. Measured through the verb: with MOSI at `medium` and
+  SCK at `very_high`, every 12 MHz case of the same probe passes,
+  through the pump and through the engines. Why the polled loop survives the
   same edges on long requests and not on short ones was not resolved,
   and does not need to be: the fix is on the pads, or on a printed
   board's short traces.

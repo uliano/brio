@@ -416,6 +416,8 @@ void host_smoke() {
     (void)Bus::lsb_first();
     Bus::sck_speed(PinSpeed::medium);
     (void)Bus::sck_speed();
+    Bus::mosi_speed(PinSpeed::medium);
+    (void)Bus::mosi_speed();
     (void)Bus::errata_apb_ceiling_hz();
     (void)Bus::within_errata_ceiling();
 

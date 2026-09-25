@@ -103,7 +103,9 @@ through the polled pump and reads back in about 1.5 s at 3 MHz.
   lines, the same two 12 MHz verdicts (letters e and k) failed while
   everything at 6 MHz passed: at that rate the breadboard decides, which
   is the pad-slew finding of docs/stm32f4/spi.md seen from the other
-  side.
+  side - and with the data pad slowed to `medium` through the host's
+  `mosi_speed()`, SCK left at `very_high`, all 38 pass again, the 12
+  MHz frame through the engines included.
 - **MADCTL's B5/B6/B7 change the order the address counter walks the
   WINDOW, not the coordinate system**: under 40 (columns reversed)
   logical (0,0) of a window (0..3, 0..1) is physical (3,0), not (319,0);
