@@ -105,6 +105,15 @@ work is mostly axis-aligned and that path is the one panels are fast at.
   point. So an outline is not a filled shape's border: a filled shape
   with a border of another colour is TWO FILLED SHAPES, the larger drawn
   first - which is also the only form no-compositing allows.
+- **A thick stroke is a filled rectangle, and only where the shape is
+  axis-aligned.** An outline `t` pixels thick grows INWARD from the
+  boundary the thin outline sits on, and a thick horizontal or vertical
+  line grows DOWN or RIGHT from the row or column a thin one occupies -
+  so the thin form is exactly the case t = 1, and an outline never
+  grows the shape. When twice the thickness reaches a side there is no
+  inside left and the outline is the filled rectangle. Behind a bus that
+  is four windows, where an arc of the same thickness would be a
+  hundred, which is why nothing round is thick (below).
 - **A coordinate stays within 4096 of the origin, and so does a
   surface's own size.** A panel a microcontroller drives is at most some
   hundreds of pixels a side, so this leaves room to place a shape
@@ -151,9 +160,15 @@ is the only erasing a write-only surface has.
 - **A font is a type.** The cell is then a constant, field arithmetic
   resolves at compile time, and the linker drops the fonts a program
   does not name - fonts are the largest data in a small program, so this
-  is not a micro-optimization. Scaling by whole numbers is an adapter
-  over one font; a drawn font per size is the other road; both satisfy
-  the same contract and the application chooses between them.
+  is not a micro-optimization. A glyph's row comes in the font's own
+  unsigned type, a byte for the five-wide glyph and wider only where a
+  cell is wider.
+- **A larger size is an adapter, not a second table.** Scaling by a
+  whole number is a type over one font - every pixel an n by n block,
+  satisfying the same contract, adding no data - and it is the road a
+  readout takes on a small part. A font drawn for a size is the other
+  road and costs its table; none exists, because no display has yet
+  asked for more legibility than a block gives.
 - **A cell includes its advance** (a six-by-eight cell for a five-by-
   seven glyph), so consecutive cells tile with no gaps and the opaque
   background covers the whole run.
@@ -235,22 +250,29 @@ and behind a bus it is a window command and a burst of bytes. A surface
 that forwards and counts (`brio/gfx/counting.hpp`) is how that stops
 being a claim - the same idea as a flash simulation's wear counters.
 
-Measured on a front panel of two framed setpoints: a full repaint is 227
-windows, changing one digit is 8, a digit change that carries is 16, and
-moving a highlight is 16. That is the write-only economy working - a cell
-rewritten opaque needs no erase and no read-back, so a change touches
-only what changed, and the difference between 8 and 227 is the
-difference between an interface that answers and one that crawls.
+Measured on a front panel of two framed setpoints, the readout scaled
+four times: a full repaint is 435 windows, changing one digit is 32 (one
+cell, a run for each of its rows), a digit change that carries is 64,
+moving the highlight is 64, and moving the selection between the two
+setpoints is 80 - two rings of four rectangles and two cells, where a
+frame redrawn whole would be more than two hundred. That is the
+write-only economy working - a cell rewritten opaque needs no erase and
+no read-back, so a change touches only what changed, and the difference
+between 32 and 435 is the difference between an interface that answers
+and one that crawls.
 
-The first use of that counter also found something about THIS library:
-of a repaint's 227 windows, 107 are single-pixel rectangles, nearly all
-of them the ARCS of two rounded frames - because a circle's mirrors are
-drawn a pixel at a time. In memory that is free. Behind a bus it is a
-hundred window commands for one frame, which is precisely what the base
-verbs were chosen to avoid. Coalescing an arc's shallow runs is the
-answer, and it is not built: the counter is what makes the case for it,
-and the case should be made with a measurement of the fix and not with
-an assumption.
+The first use of that counter also found something about THIS library,
+on the same panel drawn with ROUNDED frames: of a repaint's 227 windows,
+107 were single-pixel rectangles, nearly all of them the ARCS of the two
+frames - because a circle's mirrors are drawn a pixel at a time. In
+memory that is free. Behind a bus it is a hundred window commands for one
+frame, which is precisely what the base verbs were chosen to avoid.
+Coalescing an arc's shallow runs is the answer, and it is not built: the
+counter is what makes the case for it, and the case should be made with
+a measurement of the fix and not with an assumption. The same panel with
+square frames three pixels thick repaints in windows of which not one is
+a pixel, which is why a thick outline is offered exactly where it is
+four rectangles.
 
 ## The three planes of truth
 
@@ -312,8 +334,10 @@ corrects the simulator, never the other way round.
   tier's problem and arrives with it. What remains here is a budget
   question rather than a design one: a full-screen fill is a long step,
   to be measured and divided if a program cannot afford it.
-- **A stroke wider than one pixel.** Not an oversight and not hard to
-  compute - it is hard to SPECIFY, which is why it waits. A thin segment
+- **A stroke wider than one pixel, other than the axis-aligned one** -
+  which is a filled rectangle and exists (the conventions above). The
+  oblique case is not an oversight and not hard to compute - it is hard
+  to SPECIFY, which is why it waits. A thin segment
   has one obviously right answer (the nearest pixel at each step); a
   thick one has to say where its ends stop (cut square across the
   segment, extended past it, or rounded) and what happens where two
@@ -323,10 +347,14 @@ corrects the simulator, never the other way round.
   the width of the segment - which the reference computes from the
   definition exactly as it computes the shapes here, and which is not
   the same set as several thin segments drawn side by side. A thick
-  AXIS-ALIGNED stroke needs none of this and already exists: it is a
-  filled rectangle. Nothing in the design forecloses the general case;
-  the pen carries a width when a drawing asks for one, and the
-  primitives gain overloads rather than changing.
+  AXIS-ALIGNED stroke needs none of this and is four filled rectangles.
+  The ring of a rounded rectangle is the same question in a milder form
+  - every pixel between two radii, which the reference could compute -
+  and it waits with the capsule, declined for now: no interface has
+  asked for it, and behind a bus its arcs are exactly the runs the
+  counter found expensive. Nothing in the design forecloses either; the
+  pen carries a width when a drawing asks for one, and the primitives
+  gain overloads rather than changing.
 - **A sink that makes formatted text reach a panel.** The intent is
   settled - a program that prints a measurement to a serial line and to
   a screen should write it once, through the print vocabulary that

@@ -198,16 +198,6 @@ is the state of the world, and nothing else.**
 
 Driver gaps:
 
-- **The viewer's input half.** `brio view` shows pixels and does not yet
-  write the panel: the widgets a person would press and turn are the GUI
-  work, and the contract they will write into is what this page settles.
-  The program's side is complete and tested against a writer standing in
-  for a viewer.
-- **An interactive program to join them to.** The host project builds
-  test entries only, so the publisher, the panel and the decoder are each
-  proven alone and have nowhere yet to meet. This is the open question of
-  whether the host gains a build project of its own, and it also decides
-  where the first example application will live.
 - **Double buffering.** The fields are reserved and the mechanism is not
   built, because tearing is what the hardware being modelled does and
   hiding it would be a worse simulation, not a better one.

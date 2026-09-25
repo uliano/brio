@@ -37,7 +37,9 @@ namespace brio {
 
 /// How many pixels a text row buffers before it is flushed to the
 /// surface. Bounded on purpose: the cost of a long string is more runs,
-/// never more stack. Sized so a short field crosses in one window.
+/// never more stack. Sized so a short field crosses in one window; a
+/// scaled cell wider than this is split across runs, so a large readout
+/// costs several windows a row on a panel.
 inline constexpr uint16_t text_run_max = 32;
 
 /**
@@ -64,7 +66,7 @@ Coord text(S& s, Coord x, Coord y, std::string_view str, typename S::Color fg,
         int32_t run_x = static_cast<int32_t>(x);
 
         for (char ch : str) {
-            const uint8_t bits = F::row_bits(static_cast<uint8_t>(ch), row);
+            const typename F::Row bits = F::row_bits(static_cast<uint8_t>(ch), row);
             for (Extent col = 0; col < F::cell_w; ++col) {
                 const bool on =
                     (bits >> (F::cell_w - 1 - col)) & 1u;

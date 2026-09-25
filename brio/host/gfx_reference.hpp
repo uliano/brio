@@ -92,6 +92,38 @@ public:
         fill_rect(x, y, 1, len, c);
     }
 
+    /// In the rectangle AND NOT in the rectangle shrunk by `t` on every
+    /// side. When the shrinking leaves nothing the outline is the whole
+    /// rectangle - the definition says so on its own, with no clamp.
+    void rect(Coord x, Coord y, Extent w, Extent h, Extent t, uint8_t c) {
+        if (w == 0 || h == 0 || t == 0) {
+            return;
+        }
+        const int32_t ix0 = static_cast<int32_t>(x) + static_cast<int32_t>(t);
+        const int32_t iy0 = static_cast<int32_t>(y) + static_cast<int32_t>(t);
+        const int32_t ix1 = static_cast<int32_t>(x) + static_cast<int32_t>(w) -
+                            static_cast<int32_t>(t); // exclusive
+        const int32_t iy1 = static_cast<int32_t>(y) + static_cast<int32_t>(h) -
+                            static_cast<int32_t>(t);
+        each([&](int32_t px, int32_t py) {
+            if (!in_rect(px, py, x, y, w, h)) {
+                return false;
+            }
+            const bool inner = px >= ix0 && px < ix1 && py >= iy0 && py < iy1;
+            return !inner;
+        }, c);
+    }
+
+    /// A thick line is the rectangle it covers: `t` rows down from `y`,
+    /// or `t` columns right from `x`.
+    void hline(Coord x, Coord y, Extent len, Extent t, uint8_t c) {
+        fill_rect(x, y, len, t, c);
+    }
+
+    void vline(Coord x, Coord y, Extent len, Extent t, uint8_t c) {
+        fill_rect(x, y, t, len, c);
+    }
+
     /**
      * The segment, from the definition in gfx/draw.hpp's comment: walk
      * the MAJOR axis, and at each step the pixel whose centre is nearest
@@ -301,7 +333,7 @@ public:
                 return false;
             }
             const int32_t col = dx % static_cast<int32_t>(F::cell_w);
-            const uint8_t bits =
+            const typename F::Row bits =
                 F::row_bits(
                             static_cast<uint8_t>(str[static_cast<size_t>(cell)]),
                             static_cast<Extent>(dy));

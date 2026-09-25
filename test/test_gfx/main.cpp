@@ -17,8 +17,10 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <type_traits>
 #include <vector>
 
+#include "gfx/counting.hpp"
 #include "gfx/draw.hpp"
 #include "gfx/font_5x7.hpp"
 #include "gfx/pen.hpp"
@@ -259,6 +261,82 @@ TEST_CASE("horizontal and vertical runs match the definition") {
             }
         }
     }
+}
+
+TEST_CASE("the thick outline matches the definition, and is the thin one at t = 1") {
+    constexpr Extent W = 12;
+    constexpr Extent H = 9;
+    Canvas<Mono, W, H> c;
+    Canvas<Mono, W, H> thin;
+
+    for (Coord x = -3; x <= static_cast<Coord>(W + 1); ++x) {
+        for (Coord y = -3; y <= static_cast<Coord>(H + 1); ++y) {
+            for (Extent w = 0; w <= 8; ++w) {
+                for (Extent h = 0; h <= 8; ++h) {
+                    for (Extent t = 0; t <= 5; ++t) {
+                        c.wipe();
+                        brio::rect(c.fb, x, y, w, h, t, 1);
+
+                        RefCanvas ref(W, H);
+                        ref.rect(x, y, w, h, t, 1);
+
+                        const GfxDiff d = brio::compare(c.fb, ref);
+                        INFO("thick outline x=" << x << " y=" << y << " w=" << w
+                                                << " h=" << h << " t=" << t << "\n"
+                                                << d.map);
+                        REQUIRE(d.agree());
+
+                        // The thin outline is the case t = 1, pixel for pixel.
+                        if (t == 1) {
+                            thin.wipe();
+                            brio::rect(thin.fb, x, y, w, h, 1);
+                            REQUIRE(c.bits == thin.bits);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("thick runs match the definition") {
+    constexpr Extent W = 10;
+    constexpr Extent H = 10;
+    Canvas<Mono, W, H> c;
+
+    for (Coord x = -3; x <= static_cast<Coord>(W + 1); ++x) {
+        for (Coord y = -3; y <= static_cast<Coord>(H + 1); ++y) {
+            for (Extent n = 0; n <= 12; ++n) {
+                for (Extent t = 0; t <= 4; ++t) {
+                    c.wipe();
+                    brio::hline(c.fb, x, y, n, t, 1);
+                    RefCanvas rh(W, H);
+                    rh.hline(x, y, n, t, 1);
+                    REQUIRE(brio::compare(c.fb, rh).agree());
+
+                    c.wipe();
+                    brio::vline(c.fb, x, y, n, t, 1);
+                    RefCanvas rv(W, H);
+                    rv.vline(x, y, n, t, 1);
+                    REQUIRE(brio::compare(c.fb, rv).agree());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("a thick outline costs four windows, or one when nothing is inside") {
+    Canvas<Mono, 40, 30> c;
+    brio::Counting<Canvas<Mono, 40, 30>::Fb> counted(c.fb);
+
+    brio::rect(counted, 2, 2, 20, 10, 3, 1);
+    CHECK(counted.take().rects == 4);
+    brio::rect(counted, 2, 2, 20, 6, 3, 1); // twice the thickness reaches the height
+    CHECK(counted.take().rects == 1);
+    brio::rect(counted, 2, 2, 20, 10, 0, 1);
+    CHECK(counted.take().rects == 0);
+    brio::hline(counted, 0, 0, 10, 2, 1);
+    CHECK(counted.take().rects == 1);
 }
 
 TEST_CASE("every segment on a small canvas matches the definition") {
@@ -593,6 +671,74 @@ TEST_CASE("the font answers for everything it is asked") {
     // A space is inside the range and draws nothing at all.
     for (Extent row = 0; row < brio::Font5x7::cell_h; ++row) {
         REQUIRE(brio::Font5x7::row_bits(' ', row) == 0);
+    }
+}
+
+TEST_CASE("a scaled font is the base font with every pixel an n by n block") {
+    using brio::Font5x7;
+    using Two = brio::Scaled<Font5x7, 2>;
+    using Three = brio::Scaled<Font5x7, 3>;
+    using Four = brio::Scaled<Font5x7, 4>;
+    static_assert(brio::Font<Two> && brio::Font<Three> && brio::Font<Four>);
+    // The row widens only where the cell does: six, twelve, eighteen
+    // and twenty-four pixels wide.
+    static_assert(std::is_same_v<brio::Scaled<Font5x7, 1>::Row, uint8_t>);
+    static_assert(std::is_same_v<Two::Row, uint16_t>);
+    static_assert(std::is_same_v<Three::Row, uint32_t>);
+    static_assert(Two::cell_w == 12 && Two::cell_h == 16);
+    static_assert(Four::cell_w == 24 && Four::cell_h == 32);
+
+    // Scale one IS the font.
+    for (int ch = 0; ch < 256; ++ch) {
+        for (Extent row = 0; row < Font5x7::cell_h; ++row) {
+            REQUIRE(brio::Scaled<Font5x7, 1>::row_bits(static_cast<uint8_t>(ch), row) ==
+                    Font5x7::row_bits(static_cast<uint8_t>(ch), row));
+        }
+    }
+
+    // And the DEFINITION of scaling, on rendered text, sharing nothing
+    // with the adapter's bit arithmetic: the scaled picture at (px, py)
+    // is the plain one at (px / n, py / n).
+    const std::string_view word = "Ag7.";
+    Canvas<Mono, 4 * 6, 8> plain;
+    brio::text<Font5x7>(plain.fb, 0, 0, word, 1, 0);
+
+    auto check = [&](auto font_tag, Extent n) {
+        using F = decltype(font_tag);
+        Canvas<Mono, 4 * 6 * 4, 8 * 4> big;
+        brio::text<F>(big.fb, 0, 0, word, 1, 0);
+        for (Extent py = 0; py < F::cell_h; ++py) {
+            for (Extent px = 0; px < 4 * F::cell_w; ++px) {
+                INFO("n=" << n << " at (" << px << "," << py << ")");
+                REQUIRE(big.fb.get_pixel(static_cast<Coord>(px), static_cast<Coord>(py)) ==
+                        plain.fb.get_pixel(static_cast<Coord>(px / n),
+                                           static_cast<Coord>(py / n)));
+            }
+        }
+    };
+    check(Two{}, 2);
+    check(Three{}, 3);
+    check(Four{}, 4);
+}
+
+TEST_CASE("scaled text lands where the reference says") {
+    using Big = brio::Scaled<brio::Font5x7, 3>;
+    constexpr Extent W = 70;
+    constexpr Extent H = 40;
+    Canvas<Mono, W, H> c;
+
+    for (Coord x = -20; x <= static_cast<Coord>(W + 2); x += 7) {
+        for (Coord y = -13; y <= static_cast<Coord>(H + 1); y += 5) {
+            c.wipe();
+            brio::text<Big>(c.fb, x, y, "1.5V", 1, 0);
+
+            RefCanvas ref(W, H);
+            ref.text<Big>(x, y, "1.5V", 1, 0);
+
+            const GfxDiff d = brio::compare(c.fb, ref);
+            INFO("scaled at (" << x << "," << y << ")\n" << d.map);
+            REQUIRE(d.agree());
+        }
     }
 }
 

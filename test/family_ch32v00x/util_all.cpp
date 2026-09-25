@@ -308,6 +308,7 @@ static_assert(Surface<Viewport<GfxPanel>> && !ReadableSurface<Viewport<GfxPanel>
 void gfx_verbs() {
     clear(gfx_panel, 0);
     rect(gfx_panel, 0, 0, 128, 64, 1);
+    rect(gfx_panel, 4, 4, 120, 56, 3, 1);
     line(gfx_panel, -20000, -20000, 20000, 20000, 1);
     Viewport<GfxPanel> window(gfx_panel, 8, 8, 48, 24);
     fill_rect(window, -5, -5, 100, 100, 1);
@@ -325,6 +326,7 @@ void gfx_verbs() {
     static_assert(quadrature_step(0b00, 0b01).value() == 1);
     static_assert(!quadrature_step(0b00, 0b11).has_value());
     text<Font5x7>(gfx_panel, 2, 2, "brio", 1, 0);
+    text<Scaled<Font5x7, 3>>(gfx_panel, 2, 20, "3.30", 1, 0);
     text_field<Font5x7>(gfx_panel, 2, 12, "3.30", 8, 1, 0);
     Pen<GfxPanel> pen(gfx_panel, 1, 0);
     pen.move_to(4, 30);

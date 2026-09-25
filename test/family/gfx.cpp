@@ -51,6 +51,9 @@ void gfx_verbs() {
     rect(panel, 0, 0, 128, 64, 1);
     hline(panel, -5, 32, 200, 1);
     vline(panel, 64, -5, 200, 1);
+    rect(panel, 4, 4, 120, 56, 3, 1); // the thick outline: four fills
+    hline(panel, 0, 40, 128, 2, 1);
+    vline(panel, 100, 0, 64, 2, 1);
     line(panel, 0, 0, 127, 63, 1);
 
     circle(panel, 64, 32, 30, 1);
@@ -75,6 +78,11 @@ void gfx_verbs() {
     // Text: the font's table is the largest datum gfx puts in an image,
     // so it is compiled here as well as instantiated.
     text<Font5x7>(panel, 2, 2, "brio", 1, 0);
+    // A scaled font is a type with no table - the readout's road on a
+    // small part - and its rows are sixteen and twenty-four bits wide,
+    // which this family's sixteen-bit int has to get right.
+    text<Scaled<Font5x7, 2>>(panel, 2, 20, "12.5", 1, 0);
+    text_field<Scaled<Font5x7, 4>>(panel, 2, 36, "3.30", 5, 1, 0);
     text_field<Font5x7>(panel, 2, 12, "3.30", 8, 1, 0);
     text<Font5x7>(panel, -20, 40, "clipped at both ends of the panel", 1, 0);
 
