@@ -195,13 +195,16 @@ Driver gaps:
   is the one thing this file may not know. The refusal is a run-time
   answer (`valid()`), not a compile-time one, because the prototype is a
   value the application fills.
-- **The reset line, the backlight and the tearing effect pin.** Not on
-  the link and not missing from it: they are the panel's wires, not the
-  bus's, and they belong to the driver that owns the wake sequence.
+- **The backlight and the tearing effect pin.** Not on the link and not
+  missing from it: they are the panel's wires and not the bus's. The
+  reset line, which is the third of them, belongs to the driver that
+  owns the wake sequence and is there ([dcs_panel.md](dcs_panel.md));
+  the other two wait for a program that needs one.
 
 Implemented, not bench-verified: the serial link against the glass. Its
 every byte is the bench's already - the suite's expectations were
 measured on an ILI9481 module over a four-wire serial interface - but
 the code that produces them has only ever run against RAM. What would
-measure it is the panel driver on that module, where the link replaces
-the transaction function a bring-up writes by hand.
+measure it is the panel driver ([dcs_panel.md](dcs_panel.md)) on that
+module, where this link replaces the transaction function a bring-up
+writes by hand.

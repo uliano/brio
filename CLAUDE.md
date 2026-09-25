@@ -388,8 +388,10 @@ gets its home in `docs/design/` when taken.
   test/test_dcs, test/test_ili9481), and so are the link concept with
   its serial realization over any SpiHost and the simulated SPI host at
   the request level (brio/devices/dcs_link.hpp, brio/host/sim_spi_host.hpp,
-  test/test_dcs_link); the driver with its surfaces, the touch and the
-  viewer's mouse are next, then the black
+  test/test_dcs_link), and the driver in its DIRECT shape with the
+  rotation map and the oracle verb (brio/devices/dcs_panel.hpp,
+  test/test_dcs_panel); the tiled shape, the touch and the viewer's
+  mouse are next, then the black
   pill against the glass, then the F469's DSI link as a DcsLink over
   stm32f4/dsi.hpp and the NT35510 as a second traits type, its memory
   read back over that link already measured (docs/stm32f4/dsi.md).
@@ -974,16 +976,22 @@ test/test_pl011/, test/test_pl022/, test/test_dw_apb_i2c/
                          simulated chip (brio/host/sim_pl011.hpp and its two
                          siblings), so the block's own logic is judged off the
                          silicon it was extracted from
-test/test_dcs/, test/test_ili9481/, test/test_dcs_link/
+test/test_dcs/, test/test_ili9481/, test/test_dcs_link/, test/test_dcs_panel/
                          the devices stratum's host suites: the DCS packers'
                          round trips, the simulated ILI9481's conformance to
                          the bench's numbers - the probe's letters
-                         transcribed, framing and memory cases apart - and
-                         the serial link over the simulated SPI host against
+                         transcribed, framing and memory cases apart -, the
+                         serial link over the simulated SPI host against
                          that panel (the arbiter over the simulated host
-                         among them); every family fixture dir carries a
-                         devices_link.cpp compiling the link over that
-                         family's own SpiHost
+                         among them), and the panel driver over the whole
+                         stack: the wake counted, the rotation map judged on
+                         the simulated GLASS for a mirrored and a straight
+                         module, the oracle round trips, the clipping, the
+                         cost in transactions, and gfx's drawing judged by
+                         the reference renderer through get_pixel; every
+                         family fixture dir with an SpiHost carries a
+                         devices_link.cpp and a devices_panel.cpp compiling
+                         both over that family's own host
 test/test_sha256/        util/sha256.hpp against FIPS 180-4's own vectors, at
                          compile time and at run time, plus the tail the
                          hardware accelerators are owed
@@ -3302,6 +3310,26 @@ brio/                    the framework, one directory per stratum:
                            the command byte (a member, lent under Lease::reply),
                            the spans, the length and polled; a frame wider than
                            a byte refused at construction
+    dcs_panel.hpp          THE PANEL DRIVER, the tier's fourth layer: DcsPanel
+                           <Traits, Link>, a command panel as a gfx Surface in
+                           the DIRECT shape (every verb a synchronous link
+                           transaction), the wake from the reset line by the
+                           traits' numbers with the delay the application's,
+                           DcsModule (the board's facts: the glass's mirror, the
+                           crossed channels answered in the byte order and never
+                           in MADCTL's BGR bit, the inversion), DcsRotation and
+                           the rotation map as a pure function - a run of the
+                           logical surface is ONE walk of the counter, so each
+                           rotation states the bit along its runs and the mirror
+                           toggles B6 under r0/r180 alone - the logical window
+                           (CASET taking the pages once B5 has exchanged the
+                           axes), fill_rect as one window and h rows, write_run
+                           as one window and one row, and THE ORACLE VERB
+                           read_run() in logical coordinates with get_pixel()
+                           making the panel a ReadableSurface the reference
+                           renderer judges directly (a window and a read per
+                           pixel on the wire: the observer's verb); the two row
+                           buffers sized by the glass's long side
   gfx/                   drawing, pure and target-independent
     surface.hpp            Coord/Extent/Rect + clip() (16 bits over the WHOLE
                            domain, because the far edge is never formed) +
