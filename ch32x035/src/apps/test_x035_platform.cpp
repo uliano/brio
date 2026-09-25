@@ -162,7 +162,8 @@ void ta_boot() {
           " after clear_reset_flags()=", hex(after), " RSTSCKR=", hex(rcc()->RSTSCKR), crlf);
     bench.verdict("reset_flags() is non-destructive: two reads agree", first == second);
     bench.verdict("clear_reset_flags() leaves the flags clean", after == 0u);
-    bench.verdict("and the register holds nothing else: RMVF reads back zero, "
+    bench.verdict("and the register holds nothing else afterwards: RMVF is a LEVEL on "
+                  "this silicon - written 1 it stays 1 - so the verb clears it too, and "
                   "the low 24 bits are reserved",
                   rcc()->RSTSCKR == 0u);
 

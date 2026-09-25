@@ -68,14 +68,18 @@ suite is `test_x035_clock`.
   HB one holds three lines alone - the USB host/device controller's, the
   PIOC's and the USB PD's (3.4.9): the DMA and the SRAM have none.
 - **THE RESET FLAGS ACCUMULATE** in RCC_RSTSCKR until RMVF is written
-  (3.4.8): LPWRRSTF, WWDGRSTF, IWDGRSTF, SFTRSTF, PORRSTF, PINRSTF and
-  OPARSTF. The system reset has more sources than flags (3.2.2): a core
-  deadlock, an OPA output going high, a USB PD hard reset (whose flag,
-  the manual says, is the software reset's) and an ADC watchdog reset
-  among them. THE MANUAL GIVES TWO RESET VALUES for the register: its
-  register table (table 3-1) says 0x0C000000, PORRSTF and PINRSTF, and
-  3.4.8's own bit table gives PINRSTF a reset value of 0. On the QFN20
-  there is no reset pin at all.
+  (3.4.8) - and on this silicon RMVF is a LEVEL, not a pulse: written 1
+  it reads back 1 (measured on a CH32X035F8U6, where the CH32V203's
+  clears itself), so `clear_reset_flags()` writes it and then clears it,
+  or the next reset's flags would be gone before the boot read them:
+  LPWRRSTF, WWDGRSTF, IWDGRSTF, SFTRSTF, PORRSTF, PINRSTF and OPARSTF.
+  The system reset has more sources than flags (3.2.2): a core deadlock,
+  an OPA output going high, a USB PD hard reset (whose flag, the manual
+  says, is the software reset's) and an ADC watchdog reset among them.
+  THE MANUAL GIVES TWO RESET VALUES for the register: its register table
+  (table 3-1) says 0x0C000000, PORRSTF and PINRSTF, and 3.4.8's own bit
+  table gives PINRSTF a reset value of 0. On the QFN20 there is no reset
+  pin at all.
 
 ## Types and verbs
 
@@ -96,7 +100,8 @@ wait for HSIRDY is bounded).
 | `hsi_trim(t)`, `hsi_trim()`, `hsi_calibration()` | the user trim written and read, the factory value read |
 | `hpre_code()`, `hpre(code)`, `hclk_hz()` | the divider as it stands, a raw store, and the rate the registers say |
 | `mco(src)`, `mco()` | the output multiplexer alone - the pad is `Mco`'s |
-| `reset_flags()`, `clear_reset_flags()` | RCC_RSTSCKR's flags read without disturbing them, and RMVF |
+| `reset_flags()`, `clear_reset_flags()` | RCC_RSTSCKR's flags read without disturbing them, and RMVF written and cleared again |
+| `reset(bus, mask)` | a reset pulse on a block's line, true when pulsed; the power controller's line refused (below) |
 
 `Mco`, the clock output as a task: `has_pad` (PB9 bonded or not, from
 the part table), `init(src)` - the pad claimed and the multiplexer set
@@ -171,6 +176,28 @@ const uint32_t flags = brio::Rcc::reset_flags();
 brio::Rcc::clear_reset_flags();
 const bool watchdog = (flags & (brio::rcc_iwdgrstf | brio::rcc_wwdgrstf)) != 0u;
 ```
+
+## Bench findings
+
+`test_x035_platform`'s boot letter and `test_x035_clock` on a
+CH32X035F8U6 (WCH's evaluation board, QFN20 edition) over a WCH-LinkE:
+
+- **RMVF is a level.** After `clear_reset_flags()` wrote it, RCC_RSTSCKR
+  read 0x01000000 - the flags clear, the bit standing - where the
+  CH32V203's bit clears itself; the verb clears it now, and the register
+  reads zero after it.
+- **A power-on leaves PORRSTF alone**: the flags at the boot after the
+  probe's programming read 0x18000000, SFTRSTF and PORRSTF, no PINRSTF -
+  of the manual's two reset values for this register, 3.4.8's bit table
+  is the silicon's on this package, which has no reset pin.
+- **A reset pulse on the power controller's line ended the session.**
+  The clock suite's gates letter pulsed RCC_APB1PRSTR.PWRRST after every
+  gate had opened and closed; the console fell silent before the next
+  verdict drained and the debug port answered "failed to connect" until
+  the supply was cycled. Observed once and not repeated on purpose: the
+  driver refuses that line and the suite pulses I2C1's instead. What
+  would measure it - the mechanism, whether the regulator's setting or
+  the debug module - is a supply the bench can cycle without a hand.
 
 ## Not covered yet
 

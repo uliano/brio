@@ -340,7 +340,7 @@ struct Usart {
     }
 
     /// Put the block back to its reset state, gate left as it is.
-    static void reset() { Rcc::reset(bus, usart_gate_for(n)); }
+    static void reset() { (void)Rcc::reset(bus, usart_gate_for(n)); }
 
     /// Select the instance's column (afio.hpp). False - and nothing
     /// written - for a column this part has not got. Code 0 is the reset

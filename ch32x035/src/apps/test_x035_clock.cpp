@@ -252,10 +252,17 @@ void tf_gates() {
         all = all && on && off;
     }
     bench.verdict("every gate of the chapter opens and closes, read back", all);
-    Rcc::enable(Bus::pb1, rcc_pb1_pwr);
-    Rcc::reset(Bus::pb1, rcc_pb1_pwr);
-    bench.verdict("a reset pulse leaves its gate where it was", Rcc::enabled(Bus::pb1, rcc_pb1_pwr));
-    Rcc::disable(Bus::pb1, rcc_pb1_pwr);
+    // The pulse's subject is I2C1, a block nothing here uses. NEVER the
+    // power controller's: a pulse on PWRRST left this part unreachable by
+    // its debug port until its supply was cycled (clock.md), and the
+    // driver refuses it now - which the third verdict checks.
+    Rcc::enable(Bus::pb1, rcc_pb1_i2c1);
+    const bool pulsed = Rcc::reset(Bus::pb1, rcc_pb1_i2c1);
+    bench.verdict("a reset pulse leaves its gate where it was",
+                  pulsed && Rcc::enabled(Bus::pb1, rcc_pb1_i2c1));
+    Rcc::disable(Bus::pb1, rcc_pb1_i2c1);
+    bench.verdict("and the power controller's reset line is REFUSED, nothing written",
+                  !Rcc::reset(Bus::pb1, rcc_pb1_pwr));
 }
 
 void banner() {

@@ -136,13 +136,23 @@ struct Rcc {
     /// Pulse a peripheral's reset line: held, then released, which is how
     /// a driver puts its block back to its reset state without touching
     /// anyone else's. On the HB bus the mask is RCC_AHBRSTR's, whose bits
-    /// are the USBFS's, the PIOC's and the USB PD's alone (3.4.9).
-    static void reset(Bus bus, uint32_t mask) {
+    /// are the USBFS's, the PIOC's and the USB PD's alone (3.4.9). THE
+    /// POWER CONTROLLER'S LINE IS REFUSED (false, nothing written): a
+    /// pulse on PWRRST left a CH32X035F8U6 unreachable by its debug port
+    /// until its supply was cycled - observed once, with the pulse the
+    /// last thing the program did before its console went silent, and not
+    /// measured again on purpose, because the way back is a hand on the
+    /// board (docs/ch32x035/clock.md).
+    static bool reset(Bus bus, uint32_t mask) {
+        if (bus == Bus::pb1 && (mask & rcc_pb1_pwr) != 0u) {
+            return false;
+        }
         switch (bus) {
             case Bus::hb:  rcc()->AHBRSTR |= mask;   rcc()->AHBRSTR &= ~mask;   break;
             case Bus::pb2: rcc()->APB2PRSTR |= mask; rcc()->APB2PRSTR &= ~mask; break;
             case Bus::pb1: rcc()->APB1PRSTR |= mask; rcc()->APB1PRSTR &= ~mask; break;
         }
+        return true;
     }
 
     // ---- the root ----------------------------------------------------------
@@ -207,9 +217,15 @@ struct Rcc {
     /// device.hpp.
     static uint32_t reset_flags() { return rcc()->RSTSCKR & rcc_reset_flags; }
 
-    /// RMVF: clear the flags. What the clear leaves is what the next reset
-    /// raises.
-    static void clear_reset_flags() { rcc()->RSTSCKR = rcc()->RSTSCKR | rcc_rmvf; }
+    /// RMVF: clear the flags, then clear RMVF itself. On this silicon the
+    /// bit is a LEVEL and not a pulse (measured on a CH32X035F8U6: written
+    /// 1 it reads back 1, where the CH32V203's clears itself), and a
+    /// standing RMVF would clear the next reset's flags before the boot
+    /// read them. What the clear leaves is what the next reset raises.
+    static void clear_reset_flags() {
+        rcc()->RSTSCKR = rcc()->RSTSCKR | rcc_rmvf;
+        rcc()->RSTSCKR = rcc()->RSTSCKR & ~rcc_rmvf;
+    }
 };
 
 /**
