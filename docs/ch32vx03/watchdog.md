@@ -61,12 +61,13 @@ suite: `test_vx03_watchdog`.
   early computes its refresh interval from the FAST corner. There is no
   window register in this chapter: the independent watchdog has one
   edge and not two.
-- **It is no way out of a Stop.** On the CH32V203C8T6 it does not
-  count through one ([sleep.md](sleep.md)), and a program that sleeps
-  that deep arms the RTC's alarm as its way back, which is what the
-  timed sleep site does. Whether it ends a Standby, where RM 2.3.4
-  lists its reset among the exits, is not measured on either part
-  (below).
+- **It is no way out of a Stop, and it IS one out of a Standby.** On
+  both parts it does not count through a Stop, against 7.2.1's "can
+  still work normally in stop and standby mode" - its reset arrives
+  some 200 ms after the WAKE - so a program that sleeps that deep arms
+  the RTC's alarm as its way back, which is what the timed sleep site
+  does. Through a Standby it counts, and its reset is the exit RM 2.3.4
+  lists: measured on the CH32V303VCT6 ([sleep.md](sleep.md)).
 
 ### The window watchdog
 
@@ -259,6 +260,19 @@ puts its LSI at **40.2 kHz** - both inside the parts' rated 133 to 320
 ms and beside the datasheets' 39 kHz typical. IWDGRSTF stood alone at
 every boot, and each board had survived its ten refreshes before that.
 
+**Through the two deep modes** (`test_vx03_sleep`, letters `g` and `x`,
+the RTC's alarm armed first as the way back in both). The same setting,
+refreshed immediately before a Stop asked for two seconds, let the Stop
+run its full length on both parts and reset the board **215 ms** (the
+CH32V203C8T6) and **208 and 209 ms** (the CH32V303VCT6) after the wake - the
+counter frozen for the whole sleep. Armed after an alarm placed two
+seconds out and followed by a Standby, it ended the Standby on the
+CH32V303VCT6 **225 ms** after the alarm was placed, twice, with IWDGRSTF and
+PORRSTF standing at the boot, SBF set and WUF clear - the watchdog's
+exit and not the alarm's - and no watchdog running into the new boot.
+The debug module's two watchdog freeze bits read clear there
+(DBGMCU_CR 0x0), so neither answer is the probe's.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -274,7 +288,8 @@ Driver gaps, each with its reason:
   CSR the power chapter READS and never writes, because a `csrw` to it
   resets the part on this silicon ([sleep.md](sleep.md)), so no verb
   here sets them; every measurement above was taken with the program
-  running free, so none of them depends on which way they stand.
+  running free, and the deep modes' on the CH32V303VCT6 with both bits
+  read clear.
 - **The window watchdog through a low-power mode.** Its counter runs on
   the peripheral bus clock, which a Stop takes away, and what it does
   across one is untested; the independent one is measured there, and
@@ -291,14 +306,11 @@ Implemented but not bench-verified:
   the reset letter arms one setting. The others would cost one reset
   each to measure, and what they would add is the same arithmetic at
   another rate.
-- **The independent watchdog through a Standby**: RM 2.3.4 lists its
-  reset among Standby's exits. One program on the CH32V303VCT6 that
-  armed it for some 200 ms and entered Standby with the debug probe
-  attached never answered its console again - an observation and not a
-  measurement, because nothing in that program could tell a watchdog
-  that never fired from one that did. What would measure it: a Standby
-  entered with the RTC's alarm armed as the way back and the watchdog's
-  reload shorter than the alarm, the boot reading which flag stands.
+- **The independent watchdog through a Standby on the CH32V203C8T6**:
+  measured on the CH32V303VCT6 (above); what would measure it on the
+  other part is `test_vx03_sleep`'s letter `x` on that board - whose
+  probe leaves the two watchdog freeze bits of DBGMCU_CR set, which the
+  letter prints beside its answer.
 - **`force_reset()` on either block**: both are one store away from what
   the by-name letters already prove, and neither is called by a suite -
   a program that wants a deliberate reset has `Reset::software()`

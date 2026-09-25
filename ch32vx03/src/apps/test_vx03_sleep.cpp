@@ -1,10 +1,10 @@
-// test_vx03_sleep - the reference bench suite for the CH32V203's POWER
-// chapter and the two sleep sites over it: ch32vx03/pwr.hpp over RM
-// ch. 2 (the three modes, the regulator, the supply monitor, the two
-// flags, the wake-up pad), ch32vx03/sleep.hpp over util/power.hpp's
-// site contract, and ch32vx03/bus_activity.hpp - the count of bus
-// masters other than the core, which on this family decides whether a
-// sleep is legal at all.
+// test_vx03_sleep - the reference bench suite for the POWER chapter of
+// the CH32V203 and the CH32V303 and the two sleep sites over it:
+// ch32vx03/pwr.hpp over RM ch. 2 (the three modes, the regulator, the
+// supply monitor, the two flags, the wake-up pad, what a Standby keeps),
+// ch32vx03/sleep.hpp over util/power.hpp's site contract, and
+// ch32vx03/bus_activity.hpp - the count of bus masters other than the
+// core, which on this family decides whether a sleep is legal at all.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -21,26 +21,32 @@
 // them, and where a finer answer was wanted the same sleep is taken
 // sixteen times and the difference divided.
 //
+// EVERY LETTER THAT STOPS OR STANDS BY THE CHIP ARMS THE RTC ALARM AS ITS
+// WAY BACK FIRST, and a Standby is entered only once that counter has
+// been seen counting: no wake here needs a hand, and none needs a
+// watchdog to end it.
+//
 // NO CURRENT IS MEASURED HERE, and this desk has no meter: what the
 // low-power regulator and the RAM's low-voltage mode are worth in
 // microamps is the one question this suite cannot ask. What it can ask
-// is time, flags and counters.
+// is time, flags, counters and the RAM's own contents.
 //
-// ONE WIRE, AND THE SUITE SAYS SO WHEN IT IS NOT THERE. Letter h - and
-// the third leg of letter w - want a rising edge on PA0, the EXTI line
-// that is also the WKUP pad, from an instrument outside this board;
-// with nothing driving it they report that no edge came and take the
-// RTC's backstop instead. THE PAD IS ALSO USART2's CTS, so an
-// instrument that holds it at a level is an instrument the serial
-// suite's flow-control letter will fail against: the two want the wire
-// in opposite states and only one of them can have it at a time.
+// TWO PADS. Letter h - and the third leg of letter w - want a rising
+// edge on PA0, the EXTI line that is also the WKUP pad, from outside the
+// board; with nothing driving it they report that no edge came and take
+// the RTC's backstop instead. THE PAD IS ALSO USART2's CTS on the
+// CH32V203, so an instrument that holds it at a level is one the serial
+// suite's flow-control letter will fail against. Letter j wants the
+// board's wire from PA6 to PA1 (TIM3's first channel into EXTI line 1),
+// detects it first, and says so when it is not there.
 //
 // What is exercised, letter by letter:
 //   a  WHAT THE BOOT FOUND: the debug module's three low-power bits
 //      (a probe holding the clocks up makes every timing below a
 //      fiction), the two flags and their write-one clears, the mode
 //      pair written and read back, the Stop's two prices and their
-//      interlock, the retention bits and the regulator trims
+//      interlock, the retention bits - the driver's kept copy, and what
+//      the silicon reads back of them - and the regulator trims
 //   b  THE SUPPLY MONITOR: the eight thresholds walked from the bottom
 //      up with PVDO read at each - which brackets this board's rail
 //      between two of them - and EXTI line 16 delivering the crossing
@@ -60,10 +66,21 @@
 //      served on the WALL and never early
 //   f  THE VOTE ROUND: one not-ok ends it, a standing lock clamps the
 //      depth, the deadline guard refuses a deep round before anyone is
-//      asked, and an arm over a running DMA channel is refused by the
-//      silicon's own fact
+//      asked, and an arm over a running DMA channel - of either
+//      controller, where the part has two - is refused by the silicon's
+//      own fact
 //   h  A STOP ENDED FROM OUTSIDE: the pad's EXTI line against the RTC
 //      backstop, and the wake-up pad's own flag
+//   j  A SLEEP ENDED BY AN EDGE ON THE WIRE: TIM3's one pulse on PA6,
+//      started with the tick paused, reaching PA1's line while the core
+//      sleeps - and the time from the edge to the line's handler
+//   k  A STOP AT EVERY RATE OF A DYNAMICCLOCK: the crystal's PLL at 96,
+//      144 and 48 MHz and the bare HSI, each Stop ended by the alarm, the
+//      site's disarm() - the clock's own restore() - putting back the rate
+//      IN FORCE, and HCLK measured against the RTC after each
+//   i  (the parts with an FPU) THE FLOATING-POINT UNIT ACROSS A STOP: the
+//      thirty-two f-registers and fcsr loaded, a Stop, and every bit
+//      compared, with mstatus.FS read after the wake
 //   w  (by name, ENTERS STANDBY - the board comes back through a reset)
 //      the RTC alarm as the Standby exit, SBF and the reset chapter's
 //      low-power flag at the next boot, the SRAM the retention bit
@@ -72,12 +89,23 @@
 //   g  (by name, RESETS THE BOARD) the independent watchdog across a
 //      Stop: armed short, a Stop asked for long, and the RTC - which
 //      counts through both - saying which of the two arrived first
+//   r  (by name, FIVE RESETS) WHAT A STANDBY KEEPS: nearly all of SRAM
+//      painted, a control across a software reset, then a Standby for
+//      each combination of the retention bits, the survivors counted bank
+//      by bank at the next boot - the state carried in the backup
+//      registers, since .noinit's survival is the question
+//   x  (by name, RESETS THE BOARD) THE INDEPENDENT WATCHDOG THROUGH A
+//      STANDBY: the alarm armed first, two seconds out, then the watchdog
+//      at some 200 ms; the reset flags, SBF, WUF and the RTC's count at the
+//      next boot say which of the two ended it
 //
-// build: boards = v203c6,v203c8
-// build: groups = abcdh,efgw
+// build: boards = v203c6,v203c8,v303vc
+// build: groups = abcdhk,efgwijrx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "ch32vx03/clock.hpp"
 #include "ch32vx03/delay.hpp"
@@ -91,8 +119,10 @@
 #include "ch32vx03/rtc.hpp"
 #include "ch32vx03/sleep.hpp"
 #include "ch32vx03/ticker.hpp"
+#include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "ch32vx03/usb.hpp"
+#include "ch32vx03/usbfs.hpp"
 #include "ch32vx03/watchdog.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
@@ -131,7 +161,20 @@ struct Token {
     uint8_t returned;       ///< the deep mode came back without a reset
     uint8_t turns;          ///< how many instructions it took to stay stopped
 };
-[[gnu::section(".noinit")]] inline Token token;
+/// What letter r paints before a Standby and counts after it: every
+/// word of SRAM the program can spare, which is all of it but the
+/// sections the linker placed below and seven kilobytes for the stack.
+/// In the SAME .noinit object as the token and after it, so the token
+/// keeps the lowest address the section has - inside the first
+/// retention bank on every part.
+inline constexpr uint32_t paint_words = (brio::device::sram_bytes - 7UL * 1024UL) / 4UL;
+
+struct Kept {
+    Token token;
+    uint32_t paint[paint_words];
+};
+[[gnu::section(".noinit")]] inline Kept kept;
+inline Token& token = kept.token;
 
 namespace {
 
@@ -147,7 +190,10 @@ TestBench<Serial> bench;
 
 using Plain = Ch32vx03SleepSite<SysClock>;
 using Timed = Ch32vx03TimedSleepSite<P, SysClock>;
-using Usb = Usbd<>;
+/// The part's USB controller: the device controller where there is one,
+/// the host/device controller on the CH32V303, which has no other. Only
+/// its pull-up's count is used here - letter c attaches it.
+using Usb = std::conditional_t<device::has_usbd, Usbd<>, Usbfs<>>;
 using Copier = DmaChannel<1, 1>;
 
 /// The RTC's tick, and the prescaler under it: the site's own, because
@@ -310,22 +356,33 @@ void ta_found() {
                   lp && ramlv_refused && untouched && back);
 
     // What a Standby keeps, per class. On the D6 the first pair governs
-    // the whole array and the second does not exist.
+    // the whole array and the second does not exist; on the D8 classes
+    // the first pair is a 2 KB bank and the second a 30 KB one.
     Pwr::retain_ram(true);
     const bool kept = Pwr::retain_ram();
     Pwr::retain_ram_on_vbat(true);
     const bool kept_vbat = Pwr::retain_ram_on_vbat();
     Pwr::retain_upper_ram(true);
     const bool upper = Pwr::retain_upper_ram();
+    Pwr::retain_upper_ram_on_vbat(true);
+    const bool upper_vbat = Pwr::retain_upper_ram_on_vbat();
+    const uint32_t all_four = Pwr::retention_readback();
     Pwr::retain_ram_on_vbat(false);
+    Pwr::retain_upper_ram_on_vbat(false);
+    Pwr::retain_upper_ram(false);
+    const bool dropped = !Pwr::retain_ram_on_vbat() && !Pwr::retain_upper_ram_on_vbat() &&
+                         !Pwr::retain_upper_ram();
     print(serial, "  retention: the first bank covers ", Pwr::ram_retention_bytes,
           " B of this part's ", device::sram_bytes, " B; the second bank ",
-          Pwr::has_upper_ram_retention ? "exists" : "is the CH32V203RB's alone", crlf);
-    bench.verdict("the retention bits take a write and read back, and the upper bank's two "
-                  "answer false on this device class instead of writing a reserved bit - "
-                  "2.4.1 keys them by class and the driver folds the part table",
+          Pwr::has_upper_ram_retention ? "exists" : "is the CH32V203RB's alone",
+          "; the four bits set together READ ", hex(all_four), " on the silicon (the driver "
+          "keeps its own copy and carries it in every store)", crlf);
+    bench.verdict("the retention verbs take a write and answer it back, and the upper bank's "
+                  "two answer as the device class has them - false and nothing written where "
+                  "2.4.1 reserves them, set where it does not - and every one of them comes "
+                  "down again",
                   kept && kept_vbat && (upper == Pwr::has_upper_ram_retention) &&
-                      !Pwr::retain_ram_on_vbat());
+                      (upper_vbat == Pwr::has_upper_ram_retention) && dropped);
 
     print(serial, "  the regulator's trims (EXTEN, not this block): LDOTRIM=",
           Pwr::core_voltage(), " ULLDOTRIM=", Pwr::low_power_voltage(), crlf);
@@ -729,12 +786,12 @@ void td_stop() {
     const RtcNow after = rtc_now();
     const uint32_t awake_lag = (after.count - awake_at) * tr_div + after.phase;
     print(serial, "  an alarm served AWAKE arrives ", fine_us(awake_lag),
-          " us past the count it names - about one count of the ruler, which is this "
-          "block's own lag and not a sleep's", crlf);
-    bench.verdict("the alarm event is raised one count of the ruler AFTER the value "
-                  "written, not on it - measured awake, and subtracted from every span "
+          " us past the count it names - ", awake_lag >= tr_div / 2u ? "one count" : "on the count",
+          " of the ruler, which is this block's own lag and not a sleep's", crlf);
+    bench.verdict("the alarm event is raised on the value written or one count of the ruler "
+                  "after it, never before - measured awake, and subtracted from every span "
                   "below so that what is left is the sleep's own",
-                  awake_lag >= tr_div / 2u && awake_lag < tr_div * 2u);
+                  awake_lag < tr_div * 2u);
 
     console_drain();
     const StopRun main_run = one_stop(SleepDepth::standby, 205);
@@ -762,9 +819,9 @@ void td_stop() {
                   "core back, and the span the RTC counted is the one that was asked for",
                   main_run.ok && main_run.span >= main_run.counts * tr_div);
     bench.verdict("and it lands LATE and never early: past the block's own lag the wake "
-                  "itself costs a few periods of the ruler, which is the finest this "
-                  "silicon can say with its core stopped",
-                  main_run.overshoot >= awake_lag && wake_cost < tr_div);
+                  "costs at most one more count of the ruler and a few of its periods, "
+                  "which is the finest this silicon can say with its core stopped",
+                  main_run.overshoot >= awake_lag && wake_cost < 2u * tr_div);
     bench.verdict("WHAT COMES BACK IS NOT WHAT WENT IN: the core resumes on the HSI with "
                   "the PLL off, and the site's disarm() is what re-runs the clock task and "
                   "puts the program's own rate back",
@@ -952,6 +1009,30 @@ void te_kernel() {
     timed_round = false;
 }
 
+/// A channel of the second DMA controller, counted and refused like the
+/// first's - a template so that a part with one controller never names
+/// the other.
+template <uint8_t controller>
+void second_controller_refused() {
+    using Copier2 = DmaChannel<controller, 1>;
+    Dma<controller>::open();
+    Copier2::stop();
+    const uint8_t quiet = P::bus_masters_active();
+    const bool loaded2 = Copier2::load(long_copy());
+    const uint8_t counted = P::bus_masters_active();
+    const bool refused2 = !Timed::arm(SleepDepth::deep) && !Timed::arm(SleepDepth::standby) &&
+                          !Timed::arm(SleepDepth::light);
+    (void)wait_for([] { return (Copier2::flags() & DmaFlag::complete) != 0u; }, 200'000u);
+    Copier2::stop();
+    const uint8_t released = P::bus_masters_active();
+    print(serial, "  DMA2's first channel: the count ", quiet, " -> ", counted, " -> ",
+          released, ", every rung refused while it ran", crlf);
+    bench.verdict("AND A CHANNEL OF THE SECOND CONTROLLER counts and is refused the same "
+                  "way: DMA2's first channel raised the count to one, the site refused "
+                  "every rung over it, and stop() gave the count back",
+                  quiet == 0u && loaded2 && counted == 1u && refused2 && released == 0u);
+}
+
 void tf_votes() {
     if (!site_ready) {
         bench.verdict("the timed site's RTC is up (the crystal, a 1024 Hz tick)", false);
@@ -1034,6 +1115,12 @@ void tf_votes() {
                   "the manager disarms on the first event after a wake, and a transfer "
                   "started meanwhile must not leave a deep mode standing",
                   none_takes);
+
+    // THE SECOND CONTROLLER, where the part has one: a channel of DMA2 is
+    // counted through the same verb and refused the same way.
+    if constexpr (device::dma_controller_count > 1u) {
+        second_controller_refused<2>();
+    }
 
     Timed::disarm();
     bench.verdict("the letter leaves the machine shallow again: nothing armed, the clock "
@@ -1388,10 +1475,618 @@ void tg_resume() {
     token.letter = '\0';
 }
 
+// ===========================================================================
+// k - a Stop at every rate of a DynamicClock, the rate in force put back
+// ===========================================================================
+/// The suite's own tree first - so the pack starts where main() left the
+/// machine - then the top rate, a lower PLL rate and the bare HSI, every
+/// PLL rate on the crystal. The console and the tick are its users, so a
+/// switch rebases both and the letter speaks at every rate.
+using Dyn = DynamicClock<Rates<Clock<ClockSource::pll, 96'000'000, xtal_hz>,
+                               Clock<ClockSource::pll, 144'000'000, xtal_hz>,
+                               Clock<ClockSource::pll, 48'000'000, xtal_hz>,
+                               Clock<ClockSource::internal, 8'000'000>>,
+                         Ticker, Serial>;
+using DynSite = Ch32vx03SleepSite<Dyn>;
+
+/// HCLK as the core's own counter sees it against ten counts of the RTC:
+/// what the tree really runs at, not what the driver believes.
+uint32_t hclk_by_rtc() {
+    (void)Rtc::synchronize();
+    const uint32_t c0 = Rtc::count();
+    while (Rtc::count() == c0) {
+    }
+    Stopwatch w;
+    const uint32_t c1 = Rtc::count();
+    while (Rtc::count() - c1 < 10u) {
+        (void)w.cycles();   // polled, so no wrap of the counter goes unseen
+    }
+    const uint64_t cycles = w.cycles();
+    return static_cast<uint32_t>((cycles * tr_hz) / 10u);
+}
+
+void tk_dynamic() {
+    if (!site_ready) {
+        bench.verdict("the timed site's RTC is up (the crystal, a 1024 Hz tick)", false);
+        return;
+    }
+    timed_round = false;
+    (void)Rtc::arm_wake(true);
+    Pfic::enable(Irq::rtc_alarm);
+    bool all_back = true;
+    bool all_near = true;
+    for (uint8_t i = 0; i < Dyn::rate_count; ++i) {
+        const bool switched = Dyn::set_index(i);
+        console_drain();
+        alarm_hits = 0;
+        alarm_sws = 0xFF;
+        Rtc::clear(rtc_alrf);
+        (void)Exti::clear(Rtc::wake_line);
+        Pfic::clear_pending(Irq::rtc_alarm);
+        (void)Rtc::synchronize();
+        (void)Rtc::alarm(Rtc::count() + 20u);
+        (void)DynSite::arm(SleepDepth::standby);
+        uint8_t turns = 0;
+        while (alarm_hits == 0u && turns < 40u) {
+            {
+                P::CriticalSection cs;
+                P::idle();
+            }
+            ++turns;
+        }
+        const uint8_t sws_at_wake = alarm_sws;
+        DynSite::disarm();   // the DynamicClock's own restore(), for the rate in force
+        const bool back = Rcc::sysclk_status() == Dyn::rate_source(i);
+        const uint32_t measured = hclk_by_rtc();
+        const uint32_t asked = Dyn::rate_hz(i);
+        const uint32_t off = measured > asked ? measured - asked : asked - measured;
+        const bool near = off <= asked / 100u;
+        all_back = all_back && switched && alarm_hits != 0u &&
+                   sws_at_wake == static_cast<uint8_t>(SysclkSource::hsi) && back;
+        all_near = all_near && near;
+        print(serial, "  rate ", i, " (", asked / 1'000'000u, " MHz): the Stop ended by the "
+              "alarm after ", turns, " idle() turn(s) on ",
+              sws_at_wake == 0u ? "the HSI" : "NOT the HSI", ", restore() put back ",
+              back ? "its root" : "ANOTHER root", ", and the core's counter measures ",
+              measured / 1000u, " kHz against the RTC", crlf);
+    }
+    (void)Dyn::set_index(0);
+    bench.verdict("a Stop at every rate of the DynamicClock comes back on the HSI and the "
+                  "site's disarm() - the clock's own restore() - puts back the root of the "
+                  "rate IN FORCE and not the boot one",
+                  all_back);
+    bench.verdict("and the core then runs at that rate: the core's counter against the RTC "
+                  "within one per cent at every rung",
+                  all_near);
+    bench.verdict("and the program's own rate is in force again, the console legible",
+                  Dyn::rate_index() == 0u && Rcc::sysclk_status() == SysClock::sysclk_source);
+}
+
+// ===========================================================================
+// i - the floating-point unit across a Stop (the parts with one)
+// ===========================================================================
+/// Every f-register and fcsr loaded, a Stop entered and left by the RTC's
+/// alarm, and all of them stored again - in ONE asm block, because a call
+/// between the load and the store would be free to clobber the
+/// caller-saved half by the ABI, and the question is the silicon's.
+struct FpState {
+    uint32_t f[32];
+    uint32_t fcsr;
+    uint32_t mstatus;
+    uint32_t turns_left;   ///< of the forty wfi the block allows itself
+};
+
+/// The wfi is TAKEN AGAIN until the alarm's EXTI flag stands - the first
+/// one may consume a stale latched event and not sleep at all, the
+/// platform's idle idiom - with a bound of forty, and all of it inside
+/// the asm so no instruction the compiler emits runs between the load
+/// and the store.
+template <bool with_fpu>
+[[gnu::noinline]] void fp_stop(const uint32_t* in, FpState& out, uint32_t fcsr_in) {
+    if constexpr (with_fpu) {
+        uint32_t fcsr_out = 0;
+        uint32_t mstatus_out = 0;
+        uint32_t turns = 40;
+        uint32_t scratch = 0;
+        volatile uint32_t* const flags = &exti()->INTFR;
+        const uint32_t line_mask = 1UL << Rtc::wake_line;
+        __asm__ volatile(
+            "csrw fcsr, %[fi]\n"
+            "flw f0, 0(%[in])\n  flw f1, 4(%[in])\n  flw f2, 8(%[in])\n  flw f3, 12(%[in])\n"
+            "flw f4, 16(%[in])\n flw f5, 20(%[in])\n flw f6, 24(%[in])\n flw f7, 28(%[in])\n"
+            "flw f8, 32(%[in])\n flw f9, 36(%[in])\n flw f10, 40(%[in])\n flw f11, 44(%[in])\n"
+            "flw f12, 48(%[in])\n flw f13, 52(%[in])\n flw f14, 56(%[in])\n flw f15, 60(%[in])\n"
+            "flw f16, 64(%[in])\n flw f17, 68(%[in])\n flw f18, 72(%[in])\n flw f19, 76(%[in])\n"
+            "flw f20, 80(%[in])\n flw f21, 84(%[in])\n flw f22, 88(%[in])\n flw f23, 92(%[in])\n"
+            "flw f24, 96(%[in])\n flw f25, 100(%[in])\n flw f26, 104(%[in])\n flw f27, 108(%[in])\n"
+            "flw f28, 112(%[in])\n flw f29, 116(%[in])\n flw f30, 120(%[in])\n flw f31, 124(%[in])\n"
+            "1: wfi\n"
+            "lw %[sc], 0(%[fl])\n"
+            "and %[sc], %[sc], %[lm]\n"
+            "bnez %[sc], 2f\n"
+            "addi %[tn], %[tn], -1\n"
+            "bnez %[tn], 1b\n"
+            "2:\n"
+            "fsw f0, 0(%[out])\n  fsw f1, 4(%[out])\n  fsw f2, 8(%[out])\n  fsw f3, 12(%[out])\n"
+            "fsw f4, 16(%[out])\n fsw f5, 20(%[out])\n fsw f6, 24(%[out])\n fsw f7, 28(%[out])\n"
+            "fsw f8, 32(%[out])\n fsw f9, 36(%[out])\n fsw f10, 40(%[out])\n fsw f11, 44(%[out])\n"
+            "fsw f12, 48(%[out])\n fsw f13, 52(%[out])\n fsw f14, 56(%[out])\n fsw f15, 60(%[out])\n"
+            "fsw f16, 64(%[out])\n fsw f17, 68(%[out])\n fsw f18, 72(%[out])\n fsw f19, 76(%[out])\n"
+            "fsw f20, 80(%[out])\n fsw f21, 84(%[out])\n fsw f22, 88(%[out])\n fsw f23, 92(%[out])\n"
+            "fsw f24, 96(%[out])\n fsw f25, 100(%[out])\n fsw f26, 104(%[out])\n fsw f27, 108(%[out])\n"
+            "fsw f28, 112(%[out])\n fsw f29, 116(%[out])\n fsw f30, 120(%[out])\n fsw f31, 124(%[out])\n"
+            "csrr %[fo], fcsr\n"
+            "csrr %[ms], mstatus\n"
+            : [fo] "=&r"(fcsr_out), [ms] "=&r"(mstatus_out), [tn] "+r"(turns), [sc] "=&r"(scratch)
+            : [in] "r"(in), [out] "r"(out.f), [fi] "r"(fcsr_in), [fl] "r"(flags), [lm] "r"(line_mask)
+            : "memory", "f0", "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11",
+              "f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23",
+              "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31");
+        out.fcsr = fcsr_out;
+        out.mstatus = mstatus_out;
+        out.turns_left = turns;
+    } else {
+        (void)in;
+        (void)out;
+        (void)fcsr_in;
+    }
+}
+
+void ti_fpu() {
+    if constexpr (!device::has_fpu) {
+        bench.verdict("this part's core has no floating-point unit, so there is nothing to keep "
+                      "across a Stop",
+                      true);
+    } else {
+        if (!site_ready) {
+            bench.verdict("the timed site's RTC is up (the crystal, a 1024 Hz tick)", false);
+            return;
+        }
+        timed_round = false;
+        (void)Rtc::arm_wake(true);
+        Pfic::enable(Irq::rtc_alarm);
+        uint32_t in[32];
+        for (uint32_t i = 0; i < 32u; ++i) {
+            in[i] = 0x40490FDBUL ^ (i * 0x01010101UL) ^ (i << 27);
+        }
+        constexpr uint32_t fcsr_in = (3UL << 5) | 0x15UL;   // round up, four flags standing
+        FpState out{};
+        console_drain();
+        alarm_hits = 0;
+        alarm_sws = 0xFF;
+        Rtc::clear(rtc_alrf);
+        (void)Exti::clear(Rtc::wake_line);
+        Pfic::clear_pending(Irq::rtc_alarm);
+        (void)Rtc::synchronize();
+        const uint32_t at_arm = Rtc::count();
+        (void)Rtc::alarm(at_arm + 50u);
+        (void)Plain::arm(SleepDepth::standby);
+        {
+            // The platform's own idle shape, written out: interrupts
+            // masked, the tick paused, WFITOWFE and SEVONPEND, so the
+            // alarm's pend ends the wait and its handler runs after.
+            P::CriticalSection cs;
+            Ticker::pause();
+            stk()->SR = 0;
+            Pfic::clear_pending(Irq::systick);
+            pfic_sctlr() = (pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
+            fp_stop<device::has_fpu>(in, out, fcsr_in);
+            Ticker::resume();
+        }
+        (void)wait_for([] { return alarm_hits != 0u; }, 20'000u);
+        (void)Rtc::synchronize();
+        const uint32_t slept = Rtc::count() - at_arm;
+        Plain::disarm();
+        uint8_t kept_regs = 0;
+        uint8_t first_bad = 0xFF;
+        for (uint8_t i = 0; i < 32u; ++i) {
+            if (out.f[i] == in[i]) {
+                ++kept_regs;
+            } else if (first_bad == 0xFF) {
+                first_bad = i;
+            }
+        }
+        const uint32_t fs = (out.mstatus >> 13) & 0x3u;
+        print(serial, "  a Stop of ", slept, " counts woken by the alarm in ", 40u - out.turns_left,
+              " wfi (", alarm_hits, " alarm(s), SYSCLK at the wake ",
+              alarm_sws == 0u ? "the HSI" : "NOT the HSI", "): ", kept_regs,
+              " of 32 f-registers bit for bit, fcsr ", hex(out.fcsr), " of ", hex(fcsr_in),
+              ", mstatus.FS ", fs, crlf);
+        bench.verdict("the core really stopped: the alarm's line woke it after the fifty counts "
+                      "asked, on the HSI",
+                      alarm_hits != 0u && slept >= 50u &&
+                          alarm_sws == static_cast<uint8_t>(SysclkSource::hsi));
+        bench.verdict("ALL THIRTY-TWO F-REGISTERS AND FCSR COME THROUGH A STOP bit for bit - the "
+                      "floating-point unit keeps its state where the clocks stop",
+                      kept_regs == 32u && out.fcsr == fcsr_in);
+        bench.verdict("and mstatus.FS reads Dirty after the wake, the unit still on", fs == 3u);
+    }
+}
+
+// ===========================================================================
+// j - a Sleep ended by an edge on the board's own wire (PA6 -> PA1)
+// ===========================================================================
+using EdgeSrc = Pin<'A', 6>;
+using EdgeDst = Pin<'A', 1>;
+using EdgeInt = ExtInt<EdgeDst>;
+using EdgeTim = Tim<3>;
+using EdgePad = TimPad<tim_channel_pad(3, 0, 0)>;
+static_assert(tim_channel_pad(3, 0, 0) == Pad{'A', 6});
+
+volatile uint32_t exti1_hits = 0;
+volatile uint32_t exti1_count = 0;
+
+/// The wire, both levels, driven from one end and read at the other.
+bool edge_wire() {
+    EdgeSrc::output(false);
+    EdgeDst::input(PinPull::up);
+    (void)delay_us(clock, 20);
+    const bool low_seen = !EdgeDst::read();
+    EdgeSrc::set();
+    (void)delay_us(clock, 20);
+    const bool high_seen = EdgeDst::read();
+    EdgeDst::input(PinPull::down);
+    EdgeSrc::clear();
+    (void)delay_us(clock, 20);
+    const bool low_again = !EdgeDst::read();
+    EdgeSrc::release();
+    EdgeDst::release();
+    return low_seen && high_seen && low_again;
+}
+
+void tj_edge() {
+    if (!edge_wire()) {
+        print(serial, "  no wire from PA6 to PA1: the letter is SKIPPED", crlf);
+        bench.verdict("with no wire the edge letter is skipped and says so", true);
+        return;
+    }
+    // TIM3's first channel on PA6 makes ONE rising edge 500 us after it is
+    // started (a one-pulse), so the edge comes while the core sleeps and
+    // from nothing the core does; PA1's line, armed on the rising edge,
+    // is what ends the Sleep. The tick is paused across it, so nothing
+    // else can.
+    EdgeTim::init();
+    (void)EdgeTim::remap(0);
+    constexpr uint32_t tim_hz = EdgeTim::clock_hz(clock);
+    constexpr uint32_t edge_at = tim_hz / 2000u;   // 500 us of the timer's clock
+    (void)TimOnePulse<EdgeTim, 0>::setup(0, edge_at, tim_hz / 100000u);
+    EdgePad::claim();
+    const bool claimed = EdgeInt::claim(PinPull::down);
+    (void)EdgeInt::configure(ExtiSense::rising);
+    (void)EdgeInt::clear();
+    (void)EdgeInt::arm(true);
+    Pfic::clear_pending(Irq::exti1);
+    Pfic::enable(Irq::exti1);
+    exti1_hits = 0;
+    exti1_count = 0;
+
+    (void)Plain::arm(SleepDepth::light);
+    console_drain();
+    uint8_t turns = 0;
+    {
+        P::CriticalSection cs;
+        Ticker::pause();
+        stk()->SR = 0;
+        Pfic::clear_pending(Irq::systick);
+        TimOnePulse<EdgeTim, 0>::fire();
+    }
+    Stopwatch slept;
+    while (exti1_hits == 0u && turns < 10u) {
+        {
+            P::CriticalSection cs;
+            P::idle();
+        }
+        ++turns;
+    }
+    const uint32_t slept_us = slept.us(SysClock::hz);
+    Ticker::resume();
+    Plain::disarm();
+    const uint32_t hits = exti1_hits;
+    const uint32_t woke_at = exti1_count;
+    Pfic::disable(Irq::exti1);
+    EdgeInt::release();
+    EdgePad::release();
+    EdgeTim::release();
+
+    const uint32_t ticks_per_us = tim_hz / 1'000'000u;
+    print(serial, "  the wire is there; the edge was due ", edge_at / ticks_per_us,
+          " us after TIM3 started and the Sleep took ", turns, " idle() turn(s) and ", slept_us,
+          " us of the core's counter; line 1's handler ran ", hits, " time(s), ",
+          woke_at >= edge_at ? (woke_at - edge_at) : 0u, " timer cycles (", ticks_per_us,
+          " a microsecond) after the edge", crlf);
+    bench.verdict("A PAD'S EDGE ENDS A SLEEP with nothing else armed to: the tick paused, the "
+                  "one-pulse's edge on PA6 reached PA1's line through the wire and its handler "
+                  "ran - once, after the edge and never before it",
+                  claimed && hits == 1u && woke_at >= edge_at && turns >= 1u &&
+                      slept_us + 20u >= edge_at / ticks_per_us);
+}
+
+// ===========================================================================
+// r - what a Standby keeps of the SRAM, bank by bank (by name, resets)
+// ===========================================================================
+/// The state letter r carries across its resets lives in the BACKUP
+/// registers and not in .noinit, because .noinit's survival is the very
+/// thing being measured.
+inline constexpr uint16_t r_magic = 0x5B72;
+inline constexpr uint8_t r_bkp_magic = 1;
+inline constexpr uint8_t r_bkp_leg = 2;
+inline constexpr uint8_t r_bkp_pass = 3;
+inline constexpr uint8_t r_bkp_fail = 4;
+inline constexpr uint8_t r_bkp_count_lo = 5;
+inline constexpr uint8_t r_bkp_count_hi = 6;
+
+/// The legs: which of the two retention banks each one asks for. Where
+/// the device class has one bank there are two legs, the bank and none.
+struct RetentionLeg {
+    bool first;
+    bool second;
+    bool control;   ///< no Standby: a software reset, which keeps all of SRAM
+};
+inline constexpr RetentionLeg r_legs_d8[] = {
+    {true, true, true}, {true, true, false}, {true, false, false}, {false, true, false},
+    {false, false, false}};
+inline constexpr RetentionLeg r_legs_d6[] = {{true, false, true}, {true, false, false},
+                                             {false, false, false}};
+inline constexpr uint8_t r_leg_count = Pwr::has_upper_ram_retention ? 5u : 3u;
+constexpr RetentionLeg r_leg(uint8_t leg) {
+    return Pwr::has_upper_ram_retention ? r_legs_d8[leg - 1u] : r_legs_d6[leg - 1u];
+}
+
+/// The word painted at an address, different for every leg so that a word
+/// that merely survived from the last leg is not counted.
+constexpr uint32_t paint_word(uintptr_t addr, uint8_t leg) {
+    return static_cast<uint32_t>(addr) ^ 0x5AC3A55AUL ^ (static_cast<uint32_t>(leg) << 24);
+}
+
+/// The three regions a word can lie in: the first bank, the second, and
+/// what no bit governs (empty where the first bank is the whole array).
+inline constexpr uintptr_t sram_base = 0x20000000UL;
+inline constexpr uintptr_t bank1_end = sram_base + Pwr::ram_retention_bytes;
+inline constexpr uintptr_t bank2_end =
+    Pwr::has_upper_ram_retention ? sram_base + 32UL * 1024UL : bank1_end;
+inline constexpr uintptr_t sram_end = sram_base + device::sram_bytes;
+
+struct RegionTally {
+    uint32_t words[3];
+    uint32_t kept[3];
+    uint32_t zero[3];
+};
+
+RegionTally count_paint(uint8_t leg) {
+    RegionTally t{};
+    for (uint32_t i = 0; i < paint_words; ++i) {
+        const uintptr_t a = reinterpret_cast<uintptr_t>(&kept.paint[i]);
+        const uint8_t r = a < bank1_end ? 0u : (a < bank2_end ? 1u : 2u);
+        ++t.words[r];
+        if (kept.paint[i] == paint_word(a, leg)) {
+            ++t.kept[r];
+        } else if (kept.paint[i] == 0u) {
+            ++t.zero[r];
+        }
+    }
+    return t;
+}
+
+void bkp_count(uint32_t c) {
+    (void)Bkp::data(r_bkp_count_lo, static_cast<uint16_t>(c & 0xFFFFu));
+    (void)Bkp::data(r_bkp_count_hi, static_cast<uint16_t>(c >> 16));
+}
+uint32_t bkp_count() {
+    return static_cast<uint32_t>(Bkp::data(r_bkp_count_lo).value_or(0)) |
+           (static_cast<uint32_t>(Bkp::data(r_bkp_count_hi).value_or(0)) << 16);
+}
+
+/// Arm the documented way back BEFORE anything else - the RTC alarm, two
+/// seconds out, as an interrupt and an event - and enter Standby. The
+/// count it was placed at, and false if the alarm could not be placed
+/// (in which case NOTHING is entered).
+bool standby_with_alarm_first() {
+    // The way back is a COUNTER, so it is seen counting first: three
+    // counts of it in some four milliseconds, or no Standby at all.
+    const uint32_t c0 = Rtc::count();
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < 4u) {
+    }
+    if (Rtc::count() - c0 < 2u) {
+        return false;
+    }
+    Pwr::clear_flags();
+    (void)Rtc::arm_wake(true);
+    (void)Rtc::arm_wake_event(true);
+    Pfic::clear_pending(Irq::rtc_alarm);
+    Pfic::disable(Irq::rtc_alarm);
+    const uint32_t at = place_alarm(2u * tr_hz);
+    if (at == 0u || static_cast<int32_t>(at - Rtc::count()) <= static_cast<int32_t>(tr_hz)) {
+        return false;
+    }
+    return true;
+}
+
+void enter_standby_now() {
+    console_drain();
+    Ticker::pause();
+    Pfic::clear_pending(Irq::systick);
+    uint8_t turns = 0;
+    while (!Rtc::alarmed() && turns < 6u) {
+        Plain::enter_standby();
+        ++turns;
+    }
+    // Still here: whatever the note in table 2-1 promises, and on the HSI.
+    (void)Plain::resume_clock();
+    Ticker::resume();
+}
+
+void tr_enter(uint8_t leg) {
+    (void)Bkp::open();
+    (void)Bkp::data(r_bkp_magic, r_magic);
+    (void)Bkp::data(r_bkp_leg, leg);
+    (void)Bkp::data(r_bkp_pass, static_cast<uint16_t>(bench.passed()));
+    (void)Bkp::data(r_bkp_fail, static_cast<uint16_t>(bench.failed()));
+    for (uint32_t i = 0; i < paint_words; ++i) {
+        kept.paint[i] = paint_word(reinterpret_cast<uintptr_t>(&kept.paint[i]), leg);
+    }
+    const RetentionLeg l = r_leg(leg);
+    Pwr::retain_ram(l.first);
+    Pwr::retain_upper_ram(l.second);
+    Reset::clear_flags();
+    if (l.control) {
+        (void)Bkp::data(r_bkp_count_lo, 0);
+        (void)Bkp::data(r_bkp_count_hi, 0);
+        print(serial, "  leg ", leg, " (the control): ", paint_words, " words painted from ",
+              hex(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&kept.paint[0]))),
+              ", then a SOFTWARE reset, which keeps SRAM whole...", crlf);
+        console_drain();
+        Reset::software();
+    }
+    if (!standby_with_alarm_first()) {
+        (void)Bkp::data(r_bkp_magic, 0);
+        print(serial, "  the alarm could not be placed: NO STANDBY ENTERED", crlf);
+        bench.verdict("the alarm, the way back, was placed before the Standby", false);
+        return;
+    }
+    bkp_count(Rtc::count());
+    print(serial, "  leg ", leg, ": ", paint_words, " words painted from ",
+          hex(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&kept.paint[0]))), ", the first bank ",
+          l.first ? "KEPT" : "not kept", ", the second ",
+          Pwr::has_upper_ram_retention ? (l.second ? "KEPT" : "not kept") : "absent",
+          " (PWR_CTLR reads ", hex(Pwr::ctlr()), ", the driver keeps ",
+          hex(pwr_ctlr_kept), " and carries it in every store), the alarm two seconds out; "
+          "entering Standby...",
+          crlf);
+    enter_standby_now();
+    // A return is a finding too; the boot path is where a reset lands.
+    (void)Bkp::data(r_bkp_magic, 0);
+    print(serial, "  the machine RETURNED from Standby instead of resetting", crlf);
+    bench.verdict("a Standby entered with the alarm as its wake ends in a reset", false);
+}
+
+void tr_standby() {
+    if (!site_ready) {
+        bench.verdict("the timed site's RTC is up (the crystal, a 1024 Hz tick)", false);
+        return;
+    }
+    bench.reset_tally();
+    tr_enter(1);
+}
+
+void tr_resume() {
+    const uint8_t leg = static_cast<uint8_t>(Bkp::data(r_bkp_leg).value_or(0));
+    const uint32_t ms = ((Rtc::count() - bkp_count()) * 1000u) / tr_hz;
+    const RetentionLeg l = r_leg(leg);
+    const RegionTally t = count_paint(leg);
+    print(serial, crlf, "-> back after letter r's leg ", leg, l.control ? " (the control)" : "",
+          ", SBF=", (boot_csr & pwr_sbf) != 0u ? 1 : 0, " WUF=",
+          (boot_csr & pwr_wuf) != 0u ? 1 : 0, ", reset flags ", hex(boot_flags), crlf);
+    print(serial, "  the first bank (", l.first ? "asked kept" : "not asked", "): ", t.kept[0],
+          " of ", t.words[0], " painted words survived (", t.zero[0], " read zero); the second (",
+          Pwr::has_upper_ram_retention ? (l.second ? "asked kept" : "not asked") : "absent",
+          "): ", t.kept[1], " of ", t.words[1], " (", t.zero[1], " zero); above both: ", t.kept[2],
+          " of ", t.words[2], " (", t.zero[2], " zero)", crlf);
+    if (l.control) {
+        bench.verdict("THE CONTROL: across a software reset every painted word of every region "
+                      "is still there - so what the Standby legs count is the Standby's doing",
+                      t.kept[0] == t.words[0] && t.kept[1] == t.words[1] &&
+                          t.kept[2] == t.words[2] && (boot_flags & ResetFlag::software) != 0u);
+    } else {
+        print(serial, "  ", ms, " ms after the alarm was placed", crlf);
+        bench.verdict("the alarm ended the Standby through a reset, at the two seconds it was "
+                      "placed, with SBF and WUF standing at the boot",
+                      ms >= 1900u && ms <= 2600u && (boot_csr & pwr_sbf) != 0u &&
+                          (boot_csr & pwr_wuf) != 0u);
+    }
+    if (!l.control) {
+        const bool first_ok = l.first ? t.kept[0] == t.words[0] : t.kept[0] == 0u;
+        const bool second_ok = l.second ? t.kept[1] == t.words[1] : t.kept[1] == 0u;
+        bench.verdict("EACH BIT KEEPS ITS OWN BANK AND NOTHING ELSE: a bank asked for came "
+                      "through whole, a bank not asked for kept not one painted word, and nothing "
+                      "above the banks survived - 2.3.4's address note, bank by bank",
+                      first_ok && second_ok && t.kept[2] == 0u);
+    }
+    Pwr::clear_flags();
+    if (leg < r_leg_count) {
+        bench.resume_tally(bench.passed(), bench.failed());
+        tr_enter(static_cast<uint8_t>(leg + 1u));
+        return;
+    }
+    (void)Bkp::data(r_bkp_magic, 0);
+    Pwr::retain_ram(true);
+    Pwr::retain_upper_ram(true);
+    bench.end_letter();
+}
+
+// ===========================================================================
+// x - the independent watchdog through a Standby (by name, resets)
+// ===========================================================================
+inline constexpr uint16_t x_magic = 0x5B78;
+/// Whether the independent watchdog was running when main() began,
+/// read before anything could start the LSI.
+bool iwdg_at_boot = false;
+
+void tx_iwdg_standby() {
+    if (!site_ready) {
+        bench.verdict("the timed site's RTC is up (the crystal, a 1024 Hz tick)", false);
+        return;
+    }
+    bench.reset_tally();
+    (void)Bkp::open();
+    (void)Bkp::data(r_bkp_magic, x_magic);
+    (void)Bkp::data(r_bkp_pass, 0);
+    (void)Bkp::data(r_bkp_fail, 0);
+    Pwr::retain_ram(true);
+    Pwr::retain_upper_ram(true);
+    Reset::clear_flags();
+    // FIRST THE WAY BACK: the RTC alarm, two seconds out. Nothing below
+    // runs unless it is placed.
+    if (!standby_with_alarm_first()) {
+        (void)Bkp::data(r_bkp_magic, 0);
+        print(serial, "  the alarm could not be placed: NO STANDBY ENTERED", crlf);
+        bench.verdict("the alarm, the way back, was placed before the Standby", false);
+        bench.end_letter();
+        return;
+    }
+    bkp_count(Rtc::count());
+    print(serial, "  the alarm two seconds out; now the independent watchdog at about 200 ms "
+                  "(div32, reload 249); entering Standby - whichever ends it is the answer",
+          crlf);
+    console_drain();
+    (void)Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div32, .reload = 249});
+    Iwdg::refresh();
+    enter_standby_now();
+    (void)Bkp::data(r_bkp_magic, 0);
+    print(serial, "  the machine RETURNED from Standby instead of resetting", crlf);
+    bench.verdict("a Standby ends in a reset", false);
+    bench.end_letter();
+}
+
+void tx_resume() {
+    const uint32_t ms = ((Rtc::count() - bkp_count()) * 1000u) / tr_hz;
+    const bool iwdg_reset = (boot_flags & ResetFlag::independent_watchdog) != 0u;
+    const bool woke = (boot_csr & pwr_wuf) != 0u;
+    const bool standby = (boot_csr & pwr_sbf) != 0u;
+    print(serial, crlf, "-> back after letter x: ", ms, " ms after the alarm was placed; reset "
+          "flags ", hex(boot_flags), " (IWDGRSTF=", iwdg_reset ? 1 : 0, " PORRSTF=",
+          (boot_flags & ResetFlag::power) != 0u ? 1 : 0, " PINRSTF=",
+          (boot_flags & ResetFlag::pin) != 0u ? 1 : 0, " SFTRSTF=",
+          (boot_flags & ResetFlag::software) != 0u ? 1 : 0, "), SBF=", standby ? 1 : 0, " WUF=",
+          woke ? 1 : 0, "; the watchdog ", iwdg_at_boot ? "STILL RUNNING" : "stopped",
+          " at this boot; DBGMCU_CR=", hex(boot_dbg), crlf);
+    bench.verdict("the Standby ended - the board came back through its reset vector with SBF "
+                  "standing",
+                  standby);
+    bench.verdict("what ended it, measured: the independent watchdog's reset at about 200 ms, or "
+                  "the alarm at two seconds (the numbers above say which)",
+                  (iwdg_reset && ms < 1500u) || (woke && ms >= 1900u && ms <= 2600u));
+    bench.verdict("and the reset that ended it left no watchdog running into this boot",
+                  !iwdg_at_boot);
+    (void)Bkp::data(r_bkp_magic, 0);
+    Pwr::clear_flags();
+    bench.end_letter();
+}
+
 void banner() {
     print(serial, crlf, "test_vx03_sleep on ", device::part_name,
           " - PWR (RM ch. 2) and the two sleep sites", crlf,
-          "  z costs the board nothing; w ENTERS STANDBY and g RESETS THE BOARD, by name",
+          "  z costs the board nothing; w, r and x ENTER STANDBY and g RESETS THE BOARD, by name",
           crlf, "  the RTC: ", site_ready ? "up on the crystal" : "NOT READY",
           ", the ruler ", rtcclk_hz, " Hz", crlf, crlf);
     bench.menu();
@@ -1424,6 +2119,14 @@ extern "C" BRIO_CH32_INTERRUPT void exti0_handler() {
     exti0_hits = exti0_hits + 1u;
 }
 
+/// PA1's line, which the wire from PA6 drives (letter j): the time of the
+/// edge's arrival on TIM3's own counter.
+extern "C" BRIO_CH32_INTERRUPT void exti1_handler() {
+    exti1_count = EdgeTim::count();
+    (void)brio::Exti::clear(1);
+    exti1_hits = exti1_hits + 1u;
+}
+
 /// The supply monitor's own vector, on EXTI line 16.
 extern "C" BRIO_CH32_INTERRUPT void pvd_handler() {
     (void)brio::Pwr::pvd_isr();
@@ -1431,6 +2134,12 @@ extern "C" BRIO_CH32_INTERRUPT void pvd_handler() {
 }
 
 int main() {
+    // Before anything could start the LSI: is a watchdog running into
+    // this boot? (Letter x's question, read at every boot.)
+    iwdg_at_boot = brio::Iwdg::running();
+    if (iwdg_at_boot) {
+        brio::Iwdg::refresh();
+    }
     const bool clock_ok = SysClock::init();
     boot_flags = brio::Reset::take_flags();
 
@@ -1460,23 +2169,47 @@ int main() {
     bench.letter('f', "the vote round, the lock, the deadline guard, the silicon's refusal",
                  tf_votes);
     bench.letter('h', "a Stop ended from outside, and the wake-up pad", th_edge);
+    bench.letter('j', "a Sleep ended by an edge on the board's wire, PA6 -> PA1", tj_edge);
+    bench.letter('k', "a Stop at every rate of a DynamicClock, the rate in force put back",
+                 tk_dynamic);
+    if constexpr (device::has_fpu) {
+        bench.letter('i', "the floating-point unit across a Stop", ti_fpu);
+    }
     bench.letter('w', "STANDBY, three times (the board comes back through a reset)", tw_standby,
                  false);
     bench.letter('g', "THE INDEPENDENT WATCHDOG ACROSS A STOP (resets the board)", tg_iwdg,
                  false);
+    bench.letter('r', "WHAT A STANDBY KEEPS of the SRAM, bank by bank (resets the board)",
+                 tr_standby, false);
+    bench.letter('x', "THE INDEPENDENT WATCHDOG THROUGH A STANDBY, the alarm armed first (resets "
+                      "the board)",
+                 tx_iwdg_standby, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL96 on the crystal" : "FAILED",
                     " tick=", tick_ok ? "STK" : "FAILED", " site=", site_ready ? "RTC" : "FAILED",
                     brio::crlf);
-        if (token.magic == token_magic && token.letter == 'w') {
+        // A resume path is compiled only into an image that carries its
+        // letter, so a group image does not pay for another group's.
+        const uint16_t bkp_magic =
+            site_ready && brio::Bkp::open() ? brio::Bkp::data(r_bkp_magic).value_or(0) : 0u;
+        if (brio::test_letter_carried('w') && token.magic == token_magic && token.letter == 'w') {
             bench.reset_tally();
             bench.resume_tally(token.pass, token.fail);
             tw_resume();
-        } else if (token.magic == token_magic && token.letter == 'g') {
+        } else if (brio::test_letter_carried('g') && token.magic == token_magic &&
+                   token.letter == 'g') {
             bench.reset_tally();
             bench.resume_tally(token.pass, token.fail);
             tg_resume();
+        } else if (brio::test_letter_carried('r') && bkp_magic == r_magic) {
+            bench.reset_tally();
+            bench.resume_tally(brio::Bkp::data(r_bkp_pass).value_or(0),
+                               brio::Bkp::data(r_bkp_fail).value_or(0));
+            tr_resume();
+        } else if (brio::test_letter_carried('x') && bkp_magic == x_magic) {
+            bench.reset_tally();
+            tx_resume();
         } else {
             banner();
         }

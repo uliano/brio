@@ -147,17 +147,18 @@ CH32V30x_D8 for the four CH32V303. Drivers:
 
 ### The lines
 
-- **Twenty-two lines** (table 9-3, 9.5.1's registers carry bits
-  [21:0]): sixteen pin lines, then the PVD (16), the RTC alarm (17) and
-  the peripheral wake-ups - the USB device controller's (18), which on
-  the CH32V30x_D8, a class with no such controller, the table's note
-  gives to the USBFS/OTG one; the Ethernet's (19); the USBFS
-  controller's (20); and on the CH32V20x_D8 alone the internal 32 kHz
-  calibration's (21). Which of them a part has follows its peripherals,
-  and the part table states it (`device::exti_lines`): the CH32V303 has
-  18 and 20 and neither 19 nor 21. On the CH32V303VCT6 line 18's
-  software trigger pends interrupt 58 and line 20's pends 84, read over
-  the debug port ([README.md](README.md)).
+- **Twenty-two lines** (table 9-3, 9.5.1's registers carry bits [21:0]):
+  sixteen pin lines, then the PVD (16), the RTC alarm (17) and the
+  peripheral wake-ups - the USB device controller's (18), which on the
+  CH32V30x_D8, a class with no such controller, the table's note gives
+  to the USBFS/OTG one; the Ethernet's (19); the USBFS controller's
+  (20); and on the CH32V20x_D8 alone the internal 32 kHz calibration's
+  (21). Which of them a part has follows its peripherals, and the part
+  table states it (`device::exti_lines`): the CH32V303 has 18 and 20 and
+  neither 19 nor 21. On the CH32V303VCT6 line 18's software trigger
+  pends interrupt 58 and line 20's pends 84, read over the debug port
+  ([README.md](README.md)), and a host's resume raises line 18 alone
+  ([usbfs.md](usbfs.md)).
 - **The line number IS the pin number and the port is a choice**
   (10.2.3): PA1, PB1, PC1, PD1 and PE1 all reach EXTI1 and only one of
   them at a time, chosen four bits at a time in AFIO_EXTICR1..4 - port
@@ -475,13 +476,16 @@ Implemented but not bench-verified, each with what would measure it:
   manual gives the column to some lots alone - its V2.5 revision to
   some lots of the D8 classes alone. A program that gives the debug
   port away, on a die of a known lot, would measure it.
-- **The two USB wake-up lines as wake-ups.** `ExtiLine<n>` reaches each
-  of the four peripheral lines, and two of them are measured by the
+- **The USB wake-up lines on the CH32V203.** `ExtiLine<n>` reaches each
+  of the four peripheral lines, and three of them are measured by the
   chapter that owns the source - the PVD's through its software trigger
-  ([sleep.md](sleep.md)) and the RTC alarm's as an interrupt, as an
-  event and as a Stop's end ([rtc.md](rtc.md), [sleep.md](sleep.md)).
-  What would measure the other two is the USB chapter of each part,
-  whose controller raises them.
+  ([sleep.md](sleep.md)), the RTC alarm's as an interrupt, as an event
+  and as a Stop's end ([rtc.md](rtc.md), [sleep.md](sleep.md)), and on
+  the CH32V303VCT6 line 18, which a host's resume raises through the
+  host/device controller while line 20 stays silent
+  ([usbfs.md](usbfs.md)). What would measure the CH32V203's two is its
+  device controller's wake-up armed under a host's suspend (line 18)
+  and a board with a connector on PB6/PB7 (line 20).
 - **The configuration lock on a whole mask**, and what a peripheral
   reset pulse does to a standing lock: the suite locks one pin of one
   port, which is all it can afford when the lock stands until a reset.

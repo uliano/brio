@@ -34,11 +34,13 @@
  *                                       off; the documented exits are
  *                                       the WKUP pad's rising edge, the
  *                                       RTC alarm, the NRST pad and an
- *                                       IWDG reset - and AN ORDINARY
- *                                       EXTI LINE ends it too, which
- *                                       2.3.4 does not say (measured) -
- *                                       and every one of them comes
- *                                       back THROUGH A POWER RESET
+ *                                       IWDG reset (the alarm and the
+ *                                       watchdog measured) - and AN
+ *                                       ORDINARY EXTI LINE ends it too,
+ *                                       which 2.3.4 does not say
+ *                                       (measured) - and every one of
+ *                                       them comes back THROUGH A POWER
+ *                                       RESET
  *
  * SLEEPDEEP is the core's, not this block's (2.3's note points at
  * PFIC_SCTLR), which is why `arm()` writes the pair together: neither
@@ -61,10 +63,25 @@
  * to misread: on the CH32V20x_D6 - every part of this series but the
  * CH32V203RB - R2KSTY and R2KVBAT govern THE WHOLE 20 KB (which is
  * that class's LARGEST array: four parts of this series carry ten),
- * and R30KSTY and R30KVBAT do not exist; on the D8 they are a 2 KB
- * bank and a 30 KB one. So the verbs here are named for the banks and not for the sizes,
- * and `ram_retention_bytes` says what the first one covers on the part
+ * and R30KSTY and R30KVBAT do not exist; on the D8 classes they are a
+ * 2 KB bank at the bottom of SRAM and a 30 KB one above it, and nothing
+ * above 32 KB is kept (measured on the CH32V303VC, bank by bank). So the
+ * verbs here are named for the banks and not for the sizes, and
+ * `ram_retention_bytes` says what the first one covers on the part
  * being compiled.
+ *
+ * AND THOSE BITS ARE WRITE-ONLY ON THE CH32V303VC, measured: bits 16..20
+ * read back zero whatever was written, and act - so a read-modify-write
+ * of PWR_CTLR, any of them, writes them away, and a Standby entered after
+ * one keeps nothing. The program's choice is therefore kept in RAM
+ * (device.hpp's pwr_ctlr_kept) and EVERY store to the register carries it
+ * (pwr_ctlr_store(), which the RTC chapter's DBP goes through too); the
+ * readbacks of those five bits are that copy, the silicon's being
+ * unreadable there. RAMLV is one of them. The copy starts at zero at
+ * every boot, where 2.4.1's closing note has the bits themselves cleared
+ * by a backup reset alone: the first store after a boot writes them to
+ * the copy, so a program states its retention again before every
+ * Standby - whether they outlive a reset is not measured.
  *
  * THE PVD IS TWO TABLES AND THE PART DOES NOT SAY WHICH. PLS[2:0]
  * selects one of eight thresholds, and 2.4.1 gives two sets of
@@ -145,12 +162,14 @@ inline constexpr uint32_t pwr_r2kvbat   = 1UL << 18;   ///< the first bank kept 
 inline constexpr uint32_t pwr_r30kvbat  = 1UL << 19;   ///< the second on VBAT, D8 alone
 inline constexpr uint32_t pwr_ramlv     = 1UL << 20;   ///< the RAM's low-voltage mode, needs LPDS
 
-/// The four retention bits as one field: 2.4.1's closing note says that
-/// bits 16..20 "can only be reset by backup" while every other bit of
-/// the register is reset by a Standby wake, so they are the part of
-/// PWR_CTLR that OUTLIVES the mode they configure.
+/// The four retention bits and RAMLV as one field: 2.4.1's closing note
+/// says that bits 16..20 "can only be reset by backup" while every other
+/// bit of the register is reset by a Standby wake, so they are the part
+/// of PWR_CTLR that OUTLIVES the mode they configure - and device.hpp's
+/// kept bits, the ones every store carries.
 inline constexpr uint32_t pwr_retention_bits =
     pwr_r2ksty | pwr_r30ksty | pwr_r2kvbat | pwr_r30kvbat | pwr_ramlv;
+static_assert(pwr_retention_bits == pwr_ctlr_kept_bits);
 
 /// PWR_CSR (2.4.2). WUF, SBF and PVDO are read-only; EWUP is the only
 /// bit a program writes here, and the register is NOT reset by a
@@ -337,14 +356,14 @@ struct Pwr {
             // without a deep sleep - but taking the second down with it
             // is what makes "nothing armed here can reach Standby" a
             // fact of the REGISTERS and not only of the code.
-            pwr()->CTLR &= ~pwr_pdds;
+            pwr_ctlr_store(pwr()->CTLR & ~pwr_pdds);
             pfic_sctlr() = pfic_sctlr() & ~(sctlr_sleepdeep | sctlr_setevent);
             return true;
         }
         if (m == PwrMode::standby) {
-            pwr()->CTLR |= pwr_pdds;
+            pwr_ctlr_store(pwr()->CTLR | pwr_pdds);
         } else {
-            pwr()->CTLR &= ~pwr_pdds;
+            pwr_ctlr_store(pwr()->CTLR & ~pwr_pdds);
         }
         (void)pwr()->CTLR;   // the store has landed before SLEEPDEEP joins it
         pfic_sctlr() = (pfic_sctlr() | sctlr_sleepdeep) & ~sctlr_setevent;
@@ -378,17 +397,18 @@ struct Pwr {
             return false;
         }
         open();
-        uint32_t v = pwr()->CTLR & ~(pwr_lpds | pwr_ramlv);
+        uint32_t v = pwr()->CTLR & ~pwr_lpds;
         if (c.regulator == StopRegulator::low_power) { v |= pwr_lpds; }
-        if (c.ram_low_voltage) { v |= pwr_ramlv; }
-        pwr()->CTLR = v;
+        keep(pwr_ramlv, c.ram_low_voltage);
+        pwr_ctlr_store(v);
         return true;
     }
 
+    /// LPDS off the silicon, RAMLV off the kept copy (the file header).
     static StopConfig stop_config() {
         const uint32_t v = ctlr();
         return StopConfig{(v & pwr_lpds) != 0u ? StopRegulator::low_power : StopRegulator::main,
-                          (v & pwr_ramlv) != 0u};
+                          (pwr_ctlr_kept & pwr_ramlv) != 0u};
     }
 
     // ---- the instruction ----------------------------------------------------
@@ -455,18 +475,18 @@ struct Pwr {
     /// read taken in the next instruction may still see it standing.
     static void clear_wakeup_flag() {
         open();
-        pwr()->CTLR |= pwr_cwuf;
+        pwr_ctlr_store(pwr()->CTLR | pwr_cwuf);
     }
 
     static void clear_standby_flag() {
         open();
-        pwr()->CTLR |= pwr_csbf;
+        pwr_ctlr_store(pwr()->CTLR | pwr_csbf);
     }
 
     /// Both, in one store - the boot verb, after the flags have been read.
     static void clear_flags() {
         open();
-        pwr()->CTLR |= pwr_cwuf | pwr_csbf;
+        pwr_ctlr_store(pwr()->CTLR | pwr_cwuf | pwr_csbf);
     }
 
     // ---- the wake-up pad ----------------------------------------------------
@@ -509,9 +529,9 @@ struct Pwr {
         open();
         uint32_t v = pwr()->CTLR & ~(pwr_pvde | pwr_pls_mask);
         v |= (static_cast<uint32_t>(level) << pwr_pls_shift) & pwr_pls_mask;
-        pwr()->CTLR = v;
+        pwr_ctlr_store(v);
         if (on) {
-            pwr()->CTLR = v | pwr_pvde;
+            pwr_ctlr_store(v | pwr_pvde);
         }
         return pvd() == on;
     }
@@ -598,19 +618,23 @@ struct Pwr {
             ? 2UL * 1024UL
             : (device::sram_bytes < 20UL * 1024UL ? device::sram_bytes : 20UL * 1024UL);
 
-    /// R2KSTY: keep the first bank powered through a Standby on VDD.
+    /// R2KSTY: keep the first bank powered through a Standby on VDD. The
+    /// readback is the kept copy (the file header): the silicon's reads
+    /// zero on the CH32V303VC.
     static void retain_ram(bool on) {
+        keep(pwr_r2ksty, on);
         open();
-        pwr()->CTLR = on ? (pwr()->CTLR | pwr_r2ksty) : (pwr()->CTLR & ~pwr_r2ksty);
+        pwr_ctlr_store(pwr()->CTLR);
     }
-    static bool retain_ram() { return (ctlr() & pwr_r2ksty) != 0u; }
+    static bool retain_ram() { return (pwr_ctlr_kept & pwr_r2ksty) != 0u; }
 
     /// R2KVBAT: the same bank charged while the supply is VBAT.
     static void retain_ram_on_vbat(bool on) {
+        keep(pwr_r2kvbat, on);
         open();
-        pwr()->CTLR = on ? (pwr()->CTLR | pwr_r2kvbat) : (pwr()->CTLR & ~pwr_r2kvbat);
+        pwr_ctlr_store(pwr()->CTLR);
     }
-    static bool retain_ram_on_vbat() { return (ctlr() & pwr_r2kvbat) != 0u; }
+    static bool retain_ram_on_vbat() { return (pwr_ctlr_kept & pwr_r2kvbat) != 0u; }
 
     /// R30KSTY and R30KVBAT: the upper bank, on the class that has one.
     /// Elsewhere the verbs write nothing and read false, because the
@@ -618,34 +642,41 @@ struct Pwr {
     /// whole array.
     static void retain_upper_ram(bool on) {
         if constexpr (has_upper_ram_retention) {
+            keep(pwr_r30ksty, on);
             open();
-            pwr()->CTLR = on ? (pwr()->CTLR | pwr_r30ksty) : (pwr()->CTLR & ~pwr_r30ksty);
+            pwr_ctlr_store(pwr()->CTLR);
         } else {
             (void)on;
         }
     }
     static bool retain_upper_ram() {
         if constexpr (has_upper_ram_retention) {
-            return (ctlr() & pwr_r30ksty) != 0u;
+            return (pwr_ctlr_kept & pwr_r30ksty) != 0u;
         } else {
             return false;
         }
     }
     static void retain_upper_ram_on_vbat(bool on) {
         if constexpr (has_upper_ram_retention) {
+            keep(pwr_r30kvbat, on);
             open();
-            pwr()->CTLR = on ? (pwr()->CTLR | pwr_r30kvbat) : (pwr()->CTLR & ~pwr_r30kvbat);
+            pwr_ctlr_store(pwr()->CTLR);
         } else {
             (void)on;
         }
     }
     static bool retain_upper_ram_on_vbat() {
         if constexpr (has_upper_ram_retention) {
-            return (ctlr() & pwr_r30kvbat) != 0u;
+            return (pwr_ctlr_kept & pwr_r30kvbat) != 0u;
         } else {
             return false;
         }
     }
+
+    /// What PWR_CTLR's bits 16..20 read back ON THE SILICON - zero on the
+    /// CH32V303VC whatever was written, the program's choice on the
+    /// CH32V203C8 - for a program that asks the die which kind it is.
+    static uint32_t retention_readback() { return ctlr() & pwr_ctlr_kept_bits; }
 
     // ---- the regulator's own bits, which live in EXTEN (RM 33.2.1) ----------
 
@@ -703,6 +734,12 @@ struct Pwr {
     static bool debug_in_standby() { return (debug_cr() & (1UL << 2)) != 0u; }
     static bool debug_holds_clocks() {
         return (debug_cr() & 0x7UL) != 0u;
+    }
+
+private:
+    /// One of the kept bits (device.hpp's pwr_ctlr_kept), set or cleared.
+    static void keep(uint32_t bit, bool on) {
+        pwr_ctlr_kept = on ? (pwr_ctlr_kept | bit) : (pwr_ctlr_kept & ~bit);
     }
 };
 

@@ -321,8 +321,10 @@ Driver gaps, each with its reason:
 
 - **RCC_CFGR2.** Its PLL2, PLL3, PREDIV and I2S/RNG selectors belong to
   the D8C classes of other families; the one field of it a part of this
-  stratum could use is the USBFS clock source, which belongs with that
-  block.
+  stratum could use is the USBFS clock source, whose other choice is the
+  high-speed PHY's PLL of those classes - its reset value is the PLL
+  through USBPRE, which is what the host/device controller was measured
+  on ([usbfs.md](usbfs.md)).
 - **The oscillator calibration registers of table 3-2** (HSE_CAL_CTRL,
   the five LSI32K ones): the table's own note applies them to the
   CH32V20x_D8W, which is another family.

@@ -27,9 +27,11 @@
  * WHO COUNTS. A DMA channel while it is enabled (ch32vx03/dma.hpp's
  * `DmaChannel::enable()` counts the EN transition, so every engine and
  * every task built on a channel is counted exactly once through it),
- * and the USB device controller from the moment its pull-up goes up to
- * the moment it comes down (ch32vx03/usb.hpp's `Usbd::connect()`).
- * Nothing else on this part is a bus master.
+ * and a USB controller from the moment its pull-up goes up to the
+ * moment it comes down - the device controller through
+ * ch32vx03/usb.hpp's `Usbd::connect()`, the host/device controller
+ * through ch32vx03/usbfs.hpp's `Usbfs::connect()`. Nothing else on
+ * this part is a bus master.
  *
  * WHAT A CHANNEL THAT HAS FINISHED COUNTS AS. EN stays SET when a
  * non-circular block completes on this silicon - only software clears

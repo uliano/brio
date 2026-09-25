@@ -205,8 +205,25 @@ inline constexpr bool has_ethernet = false;
 /// (USBD, RM ch. 21) on PA11/PA12, and the host/device one (USBFS, ch.
 /// 23) on PB6/PB7. Which of them a BOARD wires to a connector is the
 /// board's business, not the part's.
-inline constexpr bool has_usbd  = true;
+///
+/// THE ONE FACT THE PREPROCESSOR IS GIVEN. has_usbd is stated here as a
+/// macro and the constant is derived from it, because a program needs
+/// this fact where no constant reaches: a VECTOR BINDING. A handler is a
+/// symbol the image defines or does not, decided before any constexpr is
+/// evaluated, and a program that drives whichever USB controller its part
+/// carries binds the device controller's line on one part and the
+/// host/device controller's on another. One statement, two readers: the
+/// constant for every driver, the macro for that one binding.
+#define BRIO_CH32VX03_HAS_USBD 1
+inline constexpr bool has_usbd  = BRIO_CH32VX03_HAS_USBD != 0;
 inline constexpr bool has_usbfs = true;
+/// The two pads the host/device controller drives, D- and D+: PB6 and
+/// PB7, the datasheet's USBFS_DM and USBFS_DP (3.3) - I2C1's default pair
+/// as well.
+inline constexpr char usbfs_dm_port = 'B';
+inline constexpr uint8_t usbfs_dm_pin = 6;
+inline constexpr char usbfs_dp_port = 'B';
+inline constexpr uint8_t usbfs_dp_pin = 7;
 
 /// The EXTI lines this part has, one bit per line (RM table 9-3 and its
 /// class notes): the sixteen pin lines, the PVD's (16) and the RTC

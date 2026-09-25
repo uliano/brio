@@ -493,20 +493,22 @@ gets its home in `docs/design/` when taken.
   measured there so far: the bus stalls in Sleep as on the CH32V203 (a
   memory-to-memory DMA moves 37 words across 1.9 ms of idle()), the part
   has NO USB device controller - its one full-speed controller is
-  chapter 23's host/device block, on the board's own connector, whose
-  driver is the next USB chapter's -, and a handler that calls out pays
-  twenty f-register saves; the bench die has none of the lot-keyed
-  registers its class's notes list (and one of them, EXTEN_CTR2, is a
-  mirror of EXTEN_CTR there) and DMA1's 64 KB wrap. What the V203's
-  silicon taught is in the same README, and one finding shapes the power
-  model: IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE - the USB
-  controller cannot reach its packet memory and a DMA stalls (measured
-  with the vendor's own example as the oracle, and no software
-  mitigation short of staying awake works), so a program that moves data
-  through the bus does not SLEEP here and slows down instead, to no less
-  than 24 MHz of HCLK; the sleep sites and the platform's idle path both
+  chapter 23's host/device block, on the board's own connector, driven
+  in device mode by usbfs.hpp with the console on the board's own
+  connector -, and a handler that calls out pays twenty f-register
+  saves; the bench die has none of the lot-keyed registers its class's
+  notes list (and one of them, EXTEN_CTR2, is a mirror of EXTEN_CTR
+  there) and DMA1's 64 KB wrap. What the V203's silicon taught is in the
+  same README, and one finding shapes the power model: IN SLEEP THE BUS
+  MATRIX SERVES THE CORE ALONE - the USB controller cannot reach its
+  packet memory and a DMA stalls (measured with the vendor's own example
+  as the oracle, and no software mitigation short of staying awake
+  works), so a program that moves data through the bus does not SLEEP
+  here and slows down instead, to no less than 24 MHz of HCLK under the
+  CH32V203's device controller and 12 MHz under the CH32V303's
+  host/device one; the sleep sites and the platform's idle path both
   read a COUNT of active bus masters - a DMA channel while its EN is up,
-  the USB controller from its pull-up - and neither sleeps above zero.
+  a USB controller from its pull-up - and neither sleeps above zero.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -1674,7 +1676,13 @@ brio/                    the framework, one directory per stratum:
                            the device class and its vector tail - the Irq table
                            per class, irq_none where a class has not the line
                            and a static_assert at its use - as constexpr facts
-                           every driver branches on with if constexpr
+                           every driver branches on with if constexpr, and
+                           BRIO_CH32VX03_HAS_USBD, the one fact a vector
+                           binding needs from the preprocessor; and PWR_CTLR's
+                           ONE STORE, pwr_ctlr_store(), which carries the
+                           retention bits the program chose - on the CH32V303VC
+                           they read back zero and still act, so a
+                           read-modify-write would write them away
     pfic.hpp               InterruptGuard (csrrci on mstatus.MIE - measured
                            with no shadow, where a store into a line's own
                            PFIC_IRER lets a pend through for three
@@ -1787,6 +1795,40 @@ brio/                    the framework, one directory per stratum:
                            does not). An attached controller holds one count in
                            bus_activity.hpp from its pull-up to its detach,
                            which is what keeps the core awake for it
+    usbfs.hpp              the USB HOST/DEVICE controller (ch. 23) in DEVICE
+                           mode: Usbfs<pool_bytes>, WCH's own design - the
+                           CH32V303's one full-speed controller, and five
+                           CH32V203 parts' second on PB6/PB7 - realizing
+                           util/usb's UsbController at the packet: a register
+                           file of BYTES whose ONE status byte and ONE
+                           receive-length register serve every endpoint, kept
+                           standing by the automatic pause the driver sets
+                           (measured: with it one status change under a held
+                           vector, without it 248 to 297 in 20 ms, each a
+                           packet over one nobody read); a SETUP taken as
+                           endpoint zero's whatever the status byte's endpoint
+                           field says (it held 6 at an enumeration's first);
+                           the endpoint buffers in the program's own RAM,
+                           reached by DMA out of a pool the driver owns and
+                           hands out in claim order, so the budget is a
+                           template parameter; a response the silicon never
+                           changes, every completion answered NAK before its
+                           flag is cleared; the data toggle kept in the
+                           register and flipped by the driver, a repeated OUT
+                           dropped; the pull-up that is also the device enable,
+                           and every event of a detached block dropped, the SE0
+                           a detach leaves reading as a bus reset; pads that
+                           need no port clock; the wake-up line per class (18
+                           on the CH32V303, measured, where table 9-3 also
+                           names 20) - and TWO COMPILE-TIME REFUSALS, the 48
+                           MHz the tree's USBPRE must make and
+                           usbfs_min_hclk_hz, the measured floor (an
+                           enumeration and a pour whole at 96 down to 12 MHz,
+                           bytes lost at 6). An attached controller holds one
+                           count in bus_activity.hpp from its pull-up to its
+                           detach, because with the core asleep this block
+                           sends IN packets full of zeros and never finishes an
+                           enumeration
     reset.hpp              Reset (RSTSCKR's six flags as a HISTORY, software()
                            through the keyed PFIC_CFGR), ResetReporter,
                            fault_reset<P>() carrying the cause byte from
@@ -2049,11 +2091,12 @@ brio/                    the framework, one directory per stratum:
                            idle path and by the sleep sites: in a sleep of any
                            depth here no other master gets a cycle (measured on
                            both parts, both of the CH32V303's DMA controllers
-                           included), so a DMA channel while EN is up and the
-                           USB controller from its pull-up to its detach each
-                           hold one count, idle() sleeps only at zero and a
-                           site refuses to arm above it - the old rule "a
-                           program with USB never idles" as a mechanism
+                           included), so a DMA channel while EN is up and a USB
+                           controller - the CH32V203's device controller or the
+                           host/device one of either part - from its pull-up to
+                           its detach each hold one count, idle() sleeps only
+                           at zero and a site refuses to arm above it - the old
+                           rule "a program with USB never idles" as a mechanism
     pwr.hpp                the power controller (ch. 2): Pwr, the three modes
                            behind SLEEPDEEP and PDDS (the core's bit and this
                            block's, written and read as ONE PAIR), the Stop
@@ -2068,8 +2111,12 @@ brio/                    the framework, one directory per stratum:
                            run time and believed only if it inverts), what a
                            Standby keeps of the RAM per device class - the
                            manual's "20K" being the class's largest array and
-                           not every part's - the regulator's two trims that
-                           live in EXTEN, and the debug module's three
+                           not every part's, and on the CH32V303VC exactly
+                           2.3.4's two banks and nothing above 32 KB, through
+                           bits that READ BACK ZERO and still act, so the
+                           driver keeps the program's choice and every store of
+                           the register carries it - the regulator's two trims
+                           that live in EXTEN, and the debug module's three
                            low-power bits READ AND NEVER WRITTEN, because a
                            csrw to that CSR resets the part
     sleep.hpp              Ch32vx03SleepSite (light -> Sleep, standby -> a Stop
@@ -2077,14 +2124,15 @@ brio/                    the framework, one directory per stratum:
                            low-power one, STANDBY OFF THE LADDER with
                            enter_standby() the deliberate door - every exit
                            measured here being a reset, an ordinary EXTI line
-                           among them - the clock tree restored after a Stop)
-                           and Ch32vx03TimedSleepSite (the RTC's alarm on EXTI
-                           line 17 as the wake and its counter as the WITNESS,
-                           a 1024 Hz tick out of the crystal, the counts
-                           rounded up and the span down so a wake is late and a
-                           resync short, the four-act ISR) - both REFUSING
-                           every rung but none while a bus master other than
-                           the core is working
+                           and on the CH32V303VC the independent watchdog's
+                           time-out among them - the clock tree restored after
+                           a Stop) and Ch32vx03TimedSleepSite (the RTC's alarm
+                           on EXTI line 17 as the wake and its counter as the
+                           WITNESS, a 1024 Hz tick out of the crystal, the
+                           counts rounded up and the span down so a wake is
+                           late and a resync short, the four-act ISR) - both
+                           REFUSING every rung but none while a bus master
+                           other than the core is working
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances

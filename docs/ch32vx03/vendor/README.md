@@ -116,11 +116,12 @@ redrawn as text and spelling alone.
   in the analog domain; the sentence that VDDA and VSSA must be tied to
   VDD and VSS is gone, and so is DBP's note that an RTC on the HSE over
   128 needs it. The silicon: every way out of a Standby measured on the
-  CH32V203C8T6 is a reset, a pad's EXTI line among them, which neither
-  revision lists ([../sleep.md](../sleep.md)); and on the CH32V303VCT6
-  an independent watchdog armed for some 200 ms, with the debug probe
-  attached, did not end a Standby at all, where both revisions list its
-  reset among the exits ([../watchdog.md](../watchdog.md)).
+  two parts is a reset, a pad's EXTI line among them on the CH32V203C8T6,
+  which neither revision lists ([../sleep.md](../sleep.md)); on the
+  CH32V303VCT6 the independent watchdog's reset is one, as both
+  revisions say ([../watchdog.md](../watchdog.md)), and the RAM a
+  Standby keeps is exactly 2.3.4's two banks - through bits that read
+  back zero there, which neither revision says.
 - **Ch. 3, RCC.** CSSON gains a note that the clock security system
   does not apply to CH32V20x_D6 dies whose fifth digit from the end of
   the lot number is 0; RCC_RSTSCKR's LPWRRSTF becomes Reserved; the
@@ -199,7 +200,12 @@ redrawn as text and spelling alone.
   is endpoint 4's "CH32V103x only"; a note after table 23-4 lets
   endpoint 3 carry up to 1023 bytes in a synchronous transfer when one
   of its directions is enabled alone and BUF_MOD is clear; the
-  misprinted addresses of endpoint 3's two control registers stand.
+  misprinted addresses of endpoint 3's two control registers stand. The
+  silicon, on the CH32V303VCT6: a SETUP's status byte names no endpoint,
+  bit 7 of the interrupt enable is the device's frame interrupt, and of
+  the two wake-up lines table 9-3 names for the class a host's resume
+  raises line 18 alone - none of it in either revision
+  ([../usbfs.md](../usbfs.md)).
 - **Ch. 29, the RNG.** Word for word the same - including the PLL48CLK
   the chapter says clocks the generator, where on the CH32V303VCT6 it
   is SYSCLK that runs the block ([../rng.md](../rng.md)).

@@ -144,6 +144,8 @@ void pwr_verbs() {
     // what a Standby keeps
     Pwr::retain_ram(true);
     (void)Pwr::retain_ram();
+    (void)Pwr::retention_readback();
+    pwr_ctlr_store(pwr()->CTLR);
     Pwr::retain_ram_on_vbat(true);
     (void)Pwr::retain_ram_on_vbat();
     Pwr::retain_upper_ram(true);

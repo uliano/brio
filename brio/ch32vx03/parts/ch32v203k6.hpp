@@ -188,8 +188,16 @@ inline constexpr bool has_ethernet = false;
 /// The device controller (USBD, RM ch. 21) is here on PA11/PA12; the
 /// host/device one (USBFS, ch. 23) is not on this part, as on the K8 -
 /// PB6 and PB7 are bonded and carry no USB function.
-inline constexpr bool has_usbd  = true;
+/// (has_usbd is the preprocessor's fact too: parts/ch32v203c8.hpp says why.)
+#define BRIO_CH32VX03_HAS_USBD 1
+inline constexpr bool has_usbd  = BRIO_CH32VX03_HAS_USBD != 0;
 inline constexpr bool has_usbfs = false;
+/// No host/device controller, so no pad of its: a port of 0 is "no pad",
+/// the way pin.hpp's Pad reads it.
+inline constexpr char usbfs_dm_port = 0;
+inline constexpr uint8_t usbfs_dm_pin = 0;
+inline constexpr char usbfs_dp_port = 0;
+inline constexpr uint8_t usbfs_dp_pin = 0;
 
 /// The EXTI lines this part has, one bit per line (RM table 9-3 and its
 /// class notes): the sixteen pin lines, the PVD's (16) and the RTC

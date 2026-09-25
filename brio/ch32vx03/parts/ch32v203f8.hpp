@@ -202,8 +202,19 @@ inline constexpr bool has_ethernet = false;
 /// which the pinout figure names UDM and UDP; the device controller
 /// (USBD, ch. 21) lives on PA11/PA12, which this package does not bond
 /// - on the QFN20 variant the two swap round (the file header).
-inline constexpr bool has_usbd  = false;
+/// (has_usbd is the preprocessor's fact too: parts/ch32v203c8.hpp says why.)
+#define BRIO_CH32VX03_HAS_USBD 0
+inline constexpr bool has_usbd  = BRIO_CH32VX03_HAS_USBD != 0;
 inline constexpr bool has_usbfs = true;
+/// The two pads the host/device controller drives, D- and D+: PB6 and
+/// PB7, the datasheet's USBFS_DM and USBFS_DP (3.3) - I2C1's default pair
+/// as well.
+/// On this package they are pins 1 and 2 with PA13 and PA14 - the
+/// debug port's two pads (the file header).
+inline constexpr char usbfs_dm_port = 'B';
+inline constexpr uint8_t usbfs_dm_pin = 6;
+inline constexpr char usbfs_dp_port = 'B';
+inline constexpr uint8_t usbfs_dp_pin = 7;
 
 /// The EXTI lines this part has, one bit per line (RM table 9-3 and its
 /// class notes): the sixteen pin lines, the PVD's (16) and the RTC

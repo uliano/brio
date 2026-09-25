@@ -220,7 +220,7 @@ struct RtcDomain {
      */
     static bool unlock(bool on) {
         pwr_bus_clock(true);
-        pwr()->CTLR = on ? (pwr()->CTLR | pwr_dbp) : (pwr()->CTLR & ~pwr_dbp);
+        pwr_ctlr_store(on ? (pwr()->CTLR | pwr_dbp) : (pwr()->CTLR & ~pwr_dbp));
         return unlocked() == on;
     }
     static bool unlocked() { return (pwr()->CTLR & pwr_dbp) != 0u; }

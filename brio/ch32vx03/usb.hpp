@@ -89,9 +89,10 @@
  *    question for a meter, and the count above is deliberately held
  *    from the pull-up to the detach and not from the first packet to
  *    the suspend.
- *  - the USBFS host/device controller (ch. 23) on PB6/PB7, which is a
- *    DIFFERENT peripheral with its own registers, and the 1-wire mode
- *    of CNTR, which the manual gives to another family's lot numbers.
+ *  - the 1-wire mode of CNTR, which the manual gives to another family's
+ *    lot numbers. (The host/device controller of ch. 23 is a DIFFERENT
+ *    peripheral with its own registers and its own driver,
+ *    ch32vx03/usbfs.hpp.)
  *  - remote wake-up (CNTR.RESUME): no program asks for it yet.
  */
 

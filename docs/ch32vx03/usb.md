@@ -36,7 +36,10 @@ an IP stratum is born at the SECOND family that carries the IP.
 The part table says which packages have it
 ([parts/](../../brio/ch32vx03/parts/), `device::has_usbd`): every one
 of the nine but the CH32V203F8, whose TSSOP20 bonds neither PA11 nor
-PA12. A part without it refuses the type at compile time.
+PA12. A part without it refuses the type at compile time. The
+host/device controller of chapter 23 - the CH32V303's one full-speed
+controller - is another peripheral with a page of its own,
+[usbfs.md](usbfs.md).
 
 ### The packet memory is 512 bytes seen through a 32-bit window
 
@@ -426,11 +429,6 @@ Driver gaps, each with its reason:
   events need; what a suspended controller would let the program sleep
   through is a question for a meter, and no program here asks the host
   to be woken.
-- **The USBFS host/device controller of chapter 23**, on PB6/PB7. It is
-  a different peripheral with its own registers, not a second instance
-  of this one, and it is declined until a program names it as its first
-  user - a board that wires that connector, or a host side, which brio
-  does not have and will not ([design/usb.md](../design/usb.md)).
 - **The 1-wire (single-ended) mode of CNTR**, which the manual gives to
   another family's lot numbers, and the low-speed bit beside the
   pull-up in EXTEN: this stratum is a full-speed device.

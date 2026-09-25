@@ -453,6 +453,29 @@ inline PwrRegs* pwr() { return reinterpret_cast<PwrRegs*>(pb1_base + 0x7000); }
 /// block and the four backup-domain bits of RCC_BDCTLR ignore a write.
 inline constexpr uint32_t pwr_dbp = 1UL << 8;
 
+/// PWR_CTLR's bits 16..20 - the four RAM retention bits and RAMLV, the
+/// ones 2.4.1's closing note says "can only be reset by backup". MEASURED
+/// WRITE-ONLY on the CH32V303VC: they read back zero whatever was written
+/// and they still act, so a read-modify-write of this register writes them
+/// away, and a Standby entered after one keeps no RAM. They read back on
+/// the CH32V203C8. So the program's choice lives HERE, in RAM, and every
+/// store to PWR_CTLR - the power chapter's and the RTC chapter's DBP -
+/// goes through pwr_ctlr_store(), which carries it whatever the read that
+/// produced the new value said. It starts at zero at every boot, which
+/// is the bits' value after a power-on; 2.4.1's closing note has only a
+/// backup reset clear the bits themselves, so the first store after any
+/// other reset writes the copy over whatever they held, and a program
+/// states its choice again after every boot.
+inline constexpr uint32_t pwr_ctlr_kept_bits = 0x1FUL << 16;
+inline uint32_t pwr_ctlr_kept = 0;
+
+/// Store `v` into PWR_CTLR with the kept bits as the program last set
+/// them (pwr_ctlr_kept), not as `v` - which a read of this register
+/// produced, and which says nothing about them on a die that reads zero.
+inline void pwr_ctlr_store(uint32_t v) {
+    pwr()->CTLR = (v & ~pwr_ctlr_kept_bits) | (pwr_ctlr_kept & pwr_ctlr_kept_bits);
+}
+
 // ---- FLASH (RM ch. 32) ----------------------------------------------------
 // The engine, for the chapter that will use it. There is no wait-state
 // field on this family: the array is split into a zero-wait and a

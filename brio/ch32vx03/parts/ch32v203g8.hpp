@@ -191,8 +191,17 @@ inline constexpr bool has_ethernet = false;
 /// ch. 21) on PA11 and the PA12 that shares pin 28 with PA13, and the
 /// host/device one (USBFS, ch. 23) on PB6/PB7, which the pinout figure
 /// names U2DM and U2DP.
-inline constexpr bool has_usbd  = true;
+/// (has_usbd is the preprocessor's fact too: parts/ch32v203c8.hpp says why.)
+#define BRIO_CH32VX03_HAS_USBD 1
+inline constexpr bool has_usbd  = BRIO_CH32VX03_HAS_USBD != 0;
 inline constexpr bool has_usbfs = true;
+/// The two pads the host/device controller drives, D- and D+: PB6 and
+/// PB7, the datasheet's USBFS_DM and USBFS_DP (3.3) - I2C1's default pair
+/// as well.
+inline constexpr char usbfs_dm_port = 'B';
+inline constexpr uint8_t usbfs_dm_pin = 6;
+inline constexpr char usbfs_dp_port = 'B';
+inline constexpr uint8_t usbfs_dp_pin = 7;
 
 /// The EXTI lines this part has, one bit per line (RM table 9-3 and its
 /// class notes): the sixteen pin lines, the PVD's (16) and the RTC

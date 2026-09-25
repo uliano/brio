@@ -360,11 +360,12 @@ Implemented but not bench-verified, each with what would measure it:
 - **PINRSTF as the flag of an event**, rather than as the register's
   documented reset value: the NRST pin pulled low by hand, and a supply
   cycled, with the flags read at the boot that follows. PORRSTF is the
-  flag a Standby wake leaves on the CH32V203C8T6 ([sleep.md](sleep.md)),
-  so that half is measured.
+  flag a Standby wake leaves on both parts ([sleep.md](sleep.md)), so
+  that half is measured.
 - **LPWRRSTF**: nothing raises it. The two watchdog flags are measured
   in [watchdog.md](watchdog.md), and a Standby wake - the one event
-  that might have been a "low-power reset" - leaves PORRSTF instead
+  that might have been a "low-power reset" - leaves PORRSTF instead on
+  both parts, beside IWDGRSTF when the independent watchdog ended it
   ([sleep.md](sleep.md)), so what sets this flag is still unknown - and
   the reference manual's V2.5 revision marks the bit Reserved
   ([vendor/README.md](vendor/README.md)); the option bytes that would

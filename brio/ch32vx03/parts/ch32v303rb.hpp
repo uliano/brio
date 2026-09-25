@@ -210,15 +210,31 @@ inline constexpr bool has_ethernet = false;
 /// reset value 0x06 at 0x50000000), on PA11/PA12, with USBFS_DM/DP named on
 /// PB6/PB7 too. WCH's own examples for this family drive USBFS and USBHS and
 /// never a USBD.
-inline constexpr bool has_usbd  = false;
+/// (has_usbd is the preprocessor's fact too: parts/ch32v203c8.hpp says why.)
+#define BRIO_CH32VX03_HAS_USBD 0
+inline constexpr bool has_usbd  = BRIO_CH32VX03_HAS_USBD != 0;
 inline constexpr bool has_usbfs = true;
+/// The two pads that controller drives, D- and D+: PA11 and PA12, the
+/// OTG_FS_DM and OTG_FS_DP of the datasheet's table 3-1 and the pair
+/// WCH's own evaluation board wires to its USBFS connector. The same
+/// table names USBFS_DM and USBFS_DP on PB6 and PB7 as well, a row it
+/// shares with the CH32V305 and CH32V307, whose high-speed controller
+/// sits there. MEASURED on the CH32V303VC: the block drives PA11/PA12 - a
+/// device enumerated on the evaluation board's connector there - and this
+/// file states the pair for every part of the class
+/// (docs/ch32vx03/usbfs.md).
+inline constexpr char usbfs_dm_port = 'A';
+inline constexpr uint8_t usbfs_dm_pin = 11;
+inline constexpr char usbfs_dp_port = 'A';
+inline constexpr uint8_t usbfs_dp_pin = 12;
 
 /// The EXTI lines this part has, one bit per line (RM table 9-3 and its
 /// class notes): the sixteen pin lines, the PVD's (16) and the RTC
 /// alarm's (17) on every part, and above them only what a block of this
 /// part is wired to - here lines 0..18 and 20: on this device class table
 /// 9-3 gives line 18 to the USBFS/OTG controller's wake-up (there is no
-/// USB device controller) and line 20 to the USBFS controller's.
+/// USB device controller) and line 20 to the USBFS controller's - and a
+/// host's resume raises 18 alone, measured on the CH32V303VC.
 inline constexpr uint32_t exti_lines = 0x17FFFFUL;
 
 // ---- the clock tree's edges (datasheet 4.3.5 to 4.3.7) --------------------

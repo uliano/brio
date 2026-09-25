@@ -1,7 +1,7 @@
 /*
  * sleep.hpp
  *
- * util/power.hpp's depth ladder on CH32V203 silicon: `Ch32vx03SleepSite`,
+ * util/power.hpp's depth ladder on CH32V203 and CH32V303 silicon: `Ch32vx03SleepSite`,
  * which arms one of this family's modes and puts the clock tree back
  * afterwards, and `Ch32vx03TimedSleepSite`, which additionally keeps
  * KERNEL TIME HONEST across a Stop by placing the RTC's alarm where the
@@ -163,10 +163,12 @@
  *     extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() { Site::isr(); }
  *
  * WHAT THE SILICON SAID OF ALL THIS is in docs/ch32vx03/sleep.md, with
- * the numbers: a Stop woken by the alarm inside a few tens of
- * microseconds of it, the clock tree back at the program's rate two
- * milliseconds later, and a five-hundred-millisecond deadline met on
- * the WALL to two milliseconds through the timed site.
+ * the numbers for both parts: a Stop woken by the alarm some sixty
+ * microseconds past the count the block raises its event at - which is
+ * the count after the one written on the CH32V203 and, in a Stop, on the
+ * CH32V303 too - the clock tree back at the program's rate within two
+ * milliseconds, and a five-hundred-millisecond deadline met on the WALL
+ * to two milliseconds through the timed site.
  */
 
 #pragma once

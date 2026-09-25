@@ -1,12 +1,19 @@
 // console_usb - the brio kernel console over the chip's own USB: the
 // same three active objects as the console app (SerialPort, Console,
-// Blinker), the transport a CDC ACM port on the CH32V203's USBD
-// controller instead of a UART - nothing above the transport changed.
+// Blinker), the transport a CDC ACM port instead of a UART - nothing
+// above the transport changed. THE CONTROLLER IS THE PART'S: the
+// CH32V203's USB device controller (ch32vx03/usb.hpp, RM ch. 21) where
+// the part has one, and the host/device controller in device mode
+// (ch32vx03/usbfs.hpp, RM ch. 23) on the CH32V303, which has no other -
+// chosen by the part table's has_usbd, the one type alias below.
 // The host sees a serial port (/dev/ttyACM* on Linux, no driver to
 // install) and types the same commands:
 //   HELP | LED ON|OFF|TOG | UPTIME | ERR | USB
 // USB reports the device's state, address, the line coding the host set
-// and DTR, and how much of the shared packet memory is spent.
+// and DTR, and how much of the controller's buffer memory is spent (the
+// device controller's shared packet memory, the host/device controller's
+// pool); its "frame" is the host/device controller's frame count, which
+// stays at zero there unless frame counting is switched on.
 //
 // The line coding is reported, not obeyed: a virtual port has no baud
 // rate, so "115200" in a terminal is a number the device reads back.
@@ -27,14 +34,18 @@
 // Wiring: on a WeAct CH32V203C8T6 core board the USB-C connector is on
 // PA11/PA12, which is the USBD block's pair (the USBFS one on PB6/PB7
 // is a different peripheral and a different chapter) - measured, the
-// host's pull-downs hold those two pads and PB6/PB7 are free. The clock
-// must be 48, 96 or 144 MHz for the controller to be fed its 48. The
-// LED is the board's blue one on PB2, active high.
+// host's pull-downs hold those two pads and PB6/PB7 are free. On WCH's
+// CH32V303 evaluation board it is the connector P14, on PA11/PA12 too,
+// which that part gives its host/device controller. The clock must be
+// 48, 96 or 144 MHz for either controller to be fed its 48. The LED is
+// the board's on PB2 (active high on the WeAct board, low on WCH's).
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "ch32vx03/clock.hpp"
 #include "ch32vx03/pfic.hpp"
@@ -42,6 +53,7 @@
 #include "ch32vx03/platform.hpp"
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/usb.hpp"
+#include "ch32vx03/usbfs.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
@@ -65,7 +77,10 @@ namespace {
 
 using Led = brio::Pin<'B', 2>;
 
-using Usb = brio::Usbd<>;                     // 384 bytes of packet memory, the CAN-safe budget
+// The device controller with its CAN-safe 384 bytes of packet memory
+// where the part has one; the host/device controller with its buffers
+// in RAM (the pool that never refuses a claim) where it has not.
+using Usb = std::conditional_t<brio::device::has_usbd, brio::Usbd<>, brio::Usbfs<>>;
 using Serial = brio::UsbCdcAcm<Usb, P>;       // interface 0, endpoints 1 (notification) and 2 (bulk)
 constexpr Serial serial;
 
@@ -231,6 +246,11 @@ void Console::cmd_err(const Cmd&, Serial s) {
 // ---- target glue ------------------------------------------------------------
 extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 
+// WHICH VECTOR IS THE PREPROCESSOR'S QUESTION, the one place this
+// program asks it: a handler is a symbol the image defines or does not,
+// and the two controllers raise two different lines, so the part table
+// states has_usbd for the preprocessor as well (parts/ch32v203c8.hpp).
+#if BRIO_CH32VX03_HAS_USBD
 // The controller's low-priority line, which every event of a
 // single-buffered device arrives on; the high-priority one (shared with
 // the CAN's transmit) belongs to double-buffered and isochronous
@@ -246,6 +266,19 @@ extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() {
         brio::post<SerialLines>(brio::RxActivity{});
     }
 }
+#else
+// The host/device controller's one line, which every event of this
+// block in device mode arrives on: the flags and the status as the
+// handler finds them, then the stack.
+extern "C" BRIO_CH32_INTERRUPT void usbfs_handler() {
+    usb_trace.stamp('f', Usb::flags());
+    usb_trace.stamp('s', Usb::status());
+    Device::isr();
+    if (Serial::take_rx_edge()) {
+        brio::post<SerialLines>(brio::RxActivity{});
+    }
+}
+#endif
 
 int main()
 {

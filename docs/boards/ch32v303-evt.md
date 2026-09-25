@@ -40,10 +40,13 @@ third reads the array's erased pattern
   carries the debug port and the console, at 115200.
 - **USB**: P14 and P4 both carry PA11/PA12, which the schematic calls
   USBFS and the datasheet's alternate-function table gives the OTG_FS
-  pair - the host/device controller of RM ch. 23. The CH32V303 has no
-  USB device controller of ch. 21 (its clock gate is not there,
-  [../ch32vx03/clock.md](../ch32vx03/clock.md)), so the CH32V203's USB
-  console does not build for this board.
+  pair - the host/device controller of RM ch. 23, and the pair it
+  drives (measured). The CH32V303 has no USB device controller of
+  ch. 21 (its clock gate is not there,
+  [../ch32vx03/clock.md](../ch32vx03/clock.md)), so a USB console on
+  this board drives the host/device controller in device mode
+  ([../ch32vx03/usbfs.md](../ch32vx03/usbfs.md)) on P14 - the same
+  stack, class and descriptors as the CH32V203's.
 - **LEDs and the KEY**: the row **P1** carries LED1 (blue), LED2 (red)
   and KEY, and a jumper takes each to a pad. Both LEDs hang from 3.3 V
   through 1 kOhm, so a LED lights with its pad driven LOW; the KEY S2
