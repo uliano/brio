@@ -34,6 +34,18 @@
  * that is off returns into a program whose registers it clobbered. One
  * macro, one option, no way to spell them apart.
  *
+ * AND THE MACRO FORBIDS gcc TO MERGE TWO HANDLERS. Two bindings with the
+ * same body - one transport's two DMA channels, each vector calling the
+ * same dma_isr() - are what gcc's identical code folding looks for, and
+ * WCH's gcc folds them by turning the second into a handler that CALLS
+ * the first: a call that never comes back, because the first ends in
+ * MRET. Whatever the caller had put on the stack stays there - on the
+ * V4F the twenty f-registers it saves before any call, eighty bytes - and
+ * the interrupted program resumes with its stack pointer that far below
+ * its frame (measured on the CH32V303VCT6: the next return jumped to a
+ * saved float). `no_icf` keeps every handler whole, the one spelling
+ * that holds under both attributes and both ABIs.
+ *
  * WHAT IS NOT HERE. This core can NEST interrupts - two, four or eight
  * levels, chosen in INTSYSCR with the priority bytes in IPRIOR - and
  * WCH's own startup file turns that on. brio does not: the kernel's rule
@@ -53,9 +65,9 @@
 /// header): what an app writes on a vector binding, and the ONE place
 /// the choice between the core's hardware prologue and gcc's is spelled.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast")]]
+#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
 #else
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt]]
+#define BRIO_CH32_INTERRUPT [[gnu::interrupt, gnu::no_icf]]
 #endif
 
 namespace brio {

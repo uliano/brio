@@ -44,15 +44,23 @@
 
 #include "ch32v00x/device.hpp"
 
+/// Both spellings carry `no_icf`: gcc's identical code folding would
+/// otherwise turn the second of two handlers with one body - a transport's
+/// two DMA channels, each vector calling the same dma_isr() - into a handler
+/// that CALLS the first, and the first ends in MRET, so the call never
+/// returns and whatever the caller pushed stays on the stack. Under the
+/// hardware prologue the caller pushes nothing and the merge was harmless
+/// by luck; under a plain `interrupt` it pushes the caller-saved registers
+/// (measured on the CH32V303VCT6, whose FPU made the frame eighty bytes).
 /// The attribute of every interrupt handler of this target (see the
 /// file header): what an app writes on a vector binding, and the ONE
 /// place the choice between the core's hardware prologue and gcc's is
 /// spelled. Where only the preprocessor can ask (a build option, an
 /// attribute), a macro is the honest tool.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast")]]
+#define BRIO_CH32_INTERRUPT [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
 #else
-#define BRIO_CH32_INTERRUPT [[gnu::interrupt]]
+#define BRIO_CH32_INTERRUPT [[gnu::interrupt, gnu::no_icf]]
 #endif
 
 namespace brio {

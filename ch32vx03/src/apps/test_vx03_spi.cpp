@@ -1,7 +1,10 @@
-// test_vx03_spi - the reference bench suite for the CH32V203's SPI
-// chapter: ch32vx03/spi.hpp over RM ch. 20, both instances, both roles,
-// the DMA engines, the hardware CRC and util/spi_bus.hpp's arbiter with
-// not one line changed.
+// test_vx03_spi - the reference bench suite for the SPI chapter of the
+// CH32V203 and the CH32V303: ch32vx03/spi.hpp over RM ch. 20, every
+// instance, both roles, the DMA engines, the hardware CRC and util/
+// spi_bus.hpp's arbiter with not one line changed. Letters a..e are both
+// series'; letters f..i are the CH32V303's third instance against its
+// second, registered on the part that has SPI3 and compiled out of every
+// other image. The I2S face is test_vx03_i2s's.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -54,8 +57,10 @@
 //   a  THE RATES: every BR code on both instances read back, with the
 //      SCK of SPI1's SECOND COLUMN measured on the pad itself - PB3 is
 //      TIM2's channel 2 under TIM2's partial remap, and a pad driven by
-//      one peripheral still reaches another's input - and the effective
-//      bit rate of a saturated block on each instance
+//      one peripheral still reaches another's input; the fastest code,
+//      at half the timer clock, judged only on a pad that carries no
+//      wire - and the effective bit rate of a saturated block on each
+//      instance
 //   b  THE HOST WITH ITS MISO HELD BY ITS OWN PORT, no wire: frames of
 //      all ones and all zeros read back, both widths, both bit orders,
 //      the four modes read back out of CTLR1
@@ -69,10 +74,37 @@
 //      exchange, and a ten-second stress with the counters at both ends
 //   e  THE FLAGS AND THE VECTORS: every flag with the sequence that
 //      clears it, the bidirectional line mode on one pad, the
-//      receive-only host and how it is stopped, the I2S register this
-//      series has no I2S for
+//      receive-only host and how it is stopped, the I2S register where
+//      the part has no I2S
+// and on the CH32V303RC and VC alone, over four wires between SPI2's
+// column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
+// PB15-PB5, each looked for before it is used:
+//   f  SPI3 AS THE CLIENT OF SPI2: the host engine polled, the client
+//      served one frame ahead from its own vector, all four modes and
+//      both bit orders in 8-bit frames and a 16-bit run, both directions
+//      compared byte for byte
+//   g  SPI3 AS THE HOST OVER SPI2'S CLIENT: the same matrix with the
+//      roles swapped
+//   h  THE HIGH-SPEED READ: a 256-byte block each way through the four
+//      DMA channels (SPI2's on DMA1, SPI3's on DMA2) at BR /4 as the
+//      baseline, then at /2 without HSRXEN and with it - each side's wrong
+//      frames counted and sorted by kind, a frame read ONE BIT LATE being
+//      a sample taken before the answer's edge - and the verb's refusal at
+//      /4; then SPI1's /2, 72 MHz of SCK: SPI1 on its second column -
+//      SPI3's default pads, so the same wires - polled frame by frame over
+//      SPI2 as a client, /8 as the baseline, /2 without HSRXEN and with
+//      it, both counts printed and not judged because the far end takes a
+//      clock at its own bus rate there - and, with no wire, whether this
+//      die keeps HSRXEN2, the lot's second mode, with a fourth run where
+//      it does
+//   i  16-BIT FRAMES THROUGH THE ENGINES: a block of half-words each way
+//      with every channel moving half-words, and the same bytes as 8-bit
+//      frames beside it, at /2 without and with HSRXEN, /4, /8 and /16 -
+//      the cost per frame and per byte against the core's counter and the
+//      frames compared - a measurement, the transfer granularity being a
+//      question the library has not settled
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: groups = abe,cd
 // build: monitor_speed = 115200
 
@@ -242,6 +274,20 @@ bool pads_linked() {
 /// the whole run.
 void third_pad_idle() { ThirdPad::release(); }
 
+/// Whether PB3 - the pad letter a counts SPI1's clock on - carries a wire
+/// to PB13, SPI2's clock pad: the link between SPI2 and SPI3 on the
+/// CH32V303 evaluation board, looked for where the part has SPI3 (whose
+/// default clock pad PB3 is) and absent everywhere else. The pads are
+/// named through `on` so that no part forms them without it.
+template <bool on = spi_present(3)>
+bool sck_pad_wired() {
+    if constexpr (on) {
+        return pads_linked<Pin<'B', on ? 13 : 13>, Pin<'B', on ? 3 : 3>>();
+    } else {
+        return false;
+    }
+}
+
 bool need_loop() {
     third_pad_idle();
     if (pads_linked<MosiPad, MisoPad>()) {
@@ -392,6 +438,9 @@ void ta_rates() {
           " MHz: the same code is two frequencies", crlf);
 
     // ---- the clock counted on the pad that carries it ----
+    // A wire on PB3 is a load the fastest code has to drive: looked for
+    // first, while the pad is still a plain one.
+    const bool pb3_wired = sck_pad_wired();
     if (!sck_counter_arm()) {
         bench.verdict("TIM2's channel 2 takes the partial remap onto PB3", false);
         return;
@@ -434,16 +483,25 @@ void ta_rates() {
         print(serial, "  /", spi_division(rate), " (", sck / 1000u, " kHz): ", edges,
               " rising edges on PB3 (want ", want, "), ", cycles, " cycles for ", frames,
               " frames (the wire alone ", wire, ")", crlf);
-        if (edges == want) {
+        // At /2 SCK is HALF THE TIMER CLOCK, the external clock mode's own
+        // ceiling: a pad with a wire on it is a load that decides the count
+        // there, so on such a pad that one row is printed and not judged.
+        if (edges == want || (code == 0u && pb3_wired)) {
             ++exact_edges;
         }
     }
     print(serial, "  the counter is TI2FP2 through the slave controller's external clock mode "
                   "1, and the pad is the SPI's alternate OUTPUT throughout",
           crlf);
+    if (pb3_wired) {
+        print(serial, "  PB3 carries the wire to PB13: the /2 row - SCK at half the timer "
+                      "clock, over that load - is printed and not judged",
+              crlf);
+    }
     bench.verdict("THE CLOCK IS COUNTED ON ITS OWN PAD: eight rising edges per 8-bit frame at "
-                  "EVERY BR code, the fastest included - a pad driven by one peripheral reaches "
-                  "another's input, and the counter follows SCK to half the timer clock",
+                  "EVERY BR code, the fastest included where the pad carries no wire - a pad "
+                  "driven by one peripheral reaches another's input, and the counter follows SCK "
+                  "to half the timer clock",
                   exact_edges == 8u);
 
     SckCounter::enable(false);
@@ -1953,18 +2011,769 @@ void te_flags() {
         print(serial, "  the line modes and the receive-only host want the PA7-PA6 strap", crlf);
     }
 
-    // ---- the I2S register this series has no I2S for ----
+    // ---- the I2S register where the part has no I2S ----
     S1::reset();
     const bool i2s_bit = S1::i2s_config_writable();
-    print(serial, "  SPI_I2S_CFGR's I2SMOD ", i2s_bit ? "TAKES a write" : "reads back zero",
-          " on this part; the datasheet's resource table names no I2S for this series and no "
-          "package bonds an audio signal",
-          crlf);
+    if constexpr (device::has_i2s) {
+        print(serial, "  SPI1's SPI_I2S_CFGR's I2SMOD ", i2s_bit ? "TAKES a write" : "reads back zero",
+              "; the I2S face is SPI2's and SPI3's on this part (test_vx03_i2s)", crlf);
+    } else {
+        print(serial, "  SPI_I2S_CFGR's I2SMOD ", i2s_bit ? "TAKES a write" : "reads back zero",
+              " on this part; the datasheet's resource table names no I2S for this series and no "
+              "package bonds an audio signal",
+              crlf);
+    }
     bench.verdict("the I2S face is reported as the silicon answers, not as the four-family "
                   "chapter promises",
                   true);
     S1::bus_clock(false);
     host_ready();
+}
+
+// ===========================================================================
+// The CH32V303's third instance against its second (letters f..i)
+// ===========================================================================
+//
+// Every name below hangs on the letters' template parameter and every
+// body is `if constexpr` on it, so a part without SPI3 forms none of it and
+// carries none of it - its state included.
+
+constexpr bool has_spi3 = spi_present(3);
+
+/// The pads of the two ends: SPI2's one column and SPI3's default one,
+/// wired pad to pad on the evaluation board.
+template <bool on>
+struct Link {
+    /// The two resources, named through `on` so that nothing of SPI3 is
+    /// formed on a part without it.
+    using S1 = Spi<on ? 1u : 1u>;
+    using S2 = Spi<on ? 2u : 2u>;
+    using S3 = Spi<on ? 3u : 3u>;
+    static constexpr SpiPins two = spi_pins_for(2, 0);
+    static constexpr SpiPins three = spi_pins_for(3, 0);
+    /// SPI1's second column: the very pads of SPI3's default one, so the
+    /// same four wires reach SPI2 from SPI1 while SPI3 is gated off.
+    static constexpr SpiPins one_b = spi_pins_for(1, 1);
+    static_assert(one_b.nss == three.nss && one_b.sck == three.sck &&
+                      one_b.miso == three.miso && one_b.mosi == three.mosi,
+                  "test_vx03_spi: SPI1's second column is SPI3's default one (tables 10-32 and "
+                  "10-33) - letter h's second half rides on that");
+    using Sel2 = Pin<two.nss.port, two.nss.pin>;
+    using Sck2 = Pin<two.sck.port, two.sck.pin>;
+    using Miso2 = Pin<two.miso.port, two.miso.pin>;
+    using Mosi2 = Pin<two.mosi.port, two.mosi.pin>;
+    using Sel3 = Pin<three.nss.port, three.nss.pin>;
+    using Sck3 = Pin<three.sck.port, three.sck.pin>;
+    using Miso3 = Pin<three.miso.port, three.miso.pin>;
+    using Mosi3 = Pin<three.mosi.port, three.mosi.pin>;
+    using Host2 = SpiHost<2, two>;
+    using Host3 = SpiHost<3, three>;
+    using Client2 = SpiClient<2, two>;
+    using Client3 = SpiClient<3, three>;
+
+    /// What the client being served from its own vector answers and
+    /// collects: one frame ahead on TXE, one taken on RXNE.
+    static inline volatile bool serve2 = false;
+    static inline volatile bool serve3 = false;
+    static inline const uint16_t* answers = nullptr;
+    static inline uint16_t* got = nullptr;
+    static inline volatile uint16_t len = 0;
+    static inline volatile uint16_t tx_i = 0;
+    static inline volatile uint16_t rx_i = 0;
+
+    static void all_released() {
+        serve2 = false;
+        serve3 = false;
+        Pfic::disable(S2::irq);
+        Pfic::disable(S3::irq);
+        S2::bus_clock(true);
+        S2::reset();
+        S2::bus_clock(false);
+        S3::bus_clock(true);
+        S3::reset();
+        (void)S3::remap(0);
+        S3::bus_clock(false);
+        Sel2::release();
+        Sck2::release();
+        Miso2::release();
+        Mosi2::release();
+        Sel3::release();
+        Sck3::release();
+        Miso3::release();
+        Mosi3::release();
+    }
+
+    /// The four wires, each driven from one end and read at the other
+    /// against the opposite pull.
+    static bool wired() {
+        const bool sel = pads_linked<Sel2, Sel3>();
+        const bool sck = pads_linked<Sck2, Sck3>();
+        const bool miso = pads_linked<Miso2, Miso3>();
+        const bool mosi = pads_linked<Mosi2, Mosi3>();
+        print(serial, "  the wires PB12-PA15 ", sel ? "in place" : "ABSENT", ", PB13-PB3 ",
+              sck ? "in place" : "ABSENT", ", PB14-PB4 ", miso ? "in place" : "ABSENT",
+              ", PB15-PB5 ", mosi ? "in place" : "ABSENT", crlf);
+        return sel && sck && miso && mosi;
+    }
+};
+
+/// The client's vector body while a letter serves it: the next answer
+/// written on TXE - one frame ahead - and the frame read on RXNE.
+template <bool on, typename Client>
+void serve_client() {
+    using L = Link<on>;
+    const uint32_t up = Client::isr();
+    if ((up & SpiFlag::txe) != 0u) {
+        if (L::tx_i < L::len) {
+            Client::write(L::answers[L::tx_i]);
+            L::tx_i = static_cast<uint16_t>(L::tx_i + 1u);
+        } else {
+            Client::txe_interrupt(false);
+        }
+    }
+    if ((up & SpiFlag::rxne) != 0u) {
+        if (const auto v = Client::poll()) {
+            if (L::rx_i < L::len) {
+                L::got[L::rx_i] = *v;
+                L::rx_i = static_cast<uint16_t>(L::rx_i + 1u);
+            }
+        }
+    }
+}
+
+/// SPI2's and SPI3's vectors while a letter serves a client there; false,
+/// and nothing done, on a part without SPI3 and otherwise.
+template <bool on = has_spi3>
+bool served_on_spi2() {
+    if constexpr (on) {
+        if (Link<on>::serve2) {
+            serve_client<on, typename Link<on>::Client2>();
+            return true;
+        }
+    }
+    return false;
+}
+
+template <bool on = has_spi3>
+void served_on_spi3() {
+    if constexpr (on) {
+        if (Link<on>::serve3) {
+            serve_client<on, typename Link<on>::Client3>();
+        }
+    }
+}
+
+constexpr uint16_t link_frames = 32;
+uint16_t link_answers[link_frames];
+uint16_t link_got[link_frames];
+uint8_t link_out[2u * link_frames];
+uint8_t link_in[2u * link_frames];
+
+/// One polled transaction of `n` frames from `Host` into `Client`, the
+/// client served from its own vector; the counts of frames each end got
+/// wrong, or 0xFFFF for a transaction that never finished.
+struct LinkResult {
+    uint16_t host_wrong;
+    uint16_t client_wrong;
+};
+
+template <bool on, typename Host, typename Client, typename Sel>
+LinkResult link_run(bool client_is_two, SpiMode mode, bool lsb, SpiDataSize bits, uint16_t n) {
+    using L = Link<on>;
+    const bool wide = bits == SpiDataSize::bits16;
+    const uint16_t mask = wide ? 0xFFFFu : 0x00FFu;
+    for (uint16_t i = 0; i < n; ++i) {
+        link_answers[i] = static_cast<uint16_t>((0xA5C3u ^ (i * 0x1111u)) & mask);
+        const uint16_t out = static_cast<uint16_t>((0x3C5Au + i * 0x0707u) & mask);
+        if (wide) {
+            link_out[2u * i] = static_cast<uint8_t>(out);
+            link_out[2u * i + 1u] = static_cast<uint8_t>(out >> 8);
+        } else {
+            link_out[i] = static_cast<uint8_t>(out);
+        }
+        link_got[i] = 0;
+    }
+    // The client first, its first answer loaded before the select falls.
+    L::answers = link_answers;
+    L::got = link_got;
+    L::len = n;
+    L::tx_i = 1;
+    L::rx_i = 0;
+    if (!Client::init(clock, {.mode = mode, .bits = bits, .lsb_first = lsb,
+                              .nss = SpiNss::hardware_input, .drive_output = true})) {
+        return {0xFFFFu, 0xFFFFu};
+    }
+    if (client_is_two) {
+        L::serve2 = true;
+    } else {
+        L::serve3 = true;
+    }
+    Client::enable(link_answers[0]);
+    Client::rxne_interrupt(true);
+    Client::txe_interrupt(true);
+
+    // The host, polled: interrupts stay on, so the client's vector runs
+    // between its frames.
+    Sel::output(true);
+    (void)Host::init(clock);
+    (void)Host::bit_order(lsb);
+    typename Host::Request r{};
+    r.cs = Sel::ref();
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(link_out));
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(link_in));
+    r.len = n;
+    r.clock = SpiClock::div64;
+    r.mode = mode;
+    r.bits = bits;
+    r.polled = true;
+    const bool done = Host::start(r);
+    (void)delay_us(clock, 50);
+
+    LinkResult res{0, 0};
+    for (uint16_t i = 0; i < n; ++i) {
+        const uint16_t in = wide ? static_cast<uint16_t>(link_in[2u * i] |
+                                                         (link_in[2u * i + 1u] << 8))
+                                 : link_in[i];
+        const uint16_t sent = wide ? static_cast<uint16_t>(link_out[2u * i] |
+                                                           (link_out[2u * i + 1u] << 8))
+                                   : link_out[i];
+        if (in != link_answers[i]) {
+            ++res.host_wrong;
+        }
+        if (i >= L::rx_i || link_got[i] != sent) {
+            ++res.client_wrong;
+        }
+    }
+    if (!done) {
+        res = {0xFFFFu, 0xFFFFu};
+    }
+    L::serve2 = false;
+    L::serve3 = false;
+    Client::rxne_interrupt(false);
+    Client::txe_interrupt(false);
+    (void)Client::disable();
+    Client::release();
+    Host::release();
+    Sel::release();
+    return res;
+}
+
+/// The mode-and-order matrix of one arrangement, and a 16-bit run in
+/// mode 0 - the count of clean runs out of nine.
+template <bool on, typename Host, typename Client, typename Sel>
+uint8_t link_matrix(bool client_is_two) {
+    uint8_t clean = 0;
+    const SpiMode modes[4] = {SpiMode::mode0, SpiMode::mode1, SpiMode::mode2, SpiMode::mode3};
+    for (SpiMode m : modes) {
+        for (uint8_t order = 0; order < 2u; ++order) {
+            const LinkResult r =
+                link_run<on, Host, Client, Sel>(client_is_two, m, order != 0u, SpiDataSize::bits8,
+                                               link_frames);
+            print(serial, "    mode ", static_cast<uint8_t>(m), order != 0u ? " LSB" : " MSB",
+                  " first: the host read ", r.host_wrong, " frames wrong, the client ",
+                  r.client_wrong, crlf);
+            if (r.host_wrong == 0u && r.client_wrong == 0u) {
+                ++clean;
+            }
+        }
+    }
+    const LinkResult w = link_run<on, Host, Client, Sel>(client_is_two, SpiMode::mode0, false,
+                                                         SpiDataSize::bits16, link_frames);
+    print(serial, "    16-bit frames in mode 0: the host read ", w.host_wrong,
+          " wrong, the client ", w.client_wrong, crlf);
+    if (w.host_wrong == 0u && w.client_wrong == 0u) {
+        ++clean;
+    }
+    return clean;
+}
+
+// ---------------------------------------------------------------------------
+// f - SPI3 as the client of SPI2
+// ---------------------------------------------------------------------------
+
+template <bool on = has_spi3>
+void tf_spi3_client() {
+    if constexpr (on) {
+        using L = Link<on>;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the link between SPI2 and SPI3 declines without its four wires, and "
+                          "says so",
+                          true);
+            return;
+        }
+        const uint8_t clean = link_matrix<on, typename L::Host2, typename L::Client3,
+                                          typename L::Sel2>(false);
+        bench.verdict("SPI2's host engine and SPI3's client served one frame ahead from its own "
+                      "vector exchange 32 frames exactly in all four modes, both bit orders, and "
+                      "in 16-bit frames",
+                      clean == 9u);
+        L::all_released();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// g - SPI3 as the host over SPI2's client
+// ---------------------------------------------------------------------------
+
+template <bool on = has_spi3>
+void tg_spi3_host() {
+    if constexpr (on) {
+        using L = Link<on>;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the link between SPI3 and SPI2 declines without its four wires, and "
+                          "says so",
+                          true);
+            return;
+        }
+        const uint8_t clean = link_matrix<on, typename L::Host3, typename L::Client2,
+                                          typename L::Sel3>(true);
+        bench.verdict("with the roles swapped - SPI3's host engine over SPI2's client - the same "
+                      "matrix is exact both ways",
+                      clean == 9u);
+        L::all_released();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// h and i - blocks through the four channels
+// ---------------------------------------------------------------------------
+
+/// A block each way between SPI2 (host) and SPI3 (client), every frame
+/// moved by a channel: DMA1's 4 and 5 for SPI2, DMA2's 1 and 2 for SPI3.
+/// The channels are polled - no vector - and put away after.
+struct BlockResult {
+    bool done;
+    uint32_t cycles;
+    uint16_t host_wrong;
+    uint16_t client_wrong;
+    /// How the wrong frames are wrong. `host_late`: the host read the
+    /// client's frame ONE BIT LATE - shifted one place toward the least
+    /// significant end with the previous frame's last bit on top, which
+    /// is what a sample taken before the answer's edge reads in MSB-first
+    /// order. `client_shifted`: the client took the host's PREVIOUS frame,
+    /// a frame lost or gained. The first wrong pair of each side is kept
+    /// as printed evidence (expected, then read).
+    uint16_t host_late;
+    uint16_t client_shifted;
+    uint16_t host_first[2];
+    uint16_t client_first[2];
+};
+
+/// A frame the host sampled one bit early against the client's edge: the
+/// client's frame `now` shifted one place right, `before`'s last bit on
+/// top (MSB first, the order every block here runs in).
+template <typename Elem>
+constexpr Elem one_bit_late(Elem now, Elem before) {
+    constexpr uint32_t top = 8u * sizeof(Elem) - 1u;
+    return static_cast<Elem>((static_cast<uint32_t>(now) >> 1) |
+                             ((static_cast<uint32_t>(before) & 1u) << top));
+}
+
+/// The four buffers of a block compared, frame by frame, into `res`.
+template <typename Elem>
+void judge_block(BlockResult& res, const Elem* host_out, const Elem* host_in,
+                 const Elem* client_out, const Elem* client_in, uint16_t n) {
+    for (uint16_t i = 0; i < n; ++i) {
+        if (host_in[i] != client_out[i]) {
+            if (res.host_wrong == 0u) {
+                res.host_first[0] = client_out[i];
+                res.host_first[1] = host_in[i];
+            }
+            ++res.host_wrong;
+            if (i > 0u && host_in[i] == one_bit_late<Elem>(client_out[i], client_out[i - 1u])) {
+                ++res.host_late;
+            }
+        }
+        if (client_in[i] != host_out[i]) {
+            if (res.client_wrong == 0u) {
+                res.client_first[0] = host_out[i];
+                res.client_first[1] = client_in[i];
+            }
+            ++res.client_wrong;
+            if (i > 0u && client_in[i] == host_out[i - 1u]) {
+                ++res.client_shifted;
+            }
+        }
+    }
+}
+
+template <bool on, typename Elem>
+struct BlockBuffers {
+    static constexpr uint16_t count = 256u / sizeof(Elem);
+    static inline Elem host_out[count];
+    static inline Elem host_in[count];
+    static inline Elem client_out[count];
+    static inline Elem client_in[count];
+};
+
+template <bool on, typename Elem>
+BlockResult block_run(SpiClock rate, bool high_speed) {
+    using L = Link<on>;
+    using B = BlockBuffers<on, Elem>;
+    using H = typename L::S2;
+    using C = typename L::S3;
+    using HostTx = DmaChannel<H::dma_tx_slot.controller, H::dma_tx_slot.channel>;
+    using HostRx = DmaChannel<H::dma_rx_slot.controller, H::dma_rx_slot.channel>;
+    using ClientTx = DmaChannel<C::dma_tx_slot.controller, C::dma_tx_slot.channel>;
+    using ClientRx = DmaChannel<C::dma_rx_slot.controller, C::dma_rx_slot.channel>;
+    constexpr bool wide = sizeof(Elem) == 2u;
+    constexpr DmaWidth w = wide ? DmaWidth::half : DmaWidth::byte;
+    constexpr SpiDataSize bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    constexpr uint16_t n = B::count;
+    for (uint16_t i = 0; i < n; ++i) {
+        B::host_out[i] = static_cast<Elem>(0x5AC3u + i * 0x0101u);
+        B::client_out[i] = static_cast<Elem>(0x0F1Eu ^ (i * 0x0302u));
+        B::host_in[i] = 0;
+        B::client_in[i] = 0;
+    }
+    const DmaChannelConfig in_cfg{.direction = DmaDirection::peripheral_to_memory,
+                                  .peripheral_width = w, .memory_width = w,
+                                  .priority = DmaPriority::very_high};
+    const DmaChannelConfig out_cfg{.direction = DmaDirection::memory_to_peripheral,
+                                   .peripheral_width = w, .memory_width = w,
+                                   .priority = DmaPriority::high};
+
+    // The client: SPI3 framed by its NSS pad, both its requests on DMA2.
+    C::bus_clock(true);
+    C::reset();
+    (void)C::remap(0);
+    (void)C::configure({.role = SpiRole::client, .bits = bits, .nss = SpiNss::hardware_input});
+    L::Sck3::input();
+    L::Mosi3::input();
+    L::Sel3::input(PinPull::up);
+    L::Miso3::function();
+    (void)ClientRx::load({.peripheral = C::data_address(), .memory = B::client_in, .count = n,
+                          .config = in_cfg});
+    (void)ClientTx::load({.peripheral = C::data_address(), .memory = B::client_out, .count = n,
+                          .config = out_cfg});
+    C::dma_requests(true, true);
+    C::enable();
+
+    // The host: SPI2, a GPIO select, the high-speed read where asked.
+    H::bus_clock(true);
+    H::reset();
+    (void)H::configure({.role = SpiRole::host, .clock = rate, .bits = bits,
+                        .nss = SpiNss::software});
+    if (high_speed) {
+        (void)H::high_speed_read(true);
+    }
+    L::Sel2::output(true);
+    L::Sck2::function();
+    L::Mosi2::function();
+    L::Miso2::input();
+    (void)HostRx::load({.peripheral = H::data_address(), .memory = B::host_in, .count = n,
+                        .config = in_cfg});
+    (void)HostTx::load({.peripheral = H::data_address(), .memory = B::host_out, .count = n,
+                        .config = out_cfg});
+    L::Sel2::clear();
+    (void)delay_us(clock, 2);
+    const uint32_t t0 = cycles_now();
+    H::enable();
+    H::dma_requests(true, true);
+    bool done = false;
+    for (uint32_t spins = 0; spins < 2'000'000UL; ++spins) {
+        if (HostRx::flag(DmaFlag::complete)) {
+            done = true;
+            break;
+        }
+    }
+    const uint32_t cycles = cycles_now() - t0;
+    (void)delay_us(clock, 5);
+    L::Sel2::set();
+
+    H::dma_requests(false, false);
+    C::dma_requests(false, false);
+    HostTx::stop();
+    HostRx::stop();
+    ClientTx::stop();
+    ClientRx::stop();
+    (void)H::high_speed_read(false);
+    (void)H::disable();
+    (void)C::disable();
+
+    BlockResult res{done, cycles, 0, 0, 0, 0, {0, 0}, {0, 0}};
+    judge_block<Elem>(res, B::host_out, B::host_in, B::client_out, B::client_in, n);
+    L::all_released();
+    return res;
+}
+
+/// SPI1 on its SECOND column as a POLLED host at `rate` over SPI2 as a
+/// client both of whose requests a channel serves (DMA1's 4 and 5): frame
+/// by frame, the gap between two frames the polled loop's, so what is
+/// measured is the round trip INSIDE a frame at SPI1's own rate - 72 MHz of
+/// SCK at /2 on its 144 MHz bus, the rate the high-speed read is for - and
+/// not a client's reload. SPI3, whose default pads these are, stays gated
+/// off; SPI1's column, clock and mode are put back before the return.
+/// `mode2` adds HSRXEN2 on top of HSRXEN, for a die the probe found it on.
+template <bool on>
+BlockResult spi1_top_run(SpiClock rate, bool high_speed, bool mode2 = false) {
+    using L = Link<on>;
+    using B = BlockBuffers<on, uint8_t>;
+    using H = typename L::S1;
+    using C = typename L::S2;
+    using ClientTx = DmaChannel<C::dma_tx_slot.controller, C::dma_tx_slot.channel>;
+    using ClientRx = DmaChannel<C::dma_rx_slot.controller, C::dma_rx_slot.channel>;
+    constexpr uint16_t n = B::count;
+    for (uint16_t i = 0; i < n; ++i) {
+        B::host_out[i] = static_cast<uint8_t>(0x5Au + i * 0x0Bu);
+        B::client_out[i] = static_cast<uint8_t>(0xC3u ^ (i * 0x07u));
+        B::host_in[i] = 0;
+        B::client_in[i] = 0;
+    }
+    const DmaChannelConfig in_cfg{.direction = DmaDirection::peripheral_to_memory,
+                                  .peripheral_width = DmaWidth::byte,
+                                  .memory_width = DmaWidth::byte,
+                                  .priority = DmaPriority::very_high};
+    const DmaChannelConfig out_cfg{.direction = DmaDirection::memory_to_peripheral,
+                                   .peripheral_width = DmaWidth::byte,
+                                   .memory_width = DmaWidth::byte,
+                                   .priority = DmaPriority::high};
+
+    // The client: SPI2 framed by its NSS pad, its first answer loaded by
+    // the channel before the host's first clock.
+    C::bus_clock(true);
+    C::reset();
+    (void)C::configure({.role = SpiRole::client, .nss = SpiNss::hardware_input});
+    L::Sck2::input();
+    L::Mosi2::input();
+    L::Sel2::input(PinPull::up);
+    L::Miso2::function();
+    (void)ClientRx::load({.peripheral = C::data_address(), .memory = B::client_in, .count = n,
+                          .config = in_cfg});
+    (void)ClientTx::load({.peripheral = C::data_address(), .memory = B::client_out, .count = n,
+                          .config = out_cfg});
+    C::dma_requests(true, true);
+    C::enable();
+
+    // The host: SPI1 on code 1, a GPIO select on PA15, one frame at a time.
+    H::bus_clock(true);
+    H::reset();
+    bool done = H::remap(1);
+    (void)H::configure({.role = SpiRole::host, .clock = rate, .nss = SpiNss::software});
+    if (high_speed) {
+        done = H::high_speed_read(true) && done;
+    }
+    if (mode2) {
+        done = H::high_speed_read2(true, SysClock::pclk2_hz) && done;
+    }
+    L::Sel3::output(true);
+    L::Sck3::function();
+    L::Mosi3::function();
+    L::Miso3::input();
+    L::Sel3::clear();
+    (void)delay_us(clock, 2);
+    H::enable();
+    for (uint16_t i = 0; done && i < n; ++i) {
+        H::data8(B::host_out[i]);
+        uint32_t spins = 100'000u;
+        while (!H::rxne() && spins != 0u) {
+            --spins;
+        }
+        if (spins == 0u) {
+            done = false;
+        } else {
+            B::host_in[i] = H::data8();
+        }
+    }
+    (void)delay_us(clock, 5);
+    L::Sel3::set();
+
+    C::dma_requests(false, false);
+    ClientTx::stop();
+    ClientRx::stop();
+    (void)H::high_speed_read(false);
+    (void)H::disable();
+    (void)C::disable();
+    (void)H::remap(0);
+    H::reset();
+    H::bus_clock(false);
+
+    BlockResult res{done, 0, 0, 0, 0, 0, {0, 0}, {0, 0}};
+    judge_block<uint8_t>(res, B::host_out, B::host_in, B::client_out, B::client_in, n);
+    L::all_released();
+    return res;
+}
+
+/// One block's line: done or stalled, the core cycles where timed, and
+/// each side's wrong frames with what kind of wrong they are.
+template <bool on>
+void print_block(const char* label, const BlockResult& r, bool timed) {
+    print(serial, "    ", label, ": ", r.done ? "done" : "STALLED");
+    if (timed) {
+        print(serial, " in ", r.cycles, " cycles");
+    }
+    print(serial, ", host ", r.host_wrong, " wrong");
+    if (r.host_wrong != 0u) {
+        print(serial, " (", r.host_late, " one bit late; first ", hex(r.host_first[0]), " read ",
+              hex(r.host_first[1]), ")");
+    }
+    print(serial, ", client ", r.client_wrong, " wrong");
+    if (r.client_wrong != 0u) {
+        print(serial, " (", r.client_shifted, " the previous frame; first ",
+              hex(r.client_first[0]), " read ", hex(r.client_first[1]), ")");
+    }
+    print(serial, crlf);
+}
+
+template <bool on = has_spi3>
+void th_high_speed_read() {
+    if constexpr (on) {
+        using L = Link<on>;
+        L::all_released();
+        // The verb's own rule first, with no wire: taken at /2, refused at
+        // /4, the code read out of the register it stands in.
+        L::S2::bus_clock(true);
+        L::S2::reset();
+        (void)L::S2::configure({.role = SpiRole::host, .clock = SpiClock::div2});
+        const bool at2 = L::S2::high_speed_read(true);
+        (void)L::S2::high_speed_read(false);
+        (void)L::S2::configure({.role = SpiRole::host, .clock = SpiClock::div4});
+        const bool at4 = L::S2::high_speed_read(true);
+        L::S2::bus_clock(false);
+        bench.verdict("the high-speed read is taken at BR /2 and refused at /4 - the one code "
+                      "every lot of every class reads alike",
+                      at2 && !at4);
+        // HSRXEN2 is a lot's bit and wants a bus of 120 MHz or more, which
+        // only SPI1's reaches: the die's answer to the probe, no wire.
+        L::S1::bus_clock(true);
+        L::S1::reset();
+        (void)L::S1::configure({.role = SpiRole::host, .clock = SpiClock::div2});
+        const bool mode2 = L::S1::high_speed_read2(true, SysClock::pclk2_hz);
+        (void)L::S1::high_speed_read(false);
+        L::S1::reset();
+        L::S1::bus_clock(false);
+        print(serial, "  HSRXEN2 on SPI1, its bus at ", SysClock::pclk2_hz / 1'000'000u, " MHz: ",
+              mode2 ? "KEPT - this die's lot has the second high-speed mode"
+                    : "not kept - this die's lot has no HSRXEN2",
+              crlf);
+        bench.verdict("HSRXEN2 is reported as the die answers the probe - 20.4.10 gives it to "
+                      "some lots of this class, and no register says which",
+                      true);
+        if (!L::wired()) {
+            bench.verdict("the high-speed read's effect wants the four wires, and says so", true);
+            return;
+        }
+        const uint32_t pclk1 = SysClock::pclk1_hz;
+        const BlockResult base = block_run<on, uint8_t>(SpiClock::div4, false);
+        const BlockResult plain = block_run<on, uint8_t>(SpiClock::div2, false);
+        const BlockResult fast = block_run<on, uint8_t>(SpiClock::div2, true);
+        print(serial, "  256 bytes each way, SPI2 host over SPI3 client, every frame a "
+                      "channel's; SCK ", pclk1 / 4u / 1000u, " kHz at /4 and ",
+              pclk1 / 2u / 1000u, " kHz at /2:", crlf);
+        print_block<on>("/4", base, true);
+        print_block<on>("/2 without HSRXEN", plain, true);
+        print_block<on>("/2 with HSRXEN", fast, true);
+        bench.verdict("at BR /4 the wires carry the block exactly both ways - the baseline the /2 "
+                      "runs are read against",
+                      base.done && base.host_wrong == 0u && base.client_wrong == 0u);
+        bench.verdict("at /2 - 36 MHz of SCK over the wires - the block with HSRXEN is exact both "
+                      "ways; the run without it is printed beside it, its wrong frames sorted by "
+                      "kind (a frame read one bit late is a sample taken before the answer's "
+                      "edge)",
+                      plain.done && fast.done && fast.host_wrong == 0u && fast.client_wrong == 0u);
+
+        // SPI2's /2 is 36 MHz of SCK - PB1 runs at 72 - a rate a strap
+        // already carries clean on the CH32V203; the mode is for SPI1's /2,
+        // 72 MHz, reached here through SPI1's second column, whose four pads
+        // are SPI3's default ones and so ride the same wires to SPI2.
+        const uint32_t pclk2 = SysClock::pclk2_hz;
+        const BlockResult top_base = spi1_top_run<on>(SpiClock::div8, false);
+        const BlockResult top_plain = spi1_top_run<on>(SpiClock::div2, false);
+        const BlockResult top_fast = spi1_top_run<on>(SpiClock::div2, true);
+        print(serial, "  256 bytes, SPI1 on PA15/PB3/PB4/PB5 polled over SPI2's client; SCK ",
+              pclk2 / 8u / 1000u, " kHz at /8 and ", pclk2 / 2u / 1000u, " kHz at /2:", crlf);
+        print_block<on>("/8", top_base, false);
+        print_block<on>("/2 without HSRXEN", top_plain, false);
+        print_block<on>("/2 with HSRXEN", top_fast, false);
+        if (mode2) {
+            const BlockResult top_two = spi1_top_run<on>(SpiClock::div2, true, true);
+            print_block<on>("/2 with HSRXEN and HSRXEN2", top_two, false);
+        }
+        bench.verdict("SPI1 on its second column carries the block exactly both ways at /8 over "
+                      "SPI3's pads - the path the /2 runs are read against",
+                      top_base.done && top_base.host_wrong == 0u && top_base.client_wrong == 0u);
+        // At 72 MHz of SCK the far end is SPI2 on a 72 MHz bus, taking a
+        // clock at its own bus rate: what IT received is printed beside
+        // what the host read, and neither count is judged - a far end that
+        // does not keep up says nothing about the host's read mode.
+        bench.verdict("at SPI1's /2 - 72 MHz of SCK - both runs complete, frame by frame, and "
+                      "their counts are printed and not judged: the client's own count says "
+                      "whether the far end kept up with a clock at its bus rate",
+                      top_plain.done && top_fast.done);
+        L::all_released();
+    }
+}
+
+template <bool on = has_spi3>
+void ti_wide_frames() {
+    if constexpr (on) {
+        using L = Link<on>;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the 16-bit block wants the four wires, and says so", true);
+            return;
+        }
+        // Five rows: /2 without the high-speed read and with it, then /4,
+        // /8 and /16. Each moves the same 256 bytes twice - as 128
+        // half-word frames and as 256 byte frames - so the cost per frame
+        // and per byte are read against each other at one SCK.
+        struct Row {
+            SpiClock rate;
+            uint8_t divisor;
+            bool high_speed;
+            const char* name;
+        };
+        const Row rows[5] = {{SpiClock::div2, 2, false, "/2 without HSRXEN"},
+                             {SpiClock::div2, 2, true, "/2 with HSRXEN"},
+                             {SpiClock::div4, 4, false, "/4"},
+                             {SpiClock::div8, 8, false, "/8"},
+                             {SpiClock::div16, 16, false, "/16"}};
+        constexpr uint32_t halves = BlockBuffers<on, uint16_t>::count;
+        constexpr uint32_t bytes = BlockBuffers<on, uint8_t>::count;
+        bool exact = true;
+        for (const Row& row : rows) {
+            const BlockResult wide = block_run<on, uint16_t>(row.rate, row.high_speed);
+            const BlockResult narrow = block_run<on, uint8_t>(row.rate, row.high_speed);
+            const uint32_t wire = 16u * row.divisor * (SysClock::hz / SysClock::pclk1_hz);
+            // Tenths of a core cycle: the cost per frame is the wire's
+            // plus whatever the engines add, and a tenth shows it.
+            const uint32_t per_frame = (wide.cycles * 10u) / halves;
+            const uint32_t per_byte_wide = (wide.cycles * 10u) / (2u * halves);
+            const uint32_t per_byte_narrow = (narrow.cycles * 10u) / bytes;
+            print(serial, "  ", row.name, ": a 16-bit frame ", per_frame / 10u, ".",
+                  per_frame % 10u, " core cycles against the wire's ", wire, "; a byte ",
+                  per_byte_wide / 10u, ".", per_byte_wide % 10u, " in 16-bit frames and ",
+                  per_byte_narrow / 10u, ".", per_byte_narrow % 10u, " in 8-bit ones", crlf);
+            print_block<on>("128 half-words", wide, true);
+            print_block<on>("256 bytes", narrow, true);
+            const bool judged = row.divisor != 2u || row.high_speed;
+            if (judged && !(wide.done && wide.host_wrong == 0u && wide.client_wrong == 0u &&
+                            narrow.done && narrow.host_wrong == 0u && narrow.client_wrong == 0u)) {
+                exact = false;
+            }
+        }
+        bench.verdict("half-words through all four channels - DMA1's for SPI2, DMA2's for SPI3, "
+                      "every one moving 16-bit items into 16-bit frames - and the same bytes as "
+                      "8-bit frames cross exactly both ways at /4, /8 and /16 and at /2 with the "
+                      "high-speed read; the costs are printed as measured, the row without the "
+                      "mode beside them",
+                      exact);
+        L::all_released();
+    }
+}
+
+/// The CH32V303's letters, registered where the part has SPI3.
+template <bool on = has_spi3>
+void register_spi3_letters() {
+    if constexpr (on) {
+        bench.letter('f', "SPI3 as the client of SPI2, over four wires", tf_spi3_client<>);
+        bench.letter('g', "SPI3 as the host over SPI2's client", tg_spi3_host<>);
+        bench.letter('h', "the high-speed read: /2 with and without HSRXEN, /4 as the baseline",
+                     th_high_speed_read<>);
+        bench.letter('i', "16-bit frames through the four DMA channels", ti_wide_frames<>);
+    }
 }
 
 // ===========================================================================
@@ -1979,6 +2788,11 @@ void banner() {
           "  SPI2: PB12..PB15 to a peer board running `spi_peer`; letter d skips when it does "
           "not answer",
           crlf);
+    if constexpr (has_spi3) {
+        print(serial, "  SPI3: PA15/PB3/PB4/PB5 wired to SPI2's PB12..PB15 for letters f..i, "
+                      "each wire looked for first",
+              crlf);
+    }
     bench.menu();
 }
 
@@ -2015,6 +2829,9 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void spi2_handler() {
+    if (served_on_spi2()) {
+        return;   // the CH32V303's letters g: SPI2 as the client of SPI3
+    }
     if (peer_client_live) {
         (void)PeerClient::isr();
         return;
@@ -2023,6 +2840,10 @@ extern "C" BRIO_CH32_INTERRUPT void spi2_handler() {
         host_done = true;
     }
 }
+
+/// SPI3's vector, the CH32V303's: the client of letter f. On the other
+/// series the body is empty and nothing in the vector table names it.
+extern "C" BRIO_CH32_INTERRUPT void spi3_handler() { served_on_spi3(); }
 
 /// SPI1's engines: one vector per channel on this family.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
@@ -2064,6 +2885,7 @@ int main() {
     bench.letter('d', "THE PEER on SPI2: the matrix, the dummy, the roles inverted, a stress",
                  td_peer);
     bench.letter('e', "the flags, the vectors, the line modes, the disable rule", te_flags);
+    register_spi3_letters();
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

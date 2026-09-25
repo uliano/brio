@@ -1,7 +1,11 @@
-// test_vx03_i2c - the reference bench suite for the CH32V203's I2C
-// chapter: ch32vx03/i2c.hpp over RM ch. 19, the host engine under its
-// two vectors, the client half addressed by a real controller, the DMA
-// engines, and util/i2c_bus.hpp's arbiter with not one line changed.
+// test_vx03_i2c - the reference bench suite for the I2C chapter of the
+// CH32V203 and the CH32V303: ch32vx03/i2c.hpp over RM ch. 19, the host
+// engine under its two vectors, the client half addressed by a real
+// controller, the DMA engines, and util/i2c_bus.hpp's arbiter with not
+// one line changed. Letters a..k are both series'; letters l..n are the
+// CH32V303 evaluation board's, where the chip's two controllers share one
+// bus, registered on that series' parts and compiled out of every other
+// image.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -48,11 +52,22 @@
 //    verdict claimed) when three command retries fail: a suite that
 //    hangs on an absent instrument is worse than one that says so.
 //
-// THE PADS. PB6 and PB7, and nothing else. NEVER TOUCHED: PA9/PA10
-// (the console), PA13/PA14 (the debug port), PA11/PA12 (the USB pads),
-// PC14/PC15 and PD0/PD1 (the crystals), PB10/PB11 (I2C2's pads, which
-// carry another link on this bench), PB12..PB15 (the SPI link), PA0..
-// PA8 (other phases' straps) - and PB2, the LED, toggled per command as
+//  - ON THE CH32V303 EVALUATION BOARD, THE CHIP'S OWN I2C2. That board
+//    wires I2C2's pads to I2C1's - PB10 to PB6, PB11 to PB7 - and puts a
+//    4.7 kOhm pull-up on each line, so one chip's two controllers share
+//    a bus: letters l..n make one the host and the other the target,
+//    the target POLLED from the loop that waits for the host (its clock
+//    stretching holds the bus while the loop comes round). The wires are
+//    looked for before a byte moves, and a peer letter that finds the
+//    bus pulled up by them and no peer answering declines instead of
+//    failing.
+//
+// THE PADS. PB6 and PB7 - and on the CH32V303 PB10 and PB11, I2C2's -
+// and nothing else. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
+// (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1
+// (the crystals), PB10/PB11 on the CH32V203 (I2C2's pads, which carry
+// another link on that bench), PB12..PB15 (the SPI link), PA0..PA8
+// (other phases' straps) - and PB2, the LED, toggled per command as
 // every suite of this target does.
 //
 // What is exercised, letter by letter:
@@ -80,6 +95,17 @@
 //   j  the flags, both vectors, the client's addresses and the PE
 //      cycle that drops an unclocked byte
 //   k  a ten-second stress with the error counters at both ends
+// and on the CH32V303 alone, over the board's two wires:
+//   l  THE SELF-LINK: I2C1 the host, I2C2 the target - the probe, an
+//      absent address, a write, reads of one, two, three, four and
+//      eight bytes (the host's receive procedures, and THE TARGET AS A
+//      TRANSMITTER), a write-then-read, at 100 kHz and at 400 kHz in both
+//      duty shapes; the second address and the general call; the DMA
+//      host's write, read and write-then-read
+//   m  the same shapes with the roles swapped: I2C2 the host
+//   n  A TARGET STUCK MID-BYTE: the chip's own target left holding SDA
+//      low by a host taken off the bus through its reset line, and
+//      unstick()'s clocks counted on the pad by the timer
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
@@ -94,7 +120,7 @@
 // tier. So the four 32 KB parts build it as one image per GROUP of
 // letters (the groups line below; design/overview.md, "A suite's image
 // fits the family's smallest chip") and every other part as one image.
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: groups = abcd,efgh,ijk
 // build: monitor_speed = 115200
 
@@ -512,6 +538,14 @@ bool ensure_link() {
     return false;
 }
 
+/// Whether this part is the one whose board wires I2C2 to I2C1 (letters
+/// l..n below), and the question a peer letter asks when no peer
+/// answered on a pulled-up bus.
+constexpr bool self_link_part =
+    device::device_class == DeviceClass::v30x_d8 && device::i2c_count >= 2u;
+template <bool on = self_link_part>
+bool self_link_present();
+
 /// Every wire letter asks first and declines with the reason.
 bool need_peer() {
     if (!wire_pulled_up()) {
@@ -523,6 +557,14 @@ bool need_peer() {
     }
     if (ensure_link()) {
         return true;
+    }
+    // A bus pulled up by THIS board's resistors, on the wires to its own
+    // I2C2, has no peer on it by construction: the letter declines.
+    if (self_link_present()) {
+        print(serial, "  SKIPPED, no verdict claimed: the pull-ups are this board's own, on the "
+                      "wires to its own I2C2 (letters l..n) - no peer board is on this bus.",
+              crlf);
+        return false;
     }
     bench.verdict("the peer answers on the command address (the peer board running twi_peer)",
                   false);
@@ -618,7 +660,8 @@ void ta_block() {
     // ---- THE WIRE: what holds it up, and how fast ----
     const bool up = wire_pulled_up();
     print(serial, "  the wire at rest: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
-          SdaPin::read() ? "high" : "LOW", " - this board pulls neither up", crlf);
+          SdaPin::read() ? "high" : "LOW", " - the pads pull neither up (resistors on the "
+          "board or a peer's pads do, where anything does)", crlf);
     if (up) {
         const uint32_t scl_rise = rise_cycles<SclPin>();
         const uint32_t sda_rise = rise_cycles<SdaPin>();
@@ -626,7 +669,7 @@ void ta_block() {
               cycles_to_ns(scl_rise), " ns), SDA ", sda_rise, " cycles (",
               cycles_to_ns(sda_rise), " ns) - an UPPER BOUND, the pad's own mode switch "
               "inside it", crlf);
-        print(serial, "  -> the far end's pull-up is ",
+        print(serial, "  -> the wire's pull-up is ",
               cycles_to_ns(scl_rise) > 1000u ? "WEAK: a microsecond and more is an internal "
                                                "pull of tens of kiloohms, and fast mode "
                                                "would lose its high half to it"
@@ -634,8 +677,8 @@ void ta_block() {
                                                "microsecond and more, and the high halves "
                                                "measured below say the same",
               crlf);
-        bench.verdict("both lines rise when released - somebody at the far end holds the bus "
-                      "up, and the number above says how strongly",
+        bench.verdict("both lines rise when released - something on the wire holds the bus up, "
+                      "and the number above says how strongly",
                       scl_rise < 0xFFFFu && sda_rise < 0xFFFFu);
     } else {
         print(serial, "  no pull-up on the wire: the rise time cannot be measured and the "
@@ -1858,14 +1901,628 @@ void tk_stress() {
 }
 
 // ===========================================================================
+// The CH32V303's self-link: the chip's two controllers on one bus (l..n)
+// ===========================================================================
+//
+// On the CH32V303 evaluation board I2C2's pads are wired to I2C1's -
+// PB10 to PB6 (SCL) and PB11 to PB7 (SDA) - with a 4.7 kOhm pull-up on
+// each line: ONE CHIP'S TWO CONTROLLERS ON ONE BUS, one the host and the
+// other the target. On the CH32V203 board those two pads carry another
+// link and are never touched, so these letters are registered on the
+// CH32V303's parts alone - and there too the two wires are looked for
+// before a byte moves. THE TARGET IS POLLED from the loop that waits for
+// the host's tenure (I2cClientOptions::interrupts false): its clock
+// stretching holds the bus while the loop comes round, which is what lets
+// one core be both ends. Every name below hangs on the letters' template
+// parameter, so a part without I2C2 forms none of it - its state included.
+
+/// The target's addresses on the self-link: its own and its second
+/// (dual addressing); the general call is the third.
+constexpr uint8_t self_addr = 0x3A;
+constexpr uint8_t self_second = 0x4B;
+
+/// Drive one pad, read the other against the OPPOSITE pull; both left
+/// floating afterwards.
+template <typename Driver, typename Reader>
+bool pads_linked() {
+    Reader::input(PinPull::down);
+    Driver::output(true);
+    (void)delay_us(clock, 20);
+    const bool high = Reader::read();
+    Reader::input(PinPull::up);
+    Driver::clear();
+    (void)delay_us(clock, 20);
+    const bool low = !Reader::read();
+    Driver::release();
+    Reader::release();
+    return high && low;
+}
+
+/// What a POLLED target did: the bytes it took, the ones it was asked to
+/// give - its shifter asks one ahead of the wire - and the events that
+/// framed them.
+struct TargetLog {
+    uint8_t in[32];
+    uint8_t in_n;
+    uint8_t served;
+    uint8_t addressed;
+    uint8_t reads;
+    uint8_t second;
+    uint8_t general;
+    uint8_t stops;
+    uint8_t nacks;
+    uint8_t flushed;
+    uint8_t errors;
+};
+
+/// The tenure shapes one host and one polled target exchange, judged at
+/// both ends.
+struct SelfShapes {
+    uint8_t probe;
+    uint8_t absent;
+    uint8_t write;
+    bool write_exact;
+    uint8_t reads_ok;      ///< of the five receive counts, byte-exact
+    uint8_t combined;
+    bool combined_exact;
+    uint8_t served_over;   ///< bytes the target gave beyond what the host read
+    uint8_t flushed;
+    uint8_t addressed;
+};
+
+template <bool on>
+struct Self {
+    using H2 = I2c<on ? 2 : 2>;
+    using Host2 = I2cHost<on ? 2 : 2>;
+    using Client2 = I2cClient<on ? 2 : 2>;
+    using Scl2 = Pin<'B', on ? 10 : 10>;
+    using Sda2 = Pin<'B', on ? 11 : 11>;
+
+    /// True while I2C2's vectors belong to letter m's host.
+    static inline volatile bool host2_live = false;
+    static inline TargetLog log{};
+    /// What the target transmits: one byte per ask, a pattern from a seed
+    /// that restarts with every read tenure.
+    static inline uint8_t seed = 0x60;
+    static inline uint8_t pos = 0;
+
+    static uint8_t value(uint8_t s, uint8_t i) { return static_cast<uint8_t>(s + 0x1Du * i); }
+
+    static void clear() {
+        log = TargetLog{};
+        pos = 0;
+    }
+
+    /// The two wires, each driven from I2C1's pad and read at I2C2's
+    /// against the opposite pull. The board's pull-ups sit on the same
+    /// net, so a push-pull high and a push-pull low are what decide.
+    static bool wired() {
+        const bool scl = pads_linked<SclPin, Scl2>();
+        const bool sda = pads_linked<SdaPin, Sda2>();
+        print(serial, "  the wires PB6-PB10 ", scl ? "in place" : "ABSENT", ", PB7-PB11 ",
+              sda ? "in place" : "ABSENT", crlf);
+        return scl && sda;
+    }
+
+    /// Both controllers back to their reset state with their gates shut,
+    /// the four pads floating, every vector of the two silenced.
+    static void all_released() {
+        host2_live = false;
+        client_live = false;
+        dma_host_live = false;
+        bus_ao_live = false;
+        Pfic::disable(H::event_irq());
+        Pfic::disable(H::error_irq());
+        Pfic::disable(H2::event_irq());
+        Pfic::disable(H2::error_irq());
+        H::bus_clock(true);
+        H::reset();
+        H::bus_clock(false);
+        H2::bus_clock(true);
+        H2::reset();
+        H2::bus_clock(false);
+        SclPin::release();
+        SdaPin::release();
+        Scl2::release();
+        Sda2::release();
+    }
+
+    /// One pass of the target's polled surface: the event the ISR body
+    /// would report, acted on the way 19.4 prescribes - and the closing
+    /// NACK of a read followed by flush(), which drops the byte the
+    /// shifter asked for and the host never clocked.
+    template <typename C>
+    static void poll() {
+        switch (C::service()) {
+            case I2cClientEvent::addressed:
+                ++log.addressed;
+                if (C::host_reads()) {
+                    ++log.reads;
+                    pos = 0;
+                }
+                if (C::second_address_matched()) {
+                    ++log.second;
+                }
+                if (C::general_call_matched()) {
+                    ++log.general;
+                }
+                break;
+            case I2cClientEvent::byte_received: {
+                const uint8_t v = C::take();
+                if (log.in_n < sizeof log.in) {
+                    log.in[log.in_n] = v;
+                }
+                ++log.in_n;
+                break;
+            }
+            case I2cClientEvent::byte_wanted:
+                C::give(value(seed, pos));
+                ++pos;
+                ++log.served;
+                break;
+            case I2cClientEvent::stop:
+                ++log.stops;
+                break;
+            default:
+                break;
+        }
+        const I2cClientEvent err = C::error_service();
+        if (err == I2cClientEvent::nacked) {
+            ++log.nacks;
+            if (C::flush()) {
+                ++log.flushed;
+            }
+        } else if (err == I2cClientEvent::error) {
+            ++log.errors;
+        }
+    }
+
+    /// One tenure of `HostT` into a POLLED target `C`: started, then
+    /// waited out with the target served on every pass, and the target
+    /// polled a while longer so it sees the STOP or the NACK that closed
+    /// the tenure.
+    template <typename HostT, typename C>
+    static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
+                          uint8_t rx_len, I2cSpeed speed) {
+        typename HostT::Request r{};
+        r.addr = addr;
+        r.tx = lend<Lease::reply>(tx);
+        r.tx_len = tx_len;
+        r.rx = lend<Lease::reply>(rx);
+        r.rx_len = rx_len;
+        r.speed = speed;
+        host_done = false;
+        host_isr_entries = 0;
+        uint8_t st = no_answer;
+        if (HostT::start(r)) {
+            st = HostT::status();
+        } else {
+            const uint32_t t0 = Ticker::millis();
+            while (!host_done && Ticker::millis() - t0 < 50u) {
+                poll<C>();
+            }
+            st = host_done ? HostT::status() : no_answer;
+        }
+        const uint32_t t1 = Ticker::millis();
+        while (Ticker::millis() - t1 < 2u) {
+            poll<C>();
+        }
+        if (st == no_answer) {
+            print(serial, "    STALL: the host's tenure never answered; recovered", crlf);
+            (void)HostT::recover();
+        }
+        return st;
+    }
+
+    template <typename HostT, typename C>
+    static SelfShapes shapes(I2cSpeed speed) {
+        SelfShapes s{};
+        clear();
+        s.probe = tenure<HostT, C>(self_addr, nullptr, 0, nullptr, 0, speed);
+        s.absent = tenure<HostT, C>(nobody_addr, nullptr, 0, nullptr, 0, speed);
+
+        // A write of eight: the target takes them all, then the STOP.
+        for (uint8_t i = 0; i < 8u; ++i) {
+            tx_buf[i] = static_cast<uint8_t>(0x11u * (i + 1u));
+        }
+        clear();
+        s.write = tenure<HostT, C>(self_addr, tx_buf, 8, nullptr, 0, speed);
+        bool same = log.in_n == 8u && log.stops >= 1u;
+        for (uint8_t i = 0; i < 8u && same; ++i) {
+            same = log.in[i] == tx_buf[i];
+        }
+        s.write_exact = same;
+
+        // THE TARGET AS A TRANSMITTER, at the counts the host's receive
+        // procedure switches on: one, two, three, four and eight bytes.
+        const uint8_t counts[5] = {1, 2, 3, 4, 8};
+        uint8_t over = 0;
+        uint8_t flushed = 0;
+        for (uint8_t c : counts) {
+            clear();
+            seed = static_cast<uint8_t>(0x60u + c);
+            for (uint8_t i = 0; i < 8u; ++i) {
+                rx_buf[i] = 0xEE;
+            }
+            const uint8_t st = tenure<HostT, C>(self_addr, nullptr, 0, rx_buf, c, speed);
+            bool exact = st == i2c_ok;
+            for (uint8_t i = 0; i < c && exact; ++i) {
+                exact = rx_buf[i] == value(seed, i);
+            }
+            if (exact) {
+                ++s.reads_ok;
+            }
+            over = static_cast<uint8_t>(over + (log.served > c ? log.served - c : 0u));
+            flushed = static_cast<uint8_t>(flushed + log.flushed);
+        }
+        s.served_over = over;
+        s.flushed = flushed;
+
+        // Write-then-read: two bytes out, a repeated START, four back.
+        clear();
+        seed = 0x90;
+        tx_buf[0] = 0x5A;
+        tx_buf[1] = 0xA5;
+        for (uint8_t i = 0; i < 4u; ++i) {
+            rx_buf[i] = 0xEE;
+        }
+        s.combined = tenure<HostT, C>(self_addr, tx_buf, 2, rx_buf, 4, speed);
+        bool cx = s.combined == i2c_ok && log.in_n == 2u && log.in[0] == 0x5Au &&
+                  log.in[1] == 0xA5u;
+        for (uint8_t i = 0; i < 4u && cx; ++i) {
+            cx = rx_buf[i] == value(0x90, i);
+        }
+        s.combined_exact = cx;
+        s.addressed = log.addressed;
+        return s;
+    }
+
+    static bool shapes_exact(const SelfShapes& s) {
+        return s.probe == i2c_ok && s.absent == i2c_nack_addr && s.write == i2c_ok &&
+               s.write_exact && s.reads_ok == 5u && s.combined_exact;
+    }
+
+    static void print_shapes(const char* rung, const SelfShapes& s, uint32_t scl_asked) {
+        print(serial, "    ", rung, ": probe=", s.probe, " absent=", s.absent, " write=",
+              s.write, s.write_exact ? " (8 taken exactly)" : " (NOT exact)",
+              "; reads of 1/2/3/4/8 exact: ", s.reads_ok, " of 5; write-then-read=",
+              s.combined, s.combined_exact ? " exact" : " NOT exact", " with ", s.addressed,
+              " address matches; SCL asked ", scl_asked / 1000u, " kHz", crlf);
+        print(serial, "      the target gave ", s.served_over,
+              " byte(s) beyond what the host read across the five reads, and flush() dropped ",
+              s.flushed, crlf);
+    }
+};
+
+/// The three rungs every self-link letter runs.
+struct SelfRung {
+    I2cSpeed speed;
+    I2cDuty duty;
+    const char* name;
+};
+constexpr SelfRung self_rungs[3] = {{I2cSpeed::standard_100k, I2cDuty::ratio_2, "100k      "},
+                                    {I2cSpeed::fast_400k, I2cDuty::ratio_2, "400k d2   "},
+                                    {I2cSpeed::fast_400k, I2cDuty::ratio_16_9, "400k d16/9"}};
+
+// ---------------------------------------------------------------------------
+// l - I2C1 the host, I2C2 the target
+// ---------------------------------------------------------------------------
+
+template <bool on = self_link_part>
+void tl_self_link() {
+    if constexpr (on) {
+        using L = Self<on>;
+        using C = typename L::Client2;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the self-link wants its two wires, and says so", true);
+            return;
+        }
+        print(serial, "  the bus now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
+              SdaPin::read() ? "high" : "LOW", " - the board's own pull-ups", crlf);
+
+        // The target: I2C2 with its own address, a second one and the
+        // general call, POLLED.
+        const bool target_up =
+            C::init(clock, {.own = self_addr, .second = self_second, .general_call = true},
+                    {.no_stretch = false, .interrupts = false});
+
+        uint8_t exact = 0;
+        uint8_t over_all = 0;
+        uint8_t flushed_all = 0;
+        for (const SelfRung& g : self_rungs) {
+            (void)Host::init(clock, g.duty);
+            const SelfShapes s = L::template shapes<Host, C>(g.speed);
+            L::print_shapes(g.name, s, Host::scl_hz(g.speed));
+            console_drain();
+            if (L::shapes_exact(s)) {
+                ++exact;
+            }
+            over_all = static_cast<uint8_t>(over_all + s.served_over);
+            flushed_all = static_cast<uint8_t>(flushed_all + s.flushed);
+        }
+        bench.verdict("I2C1 as the host and I2C2 as the target on the chip's own wires: the "
+                      "probe, an absent address, an eight-byte write, reads of one, two, three, "
+                      "four and eight bytes and a write-then-read, byte-exact at 100 kHz and at "
+                      "400 kHz in both duty shapes",
+                      target_up && exact == 3u);
+        bench.verdict("THE TARGET AS A TRANSMITTER: every byte a read took came out of I2C2's "
+                      "own data register, and every byte its shifter asked for beyond the "
+                      "host's NACK was dropped by flush()",
+                      target_up && exact == 3u && flushed_all == over_all);
+
+        // The second address and the general call reach the target.
+        (void)Host::init(clock);
+        L::clear();
+        const uint8_t w2[2] = {0x21, 0x43};
+        const uint8_t st_second = L::template tenure<Host, C>(self_second, w2, 2, nullptr, 0,
+                                                              I2cSpeed::standard_100k);
+        const uint8_t second_hits = L::log.second;
+        const bool second_bytes =
+            L::log.in_n == 2u && L::log.in[0] == 0x21u && L::log.in[1] == 0x43u;
+        L::clear();
+        const uint8_t st_gc =
+            L::template tenure<Host, C>(0x00, w2, 2, nullptr, 0, I2cSpeed::standard_100k);
+        const uint8_t gc_hits = L::log.general;
+        const bool gc_bytes = L::log.in_n == 2u;
+        print(serial, "  the second address: ", st_second, " with ", second_hits,
+              " DUALF match(es); the general call: ", st_gc, " with ", gc_hits,
+              " GENCALL match(es)", crlf);
+        bench.verdict("the second address and the general call each open a write tenure on the "
+                      "target, which says which one matched",
+                      st_second == i2c_ok && second_hits == 1u && second_bytes &&
+                          st_gc == i2c_ok && gc_hits == 1u && gc_bytes);
+
+        // The DMA host on channels 6 and 7 against the same target.
+        C::release();
+        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
+        Host::release();
+        dma_host_live = true;
+        (void)DmaHost::init(clock);
+        for (uint8_t i = 0; i < 16u; ++i) {
+            tx_buf[i] = static_cast<uint8_t>(0x80u + 3u * i);
+            rx_buf[i] = 0xEE;
+        }
+        L::clear();
+        L::seed = 0x33;
+        const uint8_t dw = L::template tenure<DmaHost, C>(self_addr, tx_buf, 16, nullptr, 0,
+                                                          I2cSpeed::fast_400k);
+        bool dw_exact = L::log.in_n == 16u;
+        for (uint8_t i = 0; i < 16u && dw_exact; ++i) {
+            dw_exact = L::log.in[i] == tx_buf[i];
+        }
+        L::clear();
+        const uint8_t dr = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
+                                                          I2cSpeed::fast_400k);
+        bool dr_exact = dr == i2c_ok;
+        for (uint8_t i = 0; i < 16u && dr_exact; ++i) {
+            dr_exact = rx_buf[i] == L::value(0x33, i);
+        }
+        // And the two halves in one tenure: three bytes out on channel 6,
+        // the repeated START, eight back on channel 7.
+        L::clear();
+        L::seed = 0x44;
+        for (uint8_t i = 0; i < 8u; ++i) {
+            rx_buf[i] = 0xEE;
+        }
+        const uint8_t dc = L::template tenure<DmaHost, C>(self_addr, tx_buf, 3, rx_buf, 8,
+                                                          I2cSpeed::fast_400k);
+        bool dc_exact = dc == i2c_ok && L::log.in_n == 3u;
+        for (uint8_t i = 0; i < 3u && dc_exact; ++i) {
+            dc_exact = L::log.in[i] == tx_buf[i];
+        }
+        for (uint8_t i = 0; i < 8u && dc_exact; ++i) {
+            dc_exact = rx_buf[i] == L::value(0x44, i);
+        }
+        dma_host_live = false;
+        DmaHost::release();
+        print(serial, "  the DMA host at 400 kHz: a write of 16 ", dw,
+              dw_exact ? " exact" : " NOT exact", ", a read of 16 ", dr,
+              dr_exact ? " exact" : " NOT exact", ", a write of 3 then a read of 8 ", dc,
+              dc_exact ? " exact" : " NOT exact", " (the target took ", L::log.in_n,
+              "), unwedged ", DmaHost::unwedges(), " time(s)", crlf);
+        bench.verdict("the DMA host - channels 6 and 7 - writes sixteen bytes into the chip's "
+                      "own target, reads sixteen back, and carries a write-then-read whole, "
+                      "byte-exact",
+                      dw == i2c_ok && dw_exact && dr_exact && dc_exact);
+        C::release();
+        L::all_released();
+        host_ready();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// m - I2C2 the host, I2C1 the target
+// ---------------------------------------------------------------------------
+
+template <bool on = self_link_part>
+void tm_self_swapped() {
+    if constexpr (on) {
+        using L = Self<on>;
+        using H2 = typename L::Host2;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the swapped self-link wants its two wires, and says so", true);
+            return;
+        }
+        client_live = true;   // I2C1's vectors stay quiet: its target is polled
+        const bool target_up = Client::init(clock, {.own = self_addr},
+                                            {.no_stretch = false, .interrupts = false});
+        uint8_t exact = 0;
+        for (const SelfRung& g : self_rungs) {
+            L::host2_live = true;
+            (void)H2::init(clock, g.duty);
+            const SelfShapes s = L::template shapes<H2, Client>(g.speed);
+            L::print_shapes(g.name, s, H2::scl_hz(g.speed));
+            console_drain();
+            if (L::shapes_exact(s)) {
+                ++exact;
+            }
+        }
+        bench.verdict("I2C2 ON A WIRE AS THE HOST, I2C1 as its target: the same shapes, "
+                      "byte-exact at 100 kHz and at 400 kHz in both duty shapes",
+                      target_up && exact == 3u);
+        L::host2_live = false;
+        H2::release();
+        Client::release();
+        L::all_released();
+        host_ready();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// n - a target stuck mid-byte, and unstick()
+// ---------------------------------------------------------------------------
+
+template <bool on = self_link_part>
+void tn_unstick() {
+    if constexpr (on) {
+        using L = Self<on>;
+        using C = typename L::Client2;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the stuck target wants the two wires, and says so", true);
+            return;
+        }
+        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
+        (void)Host::init(clock);
+        const uint8_t clean = Host::unstick();
+        bench.verdict("unstick() on a healthy bus clocks nothing and says so", clean == 0u);
+
+        // A READ OF ZEROS, CUT OFF MID-BYTE: the target drives SDA low for
+        // every data bit, and the host is taken off the bus through its
+        // reset line a few bit times into the first byte - the one way this
+        // silicon lets a controller's pads go - which leaves the target
+        // holding SDA down with SCL released high.
+        L::clear();
+        L::seed = 0x00;
+        Host::Request r{};
+        r.addr = self_addr;
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+        r.tx_len = 0;
+        r.rx = lend<Lease::reply>(rx_buf);
+        r.rx_len = 4;
+        r.speed = I2cSpeed::standard_100k;
+        host_done = false;
+        (void)Host::start(r);
+        // The target served until its first byte is in the shifter; then
+        // the host clocks some four of its bits (10 us each at 100 kHz).
+        const uint32_t t0 = Ticker::millis();
+        while (L::log.served == 0u && Ticker::millis() - t0 < 20u) {
+            L::template poll<C>();
+        }
+        (void)delay_us(clock, 40);
+        Pfic::disable(H::event_irq());
+        Pfic::disable(H::error_irq());
+        H::reset();
+        (void)delay_us(clock, 20);
+        const bool scl_high = SclPin::read();
+        const bool sda_low = !SdaPin::read();
+        print(serial, "  the host cut off ", L::log.served == 0u ? "BEFORE the byte" : "mid-byte",
+              ": SCL ", scl_high ? "high" : "LOW", ", SDA ", sda_low ? "LOW - held" : "high",
+              crlf);
+        bench.verdict("the chip's own target holds SDA low mid-byte once its host is gone - a "
+                      "stuck bus with no foreign chip on it",
+                      L::log.served != 0u && scl_high && sda_low);
+
+        // The remedy, its clocks COUNTED on the pad by TIM4.
+        (void)Host::init(clock);
+        (void)edges_arm();
+        Meter::set_count(0);
+        const uint8_t pulses = Host::unstick();
+        const uint32_t edges = Meter::count();
+        meter_off();
+        // The target took the pulses as the rest of its byte and the ninth
+        // clock as the host's NACK: its closing error is taken and the byte
+        // its shifter asked for dropped, the way every read of letter l
+        // ends.
+        for (uint16_t i = 0; i < 200u; ++i) {
+            L::template poll<C>();
+        }
+        const bool free_now = SclPin::read() && SdaPin::read();
+        print(serial, "  unstick() reported ", pulses, " pulse(s) and TIM4 counted ", edges,
+              " SCL rising edges on the pad; the bus is ", free_now ? "free" : "STILL HELD",
+              "; the target saw ", L::log.nacks, " NACK(s)", crlf);
+        bench.verdict("unstick() clocked the stuck target out - a handful of pulses, never "
+                      "0xFF - and the timer counted them on the pad, plus the STOP's own rise",
+                      pulses >= 1u && pulses <= 9u && edges >= pulses &&
+                          edges <= static_cast<uint32_t>(pulses) + 2u && free_now);
+
+        // The bus is usable again: a read of four, byte-exact.
+        (void)Host::recover();
+        L::clear();
+        L::seed = 0x71;
+        for (uint8_t i = 0; i < 4u; ++i) {
+            rx_buf[i] = 0xEE;
+        }
+        const uint8_t after = L::template tenure<Host, C>(self_addr, nullptr, 0, rx_buf, 4,
+                                                          I2cSpeed::standard_100k);
+        bool exact = after == i2c_ok;
+        for (uint8_t i = 0; i < 4u && exact; ++i) {
+            exact = rx_buf[i] == L::value(0x71, i);
+        }
+        bench.verdict("... and the same two controllers carry a read of four byte-exact right "
+                      "after",
+                      exact);
+        C::release();
+        L::all_released();
+        host_ready();
+    }
+}
+
+/// The CH32V303's letters, registered where the part has the self-link.
+template <bool on = self_link_part>
+void register_self_link_letters() {
+    if constexpr (on) {
+        bench.letter('l', "THE SELF-LINK: I2C1 the host, I2C2 the target, on the chip's own "
+                          "wires",
+                     tl_self_link<>);
+        bench.letter('m', "the self-link swapped: I2C2 the host, I2C1 the target",
+                     tm_self_swapped<>);
+        bench.letter('n', "a target stuck mid-byte, and unstick()'s clocks counted",
+                     tn_unstick<>);
+    }
+}
+
+/// Whether the wire's pull-ups are the self-link's - asked by a peer
+/// letter whose peer did not answer, so it declines instead of failing.
+template <bool on>
+bool self_link_present() {
+    if constexpr (on) {
+        return Self<on>::wired();
+    } else {
+        return false;
+    }
+}
+
+/// I2C2's two vectors: letter m's host, and nothing on any other part.
+template <bool on = self_link_part>
+void host2_event() {
+    if constexpr (on) {
+        if (Self<on>::host2_live && Self<on>::Host2::isr()) {
+            host_done = true;
+        }
+    }
+}
+template <bool on = self_link_part>
+void host2_error() {
+    if constexpr (on) {
+        if (Self<on>::host2_live && Self<on>::Host2::error_isr()) {
+            host_done = true;
+        }
+    }
+}
+
+// ===========================================================================
 // the banner
 // ===========================================================================
 
 void banner() {
-    print(serial, crlf, "test_vx03_i2c - the I2C of RM ch. 19 on I2C1 (PB6/PB7)", crlf,
+    print(serial, crlf, "test_vx03_i2c - the I2C of RM ch. 19 on I2C1 (PB6/PB7), on ",
+          device::part_name, crlf,
           "  the bus goes to a peer board running `twi_peer` (command address ",
-          hex(twilink::command_addr), "), whose pads are the wire's only pull-ups; "
-          "letters b..k skip when it does not answer",
+          hex(twilink::command_addr), ") - letters b..k skip when it does not answer - or, "
+          "on the CH32V303 evaluation board, to the chip's own I2C2 (letters l..n)",
           crlf, "  PB1 runs at ", SysClock::pclk1_hz / 1'000'000u,
           " MHz: CTLR2.FREQ cannot state more than 60 (19.12.2)", crlf,
           "  the wire now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
@@ -1931,6 +2588,11 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
     }
 }
 
+// I2C2's vectors: letter m's host on the CH32V303, empty on every other
+// part.
+extern "C" BRIO_CH32_INTERRUPT void i2c2_ev_handler() { host2_event<>(); }
+extern "C" BRIO_CH32_INTERRUPT void i2c2_er_handler() { host2_error<>(); }
+
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
@@ -1976,6 +2638,7 @@ int main() {
                  tj_flags);
     bench.letter('k', "a ten-second stress at fast mode with the counters at both ends",
                  tk_stress);
+    register_self_link_letters();
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL96" : "FAILED",

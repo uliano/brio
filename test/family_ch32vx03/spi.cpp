@@ -4,11 +4,13 @@
 // one SPI2 has, the host engine with its Request and its DMA slots, the
 // client with its dark listener, and the arbiter over the whole of it.
 //
-// HOW MANY INSTANCES a part has is device::spi_count and nothing else
-// (datasheet table 2-1): the parts below the CH32V203C8 carry SPI1
-// alone. So this TU names SPI2 only through `second_spi`, which is the
-// instance where there is one and SPI1 where there is not - and a neg TU
-// proves that Spi<2> is refused on a part with one.
+// WHICH INSTANCES a part has is device::spi_instances and nothing else
+// (the datasheets' tables 2-1 and 2-1-1): the parts below the CH32V203C8
+// carry SPI1 alone, and SPI3 is the CH32V303RC's and VC's. So this TU
+// names SPI2 only through `second_spi`, which is the instance where there
+// is one and SPI1 where there is not - and a neg TU proves that Spi<2> is
+// refused on a part with one; SPI3 is spi3.cpp's, on the two parts that
+// have it.
 //
 // WHICH COLUMN a program may name is two questions with two answers: the
 // instance must HAVE the column (SPI1 has two, SPI2 has none - no remap
@@ -43,17 +45,19 @@ static_assert(spi_bus_for(1) == Bus::pb2 && spi_bus_for(2) == Bus::pb1);
 static_assert(spi_gate_for(1) == rcc_pb2_spi1 && spi_gate_for(2) == rcc_pb1_spi2);
 static_assert(spi_irq_for(1) == Irq::spi1 && spi_irq_for(2) == Irq::spi2);
 static_assert(spi_base_for(1) == pb2_base + 0x3000 && spi_base_for(2) == pb1_base + 0x3800);
-static_assert(spi_base_for(3) == 0, "this family addresses two SPI instances");
+static_assert(spi_base_for(3) == pb1_base + 0x3C00 && spi_base_for(4) == 0,
+              "this family addresses three SPI instances, the third on PB1 beside the second");
 
 static_assert(One::number == 1 && One::bus == Bus::pb2 && One::irq == Irq::spi1);
 static_assert(!One::has_i2s_prescaler, "table 20-1 lists no I2SPR for SPI1");
 static_assert(Spi<1>::dma_rx_channel == 2 && Spi<1>::dma_tx_channel == 3);
 
-// The instance count is the part's, and nothing else in the stratum says
-// it (datasheet table 2-1).
+// The instances are the part's, and nothing else in the stratum says
+// them (the datasheets' tables 2-1 and 2-1-1).
 static_assert(spi_present(1));
 static_assert(spi_present(2) == (device::spi_count >= 2u));
-static_assert(!spi_present(0) && !spi_present(3));
+static_assert(spi_present(3) == (device::spi_count >= 3u));
+static_assert(!spi_present(0) && !spi_present(4));
 
 // The rate table is PER BUS: at 144 MHz of HCLK, SPI1 divides 144 MHz
 // and SPI2 divides 72 MHz, so the same code is two frequencies.
@@ -204,6 +208,10 @@ void resource()
     One::software_select(true);
     One::half_duplex_output(false);
     (void)One::high_speed_read(true);
+    // The compile-time face of the high-speed read: /2 and a host, the
+    // one code every lot of every class reads the same way.
+    One::configure_high_speed_read<SpiConfig{.clock = SpiClock::div2}>();
+    (void)One::high_speed_read(false);
     (void)One::i2s_config_writable();
     One::dma_requests(true, true);
     One::rxne_interrupt(true);

@@ -1,9 +1,11 @@
 /*
  * i2c.hpp
  *
- * The I2C of the CH32V203 (RM ch. 19): up to two instances, host and
- * client, 7- and 10-bit addresses, dual addressing and the general
- * call, two speeds with fast mode's two duty shapes, clock stretching,
+ * The I2C of the CH32V203 and the CH32V303 (RM ch. 19, which carries no
+ * device-class note: the same block on every class of this stratum): up
+ * to two instances, host and client, 7- and 10-bit addresses, dual
+ * addressing and the general call, two speeds with fast mode's two duty
+ * shapes, clock stretching,
  * PEC and the SMBus bits, two DMA requests per instance - the STM32F1's
  * I2C under WCH's register names, an EVENT MACHINE (SB, ADDR, BTF,
  * ADD10, STOPF, RxNE, TxE and the errors) over two vectors per
@@ -38,6 +40,24 @@
  * phase, and the reason the ITBUFEN enable is switched on and off
  * during a tenure: TxE and RxNE interrupt only while the byte pump
  * needs them, BTF (under ITEVTEN alone) carries the rest.
+ *
+ * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED WHILE THE LAST
+ * WRITTEN BYTE IS STILL GOING OUT, on the TxE that says it went into
+ * the shifter - the peripheral generating it at the end of that byte -
+ * and not on the BTF after it. Measured on the CH32V303VCT6 with its two
+ * controllers on one bus: requested after BTF, with the host holding
+ * SCL low past the byte's acknowledge, the TARGET never raised RxNE for
+ * that last byte - it acknowledged it and lost it, in silence, at every
+ * count from one to four and at both speeds, I2C1 or I2C2 as the
+ * target - where a write closed by a STOP delivered every byte; with the
+ * START requested a byte earlier (WCH's own example does it there)
+ * every byte arrives. A register write followed by a read of it is
+ * exactly this shape, and a CH32 target would lose the register number.
+ * The DMA path does the same: the transmit block's completion arms the
+ * TxE that says its last byte left the data register. A TxE served later
+ * than one byte time falls back to the BTF order - which a target of
+ * another family takes (the CH32V203C8's peer measured it) and a CH32
+ * target does not.
  *
  * THE BUS CLOCK IS PB1 AND THE CHAPTER PUTS A CEILING ON IT. CTLR2's
  * FREQ states that clock in whole megahertz and 19.12.2 confines the
@@ -102,10 +122,11 @@
  * verb here drives it.
  *
  * HOW MANY INSTANCES a part has is `device::i2c_count` and nothing else
- * (datasheet table 2-1): the CH32V203F6 has none at all - I2C1 lives on
- * PB6/PB7 and that package bonds neither - the parts up to the
- * CH32V203K8 have I2C1 alone, and the CH32V203C8 and RB have both. An
- * instance a part has not got does not compile.
+ * (the datasheets' tables 2-1 and 2-1-1): the CH32V203F6 has none at all
+ * - I2C1 lives on PB6/PB7 and that package bonds neither - the parts up
+ * to the CH32V203K8 have I2C1 alone, and the CH32V203C8 and RB and all
+ * four CH32V303 parts have both. An instance a part has not got does not
+ * compile.
  *
  * NOT COVERED YET: 10-bit addressing on the HOST side (the resource has
  * the mode and the client matches such an address; the host's header
@@ -953,9 +974,17 @@ public:
                 if ((s1 & i2c_txe) != 0u && pos_ < req_.tx_len) {
                     S::data(req_.tx.get()[pos_]);
                     ++pos_;
-                    if (pos_ >= req_.tx_len) {
+                    if (pos_ >= req_.tx_len && req_.rx_len == 0u) {
                         S::buffer_interrupt(false);   // BTF carries the end
                     }
+                    return false;
+                }
+                // A read half follows: the repeated START is requested on
+                // the TxE that says the last byte went into the shifter,
+                // while it is still going out (the file header).
+                if (pos_ >= req_.tx_len && req_.rx_len != 0u && (s1 & i2c_txe) != 0u &&
+                    (s1 & i2c_btf) == 0u) {
+                    request_restart();
                     return false;
                 }
                 if ((s1 & i2c_btf) != 0u && pos_ >= req_.tx_len) {
@@ -964,8 +993,16 @@ public:
                 return false;
 
             case Phase::tx_dma:
-                // The engine loaded every byte; BTF says the last one is
-                // out on the wire.
+                // The engine loaded every byte. With a read half to come,
+                // the TxE dma_isr() armed for says the last one went into
+                // the shifter: the repeated START is requested there, as
+                // on the pump. Otherwise BTF says it is out on the wire.
+                if (req_.rx_len != 0u && !dma_busy() && (s1 & i2c_txe) != 0u &&
+                    (s1 & i2c_btf) == 0u) {
+                    S::dma(false, false);
+                    request_restart();
+                    return false;
+                }
                 if ((s1 & i2c_btf) != 0u && !dma_busy()) {
                     S::dma(false, false);
                     return end_of_write();
@@ -1034,6 +1071,12 @@ public:
             }
             if ((tx & TxEngine::flag_complete) != 0u) {
                 (void)TxEngine::complete();
+                // A read half follows: the TxE that says the last byte
+                // left the data register is where the repeated START is
+                // requested (isr()'s tx_dma phase).
+                if (phase_ == Phase::tx_dma && req_.rx_len != 0u) {
+                    S::buffer_interrupt(true);
+                }
             }
             const uint8_t rx = RxEngine::service();
             if ((rx & RxEngine::flag_error) != 0u) {
@@ -1157,8 +1200,21 @@ private:
         return true;
     }
 
+    /// The repeated START of a write-then-read, requested while the last
+    /// written byte is still in the shifter: the peripheral generates it
+    /// at the end of that byte (19.12.1's START bit). ITBUFEN goes down,
+    /// the TxE that brought this here having no more to say.
+    static void request_restart() {
+        S::buffer_interrupt(false);
+        phase_ = Phase::start_rx;
+        S::start();
+    }
+
     /// EVT8_2: the last written byte is out. A repeated START opens the
-    /// read half, or the STOP ends the tenure.
+    /// read half, or the STOP ends the tenure. The read half normally
+    /// left through request_restart() a byte earlier; a TxE served later
+    /// than one byte time lands here instead, and a CH32 target then
+    /// loses that byte (the file header).
     static bool end_of_write() {
         if (req_.rx_len != 0u) {
             phase_ = Phase::start_rx;

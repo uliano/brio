@@ -105,16 +105,17 @@ this document keeps in its place.
 
 ## Types and verbs
 
-`Ch32vx03Platform<TB>` ([brio/ch32vx03/platform.hpp](../../brio/ch32vx03/platform.hpp))
-is the concept member for member: `CriticalSection` is pfic.hpp's
+`Ch32vx03Platform<TB>`
+([brio/ch32vx03/platform.hpp](../../brio/ch32vx03/platform.hpp)) is the
+concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
 destructor restores only what it found set), `idle()` is the
 WFITOWFE/SEVONPEND sequence above followed by the unmask - guarded by
 the count of active bus masters and, with a deep mode armed, by a pause
-of the timebase ([sleep.md](sleep.md)) - `break_here()`
-is `ebreak`, `atomic_width` 4, `now()` the timebase's tick count, and
-the breadcrumb a `PanicRecord` in `.noinit`. The interrupt verbs and the
-per-line enables are [brio/ch32vx03/pfic.hpp](../../brio/ch32vx03/pfic.hpp):
+of the timebase ([sleep.md](sleep.md)) - `break_here()` is `ebreak`,
+`atomic_width` 4, `now()` the timebase's tick count, and the breadcrumb
+a `PanicRecord` in `.noinit`. The interrupt verbs and the per-line
+enables are [brio/ch32vx03/pfic.hpp](../../brio/ch32vx03/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active` (the
 manual's ISR bank is the ENABLE status and its IPR the pending one;
 IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_INTERRUPT` is the one
@@ -122,7 +123,13 @@ spelling of the handler attribute, expanding to WCH's fast attribute
 when the image is built with `CH32VX03_HPE` (the default) and to gcc's
 plain `interrupt` otherwise - one option for the whole image, because a
 fast handler under an HPE that is off corrupts the program it
-interrupted. Interrupt nesting is never enabled: the kernel's rule
+interrupted - and both spellings carry `no_icf`: gcc's identical code
+folding turns the second of two handlers of one body into a handler that
+CALLS the first, which ends in MRET, so the call never returns and the
+caller's frame stays on the stack; on the V4F that frame is the twenty
+f-registers such a caller saves, eighty bytes (measured on the
+CH32V303VCT6: the interrupted program's next return jumped to a saved
+float). Interrupt nesting is never enabled: the kernel's rule
 ([../design/kernel.md](../design/kernel.md), section 1).
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one

@@ -1,4 +1,4 @@
-# I2C (CH32V203)
+# I2C (CH32V203, CH32V303)
 
 Up to two two-wire ports, host and target, 7- and 10-bit addresses with
 a dual address and the general call, two speeds with fast mode's two
@@ -11,13 +11,17 @@ claims, 19.3 and 19.4 for the host and target sequences with figures
 SMBus, 19.9 for the DMA, 19.10 for the PEC, 19.12 for the registers with
 tables 19-1 and 19-2 for the two instances' maps, 10.2.11 and table
 10-34 for the pads, 11.2.3 with table 11-5 for the DMA rows, 3.4.7 for
-the gate and 9.5.1 with table 9-2 for the four vectors) and the
-CH32V203 datasheet V2.8 (table 2-1 for how many I2C a part has, section
-3 for which pads it bonds and where the SMBus alert sits). Ours is the
-CH32V20x_D6 device class for every part up to the CH32V203C8 and
-CH32V20x_D8 for the CH32V203RB. Driver:
-[brio/ch32vx03/i2c.hpp](../../brio/ch32vx03/i2c.hpp). Reference suite:
-`test_vx03_i2c`, which talks to a peer board running `twi_peer`.
+the gate and 9.5.1 with table 9-2 for the four vectors), the CH32V203
+datasheet V2.8 (table 2-1 for how many I2C a part has, section 3 for
+which pads it bonds and where the SMBus alert sits) and the CH32V303
+datasheet V3.5 (table 2-1-1 and the pin tables of 3.2). Three device
+classes read the chapter - CH32V20x_D6 for every part up to the
+CH32V203C8, CH32V20x_D8 for the CH32V203RB and CH32V30x_D8 for the four
+CH32V303 - and chapter 19 carries no class note: one block on all three.
+Driver: [brio/ch32vx03/i2c.hpp](../../brio/ch32vx03/i2c.hpp). Reference
+suite: `test_vx03_i2c`, which talks to a peer board running `twi_peer`
+on the CH32V203 and, on the CH32V303 evaluation board, makes the chip's
+two controllers talk to each other.
 
 ## What the silicon does
 
@@ -64,6 +68,26 @@ engine's `isr()`, and the buffer interrupt (ITBUFEN) is switched on and
 off inside a tenure because TxE and RxNE are wanted only while the byte
 pump needs them.
 
+### The repeated START is requested while the last byte goes out
+
+A write-then-read turns around on a repeated START, and WHEN it is
+requested is not free on this silicon. Requested at EVT8_2 - TxE and
+BTF, the last byte and its acknowledge done and the host holding SCL low
+- a CH32 TARGET loses that last byte: it acknowledges it and never
+raises RxNE for it, in silence (measured on the CH32V303VCT6 with its
+two controllers on one bus: the last of one, two, three and four
+written bytes, at both speeds, whichever instance was the target, while
+the same bytes closed by a STOP all arrived). A register write followed
+by a read of that register is exactly this shape, and the register
+number is what the target would lose. Requested a byte EARLIER - on the
+TxE that says the last byte went into the shifter, so the peripheral
+generates the START at the end of that byte, which is where WCH's own
+interrupt example puts it - every byte arrives. So the engine requests
+it there, on the pump and on the DMA path alike (the transmit block's
+completion arms the TxE it waits for). A TxE served later than one byte
+time still falls back to the BTF order, which a target of another family
+takes - the CH32V203C8T6's peer board did - and a CH32 target does not.
+
 ### BUSY is the wire, and it can be left standing
 
 19.12.7 defines BUSY as "SDA or SCL has a low level", cleared when a
@@ -102,11 +126,11 @@ engines holds the program awake.
 
 ### How many instances a part has
 
-`device::i2c_count`, from datasheet table 2-1 and nothing else: the
-CH32V203F6 has NO I2C (I2C1 lives on PB6/PB7 and that package bonds
-neither), the parts up to the CH32V203K8 have I2C1 alone, and the
-CH32V203C8 and RB have both. An instance a part has not got does not
-compile.
+`device::i2c_count`, from the datasheets' tables 2-1 and 2-1-1 and
+nothing else: the CH32V203F6 has NO I2C (I2C1 lives on PB6/PB7 and that
+package bonds neither), the parts up to the CH32V203K8 have I2C1 alone,
+and the CH32V203C8 and RB and all four CH32V303 have both. An instance a
+part has not got does not compile.
 
 ## Types and verbs
 
@@ -335,14 +359,62 @@ measured on the pad that carries it, with no scope and no wire.
   401600 bytes moved, not one failure at either end and no byte
   mismatch.
 
+### On the CH32V303VCT6
+
+`test_vx03_i2c` at the same 96 MHz on WCH's evaluation board (28
+verdicts in `z`), which wires I2C2's pads to I2C1's - PB10 to PB6, PB11
+to PB7 - with a 4.7 kOhm pull-up on each line: the chip's two
+controllers share one bus, and there is no peer board. The letters that
+want the peer decline by name when they find the bus pulled up by that
+link and no peer answering; the rest measure:
+
+- **The block is the CH32V203's**: the same reset values, RTR 2 alone;
+  the same three rungs on the pad during a probe - 9979 ns of period at
+  100 kHz (high 4947 ns), 2479 ns at 400 kHz and DUTY 2 (403 kHz, high
+  781 ns), 2583 ns at DUTY 16/9 (387 kHz); the same missing enable
+  protection, CKCFGR, FREQ and RTR each taking a write with PE set; the
+  lines back high within 448 to 479 ns of release on the board's
+  resistors (two runs, an upper bound as above); an absent address
+  `i2c_nack_addr` with BUSY clear 6 us after the answer; both vectors
+  carrying a probe; the dual address and the general call in their
+  registers, and the PE cycle sparing the configuration.
+- **I2C1 the host, I2C2 the target**, the target POLLED from the loop
+  that waits for the host (its clock stretch holds the bus while the
+  loop comes round): the probe, an absent address, an eight-byte write,
+  reads of one, two, three, four and eight bytes - the host's four
+  receive procedures - and a write-then-read with the target addressed
+  twice, byte-exact at 100 kHz and at 400 kHz in both duty shapes.
+- **THE TARGET AS A TRANSMITTER**: every byte those reads took came out
+  of I2C2's own data register, and in each of the five reads the target
+  was asked for exactly one byte more than the host clocked - the byte
+  its shifter wants ahead of the wire - which `flush()` dropped after the
+  host's closing NACK, fifteen of fifteen over the three rungs.
+- **The second address and the general call** each open a write tenure
+  on the target, and the target's status says which matched (DUALF,
+  GENCALL).
+- **The DMA host on channels 6 and 7** writes sixteen bytes into the
+  chip's own target, reads sixteen back and carries a write of three and
+  a read of eight in one tenure, byte-exact at 400 kHz, with no BUSY left
+  standing.
+- **I2C2 ON A WIRE AS THE HOST**, I2C1 its target: the same shapes,
+  byte-exact at both speeds and both duties.
+- **The last written byte before a repeated START** (above): with the
+  START requested after BTF the target took none of one, one of two, two
+  of three and three of four written bytes; requested while the last byte
+  shifts, every one - the engine's order now, without a dummy byte in the
+  data register, with seven to ten event-vector entries for the whole
+  tenure.
+- **A target stuck mid-byte, with no foreign chip**: a read of zeros cut
+  off four bit times into its first byte by taking the host through its
+  reset line leaves I2C2 holding SDA low with SCL released high;
+  `unstick()` reported 4 pulses and TIM4 counted 4 rising edges on the
+  pad, the bus came back free, and the same two controllers read four
+  bytes byte-exact right after.
+
 ## Not covered yet
 
 Driver gaps:
 
-- **I2C2 on a wire.** Its pads PB10/PB11 carry another link on this
-  bench, so the instance is compiled for every part that has it and
-  never clocked. What would close it is a bus on PB10/PB11 with a device
-  or a peer at the far end.
 - **10-bit addressing on the HOST side.** The tenure
   `docs/design/i2c-bus.md` describes carries a 7-bit address on every
   stratum, so the Request has no shape for a 10-bit one and the header
@@ -365,18 +437,19 @@ Driver gaps:
 
 Implemented, not bench-verified (each with what would measure it):
 
-- **The target as a TRANSMITTER on the wire.** The link protocol's host
-  action only writes, so no controller has ever READ this board's
-  client; what `flush()` drops was measured on the registers alone. A
-  peer that reads from the DUT's own address would close it.
+- **The write-then-read's START against a target of another family**,
+  now that it is requested before BTF: measured against the CH32V303's
+  own two controllers; the CH32V203C8T6's peer board running the tenure
+  shapes again is what would measure it there.
 - **NOSTRETCH, and the overrun it admits.** The option is written and
   read back; measuring it wants a controller that will not wait, which
   the peer's engine is not.
 - **`rebase()` under a `DynamicClock`.** The fan-out is written and
   compiled; no suite drives this chapter under a dynamic clock, and one
   would have to stay inside the 4..60 MHz window at every rate.
-- **I2C1's second column, PB8/PB9.** The pads are bonded on this part
-  and the remap is refused where they are not; the bench's bus is on
-  PB6/PB7, so the column is compiled and never clocked.
+- **I2C1's second column, PB8/PB9.** The pads are bonded on both
+  boards' parts and the remap is refused where they are not; both
+  benches' buses are on PB6/PB7 (and the evaluation board's PB8 carries
+  a timer wire), so the column is compiled and never clocked.
 - **The SMBus alert pad.** PB5 for I2C1: the driver drives the bit, not
   the pad, and an alert line wants a device that pulls it.

@@ -1,12 +1,13 @@
 /*
  * spi.hpp
  *
- * The SPI of the CH32V203 (RM ch. 20): up to two instances, both roles,
- * 8- or 16-bit frames, the four modes, the three chip-select
- * arrangements, the simplex and bidirectional line modes, hardware CRC
- * and two DMA requests per instance - the STM32F1's SPI under WCH's
- * register names, with one register of its own (HSCR, a high-speed read
- * mode). Three layers, the other strata's arrangement:
+ * The SPI of the CH32V203 and the CH32V303 (RM ch. 20): up to three
+ * instances, both roles, 8- or 16-bit frames, the four modes, the three
+ * chip-select arrangements, the simplex and bidirectional line modes,
+ * hardware CRC and two DMA requests per instance - the STM32F1's SPI under
+ * WCH's register names, with one register of its own (HSCR, a high-speed
+ * read mode) - and on the CH32V303RC and VC the I2S FACE of SPI2 and SPI3.
+ * Four layers, the other strata's arrangement:
  *
  *  - `Spi<n>` is the RESOURCE: the register block, its gate and reset,
  *    the configuration under the rules the chapter states, the data and
@@ -21,15 +22,20 @@
  *  - `SpiClient<n, pins>` is the other end of the wire, a thin polled
  *    surface with an ISR body: a client is a protocol, and which one is
  *    the application's.
+ *  - `I2s<n>` is the same register block in its AUDIO face, a resource
+ *    and nothing above it: the four standards, the data and channel
+ *    widths, both roles and both directions, the clock generator and its
+ *    master clock, the flags and the requests the two faces share.
  *
- * TWO INSTANCES ON TWO BUSES, AND THAT IS THE RATE TABLE. SPI1 sits on
- * PB2, whose rate IS HCLK on this family, and SPI2 on PB1, which the
+ * INSTANCES ON TWO BUSES, AND THAT IS THE RATE TABLE. SPI1 sits on PB2,
+ * whose rate IS HCLK on this family, and SPI2 and SPI3 on PB1, which the
  * stratum caps at 72 MHz - so the same BR code means two different
- * frequencies on the two instances and a program must ask the INSTANCE
- * (`Spi<n>::bus_hz(clock)`), never the system clock. Which instances a
- * part has is `device::spi_count` (datasheet table 2-1: the 32 KB and
- * 64 KB parts below the CH32V203C8 have SPI1 alone), and `Spi<2>` does
- * not compile where there is one.
+ * frequencies on SPI1 and on the other two, and a program must ask the
+ * INSTANCE (`Spi<n>::bus_hz(clock)`), never the system clock. Which
+ * instances a part has is `device::spi_instances` (the datasheets' tables
+ * 2-1 and 2-1-1: the parts below the CH32V203C8 have SPI1 alone, the
+ * CH32V203C8 and RB and the 128 KB CH32V303 SPI1 and SPI2, the CH32V303RC
+ * and VC all three), and an instance a part has not got does not compile.
  *
  * NO FIFO (figure 20-1): one transmit buffer, one receive buffer, one
  * shift register. TXE means "the buffer moved into the shifter" - a
@@ -47,39 +53,68 @@
  * (clear_mode_fault()'s own comment lists them), and the block's RCC
  * reset pulse is the way back. The verb reports rather than promises.
  *
- * THE PADS ARE A COLUMN (afio.hpp, table 10-32). SPI1 has two: the
- * default PA4/PA5/PA6/PA7 and code 1's PA15/PB3/PB4/PB5. SPI2 has NO
+ * THE PADS ARE A COLUMN (afio.hpp, tables 10-32 and 10-33). SPI1 has two:
+ * the default PA4/PA5/PA6/PA7 and code 1's PA15/PB3/PB4/PB5. SPI2 has NO
  * remap field - one column, PB12..PB15, from the datasheet's pin table.
- * `SpiPins` carries the code and init() writes it, refused where the
- * part bonds no pad of it.
+ * SPI3 has two: the default PA15/PB3/PB4/PB5 - the very pads of SPI1's
+ * second column - and code 1's PA4/PC10/PC11/PC12, behind PCFR1's bit 28,
+ * which moves I2S3's pads with them. `SpiPins` carries the code and
+ * init() writes it, refused where the part bonds no pad of it.
  *
- * THE DMA REQUESTS ARE CHANNELS (dma_engine.hpp, table 11-5): SPI1
- * receives on 2 and transmits on 3, SPI2 receives on 4 and transmits on
- * 5. On this family the channel IS the request, so an engine slot
- * naming any other channel is refused at compile time - it would move
- * nothing. IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE (this
+ * THE DMA REQUESTS ARE SLOTS (dma_engine.hpp, tables 11-2 to 11-5): SPI1
+ * receives on DMA1's channel 2 and transmits on 3, SPI2 on DMA1's 4 and
+ * 5, and SPI3 - and the I2S face of SPI3, whose requests are the same two
+ * - on DMA2's 1 and 2. On this family the channel IS the request, so an
+ * engine slot naming any other one is refused at compile time - it would
+ * move nothing. IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE (this
  * stratum's finding, docs/ch32vx03/README.md): a transport with engines
  * holds the program awake, exactly as usart.hpp's does.
  *
- * WHAT THE CHAPTER GIVES ANOTHER CLASS, AND THIS FILE THEREFORE HAS
- * NOT. HSCR's second bit (HSRXEN2, high-speed read mode 2) is named for
- * the CH32F20x_D8/D8C, CH32V30x_D8/D8C and CH32V31x_D8C alone, and so
- * is BR's alternate ladder (FPCLK/2, /3, /4 ... under HSRXEN): on the
- * CH32V20x_D6 series 20.4.10 says the high-speed read mode "is only
- * valid at clock division 2", so HSRXEN changes the rate table nowhere
- * and `high_speed_read()` refuses at any other BR code. The bit is also
- * WRITE-ONLY here (the register's own access column), so nothing reads
- * it back.
+ * THE HIGH-SPEED READ MODE IS A LOT'S STORY, AND ONE CODE MEANS THE SAME
+ * ON EVERY LOT. HSCR.HSRXEN delays a HOST'S sampling of MISO so that a
+ * late answer is caught at the top rate. 20.4.10 tells it four ways by
+ * class and lot: on the CH32V20x_D6 it "is only valid at clock division
+ * 2" and the bit is write-only; on the CH32V20x_D8 the bit is write-only
+ * and the mode valid at /2 alone on lots whose fifth digit from the end
+ * is below 2, anywhere on the others; on the CH32V30x_D8 lots whose
+ * penultimate sixth digit is not zero the bit reads back, BR takes a
+ * second ladder under it (20.4.1: FPCLK/2, /3 ... /9) and a second mode,
+ * HSRXEN2, exists; on that class's other lots the bit is write-only again
+ * and the mode valid at /2 alone where the fifth digit is below 2. BR =
+ * 000 is FPCLK/2 in BOTH ladders, so the one code at
+ * which HSRXEN means the same thing on every die of every class is /2 -
+ * and `high_speed_read()` refuses at any other, at run time against the
+ * code in the register and at compile time where the configuration is a
+ * constant (`configure_high_speed_read<cfg>()`). HSRXEN2 is a verb that
+ * asks the die (the CH32V303's, and only with SPI's bus at 120 MHz or
+ * above, which only SPI1's PB2 reaches). What the mode buys is measured
+ * (docs/ch32vx03/spi.md): on the CH32V303VCT6, SPI2 hosting SPI3 over
+ * the evaluation board's wires at /2 - 36 MHz - read 254 bytes of 256
+ * wrong without it, 253 of them the client's byte ONE BIT LATE, and every
+ * byte right with it; that die kept no HSRXEN2.
  *
- * I2S. The register file carries the I2S face (SPIx_I2S_CFGR at 0x1C on
- * both instances, SPIx_I2SPR at 0x20 on SPI2 alone - SPI1 has no
- * prescaler and so no master I2S), and chapter 20 is written for four
- * families at once. The CH32V203 DATASHEET gives this series no I2S: no
- * row in table 2-1, no audio signal in any package's pin table, and the
- * clock a master I2S needs (RCC_CFGR2's I2S2SRC and PLL3) is another
- * class's. So this driver carries NO I2S verbs, `i2s_config_writable()`
- * is the one question it answers about that register, and
- * docs/ch32vx03/spi.md states the measurement.
+ * THE I2S FACE, THE CH32V303RC'S AND VC'S. The register file carries
+ * SPIx_I2S_CFGR on every instance and SPIx_I2SPR on SPI2 and SPI3, and
+ * chapter 20 is written for four families at once; what decides whether
+ * a part HAS the face is its datasheet - table 2-1-1 gives two I2S to the
+ * 256 KB CH32V303 and none to the 128 KB ones, and the CH32V203's table
+ * 2-1 has no I2S row at all - so `I2s<n>` compiles where
+ * `device::has_i2s` says and for SPI2 and SPI3 alone, and the SPI face
+ * keeps `i2s_config_writable()`, the one question it asks of that
+ * register elsewhere. THE CLOCK A MASTER DIVIDES IS SYSCLK: figure 3-3,
+ * the simple tree this class has, draws SYSCLK to both I2S interfaces,
+ * and RCC_CFGR2's I2S2SRC and I2S3SRC only choose between SYSCLK and a
+ * PLL3 the CH32V30x_D8C has and this class has not - so `i2s_clock_hz()`
+ * answers a static Clock's SYSCLK, and the divider pair is 20.3.3's
+ * arithmetic against it (measured: 16015 frames a second counted against
+ * the core for the 16014 that arithmetic gives at 144 MHz). The face
+ * shares the vector, the gate, the reset, CTLR2's enables and the two DMA
+ * requests with the SPI face; CTLR1, the CRC and MODF are not used in
+ * it. ONE SENTENCE OF 20.3.6.2 DOES NOT HOLD: TXE reads 1 on a configured
+ * transmitting face with I2SE clear, and a datum written there is the
+ * first word on the wire once the face is enabled (measured on the
+ * CH32V303VCT6) - so nothing here waits for TXE to rise at the enable,
+ * and a program may load its first word before it.
  */
 
 #pragma once
@@ -130,8 +165,10 @@ struct SpiRegs {
     uint16_t RESERVED9;
 };
 
+/// The three instances this family addresses (tables 20-1 to 20-3):
+/// SPI1 on PB2, SPI2 and SPI3 on PB1 - device.hpp's spi3_base.
 constexpr uint32_t spi_base_for(uint8_t n) {
-    return n == 1 ? pb2_base + 0x3000 : n == 2 ? pb1_base + 0x3800 : 0;
+    return n == 1 ? pb2_base + 0x3000 : n == 2 ? pb1_base + 0x3800 : n == 3 ? spi3_base : 0;
 }
 
 /// Which bus an instance hangs on, which is both its gate register and
@@ -139,25 +176,33 @@ constexpr uint32_t spi_base_for(uint8_t n) {
 constexpr Bus spi_bus_for(uint8_t n) { return n == 1 ? Bus::pb2 : Bus::pb1; }
 
 constexpr uint32_t spi_gate_for(uint8_t n) {
-    return n == 1 ? rcc_pb2_spi1 : n == 2 ? rcc_pb1_spi2 : 0;
+    return n == 1 ? rcc_pb2_spi1 : n == 2 ? rcc_pb1_spi2 : n == 3 ? rcc_pb1_spi3 : 0;
 }
 
-constexpr Irq spi_irq_for(uint8_t n) { return n == 1 ? Irq::spi1 : Irq::spi2; }
+/// The instance's vector - SPI3's is entry 67 of the CH32V303's own tail,
+/// and irq_none on a class that has no such line.
+constexpr Irq spi_irq_for(uint8_t n) {
+    return n == 1 ? Irq::spi1 : n == 2 ? Irq::spi2 : Irq::spi3;
+}
 
-/// Does THIS PART have that instance (datasheet table 2-1) - and is it
-/// one this driver reaches? SPI3, the CH32V303RC's and VC's, is not.
+/// Does THIS PART have that instance? The part table's mask
+/// (device::spi_instances, from the datasheets' tables 2-1 and 2-1-1),
+/// never a count read as "the first n".
 constexpr bool spi_present(uint8_t n) {
-    return n >= 1u && n <= 2u && n <= device::spi_count;
+    return n >= 1u && n <= 3u && (device::spi_instances & static_cast<uint16_t>(1U << n)) != 0u;
 }
 
-/// Table 11-5's two rows per instance, read through dma_engine.hpp so
-/// that the slots live in exactly one place - and the channel numbers of
-/// those slots, which is what a message prints.
+/// The two rows per instance (tables 11-2 to 11-5), read through
+/// dma_engine.hpp so that the slots live in exactly one place - SPI3's
+/// are DMA2's - and the channel numbers of those slots, which is what a
+/// message prints.
 constexpr DmaSlot spi_dma_rx_slot(uint8_t n) {
-    return dma_request_channel(n == 1 ? DmaRequest::spi1_rx : DmaRequest::spi2_rx);
+    return dma_request_channel(n == 1 ? DmaRequest::spi1_rx
+                               : n == 2 ? DmaRequest::spi2_rx : DmaRequest::spi3_rx);
 }
 constexpr DmaSlot spi_dma_tx_slot(uint8_t n) {
-    return dma_request_channel(n == 1 ? DmaRequest::spi1_tx : DmaRequest::spi2_tx);
+    return dma_request_channel(n == 1 ? DmaRequest::spi1_tx
+                               : n == 2 ? DmaRequest::spi2_tx : DmaRequest::spi3_tx);
 }
 constexpr uint8_t spi_dma_rx_channel(uint8_t n) { return spi_dma_rx_slot(n).channel; }
 constexpr uint8_t spi_dma_tx_channel(uint8_t n) { return spi_dma_tx_slot(n).channel; }
@@ -198,11 +243,32 @@ inline constexpr uint16_t spi_crcerr   = 1u << 4;   ///< the one rc_w0 flag of t
 inline constexpr uint16_t spi_modf     = 1u << 5;
 inline constexpr uint16_t spi_ovr      = 1u << 6;
 inline constexpr uint16_t spi_bsy      = 1u << 7;
-// HSCR (20.4.10). Bit 2 (HSRXEN2) is another device class's.
+// HSCR (20.4.10). HSRXEN is every class's; HSRXEN2 is the CH32V30x_D8's,
+// and there a lot's (the file header).
 inline constexpr uint16_t spi_hsrxen   = 1u << 0;
-// I2S_CFGR (20.4.8): the one bit this stratum ever writes, and only to
-// ask the silicon whether the face is there at all.
-inline constexpr uint16_t spi_i2smod   = 1u << 11;
+inline constexpr uint16_t spi_hsrxen2  = 1u << 2;
+/// HSRXEN2 "is used only when ... SPI PCLK is greater than or equal to
+/// 120M" (20.4.10): the bus rate below which its verb refuses.
+inline constexpr uint32_t spi_hsrxen2_min_bus_hz = 120'000'000UL;
+// SPIx_I2S_CFGR (20.4.8): the face's whole configuration, and I2SMOD the
+// one bit the SPI face writes, only to ask the silicon whether the
+// register answers.
+inline constexpr uint16_t spi_i2s_chlen        = 1u << 0;
+inline constexpr uint16_t spi_i2s_datlen_shift = 1;
+inline constexpr uint16_t spi_i2s_datlen_mask  = 3u << 1;
+inline constexpr uint16_t spi_i2s_ckpol        = 1u << 3;
+inline constexpr uint16_t spi_i2s_std_shift    = 4;
+inline constexpr uint16_t spi_i2s_std_mask     = 3u << 4;
+inline constexpr uint16_t spi_i2s_pcmsync      = 1u << 7;
+inline constexpr uint16_t spi_i2s_cfg_shift    = 8;
+inline constexpr uint16_t spi_i2s_cfg_mask     = 3u << 8;
+inline constexpr uint16_t spi_i2se             = 1u << 10;
+inline constexpr uint16_t spi_i2smod           = 1u << 11;
+// SPIx_I2SPR (20.4.9), SPI2's and SPI3's: the linear divider, ODD and the
+// master clock's output enable.
+inline constexpr uint16_t spi_i2s_div_mask = 0x00FFu;
+inline constexpr uint16_t spi_i2s_odd      = 1u << 8;
+inline constexpr uint16_t spi_i2s_mckoe    = 1u << 9;
 
 // =============================================================================
 // The vocabulary
@@ -216,8 +282,14 @@ struct SpiFlag {
     static constexpr uint32_t mode_fault = spi_modf;
     static constexpr uint32_t overrun = spi_ovr;
     static constexpr uint32_t busy = spi_bsy;
-    /// The three sources ERRIE gates (20.2.8).
+    /// The three sources ERRIE gates in the SPI face (20.2.8).
     static constexpr uint32_t errors = spi_crcerr | spi_modf | spi_ovr;
+    /// The I2S face's own two: a client transmitter clocked before its
+    /// data register was written, and the side the datum belongs to.
+    static constexpr uint32_t underrun = spi_udr;
+    static constexpr uint32_t channel_side = spi_chside;
+    /// The two sources ERRIE gates in the I2S face (20.3.8).
+    static constexpr uint32_t i2s_errors = spi_ovr | spi_udr;
 };
 
 /// CPOL and CPHA as the four Motorola modes (20.2.1).
@@ -309,21 +381,26 @@ struct SpiPins {
     uint8_t remap = 0;
 };
 
-/// How many columns an instance has: SPI1's two, and SPI2's one (no
-/// remap field exists for it).
-constexpr uint8_t spi_column_count(uint8_t n) { return n == 1 ? afio_spi1_codes : 1u; }
+/// How many columns an instance has: SPI1's two, SPI2's one (no remap
+/// field exists for it) and SPI3's two (table 10-33).
+constexpr uint8_t spi_column_count(uint8_t n) {
+    return n == 1 ? afio_spi1_codes : n == 3 ? afio_spi3_codes : 1u;
+}
 
 /// The pads of column `code` on that instance, every signal named.
 constexpr SpiPins spi_pins_for(uint8_t n, uint8_t code) {
-    const SpiPadSet p = n == 1 ? afio_spi1_pads(code) : afio_spi2_pad_set;
+    const SpiPadSet p = n == 1   ? afio_spi1_pads(code)
+                        : n == 3 ? afio_spi3_pads(code)
+                                 : afio_spi2_pad_set;
     return SpiPins{.nss = p.nss, .sck = p.sck, .miso = p.miso, .mosi = p.mosi,
-                   .remap = static_cast<uint8_t>(n == 1 ? code : 0u)};
+                   .remap = static_cast<uint8_t>(n == 2 ? 0u : code)};
 }
 
 /// The reset column of each instance, which is what a program that has
 /// not chosen its pads gets.
 inline constexpr SpiPins spi1_default_pins = spi_pins_for(1, 0);
 inline constexpr SpiPins spi2_default_pins = spi_pins_for(2, 0);
+inline constexpr SpiPins spi3_default_pins = spi_pins_for(3, 0);
 
 /// The default for `SpiHost<n>` and `SpiClient<n>`: each instance's own
 /// first column, chosen by the instance rather than by SPI1's.
@@ -464,24 +541,26 @@ constexpr uint32_t spi_bus_hz_at(uint32_t hclk) {
  */
 template <uint8_t n>
 struct Spi {
-    static_assert(spi_base_for(n) != 0, "brio Spi: this family has SPI1 and SPI2");
+    static_assert(spi_base_for(n) != 0, "brio Spi: this family has SPI1, SPI2 and SPI3");
     static_assert(spi_present(n),
                   "brio Spi: this part does not offer that instance - the parts below the "
-                  "CH32V203C8 have SPI1 alone (datasheet table 2-1, parts/<part>.hpp)");
+                  "CH32V203C8 have SPI1 alone, and SPI3 is the CH32V303RC's and VC's (the "
+                  "datasheets' tables 2-1 and 2-1-1, parts/<part>.hpp)");
 
     Spi() = delete;
 
     static constexpr uint8_t number = n;
     static constexpr Bus bus = spi_bus_for(n);
     static constexpr Irq irq = spi_irq_for(n);
-    /// Table 11-5: the two channels this instance's requests reach.
+    /// Tables 11-2 to 11-5: the two slots this instance's requests reach.
     static constexpr DmaSlot dma_rx_slot = spi_dma_rx_slot(n);
     static constexpr DmaSlot dma_tx_slot = spi_dma_tx_slot(n);
     static constexpr uint8_t dma_rx_channel = dma_rx_slot.channel;
     static constexpr uint8_t dma_tx_channel = dma_tx_slot.channel;
-    /// SPI2 alone carries the I2S prescaler (table 20-2 has it, 20-1
-    /// has not), which is what a master I2S would need.
-    static constexpr bool has_i2s_prescaler = (n == 2);
+    /// SPI2 and SPI3 carry the I2S prescaler (tables 20-2 and 20-3 have
+    /// it, 20-1 has not), which is what a master I2S needs; whether the
+    /// PART has the I2S face at all is device::has_i2s.
+    static constexpr bool has_i2s_prescaler = (n != 1);
 
     static SpiRegs& regs() { return *reinterpret_cast<SpiRegs*>(spi_base_for(n)); }
     static volatile void* data_address() { return &regs().DATAR; }
@@ -528,10 +607,13 @@ struct Spi {
     }
 
     /// Put the column this instance's pads come from into AFIO. SPI2 has
-    /// no remap field, so only code 0 is accepted for it.
+    /// no remap field, so only code 0 is accepted for it; SPI3's field
+    /// (PCFR1 bit 28) moves I2S3's pads with its own.
     static bool remap(uint8_t code) {
         if constexpr (n == 1) {
             return Afio::remap(Remap::spi1, code);
+        } else if constexpr (n == 3) {
+            return Afio::remap(Remap::spi3, code);
         } else {
             return code == 0u;
         }
@@ -706,10 +788,15 @@ struct Spi {
     }
 
     /**
-     * HSCR.HSRXEN, the high-speed read mode. On the CH32V20x_D6 series
-     * 20.4.10 says it "is only valid at clock division 2", so the verb
-     * REFUSES at any other BR code rather than arming a mode the silicon
-     * ignores; the bit is write-only here, so nothing reads it back.
+     * HSCR.HSRXEN, the high-speed read mode: a HOST's sampling of MISO
+     * moved late enough to catch an answer at the top rate. The verb
+     * REFUSES at any BR code but /2 - the one code whose meaning no lot
+     * of any class changes (the file header) - rather than arming a mode
+     * a die may ignore or read on another ladder. The bit is write-only
+     * on every die but the CH32V303 lots that also have HSRXEN2, so
+     * nothing reads it back, and HSCR is written WHOLE: HSRXEN2 goes with
+     * the mode it adds to. The mode outlives a reconfiguration - HSCR is
+     * not CTLR1 - so a host that moves off /2 turns it off first.
      */
     static bool high_speed_read(bool on) {
         if (on && clock() != SpiClock::div2) {
@@ -719,12 +806,72 @@ struct Spi {
         return true;
     }
 
+    /// The whole configuration AND the high-speed read, where the
+    /// configuration is a CONSTANT: a BR code other than /2, or a client
+    /// (the mode is a host's reading), is a compile error on the line
+    /// that wrote the value - configure<cfg>()'s refusals besides.
+    template <SpiConfig c>
+    static void configure_high_speed_read() {
+        static_assert(spi_config_valid(c),
+                      "brio Spi: this configuration is not one chapter 20 has (see configure<cfg>())");
+        static_assert(c.clock == SpiClock::div2,
+                      "brio Spi: the high-speed read mode means the same thing on every lot at BR "
+                      "= /2 alone (20.4.10: the CH32V20x_D6's only valid code, and the one the "
+                      "CH32V30x_D8's second ladder leaves where it was)");
+        static_assert(c.role == SpiRole::host,
+                      "brio Spi: the high-speed read mode moves a HOST's sampling of MISO "
+                      "(20.4.10) - a client samples on its host's clock");
+        write_config(c);
+        regs().HSCR = spi_hsrxen;
+    }
+
     /**
-     * Does SPI_I2S_CFGR's I2SMOD take a write on this silicon? The
-     * datasheet gives this series no I2S (the file header), and this is
-     * the one question the driver asks of that register: the bit is set,
-     * read back and put away, with SPE clear as 20.4.8 requires. It
-     * moves no pad and starts nothing.
+     * HSCR.HSRXEN2, the second high-speed read mode: the CH32V30x_D8's,
+     * on the lots 20.4.10's note names, "used only when HSRXEN is turned
+     * on and SPI PCLK is greater than or equal to 120M". So the verb takes
+     * the instance's bus rate, refuses below 120 MHz - which leaves it to
+     * SPI1, PB1 being capped at 72 - and at a BR code other than /2, and
+     * writes the two modes TOGETHER, mode 2 being an addition to mode 1.
+     * It then ASKS THE DIE, the way this stratum asks for a lot's bit: the
+     * word is read FIRST - HSCR holds nothing outside its two bits, so a
+     * word with any other bit set is another register's answer (an
+     * address that mirrors another has been met on this die) and the
+     * answer is no with nothing written - then the two bits are written
+     * and the word must come back as exactly those two, which is what the
+     * lots that have HSRXEN2 give (HSRXEN reads back there too). A die
+     * that did not keep them is left at HSRXEN alone and the answer is
+     * false. Refused at compile time on the CH32V203's classes.
+     */
+    static bool high_speed_read2(bool on, uint32_t bus_hz) {
+        static_assert(device::device_class == DeviceClass::v30x_d8,
+                      "brio Spi: HSRXEN2 is the CH32V30x_D8's (20.4.10's note) - no CH32V203 has "
+                      "it");
+        if (!on) {
+            regs().HSCR = spi_hsrxen;
+            return true;
+        }
+        if (bus_hz < spi_hsrxen2_min_bus_hz || clock() != SpiClock::div2) {
+            return false;
+        }
+        constexpr uint16_t both = static_cast<uint16_t>(spi_hsrxen | spi_hsrxen2);
+        if ((regs().HSCR & static_cast<uint16_t>(~both)) != 0u) {
+            return false;   // the read path is not HSCR's own
+        }
+        regs().HSCR = both;
+        if (regs().HSCR != both) {
+            regs().HSCR = spi_hsrxen;
+            return false;   // this die's lot has no HSRXEN2
+        }
+        return true;
+    }
+
+    /**
+     * Does SPI_I2S_CFGR's I2SMOD take a write on this silicon? On a part
+     * the datasheet gives no I2S (the file header) this is the one
+     * question the driver asks of that register; where the face is the
+     * part's, `I2s<n>` is its driver. The bit is set, read back and put
+     * away, with SPE clear as 20.4.8 requires. It moves no pad and starts
+     * nothing.
      */
     static bool i2s_config_writable() {
         const uint16_t saved = regs().I2SCFGR;
@@ -857,13 +1004,13 @@ class SpiHost {
     static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
                   "brio SpiHost: the two engines must ride two different DMA channels");
     static_assert(!TxEngine::present || dma_engine_slot<TxEngine>() == S::dma_tx_slot,
-                  "brio SpiHost: on this family the channel IS the request (RM table 11-5) - "
-                  "SPI1 transmits on DMA channel 3 and SPI2 on channel 5, and an engine on "
-                  "any other channel would move nothing");
+                  "brio SpiHost: on this family the channel IS the request (RM tables 11-2 to "
+                  "11-5) - SPI1 transmits on DMA1's channel 3, SPI2 on DMA1's 5 and SPI3 on "
+                  "DMA2's 2, and an engine on any other slot would move nothing");
     static_assert(!RxEngine::present || dma_engine_slot<RxEngine>() == S::dma_rx_slot,
-                  "brio SpiHost: on this family the channel IS the request (RM table 11-5) - "
-                  "SPI1 receives on DMA channel 2 and SPI2 on channel 4, and an engine on "
-                  "any other channel would move nothing");
+                  "brio SpiHost: on this family the channel IS the request (RM tables 11-2 to "
+                  "11-5) - SPI1 receives on DMA1's channel 2, SPI2 on DMA1's 4 and SPI3 on "
+                  "DMA2's 1, and an engine on any other slot would move nothing");
     static_assert(spi_pins_valid(n, pins),
                   "brio SpiHost: these SPI pads are not a link on this part - SCK is required, "
                   "no two signals may name the same pad, the remap code must be a column the "
@@ -1650,6 +1797,509 @@ private:
 };
 
 // =============================================================================
+// The I2S face (20.3, 20.4.8, 20.4.9) - the CH32V303RC's and VC's
+// =============================================================================
+
+/// I2SCFG[1:0] (20.4.8): what the block is on the audio bus - a host
+/// drives CK and WS, a client takes them - and which way SD goes.
+enum class I2sMode : uint8_t {
+    client_transmit = 0,
+    client_receive = 1,
+    host_transmit = 2,
+    host_receive = 3,
+};
+
+constexpr bool i2s_mode_is_host(I2sMode m) {
+    return m == I2sMode::host_transmit || m == I2sMode::host_receive;
+}
+constexpr bool i2s_mode_is_transmit(I2sMode m) {
+    return m == I2sMode::host_transmit || m == I2sMode::client_transmit;
+}
+
+/// I2SSTD[1:0] (20.3.2): the four audio standards - Philips (WS one
+/// clock ahead of the MSB), MSB-justified (WS with the MSB), LSB-justified
+/// (the datum's last bit against the channel's end) and PCM, whose frame
+/// PCMSYNC makes short (a one-bit WS) or long (thirteen bits).
+enum class I2sStandard : uint8_t {
+    philips = 0,
+    msb_justified = 1,
+    lsb_justified = 2,
+    pcm = 3,
+};
+
+/// DATLEN[1:0]: the datum a channel carries. The fourth code is "not
+/// allowed" (20.4.8) and has no name here.
+enum class I2sDataLength : uint8_t { bits16 = 0, bits24 = 1, bits32 = 2 };
+
+/// CHLEN: the channel's width. "Only when DATLEN = 00, the write operation
+/// of this bit is meaningful, otherwise the channel length is fixed to 32
+/// bits by hardware" - which is why a wider datum in a 16-bit channel is
+/// REFUSED here rather than quietly given the channel it would get.
+enum class I2sChannelLength : uint8_t { bits16 = 0, bits32 = 1 };
+
+struct I2sConfig {
+    I2sMode mode = I2sMode::host_transmit;
+    I2sStandard standard = I2sStandard::philips;
+    bool pcm_long_frame = false;       ///< PCMSYNC, and only under `pcm`
+    I2sDataLength data = I2sDataLength::bits16;
+    I2sChannelLength channel = I2sChannelLength::bits16;
+    bool clock_idle_high = false;      ///< CKPOL: the level CK rests at
+    bool master_clock_out = false;     ///< MCKOE: MCK = 256 x FS on its own pad, a host's
+    uint8_t div = 2;                   ///< I2SDIV, 2..255 (0 and 1 forbidden), a host's
+    bool odd = false;                  ///< ODD: the divider is 2 x div + 1
+    bool dma_transmit = false;
+    bool dma_receive = false;
+};
+
+/// The channel width the silicon really uses: 32 bits whenever the datum
+/// is wider than 16 (20.4.8) - which a VALID configuration states itself.
+constexpr bool i2s_channel_is_32(const I2sConfig& c) {
+    return c.data != I2sDataLength::bits16 || c.channel == I2sChannelLength::bits32;
+}
+
+/// Data-register accesses per channel (20.3.2): ONE for a 16-bit datum,
+/// in a 16- or a 32-bit channel, and TWO for a 24- or 32-bit one - the
+/// high half first - which is also two DMA items.
+constexpr uint8_t i2s_accesses_per_channel(const I2sConfig& c) {
+    return c.data == I2sDataLength::bits16 ? 1u : 2u;
+}
+
+/// The whole divisor 20.3.3 puts between I2SxCLK and one audio frame: two
+/// channels of 16 or 32 bits times the linear divider 2 x I2SDIV + ODD -
+/// or, with MCK out, a fixed 256 (16 x 2 x 8 and 32 x 2 x 4 alike).
+constexpr uint32_t i2s_frame_factor(bool channel_32, bool master_clock_out) {
+    if (master_clock_out) {
+        return 256u;
+    }
+    return channel_32 ? 64u : 32u;
+}
+
+/// The sampling frequency a divider pair produces from an I2S clock; 0 for
+/// a forbidden divider (I2SDIV of 0 or 1).
+constexpr uint32_t i2s_fs_hz(uint32_t i2s_clk_hz, uint8_t div, bool odd, bool channel_32,
+                             bool master_clock_out) {
+    if (div < 2u) {
+        return 0u;
+    }
+    const uint32_t whole = 2u * static_cast<uint32_t>(div) + (odd ? 1u : 0u);
+    const uint32_t den = i2s_frame_factor(channel_32, master_clock_out) * whole;
+    return den == 0u ? 0u : i2s_clk_hz / den;
+}
+
+/// The same for a configuration, and the bit clock it puts on CK: two
+/// channels of its width per frame.
+constexpr uint32_t i2s_fs_hz(uint32_t i2s_clk_hz, const I2sConfig& c) {
+    return i2s_fs_hz(i2s_clk_hz, c.div, c.odd, i2s_channel_is_32(c), c.master_clock_out);
+}
+constexpr uint32_t i2s_bit_clock_hz(uint32_t i2s_clk_hz, const I2sConfig& c) {
+    return i2s_fs_hz(i2s_clk_hz, c) * (i2s_channel_is_32(c) ? 64u : 32u);
+}
+
+struct I2sPrescaler {
+    uint8_t div = 0;
+    bool odd = false;
+};
+
+/// The divider pair whose FS is nearest `fs_hz`, or nullopt when the
+/// whole divisor would fall outside 4..511 (I2SDIV 2..255 with ODD). An
+/// audio rate is hardly ever exact against a system clock, so the rounding
+/// is to nearest and i2s_fs_hz() says what really comes out.
+constexpr std::optional<I2sPrescaler> i2s_prescaler_for(uint32_t i2s_clk_hz, uint32_t fs_hz,
+                                                        bool channel_32, bool master_clock_out) {
+    if (i2s_clk_hz == 0u || fs_hz == 0u) {
+        return {};
+    }
+    const uint32_t unit = i2s_frame_factor(channel_32, master_clock_out) * fs_hz;
+    if (unit == 0u) {
+        return {};
+    }
+    const uint32_t whole = (i2s_clk_hz + unit / 2u) / unit;
+    if (whole < 4u || whole > 511u) {
+        return {};
+    }
+    return I2sPrescaler{static_cast<uint8_t>(whole / 2u), (whole & 1u) != 0u};
+}
+
+/// The refusals the chapter owes: a field holding a value its register
+/// field does not encode (DATLEN's fourth code among them); a host's
+/// forbidden divider (I2SDIV 0 and 1, 20.4.9); PCM's long frame named
+/// outside PCM; a datum wider than 16 bits asked of a 16-bit channel,
+/// which is not a frame this block makes (20.4.8); and the master clock
+/// asked of a client, whose MCKOE "is only used in I2S master mode".
+constexpr bool i2s_config_valid(const I2sConfig& c) {
+    if (static_cast<uint8_t>(c.mode) > 3u || static_cast<uint8_t>(c.standard) > 3u ||
+        static_cast<uint8_t>(c.data) > 2u || static_cast<uint8_t>(c.channel) > 1u) {
+        return false;
+    }
+    if (i2s_mode_is_host(c.mode) && c.div < 2u) {
+        return false;
+    }
+    if (c.pcm_long_frame && c.standard != I2sStandard::pcm) {
+        return false;
+    }
+    if (c.data != I2sDataLength::bits16 && c.channel == I2sChannelLength::bits16) {
+        return false;
+    }
+    if (c.master_clock_out && !i2s_mode_is_host(c.mode)) {
+        return false;
+    }
+    return true;
+}
+
+/// SPIx_I2S_CFGR for a configuration, I2SE clear.
+constexpr uint16_t i2s_i2scfgr_of(const I2sConfig& c) {
+    uint16_t v = spi_i2smod;
+    v = static_cast<uint16_t>(v | (static_cast<uint16_t>(c.mode) << spi_i2s_cfg_shift));
+    v = static_cast<uint16_t>(v | (static_cast<uint16_t>(c.standard) << spi_i2s_std_shift));
+    if (c.pcm_long_frame) { v = static_cast<uint16_t>(v | spi_i2s_pcmsync); }
+    v = static_cast<uint16_t>(v | (static_cast<uint16_t>(c.data) << spi_i2s_datlen_shift));
+    if (c.channel == I2sChannelLength::bits32) { v = static_cast<uint16_t>(v | spi_i2s_chlen); }
+    if (c.clock_idle_high) { v = static_cast<uint16_t>(v | spi_i2s_ckpol); }
+    return v;
+}
+
+/// SPIx_I2SPR for a configuration.
+constexpr uint16_t i2s_i2spr_of(const I2sConfig& c) {
+    uint16_t v = c.div;
+    if (c.odd) { v = static_cast<uint16_t>(v | spi_i2s_odd); }
+    if (c.master_clock_out) { v = static_cast<uint16_t>(v | spi_i2s_mckoe); }
+    return v;
+}
+
+/**
+ * 20.3.4.3's and 20.3.5.2's way to stop a RECEIVER without starting
+ * another transfer: which RXNE to wait for - the LAST one, or the one
+ * before it - and how many I2S clock periods to spend after it before
+ * I2SE is cleared. A 16-bit datum in a 32-bit channel waits 17 periods
+ * after the second-to-last RXNE when LSB-justified and one after the last
+ * otherwise; every other host combination waits one after the
+ * second-to-last; a client clears I2SE at the last RXNE.
+ */
+struct I2sReceiveStop {
+    bool after_last = false;
+    uint8_t clock_periods = 0;
+};
+
+constexpr I2sReceiveStop i2s_receive_stop(const I2sConfig& c) {
+    if (!i2s_mode_is_host(c.mode)) {
+        return {true, 0};
+    }
+    if (c.data == I2sDataLength::bits16 && c.channel == I2sChannelLength::bits32) {
+        return c.standard == I2sStandard::lsb_justified ? I2sReceiveStop{false, 17}
+                                                         : I2sReceiveStop{true, 1};
+    }
+    return {false, 1};
+}
+
+/// Whether THIS PART has the I2S face of instance `n`: the datasheet's
+/// I2S row (device::has_i2s) and one of the two instances that carry it.
+constexpr bool i2s_present(uint8_t n) {
+    return device::has_i2s && (n == 2u || n == 3u) && spi_present(n);
+}
+
+/**
+ * The I2S clock this class feeds a master: SYSCLK itself (figure 3-3 - the
+ * simple tree - and RCC_CFGR2's I2S2SRC and I2S3SRC, whose other choice is
+ * a PLL3 the CH32V30x_D8C has and this class has not). A static Clock's
+ * sysclk_hz; under a DynamicClock the program hands the rate in force to
+ * i2s_prescaler_for() itself.
+ */
+template <typename C>
+constexpr uint32_t i2s_clock_hz(C clock) {
+    static_assert(C::is_static,
+                  "brio I2s: the I2S clock is SYSCLK, which a static Clock states - under a "
+                  "DynamicClock the rate in force is the program's to hand to i2s_prescaler_for()");
+    (void)clock;
+    return C::sysclk_hz;
+}
+
+/// The four pads an I2S link can claim, as a COLUMN of the instance (the
+/// datasheet's table 3-4, afio.hpp): the word select, the bit clock, the
+/// data line and the optional master clock. They are the SPI's pads under
+/// other names - WS is NSS's, CK is SCK's, SD is MOSI's - and I2S3's move
+/// with SPI3's remap code; MCK sits on a pad of its own (PC6 for I2S2, PC7
+/// for I2S3) that no remap moves.
+struct I2sPins {
+    Pad ws{};
+    Pad ck{};
+    Pad sd{};
+    Pad mck{};
+    uint8_t remap = 0;
+};
+
+/// The column of instance `n` under `code`, MCK named or not.
+constexpr I2sPins i2s_pins_for(uint8_t n, uint8_t code = 0, bool with_mck = false) {
+    const I2sPadSet p = n == 3 ? afio_i2s3_pads(code) : afio_i2s2_pad_set;
+    return I2sPins{.ws = p.ws, .ck = p.ck, .sd = p.sd, .mck = with_mck ? p.mck : Pad{},
+                   .remap = static_cast<uint8_t>(n == 3 ? code : 0u)};
+}
+
+template <uint8_t n>
+inline constexpr I2sPins i2s_default_pins = i2s_pins_for(n, 0);
+
+/// Is that set a column of instance `n` on this part? WS, CK and SD are
+/// required and must be the column's own pads, the code must be a column
+/// the instance has, MCK is optional and must be the instance's OWN master
+/// clock pad, and every pad named must be one the package bonds.
+constexpr bool i2s_pins_valid(uint8_t n, const I2sPins& p) {
+    if ((n != 2u && n != 3u) || p.remap >= (n == 3u ? afio_spi3_codes : 1u)) {
+        return false;
+    }
+    const I2sPins column = i2s_pins_for(n, p.remap, true);
+    if (!(p.ws == column.ws && p.ck == column.ck && p.sd == column.sd)) {
+        return false;
+    }
+    if (p.mck.valid() && !(p.mck == column.mck)) {
+        return false;
+    }
+    return pad_bonded(p.ws) && pad_bonded(p.ck) && pad_bonded(p.sd) &&
+           (!p.mck.valid() || pad_bonded(p.mck));
+}
+
+/**
+ * I2s<n> - SPI2's or SPI3's register block in its audio face, a RESOURCE
+ * and nothing above it (the file header).
+ *
+ *   using Out = brio::I2s<2>;
+ *   Out::bus_clock(true);
+ *   Out::reset();
+ *   Out::claim_pads<brio::i2s_default_pins<2>>(brio::I2sMode::host_transmit);
+ *   const auto pre = *brio::i2s_prescaler_for(brio::i2s_clock_hz(clock), 48'000, false, false);
+ *   (void)Out::configure({.mode = brio::I2sMode::host_transmit, .div = pre.div, .odd = pre.odd});
+ *   Out::enable();
+ *
+ * WHAT IS SHARED WITH THE SPI FACE AND WHAT IS NOT. The gate, the reset,
+ * the vector, DATAR, STATR and CTLR2's interrupt and DMA enables are one
+ * block's and are reached here by the same names; CTLR1, the CRC
+ * registers, SSOE, MODF and CRCERR are not used in I2S mode (20.3.1), and
+ * I2SMOD is what decides which face answers. `configure()` writes I2SPR,
+ * then I2S_CFGR whole, then CTLR2's two DMA bits - 20.3.4.1's order -
+ * with I2SE and SPE clear on the way in, because I2SMOD "can only be set
+ * when SPI or I2S is disabled" and every other field of both registers
+ * "should be set when I2S is turned off".
+ */
+template <uint8_t n>
+struct I2s {
+    static_assert(device::has_i2s,
+                  "brio I2s: this part has no I2S - the datasheets give two to the CH32V303RC and "
+                  "VC alone (table 2-1-1's I2S row; the CH32V203's table 2-1 has none)");
+    static_assert(n == 2u || n == 3u,
+                  "brio I2s: the I2S face is SPI2's and SPI3's (20.3.1, tables 20-2 and 20-3)");
+
+    I2s() = delete;
+
+    using Block = Spi<n>;
+
+    static constexpr uint8_t number = n;
+    static constexpr Irq irq = Block::irq;
+    /// The SPI face's two requests, the same two slots (20.3.9).
+    static constexpr DmaSlot dma_rx_slot = Block::dma_rx_slot;
+    static constexpr DmaSlot dma_tx_slot = Block::dma_tx_slot;
+
+    static SpiRegs& regs() { return Block::regs(); }
+    static volatile void* data_address() { return Block::data_address(); }
+
+    // The gate, the reset and the column are the instance's.
+    static void bus_clock(bool on) { Block::bus_clock(on); }
+    static void reset() { Block::reset(); }
+    static bool remap(uint8_t code) { return Block::remap(code); }
+
+    /// The whole configuration (the class comment's order), refused by
+    /// i2s_config_valid()'s rules with nothing written.
+    static bool configure(const I2sConfig& c) {
+        if (!i2s_config_valid(c)) {
+            return false;
+        }
+        write_config(c);
+        return true;
+    }
+
+    /// The same where the configuration is a CONSTANT: the refusal is a
+    /// compile error on the line that wrote it.
+    template <I2sConfig c>
+    static void configure() {
+        static_assert(i2s_config_valid(c),
+                      "brio I2s: this configuration is not one chapter 20 has - a field holds a "
+                      "value its register field does not encode, a host's divider is 0 or 1, PCM's "
+                      "long frame is named outside PCM, a datum wider than 16 bits is asked of a "
+                      "16-bit channel (20.4.8: that channel is 32 bits whatever CHLEN says), or "
+                      "the master clock is asked of a client");
+        write_config(c);
+    }
+
+    /// Back to the SPI face: I2SE and I2SMOD cleared together.
+    static void select_spi_mode() {
+        regs().I2SCFGR = static_cast<uint16_t>(regs().I2SCFGR & ~(spi_i2se | spi_i2smod));
+    }
+    static bool i2s_mode_selected() { return (regs().I2SCFGR & spi_i2smod) != 0u; }
+
+    static void enable() { regs().I2SCFGR = static_cast<uint16_t>(regs().I2SCFGR | spi_i2se); }
+    static bool enabled() { return (regs().I2SCFGR & spi_i2se) != 0u; }
+
+    /// A TRANSMITTER stops after its last frame is out - TXE, then BSY
+    /// down, 20.3.4.2's advice - each wait bounded, false when one ran
+    /// out and I2SE was cleared regardless. A RECEIVER stops where it
+    /// stands: the way to end a reception on a frame's edge is
+    /// i2s_receive_stop()'s, which is timing the caller owns.
+    static bool disable() {
+        bool ok = true;
+        if (enabled() && i2s_mode_is_transmit(mode())) {
+            ok = wait_until([] { return tx_empty(); }) && wait_until([] { return !busy(); });
+        }
+        regs().I2SCFGR = static_cast<uint16_t>(regs().I2SCFGR & ~spi_i2se);
+        return ok;
+    }
+
+    static I2sMode mode() {
+        return static_cast<I2sMode>((regs().I2SCFGR & spi_i2s_cfg_mask) >> spi_i2s_cfg_shift);
+    }
+    static I2sStandard standard() {
+        return static_cast<I2sStandard>((regs().I2SCFGR & spi_i2s_std_mask) >> spi_i2s_std_shift);
+    }
+
+    // ---- the generator -------------------------------------------------------
+
+    /// I2SDIV and ODD alone, with the block disabled: what a program that
+    /// changes the sampling rate and nothing else writes. MCKOE is kept.
+    static bool prescaler(uint8_t div, bool odd) {
+        if (div < 2u || enabled()) {
+            return false;
+        }
+        regs().I2SPR = static_cast<uint16_t>((regs().I2SPR & spi_i2s_mckoe) | div |
+                                             (odd ? spi_i2s_odd : uint16_t{0}));
+        return true;
+    }
+    static uint8_t prescaler_div() { return static_cast<uint8_t>(regs().I2SPR & spi_i2s_div_mask); }
+    static bool prescaler_odd() { return (regs().I2SPR & spi_i2s_odd) != 0u; }
+    static bool master_clock_out() { return (regs().I2SPR & spi_i2s_mckoe) != 0u; }
+
+    // ---- data and flags ------------------------------------------------------
+
+    static void data(uint16_t v) { regs().DATAR = v; }
+    static uint16_t data() { return regs().DATAR; }
+
+    static bool tx_empty() { return (regs().STATR & spi_txe) != 0u; }
+    static bool rx_ready() { return (regs().STATR & spi_rxne) != 0u; }
+    /// BSY; 20.3.6.1: always LOW in master receive, whatever is moving.
+    static bool busy() { return (regs().STATR & spi_bsy) != 0u; }
+    static uint16_t status() { return regs().STATR; }
+    /// CHSIDE, refreshed when TXE rises on a transmitter and when a datum
+    /// lands on a receiver: false the left channel, true the right. No
+    /// meaning under PCM, nor after an underrun or an overrun (20.3.6.4).
+    static bool right_channel() { return (regs().STATR & spi_chside) != 0u; }
+
+    /// UDR: a client transmitter clocked before software loaded DATAR
+    /// (20.3.7.1), cleared by a read of STATR.
+    static bool underrun() { return (regs().STATR & spi_udr) != 0u; }
+    static void clear_underrun() { (void)regs().STATR; }
+    /// OVR: DATAR then STATR, as on the SPI face (20.3.7.2).
+    static bool overrun() { return (regs().STATR & spi_ovr) != 0u; }
+    static void clear_overrun() {
+        (void)regs().DATAR;
+        (void)regs().STATR;
+    }
+
+    static void dma_requests(bool tx, bool rx) { Block::dma_requests(tx, rx); }
+    static void rxne_interrupt(bool on) { Block::rxne_interrupt(on); }
+    static void txe_interrupt(bool on) { Block::txe_interrupt(on); }
+    static void error_interrupt(bool on) { Block::error_interrupt(on); }
+
+    /// The raised-and-enabled sources: RXNE and TXE under their own
+    /// enables, OVR and UDR under ERRIE (20.3.8). Nothing is cleared.
+    [[gnu::always_inline]] static uint32_t isr() {
+        const uint16_t st = regs().STATR;
+        const uint16_t en = regs().CTLR2;
+        uint32_t up = 0;
+        if ((en & spi_rxneie) != 0u && (st & spi_rxne) != 0u) { up |= SpiFlag::rxne; }
+        if ((en & spi_txeie) != 0u && (st & spi_txe) != 0u) { up |= SpiFlag::txe; }
+        if ((en & spi_errie) != 0u) {
+            up |= st & SpiFlag::i2s_errors;
+        }
+        return up;
+    }
+
+    // ---- the pads (table 10-5) -----------------------------------------------
+
+    /// Hand a column's pads to the face for a mode: WS and CK as push-pull
+    /// alternate outputs on a host and floating inputs on a client, SD an
+    /// output on a transmitter and a pulled-up input on a receiver, MCK an
+    /// output where the column names it and the mode is a host's. The
+    /// column's remap code is written here, SPI3's field moving the SPI
+    /// face's pads with it.
+    template <I2sPins pins>
+    static bool claim_pads(I2sMode m) {
+        static_assert(i2s_pins_valid(n, pins),
+                      "brio I2s: these pads are not a column of this instance on this part - WS, "
+                      "CK and SD must be the column's own (I2S2: PB12/PB13/PB15; I2S3: PA15/PB3/PB5 "
+                      "or PA4/PC10/PC12), the master clock the instance's own pad (PC6 for I2S2, "
+                      "PC7 for I2S3), and every pad one the package bonds");
+        if (!remap(pins.remap)) {
+            return false;
+        }
+        using Ws = Pin<pins.ws.port, pins.ws.pin>;
+        using Ck = Pin<pins.ck.port, pins.ck.pin>;
+        using Sd = Pin<pins.sd.port, pins.sd.pin>;
+        if (i2s_mode_is_host(m)) {
+            Ws::function();
+            Ck::function();
+        } else {
+            Ws::input();
+            Ck::input();
+        }
+        if (i2s_mode_is_transmit(m)) {
+            Sd::function();
+        } else {
+            Sd::input(PinPull::up);
+        }
+        if constexpr (pins.mck.valid()) {
+            using Mck = Pin<pins.mck.port, pins.mck.pin>;
+            if (i2s_mode_is_host(m)) {
+                Mck::function();
+            } else {
+                Mck::release();
+            }
+        }
+        return true;
+    }
+
+    /// The column's pads back to floating inputs, driving nothing.
+    template <I2sPins pins>
+    static void release_pads() {
+        static_assert(i2s_pins_valid(n, pins), "brio I2s: not a column of this instance");
+        Pin<pins.ws.port, pins.ws.pin>::release();
+        Pin<pins.ck.port, pins.ck.pin>::release();
+        Pin<pins.sd.port, pins.sd.pin>::release();
+        if constexpr (pins.mck.valid()) {
+            Pin<pins.mck.port, pins.mck.pin>::release();
+        }
+    }
+
+private:
+    static void write_config(const I2sConfig& c) {
+        SpiRegs& r = regs();
+        r.I2SCFGR = static_cast<uint16_t>(r.I2SCFGR & ~spi_i2se);
+        r.CTLR1 = static_cast<uint16_t>(r.CTLR1 & ~spi_spe);
+        r.I2SPR = i2s_i2spr_of(c);
+        r.I2SCFGR = i2s_i2scfgr_of(c);
+        uint16_t v = static_cast<uint16_t>(r.CTLR2 & ~(spi_txdmaen | spi_rxdmaen | spi_ssoe));
+        if (c.dma_transmit) { v = static_cast<uint16_t>(v | spi_txdmaen); }
+        if (c.dma_receive) { v = static_cast<uint16_t>(v | spi_rxdmaen); }
+        r.CTLR2 = v;
+    }
+
+    /// A bounded wait, the SPI face's.
+    template <typename Pred>
+    static bool wait_until(Pred pred) {
+        for (uint32_t spins = 400'000u; spins != 0u; --spins) {
+            if (pred()) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+// =============================================================================
 // The chapter's own arithmetic, pinned at compile time
 // =============================================================================
 
@@ -1678,19 +2328,32 @@ static_assert(!spi_mode_cpol(SpiMode::mode1) && spi_mode_cpha(SpiMode::mode1));
 static_assert(spi_mode_cpol(SpiMode::mode2) && !spi_mode_cpha(SpiMode::mode2));
 
 // The two buses, their gates and their vectors.
-static_assert(spi_base_for(1) == 0x40013000UL && spi_base_for(2) == 0x40003800UL);
-static_assert(spi_bus_for(1) == Bus::pb2 && spi_bus_for(2) == Bus::pb1);
-static_assert(spi_gate_for(1) == rcc_pb2_spi1 && spi_gate_for(2) == rcc_pb1_spi2);
-static_assert(spi_irq_for(1) == Irq::spi1 && spi_irq_for(2) == Irq::spi2);
+static_assert(spi_base_for(1) == 0x40013000UL && spi_base_for(2) == 0x40003800UL &&
+              spi_base_for(3) == 0x40003C00UL && spi_base_for(4) == 0);
+static_assert(spi_bus_for(1) == Bus::pb2 && spi_bus_for(2) == Bus::pb1 && spi_bus_for(3) == Bus::pb1);
+static_assert(spi_gate_for(1) == rcc_pb2_spi1 && spi_gate_for(2) == rcc_pb1_spi2 &&
+              spi_gate_for(3) == rcc_pb1_spi3);
+static_assert(spi_irq_for(1) == Irq::spi1 && spi_irq_for(2) == Irq::spi2 &&
+              spi_irq_for(3) == Irq::spi3);
 static_assert(spi_bus_hz_at<1>(144'000'000UL) == 144'000'000UL);
 static_assert(spi_bus_hz_at<2>(144'000'000UL) == 72'000'000UL);
+static_assert(spi_bus_hz_at<3>(144'000'000UL) == 72'000'000UL);
 
-// Table 11-5's four rows, through dma_engine.hpp.
+// Table 11-5's four rows, through dma_engine.hpp - and SPI3's two on DMA2
+// where the part has the instance (table 11-3).
 static_assert(spi_dma_rx_channel(1) == 2 && spi_dma_tx_channel(1) == 3);
 static_assert(spi_present(2) == (device::spi_count >= 2u));
+static_assert(spi_present(3) == (device::spi_count >= 3u));
+static_assert(!spi_present(3) ||
+              (spi_dma_rx_slot(3) == DmaSlot{2, 1} && spi_dma_tx_slot(3) == DmaSlot{2, 2}));
 
-// Table 10-32's columns, and SPI2's single one.
-static_assert(spi_column_count(1) == 2 && spi_column_count(2) == 1);
+// Tables 10-32 and 10-33: SPI1's two columns, SPI2's single one, SPI3's
+// two - the first of which is SPI1's second.
+static_assert(spi_column_count(1) == 2 && spi_column_count(2) == 1 && spi_column_count(3) == 2);
+static_assert(spi_pins_for(3, 0).nss == Pad{'A', 15} && spi_pins_for(3, 0).sck == Pad{'B', 3} &&
+              spi_pins_for(3, 0).miso == Pad{'B', 4} && spi_pins_for(3, 0).mosi == Pad{'B', 5});
+static_assert(spi_pins_for(3, 1).nss == Pad{'A', 4} && spi_pins_for(3, 1).sck == Pad{'C', 10} &&
+              spi_pins_for(3, 1).remap == 1u);
 static_assert(spi_pins_for(1, 0).sck == Pad{'A', 5} && spi_pins_for(1, 0).nss == Pad{'A', 4});
 static_assert(spi_pins_for(1, 1).sck == Pad{'B', 3} && spi_pins_for(1, 1).nss == Pad{'A', 15} &&
               spi_pins_for(1, 1).remap == 1u);
@@ -1728,5 +2391,70 @@ static_assert(spi_ctlr2_of(SpiConfig{.nss = SpiNss::hardware_output, .dma_receiv
 static_assert(spi_ctlr1_of(SpiConfig{.role = SpiRole::client, .clock = SpiClock::div2}) == spi_ssm);
 static_assert((spi_ctlr1_of(SpiConfig{.direction = SpiDirection::half_duplex_in}) & spi_bidimode) != 0u);
 static_assert((spi_ctlr1_of(SpiConfig{.direction = SpiDirection::receive_only}) & spi_rxonly) != 0u);
+
+// 20.3.3's arithmetic: FS is I2SxCLK over 32 or 64 bits a frame times the
+// linear divider, or over 256 of it with MCK out - at SYSCLK = 144 MHz a
+// 48 kHz frame of two 16-bit channels is a divider of 94 and comes out at
+// 47872 Hz, and the ladder's two ends are refused rather than rounded.
+static_assert(i2s_frame_factor(false, false) == 32u && i2s_frame_factor(true, false) == 64u);
+static_assert(i2s_frame_factor(false, true) == 256u && i2s_frame_factor(true, true) == 256u);
+static_assert(i2s_prescaler_for(144'000'000UL, 48'000UL, false, false)->div == 47u &&
+              !i2s_prescaler_for(144'000'000UL, 48'000UL, false, false)->odd);
+static_assert(i2s_fs_hz(144'000'000UL, 47, false, false, false) == 47'872UL);
+static_assert(i2s_prescaler_for(144'000'000UL, 48'000UL, true, false)->div == 23u &&
+              i2s_prescaler_for(144'000'000UL, 48'000UL, true, false)->odd);
+static_assert(i2s_fs_hz(144'000'000UL, 23, true, true, false) == 47'872UL);
+static_assert(i2s_fs_hz(144'000'000UL, 1, false, false, false) == 0u);
+static_assert(i2s_prescaler_for(144'000'000UL, 8'000UL, false, true)->div == 35u);
+static_assert(!i2s_prescaler_for(144'000'000UL, 1'000UL, false, false).has_value());
+static_assert(!i2s_prescaler_for(8'000'000UL, 96'000UL, true, true).has_value());
+static_assert(i2s_bit_clock_hz(144'000'000UL, I2sConfig{.div = 47}) == 47'872UL * 32u);
+
+// The refusals i2s_config_valid() owes, and the two register words.
+static_assert(i2s_config_valid(I2sConfig{}));
+static_assert(!i2s_config_valid(I2sConfig{.div = 1}));
+static_assert(i2s_config_valid(I2sConfig{.mode = I2sMode::client_receive, .div = 0}));
+static_assert(!i2s_config_valid(I2sConfig{.pcm_long_frame = true}));
+static_assert(i2s_config_valid(I2sConfig{.standard = I2sStandard::pcm, .pcm_long_frame = true}));
+static_assert(!i2s_config_valid(I2sConfig{.data = I2sDataLength::bits24}));
+static_assert(i2s_config_valid(I2sConfig{.data = I2sDataLength::bits24,
+                                         .channel = I2sChannelLength::bits32}));
+static_assert(!i2s_config_valid(I2sConfig{.data = static_cast<I2sDataLength>(3),
+                                          .channel = I2sChannelLength::bits32}));
+static_assert(!i2s_config_valid(I2sConfig{.mode = I2sMode::client_transmit,
+                                          .master_clock_out = true}));
+static_assert(i2s_i2scfgr_of(I2sConfig{.mode = I2sMode::host_receive,
+                                       .standard = I2sStandard::pcm, .pcm_long_frame = true,
+                                       .data = I2sDataLength::bits32,
+                                       .channel = I2sChannelLength::bits32,
+                                       .clock_idle_high = true}) ==
+              (spi_i2smod | (3u << spi_i2s_cfg_shift) | (3u << spi_i2s_std_shift) |
+               spi_i2s_pcmsync | (2u << spi_i2s_datlen_shift) | spi_i2s_chlen | spi_i2s_ckpol));
+static_assert(i2s_i2spr_of(I2sConfig{.master_clock_out = true, .div = 3, .odd = true}) ==
+              (3u | spi_i2s_odd | spi_i2s_mckoe));
+static_assert(i2s_accesses_per_channel(I2sConfig{}) == 1u &&
+              i2s_accesses_per_channel(I2sConfig{.data = I2sDataLength::bits24,
+                                                 .channel = I2sChannelLength::bits32}) == 2u);
+// 20.3.4.3's stops.
+static_assert(i2s_receive_stop(I2sConfig{.mode = I2sMode::host_receive,
+                                         .standard = I2sStandard::lsb_justified,
+                                         .channel = I2sChannelLength::bits32}).clock_periods == 17u);
+static_assert(i2s_receive_stop(I2sConfig{.mode = I2sMode::host_receive,
+                                         .channel = I2sChannelLength::bits32}).after_last);
+static_assert(!i2s_receive_stop(I2sConfig{.mode = I2sMode::host_receive}).after_last);
+static_assert(i2s_receive_stop(I2sConfig{.mode = I2sMode::client_receive}).after_last);
+
+// The columns: I2S2 on SPI2's pads with MCK on PC6, I2S3 on SPI3's with MCK
+// on PC7 in either column; an MCK that is not the instance's is refused.
+static_assert(i2s_pins_for(2).ws == Pad{'B', 12} && i2s_pins_for(2).ck == Pad{'B', 13} &&
+              i2s_pins_for(2).sd == Pad{'B', 15} && !i2s_pins_for(2).mck.valid() &&
+              i2s_pins_for(2, 0, true).mck == Pad{'C', 6});
+static_assert(i2s_pins_for(3).ws == Pad{'A', 15} && i2s_pins_for(3, 1).ck == Pad{'C', 10} &&
+              i2s_pins_for(3, 1, true).mck == Pad{'C', 7} && i2s_pins_for(3, 1).remap == 1u);
+static_assert(!i2s_pins_valid(2, I2sPins{.ws = {'B', 12}, .ck = {'B', 13}, .sd = {'B', 15},
+                                         .mck = {'C', 7}}));
+static_assert(!i2s_pins_valid(1, i2s_pins_for(2)));
+static_assert(!i2s_pins_valid(2, I2sPins{.ws = {'B', 12}, .ck = {'B', 13}, .sd = {'B', 14}}));
+static_assert(i2s_present(2) == device::has_i2s && i2s_present(3) == device::has_i2s);
 
 }  // namespace brio

@@ -1688,7 +1688,10 @@ brio/                    the framework, one directory per stratum:
                            PFIC_IRER lets a pend through for three
                            instructions), the PFIC's per-line verbs,
                            BRIO_CH32_INTERRUPT - the handler attribute the
-                           CH32VX03_HPE option decides
+                           CH32VX03_HPE option decides, carrying no_icf because
+                           gcc otherwise folds two handlers of one body into a
+                           CALL that ends in MRET (measured on the V4F: the
+                           caller's f-register frame left on the stack)
     ticker.hpp             BasicTicker over the core's 64-bit STK (Ticker =
                            1000 Hz)
     delay.hpp              delay_us on the STK counter: at least, never early,
@@ -1751,22 +1754,31 @@ brio/                    the framework, one directory per stratum:
                            17 to 20 cycles, a line event ends idle() in 15
                            (V4B) and 34 (V4F) core cycles
     usart.hpp              the serial ports (ch. 18): Usart<n> the resource
-                           over the whole chapter - four instances on two
-                           buses with every divisor asked of the instance's
-                           OWN bus, and WHICH instances a part offers taken
-                           from the datasheet's table; the frame in every
-                           shape M and STOP allow, mute mode with both wakes,
-                           LIN's break, single-wire half duplex, IrDA, and
-                           THE SMARTCARD AND THE SYNCHRONOUS CLOCK, which
-                           exist because the fourth port of this part is a
-                           USART4 and not a UART4; the flow-control pair, the
-                           two DMA requests, every flag with the sequence
-                           that clears it and both interrupt sources; the
-                           pads are afio.hpp's COLUMNS and a remap code of 0
-                           writes no register at all - + Uart<n, P, rx_size,
-                           tx_size, format, TxEngine, RxEngine, remap, opts>:
-                           the interrupt-driven transport with the other
-                           strata's surface, the frame as a template
+                           over the whole chapter - up to EIGHT instances on
+                           two buses (USART1 on PB2, USART2, USART3 and
+                           UART4..UART8 on PB1, UART6..8 below USART2 in the
+                           map) with every divisor asked of the instance's OWN
+                           bus, and WHICH instances a part offers taken from
+                           the datasheets' tables; the frame in every shape M
+                           and STOP allow, mute mode with both wakes, LIN's
+                           break, single-wire half duplex, IrDA, and THE
+                           SMARTCARD AND THE SYNCHRONOUS CLOCK of a FULL
+                           instance - the fourth port a USART4 on the
+                           CH32V203C8 alone, the full-USART verbs compile
+                           errors on a UART; the flow-control pair, the two DMA
+                           requests as SLOTS (UART4..UART8's on DMA2 on the
+                           CH32V303), every flag with the sequence that clears
+                           it and both interrupt sources; the pads are
+                           afio.hpp's COLUMNS, a remap code of 0 writes no
+                           register at all and the two columns on the debug
+                           port's pads are refused while the probe's port is
+                           alive; the CH32V303's lot-keyed CTLR4 (MARK/SPACE),
+                           M_EXT, MS_ERR and RX_BUSY as verbs that ASK THE DIE,
+                           CTLR4's address read as a word first (absent on the
+                           bench die, by the probe and on the wire) - + Uart<n,
+                           P, rx_size, tx_size, format, TxEngine, RxEngine,
+                           remap, opts>: the interrupt-driven transport with
+                           the other strata's surface, the frame as a template
                            parameter of its own and two OPTIONAL DMA engine
                            slots (harvest() the verb that publishes a receive
                            run)
@@ -1942,48 +1954,65 @@ brio/                    the framework, one directory per stratum:
                            4, claim_stream()/claim_dual_stream() - and no
                            status register, no interrupt, no underrun +
                            DacOut<1|2>
-    spi.hpp                the two synchronous ports (ch. 20): Spi<1|2> the resource
-                           over the whole chapter - TWO INSTANCES ON TWO BUSES, so one
-                           BR code is two frequencies (SPI1 divides PB2, SPI2 PB1) and
-                           a program asks the INSTANCE; no FIFO at all, which is what
-                           makes a host's pump run on RXNE and a client answer ONE
-                           FRAME AHEAD; the four modes, both widths, both bit orders,
-                           the three NSS arrangements, the simplex and one-wire line
-                           modes, the hardware CRC, every flag with the sequence that
-                           clears it - and MODF with the measured fact that 20.2.7's
-                           recipe does NOT clear it here, the block's reset line being
-                           the way back - the high-speed read mode confined to BR = /2
-                           on this device class, and NO I2S (the datasheet gives this
-                           series none, and the register is only asked whether it
-                           answers) + SpiPins carrying afio.hpp's COLUMN (SPI1 has two,
-                           SPI2 no remap field at all), SpiRateOf<pclk, hz> the
-                           compile-time rate chooser, and SpiHost<n, pins, TxEngine,
-                           RxEngine> with the other strata's Request VERBATIM, its
-                           engines fixed to the channels table 11-5 wires to the
-                           instance + SpiClient<n, pins>, one frame ahead, the dark
-                           listener releasing MISO - and pad_speed() on both, the slew
-                           class of the pads a task drives
-    i2c.hpp                the two-wire ports (ch. 19): I2c<1|2> the resource over
-                           the whole chapter - the F1's event machine under WCH's
-                           names WITH the rise-time register the CH32V00x has not,
-                           so the SCL timing is THREE registers and FREQ's six bits
-                           are the chapter's own ceiling (4..60 MHz of PB1: the one
-                           peripheral this family cannot run at the top of its
-                           tree); the receive procedure by count, 7- and 10-bit own
-                           addresses with the dual address and the general call,
-                           SMBus and PEC as bits, the two DMA rows with LAST, two
-                           vectors an instance, and BUSY as the WIRE (a START set
-                           into a busy bus is held by the hardware, and a tenure
-                           that ends with no STOP seen leaves BUSY standing over an
-                           idle wire - 19.12.1's own case, taken out of the way by
-                           SWRST and only when both lines read high) + I2cPins
-                           carrying afio.hpp's COLUMN (I2C1 has two, I2C2 none) and
-                           I2cHost<n, pins, TxEngine, RxEngine> with the other
-                           strata's Request VERBATIM, its engines fixed to the
-                           channels table 11-5 wires to the instance, unstick()
-                           counting the clocks a stuck target took + I2cClient<n,
-                           pins> with a POLLED option and flush(), the PE cycle
-                           that drops a byte the controller never clocked
+    spi.hpp                SPI and I2S (ch. 20): Spi<1..3> the resource over
+                           the whole chapter - up to THREE INSTANCES ON TWO
+                           BUSES, so one BR code is two frequencies (SPI1
+                           divides PB2, SPI2 and SPI3 PB1) and a program asks
+                           the INSTANCE; no FIFO at all, which is what makes a
+                           host's pump run on RXNE and a client answer ONE
+                           FRAME AHEAD; the four modes, both widths, both bit
+                           orders, the three NSS arrangements, the simplex and
+                           one-wire line modes, the hardware CRC, every flag
+                           with the sequence that clears it - and MODF with the
+                           measured fact that 20.2.7's recipe does NOT clear it
+                           here, the block's reset line being the way back -
+                           the high-speed read mode confined to BR = /2 on
+                           every class and lot (measured: a one-bit-late read
+                           at 36 MHz made exact), the lot's HSRXEN2 a verb that
+                           asks the die + I2s<2|3>, the AUDIO FACE of the
+                           CH32V303RC's and VC's SPI2 and SPI3 (the four
+                           standards and PCM's two frames, the widths, both
+                           roles and directions, 20.3.3's divider on SYSCLK -
+                           measured to the frame -, 20.3.4.3's receive stop,
+                           the flags and the two requests; TXE reads 1 with
+                           I2SE clear, against 20.3.6.2) + SpiPins carrying
+                           afio.hpp's COLUMN (SPI1 and SPI3 two each, SPI2 no
+                           remap field), SpiRateOf<pclk, hz> the compile-time
+                           rate chooser, and SpiHost<n, pins, TxEngine,
+                           RxEngine> with the other strata's Request VERBATIM,
+                           its engines fixed to the slots the request tables
+                           wire to the instance (SPI3's on DMA2) + SpiClient<n,
+                           pins>, one frame ahead, the dark listener releasing
+                           MISO - and pad_speed() on both, the slew class of
+                           the pads a task drives
+    i2c.hpp                the two-wire ports (ch. 19): I2c<1|2> the resource
+                           over the whole chapter - the F1's event machine
+                           under WCH's names WITH the rise-time register the
+                           CH32V00x has not, so the SCL timing is THREE
+                           registers and FREQ's six bits are the chapter's own
+                           ceiling (4..60 MHz of PB1: the one peripheral this
+                           family cannot run at the top of its tree); the
+                           receive procedure by count, 7- and 10-bit own
+                           addresses with the dual address and the general
+                           call, SMBus and PEC as bits, the two DMA rows with
+                           LAST, two vectors an instance, THE REPEATED START of
+                           a write-then-read requested while the last written
+                           byte still shifts - requested after BTF a CH32
+                           target loses that byte (measured on the
+                           CH32V303VCT6's two controllers on one bus) -, and
+                           BUSY as the WIRE (a START set into a busy bus is
+                           held by the hardware, and a tenure that ends with no
+                           STOP seen leaves BUSY standing over an idle wire -
+                           19.12.1's own case, taken out of the way by SWRST
+                           and only when both lines read high) + I2cPins
+                           carrying afio.hpp's COLUMN (I2C1 has two, I2C2 none)
+                           and I2cHost<n, pins, TxEngine, RxEngine> with the
+                           other strata's Request VERBATIM, its engines fixed
+                           to the channels table 11-5 wires to the instance,
+                           unstick() counting the clocks a stuck target took +
+                           I2cClient<n, pins> with a POLLED option and flush(),
+                           the PE cycle that drops a byte the controller never
+                           clocked
     nvm.hpp                the flash memory and the user option bytes (ch. 32)
                            with the electronic signature beside them (ch. 31):
                            Flash, the engine - TWO programming methods (a

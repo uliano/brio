@@ -81,11 +81,12 @@ third reads the array's erased pattern
   window is named in the linker script and holds nothing.
 - **The jumpers the suites want**, every one on the board itself - SPI2
   against SPI3 (PB12-PA15, PB13-PB3, PB14-PB4, PB15-PB5, the same four
-  pads carrying I2S2 against I2S3), USART2 crossed with UART4 on its
-  default pads (PA2 to PC11, PC10 to PA3), TIM3's channel 1 into TIM2's
-  channel 2 (PA6 to PA1, the same wire an EXTI edge), TIM8's channel 1
-  into TIM4's channel 3 (PC6 to PB8), and I2C1 against I2C2 (PB6-PB10
-  and PB7-PB11, each pair with a 4.7 kOhm pull-up to 3.3 V). `wire_check`
-  finds exactly these ten over the twenty pads, and no stray.
-- Manifest type `v303vc`; the project is `ch32vx03/`, preset
+  pads carrying I2S2 against I2S3 and - SPI3's default column being
+  SPI1's second one - SPI1 against SPI2), USART2 crossed with UART4 on
+  its default pads (PA2 to PC11, PC10 to PA3), TIM3's channel 1 into
+  TIM2's channel 2 (PA6 to PA1, the same wire an EXTI edge), TIM8's
+  channel 1 into TIM4's channel 3 (PC6 to PB8), and I2C1 against I2C2
+  (PB6-PB10 and PB7-PB11, each pair with a 4.7 kOhm pull-up to 3.3 V).
+  `wire_check` finds exactly these ten over the twenty pads, and no
+  stray. - Manifest type `v303vc`; the project is `ch32vx03/`, preset
   `ch32v303vc-release` ([../ch32vx03/README.md](../ch32vx03/README.md)).

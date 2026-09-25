@@ -1,8 +1,11 @@
-// test_vx03_serial - the reference bench suite for the CH32V203's USART
-// chapter (RM ch. 18) beyond the console personality: the resource
-// ch32vx03/usart.hpp's `Usart<n>` in every mode the chapter has, and
-// the transport `Uart`'s options and engines, on the instances the
-// console does not own.
+// test_vx03_serial - the reference bench suite for the USART chapter (RM
+// ch. 18) of the CH32V203 and the CH32V303, beyond the console
+// personality: the resource ch32vx03/usart.hpp's `Usart<n>` in every mode
+// the chapter has, and the transport `Uart`'s options and engines, on the
+// instances the console does not own. Letters a..m are both series';
+// letters n..p are the CH32V303's upper ports and lot-keyed registers,
+// registered on the part that has them and compiled out of every other
+// image.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -10,7 +13,7 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// THE INSTRUMENTS ARE USART2 AND USART4, and three facts of this
+// THE INSTRUMENTS ARE USART2 AND THE FOURTH PORT, and three facts of this
 // silicon make almost every letter need NO WIRE AT ALL:
 //
 //  1. THE RX PAD IS A BIT-BANGED TRANSMITTER. A pad handed to the USART
@@ -30,15 +33,27 @@
 //     frames. USART4's remapped CK pad PA6 is TIM3's channel 1 input
 //     the same way, which is how the synchronous clock and the
 //     smartcard's card clock are counted.
-//  3. THE FOURTH SERIAL PORT IS A USART HERE. Chapter 18's opening
-//     names the CH32V203C8 as the exception whose UART4 is a USART4,
+//  3. THE FOURTH SERIAL PORT IS A USART ON THE CH32V203C8. Chapter 18's
+//     opening names that part as the exception whose UART4 is a USART4,
 //     with a CK, a CTS and an RTS pad - so the synchronous mode and the
-//     smartcard have an instance to run on that is not the console's.
+//     smartcard have an instance to run on that is not the console's. On
+//     the CH32V303 the fourth port is a UART4 with TX and RX alone, and
+//     letters h and i decline there by name.
 //
-// TWO WIRES WOULD ADD TWO LETTERS and each is detected rather than
-// assumed: PA2 to PA3 (USART2's own loopback, letter l) and the crossed
-// pair PA2-PB1 with PB0-PA3 (USART2 against UART4, letter m). Without
-// them the two letters say so and pass nothing.
+// WIRES ADD LETTERS and each is detected rather than assumed: PA2 to PA3
+// (USART2's own loopback, letter l) and the crossed pair of USART2's
+// pads with UART4's default ones - PA2-PB1 with PB0-PA3 on the
+// CH32V203C8, PA2-PC11 with PC10-PA3 on the CH32V303, the column table
+// 10-26 gives that class (letters m, n and o). Without them the letters
+// say so and pass nothing.
+//
+// THE CH32V303'S OWN LETTERS. UART5..UART8 carry no wire on the evaluation
+// board and need none for what letter p asks: the register face, a frame
+// read back off the TRANSMIT pad by software (a pad handed to the
+// peripheral still reads its level in the input register), a frame
+// bit-banged into the RECEIVE pad through its pull, and the vector of
+// this class's tail. The pads of those four columns are ports C's and
+// D's, and nothing else of this suite touches them.
 //
 // What is exercised, letter by letter:
 //   a  the baud generator: every standard rate from 1200 to 3 Mbaud on
@@ -70,13 +85,32 @@
 //   l  the loopback PA2-PA3 when it is strapped: a round trip at every
 //      format, the two DMA engines, and four kilobytes at the highest
 //      rate the loop takes clean
-//   m  the crossed pair when it is strapped: USART2 against USART4 at
-//      two formats and two rates, with a stress pattern each way
+//   m  the crossed pair when it is strapped: USART2 against the fourth
+//      port at two formats and two rates, with a stress pattern each way
+// and on the CH32V303RC and VC alone:
+//   n  THE CROSSED PAIR'S ENGINES: USART2's on DMA1 against UART4's on
+//      DMA2, a message each way through both transports, then four
+//      kilobytes each way at 921600 baud with every counter read
+//   o  THE LOT'S REGISTERS on the pair: CTLR4 probed on both ports and
+//      every other register compared across the probe, then - where the
+//      die has it - the MARK and SPACE parity measured on the wire and
+//      judged by the far receiver's MS_ERR, the short words of M_EXT
+//      round trip, and RX_BUSY caught while a frame arrives; where it
+//      has not, CTLR4 and M_EXT stored RAW and the wire asked whether the
+//      register is absent or only write-only
+//   p  UART5..UART8 WITH NO WIRE: the gate, the divisor and the frame
+//      read back, a byte read off each TRANSMIT pad by software, a frame
+//      banged into each RECEIVE pad through its pull, and each port's
+//      own vector reached by a transmission complete - and SW_CFG read
+//      with the probe attached, the two columns on the debug port's pads
+//      refused by init()
 //
-// build: boards = v203c6,v203c8
+// build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <optional>
 
 #include "ch32vx03/afio.hpp"
 #include "ch32vx03/clock.hpp"
@@ -124,13 +158,28 @@ using T2 = Tim<2>;                   ///< the ruler: channel 3 is PA2's input
 constexpr bool has_fourth = device::has_usart(4);
 constexpr uint8_t fourth_instance = has_fourth ? 4 : 2;
 using U4 = Usart<fourth_instance>;   ///< the fourth port, where the part has one
+/// Whether that fourth port is a FULL USART - the CH32V203C8's alone - and
+/// the instance the clocked letters (h, i) run on: the fourth port where
+/// it is one, and the console's neighbour otherwise so the image still
+/// links for every part; the letters decline by name there.
+constexpr bool has_full_fourth = has_fourth && device::usart_full(4);
+constexpr uint8_t clocked_instance = has_full_fourth ? 4 : 2;
+using Uc = Usart<clocked_instance>;
 constexpr uint8_t u4_column = 1;     ///< TX PA5, RX PB5, CK PA6, CTS PA7, RTS PA15
 using CkPad = Pin<'A', 6>;           ///< USART4_CK on that column - and TIM3's channel 1
 using U4TxPad = Pin<'A', 5>;
 using U4RxPad = Pin<'B', 5>;
 using T3 = Tim<3>;                   ///< counts the CK pad's transitions
-using CrossTxPad = Pin<'B', 0>;      ///< UART4's DEFAULT column, the crossed pair's
-using CrossRxPad = Pin<'B', 1>;
+/// UART4's DEFAULT column, the crossed pair's: PB0/PB1 on the CH32V203C8
+/// (table 10-27), PC10/PC11 on the CH32V303 (table 10-26). A part with no
+/// fourth port keeps the CH32V203C8's two pads, so the image links.
+constexpr UsartPads cross_pads =
+    has_fourth ? usart_pads_for(4, 0) : UsartPads{Pad{'B', 0}, Pad{'B', 1}};
+using CrossTxPad = Pin<cross_pads.tx.port, cross_pads.tx.pin>;
+using CrossRxPad = Pin<cross_pads.rx.port, cross_pads.rx.pin>;
+/// The CH32V303's crossed pair is UART4's default column, and its letters
+/// print the pads they were given.
+constexpr bool v303_pair = device::device_class == DeviceClass::v30x_d8;
 
 /// The transport with both engines, for the loopback letter: USART2
 /// transmits on DMA channel 7 and receives on 6 (table 11-5).
@@ -495,6 +544,11 @@ void bang_idle(uint8_t bits, uint32_t baud = 9600) {
 
 // ---- the instrument's life cycle -------------------------------------------
 
+/// The CH32V303's extras put back (defined with letters n..p): nothing on
+/// a part without them.
+template <bool on = (device::device_class == DeviceClass::v30x_d8)>
+void upper_off();
+
 /// Everything back: both vectors released, both instruments reset and
 /// gated off, every pad floating, the two rulers stopped, the remap
 /// column back at its reset value.
@@ -536,6 +590,7 @@ void all_off() {
     u2_cts = 0;
     u2_last_word = 0;
     u4_interrupts = 0;
+    upper_off();
 }
 
 /// USART2 brought up bare on its default column: gate, pads, the frame
@@ -559,18 +614,18 @@ bool u2_up(const UartFormat& f, uint32_t baud) {
 /// USART4 on its remapped column, with the CK pad handed over: the
 /// instrument of the clocked letters.
 bool u4_up(const UartFormat& f, uint32_t baud) {
-    if (!has_fourth) {
+    if (!has_full_fourth) {
         return false;
     }
     Afio::clock_on();
-    U4::bus_clock(true);
-    U4::reset();
-    if (!U4::remap(u4_column)) {
+    Uc::bus_clock(true);
+    Uc::reset();
+    if (!Uc::remap(u4_column)) {
         return false;
     }
     U4TxPad::function();
     U4RxPad::input(PinPull::up);
-    return U4::configure(f, usart_divisor(pclk1, baud));
+    return Uc::configure(f, usart_divisor(pclk1, baud));
 }
 
 /// Drive one pad and read the other: the strap test every wired letter
@@ -728,7 +783,13 @@ void tb_frame() {
         const uint32_t got = measure_frame(0xFF, psc);
         print(serial, "  ", baud, " baud: the start bit is ", got, " timer clocks for ", want,
               " asked (divisor ", brr, ")", crlf);
-        if (near(got, want, 20)) {
+        // The two captures are two channels' own edge detectors on one
+        // pad, so the ruler reads a width to one count: at 3 Mbaud that
+        // count is 2.08 per cent of the bit, and the tolerance is never
+        // tighter than the ruler.
+        const uint32_t count = static_cast<uint32_t>(psc) + 1u;
+        const uint32_t diff = got > want ? got - want : want - got;
+        if (got != 0u && (near(got, want, 20) || diff <= count)) {
             ++good;
         }
         ruler_stop();
@@ -736,7 +797,8 @@ void tb_frame() {
         console_drain();
     }
     bench.verdict("a start bit lasts exactly the divisor: four rates from 9600 to 3 Mbaud "
-                  "measured on the transmit pad by the timer, every one within 2 per cent",
+                  "measured on the transmit pad by the timer, every one within 2 per cent or "
+                  "the ruler's one count",
                   good == 4u);
 
     // The word length: the low run of a zero byte is the start bit plus
@@ -1363,13 +1425,20 @@ void th_synchronous() {
                       "so", true);
         return;
     }
+    if constexpr (!has_full_fourth) {
+        print(serial, "  the fourth port of this part is a UART4 - TX and RX, no CK pad - so "
+                      "the synchronous mode has no instrument here", crlf);
+        bench.verdict("the letter declines where the fourth serial port is a UART, and says so",
+                      true);
+        return;
+    }
     constexpr uint32_t baud = 9600;
 
     // The instance's own fact first: on this part the fourth serial port
     // is a USART4 and not a UART4.
     bench.verdict("the fourth serial port of this part is a full USART - the chapter's own "
                   "exception, and what makes a clock pad exist at all",
-                  U4::is_full && device::usart_full(4));
+                  Uc::is_full && device::usart_full(4));
 
     uint32_t without_lbcl = 0;
     uint32_t with_lbcl = 0;
@@ -1378,58 +1447,58 @@ void th_synchronous() {
     bool idle_high = false;
     bool armed = false;
     if (u4_up(UartFormat{}, baud)) {
-        armed = U4::synchronous({.clock_idle_high = false, .capture_second_edge = false,
+        armed = Uc::synchronous({.clock_idle_high = false, .capture_second_edge = false,
                                  .last_bit_clock = false}) &&
-                U4::synchronous_enabled();
+                Uc::synchronous_enabled();
         CkPad::function();
         wait_us(1000);
         idle_low = !CkPad::read();
 
-        U4::enable(true);
-        U4::transmitter(true);
+        Uc::enable(true);
+        Uc::transmitter(true);
         ck_counter_start();
         for (uint8_t i = 0; i < 8; ++i) {
-            while (!U4::flag(usart_txe)) {
+            while (!Uc::flag(usart_txe)) {
             }
-            U4::write_data(0x5A);
+            Uc::write_data(0x5A);
         }
-        while (!U4::flag(usart_tc)) {
+        while (!Uc::flag(usart_tc)) {
         }
         without_lbcl = ck_transitions();
         ck_counter_stop();
 
         // LBCL the other way, with the transmitter paused as 18.10.5
         // requires.
-        U4::transmitter(false);
-        U4::receiver(false);
-        const bool moved = U4::synchronous({.clock_idle_high = true, .last_bit_clock = true});
-        U4::transmitter(true);
+        Uc::transmitter(false);
+        Uc::receiver(false);
+        const bool moved = Uc::synchronous({.clock_idle_high = true, .last_bit_clock = true});
+        Uc::transmitter(true);
         wait_us(1000);
         idle_high = CkPad::read();
         ck_counter_start();
         for (uint8_t i = 0; i < 8; ++i) {
-            while (!U4::flag(usart_txe)) {
+            while (!Uc::flag(usart_txe)) {
             }
-            U4::write_data(0x5A);
+            Uc::write_data(0x5A);
         }
-        while (!U4::flag(usart_tc)) {
+        while (!Uc::flag(usart_tc)) {
         }
         with_lbcl = ck_transitions();
         ck_counter_stop();
 
         // CPHA is the RECEIVER'S capture edge: what the pad puts out
         // must not move with it.
-        U4::transmitter(false);
-        U4::receiver(false);
-        const bool phased = U4::synchronous({.capture_second_edge = true});
-        U4::transmitter(true);
+        Uc::transmitter(false);
+        Uc::receiver(false);
+        const bool phased = Uc::synchronous({.capture_second_edge = true});
+        Uc::transmitter(true);
         ck_counter_start();
         for (uint8_t i = 0; i < 8; ++i) {
-            while (!U4::flag(usart_txe)) {
+            while (!Uc::flag(usart_txe)) {
             }
-            U4::write_data(0x5A);
+            Uc::write_data(0x5A);
         }
-        while (!U4::flag(usart_tc)) {
+        while (!Uc::flag(usart_tc)) {
         }
         with_cpha = ck_transitions();
         ck_counter_stop();
@@ -1458,15 +1527,15 @@ void th_synchronous() {
     // The refusals: the mode wants TE and RE clear, and no other mode on.
     bool live_refused = false;
     bool mode_refused = false;
-    if (U4::enabled()) {
-        U4::transmitter(true);
-        live_refused = !U4::synchronous({}) && !U4::synchronous_off();
-        U4::transmitter(false);
-        U4::receiver(false);
-        (void)U4::synchronous_off();
-        (void)U4::half_duplex(true);
-        mode_refused = !U4::synchronous({});
-        (void)U4::half_duplex(false);
+    if (Uc::enabled()) {
+        Uc::transmitter(true);
+        live_refused = !Uc::synchronous({}) && !Uc::synchronous_off();
+        Uc::transmitter(false);
+        Uc::receiver(false);
+        (void)Uc::synchronous_off();
+        (void)Uc::half_duplex(true);
+        mode_refused = !Uc::synchronous({});
+        (void)Uc::half_duplex(false);
     }
     bench.verdict("the clock's three bits are refused while the transmitter or the receiver is "
                   "live, and while half duplex is on - 18.4's own conditions",
@@ -1479,16 +1548,16 @@ void th_synchronous() {
     // silicon collects a frame of the idle line instead.
     bool empty = false;
     uint16_t status = 0;
-    if (U4::enabled()) {
-        (void)U4::synchronous({});
-        U4::transmitter(true);
-        U4::receiver(true);
-        U4::clear_by_read();
-        U4::write_data(0x33);
+    if (Uc::enabled()) {
+        (void)Uc::synchronous({});
+        Uc::transmitter(true);
+        Uc::receiver(true);
+        Uc::clear_by_read();
+        Uc::write_data(0x33);
         Stopwatch w;
-        while (!U4::flag(usart_rxne) && w.us() < 5000u) {
+        while (!Uc::flag(usart_rxne) && w.us() < 5000u) {
         }
-        status = U4::status();
+        status = Uc::status();
         empty = (status & usart_rxne) == 0u && U4RxPad::read();
         print(serial, "  a clocked byte with nothing on RX left the receiver ",
               (status & usart_rxne) != 0u ? "FULL" : "empty", " (status ", status,
@@ -1514,6 +1583,13 @@ void ti_smartcard() {
                       "so", true);
         return;
     }
+    if constexpr (!has_full_fourth) {
+        print(serial, "  the fourth port of this part is a UART4 - no CK pad for a card's "
+                      "clock - so the smartcard has no instrument here", crlf);
+        bench.verdict("the letter declines where the fourth serial port is a UART, and says so",
+                      true);
+        return;
+    }
     constexpr uint32_t baud = 9600;
     constexpr uint8_t card_prescaler = 6;   // the clock is PCLK1 / (2 x PSC)
     constexpr uint8_t guard = 16;
@@ -1525,12 +1601,12 @@ void ti_smartcard() {
     uint32_t armed_transitions = 0;
     uint32_t sending_transitions = 0;
     if (u4_up(UartFormat{UartBits::eight, UartParity::even}, baud)) {
-        armed = U4::smartcard({.nack = true, .guard_time = guard,
+        armed = Uc::smartcard({.nack = true, .guard_time = guard,
                                .clock_prescaler = card_prescaler}) &&
-                U4::smartcard_enabled();
+                Uc::smartcard_enabled();
         // The verb sets 1.5 stop bits, which is what 18.6 recommends.
-        stops = (U4::regs().CTLR2 & usart_stop_mask) == usart_ctlr2_stop(UartStop::one_and_half);
-        guarded = U4::guard_time() == guard && U4::prescaler() == card_prescaler;
+        stops = (Uc::regs().CTLR2 & usart_stop_mask) == usart_ctlr2_stop(UartStop::one_and_half);
+        guarded = Uc::guard_time() == guard && Uc::prescaler() == card_prescaler;
 
         // THE CARD CLOCK, which the mode's own verb turns on: 18.6 says
         // its waveform "has nothing to do with the communication" and
@@ -1538,16 +1614,16 @@ void ti_smartcard() {
         // and WHEN that clock actually runs is the question - counted
         // three times, with the transmitter off, with it on, and with a
         // frame going out.
-        U4::transmitter(false);
-        U4::receiver(false);
+        Uc::transmitter(false);
+        Uc::receiver(false);
         CkPad::function();
-        U4::enable(true);
+        Uc::enable(true);
         ck_counter_start();
         wait_us(2000);
         transitions = ck_transitions();
         ck_counter_stop();
 
-        U4::transmitter(true);
+        Uc::transmitter(true);
         wait_us(1000);
         ck_counter_start();
         wait_us(2000);
@@ -1555,7 +1631,7 @@ void ti_smartcard() {
         ck_counter_stop();
 
         ck_counter_start();
-        U4::write_data(0x5A);
+        Uc::write_data(0x5A);
         (void)wait_flag(usart_tc, 50'000);
         sending_transitions = ck_transitions();
         ck_counter_stop();
@@ -1580,16 +1656,16 @@ void ti_smartcard() {
     // exclude each other, so a program leaving the smartcard hands the
     // pad back before it asks for anything else.
     bool refused = false;
-    if (U4::enabled()) {
-        U4::transmitter(false);
-        U4::receiver(false);
-        const bool zero = !U4::smartcard({.clock_prescaler = 0});
-        const bool over = !U4::smartcard({.clock_prescaler = 32});
-        U4::smartcard_off();
-        const bool clock_off = U4::synchronous_off();
-        const bool lin_on = U4::lin({});
-        const bool with_lin = !U4::smartcard({.clock_prescaler = 4});
-        U4::lin_off();
+    if (Uc::enabled()) {
+        Uc::transmitter(false);
+        Uc::receiver(false);
+        const bool zero = !Uc::smartcard({.clock_prescaler = 0});
+        const bool over = !Uc::smartcard({.clock_prescaler = 32});
+        Uc::smartcard_off();
+        const bool clock_off = Uc::synchronous_off();
+        const bool lin_on = Uc::lin({});
+        const bool with_lin = !Uc::smartcard({.clock_prescaler = 4});
+        Uc::lin_off();
         refused = zero && over && clock_off && lin_on && with_lin;
     }
     bench.verdict("the smartcard refuses a prescaler outside one to thirty-one and the company "
@@ -1686,9 +1762,15 @@ void tj_flags() {
     wait_us(4000);
     const uint32_t fourth = u4_interrupts;
     print(serial, "  the fourth port's vector ran ", fourth, " times", crlf);
-    bench.verdict("the fourth serial port's vector is its own - entry 61 of this device class's "
-                  "table, and a transmission complete reaches it",
-                  fourth >= 1u);
+    if constexpr (v303_pair) {
+        bench.verdict("the fourth serial port's vector is its own - entry 68 of this device "
+                      "class's table, and a transmission complete reaches it",
+                      fourth >= 1u);
+    } else {
+        bench.verdict("the fourth serial port's vector is its own - entry 61 of this device "
+                      "class's table, and a transmission complete reaches it",
+                      fourth >= 1u);
+    }
     all_off();
 }
 
@@ -1946,12 +2028,21 @@ void tm_cross() {
         return;
     }
     if (!need_cross_wires()) {
-        print(serial, "  the straps PA2-PB1 and PB0-PA3 are ABSENT: the crossed pair measures "
-              "nothing", crlf);
+        if constexpr (v303_pair) {
+            print(serial, "  the wires PA2-PC11 and PC10-PA3 are ABSENT: the crossed pair "
+                  "measures nothing", crlf);
+        } else {
+            print(serial, "  the straps PA2-PB1 and PB0-PA3 are ABSENT: the crossed pair measures "
+                  "nothing", crlf);
+        }
         bench.verdict("the crossed-pair letter declines without its wires, and says so", true);
         return;
     }
-    print(serial, "  the straps PA2-PB1 and PB0-PA3 are in place", crlf);
+    if constexpr (v303_pair) {
+        print(serial, "  the wires PA2-PC11 and PC10-PA3 are in place", crlf);
+    } else {
+        print(serial, "  the straps PA2-PB1 and PB0-PA3 are in place", crlf);
+    }
 
     const UartFormat rounds[2] = {UartFormat{},
                                   UartFormat{UartBits::eight, UartParity::even, UartStop::two}};
@@ -1993,6 +2084,721 @@ void tm_cross() {
                   "flag on either side",
                   clean == 2u);
     all_off();
+}
+
+// ===========================================================================
+// The CH32V303's own letters (n..p)
+// ===========================================================================
+//
+// Every name below hangs on a template parameter and every body is
+// `if constexpr` on the part's facts, so a part without UART4 on DMA2, the
+// lot's registers or UART5..UART8 forms none of it and carries none of
+// it - its state included, which lives in templates for the same reason.
+
+/// What the DMA2 vectors serve while letter n runs, and what the four
+/// upper vectors counted (letter p). Named as V303State<on> by templates
+/// whose `on` is true only where the part has what they ask - the one
+/// specialization the CH32V303 forms.
+template <bool on>
+struct V303State {
+    static inline volatile bool engines = false;
+    static inline volatile uint32_t upper_interrupts[4] = {};
+};
+
+/// UART4 with both its engines, where table 11-3 puts them: DMA2's
+/// channel 5 out and channel 3 in. With an engine on each side the port
+/// arms no interrupt of its own. `on` makes every use a dependent name.
+template <bool on, uint8_t C = 2, DmaRequest tx = DmaRequest::uart4_tx,
+          DmaRequest rx = DmaRequest::uart4_rx>
+struct PairPort {
+    using TxRow = DmaRequestOf<tx>;
+    using RxRow = DmaRequestOf<rx>;
+    static_assert(TxRow::controller == C && RxRow::controller == C,
+                  "table 11-3: UART4's two requests are DMA2's on this class");
+    using Port = Uart<4, P, 256, 256, UartFormat{}, DmaTxEngine<C, TxRow::channel>,
+                      DmaRxEngine<C, RxRow::channel>>;
+};
+
+/// Whatever a transport's receiver framed while its pad floated, drained
+/// and counted.
+template <typename T>
+uint16_t drain_port() {
+    uint16_t n = 0;
+    (void)T::harvest();
+    uint8_t b = 0;
+    while (T::read_byte(b)) {
+        ++n;
+    }
+    return n;
+}
+
+/// One direction of an engined pair: `count` xorshift bytes written into
+/// `From` and read out of `To`, the receive side harvested as it goes and
+/// never more than 128 bytes in flight.
+struct PairRun {
+    uint32_t received;
+    uint32_t wrong;
+    uint32_t us;
+};
+
+template <typename From, typename To>
+PairRun pair_run(uint32_t count, uint32_t budget_us) {
+    uint32_t tx_state = 0x1234'5678UL;
+    uint32_t rx_state = 0x1234'5678UL;
+    uint32_t sent = 0;
+    PairRun r{0, 0, 0};
+    Stopwatch w;
+    while (r.received < count && w.us() < budget_us) {
+        while (sent < count && sent - r.received < 128u) {
+            if (!From::write_byte(static_cast<uint8_t>(xorshift(tx_state) & 0xFFu))) {
+                break;
+            }
+            ++sent;
+        }
+        (void)To::harvest();
+        uint8_t b = 0;
+        while (To::read_byte(b)) {
+            if (b != static_cast<uint8_t>(xorshift(rx_state) & 0xFFu)) {
+                ++r.wrong;
+            }
+            ++r.received;
+        }
+    }
+    r.us = w.us();
+    return r;
+}
+
+/// A message through one transport and out of the other, byte for byte.
+template <typename From, typename To>
+bool pair_message(const uint8_t* msg, uint16_t len) {
+    uint8_t seen[64] = {};
+    uint16_t got = 0;
+    (void)To::harvest();
+    (void)From::write(msg, static_cast<uint8_t>(len));
+    Stopwatch w;
+    while (got < len && w.us() < 50'000UL) {
+        (void)To::harvest();
+        uint8_t b = 0;
+        while (got < len && To::read_byte(b)) {
+            seen[got++] = b;
+        }
+    }
+    bool same = got == len;
+    for (uint16_t i = 0; i < got && same; ++i) {
+        same = seen[i] == msg[i];
+    }
+    return same;
+}
+
+// ---------------------------------------------------------------------------
+// n - the crossed pair's engines
+// ---------------------------------------------------------------------------
+
+template <bool on = (has_fourth && v303_pair && device::dma_controller_count >= 2u)>
+void tn_pair_engines() {
+    if constexpr (on) {
+        all_off();
+        using Port4 = typename PairPort<on>::Port;
+        using S = V303State<on>;
+        if (!need_cross_wires()) {
+            print(serial, "  the wires PA2-PC11 and PC10-PA3 are ABSENT: the engined pair measures "
+                          "nothing", crlf);
+            bench.verdict("the engined pair declines without its wires, and says so", true);
+            return;
+        }
+        u2_transport = true;
+        S::engines = true;
+        const bool opened = Loop::init(clock, 115200) && Port4::init(clock, 115200);
+        // WHAT A RECEIVER TAKES WHILE ITS PAD FLOATS: between the first
+        // port's init and the second's, the peer's transmit pad is not
+        // driven yet. Drained - and counted - before anything is judged.
+        wait_us(2000);
+        const uint16_t stale2 = drain_port<Loop>();
+        const uint16_t stale4 = drain_port<Port4>();
+        Loop::clear_errors();
+        Port4::clear_errors();
+
+        static const uint8_t forth[] = "USART2's engines on DMA1 into UART4's on DMA2";
+        static const uint8_t back[] = "and back, DMA2 out and DMA1 in";
+        const bool forth_ok = pair_message<Loop, Port4>(forth, sizeof(forth) - 1u);
+        const bool back_ok = pair_message<Port4, Loop>(back, sizeof(back) - 1u);
+        print(serial, "  a message each way at 115200: ", forth_ok ? "exact" : "WRONG", " and ",
+              back_ok ? "exact" : "WRONG", "; framed while a pad floated: ", stale2, " and ",
+              stale4, " bytes", crlf);
+        bench.verdict("USART2's transmit engine on DMA1 pours a run into UART4's receive engine "
+                      "on DMA2 and UART4's transmit engine one back into USART2's, byte for "
+                      "byte, each run published by harvest()",
+                      opened && forth_ok && back_ok);
+
+        // Four kilobytes each way at 921600 baud.
+        constexpr uint32_t run_bytes = 4096;
+        constexpr uint32_t fast_baud = 921600;
+        const bool fast = Loop::set_baud(SysClock::hz, fast_baud) &&
+                          Port4::set_baud(SysClock::hz, fast_baud);
+        wait_us(1000);
+        (void)drain_port<Loop>();
+        (void)drain_port<Port4>();
+        Loop::clear_errors();
+        Port4::clear_errors();
+        const PairRun out = pair_run<Loop, Port4>(run_bytes, 2'000'000UL);
+        const PairRun in = pair_run<Port4, Loop>(run_bytes, 2'000'000UL);
+        print(serial, "  ", out.received, " of ", run_bytes, " bytes USART2 to UART4 in ", out.us,
+              " us with ", out.wrong, " wrong; ", in.received, " back in ", in.us, " us with ",
+              in.wrong, " wrong", crlf);
+        print(serial, "  UART4: overruns ", Port4::rx_overruns(), "/", Port4::hw_overruns(),
+              ", frame errors ", Port4::frame_errors(), ", faults ", Port4::dma_faults(),
+              "; USART2: overruns ", Loop::rx_overruns(), "/", Loop::hw_overruns(),
+              ", frame errors ", Loop::frame_errors(), ", faults ", Loop::dma_faults(), crlf);
+        bench.verdict("four kilobytes travel each way at 921600 baud through the two controllers "
+                      "with every byte of the xorshift pattern in order and no error counted at "
+                      "either end",
+                      fast && out.received == run_bytes && in.received == run_bytes &&
+                          out.wrong == 0u && in.wrong == 0u && Port4::frame_errors() == 0u &&
+                          Loop::frame_errors() == 0u && Port4::hw_overruns() == 0u &&
+                          Loop::hw_overruns() == 0u && Port4::dma_faults() == 0u &&
+                          Loop::dma_faults() == 0u);
+        // Both ports stopped and not only their channels: a receiver left
+        // running keeps its request on its channel (docs/ch32vx03/dma.md).
+        S::engines = false;
+        u2_transport = false;
+        Port4::release();
+        Loop::release();
+        all_off();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// o - the lot's registers on the pair
+// ---------------------------------------------------------------------------
+
+/// The five registers the CTLR4 probe must leave as it found them.
+struct UsartWords {
+    uint16_t brr, ctlr1, ctlr2, ctlr3, gpr;
+    bool operator==(const UsartWords&) const = default;
+};
+
+template <typename U>
+UsartWords usart_words() {
+    return {U::regs().BRR, U::regs().CTLR1, U::regs().CTLR2, U::regs().CTLR3, U::regs().GPR};
+}
+
+/// UART4 on its default column, the pair's, CONFIGURED BUT DISABLED - the
+/// state the CTLR4 probe wants.
+template <typename U>
+bool pair_far_configured(const UartFormat& f, uint32_t baud) {
+    U::bus_clock(true);
+    U::reset();
+    CrossTxPad::function();
+    CrossRxPad::input(PinPull::up);
+    return U::configure(f, usart_divisor(pclk1, baud));
+}
+
+/// USART2 the same way, disabled.
+bool pair_near_configured(const UartFormat& f, uint32_t baud) {
+    U2::bus_clock(true);
+    U2::reset();
+    TxPad::function();
+    RxPad::input(PinPull::up);
+    return U2::configure(f, usart_divisor(pclk1, baud));
+}
+
+template <typename U>
+void port_on() {
+    U::enable(true);
+    U::transmitter(true);
+    U::receiver(true);
+}
+
+/// One frame from USART2 into the far port: the word it read, and its
+/// status as the read found it.
+template <typename U>
+std::optional<uint16_t> pair_frame(uint16_t word, uint16_t& status) {
+    U::clear_by_read();
+    U2::write_word(word);
+    Stopwatch w;
+    while (!U::rx_ready() && w.us() < 20'000UL) {
+    }
+    status = U::status();
+    if ((status & usart_rxne) == 0u) {
+        return {};
+    }
+    return static_cast<uint16_t>(U::read_word());
+}
+
+/// A ZERO WORD'S LOW RUN on USART2's transmit pad, in bit times, with
+/// `ctlr4` and `m_ext` stored RAW - past the verbs, which refuse on a die
+/// whose read-back says no - so a register that TAKES a write and reads
+/// back zero is caught by what the wire does. The port is disabled for
+/// the stores, as the chapter asks of a frame's shape, and both are put
+/// back to zero after.
+template <bool on>
+uint32_t raw_low_run(const UartFormat& f, uint16_t ctlr4, uint16_t m_ext) {
+    constexpr uint32_t baud = 9600;
+    U2::enable(false);
+    (void)U2::configure(f, usart_divisor(pclk1, baud));
+    U2::regs().CTLR4 = ctlr4;
+    U2::regs().CTLR1 = static_cast<uint16_t>(U2::regs().CTLR1 | m_ext);
+    port_on<U2>();
+    wait_us(3000);
+    const uint32_t bit_cycles = (timclk1 / pclk1) * usart_divisor(pclk1, baud);
+    const uint16_t psc = ruler_prescaler_for(bit_cycles * 14u);
+    ruler_start(psc, true);
+    ruler_rearm();
+    U2::write_word(0);
+    uint32_t run = 0;
+    if (ruler_wait()) {
+        run = ruler_cycles(ruler_width(), psc);
+    }
+    (void)tx_settled();
+    ruler_stop();
+    U2::enable(false);
+    U2::regs().CTLR4 = 0;
+    U2::regs().CTLR1 = static_cast<uint16_t>(U2::regs().CTLR1 & ~usart_m_ext_mask);
+    return (run + bit_cycles / 2u) / bit_cycles;
+}
+
+template <bool on = (has_fourth && v303_pair)>
+void to_lot_registers() {
+    if constexpr (on) {
+        all_off();
+        if (!need_cross_wires()) {
+            print(serial, "  the wires PA2-PC11 and PC10-PA3 are ABSENT: the lot's registers are "
+                          "asked of the pair and not measured", crlf);
+            bench.verdict("the letter declines without its wires, and says so", true);
+            return;
+        }
+        constexpr uint32_t baud = 9600;
+        // Eight data bits and a parity bit: the frame whose parity bit
+        // CHECK_SEL would hold at one or at zero.
+        constexpr UartFormat parity_frame{UartBits::eight, UartParity::even};
+
+        // ---- the probe, and every other register compared across it ----
+        const bool up = pair_near_configured(parity_frame, baud) &&
+                        pair_far_configured<U4>(parity_frame, baud);
+        const UsartWords before2 = usart_words<U2>();
+        const UsartWords before4 = usart_words<U4>();
+        const uint16_t word2 = U2::regs().CTLR4;
+        const uint16_t word4 = U4::regs().CTLR4;
+        const bool present2 = U2::ctlr4_present();
+        const bool present4 = U4::ctlr4_present();
+        const UsartWords after2 = usart_words<U2>();
+        const UsartWords after4 = usart_words<U4>();
+        print(serial, "  CTLR4's address read ", hex(word2), " on USART2 and ", hex(word4),
+              " on UART4 before the probe; the probe says ", present2 ? "PRESENT" : "absent",
+              " and ", present4 ? "PRESENT" : "absent", crlf);
+        bench.verdict("the CTLR4 probe answers on both ports and leaves BRR, CTLR1..3 and GPR of "
+                      "each block exactly as it found them, whatever the address turned out to "
+                      "be",
+                      up && before2 == after2 && before4 == after4);
+
+        port_on<U2>();
+        port_on<U4>();
+        wait_us(3000);
+
+        if (present2 && present4) {
+            // MARK on the wire: a zero byte's low run is the start bit and
+            // eight data bits, the parity bit held HIGH; SPACE holds it low
+            // and the run is ten bits.
+            const uint32_t bit_cycles = (timclk1 / pclk1) * usart_divisor(pclk1, baud);
+            const uint16_t psc = ruler_prescaler_for(bit_cycles * 14u);
+            uint32_t runs[2] = {};
+            const UsartMarkSpace levels[2] = {UsartMarkSpace::mark, UsartMarkSpace::space};
+            for (uint8_t i = 0; i < 2u; ++i) {
+                (void)U2::mark_space(levels[i]);
+                ruler_start(psc, true);
+                ruler_rearm();
+                U2::write_word(0);
+                if (ruler_wait()) {
+                    runs[i] = ruler_cycles(ruler_width(), psc);
+                }
+                (void)tx_settled();
+                ruler_stop();
+            }
+            const uint32_t mark_bits = (runs[0] + bit_cycles / 2u) / bit_cycles;
+            const uint32_t space_bits = (runs[1] + bit_cycles / 2u) / bit_cycles;
+            print(serial, "  a zero byte's low run: ", mark_bits, " bits under MARK, ",
+                  space_bits, " under SPACE", crlf);
+            bench.verdict("MARK holds the parity bit high and SPACE holds it low, measured on the "
+                          "transmit pad: nine low bits for a zero byte under MARK, ten under SPACE",
+                          mark_bits == 9u && space_bits == 10u);
+
+            // The far receiver's judgement: a MARK frame into a MARK
+            // receiver is clean, into a SPACE receiver it raises MS_ERR.
+            uint16_t st_same = 0;
+            uint16_t st_other = 0;
+            (void)U2::mark_space(UsartMarkSpace::mark);
+            (void)U4::mark_space(UsartMarkSpace::mark);
+            const auto same = pair_frame<U4>(0x5A, st_same);
+            (void)U4::mark_space(UsartMarkSpace::space);
+            const auto other = pair_frame<U4>(0x5A, st_other);
+            print(serial, "  MARK into MARK: status ", hex(st_same), ", MARK into SPACE: status ",
+                  hex(st_other), crlf);
+            bench.verdict("a MARK frame into a MARK receiver arrives with no MS_ERR, and into a "
+                          "SPACE receiver it raises MS_ERR - the far end's own judgement of the "
+                          "held level",
+                          same.has_value() && (*same & 0xFFu) == 0x5Au &&
+                              (st_same & usart_ms_err) == 0u && other.has_value() &&
+                              (st_other & usart_ms_err) != 0u);
+            (void)U2::mark_space(UsartMarkSpace::off);
+            (void)U4::mark_space(UsartMarkSpace::off);
+        } else {
+            print(serial, "  this die's lot has no CTLR4 by the probe: the MARK and SPACE parity is "
+                          "asked of the WIRE instead", crlf);
+            bench.verdict("with the register absent every MARK and SPACE verb answers false and "
+                          "writes nothing",
+                          !U2::mark_space(UsartMarkSpace::mark) &&
+                              !U4::mark_space(UsartMarkSpace::space) &&
+                              !U2::mark_space_interrupt(true) &&
+                              U2::mark_space() == UsartMarkSpace::off);
+            // A register that took the write and reads back zero would
+            // still hold the parity bit: MARK makes a zero byte's low run
+            // nine bits under even parity (ten computed), SPACE ten under
+            // odd parity (nine computed).
+            const uint32_t even_plain =
+                raw_low_run<on>(UartFormat{UartBits::eight, UartParity::even}, 0, 0);
+            const uint32_t even_mark = raw_low_run<on>(
+                UartFormat{UartBits::eight, UartParity::even}, usart_check_mark, 0);
+            const uint32_t odd_plain =
+                raw_low_run<on>(UartFormat{UartBits::eight, UartParity::odd}, 0, 0);
+            const uint32_t odd_space = raw_low_run<on>(
+                UartFormat{UartBits::eight, UartParity::odd}, usart_check_space, 0);
+            print(serial, "  a zero byte's low run with CTLR4 stored raw: even parity ", even_plain,
+                  " bits plain and ", even_mark, " under MARK; odd parity ", odd_plain,
+                  " plain and ", odd_space, " under SPACE", crlf);
+            bench.verdict("THE WIRE AGREES WITH THE PROBE: CTLR4 stored raw with MARK or SPACE "
+                          "leaves the parity bit computed - ten low bits under even parity, nine "
+                          "under odd, as without it - so the register is absent, not write-only",
+                          even_plain == 10u && even_mark == 10u && odd_plain == 9u &&
+                              odd_space == 9u);
+            port_on<U2>();
+            wait_us(3000);
+        }
+
+        // ---- M_EXT: the short words, with the ports disabled again ----
+        U2::enable(false);
+        U4::enable(false);
+        (void)U2::configure(UartFormat{}, usart_divisor(pclk1, baud));
+        (void)U4::configure(UartFormat{}, usart_divisor(pclk1, baud));
+        const bool short2 = U2::short_word(UsartShortWord::seven);
+        const bool short4 = U4::short_word(UsartShortWord::seven);
+        print(serial, "  M_EXT kept a seven-bit word: ", short2 ? "yes" : "no", " on USART2, ",
+              short4 ? "yes" : "no", " on UART4", crlf);
+        if (short2 && short4) {
+            const UsartShortWord words[3] = {UsartShortWord::seven, UsartShortWord::six,
+                                             UsartShortWord::five};
+            uint32_t exact = 0;
+            for (UsartShortWord w : words) {
+                U2::enable(false);
+                U4::enable(false);
+                (void)U2::short_word(w);
+                (void)U4::short_word(w);
+                port_on<U2>();
+                port_on<U4>();
+                wait_us(3000);
+                uint16_t st = 0;
+                const uint16_t sent = static_cast<uint16_t>(0x55u & usart_short_word_mask(w));
+                const auto got = pair_frame<U4>(sent, st);
+                if (got.has_value() && (*got & usart_short_word_mask(w)) == sent &&
+                    (st & (usart_fe | usart_pe)) == 0u) {
+                    ++exact;
+                }
+            }
+            bench.verdict("seven, six and five-bit words cross the pair exactly, M_EXT set at both "
+                          "ends",
+                          exact == 3u);
+        } else {
+            bench.verdict("with M_EXT absent the field reads back zero and the verb answers false, "
+                          "the word left to M",
+                          !short2 && !short4 && U2::short_word() == UsartShortWord::off);
+            // Stored raw, a seven-bit code that acted would cut a zero
+            // word's low run from nine bits (start and eight) to eight.
+            const uint32_t eight = raw_low_run<on>(UartFormat{}, 0, 0);
+            const uint32_t seven =
+                raw_low_run<on>(UartFormat{}, 0, usart_ctlr1_short_word(UsartShortWord::seven));
+            const uint32_t five =
+                raw_low_run<on>(UartFormat{}, 0, usart_ctlr1_short_word(UsartShortWord::five));
+            print(serial, "  a zero word's low run with M_EXT stored raw: ", eight,
+                  " bits plain, ", seven, " under the seven-bit code, ", five,
+                  " under the five-bit one", crlf);
+            bench.verdict("THE WIRE AGREES WITH THE READ-BACK: M_EXT stored raw leaves the word at "
+                          "M's eight bits - nine low bits for a zero word under every code - so "
+                          "the field is absent, not write-only",
+                          eight == 9u && seven == 9u && five == 9u);
+        }
+
+        // ---- RX_BUSY, caught while a frame arrives at 1200 baud ----
+        U2::enable(false);
+        U4::enable(false);
+        (void)U2::configure(UartFormat{}, usart_divisor(pclk1, 1200));
+        (void)U4::configure(UartFormat{}, usart_divisor(pclk1, 1200));
+        port_on<U2>();
+        port_on<U4>();
+        wait_us(20'000);
+        U4::clear_by_read();
+        uint32_t busy_seen = 0;
+        uint32_t polls = 0;
+        U2::write_data(0x00);
+        Stopwatch w;
+        while (!U4::rx_ready() && w.us() < 20'000UL) {
+            ++polls;
+            if (U4::receiving()) {
+                ++busy_seen;
+            }
+        }
+        wait_us(2000);
+        const bool busy_after = U4::receiving();
+        (void)U4::read_word();
+        print(serial, "  RX_BUSY read set in ", busy_seen, " of ", polls,
+              " polls while a frame arrived, ", busy_after ? "SET" : "clear", " after it", crlf);
+        bench.verdict("RX_BUSY, where the die has it, stands while a frame arrives and falls "
+                      "after it; a die without it reads zero throughout (the line above says "
+                      "which)",
+                      !busy_after);
+        all_off();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// p - UART5..UART8 with no wire
+// ---------------------------------------------------------------------------
+
+/// A byte read off a TRANSMIT pad by software: the start bit's fall found
+/// by polling the pad's own input register, then each bit sampled at its
+/// middle. Bit 8 set when the stop bit came back low; 0xFFFF when no
+/// start bit came at all.
+template <typename Pad>
+uint16_t sample_tx(uint32_t baud, uint32_t timeout_us) {
+    const uint32_t bit = SysClock::hz / baud;
+    Stopwatch w;
+    while (Pad::read()) {
+        if (w.us() > timeout_us) {
+            return 0xFFFFu;
+        }
+    }
+    Stopwatch f;
+    uint16_t v = 0;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        const uint32_t at = bit + bit / 2u + static_cast<uint32_t>(i) * bit;
+        while (f.cycles() < at) {
+        }
+        if (Pad::read()) {
+            v = static_cast<uint16_t>(v | (1u << i));
+        }
+    }
+    while (f.cycles() < 9u * bit + bit / 2u) {
+    }
+    return Pad::read() ? v : static_cast<uint16_t>(v | 0x100u);
+}
+
+/// An 8N1 frame banged into a RECEIVE pad through its own pull - letter
+/// c's bit-banger on any pad.
+template <typename Pad>
+void bang_on(uint8_t byte, uint32_t baud) {
+    const uint32_t bit = SysClock::hz / baud;
+    Stopwatch w;
+    uint32_t n = 0;
+    Pad::clear();
+    ++n;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        while (w.cycles() < n * bit) {
+        }
+        if (((byte >> i) & 1u) != 0u) {
+            Pad::set();
+        } else {
+            Pad::clear();
+        }
+        ++n;
+    }
+    while (w.cycles() < n * bit) {
+    }
+    Pad::set();
+    while (w.cycles() < (n + 1u) * bit) {
+    }
+}
+
+template <uint8_t n>
+struct UpperRig {
+    using U = Usart<n>;
+    using Tx = Pin<U::pads.tx.port, U::pads.tx.pin>;
+    using Rx = Pin<U::pads.rx.port, U::pads.rx.pin>;
+};
+
+template <uint8_t n>
+void upper_port_off() {
+    using R = UpperRig<n>;
+    Pfic::disable(R::U::irq);
+    R::U::bus_clock(true);
+    R::U::reset();
+    R::U::bus_clock(false);
+    R::Tx::release();
+    R::Rx::release();
+}
+
+/// One upper port measured with no wire; true when every step held.
+template <uint8_t n>
+bool upper_port() {
+    using R = UpperRig<n>;
+    using U = typename R::U;
+    using S = V303State<device::has_usart(n)>;
+    constexpr uint32_t baud = 9600;
+    U::bus_clock(true);
+    U::reset();
+    const bool gate = Rcc::enabled(Bus::pb1, usart_gate_for(n));
+    R::Tx::function();
+    R::Rx::input(PinPull::up);
+    const uint32_t brr = usart_divisor(pclk1, baud);
+    const bool framed = U::configure(UartFormat{}, brr) && U::brr() == brr && !U::is_full;
+    port_on<U>();
+    wait_us(3000);   // TE's idle frame out
+
+    // Out: a byte read back off the transmit pad by software.
+    U::write_data(0xA5);
+    const uint16_t out = sample_tx<typename R::Tx>(baud, 5000);
+    Stopwatch w;
+    while (!U::tx_complete() && w.us() < 5000u) {
+    }
+
+    // In: a frame banged into the receive pad through its pull.
+    U::clear_by_read();
+    bang_on<typename R::Rx>(0x3C, baud);
+    Stopwatch r;
+    while (!U::rx_ready() && r.us() < 5000u) {
+    }
+    const uint16_t status = U::status();
+    const uint16_t in = U::rx_ready() ? static_cast<uint16_t>(U::read_word() & 0xFFu) : 0xFFFFu;
+
+    // The vector: a transmission complete reaching this port's own entry.
+    S::upper_interrupts[n - 5u] = 0;
+    U::clear_flags(usart_tc);
+    U::interrupts(usart_tcie, true);
+    Pfic::enable(U::irq);
+    U::write_data(0x11);
+    wait_us(4000);
+    const uint32_t vec = S::upper_interrupts[n - 5u];
+    U::interrupts(usart_tcie, false);
+    Pfic::disable(U::irq);
+
+    print(serial, "  UART", n, " (TX P", U::pads.tx.port, U::pads.tx.pin, ", RX P",
+          U::pads.rx.port, U::pads.rx.pin, ", vector ", static_cast<uint8_t>(U::irq),
+          "): gate ", gate ? "open" : "SHUT", ", BRR ", U::brr(), ", out ", hex(out), ", in ",
+          hex(in), " (status ", hex(status), "), vector ran ", vec, crlf);
+    upper_port_off<n>();
+    return gate && framed && out == 0xA5u && in == 0x3Cu &&
+           (status & (usart_fe | usart_ne | usart_pe)) == 0u && vec >= 1u;
+}
+
+/// The transports whose columns land on the two-wire debug port's own
+/// pads: UART8 on code 1 (PA14/PA15) and USART3 on code 2 (PA13/PA14).
+/// Named through `on`, so no other part forms them.
+template <bool on>
+struct DebugPadPorts {
+    using Uart8OnDebug = Uart<on ? 8 : 8, P, 16, 16, UartFormat{}, NoDmaEngine, NoDmaEngine, 1>;
+    using Usart3OnDebug = Uart<on ? 3 : 3, P, 16, 16, UartFormat{}, NoDmaEngine, NoDmaEngine, 2>;
+    static_assert(usart_column_on_debug_port(8, 1) && usart_column_on_debug_port(3, 2),
+                  "test_vx03_serial: UART8's code 1 and USART3's code 2 are the columns on the "
+                  "debug port's pads (tables 10-25 and 10-31)");
+};
+
+template <bool on = (device::has_usart(5) && device::has_usart(6) && device::has_usart(7) &&
+                     device::has_usart(8))>
+void tp_upper_ports() {
+    if constexpr (on) {
+        all_off();
+        const bool five = upper_port<5>();
+        const bool six = upper_port<6>();
+        const bool seven = upper_port<7>();
+        const bool eight = upper_port<8>();
+        bench.verdict("UART5: its gate, its divisor, a byte off its transmit pad, a frame into its "
+                      "receive pad and its own vector (69)",
+                      five);
+        bench.verdict("UART6, UART7 and UART8 the same, each on its own vector at 87, 88 and 89 "
+                      "of this class's tail - with no wire, the receive side fed through the "
+                      "pad's own pull because nothing else reaches it",
+                      six && seven && eight);
+
+        // THE COLUMNS ON THE DEBUG PORT'S PADS: with the probe attached,
+        // SW_CFG reads as the two-wire port alive and init() refuses both
+        // transports before it touches a register. Asked only where the
+        // field says so - a refusal that failed would take the probe's
+        // pads from it until the next reset.
+        const uint8_t sw_cfg = Afio::debug_config();
+        const bool alive = Afio::debug_port_enabled();
+        bool refused8 = false;
+        bool refused3 = false;
+        if (alive) {
+            refused8 = !DebugPadPorts<on>::Uart8OnDebug::init(clock, 9600);
+            refused3 = !DebugPadPorts<on>::Usart3OnDebug::init(clock, 9600);
+        }
+        const bool still = Afio::debug_port_enabled() && Afio::debug_config() == sw_cfg;
+        print(serial, "  SW_CFG reads ", sw_cfg, " with the probe attached (", alive ? "the "
+              "two-wire port alive" : "the port GONE", "); UART8 on PA14/PA15 ",
+              refused8 ? "refused" : "NOT refused", ", USART3 on PA13/PA14 ",
+              refused3 ? "refused" : "NOT refused", crlf);
+        bench.verdict("SW_CFG reads the two-wire debug port alive while the probe is attached, "
+                      "and a transport whose column lands on its pads - UART8's code 1, USART3's "
+                      "code 2 - is refused by init() and leaves the field as it found it",
+                      alive && refused8 && refused3 && still);
+        all_off();
+    }
+}
+
+template <bool on>
+void upper_off() {
+    if constexpr (on) {
+        if constexpr (device::has_usart(5) && device::has_usart(8)) {
+            upper_port_off<5>();
+            upper_port_off<6>();
+            upper_port_off<7>();
+            upper_port_off<8>();
+        }
+        if constexpr (device::dma_controller_count >= 2u) {
+            Pfic::disable(dma_channel_irq(2, 3));
+            Pfic::disable(dma_channel_irq(2, 5));
+        }
+        V303State<on>::engines = false;
+    }
+}
+
+/// UART4's two DMA2 vectors, serving the pair's transport while letter n
+/// runs and nothing otherwise.
+template <bool on = (has_fourth && v303_pair && device::dma_controller_count >= 2u)>
+void pair_dma_vector() {
+    if constexpr (on) {
+        if (V303State<on>::engines) {
+            (void)PairPort<on>::Port::dma_isr();
+        }
+    }
+}
+
+/// An upper port's vector body: counted, and its flags put down.
+template <uint8_t n>
+void upper_vector() {
+    if constexpr (device::has_usart(n)) {
+        using U = Usart<n>;
+        using S = V303State<device::has_usart(n)>;
+        S::upper_interrupts[n - 5u] = S::upper_interrupts[n - 5u] + 1u;
+        const uint16_t st = U::status();
+        if ((st & usart_tc) != 0u) {
+            U::clear_flags(usart_tc);
+            U::interrupts(usart_tcie, false);
+        }
+        if ((st & usart_rxne) != 0u) {
+            (void)U::read_word();
+        }
+    }
+}
+
+/// The CH32V303's letters, registered where the part has what they ask.
+template <bool on = (v303_pair && has_fourth)>
+void register_v303_letters() {
+    if constexpr (on) {
+        bench.letter('n', "the crossed pair's engines: DMA1 against DMA2, 4 KB each way",
+                     tn_pair_engines<>);
+        bench.letter('o', "the lot's registers on the pair: CTLR4, M_EXT, RX_BUSY",
+                     to_lot_registers<>);
+        bench.letter('p', "UART5..UART8 with no wire: the pads, the frame, the vectors",
+                     tp_upper_ports<>);
+    }
 }
 
 // ---- the menu ---------------------------------------------------------------
@@ -2069,6 +2875,30 @@ extern "C" BRIO_CH32_INTERRUPT void uart4_handler() {
     }
 }
 
+/// USART2's two DMA1 channels: the Loop transport's engines while letter l
+/// or letter n runs. The engines switch their channels' lines on, so the
+/// vectors are bound whether or not a letter uses them.
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    if (u2_transport) {
+        (void)Loop::dma_isr();
+    }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    if (u2_transport) {
+        (void)Loop::dma_isr();
+    }
+}
+
+// The CH32V303's: UART4's two DMA2 channels and the four upper ports'
+// vectors. On the other series these bodies are empty and nothing in the
+// vector table names them.
+extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() { pair_dma_vector<>(); }
+extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { pair_dma_vector<>(); }
+extern "C" BRIO_CH32_INTERRUPT void uart5_handler() { upper_vector<5>(); }
+extern "C" BRIO_CH32_INTERRUPT void uart6_handler() { upper_vector<6>(); }
+extern "C" BRIO_CH32_INTERRUPT void uart7_handler() { upper_vector<7>(); }
+extern "C" BRIO_CH32_INTERRUPT void uart8_handler() { upper_vector<8>(); }
+
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
@@ -2089,6 +2919,7 @@ int main() {
     bench.letter('k', "hardware flow control: the CTS hold and the RTS hand", tk_flow);
     bench.letter('l', "the loopback PA2-PA3, when it is strapped", tl_loopback);
     bench.letter('m', "the crossed pair, when it is strapped", tm_cross);
+    register_v303_letters();
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

@@ -1,51 +1,61 @@
 /*
  * usart.hpp
  *
- * The CH32V203's serial ports (RM ch. 18) in the two strata every brio
- * serial driver has (docs/design/serial.md):
+ * The serial ports of the CH32V203 and the CH32V303 (RM ch. 18) in the
+ * two strata every brio serial driver has (docs/design/serial.md):
  *
  *  Usart<n>              the RESOURCE: which instance, where its
  *                        registers are, its bus gate and its reset, its
- *                        vector, its DMA channels, and the whole
- *                        register description of chapter 18 as verbs -
- *                        the frame, the divisor, mute mode with both
- *                        wakes, LIN's break, single-wire half duplex,
- *                        IrDA, the smartcard, the synchronous clock,
- *                        the flow-control pair, the DMA requests, every
- *                        flag and every interrupt enable;
+ *                        vector, its DMA slots, and the whole register
+ *                        description of chapter 18 as verbs - the
+ *                        frame, the divisor, mute mode with both wakes,
+ *                        LIN's break, single-wire half duplex, IrDA,
+ *                        the smartcard, the synchronous clock, the
+ *                        flow-control pair, the DMA requests, every flag
+ *                        and every interrupt enable, and on the CH32V303
+ *                        the lot's MARK and SPACE parity and short words;
  *  Uart<n, P, ...>       the TASK: the interrupt-driven byte transport
  *                        with two rings and one ISR body - every
  *                        console's personality, a ByteTransport for
  *                        print() and SerialPort, the same surface the
  *                        other five targets expose.
  *
- * FOUR INSTANCES, TWO BUSES. USART1 sits on PB2 and USART2, USART3 and
- * UART4 on PB1 - which on this family do NOT run at the same rate above
- * 72 MHz (clock.hpp caps PB1 there), so the transport asks its own bus
- * for the clock its divisor counts. WHICH instances a part offers is the
- * part's table (device::has_usart), and the list is not always the first
- * n of them: the smallest part offers one usart and it is USART2,
- * because its package bonds neither of USART1's pin pairs.
+ * UP TO EIGHT INSTANCES, TWO BUSES. USART1 sits on PB2 and every other
+ * port - USART2, USART3 and UART4..UART8 - on PB1, which on this family
+ * does NOT run at the same rate above 72 MHz (clock.hpp caps PB1 there),
+ * so the transport asks its own bus for the clock its divisor counts.
+ * WHICH instances a part offers is the part's table (device::has_usart),
+ * and the list is not always the first n of them: the smallest part
+ * offers one usart and it is USART2, because its package bonds neither
+ * of USART1's pin pairs; the CH32V203C8 and RB offer four; the 128 KB
+ * CH32V303 three; the CH32V303RC and VC all eight. UART5..UART8 live at
+ * addresses that are not in instance order (UART6..8 BELOW USART2 on
+ * PB1), which is device.hpp's usart_base_for() and nobody else's.
  *
- * THE FOURTH PORT IS A USART ON THIS CLASS. Chapter 18's opening counts
- * three USARTs and five UARTs for the whole family and then names the
- * exception: on the CH32V203C8 the fourth serial port is a USART4 - the
- * datasheet's pin table agrees, giving it a CK, a CTS and an RTS pad -
- * while on the CH32V203RB (the other device class) it is a UART4 with
- * TX and RX alone. So `is_full` - the synchronous clock, the smartcard
- * and the flow-control pair - is a PART fact here (device::usart_full)
- * and not a number's parity, and the verbs behind it refuse rather than
- * write bits an instance has not got.
+ * WHICH OF THEM IS A FULL USART is a second part fact. Chapter 18's
+ * opening counts three USARTs and five UARTs for the whole family and
+ * then names the exception: on the CH32V203C8 the fourth serial port is
+ * a USART4 - the datasheet's pin table agrees, giving it a CK, a CTS and
+ * an RTS pad - while on the CH32V203RB and every CH32V303 it is a UART4
+ * with TX and RX alone, and UART5..8 are UARTs everywhere. So `is_full`
+ * - the synchronous clock, the smartcard and the flow-control pair - is
+ * a PART fact (device::usart_full) and not a number's parity, and the
+ * verbs behind it are REFUSED AT COMPILE TIME on an instance that is not
+ * one; the read-backs of those modes answer false there.
  *
- * THE PADS ARE THE REMAP TABLES' (afio.hpp, tables 10-23..10-27): the
+ * THE PADS ARE THE REMAP TABLES' (afio.hpp, tables 10-23..10-31): the
  * `remap` template parameter names a COLUMN and the TX, RX, CK, CTS and
  * RTS pads follow from the same table that programs AFIO_PCFR1/PCFR2.
  * A code of 0 writes nothing at all - the reset column is already
  * there, and USART1 carries the probe's console on this board, which is
  * a pair of pads no init() may move behind the program's back. UART4 is
  * where the table matters most: the manual has two of them and the one
- * that starts at PC10/PC11 belongs to the bigger class, the CH32V203C8
- * being named in the other, whose default pads are PB0 and PB1.
+ * that starts at PC10/PC11 belongs to the CH32V20x_D8 and the CH32V303,
+ * the CH32V203C8 being named in the other, whose default pads are PB0
+ * and PB1. TWO COLUMNS LAND ON THE DEBUG PORT'S OWN PADS - USART3's
+ * code 2 (PA13/PA14) and UART8's code 1 (PA14/PA15) - and a transport
+ * naming one is refused by init() while the two-wire port is still the
+ * probe's: afio.hpp's long-spelled verb is how a program gives it up.
  *
  * TWO RINGS AND TWO FLAGS. Bytes leave through a TX ring drained by the
  * TXE interrupt (write_byte() arms TXEIE; the ISR disarms it when the
@@ -93,20 +103,41 @@
  * a console that wants exact attribution takes no receive engine. And
  * harvest() is a VERB, not an interrupt: a receive block completes only
  * when its run fills, which on an idle line is never, so whoever owns
- * the port decides how often to ask. An engine is refused on any
- * channel but the instance's own, which the request table of
- * ch32vx03/dma_engine.hpp answers (USART1 transmits on channel 4 and
- * receives on 5, USART2 on 7 and 6, USART3 on 2 and 3, UART4 on 1
- * and 8) - and a program with an engine running does not sleep on this
+ * the port decides how often to ask. An engine is refused on any SLOT
+ * but the instance's own - the controller and the channel - which the
+ * request table of ch32vx03/dma_engine.hpp answers: USART1 transmits on
+ * DMA1's channel 4 and receives on 5, USART2 on 7 and 6, USART3 on 2 and
+ * 3, UART4 on DMA1's 1 and 8 on the CH32V203 and on DMA2's 5 and 3 on
+ * the CH32V303, whose UART5..8 are DMA2's too (4 and 2, 6 and 7, 8 and
+ * 9, 10 and 11). A program with an engine running does not sleep on this
  * family, because in Sleep the bus matrix serves the core alone
  * (docs/ch32vx03/dma.md).
  *
- * WHAT THE REGISTER FILE HAS NOT GOT. CTLR4 - the MARK and SPACE parity
- * of the bigger classes - is not this family's (18.10.8's note), and
- * neither are CTLR1's M_EXT (five, six and seven-bit words) nor STATR's
- * MS_ERR and RX_BUSY: every one of them carries the same note naming
- * the CH32F20x_D8, the CH32V30x and the CH32V31x. device.hpp's register
- * view stops at GPR for that reason, and nothing here reaches past it.
+ * THE LOT'S REGISTERS. Four things the chapter gives the CH32V30x_D8 -
+ * and there only "with the penultimate sixth digit of the lot number not
+ * being zero", which no register states and the part number does not
+ * carry: CTLR4 (18.10.8: the MARK and SPACE parity, a parity bit held at
+ * one or at zero, and MS_ERRIE, its error's interrupt), CTLR1's M_EXT
+ * (18.10.4: seven, six and five-bit words), and STATR's MS_ERR and
+ * RX_BUSY (18.10.1). None of them is the CH32V203's: every verb here that
+ * names one is REFUSED AT COMPILE TIME on that series' two classes. On a
+ * CH32V303 they are VERBS THAT ASK THE DIE, this stratum's rule for a
+ * lot's register (docs/ch32vx03/README.md): M_EXT is a field of a
+ * register that exists, so it is written and read back; CTLR4 is a
+ * register of its own at 0x1C, and an absent register can answer as a
+ * MIRROR of another, so `ctlr4_present()` reads the word first - the
+ * real one holds nothing outside its three bits - and then writes it
+ * only on a disabled port, every other register of the block compared
+ * before and after and the block put back through its reset line and
+ * the program's own words when anything else moved. The answer is kept
+ * per instance, and a CTLR4 verb asks it before it writes a bit. RX_BUSY
+ * and MS_ERR are status bits of a register that exists and read zero on
+ * a die without them. The CH32V303VCT6 the reference suite ran on is
+ * such a die: CTLR4's address read zero on USART2 and UART4 and moved
+ * nothing when written, M_EXT did not keep a code, RX_BUSY never rose
+ * under a frame - and the WIRE agrees, the parity bit staying computed
+ * and the word eight bits long with both stored raw, so the four are
+ * absent there and not write-only (docs/ch32vx03/usart.md).
  */
 
 #pragma once
@@ -245,6 +276,48 @@ constexpr bool smartcard_valid(const SmartcardConfig& c) {
     return c.clock_prescaler != 0u && c.clock_prescaler <= 31u;
 }
 
+/// Whether this part's DEVICE CLASS has the lot's four features at all -
+/// CTLR4, M_EXT, MS_ERR and RX_BUSY (the file header): the CH32V30x_D8's
+/// among this stratum's classes, whose notes name no CH32V203. Whether the
+/// DIE has them is a question only the die answers.
+inline constexpr bool usart_class_has_lot_registers =
+    device::device_class == DeviceClass::v30x_d8;
+
+/// CTLR4's CHECK_SEL (18.10.8): the parity bit's level held - at ONE
+/// (MARK) or at ZERO (SPACE) - instead of computed; `off` is the chapter's
+/// "0x", the parity PCE and PS say. What the receiver does with a parity
+/// bit that did not hold that level is MS_ERR, the resource's
+/// mark_space_error().
+enum class UsartMarkSpace : uint8_t { off = 0, mark = 2, space = 3 };
+
+/// CTLR1's M_EXT (18.10.4): the word shorter than M makes it - seven, six
+/// or five data bits; `off` is the chapter's "00: invalid, M bit
+/// determines data length".
+enum class UsartShortWord : uint8_t { off = 0, seven = 1, six = 2, five = 3 };
+
+/// CTLR4's field for a choice, and the choice a field holds - the two
+/// reserved codes read back as off, which is what they mean.
+constexpr uint16_t usart_ctlr4_check(UsartMarkSpace m) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(m) << 2);
+}
+constexpr UsartMarkSpace usart_mark_space_of(uint16_t ctlr4) {
+    const uint16_t code = static_cast<uint16_t>((ctlr4 & usart_check_sel_mask) >> 2);
+    return code == 2u ? UsartMarkSpace::mark : code == 3u ? UsartMarkSpace::space
+                                                          : UsartMarkSpace::off;
+}
+constexpr uint16_t usart_ctlr1_short_word(UsartShortWord w) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(w) << usart_m_ext_shift);
+}
+constexpr bool usart_mark_space_valid(UsartMarkSpace m) {
+    return m == UsartMarkSpace::off || m == UsartMarkSpace::mark || m == UsartMarkSpace::space;
+}
+constexpr bool usart_short_word_valid(UsartShortWord w) { return static_cast<uint8_t>(w) <= 3u; }
+/// The data bits a short word carries in DATAR: seven, six or five.
+constexpr uint16_t usart_short_word_mask(UsartShortWord w) {
+    return w == UsartShortWord::seven ? 0x7Fu : w == UsartShortWord::six ? 0x3Fu
+                                          : w == UsartShortWord::five ? 0x1Fu : 0xFFu;
+}
+
 /// The divisor this clock and baud ask for: pclk/baud in sixteenths,
 /// rounded to nearest so the error is halved. Below 16 there is no whole
 /// clock period per sixteenth of a bit and the generator has nothing to
@@ -263,27 +336,39 @@ constexpr uint32_t usart_actual_baud(uint32_t pclk, uint32_t brr) {
 constexpr uint32_t usart_min_hz(uint32_t baud) { return baud * 16u; }
 
 /// Which bus an instance answers on, and therefore which gate opens it
-/// and which clock its divisor counts.
+/// and which clock its divisor counts: USART1 alone is PB2's.
 constexpr Bus usart_bus_for(uint8_t n) { return n == 1 ? Bus::pb2 : Bus::pb1; }
 
+/// The gate of an instance (RCC_PB2PCENR bit 14, RCC_PB1PCENR bits 17..20
+/// for USART2..UART5 and 6..8 for UART6..UART8 - 3.4.7, 3.4.8). A bit of a
+/// block this part has not got is a gate to nothing; no verb reaches one.
 constexpr uint32_t usart_gate_for(uint8_t n) {
     return n == 1 ? rcc_pb2_usart1 :
            n == 2 ? rcc_pb1_usart2 :
            n == 3 ? rcc_pb1_usart3 :
-           n == 4 ? rcc_pb1_uart4 : 0;
+           n == 4 ? rcc_pb1_uart4 :
+           n == 5 ? rcc_pb1_uart5 :
+           n == 6 ? rcc_pb1_uart6 :
+           n == 7 ? rcc_pb1_uart7 :
+           n == 8 ? rcc_pb1_uart8 : 0;
 }
 
+/// The instance's vector - on the CH32V303 UART4 and UART5 are entries 68
+/// and 69 and UART6..UART8 87..89 of that class's own tail (device.hpp's
+/// Irq table); a line the part's class has not got is irq_none.
 constexpr Irq usart_irq_for(uint8_t n) {
     return n == 1 ? Irq::usart1 :
            n == 2 ? Irq::usart2 :
-           n == 3 ? Irq::usart3 : Irq::uart4;
+           n == 3 ? Irq::usart3 :
+           n == 4 ? Irq::uart4 :
+           n == 5 ? Irq::uart5 :
+           n == 6 ? Irq::uart6 :
+           n == 7 ? Irq::uart7 : Irq::uart8;
 }
 
 /// The AFIO field an instance's column is selected by.
 constexpr Remap usart_remap_of(uint8_t n) {
-    return n == 1 ? Remap::usart1 :
-           n == 2 ? Remap::usart2 :
-           n == 3 ? Remap::usart3 : Remap::uart4;
+    return afio_usart_remap(n);
 }
 
 /// Whether a column exists for this instance ON THIS PART - the device
@@ -310,23 +395,44 @@ constexpr UsartPads usart_pads_for(uint8_t n, uint8_t code = 0) {
     return UsartPads{p.tx, p.rx};
 }
 
+/// Whether a column puts TX or RX on one of the two pads the debug port
+/// owns from reset (parts/<part>.hpp's debug_swdio_* and debug_swclk_*):
+/// USART3's code 2 (PA13/PA14) and UART8's code 1 (PA14/PA15), where the
+/// device class and the package have those columns. A transport naming one
+/// is refused by init() while the two-wire port is still the probe's.
+constexpr bool usart_column_on_debug_port(uint8_t n, uint8_t code) {
+    const UsartPadSet p = usart_column_for(n, code);
+    const Pad dio{device::debug_swdio_port, device::debug_swdio_pin};
+    const Pad clk{device::debug_swclk_port, device::debug_swclk_pin};
+    return p.tx == dio || p.tx == clk || p.rx == dio || p.rx == clk;
+}
+
 /// The DMA slot each direction of an instance answers on - the controller
 /// and its channel - read out of the one request table
 /// (ch32vx03/dma_engine.hpp): the empty slot where the part has not got the
 /// instance at all. THE CHANNEL IS THE REQUEST here, so these two slots are
-/// what an engine is checked against; on the CH32V303 UART4's are DMA2's.
+/// what an engine is checked against; on the CH32V303 UART4's are DMA2's,
+/// and so are UART5..UART8's (tables 11-3 and 11-4).
 constexpr DmaSlot usart_dma_tx_slot(uint8_t n) {
     return n == 1 ? dma_request_channel(DmaRequest::usart1_tx) :
            n == 2 ? dma_request_channel(DmaRequest::usart2_tx) :
            n == 3 ? dma_request_channel(DmaRequest::usart3_tx) :
-           n == 4 ? dma_request_channel(DmaRequest::uart4_tx) : DmaSlot{};
+           n == 4 ? dma_request_channel(DmaRequest::uart4_tx) :
+           n == 5 ? dma_request_channel(DmaRequest::uart5_tx) :
+           n == 6 ? dma_request_channel(DmaRequest::uart6_tx) :
+           n == 7 ? dma_request_channel(DmaRequest::uart7_tx) :
+           n == 8 ? dma_request_channel(DmaRequest::uart8_tx) : DmaSlot{};
 }
 
 constexpr DmaSlot usart_dma_rx_slot(uint8_t n) {
     return n == 1 ? dma_request_channel(DmaRequest::usart1_rx) :
            n == 2 ? dma_request_channel(DmaRequest::usart2_rx) :
            n == 3 ? dma_request_channel(DmaRequest::usart3_rx) :
-           n == 4 ? dma_request_channel(DmaRequest::uart4_rx) : DmaSlot{};
+           n == 4 ? dma_request_channel(DmaRequest::uart4_rx) :
+           n == 5 ? dma_request_channel(DmaRequest::uart5_rx) :
+           n == 6 ? dma_request_channel(DmaRequest::uart6_rx) :
+           n == 7 ? dma_request_channel(DmaRequest::uart7_rx) :
+           n == 8 ? dma_request_channel(DmaRequest::uart8_rx) : DmaSlot{};
 }
 
 /// The channel numbers of those slots, 0 for none - what a message prints.
@@ -347,11 +453,12 @@ constexpr uint8_t usart_dma_rx_channel(uint8_t n) { return usart_dma_rx_slot(n).
  */
 template <uint8_t n>
 struct Usart {
-    static_assert(n >= 1u && n <= 4u && usart_base_for(n) != 0,
-                  "brio Usart: this driver reaches USART1..3 and UART4 - UART5..8, the "
-                  "CH32V303RC's and VC's, are not among them");
+    static_assert(n >= 1u && n <= 8u && usart_base_for(n) != 0,
+                  "brio Usart: this family addresses USART1..USART3 and UART4..UART8");
     static_assert(device::has_usart(n),
-                  "brio Usart: this part does not offer that instance (parts/<part>.hpp)");
+                  "brio Usart: this part does not offer that instance - UART5..UART8 are the "
+                  "CH32V303RC's and VC's, UART4 the CH32V203C8's, RB's and those two's "
+                  "(parts/<part>.hpp)");
 
     Usart() = delete;
 
@@ -367,8 +474,13 @@ struct Usart {
     /// Whether this instance is a full USART - the synchronous clock,
     /// the smartcard and the flow-control pair - or an asynchronous
     /// receiver alone. A PART fact (the file header): the fourth port is
-    /// a USART4 on the CH32V203C8 and a UART4 on the other class.
+    /// a USART4 on the CH32V203C8 and a UART4 everywhere else, and UART5..8
+    /// are UARTs on every part that has them.
     static constexpr bool is_full = device::usart_full(n);
+
+    /// Whether the DEVICE CLASS has the lot's four features (the file
+    /// header); the verbs below that name one are refused elsewhere.
+    static constexpr bool has_lot_registers = usart_class_has_lot_registers;
 
     static UsartRegs& regs() { return *reinterpret_cast<UsartRegs*>(usart_base_for(n)); }
 
@@ -546,47 +658,46 @@ struct Usart {
     static uint8_t prescaler() { return static_cast<uint8_t>(regs().GPR & usart_psc_mask); }
     static uint8_t guard_time() { return static_cast<uint8_t>((regs().GPR & usart_gt_mask) >> 8); }
 
-    /// The smartcard (18.6), a FULL instance's. Sets the guard time and
-    /// the card-clock prescaler, 1.5 stop bits, CLKEN and SCEN: the
-    /// clock is the CARD'S and belongs to the mode, which is why this
-    /// verb writes it rather than leaving it to a synchronous() the
-    /// chapter's own exclusions would refuse under SCEN. What is not
-    /// written is the CK pad - the caller hands that over
-    /// (usart_column_for(n, code).ck) - and CPOL, CPHA and LBCL, which
-    /// keep whatever a program chose. Refused while LIN, half duplex or
-    /// IrDA is on.
+    /// The smartcard (18.6), a FULL instance's - refused at compile time
+    /// on a UART. Sets the guard time and the card-clock prescaler, 1.5
+    /// stop bits, CLKEN and SCEN: the clock is the CARD'S and belongs to
+    /// the mode, which is why this verb writes it rather than leaving it
+    /// to a synchronous() the chapter's own exclusions would refuse under
+    /// SCEN. What is not written is the CK pad - the caller hands that
+    /// over (usart_column_for(n, code).ck) - and CPOL, CPHA and LBCL,
+    /// which keep whatever a program chose. Refused while LIN, half duplex
+    /// or IrDA is on.
     static bool smartcard(const SmartcardConfig& c) {
-        if constexpr (!is_full) {
-            (void)c;
+        static_assert(is_full, "brio Usart: the smartcard is a full USART's - this instance is "
+                               "a UART, TX and RX alone (18.6; parts/<part>.hpp's usart_full)");
+        if (!smartcard_valid(c)) {
             return false;
-        } else {
-            if (!smartcard_valid(c)) {
-                return false;
-            }
-            if ((regs().CTLR2 & usart_linen) != 0u ||
-                (regs().CTLR3 & (usart_hdsel | usart_iren)) != 0u) {
-                return false;
-            }
-            regs().GPR = static_cast<uint16_t>((static_cast<uint16_t>(c.guard_time) << 8) |
-                                               c.clock_prescaler);
-            regs().CTLR2 = static_cast<uint16_t>((regs().CTLR2 & ~usart_stop_mask) |
-                                                 usart_ctlr2_stop(UartStop::one_and_half) |
-                                                 usart_clken);
-            uint16_t v = static_cast<uint16_t>(regs().CTLR3 & ~usart_nack);
-            if (c.nack) { v |= usart_nack; }
-            v |= usart_scen;
-            regs().CTLR3 = v;
-            return true;
         }
+        if ((regs().CTLR2 & usart_linen) != 0u ||
+            (regs().CTLR3 & (usart_hdsel | usart_iren)) != 0u) {
+            return false;
+        }
+        regs().GPR = static_cast<uint16_t>((static_cast<uint16_t>(c.guard_time) << 8) |
+                                           c.clock_prescaler);
+        regs().CTLR2 = static_cast<uint16_t>((regs().CTLR2 & ~usart_stop_mask) |
+                                             usart_ctlr2_stop(UartStop::one_and_half) |
+                                             usart_clken);
+        uint16_t v = static_cast<uint16_t>(regs().CTLR3 & ~usart_nack);
+        if (c.nack) { v |= usart_nack; }
+        v |= usart_scen;
+        regs().CTLR3 = v;
+        return true;
     }
     /// SCEN and its NACK dropped. The CARD CLOCK IS LEFT RUNNING: CLKEN
     /// is the synchronous half's bit and synchronous_off() is what stops
     /// it, under its own TE/RE rule.
     static void smartcard_off() {
-        if constexpr (is_full) {
-            regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 & ~(usart_scen | usart_nack));
-        }
+        static_assert(is_full, "brio Usart: the smartcard is a full USART's - this instance is "
+                               "a UART, TX and RX alone (18.6)");
+        regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 & ~(usart_scen | usart_nack));
     }
+    /// A question every instance may be asked: false on a UART, which has
+    /// no smartcard to be in.
     static bool smartcard_enabled() {
         if constexpr (!is_full) {
             return false;
@@ -595,48 +706,45 @@ struct Usart {
         }
     }
 
-    /// THE SYNCHRONOUS MODE (18.4), a FULL instance's: the column's CK
-    /// pad carries a clock while the TRANSMITTER shifts and at no other
-    /// time, and the receiver samples on it - this side is the master
-    /// and CK is an output only. Refused while LIN, half duplex, IrDA or
-    /// the smartcard is on, and while the transmitter or the receiver is
-    /// enabled, because CPOL, CPHA and LBCL "need to be set when TE and
-    /// RE are not enabled". The CK pad itself is the caller's to hand to
-    /// the peripheral (usart_column_for(n, code).ck).
+    /// THE SYNCHRONOUS MODE (18.4), a FULL instance's - refused at compile
+    /// time on a UART: the column's CK pad carries a clock while the
+    /// TRANSMITTER shifts and at no other time, and the receiver samples
+    /// on it - this side is the master and CK is an output only. Refused
+    /// while LIN, half duplex, IrDA or the smartcard is on, and while the
+    /// transmitter or the receiver is enabled, because CPOL, CPHA and LBCL
+    /// "need to be set when TE and RE are not enabled". The CK pad itself
+    /// is the caller's to hand to the peripheral (usart_column_for(n,
+    /// code).ck).
     static bool synchronous(const UsartSyncConfig& c) {
-        if constexpr (!is_full) {
-            (void)c;
+        static_assert(is_full, "brio Usart: the synchronous clock is a full USART's - this "
+                               "instance is a UART and has no CK pad (18.4)");
+        if ((regs().CTLR2 & usart_linen) != 0u ||
+            (regs().CTLR3 & (usart_hdsel | usart_iren | usart_scen)) != 0u) {
             return false;
-        } else {
-            if ((regs().CTLR2 & usart_linen) != 0u ||
-                (regs().CTLR3 & (usart_hdsel | usart_iren | usart_scen)) != 0u) {
-                return false;
-            }
-            if ((regs().CTLR1 & (usart_te | usart_re)) != 0u) {
-                return false;
-            }
-            uint16_t v = static_cast<uint16_t>(regs().CTLR2 & ~(usart_cpol | usart_cpha | usart_lbcl));
-            if (c.clock_idle_high) { v |= usart_cpol; }
-            if (c.capture_second_edge) { v |= usart_cpha; }
-            if (c.last_bit_clock) { v |= usart_lbcl; }
-            v |= usart_clken;
-            regs().CTLR2 = v;
-            return true;
         }
+        if ((regs().CTLR1 & (usart_te | usart_re)) != 0u) {
+            return false;
+        }
+        uint16_t v = static_cast<uint16_t>(regs().CTLR2 & ~(usart_cpol | usart_cpha | usart_lbcl));
+        if (c.clock_idle_high) { v |= usart_cpol; }
+        if (c.capture_second_edge) { v |= usart_cpha; }
+        if (c.last_bit_clock) { v |= usart_lbcl; }
+        v |= usart_clken;
+        regs().CTLR2 = v;
+        return true;
     }
     /// CLKEN and its three companions dropped; the same TE/RE rule.
     static bool synchronous_off() {
-        if constexpr (!is_full) {
+        static_assert(is_full, "brio Usart: the synchronous clock is a full USART's - this "
+                               "instance is a UART and has no CK pad (18.4)");
+        if ((regs().CTLR1 & (usart_te | usart_re)) != 0u) {
             return false;
-        } else {
-            if ((regs().CTLR1 & (usart_te | usart_re)) != 0u) {
-                return false;
-            }
-            regs().CTLR2 = static_cast<uint16_t>(regs().CTLR2 &
-                                                 ~(usart_clken | usart_cpol | usart_cpha | usart_lbcl));
-            return true;
         }
+        regs().CTLR2 = static_cast<uint16_t>(regs().CTLR2 &
+                                             ~(usart_clken | usart_cpol | usart_cpha | usart_lbcl));
+        return true;
     }
+    /// False on a UART, which has no clock to run.
     static bool synchronous_enabled() {
         if constexpr (!is_full) {
             return false;
@@ -645,19 +753,15 @@ struct Usart {
         }
     }
 
-    /// The hardware flow-control pair (18.10.6), a FULL instance's: RTS
-    /// driven low while the receiver can take a frame, CTS sampled
-    /// before each frame goes out.
+    /// The hardware flow-control pair (18.10.6), a FULL instance's -
+    /// refused at compile time on a UART: RTS driven low while the
+    /// receiver can take a frame, CTS sampled before each frame goes out.
     static bool flow_control(bool rts, bool cts) {
-        if constexpr (!is_full) {
-            (void)rts;
-            (void)cts;
-            return false;
-        } else {
-            bit(regs().CTLR3, usart_rtse, rts);
-            bit(regs().CTLR3, usart_ctse, cts);
-            return true;
-        }
+        static_assert(is_full, "brio Usart: the flow-control pair is a full USART's - this "
+                               "instance is a UART, TX and RX alone (18.10.6)");
+        bit(regs().CTLR3, usart_rtse, rts);
+        bit(regs().CTLR3, usart_ctse, cts);
+        return true;
     }
     static bool rts_enabled() { return (regs().CTLR3 & usart_rtse) != 0u; }
     static bool cts_enabled() { return (regs().CTLR3 & usart_ctse) != 0u; }
@@ -690,7 +794,12 @@ struct Usart {
     static void idle_interrupt(bool on) { bit(regs().CTLR1, usart_idleie, on); }
     static void parity_interrupt(bool on) { bit(regs().CTLR1, usart_peie, on); }
     static void break_interrupt(bool on) { bit(regs().CTLR2, usart_lbdie, on); }
-    static void cts_interrupt(bool on) { bit(regs().CTLR3, usart_ctsie, on); }
+    /// CTSIE, the flow-control pair's own interrupt - a full USART's.
+    static void cts_interrupt(bool on) {
+        static_assert(is_full, "brio Usart: CTS and its interrupt are a full USART's - this "
+                               "instance is a UART, TX and RX alone (18.10.6)");
+        bit(regs().CTLR3, usart_ctsie, on);
+    }
     /// EIE: FE, ORE and NE raise the vector - under DMAR only (18.10.6).
     static void error_interrupt(bool on) { bit(regs().CTLR3, usart_eie, on); }
 
@@ -740,10 +849,183 @@ struct Usart {
         return brr == 0u ? 0u : pclk / brr;
     }
 
+    // ---- the lot's registers (18.10.1, 18.10.4, 18.10.8) -------------------
+    //
+    // The CH32V30x_D8's, and there only on the lots the notes name (the
+    // file header). Every verb below is refused at compile time on the
+    // CH32V203's two classes; on a CH32V303 it asks the die before it
+    // trusts a bit.
+
+    /**
+     * Does THIS DIE have CTLR4? The answer is the silicon's, kept once
+     * found. Asked with the port DISABLED (UE clear) and quiet, because
+     * the probe writes the address and an absent register can be a MIRROR
+     * of another one of this block: false - nothing written, nothing kept -
+     * while UE is set.
+     *
+     *  1. The word is read first. The real CTLR4 holds nothing outside
+     *     MS_ERRIE and CHECK_SEL (18.10.8), so a word with any other bit
+     *     set is another register's, and the answer is no with no write.
+     *  2. Every other register of the block is read, CTLR4's three bits
+     *     are written INVERTED, and everything is read again: the register
+     *     is there when the three bits came back and nothing else moved,
+     *     and its own word is then put back.
+     *  3. When anything else moved, the address was a mirror: the block is
+     *     put back through its reset line and the program's BRR, CTLR2,
+     *     CTLR3, GPR and CTLR1 are written again - the status flags going
+     *     to their reset values, which on a disabled port is what they
+     *     were. A die whose address holds nothing at all moves nothing and
+     *     keeps nothing, and the answer is no.
+     */
+    static bool ctlr4_present() {
+        static_assert(has_lot_registers,
+                      "brio Usart: CTLR4 is the CH32V30x_D8's register (18.10.8's note) - no "
+                      "CH32V203 has it");
+        if (ctlr4_ != 0u) {
+            return ctlr4_ == 1u;
+        }
+        UsartRegs& r = regs();
+        if ((r.CTLR1 & usart_ue) != 0u) {
+            return false;
+        }
+        const uint16_t word = r.CTLR4;
+        if ((word & static_cast<uint16_t>(~usart_ctlr4_bits)) != 0u) {
+            ctlr4_ = 2;
+            return false;
+        }
+        const uint16_t statr = r.STATR;
+        const uint16_t brr = r.BRR;
+        const uint16_t c1 = r.CTLR1;
+        const uint16_t c2 = r.CTLR2;
+        const uint16_t c3 = r.CTLR3;
+        const uint16_t gpr = r.GPR;
+        const uint16_t probe = static_cast<uint16_t>(word ^ usart_ctlr4_bits);
+        r.CTLR4 = probe;
+        const bool took = (r.CTLR4 & usart_ctlr4_bits) == probe;
+        const bool still = r.STATR == statr && r.BRR == brr && r.CTLR1 == c1 && r.CTLR2 == c2 &&
+                           r.CTLR3 == c3 && r.GPR == gpr;
+        if (took && still) {
+            r.CTLR4 = word;
+            ctlr4_ = 1;
+            return true;
+        }
+        if (!still) {
+            reset();
+            r.BRR = brr;
+            r.CTLR2 = c2;
+            r.CTLR3 = c3;
+            r.GPR = gpr;
+            r.CTLR1 = c1;
+        }
+        ctlr4_ = 2;
+        return false;
+    }
+
+    /// What the probe has said so far: true only where ctlr4_present()
+    /// found the register. A question that writes nothing, for a program
+    /// that wants to know before it asks.
+    static bool ctlr4_known() {
+        static_assert(has_lot_registers,
+                      "brio Usart: CTLR4 is the CH32V30x_D8's register (18.10.8's note)");
+        return ctlr4_ == 1u;
+    }
+
+    /**
+     * CTLR4's CHECK_SEL: the parity bit held at ONE (mark) or at ZERO
+     * (space) instead of computed, or back to the computed one (off). The
+     * FRAME that carries the bit - M and PCE - is configure()'s: a
+     * parity bit has to be there for its level to be held. False, with
+     * nothing written, on a die whose CTLR4 is not there (the probe runs
+     * on the first call, which wants the port disabled) and for a code the
+     * field does not have; true when the field reads back as asked.
+     */
+    static bool mark_space(UsartMarkSpace m) {
+        static_assert(has_lot_registers,
+                      "brio Usart: the MARK and SPACE parity is CTLR4's, the CH32V30x_D8's "
+                      "register (18.10.8's note) - no CH32V203 has it");
+        if (!usart_mark_space_valid(m) || !ctlr4_present()) {
+            return false;
+        }
+        UsartRegs& r = regs();
+        r.CTLR4 = static_cast<uint16_t>((r.CTLR4 & usart_ms_errie) | usart_ctlr4_check(m));
+        return usart_mark_space_of(r.CTLR4) == m;
+    }
+    /// The level the parity bit is held at - `off` on a die the probe has
+    /// not found the register on, whose address is not read at all.
+    static UsartMarkSpace mark_space() {
+        static_assert(has_lot_registers,
+                      "brio Usart: the MARK and SPACE parity is CTLR4's (18.10.8's note)");
+        return ctlr4_known() ? usart_mark_space_of(regs().CTLR4) : UsartMarkSpace::off;
+    }
+    /// MS_ERRIE: a parity bit that did not hold its level raises the
+    /// vector. The same probe and the same read-back as mark_space().
+    static bool mark_space_interrupt(bool on) {
+        static_assert(has_lot_registers,
+                      "brio Usart: MS_ERRIE is CTLR4's, the CH32V30x_D8's register (18.10.8)");
+        if (!ctlr4_present()) {
+            return false;
+        }
+        bit(regs().CTLR4, usart_ms_errie, on);
+        return ((regs().CTLR4 & usart_ms_errie) != 0u) == on;
+    }
+    /// MS_ERR (18.10.1): the received parity bit did not hold the level
+    /// CHECK_SEL asks. Cleared as PE is, by clear_by_read(). Reads zero on
+    /// a die without the lot's registers - it is a bit of a register that
+    /// is there.
+    static bool mark_space_error() {
+        static_assert(has_lot_registers,
+                      "brio Usart: MS_ERR is the CH32V30x_D8's status bit (18.10.1's note)");
+        return (regs().STATR & usart_ms_err) != 0u;
+    }
+    /// RX_BUSY (18.10.1): the receiver is inside a frame. Zero on a die
+    /// without the lot's registers, which no single read can tell from a
+    /// receiver at rest - the question is a frame's, and the reference
+    /// suite asks it while one arrives.
+    static bool receiving() {
+        static_assert(has_lot_registers,
+                      "brio Usart: RX_BUSY is the CH32V30x_D8's status bit (18.10.1's note)");
+        return (regs().STATR & usart_rx_busy) != 0u;
+    }
+
+    /**
+     * CTLR1's M_EXT: a word of seven, six or five data bits, or back to
+     * the word M says (off). A field of a register every die has, so it
+     * is written and read back: false, with the field put back to off,
+     * where the die did not keep it. Refused while the port is enabled -
+     * a frame's shape changes with UE clear, as configure()'s does - and
+     * configure() writes CTLR1 whole, so this comes after it. Whether the
+     * parity bit PCE adds is counted in the short word or beside it the
+     * chapter does not say.
+     */
+    static bool short_word(UsartShortWord w) {
+        static_assert(has_lot_registers,
+                      "brio Usart: M_EXT is the CH32V30x_D8's field (18.10.4's note) - no CH32V203 "
+                      "has five, six or seven-bit words");
+        UsartRegs& r = regs();
+        if (!usart_short_word_valid(w) || (r.CTLR1 & usart_ue) != 0u) {
+            return false;
+        }
+        const uint16_t field = usart_ctlr1_short_word(w);
+        r.CTLR1 = static_cast<uint16_t>((r.CTLR1 & ~usart_m_ext_mask) | field);
+        if ((r.CTLR1 & usart_m_ext_mask) != field) {
+            r.CTLR1 = static_cast<uint16_t>(r.CTLR1 & ~usart_m_ext_mask);
+            return false;
+        }
+        return true;
+    }
+    static UsartShortWord short_word() {
+        static_assert(has_lot_registers,
+                      "brio Usart: M_EXT is the CH32V30x_D8's field (18.10.4's note)");
+        return static_cast<UsartShortWord>((regs().CTLR1 & usart_m_ext_mask) >> usart_m_ext_shift);
+    }
+
 private:
     static void bit(volatile uint16_t& r, uint16_t mask, bool on) {
         r = static_cast<uint16_t>(on ? (r | mask) : (r & ~mask));
     }
+
+    /// What ctlr4_present() found: 0 not asked yet, 1 there, 2 not there.
+    static inline uint8_t ctlr4_ = 0;
 };
 
 // =============================================================================
@@ -751,7 +1033,7 @@ private:
 // =============================================================================
 
 /// The peripheral clock an instance counts its divisor in: USART1 is the
-/// PB2 one and the other three are PB1's, and the two buses do NOT run
+/// PB2 one and every other port is PB1's, and the two buses do NOT run
 /// at the same rate above the cap ch32vx03/clock.hpp states.
 template <uint8_t instance, typename C>
 constexpr uint32_t usart_bus_hz(C clock) {
@@ -808,11 +1090,11 @@ template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size 
           UartFormat format = {}, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine, uint8_t remap = 0, UartOptions opts = {}>
 struct Uart {
-    static_assert(instance >= 1u && instance <= 4u && usart_base_for(instance) != 0,
-                  "brio Uart: this driver reaches USART1..3 and UART4 - UART5..8, the "
-                  "CH32V303RC's and VC's, are not among them");
+    static_assert(instance >= 1u && instance <= 8u && usart_base_for(instance) != 0,
+                  "brio Uart: this family addresses USART1..USART3 and UART4..UART8");
     static_assert(device::has_usart(instance),
-                  "brio Uart: this part does not offer that instance (parts/<part>.hpp)");
+                  "brio Uart: this part does not offer that instance - UART5..UART8 are the "
+                  "CH32V303RC's and VC's (parts/<part>.hpp)");
     static_assert(uart_format_valid(format) && format.bits != UartBits::nine,
                   "brio Uart: the rings carry bytes - seven data bits with a parity bit, or eight, "
                   "with or without one; nine-bit words are the resource's read_word()/write_word()");
@@ -821,10 +1103,10 @@ struct Uart {
                   "10-23 to 10-27 - the device class has it and the package bonds its pads)");
     static_assert(!opts.rts || device::usart_full(instance),
                   "brio Uart: the flow-control pair is a full USART's - the fourth port has it on "
-                  "the CH32V203C8 and not on the other class (18.10.6)");
+                  "the CH32V203C8 alone, and UART5..UART8 nowhere (18.10.6)");
     static_assert(!opts.cts || device::usart_full(instance),
                   "brio Uart: the flow-control pair is a full USART's - the fourth port has it on "
-                  "the CH32V203C8 and not on the other class (18.10.6)");
+                  "the CH32V203C8 alone, and UART5..UART8 nowhere (18.10.6)");
     static_assert(!opts.rts || pad_bonded(usart_column_for(instance, remap).rts),
                   "brio Uart: this package does not bond this column's RTS pad - the signal exists "
                   "and the pin does not (parts/<part>.hpp)");
@@ -841,12 +1123,14 @@ struct Uart {
                       dma_engine_slot<TxEngine>() == usart_dma_tx_slot(instance),
                   "brio Uart: RM 11.2.3 - this instance transmits on its own DMA slot, controller "
                   "AND channel (USART1 on DMA1's 4, USART2 on 7, USART3 on 2; UART4 on DMA1's 1 "
-                  "on the CH32V203 and on DMA2's 5 on the CH32V303)");
+                  "on the CH32V203 and on DMA2's 5 on the CH32V303; UART5..UART8 on DMA2's 4, 6, "
+                  "8 and 10)");
     static_assert(!RxEngine::present ||
                       dma_engine_slot<RxEngine>() == usart_dma_rx_slot(instance),
                   "brio Uart: RM 11.2.3 - this instance receives on its own DMA slot, controller "
                   "AND channel (USART1 on DMA1's 5, USART2 on 6, USART3 on 3; UART4 on DMA1's 8 "
-                  "on the CH32V203 and on DMA2's 3 on the CH32V303)");
+                  "on the CH32V203 and on DMA2's 3 on the CH32V303; UART5..UART8 on DMA2's 2, 7, "
+                  "9 and 11)");
     static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
                   "the two engines of a Uart must not share a DMA channel");
 
@@ -886,6 +1170,15 @@ struct Uart {
         const uint32_t brr = usart_divisor(pclk, baud);
         if (!usart_divisor_valid(brr)) {
             return false;
+        }
+
+        // A column on the debug port's own pads is refused while the
+        // two-wire port is still the probe's (the file header): its pads
+        // configured here would fight the link that put the image there.
+        if constexpr (usart_column_on_debug_port(instance, remap)) {
+            if (Afio::debug_port_enabled()) {
+                return false;
+            }
         }
 
         Resource::bus_clock(true);

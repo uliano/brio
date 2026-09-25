@@ -345,9 +345,12 @@ struct AfioRegs {
 inline AfioRegs* afio() { return reinterpret_cast<AfioRegs*>(pb2_base + 0x0000); }
 
 // ---- USART (RM ch. 18) ----------------------------------------------------
-// Sixteen-bit registers on word-aligned addresses, the F1 shape. The
-// chapter's CTLR4 (MARK and SPACE parity) belongs to the CH32F20x_D8 and
-// the CH32V30x and is not part of this family's register file.
+// Sixteen-bit registers on word-aligned addresses, the F1 shape. CTLR4 at
+// 0x1c - the MARK and SPACE parity - is the CH32V30x_D8's among this
+// stratum's classes, and only on the lots 18.10.8's note names (the
+// penultimate sixth digit of the lot number not zero): the CH32V203 has
+// no such register, and what its address answers on a lot without it is
+// usart.hpp's probe to ask, never this map's to assume.
 struct UsartRegs {
     volatile uint16_t STATR;  uint16_t RESERVED0;   ///< 0x00
     volatile uint16_t DATAR;  uint16_t RESERVED1;   ///< 0x04
@@ -356,6 +359,7 @@ struct UsartRegs {
     volatile uint16_t CTLR2;  uint16_t RESERVED4;   ///< 0x10
     volatile uint16_t CTLR3;  uint16_t RESERVED5;   ///< 0x14
     volatile uint16_t GPR;    uint16_t RESERVED6;   ///< 0x18
+    volatile uint16_t CTLR4;  uint16_t RESERVED7;   ///< 0x1c (the CH32V30x_D8's, a lot's)
 };
 
 /// The instances this family addresses. USART1 is the PB2 one and runs
@@ -388,6 +392,12 @@ inline constexpr uint16_t usart_tc   = 1U << 6;
 inline constexpr uint16_t usart_txe  = 1U << 7;
 inline constexpr uint16_t usart_lbd  = 1U << 8;
 inline constexpr uint16_t usart_cts  = 1U << 9;
+/// RX_BUSY and MS_ERR: the CH32V30x_D8's two status bits, on the lots
+/// 18.10.1's notes name - a receiver in the middle of a frame, and a MARK
+/// or SPACE parity bit that did not hold its level (cleared as PE is, by
+/// the STATR-then-DATAR read).
+inline constexpr uint16_t usart_rx_busy = 1U << 10;
+inline constexpr uint16_t usart_ms_err  = 1U << 11;
 inline constexpr uint16_t usart_statr_rw0 = usart_rxne | usart_tc | usart_lbd | usart_cts;
 
 /// USART_CTLR1 (18.10.4)
@@ -405,6 +415,10 @@ inline constexpr uint16_t usart_pce    = 1U << 10;
 inline constexpr uint16_t usart_wake   = 1U << 11;   ///< 1: address mark wakes, 0: idle line
 inline constexpr uint16_t usart_m      = 1U << 12;   ///< 1: 9-bit word
 inline constexpr uint16_t usart_ue     = 1U << 13;
+/// M_EXT, the CH32V30x_D8's (a lot's): 01 seven data bits, 10 six, 11
+/// five; 00 leaves the word to M.
+inline constexpr uint16_t usart_m_ext_mask  = 0x3U << 14;
+inline constexpr uint16_t usart_m_ext_shift = 14;
 
 /// USART_CTLR2 (18.10.5)
 inline constexpr uint16_t usart_add_mask   = 0xFU << 0;   ///< the mute address, 4 bits
@@ -435,6 +449,16 @@ inline constexpr uint16_t usart_ctsie  = 1U << 10;
 /// time above it.
 inline constexpr uint16_t usart_psc_mask = 0x00FFU;
 inline constexpr uint16_t usart_gt_mask  = 0xFF00U;
+
+/// USART_CTLR4 (18.10.8): the MARK and SPACE parity - CHECK_SEL 0x off,
+/// 10 the parity bit always one, 11 always zero - and MS_ERRIE, the
+/// interrupt of a parity bit that did not hold that level. Bit 0 and
+/// everything above bit 3 are reserved and read zero.
+inline constexpr uint16_t usart_ms_errie      = 1U << 1;
+inline constexpr uint16_t usart_check_sel_mask = 0x3U << 2;
+inline constexpr uint16_t usart_check_mark     = 0x2U << 2;
+inline constexpr uint16_t usart_check_space    = 0x3U << 2;
+inline constexpr uint16_t usart_ctlr4_bits     = usart_ms_errie | usart_check_sel_mask;
 
 // ---- PWR (RM ch. 2) -------------------------------------------------------
 // The power controller, declared here because TWO chapters reach it:

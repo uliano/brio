@@ -84,18 +84,25 @@ upstream gcc, which has no `xw`, is not a drop-in for the toolchain
 file. The hardware prologue (below) is the other saving the compiler
 offers, 8 to 220 bytes an image on top of its nine cycles.
 
-**Interrupt handlers carry ONE attribute, `BRIO_CH32_INTERRUPT`**,
-and which attribute it is belongs to the image: with the project's
-`CH32V00X_HPE` option (ON by default) the crt sets INTSYSCR.HWSTKEN
-and the handlers are declared with WCH's `WCH-Interrupt-fast`, the
-core pushing and popping the caller-saved registers itself; with it
-off, a handler is a plain `[[gnu::interrupt]]` function. One option for
-the whole image, because a fast handler under an HPE that is off
-corrupts the program it interrupted. Interrupt nesting is never turned
-on. What the hardware prologue is worth was measured before it became
-the default - nine cycles on a minimal round trip
-([platform.md](platform.md)); the price is the vendor attribute, which
-WCH's gcc has and an upstream gcc gets from the fast-interrupt patch.
+**Interrupt handlers carry ONE attribute, `BRIO_CH32_INTERRUPT`**, and
+which attribute it is belongs to the image: with the project's
+`CH32V00X_HPE` option (ON by default) the crt sets INTSYSCR.HWSTKEN and
+the handlers are declared with WCH's `WCH-Interrupt-fast`, the core
+pushing and popping the caller-saved registers itself; with it off, a
+handler is a plain `[[gnu::interrupt]]` function. One option for the
+whole image, because a fast handler under an HPE that is off corrupts
+the program it interrupted. Both spellings carry `no_icf`: gcc's
+identical code folding otherwise turns the second of two handlers of one
+body into a handler that CALLS the first, which ends in MRET, so the
+call never returns and the caller's frame stays on the stack - empty
+under the hardware prologue, where the merge was harmless by luck, and
+the caller-saved registers under a plain `interrupt` (measured on the
+CH32V303VCT6, [../ch32vx03/platform.md](../ch32vx03/platform.md)).
+Interrupt nesting is never turned on. What the hardware prologue is
+worth was measured before it became the default - nine cycles on a
+minimal round trip ([platform.md](platform.md)); the price is the vendor
+attribute, which WCH's gcc has and an upstream gcc gets from the
+fast-interrupt patch.
 
 ## Board and build
 
