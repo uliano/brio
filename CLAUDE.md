@@ -365,6 +365,20 @@ gets its home in `docs/design/` when taken.
   and "the element type is the beat" (the DMA engines' rule) is the
   answer the SPI Request does not yet spell; measured on a block of
   16-bit pixels, not imagined.
+- **The display stack.** Decided in design/gfx.md's "The command
+  tier": the DCS vocabulary as one target-free file with a traits type
+  per controller, the link as a concept (a family's SPI request, the
+  8080 bus, the DSI host's packets, I2C), the panel driver as the
+  vocabulary over a traits type over a link and the first inhabitant of
+  `brio/devices/` (the stratum for what sits off the chip), three
+  surface shapes (memory-mapped, direct, tiled - never per-run
+  asynchronous), one oracle verb (the panel's memory read on the link),
+  and a panel simulator with a DCS-transaction core behind a framing
+  adapter per link. Nothing of it is code yet; it is built from the
+  host up, the ILI9481 first because its every fact is measured
+  (experiments/display/README.md), then on the black pill against the
+  glass, then the F469's DSI link and the NT35510 from the stm32f469
+  branch.
 - **The CH32V00x stratum's second part.** `brio/ch32v00x/` and
   `ch32v00x/` are `supported` on the CH32V006K8U6 (README.md's table):
   every chapter of the reference manual has its document and its

@@ -285,6 +285,65 @@ and a panel simulator written from one reading of a command table agree
 on the same mistake, and no host test reaches that. A bench finding
 corrects the simulator, never the other way round.
 
+## The command tier
+
+A panel that holds its own pixels behind a link - a serial interface, a
+parallel bus, a MIPI DSI host - is the write-only or the read-write
+surface above, and every such panel this project meets speaks the same
+command vocabulary, MIPI's DCS (the window, the memory write and read,
+the address mode, the pixel format), over a link of its own. Three
+decisions keep the tier from being written once per panel.
+
+**Two axes, four layers.** The VOCABULARY is one target-free file:
+the DCS commands, the address mode's bits, the pixel format codes, the
+window and pixel packers, the read formats. A CONTROLLER is a traits
+type over it - what the ILI9481 does with a window's walk, a read's
+dummy byte, the BGR bit, its clock limits - and so is every other DCS
+controller; the small OLEDs have a vocabulary of their own on the same
+shape. The LINK is a concept, `DcsLink`: a command with its parameters,
+a write of pixel bytes, a read of a run, each either synchronous or
+answered later - the four-wire serial link over a family's SPI request,
+the 8080 parallel bus where a store is the transfer, the DSI host's
+packets, I2C for the OLEDs. A panel driver is the vocabulary over a
+traits type over a link, and it lives in the devices stratum
+(`brio/devices/`), the stratum for what sits off the chip, of which it
+is the first inhabitant. The MODULE's facts - which way its glass is
+mounted, its colour order, whether it wants the inversion - are a board
+matter, handed to the driver as the pins are.
+
+**Three surface shapes, and which one a program gets.** Memory-mapped:
+the framebuffer in RAM scanned by a controller, the LTDC or the DSI host
+in video mode. DIRECT: the base verbs as synchronous link transactions -
+the natural shape where a store is the transfer, and as polled requests
+over a serial bus the shape of a bring-up, of a suite, and of a program
+that owns its bus alone. TILED: the primitives draw into a rectangle of
+RAM, a strip or a dirty rectangle, at the memory-mapped speed, and a
+display active object streams the tile to the panel as one link
+transaction, the bus asynchronous and the kernel free meanwhile; the
+DSI's adapted command mode is this shape with a tile the size of the
+screen, made by the hardware. What is NOT built is the per-run
+asynchronous surface, where every primitive's run becomes a queued
+request: the primitives produce runs faster than any queue drains, and
+every buffer would be on loan until its reply.
+
+**One oracle verb.** A read of a run on the link - the panel's memory
+read - is how the bench plane judges every command panel: the same test
+over the serial link, over DSI and over the parallel bus, the
+memory-mapped shape comparing its own RAM instead. The rotation map -
+the logical surface over the glass's frame, the walk bits each rotation
+needs - is the driver's, so a read comes back in logical coordinates
+and a test is written once for every orientation.
+
+The panel simulator on the host has the same two axes. A CORE whose
+seam is the DCS transaction - the memory and the walk, written from the
+bench's findings and corrected by them, never the other way round - and
+a FRAMING ADAPTER per link in front of it: bytes with select and D/C
+for the serial link, packets for DSI, stores for the parallel bus. A
+simulated host at the request level drives it, and so can a captured
+trace. The bench suite of a panel and the conformance suite of its
+simulator are one list of cases: the framing ones prove the adapter, the
+memory ones prove the core.
+
 ## What is deliberately absent
 
 - **Transparent text.** Not deferred but absent: a glyph that leaves its
@@ -300,18 +359,15 @@ corrects the simulator, never the other way round.
   and in the memory-mapped shape there is none. The surface is shaped so
   that a decorator can accumulate them later without a primitive
   changing.
-- **The command tier and its panel simulators.** They are built after
-  the memory-mapped shape has taken every geometry past the reference
-  renderer, because the differential oracle needs one side it already
-  trusts.
-- **An asynchronous transfer vocabulary.** Not deferred - not
-  applicable. Writing to a memory-mapped surface is a store, and the
-  panel is scanned by something the program never waits for, so
-  run-to-completion holds by construction and there is nothing to await.
-  A transfer long enough to break a cooperative dispatch is the command
-  tier's problem and arrives with it. What remains here is a budget
-  question rather than a design one: a full-screen fill is a long step,
-  to be measured and divided if a program cannot afford it.
+- **An asynchronous transfer vocabulary in the primitives.** Not
+  deferred - not applicable. Writing to a memory-mapped surface is a
+  store, and the panel is scanned by something the program never waits
+  for, so run-to-completion holds by construction and there is nothing
+  to await. On a command panel the tiled shape of the command tier
+  keeps it that way: the primitives write RAM, the transfer is the
+  display object's. What remains is a budget question rather than a
+  design one: a full-screen fill is a long step, to be measured and
+  divided if a program cannot afford it.
 - **A stroke wider than one pixel.** Not an oversight and not hard to
   compute - it is hard to SPECIFY, which is why it waits. A thin segment
   has one obviously right answer (the nearest pixel at each step); a
