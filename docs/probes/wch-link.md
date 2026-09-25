@@ -55,9 +55,18 @@ attached is untested).
   both times measured), and from then on EVERY later burst arrives that
   many bytes late, its own tail coming out only when more bytes push
   it. A suite flashed and then run can therefore hold its `ALL:` line
-  behind a boot banner nobody read. A reset of the probe over USB
-  (`USBDEVFS_RESET` on its device node) clears the state and drops the
-  held bytes.
+  behind a boot banner nobody read. And CLOSING THE PORT IN THE MIDDLE
+  OF A BURST does worse: from then on the bridge serves every later
+  burst with its bytes SHUFFLED - a 128-byte block's tail standing in
+  for another's, later text appearing a block early - the same way at
+  every attempt (measured: the suite's help text, 1710 bytes, clean
+  after a fresh enumeration, interleaved after one open-write-close of
+  30 ms, and interleaved the same at every read after that). The same
+  reset of the probe over USB (`USBDEVFS_RESET` on its device node)
+  clears both states and drops the held bytes; `brio flash` sends it
+  after every programming, and a tool that closes the port on a timer
+  rather than on the prompt should send it too before the next capture
+  is trusted.
 - **A core in debug mode never sleeps** (QingKe V2 manual 5.1), so
   nothing about the idle path's power is measurable with the probe
   halted on it; and the debugger's `step` does not take pending
