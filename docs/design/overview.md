@@ -104,7 +104,7 @@ hierarchy puts util/ below the kernel's ideas for this reason. Two
 (nearly) complete low-level strata before generalizing is the right
 order; until then, util/ generalizes from one and says so.
 
-## Layering: four strata
+## Layering: the strata
 
 Directories under `brio/`; includes always carry the stratum
 prefix (`#include "avrdx/usart.hpp"`) so an app's portability is
@@ -114,8 +114,10 @@ readable at a glance.
 |---------|-------------|---------|
 | `kernel/` | nothing of brio | pure logic: queues, scheduler, FSM, time events, panic, delivery |
 | `util/` | `kernel/` | pure services: print, stream concepts, line parser, Ring, SerialPort, SpiBus, timestamp |
+| `gfx/` | nothing of brio | drawing: the surface contract, the primitives, fonts and text (design/gfx.md) |
+| `devices/` | `kernel/`, `util/`, `gfx/` | what sits OFF the chip and is reached over a link the chip provides: the DCS vocabulary, a traits type per display controller, the panel drivers over a link concept (design/gfx.md, "The command tier") |
 | `avrdx/` | `kernel/`, `util/` | everything that knows `avr/io.h`: drivers + AvrPlatform |
-| `host/` | `kernel/`, `util/` | the test "target": HostPlatform |
+| `host/` | `kernel/`, `util/`, `gfx/`, `devices/` | the test "target": HostPlatform and the simulated devices |
 
 Two targets never meet in one binary, so another target's stratum
 is a sibling of `avrdx/` and the flat namespace stays collision-free.

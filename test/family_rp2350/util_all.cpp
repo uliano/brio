@@ -49,6 +49,9 @@
 #include "gfx/pen.hpp"
 #include "gfx/text.hpp"
 
+#include "devices/dcs.hpp"
+#include "devices/ili9481.hpp"
+
 using namespace brio;
 using P = Rp2350Platform<>;
 

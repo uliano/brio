@@ -13,9 +13,10 @@ target realizes); one folder per target (`avrdx/`, `samc21/`,
 `rp2350/`, `host/`) holds
 that target's operational page (`README.md`), one document per
 peripheral driver, and its vendor documents; and one folder per
-stratum that sits between `util/` and the targets - the core stratum
-`cortexm/` and the IP strata `pl011/`, `pl022/`, `dw_apb_i2c/` - each
-with a page of its own. Within each, ordered by
+stratum that is not a target - those that sit between `util/` and the
+targets, the core stratum `cortexm/` and the IP strata `pl011/`,
+`pl022/`, `dw_apb_i2c/`, and `devices/` for the parts that sit OFF the
+chip - each with a page of its own. Within each, ordered by
 stability - the kernel's ideas are settled enough to build on, the
 services and drivers are here to stay but will change as targets are
 added, the bench is disposable.
@@ -63,6 +64,7 @@ pages say what is theirs and what a family owes them:
 | the PL011 IP stratum (`brio/pl011/`) | [pl011/README.md](pl011/README.md) - ARM's PrimeCell UART written once for every family that carries it: what is ARM's (the frame, the divisor arithmetic, the registers, the resource and the transport) and what a family owes it (the `Pl011Chip` traits - registers, reset, interrupt line, clock, pads), and the rule that births an IP stratum |
 | the PL022 IP stratum (`brio/pl022/`) | [pl022/README.md](pl022/README.md) - ARM's PrimeCell SSP the same way: the host engine `util/spi_bus.hpp` drives, the client, the framings and the prescaler pair, with the chip's half behind a concept |
 | the DesignWare I2C IP stratum (`brio/dw_apb_i2c/`) | [dw_apb_i2c/README.md](dw_apb_i2c/README.md) - Synopsys's DW_apb_i2c the same way: the command FIFO whose entries carry the bus conditions, the host engine, the client, and what a family states about pads, requests and its reset controller |
+| the off-chip devices (`brio/devices/`) | [devices/README.md](devices/README.md) - the stratum for what sits OFF the chip and is reached over a link the chip provides: the DCS vocabulary every command panel shares, a traits type per controller, and how a driver here is judged twice - against a host simulator and against the bench |
 | host (`brio/host/`) | [host/README.md](host/README.md) - The native test target: HostPlatform, doctest suites, what a simulation is allowed (the whole standard library, heap included), and the simulator's own page - [host/simulator.md](host/simulator.md), the contract between a host program and a viewer watching it: one shared region in each direction, why input is a snapshot and not a socket, and the three rules that keep it portable |
 | the boards | [boards/README.md](boards/README.md) - how a board joins the bench (build by type, the manifest, `bin/brio`), then one page per board brio is tested on |
 | the probes | [probes/README.md](probes/README.md) - the flash mechanisms `bin/brio` knows, then one page per probe |

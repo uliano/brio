@@ -64,6 +64,20 @@ measures an optimized implementation against. From this stratum it
 cannot be linked into a target image even by accident, which is a
 stronger guarantee than remembering not to.
 
+`sim_dcs_panel.hpp` is a COMMAND PANEL made of RAM, in the two layers
+the command tier prescribes ([../design/gfx.md](../design/gfx.md)):
+`SimDcsPanel<Traits>`, the core whose seam is the DCS transaction - the
+frame memory, the window and the walk its address mode selects, the read
+pointer that counts the bytes clocked - and `SimDcsSerial<Core>`, the
+framing adapter that puts the four-wire serial interface in front of it
+at the level of bytes, with the dummy byte and the one-bit-late stream a
+controller's traits ask for. Every rule in it is a bench measurement and
+the ones that are not are marked ASSUMPTION beside the code, because a
+simulator written from a command table agrees with a driver written from
+the same table on the same mistake: what it judges is whether the driver
+does what the part was MEASURED to do, never whether that belief is
+right.
+
 ## The simulator
 
 A host program can put its pixels on a screen and take its input from a

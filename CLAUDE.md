@@ -67,8 +67,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
 - `docs/<target>/` - one folder per target, mirroring
   `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`,
   `ch32v00x/`, `ch32vx03/`, `rp2040/`, `rp2350/`, `host/`), plus one
-  per stratum that sits between `util/` and the targets (`cortexm/`,
-  and the IP strata `pl011/`, `pl022/`, `dw_apb_i2c/`): `README.md` is
+  per stratum that is not a target (`cortexm/`, the IP strata `pl011/`,
+  `pl022/`, `dw_apb_i2c/`, and `devices/`): `README.md` is
   the
   operational page (toolchain, board, probe, debugger and their
   quirks); next to it ONE document per peripheral in the shape
@@ -131,6 +131,11 @@ logic, includes nothing of brio), `util/` (services over the kernel),
 kernel - three kinds of surface told apart by where a pixel's truth
 lives, and a library that draws through the write-only base whatever
 lies beneath, design/gfx.md),
+`devices/` (what sits OFF the chip and is reached over a link the chip
+provides: the DCS vocabulary every command panel shares, a traits type
+per display controller, the panel drivers over a link concept -
+design/gfx.md's "The command tier"; it includes kernel/, util/ and
+gfx/, never a family),
 `cortexm/` (the CORE stratum every Cortex-M family includes after its
 device header - the M0+ families, the M4 one and the Arm half of the
 RP2350's M33 pair, one programmer's model for all of them: NVIC +
@@ -375,11 +380,15 @@ gets its home in `docs/design/` when taken.
   surface shapes (memory-mapped, direct, tiled - never per-run
   asynchronous), one oracle verb (the panel's memory read on the link),
   and a panel simulator with a DCS-transaction core behind a framing
-  adapter per link. Nothing of it is code yet; it is built from the
-  host up, the ILI9481 first because its every fact is measured
-  (experiments/display/README.md), then on the black pill against the
-  glass, then the F469's DSI link and the NT35510 from the stm32f469
-  branch.
+  adapter per link. Built from the host up, the ILI9481 first because
+  its every fact is measured (experiments/display/README.md): the
+  vocabulary, the controller's traits and the simulated panel with
+  their host suites are code (brio/devices/, brio/host/sim_dcs_panel.hpp,
+  test/test_dcs, test/test_ili9481); the link, the driver with its
+  surfaces, the touch and the viewer's mouse are next, then the black
+  pill against the glass, then the F469's DSI link as a DcsLink over
+  stm32f4/dsi.hpp and the NT35510 as a second traits type, its memory
+  read back over that link already measured (docs/stm32f4/dsi.md).
 - **The CH32V00x stratum's second part.** `brio/ch32v00x/` and
   `ch32v00x/` are `supported` on the CH32V006K8U6 (README.md's table):
   every chapter of the reference manual has its document and its
@@ -902,6 +911,11 @@ test/test_pl011/, test/test_pl022/, test/test_dw_apb_i2c/
                          simulated chip (brio/host/sim_pl011.hpp and its two
                          siblings), so the block's own logic is judged off the
                          silicon it was extracted from
+test/test_dcs/, test/test_ili9481/
+                         the devices stratum's host suites: the DCS packers'
+                         round trips, and the simulated ILI9481's conformance
+                         to the bench's numbers - the probe's letters
+                         transcribed, framing and memory cases apart
 test/test_sha256/        util/sha256.hpp against FIPS 180-4's own vectors, at
                          compile time and at run time, plus the tail the
                          hardware accelerators are owed
@@ -986,8 +1000,8 @@ experiments/             one SELF-CONTAINED directory per cross-cutting bench
 docs/                    README (map + rules), design/, one folder per target
                          (avrdx/, samc21/, stm32g0/, stm32f4/, ch32v00x/,
                          ch32vx03/, rp2040/, rp2350/, host/), one per shared
-                         stratum (cortexm/, pl011/, pl022/, dw_apb_i2c/),
-                         boards/, probes/
+                         stratum (cortexm/, pl011/, pl022/, dw_apb_i2c/,
+                         devices/), boards/, probes/
 brio/.clangd             per-stratum clangd routing: the framework default is
                          the host database; a target stratum carries a fragment
                          of its own (brio/<arch>/.clangd, and one in the project
@@ -3133,6 +3147,25 @@ brio/                    the framework, one directory per stratum:
                            stops through that oscillator's own aux mux and
                            leaves clk_ref on one that keeps running. The P1.m
                            states are OFF this ladder - leaving one is a boot
+  devices/               what sits OFF the chip, reached over a link the chip
+                         provides (design/gfx.md, "The command tier")
+    dcs.hpp                the DCS vocabulary every command panel shares: the
+                           command codes, MADCTL's bits and which of them are
+                           the WALK, COLMOD's two fields, the window packer and
+                           its inverse, the three pixel packers (666, 565, 888,
+                           each with a BGR flag, exact on the bits a format
+                           keeps), and DcsReadFraming - how a read's answer
+                           lines up on a link that clocks bytes
+    ili9481.hpp            the ILI9481 as a TRAITS type: 320 x 480 at 18 bits a
+                           pixel, the read framing per command (a dummy CLOCK on
+                           the device code, none on the single-parameter
+                           registers, a dummy BYTE of 0x80 on the memory
+                           reads), the memory's semantics stated once for the
+                           driver and the simulator (the walk bits reorder the
+                           counter INSIDE the window, CASET takes the pages
+                           under B5, BGR on writes alone, the read pointer
+                           counting bytes clocked), the clock ceilings against
+                           the measured rates, the wake times
   gfx/                   drawing, pure and target-independent
     surface.hpp            Coord/Extent/Rect + clip() (16 bits over the WHOLE
                            domain, because the far edge is never formed) +
@@ -3219,6 +3252,18 @@ brio/                    the framework, one directory per stratum:
                            force() the door for injecting bounce and skipped
                            states): the world's side of a contact, whose
                            whole interface is set()
+    sim_dcs_panel.hpp      A COMMAND PANEL MADE OF RAM: SimDcsPanel<Traits>,
+                           the core whose seam is the DCS TRANSACTION (the
+                           frame memory, the window and the walk the address
+                           mode selects, the read pointer that counts the bytes
+                           clocked, the glass view with the module's mirror,
+                           the inversion and B0), every unmeasured rule marked
+                           ASSUMPTION; and SimDcsSerial<Core>, the four-wire
+                           framing adapter at the level of bytes (select, D/C,
+                           a byte in and the MISO byte out), which fetches an
+                           answer as a query and tells the core the true count
+                           at the close. test/test_ili9481 is the bench's own
+                           letters transcribed
     gfx_reference.hpp      THE JUDGE of the drawing primitives: every shape
                            computed from its definition, per pixel, sharing
                            no arithmetic with what it judges; plus the ASCII
