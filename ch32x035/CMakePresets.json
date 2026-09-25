@@ -1,0 +1,95 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "ch32x035r8-release",
+            "displayName": "CH32X035R8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035r8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x035r8"
+            }
+        },
+        {
+            "name": "ch32x035c8-release",
+            "displayName": "CH32X035C8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035c8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x035c8"
+            }
+        },
+        {
+            "name": "ch32x035g8u-release",
+            "displayName": "CH32X035G8U6 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035g8u-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x035g8u"
+            }
+        },
+        {
+            "name": "ch32x035g8r-release",
+            "displayName": "CH32X035G8R6 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035g8r-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x035g8r"
+            }
+        },
+        {
+            "name": "ch32x035f8-release",
+            "displayName": "CH32X035F8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035f8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x035f8"
+            }
+        },
+        {
+            "name": "ch32x035f8-debug",
+            "displayName": "CH32X035F8 (debug, -Og)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035f8-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CH32X035_MCU": "ch32x035f8"
+            }
+        },
+        {
+            "name": "ch32x035f7-release",
+            "displayName": "CH32X035F7 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x035f7-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x035f7"
+            }
+        },
+        {
+            "name": "ch32x033f8-release",
+            "displayName": "CH32X033F8 (release, -Os)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../build-cmake/ch32x033f8-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CH32X035_MCU": "ch32x033f8"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "ch32x035r8-release", "configurePreset": "ch32x035r8-release" },
+        { "name": "ch32x035c8-release", "configurePreset": "ch32x035c8-release" },
+        { "name": "ch32x035g8u-release", "configurePreset": "ch32x035g8u-release" },
+        { "name": "ch32x035g8r-release", "configurePreset": "ch32x035g8r-release" },
+        { "name": "ch32x035f8-release", "configurePreset": "ch32x035f8-release" },
+        { "name": "ch32x035f8-debug", "configurePreset": "ch32x035f8-debug" },
+        { "name": "ch32x035f7-release", "configurePreset": "ch32x035f7-release" },
+        { "name": "ch32x033f8-release", "configurePreset": "ch32x033f8-release" }
+    ]
+}

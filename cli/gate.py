@@ -38,7 +38,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINNED = 1767225600  # 2026-01-01 00:00:00 UTC, any fixed instant will do
 DEFAULT_PRESETS = ("avr128db48-release", "samc21j-release", "stm32g0b1re-release", "ch32v006k8-release",
                    "ch32v003f4-release", "rp2040-release", "stm32f429zi-release",
-                   "ch32v203c8-release", "ch32v303vc-release", "rp2350-arm-release", "rp2350-riscv-release")
+                   "ch32v203c8-release", "ch32v303vc-release", "ch32x035f8-release",
+                   "rp2350-arm-release", "rp2350-riscv-release")
 
 
 def project_of(preset, tree=ROOT):
@@ -51,6 +52,7 @@ def project_of(preset, tree=ROOT):
                              ("stm32g0", ("stm32g0",)),
                              ("stm32f4", ("stm32f4",)),
                              ("ch32v203", ("ch32vx03", "ch32v203")), ("ch32v303", ("ch32vx03", "ch32v203")),
+                             ("ch32x035", ("ch32x035",)),
                              ("ch32v0", ("ch32v00x",)),
                              ("rp2040", ("rp2040",)),
                              ("rp2350", ("rp2350",))):

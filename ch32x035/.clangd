@@ -1,0 +1,12 @@
+# clangd config for the CH32X035 project: it is its OWN CMake project
+# (ch32x035/CMakeLists.txt) with its own compile_commands.json emitted at
+# ../build-cmake/ch32x035f8-release - point clangd straight at it, so an
+# app here parses with the RISC-V compiler's real command line.
+CompileFlags:
+  CompilationDatabase: ../build-cmake/ch32x035f8-release
+  # clangd's clang knows no WCH extension: the database's -march (the
+  # part's full ISA under WCH's gcc, CMakeLists.txt) would make every TU
+  # fail to parse, so the editor sees the standard subset instead. The
+  # compiler still builds with xw; only the parse is narrowed.
+  Remove: [-march=*]
+  Add: [-march=rv32imac]

@@ -16,6 +16,7 @@ the user's own manifest, below.
 | a CH32V006K8U6 module | `v006k8` | [ch32v006k8.md](ch32v006k8.md) |
 | WCH's CH32V003F4P6 evaluation board | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
 | WCH's CH32V303 evaluation board (CH32xx0xV-R0-1v0, a CH32V303VCT6) | `v303vc` | [ch32v303-evt.md](ch32v303-evt.md) |
+| WCH's CH32X035 evaluation board, QFN20 edition (a CH32X035F8U6) | `x035f8` | [ch32x035-evt-f8u6.md](ch32x035-evt-f8u6.md) |
 | Raspberry Pi Pico | `pico` | [pico.md](pico.md) |
 | a WeAct RP2040 board | `weact2040` | [weact-rp2040.md](weact-rp2040.md) |
 | a WeAct RP2350B core board | `weact2350b`, `weact2350b-rv` | [weact-rp2350b.md](weact-rp2350b.md) |
@@ -68,12 +69,14 @@ over SWD; `g0b1re`/`g071rb`/`g031k8` the STM32G0 Nucleos built by
 `v006k8`/`v003f4` the CH32V00x parts built by `ch32v00x/` and written by
 WCH's OpenOCD fork through a WCH-Link; `v203c8`/`v303vc` the CH32V203
 and CH32V303 boards built by `ch32vx03/` and written by WCH's OpenOCD
-fork through a WCH-Link; `pico`/`picow`/`weact2040` the RP2040 boards
-built by `rp2040/` and written by OpenOCD through a CMSIS-DAP probe, the
-Raspberry Pi Debug Probe; `f429zi`/`f446re`/`f411ce`/`f469ni` the
-STM32F4 boards built by `stm32f4/` and written by OpenOCD through an
-ST-LINK (the boards' own, or a standalone V3). The table of types is
-`BOARD_TYPES` in `cli/bench/common.py`.
+fork through a WCH-Link; `x035f8` the CH32X035F8U6 board built by
+`ch32x035/` and written by the same fork through a WCH-LinkE;
+`pico`/`picow`/`weact2040` the RP2040 boards built by `rp2040/` and
+written by OpenOCD through a CMSIS-DAP probe, the Raspberry Pi Debug
+Probe; `f429zi`/`f446re`/`f411ce`/`f469ni` the STM32F4 boards built by
+`stm32f4/` and written by OpenOCD through an ST-LINK (the boards' own,
+or a standalone V3). The table of types is `BOARD_TYPES` in
+`cli/bench/common.py`.
 
 **And on one chip the type carries the ARCHITECTURE too.** The RP2350
 runs a pair of Cortex-M33 or a pair of Hazard3 RISC-V cores over one

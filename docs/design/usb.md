@@ -105,9 +105,11 @@ not obeyed: a virtual port has no baud rate.
 | stm32f4 | `UsbOtg<core>` (`stm32f4/usb.hpp`), the Synopsys DWC2 core through push and pop registers - `UsbFs`, and `UsbHs` through its own full-speed PHY | no buffer to address: one shared receive FIFO for every OUT endpoint with a status entry per packet, and a slice of RAM per IN endpoint the program maps by hand; the address written BEFORE the status stage of SET_ADDRESS, which is what RM0383 22.17.5 and not chapter 9 asks; an OUT transfer of several packets in place of a double buffer, `out_slots` deep; the 48 MHz taken from the main PLL's Q output and asserted at compile time |
 | host | `SimUsb` (`host/sim_usb.hpp`) | the scripted controller the stack's tests play the host against: one packet per endpoint and direction, NAKs and stalls counted, a controller that refuses to configure |
 
-Every other family with a controller (STM32 G0B1 and G4) is a
-chapter of its own; the ones without
-(AVR DA/DB, SAM C21, CH32V006) keep their console on a probe's bridge.
+Every other family with a controller (STM32 G0B1 and G4, and the
+CH32X035 - whose full-speed controller is the CH32V303's host/device
+block, so `Usbfs` becomes an IP stratum at its second family, beside a
+USB PD controller) is a chapter of its own; the ones without (AVR DA/DB,
+SAM C21, CH32V006) keep their console on a probe's bridge.
 
 ## Not covered yet
 

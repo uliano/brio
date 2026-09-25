@@ -38,6 +38,9 @@
 #      v203c8 v303vc    CH32V203C8 / CH32V303VC, written by WCH's OpenOCD
 #                       fork through a WCH-Link over this family's two-wire
 #                       debug port
+#      x035f8           CH32X035F8U6 on WCH's evaluation board, written by
+#                       the same OpenOCD fork through a WCH-LinkE over the
+#                       series' two-wire debug port (PC18/PC19)
 #      weact2350b weact2350b-rv   ONE RP2350 board under TWO TYPES, because
 #                       on this chip the ARCHITECTURE is a build axis: the
 #                       same silicon runs a Cortex-M33 pair or a Hazard3
@@ -170,6 +173,17 @@ BOARDS = {
         "device_uid": None,
         "console": "/dev/serial/by-id/usb-wch.cn_WCH-Link_333333333333-if01",
         "programmer": {"type": "wch_link", "serial": "333333333333"},
+    },
+    "T": {
+        # WCH's CH32X035 evaluation board, QFN20 edition (a CH32X035F8U6),
+        # on a WCH-LinkE: PC18 = SWDIO and PC19 = SWCLK, the probe's
+        # serial pins wired to the board's "Serial port 2" (USART2, PA2 TX
+        # and PA3 RX), so one cable carries the debug port and the console.
+        "board": "x035f8",
+        "id": None,
+        "device_uid": None,
+        "console": "/dev/serial/by-id/usb-wch.cn_WCH-Link_444444444444-if01",
+        "programmer": {"type": "wch_link", "serial": "444444444444"},
     },
 }
 

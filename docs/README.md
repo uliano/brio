@@ -7,19 +7,18 @@ rationale and the contracts between layers, as they are today.
 ## Map
 
 The directory mirrors the strata of `brio/`: `design/` is the
-target-independent framework (kernel, services, the models every
-target realizes); one folder per target (`avrdx/`, `samc21/`,
-`stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `rp2040/`,
-`rp2350/`, `host/`) holds
-that target's operational page (`README.md`), one document per
-peripheral driver, and its vendor documents; and one folder per
-stratum that is not a target - those that sit between `util/` and the
-targets, the core stratum `cortexm/` and the IP strata `pl011/`,
+target-independent framework (kernel, services, the models every target
+realizes); one folder per target (`avrdx/`, `samc21/`, `stm32g0/`,
+`stm32f4/`, `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/`,
+`host/`) holds that target's operational page (`README.md`), one
+document per peripheral driver, and its vendor documents; and one folder
+per stratum that is not a target - those that sit between `util/` and
+the targets, the core stratum `cortexm/` and the IP strata `pl011/`,
 `pl022/`, `dw_apb_i2c/`, and `devices/` for the parts that sit OFF the
-chip - each with a page of its own. Within each, ordered by
-stability - the kernel's ideas are settled enough to build on, the
-services and drivers are here to stay but will change as targets are
-added, the bench is disposable.
+chip - each with a page of its own. Within each, ordered by stability -
+the kernel's ideas are settled enough to build on, the services and
+drivers are here to stay but will change as targets are added, the bench
+is disposable.
 
 Target-independent design:
 
@@ -57,6 +56,7 @@ pages say what is theirs and what a family owes them:
 | STM32G0 (`brio/stm32g0/`) | [stm32g0/README.md](stm32g0/README.md) - Toolchain, the three Nucleo boards, ST-LINK upload and debug, the SWD-under-WFI caveat, and FAMILY COVERAGE: both the x1 line and the x0 value line, the stratum compiling on all twelve headers of the pack with every vector derived from peripheral presence; then its documents |
 | CH32V00x (`brio/ch32v00x/`) | [ch32v00x/README.md](ch32v00x/README.md) - Toolchain (WCH's gcc 15 with its xw extension, each part's full ISA), the two boards and the part table the build states, the WCH-Link and WCH's OpenOCD fork, the console on the probe's own serial, and what the QingKe V2 core taught the stratum (a WFI that wakes only for an interrupt it can take, the MIE not cleared on entry); then its documents - one per chapter of the reference manual, each with what the CH32V006K8 measured with no wire and what waits for a jumper or a peer |
 | CH32V203 / CH32V303 (`brio/ch32vx03/`) | [ch32vx03/README.md](ch32vx03/README.md) - Toolchain (WCH's gcc 15 again, the full register file, the ilp32 ABI on the V4B parts and ilp32f on the V4F ones), the WeAct core board and WCH's CH32V303 evaluation board, the thirteen parts of the two series in one table the build states under three device classes, the two-wire debug port of this family and the reset verb that does NOT start the program, the console on the probe's own serial and on the chip's own USB, and what the silicon taught the stratum - the clock task parking on the HSI, the PLL divider that lives in another block, the USB pads that are still GPIO pads, the bus matrix that serves the core alone in a sleep of any depth, the CH32V303 with no USB device controller of its own - its console on the host/device block - and a floating-point unit an interrupt pays for, the lot-keyed registers the bench's CH32V303 has not got; then its documents - one per chapter of the reference manual, each with what the CH32V203C8 and the CH32V303VC measured on their boards and what waits for a wire, a peer board, another part or another lot - and what the reference manual's V2.5 changes, beside the silicon |
+| CH32X035 (`brio/ch32x035/`) | [ch32x035/README.md](ch32x035/README.md) - Toolchain (WCH's gcc 15 with its xw extension, the CH32V203's ISA and ABI on the QingKe V4C), WCH's evaluation board in its QFN20 edition, the seven parts of the series - one die in seven packages - in one part table the build states, the two-wire debug port on PC18/PC19 through a WCH-LinkE and WCH's OpenOCD fork, the console on the probe's own serial through USART2, and what the documents say that shapes the stratum (one root and no bus prescaler, 24-pin ports over three configuration registers with no speed and no open drain, the pads a package shorts together, the vendor library's RAM copy of CFGHR); then its documents - the platform, the clock, the pins and the USARTs, each implemented with every fact a measurement the bench owes |
 | RP2040 (`brio/rp2040/`) | [rp2040/README.md](rp2040/README.md) - Toolchain (the pico-sdk's CMSIS header and register definitions vendored, no SDK runtime, the boot stage checked in as bytes), the WeAct board, the Debug Probe and which OpenOCD the flash chip demands, and the two cores with a kernel on each; then its documents |
 | RP2350 (`brio/rp2350/`) | [rp2350/README.md](rp2350/README.md) - TWO PROCESSOR ARCHITECTURES OVER ONE SET OF PERIPHERALS and what that costs a build: the two toolchains (arm-none-eabi for the Cortex-M33 pair, an upstream riscv32-unknown-elf for the Hazard3 one), the four presets, the IMAGE_DEF block in the image as the only thing that decides which pair runs, the WeAct core board, the Debug Probe and the third OpenOCD - Raspberry Pi's fork, the only build that examines all four cores - the state-independent flash verb built on the rescue reset, and the four facts of this silicon that shape every chapter (a processor reset that leaves the clock tree standing, pads that come up isolated, bit maps that are not the RP2040's, erratum RP2350-E9); then its documents |
 | STM32F4 (`brio/stm32f4/`) | [stm32f4/README.md](stm32f4/README.md) - Toolchain (the hard-float ABI, the FPU enabled by the crt), the four boards (an STM32F429I-DISC1, a Nucleo-F446RE, an STM32F411CE black pill on a standalone STLINK-V3, a 32F469IDISCOVERY), ST-LINK upload, the HLA caveat, and FAMILY COVERAGE: twenty-three headers, the frequency ladders keyed on the part class and refused where no manual was read; then its documents |

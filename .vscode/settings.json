@@ -36,6 +36,9 @@
         "${workspaceFolder}/samc21",
         "${workspaceFolder}/stm32g0",
         "${workspaceFolder}/ch32v00x",
+        "${workspaceFolder}/ch32x035",
+        "${workspaceFolder}/rp2350",
+        "${workspaceFolder}/ch32vx03",
         "${workspaceFolder}/rp2040",
         "${workspaceFolder}/stm32f4"
     ],

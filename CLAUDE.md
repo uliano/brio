@@ -66,7 +66,7 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   gfx.md's reason).
 - `docs/<target>/` - one folder per target, mirroring
   `brio/<target>/` (`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`,
-  `ch32v00x/`, `ch32vx03/`, `rp2040/`, `rp2350/`, `host/`), plus one
+  `ch32v00x/`, `ch32vx03/`, `ch32x035/`, `rp2040/`, `rp2350/`, `host/`), plus one
   per stratum that is not a target (`cortexm/`, the IP strata `pl011/`,
   `pl022/`, `dw_apb_i2c/`, and `devices/`): `README.md` is
   the
@@ -122,111 +122,112 @@ This file has no decision log any more: the former log was migrated to
 ## The project in one paragraph
 
 `brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
-bare-metal MCUs built around a cooperative active-object kernel,
-written clean-room after Samek's book (never the QP source). One flat
-namespace `brio`; the strata under `brio/`, one directory each, are
-`kernel/` (pure
-logic, includes nothing of brio), `util/` (services over the kernel),
-`gfx/` (drawing: pure, target-independent, and needing nothing of the
-kernel - three kinds of surface told apart by where a pixel's truth
-lives, and a library that draws through the write-only base whatever
-lies beneath, design/gfx.md),
-`devices/` (what sits OFF the chip and is reached over a link the chip
-provides: the DCS vocabulary every command panel shares, a traits type
-per display controller, the panel drivers over a link concept -
-design/gfx.md's "The command tier"; it includes kernel/, util/ and
-gfx/, never a family),
-`cortexm/` (the CORE stratum every Cortex-M family includes after its
-device header - the M0+ families, the M4 one and the Arm half of the
-RP2350's M33 pair, one programmer's model for all of them: NVIC +
-PRIMASK guard, the SysTick ticker, the microsecond busy-wait on
-SysTick's counter - and the nvic/ticker guards accept the M33 core
-header where the delay one, which the RP2350 does not use, does not),
-`pl011/`, `pl022/` and `dw_apb_i2c/` (the IP STRATA: ARM's PrimeCell
-UART and SSP and Synopsys's DesignWare I2C, each a peripheral DESIGN
-written once, knowing no chip and including nothing of a family - what
-a family owes one is a TRAITS type satisfying the concept the IP file
-states, `Pl011Chip` and its two siblings: register block, reset,
-interrupt line and controller, guard, pin legality, clock, DMA
-requests - while the family's own header keeps the PUBLIC NAMES the
-apps write. Born under the core stratum's rule, at the SECOND family
-that carries the block, gated by the images; what earns one is that
-the register description is not similar between the chips but
-IDENTICAL),
-`avrdx/` (everything that knows `avr/io.h`: AVR DA/DB, bench chip
-AVR128DB48), `samc21/` (everything that knows `sam.h`: SAM C21,
-Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything that
-knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
+bare-metal MCUs built around a cooperative active-object kernel, written
+clean-room after Samek's book (never the QP source). One flat namespace
+`brio`; the strata under `brio/`, one directory each, are `kernel/`
+(pure logic, includes nothing of brio), `util/` (services over the
+kernel), `gfx/` (drawing: pure, target-independent, and needing nothing
+of the kernel - three kinds of surface told apart by where a pixel's
+truth lives, and a library that draws through the write-only base
+whatever lies beneath, design/gfx.md), `devices/` (what sits OFF the
+chip and is reached over a link the chip provides: the DCS vocabulary
+every command panel shares, a traits type per display controller, the
+panel drivers over a link concept - design/gfx.md's "The command tier";
+it includes kernel/, util/ and gfx/, never a family), `cortexm/` (the
+CORE stratum every Cortex-M family includes after its device header -
+the M0+ families, the M4 one and the Arm half of the RP2350's M33 pair,
+one programmer's model for all of them: NVIC + PRIMASK guard, the
+SysTick ticker, the microsecond busy-wait on SysTick's counter - and the
+nvic/ticker guards accept the M33 core header where the delay one, which
+the RP2350 does not use, does not), `pl011/`, `pl022/` and `dw_apb_i2c/`
+(the IP STRATA: ARM's PrimeCell UART and SSP and Synopsys's DesignWare
+I2C, each a peripheral DESIGN written once, knowing no chip and
+including nothing of a family - what a family owes one is a TRAITS type
+satisfying the concept the IP file states, `Pl011Chip` and its two
+siblings: register block, reset, interrupt line and controller, guard,
+pin legality, clock, DMA requests - while the family's own header keeps
+the PUBLIC NAMES the apps write. Born under the core stratum's rule, at
+the SECOND family that carries the block, gated by the images; what
+earns one is that the register description is not similar between the
+chips but IDENTICAL), `avrdx/` (everything that knows `avr/io.h`: AVR
+DA/DB, bench chip AVR128DB48), `samc21/` (everything that knows `sam.h`:
+SAM C21, Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything
+that knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
 a Nucleo-64), `ch32v00x/` (everything that knows the CH32V00x: WCH's
 QingKe V2C, RV32EC, bench chip CH32V006K8U6 - NO vendor header, the
 register map is the stratum's own device.hpp), `ch32vx03/` (everything
 that knows the CH32V203 and the CH32V303: WCH's QingKe V4B and V4F,
 RV32IMAC and RV32IMAFC with the full register file, bench chips
 CH32V203C8T6 on a WeAct core board and CH32V303VCT6 on WCH's own
-evaluation board - no vendor header either, and the STM32F1's
-peripheral generation under WCH's names, which is what separates it
-from the CH32V00x; ONE stratum for the two series because one
-reference manual covers both and keys its differences by DEVICE CLASS,
-which the stratum's part reserve states),
-`rp2040/` (everything
-that knows the RP2040: Raspberry Pi's dual Cortex-M0+, bench chip an
-RP2040 B2 on a Raspberry Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
+evaluation board - no vendor header either, and the STM32F1's peripheral
+generation under WCH's names, which is what separates it from the
+CH32V00x; ONE stratum for the two series because one reference manual
+covers both and keys its differences by DEVICE CLASS, which the
+stratum's part reserve states), `ch32x035/` (everything that knows the
+CH32X035 and the CH32X033: WCH's QingKe V4C, RV32IMAC with the
+CH32V203's ISA and ABI, bench chip CH32X035F8U6 on WCH's evaluation
+board in its QFN20 edition - no vendor header, the register map the
+stratum's own; seven parts of ONE die in seven packages, so the part
+table states what a package bonds and which pads it SHORTS together; one
+clock root, the 48 MHz internal RC, and no bus prescaler; a peripheral
+generation of WCH's own - 24-pin ports over three configuration
+registers, a USB PD controller, the PIOC - beside the CH32V303's USB
+host/device block), `rp2040/` (everything that knows the RP2040:
+Raspberry Pi's dual Cortex-M0+, bench chip an RP2040 B2 on a Raspberry
+Pi Pico and on a WeAct board, the pico-sdk's CMSIS header and register
 definitions vendored, a kernel per core), `rp2350/` (everything that
 knows the RP2350: Raspberry Pi's silicon with TWO PROCESSOR
 ARCHITECTURES over one set of peripherals - a Cortex-M33 pair and a
-Hazard3 RISC-V pair, of which exactly one runs, chosen by the
-IMAGE_DEF block in the image the bootrom finds and by nothing else, so
-the architecture is an axis of the build and every suite is written
-once and run twice; bench chip an RP2350 in the QFN-80 package,
-stepping A2, on a WeAct RP2350B core board; `core.hpp` is THE ONE FILE
-of the stratum that asks `__riscv`, and both halves export the same
-names; the pico-sdk's rp2350 device description vendored in an include
-root of its own, with a stub for the core header the RISC-V build must
-not take; no second-stage bootloader - the bootrom sets the XIP
-interface up itself), `stm32f4/` (everything that
-knows `stm32f4xx.h`: STM32F4, Cortex-M4F - brio's first ARMv7-M family,
-built with the hard-float ABI, the FPU enabled by the crt; bench chips
-STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a Nucleo-64,
-STM32F411CE on a WeAct black pill, STM32F469NI on a 32F469IDISCOVERY),
-`host/` (the native test
-target). Includes carry the stratum prefix
-(`#include "avrdx/usart.hpp"`). The builds are sibling CMake
-projects, PEERS - the repo root is not a CMake project: the CROSS ones
-`avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`, `ch32vx03/`,
-`rp2040/` and `rp2350/` (each with its own toolchain file
-and presets, Ninja, emitting into the shared `build-cmake/`)
-auto-discover one `main()` per `src/apps/<app>.cpp` at configure time
-from its own `// build:` header comment; host tests in `test/` are a
-project of their own (host g++, no cross toolchain), run via `ctest`,
-and `host/` another - the host's own apps, which RUN rather than run
-and exit, and which ctest never sees. The `rp2350/` project is the
-only one with a second axis besides the chip: the ARCHITECTURE, two
-toolchain files and two presets per build type. ONE NAME PER ARCHITECTURE,
-the same key on three axes: `brio/<arch>/` (stratum),
-`docs/<arch>/` (docs), `<arch>/` (build project); chip precision
-lives in preset names, per-chip ld/svd files and the `*_MCU` cache
-variables. Names are claims: a stratum is named for exactly the family
-it has been proven on, and a name widens only when a real chip proves
-it shares the stratum. So `samc21` is final (the C21 is the only SAM
-this stratum has known; a D21 would not share GCLK/PM/SYSCTRL and would
-earn its own stratum); the one landing name still pending is avrdx ->
-avrxt (Microchip's sigla for the modern-AVR core) when an EA/mega0 part
-proves it shares the stratum; and stm32g0 SHARES its name with the G0x0
-value line, decided on the headers (every x0 header is a strict subset
-of its x1 twin: the same IP under the same register names) - the
-stratum compiles on all twelve G0 headers of the pack with the reserve
-deriving every vector from PERIPHERAL PRESENCE and no device name
-spelled anywhere, the bench proof on x0 silicon pending a board. The
-`cortexm/` core stratum (nvic, ticker, delay) is what the Cortex-M
-families share whatever the vendor and whatever the profile - the same
-programmer's model for
-SysTick, the NVIC's enables and PRIMASK - factored with the first two in
-hand and every image byte-identical before and after, renamed from its
-architecture to its core family when the M4 joined, under the same
-gate; a RISC-V core stratum would be
-factored the same way, at its second family, never earlier - and
-Hazard3 is not a QingKe, so `rp2350/core_hazard3.hpp` stays this
-stratum's own until a second RISC-V family of that shape earns one.
+Hazard3 RISC-V pair, of which exactly one runs, chosen by the IMAGE_DEF
+block in the image the bootrom finds and by nothing else, so the
+architecture is an axis of the build and every suite is written once and
+run twice; bench chip an RP2350 in the QFN-80 package, stepping A2, on a
+WeAct RP2350B core board; `core.hpp` is THE ONE FILE of the stratum that
+asks `__riscv`, and both halves export the same names; the pico-sdk's
+rp2350 device description vendored in an include root of its own, with a
+stub for the core header the RISC-V build must not take; no second-stage
+bootloader - the bootrom sets the XIP interface up itself), `stm32f4/`
+(everything that knows `stm32f4xx.h`: STM32F4, Cortex-M4F - brio's first
+ARMv7-M family, built with the hard-float ABI, the FPU enabled by the
+crt; bench chips STM32F429ZI on an STM32F429I-DISC1, STM32F446RE on a
+Nucleo-64, STM32F411CE on a WeAct black pill, STM32F469NI on a
+32F469IDISCOVERY), `host/` (the native test target). Includes carry the
+stratum prefix (`#include "avrdx/usart.hpp"`). The builds are sibling
+CMake projects, PEERS - the repo root is not a CMake project: the CROSS
+ones `avrdx/`, `samc21/`, `stm32g0/`, `stm32f4/`, `ch32v00x/`,
+`ch32vx03/`, `ch32x035/`, `rp2040/` and `rp2350/` (each with its own
+toolchain file and presets, Ninja, emitting into the shared
+`build-cmake/`) auto-discover one `main()` per `src/apps/<app>.cpp` at
+configure time from its own `// build:` header comment; host tests in
+`test/` are a project of their own (host g++, no cross toolchain), run
+via `ctest`, and `host/` another - the host's own apps, which RUN rather
+than run and exit, and which ctest never sees. The `rp2350/` project is
+the only one with a second axis besides the chip: the ARCHITECTURE, two
+toolchain files and two presets per build type. ONE NAME PER
+ARCHITECTURE, the same key on three axes: `brio/<arch>/` (stratum),
+`docs/<arch>/` (docs), `<arch>/` (build project); chip precision lives
+in preset names, per-chip ld/svd files and the `*_MCU` cache variables.
+Names are claims: a stratum is named for exactly the family it has been
+proven on, and a name widens only when a real chip proves it shares the
+stratum. So `samc21` is final (the C21 is the only SAM this stratum has
+known; a D21 would not share GCLK/PM/SYSCTRL and would earn its own
+stratum); the one landing name still pending is avrdx -> avrxt
+(Microchip's sigla for the modern-AVR core) when an EA/mega0 part proves
+it shares the stratum; and stm32g0 SHARES its name with the G0x0 value
+line, decided on the headers (every x0 header is a strict subset of its
+x1 twin: the same IP under the same register names) - the stratum
+compiles on all twelve G0 headers of the pack with the reserve deriving
+every vector from PERIPHERAL PRESENCE and no device name spelled
+anywhere, the bench proof on x0 silicon pending a board. The `cortexm/`
+core stratum (nvic, ticker, delay) is what the Cortex-M families share
+whatever the vendor and whatever the profile - the same programmer's
+model for SysTick, the NVIC's enables and PRIMASK - factored with the
+first two in hand and every image byte-identical before and after,
+renamed from its architecture to its core family when the M4 joined,
+under the same gate; a RISC-V core stratum would be factored the same
+way, at its second family, never earlier - and Hazard3 is not a QingKe,
+so `rp2350/core_hazard3.hpp` stays this stratum's own until a second
+RISC-V family of that shape earns one.
 
 ## Governing rule and stability hierarchy
 
@@ -394,25 +395,25 @@ gets its home in `docs/design/` when taken.
   read back over that link already measured (docs/stm32f4/dsi.md).
 - **The CH32V00x stratum's second part.** `brio/ch32v00x/` and
   `ch32v00x/` are `supported` on the CH32V006K8U6 (README.md's table):
-  every chapter of the reference manual has its document and its
-  suite green on the module, the bus chapters on the wire (I2C against
-  a peer board, SPI and the USART on the module's own jumpers), on
-  WCH's gcc 15.2 and WCH's OpenOCD fork through a WCH-Link. What
-  remains: the CH32V003F4P6 as the SECOND AND LAST part of the family
-  (these two parts and no more, by decision) - its tier is OPEN: the
-  part table, the two-part check matrix, the presets, the console and
-  the platform suite are on the board, and six chapters (ADC, OPA,
-  sleep, the timers, SPI, I2C) are closed on it by name until written
-  against its own register description (docs/ch32v00x/README.md's gap
-  list; its reference manual is not on the desk). It is the most
-  extreme point brio can touch - 16 KB of flash and 2 KB of RAM, the
-  QingKe V2A with no multiplier. For its sake, this family is built
-  by WCH's gcc with the `xw` extension
-  and the hardware prologue (both measured: one to two per cent and
-  8..220 bytes an image), so no upstream gcc is sought for it; and
-  its suites are shaped by the smallest-chip rule (design/overview.md,
-  "A suite's image fits the family's smallest chip"). A `qingke/` core
-  stratum only at a second QingKe family.
+  every chapter of the reference manual has its document and its suite
+  green on the module, the bus chapters on the wire (I2C against a peer
+  board, SPI and the USART on the module's own jumpers), on WCH's gcc
+  15.2 and WCH's OpenOCD fork through a WCH-Link. What remains: the
+  CH32V003F4P6 as the SECOND AND LAST part of the family (these two
+  parts and no more, by decision) - its tier is OPEN: the part table,
+  the two-part check matrix, the presets, the console and the platform
+  suite are on the board, and six chapters (ADC, OPA, sleep, the timers,
+  SPI, I2C) are closed on it by name until written against its own
+  register description (docs/ch32v00x/README.md's gap list; its
+  reference manual is not on the desk). It is the most extreme point
+  brio can touch - 16 KB of flash and 2 KB of RAM, the QingKe V2A with
+  no multiplier. For its sake, this family is built by WCH's gcc with
+  the `xw` extension and the hardware prologue (both measured: one to
+  two per cent and 8..220 bytes an image), so no upstream gcc is sought
+  for it; and its suites are shaped by the smallest-chip rule
+  (design/overview.md, "A suite's image fits the family's smallest
+  chip"). A `qingke/` core stratum is due: the CH32X035 makes three
+  QingKe families (its bullet below).
 - **The STM32F4 stratum.** `brio/stm32f4/` and `stm32f4/` are
   `supported` on the STM32F429ZI, the STM32F446RE, the STM32F411CE and
   the STM32F469NI (README.md's table) on four boards (STM32F429I-DISC1,
@@ -581,6 +582,31 @@ gets its home in `docs/design/` when taken.
   back); and the reference manual's V2.5, its changes listed against the
   silicon in docs/ch32vx03/vendor/README.md, for promotion with the
   datasheet's V3.9 and the QingKe manual's V1.5.
+- **The CH32X035 stratum.** `brio/ch32x035/` and `ch32x035/` are `in
+  bring-up` on the CH32X035F8U6 (README.md's table), WCH's evaluation
+  board in its QFN20 edition on a WCH-LinkE, and NOTHING OF IT HAS RUN
+  ON THE SILICON: the register map, the seven parts of the series in one
+  part table (each package's bonding and the pads it shorts together,
+  the USARTs each offers), the platform, the one-root clock, the pins
+  with AFIO's remaps and the four USARTs are written from the reference
+  manual V1.8 and cross-checked against the EVT's header (the
+  disagreements in docs/ch32x035/vendor/README.md), the family check
+  green on all seven parts both HPE ways, the console and four suites
+  (`test_x035_platform`, `test_x035_clock`, `test_x035_pin`,
+  `test_x035_usart`) built and never flashed. First on the bench:
+  whether WCH's OpenOCD fork programs the part at all, then the four
+  suites' `z` - the CFGHR copy against the register, a divided HCLK
+  under the prefetch note that has no bit, the WFE idle and the hardware
+  prologue on the V4C, the manual's two reset values of RCC_RSTSCKR.
+  Then, by the user's pick, one chapter new to brio: the USB PD
+  controller as a sink, or the USB host/device controller as the console
+  - the CH32V303's block, so `usbfs.hpp` factored into an IP stratum at
+  its second family. The PIOC is out (its own assembler); DMA, EXTI, the
+  watchdogs with the failing half of the platform, the power chapter
+  (the AWU is the only wake: no RTC), ADC/TKEY, the timers, I2C, SPI and
+  OPA/CMP are born with their first user. And the `qingke/` core stratum
+  is due: pfic/ticker/platform/delay exist three times, the X035's kept
+  a diff of facts from the CH32V203's.
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
@@ -638,6 +664,9 @@ brio check ch32vx03 [name]      # same for the ch32vx03 stratum (the thirteen pa
                                 # series under TWO ISAs - the V4B's and the V4F's -, both
                                 # HPE ways; util_all.cpp = the whole of kernel/ and util/ over
                                 # both ABIs, ilp32 and ilp32f)
+brio check ch32x035 [name]      # same for the ch32x035 stratum (the seven parts of the series - one die,
+                                # seven packages - both HPE ways; util_all.cpp = the whole of kernel/
+                                # and util/ over the platform)
 brio check rp2040 [name]        # same for the rp2040 stratum (one chip: every header's verbs, util_all.cpp)
 brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE F4 headers; the ladder
                                 # refused by name where no manual was read)
@@ -668,6 +697,8 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 (cd ch32vx03 && cmake --build --preset ch32v203c8-release --target <app>)          # CH32V203 release build (WCH gcc 15, ilp32)
 (cd ch32vx03 && cmake --build --preset ch32v203c8-release --target <app>-upload)   # flash it: `reset run` does NOT start the program here, `reset halt` + `resume` does
 (cd ch32vx03 && cmake --build --preset ch32v303vc-release --target <app>)          # CH32V303 release build (the V4F: rv32imafc_xw, ilp32f)
+(cd ch32x035 && cmake --build --preset ch32x035f8-release --target <app>)          # CH32X035 release build (WCH gcc 15, rv32imac_xw/ilp32)
+(cd ch32x035 && cmake --build --preset ch32x035f8-release --target <app>-upload)   # flash via WCH's OpenOCD fork (a WCH-LinkE on PC18/PC19), `reset halt` + `resume`
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>)              # RP2040 release build
 (cd rp2040 && cmake --build --preset rp2040-release --target <app>-upload)       # flash via OpenOCD (the Debug Probe, CMSIS-DAP)
 (cd stm32f4 && cmake --build --preset stm32f429zi-release --target <app>)        # STM32F4 release build (hard-float)
@@ -837,6 +868,23 @@ ch32vx03/                the CH32V203 and CH32V303 build project, the seventh
                          never listed twice) build a suite with a
                          "// build: groups" line as one image per group,
                          <app>-<n>, and every other part builds it whole
+ch32x035/                the CH32X035 build project, the shape of the two sibling
+                         WCH projects: cmake/toolchain-riscv.cmake on /sw/wch-riscv
+                         with the CH32V203's ISA and ABI (rv32imac_xw/ilp32), a
+                         PART TABLE (cmake/ch32x035-parts.cmake: the seven parts
+                         of the series - six CH32X035 and the CH32X033F8P6, one die
+                         with 62 KB and 20 KB in seven packages - each with its
+                         part definition, memories, board type, ISA and ABI; the
+                         two 28-pin parts keyed by the package's letter),
+                         ld/<part>.ld giving the image the whole 62 KB at the
+                         alias 0x0000 0000, src/glue/startup_ch32x035.S - the
+                         55-word table whose first word is an INSTRUCTION, the
+                         hardware stack on and nesting never, corecfgr 0x1F, the
+                         free RAM painted, the fault and breakpoint entries weak
+                         spins of their own - a release preset per part and the
+                         F8's debug one, the upload target on WCH's OpenOCD fork;
+                         no group axis (every part has the same memories) and no
+                         svd/ (the EVT ships none)
 stm32f4/                 the STM32F4 build project, the sixth of the shape: a
                          PART TABLE (cmake/stm32f4-parts.cmake: the part number
                          -> ST's irregular device define, the crt stem, the
@@ -903,6 +951,10 @@ test/family_stm32f4/     stm32f4 family smoke TUs + neg/, brio check stm32f4 (AL
 test/family_ch32vx03/    ch32vx03 family smoke TUs + neg/, brio check ch32vx03
                          (the thirteen parts of the two series under two ISAs,
                          both HPE ways; util_all.cpp over both ABIs)
+test/family_ch32x035/    ch32x035 family smoke TUs + neg/, brio check ch32x035 (the
+                         seven parts, both HPE ways; util_all.cpp over the
+                         platform; a negative built for the parts its refusal is
+                         about)
 test/family_rp2350/      rp2350 family smoke TUs + neg/, brio check rp2350 - the
                          one fixture that crosses TWO COMPILERS: every TU built
                          four times (Cortex-M33 and Hazard3 x the two packages),
@@ -959,16 +1011,18 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
                          v006k8/v003f4 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
                          v203c8/v303vc -> ch32vx03/the same fork/a WCH-Link on
-                         two wires, pico/picow/weact2040 -> rp2040/OpenOCD/the Debug
-                         Probe, f429zi/f446re/f411ce/f469ni -> stm32f4/OpenOCD/
-                         an ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
+                         two wires, x035f8 -> ch32x035/the same fork/a WCH-LinkE
+                         on PC18/PC19, pico/picow/weact2040 ->
+                         rp2040/OpenOCD/the Debug Probe,
+                         f429zi/f446re/f411ce/f469ni -> stm32f4/OpenOCD/ an
+                         ST-LINK, and weact2350b + weact2350b-rv -> rp2350/
                          Raspberry Pi's OpenOCD fork/the Debug Probe: ONE BOARD
                          UNDER TWO TYPES, because the type carries the preset
                          and on this chip the preset carries the ARCHITECTURE),
                          the per-project app rosters build-cmake/apps_<project>
-                         .json (each project writes its own at
-                         every configure - separate files because app NAMES
-                         COLLIDE across the trees), the console paths
+                         .json (each project writes its own at every configure -
+                         separate files because app NAMES COLLIDE across the
+                         trees), the console paths
     manifest.py          loads the bench MANIFEST from private/bench_boards.py
                          if it exists, else cli/bench/bench_boards.py: the
                          physical boards on the desk (type, console by-path,
@@ -2247,6 +2301,55 @@ brio/                    the framework, one directory per stratum:
                            late and a resync short, the four-act ISR) - both
                            REFUSING every rung but none while a bus master
                            other than the core is working
+  ch32x035/              everything that knows the CH32X035 and the CH32X033 (WCH
+                         QingKe V4C, RV32IMAC, ilp32) - and NO vendor header: the
+                         map is the stratum's own
+    device.hpp             the register map read off the reference manual (RCC,
+                           GPIO with its THIRD configuration register and BSXR,
+                           AFIO, the USART, the core's STK and PFIC; the EXTI and
+                           PWR for the reader; the flash's option bytes and the
+                           electronic signature decoded read-only), the interrupt
+                           numbers = the 55-word table's indices; asks the build's
+                           part definition ONCE and includes parts/<part>.hpp -
+                           THE RESERVE: memories, the package, the pads each port
+                           bonds and the pads a package SHORTS together (the
+                           datasheet's notes 4 to 7, refused as outputs), the
+                           USARTs a part offers beside the model table's count,
+                           what else it carries
+    pfic.hpp / ticker.hpp / platform.hpp / delay.hpp  the CH32V203's four files on
+                           the V4C, kept as close to them as the silicon allows -
+                           the csrrci guard, BRIO_CH32_INTERRUPT with no_icf, the
+                           64-bit STK Ticker, Ch32x035Platform<TB> with the
+                           WFE-shaped idle and the stack ledger (no bus-master
+                           count: no driver here starts one), delay_us refused at a
+                           tick - the third copy a qingke/ core stratum would fold
+    clock.hpp              Rcc + Mco + Clock<internal, hz> + DynamicClock<Boot,
+                           Users...>: ONE root (the 48 MHz HSI, /6 out of reset) and
+                           ONE divider, no PLL, no crystal oscillator and no bus
+                           prescaler, the flash's wait states around every change,
+                           the gates and the reset flags; RM 3.4.2's prefetch note
+                           has no bit to act on
+    pin.hpp                Pin<'A',5> / Port<'A'> / Pad / PinRef: the F1's nibble
+                           with NO speed and NO open drain over three registers (24
+                           pins a port), CFGHR written whole from a RAM copy as
+                           WCH's library does, BSHR/BSXR for the two halves, the
+                           pull in OUTDR with the pull-down on PA0..PA15, PC16, PC17
+                           alone, the bonding and the shorted pads refused at
+                           compile time, the one-way lock
+    afio.hpp               the ten remap fields of AFIO_PCFR1 with the USARTs'
+                           columns as data, SW_CFG read and written only by
+                           disable_debug_port_until_reset(), the EXTI port
+                           multiplexer (00 A, 10 B, 11 C)
+    dma_engine.hpp         NoDmaEngine and the channel each USART direction
+                           requests on (RM 9.2.3)
+    usart.hpp              Usart<1..4>, every instance a full USART counting its
+                           divisor in HCLK, which instances a part offers read off
+                           its pins, the chapter's modes as verbs with their
+                           exclusions refused + Uart<n, P, rx, tx, format,
+                           TxEngine, RxEngine, remap, opts> with the CH32V203's
+                           surface, the engine slots taking NoDmaEngine alone, a
+                           column on the debug pads refused while the probe owns
+                           them
   stm32f4/               everything that knows stm32f4xx.h (STM32F4, Cortex-M4F):
                          brio's first ARMv7-M family on the cortexm/ core files
     device_tables.hpp      THE RESERVE: GPIO ports A..K, the serial instances
