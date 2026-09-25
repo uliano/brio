@@ -18,10 +18,12 @@
  * all of its arguments, so a program that wants none of this pays for
  * none of it, and the two surfaces of the library never disagree.
  *
- * A WIDTH belongs here too, the day a stroke wider than one pixel earns
- * its specification (docs/design/gfx.md says what that costs). It would
- * be a fourth member and a set of overloads, not a change to anything
- * that exists.
+ * A WIDTH belongs here too, the day an oblique stroke wider than one
+ * pixel earns its specification (docs/design/gfx.md says what that
+ * costs). It would be a fourth member and a set of overloads, not a
+ * change to anything that exists. The axis-aligned thick forms take
+ * their thickness as an argument of the shape (gfx/draw.hpp), because it
+ * is a property of one rectangle and not of a stroke.
  */
 
 #pragma once

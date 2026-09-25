@@ -1,11 +1,14 @@
 // build: the front panel of a bench power supply, on the host.
 //
-// Two setpoints - volts and amps - each in a rounded frame, one of them
-// selected. A button moves between them; the encoder's push walks the
-// selected digit along, and turning it changes the value by that digit's
-// weight. What it is for is to put the four pieces together for the
-// first time: the drawing library, the framebuffer published to a
-// viewer, the panel a viewer writes back, and the quadrature decoder.
+// Two setpoints - volts and amps - each in a frame, one of them live. A
+// button moves between them; the encoder's push walks the live digit
+// along, and turning it changes the value by that digit's weight. What
+// it is for is to put the pieces together: the drawing library, the
+// framebuffer published to a viewer, the panel a viewer writes back, and
+// the quadrature decoder - and, on a glass of 256 by 128, two sizes of
+// ONE font: the readout four times the table's height and the captions
+// twice, scaled from the same five-by-seven glyphs with no data of their
+// own.
 //
 // A VALUE IS A NUMBER AND NOT A ROW OF DIGITS. Turning the tens digit
 // adds ten, so 09.999 becomes 10.000 the way an instrument does; editing
@@ -15,11 +18,12 @@
 // AND IT REDRAWS ONLY WHAT CHANGED, which is the whole economy of a
 // write-only surface: a cell is rewritten opaque, so nothing needs
 // erasing first and nothing needs reading back. Changing a digit touches
-// ONE cell - or as many as a carry moved. Moving the selection touches
-// two: the one that loses the highlight and the one that gains it. Only
-// changing which setpoint is selected redraws a whole frame, because its
-// colour changed. The Counting surface reports what each cost, so the
-// economy is measured rather than claimed.
+// ONE cell - or as many as a carry moved. Moving the digit touches two:
+// the one that loses the highlight and the one that gains it. WHICH
+// SETPOINT IS LIVE IS SAID BY ITS FRAME'S THICKNESS, and a thick outline
+// is four rectangles, so moving the selection costs two rings and two
+// cells and never a whole field. The Counting surface reports what each
+// cost, so the economy is measured rather than claimed.
 //
 //   ./supply_panel            run it, and watch with: brio view supply
 //   ./supply_panel --dump     draw one known state, print it, exit
@@ -34,6 +38,7 @@
 
 #include "gfx/counting.hpp"
 #include "gfx/draw.hpp"
+#include "gfx/font.hpp"
 #include "gfx/font_5x7.hpp"
 #include "gfx/surface.hpp"
 #include "gfx/text.hpp"
@@ -54,16 +59,20 @@ namespace {
 // The board file's half: what this panel IS.
 // ---------------------------------------------------------------------
 
-constexpr Extent screen_w = 160;
-constexpr Extent screen_h = 72;
+constexpr Extent screen_w = 256;
+constexpr Extent screen_h = 128;
 using Screen = SimDisplay<Indexed8, screen_w, screen_h>;
 
-// Four colours, named by role and not by shade - the shades are in the
+// Three colours, named by role and not by shade - the shades are in the
 // palette the viewer reads.
 constexpr uint8_t col_bg = 0;
 constexpr uint8_t col_frame = 1;
 constexpr uint8_t col_ink = 2;
-constexpr uint8_t col_live = 3;
+
+// One font, two sizes: the captions twice the table's height, the
+// readout four times. Neither costs a byte beyond the one table.
+using Caption = Scaled<Font5x7, 2>;
+using Readout = Scaled<Font5x7, 4>;
 
 // The controls, in the order the panel's snapshot carries them.
 using SelectKey = SimButton<0>; ///< moves between the two setpoints
@@ -137,16 +146,19 @@ struct Field {
 };
 
 Field fields[2] = {
-    {2, 2, 156, 32, "V", 12000, 30000, 6, volt_digits, 5, 0, {0}},
-    {2, 38, 156, 32, "A", 1500, 5000, 5, amp_digits, 4, 0, {0}},
+    {4, 4, 248, 56, "V", 12000, 30000, 6, volt_digits, 5, 0, {0}},
+    {4, 68, 248, 56, "A", 1500, 5000, 5, amp_digits, 4, 0, {0}},
 };
 uint8_t live = 0; ///< which setpoint the controls act on
 
-constexpr Coord value_x = 44;
-constexpr Coord label_x = 14;
+constexpr Coord value_x = 40;
+constexpr Coord label_x = 16;
+constexpr Extent frame_ring = 2; ///< inside the outline: the mark of the live one
 
+/// Where a line of font F sits to be centred in the field's height.
+template <Font F>
 Coord text_y(const Field& f) {
-    return static_cast<Coord>(f.y + (f.h - Font5x7::cell_h) / 2);
+    return static_cast<Coord>(f.y + (f.h - F::cell_h) / 2);
 }
 
 /// The value as the characters that show it. Pure formatting: the model
@@ -176,28 +188,40 @@ bool highlighted(const Field& f, uint8_t c, bool is_live) {
 template <Surface S>
 void draw_cell(S& s, Field& f, uint8_t c, bool is_live) {
     const char ch[2] = {f.shown[c], '\0'};
-    const Coord x = static_cast<Coord>(value_x + c * Font5x7::cell_w);
+    const Coord x = static_cast<Coord>(value_x + c * Readout::cell_w);
     const bool hi = highlighted(f, c, is_live);
     // Reverse video needs no compositing and no reading back: a glyph is
     // drawn foreground AND background, so swapping the two is the whole
     // of it.
-    text<Font5x7>(s, x, text_y(f), std::string_view(ch, 1),
+    text<Readout>(s, x, text_y<Readout>(f), std::string_view(ch, 1),
                   hi ? col_bg : col_ink, hi ? col_ink : col_bg);
 }
 
-/// The whole setpoint: its frame, its unit and every cell. Drawn when
-/// the frame's colour changed, and once at the start.
+/// The frame: the outline is always there, and the ring inside it is
+/// the mark of the live setpoint - erased by being overwritten in the
+/// background colour, as everything on a write-only surface is. Eight
+/// rectangles either way.
+template <Surface S>
+void draw_frame(S& s, const Field& f, bool is_live) {
+    rect(s, f.x, f.y, f.w, f.h, 1, col_frame);
+    rect(s, static_cast<Coord>(f.x + 1), static_cast<Coord>(f.y + 1),
+         static_cast<Extent>(f.w - 2), static_cast<Extent>(f.h - 2), frame_ring,
+         is_live ? col_frame : col_bg);
+}
+
+/// The whole setpoint: its frame, its unit and every cell. Drawn once at
+/// the start, and whole never again.
 template <Surface S>
 void draw_field(S& s, Field& f, bool is_live) {
     fill_rect(s, f.x, f.y, f.w, f.h, col_bg);
-    round_rect(s, f.x, f.y, f.w, f.h, 8, is_live ? col_live : col_frame);
-    text<Font5x7>(s, label_x, text_y(f), f.unit, col_ink, col_bg);
+    draw_frame(s, f, is_live);
+    text<Caption>(s, label_x, text_y<Caption>(f), f.unit, col_ink, col_bg);
     format(f, f.shown);
     for (uint8_t c = 0; c < f.cells; ++c) {
         draw_cell(s, f, c, is_live);
     }
-    text<Font5x7>(s, static_cast<Coord>(value_x + f.cells * Font5x7::cell_w),
-                  text_y(f), f.unit, col_ink, col_bg);
+    text<Caption>(s, static_cast<Coord>(value_x + f.cells * Readout::cell_w + 8),
+                  text_y<Caption>(f), f.unit, col_ink, col_bg);
 }
 
 /// After the value moved: rewrite ONLY the cells whose character is not
@@ -251,11 +275,17 @@ struct Ui : Fsm<Ui, InputEdge, Turned> {
                     return handled(); // act on the press, not the release
                 }
                 if (k.index == 0) {
-                    // The frame's colour changes on both, so both are
-                    // redrawn whole - the one case that costs a field.
+                    // Two rings and two cells: each frame's ring changes,
+                    // the digit highlighted in the field losing the
+                    // selection goes plain, and the one in the field
+                    // gaining it lights up. Never a whole field.
+                    Field& was = fields[live];
                     live = static_cast<uint8_t>(1 - live);
-                    draw_field(*glass, fields[0], live == 0);
-                    draw_field(*glass, fields[1], live == 1);
+                    Field& now = fields[live];
+                    draw_frame(*glass, was, false);
+                    draw_cell(*glass, was, was.digits[was.sel].cell, false);
+                    draw_frame(*glass, now, true);
+                    draw_cell(*glass, now, now.digits[now.sel].cell, true);
                     report("select the other");
                 } else {
                     // Two cells: the one losing the highlight and the
@@ -311,7 +341,6 @@ int main(int argc, char** argv) {
     display.set_palette(col_bg, 0x10, 0x14, 0x1C);
     display.set_palette(col_frame, 0x50, 0x58, 0x60);
     display.set_palette(col_ink, 0xE8, 0xF0, 0xF8);
-    display.set_palette(col_live, 0xFF, 0xB0, 0x30);
 
     Screen::Surface surface = display.surface();
     Canvas counted(surface);

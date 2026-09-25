@@ -30,6 +30,7 @@
 namespace brio {
 
 struct Font5x7 {
+    using Row = uint8_t;                ///< a byte holds the six-wide cell
     static constexpr Extent cell_w = 6; ///< 5 drawn + 1 of advance
     static constexpr Extent cell_h = 8; ///< 7 drawn + 1 of line gap
     static constexpr Extent glyph_w = 5;

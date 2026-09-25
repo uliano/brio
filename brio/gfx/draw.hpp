@@ -12,6 +12,16 @@
  * shape a panel does in a single window, and line() routes the
  * axis-aligned cases into it rather than stepping them.
  *
+ * A THICK STROKE IS A FILLED RECTANGLE, and only where the shape is
+ * axis-aligned. An outline `t` pixels thick grows INWARD from the
+ * boundary the thin outline sits on, and a thick horizontal or vertical
+ * line grows DOWN or RIGHT from the row or column a thin one occupies -
+ * so the thin form is exactly the case t = 1, and an outline never grows
+ * the shape. Four windows behind a bus, where an arc of the same
+ * thickness would be a hundred, which is why nothing oblique and nothing
+ * round is thick here (the design page says what that would cost to
+ * specify).
+ *
  * NOTHING HERE READS. Not one primitive takes a ReadableSurface, which
  * is what makes them all correct on a write-only panel; erasing is
  * drawing again in the background colour, and shapes do not overlap
@@ -83,6 +93,20 @@ void vline(S& s, Coord x, Coord y, Extent len, typename S::Color c) {
     s.fill_rect(x, y, 1, len, c);
 }
 
+/// `len` pixels rightwards from (x, y), `t` rows deep: the thick line
+/// grows DOWN from the row a thin one occupies, so t = 1 is hline().
+template <Surface S>
+void hline(S& s, Coord x, Coord y, Extent len, Extent t, typename S::Color c) {
+    s.fill_rect(x, y, len, t, c);
+}
+
+/// `len` pixels downwards from (x, y), `t` columns wide: the thick line
+/// grows RIGHT from the column a thin one occupies, so t = 1 is vline().
+template <Surface S>
+void vline(S& s, Coord x, Coord y, Extent len, Extent t, typename S::Color c) {
+    s.fill_rect(x, y, t, len, c);
+}
+
 /// The OUTLINE of a rectangle, one pixel thick, drawn inside the given
 /// rectangle (an outline never grows the shape). Four fills; the two
 /// horizontals already cover a rectangle two pixels tall or less, so the
@@ -108,6 +132,36 @@ void rect(S& s, Coord x, Coord y, Extent w, Extent h, typename S::Color c) {
                 static_cast<Coord>(static_cast<int32_t>(y) + 1), 1, mid, c);
         }
     }
+}
+
+/// The outline `t` pixels thick, grown INWARD from the boundary the thin
+/// outline sits on - so t = 1 is rect() pixel for pixel, and an outline
+/// never grows the shape. Four fills that do not overlap: the two
+/// horizontals full width, the verticals between them. When twice the
+/// thickness reaches a side there is no inside left, and the outline is
+/// the filled rectangle in one fill.
+template <Surface S>
+void rect(S& s, Coord x, Coord y, Extent w, Extent h, Extent t,
+          typename S::Color c) {
+    if (w == 0 || h == 0 || t == 0) {
+        return;
+    }
+    const uint32_t twice = static_cast<uint32_t>(t) * 2UL;
+    if (twice >= w || twice >= h) {
+        s.fill_rect(x, y, w, h, c);
+        return;
+    }
+    const Extent mid = static_cast<Extent>(h - t - t);
+    const Coord inner_y = static_cast<Coord>(static_cast<int32_t>(y) + static_cast<int32_t>(t));
+    s.fill_rect(x, y, w, t, c);
+    s.fill_rect(x,
+                static_cast<Coord>(static_cast<int32_t>(y) + static_cast<int32_t>(h) -
+                                   static_cast<int32_t>(t)),
+                w, t, c);
+    s.fill_rect(x, inner_y, t, mid, c);
+    s.fill_rect(static_cast<Coord>(static_cast<int32_t>(x) + static_cast<int32_t>(w) -
+                                   static_cast<int32_t>(t)),
+                inner_y, t, mid, c);
 }
 
 /**
