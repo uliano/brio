@@ -171,7 +171,7 @@ using RxEngine = DmaRxEngine<2, 0, 3>;
 using DmaHost = SpiHost<1, spi_pins, TxEngine, RxEngine>;
 bool dma_host_live = false;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 32> bench;
 
 // ---- printing helpers -----------------------------------------------------------
 void hex2(uint8_t b) {
@@ -1866,6 +1866,581 @@ void ti_invert() {
     print(serial, "  inversion ", ili::inverted ? "ON" : "OFF", crlf);
 }
 
+// ---- the simulator's assumptions, measured ----------------------------------------
+/// The host's simulated panel (brio/host/sim_dcs_panel.hpp) states six
+/// rules the bench had not measured, each marked ASSUMPTION there.
+/// Letters w, z and s measure them in MEMORY coordinates under MADCTL
+/// 0x00, with pixels that carry their own index - byte 0 = (i + 1) << 2,
+/// byte 1 = 0x40, byte 2 = (63 - i) << 2 - so a read-back says WHICH
+/// pixel landed WHERE. A verdict passes when the outcome is one the
+/// letter can name; the finding is the text beside it.
+namespace assume {
+
+constexpr uint8_t bg[3] = {0xFC, 0x00, 0xFC};
+constexpr uint16_t region_w = 16;
+constexpr uint16_t region_h = 16;
+uint8_t region_buf[region_w * region_h * 3u];
+uint8_t px_buf[64 * 3];
+
+void tag(uint8_t* p, uint8_t i) {
+    p[0] = static_cast<uint8_t>((i + 1u) << 2);
+    p[1] = 0x40;
+    p[2] = static_cast<uint8_t>((63u - i) << 2);
+}
+
+/// The index a pixel carries, when it is one of ours.
+std::optional<uint8_t> tag_of(const uint8_t* p) {
+    if ((p[1] & 0xFCu) != 0x40u || (p[0] & 0xFCu) == 0u) {
+        return std::nullopt;
+    }
+    const uint8_t i = static_cast<uint8_t>((p[0] >> 2) - 1u);
+    if ((p[2] & 0xFCu) != static_cast<uint8_t>((63u - i) << 2)) {
+        return std::nullopt;
+    }
+    return i;
+}
+
+bool is_bg(const uint8_t* p) {
+    return (p[0] & 0xFCu) == 0xFCu && (p[1] & 0xFCu) == 0x00u && (p[2] & 0xFCu) == 0xFCu;
+}
+
+bool same_px(const uint8_t* a, const uint8_t* b) {
+    return (a[0] & 0xFCu) == (b[0] & 0xFCu) && (a[1] & 0xFCu) == (b[1] & 0xFCu) && (a[2] & 0xFCu) == (b[2] & 0xFCu);
+}
+
+void fill_bg(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+    ili::window(x, y, static_cast<uint16_t>(x + w - 1u), static_cast<uint16_t>(y + h - 1u));
+    for (uint16_t c = 0; c < w; ++c) {
+        ili::row_buf[c * 3u] = bg[0];
+        ili::row_buf[c * 3u + 1u] = bg[1];
+        ili::row_buf[c * 3u + 2u] = bg[2];
+    }
+    for (uint16_t r = 0; r < h; ++r) {
+        (void)ili::transfer(r == 0u ? ili::ramwr : ili::ramwr_continue, ili::row_buf, nullptr,
+                            static_cast<uint16_t>(w * 3u), ili::write_rate);
+    }
+}
+
+bool read_region(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+    return ili::read_block(x, y, w, h, region_buf, ili::read_rate);
+}
+
+struct Where {
+    uint16_t x;
+    uint16_t y;
+};
+
+/// Where tag `i` sits in the region last read (absolute coordinates).
+std::optional<Where> find_in_region(uint16_t x0, uint16_t y0, uint16_t w, uint16_t h, uint8_t i) {
+    for (uint16_t r = 0; r < h; ++r) {
+        for (uint16_t c = 0; c < w; ++c) {
+            const uint8_t* p = region_buf + (static_cast<uint32_t>(r) * w + c) * 3u;
+            const std::optional<uint8_t> t = tag_of(p);
+            if (t && *t == i) {
+                return Where{static_cast<uint16_t>(x0 + c), static_cast<uint16_t>(y0 + r)};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+/// The whole frame scanned for tag `i`, a row at a time - the fallback
+/// when a region has not got it. About two seconds at 3 MHz.
+std::optional<Where> find_in_frame(uint8_t i) {
+    for (uint16_t y = 0; y < ili::height; ++y) {
+        if (!ili::read_block(0, y, ili::width, 1, ili::scratch, ili::read_rate)) {
+            return std::nullopt;
+        }
+        for (uint16_t x = 0; x < ili::width; ++x) {
+            const std::optional<uint8_t> t = tag_of(ili::scratch + x * 3u);
+            if (t && *t == i) {
+                return Where{x, y};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+void print_where(const std::optional<Where>& w) {
+    if (w) {
+        print(serial, "(", w->x, ",", w->y, ")");
+    } else {
+        print(serial, "nowhere");
+    }
+}
+
+void print_px(const uint8_t* p) {
+    hex2(p[0]);
+    print(serial, " ");
+    hex2(p[1]);
+    print(serial, " ");
+    hex2(p[2]);
+}
+
+void describe(const uint8_t* p) {
+    const std::optional<uint8_t> t = tag_of(p);
+    if (t) {
+        print(serial, "tag ", *t);
+    } else if (is_bg(p)) {
+        print(serial, "background");
+    } else {
+        print(serial, "bytes ");
+        print_px(p);
+    }
+}
+
+/// `n` pixels read with `cmd`, exactly clocked, into px_buf.
+void read_pixels(uint8_t cmd, uint16_t n) {
+    const uint16_t bytes = static_cast<uint16_t>(n * 3u);
+    const uint16_t exact = static_cast<uint16_t>(ili::read_format.offset + bytes + (ili::read_format.shift != 0u ? 1u : 0u));
+    ili::read_raw(cmd, ili::raw_buf, exact);
+    (void)ili::realign(ili::raw_buf, exact, px_buf, bytes, ili::read_format);
+}
+
+/// `n` tagged pixels, `first` the first index, written with `cmd`.
+void write_tags(uint8_t cmd, uint8_t first, uint8_t n) {
+    for (uint8_t i = 0; i < n; ++i) {
+        tag(ili::row_buf + i * 3u, static_cast<uint8_t>(first + i));
+    }
+    (void)ili::transfer(cmd, ili::row_buf, nullptr, static_cast<uint16_t>(n * 3u), ili::write_rate);
+}
+
+/// The pixel of the region last read at absolute (x, y).
+const uint8_t* at(uint16_t x0, uint16_t y0, uint16_t w, uint16_t x, uint16_t y) {
+    return region_buf + (static_cast<uint32_t>(y - y0) * w + (x - x0)) * 3u;
+}
+
+}  // namespace assume
+
+/// ASSUMPTIONS 1, 2 AND 6: a write past the window's last pixel, a read
+/// past it, and what re-issuing the window does to the two pointers.
+void tw_window_edges() {
+    ili::note_format();
+    ili::set_madctl(0x00);
+    constexpr uint16_t rx = 100, ry = 200, rh = 8;          // the background region, 16 x 8
+    constexpr uint16_t wx = 104, wy = 202, ww = 4, wh = 2;  // the window inside it: eight pixels
+    const auto open_window = [] { ili::window(wx, wy, wx + ww - 1u, wy + wh - 1u); };
+    const auto region = [] { (void)assume::read_region(rx, ry, assume::region_w, rh); };
+    const auto find = [](uint8_t i) { return assume::find_in_region(rx, ry, assume::region_w, rh, i); };
+    const auto slot = [](uint8_t i) {   // the window's i-th pixel, column-first
+        return assume::at(rx, ry, assume::region_w, static_cast<uint16_t>(wx + i % ww), static_cast<uint16_t>(wy + i / ww));
+    };
+
+    // 0. Eight pixels into a window of eight: the walk this letter reads by.
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 0, 8);
+    region();
+    bool in_order = true;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        const std::optional<uint8_t> t = assume::tag_of(slot(i));
+        if (!t || *t != i) {
+            in_order = false;
+        }
+    }
+    bench.verdict("eight pixels fill the window column-first, page by page (MADCTL 0x00)", in_order);
+
+    // 1. Twelve pixels into a window of eight.
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 0, 12);
+    region();
+    print(serial, "  the window's first four pixels hold ");
+    for (uint8_t i = 0; i < 4u; ++i) {
+        assume::describe(slot(i));
+        print(serial, i < 3u ? ", " : "");
+    }
+    print(serial, crlf);
+    std::optional<assume::Where> ninth = find(8);
+    const char* outcome = nullptr;
+    if (ninth) {
+        outcome = ninth->x == wx && ninth->y == wy ? "it WRAPS to the window's first pixel" : "it lands in the region, off the window";
+    } else {
+        ninth = assume::find_in_frame(8);
+        outcome = ninth ? "it continues OUTSIDE the window" : "it is DROPPED";
+    }
+    print(serial, "  the ninth pixel of twelve: ");
+    assume::print_where(ninth);
+    print(serial, crlf);
+    bench.verdict("assumption 1, a write past the window's last pixel: ", outcome, true);
+
+    // 2. Twelve pixels read from the same window of eight.
+    open_window();
+    assume::read_pixels(ili::ramrd, 12);
+    print(serial, "  pixels 8..11 of a twelve-pixel read: ");
+    for (uint8_t i = 8; i < 12u; ++i) {
+        assume::print_px(assume::px_buf + i * 3u);
+        print(serial, i < 11u ? " | " : "");
+    }
+    print(serial, crlf);
+    const uint8_t* p8 = assume::px_buf + 8u * 3u;
+    const char* r2 = ((p8[0] | p8[1] | p8[2]) & 0xFCu) == 0u ? "0x00"
+                     : assume::same_px(p8, assume::px_buf)   ? "the window's first pixel again (a WRAP)"
+                     : (p8[0] & p8[1] & p8[2] & 0xFCu) == 0xFCu ? "0xFF, the line undriven"
+                                                                 : "another value (see the bytes)";
+    bench.verdict("assumption 2, a read past the window's last pixel answers ", r2, true);
+
+    // 6. The write pointer on a re-issued window, on CASET alone, on PASET alone.
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 20, 2);
+    open_window();
+    assume::write_tags(ili::ramwr_continue, 22, 1);
+    region();
+    std::optional<assume::Where> w22 = find(22);
+    const char* r6a = !w22 ? "3Ch after it writes nothing" : (w22->x == wx && w22->y == wy) ? "it REWINDS the write pointer"
+                    : (w22->x == wx + 2u && w22->y == wy) ? "it leaves the write pointer where it was" : "3Ch lands elsewhere";
+    print(serial, "  CASET + PASET re-issued after two pixels, then 3Ch: ");
+    assume::print_where(w22);
+    print(serial, crlf);
+    bench.verdict("assumption 6, a window re-issued: ", r6a, true);
+
+    // The same with a DIFFERENT window (one column to the right): does a
+    // window that changes rewind, where one re-issued unchanged did not?
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 24, 2);
+    ili::window(wx + 1u, wy, wx + ww, wy + wh - 1u);
+    assume::write_tags(ili::ramwr_continue, 26, 1);
+    region();
+    std::optional<assume::Where> w26 = find(26);
+    print(serial, "  a window one column to the right after two pixels, then 3Ch: ");
+    assume::print_where(w26);
+    print(serial, !w26 ? " - nothing lands" : (w26->x == wx + 1u && w26->y == wy) ? " - a CHANGED window rewinds to its own origin"
+          : (w26->x == wx + 2u && w26->y == wy) ? " - the pointer stays at the third pixel of the frame"
+          : (w26->x == wx + 3u && w26->y == wy) ? " - the pointer stays at the third pixel of the NEW window" : " - elsewhere", crlf);
+
+    uint8_t p[4];
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 30, 2);
+    p[0] = static_cast<uint8_t>(wx >> 8);
+    p[1] = static_cast<uint8_t>(wx);
+    p[2] = static_cast<uint8_t>((wx + ww - 1u) >> 8);
+    p[3] = static_cast<uint8_t>(wx + ww - 1u);
+    ili::command(ili::caset, p, 4);
+    assume::write_tags(ili::ramwr_continue, 32, 1);
+    region();
+    std::optional<assume::Where> w32 = find(32);
+    print(serial, "  CASET alone after two pixels, then 3Ch: ");
+    assume::print_where(w32);
+    print(serial, w32 && w32->x == wx && w32->y == wy ? " - CASET alone rewinds" : " - CASET alone does not rewind", crlf);
+
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 40, 2);
+    p[0] = static_cast<uint8_t>(wy >> 8);
+    p[1] = static_cast<uint8_t>(wy);
+    p[2] = static_cast<uint8_t>((wy + wh - 1u) >> 8);
+    p[3] = static_cast<uint8_t>(wy + wh - 1u);
+    ili::command(ili::paset, p, 4);
+    assume::write_tags(ili::ramwr_continue, 42, 1);
+    region();
+    std::optional<assume::Where> w42 = find(42);
+    print(serial, "  PASET alone after two pixels, then 3Ch: ");
+    assume::print_where(w42);
+    print(serial, w42 && w42->x == wx && w42->y == wy ? " - PASET alone rewinds" : " - PASET alone does not rewind", crlf);
+
+    // 6b. The read pointer on a re-issued window.
+    assume::fill_bg(rx, ry, assume::region_w, rh);
+    open_window();
+    assume::write_tags(ili::ramwr, 0, 8);
+    open_window();
+    assume::read_pixels(ili::ramrd, 2);
+    open_window();
+    assume::read_pixels(ili::ramrd_continue, 1);
+    std::optional<uint8_t> t = assume::tag_of(assume::px_buf);
+    print(serial, "  RAMRD of two, the window re-issued, 3Eh of one: ");
+    assume::describe(assume::px_buf);
+    print(serial, crlf);
+    bench.verdict("assumption 6, the read pointer on a re-issued window: ",
+                  t && *t == 0u ? "REWOUND" : t && *t == 2u ? "left where it was" : "neither reading", true);
+
+    // 6c. Are the two pointers one? A write between two reads, a read between two writes.
+    open_window();
+    assume::read_pixels(ili::ramrd, 2);
+    assume::write_tags(ili::ramwr, 50, 1);   // RAMWR restarts at the origin: tag 50 on pixel 0
+    assume::read_pixels(ili::ramrd_continue, 1);
+    t = assume::tag_of(assume::px_buf);
+    print(serial, "  RAMRD of two, RAMWR of one, 3Eh of one: ");
+    assume::describe(assume::px_buf);
+    print(serial, t && *t == 2u ? " - the read pointer ignores the write" : t && *t == 1u ? " - ONE pointer: the read continues after the write" : t && *t == 50u ? " - the read pointer was rewound by the write" : "", crlf);
+
+    open_window();
+    assume::write_tags(ili::ramwr, 60, 1);   // write pointer at 1
+    assume::read_pixels(ili::ramrd, 3);      // read pointer at 3
+    assume::write_tags(ili::ramwr_continue, 61, 1);
+    region();
+    std::optional<assume::Where> w61 = find(61);
+    print(serial, "  RAMWR of one, RAMRD of three, 3Ch of one: ");
+    assume::print_where(w61);
+    print(serial, w61 && w61->x == wx + 1u ? " - the write pointer ignores the read" : w61 && w61->x == wx + 3u ? " - ONE pointer: the write continues after the read" : w61 && w61->x == wx ? " - the write pointer was rewound by the read" : "", crlf);
+
+    ili::set_rotation(ili::rotation);
+}
+
+/// ASSUMPTION 3: windows the axes cannot hold - a start beyond the
+/// axis, an end beyond it, a range that runs backwards, pages beyond 479
+/// and a page range that runs backwards, under MADCTL 0x00. Before each
+/// a SENTINEL window is set (columns 8..11 on page 106), so that a
+/// command the controller IGNORES is told from a write it DROPS: the
+/// pixels of an ignored one land in the sentinel. Never more pixels than
+/// the smallest window in question holds, because a write past a
+/// window's end wraps to its start and hides the first pixels (letter w).
+void tl_invalid_windows() {
+    ili::note_format();
+    ili::set_madctl(0x00);
+    constexpr uint16_t py = 100, ph = 8;
+    constexpr uint16_t sx = 8, sy = 106;   // the sentinel's origin
+    const auto sentinel = [] { ili::window(sx, sy, sx + 3u, sy); };
+    const auto regions = [] {
+        assume::fill_bg(304, py, 16, ph);   // the right edge
+        assume::fill_bg(0, py, 16, ph);     // the left edge, the sentinel inside it
+        assume::fill_bg(200, py, 16, ph);   // the middle
+    };
+    const auto classify = [](const std::optional<assume::Where>& w, uint16_t cx, uint16_t cy, const char* taken,
+                             const char* clamped) -> const char* {
+        if (!w) {
+            return "the write is DROPPED";
+        }
+        if (w->x == sx && w->y == sy) {
+            return "the command is IGNORED, the window before it stands";
+        }
+        if (w->x == cx && w->y == cy) {
+            return clamped;
+        }
+        return taken;
+    };
+    uint8_t p[4];
+    const auto caset = [&p](uint16_t a, uint16_t b) {
+        p[0] = static_cast<uint8_t>(a >> 8);
+        p[1] = static_cast<uint8_t>(a);
+        p[2] = static_cast<uint8_t>(b >> 8);
+        p[3] = static_cast<uint8_t>(b);
+        ili::command(ili::caset, p, 4);
+    };
+    const auto paset = [&p](uint16_t a, uint16_t b) {
+        p[0] = static_cast<uint8_t>(a >> 8);
+        p[1] = static_cast<uint8_t>(a);
+        p[2] = static_cast<uint8_t>(b >> 8);
+        p[3] = static_cast<uint8_t>(b);
+        ili::command(ili::paset, p, 4);
+    };
+
+    // (a) a start beyond the axis: CASET 400..403, one pixel.
+    regions();
+    sentinel();
+    caset(400, 403);
+    assume::write_tags(ili::ramwr, 0, 1);
+    std::optional<assume::Where> w = assume::find_in_frame(0);
+    print(serial, "  CASET 400..403 after the sentinel: the pixel ");
+    assume::print_where(w);
+    print(serial, crlf);
+    bench.verdict("assumption 3a, a start beyond the axis: ",
+                  classify(w, 319, sy, w && w->x == 80u ? "the address WRAPS (400 - 320)" : "it lands elsewhere",
+                           "it lands on the LAST column"), true);
+
+    // (b) an end beyond the axis: CASET 316..323 on page 106 - one pixel
+    //     first (ignored, dropped or taken), then six if the start was
+    //     taken: four fit before the axis, and where the fifth goes says
+    //     whether the end is clamped (it wraps to 316) or not.
+    regions();
+    sentinel();
+    caset(316, 323);
+    assume::write_tags(ili::ramwr, 10, 1);
+    w = assume::find_in_frame(10);
+    print(serial, "  CASET 316..323 after the sentinel: one pixel ");
+    assume::print_where(w);
+    print(serial, crlf);
+    const char* r3b = classify(w, 316, sy, "it lands elsewhere", "the START is taken");
+    if (w && w->x == 316u && w->y == sy) {
+        regions();
+        caset(316, 323);
+        paset(sy, sy);
+        assume::write_tags(ili::ramwr, 10, 6);
+        (void)assume::read_region(304, py, 16, ph);
+        const std::optional<uint8_t> at316 = assume::tag_of(assume::at(304, py, 16, 316, sy));
+        std::optional<assume::Where> b14 = assume::find_in_region(304, py, 16, ph, 14);
+        if (!b14) {
+            b14 = assume::find_in_frame(14);
+        }
+        print(serial, "  CASET 316..323, six pixels: column 316 holds ");
+        assume::describe(assume::at(304, py, 16, 316, sy));
+        print(serial, ", the fifth pixel ");
+        assume::print_where(b14);
+        print(serial, crlf);
+        r3b = (at316 && *at316 == 14u) ? "the start is taken and the end is CLAMPED to the axis: the fifth pixel wraps to the start"
+              : (b14 && b14->x == 0u) ? "the start is taken and the walk runs past the edge into column 0"
+              : b14 ? "the start is taken and the fifth pixel lands elsewhere"
+                    : "the start is taken and the pixels past the axis are DROPPED";
+    }
+    bench.verdict("assumption 3b, an end beyond the axis: ", r3b, true);
+
+    // (c) a range that runs backwards: CASET 210..205 on page 106, one pixel.
+    regions();
+    sentinel();
+    caset(210, 205);
+    assume::write_tags(ili::ramwr, 20, 1);
+    w = assume::find_in_frame(20);
+    print(serial, "  CASET 210..205 after the sentinel: the pixel ");
+    assume::print_where(w);
+    print(serial, crlf);
+    bench.verdict("assumption 3c, a column range that runs backwards: ",
+                  classify(w, 210, sy, "it lands elsewhere", "the START is taken"), true);
+
+    // (d) pages beyond the axis: CASET 304..307 (valid) then PASET 500..501, one pixel.
+    regions();
+    sentinel();
+    caset(304, 307);
+    paset(500, 501);
+    assume::write_tags(ili::ramwr, 30, 1);
+    w = assume::find_in_frame(30);
+    print(serial, "  CASET 304..307, PASET 500..501: the pixel ");
+    assume::print_where(w);
+    print(serial, crlf);
+    bench.verdict("assumption 3d, pages beyond the axis: ",
+                  !w ? "the write is DROPPED" : (w->x == 304u && w->y == sy) ? "PASET is IGNORED, the page window before it stands"
+                  : (w->x == 304u && w->y == 479u) ? "it lands on the LAST page" : (w->x == 304u && w->y == 20u) ? "the address WRAPS (500 - 480)" : "it lands elsewhere", true);
+
+    // (e) a page range that runs backwards: CASET 304..307 then PASET 105..103, one pixel.
+    regions();
+    sentinel();
+    caset(304, 307);
+    paset(105, 103);
+    assume::write_tags(ili::ramwr, 40, 1);
+    w = assume::find_in_frame(40);
+    print(serial, "  CASET 304..307, PASET 105..103: the pixel ");
+    assume::print_where(w);
+    print(serial, crlf);
+    bench.verdict("assumption 3e, a page range that runs backwards: ",
+                  !w ? "the write is DROPPED" : (w->x == 304u && w->y == sy) ? "PASET is IGNORED, the page window before it stands"
+                  : (w->x == 304u && w->y == 105u) ? "the START is taken" : "it lands elsewhere", true);
+
+    // (f) a read from a window that runs backwards: what the bytes say.
+    regions();
+    ili::window(200, sy, 203, sy);
+    assume::write_tags(ili::ramwr, 44, 4);
+    caset(210, 205);
+    assume::read_pixels(ili::ramrd, 2);
+    print(serial, "  RAMRD of two from CASET 210..205 (200..203 written before): ");
+    assume::print_px(assume::px_buf);
+    print(serial, " | ");
+    assume::print_px(assume::px_buf + 3);
+    print(serial, crlf);
+    const uint8_t* q = assume::px_buf;
+    bench.verdict("assumption 3f, a read from a backwards window answers ",
+                  ((q[0] | q[1] | q[2]) & 0xFCu) == 0u ? "0x00" : (q[0] & q[1] & q[2] & 0xFCu) == 0xFCu ? "0xFF"
+                  : assume::tag_of(q) && *assume::tag_of(q) == 44u ? "the window before it (its first pixel)"
+                  : assume::tag_of(q) ? "a pixel of the frame (see the tag)" : "another value", true);
+
+    // (g) the write pointer as an ADDRESS: two pixels into 200..203 x 106,
+    //     then a window far away (220..223 x 104..105), then three
+    //     pixels through 3Ch - where do they go?
+    regions();
+    ili::window(200, sy, 203, sy);
+    assume::write_tags(ili::ramwr, 50, 2);
+    ili::window(220, py + 4u, 223, py + 5u);
+    assume::write_tags(ili::ramwr_continue, 52, 3);
+    (void)assume::read_region(200, py, 16, ph);
+    std::optional<assume::Where> g52 = assume::find_in_region(200, py, 16, ph, 52);
+    std::optional<assume::Where> g53 = assume::find_in_region(200, py, 16, ph, 53);
+    std::optional<assume::Where> g54 = assume::find_in_region(200, py, 16, ph, 54);
+    if (!g52) {
+        g52 = assume::find_in_frame(52);
+    }
+    print(serial, "  pointer at (202,106), window moved to 220..223 x 104..105, 3Ch of three: ");
+    assume::print_where(g52);
+    print(serial, " ");
+    assume::print_where(g53);
+    print(serial, " ");
+    assume::print_where(g54);
+    print(serial, crlf);
+    bench.verdict("assumption 6b, a pointer outside the new window: ",
+                  !g52 ? "the write is DROPPED" : (g52->x == 202u && g52->y == sy) ? "the ADDRESS stands and the pixel lands there, the following ones tell the step"
+                  : (g52->x == 220u && g52->y == py + 4u) ? "the pointer is pulled to the new window's origin" : "it lands elsewhere", true);
+
+    ili::set_rotation(ili::rotation);
+}
+
+/// ASSUMPTIONS 4 AND 5: MADCTL written after the window, and a pixel cut
+/// in two across a write and its continuation.
+void ts_sequence() {
+    ili::note_format();
+    ili::set_madctl(0x00);
+
+    // 4. CASET 104..107, PASET 202..203 under MADCTL 0x00, then B5, then eight pixels.
+    //    Region A holds the window as written (columns 104..107 x pages
+    //    202..203); region B holds it with the axes exchanged (columns
+    //    202..203 x pages 104..107).
+    assume::fill_bg(100, 200, 16, 8);
+    assume::fill_bg(200, 100, 8, 16);
+    ili::window(104, 202, 107, 203);
+    ili::set_madctl(0x20);
+    assume::write_tags(ili::ramwr, 0, 8);
+    ili::set_madctl(0x00);
+    (void)assume::read_region(100, 200, 16, 8);
+    std::optional<assume::Where> a0 = assume::find_in_region(100, 200, 16, 8, 0);
+    std::optional<assume::Where> a1 = assume::find_in_region(100, 200, 16, 8, 1);
+    const char* r4 = nullptr;
+    if (a0) {
+        r4 = (a1 && a1->x == 104u && a1->y == 203u) ? "the registers keep their bytes and B5 only reorders the walk: pages first inside the window as written"
+             : (a1 && a1->x == 105u && a1->y == 202u) ? "the late B5 changes nothing: columns first inside the window as written"
+                                                        : "the window as written, in another order";
+    } else {
+        (void)assume::read_region(200, 100, 8, 16);
+        a0 = assume::find_in_region(200, 100, 8, 16, 0);
+        a1 = assume::find_in_region(200, 100, 8, 16, 1);
+        if (a0) {
+            r4 = (a1 && a1->x == 202u && a1->y == 105u) ? "the late B5 REASSIGNS the axes: CASET's bytes become the pages, and the walk steps the pages first"
+                 : (a1 && a1->x == 203u && a1->y == 104u) ? "the late B5 REASSIGNS the axes: CASET's bytes become the pages, and the walk steps the columns first"
+                                                            : "the axes exchanged, in another order";
+        } else {
+            a0 = assume::find_in_frame(0);
+            r4 = a0 ? "the pixels land elsewhere in the frame" : "nothing lands";
+        }
+    }
+    print(serial, "  window written under 0x00, MADCTL 0x20 after it, eight pixels: the first at ");
+    assume::print_where(a0);
+    print(serial, ", the second at ");
+    assume::print_where(a1);
+    print(serial, crlf);
+    bench.verdict("assumption 4, MADCTL after the window: ", r4, true);
+
+    // 5. A window of three on page 206; RAMWR carries pixel 50 and the
+    //    first byte of 51; 3Ch carries the rest of 51 and the whole of 52.
+    assume::fill_bg(100, 200, 16, 8);
+    ili::window(104, 206, 106, 206);
+    uint8_t t50[3], t51[3], t52[3];
+    assume::tag(t50, 50);
+    assume::tag(t51, 51);
+    assume::tag(t52, 52);
+    uint8_t first[4] = {t50[0], t50[1], t50[2], t51[0]};
+    uint8_t rest[5] = {t51[1], t51[2], t52[0], t52[1], t52[2]};
+    (void)ili::transfer(ili::ramwr, first, nullptr, 4, ili::write_rate);
+    (void)ili::transfer(ili::ramwr_continue, rest, nullptr, 5, ili::write_rate);
+    (void)assume::read_region(100, 200, 16, 8);
+    const uint8_t* s0 = assume::at(100, 200, 16, 104, 206);
+    const uint8_t* s1 = assume::at(100, 200, 16, 105, 206);
+    const uint8_t* s2 = assume::at(100, 200, 16, 106, 206);
+    print(serial, "  the three pixels: ");
+    assume::describe(s0);
+    print(serial, " | ");
+    assume::describe(s1);
+    print(serial, " | ");
+    assume::describe(s2);
+    print(serial, crlf);
+    const uint8_t restart[3] = {t51[1], t51[2], t52[0]};
+    const std::optional<uint8_t> k1 = assume::tag_of(s1);
+    const std::optional<uint8_t> k2 = assume::tag_of(s2);
+    const char* r5 = (k1 && *k1 == 51u && k2 && *k2 == 52u) ? "the partial pixel is CARRIED into the continuation"
+                     : assume::same_px(s1, restart)         ? "the continuation restarts the byte phase; the byte left over is dropped"
+                     : assume::is_bg(s1)                    ? "the continuation writes nothing where the partial pixel was"
+                                                            : "another arrangement (see the bytes)";
+    bench.verdict("assumption 5, a pixel cut across a write and its 3Ch: ", r5, assume::tag_of(s0).has_value());
+
+    ili::set_rotation(ili::rotation);
+}
+
 void banner() {
     print(serial, crlf, "ILI9481 probe on the STM32F411CE black pill: SPI1 PA5/PA6/PA7, CS PB2, RST PB1, DC PB0",
           crlf, "sysclk ", SysClock::hz / 1000000u, " MHz, PCLK2 ", SysClock::pclk2_hz / 1000000u,
@@ -1951,6 +2526,9 @@ int main() {
     bench.letter('x', "where a window lands under B5: the frame scanned for four colours", tx_b5_range, false);
     bench.letter('r', "hardware reset and the wake sequence again", tr_reset, false);
     bench.letter('i', "toggle the inversion", ti_invert, false);
+    bench.letter('w', "the simulator's assumptions 1, 2, 6: the window's edges and the two pointers, measured", tw_window_edges, false);
+    bench.letter('l', "the simulator's assumption 3: windows the axes cannot hold, measured", tl_invalid_windows, false);
+    bench.letter('s', "the simulator's assumptions 4, 5: MADCTL after the window, a pixel cut across 3Ch, measured", ts_sequence, false);
 
     while (!Serial::configured() || !Serial::dtr()) {
         P::CriticalSection cs;

@@ -887,3 +887,252 @@ TEST_CASE("adapter: a read serves the bytes as they are clocked and the core see
     // be clocked moves no counter at all.
     CHECK(panel().commands_taken() == 9u);
 }
+
+// =============================================================================
+// w, l, s - the memory's rules at the window's edges, measured after the
+// first transcription: the address counter, the windows the axes cannot
+// hold, a pixel cut short
+// =============================================================================
+
+namespace {
+
+/// A pixel that carries its own index, the probe's own tagging: byte 0 =
+/// (i + 1) << 2, byte 1 = 0x40, byte 2 = (63 - i) << 2.
+std::array<uint8_t, 3> tag(uint8_t i) {
+    return {static_cast<uint8_t>((i + 1u) << 2), 0x40u, static_cast<uint8_t>((63u - i) << 2)};
+}
+
+/// The tag a memory cell holds, when it holds one.
+std::optional<uint8_t> tag_at(uint16_t column, uint16_t page) {
+    const uint8_t* p = panel().gram[page][column];
+    if (p[1] != 0x40u || p[0] == 0u) {
+        return std::nullopt;
+    }
+    const uint8_t i = static_cast<uint8_t>((p[0] >> 2) - 1u);
+    if (p[2] != static_cast<uint8_t>((63u - i) << 2)) {
+        return std::nullopt;
+    }
+    return i;
+}
+
+/// `n` tagged pixels from `first`, written with `cmd`.
+void write_tags(uint8_t cmd, uint8_t first, uint8_t n) {
+    uint8_t bytes[64 * 3] = {};
+    for (uint8_t i = 0; i < n; ++i) {
+        const std::array<uint8_t, 3> t = tag(static_cast<uint8_t>(first + i));
+        bytes[i * 3u] = t[0];
+        bytes[i * 3u + 1u] = t[1];
+        bytes[i * 3u + 2u] = t[2];
+    }
+    command(cmd, std::span<const uint8_t>(bytes, static_cast<size_t>(n) * 3u));
+}
+
+/// Where a tag sits in the frame, if anywhere.
+struct Where {
+    uint16_t column;
+    uint16_t page;
+    bool operator==(const Where&) const = default;
+};
+std::optional<Where> find_tag(uint8_t i) {
+    for (uint16_t page = 0; page < pages; ++page) {
+        for (uint16_t column = 0; column < columns; ++column) {
+            const std::optional<uint8_t> t = tag_at(column, page);
+            if (t && *t == i) {
+                return Where{column, page};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+constexpr uint16_t wx = 104, wy = 202, ww = 4, wh = 2;   // the probe's window of eight
+void open_window() { set_window(wx, wx + ww - 1u, wy, wy + wh - 1u); }
+/// The probe's slot i of that window under MADCTL 0x00: column-first.
+std::optional<uint8_t> slot(uint8_t i) {
+    return tag_at(static_cast<uint16_t>(wx + i % ww), static_cast<uint16_t>(wy + i / ww));
+}
+
+}   // namespace
+
+TEST_CASE("w: a write past the window's last pixel wraps to its first, and so does a read") {
+    fresh();
+    wake();
+    set_madctl(0x00);
+    open_window();
+    write_tags(Dcs::ramwr, 0, 12);
+    // The bench: the window's first four pixels hold tags 8..11, the
+    // ninth pixel of twelve landed at (104,202).
+    for (uint8_t i = 0; i < 4u; ++i) {
+        CHECK(slot(i) == static_cast<uint8_t>(8u + i));
+    }
+    for (uint8_t i = 4; i < 8u; ++i) {
+        CHECK(slot(i) == i);
+    }
+    CHECK(panel().pixels_written() == 12u);
+    CHECK(panel().writes_dropped() == 0u);
+
+    // A read of twelve from the same window: pixels 8..11 are the
+    // window's first four again.
+    open_window();
+    uint8_t back[12 * 3] = {};
+    read(Dcs::ramrd, back);
+    for (uint8_t i = 0; i < 12u; ++i) {
+        CHECK(back[i * 3u] == back[(i % 8u) * 3u]);
+        CHECK(back[i * 3u + 2u] == back[(i % 8u) * 3u + 2u]);
+    }
+}
+
+TEST_CASE("w: the address counter is an address that only RAMWR and RAMRD move, and the two are independent") {
+    fresh();
+    wake();
+    set_madctl(0x00);
+
+    // A window re-issued after two pixels leaves the write address at
+    // the third: 3Ch lands at (106,202). CASET alone and PASET alone do
+    // the same.
+    open_window();
+    write_tags(Dcs::ramwr, 20, 2);
+    open_window();
+    write_tags(Dcs::ramwr_continue, 22, 1);
+    CHECK(find_tag(22) == std::optional<Where>{{106, 202}});
+    command(Dcs::caset, dcs_window(wx, wx + ww - 1u));
+    write_tags(Dcs::ramwr_continue, 23, 1);
+    CHECK(find_tag(23) == std::optional<Where>{{107, 202}});
+    command(Dcs::paset, dcs_window(wy, wy + wh - 1u));
+    write_tags(Dcs::ramwr_continue, 24, 1);
+    CHECK(find_tag(24) == std::optional<Where>{{104, 203}});
+
+    // A window one column to the right after two pixels: 3Ch lands at
+    // (106,202) - the ADDRESS stands, not an index into the new window.
+    open_window();
+    write_tags(Dcs::ramwr, 30, 2);
+    set_window(wx + 1u, wx + ww, wy, wy + wh - 1u);
+    write_tags(Dcs::ramwr_continue, 32, 1);
+    CHECK(find_tag(32) == std::optional<Where>{{106, 202}});
+
+    // A window far away: the address is outside it and three pixels
+    // land nowhere.
+    open_window();
+    write_tags(Dcs::ramwr, 40, 2);
+    set_window(220, 223, 204, 205);
+    panel().reset_counters();
+    write_tags(Dcs::ramwr_continue, 42, 3);
+    CHECK(panel().writes_dropped() == 3u);
+    CHECK(!find_tag(42));
+
+    // The read address: RAMRD of two, the window re-issued, 3Eh of one
+    // answers pixel 2; a RAMWR between two reads moves the read address
+    // not at all; a RAMRD between two writes moves the write address
+    // not at all.
+    open_window();
+    write_tags(Dcs::ramwr, 0, 8);
+    uint8_t two[2 * 3] = {};
+    uint8_t one[3] = {};
+    open_window();
+    read(Dcs::ramrd, two);
+    open_window();
+    read(Dcs::ramrd_continue, one);
+    CHECK(one[0] == tag(2)[0]);
+    CHECK(one[2] == tag(2)[2]);
+
+    open_window();
+    read(Dcs::ramrd, two);
+    write_tags(Dcs::ramwr, 50, 1);   // RAMWR restarts at the origin: tag 50 on pixel 0
+    read(Dcs::ramrd_continue, one);
+    CHECK(one[0] == tag(2)[0]);
+    CHECK(slot(0) == 50u);
+
+    open_window();
+    write_tags(Dcs::ramwr, 60, 1);   // the write address at pixel 1
+    uint8_t three[3 * 3] = {};
+    read(Dcs::ramrd, three);         // the read address at pixel 3
+    write_tags(Dcs::ramwr_continue, 61, 1);
+    CHECK(slot(1) == 61u);
+}
+
+TEST_CASE("l: a start beyond the axis is ignored, an end beyond it or a range backwards makes the window invalid") {
+    fresh();
+    wake();
+    set_madctl(0x00);
+    constexpr uint16_t sx = 8, sy = 106;   // the sentinel window's origin
+    const auto sentinel = [] { set_window(sx, sx + 3u, sy, sy); };
+
+    // (a) CASET 400..403: ignored, the pixel lands in the sentinel.
+    sentinel();
+    command(Dcs::caset, dcs_window(400, 403));
+    write_tags(Dcs::ramwr, 0, 1);
+    CHECK(panel().windows_ignored() == 1u);
+    CHECK(find_tag(0) == std::optional<Where>{{sx, sy}});
+
+    // (b) CASET 316..323: taken, and the write lands nowhere.
+    sentinel();
+    command(Dcs::caset, dcs_window(316, 323));
+    panel().reset_counters();
+    write_tags(Dcs::ramwr, 10, 1);
+    CHECK(panel().windows_ignored() == 0u);
+    CHECK(panel().writes_dropped() == 3u);   // three bytes, none landed
+    CHECK(!find_tag(10));
+
+    // (c) CASET 210..205: taken, the write lands nowhere, and a read
+    // answers the traits' byte on every clock.
+    sentinel();
+    command(Dcs::caset, dcs_window(210, 205));
+    write_tags(Dcs::ramwr, 20, 1);
+    CHECK(!find_tag(20));
+    uint8_t two[2 * 3] = {};
+    read(Dcs::ramrd, two);
+    for (uint8_t b : two) {
+        CHECK(b == Ili9481::invalid_window_read_byte);
+    }
+
+    // (d) CASET 304..307 then PASET 500..501: the PASET is ignored and
+    // the page window before it stands.
+    sentinel();
+    command(Dcs::caset, dcs_window(304, 307));
+    command(Dcs::paset, dcs_window(500, 501));
+    write_tags(Dcs::ramwr, 30, 1);
+    CHECK(find_tag(30) == std::optional<Where>{{304, sy}});
+
+    // (e) CASET 304..307 then PASET 105..103: taken, nothing lands.
+    sentinel();
+    command(Dcs::caset, dcs_window(304, 307));
+    command(Dcs::paset, dcs_window(105, 103));
+    write_tags(Dcs::ramwr, 40, 1);
+    CHECK(!find_tag(40));
+}
+
+TEST_CASE("s: a MADCTL written after the window reassigns the axes") {
+    fresh();
+    wake();
+    set_madctl(0x00);
+    open_window();       // CASET 104..107, PASET 202..203 under 0x00
+    set_madctl(0x20);    // B5 now, the registers' bytes untouched
+    write_tags(Dcs::ramwr, 0, 8);
+    set_madctl(0x00);
+    // The bench: the first pixel at column 202, page 104, the second at
+    // column 202, page 105 - CASET's bytes became the pages and the walk
+    // steps the pages first.
+    CHECK(find_tag(0) == std::optional<Where>{{202, 104}});
+    CHECK(find_tag(1) == std::optional<Where>{{202, 105}});
+    CHECK(find_tag(4) == std::optional<Where>{{203, 104}});
+}
+
+TEST_CASE("s: a pixel cut short at the close of a write is dropped and the continuation starts fresh") {
+    fresh();
+    wake();
+    set_madctl(0x00);
+    set_window(104, 106, 206, 206);
+    const std::array<uint8_t, 3> t50 = tag(50), t51 = tag(51), t52 = tag(52);
+    const uint8_t first[4] = {t50[0], t50[1], t50[2], t51[0]};
+    const uint8_t rest[5] = {t51[1], t51[2], t52[0], t52[1], t52[2]};
+    command(Dcs::ramwr, first);
+    command(Dcs::ramwr_continue, rest);
+    // The bench: tag 50 | bytes 40 30 D4 | the memory untouched.
+    CHECK(tag_at(104, 206) == 50u);
+    CHECK(panel().gram[206][105][0] == t51[1]);
+    CHECK(panel().gram[206][105][1] == t51[2]);
+    CHECK(panel().gram[206][105][2] == t52[0]);
+    CHECK(panel().gram[206][106][0] == Ili9481::reset_fill_even_page);
+    CHECK(panel().partial_pixels_dropped() == 2u);
+    CHECK(panel().pixels_written() == 2u);
+}

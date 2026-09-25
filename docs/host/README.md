@@ -71,12 +71,18 @@ frame memory, the window and the walk its address mode selects, the read
 pointer that counts the bytes clocked - and `SimDcsSerial<Core>`, the
 framing adapter that puts the four-wire serial interface in front of it
 at the level of bytes, with the dummy byte and the one-bit-late stream a
-controller's traits ask for. Every rule in it is a bench measurement and
-the ones that are not are marked ASSUMPTION beside the code, because a
-simulator written from a command table agrees with a driver written from
-the same table on the same mistake: what it judges is whether the driver
-does what the part was MEASURED to do, never whether that belief is
-right.
+controller's traits ask for. Every rule in it is a bench measurement,
+down to the window's edges (the counter wraps to the window's first
+pixel, for a write and for a read), the two address counters that only
+RAMWR and RAMRD move, the pixel cut short at the close of a write (it is
+dropped) and the windows the axes cannot hold (a start beyond the axis
+is ignored, an end beyond it or a range backwards is taken and the window
+is no window); the two corners the bench has not reached are marked
+ASSUMPTION beside the code. That discipline is the point: a simulator
+written from a command table agrees with a driver written from the same
+table on the same mistake, and what this one judges is whether the
+driver does what the part was MEASURED to do, never whether that belief
+is right.
 
 `sim_spi_host.hpp` is what drives that panel: a SPI HOST MADE OF RAM
 whose seam is the REQUEST, offering the arbiter and a device driver the

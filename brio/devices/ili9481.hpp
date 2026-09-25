@@ -23,7 +23,8 @@
  *
  * THE MEMORY'S SEMANTICS, STATED ONCE. A driver and a panel simulator
  * written from two readings of a command table agree on the same
- * mistake, so the walk is written here and read from here by both:
+ * mistake, so the rules are written here, every one of them measured,
+ * and read from here by both:
  *
  *   - B5, B6 and B7 of MADCTL reorder the address counter's walk INSIDE
  *     the window and never move its origin.
@@ -32,12 +33,32 @@
  *   - B6 reverses the walk along the columns and B7 along the pages -
  *     each of them whichever axis it has become, the fast one or the
  *     slow one.
+ *   - The registers keep the bytes they were given and the axes are
+ *     resolved when the counter walks: a MADCTL written AFTER the window
+ *     decides which axis is which.
  *   - The BGR bit acts on WRITES alone: a pixel written under it is
  *     stored with its first and third byte exchanged, and read back as
  *     stored.
+ *   - The address counter is an ADDRESS, not an index into the walk:
+ *     RAMWR puts the write address at the walk's first pixel and RAMRD
+ *     the read address, and nothing else moves either - a window
+ *     re-issued, with the same values or others, leaves both where they
+ *     are, and the two are independent of each other.
+ *   - A write steps along the walk and after the window's last pixel
+ *     WRAPS to its first, the first pixels overwritten; a read wraps the
+ *     same way. A write whose address lies outside the window (the
+ *     window moved away from under it) lands nowhere.
  *   - The read pointer counts the BYTES CLOCKED: a following 3Eh starts
  *     at the first pixel not fully clocked, from that pixel's first
  *     byte.
+ *   - A pixel cut short at the close of a write transaction is DROPPED;
+ *     the next 2Ch or 3Ch starts a fresh pixel and the address has not
+ *     moved for the partial one.
+ *   - A CASET or PASET whose START is beyond the axis it addresses is
+ *     IGNORED, the register unchanged. One whose END is beyond the axis,
+ *     or that runs backwards, is TAKEN and makes the window invalid: a
+ *     write lands nowhere and a read answers `invalid_window_read_byte`
+ *     on every clock.
  *   - A hardware reset leaves the frame memory in alternate pages of
  *     0x54 and 0xA8, the even pages 0x54.
  *   - INVON changes nothing in the memory.
@@ -84,6 +105,12 @@ struct Ili9481 {
     /// of two values, the EVEN pages the first of them (measured).
     static constexpr uint8_t reset_fill_even_page = 0x54;
     static constexpr uint8_t reset_fill_odd_page = 0xA8;
+
+    /// What a read from a window the axes cannot hold answers on every
+    /// byte clocked (measured: CASET 210..205 taken, then RAMRD). It is
+    /// an odd page's reset fill, as if the address had left the array;
+    /// the value is recorded, the reason is not known.
+    static constexpr uint8_t invalid_window_read_byte = 0xA8;
 
     // ---- how a read comes back on the four-wire serial link -----------------
 

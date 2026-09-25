@@ -3171,9 +3171,15 @@ brio/                    the framework, one directory per stratum:
                            reads), the memory's semantics stated once for the
                            driver and the simulator (the walk bits reorder the
                            counter INSIDE the window, CASET takes the pages
-                           under B5, BGR on writes alone, the read pointer
-                           counting bytes clocked), the clock ceilings against
-                           the measured rates, the wake times
+                           under B5 and a late MADCTL still decides the axes,
+                           BGR on writes alone, the address counter an ADDRESS
+                           only RAMWR and RAMRD move and that wraps at the
+                           window's end, the read pointer counting bytes
+                           clocked, a pixel cut short dropped, a window's start
+                           beyond the axis ignored where a bad end or a
+                           backwards range is taken and answers one byte), the
+                           clock ceilings against the measured rates, the wake
+                           times
     dcs_link.hpp           DcsLink, the concept a panel driver is written over
                            (three synchronous verbs - a command with its
                            parameters, a memory write, a RAW read - the
@@ -3274,9 +3280,15 @@ brio/                    the framework, one directory per stratum:
     sim_dcs_panel.hpp      A COMMAND PANEL MADE OF RAM: SimDcsPanel<Traits>,
                            the core whose seam is the DCS TRANSACTION (the
                            frame memory, the window and the walk the address
-                           mode selects, the read pointer that counts the bytes
-                           clocked, the glass view with the module's mirror,
-                           the inversion and B0), every unmeasured rule marked
+                           mode selects, the two ADDRESSES only RAMWR and RAMRD
+                           move and that wrap at the window's last pixel, the
+                           read pointer that counts the bytes clocked, the pixel
+                           cut short and dropped, the windows the axes cannot
+                           hold - a start beyond the axis ignored, an end beyond
+                           it or a range backwards taken and the window no
+                           window - the glass view with the module's mirror,
+                           the inversion and B0), every rule a measurement and
+                           the two corners the bench has not reached marked
                            ASSUMPTION; and SimDcsSerial<Core>, the four-wire
                            framing adapter at the level of bytes (select, D/C,
                            a byte in and the MISO byte out), which fetches an

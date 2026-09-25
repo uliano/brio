@@ -99,7 +99,11 @@ through the polled pump and reads back in about 1.5 s at 3 MHz.
   back exact; 24 and 48 MHz leave garbage. A READ is exact at 6 and at
   12 MHz - three times the datasheet's 4.17 MHz - and wrong at 24 MHz.
   One module, one desk: printed, and the defaults stay inside the
-  datasheet.
+  datasheet - and on another day, the analyser's probes gone from the
+  lines, the same two 12 MHz verdicts (letters e and k) failed while
+  everything at 6 MHz passed: at that rate the breadboard decides, which
+  is the pad-slew finding of docs/stm32f4/spi.md seen from the other
+  side.
 - **MADCTL's B5/B6/B7 change the order the address counter walks the
   WINDOW, not the coordinate system**: under 40 (columns reversed)
   logical (0,0) of a window (0..3, 0..1) is physical (3,0), not (319,0);
@@ -146,6 +150,64 @@ through the polled pump and reads back in about 1.5 s at 3 MHz.
   "brio" in Font5x7 reads back with zero bytes differing from the font's
   own rows, and a filled rectangle's pixel reads back its colour. A
   clear costs 1002 ms and the whole test picture 1504 ms on the pump.
+
+### The memory's rules at the edges (letters w, l, s; not in the ALL run)
+
+The host simulator (brio/host/sim_dcs_panel.hpp) had six rules the
+letters above never measured, each marked as an assumption. Three
+letters measure them in MEMORY coordinates under MADCTL 0x00, with
+pixels that carry their own index (byte 0 = (i + 1) << 2, byte 1 = 0x40,
+byte 2 = (63 - i) << 2), so a read-back says WHICH pixel landed WHERE;
+each verdict passes when the outcome is one the letter can name, and
+the finding is the text beside it. What they found, and what the
+simulator now does:
+
+- **The counter WRAPS at the window's end.** Twelve pixels into a window
+  of eight (columns 104..107, pages 202..203): the ninth lands on the
+  window's first cell and the first four cells hold tags 8..11. A read
+  of twelve from the same window answers the first four pixels again
+  after the eighth. Neither a write nor a read past the window's last
+  pixel is dropped or answered with a constant.
+- **The address counter is an ADDRESS, and only RAMWR and RAMRD move
+  it.** The window re-issued after two pixels - CASET and PASET, or
+  CASET alone, or PASET alone - and then 3Ch: the pixel lands on the
+  THIRD cell, nothing rewound. A window one column to the right after
+  two pixels: 3Ch lands at column 106 - the same address, not the same
+  index. A window far away (columns 220..223, pages 104..105): three
+  pixels through 3Ch land NOWHERE. The two counters are independent: a
+  RAMRD of two, the window re-issued and a 3Eh of one answers pixel 2;
+  a RAMRD of two, a RAMWR of one and a 3Eh of one still answers pixel
+  2; a RAMWR of one, a RAMRD of three and a 3Ch of one lands on the
+  second cell.
+- **A pixel cut short at the close of a write is DROPPED.** A RAMWR of
+  four bytes into a window of three (one pixel and one byte) and a 3Ch
+  of five (the other two bytes and a whole pixel): the second cell
+  holds the 3Ch's first three bytes as a pixel and the third cell is
+  untouched. The continuation starts a fresh pixel; the byte left over
+  is gone and the address did not move for it.
+- **Windows the axes cannot hold are two cases, not one.** Each after a
+  sentinel window (columns 8..11 of page 106) and with ONE pixel
+  written, so that an ignored command is told from a dropped write and
+  no wrap hides the pixel: CASET 400..403 - the pixel lands in the
+  sentinel, the command IGNORED and the window before it standing; CASET
+  316..323 (an end beyond the axis) - the pixel lands nowhere, the
+  command TAKEN and the window invalid; CASET 210..205 (backwards) -
+  nowhere, and a RAMRD of two from that window answers `A8 A8 A8 | A8 A8
+  A8`, an odd page's reset fill, as if the address had left the array
+  (the value is recorded, the reason is not known); CASET 304..307 then
+  PASET 500..501 - the pixel at column 304 of page 106, the PASET
+  ignored; CASET 304..307 then PASET 105..103 - nowhere.
+- **MADCTL after the window reassigns the axes.** CASET 104..107 and
+  PASET 202..203 written under 0x00, then MADCTL 0x20, then eight
+  pixels: the first at column 202 of page 104, the second at column 202
+  of page 105 - the registers keep their bytes, CASET's became the
+  pages, and the walk steps the pages first. The one of the six
+  assumptions that held.
+
+A letter that writes more pixels than the window holds and looks for
+the first of them finds nothing: the wrap hides every one, and
+"dropped" is the wrong answer. One pixel, and a sentinel window before
+the command under test, is the shape that measures this.
 
 Two desk notes. The panel needs INVON, as on the AVR. And a freshly
 enumerated CDC console can echo the boot banner back into the board as
