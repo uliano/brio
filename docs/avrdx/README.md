@@ -148,6 +148,20 @@ flag, so there is no "last one wins" hazard to guard against.
   yields an unreadable `.lst`).
 - Do NOT add `-mrelax`: PyAvrOCD refuses ELF files built with it
   (distorted line-number info).
+- **Two ISRs with one body are folded by gcc into a call.** avr-gcc's
+  identical code folding (in -Os and -O2 alike, measured on 16.2)
+  turns the second of two `ISR()` bindings with the same body into a
+  handler that saves its registers, CALLS the first and restores
+  them: the first ends in `reti`, which returns into the caller with
+  the I flag already set, so the caller's epilogue runs with
+  interrupts enabled - a window of some forty cycles in which another
+  interrupt can nest, against the kernel's one-boundary promise
+  ([../design/kernel.md](../design/kernel.md), section 1) - and every
+  such interrupt pays two prologues. No image of this project carries
+  a folded vector today (every release image scanned: no `__vector_N`
+  calls another), so two bindings of one body are written with
+  `__attribute__((no_icf))` as the ISR's second argument, which is
+  what the other RISC-V strata carry in their handler attribute.
 - **Family compile check**: `brio check avrdx` compiles every
   smoke TU in `test/family/` for all eight AVR128 DA/DB packages
   (28/32/48/64 pins, both families) and requires every
