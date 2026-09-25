@@ -78,6 +78,10 @@ namespace brio {
 struct SimDcsGlass {
     /// The glass shows memory column `columns - 1` at its LEFT.
     bool column_mirror = false;
+    /// The module's colour channels are crossed: the glass lights a
+    /// cell's FIRST byte as blue and its third as red, so a driver that
+    /// wants the eye to see its own colour writes B, G, R.
+    bool bgr = false;
     /// The panel needs INVON, so the colours it shows are the stored
     /// ones only while the inversion is on.
     bool wants_inversion = false;
@@ -159,13 +163,14 @@ public:
      * The colour the GLASS shows at display column `d` (left to right)
      * and `line` (top to bottom), as 0x00RRGGBB.
      *
-     * Three things stand between the memory and the eye and no more:
-     * the module's own mirror (memory column `columns - 1 - d`), B0 of
-     * MADCTL, which mirrors the page, and the inversion, which shows the
-     * complement of every kept bit whenever the state does not match
-     * what the module wants. B1 (horizontal flip) and B4 (line address
-     * order) DO NOTHING on this module - measured - so they are kept in
-     * the state and applied to nothing.
+     * Four things stand between the memory and the eye and no more:
+     * the module's own mirror (memory column `columns - 1 - d`), its
+     * colour order (a crossed module lights the first byte as blue), B0
+     * of MADCTL, which mirrors the page, and the inversion, which shows
+     * the complement of every kept bit whenever the state does not
+     * match what the module wants. B1 (horizontal flip) and B4 (line
+     * address order) DO NOTHING on this module - measured - so they are
+     * kept in the state and applied to nothing.
      */
     uint32_t glass(uint16_t d, uint16_t line) const {
         if (d >= columns || line >= pages) {
@@ -175,7 +180,10 @@ public:
         const uint16_t page = (madctl_ & DcsAddressMode::vertical_flip) != 0u
                                   ? static_cast<uint16_t>(pages - 1u - line)
                                   : line;
-        const uint32_t colour = stored(column, page);
+        uint32_t colour = stored(column, page);
+        if (glass_.bgr) {
+            colour = ((colour & 0x0000FFu) << 16) | (colour & 0x00FF00u) | ((colour >> 16) & 0xFFu);
+        }
         if (inverted_ == glass_.wants_inversion) {
             return colour;
         }

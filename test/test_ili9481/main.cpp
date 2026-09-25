@@ -41,8 +41,8 @@ constexpr uint16_t columns = Ili9481::columns;
 constexpr uint16_t pages = Ili9481::pages;
 
 /// The module the bench carried: its glass shows memory column 319 at
-/// the left, and it needs the inversion.
-constexpr SimDcsGlass bench_module{.column_mirror = true, .wants_inversion = true};
+/// the left, its channels are crossed, and it needs the inversion.
+constexpr SimDcsGlass bench_module{.column_mirror = true, .bgr = true, .wants_inversion = true};
 
 /// One panel and one link for the whole suite: the frame memory is
 /// 460800 bytes and has no business on a stack.
@@ -759,13 +759,16 @@ TEST_CASE("glass: the module's mirror, the vertical flip and the inversion") {
     wake();   // the inversion is on, which is what this module wants
     set_madctl(0x00);
     set_window(0, 0, 0, 0);
+    // The module's channels are crossed, so a driver that wants the eye
+    // to see `colour` stores it as B, G, R - and the memory holds that.
     constexpr uint32_t colour = 0x00FC8004u;
-    const std::array<uint8_t, 3> p = dcs_rgb666_pack(colour);
+    constexpr uint32_t stored_as = 0x000480FCu;
+    const std::array<uint8_t, 3> p = dcs_rgb666_pack(colour, true);
     command(Dcs::ramwr, p);
-    REQUIRE(panel().stored(0, 0) == colour);
+    REQUIRE(panel().stored(0, 0) == stored_as);
 
     // The glass shows memory column 319 at its LEFT, so memory (0,0) is
-    // display column 319 of line 0.
+    // display column 319 of line 0 - and the eye sees the colour.
     CHECK(panel().glass(319, 0) == colour);
     CHECK(panel().glass(0, 0) != colour);
 
