@@ -918,10 +918,13 @@ TEST_CASE("a pen carries the text cursor across calls") {
 namespace {
 
 // What a viewer does: attach BY NAME - never by a path, which macOS does
-// not have - read only, and find the size from the object itself.
+// not have - read only, map what the object holds, and take the byte
+// count from the header the program wrote: the object's own size is
+// rounded up to a page on macOS (host/shared_segment.hpp).
 struct Attached {
     uint8_t* base{nullptr};
-    size_t bytes{0};
+    size_t bytes{0};   // what the header declares
+    size_t mapped{0};  // what the object holds: no less, a page's rounding more on macOS
 
     explicit Attached(const std::string& name) {
         const int fd = ::shm_open(name.c_str(), O_RDONLY, 0);
@@ -929,16 +932,24 @@ struct Attached {
             return;
         }
         struct stat st {};
-        if (::fstat(fd, &st) == 0) {
-            bytes = static_cast<size_t>(st.st_size);
-            void* p = ::mmap(nullptr, bytes, PROT_READ, MAP_SHARED, fd, 0);
+        if (::fstat(fd, &st) == 0 &&
+            st.st_size >= static_cast<off_t>(brio::sim_display_header_bytes)) {
+            mapped = static_cast<size_t>(st.st_size);
+            void* p = ::mmap(nullptr, mapped, PROT_READ, MAP_SHARED, fd, 0);
             base = (p == MAP_FAILED) ? nullptr : static_cast<uint8_t*>(p);
         }
         ::close(fd);
+        if (base != nullptr) {
+            bytes = brio::sim_display_bytes(*header());
+            if (bytes > mapped) {  // a header of another layout: not ours to read
+                ::munmap(base, mapped);
+                base = nullptr;
+            }
+        }
     }
     ~Attached() {
         if (base != nullptr) {
-            ::munmap(base, bytes);
+            ::munmap(base, mapped);
         }
     }
     Attached(const Attached&) = delete;

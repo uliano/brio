@@ -54,8 +54,11 @@ foreach(_app_path IN LISTS APP_SOURCES)
     target_link_options(${_app} PRIVATE
         -fsanitize=${BRIO_UBSAN_CHECKS_CSV}
     )
-    # A shared segment wants the real-time library where it is separate.
-    target_link_libraries(${_app} PRIVATE rt)
+    # A shared segment wants the real-time library where it is separate
+    # (glibc); on macOS it is part of libSystem and there is no librt.
+    if(NOT APPLE)
+        target_link_libraries(${_app} PRIVATE rt)
+    endif()
 endforeach()
 
 list(LENGTH APP_SOURCES _app_count)

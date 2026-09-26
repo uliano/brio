@@ -85,6 +85,9 @@ class Segment:
         if fd < 0:
             return
         try:
+            # What the object holds: no less than the header declares, and
+            # a page's rounding more on macOS - so it bounds the mapping
+            # and the byte count comes from the header.
             size = os.fstat(fd).st_size
             if size < HEADER_BYTES:
                 return
@@ -95,7 +98,8 @@ class Segment:
         (magic, self.version, self.header_bytes, self.boot_id, self.width,
          self.height, self.stride, self.format, self.buffers, self.front,
          _reserved, self.frame_at_open, self.palette_used) = fields
-        if magic != MAGIC or self.header_bytes != HEADER_BYTES:
+        self.bytes = self.header_bytes + self.stride * self.height * self.buffers
+        if magic != MAGIC or self.header_bytes != HEADER_BYTES or self.bytes > size:
             self.map.close()
             return
         pal_at = _FIXED.size
@@ -106,7 +110,7 @@ class Segment:
         # so that close() can release it before unmapping - a mapping
         # with a live export refuses to close, and the reattach path is
         # exactly where that would bite.
-        self.pixels = memoryview(self.map)[self.header_bytes:]
+        self.pixels = memoryview(self.map)[self.header_bytes:self.bytes]
         self.ok = True
 
     @property

@@ -86,6 +86,17 @@ inline constexpr size_t sim_display_header_bytes = 1024;
 
 static_assert(sizeof(SimDisplayHeader) <= sim_display_header_bytes);
 
+/// The bytes a segment holds by its own account - the header and the
+/// pixel planes - which is what a viewer reads. It is NOT the size the
+/// operating system reports for the object: macOS rounds that up to a
+/// page (host/shared_segment.hpp), so the count comes from the header
+/// the program wrote, and the object's size only bounds what may be
+/// mapped.
+inline size_t sim_display_bytes(const SimDisplayHeader& h) {
+    return static_cast<size_t>(h.header_bytes) +
+           static_cast<size_t>(h.stride) * h.height * h.buffers;
+}
+
 /**
  * Creates a segment, owns it, and hands out the bytes a Framebuffer
  * draws into. Destroying it unlinks the name: a viewer holding the old

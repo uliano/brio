@@ -28,6 +28,15 @@
  * segment carries an id drawn afresh at creation, and a viewer that
  * re-opens by name and finds a different one knows to remap.
  *
+ * THE BYTE COUNT IS IN THE HEADER, NOT IN THE OBJECT. What fstat reports
+ * for a shared object is exact on Linux and rounded up to a page on
+ * macOS (16 KB on Apple Silicon), so a viewer that sized itself from the
+ * object would read a different count on each. A segment's size is
+ * therefore known from its LAYOUT - the framebuffer's from its header,
+ * the panel's a constant - the object's size only bounds what a viewer
+ * may map, and a header claiming more than the object holds is another
+ * layout's, not ours to read.
+ *
  * Host only, and failures throw: a bench tool that cannot map its own
  * memory has nothing useful left to do (docs/host/simulator.md).
  */
