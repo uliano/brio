@@ -1162,6 +1162,11 @@ brio/                    the framework, one directory per stratum:
                            lines take -nostartfiles -nodefaultlibs, this,
                            and -lgcc: no C library, no syscall layer, no
                            specs file (design/runtime.md)
+    selftest.hpp           the runtime's cases, written once: every
+                           misalignment, length and overlap against a byte
+                           reference, the functions reached through volatile
+                           pointers; run by test/test_rt and by letter t of
+                           every 32-bit platform suite on its chip
   util/                  pure services - may include kernel/, never a target
     stream.hpp             ByteSink / ByteSource / ByteTransport concepts
     print.hpp              print(sink, ...) + hex/fixed/sci wrappers, crlf;

@@ -166,5 +166,11 @@ the seven.
   with no member of the C library, and the family check verifies the
   self-call guard and the RAM-code rule.
 - On silicon the functions depend on the core and the flags, not on a
-  peripheral, so one chip per core runs the host suite's cases, and one
-  board per build project runs its platform suite for the integration.
+  peripheral. The cases live in `rt/selftest.hpp`, written once: the host
+  suite runs them against the implementations (and against the host's own
+  C library, which proves the cases themselves), and letter `t` of every
+  32-bit platform suite runs them on the chip against the symbols the
+  image links - called through volatile pointers, so the compiler cannot
+  expand a copy in place and test itself instead. One chip per core is
+  enough for the runtime and one board per build project for the
+  integration; the platform suite does both in one run.

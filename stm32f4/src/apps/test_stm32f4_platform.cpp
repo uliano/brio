@@ -36,6 +36,9 @@
 //      accelerator, the APB dividers - each register against the task's
 //      constant
 //   g  the panic breadcrumb WITHOUT a reset: written, taken once, gone
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -56,6 +59,7 @@
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 #if defined(STM32F411xE)
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 100'000'000, 25'000'000>;
@@ -368,6 +372,25 @@ extern "C" void USART1_IRQHandler() { (void)Serial::isr(); }
 #endif
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     boot_record = brio::take_panic_record<P>();
 
@@ -383,6 +406,7 @@ int main() {
     bench.letter('d', "delay_us on the SysTick counter", td_delay);
     bench.letter('e', "the clock tree against the task's constants", te_clock);
     bench.letter('g', "the panic breadcrumb, no reset", tg_breadcrumb);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

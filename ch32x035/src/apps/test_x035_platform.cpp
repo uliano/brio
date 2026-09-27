@@ -53,6 +53,9 @@
 //   h  what the crt left in the core: INTSYSCR's hardware stack as the
 //      build asked and its nesting OFF, mtvec on the table with both mode
 //      bits, mstatus in machine mode, and misa as the core reports it
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200
@@ -68,6 +71,7 @@
 #include "ch32x035/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using P = brio::Ch32x035Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -549,6 +553,25 @@ extern "C" BRIO_CH32_INTERRUPT void software_handler() {
     sw_exit_cycles = brio::stk()->CNTL;
 }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     boot_flags = brio::Rcc::reset_flags();
     const bool clock_ok = SysClock::init();
@@ -565,6 +588,7 @@ int main() {
     bench.letter('f', "corecfgr, as the crt left it and cleared", tf_corecfgr);
     bench.letter('g', "the tick against the host's clock", tg_bracket);
     bench.letter('h', "what the crt left in the core's registers", th_core);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=",

@@ -99,6 +99,9 @@
 //      exception vector at index 3 and the breakpoint one at index 9 -
 //      and each leaves its own index in the token, which is how the
 //      letter says WHICH of them the silicon took.
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
@@ -121,6 +124,7 @@
 #include "kernel/panic.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using P = brio::Ch32vx03Platform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
@@ -1497,6 +1501,25 @@ extern "C" BRIO_CH32_INTERRUPT void breakpoint_handler() {
     brio::fault_reset<P>();
 }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     // Sampled FIRST: the flags are not cleared by reading, but the panic
     // record is fetch-and-clear and must be taken exactly once.
@@ -1529,6 +1552,7 @@ int main() {
     bench.letter('n', "the mask's shadow: a line taken after the instruction that masked it?",
                  tn_shadow);
     bench.letter('i', "THREE REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok && token.magic == token_magic && token.leg != 0) {
         ti_resume();

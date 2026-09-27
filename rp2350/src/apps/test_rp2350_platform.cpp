@@ -74,6 +74,9 @@
 //      from a single capture.
 //   x  (by name only) break_here(), which halts under a probe and faults
 //      without one - either way the console stops, so it is nobody's `z`
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -97,6 +100,7 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -712,6 +716,25 @@ extern "C" void isr_spare_0() {
     brio::Irq::clear_pending(spare_line);
 }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     boot_record = brio::take_panic_record<P>();
     boot_canary_alive = noinit_canary == canary_value;
@@ -738,6 +761,7 @@ int main() {
     bench.letter('r', "the breadcrumb across a PROCESSOR reset (two runs)", tr_across_reset,
                  false);
     bench.letter('x', "break_here() (stops the console)", tx_break, false);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

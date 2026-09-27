@@ -47,6 +47,9 @@
 //      ResetReporter (the breadcrumb read back), and a deliberate fault
 //      through ebreak with no debugger attached (the fault vector's
 //      own record, kernel_fault).
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
@@ -66,6 +69,7 @@
 #include "kernel/panic.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using P = brio::Ch32v00xPlatform<>;
 using SysClock = brio::Clock<brio::ClockSource::pll, 48'000'000>;
@@ -483,6 +487,25 @@ extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
     brio::fault_reset<P>(token.magic == token_magic ? token.context : 0u);
 }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     // Sampled FIRST: the flags are not cleared by reading, but the panic
     // record is fetch-and-clear and must be taken exactly once.
@@ -501,6 +524,7 @@ int main() {
     bench.letter('d', "delay_us on the STK counter", td_delay);
     bench.letter('e', "the interrupt round trip, in cycles", te_latency);
     bench.letter('i', "THREE REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok && token.magic == token_magic && token.leg != 0) {
         ti_resume();

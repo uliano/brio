@@ -64,6 +64,9 @@
 //      with the one it banked: the word is a HISTORY (HAD_POR since the
 //      power-on, REASON the last watchdog event) that a core reset
 //      leaves untouched and a chip reboot marks FORCE.
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -87,6 +90,7 @@
 #include "rp2040/watchdog.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
 constexpr SysClock clock;
@@ -746,6 +750,25 @@ extern "C" void isr_timer_0() {
 }
 extern "C" void isr_hardfault() { brio::fault_reset<P>(0x77); }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     boot_causes = brio::Reset::causes();
     boot_record = brio::take_panic_record<P>();
@@ -769,6 +792,7 @@ int main() {
     bench.letter('h', "WFI idle over 200 ticks", th_idle);
     bench.letter('j', "the system timer and an alarm", tj_timer);
     bench.letter('i', "FIVE REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok && token_leg() != 0u) {
         ti_resume();

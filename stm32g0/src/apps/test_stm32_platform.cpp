@@ -41,6 +41,9 @@
 //      real one and with it LSI), a WWDG window violation, a panic
 //      through ResetReporter, a deliberate HardFault through
 //      hard_fault_reset(), and a WWDG time-out.
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // NOTHING IN THIS SUITE FEEDS A WATCHDOG, and that is a measurement
 // rather than an oversight. Starting either watchdog is one-way in
@@ -69,6 +72,7 @@
 #include "stm32g0/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
 constexpr SysClock clock;
@@ -1153,6 +1157,25 @@ extern "C" void HardFault_Handler() {
     brio::hard_fault_reset<brio::Stm32g0Platform<>>(token.context);
 }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     // Sampled FIRST: the flags are not cleared by reading, but the panic
     // record is fetch-and-clear and must be taken exactly once.
@@ -1187,6 +1210,7 @@ int main() {
     bench.letter('e', "the IWDG, never started", te_iwdg);
     bench.letter('f', "the WWDG, never activated", tf_wwdg);
     bench.letter('i', "SIX REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     // A pending token means a leg of letter i is waiting to be judged:
     // resume it instead of printing a banner nobody asked for.

@@ -33,6 +33,9 @@
 //      running, a panic through ResetReporter, a deliberate HardFault
 //      through hard_fault_reset(), a watchdog time-out, and a window
 //      violation.
+//   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
+//      length and overlap: rt/selftest.hpp's cases, the host suite's own,
+//      against the symbols this image links - in `z`
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -53,6 +56,7 @@
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+#include "rt/selftest.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
@@ -777,6 +781,25 @@ extern "C" void HardFault_Handler() {
     brio::hard_fault_reset<brio::SamPlatform>(token.context);
 }
 
+namespace {
+
+/// t: the runtime's seven functions (rt/rt.cpp) over every alignment,
+/// length and overlap - rt/selftest.hpp's cases, the ones the host suite
+/// runs, against the symbols this image really links.
+void tt_runtime() {
+    brio::rt_selftest_all(brio::rt_linked_functions(),
+                          [](const char* name, const brio::RtSelftestResult& r) {
+        print(serial, "  ", r.cases, " cases", crlf);
+        if (r.failures != 0u) {
+            print(serial, "  ", r.failures, " failed, the first: ", r.first_what, " ",
+                  r.first_a, " ", r.first_b, crlf);
+        }
+        bench.verdict(name, r.failures == 0u);
+    });
+}
+
+}  // namespace
+
 int main() {
     // Sampled FIRST: RCAUSE is not cleared by anything, but the panic
     // record is fetch-and-clear and must be taken exactly once.
@@ -799,6 +822,7 @@ int main() {
     bench.letter('c', "what OSCULP32K really runs at", tc_oscillator);
     bench.letter('d', "delay_us on the SysTick counter (samc21/delay.hpp)", td_delay);
     bench.letter('i', "SIX REAL RESETS (reboots the board)", ti_resets, false);
+    bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     // A pending token means a leg of letter i is waiting to be judged:
     // resume it instead of printing a banner nobody asked for.

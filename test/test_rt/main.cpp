@@ -15,6 +15,9 @@
 
 #define BRIO_RT_HOST_TEST
 #include "rt/rt.cpp"
+#include "rt/selftest.hpp"
+
+#include <cstring>
 
 #include <array>
 #include <cstddef>
@@ -210,4 +213,51 @@ TEST_CASE("memchr: every position, absent values, unsigned char comparison, the 
     REQUIRE(rt_memchr(&s.b[guard], -61, 110) == &s.b[guard + 100]);
     REQUIRE(rt_memchr(&s.b[guard], 0x1C3, 110) == &s.b[guard + 100]);
     REQUIRE(rt_memchr(&s.b[guard], -61, 100) == nullptr);  // one short of it
+}
+
+// The cases every 32-bit platform suite runs on its chip (rt/selftest.hpp),
+// run here twice: against rt.cpp's implementations, and against this host's
+// own C library - a library known to be right, so a failure there would be
+// the cases' fault and not the runtime's.
+namespace {
+
+void check_all(const brio::RtFunctions& fns) {
+    using namespace brio;
+    const RtSelftestResult rs[] = {
+        rt_selftest_memcpy(fns), rt_selftest_memmove(fns), rt_selftest_memset(fns),
+        rt_selftest_memcmp(fns), rt_selftest_strlen(fns), rt_selftest_memchr(fns),
+    };
+    for (const auto& r : rs) {
+        INFO("first failure: " << (r.first_what ? r.first_what : "-") << " " << r.first_a << " " << r.first_b);
+        CHECK(r.cases > 0u);
+        CHECK(r.failures == 0u);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("rt/selftest.hpp: the chip's cases pass on rt.cpp's implementations") {
+    check_all(brio::RtFunctions{&rt_memcpy, &rt_memmove, &rt_memset, &rt_memcmp,
+                                &rt_strlen, &rt_memchr});
+}
+
+TEST_CASE("rt/selftest.hpp: the chip's cases pass on the host's own C library") {
+    check_all(brio::RtFunctions{
+        static_cast<void* (*)(void*, const void*, size_t)>(&::memcpy),
+        static_cast<void* (*)(void*, const void*, size_t)>(&::memmove),
+        static_cast<void* (*)(void*, int, size_t)>(&::memset),
+        static_cast<int (*)(const void*, const void*, size_t)>(&::memcmp),
+        static_cast<size_t (*)(const char*)>(&::strlen),
+        static_cast<void* (*)(const void*, int, size_t)>(&::memchr)});
+}
+
+TEST_CASE("rt/selftest.hpp: a broken copy is caught") {
+    // A memcpy that drops the last byte of every copy longer than four:
+    // the cases must see it - a check that cannot fail proves nothing.
+    auto broken = [](void* d, const void* s, size_t n) -> void* {
+        return rt_memcpy(d, s, n > 4u ? n - 1u : n);
+    };
+    brio::RtFunctions fns{+broken, &rt_memmove, &rt_memset, &rt_memcmp, &rt_strlen, &rt_memchr};
+    const auto r = brio::rt_selftest_memcpy(fns);
+    CHECK(r.failures > 0u);
 }
