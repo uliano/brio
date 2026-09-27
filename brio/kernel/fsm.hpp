@@ -89,20 +89,38 @@ public:
     using Handler = Status (*)(const Event&);
 
     /// Outcome of a state handler; build via handled()/unhandled()/transition().
+    /// ONE HANDLER POINTER WIDE, so every handler returns it in a register:
+    /// null is handled, the address of a private marker is unhandled, any
+    /// other address is the next state of a transition. A kind stored
+    /// beside the pointer made it two words, which Arm's calling convention
+    /// returns through memory - on the Cortex-M0+ cleared by a call to
+    /// memset at every return. A transition to a null state is therefore
+    /// read as handled, where it used to crash on the next event.
     struct Status {
         enum class Kind : uint8_t { handled, unhandled, transition };
-        Kind kind;
         Handler target;
+
+        constexpr Kind kind() const {
+            if (target == nullptr) {
+                return Kind::handled;
+            }
+            if (target == &Fsm::unhandled_mark) {
+                return Kind::unhandled;
+            }
+            return Kind::transition;
+        }
     };
 
+    static_assert(sizeof(Status) == sizeof(Handler), "a Status is one handler pointer wide");
+
     static constexpr Status handled() {
-        return {Status::Kind::handled, nullptr};
+        return {nullptr};
     }
     static constexpr Status unhandled() {
-        return {Status::Kind::unhandled, nullptr};
+        return {&unhandled_mark};
     }
     static constexpr Status transition(Handler next) {
-        return {Status::Kind::transition, next};
+        return {next};
     }
 
     /// Arm the machine on its initial state and deliver the first Entry.
@@ -127,8 +145,15 @@ private:
     static constexpr Event entry_event{std::in_place_type<Entry>};
     static constexpr Event exit_event{std::in_place_type<Exit>};
 
+    /// Never called: its address is unhandled()'s mark, distinct from every
+    /// state's because the language gives distinct functions distinct
+    /// addresses (an identical-code folding pass keeps them apart too).
+    static Status unhandled_mark(const Event&) {
+        return {nullptr};
+    }
+
     static void follow(Status s) {
-        while (s.kind == Status::Kind::transition) {
+        while (s.kind() == Status::Kind::transition) {
             (void)state_(exit_event);        // exit is an action, not a decision
             state_ = s.target;
             s = state_(entry_event);         // entry may chain (pass-through)

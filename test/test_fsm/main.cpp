@@ -134,3 +134,29 @@ TEST_CASE("two AOs with the same alternatives have independent machines") {
     CHECK(Toy::current() == &Toy::state_a);       // untouched by Other
     CHECK(Other::current() == &Other::only);
 }
+
+TEST_CASE("a Status is one handler pointer and still tells its three outcomes") {
+    static_assert(sizeof(Toy::Status) == sizeof(Toy::Handler));
+    using Kind = Toy::Status::Kind;
+    CHECK(Toy::handled().kind() == Kind::handled);
+    CHECK(Toy::unhandled().kind() == Kind::unhandled);
+    CHECK(Toy::transition(&Toy::state_b).kind() == Kind::transition);
+    static_assert(Toy::handled().kind() == Kind::handled);
+    static_assert(Toy::unhandled().kind() == Kind::unhandled);
+}
+
+TEST_CASE("a state whose code is the unhandled mark's is still a transition target") {
+    // The mark's body is `return {nullptr}`, handled()'s - exactly what this
+    // state does. Distinct functions have distinct addresses, whatever an
+    // identical-code folding pass does with their bodies.
+    struct Twin : brio::Fsm<Twin, Go> {
+        static Status start_here(const Event& e) {
+            return std::holds_alternative<Go>(e) ? transition(&twin) : handled();
+        }
+        static Status twin(const Event&) { return handled(); }
+    };
+    Twin::start(&Twin::start_here);
+    CHECK(Twin::transition(&Twin::twin).kind() == Twin::Status::Kind::transition);
+    Twin::dispatch(Twin::Event{Go{}});
+    CHECK(Twin::current() == &Twin::twin);
+}

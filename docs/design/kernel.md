@@ -344,7 +344,12 @@ the CRTP-monostate base an AO derives from; it gives the AO its
 - The handler returns `handled()`, `unhandled()`, or
   `transition(&next)`. `unhandled` today means "ignore"; tomorrow it
   means "ask the parent state" - it IS the hook that makes a
-  hierarchical extension additive rather than breaking.
+  hierarchical extension additive rather than breaking. The `Status`
+  it returns is ONE HANDLER POINTER WIDE - null for handled, a private
+  marker's address for unhandled, the next state for a transition - so
+  it comes back in a register on every core; a kind stored beside the
+  pointer made it two words, which Arm's calling convention returns
+  through memory.
 - A **transition** delivers `Exit` to the old state, switches,
   delivers `Entry` to the new one. Entry may itself return
   `transition()`: the machinery follows the chain (pass-through
