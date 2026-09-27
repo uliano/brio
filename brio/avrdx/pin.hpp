@@ -74,6 +74,14 @@ constexpr bool port_exists(char p) {
     }
 }
 
+/// Whether PORTC is the MVIO domain, powered from VDDIO2: the DB's is,
+/// the DA has no MVIO and its PORTC runs from VDD like every other port.
+#ifdef MVIO
+inline constexpr bool has_mvio = true;
+#else
+inline constexpr bool has_mvio = false;
+#endif
+
 /// The PORT of a letter chosen at RUN time (for drivers whose pin is a
 /// configuration value: a route's port, a comparator's input). Folds
 /// to one address when the letter is a constant; an absent port (by

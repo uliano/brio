@@ -99,8 +99,10 @@ struct RtcClock {
     static uint32_t hz() { return rtc_source_hz(selected()); }
 
     /// What a timebase picks when the application does not say: the
-    /// 32.768 kHz crystal if the clock init started one and it is
-    /// running, the internal OSC32K otherwise.
+    /// 32.768 kHz crystal if one was started and is running, the internal
+    /// OSC32K otherwise. "Running" is XOSC32KS, which a crystal nothing
+    /// requests yet sets only when it was started forced on
+    /// (clock.hpp's Xosc32k).
     static RtcSource preferred() {
         return Xosc32k::stable() ? RtcSource::xosc32k : RtcSource::osc32k;
     }

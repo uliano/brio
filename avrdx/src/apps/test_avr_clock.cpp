@@ -238,7 +238,9 @@ void t5_32k() {
     back_to_boot();
     verdict("back from the 32 kHz main clock", MainClock::source() == MainSource::extclk);
     print(serial, "  XOSC32K: starting the crystal oscillator on PF0/PF1 (none fitted here)...", crlf);
-    Xosc32k::start_crystal(Xosc32kStartup::cycles1k);
+    // Forced on: unrequested, a fitted crystal would never read stable
+    // either, and the verdict below could not tell the two boards apart.
+    Xosc32k::start_crystal(Xosc32kStartup::cycles1k, false, true);
     const uint32_t t0 = Ticker::millis();
     bool st = false;
     while (Ticker::millis() - t0 < 1500) { if (Xosc32k::stable()) { st = true; break; } }

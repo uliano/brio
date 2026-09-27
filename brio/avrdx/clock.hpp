@@ -85,6 +85,44 @@ inline bool clkctrl_wait(uint8_t mask, uint32_t spins) {
     return false;
 }
 
+#if !defined(CLKCTRL_XOSCHFCTRLA)
+/// DA: whether a clock arrives on PA0 (EXTCLK), asked without committing
+/// the main clock. EXTS is set only while EXTCLK is REQUESTED (DS40002183A
+/// 11.3.3.2.2: the pin becomes EXTCLK "if any peripheral requests this
+/// clock"; measured on an AVR128DA48: unrequested, EXTS stays clear with a
+/// clock on the pin; requested, it is set within three spins). The main
+/// clock cannot be the requester of a question: a switch asked of a
+/// source that never toggles stays pending until a reset (11.3.1). TCD0,
+/// on EXTCLK and enabled, is a requester that commits nothing - it is
+/// disabled again at once, CTRLA back to its reset value. With no clock
+/// on the pin its enable never synchronizes and TCD0 is left waiting for
+/// one; the caller - a Clock init, first thing in main() - uses no TCD
+/// yet.
+inline bool extclk_seen(uint32_t spins) {
+    auto enable_ready = [] {
+        for (uint16_t i = 0; i < 0xFFFFu; ++i) {
+            if (TCD0.STATUS & TCD_ENRDY_bm) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!enable_ready()) {
+        return false;
+    }
+    TCD0.CTRLA = TCD_CLKSEL_EXTCLK_gc;
+    TCD0.CTRLA = TCD_CLKSEL_EXTCLK_gc | TCD_ENABLE_bm;
+    const bool seen = clkctrl_wait(CLKCTRL_EXTS_bm, spins);
+    if (enable_ready()) {
+        TCD0.CTRLA = TCD_CLKSEL_EXTCLK_gc;
+        if (enable_ready()) {
+            TCD0.CTRLA = 0;
+        }
+    }
+    return seen;
+}
+#endif
+
 // ---- OSCHF ------------------------------------------------------------------
 
 /// OSCHF FRQSEL code for a rate it can produce, 0xFF otherwise.
@@ -164,9 +202,16 @@ struct Osc32k {
 enum class Xosc32kStartup : uint8_t { cycles1k = 0, cycles16k = 1, cycles32k = 2, cycles64k = 3 };
 
 /// The 32.768 kHz crystal oscillator on PF0/PF1, or an external 32 kHz
-/// clock on PF0. Start-up ~300 ms typ. (1 s in low-power mode): enable
-/// it early and check stable() before selecting it for the RTC or as
-/// the main clock.
+/// clock on PF0. Start-up ~300 ms typ. (1 s in low-power mode).
+///
+/// ENABLE ALONE DOES NOT RUN IT. With RUNSTDBY clear the oscillator runs
+/// only while something REQUESTS it - the RTC, the main clock, the PLL -
+/// and XOSC32KS stays clear until then (measured on an AVR128DA48: a
+/// fitted crystal, enabled, never stable; forced on, stable within about
+/// a second). So a program that wants to KNOW the crystal runs before
+/// anything uses it starts it with run_standby = true - the bit forces
+/// the oscillator on in Active and every sleep mode - and may clear the
+/// force with force_on(false) once a user requests it.
 struct Xosc32k {
     Xosc32k() = delete;
 
@@ -191,16 +236,35 @@ struct Xosc32k {
     }
     /// Off; PF0/PF1 return to the PORT.
     static void stop() { _PROTECTED_WRITE(CLKCTRL.XOSC32KCTRLA, 0); }
+    /// RUNSTDBY on a running oscillator (the one field of the register
+    /// that is not write-protected while ENABLE is set): forced on, or
+    /// running only while requested.
+    static void force_on(bool on) {
+        const uint8_t a = CLKCTRL.XOSC32KCTRLA;
+        _PROTECTED_WRITE(CLKCTRL.XOSC32KCTRLA, static_cast<uint8_t>(
+            on ? (a | CLKCTRL_RUNSTDBY_bm) : (a & ~CLKCTRL_RUNSTDBY_bm)));
+    }
+    static bool forced_on() { return (CLKCTRL.XOSC32KCTRLA & CLKCTRL_RUNSTDBY_bm) != 0; }
     static bool enabled() { return (CLKCTRL.XOSC32KCTRLA & CLKCTRL_ENABLE_bm) != 0; }
     static bool stable() { return (CLKCTRL.MCLKSTATUS & CLKCTRL_XOSC32KS_bm) != 0; }
     /// Wait for stable() with a bound (a few cycles per spin; a 1 s
-    /// crystal start-up at 24 MHz needs millions).
+    /// crystal start-up at 24 MHz needs millions). Meaningful only while
+    /// the oscillator is forced on or requested (above).
     static bool wait_stable(uint32_t spins = 0x00FFFFFFu) {
         return clkctrl_wait(CLKCTRL_XOSC32KS_bm, spins);
     }
 };
 
 // ---- XOSCHF -----------------------------------------------------------------
+
+/// Whether this part has the high-frequency crystal oscillator: the DB
+/// does, the DA takes an external CLOCK on PA0 and no crystal - so a
+/// program choosing its HF source asks this, never the device header.
+#if defined(CLKCTRL_XOSCHFCTRLA)
+inline constexpr bool has_xoschf = true;
+#else
+inline constexpr bool has_xoschf = false;
+#endif
 
 #if defined(CLKCTRL_XOSCHFCTRLA)
 enum class XoschfStartup : uint8_t { cycles256 = 0, cycles1k = 1, cycles4k = 2 };
@@ -493,7 +557,8 @@ struct ClockFailure {
 enum class ClockSource : uint8_t {
     internal,   ///< OSCHF at a rate it can produce
     crystal,    ///< XOSCHF crystal on PA0/PA1 (DB only)
-    external,   ///< external clock on PA0 (XOSCHF in EXTCLK mode, DB only)
+    external,   ///< external clock on PA0 (the DB through XOSCHF in its
+                ///< external-clock mode, the DA directly: its only HF input)
     osc32k,     ///< the internal 32.768 kHz oscillator as main clock
     xosc32k,    ///< the 32.768 kHz crystal (or clock on PF0) as main clock
 };
@@ -561,12 +626,11 @@ struct Clock {
                 return true;
 #else
                 // DA: EXTCLK is a direct input on PA0 - nothing to
-                // enable. Wait for EXTS (the clock seen) BEFORE
-                // selecting: a selected source that never toggles
-                // leaves a switch pending that only a reset clears.
-                // Datasheet-trusted (DS40002183A 10.3.4): no DA part
-                // on the bench yet.
-                if (!clkctrl_wait(CLKCTRL_EXTS_bm, 0xFFFFu)) {
+                // enable, and EXTS only answers while the clock is
+                // requested: ask through extclk_seen() BEFORE selecting,
+                // because a selected source that never toggles leaves a
+                // switch pending that only a reset clears.
+                if (!extclk_seen(0xFFFFu)) {
                     return false;                   // stay on the OSCHF fallback
                 }
                 if (!MainClock::select(MainSource::extclk)) {
@@ -583,15 +647,26 @@ struct Clock {
                 (void)clkctrl_wait(CLKCTRL_OSC32KS_bm, 0xFFFFu);
                 return MainClock::select(MainSource::osc32k);
             } else {
+                // Forced on while it is waited for (nothing requests it
+                // yet, so XOSC32KS would never be set), then selected -
+                // the main clock is a requester - and the force dropped
+                // unless whoever started it had asked for it.
+                const bool was_forced = Xosc32k::enabled() && Xosc32k::forced_on();
                 if (!Xosc32k::enabled()) {
-                    Xosc32k::start_crystal();
+                    Xosc32k::start_crystal(Xosc32kStartup::cycles64k, false, true);
+                } else {
+                    Xosc32k::force_on(true);
                 }
                 if (!Xosc32k::wait_stable()) {
                     Xosc32k::stop();
                     (void)MainClock::select(MainSource::osc32k);   // fallback: the internal 32k
                     return false;
                 }
-                return MainClock::select(MainSource::xosc32k);
+                const bool ok = MainClock::select(MainSource::xosc32k);
+                if (!was_forced) {
+                    Xosc32k::force_on(false);
+                }
+                return ok;
             }
         }
     }

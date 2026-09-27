@@ -70,7 +70,7 @@ through CCP):
 |----------|-------|
 | `Oschf` | `set_hz(hz)` (one of the nine rates; immediate, also while it is the main clock; false, touching nothing, for a rate OSCHF does not produce), `run_standby(bool)`, `autotune(bool)` (needs a running XOSC32K), `tune(-32..31)` / `tune()`, `stable()` |
 | `Osc32k` | `run_standby(bool)`, `stable()` |
-| `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)` (both stop a running oscillator first: CSUT/SEL are latched while enabled, so the new configuration always lands - at the price of the start-up time again), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)` |
+| `Xosc32k` | `start_crystal(Xosc32kStartup, low_power, run_standby)`, `start_external(run_standby)` (both stop a running oscillator first: CSUT/SEL are latched while enabled, so the new configuration always lands - at the price of the start-up time again), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `force_on(bool)` / `forced_on()` (RUNSTDBY on a running oscillator). `stable()` answers only while something REQUESTS the oscillator or it is forced on (below) |
 | `Xoschf` (DB) | `start_crystal(hz, XoschfStartup, run_standby)`, `start_external(hz, run_standby)` (both stop first: SELHF/FRQRANGE/CSUTHF are latched while enabled), `stop()`, `enabled()`, `stable()`, `wait_stable(spins)`, `range_for(hz)` |
 | `Pll` | `start(PllSource::oschf/xoschf, PllMultiplier::x2/x3, run_standby)` -> bool (false, writing nothing, when the source cannot drive the PLL on this silicon: errata 2.5.4), `source_ok(PllSource)`, `stop()`, `locked()`, `multiplier()`, `source()`; the arithmetic `pll_output_hz(in_hz, mul)` (0 outside the specified 16-24 MHz in / 32-48 MHz out) |
 | `MainClock` | `select(MainSource::oschf/osc32k/xosc32k/extclk)` -> bool (switch completed), `source()`, `switching()`, `prescale(ClockDiv)`, `clkout(bool)` (PA7) |
@@ -80,7 +80,7 @@ Tasks - what an application names ([clock.md](../design/clock.md)):
 
 | Task | Verbs |
 |------|-------|
-| `Clock<ClockSource, source_hz, ClockDiv>` | `init()` -> bool (running from the requested source), `hz`, `is_static = true`; sources `internal`, `crystal` (DB), `external` (DB via XOSCHF; DA directly on PA0, EXTS waited for BEFORE selecting - datasheet-trusted), `osc32k`, `xosc32k` |
+| `Clock<ClockSource, source_hz, ClockDiv>` | `init()` -> bool (running from the requested source), `hz`, `is_static = true`; sources `internal`, `crystal` (DB), `external` (DB via XOSCHF; DA directly on PA0, asked of TCD0 first because EXTS answers only while the clock is requested, and selected only when it answers), `osc32k`, `xosc32k` (forced on while it is waited for, the force dropped once the main clock requests it) |
 | `DynamicClock<Boot, Users...>` | `init()`, `hz()`, `set<hz>()` / `set(hz)` -> bool, `can_run_at(hz)`, `rebases<U>`; `is_static = false` |
 | vocabulary | `ClockDiv`, `clock_divisor()`, `div_for()`, `oschf_frqsel()`, `MainSource`, `CfdSource`, `PllSource`, `PllMultiplier`, `Xosc32kStartup`, `XoschfStartup` |
 | waits | `delay_us(clock, us)`, `delay_us_runtime(cycles_per_us, us)`, `cycles_per_us(hz)`, `delay_cycles(n)` (raw cycles: for clocks below 1 MHz) (`avrdx/delay.hpp`) |
@@ -115,13 +115,13 @@ using SysClock = brio::DynamicClock<Boot, Serial, Adc<0>>;   // the users it reb
 SysClock::set<4'000'000>();          // users rebased, then the prescaler
 ```
 
-**A 32 kHz crystal** for the RTC and for OSCHF auto-tune (not fitted
-on the bench board):
+**A 32 kHz crystal** for the RTC and for OSCHF auto-tune, started
+FORCED ON - nothing requests it yet, and unrequested it does not run:
 
 ```cpp
-Xosc32k::start_crystal();            // early: ~300 ms to stabilise
+Xosc32k::start_crystal(Xosc32kStartup::cycles64k, false, true);   // forced on
 ...
-if (Xosc32k::stable()) Oschf::autotune(true);   // OSCHF trimmed against it
+if (Xosc32k::wait_stable()) Oschf::autotune(true);   // OSCHF trimmed against it
 Ticker::init();                      // the RTC driver picks XOSC32K when it is stable
 ```
 
@@ -177,8 +177,17 @@ TcdPwm<TcdRoute::def>::init(clock, {.clock = TcdClock::pll, .source_hz = 48'000'
   console to these measured rates and stays readable at every step.
 - OSC32K as the main clock runs (and the Ticker must be paused: a
   1024 Hz ISR cannot be served at 32 cycles per tick).
-- XOSC32K correctly never reports stable on this board (no 32 kHz
-  crystal).
+- XOSC32K never reports stable on the AVR128DB48 board (no 32 kHz
+  crystal fitted), forced on or not.
+- On the AVR128DA48 board (REVID 0x17), with a 32.768 kHz crystal and an
+  external 24 MHz clock fitted: THE TWO EXTERNAL SOURCES ANSWER ONLY
+  WHEN REQUESTED. XOSC32K enabled with RUNSTDBY clear never reported
+  stable; forced on (RUNSTDBY) it did, a little over a second at 64k
+  cycles of start-up. With a clock on PA0 nobody had requested, EXTS
+  read 0; with TCD0 on EXTCLK and enabled, EXTS was set within three
+  polls - the probe `Clock<external>::init` now makes on the DA before
+  it selects the source, and the main clock then runs from it (the
+  console at 460800 on the external 24 MHz).
 - Clock failure, forced with the test bit while watching the main
   clock: CLKSEL falls back to OSCHF AND the OSCHF frequency is reset to
   4 MHz (FRQSEL reads 0x3 afterwards - the data sheet's "Reset
@@ -239,11 +248,12 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- The XOSC32K crystal path (no 32k crystal on the bench board) and
-  autotune; `ClockSource::external` on both families (the DA path is
-  datasheet-trusted end to end); the PLL from XOSCHF (errata 2.5.4
-  makes it need an external CLOCK on PA0, which this desk does not
-  have - the OSCHF source is bench-verified, see above); `run_standby`
-  on the PLL beyond the 2.5.3 observation; A4 silicon (the bench is
-  A5); the DA family entirely (compile-verified on all four DA
-  packages).
+- OSCHF auto-tune against XOSC32K (the crystal now runs on the DA
+  board; the tuning itself is not measured); `Clock<xosc32k>` as the
+  main clock on a board with the crystal; `ClockSource::external` on the
+  DB (no external clock on a DB board); the PLL from XOSCHF (errata
+  2.5.4 makes it need an external CLOCK on PA0); the PLL from the DA's
+  EXTCLK; `run_standby` on the PLL beyond the 2.5.3 observation; A4
+  silicon (the DB board is A5); the DA's other chapters (the AVR128DA48
+  runs the platform, meter, power and nvm suites green; the rest
+  compile-verified on all four DA packages).
