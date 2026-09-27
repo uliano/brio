@@ -11,9 +11,12 @@ probe, debugger, and their quirks. The design side (why the ticker
 is declaredly AVR, the ISR binding pattern, ...) is in
 [../design/](../design/).
 
-Bench MCU: **AVR128DB48** (48-pin, 128 KB flash, 16 KB SRAM),
-programmed and debugged with an **Atmel-ICE** over UPDI. Board wiring
-and what the board carries: [../boards/avr128db48.md](../boards/avr128db48.md).
+Bench MCUs: **AVR128DB48** (48-pin, 128 KB flash, 16 KB SRAM) and
+**AVR128DA48** (the same memories, no crystal oscillator and no MVIO),
+each on a board of its own, programmed and debugged with an
+**Atmel-ICE** over UPDI. Board wiring and what each board carries:
+[../boards/avr128db48.md](../boards/avr128db48.md),
+[../boards/avr128da48.md](../boards/avr128da48.md).
 
 ## The documents
 
@@ -67,9 +70,10 @@ flag, so there is no "last one wins" hazard to guard against.
   names none, the others are selected by the app's `boards` line
   below). No `-DF_CPU` is ever produced - the clock rate is
   `brio::Clock<...>::hz`, see below.
-- `CMakePresets.json`: one configure + build preset pair per AVR128DB
-  package x {release, debug} (`avr128db48-release`, `avr128db48-debug`,
-  `avr128db28-release`, ...); each points `AVR_MCU` and the toolchain
+- `CMakePresets.json`: one configure + build preset pair per bench
+  package x {release, debug} - the AVR128DB's three and the AVR128DA48
+  (`avr128db48-release`, `avr128db48-debug`, `avr128db28-release`, ...,
+  `avr128da48-release`); each points `AVR_MCU` and the toolchain
   file (`cmake/toolchain-avr.cmake`) at that package. Atmel-ICE upload
   is a per-app `<app>-upload` target (`CMakeLists.txt`); debug wiring
   is `.vscode/launch.json` (below).

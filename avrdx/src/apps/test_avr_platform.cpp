@@ -29,6 +29,7 @@
 // queue on the silicon | h timebase | i panic breadcrumb across real
 // resets | z = all
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -49,7 +50,10 @@
 #include "util/print.hpp"
 #include "util/ring.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 /// The suite's own reset-surviving breadcrumb: test i spans four resets

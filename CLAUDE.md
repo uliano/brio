@@ -163,7 +163,7 @@ the PUBLIC NAMES the apps write. Born under the core stratum's rule, at
 the SECOND family that carries the block, gated by the images; what
 earns one is that the register description is not similar between the
 chips but IDENTICAL), `avrdx/` (everything that knows `avr/io.h`: AVR
-DA/DB, bench chip AVR128DB48), `samc21/` (everything that knows `sam.h`:
+DA/DB, bench chips AVR128DB48 and AVR128DA48), `samc21/` (everything that knows `sam.h`:
 SAM C21, Cortex-M0+, bench chip ATSAMC21J18A), `stm32g0/` (everything
 that knows `stm32g0xx.h`: STM32G0, Cortex-M0+, bench chip STM32G0B1RE on
 a Nucleo-64), `ch32v00x/` (everything that knows the CH32V00x: WCH's
@@ -821,8 +821,9 @@ avrdx/                   the AVR build project (a PEER of samc21/ and test/ -
                            avr_predefines() (clangd's -mmcu macro delta),
                            avr_add_app() (flags, .hex/.lst/.map, per-app
                            -upload target, FLMAPLOCK/build-id defsyms)
-  CMakePresets.json        one configure+build preset pair per AVR128DB
-                           package x {release, debug}; binaryDir under the
+  CMakePresets.json        one configure+build preset pair per bench package
+                           (the AVR128DB's three and the AVR128DA48) x
+                           {release, debug}; binaryDir under the
                            shared ../build-cmake/
   cmake/toolchain-avr.cmake  the cross toolchain file (avr-gcc 16.2 at /sw/avr)
   cmake/avr-mcus.cmake     package -> mcu name table (128K flash / 16K RAM each)
@@ -1045,7 +1046,7 @@ cli/                     its guts, a Python package: main.py dispatches on the
                          duo / fuses
     common.py            what every bench verb needs: the manifest, BOARD_TYPES
                          (a board type -> its project, preset, mcu and flash
-                         mechanism: db* -> avrdx/avrdude/UPDI, c21j ->
+                         mechanism: db*/da48 -> avrdx/avrdude/UPDI, c21j ->
                          samc21/OpenOCD/SWD, g0* -> stm32g0/OpenOCD/ST-LINK,
                          v006k8/v003f4 -> ch32v00x/WCH's OpenOCD fork/WCH-Link,
                          v203c8/v303vc -> ch32vx03/the same fork/a WCH-Link on

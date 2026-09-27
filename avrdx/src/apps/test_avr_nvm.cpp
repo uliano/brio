@@ -43,6 +43,7 @@
 // g the APPDATA legs and the multi-page-erase erratum, which need a
 //   temporary CODESIZE fuse (see the message the test prints)
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 // build: flmap_lock = 0
 
@@ -65,7 +66,10 @@
 #include "util/persistent_panic.hpp"
 #include "util/print.hpp"
 
-using SysClock = brio::Clock<brio::ClockSource::crystal, 24'000'000>;
+// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
+using SysClock = brio::Clock<brio::has_xoschf ? brio::ClockSource::crystal
+                                              : brio::ClockSource::external,
+                             24'000'000>;
 constexpr SysClock clock;
 
 /// The suite's own reset-surviving breadcrumb: test f spans four resets
@@ -308,7 +312,7 @@ void ta_identity() {
     verdict("the silicon's fuses are the ones this image is built for", geometry);
     if (!geometry) {
         print(serial, "  the Flash legs of d, e and f will SKIP. Write the bench "
-                      "geometry with: bench.py fuses A bootsize=128 codesize=0", crlf);
+                      "geometry with: brio fuses <board> bootsize=128 codesize=0", crlf);
     }
     verdict("code executes from BOOT, so BOOT is not writable",
             Nvm::section_of(0) == FlashSection::boot &&

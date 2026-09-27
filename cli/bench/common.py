@@ -36,6 +36,8 @@ BOARD_TYPES = {
              "mcu": "avr128db32", "flash": "avrdude"},
     "db48": {"project": "avrdx", "preset": "avr128db48-release",
              "mcu": "avr128db48", "flash": "avrdude"},
+    "da48": {"project": "avrdx", "preset": "avr128da48-release",
+             "mcu": "avr128da48", "flash": "avrdude"},
     "c21j": {"project": "samc21", "preset": "samc21j-release",
              "mcu": "samc21j18a", "flash": "openocd",
              "target_cfg": "target/at91samdXX.cfg"},

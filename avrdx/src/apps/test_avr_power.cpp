@@ -30,6 +30,7 @@
 // | c the deadline guard | d the voters | e the standing restrictions
 // | z = a..e
 
+// build: boards = db48,da48
 // build: monitor_speed = 460800
 
 #include <avr/interrupt.h>
@@ -57,7 +58,8 @@ namespace {
 using namespace brio;
 
 using P = AvrPlatform;
-using SysClock = Clock<ClockSource::crystal, 24'000'000>;
+// The DB's 24 MHz crystal, or the DA's external 24 MHz clock on PA0.
+using SysClock = Clock<has_xoschf ? ClockSource::crystal : ClockSource::external, 24'000'000>;
 constexpr SysClock clock;
 
 using Serial = Uart<2, Route::alt1>;

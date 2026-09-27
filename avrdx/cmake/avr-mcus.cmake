@@ -11,8 +11,9 @@
 set(AVR_MCU_db28 avr128db28)  # 28-pin
 set(AVR_MCU_db32 avr128db32)  # 32-pin
 set(AVR_MCU_db48 avr128db48)  # 48-pin (the bench board)
+set(AVR_MCU_da48 avr128da48)  # 48-pin DA (the DA bench board)
 
-set(AVR_KNOWN_BOARDS db28 db32 db48)
+set(AVR_KNOWN_BOARDS db28 db32 db48 da48)
 
 # avr_short_board(<mcu> <out_var>) - inverse lookup, "avr128db48" -> "db48".
 # Used by the app-discovery loop to test an app's board allow-list against

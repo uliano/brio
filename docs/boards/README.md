@@ -9,6 +9,7 @@ the user's own manifest, below.
 | Board | Type | Page |
 |-------|------|------|
 | an AVR128DB48 board (self-built) | `db48` | [avr128db48.md](avr128db48.md) |
+| an AVR128DA48 board (self-built, REV 1.2 of a DA/DB/EA 48-pin design) | `da48` | [avr128da48.md](avr128da48.md) |
 | an ATSAMC21J18A board (self-built) | `c21j` | [samc21j.md](samc21j.md) |
 | ST Nucleo-G0B1RE | `g0b1re` | [nucleo-g0b1re.md](nucleo-g0b1re.md) |
 | ST Nucleo-G071RB | `g071rb` | [nucleo-g071rb.md](nucleo-g071rb.md) |
