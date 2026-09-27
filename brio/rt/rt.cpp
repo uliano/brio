@@ -27,12 +27,19 @@
  *
  * THE WORD PATH. A copy moves words when source and destination share
  * their alignment modulo the word (bytes up to a word boundary, then
- * words, then the tail), and bytes otherwise. No function here ever
- * performs a word access at an address that is not a multiple of the
- * word: ARMv6-M faults on one and Hazard3 traps, so the alignment test is
- * part of the contract, not an optimization. The events the kernel copies
- * are word-aligned by their own members whenever they are large enough to
- * reach memcpy at all (design/runtime.md, the census).
+ * blocks of four words, then single words, then the tail), and bytes
+ * otherwise. No function here ever performs a word access at an address
+ * that is not a multiple of the word: ARMv6-M faults on one and Hazard3
+ * traps, so the alignment test is part of the contract, not an
+ * optimization. The events the kernel copies are word-aligned by their
+ * own members whenever they are large enough to reach memcpy at all
+ * (design/runtime.md, the census).
+ *
+ * THE SHAPE OF THE LOOPS. Every loop that moves data is a do-while behind
+ * its own test, running to an end pointer: one branch a turn. A plain
+ * while loop comes out of -Os with the test at the top and a jump at the
+ * bottom, two taken branches a turn, which on the QingKe V4B cost a
+ * 52-byte copy twice the cycles (design/runtime.md has the numbers).
  *
  * THE SELF-CALL TRAP. GCC recognizes a byte loop that copies or fills and
  * replaces it with a call to memcpy or memset - here, a call to the very
@@ -72,47 +79,77 @@ uintptr_t rt_address(const void* p) {
     return reinterpret_cast<uintptr_t>(p);
 }
 
+// A block of the word path: four words a turn.
+constexpr size_t rt_block_bytes = 4u * rt_word_bytes;
+
 // Forward copy: correct for disjoint ranges and for a destination below
 // an overlapping source.
 void rt_copy_forward(unsigned char* d, const unsigned char* s, size_t n) {
-    if (((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
-        while (n != 0u && (rt_address(d) & rt_word_mask) != 0u) {
+    if (n >= rt_word_bytes && ((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
+        while ((rt_address(d) & rt_word_mask) != 0u) {
             *d++ = *s++;
             --n;
         }
-        while (n >= rt_word_bytes) {
-            *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWord*>(s);
-            d += rt_word_bytes;
-            s += rt_word_bytes;
-            n -= rt_word_bytes;
+        unsigned char* const blocks = d + (n & ~(rt_block_bytes - 1u));
+        if (d != blocks) {
+            do {
+                const RtWord w0 = reinterpret_cast<const RtWord*>(s)[0];
+                const RtWord w1 = reinterpret_cast<const RtWord*>(s)[1];
+                const RtWord w2 = reinterpret_cast<const RtWord*>(s)[2];
+                const RtWord w3 = reinterpret_cast<const RtWord*>(s)[3];
+                reinterpret_cast<RtWord*>(d)[0] = w0;
+                reinterpret_cast<RtWord*>(d)[1] = w1;
+                reinterpret_cast<RtWord*>(d)[2] = w2;
+                reinterpret_cast<RtWord*>(d)[3] = w3;
+                d += rt_block_bytes;
+                s += rt_block_bytes;
+            } while (d != blocks);
         }
+        n &= rt_block_bytes - 1u;
+        unsigned char* const words = d + (n & ~rt_word_mask);
+        if (d != words) {
+            do {
+                *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWord*>(s);
+                d += rt_word_bytes;
+                s += rt_word_bytes;
+            } while (d != words);
+        }
+        n &= rt_word_mask;
     }
-    while (n != 0u) {
-        *d++ = *s++;
-        --n;
+    // The bytes: a whole copy that is not co-aligned, or the tail.
+    if (n != 0u) {
+        unsigned char* const last = d + n;
+        do {
+            *d++ = *s++;
+        } while (d != last);
     }
 }
 
 // Backward copy, from the end: correct for a destination above an
-// overlapping source. The same word path, mirrored.
+// overlapping source. The same shape, mirrored, a word a turn.
 void rt_copy_backward(unsigned char* d, const unsigned char* s, size_t n) {
     d += n;
     s += n;
-    if (((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
-        while (n != 0u && (rt_address(d) & rt_word_mask) != 0u) {
+    if (n >= rt_word_bytes && ((rt_address(d) ^ rt_address(s)) & rt_word_mask) == 0u) {
+        while ((rt_address(d) & rt_word_mask) != 0u) {
             *--d = *--s;
             --n;
         }
-        while (n >= rt_word_bytes) {
-            d -= rt_word_bytes;
-            s -= rt_word_bytes;
-            n -= rt_word_bytes;
-            *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWord*>(s);
+        unsigned char* const words = d - (n & ~rt_word_mask);
+        if (d != words) {
+            do {
+                d -= rt_word_bytes;
+                s -= rt_word_bytes;
+                *reinterpret_cast<RtWord*>(d) = *reinterpret_cast<const RtWord*>(s);
+            } while (d != words);
         }
+        n &= rt_word_mask;
     }
-    while (n != 0u) {
-        *--d = *--s;
-        --n;
+    if (n != 0u) {
+        unsigned char* const first = d - n;
+        do {
+            *--d = *--s;
+        } while (d != first);
     }
 }
 
@@ -137,19 +174,37 @@ void* rt_memmove(void* dst, const void* src, size_t n) {
 void* rt_memset(void* dst, int c, size_t n) {
     auto* d = static_cast<unsigned char*>(dst);
     const auto v = static_cast<unsigned char>(c);
-    while (n != 0u && (rt_address(d) & rt_word_mask) != 0u) {
-        *d++ = v;
-        --n;
+    if (n >= rt_word_bytes) {
+        while ((rt_address(d) & rt_word_mask) != 0u) {
+            *d++ = v;
+            --n;
+        }
+        const RtWord w = static_cast<RtWord>(v) * static_cast<RtWord>(0x01010101u);
+        unsigned char* const blocks = d + (n & ~(rt_block_bytes - 1u));
+        if (d != blocks) {
+            do {
+                reinterpret_cast<RtWord*>(d)[0] = w;
+                reinterpret_cast<RtWord*>(d)[1] = w;
+                reinterpret_cast<RtWord*>(d)[2] = w;
+                reinterpret_cast<RtWord*>(d)[3] = w;
+                d += rt_block_bytes;
+            } while (d != blocks);
+        }
+        n &= rt_block_bytes - 1u;
+        unsigned char* const words = d + (n & ~rt_word_mask);
+        if (d != words) {
+            do {
+                *reinterpret_cast<RtWord*>(d) = w;
+                d += rt_word_bytes;
+            } while (d != words);
+        }
+        n &= rt_word_mask;
     }
-    const RtWord w = static_cast<RtWord>(v) * static_cast<RtWord>(0x01010101u);
-    while (n >= rt_word_bytes) {
-        *reinterpret_cast<RtWord*>(d) = w;
-        d += rt_word_bytes;
-        n -= rt_word_bytes;
-    }
-    while (n != 0u) {
-        *d++ = v;
-        --n;
+    if (n != 0u) {
+        unsigned char* const last = d + n;
+        do {
+            *d++ = v;
+        } while (d != last);
     }
     return dst;
 }

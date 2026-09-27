@@ -92,11 +92,12 @@ Nothing that motivates the runtime exists there.
 
 - `memcpy` and `memmove` copy words when source and destination share
   their alignment modulo the word: bytes up to a word boundary, then
-  words, then the tail. Otherwise they copy bytes. `memmove` copies
-  backwards when the destination overlaps the source from above.
+  blocks of four words, then single words, then the tail. Otherwise they
+  copy bytes. `memmove` copies backwards when the destination overlaps
+  the source from above, a word a turn.
 - `memset` fills bytes up to a word boundary, then the byte replicated
-  across a word, then the tail; with one pointer, the word path is
-  always reachable.
+  across blocks of four words, then single words, then the tail; with
+  one pointer, the word path is always reachable.
 - `memcmp` compares bytes; its callers are rare and short.
 - `strlen` and `memchr` scan bytes: the strings brio measures or
   searches at run time are short, and a word-at-a-time scan would buy
@@ -111,6 +112,20 @@ Nothing that motivates the runtime exists there.
 None of them performs a word access at an address that is not a
 multiple of the word: ARMv6-M faults on one and Hazard3 traps, so the
 alignment test is part of the contract and not an optimization.
+
+Every loop that moves data is a do-while behind its own test, running to
+an end pointer. Written as a plain while loop, it comes out of -Os with
+the test at the top and a jump at the bottom - two taken branches a turn
+- and a taken branch is dear on the cores that call these functions for
+an event: at -Os the Cortex-M4F and the M33 copy an event inline, the
+M0+, Hazard3 and the QingKe cores call `memcpy` for one of 52 bytes
+(the kernel's queue compiled for each). Measured
+on the QingKe V4B at 144 MHz, a 52-byte copy between word-aligned
+buffers: 215 cycles in the while shape, 101 in this one, against 91 for
+the full newlib's `memcpy`, which moves nine words a turn in 226 bytes
+of code where this `memcpy` takes 166. Four words a turn is the point
+where a 52-byte event, the largest the census below found, is three
+turns and one word.
 
 The file protects itself against GCC's loop recognition, which would
 turn the byte loops of `memcpy` and `memset` into calls to `memcpy` and
