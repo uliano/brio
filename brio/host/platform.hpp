@@ -2,8 +2,8 @@
  * platform.hpp
  *
  * Host (native test) implementation of the brio Platform concept: the
- * critical section only tracks its nesting depth (tests are single
- * threaded), the clock is a plain counter the test advances by hand, and
+ * critical section only tracks its nesting depth and counts its entries
+ * (tests are single threaded), the clock is a plain counter the test advances by hand, and
  * idle()/break_here() record their calls so tests can assert on them.
  * Time becomes deterministic arithmetic.
  *
@@ -22,13 +22,19 @@ namespace brio {
 struct HostPlatform {
     class CriticalSection {
     public:
-        CriticalSection() { ++depth; }
+        CriticalSection() {
+            ++depth;
+            ++entries;
+        }
         ~CriticalSection() { --depth; }
         CriticalSection(const CriticalSection&) = delete;
         CriticalSection& operator=(const CriticalSection&) = delete;
 
         /// Current nesting depth; must be back to 0 when no guard is alive.
         static inline uint8_t depth = 0;
+        /// How many times a guard was taken: a path that claims to need
+        /// none is checked by this staying still.
+        static inline uint32_t entries = 0;
     };
 
     static inline uint32_t ticks = 0;       ///< advanced by the test
@@ -62,6 +68,7 @@ struct HostPlatform {
         idle_calls = 0;
         break_calls = 0;
         CriticalSection::depth = 0;
+        CriticalSection::entries = 0;
         panic_record() = PanicRecord{};
     }
 };

@@ -10,8 +10,10 @@
  * which is run-to-completion said in one word: every dispatch runs to
  * its end, one after another, and nothing preempts an active object.
  *
- * The loop, in words: process matured time events; pop ONE event from
- * the highest-priority non-empty queue and dispatch it; if every queue
+ * The loop, in words: process matured time events; take ONE event from
+ * the highest-priority non-empty queue and dispatch it IN ITS SLOT (the
+ * queue hands it over by reference and keeps the slot until the AO's
+ * next take - kernel/event_queue.hpp); if every queue
  * was empty, re-check under the critical section and go idle - the
  * platform's idle() re-enables interrupts immediately followed by the
  * sleep instruction, so no wakeup can slip between the check and the
@@ -43,6 +45,8 @@
 #pragma once
 
 #include <stddef.h>
+
+#include <optional>
 
 #include "kernel/active_object.hpp"
 #include "kernel/platform.hpp"
@@ -141,11 +145,11 @@ public:
 private:
     template <typename Ao>
     static bool try_one() {
-        auto e = Ao::queue.pop();      // atomic in itself
-        if (!e.has_value()) {
+        const auto* e = Ao::queue.take();   // no copy, no critical section
+        if (e == nullptr) {
             return false;
         }
-        Ao::dispatch(*e);              // run-to-completion, interrupts free
+        Ao::dispatch(*e);              // in its slot, run-to-completion, interrupts free
         return true;
     }
 };

@@ -22,13 +22,16 @@
  *    dispatch runs no other AO runs (single stack, cooperative), so the
  *    AO's static data needs no locking against other AOs - only ISRs
  *    are concurrent, and they touch nothing but the queue (through
- *    post(), inside a critical section).
+ *    post(), inside a critical section). The Event it receives is the
+ *    one in the queue's slot, valid for the whole dispatch: never being
+ *    re-entered is also what keeps that slot from being taken twice.
  *
  * The concept checks only what the compiler can see: the names, the
- * signatures, that pop() yields optional<Event> and empty() a bool. It
- * does NOT check that dispatch is run-to-completion, that init() calls
- * start(), or that the queue is really an EventQueue: those are the
- * rules of the model, and Tenuto/Fsm/post are written assuming them.
+ * signatures, that take() hands over a pointer to an Event and empty()
+ * a bool. It does NOT check that dispatch is run-to-completion, that
+ * init() calls start(), or that the queue is really an EventQueue: those
+ * are the rules of the model, and Tenuto/Fsm/post are written assuming
+ * them.
  *
  * Fsm is one way to satisfy the contract (Event + dispatch for free),
  * not the contract itself: an AO with a plain switch and its own Event
@@ -39,7 +42,6 @@
 #pragma once
 
 #include <concepts>
-#include <optional>
 #include <type_traits>
 
 namespace brio {
@@ -49,7 +51,7 @@ template <typename A>
 concept ActiveObject = requires(const typename A::Event& e) {
     A::init();
     A::dispatch(e);
-    { A::queue.pop() } -> std::same_as<std::optional<typename A::Event>>;
+    { A::queue.take() } -> std::same_as<const typename A::Event*>;
     { A::queue.empty() } -> std::same_as<bool>;
 };
 

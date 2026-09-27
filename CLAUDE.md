@@ -336,7 +336,7 @@ restrictions. The antidote, in practice:
 
 Types PascalCase, functions/constants snake_case; private members
 trailing underscore; no `Ao` suffix on AO class names; queues speak
-push/pop; `std::optional` returns instead of bool + out-param; no
+push/pop (take for an element handed over in place); `std::optional` returns instead of bool + out-param; no
 `*_from_isr` API doubling; no redundant `inline` on in-class
 definitions; concepts instead of virtual interfaces; use the
 freestanding libstdc++ (variant, optional, span, concepts, bit,
@@ -1124,8 +1124,12 @@ brio/                    the framework, one directory per stratum:
     active_object.hpp      ActiveObject concept: what Tenuto requires of an
                            AO (Event, queue, init, dispatch) + the informal
                            half of the contract
-    event_queue.hpp        EventQueue<E, depth, P>: per-AO MPSC queue,
-                           saturating overflow counter, optional pop
+    event_queue.hpp        EventQueue<E, depth, P>: per-AO MPSC queue - the
+                           event built in its slot under the producers' mask,
+                           take() handing it over IN PLACE with no mask, depth
+                           = the events that can WAIT (depth + 1 slots, one
+                           for the event being served) -, saturating overflow
+                           counter, pop() as take() with a copy out
     fsm.hpp                Fsm<Derived, Alts...> flat HSM-ready machines
                            (Entry/Exit reserved, transition chaining, start);
                            match(e, lambdas...) + Overloaded

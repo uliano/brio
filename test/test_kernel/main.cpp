@@ -251,3 +251,96 @@ TEST_CASE("Pack answers ordering questions; a lender's borrowers must precede it
     K::init_all();
     CHECK(true);
 }
+
+// ---------------------------------------------------------------------------
+// The served event lives in its queue slot for the whole dispatch.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Depth 1, the smallest a queue may be: each dispatch posts the next hit
+// to itself. The served event holds its own slot, so the one waiting place
+// is free for the self-post and the chain runs to the end.
+struct Chain : brio::Fsm<Chain, Hit> {
+    static inline brio::EventQueue<Event, 1, HostPlatform> queue;
+    static void init() { start(&only); }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return handled(); },
+            [](Hit h) {
+                trace.push_back("ch:hit" + std::to_string(h.n));
+                if (h.n > 0) {
+                    brio::post<Chain>(Hit{static_cast<uint8_t>(h.n - 1)});
+                }
+                return handled();
+            },
+            [](auto) { return unhandled(); }
+        );
+    }
+};
+
+// A big event, posted to while it is being served: the posts stand for an
+// ISR landing in the middle of the dispatch, as many as the depth allows,
+// and the handler reads its own event again after them.
+struct Big { uint32_t w[12]; };
+struct Burst : brio::Fsm<Burst, Big> {
+    static inline brio::EventQueue<Event, 3, HostPlatform> queue;
+    static inline bool intact = true;
+    static void init() { start(&only); }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return handled(); },
+            [&e](const Big& b) {
+                const uint32_t first = b.w[0];
+                if (first == 1u) {
+                    for (uint32_t k = 0; k < 4; ++k) {   // depth 3 accepted, the 4th counted
+                        Big other{};
+                        for (auto& w : other.w) {
+                            w = 100u + k;
+                        }
+                        brio::post<Burst>(other);
+                    }
+                    const Big& again = std::get<Big>(e);
+                    for (const auto& w : again.w) {
+                        intact = intact && w == 1u;
+                    }
+                }
+                trace.push_back("bu:" + std::to_string(first));
+                return handled();
+            },
+            [](auto) { return unhandled(); }
+        );
+    }
+};
+
+} // namespace
+
+TEST_CASE("a depth-1 AO can post to itself from its own dispatch") {
+    reset();
+    using KC = brio::Tenuto<HostPlatform, Chain>;
+    KC::init_all();
+    trace.clear();
+
+    brio::post<Chain>(Hit{3});
+    while (KC::step()) {}
+    CHECK(trace == Trace{"ch:hit3", "ch:hit2", "ch:hit1", "ch:hit0"});
+    CHECK(Chain::queue.overflows() == 0);
+}
+
+TEST_CASE("posts during a dispatch never touch the event being served") {
+    reset();
+    using KB = brio::Tenuto<HostPlatform, Burst>;
+    KB::init_all();
+    trace.clear();
+    Burst::intact = true;
+
+    Big one{};
+    for (auto& w : one.w) {
+        w = 1u;
+    }
+    brio::post<Burst>(one);
+    while (KB::step()) {}
+    CHECK(Burst::intact);
+    CHECK(Burst::queue.overflows() == 1);   // depth waited, the one past it counted
+    CHECK(trace == Trace{"bu:1", "bu:100", "bu:101", "bu:102"});
+}

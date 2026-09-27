@@ -14,8 +14,9 @@
  *    alternatives Entry and Exit prepended by this template: the handler
  *    receives them through the same visit as ordinary events. They are
  *    empty structs, so they do not enlarge the queue slots; they are
- *    delivered synchronously by the transition machinery and are never
- *    meant to be posted (the kernel post layer excludes them);
+ *    delivered synchronously by the transition machinery, each from one
+ *    constant Event, and are never meant to be posted (the kernel post
+ *    layer excludes them);
  *  - a handler returns handled(), unhandled() (today: ignore; tomorrow:
  *    ask the parent - the HSM hook), or transition(&next_state);
  *  - a transition delivers Exit to the old state, switches, delivers
@@ -107,7 +108,7 @@ public:
     /// Arm the machine on its initial state and deliver the first Entry.
     static void start(Handler initial) {
         state_ = initial;
-        follow(state_(Event{Entry{}}));
+        follow(state_(entry_event));
     }
 
     /// Deliver one event to the current state, run-to-completion.
@@ -119,11 +120,18 @@ public:
     static Handler current() { return state_; }
 
 private:
+    /// The two reserved events, built once as constants: a handler takes
+    /// its event by const reference, so one object serves every delivery,
+    /// where a temporary built per delivery costs the compiler a clear of
+    /// the whole variant.
+    static constexpr Event entry_event{std::in_place_type<Entry>};
+    static constexpr Event exit_event{std::in_place_type<Exit>};
+
     static void follow(Status s) {
         while (s.kind == Status::Kind::transition) {
-            (void)state_(Event{Exit{}});     // exit is an action, not a decision
+            (void)state_(exit_event);        // exit is an action, not a decision
             state_ = s.target;
-            s = state_(Event{Entry{}});      // entry may chain (pass-through)
+            s = state_(entry_event);         // entry may chain (pass-through)
         }
         // handled: done. unhandled: ignored today, HSM bubble hook tomorrow.
     }

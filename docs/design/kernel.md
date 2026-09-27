@@ -39,7 +39,8 @@ plainly: **an ISR body runs to completion too - no interrupt nests
 over another.** There are two contexts, one boundary between them,
 and one primitive that guards it. Every service that an ISR touches
 is built for exactly that boundary and no other: `EventQueue` masks
-interrupts around its copies, `MeterLatch` and `Trace` around their
+interrupts around the one copy a post makes, `MeterLatch` and `Trace`
+around their
 one index, `Ring` is single-producer/single-consumer because one side
 is an ISR and the other the loop. An interrupt that could preempt an
 interrupt would be a third kind of context, and every driver whose
@@ -81,8 +82,9 @@ force a system-wide event type and cost an indirect call per event).
 It states what it needs as a **concept**, `ActiveObject`:
 
 - a nested type `Event` - the AO's own event variant;
-- a static member `queue` whose `pop()` yields `std::optional<Event>`
-  and whose `empty()` yields `bool` (an `EventQueue`);
+- a static member `queue` whose `take()` hands over a `const Event*` -
+  the oldest waiting event IN ITS SLOT, or null - and whose `empty()`
+  yields `bool` (an `EventQueue`);
 - static `init()` - called once by `Tenuto::init_all()` in pack order,
   before the first event is served; an Fsm-based AO calls
   `start(&initial)` here;
@@ -95,6 +97,8 @@ kernel is written assuming: dispatch is RTC and is only ever called
 from the loop, interrupts enabled, never re-entered; the AO's static
 data therefore needs no locking against other AOs (only ISRs are
 concurrent, and they touch nothing but the queue, through `post()`);
+the event a dispatch receives stays in its queue slot until the AO's
+next take, which never being re-entered makes the whole dispatch;
 `init()` must leave the AO in a real state; the queue is really an
 `EventQueue`. Wherever this document says "contract" it means both
 halves.
@@ -131,11 +135,13 @@ franca between publishers and subscribers, and two AOs that accept
 the same struct simply both list it in their variant.
 
 Events are **copied** into per-AO queues - no pools, no reference
-counting, no shared ownership. The 8-byte size target is a
-**guideline** for the event envelope, not a law: every slot of a
-queue pays that AO's largest alternative, and the push copies it
-with interrupts masked (on an 8-bit core at 24 MHz, ~1 us per 8
-bytes). Per-AO deviations are legal with numbers in hand, and nobody
+counting, no shared ownership - and copied ONCE: `post()` builds the
+event in its slot and the kernel dispatches it from there, with no
+temporary on the way in and no copy on the way out (section 5). The
+8-byte size target is a **guideline** for the event envelope, not a
+law: every slot of a queue pays that AO's largest alternative, and the
+push copies it with interrupts masked (on an 8-bit core at 24 MHz,
+~1 us per 8 bytes). Per-AO deviations are legal with numbers in hand, and nobody
 else pays for them (the queues are per-AO). Measured on one platform
 (avr-gcc 16.2, -Os): `std::visit` on a 4-alternative variant compiles
 to a plain switch, +30 bytes flash and identical RAM vs a hand-tagged
@@ -266,14 +272,30 @@ One `EventQueue<E, depth, Platform>` per AO, **multi-producer** (any
 ISR, any main-loop code, any timer) **single-consumer** (the
 scheduler). The kernel assumes no atomic read-modify-write from the
 machine (the smallest candidate cores have none), so the honest
-primitive is a brief interrupts-off section - the platform's
-`CriticalSection`: `push` enters it, copies the event, leaves; `pop`
-does the same around the index update. There
-are deliberately no `*_from_isr` twins: one always-safe API. Depth is
-a per-AO template parameter sized on that AO's real burst; it may be
-any number (no power-of-two rounding, no sacrificed slot: rounding a
-depth of 5 to 8 would waste real RAM to speed up a wrap that is
-already two instructions).
+primitive for the PRODUCERS is a brief interrupts-off section - the
+platform's `CriticalSection`: `push` enters it, builds the event in
+its slot (a variant's alternative emplaced there), publishes it,
+leaves. The CONSUMER takes no mask at all: `take()` hands the oldest
+event over in its slot, each side writing only its own one-byte
+counter and reading the other's, with a compiler fence between a slot
+and the counter that publishes or releases it (a byte is one access on
+every platform, `atomic_width`). There are deliberately no
+`*_from_isr` twins: one always-safe API.
+
+**Depth is the number of events that can WAIT.** The event being
+served is not one of them: the slot `take()` handed over stays the
+consumer's until its next take, so the queue holds `depth + 1` slots
+and a producer finds `depth` free places whether an event is being
+served or not. A post from inside a dispatch - an AO posting to itself
+- counts against the same depth as a post from anywhere else, and a
+full queue overflows at the same moment in every state; `capacity()`
+answers `depth`, `size()` the events waiting. The slot beyond depth is
+the storage the served event needs while its dispatch reads it, which
+lives in the queue rather than on the consumer's stack. Depth is a
+per-AO template parameter sized on that AO's real burst; it may be any
+number (no power-of-two rounding: rounding a depth of 5 to 8 would
+waste real RAM to speed up a wrap that is already two
+instructions).
 
 `Ring` (SPSC, see [ring.md](ring.md)) is NOT the event queue: it stays
 at the BYTE level inside drivers - the ISR pushes bytes lock-free,
@@ -300,11 +322,15 @@ of a programming error rather than a statistic. A single-core
 platform has no such member, and its queues carry neither the check
 nor the counter's byte.
 
-**C++ note - `std::optional` returns.** `pop()` returns
-`std::optional<E>` (C++17): "an E, or nothing". The caller writes `if
-(auto e = q.pop()) dispatch(*e);` and cannot forget to test, where a
-`bool pop(E& out)` would leave a half-written out-parameter around. A
-project style rule: optional returns instead of bool + out-param.
+**C++ note - `std::optional` returns.** `pop()` - `take()` with a copy
+out, for the code that drains a queue by hand, a test or a program
+pumping an AO outside a kernel - returns `std::optional<E>` (C++17):
+"an E, or nothing". The caller writes `if (auto e = q.pop())
+dispatch(*e);` and cannot forget to test, where a `bool pop(E& out)`
+would leave a half-written out-parameter around. A project style rule:
+optional returns instead of bool + out-param. `take()` returns a
+pointer or null instead, because what it hands over IS a place - a
+slot - and not a value.
 
 ## 6. State machines (`kernel/fsm.hpp`)
 
@@ -407,8 +433,8 @@ The loop (`run()`), one turn:
 
 1. `TimeEvents<P>::process()` - post every matured time event (main
    context, see section 9);
-2. `step()` - pop ONE event from the highest-priority non-empty queue
-   and dispatch it, run-to-completion; an urgent event arriving during
+2. `step()` - take ONE event from the highest-priority non-empty queue
+   and dispatch it in its slot, run-to-completion; an urgent event arriving during
    a slow dispatch is served right after it because the next turn
    rescans from the top;
 3. if `step()` found nothing, `idle_if_empty()`: re-check every queue
@@ -654,8 +680,8 @@ Every target stratum ships its implementation as `<stratum>/platform.hpp`
 `Ch32v00xPlatform<TB>`, `Rp2040Platform<core, TB>` - the last three
 templated on their timebase, the last one on its core too, see
 each target's `platform.md`);
-`HostPlatform` (`host/platform.hpp`) gives a depth-counting
-critical section, a test-controlled virtual clock and recording
+`HostPlatform` (`host/platform.hpp`) gives a critical section that
+counts its depth and its entries, a test-controlled virtual clock and recording
 idle/break - time becomes deterministic arithmetic in tests
 (`ctest --preset host`), which is why the host tests cover first what
 is hard to provoke on real hardware: queue overflow, entry/exit
@@ -680,7 +706,7 @@ each member costs or does on its core.
 | rp2040 | `Rp2040Platform<core, TB>` (`rp2040/platform.hpp`) | one type per core, templated on the core and its timebase (the core's own SysTick ticker); the critical section is PRIMASK, per core; `idle()` is WFI; `atomic_width` 4; BKPT as the SAM's; `on_own_core()` reads SIO's CPUID and `Doorbell` is the SIO FIFO towards the core ([../rp2040/multicore.md](../rp2040/multicore.md)) |
 | rp2350 | `Rp2350Platform<core, TB>` (`rp2350/platform.hpp`) | ONE PLATFORM TYPE PER CORE as on the RP2040, and ONE FOR BOTH PROCESSOR ARCHITECTURES: everything target-specific is a name `rp2350/core.hpp` exports, so the critical section is PRIMASK on one half and `mstatus.MIE` on the other - per core in both spellings - while `idle()` is a wait-for-interrupt instruction on both, and no member of the concept is written twice. The lost-wakeup window is absent on both halves for two DIFFERENT reasons - PRIMASK does not stop a pending interrupt from waking the core on one, and this RISC-V core's `wfi` IGNORES `mstatus.MIE` on the other, which is NOT the QingKe cores' behaviour; `atomic_width` 4; `break_here()` is BKPT or `ebreak`; a `.noinit` breadcrumb per core; `on_own_core()` and `Doorbell` as on the RP2040, the doorbell here being a register of its own and not the mailbox FIFO; no `idle_until()`, and `sleep_hook` for a low-power state that is not a sleep instruction ([../rp2350/platform.md](../rp2350/platform.md)) |
 | stm32f4 | `Stm32f4Platform<TB>` (`stm32f4/platform.hpp`) | templated on its timebase like the G0's, with no Tickless timebase on this family yet, so no `idle_until()`; `idle()` is WFI = Sleep, SLEEPDEEP never written; the critical section is PRIMASK on a core that HAS BASEPRI and does not use it - the promise kept by one priority for every line, as the SAM does; `atomic_width` 4; BKPT as the SAM's, on a core that could read DHCSR and does not ([../stm32f4/platform.md](../stm32f4/platform.md)) |
-| host | `HostPlatform` (`host/platform.hpp`) | a depth-counting critical section, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test; `HostCore<n>` adds the two members of a core of several over a test-set current core and a counting doorbell |
+| host | `HostPlatform` (`host/platform.hpp`) | a critical section that counts its depth and its entries, a virtual clock, recording `idle()` and `break_here()`; `atomic_width` 4 - `Ring`'s guarded path is covered by a second host platform stating 1 in its own test; `HostCore<n>` adds the two members of a core of several over a test-set current core and a counting doorbell |
 
 **C++ note - `if constexpr`.** `if constexpr (cond)` (C++17) with a
 compile-time condition discards the untaken branch entirely - it is
@@ -700,7 +726,7 @@ priority, the critical section, `TimeEvents<P>`, the queue typed by
 P - and every kernel static a monostate keyed by P, so the type IS
 the core. Never one kernel on two cores: pack-order priority would
 lose its meaning, dispatch loans would break (the lender re-dispatching
-on one core while the borrower reads on the other), every push and pop
+on one core while the borrower reads on the other), every push and take
 would pay a lock the smallest cores have not got, and the gain - load
 balancing - is what a static system does not want.
 
@@ -776,7 +802,7 @@ two `HostCore` platforms stepped by hand).
 |--------|--------|------|
 | `ActiveObject` (concept), `queue_on<Ao, P>` | `active_object.hpp` | what Tenuto requires of an AO; whether an AO's queue is P's (its core) |
 | `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`, `on_own_core`, `Doorbell`) |
-| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | per-AO MPSC queue, overflow counter, the mispost check of a core-aware platform |
+| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | per-AO MPSC queue: the event built in its slot, `take()` handing it over in place, `depth` the events that can wait; overflow counter, the mispost check of a core-aware platform |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, state machine base, Event, Status |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is util/inbox.hpp's, section 12) |
 | `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |

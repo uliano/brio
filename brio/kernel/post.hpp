@@ -5,7 +5,8 @@
  * notification out to a compile-time subscriber list, ReplyTo returns a
  * result to whoever asked ("commands are addressed, facts are
  * published, replies return to sender"). One copy per receiver - value
- * semantics, no pools, no reference counting.
+ * semantics, no pools, no reference counting: the event is built in the
+ * receiver's queue slot and served from there.
  *
  * The reserved FSM events (Entry/Exit) are excluded at compile time:
  * they are delivered synchronously by the transition machinery and must
@@ -36,7 +37,7 @@ void post(const Ev& e) {
     static_assert(!std::same_as<Ev, Entry> && !std::same_as<Ev, Exit>,
                   "Entry/Exit are reserved for the transition machinery "
                   "and cannot be posted");
-    Ao::queue.push(typename Ao::Event{e});
+    Ao::queue.push(e);
 }
 
 /// A compile-time subscriber list for publish().
