@@ -282,9 +282,21 @@ def speed_for(name, app):
     return env_speed(info)
 
 
+def console_of(entry):
+    """A board's console on THIS host, or None. The manifest's "console" is
+    a path, or a dict of paths keyed by host system ("linux", "darwin"):
+    the same board is one device node on Linux (/dev/serial/by-path or
+    by-id) and another on macOS (a CH340 is /dev/cu.usbserial-<location>,
+    named after the USB location it is plugged into, like by-path)."""
+    path = entry.get("console")
+    if isinstance(path, dict):
+        path = path.get("darwin" if sys.platform == "darwin" else "linux")
+    return path or None
+
+
 def console_path(name):
     entry = board_entry(name)
-    path = entry.get("console")
+    path = console_of(entry)
     if not path:
         die("board '%s' has no console in the manifest" % name)
     if not os.path.exists(path):
@@ -311,18 +323,50 @@ USB_PROGRAMMERS = {
 }
 
 
+def _usb_devices_darwin():
+    """The USB devices macOS sees, as dicts of sysfs-like attribute names,
+    read from the IOUSB plane of the I/O Registry (no root needed)."""
+    out = subprocess.run(["ioreg", "-p", "IOUSB", "-l", "-w0"],
+                         capture_output=True, text=True).stdout
+    devices, cur = [], None
+    for line in out.splitlines():
+        if "+-o " in line:
+            cur = {}
+            devices.append(cur)
+            continue
+        m = re.search(r'"(idVendor|idProduct|USB Product Name|USB Serial Number)" = (.*)$', line)
+        if m and cur is not None:
+            key, val = m.group(1), m.group(2).strip().strip('"')
+            if key in ("idVendor", "idProduct"):
+                val = "%04x" % int(val)
+            cur[{"idVendor": "idVendor", "idProduct": "idProduct",
+                 "USB Product Name": "product",
+                 "USB Serial Number": "serial"}[key]] = val
+    return devices
+
+
 def usb_programmers():
-    """Attached EDBG-class probes, read from sysfs (no root needed): the USB
-    serial number is what avrdude's -P usb:<serial> selects."""
+    """Attached EDBG-class probes, read from sysfs on Linux and from the I/O
+    Registry on macOS (no root needed either way): the USB serial number is
+    what avrdude's -P usb:<serial> selects."""
     found = []
-    base = "/sys/bus/usb/devices"
-    for dev in sorted(os.listdir(base)):
+    if sys.platform == "darwin":
+        entries = _usb_devices_darwin()
+    else:
+        base = "/sys/bus/usb/devices"
+        entries = []
+        for dev in sorted(os.listdir(base)):
+            e = {}
+            for what in ("idVendor", "idProduct", "product", "serial"):
+                try:
+                    with open(os.path.join(base, dev, what), encoding="ascii") as f:
+                        e[what] = f.read().strip()
+                except OSError:
+                    pass
+            entries.append(e)
+    for dev in entries:
         def attr(what):
-            try:
-                with open(os.path.join(base, dev, what), encoding="ascii") as f:
-                    return f.read().strip()
-            except OSError:
-                return ""
+            return dev.get(what, "")
         vid = attr("idVendor").lower()
         if vid not in USB_PROGRAMMERS:
             continue

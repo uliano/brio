@@ -41,6 +41,7 @@
 #  scriptable instrument peer (clock stretching, NACK injection, arbitration).
 #  `duo` is that shape; with one board on the desk it cannot yet be exercised.
 import argparse
+import glob
 import json
 import os
 import re
@@ -55,7 +56,16 @@ from cli.bench.console import cmd_run, cmd_console, cmd_duo   # noqa: E402
 
 
 def cmd_list(args):
-    for kind in ("by-path", "by-id"):
+    if sys.platform == "darwin":
+        # macOS has no /dev/serial tree: a USB serial bridge is a /dev/cu.*
+        # node named after its USB location (usbserial-*) or its serial
+        # (usbmodem*).
+        ports = sorted(glob.glob("/dev/cu.usb*") + glob.glob("/dev/cu.wchusbserial*"))
+        print("/dev/cu.* (USB):")
+        for p in ports or ["(none)"]:
+            print("  %s" % p)
+        print("")
+    for kind in () if sys.platform == "darwin" else ("by-path", "by-id"):
         d = "/dev/serial/" + kind
         print("/dev/serial/%s:" % kind)
         if not os.path.isdir(d):
@@ -82,8 +92,8 @@ def cmd_list(args):
     if not manifest.BOARDS:
         print("  (empty)")
     for name, entry in sorted(manifest.BOARDS.items()):
-        console = entry.get("console") or "(none)"
-        mark = "ok     " if entry.get("console") and os.path.exists(console) \
+        console = console_of(entry) or "(none)"
+        mark = "ok     " if console_of(entry) and os.path.exists(console) \
                else "MISSING"
         prog = entry["programmer"]
         if prog["type"] == "serialupdi":

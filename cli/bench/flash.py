@@ -488,7 +488,7 @@ def cmd_flash(args):
     if spec["flash"] == "wch_openocd":
         # The image is already running and may have printed into a port
         # nobody holds open: clear the probe's bridge before anyone does.
-        wch_probe_reset(prog, board_entry(args.name).get("console"))
+        wch_probe_reset(prog, console_of(board_entry(args.name)))
     return rc
 
 

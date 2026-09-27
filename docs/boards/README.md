@@ -96,7 +96,13 @@ put it in, whichever architecture was running before
 them. A bridge with no USB serial (a CH340) is addressed by
 `/dev/serial/by-path`, i.e. by the USB socket it is plugged into (two
 CH340s collide in `by-id`); a bridge with a real serial (a Nucleo's
-ST-LINK) by `/dev/serial/by-id`, stable across sockets. **Programmers**
+ST-LINK) by `/dev/serial/by-id`, stable across sockets. macOS has no
+`/dev/serial` tree: there a CH340 is `/dev/cu.usbserial-<location>`,
+named after the USB location it is plugged into - the same role as
+`by-path` - and a board used from both systems names its console per
+system in the manifest (`{"linux": ..., "darwin": ...}`). `brio list`
+reads the attached probes from sysfs on Linux and from the I/O
+Registry on macOS. **Programmers**
 are addressed by their own USB serial, and only need one when two of
 a kind are attached. The kinds - `atmelice_updi`, `serialupdi`,
 `openocd_cmsisdap`, `openocd_stlink`, `stlink_msd`, `wch_link` - are

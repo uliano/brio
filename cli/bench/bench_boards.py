@@ -59,6 +59,10 @@
 #  board whose bridge carries a real serial (a Nucleo's ST-LINK) by
 #  /dev/serial/by-id, stable across sockets. Consoles are observability
 #  only: firmware never goes in through them.
+#  A board used from more than one host system gives "console" as a dict
+#  keyed by system, {"linux": ..., "darwin": ...}. macOS has no
+#  /dev/serial tree: a CH340 is /dev/cu.usbserial-<location>, named after
+#  the USB location it is plugged into (the by-path of macOS).
 #
 #  PROGRAMMERS, by "type":
 #    atmelice_updi / pickit4_updi   an EDBG-class probe over UPDI (avrdude);
