@@ -218,8 +218,16 @@ void tb_critical() {
             last = now;
         }
     }
+    // The pending tick is taken some instructions AFTER the csrsi that
+    // unmasks it, not before the next one (measured: read at once, the
+    // count has not moved yet), so wait for it - bounded - and say how long.
+    const uint32_t unmasked = cycles_now();
+    while (Ticker::ticks() == t0 && cycles_between(unmasked, cycles_now()) < 1000u) {
+    }
+    const uint32_t settle = cycles_between(unmasked, cycles_now());
     const uint32_t through_mask = Ticker::ticks() - t0;
-    print(serial, "  5 ms with interrupts masked advanced the tick by ", through_mask, " ms", crlf);
+    print(serial, "  5 ms with interrupts masked advanced the tick by ", through_mask,
+          " ms, the tick in within ", settle, " cycles of the unmask", crlf);
     bench.verdict("a masked window LOSES ticks (the STK interrupt is a pending "
                   "bit: one tick is delivered, the rest coalesce)",
                   through_mask >= 1u && through_mask <= 5u);
