@@ -29,12 +29,18 @@ synchronized into the clk_rtc domain: a write takes two clk_rtc
 periods to land, and a coherent reading is RTC_0 before RTC_1, the
 first read latching the second.
 
-Three facts measured that the chapter does not state: the block's
+Four facts measured that the chapter does not state: the block's
 reset completes without clk_rtc (the converter's does not); A
 CALENDAR ENABLED FROM A STOP TICKS AT ONCE - one second some 130 us
 after RTC_ACTIVE, whatever the divider's phase was, the next a whole
 second later, where a LOAD into a running calendar ticks nothing -
 so a set value reads one second on within microseconds unless undone;
+a LOAD written with the calendar stopped is NOT seen before that tick
+in every timing - the chapter's own sequence (LOAD, then the enable)
+showed the value before the tick in one build and never in another
+with the same instructions placed elsewhere in flash, the read path
+going from the old calendar straight to the value plus one second - so
+the value is loaded after the tick, into the running calendar;
 and THE ALARM IS A LEVEL - the interrupt stands for the whole matching
 second, and the disarm itself lands two clk_rtc periods later, during
 which the handler is re-entered (124 entries in 43 us measured), so a
@@ -56,10 +62,11 @@ handler masks the line first.
   the one-pulse-per-second input, the block out of reset, CLKDIV_M1
   for a one-second reference; the calendar not started), `clock_hz`,
   `reference_divider`, `release`; `running` (RTC_ACTIVE), `enabled`,
-  `set(datetime)` (the chapter's sequence, then the value waited for
-  in the read path, the enable's tick waited for and undone by a
-  second LOAD, the value waited for again: the first second whole,
-  the value the one asked for, about 200 us in all), `adjust(datetime)`
+  `set(datetime)` (the two words written into the stopped calendar,
+  the calendar enabled, the enable's tick waited for in the read path,
+  THEN the LOAD into the running calendar and the value waited for:
+  the first second whole, the value the one asked for, about 210 us
+  in all), `adjust(datetime)`
   (a LOAD into the running calendar), `enable(on)`, `read()` (RTC_0
   then RTC_1; nothing while stopped), `force_not_leap_year(on)`;
   `alarm(RtcAlarm)` (written disarmed, then armed), `arm_alarm` /
@@ -108,10 +115,11 @@ the boundaries crossed one second at a time.
   month, the weekday of four known dates, the refusals (a 4096th year,
   a 13th month, a 30 February, a 7th weekday, a 24th hour).
 - SET AND READ: a date set reads back the same, set() returning in
-  about 200 us; the calendar's second is 1.000 s on the timer (999998
-  us between two rollovers); the first second after a set is a whole
-  one at three phases of the set (the enable's tick waited for and
-  undone); three seconds of the timer are three of the calendar;
+  about 210 us in two builds that place its code differently; the
+  calendar's second is 1.000 s on the timer (999998 us between two
+  rollovers); the first second after a set is a whole one at three
+  phases of the set (the enable's tick waited for, the value loaded
+  after it); three seconds of the timer are three of the calendar;
   read() declines while stopped.
 - THE BOUNDARIES, one second each: the year rolls with the weekday,
   29 February in 2024 and not in 2023, 1 March after 29 February 2024,

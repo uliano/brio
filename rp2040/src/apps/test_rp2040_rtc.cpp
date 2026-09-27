@@ -164,7 +164,7 @@ void tb_set_read() {
     print(serial, crlf);
     bench.verdict("a date set is read back the same, set() returning once the read path shows it: within 500 us "
                   "(RTC_ACTIVE after two clk_rtc periods, the enable's own tick some 130 us later, the value loaded "
-                  "again after it)",
+                  "into the running calendar after it)",
                   set && back && *back == d && took < 500u);
     RtcDateTime s1{};
     RtcDateTime s2{};
@@ -196,7 +196,7 @@ void tb_set_read() {
         }
     }
     bench.verdict("the first second after a set is a whole one, into the value's next second, at three phases of the "
-                  "set (the enable's tick waited for and undone)",
+                  "set (the enable's tick waited for, the value loaded after it)",
                   whole == 3u);
     const auto a = Rtc::read();
     spin_us(3'000'000);

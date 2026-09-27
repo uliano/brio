@@ -43,10 +43,17 @@
  * calendar enabled from a stop counts one second at once, some 130 us
  * after RTC_ACTIVE, whatever the divider's phase was (measured: the
  * value set reads one second on, the next rollover a whole second
- * after that tick; a LOAD into a running calendar ticks nothing). So
- * set() waits for that tick in the read path, loads the value again,
- * and returns once the read path shows it: the first second is then
- * a whole one and the value the one asked for.
+ * after that tick; a LOAD into a running calendar ticks nothing). AND
+ * A LOAD WRITTEN WITH THE CALENDAR STOPPED IS NOT SEEN BEFORE THAT
+ * TICK IN EVERY TIMING (measured: 4.8.5.2's sequence - LOAD, then the
+ * enable - showed the value before the tick in one build and never in
+ * another with the same instructions placed elsewhere in flash, the
+ * read path going from the old calendar straight to the value plus one
+ * second). So set() does not load before the enable: it starts the
+ * calendar stopped with the two words written, waits for the enable's
+ * tick in the read path, THEN loads into the running calendar and
+ * returns once the read path shows the value: the first second is a
+ * whole one and the value the one asked for, in any timing.
  *
  * WHAT THE SILICON DOES NOT DO (4.8.1.1, 4.8.2): it checks no field's
  * range - an illegal value is undefined behaviour, so set() refuses
@@ -259,13 +266,14 @@ struct Rtc {
     static bool running() { return (regs().CTRL & RTC_CTRL_RTC_ACTIVE_BITS) != 0u; }
     static bool enabled() { return (regs().CTRL & RTC_CTRL_RTC_ENABLE_BITS) != 0u; }
 
-    /// Set the calendar and start it (4.8.5.2's sequence: disabled and
-    /// waited inactive, the two words, LOAD, enabled and waited active)
-    /// - AND WAITED FOR IN THE READ PATH: RTC_ACTIVE rises before the
-    /// value has crossed back to RTC_0 / RTC_1 (measured: a read at
-    /// RTC_ACTIVE still answers the old calendar), so set() returns
-    /// once read() shows what was written. Refused for a value outside
-    /// table 551; the silicon checks none.
+    /// Set the calendar and start it: disabled and waited inactive, the
+    /// two words, enabled and waited active, the enable's own tick
+    /// waited for in the read path, THEN the LOAD into the running
+    /// calendar (the file header: a LOAD before the enable is not seen
+    /// before that tick in every timing) - AND WAITED FOR IN THE READ
+    /// PATH: RTC_ACTIVE rises before a value has crossed back to RTC_0 /
+    /// RTC_1, so set() returns once read() shows what was written.
+    /// Refused for a value outside table 551; the silicon checks none.
     static bool set(const RtcDateTime& d, uint32_t spins = 1'000'000u) {
         if (!rtc_datetime_valid(d)) {
             return false;
@@ -278,29 +286,27 @@ struct Rtc {
         }
         regs().SETUP_0 = rtc_word0_of(d);
         regs().SETUP_1 = rtc_word1_of(d);
-        regs().CTRL = (regs().CTRL & RTC_CTRL_FORCE_NOTLEAPYEAR_BITS) | RTC_CTRL_LOAD_BITS;
         regs().CTRL = (regs().CTRL & RTC_CTRL_FORCE_NOTLEAPYEAR_BITS) | RTC_CTRL_RTC_ENABLE_BITS;
         while (!running() && spins-- != 0u) {
         }
         if (!running()) {
             return false;
         }
-        // The value seen in the read path (the old calendar stands there
-        // until it lands), then the enable's tick seen there too and
-        // undone by a second LOAD (the file header), then the value
-        // again. A tick that does not show within its bound is not
-        // waited for.
-        if (!wait_shown(d, spins)) {
-            return false;
-        }
+        // The enable's tick, seen as ANY change of the read path - which
+        // may still hold whatever calendar stood there, the words above
+        // not loaded yet. A tick that does not show within its bound is
+        // not waited for.
+        const uint32_t was0 = regs().RTC_0;
+        const uint32_t was1 = regs().RTC_1;
         uint32_t tick_spins = 4'000u;
         while (tick_spins-- != 0u) {
-            const auto back = read();
-            if (back && back->second != d.second) {
-                hw_set(regs().CTRL, RTC_CTRL_LOAD_BITS);
+            const uint32_t now0 = regs().RTC_0;
+            const uint32_t now1 = regs().RTC_1;
+            if (now0 != was0 || now1 != was1) {
                 break;
             }
         }
+        hw_set(regs().CTRL, RTC_CTRL_LOAD_BITS);
         return wait_shown(d, spins);
     }
     /// A new value into a RUNNING calendar (4.8.5.2's note): the two
