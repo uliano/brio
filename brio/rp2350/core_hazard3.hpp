@@ -130,11 +130,11 @@ inline void disable_interrupts() { __asm__ volatile("csrci mstatus, 8" ::: "memo
  */
 class InterruptGuard {
 public:
-    InterruptGuard() {
+    [[gnu::always_inline]] InterruptGuard() {
         __asm__ volatile("csrrci %0, mstatus, 8" : "=r"(saved_) :: "memory");
     }
 
-    ~InterruptGuard() {
+    [[gnu::always_inline]] ~InterruptGuard() {
         if ((saved_ & mstatus_mie) != 0u) {
             __asm__ volatile("csrsi mstatus, 8" ::: "memory");
         }

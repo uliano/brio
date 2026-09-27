@@ -68,8 +68,8 @@ inline constexpr uint8_t irq_priority_levels = 1u << __NVIC_PRIO_BITS;
  */
 class InterruptGuard {
 public:
-    InterruptGuard() : saved_(__get_PRIMASK()) { __disable_irq(); }
-    ~InterruptGuard() { __set_PRIMASK(saved_); }
+    [[gnu::always_inline]] InterruptGuard() : saved_(__get_PRIMASK()) { __disable_irq(); }
+    [[gnu::always_inline]] ~InterruptGuard() { __set_PRIMASK(saved_); }
 
     InterruptGuard(const InterruptGuard&) = delete;
     InterruptGuard& operator=(const InterruptGuard&) = delete;

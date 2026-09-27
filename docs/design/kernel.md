@@ -626,6 +626,9 @@ target's include: the app names its platform once):
 - `CriticalSection`: RAII guard, constructor masks interrupts,
   destructor restores the previous state (nests); enter/leave are
   also compiler memory barriers, so shared data needs no `volatile`;
+  both halves are forced inline (`[[gnu::always_inline]]` in every
+  stratum), because a half the compiler outlines puts a call and a
+  return inside the window it opens - masked time for nothing;
 - `idle()`: called with interrupts masked; re-enables and sleeps with
   no lost-wakeup window;
 - `break_here()`, `now()`, `ticks_per_second` (positive constant),

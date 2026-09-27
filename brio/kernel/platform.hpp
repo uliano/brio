@@ -13,7 +13,9 @@
  *    destructor restores the PREVIOUS state (so guards nest). Entering
  *    and leaving must also act as compiler memory barriers: data shared
  *    with ISRs then needs no volatile, exactly like the cli/sei barriers
- *    of the classic ATOMIC_BLOCK pattern.
+ *    of the classic ATOMIC_BLOCK pattern. Both halves are forced inline:
+ *    a half the compiler outlines puts a call and a return inside the
+ *    window it opens.
  *  - idle(): called with interrupts MASKED when there is no work. Must
  *    re-enable interrupts and suspend until the next interrupt with no
  *    lost-wakeup window (where a core defers an interrupt enable by one

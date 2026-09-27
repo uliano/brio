@@ -29,8 +29,8 @@ namespace brio {
 struct AvrPlatform {
     class CriticalSection {
     public:
-        CriticalSection() : saved_sreg_(SREG) { cli(); }
-        ~CriticalSection() {
+        [[gnu::always_inline]] CriticalSection() : saved_sreg_(SREG) { cli(); }
+        [[gnu::always_inline]] ~CriticalSection() {
             __asm__ __volatile__("" ::: "memory");
             SREG = saved_sreg_;
         }
