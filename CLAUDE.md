@@ -772,7 +772,7 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   one build that examines all four cores and flashes from either side.
   The RP2350's Hazard3 half is built by a self-built upstream
   riscv32-unknown-elf-gcc 16.2 at `/sw/riscv32-unknown-elf`
-  (`/sw/src/build-riscv32-elf.sh`, `rp2350/cmake/toolchain-riscv.cmake`)
+  (`/sw/src/build-riscv-elf.sh`, `rp2350/cmake/toolchain-riscv.cmake`)
   - NOT WCH's compiler, which the two QingKe families use and which
   carries a vendor extension this core has not; its Arm half takes the
   same arm-none-eabi-gcc as the other ARM targets, with the hard-float

@@ -199,8 +199,12 @@ function(rp2350_add_app name)
     )
 
     # -nostartfiles: the crt is ours; newlib-nano provides memcpy etc.;
-    # NO syscall stubs on purpose (an accidental _sbrk/_write fails the
-    # link loudly). Same rationale as every other project here.
+    # NO syscall stubs on purpose. The two halves do NOT answer an
+    # accidental _sbrk/_write alike: on the Arm half the link fails loudly,
+    # as in every other project here (arm-none-eabi's nano.specs adds no
+    # libgloss); on the RISC-V half it LINKS, because libgloss's own
+    # nano.specs brings libgloss_nano, whose syscalls are ecalls - the
+    # mistake surfaces as a trap at run time, not at the link.
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
