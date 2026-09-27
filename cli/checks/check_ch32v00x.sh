@@ -87,5 +87,14 @@ for tu in test/family_ch32v00x/neg/*.cpp; do
     echo "NEG $line"
 done
 
+# The runtime (design/runtime.md), over this family's own compiler and
+# flags: cli/checks/rt_check.sh. Runs unfiltered or as `brio check ch32v00x rt`.
+case "rt" in *"$FILTER"*)
+    . cli/checks/rt_check.sh
+    rt_check ch32v006k8 "$CXX" $(part_flags ch32v006k8) || fail=1
+    rt_check ch32v003f4 "$CXX" $(part_flags ch32v003f4) || fail=1
+    ;;
+esac
+
 [ "$fail" -eq 0 ] && echo "check_ch32v00x: OK" || echo "check_ch32v00x: FAILURES"
 exit "$fail"

@@ -68,11 +68,12 @@ by an ordinary define (`-D__SAMC21J18A__`, derived from the
 device-specs macro machinery and no `-mmcu` equivalent, which is also
 why clangd needs no macro-delta feed on this target.
 
-Link: `--specs=nano.specs -nostartfiles` and deliberately **no
-syscall stubs**: brio allocates nothing and calls no syscalls, so
-anything dragging `_sbrk`/`_write` in fails the link loudly instead
-of failing at run time. The one libc symbol every image does define
-itself is `abort()` (see `platform.md`, "The crt").
+Link: `-nostartfiles -nodefaultlibs`, brio's runtime and libgcc - **no C
+library and no syscall layer**: brio allocates nothing and calls no
+syscalls, so anything dragging `printf`, `malloc` or a syscall in fails
+the link loudly instead of failing at run time. `abort()` and the four
+`mem*` the compiler calls are the runtime's
+([../design/runtime.md](../design/runtime.md)).
 
 ## Board and build
 

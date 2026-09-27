@@ -200,14 +200,14 @@ weak alias of a spin - **the app binds a vector by defining the
 strong symbol** (`extern "C" void SysTick_Handler() { ... }`), the
 ARM edition of the AVR rule that vector names never appear in
 portable code. `Reset_Handler` copies `.data`, zeroes `.bss`, walks
-`.init_array` itself (newlib's walker would drag crti.o back past
-`-nostartfiles`) and calls `main`. `.noinit` is NOLOAD and skipped by
-the zero-fill - the PanicRecord's home. The crt also owns the one
-libc symbol brio images really reference: with `-fno-exceptions`,
-libstdc++ compiles throw sites into `abort()` calls that `-Og` cannot
-prove dead, and newlib's abort would defeat the no-syscalls rule - so
-the crt defines `abort()` as a spin (not a BKPT: with no debugger a
-BKPT becomes a HardFault and the frame that got there is gone).
+`.init_array` itself (no C library is linked to offer a walker) and
+calls `main`. `.noinit` is NOLOAD and skipped by
+the zero-fill - the PanicRecord's home. `abort()`, which
+libstdc++'s throw sites call under `-fno-exceptions` when `-Og` cannot
+prove them dead, is not the crt's: it is brio's runtime's
+([../design/runtime.md](../design/runtime.md)), a spin and not a BKPT -
+with no debugger a BKPT becomes a HardFault and the frame that got
+there is gone.
 
 **`delay_us(clock, us)`** (samc21/delay.hpp, which is `cortexm/delay.hpp`
 plus this family's measured facts - [../cortexm/README.md](../cortexm/README.md)) - the microsecond busy-wait,

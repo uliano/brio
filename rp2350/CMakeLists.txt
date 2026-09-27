@@ -181,6 +181,7 @@ endforeach()
 function(rp2350_add_app name)
     add_executable(${name}
         ${RP2350_STARTUP}
+        ${CMAKE_SOURCE_DIR}/../brio/rt/rt.cpp
         ${ARGN}
     )
 
@@ -198,24 +199,23 @@ function(rp2350_add_app name)
         $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
     )
 
-    # -nostartfiles: the crt is ours; newlib-nano provides memcpy etc.;
-    # NO syscall stubs on purpose. The two halves do NOT answer an
-    # accidental _sbrk/_write alike: on the Arm half the link fails loudly,
-    # as in every other project here (arm-none-eabi's nano.specs adds no
-    # libgloss); on the RISC-V half it LINKS, because libgloss's own
-    # nano.specs brings libgloss_nano, whose syscalls are ecalls - the
-    # mistake surfaces as a trap at run time, not at the link.
+    # The link takes brio's runtime and libgcc and nothing else
+    # (design/runtime.md): -nostartfiles because the crt is ours,
+    # -nodefaultlibs so that no C library and no syscall layer reach the
+    # link on either half - an accidental printf or malloc fails here with
+    # its own name - and libgcc named below, after the objects.
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
-        --specs=nano.specs
         -nostartfiles
+        -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${RP2350_LD}.ld
         -Wl,--gc-sections
         -Wl,--no-warn-rwx-segments   # .data carries .ram_text, the code that runs with the flash disconnected (ld/)
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${RP2350_NVHEAP_BUILD_ID}
     )
+    target_link_libraries(${name} PRIVATE gcc)
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_SOURCE_DIR}/ld/${RP2350_LD}.ld)
 

@@ -106,6 +106,7 @@ endforeach()
 function(stm32_add_app name)
     add_executable(${name}
         ${STM32G0_STARTUP}
+        ${CMAKE_SOURCE_DIR}/../brio/rt/rt.cpp
         ${ARGN}
     )
 
@@ -127,19 +128,22 @@ function(stm32_add_app name)
         $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
     )
 
-    # -nostartfiles: the crt is ours; newlib-nano provides memcpy etc.;
-    # NO syscall stubs on purpose (an accidental _sbrk/_write fails the
-    # link loudly). Same rationale as samc21/CMakeLists.txt.
+    # The link takes brio's runtime and libgcc and nothing else
+    # (design/runtime.md): -nostartfiles because the crt is ours,
+    # -nodefaultlibs so that no C library and no syscall layer reach the
+    # link - an accidental printf or malloc fails here with its own name -
+    # and libgcc named below, after the objects.
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
-        --specs=nano.specs
         -nostartfiles
+        -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${STM32G0_MCU}.ld
         -Wl,--gc-sections
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${STM32G0_NVHEAP_BUILD_ID}
     )
+    target_link_libraries(${name} PRIVATE gcc)
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_SOURCE_DIR}/ld/${STM32G0_MCU}.ld)
 

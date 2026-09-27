@@ -51,8 +51,9 @@ Self-built **arm-none-eabi-gcc 16.2** at `/sw/arm-none-eabi` - the
 same compiler, flags and linker discipline as the samc21 and stm32g0
 projects (`rp2040/cmake/toolchain-arm.cmake` is that file verbatim:
 `CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
-`--specs=nano.specs -nostartfiles`, deliberately NO syscall stubs so
-an accidental `_sbrk`/`_write` fails the link). What is ARMv6-M and not
+the link that takes brio's runtime and libgcc and no C library,
+so an accidental `printf` or `malloc` fails it -
+[../design/runtime.md](../design/runtime.md)). What is ARMv6-M and not
 Raspberry Pi's lives in the `cortexm/` core stratum, so `nvic.hpp`,
 `ticker.hpp` and `delay.hpp` here are the device header plus that core
 file plus this family's own facts.

@@ -87,15 +87,6 @@ __attribute__((weak)) void HardFault_Handler()
     for (;;) {}
 }
 
-// abort(): the one libc symbol a brio image references (libstdc++'s
-// throw sites under -fno-exceptions). A spin, so the frame survives for
-// the debugger, and so newlib's abort() does not drag the syscall stubs
-// in.
-[[noreturn]] void abort()
-{
-    for (;;) {}
-}
-
 [[noreturn]] void Reset_Handler()
 {
     // CPACR at 0xE000ED88: CP10 (bits 21:20) and CP11 (bits 23:22) to

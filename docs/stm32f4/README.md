@@ -55,8 +55,9 @@ Self-built **arm-none-eabi-gcc 16.2** at `/sw/arm-none-eabi` - the
 same compiler and linker discipline as the other ARM projects
 (`stm32f4/cmake/toolchain-arm.cmake` is the stm32g0 file verbatim:
 `CMAKE_SYSTEM_NAME Generic`, `STATIC_LIBRARY` try-compile,
-`--specs=nano.specs -nostartfiles`, deliberately NO syscall stubs so an
-accidental `_sbrk`/`_write` fails the link), with this family's core
+the link that takes brio's runtime and libgcc and no C library,
+so an accidental `printf` or `malloc` fails it -
+[../design/runtime.md](../design/runtime.md)), with this family's core
 flags: `-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard` - THE FPU
 IS USED, NOT CARRIED: brio has no floats, so the hard ABI costs
 nothing today, and a program that wants one pays no ABI break across

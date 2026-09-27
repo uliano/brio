@@ -113,6 +113,7 @@ readable at a glance.
 | Stratum | May include | Content |
 |---------|-------------|---------|
 | `kernel/` | nothing of brio | pure logic: queues, scheduler, FSM, time events, panic, delivery |
+| `rt/` | nothing of brio | the runtime every 32-bit image compiles: the seven functions the compiler and libstdc++ expect of a freestanding program, and the framework's one source file (design/runtime.md) |
 | `util/` | `kernel/` | pure services: print, stream concepts, line parser, Ring, SerialPort, SpiBus, timestamp |
 | `gfx/` | nothing of brio | drawing: the surface contract, the primitives, fonts and text (design/gfx.md) |
 | `devices/` | `kernel/`, `util/`, `gfx/` | what sits OFF the chip and is reached over a link the chip provides: the DCS vocabulary, a traits type per display controller, the panel drivers over a link concept (design/gfx.md, "The command tier") |

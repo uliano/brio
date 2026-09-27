@@ -73,5 +73,13 @@ for tu in test/family_samc21/neg/*.cpp; do
     echo "NEG $line"
 done
 
+# The runtime (design/runtime.md), over this family's own compiler and
+# flags: cli/checks/rt_check.sh. Runs unfiltered or as `brio check samc21 rt`.
+case "rt" in *"$FILTER"*)
+    . cli/checks/rt_check.sh
+    rt_check m0plus "$CXX" $FLAGS || fail=1
+    ;;
+esac
+
 [ "$fail" -eq 0 ] && echo "check_samc21: OK" || echo "check_samc21: FAILURES"
 exit "$fail"

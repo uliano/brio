@@ -114,6 +114,7 @@ endforeach()
 function(sam_add_app name)
     add_executable(${name}
         src/glue/startup_samc21.cpp
+        ${CMAKE_SOURCE_DIR}/../brio/rt/rt.cpp
         ${ARGN}
     )
 
@@ -135,22 +136,23 @@ function(sam_add_app name)
         $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
     )
 
-    # -nostartfiles: startup_samc21.cpp IS the crt (vector table + reset
-    # path); newlib-nano still provides memcpy/__libc_init_array etc. No
-    # nosys syscall stubs on purpose: brio allocates nothing and calls no
-    # syscalls, so anything dragging _sbrk/_write in fails the link loudly
-    # instead of failing silently at run time. No -flto (same DWARF/gdb
+    # The link takes brio's runtime and libgcc and nothing else
+    # (design/runtime.md): -nostartfiles because the crt is ours,
+    # -nodefaultlibs so that no C library and no syscall layer reach the
+    # link - an accidental printf or malloc fails here with its own name -
+    # and libgcc named below, after the objects. No -flto (same DWARF/gdb
     # rationale as the AVR build).
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
-        --specs=nano.specs
         -nostartfiles
+        -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${SAMC21_MCU}.ld
         -Wl,--gc-sections
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${SAMC21_NVHEAP_BUILD_ID}
     )
+    target_link_libraries(${name} PRIVATE gcc)
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_SOURCE_DIR}/ld/${SAMC21_MCU}.ld)
 

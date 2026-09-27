@@ -80,29 +80,6 @@ __attribute__((weak)) void HardFault_Handler()
     for (;;) {}
 }
 
-// abort(): the ONE libc symbol a brio image really does reference, and it
-// gets its definition here rather than from newlib.
-//
-// With -fno-exceptions libstdc++ compiles every throw site into a call to
-// abort(), std::__throw_bad_variant_access() among them - so every app
-// built on the AO kernel reaches it the moment the optimizer stops
-// proving that branch dead (-Os does; -Og does not). newlib's own
-// abort() goes through raise()/_exit() and would
-// drag in the whole syscall stub set, defeating the deliberate "no
-// nosys.specs" rule in samc21/CMakeLists.txt - a rule worth keeping,
-// because it is what makes an accidental _sbrk or _write fail the link
-// instead of failing silently at run time.
-//
-// A spin, not a BKPT: on ARMv6-M a BKPT with no debugger attached
-// escalates to HardFault and the frame that got here is gone, while a
-// halt-and-spin leaves the whole call stack for the debugger to walk.
-// This path does NOT write the panic breadcrumb (kernel/panic.hpp):
-// nothing routes abort() into it.
-[[noreturn]] void abort()
-{
-    for (;;) {}
-}
-
 [[noreturn]] void Reset_Handler()
 {
     const uint32_t* src = &__data_load_start;
@@ -112,9 +89,8 @@ __attribute__((weak)) void HardFault_Handler()
     for (uint32_t* dst = &__bss_start; dst != &__bss_end; ) {
         *dst++ = 0u;
     }
-    // Static constructors, walked directly (newlib's __libc_init_array
-    // would drag in crti.o's _init, which -nostartfiles excludes - this
-    // crt owns the whole job instead).
+    // Static constructors, walked directly: no C library is linked to
+    // offer a walker (design/runtime.md), so this crt owns the whole job.
     for (auto** p = __preinit_array_start; p != __preinit_array_end; ++p) {
         (*p)();
     }

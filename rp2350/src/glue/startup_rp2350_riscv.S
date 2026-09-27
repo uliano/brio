@@ -334,10 +334,3 @@ weak_isr isr_riscv_exception
 brio_rp2350_default_isr:
     j       brio_rp2350_default_isr
 
-/* abort(): the one libc symbol a brio image references (libstdc++'s throw
-   sites under -fno-exceptions). A spin, so the frame survives for the
-   debugger, and so newlib's abort() does not drag the syscall stubs in. */
-    .globl abort
-    .type abort, %function
-abort:
-    j       abort

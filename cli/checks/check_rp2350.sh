@@ -95,5 +95,18 @@ for tu in test/family_rp2350/neg/*.cpp; do
     echo "NEG $line"
 done
 
+# The runtime (design/runtime.md), over this family's own compiler and
+# flags: cli/checks/rt_check.sh. Runs unfiltered or as `brio check rp2350 rt`.
+case "rt" in *"$FILTER"*)
+    . cli/checks/rt_check.sh
+    rt_check m33 "$ARM_CXX" $ARM_FLAGS || fail=1
+    ram_text_check m33 "$ARM_CXX" test/family_rp2350/flash.cpp $ARM_FLAGS -DBRIO_RP2350_PACKAGE_PINS=80 || fail=1
+    if [ "$RV_MISSING" = 0 ]; then
+        rt_check hazard3 "$RV_CXX" $RV_FLAGS || fail=1
+        ram_text_check hazard3 "$RV_CXX" test/family_rp2350/flash.cpp $RV_FLAGS -DBRIO_RP2350_PACKAGE_PINS=80 || fail=1
+    fi
+    ;;
+esac
+
 [ "$fail" -eq 0 ] && echo "check_rp2350: OK" || echo "check_rp2350: FAILURES"
 exit "$fail"

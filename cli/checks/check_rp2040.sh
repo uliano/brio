@@ -59,5 +59,14 @@ for tu in test/family_rp2040/neg/*.cpp; do
     echo "NEG $line"
 done
 
+# The runtime (design/runtime.md), over this family's own compiler and
+# flags: cli/checks/rt_check.sh. Runs unfiltered or as `brio check rp2040 rt`.
+case "rt" in *"$FILTER"*)
+    . cli/checks/rt_check.sh
+    rt_check m0plus "$CXX" $FLAGS || fail=1
+    ram_text_check rp2040 "$CXX" test/family_rp2040/flash.cpp $FLAGS || fail=1
+    ;;
+esac
+
 [ "$fail" -eq 0 ] && echo "check_rp2040: OK" || echo "check_rp2040: FAILURES"
 exit "$fail"

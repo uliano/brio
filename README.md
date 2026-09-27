@@ -4,7 +4,8 @@ A small modern-C++ framework for bare-metal microcontrollers, built
 around a cooperative **active-object kernel**: event queues, flat state
 machines, time events, one loop, one stack, no heap, no virtual
 functions, nothing resolved at run time that the compiler could resolve
-first. Written in C++23 (gnu++23), header-only, in one flat namespace
+first. Written in C++23 (gnu++23), header-only but for a seven-function
+runtime, in one flat namespace
 `brio` ("con brio" - the musical marking for liveliness).
 
 The kernel knows nothing about the silicon it runs on. It runs on an
@@ -151,7 +152,9 @@ where it can, its exceptions where a reader looks").
 
 ## Building and testing
 
-The framework in `brio/` is header-only, included directly. The
+The framework in `brio/` is headers, included directly, and one source
+file every 32-bit image compiles: the runtime, `brio/rt/rt.cpp`
+([docs/design/runtime.md](docs/design/runtime.md)). The
 builds are sibling CMake projects, one per target, all peers (the repo
 root is not a CMake project): `avrdx/`, `samc21/`, `stm32g0/`,
 `stm32f4/`, `ch32v00x/`, `ch32vx03/`, `rp2040/`, `rp2350/` and

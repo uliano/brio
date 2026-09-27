@@ -121,6 +121,7 @@ set(CH32X035_OPENOCD_CFG "/sw/wch-openocd/bin/wch-riscv.cfg" CACHE FILEPATH "its
 function(ch32x035_add_app name)
     add_executable(${name}
         src/glue/startup_ch32x035.S
+        ${CMAKE_SOURCE_DIR}/../brio/rt/rt.cpp
         ${ARGN}
     )
 
@@ -140,19 +141,22 @@ function(ch32x035_add_app name)
         $<$<COMPILE_LANGUAGE:CXX>:-fno-use-cxa-atexit>
     )
 
-    # -nostartfiles: the crt is ours (src/glue/startup_ch32x035.S). The C
-    # library stays linkable for the few things gcc emits calls to, but NO
-    # syscall stubs are provided on purpose: an accidental _write or _sbrk
-    # must fail the link loudly rather than pull in a heap.
+    # The link takes brio's runtime and libgcc and nothing else
+    # (design/runtime.md): -nostartfiles because the crt is ours,
+    # -nodefaultlibs so that no C library and no syscall layer reach the
+    # link - an accidental printf or malloc fails here with its own name -
+    # and libgcc named below, after the objects.
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
         -nostartfiles
+        -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${CH32X035_MCU}.ld
         -Wl,--gc-sections
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${CH32X035_NVHEAP_BUILD_ID}
     )
+    target_link_libraries(${name} PRIVATE gcc)
     set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_SOURCE_DIR}/ld/${CH32X035_MCU}.ld)
 

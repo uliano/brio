@@ -42,6 +42,13 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   `usb.md` (the USB device side: the controller contract drawn at
   the packet, the control-endpoint machine written once, the class
   contract, CDC ACM as a byte transport; no host side),
+  `runtime.md` (what an image takes from the toolchain: libgcc and
+  nothing of the C library; the seven functions the compiler and
+  libstdc++ expect - memcpy, memmove, memset, memcmp, strlen, memchr,
+  abort - in the
+  framework's one source file, the link line every 32-bit project
+  shares, the word path with no misaligned access, why the events need
+  no alignment of their own, the AVR left on avr-libc),
   `block-stream.md` (block streams: BlockSource/BlockPlayer concepts
   over caller-owned buffers - blocks, not DMA - and the BlockRelay AO
   lending each filled block for one dispatch; built BEFORE its second
@@ -121,11 +128,17 @@ This file has no decision log any more: the former log was migrated to
 
 ## The project in one paragraph
 
-`brio` (`brio/`) is a header-only C++23 (gnu++23) framework for
+`brio` (`brio/`) is a header-only C++23 (gnu++23) framework - bar the
+one source file of its runtime - for
 bare-metal MCUs built around a cooperative active-object kernel, written
 clean-room after Samek's book (never the QP source). One flat namespace
 `brio`; the strata under `brio/`, one directory each, are `kernel/`
-(pure logic, includes nothing of brio), `util/` (services over the
+(pure logic, includes nothing of brio), `rt/` (the runtime every 32-bit
+image compiles: memcpy, memmove, memset, memcmp, strlen, memchr and
+abort, the seven
+functions the compiler and libstdc++ expect of a freestanding program,
+in the framework's one source file; it includes nothing of brio, and the
+32-bit link takes libgcc and no C library - design/runtime.md), `util/` (services over the
 kernel), `gfx/` (drawing: pure, target-independent, and needing nothing
 of the kernel - three kinds of surface told apart by where a pixel's
 truth lives, and a library that draws through the write-only base
@@ -992,6 +1005,11 @@ test/test_dcs/, test/test_ili9481/, test/test_dcs_link/, test/test_dcs_panel/
                          family fixture dir with an SpiHost carries a
                          devices_link.cpp and a devices_panel.cpp compiling
                          both over that family's own host
+test/test_rt/            rt/rt.cpp's copies, fill, compare and scans against a byte-at-a-time
+                         reference, exhaustively: every misalignment of both
+                         pointers, every length up to several word blocks,
+                         every memmove overlap, guard bytes around every
+                         destination - the very file the images compile
 test/test_sha256/        util/sha256.hpp against FIPS 180-4's own vectors, at
                          compile time and at run time, plus the tail the
                          hardware accelerators are owed
@@ -1017,7 +1035,11 @@ cli/                     its guts, a Python package: main.py dispatches on the
   check.py               `brio check <stratum> [filter]` over cli/checks/, the
                          four family compile fixtures kept as shell scripts
                          (zero CMake coupling, they call the cross compiler
-                         directly)
+                         directly); every 32-bit one ends with the
+                         runtime's checks, cli/checks/rt_check.sh (rt.cpp
+                         at -Os and -O3 must call none of the seven it
+                         defines, and a .ram_text must call none of them;
+                         `brio check <stratum> rt` runs them alone)
   bench/                 THE BENCH HALF: the verbs that need a board
     verbs.py             the argparse front of list / flash / run / console /
                          duo / fuses
@@ -1126,6 +1148,20 @@ brio/                    the framework, one directory per stratum:
                            optional idle_until branch by requires
     panic.hpp              panic<P, Reporter>(), PanicCode, HaltReporter,
                            take_panic_record<P>()
+  rt/                    the RUNTIME - the framework's one source file,
+                         includes nothing of brio, compiled into every
+                         32-bit image beside its crt
+    rt.cpp                 memcpy/memmove (words when source and destination
+                           share their alignment, bytes otherwise, never a
+                           misaligned word access), memset (the byte
+                           replicated a word at a time), memcmp, strlen and
+                           memchr (byte scans, what std::char_traits<char>
+                           calls), abort (a
+                           spin); guarded in the file against GCC turning
+                           its loops into calls to itself. The 32-bit link
+                           lines take -nostartfiles -nodefaultlibs, this,
+                           and -lgcc: no C library, no syscall layer, no
+                           specs file (design/runtime.md)
   util/                  pure services - may include kernel/, never a target
     stream.hpp             ByteSink / ByteSource / ByteTransport concepts
     print.hpp              print(sink, ...) + hex/fixed/sci wrappers, crlf;
