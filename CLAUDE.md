@@ -48,7 +48,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   abort - in the
   framework's one source file, the link line every 32-bit project
   shares, the word path with no misaligned access, why the events need
-  no alignment of their own, the AVR left on avr-libc),
+  no alignment of their own, the AVR left on avr-libc with its heap
+  and stdio refused at the link),
   `block-stream.md` (block streams: BlockSource/BlockPlayer concepts
   over caller-owned buffers - blocks, not DMA - and the BlockRelay AO
   lending each filled block for one dispatch; built BEFORE its second
@@ -820,13 +821,16 @@ avrdx/                   the AVR build project (a PEER of samc21/ and test/ -
   CMakeLists.txt           app auto-discovery ("// build:" header comments),
                            avr_predefines() (clangd's -mmcu macro delta),
                            avr_add_app() (flags, .hex/.lst/.map, per-app
-                           -upload target, FLMAPLOCK/build-id defsyms)
+                           -upload target, FLMAPLOCK/build-id defsyms, the
+                           refused C library on the link)
   CMakePresets.json        one configure+build preset pair per bench package
                            (the AVR128DB's three and the AVR128DA48) x
                            {release, debug}; binaryDir under the
                            shared ../build-cmake/
   cmake/toolchain-avr.cmake  the cross toolchain file (avr-gcc 16.2 at /sw/avr)
   cmake/avr-mcus.cmake     package -> mcu name table (128K flash / 16K RAM each)
+  cmake/avr-refused-libc.rsp  the linker's --wrap list refusing avr-libc's heap
+                           and stdio (design/runtime.md)
   src/apps/<app>.cpp       one main() per app (ISR vector bindings live HERE);
                            "// build: <option> = <value>" header lines
                            ("boards = db28,..." gates which package builds it,

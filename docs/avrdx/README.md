@@ -93,7 +93,9 @@ flag, so there is no "last one wins" hazard to guard against.
   -fno-use-cxa-atexit`), plus the -mmcu macro delta made explicit
   (`avr_predefines()`: asks avr-gcc for its predefines with and without
   `-mmcu` and appends the `__AVR*` difference as `-D`s - same values
-  the real compile already implies). The host project under `test/` is
+  the real compile already implies), and on the link the refused C
+  library (`cmake/avr-refused-libc.rsp`: avr-libc's heap and stdio
+  wrapped with no wrapper defined, design/runtime.md). The host project under `test/` is
   an entirely separate CMake project (its own `CMakeLists.txt`/
   `CMakePresets.json`, host g++, no cross toolchain - a CMake configure
   has exactly one compiler).

@@ -7,6 +7,8 @@
 # Negative: every test/family/neg/*.cpp must FAIL to compile for each
 # MCU named on its "// mcu: <list>" line (what must be refused must be
 # refused at compile time).
+# Link: a program calling every name avrdx/cmake/avr-refused-libc.rsp
+# refuses must FAIL to link, each name refused, for every MCU.
 #
 # Usage: brio check avrdx            all TUs, all MCUs
 #        brio check avrdx tcb        only TUs/negatives matching "tcb"
@@ -59,6 +61,50 @@ for tu in test/family/neg/*.cpp; do
     done
     echo "NEG $line"
 done
+
+# The refused C library (design/runtime.md): a program that references
+# every name avrdx/cmake/avr-refused-libc.rsp wraps, and allocates with
+# new, must FAIL to link with the same response file - each wrapped name
+# reported as an undefined __wrap_<name>, and operator new undefined
+# because this toolchain's link gives it no definition.
+RSP=avrdx/cmake/avr-refused-libc.rsp
+case "libc" in *"$FILTER"*)
+    names="$(sed -n 's/^--wrap=//p' "$RSP" 2>/dev/null)"
+    # An empty list would refuse nothing and every link below would still
+    # fail on operator new: say so instead of passing.
+    if [ -z "$names" ]; then
+        echo "LINK refused-libc: $RSP names nothing - nothing checked"; fail=1
+    fi
+    tu=/tmp/check_family_libc.cpp
+    {
+        for n in $names; do echo "extern \"C\" void $n();"; done
+        echo "char* volatile brio_kept;"
+        echo "int main() {"
+        for n in $names; do echo "    $n();"; done
+        echo "    brio_kept = new char;"
+        echo "    return 0;"
+        echo "}"
+    } > "$tu"
+    line="refused-libc ($(echo $names | wc -w | tr -d ' ') names + operator new):"
+    for mcu in $MCUS; do
+        if $CXX -mmcu="$mcu" -std=gnu++23 -Os -fno-builtin -w "$tu" -o /tmp/check_family_libc.elf \
+                -Wl,@"$RSP" 2>/tmp/check_family_err; then
+            line="$line $mcu:LINKED(BAD)"; fail=1; continue
+        fi
+        missing=""
+        for n in $names; do
+            grep -q "undefined reference to \`__wrap_$n'" /tmp/check_family_err || missing="$missing $n"
+        done
+        grep -q "undefined reference to \`operator new" /tmp/check_family_err || missing="$missing new"
+        if [ -n "$missing" ]; then
+            line="$line $mcu:NOT-REFUSED($missing )"; fail=1
+        else
+            line="$line $mcu:refused"
+        fi
+    done
+    rm -f "$tu" /tmp/check_family_libc.elf
+    echo "LINK $line"
+;; esac
 
 [ "$fail" -eq 0 ] && echo "check_family: OK" || echo "check_family: FAILURES"
 exit "$fail"

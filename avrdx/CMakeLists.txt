@@ -197,6 +197,11 @@ function(avr_add_app name)
     # must fail, per house rules) - both flags are simply never added here,
     # since this build's flags are set from scratch rather than inherited
     # from a framework default that injected them.
+    # The refused C library (design/runtime.md): cmake/avr-refused-libc.rsp
+    # wraps every entry into avr-libc's heap and its stdio, and no image
+    # defines a wrapper, so a call to one fails the link as an undefined
+    # `__wrap_<name>` at the caller's own line. brio check avrdx links a
+    # reference to each and expects every one refused.
     target_link_options(${name} PRIVATE
         ${BRIO_COMMON_FLAGS}
         $<$<CONFIG:Release>:-Os -g>
@@ -205,8 +210,11 @@ function(avr_add_app name)
         -Wl,--section-start=.text=0x0
         -Wl,--defsym,__flmap_lock=${A_FLMAP_LOCK}
         -Wl,--defsym,__nvheap_build_id=${AVR_NVHEAP_BUILD_ID}
+        -Wl,@${CMAKE_SOURCE_DIR}/cmake/avr-refused-libc.rsp
         -lm
     )
+    set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS
+        ${CMAKE_SOURCE_DIR}/cmake/avr-refused-libc.rsp)
 
     set_target_properties(${name} PROPERTIES SUFFIX ".elf")
 
