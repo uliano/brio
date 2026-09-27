@@ -210,17 +210,11 @@ void pulse() {
 
 uint32_t systick_period() { return SysTick->LOAD + 1u; }
 
-/// A cycle count that spans ticks: it wraps every few seconds, which is
-/// longer than anything measured here.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t period = systick_period();
-    uint32_t t0 = 0, v = 0, t1 = 0;
-    do {
-        t0 = Ticker::ticks();
-        v = SysTick->VAL;
-        t1 = Ticker::ticks();
-    } while (t0 != t1);
-    return t0 * period + (period - 1u - v);
+    return Ticker::cycles();
 }
 
 uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }

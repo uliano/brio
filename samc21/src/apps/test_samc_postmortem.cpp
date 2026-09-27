@@ -202,17 +202,11 @@ void print_chain_addresses() {
           ", HardFault_Handler at ", hex(handler_address()), crlf);
 }
 
-// The cycle stopwatch and the console drain.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 
 void console_drain() {

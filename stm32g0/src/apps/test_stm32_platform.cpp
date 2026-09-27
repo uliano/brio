@@ -150,22 +150,12 @@ volatile uint32_t ewi_cycles = 0;
 volatile uint16_t ewi_count = 0;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch
-//
-// ticks x period + the phase SysTick has already counted down. The two
-// reads are retried until they belong to the same tick, which is what
-// makes the sum monotone across the handler.
+// A cycle-resolution stopwatch: the kernel ticker's own cycles(), the tick count
+// and the counter's position composed right across the reload
+// (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;

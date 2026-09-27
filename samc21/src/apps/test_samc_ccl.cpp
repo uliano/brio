@@ -131,18 +131,12 @@ constexpr uint32_t slow_period = 4096;   // CPU cycles per GCLK period
 constexpr uint8_t gen_fast = 0;          // generator 0: OSC48M, always up
 
 // ---------------------------------------------------------------------------
-// The cycle stopwatch
+// The cycle stopwatch: the kernel ticker's own cycles(), the tick count
+// and the counter's position composed right across the reload
+// (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 
 void spin_until(uint32_t target) {

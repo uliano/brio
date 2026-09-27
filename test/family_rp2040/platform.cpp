@@ -29,6 +29,7 @@ void platform_verbs() {
     (void)Ticker::init(clock);
     Ticker::tick();
     (void)Ticker::ticks();
+    (void)Ticker::cycles();
     (void)Ticker::millis();
     Ticker::rebase(12'000'000);
     Ticker::pause();

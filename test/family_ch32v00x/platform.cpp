@@ -69,6 +69,7 @@ void ticker_verbs() {
     (void)Ticker::init(clock);
     Ticker::tick();
     (void)Ticker::ticks();
+    (void)Ticker::cycles();
     (void)Ticker::millis();
     (void)Ticker::secs();
     TimeStamp stamp{};

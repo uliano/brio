@@ -84,18 +84,12 @@ constexpr uint32_t period = 4096;         // CPU cycles per GCLK_AC period
 constexpr uint32_t ulp_period = 1465;     // ~48e6 / 32768, nominal
 
 // ---------------------------------------------------------------------------
-// The cycle stopwatch
+// The cycle stopwatch: the kernel ticker's own cycles(), the tick count
+// and the counter's position composed right across the reload
+// (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = brio::Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = brio::Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return brio::Ticker::cycles();
 }
 
 void spin_until(uint32_t target) {

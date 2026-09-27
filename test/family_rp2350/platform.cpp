@@ -35,6 +35,9 @@ void platform_verbs() {
     (void)Ticker::init(clock);
     Ticker::tick();
     (void)Ticker::ticks();
+#if defined(BRIO_RP2350_CORE_M33)
+    (void)Ticker::cycles();   // the Arm half's alone (rp2350/ticker.hpp)
+#endif
     (void)Ticker::millis();
     (void)Ticker::secs();
     TimeStamp stamp{};

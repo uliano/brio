@@ -104,25 +104,12 @@ Heap heap;
 constexpr uint16_t heap_record = 0x5A01;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch
-//
-// The kernel timebase ticks at 1 kHz, far too coarse for an operation
-// that costs microseconds. SysTick counts CPU cycles DOWN from LOAD to
-// zero once per tick, so tick x (LOAD + 1) + (LOAD - VAL) is the same
-// clock read at 48 MHz. The tick counter is read on both sides of VAL
-// and the pair retried on a mismatch, because a tick landing between the
-// two reads would pair a new tick with an old remainder.
+// A cycle-resolution stopwatch: the kernel ticker's own cycles(), the tick count
+// and the counter's position composed right across the reload
+// (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = brio::Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = brio::Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return brio::Ticker::cycles();
 }
 
 uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'000UL); }

@@ -249,15 +249,7 @@ using LedPwm = TimPwm<T2, led_channel, 1000>;
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 uint32_t cycles_to_us(uint32_t c) { return c / cycles_per_us; }
 void spin_cycles(uint32_t c) {

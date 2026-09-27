@@ -32,6 +32,10 @@
  *  - millis(): milliseconds - EXACT here, see below.
  *  - secs():   exact seconds (wraps ~136 years).
  *  - now():    TimeStamp = whole seconds + millisecond fraction.
+ *  - cycles(): CPU cycles, the tick count and SysTick's position in its
+ *              period composed by util/cycle_count.hpp - right in the
+ *              window between the reload and this handler, which is what
+ *              every hand-written `ticks * period + position` got wrong.
  *
  * ## No millisecond correction, and why the rate is constrained
  * A timebase whose rate does not divide decimal milliseconds needs its
@@ -87,6 +91,7 @@
 
 #include "cortexm/nvic.hpp"
 #include "util/clock.hpp"
+#include "util/cycle_count.hpp"
 #include "util/timestamp.hpp"
 
 namespace brio {
@@ -199,6 +204,26 @@ public:
 
     /// Raw 32-bit tick count since init() (wraps: 49.7 days @ 1000 Hz)
     static uint32_t ticks() { return read_shared(m_ticks); }
+
+    /// CPU cycles since init(), from any context: the tick count and
+    /// SysTick's position in its period, with the exception's pending bit
+    /// saying whether a reload the handler has not counted yet is in
+    /// (util/cycle_count.hpp). Wraps at 2^32 - a difference of two reads is
+    /// exact under 2^32 cycles - and means cycles of the standing reload: a
+    /// rebase restarts the period, and a paused ticker counts nothing.
+    static uint32_t cycles() {
+        const uint32_t period = SysTick->LOAD + 1u;
+        for (;;) {
+            const uint32_t t0 = read_shared(m_ticks);
+            const bool p0 = (SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0u;
+            const uint32_t val = SysTick->VAL;
+            const bool p1 = (SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0u;
+            const uint32_t t1 = read_shared(m_ticks);
+            if (const auto c = ticker_cycles(t0, p0, period - 1u - val, p1, t1, period)) {
+                return *c;
+            }
+        }
+    }
 
     /// Milliseconds since init(): exact, no drift (wraps ~49.7 days)
     static uint32_t millis() { return read_shared(m_ticks) * millis_per_tick; }

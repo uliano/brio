@@ -96,26 +96,11 @@ void settle_ms(uint32_t ms) {
     }
 }
 
-/// Cycles since boot from the tick count and the STK's own counter. The
-/// counter reloads at CMP and raises CNTIF; the handler that counts the
-/// tick runs an interrupt latency LATER, so a sample taken in between
-/// would read one period low (measured: about one sample in a million,
-/// and a window that starts within a period of the wrap then ends at
-/// once, its unsigned difference wrapped). CNTIF read on both sides of
-/// CNT says whether the wrap is already in the counter and not yet in
-/// the tick.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t period = stk()->CMP + 1u;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const bool wrapped0 = (stk()->SR & stk_cntif) != 0u;
-        const uint32_t cnt = stk()->CNT;
-        const bool wrapped1 = (stk()->SR & stk_cntif) != 0u;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1 && wrapped0 == wrapped1) {
-            return (t0 + (wrapped1 ? 1u : 0u)) * period + cnt;
-        }
-    }
+    return Ticker::cycles();
 }
 
 /// An EXACT window, on the cycle counter: settle_ms() starts at a random

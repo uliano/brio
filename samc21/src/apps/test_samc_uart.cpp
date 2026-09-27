@@ -254,19 +254,11 @@ constexpr uint32_t lfsr_seed = 0x12345678UL;
     return static_cast<uint8_t>(s & 0xFFu);
 }
 
-/// The SAM suites' shared cycle-resolution stopwatch: SysTick counts CPU
-/// cycles down inside a millisecond the Ticker counts up, read in a loop
-/// that rejects a sample straddling the tick.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 
 void spin_ms(uint32_t ms) {

@@ -133,18 +133,11 @@ void console_drain() {
     (void)delay_us(clock, 500);
 }
 
-/// The STK as a stopwatch: cycles since the tick's last reload, folded
-/// with the tick count.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t period = stk()->CMP + 1u;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t cnt = stk()->CNT;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * period + cnt;
-        }
-    }
+    return Ticker::cycles();
 }
 
 /// Is the jumper there? MOSI driven both ways as a GPIO, MISO read

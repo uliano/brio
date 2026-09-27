@@ -158,20 +158,11 @@ void reset_counters() {
 // ---- a ruler --------------------------------------------------------------------
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000u;
 
-uint32_t systick_period() { return SysTick->LOAD + 1u; }
-
-/// A cycle count that spans ticks. It wraps every forty seconds or so, so
-/// only DIFFERENCES of it are used below; every bound on a wait is a
-/// millisecond deadline on the ticker instead.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t period = systick_period();
-    uint32_t t0 = 0, v = 0, t1 = 0;
-    do {
-        t0 = Ticker::ticks();
-        v = SysTick->VAL;
-        t1 = Ticker::ticks();
-    } while (t0 != t1);
-    return t0 * period + (period - 1u - v);
+    return Ticker::cycles();
 }
 
 /// A wait that cannot hang: true while `ms` milliseconds have not passed

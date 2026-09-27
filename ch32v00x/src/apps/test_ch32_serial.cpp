@@ -147,21 +147,11 @@ constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;
 
 // ---- time -----------------------------------------------------------------
 
-/// Cycles since boot from the tick count and the STK's own counter,
-/// with the wrap the tick handler has not counted yet folded in
-/// (CNTIF read on both sides of CNT; test_ch32_tim's finding).
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t period = stk()->CMP + 1u;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const bool wrapped0 = (stk()->SR & stk_cntif) != 0u;
-        const uint32_t cnt = stk()->CNT;
-        const bool wrapped1 = (stk()->SR & stk_cntif) != 0u;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1 && wrapped0 == wrapped1) {
-            return (t0 + (wrapped1 ? 1u : 0u)) * period + cnt;
-        }
-    }
+    return Ticker::cycles();
 }
 
 void spin_until(uint32_t deadline) {

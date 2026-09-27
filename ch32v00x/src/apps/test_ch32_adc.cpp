@@ -145,15 +145,7 @@ void settle_ms(uint32_t ms) {
 }
 
 uint32_t cycles_now() {
-    const uint32_t period = stk()->CMP + 1u;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t cnt = stk()->CNT;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * period + cnt;
-        }
-    }
+    return Ticker::cycles();
 }
 
 void spin_cycles(uint32_t cycles) {

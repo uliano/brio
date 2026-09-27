@@ -42,6 +42,7 @@
 #include "util/bus_master.hpp"
 #include "util/clock.hpp"
 #include "util/crc.hpp"
+#include "util/cycle_count.hpp"
 #include "util/i2c_bus.hpp"
 #include "util/input_scanner.hpp"
 #include "util/meter_sampler.hpp"

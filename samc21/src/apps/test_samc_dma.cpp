@@ -105,26 +105,12 @@ using Churn0 = brio::DmaChannel<ch_churn0>;
 using Churn1 = brio::DmaChannel<ch_churn1>;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch
-//
-// The kernel timebase ticks at 1 kHz, which is far too coarse for a
-// harvest that costs microseconds. SysTick counts CPU cycles DOWN from
-// LOAD to zero once per tick, so tick x (LOAD + 1) + (LOAD - VAL) is the
-// same clock read at 48 MHz. The tick counter is read on both sides of
-// VAL and the pair retried on a mismatch, because a tick that lands
-// between the two reads would otherwise pair a new tick with an old
-// remainder.
+// A cycle-resolution stopwatch: the kernel ticker's own cycles(), the tick count
+// and the counter's position composed right across the reload
+// (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = brio::Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = brio::Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return brio::Ticker::cycles();
 }
 
 uint32_t cycles_to_us(uint32_t cycles) { return cycles / (SysClock::hz / 1'000'000UL); }

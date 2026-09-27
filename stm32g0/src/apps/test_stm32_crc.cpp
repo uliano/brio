@@ -79,19 +79,11 @@ TestBench<Serial> bench;
 // Instruments
 // ---------------------------------------------------------------------------
 
-/// The cycle-resolution stopwatch every suite of this stratum uses:
-/// SysTick's tick count times its period plus the phase it has already
-/// counted down, the two reads retried until they belong to one tick.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 
 /// A measurement window a transmit interrupt walks through is not a

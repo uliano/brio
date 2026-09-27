@@ -192,18 +192,12 @@ volatile uint16_t flash_irqs = 0;
 volatile uint32_t flash_irq_flags = 0;
 
 // ---------------------------------------------------------------------------
-// A cycle-resolution stopwatch (the one test_stm32_platform uses)
+// A cycle-resolution stopwatch (the one test_stm32_platform uses): the kernel ticker's own cycles(), the tick count
+// and the counter's position composed right across the reload
+// (util/cycle_count.hpp).
 // ---------------------------------------------------------------------------
 uint32_t cycles_now() {
-    const uint32_t reload = SysTick->LOAD;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t val = SysTick->VAL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * (reload + 1u) + (reload - val);
-        }
-    }
+    return Ticker::cycles();
 }
 
 constexpr uint32_t cycles_per_us = SysClock::hz / 1'000'000UL;

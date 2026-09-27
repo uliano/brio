@@ -553,6 +553,15 @@ and what it does while the core sleeps.
 | rp2350 | `CoreTicker<core>` again, ONE SURFACE OVER TWO CLOCKS (`rp2350/ticker.hpp`), `Ticker` = core 0's | 1000 Hz, one per core as on the RP2040 - but the counter under it depends on the processor the image was built for: SysTick on the Cortex-M33 half (`cortexm/ticker.hpp`'s `BasicTicker`) and the RISC-V PLATFORM TIMER on the Hazard3 one, a 64-bit counter in the SIO with a comparator per core, counting the MICROSECOND tick a generator divides out of clk_ref rather than core cycles - so on that half a clk_sys change does not move the tick at all. Both wear the same verbs and BOTH RAISE THE SAME VECTOR NAME, so an app binds `isr_systick` once and is bound whichever half it is built for |
 | host | a virtual clock the test advances (`host/platform.hpp`) | 1000 Hz nominal; time is arithmetic, which is what makes drift and re-arm testable to the tick |
 
+Beyond the contract, every SysTick and STK ticker offers `cycles()`:
+the core's cycles since `init()`, the tick count and the counter's
+position in its period composed by `util/cycle_count.hpp`, which reads
+the counter's PENDING flag so that the window between the counter's
+restart and the tick handler - where `ticks * period + position` reads
+a whole period low, and a timed wait built on it ends at once - counts
+right. A difference of two reads is exact under 2^32 cycles; the Hazard3
+half of the RP2350 has none, its timer counting microseconds.
+
 ## 10. Failures: overflow and panic (`kernel/panic.hpp`)
 
 Overflow is section 5's counter. **Panic** is the one hook for

@@ -196,19 +196,11 @@ constexpr uint8_t no_answer = 200;
 // The rulers
 // ---------------------------------------------------------------------------
 
-/// The core's STK read as an absolute cycle count: the tick counter
-/// times the reload, plus the sub-tick counter, re-read until the two
-/// agree. It wraps at 2^32 cycles, some thirty seconds here.
+/// A cycle count that spans ticks: the kernel ticker's own cycles(), the
+/// tick count and the counter's position composed right across the reload
+/// (util/cycle_count.hpp); it wraps at 2^32, so only differences are used.
 uint32_t cycles_now() {
-    const uint32_t period = stk()->CMPLR + 1u;
-    for (;;) {
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t cnt = stk()->CNTL;
-        const uint32_t t1 = Ticker::ticks();
-        if (t0 == t1) {
-            return t0 * period + cnt;
-        }
-    }
+    return Ticker::cycles();
 }
 
 void settle_ms(uint32_t ms) {

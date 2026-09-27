@@ -28,6 +28,9 @@
  *  - millis(): milliseconds - exact, see below
  *  - secs():   exact seconds
  *  - now():    TimeStamp = whole seconds + millisecond fraction
+ *  - cycles(): HCLK cycles, the tick count and STK's position in its period
+ *              composed by util/cycle_count.hpp - right in the window
+ *              between the restart at the compare and this handler
  *
  * ## The rate is constrained so millis() is exact
  * STK counts HCLK cycles, so the rate is ours to choose, and every rate
@@ -72,6 +75,7 @@
 #include "ch32vx03/device.hpp"
 #include "ch32vx03/pfic.hpp"
 #include "util/clock.hpp"
+#include "util/cycle_count.hpp"
 #include "util/timestamp.hpp"
 
 namespace brio {
@@ -179,6 +183,26 @@ public:
 
     /// Raw 32-bit tick count since init() (wraps: 49.7 days @ 1000 Hz)
     static uint32_t ticks() { return read_shared(m_ticks); }
+
+    /// HCLK cycles since init(), from any context: the tick count and
+    /// STK's position in its period, with CNTIF saying whether a restart
+    /// the handler has not counted yet is in (util/cycle_count.hpp). Wraps
+    /// at 2^32 - a difference of two reads is exact under 2^32 cycles -
+    /// and means cycles of the standing compare: a rebase restarts the
+    /// period, and a paused ticker counts nothing.
+    static uint32_t cycles() {
+        const uint32_t period = stk()->CMPLR + 1u;
+        for (;;) {
+            const uint32_t t0 = read_shared(m_ticks);
+            const bool p0 = (stk()->SR & stk_cntif) != 0u;
+            const uint32_t position = stk()->CNTL;
+            const bool p1 = (stk()->SR & stk_cntif) != 0u;
+            const uint32_t t1 = read_shared(m_ticks);
+            if (const auto c = ticker_cycles(t0, p0, position, p1, t1, period)) {
+                return *c;
+            }
+        }
+    }
 
     /// Milliseconds since init(): exact, no drift (wraps ~49.7 days)
     static uint32_t millis() { return read_shared(m_ticks) * millis_per_tick; }

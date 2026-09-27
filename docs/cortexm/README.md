@@ -7,7 +7,9 @@ programmer's model over ARMv6-M, ARMv7-M and ARMv8-M
 - and every vendor ships unchanged - the NVIC and PRIMASK (`cortexm/nvic.hpp`:
 `InterruptGuard`, the global enable/disable/readback verbs, `Nvic`,
 `irq_priority_levels`), the SysTick timebase (`cortexm/ticker.hpp`:
-`BasicTicker`, and `SysTickCounter` - SysTick as a bare cycle counter
+`BasicTicker`, with `cycles()` - the tick count and VAL composed by
+`util/cycle_count.hpp`, the exception's pending bit covering the window
+between the reload and the handler - and `SysTickCounter` - SysTick as a bare cycle counter
 with no interrupt, for a program whose kernel timebase is elsewhere,
 such as the STM32G0's tickless LPTIM one; both are `ClockUser`s whose
 `rebase(hz)` reprograms the reload for a dynamic clock - a new LOAD and

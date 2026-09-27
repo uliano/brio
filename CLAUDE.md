@@ -1215,6 +1215,13 @@ brio/                    the framework, one directory per stratum:
                            no code
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
+    cycle_count.hpp        ticker_cycles(): a timebase's cycle count composed
+                           from the tick count, the counter's position and its
+                           PENDING flag - right in the window between the
+                           counter's restart and the handler, where tick x
+                           period + position reads a period low; the one
+                           composition every ticker's cycles() hands its reads
+                           to (host-tested cycle by cycle, test_cycle_count)
     power.hpp              the power model: SleepDepth ladder, SleepSite
                            concept (arm only - the kernel loop's idle path
                            still does the sleeping), PowerManager AO with
@@ -1655,7 +1662,8 @@ brio/                    the framework, one directory per stratum:
                            the guard accepts the M0, M0+, M4 and M33 core
                            headers
     ticker.hpp             BasicTicker<tps> over SysTick with advance/pause/
-                           resume; each family's ticker.hpp adds its alias
+                           resume and cycles() (util/cycle_count.hpp over VAL
+                           and the pending bit); each family's ticker.hpp adds its alias
                            and its own guards; SysTickCounter = SysTick as a
                            bare cycle counter (no interrupt) for delay_us
                            where the kernel timebase is elsewhere

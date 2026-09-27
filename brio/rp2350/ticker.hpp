@@ -26,6 +26,11 @@
  *
  * and is bound whichever processor the image was built for.
  *
+ * ONE VERB is the Arm half's alone: BasicTicker's cycles(), clk_sys
+ * cycles composed from SysTick - the platform timer counts microseconds
+ * and not cycles, so MtimeTicker has none to offer and a program that
+ * wants them on this chip asks the Arm half.
+ *
  * A PREPROCESSOR QUESTION ABOVE core.hpp IS ALWAYS ABOUT
  * BRIO_RP2350_CORE_M33 - a macro this stratum defines in core.hpp -
  * and never about the compiler's `__riscv`. This file asks it because
