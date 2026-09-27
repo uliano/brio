@@ -197,6 +197,12 @@ void quiesce() {
 using Instrument = PwmSlice<7>;
 
 void instrument_start() {
+    // The block comes out of a power-on held in reset, and a reset of
+    // core 0 alone - the flash verb's - leaves it as the last program did:
+    // released here whatever that was.
+    if (!Pwm::released()) {
+        (void)Pwm::reset();
+    }
     (void)Instrument::configure({.divider = *pwm_divider_of(4096), .top = 0xFFFF});   // 125 MHz / 256 = 488 kHz, wraps every 134 ms
     Instrument::counter(0);
     Instrument::enable(true);
@@ -222,10 +228,21 @@ void ta_found() {
     const SleepClocks now = Clocks::enabled();
     print(serial, "  SLEEP_EN ", hex(sleep.en0), " ", hex(sleep.en1), "; WAKE_EN ", hex(wake.en0), " ", hex(wake.en1), "; ENABLED ",
           hex(now.en0), " ", hex(now.en1), "; SLEEPDEEP=", sleepdeep(), crlf);
-    bench.verdict("every gate is open in both masks as found, and ENABLED reads the wake set less the one clock whose generator is "
-                  "not running (clk_usb: no USB PLL)",
-                  sleep == sleep_clocks_all && wake == sleep_clocks_all && (now & wake) == now &&
-                      (wake.en1 & ~now.en1) == CLOCKS_ENABLED1_CLK_USB_USBCTRL_BITS && wake.en0 == now.en0);
+    // What ENABLED lacks is history, not a constant: a power-on leaves
+    // the three generators whose aux mux defaults to the USB PLL stopped
+    // (clk_usb, clk_adc, clk_rtc), and a reset of core 0 alone leaves them
+    // as the last program did. Only they may be missing.
+    constexpr uint32_t may_lack0 = CLOCKS_ENABLED0_CLK_ADC_ADC_BITS | CLOCKS_ENABLED0_CLK_RTC_RTC_BITS;
+    constexpr uint32_t may_lack1 = CLOCKS_ENABLED1_CLK_USB_USBCTRL_BITS;
+    const uint32_t lack0 = wake.en0 & ~now.en0;
+    const uint32_t lack1 = wake.en1 & ~now.en1;
+    print(serial, "  not running:", (lack1 & CLOCKS_ENABLED1_CLK_USB_USBCTRL_BITS) != 0u ? " clk_usb" : "",
+          (lack0 & CLOCKS_ENABLED0_CLK_ADC_ADC_BITS) != 0u ? " clk_adc" : "",
+          (lack0 & CLOCKS_ENABLED0_CLK_RTC_RTC_BITS) != 0u ? " clk_rtc" : "", crlf);
+    bench.verdict("every gate is open in both masks as found, and ENABLED reads the wake set less, at most, the three clocks "
+                  "whose generators a power-on leaves stopped (clk_usb, clk_adc, clk_rtc - on the USB PLL by default)",
+                  sleep == sleep_clocks_all && wake == sleep_clocks_all && (now & wake) == now && (lack0 & ~may_lack0) == 0u &&
+                      (lack1 & ~may_lack1) == 0u);
     bench.verdict("SLEEPDEEP is clear, no dormant wake is enabled, the idle path's hook is empty",
                   !sleepdeep() && !DormantWake::any_enabled() && P::sleep_hook == nullptr);
     bench.verdict("the named sets: the core set keeps the fabric, the memories, the timer and the watchdog, not the PWM; the "
@@ -463,6 +480,9 @@ void tf_dormant_rosc() {
     }
     console_drain();
     DormantWake::acknowledge(rx_pin, 0x0Fu);
+    // The count is the site's for the whole boot: a second run of the
+    // letter starts from where the first left it.
+    const uint32_t dormants_before = PlainRosc::dormants();
     const std::optional<RtcDateTime> before = Rtc::read();
     const uint32_t us0 = us_now();
     const uint16_t turns = idle_until(rtc_fired, 5);
@@ -474,10 +494,11 @@ void tf_dormant_rosc() {
     const uint32_t t_after = Ticker::ticks();
     const uint32_t advanced = TimedRosc::last_advance();
     const uint32_t rtc_span = before && after ? (after->second + 60u - before->second) % 60u : 99u;
-    print(serial, "  back after ", turns, " turn(s): by the RTC=", by_rtc, ", dormants=", PlainRosc::dormants(), ", the tree on the PLL=",
+    print(serial, "  back after ", turns, " turn(s): by the RTC=", by_rtc, ", dormants ", dormants_before, " -> ", PlainRosc::dormants(),
+          ", the tree on the PLL=",
           back, "; the calendar ", before ? before->second : 0u, " -> ", after ? after->second : 0u, " s, the timer saw ", timer_saw,
           " us; tick ", t_before, " -> ", t_after, " (advanced by ", advanced, ")", crlf);
-    bench.verdict("the calendar's interrupt ended the dormant, once, and the tree is back on the PLL", by_rtc && PlainRosc::dormants() == 1u && back);
+    bench.verdict("the calendar's interrupt ended the dormant, once, and the tree is back on the PLL", by_rtc && PlainRosc::dormants() == dormants_before + 1u && back);
     bench.verdict("the calendar counted two seconds the timer never saw (clk_ref stood with the ring oscillator)",
                   rtc_span == 2u && timer_saw < 100'000u);
     bench.verdict("kernel time was advanced by the frozen span: arm to here covers the deadline, late, never early",

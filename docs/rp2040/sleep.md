@@ -120,8 +120,12 @@ WeAct board (52 verdicts in the all-key), every letter wireless: the
 system timer as the ruler, a PWM slice with its gate pruned as the
 instrument that says whether the SLEEP state was reached.
 
-- AS FOUND: both masks all open, ENABLED the wake set less clk_usb
-  (no USB PLL), SLEEPDEEP clear, no dormant wake, the hook empty; the
+- AS FOUND: both masks all open, ENABLED the wake set less at most
+  clk_usb, clk_adc and clk_rtc - the three generators on the USB PLL by
+  default, which a power-on leaves stopped and a reset of core 0 alone
+  leaves as the last program did (all three missing after a power-on,
+  clk_usb and clk_adc after this suite's own run) -, SLEEPDEEP clear,
+  no dormant wake, the hook empty; the
   ladder through the plain site as stated, deep refused on both sites
   until a GPIO wake is enabled, then armed with the hook installed.
 - A LIGHT SLEEP is ended by the tick inside one idle() call.
