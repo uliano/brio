@@ -1064,18 +1064,25 @@ void tb_counting() {
         }
         const uint32_t window = 4096u * lptim_prescaler_divider(presc);
         console_drain();
+        // Each count read is followed at once by a cycle read, so the two
+        // pairs carry the same skew and the window MEASURED between them is
+        // the one the counts span - the polling loop overshoots the nominal
+        // window by its own granularity, which a nominal comparison would
+        // charge to the prescaler.
         const uint16_t a = L1::count_raw();
         const uint32_t t0 = cycles_now();
         while (cycles_now() - t0 < window) {
         }
         const uint16_t b = L1::count_raw();
+        const uint32_t spanned = cycles_now() - t0;
         const uint32_t counts = static_cast<uint32_t>((b - a) & 0xFFFFu);
-        const uint32_t off = permille_off(counts, 4096);
+        const uint32_t want = spanned / lptim_prescaler_divider(presc);
+        const uint32_t off = permille_off(counts, want);
         print(serial, "  /", lptim_prescaler_divider(presc), ": ", counts,
-              " counts in ", window, " cycles (want 4096, off ", off,
+              " counts in ", spanned, " cycles (want ", want, ", off ", off,
               " per mille)", crlf);
-        // The polling loop's own granularity is tens of cycles, which at
-        // /1 is a per cent of the window and at /128 is nothing.
+        // What is left is the few cycles between a count and its cycle
+        // read, a count at /1 and nothing at /128.
         ratios_ok = ratios_ok && off < (p == 0u ? 40u : 20u);
     }
     bench.verdict("table 143's eight dividing factors are exact: the same "

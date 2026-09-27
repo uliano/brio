@@ -293,12 +293,21 @@ void tb_critical() {
     bench.verdict("leaving the outer scope unmasks", after_outer);
 
     // The tick keeps counting through a masked window - the interrupt is
-    // pending, not lost - which is what makes idle() safe below.
+    // pending, not lost - which is what makes idle() safe below. The 5 ms
+    // are counted as SysTick's own down-count, delta by delta, each read
+    // within one period of the last: under a mask the tick stands still
+    // and Ticker::cycles() loses every period past the first (one pending
+    // bit), so no composed count can time a masked window.
     const uint32_t t0 = Ticker::ticks();
     {
         Stm32g0Platform<>::CriticalSection cs;
-        const uint32_t spin0 = cycles_now();
-        while (cycles_now() - spin0 < SysClock::hz / 200u) {   // 5 ms masked
+        const uint32_t period = SysTick->LOAD + 1u;
+        uint32_t last = SysTick->VAL;
+        uint32_t spun = 0;
+        while (spun < SysClock::hz / 200u) {   // 5 ms masked
+            const uint32_t now = SysTick->VAL;
+            spun += last >= now ? last - now : last + period - now;
+            last = now;
         }
     }
     const uint32_t through_mask = Ticker::ticks() - t0;
