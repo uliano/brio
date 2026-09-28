@@ -123,13 +123,23 @@ pages say what is theirs and what a family owes them:
   the documents of record with their revision (data sheet, errata),
   the driver header, the reference test suite - no chapter lists, no
   history. Then: *what the silicon does* (the behaviour and the
-  physical facts that matter to code, measured ones marked as such),
+  physical facts that matter to code, measured ones marked as such -
+  and THE SILICON'S OFFER: every feature that bears on cost, FIFOs and
+  their thresholds, DMA requests and circular mode, the edges that end
+  a run, byte counters and automatic bus conditions, set/clear aliases,
+  timer widths, the instruction fetch, each one used by the driver or
+  declined with its reason, design/overview.md's "A driver is written
+  from its chapter"),
   *types and verbs* (a systematic inventory of the configuration knobs
   - name, values, default, effect - the input/resource types, and the
   verbs by purpose: names and meaning, never signatures), *how to use
   it* (one example per way of using it - what to write, since readers
   want the call, not the header), *bench findings* (the
-  facts the test suite established, with its name). Tracks, guiding
+  facts the test suite established, with its name - among them THE
+  COST of each transport or engine: cycles per byte or frame,
+  interrupts per byte, cycles masked, beside the wire's or the bus's
+  own figure; a measured rate far from that figure is explained there
+  or listed in "Not covered yet" as a gap to explain). Tracks, guiding
   applications and history live in CLAUDE.md and memory, never here.
 - **A contract with more than one realization carries a realizations
   table.** In the design page that owns the contract, `### Realizations`

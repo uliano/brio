@@ -273,7 +273,16 @@ The failure mode to guard against is EFFORT PARSIMONY: solving the one
 concrete problem on the bench chip instead of building the framework.
 It produces drivers that do not compile on half the family, docs marked
 complete that list their own gaps, and false comments justifying wrong
-restrictions. The antidote, in practice:
+restrictions.
+
+Its twin is DERIVATION BY COPY: a new chip's engine written from the
+nearest existing stratum's, its shape justified by a chip it no longer
+runs on. It produces drivers that pass every suite while running a FIFO
+one entry deep, programming a DMA channel whole for every block, keeping
+one SPI frame in flight - and measured rates several times slower than
+the wire filed as facts instead of findings. The definition of done
+judged behaviour and never cost, so nothing caught it. The antidote to
+both, in practice:
 
 - **Framework, not application.** The target is the whole AVR DA/DB
   range (and future targets), the AVR128DB48 is only the test vehicle.
@@ -281,6 +290,29 @@ restrictions. The antidote, in practice:
   from the register description, both errata documents (DB
   DS80000915F and DA DS80000882C differ). Leave something out only
   knowingly and declare it in the doc's "Not covered yet".
+- **Silicon, not sibling.** The SURFACE (task names, the Request, the
+  verbs, the events) is copied between strata on purpose; the ENGINE is
+  written from THIS chip's chapter, starting from the inventory of what
+  the silicon offers that bears on cost - FIFOs and thresholds, DMA
+  requests and circular mode, the idle-line and time-out edges, byte
+  counters and automatic STOP/RESTART, set/clear aliases, timer widths,
+  the instruction fetch - each item used or declined with its reason in
+  the document. A comment justifies an engine choice from the manual's
+  section, never from "as the other strata do". The vendor's library is
+  read BEFORE the engine is written, as the oracle of shape and cost
+  (how it does each operation, what that costs; brio need not win, a gap
+  over about a fifth is a finding). The hot path is read in the release
+  disassembly (no call per byte or frame, the request's fields outside
+  the loop, configuration at `arm()`/`init()` and only address, count
+  and enable per operation, a critical section around the decision and
+  never around the work). The byte-identity gate proves that a change
+  moves nothing; it is never the reason a better default stays off.
+  Contracts are drawn against the most capable silicon in view: the unit
+  is the run, the byte its degenerate case. None of this fixes an answer
+  (a DMA block forbids the CH32V203's sleep; a FIFO threshold starves a
+  console's tail): it forbids choosing without asking. Full text:
+  design/overview.md, "A driver is written from its chapter" and the
+  three bullets after it, and "A contract's unit is the run".
 - **Definition of done for a driver**: (1) systematic pass over the
   chapter's register description + errata; (2) a smoke TU compiled for
   every package - `avr-g++ -mmcu=avr128d{a,b}{28,48,64} -std=gnu++23
@@ -290,7 +322,13 @@ restrictions. The antidote, in practice:
   clean over the files touched, and `brio gate` for every change that
   claims to move no image (a comments-only edit, a rename, a move) - a comment or a document is a reference
   for the code as it is, and a claim about another part of the tree is
-  a POINTER the tool can check, never a statement that ages. The bench chip alone
+  a POINTER the tool can check, never a statement that ages; (6) the
+  silicon's offer inventoried in the document, each feature used or
+  declined with its reason; (7) THE COST of every transport and engine -
+  cycles per byte or frame, interrupts per byte, cycles masked - counted
+  in the release disassembly, measured by a suite letter and stated in
+  the document beside the wire's or the bus's figure, a rate far from
+  that figure explained or listed as a gap. The bench chip alone
   masks half the family (SWEVENTB, TCA1, PORTB proved it).
 - **Package variability pattern** (full rule: overview.md "Target
   strata"; model code: tcb.hpp/pin.hpp/evsys.hpp): device header =
@@ -311,7 +349,9 @@ restrictions. The antidote, in practice:
   change.
 - **When every variant of OUR code fails on the bench, consult the
   vendor's reference implementation - as an ORACLE, never as a source.**
-  The trigger is a written list of measured variants (sequence, memory,
+  (Its first use is earlier and routine - read before an engine is
+  written, for shape and cost, "Silicon, not sibling" above; this is its
+  use as a debugging instrument.) The trigger is a written list of measured variants (sequence, memory,
   width, instance, clock, reset, interrupts...) all failing the same way,
   not an impression. Then, in order: read the vendor's sequence and
   compare it register for register with ours; if reading does not

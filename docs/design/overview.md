@@ -104,6 +104,19 @@ hierarchy puts util/ below the kernel's ideas for this reason. Two
 (nearly) complete low-level strata before generalizing is the right
 order; until then, util/ generalizes from one and says so.
 
+**A contract's unit is the run.** A contract is drawn against the most
+capable silicon in view, never against the first: a transfer verb
+takes a span and treats a single byte as its degenerate case, because
+every block with a FIFO or a DMA request moves runs and every vendor's
+library takes a buffer and a length. The first chip's constraint (one
+data register, one byte per interrupt) belongs to that chip's
+realization; a contract that speaks it charges it to every chip after.
+Before a contract is taken as settled it is realized on two opposite
+shapes of silicon - one with a FIFO or DMA, one without - and read in
+both images. The byte sink of `util/stream.hpp` is the standing
+exception this rule names: its one verb is a byte, and four strata
+carry a bulk verb beside it outside the contract.
+
 ## Layering: the strata
 
 Directories under `brio/`; includes always carry the stratum
@@ -296,6 +309,62 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   fails to compile - and its `test_<target>_<subject>` suite passes on
   the bench. The family compile costs seconds and needs no hardware;
   the bench chip alone masks half the family.
+- **A driver is written from its chapter, not from its sibling.** What
+  travels between strata is the SURFACE - the task's name, the
+  request, the verbs, the events - and it is copied on purpose. The
+  ENGINE under it is written from the chapter of THIS silicon, starting
+  from an inventory of what the silicon offers that bears on cost: FIFO
+  depths and thresholds, DMA requests and circular mode, the edges that
+  end a run (an idle line, a receive time-out), byte counters with an
+  automatic STOP or RESTART, set/clear/toggle aliases, timer widths and
+  compare registers, the instruction fetch (wait states, prefetch,
+  cache, code placed in RAM). Each entry is used, or declined with its
+  reason, and the driver's document says which (docs/README.md). A
+  shape that is right on the chip it was born on - one byte per
+  interrupt on a block with one data register, a whole channel
+  programmed per block on a descriptor controller - is wrong on a chip
+  with a FIFO or a register file, and no suite that judges behaviour
+  will say so. A comment therefore justifies an engine choice from this
+  chip's manual, by section: "as the other strata do" is a statement
+  about another chip, not a reason. The vendor's library is read BEFORE
+  the engine is written, as an oracle of shape and cost and never as a
+  source: how it performs each operation and what that costs. brio
+  need not win every one; a gap of more than about a fifth is a finding
+  to settle before the driver is done.
+- **A driver's cost is part of what it is, judged against the
+  silicon's limit.** A transport or an engine has three numbers: the
+  cycles per byte or per frame on its hot path, the interrupts taken
+  per byte, the cycles run with interrupts masked. They are counted
+  once in the disassembly of a release image - the source hides what
+  the compiler adds: a lambda outlined on one core and inlined on
+  another, a copy, a call per byte - measured by a letter of the suite,
+  and stated in the document beside the wire's or the bus's own figure.
+  A measured rate far from that figure (more than about half again the
+  wire's time) is not a fact to record but a finding to explain; until
+  it is explained it sits in "Not covered yet". Byte identity is the
+  proof for a change that claims to move nothing; it is never a reason
+  to leave a better default off - a better default is switched on by a
+  change of its own, and measured.
+- **Three rules for a hot path.** ONE: nothing on a per-byte or
+  per-frame path is a call - the register accessors and the ring's
+  verbs inline, the request's fields read once outside the loop, the
+  loop specialized on the request's shape (no data out, no data in, the
+  frame width) - and the disassembly is where this is checked. TWO:
+  what is constant for the life of a binding - widths, direction, the
+  peripheral's address, the validation of all of it - is written when
+  the binding is made (`init`, `arm`) or checked at compile time; an
+  operation writes only what changes (an address, a count, an enable).
+  THREE: a critical section covers a DECISION - a claim, a
+  test-and-set - never a sequence of register stores, a copy or a spin;
+  a masked window longer than a few tens of cycles states its count in
+  its comment.
+- **These rules ask questions and demand numbers; they fix no
+  answer.** DMA is not better everywhere: the CH32V203's bus matrix
+  serves the core alone in a sleep of any depth, so a block in flight
+  forbids the sleep and an interrupt per byte is the cheaper transport
+  in energy. A FIFO threshold is wrong for a console: the tail below it
+  waits for something else to happen. What the rules forbid is a choice
+  made without asking.
 - **A suite's image fits the family's smallest chip.** A bench suite
   is a menu of letters over the console, and its IMAGE is a sum: the
   base every image carries (crt, transport, TestBench, print), the

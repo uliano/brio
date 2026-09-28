@@ -17,6 +17,14 @@ mechanically and this tool catches them before a reader does:
   3. A CLAIM OF ABSENCE: "there is no X driver", "nothing calls it
      yet", "does not exist yet", "future pass". These are sometimes true
      and always age, so they are listed for REVIEW, never an error.
+  4. A GENEALOGY in a source comment: "as the other strata do", "the
+     other strata's ...". The surface is copied between strata on
+     purpose, but an ENGINE choice is justified from this chip's manual
+     and never from another chip's shape (docs/design/overview.md, "A
+     driver is written from its chapter"), so each one is listed for
+     REVIEW: is it the surface, or a reason that belongs to another
+     silicon? Source comments only - the documents' realizations tables
+     are the designated home of the cross-target view.
 
 Plus the repo's own ASCII rule (every byte <= 127) on every file it
 reads, as an ERROR.
@@ -67,6 +75,14 @@ REVIEW_PATTERNS = [
     (re.compile(r"\bnothing calls it yet\b", re.I), "'nothing calls it yet'"),
     (re.compile(r"\bnot built yet\b", re.I), "'not built yet'"),
     (re.compile(r"\bfuture pass\b", re.I), "'future pass'"),
+]
+
+# Read in source comments only (item 4 of the docstring).
+SOURCE_REVIEW_PATTERNS = [
+    (re.compile(r"\b(as|the way|like) (every|the) other strat(a|um)\b", re.I),
+     "a genealogy (is it the surface, or another chip's reason?)"),
+    (re.compile(r"\bthe other (two |three |four )?(targets|strata)'s\b", re.I),
+     "a genealogy (is it the surface, or another chip's reason?)"),
 ]
 
 PATH_RE = re.compile(
@@ -146,13 +162,14 @@ def comment_spans(text):
             i += 1
 
 
-def check_text(path, chunks, errors, reviews):
-    """chunks: iterable of (line, text). Applies every pattern."""
+def check_text(path, chunks, errors, reviews, extra_reviews=()):
+    """chunks: iterable of (line, text). Applies every pattern, plus the
+    review patterns the caller adds for this kind of file."""
     for line, chunk in chunks:
         for pat, what in ERROR_PATTERNS:
             for m in pat.finditer(chunk):
                 errors.append((path, line + chunk[:m.start()].count("\n"), what))
-        for pat, what in REVIEW_PATTERNS:
+        for pat, what in list(REVIEW_PATTERNS) + list(extra_reviews):
             for m in pat.finditer(chunk):
                 reviews.append((path, line + chunk[:m.start()].count("\n"), what))
         for m in PATH_RE.finditer(chunk):
@@ -185,7 +202,7 @@ def main(argv):
         if path.endswith(".md"):
             check_text(rel, ((k + 1, l) for k, l in enumerate(text.split("\n"))), errors, reviews)
         else:
-            check_text(rel, comment_spans(text), errors, reviews)
+            check_text(rel, comment_spans(text), errors, reviews, SOURCE_REVIEW_PATTERNS)
     for rel, line, what in errors:
         print("%s:%d: error: %s" % (rel, line, what))
     for rel, line, what in reviews:
