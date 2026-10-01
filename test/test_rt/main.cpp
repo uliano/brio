@@ -5,9 +5,11 @@
 // every length from nothing up to several word blocks plus a tail, every
 // overlap in both directions for memmove - with guard bytes around every
 // destination, so a write one byte outside the range is caught.
-// The file under test is INCLUDED, compiled exactly as the targets compile
-// it; BRIO_RT_HOST_TEST leaves out its C-linkage definitions, which would
-// otherwise replace this host's own C library.
+// The file under test is INCLUDED, compiled as the RISC-V targets compile
+// it - its Thumb block loops are instructions this host cannot run, and
+// the platform suites' letter t runs rt/selftest.hpp's cases against them
+// on the chip; BRIO_RT_HOST_TEST leaves out its C-linkage definitions,
+// which would otherwise replace this host's own C library.
 // Run with: ctest --preset host (or ctest --preset host -R test_rt)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN

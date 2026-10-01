@@ -153,38 +153,46 @@ floor is busy cycles in one idle second.
 | family (board, clock) | ruler | stamp | window | memcpy 4096 x | memset 4096 x | print 4096: irq, isr, x | tick floor |
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz crystal) | 78 | 217 | 355 | 2.36 | 5.02 | 4463 (4096 DRE + 367 ticks), 130 (57), 0.99 | 365 k, 1.52 % |
-| SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 262 | 3.47 | 3.40 | 4453 (4097 SERCOM5 + ticks), 168 (111), 0.99 | 255 k, 0.53 % |
-| STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch on) | 62 | 118 | 218 | 3.69 | 3.35 | 4453 (4098 USART2 + 355 ticks), 109 (67), 1.00 | 209 k, 0.33 % |
-| CH32V203C8T6 (144 MHz PLL, zero-wait window) | 42 | 102 | 121 | 1.54 | 2.82 | 4452 (4097 USART1 + 355 ticks), 109 (67), 1.00 | 240 k, 0.17 % |
-| STM32F446RE (180 MHz PLL, 5 WS, ART on) | 1 | 27 | 133 | 2.15 | 2.79 | 4453 (4097 USART2 + 356 ticks), 71, 1.00 | 132 k, 0.07 % |
-| RP2350, Cortex-M33 (150 MHz PLL, XIP) | 3 | 18 | 156 | 1.65 | 2.04 | 474 388 (116 a byte: the PL011's storm), 36 a handler, 0.99 | 154 k, 0.10 % |
-| RP2350, Hazard3 (150 MHz PLL, XIP) | 3 | 22 | 70 | 1.39 | 2.03 | 391 786 (96 a byte), 33 a handler, 0.99 | 68 k, 0.045 % |
+| SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 257 | 1.43 | 1.63 | 4453 (4097 SERCOM5 + ticks), 168 (111), 0.99 | 250 k, 0.52 % |
+| STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch and the FIFO on) | 62 | 118 | 218 | 1.41 | 1.58 | 871 (515 USART2 refills + 356 ticks), 211 a refill of up to eight = 42 a character, 1.00 | 204 k, 0.32 % |
+| CH32V203C8T6 (144 MHz PLL, zero-wait window) | 32 | 79 | 94 | 1.53 | 1.81 | 4453 (4097 USART1 + 356 ticks), 74 (42), 1.00 | 186 k, 0.13 % |
+| STM32F446RE (180 MHz PLL, 5 WS, ART on) | 1 | 27 | 133 | 1.37 | 1.50 | 4453 (4097 USART2 + 356 ticks), 71, 1.00 | 132 k, 0.07 % |
+| RP2350, Cortex-M33 (150 MHz PLL, XIP) | 3 | 18 | 156 | 1.12 | 1.24 | 501 (146 FIFO refills of 28 + 355 ticks), 417 a refill = 15 a byte, 0.99 | 154 k, 0.10 % |
+| RP2350, Hazard3 (150 MHz PLL, XIP) | 3 | 22 | 70 | 1.39 | 1.53 | 501 (146 refills + ticks), 477 a refill = 17 a byte, 0.99 | 69 k, 0.045 % |
 
 What the rows say, and the two platform columns:
 
-- Every print is wire-bound (`x` = 1.00) at one interrupt per byte, as
-  the retrospective review counted: the per-byte shape costs CPU, not
-  time, at a console's rate. The SAM's and the G0's transports take one
-  interrupt more than the bytes (an empty entry from an idle transmitter
-  on the SERCOM, a wasted pass after the first byte on the USART). THE
-  PL011 IS THE EXCEPTION, AND THE NUMBER OF THE ROUND: on the RP2350 a
-  print of 4096 bytes takes 474 388 interrupts on the M33 and 391 786 on
-  Hazard3 - 116 and 96 a byte - because every `write_byte` the full ring
-  refuses still pends the line, and the handler finds the FIFO full and
-  re-arms it; the handlers hold 32 per cent of the core on the M33 for a
-  print the wire bounds. The review's "one interrupt per byte in front
-  of a 32-deep FIFO" was the quiet case; this is the loud one.
-- The runtime's copy and fill sit at 2.4 to 4.2 times the core's floor:
-  avr-libc's byte loops on the AVR (7 and 5 cycles a byte against 3 and
-  1), and on the M0+ parts the `-Os` shape of `rt/rt.cpp`'s loops - four
-  loads and four stores with a spill where a load-multiple pair would
-  halve the turn, and a fill loop with two branches a turn. Findings for
-  the runtime, explained and not yet closed.
-- The instrument is a tenth to a third of what it measures on these
-  cores: a ruler read is the tick count composed with the counter's
-  position, 60 to 80 cycles, and a stamp pair two of them. Every line
-  carries raw numbers; the row's own `ruler` and `stamp` are what the
-  reader subtracts.
+- Every print is wire-bound (`x` = 1.00): the transport's shape costs
+  CPU, not time, at a console's rate. On a block with one data register
+  and no FIFO (the SERCOM, the F1 lineage's USART, the F4's) that shape
+  is one interrupt per byte, as the retrospective review counted, plus
+  one (an empty entry from an idle transmitter on the SERCOM); on a
+  block with a FIFO it is one interrupt per REFILL - the G0's USART
+  fills eight at its empty threshold, the PL011 twenty-eight as its FIFO
+  falls through its level, the first FIFO-depth bytes from an idle
+  transmitter taking none. The PL011's row was the number of the util
+  round: before it, every `write_byte` a full ring refused pended the
+  line and the handler found the FIFO full - 474 388 interrupts for 4096
+  bytes on the M33, a third of the core for a print the wire bounds; the
+  policy is written from the transmit interrupt's measured semantics
+  ([../pl011/README.md](../pl011/README.md)).
+- The runtime's copy and fill on the Thumb cores run their block as a
+  load-multiple/store-multiple turn of 64 bytes ([runtime.md](runtime.md),
+  "The block on a Thumb core"): 1.1 to 1.6 times the core's floor at
+  4096 bytes, under newlib's own at 256 and 4096 on the M4. The RISC-V
+  cores keep the C++ loops, one branch a turn, at 1.4 to 1.8. The AVR's
+  row is avr-libc's byte loops (7 and 5 cycles a byte against 3 and 1),
+  unchanged. What is left above the floor is the head and the tail of
+  each call and the compare a turn - explained, and the gap to newlib at
+  16 bytes (the copy two frames deep) a finding of the runtime's.
+- The instrument is a tenth to a third of what it measures on the
+  cores whose ruler is a ticker's `cycles()`: the tick count composed
+  with the counter's position, 32 cycles on the QingKe V4 and 60 to 75
+  on the M0+ parts - there the same 36 Thumb instructions fetched from a
+  flash behind two wait states, which the SRAM-placed image's 102 stamp
+  against 151 proves - and a stamp pair two reads. A one-load ruler (the
+  DWT, the RP2350's timer) costs 1 to 3. Every line carries raw numbers;
+  the row's own `ruler` and `stamp` are what the reader subtracts.
 - STM32G0, the flash prefetch: measured in one image and run with
   PRFTEN off (the silicon's reset state) and on, the instrument's
   straight-line code gains 20 to 33 per cent, the handler bodies 12 to

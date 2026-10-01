@@ -108,10 +108,15 @@ for every package, and expects every one refused.
   their alignment modulo the word: bytes up to a word boundary, then
   blocks of four words, then single words, then the tail. Otherwise they
   copy bytes. `memmove` copies backwards when the destination overlaps
-  the source from above, a word a turn.
+  the source from above, a word a turn. On a Thumb core (the M0+, the M4,
+  the M33) a block is one load-multiple and one store-multiple of four
+  registers, and 64 bytes or more run in turns of four blocks; on a
+  RISC-V core a block is four loads and four stores, a block a turn.
 - `memset` fills bytes up to a word boundary, then the byte replicated
   across blocks of four words, then single words, then the tail; with
-  one pointer, the word path is always reachable.
+  one pointer, the word path is always reachable. On a Thumb core a fill
+  of 64 bytes or more runs turns of four store-multiples, out of line
+  (below).
 - `memcmp` compares bytes; its callers are rare and short.
 - `strlen` and `memchr` scan bytes: the strings brio measures or
   searches at run time are short, and a word-at-a-time scan would buy
@@ -127,19 +132,81 @@ None of them performs a word access at an address that is not a
 multiple of the word: ARMv6-M faults on one and Hazard3 traps, so the
 alignment test is part of the contract and not an optimization.
 
-Every loop that moves data is a do-while behind its own test, running to
-an end pointer. Written as a plain while loop, it comes out of -Os with
-the test at the top and a jump at the bottom - two taken branches a turn
-- and a taken branch is dear on the cores that call these functions for
-an event: at -Os the Cortex-M4F and the M33 copy an event inline, the
-M0+, Hazard3 and the QingKe cores call `memcpy` for one of 52 bytes
-(the kernel's queue compiled for each). Measured
-on the QingKe V4B at 144 MHz, a 52-byte copy between word-aligned
-buffers: 215 cycles in the while shape, 101 in this one, against 91 for
-the full newlib's `memcpy`, which moves nine words a turn in 226 bytes
-of code where this `memcpy` takes 166. Four words a turn is the point
-where a 52-byte event, the largest the census below found, is three
-turns and one word.
+Every loop that moves data runs to an end pointer with its test at the
+bottom - one branch a turn - and the test that it has a turn at all is
+made on the byte count, never on the end pointer. Written as a plain
+while loop, or with the same pointer test before the loop and at its
+foot (GCC at -Os merges the two), it comes out with the test at the top
+and a jump at the bottom - two branches a turn - and a taken branch is
+dear on the cores that call these functions for an event: at -Os the
+Cortex-M4F and the M33 copy an event inline, the M0+, Hazard3 and the
+QingKe cores call `memcpy` for one of 52 bytes (the kernel's queue
+compiled for each). Measured on the QingKe V4B at 144 MHz, a 52-byte
+copy between word-aligned buffers: 215 cycles in the while shape, 101
+in this one, against 91 for the full newlib's `memcpy`, which moves nine
+words a turn in 226 bytes of code where this `memcpy` takes 164. Four
+words a block is the point where a 52-byte event, the largest the census
+below found, is three blocks and one word.
+
+### The block on a Thumb core
+
+A Thumb core moves several words in one instruction, and that is where
+its block comes from: a load or store multiple of N registers takes
+1 + N cycles where a single load or store takes two (DDI 0439B 3.3.1
+for the M4, DDI 0432C table 3-1 for the Cortex-M0; the M33's manual
+gives no cycle table), and on the M4 a run of STR or STRD is two cycles
+a word, measured below, its write buffer holding one store. So on the
+M0+, the M4 and the M33 a block is one LDM and one STM
+of four registers, and a copy or a fill of 64 bytes or more runs turns
+of four blocks, one branch a turn. Measured on the STM32F446 at 180 MHz
+(`bench_stm32f4`, letter m: 4096 bytes between two word-aligned SRAM1
+buffers, the core's floor two bytes a cycle for a copy and four for a
+fill, `x` the wall over that floor):
+
+| shape | memcpy 4096 | memset 4096 |
+|---|---|---|
+| LDRD/STRD, 16 bytes a turn: GCC's own (the fill with two branches a turn) | 4421 (x 2.15) | 2866 (x 2.79) |
+| newlib 4.6.0, `memcpy-armv7m.S` (LDR/STR pairs, 64 bytes a turn) and its C `memset` (STRD, one branch) | 3226 (x 1.57) | 2860 (x 2.79) |
+| an aggregate of 64 bytes copied by value (GCC's LDM/STM expansion) | 3107 (x 1.51) | - |
+| LDM/STM of four, 16 bytes a turn | 3370 (x 1.64) | 2348 (x 2.29) |
+| LDM/STM of four, 64 bytes a turn - the runtime | 2818 (x 1.37) | 1540 (x 1.50) |
+| LDM/STM of eight (r3..r10), 32 bytes a turn: no Thumb-1 encoding | 2730 (x 1.33) | 1712 (x 1.67) |
+
+The fill's second branch cost it nothing there: four stores of two
+cycles bound the turn, which is why only the store-multiple moves it.
+At the bench's shorter sizes the runtime takes 35, 78 and 238 cycles to
+copy 1, 16 and 256 bytes (35, 86 and 341 in LDRD/STRD) and 20, 51 and
+160 to fill them (19, 61 and 226).
+
+GCC is not asked for these instructions, because it does not produce
+them well. Copied as an aggregate, a block becomes LDM/STM pairs through
+four fixed registers with both addresses recomputed every block (the
+table's third row), and on RISC-V at -Os the same aggregate becomes a
+call to `memcpy` - inside `memcpy`. For a fill it forms no STM at all: its
+peephole wants four ascending registers, and the register allocator does
+not hand it four for one value. So the block loops are written in the
+instructions themselves, under `__thumb__`, the one place the file
+speaks an instruction set: the Thumb-1 subset every Thumb core decodes -
+low registers, writeback, four fixed data registers declared clobbered,
+never a register list built from operands, which would follow the
+allocator's order. An interrupt arriving during one of them does not
+wait for it: the M4 and the M33 continue the transfer after the handler
+(the M33's manual lists LDM and STM among its exception-continuable
+instructions), and the M0+ abandons it and starts it again, which loads
+or stores the same words a second time.
+
+The copy's loops are inline: a block needs four data registers whatever
+moves it, so the copy's frame does not grow. The fill's are not: inline,
+memset would keep its destination and count live across the four
+registers, and GCC saves registers at its entry for every fill - a
+one-byte fill takes 38 cycles that way on the STM32F446, 20 this way.
+So the turns, with the rest of a
+long fill, are a function of their own that memset reaches for 64 bytes
+or more (a tail call on the M4 and the M33, a call on the M0+). The
+price is code: `memcpy` and `memset` with the functions behind them take
+374 bytes on the M4 and the M33 (276 with LDRD/STRD blocks) and 388 on
+the M0+ (244), against 270 to 340 on the RISC-V cores, whose blocks are
+four loads and four stores.
 
 The file protects itself against GCC's loop recognition, which would
 turn the byte loops of `memcpy` and `memset` into calls to `memcpy` and
@@ -203,3 +270,9 @@ the seven.
   expand a copy in place and test itself instead. One chip per core is
   enough for the runtime and one board per build project for the
   integration; the platform suite does both in one run.
+- The host compiles the block that RISC-V runs, four loads and four
+  stores; the Thumb block loops are instructions it cannot run, so on a
+  Thumb core letter t is what proves them. Its lengths reach 70 bytes:
+  one turn of 64 and the blocks, words and bytes after it, at every
+  misalignment. A run of several turns takes the same instructions
+  again, and the bench apps' letter m runs it, with no verdict.

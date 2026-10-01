@@ -9,7 +9,8 @@
  *
  * EXHAUSTIVE over what decides a path: each pointer misaligned by 0..7
  * (twice the word, so every residue meets every other), every length from
- * nothing to 70 bytes (the head bytes, more than sixteen words, every
+ * nothing to 150 bytes (the head bytes, two whole 64-byte turns of a
+ * Thumb core's block - the turn's repeat branch included - and every
  * tail), every overlap of memmove in both directions, guard bytes around
  * every destination so a write one byte outside the range is caught; the
  * sign memcmp gives the first difference read as unsigned char; strlen at
@@ -71,7 +72,7 @@ struct RtSelftestResult {
 namespace rt_selftest_detail {
 
 constexpr size_t offsets = 8;    // twice the word
-constexpr size_t max_len = 70;   // more than sixteen words, every tail
+constexpr size_t max_len = 150;  // two 64-byte block turns and a tail
 constexpr size_t guard = 8;      // bytes watched on each side
 constexpr size_t span = 24;      // memmove: distances between the two starts
 constexpr uint8_t guard_byte = 0xA5u;
