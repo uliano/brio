@@ -38,6 +38,7 @@
 
 #include "util/analog.hpp"
 #include "util/analog_sampler.hpp"
+#include "util/bench.hpp"
 #include "util/block_stream.hpp"
 #include "util/bus_master.hpp"
 #include "util/clock.hpp"
@@ -227,6 +228,18 @@ static_assert(crc16(three, 3) != 0);
 
 using Bench = TestBench<Serial, 8>;
 
+// The benchmark grammar over this platform: the STK's cycle count as the
+// ruler, the idle adapter the kernel would take for the platform, and a
+// handler's stamp pair.
+struct StkRuler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<StkRuler>);
+using BenchPlatform = BenchIdle<P, StkRuler>;
+static_assert(Platform<BenchPlatform>);
+IsrMeter<StkRuler, BenchPlatform> bench_meter;
+
 void letter_a() {}
 
 void util_verbs() {
@@ -280,6 +293,20 @@ void util_verbs() {
     (void)bench.letter('a', "a letter", letter_a);
     bench.verdict("thing", true);
     bench.end_letter();
+
+    // the benchmark grammar
+    Stopwatch<StkRuler> sw;
+    sw.start();
+    const BenchCounters before = bench_counters<BenchPlatform>(bench_meter);
+    bench_meter.enter();
+    bench_meter.leave();
+    {
+        BenchPlatform::CriticalSection cs;
+        BenchPlatform::idle();
+    }
+    bench_line(serial, "op", 16, bench_sample(sw.elapsed(), before,
+                                              bench_counters<BenchPlatform>(bench_meter)),
+               StkRuler::hz(), 11520);
 
     // printing, time, wire, ring
     TimeStamp stamp{};

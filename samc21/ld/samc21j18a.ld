@@ -56,11 +56,22 @@ SECTIONS
         *(.ARM.exidx* .gnu.linkonce.armexidx.*)
     } > rom
 
-    /* Initialized data: load image in flash, run address in RAM. */
+    /* Initialized data: load image in flash, run address in RAM.
+     *
+     * CODE THAT RUNS FROM SRAM lives in `.ram_text`, an input section
+     * placed first inside .data: Reset_Handler's copy of .data
+     * (startup_samc21.cpp) moves it into SRAM with the initialized data
+     * before main, so it needs no loop of its own, and an image that
+     * places nothing there gets zero bytes from this line. What it buys
+     * is the fetch: the flash runs behind 2 wait states at 48 MHz
+     * (DS60001479M table 45-41) and a 64-byte cache (27.6.7), where the
+     * SRAM is single-cycle at full speed (9.1). */
     .data :
     {
         . = ALIGN(4);
         __data_start = .;
+        *(.ram_text .ram_text.*)
+        . = ALIGN(4);
         *(.data .data.*)
         . = ALIGN(4);
         __data_end = .;

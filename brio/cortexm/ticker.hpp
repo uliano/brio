@@ -205,11 +205,16 @@ public:
     /// Raw 32-bit tick count since init() (wraps: 49.7 days @ 1000 Hz)
     static uint32_t ticks() { return read_shared(m_ticks); }
 
-    /// CPU cycles since init(), from any context: the tick count and
-    /// SysTick's position in its period, with the exception's pending bit
-    /// saying whether a reload the handler has not counted yet is in
-    /// (util/cycle_count.hpp). Wraps at 2^32 - a difference of two reads is
-    /// exact under 2^32 cycles - and means cycles of the standing reload: a
+    /// CPU cycles since init(): the tick count and SysTick's position in
+    /// its period, with the exception's pending bit saying whether a
+    /// reload the handler has not counted yet is in (util/cycle_count.hpp).
+    /// From any context BUT the SysTick handler's own body before tick()
+    /// has counted: there the exception is active and no longer pending,
+    /// the count still holds the previous tick, and the read is one whole
+    /// period low - a stamp inside that handler uses the counter's
+    /// position alone (period - 1 - VAL), which is exact between two reads
+    /// of one period. Wraps at 2^32 - a difference of two reads is exact
+    /// under 2^32 cycles - and means cycles of the standing reload: a
     /// rebase restarts the period, and a paused ticker counts nothing.
     static uint32_t cycles() {
         const uint32_t period = SysTick->LOAD + 1u;

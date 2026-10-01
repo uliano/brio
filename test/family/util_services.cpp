@@ -1,13 +1,14 @@
 // Family smoke TU for the util/ services that have no target half of
 // their own: the meter latch and its sampler, the trace ring, the input
-// scanner and the bus arbiter's completion policy.
+// scanner, the bus arbiter's completion policy and the bench grammar.
 //
 // util/ is target-independent, so nothing here is package-dependent by
 // itself; what this TU proves is that the whole composition instantiates
 // on every DA/DB - the latches fed by the REAL TCB meter ISR bodies, a
 // scanner over real Pins, a trace over the AVR platform's clock, and a
-// bus arbiter with a retry policy - and that the pieces still agree once
-// they are held together by a kernel pack.
+// bus arbiter with a retry policy, the bench instrument over two cascaded
+// TCBs - and that the pieces still agree once they are held together by a
+// kernel pack.
 #include <stdint.h>
 
 #include "avrdx/clock.hpp"
@@ -16,6 +17,7 @@
 #include "avrdx/platform.hpp"
 #include "avrdx/tcb.hpp"
 #include "kernel/tenuto.hpp"
+#include "util/bench.hpp"
 #include "util/bus_master.hpp"
 #include "util/input_scanner.hpp"
 #include "util/meter_sampler.hpp"
@@ -184,4 +186,55 @@ void util_verbs() {
     (void)PlainBus::rejected_count();
     (void)RetryBus::attempt();
     (void)System::step();
+}
+
+// ---- the bench grammar -----------------------------------------------------------
+// bench_avr's instrument, a composition of its own (an app holds either
+// this or the meters above on TCB1): two TCBs cascaded as the ruler, read
+// under the platform's guard, the stamped idle adapter in the kernel's
+// place, a meter on a vector, and bench_line's 64-bit arithmetic through
+// avr-gcc.
+using RulerWatch = CascadedCounter<Tcb<1>, Tcb<2>>;
+
+struct TcbRuler {
+    [[gnu::always_inline, gnu::flatten]] static uint32_t now() {
+        P::CriticalSection cs;
+        return RulerWatch::read();
+    }
+    static constexpr uint32_t hz() { return SysClock::hz; }
+};
+static_assert(CycleRuler<TcbRuler>);
+
+using StampedIdle = BenchIdle<P, TcbRuler>;
+static_assert(Platform<StampedIdle>);
+static_assert(IdleWindow<StampedIdle>);
+
+struct NullSink {
+    static bool write_byte(uint8_t) { return true; }
+};
+
+IsrMeter<TcbRuler, StampedIdle> vector_meter;
+
+void vector_isr() {
+    vector_meter.enter();
+    Ticker::pit();
+    vector_meter.leave();
+}
+
+void bench_verbs() {
+    RulerWatch::init(TcbClock::div1, EventChannel<4>{}, EventChannel<5>{});
+    RulerWatch::reset();
+    BenchCounters c0{};
+    {
+        P::CriticalSection cs;
+        c0 = bench_counters<StampedIdle>(vector_meter);
+    }
+    Stopwatch<TcbRuler> sw;
+    sw.start();
+    StampedIdle::idle();
+    vector_isr();
+    const uint32_t wall = sw.elapsed();
+    const BenchSample s = bench_sample(wall, c0, bench_counters<StampedIdle>(vector_meter));
+    bench_line(NullSink{}, "tick", 0u, s, TcbRuler::hz(), 0u);
+    (void)StampedIdle::idle_turns();
 }

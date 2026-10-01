@@ -15,6 +15,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/analog.hpp"
+#include "util/bench.hpp"
 #include "util/block_stream.hpp"
 #include "util/bus_master.hpp"
 #include "util/clock.hpp"
@@ -80,6 +81,21 @@ using Loop = Tenuto<P, Echo>;
 using Log = Ring<uint8_t, 64, P>;
 using Latch = MeterLatch<uint16_t, P, 0>;
 
+// The benchmark grammar over this platform: SysTick's cycle count as the
+// ruler, the idle adapter the kernel would take for the platform, a
+// handler's stamp pair and the line into a sink that drops it.
+struct SysTickRuler {
+    static uint32_t now() { return Ticker::cycles(); }
+    static constexpr uint32_t hz() { return 125'000'000u; }
+};
+static_assert(CycleRuler<SysTickRuler>);
+using BenchPlatform = BenchIdle<P, SysTickRuler>;
+static_assert(Platform<BenchPlatform>);
+IsrMeter<SysTickRuler, BenchPlatform> bench_meter;
+struct DropSink {
+    static bool write_byte(uint8_t) { return true; }
+};
+
 void util_all_verbs() {
     Loop::init_all();
     (void)Loop::step();
@@ -93,6 +109,19 @@ void util_all_verbs() {
     (void)ticks_from_ms<P>(5);
     TimeEvents<P>::process();
     (void)TimeEvents<P>::next_deadline();
+
+    Stopwatch<SysTickRuler> sw;
+    sw.start();
+    const BenchCounters before = bench_counters<BenchPlatform>(bench_meter);
+    bench_meter.enter();
+    bench_meter.leave();
+    {
+        BenchPlatform::CriticalSection cs;
+        BenchPlatform::idle();
+    }
+    bench_line(DropSink{}, "op", 16u,
+               bench_sample(sw.elapsed(), before, bench_counters<BenchPlatform>(bench_meter)),
+               SysTickRuler::hz(), 11520u);
 }
 
 // gfx/ is target-independent, so what this adds is the COMPILER's

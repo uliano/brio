@@ -50,6 +50,12 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   shares, the word path with no misaligned access, why the events need
   no alignment of their own, the AVR left on avr-libc with its heap
   and stdio refused at the link),
+  `benchmark.md` (the instrument a driver's cost is read with: one line
+  per operation and size on every family - wall, busy, interrupts,
+  handler cycles, the rate, the wire's rate and their ratio printed by
+  the harness; the ruler each core has; busy as wall minus the idle
+  windows plus the handlers inside them; the protocol, the vendor's
+  library beside brio's on the same board),
   `block-stream.md` (block streams: BlockSource/BlockPlayer concepts
   over caller-owned buffers - blocks, not DMA - and the BlockRelay AO
   lending each filled block for one dispatch; built BEFORE its second
@@ -1058,6 +1064,11 @@ test/test_rt/            rt/rt.cpp's copies, fill, compare and scans against a b
 test/test_sha256/        util/sha256.hpp against FIPS 180-4's own vectors, at
                          compile time and at run time, plus the tail the
                          hardware accelerators are owed
+test/test_bench/         util/bench.hpp: the ruler's wrap, the busy formula
+                         over scripted idle windows and handler stamps, the
+                         adapter's platform face (idle_until forwarded only
+                         where the platform has it), and the bench line as
+                         characters on the wire from numbers checked by hand
 third_party/cmsis-device-f4/  vendored ST cmsis-device-f4 v2.6.9 Include/ (Apache-2.0):
                          every F4 part's header, the umbrella stm32f4xx.h
 third_party/cmsis-core/  vendored ARM CMSIS-Core headers (Apache-2.0), core_cm33.h
@@ -1349,6 +1360,19 @@ brio/                    the framework, one directory per stratum:
                            grammar in one place - letter registry, verdict
                            lines, per-letter tally and the ALL: total
                            bin/brio parses
+    bench.hpp              the BENCHMARK grammar (design/benchmark.md):
+                           CycleRuler (a core-cycle count that states its
+                           own rate), Stopwatch, BenchIdle<P, R> (the
+                           platform adapter that stamps the idle windows -
+                           the kernel compiles nothing new), IsrMeter<R, I>
+                           (the stamp pair a bound vector carries, telling
+                           a handler inside an idle window from one that
+                           preempted the thread), bench_counters /
+                           bench_sample (busy = wall - idle + the handlers
+                           inside it) and bench_line, which computes the
+                           rate and the ratio to the wire and prints them;
+                           a bench_<family> app per build project carries
+                           the operations
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
                            LineReceived (Lease::dispatch loan, LendsTo)
     bus_master.hpp         BusMaster<Bus, P, depth, Policy>: bus arbiter
@@ -1719,6 +1743,15 @@ brio/                    the framework, one directory per stratum:
                            plus this file plus its measured facts - the RP2350
                            is the one Cortex-M family that does NOT take it,
                            its ruler being a timer both its architectures read
+    dwt.hpp                CycleCounter: the DWT's CYCCNT, the free-running
+                           count of processor cycles ARMv7-M and ARMv8-M main
+                           define and the M0+ has not (a static_assert refuses
+                           it below the M3) - TRCENA then CYCCNTENA, set only
+                           where they read clear because a probe may have set
+                           them, never a write of the count; now() one load;
+                           what it counts through in a sleep is the family's
+                           fact (stm32f4/dwt.hpp). The benchmark's ruler on
+                           the M4
   pl011/                 IP STRATUM: ARM's PrimeCell UART, written once for
                          every family that carries it - a directory named for
                          a peripheral DESIGN and not for a silicon, sitting
@@ -2482,9 +2515,13 @@ brio/                    the framework, one directory per stratum:
                            the device header is wrong in BOTH directions (a
                            second bank's bits declared on a part that has one
                            bank, a PCROP bit omitted on a part that has it)
-    nvic.hpp / ticker.hpp / delay.hpp  the device header + the cortexm/ file:
-                           PRIMASK the one mask on a core that has BASEPRI,
-                           SysTick at 1000 Hz, delay_us on VAL
+    nvic.hpp / ticker.hpp / delay.hpp / dwt.hpp  the device header + the
+                           cortexm/ file: PRIMASK the one mask on a core that
+                           has BASEPRI, SysTick at 1000 Hz, delay_us on VAL,
+                           the DWT's cycle counter on HCLK (stopped by a Stop;
+                           whether WFI's gated CPU clock stops it is not in the
+                           documents - measured by the benchmark app's control
+                           line)
     platform.hpp           Stm32f4Platform<TB>: WFI = Sleep, SLEEPDEEP never
                            written; BKPT; .noinit breadcrumb; atomic_width 4
     pwr.hpp                Pwr: the whole power controller - the APB1 gate,

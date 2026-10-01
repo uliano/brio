@@ -24,7 +24,13 @@ millisecond, no division at wait time: folded for a static clock,
 and for a dynamic one selected by its rate index out of `delay_rates`,
 a per-rate table built at compile time over the clock's discrete-rate
 surface; it needs the counter running, never the interrupt, so it
-serves both writers alike). It exists because brio's naming rule says a core stratum is
+serves both writers alike) - and, for the cores that have it, the DWT's
+cycle counter (`cortexm/dwt.hpp`: `CycleCounter` - CYCCNT, the
+free-running count of processor cycles ARMv7-M and ARMv8-M main define
+and ARMv6-M has not, enabled by TRCENA then CYCCNTENA and only where
+each reads clear, because a probe may have set them and nothing
+promises it leaves them; never a write of the count; `now()` one load;
+refused by `static_assert` below the M3). It exists because brio's naming rule says a core stratum is
 factored at the SECOND ARM family: `samc21/` and `stm32g0/` carried
 these files as twins line for line - the first two until the STM32G0's
 bring-up, the third until the STM32G0's fillers were done - and every
@@ -49,8 +55,8 @@ image byte-identical before and after.
 
 ## Three architectures, one stratum
 
-The STM32F4 stratum (Cortex-M4, ARMv7-M) includes these three files
-unchanged: SysTick, the NVIC's enable/pend/priority registers and
+The STM32F4 stratum (Cortex-M4, ARMv7-M) includes the first three
+files unchanged: SysTick, the NVIC's enable/pend/priority registers and
 PRIMASK have the same programmer's model on ARMv7-M, and the files
 read nothing else - which is why the stratum is named for the CORE
 family and not for an architecture. What ARMv7-M adds - BASEPRI, the
@@ -58,7 +64,15 @@ sixteen priority levels, the FPU, the configurable faults - stays in
 `stm32f4/`, unused by the cooperative kernel, until another ARMv7-M
 family proves what is shared (the rule by which this stratum was born
 at the second Cortex-M0+ family): an `armv7m/` would sit BESIDE this
-one, holding what v7-M adds, as an `armv8m/` would for the M33s.
+one, holding what v7-M adds, as an `armv8m/` would for the M33s. The
+fourth file is the one exception, and it is here on the same rule read
+the other way: the DWT's cycle counter is what the M3, the M4, the M7
+and the M33 SHARE - one unit, one programmer's model, in ARMv7-M and
+ARMv8-M main alike - so it is a file of the core family that two of its
+profiles carry and the third refuses at compile time, not a thing one
+architecture adds. The STM32F4 takes it through `stm32f4/dwt.hpp`,
+which states the family's facts (the counter runs on HCLK, a Stop stops
+it); no M33 family includes it yet.
 
 The RP2350's Arm half (Cortex-M33, ARMv8-M) reaches the same two of
 them under a condition worth stating, because that chip is the one
@@ -96,3 +110,14 @@ directly.
 database (the oldest of the users), so the CMSIS symbols resolve; every
 other project that includes them compiles them with its own flags at
 build time.
+
+## Not covered yet
+
+Implemented, not bench-verified:
+
+- Whether the DWT's counter keeps counting through a WFI on the STM32F4,
+  where the sleep gates the CPU clock and keeps FCLK running and no
+  document on the vendor's list says which of the two the unit counts;
+  the benchmark app's idle-window control line, run with and without
+  DBG_SLEEP (a probe leaves it set), measures it - a counter that stopped
+  there would make every busy figure of that family wrong.

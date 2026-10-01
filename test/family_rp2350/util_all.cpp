@@ -16,6 +16,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/analog.hpp"
+#include "util/bench.hpp"
 #include "util/block_stream.hpp"
 #include "util/bus_master.hpp"
 #include "util/clock.hpp"
@@ -81,6 +82,21 @@ using Loop = Tenuto<P, Echo>;
 using Log = Ring<uint8_t, 64, P>;
 using Latch = MeterLatch<uint16_t, P, 0>;
 
+// The bench grammar over this platform: the idle adapter is a Platform the
+// kernel can take, and the meter, the counters and the line instantiate.
+// The ruler here is the platform timer's microsecond, only so that the
+// templates have one; a bench app names its own.
+struct BenchRuler {
+    static uint32_t now() { return Mtime::micros(); }
+    static uint32_t hz() { return 1'000'000u; }
+};
+using BenchP = BenchIdle<P, BenchRuler>;
+static_assert(CycleRuler<BenchRuler> && Platform<BenchP> && IdleWindow<BenchP>);
+struct BenchSink {
+    static bool write_byte(uint8_t) { return true; }
+};
+IsrMeter<BenchRuler, BenchP> bench_meter;
+
 void util_all_verbs() {
     Loop::init_all();
     (void)Loop::step();
@@ -94,6 +110,15 @@ void util_all_verbs() {
     (void)ticks_from_ms<P>(5);
     TimeEvents<P>::process();
     (void)TimeEvents<P>::next_deadline();
+    Stopwatch<BenchRuler> watch;
+    watch.start();
+    const BenchCounters before = bench_counters<BenchP>(bench_meter);
+    bench_meter.enter();
+    bench_meter.leave();
+    BenchP::idle();
+    const BenchCounters after = bench_counters<BenchP>(bench_meter);
+    bench_line(BenchSink{}, "op", 16u, bench_sample(watch.elapsed(), before, after),
+               BenchRuler::hz(), 11520u);
 }
 
 // gfx/ is target-independent, so what this adds is the COMPILER's
