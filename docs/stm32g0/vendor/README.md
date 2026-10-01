@@ -77,9 +77,12 @@ are per revision, and the SHEET is per part number.
 
 Encoded in code or stated where the code cannot enforce it:
 - **2.2.10 Prefetch failure when branching across flash memory banks**
-  (no workaround, both revisions): why `FlashAccel::prefetch` is a
-  verb and not a default - PRFTEN stays at its reset value (clear)
-  until a measurement says otherwise (flash.hpp).
+  (no workaround, both revisions): answered by the LINK -
+  `stm32g0/ld/stm32g0b1re.ld` gives the image bank 1 alone, bank 2 being
+  the storage read as data, the erratum's own safe use - which is what
+  lets the clock task turn PRFTEN on in every image (clock.hpp,
+  flash.hpp); `FlashAccel::prefetch(false)` is the verb for a program
+  linked across both banks.
 - **2.2.4 Wakeup from Stop not effective** with HSIDIV != 0 (no
   workaround): a divided `ClockSource::internal` rate is a stated
   caveat on the clock task and on the sleep sites (clock.hpp).
@@ -203,9 +206,8 @@ partial, "-" = absent.
 
 **ES0418 HAS NO PREFETCH ITEM** - the G0B1's 2.2.10 (prefetch failure
 branching across flash memory banks) has no twin here, and it could not:
-this part has ONE bank. `FlashAccel::prefetch` stays a verb left at its
-reset value on both parts, because the reason to leave it there is the
-G0B1's and a common default is worth more than a per-part one.
+this part has ONE bank. The prefetch is on here as on the G0B1, one
+default for the family, the G0B1's condition being met by its link.
 
 **AND ONE PER-PART FACT THAT IS NOT AN ERRATUM AT ALL**, found the hard
 way and now in the reserve: RM0444 22.4.25's ETRSEL list footnotes codes

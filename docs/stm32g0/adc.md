@@ -203,10 +203,18 @@ a sampling time of 1.5 or 3.5 cycles takes one extra cycle on a SINGLE
 conversion or the first of a sequence - invisible in the continuous runs
 above, where it is amortized over 256. Timed single-shot and
 differenced against a 7.5-cycle conversion, where the erratum does not
-apply, the step is **13 CPU cycles where 12 is predicted**: the short
-conversion pays half a cycle more than the chapter says, which at this
-resolution is the erratum's one ADC cycle seen through a clock running
-at twice fADC.
+apply, the step is **10 CPU cycles where the chapter predicts 12**: the
+short conversion pays the erratum's one ADC cycle, two CPU cycles at
+twice fADC. THE INSTRUMENT IS THE CORE'S WAKE, NOT A POLL: masked, the
+core sleeps in WFI from the start until EOC pends the converter's line,
+and the 7.5 -> 39.5 step on the same instrument, where neither time is
+the erratum's, reads exactly the chapter's 64. A polled read cannot
+resolve this step - its loop, an APB read of ADC_ISR, a test and two
+branches, is about as long as the twelve cycles it would measure, so it
+rounds each end of conversion up to its next look, and where the looks
+fall is the instruction fetch's: the same loop read the step as 13 with
+the flash prefetch off and as 0 with it on. The wake reads 10 either
+way.
 
 **A FORBIDDEN WRITE IS NOT ONE THING ON THIS CONVERTER.** 15.3.7 says
 CFGR1 is writable only with ADEN clear and 15.12.13 says the same of

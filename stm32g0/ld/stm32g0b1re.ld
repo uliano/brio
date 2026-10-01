@@ -36,7 +36,8 @@
  *     BRANCHES ACROSS BANKS, with no workaround, and its own note lists
  *     "EEPROM emulation or other data storage in bank 2" as the safe
  *     use. Code must therefore stay in one bank; data in the other is
- *     the vendor's sanctioned arrangement;
+ *     the vendor's sanctioned arrangement - and the one bank is what
+ *     lets stm32g0/clock.hpp turn the prefetch on in every image;
  *   - and it makes the storage bounds CONSTANTS rather than linker
  *     symbols that move with every build - the property the samc21's
  *     RWWEE array has for free and the AVR backend has to work for.
@@ -45,11 +46,15 @@
  * nvm_flash.hpp checks that at run time: it must stop at 0x0804 0000,
  * and a script edited back to 512 K closes the storage (both mounts
  * answer bad_geometry and write nothing) instead of letting an image
- * grow over stored data.
+ * grow over stored data. Nothing closes the prefetch that way: a
+ * program linked across both banks turns it off itself
+ * (FlashAccel::prefetch(false), brio/stm32g0/flash.hpp).
  * ==========================================================================*/
 
 MEMORY
 {
+    /* 256K = BANK 1 ALONE, and load-bearing: stm32g0/clock.hpp turns the
+     * prefetch on, which ES0548 2.2.10 makes safe for code in one bank. */
     rom (rx)  : ORIGIN = 0x08000000, LENGTH = 256K
     ram (rwx) : ORIGIN = 0x20000000, LENGTH = 144K
 }

@@ -79,8 +79,8 @@
  *  - 2.2.10, LIVE: prefetch may fail on a branch across banks, with no
  *    workaround, and the erratum's own note blesses "EEPROM emulation or
  *    other data storage in bank 2" as the safe use of dual bank. That is
- *    precisely nvm_flash.hpp's design, and it is also why FlashAccel
- *    leaves PRFTEN at its reset value (clear).
+ *    precisely nvm_flash.hpp's design, and with the code held in bank 1
+ *    by the link it is why the prefetch can be on (below).
  *  - 2.2.5 (PCROP read weakness) is rev A only and nothing here sets
  *    PCROP anyway; 2.2.9 (option-byte mismatch) is answered by not
  *    writing option bytes at all.
@@ -94,10 +94,17 @@
  *    after a fall, and a new LATENCY value is in force only when it
  *    READS BACK - 3.7.1 says so in one sentence, and a rise taken
  *    before the readback runs the core off a flash that cannot keep up.
- *  - ICEN (instruction cache) is set at reset, PRFTEN (prefetch) is
- *    clear. This stratum leaves both at their reset values: erratum
- *    ES0548 2.2.10 (see above) makes PRFTEN a decision to take
- *    knowingly, with a measurement, not a default.
+ *  - ICEN (instruction cache) is set at reset and left so; PRFTEN
+ *    (prefetch) is clear at reset and the clock task SETS it at boot
+ *    (stm32g0/clock.hpp, Clock::init() and DynamicClock::init()). The
+ *    decision is taken on a measurement - on the STM32G0B1RE at 64 MHz
+ *    and two wait states, the handler bodies 12 to 20 per cent faster
+ *    with it, an idle second's busy cycles 19, a copy 14 to 25, the two
+ *    NV suites green (docs/design/benchmark.md) - and erratum 2.2.10's
+ *    condition is the LINK's: stm32g0/ld/stm32g0b1re.ld gives the image
+ *    bank 1 alone, and the G071's and G031's scripts describe
+ *    single-bank parts. FlashAccel::prefetch(false) is the verb for a
+ *    program that wants it off - one linked across both banks.
  */
 
 #pragma once
@@ -125,7 +132,9 @@ struct FlashWaitStates {
     /// Program `ws` and wait until it reads back (3.7.1: the write
     /// becomes effective when it returns the same value upon read).
     /// Bounded: a value the field cannot take (> 2) would never read
-    /// back, so it is refused instead, and false says so.
+    /// back, so it is refused instead, and false says so. A
+    /// read-modify-write of LATENCY alone: PRFTEN and ICEN, set once
+    /// at boot, are kept by every rate change that calls this.
     static bool set(uint8_t ws) {
         if (ws > max_latency) {
             return false;
@@ -159,6 +168,10 @@ struct FlashWaitStates {
 struct FlashAccel {
     FlashAccel() = delete;
 
+    /// PRFTEN. On once the clock task has booted: its init() sets it
+    /// (this file's header says why), nothing else in the stratum writes
+    /// it, and prefetch(false) is how a program that wants it off says
+    /// so.
     static bool prefetch() { return (FLASH->ACR & FLASH_ACR_PRFTEN) != 0u; }
     static void prefetch(bool on) {
         FLASH->ACR = on ? (FLASH->ACR | FLASH_ACR_PRFTEN) : (FLASH->ACR & ~FLASH_ACR_PRFTEN);

@@ -199,13 +199,15 @@ what it makes possible. The shape, as built
   has not got.** The fan-out precedes the switch in BOTH directions -
   this page's contract, unchanged - and the target's own steps sit
   around it: rising = low-power run left and REGLPF clear, the range up
-  and VOSF clear, then the fan-out, then the rate's own `init()` (the
+  and VOSF clear, then the fan-out, then the rate's own `apply()` (the
   wait states up, then the root); falling = the fan-out, then the
-  rate's `init()` (the root, the wait states down, the range down, and
+  rate's `apply()` (the root, the wait states down, the range down, and
   the low-power regulator LAST, because 4.3.2 wants the clock at or
   below 2 MHz before it). A static `Clock<>` in Range 2 or low-power
   run is that falling sequence on its own, so it stands alone as a boot
-  clock and is also exactly the body a switch runs; a Range 1 rate
+  clock and its `apply()` is exactly the body a switch runs - `init()`
+  being `apply()` plus the one store a boot owns and a switch must not
+  repeat, this family's flash prefetch default; a Range 1 rate
   refuses a core it finds in Range 2, because raising it is the
   orderer's step. Measured, every rung as the type claims and the CPU at
   the claimed rate on the crystal's scale; a switch costs 48 us (64 ->

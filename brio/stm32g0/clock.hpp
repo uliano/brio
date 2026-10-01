@@ -19,12 +19,13 @@
  *  TASKS - what an application names:
  *    Clock<source, hz, regime>   the static main clock: ONE constexpr
  *             truth `hz` every driver derives from (there is no F_CPU
- *             in this build); init()
- *             composes the resources and reports whether the requested
- *             root runs. `regime` is the VOLTAGE SIDE of the rate - the
- *             VCORE range and the regulator (PowerRegime below) - Range 1
- *             by default, which is the only range a 64 MHz rate can run
- *             in.
+ *             in this build); init() composes the resources, reports
+ *             whether the requested root runs and turns the flash
+ *             prefetch on; apply() is the same rate without that one
+ *             store, the verb a switch and a Stop's restore run.
+ *             `regime` is the VOLTAGE SIDE of the rate - the VCORE range
+ *             and the regulator (PowerRegime below) - Range 1 by
+ *             default, which is the only range a 64 MHz rate can run in.
  *    DynamicClock<Rates<...>, Users...>   the runtime regime: a PACK of
  *             static Clock tasks the program may run at, the first the
  *             boot rate, set<hz>() / set(hz) / set_index() switching
@@ -65,16 +66,24 @@
  * names, each member a static Clock task with its regime, and the switch
  * is DIRECTION-AWARE around the flash latency and the regulator:
  *   rising:  leave low-power run (REGLPF clear), the range UP (VOSF
- *            clear), the fan-out, then the rate's own init() - wait
+ *            clear), the fan-out, then the rate's own apply() - wait
  *            states up, then the root;
- *   falling: the fan-out, the rate's init() - the root, then wait states
+ *   falling: the fan-out, the rate's apply() - the root, then wait states
  *            down - the range DOWN, and low-power run LAST, because 4.3.2
  *            wants SYSCLK at or below 2 MHz before it.
  * A rate in Range 2 takes its wait states from table 13's Range 2 column
- * inside its own init(), which is why the range is safe to lower after
+ * inside its own apply(), which is why the range is safe to lower after
  * it: the stricter column is already in force. What a Stop leaves behind
  * (HSISYS, the PLL off, HSIDIV and LPR kept) is put back by restore() -
  * the CURRENT rate, no fan-out, the sleep site's verb.
+ *
+ * THE FLASH PREFETCH IS ON BY DEFAULT, set ONCE by the boot verbs
+ * (Clock::init(), DynamicClock::init()) and by nothing else: a rate's
+ * apply() - every switch, every restore after a Stop - touches FLASH_ACR
+ * only through FlashWaitStates::set(), a read-modify-write of LATENCY
+ * alone, so a program that turned the prefetch off keeps it off. Why on,
+ * and why the erratum that forbids it on a dual-bank part cannot bite:
+ * Clock::init().
  *
  * THE FAN-OUT IS SMALL BY CONSTRUCTION: RCC_CCIPR takes a peripheral OFF
  * SYSCLK (a USART on HSI16 or LSE, the LPTIM on the crystal, the ADC on
@@ -523,17 +532,22 @@ constexpr uint8_t flash_wait_states_for(PowerRegime regime, uint32_t hz) {
  * because this task pins both prescalers at 1 (see the file header).
  *
  * `regime` is the rate's voltage side (PowerRegime): Range 1 by default,
- * and init() then REFUSES a core it finds in Range 2 rather than raising
- * it, because a range change is a sequence around the wait states that
- * belongs to whoever ordered the rates - DynamicClock below, or the
- * program. A Range 2 rate's init() is the whole falling sequence of
- * 4.1.4 on its own: the wait states from the Range 2 column (the
- * stricter one, so it is legal to set them in either range), the root,
- * then the range down and, for `low_power_run`, LPR last; it first
+ * and the rate's sequence then REFUSES a core it finds in Range 2 rather
+ * than raising it, because a range change is a sequence around the wait
+ * states that belongs to whoever ordered the rates - DynamicClock below,
+ * or the program. A Range 2 rate's sequence is the whole falling
+ * sequence of 4.1.4 on its own: the wait states from the Range 2 column
+ * (the stricter one, so it is legal to set them in either range), the
+ * root, then the range down and, for `low_power_run`, LPR last; it first
  * LEAVES low-power run if a previous life set it, because every step of
  * that sequence is priced for the main regulator. So a static Range 2
- * clock stands alone as a boot clock, and is also exactly the body a
- * dynamic switch runs.
+ * clock stands alone as a boot clock, and its apply() is exactly the
+ * body a dynamic switch runs.
+ *
+ * TWO VERBS, because a boot and a switch differ by one store: init() is
+ * apply() and then the flash prefetch on (the default, below); apply()
+ * is the rate alone - what DynamicClock and the sleep site run after the
+ * boot, so that neither undoes a choice the program made after it.
  */
 template <ClockSource src, uint32_t src_hz, PowerRegime regime = PowerRegime::range1>
 struct Clock {
@@ -576,15 +590,52 @@ struct Clock {
     /// Table 13's wait states for `hz` in this regime's column.
     static constexpr uint8_t wait_states = flash_wait_states_for(regime, src_hz);
 
-    /// Bring SYSCLK to `hz`. Returns false when a root did not report
-    /// ready, the switch did not take, or the wait states did not land -
-    /// the caller then knows the rate is NOT the one `hz` claims. Call
-    /// first in main(), before any driver init.
+    /// Bring SYSCLK to `hz` and turn the flash PREFETCH on - this
+    /// family's default. Call first in main(), before any driver init.
+    /// The return is apply()'s; refused or failed, init() leaves PRFTEN
+    /// as it found it.
+    ///
+    /// THE PREFETCH (FLASH_ACR.PRFTEN, RM0444 3.3.5) is stored once the
+    /// rate is in place: after apply(), so after the wait states in
+    /// whichever order they took (raised before the switch on a rise,
+    /// lowered after it on a fall) - one store that does not depend on
+    /// the rate. WHY ON: measured on the STM32G0B1RE at 64 MHz and two
+    /// wait states, one image run with PRFTEN off and then on
+    /// (docs/design/benchmark.md), the handler bodies run 12 to 20 per
+    /// cent faster, an idle second's busy cycles 19, a copy 14 to 25;
+    /// the two NV suites, which read and write bank 2 while the code runs
+    /// from bank 1, are green with it on. WHY THE ERRATUM CANNOT BITE:
+    /// ES0548 2.2.10 (no workaround) says a prefetch may fail on a branch
+    /// or a call ACROSS THE BANKS of a dual-bank part, and the link keeps
+    /// the code in one - stm32g0/ld/stm32g0b1re.ld gives `rom` 256K, bank
+    /// 1 alone, bank 2 being nvm_flash.hpp's storage READ AS DATA (the
+    /// use the erratum's own note lists as safe), and
+    /// stm32g0/ld/stm32g071rb.ld and stm32g0/ld/stm32g031k8.ld describe
+    /// single-bank parts. A program linked by a script of its own whose
+    /// code spans both banks calls FlashAccel::prefetch(false) after
+    /// this, and nothing in this file turns it back on (apply() below).
+    static bool init() {
+        const bool ok = apply();
+        if (ok) {
+            FlashAccel::prefetch(true);
+        }
+        return ok;
+    }
+
+    /// The rate alone: init() without its store into PRFTEN - what
+    /// DynamicClock runs on every switch and on restore(), and what the
+    /// sleep site re-runs after a Stop, because those change the RATE and
+    /// nothing a program chose at boot. FLASH_ACR is written here only
+    /// through FlashWaitStates::set(), a read-modify-write of LATENCY
+    /// alone, so PRFTEN and ICEN stand as they were found. Returns false
+    /// when a root did not report ready, the switch did not take, or the
+    /// wait states did not land - the caller then knows the rate is NOT
+    /// the one `hz` claims.
     ///
     /// The whole sequence is RE-STATED rather than assumed: the part
     /// boots on HSI16 undivided, but a debugger or a bootloader may have
     /// left anything behind, and `hz` is a promise.
-    static bool init() {
+    static bool apply() {
         // PWR is an APB peripheral with an enable bit of its own
         // (APBENR1.PWREN, clear at reset), and 5.2.17 says a clockless
         // peripheral's registers are not readable - the bench read the
@@ -686,9 +737,9 @@ struct Rates {
  * void rebase(uint32_t hz)`, checked by the concept where the list is
  * written) IN LIST ORDER, synchronously, BEFORE the rate changes - so a
  * user can drain what it has in flight at the old rate. Then the target
- * rate's own init() runs, with this file's direction-aware steps around
+ * rate's own apply() runs, with this file's direction-aware steps around
  * it (the file header): a rise leaves low-power run and raises the
- * range FIRST, a fall lets the rate's init() lower them LAST.
+ * range FIRST, a fall lets the rate's apply() lower them LAST.
  *
  *   using Fast = brio::Clock<brio::ClockSource::pll, 64'000'000>;
  *   using Mid  = brio::Clock<brio::ClockSource::internal, 16'000'000,
@@ -698,7 +749,7 @@ struct Rates {
  *   using SysClock = brio::DynamicClock<brio::Rates<Fast, Mid, Slow>,
  *                                       brio::SysTickCounter, Link, brio::Adc>;
  *   constexpr SysClock clock;
- *   SysClock::init();                 // Fast's init: 64 MHz, Range 1
+ *   SysClock::init();                 // Fast: 64 MHz, Range 1, the prefetch on
  *   SysClock::set<2'000'000>();       // the users rebased, then Slow
  *
  * The discrete-rate surface (docs/design/clock.md) is the pack's:
@@ -714,7 +765,7 @@ struct Rates {
  *
  * WHAT A STOP DOES TO THIS: the part comes out of Stop 0/1 on HSISYS
  * with the PLL off, HSIDIV kept, LPR kept (pwr.hpp fact 4). restore()
- * re-runs the CURRENT rate's init() with no fan-out - the users were
+ * re-runs the CURRENT rate's apply() with no fan-out - the users were
  * configured for that rate and it is that rate that comes back - and
  * is what stm32g0/sleep.hpp's site calls first thing after a wake; a
  * rate already in force (SWS says so: every HSISYS rate, since HSIDIV
@@ -735,7 +786,7 @@ struct DynamicClock<Rates<Rs...>, Users...> {
 #endif
 
     /// SYSCLK = HCLK now, and PCLK, which equals it (the prescalers are
-    /// pinned at 1 by every rate's init()).
+    /// pinned at 1 by every rate's apply()).
     static uint32_t hz() { return hz_; }
     static uint32_t pclk_hz() { return hz_; }
 
@@ -766,8 +817,18 @@ struct DynamicClock<Rates<Rs...>, Users...> {
     static constexpr bool can_run_at(uint32_t hz) { return index_of(hz) < rate_count; }
 
     /// The boot rate (the pack's first), no fan-out: nothing is
-    /// initialized yet. See Clock::init for the return.
-    static bool init() { return enter(0, false); }
+    /// initialized yet - and then the flash PREFETCH on, once, for
+    /// Clock::init()'s reasons and with its rule (refused or failed, it
+    /// leaves PRFTEN as it found it). A switch and restore() run the
+    /// rate's apply(), which keeps PRFTEN as it stands. See Clock::init
+    /// for the return.
+    static bool init() {
+        const bool ok = enter(0, false);
+        if (ok) {
+            FlashAccel::prefetch(true);
+        }
+        return ok;
+    }
 
     /// Switch to a rate known at compile time (checked: a rate the pack
     /// does not name does not compile).
@@ -820,11 +881,11 @@ private:
     static constexpr SysclkSource rate_source_[rate_count] = {Rs::sysclk_source...};
 
     /// The switch, for one rate of the pack, in the order the file
-    /// header states. The mirror is written BEFORE the rate's init()
+    /// header states. The mirror is written BEFORE the rate's apply()
     /// so that a user rebased for the new rate and a delay_us
     /// dispatching on the index agree from the first instruction after
-    /// the switch; a failed init() returns false and the mirror then
-    /// names what was ASKED, which is Clock::init's own contract.
+    /// the switch; a failed apply() returns false and the mirror then
+    /// names what was ASKED, which is Clock::apply's own contract.
     template <typename R>
     static bool enter_rate(uint8_t i, bool fan_out) {
         switching_ = true;
@@ -832,7 +893,7 @@ private:
         if constexpr (R::power_regime == PowerRegime::range1) {
             // Rising into Range 1: the regulator before anything - LPR
             // off and REGLPF clear (4.3.2), then VOS 1 and VOSF clear
-            // (4.1.4) - because R::init() refuses a core in Range 2.
+            // (4.1.4) - because R::apply() refuses a core in Range 2.
             if (Pwr::low_power_run()) {
                 ok = Pwr::low_power_run(false);
             }
@@ -840,17 +901,17 @@ private:
                 ok = Pwr::range(1) && ok;
             }
         }
-        // (A Range 2 rate's init() leaves LPR itself and lowers the
+        // (A Range 2 rate's apply() leaves LPR itself and lowers the
         // range last - nothing to do here in that direction.)
         if (fan_out) {
             (Users::rebase(R::hz), ...);
         }
         hz_ = R::hz;
         idx_ = i;
-        ok = R::init() && ok;
+        ok = R::apply() && ok;
         if constexpr (R::sysclk_source == SysclkSource::pllrclk) {
             // HSISYS IS NOT LEFT DIVIDED BEHIND A PLL RATE. A PLL rate
-            // takes HSI16 undivided and its init() has no reason to
+            // takes HSI16 undivided and its apply() has no reason to
             // touch HSIDIV, so a program that came up the ladder from
             // HSISYS/8 would keep the divider - harmless to the rate,
             // measured,

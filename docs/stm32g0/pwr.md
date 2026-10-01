@@ -276,8 +276,9 @@ register removes them:
   arm, sweep the flags the chapter demands, DSB, WFI.
 - `Stm32g0SleepSite<Clock, TB = Ticker>` - `arm` / `disarm` / `armed`,
   the `util/power.hpp` concept, plus `resume_clock()` (a static clock
-  task re-run when SWS says a Stop took the root away, a DynamicClock's
-  own `restore()` - the rate in force, never the boot one) and
+  task's `apply()` re-run when SWS says a Stop took the root away, a
+  DynamicClock's own `restore()` - the rate in force, never the boot
+  one - and neither of them the boot's store into the prefetch) and
   `pauses_tick` (true for the SysTick ticker, whose interrupt the deep
   rungs pause; false for a tickless timebase, which has nothing to
   pause - the `if constexpr` that lets one site serve both programs).

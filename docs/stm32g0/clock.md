@@ -9,7 +9,7 @@ task and `DynamicClock<Rates<...>, Users...>`), `stm32g0/flash.hpp`
 (`FlashWaitStates`, `FlashAccel`), and `stm32g0/pwr.hpp` for what this
 chapter borrows from chapter 4 - `Pwr::range()`, because the latency
 table is indexed by the voltage range, and the range and low-power-run
-setters a rate's own `init()` sequences. ONE CHAPTER, ONE OWNER: chapter
+setters a rate's own `apply()` sequences. ONE CHAPTER, ONE OWNER: chapter
 4 lives in [pwr.md](pwr.md) and RCC_BDCR - LSE, RTCSEL, RTCEN, BDRST -
 lives in [rtc.md](rtc.md), because that register is unreachable without
 the RTC domain's own write gate and its choices are one-way. The family
@@ -73,6 +73,22 @@ sets LPR last of all, at the 2 MHz 4.3.2 wants - having first LEFT
 low-power run if a previous life was in it, because every step of that
 sequence is priced for the main regulator.
 
+**The flash prefetch is on by default** (RM0444 3.3.5: the next 64-bit
+line read while the current one executes, useful once there is a wait
+state). `Clock::init()` and `DynamicClock::init()` set FLASH_ACR.PRFTEN
+once the rate is in place - one store, after the wait states whichever
+order they took. ES0548 2.2.10 (no workaround) says a prefetch may fail
+on a branch or a call across the two banks of a dual-bank part, and the
+link keeps the code in one: `stm32g0/ld/stm32g0b1re.ld` gives `rom` bank
+1 alone, bank 2 being the storage read as data ([nvm.md](nvm.md)), and
+the G071's and G031's scripts describe single-bank parts. A rate's
+sequence after the boot - every switch, every restore after a Stop - is
+`apply()`, which is `init()` without that store and writes FLASH_ACR
+only through `FlashWaitStates::set()`, a read-modify-write of LATENCY
+alone, so a program that turns the prefetch off with
+`FlashAccel::prefetch(false)` (one linked across both banks) keeps it
+off. What it buys is measured below.
+
 **A rate is a tuple and the dynamic clock is a pack.** On the AVR a
 dynamic clock's rate is the boot rate over one prescaler; here it is
 (the root and its rate, the VCORE range, the regulator) - 64 MHz on the
@@ -82,12 +98,12 @@ families with no single prescaler to index. So `DynamicClock<Rates<R0,
 R1, ...>, Users...>` names its discrete set as an explicit pack of static
 `Clock` tasks (R0 the boot rate), and a switch is DIRECTION-AWARE around
 the regulator: rising, low-power run is left (REGLPF clear) and the
-range raised (VOSF clear) BEFORE the fan-out and the rate's `init()`
+range raised (VOSF clear) BEFORE the fan-out and the rate's `apply()`
 (wait states up, then the root); falling, the fan-out and the rate's
-`init()` go first (the root, then wait states down) and the range and
+`apply()` go first (the root, then wait states down) and the range and
 LPR follow inside it. A Stop drops SYSCLK to HSISYS with the PLL off and
 HSIDIV and LPR kept (pwr.md fact 4); `restore()` re-runs the CURRENT
-rate's `init()` with no fan-out, or finds it in force and does nothing.
+rate's `apply()` with no fan-out, or finds it in force and does nothing.
 The design and its reasons: [../design/clock.md](../design/clock.md).
 
 **HSISYS is not left divided behind a PLL rate.** A PLL rate takes
@@ -190,9 +206,11 @@ difference. (It is also NOT a way round 2.2.4 - measured, usart.md.)
 - `Clock<source, hz, regime = range1>` - `hz` (SYSCLK = HCLK),
   `pclk_hz` (= hz), `is_static`, `power_regime`, `sysclk_source` (the
   SWS value the root reports), `wait_states`, the `hsidiv` / `pll`
-  setting the rate needs, `init()` (false when a root did not report
-  ready, the switch did not take, the latency did not land, a regulator
-  wait ran out, or - for a Range 1 rate - the part is not in Range 1).
+  setting the rate needs, `apply()` (the rate's sequence; false when a
+  root did not report ready, the switch did not take, the latency did
+  not land, a regulator wait ran out, or - for a Range 1 rate - the
+  part is not in Range 1) and `init()` (the boot verb: `apply()` and
+  then the prefetch on, PRFTEN left as found when `apply()` is false).
   A Range 2 rate above 16 MHz and a low-power-run rate above 2 MHz are
   compile errors.
 - `Rates<R0, R1, ...>` - the pack, `R0` the boot rate.
@@ -200,11 +218,12 @@ difference. (It is also NOT a way round 2.2.4 - measured, usart.md.)
   `pclk_hz()`, the discrete-rate surface `rate_count` / `rate_hz(i)` /
   `rate_index()` / `rate_regime(i)` / `rate_source(i)` /
   `power_regime()`, `rebases<U>`, `index_of(hz)` / `can_run_at(hz)`,
-  `init()` (the boot rate, no fan-out), `set<hz>()` (a rate outside the
+  `init()` (the boot rate, no fan-out, then the prefetch on as
+  `Clock::init()` sets it), `set<hz>()` (a rate outside the
   pack does not compile) / `set(hz)` (false, nothing changed) - the
   FIRST rate at that hz - and `set_index<i>()` / `set_index(i)` to name
   one exactly; each fans the new rate out to the users in list order and
-  then runs the rate's `init()` inside the direction-aware ladder;
+  then runs the rate's `apply()` inside the direction-aware ladder;
   `restore()` (the current rate after a Stop, no fan-out; nothing done
   when SWS already reports its root, or while a `set()` is in progress
   - legal from an ISR); `switching()`.
@@ -237,9 +256,11 @@ difference. (It is also NOT a way round 2.2.4 - measured, usart.md.)
   an IWDG time-out by a wholly different route.
 - `PllConfig {m, n, r}`, `pll_config_valid`, `pll_output_hz`,
   `pll_config_for(hz)`, `hsidiv_for(hz)` - constexpr, fixture-pinned.
-- `FlashWaitStates` - `get`, `set(ws)` (waits for the readback, refuses
-  > 2), `for_hz(hz)` (Range 1), `for_hz_range2(hz)` (declared);
-  `FlashAccel` - `prefetch`/`instruction_cache` readback and setters;
+- `FlashWaitStates` - `get`, `set(ws)` (a read-modify-write of LATENCY
+  alone, waits for the readback, refuses > 2), `for_hz(hz)` (Range 1),
+  `for_hz_range2(hz)` (declared); `FlashAccel` -
+  `prefetch`/`instruction_cache` readback and setters (the prefetch on
+  from the clock task's boot, the cache on from reset);
   `flash_size_kb()`.
 
 ## How to use it
@@ -249,7 +270,16 @@ The 64 MHz road, the default of every kernel app:
 ```cpp
 using SysClock = brio::Clock<brio::ClockSource::pll, 64'000'000>;
 constexpr SysClock clock;
-const bool ok = SysClock::init();   // first thing in main()
+const bool ok = SysClock::init();   // first thing in main(); the prefetch on
+```
+
+A program linked by a script of its own whose code spans both banks of
+a dual-bank part, where ES0548 2.2.10 forbids the prefetch - no switch
+and no Stop turns it back on:
+
+```cpp
+SysClock::init();
+brio::FlashAccel::prefetch(false);
 ```
 
 The boot rate re-stated (nothing moves, everything is checked):
@@ -311,6 +341,35 @@ FLASH_ACR latency 2, PWR_CR1 0x208 (Range 1); SysTick's reload
 seen from two other registers, and the kernel tick is +0.24 % against
 the PC's clock over ten seconds (HSI16's 1 %). A raw-register sequence
 with no brio code in the loop reaches the same state in the same order.
+FLASH_ACR reads 0x00040702 (LATENCY 2, PRFTEN, ICEN, DBG_SWEN) over SWD
+after a whole `test_stm32_clock` run and after a whole
+`test_stm32_tickless` run - every switch of the ladder and every Stop's
+restore behind it, and the prefetch the boot set still standing.
+
+**The flash prefetch, measured as a column** (`bench_stm32` letter `f`,
+one image run with PRFTEN off and then on, at 64 MHz and two wait
+states; the grammar is [../design/benchmark.md](../design/benchmark.md)'s):
+
+| line | off | on | off / on |
+|---|---|---|---|
+| a ruler read | 75 | 62 | 1.21 |
+| an empty stamp pair, wall / isr | 152 / 56 | 118 / 42 | 1.29 / 1.33 |
+| USART2 per interrupt, stamps in / body alone (print of 4096) | 131.0 / 75.0 | 109.0 / 67.0 | 1.20 / 1.12 |
+| SysTick per tick | 42 | 36 | 1.17 |
+| busy cycles in an idle second | 249 383 | 209 314 | 1.19 |
+| `memcpy` 1 / 16 / 256 / 4096 | 146 / 208 / 703 / 8623 | 123 / 166 / 601 / 7561 | 1.19 / 1.25 / 1.17 / 1.14 |
+| `memset` 1 / 16 / 256 / 4096 | 103 / 152 / 347 / 3467 | 86 / 117 / 312 / 3432 | 1.20 / 1.30 / 1.11 / 1.01 |
+| print of 4096 bytes, wall | 22 774 118 | 22 774 059 | 1.00 (the wire) |
+
+A fill of 4096 bytes does not move because its loop sits in the current
+line and the two cache lines (3.3.5); USART2's body moves least because
+three of its accesses are APB reads and writes the prefetch does not
+touch. That is the default `Clock::init()` sets, and the plain letters
+of the same app, run on it, equal the `on` column - every per-unit cost
+and the idle second's busy to the cycle, the walls within a tick's
+phase.
+`test_stm32_nvm` (85 verdicts) and `test_stm32_journal` (52), which read
+and write bank 2 while the code runs from bank 1, are green on it.
 
 **The dynamic clock on silicon** (`test_stm32_clock`, ten letters, 42
 verdicts, on the tickless platform with the console on HSI16 and USART1
@@ -383,7 +442,7 @@ crystal):
   in 88..92, the loop exact at every landing, the CPU at 16 MHz on the
   crystal's scale.
 - **HSIDIV left behind a PLL rate**: with no HSIDIV write in the PLL
-  rate's `init()`, a rise from 2 MHz reaches 64 MHz on the crystal's
+  rate's `apply()`, a rise from 2 MHz reaches 64 MHz on the crystal's
   scale with HSIDIV still 3 - which is what the dynamic clock's write
   after every switch onto the PLL prevents (above).
 - **`delay_us` at every rung**, on the wall: 20/100/500/900 us served
@@ -483,16 +542,21 @@ Driver gaps:
   power-manager AO that asks the bus AOs before a switch
   ([../design/clock.md](../design/clock.md), the caller picks the
   moment); what a rate COSTS in current (the meter question, the energy
-  experiment's).
+  experiment's), the prefetch's share of it among them - at a rate with
+  no wait state, where 3.3.5 gives it nothing to buy, the default is a
+  current cost unmeasured.
 - HSI16 trimming (RCC_ICSCR.HSITRIM). The scale to trim against is
   there - TIM16's capture of LSI or LSE through TISEL, no pad anywhere
   (5.2.16, [tim.md](tim.md)), is what the timer and RTC suites weigh
   the 32 kHz roots with - but nothing writes the trim; born with its
   first user.
 
-Implemented, not bench-verified: `FlashAccel`'s setters (PRFTEN is
-left at reset because of erratum 2.2.10, [nvm.md](nvm.md), and the two
-caches are read and never turned); a `BasicTicker` program (the SysTick
+Implemented, not bench-verified: `FlashAccel`'s instruction-cache
+setter and its flush (the cache is on from reset, and no suite turns it
+or flushes it); the prefetch default on the STM32G071RB and the
+STM32G031K8, whose suites have not run with it on (one run of each
+board's suites, and of `bench_stm32`'s letter `f` for its gain, would
+measure it); a `BasicTicker` program (the SysTick
 platform) rescaling under a kernel - the ticker's `rebase` is measured
 as a user, the tick's lateness across a switch (under one tick, by
 construction) is not; and, on the STM32G071RB and the STM32G031K8,

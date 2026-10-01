@@ -154,7 +154,7 @@ floor is busy cycles in one idle second.
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz crystal) | 78 | 217 | 355 | 2.36 | 5.02 | 4463 (4096 DRE + 367 ticks), 130 (57), 0.99 | 365 k, 1.52 % |
 | SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 262 | 3.47 | 3.40 | 4453 (4097 SERCOM5 + ticks), 168 (111), 0.99 | 255 k, 0.53 % |
-| STM32G0B1RE (64 MHz PLL, 2 WS, prefetch off) | 75 | 152 | 253 | 4.21 | 3.38 | 4454 (4098 USART2 + 356 ticks), 131 (75), 1.00 | 249 k, 0.39 % |
+| STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch on) | 62 | 118 | 218 | 3.69 | 3.35 | 4453 (4098 USART2 + 355 ticks), 109 (67), 1.00 | 209 k, 0.33 % |
 | CH32V203C8T6 (144 MHz PLL, zero-wait window) | 42 | 102 | 121 | 1.54 | 2.82 | 4452 (4097 USART1 + 355 ticks), 109 (67), 1.00 | 240 k, 0.17 % |
 
 What the rows say, and the two platform columns:
@@ -175,13 +175,17 @@ What the rows say, and the two platform columns:
   position, 60 to 80 cycles, and a stamp pair two of them. Every line
   carries raw numbers; the row's own `ruler` and `stamp` are what the
   reader subtracts.
-- STM32G0, the flash prefetch: with PRFTEN on, in the same image and run,
-  the instrument's straight-line code gains 20 to 33 per cent, the
-  handler bodies 12 to 20 (the USART's held by three APB accesses the
-  prefetch does not touch), the idle second 19, a copy 14 to 25, a fill
-  of 4096 nothing (its loop fits the cache); the prints do not move. The
-  NV suites are green with it on, their timings within one per cent, so
-  ES0548 2.2.10 does not bite an image whose code is in one bank.
+- STM32G0, the flash prefetch: measured in one image and run with
+  PRFTEN off (the silicon's reset state) and on, the instrument's
+  straight-line code gains 20 to 33 per cent, the handler bodies 12 to
+  20 (the USART's held by three APB accesses the prefetch does not
+  touch), the idle second 19, a copy 14 to 25, a fill of 4096 nothing
+  (its loop fits the cache); the prints do not move. The NV suites are
+  green with it on, their timings within one per cent, so ES0548 2.2.10
+  does not bite an image whose code is in one bank - which the link
+  imposes. The family's clock task turns it on at init
+  ([../stm32g0/clock.md](../stm32g0/clock.md)); the row above is that
+  default, and the app's letter `f` keeps printing both columns.
 - SAM C21, code in SRAM: the two handlers placed in `.ram_text` (the
   linker's input section inside `.data`, zero bytes when unused) cut
   the print row's `isr` by 15 per cent as the transport is - its

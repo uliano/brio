@@ -7,8 +7,9 @@ DS13560 Rev 5 tables 48 and 49 for the timings and the endurance, and
 errata **ES0548 Rev 3** on silicon revision Z, where three items touch
 this chapter: 2.2.3 (a location holding all ones cannot be re-programmed
 to all zeros - LIVE, and unreachable by construction here), 2.2.10
-(prefetch failure branching across banks - LIVE, and the reason the
-storage is in bank 2 while the code is in bank 1) and 2.2.5 (the PCROP
+(prefetch failure branching across banks - LIVE: the code is in bank 1
+and the storage in bank 2, the erratum's own safe use, and the one bank
+is what lets the clock task turn the prefetch on) and 2.2.5 (the PCROP
 read weakness, revision A only, and nothing here sets PCROP). Drivers:
 `stm32g0/flash.hpp` (`FlashWaitStates`, `FlashAccel`, `Flash`,
 `FlashOptions`) and `stm32g0/nvm_flash.hpp` (`MainFlashPartition`,
@@ -70,9 +71,9 @@ Nothing here manages it.
 
 `FlashWaitStates` and `FlashAccel` are the bring-up surface described in
 [clock.md](clock.md): the LATENCY the clock task sets before it raises
-HCLK, plus prefetch, the instruction cache and its flush, the empty-check
-bit and the debug-access bit. Both are read-only about the two bits this
-stratum leaves at their reset values.
+HCLK, plus the prefetch (which the clock task turns on at boot), the
+instruction cache and its flush, and two bits read and never written -
+the empty-check bit and the debug-access bit.
 
 `FlashFlag` is FLASH_SR as one mask vocabulary. Every operation returns a
 mask, zero meaning success, because several causes can stand at once. One
@@ -197,6 +198,12 @@ read back at run time as the proof. Three facts point the same way:
   with no workaround - and its own note lists "EEPROM emulation or other
   data storage in bank 2" as the safe use of the feature. Code must stay
   in one bank; data in the other is the vendor's sanctioned arrangement.
+  The `rom` region of `stm32g0/ld/stm32g0b1re.ld` is therefore what the
+  flash PREFETCH stands on: `Clock::init()` turns it on in every image
+  ([clock.md](clock.md)), and `test_stm32_nvm` and `test_stm32_journal`,
+  which read and write bank 2 while the code runs from bank 1, are green
+  with it on. A program linked across both banks turns it off with
+  `FlashAccel::prefetch(false)`.
 - the bounds become **constants**, as they are on the samc21's RWWEE array
   and unlike the AVR's, where the free flash is bounded by linker symbols
   that move with every build.

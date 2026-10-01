@@ -17,8 +17,9 @@
 // THE CLOCK: HSI16 through the PLL to 64 MHz, PCLK = HCLK
 // (stm32g0/clock.hpp), the rate test_stm32_platform runs at. The flash
 // then runs at TWO WAIT STATES (RM0444 3.3.4, table 13) behind the
-// instruction cache that is on at reset and the prefetch that is off at
-// reset (3.7.1), which is what letter f is for.
+// instruction cache that is on at reset and the prefetch that
+// Clock::init() turns on - this family's default - so letters r, m, p
+// and t measure the default, and letter f is the prefetch as a column.
 //
 // THE RULER is `Ruler` below: the SysTick ticker read as cycles
 // (cortexm/ticker.hpp's BasicTicker::cycles(), the tick count and
@@ -108,12 +109,13 @@
 //   f  THE PREFETCH (FLASH_ACR.PRFTEN, RM0444 3.3.5) as a column of its
 //      own: the instrument's three cost lines and letters m, p and t run
 //      TWICE through stm32g0/flash.hpp's FlashAccel::prefetch() - off,
-//      then on - every op suffixed `.pf0` / `.pf1`, and the reset state
-//      (PRFTEN clear, 3.7.1) restored after. The instruction cache (ICEN,
-//      on at reset) stays on in both columns. The erratum that keeps the
-//      prefetch off by default, ES0548 2.2.10 (a prefetch may fail on a
-//      branch ACROSS BANKS), cannot bite this image: ld/stm32g0b1re.ld
-//      gives the linker bank 1 alone, and the G071 and G031 have one bank.
+//      then on - every op suffixed `.pf0` / `.pf1`, and the state the
+//      boot left (on, Clock::init()'s default) restored after. The
+//      instruction cache (ICEN, on at reset) stays on in both columns.
+//      The erratum that would forbid the prefetch, ES0548 2.2.10 (a
+//      prefetch may fail on a branch ACROSS BANKS), cannot bite this
+//      image: stm32g0/ld/stm32g0b1re.ld gives the linker bank 1 alone,
+//      and the G071 and G031 have one bank.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -534,6 +536,7 @@ void print_acr() {
 }
 
 void tf_prefetch() {
+    const bool booted = FlashAccel::prefetch();   // on: Clock::init()'s default
     FlashAccel::prefetch(false);
     print_acr();
     run_costs(pf0_ops);
@@ -548,7 +551,7 @@ void tf_prefetch() {
     run_print(pf1_ops);
     run_tick(pf1_ops);
 
-    FlashAccel::prefetch(false);   // the reset state (RM0444 3.7.1)
+    FlashAccel::prefetch(booted);   // the state the boot left
     print_acr();
     bench.verdict("ran", true);
 }
@@ -557,6 +560,7 @@ void banner() {
     print(serial, crlf, "bench_stm32 - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console USART2 ", console_baud, " 8N1 (", Serial::actual_baud(SysClock::pclk_hz),
           " baud), ruler SysTick cycles", crlf);
+    print_acr();   // the condition the plain letters run under
     bench.menu();
 }
 
@@ -578,7 +582,7 @@ extern "C" void SysTick_Handler() {
 }
 
 int main() {
-    const bool clock_ok = SysClock::init();   // HSI16 -> PLL -> 64 MHz, two wait states
+    const bool clock_ok = SysClock::init();   // HSI16 -> PLL -> 64 MHz, two wait states, prefetch on
     const bool serial_ok = Serial::init(clock, console_baud);
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();

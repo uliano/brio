@@ -86,7 +86,8 @@
 //   b  the scale: VDDA from VREFINT, the junction temperature from
 //      TS_CAL1/2, VBAT, and the two of them cross-checked
 //   c  conversion time exact to the CPU cycle per sampling time and
-//      resolution, and ES0548 2.6.4 measured
+//      resolution, and ES0548 2.6.4 measured on single conversions timed
+//      by the wake (one_conversion_cycles() says why not by a poll)
 //   d  the zero-length wire: the DAC's transfer curve read back through
 //      ADC_IN4, monotonic, with the buffer's own swing limits
 //   e  the LED as an analog dimmer: DAC channel 2 on PA5, read back
@@ -934,6 +935,49 @@ uint32_t timed_conversions(const AdcConfig& c, uint8_t channel, uint16_t count,
 
 uint16_t timing_buffer[256];
 
+// One conversion timed to the CPU cycle, the shortest of 32. A polled
+// read cannot do it: its loop - an APB read of ADC_ISR, a test and two
+// branches - is about as long as the 12 CPU cycles letter c must resolve,
+// so it reports the end of conversion rounded UP to its next look, and
+// where the looks fall is the instruction fetch's (measured with that
+// loop: 177 and 190 cycles for 1.5 and 7.5 sampling cycles with the flash
+// prefetch off, 170 and 170 with it on - one look for both). A WAKE has
+// no such grain: with interrupts masked the core sleeps in WFI from the
+// start until EOC pends the ADC's line, and the wake and the stamp after
+// it cost the same whatever the sampling time. Any other line pending
+// ends the WFI too, so the console is drained first (its TXE line is the
+// one that would) and a wake that finds no result at once was the tick's
+// and is not counted; the ADC line's pending bit is cleared before the
+// unmask, so the vector never runs.
+uint32_t one_conversion_cycles() {
+    uint32_t best = 0xFFFFFFFFUL;
+    console_drain();
+    Adc::interrupts(AdcFlag::converted, true);
+    Nvic::clear_pending(Adc::irq());
+    Nvic::enable(Adc::irq());
+    for (uint8_t i = 0; i < 32; ++i) {
+        disable_interrupts();
+        const uint32_t t0 = cycles_now();
+        Adc::start();
+        __DSB();
+        __WFI();
+        const bool woken_by_eoc = Adc::ready();
+        const uint32_t d = cycles_now() - t0;
+        for (uint32_t spins = 0; spins < 100'000UL && !Adc::ready(); ++spins) {
+        }
+        (void)Adc::result();   // EOC down: reading ADC_DR clears it (15.4.3)
+        Nvic::clear_pending(Adc::irq());
+        enable_interrupts();
+        if (woken_by_eoc && d < best) {
+            best = d;
+        }
+    }
+    Adc::interrupts(AdcFlag::converted, false);
+    Nvic::disable(Adc::irq());
+    Nvic::clear_pending(Adc::irq());
+    return best;
+}
+
 void tc_timing() {
     if (!analog_up(cfg_pad)) {
         bench.verdict("the ADC came up", false);
@@ -1000,32 +1044,31 @@ void tc_timing() {
     one.sample1 = AdcSampleTime::cycles1_5;
     (void)apply(one);
     (void)Adc::select_channel(0);
-    uint32_t best_short = 0xFFFFFFFFUL;
-    for (uint8_t i = 0; i < 32; ++i) {
-        const uint32_t t0 = cycles_now();
-        (void)Adc::read();
-        const uint32_t d = cycles_now() - t0;
-        if (d < best_short) best_short = d;
-    }
+    const uint32_t best_short = one_conversion_cycles();
     one.sample1 = AdcSampleTime::cycles7_5;
     (void)apply(one);
     (void)Adc::select_channel(0);
-    uint32_t best_long = 0xFFFFFFFFUL;
-    for (uint8_t i = 0; i < 32; ++i) {
-        const uint32_t t0 = cycles_now();
-        (void)Adc::read();
-        const uint32_t d = cycles_now() - t0;
-        if (d < best_long) best_long = d;
-    }
-    // 7.5 - 1.5 = 6 ADC cycles = 12 CPU cycles, IF neither pays an extra.
+    const uint32_t best_long = one_conversion_cycles();
+    // The CONTROL: 39.5 against 7.5, neither of them a time the erratum
+    // names, is 32 ADC cycles = 64 CPU cycles by the chapter alone - the
+    // instrument read on a step it must get exactly.
+    one.sample1 = AdcSampleTime::cycles39_5;
+    (void)apply(one);
+    (void)Adc::select_channel(0);
+    const uint32_t best_control = one_conversion_cycles();
+    const uint32_t control = best_control - best_long;
+    // 7.5 - 1.5 = 6 ADC cycles = 12 CPU cycles by the chapter; the
+    // erratum's extra cycle on the SHORT one takes two of them back.
     const uint32_t step = best_long - best_short;
     print(serial, "  single conversion: 1.5 cycles ", best_short,
-          " CPU cycles, 7.5 cycles ", best_long, ", difference ", step,
-          " against 12 predicted (ES0548 2.6.4 would make it 14)", crlf);
+          " CPU cycles, 7.5 cycles ", best_long, ", 39.5 cycles ", best_control,
+          "; 7.5 - 1.5 = ", step, " (the chapter 12, with ES0548 2.6.4 10), 39.5 - 7.5 = ",
+          control, " (64, no erratum)", crlf);
     bench.verdict("ES0548 2.6.4 MEASURED: a single conversion at 1.5 sampling "
-                  "cycles is timed against one at 7.5, where the erratum does "
-                  "not apply - the difference says whether the short one paid "
-                  "the extra cycle", step >= 10u && step <= 16u);
+                  "cycles takes ONE ADC CYCLE MORE than the chapter says - the "
+                  "step to 7.5 cycles is 10 CPU cycles and not 12, on an "
+                  "instrument that reads the 7.5 -> 39.5 step as exactly 64",
+                  step >= 9u && step <= 11u && control >= 63u && control <= 65u);
     quiet_everything();
 }
 

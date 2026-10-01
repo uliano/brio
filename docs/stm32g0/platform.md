@@ -222,7 +222,7 @@ int main() {
 
 ## Bench findings
 
-The reference suite is `test_stm32_platform` (six letters in `z`, 53
+The reference suite is `test_stm32_platform` (seven letters in `z`, 59
 verdicts; letter `i` outside it reboots the board six times -
 [reset.md](reset.md) carries the reset and watchdog half).
 What it measures of THIS chapter:
@@ -268,11 +268,12 @@ What it measures of THIS chapter:
   with one deadline at the end cost five lap wakes, every one on HSISYS
   with the PLL never re-locked (no AO ran, the manager was never asked:
   the loop found nothing to do and went straight back to the WFI), and
-  each kept the part awake for 214..215 us measured ISR to ISR on TIM2
+  each kept the part awake for 169..173 us measured ISR to ISR on TIM2
   clocked from MCO = HSI16/8 - a clock that runs only while the part is
   awake - that is the Stop exit, the handler, one empty loop turn and
-  the WFI, at 16 MHz with the PLL's two wait states still in
-  FLASH_ACR; 1.8 ms awake in the whole ten seconds, a 10^-4 duty. It
+  the WFI, at 16 MHz with the PLL's two wait states and the prefetch
+  still in FLASH_ACR (201..203 us with the prefetch off); 1.5 ms awake
+  in the whole ten seconds, a 10^-4 duty. It
   is the price of a 16-bit counter that must not be divided (below),
   and it does not grow with how rare the events are.
 - **The rate and the arithmetic**: 2 s of TIM2 on the PLL move the tick

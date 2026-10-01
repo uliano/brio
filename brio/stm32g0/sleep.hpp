@@ -245,12 +245,15 @@ struct Stm32g0SleepSite {
      *
      * The test is the silicon's own: RCC_CFGR.SWS says what SYSCLK is
      * NOW, and a Stop leaves it on HSISYS. For a PLL-based clock that
-     * is a mismatch and the task is re-run; for an HSISYS-based one
-     * there is nothing to detect and nothing to do, because HSIDIV
-     * survives a Stop - so a program on `internal` pays zero for this
-     * call, every time. Under a DynamicClock the same test and the same
-     * re-run are the clock's own restore(), for the rate IN FORCE - the
-     * one the users were rebased to - and never the boot one.
+     * is a mismatch and the task's rate is re-applied; for an
+     * HSISYS-based one there is nothing to detect and nothing to do,
+     * because HSIDIV survives a Stop - so a program on `internal` pays
+     * zero for this call, every time. Under a DynamicClock the same
+     * test and the same re-run are the clock's own restore(), for the
+     * rate IN FORCE - the one the users were rebased to - and never the
+     * boot one. Either way the re-run is the rate's apply() and not
+     * init(): a Stop keeps FLASH_ACR, and the prefetch is the program's
+     * standing choice, set at boot.
      *
      * Returns true when the clock is the one `C` promises.
      */
@@ -259,7 +262,7 @@ struct Stm32g0SleepSite {
             if (Rcc::sysclk_status() == sysclk_source_of<C>()) {
                 return true;
             }
-            return C::init();
+            return C::apply();
         } else {
             return C::restore();
         }
