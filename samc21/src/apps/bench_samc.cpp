@@ -20,10 +20,13 @@
 // WHERE THE VECTORS RUN. SERCOM5_Handler and SysTick_Handler are bound
 // through BENCH_PLACEMENT. It is empty in this file, so the handlers -
 // and the ISR bodies they inline - execute from flash. bench_samc_ram.cpp
-// is this same file with BENCH_RAM_TEXT defined, which places both
-// handlers in `.ram_text`, the input section samc21/ld/samc21j18a.ld puts
-// first in .data and the crt copies to SRAM (single-cycle at full speed,
-// 9.1). Letter r's `stamp` loop carries the same placement, so in each
+// is this same file with BENCH_RAM_TEXT defined, which binds both
+// handlers through this family's documented option of the binding
+// pattern: [[gnu::section(".ram_text")]] on the handler the app binds,
+// the input section samc21/ld/samc21j18a.ld puts first in .data and the
+// crt copies to SRAM (single-cycle at full speed, 9.1) - what the option
+// is and what it buys are docs/samc21/platform.md's, "A handler in
+// SRAM". Letter r's `stamp` loop carries the same placement, so in each
 // image it is the cost of a stamp pair where the vectors' stamps run.
 // Letters p and t of the two images are the comparison; nothing else
 // moves between them.
@@ -171,7 +174,9 @@
 #include "util/testbench.hpp"
 
 // The placement of the bound vectors and of letter r's stamp loop: flash
-// here, SRAM in bench_samc_ram.cpp (the file header).
+// here; in bench_samc_ram.cpp, SRAM through the attribute this family's
+// binding pattern documents (docs/samc21/platform.md, "A handler in
+// SRAM"), spelled as an app spells it on the handler it binds.
 #if defined(BENCH_RAM_TEXT)
 #define BENCH_PLACEMENT [[gnu::section(".ram_text")]]
 constexpr const char* bench_image = "bench_samc_ram";

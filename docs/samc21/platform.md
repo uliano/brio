@@ -199,9 +199,10 @@ of exactly 47 entries in `.vectors` at address 0, every handler a
 weak alias of a spin - **the app binds a vector by defining the
 strong symbol** (`extern "C" void SysTick_Handler() { ... }`), the
 ARM edition of the AVR rule that vector names never appear in
-portable code. `Reset_Handler` copies `.data`, zeroes `.bss`, walks
-`.init_array` itself (no C library is linked to offer a walker) and
-calls `main`. `.noinit` is NOLOAD and skipped by
+portable code; the handler it defines may run from SRAM instead of
+flash ("A handler in SRAM", below). `Reset_Handler` copies `.data`,
+zeroes `.bss`, walks `.init_array` itself (no C library is linked to
+offer a walker) and calls `main`. `.noinit` is NOLOAD and skipped by
 the zero-fill - the PanicRecord's home. `abort()`, which
 libstdc++'s throw sites call under `-fno-exceptions` when `-Og` cannot
 prove them dead, is not the crt's: it is brio's runtime's
@@ -531,6 +532,70 @@ the manager, even with `SleepRequested{none}`) is LOAD-BEARING with
 this site and stated on it. `SamSleepSite` is the plain site for
 programs that accept the restriction.
 
+## A handler in SRAM
+
+**What the silicon does.** At 48 MHz the flash runs behind 2 wait
+states (DS60001479M table 45-41, one wait state reaching only 38 MHz),
+with NVMCTRL's cache in front of it - direct-mapped, 8 lines of 64
+bits, 64 bytes in all (27.6.7), in its reset read mode NO_MISS_PENALTY
+(27.8.2). The SRAM is single-cycle at full speed (9.1). A handler gains
+little from a cache this size: 64 bytes hold less than either handler
+measured below, and the thread's code runs between two entries, so
+every entry fetches its lines again at the flash's price - a line of
+four Thumb instructions for two wait states, about one and a half times
+the cycles the same straight-line code takes from SRAM.
+
+**The option and its spelling.** `samc21/ld/samc21j18a.ld` places the
+input section `.ram_text` first in `.data`, so `Reset_Handler`'s copy
+of `.data` moves it to SRAM with the initialized data before `main`;
+an image that places nothing there gets zero bytes from it. An app
+places the handler it binds there with one attribute:
+
+```cpp
+extern "C" [[gnu::section(".ram_text")]] void SERCOM5_Handler() { (void)Serial::isr(); }
+extern "C" [[gnu::section(".ram_text")]] void SysTick_Handler() { brio::Ticker::tick(); }
+```
+
+The vector table holds the handler's absolute address, so the entry
+needs nothing more. What the handler INLINES moves with it - the
+driver's `[[gnu::always_inline]]` body and whatever the compiler folds
+into that; what it CALLS stays in flash, reached through a long-branch
+veneer the linker adds beside the handler (`.ram_text.__stub`, 16
+bytes), because SRAM sits 512 MB above the flash and a `bl` reaches
+16 MB.
+
+**What it buys, measured** by the benchmark's letters p and t
+([../design/benchmark.md](../design/benchmark.md)) with the console's
+and the tick's handlers bound in flash and in `.ram_text`, nothing else
+moving between the two images:
+
+- The console's handler AS THE TRANSPORT IS: 168 -> 143 cycles an
+  interrupt, 15 per cent, the meter's stamps included; the driver's
+  body alone, net of the stamps, 111 -> 105, 6 per cent. `Uart::feed()`,
+  the per-byte transmit body `isr()` calls, is not inlined at `-Os`, so
+  the placed handler calls back into the flash through the veneer for
+  the work it exists to do.
+- WITH THE WHOLE PATH INLINE - the per-byte body folded into the
+  handler, measured in a variant of both images: 150 -> 98 cycles an
+  interrupt, 35 per cent, the body alone 94 -> 60, 36 per cent - the
+  one and a half the line arithmetic above predicts.
+- The tick's handler, inline whatever the shape: 40 -> 27 cycles a
+  tick, 33 per cent; an idle second's busy cycles 255 408 -> 242 387,
+  5 per cent, the rest of an idle turn being thread code in the flash
+  in both images.
+
+The print stays wire-bound either way (x = 1.00): the placement buys
+CPU, not time - at 115200 the console's interrupts take 4.0 per cent of
+the core from flash and 2.4 from SRAM with the path inline.
+
+**What it costs.** The handler's size in SRAM - its load image stays in
+the flash - plus a veneer per function it calls; the benchmark's two
+handlers, meters included, take 120 bytes (SysTick) and 328 (SERCOM5).
+No code: the crt's copy of `.data` already moves the section, a word a
+turn of its loop. And a placed handler exists only from that copy on -
+a vector taken earlier, a fault inside the crt itself, would enter SRAM
+the copy has not written yet.
+
 ## Not covered yet
 
 Driver gaps (not built):
@@ -545,6 +610,13 @@ Driver gaps (not built):
   as the toolchain's division is ruled out, [divas.md](divas.md).)
 
 Implemented but not bench-verified:
+- **A handler in SRAM at its full gain.** The 35 per cent above was
+  measured with the console's per-byte path flattened into its
+  handler, a variant and not the driver: as `samc21/sercom.hpp` stands,
+  `Uart::feed()` is a call out of the always-inline `isr()` and holds
+  the placed handler to 15 per cent (6 for the body). Measured by the
+  benchmark's letters p and t, the handlers in flash and in SRAM, once
+  that body is inline (design/overview.md's first rule for a hot path).
 - `Nvic::set_pending` as a software interrupt source; priorities
   other than the reset default (every line runs at 0 today, so
   handler-vs-handler preemption is unexercised).

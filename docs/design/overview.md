@@ -544,4 +544,7 @@ Vector names are irreducibly target-specific glue and live in the app,
 never in portable code. The bodies are `[[gnu::always_inline]]`: an
 ISR body has exactly one call site by construction, so inlining costs
 no flash, and with the body visible the compiler saves only the
-registers actually used (measured: 16 pushes -> 8/9 per ISR).
+registers actually used (measured: 16 pushes -> 8/9 per ISR). A family
+whose linker script carries a `.ram_text` section may place a binding
+in SRAM: the SAM C21's page says what it buys
+([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM").

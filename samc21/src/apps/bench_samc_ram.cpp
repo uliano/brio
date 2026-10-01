@@ -6,9 +6,11 @@
 // measurement of what executing the vectors out of flash costs this
 // family.
 //
-// TEMPORARY: it lives for that one decision - whether the stratum's
-// ISR-binding pattern gains the placement as a documented option - and is
-// deleted with it, whichever way it goes.
+// The placement is this family's documented option of the ISR binding
+// pattern (docs/samc21/platform.md, "A handler in SRAM"). TEMPORARY: this
+// twin stays until the console's per-byte path is inline into its handler
+// and letters p and t are measured again in both images - the entry in
+// that document's "Not covered yet" - and is deleted then.
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
