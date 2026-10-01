@@ -22,8 +22,10 @@ at the console's other end).
 
 This page says what is the RP2350's. What the block itself does - the
 fractional divider, the disabled-write rule, the transmit interrupt that
-is a transition, the per-entry error flags, the engine slots - is the IP
-stratum's page and is not restated here.
+is an edge latched until cleared and the transmit policy built on it,
+the per-entry error flags, the engine slots - is the IP stratum's page
+and is not restated here; the measurement that settled the transmit
+interrupt was made on this chip and is below.
 
 ## What the silicon does
 
@@ -147,8 +149,9 @@ extern "C" void isr_uart0() {
 ## Bench findings
 
 Everything below is `test_rp2350_serial` on the bench part (a QFN-80
-stepping A2 at clk_sys and clk_peri 150 MHz), and every one of it is the
-same on both architectures unless a number is given for each.
+stepping A2 at clk_sys and clk_peri 150 MHz) unless it names another
+instrument, and every one of it is the same on both architectures unless
+a number is given for each.
 
 - THE DIVISOR at clk_peri 150 MHz for 115200 is 81 + 24/64, read back in
   UARTIBRD/UARTFBRD, which is 115207 baud - 60 ppm of the rate asked
@@ -177,18 +180,45 @@ same on both architectures unless a number is given for each.
 - A 1 ms break counts one BE (and one FE, on the same entry) and delivers
   no byte. Forty-eight frames into the 32-deep FIFO with the line masked
   deliver exactly 32 in order and count one OE.
+- THE TRANSMIT INTERRUPT, measured over the debug port with no firmware
+  in the way: the core halted, UART1 configured by hand in loop-back at
+  IBRD 0xFFFF (about 143 baud, 70 ms a frame, so the probe's reads
+  resolve the FIFO's level as it drains), the transmit level at an
+  eighth (4 entries), `UARTIMSC` zero so `UARTRIS` is read raw.
+  Enabled and never written, TXRIS reads 0; eight bytes written, 0;
+  three frames into the drain - the FIFO falling through 4 entries - it
+  reads 1, and stays 1 with the FIFO empty. Cleared through `UARTICR`
+  with the FIFO empty it reads 0 and STAYS 0 (100 ms later): the level
+  alone does not set it. Two bytes written into the empty FIFO and sent
+  leave it 0 - data leaving below the level is no edge. With TXRIS
+  latched, two bytes written (the FIFO still at or below its level)
+  leave it 1; six more, above the level, clear it; the next fall through
+  sets it again. And `TXIM` armed over an empty FIFO with TXRIS cleared
+  leaves `UARTMIS` at 0 - such a mask never fires. The block's transmit
+  interrupt is therefore an EDGE THAT STAYS LATCHED, which is what the
+  transport's transmit policy is built on
+  ([../pl011/README.md](../pl011/README.md)).
+- THE CONSOLE'S PRINT (`bench_rp2350`'s letter p, 115200 8N1): 4096
+  bytes take 146 entries of the console's handler on both halves - the
+  first 32 bytes straight into the idle FIFO, then one entry per fall
+  through the level, each refilling 28 - and 60931 cycles of handler
+  bodies on the Cortex-M33 half, 69689 on the Hazard3 half (417 and 477
+  an entry, stamps included), against a wall of 53.3 M cycles the wire
+  sets; 256 bytes take 8 entries, and a print of 1 or of 16 bytes takes
+  none.
 - BULK TRAFFIC, 4096 bytes round the loop, byte-exact with nothing
   overrun at every rung tried - 460800, 921600, 1 M, 2 M and 3 Mbaud -
   with the code running out of the flash through the interface the
   bootrom leaves set up (EBh quad-I/O reads at CLKDIV 3, which is 50 MHz
   of SCK at this clk_sys - [flash.md](flash.md); there is no
   second-stage bootloader on this chip and no chapter reprograms the QMI
-  yet). At 3 Mbaud: 13675 us and 1044 interrupts on the Cortex-M33 half,
-  13686 us and 978 on the Hazard3 half - 25 and 23 interrupts per hundred
-  bytes, against the wire's own 13653 us. On a LOOP-BACK the receive FIFO
-  is fed at exactly the rate the transmit FIFO empties, so neither runs
-  far ahead of its trigger level and the batching is nothing like the
-  FIFO's depth.
+  yet). 402 interrupts at every rung to 2 Mbaud on both halves, which is
+  146 falls through the transmit level (each refilling 28) plus 256
+  receive levels of 16 with no entry serving both; at 3 Mbaud 385 to 402
+  on both halves, in 13670 to 13682 us against the wire's own 13653 -
+  about 9 interrupts per hundred bytes, a refill and a receive level
+  sometimes landing in one entry at that rate, by how many depending on
+  the build's own timing.
 - THE SECOND FUNCTION COLUMN, with UART1 moved onto GP6/GP7: both pads
   read back FUNCSEL 11 and out of isolation, and THE TRANSMITTER REALLY
   REACHES THE PAD - read through the bank, which always reads the pad

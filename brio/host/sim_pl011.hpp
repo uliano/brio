@@ -9,20 +9,31 @@
  * chip. A claim of that shape is proved by a SECOND realization, and
  * the cheapest second realization is one with no silicon under it: a
  * register block that is an ordinary array, a reset that memsets it to
- * the block's reset values, an interrupt controller that counts, pads
- * that remember what they were handed to. The same header is compiled
- * by the host suite (test_pl011) and by a family's compile check
- * (test/family_rp2040/pl011_ip.cpp), so the proof is made twice, once
- * per compiler.
+ * the block's reset values, an interrupt controller that keeps its
+ * enables, pads that remember what they were handed to. The same header
+ * is compiled by the host suite (test_pl011) and by a family's compile
+ * check (test/family_rp2040/pl011_ip.cpp), so the proof is made twice,
+ * once per compiler.
  *
  * WHAT IT MODELS, and what it does not. The register map is the PL011's,
  * at the PL011's offsets, and the RESET VALUES are the block's (UARTFR
  * comes up with both FIFOs empty, which is what lets a transport's
- * init() drain the receive FIFO and stop). The FIFOs themselves are NOT
- * modelled: nothing moves a byte out of UARTDR and nothing ever fills
- * the receive side, so the transmit path runs (the flag register says
- * the transmit FIFO is never full) and the receive path has nothing to
- * read. A test that wants a received byte wants silicon.
+ * init() drain the receive FIFO and stop). THE TRANSMIT FIFO IS
+ * MODELLED, because the transport's transmit policy is a contract with
+ * it: a write of UARTDR is an entry (one into a full FIFO is counted as
+ * the byte the silicon would lose), the WIRE is a verb the test calls
+ * (`shift<i>()` takes the oldest entry and hands it back, so the order
+ * on the wire is judged), UARTFR's TXFF, TXFE and BUSY follow the
+ * entries, and TXRIS follows the rule measured on the RP2350
+ * (docs/rp2350/uart.md) - set when the FIFO falls through the level
+ * UARTIFLS selects, cleared by a write that takes it above the level or
+ * by UARTICR, never set by the level alone. UARTICR clears what it is
+ * written, and UARTMIS is kept equal to UARTRIS under UARTIMSC. The
+ * shifter is not modelled: a byte leaves the FIFO when the wire takes
+ * it. The RECEIVE side is not modelled at all - nothing ever fills it,
+ * so the receive path has nothing to read; a test raises a receive
+ * cause by hand when it wants an entry for the receiver alone. A test
+ * that wants a received byte wants silicon.
  *
  * WHAT IT RECORDS, beside the registers: the order of the observable
  * acts of a bring-up - which pad was claimed when, and when UARTCR's
@@ -33,17 +44,40 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include <optional>
 
 #include "host/platform.hpp"
 #include "pl011/uart.hpp"
 
 namespace brio {
 
+/// UARTDR: a word in memory whose WRITE is an entry into the transmit
+/// FIFO (defined below the chip, which owns the FIFO). A read gives back
+/// the last word written - there is no receive side to read from.
+struct SimPl011Data {
+    volatile uint32_t last;
+    SimPl011Data& operator=(uint32_t v);
+    operator uint32_t() const { return last; }
+};
+
+/// UARTICR: a write clears the UARTRIS bits it names.
+struct SimPl011Clear {
+    volatile uint32_t last;
+    SimPl011Clear& operator=(uint32_t mask);
+    operator uint32_t() const { return last; }
+};
+
+static_assert(sizeof(SimPl011Data) == 4u && sizeof(SimPl011Clear) == 4u,
+              "a register of the block is one word at its offset");
+
 /// The PL011's register block as plain memory, the names and the offsets
-/// of the block every vendor's device description spells the same way.
+/// of the block every vendor's device description spells the same way -
+/// UARTDR and UARTICR the two words whose writes act.
 struct SimPl011Regs {
-    volatile uint32_t UARTDR;        ///< 0x00
+    SimPl011Data UARTDR;             ///< 0x00
     volatile uint32_t UARTRSR;       ///< 0x04
     volatile uint32_t reserved_0[4]; ///< 0x08
     volatile uint32_t UARTFR;        ///< 0x18
@@ -57,31 +91,53 @@ struct SimPl011Regs {
     volatile uint32_t UARTIMSC;      ///< 0x38
     volatile uint32_t UARTRIS;       ///< 0x3c
     volatile uint32_t UARTMIS;       ///< 0x40
-    volatile uint32_t UARTICR;       ///< 0x44
+    SimPl011Clear UARTICR;           ///< 0x44
     volatile uint32_t UARTDMACR;     ///< 0x48
 };
+
+static_assert(offsetof(SimPl011Regs, UARTFR) == 0x18u && offsetof(SimPl011Regs, UARTICR) == 0x44u &&
+              offsetof(SimPl011Regs, UARTDMACR) == 0x48u);
 
 /// The interrupt line of one instance - a number, since there is no
 /// controller here to give it a meaning.
 enum class SimPl011Line : uint8_t { uart0 = 0, uart1 = 1 };
 
-/// The interrupt controller: three verbs and three counters.
+/// The interrupt controller: the two verbs the IP file calls, and the
+/// state they leave. Whether the line is RAISED is the block's own
+/// UARTMIS; a test that plays the core runs the handler while it is.
 struct SimPl011Interrupts {
     SimPl011Interrupts() = delete;
 
     static inline bool line_enabled[2]{};
-    static inline uint32_t pends[2]{};
 
     static void enable(SimPl011Line line) { line_enabled[slot(line)] = true; }
     static void disable(SimPl011Line line) { line_enabled[slot(line)] = false; }
-    static void set_pending(SimPl011Line line) { pends[slot(line)] = pends[slot(line)] + 1u; }
 
-    static void reset() {
-        line_enabled[0] = line_enabled[1] = false;
-        pends[0] = pends[1] = 0;
-    }
+    static void reset() { line_enabled[0] = line_enabled[1] = false; }
 
     static constexpr uint8_t slot(SimPl011Line line) { return static_cast<uint8_t>(line); }
+};
+
+/// The transmit FIFO of each instance: its entries, and what crossed it.
+struct SimPl011TxFifo {
+    SimPl011TxFifo() = delete;
+
+    static constexpr uint8_t depth = 32;
+
+    static inline uint8_t entry[2][depth]{};
+    static inline uint8_t head[2]{};       ///< the oldest entry
+    static inline uint8_t count[2]{};      ///< entries waiting for the wire
+    static inline uint32_t written[2]{};   ///< writes the FIFO took
+    static inline uint32_t lost[2]{};      ///< writes into a FULL FIFO: lost on silicon
+    static inline uint32_t sent[2]{};      ///< entries the wire took
+
+    static void reset(uint8_t i) {
+        head[i] = 0;
+        count[i] = 0;
+        written[i] = 0;
+        lost[i] = 0;
+        sent[i] = 0;
+    }
 };
 
 /// A pad's electrical setup: one bit, because one bit is all the IP file
@@ -177,10 +233,13 @@ struct SimPl011 {
     template <uint8_t i>
     static constexpr Irq irq() { return i == 0 ? SimPl011Line::uart0 : SimPl011Line::uart1; }
 
+    static_assert(fifo_depth == SimPl011TxFifo::depth);
+
     template <uint8_t i>
     static bool reset() {
         block[i] = Regs{};
         block[i].UARTFR = flag_reset;
+        SimPl011TxFifo::reset(i);
         SimPl011Bench::held[i] = false;
         SimPl011Bench::resets = SimPl011Bench::resets + 1u;
         return true;
@@ -201,14 +260,19 @@ struct SimPl011 {
 
     /// No atomic aliases here: a read-modify-write under the guard is
     /// what a chip without them would do, and the stamp records the one
-    /// act a test wants to place in time.
+    /// act a test wants to place in time. A write of UARTIMSC moves
+    /// UARTMIS with it.
     static void set_bits(volatile uint32_t& reg, uint32_t bits) {
         reg = reg | bits;
         if (is_control(reg) && (bits & UartControl::enable) != 0u) {
             SimPl011Bench::enabled_at = SimPl011Bench::tick();
         }
+        refresh_all();
     }
-    static void clear_bits(volatile uint32_t& reg, uint32_t bits) { reg = reg & ~bits; }
+    static void clear_bits(volatile uint32_t& reg, uint32_t bits) {
+        reg = reg & ~bits;
+        refresh_all();
+    }
 
     /// Any pad may carry either signal, as long as they are two.
     static constexpr bool pins_valid(uint8_t n, const Pins& p) {
@@ -244,6 +308,7 @@ struct SimPl011 {
         for (uint8_t i = 0; i < instances; ++i) {
             block[i] = Regs{};
             block[i].UARTFR = flag_reset;
+            SimPl011TxFifo::reset(i);
         }
         SimPl011Bench::reset();
         SimPl011Interrupts::reset();
@@ -252,9 +317,110 @@ struct SimPl011 {
     static bool is_control(const volatile uint32_t& reg) {
         return &reg == &block[0].UARTCR || &reg == &block[1].UARTCR;
     }
+
+    // ---- the transmit FIFO and the line, for a test that plays the wire
+    // ---- and the core
+
+    /// THE WIRE takes instance i's oldest entry and hands it back; nothing
+    /// when the FIFO is empty. The fall from one entry above the level to
+    /// the level is the edge that sets TXRIS.
+    template <uint8_t i>
+    static std::optional<uint8_t> shift() {
+        if (SimPl011TxFifo::count[i] == 0u) {
+            return std::nullopt;
+        }
+        const uint8_t b = SimPl011TxFifo::entry[i][SimPl011TxFifo::head[i]];
+        SimPl011TxFifo::head[i] = static_cast<uint8_t>((SimPl011TxFifo::head[i] + 1u) % fifo_depth);
+        SimPl011TxFifo::count[i] = static_cast<uint8_t>(SimPl011TxFifo::count[i] - 1u);
+        SimPl011TxFifo::sent[i] = SimPl011TxFifo::sent[i] + 1u;
+        if (SimPl011TxFifo::count[i] == tx_level(i)) {
+            block[i].UARTRIS = block[i].UARTRIS | UartInterrupt::tx;
+        }
+        settle(i);
+        return b;
+    }
+
+    /// A receive cause raised by hand (the receive side is not modelled):
+    /// what the handler sees on an entry for the receiver alone.
+    template <uint8_t i>
+    static void raise(uint32_t bits) {
+        block[i].UARTRIS = block[i].UARTRIS | bits;
+        settle(i);
+    }
+
+    /// The line as the interrupt controller sees it: enabled, and some
+    /// masked source standing (UARTINTR is the OR of UARTMIS).
+    template <uint8_t i>
+    static bool line_raised() {
+        return SimPl011Interrupts::line_enabled[i] && block[i].UARTMIS != 0u;
+    }
+
+    /// Where TXIFLSEL puts the transmit level, in entries: at or below it
+    /// the FIFO is "<= 1/8 full" and so on.
+    static uint8_t tx_level(uint8_t i) {
+        constexpr uint8_t eighths[] = {1, 2, 4, 6, 7};
+        const uint32_t sel = (block[i].UARTIFLS & UartTriggerField::tx_bits) >> UartTriggerField::tx_lsb;
+        return static_cast<uint8_t>(fifo_depth * eighths[sel < 5u ? sel : 2u] / 8u);
+    }
+
+    /// UARTFR's three transmit flags from the entries, UARTMIS from UARTRIS
+    /// under UARTIMSC.
+    static void settle(uint8_t i) {
+        constexpr uint32_t tx_flags = UartFlag::tx_full | UartFlag::tx_empty | UartFlag::busy;
+        const uint8_t n = SimPl011TxFifo::count[i];
+        uint32_t fr = block[i].UARTFR & ~tx_flags;
+        if (n == fifo_depth) { fr |= UartFlag::tx_full; }
+        if (n == 0u) { fr |= UartFlag::tx_empty; } else { fr |= UartFlag::busy; }
+        block[i].UARTFR = fr;
+        block[i].UARTMIS = block[i].UARTRIS & block[i].UARTIMSC;
+    }
+    static void refresh_all() {
+        for (uint8_t i = 0; i < instances; ++i) {
+            block[i].UARTMIS = block[i].UARTRIS & block[i].UARTIMSC;
+        }
+    }
+
+    /// Which block a register word belongs to.
+    static uint8_t instance_of(const SimPl011Data* reg) { return reg == &block[1].UARTDR ? 1u : 0u; }
+    static uint8_t instance_of(const SimPl011Clear* reg) { return reg == &block[1].UARTICR ? 1u : 0u; }
+
+    /// A write of UARTDR: an entry, or a byte lost to a full FIFO. A write
+    /// that takes the FIFO above its level clears TXRIS.
+    static void transmit(uint8_t i, uint8_t b) {
+        if (SimPl011TxFifo::count[i] == fifo_depth) {
+            SimPl011TxFifo::lost[i] = SimPl011TxFifo::lost[i] + 1u;
+            return;
+        }
+        const uint8_t tail = static_cast<uint8_t>((SimPl011TxFifo::head[i] + SimPl011TxFifo::count[i]) % fifo_depth);
+        SimPl011TxFifo::entry[i][tail] = b;
+        SimPl011TxFifo::count[i] = static_cast<uint8_t>(SimPl011TxFifo::count[i] + 1u);
+        SimPl011TxFifo::written[i] = SimPl011TxFifo::written[i] + 1u;
+        if (SimPl011TxFifo::count[i] > tx_level(i)) {
+            block[i].UARTRIS = block[i].UARTRIS & ~UartInterrupt::tx;
+        }
+        settle(i);
+    }
+
+    /// A write of UARTICR.
+    static void clear_raw(uint8_t i, uint32_t mask) {
+        block[i].UARTRIS = block[i].UARTRIS & ~mask;
+        settle(i);
+    }
 };
 
 static_assert(Pl011Chip<SimPl011>);
+
+inline SimPl011Data& SimPl011Data::operator=(uint32_t v) {
+    last = v;
+    SimPl011::transmit(SimPl011::instance_of(this), static_cast<uint8_t>(v));
+    return *this;
+}
+
+inline SimPl011Clear& SimPl011Clear::operator=(uint32_t mask) {
+    last = mask;
+    SimPl011::clear_raw(SimPl011::instance_of(this), mask);
+    return *this;
+}
 
 /// A static clock for the tests over SimPl011: the rate a family's own
 /// Clock type would carry.

@@ -1,8 +1,8 @@
 // THE PROOF THAT THE PL011 DRIVER KNOWS NO CHIP: brio/pl011/uart.hpp
 // instantiated over a SECOND chip that is not a chip at all - two
 // register blocks in RAM, a reset that memsets them, an interrupt
-// controller that counts and pads that remember (brio/host/sim_pl011.hpp)
-// - with every verb of the resource and of the transport named, both
+// controller that keeps its enables and pads that remember
+// (brio/host/sim_pl011.hpp) - with every verb of the resource and of the transport named, both
 // engine slots empty and both filled. Compiled here by the family's own
 // compiler and by the host's (test/test_pl011/main.cpp): a file that
 // needed a silicon would fail in one of the two.

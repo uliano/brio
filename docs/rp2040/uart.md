@@ -34,8 +34,10 @@ the receiver with the RX pad ignored. Eleven maskable interrupts
 combine into one line per instance (UART0_IRQ, UART1_IRQ): receive at
 the FIFO's trigger level, RECEIVE TIMEOUT when bytes wait and the
 line has idled 32 bit periods, transmit when the FIFO falls THROUGH
-its trigger level - a transition, not a level, so enabling it over
-an empty FIFO raises nothing (4.2.6.3) - and the four errors. The
+its trigger level - "based on a transition through a level, rather
+than on the level itself" (4.2.6.3), cleared by writing the FIFO
+above the level or through UARTICR, so enabling it over an empty FIFO
+raises nothing - and the four errors. The
 modem inputs and DTR/OUT1/OUT2 exist in the block and reach no pad on
 this chip; CTS and RTS do. The pins are fixed per instance under
 function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
@@ -86,13 +88,18 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   read per harvest (the engine moves bytes, not the entries' flags);
   `dma_faults()` counts the blocks abandoned after a bus error.
 
-HOW THE TRANSMITTER STARTS, because the interrupt is a transition:
-`write_byte` queues the byte and PENDS THE INSTANCE'S LINE in the
-NVIC; the handler moves the ring into the FIFO until the FIFO is
-full or the ring is empty, and arms the transmit interrupt only when
-bytes remain queued - the FIFO draining through its level is then a
-real transition. The handler is the ring's one consumer, the loop
-never writes the data register.
+HOW THE TRANSMITTER STARTS, because the interrupt is an edge that
+stays latched (the IP stratum's page, [../pl011/README.md](../pl011/README.md),
+where the rule and its measurement on the RP2350's same block are):
+a byte with nothing queued ahead of it and room in the FIFO is
+written straight into UARTDR by `write_byte` (a run at a time by
+`write_bulk`), so an idle transmitter takes 32 bytes with no
+interrupt; a byte behind a full FIFO is queued in the ring and arms
+the transmit interrupt, whose handler refills the FIFO once per fall
+through its level and disarms it when the ring runs dry; a byte the
+full ring refuses writes nothing. The handler is the ring's one
+consumer, and the loop writes the data register only while the ring
+is empty.
 
 ## How to use it
 
@@ -146,8 +153,7 @@ extern "C" void isr_uart0() {
     masked deliver exactly 32 in order and count one OE - from
     UARTRSR, as the entries never carry it;
   - 4096 bytes round the loop at 3 Mbaud byte-exact in 13.7 ms (the
-    wire's own 13.65) with 12 to 13 interrupts per hundred bytes: the
-    FIFO levels at half and an eighth batch the work.
+    wire's own 13.65).
 - ON THE CROSS LINK (this board's GP4 to the other's GP5 and back):
   512 bytes to a peer's echo and back byte-exact in 46 ms with no
   error counted; listening at 7E1 to the peer's 64 frames at 8N1,
@@ -155,11 +161,10 @@ extern "C" void isr_uart0() {
   parity errors counted and dropped, 34 frames accepted, no frame
   error - the attribution per entry, on a real wire.
 - THE ENGINES (`test_rp2040_dma`): 4096 bytes through the loop-back
-  at 3 Mbaud with an engine in each slot, byte-exact, 22 interrupts
-  where the interrupt-driven transport takes 520; the two traps of a
-  receive engine - a break taken at enable over a low pad, and the
-  request credits that outlive a completed run - are the transport's
-  business now ([dma.md](dma.md)).
+  at 3 Mbaud with an engine in each slot, byte-exact, 22 interrupts;
+  the two traps of a receive engine - a break taken at enable over a
+  low pad, and the request credits that outlive a completed run - are
+  the transport's business now ([dma.md](dma.md)).
 - THROUGH THE DEBUG PROBE'S BRIDGE, the console's own ladder fed by
   the host: byte-exact at 115200, 460800, 921600, 1 M, 2 M and 3 M
   baud (142 KB at 3 M with no error and no overrun, host to board);
@@ -171,11 +176,10 @@ extern "C" void isr_uart0() {
   echo-with-code of every character typed, the kernel console's
   banner, replies and prompt through `SerialPort` and `print`, with
   the frame, parity, break and hardware-overrun counters and the ring
-  overrun all at zero. The pended-line transmit start (the file
-  header) is what carried every byte of it; the receive timeout
-  interrupt is what delivers a single typed character - and it is
-  also what exposed the crt's handler-name trap
-  ([platform.md](platform.md)) before the first byte.
+  overrun all at zero. The receive timeout interrupt is what
+  delivers a single typed character - and it is also what exposed
+  the crt's handler-name trap ([platform.md](platform.md)) before the
+  first byte.
 
 ## Not covered yet
 
@@ -198,3 +202,11 @@ Implemented but not bench-verified, each with what would measure it:
   measures it at 115200 and sees its cost at 120; a timed lone byte
   per rung.
 - `rebase` and `set_baud` under a running port: the suite.
+- THE TRANSMIT POLICY on this chip's silicon - the direct write into
+  an idle FIFO, the transmit interrupt armed only behind a full FIFO,
+  nothing written for a refused byte - and the rule it rests on (the
+  transmit interrupt an edge that stays latched until a write above
+  the level or UARTICR clears it): measured on the RP2350's same
+  PL011 r1p5 ([../rp2350/uart.md](../rp2350/uart.md)), not yet here.
+  `test_rp2040_serial` whole on both boards, its letter e's interrupt
+  count, and `bench_rp2040`'s letter p would measure it.

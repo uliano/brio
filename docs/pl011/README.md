@@ -64,7 +64,7 @@ The types:
 |--------|---------------|
 | `Regs` | the register block of one instance, with the PL011's own member names (`UARTDR`, `UARTFR`, `UARTLCR_H`, ...) - the driver reads and writes them by name, so a family whose device description spells them otherwise hands over a struct of its own laid over the block, which costs nothing. What the FIELDS inside them are is not asked: the bit layout is the IP's and is stated here |
 | `Irq` | what this family's interrupt controller calls a line: an enumerator on one target, a number on another |
-| `Interrupts` | that controller, with `enable` / `disable` / `set_pending` - the driver never names an NVIC, because a family may carry one under one architecture and something else under another |
+| `Interrupts` | that controller, with `enable` / `disable` - the driver never names an NVIC, because a family may carry one under one architecture and something else under another; and it never raises the line by hand, so every entry is a cause the block's own status shows |
 | `Guard` | the RAII critical section: the transport takes it where it shares the receive ring's producer side with the line's handler |
 | `Platform` | the brio Platform the two byte rings are built on (`util/ring.hpp` asks it for the atomic width and for the same guard) |
 | `Pins` | the family's pin-set type, one pad per direction - a pin table is a chip's, never an IP's |
@@ -137,13 +137,60 @@ the point.
 Each family's document is where its measurements live
 ([../rp2040/uart.md](../rp2040/uart.md) is the first).
 
+## The transmit side: an edge that stays latched
+
+ARM's text, which both Raspberry Pi data sheets reproduce word for word
+(RP2040 4.2.6.3, RP2350 12.1.6.3, "UARTTXINTR"): the transmit interrupt
+is asserted when the transmit FIFO is at or below its trigger level,
+cleared by writing the FIFO above the level or by `UARTICR`, and "based
+on a transition through a level, rather than on the level itself".
+Measured on the RP2350 over the debug port
+([../rp2350/uart.md](../rp2350/uart.md)): `UARTRIS.TXRIS` is SET when
+the FIFO falls through the level, masked or not; it STAYS set until a
+write takes the FIFO above the level or `UARTICR` clears it; and the
+level alone never sets it again - a `TXIM` armed over a FIFO at or below
+its level with `TXRIS` clear never fires.
+
+The transport without a transmit engine is built on exactly that, in
+three rules:
+
+- A byte with nothing queued ahead of it and room in the FIFO is written
+  STRAIGHT INTO `UARTDR` by the caller (`write_byte`, and `write_bulk` a
+  run at a time): an idle transmitter takes a FIFO's depth with no
+  interrupt.
+- A byte behind a full FIFO, or behind bytes already queued, goes into
+  the ring and ARMS `TXIM` - after the push, so a handler that empties
+  the ring in between leaves at worst a mask armed over an empty ring.
+  WHENEVER BYTES ARE QUEUED THE FIFO IS ABOVE ITS LEVEL OR `TXRIS` IS
+  LATCHED: the first byte queues only behind a full FIFO, and from there
+  the FIFO draining latches `TXRIS` while a write either stays above the
+  level or leaves `TXRIS` as it was. The one store that could break it
+  is a clear of `TXRIS` in `UARTICR`, and the transmit path writes none:
+  the handler disarms `TXIM` when the ring runs dry and leaves `TXRIS`
+  as it stands. So the handler runs once per FIFO level, on the fall
+  through it, and refills the FIFO from the ring.
+- A byte the full ring REFUSES writes nothing at all: the ring is not
+  empty, so `TXIM` is armed and its edge is what drains the ring. A
+  caller spinning on a full ring costs no interrupt.
+
+The caller writes `UARTDR` only while the ring is empty, and a handler
+runs to completion, so a ring the caller sees empty has every byte
+queued before it in the FIFO already: the wire carries the bytes in the
+order they were written. The trigger level is the transport's: an
+eighth of the FIFO for the transmitter (so each entry refills
+seven-eighths of it), half for the receiver.
+
 ## The proof that it knows no chip
 
 `brio/host/sim_pl011.hpp` is a SECOND realization with no silicon under
 it: the register block as an array in RAM (at the PL011's offsets, with
 the block's reset values, so a bring-up's drain of the receive FIFO
 terminates), a reset that memsets it, an interrupt controller that
-counts, pads that remember what they were handed to and when. It is
+keeps its enables, pads that remember what they were handed to and
+when, and THE TRANSMIT FIFO with the rule above - entries, the flags
+that follow them, `TXRIS` set on the fall through the level and cleared
+by a write above it or by `UARTICR`, `UARTMIS` as `UARTRIS` under the
+mask, and the wire as a verb the test calls. It is
 compiled twice - by the host suite `test_pl011`, which judges the exact
 words a bring-up leaves in the block and the ORDER of the acts that make
 it, and by a family's compile check (`test/family_rp2040/pl011_ip.cpp`),
@@ -152,9 +199,16 @@ engine slots empty and both filled. A driver that needed a silicon would
 fail one of the two. The negative TUs beside it stage a traits type with
 one member taken away and require the concept to refuse it by name.
 
-What the fake does NOT model is the FIFOs: nothing fills the receive
-side, so the receive path has nothing to read there and stays the bench's
-to judge.
+The host suite plays the wire and the core over that FIFO: a print of
+4096 bytes takes one handler entry per FIFO level - 145 to 146, the
+first bytes straight in and then one entry per 28 - whether the caller
+spins twice or a thousand times as fast as the wire, and none at all
+while the wire keeps up with it; every byte reaches the wire in order,
+and none is written into a full FIFO.
+
+What the fake does NOT model is the receive side: nothing fills it, so
+the receive path has nothing to read there and stays the bench's to
+judge.
 
 ## Not covered yet
 

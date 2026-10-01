@@ -162,10 +162,9 @@ travelled by DMA):
   channel copies again.
 - THE ENGINES: 4096 bytes through UART1's loop-back at 3 Mbaud with an
   engine in each slot, harvested by the loop, byte-exact in 13.8 ms
-  (the wire's 13.65) with 22 to 23 interrupts on the line where the
-  interrupt-driven transport takes 520. A burst of 2064 bytes four
-  times the console's ring leaves in 47 blocks of its engine, the
-  transport idle after, no fault.
+  (the wire's 13.65) with 22 to 23 interrupts on the line. A burst of
+  2064 bytes four times the console's ring leaves in 47 blocks of its
+  engine, the transport idle after, no fault.
 - TWO TRAPS OF THE RECEIVE ENGINE, both now in the transport: a
   receiver enabled over a pad still at its reset pull-down (a wire
   from a silent peer) takes a BREAK, a zero byte the interrupt

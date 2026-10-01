@@ -31,6 +31,39 @@ void fresh() {
     HostPlatform::reset();
 }
 
+// THE CORE, played by the test: the handler runs while the line is
+// raised - UARTINTR is the OR of UARTMIS, so a handler that leaves a
+// source standing runs again at once. A storm is a failure here, not a
+// count.
+uint32_t entries = 0;
+
+void serve() {
+    uint32_t back_to_back = 0;
+    while (SimPl011::line_raised<0>()) {
+        (void)Port::isr();
+        entries = entries + 1u;
+        back_to_back = back_to_back + 1u;
+        REQUIRE(back_to_back < 4u);
+    }
+}
+
+constexpr uint8_t pattern(uint32_t i) { return static_cast<uint8_t>((i * 7u + 3u) & 0xFFu); }
+
+constexpr uint8_t tx_level = SimPl011::fifo_depth / 8u;   // the transport's 1/8
+
+// The wire takes the oldest entry; the core serves whatever that raised.
+// Returns false when the byte is not the next one of the pattern.
+bool wire_takes_one(uint32_t& sent) {
+    const auto b = SimPl011::shift<0>();
+    serve();
+    if (!b) {
+        return true;
+    }
+    const bool in_order = *b == pattern(sent);
+    sent = sent + 1u;
+    return in_order;
+}
+
 }   // namespace
 
 TEST_CASE("the baud arithmetic is the fractional divider's own") {
@@ -191,57 +224,229 @@ TEST_CASE("release puts the pads back and the block into reset") {
     CHECK_FALSE(Block::released());
 }
 
-TEST_CASE("a queued byte pends the line, and the handler is the FIFO's one feeder") {
+TEST_CASE("an idle transmitter takes a FIFO's depth with no interrupt, the rest queues behind it") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Port::init(clock, 115200));
-    const uint32_t pends_after_init = SimPl011Interrupts::pends[0];
+    entries = 0;
 
-    // write_byte() queues and PENDS; it never writes the data register.
-    regs().UARTDR = 0;
-    CHECK(Port::write_byte('A'));
-    CHECK(SimPl011Interrupts::pends[0] == pends_after_init + 1u);
-    CHECK(regs().UARTDR == 0u);
-    CHECK_FALSE(Port::tx_idle());
-
-    // The handler moves the ring into the FIFO and, with the ring empty,
-    // disarms the transmit interrupt instead of arming it.
-    CHECK_FALSE(Port::isr());
-    CHECK(regs().UARTDR == static_cast<uint32_t>('A'));
+    // Straight into UARTDR while nothing is queued and the FIFO has room:
+    // no mask armed, nothing raised.
+    for (uint32_t i = 0; i < SimPl011::fifo_depth; ++i) {
+        REQUIRE(Port::write_byte(pattern(i)));
+        serve();
+    }
+    CHECK(SimPl011TxFifo::count[0] == SimPl011::fifo_depth);
     CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
-    CHECK(Port::tx_idle());
+    CHECK(entries == 0u);
+    CHECK_FALSE(Port::tx_idle());   // BUSY: the FIFO holds them
 
-    // A bulk run is one nudge for the whole run.
-    const uint8_t run[5] = {'b', 'r', 'i', 'o', '!'};
-    const uint32_t before = SimPl011Interrupts::pends[0];
-    CHECK(Port::write_bulk(run) == 5u);
-    CHECK(SimPl011Interrupts::pends[0] == before + 1u);
-    CHECK_FALSE(Port::isr());
-    CHECK(regs().UARTDR == static_cast<uint32_t>('!'));   // the last one written
+    // The next byte finds the FIFO full: queued, and TXIM armed. The FIFO
+    // is above its level, so nothing stands yet.
+    REQUIRE(Port::write_byte(pattern(SimPl011::fifo_depth)));
+    CHECK(SimPl011TxFifo::count[0] == SimPl011::fifo_depth);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) != 0u);
+    CHECK_FALSE(SimPl011::line_raised<0>());
+
+    // The wire drains the FIFO; the fall through the level is the one
+    // entry, which moves the queued byte and, the ring dry, disarms.
+    uint32_t sent = 0;
+    while (SimPl011TxFifo::count[0] > tx_level + 1u) {
+        CHECK(wire_takes_one(sent));
+    }
+    CHECK(entries == 0u);
+    CHECK(wire_takes_one(sent));
+    CHECK(entries == 1u);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
+    CHECK(SimPl011TxFifo::count[0] == tx_level + 1u);
+    while (!Port::tx_idle()) {
+        CHECK(wire_takes_one(sent));
+    }
+    CHECK(sent == SimPl011::fifo_depth + 1u);
+    CHECK(SimPl011TxFifo::lost[0] == 0u);
+    CHECK(entries == 1u);
 }
 
-TEST_CASE("the transmit ring refuses when full, and counts nothing for it") {
+TEST_CASE("a refused byte writes nothing, and a full ring waits on its edge") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Port::init(clock, 115200));
+    entries = 0;
 
-    // The ring holds size - 1 (util/ring.hpp's one sacrificed slot), and
-    // nothing drains it while the handler is not called.
-    uint32_t queued = 0;
-    while (Port::write_byte(static_cast<uint8_t>(queued & 0xFFu))) {
-        ++queued;
-        REQUIRE(queued < 1000u);
+    // The FIFO's depth goes to the FIFO, then the ring holds size - 1
+    // (util/ring.hpp's one sacrificed slot); nothing drains either while
+    // the wire stands still.
+    uint32_t taken = 0;
+    while (Port::write_byte(pattern(taken))) {
+        ++taken;
+        serve();
+        REQUIRE(taken < 1000u);
     }
-    CHECK(queued == 255u);
+    CHECK(taken == SimPl011::fifo_depth + 255u);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) != 0u);
+
+    // A caller spinning on the full ring: no register written, nothing
+    // raised, nothing counted.
+    const uint32_t written = SimPl011TxFifo::written[0];
+    for (uint32_t spin = 0; spin < 1000u; ++spin) {
+        CHECK_FALSE(Port::write_byte(0xEE));
+        serve();
+    }
+    CHECK(entries == 0u);
+    CHECK(SimPl011TxFifo::written[0] == written);
     CHECK(Port::rx_overruns() == 0u);
     CHECK(Port::frame_errors() == 0u);
     CHECK(Port::hw_overruns() == 0u);
     CHECK_FALSE(Port::rx_pending());
 
-    // The handler empties it in one pass: this fake's transmit FIFO is
-    // never full.
-    CHECK_FALSE(Port::isr());
-    CHECK(Port::tx_idle());
+    // And the edge is what drains it, in order.
+    uint32_t sent = 0;
+    while (!Port::tx_idle()) {
+        REQUIRE(wire_takes_one(sent));
+    }
+    CHECK(sent == taken);
+    CHECK(SimPl011TxFifo::lost[0] == 0u);
+}
+
+TEST_CASE("a long print takes one interrupt per FIFO level, however fast the caller spins") {
+    // THE STORM this replaced: a refused write pended the line, so a
+    // print spinning on a full ring took one entry per spin. Here the
+    // wire takes one byte every `spins_per_frame` calls of write_byte,
+    // refused or not - a caller exactly as fast as the wire, twice as
+    // fast, fifty and a thousand times - and the entries are the refills
+    // alone: none at all while the wire keeps up, one per FIFO level once
+    // the caller outruns it.
+    constexpr uint32_t n = 4096;
+    constexpr uint32_t refill = SimPl011::fifo_depth - tx_level;
+    constexpr uint32_t bound = (n - SimPl011::fifo_depth + refill - 1u) / refill + 1u;
+    for (const uint32_t spins_per_frame : {1u, 2u, 50u, 1000u}) {
+        CAPTURE(spins_per_frame);
+        fresh();
+        constexpr Clock clock;
+        REQUIRE(Port::init(clock, 115200));
+        entries = 0;
+        uint32_t sent = 0;
+        uint32_t calls = 0;
+        bool in_order = true;
+        for (uint32_t i = 0; i < n; ++i) {
+            for (;;) {
+                const bool taken = Port::write_byte(pattern(i));
+                serve();
+                calls = calls + 1u;
+                if (calls % spins_per_frame == 0u) {
+                    in_order = wire_takes_one(sent) && in_order;
+                }
+                if (taken) {
+                    break;
+                }
+            }
+        }
+        while (!Port::tx_idle()) {
+            in_order = wire_takes_one(sent) && in_order;
+        }
+        CHECK(in_order);
+        CHECK(sent == n);
+        CHECK(SimPl011TxFifo::lost[0] == 0u);
+        CHECK(entries <= bound);
+        if (spins_per_frame == 1u) {
+            CHECK(entries == 0u);
+        }
+        if (spins_per_frame >= 50u) {
+            CHECK(entries >= bound - 2u);
+        }
+        CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
+    }
+}
+
+TEST_CASE("a bulk run from idle goes straight into the FIFO, its tail queued behind it") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    entries = 0;
+
+    // Shorter than the FIFO: all of it written, nothing armed.
+    const uint8_t run[5] = {'b', 'r', 'i', 'o', '!'};
+    CHECK(Port::write_bulk(run) == 5u);
+    CHECK(SimPl011TxFifo::count[0] == 5u);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
+    CHECK(regs().UARTDR == static_cast<uint32_t>('!'));   // the last one written
+
+    // Longer than the FIFO's room: the room written, the rest queued with
+    // TXIM armed, and the edge sends it in order.
+    uint32_t sent = 0;
+    while (!Port::tx_idle()) {
+        (void)SimPl011::shift<0>();
+    }
+    uint8_t long_run[40];
+    for (uint32_t i = 0; i < sizeof long_run; ++i) {
+        long_run[i] = pattern(i);
+    }
+    CHECK(Port::write_bulk(long_run) == sizeof long_run);
+    CHECK(SimPl011TxFifo::count[0] == SimPl011::fifo_depth);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) != 0u);
+    while (!Port::tx_idle()) {
+        REQUIRE(wire_takes_one(sent));
+    }
+    CHECK(sent == sizeof long_run);
+    CHECK(entries == 1u);
+}
+
+TEST_CASE("an entry for the receiver alone leaves the transmit side to its edge") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    entries = 0;
+
+    for (uint32_t i = 0; i < SimPl011::fifo_depth + 5u; ++i) {
+        REQUIRE(Port::write_byte(pattern(i)));
+    }
+    for (uint32_t i = 0; i < 10u; ++i) {
+        (void)SimPl011::shift<0>();
+    }
+    const uint8_t fifo_before = SimPl011TxFifo::count[0];
+
+    // The receive timeout stands, the transmit edge does not: the handler
+    // serves the receiver and writes nothing into the transmit FIFO.
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    REQUIRE(SimPl011::line_raised<0>());
+    serve();
+    CHECK(entries == 1u);
+    CHECK(SimPl011TxFifo::count[0] == fifo_before);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) != 0u);
+}
+
+TEST_CASE("a ring running dry disarms TXIM and leaves TXRIS as it stands") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    entries = 0;
+
+    // One byte queued behind a full FIFO; the FIFO falls through its
+    // level and on to one entry before the core gets round to it.
+    for (uint32_t i = 0; i < SimPl011::fifo_depth + 1u; ++i) {
+        REQUIRE(Port::write_byte(pattern(i)));
+    }
+    while (SimPl011TxFifo::count[0] > 1u) {
+        (void)SimPl011::shift<0>();
+    }
+    REQUIRE((regs().UARTRIS & UartInterrupt::tx) != 0u);
+    serve();
+
+    // The handler wrote the one byte - two entries, still at or below the
+    // level, so the write did not clear TXRIS - and disarmed TXIM over
+    // the dry ring WITHOUT clearing TXRIS: an arming that follows finds
+    // the edge latched and fires.
+    CHECK(entries == 1u);
+    CHECK(SimPl011TxFifo::count[0] == 2u);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
+    CHECK((regs().UARTRIS & UartInterrupt::tx) != 0u);
+    CHECK_FALSE(SimPl011::line_raised<0>());
+
+    // A byte now has nothing queued ahead of it and room: straight in,
+    // nothing armed.
+    CHECK(Port::write_byte(0x42));
+    CHECK(SimPl011TxFifo::count[0] == 3u);
+    CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
 }
 
 TEST_CASE("a rate change drains, reprograms and comes back up") {

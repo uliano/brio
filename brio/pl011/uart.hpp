@@ -49,15 +49,38 @@
  *    precisely; the overrun bit (bit 11) says a byte was lost AFTER the
  *    one read, and that one is good. How DEEP the two FIFOs are is a
  *    synthesis parameter and therefore the family's (`Chip::fifo_depth`);
- *  - THE TRANSMIT INTERRUPT IS A TRANSITION, NOT A LEVEL: it asserts
- *    when the FIFO falls THROUGH its trigger level, and enabling it over
- *    an empty FIFO raises nothing. So no verb of this task waits for
- *    TXIM to start a transmission: write_byte() queues the byte and
- *    PENDS THE LINE in the family's interrupt controller, the handler
- *    moves the ring into the FIFO until the FIFO is full or the ring is
- *    empty, and only when bytes remain queued is TXIM armed - the FIFO
- *    draining through the level is then a real transition. The ring's
- *    consumer is the handler alone;
+ *  - THE TRANSMIT INTERRUPT IS AN EDGE THAT STAYS LATCHED. ARM's text,
+ *    which both Raspberry Pi data sheets reproduce (RP2040 4.2.6.3,
+ *    RP2350 12.1.6.3): it is asserted when the transmit FIFO is at or
+ *    below its trigger level, cleared by writing the FIFO above the level
+ *    or by UARTICR, and "based on a transition through a level, rather
+ *    than on the level itself". Measured on the RP2350
+ *    (docs/rp2350/uart.md): TXRIS is SET when the FIFO falls through the
+ *    level, masked or not; it STAYS set until a write takes the FIFO above
+ *    the level or UARTICR clears it; and the level alone never sets it
+ *    again - a TXIM armed over a FIFO at or below its level with TXRIS
+ *    clear never fires. The transmit side is built on exactly that:
+ *      - a byte with nothing queued ahead of it and room in the FIFO is
+ *        WRITTEN STRAIGHT INTO UARTDR by the caller, so an idle
+ *        transmitter takes a FIFO's depth of bytes with no interrupt;
+ *      - a byte behind a full FIFO, or behind bytes already queued, goes
+ *        into the ring and ARMS TXIM. Every queued byte has an edge
+ *        coming or one latched: the first queues only behind a FULL FIFO,
+ *        which is above its level, and from there the FIFO draining
+ *        latches TXRIS while a write either stays above the level or
+ *        leaves TXRIS as it was - so the one store that could take the
+ *        guarantee away is a clear of TXRIS in UARTICR, which the
+ *        transmit path never writes. One interrupt per FIFO level, each
+ *        refilling the FIFO from the ring, and TXIM disarmed by the
+ *        handler when the ring runs dry;
+ *      - a byte the full ring REFUSES writes nothing at all: the ring is
+ *        not empty, so TXIM is armed and its edge is what drains the
+ *        ring. A caller spinning on a full ring costs no interrupt.
+ *    The ring's consumer is the handler alone, and the caller writes
+ *    UARTDR only while the ring is empty: a handler runs to completion,
+ *    so a ring the caller sees empty has every byte queued before it in
+ *    the FIFO already, and the wire carries the bytes in the order they
+ *    were written;
  *  - the receive side arms RXIM (the FIFO at its trigger level) AND
  *    RTIM (bytes waiting and the line idle for 32 bit periods), so a
  *    short burst is delivered after one character time and a long one
@@ -132,9 +155,9 @@ concept Pl011Chip =
         typename C::Regs;
         /// What the family's interrupt controller calls a line.
         typename C::Irq;
-        /// That controller: enable / disable / raise one line. A family
-        /// may carry an NVIC under one architecture and something else
-        /// under another, so this file never names one.
+        /// That controller: enable and disable one line. A family may
+        /// carry an NVIC under one architecture and something else under
+        /// another, so this file never names one.
         typename C::Interrupts;
         /// The RAII critical section of this family - what the transport
         /// takes while it shares the ring's producer side with a handler.
@@ -191,10 +214,11 @@ concept Pl011Chip =
         /// what "the same channel" means is the family's DMA's business.
         { C::template engines_distinct<Pl011AbsentEngine, Pl011AbsentEngine>() }
             -> std::same_as<bool>;
-        /// The line's three verbs, on the family's own controller.
+        /// The line's two verbs, on the family's own controller. Nothing
+        /// here raises the line by hand: every entry is a cause the
+        /// block's own status shows.
         C::Interrupts::enable(line);
         C::Interrupts::disable(line);
-        C::Interrupts::set_pending(line);
     };
 
 /**
@@ -739,10 +763,12 @@ public:
     /// The instance's ONE interrupt body - call from the handler the
     /// family's crt names for this instance's line.
     ///
-    /// Serves what UARTMIS reports and, whatever it reports, moves the
-    /// transmit ring into the FIFO: the entry may be the pend a
-    /// write_byte() raised, which shows nothing in the UART's own
-    /// status (the file header's transmit-interrupt note).
+    /// Serves what UARTMIS reports, and nothing else: the receive FIFO
+    /// on its level or its timeout, the transmit ring into the FIFO on
+    /// the transmit edge (the file header's transmit-interrupt note).
+    /// Nothing raises this line by hand, so every entry has a cause in
+    /// UARTMIS; an entry for the receiver alone leaves the transmit side
+    /// to its own edge.
     ///
     /// Returns true when the RX ring transitioned empty -> non-empty:
     /// the edge signal for kernel glue ("post RxActivity to the serial
@@ -756,12 +782,13 @@ public:
             if ((active & (UartInterrupt::rx | UartInterrupt::rx_timeout)) != 0u) {
                 edge = receive();
             }
-        } else {
-            (void)active;
         }
         if constexpr (!has_tx_engine) {
-            feed();
+            if ((active & UartInterrupt::tx) != 0u) {
+                feed();
+            }
         }
+        (void)active;
         return edge;
     }
 
@@ -867,16 +894,33 @@ public:
 
     // ---- byte transport (satisfies ByteSink / ByteSource) -----------------
 
-    /// Try to queue one byte for transmission; false when the TX ring is
-    /// full. The line is PENDED, never written to from here: the handler
-    /// is the FIFO's one feeder.
+    /// Try to send one byte; false when the TX ring is full. Without a
+    /// transmit engine (the file header's three rules): straight into
+    /// UARTDR when nothing is queued and the FIFO has room, else into the
+    /// ring with TXIM armed, and a refusal writes nothing. With one, the
+    /// byte is queued and the engine pumped - on a refusal too, because a
+    /// block abandoned after a bus error starts no next one, and a
+    /// refused write is the one call a blocked print keeps making.
     static bool write_byte(uint8_t b) {
-        if (!m_tx.push(b)) {
-            nudge();   // a refused byte still nudges: see below
-            return false;
+        if constexpr (has_tx_engine) {
+            const bool queued = m_tx.push(b);
+            pump_tx();
+            return queued;
+        } else {
+            if (m_tx.empty() && !U::tx_full()) {
+                U::write_data(b);
+                return true;
+            }
+            if (!m_tx.push(b)) {
+                return false;
+            }
+            // AFTER the push: a handler that ran between the two and
+            // emptied the ring leaves at most a mask armed over an empty
+            // ring, one entry that disarms it. Armed BEFORE, that handler
+            // could disarm it over the byte just queued.
+            U::interrupts(UartInterrupt::tx, true);
+            return true;
         }
-        nudge();
-        return true;
     }
 
     /// Fetch one received byte; false when nothing is pending.
@@ -898,11 +942,24 @@ public:
         return written;
     }
 
-    /// Queue a run of bytes in BULK: copy straight into the ring's own
-    /// free run and nudge the handler ONCE. Returns how many were queued
-    /// (short of `src.size()` when the ring filled).
+    /// Send a run of bytes in BULK: without a transmit engine, as much of
+    /// it as the FIFO has room for goes straight into UARTDR when nothing
+    /// is queued (write_byte()'s first rule, a run at a time); the rest
+    /// is copied into the ring's own free run, and TXIM armed ONCE if any
+    /// of it was queued. With an engine, all of it is queued and the
+    /// engine pumped once. Returns how many were taken (short of
+    /// `src.size()` when the ring filled).
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t done = 0;
+        if constexpr (!has_tx_engine) {
+            if (m_tx.empty()) {
+                while (done < src.size() && !U::tx_full()) {
+                    U::write_data(src[done]);
+                    ++done;
+                }
+            }
+        }
+        [[maybe_unused]] const uint32_t direct = done;
         while (done < src.size()) {
             const auto room = m_tx.write_span();
             if (room.empty()) {
@@ -917,7 +974,11 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
         }
-        nudge();
+        if constexpr (has_tx_engine) {
+            pump_tx();
+        } else if (done != direct) {
+            U::interrupts(UartInterrupt::tx, true);   // after the publish: write_byte()'s order
+        }
         return done;
     }
 
@@ -981,16 +1042,6 @@ private:
         } else {
             U::dma_requests(false, false);
             U::enable(false);
-        }
-    }
-
-    /// What a queued byte does to get moving: pend the handler (the
-    /// FIFO's one feeder) without an engine, start a block with one.
-    static void nudge() {
-        if constexpr (has_tx_engine) {
-            pump_tx();
-        } else {
-            Chip::Interrupts::set_pending(U::irq());
         }
     }
 
@@ -1072,21 +1123,37 @@ private:
         return was_empty && !m_rx.empty();
     }
 
-    /// Move the transmit ring into the FIFO while both allow, and leave
-    /// TXIM armed exactly when bytes remain queued: the FIFO draining
-    /// through its level is then a real transition that brings the
-    /// handler back. The ring's consumer is this function alone.
+    /// Refill the FIFO from the ring on the transmit edge, a contiguous
+    /// run at a time: the run copied while the FIFO takes it and released
+    /// with one consume. The ring's consumer is this function alone.
+    ///
+    /// When the FIFO fills with bytes still queued, TXIM stays armed (the
+    /// push that queued them armed it) and the next fall through the
+    /// level brings the handler back. When the ring runs dry TXIM is
+    /// disarmed and TXRIS IS LEFT AS IT STANDS: cleared here, with the
+    /// FIFO at or below its level, nothing would fire the arming a
+    /// write_byte() caught between its empty() and its push() makes next
+    /// - a byte queued behind a mask that never fires (the file header).
+    /// A TXRIS latched under a disarmed mask costs nothing: the next write
+    /// that takes the FIFO above its level clears it.
     [[gnu::always_inline]] static void feed() {
-        while (!U::tx_full()) {
-            const auto v = m_tx.pop();
-            if (!v) {
+        using index_t = typename decltype(m_tx)::index_t;
+        for (;;) {
+            const auto run = m_tx.read_span();
+            if (run.empty()) {
                 U::interrupts(UartInterrupt::tx, false);
-                U::clear_pending(UartInterrupt::tx);
                 return;
             }
-            U::write_data(*v);
+            uint32_t moved = 0;
+            while (moved < run.size() && !U::tx_full()) {
+                U::write_data(run[moved]);
+                ++moved;
+            }
+            m_tx.consume(static_cast<index_t>(moved));
+            if (moved < run.size()) {
+                return;
+            }
         }
-        U::interrupts(UartInterrupt::tx, true);
     }
 
     /// Wait, bounded, for the ring and the shifter to empty: what a

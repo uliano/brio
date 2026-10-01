@@ -1,7 +1,7 @@
 // THE IP STRATUM THROUGH THE HAZARD3 COMPILER, over a chip that is not a
 // chip: brio/pl011/uart.hpp instantiated on brio/host/sim_pl011.hpp - two
 // register blocks in RAM, a reset that memsets them, an interrupt
-// controller that counts, pads that remember. The RP2040's fixture makes
+// controller that keeps its enables, pads that remember. The RP2040's fixture makes
 // the same proof with one compiler; this one makes it with a SECOND
 // ARCHITECTURE'S, which is the thing this target adds - a file that had
 // smuggled in anything of a Cortex-M, of an NVIC or of a vendor header

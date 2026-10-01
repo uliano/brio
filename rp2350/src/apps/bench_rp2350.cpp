@@ -112,10 +112,11 @@
 //      after the drain. THE WIRE is 115200 baud over the ten bits of an 8N1
 //      frame: 11520 B/s. busy is wall (print spins on a full ring, the drain
 //      spins on the flag); irq and isr are the transport's SHAPE
-//      (pl011/uart.hpp: write_byte() pends the line, so a handler runs per
-//      byte - and per REFUSED byte while print spins on a full ring) plus the
-//      ticks that landed in the print, so a plain line under each splits
-//      them: the console's vector, and the tick's.
+//      (pl011/uart.hpp: from an idle transmitter the first FIFO-depth bytes
+//      go straight into the FIFO, then one handler per refill as the FIFO
+//      falls through its level; a byte the full ring refuses writes
+//      nothing) plus the ticks that landed in the print, so a plain line
+//      under each splits them: the console's vector, and the tick's.
 //   t  the tick's floor: one second of Idle::idle() turns with nothing to
 //      do, counters before and after: wall = the second, irq = the ticks,
 //      isr = the tick handler's cycles, busy = the floor.

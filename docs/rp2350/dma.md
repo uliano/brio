@@ -284,9 +284,9 @@ finding below says what it loses and why.
   to 13 702 us** on both halves - the wire's own time for 4096 bytes of
   10 bits at 3 Mbaud is 13.65 ms - with **18 to 22** line-0 interrupts
   for the whole of it, the console's own blocks among them; the same run
-  carried on the transport's own interrupt is one interrupt a byte by
-  construction, its write_byte pending the line. No framing or overrun
-  error, no ring overflow.
+  carried on the transport's own interrupt takes 385 to 402
+  (`test_rp2350_serial`'s letter e, [uart.md](uart.md)). No framing or
+  overrun error, no ring overflow.
 - **Byte-exact on every one of sixteen flash-and-run cycles** (ten on
   the Hazard3 half, six on the Cortex-M33 one), the first run after a
   flash included - which is the run that matters: code running cold out

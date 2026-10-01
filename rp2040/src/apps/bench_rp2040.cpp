@@ -90,10 +90,10 @@
 //      shifter finished" (UARTFR.BUSY clear, which stands until the last
 //      stop bit has left the shift register). Counters before the print
 //      and after the drain. busy = wall (the print and the drain spin);
-//      irq and isr are the transport's shape: write_byte pends UART0's
-//      line for EVERY byte, and a byte the full 256-byte ring refuses
-//      pends it too, so a print longer than the ring runs a handler per
-//      retry until the wire frees a slot.
+//      irq and isr are the transport's shape: from an idle transmitter
+//      the first FIFO-depth bytes go straight into the FIFO, then one
+//      handler per refill as the FIFO falls through its level; a byte the
+//      full 256-byte ring refuses writes nothing (pl011/uart.hpp).
 //   t  the tick's floor: one second (hz cycles on the ruler) of masked
 //      Idle::idle() turns with the console drained - not a kernel loop:
 //      no kernel runs here. wall = the second, irq = the ticks, isr = the
