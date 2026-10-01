@@ -108,6 +108,24 @@ without an XDIR pin; loop-back or open drain without a TXD pad (the
 pinless route included); a non-normal receiver mode outside
 asynchronous operation.
 
+What a byte costs `Uart`: one interrupt each way - the silicon buffers
+three frames and offers no deeper FIFO to fill - and the code of the
+vector it lands in. That is why both bodies are always inline and
+`dre()` also flattens what it calls into itself, so its vector holds no
+call whatever the ring's own inlining: a ring verb is shared by every
+call site of its type in the image (`tx_idle()`'s `empty()`, another
+ring of the same shape), and one call in a vector saves the whole
+call-clobbered set. Counted in the release listing: the DRE vector
+bound to `dre()` is 36 instructions, four registers, SREG and RAMPZ
+saved and no call - 54 cycles from its first instruction to its RETI
+for a byte that leaves bytes queued (59 for the last, which also clears
+DREIE), plus the CPUINT's minimum response of six: 60 cycles, 2.5 us at
+24 MHz, against the 86.8 us a byte holds the wire at 115200. The RXC
+vector bound to `rxc()` alone is 62 instructions, six registers, SREG
+and RAMPZ and no call, 73 + 6 cycles for a clean byte; a binding that
+also posts from it (the console below) adds the kernel's `post()` as a
+call, and with it the call-clobbered set: 16 pushes.
+
 ## How to use it
 
 A console (the shape every app uses):
@@ -529,6 +547,10 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
+- **The transport's cost per byte on the silicon.** The cycles above
+  are counted in the listing; `bench_avr`'s letter p measures them on
+  a print (the DRE handler between its meter's two stamps counted at
+  28 cycles);
 - **`DBGCTRL.DBGRUN`**;
 - **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4

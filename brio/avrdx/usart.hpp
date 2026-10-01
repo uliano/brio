@@ -979,16 +979,21 @@ public:
                       "list it among its Users: it would keep the old baud after "
                       "a clock change");
         m_baud = baud;
+        U::template init<UsartConfig{.route = route}>();
         // init() STARTS the transport: whatever a previous life of this
         // instance left in the rings and the counters is not this one's
         // traffic. (Measured: an instance re-init'ed after the resource
         // had been driven directly reads a stale byte as its first one.)
-        while (m_rx.pop()) {
-        }
-        while (m_tx.pop()) {
-        }
+        // The resource's init() has just written CTRLA whole, RXCIE and
+        // DREIE clear - the CPUINT has no per-vector enable, so these bits
+        // are the vectors' only mask - and rxc() and dre(), the rings'
+        // other parties, stay out until RXCIE below and the first
+        // write_byte(). That is what Ring::clear() asks of its caller, and
+        // clear() is the verb: popping the TX ring here would make this
+        // context a second consumer of a ring whose consumer is dre().
+        m_rx.clear();
+        m_tx.clear();
         clear_errors();
-        U::template init<UsartConfig{.route = route}>();
         U::baud_reg(usart_baud_reg(clock_hz(clock), baud));
         U::enable_rxc_interrupt(true);
 
@@ -1050,7 +1055,7 @@ public:
     /// Stop the transport and hand the instance back: the RXC interrupt
     /// off, the resource's own teardown (interrupts, PORTMUX to NONE, the
     /// pins returned to inputs), the rings left as they are - init()
-    /// drains them. The ISR bodies bound to the vectors stay bound and
+    /// empties them. The ISR bodies bound to the vectors stay bound and
     /// simply see nothing.
     static void release() {
         U::enable_rxc_interrupt(false);
@@ -1116,8 +1121,16 @@ public:
      * drains (write_byte() re-enables it).
      */
     // always_inline: single call site (the ISR binding) - see ticker.hpp
-    // pit() for the register-set rationale.
-    [[gnu::always_inline]] static void dre() {
+    // pit() for the register-set rationale. flatten: the calls inside are
+    // inlined as well, so the vector holds none whatever the ring's own
+    // inlining - a ring verb belongs to the ring's TYPE, shared with every
+    // other call site in the image (tx_idle()'s empty(), a ring of the
+    // same shape elsewhere), and one call left in a vector saves the whole
+    // call-clobbered set (counted in the release listings: 16 pushes and a
+    // call to empty() where gcc kept it out of line, 6 and none flattened).
+    // Not on rxc(): there it leaves the received UsartFrame in a stack
+    // frame (12 pushes and a frame, against 8 and none).
+    [[gnu::always_inline, gnu::flatten]] static void dre() {
         if (const auto c = m_tx.pop()) {
             U::template transmit_as<UsartBits::eight>(*c);
             if (m_tx.empty()) {
