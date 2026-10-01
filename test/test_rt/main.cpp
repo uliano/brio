@@ -248,7 +248,7 @@ TEST_CASE("rt/selftest.hpp: the chip's cases pass on the host's own C library") 
         static_cast<void* (*)(void*, int, size_t)>(&::memset),
         static_cast<int (*)(const void*, const void*, size_t)>(&::memcmp),
         static_cast<size_t (*)(const char*)>(&::strlen),
-        static_cast<void* (*)(const void*, int, size_t)>(&::memchr)});
+        &brio::rt_memchr});
 }
 
 TEST_CASE("rt/selftest.hpp: a broken copy is caught") {

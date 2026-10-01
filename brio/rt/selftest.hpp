@@ -327,6 +327,15 @@ inline RtSelftestResult rt_selftest_memchr(const RtFunctions& fns) {
     return r;
 }
 
+/// memchr through its C signature, whatever prototype the header gave it:
+/// glibc's <string.h> declares the const-correct C++ overload pair (a
+/// cast to the C signature matches neither), a freestanding image and the
+/// other C libraries the C one. The call inside is to whatever the image
+/// links, with arguments nothing can fold.
+inline void* rt_memchr(const void* s, int c, size_t n) {
+    return const_cast<void*>(static_cast<const void*>(::memchr(s, c, n)));
+}
+
 /// The functions this image really links - rt.cpp's on a 32-bit target -
 /// for a letter of a platform suite.
 inline RtFunctions rt_linked_functions() {
@@ -336,7 +345,7 @@ inline RtFunctions rt_linked_functions() {
         static_cast<void* (*)(void*, int, size_t)>(&::memset),
         static_cast<int (*)(const void*, const void*, size_t)>(&::memcmp),
         static_cast<size_t (*)(const char*)>(&::strlen),
-        static_cast<void* (*)(const void*, int, size_t)>(&::memchr)};
+        &rt_memchr};
 }
 
 /// Every group of cases in turn, each handed to report(name, result) - the
