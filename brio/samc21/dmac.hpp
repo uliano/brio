@@ -1354,7 +1354,11 @@ public:
     /// touches is guarded. It is NOT free - it stops the channel for the
     /// duration - so the pacing is the caller's policy, never this
     /// driver's.
-    static std::optional<DmaProgress> harvest(uint32_t spins = 0xFFFFu) {
+    ///
+    /// `spins` bounds the wait for SUSP in turns of the loop below, and
+    /// with it the masked window when the suspend never lands; the
+    /// default is harvest_spins.
+    static std::optional<DmaProgress> harvest(uint32_t spins = harvest_spins) {
         if (!loaded_.valid_bit()) {
             return std::nullopt;   // nothing was ever loaded: nothing to report
         }
@@ -1371,10 +1375,11 @@ public:
         // 70000 harvests under a five-channel load, which is exactly
         // often enough to be mistaken for silicon.
         //
-        // The cost is honest and bounded: a harvest measures ~500 cycles
-        // (10 us at 48 MHz), so that is how long interrupts are masked.
+        // The cost is honest and bounded: a harvest measures ~700 cycles
+        // (15 us at 48 MHz), so that is how long interrupts are masked.
         // It is one more reason harvest() states that its PACING is the
-        // caller's policy - a tight loop over it is not free.
+        // caller's policy - a tight loop over it is not free. A suspend
+        // that never lands is bounded by `spins` (harvest_spins below).
         typename SamPlatform::CriticalSection cs;
 
         // NOTHING TO SUSPEND, AND SUSPENDING IT IS NOT FREE. When the
@@ -1477,6 +1482,30 @@ public:
     /// zero is the measurement.
     static uint32_t violations() { return violations_; }
     /// Harvests abandoned because the suspend did not take hold in time.
+    /**
+     * harvest()'s default suspend budget, in turns of its wait - and so
+     * the bound on how long a harvest keeps interrupts masked when SUSP
+     * never comes. MEASURED: SUSP has always landed by the wait's FIRST
+     * look. test_samc_dma run with a budget of ZERO turns refused no
+     * reading for a timeout in letter d, none in g's five-channel hunt,
+     * and in j's duplex stress only on the churned channel erratum 1.10.4
+     * corrupts (9 to 14 a run) - which times out at 0xFFFF turns too (17
+     * a run): its suspend never lands, and a larger budget buys nothing
+     * but masked time. One turn is a SUSP read and an ENABLE read, each
+     * under with_channel's guard: 54 cycles counted in the release image
+     * at no wait state, 92 measured at 48 MHz (a harvest that gives up
+     * after 32 turns and one that gives up after 16 differ by 1474
+     * cycles). 16 turns is a margin of sixteen over the measured wait,
+     * and a harvest that gives up measures 2128 cycles around the call
+     * (44 us at 48 MHz, letter j prints it): under one 1 ms tick at every
+     * rate the internal clock task produces - 3 MHz is 3000 cycles a
+     * tick - even counted with 48 MHz's flash wait states.
+     * When the budget runs out the reading is refused and counted in
+     * suspend_timeouts(), and the suspend command is left as it was
+     * issued - nothing resumes a channel that may not have stopped.
+     */
+    static constexpr uint32_t harvest_spins = 16;
+
     static uint32_t suspend_timeouts() { return timeouts_; }
     static void clear_counters() { violations_ = 0; timeouts_ = 0; }
 

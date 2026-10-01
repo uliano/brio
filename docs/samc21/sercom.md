@@ -154,7 +154,8 @@ The engines are POLICIES, not features of the task:
   bytes, and returns the same empty-to-non-empty edge `isr()` has, so
   the same kernel glue works. Pacing is WHOEVER OWNS THE PORT's
   policy - a kernel TimeEvent every few ticks is the shape brio
-  expects - and each harvest costs ~10 us of masked interrupts.
+  expects - and each harvest costs ~15 us of masked interrupts, 44 us
+  when the suspend never lands (dmac.md).
   `harvest()` hands the channel a new run whenever the SILICON says it
   is not running one, not only when the engine's own beat count says
   the buffer filled: a reading that was refused leaves that count

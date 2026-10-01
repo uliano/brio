@@ -40,7 +40,9 @@ Applies to ALL silicon revisions (A4/A5/B0) unless noted:
   to an address >= 64 immediately followed by an ST/STD to an address
   < 64 (VPORT/GPIOR space) or by a write to `SLPCTRL.CTRLA` loses the
   last write. brio: `Pin` uses SBI/CBI (I/O instructions, not ST) for
-  VPORT, so bare-pin code is unaffected; `AvrPlatform::idle()` writes
+  VPORT, so bare-pin code is unaffected, and `PinRef` - the one pin
+  reached through a pointer - stores into the PORT's OUTSET/OUTCLR at
+  0x0400 and up, never into VPORT; `AvrPlatform::idle()` writes
   `SLPCTRL.CTRLA` with the documented NOP before each write (see the
   comment there). Any future driver storing to VPORT with ST must
   respect it.

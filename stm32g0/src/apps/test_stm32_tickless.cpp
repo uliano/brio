@@ -931,11 +931,12 @@ void td_handshake() {
     }
 
     // RULE 3 AS A FINDING. A compare stored IMMEDIATELY before a Stop 1:
-    // with the wait (the ticker's own rule, SLEEPDEEP set means
-    // wait_cmp_ok before the WFI) and WITHOUT it (the raw sequence, to
-    // see whether an in-flight APB->kernel transfer completes with PCLK
-    // stopped). Judged on the RTC wall. The second leg goes through
-    // Pwr and Lptim directly - the ticker would wait.
+    // with the wait (the ticker's own rule: with SLEEPDEEP set the arm
+    // declines, unmasked, until the store has landed, so the loop turns
+    // as the kernel's does) and WITHOUT it (the raw sequence, to see
+    // whether an in-flight APB->kernel transfer completes with PCLK
+    // stopped). Judged on the RTC wall. The second leg goes through Pwr
+    // and Lptim directly - the ticker would wait.
     console_drain();
     lap_room();
     clear_counters();
@@ -943,9 +944,11 @@ void td_handshake() {
     const uint32_t k0 = Tb::ticks();
     const uint32_t w0 = wall();
     (void)Pwr::arm(PwrMode::stop1);
-    {
+    uint32_t stop_turns = 0;
+    while (static_cast<int32_t>(Tb::ticks() - (k0 + 300u)) < 0 && stop_turns < 100'000u) {
         InterruptGuard g;
         P::idle_until(std::optional<uint32_t>{k0 + 300u});
+        ++stop_turns;
     }
     const uint32_t w1 = wall();
     const uint32_t k1 = Tb::ticks();
@@ -955,8 +958,8 @@ void td_handshake() {
     const uint32_t waited = Tb::stop_waits();
     print(serial, "  a 300-tick deadline through a Stop 1 with the wait: ",
           wall_ms(wall_delta(w0, w1)), " ms of RTC wall, ticks moved ", k1 - k0,
-          ", stop waits so far ", waited, ", ", lptim_irqs, " LPTIM interrupt(s); SYSCLK "
-          "came back as HSISYS=", back_hsisys, crlf);
+          ", stop waits so far ", waited, ", ", stop_turns, " idle_until turns, ", lptim_irqs,
+          " LPTIM interrupt(s); SYSCLK came back as HSISYS=", back_hsisys, crlf);
     bench.verdict("THROUGH A STOP 1: the compare waited into place fires at the deadline "
                   "on the RTC's wall, kernel time RUNS through the Stop, one interrupt",
                   within(wall_ms(wall_delta(w0, w1)), 290u, 320u) && within(k1 - k0, 300u, 302u) &&
@@ -1005,8 +1008,9 @@ void td_handshake() {
     if (landed) {
         bench.verdict("FINDING: an in-flight compare write LANDS with PCLK stopped - the "
                       "APB-to-kernel transfer completes on the kernel clock alone; rule "
-                      "3's wait is insurance the silicon does not need (kept: 93 us per "
-                      "Stop round, and the chapter promises nothing)",
+                      "3's wait is insurance the silicon does not need (kept: 72..93 us "
+                      "awake and unmasked per Stop round, and the chapter promises "
+                      "nothing)",
                       raw_hsisys);
     } else {
         bench.verdict("FINDING: an in-flight compare write DOES NOT land with PCLK "

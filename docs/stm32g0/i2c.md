@@ -229,7 +229,12 @@ usually looks like first.
 
 **Three flags no branch owns.** PECERR, TIMEOUT and ALERT ride the one
 ERRIE a plain I2C engine arms for BERR and ARLO. They are swept at the
-bottom of the handler, and what a sweep cannot reach is disarmed.
+bottom of the handler, and what a sweep cannot reach is disarmed - which
+is only ever TCIE's: TC and TCR have no clear bit, while all six error
+conditions do, so ERRIE stays armed (an error that sets after the
+handler's read is cleared on the next entry) and ARLO and BERR go on
+being reported for the life of the program. TCIE is armed afresh by
+every tenure's `start()`.
 
 **A held SDA is a PARK and not an error**, the same answer the AVR DA/DB
 and the SAM C21 give. A controller whose SDA is held low by
@@ -559,6 +564,10 @@ Implemented but not bench-verified:
   RELOAD = 0, PECBYTE = 1" - the check rides target byte control, whose
   NBYTES the suite's pump does not re-arm.
 - **The SMBus ALERT**, which needs a wire to an SMBA pad.
+- **ERRIE across the last-resort sweep.** Letter `i`'s staged PECERR
+  (on the self-link) is what takes the handler's last resort; an ARLO
+  or a BERR reported by a tenure after it is what would show the enable
+  survived, and no letter does the two in a row.
 - **The self-link roles on the STM32G071RB and the STM32G031K8**: the
   eleven self-link letters - the own-address match, the NOSTRETCH
   target, 10-bit addressing both ways, the PEC, the time-outs, the wake

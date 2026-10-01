@@ -22,6 +22,10 @@
 // LED on PB2 marks a keystroke for a hand at the desk and is judged on
 // nothing.
 //
+// THE BANNER carries one probe and no verdict: the word WCH's GPIO
+// library reads at 0x40022030 to decide whether a CH32V20x_D6 die answers
+// PORTC's top three pins on bits 0..2 (portc_probe() below).
+//
 // What is exercised, letter by letter:
 //   a  the boot story: RCC_RSTSCKR read as the ACCUMULATING history it
 //      is, the six flags named, and take_flags() leaving the register
@@ -1444,9 +1448,32 @@ void tn_shadow() {
     bench.verdict("the shadow counted for each variant (the numbers above are the finding)", true);
 }
 
+/// THE CH32V20x_D6 PORTC PROBE - a bench probe, outside the rule that
+/// an app reads no register. WCH's GPIO library (ch32v20x_gpio.c in the
+/// CH32V20x EVT) reads the word at 0x40022030 on a CH32V20x_D6 and, when
+/// its bits 27:24 are zero, sets MCU_Version = 1 and shifts every PORTC
+/// pin mask right by 13: on such a die PC13..PC15 answer on bits 0..2.
+/// The reference manual names no register at that address (V2.3's table
+/// 3-2 has HSE_CAL_CTRL at 0x4002202C and LSI32K_TUNE at 0x40022036, and
+/// V2.5 the same), so the word is named here by that use. Printed and
+/// never judged: what a die answers is a fact for the part table to
+/// take, not this suite. Read only on the class the library reads it on.
+void portc_probe() {
+    if constexpr (device::device_class == DeviceClass::v20x_d6) {
+        const uint32_t word = *reinterpret_cast<const volatile uint32_t*>(0x40022030UL);
+        print(serial, "  the EVT's MCU_Version word at 0x40022030 = ", hex(word),
+              ": PORTC shifted by 13 (bits 27:24 zero): ",
+              (word & 0x0F000000UL) == 0u ? "yes" : "no", crlf);
+    } else {
+        print(serial, "  the EVT's MCU_Version word at 0x40022030: a CH32V20x_D6 "
+                      "question, not read on this class", crlf);
+    }
+}
+
 void banner() {
     print(serial, crlf, "test_vx03_platform - ", device::part_name,
           " (clk=144 MHz PLL, tick=STK 1000 Hz)", crlf);
+    portc_probe();
     bench.menu();
 }
 

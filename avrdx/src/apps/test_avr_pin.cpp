@@ -2,8 +2,8 @@
 // interrupts (senses, flags, the one-vector-per-port pattern), the
 // one-store PinConfig, pull-up, input disable, the multi-pin engine
 // through PinSet across two ports, the Port<L> mask verbs and slew
-// limit. Reference test of avrdx/pin.hpp (docs/avrdx/port.md): keep
-// it passing.
+// limit, the PinRef descriptor. Reference test of avrdx/pin.hpp
+// (docs/avrdx/port.md): keep it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console
 // on USART2 ALT1 (PF4/PF5) at 460800. No wires: an OUTPUT pin whose
@@ -11,7 +11,7 @@
 // pins it watches (PD3, PC6, PC7 - all free on this bench).
 //
 // Commands: ? | 1 senses | 2 level | 3 invert | 4 flags | 5 pullup
-// | 6 input off | 7 multi-pin | 8 port verbs | a all
+// | 6 input off | 7 multi-pin | 8 port verbs | 9 PinRef | a all
 // Not testable here: INLVL thresholds and the slew rate (analog
 // levels / a scope), the fully-async wake (needs a standby sleep),
 // the buttons PA2..PA5 (a human finger).
@@ -43,6 +43,9 @@ using C6 = Pin<'C', 6>;
 using C7 = Pin<'C', 7>;
 
 volatile uint16_t d3_irqs = 0, c6_irqs = 0, c7_irqs = 0;
+/// Letter 9: the PORTD vector raises PC7 on its d3_irqs-th entry (0 =
+/// never).
+volatile uint16_t c7_set_at = 0;
 
 void clear_irqs() {
     cli();
@@ -237,11 +240,71 @@ void t8_port() {
     quiesce();
 }
 
+// ---- 9: PinRef, the descriptor a request carries -------------------------------
+/// The descriptor as a bus engine holds it: a value only known at run
+/// time (noipa keeps the compiler from folding it back into a constant
+/// pin, whose SBI/CBI would hide what the descriptor does).
+[[gnu::noipa]] void ref_edges(PinRef r, uint8_t pairs) {
+    for (uint8_t i = 0; i < pairs; ++i) {
+        r.set();
+        r.clear();
+    }
+}
+
+void t9_pinref() {
+    print(serial, "9 PinRef on PC6: the edges, the null ref, and an ISR's edge on PC7", crlf);
+    quiesce();
+    C6::output(); C7::output(); C6::clear(); C7::clear();
+    const PinRef r = C6::ref();
+    r.set();
+    delay_us(clock, 1);
+    verdict("set drives PC6 high", C6::read());
+    r.clear();
+    delay_us(clock, 1);
+    verdict("clear drives PC6 low", !C6::read());
+    const PinRef none{};
+    C7::set();
+    none.set();
+    none.clear();
+    delay_us(clock, 1);
+    verdict("a null ref is invalid and touches nothing",
+            !none.valid() && C7::read() && !C6::read());
+    // The race a read-modify-write of the port's output would lose: a
+    // level_low storm on PD3 enters the PORTD vector after every
+    // instruction of the main flow (an AVR runs one instruction between
+    // two interrupts), and on entry k the vector raises PC7. Swept over
+    // k, the entry lands inside every PinRef edge; an edge that read the
+    // output before the entry and stored it after would write PC7 low
+    // again. One store per edge has no such window.
+    D3::output(); D3::set();
+    D3::configure({.sense = PinSense::level_low});
+    uint8_t lost = 0, short_storm = 0;
+    for (uint8_t k = 1; k <= 64; ++k) {
+        C7::clear();
+        D3::clear_flag();
+        clear_irqs();
+        c7_set_at = k;
+        D3::clear();                               // the storm
+        ref_edges(r, 8);
+        D3::set();                                 // over
+        c7_set_at = 0;
+        delay_us(clock, 1);
+        if (d3_irqs < k) ++short_storm;
+        else if (!C7::read()) ++lost;
+    }
+    print(serial, "  PC7 raised by the ISR on entries 1..64: undone ", lost,
+          " times, storm short ", short_storm, " times", crlf);
+    verdict("every placement reached inside the storm", short_storm == 0);
+    verdict("no PinRef edge undoes the ISR's edge on the same port", lost == 0);
+    quiesce();
+}
+
 using TestFn = void (*)();
 struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'1', t1_senses}, {'2', t2_level}, {'3', t3_invert}, {'4', t4_flags},
     {'5', t5_pullup}, {'6', t6_input_off}, {'7', t7_multipin}, {'8', t8_port},
+    {'9', t9_pinref},
 };
 
 void run(TestFn fn) {
@@ -252,7 +315,7 @@ void run(TestFn fn) {
 
 void help() {
     print(serial, "test_avr_pin: 1 senses | 2 level | 3 invert | 4 flags | 5 pullup | "
-                  "6 input off | 7 multi-pin | 8 port verbs | a all", crlf);
+                  "6 input off | 7 multi-pin | 8 port verbs | 9 PinRef | a all", crlf);
 }
 
 } // namespace
@@ -261,7 +324,10 @@ ISR(USART2_RXC_vect) { (void)Serial::rxc(); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(PORTD_PORT_vect) {
     const uint8_t f = brio::Port<'D'>::take_flags();
-    if (f & 0x08) d3_irqs = d3_irqs + 1;
+    if (f & 0x08) {
+        d3_irqs = d3_irqs + 1;
+        if (d3_irqs == c7_set_at) C7::set();
+    }
 }
 ISR(PORTC_PORT_vect) {
     const uint8_t f = brio::Port<'C'>::take_flags();

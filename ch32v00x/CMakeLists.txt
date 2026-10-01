@@ -71,11 +71,34 @@ if(CH32V00X_PART_DEFINE STREQUAL "CH32V003")
 else()
     set(_ch32_arch_default "rv32ec_zmmul_xw")
 endif()
-set(CH32V00X_ARCH "${_ch32_arch_default}" CACHE STRING "-march for this part: its full ISA under WCH's gcc (xw is theirs alone); empty = the part's default")
-if("${CH32V00X_ARCH}" STREQUAL "")
-    set(CH32V00X_ARCH "${_ch32_arch_default}")
+# THE ISA AND THE ABI ARE DERIVED, NEVER CACHED: the two cache entries
+# are OVERRIDES, empty by default, so every configure re-derives from
+# the part (a changed default and a changed CH32V00X_MCU on an existing
+# cache both take effect), and an override that is set wins and says so.
+# An entry equal to the derived value is no override, and is cleared
+# (which is what a cache written while these entries held the default
+# carries).
+set(CH32V00X_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA under WCH's gcc, derived at every configure")
+set(CH32V00X_ABI "" CACHE STRING "-mabi override; empty (the default) = the family's ilp32e")
+set(_ch32_abi_default "ilp32e")
+if(CH32V00X_ARCH STREQUAL "${_ch32_arch_default}")
+    set(CH32V00X_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA under WCH's gcc, derived at every configure" FORCE)
 endif()
-set(CH32V00X_ABI "ilp32e" CACHE STRING "-mabi for this family")
+if(CH32V00X_ARCH STREQUAL "")
+    set(_ch32_arch "${_ch32_arch_default}")
+else()
+    set(_ch32_arch "${CH32V00X_ARCH}")
+    message(STATUS "CH32V00X_ARCH override: -march=${_ch32_arch} (the part's own is ${_ch32_arch_default})")
+endif()
+if(CH32V00X_ABI STREQUAL "${_ch32_abi_default}")
+    set(CH32V00X_ABI "" CACHE STRING "-mabi override; empty (the default) = the family's ilp32e" FORCE)
+endif()
+if(CH32V00X_ABI STREQUAL "")
+    set(_ch32_abi "${_ch32_abi_default}")
+else()
+    set(_ch32_abi "${CH32V00X_ABI}")
+    message(STATUS "CH32V00X_ABI override: -mabi=${_ch32_abi} (the family's is ${_ch32_abi_default})")
+endif()
 
 # --- The core's hardware prologue/epilogue (HPE): with it on, the crt
 #     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
@@ -95,8 +118,8 @@ else()
 endif()
 
 set(BRIO_COMMON_FLAGS
-    -march=${CH32V00X_ARCH}
-    -mabi=${CH32V00X_ABI}
+    -march=${_ch32_arch}
+    -mabi=${_ch32_abi}
     -D${CH32V00X_PART_DEFINE}
     ${CH32V00X_HPE_DEFINE}
     -Wall -Wextra -Werror

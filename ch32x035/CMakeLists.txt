@@ -59,10 +59,34 @@ ch32x035_part_facts("${CH32X035_MCU}"
     CH32X035_PART_DEFINE CH32X035_FLASH_KB CH32X035_RAM_KB CH32X035_BOARD
     CH32X035_PART_ARCH CH32X035_PART_ABI)
 
-# The part's own ISA and ABI are the defaults (the table's two last
-# columns); a cache entry still overrides them, for an experiment.
-set(CH32X035_ARCH "${CH32X035_PART_ARCH}" CACHE STRING "-march for this part: its full ISA under WCH's gcc (xw is theirs alone)")
-set(CH32X035_ABI "${CH32X035_PART_ABI}" CACHE STRING "-mabi for this part")
+# The part's own ISA and ABI (the table's two last columns) are DERIVED
+# at every configure, never cached: the two cache entries are OVERRIDES,
+# empty by default - for an experiment - so a changed CH32X035_MCU on an
+# existing cache follows the part, and an override that is set wins and
+# says so.
+# An entry equal to the derived value is no override, and is cleared
+# (which is what a cache written while these entries held the default
+# carries).
+set(CH32X035_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA (cmake/ch32x035-parts.cmake), derived at every configure")
+set(CH32X035_ABI "" CACHE STRING "-mabi override; empty (the default) = the part's own ABI")
+if(CH32X035_ARCH STREQUAL "${CH32X035_PART_ARCH}")
+    set(CH32X035_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA (cmake/ch32x035-parts.cmake), derived at every configure" FORCE)
+endif()
+if(CH32X035_ARCH STREQUAL "")
+    set(_x035_arch "${CH32X035_PART_ARCH}")
+else()
+    set(_x035_arch "${CH32X035_ARCH}")
+    message(STATUS "CH32X035_ARCH override: -march=${_x035_arch} (${CH32X035_MCU}'s own is ${CH32X035_PART_ARCH})")
+endif()
+if(CH32X035_ABI STREQUAL "${CH32X035_PART_ABI}")
+    set(CH32X035_ABI "" CACHE STRING "-mabi override; empty (the default) = the part's own ABI" FORCE)
+endif()
+if(CH32X035_ABI STREQUAL "")
+    set(_x035_abi "${CH32X035_PART_ABI}")
+else()
+    set(_x035_abi "${CH32X035_ABI}")
+    message(STATUS "CH32X035_ABI override: -mabi=${_x035_abi} (${CH32X035_MCU}'s own is ${CH32X035_PART_ABI})")
+endif()
 
 # --- The core's hardware prologue/epilogue (HPE): with it on, the crt
 #     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
@@ -82,8 +106,8 @@ else()
 endif()
 
 set(BRIO_COMMON_FLAGS
-    -march=${CH32X035_ARCH}
-    -mabi=${CH32X035_ABI}
+    -march=${_x035_arch}
+    -mabi=${_x035_abi}
     -D${CH32X035_PART_DEFINE}
     ${CH32X035_HPE_DEFINE}
     -Wall -Wextra -Werror

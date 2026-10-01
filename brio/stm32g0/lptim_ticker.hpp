@@ -119,18 +119,25 @@
  *     fires it on time. Never early, never late by more than the loop's
  *     own turn; the alternative - placing it later - would be legal and
  *     worse.
- *  3. BEFORE A STOP THE STORE IS WAITED FOR. Whether an APB-to-kernel
- *     transfer still in flight completes with PCLK stopped is written
- *     nowhere in chapter 26, so with SLEEPDEEP set arm_wake() spends
- *     the 93 us on wait_cmp_ok() and the compare is in place before
- *     the machine stops (the timed site's own rule). In Sleep the APB
- *     keeps running and the store is left to land on its own.
+ *  3. BEFORE A STOP THE STORE MUST HAVE LANDED - AND IT IS NOT WAITED
+ *     FOR MASKED. Whether an APB-to-kernel transfer still in flight
+ *     completes with PCLK stopped is written nowhere in chapter 26, so
+ *     with SLEEPDEEP set a store in flight is rule 1's other answer:
+ *     arm_wake() declines, the platform unmasks and returns, and the
+ *     loop turns - its own work and every interrupt served - until a
+ *     turn finds CMPOK up; that turn sleeps through the mirror with the
+ *     compare in place, the flag left standing for the wake's handler to
+ *     sweep like any completion. In Sleep the APB keeps running and the
+ *     store is left to land on its own. The price is the store's
+ *     72..93 us awake, spent with interrupts ENABLED: masked, it was
+ *     eight characters of a 921600 console with no FIFO. A store not
+ *     landed `write_landing_counts` counts after it was issued (2..3
+ *     measured) is counted in write_timeouts() and slept on regardless.
  *     Measured: a store followed by the Stop 1 with NO wait lands all
  *     the same - the compare fires at its 292 ms on the RTC's wall,
  *     three runs of three - so the transfer completes on the kernel
- *     clock alone and this wait is insurance the silicon does not need;
- *     kept, because it costs 93 us per Stop round and the chapter
- *     promises nothing.
+ *     clock alone and this rule is insurance the silicon does not need;
+ *     kept, because the chapter promises nothing.
  *  4. A DEADLINE A LAP OR MORE AWAY IS NOT ARMED, AND THE COMPARE IS
  *     PARKED ON THE LAP: the ARRM two seconds out re-evaluates, and a
  *     low half-word would match a lap early. The register is MIRRORED:
@@ -250,6 +257,14 @@ public:
     /// counts past the count `now` was read in (the write lands in 2..3,
     /// the phase adds up to one, one more for the margin).
     static constexpr uint32_t min_counts_ahead = 6;
+
+    /// Rule 3's bound: a store issued with a Stop armed and not landed
+    /// this many counts later (2..3 measured; 32 is about 1 ms) is
+    /// counted in write_timeouts() and slept on regardless. Judged on
+    /// single CNT reads, as rule 1's crossing guard is: a misread at this
+    /// grain costs at most a Stop entered with the store in flight, which
+    /// the silicon has been measured to survive (rule 3).
+    static constexpr uint16_t write_landing_counts = 32;
 
     /// Where the compare is PARKED (rule 4) - at init, when nothing is
     /// armed, and when the deadline is a lap or more away: equal to ARR,
@@ -441,11 +456,25 @@ private:
     /**
      * The one store path (rules 1 and 3, and the mirror): `cmp` into
      * the register unless it is already there, only with CMPOK clear
-     * and nothing in flight, waited for when a Stop is armed.
+     * and nothing in flight - and with a Stop armed, not slept on until
+     * it has landed. Nothing here waits: every "not yet" is a declined
+     * turn, taken with interrupts back on.
      */
     static bool store(uint16_t cmp) {
+        const bool stop = (SCB->SCR & SCB_SCR_SLEEPDEEP_Msk) != 0u;
         if (cmp == cmp_reg_) {
-            return true;    // the mirror: already in the register
+            // The mirror: already in the register - and before a Stop,
+            // LANDED (rule 3). CMPOK up says it has; the flag stays for
+            // the wake's handler to sweep.
+            if (stop && read_write_pending() && !L::cmp_ok()) {
+                if (static_cast<uint16_t>(L::count_raw() - stored_at_) <
+                    write_landing_counts) {
+                    return false;   // in flight: the loop turns, unmasked
+                }
+                write_timeouts_ = write_timeouts_ + 1u;
+                write_pending_ = false;
+            }
+            return true;
         }
         if (L::cmp_ok()) {
             // Rule 1: a completion stands - the flag may be READ from
@@ -467,17 +496,16 @@ private:
             return false;   // in flight (26.4.11), the flag not up yet: the loop turns
         }
         (void)L::set_cmp(cmp);
+        stored_at_ = L::count_raw();
         cmp_reg_ = cmp;
         write_pending_ = true;
         stores_ = stores_ + 1u;
-        if ((SCB->SCR & SCB_SCR_SLEEPDEEP_Msk) != 0u) {
-            // Rule 3: in place before the machine stops.
+        if (stop) {
+            // Rule 3: in place before the machine stops - this turn
+            // declines, and the mirror above lets the first turn that
+            // finds CMPOK up through.
             stop_waits_ = stop_waits_ + 1u;
-            if (!L::wait_cmp_ok()) {
-                write_timeouts_ = write_timeouts_ + 1u;
-                write_pending_ = false;
-                return false;
-            }
+            return false;
         }
         return true;
     }
@@ -516,9 +544,11 @@ public:
     static uint32_t floor_declines() { return floor_declines_; }
     /// Compare stores issued.
     static uint32_t stores() { return stores_; }
-    /// Waits for CMPOK that never came (a dead LPTIM; never seen).
+    /// Stores still not landed `write_landing_counts` after they were
+    /// issued, with a Stop armed (a dead LPTIM; never seen).
     static uint32_t write_timeouts() { return write_timeouts_; }
-    /// Stores waited for because a Stop was armed (rule 3).
+    /// Stores issued with a Stop armed, each waited for - by declined
+    /// turns, unmasked - until it landed (rule 3).
     static uint32_t stop_waits() { return stop_waits_; }
 
 private:
@@ -568,6 +598,7 @@ private:
     static inline bool sweep_pending_ = false;  // set with the pend, cleared by isr()
     static inline bool swept_valid_ = false;
     static inline uint16_t swept_at_ = 0;       // CNT when the handler swept CMPOK
+    static inline uint16_t stored_at_ = 0;      // CNT when the last compare was stored
     static inline uint16_t cmp_reg_ = parked_cmp;
     static inline uint32_t deferrals_ = 0;
     static inline uint32_t floor_declines_ = 0;

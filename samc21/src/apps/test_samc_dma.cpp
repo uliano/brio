@@ -27,7 +27,8 @@
 //      print() into the ring, the engine drains it in blocks
 //   i  the RX engine and the tick-paced harvest() contract - runner
 //      driven like r, so out of z
-//   j  both engines at once: the 1.10.4 stress at the task level
+//   j  both engines at once: the 1.10.4 stress at the task level, and
+//      every hand harvest timed against the tick
 //
 // Wiring: NONE. Every letter but r is self-contained; r asks the runner
 // for a burst and says so.
@@ -36,6 +37,8 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <type_traits>
 
 #include "samc21/clock.hpp"
 #include "samc21/dmac.hpp"
@@ -1430,6 +1433,25 @@ void tj_engine_duplex() {
     uint32_t harvests = 0;
     uint32_t rx_bytes = 0;
     uint32_t churn_blocks = 0;
+    // THE MASKED WINDOW, TIMED. Every hand harvest is clocked whole (the
+    // call is an upper bound on its critical section), split by whether
+    // its suspend wait gave up: the churned channel is the one 1.10.4
+    // kills, and a dead channel's suspend never lands - so this is where
+    // harvest_spins is what bounds the interrupts' latency.
+    uint32_t longest_read = 0;
+    uint32_t longest_timeout = 0;
+    const auto timed_harvest = [&]<typename Ch>(std::type_identity<Ch>) {
+        const uint32_t timeouts_before = Ch::suspend_timeouts();
+        const uint32_t t0 = cycles_now();
+        const bool ok = Ch::harvest().has_value();
+        const uint32_t took = cycles_now() - t0;
+        uint32_t& longest =
+            Ch::suspend_timeouts() != timeouts_before ? longest_timeout : longest_read;
+        if (took > longest) {
+            longest = took;
+        }
+        return ok;
+    };
     const uint32_t deadline = brio::Ticker::ticks() + run_ms;
     while (static_cast<int32_t>(brio::Ticker::ticks() - deadline) < 0) {
         if (EngineSerial::tx_idle()) {
@@ -1441,11 +1463,11 @@ void tj_engine_duplex() {
         churn_blocks += churn<Churn0>(64);
         ++harvests;
         (void)EngineSerial::harvest();
-        if (!Copy::harvest()) {
+        if (!timed_harvest(std::type_identity<Copy>{})) {
             ++refused_readings;
         }
         const uint32_t before = Churn0::violations();
-        const bool churn_ok = Churn0::harvest().has_value();
+        const bool churn_ok = timed_harvest(std::type_identity<Churn0>{});
         if (!churn_ok) {
             ++refused_readings;
         }
@@ -1491,6 +1513,13 @@ void tj_engine_duplex() {
           Churn0::violations(), "/", Churn0::suspend_timeouts(),
           "   (violations/timeouts)", crlf);
 
+    const uint32_t tick_cycles = SysClock::hz / 1000u;
+    print(serial, "  longest hand harvest: ", longest_read, " cycles (",
+          cycles_to_us(longest_read), " us) that read, ", longest_timeout, " cycles (",
+          cycles_to_us(longest_timeout), " us) that gave up after ",
+          brio::DmaChannel<ch_churn0>::harvest_spins, " turns; one tick is ",
+          tick_cycles, crlf);
+
     if (captured) {
         print(serial, "  first bad wb : ctrl=", brio::hex(bad_wb.btctrl), " cnt=",
               bad_wb.btcnt, " src=", brio::hex(bad_wb.srcaddr), " dst=",
@@ -1532,6 +1561,8 @@ void tj_engine_duplex() {
                   refused_readings == Copy::violations() + Copy::suspend_timeouts() +
                                           Churn0::violations() +
                                           Churn0::suspend_timeouts());
+    bench.verdict("no harvest masked as long as a tick, a timed-out one included",
+                  longest_read < tick_cycles && longest_timeout < tick_cycles);
     bench.verdict("the transports survived it", hw_over == 0 && lines >= 2);
     bench.verdict("the console came back", gave);
 

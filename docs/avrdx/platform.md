@@ -80,7 +80,9 @@ nothing needs to yet: for a compile-time address in the low I/O space
 GCC emits `out`/`sbi`/`cbi`, which IS the documented workaround, and a
 scan of the built images finds zero `sts` stores below 0x40 in any of
 them. A runtime-computed pointer into that space would be the
-exposure, and the stratum has none. The
+exposure, and the stratum has none: the one pin a request carries at
+run time, `PinRef`, holds the PORT and stores into its `OUTSET`/`OUTCLR`
+in the extended I/O space ([port.md](port.md)). The
 DA errata of record (DS80000882C, 10/2021) carries no twin item, but
 it predates the DB one (first published in DS80000915E, 04/2024), so
 its silence is not evidence: the NOP costs one cycle and is emitted on

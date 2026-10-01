@@ -33,21 +33,31 @@ namespace brio {
 /// asserted by the bus AO, not by the client). A null PinRef (default)
 /// means "no such pin": set/clear are no-ops, so optional pins cost one
 /// branch. Build one with Pin<...>::ref().
+///
+/// It holds the PORT, not the VPORT: an edge is ONE store into OUTSET
+/// or OUTCLR (18.5.6/18.5.7). Through a pointer the compiler cannot
+/// emit SBI/CBI, so the VPORT alias would cost a read-modify-write of
+/// OUT - a window in which an ISR's edge on another pin of the same
+/// port is written back over (test_avr_pin's letter 9 measures it) -
+/// and its store would be an STD into the low I/O space, the target
+/// erratum DS80000915F 2.2.4 loses after a store to an address >= 64.
+/// OUTSET/OUTCLR sit in the extended I/O space (PORTA at 0x0400), and
+/// the store is one STD: 1 cycle against the LDD/OR/STD's 4.
 struct PinRef {
-    volatile VPORT_t* vport = nullptr;
+    volatile PORT_t* port = nullptr;
     uint8_t mask = 0;
 
     void set() const {
-        if (vport != nullptr) {
-            vport->OUT |= mask;
+        if (port != nullptr) {
+            port->OUTSET = mask;
         }
     }
     void clear() const {
-        if (vport != nullptr) {
-            vport->OUT &= ~mask;
+        if (port != nullptr) {
+            port->OUTCLR = mask;
         }
     }
-    constexpr bool valid() const { return vport != nullptr; }
+    constexpr bool valid() const { return port != nullptr; }
 };
 
 /// Whether this package bonds out the port at all: 28/32-pin parts
@@ -277,7 +287,7 @@ struct Pin {
     }
 
     /// Runtime descriptor of this pin (for request events - see PinRef).
-    static constexpr PinRef ref() { return {&vport(), mask}; }
+    static constexpr PinRef ref() { return {&port(), mask}; }
 
     // A pin is the degenerate PwmChannel (max = 1: any non-zero duty is
     // "on"), so generic actuators written over that concept (RgbLamp)

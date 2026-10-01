@@ -133,7 +133,9 @@ BKPT with no debugger escalates to the crt's distinct
   crystal, two divisions on LSI), `arm_wake(now, deadline)` (the four
   rules: store only with CMPOK clear and no write in flight, else pend
   the sweep once and decline; a deadline nearer than six counts is
-  declined and spun through; before a Stop the store is waited for; a
+  declined and spun through; before a Stop a store is not slept on
+  until it has landed - every turn before CMPOK is declined, with
+  interrupts back on, so nothing in the ticker waits masked; a
   deadline a lap or more away parks the compare on the lap and the
   register is mirrored), `park()` (no deadline at all: the compare on
   the lap - what the platform's `idle_until(nullopt)` calls), `isr()`
@@ -311,7 +313,8 @@ What it measures of THIS chapter:
   compare fires at its 292 ms on the RTC's wall with no wait at all,
   three runs of three - the APB-to-kernel transfer completes on the
   kernel clock alone, and the ticker's wait before a Stop (rule 3) is
-  insurance the silicon does not need, kept at 93 us a round.
+  insurance the silicon does not need, kept at 72..93 us awake a round
+  - spent in declined loop turns with interrupts enabled, not masked.
 - **A real kernel**: three periodics at 7, 30 and 250 ticks pumped
   through `process()/step()/idle_if_empty()` for three seconds fire
   438 / 102 / 12 times, every interval exactly 7 / 30 / 250 ticks in

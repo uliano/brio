@@ -10,9 +10,10 @@
  *   brio::print(serial, "[", ts, "] count = ", count, brio::crlf);
  *   brio::print(serial, "mask = ", brio::hex(0xBEEF), " v = ", brio::fixed(v, 8, 3));
  *
- * Supported argument types: char, C strings, all integer types (decimal;
- * brio::hex() for hexadecimal), bool (as 1/0), float/double (scientific by
- * default, brio::fixed()/brio::sci() to control), brio::TimeStamp, brio::crlf.
+ * Supported argument types: char, C strings, all integer types up to 64
+ * bits (decimal; brio::hex() for hexadecimal, 32 bits), bool (as 1/0),
+ * float/double (scientific by default, brio::fixed()/brio::sci() to
+ * control), brio::TimeStamp, brio::crlf.
  *
  * Extension point: print() dispatches each argument to an unqualified
  * print_one(sink, value) call, so a new type becomes printable by providing
@@ -99,6 +100,67 @@ inline char* dtostre(double value, char* buffer, unsigned char precision,
 inline constexpr unsigned char DTOSTR_ALWAYS_SIGN = 0x01;
 #endif
 
+// ---- 64-bit integers ----------------------------------------------------------
+
+/// The decimal text of a 64-bit value - at most 20 digits and a NUL -
+/// with NO 64-bit division: libgcc's divides one bit at a time, which on
+/// the AVR is thousands of cycles a digit. Below 2^32 the value is
+/// ultoa()'s, the path every narrower integer takes. Above it the digits
+/// from 10^19 down to 10^9 are counted out by subtracting their power
+/// (at most nine subtractions a digit), and what is left, under 10^9 and
+/// so 32 bits, is ultoa()'s again, zero-padded to its nine digits.
+inline char* u64toa(uint64_t value, char* buffer) {
+    if ((value >> 32) == 0u) {
+        return ultoa(static_cast<unsigned long>(value), buffer, 10);
+    }
+    static constexpr uint64_t upper_powers[] = {
+        10'000'000'000'000'000'000ULL, 1'000'000'000'000'000'000ULL,
+        100'000'000'000'000'000ULL,    10'000'000'000'000'000ULL,
+        1'000'000'000'000'000ULL,      100'000'000'000'000ULL,
+        10'000'000'000'000ULL,         1'000'000'000'000ULL,
+        100'000'000'000ULL,            10'000'000'000ULL,
+        1'000'000'000ULL,
+    };
+    char* p = buffer;
+    for (const uint64_t power : upper_powers) {
+        char digit = '0';
+        while (value >= power) {
+            value -= power;
+            ++digit;
+        }
+        // 2^32 > 10^9, so a non-zero digit comes before the last power:
+        // only LEADING zeros are skipped.
+        if (digit != '0' || p != buffer) {
+            *p++ = digit;
+        }
+    }
+    char low[10];
+    (void)ultoa(static_cast<unsigned long>(value), low, 10);
+    uint8_t n = 0;
+    while (low[n] != '\0') {
+        ++n;
+    }
+    for (uint8_t i = n; i < 9u; ++i) {
+        *p++ = '0';
+    }
+    for (uint8_t i = 0; i < n; ++i) {
+        *p++ = low[i];
+    }
+    *p = '\0';
+    return buffer;
+}
+
+/// The signed twin: a minus sign and the magnitude, negated through the
+/// unsigned type so INT64_MIN is not UB. At most 20 characters and a NUL.
+inline char* i64toa(int64_t value, char* buffer) {
+    if (value < 0) {
+        buffer[0] = '-';
+        (void)u64toa(0ULL - static_cast<uint64_t>(value), buffer + 1);
+        return buffer;
+    }
+    return u64toa(static_cast<uint64_t>(value), buffer);
+}
+
 // ---- tokens and format wrappers ---------------------------------------------
 
 struct crlf_t {};
@@ -168,15 +230,29 @@ inline void print_one(S s, crlf_t) {
     print_one(s, '\n');
 }
 
+/// Integers in decimal. Up to 32 bits through ltoa/ultoa; a 64-bit one
+/// through its own explicit-width path, never through `long`, which is 32
+/// bits on every target but the host.
 template <ByteSink S, std::integral I>
 inline void print_one(S s, I value) {
-    char buffer[12];
-    if constexpr (std::is_signed_v<I>) {
-        ltoa(static_cast<long>(value), buffer, 10);
+    if constexpr (sizeof(I) > 4u) {
+        static_assert(sizeof(I) == 8u, "print: no integer wider than 64 bits");
+        char buffer[21];
+        if constexpr (std::is_signed_v<I>) {
+            (void)i64toa(static_cast<int64_t>(value), buffer);
+        } else {
+            (void)u64toa(static_cast<uint64_t>(value), buffer);
+        }
+        print_one(s, static_cast<const char *>(buffer));
     } else {
-        ultoa(static_cast<unsigned long>(value), buffer, 10);
+        char buffer[12];
+        if constexpr (std::is_signed_v<I>) {
+            ltoa(static_cast<long>(value), buffer, 10);
+        } else {
+            ultoa(static_cast<unsigned long>(value), buffer, 10);
+        }
+        print_one(s, static_cast<const char *>(buffer));
     }
-    print_one(s, static_cast<const char *>(buffer));
 }
 
 template <ByteSink S>

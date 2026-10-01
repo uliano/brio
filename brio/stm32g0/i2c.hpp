@@ -2133,8 +2133,17 @@ public:
         if ((S::flags() & I2C_ISR_RXNE) != 0u) {
             (void)S::data();
         }
-        if (S::pending() != 0u) {
-            S::interrupt(I2cInterrupt::transfer_complete | I2cInterrupt::error, false);
+        // WHAT A SWEEP CANNOT REACH IS TCIE'S, NEVER ERRIE'S. Each of the
+        // six conditions behind ERRIE has its own ICR bit (32.9.8), so an
+        // error still pending here set after this entry's pending() read,
+        // and the next entry clears it - BERR, ARLO and OVR at the top,
+        // the SMBus three in this sweep: left armed, ERRIE cannot storm.
+        // Disarmed, it would hide ARLO and BERR from every tenure after
+        // this one, because only init() arms it. TC and TCR are the flags
+        // with no ICR bit, and TCIE is the enable start() decides afresh
+        // for every tenure.
+        if ((S::pending() & ~I2cFlag::errors) != 0u) {
+            S::interrupt(I2cInterrupt::transfer_complete, false);
         }
         return false;
     }

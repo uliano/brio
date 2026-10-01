@@ -3,7 +3,8 @@
 Documents of record: AVR128DB28/32/48/64 data sheet DS40002247B
 (PORT chapter 18, I/O multiplexing chapter 3), errata DS80000915F
 (2.9.1 PD0 floating input on 28/32-pin; 2.2.4 VPORT stores after a
-store to >= 64 - Pin uses SBI/CBI, unaffected). Driver:
+store to >= 64 - Pin uses SBI/CBI and PinRef stores into the PORT's
+OUTSET/OUTCLR in the extended I/O space, so neither is exposed). Driver:
 `avrdx/pin.hpp`. Reference test: `test_avr_pin`.
 
 ## What the silicon does
@@ -67,7 +68,7 @@ Facts that matter to code:
 | `Pin<'A', 5>` | `output`/`input(pull)`, `set`/`clear`/`toggle`/`read`/`is_output` (VPORT, single cycle), `configure(cfg)` (the whole PINnCTRL in ONE store), the single-field RMW verbs `invert`/`pull`/`sense`, `input_enable(bool)` (the digital input buffer - a code of the ISC field, so it leaves an armed sense at INTDISABLE), `flag`/`clear_flag` (this pin's W1C bit), `pinctrl()`, `ref()` (runtime PinRef), `fully_async` (Px2/Px6), PwmChannel (max 1) |
 | `Port<'C'>` | the port's own registers: `in`/`dir_set`/`dir_clear`/`out_set`/`out_clear`/`out_toggle` (masks), `flags`/`clear_flags(mask)`, `take_flags` (ISR body of PORTx_PORT_vect: the fired mask, cleared), `slew_limit(bool)`/`slew_limit()`, `configure_mask(pins, cfg)` (the multi-pin engine), `regs()`/`vregs()` |
 | `PinSet<Pins...>` | up to 8 pins on ANY ports as one bit mask: `input(pull)`, `output`, `read`, `write`, `configure(cfg)` (grouped BY PORT at compile time: one mirrored PINCONFIG store plus one PINCTRLUPD per involved port - the set behaves like a single register), `port_mask<'C'>()` |
-| `PinRef` | the runtime descriptor (3 bytes): a pin inside a request event; null = no-op |
+| `PinRef` | the runtime descriptor (3 bytes): a pin inside a request event; `set`/`clear` are ONE store into the PORT's `OUTSET`/`OUTCLR` through the pointer (1 cycle; atomic against an ISR that moves another pin of the same port, where a read-modify-write of `OUT` would write that pin back), `valid()`; null = no-op |
 
 ## How to use it
 
@@ -101,7 +102,7 @@ brio::Pin<'D', 1>::configure({.sense = brio::PinSense::input_disable});
 
 ## Bench findings
 
-`test_avr_pin` (A5, 22 verdicts): every sense counts exactly (10
+`test_avr_pin` (A5, 27 verdicts): every sense counts exactly (10
 rising, 10 falling, 20 both, 0 with none, on self-driven edges 2 us
 apart); `level_low` is quiet while high, re-fires continuously while
 low (245 ISRs in a ~20 us window) and stops on the rising edge;
@@ -111,7 +112,12 @@ lands one cycle after the store; a pulled-up input reads 1;
 `input_disable` freezes IN at its last value and the buffer comes
 back live; the multi-pin engine writes one setting into three pins on
 two ports (PINnCTRL readbacks exact) and both ports interrupt; the
-Port mask verbs and the slew-limit bit read back as written.
+Port mask verbs and the slew-limit bit read back as written. A
+`PinRef` drives its pin both ways and a null one touches nothing; and
+an ISR's edge on PC7, placed by a `level_low` storm on PD3 at each of
+64 points across eight pairs of `PinRef` edges on PC6, is never undone
+- the same sweep over a read-modify-write of `OUT` through the pointer
+(the shape a VPORT descriptor compiles to) undoes it at 18 of the 64.
 
 ## Not covered yet
 

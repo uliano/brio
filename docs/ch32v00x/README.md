@@ -72,7 +72,9 @@ the non-standard extension is WCH's `xw` compressed set, which only
 their compiler emits. The project compiles with
 `-march=rv32ec_zmmul_xw -mabi=ilp32e` for the CH32V006 and
 `-march=rv32ec_xw` for the CH32V003, whose V2A core has no multiplier
-(`CH32V00X_ARCH` in the cache variables, derived from the part), and
+(derived from the part at every configure; the `CH32V00X_ARCH` cache
+entry is an override, empty by default, that a configure announces
+when it is set), and
 the reason for `xw` is the family's smallest part: `xw` is
 worth one to two per cent of every image - 72 to 516 bytes over the
 suites, measured - and on a 16 KB CH32V003 those bytes are the

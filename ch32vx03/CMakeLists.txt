@@ -73,11 +73,34 @@ ch32vx03_part_facts("${CH32VX03_MCU}"
     CH32VX03_PART_DEFINE CH32VX03_FLASH_KB CH32VX03_RAM_KB CH32VX03_BOARD
     CH32VX03_PART_ARCH CH32VX03_PART_ABI)
 
-# The part's own ISA and ABI are the defaults (the table's two last
-# columns); a cache entry still overrides them, for an experiment that
-# builds a V4F part without its FPU.
-set(CH32VX03_ARCH "${CH32VX03_PART_ARCH}" CACHE STRING "-march for this part: its full ISA under WCH's gcc (xw is theirs alone)")
-set(CH32VX03_ABI "${CH32VX03_PART_ABI}" CACHE STRING "-mabi for this part")
+# The part's own ISA and ABI (the table's two last columns) are DERIVED
+# at every configure, never cached: the two cache entries are OVERRIDES,
+# empty by default - for an experiment that builds a V4F part without
+# its FPU - so a changed CH32VX03_MCU on an existing cache follows the
+# part, and an override that is set wins and says so.
+# An entry equal to the derived value is no override, and is cleared
+# (which is what a cache written while these entries held the default
+# carries).
+set(CH32VX03_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA (cmake/ch32vx03-parts.cmake), derived at every configure")
+set(CH32VX03_ABI "" CACHE STRING "-mabi override; empty (the default) = the part's own ABI")
+if(CH32VX03_ARCH STREQUAL "${CH32VX03_PART_ARCH}")
+    set(CH32VX03_ARCH "" CACHE STRING "-march override; empty (the default) = the part's own ISA (cmake/ch32vx03-parts.cmake), derived at every configure" FORCE)
+endif()
+if(CH32VX03_ARCH STREQUAL "")
+    set(_vx03_arch "${CH32VX03_PART_ARCH}")
+else()
+    set(_vx03_arch "${CH32VX03_ARCH}")
+    message(STATUS "CH32VX03_ARCH override: -march=${_vx03_arch} (${CH32VX03_MCU}'s own is ${CH32VX03_PART_ARCH})")
+endif()
+if(CH32VX03_ABI STREQUAL "${CH32VX03_PART_ABI}")
+    set(CH32VX03_ABI "" CACHE STRING "-mabi override; empty (the default) = the part's own ABI" FORCE)
+endif()
+if(CH32VX03_ABI STREQUAL "")
+    set(_vx03_abi "${CH32VX03_PART_ABI}")
+else()
+    set(_vx03_abi "${CH32VX03_ABI}")
+    message(STATUS "CH32VX03_ABI override: -mabi=${_vx03_abi} (${CH32VX03_MCU}'s own is ${CH32VX03_PART_ABI})")
+endif()
 
 # --- The core's hardware prologue/epilogue (HPE): with it on, the crt
 #     sets INTSYSCR.HWSTKEN and every handler is declared with WCH's
@@ -97,8 +120,8 @@ else()
 endif()
 
 set(BRIO_COMMON_FLAGS
-    -march=${CH32VX03_ARCH}
-    -mabi=${CH32VX03_ABI}
+    -march=${_vx03_arch}
+    -mabi=${_vx03_abi}
     -D${CH32VX03_PART_DEFINE}
     ${CH32VX03_HPE_DEFINE}
     -Wall -Wextra -Werror

@@ -67,6 +67,14 @@ violates the order.
 TX stays the blocking push print: the drain side is an ISR (it
 preempts the loop, so the spin always progresses - a stall, not a
 deadlock), worst case ~2 ms at 460800, zero when the ring has room.
+Where the drain side is a DMA engine, nothing re-arms it once it has
+stopped - a block abandoned on a transfer error leaves it idle with
+the ring full - so every engined transport pumps its engine on a
+REFUSED `write_byte` too, and the spin stays a stall. (A plain
+transport needs no such pump: the push that filled the ring armed a
+level that cannot be missed. The PL011's transmit interrupt is a
+transition, so its transport pends the line on every `write_byte`,
+refused or not.)
 Measured cost of write_byte: ~45-50 cycles/byte with a guarded ring,
 under 10% of the 21.7 us wire time per byte; with the lock-free ring
 the hot path is 13 instructions vs 20 for a guarded one (no SREG

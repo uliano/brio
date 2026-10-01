@@ -1375,8 +1375,19 @@ struct Uart {
     // ---- byte transport (ByteSink / ByteSource) ---------------------------
 
     /// Queue one byte; false when the TX ring is full (print() spins).
+    /// Without an engine TXEIE is armed; with one the engine is pumped -
+    /// and a REFUSED byte pumps it too. print() answers false by trying
+    /// again for ever, and the ring is full exactly when nothing is
+    /// draining it: an engine left idle by a block dma_isr() abandoned
+    /// would make that spin a deadlock, where the TX policy promises a
+    /// stall (docs/design/serial.md). The plain transport needs no such
+    /// pump: the push that filled the ring armed TXEIE, a level that
+    /// cannot be missed.
     static bool write_byte(uint8_t b) {
         if (!m_tx.push(b)) {
+            if constexpr (has_tx_engine) {
+                pump_tx();
+            }
             return false;
         }
         if constexpr (has_tx_engine) {

@@ -89,7 +89,16 @@ DESCADDR sets CHSTATUS.FERR and suspends the channel, and every
 single-block descriptor this driver builds has DESCADDR = 0. So a
 harvest of a channel whose write-back is still the zeros `reset()` put
 there does not suspend anything at all: it answers "no beats done",
-which is both true and the only safe reply.
+which is both true and the only safe reply. The wait for SUSP is
+bounded by `harvest_spins` (16 turns) and runs MASKED, inside the
+critical section that covers the read: the block's interrupt dispatch
+acknowledges INTPEND by writing back the flags it saw, which clears
+the very SUSP the wait watches (bench findings), and no CHSTATUS bit
+says "suspended" - so the wait could leave the mask only behind a
+software latch in every DMAC image's dispatch. A wait that runs out
+refuses the reading, counts it in `suspend_timeouts()` and leaves the
+suspend command as issued: nothing resumes a channel that may not
+have stopped.
 
 **A TRIGGER IS AN EDGE, NOT A LEVEL - PER REQUEST SHAPE, AND THE SHAPE
 IS THE PERIPHERAL MODE'S.** A peripheral asserts its DMA request while
@@ -378,8 +387,8 @@ and the switch says so.
 - Throughput at 48 MHz: a 256-byte word-beat block in 971 cycles (20
   us, ~12 MB/s including setup); software-linked chains re-armed from
   the TCMPL handler run 804 cycles/block (~59700 blocks/s back to
-  back). A harvest measures ~525 cycles (~10 us), which is why its
-  pacing is the caller's policy.
+  back). A harvest measures ~700 cycles (~15 us, letter d's stopwatch
+  included), which is why its pacing is the caller's policy.
 - **Erratum 1.10.4 does not merely give a bad READING - it kills the
   TRANSFER**, and from outside it looks like a wedged serial port. The
   fingerprint, identical across three independent reproductions: a
@@ -423,7 +432,17 @@ and the switch says so.
   steal the SUSP flag the wait is watching - roughly one loss per
   70000 harvests under load, exactly rare enough to be mistaken for
   silicon. The whole suspend-read-resume sits in one critical
-  section (~10 us of masked interrupts per harvest).
+  section (~15 us of masked interrupts per harvest).
+- **A suspend lands at once or never.** With a budget of ZERO turns
+  the wait refused no reading in letters d and g, and in letter j only
+  on the churned channel erratum 1.10.4 corrupts (9 to 14 a run) -
+  which times out at 0xFFFF turns as well (17 a run): its SUSP never
+  comes. One turn measures 92 cycles at 48 MHz (54 counted at no wait
+  state), so the 16-turn budget is a margin of sixteen over every wait
+  that ended, and a harvest that gives up measures 2128 cycles around
+  the call (44 us), under one 1 ms tick at every rate down to 3 MHz.
+  Letter j times every hand harvest and verdicts that none, a
+  timed-out one included, masked as long as a tick.
 - A DMA buffer must be volatile in BOTH directions: gcc sinks a plain
   zeroing store past the transfer that is supposed to overwrite it,
   so the check reads pre-transfer values. The compiler cannot see a
