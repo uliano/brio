@@ -245,9 +245,11 @@ indexes the raw pointer, because a loan is a view and not a container.
 
 **In use today.** `LineReceived` lends the line buffer for one
 dispatch (mutable: in-place tokenization is the point). Bus requests
-copy the ~14-16-byte descriptor by value (read once by the bus AO; the
-request IS the arbitration token, its size is paid once in the bus
-queue) and lend the data buffers until `BusDone` - the borrowed
+travel by value - the request IS the arbitration token: a few tens of
+bytes of addresses, lengths and the select, copied once into the bus
+queue by `post()` and once more by the engine that keeps it, the
+arbiter reading it in place ([spi-bus.md](spi-bus.md)'s copy
+accounting) - and lend the data buffers until `BusDone` - the borrowed
 surface is the structurally necessary minimum. Nothing is ever
 chopped into several events: one event = one envelope, the cargo
 stays put.

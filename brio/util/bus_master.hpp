@@ -27,10 +27,14 @@
  *    copyable and carry a `ReplyTo<BusDone> reply` member. Buffer
  *    ownership travels with it: the requester must not touch the spans
  *    until its BusDone arrives (RTC makes this race-free).
- *  - Bus::start(req) -> bool: begin the transfer. FALSE = the engine
- *    runs on its ISR and the app's ISR glue posts TransferDone{status}
- *    to this AO when it ends (same pattern as the uart RxActivity
- *    edge). TRUE = the transaction COMPLETED SYNCHRONOUSLY inside
+ *  - Bus::start(req) -> bool: begin the transfer. The request is LENT
+ *    for the call: it lies in storage of this AO's (a queue slot, a
+ *    pending FIFO slot, the held copy) that may be written again once
+ *    the dispatch is over, so what the engine still needs after start()
+ *    returns, it copies. FALSE = the engine runs on its ISR and the
+ *    app's ISR glue posts TransferDone{status} to this AO when it ends
+ *    (same pattern as the uart RxActivity edge). TRUE = the
+ *    transaction COMPLETED SYNCHRONOUSLY inside
  *    start() - polled bulk transfers, degenerate empty requests, and a
  *    request the engine REFUSES without moving a byte: the reply is
  *    sent right away with whatever Bus::status() reports (bus_ok as a
@@ -89,11 +93,19 @@
  * variant alternatives, no timer, no states - byte-identical images,
  * the never_retries discipline again.
  *
- * The request event exceeds the 8-byte envelope guideline (a SPI
- * descriptor is ~16 bytes, an I2C one 9): a recorded, legal deviation -
- * the request IS the arbitration token, splitting it into a reference
- * would add an ownership protocol for zero RAM at queue depths this
- * small.
+ * The request event exceeds the 8-byte envelope guideline - two spans,
+ * a select, the bus's settings and the reply capsule: a recorded, legal
+ * deviation, because the request IS the arbitration token, and
+ * splitting it into a reference to the client's memory would hand every
+ * client an ownership protocol. What its size costs is paid per COPY,
+ * and the arbiter makes none of its own. A request that finds the bus
+ * idle is built by post() in this AO's queue slot (the kernel's copy,
+ * under the producers' mask) and handed to Bus::start() in that slot,
+ * where the engine takes whatever copy it keeps. One that finds the bus
+ * busy is copied once more, into the pending FIFO, and its turn hands
+ * that slot to start() by reference the same way. A retrying policy
+ * pays one copy more per transfer, the held request a retry starts
+ * again.
  *
  * The contract assumes a transaction that runs on interrupts and
  * completes later with a status only (buffers travel in the request);
@@ -493,18 +505,26 @@ private:
         }, e);
     }
 
-    /// Start r and keep draining the pending FIFO through synchronous
-    /// completions, each answered with what the engine reports. Returns
-    /// true when a transfer went asynchronous (its TransferDone will
-    /// arrive), false when everything finished.
-    static bool begin_chain(Request r) {
+    /// Start `first` and keep draining the pending FIFO through
+    /// synchronous completions, each answered with what the engine
+    /// reports. Returns true when a transfer went asynchronous (its
+    /// TransferDone will arrive), false when everything finished.
+    ///
+    /// Every request is read WHERE IT LIES - the first in the slot of
+    /// the event being dispatched (or a FIFO slot pending_pop() handed
+    /// over), the rest in the FIFO slots this loop pops - and copied by
+    /// nobody here: Bus::start() takes the engine's copy from the slot.
+    /// Nothing in the loop pushes, so a popped slot stays as it was
+    /// until the engine has taken what it keeps.
+    static bool begin_chain(const Request& first) {
+        const Request* r = &first;
         for (;;) {
             if constexpr (may_retry) {
-                held_ = r;              // the copy a retry would start again
+                held_ = *r;             // the copy a retry would start again
                 attempt_ = 0;           // attempts are counted per request
             }
-            active_reply_ = r.reply;
-            if (!Bus::start(r)) {
+            active_reply_ = r->reply;
+            if (!Bus::start(*r)) {
                 arm_timeout();
                 return true;
             }
@@ -512,7 +532,7 @@ private:
             if (pending_count_ == 0) {
                 return false;
             }
-            r = pending_pop();
+            r = &pending_pop();
         }
     }
 
@@ -547,8 +567,14 @@ private:
         return true;
     }
 
-    static Request pending_pop() {
-        const Request r = pending_[pending_head_];
+    /// The oldest waiting request, handed over IN ITS SLOT and not as a
+    /// copy. The pop frees the slot, and only pending_push() writes it
+    /// again - which only a later Request dispatch calls - so the
+    /// reference is good for the rest of this dispatch: long enough for
+    /// Bus::start() to take its copy, and for held_ where a retry keeps
+    /// one.
+    static const Request& pending_pop() {
+        const Request& r = pending_[pending_head_];
         if (++pending_head_ == pending_depth) {
             pending_head_ = 0;
         }

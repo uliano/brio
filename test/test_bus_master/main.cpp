@@ -1,9 +1,11 @@
 // Host tests for util/bus_master.hpp: the arbiter itself (FIFO order,
 // reject-when-full, the ReplyTo completion, both engine completion
 // styles - a synchronous one answered with what the engine's status()
-// reports, a failure included), the completion-policy hook (pass-through
-// by default, a retry ladder, the per-request attempt counter, a
-// synchronous failure delivered unjudged, and a retrying master
+// reports, a failure included - and a waiting request started from its
+// own FIFO slot across the ring's wrap), the completion-policy hook
+// (pass-through by default, a retry ladder, the per-request attempt
+// counter, the held copy a retry starts again once its slot is reused,
+// a synchronous failure delivered unjudged, and a retrying master
 // voting NOT-OK on a PrepareSleep), and the per-bus timeout (a transfer
 // that never answers is recovered and answered bus_timeout; both halves
 // of the race with the real completion staged deterministically on the
@@ -308,6 +310,34 @@ TEST_CASE("a full pending FIFO rejects immediately - never silently, never block
     CHECK(PlainEngine::started == std::vector<uint8_t>{1});
 }
 
+TEST_CASE("a waiting request reaches start() from its FIFO slot, across the ring's wrap") {
+    // The arbiter hands start() the pending slot itself, not a copy: a
+    // popped slot is written again only by a later push. Here the slot
+    // request 2 waited in is refilled by request 4 while 2 is on the
+    // wire, and the synchronous chain that follows pops the rest in
+    // order through the wrap.
+    reset_plain();
+    brio::post<Plain>(plain_req(1));      // in flight
+    brio::post<Plain>(plain_req(2));      // slot 0
+    brio::post<Plain>(plain_req(3));      // slot 1
+    pump(false);
+    brio::post<Plain>(TransferDone{bus_ok});
+    pump(false);                          // 2 popped from slot 0, on the wire
+    brio::post<Plain>(plain_req(4));      // slot 0 again
+    pump(false);
+    CHECK(PlainEngine::started == std::vector<uint8_t>{1, 2});
+
+    PlainEngine::synchronous = true;      // 3 and 4 finish inside start()
+    brio::post<Plain>(TransferDone{bus_ok});
+    pump(false);
+    CHECK(PlainEngine::started == std::vector<uint8_t>{1, 2, 3, 4});
+    CHECK(PlainClient::done == std::vector<uint8_t>{bus_ok, bus_ok, bus_ok, bus_ok});
+    brio::post<Plain>(PrepareSleep{SleepDepth::standby,
+                                   brio::reply_to<PlainClient, SleepVote>()});
+    pump(false);
+    CHECK(PlainClient::votes == std::vector<bool>{true});
+}
+
 TEST_CASE("a synchronous engine completes inside start() and drains the FIFO") {
     reset_plain();
     PlainEngine::synchronous = true;
@@ -408,6 +438,33 @@ TEST_CASE("a retry policy re-starts the SAME request and passes the final status
     CHECK(Retrying::attempt() == 0);
     CHECK(Policy2::asked == 3);
     CHECK(Policy2::last_attempt == 2);
+}
+
+TEST_CASE("a retry starts the held request again, not the FIFO slot it was popped from") {
+    // Request 2 is popped from FIFO slot 0 and goes out; request 6 then
+    // lands in that same slot. The retry of 2 must start 2: the held
+    // copy, which is why a retrying policy pays for one.
+    reset_retry();
+    for (uint8_t id = 1; id <= 5; ++id) {
+        brio::post<Retrying>(retry_req(id));   // 1 in flight, 2..5 fill the FIFO
+    }
+    pump(true);
+    brio::post<Retrying>(TransferDone{bus_ok});
+    pump(true);                                // 2 popped from slot 0
+    brio::post<Retrying>(retry_req(6));        // slot 0 again
+    pump(true);
+    brio::post<Retrying>(TransferDone{engine_fault});
+    pump(true);
+    CHECK(RetryEngine::started == std::vector<uint8_t>{1, 2, 2});
+    CHECK(Retrying::attempt() == 1);
+
+    for (int i = 0; i < 5; ++i) {
+        brio::post<Retrying>(TransferDone{bus_ok});
+        pump(true);
+    }
+    CHECK(RetryEngine::started == std::vector<uint8_t>{1, 2, 2, 3, 4, 5, 6});
+    CHECK(RetryClient::done == std::vector<uint8_t>(6, bus_ok));
+    CHECK(Retrying::rejected_count() == 0);
 }
 
 TEST_CASE("a success on a retry is passed straight through") {

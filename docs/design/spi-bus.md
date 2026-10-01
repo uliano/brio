@@ -94,9 +94,19 @@ never silent, never blocking. The AO is a real 2-state FSM
 (idle/busy); the request's `ReplyTo<SpiDone>` capsule is the return
 channel, so the AO never knows who its clients are.
 
-The request event (~16-byte descriptor) exceeds the 8-byte envelope
-guideline: a recorded, legal deviation - the request IS the
-arbitration token; the queues are per-AO, nobody else pays.
+The request event (two spans, a select, the bus's settings and the
+reply capsule) exceeds the 8-byte envelope guideline: a recorded,
+legal deviation - the request IS the arbitration token; the queues are
+per-AO, nobody else pays. Its size is paid per COPY, and the arbiter
+makes none of its own. A request that finds the bus idle is copied
+twice: by `post()` into the bus AO's queue slot (the kernel's copy,
+under the producers' mask) and by the engine's `start()` into its own
+descriptor, straight from that slot. One that finds the bus busy is
+copied once more, into the pending FIFO, and its turn hands that slot
+to `start()` by reference - the slot is written again only by a later
+push, so the engine has taken its copy long before. A retrying
+completion policy keeps one copy more, the request a retry starts
+again.
 
 ## The transaction descriptor (`SpiHost<n>::Request`)
 
