@@ -2518,10 +2518,9 @@ brio/                    the framework, one directory per stratum:
     nvic.hpp / ticker.hpp / delay.hpp / dwt.hpp  the device header + the
                            cortexm/ file: PRIMASK the one mask on a core that
                            has BASEPRI, SysTick at 1000 Hz, delay_us on VAL,
-                           the DWT's cycle counter on HCLK (stopped by a Stop;
-                           whether WFI's gated CPU clock stops it is not in the
-                           documents - measured by the benchmark app's control
-                           line)
+                           the DWT's cycle counter on HCLK (stopped by a Stop,
+                           counting through a Sleep whatever DBG_SLEEP holds -
+                           measured, no document says it)
     platform.hpp           Stm32f4Platform<TB>: WFI = Sleep, SLEEPDEEP never
                            written; BKPT; .noinit breadcrumb; atomic_width 4
     pwr.hpp                Pwr: the whole power controller - the APB1 gate,

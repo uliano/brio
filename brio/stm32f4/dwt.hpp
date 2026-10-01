@@ -12,19 +12,19 @@
  *  - IT COUNTS HCLK, 5.6 ns a count at 180 MHz and 10 ns at the F411's
  *    100; a difference of two reads stays exact for about 24 s at the
  *    family's ceiling.
- *  - SLEEP IS THE OPEN QUESTION, AND A PROBE ANSWERS IT FOR YOU. A WFI
- *    with SLEEPDEEP clear stops the CPU clock and keeps FCLK, the core's
- *    free-running clock (RM0390 6.2's clock tree: the CPU clock gated in
- *    "sleep or deepsleep", FCLK in "deepsleep" alone), and which of the
- *    two this implementation's counter runs on is stated in no document
- *    of the stratum's vendor list. DBGMCU_CR.DBG_SLEEP feeds HCLK through
- *    that sleep (33.16.1), and OpenOCD's stm32f4x.cfg writes it at every
- *    connection, the register surviving everything but a power-on reset
- *    (stm32f4/pwr.hpp, fact 6). Whether the count runs through a Sleep
- *    with DBG_SLEEP clear is NOT MEASURED on this family; a program that
- *    leans on it states the bit as it found it (Pwr::debug_in_sleep())
- *    and checks the count against a timebase that does run through Sleep
- *    (SysTick, the kernel tick: it is what ends the WFI).
+ *  - IT COUNTS THROUGH A SLEEP - MEASURED. A WFI with SLEEPDEEP clear
+ *    stops the CPU clock and keeps FCLK, the core's free-running clock
+ *    (RM0390 6.2's clock tree: the CPU clock gated in "sleep or
+ *    deepsleep", FCLK in "deepsleep" alone), and no document of the
+ *    stratum's vendor list says which of the two this implementation's
+ *    counter runs on. DBGMCU_CR.DBG_SLEEP feeds HCLK through that sleep
+ *    (33.16.1), and OpenOCD's stm32f4x.cfg writes it at every connection,
+ *    the register surviving everything but a power-on reset
+ *    (stm32f4/pwr.hpp, fact 6) - so the bit was CLEARED at run time on
+ *    the STM32F446RE and a hundred SysTick periods spent in WFI read
+ *    17999978 cycles against the 18000000 the tick says: the counter runs
+ *    through a Sleep whatever DBG_SLEEP holds (design/benchmark.md, the
+ *    idle-window control line). A span across a Sleep is a wall span.
  *  - STOP STOPS IT: every clock of the 1.2 V domain is off (5.3.5), so a
  *    span across a Stop reads the awake cycles alone.
  */

@@ -156,6 +156,9 @@ floor is busy cycles in one idle second.
 | SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 262 | 3.47 | 3.40 | 4453 (4097 SERCOM5 + ticks), 168 (111), 0.99 | 255 k, 0.53 % |
 | STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch on) | 62 | 118 | 218 | 3.69 | 3.35 | 4453 (4098 USART2 + 355 ticks), 109 (67), 1.00 | 209 k, 0.33 % |
 | CH32V203C8T6 (144 MHz PLL, zero-wait window) | 42 | 102 | 121 | 1.54 | 2.82 | 4452 (4097 USART1 + 355 ticks), 109 (67), 1.00 | 240 k, 0.17 % |
+| STM32F446RE (180 MHz PLL, 5 WS, ART on) | 1 | 27 | 133 | 2.15 | 2.79 | 4453 (4097 USART2 + 356 ticks), 71, 1.00 | 132 k, 0.07 % |
+| RP2350, Cortex-M33 (150 MHz PLL, XIP) | 3 | 18 | 156 | 1.65 | 2.04 | 474 388 (116 a byte: the PL011's storm), 36 a handler, 0.99 | 154 k, 0.10 % |
+| RP2350, Hazard3 (150 MHz PLL, XIP) | 3 | 22 | 70 | 1.39 | 2.03 | 391 786 (96 a byte), 33 a handler, 0.99 | 68 k, 0.045 % |
 
 What the rows say, and the two platform columns:
 
@@ -163,7 +166,14 @@ What the rows say, and the two platform columns:
   the retrospective review counted: the per-byte shape costs CPU, not
   time, at a console's rate. The SAM's and the G0's transports take one
   interrupt more than the bytes (an empty entry from an idle transmitter
-  on the SERCOM, a wasted pass after the first byte on the USART).
+  on the SERCOM, a wasted pass after the first byte on the USART). THE
+  PL011 IS THE EXCEPTION, AND THE NUMBER OF THE ROUND: on the RP2350 a
+  print of 4096 bytes takes 474 388 interrupts on the M33 and 391 786 on
+  Hazard3 - 116 and 96 a byte - because every `write_byte` the full ring
+  refuses still pends the line, and the handler finds the FIFO full and
+  re-arms it; the handlers hold 32 per cent of the core on the M33 for a
+  print the wire bounds. The review's "one interrupt per byte in front
+  of a 32-deep FIFO" was the quiet case; this is the loud one.
 - The runtime's copy and fill sit at 2.4 to 4.2 times the core's floor:
   avr-libc's byte loops on the AVR (7 and 5 cycles a byte against 3 and
   1), and on the M0+ parts the `-Os` shape of `rt/rt.cpp`'s loops - four
@@ -199,12 +209,13 @@ What the rows say, and the two platform columns:
 
 Implemented, not bench-verified:
 
-- The skeleton on the STM32F4, the RP2040, the RP2350 (both
-  architectures) and the CH32V006: the apps build for every board type
-  and their vectors read clean in the disassembly, their boards not
-  being on the desk; one run of each app's all-key fills their rows.
+- The skeleton on the RP2040 and the CH32V006: the apps build for every
+  board type and their vectors read clean in the disassembly, their
+  boards not being on the desk; one run of each app's all-key fills
+  their rows.
 - The instrument's two stated seams (a handler's entry and exit counted
   as idle, an interrupt between the idle call's return and the window's
-  close counted twice) are below its own cost on every family measured;
-  a ruler that is one load (the DWT, the RP2350's timer) would show
-  them, and has not run.
+  close counted twice) stay below its own cost on every family measured,
+  the one-load rulers (the DWT, the RP2350's timer) included: the M4's
+  idle turn is 133 busy cycles of which 28 the tick's handler, the rest
+  the loop's own turn - the seams are inside those, unsplit.

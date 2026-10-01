@@ -30,7 +30,8 @@ free-running count of processor cycles ARMv7-M and ARMv8-M main define
 and ARMv6-M has not, enabled by TRCENA then CYCCNTENA and only where
 each reads clear, because a probe may have set them and nothing
 promises it leaves them; never a write of the count; `now()` one load;
-refused by `static_assert` below the M3). It exists because brio's naming rule says a core stratum is
+refused by `static_assert` below the M3; on the STM32F4, measured, it
+counts through a WFI whatever DBG_SLEEP holds - `stm32f4/dwt.hpp`). It exists because brio's naming rule says a core stratum is
 factored at the SECOND ARM family: `samc21/` and `stm32g0/` carried
 these files as twins line for line - the first two until the STM32G0's
 bring-up, the third until the STM32G0's fillers were done - and every
@@ -110,14 +111,3 @@ directly.
 database (the oldest of the users), so the CMSIS symbols resolve; every
 other project that includes them compiles them with its own flags at
 build time.
-
-## Not covered yet
-
-Implemented, not bench-verified:
-
-- Whether the DWT's counter keeps counting through a WFI on the STM32F4,
-  where the sleep gates the CPU clock and keeps FCLK running and no
-  document on the vendor's list says which of the two the unit counts;
-  the benchmark app's idle-window control line, run with and without
-  DBG_SLEEP (a probe leaves it set), measures it - a counter that stopped
-  there would make every busy figure of that family wrong.
