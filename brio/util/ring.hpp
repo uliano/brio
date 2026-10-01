@@ -87,30 +87,23 @@ public:
     }
 
     /// Append one element; false (nothing written) when the ring is full.
-    bool push(const T& value) {
-        return guarded([&] {
-            const index_t head = head_;
-            const index_t next = static_cast<index_t>((head + 1) & mask);
-            if (next == load_other(tail_)) {
-                return false;
-            }
-            slots_[head] = value;
-            store_index(head_, next);
-            return true;
-        });
+    [[gnu::always_inline]] bool push(const T& value) {
+        if constexpr (lock_free) {
+            return push_body(value);
+        } else {
+            typename P::CriticalSection cs;
+            return push_body(value);
+        }
     }
 
     /// Remove and return the oldest element; nullopt when empty.
-    std::optional<T> pop() {
-        return guarded([&]() -> std::optional<T> {
-            const index_t tail = tail_;
-            if (tail == load_other(head_)) {
-                return std::nullopt;
-            }
-            const T value = slots_[tail];
-            store_index(tail_, static_cast<index_t>((tail + 1) & mask));
-            return value;
-        });
+    [[gnu::always_inline]] std::optional<T> pop() {
+        if constexpr (lock_free) {
+            return pop_body();
+        } else {
+            typename P::CriticalSection cs;
+            return pop_body();
+        }
     }
 
     // ---- bulk access: the contiguous run each side owns right now ---------
@@ -146,84 +139,62 @@ public:
     /// The contiguous run of elements ready to be read, starting at the
     /// tail. Empty when the ring is empty. Consumer side only.
     std::span<const T> read_span() const {
-        return guarded([&]() -> std::span<const T> {
-            const index_t tail = tail_;
-            const index_t head = load_other(head_);
-            if (tail == head) {
-                return {};
-            }
-            // Stop at head when the data does not wrap, at the end of
-            // the buffer when it does. THE WIDTH IS NAMED: `size` is one
-            // more than the largest index_t value at the two boundary
-            // sizes (256, 65536), so casting it down would turn the
-            // whole-buffer run into a zero-length one.
-            const uint32_t end = (head > tail) ? static_cast<uint32_t>(head) : size;
-            return {&slots_[tail], static_cast<size_t>(end - tail)};
-        });
+        if constexpr (lock_free) {
+            return read_span_body();
+        } else {
+            typename P::CriticalSection cs;
+            return read_span_body();
+        }
     }
 
     /// Release `n` elements the consumer has finished with, oldest
     /// first. Clamped to what is actually queued, so an over-long
     /// release cannot walk the tail past the head. Consumer side only.
     void consume(index_t n) {
-        guarded([&] {
-            const index_t tail = tail_;
-            const index_t available =
-                static_cast<index_t>((load_other(head_) - tail) & mask);
-            const index_t take = (n < available) ? n : available;
-            store_index(tail_, static_cast<index_t>((tail + take) & mask));
-        });
+        if constexpr (lock_free) {
+            consume_body(n);
+        } else {
+            typename P::CriticalSection cs;
+            consume_body(n);
+        }
     }
 
     /// The contiguous run of free slots the producer may fill, starting
     /// at the head. Empty when the ring is full. Producer side only.
     std::span<T> write_span() {
-        return guarded([&]() -> std::span<T> {
-            const index_t head = head_;
-            const index_t tail = load_other(tail_);
-            // 32-bit throughout, for the same reason read_span() names
-            // its width: at size 65536 the whole-buffer run does not fit
-            // in index_t.
-            uint32_t room;
-            if (tail > head) {
-                // The free run ends one slot short of the tail: that
-                // spare slot is what tells full from empty.
-                room = static_cast<uint32_t>(tail) - head - 1u;
-            } else {
-                // Up to the end of the buffer - and one short of it when
-                // the tail sits at zero, for the same reason.
-                room = size - head - (tail == 0u ? 1u : 0u);
-            }
-            if (room == 0u) {
-                return {};
-            }
-            return {&slots_[head], static_cast<size_t>(room)};
-        });
+        if constexpr (lock_free) {
+            return write_span_body();
+        } else {
+            typename P::CriticalSection cs;
+            return write_span_body();
+        }
     }
 
     /// Hand `n` freshly written elements to the consumer. Clamped to the
     /// free room, so an over-long publish cannot walk the head into the
     /// tail and make a full ring read as empty. Producer side only.
     void publish(index_t n) {
-        guarded([&] {
-            const index_t head = head_;
-            const index_t free_room =
-                static_cast<index_t>((load_other(tail_) - head - 1u) & mask);
-            const index_t give = (n < free_room) ? n : free_room;
-            store_index(head_, static_cast<index_t>((head + give) & mask));
-        });
+        if constexpr (lock_free) {
+            publish_body(n);
+        } else {
+            typename P::CriticalSection cs;
+            publish_body(n);
+        }
     }
 
     /// Elements currently queued (a snapshot; exact for the calling side's
     /// own view, conservative for the other).
-    index_t count() const {
-        return guarded([&] {
-            return static_cast<index_t>((load_other(head_) - load_other(tail_)) & mask);
-        });
+    [[gnu::always_inline]] index_t count() const {
+        if constexpr (lock_free) {
+            return count_body();
+        } else {
+            typename P::CriticalSection cs;
+            return count_body();
+        }
     }
 
-    bool empty() const { return count() == 0; }
-    bool full() const { return count() == capacity(); }
+    [[gnu::always_inline]] bool empty() const { return count() == 0; }
+    [[gnu::always_inline]] bool full() const { return count() == capacity(); }
 
     /// Reset to empty. NOT concurrent: both parties must be quiescent.
     void clear() {
@@ -238,15 +209,105 @@ private:
     index_t head_{0};  // written by the producer only
     index_t tail_{0};  // written by the consumer only
 
-    /// Run op lock-free or inside a critical section, per lock_free.
-    template <typename Op>
-    static decltype(auto) guarded(Op&& op) {
-        if constexpr (lock_free) {
-            return op();
-        } else {
-            typename P::CriticalSection cs;
-            return op();
+    // ---- the bodies: one per verb, run bare or under the guard ------------
+    //
+    // Each verb above picks its path with if constexpr and runs its body
+    // directly, so the lock-free verb IS its body and the guarded one is
+    // the same body inside P::CriticalSection. Always inline, and no
+    // lambda handed to a guard helper: at -Os gcc keeps such a lambda as
+    // a function of its own on the QingKe cores, its closure built on the
+    // stack at every call site - a call per byte on a print and in a
+    // receive interrupt for one computation of a few instructions.
+    //
+    // The ELEMENT verbs - push(), pop(), count() and the two predicates
+    // over it - are always inline themselves, because they sit on the
+    // per-byte paths: a transport's interrupt body and its blocking
+    // write. Left to -Os, gcc keeps pop() out of line as soon as it has
+    // two call sites (a transmit vector and a read_byte(), on the QingKe
+    // cores), and a call in an interrupt body makes it a non-leaf
+    // function, which saves every caller-saved register the callee may
+    // clobber - twenty f-registers more under ilp32f. Inline, each verb
+    // is a few loads, a compare and a store at its call site, about the
+    // size of the call it replaces. The span verbs are left to the
+    // compiler: they run once per run, and a call per run is the run's
+    // own price.
+
+    [[gnu::always_inline]] bool push_body(const T& value) {
+        const index_t head = head_;
+        const index_t next = static_cast<index_t>((head + 1) & mask);
+        if (next == load_other(tail_)) {
+            return false;
         }
+        slots_[head] = value;
+        store_index(head_, next);
+        return true;
+    }
+
+    [[gnu::always_inline]] std::optional<T> pop_body() {
+        const index_t tail = tail_;
+        if (tail == load_other(head_)) {
+            return std::nullopt;
+        }
+        const T value = slots_[tail];
+        store_index(tail_, static_cast<index_t>((tail + 1) & mask));
+        return value;
+    }
+
+    [[gnu::always_inline]] std::span<const T> read_span_body() const {
+        const index_t tail = tail_;
+        const index_t head = load_other(head_);
+        if (tail == head) {
+            return {};
+        }
+        // Stop at head when the data does not wrap, at the end of the
+        // buffer when it does. THE WIDTH IS NAMED: `size` is one more
+        // than the largest index_t value at the two boundary sizes (256,
+        // 65536), so casting it down would turn the whole-buffer run
+        // into a zero-length one.
+        const uint32_t end = (head > tail) ? static_cast<uint32_t>(head) : size;
+        return {&slots_[tail], static_cast<size_t>(end - tail)};
+    }
+
+    [[gnu::always_inline]] void consume_body(index_t n) {
+        const index_t tail = tail_;
+        const index_t available =
+            static_cast<index_t>((load_other(head_) - tail) & mask);
+        const index_t take = (n < available) ? n : available;
+        store_index(tail_, static_cast<index_t>((tail + take) & mask));
+    }
+
+    [[gnu::always_inline]] std::span<T> write_span_body() {
+        const index_t head = head_;
+        const index_t tail = load_other(tail_);
+        // 32-bit throughout, for the same reason read_span_body() names
+        // its width: at size 65536 the whole-buffer run does not fit in
+        // index_t.
+        uint32_t room;
+        if (tail > head) {
+            // The free run ends one slot short of the tail: that spare
+            // slot is what tells full from empty.
+            room = static_cast<uint32_t>(tail) - head - 1u;
+        } else {
+            // Up to the end of the buffer - and one short of it when the
+            // tail sits at zero, for the same reason.
+            room = size - head - (tail == 0u ? 1u : 0u);
+        }
+        if (room == 0u) {
+            return {};
+        }
+        return {&slots_[head], static_cast<size_t>(room)};
+    }
+
+    [[gnu::always_inline]] void publish_body(index_t n) {
+        const index_t head = head_;
+        const index_t free_room =
+            static_cast<index_t>((load_other(tail_) - head - 1u) & mask);
+        const index_t give = (n < free_room) ? n : free_room;
+        store_index(head_, static_cast<index_t>((head + give) & mask));
+    }
+
+    [[gnu::always_inline]] index_t count_body() const {
+        return static_cast<index_t>((load_other(head_) - load_other(tail_)) & mask);
     }
 
     /// Read the index owned by the other side: fresh (never hoisted or

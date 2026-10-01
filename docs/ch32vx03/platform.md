@@ -101,7 +101,8 @@ this document keeps in its place.
   f-registers saved by a handler that calls out, four by one that does
   a float multiply and a multiply-add inline, none by one that touches
   no f-register - and twenty by the USART transport's handler, which
-  calls its ring's functions.
+  calls the error counters' `bump()` on its error paths: one call
+  anywhere in the body is enough.
 
 ## Types and verbs
 

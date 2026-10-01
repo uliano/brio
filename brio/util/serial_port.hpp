@@ -36,14 +36,26 @@
  * naturally atomic between AOs (run-to-completion), revisited only for
  * slow links or hard latency budgets (docs/design/serial.md).
  *
- * The contract assumes a byte stream read one byte at a time with an
- * "RX went non-empty" edge from the ISR; a DMA/FIFO transport may
- * change it (docs/design/overview.md, "Authority of util/").
+ * THE DRAIN TAKES A RUN WHERE THE TRANSPORT LENDS ONE. A transport that
+ * offers its receive ring's consumer half in place (SpanSource below:
+ * read_span() and consume(n), the ring's own two verbs) is drained a run
+ * at a time - the bytes fed to the assembler where the ring holds them
+ * and released with one index store per run; any other ByteSource is
+ * drained a byte at a time through read_byte(). Either way the drain
+ * stops at the byte that completes the second line in flight and leaves
+ * every byte after it queued, so the two paths deliver the same lines in
+ * the same dispatches.
+ *
+ * The contract assumes a byte stream with an "RX went non-empty" edge
+ * from the ISR; a DMA/FIFO transport may change it (docs/design/
+ * overview.md, "Authority of util/").
  */
 
 #pragma once
 
 #include <stdint.h>
+#include <concepts>
+#include <span>
 
 #include "kernel/borrowed.hpp"
 #include "kernel/event_queue.hpp"
@@ -61,6 +73,19 @@ struct RxActivity {};
 /// only (mutable: in-place tokenization is the point of the loan).
 struct LineReceived {
     Borrowed<char, Lease::dispatch> line;
+};
+
+/// A source that lends its received bytes IN PLACE: read_span() is the
+/// contiguous run ready to be read - it never wraps, the rest of a
+/// wrapped ring coming on the next call - and consume(n) releases the
+/// first n of it, oldest first, clamped to what is queued. These are the
+/// consumer half of util/ring.hpp under the ring's own names, and the
+/// ring's rules hold: consumer side only, a run valid until the
+/// consumer's next operation on the source.
+template <typename S>
+concept SpanSource = requires(uint32_t n) {
+    { S::read_span() } -> std::convertible_to<std::span<const uint8_t>>;
+    S::consume(n);
 };
 
 template <typename Transport, Platform P, typename LineSink,
@@ -105,12 +130,41 @@ private:
     }
 
     static void drain() {
-        uint8_t byte;
-        while (in_flight_ < 2 && Transport::read_byte(byte)) {
-            if (char* line = assembler_[active_].push(byte)) {
-                post<LineSink>(LineReceived{Borrowed<char, Lease::dispatch>{line}});
-                ++in_flight_;
-                active_ = static_cast<uint8_t>(active_ ^ 1);
+        if constexpr (SpanSource<Transport>) {
+            // A run at a time: the bytes read where the ring holds them,
+            // then ONE release for every byte the assemblers took. The
+            // run cannot move under the loop - only this side's consume()
+            // frees its slots - and a line posted from it points into an
+            // assembler, never into the ring.
+            while (in_flight_ < 2) {
+                const std::span<const uint8_t> run = Transport::read_span();
+                if (run.empty()) {
+                    break;
+                }
+                const uint8_t* const first = run.data();
+                const uint8_t* const end = first + run.size();
+                const uint8_t* next = first;
+                while (next != end && in_flight_ < 2) {
+                    // The active assembler stands until a line completes,
+                    // so the inner loop holds the byte, the assembler and
+                    // the end of the run, and nothing else.
+                    LineAssembler<max_line>& assembler = assembler_[active_];
+                    char* line;
+                    do {
+                        line = assembler.push(*next++);
+                    } while (line == nullptr && next != end);
+                    if (line != nullptr) {
+                        deliver(line);
+                    }
+                }
+                Transport::consume(static_cast<uint32_t>(next - first));
+            }
+        } else {
+            uint8_t byte;
+            while (in_flight_ < 2 && Transport::read_byte(byte)) {
+                if (char* line = assembler_[active_].push(byte)) {
+                    deliver(line);
+                }
             }
         }
         if (in_flight_ >= 2) {
@@ -118,6 +172,13 @@ private:
             // reschedule ourselves AFTER the sink has consumed.
             post<SerialPort>(RxActivity{});
         }
+    }
+
+    /// A completed line to the sink; the other buffer takes over.
+    [[gnu::always_inline]] static void deliver(char* line) {
+        post<LineSink>(LineReceived{Borrowed<char, Lease::dispatch>{line}});
+        ++in_flight_;
+        active_ = static_cast<uint8_t>(active_ ^ 1);
     }
 
     static inline LineAssembler<max_line> assembler_[2]{};

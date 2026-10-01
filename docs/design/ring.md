@@ -72,7 +72,6 @@ the one constant it reads and therefore the path a given size takes.
 | ch32v00x | 4 | the same - a 32-bit index is one access on this core too |
 | ch32vx03 | 4 | the same on the bigger QingKe cores, the V4B and the V4F alike (`ch32vx03/platform.hpp`), whose guard is a `csrrci` on mstatus.MIE |
 | ch32x035 | 4 | the same on the QingKe V4C (`ch32x035/platform.hpp`), whose guard is a `csrrci` on mstatus.MIE |
-  
 | rp2040 | 4 | the same - but the guard is PRIMASK, which is PER CORE, so a ring shared BETWEEN the two cores is `util/inbox.hpp`'s and not this one ([kernel.md](kernel.md), section 12) |
 | rp2350 | 4 | the same, whichever of this chip's two processor architectures the image is built for - the guard is PRIMASK on the Cortex-M33 half and `mstatus.MIE` on the Hazard3 one, and PER CORE in both spellings, so a ring shared BETWEEN the cores is `util/inbox.hpp`'s and not this one |
 | stm32f4 | 4 | the same |
@@ -82,6 +81,35 @@ The extra template parameter is the honest price, and it is the same
 price `EventQueue`, `SerialPort`, `SpiBus` and `Tenuto` already pay:
 the app names its platform once (`using P = AvrPlatform;`) and every
 service reads it from there.
+
+### What a verb compiles to
+
+Each verb picks its path with `if constexpr` and runs its body in
+place: the lock-free verb IS its body - its own index loaded, the other
+side's read fresh, a compare, the slot, a store behind a fence - and
+the guarded verb is the same body inside `P::CriticalSection`. No lambda
+is handed to a guard helper: at `-Os` gcc keeps such a lambda as a
+function of its own on the QingKe cores, its closure built on the stack
+at every call.
+
+The ELEMENT verbs - `push`, `pop`, `count` and `empty`/`full` over it -
+are `always_inline` themselves, because they sit on the per-byte paths:
+a transport's interrupt body, its blocking write, a drain loop. Left to
+`-Os`, gcc keeps a verb out of line as soon as the ring's type has two
+call sites for it - `pop` in a transmit vector and in `read_byte()` on
+the AVR and the QingKe cores, `empty` at the two places the PL011's
+vector asks it on the RP2350 - and one call in an interrupt body makes
+it a non-leaf function that saves every register a callee may clobber:
+sixteen on the AVR's DRE vector where the inline verb leaves six, the
+twenty f-registers on top under the CH32V303's ilp32f. Inline, a verb
+is about the size of the call it replaces - a few tens of bytes in most
+images, up to about two hundred in a suite with many call sites, in
+either direction - and no per-byte path calls into the ring. On the
+CH32V203C8T6 a transmitted byte's handler body is 31 instructions with
+no call, 84 cycles an interrupt between the bench's stamps
+([benchmark.md](benchmark.md), letter p). The span verbs are left to
+the compiler: they run once per run, and a call per run is the run's
+own price.
 
 ## API and rules
 
@@ -144,8 +172,14 @@ whole-buffer span at the 65536-slot boundary where the index-width
 trap lives. The first hardware consumer is the SAM C21 Uart's DMA TX
 engine (`test_samc_dma` at the bench).
 
-## Measured on the uart driver (-Os, avr-gcc 16.2)
+## Measured on the AVR's uart driver (-Os, avr-gcc 16.2)
 
-Lock-free vs guarded ring: `write_blocking` (print's byte path) 13
-vs 20 instructions (no SREG save / cli / restore); RXC ISR 39 vs 41,
-DRE ISR 36 vs 37; 22 bytes of flash; RAM identical.
+The console's USART2 at its default rings (64/256, 8-bit indices: the
+lock-free path), against the same image with the guard forced on at
+the same sizes, so that the guard is the only difference:
+`write_blocking` (print's byte path) 15 instructions against 23 (no
+SREG save / cli / restore); the DRE vector 36 against 50 and the RXC
+vector 83 against 113, prologue and epilogue included (the DRE vector
+saves six registers lock-free and seven guarded; the RXC vector's
+sixteen are the kernel's post on the empty -> non-empty edge); 156
+bytes of flash; RAM identical.
