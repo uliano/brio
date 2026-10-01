@@ -219,13 +219,17 @@ public:
     static uint32_t cycles() {
         const uint32_t period = SysTick->LOAD + 1u;
         for (;;) {
-            const uint32_t t0 = read_shared(m_ticks);
-            const bool p0 = (SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0u;
-            const uint32_t val = SysTick->VAL;
-            const bool p1 = (SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0u;
-            const uint32_t t1 = read_shared(m_ticks);
-            if (const auto c = ticker_cycles(t0, p0, period - 1u - val, p1, t1, period)) {
-                return *c;
+            // A braced list is evaluated in its written order, so these
+            // are the five reads in util/cycle_count.hpp's order.
+            const TickerSample s{
+                .t0 = read_shared(m_ticks),
+                .p0 = (SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0u,
+                .position = period - 1u - SysTick->VAL,
+                .p1 = (SCB->ICSR & SCB_ICSR_PENDSTSET_Msk) != 0u,
+                .t1 = read_shared(m_ticks),
+            };
+            if (ticker_consistent(s)) {
+                return ticker_compose(s, period);
             }
         }
     }

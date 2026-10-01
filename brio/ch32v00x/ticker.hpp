@@ -186,13 +186,17 @@ public:
     static uint32_t cycles() {
         const uint32_t period = stk()->CMP + 1u;
         for (;;) {
-            const uint32_t t0 = read_shared(m_ticks);
-            const bool p0 = (stk()->SR & stk_cntif) != 0u;
-            const uint32_t position = stk()->CNT;
-            const bool p1 = (stk()->SR & stk_cntif) != 0u;
-            const uint32_t t1 = read_shared(m_ticks);
-            if (const auto c = ticker_cycles(t0, p0, position, p1, t1, period)) {
-                return *c;
+            // A braced list is evaluated in its written order, so these
+            // are the five reads in util/cycle_count.hpp's order.
+            const TickerSample s{
+                .t0 = read_shared(m_ticks),
+                .p0 = (stk()->SR & stk_cntif) != 0u,
+                .position = stk()->CNT,
+                .p1 = (stk()->SR & stk_cntif) != 0u,
+                .t1 = read_shared(m_ticks),
+            };
+            if (ticker_consistent(s)) {
+                return ticker_compose(s, period);
             }
         }
     }

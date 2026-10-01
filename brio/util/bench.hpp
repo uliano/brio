@@ -53,7 +53,9 @@
  *
  * THE COST OF THE INSTRUMENT. A stamp pair is two ruler reads and the
  * arithmetic (SysTick's cycles() is five register reads and a compose,
- * some 30 to 40 cycles on an M0+), and an idle window costs the same:
+ * some 35 Thumb instructions - 60 to 75 cycles on an M0+ fetching from a
+ * flash behind two wait states, measured), and an idle window costs the
+ * same:
  * the bench app's letter r measures both and prints them once per run,
  * and every bench line carries RAW numbers. Two seams are stated rather
  * than closed: the latency of entering and leaving the handler (a few

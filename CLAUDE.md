@@ -1271,13 +1271,17 @@ brio/                    the framework, one directory per stratum:
                            no code
     clock.hpp              ClockUser concept, clock_hz(clock), clock_follows:
                            the target-independent clock contracts
-    cycle_count.hpp        ticker_cycles(): a timebase's cycle count composed
-                           from the tick count, the counter's position and its
-                           PENDING flag - right in the window between the
-                           counter's restart and the handler, where tick x
-                           period + position reads a period low; the one
-                           composition every ticker's cycles() hands its reads
-                           to (host-tested cycle by cycle, test_cycle_count)
+    cycle_count.hpp        TickerSample + ticker_consistent() + ticker_compose():
+                           a timebase's cycle count composed from the tick
+                           count, the counter's position and its PENDING flag -
+                           right in the window between the counter's restart
+                           and the handler, where tick x period + position
+                           reads a period low; the test and the composition
+                           every ticker's cycles() loops over its five reads
+                           with - two always-inline functions and no optional,
+                           because the optional's round trip through the stack
+                           was a third of a read on the QingKe cores (host-
+                           tested cycle by cycle, test_cycle_count)
     power.hpp              the power model: SleepDepth ladder, SleepSite
                            concept (arm only - the kernel loop's idle path
                            still does the sleeping), PowerManager AO with
