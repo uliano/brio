@@ -68,14 +68,16 @@ void pl011_transport_verbs() {
     (void)Plain::init(clock, 9600,
                       {.bits = UartBits::seven, .parity = UartParity::even, .stop_bits = 2});
     (void)Plain::isr();
+    static_assert(BulkSink<Plain> && SpanSource<Plain>);
     (void)Plain::write_byte(0x55);
     uint8_t b = 0;
     (void)Plain::read_byte(b);
     const uint8_t buf[4] = {1, 2, 3, 4};
-    (void)Plain::write(buf, 4);
     (void)Plain::write_bulk(buf);
     uint8_t out[8];
     (void)Plain::read_bulk(out);
+    (void)Plain::read_span();
+    Plain::consume(1);
     (void)Plain::rx_pending();
     (void)Plain::tx_idle();
     (void)Plain::rx_overruns();

@@ -189,10 +189,12 @@ counter in `default_handler` and the interrupt number in mcause.
   TWENTY of them as soon as the handler calls a function it cannot see
   into. Measured on the CH32V303VCT6: a round trip of 56 cycles with no
   f-register, 67 with a float multiply-add in the body, 101 for a
-  handler that calls out - and the USART transport's own handler, which
-  calls the error counters' `bump()` on its error paths, carries the
-  twenty saves in the platform suite's image for that part. A handler
-  that must stay cheap there stays a leaf, or its callees inline.
+  handler that calls out. A handler that must stay cheap there stays a
+  leaf, or its callees inline: the USART transport's own handler is a
+  leaf with every ring verb and the error counters' `bump()` inlined,
+  and saves no f-register - in the platform suite's image and the bench
+  app's for that part, counted - where a console's, whose receive edge
+  calls the kernel's `post`, still saves all twenty.
 - **The global mask has no shadow; a line's own disable does.** The
   manual's V2.5 revision adds a note asking for a `fence.i` after a
   mask. Measured on the CH32V303VCT6 with a line pended by hand and

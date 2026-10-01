@@ -129,7 +129,7 @@ beyond the console:
 - `m` - `memcpy` and `memset` at the four sizes: the runtime
   ([runtime.md](runtime.md)) against the core's own load/store floor.
 - `p` - a print of the four sizes through the console transport at the
-  console's rate: the per-byte path every family pays
+  console's rate: the path every family's print takes, a run at a time
   ([serial.md](serial.md)).
 - `t` - the tick's floor: a second of idle with nothing to do, the tick
   handler and the loop's turnaround being all that is busy.
@@ -153,9 +153,9 @@ floor is busy cycles in one idle second.
 | family (board, clock) | ruler | stamp | window | memcpy 4096 x | memset 4096 x | print 4096: irq, isr, x | tick floor |
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz crystal) | 78 | 217 | 355 | 2.36 | 5.02 | 4463 (4096 DRE + 367 ticks), 130 (57), 0.99 | 365 k, 1.52 % |
-| SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 257 | 1.43 | 1.63 | 4453 (4097 SERCOM5 + ticks), 168 (111), 0.99 | 250 k, 0.52 % |
-| STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch and the FIFO on) | 62 | 118 | 218 | 1.41 | 1.58 | 871 (515 USART2 refills + 356 ticks), 211 a refill of up to eight = 42 a character, 1.00 | 204 k, 0.32 % |
-| CH32V203C8T6 (144 MHz PLL, zero-wait window) | 32 | 79 | 94 | 1.53 | 1.81 | 4453 (4097 USART1 + 356 ticks), 74 (42), 1.00 | 186 k, 0.13 % |
+| SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 259 | 1.43 | 1.63 | 4452 (4096 SERCOM5 + ticks), 168 (111), 0.99 | 250 k, 0.52 % |
+| STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch and the FIFO on) | 62 | 118 | 213 | 1.41 | 1.58 | 869 (513 USART2 refills + 356 ticks), 205 a refill of up to eight = 41 a character, 1.00 | 207 k, 0.32 % |
+| CH32V203C8T6 (144 MHz PLL, zero-wait window) | 32 | 79 | 94 | 1.53 | 1.81 | 4453 (4097 USART1 + 356 ticks), 73 (41), 1.00 | 190 k, 0.13 % |
 | STM32F446RE (180 MHz PLL, 5 WS, ART on) | 1 | 27 | 133 | 1.37 | 1.50 | 4453 (4097 USART2 + 356 ticks), 71, 1.00 | 132 k, 0.07 % |
 | RP2350, Cortex-M33 (150 MHz PLL, XIP) | 3 | 18 | 156 | 1.12 | 1.24 | 501 (146 FIFO refills of 28 + 355 ticks), 417 a refill = 15 a byte, 0.99 | 154 k, 0.10 % |
 | RP2350, Hazard3 (150 MHz PLL, XIP) | 3 | 22 | 70 | 1.39 | 1.53 | 501 (146 refills + ticks), 477 a refill = 17 a byte, 0.99 | 69 k, 0.045 % |

@@ -95,6 +95,7 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+#include <span>
 
 #include "ch32vx03/clock.hpp"
 #include "ch32vx03/dma.hpp"
@@ -918,7 +919,7 @@ void tg_engines() {
     // with the board bare.
     static const uint8_t message[] = "the channel is the request";
     constexpr uint16_t length = sizeof(message) - 1u;
-    Loop::write(message, length);
+    (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     Stopwatch w;
     while (!Loop::tx_idle() && w.us() < 20'000UL) {
     }
@@ -961,7 +962,7 @@ void tg_engines() {
     // nothing is published until it is asked - and the first call is
     // also what re-arms the run abandon() has just thrown away.
     (void)Loop::harvest();
-    Loop::write(message, length);
+    (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     uint16_t got = 0;
     uint8_t seen[64] = {};
     Stopwatch r;
@@ -1637,7 +1638,7 @@ void tn_dma2_uart4() {
         static const uint8_t forth_msg[] = "one controller out, the other one in";
         constexpr uint16_t forth_len = sizeof(forth_msg) - 1u;
         (void)Port4::harvest();
-        Loop::write(forth_msg, forth_len);
+        (void)Loop::write_bulk(std::span<const uint8_t>(forth_msg, forth_len));
         uint8_t seen[64] = {};
         uint16_t got = 0;
         Stopwatch w;
@@ -1658,7 +1659,7 @@ void tn_dma2_uart4() {
         static const uint8_t back_msg[] = "and back the other way";
         constexpr uint16_t back_len = sizeof(back_msg) - 1u;
         (void)Loop::harvest();
-        Port4::write(back_msg, back_len);
+        (void)Port4::write_bulk(std::span<const uint8_t>(back_msg, back_len));
         got = 0;
         Stopwatch r;
         while (got < back_len && r.us() < 50'000UL) {

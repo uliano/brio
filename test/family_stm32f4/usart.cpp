@@ -77,6 +77,7 @@ constexpr UartOptions flow{.rts = true, .cts = true,
 using Modem = Uart<1, pins1, 64, 256, NoDmaEngine, NoDmaEngine, flow>;
 
 static_assert(ByteTransport<Serial1> && ByteTransport<Serial6> && ByteTransport<OneWire>);
+static_assert(BulkSink<Serial1> && SpanSource<Serial1>);
 static_assert(Serial1::kernel_hz<SysClock>() == 16'000'000);
 static_assert(Serial1::can_baud(16'000'000u, 115'200u) && !Serial1::can_baud(1'000'000u, 115'200u));
 static_assert(Serial6::divisor_for(16'000'000u, 921'600u).has_value());   // over8 reaches it
@@ -94,10 +95,11 @@ void task_verbs() {
     uint8_t b = 0;
     (void)Serial1::read_byte(b);
     const uint8_t buf[4] = {1, 2, 3, 4};
-    (void)Serial1::write(buf, 4);
     (void)Serial1::write_bulk(std::span<const uint8_t>{buf});
     uint8_t dst[8];
     (void)Serial1::read_bulk(std::span<uint8_t>{dst});
+    (void)Serial1::read_span();
+    Serial1::consume(1);
     (void)Serial1::rx_pending();
     (void)Serial1::tx_idle();
     (void)Serial1::rx_overruns();

@@ -44,9 +44,12 @@ void usb_verbs() {
     (void)Device::resumes();
     (void)Device::last_request();
     uint8_t b = 0;
+    static_assert(BulkSink<Cdc> && SpanSource<Cdc>);
     (void)Cdc::write_byte('a');
     (void)Cdc::read_byte(b);
-    (void)Cdc::write(&b, 1);
+    (void)Cdc::write_bulk(std::span<const uint8_t>(&b, 1));
+    (void)Cdc::read_span();
+    Cdc::consume(1);
     (void)Cdc::tx_idle();
     (void)Cdc::dtr();
     (void)Cdc::rts();

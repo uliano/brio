@@ -71,8 +71,8 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine, RxEngine>` -
   the task, every target's Uart surface: `init(clock, baud, format)`,
   `isr()` (true on the receive ring's empty-to-non-empty edge),
-  `write_byte`, `read_byte`, `write`, `write_bulk`, `read_bulk`,
-  `rx_pending`, `tx_idle`, `rebase(hz)`, `set_baud(hz, baud)`,
+  `write_byte`, `write_bulk`, `read_byte`, `read_bulk`, `read_span`
+  and `consume` (the receive run in place), `rx_pending`, `tx_idle`, `rebase(hz)`, `set_baud(hz, baud)`,
   `set_format(format)`, `loopback(on)` (each under the running port,
   after a drain), `min_hz_for`, `can_baud`, `actual_baud(hz)`,
   `release()`; the counters `rx_overruns` (ring), `frame_errors`,

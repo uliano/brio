@@ -100,8 +100,9 @@ this document keeps in its place.
   Counted in the platform suite's image for the CH32V303VC: twenty
   f-registers saved by a handler that calls out, four by one that does
   a float multiply and a multiply-add inline, none by one that touches
-  no f-register - and twenty by the USART transport's handler, which
-  calls the error counters' `bump()` on its error paths: one call
+  no f-register - and none by the USART transport's handler, whose
+  ring verbs and error counters are inlined, while a console's, whose
+  receive edge calls the kernel's `post`, saves all twenty: one call
   anywhere in the body is enough.
 
 ## Types and verbs

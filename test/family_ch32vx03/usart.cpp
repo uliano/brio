@@ -132,7 +132,7 @@ static_assert(!smartcard_valid(SmartcardConfig{.clock_prescaler = 32}));
 static_assert(!smartcard_valid(SmartcardConfig{.clock_prescaler = 0}));
 
 // The transport is a ByteTransport for util's services.
-static_assert(ByteSink<Serial> && ByteSource<Serial>);
+static_assert(ByteSink<Serial> && ByteSource<Serial> && BulkSink<Serial> && SpanSource<Serial>);
 
 void usart_resource_verbs() {
     Console::bus_clock(true);
@@ -233,9 +233,11 @@ void uart_task_verbs() {
     (void)Flow::init(clock, 9600);
     (void)Serial::write_byte('x');
     static const uint8_t greeting[2] = {'h', 'i'};
-    (void)Serial::write(greeting, 2);
+    (void)Serial::write_bulk(greeting);
     uint8_t got = 0;
     (void)Serial::read_byte(got);
+    (void)Serial::read_span();
+    Serial::consume(1);
     (void)Serial::rx_pending();
     (void)Serial::tx_idle();
     (void)Serial::baud();

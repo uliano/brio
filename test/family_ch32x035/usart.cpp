@@ -38,7 +38,7 @@ static_assert(usart_column_on_debug_port(3, 1) && usart_column_on_debug_port(4, 
 static_assert(!usart_column_on_debug_port(2, 0));
 
 using Serial = Uart<2, P>;
-static_assert(ByteTransport<Serial>);
+static_assert(ByteTransport<Serial> && BulkSink<Serial> && SpanSource<Serial>);
 static_assert(Serial::pads.tx == Pad{'A', 2} && Serial::pads.rx == Pad{'A', 3});
 
 template <uint8_t n>
@@ -136,7 +136,9 @@ void transport_verbs() {
     uint8_t b = 0;
     (void)Serial::read_byte(b);
     static const uint8_t bytes[3] = {1, 2, 3};
-    (void)Serial::write(bytes, 3);
+    (void)Serial::write_bulk(bytes);
+    (void)Serial::read_span();
+    Serial::consume(1);
     (void)Serial::tx_idle();
     (void)Serial::rx_pending();
     (void)Serial::baud();

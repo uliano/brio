@@ -161,8 +161,10 @@ probe's port is alive; otherwise it opens the gate, writes the column
 if it is not the reset one, hands TX to the peripheral before the enable
 and leaves RX a floating input, configures the frame and the divisor,
 and arms RXNE and the vector. Then: `isr()` (the vector's whole body,
-true on the edge from an empty receive ring), `write_byte`, `read_byte`,
-`write(buffer, len)`, `tx_idle()`, `rx_pending()`; the counters
+true on the edge from an empty receive ring), `write_byte` and
+`write_bulk` (a run: as many as fit, TXEIE armed once), `read_byte` and
+`read_span`/`consume` (the receive run in place), `tx_idle()`,
+`rx_pending()`; the counters
 `rx_overruns`, `hw_overruns`, `frame_errors`, `noise_errors`,
 `parity_errors` (saturating) and `clear_errors()`; `baud()`,
 `actual_baud(hclk)`, `divisor_for`, `min_hz_for`, `can_baud`;
@@ -282,6 +284,11 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The run verbs**, `write_bulk()` and `read_span()`/`consume()`:
+  compiled for the seven parts and counted in the release listing, not
+  run on the board - every suite's print and the console's line drain
+  take them, so one run of `test_x035_usart` and the console would
+  measure them.
 - **Half a stop bit**: STOP = 01 is written by `stop_bits()` and
   `configure()` and by no letter - letter `b` takes the other three
   codes, and a fifth case there would measure it.

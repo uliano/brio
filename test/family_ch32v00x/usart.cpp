@@ -55,6 +55,7 @@ static_assert(Serial::divisor_for(48'000'000, 4'000'000) == 12); // below 16: in
 static_assert(Serial::divisor_for(48'000'000, 0) == 0);
 
 static_assert(ByteSink<Serial> && ByteSource<Serial> && ByteTransport<Serial>);
+static_assert(BulkSink<Serial> && SpanSource<Serial>);
 static_assert(ByteTransport<Wide>);
 
 // The chapter's vocabulary, pinned.
@@ -97,6 +98,10 @@ void usart_verbs() {
     (void)Wide::init(clock, 9600);
     (void)Serial::isr();
     (void)Serial::write_byte(0x55);
+    static const uint8_t run[3] = {1, 2, 3};
+    (void)Serial::write_bulk(run);
+    (void)Serial::read_span();
+    Serial::consume(1);
     uint8_t b;
     (void)Serial::read_byte(b);
     (void)Serial::rx_pending();

@@ -346,6 +346,35 @@ TEST_CASE("bytes from the host land in the receive ring, and the endpoint is re-
     CHECK(Cdc::rx_bytes() == 261u);
 }
 
+TEST_CASE("the receive ring lent in place: consume() frees the room and re-arms the endpoint as read_byte() does") {
+    static_assert(SpanSource<Cdc> && BulkSink<Cdc>);
+    enumerate();
+    std::vector<uint8_t> packet(64);
+    for (uint32_t i = 0; i < 64u; ++i) {
+        packet[i] = static_cast<uint8_t>(0x40u + i);
+    }
+    for (int k = 0; k < 3; ++k) {
+        REQUIRE(SimUsb::host_out(2, packet));
+        Device::isr();
+    }
+    CHECK(!SimUsb::out_armed(2));   // 192 held of 255: no packet's room
+    std::span<const uint8_t> run = Cdc::read_span();
+    REQUIRE(run.size() == 192u);
+    CHECK(run[0] == 0x40u);
+    CHECK(run[191] == 0x7Fu);
+    Cdc::consume(0);   // nothing released, nothing armed
+    CHECK(!SimUsb::out_armed(2));
+    Cdc::consume(1);   // one byte makes a packet fit again
+    CHECK(SimUsb::out_armed(2));
+    run = Cdc::read_span();
+    REQUIRE(run.size() == 191u);
+    CHECK(run[0] == 0x41u);
+    Cdc::consume(1000);   // clamped to what is queued
+    CHECK(Cdc::read_span().empty());
+    uint8_t b = 0;
+    CHECK(!Cdc::read_byte(b));
+}
+
 TEST_CASE("bytes written go out as packets: the first kicks the endpoint, completions drain the ring, a full run ends with a zero-length packet") {
     enumerate();
     CHECK(Cdc::tx_idle());
@@ -371,7 +400,7 @@ TEST_CASE("bytes written go out as packets: the first kicks the endpoint, comple
     for (uint32_t i = 0; i < 100u; ++i) {
         run[i] = static_cast<uint8_t>(i);
     }
-    CHECK(Cdc::write(run.data(), 64) == 64u);
+    CHECK(Cdc::write_bulk(std::span<const uint8_t>(run.data(), 64)) == 64u);
     p = SimUsb::host_in(2);
     REQUIRE(p.has_value());
     CHECK(p->size() == 64u);
@@ -384,7 +413,7 @@ TEST_CASE("bytes written go out as packets: the first kicks the endpoint, comple
     CHECK(Cdc::tx_bytes() == 66u);
 
     // 100 bytes: 64 + 36, no empty packet.
-    CHECK(Cdc::write(run.data(), 100) == 100u);
+    CHECK(Cdc::write_bulk(std::span<const uint8_t>(run.data(), 100)) == 100u);
     p = SimUsb::host_in(2);
     REQUIRE(p.has_value());
     CHECK(p->size() == 64u);
@@ -404,6 +433,9 @@ TEST_CASE("bytes written go out as packets: the first kicks the endpoint, comple
         ++accepted;
     }
     CHECK(accepted == 1u + Cdc::tx_capacity());
+    CHECK(SimUsb::double_submits == 0u);
+    // A run into the full ring takes nothing and kicks nothing.
+    CHECK(Cdc::write_bulk(std::span<const uint8_t>(run.data(), 10)) == 0u);
     CHECK(SimUsb::double_submits == 0u);
 }
 

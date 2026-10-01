@@ -147,14 +147,16 @@ void uart_transport_verbs() {
     (void)Instrument::dma_isr();
     (void)Instrument::harvest();
     (void)Instrument::dma_faults();
+    static_assert(BulkSink<Instrument> && SpanSource<Instrument>);
     (void)Instrument::write_byte('x');
     uint8_t b = 0;
     (void)Instrument::read_byte(b);
     const uint8_t out[2] = {1, 2};
-    (void)Instrument::write(out, sizeof out);
     (void)Instrument::write_bulk(out);
     uint8_t in[4] = {};
     (void)Instrument::read_bulk(in);
+    (void)Instrument::read_span();
+    Instrument::consume(1);
     (void)Instrument::rx_pending();
     (void)Instrument::tx_idle();
     (void)Instrument::rx_overruns();

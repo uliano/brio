@@ -45,14 +45,16 @@ void usart_verbs() {
     (void)Aux::init(clock, 9600, {.bits = UartBits::eight, .parity = UartParity::even, .stop_bits = 2});
     (void)Console::isr();
     (void)Aux::isr();
+    static_assert(BulkSink<Console> && SpanSource<Console>);
     (void)Console::write_byte(0x55);
     uint8_t b;
     (void)Console::read_byte(b);
     const uint8_t buf[4] = {1, 2, 3, 4};
-    (void)Console::write(buf, 4);
     (void)Console::write_bulk(buf);
     uint8_t out[8];
     (void)Console::read_bulk(out);
+    (void)Console::read_span();
+    Console::consume(1);
     (void)Console::rx_pending();
     (void)Console::tx_idle();
     (void)Console::rx_overruns();

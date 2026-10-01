@@ -95,7 +95,10 @@ whatever drives it.
   `init(clock, baud, format)` speaking hertz off the clock tag,
   `isr()` as the ONE handler body honouring the edge-return contract
   (true on the RX ring's empty-to-non-empty transition - the kernel
-  wakeup), try-semantics `write_byte`, `read_byte`, error counters,
+  wakeup), try-semantics `write_byte` and `write_bulk` (a run: as
+  many as fit, one nudge - the verb `print` hands every string and
+  number), `read_byte`, `read_bulk` and `read_span`/`consume` (the
+  receive run in place), error counters,
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
   `release()`. Init
@@ -139,8 +142,8 @@ The engines are POLICIES, not features of the task:
   direction, the RXC interrupt's exact per-character error
   attribution on the other), and the two must name DIFFERENT channels
   (compile-time refused - a channel moves bytes one way).
-- **TX drains the ring in blocks.** `write_byte`/`print` are
-  unchanged; the engine is handed the ring's contiguous run
+- **TX drains the ring in blocks.** `write_byte`, `write_bulk` and
+  `print` are unchanged; the engine is handed the ring's contiguous run
   (`read_span`, design/ring.md) and its completion interrupt consumes
   exactly the block it carried and starts the next - a wrapped ring
   goes out in two blocks. The app's DMAC handler routes completions
@@ -300,8 +303,8 @@ bridge between the pads and the PC - as much as of the driver.
   3 M are byte-exact. The bridge's divisor arithmetic has no exact
   2.5 M and the nearest is some 4% off, outside what a UART tolerates.
   A failure at one rate says nothing about the rate above it.
-- **The per-byte API is what limits a fast link.** `write()` loops over
-  `write_byte()`, and every byte pays a transport nudge - arming DRE, or
+- **The per-byte API is what limits a fast link.** A loop over
+  `write_byte()` pays a transport nudge every byte - arming DRE, or
   `pump_tx()` with an engine. That plateaus at 98.4 kB/s (about 1 Mbaud
   equivalent) at EVERY rate from 1 Mbaud up, the wire idling while the
   CPU catches up. Fed this way the DMA engines are SLOWER than the

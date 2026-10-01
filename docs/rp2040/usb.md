@@ -97,9 +97,9 @@ brio::print(Port{}, "hello", brio::crlf);                     // once the host h
 The port is a `ByteTransport`: a console's SerialPort runs over it as
 over a UART. The identity 1209:0001 is pid.codes' test pair, meant
 for a device that is not a product; a product states its own.
-`Port::write(buffer, n)` queues a run before the first packet goes,
+`Port::write_bulk(run)` queues a run before the first packet goes,
 where `write_byte` sends its first byte alone and batches the rest
-behind it.
+behind it - and `print` hands it every string and number whole.
 
 ## Bench findings
 

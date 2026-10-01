@@ -124,14 +124,16 @@ void lpuart_verbs() {
     (void)Lp::isr();
     (void)LpFifo::isr();
     (void)LpWake::wakes();
+    static_assert(BulkSink<Lp> && SpanSource<Lp>);
     (void)Lp::write_byte(0x55);
     uint8_t b = 0;
     (void)Lp::read_byte(b);
     const uint8_t buf[4] = {1, 2, 3, 4};
-    (void)Lp::write(buf, 4);
     (void)Lp::write_bulk(buf);
     uint8_t out[8];
     (void)Lp::read_bulk(out);
+    (void)Lp::read_span();
+    Lp::consume(1);
     (void)Lp::rx_pending();
     (void)Lp::tx_idle();
     (void)Lp::hw_overruns();

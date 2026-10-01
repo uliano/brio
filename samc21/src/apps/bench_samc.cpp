@@ -110,8 +110,9 @@
 //      nothing new in DATA sets (31.6.2.5, 31.8.8) - both spins bounded,
 //      a bound that runs out printed. Counters read before the print and
 //      after the drain. busy = wall (the print and the drain spin); irq
-//      and isr are the transport's shape: write_byte arms DRE for every
-//      byte, and SERCOM5's handler feeds one byte an entry.
+//      and isr are the transport's shape: print hands the transport runs
+//      (write_bulk arms DRE once a run), and SERCOM5's handler feeds one
+//      byte an entry.
 //   t  the tick's floor: one second (hz cycles on the ruler) of masked
 //      Idle::idle() turns with the console drained - no kernel loop, none
 //      runs here. wall = the second, irq = the ticks, isr = the tick

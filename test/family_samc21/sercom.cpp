@@ -61,7 +61,7 @@ static_assert(sercom_actual_baud(48'000'000, 0) == 3'000'000);
 static_assert(sercom_min_ref_hz(115200) == 1'843'200);
 
 using Serial = Uart<0, pads>;
-static_assert(ByteTransport<Serial>);
+static_assert(ByteTransport<Serial> && BulkSink<Serial> && SpanSource<Serial>);
 static_assert(ClockUser<Serial>);
 static_assert(Serial::generator == 0);
 static_assert(Serial::min_hz_for(115200) == 1'843'200);
@@ -145,7 +145,9 @@ void task_verbs() {
     (void)Serial::write_byte('x');
     (void)Serial::read_byte(byte);
     const uint8_t text[] = {'h', 'i'};
-    (void)Serial::write(text, sizeof(text));
+    (void)Serial::write_bulk(text);
+    (void)Serial::read_span();
+    Serial::consume(1);
 
     (void)Serial::rx_pending();
     (void)Serial::tx_idle();
@@ -157,9 +159,9 @@ void task_verbs() {
     Serial::release();
 
     // A second instantiation on the same instance but the other legal
-    // TxD pad, with rings of a size the AVR ruling would have refused:
-    // this core reads a word atomically, so the lock-free path holds at
-    // any size here.
+    // TxD pad, with rings of a size that takes the guarded path on the
+    // AVR: this core reads a word atomically, so the lock-free path holds
+    // at any size here.
     constexpr UartPads wide_pads{
         .tx = SercomPad::pad2,
         .rx = SercomPad::pad3,
@@ -208,7 +210,7 @@ static_assert(DmaSerial::has_tx_engine && DmaSerial::has_rx_engine);
 static_assert(TxOnlySerial::has_tx_engine && !TxOnlySerial::has_rx_engine);
 // The concepts hold whether or not an engine is named: adding the
 // parameters changed no part of the public surface.
-static_assert(ByteTransport<DmaSerial> && ClockUser<DmaSerial>);
+static_assert(ByteTransport<DmaSerial> && BulkSink<DmaSerial> && SpanSource<DmaSerial> && ClockUser<DmaSerial>);
 static_assert(ByteTransport<TxOnlySerial> && ClockUser<TxOnlySerial>);
 
 void engined_uart_verbs() {

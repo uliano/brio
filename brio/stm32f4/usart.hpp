@@ -731,8 +731,8 @@ struct UartOptions {
  *   Serial::init(clock, 115200);
  *
  * The shared Uart surface - same verbs, same return contracts:
- * init/rebase/set_baud/isr/write_byte/read_byte/write/write_bulk/
- * read_bulk, the error counters, release().
+ * init/rebase/set_baud/isr/write_byte/write_bulk/read_byte/read_bulk/
+ * read_span/consume, the error counters, release().
  */
 template <uint8_t instance, UartPins pins, uint32_t rx_size = 64, uint32_t tx_size = 256,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
@@ -1168,15 +1168,6 @@ public:
         return true;
     }
 
-    /// Queue as much of the buffer as fits; returns the number queued.
-    static uint8_t write(const uint8_t* buffer, uint8_t len) {
-        uint8_t written = 0;
-        while (written < len && write_byte(buffer[written])) {
-            ++written;
-        }
-        return written;
-    }
-
     /// Queue a run of bytes through the ring's contiguous span and arm
     /// the transmitter ONCE. Returns the number queued.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
@@ -1189,9 +1180,16 @@ public:
             const uint32_t chunk = dst.size() < src.size() - queued
                                        ? static_cast<uint32_t>(dst.size())
                                        : static_cast<uint32_t>(src.size() - queued);
-            for (uint32_t i = 0; i < chunk; ++i) {
-                dst[i] = src[queued + i];
-            }
+            // Two pointers and no index, and the test at the bottom: a
+            // load, a store, two steps and one branch a byte, where an index
+            // re-adds both bases every byte. `chunk` is at least one here -
+            // the room is not empty and the run is not done.
+            const uint8_t* from = src.data() + queued;
+            uint8_t* to = dst.data();
+            uint8_t* const end = to + chunk;
+            do {
+                *to++ = *from++;
+            } while (to != end);
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(chunk));
             queued += chunk;
         }
@@ -1222,6 +1220,19 @@ public:
             got += chunk;
         }
         return got;
+    }
+
+    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// never wrapping - the receive ring's consumer half under the ring's
+    /// own names. With consume() it is util/stream.hpp's SpanSource,
+    /// which SerialPort drains a run at a time with no copy at all.
+    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+
+    /// Release the first `count` bytes of read_span(), oldest first, clamped
+    /// to what is queued.
+    static void consume(uint32_t count) {
+        constexpr uint32_t most = decltype(m_rx)::capacity();
+        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
     }
 
     static auto rx_pending() { return m_rx.count(); }

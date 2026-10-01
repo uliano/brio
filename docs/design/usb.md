@@ -87,9 +87,10 @@ template arguments; the stack asks each whether an interface or an
 endpoint is its.
 
 CDC ACM is the first class and the reason for the stack: a serial
-port the host needs no driver for, with `write_byte`, `read_byte`
-and `tx_idle` - the surface of a UART - so a console or a SerialPort
-runs over the chip's own connector unchanged. Its flow control is
+port the host needs no driver for, with `write_byte` and
+`write_bulk`, `read_byte` and `read_span`/`consume`, and `tx_idle` -
+the surface of a UART - so a console or a SerialPort runs over the
+chip's own connector unchanged. Its flow control is
 USB's own: the OUT endpoint is re-armed only while a whole packet
 fits in the receive ring, and the host NAKs meanwhile, losing no byte.
 The line coding and the control line state are received and reported,

@@ -113,9 +113,12 @@ data register, one byte per interrupt) belongs to that chip's
 realization; a contract that speaks it charges it to every chip after.
 Before a contract is taken as settled it is realized on two opposite
 shapes of silicon - one with a FIFO or DMA, one without - and read in
-both images. The byte sink of `util/stream.hpp` is the standing
-exception this rule names: its one verb is a byte, and four strata
-carry a bulk verb beside it outside the contract.
+both images. The byte sink of `util/stream.hpp` is this rule applied
+late: its byte verb stays for a sink that has nothing else - a test
+capture, a simulated port - and every transport carries the run,
+`write_bulk` (`BulkSink`), which `print` hands every string and every
+number whole; the source's mirror lends its received run in place
+(`SpanSource`).
 
 ## Layering: the strata
 

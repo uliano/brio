@@ -102,8 +102,8 @@ TX and RX inside the chip and leaves the RX pad alone.
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format = 8N1)`
   (the divisor from `apb_hz(clock, on_apb2)`, false when unreachable or
   for nine data bits), `isr()` (the vector's body: the RX edge as its
-  return), `write_byte`, `read_byte`, `write`, `write_bulk`,
-  `read_bulk`, `rx_pending`, `tx_idle`, the counters `rx_overruns`,
+  return), `write_byte`, `write_bulk`, `read_byte`, `read_bulk`,
+  `read_span` and `consume` (the receive run in place), `rx_pending`, `tx_idle`, the counters `rx_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns`,
   `clear_errors`, `rebase(hz)` (the ClockUser verb: `hz` is SYSCLK and
   the bus rate is DERIVED from it with `apb_hz_at`, not read back from

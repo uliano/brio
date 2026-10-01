@@ -121,6 +121,7 @@
 #include "kernel/platform.hpp"
 #include "util/clock.hpp"
 #include "util/ring.hpp"
+#include "util/stream.hpp"
 
 namespace brio {
 
@@ -933,15 +934,6 @@ public:
         return true;
     }
 
-    /// Queue as much of the buffer as fits; returns the number queued.
-    static uint8_t write(const uint8_t* buffer, uint8_t len) {
-        uint8_t written = 0;
-        while (written < len && write_byte(buffer[written])) {
-            ++written;
-        }
-        return written;
-    }
-
     /// Send a run of bytes in BULK: without a transmit engine, as much of
     /// it as the FIFO has room for goes straight into UARTDR when nothing
     /// is queued (write_byte()'s first rule, a run at a time); the rest
@@ -968,9 +960,16 @@ public:
             const uint32_t want = static_cast<uint32_t>(src.size()) - done;
             const uint32_t take =
                 want < room.size() ? want : static_cast<uint32_t>(room.size());
-            for (uint32_t i = 0; i < take; ++i) {
-                room[i] = src[done + i];
-            }
+            // Two pointers and no index, and the test at the bottom: a
+            // load, a store, two steps and one branch a byte, where an index
+            // re-adds both bases every byte. `take` is at least one here -
+            // the room is not empty and the run is not done.
+            const uint8_t* from = src.data() + done;
+            uint8_t* to = room.data();
+            uint8_t* const end = to + take;
+            do {
+                *to++ = *from++;
+            } while (to != end);
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
         }
@@ -1000,6 +999,19 @@ public:
             done += take;
         }
         return done;
+    }
+
+    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// never wrapping - the receive ring's consumer half under the ring's
+    /// own names. With consume() it is util/stream.hpp's SpanSource,
+    /// which SerialPort drains a run at a time with no copy at all.
+    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+
+    /// Release the first `count` bytes of read_span(), oldest first, clamped
+    /// to what is queued.
+    static void consume(uint32_t count) {
+        constexpr uint32_t most = decltype(m_rx)::capacity();
+        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
     }
 
     static bool rx_pending() { return !m_rx.empty(); }

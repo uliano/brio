@@ -48,12 +48,14 @@
  * port is still the probe's.
  *
  * TWO RINGS AND TWO FLAGS. Bytes leave through a TX ring drained by the
- * TXE interrupt (write_byte() arms TXEIE; the ISR disarms it when the
- * ring runs dry, because TXE stands for ever while the transmitter is
- * idle and would re-enter the handler without end), and arrive into an
- * RX ring filled by RXNE. isr() returns the "RX went non-empty" EDGE that
- * util/serial_port.hpp posts on - one event per idle-to-busy transition,
- * not one per byte.
+ * TXE interrupt (write_byte() arms TXEIE after a byte, write_bulk() once
+ * after a run; the ISR disarms it when the ring runs dry, because TXE
+ * stands for ever while the transmitter is idle and would re-enter the
+ * handler without end), and arrive into an RX ring filled by RXNE, taken
+ * a byte at a time by read_byte() or a run at a time, in place, by
+ * read_span() and consume(). isr() returns the "RX went non-empty" EDGE
+ * that util/serial_port.hpp posts on - one event per idle-to-busy
+ * transition, not one per byte.
  *
  * THE BAUD DIVISOR IS THE WHOLE REGISTER. BRR counts HCLK periods per bit
  * in sixteenths (14.3, 14.10.3: a 12-bit mantissa and a 4-bit fraction),
@@ -93,6 +95,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <span>
 
 #include "ch32x035/afio.hpp"
 #include "ch32x035/clock.hpp"
@@ -861,13 +864,51 @@ struct Uart {
         return true;
     }
 
-    /// Queue as much of the buffer as fits; returns the number queued.
-    static uint8_t write(const uint8_t* buffer, uint8_t len) {
-        uint8_t written = 0;
-        while (written < len && write_byte(buffer[written])) {
-            ++written;
+    /// Queue a RUN (util/stream.hpp's BulkSink): as much of `src` as the
+    /// ring has room for, copied into the ring's own free run and handed
+    /// over with one index store per contiguous part, then TXEIE armed
+    /// ONCE - what write_byte() does after a push. Never blocks; returns
+    /// how many were queued. A run that finds no room arms nothing: the
+    /// push that filled the ring armed TXEIE, a level.
+    static uint32_t write_bulk(std::span<const uint8_t> src) {
+        uint32_t queued = 0;
+        while (queued < src.size()) {
+            const auto room = m_tx.write_span();
+            if (room.empty()) {
+                break;
+            }
+            const uint32_t want = static_cast<uint32_t>(src.size()) - queued;
+            const uint32_t take = want < room.size() ? want : static_cast<uint32_t>(room.size());
+            // Two pointers and no index, and the test at the bottom: a
+            // load, a store, two steps and one branch a byte, where an index
+            // re-adds both bases every byte. `take` is at least one here -
+            // the room is not empty and the run is not done.
+            const uint8_t* from = src.data() + queued;
+            uint8_t* to = room.data();
+            uint8_t* const end = to + take;
+            do {
+                *to++ = *from++;
+            } while (to != end);
+            m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
+            queued += take;
         }
-        return written;
+        if (queued != 0u) {
+            regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
+        }
+        return queued;
+    }
+
+    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// never wrapping - the receive ring's consumer half under the ring's
+    /// own names. With consume() it is util/stream.hpp's SpanSource,
+    /// which SerialPort drains a run at a time.
+    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+
+    /// Release the first `count` bytes of read_span(), oldest first, clamped
+    /// to what is queued.
+    static void consume(uint32_t count) {
+        constexpr uint32_t most = decltype(m_rx)::capacity();
+        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
     }
 
     /// Nothing queued and the shift register empty: what a program waits on

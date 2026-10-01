@@ -133,8 +133,14 @@ bool read_byte(uint8_t& b) {
 bool write_byte(uint8_t b) {
     return engined ? Engined::write_byte(b) : Plain::write_byte(b);
 }
+/// The per-byte path the `t` burst measures: write_byte() until one is
+/// refused - what a caller with no run verb writes.
 uint8_t write_block(const uint8_t* p, uint8_t len) {
-    return engined ? Engined::write(p, len) : Plain::write(p, len);
+    uint8_t written = 0;
+    while (written < len && write_byte(p[written])) {
+        ++written;
+    }
+    return written;
 }
 uint32_t write_bulk(const uint8_t* p, uint32_t len) {
     const std::span<const uint8_t> run(p, len);

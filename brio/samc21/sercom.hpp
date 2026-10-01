@@ -1339,15 +1339,6 @@ public:
         return true;
     }
 
-    /// Queue as much of the buffer as fits; returns the number queued.
-    static uint8_t write(const uint8_t* buffer, uint8_t len) {
-        uint8_t written = 0;
-        while (written < len && write_byte(buffer[written])) {
-            ++written;
-        }
-        return written;
-    }
-
     /**
      * Queue a run of bytes in BULK: copy straight into the ring's own
      * free run and nudge the transport ONCE, instead of once per byte.
@@ -1358,8 +1349,8 @@ public:
      * in a nudge - arming DRE on the plain transport, pump_tx() on the
      * engined one - and paying that per byte is what a link faster than
      * about 1 Mbaud runs out of CPU for. The probe app `serial_speed`
-     * measured a hard plateau at 98 kB/s through write()/write_byte() at
-     * EVERY rate from 1 Mbaud up, while the same wire polled bare
+     * measured a hard plateau at 98 kB/s through write_byte() at EVERY
+     * rate from 1 Mbaud up, while the same wire polled bare
      * reached 299 kB/s at 3 Mbaud: the ceiling was this API, not the
      * silicon and not the cable. Worse, the DMA engine came out SLOWER
      * than the interrupt (64 kB/s), because a pump_tx() per byte starts
@@ -1382,9 +1373,16 @@ public:
             const uint32_t want = static_cast<uint32_t>(src.size()) - done;
             const uint32_t take =
                 want < room.size() ? want : static_cast<uint32_t>(room.size());
-            for (uint32_t i = 0; i < take; ++i) {
-                room[i] = src[done + i];
-            }
+            // Two pointers and no index, and the test at the bottom: a
+            // load, a store, two steps and one branch a byte, where an index
+            // re-adds both bases every byte. `take` is at least one here -
+            // the room is not empty and the run is not done.
+            const uint8_t* from = src.data() + done;
+            uint8_t* to = room.data();
+            uint8_t* const end = to + take;
+            do {
+                *to++ = *from++;
+            } while (to != end);
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
         }
@@ -1423,6 +1421,19 @@ public:
             done += take;
         }
         return done;
+    }
+
+    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// never wrapping - the receive ring's consumer half under the ring's
+    /// own names. With consume() it is util/stream.hpp's SpanSource,
+    /// which SerialPort drains a run at a time with no copy at all.
+    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+
+    /// Release the first `count` bytes of read_span(), oldest first, clamped
+    /// to what is queued.
+    static void consume(uint32_t count) {
+        constexpr uint32_t most = decltype(m_rx)::capacity();
+        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
     }
 
     // ---- introspection -----------------------------------------------------
@@ -1649,7 +1660,9 @@ inline constexpr UartPads sercom_probe_pads{
 };
 } // namespace detail
 
-static_assert(ByteTransport<Uart<0, detail::sercom_probe_pads>>,
+static_assert(ByteTransport<Uart<0, detail::sercom_probe_pads>> &&
+                  BulkSink<Uart<0, detail::sercom_probe_pads>> &&
+                  SpanSource<Uart<0, detail::sercom_probe_pads>>,
               "Uart must satisfy the transport concepts");
 static_assert(ClockUser<Uart<0, detail::sercom_probe_pads>>,
               "Uart must be listable among a dynamic clock's users");

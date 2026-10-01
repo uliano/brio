@@ -20,9 +20,17 @@
  * a print_one overload for it (in namespace brio or in the type's own
  * namespace, found via ADL).
  *
- * Delivery policy: print BLOCKS until the sink accepts each byte (spinning
- * on write_byte). With the interrupt-driven Uart this means "wait for the
- * TX ring to drain", so printed text is never silently truncated.
+ * Delivery policy: print BLOCKS until the sink has accepted every byte,
+ * and never truncates. Where the sink is a BulkSink (util/stream.hpp) a
+ * string_view and every formatted number (each is formatted into a
+ * buffer and printed as a string) go to it as ONE RUN, and a C string as
+ * runs of up to print_scan_run bytes, measured as it goes: write_bulk()
+ * is handed the run and asked again for what is left, spinning while
+ * nothing fits - one copy into the transport's ring and one nudge of its
+ * transmitter a run, where a byte at a time pays both per byte. A sink
+ * with the byte verb alone is spun on per byte, through write_byte().
+ * Either way, with the interrupt-driven Uart this means "wait for the TX
+ * ring to drain" when the text is longer than its room.
  * Consequence: only print after the sink is initialized and interrupts
  * are enabled, or the spin never ends.
  *
@@ -37,9 +45,11 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>  // ltoa, ultoa, dtostrf, dtostre (AVR-libc)
 #include <concepts>
+#include <span>
 #include <string_view>
 #include "util/stream.hpp"
 #include "util/timestamp.hpp"
@@ -56,17 +66,35 @@ using ::dtostrf;
 using ::ltoa;
 using ::ultoa;
 #else
-/// The AVR-libc conversions the hosted C library does not ship. Only
-/// base 10 and 16 are ever asked for here; a longer buffer than the
-/// call sites give is impossible for the widths brio prints.
+/// The AVR-libc conversions the hosted C library does not ship. Two
+/// bases are ever asked for here, 10 and 16, and each loop has its
+/// divisor as a CONSTANT: base 16 by a mask and a shift, base 10 with ONE
+/// division a digit, the remainder taken back from the quotient by a
+/// multiply (or the shifts it folds to). A variable base would cost a
+/// core with no divider a remainder call AND a division call a digit (the
+/// CH32V006 and the CH32V003; a Cortex-M0+ one call, its library's divmod
+/// returning both), and a core with one a remainder and a division
+/// instruction. gcc at -Os keeps the one division a library call where
+/// the core has no divider, even where a multiply by the reciprocal would
+/// do (counted in the release listings). Any base but 16 converts as 10.
+/// A longer buffer than the call sites give is impossible for the widths
+/// brio prints.
 inline char* ultoa(unsigned long value, char* buffer, int base) {
     char digits[24];
     uint8_t n = 0;
-    do {
-        const unsigned long d = value % static_cast<unsigned long>(base);
-        digits[n++] = static_cast<char>(d < 10 ? '0' + d : 'A' + (d - 10));
-        value /= static_cast<unsigned long>(base);
-    } while (value != 0);
+    if (base == 16) {
+        do {
+            const uint8_t d = static_cast<uint8_t>(value & 0xFu);
+            digits[n++] = static_cast<char>(d < 10u ? '0' + d : 'A' + (d - 10u));
+            value >>= 4;
+        } while (value != 0u);
+    } else {
+        do {
+            const unsigned long quotient = value / 10u;
+            digits[n++] = static_cast<char>('0' + static_cast<uint8_t>(value - quotient * 10u));
+            value = quotient;
+        } while (value != 0u);
+    }
     for (uint8_t i = 0; i < n; ++i) {
         buffer[i] = digits[n - 1 - i];
     }
@@ -198,7 +226,7 @@ inline constexpr Sci sci(float value, uint8_t precision = 3) {
     return {value, precision};
 }
 
-// ---- single-value writers (the ADL extension point) -------------------------
+// ---- delivery: the run and the byte -----------------------------------------
 
 /// Spin until the sink accepts the byte (see delivery policy in the header).
 template <ByteSink S>
@@ -206,28 +234,73 @@ inline void write_blocking(S, uint8_t b) {
     while (!S::write_byte(b)) {}
 }
 
+/// Spin until the sink has taken the whole run. A BulkSink is handed the
+/// run and asked again for the rest whenever it took less, spinning while
+/// nothing fits exactly as the byte path spins on a refused byte; any
+/// other sink takes it a byte at a time.
+template <ByteSink S>
+inline void write_blocking([[maybe_unused]] S s, std::span<const uint8_t> run) {
+    if constexpr (BulkSink<S>) {
+        while (!run.empty()) {
+            run = run.subspan(S::write_bulk(run));
+        }
+    } else {
+        for (const uint8_t b : run) {
+            write_blocking(s, b);
+        }
+    }
+}
+
+// ---- single-value writers (the ADL extension point) -------------------------
+
 template <ByteSink S>
 inline void print_one(S s, char c) {
     write_blocking(s, static_cast<uint8_t>(c));
 }
 
 template <ByteSink S>
+inline void print_one(S s, std::string_view text) {
+    write_blocking(s, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()), text.size()));
+}
+
+/// The longest stretch of a C string print measures before handing it to
+/// a BulkSink (below).
+inline constexpr size_t print_scan_run = 64;
+
+/// A BulkSink takes a C string a STRETCH at a time: up to print_scan_run
+/// bytes are measured and handed over as one run, then the next. The
+/// length is found as the string goes, never all of it first, so the
+/// first byte reaches the transport after one stretch's scan whatever the
+/// string's length, and every later scan runs while the transmitter
+/// drains the stretch before it (a whole-string strlen() first delays a
+/// 4096-byte print by its scan, measured at 260 us on the CH32V203).
+/// Any other sink is fed byte by byte up to the NUL, with no length to
+/// find.
+template <ByteSink S>
 inline void print_one(S s, const char *text) {
-    while (*text) {
-        write_blocking(s, static_cast<uint8_t>(*text));
-        ++text;
+    if constexpr (BulkSink<S>) {
+        for (;;) {
+            size_t n = 0;
+            while (n < print_scan_run && text[n] != '\0') {
+                ++n;
+            }
+            write_blocking(s, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text), n));
+            if (n < print_scan_run) {
+                return;   // the stretch ended at the NUL
+            }
+            text += n;
+        }
+    } else {
+        while (*text) {
+            write_blocking(s, static_cast<uint8_t>(*text));
+            ++text;
+        }
     }
 }
 
 template <ByteSink S>
-inline void print_one(S s, std::string_view text) {
-    for (const char c : text) write_blocking(s, static_cast<uint8_t>(c));
-}
-
-template <ByteSink S>
 inline void print_one(S s, crlf_t) {
-    print_one(s, '\r');
-    print_one(s, '\n');
+    print_one(s, std::string_view("\r\n", 2));
 }
 
 /// Integers in decimal. Up to 32 bits through ltoa/ultoa; a 64-bit one

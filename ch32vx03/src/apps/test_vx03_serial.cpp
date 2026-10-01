@@ -111,6 +111,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 
 #include "ch32vx03/afio.hpp"
 #include "ch32vx03/clock.hpp"
@@ -1912,7 +1913,7 @@ void tl_loopback() {
     constexpr uint8_t length = sizeof(message) - 1u;
     Loop::clear_errors();
     (void)Loop::harvest();
-    (void)Loop::write(message, length);
+    (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     Stopwatch w;
     uint8_t got = 0;
     uint8_t back[length] = {};
@@ -2174,7 +2175,7 @@ bool pair_message(const uint8_t* msg, uint16_t len) {
     uint8_t seen[64] = {};
     uint16_t got = 0;
     (void)To::harvest();
-    (void)From::write(msg, static_cast<uint8_t>(len));
+    (void)From::write_bulk(std::span<const uint8_t>(msg, len));
     Stopwatch w;
     while (got < len && w.us() < 50'000UL) {
         (void)To::harvest();

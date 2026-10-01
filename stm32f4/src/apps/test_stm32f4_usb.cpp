@@ -64,6 +64,7 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+#include <span>
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/delay.hpp"
@@ -575,7 +576,7 @@ void ty_echo() {
         }
         uint32_t written = 0;
         while (written < n) {
-            written += Port::write(buf + written, n - written);
+            written += Port::write_bulk(std::span<const uint8_t>(buf + written, n - written));
         }
         echoed += n;
     }
@@ -635,7 +636,7 @@ void tv_throughput() {
         }
         uint32_t written = 0;
         while (written < 64u && us_now() - t0 < 3'000'000u) {
-            written += Port::write(pattern + written, 64u - written);
+            written += Port::write_bulk(std::span<const uint8_t>(pattern + written, 64u - written));
         }
     }
     while (!Port::tx_idle() && us_now() - t0 < 4'000'000u) {
@@ -747,7 +748,7 @@ void tt_zlp() {
         }
         uint32_t written = 0;
         while (written < want && us_now() - t0 < 3'000'000u) {
-            written += Port::write(buf + written, want - written);
+            written += Port::write_bulk(std::span<const uint8_t>(buf + written, want - written));
         }
         sent += written;
     }

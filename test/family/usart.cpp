@@ -243,7 +243,9 @@ void usart_transport() {
         (void)T::write_byte('x');
         uint8_t b = 0;
         (void)T::read_byte(b);
-        (void)T::write(&b, 1);
+        (void)T::write_bulk(std::span<const uint8_t>(&b, 1));
+        (void)T::read_span();
+        T::consume(1);
         (void)T::rx_pending();
         (void)T::tx_idle();
         (void)T::rx_overruns();
@@ -251,7 +253,7 @@ void usart_transport() {
         (void)T::parity_errors();
         (void)T::hw_overruns();
         T::clear_errors();
-        static_assert(ByteTransport<T>);
+        static_assert(ByteTransport<T> && BulkSink<T> && SpanSource<T>);
     }
 }
 

@@ -175,8 +175,9 @@ a compile-time refusal in the task.
   and `none` makes it ride TXFNF; `rx_threshold` defaults to `none`.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format)`,
-  `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`read_byte`, `write`,
-  `write_bulk`/`read_bulk`, `rx_pending`, `tx_idle`, `rebase(hz)`,
+  `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`write_bulk`,
+  `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
+  place), `rx_pending`, `tx_idle`, `rebase(hz)`,
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,

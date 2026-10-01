@@ -81,7 +81,7 @@ using Dma4 = Uart<4, P, 128, 128, UartFormat{}, DmaTxEngine<2, 5>, DmaRxEngine<2
 /// while the two-wire port is the probe's.
 using OnProbe = Uart<8, P, 64, 64, UartFormat{}, NoDmaEngine, NoDmaEngine, 1>;
 
-static_assert(ByteSink<Port5> && ByteSource<Port8>);
+static_assert(ByteSink<Port5> && ByteSource<Port8> && BulkSink<Port5> && SpanSource<Port8>);
 static_assert(Port7::remap_code == 1 && Port7::pads.tx == Pad{'A', 6});
 static_assert(Dma5::has_tx_engine && Dma5::has_rx_engine);
 

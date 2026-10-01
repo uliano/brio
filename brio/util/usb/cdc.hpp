@@ -6,9 +6,9 @@
  * data interface with a bulk pair), the three requests every host
  * driver sends (the line coding both ways, the control line state),
  * and - the point of it - a BYTE TRANSPORT over the bulk pair with the
- * same surface as a UART's (`write_byte`, `read_byte`, `tx_idle`), so
- * a console or a SerialPort runs over the chip's own connector with
- * nothing above it changed.
+ * same surface as a UART's (`write_byte`, `write_bulk`, `read_byte`,
+ * `read_span`/`consume`, `tx_idle`), so a console or a SerialPort runs
+ * over the chip's own connector with nothing above it changed.
  *
  * THE TWO SIDES. The program's side pushes into a transmit ring and
  * pops from a receive ring under the platform's guard; the stack's
@@ -18,8 +18,8 @@
  * dry, so the host's reader is not left waiting for a short packet),
  * a completed OUT lands in the receive ring and the endpoint is re-armed
  * ONLY WHEN THE RING HAS A PACKET'S ROOM - the host sees NAKs meanwhile,
- * which is USB's own flow control and costs no byte. `read_byte`
- * re-arms the endpoint when it frees the room.
+ * which is USB's own flow control and costs no byte. `read_byte` and
+ * `consume` re-arm the endpoint when they free the room.
  *
  * THE LINE CODING IS RECEIVED AND REPORTED, NOT OBEYED: a virtual
  * port has no baud rate. The program reads what the host set
@@ -46,6 +46,7 @@
 
 #include "kernel/platform.hpp"
 #include "util/ring.hpp"
+#include "util/stream.hpp"
 #include "util/usb/device.hpp"
 
 namespace brio {
@@ -234,21 +235,59 @@ public:
         return true;
     }
 
-    /// A run of bytes queued first and kicked once, so the first packet
-    /// carries as many of them as fit; write_byte alone would send the
-    /// first byte on its own and batch the rest behind it.
-    static uint32_t write(const uint8_t* buffer, uint32_t len) {
+    /// A RUN (util/stream.hpp's BulkSink): as many of the bytes as the
+    /// ring has room for, copied into its free run, then kicked ONCE, so
+    /// the first packet carries as many of them as fit - write_byte alone
+    /// would send the first byte on its own and batch the rest behind it.
+    /// Never blocks; returns how many were queued, none while the host has
+    /// not configured the port.
+    static uint32_t write_bulk(std::span<const uint8_t> src) {
         if (!configured_) {
             return 0;
         }
-        uint32_t written = 0;
-        while (written < len && m_tx.push(buffer[written])) {
-            ++written;
+        uint32_t queued = 0;
+        while (queued < src.size()) {
+            const auto room = m_tx.write_span();
+            if (room.empty()) {
+                break;
+            }
+            const uint32_t want = static_cast<uint32_t>(src.size()) - queued;
+            const uint32_t take = want < room.size() ? want : static_cast<uint32_t>(room.size());
+            // Two pointers and no index, and the test at the bottom: a
+            // load, a store, two steps and one branch a byte, where an index
+            // re-adds both bases every byte. `take` is at least one here -
+            // the room is not empty and the run is not done.
+            const uint8_t* from = src.data() + queued;
+            uint8_t* to = room.data();
+            uint8_t* const end = to + take;
+            do {
+                *to++ = *from++;
+            } while (to != end);
+            m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
+            queued += take;
         }
-        if (written != 0u) {
+        if (queued != 0u) {
             kick();
         }
-        return written;
+        return queued;
+    }
+
+    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// never wrapping - the receive ring's consumer half under the ring's
+    /// own names. With consume() it is util/stream.hpp's SpanSource,
+    /// which SerialPort drains a run at a time.
+    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+
+    /// Release the first `count` bytes of read_span(), oldest first, clamped
+    /// to what is queued - and, as read_byte() does, re-arm the OUT
+    /// endpoint when the room freed takes a packet.
+    static void consume(uint32_t count) {
+        constexpr uint32_t most = decltype(m_rx)::capacity();
+        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+        if (outs_armed_ < out_slots()) {
+            typename P::CriticalSection cs;
+            arm_out();
+        }
     }
 
     static constexpr uint32_t rx_capacity() { return Ring<uint8_t, rx_size, P>::capacity(); }

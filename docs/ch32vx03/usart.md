@@ -308,8 +308,9 @@ lot-keyed registers of this die already said it is
   the company the chapter forbids it.
 - `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap,
   opts>` for n = 1..8 is the transport task, on that resource:
-  `init(clock, baud)`, `isr()` (the edge), `write_byte()`/`read_byte()`/
-  `write()`, `rx_pending()`/`tx_idle()`, the counters (`rx_overruns()`,
+  `init(clock, baud)`, `isr()` (the edge), `write_byte()`/`write_bulk()`
+  (a run: as many as fit, TXEIE armed once), `read_byte()`/`read_span()`/
+  `consume()` (the receive run in place), `rx_pending()`/`tx_idle()`, the counters (`rx_overruns()`,
   `frame_errors()`, `parity_errors()`, `noise_errors()`,
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/
   `set_baud()`/`rebase()`/`divisor_for()`/`can_baud()`/`min_hz_for()`,
@@ -484,6 +485,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The run verbs on the CH32V303**: `write_bulk()` and
+  `read_span()`/`consume()` run on the CH32V203C8T6 - every suite's
+  print takes the first and the console's line drain the second - and
+  are compiled and counted for the CH32V303 with the USART handler a
+  leaf there, no f-register saved; one run of `test_vx03_serial` and the
+  console on the evaluation board would measure them.
 - **The lot's four features on a die that has them**: the MARK and
   SPACE parity on the wire and the far receiver's MS_ERR, the short
   words across the pair and RX_BUSY under a frame are letter o's, and

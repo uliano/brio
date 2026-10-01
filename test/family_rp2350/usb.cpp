@@ -251,10 +251,13 @@ void usb_stack_verbs() {
     (void)Device::last_request();
     Device::stop();
 
+    static_assert(BulkSink<Port> && SpanSource<Port>);
     (void)Port::write_byte('x');
     uint8_t b = 0;
     (void)Port::read_byte(b);
-    (void)Port::write(&b, 1);
+    (void)Port::write_bulk(std::span<const uint8_t>(&b, 1));
+    (void)Port::read_span();
+    Port::consume(1);
     (void)Port::tx_idle();
     (void)Port::take_rx_edge();
     (void)Port::configured();

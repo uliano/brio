@@ -631,11 +631,13 @@ gets its home in `docs/design/` when taken.
   standing for every other image. Decisions for the user: THE FPU TAX -
   a non-leaf interrupt handler under ilp32f saves all twenty
   caller-saved f-registers (101 cycles of round trip against 56; the
-  USART transport's handler and the USB host/device controller's, which
-  call out, pay some 45 cycles an interrupt), because gcc saves them in
-  any handler that calls a function; three ways out: a LEAF ISR path
-  (the ring's guard lambdas, bump and the kernel's post inlined through
-  - a kernel/util change), a soft-float configure for a program with no
+  USB host/device controller's handler, which calls out, pays some 45
+  cycles an interrupt - the USART transport's did until its ring verbs
+  and bump() were inlined, and a binding that itself calls out, a
+  console's post, still does), because gcc saves them in any handler
+  that calls a function; three ways out: a LEAF ISR path (the ring's
+  verbs and bump are inline now; the kernel's post is not - a kernel
+  change), a soft-float configure for a program with no
   float work (-DCH32VX03_ARCH=rv32imac_xw -DCH32VX03_ABI=ilp32, no new
   preset), or the tax as it stands, the default staying ilp32f until
   then; the kept copy of PWR_CTLR's retention bits starting at zero at

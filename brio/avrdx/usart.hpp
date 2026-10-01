@@ -82,8 +82,10 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <optional>
+#include <span>
 #include <avr/io.h>
 
 #include "avrdx/delay.hpp"
@@ -922,8 +924,9 @@ private:
  *
  * TX policy: write_byte() has TRY semantics (false when the TX ring is
  * full, nothing counted - the caller decides whether to retry, drop or
- * block; print.hpp blocks). RX overflow (ring full, byte lost) IS
- * counted, as are the hardware error flags.
+ * block; print.hpp blocks), and write_bulk() is the same for a RUN: as
+ * many as fit, one DREIE store for all of them. RX overflow (ring full,
+ * byte lost) IS counted, as are the hardware error flags.
  */
 // Ring defaults sized for console-class traffic AND for lock-free rings:
 // both <= 256 keeps Ring's index_t at 8 bits, which on AVR (atomic_width
@@ -1162,13 +1165,54 @@ public:
         return true;
     }
 
-    /// Queue as much of the buffer as fits; returns the number queued.
-    static uint8_t write(const uint8_t *buffer, uint8_t len) {
-        uint8_t written = 0;
-        while (written < len && write_byte(buffer[written])) {
-            ++written;
+    /// Queue a RUN (util/stream.hpp's BulkSink): as much of `src` as the
+    /// ring has room for, copied into the ring's own free run and handed
+    /// over with one index store per contiguous part, then DREIE set ONCE
+    /// - what write_byte() does after a push. Never blocks; returns how
+    /// many were queued. A run that finds no room sets nothing: the push
+    /// that filled the ring set DREIE, and DRE is a level. The counts are
+    /// size_t, a span's own width - sixteen bits here, where a 32-bit
+    /// count would cost four registers a step - and widened only for the
+    /// contract's return.
+    static uint32_t write_bulk(std::span<const uint8_t> src) {
+        size_t queued = 0;
+        while (queued < src.size()) {
+            const auto room = m_tx.write_span();
+            if (room.empty()) {
+                break;
+            }
+            const size_t want = src.size() - queued;
+            const size_t take = want < room.size() ? want : room.size();
+            // Two pointers and no index, and the test at the bottom: a
+            // load, a store, two steps and one branch a byte, where an index
+            // re-adds both bases every byte. `take` is at least one here -
+            // the room is not empty and the run is not done.
+            const uint8_t* from = src.data() + queued;
+            uint8_t* to = room.data();
+            uint8_t* const end = to + take;
+            do {
+                *to++ = *from++;
+            } while (to != end);
+            m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
+            queued += take;
         }
-        return written;
+        if (queued != 0u) {
+            U::regs().CTRLA |= USART_DREIE_bm;
+        }
+        return static_cast<uint32_t>(queued);
+    }
+
+    /// The received bytes IN PLACE: the contiguous run ready to be read,
+    /// never wrapping - the receive ring's consumer half under the ring's
+    /// own names. With consume() it is util/stream.hpp's SpanSource,
+    /// which SerialPort drains a run at a time.
+    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+
+    /// Release the first `count` bytes of read_span(), oldest first, clamped
+    /// to what is queued.
+    static void consume(uint32_t count) {
+        constexpr uint32_t most = decltype(m_rx)::capacity();
+        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
     }
 
     // ---- introspection ---------------------------------------------------
@@ -1189,7 +1233,8 @@ public:
     }
 };
 
-static_assert(ByteTransport<Uart<0>>, "Uart must satisfy the transport concepts");
+static_assert(ByteTransport<Uart<0>> && BulkSink<Uart<0>> && SpanSource<Uart<0>>,
+              "Uart must satisfy the transport concepts");
 
 /// The polled half-duplex and synchronous tasks share this much: a
 /// configured resource, a bounded send/receive pair, and a rebase that

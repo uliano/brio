@@ -37,14 +37,14 @@
  * slow links or hard latency budgets (docs/design/serial.md).
  *
  * THE DRAIN TAKES A RUN WHERE THE TRANSPORT LENDS ONE. A transport that
- * offers its receive ring's consumer half in place (SpanSource below:
- * read_span() and consume(n), the ring's own two verbs) is drained a run
- * at a time - the bytes fed to the assembler where the ring holds them
- * and released with one index store per run; any other ByteSource is
- * drained a byte at a time through read_byte(). Either way the drain
- * stops at the byte that completes the second line in flight and leaves
- * every byte after it queued, so the two paths deliver the same lines in
- * the same dispatches.
+ * offers its receive ring's consumer half in place (util/stream.hpp's
+ * SpanSource: read_span() and consume(n), the ring's own two verbs) is
+ * drained a run at a time - the bytes fed to the assembler where the
+ * ring holds them and released with one index store per run; any other
+ * ByteSource is drained a byte at a time through read_byte(). Either way
+ * the drain stops at the byte that completes the second line in flight
+ * and leaves every byte after it queued, so the two paths deliver the
+ * same lines in the same dispatches.
  *
  * The contract assumes a byte stream with an "RX went non-empty" edge
  * from the ISR; a DMA/FIFO transport may change it (docs/design/
@@ -54,7 +54,6 @@
 #pragma once
 
 #include <stdint.h>
-#include <concepts>
 #include <span>
 
 #include "kernel/borrowed.hpp"
@@ -63,6 +62,7 @@
 #include "kernel/platform.hpp"
 #include "kernel/post.hpp"
 #include "util/proto/line_parser.hpp"
+#include "util/stream.hpp"
 
 namespace brio {
 
@@ -73,19 +73,6 @@ struct RxActivity {};
 /// only (mutable: in-place tokenization is the point of the loan).
 struct LineReceived {
     Borrowed<char, Lease::dispatch> line;
-};
-
-/// A source that lends its received bytes IN PLACE: read_span() is the
-/// contiguous run ready to be read - it never wraps, the rest of a
-/// wrapped ring coming on the next call - and consume(n) releases the
-/// first n of it, oldest first, clamped to what is queued. These are the
-/// consumer half of util/ring.hpp under the ring's own names, and the
-/// ring's rules hold: consumer side only, a run valid until the
-/// consumer's next operation on the source.
-template <typename S>
-concept SpanSource = requires(uint32_t n) {
-    { S::read_span() } -> std::convertible_to<std::span<const uint8_t>>;
-    S::consume(n);
 };
 
 template <typename Transport, Platform P, typename LineSink,

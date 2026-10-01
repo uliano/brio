@@ -10,6 +10,18 @@
  * proto/) are templated on the transport type and constrain it with these
  * concepts, so everything dispatches at compile time and inlines.
  *
+ * THE RUN IS THE UNIT, THE BYTE ITS DEGENERATE CASE. A transport that
+ * queues into a ring or a FIFO moves a whole run for the price of one:
+ * the bytes copied into the free room it already owns, and the
+ * transmitter nudged ONCE - an interrupt armed, an engine pumped, a FIFO
+ * written - where a byte at a time pays that nudge per byte. So a sink
+ * may also offer `write_bulk(run)` (BulkSink below), and print.hpp hands
+ * it every string and every formatted number whole; the source's mirror
+ * is the run lent IN PLACE (SpanSource below), which is how SerialPort
+ * drains a receive ring. Both are OPTIONAL: a sink with the byte verb
+ * alone - a test capture, a simulated port - stays a sink, and every
+ * service falls back to the byte for it.
+ *
  * Monostate transports (all-static classes such as Uart<n>) are passed
  * around as empty tag instances: `constexpr Uart<2> serial;` costs nothing
  * and lets call sites read naturally: print(serial, ...).
@@ -19,6 +31,7 @@
 
 #include <stdint.h>
 #include <concepts>
+#include <span>
 
 namespace brio {
 
@@ -28,10 +41,35 @@ concept ByteSink = requires(uint8_t b) {
     { S::write_byte(b) } -> std::same_as<bool>;
 };
 
+/// A sink that takes a RUN: write_bulk() queues as many of the bytes as
+/// fit, oldest first, NEVER BLOCKS, and nudges the transmitter ONCE for
+/// the run; it returns how many it took - short of the run's length when
+/// the room ran out, zero when there was none. A refused run does what a
+/// refused write_byte() does on the same transport: whatever keeps a
+/// caller that spins on the refusal from spinning on a transmitter
+/// nobody drains, and nothing more.
+template <typename S>
+concept BulkSink = ByteSink<S> && requires(std::span<const uint8_t> run) {
+    { S::write_bulk(run) } -> std::same_as<uint32_t>;
+};
+
 /// A source yields bytes: read_byte() returns false when none is pending.
 template <typename S>
 concept ByteSource = requires(uint8_t &b) {
     { S::read_byte(b) } -> std::same_as<bool>;
+};
+
+/// A source that lends its received bytes IN PLACE: read_span() is the
+/// contiguous run ready to be read - it never wraps, the rest of a
+/// wrapped ring coming on the next call - and consume(n) releases the
+/// first n of it, oldest first, clamped to what is queued. These are the
+/// consumer half of util/ring.hpp under the ring's own names, and the
+/// ring's rules hold: consumer side only, a run valid until the
+/// consumer's next operation on the source.
+template <typename S>
+concept SpanSource = requires(uint32_t n) {
+    { S::read_span() } -> std::convertible_to<std::span<const uint8_t>>;
+    S::consume(n);
 };
 
 /// A full duplex transport is both.

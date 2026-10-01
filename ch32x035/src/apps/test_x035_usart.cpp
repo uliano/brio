@@ -38,6 +38,7 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+#include <span>
 
 #include "ch32x035/afio.hpp"
 #include "ch32x035/clock.hpp"
@@ -299,7 +300,7 @@ bool loop_bytes(uint32_t baud) {
         (void)Loop::read_byte(discard);
     }
     static const uint8_t pattern[8] = {0x00, 0xFF, 0x55, 0xAA, 0x01, 0x80, 0x7E, 0x81};
-    (void)Loop::write(pattern, 8);
+    (void)Loop::write_bulk(pattern);
     const uint32_t t0 = Ticker::ticks();
     while (Loop::rx_pending() < 8u && Ticker::ticks() - t0 < 20u) {
     }
