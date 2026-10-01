@@ -88,6 +88,21 @@ three flags WITH EACH ENTRY**, so a draining handler must read ISR
 BEFORE every RDR or the attribution slides by one and a good byte
 inherits its neighbour's framing error.
 
+**The FIFOs are the transport's default, where the instance has them.**
+A FULL USART and every LPUART carry an 8-deep transmit FIFO and an
+8-deep receive FIFO behind CR1.FIFOEN (33.5.4, table 184), and three
+conditions pace the transmit side instead of one: TXFNF (not full), TXFE
+(empty) and TXFT, the threshold TXFTCFG names - code 101 being "TXFIFO
+becomes empty" (33.8.4), which rises as the shift register takes the
+last entry, so a handler refilling all eight places has a whole frame
+before the wire would idle. All three are conditions, like TXE, so the
+interrupt is still armed only while the ring holds something. TC changes
+meaning with them: it waits for the TXFIFO AND the shift register
+(33.5.5, step 8), up to nine frames after the last byte left the ring
+where the one-register transmitter left two. Two exclusions come with
+the bit: 33.8.1's note forbids it in LIN and IrDA mode, and 33.5.21 makes
+a wake from Stop on an ADDRESS MATCH need mute mode once the FIFO is on.
+
 **TE sends an idle frame first** (33.5.5), which is why the pads are
 handed to the peripheral BEFORE UE/TE are raised - and why the RX pad
 gets a pull-up, so an unconnected line reads idle instead of noise.
@@ -119,7 +134,8 @@ a compile-time refusal in the task.
   `stop_bits(UartStop)` (the 0.5/1.5 codes `UartFormat` cannot name),
   `oversampling(over8)`, `prescaler(UsartPrescaler)` (the twelve codes;
   a Reserved one is REFUSED, because 33.8.14's note says the silicon
-  turns it into divide-by-256), `fifo(bool)`,
+  turns it into divide-by-256), `fifo(bool)` (turning it on REFUSED in
+  LIN or IrDA mode, and `lin()` / `irda()` refusing with it on - 33.8.1),
   `fifo_thresholds(rx, tx)`, `swap`, `invert(tx, rx, data)`,
   `msb_first`, `half_duplex`, `one_bit_sampling`, `overrun_disable`,
   `flow_control(rts, cts)`, `driver_enable(DriverEnableConfig)`,
@@ -151,7 +167,12 @@ a compile-time refusal in the task.
   `overrun_disable`, `driver_enable` + `de_pin`/`de_assertion`/
   `de_deassertion`/`de_active_low`, `rts`/`cts` + their pads, and
   `wake_from_stop`. Makers: `uart_half_duplex()`,
-  `uart_with_driver_enable()`.
+  `uart_with_driver_enable()`. `fifo` is a `UartFifo`, THREE states a
+  bool converts to: stated on (`.fifo = true`, refused at compile time
+  on an instance with no FIFO), stated off (`.fifo = false`), and
+  unstated - the default - in which the task decides. `tx_threshold`
+  defaults to `full_or_empty` (the transmitter refills an EMPTY FIFO),
+  and `none` makes it ride TXFNF; `rx_threshold` defaults to `none`.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format)`,
   `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`read_byte`, `write`,
@@ -159,7 +180,11 @@ a compile-time refusal in the task.
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
-  `wakes`), `clear_errors`, `release()`. The public surface is
+  `wakes`), `clear_errors`, `release()`, and `fifo_mode` - the FIFO
+  decision as the instantiation resolved it: the option where it is
+  stated, otherwise ON where the instance has the FIFO
+  (`has_fifo_mode`: a FULL USART, every LPUART) unless `wake_from_stop`
+  is an address match. The public surface is
   IDENTICAL to avrdx's and samc21's, which is what lets
   `util/serial_port.hpp` and `print()` compile here untouched.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ...>` - the same task
@@ -198,18 +223,27 @@ Serial::init(clock, 115200);                      // after SysClock::init()
 brio::print(serial, "hello", brio::crlf);
 ```
 
-A one-wire link on a single pad, and a port that keeps its rate through
-a clock change:
+USART2 is a FULL instance on the G071 and G0B1 classes, so this console
+runs in FIFO mode: a print costs one interrupt per eight characters.
+On the G031 class USART2 is BASIC and the same line builds the
+one-register transport (`Serial::fifo_mode` says which).
+
+A one-wire link on a single pad, a port that keeps its rate through a
+clock change, and one that keeps the FIFO OFF - one character per
+interrupt, the shape a program asks for by name:
 
 ```cpp
 constexpr brio::UartOptions one_wire = brio::uart_half_duplex();
 using Bus = brio::Uart<1, u1_pins, 64, 64, brio::NoDmaEngine,
                        brio::NoDmaEngine, one_wire>;
 
-constexpr brio::UartOptions on_hsi{.kernel_clock = brio::UsartClock::hsi16,
-                                   .fifo = true};
+constexpr brio::UartOptions on_hsi{.kernel_clock = brio::UsartClock::hsi16};
 using Steady = brio::Uart<1, u1_pins, 128, 512, brio::NoDmaEngine,
                           brio::NoDmaEngine, on_hsi>;
+
+constexpr brio::UartOptions one_register{.fifo = false};
+using Plain = brio::Uart<1, u1_pins, 64, 256, brio::NoDmaEngine,
+                         brio::NoDmaEngine, one_register>;
 ```
 
 RS-485, whose DE rides the RTS pad and whose timings are SAMPLE times -
@@ -234,20 +268,54 @@ constexpr brio::UartOptions waker{
 };
 ```
 
-## The options cost nothing
+## What the default buys, and what an option costs
 
 `UartOptions` is ONE trailing NTTP with a default, and every member of it
-is `if constexpr`-ed, so `Uart<n, pins>` costs a program that names no
-option exactly nothing: an image built with the default options is byte
-for byte an image built with no option parameter at all, a port carrying
-both DMA engines included.
+is `if constexpr`-ed, so a feature a program does not name compiles to
+nothing.
 
-Keeping that identity takes two shapes:
+**The default is the FIFO, where the instance has one.** With `fifo`
+unstated the task turns it on (`fifo_mode`), the receiver drains
+everything that arrived in one entry and the transmitter rides TXFT at
+"TXFIFO becomes empty". Each refill reads the ring as a RUN - the
+contiguous characters `read_span()` hands over, stored while TXFNF
+stands and released with one `consume()` - so the release image's
+per-character loop is eight instructions (`ldr` ISR, `tst`, `bne`,
+`ldrb`, `adds`, `str` TDR, `cmp`, `bne`), and a ring found empty is
+disarmed in the same entry. It costs 124 bytes of flash in the console
+image over `.fifo = false`. Measured on the Nucleo-G0B1RE at 115200 (`bench_stm32` letter
+`p`, a print of 4096 bytes, wire-bound either way at `x` = 1.00):
+
+| transmitter | USART2 entries | cycles an entry | cycles a character |
+|---|---|---|---|
+| `.fifo = false`, TXE | 4098 | 109 | 109 |
+| FIFO, `tx_threshold = none`, TXFNF | 4096 | 183 | 183 |
+| the default, FIFO, TXFT at empty | 515 | 331 | 41.6 |
+
+(stamps included: the bench meter's own 42 cycles an entry.) TXFNF
+pacing is the trap the middle row shows: under a long print the FIFO
+stays full and every character that leaves frees one place and costs one
+entry, each carrying the run's bookkeeping for a single character - the
+FIFO bought nothing and the entry got dearer. The 515 are 512 refills of
+eight and three at the print's start: the first byte goes
+straight through the idle FIFO into the shift register and the vector
+is entered once more to find the transmitter disarmed, and the second,
+pushed before the first has left, goes out alone - 2, 5, 35 and 515
+entries for prints of 1, 16, 256 and 4096 bytes. The receiver gains
+nine characters of slack where it had one. The transmitter's slack is
+one frame per refill - a handler later than that leaves the wire idle
+for the difference, which costs time and no data - and `tx_threshold`
+buys more: a code below 101 refills before the FIFO runs dry, and so
+more often, and `none` keeps up to seven characters queued at the price
+of an entry per character.
+
+Two shapes keep the baud arithmetic from moving images that do not use
+it:
 
 - `usart_brr()` and `usart_brr_over8()` are SIBLING VERBS. Spelling them
   as one verb with a `bool over8 = false` third argument costs forty
   bytes in an image that never passes it, although the folded code for
-  `false` is identical: byte identity outranks API economy.
+  `false` is identical.
 - The task keeps a `plain` constant for the default arrangement (PCLK,
   divide-by-1, no OVER8) and names the plain expression under it,
   because folding `hz / usart_prescaler_divisor(div1)` to `hz` gives the
@@ -280,6 +348,10 @@ neither. `uart_engines_distinct()` lives here.
   finds.
 - **`write_byte()` still nudges on a refusal** when a TX engine is
   present, because `print()` answers a false by trying for ever.
+- **In FIFO mode** - the default where the instance has one - the two
+  requests are TXFNF and RXFNE (33.5.19's two notes): still one request
+  a character, with the FIFO as slack in front of each channel, and the
+  transmit threshold written but never armed.
 
 ## Bench findings
 
@@ -372,14 +444,16 @@ the RXFIFO IS BYPASSED, so a FIFO-mode receiver collapses to ONE
 character in RDR (eleven in, the newest one out).
 
 **AND THE LOOP CANNOT SHOW WHAT A FIFO IS FOR.** 256 bytes round the
-loop through the task cost 258 interrupts without the FIFO and 257 with
-it: a single wire is its own pacer, so each byte's transmit and receive
-events fall in the SAME interrupt and there is never a second character
-waiting. One
-interrupt a byte is the floor here whatever FIFOEN says. What the letter
-does prove is that the FIFO COSTS NOTHING to turn on - no more
-interrupts, not one byte different, the same public verbs and one option
-between them.
+loop through the task cost 258 interrupts with the FIFO stated off and
+258 with it on: a single wire is its own pacer, so each byte's receive
+event tops the transmit FIFO up in the same entry and there is never a
+second character waiting. One interrupt a byte is the floor here
+whatever FIFOEN says. What the letter does prove is that the FIFO COSTS
+NOTHING to turn on - no more interrupts, not one byte different, the
+same public verbs and one option between them. A link whose two
+directions are independent is where it shows, and the console is one:
+the table under "What the default buys" is `bench_stm32` printing 4096
+bytes through it.
 
 ### The bit-banged line: parity, framing, noise, tolerance
 
@@ -512,11 +586,13 @@ each), and CPOL is the level CK rests at.
 
 ### Host-assisted (outside `z`, `brio stress`)
 
-**Streaming across the kernel clocks** (letter y): the console took the
-host's stream byte-exact on PCLK at 115200, HSI16 at 115200, SYSCLK at
-460800 and PCLK at 921600 - 4672, 4672, ~16000 and ~28000 bytes, ZERO
-wrong, zero hardware overruns, zero framing errors - and again with
-FIFOEN set under a transport that knows nothing about it.
+**Streaming across the kernel clocks** (letter y): the console, in FIFO
+mode as it is by default, took the host's stream byte-exact on PCLK at
+115200, HSI16 at 115200, SYSCLK at 460800 and PCLK at 921600 - 4672,
+4672, 17480 and 31364 bytes, ZERO wrong, zero hardware overruns, zero
+framing errors - and again (4672 bytes, 0 wrong) with FIFOEN cleared
+under a transport built for it: the receive drain reads ISR before every
+RDR, which is right in both views.
 
 **THE WAKE FROM STOP** (letter w), with the console on HSI16 and the
 RTC's wake-up timer as the backstop:
@@ -532,7 +608,9 @@ RTC's wake-up timer as the backstop:
 - **The address-match wake keeps ONE byte and drops the rest**, which is
   right and is worth stating: the receiver is in mute mode, so the
   matching address character wakes it and is reported, and the three
-  characters after it are not addressed to it.
+  characters after it are not addressed to it. The console runs in FIFO
+  mode here, and mute mode is what 33.5.21 asks of an address-match wake
+  with the FIFO on - which this letter sets through the resource.
 - **ES0548 2.2.4 REPRODUCES ON A USART WAKE.** With HSIDIV = /4 the same
   Stop was NOT ended by the same poke - WUF never rose - and ran to the
   RTC backstop's full 1.4..2.0 s, with the RTC wake-up timer as the
@@ -670,6 +748,17 @@ Implemented, not bench-verified:
   through the resource).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured
   on an LPUART, docs/stm32g0/lpuart.md).
+- The FIFO default off the STM32G0B1RE: the scores under "On the
+  STM32G071RB" and "On the STM32G031K8" are the one-register console's,
+  and the consoles that run in FIFO mode by default there - the
+  G071RB's USART2, the LPUART1 three suites move to on the G031K8 - are
+  compiled and not run (the G031K8's own USART2 is BASIC and keeps the
+  one-register transport, which `brio check stm32g0` proves at compile
+  time); one run of `test_stm32_serial` on each board measures it.
+- The default under a wake on an ADDRESS MATCH: a Uart naming
+  `wake_from_stop = address_match` with `fifo` unstated keeps the FIFO
+  off, and no suite builds one - letter w arms that wake through the
+  resource, with mute mode set.
 - On the STM32G071RB, **the smartcard CK ladder, the synchronous
   master's CK census and both IRTIM counting legs** - every one an edge
   counter with no CPU, which is exactly the path ES0418 2.2.4 breaks on

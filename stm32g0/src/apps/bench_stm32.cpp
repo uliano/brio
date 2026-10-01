@@ -95,13 +95,19 @@
 //      cleared by the TDR write that started it), both bounded on the
 //      ruler. Counters before the print and after the drain. busy = wall
 //      (the print spins in write_blocking, the drain spins on the flags);
-//      irq and isr are the transport's shape: one USART2 interrupt per
-//      byte on TXE, plus two that find the ring dry and disarm TXEIE -
-//      one right after the first byte (the idle shift register takes TDR
-//      at once, so TXE fires again before the thread has pushed the
-//      second byte, and the next push re-arms) and one after the last -
-//      plus the ticks of the run; the line after each bench line gives the
-//      two vectors apart.
+//      irq and isr are the transport's shape. USART2 is a FULL instance,
+//      so the default Uart runs it in FIFO mode (stm32g0/usart.hpp's
+//      UartTask::fifo_mode) and paces the transmitter on TXFT at "TXFIFO
+//      becomes empty": one USART2 interrupt per eight bytes, each refill
+//      taking the ring as a run, plus two at the print's start - the
+//      first byte goes straight through the idle FIFO into the shift
+//      register and the vector is entered once more to find the
+//      transmitter disarmed, and the second, pushed before the first has
+//      left, goes out alone (2, 5, 35 and 515 entries for the four
+//      sizes) - plus the ticks of the run; the line after each bench line
+//      gives the two vectors apart.
+//      TC means the TXFIFO AND the shift register empty in this mode
+//      (RM0444 33.5.5), so the drain still ends on the last frame out.
 //   t  the tick's floor: one second (hz cycles on the ruler) of masked
 //      Idle::idle() turns with the console drained - not a kernel loop:
 //      no kernel runs here. wall = the second, irq = the ticks, isr = the

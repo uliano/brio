@@ -293,8 +293,10 @@ bool lpuart1_line_ok() {
 
 // The task instantiations this suite drives. The DEFAULT one is what
 // every console in the tree uses; the others are the option struct at
-// work, and each is a compile-time proof that its branch exists.
-constexpr UartOptions hdsel_opts = uart_half_duplex();
+// work, and each is a compile-time proof that its branch exists. The
+// plain loop STATES the FIFO off: it is letter e's one-register control,
+// and the default would turn the FIFO on for USART1.
+constexpr UartOptions hdsel_opts = uart_half_duplex({.fifo = false});
 constexpr UartOptions hdsel_fifo_opts{
     .fifo = true,
     .rx_threshold = UartFifoThreshold::full_or_empty,
@@ -3923,18 +3925,22 @@ void ty_streaming() {
         }
     }
 
-    // AND THE SAME WITH THE FIFO ON, at the console's own rate - on a
-    // console that HAS one. A BASIC instance has not (letter a measures
-    // the enable being dropped), so the leg names the fact and claims
-    // nothing rather than turning FIFOEN's refusal into a stream test.
+    // AND THE SAME WITH FIFOEN FLIPPED UNDER IT, at the console's own rate
+    // - on a console that HAS a FIFO. The task runs FIFO mode where the
+    // instance has one (Serial::fifo_mode), so the leg streams with the
+    // enable the task was NOT built for, and puts it back. A BASIC
+    // instance has none (letter a measures the enable being dropped), so
+    // the leg names the fact and claims nothing rather than turning
+    // FIFOEN's refusal into a stream test.
     feed();
     [[maybe_unused]] bool fifo_ok = false;
     if constexpr (Usart<2>::is_full) {
+        constexpr bool built = Serial::fifo_mode;
         host_announce("sink", 0, 115200, "8N1", 900, 0);
         {
             InterruptGuard guard;
             Usart<2>::enable(false);
-            (void)Usart<2>::fifo(true);
+            (void)Usart<2>::fifo(!built);
             (void)Usart<2>::fifo_thresholds(UartFifoThreshold::half,
                                             UartFifoThreshold::none);
             Usart<2>::enable(true);
@@ -3961,13 +3967,13 @@ void ty_streaming() {
         {
             InterruptGuard guard;
             Usart<2>::enable(false);
-            (void)Usart<2>::fifo(false);
+            (void)Usart<2>::fifo(built);
             Usart<2>::enable(true);
         }
         host_settle();
-        print(serial, "  with FIFOEN set on the console: ", fifo_got,
-              " bytes in, ", fifo_bad, " wrong, hardware overruns ", fifo_hw,
-              crlf);
+        print(serial, "  with FIFOEN ", built ? "cleared" : "set",
+              " under the console: ", fifo_got, " bytes in, ", fifo_bad,
+              " wrong, hardware overruns ", fifo_hw, crlf);
         fifo_ok = fifo_got >= 2000u && fifo_bad == 0u;
     } else {
         print(serial, "  SKIPPED, no verdict claimed: the console is a BASIC "
@@ -3978,8 +3984,8 @@ void ty_streaming() {
                   "kernel clock it can take",
                   clean == tried && tried >= (console_mux ? 3u : 2u));
     if constexpr (Usart<2>::is_full) {
-        bench.verdict("and with the FIFO turned on under it, without one line "
-                      "of the transport changing", fifo_ok);
+        bench.verdict("and with FIFOEN flipped under it, without one line of "
+                      "the transport changing", fifo_ok);
     }
 }
 

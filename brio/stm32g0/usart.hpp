@@ -60,7 +60,11 @@
  *    usart_ker_ck AFTER the PRESC prescaler, not PCLK by assumption;
  *  - TXE is a CONDITION (transmit data register empty), so its interrupt
  *    is armed only while the ring holds something and disarmed from the
- *    handler when it runs dry;
+ *    handler when it runs dry - and so are TXFNF and TXFT, the FIFO
+ *    view's two, of which the task rides TXFT by default: an instance
+ *    with the 8-deep FIFOs (table 184) runs the task in FIFO mode
+ *    unless the program says otherwise, one interrupt refilling the
+ *    whole transmit FIFO and the receiver nine characters deep;
  *  - ORE raises the interrupt whenever RXNEIE is set (33.8.9), and it is
  *    cleared ONLY through ICR.ORECF - a handler that reads RDR and
  *    leaves ORE standing re-enters for ever. Every error flag has its
@@ -671,9 +675,15 @@ struct Usart {
 
     /// CR1.FIFOEN (33.5.4). Refused on a BASIC instance, where the bit
     /// is Reserved - and where writing it reads back clear anyway,
-    /// which is measured.
+    /// which is measured. And turning it ON is refused in LIN or IrDA
+    /// mode: 33.8.1's note on the bit, "it must not be enabled in IrDA
+    /// and LIN modes" (lin() and irda() refuse the other order).
     static bool fifo(bool on) {
         if (enabled() || !is_full) {
+            return false;
+        }
+        if (on && ((regs().CR2 & USART_CR2_LINEN) != 0u ||
+                   (regs().CR3 & USART_CR3_IREN) != 0u)) {
             return false;
         }
         regs().CR1 = on ? (regs().CR1 | USART_CR1_FIFOEN)
@@ -808,6 +818,8 @@ struct Usart {
     /// forbids is REFUSED here rather than written: STOP must be 00 and
     /// CLKEN, SCEN, HDSEL and IREN clear. OVER8 too - equation 2 of
     /// 33.5.7 gives LIN, smartcard and IrDA the OVER8 = 0 formula alone.
+    /// And FIFOEN, which 33.8.1 forbids in LIN mode - a Uart leaves it
+    /// set by default on a FULL instance, so the order matters here.
     static bool lin(const LinConfig& c) {
         if (enabled() || !has_lin_mode) {
             return false;
@@ -815,7 +827,7 @@ struct Usart {
         const uint32_t cr1 = regs().CR1;
         const uint32_t cr2 = regs().CR2;
         const uint32_t cr3 = regs().CR3;
-        if ((cr1 & (USART_CR1_M0 | USART_CR1_M1 | USART_CR1_OVER8)) != 0u ||
+        if ((cr1 & (USART_CR1_M0 | USART_CR1_M1 | USART_CR1_OVER8 | USART_CR1_FIFOEN)) != 0u ||
             (cr2 & (USART_CR2_STOP | USART_CR2_CLKEN)) != 0u ||
             (cr3 & (USART_CR3_SCEN | USART_CR3_HDSEL | USART_CR3_IREN)) != 0u) {
             return false;
@@ -1037,13 +1049,14 @@ struct Usart {
     /// IrDA (33.5.18): IREN + IRLP + the GTPR.PSC divisor, which is both
     /// the low-power baud divisor and the receive glitch filter. Stop
     /// bits must be 1 and LINEN/CLKEN/SCEN/HDSEL clear - refused, not
-    /// written over.
+    /// written over - and FIFOEN clear, 33.8.1's note on that bit.
     static bool irda(const IrdaConfig& c) {
         if (enabled() || !is_full || !irda_valid(c)) {
             return false;
         }
         const uint32_t cr2 = regs().CR2;
-        if ((cr2 & (USART_CR2_LINEN | USART_CR2_STOP | USART_CR2_CLKEN)) != 0u ||
+        if ((regs().CR1 & USART_CR1_FIFOEN) != 0u ||
+            (cr2 & (USART_CR2_LINEN | USART_CR2_STOP | USART_CR2_CLKEN)) != 0u ||
             (regs().CR3 & (USART_CR3_SCEN | USART_CR3_HDSEL)) != 0u) {
             return false;
         }
@@ -1293,12 +1306,34 @@ constexpr bool uart_engines_distinct() {
 }
 
 /**
+ * UartOptions::fifo - CR1.FIFOEN as the task's option, in THREE states:
+ * stated on (`.fifo = true`, refused at compile time on an instance with
+ * no FIFO), stated off (`.fifo = false`), and UNSTATED, the default, in
+ * which the task decides from the instance (UartTask::fifo_mode says
+ * how). A bool cannot tell "off" from "not said", and std::optional<bool>
+ * is not a structural type, which a template argument must be - so this
+ * is a struct a bool converts to IMPLICITLY, on purpose: every program
+ * that wrote `.fifo = true` or `.fifo = false` still means what it meant.
+ */
+struct UartFifo {
+    bool stated = false;
+    bool on = false;
+    constexpr UartFifo() = default;
+    constexpr UartFifo(bool v) : stated(true), on(v) {}
+};
+
+/**
  * EVERYTHING THE CHAPTER OFFERS A BYTE TRANSPORT, as one constexpr
  * struct the task takes as its LAST template argument - and every member
- * of it is `if constexpr`-ed below, so `UartOptions{}` (the default)
- * compiles to exactly what the task compiled to before the parameter
- * existed. That is not a hope: the md5 gate on every pre-existing
- * stm32g0 image is what says so (docs/stm32g0/usart.md).
+ * of it is `if constexpr`-ed below, so a feature nobody names costs
+ * nothing.
+ *
+ * THE DEFAULT IS NOT THE ONE-REGISTER SHAPE: with `fifo` unstated the
+ * task turns the FIFO on wherever the instance has one and paces the
+ * transmitter on the FIFO running EMPTY, one interrupt refilling eight
+ * characters, because that is the better transport on this silicon
+ * (docs/stm32g0/usart.md has the numbers). A program that wants one
+ * character per interrupt says `.fifo = false`.
  *
  * WHY AN OPTIONS STRUCT AND NOT TEN TEMPLATE PARAMETERS: the surface of
  * Uart is a SHARED one (util/serial_port.hpp and print() compile
@@ -1314,17 +1349,33 @@ struct UartOptions {
     UsartPrescaler prescaler = UsartPrescaler::div1;
     bool over8 = false;
 
-    /// FIFO mode (33.5.4). The thresholds are written when they are not
-    /// `none`; the task's own pump rides RXFNE and TXFNF whatever they
-    /// say, EXCEPT that a transmit threshold makes it ride TXFT instead
-    /// (which is what a threshold is for). A RECEIVE threshold never
-    /// replaces RXFNE in this task: a threshold-only receiver leaves the
-    /// tail below the threshold unserved until something else happens,
-    /// and a console cannot have that. RXFT + the receiver time-out is
-    /// the Modbus pattern, and it is driven through the resource.
-    bool fifo = false;
+    /// FIFO mode (33.5.4): unstated, the task decides (UartFifo above,
+    /// UartTask::fifo_mode). The thresholds are written when the FIFO is
+    /// on and they are not `none`.
+    ///
+    /// THE TRANSMITTER RIDES TXFT, by default at code 101, "TXFIFO
+    /// becomes empty" (33.8.4): the flag rises as the shift register
+    /// takes the last entry, so the handler refills all eight places
+    /// while that character still has a whole frame to go - one
+    /// interrupt per eight characters, and no gap on the wire unless the
+    /// handler is a frame late. A code below 101 trades interrupts for
+    /// slack against a late handler; `none` rides TXFNF, which under a
+    /// long print tops the FIFO up one character an entry - measured
+    /// dearer per character than the FIFO left off. A transmit threshold
+    /// never leaves a tail behind: the FIFO drains on its own, so the
+    /// condition always comes.
+    ///
+    /// A RECEIVE threshold never replaces RXFNE in this task: a
+    /// threshold-only receiver leaves the tail below the threshold
+    /// unserved until something else happens, and a console cannot have
+    /// that. What the FIFO buys the receiver is SLACK - nine characters
+    /// a masked or busy core can be late by, where the one-register
+    /// receiver has one - and the drain of everything that arrived in
+    /// one entry. RXFT + the receiver time-out is the Modbus pattern,
+    /// and it is driven through the resource.
+    UartFifo fifo{};
     UartFifoThreshold rx_threshold = UartFifoThreshold::none;
-    UartFifoThreshold tx_threshold = UartFifoThreshold::none;
+    UartFifoThreshold tx_threshold = UartFifoThreshold::full_or_empty;
 
     /// The pad options of 33.8.3.
     bool swap = false;
@@ -1458,7 +1509,7 @@ class UartTask {
 
     // The instance-capability refusals of table 183/184, at the line the
     // application typed them on.
-    static_assert(!opts.fifo || S::has_fifo_mode,
+    static_assert(!(opts.fifo.stated && opts.fifo.on) || S::has_fifo_mode,
                   "brio Uart: FIFO mode is a FULL instance's (RM0444 table 184); this "
                   "instance has none, and FIFOEN would not even stick");
     static_assert(opts.prescaler == UsartPrescaler::div1 || S::has_prescaler,
@@ -1532,6 +1583,24 @@ public:
     static constexpr bool has_rx_engine = RxEngine::present;
     static constexpr UartOptions options = opts;
 
+    /// FIFO MODE AS THIS INSTANTIATION RESOLVED IT - what `options.fifo`
+    /// alone no longer says. Stated, the option decides (and "on" is
+    /// refused above where the instance has no FIFO). Unstated, the task
+    /// decides: ON where the instance has the FIFO - table 184 gives it
+    /// to the FULL USARTs and to every LPUART, `has_fifo_mode` - EXCEPT
+    /// under a wake on an address match, because 33.5.21 says "when the
+    /// FIFO is enabled, waking up from low-power mode on address match
+    /// is only possible when mute mode is enabled", mute mode is the
+    /// resource's and not this task's, and without the FIFO that wake
+    /// needs nothing else.
+    static constexpr bool fifo_mode =
+        opts.fifo.stated ? opts.fifo.on
+                         : (S::has_fifo_mode &&
+                            opts.wake_from_stop != UsartWakeSource::address_match);
+    static_assert(opts.fifo.stated || !fifo_mode || S::has_fifo_mode,
+                  "brio Uart: the default FIFO decision must follow the instance's "
+                  "presence (RM0444 table 184): FIFOEN does not stick on a BASIC USART");
+
     /// The rate the baud divisor really divides, for the app's clock -
     /// the kernel clock the options name, through the prescaler they
     /// name. A compile-time constant with a static clock.
@@ -1593,7 +1662,7 @@ public:
         if constexpr (opts.prescaler != UsartPrescaler::div1) {
             (void)S::prescaler(opts.prescaler);
         }
-        if constexpr (opts.fifo) {
+        if constexpr (fifo_mode) {
             (void)S::fifo(true);
             (void)S::fifo_thresholds(opts.rx_threshold, opts.tx_threshold);
         }
@@ -1796,11 +1865,10 @@ public:
             (void)hz;
         } else {
             constexpr uint32_t ring_drain_spins = 8'000'000u;
-            constexpr uint32_t frame_spins = 200'000u;
             uint32_t spins = ring_drain_spins;
             while (!m_tx.empty() && spins-- != 0u) {
             }
-            spins = frame_spins;
+            spins = tail_spins;
             while ((S::status() & UsartFlag::tc) == 0u && spins-- != 0u) {
             }
             const Divisor reg = plain ? Divisor{usart_brr(hz, m_baud)}
@@ -1835,11 +1903,10 @@ public:
             return false;
         }
         constexpr uint32_t ring_drain_spins = 8'000'000u;
-        constexpr uint32_t frame_spins = 200'000u;
         uint32_t spins = ring_drain_spins;
         while (!m_tx.empty() && spins-- != 0u) {
         }
-        spins = frame_spins;
+        spins = tail_spins;
         while ((S::status() & UsartFlag::tc) == 0u && spins-- != 0u) {
         }
         S::enable(false);
@@ -1897,7 +1964,7 @@ public:
             }
         }
 
-        if constexpr (opts.fifo) {
+        if constexpr (fifo_mode) {
             // 33.5.4: the RXFIFO carries PE/NE/FE WITH EACH ENTRY and
             // ISR reports the flags of the entry AT THE HEAD - so ISR is
             // re-read before every RDR, or the attribution slides by one
@@ -1959,19 +2026,36 @@ public:
             m_hw_overruns = m_hw_overruns + 1;
         }
 
-        if constexpr (opts.fifo) {
+        if constexpr (fifo_mode) {
             // Fill while there is room, on whichever condition the
-            // options armed: TXFT when a transmit threshold was named,
-            // TXFNF otherwise. Either way the loop stops at TXFNF clear,
-            // so the FIFO is filled and not overrun.
+            // options armed: TXFT at the transmit threshold (by default
+            // the FIFO run empty), TXFNF under `none`. Either way the
+            // loop stops at TXFNF clear, so the FIFO is filled and not
+            // overrun - and an entry for the RECEIVER tops it up too.
+            //
+            // THE RING IS READ AS A RUN: read_span() hands over the
+            // contiguous characters, the loop stores them while TXFNF
+            // stands - one ISR load, one byte load and one TDR store a
+            // character - and consume() releases what went, once. A ring
+            // found empty disarms at once, the one the FIFO has just
+            // taken the last of included, so a print does not end on an
+            // entry that finds nothing to send.
             if (tx_armed()) {
-                while ((r.ISR & UsartFlag::txfnf) != 0u) {
-                    const auto v = m_tx.pop();
-                    if (!v) {
+                for (;;) {
+                    const auto run = m_tx.read_span();
+                    if (run.empty()) {
                         disarm_tx();
                         break;
                     }
-                    r.TDR = *v;
+                    uint32_t sent = 0;
+                    while (sent < run.size() && (r.ISR & UsartFlag::txfnf) != 0u) {
+                        r.TDR = run[sent];
+                        ++sent;
+                    }
+                    m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(sent));
+                    if (sent < run.size()) {
+                        break;   // the FIFO is full; the ring keeps the rest
+                    }
                 }
             }
         } else if ((st & UsartFlag::txe) != 0u && (r.CR1 & USART_CR1_TXEIE_TXFNFIE) != 0u) {
@@ -2217,11 +2301,23 @@ private:
     }
 
     /// Which transmit condition this transport rides, and how it is
-    /// armed and disarmed. Without the FIFO it is TXE (TXEIE); with a
-    /// transmit threshold named it is TXFT (TXFTIE), which is what a
-    /// threshold is for; with the FIFO and no threshold it is TXFNF.
+    /// armed and disarmed. Without the FIFO it is TXE (TXEIE); with it,
+    /// TXFT (TXFTIE) at the transmit threshold - by default the FIFO run
+    /// empty - and TXFNF where the threshold is `none`.
     static constexpr bool tx_on_threshold =
-        opts.fifo && opts.tx_threshold != UartFifoThreshold::none;
+        fifo_mode && opts.tx_threshold != UartFifoThreshold::none;
+
+    /// The bound of the TC wait rebase() and set_baud() make before a
+    /// BRR write, in spins - a guard against a wedge, not a time. TC
+    /// rises when the last frame has left the shift register AND, in FIFO
+    /// mode, the TXFIFO is empty (33.5.5, step 8), so what is still to go
+    /// once the ring is empty is two frames without the FIFO (the data
+    /// register and the shift register) and up to nine with it (eight
+    /// places and the shift register): the FIFO's depth scales the bound,
+    /// so the margin the one-register transport had over its tail is the
+    /// margin the FIFO's tail gets.
+    static constexpr uint32_t tail_spins =
+        fifo_mode ? 200'000u * (uint32_t{S::fifo_depth} + 1u) : 200'000u;
 
     static void disarm_tx() {
         if constexpr (tx_on_threshold) {
