@@ -501,10 +501,21 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     CHECK(TxEngine::blocks == started + 1u);
     CHECK_FALSE(Streamed::tx_idle());
 
-    // The completion releases exactly that run; nothing else is queued,
-    // so no next block starts.
+    // A byte queued behind a running block cannot CLAIM the engine: it
+    // waits in the ring, and the completion starts it as the next block.
+    CHECK(Streamed::write_byte('y'));
+    CHECK(TxEngine::blocks == started + 1u);
     TxEngine::next_flags = TxEngine::flag_complete;
     CHECK(Streamed::dma_isr());
+    CHECK(TxEngine::blocks == started + 2u);
+    CHECK(TxEngine::length == 1u);
+
+    // The completion releases exactly that run; nothing else is queued,
+    // so the claim the pump took is given back and no next block starts.
+    TxEngine::next_flags = TxEngine::flag_complete;
+    CHECK(Streamed::dma_isr());
+    CHECK(TxEngine::blocks == started + 2u);
+    CHECK_FALSE(TxEngine::busy());
     CHECK(Streamed::tx_idle());
 
     // A bus error throws the block away and is counted.

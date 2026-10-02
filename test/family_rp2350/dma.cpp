@@ -1,7 +1,7 @@
 // DMA family smoke TU: the sixteen channels, the four interrupt lines,
 // the count modes in TRANS_COUNT's top nibble, the four address steps,
 // the pacing timers, the sniffer, the read-only security and MPU views,
-// and the two engines - every verb instantiated, and the CTRL and
+// and the three engines - every verb instantiated, and the CTRL and
 // TRANS_COUNT words computed at COMPILE TIME against the fields the
 // device header names, which is where this chip differs from its
 // predecessor by two bits' worth of shifting.
@@ -11,6 +11,8 @@
 // what the sweep proves is that the controller knows no instruction set
 // (the interrupt line goes to `Irq`, which is an NVIC under one
 // architecture and Hazard3's own under the other).
+#include <span>
+
 #include "rp2350/dma.hpp"
 #include "rp2350/uart.hpp"
 
@@ -311,11 +313,32 @@ static_assert(Tx::size == DmaSize::byte && WideTx::size == DmaSize::half &&
               WordRx::size == DmaSize::word);
 static_assert(Tx::flag_complete != Tx::flag_error && Tx::flag_half == 0u);
 
+// The binding word: EN, the request, CHAIN_TO at the channel itself, and
+// IRQ_QUIET for a binding that reports errors alone - nothing else.
+static_assert(dma_binding_word(4, Dreq::spi0_tx, false, DmaReport::blocks) ==
+              (DMA_CH0_CTRL_TRIG_EN_BITS | (4u << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB) |
+               (static_cast<uint32_t>(Dreq::spi0_tx) << DMA_CH0_CTRL_TRIG_TREQ_SEL_LSB)));
+static_assert((dma_binding_word(4, Dreq::spi0_tx, false, DmaReport::errors) ^
+               dma_binding_word(4, Dreq::spi0_tx, false, DmaReport::blocks)) ==
+              DMA_CH0_CTRL_TRIG_IRQ_QUIET_BITS);
+static_assert(dma_beat_bits<uint16_t>() == (1u << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB));
+
 void dma_engine_verbs() {
     Tx::arm(&sink, Dreq::uart0_tx);
     (void)Tx::service();
     (void)Tx::start(bytes, 16);
+    (void)Tx::start(std::span<const uint8_t>{bytes, 16});
     (void)Tx::start_fixed(bytes, 16);
+    // The claim, then a block on the claimed channel, or the claim back.
+    if (Tx::claim()) {
+        (void)Tx::launch(std::span<const uint8_t>{bytes, 16});
+    }
+    if (Tx::claim()) {
+        Tx::unclaim();
+    }
+    if (Tx::claim()) {
+        (void)Tx::launch_fixed(bytes, 16);
+    }
     (void)Tx::complete();
     (void)Tx::busy();
     (void)Tx::in_flight();
@@ -324,11 +347,15 @@ void dma_engine_verbs() {
     (void)Tx::faults();
     Tx::clear_faults();
     Tx::stop();
+    // A binding that reports a bus error and no completion.
+    Tx::arm(&sink, Dreq::spi0_tx, false, Tx::Report::errors);
+    Tx::stop();
 
     Rx::arm(&sink, Dreq::uart0_rx, true);
     (void)Rx::service();
     (void)Rx::idle();
     (void)Rx::start(bytes, 16);
+    (void)Rx::start(std::span<uint8_t>{bytes, 16});
     (void)Rx::start_discard(bytes, 16);
     (void)Rx::take();
     (void)Rx::full();
@@ -339,14 +366,48 @@ void dma_engine_verbs() {
     Rx::clear_faults();
     Rx::stop();
 
-    uint16_t halves[4] = {};
+    // THE BEAT IS THE TYPE: a half-word engine takes bytes and
+    // half-words, a word engine all three.
+    alignas(4) uint16_t halves[4] = {};
     WideTx::arm(&sink, Dreq::spi0_tx);
     (void)WideTx::start(halves, 4);
+    (void)WideTx::start(std::span<const uint16_t>{halves, 4});
+    (void)WideTx::start(bytes, 4);
+    (void)WideTx::start_fixed(halves, 4);
     WideTx::stop();
     alignas(4) uint32_t words[4] = {};
     WordRx::arm(&sink, Dreq::spi0_rx);
     (void)WordRx::start(words, 4);
+    (void)WordRx::start(halves, 4);
+    (void)WordRx::start(bytes, 4);
+    (void)WordRx::start_discard(halves, 4);
     WordRx::stop();
+}
+
+// ---- memory to memory --------------------------------------------------------
+
+using Copy = DmaCopyEngine<6>;
+using CopyOnLine = DmaCopyEngine<7, 2>;
+static_assert(Copy::present && Copy::channel == 6u && CopyOnLine::irq_line == 2u);
+
+void dma_copy_verbs() {
+    alignas(4) static uint32_t from[8];
+    alignas(4) static uint32_t to[8];
+    static constexpr uint16_t pixel = 0xF800u;
+    Copy::arm(DmaReport::errors);   // polled
+    (void)Copy::copy(to, from, 8);
+    (void)Copy::copy(bytes, bytes + 32, 16);
+    (void)Copy::fill(to, from, 8);
+    (void)Copy::fill(reinterpret_cast<uint16_t*>(to), &pixel, 16);
+    (void)Copy::busy();
+    (void)Copy::errors();
+    Copy::clear_errors();
+    (void)Copy::remaining();
+    (void)Copy::abandon();
+    Copy::stop();
+    CopyOnLine::arm();   // every block's end on line 2
+    (void)CopyOnLine::service();
+    CopyOnLine::stop();
 }
 
 // ---- the engines in a transport's slots ------------------------------------

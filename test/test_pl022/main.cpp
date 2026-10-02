@@ -30,6 +30,9 @@ using Host = Pl022Host<SimPl022, 0, host_pins, SimPl022NoEngine, SimPl022NoEngin
 using TxEngine = SimPl022Engine<0>;
 using RxEngine = SimPl022Engine<1>;
 using Engined = Pl022Host<SimPl022, 0, host_pins, TxEngine, RxEngine>;
+using WideTx = SimPl022Engine<2, uint16_t>;
+using WideRx = SimPl022Engine<3, uint16_t>;
+using WideHost = Pl022Host<SimPl022, 0, host_pins, WideTx, WideRx>;
 using Client = Pl022Client<SimPl022, 1, client_pins>;
 using Block = Pl022Ssp<SimPl022, 0>;
 
@@ -39,10 +42,12 @@ void fresh() {
     SimPl022::reset_all();
     TxEngine::reset();
     RxEngine::reset();
+    WideTx::reset();
+    WideRx::reset();
 }
 
-uint8_t out_buf[32];
-uint8_t in_buf[32];
+alignas(4) uint8_t out_buf[32];
+alignas(4) uint8_t in_buf[32];
 
 Host::Request plain_request(uint16_t len) {
     Host::Request r{};
@@ -328,9 +333,13 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     REQUIRE(Engined::init(clock));
 
     // Both engines armed on the data register at the bring-up, and the
-    // requests left DOWN until a block stands behind them.
+    // requests left DOWN until a block stands behind them. The transmit
+    // engine reports a bus error and nothing else: the receive block's
+    // completion is the transaction's, ONE interrupt a transaction.
     CHECK(TxEngine::armed == 1u);
     CHECK(RxEngine::armed == 1u);
+    CHECK(TxEngine::errors_only);
+    CHECK_FALSE(RxEngine::errors_only);
     CHECK(regs().SSPDMACR == 0u);
 
     Engined::Request r{};
@@ -342,16 +351,19 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(TxEngine::blocks == 1u);
     CHECK(RxEngine::blocks == 1u);
     CHECK(TxEngine::length == 24u);
+    CHECK(TxEngine::beat == 1u);
     CHECK(regs().SSPDMACR == (SpiDmaControl::tx | SpiDmaControl::rx));
     CHECK(regs().SSPIMSC == 0u);   // the pump is not in this path
 
     // The RECEIVE block's completion is the transaction's: the requests
-    // go down, the select goes up, and the status is clean.
+    // go down, the select goes up, the status is clean - and the transmit
+    // block, which raised nothing, is completed by that proof.
     RxEngine::next_flags = RxEngine::flag_complete;
     CHECK(Engined::dma_isr());
     CHECK(regs().SSPDMACR == 0u);
     CHECK(SimPl022Bench::pin_level[cs_pin]);
     CHECK(Engined::status() == spi_ok);
+    CHECK_FALSE(TxEngine::busy());
 
     // A request with no out buffer clocks the fixed dummy cell; one with
     // no in buffer lands in the sink.
@@ -373,7 +385,7 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(Engined::status() == spi_dma_fault);
     CHECK(regs().SSPDMACR == 0u);
 
-    // Sixteen-bit frames fall back to the pump: the engines carry bytes.
+    // Sixteen-bit frames fall back to the pump on BYTE engines.
     fresh();
     REQUIRE(Engined::init(clock));
     Engined::Request wide{};
@@ -390,6 +402,68 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     Engined::release();
     CHECK(TxEngine::stops == 1u);
     CHECK(RxEngine::stops == 1u);
+}
+
+TEST_CASE("half-word engines carry both frame sizes, each at its own beat") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(WideHost::init(clock));
+    CHECK(WideTx::errors_only);
+
+    // A 16-bit request on aligned buffers rides the engines, one
+    // half-word beat a frame, the length in FRAMES.
+    WideHost::Request r{};
+    r.cs = SimPl022PinRef{cs_pin};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    r.rx = lend<Lease::reply>(in_buf);
+    r.len = 8;
+    r.bits = SpiDataSize::bits16;
+    CHECK_FALSE(WideHost::start(r));
+    CHECK(WideTx::blocks == 1u);
+    CHECK(WideRx::blocks == 1u);
+    CHECK(WideTx::beat == 2u);
+    CHECK(WideRx::beat == 2u);
+    CHECK(WideTx::length == 8u);
+    CHECK(regs().SSPIMSC == 0u);
+    WideRx::next_flags = WideRx::flag_complete;
+    CHECK(WideHost::dma_isr());
+    CHECK(WideHost::status() == spi_ok);
+
+    // The same width with no buffers clocks the fixed cell and fills the
+    // sink at the frame's beat.
+    WideHost::Request blind{};
+    blind.cs = SimPl022PinRef{cs_pin};
+    blind.len = 4;
+    blind.bits = SpiDataSize::bits16;
+    CHECK_FALSE(WideHost::start(blind));
+    CHECK(WideTx::fixed);
+    CHECK(WideRx::discarded);
+    CHECK(WideTx::beat == 2u);
+    WideRx::next_flags = WideRx::flag_complete;
+    CHECK(WideHost::dma_isr());
+
+    // 8-bit frames on the same engines: a byte beat.
+    WideHost::Request narrow = r;
+    narrow.bits = SpiDataSize::bits8;
+    CHECK_FALSE(WideHost::start(narrow));
+    CHECK(WideTx::beat == 1u);
+    CHECK(WideRx::beat == 1u);
+    WideRx::next_flags = WideRx::flag_complete;
+    CHECK(WideHost::dma_isr());
+
+    // A buffer one byte off a half-word is not one the DMA can take: the
+    // request goes to the pump and no block starts.
+    const uint32_t blocks = WideTx::blocks;
+    WideHost::Request odd{};
+    odd.cs = SimPl022PinRef{cs_pin};
+    odd.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf + 1));
+    odd.len = 4;
+    odd.bits = SpiDataSize::bits16;
+    CHECK_FALSE(WideHost::start(odd));
+    CHECK(WideTx::blocks == blocks);
+    CHECK(regs().SSPIMSC == (SpiInterrupt::rx | SpiInterrupt::rx_timeout));
+
+    WideHost::release();
 }
 
 TEST_CASE("a client frames on its own select pad, and may listen dark") {

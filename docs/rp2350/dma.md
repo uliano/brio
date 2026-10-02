@@ -10,12 +10,16 @@ timing, 12.6.8 the pacing timers, the sniffer, the abort and the debug
 registers, 12.6.10 the registers), 12.1 (the UART's DMA interface), 7.5
 (the reset controller), 3.2 (the interrupt lines); Appendix E,
 RP2350-E5 and RP2350-E8. The driver: `brio/rp2350/dma.hpp` (the block, a
-channel, a line, a timer, the sniffer, the read-only MPU view, the two
+channel, a line, a timer, the sniffer, the read-only MPU view, the three
 engines) with the request numbers in `dma_engine.hpp` beside the empty
-slot's tag; the engines' one user today is `uart.hpp`'s transport. The
+slot's tag. The engines' users are the transports the IP strata drive
+with them - the PL011's ([../pl011/README.md](../pl011/README.md)), the
+PL022 host's data phase ([spi.md](spi.md)), the DW_apb_i2c host's read
+phase ([i2c.md](i2c.md)) - and the PIO, PWM and ADC chapters. The
 reference suite: `test_rp2350_dma`, whose console prints through a
 transmit engine, and which runs on both of this chip's architectures from
-one source.
+one source; `bench_rp2350`'s letter d prices the engines
+([../design/benchmark.md](../design/benchmark.md)).
 
 ## What the silicon does
 
@@ -112,6 +116,93 @@ effect is worth knowing: a successful write to a channel's control
 registers LOCKS that channel's assignment, and only the block's reset
 (which `Dma::init()` performs) clears the lock again.
 
+## The engines, from this chapter
+
+An engine is ONE CHANNEL BOUND ONCE and fed a block at a time, and every
+choice in it answers an item of the controller's own offer:
+
+- **The four live registers and their four aliases** (12.6.2, 12.6.3.1).
+  A completed channel KEEPS its CTRL, EN included, and starts only on a
+  trigger write; an address that is not reprogrammed is the next
+  sequence's start. So `arm()` writes the peripheral side's address once
+  and CTRL once - the request, the priority, CHAIN_TO at the channel
+  itself, what the channel reports, EN - and a block writes the count and
+  the memory address in the TUPLE the chapter names for its direction:
+  (TRANS_COUNT, READ_ADDR_TRIG) to gather a run into a peripheral,
+  (WRITE_ADDR, TRANS_COUNT_TRIG) to scatter one out of it, (READ_ADDR,
+  WRITE_ADDR, TRANS_COUNT_TRIG) for memory to memory. The second store is
+  the trigger. CTRL is written again only when the block's beat or step
+  differs from the word the channel holds, which the engine keeps per
+  channel (`DmaBinding`) and compares, so the question costs a load and
+  not a bus read.
+- **The width** (12.6.2.3): DATA_SIZE is one field, the same for the read
+  and the write, so ONE channel carries 8-, 16- and 32-bit blocks, each
+  at the width of the run it is handed. `Elem` is the WIDEST beat the
+  binding allows, and a wider run does not compile; a half-word or word
+  run not aligned to its beat is refused at run time (12.6.2.1.1: the DMA
+  does not enforce alignment).
+- **The count's MODE nibble** (12.6.2.2.1): a block's count is checked
+  against the 28 bits the nibble leaves - one compare - because a larger
+  one written whole would select a mode, TRIGGER_SELF among them.
+- **The flags.** A completion is acted on through the line's INTS, which
+  clears the raw status with it, and a bus error where it is seen - in
+  `service()`, `abandon()` and `stop()`. No block start clears anything:
+  a channel still holding a bus error ignores its trigger (12.6.7.1), so a
+  block over one never begins rather than misbehaving.
+- **What a channel reports** (12.6.5, 12.6.7.1): IRQ_QUIET takes a
+  block's completion off the line and leaves a bus error on it - "bus
+  errors always cause the channel's interrupt request to be asserted".
+  `DmaReport::errors` is that binding, and it is how a pair whose second
+  completion proves the first's costs ONE interrupt: the SPI host's
+  transmit engine is armed with it ([spi.md](spi.md)).
+- **The gate** is the block's reset line, released ONCE by `Dma::init()`;
+  there is no per-channel clock to open.
+- **The credit counter** (12.6.4.2, 12.6.8.4): a receive engine clears
+  its channel's count before every run, because a peripheral that kept
+  requesting while the channel sat completed has banked credits the next
+  run would spend reading nothing (measured, the transport's account). A
+  transmit engine leaves it: a peripheral's transmit request counts room.
+- **Memory to memory** is the controller's native case (TREQ_SEL
+  permanent, one read and one write a clock): `DmaCopyEngine`, any
+  channel, `copy` and `fill` at the beat of their element type.
+- **The pacing timers** (12.6.8.1): any engine bound to a timer's request
+  is the PACED shape - a table into one cell at a known rate, the
+  "memory to a pad register" a timer drives.
+- **The abort** (12.6.8.3, RP2350-E5) belongs to `arm()`, `abandon()` and
+  `stop()`, never to a block start: a receive run is restarted only when
+  it has ended, and a start over a channel still BUSY - a caller's
+  misuse, not a transport's path - is answered by binding it again.
+- **Declined this round, each for its reason.** The count modes and
+  RING_SIZE (a self-re-arming circular receive): the transports' receive
+  is still a run re-armed by its owner, and the circular shape over the
+  ring's own storage is the next round's, with its ring
+  (`docs/design/ring.md`). CHAIN_TO and MULTI_CHAN_TRIGGER: one start of
+  an SPI pair in one store is the launch order an open question about
+  the engined SPI is being bisected over ([spi.md](spi.md)), so the
+  launch keeps its order until that settles. HIGH_PRIORITY: kept as an
+  `arm()` option, contended by nothing yet.
+
+THE CLAIM. A transmit engine's owner may start blocks from two contexts
+- a transport's thread and its completion on the line - and "is the
+channel mine" is the one decision they race for: `claim()` is its
+test-and-set, taken under the owner's mask; `launch()` programs a
+claimed channel with the mask down, because a channel that has not
+started cannot complete under its loader; `unclaim()` gives a claim back
+with nothing sent; `start()` is `claim()` then `launch()` for an owner
+with one context. Before the trigger store a compiler fence
+(`dma_handoff_fence`) keeps the block's bookkeeping and its data above
+it; both cores issue their accesses in program order, so no barrier
+instruction is owed.
+
+WHAT A BLOCK START COSTS, counted in the release listings (the PL011
+transport's `pump_tx`, the console of `test_rp2350_dma`): on the
+Cortex-M33 7 instructions under the mask - the claim - and about 30
+after it with two stores to the controller; on Hazard3 7 under the mask
+and about 25 after it. The PL022 host's launch of a data phase is a
+receive start and a transmit start: about 70 instructions and six
+accesses to the controller, one of them a read (the receive channel's
+BUSY).
+
 ## Types and verbs
 
 - `DmaSize`, `dma_size_of<Elem>()`, `dma_size_bytes`; `DmaStep` (fixed,
@@ -156,14 +247,32 @@ registers LOCKS that channel's assignment, and only the block's reset
   `stop()`, `security()`; `DmaSniffCalc`.
 - `DmaMpu` (read-only): `regions`, `global_level()`,
   `hides_addresses()`, `region(n)` returning a `DmaMpuRegion`.
+- `DmaReport` (`blocks`, `errors`), `dma_binding_word`,
+  `dma_beat_bits<T>()`, `dma_beat_aligned<T>`, `dma_run_valid<T>`,
+  `dma_handoff_fence()`, and `DmaBinding<ch>` - the CTRL word a channel
+  holds as its engine last wrote it, `steer` / `bind` / `release` and the
+  ISR body every engine folds in.
 - `DmaTxEngine<ch, Elem, line>` / `DmaRxEngine<ch, Elem, line>`: the
-  other families' engine surface - `arm(data, dreq)`, `start`,
-  `start_fixed` / `start_discard`, `service()` (this channel's status on
-  its line, cleared and handed back as `flag_complete` / `flag_error`; no
-  half event on this controller), `complete()`, `busy()` / `idle()`,
-  `take()` (from TRANS_COUNT, with the mode masked off), `full`,
-  `capacity`, `abandon()`, `faults()`, `stop()`. A receive engine clears
-  the channel's request credits before every run.
+  other families' engine surface - `arm(data, dreq, high_priority,
+  report)`, `start` over a pointer and a count or a span of `uint8_t`,
+  `uint16_t` or `uint32_t` no wider than `Elem`, `start_fixed` /
+  `start_discard` (one cell, its own beat), and on the transmit engine
+  the claim: `claim()`, `unclaim()`, `launch` / `launch_fixed`;
+  `service()` (this channel's status on its line, cleared and handed back
+  as `flag_complete` / `flag_error`; no half event on this controller),
+  `complete()`, `busy()` / `idle()`, `take()` (beats, from TRANS_COUNT,
+  with the mode masked off), `full`, `capacity`, `abandon()`,
+  `faults()`, `stop()`, and `Report` - `DmaReport` by a name a template
+  reaches through the engine type. A receive engine clears the channel's
+  request credits before every run.
+- `DmaCopyEngine<ch, line>`: `arm(report, high_priority)` (TREQ_SEL
+  permanent; with `DmaReport::blocks` the completion on `line`, with
+  `DmaReport::errors` routed nowhere and polled), `copy(dst, src, n)` and
+  `fill(dst, cell, n)` - `n` ELEMENTS of `uint8_t`, `uint16_t` or
+  `uint32_t`, the element the beat, the fill's cell in memory and read in
+  place - `busy()`, `errors()` / `clear_errors()`, `remaining()`,
+  `abandon()` (the abort polled to its end, the channel bound again),
+  `service()`, `stop()`.
 - In `uart.hpp`'s transport: the two slots, `dma_isr()` (the line's ISR
   body), `harvest()` (the receive verb), `dma_faults()`.
 
@@ -221,6 +330,26 @@ Link::init(clock, 3'000'000);
 (void)Link::harvest();                // what arrived, published; a run re-armed
 ```
 
+A copy and a fill, polled, and a table poured into one cell at a timer's
+pace with its completion on line 0:
+
+```cpp
+using Copy = brio::DmaCopyEngine<8>;
+Copy::arm(brio::DmaReport::errors);                   // polled: on no line
+(void)Copy::copy(dst_words, src_words, 1024);         // 1024 words, one a clock
+while (Copy::busy()) {}
+static const uint16_t pixel = 0xF800;
+(void)Copy::fill(framebuffer, &pixel, 320u * 480u);   // half-words from one cell
+
+using Paced = brio::DmaTxEngine<9, uint32_t>;
+brio::DmaTimer<0>::set(1, 150);                       // a request a microsecond at 150 MHz
+Paced::arm(&cell, brio::DmaTimer<0>::dreq());
+(void)Paced::start(table, 256);
+extern "C" void isr_dma_0() {
+    if ((Paced::service() & Paced::flag_complete) != 0u) { (void)Paced::complete(); }
+}
+```
+
 Ending a CHAIN needs the whole chain named at once, which is 12.6.8.3's
 closing advice and RP2350-E5's other half:
 
@@ -232,11 +361,9 @@ brio::Dma::abort(brio::DmaChannel<4>::bit | brio::DmaChannel<5>::bit);
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_dma`
-reports **40 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+reports **49 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
 pair, from one source - and every verdict of it was printed THROUGH a
 DMA engine, the console's transport naming one in its transmit slot.
-One letter of it is not reliably green on the Hazard3 half, and the
-finding below says what it loses and why.
 
 - **Sixteen channels and four lines, as the silicon says.** N_CHANNELS
   reads 16, a channel out of reset reads its reset word, and a
@@ -303,6 +430,33 @@ finding below says what it loses and why.
   byte is; on a time-out how many are short and what the engine holds.
 - **The console's engine under a burst**: 2064 bytes of it went out in 46
   blocks, no fault, the engine idle after the drain.
+- **ONE CHANNEL, THREE BEATS.** A byte, a half-word and a word run poured
+  in turn into one cell of RAM by one engine leave it reading 0x00000044,
+  0x00007788 and 0xDDEEFF01 - each beat wrote its own lanes - and a
+  half-word run one byte off its beat, an empty run and a count past the
+  28 bits are refused with the claim given back.
+- **ERRORS ALONE.** Under `DmaReport::errors` a clean block raises
+  nothing - not one entry of its line's handler - and a block reading
+  the SIO window raises the channel's interrupt all the same, served as
+  an error; `abandon()` hands the channel back and it runs again.
+- **THE COPY ENGINE.** Copy at three beats (1024 words, 100 half-words,
+  333 bytes at an odd address) and fill from one cell at three beats are
+  exact; a misaligned word run and an empty one are refused; a 1024-word
+  copy abandoned in flight stops short and the engine copies again exact.
+- **WHAT A BLOCK COSTS, `bench_rp2350` letter d**, Cortex-M33 / Hazard3,
+  the ruler TIMER1 on clk_sys. A COPY of 16 bytes as words takes 52 / 51
+  cycles start to BUSY down - 48 / 47 over one cycle a word, which is the
+  controller's own rate (one read and one write a clock) - and 4096 bytes
+  1072 / 1071, x 1.04 against 600 MB/s; the channel verbs the suite's
+  letter b uses take 167 for the same 16 bytes. A FILL from one cell
+  costs the same at 16 bytes and 1.25 cycles a word at 4096 (1333 /
+  1326): the cell sits in one SRAM bank and the destination walks all
+  four - 2.2.3 stripes them on address bits 3:2 - so every fourth write
+  waits behind a read. A PACED block - 256 words into one cell at one
+  request in 150 cycles from `DmaTimer<0>` - runs at the pace, x 1.00,
+  ONE interrupt, 224 / 327 busy cycles for its 256 microseconds; stamped
+  against the ruler by a polling core, its steps are 150 cycles apart,
+  250 of 255 within the poll's own 23-cycle turn.
 
 ## Not covered yet
 
@@ -324,14 +478,31 @@ Driver gaps, each with its reason:
 - The loop and ping-pong engines the other strata keep for a block
   stream (util/block_stream.hpp): born with the ADC chapter, their first
   user here. TRIGGER_SELF is what a loop engine would be built on.
-- The engines on the SPI, the I2C and the PIO: with their chapters; the
-  requests are named already in `dma_engine.hpp`. The PWM's is measured -
-  a transmit engine paced by a slice's wrap, in [pwm.md](pwm.md)'s own
-  findings.
+- A circular receive engine - TRIGGER_SELF over a ring the hardware
+  writes, its producer index the channel's own count: born with the
+  ring's view of a hardware producer (`docs/design/ring.md`) and the
+  transport round that adopts it.
 - The HIGH_PRIORITY arbitration between channels: the suite runs one
   channel at a time, so the field is written and never contended.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- A PACED block started right after its `arm()`: its first transfer
+  comes 700 to 1200 cycles after the trigger at one request in 150,
+  where a block started 100 cycles or more after the binding - or after
+  the channel's credits are cleared, or the timer written again - begins
+  within one pace period; the pace itself is exact either way, and the
+  credits a free-running timer banks (the counter saturates at 63) start
+  no burst. Measured, not explained; a letter that sweeps the gap
+  between the abort `arm()` performs and the trigger, with the
+  controller's debug registers read across it, would.
+- `DmaCopyEngine` completed on a line (`DmaReport::blocks`): letter l
+  polls it; a letter that waits on the line's handler.
+- The DW_apb_i2c host's read phase on these engines - the transmit engine
+  pouring a half-word command cell, the receive engine collecting the
+  bytes: compiled for both halves, and run by the I2C suite's letter on
+  the I2C0 x I2C1 self-link with its two pull-ups, which is what would
+  measure it ([i2c.md](i2c.md)).
 
 - A WRITE bus error (WRITE_ERROR): letter `h` provokes a read error; a
   block writing into an address the fabric cannot decode would be the

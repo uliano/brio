@@ -35,7 +35,11 @@
  *                 pours a caller-owned run into one peripheral register
  *                 and reports what the block carried when it completes;
  *                 a receive engine fills a caller-owned run and answers
- *                 how many items have arrived since it was last asked
+ *                 how many beats have arrived since it was last asked.
+ *                 Bound once at arm(), two stores a block, the beat the
+ *                 run's own element (the engines' section says how)
+ *  DmaCopyEngine<ch, line>
+ *                 copy and fill, memory to memory on one channel
  *
  * WHAT DIFFERS FROM THE OTHER FAMILIES' CONTROLLERS, stated once:
  *  - the request is a FIELD, not a channel: any channel takes any DREQ
@@ -142,6 +146,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include <atomic>
+#include <span>
 
 #include "rp2350/device.hpp"
 
@@ -831,10 +838,186 @@ struct DmaMpu {
 };
 
 // ---- the engines ---------------------------------------------------------------------
+//
+// TWO MOMENTS, written from this controller's own offer (12.6.2, 12.6.3.1).
+//
+// arm() is the BINDING. The channel is put away (the abort with E5's
+// preparation, the routes off, CTRL zero), the PERIPHERAL side's address
+// written - a FIFO's address never moves, and 12.6.2.1 says an address
+// that is not reprogrammed is the next sequence's start, so it is written
+// once - CTRL written through its non-trigger alias with everything that
+// is constant for the binding (the request, the priority, CHAIN_TO at the
+// channel itself, what the channel reports, EN), the route to the line set
+// and the line enabled.
+//
+// A block writes what changes: the count and the memory side's address,
+// in the TUPLE 12.6.3.1 names for that direction - (TRANS_COUNT,
+// READ_ADDR_TRIG) to gather a run into a peripheral, (WRITE_ADDR,
+// TRANS_COUNT_TRIG) to scatter a peripheral into a run - so the second
+// store IS the trigger. Two stores a block. CTRL is a third only when the
+// block's beat or step differs from the word the channel holds, and the
+// engine keeps that word (DmaBinding), so the question is a compare
+// against RAM and not a read of the bus: a completed channel KEEPS its
+// CTRL, EN included, and only a trigger starts it (12.6.3). The count is
+// checked against the 28 bits the MODE nibble leaves (12.6.2.2.1): a
+// larger one written whole would set a mode - 0x1 is TRIGGER_SELF - and
+// refusing it is one compare.
+//
+// No flag is cleared per block. A completion is acted on by the engine's
+// service() through the line's INTS, which clears the raw status with it;
+// a bus error is cleared where it is SEEN, in service(), abandon() and
+// stop() - and a channel still holding one IGNORES its trigger (12.6.7.1),
+// so a block started over one is a block that never begins, not a
+// corrupted one.
+//
+// THE BEAT IS THE TYPE. DATA_SIZE is one field of CTRL, read and write
+// the same width (12.6.2.3), so ONE channel carries 8-, 16- and 32-bit
+// blocks, the width following the element of the run start() is handed.
+// `Elem`, the template parameter, is the WIDEST beat the binding allows -
+// a PL022's data register is sixteen bits, a PL011's eight - and a wider
+// run does not compile. A run wider than a byte whose address is not
+// aligned to its beat is REFUSED at run time (12.6.2.1.1: the DMA does not
+// enforce alignment and an unaligned access is unspecified), and the
+// caller falls back to whatever it has that moves bytes. Narrow writes are
+// byte-lane replicated (12.6's opening), so a byte beat into a half-word
+// register lands where the peripheral reads it.
+//
+// THE CLAIM. A transmit engine's `busy_` is its claim on the channel, and
+// the claim is the one step a completion on the line can race: claim() is
+// that test-and-set, for a transport to take under its mask; launch()
+// programs a claimed channel with the mask down, because a channel that
+// has not started cannot complete under its loader; unclaim() gives back a
+// claim with nothing to send. start() is claim() then launch(), for an
+// owner with one context.
+//
+// THE SAME SURFACE AS THE RP2040'S ENGINES (brio/rp2040/dma.hpp) -
+// DmaReport, the binding, the claim, the typed runs - because the IP
+// strata (brio/pl011/, brio/pl022/, brio/dw_apb_i2c/) drive both chips'
+// engines through one set of names. What is this chip's below is the count
+// with its mode nibble, the four address steps the engines leave at
+// forward and fixed, and the tuples.
+
+/// What an engine's channel reports on its line, chosen at arm(): every
+/// block (`blocks`), or a bus error alone (`errors`). `errors` is
+/// IRQ_QUIET: no interrupt at the end of a block - only a null trigger
+/// raises one, and no engine writes a null trigger - while a BUS ERROR
+/// STILL DOES (12.6.5 lists it as its own circumstance; 12.6.7.1: "bus
+/// errors always cause the channel's interrupt request to be asserted").
+/// It is how two channels whose second completion proves the first's -
+/// an SPI host's transmit beside its receive - cost ONE interrupt a
+/// transaction.
+enum class DmaReport : uint8_t { blocks, errors };
+
+/// The part of CTRL constant for a binding: EN, the request, the
+/// priority, CHAIN_TO at the channel itself (no chain), the report.
+constexpr uint32_t dma_binding_word(uint8_t ch, Dreq treq, bool high_priority, DmaReport report) {
+    uint32_t v = DMA_CH0_CTRL_TRIG_EN_BITS;
+    v |= static_cast<uint32_t>(ch) << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB;
+    v |= static_cast<uint32_t>(treq) << DMA_CH0_CTRL_TRIG_TREQ_SEL_LSB;
+    if (high_priority) { v |= DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS; }
+    if (report == DmaReport::errors) { v |= DMA_CH0_CTRL_TRIG_IRQ_QUIET_BITS; }
+    return v;
+}
+
+/// CTRL's DATA_SIZE field for a beat of T.
+template <typename T>
+constexpr uint32_t dma_beat_bits() {
+    return static_cast<uint32_t>(dma_size_of<T>()) << DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB;
+}
+
+/// A run's address aligned to its beat (12.6.2.1.1); a byte always is.
+template <typename T>
+[[gnu::always_inline]] inline bool dma_beat_aligned(const volatile void* p) {
+    if constexpr (sizeof(T) == 1u) {
+        return true;
+    } else {
+        return (reinterpret_cast<uintptr_t>(p) & (sizeof(T) - 1u)) == 0u;
+    }
+}
+
+/// The checks a block's arguments can fail: a run, a count the 28 bits
+/// hold, an address aligned to its beat.
+template <typename T>
+[[gnu::always_inline]] inline bool dma_run_valid(const volatile void* p, uint32_t count) {
+    return p != nullptr && count != 0u && count <= dma_count_max && dma_beat_aligned<T>(p);
+}
+
+[[gnu::always_inline]] inline uint32_t dma_address(const volatile void* p) {
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p));
+}
+
+/// A fence the compiler may not move a memory access across, emitted as
+/// nothing: a block's bookkeeping and its data are stored BEFORE the
+/// trigger store that hands them to the controller and to the completion
+/// handler. Both cores issue their bus accesses in program order, so no
+/// barrier instruction is owed.
+[[gnu::always_inline]] inline void dma_handoff_fence() { std::atomic_signal_fence(std::memory_order_seq_cst); }
+
+/**
+ * What every engine keeps of the channel it binds - ONE PER CHANNEL, so
+ * that two engine types naming one channel (a byte engine and a word
+ * engine on one FIFO, armed in turn) agree on what CTRL holds. The channel
+ * is the engine's from arm() to stop(): a channel verb that rewrites CTRL
+ * behind it (DmaChannel::stop, configure, load, prepare) breaks the
+ * binding until the next arm().
+ */
+template <uint8_t ch>
+struct DmaBinding {
+    DmaBinding() = delete;
+    using Channel = DmaChannel<ch>;
+
+    /// The CTRL word the channel holds, as an engine last wrote it.
+    static inline uint32_t ctrl = 0;
+
+    /// The block's CTRL, written only when it differs from the held word.
+    [[gnu::always_inline]] static void steer(uint32_t want) {
+        if (want != ctrl) {
+            ctrl = want;
+            Channel::ctrl() = want;
+        }
+    }
+
+    /// The channel stopped and bound: CTRL with EN through the non-trigger
+    /// alias, and the route to `line` when the engine's completions or
+    /// errors are served there.
+    static void bind(uint32_t word, uint8_t line, bool routed) {
+        Channel::stop();
+        ctrl = word;
+        Channel::ctrl() = word;
+        if (routed) {
+            Channel::route(line, true);
+        }
+    }
+
+    /// Back to nothing, the held word with it.
+    static void release() {
+        Channel::stop();
+        ctrl = 0;
+    }
+
+    /// The ISR body every engine folds in: this channel's status on its
+    /// line, cleared and handed back as flags - the error read first,
+    /// since a bus error raises the completion's flag too.
+    template <uint8_t line>
+    [[gnu::always_inline]] static uint8_t service() {
+        uint8_t f = 0;
+        if (Channel::pending(line)) {
+            Channel::clear_pending(line);
+            f |= 1u << 0;
+            if (Channel::errors() != 0u) {
+                Channel::clear_errors();
+                f |= 1u << 1;
+            }
+        }
+        return f;
+    }
+};
 
 /**
  * A transmit engine: one caller-owned run poured into one peripheral
- * register, paced by that peripheral's request. `line` is the system
+ * register, paced by that peripheral's request - or by a DmaTimer's,
+ * which is the PACED shape (a table into one cell at a known rate).
+ * `Elem` is the widest beat the register takes; `line` is the system
  * interrupt line the completion reports on - the owner core's.
  */
 template <uint8_t ch, typename Elem = uint8_t, uint8_t line = 0>
@@ -842,6 +1025,7 @@ class DmaTxEngine {
     static_assert(ch < dma_channel_count, "no such DMA channel for this engine");
     static_assert(line < dma_line_count, "the RP2350 DMA has four interrupt lines, 0 to 3");
     using Channel = DmaChannel<ch>;
+    using Binding = DmaBinding<ch>;
 
 public:
     DmaTxEngine() = delete;
@@ -849,53 +1033,81 @@ public:
     static constexpr bool present = true;
     static constexpr uint8_t channel = ch;
     static constexpr uint8_t irq_line = line;
+    /// The WIDEST beat the binding allows; a run may be narrower.
     static constexpr DmaSize size = dma_size_of<Elem>();
     using element = Elem;
+    /// DmaReport by a name the IP strata reach through the engine type.
+    using Report = DmaReport;
 
     static constexpr uint8_t flag_complete = 1u << 0;
     static constexpr uint8_t flag_half = 0;   ///< this controller has no half-transfer event
     static constexpr uint8_t flag_error = 1u << 1;
 
-    /// The ISR body folded into the engine: this channel's status on
-    /// its line, cleared and handed back as flags - the error read
-    /// first, since a bus error raises the completion too.
-    [[gnu::always_inline]] static uint8_t service() {
-        uint8_t f = 0;
-        if (Channel::pending(line)) {
-            Channel::clear_pending(line);
-            f |= flag_complete;
-            if (Channel::errors() != 0u) {
-                Channel::clear_errors();
-                f |= flag_error;
-            }
-        }
-        return f;
-    }
+    /// The ISR body folded into the engine (DmaBinding::service).
+    [[gnu::always_inline]] static uint8_t service() { return Binding::template service<line>(); }
 
-    /// Claim the channel: `data` is the register the run is poured
-    /// into, `dreq` the peripheral's transmit request. The channel is
-    /// routed to `line` and the line enabled in the calling core's
-    /// interrupt controller.
-    static void arm(volatile void* data, Dreq dreq, bool high_priority = false) {
-        data_ = data;
-        dreq_ = dreq;
-        high_ = high_priority;
-        claim();
+    /// Bind the channel: `data` is the register the runs are poured into,
+    /// `dreq` the request that paces them, `report` what reaches the line
+    /// (DmaReport). The line is enabled in the calling core's interrupt
+    /// controller.
+    static void arm(volatile void* data, Dreq dreq, bool high_priority = false,
+                    DmaReport report = DmaReport::blocks) {
+        data_ = dma_address(data);
+        base_ = dma_binding_word(ch, dreq, high_priority, report);
+        busy_ = false;
+        in_flight_ = 0;
+        bind();
         DmaLine<line>::enable();
     }
 
-    /// Start moving `length` elements from `buffer` (the caller's, and
-    /// it stays put until complete() reports the block).
-    static bool start(const Elem* buffer, uint32_t length) {
-        return begin(buffer, length, DmaStep::forward);
+    /// THE CLAIM: busy_ tested and set, the one step to take under the
+    /// caller's mask. True = the channel is the caller's until
+    /// complete(), abandon() or unclaim().
+    [[gnu::always_inline]] static bool claim() {
+        if (busy_) {
+            return false;
+        }
+        busy_ = true;
+        return true;
     }
-    /// `length` copies of ONE element: the read pointer does not
-    /// increment. What a full-duplex bus needs to clock a read.
-    static bool start_fixed(const Elem* cell, uint32_t length) {
-        return begin(cell, length, DmaStep::fixed);
+    /// A claim given back with nothing started.
+    [[gnu::always_inline]] static void unclaim() { busy_ = false; }
+
+    /// Program a CLAIMED channel and start it: `length` beats from
+    /// `buffer` (the caller's, and it stays put until complete() reports
+    /// the block). False, and the claim given back, for an empty run, one
+    /// past the 28-bit count, or a misaligned one.
+    template <typename T>
+    static bool launch(const T* buffer, uint32_t length) {
+        return program(buffer, length, DMA_CH0_CTRL_TRIG_INCR_READ_BITS);
+    }
+    template <typename T>
+    static bool launch(std::span<T> run) {
+        return launch(run.data(), static_cast<uint32_t>(run.size()));
+    }
+    /// `length` copies of ONE cell on a claimed channel: the read address
+    /// does not move. What a full-duplex bus needs to clock a read; the
+    /// beat is the cell's.
+    template <typename T>
+    static bool launch_fixed(const T* cell, uint32_t length) {
+        return program(cell, length, 0u);
     }
 
-    /// The block ended: how many elements it carried, so the owner can
+    /// claim() and launch(), for an owner with one context.
+    template <typename T>
+    static bool start(const T* buffer, uint32_t length) {
+        return claim() && launch(buffer, length);
+    }
+    template <typename T>
+    static bool start(std::span<T> run) {
+        return claim() && launch(run);
+    }
+    template <typename T>
+    static bool start_fixed(const T* cell, uint32_t length) {
+        return claim() && launch_fixed(cell, length);
+    }
+
+    /// The block ended: how many beats it carried, so the owner can
     /// release exactly that much of its ring.
     static uint32_t complete() {
         const uint32_t n = in_flight_;
@@ -904,57 +1116,56 @@ public:
         return n;
     }
 
+    /// Claimed or running.
     static bool busy() { return busy_; }
     static uint32_t in_flight() { return busy_ ? in_flight_ : 0u; }
     static DmaProgress progress() { return Channel::progress(in_flight_); }
 
     /// Throw the running block away (the abort with E5's preparation) and
-    /// hand the channel back ready.
+    /// hand the channel back bound and ready.
     static bool abandon() {
         ++faults_;
         busy_ = false;
         in_flight_ = 0;
-        claim();
+        bind();
         return true;
     }
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
     static void stop() {
-        Channel::stop();
+        Binding::release();
         busy_ = false;
         in_flight_ = 0;
     }
 
 private:
-    static bool begin(const Elem* p, uint32_t length, DmaStep step) {
-        if (busy_ || p == nullptr || length == 0u) {
+    template <typename T>
+    static bool program(const T* p, uint32_t length, uint32_t step) {
+        static_assert(sizeof(T) == 1u || sizeof(T) == 2u || sizeof(T) == 4u,
+                      "a DMA beat is one bus access wide: 1, 2 or 4 bytes");
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "a run's beat is at most the engine's Elem - the widest the binding allows");
+        if (!dma_run_valid<T>(p, length)) {
+            busy_ = false;
             return false;
         }
         in_flight_ = length;
-        busy_ = Channel::load(DmaTransfer{
-            .read = p,
-            .write = data_,
-            .count = length,
-            .config = {.size = size,
-                       .read_step = step,
-                       .write_step = DmaStep::fixed,
-                       .treq = dreq_,
-                       .high_priority = high_},
-        });
-        if (!busy_) {
-            in_flight_ = 0;
-        }
-        return busy_;
+        Binding::steer(base_ | dma_beat_bits<T>() | step);
+        Channel::trans_count() = length;   // the MODE nibble 0: count down and halt
+        dma_handoff_fence();
+        Channel::read_addr_trig() = dma_address(p);
+        return true;
     }
-    static void claim() {
-        Channel::stop();
-        Channel::route(line, true);
+    /// Bound: the data register written ONCE, here - the write side does
+    /// not move, so 12.6.2.1 lets every block find it in place.
+    static void bind() {
+        Binding::bind(base_ | dma_beat_bits<Elem>() | DMA_CH0_CTRL_TRIG_INCR_READ_BITS, line, true);
+        Channel::write_addr() = data_;
     }
 
-    static inline volatile void* data_ = nullptr;
-    static inline Dreq dreq_ = Dreq::permanent;
-    static inline bool high_ = false;
+    static inline uint32_t data_ = 0;
+    static inline uint32_t base_ = 0;   ///< CTRL's binding part (dma_binding_word)
     static inline uint32_t in_flight_ = 0;
     static inline uint32_t faults_ = 0;
     static inline bool busy_ = false;
@@ -963,16 +1174,17 @@ private:
 /**
  * A receive engine: one caller-owned run filled from one peripheral
  * register, and asked how much has arrived - from TRANS_COUNT, one read,
- * nothing suspended. (The RP2040 read the count because its addresses
- * lied during a non-incrementing sequence; here they no longer do, and
- * the count is still the right reading, because a run's accounting is in
- * ITEMS and not in bytes past a base.)
+ * nothing suspended, the MODE nibble masked off. (The RP2040 read the
+ * count because its addresses lied during a non-incrementing sequence;
+ * here they no longer do, and the count is still the right reading,
+ * because a run's accounting is in BEATS and not in bytes past a base.)
  */
 template <uint8_t ch, typename Elem = uint8_t, uint8_t line = 0>
 class DmaRxEngine {
     static_assert(ch < dma_channel_count, "no such DMA channel for this engine");
     static_assert(line < dma_line_count, "the RP2350 DMA has four interrupt lines, 0 to 3");
     using Channel = DmaChannel<ch>;
+    using Binding = DmaBinding<ch>;
 
 public:
     DmaRxEngine() = delete;
@@ -980,45 +1192,50 @@ public:
     static constexpr bool present = true;
     static constexpr uint8_t channel = ch;
     static constexpr uint8_t irq_line = line;
+    /// The WIDEST beat the binding allows; a run may be narrower.
     static constexpr DmaSize size = dma_size_of<Elem>();
     using element = Elem;
+    using Report = DmaReport;
 
     static constexpr uint8_t flag_complete = 1u << 0;
     static constexpr uint8_t flag_half = 0;
     static constexpr uint8_t flag_error = 1u << 1;
 
-    [[gnu::always_inline]] static uint8_t service() {
-        uint8_t f = 0;
-        if (Channel::pending(line)) {
-            Channel::clear_pending(line);
-            f |= flag_complete;
-            if (Channel::errors() != 0u) {
-                Channel::clear_errors();
-                f |= flag_error;
-            }
-        }
-        return f;
-    }
+    [[gnu::always_inline]] static uint8_t service() { return Binding::template service<line>(); }
 
-    static void arm(volatile void* data, Dreq dreq, bool high_priority = false) {
-        data_ = data;
-        dreq_ = dreq;
-        high_ = high_priority;
-        claim();
+    /// Bind the channel: `data` is the register the runs are filled from,
+    /// `dreq` the request that paces them.
+    static void arm(volatile void* data, Dreq dreq, bool high_priority = false,
+                    DmaReport report = DmaReport::blocks) {
+        data_ = dma_address(data);
+        base_ = dma_binding_word(ch, dreq, high_priority, report);
+        capacity_ = 0;
+        taken_ = 0;
+        bind();
         DmaLine<line>::enable();
     }
 
     /// Nothing in progress: the run filled, or none started.
     static bool idle() { return !Channel::busy(); }
 
-    static bool start(Elem* buffer, uint32_t length) { return begin(buffer, length, DmaStep::forward); }
-    /// `length` elements into ONE cell, thrown away (the receive side of
-    /// a bus write).
-    static bool start_discard(Elem* cell, uint32_t length) {
-        return begin(cell, length, DmaStep::fixed);
+    /// Fill `length` beats of `buffer`. False for an empty run, one past
+    /// the 28-bit count, or a misaligned one.
+    template <typename T>
+    static bool start(T* buffer, uint32_t length) {
+        return begin(buffer, length, DMA_CH0_CTRL_TRIG_INCR_WRITE_BITS);
+    }
+    template <typename T>
+    static bool start(std::span<T> room) {
+        return start(room.data(), static_cast<uint32_t>(room.size()));
+    }
+    /// `length` beats into ONE cell, thrown away (the receive side of a
+    /// bus write); the beat is the cell's.
+    template <typename T>
+    static bool start_discard(T* cell, uint32_t length) {
+        return begin(cell, length, 0u);
     }
 
-    /// How many elements have arrived since the last take().
+    /// How many beats have arrived since the last take().
     static uint32_t take() {
         if (capacity_ == 0u) {
             return 0;
@@ -1040,55 +1257,159 @@ public:
         ++faults_;
         capacity_ = 0;
         taken_ = 0;
-        claim();
+        bind();
         return true;
     }
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
     static void stop() {
-        Channel::stop();
+        Binding::release();
         capacity_ = 0;
         taken_ = 0;
     }
 
 private:
-    static bool begin(Elem* p, uint32_t length, DmaStep step) {
-        if (p == nullptr || length == 0u) {
+    template <typename T>
+    static bool begin(T* p, uint32_t length, uint32_t step) {
+        static_assert(sizeof(T) == 1u || sizeof(T) == 2u || sizeof(T) == 4u,
+                      "a DMA beat is one bus access wide: 1, 2 or 4 bytes");
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "a run's beat is at most the engine's Elem - the widest the binding allows");
+        if (!dma_run_valid<T>(p, length)) {
             return false;
         }
         if (Channel::busy()) {
-            (void)Channel::abort();
+            // Never on a transport's path - a run is re-armed when it has
+            // ended - but a caller that restarts a running receive gets
+            // the abort, which leaves EN clear: bound again.
+            bind();
         }
         Channel::clear_credits();   // a stale credit is a read of nothing (DmaChannel)
         capacity_ = length;
         taken_ = 0;
-        const bool ok = Channel::load(DmaTransfer{
-            .read = data_,
-            .write = p,
-            .count = length,
-            .config = {.size = size,
-                       .read_step = DmaStep::fixed,
-                       .write_step = step,
-                       .treq = dreq_,
-                       .high_priority = high_},
-        });
-        if (!ok) {
-            capacity_ = 0;
-        }
-        return ok;
+        Binding::steer(base_ | dma_beat_bits<T>() | step);
+        Channel::write_addr() = dma_address(p);
+        dma_handoff_fence();
+        Channel::trans_count_trig() = length;   // the MODE nibble 0: count down and halt
+        return true;
     }
-    static void claim() {
-        Channel::stop();
-        Channel::route(line, true);
+    /// Bound: the data register written ONCE, here (12.6.2.1).
+    static void bind() {
+        Binding::bind(base_ | dma_beat_bits<Elem>() | DMA_CH0_CTRL_TRIG_INCR_WRITE_BITS, line, true);
+        Channel::read_addr() = data_;
     }
 
-    static inline volatile void* data_ = nullptr;
-    static inline Dreq dreq_ = Dreq::permanent;
-    static inline bool high_ = false;
+    static inline uint32_t data_ = 0;
+    static inline uint32_t base_ = 0;
     static inline uint32_t capacity_ = 0;
     static inline uint32_t taken_ = 0;
     static inline uint32_t faults_ = 0;
+};
+
+/**
+ * MEMORY TO MEMORY, this controller's native case (12.6's opening: "the
+ * DMA transfers data between two buffers in RAM, as fast as possible"):
+ * any channel, no request (TREQ_SEL permanent), one read and one write a
+ * clock.
+ *
+ *  copy(dst, src, n)    n elements of T, the beat T
+ *  fill(dst, cell, n)   n copies of the element at `cell` - the read side
+ *                       does not move - the beat T
+ *
+ * Three stores a block, alias 1's tuple (READ_ADDR, WRITE_ADDR,
+ * TRANS_COUNT_TRIG); four when the beat or the read step changed. A bus
+ * error halts the channel with busy() down and stands in errors(): the
+ * channel ignores every trigger until clear_errors() (12.6.7.1).
+ */
+template <uint8_t ch, uint8_t line = 0>
+class DmaCopyEngine {
+    static_assert(ch < dma_channel_count, "no such DMA channel for this engine");
+    static_assert(line < dma_line_count, "the RP2350 DMA has four interrupt lines, 0 to 3");
+    using Channel = DmaChannel<ch>;
+    using Binding = DmaBinding<ch>;
+
+public:
+    DmaCopyEngine() = delete;
+
+    static constexpr bool present = true;
+    static constexpr uint8_t channel = ch;
+    static constexpr uint8_t irq_line = line;
+
+    static constexpr uint8_t flag_complete = 1u << 0;
+    static constexpr uint8_t flag_half = 0;
+    static constexpr uint8_t flag_error = 1u << 1;
+
+    [[gnu::always_inline]] static uint8_t service() { return Binding::template service<line>(); }
+
+    /// Bind the channel, unpaced (TREQ_SEL permanent). With
+    /// `DmaReport::blocks` every block's end reaches `line`, enabled in
+    /// the calling core's interrupt controller; with `DmaReport::errors`
+    /// the channel is left off every line and the caller polls busy() - a
+    /// bus error then stands in errors() and stops the block.
+    static void arm(DmaReport report = DmaReport::blocks, bool high_priority = false) {
+        const bool routed = report == DmaReport::blocks;
+        base_ = dma_binding_word(ch, Dreq::permanent, high_priority, report);
+        Binding::bind(base_ | dma_beat_bits<uint32_t>() | both_, line, routed);
+        if (routed) {
+            DmaLine<line>::enable();
+        }
+    }
+
+    /// `n` elements from `src` to `dst`. False while a block runs, and for
+    /// an empty, oversized or misaligned one.
+    template <typename T>
+    static bool copy(T* dst, const T* src, uint32_t n) {
+        return program(dst, src, n, both_);
+    }
+    /// `n` copies of the element at `cell` into `dst`; the cell stays put
+    /// until the block ends.
+    template <typename T>
+    static bool fill(T* dst, const T* cell, uint32_t n) {
+        return program(dst, cell, n, DMA_CH0_CTRL_TRIG_INCR_WRITE_BITS);
+    }
+
+    /// A block in progress, as the channel says (CTRL.BUSY).
+    static bool busy() { return Channel::busy(); }
+    /// A bus error the last block met (DmaError's bits), and its clear.
+    static uint32_t errors() { return Channel::errors(); }
+    static void clear_errors() { Channel::clear_errors(); }
+    /// Elements the running block has still to move (TRANS_COUNT, the
+    /// mode masked off).
+    static uint32_t remaining() { return Channel::count(); }
+
+    /// Throw the running block away - the abort with E5's preparation,
+    /// polled to its end (12.6.8.3) - and hand the channel back bound as
+    /// it was, its error flags and its status cleared. False when the
+    /// channel is still BUSY after it.
+    static bool abandon() {
+        const bool routed = Channel::routed(line);
+        Binding::bind(Binding::ctrl != 0u ? Binding::ctrl : base_ | dma_beat_bits<uint32_t>() | both_,
+                      line, routed);
+        return !Channel::busy();
+    }
+
+    static void stop() { Binding::release(); }
+
+private:
+    static constexpr uint32_t both_ = DMA_CH0_CTRL_TRIG_INCR_READ_BITS | DMA_CH0_CTRL_TRIG_INCR_WRITE_BITS;
+
+    template <typename T>
+    static bool program(T* dst, const T* src, uint32_t n, uint32_t step) {
+        static_assert(sizeof(T) == 1u || sizeof(T) == 2u || sizeof(T) == 4u,
+                      "a DMA beat is one bus access wide: 1, 2 or 4 bytes");
+        if (!dma_run_valid<T>(dst, n) || !dma_beat_aligned<T>(src) || src == nullptr || Channel::busy()) {
+            return false;
+        }
+        Binding::steer(base_ | dma_beat_bits<T>() | step);
+        Channel::read_addr() = dma_address(src);
+        Channel::write_addr() = dma_address(dst);
+        dma_handoff_fence();
+        Channel::trans_count_trig() = n;
+        return true;
+    }
+
+    static inline uint32_t base_ = 0;
 };
 
 } // namespace brio

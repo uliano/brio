@@ -52,6 +52,18 @@
 //   j  this console's transmit engine under a burst longer than its
 //      ring: every byte out in order (the host reads it), the blocks
 //      counted, no fault
+//   m  THE COPY ENGINE AND THE BEAT PER BLOCK: DmaCopyEngine<8> polled -
+//      four kilobytes as words, an odd count of half-words, a byte run at
+//      odd addresses, each exact with the bytes either side untouched; a
+//      fill of 256 words from one cell; a misaligned half-word run, an
+//      empty one and a second block over a running one refused - then a
+//      transmit engine whose widest beat is a word poured into ONE word
+//      cell, unpaced, a byte run, a half-word run and a word run in turn:
+//      the cell's low byte, low half and whole word written, CTRL's
+//      DATA_SIZE following the run, and a misaligned half-word run
+//      refused with the claim given back
+//   (k and l are diagnostics, off the all-key: one engine at a time on
+//      the instrument's loop-back)
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -510,6 +522,98 @@ void half_loop(const char* name) {
 void tk_tx_only() { half_loop<TxOnly>("the transmit engine alone, the receiver on its interrupt"); }
 void tl_rx_only() { half_loop<RxOnly>("the receive engine alone, the transmitter on its interrupt"); }
 
+// -----------------------------------------------------------------------------
+using Copier = DmaCopyEngine<8>;
+using Beat = DmaTxEngine<9, uint32_t>;
+alignas(4) volatile uint32_t beat_cell = 0;
+volatile uint32_t beat_blocks = 0;
+
+/// The copy engine's block waited out, bounded.
+bool copier_done() {
+    const uint32_t t0 = us_now();
+    while (Copier::busy() && us_now() - t0 < 10'000u) {
+    }
+    return !Copier::busy() && Copier::errors() == 0u;
+}
+/// One block of the beat engine waited out on its completion count.
+bool beat_done(uint32_t before) {
+    const uint32_t t0 = us_now();
+    while (beat_blocks == before && us_now() - t0 < 10'000u) {
+    }
+    return beat_blocks != before;
+}
+/// The beat engine's channel's DATA_SIZE field, read back.
+uint32_t beat_size() {
+    return (DmaChannel<Beat::channel>::ctrl() & DMA_CH0_CTRL_TRIG_DATA_SIZE_BITS) >> DMA_CH0_CTRL_TRIG_DATA_SIZE_LSB;
+}
+
+void tm_engines() {
+    Copier::arm(DmaReport::errors);   // polled: the channel on no line
+    auto* const s32 = reinterpret_cast<uint32_t*>(src);
+    auto* const d32 = reinterpret_cast<uint32_t*>(dst);
+    fill(src, 4096, 0xC0DEu);
+    fill(dst, 4096, 0u);
+    const bool w = Copier::copy(d32, s32, 1024u) && copier_done();
+    bench.verdict("copy: 4096 bytes as 1024 words, exact", w && same(src, dst, 4096));
+
+    fill(dst, 4096, 0u);
+    const bool h = Copier::copy(reinterpret_cast<uint16_t*>(dst + 2), reinterpret_cast<const uint16_t*>(src + 2), 255u) &&
+                   copier_done();
+    bench.verdict("copy: 255 half-words, exact, the bytes either side untouched",
+                  h && same(src + 2, dst + 2, 510) && dst[0] == 0u && dst[1] == 0u && dst[512] == 0u);
+
+    fill(dst, 4096, 0u);
+    const bool b = Copier::copy(dst + 1, src + 3, 1001u) && copier_done();
+    bench.verdict("copy: 1001 bytes between odd addresses, exact, the bytes either side untouched",
+                  b && same(src + 3, dst + 1, 1001) && dst[0] == 0u && dst[1002] == 0u);
+
+    const uint32_t cell = 0xA5C30F96u;
+    fill(dst, 4096, 0u);
+    const bool f = Copier::fill(d32, &cell, 256u) && copier_done();
+    bool filled = true;
+    for (uint32_t i = 0; i < 256u; ++i) {
+        filled = filled && d32[i] == cell;
+    }
+    bench.verdict("fill: 256 words from one cell, exact, the word after untouched", f && filled && d32[256] == 0u);
+
+    const bool misaligned = !Copier::copy(reinterpret_cast<uint16_t*>(dst + 1), reinterpret_cast<const uint16_t*>(src), 4u);
+    const bool empty = !Copier::copy(d32, s32, 0u);
+    const bool first = Copier::copy(d32, s32, 1024u);
+    const bool second = Copier::copy(d32, s32, 4u);
+    (void)copier_done();
+    bench.verdict("refused: a half-word run at an odd address, an empty run, a block over a running one",
+                  misaligned && empty && first && !second);
+    Copier::stop();
+
+    // the beat per block, one engine
+    Beat::arm(&beat_cell, Dreq::permanent);
+    alignas(4) static const uint8_t bytes[4] = {0x11u, 0x22u, 0x33u, 0x44u};
+    alignas(4) static const uint16_t halves[2] = {0x5566u, 0x7788u};
+    alignas(4) static const uint32_t words[1] = {0x99AABBCCu};
+    beat_cell = 0xEEEEEEEEu;
+    uint32_t n0 = beat_blocks;
+    const bool b8 = Beat::start(std::span<const uint8_t>(bytes)) && beat_done(n0);
+    const uint32_t after8 = beat_cell;
+    const uint32_t size8 = beat_size();
+    n0 = beat_blocks;
+    const bool b16 = Beat::start(std::span<const uint16_t>(halves)) && beat_done(n0);
+    const uint32_t after16 = beat_cell;
+    const uint32_t size16 = beat_size();
+    n0 = beat_blocks;
+    const bool b32 = Beat::start(std::span<const uint32_t>(words)) && beat_done(n0);
+    const uint32_t after32 = beat_cell;
+    const uint32_t size32 = beat_size();
+    print(serial, "  one word cell, three runs: ", hex(after8), " (DATA_SIZE ", size8, "), ", hex(after16),
+          " (", size16, "), ", hex(after32), " (", size32, ")", crlf);
+    bench.verdict("the beat follows the run: a byte run writes the cell's low byte, a half-word run its "
+                  "low half, a word run the whole word, DATA_SIZE 0, 1, 2",
+                  b8 && b16 && b32 && after8 == 0xEEEEEE44u && after16 == 0xEEEE7788u && after32 == 0x99AABBCCu &&
+                      size8 == 0u && size16 == 1u && size32 == 2u);
+    const bool odd = !Beat::start(reinterpret_cast<const uint16_t*>(bytes + 1), 1u);
+    bench.verdict("a half-word run at an odd address is refused and the claim given back", odd && !Beat::busy());
+    Beat::stop();
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_dma - the RP2040 DMA (datasheet 2.5), this console on a transmit engine, "
           "clk=", SysClock::hz, " Hz", crlf);
@@ -539,6 +643,10 @@ extern "C" void isr_dma_0() {
     (void)Instrument::dma_isr();
     (void)TxOnly::dma_isr();
     (void)RxOnly::dma_isr();
+    if ((Beat::service() & Beat::flag_complete) != 0u) {
+        (void)Beat::complete();
+        beat_blocks = beat_blocks + 1u;
+    }
 }
 extern "C" void isr_dma_1() {
     dma1_irqs = dma1_irqs + 1u;
@@ -571,6 +679,7 @@ int main() {
     bench.letter('j', "this console's transmit engine under a burst", tj_console_engine);
     bench.letter('k', "diagnostic: the transmit engine alone", tk_tx_only, false);
     bench.letter('l', "diagnostic: the receive engine alone", tl_rx_only, false);
+    bench.letter('m', "the copy engine, and the beat per block", tm_engines);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED",

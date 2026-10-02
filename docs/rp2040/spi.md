@@ -89,10 +89,16 @@ listener is therefore the pad, released.
   re-application: the wireless instrument), `isr()`, `dma_isr()`,
   `status()`, `recover()`, `release()`. The engine slots take
   `dma.hpp`'s `DmaTxEngine` / `DmaRxEngine` on any two channels, both
-  or neither; the data phase moves as one block each way with the
-  requests raised around the engines; a 16-bit request falls back to
-  the pump. Frames in a byte buffer: one byte per 8-bit frame, two
-  bytes low-first per 16-bit frame.
+  or neither, both of one element: `uint16_t` - SSPDR's width - carries
+  8- and 16-bit frames alike, each block at its frame's beat, and
+  `uint8_t` engines leave 16-bit frames to the pump. The data phase
+  moves as one block each way with the requests raised around the
+  engines; the transmit engine is bound to report a bus error alone
+  (IRQ_QUIET), so the receive block's completion is the transaction's
+  ONE DMA interrupt. A 16-bit request whose buffers are not half-word
+  aligned goes to the pump. Frames in a byte buffer: one byte per 8-bit
+  frame, two bytes low-first per 16-bit frame - on this little-endian
+  core, a half-word in memory.
 - `SpiClient<n, pins>`: `init(clock, Config)` (mode, format, bits,
   drive_output), `enable(first)` with the first answer in the FIFO
   before the host's clock, `write()` on TNF up to `frames_ahead` = 8,
@@ -129,8 +135,10 @@ extern "C" void isr_spi0() {
 }
 ```
 
-With the engines: `SpiHost<0, pins, DmaTxEngine<4>, DmaRxEngine<5>>`
-and `isr_dma_0` calling `Bus::dma_isr()` the same way. A client:
+With the engines: `SpiHost<0, pins, DmaTxEngine<4, uint16_t>,
+DmaRxEngine<5, uint16_t>>` (half-word engines, so a display's 16-bit
+pixels ride them too) and `isr_dma_0` calling `Bus::dma_isr()` the same
+way. A client:
 
 ```cpp
 constexpr brio::SpiPins client_pins{.sck = 10, .tx = 11, .rx = 8, .cs = 9};
@@ -171,9 +179,16 @@ the roles inverted on the same wires for the last letter.
   us at / 256 (the wire alone 16.4 us): the per-frame cost is the poll
   until the divider is the larger of the two.
 - THE ENGINES on the loop: a 128-byte block at 31.25 MHz in 296 us,
-  ISR-completed and exact; a command frame on the pump then 32 data
-  frames on the engines; a polled request on the engines completing
-  inside start() at 62.5 MHz; 16-bit frames falling back to the pump;
+  ISR-completed and exact - the letter's FIRST engined transaction,
+  whose code runs out of the flash for the first time, against a wire of
+  33 us. The same letter on the RP2350's same block split that kind of
+  figure into the XIP cache's fill and the wire, and the vendor's library
+  doing the same transfer there takes this driver's time to the cycle
+  inside the block ([../rp2350/spi.md](../rp2350/spi.md)): the 296 us is
+  not the engines' pace, and this chip's own split is owed to its board
+  (below);
+  a command frame on the pump then 32 data frames on the engines; a
+  polled request on the engines completing inside start() at 62.5 MHz;
   a read with no out buffer through the transmit engine's fixed 0xFF
   cell.
 - THE KERNEL over it, unchanged: four transactions through SpiBus
@@ -226,7 +241,27 @@ Driver gaps, each with its reason:
   does and a GPIO select does not; a program that wants it uses the
   peripheral's select on the host side.
 
-Implemented but not bench-verified, each with what would measure it:
+Implemented but not bench-verified, each with what would measure it
+(the board is not on the desk):
+
+- An engined block at the wire, and the 296 us of the first one as this
+  chip's XIP fill: on the RP2350 the first transaction after `init()`
+  misses 126 to 165 cache lines and every later one runs at the wire
+  plus mode 0's frame gap, as the vendor's library does
+  ([../rp2350/spi.md](../rp2350/spi.md)); here the flash is read through
+  the second stage's EBh at clk_sys / 4 by a Cortex-M0+, so a line costs
+  what this board measures. `bench_rp2040` letter d's `spi.dma` lines
+  (the best of four: warm) for the wire, and the first transaction timed
+  beside a repeat with `Xip`'s two counters for the split.
+
+- Half-word engines carrying 16-bit frames with no SPI interrupt, a
+  16-bit request on odd-aligned buffers going to the pump, and ONE DMA
+  interrupt a transaction: `test_rp2040_spi` letter d.
+- The engined transaction's fixed cost, counted in the listing at
+  about 180 cycles for the data phase's launch and 95 for its one
+  interrupt (about 2.2 us at 125 MHz; [dma.md](dma.md)): `bench_rp2040`
+  letter d's `spi.dma` lines, 16 and 256 frames at two rates and 16-bit
+  frames up to 4096 - which also time a byte inside the transfer.
 
 - The per-bus timeout with `recover()`: a lost completion staged as
   the other targets' suites stage it (the ISR body run, the reply

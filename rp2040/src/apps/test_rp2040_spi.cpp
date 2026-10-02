@@ -38,9 +38,12 @@
 //      phase; a read with no out buffer; the select released
 //   c  THE POLLED PATH AT EVERY NAMED RATE, div2 to div256, 64 frames
 //      each, timed on the ruler, the frame period reported
-//   d  THE DMA ENGINES on the loop: 128-byte blocks with and without a
-//      command phase, timed, the polled variant, and the 16-bit
-//      fallback to the pump
+//   d  THE DMA ENGINES on the loop - half-word engines, SSPDR's width:
+//      128-byte blocks with and without a command phase, timed, in ONE
+//      DMA interrupt a transaction (the transmit engine reports errors
+//      alone); the polled variant; 16-bit frames riding the same engines
+//      with no SPI interrupt; and the pump taking a 16-bit request whose
+//      buffers are not half-word aligned
 //   e  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
 //      the rejection, both sleep votes
 //   f  THE WIRE: sixteen frames both ways in modes 1 and 3 and at 16
@@ -109,7 +112,7 @@ constexpr SpiPins client_pins{.sck = 10, .tx = 11, .rx = 8, .cs = 9};
 constexpr SpiPins host_b_pins{.sck = 10, .tx = 11, .rx = 8};
 constexpr SpiPins client_a_pins{.sck = 18, .tx = 19, .rx = 16, .cs = 17};
 using Host = SpiHost<0, host_pins>;
-using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4>, DmaRxEngine<5>>;
+using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
 using Client = SpiClient<1, client_pins>;
 using HostB = SpiHost<1, host_b_pins>;
 using ClientA = SpiClient<0, client_a_pins>;
@@ -122,6 +125,7 @@ enum class Spi1Owner : uint8_t { none, client, host_b };
 volatile Spi0Owner spi0_owner = Spi0Owner::none;
 volatile Spi1Owner spi1_owner = Spi1Owner::none;
 volatile uint32_t spi0_isr_entries = 0;
+volatile uint32_t dma_isr_entries = 0;
 volatile uint32_t spi1_isr_entries = 0;
 volatile bool transfer_done = false;
 volatile uint8_t transfer_status = 0;
@@ -129,8 +133,8 @@ bool bus_ao_live = false;
 
 uint32_t us_now() { return Timer::now_low(); }
 
-uint8_t tx_buf[256];
-uint8_t rx_buf[256];
+alignas(4) uint8_t tx_buf[256];
+alignas(4) uint8_t rx_buf[256];
 uint8_t cmd_buf[4];
 
 void fill_pattern(uint8_t* p, uint16_t n, uint8_t seed) {
@@ -216,6 +220,7 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
     r.polled = polled;
     transfer_done = false;
     spi0_isr_entries = 0;
+    dma_isr_entries = 0;
     if (H::start(r)) {
         return H::status();
     }
@@ -376,11 +381,15 @@ void td_dma() {
     uint32_t t0 = us_now();
     const uint8_t st = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 128, SpiMode::mode0, SpiClocks::div4, SpiDataSize::bits8, false);
     const uint32_t took = us_now() - t0;
+    const uint32_t dma_entries = dma_isr_entries;
     print(serial, "  128 bytes on the engines at div4 (31.25 MHz): status ", st, " in ", took, " us (the wire alone ",
           128u * 8u * 4u / 125u, "), ", same(tx_buf, rx_buf, 128) ? "byte-exact" : "MISMATCH", ", cs released=",
-          CsPin::read_out(), crlf);
+          CsPin::read_out(), ", ", dma_entries, " DMA interrupt(s)", crlf);
     bench.verdict("a 128-byte block through the two engines, ISR-completed, byte-exact and the select released",
                   st == spi_ok && same(tx_buf, rx_buf, 128) && CsPin::read_out());
+    bench.verdict("ONE DMA interrupt for the transaction: the receive block's, the transmit engine "
+                  "reporting errors alone",
+                  dma_entries == 1u);
     cmd_buf[0] = 0x0B;
     fill_pattern(tx_buf, 32, 0x41);
     for (uint16_t i = 0; i < 32; ++i) {
@@ -404,8 +413,15 @@ void td_dma() {
         rx_buf[i] = 0xEE;
     }
     const uint8_t st4 = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode3, SpiClocks::div16, SpiDataSize::bits16, false);
-    bench.verdict("16-bit frames fall back to the pump on an engined host, exact",
-                  st4 == spi_ok && same(tx_buf, rx_buf, 32) && spi0_isr_entries != 0u);
+    bench.verdict("16-bit frames ride the half-word engines: exact, no SPI interrupt, one DMA interrupt",
+                  st4 == spi_ok && same(tx_buf, rx_buf, 32) && spi0_isr_entries == 0u && dma_isr_entries == 1u);
+    fill_pattern(tx_buf, 40, 0x71);
+    for (uint16_t i = 0; i < 40; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t st6 = xfer<DmaHost>(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiMode::mode3, SpiClocks::div16, SpiDataSize::bits16, false);
+    bench.verdict("a 16-bit request whose buffers are not half-word aligned goes to the pump instead, exact",
+                  st6 == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && spi0_isr_entries != 0u && dma_isr_entries == 0u);
     for (uint16_t i = 0; i < 16; ++i) {
         rx_buf[i] = 0x00;
     }
@@ -878,6 +894,7 @@ extern "C" void isr_spi1() {
     }
 }
 extern "C" void isr_dma_0() {
+    dma_isr_entries = dma_isr_entries + 1u;
     if (spi0_owner == Spi0Owner::dma_host && DmaHost::dma_isr()) {
         transfer_status = DmaHost::status();
         transfer_done = true;

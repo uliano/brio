@@ -6,11 +6,14 @@ chaining and null triggers, 2.5.3 the credit-based data request and
 table 119, 2.5.4 the two lines, 2.5.5 the pacing timers, the sniffer
 and the abort, 2.5.7 the registers), 4.2.5 (the UART's DMA interface);
 Appendix B, RP2040-E12 and E13. The driver: `brio/rp2040/dma.hpp`
-(the block, a channel, a line, a timer, the sniffer, the two engines)
-with the request numbers in `dma_engine.hpp` beside the empty slot's
-tag; the engines' one user today is `uart.hpp`'s transport. The
-reference suite: `test_rp2040_dma`, whose console prints through a
-transmit engine.
+(the block, a channel, a line, a timer, the sniffer, the transfer
+engines and the copy engine) with the request numbers in
+`dma_engine.hpp` beside the empty slot's tag; the transfer engines'
+users are the UART's, the SPI's and the I2C's transports (the IP
+strata `brio/pl011/`, `brio/pl022/`, `brio/dw_apb_i2c/`) and the ADC,
+PIO and PWM suites. The reference suite: `test_rp2040_dma`, whose
+console prints through a transmit engine; the engines' cost is
+`bench_rp2040`'s letter d.
 
 ## What the silicon does
 
@@ -48,6 +51,37 @@ reports a completion when they land - the interrupt enable is cleared
 before the abort, BUSY awaited, the status cleared, the enable
 restored.
 
+THE OFFER, and what the engines take of it. A channel's registers are
+LIVE and keep what was last written: an address that does not
+increment is still the next sequence's start (2.5.1.1), a completed
+channel keeps CTRL with EN set, and TRANS_COUNT reloads from the last
+value written. So an engine binds its channel once - the peripheral's
+data register written once, CTRL composed once with the request, the
+priority, CHAIN_TO at the channel itself and EN - and a block is the
+count and the memory address, the last of the two written through the
+alias whose final word is a trigger (2.5.2.1's tuples: TRANS_COUNT then
+READ_ADDR_TRIG to a peripheral, WRITE_ADDR then TRANS_COUNT_TRIG from
+one): two stores, the third (CTRL) only when the block's width or step
+differs from the word the channel holds. DATA_SIZE is one field for
+both sides, so one channel carries bytes, half-words and words, block by
+block; narrow writes are byte-lane replicated (2.5), which is why a byte
+beat into the PL022's half-word data register delivers the frame.
+IRQ_QUIET (2.5.2.3) silences a completion while a bus error still
+raises the channel's flag (CTRL.AHB_ERROR: the channel "always raises
+its channel IRQ flag"): a transmit engine whose completion another
+block proves - the SPI host's beside its receive - reports errors
+alone, one interrupt a transaction. A zero count is never written: a
+zero into a trigger register is a null trigger. Memory to memory is the
+controller's own case (TREQ_SEL PERMANENT, one read and one write a
+clock). Declined, each for its reason: the address ring and CHAIN_TO in
+the engines (one block per start; the circular receive is a ring on the
+write side with a second channel chaining back, this chip having no
+self-trigger - not built), MULTI_CHAN_TRIGGER (a transport's pair
+starts receive first and transmit second with the peripheral's requests
+raised between them, an order one mask write would not keep), the
+sniffer (not an engine's business). The gate - the block out of
+RESETS - is `Dma::init()`, once per program; no engine touches it.
+
 ## Types and verbs
 
 - `DmaSize`, `dma_size_of<Elem>()`, `Dreq` (table 119 by name, the
@@ -78,16 +112,54 @@ restored.
   cycles), `stop()`, `dreq()`.
 - `DmaSniffer`: `start(channel, DmaSniffConfig, seed)`, `result()`,
   `stop()`; `DmaSniffCalc`.
+- The engines' vocabulary: `DmaReport` (`blocks`: every completed
+  block reaches the line; `errors`: IRQ_QUIET, a bus error alone),
+  `dma_binding_word` (CTRL's part constant for a binding),
+  `dma_beat_bits<T>`, `dma_beat_aligned<T>`, `dma_run_valid<T>` (a
+  run, a non-zero count, an address aligned to its beat),
+  `dma_handoff_fence` (a compiler fence before every trigger store),
+  `DmaBinding<ch>` (the CTRL word the channel holds, kept per channel,
+  rewritten only when a block's differs; the shared `service()` body).
 - `DmaTxEngine<ch, Elem, line>` / `DmaRxEngine<ch, Elem, line>`: the
-  other families' engine surface - `arm(data, dreq)`, `start`,
-  `start_fixed` / `start_discard`, `service()` (this channel's status
-  on its line, cleared and handed back as `flag_complete` /
-  `flag_error`; no half event on this controller), `complete()`,
-  `busy()` / `idle()`, `take()` (from TRANS_COUNT), `full`,
-  `capacity`, `abandon()`, `faults()`, `stop()`. A receive engine
-  clears the channel's request credits before every run.
-- In `uart.hpp`'s transport: the two slots, `dma_isr()` (the line's
-  ISR body), `harvest()` (the receive verb), `dma_faults()`.
+  transports' engines. `Elem` is the WIDEST beat the binding allows
+  (the data register's width): a run of `uint8_t`, `uint16_t` or
+  `uint32_t` up to it is legal, a wider one a compile error, one whose
+  address is not aligned to its beat refused at run time (the caller's
+  pump takes it). `arm(data, dreq, high_priority, report)` binds once;
+  `Report` names `DmaReport` through the engine. Transmit: `claim()`
+  (the test-and-set a transport takes under its mask), `unclaim()`,
+  `launch(run)` / `launch_fixed(cell, n)` on a claimed channel,
+  `start(run)` / `start_fixed(cell, n)` = claim and launch, a run being
+  a span or a pointer and a count; `complete()` (the beats the block
+  carried), `busy()` (claimed or running), `in_flight()`,
+  `progress()`. Receive: `start(run)`, `start_discard(cell, n)`,
+  `idle()`, `take()` (beats arrived since the last take, from
+  TRANS_COUNT), `full`, `capacity`, `taken`. Both: `service()` (this
+  channel's status on its line, cleared and handed back as
+  `flag_complete` / `flag_error`; no half event on this controller),
+  `abandon()`, `faults()`, `stop()`. A receive engine clears the
+  channel's request credits before every run.
+- `DmaCopyEngine<ch, line>`: `arm(report, high_priority)` (`blocks`:
+  the completion on the line, `service()` its body; `errors`: polled,
+  the channel on no line), `copy(dst, src, n)` and `fill(dst, cell, n)`
+  in elements of the type the pointers carry, which is the beat;
+  `busy()` (CTRL.BUSY), `errors()` / `clear_errors()`, `remaining()`,
+  `stop()`. A block over a running one, an empty one and a misaligned
+  one are refused.
+- In the transports (`uart.hpp`, `spi.hpp`, `i2c.hpp` over the IP
+  strata): the slots, `dma_isr()` (the line's ISR body), the UART's
+  `harvest()` and `dma_faults()`.
+
+What a block costs, counted in the release listing (Cortex-M0+
+timings, one path, the CTRL word unchanged): a transmit block start
+from a transport - the claim, the ring's run, the block - 51
+instructions and about 100 cycles with TWO stores to the DMA block,
+the mask held over the claim alone (six instructions, about 10
+cycles); a receive run 27 instructions, about 60 cycles, one read
+(BUSY) and three stores (the credit clear, the address, the count);
+an SPI data phase on two engines 89 instructions, about 180 cycles,
+and ONE DMA interrupt for the transaction; a copy 25 instructions,
+about 40 cycles, one read and three stores.
 
 ## How to use it
 
@@ -115,6 +187,28 @@ brio::DmaLine<0>::enable();
 
 brio::DmaSniffer::start(4, {.calc = brio::DmaSniffCalc::crc16}, 0xFFFF);
 C::load({.read = buf, .write = sink, .count = n, .config = {.incr_write = false, .sniff = true}});
+```
+
+Copy and fill on one channel, the beat the element type:
+
+```cpp
+using Copier = brio::DmaCopyEngine<8>;
+Copier::arm();                                            // the completion on line 0
+extern "C" void isr_dma_0() {
+    if ((Copier::service() & Copier::flag_complete) != 0u) { /* done */ }
+}
+(void)Copier::copy(framebuffer_words, tile_words, 1024u);         // 4 KB as words
+(void)Copier::fill(framebuffer_halves, &background, 320u * 480u); // one 16-bit cell
+```
+
+A table into one register at a timer's pace - a transmit engine whose
+request is the timer's:
+
+```cpp
+using Wave = brio::DmaTxEngine<9, uint32_t>;
+Wave::arm(&pwm_level, brio::DmaTimer<0>::dreq());
+brio::DmaTimer<0>::set(1, 400);                           // a word every 400 clk_sys cycles
+(void)Wave::start(std::span<const uint32_t>(table));
 ```
 
 A transport with an engine in each slot:
@@ -188,11 +282,11 @@ Driver gaps, each with its reason:
   aliases, 2.5.6.2): born with a first stream that wants the DMA to
   reconfigure itself; `prepare()`, the aliases and `chain_to` are its
   building blocks.
-- The loop and ping-pong engines the other strata keep for a block
-  stream (util/block_stream.hpp): born with the ADC chapter, their
-  first user here.
-- The engines on I2C and the PWM: with their chapters; the requests
-  are named already (the SPI's are in its host, [spi.md](spi.md)).
+- The loop and ping-pong engines of a block stream
+  (util/block_stream.hpp), and the circular receive: on this controller
+  each is two channels chaining to each other or a ring on one side with
+  a second channel re-arming it - there is no self-trigger - and each is
+  born with its first user.
 - `DmaSniffCalc::crc32_reversed`, `crc16_reversed` and `even_parity`,
   and the BSWAP option: written from 2.5.5.2 and not measured; a
   letter with their software twins.
@@ -200,8 +294,23 @@ Driver gaps, each with its reason:
   channel at a time; two channels started together, their order read
   off the counts.
 
-Implemented but not bench-verified, each with what would measure it:
+Implemented but not bench-verified, each with what would measure it
+(the board is not on the desk):
 
+- The engines' binding and their two-store block, the beat per block,
+  the claim, the copy engine: `test_rp2040_dma` whole - letter m judges
+  copy and fill at three widths and their refusals, and one engine
+  writing a byte, a half-word and a word run into one cell with
+  DATA_SIZE read back; letters i and j run the transports' block
+  start - and the transports' suites (`test_rp2040_serial`,
+  `test_rp2040_spi`, `test_rp2040_i2c`, the ADC, PIO and PWM suites).
+- A bus error raising the line on a channel bound IRQ_QUIET (the
+  SPI host's transmit engine): a block of that engine reading the
+  suite's hole in the map.
+- The costs above as time: `bench_rp2040` letter d - copy and fill at
+  16, 256 and 4096 bytes (the fixed cost is the wall less one beat a
+  cycle), a paced table and its jitter against the timer's 400 cycles,
+  and an engined SPI transaction of 16 and 256 frames at two rates.
 - A write bus error (WRITE_ERROR): the suite provokes a read error;
   a block writing into the hole.
 - An engine on line 1 served by core 1: the multicore suite with a

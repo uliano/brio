@@ -180,6 +180,31 @@ order they were written. The trigger level is the transport's: an
 eighth of the FIFO for the transmitter (so each entry refills
 seven-eighths of it), half for the receiver.
 
+## The engine slots
+
+With a family's DMA engine in the transmit slot the handler never
+touches the transmit FIFO: the transport queues into its ring and starts
+a block over the ring's contiguous run, and the block's completion on the
+DMA line releases exactly that run and starts the next. Two contexts
+start blocks - the thread that queued and the completion - and THE
+MASK COVERS THE CLAIM AND NOTHING ELSE: under the family's guard
+`pump_tx()` takes the engine's `claim()`, its test-and-set; with the mask
+down it reads the run and `launch()`es it, or gives the claim back with
+`unclaim()` when the run is empty. The claim comes first because a
+claimed engine has no block in flight, so nothing consumes the ring or
+starts another block under the loader, and the run read after it never
+holds bytes an ended block already sent. A receive engine fills the
+ring's free run and is re-armed when it has ended, by the line's handler
+or by `harvest()` under the guard.
+
+What the transport asks of an engine, so a family's engines are written
+to it: `present`, `channel`, `arm(data, request)`, `claim()`,
+`unclaim()`, `launch(span)`, `complete()`, `busy()`, `service()` with
+`flag_complete` and `flag_error`, `abandon()`, `stop()`; and of a
+receive engine `start(pointer, count)`, `take()`, `idle()`,
+`capacity()`. The RP2040's and the RP2350's engines are both written to
+it ([../rp2350/dma.md](../rp2350/dma.md)).
+
 ## The proof that it knows no chip
 
 `brio/host/sim_pl011.hpp` is a SECOND realization with no silicon under

@@ -460,6 +460,7 @@ struct SimPl011Engine {
     static inline uint32_t faults = 0;
     static inline uint32_t length = 0;
     static inline bool running = false;
+    static inline bool claimed = false;   ///< taken by claim(), no block started on it yet
 
     static uint8_t service() {
         const uint8_t f = next_flags;
@@ -473,6 +474,7 @@ struct SimPl011Engine {
     }
     static bool start(const uint8_t* buffer, uint32_t len) {
         (void)buffer;
+        claimed = false;
         length = len;
         running = true;
         blocks = blocks + 1u;
@@ -481,8 +483,27 @@ struct SimPl011Engine {
     static bool start(uint8_t* buffer, uint32_t len) {
         return start(static_cast<const uint8_t*>(buffer), len);
     }
+    /// The claim, the families' test-and-set: refused while a block runs
+    /// or another claim stands.
+    static bool claim() {
+        if (running || claimed) {
+            return false;
+        }
+        claimed = true;
+        return true;
+    }
+    static void unclaim() { claimed = false; }
+    /// A block on a claimed engine; an empty run gives the claim back.
+    static bool launch(std::span<const uint8_t> run) {
+        if (run.empty()) {
+            claimed = false;
+            return false;
+        }
+        return start(run.data(), static_cast<uint32_t>(run.size()));
+    }
     static uint32_t complete() {
         running = false;
+        claimed = false;
         return length;
     }
     static uint32_t take() {
@@ -496,16 +517,20 @@ struct SimPl011Engine {
         length = 0;
         return n;
     }
-    static bool busy() { return running; }
+    static bool busy() { return running || claimed; }
     static bool idle() { return !running; }
     static bool full() { return false; }
     static uint32_t capacity() { return length; }
     static bool abandon() {
         running = false;
+        claimed = false;
         faults = faults + 1u;
         return true;
     }
-    static void stop() { running = false; }
+    static void stop() {
+        running = false;
+        claimed = false;
+    }
 
     static void reset() {
         next_flags = 0;
@@ -515,6 +540,7 @@ struct SimPl011Engine {
         faults = 0;
         length = 0;
         running = false;
+        claimed = false;
     }
 };
 

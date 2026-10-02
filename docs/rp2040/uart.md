@@ -81,7 +81,10 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   UARTRSR), `clear_errors`. The two engine slots take `dma.hpp`'s
   `DmaTxEngine` / `DmaRxEngine` ([dma.md](dma.md)): with a transmit
   engine the ring's runs leave as DMA blocks and `dma_isr()` (the
-  line's ISR body) releases each and starts the next; with a receive
+  line's ISR body) releases each and starts the next - a block start
+  masks the engine's claim alone (six instructions, about 10 cycles,
+  counted in the listing) and programs the channel with the mask down,
+  two stores to the DMA block a block; with a receive
   engine the run is filled straight from UARTDR, `harvest()`
   publishes what TRANS_COUNT says has landed and re-arms, the
   completion re-arms from the line, and UARTRSR's sticky errors are
@@ -210,3 +213,7 @@ Implemented but not bench-verified, each with what would measure it:
   PL011 r1p5 ([../rp2350/uart.md](../rp2350/uart.md)), not yet here.
   `test_rp2040_serial` whole on both boards, its letter e's interrupt
   count, and `bench_rp2040`'s letter p would measure it.
+- The engined block start with its claim under the mask and the
+  channel bound once (two stores a block, [dma.md](dma.md)):
+  `test_rp2040_dma` letters i and j - the 4096-byte loop at 3 Mbaud and
+  the console's burst - on this chip's board.

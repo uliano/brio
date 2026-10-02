@@ -91,9 +91,10 @@
  * THE ENGINE SLOTS (the family's DmaTxEngine / DmaRxEngine, the other
  * families' shape). With a TRANSMIT engine the handler never touches the
  * transmit FIFO: write_byte() and write_bulk() queue into the ring and
- * pump_tx() starts a block over the ring's contiguous run whenever the
- * engine is idle; the block's completion - on the DMA line the engine
- * reports on, dma_isr() - releases exactly that run and starts the next.
+ * pump_tx() starts a block over the ring's contiguous run whenever it can
+ * CLAIM the engine - the claim alone under the mask, the block programmed
+ * after it; the block's completion - on the DMA line the engine reports
+ * on, dma_isr() - releases exactly that run and starts the next.
  * The transmit FIFO's own data request (UARTDMACR.TXDMAE) paces it,
  * credit by credit, so no kick is ever needed. With a RECEIVE engine the
  * receive interrupts stay off and the engine fills the ring's free run
@@ -1058,19 +1059,28 @@ private:
     }
 
     /// Start the next contiguous run of the TX ring on the engine, if it
-    /// is idle and there is one. Under the guard: the completion path
-    /// runs on the DMA line.
+    /// is idle and there is one. THE GUARD COVERS THE CLAIM AND NOTHING
+    /// ELSE: the thread and the completion on the DMA line both start
+    /// blocks, and "is the channel mine" is the one decision they race
+    /// for. The run is read and the block programmed with the mask down,
+    /// because a claimed channel has no block in flight - no completion
+    /// can consume the ring or start another block under the loader - and
+    /// the run is read AFTER the claim, so it never holds bytes a block
+    /// that ended meanwhile has already sent.
     static void pump_tx() {
         if constexpr (has_tx_engine) {
-            typename Chip::Guard guard;
-            if (TxEngine::busy()) {
-                return;
+            {
+                typename Chip::Guard guard;
+                if (!TxEngine::claim()) {
+                    return;
+                }
             }
             const auto run = m_tx.read_span();
             if (run.empty()) {
+                TxEngine::unclaim();
                 return;
             }
-            (void)TxEngine::start(run.data(), static_cast<uint32_t>(run.size()));
+            (void)TxEngine::launch(run);
         }
     }
 

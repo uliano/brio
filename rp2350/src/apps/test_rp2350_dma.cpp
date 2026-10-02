@@ -3,9 +3,10 @@
 // their trigger aliases, the FOUR interrupt lines, chaining, address
 // wrapping and the four address steps, THE COUNT MODES in TRANS_COUNT's
 // top nibble, the pacing timers, the checksum sniffer, the abort with
-// erratum RP2350-E5's workaround, a bus error - and the two engines in a
-// UART's slots, this console's own transmit side among them. ON BOTH
-// ARCHITECTURES from one source.
+// erratum RP2350-E5's workaround, a bus error - and the engines: the two
+// in a UART's slots, this console's own transmit side among them, and on
+// their own (letter l) the beat per block, a binding that reports errors
+// alone, and the copy engine. ON BOTH ARCHITECTURES from one source.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -74,6 +75,13 @@
 //   k  this console's transmit engine under a burst longer than its
 //      ring: every byte out in order (the host reads it), the blocks
 //      counted, no fault
+//   l  THE ENGINES' OWN SURFACE: one channel carrying a byte, a
+//      half-word and a word block in turn (the beat per block, CTRL
+//      rewritten only when it changes), a binding that reports ERRORS
+//      ALONE - a clean block raising nothing, a block reading the SIO
+//      window raising its interrupt all the same (12.6.7.1), which is
+//      what lets an SPI host take one interrupt a transaction - and the
+//      copy engine: copy and fill at three beats, exact, the refusals
 //
 //   m  (by name only) diagnostic: the transmit engine alone on the loop
 //   n  (by name only) diagnostic: the receive engine alone on the loop
@@ -761,6 +769,155 @@ void tk_console_engine() {
 }
 
 // =============================================================================
+// l - the engines' own surface
+// =============================================================================
+using BeatTx = DmaTxEngine<8, uint32_t>;
+using QuietTx = DmaTxEngine<9, uint32_t>;
+using Copy = DmaCopyEngine<10>;
+volatile uint32_t quiet_entries = 0;   // line-0 entries QuietTx's service() answered
+volatile uint8_t quiet_flags = 0;
+alignas(4) volatile uint32_t beat_cell = 0;
+
+/// Wait for a channel's BUSY to fall, bounded.
+template <uint8_t ch>
+bool settle(uint32_t budget_us = 10'000u) {
+    const uint32_t t0 = us_now();
+    while (DmaChannel<ch>::busy() && us_now() - t0 < budget_us) {
+    }
+    return !DmaChannel<ch>::busy();
+}
+
+void tl_engines() {
+    // ONE CHANNEL, THREE BEATS: a byte run, a half-word run, a word run
+    // poured in turn into one cell of RAM - an SRAM write of a byte or a
+    // half-word writes that lane alone, so the cell shows which beat
+    // wrote it last. The binding reports errors alone: the owner
+    // completes each block once BUSY has fallen.
+    alignas(4) static const uint8_t bytes4[4] = {0x11, 0x22, 0x33, 0x44};
+    alignas(4) static const uint16_t halves2[2] = {0x5566, 0x7788};
+    alignas(4) static const uint32_t words2[2] = {0x99AABBCCu, 0xDDEEFF01u};
+    beat_cell = 0;
+    BeatTx::arm(&beat_cell, Dreq::permanent, false, DmaReport::errors);
+    const bool b1 = BeatTx::start(bytes4, 4) && settle<8>();
+    (void)BeatTx::complete();
+    const uint32_t after_bytes = beat_cell;
+    const bool b2 = BeatTx::start(halves2, 2) && settle<8>();
+    (void)BeatTx::complete();
+    const uint32_t after_halves = beat_cell;
+    const bool b3 = BeatTx::start(words2, 2) && settle<8>();
+    (void)BeatTx::complete();
+    const uint32_t after_words = beat_cell;
+    print(serial, "  one channel, three beats into one cell: ", hex(after_bytes), " ",
+          hex(after_halves), " ", hex(after_words), crlf);
+    bench.verdict("one channel carries a byte, a half-word and a word block in turn, each at its "
+                  "own beat",
+                  b1 && b2 && b3 && after_bytes == 0x00000044u && after_halves == 0x00007788u &&
+                      after_words == 0xDDEEFF01u);
+    alignas(4) static uint16_t odd_halves[3];
+    bench.verdict("a half-word run one byte off its beat, an empty run and a 29-bit count are "
+                  "refused, and give the claim back",
+                  !BeatTx::start(reinterpret_cast<const uint16_t*>(
+                                     reinterpret_cast<const uint8_t*>(odd_halves) + 1),
+                                 2) &&
+                      !BeatTx::start(words2, 0) && !BeatTx::start(words2, dma_count_max + 1u) &&
+                      !BeatTx::busy());
+    BeatTx::stop();
+
+    // ERRORS ALONE: IRQ_QUIET takes the completion off the line and leaves
+    // the bus error on it.
+    QuietTx::arm(&beat_cell, Dreq::permanent, false, DmaReport::errors);
+    const uint32_t e0 = quiet_entries;
+    const uint32_t l0 = line_irqs[0];
+    const bool clean = QuietTx::start(words2, 2) && settle<9>();
+    spin_us(100);
+    (void)QuietTx::complete();
+    const uint32_t clean_entries = quiet_entries - e0;
+    const uint32_t clean_lines = line_irqs[0] - l0;
+    quiet_flags = 0;
+    const auto* unreachable = reinterpret_cast<const uint32_t*>(0xD0000000u);   // the SIO (12.6.7)
+    const bool faulted = QuietTx::start(unreachable, 4) && settle<9>();
+    spin_us(100);
+    const uint32_t fault_entries = quiet_entries - e0;
+    print(serial, "  errors alone: a clean block raised ", clean_entries, " (line 0 entered ",
+          clean_lines, "), a block reading the SIO raised ", fault_entries, " with flags ",
+          hex(quiet_flags), crlf);
+    bench.verdict("a binding that reports errors alone: a clean block raises nothing",
+                  clean && clean_entries == 0u && clean_lines == 0u);
+    bench.verdict("and a bus error under it still raises the channel's interrupt, served as an "
+                  "error",
+                  faulted && fault_entries == 1u &&
+                      (quiet_flags & QuietTx::flag_error) != 0u);
+    (void)QuietTx::abandon();
+    const bool again = QuietTx::start(words2, 2) && settle<9>();
+    (void)QuietTx::complete();
+    bench.verdict("abandon() hands the channel back, and it runs again", again &&
+                  beat_cell == 0xDDEEFF01u);
+    QuietTx::stop();
+
+    // THE COPY ENGINE, polled: copy and fill at three beats.
+    Copy::arm(DmaReport::errors);
+    fill(src, 4096, 0x2468u);
+    fill(dst, 4096, 0);
+    const bool w = Copy::copy(reinterpret_cast<uint32_t*>(dst), reinterpret_cast<const uint32_t*>(src),
+                              1024) && settle<10>();
+    const bool word_copy = w && same(src, dst, 4096);
+    fill(dst, 4096, 0);
+    const bool h = Copy::copy(reinterpret_cast<uint16_t*>(dst + 2),
+                              reinterpret_cast<const uint16_t*>(src + 2), 100) && settle<10>();
+    const bool half_copy = h && same(src + 2, dst + 2, 200) && dst[0] == 0u && dst[1] == 0u;
+    fill(dst, 4096, 0);
+    const bool b = Copy::copy(dst + 1, src + 1, 333) && settle<10>();
+    const bool byte_copy = b && same(src + 1, dst + 1, 333) && dst[0] == 0u;
+    print(serial, "  copy: 1024 words ", word_copy ? "exact" : "WRONG", ", 100 half-words ",
+          half_copy ? "exact" : "WRONG", ", 333 bytes at an odd address ",
+          byte_copy ? "exact" : "WRONG", crlf);
+    bench.verdict("the copy engine copies at three beats, exact", word_copy && half_copy && byte_copy);
+    static const uint32_t word_cell = 0xA5C3E1F0u;
+    static const uint16_t pixel = 0xF81Fu;
+    static const uint8_t byte_cell = 0x5Au;
+    const bool fw = Copy::fill(reinterpret_cast<uint32_t*>(dst), &word_cell, 64) && settle<10>();
+    bool word_fill = fw;
+    for (uint32_t i = 0; i < 64; ++i) {
+        word_fill = word_fill && reinterpret_cast<const uint32_t*>(dst)[i] == word_cell;
+    }
+    const bool fh = Copy::fill(reinterpret_cast<uint16_t*>(dst + 512), &pixel, 64) && settle<10>();
+    bool half_fill = fh;
+    for (uint32_t i = 0; i < 64; ++i) {
+        half_fill = half_fill && reinterpret_cast<const uint16_t*>(dst + 512)[i] == pixel;
+    }
+    const bool fb = Copy::fill(dst + 1001, &byte_cell, 77) && settle<10>();
+    bool byte_fill = fb && dst[1000] != byte_cell;
+    for (uint32_t i = 0; i < 77; ++i) {
+        byte_fill = byte_fill && dst[1001 + i] == byte_cell;
+    }
+    print(serial, "  fill: 64 words ", word_fill ? "exact" : "WRONG", ", 64 half-words ",
+          half_fill ? "exact" : "WRONG", ", 77 bytes ", byte_fill ? "exact" : "WRONG", crlf);
+    bench.verdict("the copy engine fills from one cell at three beats, exact",
+                  word_fill && half_fill && byte_fill);
+    // A block thrown away in flight: abandon() is the abort polled to its
+    // end, and the channel copies again afterwards.
+    fill(dst, 4096, 0);
+    const bool long_started = Copy::copy(reinterpret_cast<uint32_t*>(dst),
+                                         reinterpret_cast<const uint32_t*>(src), 1024);
+    const bool thrown = Copy::abandon();
+    const bool partial = !same(src, dst, 4096);
+    const bool after = Copy::copy(reinterpret_cast<uint32_t*>(dst),
+                                  reinterpret_cast<const uint32_t*>(src), 1024) && settle<10>();
+    print(serial, "  abandon: started ", long_started, ", thrown away ", thrown,
+          ", the destination short of the source ", partial, ", then copied again ",
+          after && same(src, dst, 4096) ? "exact" : "WRONG", crlf);
+    bench.verdict("a copy abandoned in flight stops short, and the engine copies again exact",
+                  long_started && thrown && partial && after && same(src, dst, 4096));
+    bench.verdict("and refuses a misaligned word run and an empty one",
+                  !Copy::copy(reinterpret_cast<uint32_t*>(dst + 2), reinterpret_cast<const uint32_t*>(src),
+                              4) &&
+                      !Copy::copy(reinterpret_cast<uint32_t*>(dst), reinterpret_cast<const uint32_t*>(src),
+                                  0) &&
+                      Copy::errors() == 0u);
+    Copy::stop();
+}
+
+// =============================================================================
 // m, n - the diagnostic halves (by name)
 // =============================================================================
 using TxOnly = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<6>, NoDmaEngine>;
@@ -827,6 +984,11 @@ extern "C" void isr_dma_0() {
     (void)Instrument::dma_isr();
     (void)TxOnly::dma_isr();
     (void)RxOnly::dma_isr();
+    const uint8_t quiet = QuietTx::service();
+    if (quiet != 0u) {
+        quiet_flags = static_cast<uint8_t>(quiet_flags | quiet);
+        quiet_entries = quiet_entries + 1u;
+    }
 }
 extern "C" void isr_dma_1() {
     line_irqs[1] = line_irqs[1] + 1u;
@@ -884,6 +1046,7 @@ int main() {
     bench.letter('i', "THE COUNT MODES: trigger-self, then endless", ti_count_modes);
     bench.letter('j', "the instrument's two engines on the loop-back", tj_instrument);
     bench.letter('k', "this console's transmit engine under a burst", tk_console_engine);
+    bench.letter('l', "the engines: the beat per block, errors alone, copy and fill", tl_engines);
     bench.letter('m', "diagnostic: the transmit engine alone", tm_tx_only, false);
     bench.letter('n', "diagnostic: the receive engine alone", tn_rx_only, false);
 

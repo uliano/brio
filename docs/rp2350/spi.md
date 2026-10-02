@@ -180,8 +180,14 @@ extern "C" void isr_spi0() {
 The same source builds for both architectures; `isr_spi0` is a
 vector-table slot on one half and a dispatch entry on the other.
 
-With the engines: `SpiHost<0, pins, DmaTxEngine<4>, DmaRxEngine<5>>` and
-the line the engines report on calling `Bus::dma_isr()` the same way:
+With the engines: `SpiHost<0, pins, DmaTxEngine<4, uint16_t>,
+DmaRxEngine<5, uint16_t>>` - half-word engines, SSPDR's width, so 8-bit
+frames ride them at a byte beat and 16-bit frames at a half-word one;
+byte engines leave a 16-bit request to the pump, as does a buffer not
+aligned to a half-word - and the line the engines report on calling
+`Bus::dma_isr()` the same way. The receive block's completion is the
+transaction's ONE interrupt: the transmit engine is armed to report a bus
+error and nothing else ([dma.md](dma.md)).
 
 ```cpp
 extern "C" void isr_dma_0() {
@@ -207,11 +213,12 @@ extern "C" void isr_spi1() {
 ## Bench findings
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
-and clk_peri at 150 MHz, and all of them on BOTH architectures:
-`test_rp2350_spi` reports **41 pass, 0 fail** on the Cortex-M33 pair and
-on the Hazard3 pair, from one source, each on three flash-and-run cycles.
-Where a number differs between the halves both are given; every verdict
-reads the same.
+and clk_peri at 150 MHz, and all of them on BOTH architectures, from one
+source: `test_rp2350_spi` carries 43 verdicts, the 30 of the loop-back
+letters a..e green on the Cortex-M33 pair and on the Hazard3 pair, and
+the 13 of the wire letters f..j green on the four self-link wires (letter
+i, the engines on the wire, is the one gap below). Where a number differs
+between the halves both are given; every verdict reads the same.
 
 - **THE BLOCK IS THE RP2040'S, AND SAYS SO.** SSPPERIPHID 0..3 read 0x22,
   0x10, 0x34, 0x00 - the revision field 3, which is r1p4 - and SSPPCELLID
@@ -245,11 +252,94 @@ reads the same.
   690 and 765 ns a frame** where the wire alone would want 213 and 106.
   Every rate is byte-exact.
 - **THE ENGINES ON THE LOOP-BACK.** 128 bytes at 37.5 MHz, ISR-completed,
-  take **126 us on the Cortex-M33 half and 113 on the Hazard3 one** where
-  the wire alone is 27; a polled request on the engines completes inside
-  `start()` in 28 us at 75 MHz. A command frame on the pump then data on
-  the engines, 16-bit frames falling back to the pump, and a read with no
-  out buffer through the transmit engine's fixed 0xFF cell are all exact.
+  are exact with **ONE DMA interrupt**, and 64 16-bit frames ride the
+  engines at a half-word beat exact with no pump interrupt and one DMA
+  interrupt; a 16-bit request on a buffer one byte off a half-word goes
+  to the pump and is exact there. A command frame on the pump then data
+  on the engines, a polled request on the engines completing inside
+  `start()`, and a read with no out buffer through the transmit engine's
+  fixed 0xFF cell are all exact. The letter times the 128-byte block, the
+  polled request and the 16-bit block twice each - the first run and a
+  repeat - with the XIP cache's misses beside each: the block takes
+  **112 / 98 us cold, missing 146 / 154 lines, and 40 / 45 us warm**,
+  where the wire with mode 0's frame gap is 32 (the next items); the
+  polled request, a command frame and 64 data frames at 75 MHz, 21 / 25
+  us cold and 14 / 17 warm; the 16-bit block in mode 3, 53 / 49 cold and
+  33 / 34 warm against a wire of 27. The repeat still misses 5 to 13
+  lines in this image: the cache is two-way, and some lines of this
+  image's transaction path share a set; a smaller image of the same
+  binding misses none warm.
+- **WHAT AN ENGINED TRANSACTION COSTS, `bench_rp2350` letter d**, the
+  ruler TIMER1 on clk_sys, MISO floating (and the same on the loop-back),
+  the core asleep between the start and the completion; Cortex-M33 /
+  Hazard3. `start()` returns after **353 / 322 cycles** - the request
+  copied, the select and the flush, both engines started - and the
+  transaction's ONE interrupt follows the last frame; with it a
+  transaction costs the core **about 700 / 480 busy cycles** whatever its
+  size, and its FIXED COST, the wall less its frames' own
+  time, is **about 550 / 530 cycles, 3.7 / 3.5 us**, the same at 16 and
+  256 frames and at both rates. THE FRAMES' OWN TIME IS NOT THE NOMINAL
+  WIRE'S: in mode 0 the PL022 raises its frame signal between two frames
+  of a continuous transfer (12.3.4.10, and 12.3.4.12 for mode 2), and the
+  gap is 1.5 SCK periods - measured 19 cycles a byte at 75 MHz where the
+  bits are 16, 76 at 18.75 MHz where they are 64, 35 and 140 a 16-bit
+  frame where they are 32 and 128, x 1.19 and x 1.09 - so with the fixed
+  cost 256 frames come out at x 1.10 to x 1.32 of the nominal wire. IN
+  MODES 1 AND 3 (SPH = 1) THERE IS NO GAP - measured on a build of the
+  same binding in the four modes, warm, by the difference of 16 and 256
+  frames: 16.00 and 64.00 cycles a byte at 75 and 18.75 MHz, the nominal
+  wire exactly, on both halves, where modes 0 and 2 give 19.00 and 76.00.
+  256 16-bit frames at 75 MHz take 9519 / 9499
+  cycles, x 1.16, with ONE interrupt; the same request on the pump - byte
+  engines, or a misaligned buffer - takes 25836 / 26644, x 3.15 / 3.25,
+  with 34 / 33. The core spinning on a flag in RAM or on a register behind
+  the APB bridge while the engines run changes a 256-byte block by under
+  a hundredth.
+- **THE FIRST TRANSACTION PAYS THE XIP CACHE ITS FILL.**
+  The very first transaction after the host is brought up takes 10318 /
+  8714 cycles in `bench_rp2350` where every later one takes 858 / 837.
+  Split on a build of the bench's own binding - 16 frames at 75 MHz, the
+  core spinning on the completion's RAM flag, the cache's two counters
+  (`Xip::hits()`, `Xip::accesses()`, [flash.md](flash.md)) read around
+  each transaction: the first after `init()` costs **11576 / 9354 cycles
+  and misses 132 / 126 lines**; the cache invalidated with nothing about
+  the SPI changed, 11982 / 11693 and 136 / 165 misses; warm, 794 / 790 and
+  none. The SAME SOURCE WITH ITS CODE LINKED INTO SRAM pays the warm wall
+  and the rate change and nothing more - 991 / 1160 for its first
+  transaction, the remainder exactly what stayed in the flash (one vector
+  fetch on the Cortex-M33; the trap entry and the runtime's memcpy on
+  Hazard3). So a rate change costs 90 cycles (`apply()`'s SSE pair around
+  `configure()`), the DMA's first block after `arm()` and the PL022's
+  first frame after SSE cost nothing measurable, and the rest is 126 to
+  165 misses of 66 to 82 cycles each: an engined transaction executes
+  about 1.1 KB of code (`start()` 420 bytes, the completion's handler
+  with `finish_dma()` about 300, the two engine starts 184, `apply()` and
+  `clamp()` 164, the launch 84 - Cortex-M33, `-Os`), and the boot's XIP
+  setting (EBh at CLKDIV 3, [flash.md](flash.md)) prices a line at that.
+  The wire inside is untouched: on the Cortex-M33 at 75 MHz the
+  completion's handler is entered before a cold `start()` has even
+  returned - the frames were done while its tail was still being fetched.
+- **THE VENDOR'S LIBRARY DOING THE SAME TRANSFER ON THE SAME BOARD** is
+  the oracle for both numbers: the pico-sdk 2.3.1's `hardware_spi` and
+  `hardware_dma`, built by its own CMake with its own crt, SPI0 on the
+  same pads at the same rates, two channels with byte beats into SSPDR
+  started by one `dma_start_channel_mask()`, timed on the same TIMER1,
+  the XIP left as the bootrom set it (the SDK reprograms the QMI only
+  when told to: it reads back CLKDIV 3 and EBh too). Inside the block it
+  takes **exactly this driver's time - 19.00 cycles a byte at 75 MHz and
+  76.00 at 18.75 MHz, on both halves** - so the frame gap is the block's
+  and the engines run at the wire. Its warm 16-frame transfer, completed
+  by the same interrupt, takes **405 / 452 cycles against this driver's
+  794 / 790**: its transfer is two `dma_channel_configure()` calls and
+  one store, inlined, where this one carries the arbiter's Request
+  through `start()` - stamped, each stamp's own 4 cycles included: the
+  Request copied 68 / 91 cycles, an unchanged `apply()` 75 / 64, the D/C
+  line, the select and the flush 52 / 56, the two engine starts with
+  their two SSPDMACR writes 158 / 123, the completion's handler through
+  `finish_dma()` 119 / 110. And its first transfer after `spi_init()`,
+  completed by its interrupt, pays the same price per line - 14 to 24
+  misses, 1158 to 1996 cycles - because it touches six to seven times
+  fewer lines.
 - **THE CLIENT KEEPS UP ONE RUNG ABOVE THE CHAPTER'S CEILING.** On the
   four wires, the host polled and the client served from its own
   interrupt, 32 frames are exact both ways at **clk_peri / 8, 18.75 MHz**,
@@ -293,6 +383,13 @@ the Microwire transaction, frame widths other than 8 and 16 in the
 Request, a client on the DMA engines - are in
 [../pl022/README.md](../pl022/README.md) and are not repeated here.
 
+- The transaction path in SRAM: an engined transaction whose lines have
+  left the XIP cache pays 126 to 165 misses, about 70 us at 150 MHz (the
+  bench findings), which `start()`, the engines' starts and the
+  completion's handler placed in `.ram_text` would not pay - at about
+  1.1 KB of SRAM a host, and a section the IP stratum would name for
+  every family that carries the block. Declined while the path's own
+  size, six to seven times the vendor's transfer in cache lines, is open.
 - The TI and the Microwire framings ON THE WIRE: both are codes
   `SpiConfig` takes and the resource reads back, and no device on this
   desk speaks either. The pair of instances could speak TI to each other
@@ -310,6 +407,11 @@ Request, a client on the DMA engines - are in
   running bus.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- Letter i, the host's engines on the wire against the client, with the
+  engines in the half-word shape: the loop-back letters and the bench
+  measure them, the wire has not carried them. The four self-link wires
+  and the letter.
 
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no

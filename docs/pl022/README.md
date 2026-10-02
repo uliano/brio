@@ -140,6 +140,40 @@ the framework default (`brio/.clangd`, the host test project's database)
 is the right one, because this file really does compile on the host -
 which is also what makes the host suite below possible.
 
+## The engine slots
+
+A transmit and a receive engine, both or neither: the data phase moves
+as one block each way, the command phase on the pump. ONE INTERRUPT A
+TRANSACTION - every frame that came back was sent, so the receive block's
+completion proves the transmit block's, and the host arms its transmit
+engine to report a bus error and nothing else (`arm(data, request,
+false, Engine::Report::errors)`); the owner then completes the transmit
+block itself. THE BEAT IS THE FRAME: SSPDR is sixteen bits wide, so the
+engines' element is `uint8_t` or `uint16_t`, the same on both. Half-word
+engines carry 8-bit frames at a byte beat and 16-bit frames at a
+half-word beat, the Request's byte buffers handed over as runs of the
+frame - two bytes low-first ARE a half-word on a little-endian core - and
+a 16-bit request whose buffers are not aligned to a half-word goes to the
+pump; byte engines leave every 16-bit request to the pump. The requests
+are raised around the engines and dropped at the end of the data phase.
+
+WHAT AN ENGINED BLOCK COSTS ON THE WIRE is the block's and not a
+family's: with SPH = 0 (modes 0 and 2) the PL022 pulses its frame signal
+between the frames of a continuous transfer, and the pulse costs 1.5 SCK
+periods a frame - 19 % on 8-bit frames, 9 % on 16-bit ones - where with
+SPH = 1 (modes 1 and 3) a block runs at the nominal wire exactly.
+Measured on the RP2350 by this engine in the four modes at two rates on
+both of that chip's architectures, the mode-0 figure to the cycle the
+same by the vendor's own library doing the same transfer on the same
+board ([../rp2350/spi.md](../rp2350/spi.md)): a device that takes mode 1
+or 3 saves the 19 % by saying so.
+
+What the host asks of an engine: `present`, `channel`, `element`,
+`Report` with `errors`, `arm(data, request[, high, report])`,
+`start(pointer, count)` at the frame's beat, `start_fixed(cell, count)`
+and `start_discard(cell, count)`, `complete()`, `busy()`, `service()`
+with `flag_complete` and `flag_error`, `abandon()`, `stop()`.
+
 ## What stays per family
 
 The pin table and its function code; the reset or clock gate; the

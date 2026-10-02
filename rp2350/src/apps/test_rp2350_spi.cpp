@@ -63,8 +63,14 @@
 //   c  THE POLLED PATH AT EVERY NAMED RATE, div2 to div256, 64 frames
 //      each, timed on the ruler, the frame period reported
 //   d  THE DMA ENGINES on the loop: 128-byte blocks with and without a
-//      command phase, timed, the polled variant, and the 16-bit
-//      fallback to the pump
+//      command phase, ONE DMA interrupt a transaction (the transmit
+//      engine reports errors alone), the polled variant, 16-bit frames ON
+//      THE ENGINES at a half-word beat, and a 16-bit request on a
+//      misaligned buffer falling back to the pump. The first block and
+//      the first polled request are timed TWICE, cold and then warm, with
+//      the XIP cache's misses beside each: the first transaction after
+//      the host is brought up runs its code out of the flash, and that -
+//      not the engines - is what its figure measures
 //   e  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
 //      the rejection, both sleep votes
 //   f  THE WIRE: sixteen frames both ways in modes 1 and 3 and at 16
@@ -95,6 +101,7 @@
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/dma.hpp"
+#include "rp2350/flash.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
@@ -133,7 +140,7 @@ constexpr SpiPins client_pins{.sck = 10, .tx = 11, .rx = 8, .cs = 9};
 constexpr SpiPins host_b_pins{.sck = 10, .tx = 11, .rx = 8};
 constexpr SpiPins client_a_pins{.sck = 18, .tx = 19, .rx = 16, .cs = 17};
 using Host = SpiHost<0, host_pins>;
-using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4>, DmaRxEngine<5>>;
+using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
 using Client = SpiClient<1, client_pins>;
 using HostB = SpiHost<1, host_b_pins>;
 using ClientA = SpiClient<0, client_a_pins>;
@@ -148,20 +155,29 @@ enum class Spi1Owner : uint8_t { none, client, host_b };
 volatile Spi0Owner spi0_owner = Spi0Owner::none;
 volatile Spi1Owner spi1_owner = Spi1Owner::none;
 volatile uint32_t spi0_isr_entries = 0;
+volatile uint32_t dma_line_entries = 0;
 volatile uint32_t spi1_isr_entries = 0;
 volatile bool transfer_done = false;
 volatile uint8_t transfer_status = 0;
 bool bus_ao_live = false;
 
 uint32_t us_now() { return Ruler::now_low(); }
+/// The XIP cache's misses since its counters were cleared: what a cold
+/// transaction pays to fetch its code out of the flash. The hits are read
+/// first, so the reads' own fetches land on the accesses' side as hits.
+uint32_t xip_misses() {
+    const uint32_t hits = Xip::hits();
+    return Xip::accesses() - hits;
+}
 void spin_us(uint32_t us) {
     const uint32_t t0 = us_now();
     while (us_now() - t0 < us) {
     }
 }
 
-uint8_t tx_buf[256];
-uint8_t rx_buf[256];
+// Aligned for the engines' half-word beat (letter d, the 16-bit frames).
+alignas(4) uint8_t tx_buf[256];
+alignas(4) uint8_t rx_buf[256];
 uint8_t cmd_buf[4];
 
 void fill_pattern(uint8_t* p, uint16_t n, uint8_t seed) {
@@ -514,17 +530,40 @@ void td_dma() {
     for (uint16_t i = 0; i < 128; ++i) {
         rx_buf[i] = 0xEE;
     }
+    // THE FIRST TRANSACTION AFTER THE HOST IS BROUGHT UP runs its code out
+    // of the flash, line by line into the XIP cache; the same block again
+    // runs it out of the cache. Both are timed, the misses beside each.
+    Xip::reset_counters();
     uint32_t t0 = us_now();
+    dma_line_entries = 0;
     const uint8_t st = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 128, SpiMode::mode0,
                                      SpiClocks::div4, SpiDataSize::bits8, false);
     const uint32_t took = us_now() - t0;
+    const uint32_t cold_misses = xip_misses();
+    const uint32_t line_entries = dma_line_entries;
+    const bool exact = same(tx_buf, rx_buf, 128);
+    const bool released = CsPin::read_out();
+    for (uint16_t i = 0; i < 128; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    Xip::reset_counters();
+    t0 = us_now();
+    const uint8_t st_warm = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 128, SpiMode::mode0,
+                                          SpiClocks::div4, SpiDataSize::bits8, false);
+    const uint32_t took_warm = us_now() - t0;
+    const uint32_t warm_misses = xip_misses();
     print(serial, "  128 bytes on the engines at div4 (37.5 MHz): status ", st, " in ", took,
-          " us (the wire alone ", 128u * 8u * 4u / 150u, "), ",
-          same(tx_buf, rx_buf, 128) ? "byte-exact" : "MISMATCH", ", cs released=",
-          CsPin::read_out(), crlf);
+          " us cold (", cold_misses, " XIP misses), ", took_warm, " us warm (", warm_misses,
+          " misses, status ", st_warm, ", ", same(tx_buf, rx_buf, 128) ? "exact" : "MISMATCH",
+          "); the wire alone ", 128u * 8u * 4u / 150u, ", with mode 0's gap of 1.5 bit "
+          "periods a frame ", 128u * (8u * 4u + 6u) / 150u, "; ", exact ? "byte-exact" : "MISMATCH",
+          ", cs released=", released, ", DMA line entries ", line_entries, crlf);
     bench.verdict("a 128-byte block through the two engines, ISR-completed, byte-exact and the "
                   "select released",
-                  st == spi_ok && same(tx_buf, rx_buf, 128) && CsPin::read_out());
+                  st == spi_ok && exact && released);
+    bench.verdict("ONE DMA interrupt for the transaction: the receive block's completion, the "
+                  "transmit engine reporting errors alone",
+                  line_entries == 1u);
     cmd_buf[0] = 0x0B;
     fill_pattern(tx_buf, 32, 0x41);
     for (uint16_t i = 0; i < 32; ++i) {
@@ -538,22 +577,70 @@ void td_dma() {
     for (uint16_t i = 0; i < 64; ++i) {
         rx_buf[i] = 0xEE;
     }
+    // The polled path's own first run, and the same request warm.
+    Xip::reset_counters();
     t0 = us_now();
     const uint8_t st3 = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode0,
                                       SpiClocks::div2, SpiDataSize::bits8, true);
     const uint32_t took3 = us_now() - t0;
-    print(serial, "  polled on the engines at div2 (75 MHz): status ", st3, " in ", took3, " us",
-          crlf);
+    const uint32_t cold3 = xip_misses();
+    const bool exact3 = same(tx_buf, rx_buf, 64);
+    Xip::reset_counters();
+    t0 = us_now();
+    const uint8_t st3_warm = xfer<DmaHost>(cmd_buf, 1, tx_buf, rx_buf, 64, SpiMode::mode0,
+                                           SpiClocks::div2, SpiDataSize::bits8, true);
+    const uint32_t took3_warm = us_now() - t0;
+    const uint32_t warm3 = xip_misses();
+    print(serial, "  polled on the engines at div2 (75 MHz), a command frame and 64 data frames: "
+          "status ", st3, " in ", took3, " us cold (", cold3, " XIP misses), ", took3_warm,
+          " us warm (", warm3, " misses, status ", st3_warm, "); the wire alone ",
+          65u * 8u * 2u / 150u, crlf);
     bench.verdict("a polled request on the engines completes inside start(), exact",
-                  st3 == spi_ok && same(tx_buf, rx_buf, 64));
-    fill_pattern(tx_buf, 32, 0x61);
-    for (uint16_t i = 0; i < 32; ++i) {
+                  st3 == spi_ok && exact3);
+    // THE BEAT IS THE FRAME: 16-bit frames on aligned buffers ride the
+    // engines as half-words - no pump interrupt at all - and the low-first
+    // byte buffer comes back exact.
+    fill_pattern(tx_buf, 128, 0x61);
+    for (uint16_t i = 0; i < 128; ++i) {
         rx_buf[i] = 0xEE;
     }
-    const uint8_t st4 = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode3,
-                                      SpiClocks::div16, SpiDataSize::bits16, false);
-    bench.verdict("16-bit frames fall back to the pump on an engined host, exact",
-                  st4 == spi_ok && same(tx_buf, rx_buf, 32) && spi0_isr_entries != 0u);
+    dma_line_entries = 0;
+    Xip::reset_counters();
+    t0 = us_now();
+    const uint8_t st4 = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode3,
+                                      SpiClocks::div4, SpiDataSize::bits16, false);
+    const uint32_t took4 = us_now() - t0;
+    const uint32_t cold4 = xip_misses();
+    const bool exact4 = same(tx_buf, rx_buf, 128);
+    const uint32_t pump4 = spi0_isr_entries;
+    const uint32_t line4 = dma_line_entries;
+    for (uint16_t i = 0; i < 128; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    Xip::reset_counters();
+    t0 = us_now();
+    const uint8_t st4_warm = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode3,
+                                           SpiClocks::div4, SpiDataSize::bits16, false);
+    const uint32_t took4_warm = us_now() - t0;
+    const uint32_t warm4 = xip_misses();
+    print(serial, "  64 16-bit frames on the engines at div4, mode 3: status ", st4, " in ", took4,
+          " us cold (", cold4, " XIP misses), ", took4_warm, " us warm (", warm4, " misses, status ",
+          st4_warm, ", ", same(tx_buf, rx_buf, 128) ? "exact" : "MISMATCH", "); the wire alone ",
+          64u * 16u * 4u / 150u, " (mode 3: no frame gap); ", exact4 ? "exact" : "MISMATCH",
+          ", pump entries ", pump4, ", DMA line entries ", line4, crlf);
+    bench.verdict("16-bit frames ride the engines at a half-word beat, exact, with no pump "
+                  "interrupt and one DMA interrupt",
+                  st4 == spi_ok && exact4 && pump4 == 0u && line4 == 1u);
+    // A buffer one byte off a half-word cannot be a run of half-words: the
+    // request goes to the pump, and is exact there.
+    fill_pattern(tx_buf + 1, 32, 0x71);
+    for (uint16_t i = 0; i < 33; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint8_t st4b = xfer<DmaHost>(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiMode::mode3,
+                                       SpiClocks::div16, SpiDataSize::bits16, false);
+    bench.verdict("16-bit frames on a misaligned buffer fall back to the pump, exact",
+                  st4b == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && spi0_isr_entries != 0u);
     for (uint16_t i = 0; i < 16; ++i) {
         rx_buf[i] = 0x00;
     }
@@ -1115,6 +1202,7 @@ extern "C" void isr_spi1() {
 }
 
 extern "C" void isr_dma_0() {
+    dma_line_entries = dma_line_entries + 1u;
     if (spi0_owner == Spi0Owner::dma_host && DmaHost::dma_isr()) {
         transfer_status = DmaHost::status();
         transfer_done = true;

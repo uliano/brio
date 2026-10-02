@@ -246,6 +246,12 @@ a number is given for each.
 - The transport carries the kernel console and the pin-check tool on both
   architectures at 115200 through that bridge, with every error counter
   and the ring overrun at zero.
+- THE TWO DMA ENGINE SLOTS are measured in [dma.md](dma.md), whose suite
+  puts an engine in each slot of the second instance under the loop-back
+  (4096 bytes at 3 Mbaud exact) and runs its own console's transmitter on
+  one: the block start there is the engine's CLAIM alone under the mask
+  and the block programmed after it
+  ([../pl011/README.md](../pl011/README.md)).
 
 ## Not covered yet
 
@@ -261,10 +267,6 @@ signals, the stick-parity bit - are in
 
 Implemented but not bench-verified, each with what would measure it:
 
-- THE TWO DMA ENGINE SLOTS, now that there is a controller to fill them
-  ([dma.md](dma.md)): `test_rp2350_dma`'s letter j puts an engine in each
-  slot of the second instance under the loop-back, and its letter k runs
-  the console's own transmitter on one.
 - THE RECEIVE HALF OF THE SECOND COLUMN. The transmitter is proven on its
   alternate pad by watching the pad itself; the receiver on an alternate
   pad is proven only as far as the pad register - no wire of this bench

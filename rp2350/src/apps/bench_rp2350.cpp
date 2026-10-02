@@ -120,6 +120,50 @@
 //   t  the tick's floor: one second of Idle::idle() turns with nothing to
 //      do, counters before and after: wall = the second, irq = the ticks,
 //      isr = the tick handler's cycles, busy = the floor.
+//   d  THE DMA (rp2350/dma.hpp, datasheet 12.6), four operations:
+//        copy   DmaCopyEngine moving 16, 256 and 4096 bytes as WORDS between
+//               the two static buffers, polled: wall = the start to BUSY
+//               falling, busy = wall, each the best of 8. THE WIRE is the
+//               controller's own rate, one read and one write of up to 32
+//               bits every clock (12.6's opening): 4 bytes a cycle, 600 MB/s.
+//               A plain line beside each: the fixed cost, wall less one
+//               cycle a word.
+//        fill   the same sizes written from one word cell: the same wire.
+//        paced  256 words from a table into ONE CELL, one a microsecond, the
+//               request a DMA pacing timer's (DmaTimer<0>, X 1 / Y 150 of
+//               clk_sys), the block's completion on line 0 - the core idles
+//               through it, so busy is what the block cost the CPU and irq
+//               the interrupts it took; the second of two runs, the first
+//               running the handler and the idle path cold. THE WIRE is the pace, 4 MB/s. Then
+//               the same block again with the core STAMPING THE RULER at
+//               every step of the channel's count - a polled loop of a few
+//               cycles a turn, which bounds the resolution - and the plain
+//               line gives the 255 intervals against the 150-cycle pace:
+//               the mean, how many lie within one polling turn of it, and
+//               the extremes.
+//        spi.dma  SPI0 as a host on its two engines (DmaTxEngine<4,
+//               uint16_t>, DmaRxEngine<5, uint16_t>), 16 and 256 frames of
+//               8 and of 16 bits at clk_peri / 2 (75 MHz) and clk_peri / 8
+//               (18.75 MHz), on GP18/GP19/GP16 with GP17 as the select and
+//               NOTHING ON THE WIRE: MISO floats and the time is the wire's
+//               and the engines', the data unjudged (the suite's loop-back
+//               judges it, test_rp2350_spi letter d). Wall = start() to the
+//               completion on line 0, the core idling between, the best of
+//               five after one thrown away (which runs cold out of the flash
+//               and applies the new rate to the block). THE WIRE is
+//               the SCK rate over eight bits a byte. The plain line beside
+//               each gives the transaction's fixed cost - wall less the
+//               wire's own cycles - which is the number this round is
+//               judged by; another, per rate and width, the cycles a byte
+//               by the difference of the two sizes. Then the same
+//               transactions on the PL022's loop-back (LBM), plain lines
+//               only, the cycles a byte beside the wire's: the instrument the
+//               SPI suite's letter d judges the data on. And 256 bytes at
+//               each rate with the core AWAKE while the engines run -
+//               spinning on the RAM flag the handler sets, then spinning on
+//               the ruler, a register behind the APB bridge the engines'
+//               accesses to SSPDR cross too - beside the same block with the
+//               core asleep.
 //
 // THE INSTRUMENT'S COST, and how a reader takes it out. Every number is RAW.
 //  - A Stopwatch frames an operation between two ruler reads, inline, so
@@ -153,8 +197,11 @@
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/delay.hpp"
+#include "rp2350/dma.hpp"
 #include "rp2350/mtime.hpp"
+#include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
+#include "rp2350/spi.hpp"
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
@@ -211,6 +258,8 @@ TestBench<Serial, 8> bench;
 // One meter per bound vector (the file header).
 IsrMeter<Ruler, Idle> uart_meter;
 IsrMeter<Ruler, Idle> tick_meter;
+IsrMeter<Ruler, Idle> dma_meter;
+IsrMeter<Ruler, Idle> spi_meter;
 
 // A meter no vector carries: letter r's stamp pair is measured on it, so
 // the two above count interrupts and nothing else.
@@ -234,7 +283,7 @@ void identity() {
 /// Outside every measured span.
 BenchCounters counters() {
     P::CriticalSection masked;
-    return bench_counters<Idle>(uart_meter, tick_meter);
+    return bench_counters<Idle>(uart_meter, tick_meter, dma_meter, spi_meter);
 }
 
 /// Let the console fall silent before a measurement, so its interrupts are
@@ -437,7 +486,8 @@ struct PrintCounters {
 };
 PrintCounters print_counters() {
     P::CriticalSection masked;
-    return {bench_counters<Idle>(uart_meter, tick_meter), uart_meter.count(), uart_meter.cycles()};
+    return {bench_counters<Idle>(uart_meter, tick_meter, dma_meter, spi_meter), uart_meter.count(),
+            uart_meter.cycles()};
 }
 
 void tp_print() {
@@ -479,6 +529,318 @@ void tt_tick() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// d - the DMA: copy and fill, a paced block, the SPI engines
+// =============================================================================
+using Copy = DmaCopyEngine<8>;
+using Paced = DmaTxEngine<9, uint32_t>;
+using Pace = DmaTimer<0>;
+constexpr uint32_t dma_bytes_per_cycle = 4;   // one 32-bit read and write a clock (12.6)
+constexpr uint32_t paced_words = 256;
+constexpr uint16_t pace_cycles = 150;         // Y / X: one request a microsecond at 150 MHz
+
+constexpr SpiPins spi_pins{.sck = 18, .tx = 19, .rx = 16};
+using Spi = SpiHost<0, spi_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
+using SpiSelect = Pin<17>;
+
+alignas(4) uint32_t paced_table[paced_words];
+volatile uint32_t paced_cell = 0;
+uint32_t pace_stamps[paced_words];
+volatile bool paced_done = false;
+volatile bool spi_done = false;
+volatile bool spi_live = false;
+volatile uint32_t spi_irq_at = 0;   // the ruler at the DMA line's entry, a transaction's completion
+
+/// A copy or a fill and its wait on BUSY, timed: the best of 8.
+template <typename Op>
+BenchSample best_dma_of_8(Op op) {
+    return best_of_8([&op] {
+        (void)op();
+        while (Copy::busy()) {
+        }
+    });
+}
+
+void dma_memory() {
+    Copy::arm(DmaReport::errors);   // polled: the channel on no line
+    auto* const to = reinterpret_cast<uint32_t*>(destination_buffer);
+    const auto* const from = reinterpret_cast<const uint32_t*>(source_buffer);
+    static uint32_t cell = 0x5A5A5A5Au;   // in SRAM: a const one would be read through the XIP cache
+    for (uint32_t i = 0; i < sizeof(source_buffer); ++i) {
+        source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    console_drain();
+    for (const uint32_t n : {16u, 256u, 4096u}) {
+        const BenchSample s = best_dma_of_8([=] { return Copy::copy(to, from, n / 4u); });
+        const bool exact = std::memcmp(destination_buffer, source_buffer, n) == 0;
+        bench_line(serial, "copy", n, s, Ruler::hz(), dma_bytes_per_cycle * Ruler::hz());
+        print(serial, "  copy ", n, ": fixed cost ", s.wall - n / 4u, " cycles over one a word, ",
+              exact ? "exact" : "WRONG", crlf);
+        console_drain();
+    }
+    for (const uint32_t n : {16u, 256u, 4096u}) {
+        const BenchSample s = best_dma_of_8([=] { return Copy::fill(to, &cell, n / 4u); });
+        bool exact = true;
+        for (uint32_t i = 0; i < n / 4u; ++i) {
+            exact = exact && to[i] == cell;
+        }
+        bench_line(serial, "fill", n, s, Ruler::hz(), dma_bytes_per_cycle * Ruler::hz());
+        print(serial, "  fill ", n, ": fixed cost ", s.wall - n / 4u, " cycles over one a word, ",
+              exact ? "exact" : "WRONG", crlf);
+        console_drain();
+    }
+    Copy::stop();
+}
+
+void dma_paced() {
+    for (uint32_t i = 0; i < paced_words; ++i) {
+        paced_table[i] = i * 0x01010101u;
+    }
+    Pace::set(1, pace_cycles);
+    Paced::arm(&paced_cell, Pace::dreq());   // a completion on line 0
+    // Twice, the first thrown away: it runs the handler and the idle path
+    // cold out of the flash.
+    BenchSample paced{};
+    uint32_t banked = 0;
+    for (uint8_t run = 0; run < 2u; ++run) {
+        console_drain();
+        paced_done = false;
+        banked = DmaChannel<Paced::channel>::debug_credits();
+        const BenchCounters before = counters();
+        Stopwatch<Ruler> sw;
+        sw.start();
+        (void)Paced::start(paced_table, paced_words);
+        while (!paced_done && sw.elapsed() < Ruler::hz() / 10u) {
+            idle_turn();
+        }
+        const uint32_t wall = sw.elapsed();
+        const BenchCounters after = counters();
+        paced = bench_sample(wall, before, after);
+    }
+    bench_line(serial, "paced", paced_words * 4u, paced, Ruler::hz(),
+               4u * (Ruler::hz() / pace_cycles));
+    print(serial, "  paced: the cell holds ", hex(paced_cell), " (the table's last word ",
+          hex(paced_table[paced_words - 1u]), "); the channel held ", banked,
+          " request credits from the timer when the block started", crlf);
+
+    // The jitter: the same block, the core stamping the ruler each time
+    // the channel's count steps.
+    console_drain();
+    Paced::arm(&paced_cell, Pace::dreq(), false, DmaReport::errors);
+    uint32_t turns = 0;
+    uint32_t start_at = 0;
+    uint32_t banked_now = 0;
+    {
+        P::CriticalSection masked;
+        uint32_t seen = paced_words;
+        uint32_t k = 0;
+        banked_now = DmaChannel<Paced::channel>::debug_credits();
+        const uint32_t t0 = Ruler::now();
+        start_at = t0;
+        (void)Paced::start(paced_table, paced_words);
+        while (k < paced_words && Ruler::now() - t0 < Ruler::hz() / 10u) {
+            const uint32_t left = DmaChannel<Paced::channel>::count();
+            const uint32_t now = Ruler::now();
+            ++turns;
+            while (seen > left && k < paced_words) {
+                pace_stamps[k++] = now;
+                --seen;
+            }
+        }
+        (void)Paced::complete();
+    }
+    const uint32_t span = pace_stamps[paced_words - 1u] - pace_stamps[0];
+    const uint32_t turn = span / (turns != 0u ? turns : 1u);   // the instrument's resolution
+    uint32_t lo = 0xFFFFFFFFu;
+    uint32_t hi = 0;
+    uint32_t inside = 0;
+    for (uint32_t i = 1; i < paced_words; ++i) {
+        const uint32_t d = pace_stamps[i] - pace_stamps[i - 1u];
+        lo = d < lo ? d : lo;
+        hi = d > hi ? d : hi;
+        if (d + turn >= pace_cycles && d <= pace_cycles + turn) {
+            ++inside;
+        }
+    }
+    print(serial, "  paced, the pace against the ruler: ", span, " cycles over 255 steps = ",
+          (span + 127u) / 255u, " a step (", pace_cycles, " asked); ", inside,
+          " of the 255 intervals within one polling turn (", turn, " cycles) of it, the "
+          "extremes ", lo, " and ", hi, "; ", banked_now, " credits banked at the start, the "
+          "first step seen ", pace_stamps[0] - start_at, " cycles after it and the last ",
+          pace_stamps[paced_words - 1u] - start_at, crlf);
+    Pace::stop();
+    Paced::stop();
+}
+
+/// A transaction's numbers, and where its wall went: start() returning,
+/// and the completion's handler entered, both from the first stamp.
+struct SpiRun {
+    BenchSample sample;
+    uint32_t launch;
+    uint32_t to_irq;
+};
+
+/// How the core waits for a transaction's completion: asleep (the idle
+/// turn, the default), spinning on the RAM flag the handler sets, or
+/// spinning on a read of the ruler - a register behind the APB bridge, as
+/// the SPI's own data register is.
+enum class SpiWait : uint8_t { sleep, spin_ram, spin_apb };
+
+/// One engined transaction of `frames` frames, timed start() to the
+/// completion on line 0 with the core idling between.
+SpiRun spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, SpiWait wait = SpiWait::sleep) {
+    Spi::Request r{};
+    r.cs = SpiSelect::ref();
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.cmd_len = 0;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(source_buffer));
+    r.rx = lend<Lease::reply>(destination_buffer);
+    r.len = frames;
+    r.clock = rate;
+    r.mode = SpiMode::mode0;
+    r.bits = bits;
+    console_drain();
+    spi_done = false;
+    spi_irq_at = 0;
+    const BenchCounters before = counters();
+    const uint32_t t0 = Ruler::now();
+    if (Spi::start(r)) {
+        spi_done = true;
+    }
+    const uint32_t launched = Ruler::now();
+    if (wait == SpiWait::spin_ram) {
+        for (uint32_t spins = 1'000'000u; !spi_done && spins != 0u; --spins) {
+        }
+    } else if (wait == SpiWait::spin_apb) {
+        while (!spi_done && Ruler::now() - t0 < Ruler::hz() / 10u) {
+        }
+    }
+    while (!spi_done && Ruler::now() - t0 < Ruler::hz() / 10u) {
+        idle_turn();
+    }
+    const uint32_t wall = Ruler::now() - t0;
+    const BenchCounters after = counters();
+    return {bench_sample(wall, before, after), launched - t0, spi_irq_at - t0};
+}
+
+/// The best of five by wall, after one run thrown away: the first of a
+/// configuration runs its code cold out of the flash and applies the new
+/// rate or width to the block, which are the cache's cost and the
+/// reconfiguration's, not the engines'.
+uint32_t spi_cold_wall = 0;   // the very first transaction's wall: the code cold out of the flash
+
+SpiRun spi_transaction(uint16_t frames, SpiClock rate, SpiDataSize bits) {
+    const SpiRun thrown = spi_once(frames, rate, bits);
+    if (spi_cold_wall == 0u) {
+        spi_cold_wall = thrown.sample.wall;
+    }
+    SpiRun best{};
+    for (uint8_t run = 0; run < 5u; ++run) {
+        const SpiRun s = spi_once(frames, rate, bits);
+        if (run == 0u || s.sample.wall < best.sample.wall) {
+            best = s;
+        }
+    }
+    return best;
+}
+
+void dma_spi() {
+    (void)SpiSelect::output(true);
+    (void)Spi::init(clock);
+    spi_live = true;
+    spi_cold_wall = 0;
+    struct Rate { SpiClock clock; const char* name; };
+    constexpr Rate rates[] = {{SpiClocks::div2, "75 MHz"}, {SpiClocks::div8, "18.75 MHz"}};
+    for (const Rate& rate : rates) {
+        const uint32_t sck = Spi::sck_hz(rate.clock);
+        for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
+            const uint32_t frame_bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
+            uint32_t walls[2] = {0, 0};
+            uint8_t k = 0;
+            for (const uint16_t frames : {static_cast<uint16_t>(16), static_cast<uint16_t>(256)}) {
+                const SpiRun run = spi_transaction(frames, rate.clock, bits);
+                const BenchSample& s = run.sample;
+                const uint32_t n = frames * frame_bytes;
+                const uint32_t wire_cycles =
+                    static_cast<uint32_t>(static_cast<uint64_t>(n) * 8u * Ruler::hz() / sck);
+                walls[k++] = s.wall;
+                bench_line(serial, "spi.dma", n, s, Ruler::hz(), sck / 8u);
+                const uint32_t fixed = s.wall > wire_cycles ? s.wall - wire_cycles : 0u;
+                print(serial, "  spi.dma ", frames, " frames of ", spi_data_bits(bits), " bits at ",
+                      rate.name, ": the wire ", wire_cycles, " cycles, the transaction's fixed "
+                      "cost ", fixed, " cycles = ", fixed * 1000u / (Ruler::hz() / 1'000'000u),
+                      " ns; start() returned at ", run.launch, ", the completion's handler "
+                      "entered at ", run.to_irq, crlf);
+            }
+            const uint32_t per_byte_x100 =
+                walls[1] > walls[0] ? (walls[1] - walls[0]) * 100u / (240u * frame_bytes) : 0u;
+            print(serial, "  spi.dma at ", rate.name, ", ", spi_data_bits(bits),
+                  "-bit frames: ", per_byte_x100 / 100u, '.', per_byte_x100 % 100u / 10u,
+                  per_byte_x100 % 10u, " cycles a byte by the difference of the two sizes, the "
+                  "wire's ", 8u * Ruler::hz() / sck, crlf);
+            if (k == 2u && rate.clock == SpiClocks::div2 && bits == SpiDataSize::bits8) {
+                print(serial, "  spi.dma, the very first transaction (16 frames, its code cold "
+                      "out of the flash and the rate applied to the block): ", spi_cold_wall,
+                      " cycles", crlf);
+            }
+        }
+    }
+    // THE SAME TRANSACTIONS ON THE LOOP-BACK (LBM), plain lines and not
+    // bench lines: the cycles a byte by the difference of two sizes, the
+    // instrument test_rp2350_spi's letter d uses - for the reader who
+    // compares the two.
+    Spi::loopback(true);
+    for (const Rate& rate : rates) {
+        const uint32_t sck = Spi::sck_hz(rate.clock);
+        for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
+            const uint32_t frame_bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
+            const SpiRun small = spi_transaction(16, rate.clock, bits);
+            const SpiRun large = spi_transaction(256, rate.clock, bits);
+            const uint32_t per_byte_x100 =
+                large.sample.wall > small.sample.wall
+                    ? (large.sample.wall - small.sample.wall) * 100u / (240u * frame_bytes)
+                    : 0u;
+            print(serial, "  spi.dma ON THE LOOP-BACK at ", rate.name, ", ", spi_data_bits(bits),
+                  "-bit frames: 16 frames in ", small.sample.wall, " cycles, 256 in ",
+                  large.sample.wall, ", irq ", large.sample.irq, "; ", per_byte_x100 / 100u, '.',
+                  per_byte_x100 % 100u / 10u, per_byte_x100 % 10u,
+                  " cycles a byte by the difference, the wire's ", 8u * Ruler::hz() / sck, crlf);
+        }
+    }
+    Spi::loopback(false);
+
+    // AND THE SAME 256 BYTES WITH THE CORE AWAKE: spinning on the flag in
+    // RAM, then spinning on the ruler, whose every read crosses the APB
+    // bridge the DMA's accesses to SSPDR cross too.
+    for (const Rate& rate : rates) {
+        const uint32_t sck = Spi::sck_hz(rate.clock);
+        uint32_t walls[3] = {0, 0, 0};
+        const SpiWait waits[3] = {SpiWait::sleep, SpiWait::spin_ram, SpiWait::spin_apb};
+        for (uint8_t w = 0; w < 3u; ++w) {
+            (void)spi_once(256, rate.clock, SpiDataSize::bits8, waits[w]);
+            uint32_t best = 0;
+            for (uint8_t run = 0; run < 5u; ++run) {
+                const uint32_t wall = spi_once(256, rate.clock, SpiDataSize::bits8, waits[w]).sample.wall;
+                best = run == 0u || wall < best ? wall : best;
+            }
+            walls[w] = best;
+        }
+        print(serial, "  spi.dma 256 bytes at ", rate.name, " (the wire ",
+              256u * 8u * (Ruler::hz() / sck), " cycles): the core asleep ", walls[0],
+              ", spinning on a RAM flag ", walls[1], ", spinning on the APB ruler ", walls[2],
+              " cycles", crlf);
+    }
+    spi_live = false;
+    Spi::release();
+}
+
+void td_dma() {
+    dma_memory();
+    dma_paced();
+    dma_spi();
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_rp2350", crlf);
     identity();
@@ -501,6 +863,25 @@ extern "C" void isr_systick() {
     brio::Ticker::tick();
     tick_meter.leave();
 }
+extern "C" void isr_dma_0() {
+    dma_meter.enter();
+    spi_irq_at = Ruler::now();
+    if (spi_live && Spi::dma_isr()) {
+        spi_done = true;
+    }
+    if ((Paced::service() & Paced::flag_complete) != 0u) {
+        (void)Paced::complete();
+        paced_done = true;
+    }
+    dma_meter.leave();
+}
+extern "C" void isr_spi0() {
+    spi_meter.enter();
+    if (spi_live && Spi::isr()) {
+        spi_done = true;
+    }
+    spi_meter.leave();
+}
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -509,18 +890,20 @@ int main() {
     Ruler::Counter::source(brio::TimerSource::sysclk);
     const bool serial_ok = Serial::init(clock, console_baud);
     const bool tick_ok = brio::Ticker::init(clock);
+    const bool dma_ok = brio::Dma::init();
     brio::enable_interrupts();
 
     bench.letter('r', "the ruler's self-check and the instrument's cost", tr_ruler);
     bench.letter('m', "memcpy and memset against the load/store floor", tm_memory);
     bench.letter('p', "a print through the console at its rate", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
+    bench.letter('d', "the DMA: copy, fill, a paced block, the SPI engines", td_dma);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",
                     " mtime=", mtime_ok ? "1us" : "FAILED", " ruler=",
                     ruler_ok ? "clk_sys" : "FAILED", " tick=", tick_ok ? "1kHz" : "FAILED",
-                    brio::crlf);
+                    " dma=", dma_ok ? "released" : "FAILED", brio::crlf);
         banner();
         bench.prompt();
     }

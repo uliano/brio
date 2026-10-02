@@ -358,16 +358,24 @@ struct SimPl022NoEngine {
     static constexpr bool present = false;
 };
 
+/// What a simulated engine reports on its line, the families' DmaReport:
+/// every block, or a bus error alone.
+enum class SimDmaReport : uint8_t { blocks, errors };
+
 /**
  * A DMA engine of no controller: the slot's whole vocabulary over a few
  * counters, so that a host's engine BRANCHES - the ones a family with no
- * DMA driver never compiles - are exercised here too.
+ * DMA driver never compiles - are exercised here too. `Elem` is the widest
+ * beat, as on a family's engine; each block records the beat it was
+ * handed, which is what says a 16-bit frame rode the engine as a
+ * half-word.
  */
-template <uint8_t ch>
+template <uint8_t ch, typename Elem = uint8_t>
 struct SimPl022Engine {
     SimPl022Engine() = delete;
 
-    using element = uint8_t;
+    using element = Elem;
+    using Report = SimDmaReport;
     static constexpr bool present = true;
     static constexpr uint8_t channel = ch;
     static constexpr uint8_t flag_complete = 1u << 0;
@@ -379,6 +387,8 @@ struct SimPl022Engine {
     static inline uint32_t faults = 0;
     static inline uint32_t stops = 0;
     static inline uint32_t length = 0;
+    static inline uint8_t beat = 0;         ///< the last block's beat, in bytes
+    static inline bool errors_only = false; ///< armed to report a bus error alone
     static inline bool fixed = false;       ///< the last block was a fixed cell
     static inline bool discarded = false;   ///< the last block went to a sink
     static inline bool running = false;
@@ -388,30 +398,37 @@ struct SimPl022Engine {
         next_flags = 0;
         return f;
     }
-    static void arm(volatile void* data, SimPl022Request request) {
+    static void arm(volatile void* data, SimPl022Request request, bool high_priority = false,
+                    Report report = Report::blocks) {
         (void)data;
         (void)request;
+        (void)high_priority;
+        errors_only = report == Report::errors;
         armed = armed + 1u;
     }
-    static bool start(const uint8_t* buffer, uint32_t len) {
+    /// A run of beats T, const or not; T no wider than Elem, as a
+    /// family's engine refuses at compile time.
+    template <typename T>
+    static bool start(T* buffer, uint32_t len) {
+        static_assert(sizeof(T) <= sizeof(Elem), "a run's beat is at most the engine's Elem");
         (void)buffer;
         length = len;
+        beat = static_cast<uint8_t>(sizeof(T));
         fixed = false;
         discarded = false;
         running = true;
         blocks = blocks + 1u;
         return true;
     }
-    static bool start(uint8_t* buffer, uint32_t len) {
-        return start(static_cast<const uint8_t*>(buffer), len);
-    }
-    static bool start_fixed(const uint8_t* cell, uint32_t len) {
+    template <typename T>
+    static bool start_fixed(T* cell, uint32_t len) {
         const bool ok = start(cell, len);
         fixed = true;
         return ok;
     }
-    static bool start_discard(uint8_t* sink, uint32_t len) {
-        const bool ok = start(static_cast<const uint8_t*>(sink), len);
+    template <typename T>
+    static bool start_discard(T* sink, uint32_t len) {
+        const bool ok = start(sink, len);
         discarded = true;
         return ok;
     }
@@ -437,6 +454,8 @@ struct SimPl022Engine {
         faults = 0;
         stops = 0;
         length = 0;
+        beat = 0;
+        errors_only = false;
         fixed = false;
         discarded = false;
         running = false;
