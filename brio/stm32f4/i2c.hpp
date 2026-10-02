@@ -110,6 +110,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "stm32f4xx.h"
@@ -931,7 +932,7 @@ public:
                 if constexpr (has_engines) {
                     // 27.3.8: DMAEN before the ADDR flag is cleared.
                     S::dma(true, false);
-                    (void)TxEngine::start(req_.tx.get(), req_.tx_len);
+                    (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
                     (void)S::clear_addr();
                     phase_ = Phase::tx_dma;
                     return false;
@@ -1224,7 +1225,7 @@ private:
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
                 S::dma(true, true);   // LAST: the block's last byte is NACKed
-                (void)RxEngine::start(req_.rx.get(), req_.rx_len);
+                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
                 (void)S::clear_addr();
                 phase_ = Phase::rx_dma;
                 return false;
@@ -1323,7 +1324,6 @@ private:
     static void put_engines_away() {
         if constexpr (has_engines) {
             (void)TxEngine::abandon();
-            RxEngine::stop();
             RxEngine::arm(S::data_address());
             S::dma(false, false);
         }

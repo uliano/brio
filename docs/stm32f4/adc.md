@@ -505,10 +505,12 @@ Driver gaps:
   DDS clear the converter stops asking, and making it ask again was not
   achieved here - not by cycling CR2's DMA bit, not by re-initializing
   both ends. What the chapter points at for a stream that keeps running
-  is DDS with a CIRCULAR stream (and the double buffer beside it), and
-  the DMA chapter's engines run a block and end, so there is nothing to
-  compose with yet. The converter's own side of it is one bit and is
-  here.
+  is DDS with a CIRCULAR stream (and the double buffer beside it); the
+  DMA chapter's receive engine now has that circular shape
+  ([dma.md](dma.md)), written for a byte register and a ring the
+  transport reads in place, and a converter's stream of half-words into
+  a `HardwareRing` is the composition still to be made and measured.
+  The converter's own side of it is one bit and is here.
 - **The multi-ADC transfer modes.** All three are selectable and one of
   them was proved to be what loads ADC_CDR at all; none has moved a byte
   through a stream, because their point is a PAIR per request and that is

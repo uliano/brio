@@ -101,6 +101,7 @@
 
 #include <stdint.h>
 
+#include <span>
 #include <variant>
 
 #include "kernel/event_queue.hpp"
@@ -1923,7 +1924,7 @@ void tq_adc_dma() {
     adc_dma_errors = 0;
     AdcStream::arm(Adc1::data_address());
     bench.verdict("the stream takes a run of four halfwords",
-                  AdcStream::start(block, 4));
+                  AdcStream::start(block));
 
     Adc1::clear_flags(AdcFlag::all);
     Adc1::start();
@@ -1956,7 +1957,7 @@ void tq_adc_dma() {
         block[i] = 0;
     }
     adc_dma_complete = false;
-    (void)AdcStream::start(block, 4);
+    (void)AdcStream::start(block);
     Adc1::clear_flags(AdcFlag::all);
     Adc1::start();
     (void)delay_us(clock, 400);
@@ -2056,7 +2057,7 @@ void tr_dac_dma() {
         dac_dma_complete = false;
         dac_dma_errors = 0;
         DacStream::arm(Dac::data_address_12r(dac_ch_pa4));
-        bench.verdict("the stream takes the table's tail", DacStream::start(&table[1], 7));
+        bench.verdict("the stream takes the table's tail", DacStream::start(std::span<const uint32_t>(&table[1], 7)));
 
         (void)Dac::enable(dac_ch_pa4, true);
         (void)delay_us(clock, 20);

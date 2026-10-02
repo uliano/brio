@@ -148,6 +148,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "stm32f4xx.h"
@@ -2346,12 +2347,12 @@ private:
     static void launch_dma() {
         if constexpr (has_engines) {
             if (req_.rx_len != 0u && req_.rx.get() != nullptr) {
-                (void)RxEngine::start(req_.rx.get(), req_.rx_len);
+                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
                 S::dma_receive(true);
                 S::interrupt(FmpI2cInterrupt::rx, false);
             }
             if (req_.tx_len != 0u && req_.tx.get() != nullptr) {
-                (void)TxEngine::start(req_.tx.get(), req_.tx_len);
+                (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
                 S::dma_transmit(true);
                 S::interrupt(FmpI2cInterrupt::tx, false);
             }

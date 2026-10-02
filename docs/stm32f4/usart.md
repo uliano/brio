@@ -15,11 +15,15 @@ tx_size, TxEngine, RxEngine, opts>` the task, the vocabulary
 `UartFormat`, `UartOptions`, `UartPins`, `MuteConfig`, `LinConfig`,
 `IrdaConfig`, `SmartcardConfig`, `UsartSyncConfig`, `UsartFlag`, the
 divisor arithmetic), over the reserve's instance facts
-(`stm32f4/device_tables.hpp`); `stm32f4/dma_engine.hpp` holds the
-empty engine tag. The family fixture is `test/family_stm32f4/usart.cpp`
-with the negatives that refuse an absent instance, flow control on a
-UART, an engine slot naming anything but the tag, and one pad twice.
-Bench: the console apps and the platform suite on the three boards.
+(`stm32f4/device_tables.hpp`), with the engine slots filled from
+[dma.md](dma.md) (`stm32f4/dma_engine.hpp` the empty slot's tag). The
+family fixture is `test/family_stm32f4/usart.cpp` with the negatives
+that refuse an absent instance, flow control on a UART, an engine off
+the instance's cells of the request mapping, an engine on a part class
+whose manual was not read, a receive ring longer than one lap of the
+stream's count, and one pad twice. Bench: the console apps
+and the platform suite on the four boards, the engined console in
+`test_stm32f4_dma`.
 
 ## What the silicon does
 
@@ -110,9 +114,41 @@ TX and RX inside the chip and leaves the RX pad alone.
   the RCC, because a dynamic clock fans the new rate out BEFORE the
   prescalers move), `set_baud(hz, baud)`, `divisor_for`,
   `min_hz_for`, `can_baud`, `actual_baud(fck)`, `kernel_hz<Clock>()`,
-  `release()`. Refused at compile time: invalid or coincident pads, an
-  engine slot naming anything but `NoDmaEngine`, flow control on a
-  UART, a flow pad missing.
+  `release()`; with engines, `dma_isr()` (the streams' vectors' body),
+  `harvest()` (the receive edge for the owner's TimeEvent, below) and
+  `dma_faults()`. Refused at compile time: invalid or coincident pads,
+  an engine off the instance's request cells, flow control on a UART, a
+  flow pad missing, and with a receive engine a ring above 32768 bytes.
+- WITH A TRANSMIT ENGINE THE MASK COVERS THE CLAIM AND NOTHING ELSE. Two
+  contexts start blocks - a print in the loop and the completion handler
+  starting the ring's next run - so the decision is masked: the ring's
+  run read and the engine's test-and-set, twelve instructions in the
+  listing. The block start (four stores and one read of the stream,
+  dma.md) runs with interrupts on, because a claimed stream is not
+  running and cannot complete under it.
+- WITH A RECEIVE ENGINE THE RECEIVE RING IS THE STREAM'S. The engine
+  runs in its circular shape over the whole receive storage, bound once
+  at `init()` and never re-armed (dma.md), and the consumer verbs -
+  `read_span`/`consume`, `read_byte`, `read_bulk`, `rx_pending` - read it
+  through util/ring.hpp's `HardwareRing`, whose producer index is the
+  stream's SxNDTR and the lap count its vector keeps. So the ring is a
+  power of two and one lap of SxNDTR, 32768 bytes at most. A byte is in
+  the ring the moment the stream has stored it, whoever asked; what the
+  consumer can lose is a LAP it did not keep up with, which the view
+  counts in `rx_overruns()` - one count a lap, up to a ring's worth of
+  bytes skipped - and a consumer looking once a millisecond keeps up when
+  the ring holds a millisecond of the line (92 bytes at 921600). The ring
+  must be read from one context, the consumer's.
+- `harvest()` IS THE EDGE, NOT A PUBLICATION. With nothing to publish, what
+  it adds is the moment to tell a consumer: true when the ring holds bytes
+  and its consumer has found it empty since the last true - read_span(),
+  read_byte() or read_bulk() coming back empty is what re-arms it - so a
+  consumer that drains to empty is told once per idle-to-busy transition,
+  the contract `isr()` has. It looks at the view, so it runs in the
+  consumer's main context and never in an interrupt; it reads the
+  receive errors (clearing one costs a byte, as the chapter's sequence
+  reads DR) and binds the stream again after a transfer error stopped
+  it, the ring restarted empty and the loss in `dma_faults()`.
 
 ## How to use it
 
@@ -167,6 +203,31 @@ verbs on the same instance.
   rates from 180 MHz down to the 16 MHz HSI and back, the bus divider
   changing from /4 to /1 under it, every line legible
   ([clock.md](clock.md), `test_stm32f4_power` letter f).
+- The engined console (`test_stm32f4_dma` letters l, m, n and u, the
+  F446's USART2 on DMA1 streams 6 and 5): 575 bytes leave through the
+  transmit stream in 50 ms where the line's own time is 49, no block
+  thrown away. A block start masks the claim alone - from the `cpsid` to
+  the `msr PRIMASK` twelve instructions, the ring's indices, the engine's
+  flag and its store - where the whole stream start ran masked before,
+  some 650 cycles of interrupt latency on the first byte of every run.
+- The receive side over the circular stream takes every byte the host
+  sends, at every rate the ST-LINK's bridge carries: `brio stress`
+  pumping its xorshift into a ring of 256 bytes for a second, the
+  consumer looking once a millisecond, 10688 bytes of 10688 at 115200,
+  30820 of 30820 at 460800 and 32200 of 32200 at 921600 - no gap, no lap
+  missed, no ORE. The same receive as a run re-armed by `harvest()` lost
+  386, 3453 and 3495 of them in 73, 203 and 217 gaps, one ORE each - the
+  bytes that arrived while a filled run waited for the next look
+  ([dma.md](dma.md)). On the half-duplex echo the circular ring returns
+  128 of 128 where the run returned 127, with no flag for the missing one.
+- `harvest()` costs 73 core cycles with nothing new and 100 with bytes
+  waiting (110 and 186 as the run's publisher): the error read, the
+  restart flag, one look of the view - SxNDTR and the lap count - and
+  the edge, with no call. Its edge is measured both ways in letter n: the
+  first bytes reported, not again to a consumer that has not drained, not
+  for an empty ring, and again once the consumer has drained; a consumer
+  asleep for three laps finds one overrun counted at its first look,
+  nothing offered, and the bytes after it whole.
 - AND `tx_idle()` IS NOT THE WIRE: it reports the transport's ring, and
   the last character is still in the shift register when it answers
   true. A Stop taken there truncates that character - measured, the
@@ -176,9 +237,12 @@ verbs on the same instance.
 ## Not covered yet
 
 Driver gaps:
-- The DMA engine slots hold the empty tag alone: this family's
-  stream-and-FIFO controller (RM0090 ch. 10) is the DMA chapter's, and
-  the engines come with it.
+- The IDLE line as the receive edge, with a receive engine: the edge is
+  `harvest()`'s, so a line's latency is the owner's polling period
+  rather than a frame time after its last byte, and IDLE's clearing
+  sequence (SR then DR) must not take a byte out of the stream's hands -
+  the UART round's, with SerialPort's posting order over a ring that can
+  be written over (util/ring.hpp).
 - Nine-bit words through the TASK (the resource's `write_word`/
   `read_word` speak them; the rings carry bytes) - declined, as on the
   other strata.
@@ -189,14 +253,16 @@ Implemented, not bench-verified (every mode of the resource beyond the
 console's - each waits for the wire or the peer that measures it):
 OVER8 and ONEBIT (a peer at a rate the console does not use), mute
 mode with both wakes, LIN's break and detection, single-wire half
-duplex (a second board on the wire), IrDA (an IR pair), the smartcard
+duplex against a second board (the port's own echo is measured,
+`test_stm32f4_dma` letters m and n), IrDA (an IR pair), the smartcard
 (no card on the desk), the synchronous clock (a timer capture on CK -
 the timer chapter's ruler), CTS/RTS flow control (a peer that asserts
-them), the DMAT/DMAR bits (the DMA chapter), the IDLE/TC/PE/CTS/LBD
-interrupt enables, `set_baud` at run time (nothing changes the LINK's
-rate with the clock standing still), `read_bulk` (compiled; the console
-drains its receive run in place, `read_span`/`consume`), `release()`, the instances beyond the consoles'
-(USART6 and the UARTs - compiled on every header that has them, none
-driven; USART1, USART2 and USART3 are the four boards' consoles), the
-frame formats beyond 8N1 (parity and two stops compile; a peer measures
-them).
+them), the IDLE/TC/PE/CTS/LBD interrupt enables, `set_baud` at run time
+(nothing changes the LINK's rate with the clock standing still),
+`read_bulk` over the interrupt-driven ring (compiled; the console drains
+its receive run in place, `read_span`/`consume`, and letter u measures
+`read_bulk` over the receive engine's ring), the instances beyond the
+consoles' (USART6 and the UARTs - compiled on every header that has
+them, none driven; USART1, USART2 and USART3 are the four boards'
+consoles), the frame formats beyond 8N1 (parity and two stops compile; a
+peer measures them).

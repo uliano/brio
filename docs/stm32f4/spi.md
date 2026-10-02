@@ -24,10 +24,12 @@ family fixture is `test/family_stm32f4/spi.cpp` with the negatives
 that refuse an absent instance, one pad twice, a host with no MOSI, a
 pad on an absent port, an engine off the request map, an engine on a
 part class whose manual was not read, one engine of two, two engines
-on one stream, the audio face on an instance that has none, on a part
-class that is not known, and an extension block that does not exist.
-Bench: `test_stm32f4_spi` on the STM32F429I-DISC1, against the
-gyroscope and the display controller the board carries on SPI5.
+on one stream, engines a word wide, the audio face on an instance that
+has none, on a part class that is not known, and an extension block that
+does not exist. Bench: `test_stm32f4_spi` on the STM32F429I-DISC1,
+against the gyroscope and the display controller the board carries on
+SPI5; the engined request's cost on the Nucleo-F446RE's SPI1 with MISO
+floating, letter d of `bench_stm32f4`.
 
 ## What the silicon does
 
@@ -191,7 +193,9 @@ strata's `Request` field for field. `init(clock, max_sck_hz)`,
 `rebase(sysclk)`, `clock_for`, `sck_hz`, `max_sck_hz`,
 `ceiling_clock`, `reference_hz` (the instance's APB clock), `prime`,
 `bit_order`, `lsb_first`, `start`, `isr`, `dma_isr`, `status`,
-`recover`, `release`, `claim_nss_pad` - and this stratum's three of its
+`recover`, `release`, `claim_nss_pad`; with engines, the transmit
+stream armed for its errors alone and the receive block's completion the
+transaction's one interrupt - and this stratum's three of its
 own: `sck_speed` and `errata_apb_ceiling_hz`/`within_errata_ceiling`,
 because on this family the SCK pad's slew class is a correctness
 parameter and not a taste, and `mosi_speed`, because on a bus of wires
@@ -248,11 +252,13 @@ brio::post<Arb>(r);
 ```
 
 With the data phase on the DMA streams - the cells are the request
-mapping's and the reserve checks them at compile time:
+mapping's and the reserve checks them at compile time; an element of
+`uint16_t` (DR's width) lets the engines carry 16-bit frames too, and
+`uint8_t` keeps those on the pump:
 
 ```cpp
-using Tx = brio::DmaTxEngine<2, 4, 2>;   // SPI5_TX: DMA2 stream 4, channel 2
-using Rx = brio::DmaRxEngine<2, 3, 2>;   // SPI5_RX: DMA2 stream 3, channel 2
+using Tx = brio::DmaTxEngine<2, 4, 2, uint16_t>;   // SPI5_TX: DMA2 stream 4, channel 2
+using Rx = brio::DmaRxEngine<2, 3, 2, uint16_t>;   // SPI5_RX: DMA2 stream 3, channel 2
 using FastBus = brio::SpiHost<5, spi5, Tx, Rx>;
 extern "C" void DMA2_Stream4_IRQHandler() { (void)FastBus::dma_isr(); }
 extern "C" void DMA2_Stream3_IRQHandler() { (void)FastBus::dma_isr(); }
@@ -352,10 +358,24 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
 - **The DMA engines carry the data phase** both ways: a polled request
   completes inside `start()` with the block byte-exact, and an
   ISR-style one answers off the streams' vectors with the select
-  released by the completion. Sixty-five frames (a command byte pumped,
-  sixty-four streamed) cost 1640 ns a frame at 5625 kHz against the
-  wire's 1422, and 22998 against 22755 at 351 kHz - the same constant
-  as the pump's, spent once on the command frame and not per frame.
+  released by the completion (the gyroscope's letters on the F429).
+- **An engined request costs 3.3 us more than its wire, and ONE
+  interrupt.** Measured on the F446's SPI1 at 180 MHz with MISO floating
+  (`bench_stm32f4` letter d, the data phase alone, no command frame):
+  wall minus the wire's time is 606 cycles at SCK 22.5 MHz and 594 at
+  5.625 MHz, for 16 frames and for 256 alike, and the core is busy 579
+  cycles of it - `start()`, the two block starts and the requests raised
+  in one CR2 store, then one completion handler of 136 cycles (the
+  receive block's; the transmit stream is armed for its errors alone,
+  because every frame the receive stream took was clocked out first). A
+  256-frame request runs at 1.03 x the wire at 22.5 MHz. The same
+  request cost 2472 cycles (13.7 us) and two interrupts while each block
+  start validated and rebuilt its stream (dma.md).
+- **16-bit frames ride the engines**, a half-word a beat out of the
+  Request's bytes low-first, when the engines' element is `uint16_t`:
+  256 frames in 1.01 x the wire at 22.5 MHz with one interrupt, where
+  the pump took one interrupt a frame and 2.35 x the wire. A 16-bit
+  request whose buffer is not half-word aligned goes to the pump.
 - **The SCK pad's slew class does not decide the answer here.** PCLK2 at
   90 MHz is above ES0206 2.12.4's ceiling at every class, and the
   driver says so; the device nevertheless reads exactly at all four
@@ -450,10 +470,6 @@ Driver gaps:
   exchange comes back nine bytes of sixteen wrong; at `low`, with the
   far board's own pads left at its driver's fastest, everything is
   byte-exact and the rate ladder is unchanged.
-- The DMA engines on 16-bit frames: the engines carry bytes, and a
-  16-bit request falls back to the pump - the other strata's rule, and
-  the transfer-granularity question the first portable example is meant
-  to settle.
 - The I2S beyond a master transmitter: no codec on the board, so
   reception, the slave modes, the full-duplex extension block on the
   wire and the DMA-fed audio stream have no peer. The extension block's
@@ -476,9 +492,16 @@ Implemented, not bench-verified (each with what would measure it):
   `direction`: the engine's transactions are full duplex by
   construction, and the resource's simplex modes were driven by hand in
   the bidirectional letter alone.
-- 16-bit frames end to end: the frame size travels per request and the
-  engine packs two bytes low-first, but the device on this bus speaks
-  bytes. A converter with 16-bit registers would measure it.
+- 16-bit frames end to end: the frame size travels per request, the
+  pump packs two bytes low-first and the engines read the same bytes as
+  half-words, and the engines' time is measured (above) - but the device
+  on this bus speaks bytes and no wire joins MOSI to MISO on the desk, so
+  the DATA of a 16-bit frame is judged nowhere. A self-link wire on the
+  F446's SPI1 (PA7 to PA6) or a converter with 16-bit registers would
+  judge it.
+- The engined request and its single interrupt on the STM32F429's SPI5
+  against the gyroscope: the suite's engine letters predate the block
+  start of two moments and are owed a run on that board.
 - The hardware NSS arrangements as the ENGINE's select (`claim_nss_pad`,
   SSOE, the hardware input): the bus AO's select is a GPIO on purpose,
   and a multi-master bus is what would exercise the input.

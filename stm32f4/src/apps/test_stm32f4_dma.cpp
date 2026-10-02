@@ -39,8 +39,16 @@
 //   k  priority arbitration between two streams of one controller
 //   l  the console through the DMA engines: the Uart task with both
 //      slots filled, measured against its own bit rate
-//   r  (not in z) the receive engine, harvesting a line the host sends:
-//      brio run <board> "rhello dma"
+//   m  the receive engine in its circular shape, on the transmitter's
+//      own echo (single-wire half duplex): every byte, the laps counted,
+//      the stream never re-armed, and what one harvest() costs
+//   n  the circular receive's two edges: a lap the consumer slept
+//      through, counted and skipped, and harvest()'s edge re-armed by a
+//      drain
+//   u  (outside z) brio stress: the host's stream into the receive
+//      engine at 115200, 460800 and 921600, the consumer paced by the
+//      tick as a TimeEvent would pace it - every byte accounted:
+//      brio stress --letters u --board <board>
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -83,18 +91,21 @@ using namespace brio;
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 constexpr uint8_t console_instance = 2;
 using ConsoleTxStream = DmaStream<1, 6>;
+using ConsoleRxStream = DmaStream<1, 5>;
 using ConsoleTxEngine = DmaTxEngine<1, 6, 4>;
 using ConsoleRxEngine = DmaRxEngine<1, 5, 4>;
 #elif defined(STM32F469xx)
 constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
 constexpr uint8_t console_instance = 3;
 using ConsoleTxStream = DmaStream<1, 3>;
+using ConsoleRxStream = DmaStream<1, 1>;
 using ConsoleTxEngine = DmaTxEngine<1, 3, 4>;
 using ConsoleRxEngine = DmaRxEngine<1, 1, 4>;
 #else
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 using ConsoleTxStream = DmaStream<2, 7>;
+using ConsoleRxStream = DmaStream<2, 2>;
 using ConsoleTxEngine = DmaTxEngine<2, 7, 4>;
 using ConsoleRxEngine = DmaRxEngine<2, 2, 4>;
 #endif
@@ -119,6 +130,13 @@ using DmaSerial = Uart<console_instance, console_pins, rx_ring_bytes, 256, Conso
 constexpr UartOptions loop_options{.half_duplex = true};
 using LoopSerial = Uart<console_instance, console_pins, rx_ring_bytes, 256, ConsoleTxEngine,
                         ConsoleRxEngine, loop_options>;
+
+/// And once more with a ring sized for letter u's pace: a consumer that
+/// looks once a millisecond must hold a millisecond of the fastest rung,
+/// 92 bytes at 921600, and a lap of 256 holds 2.7 ms of it.
+constexpr uint32_t stress_ring_bytes = 256;
+using StressSerial = Uart<console_instance, console_pins, stress_ring_bytes, 256,
+                          ConsoleTxEngine, ConsoleRxEngine>;
 
 TestBench<Serial> bench;
 
@@ -979,8 +997,8 @@ void tk_priority() {
 
 // ---- l  the console through the DMA engines ---------------------------------------
 
-/// What letter l and letter r leave behind for the verdicts, which can
-/// only be printed once the plain console is back.
+/// What letters l and m leave behind for the verdicts, which can only be
+/// printed once the plain console is back.
 struct EngineRun {
     bool up = false;
     uint32_t queued = 0;
@@ -989,23 +1007,78 @@ struct EngineRun {
     bool drained = false;
     uint16_t harvested = 0;
     bool rx_running = false;
-    uint8_t hw_overruns = 0;   ///< ORE: a byte the receiver lost in silicon
-    uint8_t rx_overruns = 0;   ///< the ring had no room for a new run
-    uint8_t line_errors = 0;   ///< NE, FE, PE: each costs the byte in DR
-    uint16_t first_gap = 0;    ///< where the echo first left the pattern
+    uint8_t hw_overruns = 0;    ///< ORE: a byte the receiver lost in silicon
+    uint8_t rx_overruns = 0;    ///< laps the consumer did not keep up with
+    uint8_t line_errors = 0;    ///< NE, FE, PE: each costs the byte in DR
+    uint16_t first_gap = 0;     ///< where the echo first left the pattern
+    uint32_t laps = 0;          ///< the receive engine's completions, at the end
+    uint16_t rx_remaining = 0;  ///< the receive stream's SxNDTR, at the end
+    bool circular = false;      ///< the receive stream still circular, at the end
+    uint32_t ruler = 0;         ///< an empty pair of SysTick reads, core cycles
+    uint32_t harvest_idle = 0;  ///< one harvest() with nothing new, the ruler included
+    uint32_t harvest_busy = 0;  ///< one harvest() with bytes waiting, the ruler included
 };
 
 /// Which transport owns the port right now, for the two stream vectors
 /// to dispatch on: 0 the plain interrupt-driven one, 1 the engined
-/// console, 2 the engined half-duplex loop.
+/// console, 2 the engined half-duplex loop, 3 letter u's.
 volatile uint8_t engined_console = 0;
+
+/// Wait for `Port`'s transmit ring to drain and its last frame to leave
+/// the shifter, then `ms` more for the line to settle.
+template <typename Port>
+void wait_line(uint32_t ms) {
+    uint32_t spins = 4'000'000u;
+    while (!Port::tx_idle() && spins-- != 0u) {
+    }
+    spins = 400'000u;
+    while (!Console::tx_complete() && spins-- != 0u) {
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 <= ms) {
+    }
+}
+
+/// What one harvest() costs on the port `Port` holds - the least of three
+/// tries, once with nothing new and once with eight bytes waiting for the
+/// consumer - with the ruler's own pair beside it. Run on the half-duplex
+/// loop, whose transmitter is the stimulus; the port must be idle.
+template <typename Port>
+void time_harvest(EngineRun& r) {
+    static const uint8_t poke[8] = {'0', '1', '2', '3', '4', '5', '6', '7'};
+    uint8_t byte = 0;
+    r.ruler = 0xFFFF'FFFFu;
+    r.harvest_idle = 0xFFFF'FFFFu;
+    r.harvest_busy = 0xFFFF'FFFFu;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        while (Port::read_byte(byte)) {
+        }
+        (void)Port::harvest();
+        uint32_t v0 = SysTick->VAL;
+        uint32_t d = val_delta(v0, SysTick->VAL);
+        r.ruler = d < r.ruler ? d : r.ruler;
+        v0 = SysTick->VAL;
+        (void)Port::harvest();
+        d = val_delta(v0, SysTick->VAL);
+        r.harvest_idle = d < r.harvest_idle ? d : r.harvest_idle;
+        (void)Port::write_bulk(std::span<const uint8_t>(poke, sizeof(poke)));
+        wait_line<Port>(2);
+        v0 = SysTick->VAL;
+        (void)Port::harvest();
+        d = val_delta(v0, SysTick->VAL);
+        r.harvest_busy = d < r.harvest_busy ? d : r.harvest_busy;
+    }
+    while (Port::read_byte(byte)) {
+    }
+}
 
 /// Hand the port to `Port` (an engined Uart type), send `block` bytes
 /// through the transmit stream, harvest for `rx_window_ms`, and give it
 /// back. Nothing may print between the two swaps: the verdicts wait for
-/// the plain console to come home.
+/// the plain console to come home. With `timed`, what one harvest()
+/// costs is measured before the port goes back.
 template <typename Port>
-EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms) {
+EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms, bool timed = false) {
     EngineRun r{};
     static uint8_t line[64];
     for (uint16_t i = 0; i < sizeof(line); ++i) {
@@ -1027,11 +1100,9 @@ EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms) {
     Port::clear_errors();   // what the handover itself left behind is not the run's
 
     // THE HARVEST RIDES ALONG WITH THE SENDING, because that is how a
-    // program uses this port: the receive run is the ring's free span,
-    // and an owner that stops asking while the line is busy lets that
-    // run fill and loses what arrives after it. On the half-duplex loop
-    // everything sent comes straight back, so the two directions are
-    // busy at once and the pacing is the whole test.
+    // program uses this port: the owner asks for the edge and the
+    // consumer drains. On the half-duplex loop everything sent comes
+    // straight back, so the two directions are busy at once.
     const uint32_t t0 = Ticker::millis();
     for (;;) {
         if (r.queued < block) {
@@ -1075,6 +1146,12 @@ EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms) {
     r.rx_overruns = Port::rx_overruns();
     r.line_errors = static_cast<uint8_t>(Port::noise_errors() + Port::frame_errors() +
                                          Port::parity_errors());
+    r.laps = ConsoleRxEngine::laps();
+    r.rx_remaining = ConsoleRxStream::count();
+    r.circular = ConsoleRxStream::circular();
+    if (timed) {
+        time_harvest<Port>(r);
+    }
 
     Port::release();
     engined_console = 0;
@@ -1104,7 +1181,7 @@ void tl_engines() {
                   r.millis + 5u >= expected && r.millis <= expected + 5u);
 }
 
-// ---- m  the receive engine, on the transmitter's own echo -----------------------------
+// ---- m  the circular receive, on the transmitter's own echo ---------------------------
 
 void tm_receive() {
     Block::init();
@@ -1112,36 +1189,308 @@ void tm_receive() {
     // SINGLE-WIRE HALF DUPLEX IS THE WIRE THIS BOARD HAS NOT GOT: with
     // HDSEL the receiver listens on the transmit pad, so a block sent by
     // the transmit stream arrives back at the receive stream. The host
-    // sees the block too - the pad is still the console's.
-    const EngineRun r = run_engined<LoopSerial>(2, 128, 20);
+    // sees the block too - the pad is still the console's. 128 bytes
+    // through a ring of 64 is two whole laps.
+    const EngineRun r = run_engined<LoopSerial>(2, 128, 20, true);
 
-    print(serial, "  sent ", r.queued, " byte(s) in ", r.millis, " ms and harvested ",
-          r.harvested, " through the receive stream; ", r.hw_overruns, " overrun(s) in "
-          "silicon, ", r.line_errors, " line error(s), ", r.rx_overruns,
-          " ring(s) with no room, ", r.faults, " fault(s)", crlf);
+    print(serial, "  sent ", r.queued, " byte(s) in ", r.millis, " ms and read ", r.harvested,
+          " back through the receive stream; ", r.laps, " lap(s), SxNDTR ", r.rx_remaining,
+          "; ", r.rx_overruns, " lap(s) the consumer missed, ", r.hw_overruns,
+          " overrun(s) in silicon, ", r.line_errors, " line error(s), ", r.faults,
+          " fault(s)", crlf);
     bench.verdict("the port comes up in half duplex with both slots filled", r.up);
-    bench.verdict("the receive engine is armed from the first byte", r.rx_running);
+    bench.verdict("the receive engine is running from the first byte", r.rx_running);
     bench.verdict("the transmit stream drained the ring", r.drained);
-    // WHAT IS NOT HARVESTED IS ACCOUNTED FOR - or it is THE RE-ARM GAP,
-    // which is this engine's one real cost and is measured here rather
-    // than assumed away. A receive run that fills stops the stream, and
-    // the byte that arrives before harvest() has started the next run
-    // can be lost - SILENTLY, with no overrun flag to show for it,
-    // because nothing overran: the receiver was simply not being served.
-    // Measured: one byte, exactly at the boundary where the first full
-    // run is swapped for the next or a partial tail is read - WHERE it
-    // falls depends on the harvest's timing against the line, so the
-    // position is reported and the count is judged.
-    const uint32_t accounted =
-        static_cast<uint32_t>(r.harvested) + static_cast<uint32_t>(r.hw_overruns) +
-        static_cast<uint32_t>(r.rx_overruns) + static_cast<uint32_t>(r.line_errors);
-    print(serial, "  accounted for: ", accounted, " of ", r.queued, ", first gap at byte ",
-          r.first_gap, crlf);
-    bench.verdict("the echo arrives whole but for the re-arm gap",
-                  r.harvested + 1u >= r.queued && r.harvested <= r.queued);
-    print(serial, "  the gap, when there is one, is at a harvest: byte ", r.first_gap,
-          " this time (", rx_ring_bytes, " is the first run's boundary)", crlf);
+    // THE ECHO ARRIVES WHOLE: the stream writes the ring lap after lap and
+    // is never re-armed, so there is no moment between two runs at which
+    // a byte can arrive with nobody serving the receiver.
+    bench.verdict("every byte of the echo arrives, in order", r.harvested == r.queued &&
+                                                                  r.first_gap == 0u);
+    bench.verdict("the laps are the stream's own: two of 64 bytes for 128",
+                  r.laps == r.queued / rx_ring_bytes);
+    bench.verdict("SxNDTR was reloaded by the hardware at the last wrap",
+                  r.rx_remaining == rx_ring_bytes - (r.queued % rx_ring_bytes));
+    bench.verdict("the stream is still circular: nothing re-armed it", r.circular);
+    bench.verdict("no lap missed, no overrun, no line error",
+                  r.rx_overruns == 0u && r.hw_overruns == 0u && r.line_errors == 0u);
     bench.verdict("no block was thrown away", r.faults == 0u);
+    print(serial, "  one harvest() costs ", r.harvest_idle - r.ruler, " cycles with nothing new and ",
+          r.harvest_busy - r.ruler, " with bytes waiting (the least of three; the ruler's own ",
+          r.ruler, " taken off)", crlf);
+}
+
+// ---- n  the circular receive's two edges ----------------------------------------------
+
+/// The stream letter n sends: position `k` of it is a printable
+/// character, so what the host sees on the shared pad is legible.
+constexpr uint8_t loop_byte(uint16_t k) { return static_cast<uint8_t>(0x20u + k % 95u); }
+
+/// Positions `from` .. `from + count - 1` of that stream through the
+/// half-duplex loop, and the line settled after them.
+void loop_send(uint16_t from, uint16_t count) {
+    static uint8_t block[192];
+    for (uint16_t i = 0; i < count && i < sizeof(block); ++i) {
+        block[i] = loop_byte(static_cast<uint16_t>(from + i));
+    }
+    uint16_t sent = 0;
+    const uint32_t t0 = Ticker::millis();
+    while (sent < count && Ticker::millis() - t0 < 1000u) {
+        sent = static_cast<uint16_t>(
+            sent + LoopSerial::write_bulk(std::span<const uint8_t>(block + sent, count - sent)));
+    }
+    wait_line<LoopSerial>(2);
+}
+
+/// Every byte the loop holds, judged against the stream from position
+/// `from` on; the count read, and in `in_order` whether each was the one
+/// expected.
+uint16_t loop_drain(uint16_t from, bool& in_order) {
+    uint16_t got = 0;
+    in_order = true;
+    uint8_t byte = 0;
+    while (LoopSerial::read_byte(byte)) {
+        if (byte != loop_byte(static_cast<uint16_t>(from + got))) {
+            in_order = false;
+        }
+        ++got;
+    }
+    return got;
+}
+
+void tn_receive_edges() {
+    Block::init();
+    Dma<1>::init();
+    quiesce_console();
+    Serial::release();
+    engined_console = 2;
+    const bool up = LoopSerial::init(clock, 115200);
+    LoopSerial::clear_errors();
+
+    // THE EDGE. harvest() reports bytes once per idle-to-busy transition:
+    // true when the ring holds bytes and its consumer has found it empty
+    // since the last true. A consumer that has not drained is not told
+    // twice; one that has, is told again by the next byte.
+    loop_send(0, 16);
+    const bool e_first = LoopSerial::harvest();
+    const bool e_again = LoopSerial::harvest();
+    bool order1 = false;
+    const uint16_t d1 = loop_drain(0, order1);
+    const bool e_empty = LoopSerial::harvest();
+    loop_send(16, 16);
+    const bool e_next = LoopSerial::harvest();
+    bool order2 = false;
+    const uint16_t d2 = loop_drain(16, order2);
+
+    // THE LAP SLEPT THROUGH. 160 bytes go by with nobody looking: the
+    // ring of 64 is written over two and a half times, and only the lap
+    // count can say so. The first look counts it once and SKIPS to the
+    // stream's head - skip rather than tear - and what arrives after it
+    // reads whole.
+    const uint32_t laps0 = ConsoleRxEngine::laps();
+    loop_send(32, 160);
+    const uint32_t laps1 = ConsoleRxEngine::laps();
+    const uint32_t pending = LoopSerial::rx_pending();
+    const uint8_t missed = LoopSerial::rx_overruns();
+    const bool e_skipped = LoopSerial::harvest();
+    loop_send(192, 32);
+    const bool e_after = LoopSerial::harvest();
+    bool order3 = false;
+    const uint16_t d3 = loop_drain(192, order3);
+    const uint8_t missed_after = LoopSerial::rx_overruns();
+    const uint8_t faults = LoopSerial::dma_faults();
+    const uint8_t hw = LoopSerial::hw_overruns();
+
+    LoopSerial::release();
+    engined_console = 0;
+    (void)Serial::init(clock, 115200);
+
+    print(serial, "  the edge: ", e_first ? 1u : 0u, " at the first bytes, ", e_again ? 1u : 0u,
+          " asked again undrained, ", e_empty ? 1u : 0u, " drained and empty, ",
+          e_next ? 1u : 0u, " at the next bytes; drained ", d1, " and ", d2, crlf);
+    bench.verdict("the port comes up in half duplex", up);
+    bench.verdict("harvest() reports the first bytes", e_first);
+    bench.verdict("and does not report them twice to a consumer that has not drained",
+                  !e_again);
+    bench.verdict("nor an empty ring", !e_empty);
+    bench.verdict("and reports the next bytes once the consumer has drained", e_next);
+    bench.verdict("both drains read their 16 bytes in order",
+                  d1 == 16u && d2 == 16u && order1 && order2);
+    print(serial, "  a consumer asleep for ", laps1 - laps0, " lap(s): ", pending,
+          " byte(s) offered at its first look, ", missed, " lap(s) counted missed, then ",
+          d3, " byte(s) read after the skip", crlf);
+    bench.verdict("160 bytes through a ring of 64 from byte 32 on: three laps went by",
+                  laps1 - laps0 == 3u);
+    bench.verdict("the first look counts the lap once and skips to the stream's head",
+                  missed == 1u && pending == 0u);
+    bench.verdict("so harvest() has nothing to report", !e_skipped);
+    bench.verdict("what arrives after the skip is read whole and in order",
+                  e_after && d3 == 32u && order3 && missed_after == 1u);
+    bench.verdict("no overrun in silicon, no fault", hw == 0u && faults == 0u);
+}
+
+// ---- u  brio stress: the host's stream into the receive engine (OUTSIDE z) ------------
+//
+// brio stress (cli/bench/stress.py) is the host end: the board prints one
+// "HOST sink mode baud format window count" line, the script moves its own
+// port to that rate after a settle of its own and pumps its xorshift for
+// the window less half a second, then goes quiet. The board runs the
+// circular receive at the announced rate and judges every byte against
+// the same generator. THE CONSUMER IS PACED BY THE TICK - one look a
+// millisecond, a TimeEvent's pace - because that is what the receive
+// engine has to survive in a program: a consumer that is not always
+// looking.
+
+uint32_t lfsr_state = 0x12345678u;
+
+/// brio stress's generator: three shifts, the low byte a step.
+constexpr uint32_t lfsr_step(uint32_t s) {
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    return s;
+}
+
+struct SinkLeg {
+    uint32_t baud = 0;
+    bool up = false;
+    uint32_t in = 0;         ///< bytes received
+    uint32_t gaps = 0;       ///< places the stream skipped positions
+    uint32_t lost = 0;       ///< positions skipped there, in all
+    uint32_t bad = 0;        ///< bytes matching no position near the expected one
+    uint32_t first_gap = 0;  ///< which received byte first left the stream, 0 for none
+    uint32_t looks = 0;      ///< consumer turns, one a millisecond
+    uint8_t rx_overruns = 0;
+    uint8_t hw_overruns = 0;
+    uint8_t line_errors = 0;
+    uint8_t faults = 0;
+};
+
+/// A run of received bytes against the host's stream. A byte that is not
+/// the next position's is looked for among the next 255, confirmed by the
+/// byte after it where the run has one: the positions stepped over were
+/// LOST, one GAP, and the judge carries on from where the pair fits. A
+/// byte that fits nowhere near is BAD and stands in for the position.
+void judge(SinkLeg& leg, const uint8_t* run, uint32_t n) {
+    constexpr uint32_t horizon = 255;
+    for (uint32_t i = 0; i < n; ++i) {
+        ++leg.in;
+        const uint32_t s = lfsr_step(lfsr_state);
+        if (static_cast<uint8_t>(s) == run[i]) {
+            lfsr_state = s;
+            continue;
+        }
+        if (leg.first_gap == 0u) {
+            leg.first_gap = leg.in;
+        }
+        uint32_t t = s;
+        bool found = false;
+        for (uint32_t k = 1; k <= horizon; ++k) {
+            t = lfsr_step(t);
+            if (static_cast<uint8_t>(t) == run[i] &&
+                (i + 1u == n || static_cast<uint8_t>(lfsr_step(t)) == run[i + 1u])) {
+                leg.lost += k;
+                ++leg.gaps;
+                lfsr_state = t;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            ++leg.bad;
+            lfsr_state = s;
+        }
+    }
+}
+
+template <typename Port>
+SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
+    SinkLeg leg{};
+    leg.baud = baud;
+    print(serial, "HOST sink 3 ", baud, " 8N1 ", window_ms, " 0", crlf);
+    const uint32_t t_line = Ticker::millis();
+    quiesce_console();
+    Serial::release();
+    engined_console = 3;
+    leg.up = Port::init(clock, baud);
+    if (leg.up) {
+        // The host settles 140 ms before it pumps: what comes before that
+        // is the switch's, not the stream's.
+        while (Ticker::millis() - t_line < 100u) {
+        }
+        uint8_t junk = 0;
+        while (Port::read_byte(junk)) {
+        }
+        Port::clear_errors();
+        lfsr_state = 0x12345678u;
+        uint8_t chunk[64];
+        uint32_t last = Ticker::millis();
+        while (Ticker::millis() - t_line < window_ms) {
+            const uint32_t now = Ticker::millis();
+            if (now == last) {
+                continue;
+            }
+            last = now;
+            ++leg.looks;
+            (void)Port::harvest();
+            for (;;) {
+                const uint32_t n = Port::read_bulk(std::span<uint8_t>(chunk, sizeof(chunk)));
+                if (n == 0u) {
+                    break;
+                }
+                judge(leg, chunk, n);
+            }
+        }
+        leg.rx_overruns = Port::rx_overruns();
+        leg.hw_overruns = Port::hw_overruns();
+        leg.line_errors = static_cast<uint8_t>(Port::noise_errors() + Port::frame_errors() +
+                                               Port::parity_errors());
+        leg.faults = Port::dma_faults();
+        Port::release();
+    }
+    engined_console = 0;
+    (void)Serial::init(clock, 115200);
+    // A SILENCE BEFORE THE REPORT, the script's contract: it reads until
+    // the wire has been quiet, and whatever it still had in flight lands
+    // in the plain console's ring - thrown away here, it is no letter.
+    const uint32_t q0 = Ticker::millis();
+    while (Ticker::millis() - q0 < 500u) {
+    }
+    uint8_t junk = 0;
+    while (Serial::read_byte(junk)) {
+    }
+    Serial::clear_errors();
+    return leg;
+}
+
+void tu_stress() {
+    print(serial, "  this letter needs brio stress on the other end of the console:", crlf,
+          "  brio stress --letters u --board <board>", crlf);
+    Block::init();
+    Dma<1>::init();
+    constexpr uint32_t rungs[] = {115200, 460800, 921600};
+    constexpr uint32_t window_ms = 1500;
+    bool all_whole = true;
+    bool all_fed = true;
+    for (const uint32_t baud : rungs) {
+        const SinkLeg leg = sink_leg<StressSerial>(baud, window_ms);
+        print(serial, "  sink at ", baud, ": ", leg.in, " byte(s) in, ", leg.gaps, " gap(s) of ",
+              leg.lost, " lost in all, ", leg.bad, " bad, the first gap at byte ", leg.first_gap,
+              "; ", leg.looks, " look(s), laps missed ", leg.rx_overruns, ", ORE ",
+              leg.hw_overruns, ", line errors ", leg.line_errors, ", faults ", leg.faults, crlf);
+        // The bridge carries what it carries: a quarter of the line's own
+        // rate over the pump's second is enough to call the leg fed.
+        if (!leg.up || leg.in < baud / 10u / 4u) {
+            all_fed = false;
+        }
+        if (leg.gaps != 0u || leg.bad != 0u || leg.first_gap != 0u || leg.rx_overruns != 0u ||
+            leg.hw_overruns != 0u || leg.line_errors != 0u || leg.faults != 0u) {
+            all_whole = false;
+        }
+    }
+    bench.verdict("the host fed every rung (brio stress on the other end)", all_fed);
+    bench.verdict("and every byte it sent arrived, in order, at every rung: none lost "
+                  "between laps, no lap missed, no overrun in silicon",
+                  all_whole);
 }
 
 // ---- the menu -----------------------------------------------------------------------
@@ -1165,6 +1514,8 @@ namespace {
         (void)DmaSerial::dma_isr();
     } else if (engined_console == 2u) {
         (void)LoopSerial::dma_isr();
+    } else if (engined_console == 3u) {
+        (void)StressSerial::dma_isr();
     }
 }
 }   // namespace
@@ -1231,7 +1582,11 @@ int main() {
     bench.letter('j', "a transfer error", tj_transfer_error);
     bench.letter('k', "priority arbitration between two streams", tk_priority);
     bench.letter('l', "the console through the DMA engines", tl_engines);
-    bench.letter('m', "the receive engine, on the transmitter's own echo", tm_receive);
+    bench.letter('m', "the circular receive, on the transmitter's own echo", tm_receive);
+    bench.letter('n', "the circular receive's two edges: a lap missed, the drain",
+                 tn_receive_edges);
+    bench.letter('u', "brio stress: the host's stream into the receive engine", tu_stress,
+                 false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

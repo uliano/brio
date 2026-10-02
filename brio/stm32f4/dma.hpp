@@ -18,9 +18,17 @@
  *                         its current-target readback, the flow
  *                         controller, all five flags and one ISR body;
  *   DmaTxEngine / DmaRxEngine
- *                         the two TASKS a byte transport wants: drain a
- *                         run into a peripheral, fill a run from one -
- *                         the slots stm32f4/usart.hpp's Uart declares.
+ *                         the two TASKS a transport wants: drain a run
+ *                         into a peripheral, fill a run from one - the
+ *                         slots stm32f4/usart.hpp's Uart and the bus
+ *                         hosts declare, bound once and started with four
+ *                         stores a block, the beat the run's own element;
+ *                         and the receive engine's second shape, a ring
+ *                         filled lap after lap in circular mode, whose
+ *                         producer index is SxNDTR itself;
+ *   DmaCopyEngine         the TASK memory wants: copy and fill, memory to
+ *                         memory on a DMA2 stream, the beat and the bursts
+ *                         chosen per block from its alignment.
  *
  * A STREAM IS NOT A CHANNEL, and the difference is the whole shape of
  * this controller. On the STM32G0 a channel is the unit and a
@@ -57,8 +65,9 @@
  *    reads 1 rather than store into a protected field. And the SET side
  *    has a slack of its own, measured rather than documented anywhere:
  *    EN reads back 0 in the load that follows its store and 1 in the
- *    next one, so enable() polls its answer instead of trusting one
- *    read.
+ *    next one - and on the STM32F446 and the STM32F411 that load can
+ *    wedge the stream - so nothing in this file reads SxCR after an EN
+ *    store: enable() and the engines' starts store and move on.
  *
  *  - THE FIFO IS A CONFIGURATION, NOT A BUFFER THE CALLER SEES. Four
  *    words per stream, a threshold, and table 49's list of which
@@ -104,12 +113,17 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include <span>
+#include <type_traits>
 
 #include "stm32f4xx.h"
 
 #include "stm32f4/clock.hpp"
 #include "stm32f4/device_tables.hpp"
+#include "stm32f4/dma_engine.hpp"
 #include "stm32f4/nvic.hpp"
 
 namespace brio {
@@ -149,16 +163,6 @@ constexpr DmaWidth dma_width_of() {
            : sizeof(Elem) == 2 ? DmaWidth::half
                                : DmaWidth::word;
 }
-
-/// SxCR.PL (10.5.5): the software half of the arbitration. The hardware
-/// half is the stream INDEX and cannot be configured: on equal levels
-/// the lower-numbered stream wins (10.3.4).
-enum class DmaPriority : uint8_t {
-    low = 0,
-    medium = 1,
-    high = 2,
-    very_high = 3,
-};
 
 /**
  * SxCR.DIR (10.5.5, table 45). DIR names WHICH SIDE IS THE SOURCE, and
@@ -348,6 +352,45 @@ constexpr bool dma_stream_config_valid(const DmaStreamConfig& c, uint8_t control
     }
     return dma_fifo_burst_valid(c.fifo_threshold, c.memory_burst, c.memory_width,
                                 c.peripheral_burst, c.peripheral_width);
+}
+
+/**
+ * SxCR's CONFIGURATION as one word: every field of `c` at its place, and
+ * neither the four interrupt enables nor EN. configure() writes it beside
+ * the enables it keeps; an engine computes its own once, at arm(), and a
+ * block start never builds it again.
+ */
+constexpr uint32_t dma_control_word(const DmaStreamConfig& c) {
+    uint32_t cr = static_cast<uint32_t>(c.channel) << DMA_SxCR_CHSEL_Pos;
+    cr |= static_cast<uint32_t>(c.memory_burst) << DMA_SxCR_MBURST_Pos;
+    cr |= static_cast<uint32_t>(c.peripheral_burst) << DMA_SxCR_PBURST_Pos;
+    cr |= c.current_target_is_m1 ? DMA_SxCR_CT : 0u;
+    cr |= c.double_buffer ? DMA_SxCR_DBM : 0u;
+    cr |= static_cast<uint32_t>(c.priority) << DMA_SxCR_PL_Pos;
+    cr |= c.peripheral_increment_fixed4 ? DMA_SxCR_PINCOS : 0u;
+    cr |= static_cast<uint32_t>(c.memory_width) << DMA_SxCR_MSIZE_Pos;
+    cr |= static_cast<uint32_t>(c.peripheral_width) << DMA_SxCR_PSIZE_Pos;
+    cr |= c.memory_increment ? DMA_SxCR_MINC : 0u;
+    cr |= c.peripheral_increment ? DMA_SxCR_PINC : 0u;
+    cr |= c.circular ? DMA_SxCR_CIRC : 0u;
+    cr |= static_cast<uint32_t>(c.direction) << DMA_SxCR_DIR_Pos;
+    cr |= c.peripheral_flow_control ? DMA_SxCR_PFCTRL : 0u;
+    return cr;
+}
+
+/// SxFCR's two configuration fields, DMDIS and FTH (FEIE is an enable and
+/// not configuration; FS is read-only).
+constexpr uint32_t dma_fifo_word(const DmaStreamConfig& c) {
+    return c.use_fifo ? (DMA_SxFCR_DMDIS |
+                         static_cast<uint32_t>(c.fifo_threshold) << DMA_SxFCR_FTH_Pos)
+                      : 0u;
+}
+
+/// PSIZE and MSIZE both at `w` - a beat the two ports agree on, which is
+/// what direct mode demands (10.3.12) and what an engine's start writes.
+constexpr uint32_t dma_beat_word(DmaWidth w) {
+    return static_cast<uint32_t>(w) << DMA_SxCR_PSIZE_Pos |
+           static_cast<uint32_t>(w) << DMA_SxCR_MSIZE_Pos;
 }
 
 /// One block transfer: both ends, the double buffer's second memory, and
@@ -636,44 +679,8 @@ public:
         const uint32_t armed_cr = regs().CR & (DMA_SxCR_TCIE | DMA_SxCR_HTIE | DMA_SxCR_TEIE |
                                                DMA_SxCR_DMEIE);
         const uint32_t armed_fcr = regs().FCR & DMA_SxFCR_FEIE;
-
-        uint32_t fcr = armed_fcr;
-        if (c.use_fifo) {
-            fcr |= DMA_SxFCR_DMDIS;
-            fcr |= static_cast<uint32_t>(c.fifo_threshold) << DMA_SxFCR_FTH_Pos;
-        }
-        regs().FCR = fcr;
-
-        uint32_t cr = armed_cr;
-        cr |= static_cast<uint32_t>(c.channel) << DMA_SxCR_CHSEL_Pos;
-        cr |= static_cast<uint32_t>(c.memory_burst) << DMA_SxCR_MBURST_Pos;
-        cr |= static_cast<uint32_t>(c.peripheral_burst) << DMA_SxCR_PBURST_Pos;
-        if (c.current_target_is_m1) {
-            cr |= DMA_SxCR_CT;
-        }
-        if (c.double_buffer) {
-            cr |= DMA_SxCR_DBM;
-        }
-        cr |= static_cast<uint32_t>(c.priority) << DMA_SxCR_PL_Pos;
-        if (c.peripheral_increment_fixed4) {
-            cr |= DMA_SxCR_PINCOS;
-        }
-        cr |= static_cast<uint32_t>(c.memory_width) << DMA_SxCR_MSIZE_Pos;
-        cr |= static_cast<uint32_t>(c.peripheral_width) << DMA_SxCR_PSIZE_Pos;
-        if (c.memory_increment) {
-            cr |= DMA_SxCR_MINC;
-        }
-        if (c.peripheral_increment) {
-            cr |= DMA_SxCR_PINC;
-        }
-        if (c.circular) {
-            cr |= DMA_SxCR_CIRC;
-        }
-        cr |= static_cast<uint32_t>(c.direction) << DMA_SxCR_DIR_Pos;
-        if (c.peripheral_flow_control) {
-            cr |= DMA_SxCR_PFCTRL;
-        }
-        regs().CR = cr;
+        regs().FCR = armed_fcr | dma_fifo_word(c);
+        regs().CR = armed_cr | dma_control_word(c);
         return true;
     }
 
@@ -809,10 +816,28 @@ public:
 
     // -- flags and interrupts ----------------------------------------------
 
+    /// Where this stream's group sits in its flag register: a constant,
+    /// so the two verbs below are a load and a shift, and a store.
+    static constexpr uint32_t flag_shift = Block::flag_shift(s);
+
     /// This stream's five flags, at DmaFlag's positions.
-    static uint32_t flags() { return Block::stream_flags(s); }
+    [[gnu::always_inline]] static uint32_t flags() {
+        if constexpr (s < 4u) {
+            return (Block::regs().LISR >> flag_shift) & DmaFlag::all;
+        } else {
+            return (Block::regs().HISR >> flag_shift) & DmaFlag::all;
+        }
+    }
     static bool flag(uint32_t mask) { return (flags() & mask) != 0u; }
-    static void clear(uint32_t mask) { Block::clear(s, mask); }
+    /// One store into the write-one-to-clear twin - never a
+    /// read-modify-write, so it is safe from any context.
+    [[gnu::always_inline]] static void clear(uint32_t mask) {
+        if constexpr (s < 4u) {
+            Block::regs().LIFCR = (mask & DmaFlag::all) << flag_shift;
+        } else {
+            Block::regs().HIFCR = (mask & DmaFlag::all) << flag_shift;
+        }
+    }
 
     /**
      * The five interrupt enables. FOUR OF THEM ARE IN SxCR AND ONE IN
@@ -911,34 +936,82 @@ public:
     }
 };
 
-// ---- the byte-transport engines ------------------------------------------------
+// ---- the engines ------------------------------------------------------------------
+
+/// The DmaFlag bits an engine armed with `i` hands back from service().
+constexpr uint32_t dma_interrupt_flags(DmaInterrupts i) {
+    return i == DmaInterrupts::completion    ? (DmaFlag::complete | DmaFlag::transfer_error)
+           : i == DmaInterrupts::errors_only ? DmaFlag::transfer_error
+                                             : 0u;
+}
+
+/// The SxCR enables behind them (TCIE, TEIE - both in SxCR, 10.5.5).
+constexpr uint32_t dma_interrupt_enables(DmaInterrupts i) {
+    return i == DmaInterrupts::completion    ? (DMA_SxCR_TCIE | DMA_SxCR_TEIE)
+           : i == DmaInterrupts::errors_only ? DMA_SxCR_TEIE
+                                             : 0u;
+}
 
 /**
  * DmaTxEngine<n, s, ch, Elem> - "drain a run of memory into a
  * peripheral's data register".
  *
  * The engine owns a stream and nothing else: the peripheral's data
- * address is handed in at arm() time by whoever owns the peripheral, so
- * this type knows nothing about USARTs and would serve an SPI or a DAC
- * unchanged. The CHANNEL, though, is a template argument and not an
- * arm() one - on this controller the (stream, channel) pair IS the
- * peripheral's wiring, so it belongs where the type is written and where
- * a static_assert can check it (stm32f4/usart.hpp does exactly that).
+ * address is handed in at arm() by whoever owns the peripheral, so this
+ * type knows nothing about USARTs and serves an SPI or a DAC unchanged.
+ * The CHANNEL is a template argument and not an arm() one - on this
+ * controller the (stream, channel) pair IS the peripheral's wiring, so it
+ * belongs where a static_assert can check it (stm32f4/usart.hpp does).
  *
- * `Elem` IS THE ACCESS WIDTH (dma_width_of): the default byte engine is
- * what a USART wants; a converter's data register wants uint16_t and
- * nothing else in the engine changes.
+ * TWO MOMENTS, and 10.3.17's procedure says which step is which. arm() is
+ * the BINDING and runs once: the gate opened, the stream stopped, step 2
+ * (SxPAR, the peripheral's register), step 8 (SxFCR: direct mode) and
+ * steps 5, 7 and 9 (SxCR: CHSEL, the priority, the direction, the
+ * interrupt enables) - the configuration word kept in the engine, because
+ * a block needs it back. A block start is steps 1, 3, 4 and 10 and nothing
+ * else: the flags cleared (one store into LIFCR/HIFCR), SxM0AR, SxNDTR,
+ * EN. SxCR's configuration is COMPARED with the word the block needs and
+ * stored only when it differs - the beat and the memory increment are the
+ * block's own, so a run of bytes after a run of bytes stores nothing.
+ * The vendor's library stores five registers a block and reads SxCR back
+ * three times (HAL_DMA_Start_IT); this start stores four and reads SxCR
+ * once.
  *
- * DIRECT MODE, NOT THE FIFO, and the reason is the contract above it. A
- * byte transport hands over runs whose length it does not choose, into a
- * register one byte wide; the FIFO would buy burst efficiency at the
- * price of table 49's constraints on every run length. 10.3.12's direct
- * mode is what "an immediate and single transfer after each DMA request"
- * means, and it is what these two engines use.
+ * A BLOCK START NEVER WAITS. 10.3.17's first step - clear EN and wait
+ * for it to read 0 - is for a stream somebody else may be running; an
+ * engine's own stream between two blocks is already stopped, because EN
+ * is cleared by hardware at the end of a non-circular block (10.3.13) and
+ * at a transfer error (10.5.5), and abandon() and stop() wait for it
+ * themselves. So start() reads SxCR ONCE, BEFORE anything is stored, and
+ * REFUSES if EN still stands - it never polls, which is what lets a
+ * transport hold its mask over the claim alone - and it reads nothing
+ * after the EN store: on the STM32F446 and the STM32F411 a load of SxCR in
+ * the cycles after that store wedges the stream (docs/stm32f4/dma.md).
+ *
+ * THE BEAT IS THE ELEMENT OF THE RUN. `Elem` is the WIDEST beat this
+ * binding allows - the width of the register the stream is pointed at -
+ * and start() is overloaded on every narrower one: a byte run of an SPI
+ * in 8-bit frames and a half-word run of the same SPI in 16-bit frames go
+ * through one engine, the width from the span's element type. 10.3.6: an
+ * address is aligned on the width of the accesses through it, so a run
+ * whose address is not is REFUSED - a 16-bit span built over a byte
+ * buffer can be misaligned, and the caller then takes its pump.
+ *
+ * THE CLAIM IS ITS OWN VERB. start() = claim() + the block start. A
+ * transport whose two contexts can race for the stream (a print in the
+ * loop, the completion handler starting the ring's next run) masks
+ * claim() - a test-and-set, a dozen cycles - and calls start_claimed()
+ * with the mask off: a claimed stream cannot complete under the loader's
+ * feet, because it is not running.
+ *
+ * DIRECT MODE, NOT THE FIFO. 10.3.12's direct mode is "an immediate and
+ * single transfer after each DMA request" with the one datum preloaded,
+ * which is what a peripheral register a beat wide wants; the FIFO would
+ * buy bursts at the price of table 49's constraints on every run length.
  *
  * THERE IS NO VERB TO KICK A STALLED FIRST BEAT, and the absence is a
  * fact: 10.3.2's handshake is level-driven, so a stream enabled with TXE
- * already standing moves the first byte at once.
+ * already standing moves the first datum at once.
  */
 template <uint8_t n, uint8_t s, uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
@@ -947,7 +1020,7 @@ class DmaTxEngine {
 public:
     static_assert(ch < dma_channels, "brio DmaTxEngine: CHSEL selects one of eight channels");
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
-                  "brio DmaTxEngine: the element type is the bus access - 1, 2 or 4 bytes");
+                  "brio DmaTxEngine: the element type is the widest bus access - 1, 2 or 4 bytes");
 
     DmaTxEngine() = delete;
 
@@ -955,6 +1028,7 @@ public:
     static constexpr uint8_t controller = n;
     static constexpr uint8_t stream = s;
     static constexpr uint8_t channel = ch;
+    /// The WIDEST beat this binding takes; start() takes every narrower one.
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -967,41 +1041,88 @@ public:
     static constexpr uint8_t flag_fifo_error = DmaFlag::fifo_error;
 
     /**
-     * The stream's ISR BODY folded into the engine: read this stream's
-     * own armed flags, clear exactly those, hand them back. One vector
-     * per stream here, so it answers for itself alone.
+     * The stream's ISR BODY: this stream's flags, those the binding armed,
+     * cleared and handed back - one load of the flag bank and one store
+     * into its clear register, SxCR not read at all (the armed set is the
+     * engine's own, from arm()).
      *
      * IT ACTS ON NOTHING. What a completion or an error MEANS is the
      * owner's to decide - complete(), abandon() are the verbs - because
      * only the owner can see its peripheral's state.
      */
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Stream::isr());
+        const uint32_t pending = Stream::flags() & st_.irq_flags;
+        if (pending != 0u) {
+            Stream::clear(pending);
+        }
+        return static_cast<uint8_t>(pending);
     }
 
-    /// Claim the stream for this peripheral: `data` is the register the
-    /// run is poured into.
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        priority_ = priority;
-        claim();
-        Nvic::enable(Stream::irq());
+    /// THE BINDING: `data` is the register the runs are poured into,
+    /// `irqs` what the stream interrupts for. Opens the controller's gate,
+    /// stops the stream, writes everything a block does not change.
+    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low,
+                    DmaInterrupts irqs = DmaInterrupts::completion) {
+        st_.data = data;
+        st_.control = dma_control_word(DmaStreamConfig{
+                       .channel = ch,
+                       .direction = DmaDirection::memory_to_peripheral,
+                       .memory_increment = false,   // the block's own, at its start
+                       .priority = priority}) |
+                   dma_interrupt_enables(irqs);
+        st_.irq_flags = static_cast<uint8_t>(dma_interrupt_flags(irqs));
+        bind();
+        if (irqs == DmaInterrupts::none) {
+            Nvic::disable(Stream::irq());
+        } else {
+            Nvic::enable(Stream::irq());
+        }
     }
 
-    /// Start moving `length` elements from `buffer`. The buffer is the
-    /// CALLER'S and must stay put until complete() reports the block.
-    static bool start(const Elem* buffer, uint16_t length) {
-        if (busy_ || buffer == nullptr || length == 0u) {
+    /// THE CLAIM: take the stream for one block, or answer false because a
+    /// block holds it. A test-and-set and nothing else - the one step a
+    /// caller with two racing contexts masks.
+    [[gnu::always_inline]] static bool claim() {
+        if (st_.busy) {
             return false;
         }
-        in_flight_ = length;
-        busy_ = true;
-        if (!Stream::load(transfer(const_cast<Elem*>(buffer), length, true))) {
-            busy_ = false;
-            in_flight_ = 0;
-            return false;
-        }
+        st_.busy = true;
         return true;
+    }
+
+    /// Start moving `run` - claim() and the block start. The buffer is the
+    /// CALLER'S and must stay put until complete() reports the block.
+    /// False, and nothing started, when a block holds the stream, the run
+    /// is empty or longer than SxNDTR counts, its address is not aligned
+    /// on its beat, or the stream had not stopped.
+    [[gnu::always_inline]] static bool start(std::span<const uint8_t> run) {
+        return claim() && launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+    [[gnu::always_inline]] static bool start(std::span<const uint16_t> run)
+        requires(sizeof(Elem) >= 2)
+    {
+        return claim() && launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+    [[gnu::always_inline]] static bool start(std::span<const uint32_t> run)
+        requires(sizeof(Elem) >= 4)
+    {
+        return claim() && launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+
+    /// The block start on a stream the caller has already claim()ed; the
+    /// claim is given back if the start is refused.
+    [[gnu::always_inline]] static bool start_claimed(std::span<const uint8_t> run) {
+        return launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+    [[gnu::always_inline]] static bool start_claimed(std::span<const uint16_t> run)
+        requires(sizeof(Elem) >= 2)
+    {
+        return launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+    [[gnu::always_inline]] static bool start_claimed(std::span<const uint32_t> run)
+        requires(sizeof(Elem) >= 4)
+    {
+        return launch(run.data(), run.size(), DMA_SxCR_MINC);
     }
 
     /**
@@ -1009,126 +1130,166 @@ public:
      * pointer does not increment. What a full-duplex bus needs for the
      * transmit side of a READ - the clock has to run, so something must
      * be shifted out, and the dummy is one element of the caller's that
-     * stays put for the whole block.
-     *
-     * A SIBLING VERB and not a defaulted argument to start(): a defaulted
-     * argument moves the images of every caller that does not pass it,
-     * where a sibling leaves them byte-identical.
+     * stays put for the whole block. The cell's type is the beat.
      */
-    static bool start_fixed(const Elem* cell, uint16_t length) {
-        if (busy_ || cell == nullptr || length == 0u) {
-            return false;
-        }
-        in_flight_ = length;
-        busy_ = true;
-        if (!Stream::load(transfer(const_cast<Elem*>(cell), length, false))) {
-            busy_ = false;
-            in_flight_ = 0;
-            return false;
-        }
-        return true;
+    [[gnu::always_inline]] static bool start_fixed(const uint8_t* cell, uint16_t length) {
+        return claim() && launch(cell, length, 0u);
+    }
+    [[gnu::always_inline]] static bool start_fixed(const uint16_t* cell, uint16_t length)
+        requires(sizeof(Elem) >= 2)
+    {
+        return claim() && launch(cell, length, 0u);
+    }
+    [[gnu::always_inline]] static bool start_fixed(const uint32_t* cell, uint16_t length)
+        requires(sizeof(Elem) >= 4)
+    {
+        return claim() && launch(cell, length, 0u);
     }
 
     /// The block ended - called from the stream's handler when its
-    /// completion flag is up. Returns the elements the block carried, so
-    /// the owner can release exactly that much of its ring.
+    /// completion flag is up, or by an owner that has proof of the end
+    /// from elsewhere. Returns the elements the block carried, so the owner
+    /// can release exactly that much of its ring.
     static uint16_t complete() {
-        if (!busy_) {
+        if (!st_.busy) {
             return 0;
         }
-        busy_ = false;
-        const uint16_t moved = in_flight_;
-        in_flight_ = 0;
+        st_.busy = false;
+        const uint16_t moved = st_.in_flight;
+        st_.in_flight = 0;
         return moved;
     }
 
-    static bool busy() { return busy_; }
-    static uint16_t in_flight() { return busy_ ? in_flight_ : 0u; }
-    static DmaProgress progress() { return Stream::progress(in_flight_); }
+    static bool busy() { return st_.busy; }
+    static uint16_t in_flight() { return st_.busy ? st_.in_flight : 0u; }
+    static DmaProgress progress() { return Stream::progress(st_.in_flight); }
 
     /**
      * Throw away a block the silicon has stopped running and free the
-     * stream. THE CALLER DECIDES, because only the peripheral's owner can
-     * read the flags that make "dead" a fact rather than a timeout. What
-     * is lost is the untransmitted tail, and it is counted rather than
-     * papered over.
+     * stream, the binding written back. THE CALLER DECIDES, because only
+     * the peripheral's owner can read the flags that make "dead" a fact
+     * rather than a timeout. What is lost is the untransmitted tail, and
+     * it is counted rather than papered over.
      */
     static bool abandon() {
-        if (!busy_) {
+        if (!st_.busy) {
             return false;
         }
-        ++faults_;
-        busy_ = false;
-        in_flight_ = 0;
-        claim();
+        ++st_.faults;
+        bind();
         return true;
     }
 
-    static uint32_t faults() { return faults_; }
-    static void clear_faults() { faults_ = 0; }
+    static uint32_t faults() { return st_.faults; }
+    static void clear_faults() { st_.faults = 0; }
 
+    /// The stream stopped (EN waited down) and its flags and enables
+    /// cleared. The binding survives: the next start() writes the
+    /// configuration word back, enables included.
     static void stop() {
         Stream::stop();
-        busy_ = false;
-        in_flight_ = 0;
+        st_.busy = false;
+        st_.in_flight = 0;
     }
 
 private:
-    static DmaTransfer transfer(Elem* buffer, uint16_t length, bool increment) {
-        return DmaTransfer{
-            .peripheral = data_,
-            .memory = buffer,
-            .memory1 = nullptr,
-            .count = length,
-            .config = {.channel = ch,
-                       .direction = DmaDirection::memory_to_peripheral,
-                       .circular = false,
-                       .double_buffer = false,
-                       .current_target_is_m1 = false,
-                       .peripheral_flow_control = false,
-                       .peripheral_increment = false,
-                       .memory_increment = increment,
-                       .peripheral_increment_fixed4 = false,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .peripheral_burst = DmaBurst::single,
-                       .memory_burst = DmaBurst::single,
-                       .priority = priority_,
-                       .use_fifo = false,
-                       .fifo_threshold = DmaFifoThreshold::half},
-        };
+    template <typename T>
+    [[gnu::always_inline]] static bool launch(const T* first, size_t count, uint32_t increment) {
+        const uint32_t address = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(first));
+        if (first == nullptr || count == 0u || count > dma_max_items ||
+            (address & (sizeof(T) - 1u)) != 0u) {
+            st_.busy = false;
+            return false;
+        }
+        DMA_Stream_TypeDef& r = Stream::regs();
+        const uint32_t want = st_.control | dma_beat_word(dma_width_of<T>()) | increment;
+        const uint32_t now = r.CR;   // the one read of SxCR, before every store
+        if ((now & DMA_SxCR_EN) != 0u) {
+            st_.busy = false;
+            return false;
+        }
+        if (now != want) {
+            r.CR = want;
+        }
+        Stream::clear(DmaFlag::all);
+        r.M0AR = address;
+        r.NDTR = static_cast<uint32_t>(count);
+        st_.in_flight = static_cast<uint16_t>(count);
+        r.CR = want | DMA_SxCR_EN;   // and nothing reads SxCR after this
+        return true;
     }
 
-    /// Take the stream from whatever state it is in and arm the two flags
-    /// that matter. arm() and abandon() are the same act with a different
-    /// reason.
-    static void claim() {
+    /// The binding written: the stream stopped (the gate opened, EN waited
+    /// down, enables and flags cleared), then SxPAR, SxFCR and SxCR's
+    /// configuration. arm() and abandon() are the same act.
+    static void bind() {
         Stream::stop();
-        Stream::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+        DMA_Stream_TypeDef& r = Stream::regs();
+        r.PAR = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(st_.data));
+        r.FCR = 0u;   // direct mode, FEIE clear
+        r.CR = st_.control;
+        st_.busy = false;
+        st_.in_flight = 0;
     }
 
-    static inline volatile void* data_ = nullptr;
-    static inline DmaPriority priority_ = DmaPriority::low;
-    static inline uint16_t in_flight_ = 0;
-    static inline uint32_t faults_ = 0;
-    static inline volatile bool busy_ = false;
+    /// The engine's state in ONE object, so a block start loads one base
+    /// address and reaches every field by an offset from it - where
+    /// separate statics cost a literal-pool load from the flash apiece.
+    struct State {
+        uint32_t control;          ///< SxCR's binding word, EN and the beat clear
+        volatile void* data;       ///< SxPAR
+        uint32_t faults;
+        uint16_t in_flight;
+        uint8_t irq_flags;         ///< what service() reports
+        volatile bool busy;
+    };
+    static inline State st_{};
 };
 
 /**
- * DmaRxEngine<n, s, ch, Elem> - "fill a run of memory from a
- * peripheral's data register".
+ * DmaRxEngine<n, s, ch, Elem> - "fill memory from a peripheral's data
+ * register", in TWO SHAPES.
  *
- * The asymmetry that shapes it: a receive block completes only when the
- * buffer FILLS, which on an idle line may be never. So the owner does
- * not wait for a completion - it ASKS, with take(), which reports what
- * has arrived since the last question.
+ * THE ONE-SHOT SHAPE is the transmit engine's two moments and its
+ * one-read start, mirrored: arm(data, priority, interrupts) is the
+ * binding, a block start is the flag clear, SxM0AR, SxNDTR and EN, SxCR
+ * compared and not rebuilt, refused while EN stands. It is what a
+ * BOUNDED block wants - the data phase of an I2C or SPI read, a block of
+ * conversions. A receive block completes only when the buffer FILLS,
+ * which on an idle line may be never, so its owner does not wait for a
+ * completion: it ASKS, with take(), what has arrived since the last
+ * question - one SxNDTR read and a subtraction, because SxNDTR is a live
+ * counter software may read at any time (10.5.6).
  *
- * AND ON THIS SILICON ASKING IS FREE. SxNDTR is a live counter the
- * controller decrements and software may read at any time (10.5.6), so
- * take() is one register read and a subtraction: nothing is suspended,
- * no write-back has to be judged. The PACING is still the owner's (a
- * kernel TimeEvent every few ticks), because the latency of asking late
- * is the owner's to choose; what is gone is the cost of asking.
+ * THE CIRCULAR SHAPE is what an UNBOUNDED stream wants - a serial line -
+ * and on this controller it costs nothing to run: under CIRC "the number
+ * of data items to be transferred is automatically reloaded ... and the
+ * DMA requests continue to be served" (10.3.8), the memory pointer back
+ * at SxM0AR, so a stream pointed at a whole ring never stops and never
+ * needs a start again. arm(data, ring, priority) is therefore the
+ * binding AND the only start there is: SxPAR, the ring's first element
+ * in SxM0AR, its length in SxNDTR, SxCR with CIRC and the completion
+ * enable, EN. From then on the engine is the PRODUCER of util/ring.hpp's
+ * HardwareRing - a RingCounter:
+ *
+ *  - remaining() is SxNDTR, read live: the elements still to land in the
+ *    current lap. In direct mode a datum loaded from the peripheral is
+ *    "immediately drained and stored into the destination" (10.3.6), and
+ *    the post-decrement of SxNDTR is the last of a transfer's three
+ *    operations (10.3.2) - so the count says only what memory already
+ *    holds;
+ *  - laps() counts the completions the stream's handler has reported
+ *    through service_ring() - the circular shape's ISR body - since the
+ *    binding: every completion is the end of a lap (TCIF rises as
+ *    SxNDTR reaches zero, before the reload - measured, two completions
+ *    for two laps, docs/stm32f4/dma.md), so the count lags the counter by
+ *    the handler's latency and never leads it. The half-transfer flag is
+ *    not armed: a lap is one interrupt.
+ *
+ * What the circular shape cannot do is stop for a consumer that has not
+ * caught up - the stream writes over what was not read - and the view
+ * counts that as its overrun. take(), full(), capacity() and taken() are
+ * the one-shot shape's and answer nothing useful in the other.
  */
 template <uint8_t n, uint8_t s, uint8_t ch, typename Elem = uint8_t>
 class DmaRxEngine {
@@ -1137,7 +1298,7 @@ class DmaRxEngine {
 public:
     static_assert(ch < dma_channels, "brio DmaRxEngine: CHSEL selects one of eight channels");
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
-                  "brio DmaRxEngine: the element type is the bus access - 1, 2 or 4 bytes");
+                  "brio DmaRxEngine: the element type is the widest bus access - 1, 2 or 4 bytes");
 
     DmaRxEngine() = delete;
 
@@ -1145,6 +1306,7 @@ public:
     static constexpr uint8_t controller = n;
     static constexpr uint8_t stream = s;
     static constexpr uint8_t channel = ch;
+    /// The WIDEST beat this binding takes; start() takes every narrower one.
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -1153,125 +1315,434 @@ public:
     static constexpr uint8_t flag_error = DmaFlag::transfer_error;
     static constexpr uint8_t flag_fifo_error = DmaFlag::fifo_error;
 
+    /// The one-shot shape's ISR BODY, the transmit engine's: this stream's
+    /// armed flags, cleared and handed back, acting on nothing.
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Stream::isr());
+        const uint32_t pending = Stream::flags() & st_.irq_flags;
+        if (pending != 0u) {
+            Stream::clear(pending);
+        }
+        return static_cast<uint8_t>(pending);
     }
 
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        priority_ = priority;
-        claim();
-        Nvic::enable(Stream::irq());
+    /// The circular shape's ISR BODY: service(), and a reported completion
+    /// COUNTED as the lap it is - the count laps() hands util/ring.hpp's
+    /// HardwareRing as half of the producer index. Its own verb, so the
+    /// one-shot shape's owners (the bus hosts, a block of conversions) pay
+    /// nothing for a count they have no use for; whoever bound the ring
+    /// binds the vector to this one.
+    [[gnu::always_inline]] static uint8_t service_ring() {
+        const uint32_t pending = Stream::flags() & st_.irq_flags;
+        if (pending != 0u) {
+            Stream::clear(pending);
+            if ((pending & DmaFlag::complete) != 0u) {
+                st_.laps = st_.laps + 1u;
+            }
+        }
+        return static_cast<uint8_t>(pending);
     }
+
+    /// THE ONE-SHOT BINDING: `data` is the register the blocks are filled
+    /// from, `irqs` what the stream interrupts for. Opens the controller's
+    /// gate, stops the stream, writes everything a block does not change.
+    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low,
+                    DmaInterrupts irqs = DmaInterrupts::completion) {
+        st_.data = data;
+        st_.control = dma_control_word(DmaStreamConfig{
+                       .channel = ch,
+                       .direction = DmaDirection::peripheral_to_memory,
+                       .memory_increment = false,   // the block's own, at its start
+                       .priority = priority}) |
+                   dma_interrupt_enables(irqs);
+        st_.irq_flags = static_cast<uint8_t>(dma_interrupt_flags(irqs));
+        bind();
+        if (irqs == DmaInterrupts::none) {
+            Nvic::disable(Stream::irq());
+        } else {
+            Nvic::enable(Stream::irq());
+        }
+    }
+
+    /**
+     * THE CIRCULAR BINDING, which is also the stream's only start: `ring`
+     * is the caller's WHOLE storage, filled from its first element lap
+     * after lap for as long as the binding stands, `data` the register it
+     * is filled from. The completion and the transfer error interrupt -
+     * a completion is a lap, counted by service_ring(), which the stream's
+     * vector must call - and the half-transfer flag is left unarmed.
+     *
+     * False, and nothing touched, for a ring that is empty, longer than
+     * SxNDTR counts (65535) or not aligned on its element (10.3.6). A
+     * stream that is running is stopped first (the binding's wait), so
+     * calling it again restarts the ring at its first element with laps()
+     * at zero - the moment util/ring.hpp's HardwareRing over the same
+     * storage is clear()ed.
+     *
+     * NOTHING READS SxCR AFTER THE EN STORE, the one-shot start's rule
+     * (the wedge, docs/stm32f4/dma.md).
+     */
+    static bool arm(volatile void* data, std::span<uint8_t> ring,
+                    DmaPriority priority = DmaPriority::low) {
+        return arm_ring(data, ring.data(), ring.size(), priority);
+    }
+    static bool arm(volatile void* data, std::span<uint16_t> ring,
+                    DmaPriority priority = DmaPriority::low)
+        requires(sizeof(Elem) >= 2)
+    {
+        return arm_ring(data, ring.data(), ring.size(), priority);
+    }
+    static bool arm(volatile void* data, std::span<uint32_t> ring,
+                    DmaPriority priority = DmaPriority::low)
+        requires(sizeof(Elem) >= 4)
+    {
+        return arm_ring(data, ring.data(), ring.size(), priority);
+    }
+
+    /// SxNDTR, live (10.5.6): the elements still to land in the current
+    /// lap of the circular shape, or the current block of the one-shot
+    /// one. One load of a 32-bit register; nothing is suspended.
+    [[gnu::always_inline]] static uint32_t remaining() {
+        return static_cast<uint16_t>(Stream::regs().NDTR);
+    }
+
+    /// The completions service_ring() has counted since the binding: the
+    /// laps of the circular shape. Written by the handler and read from
+    /// the consumer's context, so the load is a volatile one.
+    [[gnu::always_inline]] static uint32_t laps() { return st_.laps; }
 
     /// True while the stream is not running a block at all - it filled
     /// up, it errored, or it was never started. The owner hands it a new
-    /// run then, whatever the arithmetic says.
+    /// run then, whatever the arithmetic says. A read of SxCR: not in the
+    /// cycles right after an EN store (the wedge).
     static bool idle() { return !Stream::enabled(); }
 
-    /// Point the stream at a run of free memory and start filling it.
-    static bool start(Elem* buffer, uint16_t length) {
-        if (buffer == nullptr || length == 0u) {
-            return false;
-        }
-        capacity_ = length;
-        taken_ = 0;
-        return Stream::load(transfer(buffer, length, true));
+    /// Point the stream at a run of free memory and start filling it. The
+    /// refusals are the transmit engine's.
+    [[gnu::always_inline]] static bool start(std::span<uint8_t> run) {
+        return launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+    [[gnu::always_inline]] static bool start(std::span<uint16_t> run)
+        requires(sizeof(Elem) >= 2)
+    {
+        return launch(run.data(), run.size(), DMA_SxCR_MINC);
+    }
+    [[gnu::always_inline]] static bool start(std::span<uint32_t> run)
+        requires(sizeof(Elem) >= 4)
+    {
+        return launch(run.data(), run.size(), DMA_SxCR_MINC);
     }
 
     /**
      * `length` elements into ONE CELL, thrown away: the memory pointer
      * does not increment. What a full-duplex bus needs for the receive
      * side of a WRITE - every frame clocked out brings one back, and a
-     * receiver left unread would overrun.
+     * receiver left unread would overrun. The cell's type is the beat.
      */
-    static bool start_discard(Elem* cell, uint16_t length) {
-        if (cell == nullptr || length == 0u) {
-            return false;
-        }
-        capacity_ = length;
-        taken_ = 0;
-        return Stream::load(transfer(cell, length, false));
+    [[gnu::always_inline]] static bool start_discard(uint8_t* cell, uint16_t length) {
+        return launch(cell, length, 0u);
+    }
+    [[gnu::always_inline]] static bool start_discard(uint16_t* cell, uint16_t length)
+        requires(sizeof(Elem) >= 2)
+    {
+        return launch(cell, length, 0u);
+    }
+    [[gnu::always_inline]] static bool start_discard(uint32_t* cell, uint16_t length)
+        requires(sizeof(Elem) >= 4)
+    {
+        return launch(cell, length, 0u);
     }
 
     /// How many elements have arrived since the last take(). One NDTR
     /// read; nothing is suspended and nothing can be refused, so the
     /// return is a plain number and not an optional.
     static uint16_t take() {
-        if (capacity_ == 0u) {
+        if (st_.capacity == 0u) {
             return 0;
         }
         const uint16_t remaining = Stream::count();
-        const uint16_t filled = remaining > capacity_
-                                    ? capacity_
-                                    : static_cast<uint16_t>(capacity_ - remaining);
-        if (filled <= taken_) {
+        const uint16_t filled = remaining > st_.capacity
+                                    ? st_.capacity
+                                    : static_cast<uint16_t>(st_.capacity - remaining);
+        if (filled <= st_.taken) {
             return 0;
         }
-        const uint16_t fresh = static_cast<uint16_t>(filled - taken_);
-        taken_ = filled;
+        const uint16_t fresh = static_cast<uint16_t>(filled - st_.taken);
+        st_.taken = filled;
         return fresh;
     }
 
     /// True once the run is full: the owner must hand over a new one or
     /// the peripheral piles its own losses up.
-    static bool full() { return capacity_ != 0u && taken_ >= capacity_; }
-    static uint16_t capacity() { return capacity_; }
-    static uint16_t taken() { return taken_; }
+    static bool full() { return st_.capacity != 0u && st_.taken >= st_.capacity; }
+    static uint16_t capacity() { return st_.capacity; }
+    static uint16_t taken() { return st_.taken; }
 
     static bool abandon() {
-        ++faults_;
-        capacity_ = 0;
-        taken_ = 0;
-        claim();
+        ++st_.faults;
+        bind();
         return true;
     }
 
-    static uint32_t faults() { return faults_; }
-    static void clear_faults() { faults_ = 0; }
+    static uint32_t faults() { return st_.faults; }
+    static void clear_faults() { st_.faults = 0; }
 
     static void stop() {
         Stream::stop();
-        capacity_ = 0;
-        taken_ = 0;
+        st_.capacity = 0;
+        st_.taken = 0;
     }
 
 private:
-    static DmaTransfer transfer(Elem* buffer, uint16_t length, bool increment) {
-        return DmaTransfer{
-            .peripheral = data_,
-            .memory = buffer,
-            .memory1 = nullptr,
-            .count = length,
-            .config = {.channel = ch,
-                       .direction = DmaDirection::peripheral_to_memory,
-                       .circular = false,
-                       .double_buffer = false,
-                       .current_target_is_m1 = false,
-                       .peripheral_flow_control = false,
-                       .peripheral_increment = false,
-                       .memory_increment = increment,
-                       .peripheral_increment_fixed4 = false,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .peripheral_burst = DmaBurst::single,
-                       .memory_burst = DmaBurst::single,
-                       .priority = priority_,
-                       .use_fifo = false,
-                       .fifo_threshold = DmaFifoThreshold::half},
-        };
+    template <typename T>
+    [[gnu::always_inline]] static bool launch(T* first, size_t count, uint32_t increment) {
+        const uint32_t address = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(first));
+        if (first == nullptr || count == 0u || count > dma_max_items ||
+            (address & (sizeof(T) - 1u)) != 0u) {
+            return false;
+        }
+        DMA_Stream_TypeDef& r = Stream::regs();
+        const uint32_t want = st_.control | dma_beat_word(dma_width_of<T>()) | increment;
+        const uint32_t now = r.CR;   // the one read of SxCR, before every store
+        if ((now & DMA_SxCR_EN) != 0u) {
+            return false;
+        }
+        if (now != want) {
+            r.CR = want;
+        }
+        Stream::clear(DmaFlag::all);
+        r.M0AR = address;
+        r.NDTR = static_cast<uint32_t>(count);
+        st_.capacity = static_cast<uint16_t>(count);
+        st_.taken = 0;
+        r.CR = want | DMA_SxCR_EN;   // and nothing reads SxCR after this
+        return true;
     }
 
-    static void claim() {
+    /// The circular binding: the one-shot binding's steps (10.3.17's 1, 2,
+    /// 8), then SxM0AR and SxNDTR (3, 4) once for good, SxCR with CIRC,
+    /// MINC, the beat and the two enables (5, 7, 9), and EN (10) in a
+    /// store of its own. CIRC is not kept in the binding word: a one-shot
+    /// start after a transfer error stopped the ring is an ordinary block.
+    template <typename T>
+    static bool arm_ring(volatile void* data, T* first, size_t count, DmaPriority priority) {
+        const uint32_t address = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(first));
+        if (first == nullptr || count == 0u || count > dma_max_items ||
+            (address & (sizeof(T) - 1u)) != 0u) {
+            return false;
+        }
+        st_.data = data;
+        st_.control = dma_control_word(DmaStreamConfig{
+                          .channel = ch,
+                          .direction = DmaDirection::peripheral_to_memory,
+                          .memory_increment = false,
+                          .priority = priority}) |
+                      dma_interrupt_enables(DmaInterrupts::completion);
+        st_.irq_flags = static_cast<uint8_t>(dma_interrupt_flags(DmaInterrupts::completion));
+        bind();   // stopped, flags and laps cleared, SxPAR, SxFCR
+        DMA_Stream_TypeDef& r = Stream::regs();
+        const uint32_t word =
+            st_.control | dma_beat_word(dma_width_of<T>()) | DMA_SxCR_MINC | DMA_SxCR_CIRC;
+        r.M0AR = address;
+        r.NDTR = static_cast<uint32_t>(count);
+        r.CR = word;
+        Nvic::enable(Stream::irq());
+        r.CR = word | DMA_SxCR_EN;   // and nothing reads SxCR after this
+        return true;
+    }
+
+    static void bind() {
         Stream::stop();
-        Stream::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+        DMA_Stream_TypeDef& r = Stream::regs();
+        r.PAR = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(st_.data));
+        r.FCR = 0u;   // direct mode, FEIE clear
+        r.CR = st_.control;
+        st_.capacity = 0;
+        st_.taken = 0;
+        st_.laps = 0u;
     }
 
-    static inline volatile void* data_ = nullptr;
-    static inline DmaPriority priority_ = DmaPriority::low;
-    static inline uint16_t capacity_ = 0;
-    static inline uint16_t taken_ = 0;
-    static inline uint32_t faults_ = 0;
+    /// One object, for the transmit engine's reason.
+    struct State {
+        uint32_t control;          ///< SxCR's binding word, EN and the beat clear
+        volatile void* data;       ///< SxPAR
+        uint32_t faults;
+        /// Completions service_ring() counted since the binding: written
+        /// by the handler, read by the consumer's HardwareRing.
+        volatile uint32_t laps;
+        uint16_t capacity;
+        uint16_t taken;
+        uint8_t irq_flags;         ///< what service() reports
+    };
+    static inline State st_{};
+};
+
+/**
+ * DmaCopyEngine<n, s> - copy and fill, memory to memory, on one stream of
+ * DMA2.
+ *
+ * MEMORY TO MEMORY NEEDS NO REQUEST AND IS DMA2's ALONE (10.3.6): the
+ * stream "immediately starts to fill the FIFO" on EN, and DMA1's
+ * peripheral port - the SOURCE of such a block - reaches no memory. So
+ * the controller is refused at compile time, and the stream's channel is
+ * nobody's.
+ *
+ * THE ELEMENT IS THE BEAT. copy() and fill() count ELEMENTS of a type one
+ * bus access wide - uint8_t, uint16_t or uint32_t - and the stream moves
+ * them as beats of that width at both ports, so a block of pixels moves
+ * as half-words and a block of words as words; an address not aligned on
+ * its element is refused (10.3.6). The surface is the one every family's
+ * copy engine has.
+ *
+ * THE FIFO, BECAUSE DIRECT MODE IS FORBIDDEN HERE (10.3.12), and it buys
+ * the BURST: sixteen bytes a burst on each port - a word INCR4, a
+ * half-word INCR8 or a byte INCR16, the full-threshold row of table 49
+ * that every beat has - which the measured ladder (docs/stm32f4/dma.md)
+ * puts at a third more than single beats. A port bursts only from a
+ * sixteen-byte boundary: 10.3.11 forbids a burst across a 1 KB boundary
+ * (an AHB error the DMA's registers do not report), and a sixteen-byte
+ * burst from a sixteen-byte boundary cannot cross one.
+ *
+ * FILL is a copy whose source does not move: the stream reads the
+ * caller's CELL - one element in memory, the caller's to keep in place
+ * until busy() answers false - at every beat, single, because an
+ * incrementing burst has no meaning on a fixed address.
+ *
+ * TWO MOMENTS, as the transport engines: arm() writes SxFCR (the FIFO, a
+ * full threshold) and keeps SxCR's configuration word; a block is the
+ * flag clear, SxPAR, SxM0AR, SxNDTR, then SxCR - its beat and bursts are
+ * the block's, so it is stored whole - and EN. NOTHING READS SxCR: the
+ * completion is read in the FLAG BANK (busy(), one load of LISR/HISR,
+ * harmless at any distance from the enable), and a block start needs no
+ * EN read because busy() saw the last block end - TCIF or TEIF, each of
+ * which clears EN (10.3.13, 10.5.5) - before it lets another start.
+ */
+template <uint8_t n, uint8_t s>
+class DmaCopyEngine {
+    static_assert(dma_memory_to_memory_capable(n),
+                  "brio DmaCopyEngine: memory to memory is DMA2's alone - DMA1's peripheral "
+                  "port, the source of such a block, is not connected to the bus matrix "
+                  "(RM0090 10.3.6, figures 33 and 34 note 1)");
+    using Stream = DmaStream<n, s>;
+
+    template <typename T>
+    static constexpr bool beat =
+        std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t> || std::is_same_v<T, uint32_t>;
+
+public:
+    DmaCopyEngine() = delete;
+
+    static constexpr uint8_t controller = n;
+    static constexpr uint8_t stream = s;
+
+    /// THE BINDING: the gate, the stream stopped, the FIFO at a full
+    /// threshold, the configuration word kept. The completion is polled
+    /// (busy()), so the stream's interrupt stays off.
+    static void arm(DmaPriority priority = DmaPriority::low) {
+        st_.control = dma_control_word(DmaStreamConfig{
+            .direction = DmaDirection::memory_to_memory,
+            .memory_increment = true,
+            .priority = priority});
+        Stream::stop();
+        Stream::regs().FCR = dma_fifo_word(DmaStreamConfig{
+            .use_fifo = true, .fifo_threshold = DmaFifoThreshold::full});
+        Stream::regs().CR = st_.control;
+        Nvic::disable(Stream::irq());
+        st_.busy = false;
+    }
+
+    /// `count` elements from `src` to `dst`, memcpy's shape (no overlap),
+    /// the element the beat. False, and nothing started, while a block runs,
+    /// for an empty block or one past SxNDTR's 65535, or for an address
+    /// not aligned on its element.
+    template <typename T>
+        requires beat<T>
+    static bool copy(T* dst, const T* src, uint32_t count) {
+        return launch(dst, src, count, DMA_SxCR_PINC);
+    }
+
+    /// `count` copies of the element at `cell` from `dst` on - a clear, a
+    /// rectangle of pixels. The cell is read by the stream at every beat:
+    /// it stays put until busy() answers false.
+    template <typename T>
+        requires beat<T>
+    static bool fill(T* dst, const T* cell, uint32_t count) {
+        return launch(dst, cell, count, 0u);
+    }
+
+    /// True while the last block runs. Reads the stream's flags (one load
+    /// of LISR/HISR) and retires the block when they say it ended; a
+    /// transfer error is counted in faults().
+    static bool busy() {
+        if (!st_.busy) {
+            return false;
+        }
+        const uint32_t f = Stream::flags();
+        if ((f & (DmaFlag::complete | DmaFlag::transfer_error)) == 0u) {
+            return true;
+        }
+        if ((f & DmaFlag::transfer_error) != 0u) {
+            ++st_.faults;
+        }
+        st_.busy = false;
+        return false;
+    }
+
+    /// Stop a running block where it is - abort()'s wait, the FIFO
+    /// flushed into the destination first (10.3.14) - and free the engine.
+    /// The block is lost and counted in faults(); false when none ran.
+    static bool abandon() {
+        if (!busy()) {
+            return false;
+        }
+        Stream::stop();
+        Stream::regs().CR = st_.control;
+        ++st_.faults;
+        st_.busy = false;
+        return true;
+    }
+
+    /// Blocks a transfer error ended (a bus error at either port - an
+    /// address no DMA master reaches, 10.3.18) or abandon() threw away.
+    static uint32_t faults() { return st_.faults; }
+
+private:
+    template <typename T>
+    static bool launch(T* dst, const volatile T* src, uint32_t count, uint32_t source_increment) {
+        const uint32_t d = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst));
+        const uint32_t from = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(src));
+        if (count == 0u || count > dma_max_items || ((d | from) & (sizeof(T) - 1u)) != 0u ||
+            busy()) {
+            return false;
+        }
+        // Sixteen bytes a burst at every beat: INCR4 words, INCR8
+        // half-words, INCR16 bytes.
+        constexpr DmaWidth w = dma_width_of<T>();
+        constexpr uint32_t burst = sizeof(T) == 4u ? 1u : sizeof(T) == 2u ? 2u : 3u;
+        uint32_t cr = st_.control | source_increment | dma_beat_word(w);
+        if (source_increment != 0u && (from & 15u) == 0u) {
+            cr |= burst << DMA_SxCR_PBURST_Pos;
+        }
+        if ((d & 15u) == 0u) {
+            cr |= burst << DMA_SxCR_MBURST_Pos;
+        }
+        st_.busy = true;
+        DMA_Stream_TypeDef& r = Stream::regs();
+        Stream::clear(DmaFlag::all);
+        r.PAR = from;
+        r.M0AR = d;
+        r.NDTR = count;
+        r.CR = cr;
+        r.CR = cr | DMA_SxCR_EN;
+        return true;
+    }
+
+    /// One object, for the transmit engine's reason.
+    struct State {
+        uint32_t control;          ///< SxCR's binding word, the block's fields clear
+        uint32_t faults;
+        volatile bool busy;
+    };
+    static inline State st_{};
 };
 
 } // namespace brio

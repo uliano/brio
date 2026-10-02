@@ -12,6 +12,8 @@
 // TWICE, by two independent symbols, and assert the two answers agree.
 #include <stdint.h>
 
+#include <span>
+
 #include "stm32f4/dma.hpp"
 #include "stm32f4/usart.hpp"
 
@@ -348,6 +350,8 @@ static_assert(Tx::width == DmaWidth::byte && Wide::width == DmaWidth::half);
 static_assert(Tx::flag_complete == DmaFlag::complete);
 static_assert(Tx::flag_error == DmaFlag::transfer_error);
 static_assert(Rx::flag_fifo_error == DmaFlag::fifo_error);
+// A receive engine is the producer util/ring.hpp's HardwareRing reads.
+static_assert(RingCounter<Rx>);
 
 // Two engines of one transport must not share a stream - a stream has one
 // direction and one FIFO. Nothing in the serial request map puts a
@@ -363,8 +367,10 @@ void engine_verbs() {
     static uint8_t cell = 0;
     Tx::arm(bytes_a, DmaPriority::high);
     (void)Tx::service();
-    (void)Tx::start(buffer, 32);
+    (void)Tx::start(std::span<const uint8_t>(buffer, 32));
     (void)Tx::start_fixed(&cell, 4);
+    (void)Tx::claim();
+    (void)Tx::start_claimed(std::span<const uint8_t>(buffer));
     (void)Tx::complete();
     (void)Tx::busy();
     (void)Tx::in_flight();
@@ -374,10 +380,10 @@ void engine_verbs() {
     Tx::clear_faults();
     Tx::stop();
 
-    Rx::arm(bytes_a);
+    Rx::arm(bytes_a, DmaPriority::low, DmaInterrupts::none);
     (void)Rx::service();
     (void)Rx::idle();
-    (void)Rx::start(buffer, 32);
+    (void)Rx::start(buffer);
     (void)Rx::start_discard(&cell, 4);
     (void)Rx::take();
     (void)Rx::full();
@@ -387,7 +393,78 @@ void engine_verbs() {
     (void)Rx::faults();
     Rx::clear_faults();
     Rx::stop();
+
+    // The circular shape: the binding over a whole ring is the only
+    // start, the count register and the lap count its producer index.
+    (void)Rx::arm(bytes_a, std::span<uint8_t>(buffer), DmaPriority::high);
+    (void)Rx::service_ring();
+    (void)Rx::remaining();
+    (void)Rx::laps();
+    Rx::stop();
+
+    // THE BEAT IS THE ELEMENT OF THE RUN: an engine bound to a half-word
+    // register takes a byte run and a half-word run, each its own width.
+    static uint16_t halves[16];
+    static const uint16_t dummy16 = 0xFFFF;
+    Wide::arm(halves, DmaPriority::medium, DmaInterrupts::errors_only);
+    (void)Wide::start(std::span<const uint8_t>(buffer));
+    (void)Wide::start(std::span<const uint16_t>(halves));
+    (void)Wide::start_fixed(&dummy16, 8);
+    (void)Wide::start_fixed(&cell, 8);
+    (void)Wide::start_claimed(std::span<const uint16_t>(halves));
+    Wide::stop();
 }
+
+// The beat a binding takes: every width up to its element, none beyond.
+template <typename E, typename T>
+concept TakesRun = requires(std::span<const T> run) { E::start(run); };
+static_assert(TakesRun<Wide, uint8_t> && TakesRun<Wide, uint16_t> && !TakesRun<Wide, uint32_t>);
+static_assert(TakesRun<Tx, uint8_t> && !TakesRun<Tx, uint16_t>);
+static_assert(TakesRun<DmaTxEngine<1, 5, 7, uint32_t>, uint32_t>);
+static_assert(dma_max_items == 0xFFFFu);
+
+// The SxCR words an engine keeps are the configure() words: one function
+// computes both.
+static_assert(dma_control_word(DmaStreamConfig{.channel = 4,
+                                               .direction = DmaDirection::memory_to_peripheral,
+                                               .memory_increment = false}) ==
+              ((4u << DMA_SxCR_CHSEL_Pos) | DMA_SxCR_DIR_0));
+static_assert(dma_beat_word(DmaWidth::half) == (DMA_SxCR_PSIZE_0 | DMA_SxCR_MSIZE_0));
+static_assert(dma_fifo_word(DmaStreamConfig{.use_fifo = true,
+                                            .fifo_threshold = DmaFifoThreshold::full}) ==
+              (DMA_SxFCR_DMDIS | DMA_SxFCR_FTH));
+static_assert(dma_interrupt_flags(DmaInterrupts::errors_only) == DmaFlag::transfer_error);
+static_assert(dma_interrupt_enables(DmaInterrupts::none) == 0u);
+
+// ---- the copy engine: memory to memory, DMA2's alone ---------------------------
+
+using Copier = DmaCopyEngine<2, 4>;
+static_assert(Copier::controller == 2 && Copier::stream == 4);
+
+void copy_verbs() {
+    static uint8_t a[64];
+    static uint8_t b[64];
+    static uint16_t pixels[32];
+    static uint32_t words[16];
+    static const uint16_t red = 0xF800;
+    static const uint32_t pattern = 0xDEADBEEFu;
+    static const uint8_t blank = 0;
+    Copier::arm(DmaPriority::very_high);
+    (void)Copier::copy(b, a, sizeof(a));
+    (void)Copier::copy(b + 1, a + 3, 17);
+    (void)Copier::copy(words, words + 8, 8);
+    (void)Copier::fill(pixels, &red, 32);
+    (void)Copier::fill(words, &pattern, 16);
+    (void)Copier::fill(b, &blank, sizeof(b));
+    (void)Copier::busy();
+    (void)Copier::abandon();
+    (void)Copier::faults();
+}
+
+// The copy engine's beats are the three bus widths; no other element.
+template <typename T>
+concept Copies = requires(T* d, const T* s) { DmaCopyEngine<2, 4>::copy(d, s, 1u); };
+static_assert(Copies<uint8_t> && Copies<uint16_t> && Copies<uint32_t> && !Copies<uint64_t>);
 
 // ---- the request map ---------------------------------------------------------
 //
@@ -445,6 +522,16 @@ void engined_console() {
         (void)Serial::dma_isr();
         (void)Serial::harvest();
         (void)Serial::write_byte('x');
+        // The receive side is the circular stream's ring, read through
+        // the view whose producer is the engine.
+        uint8_t got[4];
+        uint8_t one = 0;
+        (void)Serial::read_span();
+        Serial::consume(1);
+        (void)Serial::read_byte(one);
+        (void)Serial::read_bulk(std::span<uint8_t>(got));
+        (void)Serial::rx_pending();
+        (void)Serial::rx_overruns();
         (void)Serial::dma_faults();
         Serial::clear_errors();
         Serial::release();

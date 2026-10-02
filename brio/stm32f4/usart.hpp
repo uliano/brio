@@ -80,6 +80,15 @@
  * throughout, so an engineless image carries no DMA code at all and is
  * byte-identical to the one built before the slots were filled.
  *
+ * THE RECEIVE ENGINE RUNS CIRCULAR OVER THE WHOLE RING, and the ring is
+ * then not a Ring at all: the stream writes the receive storage lap after
+ * lap (the engine's circular shape, stm32f4/dma.hpp) and the consumer
+ * reads it through util/ring.hpp's HardwareRing, whose producer index is
+ * the stream's own SxNDTR and the lap count its completion handler keeps.
+ * Nothing re-arms anything between bytes, so no byte is lost between two
+ * runs - there are no runs; what the consumer can lose is a LAP it did
+ * not keep up with, which the view counts and reports as rx_overruns().
+ *
  * A STREAM AND A CHANNEL ARE NOT FREE HERE. On this family's controller
  * a peripheral reaches exactly the one or two (controller, stream,
  * channel) cells the request mapping gives it (RM0090 tables 43 and 44,
@@ -769,11 +778,34 @@ class Uart {
     static_assert(!(opts.rts || opts.cts) || S::is_full,
                   "brio Uart: hardware flow control is a FULL instance's (USART1, 2, 3, 6 - "
                   "RM0090 table 148); UART4/5/7/8 have no CTS/RTS");
+    static_assert(!RxEngine::present || rx_size <= 32768u,
+                  "brio Uart: with a receive engine the ring is the circular stream's whole "
+                  "storage, and SxNDTR counts 65535 at most - the largest power of two that "
+                  "fits is 32768 bytes");
 
     using TxPin = Pin<pins.tx.port, pins.tx.pin>;
     using RxPin = Pin<pins.rx.port, pins.rx.pin>;
 
-    static inline Ring<uint8_t, rx_size, Stm32f4Platform<>> m_rx{};
+    /// The receive storage the circular stream writes - named only where
+    /// there is a receive engine, so an engineless image has none of it.
+    static inline uint8_t m_rx_storage[rx_size]{};
+
+    /// THE RECEIVE RING: the Ring the RXNE handler pushes into, or - with
+    /// a receive engine - the view of the stream's own storage whose
+    /// producer index is the engine (util/ring.hpp's HardwareRing over a
+    /// RingCounter). A member template, so the view is named, and the
+    /// storage with it, only on the branch that has the engine.
+    template <bool hardware, typename Unused = void>
+    struct RxRingOf {
+        using type = Ring<uint8_t, rx_size, Stm32f4Platform<>>;
+    };
+    template <typename Unused>
+    struct RxRingOf<true, Unused> {
+        using type = HardwareRing<m_rx_storage, RxEngine>;
+    };
+    using RxRing = typename RxRingOf<RxEngine::present>::type;
+
+    static inline RxRing m_rx{};
     static inline Ring<uint8_t, tx_size, Stm32f4Platform<>> m_tx{};
 
     static inline volatile uint8_t m_rx_overruns = 0;   // RX ring full, byte lost
@@ -783,6 +815,12 @@ class Uart {
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
     static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
     static inline uint32_t m_baud = 0;                  // for rebase()
+    // The receive engine's two flags. `m_rx_drained`: the consumer has
+    // found the ring empty since harvest() last reported the edge - what
+    // re-arms the edge. `m_rx_restart`: a transfer error stopped the
+    // circular stream, and harvest() binds it again.
+    static inline volatile bool m_rx_drained = true;
+    static inline volatile bool m_rx_restart = false;
 
 public:
     constexpr Uart() = default;
@@ -886,8 +924,7 @@ public:
         if constexpr (has_rx_engine) {
             // NOT S::rxne_interrupt(true): the stream consumes RXNE, and a
             // handler that also read DR would race it for the byte.
-            RxEngine::arm(S::data_address());
-            rearm_rx();
+            arm_rx();
         } else {
             S::rxne_interrupt(true);
         }
@@ -908,9 +945,11 @@ public:
     ///
     /// On the transmit stream a completion means the block has left the
     /// ring, so exactly that many bytes are released and the next
-    /// contiguous run started. On the receive stream nothing is published
-    /// here - only harvest() knows how much of the run the consumer has
-    /// been told about, and the pacing of that is the owner's.
+    /// contiguous run started. On the receive stream a completion is the
+    /// end of a LAP, and the engine's service_ring() has already counted it -
+    /// that count is half of the receive ring's producer index - so there
+    /// is nothing left to do here; a transfer error stops the stream
+    /// (10.3.18), and harvest() binds it again from the main context.
     ///
     /// Returns true when something belonging to this transport was served.
     [[gnu::always_inline]] static bool dma_isr() {
@@ -928,13 +967,13 @@ public:
             }
         }
         if constexpr (has_rx_engine) {
-            const uint8_t f = RxEngine::service();
+            const uint8_t f = RxEngine::service_ring();   // a completion: one lap, counted there
             if ((f & RxEngine::flag_error) != 0u) {
                 (void)RxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1;
+                m_rx_restart = true;
                 mine = true;
-            } else if ((f & RxEngine::flag_complete) != 0u) {
-                // The run filled up. harvest() publishes and re-arms.
+            } else if (f != 0u) {
                 mine = true;
             }
         }
@@ -942,14 +981,24 @@ public:
     }
 
     /**
-     * Ask the receive engine what has arrived, and publish it.
+     * Ask the receive ring whether its consumer has something to do.
      *
-     * WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
-     * only when the buffer fills, which on an idle line may be never, so
-     * there is no event to wait for. WHOEVER OWNS THE PORT DECIDES HOW
+     * WHY THIS IS A VERB AND NOT AN INTERRUPT. The circular stream never
+     * ends a block - a lap is not a message - so there is no event that
+     * says "bytes arrived" on its own. WHOEVER OWNS THE PORT DECIDES HOW
      * OFTEN TO ASK and pays the latency it chose; a kernel TimeEvent
-     * every few ticks is the shape brio expects. The asking itself is one
-     * SxNDTR read.
+     * every few ticks is the shape brio expects. Nothing is published and
+     * nothing re-armed: the bytes are in the ring the moment the stream
+     * has stored them, and the consumer reads them through the view
+     * whether or not anybody asked. What the asking buys is the EDGE.
+     *
+     * THE EDGE: true when the ring holds bytes and its consumer has found
+     * it empty since the last true - so a consumer that drains until
+     * read_span() (or read_byte(), or read_bulk()) comes back empty is
+     * told once per idle-to-busy transition, the contract isr() has, and
+     * the same kernel glue works. The look is the consumer's (the view's
+     * state is the consumer's alone), so this is a MAIN-CONTEXT verb, the
+     * consumer's side - never an interrupt body.
      *
      * THE ERRORS ARE READ AT HARVEST GRANULARITY, and clearing one costs
      * a byte: on this block ORE, FE, NE and PE go away only when SR is
@@ -957,9 +1006,9 @@ public:
      * clearing sequence runs only when a flag really stands, and the byte
      * it takes is counted as the loss it is.
      *
-     * Returns true when the receive ring went from empty to non-empty -
-     * the same edge contract isr() has, so the same kernel glue works.
-     * False, and free, without an engine.
+     * A stream a transfer error stopped is bound again here, the ring
+     * restarted empty - the one way bytes already received are dropped,
+     * and dma_faults() counts it. False, and free, without an engine.
      */
     static bool harvest() {
         if constexpr (!has_rx_engine) {
@@ -981,20 +1030,16 @@ public:
                 }
                 S::clear_by_read();
             }
-
-            const bool was_empty = m_rx.empty();
-            const uint16_t fresh = RxEngine::take();
-            if (fresh != 0u) {
-                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            if (m_rx_restart) {
+                arm_rx();
             }
-            // THE SILICON IS ASKED FIRST AND THE ARITHMETIC SECOND: a
-            // stream that is not running gets a new run whatever the count
-            // says. The opposite rule - trust the count and leave a stopped
-            // stream alone - leaves a receive stream dead.
-            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
-                rearm_rx();
+            // One look a harvest, whatever the edge: it also keeps the
+            // view's lap inference exact for a consumer that reads seldom.
+            if (!m_rx.empty() && m_rx_drained) {
+                m_rx_drained = false;
+                return true;
             }
-            return was_empty && !m_rx.empty();
+            return false;
         }
     }
 
@@ -1163,6 +1208,9 @@ public:
     static bool read_byte(uint8_t& b) {
         const auto v = m_rx.pop();
         if (!v) {
+            if constexpr (has_rx_engine) {
+                m_rx_drained = true;   // harvest()'s edge re-armed
+            }
             return false;
         }
         b = *v;
@@ -1228,6 +1276,9 @@ public:
         while (got < dst.size()) {
             auto src = m_rx.read_span();
             if (src.empty()) {
+                if constexpr (has_rx_engine) {
+                    m_rx_drained = true;
+                }
                 break;
             }
             const uint32_t chunk = src.size() < dst.size() - got
@@ -1236,7 +1287,11 @@ public:
             for (uint32_t i = 0; i < chunk; ++i) {
                 dst[got + i] = src[i];
             }
-            m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(chunk));
+            if constexpr (has_rx_engine) {
+                (void)m_rx.consume(chunk);   // a run written over under the copy: rx_overruns()
+            } else {
+                m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(chunk));
+            }
             got += chunk;
         }
         return got;
@@ -1246,19 +1301,48 @@ public:
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
     /// which SerialPort drains a run at a time with no copy at all.
-    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+    static std::span<const uint8_t> read_span() {
+        if constexpr (has_rx_engine) {
+            const std::span<const uint8_t> run = m_rx.read_span();
+            if (run.empty()) {
+                m_rx_drained = true;   // harvest()'s edge re-armed
+            }
+            return run;
+        } else {
+            return m_rx.read_span();
+        }
+    }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped
-    /// to what is queued.
+    /// to what is queued. With a receive engine the release also JUDGES
+    /// the run: one the stream wrote over while it was held is counted in
+    /// rx_overruns(), and the consumer finds the ring skipped to the
+    /// stream's head.
     static void consume(uint32_t count) {
-        constexpr uint32_t most = decltype(m_rx)::capacity();
-        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+        if constexpr (has_rx_engine) {
+            (void)m_rx.consume(count);
+        } else {
+            constexpr uint32_t most = decltype(m_rx)::capacity();
+            m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+        }
     }
 
     static auto rx_pending() { return m_rx.count(); }
     static bool tx_idle() { return m_tx.empty(); }
 
-    static uint8_t rx_overruns() { return m_rx_overruns; }
+    /// What the receive side lost for want of room. Without an engine,
+    /// each count a byte the RX ring was full for; with one, each a LAP
+    /// the consumer did not keep up with (or a run written over while it
+    /// was held) - the view skipped what was left unread, so one count may
+    /// stand for up to a ring's worth of bytes.
+    static uint8_t rx_overruns() {
+        if constexpr (has_rx_engine) {
+            const uint32_t laps_lost = m_rx.overruns();
+            return static_cast<uint8_t>(laps_lost < 255u ? laps_lost : 255u);
+        } else {
+            return m_rx_overruns;
+        }
+    }
     static uint8_t frame_errors() { return m_frame_errors; }
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t noise_errors() { return m_noise_errors; }
@@ -1272,6 +1356,9 @@ public:
         m_hw_overruns = 0;
         if constexpr (has_tx_engine || has_rx_engine) {
             m_dma_faults = 0;
+        }
+        if constexpr (has_rx_engine) {
+            m_rx.clear_overruns();
         }
     }
 
@@ -1303,6 +1390,16 @@ private:
      * Hand the transmit engine the ring's next contiguous run, if it is
      * free to take one.
      *
+     * THE MASK COVERS THE CLAIM AND NOTHING ELSE. Two contexts race for
+     * the stream - a print in the loop, the completion handler starting
+     * the ring's next run - so the decision is taken masked: the run read
+     * and the engine's test-and-set, a dozen cycles. The block start runs
+     * with interrupts on, because a claimed stream is not running and
+     * cannot complete under it. The run is read INSIDE the mask so that a
+     * handler which queues bytes between the read and the claim finds
+     * the engine claimed and leaves them to this run's completion,
+     * rather than finding it free and starting a second block on them.
+     *
      * NOTHING KICKS THE FIRST BEAT, AND THAT IS THIS CONTROLLER'S OWN
      * FACT. 10.3.2's handshake is level-driven: the stream is enabled, it
      * sees TXE asserted, it writes DR. Measured rather than assumed,
@@ -1310,29 +1407,33 @@ private:
      */
     static void pump_tx() {
         if constexpr (has_tx_engine) {
-            typename Stm32f4Platform<>::CriticalSection cs;
-            if (TxEngine::busy()) {
-                return;
+            std::span<const uint8_t> run;
+            {
+                typename Stm32f4Platform<>::CriticalSection cs;
+                run = m_tx.read_span();
+                if (run.empty() || !TxEngine::claim()) {
+                    return;
+                }
             }
-            const auto run = m_tx.read_span();
-            if (run.empty()) {
-                return;
+            if constexpr (tx_size - 1u > dma_max_items) {
+                if (run.size() > dma_max_items) {
+                    run = run.first(dma_max_items);   // one block counts at most SxNDTR's 65535
+                }
             }
-            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
+            (void)TxEngine::start_claimed(run);
         }
     }
 
-    /// Point the receive engine at the ring's next free run. A ring with
-    /// no room at all is a byte lost before it arrives, and it is counted
-    /// as the software overrun it is.
-    static void rearm_rx() {
+    /// Bind the receive engine over the whole storage in its circular
+    /// shape - the stream restarted at the first byte, its laps at zero -
+    /// and start the view over it empty, as its contract asks at that
+    /// moment. Main context: the view is the consumer's.
+    static void arm_rx() {
         if constexpr (has_rx_engine) {
-            const auto room = m_rx.write_span();
-            if (room.empty()) {
-                m_rx_overruns = m_rx_overruns + 1;
-                return;
-            }
-            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
+            m_rx_restart = false;
+            (void)RxEngine::arm(S::data_address(), std::span<uint8_t>(m_rx_storage));
+            m_rx.clear();
+            m_rx_drained = true;
         }
     }
 };
