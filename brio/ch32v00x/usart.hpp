@@ -68,10 +68,12 @@
  * pushed: a corrupted byte in a line assembler is worse than a gap,
  * and the counter says it happened.
  *
- * TWO OPTIONAL DMA ENGINE SLOTS, the STM32G0 stratum's shape: a
- * transmit engine drains the TX ring by contiguous runs (the ring's
- * read_span, consumed by exactly what the block carried when it
- * completes) and a receive engine fills the RX ring's free run
+ * TWO OPTIONAL DMA ENGINE SLOTS, one for each of the instance's two
+ * requests (14.6, DMAT and DMAR): a transmit engine drains the TX ring
+ * by contiguous runs (the ring's read_span, consumed by exactly what
+ * the block carried when it completes - the run started outside the
+ * mask, the engine CLAIMED under it) and a receive engine fills the RX
+ * ring's free run
  * (write_span, published by what harvest() finds arrived). Without an
  * engine the slot is the NoDmaEngine tag and every engine branch is
  * compiled out. With a receive engine RXNE is the channel's, so the
@@ -744,16 +746,24 @@ struct Uart {
      *
      *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
      *
-     * Each engine reads only its own channel's flags, so this is safe on
-     * a vector another channel of the program shares nothing with. On
-     * the transmit channel a completion releases exactly the block's
-     * bytes from the ring and starts the next run; on the receive
-     * channel nothing is published here - harvest() does that.
+     * The flags of every channel are one register (INTFR), read ONCE
+     * here for both engines; each engine takes and clears only its own
+     * channel's armed flags, so this is safe on a vector another channel
+     * of the program shares nothing with. On the transmit channel a
+     * completion releases exactly the block's bytes from the ring and
+     * starts the next run; on the receive channel nothing is published
+     * here - harvest() does that.
      */
     [[gnu::always_inline]] static bool dma_isr() {
         bool mine = false;
+        uint32_t intfr = 0;
         if constexpr (has_tx_engine) {
-            const uint8_t f = TxEngine::service();
+            intfr = TxEngine::block_flags();
+        } else if constexpr (has_rx_engine) {
+            intfr = RxEngine::block_flags();
+        }
+        if constexpr (has_tx_engine) {
+            const uint8_t f = TxEngine::service(intfr);
             if ((f & TxEngine::flag_error) != 0u) {
                 (void)TxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1u;
@@ -765,7 +775,7 @@ struct Uart {
             }
         }
         if constexpr (has_rx_engine) {
-            const uint8_t f = RxEngine::service();
+            const uint8_t f = RxEngine::service(intfr);
             if ((f & RxEngine::flag_error) != 0u) {
                 (void)RxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1u;
@@ -1007,19 +1017,32 @@ struct Uart {
 
 private:
     /// Start the next contiguous run of the TX ring on the engine, if it
-    /// is idle and there is one. Under the guard: the completion path
-    /// runs in the channel's handler.
+    /// is idle and there is one. THE MASK COVERS THE CLAIM AND NOTHING
+    /// ELSE: the engine's busy flag tested and set under the guard - the
+    /// completion path, which clears it, runs in the channel's handler -
+    /// and the run read and the block programmed outside it, because a
+    /// claimed engine has no block in flight and so no completion can
+    /// land under the programming, nor any consume() move the ring's
+    /// tail. The producer is this context (the ring is SPSC), so a run
+    /// found empty after the claim stays empty until the claim is given
+    /// back.
     static void pump_tx() {
         if constexpr (has_tx_engine) {
-            typename P::CriticalSection cs;
-            if (TxEngine::busy()) {
+            if (m_tx.empty()) {
                 return;
+            }
+            {
+                typename P::CriticalSection cs;
+                if (!TxEngine::claim()) {
+                    return;
+                }
             }
             const auto run = m_tx.read_span();
             if (run.empty()) {
+                TxEngine::unclaim();
                 return;
             }
-            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
+            (void)TxEngine::launch(run);
         }
     }
 
@@ -1033,7 +1056,7 @@ private:
                 bump(m_rx_overruns);
                 return;
             }
-            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
+            (void)RxEngine::start(room);
         }
     }
 

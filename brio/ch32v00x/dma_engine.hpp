@@ -2,17 +2,20 @@
  * dma_engine.hpp
  *
  * The "no DMA engine" tag of every optional engine slot in this stratum
- * (ch32v00x/usart.hpp's two) and nothing else - the STM32G0 stratum's
- * arrangement, for its reasons: a driver with an engine slot must not
- * include dma.hpp, or every program with a console would carry the
- * controller; an application that wants an engine includes both
- * headers and names the channel, one that does not never sees the
- * controller at all. `present` is the only thing a task asks about,
- * with `if constexpr`, so every engine branch disappears from a driver
- * that does not name one.
+ * (the USART's, the SPI host's and the I2C host's) and nothing else: a
+ * driver with an engine slot must not include dma.hpp, or every program
+ * with a console would carry the controller; an application that wants
+ * an engine includes both headers and names the channel, one that does
+ * not never sees the controller at all. `present` is the only thing a
+ * task asks about, with `if constexpr`, so every engine branch
+ * disappears from a driver that does not name one - and an engine
+ * reaches the driver only through its own published names (start,
+ * service, block_flags, the flag names), never the controller's.
  */
 
 #pragma once
+
+#include <stdint.h>
 
 namespace brio {
 

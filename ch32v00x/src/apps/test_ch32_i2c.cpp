@@ -51,7 +51,9 @@
 //   e  the vocabulary against the peer (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
 //   f  the two speeds against a second chip, byte-exact both ways
-//   g  THE DMA ENGINES: the same shapes on channels 6 and 7
+//   g  THE DMA ENGINES: the same shapes on channels 6 and 7, and the
+//      interrupts they take - none for a write (BTF ends it), one per
+//      engined read
 //   h  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
 //      the NACK in its place, the rejection, both votes, and two
 //      wedges the PEER holds: SDA, which this silicon answers by itself
@@ -126,6 +128,8 @@ constexpr uint8_t nobody_addr = 0x23;
 
 volatile bool host_done = false;
 volatile bool dma_host_live = false;
+volatile uint32_t dma6_entries = 0;   // the transmit channel's vector
+volatile uint32_t dma7_entries = 0;   // the receive channel's
 volatile bool bus_ao_live = false;
 volatile uint32_t host_isr_entries = 0;
 volatile uint32_t error_isr_entries = 0;
@@ -881,6 +885,8 @@ void tg_dma() {
         tx_buf[i] = static_cast<uint8_t>(0x80u + i);
         rx_buf[i] = 0xEE;
     }
+    dma6_entries = 0;
+    dma7_entries = 0;
     const uint8_t ws = dma_tenure(twilink::dut_addr, tx_buf, 16, nullptr, 0, link_speed);
     const uint8_t rs = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 16, link_speed);
     uint8_t mism = 0;
@@ -895,6 +901,8 @@ void tg_dma() {
     const uint8_t cs = dma_tenure(twilink::dut_addr, tx_buf, 4, rx_buf, 4, link_speed);
     const uint8_t r2 = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf + 8, 2, link_speed);
     const uint8_t r1 = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf + 12, 1, link_speed);
+    const uint32_t e6 = dma6_entries;
+    const uint32_t e7 = dma7_entries;
     DmaHost::release();
     dma_host_live = false;
     // The plain host is the command channel's, and the DMA host's
@@ -906,7 +914,8 @@ void tg_dma() {
     const bool rep = peer_report(r);
     print(serial, "  DMA: write16=", ws, " read16=", rs, " mism=", mism, " combined=", cs,
           " read2=", r2, " read1(pump)=", r1, "; peer count=", r.count, " addr_hits=", r.addr_hits,
-          " faults tx=", DmaTxEngine<6>::faults(), " rx=", DmaRxEngine<7>::faults(), crlf);
+          " faults tx=", DmaTxEngine<6>::faults(), " rx=", DmaRxEngine<7>::faults(), "; DMA interrupts ch6=",
+          e6, " ch7=", e7, crlf);
     bench.verdict("a 16-byte write and a 16-byte read through the DMA engines complete i2c_ok, "
                   "byte-exact",
                   ws == i2c_ok && rs == i2c_ok && mism == 0u);
@@ -916,6 +925,9 @@ void tg_dma() {
     bench.verdict("the peer accounts every byte (16 + 16 + 4 + 4 + 2 + 1 = 43), no transfer fault",
                   rep && r.count == 43u && DmaTxEngine<6>::faults() == 0u &&
                       DmaRxEngine<7>::faults() == 0u);
+    bench.verdict("no write block interrupts (BTF ends a write), each of the three engined reads "
+                  "once",
+                  e6 == 0u && e7 == 3u);
     host_ready();
 }
 
@@ -1340,11 +1352,13 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    dma6_entries = dma6_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    dma7_entries = dma7_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }

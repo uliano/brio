@@ -22,11 +22,13 @@ static_assert(offsetof(SpiRegs, HSCR) == 0x24);
 
 using Host = SpiHost<1>;
 using HostDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3>, DmaRxEngine<2>>;
+// The engines at DATAR's width: 8- and 16-bit frames both on the engines.
+using HostDma16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 constexpr SpiPins write_only{.sck = {'C', 5}, .mosi = {'C', 6}};
 using HostNoMiso = SpiHost<1, write_only>;
 using Client = SpiClient<1>;
 
-static_assert(!Host::has_engines && HostDma::has_engines);
+static_assert(!Host::has_engines && HostDma::has_engines && HostDma16::has_engines);
 static_assert(std::is_trivially_copyable_v<Host::Request>);
 static_assert(std::is_same_v<Host::Request, Host::Request>);
 
@@ -91,6 +93,7 @@ void all_hosts() {
     static uint8_t buf[16];
     host_verbs<Host>(buf);
     host_verbs<HostDma>(buf);
+    host_verbs<HostDma16>(buf);
     host_verbs<HostNoMiso>(buf);
 }
 

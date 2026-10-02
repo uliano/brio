@@ -95,7 +95,13 @@ pads).
   peripheral back (SWRST, the timing rewritten). The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a write
   phase of any length and a read of two bytes or more run on them, the
-  one-byte read stays on the pump.
+  one-byte read stays on the pump. A WRITE PHASE ENDS ON BTF, which the
+  event vector takes anyway, with the transmit channel's count read at
+  zero: the controller wrote the last byte a byte time before it left
+  the shifter, so the transmit engine is armed for its errors alone and
+  a write takes no DMA interrupt; a read ends on the receive block's
+  completion, its one. `dma_isr()` reads the controller's one flag
+  register once for both channels.
 - `I2cClient<1, pins>`: the target side - `init(clock, addresses,
   no_stretch)`, the polled surface (`addressed()`, `answer_address()`
   returning the direction, `take()`/`give()`, `stop_seen()`,
@@ -132,10 +138,10 @@ The reference suite is `test_ch32_i2c` on the CH32V006K8U6 at 48 MHz:
 its wire letters talk to a PEER BOARD running `twi_peer` (the shared
 twi_link protocol, the peer's pull-ups, both boards at 3.3 V) and
 decline when the wire reads low. On the CH32V003F4P6 it builds as five
-group images: 38 verdicts green there against the same SAM C21 peer
-on the same two pads (the scan in 13 ms, every tenure shape and
-receive procedure byte-exact, the two speeds at 94 and 330 kHz on
-the wire, the DMA engines, the held SDA freed by four pulses); the
+group images, green there against the same SAM C21 peer on the same
+two pads (the scan in 13 ms, every tenure shape and receive procedure
+byte-exact, the two speeds at 94 and 330 kHz on the wire, the held SDA
+freed by four pulses); the
 kernel letter is left out of that build, its image alone 216 bytes
 over the part's 15 KB. Against a SAM C21 peer:
 
@@ -167,9 +173,6 @@ over the part's 15 KB. Against a SAM C21 peer:
   about 93 kHz, at 400 kHz about 324 kHz - CCR rounded up, the wire's
   rise time and the interrupt turnaround between bytes all counted -
   byte-exact both ways.
-- **The DMA engines** on channels 6 and 7 carry a 16-byte write, a
-  16-byte read and a write-then-read; the two-byte read ends on LAST's
-  NACK, the one-byte read stays on the pump; no transfer fault.
 - **The arbiter over the engine** carries queued tenures in order with
   a NACK delivered in its place, rejects what its queue cannot hold,
   votes for a sleep idle and against it busy. A held SDA is answered
@@ -195,6 +198,12 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- The DMA engines as they are ([dma.md](dma.md)) - a 16-byte write, a
+  16-byte read and a write-then-read on channels 6 and 7, the two-byte
+  read ending on LAST's NACK, the one-byte read on the pump, no
+  transfer fault, and the vectors' entries: none for a write (BTF ends
+  it), one for each engined read: `test_ch32_i2c` letter g against the
+  peer, on both parts. The boards are off the desk.
 - The kernel letter on the CH32V003, which no group image of the
   part holds (the suite's header says which letters each image
   carries): the arbiter over the engine is proven on the CH32V006, and

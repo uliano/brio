@@ -1,20 +1,24 @@
-// bench_ch32 - the benchmark skeleton on the CH32V00x (QingKe V2C,
-// RV32EmC): the instrument's self-check and cost, the runtime's copy and
-// fill against the core's floor, a print through the console transport
-// against the wire, and the tick's floor - one line per operation and
-// size, in util/bench.hpp's grammar (docs/design/benchmark.md).
+// bench_ch32 - the benchmark skeleton on the CH32V00x (QingKe V2C on the
+// CH32V006, V2A on the CH32V003, RV32EC): the instrument's self-check and
+// cost, the runtime's copy and fill against the core's floor, a print
+// through the console transport against the wire, the tick's floor, and
+// the DMA - copy, fill, a timer-paced block and the SPI's engines - one
+// line per operation and size, in util/bench.hpp's grammar
+// (docs/design/benchmark.md).
 //
 // NOT A TEST. TestBench frames it (the menu, the ALL: line bin/brio
 // waits for); every letter ends with one verdict "ran", and letter r's
 // two verdicts on the ruler are the only ones that judge anything.
 //
-// THE BOARD AND THE RATES. The CH32V006K8U6 module at 48 MHz (the HSI's
-// 24 MHz doubled by the PLL), the rate test_ch32_platform runs at. The
-// console is USART1 on PD5/PD6 through the WCH-Link at 115200 8N1, the
-// interrupt-driven transport with no DMA engine, bound as that suite
-// binds it. The CH32V003 is outside this round: the app is built for the
-// v006k8 alone, and the smallest-chip rule (design/overview.md) is noted
-// and not applied - the 4 KB copy buffer below is twice that part's RAM.
+// THE BOARD AND THE RATES. The CH32V006K8U6 module or the CH32V003F4P6
+// board at 48 MHz (the HSI's 24 MHz doubled by the PLL), the rate
+// test_ch32_platform runs at. The console is USART1 on PD5/PD6 through
+// the WCH-Link at 115200 8N1, the interrupt-driven transport with no DMA
+// engine, bound as that suite binds it. THE RAM BOUNDS THE SIZES: the one
+// work buffer is half the part's SRAM (4096 bytes on the CH32V006, 1024
+// on the CH32V003), and every size below that names "the buffer" is that
+// part's; on the CH32V003 the app builds as group images (design/
+// overview.md, "A suite's image fits the family's smallest chip").
 //
 // NO KERNEL. The suite's shape: a prompt loop over the console, which
 // here sleeps through BenchIdle<P, Ruler>::idle() when no byte is
@@ -29,11 +33,13 @@
 // flatten, so the whole read is spelled inline wherever a stamp or a
 // Stopwatch takes one, the vectors included: no call on the hot path.
 //
-// THE METERS. Two vectors, one IsrMeter each: the STK's (the tick) and
-// USART1's (the transport's ISR body). enter() is each handler's first
-// statement and leave() its last, the body between them as the suite
-// binds it. The hardware prologue's entry and exit, measured in
-// docs/ch32v00x/platform.md, lie outside the stamps.
+// THE METERS. One IsrMeter for each vector or group of vectors: the
+// STK's (the tick), USART1's (the transport's ISR body), and letter d's
+// three - DMA channel 1 (the copy engine), channels 2 and 3 with SPI1's
+// own (the SPI host's engines), channel 5 (the paced block). enter() is
+// each handler's first statement and leave() its last, the body between
+// them as a suite binds it. The hardware prologue's entry and exit,
+// measured in docs/ch32v00x/platform.md, lie outside the stamps.
 //
 // What each letter prints:
 //
@@ -63,13 +69,13 @@
 //                what a turn costs besides it
 //   m  memcpy and memset of the runtime (rt/rt.cpp), each the best of 8
 //      runs on a Stopwatch, between static word-aligned buffers (the
-//      runtime's word path). THE RAM BOUNDS THE SIZES: two 4096-byte
-//      buffers would be the part's whole 8 KB, so
-//        memcpy        RAM to RAM, 1, 16, 256 and 2048 bytes, between the
-//                      two halves of one 4096-byte buffer
+//      runtime's word path). THE RAM BOUNDS THE SIZES: two buffers of the
+//      larger size would be the part's whole SRAM, so
+//        memcpy        RAM to RAM, 1, 16, 256 and half the buffer, between
+//                      its two halves
 //        memcpy.flash  the 4096-byte string of letter p, in flash, into
-//                      the buffer: 1, 16, 256 and 4096 bytes
-//        memset        the buffer: 1, 16, 256 and 4096 bytes
+//                      the buffer: 1, 16, 256 and the buffer
+//        memset        the buffer: 1, 16, 256 and the buffer
 //      Nothing idles and nothing is expected to interrupt: busy is wall,
 //      and irq and isr are whatever the tick took in the best run. At 1
 //      and 16 bytes a line is mostly the call and the stopwatch, not the
@@ -87,6 +93,41 @@
 //      nothing to do (this loop, not the kernel's), counters before and
 //      after: wall = the second in cycles, irq = the ticks, isr = the tick
 //      handler's cycles, busy = the floor.
+//   d  THE DMA (ch32v00x/dma.hpp, docs/ch32v00x/dma.md). Every line runs
+//      from the block's launch to its COMPLETION INTERRUPT - the loop
+//      idles through BenchIdle until the handler has said so - so wall
+//      holds the launch, the controller's own time, the vector and the
+//      idle turn's wake, and busy what the core spent of it.
+//        copy        DmaCopyEngine on channel 1, word beats, RAM to RAM
+//                    between the buffer's two halves: 16, 256 and half
+//                    the buffer - the best of 8
+//        copy.flash  a string as long as the buffer, in flash, into it:
+//                    16, 256 and the buffer (on the CH32V006 letter p's
+//                    own 4096 bytes)
+//        fill        the buffer from one word cell: 16, 256 and the buffer
+//                    After each op a note line: the controller's cycles
+//                    an item, from the difference of the two larger sizes,
+//                    and the FIXED COST a block (wall at 16 bytes less
+//                    that slope's share), which is the engine's number.
+//        paced       DmaTxEngine<5, uint32_t> pouring 256 words of the
+//                    buffer into ONE word cell at TIM1's update request
+//                    (table 8-2: channel 5), TIM1 at 10 kHz: irq, isr and
+//                    busy of a block the CPU only launches and is told
+//                    the end of. Then the same block with the core polling
+//                    CNTR and stamping every decrement on the ruler: the
+//                    intervals' least and greatest against the period, a
+//                    note line - the pace's jitter as a polling core sees
+//                    it, its resolution the poll turn's.
+//        spi.dma     SpiHost<1> on DmaTxEngine<3, uint16_t> and
+//                    DmaRxEngine<2, uint16_t>, a WRITE (the receive side
+//                    discarding), no chip select, MISO left floating: the
+//                    time is the wire's and nothing needs to be judged.
+//                    16 and 256 frames of 8 bits at SCK = HCLK/4 (12 MHz)
+//                    and HCLK/16 (3 MHz), the best of 4; spi.dma16 the
+//                    same frame counts of 16 bits, the half-word beat.
+//                    A note line per rate: the cycles a byte above the
+//                    wire's, and THE FIXED COST A TRANSACTION (wall less
+//                    the wire's time), the round's number.
 //
 // THE WIRE, and why it is the limit:
 //   memcpy, memset  the core's load/store floor. The QingKe V2 manual
@@ -107,6 +148,18 @@
 //   print           the console's ACTUAL baud, read back from BRR (48 MHz
 //                   over 417, 115107 baud), over the ten bits of an 8N1
 //                   frame: 11510 B/s.
+//   copy, fill      ONE ITEM PER HCLK CYCLE, the bus the controller sits on
+//                   (RM 1.1: the DMA a master of the same matrix as the
+//                   core, at HCLK): 4 bytes a cycle for word beats, 192
+//                   MB/s. The chapter states no cycles per item; the
+//                   suite measured about six an item (docs/ch32v00x/
+//                   dma.md: a read, a write and the arbitration), so x is
+//                   about six at the large sizes by the controller's own
+//                   cost, and the note line separates it from the block's.
+//   paced           the pace: 4 bytes a request at 10 kHz, 40000 B/s.
+//   spi.dma         SCK over eight bits a byte: 1.5 MB/s at HCLK/4, 375
+//                   kB/s at HCLK/16 - for both frame sizes, a 16-bit frame
+//                   being two bytes in sixteen clocks.
 //
 // THE INSTRUMENT'S COST, and how the reader subtracts it. Every line
 // carries RAW numbers. A Stopwatch measurement holds the stopwatch line's
@@ -120,7 +173,8 @@
 // counted as idle, and an interrupt landing between P::idle()'s return
 // and the window's close is counted in both.
 //
-// build: boards = v006k8
+// build: boards = v006k8,v003f4
+// build: groups = rt,m,p,d
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -128,11 +182,16 @@
 
 #include <cstddef>
 
+#include <span>
+
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/delay.hpp"
+#include "ch32v00x/dma.hpp"
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/platform.hpp"
+#include "ch32v00x/spi.hpp"
 #include "ch32v00x/ticker.hpp"
+#include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
@@ -165,13 +224,18 @@ TestBench<Serial> bench;
 
 Meter tick_meter;    // the STK's vector
 Meter usart_meter;   // USART1's vector
+Meter copy_meter;    // DMA channel 1: the copy engine
+Meter spi_meter;     // DMA channels 2 and 3 and SPI1: the SPI host
+Meter paced_meter;   // DMA channel 5: the paced block
 Meter probe_meter;   // bound to nothing: letter r's stamp line
 
 /// The counters of the bound meters and the idle adapter. Read
 /// quiescent, before an operation starts and after it has completed;
 /// this core moves an aligned word in one access (atomic_width 4), so no
 /// guard is wanted.
-BenchCounters counters() { return bench_counters<Plat>(tick_meter, usart_meter); }
+BenchCounters counters() {
+    return bench_counters<Plat>(tick_meter, usart_meter, copy_meter, spi_meter, paced_meter);
+}
 
 /// The console silent: the ring empty, then the last frame out of the
 /// shifter (the resource's TC; the transport has no verb for that half).
@@ -337,7 +401,9 @@ void tr_ruler() {
 // ---------------------------------------------------------------------------
 // m - the runtime's copy and fill
 // ---------------------------------------------------------------------------
-alignas(4) uint8_t ram[4096];
+/// Half the part's SRAM: 4096 bytes on the CH32V006, 1024 on the CH32V003.
+constexpr uint32_t ram_bytes = device::sram_bytes / 2u;
+alignas(4) uint8_t ram[ram_bytes];
 
 enum class MemOp : uint8_t { copy_ram, copy_flash, fill };
 
@@ -349,7 +415,7 @@ template <MemOp op>
 BenchSample mem_best(uint32_t n) {
     BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
     for (uint8_t run = 0; run < 8u; ++run) {
-        uint8_t* dst = op == MemOp::copy_ram ? ram + 2048 : ram;
+        uint8_t* dst = op == MemOp::copy_ram ? ram + ram_bytes / 2u : ram;
         const uint8_t* src = op == MemOp::copy_ram
                                  ? ram
                                  : reinterpret_cast<const uint8_t*>(filler<4096>.text);
@@ -373,7 +439,7 @@ BenchSample mem_best(uint32_t n) {
     return best;
 }
 
-constexpr uint32_t mem_sizes[4] = {1, 16, 256, 4096};
+constexpr uint32_t mem_sizes[4] = {1, 16, 256, ram_bytes};
 
 // The floors of the header: bytes per HCLK cycle times the rate.
 constexpr uint32_t wire_copy_ram = 2u * Ruler::hz();
@@ -383,7 +449,7 @@ constexpr uint32_t wire_fill = 4u * Ruler::hz();
 void tm_memory() {
     console_drain();
     for (const uint32_t n : mem_sizes) {
-        const uint32_t half = n > 2048u ? 2048u : n;   // the RAM's bound: two halves
+        const uint32_t half = n > ram_bytes / 2u ? ram_bytes / 2u : n;   // the RAM's bound: two halves
         bench_line(serial, "memcpy", half, mem_best<MemOp::copy_ram>(half), Ruler::hz(),
                    wire_copy_ram);
     }
@@ -448,6 +514,231 @@ void tt_tick() {
     bench.verdict("ran", true);
 }
 
+// ---------------------------------------------------------------------------
+// d - the DMA: copy and fill, a paced block, the SPI's engines
+// ---------------------------------------------------------------------------
+using Copier = DmaCopyEngine<1>;               // word beats at most
+using Paced = DmaTxEngine<5, uint32_t>;        // TIM1's update request (table 8-2)
+using PaceTimer = Tim<1>;
+using SpiDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
+
+constexpr uint32_t pace_hz = 10'000;
+constexpr uint32_t pace_period = SysClock::hz / pace_hz;   // 4800 HCLK cycles
+
+volatile bool copy_done = false;
+volatile bool paced_done = false;
+volatile bool spi_done = false;
+bool dma_ready = false;   // letter d's peripherals brought up once
+
+/// The one word cell the paced block pours into, and the one the fill
+/// reads from.
+volatile uint32_t pace_cell = 0;
+const uint32_t fill_cell = 0xA5A5'5A5Au;
+
+/// Launch, then idle until the completion handler sets `done`: the
+/// sample a block makes from its start to its interrupt.
+template <typename Launch>
+BenchSample dma_sample(volatile bool& done, Launch launch) {
+    done = false;
+    const BenchCounters before = counters();
+    Stopwatch<Ruler> sw;
+    sw.start();
+    launch();
+    for (;;) {
+        Plat::CriticalSection cs;
+        if (done) {
+            break;
+        }
+        Plat::idle();
+    }
+    const uint32_t wall = sw.elapsed();
+    return bench_sample(wall, before, counters());
+}
+
+/// The best (least wall) of `runs` samples.
+template <typename Launch>
+BenchSample dma_best(uint8_t runs, volatile bool& done, Launch launch) {
+    BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
+    for (uint8_t run = 0; run < runs; ++run) {
+        const BenchSample s = dma_sample(done, launch);
+        if (s.wall < best.wall) {
+            best = s;
+        }
+    }
+    return best;
+}
+
+/// The two numbers a block line leaves to the reader: the controller's
+/// cycles an item (tenths), from the difference of two sizes, and the
+/// fixed cost a block at the smallest - wall less that slope's share.
+void block_note(const char* op, uint32_t n_small, uint32_t wall_small, uint32_t n_mid, uint32_t wall_mid,
+                uint32_t n_big, uint32_t wall_big) {
+    const uint32_t items_small = n_small / 4u;
+    const uint32_t items_mid = n_mid / 4u;
+    const uint32_t items_big = n_big / 4u;
+    const uint32_t tenths = (wall_big - wall_mid) * 10u / (items_big - items_mid);
+    const uint32_t share = tenths * items_small / 10u;
+    const uint32_t fixed = wall_small > share ? wall_small - share : 0u;
+    print(serial, "  ", op, ": ", tenths / 10u, '.', tenths % 10u, " cycles an item of 4 bytes (", n_mid,
+          " and ", n_big, " bytes), fixed ", fixed, " cycles a block", crlf);
+}
+
+/// copy / copy.flash / fill at 16, 256 and `big` bytes, word beats.
+enum class BlockOp : uint8_t { copy, copy_flash, fill };
+
+template <BlockOp op>
+BenchSample block_run(uint32_t n) {
+    const uint32_t words = n / 4u;
+    return dma_best(8, copy_done, [words] {
+        uint32_t* const base = reinterpret_cast<uint32_t*>(ram);
+        if constexpr (op == BlockOp::copy) {
+            (void)Copier::copy(base + ram_bytes / 8u, base, words);
+        } else if constexpr (op == BlockOp::copy_flash) {
+            (void)Copier::copy(base, reinterpret_cast<const uint32_t*>(filler<ram_bytes>.text), words);
+        } else {
+            (void)Copier::fill(base, &fill_cell, words);
+        }
+    });
+}
+
+template <BlockOp op>
+void block_lines(const char* name, uint32_t big) {
+    constexpr uint32_t wire = 4u * Ruler::hz();   // one word item a cycle
+    const BenchSample s16 = block_run<op>(16);
+    const BenchSample s256 = block_run<op>(256);
+    const BenchSample sbig = block_run<op>(big);
+    bench_line(serial, name, 16, s16, Ruler::hz(), wire);
+    bench_line(serial, name, 256, s256, Ruler::hz(), wire);
+    bench_line(serial, name, big, sbig, Ruler::hz(), wire);
+    block_note(name, 16, s16.wall, 256, s256.wall, big, sbig.wall);
+}
+
+/// TIM1 at the pace, its update request armed: the paced block's clock.
+void pace_start() {
+    PaceTimer::init();
+    (void)PaceTimer::configure({.prescaler = 0, .period = static_cast<uint16_t>(pace_period - 1u)});
+    PaceTimer::interrupts(PaceTimer::update_dma, true);
+    PaceTimer::enable(true);
+}
+
+void pace_stop() {
+    PaceTimer::enable(false);
+    PaceTimer::interrupts(PaceTimer::update_dma, false);
+}
+
+constexpr uint16_t paced_words = 256;
+
+void paced_lines() {
+    const BenchSample s = dma_sample(paced_done, [] {
+        (void)Paced::start(std::span<const uint32_t>(reinterpret_cast<const uint32_t*>(ram), paced_words));
+        pace_start();
+    });
+    pace_stop();
+    bench_line(serial, "paced", 4u * paced_words, s, Ruler::hz(), 4u * pace_hz);
+
+    // The jitter: the same block with the core polling CNTR, every
+    // decrement stamped. Masked, so that no tick or completion handler
+    // lands in the poll - and so the stamp is the STK's own counter, one
+    // period of the tick (CMP + 1 cycles) long, the interval taken modulo
+    // it: an interval is a fifth of that period, and the ruler's
+    // composition with a tick count would go wrong with the tick held off.
+    console_drain();
+    uint32_t least = 0xFFFF'FFFFu;
+    uint32_t most = 0;
+    uint32_t turns = 0;
+    {
+        (void)Paced::start(std::span<const uint32_t>(reinterpret_cast<const uint32_t*>(ram), paced_words));
+        Plat::CriticalSection cs;   // the poll alone: no tick, no completion handler
+        const uint32_t tick_period = stk()->CMP + 1u;
+        pace_start();
+        uint16_t last = paced_words;
+        uint32_t at = 0;
+        while (last != 0u) {
+            const uint16_t now = DmaChannel<5>::count();
+            ++turns;
+            if (now != last) {
+                const uint32_t t = stk()->CNT;
+                if (last != paced_words && now == last - 1u) {
+                    const uint32_t d = t >= at ? t - at : t + tick_period - at;
+                    least = d < least ? d : least;
+                    most = d > most ? d : most;
+                }
+                at = t;
+                last = now;
+            }
+        }
+        pace_stop();
+        (void)Paced::complete();
+        DmaChannel<5>::clear(DmaFlag::all);   // the completion the masked handler never took
+    }
+    print(serial, "  paced, polled: intervals ", least, "..", most, " cycles against a period of ", pace_period,
+          ", jitter ", most - least, " cycles; ", turns, " poll turns over ", paced_words,
+          " requests", crlf);
+}
+
+/// One SPI write of `frames` frames of `bits`, MISO floating: the line
+/// the round is judged by.
+BenchSample spi_run(uint16_t frames, SpiClock clock, SpiDataSize bits) {
+    return dma_best(4, spi_done, [frames, clock, bits] {
+        SpiDma::Request r{};
+        r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
+        r.len = frames;
+        r.clock = clock;
+        r.bits = bits;
+        (void)SpiDma::start(r);
+    });
+}
+
+void spi_lines(SpiClock clock, uint8_t div) {
+    const uint32_t wire = SysClock::hz / div / 8u;   // bytes a second
+    for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
+        const uint32_t bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
+        const char* const op = bits == SpiDataSize::bits16 ? "spi.dma16" : "spi.dma";
+        (void)spi_run(16, clock, bits);   // a warm-up: apply() reconfigures on a change
+        const BenchSample s16 = spi_run(16, clock, bits);
+        const BenchSample s256 = spi_run(256, clock, bits);
+        bench_line(serial, op, 16u * bytes, s16, Ruler::hz(), wire);
+        bench_line(serial, op, 256u * bytes, s256, Ruler::hz(), wire);
+        const uint32_t wire16 = 16u * bytes * 8u * div;   // cycles on the wire
+        const uint32_t wire256 = 256u * bytes * 8u * div;
+        const uint32_t per_byte = (s256.wall - s16.wall) * 10u / (240u * bytes);
+        print(serial, "  ", op, " at HCLK/", div, ": ", per_byte / 10u, '.', per_byte % 10u,
+              " cycles a byte against the wire's ", 8u * div, "; fixed ",
+              s16.wall > wire16 ? s16.wall - wire16 : 0u, " cycles a transaction at 16 frames, ",
+              s256.wall > wire256 ? s256.wall - wire256 : 0u, " at 256", crlf);
+    }
+}
+
+void td_dma() {
+    if (!dma_ready) {
+        Copier::arm(DmaPriority::high);
+        Paced::arm(&pace_cell);
+        (void)SpiDma::init(clock);
+        dma_ready = true;
+    }
+    for (uint32_t i = 0; i < ram_bytes; ++i) {
+        ram[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    console_drain();
+    print(serial, "  the buffer: ", ram_bytes, " bytes; every line to the completion interrupt", crlf);
+    console_drain();
+    block_lines<BlockOp::copy>("copy", ram_bytes / 2u);
+    console_drain();
+    block_lines<BlockOp::copy_flash>("copy.flash", ram_bytes);
+    console_drain();
+    block_lines<BlockOp::fill>("fill", ram_bytes);
+    print(serial, "  copy faults: ", Copier::faults(), crlf);
+    console_drain();
+    paced_lines();
+    console_drain();
+    spi_lines(SpiClock::div4, 4);
+    console_drain();
+    spi_lines(SpiClock::div16, 16);
+    print(serial, "  spi faults: tx ", DmaTxEngine<3, uint16_t>::faults(), " rx ", DmaRxEngine<2, uint16_t>::faults(),
+          ", status ", SpiDma::status(), crlf);
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_ch32 - ", device::part_name,
           " (clk=48 MHz PLL, ruler=STK cycles at 48 MHz, tick=STK 1000 Hz, console=USART1 ",
@@ -472,6 +763,65 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
     usart_meter.leave();
 }
 
+// Letter d's vectors, empty in an image that does not carry the letter
+// (nothing enables their lines there).
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+    if constexpr (brio::test_letter_carried('d')) {
+        copy_meter.enter();
+        if (Copier::isr() != 0u) {
+            copy_done = true;
+        }
+        copy_meter.leave();
+    }
+}
+
+// The SPI host's two channels share one body (dma_isr() serves both),
+// spelled once and called from both vectors: two inline copies of it
+// would cost the CH32V003's image a quarter of a kilobyte.
+namespace {
+[[gnu::noinline]] void spi_dma_vector() {
+    spi_meter.enter();
+    if (SpiDma::dma_isr()) {
+        spi_done = true;
+    }
+    spi_meter.leave();
+}
+} // namespace
+
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+    if constexpr (brio::test_letter_carried('d')) {
+        spi_dma_vector();
+    }
+}
+
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+    if constexpr (brio::test_letter_carried('d')) {
+        spi_dma_vector();
+    }
+}
+
+extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+    if constexpr (brio::test_letter_carried('d')) {
+        spi_meter.enter();
+        if (SpiDma::isr()) {
+            spi_done = true;
+        }
+        spi_meter.leave();
+    }
+}
+
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+    if constexpr (brio::test_letter_carried('d')) {
+        paced_meter.enter();
+        const uint8_t f = Paced::service();
+        if (f != 0u) {
+            (void)Paced::complete();
+            paced_done = true;
+        }
+        paced_meter.leave();
+    }
+}
+
 int main() {
     const bool clock_ok = SysClock::init();            // HSI x2 -> 48 MHz
     const bool serial_ok = Serial::init(clock, console_baud);
@@ -482,6 +832,7 @@ int main() {
     bench.letter('m', "memcpy and memset of the runtime against the core's floor", tm_memory);
     bench.letter('p', "a print through the console against the wire", tp_print);
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
+    bench.letter('d', "the DMA: copy, fill, a paced block, the SPI's engines", td_dma);
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a port that failed to come up would never return.

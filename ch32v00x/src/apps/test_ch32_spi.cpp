@@ -47,8 +47,10 @@
 //   c  THE POLLED PATH AT EVERY RATE, /2 to /256, 64 bytes each, the
 //      burst timed on the STK and the frame period reported
 //   d  THE DMA ENGINES on channels 2 and 3: 128-byte blocks with and
-//      without a command phase, timed, and the 16-bit fallback to the
-//      pump
+//      without a command phase, timed, ONE DMA INTERRUPT a transaction
+//      (the receive channel's), 16-bit frames on the engines in
+//      half-word beats, and the fallback to the pump of a 16-bit
+//      request whose buffer sits off a half-word boundary
 //   e  THE HARDWARE CRC through the loop: TXCRCR against a bitwise
 //      reference, RXCRCR equal to it, CRCERR down
 //   f  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
@@ -105,7 +107,8 @@ using Led = Pin<'C', 0>;
 
 using S = Spi<1>;
 using Host = SpiHost<1>;
-using DmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3>, DmaRxEngine<2>>;
+// The engines at DATAR's width: 8- and 16-bit frames both on them.
+using DmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 using SckPin = Pin<'C', 5>;
 using MosiPin = Pin<'C', 6>;
 using MisoPin = Pin<'C', 7>;
@@ -117,9 +120,12 @@ volatile bool host_done = false;
 volatile bool dma_host_live = false;
 volatile bool bus_ao_live = false;
 volatile uint32_t spi_isr_entries = 0;
+volatile uint32_t dma_isr_entries = 0;
 
-uint8_t tx_buf[256];
-uint8_t rx_buf[256];
+// Word-aligned: a 16-bit request on the engines needs half-word
+// boundaries (RM 8.3.6), and letter d makes an odd one on purpose.
+alignas(4) uint8_t tx_buf[256];
+alignas(4) uint8_t rx_buf[256];
 uint8_t cmd_buf[4];
 
 bool loop_present = false;
@@ -814,17 +820,20 @@ void td_dma() {
         rx_buf[i] = 0xEE;
     }
     console_drain();
+    dma_isr_entries = 0;
     uint32_t t0 = cycles_now();
     const uint8_t st = dma_xfer(nullptr, 0, tx_buf, rx_buf, 128, SpiClock::div2, SpiDataSize::bits8, false);
     const uint32_t cycles = cycles_now() - t0;
+    const uint32_t entries = dma_isr_entries;
     print(serial, "  128 bytes at /2 on the engines: status=", st, " in ", cycles, " cycles (",
-          cycles / 128u, " per frame; the wire alone 16)", same(tx_buf, rx_buf, 128) ? "  byte-exact"
-                                                                                       : "  MISMATCH",
-          crlf);
+          cycles / 128u, " per frame; the wire alone 16), ", entries, " DMA interrupt(s)",
+          same(tx_buf, rx_buf, 128) ? "  byte-exact" : "  MISMATCH", crlf);
     bench.verdict("a 128-byte block through both engines completes spi_ok, byte-exact",
                   st == spi_ok && same(tx_buf, rx_buf, 128));
+    bench.verdict("with ONE DMA interrupt: the receive block's end proves the transmit's",
+                  entries == 1u);
     bench.verdict("with no transfer fault on either channel",
-                  DmaTxEngine<3>::faults() == 0u && DmaRxEngine<2>::faults() == 0u);
+                  DmaTxEngine<3, uint16_t>::faults() == 0u && DmaRxEngine<2, uint16_t>::faults() == 0u);
 
     // The command phase runs on the pump and hands over to the engines.
     cmd_buf[0] = 0x0B;
@@ -849,15 +858,27 @@ void td_dma() {
     bench.verdict("a POLLED request on the engines completes inside start(), exact",
                   ps == spi_ok && same(tx_buf, rx_buf, 64));
 
-    // 16-bit frames fall back to the pump.
-    fill_pattern(tx_buf, 32, 0x42);
-    for (uint16_t i = 0; i < 32; ++i) {
+    // 16-bit frames on the engines: half-word beats, no SPI interrupt.
+    fill_pattern(tx_buf, 64, 0x42);
+    for (uint16_t i = 0; i < 64; ++i) {
         rx_buf[i] = 0xEE;
     }
     spi_isr_entries = 0;
-    const uint8_t hs = dma_xfer(nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div8, SpiDataSize::bits16, false);
-    bench.verdict("16-bit frames fall back to the pump on an engined host (sixteen ISR entries), exact",
-                  hs == spi_ok && same(tx_buf, rx_buf, 32) && spi_isr_entries == 16u);
+    dma_isr_entries = 0;
+    const uint8_t hs = dma_xfer(nullptr, 0, tx_buf, rx_buf, 32, SpiClock::div8, SpiDataSize::bits16, false);
+    print(serial, "  32 frames of 16 bits on the engines: status=", hs, ", ", spi_isr_entries,
+          " SPI and ", dma_isr_entries, " DMA interrupt(s)", crlf);
+    bench.verdict("16-bit frames ride the engines in half-word beats (no SPI interrupt, one DMA), exact",
+                  hs == spi_ok && same(tx_buf, rx_buf, 64) && spi_isr_entries == 0u && dma_isr_entries == 1u);
+    // An odd buffer cannot take a 16-bit beat (8.3.6): the pump.
+    fill_pattern(tx_buf + 1, 32, 0x24);
+    for (uint16_t i = 0; i < 33; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    spi_isr_entries = 0;
+    const uint8_t os = dma_xfer(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiClock::div8, SpiDataSize::bits16, false);
+    bench.verdict("16-bit frames from an ODD buffer fall back to the pump (sixteen ISR entries), exact",
+                  os == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && spi_isr_entries == 16u);
     // A read with no out buffer: the fixed dummy cell.
     for (uint16_t i = 0; i < 16; ++i) {
         rx_buf[i] = 0;
@@ -869,6 +890,15 @@ void td_dma() {
     }
     bench.verdict("a read with no out buffer clocks the fixed 0xFF cell through the transmit engine",
                   rd == spi_ok && ff);
+    for (uint16_t i = 0; i < 16; ++i) {
+        rx_buf[i] = 0;
+    }
+    const uint8_t rd16 = dma_xfer(nullptr, 0, nullptr, rx_buf, 8, SpiClock::div8, SpiDataSize::bits16, false);
+    ff = true;
+    for (uint16_t i = 0; i < 16; ++i) {
+        ff = ff && rx_buf[i] == 0xFFu;
+    }
+    bench.verdict("and of 16 bits, the same cell read as a half-word", rd16 == spi_ok && ff);
     DmaHost::release();
     dma_host_live = false;
     host_ready();
@@ -1542,11 +1572,13 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+    dma_isr_entries = dma_isr_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+    dma_isr_entries = dma_isr_entries + 1u;
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
@@ -1565,7 +1597,7 @@ int main() {
     bench.letter('b', "THE LOOPBACK on the pump: four modes, 8 and 16 bits, a command phase",
                  tb_pump);
     bench.letter('c', "the polled path at every rate, timed", tc_rates);
-    bench.letter('d', "THE DMA ENGINES on channels 2 and 3, and the 16-bit fallback", td_dma);
+    bench.letter('d', "THE DMA ENGINES on channels 2 and 3: one interrupt, the 16-bit beat, the odd fallback", td_dma);
     bench.letter('e', "the hardware CRC against a bitwise reference", te_crc);
     bench.letter('f', "THE KERNEL: SpiBus over SpiHost, the rejection, the votes", tf_kernel);
     bench.letter('n', "THE PEER: the spi_link command channel, ident, ten pings", tn_peer_link);

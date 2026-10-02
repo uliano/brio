@@ -29,12 +29,18 @@
 //      printed through it, the blocks counted, no fault
 //   f  the console's receive engine: what the harvest publishes is
 //      what was typed - this letter asks for a line and echoes it
+//   g  the copy engine on channel 7: copy and fill at the three beats
+//      exact, polled and by its own interrupt, its refusals - a
+//      half-word run off its boundary (RM 8.3.6), a count of zero or
+//      over CNTR's, a block on a busy engine - and abandon()
 //
 // build: boards = v006k8,v003f4
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 #include <string.h>
+
+#include <span>
 
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/delay.hpp"
@@ -63,15 +69,18 @@ using Led = Pin<'C', 0>;
 
 // The channel the memory-to-memory letters use: 1, the ADC's, idle here.
 using Copier = DmaChannel<1>;
+// The copy engine's: 7, I2C1's and USART2's receive, idle here.
+using CopyEngine = DmaCopyEngine<7>;
 
 TestBench<Serial> bench;
 
 volatile uint32_t copier_completions = 0;
 volatile uint32_t copier_errors = 0;
 volatile uint32_t tx_blocks = 0;
+volatile uint32_t engine_completions = 0;
 
-uint8_t src8[64];
-uint8_t dst8[64];
+alignas(4) uint8_t src8[64];
+alignas(4) uint8_t dst8[64];
 uint16_t src16[32];
 uint16_t dst16[32];
 uint32_t src32[16];
@@ -301,6 +310,84 @@ void tf_rx_engine() {
                   Serial::rx_overruns() == 0u && Serial::dma_faults() == 0u);
 }
 
+// ---------------------------------------------------------------------------
+// g - the copy engine
+// ---------------------------------------------------------------------------
+/// The engine idle again, bounded: busy() reads the flags while a block
+/// runs, polled or not.
+bool engine_wait() {
+    for (uint32_t i = 0; i < 1'000'000u; ++i) {
+        if (!CopyEngine::busy()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void tg_copy_engine() {
+    CopyEngine::arm(DmaPriority::high, false);   // polled: no interrupt
+    for (uint32_t i = 0; i < 64u; ++i) { src8[i] = static_cast<uint8_t>(i * 5u + 3u); dst8[i] = 0; }
+    for (uint32_t i = 0; i < 32u; ++i) { src16[i] = static_cast<uint16_t>(i * 1031u + 7u); dst16[i] = 0; }
+    for (uint32_t i = 0; i < 16u; ++i) { src32[i] = i * 0x01020304u + 0x5Au; dst32[i] = 0; }
+
+    bool ok = CopyEngine::copy(dst8, src8, 64u) && engine_wait();
+    bench.verdict("64 bytes copied in byte beats, polled", ok && memcmp(src8, dst8, 64) == 0);
+    ok = CopyEngine::copy(dst16, src16, 32u) && engine_wait();
+    bench.verdict("32 half-words copied in half-word beats", ok && memcmp(src16, dst16, 64) == 0);
+    ok = CopyEngine::copy(dst32, src32, 16u) && engine_wait();
+    bench.verdict("16 words copied in word beats", ok && memcmp(src32, dst32, 64) == 0);
+
+    static const uint32_t word_cell = 0xC0DE'F00Du;
+    static const uint16_t half_cell = 0xBEEFu;
+    ok = CopyEngine::fill(dst32, &word_cell, 16u) && engine_wait();
+    bool filled = ok;
+    for (uint32_t i = 0; i < 16u; ++i) { filled = filled && dst32[i] == word_cell; }
+    ok = CopyEngine::fill(dst16, &half_cell, 32u) && engine_wait();
+    for (uint32_t i = 0; i < 32u; ++i) { filled = filled && ok && dst16[i] == half_cell; }
+    bench.verdict("a fill from one cell, words and half-words: every element the cell", filled);
+
+    // The odd address passes through an empty asm, so that the refusal is
+    // the engine's run-time check and not one the compiler folded.
+    uint8_t* odd = dst8 + 1;
+    __asm__ volatile("" : "+r"(odd));
+    bench.verdict("a half-word run off its boundary is refused (8.3.6: bit 0 would be ignored)",
+                  !CopyEngine::copy(reinterpret_cast<uint16_t*>(odd), src16, 4u));
+    bench.verdict("a block of no element, or of more than CNTR counts, is refused",
+                  !CopyEngine::copy(dst8, src8, 0u) && !CopyEngine::copy(dst8, src8, 65536u));
+    const bool first = CopyEngine::copy(dst8, src8, 64u);
+    const bool second = CopyEngine::copy(dst8, src8, 64u);
+    const bool was_busy = CopyEngine::busy();
+    (void)engine_wait();
+    bench.verdict("a block on a busy engine is refused", first && (!second || !was_busy));
+    // abandon(): a fill of 64 bytes in byte beats (some 380 cycles of the
+    // controller's) stopped where it stands, CNTR holding what was left.
+    for (uint32_t i = 0; i < 64u; ++i) { dst8[i] = 0; }
+    const bool long_started = CopyEngine::fill(dst8, &src8[0], 64u);
+    const bool stopped = CopyEngine::abandon();
+    const bool idle_after = !CopyEngine::busy() && !CopyEngine::abandon();
+    print(serial, "  abandon(): started ", long_started, ", stopped ", stopped, ", CNTR left ",
+          DmaChannel<7>::count(), crlf);
+    bench.verdict("abandon() stops a running block and frees the engine; a second one finds nothing",
+                  long_started && idle_after);
+    bench.verdict("no transfer fault, polled", CopyEngine::faults() == 0u);
+
+    // By its own interrupt: five blocks, each ended by the vector.
+    CopyEngine::arm(DmaPriority::high, true);
+    engine_completions = 0;
+    uint8_t started = 0;
+    for (uint8_t round = 0; round < 5u; ++round) {
+        if (CopyEngine::copy(dst32, src32, 16u)) {
+            ++started;
+        }
+        (void)delay_us(clock, 100);
+    }
+    print(serial, "  5 blocks by the interrupt: ", started, " started, ", engine_completions,
+          " completions in the handler, faults ", CopyEngine::faults(), crlf);
+    bench.verdict("every block started and ended in the channel's handler",
+                  started == 5u && engine_completions == 5u && !CopyEngine::busy());
+    (void)CopyEngine::abandon();
+}
+
 void banner() {
     print(serial, crlf, "test_ch32_dma - ", device::part_name, " (console on DMA channels 4 and 5)", crlf);
     bench.menu();
@@ -316,6 +403,11 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() {
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { (void)Serial::dma_isr(); }
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    if (CopyEngine::isr() != 0u) {
+        engine_completions = engine_completions + 1u;
+    }
+}
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
     const uint32_t f = Copier::isr();
     if ((f & brio::DmaFlag::complete) != 0u) { copier_completions = copier_completions + 1u; }
@@ -335,6 +427,8 @@ int main() {
     bench.letter('d', "a transfer error", td_error);
     bench.letter('e', "the console's transmit engine", te_tx_engine);
     bench.letter('f', "the console's receive engine (asks for a line)", tf_rx_engine, false);
+    bench.letter('g', "the copy engine: three beats, copy and fill, polled and by interrupt, refusals",
+                 tg_copy_engine);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL48" : "FAILED",

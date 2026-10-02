@@ -38,7 +38,12 @@ the pads).
   RXDMAEN only once the receive channel is enabled, TXDMAEN only once
   the transmit one is, and drops both at the block's end.
 - **The DMA requests are channels 2 (receive) and 3 (transmit)**,
-  table 8-2 - the channel is the request on this family.
+  table 8-2 - the channel is the request on this family. DATAR is
+  sixteen bits, so a channel can move a 16-bit frame in one half-word
+  beat - from a half-word boundary only: 8.3.6, a 16-bit access ignores
+  the address's bit 0. Every frame that comes back was clocked out
+  first, so the receive block ends after the transmit block: the
+  receive channel's completion is the one edge a transaction needs.
 - **The default pads on the CH32V006** are SCK PC5, MOSI PC6, MISO PC7,
   NSS PC1 (table 2-1-1); the remaps are AFIO's, which the stratum does
   not touch yet.
@@ -71,10 +76,20 @@ the pads).
   `rebase()`, `clock_for(hz)`, `prime()` for a caller framing its own
   select, `bit_order()`, `isr()`, `dma_isr()`, `status()`,
   `recover()`, `release()`, `claim_nss_pad()`. The engine slots are
-  `DmaTxEngine<3>` and `DmaRxEngine<2>`, both or neither, on those
-  two channels and no others (refused at compile time otherwise); a
-  16-bit request falls back to the pump. Frames in a byte buffer: one
-  byte per 8-bit frame, two bytes low-first per 16-bit frame.
+  `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`, both or neither,
+  on those two channels and no others (refused at compile time
+  otherwise). Their `Elem` is the widest beat: `uint8_t` engines serve
+  the 8-bit requests and send a 16-bit one to the pump; `uint16_t`
+  engines - DATAR's width, nothing wider compiles - serve both, the
+  16-bit request in half-word beats when both of its buffers sit on a
+  half-word boundary and on the pump otherwise. The transmit engine is
+  armed for its errors alone: ONE DMA INTERRUPT A TRANSACTION, the
+  receive channel's, and `dma_isr()` reads the controller's one flag
+  register once for both channels. The data phase's launch is the two
+  engines' block starts and the two DMA requests raised around them,
+  no mask (nothing completes under it). Frames in a byte buffer: one
+  byte per 8-bit frame, two bytes low-first per 16-bit frame - one
+  half-word in memory, which is what a 16-bit beat moves.
 - `SpiClient<1, pins>`: the target side, thin - `init(clock, Config)`,
   `enable(first)` with the first answer loaded before the host's
   clock, `write()` on TXE (ONE frame ahead: no FIFO), `poll()`,
@@ -109,9 +124,12 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
 }
 ```
 
-With the engines: `SpiHost<1, spi1_default_pins, DmaTxEngine<3>,
-DmaRxEngine<2>>`, and `dma1_channel2_handler` / `dma1_channel3_handler`
-both calling `Bus::dma_isr()` the same way.
+With the engines at DATAR's width, 8- and 16-bit frames both on them:
+`SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>,
+DmaRxEngine<2, uint16_t>>`, and `dma1_channel2_handler` /
+`dma1_channel3_handler` both calling `Bus::dma_isr()` the same way (the
+receive channel's is the one that fires; the transmit channel's only on
+a transfer error).
 
 ## Bench findings
 
@@ -121,8 +139,8 @@ PC7, declining without it) and five against a PEER BOARD running
 `spi_peer` on five wires (SCK PC5, MOSI PC6, MISO PC7, the GPIO chip
 select PC3 to the peer's SS, GND - the other strata's spi_link
 protocol, commanded in band), plus the wireless letter and a slip
-probe outside `z`. On the CH32V006K8U6 at 48 MHz the image is one (30
-verdicts on the loop, 25 with the peer); on the CH32V003F4P6 it is
+probe outside `z`. On the CH32V006K8U6 at 48 MHz the image is one; on
+the CH32V003F4P6 it is
 seven group images (letters a, b and e; c and d; f; n and o; p; q; r
 and x - the part's 15 KB and 2 KB decide the cut, design/overview.md,
 and the kernel letter against the peer is alone because its stack
@@ -143,9 +161,8 @@ nak-ing corrupted frames (measured), not as silence.
   CPOL, CPHA, LSBFIRST, BR and MSTR - so the enable protection the
   chapter describes does not exist in the silicon.
 - **Every path completes with nothing on MISO**: the ISR pump (sixteen
-  interrupts for sixteen frames), the polled path, the DMA engines
-  ISR-completed and polled, each transaction ending and releasing the
-  select.
+  interrupts for sixteen frames) and the polled path, each transaction
+  ending and releasing the select.
 - **On the loop, the pump**: the four modes at 8 and 16 bits, sixteen
   frames each, byte-exact with one interrupt per frame; a two-frame
   command phase then eight data frames, the data exact and the
@@ -155,12 +172,6 @@ nak-ing corrupted frames (measured), not as silence.
   bytes byte-exact, from 215 cycles a frame at /2 (the wire alone 2)
   to 2243 at /256 (the wire alone 258) - the per-frame cost is the
   poll, not the clock, until the divider is the larger of the two.
-- **The engines**: a 128-byte block at /2 in 3928 cycles (30 a frame,
-  the wire alone 16) with no transfer fault; a command frame on the
-  pump then 32 data frames on the engines, exact; a polled request on
-  the engines completing inside start(), exact; 16-bit frames falling
-  back to the pump; a read with no out buffer through the transmit
-  engine's fixed 0xFF cell.
 - **The hardware CRC is the arithmetic**: TXCRCR over six frames is
   what a bitwise loop over the same polynomial computes (0x5A), the
   receiver's RXCRCR over the looped-back frames is the same number,
@@ -213,5 +224,17 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- The engined data phase as it is - the engines bound at init, a
+  block start of five stores a channel, ONE DMA interrupt a
+  transaction, 16-bit frames in half-word beats, an odd buffer's
+  16-bit request on the pump, a command phase on the pump handed over
+  to the engines, a polled request spun inside start(), a read with no
+  out buffer through the fixed 0xFFFF cell, nothing on MISO:
+  `test_ch32_spi` letter d on the jumper (byte-exact, the vectors'
+  entries counted) on both parts, and the cost - the cycles a byte
+  against the wire's and the fixed cost a transaction against the
+  listing's count of about 350 cycles (dma.md) - in `bench_ch32`'s
+  letter d at HCLK/4 and HCLK/16 with MISO floating. The boards are
+  off the desk; every image builds for both parts.
 - HSCR's high-speed read mode: its rate formula against a scope on
   SCK.

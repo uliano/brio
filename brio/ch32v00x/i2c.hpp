@@ -68,6 +68,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "ch32v00x/afio.hpp"
@@ -441,7 +442,11 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * THE ENGINE SLOTS: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
  * neither. A write phase runs on the transmit engine; a read phase of
  * two bytes or more on the receive engine under CTLR2.LAST; the one-
- * byte read on the pump.
+ * byte read on the pump. The transmit engine is armed for its ERRORS
+ * ALONE: a write phase ends on BTF, which the event vector takes
+ * anyway, with the channel's count at zero - the controller wrote the
+ * last byte a byte time before it left the shifter - so the block's
+ * own completion interrupt would prove nothing BTF does not.
  */
 template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine>
@@ -523,7 +528,8 @@ public:
         S::enable();
         S::ack(false);
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address());
+            // BTF ends a write phase: the transmit block's errors alone.
+            TxEngine::arm(S::data_address(), TxEngine::flag_error);
             RxEngine::arm(S::data_address());
         }
         // The pads go to the peripheral only now. OPEN DRAIN is the
@@ -662,7 +668,7 @@ public:
                 }
                 if constexpr (has_engines) {
                     S::dma(true, false);
-                    (void)TxEngine::start(req_.tx.get(), req_.tx_len);
+                    (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
                     (void)S::clear_addr();
                     phase_ = Phase::tx_dma;
                     return false;
@@ -687,10 +693,12 @@ public:
                 return false;
 
             case Phase::tx_dma:
-                // The engine loaded every byte; BTF says the last one is
-                // out on the wire.
-                if ((s1 & i2c_btf) != 0u && !dma_busy()) {
-                    S::dma(false, false);
+                // BTF with the channel's count at zero: the engine wrote
+                // every byte and the last one is out on the wire. (BTF
+                // with bytes still to move would be the controller late
+                // by a whole byte time: its next write clears the flag.)
+                if ((s1 & i2c_btf) != 0u && dma_tx_drained()) {
+                    dma_tx_done();
                     return end_of_write();
                 }
                 return false;
@@ -743,22 +751,20 @@ public:
 
     /// The DMA channels' interrupt body - call from BOTH channels'
     /// vectors. The receive block completing ends a read phase (STOP
-    /// after it); the transmit block completing is only half the story
-    /// (BTF on the event vector says the last byte is out). A transfer
-    /// error ends the tenure with i2c_dma_fault. True when the tenure
-    /// just completed.
+    /// after it); the transmit channel interrupts on an error alone (BTF
+    /// on the event vector ends a write phase). A transfer error ends the
+    /// tenure with i2c_dma_fault. INTFR is read once for both. True when
+    /// the tenure just completed.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
-            const uint8_t tx = TxEngine::service();
+            const uint32_t intfr = RxEngine::block_flags();
+            const uint8_t tx = TxEngine::service(intfr);
             if ((tx & TxEngine::flag_error) != 0u) {
                 put_engines_away();
                 S::stop();
                 return finish(i2c_dma_fault);
             }
-            if ((tx & TxEngine::flag_complete) != 0u) {
-                (void)TxEngine::complete();
-            }
-            const uint8_t rx = RxEngine::service();
+            const uint8_t rx = RxEngine::service(intfr);
             if ((rx & RxEngine::flag_error) != 0u) {
                 put_engines_away();
                 S::stop();
@@ -909,7 +915,7 @@ private:
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
                 S::dma(true, true);   // LAST: the block's last byte is NACKed
-                (void)RxEngine::start(req_.rx.get(), req_.rx_len);
+                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
                 (void)S::clear_addr();
                 phase_ = Phase::rx_dma;
                 return false;
@@ -998,18 +1004,26 @@ private:
             return false;
         }
     }
-    static bool dma_busy() {
+    /// The transmit block has moved every byte: its count read at zero.
+    static bool dma_tx_drained() {
         if constexpr (has_engines) {
-            return TxEngine::busy();
+            return TxEngine::progress().remaining == 0u;
         } else {
-            return false;
+            return true;
+        }
+    }
+    /// The write block's end, proved by BTF: the engine released and the
+    /// controller's requests dropped.
+    static void dma_tx_done() {
+        if constexpr (has_engines) {
+            (void)TxEngine::complete();
+            S::dma(false, false);
         }
     }
     static void put_engines_away() {
         if constexpr (has_engines) {
             (void)TxEngine::abandon();
-            RxEngine::stop();
-            RxEngine::arm(S::data_address());
+            RxEngine::stop();   // the binding stands: the next start() needs no arm()
             S::dma(false, false);
         }
     }

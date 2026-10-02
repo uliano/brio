@@ -109,10 +109,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   which is what the transport's ISR does when its ring runs dry.
 - **DMA**: USART1 transmits on channel 4 and receives on 5, USART2 on
   6 and 7 (table 8-2, the channel IS the request - [dma.md](dma.md));
-  an engine on any other channel is refused at compile time. Both
-  engines of USART2 measured: sixteen banged frames harvested exact,
-  a 256-byte ring moved in one run at the wire's pace (267 ms for 2560
-  bits).
+  an engine on any other channel is refused at compile time.
 - **The reset values** are table 14-3's: STATR 0xC0, the rest zero.
 - **The errors are read then cleared**: PE, FE, NE, ORE and IDLE by
   the STATR-then-DATAR read; RXNE, TC, LBD and CTS also by writing
@@ -168,7 +165,9 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   `consume()` (the receive run in place), the counters
   (`rx_overruns()`, `frame_errors()`, `parity_errors()`,
   `noise_errors()`, `hw_overruns()`, `clear_errors()`), `rebase()`,
-  the engine verbs `dma_isr()`, `harvest()`, `dma_faults()`, and
+  the engine verbs `dma_isr()` (the ISR body of both channels, the
+  controller's one flag register read once), `harvest()`,
+  `dma_faults()`, and
   `actual_baud()`/`divisor_for()`. `UartOptions`, the trailing
   parameter: `format` (seven data bits with parity or eight, with or
   without - nine is refused, the rings carry bytes), `half_duplex`
@@ -259,6 +258,16 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- The two engines as they are ([dma.md](dma.md)): a block start of
+  five stores and no load, THE MASK OVER THE CLAIM ALONE - the transmit
+  engine's busy flag tested and set under it, six instructions, the run
+  read and the block programmed outside it, which a claimed engine
+  makes safe (no block in flight, so no completion and no consume()
+  under the programming) - and the completion vector reading the flags
+  once: `test_ch32_serial` letter i (sixteen banged frames harvested
+  exact, a 256-byte ring moved in one run at the wire's pace - 2560 bits
+  at 9600 baud are 267 ms) and `test_ch32_dma` letters e and f on the
+  console's own two engines, on both parts.
 - The run verbs, `write_bulk()` and `read_span()`/`consume()`: compiled
   for both parts and counted in the release listing, not run on either
   module - every suite's print and the console's line drain take them,

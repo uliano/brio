@@ -1,13 +1,17 @@
 // DMA family smoke TU: ch32v00x/dma.hpp instantiated for every one of
-// the seven channels, the two engines at the three element widths, and
+// the seven channels, the two transfer engines at the three widest
+// beats with every narrower beat a start() takes, the copy engine, and
 // the Uart's two engine slots in every combination - instantiation
 // only, no main(), no hardware.
 //
 // The vocabulary's compile-time arithmetic is re-stated here (the
 // vector per channel, the flag nibble, the width of an element, the
-// one config the chapter forbids) because a wrong vector is a silent
-// default_handler spin and a wrong nibble a flag read off the
-// neighbour channel.
+// one config the chapter forbids, the configuration word and the
+// alignment rule) because a wrong vector is a silent default_handler
+// spin, a wrong nibble a flag read off the neighbour channel and a
+// wrong word a block that moves the wrong way.
+#include <span>
+
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/dma.hpp"
 #include "ch32v00x/platform.hpp"
@@ -35,6 +39,17 @@ static_assert(!dma_channel_config_valid(DmaChannelConfig{.circular = true, .memo
               "RM 8.2.1: circular mode is not for memory-to-memory");
 static_assert(dma_channel_config_valid(DmaChannelConfig{.circular = true}));
 static_assert(!dma_transfer_valid(DmaTransfer{}), "a transfer needs both ends and a count");
+static_assert(dma_cfgr_of(DmaChannelConfig{}) == dma_cfgr_minc, "the default: read the peripheral, MINC");
+static_assert(dma_cfgr_of({.direction = DmaDirection::memory_to_peripheral, .memory_increment = false,
+                           .peripheral_width = DmaWidth::half, .memory_width = DmaWidth::word,
+                           .priority = DmaPriority::very_high}) == (dma_cfgr_dir | (1u << 8) | (2u << 10) | (3u << 12)));
+static_assert(dma_cfgr_beat<uint8_t>() == 0u && dma_cfgr_beat<uint16_t>() == 0x500u &&
+              dma_cfgr_beat<uint32_t>() == 0xA00u, "PSIZE and MSIZE both follow the beat");
+static_assert(dma_aligned(0x20000001u, DmaWidth::byte) && !dma_aligned(0x20000001u, DmaWidth::half) &&
+              dma_aligned(0x20000002u, DmaWidth::half) && !dma_aligned(0x20000002u, DmaWidth::word),
+              "8.3.6: a 16- or 32-bit access ignores the address's low bits");
+static_assert(dma_beat_fits<uint8_t, uint16_t> && dma_beat_fits<uint16_t, uint16_t> &&
+              !dma_beat_fits<uint32_t, uint16_t>);
 static_assert(dma_engines_distinct<NoDmaEngine, NoDmaEngine>() &&
               dma_engines_distinct<DmaTxEngine<4>, NoDmaEngine>() &&
               dma_engines_distinct<DmaTxEngine<4>, DmaRxEngine<5>>() &&
@@ -88,9 +103,21 @@ void all_channels() {
     channel_verbs<7>(buf);
 }
 
-// ---- the engines at the three widths -------------------------------------
+// ---- the engines at the three widest beats --------------------------------
+/// Every beat up to the engine's widest, through both spans.
+template <typename Tx, typename Rx, typename T>
+void beats(T* run) {
+    if constexpr (sizeof(T) <= sizeof(typename Tx::element)) {
+        (void)Tx::start(std::span<const T>(run, 8));
+        (void)Tx::start(std::span<T>(run, 8));
+        (void)Tx::start_fixed(run, 8);
+        (void)Rx::start(std::span<T>(run, 8));
+        (void)Rx::start_discard(run, 8);
+    }
+}
+
 template <uint8_t ch, typename Elem>
-void engines(volatile uint32_t* reg, Elem* run) {
+void engines(volatile uint32_t* reg, uint8_t* r8, uint16_t* r16, uint32_t* r32) {
     using Tx = DmaTxEngine<ch, Elem>;
     using Rx = DmaRxEngine<ch, Elem>;
     static_assert(Tx::present && Rx::present);
@@ -99,9 +126,18 @@ void engines(volatile uint32_t* reg, Elem* run) {
     static_assert(std::same_as<typename Tx::element, Elem>);
     static_assert(Tx::flag_complete == DmaFlag::complete && Tx::flag_error == DmaFlag::error);
 
-    Tx::arm(reg, DmaPriority::high);
-    (void)Tx::start(run, 8);
-    (void)Tx::start_fixed(run, 8);
+    Tx::arm(reg, Tx::flag_error, DmaPriority::high);
+    Tx::arm(reg, DmaPriority::medium);
+    Tx::arm(reg);
+    if (Tx::claim()) {
+        (void)Tx::launch(std::span<const uint8_t>(r8, 8));
+    }
+    (void)Tx::claim();
+    Tx::unclaim();
+    beats<Tx, Rx, uint8_t>(r8);
+    beats<Tx, Rx, uint16_t>(r16);
+    beats<Tx, Rx, uint32_t>(r32);
+    (void)Tx::service(Tx::block_flags());
     (void)Tx::busy();
     (void)Tx::in_flight();
     (void)Tx::progress();
@@ -113,9 +149,10 @@ void engines(volatile uint32_t* reg, Elem* run) {
     Tx::stop();
 
     Rx::arm(reg);
+    Rx::arm(reg, DmaPriority::low);
+    Rx::arm(reg, Rx::flag_complete | Rx::flag_error, DmaPriority::very_high);
     (void)Rx::idle();
-    (void)Rx::start(run, 8);
-    (void)Rx::start_discard(run, 8);
+    (void)Rx::service(Rx::block_flags());
     (void)Rx::take();
     (void)Rx::full();
     (void)Rx::capacity();
@@ -131,9 +168,42 @@ void all_engines() {
     static uint8_t r8[8];
     static uint16_t r16[8];
     static uint32_t r32[8];
-    engines<1, uint8_t>(&dma()->channel[0].CNTR, r8);
-    engines<2, uint16_t>(&dma()->channel[0].CNTR, r16);
-    engines<7, uint32_t>(&dma()->channel[0].CNTR, r32);
+    engines<1, uint8_t>(&dma()->channel[0].CNTR, r8, r16, r32);
+    engines<2, uint16_t>(&dma()->channel[0].CNTR, r8, r16, r32);
+    engines<7, uint32_t>(&dma()->channel[0].CNTR, r8, r16, r32);
+}
+
+// ---- the copy engine, every beat --------------------------------------------
+template <uint8_t ch, typename Elem>
+void copier() {
+    using C = DmaCopyEngine<ch, Elem>;
+    static_assert(C::present && C::channel == ch && C::width == dma_width_of<Elem>());
+    static uint8_t b8[16];
+    static uint16_t b16[16];
+    static uint32_t b32[16];
+    static const uint32_t cell = 0x5A5A5A5Au;
+    C::arm();
+    C::arm(DmaPriority::high, false);
+    (void)C::copy(b8, b8 + 8, 8u);
+    (void)C::fill(b8, reinterpret_cast<const uint8_t*>(&cell), 16u);
+    if constexpr (sizeof(Elem) >= 2u) {
+        (void)C::copy(b16, b16 + 8, 8u);
+        (void)C::fill(b16, reinterpret_cast<const uint16_t*>(&cell), 16u);
+    }
+    if constexpr (sizeof(Elem) >= 4u) {
+        (void)C::copy(b32, b32 + 8, 8u);
+        (void)C::fill(b32, &cell, 16u);
+    }
+    (void)C::busy();
+    (void)C::isr();
+    (void)C::faults();
+    (void)C::abandon();
+}
+
+void all_copiers() {
+    copier<1, uint32_t>();
+    copier<4, uint16_t>();
+    copier<7, uint8_t>();
 }
 
 // ---- the Uart's slots, every combination ----------------------------------
