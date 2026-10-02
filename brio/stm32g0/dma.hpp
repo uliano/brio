@@ -18,14 +18,27 @@
  *                           generator;
  *   DmaTxEngine / DmaRxEngine
  *                           the two TASKS a byte transport wants: drain a
- *                           run into a peripheral, fill a run from one;
+ *                           run into a peripheral, fill a run from one -
+ *                           or, the receive engine's second shape, fill a
+ *                           RING from one for ever (util/ring.hpp's
+ *                           HardwareRing reads it);
  *   DmaLoopEngine           the TASK a waveform wants - one caller-owned
  *                           table played for ever (util/block_stream.hpp's
  *                           BlockPlayer on this silicon);
  *   DmaPingPongEngine       the TASK a sampled stream wants - fill one
  *                           caller-owned buffer while the caller drains
  *                           the other (util/block_stream.hpp's
- *                           BlockSource on this silicon).
+ *                           BlockSource on this silicon);
+ *   DmaCopyEngine           the TASK a framebuffer wants - copy a run of
+ *                           memory, or fill one from a cell, in the
+ *                           controller's memory-to-memory mode.
+ *
+ * EVERY ENGINE HAS TWO MOMENTS: arm() writes everything constant for a
+ * binding once - the gate, the request, CPAR, and the CCR word, which the
+ * ENGINE keeps because the register cannot (its fields are read-only while
+ * EN is set) - and a block's start is DmaChannel::restart(): five stores,
+ * no read, the beat's width from the caller's element type. The section
+ * above the engines says it at length.
  *
  * THE DRIVER OWNS THE FABRIC AND NOT THE REQUEST VOCABULARY. Table 55
  * numbers 77 request lines by peripheral, and no device header of this
@@ -53,7 +66,10 @@
  *    channel keeps serving requests, with no CPU in the path at all. That
  *    is what DmaLoopEngine is built on, and it is why this target's
  *    player has no per-lap re-arm window: the interrupt at the wrap
- *    COUNTS laps, it does not create them.
+ *    COUNTS laps, it does not create them. The receive engine's ring is
+ *    the same mode in the other direction: the channel writes a ring's
+ *    storage lap after lap and its count register IS the ring's producer
+ *    index.
  *
  * WHY DmaPingPongEngine IS *NOT* CIRCULAR, which is this file's one real
  * design position. Circular mode plus the half-transfer flag looks like a
@@ -100,11 +116,14 @@
 
 #include <stdint.h>
 #include <optional>
+#include <span>
+#include <type_traits>
 
 #include "stm32g0xx.h"
 
 #include "stm32g0/clock.hpp"
 #include "stm32g0/device_tables.hpp"
+#include "stm32g0/dma_engine.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/platform.hpp"
 
@@ -206,6 +225,51 @@ struct DmaChannelConfig {
 /// cannot be got wrong at run time either.
 constexpr bool dma_channel_config_valid(const DmaChannelConfig& c) {
     return !(c.circular && c.memory_to_memory);
+}
+
+/// PSIZE and MSIZE set to one width: the two halves of a beat, which on
+/// every engine of this file are the same width (table 51's packing is
+/// the channel verbs' and the bench's, not an engine's).
+constexpr uint32_t dma_ccr_width(DmaWidth w) {
+    return (static_cast<uint32_t>(w) << DMA_CCR_PSIZE_Pos) |
+           (static_cast<uint32_t>(w) << DMA_CCR_MSIZE_Pos);
+}
+
+/// CCR's configuration fields OR-ed onto `v` (the interrupt enables a
+/// caller keeps, or nothing), EN left out: what configure() stores, and
+/// the value an engine composes ONCE, at arm().
+constexpr uint32_t dma_ccr_config(const DmaChannelConfig& c, uint32_t v = 0) {
+    if (c.direction == DmaDirection::memory_to_peripheral) {
+        v |= DMA_CCR_DIR;
+    }
+    if (c.circular) {
+        v |= DMA_CCR_CIRC;
+    }
+    if (c.memory_to_memory) {
+        v |= DMA_CCR_MEM2MEM;
+    }
+    if (c.peripheral_increment) {
+        v |= DMA_CCR_PINC;
+    }
+    if (c.memory_increment) {
+        v |= DMA_CCR_MINC;
+    }
+    v |= static_cast<uint32_t>(c.peripheral_width) << DMA_CCR_PSIZE_Pos;
+    v |= static_cast<uint32_t>(c.memory_width) << DMA_CCR_MSIZE_Pos;
+    v |= static_cast<uint32_t>(c.priority) << DMA_CCR_PL_Pos;
+    return v;
+}
+
+/// The interrupt enables an engine's DmaIrq stands for (dma_engine.hpp):
+/// TEIE always, TCIE unless the owner proves the completion otherwise.
+constexpr uint32_t dma_ccr_irq(DmaIrq irq) {
+    return irq == DmaIrq::error_only ? DMA_CCR_TEIE : (DMA_CCR_TCIE | DMA_CCR_TEIE);
+}
+
+/// The same choice as the flag bits service() reports.
+constexpr uint8_t dma_irq_flags(DmaIrq irq) {
+    return irq == DmaIrq::error_only ? DmaFlag::error
+                                     : static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error);
 }
 
 /// One block transfer: both ends and how many data items. The names are
@@ -363,26 +427,7 @@ public:
             return false;
         }
         const uint32_t armed = regs().CCR & (DMA_CCR_TCIE | DMA_CCR_HTIE | DMA_CCR_TEIE);
-        uint32_t v = armed;
-        if (c.direction == DmaDirection::memory_to_peripheral) {
-            v |= DMA_CCR_DIR;
-        }
-        if (c.circular) {
-            v |= DMA_CCR_CIRC;
-        }
-        if (c.memory_to_memory) {
-            v |= DMA_CCR_MEM2MEM;
-        }
-        if (c.peripheral_increment) {
-            v |= DMA_CCR_PINC;
-        }
-        if (c.memory_increment) {
-            v |= DMA_CCR_MINC;
-        }
-        v |= static_cast<uint32_t>(c.peripheral_width) << DMA_CCR_PSIZE_Pos;
-        v |= static_cast<uint32_t>(c.memory_width) << DMA_CCR_MSIZE_Pos;
-        v |= static_cast<uint32_t>(c.priority) << DMA_CCR_PL_Pos;
-        regs().CCR = v;
+        regs().CCR = dma_ccr_config(c, armed);
         return true;
     }
 
@@ -454,6 +499,57 @@ public:
         set_peripheral(t.peripheral);
         set_memory(t.memory);
         return set_count(t.count);
+    }
+
+    /// The IFCR word that clears this channel's three flags - never CGIFx
+    /// (ES0548 2.4.1, clear() below).
+    static constexpr uint32_t clear_word = DmaFlag::all << Dma<n>::flag_shift(ch);
+
+    /**
+     * THE PER-BLOCK RESTART of a channel whose configuration word its
+     * owner keeps: 10.4.5's abort-and-restart sequence reduced to the
+     * registers that change, FIVE STORES AND NO READ -
+     *
+     *   CCR   = ccr, EN clear: the first of 10.4.5's separate writes, and
+     *           the configuration rewritten whole while EN is down (the
+     *           only state in which its fields take a write, 10.6.3), so
+     *           nothing a previous binding left can ride along;
+     *   IFCR  = this channel's three flags: a previous block's TC, the HT
+     *           the hardware sets whether or not HTIE is armed, a TE -
+     *           EN would be refused while TEIF stands (10.4.7), so after
+     *           this store the enable below cannot fail and is not read
+     *           back;
+     *   CMAR, CNDTR = the block (CNDTR takes a write only with EN down,
+     *           10.6.4);
+     *   CCR   = ccr | EN: steps 4 and 5 of the configuration procedure in
+     *           one access, which 10.4.5's note allows.
+     *
+     * CPAR is not here: it is constant for a binding and written once, at
+     * an engine's arm(). The caller guarantees what 10.4.5 asks of an
+     * abort - no transfer in flight on the channel: the previous block
+     * complete, a channel never started, or one stopped by an error.
+     */
+    [[gnu::always_inline]] static void restart(uint32_t ccr, const volatile void* memory,
+                                               uint16_t count) {
+        DMA_Channel_TypeDef& c = regs();
+        c.CCR = ccr;
+        Dma<n>::regs().IFCR = clear_word;
+        c.CMAR = reinterpret_cast<uint32_t>(memory);
+        c.CNDTR = count;
+        c.CCR = ccr | DMA_CCR_EN;
+    }
+
+    /// The same with the CPAR side moved too - memory to memory, where
+    /// both ends are the block's: six stores.
+    [[gnu::always_inline]] static void restart(uint32_t ccr, const volatile void* peripheral,
+                                               const volatile void* memory, uint16_t count) {
+        DMA_Channel_TypeDef& c = regs();
+        c.CCR = ccr;
+        Dma<n>::regs().IFCR = clear_word;
+        c.CPAR = reinterpret_cast<uint32_t>(peripheral);
+        c.CMAR = reinterpret_cast<uint32_t>(memory);
+        c.CNDTR = count;
+        c.CCR = ccr | DMA_CCR_EN;
     }
 
     // -- flags and interrupts ----------------------------------------------
@@ -790,6 +886,75 @@ constexpr uint8_t dmamux_trigger_event(uint8_t event) {
     return static_cast<uint8_t>(16u + event);
 }
 
+// ---- the engines: what they share ------------------------------------------------
+
+/**
+ * EVERY ENGINE BELOW HAS TWO MOMENTS, and the line between them is this
+ * controller's register file.
+ *
+ *   arm()    configures ONCE: the AHB gate (opened here and never per
+ *            block), the channel taken from whatever state it is in, the
+ *            DMAMUX pointed at the peripheral's request (11.4.3), CPAR -
+ *            the peripheral's register, constant for a binding - and the
+ *            CCR WORD composed and KEPT IN THE ENGINE: direction,
+ *            priority, the interrupt enables, the circular bit. The
+ *            controller cannot keep it for us: every field of CCR but the
+ *            enables is read-only while EN is set (10.6.3), and a block
+ *            can only be restarted with EN down.
+ *   start()  writes what changes: DmaChannel::restart()'s five stores -
+ *            CCR (the kept word, EN clear), IFCR, CMAR, CNDTR, CCR | EN -
+ *            and reads nothing back. The beat's width and the memory
+ *            increment are the only bits OR-ed in per block, and both are
+ *            constants of the verb called.
+ *
+ * THE BEAT IS THE CALLER'S TYPE. start() is overloaded on spans of
+ * uint8_t, uint16_t and uint32_t and the width follows the element
+ * (PSIZE = MSIZE, so the register and the memory move one item a beat);
+ * an engine's `Elem` is the WIDEST beat its binding allows - the
+ * peripheral register's width - and a wider span is a compile error at
+ * the call. A buffer misaligned for its beat (10.4.3's note) is refused
+ * at run time, false, so a driver can fall back to its pump; a driver
+ * that can ask first does (dma_engine.hpp's dma_beat_aligned).
+ */
+namespace dma_detail {
+
+/// arm()'s common part: the gate, the channel stopped, the request, CPAR.
+template <uint8_t n, uint8_t ch>
+void bind(volatile void* peripheral, uint8_t request) {
+    Dma<n>::bus_clock(true);
+    DmaChannel<n, ch>::stop();
+    (void)DmaMux::request(DmaChannel<n, ch>::mux_channel, request);
+    DmaChannel<n, ch>::set_peripheral(peripheral);
+}
+
+/// The ISR body every engine folds in: this channel's flags masked by
+/// what the ENGINE armed (its own record, not a read of CCR), cleared,
+/// handed back. One ISR load and, when something is pending, one IFCR
+/// store.
+template <uint8_t n, uint8_t ch>
+[[gnu::always_inline]] inline uint8_t service(uint8_t armed) {
+    const uint32_t pending = DmaChannel<n, ch>::flags() & armed;
+    if (pending != 0u) {
+        DmaChannel<n, ch>::clear(pending);
+    }
+    return static_cast<uint8_t>(pending);
+}
+
+/// A run the counter can carry, from memory aligned for its beat.
+template <typename T>
+[[gnu::always_inline]] inline bool run_ok(const volatile T* memory, size_t length) {
+    return memory != nullptr && length != 0u && length <= 0xFFFFu &&
+           dma_beat_aligned(memory, sizeof(T));
+}
+
+/// The CCR bits of one beat type and one increment, both constants.
+template <typename T, bool increment, uint32_t increment_bit>
+constexpr uint32_t beat_bits() {
+    return dma_ccr_width(dma_width_of<T>()) | (increment ? increment_bit : 0u);
+}
+
+}  // namespace dma_detail
+
 // ---- the byte-transport engines ------------------------------------------------
 
 /**
@@ -801,9 +966,10 @@ constexpr uint8_t dmamux_trigger_event(uint8_t event) {
  * whoever owns the peripheral, so this type knows nothing about USARTs
  * and would serve an SPI or a DAC unchanged.
  *
- * `Elem` IS THE ACCESS WIDTH (dma_width_of): the default byte engine is
- * what a USART wants; a converter's data register wants uint16_t and
- * nothing else in the engine changes.
+ * `Elem` IS THE WIDEST BEAT: a USART's byte engine is the default; an
+ * SPI's data register takes a half-word as well as a byte, so its engine
+ * is uint16_t and serves frames of either width, the beat chosen per
+ * start() by the span's type.
  *
  * THERE IS NO VERB TO KICK A STALLED FIRST BEAT, and the absence is a
  * fact, not an omission. A controller that latched a trigger on the
@@ -814,6 +980,14 @@ constexpr uint8_t dmamux_trigger_event(uint8_t event) {
  * already set moves the first byte immediately. Measured, because it is
  * exactly the kind of claim that costs a dead transmitter when it is
  * wrong.
+ *
+ * THE CLAIM IS ITS OWN VERB. start() is a test-and-set of busy() and the
+ * programming; an owner that starts blocks from TWO contexts (a
+ * transport's thread and its completion handler) masks the claim alone
+ * - claim() under its guard, then launch() unmasked, since a claimed
+ * channel has no block in flight and so no completion that could run
+ * under the programming - and unclaim() gives back a claim that found
+ * nothing to send.
  */
 template <uint8_t n, uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
@@ -825,6 +999,7 @@ public:
     static constexpr bool present = true;
     static constexpr uint8_t controller = n;
     static constexpr uint8_t channel = ch;
+    /// The widest beat the binding allows.
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -843,94 +1018,78 @@ public:
      * otherwise, so it is safe on a shared line.
      *
      * IT ACTS ON NOTHING. What a completion or an error MEANS is the
-     * owner's to decide - complete(), abandon(), fail() are the verbs -
-     * because only the owner can see its peripheral's state.
+     * owner's to decide - complete(), abandon() are the verbs - because
+     * only the owner can see its peripheral's state.
      */
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return dma_detail::service<n, ch>(armed_);
     }
 
-    /// Claim the channel for this peripheral: `data` is the register the
-    /// run is poured into, `request` the peripheral's own DMAMUX request
-    /// id.
+    /// Bind the channel to a peripheral: `data` is the register the runs
+    /// are poured into, `request` the peripheral's own DMAMUX request id,
+    /// `irq` which events interrupt (dma_engine.hpp). Everything constant
+    /// for the binding is written here and nowhere else; the channel
+    /// comes out stopped, nothing in flight.
     static void arm(volatile void* data, uint8_t request,
-                    DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        request_ = request;
-        priority_ = priority;
-        claim();
+                    DmaPriority priority = DmaPriority::low,
+                    DmaIrq irq = DmaIrq::complete_and_error) {
+        dma_detail::bind<n, ch>(data, request);
+        ccr_ = dma_ccr_config({.direction = DmaDirection::memory_to_peripheral,
+                               .memory_increment = false,
+                               .priority = priority}) |
+               dma_ccr_irq(irq);
+        armed_ = dma_irq_flags(irq);
+        busy_ = false;
+        in_flight_ = 0;
         Nvic::enable(Channel::irq());
     }
 
-    /// Start moving `length` elements from `buffer`. The buffer is the
-    /// CALLER'S and must stay put until complete() reports the block.
-    static bool start(const Elem* buffer, uint16_t length) {
-        if (busy_ || buffer == nullptr || length == 0u) {
-            return false;
-        }
-        in_flight_ = length;
-        busy_ = true;
-        if (!Channel::load(DmaTransfer{
-                .peripheral = data_,
-                .memory = const_cast<Elem*>(buffer),
-                .count = length,
-                .config = {.direction = DmaDirection::memory_to_peripheral,
-                           .circular = false,
-                           .memory_to_memory = false,
-                           .peripheral_increment = false,
-                           .memory_increment = true,
-                           .peripheral_width = width,
-                           .memory_width = width,
-                           .priority = priority_},
-            })) {
-            busy_ = false;
-            in_flight_ = 0;
-            return false;
-        }
-        return true;
-    }
+    /// Start moving a run. The memory is the CALLER'S and must stay put
+    /// until complete() reports the block. False when the engine is busy
+    /// or the run is empty, longer than CNDTR counts, or misaligned for
+    /// its beat.
+    static bool start(std::span<const uint8_t> run) { return begin<uint8_t, true>(run.data(), run.size()); }
+    static bool start(std::span<const uint16_t> run) { return begin<uint16_t, true>(run.data(), run.size()); }
+    static bool start(std::span<const uint32_t> run) { return begin<uint32_t, true>(run.data(), run.size()); }
 
     /**
      * The same block from ONE CELL, sent `length` times: the memory
      * pointer does not increment. What a full-duplex bus needs for the
      * transmit side of a READ - the clock has to run, so something must
-     * be shifted out, and the dummy is one byte of the caller's that
+     * be shifted out, and the dummy is one cell of the caller's that
      * stays put for the whole block.
-     *
-     * A SIBLING VERB and not a defaulted argument to start(), and the
-     * reason is measured: a defaulted argument MOVES the images of every
-     * caller that does not pass it, where a sibling leaves them
-     * byte-identical. Byte-identity outranks API economy.
      */
-    static bool start_fixed(const Elem* cell, uint16_t length) {
-        if (busy_ || cell == nullptr || length == 0u) {
+    static bool start_fixed(const uint8_t* cell, uint16_t length) { return begin<uint8_t, false>(cell, length); }
+    static bool start_fixed(const uint16_t* cell, uint16_t length) { return begin<uint16_t, false>(cell, length); }
+    static bool start_fixed(const uint32_t* cell, uint16_t length) { return begin<uint32_t, false>(cell, length); }
+
+    /// THE CLAIM ALONE: true and the engine is the caller's, or false and
+    /// a block is in flight. Not masked here - the owner that has two
+    /// starting contexts holds its guard around this call and nothing
+    /// else.
+    static bool claim() {
+        if (busy_) {
             return false;
         }
-        in_flight_ = length;
         busy_ = true;
-        if (!Channel::load(DmaTransfer{
-                .peripheral = data_,
-                .memory = const_cast<Elem*>(cell),
-                .count = length,
-                .config = {.direction = DmaDirection::memory_to_peripheral,
-                           .circular = false,
-                           .memory_to_memory = false,
-                           .peripheral_increment = false,
-                           .memory_increment = false,
-                           .peripheral_width = width,
-                           .memory_width = width,
-                           .priority = priority_},
-            })) {
-            busy_ = false;
-            in_flight_ = 0;
-            return false;
-        }
         return true;
     }
+    /// Give back a claim that started nothing.
+    static void unclaim() {
+        busy_ = false;
+        in_flight_ = 0;
+    }
+    /// Program and enable a block on a CLAIMED engine - start() less the
+    /// claim. False, the claim kept, for a run start() would refuse or an
+    /// engine that was not claimed.
+    static bool launch(std::span<const uint8_t> run) { return go<uint8_t, true>(run.data(), run.size()); }
+    static bool launch(std::span<const uint16_t> run) { return go<uint16_t, true>(run.data(), run.size()); }
+    static bool launch(std::span<const uint32_t> run) { return go<uint32_t, true>(run.data(), run.size()); }
 
     /// The block ended - called from the channel's handler when its
-    /// completion flag is up. Returns the elements the block carried,
-    /// so the owner can release exactly that much of its ring.
+    /// completion flag is up, or by an owner that holds another proof of
+    /// it. Returns the elements the block carried, so the owner can
+    /// release exactly that much of its ring.
     static uint16_t complete() {
         if (!busy_) {
             return 0;
@@ -950,16 +1109,17 @@ public:
      * channel. THE CALLER DECIDES, because only the peripheral's owner
      * can read the flags that make "dead" a fact rather than a timeout.
      * What is lost is the untransmitted tail, and it is counted rather
-     * than papered over.
+     * than papered over. The binding (request, CPAR, the kept word)
+     * stands: the next start() needs nothing re-armed.
      */
     static bool abandon() {
         if (!busy_) {
             return false;
         }
         ++faults_;
+        Channel::stop();
         busy_ = false;
         in_flight_ = 0;
-        claim();
         return true;
     }
 
@@ -973,39 +1133,92 @@ public:
     }
 
 private:
-    /// Take the channel from whatever state it is in: stop it, point the
-    /// multiplexer at this peripheral, arm the two flags that matter.
-    /// arm() and abandon() are the same act with a different reason.
-    static void claim() {
-        Channel::stop();
-        (void)DmaMux::request(Channel::mux_channel, request_);
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
+    template <typename T, bool increment>
+    static bool begin(const T* memory, size_t length) {
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "brio DmaTxEngine: a beat wider than the engine's element - the "
+                      "binding's register does not take it (name the engine with the "
+                      "wider element if the register does)");
+        if (busy_ || !dma_detail::run_ok(memory, length)) {
+            return false;
+        }
+        busy_ = true;
+        program<T, increment>(memory, static_cast<uint16_t>(length));
+        return true;
     }
 
-    static inline volatile void* data_ = nullptr;
-    static inline uint8_t request_ = dma_request_none;
-    static inline DmaPriority priority_ = DmaPriority::low;
+    template <typename T, bool increment>
+    static bool go(const T* memory, size_t length) {
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "brio DmaTxEngine: a beat wider than the engine's element");
+        if (!busy_ || !dma_detail::run_ok(memory, length)) {
+            return false;
+        }
+        program<T, increment>(memory, static_cast<uint16_t>(length));
+        return true;
+    }
+
+    template <typename T, bool increment>
+    [[gnu::always_inline]] static void program(const T* memory, uint16_t length) {
+        in_flight_ = length;
+        Channel::restart(ccr_ | dma_detail::beat_bits<T, increment, DMA_CCR_MINC>(), memory,
+                         length);
+    }
+
+    static inline uint32_t ccr_ = 0;
+    static inline uint8_t armed_ = 0;
     static inline uint16_t in_flight_ = 0;
     static inline uint32_t faults_ = 0;
     static inline volatile bool busy_ = false;
 };
 
 /**
- * DmaRxEngine<n, ch, Elem> - "fill a run of memory from a peripheral's
- * data register".
+ * DmaRxEngine<n, ch, Elem> - "fill memory from a peripheral's data
+ * register", in TWO SHAPES on one binding: which one runs is decided by
+ * the arm() that made the binding and the start() that runs it.
  *
- * The asymmetry that shapes it: a receive block completes only when the
- * buffer FILLS, which on an idle line may be never. So the owner does not
- * wait for a completion - it ASKS, with take(), which reports what has
- * arrived since the last question.
+ * THE ONE-SHOT SHAPE fills a run and stops - a bounded block, the
+ * receive half of a bus transaction (an SPI host's data phase, an I2C
+ * read). A receive block completes only when the run FILLS, which on an
+ * idle line may be never, so its owner may also ASK, with take(), what
+ * has arrived since the last question. On this silicon asking is free:
+ * CNDTR is a live counter the controller decrements and software may
+ * read at any time (10.6.4), so take() is one register read and a
+ * subtraction - nothing suspended, no write-back to judge.
  *
- * AND ON THIS SILICON ASKING IS FREE. CNDTR is a live counter the
- * controller decrements and software may read at any time (10.6.4), so
- * take() is one register read and a subtraction: nothing is suspended,
- * no write-back has to be read and judged. The PACING is still the
- * owner's (a kernel TimeEvent every few
- * ticks), because the latency of asking late is the owner's to choose;
- * what is gone is the cost of asking.
+ * THE CIRCULAR SHAPE fills a RING for ever. arm() is handed the ring's
+ * whole storage and binds it for good - CIRC set, CMAR the storage, the
+ * count its length - and from start() on the controller writes the
+ * storage lap after lap with no CPU in the path, reloading CNDTR and its
+ * internal address at every wrap (10.4.5, 10.6.4). Nothing re-arms it,
+ * so nothing is lost between runs: there are no runs. The producer index
+ * of that ring is not a variable anybody stores - it is the channel's
+ * own count - and this engine IS util/ring.hpp's RingCounter for it:
+ *
+ *   remaining()  CNDTR, one load: the elements still to be written in
+ *                the current lap. 10.6.4 decrements it after each "read
+ *                followed by write", so it never counts an element whose
+ *                write has not landed;
+ *   laps()       the laps completed since start(): the transfer-complete
+ *                flag, raised at every wrap, turned into a count by
+ *                complete() in the channel's handler - so it lags the
+ *                counter by a handler's latency and never leads it.
+ *
+ * util/ring.hpp's HardwareRing<storage, DmaRxEngine<n, ch, Elem>> is the
+ * consumer half. What the consumer did not keep up with - a lap written
+ * over it - is that view's accounting (its overruns()), because only the
+ * consumer knows where its tail is; this engine counts laps and faults.
+ * The half-transfer flag is unused: the view reads the counter whenever
+ * it looks, and the wrap is the one edge the count needs.
+ *
+ * STOPPING A CIRCULAR CHANNEL HAS AN ORDER, and it is the owner's:
+ * 10.4.5 asks for the peripheral's requests to be stopped FIRST and the
+ * channel disabled after, a channel that never ends having no idle moment
+ * of its own (stm32g0/usart.hpp's release() disables the USART first).
+ *
+ * The two moments and the beat are DmaTxEngine's: arm() once, a start the
+ * five stores of DmaChannel::restart(), the width from the element type
+ * and `Elem` the widest the binding allows.
  */
 template <uint8_t n, uint8_t ch, typename Elem = uint8_t>
 class DmaRxEngine {
@@ -1017,6 +1230,7 @@ public:
     static constexpr bool present = true;
     static constexpr uint8_t controller = n;
     static constexpr uint8_t channel = ch;
+    /// The widest beat the binding allows.
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -1027,55 +1241,89 @@ public:
     static constexpr uint8_t flag_half = DmaFlag::half;
     static constexpr uint8_t flag_error = DmaFlag::error;
 
-    /**
-     * The channel's ISR BODY folded into the engine: read this channel's
-     * own armed flags, clear exactly those, hand them back. Call it from
-     * whichever vector the channel reports on (three vectors serve twelve
-     * channels here) - it answers for its own channel and returns 0
-     * otherwise, so it is safe on a shared line.
-     *
-     * IT ACTS ON NOTHING. What a completion or an error MEANS is the
-     * owner's to decide - complete(), abandon(), fail() are the verbs -
-     * because only the owner can see its peripheral's state.
-     */
+    /// The channel's ISR BODY folded into the engine (DmaTxEngine's).
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return dma_detail::service<n, ch>(armed_);
     }
 
+    /// Bind the channel to a peripheral, ONE-SHOT (DmaTxEngine::arm()'s
+    /// contract). It leaves the ring a circular arm() bound where it was,
+    /// so start() with no run still runs that ring.
     static void arm(volatile void* data, uint8_t request,
-                    DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        request_ = request;
-        priority_ = priority;
-        claim();
+                    DmaPriority priority = DmaPriority::low,
+                    DmaIrq irq = DmaIrq::complete_and_error) {
+        dma_detail::bind<n, ch>(data, request);
+        ccr_ = dma_ccr_config({.direction = DmaDirection::peripheral_to_memory,
+                               .memory_increment = false,
+                               .priority = priority}) |
+               dma_ccr_irq(irq);
+        armed_ = dma_irq_flags(irq);
+        capacity_ = 0;
+        taken_ = 0;
         Nvic::enable(Channel::irq());
     }
 
-    /// True while the channel is not running a block at all - it filled
-    /// up, it errored, or it was never started. The owner hands it a new
-    /// run then, whatever the arithmetic says.
+    /**
+     * Bind the channel to a peripheral AND to a ring's whole storage, for
+     * good: the CIRCULAR shape. `storage` is the caller's array - the
+     * consumer view's own storage, named in its type - and its element
+     * is the beat; its length, the count every lap reloads, is a compile-
+     * time fact and so is checked here (CNDTR holds 65535 at most).
+     *
+     * The word kept for the ring carries CIRC, MINC, the beat on both
+     * sides, the priority, TCIE (the lap) and TEIE (the error); HTIE stays
+     * clear. The storage and its length are kept beside the word, and
+     * the channel comes out stopped: start() runs the ring. The one-shot
+     * verbs stay usable on the same binding - a start(run) is a one-shot
+     * run that replaces the ring until the next start().
+     */
+    template <typename T, size_t N>
+    static void arm(volatile void* data, uint8_t request, T (&storage)[N],
+                    DmaPriority priority = DmaPriority::low) {
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "brio DmaRxEngine: a ring wider than the engine's element - the "
+                      "binding's register does not give it");
+        static_assert(!std::is_const_v<T> && !std::is_volatile_v<T>,
+                      "brio DmaRxEngine: the ring is plain storage the channel writes");
+        static_assert(N >= 2u && N <= 0xFFFFu,
+                      "brio DmaRxEngine: a ring of 2..65535 elements - CNDTR is the "
+                      "count every lap reloads, and it is sixteen bits (10.6.4)");
+        arm(data, request, priority, DmaIrq::complete_and_error);
+        ring_ccr_ = ccr_ | DMA_CCR_CIRC | dma_detail::beat_bits<T, true, DMA_CCR_MINC>();
+        ring_ = &storage[0];
+        ring_length_ = static_cast<uint16_t>(N);
+        laps_ = 0;
+    }
+
+    /// True while the channel is not running a block at all - it was
+    /// stopped by an error, or never started. A FILLED one-shot block
+    /// leaves EN set with nothing left to count (10.6.4), and full() is
+    /// that state; a ring never fills and never stops on its own, so for
+    /// it idle() means a transfer error (10.4.7) or no start() yet.
     static bool idle() { return !Channel::enabled(); }
 
-    /// Point the channel at a run of free memory and start filling it.
-    static bool start(Elem* buffer, uint16_t length) {
-        if (buffer == nullptr || length == 0u) {
+    /// Point the channel at a run of free memory and start filling it,
+    /// ONE-SHOT. False for an empty run, one longer than CNDTR counts, or
+    /// one misaligned for its beat.
+    static bool start(std::span<uint8_t> run) { return begin<uint8_t, true>(run.data(), run.size()); }
+    static bool start(std::span<uint16_t> run) { return begin<uint16_t, true>(run.data(), run.size()); }
+    static bool start(std::span<uint32_t> run) { return begin<uint32_t, true>(run.data(), run.size()); }
+
+    /**
+     * (Re)start the RING at its storage's first element with the lap
+     * count at zero - DmaChannel::restart()'s five stores. Once, after
+     * the circular arm(); again only after the channel has stopped (a
+     * transfer error, or stop()), and then the consumer's view is cleared
+     * with it, its positions being counted from this element and this lap.
+     * False on a binding that has no ring.
+     */
+    static bool start() {
+        if (ring_ == nullptr) {
             return false;
         }
-        capacity_ = length;
-        taken_ = 0;
-        return Channel::load(DmaTransfer{
-            .peripheral = data_,
-            .memory = buffer,
-            .count = length,
-            .config = {.direction = DmaDirection::peripheral_to_memory,
-                       .circular = false,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = true,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        });
+        laps_ = 0;
+        Channel::restart(ring_ccr_, ring_, ring_length_);
+        return true;
     }
 
     /**
@@ -1084,34 +1332,16 @@ public:
      * side of a WRITE - every frame clocked out brings one back, and a
      * receiver left unread would overrun. The cell is the caller's and
      * ends up holding the last frame; nothing else of the block survives.
-     *
-     * A SIBLING VERB, for the reason start_fixed() states.
      */
-    static bool start_discard(Elem* cell, uint16_t length) {
-        if (cell == nullptr || length == 0u) {
-            return false;
-        }
-        capacity_ = length;
-        taken_ = 0;
-        return Channel::load(DmaTransfer{
-            .peripheral = data_,
-            .memory = cell,
-            .count = length,
-            .config = {.direction = DmaDirection::peripheral_to_memory,
-                       .circular = false,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = false,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        });
-    }
+    static bool start_discard(uint8_t* cell, uint16_t length) { return begin<uint8_t, false>(cell, length); }
+    static bool start_discard(uint16_t* cell, uint16_t length) { return begin<uint16_t, false>(cell, length); }
+    static bool start_discard(uint32_t* cell, uint16_t length) { return begin<uint32_t, false>(cell, length); }
 
     /**
-     * How many elements have arrived since the last take(). One CNDTR
-     * read; nothing is suspended and nothing can be refused, so the
-     * return is a plain number and not an optional.
+     * How many elements have arrived since the last take() - the
+     * one-shot run's question. One CNDTR read; nothing is suspended and
+     * nothing can be refused, so the return is a plain number and not an
+     * optional.
      */
     static uint16_t take() {
         if (capacity_ == 0u) {
@@ -1129,17 +1359,38 @@ public:
         return fresh;
     }
 
-    /// True once the run is full: the owner must hand over a new one or
-    /// the peripheral piles its own losses up.
+    /// True once the one-shot run is full: the owner must hand over a new
+    /// one or the peripheral piles its own losses up.
     static bool full() { return capacity_ != 0u && taken_ >= capacity_; }
     static uint16_t capacity() { return capacity_; }
     static uint16_t taken() { return taken_; }
 
+    // -- the ring's counter (util/ring.hpp's RingCounter) ---------------------
+
+    /// The elements still to be written in the current lap: CNDTR, ONE
+    /// load, never refused (10.6.4: live while the channel runs).
+    static uint32_t remaining() { return Channel::count(); }
+
+    /// The laps completed since start(): complete()'s count. A volatile
+    /// word, so a consumer polling it sees the handler's store.
+    static uint32_t laps() { return laps_; }
+
+    /// The completion flag's verb - called from the channel's handler when
+    /// service() reports it. On the ring it is a LAP, counted here; the
+    /// controller has already reloaded itself, and nothing is re-armed.
+    /// Returns the elements a lap carries.
+    static uint16_t complete() {
+        laps_ = laps_ + 1u;
+        return ring_length_;
+    }
+
+    /// Give up the block or ring in flight - counted - and leave the
+    /// channel stopped with its binding standing.
     static bool abandon() {
         ++faults_;
+        Channel::stop();
         capacity_ = 0;
         taken_ = 0;
-        claim();
         return true;
     }
 
@@ -1153,18 +1404,189 @@ public:
     }
 
 private:
-    static void claim() {
-        Channel::stop();
-        (void)DmaMux::request(Channel::mux_channel, request_);
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
+    template <typename T, bool increment>
+    static bool begin(T* memory, size_t length) {
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "brio DmaRxEngine: a beat wider than the engine's element - the "
+                      "binding's register does not give it (name the engine with the "
+                      "wider element if the register does)");
+        if (!dma_detail::run_ok(memory, length)) {
+            return false;
+        }
+        capacity_ = static_cast<uint16_t>(length);
+        taken_ = 0;
+        Channel::restart(ccr_ | dma_detail::beat_bits<T, increment, DMA_CCR_MINC>(), memory,
+                         static_cast<uint16_t>(length));
+        return true;
     }
 
-    static inline volatile void* data_ = nullptr;
-    static inline uint8_t request_ = dma_request_none;
-    static inline DmaPriority priority_ = DmaPriority::low;
+    static inline uint32_t ccr_ = 0;
+    static inline uint8_t armed_ = 0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
     static inline uint32_t faults_ = 0;
+    // The ring's binding: the word with CIRC, the storage, its length.
+    static inline uint32_t ring_ccr_ = 0;
+    static inline volatile void* ring_ = nullptr;
+    static inline uint16_t ring_length_ = 0;
+    // Written by complete() in the handler and read from the consumer's
+    // context, which may poll it - the ticker's lesson, a volatile load.
+    static inline volatile uint32_t laps_ = 0;
+};
+
+// ---- memory to memory ----------------------------------------------------------
+
+/**
+ * DmaCopyEngine<n, ch> - "copy a run of memory, or fill one from a cell",
+ * the controller's own MEMORY-TO-MEMORY MODE (10.4.5): with CCR.MEM2MEM
+ * set an enabled channel runs its block with no request at all, re-
+ * arbitrated after every single transfer (10.4.4), and stops when CNDTR
+ * reaches zero. The multiplexer is left on request 0, "no DMA request
+ * line selected" (11.4.4), so no peripheral can reach the channel.
+ *
+ *   copy(dst, src, count)   count elements, both pointers incrementing;
+ *   fill(dst, cell, count)  count elements, the source pointer held on one
+ *                           cell of the caller's memory.
+ *
+ * The element type T of the two pointers is the beat (uint8_t, uint16_t
+ * or uint32_t) and the count is in elements - the surface every family's
+ * copy engine shares.
+ *
+ * DIR = 0 in this mode, so 10.6.3's "peripheral" side is the SOURCE
+ * (CPAR, PINC) and the "memory" side the destination (CMAR, MINC); both
+ * ends move per block, so a start here is DmaChannel::restart()'s six
+ * stores. Every beat width is legal for memory, so the element is the
+ * pointer's type and there is no `Elem`. A single transfer is a read and
+ * a write over the one AHB master (10.4.3), so one item takes at least
+ * two bus cycles: a word copy is bounded by the core's own memcpy floor,
+ * a fill cannot reach the core's store-only memset floor - the reason to
+ * use this engine is the CPU it gives back, which letter d of the bench
+ * app measures.
+ *
+ * Completion: TC's interrupt (complete() from the handler), or, armed
+ * with DmaIrq::error_only, poll().
+ */
+template <uint8_t n, uint8_t ch>
+class DmaCopyEngine {
+    using Channel = DmaChannel<n, ch>;
+
+public:
+    DmaCopyEngine() = delete;
+
+    static constexpr bool present = true;
+    static constexpr uint8_t controller = n;
+    static constexpr uint8_t channel = ch;
+
+    static constexpr uint8_t flag_complete = DmaFlag::complete;
+    static constexpr uint8_t flag_half = DmaFlag::half;
+    static constexpr uint8_t flag_error = DmaFlag::error;
+
+    /// The channel's ISR BODY folded into the engine (DmaTxEngine's).
+    [[gnu::always_inline]] static uint8_t service() {
+        return dma_detail::service<n, ch>(armed_);
+    }
+
+    static void arm(DmaPriority priority = DmaPriority::low,
+                    DmaIrq irq = DmaIrq::complete_and_error) {
+        dma_detail::bind<n, ch>(nullptr, dma_request_none);
+        ccr_ = dma_ccr_config({.direction = DmaDirection::peripheral_to_memory,
+                               .memory_to_memory = true,
+                               .memory_increment = false,
+                               .priority = priority}) |
+               dma_ccr_irq(irq);
+        armed_ = dma_irq_flags(irq);
+        busy_ = false;
+        items_ = 0;
+        Nvic::enable(Channel::irq());
+    }
+
+    /// Copy `count` elements from `src` to `dst`; the element type T is
+    /// the beat (uint8_t, uint16_t or uint32_t). Both runs are the
+    /// caller's and must stay put until the block completes. False when
+    /// busy, for a count of zero or beyond what CNDTR counts (65535), or
+    /// for a pointer misaligned for its beat.
+    template <typename T>
+    static bool copy(T* dst, const T* src, uint32_t count) {
+        return begin<T, true>(dst, src, count);
+    }
+
+    /// Fill `count` elements of `dst` with the value in `*cell`. The cell
+    /// is MEMORY the caller owns - the channel reads an address, once a
+    /// beat, so it must stay put and hold the value until completion.
+    template <typename T>
+    static bool fill(T* dst, const T* cell, uint32_t count) {
+        return begin<T, false>(dst, cell, count);
+    }
+
+    static bool busy() { return busy_; }
+
+    /// The block ended - from the handler on the completion flag. Returns
+    /// the items it carried.
+    static uint16_t complete() {
+        if (!busy_) {
+            return 0;
+        }
+        busy_ = false;
+        return items_;
+    }
+
+    /// The completion ASKED rather than interrupted: true once the
+    /// engine is free (its block's TC seen and cleared here, or nothing
+    /// was running).
+    static bool poll() {
+        if (busy_ && Channel::flag(DmaFlag::complete)) {
+            Channel::clear(DmaFlag::complete);
+            busy_ = false;
+        }
+        return !busy_;
+    }
+
+    static DmaProgress progress() { return Channel::progress(items_); }
+
+    /// A transfer error (10.4.7: the channel already disabled by the
+    /// hardware) or a block given up: counted, the engine freed.
+    static bool abandon() {
+        if (!busy_) {
+            return false;
+        }
+        ++faults_;
+        Channel::stop();
+        busy_ = false;
+        return true;
+    }
+
+    static uint32_t faults() { return faults_; }
+    static void clear_faults() { faults_ = 0; }
+
+    static void stop() {
+        Channel::stop();
+        busy_ = false;
+    }
+
+private:
+    template <typename T, bool increment>
+    static bool begin(T* dst, const T* src, uint32_t count) {
+        static_assert(std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t> ||
+                          std::is_same_v<T, uint32_t>,
+                      "brio DmaCopyEngine: the element is the beat - uint8_t, uint16_t or "
+                      "uint32_t (CCR.PSIZE/MSIZE have no other code)");
+        if (busy_ || dst == nullptr || !dma_detail::run_ok(src, count) ||
+            !dma_beat_aligned(dst, sizeof(T))) {
+            return false;
+        }
+        busy_ = true;
+        items_ = static_cast<uint16_t>(count);
+        Channel::restart(ccr_ | dma_detail::beat_bits<T, increment, DMA_CCR_PINC>() |
+                             DMA_CCR_MINC,
+                         src, dst, static_cast<uint16_t>(count));
+        return true;
+    }
+
+    static inline uint32_t ccr_ = 0;
+    static inline uint8_t armed_ = 0;
+    static inline uint16_t items_ = 0;
+    static inline uint32_t faults_ = 0;
+    static inline volatile bool busy_ = false;
 };
 
 // ---- the block-stream engines --------------------------------------------------
@@ -1223,17 +1645,24 @@ public:
      * because only the owner can see its peripheral's state.
      */
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return dma_detail::service<n, ch>(DmaFlag::complete | DmaFlag::error);
     }
 
-    /// Claim the channel: `data` is the register the table is played
-    /// into, `request` the peripheral's own DMAMUX request id.
+    /// Bind the channel: `data` is the register the table is played
+    /// into, `request` the peripheral's own DMAMUX request id. The CCR
+    /// word - circular, memory to peripheral, the element's width, the
+    /// two interrupt enables - is composed here once (the engines' two
+    /// moments, above).
     static void arm(volatile void* data, uint8_t request,
                     DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        request_ = request;
-        priority_ = priority;
-        claim();
+        dma_detail::bind<n, ch>(data, request);
+        ccr_ = dma_ccr_config({.direction = DmaDirection::memory_to_peripheral,
+                               .circular = true,
+                               .memory_increment = true,
+                               .peripheral_width = width,
+                               .memory_width = width,
+                               .priority = priority}) |
+               dma_ccr_irq(DmaIrq::complete_and_error);
         Nvic::enable(Channel::irq());
     }
 
@@ -1301,7 +1730,6 @@ public:
             return false;
         }
         faults_ = faults_ + 1u;
-        claim();
         return launch();
     }
 
@@ -1313,36 +1741,20 @@ public:
     }
 
 private:
+    /// The table from its start: DmaChannel::restart()'s five stores, the
+    /// restart disabling whatever the channel was doing first (an
+    /// abandon()'s case) - CIRC's own reload does the rest for ever.
     static bool launch() {
         if (table_ == nullptr || length_ == 0u) {
             return false;
         }
-        running_ = Channel::load(DmaTransfer{
-            .peripheral = data_,
-            .memory = const_cast<Elem*>(table_),
-            .count = length_,
-            .config = {.direction = DmaDirection::memory_to_peripheral,
-                       .circular = true,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = true,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        });
-        return running_;
+        Channel::restart(ccr_, table_, length_);
+        running_ = true;
+        return true;
     }
 
-    static void claim() {
-        Channel::stop();
-        (void)DmaMux::request(Channel::mux_channel, request_);
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
-    }
-
-    static inline volatile void* data_ = nullptr;
+    static inline uint32_t ccr_ = 0;
     static inline const volatile Elem* table_ = nullptr;
-    static inline uint8_t request_ = dma_request_none;
-    static inline DmaPriority priority_ = DmaPriority::low;
     static inline uint16_t length_ = 0;
     // laps_ is written in the handler and READ FROM THREAD CONTEXT,
     // typically in a polling loop - the ticker's lesson (gcc -Os deleted a
@@ -1437,17 +1849,24 @@ public:
      * because only the owner can see its peripheral's state.
      */
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return dma_detail::service<n, ch>(DmaFlag::complete | DmaFlag::error);
     }
 
-    /// Claim the channel: `data` is the peripheral's data register,
-    /// `request` its own DMAMUX request id.
+    /// Bind the channel: `data` is the peripheral's data register,
+    /// `request` its own DMAMUX request id. The CCR word - NOT circular,
+    /// peripheral to memory, the element's width, the two interrupt
+    /// enables - is composed here once, so the swap in the handler is the
+    /// five stores of DmaChannel::restart().
     static void arm(volatile void* data, uint8_t request,
                     DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        request_ = request;
-        priority_ = priority;
-        claim();
+        dma_detail::bind<n, ch>(data, request);
+        ccr_ = dma_ccr_config({.direction = DmaDirection::peripheral_to_memory,
+                               .circular = false,
+                               .memory_increment = true,
+                               .peripheral_width = width,
+                               .memory_width = width,
+                               .priority = priority}) |
+               dma_ccr_irq(DmaIrq::complete_and_error);
         Nvic::enable(Channel::irq());
     }
 
@@ -1573,7 +1992,6 @@ public:
             return false;
         }
         faults_ = faults_ + 1u;
-        claim();
         return launch();
     }
 
@@ -1589,36 +2007,19 @@ public:
     }
 
 private:
+    /// The next block into the buffer the engine fills: five stores, the
+    /// channel's previous block complete (it stopped itself) or abandoned.
     static bool launch() {
         if (buffer_[fill_] == nullptr || length_ == 0u) {
             return false;
         }
-        running_ = Channel::load(DmaTransfer{
-            .peripheral = data_,
-            .memory = const_cast<Elem*>(buffer_[fill_]),
-            .count = length_,
-            .config = {.direction = DmaDirection::peripheral_to_memory,
-                       .circular = false,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = true,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        });
-        return running_;
+        Channel::restart(ccr_, buffer_[fill_], length_);
+        running_ = true;
+        return true;
     }
 
-    static void claim() {
-        Channel::stop();
-        (void)DmaMux::request(Channel::mux_channel, request_);
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
-    }
-
-    static inline volatile void* data_ = nullptr;
+    static inline uint32_t ccr_ = 0;
     static inline volatile Elem* buffer_[2] = {nullptr, nullptr};
-    static inline uint8_t request_ = dma_request_none;
-    static inline DmaPriority priority_ = DmaPriority::low;
     static inline uint16_t length_ = 0;
     // laps_ and overruns_ are handler-written and thread-read, typically
     // in a polling loop: volatile for the ticker's reason.

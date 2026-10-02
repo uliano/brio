@@ -177,7 +177,8 @@ a compile-time refusal in the task.
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format)`,
   `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`write_bulk`,
   `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
-  place), `rx_pending`, `tx_idle`, `rebase(hz)`,
+  place; with a receive engine `consume()` answers whether the run was
+  intact), `rx_pending`, `tx_idle`, `rebase(hz)`,
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
@@ -340,19 +341,57 @@ neither. `uart_engines_distinct()` lives here.
   matching INTERRUPT is NOT armed: the request and the interrupt are the
   same condition.
 - **`dma_isr()`** is the body of whichever channel vector the engines
-  report on; each engine reads only its own channel's flags.
-- **`harvest()`** publishes received bytes: a receive block completes
-  only when the buffer fills, which on an idle line may be never, so the
-  owner ASKS. On this silicon the asking is one CNDTR read.
+  report on; each engine reads only its own channel's flags. On the
+  receive channel a completion is a LAP of the ring, counted and nothing
+  more.
+- **THE RECEIVE ENGINE RUNS A RING, NOT RUNS.** `init()` arms it in its
+  circular shape over the whole receive ring's storage
+  ([dma.md](dma.md), "The circular receive"): the channel writes the
+  storage lap after lap and is never re-armed, the ring's producer index
+  is its count register, and the receive ring is the consumer half of
+  that, `util/ring.hpp`'s `HardwareRing`. A byte that lands is readable
+  at once through `read_span()`, `read_byte()` and `read_bulk()`; a
+  burst longer than the run to the end of the storage wraps with no CPU;
+  and nothing is lost between runs, there being none (letter `o` of
+  `test_stm32_dma`: 60 bytes landing with the consumer away, all 60 read
+  back, where a one-shot run to the storage's end delivered 22 and an
+  ORE). The ring is ONE circular block, so `rx_size` is refused past
+  32768 where the transport is named (CNDTR counts 65535).
+- **What the consumer did not keep up with** - a lap written over its
+  unread bytes, or a run written over while it was held - is counted by
+  the ring and skipped, and `rx_overruns()` reports it (without an engine
+  it counts a byte a full ring refused); `read_bulk()` does not count a
+  run that came back torn, and `consume()` answers false for one.
+- **`harvest()`** is the owner's poll, and nothing is published in it:
+  it reads the receive errors once, starts again a channel a transfer
+  error stopped (the ring cleared with it, its unread bytes gone with the
+  abandoned lap, which `dma_faults()` counts), and reports the EDGE a
+  ring with no publish step cannot give by itself - true when bytes stand
+  in a ring the consumer had found empty since the last true, so the
+  kernel glue of `isr()` serves it unchanged. It costs 65..68 cycles with
+  the consumer told and still reading and 102..122 on a drained ring
+  ([dma.md](dma.md) has the listing).
 - **What is traded away** is per-byte error attribution: nobody reads
   ISR per character, so `harvest()` reads it once and counts what it
-  finds.
+  finds, and a framed byte stays in the ring. `isr()` never touches RDR
+  where a receive engine is named: the channel owns RXNE.
 - **`write_byte()` still nudges on a refusal** when a TX engine is
   present, because `print()` answers a false by trying for ever.
+- **A block's start masks the CLAIM and nothing else.** The thread and
+  the transmit channel's completion both start blocks, so `pump_tx()`
+  takes the engine's busy flag (`DmaTxEngine::claim()`) under the
+  platform's guard - seven instructions - and programs the channel
+  unmasked: a free engine has no block in flight, so no completion,
+  error or `consume()` can run under the five stores
+  ([dma.md](dma.md), "Two moments"). A claim that finds the ring empty
+  is given back.
 - **In FIFO mode** - the default where the instance has one - the two
   requests are TXFNF and RXFNE (33.5.19's two notes): still one request
   a character, with the FIFO as slack in front of each channel, and the
   transmit threshold written but never armed.
+- **`release()` stops the instance before its channels**: 10.4.5 stops a
+  circular transfer by stopping the peripheral's requests first, a ring
+  having no idle moment of its own.
 
 ## Bench findings
 
@@ -720,7 +759,13 @@ which is the letter's 2/2 as on the Nucleo-64s.
 
 ## Not covered yet
 
-Driver gaps: none. Every field of chapter 33 is implemented.
+Driver gaps (every field of chapter 33 is implemented):
+- **The line's IDLE edge as the end of a received burst.** With a
+  receive engine the ring needs no re-arm, but its owner still polls
+  `harvest()` on a TimeEvent and pays that latency; the IDLE flag (or the
+  receiver time-out) posting at a burst's end is the UART round's, which
+  takes every transport's receive edge as a whole - this round gave the
+  receive engine the circular shape the edge will stand on.
 
 Declined with a reason:
 - **The synchronous DATA path.** The master's CK, its polarity, its
@@ -740,6 +785,12 @@ Declined with a reason:
   brio's business yet.
 
 Implemented, not bench-verified:
+- The receive ring off the STM32G0B1RE: `test_stm32_dma`'s console
+  carries both engines on the STM32G071RB too, and its letter `o` is
+  built for both smaller parts; none of it has run there (the boards are
+  not on the desk), and one run of the suite on each measures it. The ring
+  under an `LpUart` is the same task's and compile-only, as the LPUART's
+  engine slots are ([lpuart.md](lpuart.md)).
 - `Rs485` as a TASK (the driver-enable timings are measured through the
   resource on the DE pad; the task's own `init()` path is compile-only).
 - The receive-threshold interrupt as a TRANSPORT pace (RXFT is measured
@@ -775,5 +826,6 @@ Implemented, not bench-verified:
 The DMA half is bench-verified in `test_stm32_dma`, whose own console
 carries both engines - so every verdict line of that suite left the chip
 through a `DmaTxEngine` and every letter arrived through a `DmaRxEngine`
+ring, and its letter `o` judges the ring on USART1's single wire
 (docs/stm32g0/dma.md has the throughput table and the ST-LINK VCP's own
 921600 ceiling).

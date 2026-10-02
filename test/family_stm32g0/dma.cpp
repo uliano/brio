@@ -38,6 +38,8 @@
 #include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/block_stream.hpp"
+#include "util/ring.hpp"
+#include "util/stream.hpp"
 
 using namespace brio;
 
@@ -108,6 +110,11 @@ uint16_t halves[8];
 volatile uint16_t rx_halves[2][8];
 uint32_t words[8];
 volatile uint32_t rx_words[2][8];
+// The receive engine's circular shape at its three beats: a ring's
+// storage each, power-of-two long for the consumer view over it.
+uint8_t ring_bytes[16];
+uint16_t ring_halves[16];
+uint32_t ring_words[16];
 
 template <uint8_t n, uint8_t ch>
 void one_channel() {
@@ -211,7 +218,12 @@ void engines_at(Elem* table, Buf* a, Buf* b) {
     static_assert(!BlockSource<Rx>, "an RX engine hands over no BLOCK - it is asked");
 
     Tx::arm(&sink, 51);
-    (void)Tx::start(table, 4);
+    (void)Tx::start(std::span<const Elem>(table, 4));
+    (void)Tx::start(std::span<const uint8_t>(bytes, 4));
+    (void)Tx::start_fixed(table, 4);
+    if (Tx::claim() && !Tx::launch(std::span<const Elem>(table, 4))) {
+        Tx::unclaim();
+    }
     (void)Tx::service();
     (void)Tx::complete();
     (void)Tx::busy();
@@ -222,8 +234,10 @@ void engines_at(Elem* table, Buf* a, Buf* b) {
     Tx::clear_faults();
     Tx::stop();
 
-    Rx::arm(&sink, 50);
-    (void)Rx::start(table, 4);
+    Rx::arm(&sink, 50, DmaPriority::high, DmaIrq::error_only);
+    (void)Rx::start(std::span<Elem>(table, 4));
+    (void)Rx::start(std::span<uint8_t>(bytes, 4));
+    (void)Rx::start_discard(table, 4);
     (void)Rx::idle();
     (void)Rx::take();
     (void)Rx::full();
@@ -268,6 +282,87 @@ void engines_at(Elem* table, Buf* a, Buf* b) {
     Pong::stop();
 }
 
+/// The receive engine's CIRCULAR shape over a ring's whole storage, and
+/// the consumer view util/ring.hpp builds over it: the engine is the
+/// view's RingCounter, and with a byte ring the view is a SpanSource.
+template <uint8_t n, uint8_t ch, typename Elem, auto& ring>
+void circular_receive() {
+    using Rx = DmaRxEngine<n, ch, Elem>;
+    using View = HardwareRing<ring, Rx>;
+    static_assert(RingCounter<Rx>, "the receive engine counts a ring's producer");
+    static_assert(View::size == 16u && View::capacity() == 15u);
+    static_assert(SpanSource<View> == (sizeof(typename View::element) == 1u),
+                  "a byte ring is a SpanSource; a wider one hands out beats");
+
+    Rx::arm(&sink, 50, ring, DmaPriority::medium);
+    (void)Rx::start();
+    (void)Rx::remaining();
+    (void)Rx::laps();
+    (void)Rx::complete();
+    (void)Rx::idle();
+    (void)Rx::service();
+    (void)View::read_span();
+    (void)View::consume(1);
+    (void)View::pop();
+    (void)View::count();
+    (void)View::empty();
+    (void)View::overruns();
+    View::clear_overruns();
+    View::clear();
+    (void)Rx::start(std::span(&ring[0], 4));   // a one-shot run on the same binding
+    (void)Rx::abandon();
+    Rx::stop();
+}
+
+/// The memory-to-memory engine: every width both ways, both completions.
+template <uint8_t n, uint8_t ch>
+void copy_engine() {
+    using Copy = DmaCopyEngine<n, ch>;
+    static_assert(Copy::present && Copy::controller == n && Copy::channel == ch);
+    Copy::arm();
+    Copy::arm(DmaPriority::very_high, DmaIrq::error_only);
+    (void)Copy::copy(bytes, bytes + 4, 4);
+    (void)Copy::copy(halves, halves + 4, 4);
+    (void)Copy::copy(words, words + 4, 4);
+    (void)Copy::fill(bytes, bytes + 7, 4);
+    (void)Copy::fill(halves, halves + 7, 4);
+    (void)Copy::fill(words, words + 7, 4);
+    (void)Copy::busy();
+    (void)Copy::service();
+    (void)Copy::complete();
+    (void)Copy::poll();
+    (void)Copy::progress();
+    (void)Copy::abandon();
+    (void)Copy::faults();
+    Copy::clear_faults();
+    Copy::stop();
+}
+
+/// A byte transport on both engines: pump_tx()'s claim under the guard
+/// and its launch outside it, the receive engine's ring and the view the
+/// transport reads it through, the ISR body.
+constexpr UartPins engine_pins{.tx = {'A', 2, PinFunction::af1}, .rx = {'A', 3, PinFunction::af1}};
+using EngineUart = Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<1, 5>>;
+
+void engined_transport() {
+    constexpr Clock<ClockSource::pll, 64'000'000> clock;
+    (void)EngineUart::init(clock, 115200);
+    (void)EngineUart::write_byte(0x55);
+    (void)EngineUart::write_bulk(std::span<const uint8_t>(bytes, 4));
+    (void)EngineUart::dma_isr();
+    (void)EngineUart::harvest();
+    static_assert(SpanSource<EngineUart>, "the engined transport lends the ring in place");
+    uint8_t b = 0;
+    (void)EngineUart::read_byte(b);
+    (void)EngineUart::read_bulk(std::span<uint8_t>(bytes, 4));
+    const bool intact = EngineUart::consume(static_cast<uint32_t>(EngineUart::read_span().size()));
+    (void)intact;
+    (void)EngineUart::rx_pending();
+    (void)EngineUart::rx_overruns();
+    EngineUart::clear_errors();
+    EngineUart::release();
+}
+
 }   // namespace
 
 void family_stm32g0_dma();
@@ -281,9 +376,17 @@ void family_stm32g0_dma() {
     engines_at<1, 1, uint8_t>(bytes, rx_bytes[0], rx_bytes[1]);
     engines_at<1, 2, uint16_t>(halves, rx_halves[0], rx_halves[1]);
     engines_at<1, 3, uint32_t>(words, rx_words[0], rx_words[1]);
+    circular_receive<1, 1, uint8_t, ring_bytes>();
+    circular_receive<1, 2, uint16_t, ring_halves>();
+    circular_receive<1, 3, uint32_t, ring_words>();
+    circular_receive<1, 4, uint32_t, ring_halves>();   // a half-word ring on a word binding
 #if defined(DMA2_BASE)
     engines_at<2, 5, uint32_t>(words, rx_words[0], rx_words[1]);
+    circular_receive<2, 5, uint8_t, ring_bytes>();
+    copy_engine<2, 1>();
 #endif
+    copy_engine<1, 1>();
+    engined_transport();
 }
 
 // ---- what the peripherals publish ------------------------------------------

@@ -128,6 +128,9 @@ static_assert(Peer::frames_ahead == 2);
 using Tx = DmaTxEngine<1, 1>;
 using Rx = DmaRxEngine<1, 2>;
 using EngineHost = SpiHost<1, host_pins, Tx, Rx>;
+// The half-word engines: the same two channels, a frame of either width
+// on the DMA (the beat per start()).
+using WideHost = SpiHost<1, host_pins, DmaTxEngine<1, 1, uint16_t>, DmaRxEngine<1, 2, uint16_t>>;
 #if defined(SPI3_BASE)
 constexpr SpiPins third_pins{
     .sck = {'C', 10, PinFunction::af4},    // SPI3_SCK
@@ -312,7 +315,21 @@ void spi_tasks() {
     (void)EngineHost::start(e);
     (void)EngineHost::isr();
     (void)EngineHost::dma_isr();
+    (void)EngineHost::recover();
     EngineHost::release();
+
+    (void)WideHost::init(clock);
+    WideHost::Request w{};
+    w.tx = lend<Lease::reply>(cmd);
+    w.len = 1;
+    w.bits = SpiDataSize::bits16;
+    (void)WideHost::start(w);
+    w.polled = true;
+    (void)WideHost::start(w);
+    (void)WideHost::isr();
+    (void)WideHost::dma_isr();
+    (void)WideHost::recover();
+    WideHost::release();
 
 #if defined(SPI3_BASE)
     (void)Third::init(clock);

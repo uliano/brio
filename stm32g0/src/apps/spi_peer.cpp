@@ -514,8 +514,8 @@ spilink::Report run_exchange(const spilink::Params& a) {
         (void)Raw::dma_receive(true);
         PeerRx::arm(Raw::data_address(), Raw::dma_rx_request());
         PeerTx::arm(Raw::data_address(), Raw::dma_tx_request());
-        (void)PeerRx::start(x_in, n);
-        (void)PeerTx::start(x_dma_out, n);
+        (void)PeerRx::start(std::span<uint8_t>(x_in, n));
+        (void)PeerTx::start(std::span<const uint8_t>(x_dma_out, n));
         Raw::enable();
 
         const uint32_t t0 = Ticker::millis();

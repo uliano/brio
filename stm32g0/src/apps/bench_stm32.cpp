@@ -112,6 +112,26 @@
 //      Idle::idle() turns with the console drained - not a kernel loop:
 //      no kernel runs here. wall = the second, irq = the ticks, isr = the
 //      tick handler's cycles, busy = the floor. n=0, wire=0.
+//   d  THE DMA ENGINES (stm32g0/dma.hpp), each op the best of 8 runs, the
+//      completion an interrupt awaited on the masked idle path (one meter,
+//      `dma_meter`, on the three DMA vectors and SPI1's), and after each
+//      line the start call alone - "the launch call" / "start()", timed
+//      with interrupts masked, one ruler read in it:
+//        copy, fill  DmaCopyEngine on DMA1 channel 1, word beats, 16, 256
+//                    and letter m's largest size; the data checked after;
+//                    the cycles a word by the difference of the two larger
+//                    walls and each wall's fixed cost beside it;
+//        paced       256 words from a table into one RAM cell by
+//                    DmaTxEngine<1, 4, uint32_t> on TIM3's update at 100
+//                    kHz, the counter restarted from zero every run so the
+//                    first item lands one period after the start: the wall
+//                    against the 256 periods, the jitter the spread of the
+//                    eight walls;
+//        spi.dma     SpiHost<1> on its two engines (uint16_t, DMA1 channels
+//                    2 and 3), SPI1 on PB3/PB4/PB5 with nothing wired - MISO
+//                    floats: 16 and 256 frames of 8 bits (`spi.dma`) and of
+//                    16 (`spi.dma.w16`) at PCLK/2 and PCLK/8, the wall
+//                    against the wire.
 //   f  THE PREFETCH (FLASH_ACR.PRFTEN, RM0444 3.3.5) as a column of its
 //      own: the instrument's three cost lines and letters m, p and t run
 //      TWICE through stm32g0/flash.hpp's FlashAccel::prefetch() - off,
@@ -144,6 +164,13 @@
 //           implementation's.
 //   memset  4 bytes a cycle x hz = 256 000 000 B/s: one STM beat per word
 //           (the same table), nothing loaded.
+//   copy    a word in two cycles x hz = 128 000 000 B/s (and fill): RM0444
+//           10.4.3, a single DMA transfer is a read and a write over the
+//           controller's one AHB master - the same floor as memcpy's.
+//   paced   4 bytes x 100 kHz = 400 000 B/s, the request's own rate.
+//   spi.dma SCK / 8 bytes a second: PCLK/2 = 32 MHz -> 4 000 000 B/s,
+//           PCLK/8 -> 1 000 000; a 16-bit frame is two bytes in sixteen
+//           bit times, the same rate.
 //   r, t    wire=0: an instrument's cost and an idle second carry no
 //           bytes.
 //
@@ -175,13 +202,17 @@
 
 #include <array>
 #include <cstring>
+#include <span>
 
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
+#include "stm32g0/dma.hpp"
 #include "stm32g0/flash.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/platform.hpp"
+#include "stm32g0/spi.hpp"
 #include "stm32g0/ticker.hpp"
+#include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
@@ -232,6 +263,7 @@ static_assert(Platform<Idle>);
 IsrMeter<Ruler, Idle> usart_meter;
 IsrMeter<TickRuler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> empty_meter;
+IsrMeter<Ruler, Idle> dma_meter;   // letter d: the three DMA vectors and SPI1's
 
 /// The counters at one instant, read UNDER THE MASK although every word
 /// of them is atomic on this core: the tick keeps running between two
@@ -244,7 +276,7 @@ BenchCounters counters_of(const Meters&... m) {
     const Idle::CriticalSection cs;
     return bench_counters<Idle>(m...);
 }
-BenchCounters counters() { return counters_of(usart_meter, tick_meter); }
+BenchCounters counters() { return counters_of(usart_meter, tick_meter, dma_meter); }
 
 /// The same instant with the two vectors kept apart, for letter p.
 struct Snapshot {
@@ -562,6 +594,318 @@ void tf_prefetch() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// d - the DMA: the engines' cost (stm32g0/dma.hpp)
+// =============================================================================
+/// A word moved in two cycles: 10.4.3's single transfer is a read and a
+/// write over the controller's one AHB master.
+constexpr uint32_t dma_wire_bps = 2u * SysClock::hz;
+
+// -- copy and fill: DmaCopyEngine on DMA1 channel 1, word beats
+using Copy = DmaCopyEngine<1, 1>;
+
+bool copy_words(uint32_t* dst, const uint32_t* src, uint16_t words, bool fill) {
+    return fill ? Copy::fill(dst, src, words) : Copy::copy(dst, src, words);
+}
+
+void copy_vector() {
+    const uint8_t f = Copy::service();
+    if ((f & Copy::flag_error) != 0u) {
+        (void)Copy::abandon();
+    } else if ((f & Copy::flag_complete) != 0u) {
+        (void)Copy::complete();
+    }
+}
+
+// -- paced: 256 words from a table into one cell on TIM3's update
+using T3 = Tim<3>;
+using Paced = DmaTxEngine<1, 4, uint32_t>;
+constexpr uint32_t paced_hz = 100'000u;
+constexpr uint32_t paced_period = SysClock::hz / paced_hz;   // 640 cycles
+constexpr uint16_t paced_items = 256u;
+static_assert(SysClock::hz % paced_hz == 0u);
+uint32_t paced_table[paced_items];
+volatile uint32_t paced_cell = 0;
+
+bool paced_start(const uint32_t* table, uint16_t n) {
+    return Paced::start(std::span<const uint32_t>(table, n));
+}
+
+void paced_vector() {
+    const uint8_t f = Paced::service();
+    if ((f & Paced::flag_error) != 0u) {
+        (void)Paced::abandon();
+    } else if ((f & Paced::flag_complete) != 0u) {
+        (void)Paced::complete();
+    }
+}
+
+// -- the engined SPI host: test_stm32_spi's SPI1 pads, NOTHING WIRED to
+// them - MISO floats, and the time is the wire's whatever comes back.
+using SpiTx = DmaTxEngine<1, 2, uint16_t>;
+using SpiRx = DmaRxEngine<1, 3, uint16_t>;
+constexpr SpiPins spi_pins{
+    .sck = {'B', 3, PinFunction::af0},
+    .miso = {'B', 4, PinFunction::af0},
+    .mosi = {'B', 5, PinFunction::af0},
+    .nss = {},
+};
+using SpiHw = SpiHost<1, spi_pins, SpiTx, SpiRx>;
+volatile bool spi_done = false;
+volatile bool spi_live = false;   // read by the vectors: a plain store would be dead to the compiler
+alignas(4) uint8_t spi_tx[512];
+alignas(4) uint8_t spi_rx[512];
+
+/// The THREAD'S own cost of starting a block: the call alone, timed with
+/// interrupts masked (so a completion that lands at once is served after
+/// the second read, not inside the window), the completion waited for
+/// outside the clock; the shortest of 8 runs, one ruler read in it.
+template <typename Prep, typename Launch, typename Wait>
+uint32_t launch_cost(Prep prep, Launch launch, Wait wait) {
+    uint32_t best = 0;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        prep();
+        disable_interrupts();
+        const uint32_t t0 = Ruler::now();
+        asm volatile("" ::: "memory");
+        const bool started = launch();
+        asm volatile("" ::: "memory");
+        const uint32_t d = Ruler::now() - t0;
+        enable_interrupts();
+        (void)wait(started);
+        if (run == 0u || d < best) {
+            best = d;
+        }
+    }
+    return best;
+}
+
+/// Idle (the masked call of Idle::idle()) until `pending()` falls; false
+/// when `budget_ms` ran out first.
+template <typename Pending>
+bool idle_while(Pending pending, uint32_t budget_ms) {
+    const uint32_t t0 = Ticker::millis();
+    for (;;) {
+        disable_interrupts();
+        if (!pending()) {
+            enable_interrupts();
+            return true;
+        }
+        if (Ticker::millis() - t0 > budget_ms) {
+            enable_interrupts();
+            return false;
+        }
+        Idle::idle();
+    }
+}
+
+/// best_of_8 with the wait inside the op, a preparation outside the
+/// clock, every run's success and the worst wall kept.
+template <typename Prep, typename Op>
+BenchSample best_of_8_dma(Prep prep, Op op, bool& ok, uint32_t& worst) {
+    (void)drain();
+    BenchSample best{};
+    worst = 0;
+    ok = true;
+    Stopwatch<Ruler> sw;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        prep();
+        const BenchCounters c0 = counters();
+        sw.start();
+        const bool done = op();
+        const uint32_t wall = sw.elapsed();
+        const BenchSample s = bench_sample(wall, c0, counters());
+        asm volatile("" ::: "memory");
+        ok = ok && done;
+        if (wall > worst) {
+            worst = wall;
+        }
+        if (run == 0u || s.wall < best.wall || (s.wall == best.wall && s.irq < best.irq)) {
+            best = s;
+        }
+    }
+    return best;
+}
+
+void run_copy(bool fill) {
+    uint32_t* const dst = reinterpret_cast<uint32_t*>(mem_dst);
+    const uint32_t* const src = reinterpret_cast<const uint32_t*>(mem_src);
+    static uint32_t cell = 0;
+    for (uint32_t i = 0; i < mem_max; ++i) {
+        mem_src[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    uint32_t walls[3] = {};
+    uint8_t k = 0;
+    for (const uint32_t n : std::array<uint32_t, 3>{16u, 256u, mem_max}) {
+        const uint16_t words = static_cast<uint16_t>(n / 4u);
+        cell = 0xA5000000u | n;
+        bool ok = false;
+        uint32_t worst = 0;
+        const BenchSample s = best_of_8_dma(
+            [n] { std::memset(mem_dst, 0, n); },
+            [&] {
+                if (!copy_words(dst, fill ? &cell : src, words, fill)) {
+                    return false;
+                }
+                return idle_while([] { return Copy::busy(); }, 10u);
+            },
+            ok, worst);
+        bool data = ok;
+        for (uint32_t i = 0; i < words && data; ++i) {
+            data = fill ? dst[i] == cell : dst[i] == src[i];
+        }
+        bench_line(serial, fill ? "fill" : "copy", n, s, Ruler::hz(), dma_wire_bps);
+        const uint32_t launch = launch_cost(
+            [] {}, [&] { return copy_words(dst, fill ? &cell : src, words, fill); },
+            [](bool started) { return started && idle_while([] { return Copy::busy(); }, 10u); });
+        print(serial, "  data ", data ? "exact" : "WRONG", ", worst wall ", worst,
+              ", the launch call ", launch, crlf);
+        walls[k++] = s.wall;
+    }
+    // The DMA's own time per word, by the difference of the two larger
+    // sizes, and what is left of each wall: the fixed cost of a block.
+    const uint32_t big_words = mem_max / 4u;
+    const uint32_t per_word_x100 = (walls[2] - walls[1]) * 100u / (big_words - 64u);
+    print(serial, "  ", fill ? "fill" : "copy", ": ", per_word_x100 / 100u, '.',
+          per_word_x100 % 100u < 10u ? "0" : "", per_word_x100 % 100u,
+          " cycles a word (", mem_max, " - 256 bytes); fixed cost");
+    const uint32_t sizes[3] = {16u, 256u, mem_max};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        const uint32_t dma = (sizes[i] / 4u) * per_word_x100 / 100u;
+        print(serial, " n=", sizes[i], ':', walls[i] > dma ? walls[i] - dma : 0u);
+    }
+    print(serial, crlf);
+}
+
+void run_paced() {
+    for (uint16_t i = 0; i < paced_items; ++i) {
+        paced_table[i] = 0x5A000000u | i;
+    }
+    T3::init();
+    (void)T3::configure({.prescaler = 0, .period = paced_period - 1u});
+    Paced::arm(&paced_cell, T3::dma_update_request());
+    bool ok = false;
+    uint32_t worst = 0;
+    const BenchSample s = best_of_8_dma(
+        [] {
+            // The counter from zero and the request line down, so the
+            // first item lands one whole period after the start.
+            T3::enable(false);
+            T3::interrupts(T3::update_dma, false);
+            T3::set_count(0);
+            T3::clear_flags(TIM_SR_UIF);
+            T3::interrupts(T3::update_dma, true);
+        },
+        [] {
+            if (!paced_start(paced_table, paced_items)) {
+                return false;
+            }
+            T3::enable(true);
+            const bool done = idle_while([] { return Paced::busy(); }, 20u);
+            T3::enable(false);
+            return done;
+        },
+        ok, worst);
+    // The launch alone, the timer stopped so nothing is served under it.
+    const uint32_t launch = launch_cost(
+        [] {}, [] { return paced_start(paced_table, paced_items); },
+        [](bool started) {
+            if (started) {
+                Paced::stop();
+            }
+            return true;
+        });
+    T3::interrupts(T3::update_dma, false);
+    T3::release();
+    Paced::stop();
+    constexpr uint32_t nominal = paced_items * paced_period;
+    bench_line(serial, "paced", paced_items * 4u, s, Ruler::hz(), paced_hz * 4u);
+    print(serial, "  ", paced_items, " words at ", paced_hz, " Hz into one cell: nominal ",
+          nominal, " cycles, best wall ", s.wall, " (+", s.wall - nominal, "), worst ", worst,
+          " (+", worst - nominal, "), jitter ", worst - s.wall, ", the launch call ", launch,
+          ", cell ", hex(paced_cell),
+          ok ? "" : " - A RUN TIMED OUT", crlf);
+}
+
+void run_spi(SpiDataSize bits, SpiClock rate, uint16_t div) {
+    const bool wide = bits == SpiDataSize::bits16;
+    for (const uint16_t frames : {uint16_t{16}, uint16_t{256}}) {
+        const uint32_t bytes = wide ? 2u * frames : frames;
+        bool ok = false;
+        uint32_t worst = 0;
+        const BenchSample s = best_of_8_dma(
+            [] {},
+            [=] {
+                SpiHw::Request r{};
+                r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
+                r.rx = lend<Lease::reply>(spi_rx);
+                r.len = frames;
+                r.clock = rate;
+                r.mode = SpiMode::mode0;
+                r.bits = bits;
+                r.polled = false;
+                spi_done = false;
+                if (SpiHw::start(r)) {
+                    return true;
+                }
+                if (!idle_while([] { return !spi_done; }, 20u)) {
+                    (void)SpiHw::recover();
+                    return false;
+                }
+                return true;
+            },
+            ok, worst);
+        // start() alone: the Request built outside the clock.
+        SpiHw::Request lr{};
+        lr.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
+        lr.rx = lend<Lease::reply>(spi_rx);
+        lr.len = frames;
+        lr.clock = rate;
+        lr.mode = SpiMode::mode0;
+        lr.bits = bits;
+        const uint32_t launch = launch_cost(
+            [] { spi_done = false; }, [&] { return SpiHw::start(lr); },
+            [](bool done) {
+                if (done || idle_while([] { return !spi_done; }, 20u)) {
+                    return true;
+                }
+                (void)SpiHw::recover();
+                return false;
+            });
+        const uint32_t wire_bps = SysClock::hz / div / 8u;
+        bench_line(serial, wide ? "spi.dma.w16" : "spi.dma", bytes, s, Ruler::hz(), wire_bps);
+        const uint32_t wire_cycles = bytes * 8u * div;
+        print(serial, "  ", frames, wide ? " 16-bit" : " 8-bit", " frames at PCLK/", div,
+              ": the wire ", wire_cycles, " cycles, the rest ",
+              s.wall > wire_cycles ? s.wall - wire_cycles : 0u, ", worst wall ", worst,
+              ", start() ", launch,
+              ok ? "" : " - A TRANSACTION TIMED OUT", crlf);
+    }
+}
+
+void td_dma() {
+    print(serial, "  copy/fill: DMA1 channel 1, word beats, memory to memory; paced: "
+                  "DMA1 channel 4 on TIM3's update; spi: DmaTxEngine<1, 2> + "
+                  "DmaRxEngine<1, 3> (uint16_t)",
+          crlf);
+    Copy::arm();
+    run_copy(false);
+    run_copy(true);
+    run_paced();
+    for (uint16_t i = 0; i < 512u; ++i) {
+        spi_tx[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    (void)SpiHw::init(clock);
+    spi_live = true;
+    run_spi(SpiDataSize::bits8, SpiClock::div2, 2u);
+    run_spi(SpiDataSize::bits8, SpiClock::div8, 8u);
+    run_spi(SpiDataSize::bits16, SpiClock::div2, 2u);
+    run_spi(SpiDataSize::bits16, SpiClock::div8, 8u);
+    spi_live = false;
+    SpiHw::release();
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_stm32 - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console USART2 ", console_baud, " 8N1 (", Serial::actual_baud(SysClock::pclk_hz),
@@ -581,6 +925,30 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
     (void)Serial::isr();
     usart_meter.leave();
 }
+extern "C" void DMA1_Channel1_IRQHandler() {
+    dma_meter.enter();
+    copy_vector();
+    dma_meter.leave();
+}
+extern "C" void DMA1_Channel2_3_IRQHandler() {
+    dma_meter.enter();
+    if (spi_live && SpiHw::dma_isr()) {
+        spi_done = true;
+    }
+    dma_meter.leave();
+}
+extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
+    dma_meter.enter();
+    paced_vector();
+    dma_meter.leave();
+}
+extern "C" void SPI1_IRQHandler() {
+    dma_meter.enter();
+    if (spi_live && SpiHw::isr()) {
+        spi_done = true;
+    }
+    dma_meter.leave();
+}
 extern "C" void SysTick_Handler() {
     tick_meter.enter();
     brio::Ticker::tick();
@@ -598,6 +966,7 @@ int main() {
                  tm_memory);
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
+    bench.letter('d', "the DMA: copy and fill, a paced block, the engined SPI host", td_dma);
     bench.letter('f', "the prefetch: the costs, m, p and t with PRFTEN off, then on", tf_prefetch);
 
     if (serial_ok) {

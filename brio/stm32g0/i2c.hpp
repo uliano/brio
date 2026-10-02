@@ -126,6 +126,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "stm32g0xx.h"
@@ -1646,8 +1647,9 @@ struct I2c {
  * file states: a driver with an optional engine slot must not include
  * stm32g0/dma.hpp, or every program with a bus would carry the DMA
  * controller. This file reaches its engines only through their own
- * published names - start(), service(), abandon(), stop(), busy(),
- * flag_complete, flag_error - and never spells a DmaChannel.
+ * published names - start(), service(), complete(), abandon(), stop(),
+ * busy(), flag_complete, flag_error - and the slot file's DmaIrq, and
+ * never spells a DmaChannel.
  */
 
 /// Both engines or neither, and never the same channel twice. UNLIKE THE
@@ -1728,7 +1730,14 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * the DMA - the TX channel feeds TXDR on TXIS and the RX channel drains
  * RXDR on RXNE - while the address, the repeated START and the ending
  * stay on the interrupt, because 32.7 says the address "cannot be
- * transferred with DMA". The completion edge is STOPF either way.
+ * transferred with DMA". The completion edge is STOPF either way, and
+ * THAT IS WHY BOTH ENGINES ARE ARMED FOR THEIR ERRORS ALONE
+ * (DmaIrq::error_only): a tenure that ends on its STOP after NBYTES has
+ * had every byte written to TXDR and read from RXDR, so a channel's own
+ * completion interrupt would prove nothing STOPF does not, and a tenure
+ * costs the I2C's interrupts and no DMA one. finish() completes the
+ * transmit engine on that proof, or on a count run to zero, and abandons
+ * it - counted, an untransmitted tail - otherwise.
  *
  * THE DMA CONTROLLER IS THE APP'S: Dma1::init() before any engined
  * init(). The engines arm CHANNELS of a controller somebody else owns.
@@ -1851,8 +1860,7 @@ public:
             // registers and its own DMAMUX request lines. Unlike the
             // SPI's one DR, an I2C has a separate TXDR and RXDR, so the
             // two engines never share an address.
-            TxEngine::arm(S::tx_address(), S::dma_tx_request());
-            RxEngine::arm(S::rx_address(), S::dma_rx_request());
+            arm_engines();
         }
         // The pads go to the peripheral only now. OPEN DRAIN is not an
         // option here but the definition of the bus: the pull-ups own
@@ -2152,26 +2160,17 @@ public:
     /// vector each channel reports on. Compiles away on an engineless
     /// host.
     ///
-    /// A transfer error on either channel ends the tenure with
-    /// i2c_dma_fault and a software STOP, so the bus is released rather
-    /// than left to a channel that will never be served again.
+    /// Both engines are armed for their errors alone (the class comment:
+    /// STOPF is the tenure's edge), so the only thing this body ever finds
+    /// is a TRANSFER ERROR - which ends the tenure with i2c_dma_fault and
+    /// a software STOP, so the bus is released rather than left to a
+    /// channel that will never be served again.
     ///
     /// Returns true when the tenure just completed that way.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
             const uint8_t rx = RxEngine::service();
-            if ((tx & TxEngine::flag_complete) != 0u) {
-                (void)TxEngine::complete();
-            }
-            // The RECEIVE side needs no completion verb: its block IS
-            // the Request's rx span, already filled in place, and the
-            // tenure's end is STOPF either way. take() is read only so
-            // the engine's own count does not carry into the next
-            // tenure.
-            if ((rx & RxEngine::flag_complete) != 0u) {
-                (void)RxEngine::take();
-            }
             if (((tx & TxEngine::flag_error) | (rx & RxEngine::flag_error)) != 0u) {
                 if (phase_ != Phase::idle) {
                     (void)TxEngine::abandon();
@@ -2266,8 +2265,7 @@ public:
         if constexpr (has_engines) {
             (void)TxEngine::abandon();
             RxEngine::stop();
-            TxEngine::arm(S::tx_address(), S::dma_tx_request());
-            RxEngine::arm(S::rx_address(), S::dma_rx_request());
+            arm_engines();
         }
         const bool ok = S::cycle();
         S::clear(I2cClear::all);
@@ -2305,8 +2303,20 @@ private:
         // the tenure (see start()).
         S::interrupt(I2cInterrupt::transfer_complete, false);
         if constexpr (has_engines) {
-            (void)TxEngine::abandon();
-            RxEngine::stop();
+            if (st == i2c_ok || TxEngine::progress().remaining == 0u) {
+                // The STOP after NBYTES proves the transmit block went out
+                // whole (the class comment), and on any other ending a
+                // block whose count reached zero went out whole too (a
+                // NACK on its last byte); the receive block is the
+                // Request's span, and the next start() reprograms its
+                // channel.
+                (void)TxEngine::complete();
+            } else {
+                (void)TxEngine::abandon();   // an untransmitted tail, counted
+            }
+            if (st != i2c_ok) {
+                RxEngine::stop();
+            }
             S::dma_transmit(false);
             S::dma_receive(false);
         }
@@ -2317,15 +2327,22 @@ private:
         return true;
     }
 
+    /// The two engines bound to THIS instance's TXDR and RXDR and their
+    /// DMAMUX lines, both for their errors alone (the class comment).
+    static void arm_engines() {
+        TxEngine::arm(S::tx_address(), S::dma_tx_request(), {}, DmaIrq::error_only);
+        RxEngine::arm(S::rx_address(), S::dma_rx_request(), {}, DmaIrq::error_only);
+    }
+
     static void launch_dma() {
         if constexpr (has_engines) {
             if (req_.rx_len != 0u && req_.rx.get() != nullptr) {
-                (void)RxEngine::start(req_.rx.get(), req_.rx_len);
+                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
                 S::dma_receive(true);
                 S::interrupt(I2cInterrupt::rx, false);
             }
             if (req_.tx_len != 0u && req_.tx.get() != nullptr) {
-                (void)TxEngine::start(req_.tx.get(), req_.tx_len);
+                (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
                 S::dma_transmit(true);
                 S::interrupt(I2cInterrupt::tx, false);
             }

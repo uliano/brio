@@ -192,14 +192,20 @@ extern "C" void SPI1_IRQHandler() {
 
 **The data phase on DMA.** Name both engine slots and bind the channels'
 vectors as well; the command phase stays on the frame pump and the
-engines take the data phase at its end.
+engines take the data phase at its end. Engines of `uint16_t` serve a
+frame of either width, each with its own beat - a byte access to DR for
+eight bits or fewer, a half-word one above (35.5.9) - and a wide request
+whose buffers are not half-word aligned goes to the frame pump, decided
+before the select. The transmit engine is armed for its errors alone:
+the receive block's completion is the transaction's, and it proves the
+transmit block's, so a transaction takes ONE interrupt; its channel's
+vector is still bound, for an error.
 
 ```cpp
-using Tx = brio::DmaTxEngine<1, 1>;
-using Rx = brio::DmaRxEngine<1, 2>;
+using Tx = brio::DmaTxEngine<1, 1, uint16_t>;
+using Rx = brio::DmaRxEngine<1, 2, uint16_t>;
 using Bus = brio::SpiHost<1, bus_pins, Tx, Rx>;
-brio::Dma<1>::bus_clock(true);     // the CONTROLLER is the app's
-(void)Bus::init(clock);
+(void)Bus::init(clock);            // arms both engines: the gate, the requests, DR
 extern "C" void DMA1_Channel1_IRQHandler()   { if (Bus::dma_isr()) { /* post */ } }
 extern "C" void DMA1_Channel2_3_IRQHandler() { if (Bus::dma_isr()) { /* post */ } }
 ```
@@ -375,6 +381,34 @@ ends on DMA channels the ladder is monotone and has a real ceiling:
 byte-exact to PCLK/4 = 16 MHz, slipping at PCLK/2 = 32 MHz** - a channel
 sustains frames an interrupt entry cannot, which is the distinction the
 CPU-driven ladder could only name.
+
+**The engined transaction's cost, with nothing on the wire**
+(`bench_stm32` letter `d`: SPI1 on PB3/PB4/PB5 with MISO floating, the
+engines `uint16_t` on DMA1 channels 2 and 3, the completion awaited on
+the idle path; [../design/benchmark.md](../design/benchmark.md)'s
+grammar, n in bytes, the wire SCK/8 bytes a second):
+
+| op | n | PCLK/ | wall | busy | irq | isr | wire cycles | rest |
+|---|---|---|---|---|---|---|---|---|
+| spi.dma (8-bit) | 16 | 2 | 1340 | 1035 | 1 | 241 | 256 | 1084 |
+| spi.dma (8-bit) | 256 | 2 | 5180 | 1035 | 1 | 241 | 4096 | 1084 |
+| spi.dma (8-bit) | 16 | 8 | 2105 | 1035 | 1 | 241 | 1024 | 1081 |
+| spi.dma (8-bit) | 256 | 8 | 17465 | 1035 | 1 | 241 | 16384 | 1081 |
+| spi.dma.w16 | 32 | 2 | 1601 | 1040 | 1 | 241 | 512 | 1089 |
+| spi.dma.w16 | 512 | 2 | 9281 | 1040 | 1 | 241 | 8192 | 1089 |
+| spi.dma.w16 | 32 | 8 | 3134 | 1039 | 1 | 241 | 2048 | 1086 |
+| spi.dma.w16 | 512 | 8 | 33854 | 1039 | 1 | 241 | 32768 | 1086 |
+
+Every frame beyond the first costs exactly the wire's time - 16.0 HCLK
+cycles a byte at PCLK/2, 64.0 at PCLK/8, either width - so the engines
+keep the FIFO fed at the top rate and the per-byte time is the wire's.
+What a transaction adds is a constant some 1085 cycles: `start()` itself
+(485 measured alone, a ruler read of ~62 in it: the Request's copy, the
+cached `apply()`, the select, `flush_rx()`, `dma_serves()` and the two
+engines' five stores each), ONE completion interrupt whose handler is
+241 cycles with the meter's stamps, and the idle path's wake with the
+bench's own idle-window reads.
+
 **35.9.2's LDMA_TX, measured**: three 16-bit DMA accesses to an 8-bit
 frame size carry SIX frames with the bit clear and FIVE with it set, the
 odd count told to the silicon being what stops the dummy half of the
@@ -645,11 +679,11 @@ must reach the registers itself:
   after `init()` (the stm32g0 `spi_peer` does), and a `PinSpeed` field
   on the two tasks' configs is the driver's answer, born with its second
   user.
-- **the host's DMA path serves frame sizes of eight bits and below.**
-  The engine slots carry `uint8_t`, so a request with `bits` above eight
-  on an engined host runs on the frame pump. A second pair of half-word
-  slots would double the task's template surface for a case the pump
-  serves correctly; declined, and stated in the header.
+- **a wide frame on byte engines, or from an odd address, runs on the
+  frame pump.** Engines of `uint8_t` cannot carry a 9..16-bit frame and
+  a half-word beat cannot read a buffer that is not half-word aligned
+  (10.4.3's note), so `dma_serves()` sends such a request to the pump
+  before the select; the pump is correct at a frame an interrupt.
 - **packed 8-bit DMA is a RESOURCE fact and not the task's.** LDMA_TX
   and LDMA_RX are verbs and the rule is measured, but the task never
   packs: packing needs the caller's own buffer layout.
@@ -671,6 +705,13 @@ must reach the registers itself:
 
 **Implemented but not bench-verified** - the code is there and compiles
 on every header of the pack, but no silicon has run it:
+
+- **16-bit frames on the DMA engines, judged on the wire.** Letter `i`
+  carries the leg - sixteen half-word frames out and back on the
+  half-word engines with one completion, and the same request from an
+  odd address on the frame pump - and it needs the self-link, which is
+  not on this desk; `bench_stm32`'s letter `d` times the path with MISO
+  floating (the table above) and judges no data.
 
 - **SPI3, on any board.** It exists only on the G0B1/G0C1 and its pads
   (PC10/PC11/PC12 at AF4) are not wired on this desk; the family fixture

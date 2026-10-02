@@ -8,9 +8,10 @@ on the bench chip's revision Z column, where all five apply. Driver:
 from `stm32g0/device_tables.hpp`, and the REQUEST IDS from the
 peripherals that publish them (`Usart<n>::dma_tx_request()`,
 `Tim<n>::dma_update_request()` and their kin). Bench suite:
-`test_stm32_dma` (14 letters in `z`, 69 verdicts, wireless; letters `u`
-and `w` outside `z` need `brio stress`). Family fixture
-`test/family_stm32g0/dma.cpp` plus seven negatives under
+`test_stm32_dma` (15 letters in `z`, 74 verdicts, wireless; letters `u`
+and `w` outside `z` need `brio stress`); the engines' cost is
+`bench_stm32`'s letter `d`. Family fixture
+`test/family_stm32g0/dma.cpp` plus ten negatives under
 `brio check stm32g0`.
 
 ## What the silicon does
@@ -92,63 +93,179 @@ as the silicon numbers it - from ONE. `DmaMux` addresses the multiplexer
 by DMAMUX channel (`DmaChannel<n, ch>::mux_channel` is the map) and
 `DmaMuxGenerator<x>` is one of the four request generators.
 
-Four engines sit on top, each owning one channel and knowing nothing
+Five engines sit on top, each owning one channel and knowing nothing
 about the peripheral it serves - the data address and the request id are
 handed in at `arm()`:
 
-- `DmaTxEngine<n, ch, Elem>` / `DmaRxEngine<n, ch, Elem>` - the byte
-  transport pair. They are the two OPTIONAL slots
-  `Uart<n, pins, rx, tx, TxEngine, RxEngine>` takes.
+- `DmaTxEngine<n, ch, Elem>` / `DmaRxEngine<n, ch, Elem>` - the transfer
+  pair: one run of memory into a peripheral's register, one run filled
+  from it. The receive engine has a SECOND SHAPE on the same binding, the
+  CIRCULAR one: a ring's whole storage handed to `arm()`, written lap
+  after lap with its count register as the ring's producer index (below,
+  "The circular receive"). They are the OPTIONAL slots `Uart`'s,
+  `SpiHost`'s and `I2cHost`'s templates take - the bus hosts run the
+  one-shot receive, the `Uart` the ring.
 - `DmaLoopEngine<n, ch, Elem>` - `util/block_stream.hpp`'s
   **BlockPlayer**: one caller-owned table played into a peripheral for
   ever, on a CIRCULAR channel.
 - `DmaPingPongEngine<n, ch, Elem>` - `util/block_stream.hpp`'s
   **BlockSource**: fill one caller-owned buffer while the caller drains
   the other, on a NON-circular one.
+- `DmaCopyEngine<n, ch>` - memory to memory: `copy(dst, src, count)` and
+  `fill(dst, cell, count)`, the element type of the two pointers the beat
+  (uint8_t, uint16_t or uint32_t) and the count in elements, the fill's
+  cell a word of the caller's MEMORY (the channel reads an address);
+  `busy()`, `complete()` from the handler or `poll()`, `abandon()`. This
+  surface is every family's.
 
-`Elem` IS the access width: one `sizeof` decides PSIZE, MSIZE and the
-address arithmetic together, so they cannot disagree, and a type that is
-not 1, 2 or 4 bytes wide is a compile error at the engine that named it.
+`Elem` IS THE WIDEST BEAT the binding allows - the peripheral register's
+width - and one `sizeof` decides PSIZE, MSIZE and the address arithmetic
+together, so they cannot disagree; a type that is not 1, 2 or 4 bytes
+wide is a compile error at the engine that named it. The transfer
+engines' `start()` is overloaded on spans of uint8_t, uint16_t and
+uint32_t and takes its beat from the span: an SPI's engines are uint16_t
+and serve a byte frame with a byte beat and a 16-bit frame with a
+half-word one, and a span wider than `Elem` is a compile error at the
+call. A run misaligned for its beat (10.4.3's note) is refused at run
+time, false, so a driver can fall back to its pump - and one that can
+ask first does, with `dma_engine.hpp`'s `dma_beat_aligned()`.
+
+### Two moments: arm() once, five stores a block
+
+`arm()` writes everything that is constant for a binding: the AHB gate
+(RCC_AHBENR, opened there and never per block), the channel stopped, the
+DMAMUX pointed at the request, CPAR - and the CCR WORD (direction,
+priority, the interrupt enables, the circular bit), which the ENGINE
+keeps because the register cannot: every CCR field but the enables is
+read-only while EN is set (10.6.3) and a block restarts only with EN
+down. A block's start is `DmaChannel::restart()`, 10.4.5's abort and
+restart reduced to what changes - CCR = the word with EN clear, IFCR =
+the channel's three flags, CMAR, CNDTR, CCR = the word with EN - FIVE
+STORES AND NO READ; memory to memory adds CPAR, six. The enable is not
+read back: the IFCR store clears TEIF before it, and TEIF is the only
+thing that makes the silicon refuse EN (10.4.7). ST's own
+`HAL_DMA_Start_IT()`, read as the oracle (stm32g0xx-hal-driver 1.4.7),
+spends fourteen accesses on the same restart - three read-modify-writes
+of CCR, the DMAMUX's flags, CPAR again - and clears the global flag this
+driver never writes (ES0548 2.4.1).
+
+The controller's offer, item by item:
+
+| item (RM0444) | used? |
+|---|---|
+| the register file: CCR, CNDTR, CPAR, CMAR (10.6.3-10.6.6) | CPAR at `arm()`, CMAR and CNDTR a block, CCR's word kept in the engine |
+| the width fields PSIZE and MSIZE (10.4.5) | the beat per `start()`, equal on both sides; table 51's unequal widths (packing, zero-extension) stay the channel verbs' and the bench's - an engine moves one item a beat |
+| circular mode (10.4.5) | the player's (`DmaLoopEngine`), and the receive engine's second shape: a ring's storage written lap after lap, its count register the ring's producer index (`util/ring.hpp`'s `HardwareRing`), the transfer-complete flag counting laps; the half-transfer flag is used by neither |
+| a self-trigger or a chain between channels | none on this controller: a channel is one block; the DMAMUX's channel events (EGE) and request generators chain channels through the fabric, measured below and used by no engine |
+| the gate (5.4.9) | opened by `arm()`, once |
+| the flags (10.6.1, 10.6.2) | cleared by a write-one IFCR store of the three specific bits, never CGIFx (ES0548 2.4.1): one store a block start, one a completion |
+| the interrupt enables (10.5) | in the kept word: `DmaIrq` (`dma_engine.hpp`) - the error always, the completion unless the owner holds another proof of it |
+| memory to memory (MEM2MEM, 10.4.5) | `DmaCopyEngine` |
+| the request sources: table 55 through the DMAMUX, its synchronization and request generators (11.4.4, 11.4.5) | the request is the peripheral's, handed to `arm()`; a timer's update paces `bench_stm32`'s `paced` |
+
+**ONE INTERRUPT PER TRANSACTION.** An owner that holds another edge
+arms an engine for its errors alone (`DmaIrq::error_only`). The SPI host
+does it to its transmit engine - the receive block's completion is
+strictly after the transmit block's last beat, since every frame that
+came back was clocked out first - and the I2C host to both of its, the
+tenure's STOP after NBYTES proving both blocks; the owner completes the
+engine on that proof (`complete()`).
+
+**THE MASK COVERS THE CLAIM.** A transport starts blocks from two
+contexts, its thread and its completion handler, so `DmaTxEngine` has
+the claim as a verb of its own: `claim()` (a test-and-set of `busy()`),
+`launch(span)` (the five stores on a claimed engine), `unclaim()`;
+`start()` is the three for an owner with one starting context. The
+USART's `pump_tx()` holds its guard around `claim()` alone - seven
+instructions - and launches unmasked: a free engine has no block in
+flight, so no completion can run under the programming.
 
 ### Reading a channel's progress costs nothing
 
 CNDTR is a live register the controller decrements and software may read
 at any time (10.6.4). The SAM C21's DMAC asks for a channel SUSPENDED,
 its write-back read and validated against an erratum that can corrupt
-it; there is no harvest ceremony on this silicon, and `DmaRxEngine::take()`
-is one register read and a subtraction.
+it; there is no harvest ceremony on this silicon: `DmaRxEngine::take()`
+is one register read and a subtraction, and `remaining()` - the circular
+shape's producer index - is the register read alone.
+
+### The circular receive: a ring the channel writes
+
+`DmaRxEngine`'s second `arm()` takes a ring's whole storage, an array
+whose element is the beat: `arm(data, request, storage, priority)` binds
+it for good and keeps a word with CIRC, MINC, the beat, the priority,
+TCIE and TEIE beside the storage and its length; `start()` - no run -
+is the five stores, and from then on the controller writes the storage
+lap after lap and reloads CNDTR and its internal address at every wrap
+(10.4.5, 10.6.4) with no CPU in the path. Nothing re-arms it, so nothing
+is lost between runs: there are none. The engine is
+`util/ring.hpp`'s `RingCounter` for that ring:
+
+- `remaining()` is CNDTR, one load - decremented after each "read
+  followed by write" (10.6.4), so it never counts an element whose write
+  has not landed;
+- `laps()` is the transfer-complete flag turned into a count by
+  `complete()` in the channel's handler - so it lags the counter by a
+  handler's latency and never leads it.
+
+`HardwareRing<storage, DmaRxEngine<n, ch, Elem>>` is the consumer half
+([../design/ring.md](../design/ring.md)): Ring's consumer verbs, and the
+accounting of a lap the consumer did not keep up with (`overruns()`),
+which is the view's because only the consumer knows where its tail is.
+The half-transfer flag is not used: the view reads the counter whenever
+it looks, and the wrap is the one edge its arithmetic needs. The
+one-shot verbs stay usable on a ring binding - `start(run)` runs a block
+that replaces the ring until the next `start()` - and a one-shot `arm()`
+leaves the ring the circular one bound where it was. The ring's length
+is a compile-time fact and is refused past CNDTR's 65535 at the `arm()`,
+a ring wider than the engine's element likewise.
+
+**Stopping one has an order.** 10.4.5 stops a circular transfer by
+stopping the peripheral's requests FIRST and disabling the channel
+after, a channel that never ends having no idle moment of its own; so
+the owner sequences it, and `Uart::release()` disables the USART before
+it stops its engines.
+
+`stm32g0/usart.hpp`'s `Uart` runs its receive engine in this shape over
+its whole receive ring ([usart.md](usart.md)): a byte that lands is
+readable at once through `read_span()`, `read_byte()` and
+`read_bulk()`, the channel's completion handler counts a lap, and
+`harvest()` is left with the housekeeping (the receive errors read once,
+a channel a transfer error stopped started again with the view cleared)
+and with the edge a ring with no publish step cannot give by itself:
+true when bytes stand in a ring the consumer had found empty since the
+last true. `consume()` there answers whether the run was intact, and
+`rx_overruns()` counts the laps a consumer lost.
 
 ### The two verbs a full-duplex bus needs
 
 `DmaTxEngine::start_fixed(cell, n)` sends the SAME cell `n` times and
 `DmaRxEngine::start_discard(cell, n)` throws `n` elements into one -
-the memory pointer simply does not increment. They exist because a
-full-duplex bus has no half-transaction: the transmit side of a READ
-must still put something on the wire to make the clock run, and the
-receive side of a WRITE must still be drained or the peripheral
-overruns. `stm32g0/spi.hpp`'s engined host is their first user (a null
-`tx` feeds 0xFF from a held source, a null `rx` drains into a held sink)
-and `test_stm32_spi` letter `i` is their proof.
-
-They are SIBLING VERBS and not a defaulted argument to `start()`, and
-the reason is measured on the SAM C21: a defaulted argument changes the
-code generated for the callers that never pass it, where a sibling verb
-adds nothing to them at all. Byte-identity outranks API economy.
+the memory pointer simply does not increment, MINC being the one bit
+the verb ORs into the kept word. The cell's type is the beat, as a
+span's element is. They exist because a full-duplex bus has no
+half-transaction: the transmit side of a READ must still put something
+on the wire to make the clock run, and the receive side of a WRITE must
+still be drained or the peripheral overruns. `stm32g0/spi.hpp`'s engined
+host is their first user (a null `tx` feeds all-ones from a held
+half-word, a null `rx` drains into a held sink; a byte beat reads and
+writes the cell's low byte) and `test_stm32_spi` letter `i` is their
+proof.
 
 ### One example per use
 
 Memory to memory - no peripheral, no request, runs on the enable:
 
 ```cpp
-using Copy = brio::DmaChannel<1, 1>;
-brio::Dma<1>::bus_clock(true);
-Copy::load({.peripheral = src, .memory = dst, .count = 512,
-            .config = {.memory_to_memory = true,
-                       .peripheral_increment = true,
-                       .peripheral_width = brio::DmaWidth::word,
-                       .memory_width = brio::DmaWidth::word}});
-while (!Copy::flag(brio::DmaFlag::complete)) {}
-Copy::stop();
+using Copy = brio::DmaCopyEngine<1, 1>;
+Copy::arm();                                  // the gate, request 0, the word
+(void)Copy::copy(dst_words, src_words, 512);  // 512 words, word beats
+extern "C" void DMA1_Channel1_IRQHandler() {
+    const uint8_t f = Copy::service();
+    if ((f & Copy::flag_error) != 0u) { (void)Copy::abandon(); }
+    else if ((f & Copy::flag_complete) != 0u) { (void)Copy::complete(); }
+}
+// or, armed with brio::DmaIrq::error_only: while (!Copy::poll()) {}
 ```
 
 A waveform played for ever, with the CPU out of the path:
@@ -175,16 +292,31 @@ brio::post<Relay>(brio::BlockDone{});
 ```
 
 A USART that moves its bytes without the CPU - the slots are empty by
-default and cost an engineless image nothing:
+default and cost an engineless image nothing; the receive side is the
+ring above:
 
 ```cpp
 using Serial = brio::Uart<2, pins, 64, 256,
                           brio::DmaTxEngine<1, 6>, brio::DmaRxEngine<1, 7>>;
 extern "C" void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler() {
-    (void)Serial::dma_isr();
+    (void)Serial::dma_isr();   // a block sent, or a lap of the ring counted
 }
-// ... and somewhere in the loop, or on a TimeEvent:
-(void)Serial::harvest();
+// ... and somewhere in the loop, or on a TimeEvent - the edge, nothing
+// to publish:
+if (Serial::harvest()) { brio::post<SerialLines>(brio::RxActivity{}); }
+```
+
+A receive ring any peripheral fills, read in place:
+
+```cpp
+uint8_t rx_ring[256];
+using Rx   = brio::DmaRxEngine<1, 5>;
+using View = brio::HardwareRing<rx_ring, Rx>;
+Rx::arm(brio::Usart<3>::rx_data_address(), brio::Usart<3>::dma_rx_request(), rx_ring);
+Rx::start();
+// the channel's handler: if (Rx::service() & Rx::flag_complete) Rx::complete();
+const auto run = View::read_span();   // the bytes where the channel wrote them
+const bool intact = View::consume(static_cast<uint32_t>(run.size()));
 ```
 
 ## The block stream's second implementation
@@ -289,9 +421,12 @@ while the other's is down is what would show it, and none of this suite's
 sources does that.
 
 **Throughput.** 512 words (2048 bytes) memory to memory in 2638 cycles =
-5.15 cycles a word, about 49.7 MB/s at 64 MHz - which is the two AHB
-accesses 10.4.3 describes plus arbitration, and about four times the
-core's own copy loop.
+5.15 cycles a word, about 49.7 MB/s at 64 MHz - the two AHB accesses
+10.4.3 describes for every single transfer plus the re-arbitration 10.4.4
+places between the transfers of a memory-to-memory block. The chapter
+gives no cycle figure, so how the five divide is not claimed;
+`bench_stm32`'s letter `d` measures the same 5.00 a word by the
+difference of two sizes.
 
 **Table 51's alignment rules hold as printed.** A byte source into a
 halfword destination is ZERO-EXTENDED, one item per address step of two
@@ -374,6 +509,100 @@ free-running TIM2 readings taken by the DMA on TIM3's update, so a
 single late request shows as a whole failed verdict. It is recorded
 rather than tuned: whoever next owns this suite has the choice of a
 tolerance or of finding what is late.
+
+**THE RECEIVE ENGINE AS A RING** (letter `o`). USART1 in single-wire
+half duplex hears every byte it sends (33.5.15), so its two engines -
+transmit on channel 2, receive on channel 3 in the circular shape over a
+64-byte ring - make a loop with no wire, PA9 alone under its pull-up, at
+1 Mbaud:
+
+- At rest the channel is CIRCULAR, its count the ring's 64, the lap's
+  completion and the error armed and the half-transfer not.
+- **4096 bytes came back byte-exact in 40986 us against 40960 of wire**,
+  read where the channel wrote them, through 64 laps each counted once
+  by its own completion (a restart would have zeroed the count), with no
+  ring overrun, no ORE and no fault.
+- **A burst with the consumer away loses nothing.** With the tail at 40
+  of the 64, 60 bytes landed with nobody reading, harvesting or
+  re-arming, and all 60 read back exact - the ring wrapped the storage by
+  itself. The same stimulus on the ONE-SHOT shape (a run to the end of
+  the storage, re-armed by the owner's poll) delivered 22 of the 60: the
+  run ended with the storage, the receiver's FIFO and RDR took a few
+  more, and ORE stood over the rest.
+- **A consumer a lap behind is told and the stream goes on.** 80 bytes
+  with nobody reading: ONE overrun counted, nothing of the lapped bytes
+  delivered (the view skips rather than tears), the next 20 exact - and
+  no ORE: the silicon lost nothing, the consumer did.
+- **`harvest()` is an edge** over a ring nobody publishes into: true
+  once for bytes landing on a ring the consumer had drained, false asked
+  again, false while the consumer has not drained, true for the next
+  byte after a drain.
+- **What a harvest costs**, best of eight on the ruler with the ruler's
+  own 65..68 cycles taken out: 65..68 cycles with the consumer told and
+  still reading, 102..122 on a drained ring (the look at the producer
+  included; two builds differing by one store on the restart path read
+  102..105 and 122, the slower with the look behind a backward branch -
+  the same instructions, so the 20 cycles are the fetch at two wait
+  states, measured and not dissected); a poll over the one-shot
+  shape on the same stimulus - the
+  receive errors, `take()`, the re-arm test - costs 115..125. In the
+  release listing (`-Os`, the console's transport) `harvest()` is 204
+  bytes and runs 20 instructions on the told path, about 40 with the
+  look, three peripheral reads at most (USART ISR, CCR, CNDTR), against
+  244 bytes, a 136-byte re-arm and about 50 instructions on the quiet
+  path of a poll over the one-shot shape. The cost moved to the consumer: a run
+  read costs two looks, `HardwareRing::read_span()` 112 bytes and
+  `consume()` 88 against `Ring`'s index loads, and a lap costs one
+  completion interrupt (the ISR load, one IFCR store, the count) - every
+  64 bytes at this ring's size.
+
+### The engines' cost (`bench_stm32` letter `d`)
+
+On the Nucleo-G0B1RE at 64 MHz, the lines in
+[../design/benchmark.md](../design/benchmark.md)'s grammar, each the best
+of eight runs: `wall` from before the start to the completion seen by the
+waiting loop, the completion an interrupt and the wait the masked idle
+path. `launch` is the start call alone, timed with interrupts masked
+(one ruler read, some 62 cycles, is in it). The wire of a memory
+operation is one word in two cycles, 10.4.3's read and write - the same
+128 MB/s as the core's own copy floor.
+
+| op | n | wall | busy | irq | isr | launch | x |
+|---|---|---|---|---|---|---|---|
+| copy | 16 | 595 | 421 | 1 | 93 | 166 | 74.37 |
+| copy | 256 | 809 | 423 | 1 | 93 | 166 | 6.32 |
+| copy | 4096 | 5609 | 423 | 1 | 93 | 166 | 2.73 |
+| fill | 16 | 583 | 409 | 1 | 93 | 154 | 72.87 |
+| fill | 256 | 797 | 411 | 1 | 93 | 154 | 6.22 |
+| fill | 4096 | 5597 | 411 | 1 | 93 | 154 | 2.73 |
+| paced | 1024 | 164340 | 776 | 3 | 181 | 125 | 1.00 |
+
+- **5.00 cycles a word**, copy and fill alike, by the difference of the
+  4096- and the 256-byte walls: a fill is no cheaper, because the
+  channel reads its cell once a beat. That is 0.8 bytes a cycle, where
+  the runtime's own memcpy and memset of 4096 bytes (letter `m`, x 1.41
+  and x 1.58 of the core's floors) move 1.42 and 2.53: the core copies
+  1.8 times and fills 3.2 times faster than the channel. What a copy
+  engine buys is the core given back - 423 cycles of busy for a
+  4096-byte block that walls 5609.
+- **The fixed cost of a block is some 480 cycles**: the launch (~100
+  net of the ruler), the completion's entry and handler (93 with the
+  meter's stamps), the WFI's wake and the waiting loop's turn with the
+  idle window's own two ruler reads. A 16-byte block is all fixed cost;
+  its wall is the launch, the window and the wake around a transfer of
+  twenty cycles.
+- **`paced`**: 256 words from a table into one cell on TIM3's update at
+  100 kHz (`DmaTxEngine<1, 4, uint32_t>`): the wall is the 256 periods
+  (163 840 cycles) plus 500 - the launch, the completion, the wake and
+  the timer stopped. The timer and the ruler count the same HCLK, and
+  the spread of the eight walls is 0 cycles: the last word lands on the
+  same cycle every run. A run whose completion lands behind a SysTick
+  handler reads 93 more - the moment the completion is SEEN moves, not
+  the pace. One completion interrupt a block (the other two are the
+  SysTick's), 776 cycles of busy for 2.6 ms.
+- **The SPI host's engines** have their numbers in [spi.md](spi.md):
+  the same 16 cycles a byte as the wire at PCLK/2, with both widths of
+  frame, and some 1090 cycles of fixed cost a transaction.
 
 ### The VCP's ceiling (letters `u` and `w`, with `brio stress`)
 
@@ -500,9 +729,11 @@ periods, rising moves 10 words, falling 10, both 20.
 
 ## On the STM32G071RB
 
-`test_stm32_dma` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID 0x2000)
-and scores **65/65** against the G0B1RE's 69, the four missing verdicts
-being the two the part cannot have and the two that skip with them:
+`test_stm32_dma`'s letters `a` to `n` run on the Nucleo-G071RB (DEV_ID
+0x460, REV_ID 0x2000) and score **65/65** against the G0B1RE's 69, the
+four missing verdicts being the two the part cannot have and the two that
+skip with them (letter `o` is built for this board and not run on it,
+below):
 
 - **There is ONE controller.** `dma_present(2)` is false, so `Dma<2>` and
   `DmaChannel<2, n>` do not compile there at all and DMA1's seven channels
@@ -535,8 +766,10 @@ EXTI line.
 
 ## On the STM32G031K8
 
-`test_stm32_dma` scores **62 of 69** on the Nucleo-G031K8 (DEV_ID 0x466,
-REV_ID 0x1003). The controller here is **DMA1 with FIVE channels** and a
+`test_stm32_dma`'s letters `a` to `n` score **62 of 69** on the
+Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003); letter `o` is built for this
+board and not run on it (below). The controller here is **DMA1 with FIVE
+channels** and a
 DMAMUX with five channel multiplexers and four request generators, so
 DMA2's five channels (2 verdicts), the second bus master (1) and the
 peripheral-to-peripheral leg (1, which needs TIM4 and TIM6 and this part
@@ -565,8 +798,8 @@ console shares it and nothing at all where it does not.
 **8 KB OF SRAM IS THE OTHER LIMIT.** The three big memory-to-memory
 buffers drop from 512 to 256 words on this part (every claim restated for
 the length that fits and the length printed beside it), which brings the
-image to 42348 bytes of flash and 6108 of RAM - the stack living in what
-is left.
+image to 48168 bytes of flash and 6288 of RAM - the stack living in the
+1904 left.
 
 `BlockRelay` and the two block-stream engines run unchanged on this die,
 as does `util/` entire.
@@ -575,6 +808,16 @@ as does `util/` entire.
 
 Driver gaps:
 
+- **The line's IDLE edge** as the event that ends a received burst: the
+  ring needs no re-arm, but its owner still ASKS - `harvest()` on a
+  TimeEvent, the latency the owner chose - where the USART's IDLE flag
+  (or its receiver time-out) would post at a burst's end with no poll.
+  It is the UART round's, which takes the transports' receive edge as a
+  whole; this round gave the engine the shape the edge will stand on.
+- **The per-item cost is measured and not explained to the cycle**:
+  5.00 cycles a word memory to memory, against two AHB accesses and a
+  re-arbitration the chapter names but does not time. ST's application
+  note on this controller's timing (AN2548) is not on the desk.
 - **Peripheral-to-peripheral transfers** in the sense of 10.4.5's first
   bullet are reachable through the existing verbs and are bench-run
   (above), and no vocabulary names the arrangement - deliberately, since
@@ -595,8 +838,15 @@ Driver gaps:
   and not measured; what IS measured is that a channel runs in Sleep and
   freezes in Stop with the bits at their reset values.
 
-Implemented but not bench-verified: nothing of the controller's own on
-the STM32G0B1RE. On the STM32G071RB and the STM32G031K8, 10.4.5's
+Implemented but not bench-verified: on the STM32G0B1RE, the circular
+receive at a half-word or word beat (compiled at all three in the
+family fixture; letter `o` runs bytes, the beat a USART gives - a
+converter's stream into a ring would measure the wider ones), and the
+ring's restart after a transfer error (`harvest()` starting a channel
+10.4.7 stopped, the view cleared: a transfer error needs an address no
+transport hands the engine, so nothing stages it). On the STM32G071RB
+and the STM32G031K8, letter `o` (built for both, the boards not on the
+desk; one run of the suite on each measures it), and 10.4.5's
 peripheral-to-peripheral transfer: the leg is arranged over TIM6's
 update moving TIM3's compare into TIM4's, and those parts have no TIM4
 (the STM32G031K8 no TIM6 either), so it skips by name there;

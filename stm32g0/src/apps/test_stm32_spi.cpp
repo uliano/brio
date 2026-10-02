@@ -229,9 +229,10 @@ using Host = SpiHost<1, host_pins>;
 using Peer = SpiClient<2, client_pins>;
 
 // The engined host of letter i, over the SAME instance and the same
-// pads: a second set of statics, one live at a time.
-using HostTx = DmaTxEngine<1, 1>;
-using HostRx = DmaRxEngine<1, 2>;
+// pads: a second set of statics, one live at a time. Half-word engines,
+// so a frame of either width rides the DMA with its own beat.
+using HostTx = DmaTxEngine<1, 1, uint16_t>;
+using HostRx = DmaRxEngine<1, 2, uint16_t>;
 using DmaHost = SpiHost<1, host_pins, HostTx, HostRx>;
 // The client's own engines, RAW (SpiClient has no slots - see the
 // report): letter i uses them to take the client's ISR turnaround out of
@@ -421,7 +422,8 @@ bool host_xfer(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock rate,
 
 /// The same through the ENGINED host of letter i.
 bool dma_xfer(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock rate,
-              bool polled, uint8_t cmd_len = 0, const uint8_t* cmd = nullptr) {
+              bool polled, uint8_t cmd_len = 0, const uint8_t* cmd = nullptr,
+              SpiDataSize bits = SpiDataSize::bits8) {
     DmaHost::Request r{};
     r.cs = CsPin::ref();
     r.cmd = lend<Lease::reply>(cmd);
@@ -431,7 +433,7 @@ bool dma_xfer(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock rate,
     r.len = frames;
     r.clock = rate;
     r.mode = SpiMode::mode0;
-    r.bits = SpiDataSize::bits8;
+    r.bits = bits;
     r.polled = polled;
     host_done = false;
     if (DmaHost::start(r)) {
@@ -2426,6 +2428,64 @@ void ti_dma() {
                   "start_fixed() and start_discard() of stm32g0/dma.hpp",
                   dummies && discarded);
 
+    // THE BEAT IS THE FRAME: sixteen 16-bit frames on the half-word
+    // engines - one completion, the receive block's, and byte-exact both
+    // ways with each frame low byte first in the buffers - and then the
+    // same request from an ODD address, which dma_serves() sends to the
+    // frame pump before the select (10.4.3: a half-word beat cannot read
+    // across one).
+    {
+        alignas(2) static uint8_t wide_tx[2u * 16u + 2u];
+        alignas(2) static uint8_t wide_rx[2u * 16u + 2u];
+        uint16_t wide_answers[16];
+        for (uint16_t i = 0; i < 16u; ++i) {
+            const uint16_t out = static_cast<uint16_t>(0x1203u + i * 0x0111u);
+            wide_answers[i] = static_cast<uint16_t>(0xA05Au + i * 7u);
+            wide_tx[2u * i] = static_cast<uint8_t>(out);
+            wide_tx[2u * i + 1u] = static_cast<uint8_t>(out >> 8);
+            wide_rx[2u * i] = 0xEE;
+            wide_rx[2u * i + 1u] = 0xEE;
+        }
+        bool wide_ok[2] = {};
+        uint16_t completions[2][2] = {};
+        for (uint8_t leg = 0; leg < 2u; ++leg) {
+            // Leg 1 shifts both buffers by one byte: an odd address.
+            uint8_t* const tx = leg == 0u ? wide_tx : wide_tx + 1;
+            uint8_t* const rx = leg == 0u ? wide_rx : wide_rx + 1;
+            if (leg == 1u) {
+                for (int16_t i = 31; i >= 0; --i) {
+                    tx[i] = wide_tx[i];   // the same frames, one byte up
+                }
+                for (uint16_t i = 0; i < 32u; ++i) {
+                    rx[i] = 0xEE;
+                }
+            }
+            peer_arm({.mode = SpiMode::mode0, .bits = SpiDataSize::bits16}, wide_answers, 16);
+            dma_completions = 0;
+            host_isr_completions = 0;
+            const bool moved = dma_xfer(tx, rx, 16, SpiClock::div256, false, 0, nullptr,
+                                        SpiDataSize::bits16);
+            bool ok = moved && peer_rx_n == 16u && DmaHost::status() == spi_ok;
+            for (uint16_t i = 0; i < 16u && ok; ++i) {
+                const uint16_t in = static_cast<uint16_t>(rx[2u * i] | (rx[2u * i + 1u] << 8));
+                const uint16_t out = static_cast<uint16_t>(tx[2u * i] | (tx[2u * i + 1u] << 8));
+                ok = in == wide_answers[i] && peer_rx[i] == out;
+            }
+            wide_ok[leg] = ok;
+            completions[leg][0] = dma_completions;
+            completions[leg][1] = host_isr_completions;
+        }
+        print(serial, "  16-bit frames: aligned exact=", wide_ok[0], " (dma completions ",
+              completions[0][0], ", pump ", completions[0][1], "), odd address exact=",
+              wide_ok[1], " (dma ", completions[1][0], ", pump ", completions[1][1], ")", crlf);
+        bench.verdict("16-BIT FRAMES ON THE DMA: sixteen half-word beats out and back, "
+                      "byte-exact both ways, ONE completion and no pump interrupt",
+                      wide_ok[0] && completions[0][0] == 1u && completions[0][1] == 0u);
+        bench.verdict("and the same request from an ODD address goes to the frame pump, "
+                      "exact, completing on SPI1's own vector and never on a channel's",
+                      wide_ok[1] && completions[1][0] == 0u && completions[1][1] == 1u);
+    }
+
     // The ladder with the CLIENT on raw engines too, so its ISR
     // turnaround is out of the way.
     static uint8_t peer_tx_dma[64];
@@ -2450,8 +2510,8 @@ void ti_dma() {
         (void)S2::dma_receive(true);
         PeerRx::arm(S2::data_address(), S2::dma_rx_request());
         PeerTx::arm(S2::data_address(), S2::dma_tx_request());
-        (void)PeerRx::start(peer_rx_dma, 32);
-        (void)PeerTx::start(peer_tx_dma, 32);
+        (void)PeerRx::start(std::span<uint8_t>(peer_rx_dma, 32));
+        (void)PeerTx::start(std::span<const uint8_t>(peer_tx_dma, 32));
         S2::enable();
 
         const bool ok_move = dma_xfer(tx_buf, rx_buf, 32, rate, true);
@@ -2526,7 +2586,7 @@ void ti_dma() {
         PeerTx16::arm(S1::data_address(), S1::dma_tx_request());
         CsPin::clear();
         S1::enable();
-        (void)PeerTx16::start(packed, 3);   // 3 half-words = 5 or 6 frames
+        (void)PeerTx16::start(std::span<const uint16_t>(packed, 3));   // 5 or 6 frames
         uint32_t sp = 2'000'000u;
         while (peer_rx_n < 5u && sp-- != 0u) {
         }

@@ -13,9 +13,10 @@
 // This suite's own USART2 carries a DmaTxEngine AND a DmaRxEngine on
 // channels 6 and 7, so every verdict line you are reading left the chip
 // without the CPU touching a byte, and the letter you typed to ask for it
-// arrived the same way - harvest() in the main loop is what publishes it.
-// If either engine were broken there would be no output to read and no
-// letter to run: the suite cannot pass vacuously.
+// arrived the same way - into the receive engine's RING, which the channel
+// writes lap after lap and the main loop reads in place. If either engine
+// were broken there would be no output to read and no letter to run: the
+// suite cannot pass vacuously.
 //   ON A FIVE-CHANNEL PART THERE IS NO SIXTH AND SEVENTH CHANNEL. Letters
 // a..n spend channels 1..5 and the console falls back to the interrupt
 // transport (the same Uart with both engine slots empty), so letter h's
@@ -43,13 +44,15 @@
 //      pins left in analog mode still asserts TXE, which is exactly the
 //      standing request letter h needs - and nothing leaves the die.
 //
-// THE PADS: one, and only by letters i and l - the board's own LED under
-// a timer channel, read back off its own input buffer. PA5 (LD4,
-// TIM2_CH1 AF2) on the Nucleo-64s, PC6 (LD3, TIM2_CH3 AF2) on the
-// Nucleo-32. WHICH PAD CARRIES THE LED IS A BOARD FACT and no device
-// header knows it, so the app asks the one question it is allowed to
-// ask that way (one Nucleo carries one part, so the part selects the
-// pad). PA2/PA3 are the console, PA13/PA14 the SWD.
+// THE PADS: two. Letters i and l take the board's own LED under a timer
+// channel, read back off its own input buffer: PA5 (LD4, TIM2_CH1 AF2)
+// on the Nucleo-64s, PC6 (LD3, TIM2_CH3 AF2) on the Nucleo-32. WHICH PAD
+// CARRIES THE LED IS A BOARD FACT and no device header knows it, so the
+// app asks the one question it is allowed to ask that way (one Nucleo
+// carries one part, so the part selects the pad). Letter o takes PA9,
+// USART1_TX as a single wire (open drain under the pull-up) - a pad
+// nothing on these boards drives. PA2/PA3 are the console, PA13/PA14 the
+// SWD.
 //
 // THE SMALL PART'S OTHER LIMIT IS ITS SRAM: 8 KB against the Nucleo-64s'
 // 36. The three long memory-to-memory blocks are therefore a quarter of
@@ -83,6 +86,14 @@
 //   l  the timer's DMA BURST engine: a whole row of registers walked off
 //      ONE update request through TIMx_DMAR, with a control that changes
 //      one field of DCR and nothing else
+//   m  DMA2's channels at every width, and a transfer between two
+//      peripherals
+//   n  the sleep story: a channel through Sleep, and a channel frozen by a
+//      Stop
+//   o  THE CIRCULAR RECEIVE: USART1's single wire as its own loop, its
+//      receive engine a ring the channel writes lap after lap - a stream
+//      across 64 laps, a burst with the consumer away, a consumer a lap
+//      behind, the edge harvest() reports and what harvest() costs
 //   u  (outside z) brio stress: byte-exact streaming both ways
 //      through the engines, up to the VCP's own measured ceiling
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
@@ -293,7 +304,7 @@ constexpr uint16_t block_len = 32;
 /// the entry it has to outlive.
 ///
 /// AND IT IS THE BUDGET'S LAST WORD. At 256 the small part's image is
-/// 6108 bytes of data and bss, which leaves 2084 for the stack of an 8 KB
+/// 6288 bytes of data and bss, which leaves 1904 for the stack of an 8 KB
 /// SRAM - and the linker says nothing when that number goes down, so an
 /// edit that adds an array here has to check it (arm-none-eabi-size on
 /// the .elf: data + bss, against 8192 less the stack the suite wants).
@@ -2912,6 +2923,284 @@ void tn_sleep_story() {
     quiet_everything();
 }
 
+// ---- o: the circular receive ------------------------------------------------------
+//
+// USART1 IN SINGLE-WIRE HALF DUPLEX IS ITS OWN LOOP: the instance hears
+// every byte it sends (33.5.15), so a stream its transmit engine sends
+// comes back through its receive engine with no wire - PA9, the single
+// wire's one pad, open drain under the pull-up, nothing soldered to it.
+// The receive engine runs its CIRCULAR shape over the transport's 64-byte
+// ring, and the letter judges that shape through the transport's own
+// verbs: what the channel holds, a stream across many laps, a burst that
+// arrives while the consumer is away, a consumer a lap behind, the edge
+// harvest() reports, and what harvest() costs.
+
+constexpr UartPins u1_pins{
+    .tx = {'A', 9, PinFunction::af1},    // USART1_TX, the single wire
+    .rx = {'A', 10, PinFunction::af1},   // not claimed in half duplex
+};
+using U1Tx = DmaTxEngine<1, 2>;
+using U1Rx = DmaRxEngine<1, 3>;
+// The receive ring is the subject (64 bytes, the letter's geometry); the
+// transmit ring is the smallest that keeps the wire busy, every byte of
+// SRAM counting on the 8 KB part.
+using U1 = Uart<1, u1_pins, 64, 16, U1Tx, U1Rx, uart_half_duplex()>;
+constexpr uint32_t u1_baud = 1'000'000;
+constexpr uint32_t u1_byte_cycles = SysClock::hz / (u1_baud / 10u);   // ten bits
+volatile bool u1_live = false;
+
+/// The payload: a xorshift both ends run, so every byte checks itself.
+struct Stream {
+    uint32_t s;
+    uint8_t next() {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return static_cast<uint8_t>(s & 0xFFu);
+    }
+};
+
+/// `n` bytes of `tx` into the transport's transmit ring, refused bytes
+/// retried - the transmit ring is 16 bytes, so a longer run waits for its
+/// engine. Nothing is read meanwhile.
+void u1_send(Stream& tx, uint32_t n) {
+    uint8_t stage[16];
+    while (n != 0u) {
+        const uint32_t len = n < sizeof stage ? n : static_cast<uint32_t>(sizeof stage);
+        for (uint32_t i = 0; i < len; ++i) {
+            stage[i] = tx.next();
+        }
+        uint32_t done = 0;
+        uint32_t spins = 4'000'000u;
+        while (done < len && spins-- != 0u) {
+            done += U1::write_bulk({stage + done, len - done});
+        }
+        n -= len;
+    }
+}
+
+/// Wait until the wire has carried everything queued, and `bytes` more
+/// character times for the receive side to land it.
+void u1_settle(uint32_t bytes) {
+    uint32_t spins = 8'000'000u;
+    while ((!U1::tx_idle() || (Usart<1>::status() & UsartFlag::tc) == 0u) &&
+           spins-- != 0u) {
+    }
+    spin_cycles(u1_byte_cycles * bytes);
+}
+
+/// Read up to `max` bytes and judge each against `rx`; the count read.
+uint32_t u1_take(Stream& rx, uint32_t max, uint32_t& bad) {
+    uint8_t chunk[16];
+    uint32_t got = 0;
+    while (got < max) {
+        const uint32_t want = max - got < sizeof chunk ? max - got
+                                                       : static_cast<uint32_t>(sizeof chunk);
+        const uint32_t n = U1::read_bulk({chunk, want});
+        for (uint32_t i = 0; i < n; ++i) {
+            if (chunk[i] != rx.next()) {
+                ++bad;
+            }
+        }
+        got += n;
+        if (n < want) {
+            break;
+        }
+    }
+    return got;
+}
+
+void to_circular_receive() {
+    u1_live = true;
+    const bool up = U1::init(clock, u1_baud);
+    U1::clear_errors();
+
+    // --- what the channel holds, before a byte has moved.
+    const bool circular = ChC::circular();
+    const uint32_t armed = ChC::armed();
+    const uint16_t at_rest = ChC::count();
+    print(serial, "  USART1 single wire at ", u1_baud, " baud, ring 64 bytes: the "
+          "receive channel ", circular ? "CIRCULAR" : "not circular",
+          ", armed ", hex(armed), ", CNDTR at rest ", at_rest, ", laps ",
+          U1Rx::laps(), crlf);
+    bench.verdict("THE RECEIVE ENGINE IS A RING: the channel is circular over "
+                  "the transport's whole 64-byte ring, its count at rest the "
+                  "ring's length, the lap's completion and the error armed and "
+                  "the half-transfer not",
+                  up && circular &&
+                      armed == static_cast<uint32_t>(DmaFlag::complete | DmaFlag::error) &&
+                      at_rest == 64u && U1Rx::laps() == 0u);
+
+    // --- a stream across many laps, read as it lands.
+    constexpr uint32_t total = 4096;
+    Stream tx{0x2545F491u};
+    Stream rx{0x2545F491u};
+    uint8_t stage[16];
+    uint32_t staged = 0;
+    uint32_t sent_off = 0;
+    uint32_t generated = 0;
+    uint32_t got = 0;
+    uint32_t bad = 0;
+    uint32_t torn = 0;
+    const uint32_t t0 = cycles_now();
+    const uint32_t budget = u1_byte_cycles * total * 4u;
+    while (got < total && cycles_now() - t0 < budget) {
+        if (sent_off == staged && generated < total) {
+            const uint32_t len = total - generated < sizeof stage
+                                     ? total - generated
+                                     : static_cast<uint32_t>(sizeof stage);
+            for (uint32_t i = 0; i < len; ++i) {
+                stage[i] = tx.next();
+            }
+            staged = len;
+            sent_off = 0;
+            generated += len;
+        }
+        if (sent_off < staged) {
+            sent_off += U1::write_bulk({stage + sent_off, staged - sent_off});
+        }
+        (void)U1::harvest();
+        const std::span<const uint8_t> run = U1::read_span();
+        uint32_t wrong = 0;
+        Stream check = rx;
+        for (const uint8_t b : run) {
+            if (b != check.next()) {
+                ++wrong;
+            }
+        }
+        if (U1::consume(static_cast<uint32_t>(run.size()))) {
+            rx = check;
+            bad += wrong;
+            got += static_cast<uint32_t>(run.size());
+        } else {
+            ++torn;
+        }
+    }
+    const uint32_t wall = cycles_now() - t0;
+    u1_settle(2);
+    const uint32_t laps = U1Rx::laps();
+    print(serial, "  ", got, " of ", total, " bytes back in ", cycles_to_us(wall),
+          " us (the wire ", total * 10u, " us): ", bad, " wrong, ", torn,
+          " runs torn, laps ", laps, ", ring overruns ", U1::rx_overruns(),
+          ", ORE ", U1::hw_overruns(), ", dma faults ", U1::dma_faults(), crlf);
+    bench.verdict("4096 bytes through 64 laps of the ring BYTE-EXACT, read where "
+                  "the channel wrote them: every lap counted once by its own "
+                  "completion - a restart would have zeroed the count - and "
+                  "nothing lost on the way, no overrun of the ring, no ORE, no "
+                  "fault",
+                  got == total && bad == 0u && torn == 0u && laps == total / 64u &&
+                      U1::rx_overruns() == 0u && U1::hw_overruns() == 0u &&
+                      U1::dma_faults() == 0u);
+
+    // --- a burst while the consumer is away, the tail in the middle.
+    uint32_t bad2 = 0;
+    u1_send(tx, 40);
+    u1_settle(2);
+    (void)U1::harvest();
+    const uint32_t first = u1_take(rx, 40, bad2);
+    u1_send(tx, 60);   // and nobody reads, harvests or re-arms meanwhile
+    u1_settle(4);
+    (void)U1::harvest();
+    const uint32_t burst = u1_take(rx, 60, bad2);
+    print(serial, "  40 bytes read, the tail at 40 of 64; then 60 in one burst "
+          "with the consumer away: ", burst, " of 60 read, ", bad2, " wrong, "
+          "ORE ", U1::hw_overruns(), ", ring overruns ", U1::rx_overruns(), crlf);
+    bench.verdict("NOTHING IS LOST BETWEEN RUNS, there being none: 60 bytes "
+                  "landing with the tail at 40 of a 64-byte ring wrap the "
+                  "storage with no step of the CPU's, and all 60 are read back "
+                  "exact - a run that ended at the storage's end would have "
+                  "left the receiver to its FIFO and an overrun",
+                  first == 40u && burst == 60u && bad2 == 0u &&
+                      U1::hw_overruns() == 0u && U1::rx_overruns() == 0u);
+
+    // --- a consumer a lap behind: told, skipped, resumed.
+    uint32_t bad3 = 0;
+    u1_send(tx, 80);   // more than a lap, nobody reading
+    u1_settle(4);
+    for (uint32_t i = 0; i < 80u; ++i) {
+        (void)rx.next();   // the stream moves on whatever the consumer saw
+    }
+    (void)U1::harvest();
+    const uint32_t behind = u1_take(rx, 80, bad3);
+    const uint8_t overruns = U1::rx_overruns();
+    u1_send(tx, 20);
+    u1_settle(2);
+    (void)U1::harvest();
+    const uint32_t after = u1_take(rx, 20, bad3);
+    print(serial, "  80 bytes with nobody reading: ", behind, " read, ring "
+          "overruns ", overruns, "; the next 20: ", after, " read, ", bad3,
+          " wrong, ORE ", U1::hw_overruns(), crlf);
+    bench.verdict("A CONSUMER A LAP BEHIND IS TOLD: one overrun counted and the "
+                  "lap skipped rather than read torn - nothing of it delivered "
+                  "- and the next bytes arrive exact; the silicon lost nothing "
+                  "(no ORE), the consumer did",
+                  behind == 0u && overruns == 1u && after == 20u && bad3 == 0u &&
+                      U1::hw_overruns() == 0u);
+
+    // --- the edge harvest() reports.
+    uint32_t bad4 = 0;
+    (void)U1::harvest();
+    (void)u1_take(rx, 64, bad4);   // drained: the consumer found it empty
+    const bool e0 = U1::harvest();
+    u1_send(tx, 5);
+    u1_settle(2);
+    const bool e1 = U1::harvest();
+    const bool e2 = U1::harvest();
+    const uint32_t part = u1_take(rx, 2, bad4);
+    u1_send(tx, 3);
+    u1_settle(2);
+    const bool e3 = U1::harvest();
+    const uint32_t rest = u1_take(rx, 64, bad4);
+    const bool e4 = U1::harvest();
+    u1_send(tx, 1);
+    u1_settle(2);
+    const bool e5 = U1::harvest();
+    const uint32_t last = u1_take(rx, 64, bad4);
+    print(serial, "  the edge: empty ", e0, ", 5 in ", e1, ", asked again ", e2,
+          ", 2 read and 3 more in ", e3, ", drained ", e4, ", 1 in ", e5,
+          " (", part, "+", rest, "+", last, " bytes, ", bad4, " wrong)", crlf);
+    bench.verdict("harvest() IS AN EDGE over a ring nobody publishes into: true "
+                  "once when bytes land on a ring the consumer had drained, "
+                  "false asked again, false while the consumer has not drained "
+                  "yet, true again for the next byte after a drain",
+                  !e0 && e1 && !e2 && !e3 && !e4 && e5 && part == 2u &&
+                      rest == 6u && last == 1u && bad4 == 0u);
+
+    // --- what harvest() costs, the ruler's own read taken out: on a ring
+    // the consumer has drained (the edge's look at the producer included),
+    // and on one whose consumer was told and has not drained yet.
+    auto best_of_8 = [] {
+        uint32_t best = 0xFFFFFFFFu;
+        for (uint8_t i = 0; i < 8; ++i) {
+            const uint32_t a = cycles_now();
+            (void)U1::harvest();
+            const uint32_t b = cycles_now();
+            best = b - a < best ? b - a : best;
+        }
+        return best;
+    };
+    uint32_t ruler = 0xFFFFFFFFu;
+    for (uint8_t i = 0; i < 8; ++i) {
+        const uint32_t a = cycles_now();
+        const uint32_t b = cycles_now();
+        ruler = b - a < ruler ? b - a : ruler;
+    }
+    const uint32_t drained = best_of_8();
+    u1_send(tx, 1);
+    u1_settle(2);
+    (void)U1::harvest();   // told
+    const uint32_t told = best_of_8();
+    const uint32_t one = u1_take(rx, 64, bad4);
+    print(serial, "  harvest(), best of 8 with the ruler's ", ruler, " taken out: ",
+          drained - ruler, " cycles on a drained, empty ring, ", told - ruler,
+          " with a byte the consumer was told of and has not read (", one,
+          " read after)", crlf);
+
+    U1::release();
+    u1_live = false;
+    quiet_everything();
+}
+
 }   // namespace
 
 // ---- the vectors ----------------------------------------------------------------
@@ -2919,6 +3208,11 @@ void tn_sleep_story() {
 extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+
+/// USART1 has a line of its own on every part of this family; letter o's
+/// transport arms no interrupt there (both directions have an engine),
+/// and a vector left unbound would land in Default_Handler's spin.
+extern "C" void USART1_IRQHandler() { (void)U1::isr(); }
 
 /// Channel 1 has a vector to itself (table 61) - and channel 1 is the
 /// loop engine's, so this body is a player's whole CPU cost: one lap
@@ -2943,6 +3237,10 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 /// - there is no "which channel" register on this controller, so asking
 /// every owner IS the dispatch.
 extern "C" void DMA1_Channel2_3_IRQHandler() {
+    if (u1_live) {
+        (void)U1::dma_isr();   // letter o's single-wire USART1, both engines
+        return;
+    }
     if (ChB::isr() != 0u) {
         ch2_calls = ch2_calls + 1u;
     }
@@ -3053,6 +3351,8 @@ int main() {
                  "between two peripherals", tm_dma2_and_p2p);
     bench.letter('n', "the sleep story: a channel through Sleep, and a "
                  "channel frozen by a Stop", tn_sleep_story);
+    bench.letter('o', "the circular receive: a ring the channel writes lap "
+                 "after lap", to_circular_receive);
     bench.letter('u', "the host peer, and the VCP's ceiling", tu_stress, false);
     bench.letter('w', "the two rungs ABOVE the ceiling, judged by nothing",
                  tw_beyond, false);

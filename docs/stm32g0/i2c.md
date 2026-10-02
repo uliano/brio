@@ -118,7 +118,12 @@ same.
 `speed_ok()`, `scl_hz()`, `start()`, `isr()`, `dma_isr()`, `status()`,
 `recover()`, `unstick()`, `fast_plus_drive()` and
 `spurious_bus_errors()`. The two DMA engine slots default to
-`NoDmaEngine` and every DMA branch folds away.
+`NoDmaEngine` and every DMA branch folds away. Named, they carry the
+DATA of a tenure (32.7: the address cannot be moved by DMA) and both are
+armed for their errors alone: the tenure's own STOP after NBYTES proves
+every byte went through TXDR and RXDR, so a tenure takes the I2C's
+interrupts and no DMA one, and `finish()` completes the transmit engine
+on that proof ([dma.md](dma.md), "Two moments").
 
 `I2cClient<n, pins>` is the target: `init(clock, addresses, speed,
 kernel, filters, no_stretch)`, `addressed()`, `host_reads()`,
@@ -539,6 +544,9 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- **The engined tenure with both engines armed for their errors alone**
+  and completed on STOPF: letter `h` on the self-link (I2C1 PB8/PB9 to
+  I2C2 PA11/PA12 with its pull-ups, above) is what measures it.
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of
