@@ -234,12 +234,18 @@ usually looks like first.
 
 **Three flags no branch owns.** PECERR, TIMEOUT and ALERT ride the one
 ERRIE a plain I2C engine arms for BERR and ARLO. They are swept at the
-bottom of the handler, and what a sweep cannot reach is disarmed - which
-is only ever TCIE's: TC and TCR have no clear bit, while all six error
-conditions do, so ERRIE stays armed (an error that sets after the
-handler's read is cleared on the next entry) and ARLO and BERR go on
-being reported for the life of the program. TCIE is armed afresh by
-every tenure's `start()`.
+bottom of the handler, and the sweep touches nothing a branch owns: a
+flag that sets between the handler's read of the status and the sweep -
+a TXIS, a byte in RXDR, the TC that ends a write-then-read's write half -
+is the next entry's to serve. What a sweep cannot reach is disarmed, and
+inside a tenure that is TCR alone, which only RELOAD raises and which the
+engine never asks for. TC is never disarmed there: RM0444 32.4.7 keeps
+SCL stretched as long as TC stands, so a disarmed TCIE would be a lost
+repeated START and a tenure left to the per-bus timeout. ERRIE is never
+disarmed either: all six error conditions have a clear bit, so an error
+that sets after the handler's read is cleared on the next entry, and
+ARLO and BERR go on being reported for the life of the program. TCIE is
+armed afresh by every tenure's `start()`.
 
 **A held SDA is a PARK and not an error**, the same answer the AVR DA/DB
 and the SAM C21 give. A controller whose SDA is held low by
@@ -572,10 +578,18 @@ Implemented but not bench-verified:
   RELOAD = 0, PECBYTE = 1" - the check rides target byte control, whose
   NBYTES the suite's pump does not re-arm.
 - **The SMBus ALERT**, which needs a wire to an SMBA pad.
-- **ERRIE across the last-resort sweep.** Letter `i`'s staged PECERR
-  (on the self-link) is what takes the handler's last resort; an ARLO
-  or a BERR reported by a tenure after it is what would show the enable
-  survived, and no letter does the two in a row.
+- **The last-resort sweep inside a tenure.** Letter `i`'s staged PECERR
+  (on the self-link) is what takes the handler's last resort. Two of
+  its promises are staged by no letter: ERRIE surviving it (an ARLO or a
+  BERR reported by a tenure after it), and a flag that sets between the
+  handler's read and the sweep - the TC of a write-then-read above all -
+  served by the next entry instead of being disarmed or read away. The
+  second needs the sweep to run in the middle of a tenure, which only a
+  spurious BERR (ES0548 2.10.2, swept 0 times in a whole `z` run) or an
+  SMBus flag makes it do, and a flag to land in the handler's few
+  microseconds: a self-link letter raising an SMBus flag inside a
+  write-then-read's write half, repeated until a TC lands there, would
+  measure it.
 - **The self-link roles on the STM32G071RB and the STM32G031K8**: the
   eleven self-link letters - the own-address match, the NOSTRETCH
   target, 10-bit addressing both ways, the PEC, the time-outs, the wake

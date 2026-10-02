@@ -2138,19 +2138,31 @@ public:
         // three - PECERR, TIMEOUT and ALERT - which ride this engine's
         // one ERRIE and which nothing above claims.
         S::clear(I2cClear::pec_error | I2cClear::timeout | I2cClear::alert);
-        if ((S::flags() & I2C_ISR_RXNE) != 0u) {
-            (void)S::data();
-        }
-        // WHAT A SWEEP CANNOT REACH IS TCIE'S, NEVER ERRIE'S. Each of the
-        // six conditions behind ERRIE has its own ICR bit (32.9.8), so an
-        // error still pending here set after this entry's pending() read,
-        // and the next entry clears it - BERR, ARLO and OVR at the top,
-        // the SMBus three in this sweep: left armed, ERRIE cannot storm.
-        // Disarmed, it would hide ARLO and BERR from every tenure after
-        // this one, because only init() arms it. TC and TCR are the flags
-        // with no ICR bit, and TCIE is the enable start() decides afresh
-        // for every tenure.
-        if ((S::pending() & ~I2cFlag::errors) != 0u) {
+        // AND NOTHING HERE TOUCHES THE DATA. Inside a tenure RXNE always
+        // has an owner - the RXNE branch above while RXIE is armed, the
+        // receive channel while RXDMAEN is - so a byte standing in RXDR
+        // now landed after this entry's pending() read, and reading it
+        // here would drop it from the Request's buffer and shift every
+        // byte after it by one. It is the next entry's, or the channel's.
+        //
+        // WHAT A SWEEP CANNOT REACH IS DISARMED - AND INSIDE A TENURE THAT
+        // IS TCR ALONE. Every flag behind an enable this engine arms has a
+        // branch above or an ICR bit (32.9.8) but one: TCR, which only
+        // RELOAD raises (32.4.7) and which start() never asks for, so a
+        // TCR here means CR2 was written by somebody else and its level
+        // would hold the vector for ever. Everything else still pending
+        // here set after the entry's read and is the next entry's to
+        // serve, TC first among them: 32.4.7 sets it the moment a
+        // write-then-read's write half has moved NBYTES with AUTOEND
+        // clear, and the next entry's TC branch turns it into the
+        // repeated START. Disarming TCIE on it instead leaves SCL
+        // stretched "as long as the TC flag is set" and the tenure to the
+        // per-bus timeout - which is what a decision on ANY pending flag
+        // would do. ERRIE is never disarmed: each of the six conditions behind
+        // it has its own ICR bit, so an error pending here is cleared by
+        // the next entry - BERR, ARLO and OVR at the top, the SMBus three
+        // in this sweep - and only init() would arm it again.
+        if ((S::flags() & I2cFlag::transfer_reload) != 0u) {
             S::interrupt(I2cInterrupt::transfer_complete, false);
         }
         return false;
