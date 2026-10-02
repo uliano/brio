@@ -213,6 +213,59 @@ What the rows say, and the two platform columns:
   per-byte path has no call in it (overview.md's three rules for a hot
   path), not before.
 
+## Letter d: the engines on each controller
+
+Measured on the bench boards after the DMA round, each line the best of
+its runs; `copy` and `fill` by the family's `DmaCopyEngine` at 4096
+bytes against one item per cycle of the DMA's clock, the fixed cost the
+launch and the completion of one block; `paced` 256 or 1024 words moved
+by a timer's request at a known rate; `spi.dma` an engined SPI request
+of 256 or 512 frames at the fastest rate the family's host offers, MISO
+floating (the time is the wire's; the data is judged by a loop-back
+letter where the suite has one, and on the CH32V203 by the SPI's own
+transmit CRC), the fixed cost per transaction = wall minus the wire's
+time.
+
+| family | copy 4096 x (the DMA's rate) | fill 4096 x | copy fixed cost | paced x | spi.dma x, irq | spi fixed cost per transaction |
+|---|---|---|---|---|---|---|
+| SAM C21J18A | 2.77 (5 cycles a word) | 2.86 | ~390 cycles (750 with the instrument inside) | 1.00 | 1.04 at 12 MHz (a write-only request on one channel 1.03), 1 | 1416 cycles (was 2365, two interrupts) |
+| STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~480 cycles (the instrument inside) | 1.00 | 1.06 at 4 MHz, 1.26 at 16 MHz; 16-bit frames 1.03, 1 | 1084 cycles (was 1291) |
+| STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles (was 1027) | 1.00 | 1.03 at 22.5 MHz; 16-bit frames 1.01, 1 | 606 cycles = 3.4 us (was 13.7 us, two interrupts) |
+| CH32V203C8T6 | 6.23 (6 cycles an item, the silicon's) | 6.23 | 241 cycles (was 360) | 1.00 | 1.06 at 36 MHz, 1.03 at 512 frames; 16-bit frames 1.03, 1 | 571 cycles (was 1087, two interrupts): 334 the engines, 130 the Request's copy |
+| RP2350, Cortex-M33 | 1.04 | 1.30 (the cell in one SRAM bank, the destination striped over four) | 48 cycles (was 163) | 1.00 | 1.16 at 75 MHz, 1 | 545..559 cycles = 3.7 us (was 5.2, two interrupts) |
+| RP2350, Hazard3 | 1.04 | 1.30 | 47 cycles | 1.00 | 1.15 at 75 MHz, 1 | 524..539 cycles = 3.5 us |
+
+What the rows say:
+
+- A block costs what the chapter's restart costs - two to five stores -
+  and the engines are no longer the dominant term of a transaction: on
+  every family what remains above the wire is the bus host's own
+  `start()`, the Request copied into the engine, the pins and the
+  compare (the SPI round's), and the frame gap the PL022 keeps between
+  frames in mode 0 and 2 (1.5 SCK periods: +19 per cent on 8-bit frames,
+  +9 on 16-bit; a display in mode 3 would not pay it).
+- A copy by DMA is the controller's own rate, not the bus's: five cycles
+  a word on the SAM and the G0, six an item on the CH32V203, and on the
+  M4 slower than the core's own load-multiple block - the engine buys
+  CPU time there, never wall time. The RP2350's controller is the one
+  that copies at the bus's rate.
+- A 16-bit frame rides the engines on every family that has them (the
+  beat is the frame), one interrupt per transaction where the receive
+  block's completion proves the transmit's.
+- The paced transfers hold their rate to the ruler's resolution; on the
+  RP2350 a block started right after its binding begins 700 to 1200
+  cycles late, measured and unexplained (dma.md).
+- The RP's "engined SPI at four to nine times the wire" of the
+  retrospective review was the FIRST transaction after init: the XIP
+  cache filling with the transaction's own code, 126 to 165 lines at 66
+  to 82 cycles each (the boot's QMI setting, the same under the SDK),
+  nothing of the DMA's. Inside the block brio and the SDK read the same
+  number to the hundredth of a cycle - 19.00 and 76.00 cycles a byte in
+  mode 0, 16.00 and 64.00 in modes 1 and 3, where the PL022's frame gap
+  is SPH's and not the engine's. What is brio's is the NUMBER of lines:
+  about 1.15 KB of code per transaction against the SDK's two inlined
+  calls, the SPI round's to shrink ([../rp2350/spi.md](../rp2350/spi.md)).
+
 ## Not covered yet
 
 Implemented, not bench-verified:

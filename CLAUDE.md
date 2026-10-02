@@ -1334,7 +1334,17 @@ brio/                    the framework, one directory per stratum:
     persistent_panic.hpp   PersistentPanic<S>: panic Reporter into an
                            NvStore + boot-side take()
     ring.hpp               Ring<T, size, P> SPSC FIFO, lock-free when the
-                           index fits P::atomic_width, guarded otherwise
+                           index fits P::atomic_width, guarded otherwise;
+                           HardwareRing<storage, Counter>, the reading side
+                           of a ring a DMA channel fills in circular mode:
+                           the producer's position is never stored, it is
+                           the channel's remaining count and lap count read
+                           through the Counter (laps first, then the count,
+                           so a wrap between the two can only lose a lap and
+                           never invent one), a full lap unread an overrun,
+                           a run judged again when it is released; the
+                           consumer's verbs under Ring's names, no critical
+                           section, no platform
     inbox.hpp              THE BRIDGE BETWEEN TWO KERNELS ON TWO CORES
                            (design/kernel.md sec. 12): Inbox<Ao> (a ring of
                            Ao::Event written by the sending core under its
@@ -1544,7 +1554,14 @@ brio/                    the framework, one directory per stratum:
     sercom.hpp             Sercom<n> resource + Uart task with two OPTIONAL
                            DMA engine slots
     dmac.hpp               Dmac block + DmaDescriptor + DmaChannel<n> +
-                           DmaTxEngine/DmaRxEngine
+                           DmaTxEngine/DmaRxEngine/DmaLoopEngine/
+                           DmaPingPongEngine and DmaCopyEngine - the
+                           descriptor written once at arm(), a block its
+                           three fields and one enable; NO KICK on either
+                           engine (a kick landing after the channel's own
+                           first beat doubled a beat, measured over 3376
+                           starts); a write-only SPI request on ONE channel
+                           with TXC as the edge, the wire's rate
     eic.hpp                EIC: the family's pin interrupts - Eic block
                            (per-line sense/filter/async, the optional clock
                            and the enable that synchronizes against it,
@@ -1835,6 +1852,14 @@ brio/                    the framework, one directory per stratum:
                            rules the silicon and ES0548 2.8.2 dictate; the
                            platform's template argument for a program with
                            no periodic interrupt
+    dma.hpp                Dma + DmaChannel + the DMAMUX: the request and
+                           the CCR word composed at arm() once, a block
+                           five stores and no read; DmaTxEngine/DmaRxEngine/
+                           DmaLoopEngine/DmaPingPongEngine, DmaCopyEngine
+                           (MEM2MEM), one interrupt per SPI transaction, the
+                           beat per start(), and the receive engine's
+                           circular shape over a HardwareRing (CNDTR the
+                           producer index)
   ch32v00x/              everything that knows the CH32V00x (WCH QingKe V2C,
                          RV32EC) - and NO vendor header: the map is the
                          stratum's own
@@ -1887,7 +1912,11 @@ brio/                    the framework, one directory per stratum:
                            REQUEST: no multiplexer, table 8-2 names the
                            channel; every store refused while EN is set,
                            which stays set after a completed block) +
-                           DmaTxEngine/DmaRxEngine<ch, Elem>
+                           DmaTxEngine/DmaRxEngine<ch, Elem> and
+                           DmaCopyEngine: the channel bound once at arm(),
+                           a block five stores and no load, the beat per
+                           start() from the run's element type, one
+                           interrupt per SPI transaction
     spi.hpp                Spi<1> resource (the F1's SPI, no FIFO, HSCR) +
                            SpiHost<1, pins, TxEngine, RxEngine> (the other
                            strata's Request VERBATIM: pump on RXNE or polled,
@@ -2199,7 +2228,14 @@ brio/                    the framework, one directory per stratum:
                            BlockPlayer on circular mode) and DmaPingPongEngine
                            (a BlockSource that stops at every block: two or
                            three items land past the edge before the fastest
-                           handler acts)
+                           handler acts); the engines bound once at arm()
+                           and restarted with four stores, the beat per
+                           start(), the gate opened once, DmaCopyEngine in
+                           MEM2MEM, one interrupt per SPI transaction, and
+                           the receive engine's CIRCULAR shape over the
+                           transport's HardwareRing (CNTR the producer
+                           index, nothing re-armed, a lap the consumer
+                           missed one overrun)
     adc.hpp                the two converters (ch. 12): Adc<1|2> - the
                            calibration BEFORE the buffer and the internal
                            sources, the regular sixteen and the INJECTED four
@@ -2621,7 +2657,14 @@ brio/                    the framework, one directory per stratum:
                            flow controller, five flags and one ISR body -
                            + DmaTxEngine/DmaRxEngine<n, stream, channel, Elem>
                            for the transports' slots, checked against the
-                           request mapping the reserve keys per part class
+                           request mapping the reserve keys per part class;
+                           the stream's configuration word at arm() once, a
+                           block four stores and nothing read after the
+                           enable, the beat per start() (byte, half-word,
+                           word), DmaCopyEngine on DMA2, one interrupt per
+                           SPI transaction, and the receive engine's
+                           circular shape over a HardwareRing (SxNDTR the
+                           producer index)
     usart.hpp              Usart<n> resource over the classic SR/DR/BRR chapter
                            (mute, LIN, IrDA, smartcard, synchronous, flow
                            control, DMA requests, every flag) + Uart<n, pins,
@@ -3017,7 +3060,11 @@ brio/                    the framework, one directory per stratum:
                            DmaLine<0|1> (one per core by convention),
                            DmaTimer<n>, DmaSniffer, and DmaTxEngine/DmaRxEngine
                            <ch, Elem, line> for the transports' slots, and the rule
-                           that two engines of one transport name two channels
+                           that two engines of one transport name two channels;
+                           a block two stores with the second the trigger,
+                           CTRL kept and compared, IRQ_QUIET giving one
+                           interrupt per SPI transaction, DmaCopyEngine, and
+                           the handoff fence before every trigger store
     flash.hpp              the external QSPI chip: Flash (the bootrom's
                            six functions found by code, every erase /
                            program / raw command a WINDOW with the flash
@@ -3274,7 +3321,11 @@ brio/                    the framework, one directory per stratum:
                            belongs to the core whose kernel serves it) +
                            DmaTimer<n>, DmaSniffer, DmaMpu (read-only) +
                            DmaTxEngine/DmaRxEngine<ch, Elem, line> for the
-                           transports' slots
+                           transports' slots; a block two stores with the
+                           second the trigger, CTRL kept and compared,
+                           IRQ_QUIET giving one interrupt per SPI
+                           transaction, DmaCopyEngine, the handoff fence
+                           before every trigger store
     bootrom.hpp            the mask ROM's public function table (5.4): two
                            sets of well-known words, one per architecture,
                            and TWO DIFFERENT LOOKUPS over them - a pointer
