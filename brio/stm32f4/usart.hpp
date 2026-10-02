@@ -1318,9 +1318,9 @@ public:
     /// the run: one the stream wrote over while it was held is counted in
     /// rx_overruns(), and the consumer finds the ring skipped to the
     /// stream's head.
-    static void consume(uint32_t count) {
+    static auto consume(uint32_t count) {
         if constexpr (has_rx_engine) {
-            (void)m_rx.consume(count);
+            return m_rx.consume(count);   // false: the run was written over while held
         } else {
             constexpr uint32_t most = decltype(m_rx)::capacity();
             m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));

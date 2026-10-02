@@ -284,7 +284,7 @@ void util_verbs() {
     // printing, time, wire, ring
     TimeStamp stamp{};
     Ticker::now(stamp);
-    print(serial, "t=", stamp, " ", hex(0xBEEFu), " ", fixed(1.5f, 6, 2), " ", sci(1e-3f), " ", true, crlf);
+    print(serial, "t=", stamp, " ", hex(0xBEEFu), " ", hex(uint64_t{0x1234'5678'9ABC'DEF0}), " ", fixed(1.5f, 6, 2), " ", sci(1e-3f), " ", true, crlf);
     uint8_t wire[4];
     store_be32(wire, 0x01020304u);
     (void)load_be16(wire);

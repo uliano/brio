@@ -1232,7 +1232,16 @@ brio/                    the framework, one directory per stratum:
   util/                  pure services - may include kernel/, never a target
     stream.hpp             ByteSink / ByteSource / ByteTransport concepts
     print.hpp              print(sink, ...) + hex/fixed/sci wrappers, crlf;
-                           extend via print_one + ADL
+                           extend via print_one + ADL; a BulkSink is handed
+                           every string and number as a RUN; the decimal digit
+                           by shifts and adds (no divider asked of the core);
+                           64-bit integers and hex(); and THE FLOAT FORMATTER
+                           OF BRIO'S OWN - dtostrf/dtostre's contracts over an
+                           exact fixed-point split (128 bits of integer, 256 of
+                           fraction), no floating-point operation and no
+                           library, equal to snprintf for every finite float
+                           and every double in [2^-204, 2^128) - the AVR alone
+                           keeping avr-libc's
     timestamp.hpp          TimeStamp (ms fraction)
     wire.hpp               constexpr big-endian load/store (16/24/32, be24s)
     analog.hpp             adc_mv/adc_mv_signed, dac_code/dac_mv: pure counts<->mV
@@ -1390,7 +1399,13 @@ brio/                    the framework, one directory per stratum:
                            a bench_<family> app per build project carries
                            the operations
     serial_port.hpp        SerialPort<Transport, P, LineSink>: RX bytes ->
-                           LineReceived (Lease::dispatch loan, LendsTo)
+                           LineReceived (Lease::dispatch loan, LendsTo); drains
+                           by the run where the transport lends one
+                           (SpanSource), and over a hardware-filled ring posts
+                           a run's lines only after its release came back
+                           clean - a torn run's lines dropped and counted in
+                           torn_lines(), the stream resynced to the next end
+                           of line
     bus_master.hpp         BusMaster<Bus, P, depth, Policy>: bus arbiter
                            (pending FIFO, reject-when-full, ReplyTo
                            completion, BusDone, PrepareSleep voter) + the

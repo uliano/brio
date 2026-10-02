@@ -46,6 +46,17 @@
  * and leaves every byte after it queued, so the two paths deliver the
  * same lines in the same dispatches.
  *
+ * A LINE IS POSTED ONLY FROM A RUN RELEASED CLEAN. The lines completed
+ * from a run are posted after its consume(), never before: where the
+ * ring's producer is the hardware (util/ring.hpp's HardwareRing, behind
+ * a DMA receive engine) the run can be written over while it is read,
+ * and consume() answers false. Then the lines completed from that run
+ * and the line begun when it came are dropped and counted in
+ * torn_lines(), and the stream resumes after its next end of line - the
+ * bytes before it end a line whose beginning the ring skipped. Over a
+ * Ring, whose consume() answers nothing, the release cannot refuse and
+ * none of that is compiled.
+ *
  * The contract assumes a byte stream with an "RX went non-empty" edge
  * from the ISR; a DMA/FIFO transport may change it (docs/design/
  * overview.md, "Authority of util/").
@@ -55,6 +66,7 @@
 
 #include <stdint.h>
 #include <span>
+#include <type_traits>
 
 #include "kernel/borrowed.hpp"
 #include "kernel/event_queue.hpp"
@@ -104,6 +116,13 @@ public:
                                     assembler_[1].overflow_count());
     }
 
+    /// Lines dropped because a run they were read from was written over
+    /// while it was read - the transport refused it at its release (a
+    /// HardwareRing behind it): the lines completed from that run, and the
+    /// line begun in the assemblers when it came. Always zero over a
+    /// transport whose release cannot refuse.
+    static uint32_t torn_lines() { return torn_lines_; }
+
 private:
     static Status running(const Event& e) {
         if (std::holds_alternative<RxActivity>(e)) {
@@ -119,10 +138,15 @@ private:
     static void drain() {
         if constexpr (SpanSource<Transport>) {
             // A run at a time: the bytes read where the ring holds them,
-            // then ONE release for every byte the assemblers took. The
-            // run cannot move under the loop - only this side's consume()
-            // frees its slots - and a line posted from it points into an
-            // assembler, never into the ring.
+            // then ONE release for every byte the assemblers took, and only
+            // THEN the lines completed from them posted. A line points into
+            // an assembler, never into the ring, so the release costs it
+            // nothing - and the release is the run's verdict: over a ring
+            // whose producer is the hardware the run can be written over
+            // while it is read, and consume() says so (util/ring.hpp's
+            // HardwareRing), so a line is posted only from a run released
+            // clean. Over Ring the run cannot move - only this side's
+            // consume() frees its slots - and the release never refuses.
             while (in_flight_ < 2) {
                 const std::span<const uint8_t> run = Transport::read_span();
                 if (run.empty()) {
@@ -131,7 +155,15 @@ private:
                 const uint8_t* const first = run.data();
                 const uint8_t* const end = first + run.size();
                 const uint8_t* next = first;
-                while (next != end && in_flight_ < 2) {
+                if constexpr (release_can_refuse) {
+                    if (resync_) {
+                        next = skip_to_line_end(next, end);
+                    }
+                }
+                const uint8_t active_at_run = active_;
+                char* lines[2];
+                uint8_t held = 0;
+                while (next != end && in_flight_ + held < 2) {
                     // The active assembler stands until a line completes,
                     // so the inner loop holds the byte, the assembler and
                     // the end of the run, and nothing else.
@@ -141,16 +173,24 @@ private:
                         line = assembler.push(*next++);
                     } while (line == nullptr && next != end);
                     if (line != nullptr) {
-                        deliver(line);
+                        lines[held++] = line;
+                        switch_assembler();
                     }
                 }
-                Transport::consume(static_cast<uint32_t>(next - first));
+                if (release(static_cast<uint32_t>(next - first))) {
+                    for (uint8_t i = 0; i < held; ++i) {
+                        deliver(lines[i]);
+                    }
+                } else if constexpr (release_can_refuse) {
+                    tear(held, active_at_run);
+                }
             }
         } else {
             uint8_t byte;
             while (in_flight_ < 2 && Transport::read_byte(byte)) {
                 if (char* line = assembler_[active_].push(byte)) {
                     deliver(line);
+                    switch_assembler();
                 }
             }
         }
@@ -161,16 +201,80 @@ private:
         }
     }
 
-    /// A completed line to the sink; the other buffer takes over.
+    /// A completed line to the sink, lent until the sink's dispatch ends.
     [[gnu::always_inline]] static void deliver(char* line) {
         post<LineSink>(LineReceived{Borrowed<char, Lease::dispatch>{line}});
         ++in_flight_;
+    }
+
+    /// The other buffer takes over the assembly, from the byte after a
+    /// completed line.
+    [[gnu::always_inline]] static void switch_assembler() {
         active_ = static_cast<uint8_t>(active_ ^ 1);
+    }
+
+    // ---- the run's release, and a run refused at it -------------------------
+
+    /// Whether the transport's consume() can refuse a run: it answers a
+    /// bool (a HardwareRing behind it) rather than nothing (a Ring).
+    static constexpr bool release_can_refuse =
+        !std::is_void_v<decltype(Transport::consume(uint32_t{}))>;
+
+    /// Release `n` bytes of the run; true when the run was intact.
+    [[gnu::always_inline]] static bool release(uint32_t n) {
+        if constexpr (release_can_refuse) {
+            return Transport::consume(n);
+        } else {
+            Transport::consume(n);
+            return true;
+        }
+    }
+
+    /// The bytes before the next end of line, and the end of line itself,
+    /// skipped; the line after it is the first whole one.
+    static const uint8_t* skip_to_line_end(const uint8_t* next, const uint8_t* end) {
+        while (next != end) {
+            if (*next++ == '\n') {
+                resync_ = false;
+                break;
+            }
+        }
+        return next;
+    }
+
+    /// A run refused at its release: the bytes the assemblers took from it
+    /// are not the stream, and the ring has skipped to its producer. So
+    /// the `held` lines completed from the run are dropped, and so is the
+    /// line the assemblers had begun - ended in every assembler that lends
+    /// nothing, a '\n' emptying an assembler and ending an overflow's drop
+    /// alike - and the stream is skipped to its next end of line, the bytes
+    /// before it being the end of a line whose beginning the ring skipped.
+    /// The run started on `active_at_run`, which lends nothing; the other
+    /// one is lent only when a line went out before this run in the same
+    /// dispatch. Counted: the lines completed and the one begun, if any.
+    static void tear(uint8_t held, uint8_t active_at_run) {
+        uint32_t dropped = held;
+        active_ = active_at_run;
+        dropped += end_begun_line(active_at_run);
+        if (in_flight_ == 0u) {
+            dropped += end_begun_line(static_cast<uint8_t>(active_at_run ^ 1));
+        }
+        torn_lines_ = torn_lines_ + dropped;
+        resync_ = true;
+    }
+
+    /// Ends what an assembler holds; 1 when that was a line begun - a
+    /// character at least, and not an overflow's drop, already counted.
+    static uint32_t end_begun_line(uint8_t which) {
+        const char* const line = assembler_[which].push('\n');
+        return line != nullptr && line[0] != '\0' ? 1u : 0u;
     }
 
     static inline LineAssembler<max_line> assembler_[2]{};
     static inline uint8_t active_ = 0;
     static inline uint8_t in_flight_ = 0;
+    static inline bool resync_ = false;        // skip to the next end of line
+    static inline uint32_t torn_lines_ = 0;
 };
 
 } // namespace brio

@@ -113,6 +113,22 @@ the run. Counted on the CH32V203's console (`-Os`): 14 instructions an
 ordinary byte by the run, against 28 through `read_byte()`, the ring's
 `pop` inline in the loop.
 
+**A line is posted only from a run released clean.** The lines
+completed from a run are posted after the run's `consume()`, never
+before. Where the receive ring's producer is a DMA channel
+(`HardwareRing`, [ring.md](ring.md)) the channel can write over a run
+while the drain reads it, and `consume()` answers `false`: then the
+lines completed from that run are dropped, so is the line the
+assemblers had begun when it came, both counted in `torn_lines()`, and
+the drain skips the stream to its next end of line - the bytes before
+it end a line whose beginning the ring skipped. A transport passes that
+answer up by returning `consume()`'s `bool`; one whose `consume()`
+returns nothing - every Ring-backed transport - has a release that
+cannot refuse, and none of this is compiled for it: the byte loop and
+its 14 instructions are the same either way. Validated on the host
+(`test_serial_port`, a real `HardwareRing` over a scripted channel that
+writes while a run is held).
+
 **Scheduling contract**: the line consumer must precede SerialPort in
 the Tenuto pack. The kernel then consumes every posted line before
 SerialPort runs again, which is why `in_flight` can reset at dispatch
@@ -154,3 +170,48 @@ direction:
 
 A message-atomic drop ("say it all or say nothing" + counter) is the
 noted future option for telemetry streams.
+
+## Numbers as text (`util/print.hpp`)
+
+`print` formats on top of any `ByteSink` through conversions under
+avr-libc's names and call shapes - `ltoa`, `ultoa`, `dtostrf`,
+`dtostre` and the float twins `ftostrf`, `ftostre`. On the AVR they are
+avr-libc's. Every other image links no C library
+([runtime.md](runtime.md)), so there they are print.hpp's own, written
+in C++ over nothing: the integers by a divide by ten in shifts and adds
+(no division, no multiply - the same instructions on a core with
+neither), a 64-bit integer without a 64-bit division, `hex()` at 32 bits
+and at 64 (sixteen digits at most, no leading zeros, the letters
+`ultoa`'s on each target).
+
+**Off the AVR the floats are an exact binary split, not a float
+routine.** A value travels as what it is - a float as a float, through
+`ftostrf` and `ftostre`, a double as a double -; its bits are taken
+apart and placed in a fixed-point number of 128 integer bits over 256
+fraction bits, and every digit is a multiply or a divide by ten on
+32-bit words - no floating-point operation, not even a float's widening
+to double, and no libgcc call on any core. So the digits are the
+value's own, rounded once, an exact half to even: the text the host's
+`snprintf` prints (`"%*.*f"`, `"%.*e"` under each flag), which
+`test_print` holds all four against over every binade of the float and
+of the double from 2^-204 to 2^128, random fields and precisions, the
+exact halves and the carries.
+
+- The range: every finite float, and every double below 2^128, held
+  exactly from 2^-204 up; a double below that keeps its bits from
+  2^-256 up (`fixed()` is still exact there at every precision up to
+  61) and reads as zero under 2^-256. A double of 2^128 or more prints
+  as an infinity of its sign.
+- The letters are avr-libc's: `dtostrf` writes `NAN`, `INF`, `-INF` in
+  its field; `dtostre` writes `nan` and `inf` (upper case under
+  `DTOSTR_UPPERCASE`), a NaN taking no `-`.
+- `fixed(v, width, precision)` keeps at most 18 decimals and a field as
+  wide as its 60-byte buffer, either alignment; `sci(v, precision)` and a
+  bare float or double print signed (`+1.230e-03`), at most 7 decimals,
+  avr-libc's own bound.
+- The cost, counted on two consoles at `-Os`: one `fixed()` of a float
+  adds 1068 bytes of text on the STM32G0's (Cortex-M0+) - the conversion
+  inlined into its caller, the fraction's digit step, the divide by ten
+  and the runtime's `memset` for the split's words - and 1208 on the
+  CH32V003's (no multiplier); of a double 1168 and 1312; `fixed()` and
+  `sci()` of a float together 1592 on the STM32G0.

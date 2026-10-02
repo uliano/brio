@@ -1,7 +1,10 @@
 // Host tests for util/serial_port.hpp: line assembly, ping-pong ownership,
 // backpressure with self-post, consumer-above-producer scheduling - each
 // over the two drains: a byte at a time through read_byte(), and a run at
-// a time over a transport that lends its receive ring in place.
+// a time over a transport that lends its receive ring in place - and,
+// over a transport lending a HardwareRing whose scripted channel writes
+// over a run while it is held, the rule that a line is posted only from a
+// run released clean.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -88,8 +91,78 @@ struct RunFake {
     }
 };
 
+// The DMA side of a circular receive, scripted: a 16-byte storage the
+// producer writes lap after lap, its count and its lap number what a
+// circular channel shows (the count reloads to the length at a lap's end,
+// the completion that counts a lap served at once).
+struct Channel {
+    static constexpr uint32_t length = 16;
+    static inline uint8_t storage[length]{};
+    static inline uint32_t written = 0;   // bytes the producer has written
+    static uint32_t remaining() { return length - written % length; }
+    static uint32_t laps() { return written / length; }
+    static void write(const char* s) {
+        while (*s) {
+            storage[written % length] = static_cast<uint8_t>(*s++);
+            ++written;
+        }
+    }
+    static void reset() {
+        written = 0;
+        for (uint8_t& b : storage) {
+            b = 0;
+        }
+    }
+};
+
+// Fake engined transport: a real HardwareRing over that channel, its
+// consumer half lent in place - consume() answering whether the run was
+// intact. Two hooks script the channel: `written_while_held` is written
+// while the `lend`-th run lent from now is HELD, between the read_span()
+// that lent it and the consume() that releases it; `written_after_refusal`
+// right after a release is refused, as a channel that keeps receiving.
+struct HwFake {
+    using Rx = brio::HardwareRing<Channel::storage, Channel>;
+    static inline const char* written_while_held = nullptr;
+    static inline uint32_t lend = 1;
+    static inline const char* written_after_refusal = nullptr;
+    static inline uint32_t refusals = 0;   // consume() calls that answered false
+
+    static std::span<const uint8_t> read_span() {
+        const auto run = Rx::read_span();
+        if (!run.empty() && written_while_held != nullptr && --lend == 0u) {
+            Channel::write(written_while_held);
+            written_while_held = nullptr;
+        }
+        return run;
+    }
+    static bool consume(uint32_t n) {
+        const bool intact = Rx::consume(n);
+        if (!intact) {
+            ++refusals;
+            if (written_after_refusal != nullptr) {
+                Channel::write(written_after_refusal);
+                written_after_refusal = nullptr;
+            }
+        }
+        return intact;
+    }
+    static void feed(const char* s) { Channel::write(s); }
+    static uint32_t queued() { return Rx::count(); }
+    static void reset() {
+        Channel::reset();
+        Rx::clear();
+        Rx::clear_overruns();
+        written_while_held = nullptr;
+        lend = 1;
+        written_after_refusal = nullptr;
+        refusals = 0;
+    }
+};
+
 static_assert(!brio::SpanSource<ByteFake>);
 static_assert(brio::SpanSource<RunFake>);
+static_assert(brio::SpanSource<HwFake>);
 
 // Sink AO: copies each received line during its dispatch (the only
 // window in which the reference is valid).
@@ -285,4 +358,111 @@ TEST_CASE("a run cut at the second line resumes inside the same run") {
     CHECK(RunFake::spans == 2);
     CHECK(RunFake::consumes == 2);
     CHECK(RunFake::queued() == 0);
+}
+
+// ---- a run written over while it is held -------------------------------------
+
+TEST_CASE("over a HardwareRing a line goes out from a clean run, as over a Ring") {
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("HELLO\nWORLD\n");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"HELLO", "WORLD"});
+    // Across the storage's end and through a lap: every line, in order.
+    HwFake::feed("ABCDEFGHIJ\nK\n");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"HELLO", "WORLD", "ABCDEFGHIJ", "K"});
+    CHECK(HwFake::queued() == 0u);
+    CHECK(HwFake::refusals == 0u);
+    CHECK(Serial::torn_lines() == torn_before);
+}
+
+TEST_CASE("a run the channel writes over while it is held posts nothing, and the stream resumes at a line") {
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    // "ONE\nTWO\nTH" (positions 0..10) is lent as one run; while it is
+    // held the channel writes 21 more bytes (11..31), a lap and more, so
+    // the slots the run spans hold positions 16..26 by the time they are
+    // read: "XXX\nYYYYYYY". The assemblers complete "XXX" and begin
+    // "YYYYYYY", and the release refuses the run: nothing is posted - not
+    // "ONE" nor "TWO", whose bytes were never read, nor "XXX" - and the
+    // line completed and the one begun are counted.
+    HwFake::feed("ONE\nTWO\nTH");
+    HwFake::written_while_held = "REE\nQXXX\nYYYYYYYZZZZZ";
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(HwFake::refusals == 1u);
+    CHECK(Sink::lines.empty());
+    CHECK(HwFake::Rx::overruns() == 1u);
+    CHECK(Serial::torn_lines() == torn_before + 2u);
+    // The ring skipped to its producer, in the middle of "ZZZZZ..": the
+    // stream resumes after the next end of line, so the line whose
+    // beginning the skip took never reaches the sink, and the whole ones
+    // after it do, each assembled from empty.
+    HwFake::feed("ZZ\nAFTER\nNEXT\n");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"AFTER", "NEXT"});
+    CHECK(HwFake::refusals == 1u);
+    CHECK(Serial::torn_lines() == torn_before + 2u);
+}
+
+TEST_CASE("a refused run after a line already out leaves that line's buffer alone") {
+    // Two runs in one dispatch: the first, up to the storage's end,
+    // completes "CD" and is released clean, so "CD" goes out and its
+    // buffer is LENT until the sink's dispatch. The second, after the
+    // wrap, is written over while held and completes "PQ" from what the
+    // channel left there, which hands the assembly back to the lent
+    // buffer; its release is refused, and the channel goes on with
+    // "tt\nUV\n" in the same dispatch. The tear must hand the assembly to
+    // the buffer that lends nothing and leave the lent one untouched, or
+    // the sink reads "UV" - or nothing - where "CD" was posted.
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("0123456789AB\n");   // positions 0..12
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    REQUIRE(Sink::lines == Lines{"0123456789AB"});
+    Sink::lines.clear();
+    HwFake::feed("CD\n");             // 13..15: the first run, up to the end
+    HwFake::feed("EF\nGH");           // 16..20: the second, after the wrap
+    // 21..36 while the second is held: slots 0..4 then read "PQ\nRS".
+    HwFake::written_while_held = "aaaaaaaaaaaPQ\nRS";
+    HwFake::lend = 2;
+    HwFake::written_after_refusal = "tt\nUV\n";
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(HwFake::refusals == 1u);
+    CHECK(Sink::lines == Lines{"CD", "UV"});
+    CHECK(Serial::torn_lines() == torn_before + 1u);
+}
+
+TEST_CASE("a line begun in a clean run and cut by a refused one is dropped and counted") {
+    // "HEL" arrives alone and is released clean: a line begun. The next
+    // run carries no end of line and is written over while held, so the
+    // line it would have continued is cut - dropped and counted once - and
+    // the stream resumes after the next end of line.
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("HEL");                // 0..2
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines.empty());
+    HwFake::feed("LO");                 // 3..4
+    HwFake::written_while_held = "aaaaaaaaaaaaaaaaa";   // 5..21: a lap over it
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(HwFake::refusals == 1u);
+    CHECK(Sink::lines.empty());
+    CHECK(Serial::torn_lines() == torn_before + 1u);
+    HwFake::feed("aa\nNEXT\n");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"NEXT"});
 }

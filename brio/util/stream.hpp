@@ -73,7 +73,12 @@ concept ByteSource = requires(uint8_t &b) {
 /// first n of it, oldest first, clamped to what is queued. These are the
 /// consumer half of util/ring.hpp under the ring's own names, and the
 /// ring's rules hold: consumer side only, a run valid until the
-/// consumer's next operation on the source.
+/// consumer's next operation on the source - and, where the producer is
+/// the hardware (a HardwareRing behind the transport), valid only as
+/// long as the producer has not lapped it: consume() then answers
+/// whether the run was still intact when released, and a reader that
+/// acted on the run before releasing it (SerialPort's lines) acts on
+/// that answer. Over a plain Ring consume() answers nothing.
 template <typename S>
 concept SpanSource = requires(uint32_t n) {
     { S::read_span() } -> std::convertible_to<std::span<const uint8_t>>;

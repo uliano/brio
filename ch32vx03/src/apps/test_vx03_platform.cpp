@@ -851,8 +851,8 @@ void tj_fpu_state() {
             fma_result = r;
             fs_after = fs_of(read_mstatus());
         }
-        // Printed as thousandths: a float through the C library's
-        // formatter would drag its whole printf into the image.
+        // Printed as thousandths: an integer the verdict can compare,
+        // and the letter asks nothing of the float formatter.
         print(serial, "  FS set to ", fs_before, " (", fs_name(fs_before),
               "), then fmadd.s 1.5*2.25+3.0 = ",
               static_cast<int32_t>(fma_result * 1000.0f), "/1000, then FS = ", fs_after, " (",
