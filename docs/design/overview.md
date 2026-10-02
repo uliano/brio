@@ -117,8 +117,9 @@ both images. The byte sink of `util/stream.hpp` is this rule applied
 late: its byte verb stays for a sink that has nothing else - a test
 capture, a simulated port - and every transport carries the run,
 `write_bulk` (`BulkSink`), which `print` hands every string and every
-number whole; the source's mirror lends its received run in place
-(`SpanSource`).
+number - a C string's first byte through the byte verb, so an idle
+transmitter starts before the rest is measured; the source's mirror
+lends its received run in place (`SpanSource`).
 
 ## Layering: the strata
 

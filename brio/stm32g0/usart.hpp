@@ -2109,12 +2109,34 @@ public:
         return true;
     }
 
-    /// Queue a run of bytes through the ring's contiguous span and nudge
-    /// the transmitter ONCE - one nudge per run where write_byte() costs
-    /// one per byte, which is what a fed engine wants (util/stream.hpp's
-    /// BulkSink). Returns the number queued.
+    /// Queue a run of bytes through the ring's contiguous span
+    /// (util/stream.hpp's BulkSink). Returns the number queued.
+    ///
+    /// THE FIRST BYTE GOES BEFORE THE COPY, on the plain transport: it is
+    /// pushed and the transmit interrupt armed exactly as write_byte()
+    /// does, so an idle transmitter starts on it while the rest is
+    /// copied. The handler disarms when it finds the ring empty - in the
+    /// same entry that hands the FIFO that byte, and on the TXE entry
+    /// after it without the FIFO - and the first byte was the whole ring,
+    /// so the rest, once published, is armed again: the same masked arm,
+    /// idempotent, two a run at most. A run that finds the ring full is
+    /// write_byte()'s refusal. WITH AN ENGINE the run is copied whole and
+    /// the engine pumped once, a block being what it starts on.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t queued = 0;
+        if constexpr (!has_tx_engine) {
+            // write_byte()'s two steps, spelled here so the run's path
+            // holds no call: a full ring is its refusal, nothing to arm.
+            if (src.empty() || !m_tx.push(src[0])) {
+                return 0;
+            }
+            if constexpr (tx_on_threshold) {
+                S::tx_threshold_interrupt(true);
+            } else {
+                S::txe_interrupt(true);
+            }
+            queued = 1;
+        }
         while (queued < src.size()) {
             auto dst = m_tx.write_span();
             if (dst.empty()) {
@@ -2136,15 +2158,15 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(chunk));
             queued += chunk;
         }
-        // ONE nudge for the whole run - the entire point of the verb.
         if constexpr (has_tx_engine) {
-            pump_tx();
-        } else if constexpr (tx_on_threshold) {
-            if (queued != 0u) {
+            pump_tx();   // ONE nudge for the whole run
+        } else if (queued > 1u) {
+            // The rest, behind a first byte the handler may have disarmed on.
+            if constexpr (tx_on_threshold) {
                 S::tx_threshold_interrupt(true);
+            } else {
+                S::txe_interrupt(true);
             }
-        } else if (queued != 0u) {
-            S::txe_interrupt(true);
         }
         return queued;
     }

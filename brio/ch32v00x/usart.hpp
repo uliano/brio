@@ -43,13 +43,14 @@
  *
  * TWO RINGS AND TWO FLAGS. Bytes leave through a TX ring drained by
  * the TXE interrupt (write_byte() re-arms TXEIE after a byte,
- * write_bulk() once after a run; the ISR disarms it when the ring runs
- * dry, because TXE stands for ever while the transmitter is idle and
- * would re-enter the handler without end), and arrive into an RX ring
- * filled by RXNE, taken a byte at a time by read_byte() or a run at a
- * time, in place, by read_span() and consume(). isr() returns the "RX
- * went non-empty" EDGE that util/serial_port.hpp wants to post on - one
- * event per idle-to-busy transition, not one per byte.
+ * write_bulk() after a run's first byte and again after the rest; the
+ * ISR disarms it when the ring runs dry, because TXE stands for ever
+ * while the transmitter is idle and would re-enter the handler without
+ * end), and arrive into an RX ring filled by RXNE, taken a byte at a
+ * time by read_byte() or a run at a time, in place, by read_span() and
+ * consume(). isr() returns the "RX went non-empty" EDGE that
+ * util/serial_port.hpp wants to post on - one event per idle-to-busy
+ * transition, not one per byte.
  *
  * THE BAUD DIVISOR IS THE WHOLE REGISTER. BRR counts the peripheral
  * clock's periods per bit in sixteenths (14.8.3: a 12-bit integer part
@@ -891,15 +892,33 @@ struct Uart {
 
     /// Queue a RUN (util/stream.hpp's BulkSink): as much of `src` as the
     /// ring has room for, copied into the ring's own free run and handed
-    /// over with one index store per contiguous part, then the
-    /// transmitter nudged ONCE - TXEIE armed, or the engine nudged,
-    /// exactly what write_byte() does after a push. Never blocks; returns
-    /// how many were queued. A run that finds no room arms nothing on the
-    /// plain transport (the push that filled the ring armed TXEIE, a
-    /// level) and nudges the engine on the engined one, write_byte()'s
-    /// refusal rule.
+    /// over with one index store per contiguous part. Never blocks;
+    /// returns how many were queued. A run that finds no room is
+    /// write_byte()'s refusal: nothing armed on the plain transport (the
+    /// push that filled the ring armed TXEIE, a level), the engine nudged
+    /// on the engined one.
+    ///
+    /// THE FIRST BYTE GOES BEFORE THE COPY, on the plain transport: it is
+    /// pushed and TXEIE armed exactly as write_byte() does, so an idle
+    /// transmitter starts on it while the rest is copied. The handler
+    /// disarms on the TXE entry that finds the ring empty - the one after
+    /// it hands DATAR that byte, TXE rising again as the byte moves to the
+    /// shift register - and the first byte was the whole ring, so the
+    /// rest, once published, is armed again: one more CTLR1
+    /// read-modify-write, idempotent, two a run at most. WITH AN ENGINE
+    /// the run is copied whole and the engine nudged once, a block being
+    /// what it starts on.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t queued = 0;
+        if constexpr (!has_tx_engine) {
+            // write_byte()'s two steps, spelled here so the run's path
+            // holds no call: a full ring is its refusal, nothing to arm.
+            if (src.empty() || !m_tx.push(src[0])) {
+                return 0;
+            }
+            regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
+            queued = 1;
+        }
         while (queued < src.size()) {
             const auto room = m_tx.write_span();
             if (room.empty()) {
@@ -922,7 +941,8 @@ struct Uart {
         }
         if constexpr (has_tx_engine) {
             pump_tx();
-        } else if (queued != 0u) {
+        } else if (queued > 1u) {
+            // The rest, behind a first byte the handler may have disarmed on.
             regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 | usart_txeie);
         }
         return queued;

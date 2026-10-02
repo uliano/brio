@@ -1319,8 +1319,10 @@ void th_engine_tx() {
     bench.verdict("print() drained the ring completely", drained);
     bench.verdict("the DRE interrupt was never armed",
                   (dre_armed & brio::SercomFlag::dre) == 0);
+    // A print is a RUN since the transport took the run verb: one block
+    // per stretch the engine was idle for, fewer than the lines printed.
     bench.verdict("the engine's channel reported completions",
-                  irq_complete[ch_engine_tx] >= lines);
+                  irq_complete[ch_engine_tx] >= 1u);
     bench.verdict("no transfer error on the engine's channel",
                   irq_error[ch_engine_tx] == 0);
     bench.verdict("the console came back", gave);

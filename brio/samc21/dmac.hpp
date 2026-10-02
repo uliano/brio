@@ -47,19 +47,22 @@
  *               block armed while the request already stands waits for
  *               an edge that has gone by: enabled channel, empty
  *               CHSTATUS, standing peripheral flag, not one beat moving.
- *               One software trigger closes the hole, and doubling is
- *               impossible by construction (one pending bit, raised only
- *               if clear), so a kick racing a real trigger is LOST.
+ *               One software trigger closes the hole; a kick racing a
+ *               real trigger still pending is LOST (one pending bit,
+ *               raised only if clear), but one landing after that
+ *               trigger's beat has started is a SECOND beat (PEND clears
+ *               as the beat starts, 25.8.23).
  *               BUT NOT EVERY PERIPHERAL PRESENTS ITS REQUEST THAT WAY,
  *               and the owner is the only thing that can know: a SERCOM's
  *               DRE and an ADC's RESRDY do, a TC CAPTURE CHANNEL DOES NOT
  *               - a capture stream armed with INTFLAG.MCx already
  *               standing starts anyway, and resumes from a dead stop with
  *               the flag up and TRIGSRC untouched (measured,
- *               docs/samc21/dmac.md). kick() is harmless where it
- *               is unnecessary and necessary where it is not; arming with
- *               the request drained is what makes the first beat a fresh
- *               one either way.
+ *               docs/samc21/dmac.md). kick() is necessary where the
+ *               edge has gone by, lost where a trigger still waits, and
+ *               a second beat where one has started; arming with the
+ *               request drained is what makes the first beat a fresh one
+ *               either way.
  *   abandon()   THE CALLER DECIDES A BLOCK IS DEAD, never the engine:
  *               only the peripheral's owner can read the flags that make
  *               "dead" a fact rather than a timeout. What the
@@ -1687,11 +1690,13 @@ public:
     /// thing that can read the peripheral's flag, gives the channel the
     /// missing edge with this.
     ///
-    /// Safe against doubling by construction: SWTRIGCTRL raises the
-    /// pending bit only if it was not already set (25.8.8), and the
-    /// channel has exactly one, so a kick that races a real hardware
-    /// trigger is simply LOST (readable through trigger_lost()) rather
-    /// than moving a second beat.
+    /// A kick that races a real hardware trigger still PENDING is LOST
+    /// (readable through trigger_lost()): SWTRIGCTRL raises the pending
+    /// bit only if it was not already set (25.8.8), and the channel has
+    /// exactly one. But PEND clears when that trigger's beat STARTS
+    /// (25.8.23), and a kick after that is a second trigger and a second
+    /// beat - measured on the SERCOM USART, whose enable onto a standing
+    /// DRE fires the first beat by itself (docs/samc21/sercom.md).
     static void kick() { Channel::trigger(); }
 
     /// Beats of the block currently in flight (0 when idle).
@@ -1884,11 +1889,13 @@ public:
     /// thing that can read the peripheral's flag, gives the channel the
     /// missing edge with this.
     ///
-    /// Safe against doubling by construction: SWTRIGCTRL raises the
-    /// pending bit only if it was not already set (25.8.8), and the
-    /// channel has exactly one, so a kick that races a real hardware
-    /// trigger is simply LOST (readable through trigger_lost()) rather
-    /// than moving a second beat.
+    /// A kick that races a real hardware trigger still PENDING is LOST
+    /// (readable through trigger_lost()): SWTRIGCTRL raises the pending
+    /// bit only if it was not already set (25.8.8), and the channel has
+    /// exactly one. But PEND clears when that trigger's beat STARTS
+    /// (25.8.23), and a kick after that is a second trigger and a second
+    /// beat - measured on the SERCOM USART, whose enable onto a standing
+    /// DRE fires the first beat by itself (docs/samc21/sercom.md).
     static void kick() { Channel::trigger(); }
 
     /// True once the block filled the whole run: the owner must hand over

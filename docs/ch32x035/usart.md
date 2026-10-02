@@ -162,7 +162,8 @@ if it is not the reset one, hands TX to the peripheral before the enable
 and leaves RX a floating input, configures the frame and the divisor,
 and arms RXNE and the vector. Then: `isr()` (the vector's whole body,
 true on the edge from an empty receive ring), `write_byte` and
-`write_bulk` (a run: as many as fit, TXEIE armed once), `read_byte` and
+`write_bulk` (a run: as many as fit, its first byte pushed and TXEIE
+armed before the rest is copied, armed again behind it), `read_byte` and
 `read_span`/`consume` (the receive run in place), `tx_idle()`,
 `rx_pending()`; the counters
 `rx_overruns`, `hw_overruns`, `frame_errors`, `noise_errors`,

@@ -13,14 +13,14 @@
  * THE RUN IS THE UNIT, THE BYTE ITS DEGENERATE CASE. A transport that
  * queues into a ring or a FIFO moves a whole run for the price of one:
  * the bytes copied into the free room it already owns, and the
- * transmitter nudged ONCE - an interrupt armed, an engine pumped, a FIFO
- * written - where a byte at a time pays that nudge per byte. So a sink
- * may also offer `write_bulk(run)` (BulkSink below), and print.hpp hands
- * it every string and every formatted number whole; the source's mirror
- * is the run lent IN PLACE (SpanSource below), which is how SerialPort
- * drains a receive ring. Both are OPTIONAL: a sink with the byte verb
- * alone - a test capture, a simulated port - stays a sink, and every
- * service falls back to the byte for it.
+ * transmitter nudged at most twice a run - an interrupt armed, an engine
+ * pumped, a FIFO written - where a byte at a time pays that nudge per
+ * byte. So a sink may also offer `write_bulk(run)` (BulkSink below), and
+ * print.hpp hands it every string and every formatted number whole; the
+ * source's mirror is the run lent IN PLACE (SpanSource below), which is
+ * how SerialPort drains a receive ring. Both are OPTIONAL: a sink with
+ * the byte verb alone - a test capture, a simulated port - stays a sink,
+ * and every service falls back to the byte for it.
  *
  * Monostate transports (all-static classes such as Uart<n>) are passed
  * around as empty tag instances: `constexpr Uart<2> serial;` costs nothing
@@ -42,12 +42,20 @@ concept ByteSink = requires(uint8_t b) {
 };
 
 /// A sink that takes a RUN: write_bulk() queues as many of the bytes as
-/// fit, oldest first, NEVER BLOCKS, and nudges the transmitter ONCE for
-/// the run; it returns how many it took - short of the run's length when
-/// the room ran out, zero when there was none. A refused run does what a
-/// refused write_byte() does on the same transport: whatever keeps a
-/// caller that spins on the refusal from spinning on a transmitter
-/// nobody drains, and nothing more.
+/// fit, oldest first, NEVER BLOCKS, and returns how many it took - short
+/// of the run's length when the room ran out, zero when there was none.
+/// Where the transmitter starts on a byte, it is started on the run's
+/// FIRST byte and the rest queued behind it, with at most two nudges a
+/// run: a transport whose interrupt drains a ring pushes the first byte
+/// and nudges as write_byte() does, then copies the rest and nudges
+/// again behind it, its handler having perhaps disarmed on the ring that
+/// byte emptied; one that writes an idle FIFO directly writes the run's
+/// head into it and arms once behind what it queued. Where it starts on a
+/// block - an engine, a USB packet - the run is queued whole and the
+/// transmitter nudged once behind it. A refused run does what a refused
+/// write_byte() does on the same transport: whatever keeps a caller that
+/// spins on the refusal from spinning on a transmitter nobody drains, and
+/// nothing more.
 template <typename S>
 concept BulkSink = ByteSink<S> && requires(std::span<const uint8_t> run) {
     { S::write_bulk(run) } -> std::same_as<uint32_t>;

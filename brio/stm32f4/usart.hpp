@@ -34,7 +34,8 @@
  * from that copy, and lets the DR read do the clearing.
  *
  * TWO RINGS AND TWO FLAGS. Bytes leave through a TX ring drained by
- * the TXE interrupt (write_byte() arms TXEIE; the ISR disarms it when
+ * the TXE interrupt (write_byte() arms TXEIE, write_bulk() after a
+ * run's first byte and again after the rest; the ISR disarms it when
  * the ring runs dry, because TXE stands for ever while the transmitter
  * is idle and would re-enter the handler without end), and arrive into
  * an RX ring filled by RXNE. isr() returns the "RX went non-empty" EDGE
@@ -1168,10 +1169,30 @@ public:
         return true;
     }
 
-    /// Queue a run of bytes through the ring's contiguous span and arm
-    /// the transmitter ONCE. Returns the number queued.
+    /// Queue a run of bytes through the ring's contiguous span
+    /// (util/stream.hpp's BulkSink). Returns the number queued.
+    ///
+    /// THE FIRST BYTE GOES BEFORE THE COPY, on the plain transport: it is
+    /// pushed and TXEIE armed exactly as write_byte() does, so an idle
+    /// transmitter starts on it while the rest is copied. The handler
+    /// disarms on the TXE entry that finds the ring empty - the one after
+    /// it hands DR that byte, TXE rising again as the byte moves to the
+    /// shift register - and the first byte was the whole ring, so the
+    /// rest, once published, is armed again: one more CR1 read-modify-
+    /// write, idempotent, two a run at most. A run that finds the ring
+    /// full is write_byte()'s refusal. WITH AN ENGINE the run is copied
+    /// whole and the stream pumped once, a block being what it starts on.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t queued = 0;
+        if constexpr (!has_tx_engine) {
+            // write_byte()'s two steps, spelled here so the run's path
+            // holds no call: a full ring is its refusal, nothing to arm.
+            if (src.empty() || !m_tx.push(src[0])) {
+                return 0;
+            }
+            S::txe_interrupt(true);
+            queued = 1;
+        }
         while (queued < src.size()) {
             auto dst = m_tx.write_span();
             if (dst.empty()) {
@@ -1193,11 +1214,10 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(chunk));
             queued += chunk;
         }
-        // ONE nudge for the whole run - the entire point of the verb.
         if constexpr (has_tx_engine) {
-            pump_tx();
-        } else if (queued != 0u) {
-            S::txe_interrupt(true);
+            pump_tx();   // ONE nudge for the whole run
+        } else if (queued > 1u) {
+            S::txe_interrupt(true);   // the rest, behind a first byte the handler may have disarmed on
         }
         return queued;
     }

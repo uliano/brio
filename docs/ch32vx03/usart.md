@@ -309,7 +309,9 @@ lot-keyed registers of this die already said it is
 - `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap,
   opts>` for n = 1..8 is the transport task, on that resource:
   `init(clock, baud)`, `isr()` (the edge), `write_byte()`/`write_bulk()`
-  (a run: as many as fit, TXEIE armed once), `read_byte()`/`read_span()`/
+  (a run: as many as fit, its first byte pushed and TXEIE armed before
+  the rest is copied and armed again behind it; with an engine the run
+  queued whole and the engine pumped once), `read_byte()`/`read_span()`/
   `consume()` (the receive run in place), `rx_pending()`/`tx_idle()`, the counters (`rx_overruns()`,
   `frame_errors()`, `parity_errors()`, `noise_errors()`,
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/

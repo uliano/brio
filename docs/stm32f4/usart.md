@@ -194,8 +194,8 @@ duplex (a second board on the wire), IrDA (an IR pair), the smartcard
 the timer chapter's ruler), CTS/RTS flow control (a peer that asserts
 them), the DMAT/DMAR bits (the DMA chapter), the IDLE/TC/PE/CTS/LBD
 interrupt enables, `set_baud` at run time (nothing changes the LINK's
-rate with the clock standing still), `write_bulk`/`read_bulk` (compiled, the
-console writes bytes), `release()`, the instances beyond the consoles'
+rate with the clock standing still), `read_bulk` (compiled; the console
+drains its receive run in place, `read_span`/`consume`), `release()`, the instances beyond the consoles'
 (USART6 and the UARTs - compiled on every header that has them, none
 driven; USART1, USART2 and USART3 are the four boards' consoles), the
 frame formats beyond 8N1 (parity and two stops compile; a peer measures

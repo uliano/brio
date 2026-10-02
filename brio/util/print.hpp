@@ -22,11 +22,13 @@
  *
  * Delivery policy: print BLOCKS until the sink has accepted every byte,
  * and never truncates. Where the sink is a BulkSink (util/stream.hpp) a
- * string_view and every formatted number (each is formatted into a
- * buffer and printed as a string) go to it as ONE RUN, and a C string as
- * runs of up to print_scan_run bytes, measured as it goes: write_bulk()
- * is handed the run and asked again for what is left, spinning while
- * nothing fits - one copy into the transport's ring and one nudge of its
+ * string_view goes to it as ONE RUN, and a C string - every formatted
+ * number among them, each formatted into a buffer and printed as a
+ * string - as its first byte through write_byte(), so an idle
+ * transmitter starts before anything is measured, then as runs of up to
+ * print_scan_run bytes, measured as they go: write_bulk() is handed the
+ * run and asked again for what is left, spinning while nothing fits -
+ * one copy into the transport's ring and at most two nudges of its
  * transmitter a run, where a byte at a time pays both per byte. A sink
  * with the byte verb alone is spun on per byte, through write_byte().
  * Either way, with the interrupt-driven Uart this means "wait for the TX
@@ -60,6 +62,49 @@
 
 namespace brio {
 
+/// A quotient and its remainder, C's div_t by its field names.
+struct DivMod {
+    uint32_t quot;
+    uint32_t rem;
+};
+
+/// value / 10 and value % 10 by shifts and adds alone - no division, no
+/// multiply, no library call, the same dozen and a half instructions on
+/// every core, which is what a decimal digit costs where the core has no
+/// divider (gcc at -Os keeps `/ 10` a libgcc call there, a shift and
+/// subtract of some hundred and fifty instructions) and no multiplier
+/// either (where a reciprocal multiply would be a call of its own).
+///
+/// THE ESTIMATE. value / 10 = value * 4/5 / 8, and 4/5 = 3/4 * 16/15
+/// with 16/15 = (1 + 2^-4)(1 + 2^-8)(1 + 2^-16) / (1 - 2^-32): the first
+/// line forms 3/4 of the value, the next three multiply it by the three
+/// factors, the shift divides by 8. Every right shift truncates, so the
+/// estimate is NEVER ABOVE value / 10. What the truncations lose, carried
+/// through the factors that follow them (a product under 16/15), stays
+/// under 5.2 before the last shift - 4/3 from the first line's 5/4, under
+/// one from each of the three lines after it, under 0.8 from the 2^-32
+/// the product leaves out - and the last shift divides that by 8 and
+/// truncates up to 7/8 more: the estimate is short of value / 10 by under
+/// 5.2/8 + 7/8 < 1.53. An integer at most value / 10 and short of it by
+/// under 1.53 is floor(value / 10) or one less, so the remainder it
+/// leaves is under 20 and ONE correction - subtract 10 once when it is 10
+/// or more - makes both exact. Nothing overflows: every intermediate is
+/// at most 0.8 * value and the product taken back, ten times the
+/// estimate, at most value. test_print checks it against `/` and `%`.
+constexpr DivMod divmod10(uint32_t value) {
+    uint32_t q = (value >> 1) + (value >> 2);
+    q += q >> 4;
+    q += q >> 8;
+    q += q >> 16;
+    q >>= 3;
+    uint32_t r = value - ((q << 3) + (q << 1));
+    if (r >= 10u) {
+        q += 1u;
+        r -= 10u;
+    }
+    return {q, r};
+}
+
 #if defined(__AVR__)
 using ::dtostre;
 using ::dtostrf;
@@ -68,15 +113,12 @@ using ::ultoa;
 #else
 /// The AVR-libc conversions the hosted C library does not ship. Two
 /// bases are ever asked for here, 10 and 16, and each loop has its
-/// divisor as a CONSTANT: base 16 by a mask and a shift, base 10 with ONE
-/// division a digit, the remainder taken back from the quotient by a
-/// multiply (or the shifts it folds to). A variable base would cost a
-/// core with no divider a remainder call AND a division call a digit (the
-/// CH32V006 and the CH32V003; a Cortex-M0+ one call, its library's divmod
-/// returning both), and a core with one a remainder and a division
-/// instruction. gcc at -Os keeps the one division a library call where
-/// the core has no divider, even where a multiply by the reciprocal would
-/// do (counted in the release listings). Any base but 16 converts as 10.
+/// divisor as a CONSTANT: base 16 by a mask and a shift, base 10 by
+/// divmod10() above, the same shifts and adds on every core whether or
+/// not it divides. Any base but 16 converts as 10. Where `unsigned long`
+/// is wider than 32 bits - an LP64 host - the digits above 32 bits are
+/// peeled off first by the compiler's own division, a loop that does not
+/// exist where it is 32 bits; brio itself never hands this more than 32.
 /// A longer buffer than the call sites give is impossible for the widths
 /// brio prints.
 inline char* ultoa(unsigned long value, char* buffer, int base) {
@@ -89,11 +131,19 @@ inline char* ultoa(unsigned long value, char* buffer, int base) {
             value >>= 4;
         } while (value != 0u);
     } else {
+        if constexpr (sizeof(unsigned long) > sizeof(uint32_t)) {
+            while (value > 0xFFFF'FFFFul) {
+                const unsigned long quotient = value / 10u;
+                digits[n++] = static_cast<char>('0' + static_cast<uint8_t>(value - quotient * 10u));
+                value = quotient;
+            }
+        }
+        uint32_t v = static_cast<uint32_t>(value);
         do {
-            const unsigned long quotient = value / 10u;
-            digits[n++] = static_cast<char>('0' + static_cast<uint8_t>(value - quotient * 10u));
-            value = quotient;
-        } while (value != 0u);
+            const DivMod d = divmod10(v);
+            digits[n++] = static_cast<char>('0' + d.rem);
+            v = d.quot;
+        } while (v != 0u);
     }
     for (uint8_t i = 0; i < n; ++i) {
         buffer[i] = digits[n - 1 - i];
@@ -267,11 +317,14 @@ inline void print_one(S s, std::string_view text) {
 /// a BulkSink (below).
 inline constexpr size_t print_scan_run = 64;
 
-/// A BulkSink takes a C string a STRETCH at a time: up to print_scan_run
-/// bytes are measured and handed over as one run, then the next. The
-/// length is found as the string goes, never all of it first, so the
-/// first byte reaches the transport after one stretch's scan whatever the
-/// string's length, and every later scan runs while the transmitter
+/// A BulkSink takes a C string's FIRST BYTE through the byte verb, before
+/// anything is measured, and the rest a STRETCH at a time: up to
+/// print_scan_run bytes measured and handed over as one run, then the
+/// next. An idle transmitter starts on that byte while the first stretch
+/// is scanned and copied behind it - the scan alone, ahead of it, put
+/// some six hundred cycles in front of a long print's first frame on the
+/// Cortex-M0+ parts - and the length is found as the string goes, never
+/// all of it first, so every later scan runs while the transmitter
 /// drains the stretch before it (a whole-string strlen() first delays a
 /// 4096-byte print by its scan, measured at 260 us on the CH32V203).
 /// Any other sink is fed byte by byte up to the NUL, with no length to
@@ -279,6 +332,11 @@ inline constexpr size_t print_scan_run = 64;
 template <ByteSink S>
 inline void print_one(S s, const char *text) {
     if constexpr (BulkSink<S>) {
+        if (*text == '\0') {
+            return;
+        }
+        write_blocking(s, static_cast<uint8_t>(*text));
+        ++text;
         for (;;) {
             size_t n = 0;
             while (n < print_scan_run && text[n] != '\0') {

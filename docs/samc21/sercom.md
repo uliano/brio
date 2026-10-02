@@ -96,8 +96,10 @@ whatever drives it.
   `isr()` as the ONE handler body honouring the edge-return contract
   (true on the RX ring's empty-to-non-empty transition - the kernel
   wakeup), try-semantics `write_byte` and `write_bulk` (a run: as
-  many as fit, one nudge - the verb `print` hands every string and
-  number), `read_byte`, `read_bulk` and `read_span`/`consume` (the
+  many as fit, its first byte pushed and DRE armed before the rest is
+  copied and armed again behind it, or with an engine the run queued
+  whole and the engine pumped once - the verb `print` hands every
+  string and number), `read_byte`, `read_bulk` and `read_span`/`consume` (the
   receive run in place), error counters,
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
@@ -178,10 +180,11 @@ The engines are POLICIES, not features of the task:
   it. The kick is therefore insurance whose cost is one never-doubling
   store, kept on both paths. Both `pump_tx()` and the receive re-arm
   therefore ask the SERCOM whether its flag is already set and, if it
-  is, give the channel one software trigger. It cannot double a byte:
-  a channel has exactly one pending bit and SWTRIGCTRL raises it only
-  if it was clear (25.8.8), so a kick
-  that races a real trigger is lost rather than served twice.
+  is, give the channel one software trigger. A kick that races a real
+  trigger still PENDING is lost - a channel has exactly one pending bit
+  and SWTRIGCTRL raises it only if it was clear (25.8.8) - but one that
+  lands after the real trigger's beat has STARTED doubles it, PEND
+  being clear by then (25.8.23): the race the first gap below names.
 - **A REFUSED BYTE STILL NUDGES.** `write_byte()` returning false is
   the state in which nothing is draining the ring, and `print()`
   answers that false by trying again for ever - so the refusal path
@@ -347,6 +350,19 @@ bridge between the pads and the PC - as much as of the driver.
 ## Not covered yet
 
 Driver gaps (not built):
+- A TRANSMIT KICK THAT CANNOT DOUBLE A BEAT. `pump_tx()` enables the
+  block, then reads DRE and kicks when it stands; the enable onto a
+  standing DRE fires the channel's own first beat as well (measured:
+  the kick found PEND already raised), and a kick that lands after that
+  beat has started is a second trigger whose byte a full DATA discards.
+  Measured with `write_bulk()` built `[[gnu::flatten]]`, which inlined
+  `pump_tx()` and brought the DRE read into that window: the second byte of a block lost in
+  `test_samc_dma`'s letters h and j. As built, the read falls after the
+  beat has landed and the suites lose nothing - which is timing, not a
+  guard. Reading CHSTATUS (PEND or BUSY) before DRE would close the
+  window; not built, because whether a USART transmit block is kicked
+  at all is a decision about the owner's request shape and the change
+  wants its own measurement.
 - A BULK RECEIVE PATH THAT PACES ITSELF. `read_bulk()` exists, but the
   RX engine only publishes what `harvest()` takes, and how often to call
   it is left entirely to the port owner - which at 3 Mbaud means every

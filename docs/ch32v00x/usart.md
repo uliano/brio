@@ -162,7 +162,9 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
 - `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` is
   the transport task, on the resource: `init(clock, baud)`, `isr()`
   (the edge), `write_byte()`/`write_bulk()` (a run: as many as fit,
-  TXEIE armed or the engine nudged once), `read_byte()`/`read_span()`/
+  its first byte pushed and TXEIE armed before the rest is copied and
+  armed again behind it, or with an engine the run queued whole and
+  the engine nudged once), `read_byte()`/`read_span()`/
   `consume()` (the receive run in place), the counters
   (`rx_overruns()`, `frame_errors()`, `parity_errors()`,
   `noise_errors()`, `hw_overruns()`, `clear_errors()`), `rebase()`,

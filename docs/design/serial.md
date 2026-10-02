@@ -17,28 +17,44 @@ of any ByteSink.
 offers `write_bulk(run)` beside `write_byte` (`util/stream.hpp`'s
 `BulkSink`): as many of the bytes as the transmit ring has room for,
 copied into the ring's own free run and published with one index store
-a contiguous part, then the transmitter nudged ONCE - an interrupt or a
-FIFO threshold armed, an engine pumped, an idle FIFO written directly -
-never blocking, and returning how many it took. A run that finds no room
-does what a refused byte does on the same transport. `print` hands it
-every `string_view` and formatted number whole and a C string in
-stretches of up to 64 bytes, measured as it goes (`util/print.hpp`); a
-sink with the byte verb alone - a test capture, a simulated port - is
-fed a byte at a time. Counted in the release listings, a printed byte
-that finds room in the ring costs the thread 10 instructions on the
-CH32V203 (a scan and a copy of five each) against 21 through
-`write_byte` - a call and a read-modify-write of the USART's control
-register every byte - 12 against 22 on the SAM C21, 12 against 27 on
-the STM32G0 (its byte path masking interrupts around the register write
-every byte), 9 against 19 on the STM32F446, plus some sixty a run. On a
-block with one data register and no FIFO the line does not show it: a
-print is wire-bound, the interrupt count is the block's shape, and a
-print longer than the ring's room is a spin either way - what moves is
-the thread's cost of a line that fits. The price is the start: the
-transmitter is nudged after the first run is copied, not after its
-first byte, which puts a few hundred to fifteen hundred cycles - a bit
-to three at 115200 - in front of a print's first frame on the
-Cortex-M0+ parts at 48 and 64 MHz.
+a contiguous part, never blocking, and returning how many it took.
+Where the transmitter starts on a byte, it is started on the run's
+FIRST byte, before the rest is copied. A transport whose interrupt
+drains its ring - the SAM C21's, the STM32G0's, the STM32F4's, the
+three CH32 strata's, the AVR's - pushes that byte and arms its
+interrupt exactly as `write_byte` does, copies the rest and arms again
+behind it, because every one of those handlers disarms on the ring that
+one byte emptied (the SAM C21's and the AVR's as they pop it, the
+STM32G0's FIFO in the same entry, the others on the entry after): two
+nudges a run at most, the second idempotent. The PL011's writes an idle
+FIFO directly. Where the transmitter starts on a block - a DMA engine,
+a USB packet - the run is queued whole and nudged once behind it. A run
+that finds no room does what a refused byte does on the same transport.
+`print` hands a `string_view` over as one run and a C string - every
+formatted number is one - as its first byte through `write_byte`, then
+in stretches of up to 64 bytes, measured as it goes (`util/print.hpp`),
+so an idle transmitter starts before anything is measured or copied; on
+an engined transport that first byte is a block of its own. A sink with
+the byte verb alone - a test capture, a simulated port - is fed a byte
+at a time. Counted in the release listings, a printed byte that finds
+room in the ring costs the thread 10 instructions on the CH32V203 (a
+scan and a copy of five each) against 21 through `write_byte` - a call
+and a read-modify-write of the USART's control register every byte -
+12 against 22 on the SAM C21, 12 against 27 on the STM32G0 (its byte
+path masking interrupts around the register write every byte), 9
+against 19 on the STM32F446, plus a run's own fifty-odd (the CH32V203)
+to seventy-odd (the SAM C21). On a block with one data register and no
+FIFO the line does not show it: a print is wire-bound, the interrupt
+count is the block's shape, and a print longer than the ring's room is
+a spin either way - what moves is the thread's cost of a line that
+fits. What the line does show is the
+start: measured with `bench_*`'s letter p, a print's first frame leaves
+within a few tens of cycles of where the byte verb alone sends it, on the
+SAM C21 at 48 MHz and the STM32G0 at 64 MHz alike, and the start costs
+the interrupts the byte verb's start costs - the handler entered for
+the first byte alone, so the SAM C21 takes one entry more than a print
+has bytes and the STM32G0's FIFO serves the first two bytes one an
+entry before its refills of eight.
 
 The receive-side ISR body returns the RX ring's empty -> non-empty
 EDGE: the app ISR glue posts one `RxActivity` event on true. No event

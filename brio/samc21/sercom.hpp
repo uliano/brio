@@ -1341,9 +1341,9 @@ public:
 
     /**
      * Queue a run of bytes in BULK: copy straight into the ring's own
-     * free run and nudge the transport ONCE, instead of once per byte.
-     * Returns how many were queued (short of `src.size()` when the ring
-     * filled).
+     * free run and nudge the transport once a run - twice at most, the
+     * first byte's own below - instead of once per byte. Returns how
+     * many were queued (short of `src.size()` when the ring filled).
      *
      * WHY THIS EXISTS, measured rather than assumed. write_byte() ends
      * in a nudge - arming DRE on the plain transport, pump_tx() on the
@@ -1362,9 +1362,33 @@ public:
      * store. Nothing about the concurrency model changes - this side
      * still writes only its own index - so the engine or the handler
      * draining the other end needs no cooperation.
+     *
+     * THE FIRST BYTE GOES BEFORE THE COPY, on the plain transport: it is
+     * pushed and DRE armed exactly as write_byte() does, so an idle
+     * transmitter starts on it while the rest is copied, where a nudge
+     * after the copy started the first frame only once the whole run was
+     * in the ring. feed() disarms DRE when it pops the ring's last byte,
+     * and that first byte WAS the ring, so the rest, once published, is
+     * armed again - one more INTENSET store, idempotent: two nudges a run
+     * at most. A run that finds the ring full is write_byte()'s refusal,
+     * nudge included. WITH AN ENGINE the run is copied whole and the
+     * engine pumped once: an engine starts on a block, and a first byte
+     * of its own would be a block and a completion interrupt more every
+     * run.
      */
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t done = 0;
+        if constexpr (!has_tx_engine) {
+            // write_byte()'s two steps, spelled here so the run's path
+            // holds no call. A full ring is its refusal, nudge included -
+            // and so is an empty run, the legal nudge sercom.md documents.
+            if (src.empty() || !m_tx.push(src[0])) {
+                nudge_blocked_tx();
+                return 0;
+            }
+            S::enable_dre_interrupt(true);
+            done = 1;
+        }
         while (done < src.size()) {
             const auto room = m_tx.write_span();
             if (room.empty()) {
@@ -1386,15 +1410,14 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
         }
-        if (done != 0u) {
-            // ONE nudge for the whole run - the entire point.
-            if constexpr (has_tx_engine) {
-                pump_tx();
+        if constexpr (has_tx_engine) {
+            if (done != 0u) {
+                pump_tx();   // ONE nudge for the whole run - the entire point
             } else {
-                S::enable_dre_interrupt(true);
+                nudge_blocked_tx();   // nothing fitted: see write_byte()
             }
-        } else {
-            nudge_blocked_tx();   // nothing fitted: see write_byte()
+        } else if (done > 1u) {
+            S::enable_dre_interrupt(true);   // the rest, behind a first byte feed() may have disarmed on
         }
         return done;
     }

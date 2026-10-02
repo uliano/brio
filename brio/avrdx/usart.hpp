@@ -925,7 +925,8 @@ private:
  * TX policy: write_byte() has TRY semantics (false when the TX ring is
  * full, nothing counted - the caller decides whether to retry, drop or
  * block; print.hpp blocks), and write_bulk() is the same for a RUN: as
- * many as fit, one DREIE store for all of them. RX overflow (ring full,
+ * many as fit, the first byte pushed and DREIE set before the rest is
+ * copied, and DREIE set again behind the rest. RX overflow (ring full,
  * byte lost) IS counted, as are the hardware error flags.
  */
 // Ring defaults sized for console-class traffic AND for lock-free rings:
@@ -1167,15 +1168,28 @@ public:
 
     /// Queue a RUN (util/stream.hpp's BulkSink): as much of `src` as the
     /// ring has room for, copied into the ring's own free run and handed
-    /// over with one index store per contiguous part, then DREIE set ONCE
-    /// - what write_byte() does after a push. Never blocks; returns how
-    /// many were queued. A run that finds no room sets nothing: the push
-    /// that filled the ring set DREIE, and DRE is a level. The counts are
-    /// size_t, a span's own width - sixteen bits here, where a 32-bit
-    /// count would cost four registers a step - and widened only for the
-    /// contract's return.
+    /// over with one index store per contiguous part. Never blocks;
+    /// returns how many were queued. A run that finds no room is
+    /// write_byte()'s refusal and sets nothing: the push that filled the
+    /// ring set DREIE, and DRE is a level. The counts are size_t, a
+    /// span's own width - sixteen bits here, where a 32-bit count would
+    /// cost four registers a step - and widened only for the contract's
+    /// return.
+    ///
+    /// THE FIRST BYTE GOES BEFORE THE COPY: it is pushed and DREIE set
+    /// exactly as write_byte() does, so an idle transmitter starts on it
+    /// while the rest is copied. dre() clears DREIE when it pops the
+    /// ring's last byte, and that first byte was the ring, so the rest,
+    /// once published, sets it again - one more CTRLA read-modify-write,
+    /// idempotent, two a run at most.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
-        size_t queued = 0;
+        // write_byte()'s two steps, spelled here so the run's path holds no
+        // call: a full ring is its refusal, nothing to set.
+        if (src.empty() || !m_tx.push(src[0])) {
+            return 0;
+        }
+        U::regs().CTRLA |= USART_DREIE_bm;
+        size_t queued = 1;
         while (queued < src.size()) {
             const auto room = m_tx.write_span();
             if (room.empty()) {
@@ -1196,8 +1210,8 @@ public:
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             queued += take;
         }
-        if (queued != 0u) {
-            U::regs().CTRLA |= USART_DREIE_bm;
+        if (queued > 1u) {
+            U::regs().CTRLA |= USART_DREIE_bm;   // the rest, behind a first byte dre() disarmed on
         }
         return static_cast<uint32_t>(queued);
     }

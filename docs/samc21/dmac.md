@@ -110,7 +110,11 @@ USART transmit measurement, and the reason the engines expose `kick()`:
 one software trigger, which the owner issues when it can see the
 peripheral's flag already standing. SWTRIGCTRL raises the single
 pending bit only if it was clear (25.8.8), so a kick that races a real
-trigger is lost, never doubled. BUT THE SAME SERCOM IN SPI HOST MODE
+trigger STILL PENDING is lost - but PEND clears when the trigger's beat
+starts (25.8.23), and a kick after that is a second trigger: measured
+on the SERCOM USART, a block enabled onto a standing DRE fired its own
+first beat and a kick that landed behind it moved a second beat into a
+full DATA, one byte lost (sercom.md). BUT THE SAME SERCOM IN SPI HOST MODE
 MEASURES THE OTHER WAY: enabling a channel with DRE already standing
 fires the first beat by itself, and a kick on top of that start is one
 extra beat whose byte a full transmit buffer discards in silence

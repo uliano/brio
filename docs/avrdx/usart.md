@@ -93,7 +93,7 @@ tasks speak hertz and are `ClockUser`s.
 | `Usart<n>` interrupts | `enable_rxc_interrupt`, `enable_txc_interrupt`, `enable_dre_interrupt`, `enable_rxs_interrupt`, `enable_autobaud_error_interrupt` |
 | `Usart<n>` data | `receive()` / `receive_as<bits>()` -> `UsartFrame` (ISR body of `USARTn_RXC_vect`), `transmit(v)` / `transmit_as<bits>(v)`, `clear_txc()` (ISR body of `USARTn_TXC_vect`), the bounded `send`/`poll`/`wait`/`wait_line_idle` |
 | `Usart<n>` events | `XckEvent` (generator), `IrdaIn` (user) |
-| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once TX is idle), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, one DREIE store for all of them), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`/`tx_idle`, the error counters, ISR bodies `rxc()` (returns the empty -> non-empty edge) and `dre()` |
+| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once TX is idle), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, DREIE set again behind the rest), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`/`tx_idle`, the error counters, ISR bodies `rxc()` (returns the empty -> non-empty edge) and `dre()` |
 | `OneWire<n, route>` | `available`, `init(clock, baud, fmt)`, `talk()`/`listen()`, `line()`, `echo_matches(sent)` |
 | `Rs485<n, route>` | `available`, `init(clock, baud, fmt, one_wire)`, `drive_enable()`, `guard_bits` |
 | `SyncHost<n, route>` / `SyncClient<n, route>` | `available`, `init(...)`, `clock_pin()`, `invert_xck(bool)` (host), `max_xck_hz(hz)` (client) |
@@ -552,7 +552,8 @@ bench-verified:
   a print (the DRE handler between its meter's two stamps counted at
   28 cycles);
 - **the run verbs**: `write_bulk()` (a byte copied in seven
-  instructions, DREIE set once a run) and `read_span()`/`consume()`,
+  instructions, the first byte pushed and DREIE set before the copy,
+  set again behind it) and `read_span()`/`consume()`,
   which every print and the console's SerialPort now take, are counted
   in the release listing and have not run on the silicon;
   `test_avr_serial`, the console and `bench_avr`'s letter p on a DB48

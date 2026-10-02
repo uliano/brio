@@ -1,11 +1,14 @@
 // Host tests for util/print.hpp: its integers - every width through
-// print(), the two bases ultoa() converts with a constant divisor at
+// print(), the divide by ten a decimal digit is made of against `/` and
+// `%` over seventeen million values chosen for where its estimate can
+// err, the two bases ultoa() converts with a constant divisor at
 // their edges, and the 64-bit path's own two converters against the
 // standard library's text, at every power of ten and its neighbours, the
 // 2^32 edge the path splits on, both extremes and a pseudo-random sweep -
 // and its DELIVERY: a sink with the byte verb alone is fed a byte at a
-// time, a BulkSink a run at a time, through refusals and short takes,
-// with the same text either way. The host's `long` is 64 bits, so here
+// time, a BulkSink a run at a time - a C string's first byte through the
+// byte verb before anything is measured - through refusals and short
+// takes, with the same text either way. The host's `long` is 64 bits, so here
 // every 64-bit type - long included - takes the explicit-width path the
 // 32-bit targets and the AVR take for int64_t. Run with: ctest --preset
 // host (or ctest --preset host -R test_print)
@@ -172,6 +175,73 @@ TEST_CASE("a pseudo-random sweep over the whole range") {
     }
 }
 
+// divmod10() at compile time: both ends of the range and the boundary of
+// its one correction.
+static_assert(brio::divmod10(0u).quot == 0u && brio::divmod10(0u).rem == 0u);
+static_assert(brio::divmod10(9u).quot == 0u && brio::divmod10(9u).rem == 9u);
+static_assert(brio::divmod10(10u).quot == 1u && brio::divmod10(10u).rem == 0u);
+static_assert(brio::divmod10(0xFFFF'FFFFu).quot == 429'496'729u &&
+              brio::divmod10(0xFFFF'FFFFu).rem == 5u);
+
+TEST_CASE("divmod10 is exact: its estimate is never above the quotient nor short by more than one") {
+    // One correction is enough only if the shift-and-add estimate lands on
+    // floor(v / 10) or one below it (util/print.hpp states the bound).
+    // An estimate short by two would leave a remainder of 20 or more and
+    // the result one too low after the correction; one above would leave
+    // a remainder that wraps and is "corrected" further off. Either shows
+    // here as a quotient or a remainder unlike the compiler's own `/` and
+    // `%`, so the sweep counts mismatches - one assertion for millions of
+    // values. What it sweeps, and what each part reaches:
+    //  - EVERY value below 2^20: every combination of the bits the first
+    //    shifts drop (the low two of the value, the low four and eight of
+    //    the running estimate) and every carry between them;
+    //  - 10k - 1, 10k and 10k + 1 for every k below 2^20 and for k on a
+    //    stride of 431 up to the top: the remainder's two ends, 9 (a short
+    //    estimate leaves 19, the most the one correction must take back)
+    //    and 0 (a short estimate leaves exactly 10, the comparison's edge);
+    //  - every power of two and its neighbours: 2^j - 1 is a run of ones,
+    //    where every truncation loses all it can at once;
+    //  - a stride of 429 - coprime with ten and with two - over the whole
+    //    range: ten million values, every residue, the high bits the
+    //    sixteen-bit shift drops.
+    // The whole 2^32 at the suite's -O0 would take over a minute.
+    uint64_t checked = 0;
+    uint64_t wrong = 0;
+    const auto check = [&](uint32_t v) {
+        const brio::DivMod d = brio::divmod10(v);
+        if (d.quot != v / 10u || d.rem != v % 10u) {
+            ++wrong;
+        }
+        ++checked;
+    };
+    for (uint32_t v = 0; v < (1u << 20); ++v) {
+        check(v);
+    }
+    const auto tens = [&](uint32_t k) {
+        const uint32_t t = k * 10u;
+        check(t - 1u);   // k = 0 wraps to 0xFFFFFFFF: the top of the range
+        check(t);
+        check(t + 1u);
+    };
+    for (uint32_t k = 0; k < (1u << 20); ++k) {
+        tens(k);
+    }
+    for (uint32_t k = 1u << 20; k <= 429'496'729u; k += 431u) {
+        tens(k);
+    }
+    for (uint32_t j = 0; j < 32u; ++j) {
+        const uint32_t p = 1u << j;
+        check(p - 1u);
+        check(p);
+        check(p + 1u);
+    }
+    for (uint64_t v = 0; v <= 0xFFFF'FFFFull; v += 429u) {
+        check(static_cast<uint32_t>(v));
+    }
+    CHECK(checked > 17'000'000u);
+    CHECK(wrong == 0u);
+}
+
 TEST_CASE("ultoa converts both bases with a constant divisor, at their edges") {
     char buffer[24];
     CHECK(std::string(brio::ultoa(0ul, buffer, 10)) == "0");
@@ -196,6 +266,14 @@ TEST_CASE("ultoa converts both bases with a constant divisor, at their edges") {
         char expect[24];
         (void)snprintf(expect, sizeof expect, "%lX", w);
         REQUIRE(std::string(brio::ultoa(w, buffer, 16)) == expect);
+    }
+    // This host's unsigned long is 64 bits: the digits above 32 bits are
+    // peeled off before divmod10() takes the rest.
+    if constexpr (sizeof(unsigned long) > sizeof(uint32_t)) {
+        CHECK(std::string(brio::ultoa(4'294'967'296ul, buffer, 10)) == "4294967296");
+        CHECK(std::string(brio::ultoa(10'000'000'009ul, buffer, 10)) == "10000000009");
+        CHECK(std::string(brio::ultoa(std::numeric_limits<unsigned long>::max(), buffer, 10)) ==
+              std::to_string(std::numeric_limits<unsigned long>::max()));
     }
     CHECK(std::string(brio::ltoa(-1l, buffer, 10)) == "-1");
     CHECK(std::string(brio::ltoa(-2147483648l, buffer, 10)) == "-2147483648");
@@ -224,27 +302,39 @@ TEST_CASE("a sink with the byte verb alone is fed a byte at a time") {
     CHECK(printed("abc", std::string_view("de"), 'f', 123, brio::crlf) == "abcdef123\r\n");
 }
 
-TEST_CASE("a C string reaches a BulkSink in stretches, never measured whole before its first byte") {
+TEST_CASE("a C string reaches a BulkSink as its first byte, then in stretches, never measured whole") {
     std::string long_text(1000, 'x');
     BulkCapture::reset(1000, 0);
     brio::print(BulkCapture{}, long_text.c_str());
     CHECK(BulkCapture::text == long_text);
+    CHECK(BulkCapture::bytes == 1u);   // the first byte, before anything is measured
     CHECK(BulkCapture::longest == brio::print_scan_run);
-    CHECK(BulkCapture::runs == 16u);   // fifteen stretches of 64 and the last 40
-    // A string exactly a stretch long ends on its NUL with no empty run.
+    CHECK(BulkCapture::runs == 16u);   // then fifteen stretches of 64 and the last 39
+    // A string a byte and a stretch long ends on its NUL with no empty run.
     BulkCapture::reset(1000, 0);
-    brio::print(BulkCapture{}, std::string(64, 'y').c_str());
+    brio::print(BulkCapture{}, std::string(65, 'y').c_str());
+    CHECK(BulkCapture::bytes == 1u);
     CHECK(BulkCapture::calls == 1u);
-    CHECK(BulkCapture::text == std::string(64, 'y'));
+    CHECK(BulkCapture::text == std::string(65, 'y'));
+    // A one-byte string is the byte verb alone.
+    BulkCapture::reset(1000, 0);
+    brio::print(BulkCapture{}, "z");
+    CHECK(BulkCapture::bytes == 1u);
+    CHECK(BulkCapture::calls == 0u);
+    CHECK(BulkCapture::text == "z");
 }
 
-TEST_CASE("a BulkSink is handed every string and every number as one run") {
+TEST_CASE("a BulkSink is handed a string_view as one run, a C string or a number as a byte and a run") {
     BulkCapture::reset(1000, 0);
     brio::print(BulkCapture{}, "hello, ", std::string_view("world"), ' ', 4294967295u, " ",
                 brio::hex(0xBEEFu), " ", int64_t{-12345678901LL}, brio::crlf);
     CHECK(BulkCapture::text == "hello, world 4294967295 0xBEEF -12345678901\r\n");
-    CHECK(BulkCapture::bytes == 1u);   // the char alone takes the byte verb
-    CHECK(BulkCapture::runs == 8u);    // every other argument one run
+    // The byte verb: the char, and the first byte of each of the six C
+    // strings and numbers.
+    CHECK(BulkCapture::bytes == 7u);
+    // The runs: the five of those longer than a byte, after their first,
+    // the string_view and the line end; the one-byte " " is a byte alone.
+    CHECK(BulkCapture::runs == 6u);
     CHECK(BulkCapture::refusals == 0u);
 }
 
@@ -258,11 +348,11 @@ TEST_CASE("print spins on a BulkSink through refusals and short takes and loses 
     BulkCapture::reset(7, 3);
     brio::print(BulkCapture{}, long_text.c_str(), std::string_view(long_text), brio::crlf);
     CHECK(BulkCapture::text == long_text + long_text + "\r\n");
-    CHECK(BulkCapture::bytes == 0u);
+    CHECK(BulkCapture::bytes == 1u);   // the C string's first
     CHECK(BulkCapture::refusals > 0u);
-    // The C string in stretches of 64 (fifteen, then 40), each taken in
-    // sevens: 10 runs a stretch and 6 for the last; the string_view whole,
-    // 143 runs; the line end one.
+    // The rest of the C string in stretches of 64 (fifteen, then 39), each
+    // taken in sevens: 10 runs a stretch and 6 for the last; the
+    // string_view whole, 143 runs; the line end one.
     static_assert(brio::print_scan_run == 64u);
     CHECK(BulkCapture::runs == 15u * 10u + 6u + 143u + 1u);
     // An empty string is no call at all.
