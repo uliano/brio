@@ -122,6 +122,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "ch32vx03/afio.hpp"
@@ -980,8 +981,14 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *
  * THE ENGINE SLOTS: both or neither (the data phase is full duplex and
  * the transaction's completion is the RECEIVE block's), on the two
- * channels table 11-5 wires to THIS instance and no others. A request in
- * 16-bit frames falls back to the pump: the engines carry bytes.
+ * channels table 11-5 wires to THIS instance and no others. ONE INTERRUPT
+ * A TRANSACTION: every frame that comes back was clocked out first, so the
+ * receive block's completion proves the transmit block's, and the transmit
+ * engine is armed for its ERROR alone. THE BEAT IS THE FRAME: a request in
+ * 16-bit frames runs on the engines as half-words - one 16-bit access to
+ * DATAR a frame, DFF and the access agreeing - when its buffers are
+ * half-word aligned and the engines' element is at least 16 bits; a
+ * misaligned buffer falls back to the pump.
  *
  * FRAMES IN A BYTE BUFFER: one byte per 8-bit frame, two bytes low-first
  * per 16-bit frame - the other strata's rule.
@@ -1101,8 +1108,7 @@ public:
         }
         status_ = spi_ok;
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address());
-            RxEngine::arm(S::data_address());
+            arm_engines();
         }
         // The pads go to the peripheral only now, with the registers
         // already holding the idle polarity: a pad handed over first
@@ -1314,32 +1320,36 @@ public:
         return false;
     }
 
-    /// The DMA channels' interrupt body - call from BOTH channels'
-    /// vectors (one vector per channel here). A transfer error on either
-    /// channel ends the transaction with spi_dma_fault. Compiles away on
-    /// an engineless host. True when the transaction just completed.
-    [[gnu::always_inline]] static bool dma_isr() {
+    /// The RECEIVE channel's interrupt body - call from its vector: the
+    /// one interrupt of an engined transaction, its completion or a
+    /// transfer error (spi_dma_fault). Compiles away on an engineless host.
+    /// True when the transaction just completed.
+    [[gnu::always_inline]] static bool dma_rx_isr() {
         if constexpr (has_engines) {
-            const uint8_t tx = TxEngine::service();
-            if ((tx & TxEngine::flag_error) != 0u) {
-                (void)TxEngine::abandon();
-                return finish_dma(spi_dma_fault);
-            }
-            if ((tx & TxEngine::flag_complete) != 0u) {
-                (void)TxEngine::complete();   // the transmit side never completes a transaction
-            }
             const uint8_t rx = RxEngine::service();
             if (rx != 0u && dma_active_) {
-                if ((rx & RxEngine::flag_error) != 0u) {
-                    return finish_dma(spi_dma_fault);
-                }
-                if ((rx & RxEngine::flag_complete) != 0u) {
-                    return finish_dma(spi_ok);
-                }
+                return finish_dma((rx & RxEngine::flag_error) != 0u ? spi_dma_fault : spi_ok);
             }
         }
         return false;
     }
+
+    /// The TRANSMIT channel's interrupt body - call from its vector, which
+    /// rings on a transfer error alone: the transmit block's completion is
+    /// proved by the receive block's and raises nothing.
+    [[gnu::always_inline]] static bool dma_tx_isr() {
+        if constexpr (has_engines) {
+            const uint8_t tx = TxEngine::service();
+            if (tx != 0u && dma_active_) {
+                return finish_dma(spi_dma_fault);
+            }
+        }
+        return false;
+    }
+
+    /// Both bodies in one, for a program that binds the two vectors to the
+    /// same function: each reads only its own channel's flags.
+    [[gnu::always_inline]] static bool dma_isr() { return dma_tx_isr() || dma_rx_isr(); }
 
     /// The engine's completion status, for the TransferDone payload.
     static uint8_t status() { return status_; }
@@ -1359,9 +1369,7 @@ public:
         req_.cs.set();
         if constexpr (has_engines) {
             S::dma_requests(false, false);
-            (void)TxEngine::abandon();
-            RxEngine::stop();
-            RxEngine::arm(S::data_address());
+            arm_engines();
         }
         Pfic::disable(S::irq);
         in_cmd_ = false;
@@ -1407,56 +1415,112 @@ public:
 private:
     static_assert([] {
         if constexpr (TxEngine::present) {
-            return std::is_same_v<typename TxEngine::element, uint8_t> &&
-                   std::is_same_v<typename RxEngine::element, uint8_t>;
+            return sizeof(typename TxEngine::element) <= 2u &&
+                   sizeof(typename RxEngine::element) <= 2u;
         } else {
             return true;
         }
-    }(), "brio SpiHost: the DMA engines must carry uint8_t elements - the Request's "
-         "buffers are bytes and the engined path serves 8-bit frames");
+    }(), "brio SpiHost: the DMA engines' element is the widest beat DATAR takes - "
+         "uint8_t, or uint16_t for the 16-bit frames (DATAR is a 16-bit register)");
 
-    /// The engines serve a request in 8-bit frames; 16-bit ones are two
-    /// bytes a datum, which byte engines cannot express.
-    static bool dma_serves(const Request& r) { return !spi_frame_is_halfword(r.bits); }
+    /// Whether the engines can carry 16-bit frames at all.
+    static constexpr bool engines_take_halfwords = [] {
+        if constexpr (TxEngine::present) {
+            return sizeof(typename TxEngine::element) >= 2u &&
+                   sizeof(typename RxEngine::element) >= 2u;
+        } else {
+            return false;
+        }
+    }();
 
+    /// The engines bind DATAR once: the transmit side armed for its ERROR
+    /// alone (the receive block's completion is the transaction's), the
+    /// receive side for its completion and its error.
+    static void arm_engines() {
+        if constexpr (has_engines) {
+            (void)TxEngine::arm(S::data_address(), TxEngine::flag_error);
+            (void)RxEngine::arm(S::data_address());
+        }
+    }
+
+    /// Every 8-bit request; a 16-bit one when the engines take half-words
+    /// and both buffers it names are half-word aligned - the frame is ONE
+    /// 16-bit access, and an odd address would be rounded down by the
+    /// controller in silence (11.3.6). The rest goes to the pump.
+    static bool dma_serves(const Request& r) {
+        if (!spi_frame_is_halfword(r.bits)) {
+            return true;
+        }
+        if constexpr (engines_take_halfwords) {
+            const uintptr_t a = reinterpret_cast<uintptr_t>(r.tx.get()) |
+                                reinterpret_cast<uintptr_t>(r.rx.get());
+            return (a & 1u) == 0u;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * The data phase on the two engines. BOTH CHANNELS ARE PROGRAMMED FIRST
+     * AND THE REQUESTS RAISED IN ONE STORE AFTER THEM: a request that rises
+     * while its channel is disabled is latched by the controller and served
+     * at the channel's next enable, so no request is up while a channel is
+     * programmed - and since nothing can complete before that last store,
+     * the completion's own store (finish_dma() drops both requests) is
+     * always the later one. With the requests raised around each channel
+     * instead, a one-frame transaction completed INSIDE the launch and the
+     * launch's last store raised both again after it - the next request
+     * then stalled, its transmit block moving into nothing (measured).
+     */
     static void launch_dma() {
         dma_done_ = false;
         dma_active_ = true;
-        // THE REQUESTS ARE ARMED AROUND THE ENGINES AND NOWHERE ELSE: a
-        // request that rises while its channel is disabled is latched by
-        // the controller and served at the channel's next enable, and the
-        // block would come back shifted by one. So RXDMAEN is raised only
-        // once the receive channel is enabled, TXDMAEN only once the
-        // transmit one is, and finish_dma() drops both.
-        // The RECEIVE channel first: its request rises only when a frame
-        // has come back, and the transmit side is what starts the clock.
-        if (req_.rx.get() != nullptr) {
-            (void)RxEngine::start(req_.rx.get(), req_.len);
+        if (spi_frame_is_halfword(req_.bits)) {
+            if constexpr (engines_take_halfwords) {
+                uint16_t* const rx = reinterpret_cast<uint16_t*>(req_.rx.get());
+                const uint16_t* const tx = reinterpret_cast<const uint16_t*>(req_.tx.get());
+                if (rx != nullptr) {
+                    (void)RxEngine::start(std::span<uint16_t>(rx, req_.len));
+                } else {
+                    (void)RxEngine::start_discard(&rx_sink_, req_.len);
+                }
+                if (tx != nullptr) {
+                    (void)TxEngine::start(std::span<const uint16_t>(tx, req_.len));
+                } else {
+                    (void)TxEngine::start_fixed(&tx_dummy_, req_.len);
+                }
+            }
         } else {
-            (void)RxEngine::start_discard(&rx_sink_, req_.len);
-        }
-        S::dma_requests(false, true);
-        if (req_.tx.get() != nullptr) {
-            (void)TxEngine::start(req_.tx.get(), req_.len);
-        } else {
-            (void)TxEngine::start_fixed(&tx_dummy_, req_.len);
+            if (req_.rx.get() != nullptr) {
+                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.len));
+            } else {
+                (void)RxEngine::start_discard(reinterpret_cast<uint8_t*>(&rx_sink_), req_.len);
+            }
+            if (req_.tx.get() != nullptr) {
+                (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.len));
+            } else {
+                (void)TxEngine::start_fixed(reinterpret_cast<const uint8_t*>(&tx_dummy_),
+                                            req_.len);
+            }
         }
         S::dma_requests(true, true);
     }
 
-    /// One exit for the data phase. True when the ISR-style caller should
-    /// post completion.
+    /// One exit for the data phase. The requests go down FIRST, so that
+    /// neither channel sees one rise while it is being stopped; then both
+    /// channels are stopped - the receive one too, whose EN a completed
+    /// block leaves set and whose bus-master count would otherwise keep the
+    /// core awake (ch32vx03/bus_activity.hpp). True when the ISR-style
+    /// caller should post completion.
     static bool finish_dma(uint8_t st) {
         S::dma_requests(false, false);
         if (st != spi_ok) {
             status_ = st;
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address());
-        } else if (TxEngine::busy()) {
-            // The receive block completing is proof the transmit one did:
-            // every frame that came back was clocked out first.
+        } else {
             (void)TxEngine::complete();
+            RxEngine::complete();
         }
         dma_active_ = false;
         dma_done_ = true;
@@ -1477,7 +1541,6 @@ private:
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address());
             dma_active_ = false;
             status_ = spi_dma_fault;
         }
@@ -1506,11 +1569,14 @@ private:
     /// Put the peripheral where this request wants it. DFF is
     /// enable-protected and BR/CPOL/CPHA "cannot be modified during
     /// communication", so any change costs a disable/enable pair - paid
-    /// only when something moved.
-    static void apply(SpiMode m, SpiClock c, SpiDataSize bits) {
-        if (m == applied_.mode && c == applied_.clock && bits == applied_.bits) {
-            return;
+    /// only when something moved. The comparison is spelled inline at the
+    /// call; the reconfiguration is the call.
+    [[gnu::always_inline]] static void apply(SpiMode m, SpiClock c, SpiDataSize bits) {
+        if (m != applied_.mode || c != applied_.clock || bits != applied_.bits) {
+            reapply(m, c, bits);
         }
+    }
+    static void reapply(SpiMode m, SpiClock c, SpiDataSize bits) {
         applied_.mode = m;
         applied_.clock = c;
         applied_.bits = bits;
@@ -1563,8 +1629,10 @@ private:
     static inline uint8_t status_ = spi_ok;
     static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
-    static inline uint8_t rx_sink_ = 0;
-    static constexpr uint8_t tx_dummy_ = 0xFF;
+    /// The dummies of a one-sided data phase, wide enough for either
+    /// frame: a byte beat reads the low byte of either (little-endian).
+    static inline uint16_t rx_sink_ = 0;
+    static constexpr uint16_t tx_dummy_ = 0xFFFF;
     static inline SpiConfig applied_{};
     static inline uint32_t hclk_hz_ = 0;
     static inline uint32_t pclk_hz_ = 0;

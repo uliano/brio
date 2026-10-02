@@ -276,6 +276,15 @@ void hosts()
 
     (void)Host1Dma::init(clock);
     (void)Host1Dma::dma_isr();
+    (void)Host1Dma::dma_rx_isr();
+    (void)Host1Dma::dma_tx_isr();
+    // A 16-bit request on the engines, the beat the frame.
+    Host1Dma::Request w{};
+    w.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    w.rx = lend<Lease::reply>(in_buf);
+    w.len = 4;
+    w.bits = SpiDataSize::bits16;
+    (void)Host1Dma::start(w);
     Host1Dma::release();
 
     (void)Host2::init(clock);
@@ -351,4 +360,5 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler()
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void spi2_handler() { (void)Client2::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void spi_dma_tx_handler() { (void)Host1Dma::dma_isr(); }
+extern "C" BRIO_CH32_INTERRUPT void spi_dma_tx_handler() { (void)Host1Dma::dma_tx_isr(); }
+extern "C" BRIO_CH32_INTERRUPT void spi_dma_rx_handler() { (void)Host1Dma::dma_rx_isr(); }

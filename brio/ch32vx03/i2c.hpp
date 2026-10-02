@@ -1097,6 +1097,10 @@ public:
             }
             if ((rx & RxEngine::flag_complete) != 0u && phase_ == Phase::rx_dma) {
                 S::dma(false, false);
+                // EN stays set after a completed block, and a channel left
+                // enabled holds the bus-master count that keeps the core
+                // awake (ch32vx03/bus_activity.hpp).
+                RxEngine::complete();
                 S::stop();
                 return finish(i2c_ok);
             }
@@ -1197,12 +1201,13 @@ private:
 
     static_assert([] {
         if constexpr (TxEngine::present) {
-            return std::is_same_v<typename TxEngine::element, uint8_t> &&
-                   std::is_same_v<typename RxEngine::element, uint8_t>;
+            return sizeof(typename TxEngine::element) <= 2u &&
+                   sizeof(typename RxEngine::element) <= 2u;
         } else {
             return true;
         }
-    }(), "brio I2cHost: the DMA engines must carry uint8_t elements");
+    }(), "brio I2cHost: the DMA engines bind DATAR, a 16-bit register whose data is a "
+         "byte - an element of uint8_t or uint16_t, the runs moving bytes either way");
 
     static bool finish(uint8_t st) {
         status_ = st;
@@ -1350,10 +1355,9 @@ private:
     }
     static void put_engines_away() {
         if constexpr (has_engines) {
+            S::dma(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address());
-            S::dma(false, false);
         }
     }
 

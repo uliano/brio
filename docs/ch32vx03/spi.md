@@ -139,6 +139,17 @@ I2S3, whose requests are the same two - on DMA2's 1 and 2. An engine
 named on any other slot is refused at compile time, because a wrong one
 would move nothing.
 
+ONE INTERRUPT A TRANSACTION: every frame that comes back was clocked out
+first, so the receive block's completion proves the transmit block's, and
+the host arms its transmit engine for a transfer error alone. THE BEAT IS
+THE FRAME: a 16-bit request runs on the engines as half-words - DFF and
+the access to DATAR agreeing - when its buffers are half-word aligned
+(a misaligned one goes to the pump). And the requests are raised AFTER
+both channels are programmed, in one store: a one-frame transaction can
+complete before the launch returns, and the old order - each request
+raised beside its own channel - raised both again after that completion
+and wedged the next transaction ([dma.md](dma.md)).
+
 IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE on this family
 ([dma.md](dma.md)), so a transport with engines holds the program awake
 while a block is in flight.
@@ -352,8 +363,10 @@ and rate now, moving no data - a CPOL flip is an edge, so prime BEFORE
 the select falls), `bit_order()` (a property of the WIRE and so a
 bus-level verb), `pad_speed()` (the slew class of SCK and MOSI, a
 choice that survives the next `init()`), `start()`, `isr()`,
-`dma_isr()`, `status()`, `busy()`, `recover()`, `release()` and
-`claim_nss_pad()`.
+`dma_rx_isr()` and `dma_tx_isr()` (the two channels' bodies, each reading
+its own flags; `dma_isr()` is both, for a program that binds the two
+vectors to one function), `status()`, `busy()`, `recover()`, `release()`
+and `claim_nss_pad()`.
 
 ### The client
 
@@ -407,10 +420,11 @@ for SPI1 and SPI2, DMA2 for the CH32V303's SPI3:
 ```cpp
 using Fast = brio::SpiHost<1, brio::spi_default_pins<1>,
                            brio::DmaTxEngine<1, 3>, brio::DmaRxEngine<1, 2>>;
-brio::Dma<1>::open();
-Fast::init(clock);
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { (void)Fast::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { (void)Fast::dma_isr(); }
+Fast::init(clock);                         // arms both engines: the gate, DATAR
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+    if (Fast::dma_rx_isr()) { /* the transaction completed: Fast::status() */ }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { (void)Fast::dma_tx_isr(); }
 
 using Third = brio::SpiHost<3, brio::spi3_default_pins,
                             brio::DmaTxEngine<2, 2>, brio::DmaRxEngine<2, 1>>;
@@ -474,8 +488,27 @@ own.
 - **The polled loop, not the wire, is the limit at the fast end.** On
   SPI1's strap a 256-byte polled burst costs 101 core cycles a frame at
   /2 where the wire alone is 16, and 2133 at /256 where the wire is
-  2048; the two meet around /64. The DMA engines close that gap: the
-  same block at /4 costs 36 cycles a frame against the wire's 32.
+  2048; the two meet around /64. The DMA engines close that gap: a block
+  on them costs the wire's own time per frame, and a fixed cost per
+  transaction above it (the next finding).
+- **THE ENGINED TRANSACTION'S FIXED COST**, `bench_vx03`'s letter d, a
+  write on SPI1 with MISO floating at 144 MHz: 571 cycles above the
+  frames' own wire time at /4, 561 at /16, ONE interrupt (the receive
+  channel's) - 1087 and 926, with two, before the engines were rewritten
+  ([dma.md](dma.md)). Of the 571: the instrument 107, the copy of the
+  `Request` into the host 130, the engines 334. 256 frames at /4 are
+  8763 cycles against 8192 of SCK, at /16 33329 against 32768.
+- **16-bit frames through the engines**: a 256-frame write of half-words
+  in 16966 cycles at /4 against 16384 of SCK (x 1.03), and 66118 at /16
+  against 65536, one interrupt each - the pump took 52545 cycles and 256
+  interrupts for the same frames at /4.
+- **THE TRANSMITTED DATA JUDGED WITH NO WIRE, by the CRC unit**: with
+  CRCEN raised under SPE down, TCRCR accumulates every frame the shift
+  register sends, so an engined write of 256 frames must leave there what
+  a bitwise loop computes over the same buffer - and it did, 0x2E for
+  8-bit frames under the polynomial 0x07 and 0xEA0D for 16-bit ones under
+  0x1021: the half-word beat, and the order of the two bytes inside a
+  frame, are the Request's.
 - **THE STRAP IS CLEAN TO 36 MHz AND BREAKS AT 72.** Every BR code from
   /4 down carried 256 bytes byte-exact; /2 did not. Four kilobytes at
   /4 (36 MHz of SCK), sent as sixteen chunks, came back byte-exact.
@@ -628,12 +661,6 @@ Driver gaps:
 - **The CRC through the DMA engines**: the engines carry the data phase
   and the CRC frame is CRCNEXT's, one frame after the block ends. Born
   with the first device that checks one over a block.
-- **16-bit frames through the host engine's DMA slots**: the engines of
-  `SpiHost` carry bytes and a 16-bit request falls back to the pump - the
-  other strata's rule, and the transfer-granularity question the first
-  portable example is meant to settle. What the silicon costs for
-  half-words through all four channels is measured above, at the
-  resource, and decides nothing.
 - **The BR ladder under HSRXEN on the CH32V30x_D8 lots that have it**
   (FPCLK/3, /5 ... /9): declined, because a program cannot read its lot
   and /2, the one code both ladders share, is what the driver offers.
@@ -650,6 +677,13 @@ Driver gaps:
   them.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- **The RECEIVED half of the engined data phase as the engines now are,
+  16-bit frames included**: the transmitted half is judged by the CRC
+  unit above, and what the receive engine lands in memory is judged by
+  nothing on a desk with no strap and no peer - the strap from PA7 to PA6
+  (letter c of `test_vx03_spi`) or the peer board on SPI2 (letter d)
+  would judge it byte for byte, both widths.
 
 - **The high-speed read at 72 MHz of SCK**, SPI1's /2 - the rate the
   mode is for - and **HSRXEN2**: on the CH32V303 board the only far end

@@ -83,33 +83,44 @@
  * and the core's counter count the whole sleep (measured on both parts -
  * docs/ch32vx03/dma.md, and it is the same starvation that kills the
  * USB controller in Sleep). SO A CHANNEL COUNTS ITSELF, on either
- * controller: the EN transition is one bus master entering and leaving
- * (ch32vx03/bus_activity.hpp), the kernel's idle path does not sleep
- * while the count stands, and a sleep site refuses to arm over it -
- * a program with an engine running holds itself awake without having
- * to know that it does. `Dma<c>::any_enabled()` is the same question
- * asked of the registers instead, of EVERY controller the part has, for
- * a caller that wants the silicon's own answer.
+ * controller: setting EN takes one count of a bus master and clearing it
+ * gives the count back (ch32vx03/bus_activity.hpp), the controller's
+ * LEDGER (`Dma<c>::count`) remembering which channel holds one, the
+ * kernel's idle path does not sleep while the count stands, and a sleep
+ * site refuses to arm over it - a program with an engine running holds
+ * itself awake without having to know that it does. `Dma<c>::any_enabled()`
+ * is the same question asked of the registers instead, of EVERY controller
+ * the part has, for a caller that wants the silicon's own answer.
  *
  * THE ENGINES. `DmaTxEngine<c, ch, Elem>` and `DmaRxEngine<c, ch, Elem>`
- * are the CH32V00x stratum's with a controller in front: a transmit engine
- * pours a caller-owned run into one peripheral register and reports how
- * many items the block carried when it completes; a receive engine fills
- * a caller-owned run from one register and answers how many items have
- * arrived since it was last asked (one CNTR read - nothing suspended,
- * nothing refused). ch32vx03/usart.hpp's two engine slots are built on
- * them, and a driver reaches its engines only through their published
- * names (start, service, flag_complete, flag_error, controller, channel)
- * so that a driver with an empty slot never includes this file. TWO
- * ENGINES OF ONE TRANSPORT NAME TWO SLOTS: a channel moves data one way,
- * and the table gives each direction its own.
+ * pour caller-owned runs into one peripheral register and fill them from
+ * one: the transmit engine reports how many items a block carried when it
+ * completes, the receive engine answers how many have arrived since it was
+ * last asked (one CNTR read - nothing suspended, nothing refused) or, in
+ * its CIRCULAR shape, fills a ring for ever on the controller's cycle mode,
+ * its count being the ring's producer index (util/ring.hpp's
+ * HardwareRing); the beat of a block is its run's element, `Elem` the
+ * widest the binding takes. `DmaCopyEngine<c, ch>` is memory to memory, a
+ * copy or a fill.
+ * ch32vx03/usart.hpp's, spi.hpp's and i2c.hpp's engine slots are built on
+ * the first two, and a driver reaches its engines only through their
+ * published names (start, claim, launch, service, complete, flag_complete,
+ * flag_error, controller, channel) so that a driver with an empty slot
+ * never includes this file. TWO ENGINES OF ONE TRANSPORT NAME TWO SLOTS: a
+ * channel moves data one way, and the table gives each direction its own.
+ *
+ * EVERY ENGINE STANDS ON `DmaBinding<c, ch>`, which is where this
+ * controller's two moments are kept apart: what is constant for a binding
+ * written once when the engine is armed, and per block the four stores the
+ * vendor's own restart is made of. Its header says which, and why.
  *
  * ONE THING THE SILICON DOES that the engines are built on: EN STAYS
  * SET when a non-circular block completes (CNTR at zero, TCIF up, the
  * channel enabled and idle - the F1 lineage: only software clears EN),
- * so every verb that programs a channel refuses while EN is up and the
- * owner disables before the next load. A TRANSFER ERROR is the one
- * thing that clears EN by itself (11.3.3).
+ * so every verb that programs a channel refuses while EN is up, an engine
+ * stops its channel at the block's end, and a channel that may still be
+ * standing is stopped before it is programmed again. A TRANSFER ERROR is
+ * the one thing that clears EN by itself (11.3.3).
  *
  * THE BLOCK ENGINES beside them are util/block_stream.hpp's two
  * concepts: `DmaLoopEngine<c, ch, Elem>` is a BlockPlayer, one
@@ -130,7 +141,11 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include <span>
+#include <type_traits>
 
 #include "ch32vx03/bus_activity.hpp"
 #include "ch32vx03/clock.hpp"
@@ -392,35 +407,43 @@ struct Dma {
      */
     static void stop_all() {
         open();
-        if constexpr (c == 1u) {
-            for (uint8_t ch = 0; ch < channel_count; ++ch) {
-                const bool was = (regs().channel[ch].CFGR & dma_cfgr_en) != 0u;
-                regs().channel[ch].CFGR = 0;
-                if (was) {
-                    BusActivity::left();
-                }
-                regs().channel[ch].CNTR = 0;
-                regs().channel[ch].PADDR = 0;
-                regs().channel[ch].MADDR = 0;
-            }
-            regs().INTFCR = 0xFFFFFFFFUL;
-        } else {
-            for (uint8_t ch = 1; ch <= channel_count; ++ch) {
-                DmaChannelRegs& r =
-                    *reinterpret_cast<DmaChannelRegs*>(dma_channel_address(c, ch));
-                const bool was = (r.CFGR & dma_cfgr_en) != 0u;
-                r.CFGR = 0;
-                if (was) {
-                    BusActivity::left();
-                }
-                r.CNTR = 0;
-                r.PADDR = 0;
-                r.MADDR = 0;
-            }
-            regs().INTFCR = 0xFFFFFFFFUL;
+        for (uint8_t ch = 1; ch <= channel_count; ++ch) {
+            DmaChannelRegs& r = *reinterpret_cast<DmaChannelRegs*>(dma_channel_address(c, ch));
+            r.CFGR = 0;
+            uncount(ch);
+            r.CNTR = 0;
+            r.PADDR = 0;
+            r.MADDR = 0;
+        }
+        regs().INTFCR = 0xFFFFFFFFUL;
+        if constexpr (has_extended_flags) {
             dma2_extend()->INTFCR = 0xFFFFUL;
         }
     }
+
+    /**
+     * THE BUS-MASTER LEDGER, one byte a channel: whether channel `ch`
+     * holds one count in ch32vx03/bus_activity.hpp. A channel takes its
+     * count when a verb sets EN and gives it back when a verb clears it,
+     * and the ledger - not the register - is what says which: the one
+     * thing that clears EN behind software's back is a TRANSFER ERROR
+     * (11.3.3), and a count read off the register there would never be
+     * given back. Each channel's byte is touched by that channel's own
+     * users alone, so no two channels share a read-modify-write.
+     */
+    [[gnu::always_inline]] static void count(uint8_t ch) {
+        if (counted_[ch - 1u] == 0u) {
+            counted_[ch - 1u] = 1;
+            BusActivity::entered();
+        }
+    }
+    [[gnu::always_inline]] static void uncount(uint8_t ch) {
+        if (counted_[ch - 1u] != 0u) {
+            counted_[ch - 1u] = 0;
+            BusActivity::left();
+        }
+    }
+    static bool counted(uint8_t ch) { return counted_[ch - 1u] != 0u; }
 
     /// INTFR whole: channels 1..8 of DMA1, 1..7 of DMA2.
     static uint32_t flags() { return regs().INTFR; }
@@ -457,6 +480,9 @@ struct Dma {
         return dma_enabled_channels(1) != 0u ||
                (device::dma_controller_count >= 2u && dma_enabled_channels(2) != 0u);
     }
+
+private:
+    static inline uint8_t counted_[channel_count] = {};
 };
 
 /**
@@ -508,23 +534,17 @@ public:
     /// AND THIS IS WHERE THE FAMILY'S BUS ACTIVITY IS COUNTED. EN is the
     /// bit that makes this channel a bus master, and a master that is up
     /// forbids a sleep of any depth here (ch32vx03/bus_activity.hpp), so
-    /// the TRANSITION is counted in the one verb every engine and every
-    /// task goes through - never the enable itself, which would count an
-    /// idempotent store twice.
+    /// every verb that sets or clears EN keeps the controller's ledger
+    /// (`Dma<c>::count`): the TRANSITION is counted, never the store,
+    /// which would count an idempotent enable twice.
     static void enable(bool on) {
         Controller::open();
-        const bool was = enabled();
         if (on) {
             regs().CFGR |= dma_cfgr_en;
+            Controller::count(ch);
         } else {
             regs().CFGR &= ~dma_cfgr_en;
-        }
-        if (on != was) {
-            if (on) {
-                BusActivity::entered();
-            } else {
-                BusActivity::left();
-            }
+            Controller::uncount(ch);
         }
     }
 
@@ -717,24 +737,184 @@ public:
     /// zeroed, the flags cleared.
     static void stop() {
         Controller::open();
-        const bool was = enabled();
         regs().CFGR = 0;
-        if (was) {
-            BusActivity::left();
-        }
+        Controller::uncount(ch);
         clear(DmaFlag::all);
+    }
+};
+
+// ---- the binding: what every engine is built on --------------------------------
+
+/// CFGR's two width fields set equal, PSIZE = MSIZE: every engine's
+/// transfer (table 11-1's widening and truncation are the channel verbs').
+constexpr uint32_t dma_cfgr_widths(DmaWidth w) {
+    return (static_cast<uint32_t>(w) << dma_cfgr_psize_shift) |
+           (static_cast<uint32_t>(w) << dma_cfgr_msize_shift);
+}
+
+/// CFGR's three interrupt enables for a mask in DmaFlag's terms.
+constexpr uint32_t dma_cfgr_interrupts(uint32_t mask) {
+    return ((mask & DmaFlag::complete) != 0u ? dma_cfgr_tcie : 0u) |
+           ((mask & DmaFlag::half) != 0u ? dma_cfgr_htie : 0u) |
+           ((mask & DmaFlag::error) != 0u ? dma_cfgr_teie : 0u);
+}
+
+constexpr uint32_t dma_cfgr_priority(DmaPriority p) {
+    return static_cast<uint32_t>(p) << dma_cfgr_pl_shift;
+}
+
+inline uint32_t dma_address(const volatile void* p) {
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p));
+}
+
+/**
+ * DmaBinding<c, ch> - one channel HELD BY AN ENGINE, and the stores every
+ * block of every engine in this file is started and ended with.
+ *
+ * TWO MOMENTS. What is constant for a binding - the gate, the peripheral's
+ * address, the direction, the increments, the priority, the interrupt
+ * enables - is written ONCE, when the engine is armed: `bind()` opens the
+ * gate, stops the channel, clears its flags and stores PADDR, and the
+ * engine keeps the rest of CFGR as a word of its own, because the register
+ * cannot keep it - EN lives in the same word, and every field of the word
+ * is read-only while EN is set (11.2.1's note). What changes is written per
+ * block, and on this controller that is FOUR STORES: MADDR, CNTR, the
+ * channel's four flags in INTFCR, and CFGR written WHOLE with EN - never a
+ * read-modify-write, the engine knowing the word. A block ends with one
+ * store more, the same word without EN. The vendor's own restart is the
+ * same four registers (the EVT's SPI_LCD, `SPI1_Read_DMA`), each of its
+ * enables a read-modify-write.
+ *
+ * ONE STORE SETS THE FIELDS AND EN TOGETHER. 11.2.1 makes the fields
+ * read-only while EN is SET; the store that sets it lands on a channel
+ * whose EN is clear, so the widths, the increments and the enable are
+ * taken in one access - measured: a word copy, a byte copy and a fill
+ * back to back, each starting with a different width in that one store,
+ * every byte where it belongs (docs/ch32vx03/dma.md).
+ *
+ * The gate is opened in `bind()` and nowhere on the block path: nothing in
+ * this stratum closes it again, and a program that does - a clock suite's
+ * gate walk - arms its engines again after it.
+ *
+ * Nothing here validates. The engines check what a run can get wrong
+ * (null, empty, longer than CNTR, misaligned for its width, across 64 KB
+ * on the CH32V303's DMA1) before they call `go()`.
+ */
+template <uint8_t c, uint8_t ch>
+struct DmaBinding {
+    using Channel = DmaChannel<c, ch>;   // its static_asserts check c and ch
+
+    DmaBinding() = delete;
+
+    static constexpr uint32_t flag_bits = DmaFlag::all << Channel::flag_shift;
+
+    static volatile uint32_t& clear_register() {
+        if constexpr (Channel::extended) {
+            return dma2_extend()->INTFCR;
+        } else {
+            return dma_regs(c)->INTFCR;
+        }
+    }
+    static uint32_t flags() {
+        if constexpr (Channel::extended) {
+            return (dma2_extend()->INTFR >> Channel::flag_shift) & DmaFlag::all;
+        } else {
+            return (dma_regs(c)->INTFR >> Channel::flag_shift) & DmaFlag::all;
+        }
+    }
+
+    /// The binding: the gate opened, the channel stopped and its flags
+    /// cleared, PADDR written - once, at an engine's arm().
+    static void bind(volatile void* peripheral) {
+        Dma<c>::open();
+        halt(0);
+        clear_register() = flag_bits;
+        Channel::regs().PADDR = dma_address(peripheral);
+    }
+
+    /// A block on a channel whose EN is CLEAR: MADDR, CNTR, the flags,
+    /// CFGR whole with EN. The ledger's count is taken after the enable.
+    [[gnu::always_inline]] static void go(uint32_t memory, uint16_t count, uint32_t cfgr) {
+        DmaChannelRegs& r = Channel::regs();
+        r.MADDR = memory;
+        r.CNTR = count;
+        clear_register() = flag_bits;
+        r.CFGR = cfgr | dma_cfgr_en;
+        Dma<c>::count(ch);
+    }
+
+    /// The same on a channel whose EN may still stand - a completed block
+    /// leaves it set (the file header) - with one store first to drop it.
+    /// The ledger's count stays taken across the two.
+    [[gnu::always_inline]] static void rearm(uint32_t memory, uint16_t count, uint32_t cfgr) {
+        Channel::regs().CFGR = cfgr;
+        go(memory, count, cfgr);
+    }
+
+    /// A block's end: the word without EN, and the count given back.
+    [[gnu::always_inline]] static void halt(uint32_t cfgr) {
+        Channel::regs().CFGR = cfgr;
+        Dma<c>::uncount(ch);
+    }
+
+    /// The ISR body: the ARMED flags that are up, cleared with the global
+    /// bit and handed back - one load and one store, the armed mask being
+    /// the engine's own word and not a second read of CFGR.
+    [[gnu::always_inline]] static uint32_t service(uint32_t armed) {
+        uint32_t up;
+        if constexpr (Channel::extended) {
+            up = (dma2_extend()->INTFR >> Channel::flag_shift) & armed;
+        } else {
+            up = (dma_regs(c)->INTFR >> Channel::flag_shift) & armed;
+        }
+        if (up != 0u) {
+            clear_register() = (up | DmaFlag::global) << Channel::flag_shift;
+        }
+        return up;
+    }
+
+    /// Whether a run of `count` items of width `w` from `memory` would
+    /// cross 64 KB where this channel is held to 11.2.3's rule.
+    static bool crosses(uint32_t memory, uint32_t count, DmaWidth w, bool increment) {
+        if constexpr (Channel::bounded_to_64k) {
+            return dma_span_crosses_64k(memory, static_cast<uint16_t>(count), w, increment);
+        } else {
+            (void)memory;
+            (void)count;
+            (void)w;
+            (void)increment;
+            return false;
+        }
     }
 };
 
 // ---- the engines ---------------------------------------------------------------
 
 /**
- * A transmit engine: one caller-owned run poured into one peripheral
- * register. The channel IS the request (11.2.3's tables), so the slot -
- * the controller and its channel - is the whole of the engine's
- * identity.
+ * A transmit engine: caller-owned runs poured into one peripheral register.
+ * The channel IS the request (11.2.3's tables), so the slot - the
+ * controller and its channel - is the whole of the engine's identity.
+ *
+ * THE BEAT IS THE ELEMENT OF THE RUN. `start()` takes a span of bytes, of
+ * half-words or - where `Elem` allows - of words, and the width of the
+ * block is the span's: PSIZE = MSIZE = sizeof(T), a 16-bit frame one
+ * 16-bit access to the data register. `Elem` is the WIDEST beat the binding
+ * takes, the data register's width (16 bits by default, every serial and
+ * bus data register of this family; 32 for a timer's 32-bit compare or a
+ * memory cell), and a wider span is a compile error. A half-word run whose
+ * address is odd is REFUSED at run time - 11.3.6's silent rounding would
+ * move the wrong bytes - and the caller falls back to whatever it does
+ * without the engine.
+ *
+ * THE CLAIM AND THE PROGRAMMING ARE TWO VERBS. `claim()` is the busy flag's
+ * test-and-set and nothing else; `launch()` programs a claimed engine.
+ * A transport whose completion handler starts the next block holds its
+ * mask over `claim()` alone - a claimed channel cannot complete under the
+ * loader, there being no block in flight to complete - and programs
+ * unmasked. `start()` is the two together, for an owner with no handler to
+ * race.
  */
-template <uint8_t c, uint8_t ch, typename Elem = uint8_t>
+template <uint8_t c, uint8_t ch, typename Elem = uint16_t>
 class DmaTxEngine {
     static_assert(c == 1u || c == 2u,
                   "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
@@ -747,6 +927,7 @@ class DmaTxEngine {
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
     using Channel = DmaChannel<c, ch>;
+    using B = DmaBinding<c, ch>;
 
 public:
     DmaTxEngine() = delete;
@@ -755,6 +936,7 @@ public:
     static constexpr uint8_t controller = c;
     static constexpr uint8_t channel = ch;
     static constexpr DmaSlot slot{c, ch};
+    /// The widest beat this binding takes.
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
 
@@ -762,58 +944,106 @@ public:
     static constexpr uint8_t flag_half = DmaFlag::half;
     static constexpr uint8_t flag_error = DmaFlag::error;
 
-    /// The channel's ISR body folded into the engine: the armed flags
-    /// that are up, cleared and handed back. Acts on nothing.
-    [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
-    }
-
-    /// Claim the channel for this peripheral: `data` is the register the
-    /// run is poured into. The PFIC line is enabled here.
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        priority_ = priority;
-        claim();
-        Pfic::enable(Channel::irq());
-    }
-
-    /// Start moving `length` elements from `buffer` (the caller's, and
-    /// it stays put until complete() reports the block).
-    static bool start(const Elem* buffer, uint16_t length) {
-        if (busy_ || buffer == nullptr || length == 0u) {
+    /**
+     * Bind the channel to this peripheral: `data` is the register the runs
+     * are poured into. Everything constant is written here (DmaBinding).
+     * `interrupts` is which flags raise the channel's line - the
+     * completion and the error by default; a transport whose completion is
+     * proved by ANOTHER channel arms the error alone and takes no interrupt
+     * per block. The PFIC line is enabled when anything is armed. False,
+     * and nothing armed, when `data` is not aligned to `Elem`.
+     */
+    static bool arm(volatile void* data, uint8_t interrupts,
+                    DmaPriority priority = DmaPriority::low) {
+        stop();
+        if ((dma_address(data) & dma_width_mask(width)) != 0u) {
             return false;
         }
-        in_flight_ = length;
-        busy_ = Channel::load(run(const_cast<Elem*>(buffer), length, true));
-        if (!busy_) {
-            in_flight_ = 0;
+        B::bind(data);
+        armed_ = static_cast<uint8_t>(interrupts & (DmaFlag::complete | DmaFlag::half |
+                                                    DmaFlag::error));
+        cfg_ = dma_cfgr_dir | dma_cfgr_priority(priority) | dma_cfgr_interrupts(armed_);
+        if (armed_ != 0u) {
+            Pfic::enable(Channel::irq());
+        } else {
+            Pfic::disable(Channel::irq());
         }
-        return busy_;
+        return true;
+    }
+    /// The completion and the error armed.
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+        return arm(data, static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error), priority);
+    }
+
+    /// The channel's ISR body: the armed flags that are up, cleared and
+    /// handed back. Acts on nothing.
+    [[gnu::always_inline]] static uint8_t service() {
+        return static_cast<uint8_t>(B::service(armed_));
+    }
+
+    /// Take the engine for a block: false when one is in flight. The test
+    /// and the set are the whole of it - what a caller racing this
+    /// engine's completion handler masks.
+    static bool claim() {
+        if (busy_) {
+            return false;
+        }
+        busy_ = true;
+        return true;
+    }
+    /// Give a claim back unused.
+    static void unclaim() { busy_ = false; }
+
+    /// Program and start a block on a CLAIMED engine. False - and the
+    /// claim given back - for an empty run, one longer than CNTR counts, a
+    /// misaligned one, or one across 64 KB on the CH32V303's DMA1.
+    static bool launch(std::span<const uint8_t> run) { return go(run.data(), run.size(), true); }
+    static bool launch(std::span<const uint16_t> run)
+        requires(sizeof(Elem) >= 2)
+    {
+        return go(run.data(), run.size(), true);
+    }
+    static bool launch(std::span<const uint32_t> run)
+        requires(sizeof(Elem) >= 4)
+    {
+        return go(run.data(), run.size(), true);
+    }
+
+    /// claim() and launch() in one: start moving the run (the caller's,
+    /// and it stays put until complete() reports the block).
+    static bool start(std::span<const uint8_t> run) { return claim() && launch(run); }
+    static bool start(std::span<const uint16_t> run)
+        requires(sizeof(Elem) >= 2)
+    {
+        return claim() && launch(run);
+    }
+    static bool start(std::span<const uint32_t> run)
+        requires(sizeof(Elem) >= 4)
+    {
+        return claim() && launch(run);
+    }
+    template <typename T>
+    static bool start(const T* buffer, uint16_t length) {
+        return start(std::span<const T>(buffer, length));
     }
 
     /// `length` copies of ONE element: the memory pointer does not
     /// increment. What a full-duplex bus needs to clock a read.
-    static bool start_fixed(const Elem* cell, uint16_t length) {
-        if (busy_ || cell == nullptr || length == 0u) {
-            return false;
-        }
-        in_flight_ = length;
-        busy_ = Channel::load(run(const_cast<Elem*>(cell), length, false));
-        if (!busy_) {
-            in_flight_ = 0;
-        }
-        return busy_;
+    template <typename T>
+    static bool start_fixed(const T* cell, uint16_t length) {
+        static_assert(sizeof(T) <= sizeof(Elem), "brio DMA: a beat wider than this binding");
+        return claim() && go(cell, length, false);
     }
 
     /// The block ended: how many elements it carried, so the owner can
-    /// release exactly that much of its ring. The channel is disabled
-    /// here because the silicon does not do it: EN stays set after a
-    /// completed block, and load() refuses an enabled channel.
+    /// release exactly that much of its ring. The channel is disabled here
+    /// because the silicon does not do it: EN stays set after a completed
+    /// block, and the next block's store would be dropped.
     static uint16_t complete() {
         const uint16_t n = in_flight_;
-        Channel::enable(false);
-        busy_ = false;
+        B::halt(cfg_);
         in_flight_ = 0;
+        busy_ = false;
         return n;
     }
 
@@ -824,17 +1054,18 @@ public:
     /// Throw the running block away and hand the channel back ready.
     static bool abandon() {
         ++faults_;
+        B::halt(cfg_);
         busy_ = false;
         in_flight_ = 0;
-        claim();
         return true;
     }
 
-    /// Start the run again from the beginning - what an owner does when
-    /// a request was armed after the channel and the first datum never
-    /// came. Nothing is in flight afterwards unless it succeeds.
-    static bool kick(const Elem* buffer, uint16_t length) {
-        Channel::enable(false);
+    /// Start a run again from its beginning - what an owner does when a
+    /// request was armed after the channel and the first datum never came.
+    /// Nothing is in flight afterwards unless it succeeds.
+    template <typename T>
+    static bool kick(const T* buffer, uint16_t length) {
+        B::halt(cfg_);
         busy_ = false;
         in_flight_ = 0;
         return start(buffer, length);
@@ -843,46 +1074,82 @@ public:
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
+    /// The channel stopped and its flags cleared; the binding (PADDR and
+    /// the engine's word) stays, so start() works again without arm().
     static void stop() {
-        Channel::stop();
+        B::halt(0);
+        B::clear_register() = B::flag_bits;
         busy_ = false;
         in_flight_ = 0;
     }
 
 private:
-    static DmaTransfer run(Elem* buffer, uint16_t length, bool increment) {
-        return DmaTransfer{
-            .peripheral = data_,
-            .memory = buffer,
-            .count = length,
-            .config = {.direction = DmaDirection::memory_to_peripheral,
-                       .circular = false,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = increment,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        };
+    template <typename T>
+    static bool go(const T* buffer, size_t length, bool increment) {
+        const uint32_t m = dma_address(buffer);
+        if (buffer == nullptr || length == 0u || length > 0xFFFFu ||
+            (m & (sizeof(T) - 1u)) != 0u ||
+            B::crosses(m, static_cast<uint32_t>(length), dma_width_of<T>(), increment)) {
+            busy_ = false;
+            return false;
+        }
+        in_flight_ = static_cast<uint16_t>(length);
+        B::go(m, static_cast<uint16_t>(length),
+              cfg_ | dma_cfgr_widths(dma_width_of<T>()) | (increment ? dma_cfgr_minc : 0u));
+        return true;
     }
 
-    static void claim() {
-        Channel::stop();
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
-    }
-
-    static inline volatile void* data_ = nullptr;
-    static inline DmaPriority priority_ = DmaPriority::low;
+    static inline uint32_t cfg_ = 0;
+    static inline uint8_t armed_ = 0;
     static inline uint16_t in_flight_ = 0;
     static inline uint32_t faults_ = 0;
-    static inline bool busy_ = false;
+    // Set in the thread, cleared in the completion handler.
+    static inline volatile bool busy_ = false;
 };
 
 /**
- * A receive engine: one caller-owned run filled from one peripheral
- * register, and asked how much has arrived.
+ * A receive engine, in two shapes on one binding.
+ *
+ * THE ONE-SHOT SHAPE fills a caller-owned run and stops: a bounded block,
+ * the receive half of a bus transaction (an SPI host's data phase, an I2C
+ * read). A block completes only when its run FILLS, which on a quiet line
+ * may be never, so the owner may also ASK what has arrived since it last
+ * asked - take(), one CNTR read, nothing suspended and nothing refused. The
+ * beat is the run's element, as on the transmit side; a new run always
+ * takes the channel, whatever the last one left standing.
+ *
+ * THE CIRCULAR SHAPE fills a RING for ever, on the controller's own cycle
+ * mode (CFGR.CIRC, 11.2.1): when the count reaches zero the controller
+ * reloads CNTR AND BOTH INTERNAL ADDRESSES and goes on, with no CPU in the
+ * path. The circular arm() is handed the ring's whole storage and keeps it
+ * - the address, the length every lap reloads, and the word with CIRC,
+ * MINC, the beat, the priority and the two interrupts the ring needs, the
+ * lap and the error - and start() runs it from the storage's first element
+ * with the binding's five stores. Nothing re-arms it afterwards, so nothing
+ * is lost between runs: there are none. The producer index of that ring is
+ * no variable anybody stores - it is the channel's own count - and this
+ * engine IS util/ring.hpp's RingCounter for it:
+ *
+ *   remaining()  CNTR, one load: the items still to be written in this
+ *                lap. 11.2.1 orders a transfer as the read, the store, and
+ *                THEN the decrement, so the count never counts an item
+ *                whose store has not been made;
+ *   laps()       the laps completed since start(): the transfer-complete
+ *                flag, raised at every wrap, turned into a count by lap()
+ *                in the channel's handler - so it lags the count by a
+ *                handler's latency and never leads it.
+ *
+ * util/ring.hpp's HardwareRing<storage, DmaRxEngine<c, ch, Elem>> is the
+ * consumer half, and a lap the consumer did not keep up with is that view's
+ * accounting (its overruns()), because only the consumer knows where its
+ * tail is. The half-transfer flag stays unarmed: the view reads the count
+ * whenever it looks, and the wrap is the one edge the lap count needs. A
+ * circular channel never stops on its own - EN stands, and with it the
+ * bus-master count the channel holds (a program with a ring running does
+ * not sleep on this family, the file header) - so the one way it stops by
+ * itself is a transfer error, which idle() reports.
  */
-template <uint8_t c, uint8_t ch, typename Elem = uint8_t>
+template <uint8_t c, uint8_t ch, typename Elem = uint16_t>
 class DmaRxEngine {
     static_assert(c == 1u || c == 2u,
                   "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
@@ -895,6 +1162,7 @@ class DmaRxEngine {
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
     using Channel = DmaChannel<c, ch>;
+    using B = DmaBinding<c, ch>;
 
 public:
     DmaRxEngine() = delete;
@@ -905,45 +1173,162 @@ public:
     static constexpr DmaSlot slot{c, ch};
     static constexpr DmaWidth width = dma_width_of<Elem>();
     using element = Elem;
+    /// Whether this channel is held to 11.2.3's 64 KB rule (the CH32V303's
+    /// DMA1): what an owner placing a ring's storage asks, so that no
+    /// placement can straddle a 64 KB page and arm() never refuses it.
+    static constexpr bool bounded_to_64k = Channel::bounded_to_64k;
 
     static constexpr uint8_t flag_complete = DmaFlag::complete;
     static constexpr uint8_t flag_half = DmaFlag::half;
     static constexpr uint8_t flag_error = DmaFlag::error;
 
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return static_cast<uint8_t>(B::service(armed_));
     }
 
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        priority_ = priority;
-        claim();
-        Pfic::enable(Channel::irq());
-    }
-
-    static bool idle() { return !Channel::enabled(); }
-
-    static bool start(Elem* buffer, uint16_t length) {
-        if (buffer == nullptr || length == 0u) {
+    /// Bind the channel to this peripheral's register for ONE-SHOT runs;
+    /// DmaTxEngine::arm()'s rules. False, and nothing armed, when `data` is
+    /// not aligned to Elem. A ring an earlier circular arm() bound stays
+    /// bound - its word is its own - and start() with no run runs it.
+    static bool arm(volatile void* data, uint8_t interrupts,
+                    DmaPriority priority = DmaPriority::low) {
+        stop();
+        if ((dma_address(data) & dma_width_mask(width)) != 0u) {
             return false;
         }
-        Channel::enable(false);
-        capacity_ = length;
+        B::bind(data);
+        armed_ = static_cast<uint8_t>(interrupts & (DmaFlag::complete | DmaFlag::half |
+                                                    DmaFlag::error));
+        cfg_ = dma_cfgr_priority(priority) | dma_cfgr_interrupts(armed_);
+        if (armed_ != 0u) {
+            Pfic::enable(Channel::irq());
+        } else {
+            Pfic::disable(Channel::irq());
+        }
+        return true;
+    }
+    /// The completion and the error armed.
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+        return arm(data, static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error), priority);
+    }
+
+    /**
+     * Bind the channel to this peripheral's register AND to a ring's whole
+     * storage, for good: the CIRCULAR shape. `storage` is the caller's
+     * array - the consumer view's own, named in its type - and its element
+     * is the beat; its length, the count every lap reloads, is a compile-
+     * time fact and is checked here (CNTR counts 65535 at most). The lap and
+     * the error are armed and the PFIC line enabled; the channel comes out
+     * stopped, and start() runs the ring. False, and nothing armed, when
+     * `data` is not aligned to Elem, the storage not aligned to its element,
+     * or - on the CH32V303's DMA1 - the storage across a 64 KB boundary.
+     * The one-shot verbs stay usable on the same binding: a start(run)
+     * replaces the ring until the next start().
+     */
+    template <typename T, size_t N>
+    static bool arm(volatile void* data, T (&storage)[N],
+                    DmaPriority priority = DmaPriority::low) {
+        static_assert(sizeof(T) <= sizeof(Elem),
+                      "brio DmaRxEngine: a ring wider than this binding's beat - name the engine "
+                      "with the wider element if the register gives it");
+        static_assert(!std::is_const_v<T> && !std::is_volatile_v<T>,
+                      "brio DmaRxEngine: the ring is plain storage the channel writes");
+        static_assert(N >= 2u && N <= 0xFFFFu,
+                      "brio DmaRxEngine: a ring of 2..65535 items - CNTR is the count every lap "
+                      "reloads, and it is sixteen bits (11.3.4)");
+        ring_length_ = 0;
+        if (!arm(data, static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error), priority)) {
+            return false;
+        }
+        const uint32_t m = dma_address(&storage[0]);
+        if ((m & (sizeof(T) - 1u)) != 0u ||
+            B::crosses(m, static_cast<uint32_t>(N), dma_width_of<T>(), true)) {
+            Pfic::disable(Channel::irq());
+            armed_ = 0;
+            cfg_ = 0;
+            return false;
+        }
+        ring_ = m;
+        ring_length_ = static_cast<uint16_t>(N);
+        ring_cfg_ = cfg_ | dma_cfgr_circ | dma_cfgr_minc | dma_cfgr_widths(dma_width_of<T>());
+        laps_ = 0;
+        return true;
+    }
+
+    /**
+     * (Re)start the RING from its storage's first element with the lap
+     * count at zero: the binding's re-arm, five stores. Once after the
+     * circular arm(), and again only after the channel has stopped - a
+     * transfer error, or stop() - and then the consumer's view is cleared
+     * with it, its positions being counted from this element and this lap.
+     * False on a binding that has no ring.
+     */
+    static bool start() {
+        if (ring_length_ == 0u) {
+            return false;
+        }
+        capacity_ = 0;
         taken_ = 0;
-        return Channel::load(run(buffer, length, true));
+        laps_ = 0;
+        B::rearm(ring_, ring_length_, ring_cfg_);
+        return true;
+    }
+
+    // -- the ring's counter (util/ring.hpp's RingCounter) ---------------------
+
+    /// The items still to be written in the current lap: CNTR, ONE load,
+    /// never refused - live while the channel runs (11.3.4).
+    [[gnu::always_inline]] static uint32_t remaining() {
+        return static_cast<uint16_t>(Channel::regs().CNTR);
+    }
+
+    /// The laps completed since start(): lap()'s count. A volatile word, so
+    /// a consumer polling it sees the handler's store.
+    [[gnu::always_inline]] static uint32_t laps() { return laps_; }
+
+    /// The completion flag's verb ON A RING - called from the channel's
+    /// handler when service() reports it. A lap, counted; the controller
+    /// has already reloaded itself and nothing is re-armed. (A one-shot
+    /// block's completion is complete(), which stops the channel.) Always
+    /// inline: an ISR body's verb, so the handler stays free of a call.
+    [[gnu::always_inline]] static void lap() { laps_ = laps_ + 1u; }
+
+    /// The channel is not running - the silicon asked, because a transfer
+    /// error drops EN by itself.
+    static bool idle() { return !Channel::enabled(); }
+
+    /// Fill a run, the width the span's. False for an empty run, one longer
+    /// than CNTR counts, a misaligned one or one across 64 KB on the
+    /// CH32V303's DMA1 - the channel then left as it was.
+    static bool start(std::span<uint8_t> run) { return go(run.data(), run.size(), true); }
+    static bool start(std::span<uint16_t> run)
+        requires(sizeof(Elem) >= 2)
+    {
+        return go(run.data(), run.size(), true);
+    }
+    static bool start(std::span<uint32_t> run)
+        requires(sizeof(Elem) >= 4)
+    {
+        return go(run.data(), run.size(), true);
+    }
+    template <typename T>
+    static bool start(T* buffer, uint16_t length) {
+        return start(std::span<T>(buffer, length));
     }
 
     /// `length` elements into ONE cell, thrown away (the receive side of
     /// a bus write).
-    static bool start_discard(Elem* cell, uint16_t length) {
-        if (cell == nullptr || length == 0u) {
-            return false;
-        }
-        Channel::enable(false);
-        capacity_ = length;
-        taken_ = 0;
-        return Channel::load(run(cell, length, false));
+    template <typename T>
+    static bool start_discard(T* cell, uint16_t length) {
+        static_assert(sizeof(T) <= sizeof(Elem), "brio DMA: a beat wider than this binding");
+        return go(cell, length, false);
     }
+
+    /// The block ended: the channel disabled - EN stays set after a
+    /// completed block, and a channel left enabled holds the bus-master
+    /// count that keeps the core awake. What it collected stays readable
+    /// through take() and harvest().
+    static void complete() { B::halt(cfg_); }
 
     /// How many elements have arrived since the last take(): one CNTR
     /// read, nothing suspended, nothing refused.
@@ -980,15 +1365,16 @@ public:
     /// that outlived its sender, so the next start() begins clean.
     static bool abandon() {
         ++faults_;
+        B::halt(cfg_);
         capacity_ = 0;
         taken_ = 0;
-        claim();
         return true;
     }
 
     /// The same run started again from its beginning.
-    static bool kick(Elem* buffer, uint16_t length) {
-        Channel::enable(false);
+    template <typename T>
+    static bool kick(T* buffer, uint16_t length) {
+        B::halt(cfg_);
         capacity_ = 0;
         taken_ = 0;
         return start(buffer, length);
@@ -997,39 +1383,198 @@ public:
     static uint32_t faults() { return faults_; }
     static void clear_faults() { faults_ = 0; }
 
+    /// The channel stopped and its flags cleared; the binding stays.
     static void stop() {
-        Channel::stop();
+        B::halt(0);
+        B::clear_register() = B::flag_bits;
         capacity_ = 0;
         taken_ = 0;
     }
 
 private:
-    static DmaTransfer run(Elem* buffer, uint16_t length, bool increment) {
-        return DmaTransfer{
-            .peripheral = data_,
-            .memory = buffer,
-            .count = length,
-            .config = {.direction = DmaDirection::peripheral_to_memory,
-                       .circular = false,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = increment,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        };
+    template <typename T>
+    static bool go(T* buffer, size_t length, bool increment) {
+        const uint32_t m = dma_address(buffer);
+        if (buffer == nullptr || length == 0u || length > 0xFFFFu ||
+            (m & (sizeof(T) - 1u)) != 0u ||
+            B::crosses(m, static_cast<uint32_t>(length), dma_width_of<T>(), increment)) {
+            return false;
+        }
+        capacity_ = static_cast<uint16_t>(length);
+        taken_ = 0;
+        B::rearm(m, static_cast<uint16_t>(length),
+                 cfg_ | dma_cfgr_widths(dma_width_of<T>()) | (increment ? dma_cfgr_minc : 0u));
+        return true;
     }
 
-    static void claim() {
-        Channel::stop();
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
-    }
-
-    static inline volatile void* data_ = nullptr;
-    static inline DmaPriority priority_ = DmaPriority::low;
+    static inline uint32_t cfg_ = 0;
+    static inline uint8_t armed_ = 0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
     static inline uint32_t faults_ = 0;
+    // The ring the circular arm() bound: its address, its length (zero:
+    // none) and its word.
+    static inline uint32_t ring_ = 0;
+    static inline uint16_t ring_length_ = 0;
+    static inline uint32_t ring_cfg_ = 0;
+    // Handler-written, consumer-read.
+    static inline volatile uint32_t laps_ = 0;
+};
+
+/**
+ * DmaCopyEngine<c, ch> - memory to memory: `copy()` and `fill()` on one
+ * channel in the controller's MEMORY-TO-MEMORY MODE (CFGR.MEM2MEM, 11.2.1:
+ * no request, the block runs on the enable), the source on the PADDR side
+ * (DIR clear) and the destination on MADDR's.
+ *
+ * THE BEAT IS T. `n` counts elements of T - a byte, a half-word or a word,
+ * PSIZE = MSIZE = sizeof(T) - and this controller moves any of the three in
+ * six cycles (docs/ch32vx03/dma.md), so a word is four times the bytes a
+ * cycle of a byte: a caller with an aligned run hands it over as words. An
+ * address not aligned to T is refused (11.3.5 and 11.3.6 round it down in
+ * silence), and so is a run longer than CNTR's 65535 or, on the CH32V303's
+ * DMA1, one across 64 KB.
+ *
+ * THE FILL'S CELL IS THE CALLER'S, in memory: the controller reads an
+ * ADDRESS each beat, with the source increment off, so the cell must stay
+ * put until the block is over - as the buffers of a copy must.
+ *
+ * Completion by the channel's interrupt (`service()` the ISR body) or, armed
+ * without one, by `busy()` asking the flag. One owner: the busy flag is
+ * tested and set without a mask.
+ */
+template <uint8_t c, uint8_t ch>
+class DmaCopyEngine {
+    static_assert(c == 1u || c == 2u,
+                  "brio DMA: this family's controllers are DMA1 and DMA2 (RM 11.2.3)");
+    static_assert(c <= device::dma_controller_count,
+                  "brio DMA: this part has ONE DMA controller - DMA2 and its eleven channels are "
+                  "the CH32V303's (device::dma_controller_count, RM 11.2.3)");
+    static_assert(dma_channel_exists(c, ch),
+                  "brio DMA: no such DMA channel for this engine - DMA1 has channels 1..8 on the "
+                  "CH32V203 and 1..7 on the CH32V303, DMA2 has 1..11");
+    using Channel = DmaChannel<c, ch>;
+    using B = DmaBinding<c, ch>;
+
+public:
+    DmaCopyEngine() = delete;
+
+    static constexpr bool present = true;
+    static constexpr uint8_t controller = c;
+    static constexpr uint8_t channel = ch;
+    static constexpr DmaSlot slot{c, ch};
+
+    static constexpr uint8_t flag_complete = DmaFlag::complete;
+    static constexpr uint8_t flag_error = DmaFlag::error;
+
+    /// Bind the channel: the gate, the mode, the priority, and whether the
+    /// completion raises the channel's line (`interrupt`) or is asked for
+    /// by busy().
+    static void arm(DmaPriority priority = DmaPriority::low, bool interrupt = true) {
+        stop();
+        B::bind(nullptr);
+        interrupt_ = interrupt;
+        cfg_ = dma_cfgr_mem2mem | dma_cfgr_minc | dma_cfgr_priority(priority) |
+               (interrupt ? dma_cfgr_interrupts(DmaFlag::complete | DmaFlag::error) : 0u);
+        if (interrupt) {
+            Pfic::enable(Channel::irq());
+        } else {
+            Pfic::disable(Channel::irq());
+        }
+    }
+
+    /// Copy `n` elements from `src` to `dst`, one beat an element. False -
+    /// nothing started - while a block is in flight and for a run the
+    /// header refuses.
+    template <typename T>
+    static bool copy(T* dst, const T* src, uint32_t n) {
+        static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4,
+                      "brio DMA: a beat is a byte, a half-word or a word");
+        return run(dma_address(dst), dma_address(src), n, dma_width_of<T>(), dma_cfgr_pinc);
+    }
+
+    /// Write `n` copies of `*cell` from `dst` on - the cell read each beat,
+    /// so it stays put until the block is over.
+    template <typename T>
+    static bool fill(T* dst, const T* cell, uint32_t n) {
+        static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4,
+                      "brio DMA: a beat is a byte, a half-word or a word");
+        return run(dma_address(dst), dma_address(cell), n, dma_width_of<T>(), 0u);
+    }
+
+    /// A block in flight. Armed without the interrupt, this is also where
+    /// the completion is found: the flag asked, the channel stopped.
+    static bool busy() {
+        if (busy_ && !interrupt_) {
+            const uint32_t f = B::flags();
+            if ((f & (DmaFlag::complete | DmaFlag::error)) != 0u) {
+                if ((f & DmaFlag::error) != 0u) {
+                    ++faults_;
+                }
+                finish();
+            }
+        }
+        return busy_;
+    }
+
+    /// Stop the block where it stands - CNTR then holds what was left -
+    /// and free the engine. False when nothing was in flight.
+    static bool abandon() {
+        if (!busy_) {
+            return false;
+        }
+        finish();
+        return true;
+    }
+
+    /// The channel's ISR body: the block's end acted on - the channel
+    /// stopped, the engine free again - and the flags handed back.
+    [[gnu::always_inline]] static uint8_t service() {
+        const uint32_t up = B::service(DmaFlag::complete | DmaFlag::error);
+        if ((up & DmaFlag::error) != 0u) {
+            ++faults_;
+        }
+        if (up != 0u) {
+            finish();
+        }
+        return static_cast<uint8_t>(up);
+    }
+
+    static uint32_t faults() { return faults_; }
+    static void clear_faults() { faults_ = 0; }
+
+    static void stop() {
+        B::halt(0);
+        B::clear_register() = B::flag_bits;
+        busy_ = false;
+    }
+
+private:
+    /// One block of `n` beats of width `w` from `source` (incremented when
+    /// `pinc` says so) to `dst`.
+    static bool run(uint32_t dst, uint32_t source, uint32_t n, DmaWidth w, uint32_t pinc) {
+        const uint32_t mask = dma_width_mask(w);
+        if (busy_ || dst == 0u || source == 0u || n == 0u || n > 0xFFFFu ||
+            ((dst | source) & mask) != 0u || B::crosses(dst, n, w, true) ||
+            (pinc != 0u && B::crosses(source, n, w, true))) {
+            return false;
+        }
+        busy_ = true;
+        Channel::regs().PADDR = source;
+        B::go(dst, static_cast<uint16_t>(n), cfg_ | pinc | dma_cfgr_widths(w));
+        return true;
+    }
+
+    static void finish() {
+        B::halt(cfg_);
+        busy_ = false;
+    }
+
+    static inline uint32_t cfg_ = 0;
+    static inline uint32_t faults_ = 0;
+    static inline bool interrupt_ = true;
+    // Set by the owner, cleared by the completion.
+    static inline volatile bool busy_ = false;
 };
 
 // ---- the block engines ----------------------------------------------------------
@@ -1062,6 +1607,7 @@ class DmaLoopEngine {
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
     using Channel = DmaChannel<c, ch>;
+    using B = DmaBinding<c, ch>;
 
 public:
     DmaLoopEngine() = delete;
@@ -1080,42 +1626,41 @@ public:
     /// The channel's ISR body folded into the engine: the armed flags
     /// that are up, cleared, handed back. Acts on nothing.
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return static_cast<uint8_t>(B::service(DmaFlag::complete | DmaFlag::error));
     }
 
-    /// Claim the channel for this peripheral; `data` is the register the
-    /// table is poured into. The PFIC line is enabled here.
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        priority_ = priority;
-        claim();
+    /// Bind the channel to this peripheral; `data` is the register the
+    /// table is poured into. The PFIC line is enabled here. False, and
+    /// nothing armed, when `data` is not aligned to Elem.
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+        stop();
+        if ((dma_address(data) & dma_width_mask(width)) != 0u) {
+            return false;
+        }
+        B::bind(data);
+        cfg_ = dma_cfgr_dir | dma_cfgr_circ | dma_cfgr_minc | dma_cfgr_widths(width) |
+               dma_cfgr_priority(priority) |
+               dma_cfgr_interrupts(DmaFlag::complete | DmaFlag::error);
         Pfic::enable(Channel::irq());
+        return true;
     }
 
     /// Begin playing `length` elements of `table`, over and over. The
-    /// buffer is the caller's and must outlive the stream.
+    /// buffer is the caller's and must outlive the stream. Refused while
+    /// the stream runs, and for a table this channel cannot take.
     static bool start(const Elem* table, uint16_t length) {
-        if (table == nullptr || length == 0u) {
+        const uint32_t m = dma_address(table);
+        if (running_ || table == nullptr || length == 0u || (m & dma_width_mask(width)) != 0u ||
+            B::crosses(m, length, width, true)) {
             return false;
         }
         table_ = table;
         length_ = length;
         laps_ = 0;
         faults_ = 0;
-        running_ = Channel::load(DmaTransfer{
-            .peripheral = data_,
-            .memory = const_cast<Elem*>(table),
-            .count = length,
-            .config = {.direction = DmaDirection::memory_to_peripheral,
-                       .circular = true,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = true,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        });
-        return running_;
+        B::rearm(m, length, cfg_);
+        running_ = true;
+        return true;
     }
 
     /// A lap ended - called from the handler on the completion flag.
@@ -1131,6 +1676,7 @@ public:
     static void fail() {
         faults_ = faults_ + 1u;
         running_ = false;
+        B::halt(cfg_);
     }
 
     static uint32_t laps() { return laps_; }
@@ -1147,26 +1693,21 @@ public:
     /// does when the request was armed after the channel and the first
     /// datum never came.
     static bool kick() {
-        Channel::enable(false);
+        B::halt(cfg_);
         running_ = false;
         return start(table_, length_);
     }
 
     static void stop() {
-        Channel::stop();
+        B::halt(0);
+        B::clear_register() = B::flag_bits;
         running_ = false;
         length_ = 0;
     }
 
 private:
-    static void claim() {
-        Channel::stop();
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
-    }
-
-    static inline volatile void* data_ = nullptr;
+    static inline uint32_t cfg_ = 0;
     static inline const Elem* table_ = nullptr;
-    static inline DmaPriority priority_ = DmaPriority::low;
     static inline uint16_t length_ = 0;
     // Handler-written, loop-read.
     static inline volatile uint32_t laps_ = 0;
@@ -1192,12 +1733,12 @@ private:
  * again on this silicon in test_vx03_adc's letter d.
  *
  * So each block is a PLAIN transfer: the completion handler hands the
- * full buffer over and launches the other one, and when the caller
- * holds both the engine counts an overrun, stalls, and is restarted by
- * `release()`. The gap between one block and the next is the re-arm,
- * which the accounting does not hide: a sample lost there is a sample
- * the peripheral never delivered, and `overruns()` counts the laps the
- * engine chose not to take.
+ * full buffer over and starts the other one - five stores, the binding's
+ * re-arm - and when the caller holds both the engine counts an overrun,
+ * stalls, and is restarted by `release()`. The gap between one block and
+ * the next is the re-arm, which the accounting does not hide: a sample
+ * lost there is a sample the peripheral never delivered, and `overruns()`
+ * counts the laps the engine chose not to take.
  *
  * Both buffers are the caller's, both hold `length` elements, and both
  * must outlive the stream. They are `volatile` because the controller
@@ -1216,6 +1757,7 @@ class DmaPingPongEngine {
     static_assert(sizeof(Elem) == 1 || sizeof(Elem) == 2 || sizeof(Elem) == 4,
                   "a DMA element is one bus access wide: 1, 2 or 4 bytes");
     using Channel = DmaChannel<c, ch>;
+    using B = DmaBinding<c, ch>;
 
 public:
     DmaPingPongEngine() = delete;
@@ -1232,21 +1774,29 @@ public:
     static constexpr uint8_t flag_error = DmaFlag::error;
 
     [[gnu::always_inline]] static uint8_t service() {
-        return static_cast<uint8_t>(Channel::isr());
+        return static_cast<uint8_t>(B::service(DmaFlag::complete | DmaFlag::error));
     }
 
-    /// Claim the channel; `data` is the peripheral's data register.
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
-        data_ = data;
-        priority_ = priority;
-        claim();
+    /// Bind the channel; `data` is the peripheral's data register. False,
+    /// and nothing armed, when it is not aligned to Elem.
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+        stop();
+        if ((dma_address(data) & dma_width_mask(width)) != 0u) {
+            return false;
+        }
+        B::bind(data);
+        cfg_ = dma_cfgr_minc | dma_cfgr_widths(width) | dma_cfgr_priority(priority) |
+               dma_cfgr_interrupts(DmaFlag::complete | DmaFlag::error);
         Pfic::enable(Channel::irq());
+        return true;
     }
 
     /// Begin streaming into `first`, with `second` as the buffer the
-    /// next block will use.
+    /// next block will use. Both are checked here, once: their alignment,
+    /// and on the CH32V303's DMA1 the 64 KB rule.
     static bool start(volatile Elem* first, volatile Elem* second, uint16_t length) {
-        if (first == nullptr || second == nullptr || first == second || length == 0u) {
+        if (first == nullptr || second == nullptr || first == second || length == 0u ||
+            !fits(first, length) || !fits(second, length)) {
             return false;
         }
         buffer_[0] = first;
@@ -1278,10 +1828,12 @@ public:
         fill_ = static_cast<uint8_t>(fill_ ^ 1u);
         if (pending_ >= 2u) {
             // The buffer the engine needs next is the one the caller has
-            // not released. Skip the lap rather than write into it.
+            // not released. Skip the lap rather than write into it - and
+            // stop the channel, whose EN a completed block leaves set.
             overruns_ = overruns_ + 1u;
             stalled_ = true;
             running_ = false;
+            B::halt(cfg_);
             return length_;
         }
         if (!launch()) {
@@ -1294,6 +1846,7 @@ public:
     static void fail() {
         faults_ = faults_ + 1u;
         running_ = false;
+        B::halt(cfg_);
     }
 
     /// The buffer that is full and waiting for the caller, or nullptr.
@@ -1352,7 +1905,6 @@ public:
             return false;
         }
         faults_ = faults_ + 1u;
-        claim();
         return launch();
     }
 
@@ -1360,7 +1912,8 @@ public:
     static void clear_faults() { faults_ = 0; }
 
     static void stop() {
-        Channel::stop();
+        B::halt(0);
+        B::clear_register() = B::flag_bits;
         running_ = false;
         stalled_ = false;
         pending_ = 0;
@@ -1368,39 +1921,25 @@ public:
     }
 
 private:
+    static bool fits(volatile Elem* buffer, uint16_t length) {
+        const uint32_t m = dma_address(buffer);
+        return (m & dma_width_mask(width)) == 0u && !B::crosses(m, length, width, true);
+    }
+
     /// EN STAYS SET WHEN A BLOCK COMPLETES on this controller (the file
-    /// header: only software clears it), and every configuring verb
-    /// refuses an enabled channel - so the re-arm drops it first. On the
-    /// first launch there is nothing to drop.
+    /// header: only software clears it), and the four stores are dropped
+    /// while it is - so the re-arm is the binding's, which drops it first.
     static bool launch() {
         if (buffer_[fill_] == nullptr || length_ == 0u) {
             return false;
         }
-        Channel::enable(false);
-        running_ = Channel::load(DmaTransfer{
-            .peripheral = data_,
-            .memory = const_cast<Elem*>(buffer_[fill_]),
-            .count = length_,
-            .config = {.direction = DmaDirection::peripheral_to_memory,
-                       .circular = false,
-                       .memory_to_memory = false,
-                       .peripheral_increment = false,
-                       .memory_increment = true,
-                       .peripheral_width = width,
-                       .memory_width = width,
-                       .priority = priority_},
-        });
-        return running_;
+        B::rearm(dma_address(buffer_[fill_]), length_, cfg_);
+        running_ = true;
+        return true;
     }
 
-    static void claim() {
-        Channel::stop();
-        Channel::arm(DmaFlag::complete | DmaFlag::error, true);
-    }
-
-    static inline volatile void* data_ = nullptr;
+    static inline uint32_t cfg_ = 0;
     static inline volatile Elem* buffer_[2] = {nullptr, nullptr};
-    static inline DmaPriority priority_ = DmaPriority::low;
     static inline uint16_t length_ = 0;
     // Handler-written and loop-read: volatile for the ticker's reason.
     static inline volatile uint32_t laps_ = 0;

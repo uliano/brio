@@ -123,5 +123,5 @@ void tasks() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void spi3_handler() { (void)Host3::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel1_handler() { (void)Host3Dma::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel2_handler() { (void)Host3Dma::dma_isr(); }
+extern "C" BRIO_CH32_INTERRUPT void dma2_channel1_handler() { (void)Host3Dma::dma_rx_isr(); }
+extern "C" BRIO_CH32_INTERRUPT void dma2_channel2_handler() { (void)Host3Dma::dma_tx_isr(); }

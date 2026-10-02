@@ -1,9 +1,9 @@
 // bench_vx03 - the benchmark skeleton on the CH32V203 and the CH32V303
 // (QingKe V4B and V4F, RV32IMAC and RV32IMAFC): the instrument's
 // self-check and cost, the runtime's copy and fill against the core's
-// floor, a print through the console transport against the wire, and the
-// tick's floor - one line per operation and size, in util/bench.hpp's
-// grammar (docs/design/benchmark.md).
+// floor, a print through the console transport against the wire, the
+// tick's floor, and the DMA engines - one line per operation and size, in
+// util/bench.hpp's grammar (docs/design/benchmark.md).
 //
 // NOT A TEST. TestBench frames it (the menu, the ALL: line bin/brio
 // waits for); every letter ends with one verdict "ran", and letter r's
@@ -34,9 +34,9 @@
 // flatten, so the whole read is spelled inline wherever a stamp or a
 // Stopwatch takes one, the vectors included: no call on the hot path.
 //
-// THE METERS. Two vectors, one IsrMeter each, enter() the handler's first
+// THE METERS. One IsrMeter a vector, enter() the handler's first
 // statement and leave() its last, the body between them as the suite
-// binds it:
+// binds it - two for letters r, m, p and t:
 //   systick_handler  the tick. Its meter reads the STK's POSITION alone
 //                    (TickRuler: CNTL, one load). Ticker::cycles() would
 //                    be right here too - CNTIF stands from the restart
@@ -51,6 +51,12 @@
 //   usart1_handler   USART1's ISR body, on the full Ruler: this handler
 //                    may straddle a restart, where the position alone
 //                    would go back by a period.
+// and letter d's five, each on the full Ruler: dma1_channel1_handler (the
+// copy engine), dma1_channel7_handler (TIM4's update, the paced block),
+// dma1_channel2_handler and dma1_channel3_handler (SPI1's receive and
+// transmit engines - the second armed for a transfer error alone), and
+// spi1_handler (the pump, which an engined write never enters). SPI1's
+// pads are NSS PA4, SCK PA5, MISO PA6 and MOSI PA7, nothing wired to them.
 // The hardware prologue's entry and exit (16 and 25 HCLK cycles with HPE,
 // docs/ch32vx03/platform.md) lie outside the stamps.
 //
@@ -115,6 +121,48 @@
 //      nothing to do (this loop, not the kernel's), counters before and
 //      after: wall = the second in cycles, irq = the ticks, isr = the tick
 //      handler's cycles, busy = the floor.
+//   d  THE DMA ENGINES (ch32vx03/dma.hpp), four operations, each the best
+//      of 4 from a fresh tick, the counters those of the four DMA vectors
+//      and SPI1's (not the tick's). NOTHING IDLES IN THIS LETTER: a running
+//      channel keeps the core awake on this family (bus_activity.hpp), so
+//      the core spins on the completion and busy is wall by construction;
+//      what the operation costs the CPU is the launch and the isr, printed
+//      on the note line before each bench line.
+//        copy, fill  DmaCopyEngine on DMA1's channel 1, 16, 256 and 4096
+//                    bytes handed over as words, from start() to the
+//                    completion's interrupt; the note line gives the
+//                    launch alone (copy() called to copy() returned - at
+//                    16 bytes the block completes inside it, so the
+//                    completion's handler is in it too) and the fixed
+//                    cost: wall less the DMA's own time, measured as the
+//                    difference of the two larger sizes over their words.
+//                    Then the data judged, and a word copy, a byte copy and
+//                    a half-word fill back to back judged byte for byte -
+//                    each block starting with a width the last had not.
+//        paced       256 words from a table into ONE cell on TIM4's update
+//                    request (DMA1's channel 7), one every 1440 cycles
+//                    (100 kHz), the completion's interrupt the edge; then
+//                    the same run WATCHED under the mask, the core stamping
+//                    each fall of the count on the STK's position (one
+//                    load) - the spread of the intervals is the jitter as
+//                    the core sees it, the watching loop's own turn
+//                    included.
+//        spi.dma     SPI1's host on its two engines, a write of 16 and 256
+//                    frames of 8 and of 16 bits at SCK /4 (36 MHz) and /16
+//                    (9 MHz), MISO floating - no strap on this desk, so the
+//                    time is the wire's and the received data is not
+//                    judged here (test_vx03_spi's letters c and d judge it
+//                    on the strap and against the peer; the transmitted is,
+//                    below). Each point warmed by a ONE-frame
+//                    request first. The note line: the launch (start()
+//                    called to start() returned) and the fixed cost, wall
+//                    less the frames' own wire time.
+//      Then the TRANSMIT DATA JUDGED WITH NO WIRE: 256 frames of 8 and of
+//      16 bits sent with SPI1's CRC unit on, its TCRCR - the CRC of every
+//      frame the shift register sent - against a bitwise loop over the
+//      same buffer: the beat and the byte order inside a 16-bit frame are
+//      what that judges. The last line: the bus masters still counted
+//      after the SPI requests - zero when every engine stopped its channel.
 //
 // THE WIRE, and why it is the limit:
 //   memcpy, memset  the core's load/store floor. The QingKe V4 manual
@@ -134,6 +182,13 @@
 //   print           the console's ACTUAL baud, read back from BRR (144 MHz
 //                   over 1250, 115200 baud), over the ten bits of an 8N1
 //                   frame: 11520 B/s.
+//   copy, fill      the DMA's bus: ONE ITEM A CYCLE of HCLK, the DMA's
+//                   clock - four bytes a cycle on a word beat, 576 MB/s. The
+//                   chapter states no item time; the controller takes six
+//                   cycles an item at every width (docs/ch32vx03/dma.md),
+//                   so x sits near 6 at 4096 bytes by the silicon's own rate.
+//   paced           the pace: four bytes a period of TIM4, 400 kB/s.
+//   spi.dma         SCK over eight, the bytes of a frame per frame time.
 //
 // THE INSTRUMENT'S COST, and how the reader subtracts it. Every line
 // carries RAW numbers. A Stopwatch measurement holds the stopwatch line's
@@ -155,14 +210,19 @@
 #include <string.h>
 
 #include <cstddef>
+#include <span>
 
 #include "ch32vx03/clock.hpp"
 #include "ch32vx03/delay.hpp"
 #include "ch32vx03/device.hpp"
+#include "ch32vx03/dma.hpp"
 #include "ch32vx03/pfic.hpp"
 #include "ch32vx03/platform.hpp"
+#include "ch32vx03/spi.hpp"
 #include "ch32vx03/ticker.hpp"
+#include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
+#include "kernel/borrowed.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -483,6 +543,434 @@ void tt_tick() {
     bench.verdict("ran", true);
 }
 
+// ---------------------------------------------------------------------------
+// d - the DMA engines
+// ---------------------------------------------------------------------------
+Meter copy_meter;    // dma1_channel1_handler: the copy engine
+Meter paced_meter;   // dma1_channel7_handler: TIM4's update
+Meter spi_rx_meter;  // dma1_channel2_handler: SPI1's receive engine
+Meter spi_tx_meter;  // dma1_channel3_handler: SPI1's transmit engine (errors alone)
+Meter spi_meter;     // spi1_handler: the pump
+
+/// Letter d's counters: the DMA vectors and SPI1's, not the tick (each
+/// short operation starts on a fresh tick, and the paced one says how many
+/// ticks its wall holds). Nothing idles in this letter: a running channel
+/// keeps the core awake on this family (ch32vx03/bus_activity.hpp), so the
+/// core spins on the completion and busy is wall by construction.
+BenchCounters dma_counters() {
+    return bench_counters<Plat>(copy_meter, paced_meter, spi_rx_meter, spi_tx_meter, spi_meter);
+}
+
+// ---- copy and fill: DmaCopyEngine on DMA1's first channel -----------------
+using Copier = DmaCopyEngine<1, 1>;
+volatile bool copy_done = false;
+uint32_t fill_cell = 0;
+
+void copy_arm() { Copier::arm(DmaPriority::low, true); }
+
+/// One block of `bytes`, handed over as words: the beat is the element
+/// type, and the buffers and the sizes here are all whole words.
+bool copy_start(void* dst, const void* src, uint32_t bytes, bool fill) {
+    copy_done = false;
+    if (fill) {
+        return Copier::fill(static_cast<uint32_t*>(dst), &fill_cell, bytes / 4u);
+    }
+    return Copier::copy(static_cast<uint32_t*>(dst), static_cast<const uint32_t*>(src),
+                        bytes / 4u);
+}
+
+[[gnu::always_inline]] inline void copy_vector() {
+    if (Copier::service() != 0u) {
+        copy_done = true;
+    }
+}
+
+// ---- paced: TIM4's update request on DMA1's channel 7 ----------------------
+using PacedTx = DmaTxEngine<1, DmaRequestOf<DmaRequest::tim4_up>::channel, uint32_t>;
+using PacedCh = DmaChannel<1, DmaRequestOf<DmaRequest::tim4_up>::channel>;
+using Pacer = Tim<4>;
+volatile bool paced_done = false;
+volatile uint32_t paced_cell = 0;
+
+void paced_arm() { (void)PacedTx::arm(&paced_cell, DmaPriority::high); }
+
+bool paced_start(const uint32_t* table, uint16_t n) {
+    paced_done = false;
+    return PacedTx::start(std::span<const uint32_t>(table, n));
+}
+
+[[gnu::always_inline]] inline void paced_vector() {
+    const uint8_t f = PacedTx::service();
+    if ((f & PacedTx::flag_error) != 0u) {
+        (void)PacedTx::abandon();
+        paced_done = true;
+    } else if ((f & PacedTx::flag_complete) != 0u) {
+        (void)PacedTx::complete();
+        paced_done = true;
+    }
+}
+
+// ---- SPI1's host on its two engines, MISO floating -------------------------
+constexpr SpiPins spi_pins = spi_pins_for(1, 0);   // NSS PA4, SCK PA5, MISO PA6, MOSI PA7
+using SpiDma = SpiHost<1, spi_pins, DmaTxEngine<1, Spi<1>::dma_tx_channel>,
+                       DmaRxEngine<1, Spi<1>::dma_rx_channel>>;
+volatile bool spi_done = false;
+bool spi_up = false;
+
+[[gnu::always_inline]] inline void spi_rx_vector() {
+    if (SpiDma::dma_rx_isr()) {
+        spi_done = true;
+    }
+}
+[[gnu::always_inline]] inline void spi_tx_vector() {
+    if (SpiDma::dma_tx_isr()) {
+        spi_done = true;
+    }
+}
+
+// ---- what letter d prints ---------------------------------------------------
+// The DMA's clock is HCLK, and its wire here is the brief's: ONE ITEM A
+// CYCLE of that clock, four bytes a cycle on the word beat a copy and a
+// fill take. The controller does not come near it - the chapter states no
+// item time, and the difference of two sizes below is the measurement.
+constexpr uint32_t wire_dma_word = 4u * Ruler::hz();
+
+constexpr uint32_t copy_sizes[3] = {16, 256, 4096};
+
+/// One copy or fill, the best of 4 from a fresh tick: the wall from the
+/// start to the completion's flag, and the launch alone (start() called
+/// to start() returned) in `launch`.
+BenchSample copy_once(uint32_t n, bool fill, uint32_t& launch) {
+    BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
+    for (uint8_t run = 0; run < 4u; ++run) {
+        void* dst = buffer_b;
+        const void* src = fill ? static_cast<const void*>(&fill_cell) : buffer_a;
+        fresh_tick();
+        const BenchCounters before = dma_counters();
+        Stopwatch<Ruler> sw;
+        sw.start();
+        const bool ok = copy_start(dst, src, n, fill);
+        const uint32_t l = sw.elapsed();
+        uint32_t spins = 1'000'000UL;
+        while (ok && !copy_done && spins-- != 0u) {
+        }
+        const uint32_t wall = sw.elapsed();
+        const BenchSample s = bench_sample(wall, before, dma_counters());
+        if (ok && copy_done && s.wall < best.wall) {
+            best = s;
+            launch = l;
+        }
+    }
+    return best;
+}
+
+void copy_report(const char* op, bool fill) {
+    BenchSample s[3]{};
+    uint32_t launch[3]{};
+    for (uint8_t i = 0; i < 3u; ++i) {
+        s[i] = copy_once(copy_sizes[i], fill, launch[i]);
+    }
+    // The DMA's own time an item, from the difference of the two larger
+    // sizes (word items: 64 and 1024), in hundredths of a cycle.
+    const uint32_t per_item_x100 = (s[2].wall - s[1].wall) * 100u / (1024u - 64u);
+    for (uint8_t i = 0; i < 3u; ++i) {
+        const uint32_t items = copy_sizes[i] / 4u;
+        const uint32_t moving = items * per_item_x100 / 100u;
+        print(serial, "  ", op, " ", copy_sizes[i], " B = ", items, " words: launch ", launch[i],
+              ", fixed ", s[i].wall - moving, " (wall less ", per_item_x100 / 100u, '.',
+              static_cast<char>('0' + per_item_x100 / 10u % 10u),
+              static_cast<char>('0' + per_item_x100 % 10u), " cycles a word)", crlf);
+        bench_line(serial, op, copy_sizes[i], s[i], Ruler::hz(), wire_dma_word);
+    }
+    // The data, judged once: the last copy or fill is what buffer_b holds.
+    bool same = true;
+    for (uint32_t k = 0; k < 4096u; ++k) {
+        const uint8_t want = fill ? static_cast<uint8_t>(fill_cell >> (8u * (k & 3u))) : buffer_a[k];
+        if (buffer_b[k] != want) {
+            same = false;
+            break;
+        }
+    }
+    print(serial, "  ", op, " 4096 B: ", same ? "every byte as expected" : "A BYTE DIFFERS", crlf);
+}
+
+// ---- paced -----------------------------------------------------------------
+constexpr uint32_t paced_period = 1440;   // TIM4 at HCLK, an update every 10 us
+constexpr uint16_t paced_items = 256;
+/// The table is the first kilobyte of buffer_a, written after the copies
+/// have judged it: the 32 KB parts have 10 KB of SRAM, and this app
+/// builds for them.
+uint32_t* const paced_table = reinterpret_cast<uint32_t*>(buffer_a);
+
+void pacer_start() {
+    Pacer::init();
+    (void)Pacer::configure(TimConfig{.prescaler = 0, .period = paced_period - 1u});
+    Pacer::interrupts(tim_ude, true);
+    Pacer::enable(true);
+}
+void pacer_stop() {
+    Pacer::enable(false);
+    Pacer::interrupts(tim_ude, false);
+}
+
+void paced_report() {
+    for (uint16_t i = 0; i < paced_items; ++i) {
+        paced_table[i] = 0x01010101UL * i;
+    }
+    paced_arm();
+
+    // The line: 256 words into one cell, the completion's interrupt the
+    // edge, the core spinning on it (it cannot sleep under a channel here).
+    fresh_tick();
+    const BenchCounters before = dma_counters();
+    const uint32_t ticks0 = Ticker::ticks();
+    Stopwatch<Ruler> sw;
+    sw.start();
+    const bool ok = paced_start(paced_table, paced_items);
+    const uint32_t launch = sw.elapsed();
+    pacer_start();
+    uint32_t spins = 10'000'000UL;
+    while (ok && !paced_done && spins-- != 0u) {
+    }
+    const uint32_t wall = sw.elapsed();
+    const BenchSample s = bench_sample(wall, before, dma_counters());
+    pacer_stop();
+    const uint32_t ticks = Ticker::ticks() - ticks0;
+    const uint32_t due = paced_period * paced_items;
+    // Items moved at 4 bytes: the wire is the pace's own, 4 bytes a period.
+    const uint32_t wire_pace = 4u * (Ruler::hz() / paced_period);
+    print(serial, "  paced: ", paced_items, " words at one a ", paced_period,
+          " cycles (TIM4's update, 100 kHz) into one cell: ", ok ? "" : "REFUSED ", "launch ",
+          launch, ", wall ", wall, " for ", due, " due, cell=", hex(paced_cell), ", ", ticks,
+          " ticks in the wall", crlf);
+    bench_line(serial, "paced", 4u * paced_items, s, Ruler::hz(), wire_pace);
+
+    // The pace against the ruler: the core watches the count fall and
+    // stamps each step on the STK's position (one load), the intervals'
+    // spread being the jitter as the core sees it. Under the mask, so that
+    // no handler stretches one interval and shortens the next: the STK
+    // counts on regardless, and the completion and the ticks are served
+    // when the mask lifts.
+    uint32_t* const stamp = reinterpret_cast<uint32_t*>(buffer_b);
+    (void)paced_start(paced_table, paced_items);
+    fresh_tick();
+    uint16_t seen = 0;
+    {
+        InterruptGuard masked;
+        pacer_start();
+        uint16_t last = PacedCh::remaining();
+        spins = 40'000'000UL;
+        while (seen < paced_items && spins-- != 0u) {
+            const uint16_t now = PacedCh::remaining();
+            if (now != last) {
+                stamp[seen++] = TickRuler::now();
+                last = now;
+            }
+        }
+    }
+    uint32_t spins2 = 1'000'000UL;
+    while (!paced_done && spins2-- != 0u) {
+    }
+    pacer_stop();
+    constexpr uint32_t tick_period = Ruler::hz() / 1000u;
+    uint32_t lo = 0xFFFF'FFFFu;
+    uint32_t hi = 0;
+    uint32_t off = 0;
+    for (uint16_t k = 1; k < seen; ++k) {
+        const uint32_t a = stamp[k - 1u];
+        const uint32_t b = stamp[k];
+        const uint32_t d = b >= a ? b - a : b + tick_period - a;
+        if (d < lo) { lo = d; }
+        if (d > hi) { hi = d; }
+        if (d > paced_period + 32u || d + 32u < paced_period) { ++off; }
+    }
+    print(serial, "  paced, watched: ", seen, " steps, interval min ", lo, " max ", hi,
+          " cycles (", paced_period, " due), ", off, " beyond +-32",
+          crlf);
+}
+
+// ---- spi.dma ---------------------------------------------------------------
+/// One write of `frames` frames on the engined host, MISO floating: the
+/// wall from start() to the completion edge, the launch alone in `launch`.
+BenchSample spi_once(uint16_t frames, SpiClock rate, SpiDataSize bits, uint32_t& launch) {
+    BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
+    for (uint8_t run = 0; run < 4u; ++run) {
+        SpiDma::Request r{};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
+        r.len = frames;
+        r.mode = SpiMode::mode0;
+        r.clock = rate;
+        r.bits = bits;
+        r.polled = false;
+        spi_done = false;
+        fresh_tick();
+        const BenchCounters before = dma_counters();
+        Stopwatch<Ruler> sw;
+        sw.start();
+        const bool sync = SpiDma::start(r);
+        const uint32_t l = sw.elapsed();
+        uint32_t spins = 1'000'000UL;
+        while (!sync && !spi_done && spins-- != 0u) {
+        }
+        const uint32_t wall = sw.elapsed();
+        const BenchSample s = bench_sample(wall, before, dma_counters());
+        if ((sync || spi_done) && s.wall < best.wall) {
+            best = s;
+            launch = l;
+        }
+    }
+    return best;
+}
+
+void spi_report() {
+    if (!spi_up) {
+        spi_up = SpiDma::init(clock);
+    }
+    constexpr SpiClock rates[2] = {SpiClock::div4, SpiClock::div16};
+    for (const SpiClock rate : rates) {
+        const uint32_t sck = spi_sck_hz(Spi<1>::bus_hz(clock), rate);
+        for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
+            const uint32_t frame_bits = bits == SpiDataSize::bits16 ? 16u : 8u;
+            const uint32_t frame_cycles = frame_bits * (Ruler::hz() / sck);
+            for (const uint16_t frames : {uint16_t{16}, uint16_t{256}}) {
+                uint32_t launch = 0;
+                // Warm the configuration (a rate or width change costs a
+                // disable and an enable once) with ONE frame - the request
+                // that left both DMA requests standing before the engines'
+                // rework, and stalled the next - then measure.
+                (void)spi_once(1, rate, bits, launch);
+                const BenchSample s = spi_once(frames, rate, bits, launch);
+                const uint32_t bytes = frames * (frame_bits / 8u);
+                const uint32_t wire_cycles = frames * frame_cycles;
+                print(serial, "  spi.dma SCK ", sck, " Hz, ", frame_bits, "-bit frames x ", frames,
+                      ": launch ", launch, ", fixed ", s.wall - wire_cycles, " (wall less ",
+                      wire_cycles, " of wire), ", s.irq, " interrupts", crlf);
+                bench_line(serial, "spi.dma", bytes, s, Ruler::hz(), sck / 8u);
+            }
+        }
+    }
+}
+
+/// The CRC of `frames` frames of `width` bits, MSB first, no reflection,
+/// from zero - the SPI's own CRC unit's arithmetic (RM 20.2.5); a 16-bit
+/// frame is two bytes low first, as the Request stores it.
+uint16_t crc_frames(uint16_t poly, uint8_t width, const uint8_t* data, uint16_t frames) {
+    uint32_t crc = 0;
+    const uint32_t top = 1UL << (width - 1u);
+    const uint32_t mask = (1UL << width) - 1UL;
+    for (uint16_t k = 0; k < frames; ++k) {
+        const uint32_t v = width == 16u ? (data[2u * k] | (static_cast<uint32_t>(data[2u * k + 1u]) << 8))
+                                        : data[k];
+        for (uint8_t b = width; b-- > 0;) {
+            const bool in = ((v >> b) & 1u) != 0u;
+            const bool out = (crc & top) != 0u;
+            crc = (crc << 1) & mask;
+            if (in != out) {
+                crc ^= poly;
+            }
+        }
+    }
+    return static_cast<uint16_t>(crc);
+}
+
+/// THE TRANSMIT DATA JUDGED WITH NO WIRE: SPI1's CRC unit accumulates every
+/// frame the shift register sends (TCRCR), so a write of `frames` frames on
+/// the engines - CRCEN raised with SPE down, the configuration the request
+/// wants already applied by a request before it - must leave there the
+/// CRC a bitwise loop computes over the same buffer. For 16-bit frames the
+/// half-word beat and the byte order inside it are what that judges.
+bool spi_crc_judge(SpiDataSize bits, uint16_t frames) {
+    const bool wide = bits == SpiDataSize::bits16;
+    const uint16_t poly = wide ? 0x1021u : 0x0007u;
+    SpiDma::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
+    r.len = 1;
+    r.clock = SpiClock::div16;
+    r.bits = bits;
+    spi_done = false;
+    if (!SpiDma::start(r)) {
+        while (!spi_done) {
+        }
+    }
+    (void)Spi<1>::disable();
+    Spi<1>::crc_polynomial(poly);
+    Spi<1>::regs().CTLR1 = static_cast<uint16_t>(Spi<1>::regs().CTLR1 | spi_crcen);
+    Spi<1>::enable();
+    r.len = frames;
+    spi_done = false;
+    if (!SpiDma::start(r)) {
+        uint32_t spins = 1'000'000UL;
+        while (!spi_done && spins-- != 0u) {
+        }
+    }
+    const uint16_t got = Spi<1>::tx_crc();
+    (void)Spi<1>::disable();
+    Spi<1>::regs().CTLR1 = static_cast<uint16_t>(Spi<1>::regs().CTLR1 & ~spi_crcen);
+    Spi<1>::enable();
+    const uint16_t want = crc_frames(poly, wide ? 16u : 8u, buffer_a, frames);
+    print(serial, "  spi.dma ", wide ? 16 : 8, "-bit frames x ", frames, ", the data judged by ",
+          "the transmit CRC: TCRCR ", hex(got), ", software ", hex(want), want == got ? "" : " - DIFFER",
+          crlf);
+    return want == got;
+}
+
+/// The width and EN in ONE store (DmaBinding): three blocks back to back,
+/// each starting with a width the last did not have - a word copy, a byte
+/// copy whose two ends disagree modulo four, a half-word fill at a
+/// half-word-aligned destination - and every byte judged.
+bool beats_check() {
+    for (uint32_t k = 0; k < 64u; ++k) {
+        buffer_b[k] = 0;
+    }
+    static constexpr uint16_t half_cell = 0xBEEF;
+    bool ok = Copier::copy(reinterpret_cast<uint32_t*>(buffer_b),
+                           reinterpret_cast<const uint32_t*>(buffer_a), 4u);   // words
+    while (Copier::busy()) {
+    }
+    ok = ok && Copier::copy(buffer_b + 17, buffer_a + 2, 15u);   // bytes
+    while (Copier::busy()) {
+    }
+    ok = ok && Copier::fill(reinterpret_cast<uint16_t*>(buffer_b + 34), &half_cell, 7u);
+    while (Copier::busy()) {
+    }
+    for (uint32_t k = 0; k < 16u; ++k) {
+        ok = ok && buffer_b[k] == buffer_a[k];
+    }
+    ok = ok && buffer_b[16] == 0u;
+    for (uint32_t k = 0; k < 15u; ++k) {
+        ok = ok && buffer_b[17u + k] == buffer_a[2u + k];
+    }
+    ok = ok && buffer_b[32] == 0u && buffer_b[33] == 0u;
+    for (uint32_t k = 0; k < 7u; ++k) {
+        ok = ok && buffer_b[34u + 2u * k] == 0xEFu && buffer_b[35u + 2u * k] == 0xBEu;
+    }
+    ok = ok && buffer_b[48] == 0u;
+    return ok;
+}
+
+void td_dma() {
+    console_drain();
+    for (uint32_t k = 0; k < 4096u; ++k) {
+        buffer_a[k] = static_cast<uint8_t>(k * 7u + 3u);
+    }
+    fill_cell = 0xA5A5A5A5UL;
+    copy_arm();
+    copy_report("copy", false);
+    console_drain();
+    copy_report("fill", true);
+    console_drain();
+    print(serial, "  beats: a word copy, a byte copy, a half-word fill back to back: ",
+          beats_check() ? "every byte as expected" : "A BYTE DIFFERS", crlf);
+    console_drain();
+    paced_report();
+    console_drain();
+    spi_report();
+    (void)spi_crc_judge(SpiDataSize::bits8, 256);
+    (void)spi_crc_judge(SpiDataSize::bits16, 256);
+    print(serial, "  bus masters standing after the SPI requests: ", BusActivity::active(), crlf);
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_vx03 - ", device::part_name,
           " (clk=144 MHz PLL, ruler=STK cycles at 144 MHz, tick=STK 1000 Hz, console=USART1 ",
@@ -507,6 +995,38 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
     usart_meter.leave();
 }
 
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+    copy_meter.enter();
+    copy_vector();
+    copy_meter.leave();
+}
+
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    paced_meter.enter();
+    paced_vector();
+    paced_meter.leave();
+}
+
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+    spi_rx_meter.enter();
+    spi_rx_vector();
+    spi_rx_meter.leave();
+}
+
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+    spi_tx_meter.enter();
+    spi_tx_vector();
+    spi_tx_meter.leave();
+}
+
+extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+    spi_meter.enter();
+    if (SpiDma::isr()) {
+        spi_done = true;
+    }
+    spi_meter.leave();
+}
+
 int main() {
     const bool clock_ok = SysClock::init();            // HSI x18 -> 144 MHz
     const bool serial_ok = Serial::init(clock, console_baud);
@@ -517,6 +1037,7 @@ int main() {
     bench.letter('m', "memcpy and memset of the runtime against the core's floor", tm_memory);
     bench.letter('p', "a print through the console against the wire", tp_print);
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
+    bench.letter('d', "the DMA engines: copy, fill, a paced block, SPI1's engined write", td_dma);
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a port that failed to come up would never return.

@@ -202,7 +202,30 @@ and 3, on every part that has them. UART4 is DMA1's 1 and 8 on the
 CH32V203 (tables 11-5 and 11-6) and DMA2's 5 and 3 on the CH32V303
 (table 11-3), whose UART5..UART8 are DMA2's too: 4 and 2, 6 and 7, 8 and
 9, 10 and 11 (tables 11-3 and 11-4). An engine on any other slot is
-refused at compile time. Measured on the CH32V303VCT6's crossed pair:
+refused at compile time. A block start holds the transport's guard over
+the transmit engine's CLAIM alone - the busy flag's test-and-set, eight
+instructions - and programs the claimed channel, four stores, unmasked:
+no block is in flight that could complete under it ([dma.md](dma.md)).
+
+THE RECEIVE ENGINE RUNS A RING, NOT RUNS. It is armed in its circular
+shape over the whole receive ring's storage, from `init()` to
+`release()`: the channel writes the storage lap after lap and is never
+re-armed, the ring's producer index is the channel's own count, and the
+transport's receive ring is the consumer half of that -
+[util/ring.hpp](../../brio/util/ring.hpp)'s `HardwareRing` over a
+storage the transport owns, its size a power of two up to 32 KB, aligned
+to its own size where the slot is the CH32V303's DMA1 so the 64 KB rule
+cannot refuse it. A byte that lands is readable at once, a burst wraps
+the storage's end with no CPU, and nothing is lost between runs because
+there are none - measured with bursts banged into the receive pad
+through its pull ([dma.md](dma.md)). What the consumer did not keep
+up with - a lap written over its unread bytes, or a run written over
+while it was held - the ring counts and SKIPS, and `rx_overruns()`
+reports it; `consume()` answers whether the run it releases was intact.
+With a receive engine the handler's receive half is compiled out: RXNE
+is the channel's request, and a handler entered for TXE that read DATAR
+would take a byte from under the channel.
+Measured on the CH32V303VCT6's crossed pair:
 USART2's two engines on DMA1 against UART4's on DMA2, a message each way
 and then four kilobytes each way at 921600 baud, every byte in order and
 no error, overrun or fault counted at either end.
@@ -312,17 +335,22 @@ lot-keyed registers of this die already said it is
   (a run: as many as fit, its first byte pushed and TXEIE armed before
   the rest is copied and armed again behind it; with an engine the run
   queued whole and the engine pumped once), `read_byte()`/`read_span()`/
-  `consume()` (the receive run in place), `rx_pending()`/`tx_idle()`, the counters (`rx_overruns()`,
+  `consume()` (the receive run in place; with a receive engine
+  `consume()` answers whether the run was intact), `rx_pending()`/
+  `tx_idle()`, the counters (`rx_overruns()` - a byte a full ring refused,
+  or with a receive engine a lap or a held run the ring skipped -,
   `frame_errors()`, `parity_errors()`, `noise_errors()`,
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/
   `set_baud()`/`rebase()`/`divisor_for()`/`can_baud()`/`min_hz_for()`,
-  `release()`, and the engine verbs `dma_isr()`, `harvest()`,
-  `dma_faults()`. THE FRAME IS ITS OWN PARAMETER here, ahead of the
-  engine slots, and `UartOptions` - the trailing one - carries what is
-  left: `half_duplex` (the TX pad as an alternate-function open drain,
-  the RX pad untouched) and `rts`/`cts` (the column's pads, refused on
-  an instance that is not full and on a package that does not bond
-  them). A remap code of 0 writes no AFIO register at all.
+  `release()`, and the engine verbs `dma_isr()`, `harvest()` (the
+  receive ring's housekeeping and its edge: true when the ring holds
+  bytes and the consumer has found it empty since the last true, the
+  edge `isr()` gives), `dma_faults()`. THE FRAME IS ITS OWN PARAMETER
+  here, ahead of the engine slots, and `UartOptions` - the trailing one -
+  carries what is left: `half_duplex` (the TX pad as an alternate-function
+  open drain, the RX pad untouched) and `rts`/`cts` (the column's pads,
+  refused on an instance that is not full and on a package that does not
+  bond them). A remap code of 0 writes no AFIO register at all.
 
 ## How to use it
 
@@ -368,7 +396,7 @@ using Far = brio::Uart<4, P, 256, 256, brio::UartFormat{},
                        brio::DmaTxEngine<2, 5>, brio::DmaRxEngine<2, 3>>;
 extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { (void)Far::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() { (void)Far::dma_isr(); }
-// ... and harvest() whenever the owner wants to publish what arrived
+// ... and harvest() from a TimeEvent the owner arms: the edge of new bytes
 ```
 
 The chapter beyond the transport, on the resource - a LIN break, a
@@ -456,11 +484,21 @@ CH32V303 evaluation board - and the second is measured on both below.
   way at 921600 baud - 923076 really, the divisor 78 of a 72 MHz bus - in
   44378 us each way, against 44373 for the bits alone, so the two
   controllers feed the two ports back to back.
+- **The receive ring** is `test_vx03_dma`'s letter g, with no wire: the
+  channel circular over the storage from `init()`, a burst across the
+  storage's end delivered whole with nobody reading, a lap the consumer
+  missed counted once and skipped, a held run refused at its release
+  ([dma.md](dma.md)).
 
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
+- **The IDLE edge**: a receive engine's bytes are readable as they land,
+  and the owner learns of them by asking `harvest()` from a TimeEvent of
+  its own - the latency the poll period it chose. The USART's IDLE
+  interrupt (18.10.1) as the edge that ends a burst, publishing it one
+  frame after its last byte, is the serial round's.
 - **A single-wire bus with a peer**, and with the pull-up the chapter
   asks for: the mode is armed and its exclusions hold, but the wire is
   released between frames and nothing on either board holds it - a
@@ -501,6 +539,11 @@ Implemented but not bench-verified, each with what would measure it:
 - **`error_interrupt()` (EIE, the FE/ORE/NE vector under DMAR)**: an
   error provoked on a line a receive engine is draining is what would
   raise it.
+- **The receive ring on a wire, and on the CH32V303**: measured on the
+  CH32V203C8T6 with bursts banged into the receive pad at 115200 baud;
+  the loopback strap and the crossed pair (letters l and n of
+  `test_vx03_serial`, n of `test_vx03_dma`) would carry it at a wire's
+  rate, and on the evaluation board through both controllers.
 - **The transport's `remap` parameter on a column other than the
   default**: the resource's `remap()` is measured through the fourth
   port's second column, and the transport's own path is compiled and

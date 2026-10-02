@@ -96,24 +96,32 @@
  * TWO OPTIONAL DMA ENGINE SLOTS, the shape every stratum with a
  * controller uses: a transmit engine drains the TX ring by contiguous
  * runs (the ring's read_span, consumed by exactly what the block
- * carried) and a receive engine fills the RX ring's free run
- * (write_span, published by what harvest() finds arrived). Without an
+ * carried), and a receive engine runs in its CIRCULAR shape over the
+ * whole receive ring's storage (ch32vx03/dma.hpp's DmaRxEngine): the
+ * channel writes the storage lap after lap and is never re-armed, the
+ * ring's producer index is the channel's own count, and the receive ring
+ * is the consumer half of that (util/ring.hpp's HardwareRing) - so a byte
+ * that lands is readable at once, a burst wraps the storage's end with no
+ * CPU, and nothing is lost between runs because there are none. What the
+ * consumer did not keep up with - a lap written over its unread bytes -
+ * the ring counts and skips, and rx_overruns() reports it. Without an
  * engine the slot is the NoDmaEngine tag, every engine branch is
  * compiled out and init() does not so much as touch CTLR3. With a
  * receive engine RXNE belongs to the channel, so the error flags are
- * read once per harvest and counted against the RUN and not the byte -
- * a console that wants exact attribution takes no receive engine. And
- * harvest() is a VERB, not an interrupt: a receive block completes only
- * when its run fills, which on an idle line is never, so whoever owns
- * the port decides how often to ask. An engine is refused on any SLOT
- * but the instance's own - the controller and the channel - which the
- * request table of ch32vx03/dma_engine.hpp answers: USART1 transmits on
- * DMA1's channel 4 and receives on 5, USART2 on 7 and 6, USART3 on 2 and
- * 3, UART4 on DMA1's 1 and 8 on the CH32V203 and on DMA2's 5 and 3 on
- * the CH32V303, whose UART5..8 are DMA2's too (4 and 2, 6 and 7, 8 and
- * 9, 10 and 11). A program with an engine running does not sleep on this
- * family, because in Sleep the bus matrix serves the core alone
- * (docs/ch32vx03/dma.md).
+ * read once per harvest and counted against the HARVEST and not the
+ * byte, and a framed byte stays in the ring - a console that wants exact
+ * attribution takes no receive engine. And harvest() is a VERB, not an
+ * interrupt: nothing marks a burst's end but the line going quiet, so
+ * whoever owns the port decides how often to ask. An engine is refused
+ * on any SLOT but the instance's own - the controller and the channel -
+ * which the request table of ch32vx03/dma_engine.hpp answers: USART1
+ * transmits on DMA1's channel 4 and receives on 5, USART2 on 7 and 6,
+ * USART3 on 2 and 3, UART4 on DMA1's 1 and 8 on the CH32V203 and on
+ * DMA2's 5 and 3 on the CH32V303, whose UART5..8 are DMA2's too (4 and 2,
+ * 6 and 7, 8 and 9, 10 and 11). A program with an engine running does not
+ * sleep on this family, because in Sleep the bus matrix serves the core
+ * alone (docs/ch32vx03/dma.md) - and a receive ring runs from init() to
+ * release().
  *
  * THE LOT'S REGISTERS. Four things the chapter gives the CH32V30x_D8 -
  * and there only "with the penultimate sixth digit of the lot number not
@@ -145,6 +153,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <bit>
 #include <span>
 
 #include "ch32vx03/afio.hpp"
@@ -1079,6 +1088,32 @@ struct UartOptions {
 };
 
 /**
+ * The receive ring a transport keeps, chosen by whether its receive has an
+ * engine: Ring, which the handler pushes into, where it has none; and where
+ * it has one, the CONSUMER HALF of a ring the channel itself writes -
+ * util/ring.hpp's HardwareRing over a storage array the transport owns
+ * (keyed by the transport's type), the receive engine its RingCounter. A
+ * partial specialization and not std::conditional_t, because naming
+ * HardwareRing over NoDmaEngine would be checked even in the arm not taken.
+ * Where the engine's channel is held to the 64 KB rule (the CH32V303's
+ * DMA1) the storage is aligned to its own size, a power of two, so no
+ * placement the linker chooses can straddle a 64 KB page.
+ */
+template <bool engine, typename Owner, uint16_t size, typename Engine, typename P>
+struct UartRxRing {
+    using type = Ring<uint8_t, size, P>;
+};
+template <typename Owner, uint16_t size, typename Engine, typename P>
+struct UartRxRing<true, Owner, size, Engine, P> {
+    static_assert(size >= 2u && size <= 0x8000u && std::has_single_bit(size),
+                  "brio Uart: a receive engine runs the whole receive ring as one circular "
+                  "block - a power of two, 2..32768 bytes (the ring's arithmetic is a mask, and "
+                  "CNTR counts 65535 at most)");
+    alignas(Engine::bounded_to_64k ? size : 1u) static inline uint8_t storage[size]{};
+    using type = HardwareRing<storage, Engine>;
+};
+
+/**
  * The interrupt-driven serial port.
  *
  *   using Serial = brio::Uart<1, Platform>;
@@ -1215,6 +1250,9 @@ struct Uart {
 
         m_tx.clear();
         m_rx.clear();
+        if constexpr (has_rx_engine) {
+            m_rx.clear_overruns();
+        }
         m_rx_overruns = 0;
         m_hw_overruns = 0;
         m_frame_errors = 0;
@@ -1242,8 +1280,15 @@ struct Uart {
                                              (has_rx_engine ? uint16_t{0} : usart_rxneie));
 
         if constexpr (has_rx_engine) {
-            RxEngine::arm(Resource::data_address());
-            rearm_rx();
+            // The channel takes RXNE - into the whole receive ring, lap
+            // after lap, from here on. A ring the engine refuses (its
+            // storage misplaced for the channel) is a port that cannot
+            // receive, which the caller is told.
+            if (!RxEngine::arm(Resource::data_address(), RxRing::storage)) {
+                return false;
+            }
+            m_rx_drained = true;
+            (void)RxEngine::start();
         }
         if constexpr (has_tx_engine) {
             TxEngine::arm(Resource::data_address());
@@ -1262,8 +1307,11 @@ struct Uart {
      * Each engine reads only its own channel's flags, so this is safe
      * on a vector another channel of the program shares nothing with.
      * On the transmit channel a completion releases exactly the block's
-     * bytes from the ring and starts the next run; on the receive
-     * channel nothing is published here - harvest() does that.
+     * bytes from the ring and starts the next run. On the receive channel
+     * a completion is a LAP of the ring, counted - the ring's producer
+     * index is the channel's count plus these laps - and nothing more: the
+     * channel has reloaded itself, and every byte is already where the
+     * consumer reads it.
      */
     [[gnu::always_inline]] static bool dma_isr() {
         bool mine = false;
@@ -1286,18 +1334,31 @@ struct Uart {
                 bump(m_dma_faults);
                 mine = true;
             } else if ((f & RxEngine::flag_complete) != 0u) {
-                mine = true;   // the run filled: harvest() publishes and re-arms
+                RxEngine::lap();   // a lap: counted, nothing re-armed
+                mine = true;
             }
         }
         return mine;
     }
 
     /**
-     * Ask the receive engine what has arrived, and publish it. A VERB,
-     * not an interrupt (see the file header): the owner decides how
-     * often, a kernel TimeEvent every few ticks is the shape. Returns
-     * the same edge isr() does - the ring went from empty to non-empty.
-     * False, and free, without an engine.
+     * The receive engine's housekeeping, and the edge a ring the channel
+     * fills cannot give by itself. A VERB, not an interrupt (see the file
+     * header): the channel writes the ring with no step of the CPU's in
+     * between - a byte that lands is readable at once, and nothing has to
+     * be PUBLISHED - so whoever owns the port decides how often to ask; a
+     * kernel TimeEvent every few ticks is the shape.
+     *
+     * What it does: the receive error flags read once and counted (nobody
+     * reads STATR per byte under DMAR); a channel a transfer error stopped
+     * started again, the ring cleared with it - its unread bytes gone with
+     * the abandoned lap, which dma_faults() counted; and the edge. Returns
+     * true when the ring holds bytes and the consumer has found it EMPTY
+     * since the last true - isr()'s contract, so the same kernel glue
+     * works: every byte that lands after the consumer's last look at an
+     * empty ring is reported by the next harvest(), and a consumer that
+     * has not drained yet is not told twice. False, and free, without an
+     * engine.
      */
     static bool harvest() {
         if constexpr (!has_rx_engine) {
@@ -1313,18 +1374,20 @@ struct Uart {
                 if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
                 (void)regs().DATAR;
             }
-            const bool was_empty = m_rx.empty();
-            const uint16_t fresh = RxEngine::take();
-            if (fresh != 0u) {
-                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            // THE SILICON IS ASKED, NOT THE ARITHMETIC: a ring never stops
+            // on its own, so a channel that is not running was stopped by
+            // a transfer error (11.2.1) - started again from the storage's
+            // first element, the view's positions with it. The consumer is
+            // this context, so the view's clear() has no reader to race.
+            if (RxEngine::idle()) {
+                m_rx.clear();
+                (void)RxEngine::start();
             }
-            // The silicon is asked first and the arithmetic second: a
-            // channel that is not running gets a new run whatever the
-            // count says.
-            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
-                rearm_rx();
+            if (!m_rx_drained || m_rx.empty()) {
+                return false;
             }
-            return was_empty && !m_rx.empty();
+            m_rx_drained = false;
+            return true;
         }
     }
 
@@ -1340,24 +1403,31 @@ struct Uart {
      */
     // always_inline: one call site (the app's vector binding), so the
     // compiler saves only the registers this body uses.
+    //
+    // WITH A RECEIVE ENGINE THE RECEIVE HALF IS NOT HERE AT ALL: RXNE is
+    // the channel's request, and a handler entered for TXE that read DATAR
+    // on a standing RXNE would take a byte from under the channel - the
+    // read clears the request it was about to serve.
     [[gnu::always_inline]] static bool isr() {
         bool rx_edge = false;
 
         const uint16_t status = regs().STATR;
 
-        if ((status & usart_rxne) != 0u) {
-            const uint8_t byte = static_cast<uint8_t>(regs().DATAR & 0xFFu);
-            if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
-                if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
-                if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
-                if ((status & usart_pe) != 0u) { bump(m_parity_errors); }
-                if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
-            } else {
-                const bool was_empty = m_rx.empty();
-                if (m_rx.push(byte)) {
-                    rx_edge = was_empty;
+        if constexpr (!has_rx_engine) {
+            if ((status & usart_rxne) != 0u) {
+                const uint8_t byte = static_cast<uint8_t>(regs().DATAR & 0xFFu);
+                if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
+                    if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
+                    if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
+                    if ((status & usart_pe) != 0u) { bump(m_parity_errors); }
+                    if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
                 } else {
-                    bump(m_rx_overruns);
+                    const bool was_empty = m_rx.empty();
+                    if (m_rx.push(byte)) {
+                        rx_edge = was_empty;
+                    } else {
+                        bump(m_rx_overruns);
+                    }
                 }
             }
         }
@@ -1401,10 +1471,15 @@ struct Uart {
         return true;
     }
 
-    /// Take one received byte; false when none is pending.
+    /// Take one received byte; false when none is pending - or, with a
+    /// receive engine, when the byte was written over while it was being
+    /// read (the ring counts it in rx_overruns()).
     static bool read_byte(uint8_t& b) {
         const auto v = m_rx.pop();
         if (!v) {
+            if constexpr (has_rx_engine) {
+                m_rx_drained = true;
+            }
             return false;
         }
         b = *v;
@@ -1473,13 +1548,33 @@ struct Uart {
     /// never wrapping - the receive ring's consumer half under the ring's
     /// own names. With consume() it is util/stream.hpp's SpanSource,
     /// which SerialPort drains a run at a time.
-    static std::span<const uint8_t> read_span() { return m_rx.read_span(); }
+    ///
+    /// With a receive engine the run is the CHANNEL'S ring, read where it
+    /// writes: its bytes are the stream as long as the consumer is less than
+    /// a lap behind, and consume() says whether they were.
+    static std::span<const uint8_t> read_span() {
+        if constexpr (has_rx_engine) {
+            const std::span<const uint8_t> run = m_rx.read_span();
+            if (run.empty()) {
+                m_rx_drained = true;
+            }
+            return run;
+        } else {
+            return m_rx.read_span();
+        }
+    }
 
     /// Release the first `count` bytes of read_span(), oldest first, clamped
-    /// to what is queued.
-    static void consume(uint32_t count) {
-        constexpr uint32_t most = decltype(m_rx)::capacity();
-        m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+    /// to what is queued. With a receive engine it answers whether the run
+    /// was intact when it was read - false when the channel wrote over it
+    /// while it was held, which the ring counts in rx_overruns() and skips.
+    static auto consume(uint32_t count) {
+        if constexpr (has_rx_engine) {
+            return m_rx.consume(count);
+        } else {
+            constexpr uint32_t most = decltype(m_rx)::capacity();
+            m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+        }
     }
 
     /// Nothing queued and the shift register empty: what a program waits
@@ -1499,13 +1594,29 @@ struct Uart {
 
     static uint32_t baud() { return m_baud; }
     static uint32_t actual_baud(uint32_t pclk) { return Resource::actual_baud(pclk); }
-    static uint16_t rx_overruns() { return m_rx_overruns; }
+
+    /// Bytes the receive ring lost to a consumer that did not keep up:
+    /// without an engine, a byte refused by a full ring; with one, a lap of
+    /// the channel's ring written over unread bytes, or a run written over
+    /// while it was held - each one a skip (util/ring.hpp's
+    /// HardwareRing::overruns()), saturating here.
+    static uint16_t rx_overruns() {
+        if constexpr (has_rx_engine) {
+            const uint32_t n = m_rx.overruns();
+            return n > 0xFFFFu ? uint16_t{0xFFFF} : static_cast<uint16_t>(n);
+        } else {
+            return m_rx_overruns;
+        }
+    }
     static uint16_t hw_overruns() { return m_hw_overruns; }
     static uint16_t frame_errors() { return m_frame_errors; }
     static uint16_t noise_errors() { return m_noise_errors; }
     static uint16_t parity_errors() { return m_parity_errors; }
 
     static void clear_errors() {
+        if constexpr (has_rx_engine) {
+            m_rx.clear_overruns();
+        }
         m_rx_overruns = 0;
         m_hw_overruns = 0;
         m_frame_errors = 0;
@@ -1608,33 +1719,28 @@ private:
                     opts.rts ? column.rts.pin : pads.tx.pin>;
 
     /// Start the next contiguous run of the TX ring on the engine, if it
-    /// is idle and there is one. Under the guard: the completion path
-    /// runs in the channel's handler.
+    /// is idle and there is one.
+    ///
+    /// THE MASK COVERS THE CLAIM AND NOTHING ELSE. The completion handler
+    /// pumps too, so the engine's busy flag is tested and set under the
+    /// guard - a handful of cycles. The run is read and the channel
+    /// programmed unmasked: a claimed engine has no block in flight, so no
+    /// completion can come to consume the ring under the reader or start a
+    /// block of its own. A run that turns out empty gives the claim back.
     static void pump_tx() {
         if constexpr (has_tx_engine) {
-            typename P::CriticalSection cs;
-            if (TxEngine::busy()) {
-                return;
+            {
+                typename P::CriticalSection cs;
+                if (!TxEngine::claim()) {
+                    return;
+                }
             }
             const auto run = m_tx.read_span();
             if (run.empty()) {
+                TxEngine::unclaim();
                 return;
             }
-            (void)TxEngine::start(run.data(), static_cast<uint16_t>(run.size()));
-        }
-    }
-
-    /// Point the receive engine at the ring's next free run. No room is
-    /// a byte lost before it arrives, counted as the software overrun
-    /// it is.
-    static void rearm_rx() {
-        if constexpr (has_rx_engine) {
-            const auto room = m_rx.write_span();
-            if (room.empty()) {
-                bump(m_rx_overruns);
-                return;
-            }
-            (void)RxEngine::start(room.data(), static_cast<uint16_t>(room.size()));
+            (void)TxEngine::launch(run);   // a refusal gives the claim back itself
         }
     }
 
@@ -1652,9 +1758,17 @@ private:
         }
     }
 
-    static inline Ring<uint8_t, rx_size, P> m_rx{};
+    // The receive ring: Ring without a receive engine, the view over the
+    // channel's ring with one (UartRxRing above).
+    using RxRing = UartRxRing<RxEngine::present, Uart, rx_size, RxEngine, P>;
+    static inline typename RxRing::type m_rx{};
     static inline Ring<uint8_t, tx_size, P> m_tx{};
     static inline uint32_t m_baud = 0;
+    /// Whether the consumer has found the receive ring empty since the last
+    /// harvest() that reported an edge - what makes harvest()'s answer an
+    /// EDGE over a ring the channel fills with no step of ours in between.
+    /// Thread context on both sides; touched only with a receive engine.
+    static inline bool m_rx_drained = true;
     static inline uint16_t m_rx_overruns = 0;
     static inline uint16_t m_hw_overruns = 0;
     static inline uint16_t m_frame_errors = 0;

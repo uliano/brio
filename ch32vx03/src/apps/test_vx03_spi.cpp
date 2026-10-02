@@ -2837,26 +2837,28 @@ extern "C" BRIO_CH32_INTERRUPT void spi2_handler() {
 /// series the body is empty and nothing in the vector table names it.
 extern "C" BRIO_CH32_INTERRUPT void spi3_handler() { served_on_spi3(); }
 
-/// SPI1's engines: one vector per channel on this family.
+/// SPI1's engines: one vector per channel on this family, each servicing
+/// its own - the receive channel's the transaction's one interrupt, the
+/// transmit channel's armed for an error alone.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
-    if (dma_host_live && Dma1::dma_isr()) {
+    if (dma_host_live && Dma1::dma_rx_isr()) {
         host_done = true;
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
-    if (dma_host_live && Dma1::dma_isr()) {
+    if (dma_host_live && Dma1::dma_tx_isr()) {
         host_done = true;
     }
 }
 
-/// SPI2's engines.
+/// SPI2's engines, the same way round.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() {
-    if (dma_host_live && PeerDma::dma_isr()) {
+    if (dma_host_live && PeerDma::dma_rx_isr()) {
         host_done = true;
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
-    if (dma_host_live && PeerDma::dma_isr()) {
+    if (dma_host_live && PeerDma::dma_tx_isr()) {
         host_done = true;
     }
 }

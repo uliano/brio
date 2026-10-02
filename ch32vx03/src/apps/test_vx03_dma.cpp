@@ -18,21 +18,27 @@
 // line and no pad; the core's own STK counter is the ruler every number
 // is weighed against; and the SOURCE of every copy is a four-kilobyte
 // pattern in the image itself, which is a memory 11.1 lists as a legal
-// source and which costs no RAM. ONE OPTIONAL JUMPER, PA2 to PA3 -
-// USART2's transmitter to its own receiver - is what letter g needs: it
-// says whether the strap is there (a plain output on one pad read on
-// the other, both levels) and reports "no jumper" and passes when it is
-// not - the transmit half of that letter needs no listener and runs
-// either way. On the CH32V303's evaluation board the same two pads are
-// wired to UART4's instead (PA2 to PC11, PC10 to PA3): letter g finds no
-// strap there and says so, and letter n takes those two wires, each one
-// looked for the same way before it is used.
+// source and which costs no RAM. A SERIAL LINE NEEDS NO WIRE EITHER: the
+// receive pad PA3 handed to USART2 is an input whose level follows its own
+// pull, which the output data register moves, so software banging the
+// pull puts 8N1 frames on the receive line at 115200 baud
+// (test_vx03_serial's first fact) - and the receive ring of letter g takes
+// bursts with nobody reading. ONE OPTIONAL JUMPER, PA2 to PA3 - USART2's
+// transmitter to its own receiver - turns that half of letter g into a
+// round trip: the letter says whether the strap is there (a plain output
+// on one pad read on the other, both levels), bangs the line when it is
+// not and goes round it when it is; the transmit half needs no listener
+// and runs either way. On the CH32V303's evaluation board the same two
+// pads are wired to UART4's instead (PA2 to PC11, PC10 to PA3): letter g
+// finds no strap there and says so, and letter n takes those two wires,
+// each one looked for the same way before it is used.
 //
-// THE PADS. PA2 and PA3 in letter g, and on the CH32V303 PA2, PA3, PC10
-// and PC11 in letter n. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
-// (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
-// crystals), PA0 (the CH32V203 board's KEY) - and PB2, the CH32V203
-// board's LED, toggled per command as every suite of this target does.
+// THE PADS. PA2 and PA3 in letter g (PA3 the banged line when the strap
+// is absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n.
+// NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port),
+// PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the
+// CH32V203 board's KEY) - and PB2, the CH32V203 board's LED, toggled per
+// command as every suite of this target does.
 //
 // What is exercised, letter by letter:
 //   a  MEMORY TO MEMORY: the block's gate, the three widths with and
@@ -61,12 +67,25 @@
 //      priority against the channel number, once with the channel
 //      number alone
 //   g  THE USART ENGINES: a run drained from the ring by the transmit
-//      engine, which needs no listener, and a receive block that
-//      outlives its sender and is abandoned - both with the board bare;
-//      then, WITH THE JUMPER, the same run coming back through the
-//      receive engine and published by harvest()
+//      engine, which needs no listener; the RECEIVE RING standing from
+//      init() - the channel circular over the whole ring's storage - and
+//      started again by harvest() after its channel stopped; then, with
+//      the board bare, bursts banged into the receive pad while the core
+//      reads nothing: one into an empty ring and its edge, one across the
+//      storage's end delivered whole, a lap the consumer did not keep up
+//      with counted once and skipped, and a run written over while it was
+//      held refused at its release - or, WITH THE JUMPER, the transmit
+//      run coming back through the receive ring
 //   h  THE VECTORS: a block on each of DMA1's channels, each one's flag
 //      reaching its own handler body and no other
+//   o  THE RECEIVE RING AT SPEED: the receive engine's circular shape on
+//      TIM2's update request, copying TIM3's counter into a ring of 256
+//      half-words lap after lap, read behind the channel through
+//      util/ring.hpp's HardwareRing - every element judged against the one
+//      before it at 500 thousand and at 3 million elements a second, the
+//      laps counted checked against the pace, the wrap seen from the core,
+//      a consumer stalling a lap and a half now and then, and a run held
+//      while the producer laps it
 // and on the CH32V303 alone, the second controller:
 //   i  MEMORY TO MEMORY ON DMA2: its gate, a kilobyte copied on each of
 //      the eleven channels and verified, and every completion flag found
@@ -92,6 +111,7 @@
 //      its channel
 //
 // build: boards = v203c6,v203c8,v303vc
+// build: groups = abcdef,gho
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -106,6 +126,7 @@
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
 #include "util/print.hpp"
+#include "util/ring.hpp"
 #include "util/testbench.hpp"
 
 namespace {
@@ -129,6 +150,10 @@ using Loop = Uart<2, P, 128, 128, UartFormat{},
                   DmaTxEngine<1, DmaRequestOf<DmaRequest::usart2_tx>::channel>,
                   DmaRxEngine<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>>;
 using LoopRx = DmaRxEngine<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>;
+/// The channel under the receive engine, asked directly by letter g.
+using LoopRxChannel = DmaChannel<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>;
+/// USART2's receive pad, the bit-banged line of letter g.
+using RxPad = Pin<'A', 3>;
 
 using Pacer = Tim<2>;    ///< the request source: its update drives channel 2
 using Ruler = Tim<3>;    ///< free-running, the datum the staircase samples
@@ -897,8 +922,131 @@ void tf_priority() {
 }
 
 // ===========================================================================
-// g - the USART's two engines, on the jumper
+// g - the USART's two engines: the ring on a banged line, and the jumper
 // ===========================================================================
+
+/// THE RECEIVE PAD IS A BIT-BANGED TRANSMITTER (test_vx03_serial's first
+/// fact): a pad handed to the USART as RX is an input whose level follows
+/// its own pull, which the output data register moves. `n` bytes of
+/// `bytes` go out as 8N1 frames back to back, every edge at an ABSOLUTE
+/// offset from the run's start so a handler's delay never accumulates, and
+/// the line then idles for two bit times more: the last frame is received
+/// and stored by the time this returns.
+constexpr uint32_t bang_baud = 115200;
+
+void bang(const uint8_t* bytes, uint16_t n) {
+    constexpr uint32_t bit = SysClock::hz / bang_baud;
+    Stopwatch w;
+    uint32_t edge = 0;
+    for (uint16_t i = 0; i < n; ++i) {
+        const uint16_t frame = static_cast<uint16_t>((bytes[i] << 1) | 0x200u);   // start, 8 data, stop
+        for (uint8_t b = 0; b < 10u; ++b) {
+            while (w.cycles() < edge) {
+            }
+            if (((frame >> b) & 1u) != 0u) {
+                RxPad::set();
+            } else {
+                RxPad::clear();
+            }
+            edge += bit;
+        }
+    }
+    edge += 2u * bit;
+    while (w.cycles() < edge) {
+    }
+}
+
+/// Everything the transport holds, read away: how many bytes, and whether
+/// they were `want`'s first ones in order.
+uint16_t read_all(const uint8_t* want, uint16_t most, bool& in_order) {
+    uint16_t got = 0;
+    in_order = true;
+    uint8_t b = 0;
+    while (Loop::read_byte(b)) {
+        if (got < most && b != want[got]) {
+            in_order = false;
+        }
+        ++got;
+    }
+    if (got > most) {
+        in_order = false;
+    }
+    return got;
+}
+
+/// The ring with NO WIRE: bursts banged into PA3 while the core does
+/// nothing else, so no harvest() and no read runs between their bytes.
+void ring_on_a_banged_line() {
+    const uint8_t* src = source_first_bytes();
+    (void)Loop::harvest();
+    bool junk_in_order = true;
+    (void)read_all(src, 0, junk_in_order);   // whatever the pad framed before the pull settled
+    Loop::clear_errors();
+
+    // A burst into an empty ring, then the edge: true once, then not again
+    // until the consumer has found the ring empty.
+    bang(src, 100);
+    const bool edge = Loop::harvest();
+    const bool edge_again = Loop::harvest();
+    bool first_in_order = false;
+    const uint16_t first = read_all(src, 100, first_in_order);
+    const bool edge_drained = Loop::harvest();
+    print(serial, "  100 bytes banged at ", bang_baud, " baud: ", first,
+          first_in_order ? " read back in order" : " read back WRONG", "; edges ", edge ? 1 : 0,
+          edge_again ? 1 : 0, edge_drained ? 1 : 0, crlf);
+    bench.verdict("a burst banged into the receive pad lands in the ring with no step of the "
+                  "core's, every byte in order - and harvest() reports the edge once",
+                  first == 100u && first_in_order && edge && !edge_again && !edge_drained);
+
+    // THE BURST ACROSS THE STORAGE'S END, with no harvest() and no read
+    // between its bytes: the ring is 128 long and 100 of it are behind
+    // the consumer, so these sixty wrap. A run engine stopped at its run's
+    // end and lost what came before the next harvest.
+    bang(src + 100, 60);
+    const bool edge_b = Loop::harvest();
+    bool second_in_order = false;
+    const uint16_t second = read_all(src + 100, 60, second_in_order);
+    print(serial, "  60 more across the storage's end: ", second,
+          second_in_order ? " in order" : " NOT in order", ", the channel's count ",
+          LoopRxChannel::remaining(), ", overruns ", Loop::rx_overruns(), "/",
+          Loop::hw_overruns(), crlf);
+    bench.verdict("a burst across the end of the ring's storage arrives whole and in order with "
+                  "no harvest() between its bytes - nothing is lost between runs, there being "
+                  "none - and no overrun of either kind is counted",
+                  edge_b && second == 60u && second_in_order && Loop::rx_overruns() == 0u &&
+                      Loop::hw_overruns() == 0u);
+
+    // A LAP THE CONSUMER DID NOT KEEP UP WITH: two hundred bytes into a
+    // ring of 128 with nobody reading. Counted once and skipped; the next
+    // burst is read whole.
+    bang(src + 160, 200);
+    bool skipped_in_order = false;
+    const uint16_t after_lap = read_all(src + 160, 0, skipped_in_order);
+    const uint16_t lap_overruns = Loop::rx_overruns();
+    bang(src + 360, 10);
+    bool resumed_in_order = false;
+    const uint16_t resumed = read_all(src + 360, 10, resumed_in_order);
+    print(serial, "  200 bytes unread into a ring of 128: ", after_lap,
+          " delivered, overruns ", lap_overruns, "; ten more after it: ", resumed,
+          resumed_in_order ? " in order" : " NOT in order", crlf);
+    bench.verdict("a lap the consumer did not keep up with is counted ONCE and skipped - no "
+                  "byte of the overwritten ring delivered - and the stream resumes with the "
+                  "next burst, whole",
+                  after_lap == 0u && lap_overruns == 1u && resumed == 10u && resumed_in_order);
+
+    // A RUN WRITTEN OVER WHILE IT IS HELD: consume() is the one witness.
+    bang(src + 370, 20);
+    const std::span<const uint8_t> held = Loop::read_span();
+    const uint16_t held_size = static_cast<uint16_t>(held.size());
+    bang(src + 390, 140);
+    const bool intact = Loop::consume(held_size);
+    print(serial, "  a run of ", held_size, " held while 140 more landed: consume() says ",
+          intact ? "intact" : "torn", ", overruns ", Loop::rx_overruns(), crlf);
+    bench.verdict("a run the channel wrote over while it was held is refused at its release - "
+                  "consume() answers false and the overrun is counted",
+                  held_size != 0u && !intact && Loop::rx_overruns() == 2u);
+}
+
 void tg_engines() {
     all_off();
     need_jumper();
@@ -910,7 +1058,7 @@ void tg_engines() {
     // high, so with no strap the receiver sees no frame instead of
     // whatever a floating pad invents. A transmitter driving the pad
     // overrides it.
-    Pin<'A', 3>::input(PinPull::up);
+    RxPad::input(PinPull::up);
     LoopRx::clear_faults();
 
     // THE TRANSMIT ENGINE NEEDS NO LISTENER. TXE raises its request
@@ -934,33 +1082,54 @@ void tg_engines() {
                   "all - the ring is empty and the shift register idle, no fault counted",
                   opened && drained && Loop::dma_faults() == 0u);
 
-    // A RECEIVE THAT OUTLIVES ITS SENDER. The run is armed for the
-    // ring's whole free span and the line goes quiet: the block never
-    // completes, so abandon() is what hands the channel back.
-    const uint16_t standing = LoopRx::capacity();
-    const uint16_t arrived = LoopRx::harvest();
-    const bool still_running = !LoopRx::idle();
+    // THE RING STANDS FROM init(): the receive engine runs circular over
+    // the whole receive ring's storage, its count plus what has arrived
+    // equal to the storage's length, and a running channel is a bus master
+    // counted - the one this program holds while the transmit engine rests.
+    const DmaChannelConfig standing = LoopRxChannel::configuration();
+    const bool running = LoopRxChannel::enabled();
+    const uint16_t count = LoopRxChannel::remaining();
+    const uint32_t pending = Loop::rx_pending();
+    const uint8_t masters = BusActivity::active();
+    print(serial, "  the receive channel: ", running ? "running" : "STOPPED", ", ",
+          standing.circular ? "circular" : "one-shot", ", count ", count, " + ", pending,
+          " arrived of the ring's 128, bus masters counted ", masters, crlf);
+    bench.verdict("the receive ring stands from init(): the channel running in circular mode "
+                  "over the whole 128-byte storage, its count and what has arrived adding up "
+                  "to that length, and one bus master counted for it",
+                  opened && running && standing.circular && count + pending == 128u &&
+                      masters == 1u);
+
+    // A RING WHOSE CHANNEL STOPPED is started again by the next harvest().
+    // A transfer error is the one way a ring stops on its own (11.2.1: the
+    // silicon drops EN), and abandon() - what the transport's handler calls
+    // on one - stands for it here.
     const bool abandoned = LoopRx::abandon();
     const bool idle_after = LoopRx::idle();
-    print(serial, "  the standing receive run is ", standing, " long with ", arrived,
-          " in it; faults after abandon(): ", LoopRx::faults(), crlf);
-    bench.verdict("a receive block that outlives its sender stands open - harvest() reports "
-                  "its progress and abandon() is what ends it, the channel handed back and "
-                  "the fault counted",
-                  still_running && abandoned && idle_after && LoopRx::faults() == 1u);
+    (void)Loop::harvest();
+    const bool restarted = !LoopRx::idle() && LoopRxChannel::remaining() == 128u;
+    print(serial, "  abandon(): the channel ", idle_after ? "stopped" : "STILL RUNNING",
+          "; the next harvest(): ", restarted ? "the ring running again from its first byte"
+                                              : "NOT restarted",
+          ", faults ", LoopRx::faults(), crlf);
+    bench.verdict("a ring whose channel stopped is started again by the next harvest() from "
+                  "its storage's first byte, and the fault is counted",
+                  abandoned && idle_after && restarted && LoopRx::faults() == 1u);
 
     if (!jumper) {
+        ring_on_a_banged_line();
         bench.verdict("the round trip is skipped and says so: without the strap between "
                       "USART2's two pads a transmit engine has no receive engine to reach",
                       true);
+        Loop::release();
         uart_mode = false;
         all_off();
         return;
     }
 
     // With the strap, the same run comes back. harvest() is a VERB:
-    // nothing is published until it is asked - and the first call is
-    // also what re-arms the run abandon() has just thrown away.
+    // nothing is published by it - the bytes land where the consumer
+    // reads them - and it is what reports the edge.
     (void)Loop::harvest();
     (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     uint16_t got = 0;
@@ -980,9 +1149,10 @@ void tg_engines() {
     print(serial, "  ", got, " of ", length, " bytes round the jumper, faults ",
           Loop::dma_faults(), ", overruns ", Loop::rx_overruns(), crlf);
     bench.verdict("a run poured out by the transmit engine comes back through the receive "
-                  "one byte for byte, published by harvest() and by nothing else",
+                  "ring one byte for byte",
                   same && Loop::dma_faults() == 0u);
 
+    Loop::release();
     uart_mode = false;
     all_off();
 }
@@ -1046,6 +1216,297 @@ void th_vectors() {
                   clean == count);
     all_off();
 }
+
+// ---- letter o: BEGIN -------------------------------------------------------
+// ===========================================================================
+// o - the receive ring at speed: a timer's staircase, lap after lap
+// ===========================================================================
+
+/// The receive engine in its circular shape, on TIM2's update request,
+/// which table 11-5 puts on channel 2: every update copies TIM3's counter
+/// into the next slot of a ring the core reads behind it.
+using RingRx = DmaRxEngine<1, DmaRequestOf<DmaRequest::tim2_up>::channel>;
+using RingRxChannel = DmaChannel<1, DmaRequestOf<DmaRequest::tim2_up>::channel>;
+constexpr uint32_t ring_length = 256;
+/// Half-words, the counter's width - aligned to its own size where the
+/// channel is held to the 64 KB rule, so the CH32V303's DMA1 takes it.
+alignas(RingRx::bounded_to_64k ? 512 : 4) uint16_t ring_storage[ring_length];
+using RingView = HardwareRing<ring_storage, RingRx>;
+
+/// Channel 2's vector serves the ring while letter o runs.
+volatile bool ring_mode = false;
+
+/// The ring's completion, as a transport's handler does it: a lap counted,
+/// an error abandoned. False while the ring is not running.
+[[gnu::always_inline]] inline bool ring_vector() {
+    if (!ring_mode) {
+        return false;
+    }
+    const uint8_t f = RingRx::service();
+    if ((f & RingRx::flag_error) != 0u) {
+        (void)RingRx::abandon();
+    } else if ((f & RingRx::flag_complete) != 0u) {
+        RingRx::lap();
+    }
+    return true;
+}
+
+/// What a consumer read off the ring.
+struct Drink {
+    uint32_t elements = 0;    ///< handed out in runs
+    uint32_t bad_steps = 0;   ///< steps that were not the pace's
+    uint32_t torn = 0;        ///< runs consume() refused
+    uint32_t skips = 0;       ///< looks that counted a lap missed
+    uint32_t stalls = 0;
+    uint32_t looks = 0;
+    uint32_t cycles = 0;
+};
+
+/// Read `target` elements off the ring as fast as the core can, every one
+/// judged against the one before it: a counter sampled every `period`
+/// cycles steps by `period`, give or take the controller's service. Every
+/// `stall_every` elements (0: never) the consumer first stands still for
+/// `stall` cycles - under one tick, so the stopwatch folds no period away.
+Drink drink(uint32_t target, uint32_t period, uint32_t stall_every = 0, uint32_t stall = 0) {
+    constexpr uint32_t slack = 16;
+    Drink d;
+    bool have_last = false;
+    uint16_t last = 0;
+    uint32_t next_stall = stall_every;
+    uint32_t seen = RingView::overruns();
+    Stopwatch w;
+    while (d.elements < target && d.cycles < 400'000'000UL) {
+        if (stall_every != 0u && d.elements >= next_stall) {
+            next_stall += stall_every;
+            ++d.stalls;
+            Stopwatch s;
+            while (s.cycles() < stall) {
+            }
+        }
+        const std::span<const uint16_t> run = RingView::read_span();
+        ++d.looks;
+        if (RingView::overruns() != seen) {
+            seen = RingView::overruns();
+            ++d.skips;
+            have_last = false;
+        }
+        for (const uint16_t v : run) {
+            if (have_last) {
+                const uint32_t step = static_cast<uint16_t>(v - last);
+                if (step + slack < period || step > period + slack) {
+                    ++d.bad_steps;
+                }
+            }
+            last = v;
+            have_last = true;
+        }
+        if (!RingView::consume(static_cast<uint32_t>(run.size()))) {
+            ++d.torn;
+            seen = RingView::overruns();
+            have_last = false;
+        }
+        d.elements += static_cast<uint32_t>(run.size());
+        d.cycles = w.cycles();
+    }
+    return d;
+}
+
+/// Whatever the ring holds, read away, with the pace stopped.
+void drain_ring() {
+    for (;;) {
+        const std::span<const uint16_t> run = RingView::read_span();
+        if (run.empty()) {
+            return;
+        }
+        (void)RingView::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+void print_drink(const char* what, const Drink& d) {
+    print(serial, "  ", what, ": ", d.elements, " elements in ", d.looks, " looks, ", d.cycles,
+          " cycles; bad steps ", d.bad_steps, ", skips ", d.skips, ", torn ", d.torn,
+          ", stalls ", d.stalls, crlf);
+}
+
+void to_ring() {
+    all_off();
+    constexpr uint32_t slow = 288;   // an update every 2 us
+    constexpr uint32_t fast = 48;    // every third of a microsecond
+    constexpr uint32_t lap_cycles = ring_length * slow;
+    for (uint16_t& v : ring_storage) {
+        v = 0;
+    }
+
+    Ruler::init();
+    (void)Ruler::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
+    Ruler::enable(true);
+    Pacer::init();
+    (void)Pacer::configure(TimConfig{.prescaler = 0, .period = static_cast<uint16_t>(slow - 1u)});
+
+    // THE SHAPE: bound once, the storage the ring; started, the count at
+    // its length and one bus master counted.
+    const uint8_t masters_before = BusActivity::active();
+    ring_mode = true;
+    const bool armed = RingRx::arm(Ruler::cnt_address(), ring_storage, DmaPriority::high);
+    // arm() keeps the ring's word in the engine and leaves the channel
+    // stopped; start() is the store that puts it in CFGR.
+    const uint32_t before_start = RingRxChannel::regs().CFGR;
+    RingView::clear();
+    const bool started = RingRx::start();
+    const DmaChannelConfig cfg = RingRxChannel::configuration();
+    const uint32_t irqs = RingRxChannel::armed();
+    const uint32_t first_count = RingRx::remaining();
+    const uint8_t masters_running = BusActivity::active();
+    print(serial, "  CFGR after arm() ", hex(before_start), "; after start(): ",
+          cfg.circular ? "circular" : "ONE-SHOT", cfg.memory_increment ? ", memory increment" : "",
+          ", interrupts ", hex(irqs), ", count ", first_count, " of ", ring_length,
+          ", bus masters ", masters_before, " -> ", masters_running, crlf);
+    bench.verdict("the circular shape: arm() binds the ring's whole storage and leaves the "
+                  "channel stopped, and start() runs it - circular, the memory side "
+                  "incrementing, half-words both sides, the lap and the error armed and not the "
+                  "half, the count at the storage's length and one bus master counted",
+                  armed && started && before_start == 0u && cfg.circular && cfg.memory_increment &&
+                      !cfg.peripheral_increment && cfg.peripheral_width == DmaWidth::half &&
+                      cfg.memory_width == DmaWidth::half &&
+                      irqs == (DmaFlag::complete | DmaFlag::error) &&
+                      first_count == ring_length && masters_running == masters_before + 1u);
+
+    // A CONSUMER THAT KEEPS UP, at two paces: every element in order, the
+    // step between neighbours the pace's, nothing skipped and nothing torn.
+    // A count that ran ahead of a store would hand out a slot still holding
+    // the previous lap's sample - a step off by a whole lap's worth.
+    Pacer::interrupts(tim_ude, true);
+    Pacer::enable(true);
+    const Drink a = drink(1UL << 17, slow);
+    // Where the producer is by laps() and the count, read the moment the
+    // consumer stops - the pace still running - against the updates the
+    // pace made in the consumer's time.
+    const uint32_t position =
+        RingRx::laps() * ring_length + ((ring_length - RingRx::remaining()) & (ring_length - 1u));
+    const uint32_t due = a.cycles / slow;
+    // The count read in a tight loop across laps: what the wrap looks like
+    // from the core - the view takes zero and the length alike.
+    uint32_t zeros = 0;
+    uint32_t highest = 0;
+    const uint32_t laps_from = RingRx::laps();
+    for (uint32_t i = 0; i < 100'000UL; ++i) {
+        const uint32_t r = RingRx::remaining();
+        if (r == 0u) {
+            ++zeros;
+        }
+        if (r > highest) {
+            highest = r;
+        }
+    }
+    const uint32_t laps_across = RingRx::laps() - laps_from;
+    Pacer::enable(false);
+    print_drink("at one update every 288 cycles", a);
+    print(serial, "  the producer's position from laps() and the count: ", position,
+          "; the updates the pace made in the consumer's time: ", due, crlf);
+    bench.verdict("a consumer that keeps up reads 131072 elements across 512 laps with every "
+                  "step the pace's - no count ahead of its store, nothing skipped, no run torn",
+                  a.elements >= (1UL << 17) && a.bad_steps == 0u && a.skips == 0u &&
+                      a.torn == 0u && RingView::overruns() == 0u);
+    bench.verdict("and every lap was counted: the position laps() and the count give is the "
+                  "number of updates the pace made in that time, to within four",
+                  position + 4u >= due && position <= due + 4u);
+    print(serial, "  the count read 100000 times across ", laps_across, " laps: ", zeros,
+          " zeros, highest ", highest, crlf);
+    bench.verdict("the count never read above the storage's length, and the reload was seen: a "
+                  "wrap reads the length again", highest == ring_length);
+
+    // A new period is loaded by an update event, which with the request
+    // enabled moves one sample off the pace - landing some cycles after the
+    // store that raised it, so it is waited for and drained before the pace
+    // runs.
+    // The probe above read no run for a score of laps: the drain counts
+    // that lap missed, and the count starts again from zero.
+    (void)Pacer::configure(TimConfig{.prescaler = 0, .period = static_cast<uint16_t>(fast - 1u)});
+    wait_us(5);
+    drain_ring();
+    RingView::clear_overruns();
+    Pacer::enable(true);
+    const Drink b = drink(1UL << 17, fast);
+    // The same probe at this pace, where a read lands on a lap's end often
+    // enough to catch the count between the decrement and the reload.
+    uint32_t fast_zeros = 0;
+    uint32_t fast_highest = 0;
+    const uint32_t fast_from = RingRx::laps();
+    for (uint32_t i = 0; i < 100'000UL; ++i) {
+        const uint32_t r = RingRx::remaining();
+        if (r == 0u) {
+            ++fast_zeros;
+        }
+        if (r > fast_highest) {
+            fast_highest = r;
+        }
+    }
+    const uint32_t fast_across = RingRx::laps() - fast_from;
+    Pacer::enable(false);
+    print_drink("at one update every 48 cycles", b);
+    print(serial, "  the count read 100000 times across ", fast_across, " laps: ", fast_zeros,
+          " zeros, highest ", fast_highest, crlf);
+    bench.verdict("and at six times the pace - 3 million elements a second - the same: every "
+                  "step the pace's, nothing skipped, no run torn",
+                  b.elements >= (1UL << 17) && b.bad_steps == 0u && b.skips == 0u &&
+                      b.torn == 0u && RingView::overruns() == 0u && fast_highest <= ring_length);
+
+    // A CONSUMER THAT FALLS A LAP AND A HALF BEHIND, now and then: each
+    // stall a lap missed, counted once and skipped, and the steps between
+    // the skips still the pace's.
+    (void)Pacer::configure(TimConfig{.prescaler = 0, .period = static_cast<uint16_t>(slow - 1u)});
+    wait_us(5);
+    drain_ring();
+    RingView::clear_overruns();
+    Pacer::enable(true);
+    const Drink c = drink(1UL << 15, slow, 4096, lap_cycles + lap_cycles / 2u);
+    Pacer::enable(false);
+    const uint32_t stalled_overruns = RingView::overruns();
+    print_drink("stalling a lap and a half every 4096", c);
+    bench.verdict("a consumer that falls a lap and a half behind loses exactly that: one "
+                  "overrun counted and skipped per stall, and the steps between the skips "
+                  "still the pace's",
+                  c.stalls >= 7u && c.skips == c.stalls && stalled_overruns == c.stalls &&
+                      c.bad_steps == 0u && c.torn == 0u);
+
+    // A RUN HELD WHILE THE PRODUCER LAPS IT: refused at its release.
+    drain_ring();
+    RingView::clear_overruns();
+    Pacer::enable(true);
+    uint8_t refused = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        drain_ring();
+        std::span<const uint16_t> held{};
+        Stopwatch t;
+        while (held.empty() && t.us() < 1000UL) {
+            held = RingView::read_span();
+        }
+        Stopwatch s;
+        while (s.cycles() < lap_cycles + lap_cycles / 2u) {
+        }
+        if (!held.empty() && !RingView::consume(static_cast<uint32_t>(held.size()))) {
+            ++refused;
+        }
+    }
+    const uint32_t held_overruns = RingView::overruns();
+    Pacer::enable(false);
+    Pacer::interrupts(tim_ude, false);
+    print(serial, "  four runs held across a lap and a half: ", refused,
+          " refused at their release, overruns ", held_overruns, crlf);
+    bench.verdict("a run the producer laps while it is held is refused at its release - "
+                  "consume() answers false and counts the overrun - every time",
+                  refused == 4u && held_overruns == 4u);
+
+    RingRx::stop();
+    const uint8_t masters_after = BusActivity::active();
+    print(serial, "  laps counted ", RingRx::laps(), "; bus masters after stop(): ",
+          masters_after, crlf);
+    bench.verdict("stop() ends the ring and gives its bus-master count back",
+                  masters_after == masters_before && RingRx::idle());
+    ring_mode = false;
+    all_off();
+}
+// ---- letter o: END ---------------------------------------------------------
 
 // ===========================================================================
 // The second controller - the CH32V303's alone (letters i..n)
@@ -1782,7 +2243,8 @@ void banner() {
           device::dma_controller_count == 2u ? "test_vx03_dma - the two DMA controllers of RM ch. 11"
                                              : "test_vx03_dma - the DMA controller of RM ch. 11",
           crlf,
-          "  one optional jumper: PA2 to PA3 (USART2's own two pads) is what letter g needs",
+          "  one optional jumper: PA2 to PA3 (USART2's own two pads) turns letter g's banged "
+          "line into a round trip",
           crlf, "  the source of every copy is a 4 KB pattern in the image itself", crlf);
     bench.menu();
 }
@@ -1793,7 +2255,12 @@ void banner() {
 // Channels 6 and 7 are USART2's, so their bodies serve the transport
 // while letters g and n run and the bare channel the rest of the time.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { note(0, brio::DmaChannel<1, 1>::isr()); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { note(1, brio::DmaChannel<1, 2>::isr()); }
+// Channel 2 is TIM2's update, and serves letter o's ring while it runs.
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+    if (!ring_vector()) {
+        note(1, brio::DmaChannel<1, 2>::isr());
+    }
+}
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { note(2, brio::DmaChannel<1, 3>::isr()); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { note(3, brio::DmaChannel<1, 4>::isr()); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { note(4, brio::DmaChannel<1, 5>::isr()); }
@@ -1848,9 +2315,11 @@ int main() {
     bench.letter('e', "the request path with no wire: a staircase, and the burst engine",
                  te_request);
     bench.letter('f', "the priorities: two channels contending for one bus", tf_priority);
-    bench.letter('g', "the USART's two engines, on the jumper", tg_engines);
+    bench.letter('g', "the USART's two engines: the receive ring on a banged line, the jumper",
+                 tg_engines);
     bench.letter('h', "the vectors: one line per channel", th_vectors);
     register_dma2_letters();
+    bench.letter('o', "the receive ring at speed: a timer's staircase, lap after lap", to_ring);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

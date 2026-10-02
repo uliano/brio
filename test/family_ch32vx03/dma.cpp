@@ -1,6 +1,7 @@
 // DMA family smoke TU: the first controller, all of its channels, the
 // request table of RM 11.2.3 (tables 11-5 and 11-6, and 11-2 to 11-4 on
-// the CH32V303), the two engines, and the transport slots they fill.
+// the CH32V303), the transfer engines with the beat their runs carry, the
+// copy engine, and the transport slots they fill.
 // The second controller, the CH32V303's, is dma2.cpp's.
 //
 // EIGHT CHANNELS ON DMA1 OF EVERY CH32V203 - the register notes of
@@ -15,6 +16,10 @@
 // as a literal where the part decides: it asks the table, and a neg TU
 // proves that a request the part cannot raise is refused on the line
 // that asked.
+#include <stdint.h>
+
+#include <span>
+
 #include "ch32vx03/dma.hpp"
 #include "ch32vx03/platform.hpp"
 #include "ch32vx03/usart.hpp"
@@ -173,7 +178,10 @@ static_assert(dma_engine_slot<DmaTxEngine<1, 7>>() == DmaSlot{1, 7});
 static_assert(dma_engines_distinct<NoDmaEngine, NoDmaEngine>());
 static_assert(dma_engines_distinct<DmaTxEngine<1, 7>, DmaRxEngine<1, 6>>());
 static_assert(!dma_engines_distinct<DmaTxEngine<1, 6>, DmaRxEngine<1, 6>>());
-static_assert(DmaTxEngine<1, 7>::width == DmaWidth::byte);
+// The element is the WIDEST beat the binding takes: 16 bits by default (a
+// serial or bus data register), each run's own element its beat.
+static_assert(DmaTxEngine<1, 7>::width == DmaWidth::half);
+static_assert(DmaTxEngine<1, 7, uint8_t>::width == DmaWidth::byte);
 static_assert(DmaRxEngine<1, 6, uint16_t>::width == DmaWidth::half);
 static_assert(DmaTxEngine<1, 7, uint32_t>::width == DmaWidth::word);
 static_assert(DmaTxEngine<1, 7>::controller == 1 && DmaTxEngine<1, 7>::slot == DmaSlot{1, 7});
@@ -282,17 +290,36 @@ void dma_verbs() {
                                                .config = {.memory_to_memory = true}});
 }
 
+alignas(4) uint16_t half_src[8];
+alignas(4) uint16_t half_dst[8];
+alignas(4) uint32_t word_dst[4];
+constexpr uint32_t word_cell = 0x5A5A5A5AUL;
+
 void engine_verbs() {
     using Tx = DmaTxEngine<Usart2Tx::controller, Usart2Tx::channel>;
     using Rx = DmaRxEngine<Usart2Rx::controller, Usart2Rx::channel>;
 
-    Tx::arm(Usart<2>::data_address(), DmaPriority::high);
+    (void)Tx::arm(Usart<2>::data_address(), DmaPriority::high);
+    (void)Tx::arm(Usart<2>::data_address(), Tx::flag_error);   // the error alone
     (void)Tx::present;
     (void)Tx::controller;
     (void)Tx::channel;
     (void)Tx::slot;
+    // The beat is the run's element: bytes and half-words through one
+    // binding, a span or a pointer and a length.
     (void)Tx::start(src, 8);
+    (void)Tx::start(std::span<const uint8_t>(src, 8));
+    (void)Tx::start(std::span<const uint16_t>(half_src, 8));
+    (void)Tx::start(half_src, 8);
+    // The two halves of start(): the claim a transport masks, and the rest.
+    if (Tx::claim()) {
+        (void)Tx::launch(std::span<const uint8_t>(src, 8));
+    }
+    if (Tx::claim()) {
+        Tx::unclaim();
+    }
     (void)Tx::start_fixed(src, 8);
+    (void)Tx::start_fixed(half_src, 8);
     (void)Tx::kick(src, 8);
     (void)Tx::busy();
     (void)Tx::in_flight();
@@ -304,10 +331,14 @@ void engine_verbs() {
     (void)Tx::service();
     Tx::stop();
 
-    Rx::arm(Usart<2>::data_address());
+    (void)Rx::arm(Usart<2>::data_address());
     (void)Rx::idle();
     (void)Rx::start(dst, 8);
+    (void)Rx::start(std::span<uint8_t>(dst, 8));
+    (void)Rx::start(std::span<uint16_t>(half_dst, 8));
     (void)Rx::start_discard(dst, 8);
+    (void)Rx::start_discard(half_dst, 8);
+    Rx::complete();
     (void)Rx::kick(dst, 8);
     (void)Rx::take();
     (void)Rx::harvest();
@@ -319,6 +350,29 @@ void engine_verbs() {
     Rx::clear_faults();
     (void)Rx::service();
     Rx::stop();
+
+    // A word engine: a timer's 32-bit compare, a memory cell.
+    using Wide = DmaTxEngine<1, 1, uint32_t>;
+    (void)Wide::arm(&word_dst[0]);
+    (void)Wide::start(std::span<const uint32_t>(word_dst, 4));
+    (void)Wide::complete();
+
+    // Memory to memory: the beat is T, the fill's cell the caller's.
+    using Copier = DmaCopyEngine<1, 2>;
+    Copier::arm(DmaPriority::low, false);
+    Copier::arm();
+    (void)Copier::copy(dst, src, 16u);
+    (void)Copier::copy(half_dst, half_src, 8u);
+    (void)Copier::copy(word_dst, &word_cell, 1u);
+    (void)Copier::fill(word_dst, &word_cell, 4u);
+    (void)Copier::fill(half_dst, &half_src[0], 8u);
+    (void)Copier::busy();
+    (void)Copier::abandon();
+    (void)Copier::service();
+    (void)Copier::faults();
+    Copier::clear_faults();
+    Copier::stop();
+    static_assert(Copier::slot == DmaSlot{1, 2} && Copier::present);
 }
 
 void transport_verbs() {

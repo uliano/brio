@@ -156,7 +156,14 @@ of two bytes or more run on them, the read under CTLR2.LAST so the
 controller NACKs the block's last byte; a ONE-BYTE read stays on the
 pump, because its ACK-before-ADDR sequence has no DMA shape. IN SLEEP
 THE BUS MATRIX SERVES THE CORE ALONE on this family, so a transport with
-engines holds the program awake.
+engines holds the program awake while a block is in flight - and stops
+the receive channel when its block completes, because a channel's EN
+stays set after a block and an enabled channel is counted as a working
+bus master ([dma.md](dma.md)). The transmit channel's completion still
+raises its interrupt here, unlike the SPI host's: on this bus nothing
+comes back to prove it, and it is the edge the host acts on - the event
+vector ends a write on BTF only behind it, and a write-then-read's
+repeated START is requested on the TxE it arms.
 
 ### How many instances a part has
 
