@@ -1,15 +1,18 @@
 // test_samc_uart - the SERCOM USART transport (DS60001479M ch. 30/31),
-// all four shapes of it, byte for byte.
+// all three shapes of it, byte for byte.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over a
 // serial console; z runs the self-contained ones and prints the ALL: line
 // bin/brio judges.
 //
-// WHAT THIS SUITE IS FOR. samc21/sercom.hpp's Uart can be built in four
-// shapes - interrupt or DMA on each direction, independently - and what
+// WHAT THIS SUITE IS FOR. samc21/sercom.hpp's Uart can be built in three
+// shapes - interrupt on both directions, or DMA on ONE of them - and what
 // is checked here is the BYTES through each of them, on both sides at
 // once, with a pattern in which a lost, duplicated or reordered byte is
-// IDENTIFIED and not merely counted.
+// IDENTIFIED and not merely counted. The fourth shape, DMA on both, is a
+// compile error (erratum 1.10.4, uart_engines_not_concurrent()): letter
+// d states the refusal as a value, and letter h carries the duplex link
+// the refusal leaves at a rate where the choice matters.
 //
 // THE PATTERN is a 32-bit xorshift, low byte per step, seeded the same at
 // both ends (brio stress runs the identical arithmetic). The
@@ -50,7 +53,8 @@
 //   e  echo through the plain interrupt transport
 //   f  echo with the DMA transmitter
 //   g  echo with the DMA receiver
-//   h  echo with both engines
+//   h  echo at 1 and 2 Mbaud: the DMA transmitter beside the interrupt
+//      receiver, the duplex shape erratum 1.10.4 leaves
 //   i  receive-only, sustained
 //   j  transmit-only, sustained
 //   k  the same traffic at 115200, 1 M and 3 Mbaud
@@ -90,7 +94,7 @@ constexpr UartPads console_pads{
 };
 
 // 512 each way: big enough that a harvest cadence of a few hundred
-// microseconds keeps up at 1 Mbaud, small enough that four
+// microseconds keeps up at 1 Mbaud, small enough that three
 // instantiations fit comfortably in 32 KB of SRAM.
 constexpr uint32_t rx_ring = 512;
 constexpr uint32_t tx_ring = 512;
@@ -101,8 +105,7 @@ constexpr uint8_t ch_rx = 7;
 using UPlain = Uart<5, console_pads, rx_ring, tx_ring>;
 using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<ch_tx>, NoDmaEngine>;
 using URxDma = Uart<5, console_pads, rx_ring, tx_ring, NoDmaEngine, DmaRxEngine<ch_rx>>;
-using UDuplex =
-    Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<ch_tx>, DmaRxEngine<ch_rx>>;
+// The fourth shape, both engines, does not compile: erratum 1.10.4.
 
 constexpr UPlain plain;
 
@@ -115,10 +118,10 @@ using brio::crlf;
 using brio::print;
 
 // =============================================================================
-// The four transports behind one set of verbs
+// The three transports behind one set of verbs
 // =============================================================================
 //
-// THE FOUR INSTANTIATIONS ARE NEVER LIVE AT ONCE. Each has its own rings
+// THE THREE INSTANTIATIONS ARE NEVER LIVE AT ONCE. Each has its own rings
 // and counters, and init() resets and reconfigures SERCOM5 from scratch,
 // so switching is a clean handover. Two of them name the same DMA
 // channel, and an engine is a set of STATIC members - one object per
@@ -130,15 +133,16 @@ using brio::print;
 // and three letters' worth of false evidence, which is why `live` gates
 // the dispatch in DMAC_Handler().
 
-enum class Mode : uint8_t { plain = 0, txdma = 1, rxdma = 2, duplex = 3 };
+// The numbers are brio stress's protocol (its mode 3, both engines, is
+// a shape this transport refuses).
+enum class Mode : uint8_t { plain = 0, txdma = 1, rxdma = 2 };
 Mode live = Mode::plain;
 
 const char* mode_name(Mode m) {
     switch (m) {
         case Mode::plain: return "irqTX+irqRX";
         case Mode::txdma: return "dmaTX+irqRX";
-        case Mode::rxdma: return "irqTX+dmaRX";
-        default: return "dmaTX+dmaRX";
+        default: return "irqTX+dmaRX";
     }
 }
 
@@ -147,8 +151,7 @@ bool mode_init(Mode m, uint32_t baud, const UartFormat& fmt = {}) {
     switch (m) {
         case Mode::plain: return UPlain::init(clock, baud, fmt);
         case Mode::txdma: return UTxDma::init(clock, baud, fmt);
-        case Mode::rxdma: return URxDma::init(clock, baud, fmt);
-        default: return UDuplex::init(clock, baud, fmt);
+        default: return URxDma::init(clock, baud, fmt);
     }
 }
 
@@ -156,8 +159,7 @@ void mode_release() {
     switch (live) {
         case Mode::plain: UPlain::release(); break;
         case Mode::txdma: UTxDma::release(); break;
-        case Mode::rxdma: URxDma::release(); break;
-        default: UDuplex::release(); break;
+        default: URxDma::release(); break;
     }
 }
 
@@ -165,8 +167,7 @@ bool mode_tx_idle() {
     switch (live) {
         case Mode::plain: return UPlain::tx_idle();
         case Mode::txdma: return UTxDma::tx_idle();
-        case Mode::rxdma: return URxDma::tx_idle();
-        default: return UDuplex::tx_idle();
+        default: return URxDma::tx_idle();
     }
 }
 
@@ -175,8 +176,7 @@ uint32_t mode_write_bulk(const uint8_t* p, uint32_t n) {
     switch (live) {
         case Mode::plain: return UPlain::write_bulk(s);
         case Mode::txdma: return UTxDma::write_bulk(s);
-        case Mode::rxdma: return URxDma::write_bulk(s);
-        default: return UDuplex::write_bulk(s);
+        default: return URxDma::write_bulk(s);
     }
 }
 
@@ -185,15 +185,13 @@ uint32_t mode_read_bulk(uint8_t* p, uint32_t n) {
     switch (live) {
         case Mode::plain: return UPlain::read_bulk(s);
         case Mode::txdma: return UTxDma::read_bulk(s);
-        case Mode::rxdma: return URxDma::read_bulk(s);
-        default: return UDuplex::read_bulk(s);
+        default: return URxDma::read_bulk(s);
     }
 }
 
 void mode_harvest() {
     switch (live) {
         case Mode::rxdma: (void)URxDma::harvest(); break;
-        case Mode::duplex: (void)UDuplex::harvest(); break;
         default: break;
     }
 }
@@ -208,8 +206,7 @@ void mode_clear_errors() {
     switch (live) {
         case Mode::plain: UPlain::clear_errors(); break;
         case Mode::txdma: UTxDma::clear_errors(); break;
-        case Mode::rxdma: URxDma::clear_errors(); break;
-        default: UDuplex::clear_errors(); break;
+        default: URxDma::clear_errors(); break;
     }
 }
 
@@ -227,14 +224,10 @@ ErrCounts mode_errors() {
             return {UTxDma::rx_overruns(), UTxDma::frame_errors(),
                     UTxDma::parity_errors(), UTxDma::hw_overruns(),
                     UTxDma::dma_faults()};
-        case Mode::rxdma:
+        default:
             return {URxDma::rx_overruns(), URxDma::frame_errors(),
                     URxDma::parity_errors(), URxDma::hw_overruns(),
                     URxDma::dma_faults()};
-        default:
-            return {UDuplex::rx_overruns(), UDuplex::frame_errors(),
-                    UDuplex::parity_errors(), UDuplex::hw_overruns(),
-                    UDuplex::dma_faults()};
     }
 }
 
@@ -714,8 +707,16 @@ void td_engines() {
                   UTxDma::has_tx_engine && !UTxDma::has_rx_engine);
     bench.verdict("the RX-only one names the other",
                   !URxDma::has_tx_engine && URxDma::has_rx_engine);
-    bench.verdict("the duplex one names both",
-                  UDuplex::has_tx_engine && UDuplex::has_rx_engine);
+    // THE FOURTH SHAPE IS A COMPILE ERROR, so what the board can show of
+    // it is the predicate the Uart's static_assert asks: two engines on
+    // one transport are two channels triggered concurrently, erratum
+    // 1.10.4's condition, and the pair is refused at the template
+    // argument (test/family_samc21/neg/uart_both_engines.cpp fails to
+    // compile for that reason).
+    bench.verdict("both engines on one transport are refused (erratum 1.10.4)",
+                  !uart_engines_not_concurrent<DmaTxEngine<ch_tx>, DmaRxEngine<ch_rx>>() &&
+                      uart_engines_not_concurrent<DmaTxEngine<ch_tx>, NoDmaEngine>() &&
+                      uart_engines_not_concurrent<NoDmaEngine, DmaRxEngine<ch_rx>>());
     bench.verdict("an engineless transport reports no DMA faults, for free",
                   UPlain::dma_faults() == 0);
 
@@ -783,7 +784,51 @@ Leg base_leg(Op op, Mode m) {
 void te_plain_echo() { run_and_report(base_leg(Op::echo, Mode::plain), true); }
 void tf_txdma_echo() { run_and_report(base_leg(Op::echo, Mode::txdma), true); }
 void tg_rxdma_echo() { run_and_report(base_leg(Op::echo, Mode::rxdma), false); }
-void th_duplex_echo() { run_and_report(base_leg(Op::echo, Mode::duplex), false); }
+/// THE DUPLEX LINK THE ERRATUM LEAVES. Both engines on one SERCOM are
+/// refused (erratum 1.10.4), so a link that wants bulk both ways takes
+/// the engine on the transmit side and keeps the receiver on RXC. Two
+/// rates, two claims:
+///  - at 1 Mbaud the shape is LOSSLESS - every byte back, in order,
+///    nothing dropped, no hardware overrun;
+///  - at 2 Mbaud the interrupt receiver is at its edge (one RXC entry
+///    per 240 cycles, two characters of FIFO), so a lost byte is
+///    allowed and SILENCE is not, as in letter k.
+/// At both, NO TRANSMIT BLOCK MAY BE ABANDONED: the engine's channel is
+/// the only one in this image, so erratum 1.10.4 has nothing to corrupt
+/// it with, and an abandoned block is the dead-block predicate firing on
+/// a live one - which a test of the engine's own "in flight" and the
+/// flags alone did at 2 Mbaud, where main context is preempted for a
+/// character time across a completion (samc21/sercom.hpp,
+/// nudge_blocked_tx()).
+void th_duplex_echo() {
+    static constexpr uint32_t rates[] = {1'000'000, 2'000'000};
+    for (uint32_t rate : rates) {
+        Leg leg = base_leg(Op::echo, Mode::txdma);
+        leg.baud = rate;
+        const LegResult r = run_leg(leg);
+        const EngineSnapshot s = snapshot();
+        back_to_console();
+        report(leg, r);
+        dump_engines(s);
+        bench.verdict("the transport drained at the end of the window", r.drained);
+        bench.verdict("something crossed the wire", r.received != 0u);
+        bench.verdict("nothing was dropped on the way back", r.dropped == 0);
+        if (rate <= 1'000'000u) {
+            bench.verdict("every received byte was on the stream, in order",
+                          r.first_bad == 0);
+            bench.verdict("no hardware overrun", r.err.hw_overrun == 0);
+        } else {
+            print(plain, "  (at 2 Mbaud the interrupt receiver is the limit - loss "
+                         "is allowed, silence is not)", crlf);
+            bench.verdict("nothing was lost silently at this rate",
+                          r.first_bad == 0 || r.err.hw_overrun != 0 ||
+                              r.err.rx_overrun != 0);
+        }
+        bench.verdict("no transmit block was abandoned (one channel, nothing to "
+                      "corrupt it)",
+                      r.err.dma_faults == 0);
+    }
+}
 
 /// RX-only sustained: the host pumps, the board verifies against its own
 /// copy of the generator and answers nothing at all.
@@ -922,7 +967,7 @@ void tn_pressure() {
     // application would. NEITHER MAY WEDGE.
     static constexpr uint32_t cadences[] = {50, 2000};
     for (uint32_t us : cadences) {
-        Leg leg = base_leg(Op::echo, Mode::duplex);
+        Leg leg = base_leg(Op::echo, Mode::rxdma);
         leg.harvest_us = us;
         leg.window_ms = 900;
         const LegResult r = run_leg(leg);
@@ -942,7 +987,7 @@ void tp_burst() {
     // and the one an RX engine is worst at: nothing tells it a byte has
     // arrived, so an idle line is exactly where the harvest cadence
     // carries the whole latency.
-    Leg leg = base_leg(Op::burst, Mode::duplex);
+    Leg leg = base_leg(Op::burst, Mode::rxdma);
     leg.window_ms = 1400;
     run_and_report(leg, false);
 }
@@ -967,8 +1012,7 @@ extern "C" void SERCOM5_Handler() {
     switch (live) {
         case Mode::plain: (void)UPlain::isr(); break;
         case Mode::txdma: (void)UTxDma::isr(); break;
-        case Mode::rxdma: (void)URxDma::isr(); break;
-        default: (void)UDuplex::isr(); break;
+        default: (void)URxDma::isr(); break;
     }
 }
 
@@ -979,7 +1023,6 @@ extern "C" void DMAC_Handler() {
         switch (live) {
             case Mode::txdma: (void)UTxDma::dma_isr(ch); break;
             case Mode::rxdma: (void)URxDma::dma_isr(ch); break;
-            case Mode::duplex: (void)UDuplex::dma_isr(ch); break;
             default: break;
         }
     }
@@ -1004,7 +1047,8 @@ int main() {
     bench.letter('e', "echo, plain transport (host)", te_plain_echo, false);
     bench.letter('f', "echo, DMA transmitter (host)", tf_txdma_echo, false);
     bench.letter('g', "echo, DMA receiver (host)", tg_rxdma_echo, false);
-    bench.letter('h', "echo, both engines (host)", th_duplex_echo, false);
+    bench.letter('h', "echo at 1 and 2 Mbaud, DMA TX beside irq RX (host)",
+                 th_duplex_echo, false);
     bench.letter('i', "receive-only sustained (host)", ti_sink, false);
     bench.letter('j', "transmit-only sustained (host)", tj_source, false);
     bench.letter('k', "115200 / 1 M / 3 Mbaud (host)", tk_rates, false);

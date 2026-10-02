@@ -25,7 +25,8 @@
  *
  *  DmaTxEngine<ch, Elem> / DmaRxEngine<ch, Elem>
  *              the two peripheral engines samc21/sercom.hpp's Uart and
- *              samc21/spi.hpp's SpiHost take as OPTIONAL policies. They
+ *              samc21/spi.hpp's SpiHost take as OPTIONAL policies - a
+ *              Uart one of them at most (erratum 1.10.4, below). They
  *              live here, not there, so that neither header includes this
  *              one and a program that names no engine cannot pay for one
  *              (see "ZERO WHEN ABSENT" below).
@@ -181,17 +182,23 @@
  *    same item under the name "Linked Descriptors") is LIVE HERE: E/G/J
  *    at revisions E, F and H. When several channels are triggered
  *    concurrently, THE WRITE-BACK DESCRIPTORS MAY BE CORRUPTED. Microchip's
- *    workaround - "multiple transfers must only be sequenced using linked
- *    descriptors on a single channel" - amounts to not using concurrent
- *    channels, which a full-duplex serial port cannot honour: its TX and
- *    RX engines ARE two channels triggered by two independent peripheral
- *    events. So this driver takes the other road: IT NEVER TRUSTS A
- *    WRITE-BACK READ. Every field of a write-back descriptor except BTCNT
- *    and VALID is invariant WHILE THE BLOCK RUNS - the controller copies
- *    it from the fetched descriptor and, until the block ends, writes back
- *    only the beat counter (25.10.2) - so harvest() compares all of them
- *    against the copy this driver loaded, bounds-checks BTCNT against the
- *    programmed length, and DISCARDS a reading that fails, counting it.
+ *    one workaround - "multiple transfers must only be sequenced using
+ *    linked descriptors on a single channel" - amounts to not triggering
+ *    two channels concurrently at all. Where one driver owns both
+ *    channels of a pair whose triggers drift against each other, the
+ *    pair is refused: samc21/sercom.hpp's Uart takes one engine at most
+ *    (uart_engines_not_concurrent(), a compile error), its two directions
+ *    being clocked by the two ends of the wire. Everywhere else - the SPI
+ *    host's pair, whose two requests rise from one shifter, and channels
+ *    of DIFFERENT owners, which no driver sees together - concurrency
+ *    stays the program's, and this driver takes the other road: IT NEVER
+ *    TRUSTS A WRITE-BACK READ. Every field of a write-back descriptor
+ *    except BTCNT and VALID is invariant WHILE THE BLOCK RUNS - the
+ *    controller copies it from the fetched descriptor and, until the
+ *    block ends, writes back only the beat counter (25.10.2) - so
+ *    harvest() compares all of them against the copy this driver loaded,
+ *    bounds-checks BTCNT against the programmed length, and DISCARDS a
+ *    reading that fails, counting it.
  *
  *    THE READING IS NOT THE DAMAGE, and that is the correction this
  *    header carries (docs/samc21/dmac.md, docs/samc21/sercom.md).
@@ -201,15 +208,18 @@
  *    the driver may take or leave - it is the controller's LIVE COPY of
  *    the descriptor it is running. When 1.10.4 corrupts it, the transfer
  *    itself is destroyed: the channel stops moving bytes, raises no
- *    interrupt, and sits there enabled for ever. MEASURED with two
- *    engines on one SERCOM: the transmit channel enabled, its
- *    peripheral's DRE and TXC both set (the transmitter idle and asking),
- *    CHSTATUS all zeros, no flag anywhere - and its write-back holding
- *    the OTHER channel's descriptor (BTCTRL 0x809 with SRCADDR = the
- *    SERCOM's DATA register, where its own says 0x409 and a RAM address).
- *    On the receive side the same corruption shows as CHSTATUS.FERR,
- *    which 25.6.2.8 raises when an invalid descriptor is fetched, and
- *    which is cleared only by a software RESUME.
+ *    interrupt, and sits there enabled for ever - or runs the OTHER
+ *    channel's transfer under its own trigger. MEASURED with two engines
+ *    on one SERCOM, the shape the Uart refuses for it: the transmit
+ *    channel enabled, its peripheral's DRE and TXC both set (the
+ *    transmitter idle and asking), CHSTATUS all zeros, no flag anywhere -
+ *    and its write-back holding the OTHER channel's descriptor (BTCTRL
+ *    0x809 with SRCADDR = the SERCOM's DATA register, where its own says
+ *    0x409 and a RAM address); and, running such a copy, the transmit
+ *    channel writing received bytes into the SERCOM's registers below
+ *    DATA. On the receive side the same corruption shows as
+ *    CHSTATUS.FERR, which 25.6.2.8 raises when an invalid descriptor is
+ *    fetched, and which is cleared only by a software RESUME.
  *
  *    So validating the reading is NECESSARY AND NOT SUFFICIENT, and the
  *    two engines below carry the other half: abandon(), which throws away
@@ -1334,6 +1344,27 @@ public:
             return static_cast<uint8_t>(r.DMAC_CHSTATUS);
         });
     }
+
+    /**
+     * ENABLED, with no trigger pending and no beat moving - CHCTRLA.ENABLE
+     * set, CHSTATUS.PEND and BUSY clear - read under ONE select: the state
+     * of a channel waiting for its trigger. Beside a trigger that STANDS
+     * (the peripheral's request already high) it is the state of a channel
+     * that cannot move: the rise was lost, or the live descriptor is not
+     * the one programmed (erratum 1.10.4). A channel just enabled onto a
+     * standing request shows PEND - a request queued to the arbiter is
+     * pending (25.6.2.4), and a rise latched while the channel was
+     * disabled is served on the enable (measured, docs/samc21/dmac.md;
+     * on the USART's 3376 block starts never "nothing pending" with DRE
+     * standing) - and a single block that has ended is disabled
+     * (25.6.2.6), so neither reads as waiting.
+     */
+    static bool waiting() {
+        return Dmac::with_channel(n, [](dmac_registers_t& r) {
+            return (r.DMAC_CHCTRLA & DMAC_CHCTRLA_ENABLE_Msk) != 0u &&
+                   (r.DMAC_CHSTATUS & (DmaStatus::pending | DmaStatus::busy)) == 0u;
+        });
+    }
     static bool busy() { return (status() & DmaStatus::busy) != 0u; }
     static bool pending() { return (status() & DmaStatus::pending) != 0u; }
     /// An invalid descriptor was fetched. Cleared only by a software
@@ -1527,7 +1558,7 @@ public:
      * never comes. MEASURED: SUSP has always landed by the wait's FIRST
      * look. test_samc_dma run with a budget of ZERO turns refused no
      * reading for a timeout in letter d, none in g's five-channel hunt,
-     * and in j's duplex stress only on the churned channel erratum 1.10.4
+     * and in j's stress only on the churned channel erratum 1.10.4
      * corrupts (9 to 14 a run) - which times out at 0xFFFF turns too (17
      * a run): its suspend never lands, and a larger budget buys nothing
      * but masked time. One turn is a SUSP read and an ENABLE read, each
@@ -1684,7 +1715,11 @@ template <typename T>
  * NO WRITE-BACK IS EVER READ HERE. The engine knows the block length it
  * programmed and the owner learns of the end (TCMPL, or its own proof
  * under DmaCompletion::silent); there is no third fact to want, and so
- * erratum 1.10.4 has no surface on this side at all.
+ * erratum 1.10.4 has no READING to corrupt on this side. Its DAMAGE it
+ * has - the write-back is the live copy of a block in progress - which
+ * is what abandon() below answers, and why a Uart never puts this
+ * engine beside its own DmaRxEngine (samc21/sercom.hpp,
+ * uart_engines_not_concurrent()).
  */
 template <uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
@@ -1856,6 +1891,14 @@ public:
     /// because a transmit buffer that ran dry between two beats raises
     /// TXC too, and only a disabled channel has written its last beat.
     static bool running() { return Channel::enabled(); }
+
+    /// Whether the channel is enabled and WAITING - no trigger pending, no
+    /// beat moving (DmaChannel::waiting()). Beside the owner's proof that
+    /// its trigger stands, the evidence of a dead block: samc21/sercom.hpp's
+    /// Uart asks it with DRE and TXC both up. busy() alone cannot say it -
+    /// it is the engine's bookkeeping, true from a block's last beat until
+    /// complete() and before a new block's first beat has landed.
+    static bool waiting() { return Channel::waiting(); }
 
     /**
      * The block ended - called from the DMAC handler when take_pending()

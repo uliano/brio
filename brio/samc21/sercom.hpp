@@ -104,7 +104,11 @@
  *    in Debug mode. The field is exposed and the erratum named, because
  *    a fact with no code behind it must at least be visible;
  *  - erratum 1.17.14 (standby over-consumption with RUNSTDBY = 0 and the
- *    receiver disabled) is a sleep-current fact: nothing here sleeps.
+ *    receiver disabled) is a sleep-current fact: nothing here sleeps;
+ *  - erratum 1.10.4 (the DMAC's, concurrent channel triggers corrupting
+ *    the write-back): the Uart's two optional DMA engines are ONE AT
+ *    MOST, refused at the template argument - see
+ *    uart_engines_not_concurrent().
  */
 
 #pragma once
@@ -919,6 +923,40 @@ constexpr bool uart_engines_distinct() {
     }
 }
 
+/**
+ * A Uart takes ONE DMA engine at most: erratum 1.10.4 as a rule of the
+ * type.
+ *
+ * DS80000740S 1.10.4, live on the E/G/J parts at revisions E, F and H:
+ * "When using concurrent channels triggers, the DMAC write-back
+ * descriptors may get corrupted." Its one workaround: "Multiple
+ * transfers must only be sequenced using linked descriptors on a single
+ * channel." A duplex port's two engines are two channels on two
+ * triggers - DRE paced by this end's baud generator, RXC by the far
+ * end's - which nothing can sequence onto one channel, so the workaround
+ * cannot be applied to the pair, only the pair refused.
+ *
+ * What the pair costs is measured (docs/samc21/sercom.md, "The optional
+ * DMA engines"): echoing at 115200 with both engines on one SERCOM, the
+ * erratum struck in nineteen runs of twenty. The write-back is the
+ * controller's LIVE descriptor for a block in progress (25.6.2.6), so a
+ * transmit channel resumed from one holding the RECEIVE descriptor
+ * walked received bytes into the registers below DATA: INTENSET
+ * scribbled, the transmitter wedged with DRE and TXC both clear, and
+ * once the program silent. A runtime rule - the second engine refused
+ * while the first's channel runs - would name an engine it could never
+ * use: the receive channel waits enabled for as long as the port is up.
+ *
+ * So the bulk direction takes the engine and the other keeps its
+ * interrupt. Which pair is concurrent is visible here only for the two
+ * channels one transport owns; channels of different owners are the
+ * program's to sequence (docs/samc21/dmac.md).
+ */
+template <typename Tx, typename Rx>
+constexpr bool uart_engines_not_concurrent() {
+    return !(Tx::present && Rx::present);
+}
+
 template <uint8_t n, UartPads pads, uint32_t rx_size = 64, uint32_t tx_size = 256,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
 class Uart {
@@ -939,9 +977,12 @@ class Uart {
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
                   "DmaRxEngine from samc21/dmac.hpp, or NoDmaEngine (the default)");
-    static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
-                  "the transmit and receive engines must use DIFFERENT DMA "
-                  "channels: a channel moves bytes in one direction only");
+    static_assert(uart_engines_not_concurrent<TxEngine, RxEngine>(),
+                  "erratum 1.10.4 (DS80000740S): a Uart takes ONE DMA engine at most - "
+                  "two channels triggered concurrently may have their write-back "
+                  "descriptors corrupted, measured turning the transmit channel into "
+                  "a writer of this SERCOM's registers; give the engine to the bulk "
+                  "direction and leave the other on its interrupt");
     // An engine moves a ring's run as ONE block, and BTCNT counts 65535
     // beats at most (25.6.1.1): an engined direction's ring is no longer.
     static_assert((!TxEngine::present || tx_size <= 65535u) &&
@@ -1477,8 +1518,10 @@ public:
 
     /// DMA blocks this transport had to throw away because the silicon
     /// had stopped running them - erratum 1.10.4's running bill, and the
-    /// number to watch when both engines are named. Always 0, and free,
-    /// without an engine.
+    /// number to watch when the program triggers another DMA channel
+    /// beside this transport's engine (its own second engine is refused,
+    /// uart_engines_not_concurrent()). Always 0, and free, without an
+    /// engine.
     static uint8_t dma_faults() {
         if constexpr (has_tx_engine || has_rx_engine) {
             return m_dma_faults;
@@ -1520,23 +1563,48 @@ private:
      * exactly the state in which nothing is draining it. Repair whatever
      * is repairable, then nudge.
      *
-     * THE DEAD-BLOCK PREDICATE, and it is one line of SERCOM truth. The
-     * engine says a block is in flight; the peripheral says its transmit
-     * buffer is EMPTY (DRE) and its shifter has finished (TXC). Those two
-     * cannot both be true of a live block - a DMA channel with beats left
-     * fills DATA within one beat of DRE rising, which clears both flags.
-     * So the block is not slow, it is dead, and the only thing to do is
-     * throw it away and start the next one. No timer, no rate, no guess:
-     * the contradiction IS the evidence.
+     * THE DEAD-BLOCK PREDICATE: a channel waiting for a trigger that
+     * stands. The peripheral says its transmit buffer is EMPTY (DRE) and
+     * its shifter has finished (TXC) - DRE is this channel's trigger, high
+     * - and the channel says it is ENABLED with no trigger pending and no
+     * beat moving (DmaTxEngine::waiting(): CHCTRLA.ENABLE, CHSTATUS.PEND
+     * and BUSY). A channel with beats left latches DRE's rise and fills
+     * DATA within one beat, so it cannot read that way; this one has lost
+     * its trigger or is running a descriptor that is not the one
+     * programmed. So the block is not slow, it is dead, and the only thing
+     * to do is throw it away and start the next one. No timer, no rate,
+     * no guess: the contradiction IS the evidence.
+     *
+     * THE ENGINE'S OWN "IN FLIGHT" IS NOT THE CHANNEL'S, and the
+     * predicate asks the channel because of it. busy() is software: it
+     * stays true from a block's last beat until dma_isr() hears the
+     * completion, and it is true again for a block the handler has just
+     * started whose first beat has not landed. Main context preempted
+     * across that handler for a character time sees DRE and TXC both up
+     * in either window - measured at 2 Mbaud with ONE channel and no
+     * erratum in reach: blocks abandoned in nine echoes of twenty, up to
+     * four in one, when the test was busy() and the flags alone. A
+     * finished single block is DISABLED (25.6.2.6) and a just-started one
+     * shows PEND - measured on 3376 starts onto a standing DRE, never
+     * "nothing pending" (docs/samc21/sercom.md) - so neither reads as
+     * waiting. And the three readings are taken under the mask, so the
+     * handler cannot complete one block and start the next between them;
+     * the abandon itself runs unmasked, a dead channel raising no
+     * interrupt that could change its state.
      *
      * What kills a block that way is erratum 1.10.4 - a concurrently
      * triggered second channel corrupting this one's write-back, which
      * 25.6.2.6 makes the controller's LIVE descriptor and not a report
-     * (samc21/dmac.hpp's errata note carries the captured state). Before
-     * this existed the transport simply stopped: DmaTxEngine::busy()
-     * stayed true for ever, pump_tx() returned at its first line every
-     * time, the ring filled, and print() spun in Ring::push with the
-     * board silent.
+     * (samc21/dmac.hpp's errata note carries the captured state). The
+     * second channel is never this transport's own receive engine - that
+     * pair is refused (uart_engines_not_concurrent()) - but it can be any
+     * other channel the program triggers. Without this predicate the
+     * transport simply stops: DmaTxEngine::busy() stays true for ever,
+     * pump_tx() returns at its first line every time, the ring fills,
+     * and print() spins in Ring::push with the board silent. A
+     * corruption that leaves DATA full or the transmitter off (DRE
+     * clear) is beyond it: the predicate sees only the dead block that
+     * left the transmitter idle and asking.
      *
      * WITHOUT an engine there is nothing to repair and the nudge is the
      * ordinary one - arming DRE, which write_byte() would have done
@@ -1544,8 +1612,10 @@ private:
      */
     static void nudge_blocked_tx() {
         if constexpr (has_tx_engine) {
-            constexpr uint8_t idle_transmitter = SercomFlag::dre | SercomFlag::txc;
-            if (TxEngine::busy() && (S::flags() & idle_transmitter) == idle_transmitter) {
+            // The cheap half first, unmasked: this path runs on every
+            // refused byte of a spinning print(), and almost always one of
+            // the two is false.
+            if (TxEngine::busy() && transmitter_idle() && tx_block_dead()) {
                 if (TxEngine::abandon()) {
                     m_dma_faults = m_dma_faults + 1;
                 }
@@ -1554,6 +1624,19 @@ private:
         } else {
             S::enable_dre_interrupt(true);
         }
+    }
+
+    /// DRE and TXC both up: nothing in DATA, nothing in the shifter.
+    static bool transmitter_idle() {
+        constexpr uint8_t idle = SercomFlag::dre | SercomFlag::txc;
+        return (S::flags() & idle) == idle;
+    }
+
+    /// The predicate's DECISION, under the mask (see nudge_blocked_tx()):
+    /// the engine claims a block, its channel waits, the trigger stands.
+    static bool tx_block_dead() {
+        typename SamPlatform::CriticalSection cs;
+        return TxEngine::busy() && TxEngine::waiting() && transmitter_idle();
     }
 
     /**

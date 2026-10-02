@@ -6,7 +6,7 @@ ch. 31 - and errata DS80000740S items 1.17.15 and 1.17.16, both
 encoded in code (1.17.4 and 1.17.14 are named where their fields
 live). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine, RxEngine>` task, the engine slots
-optional). The family fixture is `test/family_samc21/sercom.cpp` plus
+optional and ONE of them at most). The family fixture is `test/family_samc21/sercom.cpp` plus
 its negatives under `brio check samc21`; the bench suite is
 `test_samc_uart`, driven from the host by `brio stress`.
 
@@ -120,11 +120,13 @@ whatever drives it.
 ## The optional DMA engines
 
 An application that wants DMA on a direction includes `samc21/dmac.hpp`
-alongside this header and names an engine with its channel:
+alongside this header and names an engine with its channel - on ONE
+direction, the other keeping its interrupt:
 
 ```cpp
-using Serial = brio::Uart<5, console_pads, 64, 256,
-                          brio::DmaTxEngine<0>, brio::DmaRxEngine<1>>;
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine<0>>;
+using Logger = brio::Uart<5, console_pads, 256, 64,
+                          brio::NoDmaEngine, brio::DmaRxEngine<1>>;
 ```
 
 The engines are POLICIES, not features of the task:
@@ -138,12 +140,29 @@ The engines are POLICIES, not features of the task:
   descriptor tables.
 - **The trigger replaces the interrupt.** DRE for the transmitter and
   RXC for the receiver are the SAME condition as the DMA trigger, so
-  whichever direction has an engine does not arm its interrupt -
-  both armed would serve every byte twice. The two directions are
-  independent: one engine is a legal shape (DMA on the bulk
-  direction, the RXC interrupt's exact per-character error
-  attribution on the other), and the two must name DIFFERENT channels
-  (compile-time refused - a channel moves bytes one way).
+  the direction that has the engine does not arm its interrupt -
+  both armed would serve every byte twice.
+- **ONE ENGINE AT MOST: erratum 1.10.4 as a compile error.**
+  DS80000740S 1.10.4, live on this silicon: "When using concurrent
+  channels triggers, the DMAC write-back descriptors may get
+  corrupted", and its one workaround: "Multiple transfers must only be
+  sequenced using linked descriptors on a single channel." The erratum
+  names no other remedy - no placement of the write-back section, no
+  priority, no arbitration scheme - and a port's two engines are two
+  channels on two triggers clocked by the two ends of the wire, which
+  nothing sequences onto one channel. So the pair is refused at the
+  template argument (`uart_engines_not_concurrent()`, a static_assert
+  with the erratum as its message; the family fixture's negative
+  `uart_both_engines` holds it). A runtime rule - the second engine
+  refused while the first's channel runs - would name an engine it
+  could never use: the receive channel waits enabled for as long as
+  the port is up. What the pair cost, measured in the Bench findings
+  below, is why it is refused rather than counted: the erratum struck
+  in nineteen echoes of twenty, and wrote this SERCOM's registers. A
+  duplex link that wants bulk both ways takes the transmit engine and
+  keeps the receiver on RXC, which a run-at-a-time consumer holds to
+  2 Mbaud (letter h). Channels of OTHER owners triggered beside the
+  engine are the program's to sequence (dmac.md).
 - **TX drains the ring in blocks.** `write_byte`, `write_bulk` and
   `print` are unchanged; the engine is handed the ring's contiguous run
   (`read_span`, design/ring.md) and its completion interrupt consumes
@@ -191,9 +210,19 @@ The engines are POLICIES, not features of the task:
   arriving LONGER than it was sent. Neither `pump_tx()` nor the receive
   re-arm kicks; every wedge measured on this transport carried a
   corrupted write-back (erratum 1.10.4), which the DEAD-BLOCK PREDICATE
-  answers on the refused-byte path below: a block the engine calls in
-  flight while DRE and TXC both stand cannot be running, so it is
-  abandoned (dmac.md) and counted in `dma_faults()`.
+  answers on the refused-byte path below: a channel that waits ENABLED
+  with no trigger pending and no beat moving while DRE - its trigger -
+  and TXC both stand cannot be running, so the block is abandoned
+  (dmac.md) and counted in `dma_faults()`. The channel is asked and not
+  the engine's own "in flight", which stays true from a block's last
+  beat until its completion is heard and is true again for a block the
+  handler has just started: with main context preempted for a character
+  time across a completion, that test abandoned live blocks at 2 Mbaud
+  with ONE channel in the image (Bench findings). The three readings are
+  taken under the mask. The channel that corrupts a block is another
+  owner's - the transport's own pair is refused - and a corruption that
+  leaves DRE clear (DATA full, or the transmitter switched off by a
+  stray write) is beyond the predicate.
 - **A REFUSED BYTE STILL NUDGES.** `write_byte()` returning false is
   the state in which nothing is draining the ring, and `print()`
   answers that false by trying again for ever - so the refusal path
@@ -258,21 +287,24 @@ int main() {
   went out as seven DMA blocks - the ring wrap served as two spans,
   exactly as designed); the RX engine with a tick-paced harvest
   served a typed burst unchanged with the RXC interrupt never armed;
-  both engines at once survived the erratum-1.10.4 stress with zero
-  violations on their own channels (the full account is in dmac.md).
+  the transmit engine beside two memory-to-memory channels sprayed for
+  three seconds (`test_samc_dma` j: the erratum corrupting the churned
+  channels' write-backs, 81 readings refused and 23 suspends lost in
+  68409 rounds) carried 694 lines of 694 intact and in order, no block
+  of its own abandoned (the full account is in dmac.md).
 
-**THE FOUR SHAPES, BYTE FOR BYTE** (suite `test_samc_uart` with
+**THE THREE SHAPES, BYTE FOR BYTE** (suite `test_samc_uart` with
 `brio stress` at the other end; the pattern is a 32-bit
 xorshift both ends generate, so a lost byte is located and not merely
-counted). Every combination of interrupt and DMA on each direction, as
-an echo of 8384 bytes at 115200 in a 1.2 s window:
+counted). Interrupt on both directions, or DMA on one of them, as an
+echo of 8384 bytes at 115200 in a 1.2 s window, each DMA shape twenty
+times:
 
   | transport      | received    | notes                                    |
   |----------------|-------------|------------------------------------------|
   | irq TX + irq RX| 8384        | byte-exact both ways                     |
-  | DMA TX + irq RX| 8384        | byte-exact both ways                     |
-  | irq TX + DMA RX| 8383..8384  | byte-exact or one byte short: a gap      |
-  | DMA TX + DMA RX| 8382..8384  | gaps, and erratum 1.10.4 on the pair     |
+  | DMA TX + irq RX| 8384        | byte-exact both ways, 20 of 20, no block abandoned |
+  | irq TX + DMA RX| 8381..8384  | byte-exact or a few short: a gap         |
 
   The interrupt receiver is exact; the DMA receiver can lose a byte at a
   block boundary, and WHERE it loses them is its contract rather than a
@@ -280,11 +312,31 @@ an echo of 8384 bytes at 115200 in a 1.2 s window:
   harvest re-arms the channel, so whatever arrives in that gap is gone.
   It is measured, not hidden: the suite prints the position of the first
   missing byte. It never receives MORE than was sent (it did, while the
-  re-arm kicked: below). Both engines at once are two channels triggered
-  concurrently, erratum 1.10.4's precondition: eight runs abandoned 0 to
-  3 transmit blocks each (the dead-block predicate, counted in
-  `dma_faults()`) and the host got up to 113 bytes more than it sent, and
-  once in ten runs the erratum went further - below.
+  re-arm kicked: below).
+
+  THE FOURTH SHAPE, DMA on both directions, is a compile error (erratum
+  1.10.4, "The optional DMA engines" above), and this is what it did
+  when it built: the same echo, twenty runs, the erratum in nineteen of
+  them. Seventeen passed the suite's verdicts while abandoning one to
+  seven transmit blocks each (the dead-block predicate, counted in
+  `dma_faults()`), the host receiving up to 138 bytes MORE than it sent;
+  two of those had SERCOM5's INTENSET scribbled (0xA8 and 0x38, where the
+  engined transport arms nothing); one ended with the transmitter WEDGED
+  - its channel enabled, its write-back its own, DATA full and TXC clear,
+  so the predicate could not fire - and the window never drained; and
+  one left the board silent until it was re-flashed. One run in twenty
+  was byte-exact.
+
+- **The duplex link the refusal leaves**, the transmit engine beside the
+  interrupt receiver, twenty runs of letter h: at 1 Mbaud 61500 to
+  62000 bytes each way, byte-exact on the board's side every time, no
+  hardware overrun; at 2 Mbaud 87000 to 88000, the interrupt receiver
+  overrunning in hardware in ten runs of twenty (one to three bytes,
+  each counted in `hw_overruns`) - one RXC entry per 240 cycles and two
+  characters of FIFO is its edge - and no transmit block abandoned in
+  any run of either rate. The host's own view of the echo above 115200 is the
+  bridge's and is not judged: the plain transport's echo at 1 Mbaud,
+  byte-exact on the board, reached the host 635 bytes short.
 
 - **Rates, through the interrupt transport, echoing:** 115200 and
   1 Mbaud are byte-exact; 3 Mbaud loses, and the loss is ACCOUNTED FOR
@@ -324,15 +376,15 @@ bridge between the pads and the PC - as much as of the driver.
   `write_byte()` pays a transport nudge every byte - arming DRE, or
   `pump_tx()` with an engine. That plateaus at 98.4 kB/s (about 1 Mbaud
   equivalent) at EVERY rate from 1 Mbaud up, the wire idling while the
-  CPU catches up. Fed this way the DMA engines are SLOWER than the
-  interrupt, 57-64 kB/s at 92% CPU, because a pump_tx() per byte starts
-  a block for one byte.
-- **`write_bulk()` is what makes the engines worth having.** The same
-  64 KB at 3 Mbaud: 169343 B/s at 75% CPU through the interrupt
+  CPU catches up. Fed this way the DMA transmit engine is SLOWER than
+  the interrupt, 57-64 kB/s at 92% CPU, because a pump_tx() per byte
+  starts a block for one byte.
+- **`write_bulk()` is what makes the transmit engine worth having.** The
+  same 64 KB at 3 Mbaud: 169343 B/s at 75% CPU through the interrupt
   transport, and 297890 B/s - 99.3% of the wire - at 9% CPU through the
-  engines. At 1 Mbaud the engines saturate the wire at 5% CPU against
+  engine. At 1 Mbaud the engine saturates the wire at 5% CPU against
   70% for the per-byte interrupt path.
-- **With the engines, transmit is limited by the BAUD GENERATOR and
+- **With the engine, transmit is limited by the BAUD GENERATOR and
   nothing else.** Measured across four rates, the engined bulk path
   costs 4% of the CPU at 46 kB/s, 5% at 100 kB/s and 8% at 298 kB/s -
   a straight line whose slope is **7.6 CPU cycles per byte**, about
@@ -356,26 +408,39 @@ bridge between the pads and the PC - as much as of the driver.
   is the interrupt RATE that gives way and not the total work.
   (The ~50-58 kB/s each way these runs report is the HOST's USB
   turnaround, not the board's: the meaningful measurement here is where
-  loss begins, not the rate achieved.)
+  loss begins, not the rate achieved - and at that traffic. Pumped
+  harder, some 124 kB/s each way by `brio stress`, the 2 Mbaud echo's
+  interrupt receiver overruns in hardware in about half the runs, one to
+  three bytes, with the DMA transmitter beside it as in the duplex
+  record above.)
 - **At 115200 the console alone costs 11% of the CPU** through the
-  per-byte interrupt path and 6% through the engines - worth knowing,
-  since every bench suite prints.
+  per-byte interrupt path and 6% with DMA on both directions - the shape
+  erratum 1.10.4 refuses - worth knowing, since every bench suite
+  prints.
 - **Erratum 1.10.4 can turn the transmit channel into a writer of the
-  SERCOM's own registers.** Once in ten runs of the both-engines echo the
-  program stopped answering; halted over SWD it sat in SERCOM5_Handler
-  re-entered without end, INTENSET reading 0xAE (ERROR, RXBRK, RXS, RXC
-  and TXC armed - a byte of the stream) and TXC, which the engined
-  transport never serves, standing. The transmit channel's write-back
-  held BTCTRL 0x0809 - the RECEIVE descriptor's, destination incrementing
-  - with BTCNT 17 and DATA as both addresses, while its first-descriptor
-  slot was intact: running that live copy, the channel read received
-  bytes from DATA and wrote them at "end minus remaining", up through the
-  registers below DATA. The dead-block predicate cannot see this (the
-  block is running), and nothing at the channel level undoes it. The
-  exposure is c1c9e26's as much as today's (its eight runs of the same
-  leg abandoned 0 to 5 blocks each, today's 0 to 3); a program that
-  cannot afford it takes the interrupt receiver, which keeps the
-  transmit channel the only one.
+  SERCOM's own registers** - the measurement that makes the two-engine
+  shape a compile error. A both-engines echo that stopped answering,
+  halted over SWD, sat in SERCOM5_Handler re-entered without end,
+  INTENSET reading 0xAE (ERROR, RXBRK, RXS, RXC and TXC armed - a byte of
+  the stream) and TXC, which the engined transport never serves,
+  standing. The transmit channel's write-back held BTCTRL 0x0809 - the
+  RECEIVE descriptor's, destination incrementing - with BTCNT 17 and DATA
+  as both addresses, while its first-descriptor slot was intact: running
+  that live copy, the channel read received bytes from DATA and wrote
+  them at "end minus remaining", up through the registers below DATA.
+  The dead-block predicate cannot see this (the block is running), and
+  nothing at the channel level undoes it; the scribbled INTENSETs and
+  the wedged transmitter of the twenty-run record above are the same
+  walk caught short of a storm.
+- **The dead-block predicate, asked of the engine alone, fired on live
+  blocks.** Tested as the engine's `busy()` and the two flags, unmasked,
+  it abandoned blocks in nine runs of twenty of letter h's 2 Mbaud echo,
+  up to four in one - with the transmit engine's the only channel in the
+  image, so with no erratum in reach. Instrumented, every firing caught
+  found the channel DISABLED with nothing pending - a block already
+  over, read as in flight across its completion while the receive
+  interrupt entered every 240 cycles. Asked of the channel - enabled, no
+  PEND, no BUSY - and decided under the mask, it fired in none of twenty.
 - **The kick, measured and retired.** A scratch probe started 400
   messages a run through the transmit engine in four shapes - after a
   full drain at once, after 30 us, after 1.8 ms of standing DRE, and
@@ -410,6 +475,10 @@ Driver gaps (not built):
   but sit inside erratum 1.10.4's blast radius, so the shape is named
   and not built. A caller that cannot afford the gap should take the
   interrupt receiver, which has none.
+- DMA ON BOTH DIRECTIONS OF ONE PORT: refused, erratum 1.10.4 ("The
+  optional DMA engines"); the duplex bulk link is the transmit engine
+  beside the interrupt receiver, lossless to 1 Mbaud (letter h). Born
+  again only on a silicon revision the erratum's matrix leaves out.
 - Within USART: fractional and 3x-arithmetic baud, synchronous mode
   and XCK, RTS/CTS handshaking, RS-485/TE, LIN, IrDA, collision
   detection, auto-baud, start-of-frame/RXS wake, 9-bit data uses,
@@ -420,6 +489,9 @@ Driver gaps (not built):
   user.
 
 Implemented but not bench-verified:
+- The console's CPU share with ONE engine at 115200 (the 6% above is
+  the refused two-engine shape's): `serial_speed`'s occupancy, on its
+  transmit-engine transport.
 - `rebase()` (no dynamic clock exists on this target to drive it);
   nine-bit frames (this transport's rings are bytes); the USART
   personality on instances other than SERCOM5 (SERCOM1 and SERCOM3 run

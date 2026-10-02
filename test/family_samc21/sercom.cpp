@@ -199,37 +199,52 @@ static_assert(Sercom<sercom_count - 1>::dma_tx_trigger() ==
 static_assert(sercom_count == dma_sercom_count,
               "sercom.hpp and dmac.hpp must count the same instances");
 
-using DmaSerial = Uart<0, pads, 64, 256, DmaTxEngine<0>, DmaRxEngine<1>>;
-// One engine only is a legal shape: DMA on the bulk direction and the
-// RXC interrupt's exact per-character error attribution on the other.
+// ONE engine at most, on either side: DMA on the bulk direction and the
+// interrupt on the other. Both is a compile error - erratum 1.10.4, two
+// channels triggered concurrently (neg/uart_both_engines.cpp).
+using RxOnlySerial = Uart<0, pads, 64, 256, NoDmaEngine, DmaRxEngine<1>>;
 using TxOnlySerial = Uart<0, pads, 64, 256, DmaTxEngine<2>>;
 
 static_assert(!NoDmaEngine::present);
 static_assert(!Serial::has_tx_engine && !Serial::has_rx_engine);
-static_assert(DmaSerial::has_tx_engine && DmaSerial::has_rx_engine);
+static_assert(!RxOnlySerial::has_tx_engine && RxOnlySerial::has_rx_engine);
 static_assert(TxOnlySerial::has_tx_engine && !TxOnlySerial::has_rx_engine);
 // The concepts hold whether or not an engine is named: adding the
 // parameters changed no part of the public surface.
-static_assert(ByteTransport<DmaSerial> && BulkSink<DmaSerial> && SpanSource<DmaSerial> && ClockUser<DmaSerial>);
-static_assert(ByteTransport<TxOnlySerial> && ClockUser<TxOnlySerial>);
+static_assert(ByteTransport<RxOnlySerial> && BulkSink<RxOnlySerial> &&
+              SpanSource<RxOnlySerial> && ClockUser<RxOnlySerial>);
+static_assert(ByteTransport<TxOnlySerial> && BulkSink<TxOnlySerial> &&
+              SpanSource<TxOnlySerial> && ClockUser<TxOnlySerial>);
+
+// The rule the Uart's static_assert asks, as a value.
+static_assert(uart_engines_not_concurrent<NoDmaEngine, NoDmaEngine>());
+static_assert(uart_engines_not_concurrent<DmaTxEngine<0>, NoDmaEngine>());
+static_assert(uart_engines_not_concurrent<NoDmaEngine, DmaRxEngine<1>>());
+static_assert(!uart_engines_not_concurrent<DmaTxEngine<0>, DmaRxEngine<1>>());
 
 void engined_uart_verbs() {
     constexpr SysClock clock;
-    (void)DmaSerial::init(clock, 115200);
-    (void)DmaSerial::isr();       // whatever interrupts remain armed
-    (void)DmaSerial::dma_isr(0);  // the DMAC's vector, filtered per channel
-    (void)DmaSerial::dma_isr(9);  // a channel that is somebody else's
-    (void)DmaSerial::harvest();   // the RX pacing verb - the caller's policy
-    (void)DmaSerial::write_byte('x');
+    (void)RxOnlySerial::init(clock, 115200);
+    (void)RxOnlySerial::isr();       // the transmitter's DRE, still an interrupt
+    (void)RxOnlySerial::dma_isr(1);  // the DMAC's vector, filtered per channel
+    (void)RxOnlySerial::dma_isr(9);  // a channel that is somebody else's
+    (void)RxOnlySerial::harvest();   // the RX pacing verb - the caller's policy
+    (void)RxOnlySerial::write_byte('x');
     uint8_t b = 0;
-    (void)DmaSerial::read_byte(b);
-    (void)DmaSerial::rx_pending();
-    (void)DmaSerial::tx_idle();
-    (void)DmaSerial::hw_overruns();
-    DmaSerial::release();
+    (void)RxOnlySerial::read_byte(b);
+    (void)RxOnlySerial::rx_pending();
+    (void)RxOnlySerial::tx_idle();
+    (void)RxOnlySerial::hw_overruns();
+    (void)RxOnlySerial::dma_faults();
+    RxOnlySerial::release();
 
     (void)TxOnlySerial::init(clock, 9600);
+    (void)TxOnlySerial::isr();       // the receiver's RXC, still an interrupt
+    (void)TxOnlySerial::dma_isr(2);
+    (void)TxOnlySerial::write_byte('x');
+    (void)TxOnlySerial::write_bulk(std::span<const uint8_t>());
     (void)TxOnlySerial::harvest();   // no RX engine: false, and free
+    (void)TxOnlySerial::dma_faults();
     TxOnlySerial::release();
 
     // The engine-less Uart keeps every verb it had, harvest() included -
@@ -253,7 +268,8 @@ void ring_span_verbs() {
     r.consume(static_cast<uint8_t>(rd.size()));
 }
 
-// Two engines on one transport must not name the same channel.
+// Two engines of one transport must not name the same channel - the
+// SPI host's rule (samc21/spi.hpp); a Uart never has two.
 static_assert(uart_engines_distinct<NoDmaEngine, NoDmaEngine>());
 static_assert(uart_engines_distinct<DmaTxEngine<0>, NoDmaEngine>());
 static_assert(uart_engines_distinct<DmaTxEngine<0>, DmaRxEngine<1>>());

@@ -143,20 +143,31 @@ whose byte a full transmit buffer discards). `kick()` stays the owner's
 verb for a peripheral whose request rose before its channel was
 configured onto it at all; a TC capture needs it nowhere (below).
 
-**Erratum 1.10.4 is live on this silicon, and the write-back is
-therefore checked, never believed.** "Concurrent channels triggers"
-(the summary table files it under "Linked Descriptors"): when several
-channels are triggered concurrently, write-back descriptors may be
-corrupted - E/G/J at revisions E, F and H. Microchip's workaround
-(sequence everything through linked descriptors on a single channel)
-amounts to not using concurrent channels, which a full-duplex serial
-port cannot honour. The driver takes the other road: every field of a
-write-back except BTCNT and VALID is invariant WHILE THE BLOCK RUNS
-(copied from the fetched descriptor, and until the block ends only the
-beat counter is written back - 25.10.2), so `harvest()` compares them
-all against the copy it loaded, bounds-checks BTCNT, and DISCARDS a
-reading that fails, counting it in `violations()`. The corruption is
-real and is measured - see the bench findings.
+**Erratum 1.10.4 is live on this silicon: where a driver owns the pair,
+the pair is refused; elsewhere the write-back is checked, never
+believed.** DS80000740S 1.10.4, "Concurrent channels triggers" (the
+summary table files it under "Linked Descriptors"), E/G/J at revisions
+E, F and H: "When using concurrent channels triggers, the DMAC
+write-back descriptors may get corrupted." Its one workaround:
+"Multiple transfers must only be sequenced using linked descriptors on
+a single channel" - not triggering two channels concurrently at all;
+the erratum offers nothing about the write-back section's placement, a
+priority or the arbitration. So where ONE driver owns two channels whose
+triggers drift against each other, the pair is refused: a
+[sercom.md](sercom.md) Uart takes one engine at most, its two
+directions clocked by the two ends of the wire (a compile error,
+measured first: the pair was corrupted in nineteen echoes of twenty and
+wrote the SERCOM's registers). Everywhere else concurrency stays - the
+SPI host's full-duplex pair, whose two requests rise from one shifter at
+a fixed phase and in which no fault has been seen (`test_samc_spi`
+letter h verdicts its engine faults at zero), and channels of DIFFERENT owners, which no driver sees together - and
+the driver takes the other road: every field of a write-back except
+BTCNT and VALID is invariant WHILE THE BLOCK RUNS (copied from the
+fetched descriptor, and until the block ends only the beat counter is
+written back - 25.10.2), so `harvest()` compares them all against the
+copy it loaded, bounds-checks BTCNT, and DISCARDS a reading that fails,
+counting it in `violations()`. The corruption is real and is measured -
+see the bench findings.
 
 **THE READING IS NOT THE DAMAGE.** Validating what is read is
 necessary and NOT sufficient. 25.6.2.6: "For an ongoing block
@@ -266,8 +277,12 @@ promise, not an inheritance from whatever a debugger left behind.
   failed; clears both table slots), `trigger()`/`trigger_lost()` (the
   SWTRIGCTRL readback semantics: the bit reads set exactly when the
   trigger was LOST to an already-pending one), `suspend()`/`resume()`,
-  flags/arming/status verbs, `harvest()` -> `DmaProgress` with the
-  1.10.4 validation, `violations()`/`suspend_timeouts()` counters.
+  flags/arming/status verbs, `waiting()` (enabled with no trigger
+  pending and no beat moving, one select: beside a trigger that stands,
+  a channel that cannot move - the half of sercom.md's dead-block
+  predicate only the channel can answer), `harvest()` -> `DmaProgress`
+  with the 1.10.4 validation, `violations()`/`suspend_timeouts()`
+  counters.
   Everything channel-addressed pays the CHID guard uniformly.
 - **The five engines** - `DmaTxEngine<ch, Elem>`,
   `DmaRxEngine<ch, Elem>`, `DmaLoopEngine<ch, Elem>`,
@@ -314,7 +329,8 @@ promise, not an inheritance from whatever a debugger left behind.
   nowhere else, so every write-back reading is validated against the
   slot.
 - **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart and SPI host
-  engines (see sercom.md and spi.md for the task-side contracts): drain
+  engines (see sercom.md and spi.md for the task-side contracts; a Uart
+  takes ONE of them, erratum 1.10.4 above): drain
   a buffer into a peripheral, and fill a buffer from one. The transmit
   side's claim and programming are TWO verbs, `reserve()` (a
   test-and-set of its busy flag) and `launch(run)` (`cancel()` gives an
@@ -511,6 +527,20 @@ and the switch says so.
   INTENSET, INTFLAG, STATUS below DATA - and the program died in an
   interrupt storm the scribbled enables raised. Its slot in BASEADDR was
   intact: the corruption is the live copy's alone, as the erratum says.
+  Over twenty echoes of that shape the erratum struck in nineteen: blocks
+  abandoned in seventeen, INTENSET scribbled in two, the transmitter
+  wedged in one and the board silent in one (sercom.md) - which is why a
+  Uart takes one engine. With one, the same echo ran forty legs with
+  nothing abandoned.
+- **The erratum reaches across owners.** The Uart's transmit engine
+  beside two memory-to-memory channels triggered without a wait
+  (`test_samc_dma` j) found the engine's own state in a churned
+  channel's write-back - BTCTRL 0x408 (its SRCINC block, VALID cleared)
+  and a transmit-ring SRCADDR under the churned channel's DSTADDR - with
+  81 readings refused and 23 suspends lost in 68409 rounds; the engine's
+  694 lines all arrived, in order, and no block of its was abandoned.
+  The refusal of the Uart's pair does not make a program's DMA safe; it
+  removes the one pair a single driver can see.
 - **Erratum 1.10.4 observed directly**, twice over: under five
   concurrent channels with the engined Uart running, 340 corrupted
   write-backs are refused out of 210852 readings in one four-second
@@ -761,6 +791,12 @@ Driver gaps (not built):
   chain in `test_samc_analog_dma`'s kernel letter; the contract speaks
   blocks, not DMA, and exists as the fixed point the next platform's
   stream machinery is measured against.)
+- A GUARD ACROSS OWNERS for erratum 1.10.4: the Uart refuses its own
+  pair, and nothing refuses two channels of different owners triggered
+  concurrently - a block-wide rule would refuse the SPI host's
+  full-duplex pair and every analog chain, and which concurrency a
+  program can afford is the program's decision, measured above. Born
+  with a program that wants one.
 - An automatic recovery ladder. A channel the erratum has left unable
   to clear ENABLE cannot be reclaimed at the channel level and needs
   `Dmac::init()`; the suite spends that rung by hand, and no verb here

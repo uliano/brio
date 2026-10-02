@@ -27,8 +27,9 @@
 //      print() into the ring, the engine drains it in blocks
 //   i  the RX engine and the tick-paced harvest() contract - runner
 //      driven like r, so out of z
-//   j  both engines at once: the 1.10.4 stress at the task level, and
-//      every hand harvest timed against the tick
+//   j  the TX engine beside two churned memory channels: the 1.10.4
+//      stress at the task level, and every hand harvest timed against
+//      the tick
 //
 // Wiring: NONE. Every letter but r is self-contained; r asks the runner
 // for a burst and says so.
@@ -66,22 +67,31 @@ constexpr Serial serial;
 using Sc5 = Serial::Resource;
 
 // THE SAME SERCOM, SEEN THROUGH THE ENGINES. Letters h/i/j drive the
-// console through a SECOND Uart instantiation on instance 5 - identical
-// pads and rate, but with samc21/dmac.hpp's optional engines named. The
-// two instantiations have separate rings and separate counters and are
-// never live at the same time: each letter re-init()s the one it wants,
-// which resets and reconfigures the peripheral from scratch, and hands
-// the console back before it prints a single verdict.
+// console through OTHER Uart instantiations on instance 5 - identical
+// pads and rate, but with one of samc21/dmac.hpp's optional engines
+// named: the transmit engine for h and j, the receive engine for i. ONE
+// each, because a Uart takes one engine at most (erratum 1.10.4:
+// sercom.hpp refuses the pair at compile time). The instantiations have
+// separate rings and separate counters and are never live at the same
+// time: each letter re-init()s the one it wants, which resets and
+// reconfigures the peripheral from scratch, and hands the console back
+// before it prints a single verdict.
 //
 // The engines take channels 6 and 7 so nothing collides with the raw
-// channels letters a..g use, and the two must differ - a channel moves
-// bytes one way, and sercom.hpp refuses a shared one at compile time.
+// channels letters a..g use.
 constexpr uint8_t ch_engine_tx = 6;
 constexpr uint8_t ch_engine_rx = 7;
-using EngineSerial = brio::Uart<5, console_pads, 64, 256,
-                                brio::DmaTxEngine<ch_engine_tx>,
-                                brio::DmaRxEngine<ch_engine_rx>>;
-constexpr EngineSerial engine_serial;
+using TxEngineSerial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine<ch_engine_tx>>;
+using RxEngineSerial = brio::Uart<5, console_pads, 64, 256, brio::NoDmaEngine,
+                                  brio::DmaRxEngine<ch_engine_rx>>;
+constexpr TxEngineSerial tx_engine_serial;
+constexpr RxEngineSerial rx_engine_serial;
+
+/// Which instantiation owns SERCOM5: its vector serves that one's rings
+/// and nobody else's (the engined ones keep the other direction on the
+/// SERCOM's interrupt).
+enum class Console : uint8_t { plain, tx_engine, rx_engine };
+Console live = Console::plain;
 
 using Led = brio::Pin<'B', 23>;
 
@@ -254,7 +264,13 @@ void chain_start(uint8_t n) {
 
 // ---- target glue ------------------------------------------------------------
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
-extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+extern "C" void SERCOM5_Handler() {
+    switch (live) {
+        case Console::tx_engine: (void)TxEngineSerial::isr(); break;
+        case Console::rx_engine: (void)RxEngineSerial::isr(); break;
+        default: (void)Serial::isr(); break;
+    }
+}
 
 extern "C" void DMAC_Handler() {
     uint16_t served = 0;
@@ -276,10 +292,14 @@ extern "C" void DMAC_Handler() {
                 irq_suspend[ch] = static_cast<uint16_t>(irq_suspend[ch] + 1);
             }
         }
-        // The engined Uart's own channels: it consumes what its
-        // transmit block carried and starts the next run itself. A
-        // channel that is not its own simply answers false.
-        (void)EngineSerial::dma_isr(ch);
+        // The engined Uart's own channel: the transmit one consumes what
+        // its block carried and starts the next run itself. A channel
+        // that is not its own simply answers false.
+        switch (live) {
+            case Console::tx_engine: (void)TxEngineSerial::dma_isr(ch); break;
+            case Console::rx_engine: (void)RxEngineSerial::dma_isr(ch); break;
+            default: break;
+        }
         if (ch == ch_chain && irq->complete() && chain_running) {
             const uint8_t next = static_cast<uint8_t>(chain_done + 1);
             chain_done = next;
@@ -1264,22 +1284,26 @@ void tr_uart_rx() {
 // the other instantiation owns the peripheral would sit in a ring nobody
 // is draining.
 
-bool take_console_with_engines() {
+template <typename U>
+bool take_console_with_engine(Console who) {
     console_tx_quiesce();
     Sc5::enable_rxc_interrupt(false);
-    return EngineSerial::init(clock, 115200);
+    live = who;
+    return U::init(clock, 115200);
 }
 
+template <typename U>
 bool give_console_back() {
-    // Let the engine finish whatever block is on the wire, then hand the
+    // Let the transmitter finish whatever is on the wire, then hand the
     // peripheral to the plain interrupt-driven console again.
     uint32_t spins = 20'000'000u;
-    while (!EngineSerial::tx_idle() && spins-- != 0u) {
+    while (!U::tx_idle() && spins-- != 0u) {
     }
     spins = 400'000u;
     while (!Sc5::txc_flag() && spins-- != 0u) {
     }
-    EngineSerial::release();
+    U::release();
+    live = Console::plain;
     return Serial::init(clock, 115200);
 }
 
@@ -1287,15 +1311,15 @@ bool give_console_back() {
 // h - transmitting through Uart's optional TX engine
 // =============================================================================
 void th_engine_tx() {
-    bench.verdict("the engined Uart names both engines",
-                  EngineSerial::has_tx_engine && EngineSerial::has_rx_engine);
+    bench.verdict("the engined Uart names the transmit engine alone",
+                  TxEngineSerial::has_tx_engine && !TxEngineSerial::has_rx_engine);
     bench.verdict("the plain one names neither",
                   !Serial::has_tx_engine && !Serial::has_rx_engine);
     bench.verdict("SERCOM5's own TX trigger code",
                   Sc5::dma_tx_trigger() == SERCOM5_DMAC_ID_TX);
 
     clear_irq_counts();
-    const bool took = take_console_with_engines();
+    const bool took = take_console_with_engine<TxEngineSerial>(Console::tx_engine);
 
     // Ordinary print() calls. write_byte() pushes into the same SPSC
     // ring as ever; what changed is who drains it - the DRE interrupt is
@@ -1303,17 +1327,17 @@ void th_engine_tx() {
     const uint32_t t0 = cycles_now();
     constexpr uint8_t lines = 6;
     for (uint8_t i = 0; i < lines; ++i) {
-        brio::print(engine_serial, "[engine-tx] line ", i,
+        brio::print(tx_engine_serial, "[engine-tx] line ", i,
                     " written with print(), drained by DMA", crlf);
     }
     uint32_t spins = 20'000'000u;
-    while (!EngineSerial::tx_idle() && spins-- != 0u) {
+    while (!TxEngineSerial::tx_idle() && spins-- != 0u) {
     }
     const uint32_t spent = cycles_now() - t0;
-    const bool drained = EngineSerial::tx_idle();
+    const bool drained = TxEngineSerial::tx_idle();
     const uint8_t dre_armed = Sc5::armed();
 
-    const bool gave = give_console_back();
+    const bool gave = give_console_back<TxEngineSerial>();
 
     bench.verdict("the engined transport came up", took);
     bench.verdict("print() drained the ring completely", drained);
@@ -1339,13 +1363,13 @@ void th_engine_tx() {
 // =============================================================================
 void ti_engine_rx() {
     clear_irq_counts();
-    const bool took = take_console_with_engines();
+    const bool took = take_console_with_engine<RxEngineSerial>(Console::rx_engine);
 
     constexpr uint32_t window_ms = 3000;
-    brio::print(engine_serial, "  READY - send a burst now (", window_ms,
+    brio::print(rx_engine_serial, "  READY - send a burst now (", window_ms,
                 " ms window)", crlf);
     uint32_t spins = 20'000'000u;
-    while (!EngineSerial::tx_idle() && spins-- != 0u) {
+    while (!RxEngineSerial::tx_idle() && spins-- != 0u) {
     }
 
     // TICK-PACED, which is the whole contract: nothing tells this
@@ -1364,7 +1388,7 @@ void ti_engine_rx() {
         while (static_cast<int32_t>(brio::Ticker::ticks() - next) < 0) {
         }
         ++polls;
-        if (EngineSerial::harvest()) {
+        if (RxEngineSerial::harvest()) {
             ++edges;   // the empty -> non-empty edge a kernel AO would post on
             if (first_byte_at == 0u) {
                 first_byte_at = brio::Ticker::ticks() - start;
@@ -1374,15 +1398,15 @@ void ti_engine_rx() {
         // verb: an engine changes who fills the ring, never how it is
         // read.
         uint8_t b = 0;
-        while (got < sizeof(received) && EngineSerial::read_byte(b)) {
+        while (got < sizeof(received) && RxEngineSerial::read_byte(b)) {
             received[got++] = b;
         }
     }
 
-    const uint8_t hw_over = EngineSerial::hw_overruns();
-    const uint8_t frame_err = EngineSerial::frame_errors();
+    const uint8_t hw_over = RxEngineSerial::hw_overruns();
+    const uint8_t frame_err = RxEngineSerial::frame_errors();
     const uint8_t rx_armed = Sc5::armed();
-    const bool gave = give_console_back();
+    const bool gave = give_console_back<RxEngineSerial>();
 
     print(serial, "  received ", got, " bytes in ", polls, " polls, ", edges,
           " wake edges, first at ", first_byte_at, " ms", crlf, "  bytes: ");
@@ -1406,21 +1430,23 @@ void ti_engine_rx() {
 }
 
 // =============================================================================
-// j - both engines at once: erratum 1.10.4 at the task level
+// j - the TX engine beside the churn: erratum 1.10.4 at the task level
 // =============================================================================
-void tj_engine_duplex() {
+void tj_engine_churn() {
     clear_irq_counts();
     brio::DmaChannel<ch_engine_tx>::clear_counters();
-    brio::DmaChannel<ch_engine_rx>::clear_counters();
     Copy::clear_counters();
     Churn0::clear_counters();
 
-    const bool took = take_console_with_engines();
+    const bool took = take_console_with_engine<TxEngineSerial>(Console::tx_engine);
 
-    // Full duplex through the task's own surface - print() out, harvest()
-    // in - with two memory-to-memory channels churning underneath, so
-    // four channels are being triggered concurrently while every one of
-    // them has its write-back read.
+    // The task's own surface - print() out through the transmit engine,
+    // the receiver on its interrupt - with two memory-to-memory channels
+    // churning underneath, so three channels are triggered concurrently
+    // and the two churned ones have their write-backs read by hand. The
+    // transport's own pair is never two channels (a Uart takes one
+    // engine, erratum 1.10.4); concurrency between DIFFERENT owners is
+    // the program's, and this letter is what it costs.
     constexpr uint32_t run_ms = 3000;
     (void)Copy::configure({.action = brio::DmaTriggerAction::beat});
     (void)Churn0::configure({.action = brio::DmaTriggerAction::beat});
@@ -1456,15 +1482,14 @@ void tj_engine_duplex() {
     };
     const uint32_t deadline = brio::Ticker::ticks() + run_ms;
     while (static_cast<int32_t>(brio::Ticker::ticks() - deadline) < 0) {
-        if (EngineSerial::tx_idle()) {
-            brio::print(engine_serial, "[duplex] line ", lines,
-                        " out while the harvest runs in", crlf);
+        if (TxEngineSerial::tx_idle()) {
+            brio::print(tx_engine_serial, "[tx+churn] line ", lines,
+                        " out while two channels churn", crlf);
             ++lines;
         }
         churn_blocks += churn<Copy>(0);
         churn_blocks += churn<Churn0>(64);
         ++harvests;
-        (void)EngineSerial::harvest();
         if (!timed_harvest(std::type_identity<Copy>{})) {
             ++refused_readings;
         }
@@ -1483,37 +1508,33 @@ void tj_engine_duplex() {
             captured = true;
         }
         uint8_t b = 0;
-        while (EngineSerial::read_byte(b)) {
+        while (TxEngineSerial::read_byte(b)) {
             ++rx_bytes;
         }
     }
 
     const uint32_t violations = brio::DmaChannel<ch_engine_tx>::violations() +
-                                brio::DmaChannel<ch_engine_rx>::violations() +
                                 Copy::violations() + Churn0::violations();
     const uint32_t timeouts = brio::DmaChannel<ch_engine_tx>::suspend_timeouts() +
-                              brio::DmaChannel<ch_engine_rx>::suspend_timeouts() +
                               Copy::suspend_timeouts() + Churn0::suspend_timeouts();
-    const uint8_t hw_over = EngineSerial::hw_overruns();
-    const bool gave = give_console_back();
+    const uint8_t hw_over = TxEngineSerial::hw_overruns();
+    const uint8_t tx_faults = TxEngineSerial::dma_faults();
+    const bool gave = give_console_back<TxEngineSerial>();
 
-    print(serial, crlf, "  ---- duplex 1.10.4 stress ----", crlf);
+    print(serial, crlf, "  ---- 1.10.4 stress at the task level ----", crlf);
     print(serial, "  TX lines=", lines, "  RX bytes=", rx_bytes,
           "  churn blocks=", churn_blocks, crlf);
     print(serial, "  harvest rounds=", harvests, "  write-back violations=",
           violations, "  suspend timeouts=", timeouts, "  hw_overruns=", hw_over,
           crlf);
     // PER CHANNEL, because the whole question is WHICH write-back went
-    // bad: a memory channel's would point at the erratum, the receive
-    // engine's own at this driver.
-    print(serial, "  per channel: tx", ch_engine_tx, "=",
-          brio::DmaChannel<ch_engine_tx>::violations(), "/",
-          brio::DmaChannel<ch_engine_tx>::suspend_timeouts(), " rx", ch_engine_rx,
-          "=", brio::DmaChannel<ch_engine_rx>::violations(), "/",
-          brio::DmaChannel<ch_engine_rx>::suspend_timeouts(), " copy", ch_copy, "=",
-          Copy::violations(), "/", Copy::suspend_timeouts(), " churn", ch_churn0, "=",
-          Churn0::violations(), "/", Churn0::suspend_timeouts(),
-          "   (violations/timeouts)", crlf);
+    // bad. The transmit engine reads none of its own (programmed length
+    // plus TCMPL is its whole truth), so its share of the erratum shows
+    // as the dead blocks the transport abandoned, not as refusals.
+    print(serial, "  per channel: copy", ch_copy, "=", Copy::violations(), "/",
+          Copy::suspend_timeouts(), " churn", ch_churn0, "=", Churn0::violations(),
+          "/", Churn0::suspend_timeouts(), "   (violations/timeouts); tx", ch_engine_tx,
+          " blocks abandoned=", tx_faults, crlf);
 
     const uint32_t tick_cycles = SysClock::hz / 1000u;
     print(serial, "  longest hand harvest: ", longest_read, " cycles (",
@@ -1557,8 +1578,7 @@ void tj_engine_duplex() {
     // BY HAND: every reading that came back empty is one the driver
     // refused, and every refusal is counted as exactly one of the two
     // reasons. Nothing was quietly dropped, and nothing inconsistent was
-    // quietly believed. (The engines' own channels are harvested inside
-    // the transport and reported separately above.)
+    // quietly believed.
     bench.verdict("every refused reading is a counted one",
                   refused_readings == Copy::violations() + Copy::suspend_timeouts() +
                                           Churn0::violations() +
@@ -1570,7 +1590,7 @@ void tj_engine_duplex() {
 
     if (violations != 0u) {
         print(serial, "  ERRATUM 1.10.4 OBSERVED: ", violations,
-              " corrupted write-backs refused in ", harvests * 3u,
+              " corrupted write-backs refused in ", harvests * 2u,
               " readings, and every transfer still landed correctly", crlf);
     } else {
         print(serial, "  no corrupted write-back seen in this run", crlf);
@@ -1610,8 +1630,8 @@ int main() {
     bench.letter('h', "Uart's optional TX engine", th_engine_tx);
     bench.letter('i', "Uart's RX engine + tick-paced harvest (send a burst)",
                  ti_engine_rx, false);
-    bench.letter('j', "both engines at once (1.10.4 at the task level)",
-                 tj_engine_duplex);
+    bench.letter('j', "the TX engine beside the churn (1.10.4 at the task level)",
+                 tj_engine_churn);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

@@ -222,6 +222,7 @@ void channel_verbs() {
     Ch::arm(DmaFlag::complete, true);
     (void)Ch::armed();
     (void)Ch::status();
+    (void)Ch::waiting();
     (void)Ch::busy();
     (void)Ch::pending();
     (void)Ch::fetch_error();
@@ -257,6 +258,7 @@ void engine_verbs() {
     DmaTxEngine<0>::cancel();
     (void)DmaTxEngine<0>::start_fixed(&out[0], 8);
     (void)DmaTxEngine<0>::running();
+    (void)DmaTxEngine<0>::waiting();
     (void)DmaTxEngine<0>::busy();
     (void)DmaTxEngine<0>::in_flight();
     (void)DmaTxEngine<0>::complete();
@@ -292,8 +294,9 @@ static_assert(DmaLoopEngine<2, uint16_t>::beat == DmaBeat::hword);
 static_assert(DmaPingPongEngine<3, uint32_t>::beat == DmaBeat::word);
 
 // A widened engine is still the same engine to sercom.hpp's tests: the
-// tags and the channel are where they were, so `uart_engines_distinct`
-// and the Uart's `if constexpr` branches see no difference.
+// tags and the channel are where they were, so `uart_engines_distinct`,
+// `uart_engines_not_concurrent` and the transports' `if constexpr`
+// branches see no difference.
 static_assert(DmaTxEngine<0, uint16_t>::present);
 static_assert(DmaTxEngine<4, uint32_t>::channel == 4);
 static_assert(DmaLoopEngine<5, uint16_t>::channel == 5);

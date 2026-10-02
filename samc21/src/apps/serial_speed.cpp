@@ -1,5 +1,6 @@
 // serial_speed - how fast can this console link really go, what does it
-// cost the CPU, and how much of that cost do the DMA engines take away?
+// cost the CPU, and how much of that cost does the DMA transmit engine
+// take away?
 //
 // A PROBE, not a test suite: what it reports is a property of the WIRE
 // and the two chips on it (an ADuM1201 isolator and a CH340 bridge), not
@@ -39,7 +40,9 @@
 // the point, so the menu has to survive it):
 //   ?      this menu and the current state
 //   0..7   switch to that rate from the table, and STAY there
-//   p      switch transport: plain interrupt-driven <-> DMA engines
+//   p      switch transport: plain interrupt-driven <-> the DMA transmit
+//          engine (the receiver stays on RXC: a Uart takes one engine at
+//          most, erratum 1.10.4)
 //   t      transmit burst (64 KB) - throughput and occupancy
 //   e      echo window (2 s): everything received goes straight back
 //   s      status: rates asked and achieved, transport, error counters
@@ -84,11 +87,11 @@ constexpr uint32_t rx_ring = 1024;
 constexpr uint32_t tx_ring = 1024;
 
 constexpr uint8_t ch_tx = 6;
-constexpr uint8_t ch_rx = 7;
 
 using Plain = Uart<5, console_pads, rx_ring, tx_ring>;
-using Engined = Uart<5, console_pads, rx_ring, tx_ring,
-                     DmaTxEngine<ch_tx>, DmaRxEngine<ch_rx>>;
+// ONE engine, on the transmit side: sercom.hpp refuses the pair
+// (erratum 1.10.4), and transmit is the direction a burst measures.
+using Engined = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<ch_tx>>;
 constexpr Plain plain_serial;
 constexpr Engined engined_serial;
 using Sc5 = Plain::Resource;
@@ -149,11 +152,6 @@ uint32_t write_bulk(const uint8_t* p, uint32_t len) {
 uint32_t read_bulk(uint8_t* p, uint32_t len) {
     const std::span<uint8_t> run(p, len);
     return engined ? Engined::read_bulk(run) : Plain::read_bulk(run);
-}
-void harvest_if_engined() {
-    if (engined) {
-        (void)Engined::harvest();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +439,6 @@ void echo_window() {
     const uint32_t window = (SysClock::hz / 1000u) * echo_ms;
     const uint32_t t0 = cycles_now();
     while (cycles_now() - t0 < window) {
-        harvest_if_engined();
         uint8_t b = 0;
         while (read_byte(b)) {
             if (!write_byte(b)) {
@@ -505,14 +502,12 @@ void echo_window_bulk() {
     const uint32_t t0 = cycles_now();
     while (cycles_now() - t0 < window) {
         // THE PACE IS THE PORT OWNER'S, and at these rates it has to be
-        // brisk: the RX engine only publishes what harvest() takes, so a
-        // loop that harvested once per whole job batch (~385 us) would
-        // leave 115 bytes of 3 Mbaud traffic to pile up behind it. The
-        // batch is therefore broken into slices with a harvest between
+        // brisk: a loop that drained once per whole job batch (~385 us)
+        // would leave 115 bytes of 3 Mbaud traffic to pile up behind it.
+        // The batch is therefore broken into slices with a drain between
         // them - the same total background work, visited more often.
         constexpr uint32_t slices = 32;
         for (uint32_t slice = 0; slice < slices; ++slice) {
-            harvest_if_engined();
             for (;;) {
                 const uint32_t got = read_bulk(hop, sizeof hop);
                 if (got == 0u) {
@@ -572,7 +567,7 @@ void menu() {
         say("  ", static_cast<char>('0' + i), "  ", rates[i],
             i == rate_index ? "   <= current" : "", crlf);
     }
-    say("  p  transport: plain irq <-> DMA engines (now ",
+    say("  p  transport: plain irq <-> DMA transmit engine (now ",
         engined ? "DMA" : "irq", ")", crlf);
     say("  t  transmit burst of ", burst_bytes, " bytes (through the transport)",
         crlf);
@@ -632,7 +627,6 @@ int main() {
     say("> ");
 
     for (;;) {
-        harvest_if_engined();
         uint8_t c = 0;
         if (!read_byte(c)) {
             continue;

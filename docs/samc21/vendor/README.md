@@ -72,12 +72,15 @@ Encoded in code (each with its comment citing the item):
 - **1.10.4 DMAC Concurrent channels triggers** (the summary table
   files it under "Linked Descriptors") - concurrent channel triggers
   may corrupt WRITE-BACK descriptors; E/G/J at revisions E, F and H,
-  so LIVE on this chip and positively observed at the bench. The
-  workaround Microchip offers (single channel, linked descriptors)
-  forbids concurrency itself, which a duplex serial port cannot
-  honour - dmac.hpp instead validates every write-back reading
-  against the loaded descriptor and refuses inconsistent ones
-  (dmac.md carries the measurements).
+  so LIVE on this chip and positively observed at the bench. The one
+  workaround Microchip offers ("Multiple transfers must only be
+  sequenced using linked descriptors on a single channel") forbids
+  concurrency itself; nothing about the write-back's placement, a
+  priority or the arbitration. Applied where one driver owns the pair:
+  sercom.hpp's Uart takes ONE DMA engine (both is a compile error).
+  Everywhere else dmac.hpp validates every write-back reading against
+  the loaded descriptor and refuses inconsistent ones, and the owners
+  abandon dead blocks (dmac.md and sercom.md carry the measurements).
 
 NOT applicable to rev F (rev B..E items - do not code around them):
 - 1.10.1 DMAC CRCDATAIN two-instruction hazard - rev B only (and the
