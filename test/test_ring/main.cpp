@@ -1,14 +1,19 @@
-// Host tests for brio::Ring (SPSC FIFO, util/ring.hpp).
+// Host tests for util/ring.hpp: brio::Ring (the SPSC FIFO) and
+// brio::HardwareRing (the consumer half of a ring whose producer is the
+// hardware, driven here by a scripted circular channel).
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
 
 #include <stdint.h>
+#include <vector>
 
 #include "util/ring.hpp"
+#include "util/stream.hpp"
 #include "host/platform.hpp"
 
+using brio::HardwareRing;
 using brio::HostPlatform;
 using brio::Ring;
 
@@ -403,4 +408,632 @@ TEST_CASE("spans are correct at the 65536-slot boundary, where size > index_t") 
     CHECK(rd.size() == 65535);
     r.consume(65535);
     CHECK(r.empty());
+}
+
+// =============================================================================
+// HardwareRing: the ring whose producer is the hardware
+//
+// The producer below is a SCRIPTED CIRCULAR CHANNEL, honest to the
+// RingCounter contract and to the silicon's habits: it writes one element
+// at a time, the value of each being its own position since the start
+// (truncated to the element), so a consumer can tell exactly what it was
+// handed; its count reloads to N at a lap's end, as a circular channel's
+// does; and its lap count is kept by a "completion handler" fed by ONE
+// FLAG - served at once by default, held off on demand, in which case the
+// count lags the counter, and a second wrap while the flag stands is lost,
+// as a latched flag loses it. A burst can also land INSIDE a look, between
+// the view's read of the lap count and its read of the counter.
+// =============================================================================
+
+namespace {
+
+template <int id, uint32_t N, typename E = uint32_t>
+struct Channel {
+    static inline E storage[N]{};
+
+    static inline uint32_t written = 0;      // positions written: the truth
+    static inline uint32_t counted = 0;      // what laps() reports
+    static inline bool flag = false;         // a wrap the handler has not served
+    static inline bool held = false;         // the handler held off
+    static inline bool zero_at_end = false;  // the count reads 0, not N, at a lap's end
+    // A burst written on entry to the inject_at-th call of either function,
+    // counted together: a producer that moves between the two reads of a
+    // look, whichever read comes first.
+    static inline uint32_t calls = 0;
+    static inline uint32_t inject_at = 0;
+    static inline uint32_t inject_burst = 0;
+
+    static void maybe_inject() {
+        ++calls;
+        if (inject_burst != 0u && calls == inject_at) {
+            const uint32_t k = inject_burst;
+            inject_burst = 0;
+            write(k);
+        }
+    }
+
+    static uint32_t laps() {
+        maybe_inject();
+        return counted;
+    }
+
+    static uint32_t remaining() {
+        maybe_inject();
+        const uint32_t into = written % N;
+        if (into == 0u && written != 0u && zero_at_end) {
+            return 0;
+        }
+        return N - into;
+    }
+
+    static void serve() {
+        if (flag) {
+            flag = false;
+            counted = counted + 1u;
+        }
+    }
+
+    static void hold(bool on) {
+        held = on;
+        if (!on) {
+            serve();
+        }
+    }
+
+    static void write(uint32_t k) {
+        for (uint32_t i = 0; i < k; ++i) {
+            storage[written % N] = static_cast<E>(written);
+            written = written + 1u;
+            if (written % N == 0u) {
+                flag = true;
+                if (!held) {
+                    serve();
+                }
+            }
+        }
+    }
+
+    // `k` elements at once, for the long distances (the handler serving
+    // every wrap): the lap count moves by the boundaries crossed and the
+    // storage holds the last lap's values.
+    static void jump(uint32_t k) {
+        const uint32_t crossed = ((written % N) + k) / N;
+        written = written + k;
+        counted = counted + crossed;
+        const uint32_t fill = k < N ? k : N;
+        for (uint32_t i = 0; i < fill; ++i) {
+            const uint32_t p = written - fill + i;
+            storage[p % N] = static_cast<E>(p);
+        }
+    }
+
+    static void call_inject(uint32_t calls_from_now, uint32_t burst) {
+        inject_at = calls + calls_from_now;
+        inject_burst = burst;
+    }
+
+    static void reset() {
+        written = 0;
+        counted = 0;
+        flag = false;
+        held = false;
+        zero_at_end = false;
+        calls = 0;
+        inject_at = 0;
+        inject_burst = 0;
+        for (uint32_t i = 0; i < N; ++i) {
+            storage[i] = static_cast<E>(0xEEEEEEEEu);
+        }
+    }
+};
+
+/// Read everything the view offers, run by run, checking each released
+/// run was intact; returns the values in the order they came.
+template <typename View>
+std::vector<uint32_t> drain_all() {
+    std::vector<uint32_t> got;
+    for (;;) {
+        const auto run = View::read_span();
+        if (run.empty()) {
+            break;
+        }
+        std::vector<uint32_t> part(run.begin(), run.end());
+        if (View::consume(static_cast<uint32_t>(run.size()))) {
+            got.insert(got.end(), part.begin(), part.end());
+        }
+    }
+    return got;
+}
+
+std::vector<uint32_t> positions(uint32_t first, uint32_t count) {
+    std::vector<uint32_t> v;
+    for (uint32_t i = 0; i < count; ++i) {
+        v.push_back(first + i);
+    }
+    return v;
+}
+
+using Ch8 = Channel<1, 8>;
+using View8 = HardwareRing<Ch8::storage, Ch8>;
+
+using Byte16 = Channel<2, 16, uint8_t>;
+using ByteView = HardwareRing<Byte16::storage, Byte16>;
+
+using Half8 = Channel<3, 8, uint16_t>;
+using HalfView = HardwareRing<Half8::storage, Half8>;
+
+void fresh8() {
+    Ch8::reset();
+    View8::clear();
+    View8::clear_overruns();
+}
+
+} // namespace
+
+static_assert(brio::RingCounter<Ch8>);
+// With a byte element the view IS a SpanSource; with a wider one it is not
+// (a SpanSource lends bytes).
+static_assert(brio::SpanSource<ByteView>);
+static_assert(!brio::SpanSource<View8>);
+static_assert(!brio::SpanSource<HalfView>);
+static_assert(std::is_same_v<View8::element, uint32_t>);
+static_assert(std::is_same_v<HalfView::element, uint16_t>);
+static_assert(View8::size == 8 && View8::capacity() == 7);
+
+TEST_CASE("hardware ring: a fresh view is empty") {
+    fresh8();
+    CHECK(View8::empty());
+    CHECK(View8::count() == 0);
+    CHECK(View8::read_span().empty());
+    CHECK_FALSE(View8::pop().has_value());
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: the head is the counter - a run up to it, then the next") {
+    fresh8();
+    Ch8::write(3);
+    CHECK(View8::count() == 3);
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 3);
+    CHECK(std::vector<uint32_t>(run.begin(), run.end()) == positions(0, 3));
+    CHECK(View8::consume(2));
+    CHECK(View8::count() == 1);
+    Ch8::write(2);
+    run = View8::read_span();
+    REQUIRE(run.size() == 3);
+    CHECK(run[0] == 2);
+    CHECK(run[2] == 4);
+    CHECK(View8::consume(3));
+    CHECK(View8::empty());
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: a run is cut by the end of the storage, the rest comes next") {
+    fresh8();
+    Ch8::write(6);
+    CHECK(View8::consume(6) == true);   // nothing read: a plain release
+    CHECK(View8::empty());
+    Ch8::write(5);                      // positions 6..10: slots 6, 7, 0, 1, 2
+    CHECK(View8::count() == 5);
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 2);           // slots 6 and 7, stopping at the end
+    CHECK(run[0] == 6);
+    CHECK(run[1] == 7);
+    CHECK(View8::consume(2));
+    run = View8::read_span();
+    REQUIRE(run.size() == 3);           // the wrapped part, from slot 0
+    CHECK(run.data() == &Ch8::storage[0]);
+    CHECK(std::vector<uint32_t>(run.begin(), run.end()) == positions(8, 3));
+    CHECK(View8::consume(3));
+    CHECK(View8::empty());
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: a consume across the wrap releases the wrapped part too") {
+    fresh8();
+    Ch8::write(5);
+    CHECK(View8::consume(5));
+    Ch8::write(6);                      // positions 5..10
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 3);           // slots 5, 6, 7
+    // Release past the run: clamped to what is queued, not to the run, so
+    // two elements of the wrapped part go with it (Ring's rule).
+    CHECK(View8::consume(5));
+    run = View8::read_span();
+    REQUIRE(run.size() == 1);
+    CHECK(run[0] == 10);
+    CHECK(run.data() == &Ch8::storage[2]);
+    // An over-long release stops at the head.
+    CHECK(View8::consume(100));
+    CHECK(View8::empty());
+    Ch8::write(1);
+    CHECK(View8::pop().value() == 11);
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: every wrap, many laps, every element once and in order") {
+    // A consumer that looks more often than once a lap, and a completion
+    // handler held off at random - never across a second wrap, which one
+    // latched flag cannot count.
+    fresh8();
+    uint32_t expect = 0;
+    uint32_t r = 0x12345678u;
+    uint32_t held_writes = 0;
+    uint32_t holds = 0;
+    for (int round = 0; round < 20000; ++round) {
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        // A burst that leaves the consumer short of a lap behind.
+        const uint32_t room = View8::capacity() - View8::count();
+        const uint32_t burst = room == 0u ? 0u : r % (room + 1u);
+        if (Ch8::held && (held_writes + burst >= 8u || (r >> 20) % 4u == 0u)) {
+            Ch8::hold(false);
+        } else if (!Ch8::held && (r >> 22) % 3u == 0u) {
+            Ch8::hold(true);
+            held_writes = 0;
+            ++holds;
+        }
+        if (Ch8::held) {
+            held_writes += burst;
+        }
+        Ch8::write(burst);
+        // Drain part or all of it, in runs the end of the storage cuts.
+        const uint32_t take_runs = (r >> 8) % 3u;
+        for (uint32_t k = 0; k < take_runs; ++k) {
+            const auto run = View8::read_span();
+            if (run.empty()) {
+                break;
+            }
+            const uint32_t n = 1u + (r >> 12) % static_cast<uint32_t>(run.size());
+            for (uint32_t i = 0; i < n; ++i) {
+                REQUIRE(run[i] == expect + i);
+            }
+            REQUIRE(View8::consume(n));
+            expect += n;
+        }
+    }
+    Ch8::hold(false);
+    for (uint32_t v : drain_all<View8>()) {
+        REQUIRE(v == expect);
+        ++expect;
+    }
+    CHECK(expect == Ch8::written);
+    CHECK(Ch8::written > 8u * 1000u);   // many laps, every wrap crossed
+    CHECK(holds > 1000u);
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: a completion not yet run is inferred from the head going back") {
+    fresh8();
+    Ch8::write(5);
+    CHECK(View8::count() == 5);         // the view has looked: head 5
+    CHECK(View8::consume(4));           // tail 4
+    // The channel wraps (positions 5..10) but its handler is held off: the
+    // lap count still says 0 and the counter says 8 - 3, a head of 3,
+    // behind the 5 the view saw - impossible, so the lap is added back.
+    Ch8::hold(true);
+    Ch8::write(6);
+    CHECK(Ch8::laps() == 0);
+    CHECK(View8::count() == 7);
+    CHECK(drain_all<View8>() == positions(4, 7));
+    CHECK(View8::overruns() == 0);
+    // The handler runs: the count catches up and nothing moves.
+    Ch8::hold(false);
+    CHECK(Ch8::laps() == 1);
+    CHECK(View8::empty());
+    Ch8::write(3);
+    CHECK(drain_all<View8>() == positions(11, 3));
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: a wrap between the two reads of a look errs low and is added back") {
+    fresh8();
+    Ch8::write(6);
+    CHECK(View8::count() == 6);         // head 6
+    CHECK(View8::consume(6));
+    // Four elements land INSIDE the next look, between its two reads: they
+    // cross the wrap and the handler counts it at once. Read in the view's
+    // order the look holds laps = 0 and a count past the wrap - a lap low,
+    // added back; read the other way round it would hold a count from
+    // before the wrap and laps = 1 - a lap HIGH, a whole lap of elements
+    // that do not exist, and nothing could tell it from a real overrun.
+    Ch8::call_inject(2, 4);
+    CHECK(View8::count() == 4);
+    CHECK(Ch8::laps() == 1);
+    CHECK(drain_all<View8>() == positions(6, 4));
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: a count that reads 0 at a lap's end means the same head") {
+    fresh8();
+    Ch8::zero_at_end = true;
+    Ch8::write(4);
+    CHECK(drain_all<View8>() == positions(0, 4));
+    Ch8::write(4);                      // to the lap's end: the count reads 0
+    CHECK(Ch8::remaining() == 0);
+    CHECK(View8::count() == 4);         // laps 1, count 0: a head of 8
+    CHECK(drain_all<View8>() == positions(4, 4));
+    // The same with the handler held: laps 1, count 0 - a head of 8, behind
+    // the 13 the view last saw, and the lap added back.
+    Ch8::hold(true);
+    Ch8::write(5);
+    CHECK(drain_all<View8>() == positions(8, 5));
+    Ch8::write(3);                      // 16: the count reads 0, the lap pending
+    CHECK(Ch8::laps() == 1);
+    CHECK(View8::count() == 3);
+    CHECK(drain_all<View8>() == positions(13, 3));
+    Ch8::hold(false);
+    Ch8::write(2);
+    CHECK(drain_all<View8>() == positions(16, 2));
+    // And a full lap unread there is an overrun like anywhere else.
+    Ch8::write(8);
+    CHECK(View8::count() == 0);
+    CHECK(View8::overruns() == 1);
+}
+
+TEST_CASE("hardware ring: a lap missed is counted, skipped, and the stream resumes") {
+    fresh8();
+    Ch8::write(3);
+    CHECK(drain_all<View8>() == positions(0, 3));
+    // Seven unread is the capacity: still the stream.
+    Ch8::write(7);
+    CHECK(View8::count() == 7);
+    CHECK(View8::overruns() == 0);
+    CHECK(drain_all<View8>() == positions(3, 7));
+    // A full lap unread is the producer's next write: an overrun.
+    Ch8::write(8);
+    CHECK(View8::read_span().empty());
+    CHECK(View8::overruns() == 1);
+    // The view skipped to the head: what comes next is the stream again.
+    Ch8::write(2);
+    CHECK(drain_all<View8>() == positions(18, 2));
+    // Three laps and a bit behind: one look, one overrun.
+    Ch8::write(27);
+    CHECK_FALSE(View8::pop().has_value());
+    CHECK(View8::overruns() == 2);
+    Ch8::write(1);
+    CHECK(View8::pop().value() == 47);
+    CHECK(View8::overruns() == 2);
+    View8::clear_overruns();
+    CHECK(View8::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: a run written over while held is refused at its release") {
+    fresh8();
+    Ch8::write(2);
+    CHECK(drain_all<View8>() == positions(0, 2));
+    Ch8::write(6);                      // positions 2..7, unread 6
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 6);
+    CHECK(run[0] == 2);
+    // The consumer is slow: three more land, and the third is written into
+    // the slot at the tail - the run it holds now says 10 where it said 2.
+    Ch8::write(3);
+    CHECK(run[0] == 10);
+    CHECK_FALSE(View8::consume(6));
+    CHECK(View8::overruns() == 1);
+    CHECK(View8::empty());              // skipped to the head
+    Ch8::write(2);
+    CHECK(drain_all<View8>() == positions(11, 2));
+
+    // Two land, filling the lap to its last free slot: the slot at the
+    // tail is the producer's NEXT write, not yet made, so the run is intact.
+    Ch8::write(5);                      // positions 13..17
+    run = View8::read_span();
+    REQUIRE(run.size() == 3);           // slots 5, 6, 7
+    Ch8::write(3);                      // 18..20: unread 8, the tail untouched
+    CHECK(run[0] == 13);
+    CHECK(View8::consume(3));
+    CHECK(View8::overruns() == 1);
+    CHECK(drain_all<View8>() == positions(16, 5));
+}
+
+TEST_CASE("hardware ring: pop() takes one element, and refuses one written over under it") {
+    fresh8();
+    Ch8::write(3);
+    CHECK(View8::pop().value() == 0);
+    CHECK(View8::pop().value() == 1);
+    CHECK(View8::count() == 1);
+    // Six land between pop()'s look and its release: the slot it read
+    // (position 2, slot 2) is written over by position 10.
+    Ch8::write(4);                      // positions 3..6, unread 5
+    Ch8::call_inject(3, 6);             // as pop's second look begins
+    CHECK_FALSE(View8::pop().has_value());
+    CHECK(View8::overruns() == 1);
+    Ch8::write(1);
+    CHECK(View8::pop().value() == 13);
+    CHECK_FALSE(View8::pop().has_value());
+}
+
+TEST_CASE("hardware ring: a byte ring lends bytes as a SpanSource") {
+    Byte16::reset();
+    ByteView::clear();
+    ByteView::clear_overruns();
+    Byte16::write(20);                  // more than a lap before the first look
+    CHECK(ByteView::count() == 0);      // 20 unread of 16 slots: an overrun
+    CHECK(ByteView::overruns() == 1);
+    Byte16::write(14);                  // positions 20..33: slots 4..15, 0, 1
+    std::span<const uint8_t> run = ByteView::read_span();
+    REQUIRE(run.size() == 12);
+    CHECK(run[0] == 20);
+    CHECK(run[11] == 31);
+    CHECK(ByteView::consume(12));
+    run = ByteView::read_span();
+    REQUIRE(run.size() == 2);
+    CHECK(run[0] == 32);
+    CHECK(run[1] == 33);
+    CHECK(ByteView::consume(2));
+    CHECK(ByteView::empty());
+}
+
+TEST_CASE("hardware ring: a 16-bit ring counts beats, not bytes") {
+    Half8::reset();
+    HalfView::clear();
+    HalfView::clear_overruns();
+    Half8::write(5);
+    CHECK(HalfView::consume(3));
+    Half8::write(5);                    // 10: slots 0, 1 hold 8, 9
+    // The counter says 8 - 2 beats to go: the head is 10 elements, 20 bytes.
+    CHECK(HalfView::count() == 7);
+    std::span<const uint16_t> run = HalfView::read_span();
+    REQUIRE(run.size() == 5);           // slots 3..7
+    CHECK(run[0] == 3);
+    CHECK(run[4] == 7);
+    CHECK(HalfView::consume(5));
+    run = HalfView::read_span();
+    REQUIRE(run.size() == 2);
+    CHECK(run[0] == 8);
+    CHECK(run[1] == 9);
+    CHECK(HalfView::consume(2));
+    CHECK(HalfView::overruns() == 0);
+}
+
+TEST_CASE("hardware ring: clear() restarts the view with a restarted producer") {
+    fresh8();
+    Ch8::write(13);
+    (void)View8::count();
+    Ch8::reset();                       // the channel re-armed from slot 0
+    View8::clear();
+    CHECK(View8::empty());
+    Ch8::write(4);
+    CHECK(drain_all<View8>() == positions(0, 4));
+    CHECK(View8::overruns() == 1);      // the 13 were a lap missed
+}
+
+TEST_CASE("hardware ring: the positions run through 2^32 like any other number") {
+    fresh8();
+    // Long distances, each one a lap missed (counted), to bring the
+    // producer's position just short of 2^32...
+    Ch8::jump(0x7FFF'FFF0u);
+    CHECK(View8::empty());
+    Ch8::jump(0x7FFF'FFF0u);
+    CHECK(View8::empty());
+    CHECK(View8::overruns() == 2);
+    CHECK(Ch8::written == 0xFFFF'FFE0u);
+    // ...then ordinary traffic across it: the position wraps, the lap
+    // count wraps its top bits away, and every element still comes once.
+    uint32_t expect = Ch8::written;
+    for (int round = 0; round < 40; ++round) {
+        Ch8::write(3);
+        for (uint32_t v : drain_all<View8>()) {
+            REQUIRE(v == expect);
+            ++expect;
+        }
+    }
+    CHECK(Ch8::written == 0x0000'0058u);
+    CHECK(expect == Ch8::written);
+    CHECK(View8::overruns() == 2);
+}
+
+TEST_CASE("hardware ring: lossy traffic - a gap is always counted, a run released is the stream") {
+    // Bursts that sometimes run more than a lap past the consumer, and a
+    // consumer that is sometimes overtaken between reading a run and
+    // releasing it. What must hold: every run released with true is a
+    // contiguous slice of the stream continuing the last one, or opening
+    // after a gap; and a gap never comes without an overrun counted since
+    // the last element delivered.
+    fresh8();
+    uint32_t r = 0xC0FFEE11u;
+    bool have_last = false;
+    uint32_t last = 0;
+    uint32_t seen_overruns = 0;
+    uint32_t gaps = 0;
+    uint32_t delivered = 0;
+    for (int round = 0; round < 50000; ++round) {
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        Ch8::write(r % 11u);            // up to 10: more than a lap at times
+        const auto run = View8::read_span();
+        if (run.empty()) {
+            continue;
+        }
+        std::vector<uint32_t> part(run.begin(), run.end());
+        Ch8::write((r >> 8) % 4u == 0u ? (r >> 12) % 9u : 0u);   // overtaken, at times
+        if (!View8::consume(static_cast<uint32_t>(part.size()))) {
+            continue;                   // torn: dropped by the consumer
+        }
+        for (size_t i = 1; i < part.size(); ++i) {
+            REQUIRE(part[i] == part[i - 1] + 1u);
+        }
+        if (have_last && part[0] != last + 1u) {
+            REQUIRE(part[0] > last + 1u);
+            REQUIRE(View8::overruns() > seen_overruns);
+            ++gaps;
+        }
+        seen_overruns = View8::overruns();
+        last = part.back();
+        have_last = true;
+        delivered += static_cast<uint32_t>(part.size());
+    }
+    CHECK(gaps > 100);                  // the loss really happened...
+    CHECK(delivered > 50000);           // ...and so did the stream
+    CHECK(View8::overruns() >= gaps);
+}
+
+TEST_CASE("hardware ring: a lap missed while its completion is pending is counted late, never undone") {
+    // The documented corner: a consumer that has not looked for a whole
+    // lap, looking while the completion of the latest wrap is still
+    // pending, cannot tell that lap from none. What must hold even there:
+    // what it delivers is the stream's own elements, strictly increasing
+    // and contiguous within a run - a gap, never a repeat or a reordering -
+    // and a gap the overrun count has not shown yet is shown at the first
+    // look after the handler has run.
+    fresh8();
+    uint32_t r = 0x5EED1234u;
+    bool have_last = false;
+    uint32_t last = 0;
+    uint32_t seen_overruns = 0;
+    uint32_t held_writes = 0;
+    bool owed = false;
+    uint32_t owed_at = 0;
+    uint32_t late = 0;
+    uint32_t delivered = 0;
+    for (int round = 0; round < 50000; ++round) {
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        uint32_t burst = r % 7u;
+        if (Ch8::held && (held_writes + burst >= 8u || (r >> 20) % 3u == 0u)) {
+            Ch8::hold(false);
+        } else if (!Ch8::held && (r >> 22) % 2u == 0u) {
+            Ch8::hold(true);
+            held_writes = 0;
+        }
+        if (Ch8::held) {
+            held_writes += burst;
+        }
+        Ch8::write(burst);
+        if ((r >> 25) % 3u != 0u) {
+            continue;                   // the consumer does not look this round
+        }
+        const bool check_owed = owed && !Ch8::held;
+        const auto run = View8::read_span();
+        if (check_owed) {
+            REQUIRE(View8::overruns() > owed_at);
+            owed = false;
+        }
+        if (run.empty()) {
+            continue;
+        }
+        std::vector<uint32_t> part(run.begin(), run.end());
+        if (!View8::consume(static_cast<uint32_t>(part.size()))) {
+            continue;
+        }
+        for (size_t i = 1; i < part.size(); ++i) {
+            REQUIRE(part[i] == part[i - 1] + 1u);
+        }
+        if (have_last) {
+            REQUIRE(part[0] > last);
+            if (part[0] != last + 1u && View8::overruns() == seen_overruns) {
+                REQUIRE(Ch8::held);     // late only while the handler is held
+                if (!owed) {
+                    owed = true;
+                    owed_at = seen_overruns;
+                }
+                ++late;
+            }
+        }
+        seen_overruns = View8::overruns();
+        last = part.back();
+        have_last = true;
+        delivered += static_cast<uint32_t>(part.size());
+    }
+    CHECK(late > 0u);                   // the corner was really reached
+    CHECK(delivered > 10000u);
 }

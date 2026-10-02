@@ -1,6 +1,8 @@
 # Ring: the SPSC FIFO
 
-`util/ring.hpp` - `Ring<T, size, P>`.
+`util/ring.hpp` - `Ring<T, size, P>`, and beside it
+`HardwareRing<storage, Counter>`, the consumer half of a ring whose
+producer is the hardware ([its own section](#hardwarering-the-ring-whose-producer-is-the-hardware)).
 
 ## What it is for
 
@@ -183,3 +185,176 @@ vector 83 against 113, prologue and epilogue included (the DRE vector
 saves six registers lock-free and seven guarded; the RXC vector's
 sixteen are the kernel's post on the empty -> non-empty edge); 156
 bytes of flash; RAM identical.
+
+## HardwareRing: the ring whose producer is the hardware
+
+### What it is for
+
+A receive stream that a DMA channel writes in CIRCULAR mode: the channel
+writes the storage lap after lap with no CPU in the path, and its own
+count register says how far into the lap it has got. Nobody stores a
+producer index - the counter IS it, head = size - remaining - and
+`HardwareRing<storage, Counter>` is the consumer half of that ring:
+Ring's consumer verbs under Ring's names (`read_span()`/`consume(n)`,
+`pop()`, `count()`, `empty()`, `capacity()`, `clear()`), so a transport
+whose receive engine turns circular changes a type and not its code.
+With a byte element it is `util/stream.hpp`'s `SpanSource` itself.
+
+It is a second flavour and not Ring with a hook, because the hardware
+producer breaks the two things Ring's consumer stands on. Ring's
+producer never writes the consumer's run - the SPSC invariant makes the
+run private - and it refuses to push into a full ring. A circular
+channel does neither: it never stops, never learns where the tail is,
+and writes over the oldest elements when the consumer falls a lap
+behind. So the view does what Ring never needs to: it ACCOUNTS for the
+laps it did not keep up with, and it judges a run at its release.
+
+### The contract: `RingCounter`
+
+The producer is a type with two static functions, each ONE READ of its
+state:
+
+- `remaining()` - the elements still to be written in the current lap,
+  in [0, size]: the channel's count register, which the hardware reloads
+  to the storage's length at every wrap. It counts ELEMENTS, the
+  channel's beats, never bytes; and it counts an element as written only
+  once a read of its slot returns it.
+- `laps()` - the laps completed since the producer started at the
+  storage's first element: the count the channel's completion interrupt
+  increments at every wrap. It may LAG the counter - the handler runs
+  after the wrap it counts - and must never LEAD it.
+
+The storage is the CALLER's array, named in the view's type (a reference
+template parameter, as `JournalPanic` names its journal): the caller
+places and aligns it where the channel can reach, and the array's type
+gives the element and the size - a power of two, at least 2. The view
+is a monostate like the engines and transports it sits between; two
+views of one storage are one view.
+
+### Positions, and why the lap count is read first
+
+The view keeps two 32-bit POSITIONS counted from the producer's start,
+modulo 2^32: the consumer's tail, and the producer's head as last looked
+at. A look computes
+
+    head = laps() * size + (size - remaining()) mod size
+
+- a shift and a mask, the size being a power of two (no multiply: the
+CH32V003 has none). The two reads are not one atomic snapshot, and the
+ORDER decides which way a look can err:
+
+| read first | a wrap between the two reads, or a completion not yet run | what the view can do |
+|---|---|---|
+| `laps()` (the view's order) | the count is past the wrap, the laps are not: the head is a lap TOO FEW | a head behind the last look is impossible, so the lap is added back |
+| `remaining()` | the count is before the wrap, the laps after it: a lap TOO MANY | nothing - a phantom lap reads exactly like a real overrun |
+
+So the view reads the laps first, with a compiler fence before the count
+so that no counter implementation can reorder them, and its only error
+is a lap low - which it corrects from the head it saw last. That
+correction is exact while the consumer looks MORE OFTEN THAN ONCE A
+LAP: a head that has moved a whole lap or more since the last look and
+is then a lap low cannot be told from one that has not moved.
+
+### The overrun: skip rather than tear
+
+The lap count is the only witness of a consumer that fell behind. Every
+look judges `head - tail`:
+
+- `>= size` - the oldest unread element is the producer's next write,
+  or already written over: ONE OVERRUN is counted and the view SKIPS -
+  the tail jumps to the head, everything unread discarded, because what
+  is left within a lap of the producer is racing it. Skip rather than
+  tear, the block streams' doctrine ([block-stream.md](block-stream.md)).
+  The capacity is therefore size - 1, as Ring's: a full lap unread is
+  already an overrun.
+
+  The `>=` is load-bearing beyond the race. A lap missed while its
+  completion is still pending, by a consumer that has not looked for a
+  whole lap, reads as a lap less than it is; with `>`, the next look
+  after the handler can find exactly a lap unread and hand it out again,
+  REPEATING elements the consumer already had. With `>=` that look
+  counts the overrun and skips: the late corner is a gap, never a
+  repeat.
+
+- At the RELEASE, `consume(n)` looks again - after a fence, so the run's
+  reads stay before it - and if the slot at the tail was written over
+  while the consumer held the run (`head - tail > size`), the run was
+  TORN: the overrun is counted, the view skips, and `consume()` answers
+  false. It is the one place a consumer can learn that what it just read
+  was overwritten under it; a run released with true was intact when it
+  was read. `util/stream.hpp`'s `SpanSource` puts no type on `consume()`'s
+  return, so the answer costs a consumer that ignores it nothing.
+
+`overruns()` counts both, each one a skip, until `clear_overruns()`;
+what a skip cost in elements is not invented here - the producer's
+peripheral, if it can tell, is the one to say.
+
+### No critical section, no platform
+
+The view's state - the two positions and the overrun count - belongs to
+the consumer alone, and the producer's two numbers arrive in one read
+each, so there is nothing to mask and no `Platform` parameter to read an
+atomic width from. A 32-bit lap count that a byte-atomic core would tear
+is the producer's to read whole, because the producer is the one that
+knows its platform. The fences are Ring's: compiler-only, which is
+enough on the in-order cores with no data cache between a channel and
+the core that every family with DMA has today - the assumption this
+contract carries ([overview.md](overview.md), "Authority of util/").
+
+### What it cannot know
+
+- An element landing between the count read and the run's use is not
+  in the run: it is the next call's.
+- A lap missed while the completion that counts it is still pending, by
+  a consumer that has not looked for a whole lap, is counted at the
+  first look after the handler has run; the run handed in between holds
+  the stream's real elements, from after the gap.
+- A completion handler held off for a whole lap loses that lap from the
+  count - one flag latches one wrap - and the view cannot see a lap the
+  count never had.
+- A consumer that does not look for 2^31 elements outruns the positions'
+  arithmetic.
+- `clear()` is for a producer (re)started at the storage's first element
+  with its lap count at zero, and like Ring's it is not concurrent.
+
+### What it costs
+
+A look is the lap word, the count register and the two positions:
+counted at `-Os` on a translation unit instantiating the view over a
+256-byte storage and a counter shaped like a circular channel's (a
+volatile count register, a volatile lap word), `read_span()` is 41-46
+instructions on the 32-bit cores (Cortex-M0+, M4, QingKe V2C and V4B,
+Hazard3) against Ring's 16-20, and `consume()` 30-37 against Ring's
+10-18; on the Cortex-M0+ each runs about 30 instructions on the path
+that hands or releases a run, with one load of the count register. The
+run is the unit: `pop()` pays two looks for one element (54-62
+instructions), so a consumer that can take a run takes it.
+
+### Testing
+
+`test/test_ring` drives the view with a SCRIPTED CIRCULAR CHANNEL honest
+to the contract and to the silicon's habits: one element at a time, each
+holding its own position, a count that reloads at a lap's end (or reads
+0 there, both conventions covered), a lap count kept by a completion
+handler fed by one latched flag - held off on demand, so it lags and a
+second wrap while held is lost - and a burst that can land BETWEEN the
+two reads of a look. The cases: a run up to the head; a run cut by the
+end of the storage and the rest on the next call; a consume across the
+wrap; every wrap over thousands of laps with the handler held at random,
+every element once and in order; a pending completion inferred from the
+head going back; a wrap between the two reads of a look; a lap missed,
+counted, skipped and the stream resumed; a run written over while held
+refused at its release, and one whose tail slot was not yet reached
+released; `pop()` refusing an element written over under it; the byte
+view as a `SpanSource` and the 16-bit view counting beats; `clear()`
+with a restarted producer; positions running through 2^32; lossy
+traffic where every gap is counted and every released run is a slice of
+the stream; and the late corner, where a gap may be counted late but is
+never a repeat. On the silicon, the circular receive engines of the
+STM32F4, the STM32G0 and the CH32V203 produce into it and their
+transports read through it: a host's stream arrives whole at every rate
+the bridge carries where the run engine lost up to a tenth of it, a
+burst the consumer sleeps through is one overrun counted and the next
+run exact ([../stm32f4/dma.md](../stm32f4/dma.md),
+[../stm32g0/dma.md](../stm32g0/dma.md),
+[../ch32vx03/dma.md](../ch32vx03/dma.md)).
