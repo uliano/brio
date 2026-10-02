@@ -730,10 +730,12 @@ void td_engines() {
                   dma_trigger_sercom_rx<5>() == Sc5::dma_rx_trigger() &&
                       dma_trigger_sercom_tx<5>() == Sc5::dma_tx_trigger());
 
-    // A channel has exactly ONE pending-trigger bit, which is what makes
-    // the standing-request kick safe: a kick that races a real hardware
-    // trigger is LOST, not doubled (25.8.8). The register says so about
-    // itself - it reads back set exactly when a trigger was lost.
+    // A channel has exactly ONE pending-trigger bit: a software trigger
+    // that races a real one still pending is LOST (25.8.8), and the
+    // register says so about itself - it reads back set exactly when a
+    // trigger was lost. (One that lands after a beat has started is a
+    // second beat, which is why the transport kicks neither direction:
+    // docs/samc21/sercom.md.)
     DmaChannel<ch_tx>::clear_trigger_lost();
     bench.verdict("no trigger is recorded lost on an idle channel",
                   !DmaChannel<ch_tx>::trigger_lost());

@@ -150,7 +150,15 @@ The engines are POLICIES, not features of the task:
   exactly the block it carried and starts the next - a wrapped ring
   goes out in two blocks. The app's DMAC handler routes completions
   with `dma_isr(channel)`, which answers false for channels that are
-  not this transport's.
+  not this transport's. THE MASK COVERS THE CLAIM: a block start (from
+  `write_byte`/`write_bulk` in main context or from the completion in
+  the handler) takes the engine's reservation - a test-and-set of its
+  busy flag, nine instructions under PRIMASK - and reads the run and
+  programs the channel unmasked, because no completion of an engine
+  that has no block in flight can land under it. The block itself is
+  three stores into the descriptor slot and the channel's enable
+  (dmac.md); an engined direction's ring is at most 65535 bytes, a run
+  being one block and BTCNT sixteen bits (refused at compile time).
 - **RX fills the ring's free run and is HARVESTED on the caller's
   clock.** A receive block completes only when the buffer fills -
   on an idle line, never - so arrival is not an event anyone is told
@@ -166,25 +174,26 @@ The engines are POLICIES, not features of the task:
   the buffer filled: a reading that was refused leaves that count
   behind, and a re-arm rule that trusted it alone would never fire
   again.
-- **THE STANDING REQUEST, and it is the load-bearing detail of both
-  engines.** A peripheral asserts its DMA request as a LEVEL - "my
-  transmit buffer is free", "I have a character" - and the DMAC turns
-  that level into a pending trigger when it RISES. A block armed while
-  the level is ALREADY HIGH can therefore be waiting for an edge that
-  has already happened: the channel sits enabled, CHSTATUS empty, the
-  peripheral's own flag standing, and not one beat moves. CAN, not
-  MUST: on the ADC's RESRDY a late arm is rescued by the silicon
-  itself - selecting TRIGSRC onto a standing request is itself a rise,
-  and a rise during a disable is latched (dmac.md) - and every wedge
-  measured here carried a corrupted write-back (erratum 1.10.4) with
-  it. The kick is therefore insurance whose cost is one never-doubling
-  store, kept on both paths. Both `pump_tx()` and the receive re-arm
-  therefore ask the SERCOM whether its flag is already set and, if it
-  is, give the channel one software trigger. A kick that races a real
-  trigger still PENDING is lost - a channel has exactly one pending bit
-  and SWTRIGCTRL raises it only if it was clear (25.8.8) - but one that
-  lands after the real trigger's beat has STARTED doubles it, PEND
-  being clear by then (25.8.23): the race the first gap below names.
+- **THE STANDING REQUEST, AND WHY NEITHER DIRECTION KICKS.** A
+  peripheral asserts its DMA request as a LEVEL - "my transmit buffer is
+  free", "I have a character" - and the DMAC turns that level into a
+  pending trigger when it RISES. A block armed while the level is
+  already high could, on that reading alone, wait for an edge that has
+  gone by. It does not: a rise while the channel is DISABLED with its
+  trigger selected is latched and served on the next enable, and so is
+  the claim's selection of the trigger onto a request already standing
+  (dmac.md), and an engine keeps its trigger selected from `arm()` on.
+  So the enable fires the first beat by itself, and a software kick on
+  top of it is lost when that trigger is still pending and a SECOND beat
+  when its beat has started (PEND clears as a beat starts, 25.8.23) -
+  measured both ways (Bench findings): a transmit kick doubled a byte
+  into a full DATA, and a receive kick read DATA twice, the stream
+  arriving LONGER than it was sent. Neither `pump_tx()` nor the receive
+  re-arm kicks; every wedge measured on this transport carried a
+  corrupted write-back (erratum 1.10.4), which the DEAD-BLOCK PREDICATE
+  answers on the refused-byte path below: a block the engine calls in
+  flight while DRE and TXC both stand cannot be running, so it is
+  abandoned (dmac.md) and counted in `dma_faults()`.
 - **A REFUSED BYTE STILL NUDGES.** `write_byte()` returning false is
   the state in which nothing is draining the ring, and `print()`
   answers that false by trying again for ever - so the refusal path
@@ -256,21 +265,26 @@ int main() {
 `brio stress` at the other end; the pattern is a 32-bit
 xorshift both ends generate, so a lost byte is located and not merely
 counted). Every combination of interrupt and DMA on each direction, as
-a 1.2 s echo at 115200:
+an echo of 8384 bytes at 115200 in a 1.2 s window:
 
-  | transport      | received | echoed back | notes                    |
-  |----------------|----------|-------------|--------------------------|
-  | irq TX + irq RX| 11840    | 11840       | byte-exact both ways     |
-  | DMA TX + irq RX| 11840    | 11840       | byte-exact both ways     |
-  | irq TX + DMA RX| 11813    | 11813       | gaps at block boundaries |
-  | DMA TX + DMA RX| 11827    | 7431        | gaps, plus ring pressure |
+  | transport      | received    | notes                                    |
+  |----------------|-------------|------------------------------------------|
+  | irq TX + irq RX| 8384        | byte-exact both ways                     |
+  | DMA TX + irq RX| 8384        | byte-exact both ways                     |
+  | irq TX + DMA RX| 8383..8384  | byte-exact or one byte short: a gap      |
+  | DMA TX + DMA RX| 8382..8384  | gaps, and erratum 1.10.4 on the pair     |
 
-  The interrupt receiver is exact; the DMA receiver loses a few bytes
-  per window, and WHERE it loses them is its contract rather than a
+  The interrupt receiver is exact; the DMA receiver can lose a byte at a
+  block boundary, and WHERE it loses them is its contract rather than a
   defect - a block that fills has no run to continue into until a
   harvest re-arms the channel, so whatever arrives in that gap is gone.
   It is measured, not hidden: the suite prints the position of the first
-  missing byte.
+  missing byte. It never receives MORE than was sent (it did, while the
+  re-arm kicked: below). Both engines at once are two channels triggered
+  concurrently, erratum 1.10.4's precondition: eight runs abandoned 0 to
+  3 transmit blocks each (the dead-block predicate, counted in
+  `dma_faults()`) and the host got up to 113 bytes more than it sent, and
+  once in ten runs the erratum went further - below.
 
 - **Rates, through the interrupt transport, echoing:** 115200 and
   1 Mbaud are byte-exact; 3 Mbaud loses, and the loss is ACCOUNTED FOR
@@ -346,23 +360,44 @@ bridge between the pads and the PC - as much as of the driver.
 - **At 115200 the console alone costs 11% of the CPU** through the
   per-byte interrupt path and 6% through the engines - worth knowing,
   since every bench suite prints.
+- **Erratum 1.10.4 can turn the transmit channel into a writer of the
+  SERCOM's own registers.** Once in ten runs of the both-engines echo the
+  program stopped answering; halted over SWD it sat in SERCOM5_Handler
+  re-entered without end, INTENSET reading 0xAE (ERROR, RXBRK, RXS, RXC
+  and TXC armed - a byte of the stream) and TXC, which the engined
+  transport never serves, standing. The transmit channel's write-back
+  held BTCTRL 0x0809 - the RECEIVE descriptor's, destination incrementing
+  - with BTCNT 17 and DATA as both addresses, while its first-descriptor
+  slot was intact: running that live copy, the channel read received
+  bytes from DATA and wrote them at "end minus remaining", up through the
+  registers below DATA. The dead-block predicate cannot see this (the
+  block is running), and nothing at the channel level undoes it. The
+  exposure is c1c9e26's as much as today's (its eight runs of the same
+  leg abandoned 0 to 5 blocks each, today's 0 to 3); a program that
+  cannot afford it takes the interrupt receiver, which keeps the
+  transmit channel the only one.
+- **The kick, measured and retired.** A scratch probe started 400
+  messages a run through the transmit engine in four shapes - after a
+  full drain at once, after 30 us, after 1.8 ms of standing DRE, and
+  back to back - reading CHSTATUS and DRE right after each enable: over
+  3376 block starts the first beat (and the second, the first byte gone
+  straight to the idle shifter) had ALWAYS landed by the next register
+  read, never once a block waiting with nothing pending, and with no
+  kick at all every message arrived intact, no stall and no fault. With
+  the kick and `write_bulk()` built `[[gnu::flatten]]` - which brings the
+  DRE read into the first beat's window - `test_samc_dma`'s letter j lost
+  the second byte of a line in four runs of four; without it, 708 lines
+  of 708 in four runs. The receive re-arm's kick did the same in reverse
+  once the engine's start had become fast enough to read RXC inside the
+  first beat: the DMA receiver counted 8387 and 8396 bytes for 8384 sent
+  (beats reading DATA twice); without it, 8384 and byte-exact. Reading
+  CHSTATUS before the kick would narrow that window and not close it - a
+  beat can start between the read and the kick - so neither direction
+  kicks.
 
 ## Not covered yet
 
 Driver gaps (not built):
-- A TRANSMIT KICK THAT CANNOT DOUBLE A BEAT. `pump_tx()` enables the
-  block, then reads DRE and kicks when it stands; the enable onto a
-  standing DRE fires the channel's own first beat as well (measured:
-  the kick found PEND already raised), and a kick that lands after that
-  beat has started is a second trigger whose byte a full DATA discards.
-  Measured with `write_bulk()` built `[[gnu::flatten]]`, which inlined
-  `pump_tx()` and brought the DRE read into that window: the second byte of a block lost in
-  `test_samc_dma`'s letters h and j. As built, the read falls after the
-  beat has landed and the suites lose nothing - which is timing, not a
-  guard. Reading CHSTATUS (PEND or BUSY) before DRE would close the
-  window; not built, because whether a USART transmit block is kicked
-  at all is a decision about the owner's request shape and the change
-  wants its own measurement.
 - A BULK RECEIVE PATH THAT PACES ITSELF. `read_bulk()` exists, but the
   RX engine only publishes what `harvest()` takes, and how often to call
   it is left entirely to the port owner - which at 3 Mbaud means every

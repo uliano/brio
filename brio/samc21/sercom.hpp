@@ -942,6 +942,12 @@ class Uart {
     static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
                   "the transmit and receive engines must use DIFFERENT DMA "
                   "channels: a channel moves bytes in one direction only");
+    // An engine moves a ring's run as ONE block, and BTCNT counts 65535
+    // beats at most (25.6.1.1): an engined direction's ring is no longer.
+    static_assert((!TxEngine::present || tx_size <= 65535u) &&
+                      (!RxEngine::present || rx_size <= 65535u),
+                  "an engined direction's ring holds at most 65535 bytes: the "
+                  "engine moves a run of it as one DMA block, and BTCNT is 16 bits");
 
     using TxPin = Pin<pads.tx_pin.port, pads.tx_pin.pin>;
     using RxPin = Pin<pads.rx_pin.port, pads.rx_pin.pin>;
@@ -1510,22 +1516,6 @@ public:
 
 private:
     /**
-     * Hand the transmit engine the next contiguous run of the TX ring,
-     * if it is free to take one.
-     *
-     * TWO CONTEXTS, ONE CONSUMER. This runs both from write_byte() in
-     * main context and from dma_isr() in the handler, and it is the
-     * ring's CONSUMER side in both - which the SPSC contract allows only
-     * one of. The critical section is what makes the two into one
-     * logical consumer: they are mutually exclusive, so the ring never
-     * has two consumers at once. It also covers the busy-test-then-start
-     * pair, which would otherwise let both contexts start a block.
-     *
-     * The run is contiguous by construction: read_span() stops at the
-     * end of the buffer, so a wrapped ring goes out in two blocks and
-     * the second is started by the first one's completion.
-     */
-    /**
      * The producer has been refused: the transmit ring is full, which is
      * exactly the state in which nothing is draining it. Repair whatever
      * is repairable, then nudge.
@@ -1566,29 +1556,52 @@ private:
         }
     }
 
+    /**
+     * Hand the transmit engine the next contiguous run of the TX ring,
+     * if it is free to take one.
+     *
+     * TWO CONTEXTS, ONE CONSUMER. This runs both from write_byte() in
+     * main context and from dma_isr() in the handler, and it is the
+     * ring's CONSUMER side in both - which the SPSC contract allows only
+     * one of. The engine's reservation is what makes the two into one
+     * logical consumer: it is taken under the critical section, and the
+     * context that holds it is the only one that reads the run and starts
+     * the block - the other finds the engine reserved and returns. The
+     * consumer index moves only in dma_isr(), on a completion, which no
+     * reserved engine with no block in flight can raise.
+     *
+     * The run is contiguous by construction: read_span() stops at the
+     * end of the buffer, so a wrapped ring goes out in two blocks and
+     * the second is started by the first one's completion.
+     */
     static void pump_tx() {
         if constexpr (has_tx_engine) {
-            typename SamPlatform::CriticalSection cs;
-            if (TxEngine::busy()) {
-                return;
+            {
+                // THE MASK COVERS THE CLAIM AND NOTHING ELSE: a
+                // test-and-set of the engine's busy flag. Once it is held,
+                // no completion of this engine can land - no block of it
+                // is in flight - so the ring's run and the channel's
+                // programming need no mask at all.
+                typename SamPlatform::CriticalSection cs;
+                if (!TxEngine::reserve()) {
+                    return;
+                }
             }
             const auto run = m_tx.read_span();
             if (run.empty()) {
+                TxEngine::cancel();
                 return;
             }
-            if (TxEngine::start(run.data(), static_cast<uint16_t>(run.size()))) {
-                // THE STANDING REQUEST (samc21/dmac.hpp's kick()). DRE is a
-                // LEVEL and the DMAC latches it on the RISE, so a block
-                // armed while the transmit buffer is already free waits
-                // for an edge that has been and gone. The engine then
-                // sits enabled with DRE and TXC both set and moves
-                // nothing, which is exactly how a transmitter was found
-                // dead. Whether that edge is still to come is a question
-                // only this file can ask.
-                if (S::dre_flag()) {
-                    TxEngine::kick();
-                }
-            }
+            // NO KICK. DRE is a level the DMAC latches on its rise, and a
+            // rise while the channel is disabled with its trigger selected
+            // is served on the next enable, as is the claim's selection of
+            // the trigger onto a DRE already standing - so the enable
+            // fires the first beat by itself. Measured on 3376 block
+            // starts, after a DRE standing up to 1.8 ms among them: the
+            // first beat had always landed by the next register read, and
+            // a kick that came after it had started was a second beat
+            // into a full DATA (one byte of a block lost, sercom.md).
+            (void)TxEngine::launch(run);
         }
     }
 
@@ -1611,15 +1624,7 @@ private:
                 m_rx_overruns = m_rx_overruns + 1;
                 return;
             }
-            if (RxEngine::start(room.data(), static_cast<uint16_t>(room.size()))) {
-                // The receiver's twin of pump_tx()'s standing request: a
-                // character that arrived while the channel had no run to
-                // fill has already raised RXC, and the rise the DMAC
-                // needed is in the past.
-                if (S::rxc_flag()) {
-                    RxEngine::kick();
-                }
-            }
+            (void)RxEngine::start(room);
         }
     }
 

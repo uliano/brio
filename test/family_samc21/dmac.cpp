@@ -17,6 +17,8 @@
 // landed.
 #include "samc21/dmac.hpp"
 
+#include <span>
+
 // The analog drivers are here for ONE static_assert block at the bottom:
 // dmac.hpp owns the channels and never table 25-2, so each peripheral
 // states its own trigger id and this is the file where all of them are
@@ -249,7 +251,12 @@ void engine_verbs() {
     volatile uint32_t data = 0;
     DmaTxEngine<0>::arm(&data, dma_trigger_sercom_tx<0>());
     static uint8_t out[8];
-    (void)DmaTxEngine<0>::start(out, sizeof(out));
+    (void)DmaTxEngine<0>::start(std::span<const uint8_t>(out));
+    (void)DmaTxEngine<0>::reserve();
+    (void)DmaTxEngine<0>::launch(std::span<const uint8_t>(out));
+    DmaTxEngine<0>::cancel();
+    (void)DmaTxEngine<0>::start_fixed(&out[0], 8);
+    (void)DmaTxEngine<0>::running();
     (void)DmaTxEngine<0>::busy();
     (void)DmaTxEngine<0>::in_flight();
     (void)DmaTxEngine<0>::complete();
@@ -257,7 +264,8 @@ void engine_verbs() {
 
     DmaRxEngine<1>::arm(&data, dma_trigger_sercom_rx<0>());
     static uint8_t in[8];
-    (void)DmaRxEngine<1>::start(in, sizeof(in));
+    (void)DmaRxEngine<1>::start(std::span<uint8_t>(in));
+    (void)DmaRxEngine<1>::start_discard(&in[0], 8);
     (void)DmaRxEngine<1>::take();
     (void)DmaRxEngine<1>::full();
     (void)DmaRxEngine<1>::capacity();
@@ -353,11 +361,68 @@ void ping_pong_engine_verbs() {
     Stream::stop();
 }
 
+// ---- the beat per start -------------------------------------------------------
+// An engine's Elem is the WIDEST beat its binding allows; a run of a
+// narrower element moves with that element's beat on the same channel.
+void beat_per_start() {
+    volatile uint32_t data = 0;
+    using Wide = DmaTxEngine<4, uint32_t>;
+    Wide::arm(&data, 0x40u, DmaPriority::level1, DmaCompletion::silent);
+    static const uint8_t bytes[4] = {};
+    static const uint16_t halves[4] = {};
+    static const uint32_t words[4] = {};
+    (void)Wide::start(std::span<const uint8_t>(bytes));
+    (void)Wide::start(std::span<const uint16_t>(halves));
+    (void)Wide::start(std::span<const uint32_t>(words));
+    (void)Wide::start_fixed(&halves[0], 4);
+    using WideRx = DmaRxEngine<5, uint16_t>;
+    WideRx::arm(&data, 0x41u);
+    static uint8_t in8[4];
+    static uint16_t in16[4];
+    (void)WideRx::start(std::span<uint8_t>(in8));
+    (void)WideRx::start(std::span<uint16_t>(in16));
+}
+// The per-start BTCTRL is a constant: the beat of the element type,
+// which side walks, VALID - and the completion's BLOCKACT ORed in.
+static_assert((dma_engine_btctrl<uint16_t>(true, false) & DMAC_BTCTRL_BEATSIZE_Msk) ==
+              DMAC_BTCTRL_BEATSIZE_HWORD);
+static_assert((dma_engine_btctrl<uint8_t>(true, false) & DMAC_BTCTRL_SRCINC_Msk) != 0u);
+static_assert((dma_engine_btctrl<uint8_t>(true, false) & DMAC_BTCTRL_DSTINC_Msk) == 0u);
+static_assert((dma_engine_btctrl<uint8_t>(true, false) & DMAC_BTCTRL_VALID_Msk) != 0u);
+static_assert((dma_engine_btctrl<uint8_t>(true, false) & DMAC_BTCTRL_BLOCKACT_Msk) ==
+              DMAC_BTCTRL_BLOCKACT_NOACT);
+static_assert(dma_completion_bits(DmaCompletion::silent) == 0u);
+static_assert(dma_completion_bits(DmaCompletion::interrupt) == DMAC_BTCTRL_BLOCKACT_INT);
+
+// ---- memory to memory -----------------------------------------------------------
+// The surface every family's DmaCopyEngine shares: copy and fill in
+// ELEMENTS, the element type the beat, the fill's cell the caller's.
+static_assert(DmaCopyEngine<0>::present && DmaCopyEngine<0>::channel == 0);
+
+void copy_engine_verbs() {
+    using Copy = DmaCopyEngine<0>;
+    static uint32_t a[16];
+    static uint32_t b[16];
+    static uint16_t h[16];
+    static uint8_t c[16];
+    static const uint32_t word = 0x12345678u;
+    static const uint8_t byte = 0x5A;
+    Copy::arm();
+    Copy::arm(DmaPriority::level2, DmaCompletion::silent);
+    (void)Copy::copy(a, b, 16u);
+    (void)Copy::copy(h, h + 8, 8u);
+    (void)Copy::copy(c, c + 8, 8u);
+    (void)Copy::fill(a, &word, 16u);
+    (void)Copy::fill(c, &byte, 16u);
+    (void)Copy::busy();
+    (void)Copy::abandon();
+}
+
 // ---- the codes the analog peripherals publish ------------------------------------
 // dmac.hpp owns the CHANNELS and never the table: each converter states
 // its own trigger id, which is the accepted division of labour (the
-// EVSYS ruling applied to table 25-2). Held in step here, where all the
-// headers are legitimately in scope.
+// arrangement samc21/evsys.hpp keeps, applied to table 25-2). Held in
+// step here, where all the headers are legitimately in scope.
 static_assert(Adc<0>::dma_trigger_resrdy != dma_trigger_none);
 static_assert(Adc<1>::dma_trigger_resrdy != Adc<0>::dma_trigger_resrdy);
 static_assert(Dac::dma_trigger_empty != dma_trigger_none);

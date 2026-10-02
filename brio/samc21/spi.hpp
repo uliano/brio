@@ -123,6 +123,7 @@
 #include <stdint.h>
 
 #include <optional>
+#include <span>
 #include <type_traits>
 
 #include "sam.h"
@@ -918,39 +919,46 @@ public:
  * reason: an engineless build must stay byte-identical, so the slots
  * default to NoDmaEngine and every DMA branch folds away under
  * `if constexpr`). With DmaTxEngine/DmaRxEngine named, the DATA PHASE
- * of every request runs on the DMAC: the RX channel drains DATA on the
- * RXC trigger, the TX channel feeds it on DRE, and the transaction is
- * complete when the RECEIVE block completes - the last character is on
- * the wire until it has been shifted back in, so RX completion is the
- * only edge that means "done", exactly the reason the byte pump arms
- * RXC and never DRE. The command phase stays on the byte pump (it is a
- * few bytes with a DC flip at its end); a null tx feeds 0xFF dummies
- * from a held source address, a null rx drains into a held sink cell.
+ * of every request runs on the DMAC, ONE INTERRUPT A TRANSACTION:
+ *  - with something to RECEIVE, two channels: the RX one drains DATA on
+ *    the RXC trigger, the TX one feeds it on DRE, and the transaction is
+ *    complete when the RECEIVE block completes - the last character is
+ *    on the wire until it has been shifted back in, so RX completion is
+ *    the edge that means "done", exactly the reason the byte pump arms
+ *    RXC and never DRE. The transmit block is SILENT (BLOCKACT none, no
+ *    TCMPL): it ended before the receive block that drains its frames,
+ *    so its own interrupt would prove nothing;
+ *  - WRITE-ONLY (null rx), ONE channel: the transmit block alone, and the
+ *    SERCOM's TXC as the edge, which rises after the LAST frame has been
+ *    shifted out (32.8.6, measured: spi.md). One channel is also no
+ *    concurrent channels at all - erratum 1.10.4's precondition - on the
+ *    path a display's bulk writes take.
+ * The command phase stays on the byte pump (it is a few bytes with a DC
+ * flip at its end); a null tx feeds 0xFF dummies from a held source
+ * address, a null rx with something to receive is not a case (null rx IS
+ * write-only).
  *
  * THE DMAC BLOCK IS THE APP'S: Dmac::init() once, before any engined
  * init() - the engines arm CHANNELS of a controller somebody else owns,
  * and a driver that reset the shared block would stop every other
  * channel in the program (the Uart's own contract, restated).
  *
- * THE KICK DOCTRINE INVERTS IN SPI MODE, and it was measured, not
- * assumed. In USART mode a channel armed while the peripheral's request
- * LEVEL is already high sees no beat (the trigger latches on the RISE)
- * and must be kicked - samc21/sercom.hpp carries that half. THIS mode's
- * TX request behaves as the opposite: ENABLING the channel with DRE
- * already standing fires the first beat by itself, the chain then
- * sustains on the per-character rises - and a kick on top of that start
- * is one EXTRA beat whose byte lands in a full transmit buffer and is
- * DISCARDED in silence (measured three ways on the loop-back bench: with
- * the kick, exactly one early character vanishes from the wire - the
- * kick's own - at every rate; without it the stream is byte-exact). So
- * launch_dma() starts the two channels and kicks NOTHING; on silicon
- * where the SPI request ever behaved the UART way the bounded fault path
- * below is what would fire, and the kick question would reopen with that
- * measurement in hand. RXC starts clear (flushed) and is a clean rise
- * under either reading. Both engines' completions arrive on the DMAC's
- * own vector, so AN APP THAT NAMES ENGINES BINDS DMAC_Handler TOO
- * (below) - polled requests included: the spin waits on a flag that
- * handler sets.
+ * NO KICK, and it was measured, not assumed. ENABLING the transmit
+ * channel with DRE already standing fires the first beat by itself, the
+ * chain then sustains on the per-character rises - and a kick on top of
+ * that start is one EXTRA beat whose byte lands in a full transmit buffer
+ * and is DISCARDED in silence (measured three ways on the loop-back
+ * bench: with the kick, exactly one early character vanishes from the
+ * wire - the kick's own - at every rate; without it the stream is
+ * byte-exact). The USART measured the same, once its kick was timed into
+ * the window (samc21/sercom.hpp): a rise latched while the channel was
+ * disabled, or the trigger's selection onto a standing request, is
+ * served on the enable (docs/samc21/dmac.md). So launch_dma() starts its
+ * channels and kicks NOTHING. RXC starts clear (flushed) and is a clean
+ * rise. A two-channel transaction completes on the
+ * DMAC's vector and a write-only one on the SERCOM's, so AN APP THAT
+ * NAMES ENGINES BINDS DMAC_Handler TOO (below) - polled requests
+ * included: the spin waits on a flag one of the two handlers sets.
  *
  * A DMA TRANSFER ERROR (erratum 1.10.4's class) is the one failure this
  * otherwise ACK-less bus can detect: the request completes with
@@ -1123,7 +1131,10 @@ public:
             // Claim the two channels for this SERCOM's data register and
             // trigger codes. arm() also enables the DMAC's NVIC line -
             // the app's DMAC_Handler binding is part of taking engines.
-            TxEngine::arm(S::data_address(), S::dma_tx_trigger());
+            // The TRANSMIT block is SILENT: its end is proven by the
+            // receive block's (full duplex) or by TXC (write-only), so a
+            // TCMPL of its own would be an interrupt that proves nothing.
+            arm_tx();
             RxEngine::arm(S::data_address(), S::dma_rx_trigger());
         }
         status_ = spi_ok;
@@ -1299,7 +1310,13 @@ public:
     /// Returns true when the transaction just completed (CS released):
     /// the edge on which the app's glue posts TransferDone to the bus AO.
     [[gnu::always_inline]] static bool isr() {
-        if ((S::pending() & SpiFlag::rxc) == 0u) {
+        const uint8_t pending = S::pending();
+        if constexpr (has_engines) {
+            if ((pending & SpiFlag::txc) != 0u) {
+                return write_done();
+            }
+        }
+        if ((pending & SpiFlag::rxc) == 0u) {
             return false;
         }
         const uint8_t in = static_cast<uint8_t>(S::data());
@@ -1366,12 +1383,12 @@ public:
             // asks the question without this file including dmac.hpp.
             const bool error = (flags & DMAC_CHINTFLAG_TERR_Msk) != 0u;
             if (channel == TxEngine::channel) {
-                if (error) {
-                    (void)TxEngine::abandon();
+                // The transmit block is silent (BLOCKACT none): what can
+                // arrive here is a transfer error, never a completion.
+                if (error && dma_active_) {
                     return finish_dma(spi_dma_fault);
                 }
-                (void)TxEngine::complete();
-                return false;   // the transmit side never completes a transaction
+                return false;
             }
             if (channel == RxEngine::channel) {
                 if (!dma_active_) {
@@ -1408,7 +1425,8 @@ public:
     static bool recover() {
         req_.cs.set();
         if constexpr (has_engines) {
-            (void)TxEngine::abandon();   // re-claims: interrupts re-armed
+            S::enable_txc_interrupt(false);
+            (void)TxEngine::abandon();   // re-claims, the silent block kept
             RxEngine::stop();
             RxEngine::arm(S::data_address(), S::dma_rx_trigger());
         }
@@ -1453,37 +1471,78 @@ private:
     }(), "brio SpiHost: the DMA engines must carry uint8_t elements - the "
          "Request's buffers are bytes");
 
-    /// Start the data phase on the two channels. The RECEIVE channel
-    /// goes first (its trigger is a rise that has not happened yet);
-    /// the transmit one starts SECOND AND IS NOT KICKED - in SPI mode
-    /// the standing DRE level fires the first beat at the enable
-    /// itself, and a kick would add a beat the full transmit buffer
-    /// discards (the class comment carries the measurement).
+    /// The transmit engine's claim: this SERCOM's DATA and TX trigger,
+    /// the default priority, and a SILENT block (the class comment).
+    static void arm_tx() {
+        TxEngine::arm(S::data_address(), S::dma_tx_trigger(), typename TxEngine::Priority{},
+                      TxEngine::Completion::silent);
+    }
+
+    /**
+     * Start the data phase.
+     *
+     * WITH SOMETHING TO RECEIVE, two channels: the RECEIVE channel first
+     * (its trigger is a rise that has not happened yet), then the
+     * transmit one, NOT KICKED - in SPI mode the standing DRE level fires
+     * the first beat at the enable itself, and a kick would add a beat
+     * the full transmit buffer discards (the class comment carries the
+     * measurement). The receive block's TCMPL is the transaction's one
+     * interrupt.
+     *
+     * WRITE-ONLY, ONE CHANNEL: the transmit block alone, and TXC as the
+     * edge - "set when the data have been shifted out and there are no
+     * new data in DATA" (32.8.6), measured to rise after the LAST frame:
+     * enable to TXC is n frames plus a constant at every n and rate
+     * (spi.md). The receiver stays on and its two-level buffer overflows
+     * harmlessly (ERROR is never armed, and start() flushes it). TXC is
+     * cleared BEFORE its interrupt is armed and the block started, so a
+     * flag left by an earlier transaction cannot complete this one.
+     */
     static void launch_dma() {
         dma_done_ = false;
         dma_active_ = true;
-        if (req_.rx.get() != nullptr) {
-            (void)RxEngine::start(req_.rx.get(), req_.len);
+        if (req_.rx.get() == nullptr) {
+            S::clear_flags(SpiFlag::txc);
+            S::enable_txc_interrupt(true);
         } else {
-            (void)RxEngine::start_discard(&rx_sink_, req_.len);
+            (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.len));
         }
         if (req_.tx.get() != nullptr) {
-            (void)TxEngine::start(req_.tx.get(), req_.len);
+            (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.len));
         } else {
             (void)TxEngine::start_fixed(&tx_dummy_, req_.len);
         }
     }
 
-    /// One exit for the data phase, from either flavour of dma_isr().
-    /// Returns true when the ISR-style caller should post completion.
+    /**
+     * TXC rose on a write-only data phase. A transmit buffer that ran dry
+     * BETWEEN two beats raises it too - the DMA late for one frame - and
+     * the next beat clears it again (32.8.6: "cleared ... by writing new
+     * data to DATA"); only a channel that has disabled itself has written
+     * its last beat, and then TXC can only be the last frame's.
+     */
+    static bool write_done() {
+        if (!dma_active_ || TxEngine::running()) {
+            return false;
+        }
+        return finish_dma(spi_ok);
+    }
+
+    /// One exit for the data phase, from either vector. Returns true when
+    /// the ISR-style caller should post completion.
     static bool finish_dma(uint8_t st) {
+        S::enable_txc_interrupt(false);
         if (st != spi_ok) {
             status_ = st;
-            (void)TxEngine::abandon();   // re-claims: interrupts re-armed
+            (void)TxEngine::abandon();   // re-claims, the silent block kept
             RxEngine::stop();
             // stop() disarms the channel's interrupts with it; the next
             // transaction needs the claim back.
             RxEngine::arm(S::data_address(), S::dma_rx_trigger());
+        } else {
+            // The silent transmit block ended before this edge: release
+            // its claim.
+            (void)TxEngine::complete();
         }
         dma_active_ = false;
         dma_done_ = true;
@@ -1507,6 +1566,7 @@ private:
             // channels away and REPORT - never hang the dispatch.
             // abandon() re-claims by itself; the stopped receive
             // channel gets its claim (interrupts included) re-armed.
+            S::enable_txc_interrupt(false);
             (void)TxEngine::abandon();
             RxEngine::stop();
             RxEngine::arm(S::data_address(), S::dma_rx_trigger());
@@ -1588,9 +1648,8 @@ private:
     /// ticker doctrine.
     static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
-    /// The write-only transfer's discard cell and the read-only one's
-    /// dummy source (see launch_dma).
-    static inline uint8_t rx_sink_ = 0;
+    /// The read-only transfer's dummy source (see launch_dma): a null tx
+    /// clocks out 0xFF from this one cell.
     static constexpr uint8_t tx_dummy_ = 0xFF;
     /// The configuration really in the registers - the cache `apply()`
     /// compares against, and the thing a re-init overwrites wholesale.

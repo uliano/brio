@@ -1098,7 +1098,14 @@ void tf_tc_waveforms() {
                   Timer0::init(gen) && TcPwm<Timer0, 0>::setup());
     TcPwm<Timer0, 0>::duty(0x4000);
     wait_ms(5);
-    const uint32_t pad_pwm = duty_permille<Wo0Pin>();
+    // TEN TIMES THE DEFAULT WINDOW: the pad is sampled for a fixed count,
+    // not a whole number of periods, and a period of 65536 ticks fits
+    // only some seven times into the default one - the part period left
+    // over biases the reading by up to a few per cent (measured 266 and
+    // 271 per mille for 250, moving with code placement). Seventy periods
+    // bring that under one per cent; the capture below is the exact
+    // witness either way.
+    const uint32_t pad_pwm = duty_permille<Wo0Pin>(400'000UL);
     const bool pwm_read = meter_read(period, width);
     print(serial, "  TcPwm<TC0,0> duty 16384/65535: PA22 high ", pad_pwm,
           " per mille, captured period ", period, " width ", width, crlf);

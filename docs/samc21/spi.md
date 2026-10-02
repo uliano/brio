@@ -67,6 +67,15 @@ the request's mode BEFORE asserting the request's cs, so an
 engine-owned window never sees it; a caller framing CS by hand must call
 `SpiHost::prime()` first.
 
+**TXC closes the LAST frame.** "In Host mode, this flag is set when the
+data have been shifted out and there are no new data in DATA" (32.8.6) -
+measured to mean the END of the last frame and not its start: a
+write-only DMA block of n frames, timed from the channel's enable to TXC
+in core cycles, takes n frames and a constant at every n and rate (at
+100 kHz, 2 frames 9022 cycles and 6 frames 24375: 3838 a frame against
+3840; at 1 and 12 MHz the same shape). So a write-only transaction needs
+no receive channel to know it is over: TXC is its edge.
+
 **Hardware SS frames a character, not a transaction.** CTRLB.MSSEN
 raises SS "for a minimum of one baud cycle between each data sent"
 (32.6.3.5) - measured: four rising edges on the SS pad over a
@@ -123,7 +132,8 @@ answer being construction, not tuning.
 slots named, a request's data phase rides the DMAC: RX drains DATA on
 the RXC trigger (its completion IS the transaction's - the last
 character is on the wire until it has been shifted back in), TX feeds
-DATA on DRE, and both back-to-back with no CPU in the byte path. In
+DATA on DRE, and both back-to-back with no CPU in the byte path; a
+write-only phase is TX alone, closed by TXC (above). In
 loop-back the phase is byte-exact through 12 MHz (f_ref/4); the 24 MHz
 rung reads 1 of 64 correct and is recorded, not judged - at f_ref/2
 the pad round trip meets the input sampler inside one 333 ns character
@@ -191,14 +201,22 @@ item a reader would apply without checking the row.
   costs no disable/enable pair at all.
   THE TWO ENGINE SLOTS default to `NoDmaEngine`, so an engineless build
   carries no DMA code at all (the Uart's shape); named, they take the
-  DATA PHASE onto the DMAC, both or neither (the completion is the receive
-  block's), byte elements only, a null tx feeding 0xFF dummies from a
-  held source (`start_fixed`) and a null rx draining into a held sink
-  (`start_discard`). The command phase stays on the byte pump with the
+  DATA PHASE onto the DMAC, both or neither, byte elements (the host's
+  frame is eight bits), ONE INTERRUPT A TRANSACTION: with something to
+  receive, two channels - the receive block's TCMPL is the edge, the
+  transmit block SILENT (armed `DmaCompletion::silent`: TERR alone, since
+  BLOCKACT NOACT does not silence TCMPL on this die, dmac.md) - and a
+  null tx feeds 0xFF dummies from a held source (`start_fixed`);
+  WRITE-ONLY (null rx), the transmit channel alone and the SERCOM's TXC
+  the edge, the receiver left on to overflow harmlessly. TXC is cleared
+  before it is armed, and the handler that sees it asks the channel
+  whether its last beat is written (a buffer run dry between two beats
+  raises TXC too). The command phase stays on the byte pump with the
   handover made inside `isr()`; `dma_isr(channel, flags)` is the
-  DMAC-vector body and `status()` the completion's word - `spi_ok`, or
-  `spi_dma_fault` (an engine-defined BusDone code) when a
-  transfer error or a bounded-timeout abandon ended the request. The
+  DMAC-vector body, `isr()` takes TXC as well as RXC, and `status()` is
+  the completion's word - `spi_ok`, or `spi_dma_fault` (an
+  engine-defined BusDone code) when a transfer error or a bounded-timeout
+  abandon ended the request. The
   DMAC BLOCK is the app's: `Dmac::init()` once, before any engined
   `init()`. `recover()` is the verb a TIMED SpiBus calls on a
   transaction that never answered (util/bus_master.hpp): CS deasserted
@@ -270,11 +288,26 @@ A client answering a stream (the one-ahead pump):
   one refuses. `util/spi_bus.hpp` and `util/bus_master.hpp` arbitrate
   this engine as written: nothing above the contract is target-specific.
 
+- `bench_samc` letter d, the host on SERCOM1 with MISO floating (the
+  time is the wire's; dmac.md has the whole table): an engined
+  full-duplex request of 16 frames at 12 MHz takes 1928 cycles where it
+  took 2877, its launch 693 where it took 1651 - the engines' share of
+  that now some fifty instructions, the rest the host's own start (the
+  47-byte Request copied, the configuration compared, the receive buffer
+  flushed) - and ONE interrupt; a write-only one 1800 where 2869. Per
+  byte at 12 MHz the two channels interleave at 35 cycles against the
+  wire's 32 (a descriptor write-back and fetch at each switch, dmac.md);
+  the write-only one, on one channel, at 32.0. At 3 MHz both are the
+  wire's.
+
 ## Not covered yet
 
 Driver gaps (not built): **DMA engine slots on `SpiClient`** - the peer
 drives its channels through the raw engines, and a slot on the task
-waits for a device-shaped user.
+waits for a device-shaped user. **Nine-bit frames on the engines** - the
+host's Request is bytes and its frame eight bits; a nine-bit character
+would ride a halfword beat into DATA, which the engines offer
+(dmac.md), born with a nine-bit device.
 
 Implemented but not bench-verified:
 

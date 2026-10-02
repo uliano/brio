@@ -61,6 +61,8 @@
 
 #include <stdint.h>
 
+#include <span>
+
 #include "samc21/clock.hpp"
 #include "samc21/dmac.hpp"
 #include "samc21/nvic.hpp"
@@ -379,10 +381,10 @@ spilink::Report run_exchange(const spilink::Params& a) {
     // loop instead, so both boundaries stay measurable.
     if (dmac_ok && preload && (a.flags == 0u || a.flags == spilink::flag_expect_reversed)
         && (a.spare & spilink::spare_polled_pump) == 0u) {
-        (void)PeerRx::start(x_in, n);
+        (void)PeerRx::start(std::span<uint8_t>(x_in, n));
         Client::write(x_out[0]);          // PLOADEN: straight into the shifter
         if (n > 1) {
-            (void)PeerTx::start(x_out + 1, static_cast<uint16_t>(n - 1));
+            (void)PeerTx::start(std::span<const uint8_t>(x_out + 1, n - 1u));
         }
         const uint32_t t0 = Ticker::millis();
         while (!PeerRx::idle() && Ticker::millis() - t0 < a.ms) {

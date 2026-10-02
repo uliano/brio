@@ -6,15 +6,17 @@ DS80000740S items 1.10.1..1.10.4, the whole matrix re-read against
 this chip (E/G/J family, silicon rev F): 1.10.4 is LIVE and measured
 here, the other three are not this silicon (see "What the silicon
 does"). Driver: `samc21/dmac.hpp` (`Dmac` block + `DmaDescriptor` /
-`dma_descriptor()` + `DmaChannel<n>` + four engines: `DmaTxEngine` /
-`DmaRxEngine`, which `samc21/sercom.hpp`'s Uart takes as options, and
-`DmaLoopEngine` / `DmaPingPongEngine`, the two streaming shapes).
+`dma_descriptor()` + `DmaChannel<n>` + five engines: `DmaTxEngine` /
+`DmaRxEngine`, which `samc21/sercom.hpp`'s Uart and `samc21/spi.hpp`'s
+SpiHost take as options, `DmaLoopEngine` / `DmaPingPongEngine`, the two
+streaming shapes, and `DmaCopyEngine`, memory to memory).
 Family fixture `test/family_samc21/dmac.cpp` plus negatives under
 `brio check samc21`; the bench suites are `test_samc_dma` (the block,
 the channel, the serial engines), `test_samc_analog_dma` (the streaming
 engines and the element-type generalization) and `test_samc_timer_dma`
 (the same two engines on the timers, and the peripheral that does NOT
-present its request the way 25.8.8 leads one to expect).
+present its request the way 25.8.8 leads one to expect); the engines'
+cost is `bench_samc`'s letter d.
 
 ## What the silicon does
 
@@ -47,6 +49,20 @@ enable-protected - a write while the block runs is DISCARDED, not
 refused - so `Dmac::init()` writes them into a stopped controller.
 The tables exist only in an image that reaches them (`gc-sections`),
 which is half of the zero-when-absent proof below.
+
+**The first descriptor is the configuration, and the controller never
+writes it.** A channel's slot in the BASEADDR table is FETCHED when a
+block starts; the ongoing state goes to the write-back section
+(25.6.2.3, 25.6.2.5), and with the two sections apart "the same
+transaction for a channel can be repeated without having to modify the
+first transfer descriptor" (25.6.2.3). So the slot is both the
+configuration and the record of what was loaded: an engine writes it
+whole once, at `arm()`, and a block writes only what changes - BTCTRL
+(one constant per call site: the beat of the element type and which
+side walks), BTCNT and the walking side's address - then enables the
+channel with one select and one store. A loop that replays one block
+writes nothing at all; `harvest()` judges the write-back against the
+slot itself.
 
 **The end-address quirk.** For an INCREMENTING side, the descriptor's
 SRCADDR/DSTADDR holds the address one beat PAST the last one - start
@@ -103,25 +119,29 @@ have stopped.
 **A TRIGGER IS AN EDGE, NOT A LEVEL - PER REQUEST SHAPE, AND THE SHAPE
 IS THE PERIPHERAL MODE'S.** A peripheral asserts its DMA request while
 its condition holds; the DMAC latches a pending trigger when the
-request RISES. A block armed while the condition is already true is
-therefore waiting for an edge that has already gone by, and the
-channel sits enabled with nothing pending and nothing moving - the
-USART transmit measurement, and the reason the engines expose `kick()`:
-one software trigger, which the owner issues when it can see the
-peripheral's flag already standing. SWTRIGCTRL raises the single
+request RISES. Read alone, that says a block armed while the condition
+is already true waits for an edge that has gone by - the reading a
+wedged USART transmitter was first taken for, and the reason the
+engines expose `kick()`: one software trigger, for the owner to issue
+when it can see the peripheral's flag already standing. SWTRIGCTRL raises the single
 pending bit only if it was clear (25.8.8), so a kick that races a real
 trigger STILL PENDING is lost - but PEND clears when the trigger's beat
 starts (25.8.23), and a kick after that is a second trigger: measured
 on the SERCOM USART, a block enabled onto a standing DRE fired its own
 first beat and a kick that landed behind it moved a second beat into a
-full DATA, one byte lost (sercom.md). BUT THE SAME SERCOM IN SPI HOST MODE
-MEASURES THE OTHER WAY: enabling a channel with DRE already standing
-fires the first beat by itself, and a kick on top of that start is one
-extra beat whose byte a full transmit buffer discards in silence
-(exactly one early character vanishes from the wire, at every rate;
-spi.md). So the kick is the OWNER's judgement about ITS peripheral's
-request shape - USART TX kicks, SPI's launch does not, a TC capture
-needs neither (below) - and the engine stays the mechanism.
+full DATA, one byte lost (sercom.md). AND THE STANDING REQUEST IS NOT
+MISSED IN THE FIRST PLACE, which is why no engine owner in this tree
+kicks a block start any more: a rise arriving while the channel is
+DISABLED with its trigger selected is latched and served on the next
+enable, and so is the selection of a trigger onto a request already
+standing (both measured on the ADC, below) - and an engine keeps its
+trigger selected from `arm()` on. Measured on the USART's 3376 block
+starts after a DRE standing up to 1.8 ms, the first beat had always
+landed by the next register read (sercom.md), and the SPI host's launch
+showed the same from the start (spi.md: a kick there is one extra beat
+whose byte a full transmit buffer discards). `kick()` stays the owner's
+verb for a peripheral whose request rose before its channel was
+configured onto it at all; a TC capture needs it nowhere (below).
 
 **Erratum 1.10.4 is live on this silicon, and the write-back is
 therefore checked, never believed.** "Concurrent channels triggers"
@@ -169,6 +189,31 @@ that each item's matrix also has an N-family row, and for those two
 it is the N row that carries the marks under E and F. Read the row,
 not the column.
 
+**BLOCKACT = NOACT does not silence TCMPL on this die.** 25.8.22: TCMPL
+"is set when a block transfer is completed and the corresponding
+interrupt block action is enabled", which reads as NOACT suppressing it -
+the driver used to say so. Measured: a transmit block written with
+BTCTRL 0x401 (SRCINC, VALID, BLOCKACT NOACT) raised TCMPL at its end and,
+with TCMPL armed, interrupted once per block. What silences a block is
+the CHANNEL'S INTERRUPT ENABLE: an engine armed `DmaCompletion::silent`
+arms TERR alone, and its standing TCMPL flag is never reported by INTPEND
+(measured: a full-duplex SPI request with the transmit channel silent
+takes exactly one DMAC entry and one `take_pending()`, the receive
+channel's). The channel still disables itself at the end of a NOACT
+block, as 25.6.2.5 says.
+
+**A memory-to-memory beat costs five cycles.** A software-triggered
+channel with TRIGACT BLOCK moves a word beat (one read, one write) every
+five CLK_DMAC_AHB cycles at 48 MHz - the difference of a 256- and a
+4096-byte copy, the same for a fill from one cell, the same whether the
+core spins on a flag in SRAM or sleeps (so the CPU's high SRAM QoS does
+not slow it here). The bus would allow two cycles a beat; the chapter
+gives no figure for the controller's own pace, and 25.6.2.5's
+arbitration after every burst - a burst being one beat on this
+controller, no length field - is the likely three, not separately
+measured. The width is what to buy: the cost is per BEAT, so a word copy
+moves 0.8 bytes a cycle and a byte copy 0.2.
+
 **The device header's LVLEN trap.** `DMAC_CTRL_LVLEN(v)` is the group
 macro (all four level-enable bits); `DMAC_CTRL_LVLEN0(v)` masks to a
 single bit, so feeding the per-level macro a four-bit mask silently
@@ -213,46 +258,75 @@ promise, not an inheritance from whatever a debugger left behind.
   `release()`.
 - **`DmaChannel<n>`** - one channel: `configure(DmaChannelConfig)`
   (disables first: CHCTRLB is enable-protected), `load()` (descriptor
-  into the slot, copy remembered), `enable()` with the bounded
-  disable wait, `reset()` (refuses when the disable failed; clears
-  both table slots and the copy), `trigger()`/`trigger_lost()` (the
+  into the slot - the slot is the record, `loaded()` reads it back),
+  `enable()` with the bounded disable wait, `start_block()` (the
+  engines' per-block enable: one select and one store, CHCTRLA written
+  whole with ENABLE alone - an engine's channel has no RUNSTDBY and is
+  idle when a block starts), `reset()` (refuses when the disable
+  failed; clears both table slots), `trigger()`/`trigger_lost()` (the
   SWTRIGCTRL readback semantics: the bit reads set exactly when the
   trigger was LOST to an already-pending one), `suspend()`/`resume()`,
   flags/arming/status verbs, `harvest()` -> `DmaProgress` with the
   1.10.4 validation, `violations()`/`suspend_timeouts()` counters.
   Everything channel-addressed pays the CHID guard uniformly.
-- **The four engines** - `DmaTxEngine<ch, Elem>`,
-  `DmaRxEngine<ch, Elem>`, `DmaLoopEngine<ch, Elem>` and
-  `DmaPingPongEngine<ch, Elem>`. All four are peripheral-agnostic by
-  construction: `arm(data_address, trigger)` takes any peripheral's
-  DATA address and trigger code, so the same engine serves a SERCOM, a
-  DAC, either ADC, the SDADC or TSENS unchanged. The channel number is
-  refused at the spelling site (a static_assert in the engine,
-  instantiated where it is named).
-- **`Elem` IS THE BEAT**, through `dma_beat_of<Elem>()`: one `sizeof`
-  feeds both BEATSIZE and the end-address arithmetic, so the two
-  cannot disagree, and a width the silicon does not implement is a
-  compile error (25.10.1 has three, and the fourth code is Reserved).
-  It defaults to `uint8_t` - what a SERCOM moves - so every existing
-  spelling means what it always did. Alignment is NOT checked, because
-  the descriptor has no field for it: a misaligned buffer is a bus
-  error (CHINTFLAG.TERR), which is why the engines take a typed
-  pointer and not a `void*`.
-- **The hardening all four inherit**, and the reason they are one
-  family: `kick()` (one software trigger for a request that is already
-  standing - see "a trigger is an edge" below; un-doublable by
-  construction, since a channel has one pending bit and SWTRIGCTRL
-  raises it only if clear), `abandon()`/`faults()` (the caller decides
-  a block is dead, never the engine - only the peripheral's owner can
-  read the flags that make "dead" a fact rather than a timeout; what
-  the abandonment loses is stated, not pretended away), and mid-block
-  progress through `DmaChannel::harvest()` and nowhere else, so every
-  write-back reading is validated against the loaded descriptor.
-- **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart engines (see
-  sercom.md for the task-side contract): drain a buffer into a
-  peripheral, and fill a buffer from one. The receive side's asymmetry
-  is its own: arrival is not an event anyone is told about, so
-  `take()` asks by harvesting and the PACING is the caller's.
+- **The five engines** - `DmaTxEngine<ch, Elem>`,
+  `DmaRxEngine<ch, Elem>`, `DmaLoopEngine<ch, Elem>`,
+  `DmaPingPongEngine<ch, Elem>` and `DmaCopyEngine<ch>`. The first four
+  are peripheral-agnostic by construction: `arm(data_address, trigger,
+  ...)` takes any peripheral's DATA address and trigger code, so the
+  same engine serves a SERCOM, a DAC, either ADC, the SDADC or TSENS
+  unchanged. The channel number is refused at the spelling site (a
+  static_assert in the engine, instantiated where it is named).
+- **TWO MOMENTS.** `arm()` configures the binding ONCE - the channel
+  reset and configured (trigger, TRIGACT, priority), its interrupts
+  armed, the NVIC line opened, the slot's constant half written (the
+  fixed side's address, no next descriptor, the completion). A block
+  then writes what changes and enables: three stores into SRAM and one
+  select-and-store on a transfer engine, one store and the enable on the
+  ping-pong source, the enable alone on the loop. Nothing is built,
+  nothing validated twice, nothing compared.
+- **`Elem` IS THE WIDEST BEAT** the binding allows, through
+  `dma_beat_of<Elem>()` (one `sizeof` feeds BEATSIZE and the
+  end-address arithmetic, so the two cannot disagree; a width the
+  silicon does not implement is a compile error - 25.10.1 has three).
+  The transfer engines' starts are OVERLOADED on the run's element type
+  (`std::span<const uint8_t>`, `<const uint16_t>`, `<const uint32_t>` on
+  the transmit side, the mutable spans on the receive side), so one
+  engine moves bytes, halfwords or words per start, up to Elem; a wider
+  run does not compile, a run not aligned to its beat is REFUSED at run
+  time (a misaligned buffer would otherwise be a bus error, TERR, the
+  descriptor having no field to say so). Elem defaults to `uint8_t` -
+  what a SERCOM moves. The streaming engines' beat is their Elem, fixed:
+  a peripheral register is as wide as it is (the TCC finding below).
+- **`DmaCompletion`** - chosen at `arm()`: `interrupt` arms TCMPL and
+  TERR; `silent` arms TERR alone and writes BLOCKACT NOACT, for an owner
+  that proves a block's end elsewhere (the SPI host's transmit block).
+  The enable, not BLOCKACT, is what silences it (above).
+- **The hardening the peripheral engines inherit**, and the reason they
+  are one family: `kick()` (one software trigger for a request that rose
+  before its channel was configured onto it - lost when a trigger is
+  pending, a SECOND beat when one has started; no block start in this
+  tree issues it, see "a trigger is an edge"), `abandon()`/`faults()`
+  (the caller decides a block is dead, never the engine - only the
+  peripheral's owner can read the flags that make "dead" a fact rather
+  than a timeout; what the abandonment loses is stated, not pretended
+  away), and mid-block progress through `DmaChannel::harvest()` and
+  nowhere else, so every write-back reading is validated against the
+  slot.
+- **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart and SPI host
+  engines (see sercom.md and spi.md for the task-side contracts): drain
+  a buffer into a peripheral, and fill a buffer from one. The transmit
+  side's claim and programming are TWO verbs, `reserve()` (a
+  test-and-set of its busy flag) and `launch(run)` (`cancel()` gives an
+  unused reservation back), so an owner that starts blocks from two
+  contexts masks the claim alone; `start(run)` is both, for an owner in
+  one context; `start_fixed(cell, count)` sends one element `count`
+  times, `start_discard(cell, count)` drains `count` into one. A block
+  starts on an IDLE channel - the previous one completed, was stopped,
+  or never ran - which is what lets it write the slot and enable without
+  waiting. The receive side's asymmetry is its own: arrival is not an
+  event anyone is told about, so `take()` asks by harvesting and the
+  PACING is the caller's.
 - **`DmaLoopEngine`** - one caller-owned table played into a
   peripheral for ever. `start(table, length)`, `complete()` from the
   handler (counts the lap, re-arms the same block), `laps()`,
@@ -286,6 +360,18 @@ promise, not an inheritance from whatever a debugger left behind.
   controller reads and writes this memory where the compiler cannot
   see it, and gcc has already been caught on this target sinking a
   store past a transfer. A plain array still converts for free.
+- **`DmaCopyEngine<ch>`** - memory to memory, the controller's native
+  shape: no trigger source, TRIGACT BLOCK, one software trigger a block.
+  `copy(dst, src, n)` and `fill(dst, cell, n)` - `n` in ELEMENTS, the
+  element type the beat (uint8_t, uint16_t, uint32_t; any other width
+  does not compile), the fill's cell the CALLER'S memory, read by
+  address; 1 to 65535 elements (BTCNT), a misaligned pointer refused.
+  `busy()` reads the channel's ENABLE (a single block disables its
+  channel at the end, 25.6.2.6), so completion needs no handler;
+  `arm(priority, completion)` says whether the end also interrupts - to
+  wake an idling core - and the app's DMAC_Handler then only
+  acknowledges it. `abandon()` stops a block mid-way, the disable
+  waited out, bounded. The same surface on every family.
 
 ## How to use it
 
@@ -293,15 +379,27 @@ Memory to memory, software triggered:
 
 ```cpp
 brio::Dmac::init();
-using Copy = brio::DmaChannel<0>;
-Copy::configure({});                       // no trigger: software, TRIGACT block
-Copy::load(brio::DmaTransfer{
+using Copy = brio::DmaCopyEngine<0>;
+Copy::arm();                               // no trigger source, TRIGACT block
+alignas(4) static uint32_t src[256], dst[256];
+(void)Copy::copy(dst, src, 256);           // 256 WORD beats: 1 KiB
+while (Copy::busy()) { }                   // or idle: TCMPL wakes the core
+static const uint32_t black = 0;
+(void)Copy::fill(dst, &black, 256);        // the cell is the caller's
+```
+
+The same by the channel verbs, for a shape no engine has:
+
+```cpp
+using Ch = brio::DmaChannel<1>;
+Ch::configure({});
+Ch::load(brio::DmaTransfer{
     .source = src, .destination = dst, .beats = 256,
     .beat = brio::DmaBeat::byte,
 });
-Copy::arm(brio::DmaFlag::complete | brio::DmaFlag::transfer_error, true);
-Copy::enable(true);
-Copy::trigger();                           // one trigger runs the block
+Ch::arm(brio::DmaFlag::complete | brio::DmaFlag::transfer_error, true);
+Ch::enable(true);
+Ch::trigger();                             // one trigger runs the block
 ```
 
 The block's one vector, dispatched by INTPEND:
@@ -405,6 +503,14 @@ and the switch says so.
   and never finishes it; `DmaTxEngine::busy()` stays true, the owner's
   pump does nothing every time it is called, the transmit ring fills
   and `print()` spins in `Ring::push` with the board silent.
+- **A corrupted write-back can WRITE A PERIPHERAL'S REGISTERS.** With
+  the Uart's two engines on SERCOM5 (sercom.md), the transmit channel
+  once ran a write-back holding the receive descriptor's BTCTRL (0x0809:
+  destination incrementing) with DATA as both addresses and BTCNT 17, so
+  each DRE beat read DATA and wrote it at end minus remaining - into
+  INTENSET, INTFLAG, STATUS below DATA - and the program died in an
+  interrupt storm the scribbled enables raised. Its slot in BASEADDR was
+  intact: the corruption is the live copy's alone, as the erratum says.
 - **Erratum 1.10.4 observed directly**, twice over: under five
   concurrent channels with the engined Uart running, 340 corrupted
   write-backs are refused out of 210852 readings in one four-second
@@ -463,15 +569,50 @@ and the switch says so.
 
 From `test_samc_spi` letters d and h (the serial engines' second
 SERCOM personality, and the block-request engines' own speed record):
-`start_fixed()`/`start_discard()` are the two sibling verbs the SPI
-host's null buffers need (one element sent `length` times, `length`
-elements drained into one cell - each differs from start() by one
-descriptor bit, and they are SIBLINGS rather than a defaulted argument
-on start(), which would move the code generated for every caller that
-does not use them); the full-duplex pair moves a data phase byte-exact
-through 12 MHz in loop-back and carries a two-board link exact to 6 MHz
-with both ends on engines. The SPI-mode kick inversion above is
-measured there.
+`start_fixed()` is the sibling verb a null tx needs (one element sent
+`length` times - it differs from start() by one bit of BTCTRL, and a
+cell and a count are not a run); the full-duplex pair moves a data phase
+byte-exact through 12 MHz in loop-back and carries a two-board link
+exact to 6 MHz with both ends on engines, ONE DMAC interrupt a request
+(the transmit block silent); a write-only request runs on the transmit
+channel alone. The SPI-mode kick inversion above is measured there.
+
+From `bench_samc` letter d (48 MHz, flash at 2 wait states, the core
+idling until each completion; copy, fill and spi.dma the best of 8;
+`launch` the cycles to the start verb's return; letter r of the same
+image: ruler 65, stamp 151, interval 82), BEFORE - the raw channel verbs
+a copy took, `load(DmaTransfer)` + `enable` + `trigger`, and the engines
+as they were - and AFTER, on the engines as they are:
+
+  | operation                  | wall before | wall after | launch before | launch after | handler |
+  |----------------------------|-------------|------------|---------------|--------------|---------|
+  | copy 16 B (4 word beats)   | 1026        | 683        | 882 (1)       | 212          | 151 -> 143 |
+  | copy 256 B                 | 1401        | 1070       | 584           | 212          | |
+  | copy 4096 B                | 6201        | 5870       | 584           | 212          | |
+  | fill 4096 B                | 6206        | 5876       | 577           | 212          | |
+  | paced, 8 laps of 256 words | 983724      | 983296     | -             | -            | 6784 -> 3377 in all |
+  | spi.dma 16 frames, 12 MHz  | 2877        | 1928       | 1651          | 693          | 356 -> 297 |
+  | spi.dma 256 frames, 12 MHz | 11277       | 10328      | 1651          | 693          | |
+  | spi.dma.tx 16, 12 MHz      | 2869        | 1800       | 1643          | 663          | 356 -> 258 |
+  | spi.dma.tx 256, 12 MHz     | 11269       | 9480       | 1643          | 663          | |
+
+  (1) the 4-beat block completes inside the launch, its handler with it.
+
+  The copy's fixed cost - wall less five cycles a beat - fell from 1081
+  to 750 cycles, of which some 360 are the instrument (the interval, the
+  handler's stamps, the idle window's stamps) and 212 the launch: the
+  slot's four words, the busy() read, the enable and the trigger. A lap of
+  the paced loop costs the handler some 290 cycles where it cost 710
+  (the lap is now the enable alone), the pace exact to the cycle either
+  way: lap to lap 122880 cycles, 0 .. 0 off, 100 kHz from TC0's overflow.
+  The SPI request's launch fell by 958 cycles - the two engines' share,
+  now some fifty instructions together - and what remains (some 650) is
+  the host's own start: the 47-byte Request copied, the configuration
+  compared, the receive buffer flushed (spi.md). Per byte at 12 MHz the
+  two channels interleave at 35 cycles against the wire's 32, a
+  descriptor write-back and fetch at every switch between them
+  (25.6.2.5); the write-only request on ONE channel runs at 32.0, the
+  wire's own. At 3 MHz both run at the wire.
 
 From `test_samc_timer_dma` (10 letters, wireless), which is the
 streaming engines' third peripheral family and the one that qualifies
@@ -479,9 +620,8 @@ the trigger doctrine:
 
 - **NOT EVERY PERIPHERAL PRESENTS ITS DMA REQUEST AS A LEVEL, and a TC
   CAPTURE CHANNEL DOES NOT.** 25.8.8 makes a trigger the RISE of a
-  request the peripheral holds up, which is why `DmaTxEngine` needs
-  `kick()` when a SERCOM's DRE already stands and why the ADC stream
-  drains RESULT before arming. A TC capture's flag is INTFLAG.MCx and
+  request the peripheral holds up, which is why `kick()` exists at all
+  and why the ADC stream drains RESULT before arming. A TC capture's flag is INTFLAG.MCx and
   35.6.2.8 makes reading CCx the only thing that clears it, so an unread
   capture looks identical to a standing request - and it does not
   behave like one. Measured two ways: a `DmaPingPongEngine` **armed with
@@ -638,8 +778,23 @@ Driver gaps (not built):
 - Trigger codes no driver spends: the SERCOMs', the three converters',
   the TSENS's and the timers' are measured with their drivers; a
   peripheral with no driver here publishes none.
+- A CIRCULAR RECEIVE, the shape whose producer index is the hardware's
+  remaining count: this controller has no circular mode (above) and no
+  readable counter - BTCNT reaches the write-back only on a suspend
+  (25.10.2), so every reading of "how far" is a harvest. The receive
+  engine stays a run a harvest re-arms; the shape is born with the
+  ring's external-index half (design/ring.md) and its first user here.
+- A copy longer than 65535 elements in one call (BTCNT is sixteen bits):
+  the caller's loop, a chain needing the linked descriptors declined
+  above.
 
 Implemented but not bench-verified:
+- `DmaCopyEngine` with halfword and byte beats, `abandon()` and
+  `DmaCompletion::silent` (letter d copies and fills word beats and
+  waits on the completion's interrupt; the fixture compiles the rest).
+- The transfer engines' halfword and word runs (`DmaTxEngine` and
+  `DmaRxEngine` with a wider Elem): no suite hands one a wider run - the
+  SERCOM moves bytes - and the family fixture compiles every overload.
 - Step sizes beyond x1 and STEPSEL=source (the arithmetic is
   fixture-pinned, no bench letter walks a strided buffer).
 - Round-robin arbitration and DBGRUN (`DmacConfig` writes them; no

@@ -24,11 +24,11 @@
  *              write-back corruption checked rather than trusted.
  *
  *  DmaTxEngine<ch, Elem> / DmaRxEngine<ch, Elem>
- *              the two peripheral engines samc21/sercom.hpp's Uart takes
- *              as OPTIONAL policies. They live here, not there, so that
- *              sercom.hpp never includes this header and a program that
- *              names no engine cannot pay for one (see "ZERO WHEN
- *              ABSENT" below).
+ *              the two peripheral engines samc21/sercom.hpp's Uart and
+ *              samc21/spi.hpp's SpiHost take as OPTIONAL policies. They
+ *              live here, not there, so that neither header includes this
+ *              one and a program that names no engine cannot pay for one
+ *              (see "ZERO WHEN ABSENT" below).
  *
  *  DmaLoopEngine<ch, Elem> / DmaPingPongEngine<ch, Elem>
  *              the two STREAMING engines: one table played into a
@@ -36,33 +36,40 @@
  *              filling one while the caller drains the other. Same
  *              monostate shape, same hardening.
  *
- * ALL FOUR ENGINES ARE PERIPHERAL-AGNOSTIC by construction - a data
- * address and a trigger code are handed in at arm() - and all four
- * inherit the same four pieces of hardening, which is the reason they
- * are one family and not four files:
+ *  DmaCopyEngine<ch>
+ *              memory to memory: copy a run, or fill one from a cell, on
+ *              one software trigger a block.
  *
- *   kick()      A TRIGGER IS AN EDGE, NOT A LEVEL. A peripheral asserts
- *               its request as a level and the controller latches a
- *               pending trigger when that level RISES (25.8.8), so a
- *               block armed while the request already stands waits for
- *               an edge that has gone by: enabled channel, empty
- *               CHSTATUS, standing peripheral flag, not one beat moving.
- *               One software trigger closes the hole; a kick racing a
- *               real trigger still pending is LOST (one pending bit,
- *               raised only if clear), but one landing after that
- *               trigger's beat has started is a SECOND beat (PEND clears
- *               as the beat starts, 25.8.23).
- *               BUT NOT EVERY PERIPHERAL PRESENTS ITS REQUEST THAT WAY,
- *               and the owner is the only thing that can know: a SERCOM's
- *               DRE and an ADC's RESRDY do, a TC CAPTURE CHANNEL DOES NOT
- *               - a capture stream armed with INTFLAG.MCx already
- *               standing starts anyway, and resumes from a dead stop with
- *               the flag up and TRIGSRC untouched (measured,
- *               docs/samc21/dmac.md). kick() is necessary where the
- *               edge has gone by, lost where a trigger still waits, and
- *               a second beat where one has started; arming with the
- *               request drained is what makes the first beat a fresh one
- *               either way.
+ * TWO MOMENTS, every engine. arm() configures the binding ONCE - the
+ * channel reset and configured, its interrupts armed, and the constant
+ * half of its descriptor slot written - and a block writes only what
+ * changes before one select-and-store enables the channel. The slot the
+ * controller fetches it never writes back (25.6.2.3), so it holds the
+ * configuration between blocks and is the record harvest() judges the
+ * write-back against.
+ *
+ * THE FOUR PERIPHERAL ENGINES ARE PERIPHERAL-AGNOSTIC by construction - a
+ * data address and a trigger code are handed in at arm() - and inherit
+ * the same pieces of hardening, which is the reason they are one family
+ * and not four files:
+ *
+ *   kick()      A TRIGGER IS THE RISE OF A LEVEL (25.8.8) - and a rise
+ *               while the channel is disabled with its trigger selected
+ *               is LATCHED and served on the next enable, as is the
+ *               selection of a trigger onto a request already standing
+ *               (measured, docs/samc21/dmac.md). An engine keeps its
+ *               trigger selected from arm() on, so its enable fires the
+ *               first beat of a standing request by itself, and a kick
+ *               there is lost when that trigger is still pending and a
+ *               SECOND beat when its beat has started (PEND clears as the
+ *               beat starts, 25.8.23) - measured on both of the USART's
+ *               directions, which kick neither. The verb stays for a
+ *               peripheral whose request rose before its channel was
+ *               configured onto it at all. Not every peripheral presents
+ *               a level either: a TC CAPTURE CHANNEL asks again with
+ *               every capture, read or not (measured, the same document);
+ *               arming with the request drained makes the first beat a
+ *               fresh one whichever way.
  *   abandon()   THE CALLER DECIDES A BLOCK IS DEAD, never the engine:
  *               only the peripheral's owner can read the flags that make
  *               "dead" a fact rather than a timeout. What the
@@ -79,9 +86,9 @@
  * `Elem` IS THE BEAT (dma_beat_of): the element type's `sizeof` feeds
  * both BEATSIZE and the end-address arithmetic, so the two cannot
  * disagree, and a width the silicon does not implement is a compile
- * error. It defaults to `uint8_t`, which is what a SERCOM moves, so
- * every existing spelling `DmaTxEngine<3>` means exactly what it always
- * did.
+ * error. It defaults to `uint8_t`, which is what a SERCOM moves. On the
+ * two transfer engines it is the WIDEST beat: their starts take a run of
+ * any element up to it, the beat following the run's type.
  *
  * =========================================================================
  * THE CHANNEL REGISTERS SIT BEHIND A SELECTOR. This is the load-bearing
@@ -267,6 +274,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <optional>
+#include <span>
+#include <type_traits>
 
 #include "sam.h"
 
@@ -350,10 +359,11 @@ enum class DmaStepSide : uint8_t {
 };
 
 /// BTCTRL.BLOCKACT (25.10.1): what the channel does when a block ends.
-/// Note the register description's own clause behind `none`: with the
-/// block action set to none, TCMPL is NOT RAISED at all - so a channel
-/// whose completion must be noticed needs `interrupt` (or `both`), not
-/// merely an armed TCMPL.
+/// The register description's clause behind `none` (25.8.22: TCMPL is set
+/// only when the "interrupt block action is enabled") does NOT hold on
+/// this die - a `none` block raised TCMPL, measured (dmac.md) - so a
+/// completion that must be noticed asks for `interrupt` and arms TCMPL,
+/// and one that must not interrupt leaves TCMPL disarmed (DmaCompletion).
 enum class DmaBlockAction : uint8_t {
     none = DMAC_BTCTRL_BLOCKACT_NOACT_Val,
     interrupt = DMAC_BTCTRL_BLOCKACT_INT_Val,
@@ -548,8 +558,9 @@ struct DmaTransfer {
     DmaStepSide step_side = DmaStepSide::destination;
 
     /// What happens at the end of the block. `interrupt` is the default
-    /// because a completion nobody can observe is rarely what was meant -
-    /// and because BLOCKACT::none suppresses TCMPL outright (25.8.20).
+    /// because a completion nobody can observe is rarely what was meant
+    /// (and `none`, which the data sheet says suppresses TCMPL, does not
+    /// on this die - see DmaBlockAction).
     DmaBlockAction block_action = DmaBlockAction::interrupt;
     DmaEventOut event_output = DmaEventOut::none;
 
@@ -952,16 +963,13 @@ public:
     /// Read one write-back entry as a value. Field-by-field through the
     /// volatile members, so the compiler cannot turn it into a block copy
     /// that reads a field twice or not at all.
-    static DmaDescriptor read_write_back(uint8_t id) {
-        volatile dmac_descriptor_registers_t& w = writeback_[id];
-        DmaDescriptor d{};
-        d.btctrl = w.DMAC_BTCTRL;
-        d.btcnt = w.DMAC_BTCNT;
-        d.srcaddr = w.DMAC_SRCADDR;
-        d.dstaddr = w.DMAC_DSTADDR;
-        d.descaddr = w.DMAC_DESCADDR;
-        return d;
-    }
+    static DmaDescriptor read_write_back(uint8_t id) { return read(writeback_[id]); }
+
+    /// Read one FIRST-descriptor slot as a value, the same way. The
+    /// controller fetches this slot and never writes it - the ongoing
+    /// state goes to the write-back section (25.6.2.3, 25.6.2.5) - so the
+    /// slot is the driver's own record of what it loaded.
+    static DmaDescriptor read_descriptor(uint8_t id) { return read(descriptors_[id]); }
 
     /// Store a descriptor into a table slot, field by field.
     static void write_descriptor(volatile dmac_descriptor_registers_t& slot,
@@ -995,6 +1003,16 @@ private:
         typename SamPlatform::CriticalSection cs;
         regs().DMAC_CHID = static_cast<uint8_t>(DMAC_CHID_ID(id));
         return op(regs());
+    }
+
+    static DmaDescriptor read(const volatile dmac_descriptor_registers_t& w) {
+        DmaDescriptor d{};
+        d.btctrl = w.DMAC_BTCTRL;
+        d.btcnt = w.DMAC_BTCNT;
+        d.srcaddr = w.DMAC_SRCADDR;
+        d.dstaddr = w.DMAC_DSTADDR;
+        d.descaddr = w.DMAC_DESCADDR;
+        return d;
     }
 
     /// 12 x 16 bytes each, 384 bytes together, in .bss. Present only in a
@@ -1045,10 +1063,10 @@ constexpr uint32_t dma_chctrlb(const DmaChannelConfig& c) {
  * shared with an interrupt handler, and it is paid uniformly rather than
  * being reasoned about per call site.
  *
- * The channel keeps a COPY of the descriptor it loaded (16 bytes of .bss
- * per instantiated channel). It is not bookkeeping for its own sake: it
- * is the reference harvest() judges the write-back against, and without
- * it erratum 1.10.4 would be undetectable rather than merely unavoidable.
+ * The descriptor the channel was LOADED with stays in its BASEADDR slot,
+ * which the controller fetches and never writes: that slot is the
+ * reference harvest() judges the write-back against, and without it
+ * erratum 1.10.4 would be undetectable rather than merely unavoidable.
  */
 template <uint8_t n>
 class DmaChannel {
@@ -1134,22 +1152,25 @@ public:
         // transfer's evidence contaminated by the previous one's.
         Dmac::write_descriptor(Dmac::descriptor(n), DmaDescriptor{});
         Dmac::write_descriptor(Dmac::write_back(n), DmaDescriptor{});
-        loaded_ = DmaDescriptor{};
         return ok;
     }
 
     // ---- the descriptor ----------------------------------------------------
 
     /**
-     * Put a descriptor in this channel's slot of the BASEADDR table, and
-     * remember it. Main context only, and only while the channel is not
-     * running - a descriptor swapped under a live fetch is exactly the
-     * race 25.6.3.1.2 spends a page working around.
+     * Put a descriptor in this channel's slot of the BASEADDR table.
+     * Main context only, and only while the channel is not running - a
+     * descriptor swapped under a live fetch is exactly the race
+     * 25.6.3.1.2 spends a page working around.
+     *
+     * THE SLOT IS THE RECORD. The controller FETCHES a first descriptor
+     * and never writes it back - the ongoing state goes to the write-back
+     * section (25.6.2.3, 25.6.2.5), which is why the two sections are kept
+     * apart here - so what was loaded is still in the slot, and harvest()
+     * judges the write-back against the slot itself rather than a second
+     * copy kept beside it.
      */
-    static void load(const DmaDescriptor& d) {
-        loaded_ = d;
-        Dmac::write_descriptor(Dmac::descriptor(n), d);
-    }
+    static void load(const DmaDescriptor& d) { Dmac::write_descriptor(Dmac::descriptor(n), d); }
 
     /// Build and load in one step.
     static bool load(const DmaTransfer& t) {
@@ -1161,8 +1182,26 @@ public:
     }
 
     /// The descriptor this channel was last given - the reference the
-    /// write-back is judged against.
-    static const DmaDescriptor& loaded() { return loaded_; }
+    /// write-back is judged against, read out of the slot.
+    static DmaDescriptor loaded() { return Dmac::read_descriptor(n); }
+
+    /**
+     * THE ENGINES' PER-BLOCK ENABLE: one select and one store under the
+     * selector's guard, CHCTRLA written WHOLE with ENABLE alone - no
+     * read-modify-write. Two facts make the plain store right: every
+     * engine configures its channel without RUNSTDBY (25.6.7's standby
+     * sequence has no owner in this driver), the one other writable bit
+     * of the register; and a block starts only on an IDLE channel - its
+     * previous single-descriptor block disabled it at the end (25.6.2.6),
+     * stop() or a reset did, or it never ran - so ENABLE is not a bit
+     * there is anything to preserve around. Not for a channel configured
+     * with run_standby: enable(true) is.
+     */
+    [[gnu::always_inline]] static void start_block() {
+        Dmac::with_channel(n, [](dmac_registers_t& r) {
+            r.DMAC_CHCTRLA = static_cast<uint8_t>(DMAC_CHCTRLA_ENABLE_Msk);
+        });
+    }
 
     // ---- running -----------------------------------------------------------
 
@@ -1362,7 +1401,8 @@ public:
     /// with it the masked window when the suspend never lands; the
     /// default is harvest_spins.
     static std::optional<DmaProgress> harvest(uint32_t spins = harvest_spins) {
-        if (!loaded_.valid_bit()) {
+        const DmaDescriptor loaded = Dmac::read_descriptor(n);
+        if (!loaded.valid_bit()) {
             return std::nullopt;   // nothing was ever loaded: nothing to report
         }
 
@@ -1398,7 +1438,7 @@ public:
         // and the recovery re-armed it straight into the same wall.
         if (Dmac::read_write_back(n) == DmaDescriptor{}) {
             return DmaProgress{
-                .remaining = loaded_.btcnt,
+                .remaining = loaded.btcnt,
                 .done = 0,
                 .complete = false,
             };
@@ -1449,7 +1489,7 @@ public:
             resume();
         }
 
-        if (!consistent(w)) {
+        if (!consistent(w, loaded)) {
             ++violations_;
             return std::nullopt;
         }
@@ -1457,7 +1497,7 @@ public:
         const uint16_t remaining = w.btcnt;
         return DmaProgress{
             .remaining = remaining,
-            .done = static_cast<uint16_t>(loaded_.btcnt - remaining),
+            .done = static_cast<uint16_t>(loaded.btcnt - remaining),
             .complete = remaining == 0u,
         };
     }
@@ -1473,11 +1513,7 @@ public:
      * rather than equality-checked, because it is the one field that is
      * SUPPOSED to move.
      */
-    static bool consistent(const DmaDescriptor& w) {
-        return w.invariant_control() == loaded_.invariant_control() &&
-               w.srcaddr == loaded_.srcaddr && w.dstaddr == loaded_.dstaddr &&
-               w.descaddr == loaded_.descaddr && w.btcnt <= loaded_.btcnt;
-    }
+    static bool consistent(const DmaDescriptor& w) { return consistent(w, loaded()); }
 
     /// Write-back readings refused because they failed consistent().
     /// THIS IS THE ERRATUM 1.10.4 COUNTER: on silicon where the erratum
@@ -1513,14 +1549,93 @@ public:
     static void clear_counters() { violations_ = 0; timeouts_ = 0; }
 
 private:
-    static inline DmaDescriptor loaded_{};
+    static bool consistent(const DmaDescriptor& w, const DmaDescriptor& loaded) {
+        return w.invariant_control() == loaded.invariant_control() &&
+               w.srcaddr == loaded.srcaddr && w.dstaddr == loaded.dstaddr &&
+               w.descaddr == loaded.descaddr && w.btcnt <= loaded.btcnt;
+    }
+
     static inline uint32_t violations_ = 0;
     static inline uint32_t timeouts_ = 0;
 };
 
 // =============================================================================
-// The peripheral engines samc21/sercom.hpp takes as options
+// The peripheral engines samc21/sercom.hpp and samc21/spi.hpp take as options
 // =============================================================================
+
+/**
+ * Whether an engine's block INTERRUPTS at its end, chosen ONCE, at arm().
+ *
+ *   interrupt  the owner's next step waits for the block's end: the
+ *              Uart consumes what a transmit block carried and starts
+ *              the next run from the completion.
+ *   silent     the owner proves the end ELSEWHERE, and a second
+ *              interrupt would prove nothing new: the SPI host's
+ *              transmit block ends before the receive block that drains
+ *              the same frames (a full-duplex request completes on the
+ *              receive side), and a write-only request completes on the
+ *              SERCOM's TXC.
+ *
+ * WHAT SILENCES A BLOCK IS THE INTERRUPT ENABLE, NOT BLOCKACT. A silent
+ * block is written with BLOCKACT = NOACT, which still disables the
+ * channel at the end of its single block (25.6.2.5), and its channel has
+ * TERR armed and TCMPL NOT armed. 25.8.22 says TCMPL "is set when a block
+ * transfer is completed and the corresponding interrupt block action is
+ * enabled", so NOACT alone should have been enough - and on this die it
+ * is not: a NOACT block (BTCTRL 0x401 read back from the slot) raised
+ * TCMPL and, armed, its interrupt, once per block (measured, dmac.md).
+ * The flag is therefore left standing on a silent channel; nothing
+ * acknowledges it but the next take_pending() that happens to report
+ * it, which an owner of a silent engine ignores.
+ */
+enum class DmaCompletion : uint8_t { interrupt, silent };
+
+/// Whether a pointer meets the alignment of the beat that moves a T: the
+/// AHB fetches no halfword from an odd address and no word from an
+/// unaligned one, and the descriptor has no field to say so - a
+/// misaligned buffer is a BUS ERROR (TERR), so the engines refuse it
+/// first. A byte is always aligned and the test folds away.
+template <typename T>
+[[gnu::always_inline]] inline bool dma_aligned(const volatile T* p) {
+    return (reinterpret_cast<uintptr_t>(p) & (sizeof(T) - 1u)) == 0u;
+}
+
+/// BTCTRL for an engine's block, everything but the completion: the beat
+/// a T needs, which sides walk, VALID. Constant per call site, so an
+/// engine's per-block store of it is one literal.
+template <typename T>
+constexpr uint16_t dma_engine_btctrl(bool source_walks, bool destination_walks) {
+    return dma_btctrl(DmaTransfer{
+        .beat = dma_beat_of<T>(),
+        .source_increment = source_walks,
+        .destination_increment = destination_walks,
+        .block_action = DmaBlockAction::none,
+    });
+}
+
+/// The BLOCKACT bits a completion mode adds to dma_engine_btctrl().
+constexpr uint16_t dma_completion_bits(DmaCompletion c) {
+    return c == DmaCompletion::silent
+               ? 0u
+               : static_cast<uint16_t>(
+                     DMAC_BTCTRL_BLOCKACT(static_cast<uint32_t>(DmaBlockAction::interrupt)));
+}
+
+/// The channel interrupts a completion mode arms: TERR always, TCMPL
+/// unless the block is silent (DmaCompletion's comment says why the
+/// enable and not BLOCKACT).
+constexpr uint8_t dma_completion_irqs(DmaCompletion c) {
+    return c == DmaCompletion::silent
+               ? DmaFlag::transfer_error
+               : static_cast<uint8_t>(DmaFlag::complete | DmaFlag::transfer_error);
+}
+
+/// The end address of an incrementing side, from a start and a count of
+/// T (25.6.2.7, dma_end_address()'s rule): one T past the last one.
+template <typename T>
+[[gnu::always_inline]] inline uint32_t dma_run_end(const volatile T* p, uint32_t count) {
+    return reinterpret_cast<uint32_t>(p) + count * static_cast<uint32_t>(sizeof(T));
+}
 
 /**
  * DmaTxEngine<ch, Elem> - "drain a buffer into a peripheral's DATA
@@ -1531,22 +1646,45 @@ private:
  * owns the peripheral, so this type knows nothing about SERCOMs and
  * serves a DAC or an SPI unchanged.
  *
- * `Elem` IS THE BEAT (dma_beat_of): `DmaTxEngine<3>` is a byte engine,
- * which is what a SERCOM wants and why the parameter defaults;
- * `DmaTxEngine<3, uint16_t>` moves halfwords, which is what a converter's
- * data register wants. Nothing else in the engine changes - the width
- * lives in one constant and the typed pointer start() takes.
+ * TWO MOMENTS. arm() CONFIGURES the binding once - the channel reset and
+ * configured (trigger, TRIGACT beat, priority), its two interrupts armed,
+ * the NVIC line opened, and the descriptor slot written whole: the fixed
+ * destination, no next descriptor, the completion mode. A block start
+ * then writes WHAT CHANGES and nothing else: BTCTRL (one constant per
+ * call site - the beat and the source's walk), BTCNT, SRCADDR - three
+ * stores into SRAM - and the channel's enable, one select and one store
+ * (DmaChannel::start_block()). This controller keeps its configuration in
+ * the slot it fetches and never writes back (25.6.2.3: two separate
+ * sections let "the same transaction be repeated without modifying the
+ * first transfer descriptor"), so there is nothing to rebuild and nothing
+ * to compare.
+ *
+ * `Elem` IS THE WIDEST BEAT the binding allows, not the only one: the
+ * launch is overloaded on the element type of the run, and a run of
+ * bytes, halfwords or words moves with byte, halfword or word beats up to
+ * Elem's width - a wider run on a narrower engine is a compile error, a
+ * misaligned one is refused at run time (dma_aligned()). `DmaTxEngine<3>`
+ * is a byte engine, which is what a SERCOM wants and why the parameter
+ * defaults.
  *
  * TRIGACT is BEAT: one trigger, one beat. The peripheral raises its
- * "transmit buffer is free" trigger once per byte and the channel moves
- * one byte - which is precisely the work the DRE interrupt used to do,
+ * "transmit buffer is free" trigger once per element and the channel
+ * moves one - which is precisely the work the DRE interrupt used to do,
  * now done without entering the CPU at all. The DRE interrupt is
  * therefore DISARMED by whoever installs this engine; the trigger has
  * replaced it, and leaving both armed would give the byte away twice.
  *
+ * THE CLAIM AND THE PROGRAMMING ARE TWO STEPS (reserve(), launch()), so
+ * an owner that starts blocks from two contexts masks the claim alone -
+ * a test-and-set of busy_ - and programs a reserved channel unmasked: no
+ * completion of this engine can land under the programming, because no
+ * block of it is in flight. start() is the one-step spelling for an owner
+ * that starts from one context.
+ *
  * NO WRITE-BACK IS EVER READ HERE. The engine knows the block length it
- * programmed and TCMPL tells it the block ended; there is no third fact
- * to want, and so erratum 1.10.4 has no surface on this side at all.
+ * programmed and the owner learns of the end (TCMPL, or its own proof
+ * under DmaCompletion::silent); there is no third fact to want, and so
+ * erratum 1.10.4 has no surface on this side at all.
  */
 template <uint8_t ch, typename Elem = uint8_t>
 class DmaTxEngine {
@@ -1568,21 +1706,28 @@ public:
     /// The tag samc21/sercom.hpp's Uart tests with `if constexpr`.
     static constexpr bool present = true;
     static constexpr uint8_t channel = ch;
-    /// The bus width one element costs, from the element type alone.
+    /// The widest bus beat this engine moves, from the element type alone.
     static constexpr DmaBeat beat = dma_beat_of<Elem>();
     using element = Elem;
+    /// The vocabulary of arm(), named through the engine so an owner that
+    /// does not include this header (samc21/spi.hpp) can spell it.
+    using Priority = DmaPriority;
+    using Completion = DmaCompletion;
 
     /**
-     * Claim the channel for this peripheral. `data` is the address of
-     * the peripheral's transmit data register, `trigger` its TX trigger
-     * code (dma_trigger_sercom_tx<n>() and its kin).
+     * Claim the channel for this peripheral, and configure the binding.
+     * `data` is the address of the peripheral's transmit data register,
+     * `trigger` its TX trigger code (dma_trigger_sercom_tx<n>() and its
+     * kin), `completion` whether a block's end raises TCMPL.
      */
     static void arm(volatile void* data, uint8_t trigger,
-                    DmaPriority priority = DmaPriority::level0) {
+                    DmaPriority priority = DmaPriority::level0,
+                    DmaCompletion completion = DmaCompletion::interrupt) {
         data_ = data;
         trigger_ = trigger;
         priority_ = priority;
-        claim();
+        completion_ = completion;
+        take_channel();
         Nvic::enable(Dmac::irq());
     }
 
@@ -1611,7 +1756,7 @@ public:
             return false;
         }
         ++faults_;
-        claim();
+        take_channel();
         in_flight_ = 0;
         busy_ = false;
         return true;
@@ -1623,90 +1768,100 @@ public:
     static void clear_faults() { faults_ = 0; }
 
     /**
-     * Send one contiguous run. False when a block is already in flight or
-     * the run is empty - the caller (the Uart) then keeps the bytes in
-     * its ring and offers them again when the current block completes.
+     * THE CLAIM: false when a block is already in flight, otherwise the
+     * engine is the caller's until launch() or cancel(). A plain
+     * test-and-set - an owner that starts blocks from two contexts holds
+     * its guard across this call and nothing else.
      */
-    static bool start(const Elem* buffer, uint16_t length) {
-        if (busy_ || buffer == nullptr || length == 0u) {
+    [[gnu::always_inline]] static bool reserve() {
+        if (busy_) {
             return false;
         }
-        if (!Channel::load(DmaTransfer{
-                .source = buffer,
-                .destination = data_,
-                .beats = length,
-                .beat = beat,
-                .source_increment = true,
-                .destination_increment = false,
-                .block_action = DmaBlockAction::interrupt,
-            })) {
-            return false;
-        }
-        in_flight_ = length;
         busy_ = true;
-        Channel::enable(true);
         return true;
+    }
+
+    /// Give a reservation back unused (the owner found nothing to send).
+    static void cancel() { busy_ = false; }
+
+    /**
+     * Send one contiguous run on a RESERVED engine. False - and the
+     * reservation given back - when the run is empty, longer than BTCNT
+     * counts (65535 beats), or not aligned to its beat; the caller then
+     * keeps the elements and offers them again.
+     */
+    static bool launch(std::span<const uint8_t> run) {
+        return launch_run<true>(run.data(), run.size());
+    }
+    static bool launch(std::span<const uint16_t> run)
+        requires(sizeof(Elem) >= 2u)
+    {
+        return launch_run<true>(run.data(), run.size());
+    }
+    static bool launch(std::span<const uint32_t> run)
+        requires(sizeof(Elem) >= 4u)
+    {
+        return launch_run<true>(run.data(), run.size());
+    }
+
+    /// reserve() and launch() in one call, for an owner that starts blocks
+    /// from ONE context (no guard needed around the claim). False when a
+    /// block is in flight or the run is refused.
+    static bool start(std::span<const uint8_t> run) { return reserve() && launch(run); }
+    static bool start(std::span<const uint16_t> run)
+        requires(sizeof(Elem) >= 2u)
+    {
+        return reserve() && launch(run);
+    }
+    static bool start(std::span<const uint32_t> run)
+        requires(sizeof(Elem) >= 4u)
+    {
+        return reserve() && launch(run);
     }
 
     /**
-     * Send ONE element `length` times - the source address held still.
-     * The SPI host's dummy-fill for a read-only transfer, where a null
-     * tx means "0xFF on every character". A SIBLING VERB rather than a
-     * flag on start(): a defaulted argument re-compiles every existing
-     * call site, and the pre-existing images' byte-identity is a gate
-     * this stratum keeps (the descriptor differs by exactly one bit).
+     * Send ONE element `count` times - the source address held still.
+     * The SPI host's dummy-fill for a read-only transfer, where a null tx
+     * means "0xFF on every character". A sibling verb rather than a flag:
+     * a cell and a repeat count are not a run. Single-context, like
+     * start().
      */
-    static bool start_fixed(const Elem* one, uint16_t length) {
-        if (busy_ || one == nullptr || length == 0u) {
-            return false;
-        }
-        if (!Channel::load(DmaTransfer{
-                .source = one,
-                .destination = data_,
-                .beats = length,
-                .beat = beat,
-                .source_increment = false,
-                .destination_increment = false,
-                .block_action = DmaBlockAction::interrupt,
-            })) {
-            return false;
-        }
-        in_flight_ = length;
-        busy_ = true;
-        Channel::enable(true);
-        return true;
+    template <typename T>
+        requires(sizeof(T) <= sizeof(Elem))
+    static bool start_fixed(const T* one, uint16_t count) {
+        return reserve() && launch_run<false>(one, count);
     }
-
 
     /// Raise ONE software trigger on the channel.
     ///
     /// THE STANDING REQUEST. A peripheral asserts its DMA request as a
-    /// LEVEL - "my transmit buffer is free", "I have a character" - and
-    /// the DMAC turns that level into a pending trigger when it RISES. A
-    /// block armed while the level is ALREADY HIGH therefore waits for an
-    /// edge that has already happened and may never happen again: the
-    /// channel sits enabled, CHSTATUS empty, the peripheral's own flag
-    /// standing, and not one beat moves. The owner, which is the only
-    /// thing that can read the peripheral's flag, gives the channel the
-    /// missing edge with this.
-    ///
-    /// A kick that races a real hardware trigger still PENDING is LOST
-    /// (readable through trigger_lost()): SWTRIGCTRL raises the pending
-    /// bit only if it was not already set (25.8.8), and the channel has
-    /// exactly one. But PEND clears when that trigger's beat STARTS
-    /// (25.8.23), and a kick after that is a second trigger and a second
-    /// beat - measured on the SERCOM USART, whose enable onto a standing
-    /// DRE fires the first beat by itself (docs/samc21/sercom.md).
+    /// LEVEL and the DMAC turns it into a pending trigger when it RISES -
+    /// and a rise while the channel is DISABLED with its trigger already
+    /// selected is latched and served on the next enable, as is the
+    /// selection of a trigger onto a request already standing (dmac.md).
+    /// So an engine that keeps its trigger selected sees its first beat
+    /// fired by the enable itself, and a kick there is lost at best and a
+    /// SECOND beat at worst (PEND clears as a beat starts, 25.8.23): the
+    /// Uart's transmit block start does not kick (measured, sercom.md).
+    /// The verb stays for an owner whose peripheral raised its request
+    /// before the channel was configured onto it at all.
     static void kick() { Channel::trigger(); }
 
     /// Beats of the block currently in flight (0 when idle).
     static uint16_t in_flight() { return busy_ ? in_flight_ : 0u; }
     static bool busy() { return busy_; }
 
+    /// Whether the CHANNEL is still enabled - beats left in the block.
+    /// One guarded register read; the SPI host asks it when TXC rises,
+    /// because a transmit buffer that ran dry between two beats raises
+    /// TXC too, and only a disabled channel has written its last beat.
+    static bool running() { return Channel::enabled(); }
+
     /**
      * The block ended - called from the DMAC handler when take_pending()
-     * names this channel. Returns how many beats the finished block
-     * carried, so the owner can consume exactly that much of its ring.
+     * names this channel, or by the owner that proved the end of a silent
+     * block. Returns how many beats the finished block carried, so the
+     * owner can consume exactly that much of its ring.
      */
     static uint16_t complete() {
         const uint16_t moved = in_flight_;
@@ -1725,22 +1880,50 @@ public:
     }
 
 private:
-    /// Take the channel from whatever state it is in: reset (which also
-    /// clears both descriptor tables), configure, arm. arm() and
-    /// abandon() are the same act with a different reason.
-    static void claim() {
+    /// The per-block half: three stores into the slot, the in-flight
+    /// count, the enable. The channel is idle here - a reservation is
+    /// only granted with no block in flight.
+    template <bool walks, typename T>
+    static bool launch_run(const T* p, size_t count) {
+        constexpr uint16_t control = dma_engine_btctrl<T>(walks, false);
+        if (count == 0u || count > 0xFFFFu || !dma_aligned(p)) {
+            busy_ = false;
+            return false;
+        }
+        volatile dmac_descriptor_registers_t& slot = Dmac::descriptor(ch);
+        slot.DMAC_BTCTRL = static_cast<uint16_t>(control | action_);
+        slot.DMAC_BTCNT = static_cast<uint16_t>(count);
+        slot.DMAC_SRCADDR =
+            walks ? dma_run_end(p, static_cast<uint32_t>(count)) : reinterpret_cast<uint32_t>(p);
+        in_flight_ = static_cast<uint16_t>(count);
+        Channel::start_block();
+        return true;
+    }
+
+    /// Take the channel from whatever state it is in - reset (which also
+    /// clears both descriptor tables), configure, arm - and write the
+    /// constant half of the slot: the destination, no next descriptor,
+    /// a byte block that is not yet VALID. arm() and abandon() are the
+    /// same act with a different reason.
+    static void take_channel() {
         (void)Channel::reset();
         (void)Channel::configure({
             .trigger = trigger_,
             .action = DmaTriggerAction::beat,
             .priority = priority_,
         });
-        Channel::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+        Channel::arm(dma_completion_irqs(completion_), true);
+        volatile dmac_descriptor_registers_t& slot = Dmac::descriptor(ch);
+        slot.DMAC_DSTADDR = reinterpret_cast<uint32_t>(data_);
+        slot.DMAC_DESCADDR = 0u;
+        action_ = dma_completion_bits(completion_);
     }
 
     static inline volatile void* data_ = nullptr;
     static inline uint8_t trigger_ = dma_trigger_none;
     static inline DmaPriority priority_ = DmaPriority::level0;
+    static inline DmaCompletion completion_ = DmaCompletion::interrupt;
+    static inline uint16_t action_ = 0;
     static inline uint16_t in_flight_ = 0;
     static inline uint32_t faults_ = 0;
     static inline bool busy_ = false;
@@ -1750,15 +1933,15 @@ private:
  * DmaRxEngine<ch, Elem> - "fill a buffer from a peripheral's DATA
  * register".
  *
- * `Elem` IS THE BEAT, exactly as in the TX engine above, and it defaults
- * to a byte so every existing spelling means what it always did.
- *
- * The mirror of the TX engine, with one asymmetry that is not an
- * accident: THE ARRIVAL OF DATA IS NOT AN EVENT ANYONE IS TOLD ABOUT.
- * A receive block completes only when the buffer is full, which at an
- * idle line may be never, so the only way to know how much has arrived
- * is to ASK - and asking means suspending the channel to force the
- * write-back (DmaChannel::harvest). Hence:
+ * The mirror of the TX engine - TWO MOMENTS the same way (the slot's
+ * fixed source and completion written at arm(), BTCTRL, BTCNT and
+ * DSTADDR per block, then the enable), `Elem` the widest beat with the
+ * run's element type choosing the beat per start - with one asymmetry
+ * that is not an accident: THE ARRIVAL OF DATA IS NOT AN EVENT ANYONE IS
+ * TOLD ABOUT. A receive block completes only when the buffer is full,
+ * which at an idle line may be never, so the only way to know how much
+ * has arrived is to ASK - and asking means suspending the channel to
+ * force the write-back (DmaChannel::harvest). Hence:
  *
  *   HARVEST PACING IS THE CALLER'S. This engine never schedules itself.
  *   Whoever owns it decides how often to ask - a kernel TimeEvent every
@@ -1773,6 +1956,14 @@ private:
  * was bad. A protocol with its own framing and checksum does not care; a
  * console that wants exact frame-error attribution should not take this
  * engine.
+ *
+ * A BLOCK STARTS ON AN IDLE CHANNEL: its previous block completed (a
+ * single-descriptor block disables its channel at the end, 25.6.2.6), it
+ * was stopped, or it never ran. Every owner in this tree starts one only
+ * then - the Uart re-arms when the silicon reports the channel idle or
+ * the write-back reports the block complete, the SPI host after the
+ * completion - so the start writes the slot and enables, and waits for
+ * nothing.
  */
 template <uint8_t ch, typename Elem = uint8_t>
 class DmaRxEngine {
@@ -1787,18 +1978,24 @@ public:
 
     static constexpr bool present = true;
     static constexpr uint8_t channel = ch;
-    /// The bus width one element costs, from the element type alone.
+    /// The widest bus beat this engine moves, from the element type alone.
     static constexpr DmaBeat beat = dma_beat_of<Elem>();
     using element = Elem;
+    /// The vocabulary of arm(), named through the engine so an owner that
+    /// does not include this header (samc21/spi.hpp) can spell it.
+    using Priority = DmaPriority;
+    using Completion = DmaCompletion;
 
-    /// Claim the channel. `data` is the peripheral's receive data
-    /// register, `trigger` its RX trigger code.
+    /// Claim the channel and configure the binding. `data` is the
+    /// peripheral's receive data register, `trigger` its RX trigger code.
     static void arm(volatile void* data, uint8_t trigger,
-                    DmaPriority priority = DmaPriority::level0) {
+                    DmaPriority priority = DmaPriority::level0,
+                    DmaCompletion completion = DmaCompletion::interrupt) {
         data_ = data;
         trigger_ = trigger;
         priority_ = priority;
-        claim();
+        completion_ = completion;
+        take_channel();
         Nvic::enable(Dmac::irq());
     }
 
@@ -1810,53 +2007,29 @@ public:
     static bool idle() { return !Channel::enabled(); }
 
     /// Point the channel at a run of free buffer and start filling it.
-    static bool start(Elem* buffer, uint16_t length) {
-        if (buffer == nullptr || length == 0u) {
-            return false;
-        }
-        (void)Channel::enable(false);
-        if (!Channel::load(DmaTransfer{
-                .source = data_,
-                .destination = buffer,
-                .beats = length,
-                .beat = beat,
-                .source_increment = false,
-                .destination_increment = true,
-                .block_action = DmaBlockAction::interrupt,
-            })) {
-            return false;
-        }
-        capacity_ = length;
-        taken_ = 0;
-        Channel::enable(true);
-        return true;
+    /// False when the run is empty, longer than 65535 beats or not aligned
+    /// to its beat.
+    static bool start(std::span<uint8_t> run) { return start_run<true>(run.data(), run.size()); }
+    static bool start(std::span<uint16_t> run)
+        requires(sizeof(Elem) >= 2u)
+    {
+        return start_run<true>(run.data(), run.size());
+    }
+    static bool start(std::span<uint32_t> run)
+        requires(sizeof(Elem) >= 4u)
+    {
+        return start_run<true>(run.data(), run.size());
     }
 
-    /// Drain `length` elements into ONE cell - the destination held
-    /// still. The SPI host's discard sink for a write-only transfer,
-    /// where the completion still needs every character RECEIVED (the
-    /// last one is on the wire until it is) but nobody wants the bytes.
-    /// A sibling verb, not a flag, for start_fixed()'s own reason.
-    static bool start_discard(Elem* sink, uint16_t length) {
-        if (sink == nullptr || length == 0u) {
-            return false;
-        }
-        (void)Channel::enable(false);
-        if (!Channel::load(DmaTransfer{
-                .source = data_,
-                .destination = sink,
-                .beats = length,
-                .beat = beat,
-                .source_increment = false,
-                .destination_increment = false,
-                .block_action = DmaBlockAction::interrupt,
-            })) {
-            return false;
-        }
-        capacity_ = length;
-        taken_ = 0;
-        Channel::enable(true);
-        return true;
+    /// Drain `count` elements into ONE cell - the destination held
+    /// still. The SPI host's discard sink for a read-only phase that
+    /// nobody keeps, where the completion still needs every character
+    /// RECEIVED. A sibling verb, not a flag: a cell and a count are not a
+    /// run.
+    template <typename T>
+        requires(sizeof(T) <= sizeof(Elem))
+    static bool start_discard(T* sink, uint16_t count) {
+        return start_run<false>(sink, count);
     }
 
     /**
@@ -1875,27 +2048,8 @@ public:
         return fresh;
     }
 
-
-
-    /// Raise ONE software trigger on the channel.
-    ///
-    /// THE STANDING REQUEST. A peripheral asserts its DMA request as a
-    /// LEVEL - "my transmit buffer is free", "I have a character" - and
-    /// the DMAC turns that level into a pending trigger when it RISES. A
-    /// block armed while the level is ALREADY HIGH therefore waits for an
-    /// edge that has already happened and may never happen again: the
-    /// channel sits enabled, CHSTATUS empty, the peripheral's own flag
-    /// standing, and not one beat moves. The owner, which is the only
-    /// thing that can read the peripheral's flag, gives the channel the
-    /// missing edge with this.
-    ///
-    /// A kick that races a real hardware trigger still PENDING is LOST
-    /// (readable through trigger_lost()): SWTRIGCTRL raises the pending
-    /// bit only if it was not already set (25.8.8), and the channel has
-    /// exactly one. But PEND clears when that trigger's beat STARTS
-    /// (25.8.23), and a kick after that is a second trigger and a second
-    /// beat - measured on the SERCOM USART, whose enable onto a standing
-    /// DRE fires the first beat by itself (docs/samc21/sercom.md).
+    /// Raise ONE software trigger on the channel - see DmaTxEngine::kick()
+    /// for when an owner should and when the enable has already done it.
     static void kick() { Channel::trigger(); }
 
     /// True once the block filled the whole run: the owner must hand over
@@ -1914,20 +2068,44 @@ public:
     }
 
 private:
-    /// See DmaTxEngine::claim() - the same act, the same two reasons.
-    static void claim() {
+    template <bool walks, typename T>
+    static bool start_run(T* p, size_t count) {
+        constexpr uint16_t control = dma_engine_btctrl<T>(false, walks);
+        if (count == 0u || count > 0xFFFFu || !dma_aligned(p)) {
+            return false;
+        }
+        volatile dmac_descriptor_registers_t& slot = Dmac::descriptor(ch);
+        slot.DMAC_BTCTRL = static_cast<uint16_t>(control | action_);
+        slot.DMAC_BTCNT = static_cast<uint16_t>(count);
+        slot.DMAC_DSTADDR =
+            walks ? dma_run_end(p, static_cast<uint32_t>(count)) : reinterpret_cast<uint32_t>(p);
+        capacity_ = static_cast<uint16_t>(count);
+        taken_ = 0;
+        Channel::start_block();
+        return true;
+    }
+
+    /// See DmaTxEngine::take_channel() - the same act, the source fixed
+    /// instead of the destination.
+    static void take_channel() {
         (void)Channel::reset();
         (void)Channel::configure({
             .trigger = trigger_,
             .action = DmaTriggerAction::beat,
             .priority = priority_,
         });
-        Channel::arm(DmaFlag::complete | DmaFlag::transfer_error, true);
+        Channel::arm(dma_completion_irqs(completion_), true);
+        volatile dmac_descriptor_registers_t& slot = Dmac::descriptor(ch);
+        slot.DMAC_SRCADDR = reinterpret_cast<uint32_t>(data_);
+        slot.DMAC_DESCADDR = 0u;
+        action_ = dma_completion_bits(completion_);
     }
 
     static inline volatile void* data_ = nullptr;
     static inline uint8_t trigger_ = dma_trigger_none;
     static inline DmaPriority priority_ = DmaPriority::level0;
+    static inline DmaCompletion completion_ = DmaCompletion::interrupt;
+    static inline uint16_t action_ = 0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
 };
@@ -1941,8 +2119,10 @@ private:
  *
  * The shape a waveform wants: a caller-owned table of `Elem`, a
  * peripheral data register, and a trigger. Every time the block ends,
- * the SAME block starts again - so the table plays as a loop and the CPU
- * is in the path only for the few stores that re-arm it.
+ * the SAME block starts again - so the table plays as a loop, and since
+ * the controller fetches the first descriptor and never writes it back
+ * (25.6.2.3), the slot start() wrote still describes the next lap: the
+ * CPU is in the path only for the enable, one select and one store.
  *
  * THERE IS NO HARDWARE CIRCULAR MODE ON THIS CONTROLLER, and that is why
  * the loop is closed in software. Chapter 25 offers exactly one way to
@@ -2028,7 +2208,11 @@ public:
         table_ = table;
         length_ = length;
         laps_ = 0;
-        return launch();
+        write_block();
+        running_ = true;
+        // NO KICK HERE - see the class comment.
+        Channel::start_block();
+        return true;
     }
 
     /// The block ended - called from the DMAC handler when
@@ -2044,10 +2228,10 @@ public:
         // Written out rather than `++`: compound operations on a
         // volatile are deprecated in C++20 and this build is -Werror.
         laps_ = laps_ + 1u;
-        if (!launch()) {
-            running_ = false;
-            return 0;
-        }
+        // THE SAME BLOCK AGAIN, AND THE SLOT ALREADY SAYS SO: the
+        // controller fetched it and wrote its progress to the write-back
+        // section, never here (25.6.2.3), so a lap is the enable alone.
+        Channel::start_block();
         return length_;
     }
 
@@ -2085,7 +2269,9 @@ public:
         }
         ++faults_;
         claim();
-        return launch();
+        write_block();
+        Channel::start_block();
+        return true;
     }
 
     static uint32_t faults() { return faults_; }
@@ -2100,34 +2286,22 @@ public:
     }
 
 private:
-    /// Load the block and set it going. The descriptor is rebuilt every
-    /// lap rather than relied on to survive: it costs six stores, and
-    /// after an abandon() there is nothing in the tables worth trusting.
-    static bool launch() {
-        if (table_ == nullptr || length_ == 0u) {
-            return false;
-        }
-        if (!Channel::load(DmaTransfer{
-                .source = table_,
-                .destination = data_,
-                .beats = length_,
-                .beat = beat,
-                .source_increment = true,
-                .destination_increment = false,
-                .block_action = DmaBlockAction::interrupt,
-            })) {
-            return false;
-        }
-        running_ = true;
-        // NO KICK HERE - see the class comment. A kick is right only
-        // where the peripheral's request is ALREADY STANDING, which the
-        // owner is the only thing that can see; issued blind it would
-        // overwrite a value the peripheral has not taken.
-        Channel::enable(true);
-        return true;
+    /// The whole slot for this table: written by start() and by
+    /// abandon() (whose reset zeroed it), never per lap.
+    static void write_block() {
+        Channel::load(dma_descriptor(DmaTransfer{
+            .source = table_,
+            .destination = data_,
+            .beats = length_,
+            .beat = beat,
+            .source_increment = true,
+            .destination_increment = false,
+            .block_action = DmaBlockAction::interrupt,
+        }));
     }
 
-    /// See DmaTxEngine::claim() - the same act, the same two reasons.
+    /// See DmaTxEngine::take_channel() - the same act, the same two
+    /// reasons.
     static void claim() {
         (void)Channel::reset();
         (void)Channel::configure({
@@ -2248,6 +2422,8 @@ public:
         }
         buffer_[0] = first;
         buffer_[1] = second;
+        end_[0] = dma_run_end(first, length);
+        end_[1] = dma_run_end(second, length);
         length_ = length;
         fill_ = 0;
         drain_ = 0;
@@ -2255,6 +2431,7 @@ public:
         laps_ = 0;
         overruns_ = 0;
         stalled_ = false;
+        write_block();
         return launch();
     }
 
@@ -2283,9 +2460,7 @@ public:
             running_ = false;
             return length_;
         }
-        if (!launch()) {
-            running_ = false;
-        }
+        (void)launch();
         return length_;
     }
 
@@ -2313,9 +2488,7 @@ public:
         drain_ = static_cast<uint8_t>(drain_ ^ 1u);
         if (stalled_) {
             stalled_ = false;
-            if (!launch()) {
-                return false;
-            }
+            (void)launch();
         }
         return true;
     }
@@ -2357,6 +2530,7 @@ public:
         }
         ++faults_;
         claim();
+        write_block();
         return launch();
     }
 
@@ -2373,28 +2547,32 @@ public:
     }
 
 private:
+    /// The whole slot, for the buffer the engine fills next: written by
+    /// start() and by abandon() (whose reset zeroed it), never per block.
+    static void write_block() {
+        Channel::load(dma_descriptor(DmaTransfer{
+            .source = data_,
+            .destination = buffer_[fill_],
+            .beats = length_,
+            .beat = beat,
+            .source_increment = false,
+            .destination_increment = true,
+            .block_action = DmaBlockAction::interrupt,
+        }));
+    }
+
+    /// One block: the destination is the one field that alternates, so a
+    /// block is one store into the slot and the enable. The channel is
+    /// idle here - the block before completed (25.6.2.6), the stream
+    /// stalled with no block running, or abandon() reset it.
     static bool launch() {
-        if (buffer_[fill_] == nullptr || length_ == 0u) {
-            return false;
-        }
-        (void)Channel::enable(false);
-        if (!Channel::load(DmaTransfer{
-                .source = data_,
-                .destination = buffer_[fill_],
-                .beats = length_,
-                .beat = beat,
-                .source_increment = false,
-                .destination_increment = true,
-                .block_action = DmaBlockAction::interrupt,
-            })) {
-            return false;
-        }
+        Dmac::descriptor(ch).DMAC_DSTADDR = end_[fill_];
         running_ = true;
         // NO KICK HERE - see the class comment. A kick is right only
         // where the peripheral's request is ALREADY STANDING, which the
         // owner is the only thing that can see; issued blind it would
         // overwrite a value the peripheral has not taken.
-        Channel::enable(true);
+        Channel::start_block();
         return true;
     }
 
@@ -2411,6 +2589,9 @@ private:
 
     static inline volatile void* data_ = nullptr;
     static inline volatile Elem* buffer_[2] = {nullptr, nullptr};
+    /// The two blocks' DSTADDR words (25.6.2.7's end addresses), computed
+    /// once at start().
+    static inline uint32_t end_[2] = {0u, 0u};
     static inline uint8_t trigger_ = dma_trigger_none;
     static inline DmaPriority priority_ = DmaPriority::level0;
     static inline uint16_t length_ = 0;
@@ -2426,6 +2607,132 @@ private:
     static inline volatile uint8_t pending_ = 0;
     static inline volatile bool stalled_ = false;
     static inline volatile bool running_ = false;
+};
+
+// =============================================================================
+// Memory to memory
+// =============================================================================
+
+/**
+ * DmaCopyEngine<ch> - "copy a run, or fill one from a cell, with the CPU
+ * out of the byte path".
+ *
+ * THE CONTROLLER'S NATIVE MEMORY-TO-MEMORY SHAPE (25.2: memory to memory
+ * is one of its four directions): a channel with NO trigger source
+ * (TRIGSRC DISABLE) and TRIGACT BLOCK, so ONE software trigger runs the
+ * whole block (25.6.2.6, 25.8.19), both sides walking for a copy and the
+ * source held on one cell for a fill. arm() configures that once; an
+ * operation writes the slot's four words - BTCTRL (the beat of the
+ * element type and which side walks: a constant per call site), BTCNT,
+ * SRCADDR, DSTADDR - enables the channel and raises the trigger: no
+ * descriptor is built, nothing is validated twice.
+ *
+ * THE BEAT IS THE ELEMENT TYPE: a run of uint32_t moves with word beats,
+ * of uint16_t with halfword ones, of uint8_t with byte ones (any other
+ * width does not compile, dma_beat_of()). The controller's cost is per
+ * BEAT - measured on this die at five cycles a beat memory to memory -
+ * so a word copy moves 0.8 bytes a cycle and a byte copy 0.2
+ * (docs/samc21/dmac.md). A pointer not aligned to its type is refused
+ * (dma_aligned()), never handed to the bus as a fault.
+ *
+ * THE FILL'S CELL IS THE CALLER'S: the DMA reads an ADDRESS, so the value
+ * lives in memory the caller owns until busy() falls.
+ *
+ * COMPLETION IS THE CHANNEL'S OWN STATE: a single-descriptor block
+ * disables its channel at the end (25.6.2.6), so busy() reads CHCTRLA's
+ * ENABLE - one guarded select and read - and needs no handler. arm()'s
+ * `completion` says whether the end also INTERRUPTS: `interrupt` (the
+ * default) arms TCMPL, so a core idling in the kernel's loop wakes for
+ * it - the app's DMAC_Handler acknowledges it through take_pending() and
+ * owes the engine nothing; `silent` arms none, for a caller that polls.
+ * TERR is armed either way, and a bus error disables the channel too
+ * (25.6.2.8), so busy() falls on it as well.
+ *
+ * `n` is in ELEMENTS and BTCNT is sixteen bits: 1 to 65535 per operation
+ * (25.6.1.1); a longer run is refused, and is the caller's loop. One
+ * operation at a time per engine: copy() and fill() refuse while one is
+ * in flight.
+ */
+template <uint8_t ch>
+class DmaCopyEngine {
+    static_assert(ch < DMAC_CH_NUM,
+                  "no such DMA channel for this engine: the DMAC has DMAC_CH_NUM "
+                  "of them (twelve on every SAM C21 variant), numbered from zero");
+
+    using Channel = DmaChannel<ch>;
+
+public:
+    DmaCopyEngine() = delete;
+
+    static constexpr bool present = true;
+    static constexpr uint8_t channel = ch;
+
+    /// Claim and configure the channel: no trigger source, one software
+    /// trigger a block, TERR armed and TCMPL by `completion`, the NVIC
+    /// line opened.
+    static void arm(DmaPriority priority = DmaPriority::level0,
+                    DmaCompletion completion = DmaCompletion::interrupt) {
+        (void)Channel::reset();
+        (void)Channel::configure({
+            .trigger = dma_trigger_none,
+            .action = DmaTriggerAction::block,
+            .priority = priority,
+        });
+        Channel::arm(dma_completion_irqs(completion), true);
+        Dmac::descriptor(ch).DMAC_DESCADDR = 0u;
+        Nvic::enable(Dmac::irq());
+    }
+
+    /// Copy `n` elements from `src` to `dst`. False when an operation is
+    /// in flight, `n` is 0 or past 65535, or a pointer is not aligned to T.
+    template <typename T>
+    static bool copy(T* dst, const T* src, uint32_t n) {
+        if (n == 0u || n > 0xFFFFu || !dma_aligned(dst) || !dma_aligned(src) || busy()) {
+            return false;
+        }
+        constexpr uint16_t control = dma_engine_btctrl<T>(true, true);
+        go(control, n, dma_run_end(src, n), dma_run_end(dst, n));
+        return true;
+    }
+
+    /// Write the element at `cell` into `n` elements from `dst` on - the
+    /// source held still. False as copy().
+    template <typename T>
+    static bool fill(T* dst, const T* cell, uint32_t n) {
+        if (n == 0u || n > 0xFFFFu || !dma_aligned(dst) || !dma_aligned(cell) || busy()) {
+            return false;
+        }
+        constexpr uint16_t control = dma_engine_btctrl<T>(false, true);
+        go(control, n, reinterpret_cast<uint32_t>(cell), dma_run_end(dst, n));
+        return true;
+    }
+
+    /// An operation is in flight: the channel is still enabled.
+    static bool busy() { return Channel::enabled(); }
+
+    /// Stop an operation mid-block - the channel disabled, the wait for
+    /// it bounded (25.8.18: ENABLE clears once the ongoing beat has
+    /// drained). What was moved is moved. True when an operation was in
+    /// flight and has stopped.
+    static bool abandon() {
+        if (!busy()) {
+            return false;
+        }
+        return Channel::enable(false);
+    }
+
+private:
+    [[gnu::always_inline]] static void go(uint16_t btctrl, uint32_t n, uint32_t src_word,
+                                          uint32_t dst_word) {
+        volatile dmac_descriptor_registers_t& slot = Dmac::descriptor(ch);
+        slot.DMAC_BTCTRL =
+            static_cast<uint16_t>(btctrl | dma_completion_bits(DmaCompletion::interrupt));
+        slot.DMAC_BTCNT = static_cast<uint16_t>(n);
+        slot.DMAC_SRCADDR = src_word;
+        slot.DMAC_DSTADDR = dst_word;
+        Channel::start_block();
+        Channel::trigger();
+    }
 };
 
 } // namespace brio

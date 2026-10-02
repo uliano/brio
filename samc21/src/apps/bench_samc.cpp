@@ -1,5 +1,5 @@
 // bench_samc - the benchmark skeleton on the SAM C21 (docs/design/
-// benchmark.md, util/bench.hpp): four letters that print NUMBERS, one
+// benchmark.md, util/bench.hpp): five letters that print NUMBERS, one
 // `bench` line per operation and size, in the grammar every family
 // prints. NOT A TEST: a letter's one verdict is "ran", except letter r,
 // whose verdicts judge the ruler every other line is read with.
@@ -7,18 +7,21 @@
 // NOTHING TO WIRE. The console is the board's CH340 bridge on PB30 (TX)
 // / PB31 (RX) = SERCOM5 PAD[0]/PAD[1] under function D, 115200 8N1 - the
 // binding of console.cpp and test_samc_platform.cpp, with the latter's
-// TestBench frame and polled prompt loop. NO KERNEL AND NO AO: the
-// letters are plain functions and the idle path is called by hand,
-// masked, as the kernel's loop calls it - what is measured is the
-// transport, the runtime and the idle path, never a dispatch.
+// TestBench frame and polled prompt loop. Letter d drives PA16 and PA17
+// (SERCOM1's MOSI and SCK) and leaves PA19 (MISO) floating: nothing is
+// wired there and nothing should be. NO KERNEL AND NO AO: the letters are
+// plain functions and the idle path is called by hand, masked, as the
+// kernel's loop calls it - what is measured is the transport, the
+// runtime, the DMA and the idle path, never a dispatch.
 //
 // THE CLOCK: OSC48M undivided, 48 MHz on GCLK0 (samc21/clock.hpp), the
 // flash at 2 wait states (DS60001479M table 45-41) behind NVMCTRL's
 // 64-byte cache in its reset mode, NO_MISS_PENALTY (27.6.7, 27.8.2) - the
 // rate test_samc_platform runs at.
 //
-// WHERE THE VECTORS RUN. SERCOM5_Handler and SysTick_Handler are bound
-// through BENCH_PLACEMENT. It is empty in this file, so the handlers -
+// WHERE THE VECTORS RUN. SERCOM5_Handler and SysTick_Handler (and
+// letter d's DMAC_Handler and SERCOM1_Handler) are bound through
+// BENCH_PLACEMENT. It is empty in this file, so the handlers -
 // and the ISR bodies they inline - execute from flash. bench_samc_ram.cpp
 // is this same file with BENCH_RAM_TEXT defined, which binds both
 // handlers through this family's documented option of the binding
@@ -117,6 +120,31 @@
 //      Idle::idle() turns with the console drained - no kernel loop, none
 //      runs here. wall = the second, irq = the ticks, isr = the tick
 //      handler's cycles, busy = the floor. n=0, wire=0.
+//   d  THE DMA (samc21/dmac.hpp, docs/samc21/dmac.md), on its own vector
+//      DMAC_Handler and SERCOM1's, each with a meter. Every operation
+//      waits by IDLING (a masked test, then Idle::idle(), bounded at
+//      10 ms), so busy is the launch, the completion's handler and the
+//      loop's turns; copy, fill and spi.dma are the BEST of 8 by wall,
+//      and the line after each prints `launch` - the fewest cycles from
+//      the interval's start to the start verb's return - and whether every
+//      run completed:
+//        copy      16/256/4096 bytes as word beats between two word arrays
+//                  in SRAM by DmaCopyEngine<0>, the copy judged word for
+//                  word after;
+//        fill      the same sizes from one cell;
+//        paced     DmaLoopEngine<1, uint32_t> playing a 256-word table into
+//                  one cell, TC0's overflow the request at 100 kHz (MFRQ,
+//                  CC0 = 479 on GCLK0), eight laps re-armed from the
+//                  completion, the lap's end stamped on the ruler in the
+//                  handler: the line, then the lap-to-lap deviation from
+//                  256 x 480 cycles;
+//        spi.dma   SpiHost<1> on PA16 (MOSI), PA17 (SCK) and PA19 (MISO,
+//                  FLOATING: the bytes are not judged, the time is the
+//                  wire's) with DmaTxEngine<2> and DmaRxEngine<3>, a
+//                  full-duplex data phase of 16 and 256 frames at 12 and
+//                  3 MHz, no command phase, no chip select, ISR-style;
+//        spi.dma.tx  the same, write-only (null rx): ONE channel, TXC the
+//                  edge.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -137,6 +165,14 @@
 //           implementation's.
 //   memset  4 bytes a cycle x hz = 192 000 000 B/s: one STM beat a word,
 //           nothing loaded.
+//   copy, fill  2 bytes a cycle x hz = 96 000 000 B/s: the DMAC's data
+//           bus moves a word beat as one read and one write (25.6.2.5), an
+//           access a cycle at best. The controller's own pace is slower -
+//           five cycles a beat, measured by the difference of 256 and 4096
+//           bytes - so x is about 2.5 there and the fixed cost is wall minus
+//           five cycles a beat.
+//   paced   4 bytes a period of TC0's overflow: 400 000 B/s.
+//   spi.dma SCK / 8 bytes a second: one frame of eight bits a byte.
 //   r and t wire=0: an instrument's cost and an idle second carry no
 //           bytes.
 //
@@ -166,9 +202,12 @@
 
 #include "samc21/clock.hpp"
 #include "samc21/delay.hpp"
+#include "samc21/dmac.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/spi.hpp"
+#include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/bench.hpp"
 #include "util/print.hpp"
@@ -233,6 +272,8 @@ static_assert(Platform<Idle>);
 IsrMeter<Ruler, Idle> sercom_meter;
 IsrMeter<TickRuler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> empty_meter;
+IsrMeter<Ruler, Idle> dmac_meter;
+IsrMeter<Ruler, Idle> spi_meter;
 
 /// The counters as ONE instant: read under the platform's guard. The tick
 /// is never quiescent, and an interrupt landing between bench_counters()'
@@ -256,14 +297,14 @@ class Interval {
 public:
     [[gnu::always_inline]] void start() {
         SamPlatform::CriticalSection guard;
-        c0_ = bench_counters<Idle>(sercom_meter, tick_meter);
+        c0_ = bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, spi_meter);
         sw_.start();
     }
     [[gnu::always_inline]] uint32_t elapsed() const { return sw_.elapsed(); }
     [[gnu::always_inline]] BenchSample stop() {
         SamPlatform::CriticalSection guard;
         const uint32_t wall = sw_.elapsed();
-        return bench_sample(wall, c0_, bench_counters<Idle>(sercom_meter, tick_meter));
+        return bench_sample(wall, c0_, bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, spi_meter));
     }
 
 private:
@@ -497,6 +538,290 @@ void tt_tick() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// d - the DMA: copy, fill, paced, spi.dma
+// =============================================================================
+namespace dd {
+
+constexpr uint8_t ch_copy = 0;
+constexpr uint8_t ch_paced = 1;
+constexpr uint8_t ch_spi_tx = 2;
+constexpr uint8_t ch_spi_rx = 3;
+
+using Copy = DmaCopyEngine<ch_copy>;
+using Paced = DmaLoopEngine<ch_paced, uint32_t>;
+using PaceTc = Tc<0>;
+
+/// SERCOM1 as an SPI host on PA16 (MOSI), PA17 (SCK), PA19 (MISO, left
+/// floating: the bytes are not judged here) - test_samc_spi's host pads.
+constexpr SpiPads spi_pads{
+    .data_out = SercomPad::pad0,
+    .sck = SercomPad::pad1,
+    .ss = SercomPad::pad2,
+    .data_in = SercomPad::pad3,
+    .data_out_pin = {'A', 16, PinFunction::c},
+    .sck_pin = {'A', 17, PinFunction::c},
+    .ss_pin = {'A', 18, PinFunction::c},
+    .data_in_pin = {'A', 19, PinFunction::c},
+};
+using SpiHw = SpiHost<1, spi_pads, 0, DmaTxEngine<ch_spi_tx>, DmaRxEngine<ch_spi_rx>>;
+
+alignas(4) volatile uint32_t src[1024];
+alignas(4) volatile uint32_t dst[1024];
+volatile uint32_t cell = 0;
+
+constexpr uint32_t pace_period = 480u;        // TC0 on GCLK0 at 48 MHz: 100 kHz
+constexpr uint16_t pace_words = 256u;
+constexpr uint8_t pace_laps = 8u;
+alignas(4) uint32_t pace_table[pace_words];
+volatile uint8_t pace_seen = 0;
+uint32_t pace_stamp[pace_laps];
+
+uint8_t spi_tx[256];
+uint8_t spi_rx[256];
+volatile bool spi_done = false;
+
+/// The completions, called from DMAC_Handler for each take_pending() result.
+/// The copy channel's TCMPL needs nothing: take_pending() acknowledged it,
+/// and its interrupt only woke the idling core.
+[[gnu::always_inline]] inline void dmac_dispatch(const DmaInterrupt& irq) {
+    if (irq.channel == ch_copy) {
+        return;
+    }
+    if (irq.channel == ch_paced) {
+        pace_stamp[pace_seen] = Ruler::now();
+        pace_seen = static_cast<uint8_t>(pace_seen + 1u);
+        if (pace_seen >= pace_laps) {
+            Paced::stop();
+        } else {
+            (void)Paced::complete();
+        }
+    } else if (SpiHw::dma_isr(irq.channel, irq.flags)) {
+        spi_done = true;
+    }
+}
+
+bool start_copy(volatile uint32_t* to, const volatile uint32_t* from, uint16_t words,
+                bool fixed_source) {
+    return fixed_source ? Copy::fill(to, from, words) : Copy::copy(to, from, words);
+}
+bool copy_finished() { return !Copy::busy(); }
+
+bool copy_setup() {
+    Copy::arm();
+    return true;
+}
+
+}  // namespace dd
+
+namespace dd {
+
+/// The wait for a completion: the core IDLES - a masked test, then the
+/// platform's sleep, as the kernel's loop does - bounded at 10 ms. Busy is
+/// then the launch, the completion's handler and the loop's own turns.
+/// (A spin on the flag instead moves the DMAC's beats no slower: measured,
+/// the same five cycles a word beat either way.)
+template <typename Flag>
+bool wait_for(Flag done) {
+    const uint32_t t0 = Ruler::now();
+    for (;;) {
+        disable_interrupts();
+        if (done()) {
+            enable_interrupts();
+            return true;
+        }
+        Idle::idle();
+        if (Ruler::now() - t0 > Ruler::hz() / 100u) {
+            return done();
+        }
+    }
+}
+
+/// One operation, the best of 8 by wall, and the launch's own share: the
+/// fewest cycles from the interval's start to start()'s return over the 8.
+template <typename Start, typename Done>
+BenchSample best_dma(Start start, Done done, uint32_t& launch, bool& ok) {
+    BenchSample best{};
+    Interval iv;
+    launch = 0;
+    ok = true;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        iv.start();
+        const bool started = start();
+        const uint32_t l = iv.elapsed();
+        const bool finished = started && wait_for(done);
+        const BenchSample s = iv.stop();
+        asm volatile("" ::: "memory");
+        ok = ok && finished;
+        if (run == 0u || s.wall < best.wall) {
+            best = s;
+        }
+        if (run == 0u || l < launch) {
+            launch = l;
+        }
+    }
+    return best;
+}
+
+/// The wires (the file header): the DMAC's data bus moves a word beat as
+/// one read and one write, an access a cycle at best - 2 bytes a cycle.
+constexpr uint32_t dma_wire_bps = 2u * SysClock::hz;
+
+void copy_and_fill() {
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        src[i] = 0x01020304u * (i + 1u);
+    }
+    for (const uint32_t n : sizes) {
+        if (n < 16u) {
+            continue;
+        }
+        const uint16_t words = static_cast<uint16_t>(n / 4u);
+        for (uint32_t i = 0; i < 1024u; ++i) {
+            dst[i] = 0;
+        }
+        (void)drain();
+        uint32_t launch = 0;
+        bool ok = false;
+        const BenchSample s = best_dma([words] { return start_copy(dst, src, words, false); },
+                                       [] { return copy_finished(); }, launch, ok);
+        uint32_t mism = 0;
+        for (uint32_t i = 0; i < words; ++i) {
+            mism += dst[i] != src[i] ? 1u : 0u;
+        }
+        bench_line(serial, "copy", n, s, Ruler::hz(), dma_wire_bps);
+        print(serial, "  launch ", launch, " cycles, completions ", ok ? "all" : "MISSING",
+              ", mismatched words ", mism, crlf);
+    }
+    for (const uint32_t n : sizes) {
+        if (n < 16u) {
+            continue;
+        }
+        const uint16_t words = static_cast<uint16_t>(n / 4u);
+        cell = 0xA5C3E1F0u;
+        (void)drain();
+        uint32_t launch = 0;
+        bool ok = false;
+        const BenchSample s = best_dma([words] { return start_copy(dst, &cell, words, true); },
+                                       [] { return copy_finished(); }, launch, ok);
+        uint32_t mism = 0;
+        for (uint32_t i = 0; i < words; ++i) {
+            mism += dst[i] != 0xA5C3E1F0u ? 1u : 0u;
+        }
+        bench_line(serial, "fill", n, s, Ruler::hz(), dma_wire_bps);
+        print(serial, "  launch ", launch, " cycles, completions ", ok ? "all" : "MISSING",
+              ", mismatched words ", mism, crlf);
+    }
+}
+
+/// paced: 8 laps of 256 words into one cell, TC0's overflow the request
+/// at 100 kHz, the loop re-armed from the completion; the thread idles.
+void paced() {
+    for (uint32_t i = 0; i < pace_words; ++i) {
+        pace_table[i] = i;
+    }
+    if (!PaceTc::init(0) ||
+        !PaceTc::configure({.mode = TcMode::count16, .waveform = TcWaveform::match_frequency}) ||
+        !PaceTc::set_cc16(0, static_cast<uint16_t>(pace_period - 1u))) {
+        print(serial, "  TC0 did not come up", crlf);
+        return;
+    }
+    Paced::arm(&cell, PaceTc::dma_trigger_overflow);
+    (void)PaceTc::enable(true);
+    (void)drain();
+    pace_seen = 0;
+    Interval iv;
+    iv.start();
+    (void)Paced::start(pace_table, pace_words);
+    while (pace_seen < pace_laps && iv.elapsed() < Ruler::hz() / 10u) {
+        disable_interrupts();
+        if (pace_seen >= pace_laps) {
+            enable_interrupts();
+            break;
+        }
+        Idle::idle();
+    }
+    const BenchSample s = iv.stop();
+    (void)PaceTc::enable(false);
+    PaceTc::release();
+    const uint32_t nominal = pace_period * pace_words;
+    int32_t lo = 0;
+    int32_t hi = 0;
+    for (uint8_t k = 1; k < pace_seen; ++k) {
+        const int32_t dev = static_cast<int32_t>(pace_stamp[k] - pace_stamp[k - 1u] - nominal);
+        if (k == 1u || dev < lo) {
+            lo = dev;
+        }
+        if (k == 1u || dev > hi) {
+            hi = dev;
+        }
+    }
+    constexpr uint32_t paced_wire_bps = 4u * (SysClock::hz / pace_period);
+    bench_line(serial, "paced", static_cast<uint32_t>(pace_seen) * pace_words * 4u, s,
+               Ruler::hz(), paced_wire_bps);
+    print(serial, "  laps ", pace_seen, " of ", pace_laps, ", lap-to-lap against ", nominal,
+          " cycles: ", lo, " .. ", hi, ", the cell holds ", cell, crlf);
+}
+
+/// spi.dma: a full-duplex data phase (two channels) and a write-only one,
+/// 16 and 256 frames at two rates, MISO floating on PA19: the time is
+/// the wire's and the engines', the bytes are not judged.
+void spi_dma() {
+    if (!SpiHw::init(clock)) {
+        print(serial, "  the SPI host did not come up", crlf);
+        return;
+    }
+    for (uint32_t i = 0; i < 256u; ++i) {
+        spi_tx[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    static constexpr uint8_t bauds[] = {1, 7};   // 12 MHz and 3 MHz SCK
+    for (const bool duplex : {true, false}) {
+        for (const uint8_t baud : bauds) {
+            const uint32_t sck = spi_sck_hz(SysClock::hz, baud);
+            for (const uint16_t frames : {static_cast<uint16_t>(16), static_cast<uint16_t>(256)}) {
+                (void)drain();
+                uint32_t launch = 0;
+                bool ok = false;
+                const BenchSample s = best_dma(
+                    [frames, baud, duplex] {
+                        spi_done = false;
+                        SpiHw::Request r{
+                            .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+                            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx)),
+                            .rx = duplex ? lend<Lease::reply>(static_cast<uint8_t*>(spi_rx))
+                                         : Borrowed<uint8_t, Lease::reply>{},
+                            .len = frames, .reply = {},
+                            .baud = baud, .mode = SpiMode::mode0, .polled = false,
+                        };
+                        return !SpiHw::start(r);
+                    },
+                    [] { return spi_done; }, launch, ok);
+                bench_line(serial, duplex ? "spi.dma" : "spi.dma.tx", frames, s, Ruler::hz(),
+                           sck / 8u);
+                print(serial, "  ", duplex ? "full duplex" : "write-only", ", SCK ", sck,
+                      " Hz: launch ", launch, " cycles, completions ", ok ? "all" : "MISSING",
+                      ", status ", SpiHw::status(), ", wire ",
+                      static_cast<uint32_t>(frames) * 8u * (SysClock::hz / sck), " cycles", crlf);
+            }
+        }
+    }
+    SpiHw::release();
+}
+
+}  // namespace dd
+
+void td_dma() {
+    if (!Dmac::init() || !dd::copy_setup()) {
+        print(serial, "  the DMAC did not come up", crlf);
+        bench.verdict("ran", false);
+        return;
+    }
+    dd::copy_and_fill();
+    dd::paced();
+    dd::spi_dma();
+    Dmac::release();
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console SERCOM5 ", console_baud, " 8N1 (BAUD gives ",
@@ -514,6 +839,20 @@ extern "C" BENCH_PLACEMENT void SERCOM5_Handler() {
     (void)Serial::isr();
     sercom_meter.leave();
 }
+extern "C" BENCH_PLACEMENT void DMAC_Handler() {
+    dmac_meter.enter();
+    while (const auto irq = brio::Dmac::take_pending()) {
+        dd::dmac_dispatch(*irq);
+    }
+    dmac_meter.leave();
+}
+extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
+    spi_meter.enter();
+    if (dd::SpiHw::isr()) {
+        dd::spi_done = true;
+    }
+    spi_meter.leave();
+}
 extern "C" BENCH_PLACEMENT void SysTick_Handler() {
     tick_meter.enter();
     brio::Ticker::tick();
@@ -530,6 +869,7 @@ int main() {
     bench.letter('m', "memcpy and memset, 1/16/256/4096 bytes", tm_memory);
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
+    bench.letter('d', "the DMA: copy, fill, paced, spi.dma", td_dma);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED", " tick=",

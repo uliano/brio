@@ -63,6 +63,11 @@
 //   g  THE KERNEL LETTER: SpiBus (= BusMaster) over SpiHost inside a
 //      real kernel - queued requests, replies through ReplyTo,
 //      reject-when-full, and the PrepareSleep vote idle vs busy
+//   h  THE DMA HOST, WIRELESS (loop-back): the data phase on the two
+//      engines, ONE interrupt a transaction (the receive block's; the
+//      transmit block silent), a write-only request on ONE channel with
+//      TXC as its edge - and TXC timed against the frames it closes - and
+//      the rate ladder on the crystal
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -1701,6 +1706,10 @@ using DmaLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<0>, DmaRxEngi
 
 volatile bool request_done = false;
 volatile bool host_live = false;   ///< routes SERCOM1_Handler to DmaLoop::isr()
+/// The vectors a request took, counted by the two handlers below.
+volatile uint32_t dmac_entries = 0;
+volatile uint32_t dmac_tx_reports = 0;   ///< take_pending() naming the TX channel
+volatile uint32_t sercom_entries = 0;
 
 uint8_t tx[64];
 uint8_t rx[64];
@@ -1787,17 +1796,27 @@ void th_dma() {
                   "(increment off - one descriptor bit)",
                   ok && mism == 0);
 
-    // 4. A null rx drains into the held sink - the completion still
-    // needs every byte RECEIVED, nobody keeps them.
+    // 4. A null rx is WRITE-ONLY: the transmit channel alone, and the
+    // SERCOM's TXC the edge (the receiver overflows harmlessly). Polled,
+    // the spin still waits on the flag the SERCOM vector sets.
+    dh::dmac_entries = 0;
+    dh::sercom_entries = 0;
+    dh::host_live = true;
     ok = dh::polled_req(dh::tx, nullptr, 16, command_baud) && DmaLoop::status() == spi_ok;
-    bench.verdict("a null rx completes through the discard sink, spi_ok",
-                  ok);
+    dh::host_live = false;
+    print(serial, "  write-only polled: DMAC entries ", dh::dmac_entries, ", SERCOM1 entries ",
+          dh::sercom_entries, crlf);
+    bench.verdict("a null rx runs on ONE channel and completes on TXC, spi_ok - no DMAC "
+                  "interrupt, one SERCOM interrupt",
+                  ok && dh::dmac_entries == 0u && dh::sercom_entries == 1u);
 
     // 5. The ISR-style request: the command phase pumped by
     // SERCOM1_Handler, the handover made INSIDE the interrupt, the
     // completion posted by DMAC_Handler - both vectors in one request.
     for (uint8_t i = 0; i < 24; ++i) dh::rx[i] = 0xEE;
     dh::request_done = false;
+    dh::dmac_entries = 0;
+    dh::dmac_tx_reports = 0;
     dh::host_live = true;
     {
         DmaLoop::Request r{
@@ -1822,11 +1841,58 @@ void th_dma() {
         if (dh::rx[i] != dh::tx[i]) ++mism;
     }
     print(serial, "  ISR-style request: done=", dh::request_done, " mism=", mism,
-          " status=", DmaLoop::status(), crlf);
+          " status=", DmaLoop::status(), ", DMAC entries ", dh::dmac_entries,
+          " (the TX channel reported ", dh::dmac_tx_reports, " times)", crlf);
     bench.verdict("an ISR-style request runs the command phase on the SERCOM vector, "
                   "hands over to the engines inside the interrupt, and completes "
                   "through the DMAC vector with spi_ok",
                   ok && dh::request_done && mism == 0 && DmaLoop::status() == spi_ok);
+    bench.verdict("ONE DMAC interrupt for the data phase: the receive block's; the "
+                  "transmit block is silent (TCMPL disarmed)",
+                  dh::dmac_entries == 1u && dh::dmac_tx_reports == 0u);
+
+    // 5b. Does TXC mark the END of the last frame (32.8.6)? A write-only
+    // request of n frames at 100 kHz, ISR-style, timed in CORE cycles -
+    // the clock SCK is divided from, so a frame is exactly 8 x 480 of them
+    // - from start() to the completion edge: n frames and a constant, not
+    // n - 1.
+    {
+        constexpr uint8_t slow = 239;   // 100 kHz: a frame is 80 us
+        constexpr uint32_t frame = 8u * (SysClock::hz / spi_sck_hz(SysClock::hz, slow));
+        // The first request moves the bus to this rate (apply()'s disable
+        // and enable), so it is spent and the next two are timed.
+        uint32_t took[3] = {0, 0, 0};
+        static constexpr uint16_t ns[3] = {2, 2, 6};
+        bool done_all = true;
+        for (uint8_t k = 0; k < 3; ++k) {
+            dh::request_done = false;
+            dh::host_live = true;
+            DmaLoop::Request r{
+                .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+                .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
+                .rx = {},
+                .len = ns[k], .reply = {},
+                .baud = slow, .mode = SpiMode::mode0, .polled = false,
+            };
+            const uint32_t t0 = Ticker::cycles();
+            (void)DmaLoop::start(r);
+            const uint32_t m0 = Ticker::millis();
+            while (!dh::request_done && Ticker::millis() - m0 < 10u) {
+            }
+            took[k] = Ticker::cycles() - t0;
+            dh::host_live = false;
+            done_all = done_all && dh::request_done;
+        }
+        const uint32_t per_frame = (took[2] - took[1]) / 4u;
+        const uint32_t constant = took[1] - 2u * per_frame;
+        print(serial, "  write-only at 100 kHz: 2 frames ", took[1], ", 6 frames ", took[2],
+              " core cycles - ", per_frame, " a frame (", frame, " due), the rest ",
+              constant, crlf);
+        bench.verdict("TXC marks the END of the last frame: each frame adds one frame "
+                      "time, and two frames take more than two",
+                      done_all && per_frame + frame / 100u >= frame &&
+                          per_frame <= frame + frame / 100u && took[1] > 2u * frame);
+    }
 
     // 6. The ladder to the generator's top, timed on the crystal. The
     // point of the engines: back-to-back characters with the CPU out of
@@ -1902,6 +1968,7 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// Spi<1>, and only one of them ever has RXC armed at a time.
 extern "C" void SERCOM1_Handler() {
     if (dh::host_live) {
+        dh::sercom_entries = dh::sercom_entries + 1u;
         // Letter h's ISR-style request: the command phase pumped here,
         // the handover to the engines made inside this very interrupt.
         if (dh::DmaLoop::isr()) {
@@ -1927,7 +1994,11 @@ extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 /// The engines' completions and faults - letter h's loop-back twin or
 /// letter d's on-the-wire one, whichever is live.
 extern "C" void DMAC_Handler() {
+    dh::dmac_entries = dh::dmac_entries + 1u;
     while (const auto irq = brio::Dmac::take_pending()) {
+        if (irq->channel == 0u) {
+            dh::dmac_tx_reports = dh::dmac_tx_reports + 1u;
+        }
         if (dma_bus_live) {
             (void)DmaBus::dma_isr(irq->channel, irq->flags);
         } else if (dh::DmaLoop::dma_isr(irq->channel, irq->flags)) {
