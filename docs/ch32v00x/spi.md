@@ -16,7 +16,14 @@ the pads).
   as HCLK/(BR + 2).
 - **No FIFO.** One transmit buffer, one receive buffer, one shift
   register (figure 16-1): TXE means the buffer moved into the shifter,
-  RXNE that a frame has been shifted both ways.
+  RXNE that a frame has been shifted both ways. A frame written while
+  another shifts waits in the buffer and follows it with no gap on SCK
+  (16.2.2: "if the TXE flag is set, fill the data register, maintain
+  the complete data flow"); and the receive buffer holds ONE frame - a
+  frame that ends while the one before it stands unread is lost, OVR
+  set, the transmit side untouched (16.2.7), the flag cleared by a
+  DATAR read followed by a STATR read. Those two sentences are what the
+  host's loops and its write-ahead rest on, and what bounds them.
 - **Frames of 8 or 16 bits** (DFF), SCK from HCLK/2 to HCLK/256 (BR),
   MSB or LSB first, the four CPOL/CPHA modes of table 16-1.
 - **The chip select has three arrangements** (16.2.1): software (SSM,
@@ -66,29 +73,38 @@ the pads).
   `software_select()`, `high_speed_read()`, `dma_requests()`, the
   three interrupt enables and `isr()`, the raised-and-enabled sources.
 - `SpiHost<1, pins, TxEngine, RxEngine>` is the engine `SpiBus` (=
-  `BusMaster`) drives. Its `Request` is the other strata's verbatim:
-  a chip select `PinRef` and a D/C line, a command phase (D/C low), a
-  data phase with an optional out buffer (null = 0xFF dummies) and an
-  optional in buffer (null = discard), the per-request `mode`, `clock`
-  and `bits`, and `polled` - false runs the frames on the RXNE
-  interrupt with the kernel free between them, true spins inside
-  `start()` and completes synchronously. `init(clock, max_sck_hz)`,
-  `rebase()`, `clock_for(hz)`, `prime()` for a caller framing its own
-  select, `bit_order()`, `isr()`, `dma_isr()`, `status()`,
-  `recover()`, `release()`, `claim_nss_pad()`. The engine slots are
-  `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`, both or neither,
-  on those two channels and no others (refused at compile time
-  otherwise). Their `Elem` is the widest beat: `uint8_t` engines serve
-  the 8-bit requests and send a 16-bit one to the pump; `uint16_t`
-  engines - DATAR's width, nothing wider compiles - serve both, the
-  16-bit request in half-word beats when both of its buffers sit on a
-  half-word boundary and on the pump otherwise. The transmit engine is
-  armed for its errors alone: ONE DMA INTERRUPT A TRANSACTION, the
-  receive channel's, and `dma_isr()` reads the controller's one flag
-  register once for both channels. The data phase's launch is the two
-  engines' block starts and the two DMA requests raised around them,
-  no mask (nothing completes under it). Frames in a byte buffer: one
-  byte per 8-bit frame, two bytes low-first per 16-bit frame - one
+  `BusMaster`) drives. Its `Request` carries the other strata's fields
+  name for name: a chip select `PinRef` and a D/C line, a command phase
+  (D/C low), a data phase with an optional out buffer (null = 0xFF
+  dummies) and an optional in buffer (null = discard), the per-request
+  `mode`, `clock` and `bits`, and `polled` - false runs the frames on
+  the RXNE interrupt with the kernel free between them, true spins
+  inside `start()` and completes synchronously. The ORDER of the fields
+  is this host's: forty bytes with no padding, the eight words an
+  asynchronous tenure needs first, then one word holding `clock`,
+  `mode` and `bits` behind `cs_setup_us`, then the reply (the next
+  section). `status()` answers `spi_ok`, `spi_dma_fault`,
+  `spi_overrun` (the pump lost a frame to the one-deep receive buffer:
+  every frame went out, one that came back is missing) or
+  `spi_stalled` (a polled flag never came within the transaction's
+  budget). `init(clock, max_sck_hz)`, `rebase()`, `clock_for(hz)`,
+  `prime()` for a caller framing its own select, `bit_order()`,
+  `isr()`, `dma_isr()`, `recover()`, `release()`, `claim_nss_pad()`.
+  The engine slots are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2,
+  Elem>`, both or neither, on those two channels and no others (refused
+  at compile time otherwise). Their `Elem` is the widest beat:
+  `uint8_t` engines serve the 8-bit requests and send a 16-bit one to
+  the pump; `uint16_t` engines - DATAR's width, nothing wider compiles
+  - serve both, the 16-bit request in half-word beats when both of its
+  buffers sit on a half-word boundary and on the pump otherwise. The
+  transmit engine is armed for its errors alone: ONE DMA INTERRUPT A
+  TRANSACTION, the receive channel's, and `dma_isr()` reads the
+  controller's one flag register once for both channels. The data
+  phase's launch is the two engines' block starts and the two DMA
+  requests raised around them, no mask (nothing completes under it).
+  Which requests the engines take at all is a count (`dma_min_frames`,
+  `dma_min_frames_polled`, the next section). Frames in a byte buffer:
+  one byte per 8-bit frame, two bytes low-first per 16-bit frame - one
   half-word in memory, which is what a 16-bit beat moves.
 - `SpiClient<1, pins>`: the target side, thin - `init(clock, Config)`,
   `enable(first)` with the first answer loaded before the host's
@@ -99,6 +115,114 @@ the pads).
 [brio/ch32v00x/pin.hpp](../../brio/ch32v00x/pin.hpp)'s `PinRef` (the
 runtime pin the request carries) and `Pad` (the compile-time pad name
 the pin tables use) were born with this driver.
+
+## The host above the wire
+
+What a transaction costs beyond its frames' time is the host's own:
+`start()`, the polled loops, the pump's handler. Each is written from
+16.2.2's two sentences above, and each is COUNTED in the release
+listings (WCH gcc 15.2, `-Os`, the `xw` ISA, the hardware prologue on:
+`test_ch32_spi.lst` and `bench_ch32.lst` for the CH32V006, the cost
+model 2.5 cycles a straight-line instruction, the prologue's entry 29
+and exit 25 cycles measured in platform.md) and MEASURED IN THE
+RECOVERY SESSION by `bench_ch32`'s letter e, the boards being off the
+desk.
+
+- **The request is lent for the call** (design/spi-bus.md): a polled
+  request completes inside `start()` and is read through the reference
+  - copied nowhere; an asynchronous one has its tenure copied as eight
+  word loads and eight word stores inline (the two pins, the three
+  buffers, the two lengths, the completion style), never a call. The
+  descriptor's layout makes those words its first eight and leaves no
+  padding: 40 bytes where the same fields in the other strata's order
+  take 48 with twelve of padding, and the copy a transaction paid - a
+  48-byte `memcpy` call - is gone from every path.
+- **`apply()` compares one word.** The request's `clock`, `mode` and
+  `bits` lie together behind `cs_setup_us` at a word boundary, so the
+  compare with the last request's is one load and a shift against a
+  kept word: nine instructions with the ceiling's clamp, nothing
+  written. On a mismatch the three are folded into CTLR1 and compared
+  with the word in force (two requests under a ceiling may fold to the
+  same word); a changed word is written with the drain and the
+  disable/enable pair 16.3.1 asks for DFF.
+- **Two polled loops.** A phase whose answers nobody wants - the
+  command phase, a write with no in buffer - runs the TRANSMIT-ONLY
+  loop: a frame written whenever TXE says the buffer is free, which it
+  is a whole frame time before the shifter needs it, so the clock never
+  pauses; the answers overrun the receive buffer, harmless to the
+  transmit side by 16.2.7, and the tail waits TXE then not BSY and
+  clears RXNE and OVR with the chapter's DATAR-then-STATR read. Nine
+  instructions a frame at 8 bits (twelve at 16): at the wire from
+  HCLK/4 on 8-bit frames and from HCLK/2 on 16-bit ones, and an
+  interrupt that lands in the loop only pauses the stream. A phase with
+  an in buffer runs the RECEIVE loop with ONE FRAME IN FLIGHT: write k,
+  poll RXNE, read k and write k + 1 in the next instruction, the next
+  frame's load and the store of the one read placed inside the wire
+  time. Twelve instructions a frame at 8 bits, of which four on the
+  bus's dead time (the poll's last turn, the DATAR read, the DATAR
+  write): about 15 cycles a frame plus half a poll turn, so HCLK/4 runs
+  at about 1.5 times the wire and HCLK/16 at 1.15. A frame AHEAD in
+  that loop would be wire-bound but is refused by the same arithmetic
+  as the pump's: two in flight lose a frame to any interrupt longer
+  than a frame time, and a lost answer is a wrong read where an idle
+  bus is only a slower one. Both loops spend ONE bounded budget of poll
+  turns for the whole transaction (a frame's cycles per frame, a shift
+  and no multiply) and end with `spi_stalled` when a flag never comes.
+- **The select and D/C edges** are one store each into BSHR and BCR
+  (RM 7.3.1.4, 7.3.1.5), inline, the null D/C a branch; `cs_setup_us`
+  is tested before anything is called; no flush of the receive buffer
+  at the start of a transaction, because every path leaves it empty at
+  its end (the receive loop and the pump read every frame, the
+  transmit-only loop flushes after its tail, the receive engine takes
+  every frame, the fault exits flush) and `init()` and `recover()`
+  flush what a reset or a `prime()` left.
+- **The pump and its threshold.** One interrupt a frame (no FIFO); in
+  the handler the DATAR read is the seventh instruction of the body
+  and the next frame's write - PREPARED by the previous handler inside
+  the wire time - the eighth after it; the store, the walk to the frame
+  after and the counters come behind the write: 42 instructions on an
+  8-bit frame with an in buffer, about 160 cycles a frame with the
+  prologue and epilogue. Above a rate threshold the handler keeps TWO
+  frames in flight (the phase primed with two, the handler for frame k
+  writing k + 2), so the bus never idles through the handler; below it
+  one, the bus idle from RXNE to the write - about 70 cycles. The
+  threshold is arithmetic in the header, its inputs named: two in
+  flight is safe where a frame outlasts the longest window the SPI's
+  service waits behind plus the core's entry plus the handler's path to
+  the read. On this core NO INTERRUPT NESTS, so the first term is the
+  longer of the image's longest handler and its longest masked window:
+  the console transport's receive path with its RxActivity post, about
+  245 cycles behind the prologue and epilogue; the kernel's post() of a
+  48-byte bus request under the mask, about 160; the bench app's USART
+  handler with its two stamps, about 300 - the constant is 320. The
+  entry is the prologue's 29 and the nine instructions to the read, 52.
+  A frame of more than 372 cycles: HCLK/64 and slower on 8-bit frames
+  (512 cycles), HCLK/32 and slower on 16-bit ones. At HCLK/64 the pump
+  goes from about 1.4 times the wire to the wire. An OVR seen in the
+  handler's STATR read ends the transaction with `spi_overrun`, the
+  lost frame counted so the phase still ends - the witness of a
+  threshold too low for the image it runs in, and the guard the
+  constant has.
+- **The engines against the pump**, two counts beside each other:
+  the engines' fixed cost a transaction, about 355 cycles (dma.md: the
+  launch's 59 instructions, the receive channel's completion vector
+  with `finish_dma()` and the select's release), over the pump's 160 a
+  frame - `dma_min_frames` = 3: a data phase shorter than that takes
+  the pump even with engines bound. A POLLED request takes the engines
+  only with an in buffer and from `dma_min_frames_polled` = 14 frames
+  on (the fixed cost over the receive loop's 24 cycles of dead bus a
+  frame); a polled write never does, its loop running at the wire.
+- **The fixed cost of a request**, a 3-byte polled one (a command and
+  two data bytes, D/C scripted, the rate unchanged): about 120
+  instructions on the path - start()'s 81, two entries into the
+  transmit-only loop with their tails - about 300 cycles counted,
+  where the same request on the previous host ran about 250
+  instructions and a 48-byte `memcpy` call, about 650. The vendor's
+  own loop, the EVT's `2Lines_FullDuplex` host side transcribed as a
+  scratch program over the EVT's library (counted, not run): 51
+  instructions a frame through three library calls, about 130 cycles -
+  at the wire from HCLK/16, four times it at HCLK/4, where brio's
+  transmit-only loop is at the wire and its receive loop at 1.5.
 
 ## How to use it
 
@@ -169,9 +293,8 @@ nak-ing corrupted frames (measured), not as silence.
   command's echo discarded; a read with no out buffer clocks 0xFF
   dummies; the select released after every transaction.
 - **The polled path at every rate**: all eight BR codes carry 64
-  bytes byte-exact, from 215 cycles a frame at /2 (the wire alone 2)
-  to 2243 at /256 (the wire alone 258) - the per-frame cost is the
-  poll, not the clock, until the divider is the larger of the two.
+  bytes byte-exact (the timing of that letter is owed to the loops as
+  they are: the second gap list).
 - **The hardware CRC is the arithmetic**: TXCRCR over six frames is
   what a bitwise loop over the same polynomial computes (0x5A), the
   receiver's RXCRCR over the looped-back frames is the same number,
@@ -224,6 +347,25 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- THE HOST ABOVE THE WIRE as it is - the request lent and its tenure
+  copied as words, the one-word compare, the transmit-only loop and the
+  receive loop, the pump with the prepared frame and the write-ahead
+  from HCLK/64 (HCLK/32 at 16 bits), `spi_overrun` and `spi_stalled`,
+  the engines from `dma_min_frames` and `dma_min_frames_polled` - and
+  every number the section above counts: `bench_ch32`'s letter e on
+  both parts (spi.poll and spi.poll.rx at 16 and 256 frames at HCLK/4
+  and HCLK/16 in both widths against the wire; spi.pump the same and
+  at HCLK/64 with the overrun flag and the host's status read after
+  each run - the threshold's verification, since a frame lost there
+  says the hold-off constant is below the image's longest window;
+  spi.req at 1, 3 and 16 bytes with the select and D/C on PC3 and PC4,
+  the fixed cost a request), then `test_ch32_spi` whole on the jumper
+  and against the peer (letters b, c, d, f, o, p, q byte-exact on both
+  loops and the pump at both widths; letter c's timing of the eight BR
+  codes, which was 215 cycles a frame at /2 on the loop before this
+  one), `test_ch32_dma`'s SPI letters and the console's own transport
+  suite once. The vendor's loop on the same board, counted above, is
+  owed its run beside letter e.
 - The engined data phase as it is - the engines bound at init, a
   block start of five stores a channel, ONE DMA interrupt a
   transaction, 16-bit frames in half-word beats, an odd buffer's

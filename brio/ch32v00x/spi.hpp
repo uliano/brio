@@ -12,11 +12,12 @@
  *    and status verbs, the ISR body that reads the raised-and-enabled
  *    sources. It decides nothing.
  *  - `SpiHost<n, pins, TxEngine, RxEngine>` is the ENGINE util/
- *    spi_bus.hpp's SpiBus drives: the Request is the other strata's
- *    VERBATIM (chip select, D/C, a command phase, a data phase with
- *    optional out and in, the per-request mode/rate/frame size, the
- *    polled or ISR-pumped completion), so an application written over
- *    SpiBus on a Nucleo runs here unchanged.
+ *    spi_bus.hpp's SpiBus drives: the Request's fields are the other
+ *    strata's, name for name (chip select, D/C, a command phase, a
+ *    data phase with optional out and in, the per-request mode/rate/
+ *    frame size, the polled or ISR-pumped completion), so an
+ *    application that fills them by name over SpiBus on a Nucleo runs
+ *    here unchanged; their order is this host's own.
  *  - `SpiClient<n, pins>` is the other end of the wire, a thin polled
  *    surface with an ISR body: a client is a protocol and which one is
  *    the application's.
@@ -24,17 +25,23 @@
  * WHAT THIS SILICON HAS, AND HAS NOT. There is NO FIFO: one transmit
  * buffer, one receive buffer, one shift register (figure 16-1), so TXE
  * means "the buffer moved into the shifter" and RXNE "a frame has
- * been shifted both ways" - and the host's pump runs on RXNE alone,
- * the way the other strata's do, because a frame that came back is the
- * one witness that the bus is idle for the next. The frame is 8 or 16
- * bits (DFF), and both DFF and CRCEN "can only be written when SPE is
- * 0" (16.3.1), which is what makes apply() pay a disable/enable pair
- * when a request changes the size. The baud rate is HCLK over a power
- * of two, /2 to /256, and the manual promises SCK up to HCLK/2 - 24 MHz
- * at the 48 MHz this stratum runs at. The chip select the engine uses
- * is a GPIO the Request carries (SSM set, SSI high): 16.2.1 makes the
- * NSS pad free under software management, and a select the bus AO
- * drives is the arrangement docs/design/spi-bus.md gives every target.
+ * been shifted both ways" (16.2.2). A frame written while another
+ * shifts waits in the buffer and follows it with no gap on SCK - "if
+ * the TXE flag is set, fill the data register, maintain the complete
+ * data flow" - which is what the host's transmit-only loop and its
+ * write-ahead pump build on; and the receive buffer is one frame deep,
+ * which is what bounds them (16.2.7, OVR: the arithmetic above the
+ * host engine). The host's pump runs on RXNE, because a frame that
+ * came back is the one witness that the bus is idle for the next. The
+ * frame is 8 or 16 bits (DFF), and both DFF and CRCEN "can only be
+ * written when SPE is 0" (16.3.1), which is what makes apply() pay a
+ * disable/enable pair when a request changes the size. The baud rate
+ * is HCLK over a power of two, /2 to /256, and the manual promises SCK
+ * up to HCLK/2 - 24 MHz at the 48 MHz this stratum runs at. The chip
+ * select the engine uses is a GPIO the Request carries (SSM set, SSI
+ * high): 16.2.1 makes the NSS pad free under software management, and
+ * a select the bus AO drives is the arrangement docs/design/spi-bus.md
+ * gives every target.
  *
  * TWO OF THE CHAPTER'S SENTENCES ARE SLIPS and this file reads past
  * them: DFF's two codes are both described as "16-bit" (0 is 8-bit,
@@ -60,9 +67,11 @@
  * engine's select is a GPIO on purpose); the CRC beyond the resource's
  * verbs - born with a device that checks one; HSCR's high-speed read
  * mode, whose rate formula (16.3.1's note: HCLK/(BR+2)) the bench has
- * not measured. The pads come with their remap code (afio.hpp, table
- * 7-12): spi1_pins_for(code) is a whole column, and init() writes the
- * code.
+ * not measured; and every cost the host engine states, counted in the
+ * release listings and not yet read on the silicon (docs/ch32v00x/
+ * spi.md's second gap list names the letter that measures each). The
+ * pads come with their remap code (afio.hpp, table 7-12):
+ * spi1_pins_for(code) is a whole column, and init() writes the code.
  */
 
 #pragma once
@@ -70,6 +79,7 @@
 
 #include <stdint.h>
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -507,6 +517,92 @@ private:
 /// channel, or a polled block that never completed): the engine's own
 /// status code, in the range util/bus_master.hpp leaves to engines.
 inline constexpr uint8_t spi_dma_fault = bus_engine_status;
+/// The pump lost a frame: the receive buffer overran (16.2.7) because
+/// the handler read frame k later than one frame time after it came
+/// back - the transaction still ran to its end, every frame went OUT,
+/// one that came back is missing from the in buffer. The witness of a
+/// write-ahead threshold that was too low for the image it ran in.
+inline constexpr uint8_t spi_overrun = bus_engine_status + 1u;
+/// A polled frame's flag never came within the transaction's budget: a
+/// clock that stopped, a block that is dead. The select is released.
+inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
+
+/// A frame's time on the wire in HCLK cycles: its bits at SCK = HCLK over
+/// two to the code plus one (16.3.1's BR table).
+constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
+    return static_cast<uint32_t>(spi_data_bits(bits)) << (static_cast<uint8_t>(c) + 1u);
+}
+
+/*
+ * THE WRITE-AHEAD THRESHOLD, and the arithmetic behind it.
+ *
+ * The block has one transmit buffer, one shift register and one receive
+ * buffer (figure 16-1): a frame written while another shifts waits in
+ * the buffer and moves into the shifter the instant the one before it
+ * ends, with no gap on SCK - "if the TXE flag is set, fill the data
+ * register, maintain the complete data flow" (16.2.2). So a pump that
+ * keeps TWO frames in flight (frame k + 1 shifting while the handler for
+ * frame k runs) keeps the bus busy through the handler; one that keeps
+ * ONE leaves the bus idle from RXNE to the handler's next write.
+ *
+ * Two in flight has a price: the receive buffer is one frame deep. RXNE
+ * for frame k rises at frame k's last sampling edge, and frame k + 1
+ * ends one frame time later - if the handler has not read DATAR by then,
+ * OVR (16.2.7: "there is unread data in the receive buffer"), frame
+ * k + 1's answer lost. The handler reads frame k within
+ *
+ *     the longest window the SPI's service waits behind
+ *   + the core's interrupt entry
+ *   + the handler's own instructions from its vector to the DATAR read
+ *
+ * cycles after RXNE, and two in flight is safe only where the frame time
+ * exceeds that sum. On this core NO INTERRUPT NESTS (kernel.md section 1,
+ * the platform's promise): the SPI's handler waits behind every other
+ * handler's whole body as it waits behind a critical section, so the
+ * first term is the longer of the image's longest handler and its longest
+ * masked window. Counted in the release listings of bench_ch32 and
+ * test_ch32_spi (WCH gcc 15.2, -Os, the retro's 2.5 cycles an
+ * instruction, HPE entry 29 and exit 25 measured in test_ch32_platform):
+ * the console transport's receive path with its RxActivity post, ~75
+ * instructions behind the hardware prologue and epilogue, ~245 cycles;
+ * the kernel's post() of a 48-byte bus request under the mask, the copy
+ * three word turns of it, ~160; the USART handler of the bench app with
+ * its two stamps ~300. The constant below is that last figure rounded
+ * up; a program whose handlers are longer reads spi_overrun in its
+ * TransferDone, which is the guard the constant has. The second and
+ * third terms are the hardware prologue's 29 cycles and the nine
+ * instructions from the vector to the DATAR read in bench_ch32's
+ * spi1_handler (the app's own test of which host the vector serves,
+ * then lui, lhu STATR, the compiler's zero-extension pair, andi, beqz,
+ * lhu DATAR), two of them APB loads.
+ *
+ * At 48 MHz an 8-bit frame is 16 cycles at /2 and doubles per code: the
+ * sum of 372 is first exceeded at /64 (512 cycles) for 8-bit frames and
+ * at /32 (512) for 16-bit ones. Below those rates the pump keeps one
+ * frame in flight, as the polled receive loop does at every rate - the
+ * loop in main context waits behind the same handlers, and a lost frame
+ * on a read is a wrong answer where an idle bus is only a slower one.
+ * The polled WRITE needs no threshold at all: it never reads the answers
+ * (below).
+ */
+inline constexpr uint32_t spi_service_hold_off_cycles = 320;
+inline constexpr uint32_t spi_pump_read_cycles = 29u + 9u * 2u + 5u;   // HPE entry + nine instructions, two of them APB loads
+inline constexpr uint32_t spi_write_ahead_min_frame_cycles = spi_service_hold_off_cycles + spi_pump_read_cycles;
+
+/// Two frames in flight at this code and width?
+constexpr bool spi_write_ahead_safe(SpiClock c, SpiDataSize bits) {
+    return spi_frame_cycles(c, bits) > spi_write_ahead_min_frame_cycles;
+}
+/// The fastest code at which the pump keeps two frames in flight for a
+/// width (every slower code does too).
+constexpr SpiClock spi_write_ahead_from(SpiDataSize bits) {
+    for (uint8_t code = 0; code < 8u; ++code) {
+        if (spi_write_ahead_safe(static_cast<SpiClock>(code), bits)) {
+            return static_cast<SpiClock>(code);
+        }
+    }
+    return SpiClock::div256;
+}
 
 /**
  * SpiHost<n, pins, TxEngine, RxEngine>
@@ -521,18 +617,45 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * shared bus serves devices that disagree on them; the bit order is a
  * property of the WIRE and a bus-level verb.
  *
- * THE PUMP RUNS ON RXNE. A frame written to DATAR is clocked out and
- * the frame that comes back raises RXNE when it has been shifted BOTH
- * ways - which is the one moment the bus is provably idle, and why
- * TXE (raised when the buffer moves to the shifter, a frame early) is
- * never the pump's edge. Per frame: one write, one interrupt, one read.
+ * THE REQUEST IS LENT FOR THE CALL (util/bus_master.hpp): a POLLED
+ * request completes inside start() and is read through the reference
+ * and copied nowhere; an asynchronous one has what its tenure needs -
+ * the two pins, the three buffers, the two lengths, the width, the
+ * completion style - copied as word stores into the host's own tenure
+ * record, never through a call. The Request's fields are laid out so
+ * that those words are the first nine and nothing in it is padding.
  *
- * TWO COMPLETION STYLES, the request's choice: `polled` false runs the
- * data on this interrupt with the kernel free between frames (a
- * TransferDone follows), `polled` true spins inside start() with only
- * this SPI's own RXNE silenced and completes synchronously - at HCLK/2
- * a frame is sixteen cycles and an interrupt entry alone costs more,
- * so the polled loop is the fast path for bulk.
+ * TWO POLLED LOOPS, from 16.2.2. A phase whose answers nobody wants (the
+ * command phase, a write with no in buffer) runs the TRANSMIT-ONLY loop:
+ * a frame is written whenever TXE says the buffer is free, which it is a
+ * whole frame time before the shifter needs it, so the bus never idles
+ * and an interrupt that delays the loop only pauses the stream; the
+ * answers pile into the receive buffer and overrun it, which costs
+ * nothing (16.2.7: the buffer keeps the old frame, the transmit side is
+ * untouched) and is cleared at the phase's end by the DATAR-then-STATR
+ * read the chapter prescribes, after TXE and then BSY have said the last
+ * frame is out. A phase with an in buffer runs the RECEIVE loop: ONE
+ * frame in flight - write k, wait RXNE, read k and write k + 1 in the
+ * next instruction - because two in flight would lose a frame to any
+ * interrupt longer than a frame time (the threshold above), and a lost
+ * answer is wrong where an idle bus is slow. The next frame's load and
+ * the store of the one just read sit inside the wire time; the bus's
+ * dead time per frame is the poll's last turn, the DATAR read and the
+ * DATAR write. Both loops are specialized by frame width and both spend
+ * ONE bounded budget for the whole transaction, not one per frame.
+ *
+ * THE PUMP RUNS ON RXNE: the frame that came back is the one witness the
+ * bus is idle for the next, so TXE (a frame early) is never the pump's
+ * edge. Per frame one interrupt - this silicon has no FIFO - and in the
+ * handler the DATAR read is the seventh instruction of the body and
+ * the next frame's write, PREPARED by the previous handler inside the
+ * wire time, the eighth after it; the store of the frame read and the
+ * walk to the frame after come behind the write. Above the threshold
+ * the handler keeps two frames in flight
+ * (the phase primed with two, the handler for frame k writing k + 2),
+ * below it one. An OVR seen in the handler's STATR read ends the
+ * transaction with spi_overrun, the lost frame counted so the phase
+ * still ends.
  *
  * THE ENGINE SLOTS: `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`,
  * both or neither, on the two channels table 8-2 wires to this instance
@@ -546,10 +669,15 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * memory, when both of its buffers sit on a half-word boundary - 8.3.6:
  * a 16-bit access ignores the address's bit 0, so an odd buffer would
  * move the wrong bytes and goes to the pump instead; engines of
- * `uint8_t` serve the 8-bit requests alone.
+ * `uint8_t` serve the 8-bit requests alone. A data phase shorter than
+ * `dma_min_frames` takes the pump even with engines bound, and a POLLED
+ * request takes the engines only with an in buffer and from
+ * `dma_min_frames_polled` on - the transmit-only loop runs at the wire
+ * and the engines' fixed cost buys it nothing (the two constants and
+ * their inputs below).
  *
- * FRAMES IN A BYTE BUFFER: one byte per 8-bit frame, two bytes
- * low-first per 16-bit frame - the other strata's rule.
+ * FRAMES IN A BYTE BUFFER: one byte per 8-bit frame, two bytes low-first
+ * per 16-bit frame - the other strata's rule.
  */
 template <uint8_t n, SpiPins pins = spi1_default_pins, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine>
@@ -601,35 +729,66 @@ public:
     static constexpr SpiPins pin_pads = pins;
     static constexpr bool has_engines = TxEngine::present;
 
+    /// The transaction descriptor. THE FIELD NAMES ARE THE CONTRACT (the
+    /// other strata's, filled by name); the ORDER is this host's: the
+    /// eight words an asynchronous tenure copies come first, then ONE
+    /// word holding the three fields apply() compares and the setup
+    /// time, then the reply - no padding anywhere.
     struct Request {
         PinRef cs;   ///< asserted low around the transaction
         PinRef dc;   ///< display D/C line; null = no such pin
-        /// Microseconds between the CS assertion and the first clock -
-        /// what a device's datasheet calls CS setup. Spent spinning in
-        /// start(), main context; 0 = none.
-        uint8_t cs_setup_us = 0;
         /// Phase 1, sent with DC low; LENT until the reply lands.
         Borrowed<const uint8_t, Lease::reply> cmd;
-        uint8_t cmd_len;   ///< in FRAMES (see the class comment)
         /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
         Borrowed<const uint8_t, Lease::reply> tx;
         /// Phase 2 in, null = discard; LENT until the reply lands.
         Borrowed<uint8_t, Lease::reply> rx;
         uint16_t len;      ///< phase 2 length, in FRAMES
-        ReplyTo<SpiDone> reply;
-
+        uint8_t cmd_len;   ///< in FRAMES (see the class comment)
+        /// Completion style: false = per-frame ISR pump, true = POLLED
+        /// inside start() (see the class comment).
+        bool polled = false;
+        /// Microseconds between the CS assertion and the first clock -
+        /// what a device's datasheet calls CS setup. Spent spinning in
+        /// start(), main context; 0 = none.
+        uint8_t cs_setup_us = 0;
         /// Per-transaction bus configuration: a shared bus's devices
         /// each name their own, and the engine reprograms the peripheral
         /// only when something CHANGED.
         SpiClock clock = SpiClock::div16;
         SpiMode mode = SpiMode::mode0;
         SpiDataSize bits = SpiDataSize::bits8;
-
-        /// Completion style: false = per-frame ISR pump, true = POLLED
-        /// inside start() (see the class comment).
-        bool polled = false;
+        ReplyTo<SpiDone> reply;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    static_assert(sizeof(Request) == 40u, "the Request is forty bytes with no padding on this ABI");
+    static_assert(offsetof(Request, cmd) == 16u && offsetof(Request, rx) == 24u && offsetof(Request, len) == 28u &&
+                  offsetof(Request, polled) == 31u && offsetof(Request, cs_setup_us) == 32u &&
+                  offsetof(Request, clock) == 33u && offsetof(Request, mode) == 34u && offsetof(Request, bits) == 35u &&
+                  offsetof(Request, reply) == 36u,
+                  "the tenure's words are the first eight of the Request, the configuration the ninth");
+
+    /// THE PUMP AGAINST THE ENGINES, two counts from the release listings
+    /// (test_ch32_spi, bench_ch32; the recovery session measures them
+    /// with bench_ch32's letters d and e). The engines' fixed cost per
+    /// transaction: the launch's 59 instructions, the receive channel's
+    /// completion vector with finish_dma() and the select's release (~61
+    /// instructions behind the hardware prologue and epilogue) - about
+    /// 355 cycles (dma.md). The pump's cost per frame: the handler's 42
+    /// instructions on the data path of an 8-bit frame with an in buffer
+    /// plus the prologue and epilogue - about 160 cycles. A data phase
+    /// of fewer frames than their quotient costs less on the pump.
+    static constexpr uint32_t engine_fixed_cycles = 355;
+    static constexpr uint32_t pump_frame_cycles = 160;
+    static constexpr uint16_t dma_min_frames =
+        static_cast<uint16_t>((engine_fixed_cycles + pump_frame_cycles - 1u) / pump_frame_cycles);
+    /// The receive loop's dead bus per frame - the poll's last turn, the
+    /// DATAR read, the DATAR write, counted at about 24 cycles - against
+    /// the same fixed cost: a polled request with an in buffer rides the
+    /// engines from this many frames on. The transmit-only loop never
+    /// does: it runs at the wire.
+    static constexpr uint32_t polled_gap_cycles = 24;
+    static constexpr uint16_t dma_min_frames_polled = static_cast<uint16_t>(engine_fixed_cycles / polled_gap_cycles);
 
     // ---- lifecycle ----------------------------------------------------------
 
@@ -680,7 +839,7 @@ public:
         // is what this engine's chip select is, an ordinary GPIO the
         // Request carries. claim_nss_pad() is for a program that moves
         // the resource to a hardware arrangement.
-        S::enable();
+        enable_applied();
         S::flush_rx();
         Pfic::enable(S::irq());
         return true;
@@ -692,7 +851,14 @@ public:
     static void rebase(uint32_t hz) {
         hclk_hz_ = hz;
         ceiling_ = ceiling_hz_ != 0u ? spi_rate_for(hz, ceiling_hz_) : std::optional<SpiClock>{};
+        // A slower rate is a LARGER code, so the ceiling clamps codes from
+        // below; code 0 (HCLK/2) as the floor clamps nothing, which is
+        // also what "no ceiling" means.
+        floor_code_ = ceiling_ ? static_cast<uint8_t>(*ceiling_) : 0u;
         cs_rate_ = delay_rate(hz);
+        // A new ceiling may clamp the last request's clock to another
+        // code: the next request must be folded and compared again.
+        request_key_ = 0xFFFF'FFFFu;
     }
 
     /// The BR code that produces at most `hz` of SCK at the HCLK last
@@ -709,7 +875,11 @@ public:
     /// (Request.cs null). A mode change is a CPOL FLIP ON THE WIRE and a
     /// selected client counts it as an edge: prime FIRST, then select.
     static void prime(SpiMode m, SpiClock c, SpiDataSize bits = SpiDataSize::bits8) {
-        apply(m, clamp(c), bits);
+        Request r{};
+        r.clock = c;
+        r.mode = m;
+        r.bits = bits;
+        apply(r, clamp(c));
     }
 
     /// The bus's bit order (LSBFIRST): a property of the WIRE, applied
@@ -721,7 +891,7 @@ public:
         applied_.lsb_first = lsb_first;
         (void)S::disable();
         const bool ok = S::configure(applied_);
-        S::enable();
+        enable_applied();
         return ok;
     }
     static bool lsb_first() { return applied_.lsb_first; }
@@ -733,72 +903,87 @@ public:
     /// when it runs on the ISR and a TransferDone follows - exactly
     /// util/bus_master.hpp's engine contract.
     static bool start(const Request& r) {
-        req_ = r;
-        pos_ = 0;
-        in_cmd_ = (r.cmd_len > 0u);
         status_ = spi_ok;
-        if (total_len() == 0u) {
+        if (r.cmd_len == 0u && r.len == 0u) {
             return true;
         }
-        apply(r.mode, clamp(r.clock), r.bits);
-        if (in_cmd_) {
-            r.dc.clear();
+        const SpiClock code = clamp(r.clock);
+        apply(r, code);
+        if (r.cmd_len != 0u) {
+            select_low(r.dc);
         } else {
-            r.dc.set();
+            select_high(r.dc);
         }
-        r.cs.clear();   // assert, active low
+        select_low(r.cs);   // assert, active low
         if (r.cs_setup_us != 0u) {
             (void)delay_us(cs_rate_, r.cs_setup_us);
         }
-        S::flush_rx();   // a stale frame would be captured as this one's
+        // No flush of the receive buffer here: every path below leaves it
+        // empty at its end (the receive loop and the pump read every
+        // frame, the transmit-only loop flushes after its tail, the
+        // receive engine takes every frame and the fault exits flush),
+        // and init() and recover() flush what a reset or a prime left.
 
-        if constexpr (has_engines) {
-            if (dma_serves(r)) {
-                if (!r.polled) {
-                    if (in_cmd_) {
-                        // The command phase runs on the pump; isr()
-                        // hands over to the engines at its end.
-                        S::rxne_interrupt(true);
-                        S::data(req_.bits, frame_at(req_.cmd.get(), 0));
-                        return false;
+        if (r.polled) {
+            uint32_t budget = poll_budget(code, r.bits, static_cast<uint32_t>(r.cmd_len) + r.len);
+            bool ok = true;
+            if constexpr (has_engines) {
+                if (r.rx.get() != nullptr && r.len >= dma_min_frames_polled && dma_serves(r)) {
+                    // The command phase on the transmit-only loop, then
+                    // the engines over the data phase, spun to their end.
+                    if (r.cmd_len != 0u) {
+                        ok = poll_write_phase(r.bits, r.cmd.get(), r.cmd_len, budget);
                     }
-                    launch_dma();
-                    return false;   // dma_isr() is the completion edge
+                    select_high(r.dc);
+                    if (ok) {
+                        keep(r);
+                        launch_dma();
+                        spin_dma();
+                    }
+                    select_high(r.cs);
+                    if (!ok) {
+                        stalled();
+                    }
+                    return true;
                 }
-                S::rxne_interrupt(false);
-                for (uint8_t i = 0; i < r.cmd_len; ++i) {
-                    (void)xfer(frame_at(r.cmd.get(), i));
-                }
-                r.dc.set();
-                if (r.len != 0u) {
-                    launch_dma();
-                    spin_dma();
-                }
-                r.cs.set();
-                return true;
             }
+            if (r.cmd_len != 0u) {
+                ok = poll_write_phase(r.bits, r.cmd.get(), r.cmd_len, budget);
+            }
+            select_high(r.dc);
+            if (ok && r.len != 0u) {
+                if (r.rx.get() == nullptr) {
+                    ok = poll_write_phase(r.bits, r.tx.get(), r.len, budget);
+                } else {
+                    ok = poll_duplex_phase(r.bits, r.tx.get(), r.rx.get(), r.len, budget);
+                }
+            }
+            select_high(r.cs);
+            if (!ok) {
+                stalled();
+            }
+            return true;
         }
 
-        if (!r.polled) {
-            S::rxne_interrupt(true);
-            S::data(req_.bits, first_frame());   // the ISR pumps the rest
-            return false;
-        }
-        // Polled pump: silence this SPI's own RXNE (a bound handler would
-        // steal the frames). Global interrupts STAY ENABLED.
-        S::rxne_interrupt(false);
-        for (uint8_t i = 0; i < r.cmd_len; ++i) {
-            (void)xfer(frame_at(r.cmd.get(), i));
-        }
-        r.dc.set();
-        for (uint16_t i = 0; i < r.len; ++i) {
-            const uint16_t in = xfer(data_frame(i));
-            if (r.rx.get() != nullptr) {
-                store_frame(r.rx.get(), i, in);
+        // The asynchronous paths: what the tenure needs, copied.
+        keep(r);
+        step_ = spi_frame_is_halfword(r.bits) ? 2u : 1u;
+        ahead_ = spi_write_ahead_safe(code, r.bits) ? 2u : 1u;
+        if constexpr (has_engines) {
+            dma_tenure_ = r.len >= dma_min_frames && dma_serves(r);
+            if (dma_tenure_ && r.cmd_len == 0u) {
+                launch_dma();
+                return false;   // dma_isr() is the completion edge
             }
         }
-        r.cs.set();
-        return true;
+        in_cmd_ = r.cmd_len != 0u;
+        S::rxne_interrupt(true);
+        if (in_cmd_) {
+            begin_phase(r.cmd.get(), nullptr, r.cmd_len);   // the echo discarded
+        } else {
+            begin_phase(r.tx.get(), r.rx.get(), r.len);
+        }
+        return false;   // isr() pumps the rest
     }
 
     /// The instance's interrupt body - call from its vector. Only RXNE
@@ -807,49 +992,58 @@ public:
     /// completed (CS released): the edge the app's glue posts
     /// TransferDone on.
     [[gnu::always_inline]] static bool isr() {
-        if ((S::isr() & SpiFlag::rxne) == 0u) {
+        const uint32_t st = S::regs().STATR;
+        if ((st & spi_rxne) == 0u) {
             return false;
         }
-        const uint16_t in = S::data(req_.bits);
-
-        if constexpr (has_engines) {
-            if (dma_serves(req_)) {
-                // Only the COMMAND phase runs on this pump when the
-                // engines serve the request; its echo is discarded.
-                (void)in;
-                ++pos_;
-                if (pos_ >= req_.cmd_len) {
-                    in_cmd_ = false;
+        const uint16_t in = S::regs().DATAR;   // the seventh instruction of the body
+        if ((st & spi_ovr) != 0u) {
+            // 16.2.7: the frame after this one ended while this one stood
+            // unread; the buffer kept this one and lost that one. Counted
+            // as read so the phase ends; the DATAR read above, followed
+            // by the next handler's STATR read, is what clears the flag.
+            status_ = spi_overrun;
+            if (to_read_ > 1u) {
+                --to_read_;
+                if (in_ != nullptr) {
+                    in_ += step_;
+                }
+            }
+        }
+        // The prepared frame out: with one in flight this is the bus's
+        // restart, with two it keeps the buffer full. Then the frame
+        // read stored, and the one after prepared inside the wire time.
+        if (left_ != 0u) {
+            S::regs().DATAR = next_;
+            --left_;
+        }
+        if (in_ != nullptr) {
+            store_in(in);
+        }
+        if (left_ != 0u) {
+            next_ = next_out();
+        }
+        if (--to_read_ != 0u) {
+            return false;
+        }
+        // The phase ended: its last frame is back and read.
+        if (in_cmd_) {
+            in_cmd_ = false;
+            select_high(tenure_.dc);
+            if (tenure_.len == 0u) {
+                return finish_pump();
+            }
+            if constexpr (has_engines) {
+                if (dma_tenure_) {
                     S::rxne_interrupt(false);
-                    req_.dc.set();
-                    if (req_.len == 0u) {
-                        req_.cs.set();
-                        return true;
-                    }
                     launch_dma();
                     return false;
                 }
-                S::data(req_.bits, frame_at(req_.cmd.get(), pos_));
-                return false;
             }
+            begin_phase(tenure_.tx, tenure_.rx, tenure_.len);
+            return false;
         }
-
-        if (!in_cmd_ && req_.rx.get() != nullptr) {
-            store_frame(req_.rx.get(), pos_, in);
-        }
-        ++pos_;
-        if (in_cmd_ && pos_ >= req_.cmd_len) {
-            in_cmd_ = false;
-            pos_ = 0;
-            req_.dc.set();
-        }
-        if (!in_cmd_ && pos_ >= req_.len) {
-            S::rxne_interrupt(false);
-            req_.cs.set();
-            return true;
-        }
-        S::data(req_.bits, next_frame());
-        return false;
+        return finish_pump();
     }
 
     /// The DMA channels' interrupt body - call from BOTH channels'
@@ -889,7 +1083,7 @@ public:
     /// peripheral reset and reconfigured to the applied state. False
     /// when a bounded wait ran out.
     static bool recover() {
-        req_.cs.set();
+        select_high(tenure_.cs);
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
@@ -897,13 +1091,15 @@ public:
         }
         Pfic::disable(S::irq());
         in_cmd_ = false;
+        to_read_ = 0;
+        left_ = 0;
         dma_active_ = false;
         dma_done_ = false;
         S::rxne_interrupt(false);
         const bool ok = S::disable();
         S::reset();
         const bool cfg = S::configure(applied_);
-        S::enable();
+        enable_applied();
         S::flush_rx();
         Pfic::enable(S::irq());
         return ok && cfg;
@@ -936,6 +1132,240 @@ public:
     }
 
 private:
+    /// What the asynchronous paths read after start() has returned: the
+    /// request's tenure, its first eight words, copied by keep() as word
+    /// loads and stores.
+    struct Tenure {
+        PinRef cs;
+        PinRef dc;
+        const uint8_t* cmd;
+        const uint8_t* tx;
+        uint8_t* rx;
+        uint16_t len;
+        uint8_t cmd_len;
+        bool polled;
+    };
+
+    [[gnu::always_inline]] static void keep(const Request& r) {
+        tenure_.cs = r.cs;
+        tenure_.dc = r.dc;
+        tenure_.cmd = r.cmd.get();
+        tenure_.tx = r.tx.get();
+        tenure_.rx = r.rx.get();
+        tenure_.len = r.len;
+        tenure_.cmd_len = r.cmd_len;
+        tenure_.polled = r.polled;
+    }
+
+    // ---- the pins -----------------------------------------------------------
+
+    /// The select and the D/C edges: one store each into the port's
+    /// set and clear registers (RM 7.3.1.4 BSHR, 7.3.1.5 BCR - atomic by
+    /// construction, no read), the null D/C a predictable branch. The
+    /// PinRef verbs of pin.hpp are these stores behind a call the
+    /// compiler keeps out of line at -Os; four edges a transaction want
+    /// them inline here.
+    [[gnu::always_inline]] static void select_low(const PinRef& p) {
+        if (p.port != nullptr) {
+            p.port->BCR = p.mask & 0xFFFFu;
+        }
+    }
+    [[gnu::always_inline]] static void select_high(const PinRef& p) {
+        if (p.port != nullptr) {
+            p.port->BSHR = p.mask & 0xFFFFu;
+        }
+    }
+
+    // ---- the polled loops ---------------------------------------------------
+
+    /// The frame at `p` in the strata's byte order, and its store.
+    template <typename T>
+    [[gnu::always_inline]] static uint16_t load_frame(const uint8_t* p) {
+        if constexpr (sizeof(T) == 2u) {
+            return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
+        } else {
+            return p[0];
+        }
+    }
+    template <typename T>
+    [[gnu::always_inline]] static void store_frame(uint8_t* p, uint16_t v) {
+        p[0] = static_cast<uint8_t>(v);
+        if constexpr (sizeof(T) == 2u) {
+            p[1] = static_cast<uint8_t>(v >> 8);
+        }
+    }
+
+    /// ONE budget of poll turns for the whole transaction: a frame's
+    /// cycles per frame, two frames more for the priming and the drain.
+    /// A turn is at least three instructions, so the budget is several
+    /// times the turns the wire takes, and a shift and no multiply (the
+    /// CH32V003 has none). Spent across the phases; zero when a flag
+    /// never came.
+    [[gnu::always_inline]] static uint32_t poll_budget(SpiClock code, SpiDataSize bits, uint32_t frames) {
+        const uint32_t log2_frame = static_cast<uint32_t>(code) + 4u + (spi_frame_is_halfword(bits) ? 1u : 0u);
+        return (frames + 2u) << log2_frame;
+    }
+
+    static bool poll_write_phase(SpiDataSize bits, const uint8_t* out, uint16_t count, uint32_t& budget) {
+        return spi_frame_is_halfword(bits) ? poll_write<uint16_t>(out, count, budget)
+                                           : poll_write<uint8_t>(out, count, budget);
+    }
+    static bool poll_duplex_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in, uint16_t count,
+                                  uint32_t& budget) {
+        return spi_frame_is_halfword(bits) ? poll_duplex<uint16_t>(out, in, count, budget)
+                                           : poll_duplex<uint8_t>(out, in, count, budget);
+    }
+
+    /// THE TRANSMIT-ONLY LOOP (16.2.2): a frame written whenever TXE says
+    /// the buffer is free - a frame time ahead of the shifter's need, so
+    /// the clock never pauses - and the answers left to overrun the
+    /// receive buffer, which 16.2.7 makes harmless for the transmit side.
+    /// The tail waits TXE (the last frame into the shifter) and then not
+    /// BSY (out of it); the DATAR-then-STATR read clears RXNE and OVR.
+    /// A null `out` clocks 0xFF dummies from a fixed cell. `count` >= 1.
+    template <typename T>
+    static bool poll_write(const uint8_t* out, uint16_t count, uint32_t& budget) {
+        const uint8_t* p = out != nullptr ? out : dummy_bytes_;
+        const uint32_t step = out != nullptr ? sizeof(T) : 0u;
+        SpiRegs& regs = S::regs();
+        uint32_t spins = budget;
+        uint32_t left = count;   // a word: a half-word counter costs a zero-extension a turn
+        do {
+            while ((regs.STATR & spi_txe) == 0u) {
+                if (--spins == 0u) {
+                    budget = 0;
+                    return false;
+                }
+            }
+            regs.DATAR = load_frame<T>(p);
+            p += step;
+        } while (--left != 0u);
+        while ((regs.STATR & spi_txe) == 0u) {
+            if (--spins == 0u) {
+                budget = 0;
+                return false;
+            }
+        }
+        while ((regs.STATR & spi_bsy) != 0u) {
+            if (--spins == 0u) {
+                budget = 0;
+                return false;
+            }
+        }
+        (void)regs.DATAR;
+        (void)regs.STATR;
+        budget = spins;
+        return true;
+    }
+
+    /// THE RECEIVE LOOP: one frame in flight. Frame 0 written; then for
+    /// each frame the next one's load, the wait on RXNE, the DATAR read
+    /// and the DATAR write back to back, the store of the frame read.
+    /// The last frame is read after the loop. `count` >= 1.
+    template <typename T>
+    static bool poll_duplex(const uint8_t* out, uint8_t* in, uint16_t count, uint32_t& budget) {
+        const uint8_t* p = out != nullptr ? out : dummy_bytes_;
+        const uint32_t step = out != nullptr ? sizeof(T) : 0u;
+        SpiRegs& regs = S::regs();
+        uint32_t spins = budget;
+        uint32_t left = count;
+        regs.DATAR = load_frame<T>(p);   // the shifter is idle: frame 0 moves at once
+        while (--left != 0u) {
+            p += step;
+            const uint32_t next = load_frame<T>(p);   // a word: the barrier would zero-extend a half-word
+            // The load above belongs INSIDE the wire time: the compiler
+            // would sink it past the poll, onto the bus's dead time.
+            __asm__ volatile("" : : "r"(next));
+            while ((regs.STATR & spi_rxne) == 0u) {
+                if (--spins == 0u) {
+                    budget = 0;
+                    return false;
+                }
+            }
+            const uint16_t got = regs.DATAR;
+            regs.DATAR = static_cast<uint16_t>(next);
+            store_frame<T>(in, got);
+            in += sizeof(T);
+        }
+        while ((regs.STATR & spi_rxne) == 0u) {
+            if (--spins == 0u) {
+                budget = 0;
+                return false;
+            }
+        }
+        store_frame<T>(in, regs.DATAR);
+        budget = spins;
+        return true;
+    }
+
+    /// A polled flag that never came: the status, and the buffer flushed
+    /// so the next transaction does not read this one's frame.
+    static void stalled() {
+        status_ = spi_stalled;
+        S::flush_rx();
+    }
+
+    // ---- the pump -----------------------------------------------------------
+
+    /// The next frame to go out in this phase, read from the out pointer
+    /// and advancing it by the width, or the dummy when the phase has no
+    /// out buffer. Called at a handler's TAIL and at a phase's start, so
+    /// that the handler's path to the DATAR write holds a load of the
+    /// prepared frame and nothing of the buffer walk.
+    [[gnu::always_inline]] static uint16_t next_out() {
+        if (out_ == nullptr) {
+            return 0xFFFFu;
+        }
+        uint16_t v = out_[0];
+        if (step_ == 2u) {
+            v = static_cast<uint16_t>(v | (static_cast<uint16_t>(out_[1]) << 8));
+        }
+        out_ += step_;
+        return v;
+    }
+    [[gnu::always_inline]] static void store_in(uint16_t v) {
+        in_[0] = static_cast<uint8_t>(v);
+        if (step_ == 2u) {
+            in_[1] = static_cast<uint8_t>(v >> 8);
+        }
+        in_ += step_;
+    }
+
+    /// Open a phase on the pump: its buffers and count, then the priming
+    /// - one frame, or two where the threshold allows (the second after
+    /// TXE has said the first moved into the shifter, a few cycles on an
+    /// idle bus; if it has not within a short bound, one stays in flight
+    /// and the handler writes the second) - and the frame after those
+    /// prepared for the first handler. `count` >= 1.
+    static void begin_phase(const uint8_t* out, uint8_t* in, uint16_t count) {
+        out_ = out;
+        in_ = in;
+        to_read_ = count;
+        S::regs().DATAR = next_out();
+        uint32_t left = count - 1u;
+        if (ahead_ == 2u && left != 0u) {
+            for (uint8_t spins = 32; spins != 0u; --spins) {
+                if (S::txe()) {
+                    S::regs().DATAR = next_out();
+                    --left;
+                    break;
+                }
+            }
+        }
+        if (left != 0u) {
+            next_ = next_out();
+        }
+        left_ = left;
+    }
+
+    [[gnu::always_inline]] static bool finish_pump() {
+        S::rxne_interrupt(false);
+        select_high(tenure_.cs);
+        return true;
+    }
+
+    // ---- the engines --------------------------------------------------------
+
     /// Do the engines take a 16-bit beat?
     static constexpr bool engines_carry_halfwords = [] {
         if constexpr (TxEngine::present) {
@@ -977,7 +1407,7 @@ private:
         // has come back, and the transmit side is what starts the clock.
         // The beat is the frame (dma_serves() checked the alignment).
         if constexpr (engines_carry_halfwords) {
-            if (spi_frame_is_halfword(req_.bits)) {
+            if (step_ == 2u) {
                 launch_beats<uint16_t>();
                 return;
             }
@@ -987,18 +1417,18 @@ private:
 
     template <typename T>
     static void launch_beats() {
-        T* const rx = reinterpret_cast<T*>(req_.rx.get());
-        const T* const tx = reinterpret_cast<const T*>(req_.tx.get());
+        T* const rx = reinterpret_cast<T*>(tenure_.rx);
+        const T* const tx = reinterpret_cast<const T*>(tenure_.tx);
         if (rx != nullptr) {
-            (void)RxEngine::start(std::span<T>(rx, req_.len));
+            (void)RxEngine::start(std::span<T>(rx, tenure_.len));
         } else {
-            (void)RxEngine::start_discard(reinterpret_cast<T*>(&rx_sink_), req_.len);
+            (void)RxEngine::start_discard(reinterpret_cast<T*>(&rx_sink_), tenure_.len);
         }
         S::dma_requests(false, true);
         if (tx != nullptr) {
-            (void)TxEngine::start(std::span<const T>(tx, req_.len));
+            (void)TxEngine::start(std::span<const T>(tx, tenure_.len));
         } else {
-            (void)TxEngine::start_fixed(reinterpret_cast<const T*>(&tx_dummy_), req_.len);
+            (void)TxEngine::start_fixed(reinterpret_cast<const T*>(&tx_dummy_), tenure_.len);
         }
         S::dma_requests(true, true);
     }
@@ -1011,6 +1441,7 @@ private:
             status_ = st;
             (void)TxEngine::abandon();
             RxEngine::stop();
+            S::flush_rx();   // a frame the stopped channel never took
         } else {
             // The receive block completing is proof the transmit one did:
             // every frame that came back was clocked out first.
@@ -1018,8 +1449,8 @@ private:
         }
         dma_active_ = false;
         dma_done_ = true;
-        if (!req_.polled) {
-            req_.cs.set();
+        if (!tenure_.polled) {
+            select_high(tenure_.cs);
             return true;
         }
         return false;
@@ -1028,7 +1459,7 @@ private:
     /// The polled request's wait on the DMA completion - bounded (the
     /// slowest frame is 256 x 16 HCLK cycles; the budget scales).
     static void spin_dma() {
-        uint32_t spins = 200'000u + 6'000u * static_cast<uint32_t>(req_.len);
+        uint32_t spins = 200'000u + 6'000u * static_cast<uint32_t>(tenure_.len);
         while (!dma_done_ && spins-- != 0u) {
         }
         if (!dma_done_) {
@@ -1037,15 +1468,15 @@ private:
             RxEngine::stop();
             dma_active_ = false;
             status_ = spi_dma_fault;
+            S::flush_rx();
         }
     }
 
+    // ---- the configuration --------------------------------------------------
+
     /// A slower rate is a LARGER code, so the ceiling clamps from below.
-    static SpiClock clamp(SpiClock c) {
-        if (!ceiling_) {
-            return c;
-        }
-        return static_cast<uint8_t>(c) < static_cast<uint8_t>(*ceiling_) ? *ceiling_ : c;
+    [[gnu::always_inline]] static SpiClock clamp(SpiClock c) {
+        return static_cast<uint8_t>(c) < floor_code_ ? static_cast<SpiClock>(floor_code_) : c;
     }
 
     static SpiConfig boot_config() {
@@ -1060,69 +1491,98 @@ private:
         return c;
     }
 
-    /// Put the peripheral where this request wants it. DFF is
-    /// enable-protected and BR/CPOL/CPHA "cannot be modified during
-    /// communication", so any change costs a disable/enable pair -
-    /// paid only when something moved.
-    static void apply(SpiMode m, SpiClock c, SpiDataSize bits) {
-        if (m == applied_.mode && c == applied_.clock && bits == applied_.bits) {
+    /// SPE up over the applied configuration, and the control word the
+    /// per-request compare is made against kept beside it.
+    static void enable_applied() {
+        ctlr1_ = static_cast<uint16_t>(spi_ctlr1_of(applied_) | spi_spe);
+        S::regs().CTLR1 = ctlr1_;
+        Request r{};
+        r.clock = applied_.clock;
+        r.mode = applied_.mode;
+        r.bits = applied_.bits;
+        request_key_ = request_key(r);
+    }
+
+    /// The CTLR1 bits a request decides: CPHA and CPOL (the mode), BR
+    /// (the rate), DFF (the width).
+    static constexpr uint16_t request_bits_mask = spi_cpha | spi_cpol | spi_br_mask | spi_dff;
+    static constexpr uint16_t request_bits(SpiMode m, SpiClock c, SpiDataSize bits) {
+        uint16_t v = static_cast<uint16_t>(static_cast<uint16_t>(c) << 3);
+        if (spi_mode_cpha(m)) { v |= spi_cpha; }
+        if (spi_mode_cpol(m)) { v |= spi_cpol; }
+        if (bits == SpiDataSize::bits16) { v |= spi_dff; }
+        return v;
+    }
+
+    /// The request's clock, mode and width AS ONE WORD: the three bytes
+    /// lie together behind cs_setup_us at a word boundary (the layout
+    /// the static_assert above pins), so one load and a shift read them.
+    [[gnu::always_inline]] static uint32_t request_key(const Request& r) {
+        uint32_t w;
+        // The word is at offset 32 of a word-aligned descriptor (the
+        // static_assert above); said so, or the copy is a call.
+        __builtin_memcpy(&w, __builtin_assume_aligned(&r.cs_setup_us, 4), sizeof w);
+        return w >> 8;
+    }
+
+    /// Put the peripheral where this request wants it. The compare is
+    /// ONE WORD: the request's three fields against the last request's;
+    /// equal, nothing moves. Different, the fields are folded into the
+    /// control word and compared with the one in force (two requests
+    /// under a ceiling may fold to the same word), and a changed word is
+    /// written with the disable/enable pair 16.3.1 asks for DFF ("can
+    /// only be written when SPE is 0") and the drain before it, so that
+    /// no frame is cut on the wire.
+    [[gnu::always_inline]] static void apply(const Request& r, SpiClock code) {
+        const uint32_t key = request_key(r);
+        if (key != request_key_) {
+            reconfigure(key, r.mode, code, r.bits);
+        }
+    }
+    static void reconfigure(uint32_t key, SpiMode m, SpiClock c, SpiDataSize bits) {
+        request_key_ = key;
+        const uint16_t want = static_cast<uint16_t>((ctlr1_ & ~request_bits_mask) | request_bits(m, c, bits));
+        if (want == ctlr1_) {
             return;
         }
         applied_.mode = m;
         applied_.clock = c;
         applied_.bits = bits;
-        (void)S::disable();
-        (void)S::configure(applied_);
-        S::enable();
+        (void)S::disable();                                            // the drain, then SPE down
+        S::regs().CTLR1 = static_cast<uint16_t>(want & ~spi_spe);      // the new word, SPE still clear
+        S::regs().CTLR1 = want;                                        // and up
+        ctlr1_ = want;
     }
 
-    /// One polled frame: write, spin on RXNE, read back. Bounded.
-    static uint16_t xfer(uint16_t out) {
-        S::data(req_.bits, out);
-        uint32_t spins = 200'000u;
-        while (!S::rxne() && spins-- != 0u) {
-        }
-        return S::data(req_.bits);
-    }
+    // ---- the state ----------------------------------------------------------
 
-    static uint16_t total_len() { return static_cast<uint16_t>(req_.cmd_len) + req_.len; }
-
-    static uint16_t frame_at(const uint8_t* p, uint16_t i) {
-        if (p == nullptr) {
-            return 0xFFFFu;
-        }
-        if (spi_frame_is_halfword(req_.bits)) {
-            const uint16_t k = static_cast<uint16_t>(2u * i);
-            return static_cast<uint16_t>(p[k] | (static_cast<uint16_t>(p[k + 1u]) << 8));
-        }
-        return p[i];
-    }
-    static void store_frame(uint8_t* p, uint16_t i, uint16_t v) {
-        if (spi_frame_is_halfword(req_.bits)) {
-            const uint16_t k = static_cast<uint16_t>(2u * i);
-            p[k] = static_cast<uint8_t>(v);
-            p[k + 1u] = static_cast<uint8_t>(v >> 8);
-        } else {
-            p[i] = static_cast<uint8_t>(v);
-        }
-    }
-    static uint16_t first_frame() { return in_cmd_ ? frame_at(req_.cmd.get(), 0) : data_frame(0); }
-    static uint16_t next_frame() { return in_cmd_ ? frame_at(req_.cmd.get(), pos_) : data_frame(pos_); }
-    static uint16_t data_frame(uint16_t i) {
-        return (req_.tx.get() != nullptr) ? frame_at(req_.tx.get(), i) : 0xFFFFu;
-    }
-
-    static inline Request req_{};
-    static inline uint16_t pos_ = 0;
+    static inline Tenure tenure_{};
+    /// The phase on the pump: its out and in pointers walking the
+    /// buffers, the frames still to write and still to read (words: a
+    /// half-word counter costs a zero-extension per step), the frame
+    /// prepared for the next write.
+    static inline const uint8_t* out_ = nullptr;
+    static inline uint8_t* in_ = nullptr;
+    static inline uint32_t left_ = 0;
+    static inline uint32_t to_read_ = 0;
+    static inline uint16_t next_ = 0;
+    static inline uint8_t step_ = 1;    ///< bytes per frame in the buffers
+    static inline uint8_t ahead_ = 1;   ///< frames in flight on the pump, 1 or 2
     static inline bool in_cmd_ = false;
+    static inline bool dma_tenure_ = false;
     static inline uint8_t status_ = spi_ok;
     static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
-    /// The discard cell and the dummy cell, half-words so that either
-    /// beat reads or writes them (a byte beat takes the low byte).
+    /// The dummy frame of the polled loops (0xFF or 0xFFFF, read at a
+    /// stride of zero), and the discard cell and the dummy cell of the
+    /// engines, half-words so that either beat reads or writes them.
+    static constexpr uint8_t dummy_bytes_[2] = {0xFFu, 0xFFu};
     static inline uint16_t rx_sink_ = 0;
     static constexpr uint16_t tx_dummy_ = 0xFFFFu;
     static inline SpiConfig applied_{};
+    static inline uint16_t ctlr1_ = 0;     ///< CTLR1 as it stands, SPE included
+    static inline uint32_t request_key_ = 0;   ///< the last request's clock, mode and width as one word
+    static inline uint8_t floor_code_ = 0;
     static inline uint32_t hclk_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<SpiClock> ceiling_{};
@@ -1329,6 +1789,17 @@ static_assert(!spi_rate_for(0, 1'000'000UL).has_value());
 
 static_assert(!spi_frame_is_halfword(SpiDataSize::bits8) && spi_frame_is_halfword(SpiDataSize::bits16));
 static_assert(spi_frame_mask(SpiDataSize::bits8) == 0xFFu);
+
+// The frame's time and the write-ahead threshold it decides: 16 cycles
+// an 8-bit frame at /2, doubling per code; two frames in flight from
+// /64 on 8-bit frames and from /32 on 16-bit ones, never at /32 and 8.
+static_assert(spi_frame_cycles(SpiClock::div2, SpiDataSize::bits8) == 16u);
+static_assert(spi_frame_cycles(SpiClock::div16, SpiDataSize::bits8) == 128u);
+static_assert(spi_frame_cycles(SpiClock::div256, SpiDataSize::bits16) == 4096u);
+static_assert(spi_write_ahead_from(SpiDataSize::bits8) == SpiClock::div64);
+static_assert(spi_write_ahead_from(SpiDataSize::bits16) == SpiClock::div32);
+static_assert(!spi_write_ahead_safe(SpiClock::div32, SpiDataSize::bits8));
+static_assert(spi_write_ahead_safe(SpiClock::div256, SpiDataSize::bits8));
 
 // Table 16-1.
 static_assert(!spi_mode_cpol(SpiMode::mode1) && spi_mode_cpha(SpiMode::mode1));
