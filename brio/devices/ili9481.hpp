@@ -166,6 +166,25 @@ struct Ili9481 {
 
     // ---- the serial clock ---------------------------------------------------
 
+    /// WHICH SPI MODES THE FOUR-WIRE SERIAL INTERFACE TAKES, numbered as
+    /// every SPI block numbers them (CPOL in bit 1, CPHA in bit 0). 7.2.1
+    /// states the write cycle and 7.2.2 the read cycle in the same words:
+    /// SCL is driven from high to low and pulled back to high, the host
+    /// puts a bit on the line at the FALLING edge and the module - or the
+    /// host, on a read - takes it at the RISING edge (the write-cycle and
+    /// read-cycle figures of those two sections). A clock that idles high
+    /// and samples on its second edge is mode 3, the cycle as the data
+    /// sheet writes it; one that idles low and samples on its first edge
+    /// is mode 0, the same two edges under an idle level the interface
+    /// never looks at - "SCL is an unsynchronized signal; it can be
+    /// stopped" (the note under both figures). Modes 1 and 2 sample on
+    /// the falling edge and are not this interface's. A fact of the
+    /// controller and never of a board. Mode 0 is the one every number in
+    /// this file was measured in; mode 3 is the data sheet's and not yet
+    /// the bench's, and what it buys is a block's business (the PL022
+    /// leaves no gap between frames in it, docs/pl022/README.md).
+    static constexpr bool serial_mode_accepted(uint8_t mode) { return mode == 0u || mode == 3u; }
+
     /// 13.3.2: 40 ns high and 40 ns low for a write, 120 + 120 for a
     /// read. These are the interface's ceilings and the rates a driver
     /// stays inside by default.

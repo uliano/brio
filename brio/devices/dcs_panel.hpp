@@ -56,6 +56,21 @@
  * driver packs and never in MADCTL's BGR bit, because that bit acts on
  * writes alone (measured) and would leave every read-back crossed -
  * which would cost the oracle.
+ *
+ * THE LINK'S MODE IS JUDGED HERE, because this is the one layer with
+ * both facts in hand: the traits say which SPI modes the controller's
+ * serial interface takes (`Traits::serial_mode_accepted`, a fact of the
+ * controller) and a serial link says which mode each of its two tenures
+ * runs in (`write_mode()` / `read_mode()`, as the stratum spells it).
+ * A link whose mode the traits refuse is refused AT CONSTRUCTION -
+ * `valid()` false and every verb refusing before it touches the bus, as
+ * the link itself refuses a frame wider than a byte - because a command
+ * clocked in a mode the controller does not sample is not a wrong
+ * picture but no picture, and no verb would ever say so. A link with no
+ * mode to show (a DSI host, a parallel bus) has nothing to judge and is
+ * valid as it stands. The comparison goes through
+ * `dcs_spi_mode_number()` (devices/dcs_link.hpp), so no family's enum
+ * is named here either.
  */
 
 #pragma once
@@ -64,6 +79,7 @@
 #include <stddef.h>
 
 #include <array>
+#include <concepts>
 #include <optional>
 #include <span>
 
@@ -212,7 +228,15 @@ public:
     static constexpr uint16_t row_bytes =
         static_cast<uint16_t>(static_cast<uint32_t>(long_side) * bytes_per_pixel);
 
-    DcsPanel(Link& link, DcsModule module) : link_(link), module_(module) {}
+    DcsPanel(Link& link, DcsModule module)
+        : link_(link), module_(module), valid_(modes_accepted(link)) {}
+
+    /// True while the link's mode is one the controller's serial
+    /// interface takes, on both of its tenures - or the link has no
+    /// mode to show. Every verb refuses while this is false, counted in
+    /// `link_failures()` like any other refusal, and nothing reaches
+    /// the bus.
+    bool valid() const { return valid_; }
 
     // ---- the wake -----------------------------------------------------------
 
@@ -530,11 +554,33 @@ private:
         return send(Dcs::caset, caset) && send(Dcs::paset, paset);
     }
 
+    /// Does the link show a mode at all? A serial link does; a DSI host
+    /// or a parallel bus has none, and nothing to judge.
+    static constexpr bool link_has_mode =
+        requires(const Link& l) { l.write_mode(); l.read_mode(); };
+
+    static_assert(!link_has_mode || requires(uint8_t m) {
+                      { Traits::serial_mode_accepted(m) } -> std::same_as<bool>;
+                  },
+                  "a serial link needs the controller's traits to state the SPI modes "
+                  "its serial interface accepts");
+
+    /// Both tenures' modes against the traits, where the link has them.
+    static bool modes_accepted(const Link& link) {
+        if constexpr (link_has_mode) {
+            return Traits::serial_mode_accepted(dcs_spi_mode_number(link.write_mode())) &&
+                   Traits::serial_mode_accepted(dcs_spi_mode_number(link.read_mode()));
+        } else {
+            (void)link;
+            return true;
+        }
+    }
+
     /// A command, its refusal counted. `link_` is a reference, so its
     /// verbs stay reachable from the const oracle - which is right: a
     /// panel that is asked a question is not a panel that has changed.
     bool send(uint8_t command, std::span<const uint8_t> parameters) const {
-        if (link_.command(command, parameters)) {
+        if (valid_ && link_.command(command, parameters)) {
             return true;
         }
         ++link_failures_;
@@ -545,7 +591,7 @@ private:
     /// an array of bytes converts to either span and a reader should
     /// not have to work out which verb a call means.
     bool read_back(uint8_t command, std::span<uint8_t> in) const {
-        if (link_.read(command, in)) {
+        if (valid_ && link_.read(command, in)) {
             return true;
         }
         ++link_failures_;
@@ -555,7 +601,7 @@ private:
     /// A memory write, which is the link's OTHER verb: on a serial link
     /// the same tenure, on a parallel one a store of a different width.
     bool send_pixels(uint8_t command, std::span<const uint8_t> bytes) {
-        if (link_.write(command, bytes)) {
+        if (valid_ && link_.write(command, bytes)) {
             return true;
         }
         ++link_failures_;
@@ -565,6 +611,7 @@ private:
     Link& link_;
     DcsModule module_;
     DcsRotation rotation_ = DcsRotation::r0;
+    bool valid_ = false;
     mutable uint32_t link_failures_ = 0;
 
     uint8_t row_[row_bytes] = {};

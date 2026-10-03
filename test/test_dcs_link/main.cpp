@@ -21,6 +21,7 @@
 
 #include <array>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 #include "devices/dcs.hpp"
@@ -597,6 +598,126 @@ TEST_CASE("a prototype whose frame is not a byte is refused, and no transaction 
     CHECK(Host::transactions() == 0);
     CHECK(front().transactions() == 0);
     CHECK(panel().commands_taken() == 0);
+}
+
+// =============================================================================
+// the link's own request: copied once, lent per verb
+// =============================================================================
+
+TEST_CASE("the mode a prototype carries is read off its spelling, and the link shows both") {
+    // The number is read off the enumerator and not off the value, so a
+    // stratum whose enumerators are register codes answers the same.
+    static_assert(dcs_spi_mode_number(SimSpiMode::mode0) == 0);
+    static_assert(dcs_spi_mode_number(SimSpiMode::mode1) == 1);
+    static_assert(dcs_spi_mode_number(SimSpiMode::mode2) == 2);
+    static_assert(dcs_spi_mode_number(SimSpiMode::mode3) == 3);
+    static_assert(std::is_same_v<Link::Mode, SimSpiMode>);
+
+    fresh();
+    Link::Config config = link_config();
+    config.write.mode = SimSpiMode::mode3;
+    config.read.mode = SimSpiMode::mode1;
+    Link link{config};
+    CHECK(link.write_mode() == SimSpiMode::mode3);
+    CHECK(link.read_mode() == SimSpiMode::mode1);
+    // Which modes a controller takes is the panel driver's question and
+    // not the link's: both prototypes are valid here.
+    CHECK(link.valid());
+}
+
+TEST_CASE("the prototype pair is copied at construction and never read again") {
+    fresh();
+    Link::Config config = link_config();
+    Link link{config};
+    // The application's own copy is changed under the link: a select
+    // line with nothing on it, a wider frame. The link runs the tenure
+    // it was given.
+    config.write.cs = empty_cs;
+    config.write.bits = SimSpiDataSize::bits16;
+    config.read.cs = empty_cs;
+
+    const uint8_t code[1] = {0x40};
+    REQUIRE(link.command(Dcs::madctl, code));
+    CHECK(panel().madctl() == 0x40);
+    CHECK(Host::unaddressed() == 0);
+    CHECK(Host::trace(0).cs == panel_cs.pin);
+    CHECK(Host::bytes_clocked() == 2);   // one frame a byte, as the copy says
+
+    uint8_t mad[1] = {};
+    REQUIRE(link.read(Dcs::rddmadctl, mad));
+    CHECK(mad[0] == 0x40);
+    CHECK(Host::unaddressed() == 0);
+}
+
+TEST_CASE("a verb after a read lends no stale span: the read buffer is not written again") {
+    fresh();
+    Link link{link_config()};
+    wake(link);
+
+    // A read fills the caller's buffer...
+    uint8_t in[4] = {0x11, 0x22, 0x33, 0x44};
+    REQUIRE(link.read(Dcs::rddpm, std::span<uint8_t>(in, 1)));
+    CHECK(in[0] == 0x1C);
+    in[0] = 0x11;
+
+    // ... and a write of as many bytes afterwards, on the OTHER
+    // prototype, must leave it alone: the link fills both spans on
+    // every verb, so the read prototype's `rx` cannot survive into a
+    // tenure that clocks data in.
+    set_window(link, 4, 4, 4, 4);
+    const uint8_t pixel[3] = {0x40, 0x80, 0xC0};
+    REQUIRE(link.write(Dcs::ramwr, pixel));
+    CHECK(in[0] == 0x11);
+    CHECK(in[1] == 0x22);
+    CHECK(in[2] == 0x33);
+    CHECK(in[3] == 0x44);
+
+    // And the write prototype carries no `tx` into a read: a read's
+    // data phase clocks 0xFF, whatever the last write sent.
+    set_window(link, 4, 4, 4, 4);
+    uint8_t raw[4] = {};
+    REQUIRE(link.read(Dcs::ramrd, raw));
+    const uint16_t last = static_cast<uint16_t>(Host::trace_count() - 1u);
+    CHECK(Host::trace(last).mosi == 0xFF);
+    CHECK(Host::trace(last).dc);
+    CHECK(raw[1] == 0x40);
+    CHECK(raw[2] == 0x80);
+    CHECK(raw[3] == 0xC0);
+}
+
+TEST_CASE("the link's tenures are polled, so they complete inside start() in deferred mode too") {
+    fresh();
+    Host::completion(SimSpiCompletion::deferred);
+    Link link{link_config()};
+    wake(link);
+    CHECK_FALSE(Host::pending());
+
+    // The same transaction the immediate-mode cases judge, byte for
+    // byte on the wire: the member lent to start() is read inside the
+    // call and never after it, whichever completion style the host has.
+    Host::reset_counters();
+    SimSpiBench::reset();
+    const uint8_t data[4] = {0, 0, 1, 0x3F};
+    REQUIRE(link.command(Dcs::caset, data));
+    CHECK_FALSE(Host::pending());
+    CHECK(Host::transactions() == 1);
+    CHECK(Host::polled_requests() == 1);
+    CHECK(Host::pumped_requests() == 0);
+    REQUIRE(Host::trace_count() == 5);
+    CHECK_FALSE(Host::trace(0).dc);
+    CHECK(Host::trace(0).mosi == Dcs::caset);
+    for (uint16_t i = 1; i < 5u; ++i) {
+        CHECK(Host::trace(i).dc);
+        CHECK(Host::trace(i).mosi == data[i - 1u]);
+    }
+    CHECK(SimSpiBench::clear_at[panel_cs.pin] < Host::first_byte_at());
+    CHECK(SimSpiBench::set_at[panel_cs.pin] > Host::last_byte_at());
+
+    uint8_t raw[8] = {};
+    REQUIRE(link.read(Ili9481::device_code_command, raw));
+    CHECK(raw[1] == 0x02);
+    CHECK(raw[2] == 0x4A);
+    CHECK_FALSE(Host::pending());
 }
 
 TEST_CASE("a verb answers with the engine's status, and on a bus made of RAM it cannot fail") {

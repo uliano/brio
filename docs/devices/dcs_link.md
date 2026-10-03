@@ -49,18 +49,54 @@ strata do not spell a bus transaction the same way - the rate is an enum
 on most, a `uint8_t baud` divisor on the SAM, a prescaler pair on the
 PL022, and only some Requests carry a frame size - so the link reads
 none of those fields. The application fills a request of its own bus
-exactly as it would fill any other, and a verb copies it and supplies
-only what a transaction of its own needs. There are two because a
-controller's read ceiling is not its write ceiling: a third of it on the
-ILI9481.
+exactly as it would fill any other, and the link copies it ONCE, at
+construction. There are two because a controller's read ceiling is not
+its write ceiling: a third of it on the ILI9481.
+
+**A verb copies nothing: it fills the member in place and lends it.**
+What every tenure of a prototype shares is written into the link's copy
+once, by the constructor - the command byte lent from a member of the
+link's own, `cmd_len` of one, a null reply, `polled` - and a verb stores
+only what its transaction brings, the two spans and the length, then
+hands the member to `Host::start()`. The arbiter's contract
+([../design/spi-bus.md](../design/spi-bus.md)) is what makes the lend
+enough: a request is lent for the call, and a polled one completes inside
+it, so nothing of the member is read after the return. Counted in the
+compile fixtures' listing (`test/family_stm32f4/devices_link.cpp`,
+`test/family/devices_link.cpp`): a verb is the command byte, the two
+spans and the length - four stores on a Cortex-M4, seven on the AVR -
+where it was a 48-byte copy of the prototype plus seven field stores on
+the M4 and a 21-byte copy loop plus twelve on the AVR. Both spans are
+stored on every verb, one of them null: a stale loan left in the member
+would be written by the engine on the next tenure of the other verb,
+and the suite stages exactly that.
+
+**The link does not move.** Its two prototypes carry the loan of the
+command byte from construction on, which is a pointer into the link
+itself; a copy would lend the original's byte, so copying and moving
+are deleted. A panel driver holds its link by reference, which is how it
+was always meant to be held.
+
+**The mode is the panel's to judge, and the link shows it.** Which SPI
+modes a controller's serial interface takes is a fact of the CONTROLLER
+(its traits, [ili9481.md](ili9481.md)); the link knows no controller, but
+it exposes the mode each prototype carries, as the stratum spells it,
+and `dcs_spi_mode_number()` turns any stratum's enum into the number
+every data sheet uses (CPOL in bit 1, CPHA in bit 0) by reading its
+SPELLING - `mode0`..`mode3` are the vocabulary's names on every family
+and on the simulated host - and never its value. The panel driver
+([dcs_panel.md](dcs_panel.md)) is the layer that holds the two against
+each other, and neither it nor this file names a family's enum.
 
 ## Types and verbs
 
 | Type | What it is |
 |------|------------|
 | `DcsLink` | The concept a panel driver is written over: three verbs, all complete on return |
-| `DcsSerialLink<Host>` | The four-wire serial realization over ANY stratum's `SpiHost` |
+| `DcsSerialLink<Host>` | The four-wire serial realization over ANY stratum's `SpiHost`; neither copyable nor movable |
 | `DcsSerialLink<Host>::Config` | The two prototype requests: `write` and `read` |
+| `DcsSerialLink<Host>::Mode` | The mode as that stratum spells it - the type of the Request's `mode` field |
+| `dcs_spi_mode_number(m)` | The number of a mode (CPOL in bit 1, CPHA in bit 0) read off the spelling of any stratum's mode enum |
 
 The concept's three verbs, each answering `bool`:
 
@@ -76,9 +112,10 @@ What the serial realization adds:
 |------|--------------|
 | `valid()` | Both prototypes carry a byte-wide frame. A verb refuses while this is false |
 | `write_prototype_valid()`, `read_prototype_valid()` | Which of the two the constructor refused |
+| `write_mode()`, `read_mode()` | The mode each tenure runs in, as the application set it - for the panel driver to hold against its controller's traits |
 | `status()` | The engine's own code for the last transaction it ran - what to read after a `false` |
 
-Three rules the realization keeps, each of which a suite checks:
+Four rules the realization keeps, each of which a suite checks:
 
 - **A verb is `Host::start(r) && Host::status() == spi_ok`.** A polled
   request completes inside `start()` by the arbiter's contract
@@ -96,12 +133,19 @@ Three rules the realization keeps, each of which a suite checks:
   prototype whose frame is wider is refused at construction. Where a
   Request has no frame size at all there is nothing to check, and the
   link detects which case it is with a `requires`.
+- **The prototype is copied once and the member is lent.** The
+  application's own copy changed after construction changes nothing;
+  a read's buffer is not written by a write that follows it, and a
+  read clocks 0xFF whatever the last write sent, because both spans
+  are stored on every verb; and the tenures complete inside `start()`
+  under the host's deferred completion style too, because they are
+  polled.
 
 ## How to use it
 
 A link over a family's own host - the select and the D/C pin, the setup
 time, the rate, the mode and the frame size are that stratum's, and the
-link reads none of them:
+link reads none of them but the mode, which it only shows:
 
 ```cpp
 using PanelHost = brio::SpiHost<1, panel_pins>;
@@ -112,7 +156,7 @@ write.cs = Cs::ref();
 write.dc = Dc::ref();
 write.cs_setup_us = 1;
 write.clock = brio::SpiClock::div8;       // under the write ceiling
-write.mode = brio::SpiMode::mode0;
+write.mode = brio::SpiMode::mode3;        // one the panel's traits take; no frame gap on a PL022
 write.bits = brio::SpiDataSize::bits8;    // where the stratum has one
 PanelHost::Request read = write;
 read.clock = brio::SpiClock::div32;       // under the READ ceiling, which is lower
@@ -153,7 +197,12 @@ single-parameter reads aligned, RDDID and RDDST all ones, a block
 written and read back pixel for pixel behind its `0x80`, a read memory
 continue picking up where the clocks stopped, the BGR bit acting on the
 write alone, and a prototype with a wider frame refused with no
-transaction reaching the panel.
+transaction reaching the panel; and about the link's own request, that
+the application's copy changed after construction changes nothing on the
+wire, that a read's buffer survives a later write and a read sends 0xFF
+after a write, that the tenures complete inside `start()` in the host's
+deferred style too, and that the mode accessors answer what each
+prototype was given.
 
 What the same suite establishes about the host under it - the select
 falling before the first byte and rising after the last, the D/C low for

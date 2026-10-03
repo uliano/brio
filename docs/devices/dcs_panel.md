@@ -87,6 +87,31 @@ in rectangles, runs and pixels is a different question and
 `gfx/counting.hpp` is where it is asked; this driver counts nothing
 else.
 
+**The link's SPI mode is judged here, at construction.** Which modes a
+controller's serial interface takes is a fact of the CONTROLLER - the
+traits' `serial_mode_accepted(mode)` ([ili9481.md](ili9481.md): modes 0
+and 3, from the data sheet's own cycle) - and which mode a link runs in
+is the link's (`write_mode()` / `read_mode()`,
+[dcs_link.md](dcs_link.md)). This driver is the one layer with both in
+hand, so it holds them against each other when it is built: a link whose
+mode the traits refuse, on either tenure, leaves the panel with `valid()`
+false, and every verb then refuses before it touches the bus - counted in
+`link_failures()`, one per verb, exactly as a link that refuses a wide
+frame behaves - because a command clocked in a mode the controller does
+not sample is not a wrong picture but no picture, and no verb would ever
+say so. A link that shows no mode at all (a DSI host, a parallel bus) has
+nothing to judge and the panel is valid as it stands; a serial link over a
+controller whose traits do not state their modes is a compile error. The
+comparison goes through `dcs_spi_mode_number()`, which reads a mode's
+number off the SPELLING of any stratum's enum, so this file names no
+family's enum and compiles over every host unchanged. What mode 3 buys
+over mode 0 is a block's business and not this driver's: on the PL022 it
+removes the 1.5 SCK gap the block leaves between frames in modes 0 and 2
+- 19 per cent of an 8-bit transfer, measured in
+[../rp2350/spi.md](../rp2350/spi.md) and stated for both families that
+carry the block in [../pl022/README.md](../pl022/README.md); the other
+blocks have no gap to lose.
+
 **The buffers are members, sized by the glass's LONG side.** A run of
 the rotated surface is as wide as the glass is tall, so a buffer sized
 by the short side is correct until the first r90 and then writes past
@@ -118,6 +143,7 @@ The driver's verbs, by purpose:
 
 | Verb | What it does |
 |------|--------------|
+| `valid()` | The link's mode is one the controller's serial interface takes, on both tenures - or the link has no mode to show. Every verb refuses while this is false, counted in `link_failures()` |
 | `reset_and_wake(reset, delay_ms)` | The reset line low and high by the traits' times, then `wake()`. `reset` is a pin-like with `set()` and `clear()`, active LOW - every stratum's `PinRef` is one |
 | `wake(delay_ms)` | SLPOUT, the wait, DISPON, the wait, the inversion the module asks for, COLMOD as a statement, MADCTL for the rotation in force |
 | `rotation(r)` / `rotation()` | Put the logical surface in an orientation, and read the one in force. `width()`/`height()` follow |
@@ -135,17 +161,29 @@ silicon spend them however it spends time.
 ## How to use it
 
 **The wake, on a family, with a real pin and a real clock.** The link is
-[dcs_link.md](dcs_link.md)'s, built over that stratum's `SpiHost`; the
-reset line is a pad named at run time, and the module's facts come from
-the board:
+[dcs_link.md](dcs_link.md)'s, built over that stratum's `SpiHost` from
+two prototype requests the application fills as it fills any request of
+that bus - in a mode the controller's traits take; the reset line is a
+pad named at run time, and the module's facts come from the board:
 
 ```cpp
 using Panel = brio::DcsPanel<brio::Ili9481, PanelLink>;
+
+PanelHost::Request write_prototype{};
+write_prototype.cs = Cs::ref();
+write_prototype.dc = Dc::ref();
+write_prototype.clock = brio::SpiClock::div8;    // under the write ceiling
+write_prototype.mode = brio::SpiMode::mode3;     // the ILI9481 takes 0 and 3; 3 has no frame gap on a PL022
+PanelHost::Request read_prototype = write_prototype;
+read_prototype.clock = brio::SpiClock::div32;    // under the READ ceiling, which is lower
 
 PanelLink link{PanelLink::Config{write_prototype, read_prototype}};
 Panel panel{link, brio::DcsModule{.column_mirror = true,
                                   .bgr = true,
                                   .wants_inversion = true}};
+if (!panel.valid()) {
+    // the link's mode is not one the controller takes: nothing will reach the bus
+}
 
 brio::Pin<'A', 2>::output();            // the reset line is a pad the board wires
 auto reset = brio::Pin<'A', 2>::ref();  // named at run time, as a request names a select
@@ -215,6 +253,13 @@ truth"). `test/test_dcs_panel` establishes, off any hardware:
   time.
 - **A link that refuses** everything: one refusal counted per verb,
   nothing on the bus, nothing in the panel.
+- **The link's mode against the traits**: a link in mode 0 or 3 leaves
+  the panel valid and every verb open; one in mode 1 or 2 - on either
+  tenure - is refused at construction, the panel behaving as it does
+  over a link that refuses: the reset line still driven and the waits
+  still spent, one refusal counted per verb, nothing on the bus. The
+  host made of RAM has no wire, so an accepted mode changes nothing in
+  it; what the case proves is the gate and not the glass.
 
 ## Not covered yet
 
@@ -265,11 +310,18 @@ Driver gaps:
   its reference renderer and not about this file, so it waits for the
   bench run that makes the price real.
 
-Implemented, not bench-verified: **the whole of it, against glass.**
-Every expectation in the suite is the bench's own measurement of the
-controller, but the code that meets them has only ever run against RAM -
-and a driver and a simulator written from one reading of a command table
-agree on the same mistake. What would measure it is the probe's letters
-run through this driver on the module, the memory read back through
-`read_run()` in each of the four rotations and the picture looked at
-once by a human.
+Implemented, not bench-verified:
+
+- **The whole of it, against glass.** Every expectation in the suite is
+  the bench's own measurement of the controller, but the code that meets
+  them has only ever run against RAM - and a driver and a simulator
+  written from one reading of a command table agree on the same mistake.
+  What would measure it is the probe's letters run through this driver
+  on the module, the memory read back through `read_run()` in each of
+  the four rotations and the picture looked at once by a human.
+- **Mode 3 on the glass.** The traits take it from the data sheet's own
+  cycle and the gate here lets it through, but every byte the bench
+  measured was clocked in mode 0 ([ili9481.md](ili9481.md)). What would
+  measure it is the same probe with the host's prototypes in mode 3: the
+  write and read rate ladders judged by read-back, and the frame read
+  back whole.

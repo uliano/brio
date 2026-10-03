@@ -183,22 +183,31 @@ public:
      * the rate and the frame size an STM32F4 or a PL022 Request carries
      * - so a driver written over one of those compiles over this one and
      * a frame-size check has something to check.
+     *
+     * The ORDER is the pointer-sized fields first, the two-byte length,
+     * then the bytes, so that no padding stands between fields (48 bytes
+     * on a 64-bit host, where alignment holes between the old order's
+     * fields made 64). Nothing here is copied for speed; the shape is
+     * the one an engine wants when it copies a tenure's fields with word
+     * stores, and a driver fills a Request by NAME, so a driver proved
+     * over this host is proved over a Request of that shape.
      */
     struct Request {
+        /// Phase 1, sent with DC low; LENT until the reply lands.
+        Borrowed<const uint8_t, Lease::reply> cmd;
+        /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
+        Borrowed<const uint8_t, Lease::reply> tx;
+        /// Phase 2 in, null = discard; LENT until the reply lands.
+        Borrowed<uint8_t, Lease::reply> rx;
+        ReplyTo<SpiDone> reply;
+        uint16_t len;      ///< phase 2 length, in FRAMES
+        uint8_t cmd_len;   ///< in FRAMES
+
         PinRef cs;   ///< asserted low around the transaction
         PinRef dc;   ///< display D/C line; null = no such pin
         /// Microseconds between the CS assertion and the first clock.
         /// COUNTED here and never spent: there is no time in this world.
         uint8_t cs_setup_us = 0;
-        /// Phase 1, sent with DC low; LENT until the reply lands.
-        Borrowed<const uint8_t, Lease::reply> cmd;
-        uint8_t cmd_len;   ///< in FRAMES
-        /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
-        Borrowed<const uint8_t, Lease::reply> tx;
-        /// Phase 2 in, null = discard; LENT until the reply lands.
-        Borrowed<uint8_t, Lease::reply> rx;
-        uint16_t len;   ///< phase 2 length, in FRAMES
-        ReplyTo<SpiDone> reply;
 
         SimSpiClock clock = SimSpiClock::div16;
         SimSpiMode mode = SimSpiMode::mode0;

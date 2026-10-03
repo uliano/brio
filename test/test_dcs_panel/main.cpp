@@ -728,6 +728,94 @@ TEST_CASE("the verbs cost the transactions the design says and no more") {
 }
 
 // =============================================================================
+// the link's mode against the controller's traits
+// =============================================================================
+
+TEST_CASE("the traits state the modes the serial interface takes, and the panel reads them") {
+    // The data sheet's cycle (7.2.1, 7.2.2): the bit on the line at the
+    // falling edge, taken at the rising edge - modes 0 and 3, and not
+    // the two that sample on the falling edge.
+    static_assert(Ili9481::serial_mode_accepted(0));
+    static_assert(!Ili9481::serial_mode_accepted(1));
+    static_assert(!Ili9481::serial_mode_accepted(2));
+    static_assert(Ili9481::serial_mode_accepted(3));
+
+    // A panel over the simulated host has a mode to judge; the
+    // comparison goes through the link's accessor and the number read
+    // off its spelling, so the driver names no family's enum.
+    for (SimSpiMode m : {SimSpiMode::mode0, SimSpiMode::mode3}) {
+        INFO("mode " << static_cast<int>(dcs_spi_mode_number(m)));
+        fresh();
+        Link::Config config = link_config(bench_cs);
+        config.write.mode = m;
+        config.read.mode = m;
+        Link link{config};
+        Panel panel{link, bench_module};
+        REQUIRE(panel.valid());
+
+        RecordingPin reset;
+        WaitLog waits;
+        REQUIRE(panel.reset_and_wake(reset, waits));
+        CHECK(bench_core().display_on());
+
+        // A pixel through and back: the host made of RAM has no wire,
+        // so the mode changes nothing in it - what this proves is that
+        // an accepted mode leaves every verb open.
+        set_pixel(panel, 3, 5, green);
+        CHECK(panel.get_pixel(3, 5) == green);
+        CHECK(panel.link_failures() == 0);
+    }
+}
+
+TEST_CASE("a link whose mode the controller does not take is refused at construction") {
+    for (SimSpiMode m : {SimSpiMode::mode1, SimSpiMode::mode2}) {
+        INFO("mode " << static_cast<int>(dcs_spi_mode_number(m)));
+        fresh();
+        Link::Config config = link_config(bench_cs);
+        config.write.mode = m;
+        config.read.mode = m;
+        Link link{config};
+        REQUIRE(link.valid());   // the LINK has nothing against it
+        Panel panel{link, bench_module};
+        CHECK_FALSE(panel.valid());
+
+        // The refusal is the panel's and behaves as the link's does: the
+        // pin driven and the waits spent, every verb refused and
+        // counted, nothing on the bus.
+        RecordingPin reset;
+        WaitLog waits;
+        CHECK_FALSE(panel.reset_and_wake(reset, waits));
+        CHECK(reset.clears == 1);
+        CHECK(waits.ms.size() == 4);
+        CHECK(panel.link_failures() == 5);
+
+        panel.reset_counters();
+        panel.fill_rect(0, 0, 4, 4, red);
+        CHECK(panel.link_failures() == 1);
+        std::array<uint32_t, 4> got{};
+        CHECK_FALSE(panel.read_run(0, 0, std::span<uint32_t>(got)));
+        CHECK(panel.link_failures() == 2);
+        CHECK_FALSE(panel.rotation(DcsRotation::r90));
+        CHECK(panel.link_failures() == 3);
+        CHECK(Host::transactions() == 0);
+        CHECK(bench_core().commands_taken() == 0);
+    }
+
+    // Both tenures are judged: a read in a refused mode is refused
+    // whatever the write's.
+    fresh();
+    Link::Config config = link_config(bench_cs);
+    config.write.mode = SimSpiMode::mode3;
+    config.read.mode = SimSpiMode::mode1;
+    Link link{config};
+    Panel panel{link, bench_module};
+    CHECK_FALSE(panel.valid());
+    CHECK(panel.get_pixel(0, 0) == 0);
+    CHECK(panel.link_failures() == 1);
+    CHECK(Host::transactions() == 0);
+}
+
+// =============================================================================
 // a link that refuses
 // =============================================================================
 

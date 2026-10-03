@@ -3512,10 +3512,16 @@ brio/                    the framework, one directory per stratum:
                            DcsSerialLink<Host>, the four-wire realization over
                            ANY stratum's SpiHost: its configuration is TWO
                            PROTOTYPE REQUESTS the application fills as it fills
-                           any request of that bus, the link supplying only
-                           the command byte (a member, lent under Lease::reply),
-                           the spans, the length and polled; a frame wider than
-                           a byte refused at construction
+                           any request of that bus, copied ONCE at construction
+                           - the command byte lent there from a member under
+                           Lease::reply, cmd_len, the null reply and polled set
+                           there too - and a verb filling the spans and the
+                           length IN PLACE and lending the member to start()
+                           (so the link copies nothing per command and does
+                           not move); the mode each prototype carries exposed
+                           for the panel driver to judge against its
+                           controller's traits; a frame wider than a byte
+                           refused at construction
     dcs_panel.hpp          THE PANEL DRIVER, the tier's fourth layer: DcsPanel
                            <Traits, Link>, a command panel as a gfx Surface in
                            the DIRECT shape (every verb a synchronous link
