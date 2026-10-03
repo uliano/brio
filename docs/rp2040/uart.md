@@ -184,6 +184,13 @@ extern "C" void isr_uart0() {
   the crt's handler-name trap ([platform.md](platform.md)) before the
   first byte.
 
+- THE TRANSMIT POLICY MEASURED ON THE WEACT RP2040 as on the RP2350's
+  same PL011 r1p5 ([../rp2350/uart.md](../rp2350/uart.md)): the direct
+  write into an idle FIFO, the transmit interrupt armed only behind a
+  full FIFO - `test_rp2040_serial` 32 pass whole, a 4096-byte print 501
+  interrupts at x 0.99 of the wire and 256 bytes 31 (`bench_rp2040`
+  letter p).
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -205,14 +212,6 @@ Implemented but not bench-verified, each with what would measure it:
   measures it at 115200 and sees its cost at 120; a timed lone byte
   per rung.
 - `rebase` and `set_baud` under a running port: the suite.
-- THE TRANSMIT POLICY on this chip's silicon - the direct write into
-  an idle FIFO, the transmit interrupt armed only behind a full FIFO,
-  nothing written for a refused byte - and the rule it rests on (the
-  transmit interrupt an edge that stays latched until a write above
-  the level or UARTICR clears it): measured on the RP2350's same
-  PL011 r1p5 ([../rp2350/uart.md](../rp2350/uart.md)), not yet here.
-  `test_rp2040_serial` whole on both boards, its letter e's interrupt
-  count, and `bench_rp2040`'s letter p would measure it.
 - The engined block start with its claim under the mask and the
   channel bound once (two stores a block, [dma.md](dma.md)):
   `test_rp2040_dma` letters i and j - the 4096-byte loop at 3 Mbaud and

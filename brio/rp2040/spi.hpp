@@ -133,12 +133,12 @@ struct Rp2040Pl022 {
     static constexpr uint8_t no_pad = 0xFFu;
     /// Below how many data frames the pump beats the engines: the
     /// engines' fixed cost per transaction over the pump's cost per
-    /// frame. THE RP2350's MEASURED PAIR STANDS IN (docs/rp2040/spi.md
-    /// says what would measure this chip's own - bench_rp2040's letters
-    /// d and e): the same block and the same driver, on a Cortex-M0+
-    /// whose interrupt entry and flash are both slower, so the quotient
-    /// is if anything smaller here.
-    static constexpr uint16_t dma_min_frames = 10;
+    /// frame, both measured on this chip by bench_rp2040's letters d
+    /// and e (docs/rp2040/spi.md): an engined request costs 902 cycles
+    /// plus 38 a frame at 31.25 MHz, the pump 284 plus 87 a frame - the
+    /// Cortex-M0+'s handler is the dearer term, not the launch - so the
+    /// two cost the same at twelve and a half frames.
+    static constexpr uint16_t dma_min_frames = 13;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? SPI0 : SPI1); }

@@ -158,7 +158,10 @@ the mask held over the claim alone (six instructions, about 10
 cycles); a receive run 27 instructions, about 60 cycles, one read
 (BUSY) and three stores (the credit clear, the address, the count);
 an SPI data phase on two engines 89 instructions, about 180 cycles,
-and ONE DMA interrupt for the transaction; a copy 25 instructions,
+and ONE DMA interrupt for the transaction - the block start alone: a
+whole engined request of 16 frames at 31.25 MHz costs 998 cycles over
+the wire, the host's start(), the completion and the block's mode-0
+gap on top of this launch ([spi.md](spi.md)); a copy 25 instructions,
 about 40 cycles, one read and three stores.
 
 ## How to use it
@@ -274,6 +277,16 @@ travelled by DMA):
   every run (a level request re-pulses for every byte still waiting,
   so nothing is lost).
 
+- THE ENGINES MEASURED ON THE WEACT RP2040: `test_rp2040_dma` 37 pass
+  whole (the binding and the two-store block, the beat per block, the
+  claim, the copy engine at three widths); `bench_rp2040` letter d - a
+  copy of 16 bytes wall 442 and busy 279 cycles with a 79-cycle
+  handler, and an engined SPI request of 16 frames at 31.25 MHz wall
+  1510 with ONE interrupt, a fixed cost of 998 cycles (8.0 us) of which
+  96 the block's mode-0 gap; inside the block the engines run at the
+  wire plus that gap, 38.00 cycles a byte at 31.25 MHz and 304.00 at
+  3.906 MHz, 35.00 a byte in 16-bit frames.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -294,23 +307,11 @@ Driver gaps, each with its reason:
   channel at a time; two channels started together, their order read
   off the counts.
 
-Implemented but not bench-verified, each with what would measure it
-(the board is not on the desk):
+Implemented but not bench-verified, each with what would measure it:
 
-- The engines' binding and their two-store block, the beat per block,
-  the claim, the copy engine: `test_rp2040_dma` whole - letter m judges
-  copy and fill at three widths and their refusals, and one engine
-  writing a byte, a half-word and a word run into one cell with
-  DATA_SIZE read back; letters i and j run the transports' block
-  start - and the transports' suites (`test_rp2040_serial`,
-  `test_rp2040_spi`, `test_rp2040_i2c`, the ADC, PIO and PWM suites).
 - A bus error raising the line on a channel bound IRQ_QUIET (the
   SPI host's transmit engine): a block of that engine reading the
   suite's hole in the map.
-- The costs above as time: `bench_rp2040` letter d - copy and fill at
-  16, 256 and 4096 bytes (the fixed cost is the wall less one beat a
-  cycle), a paced table and its jitter against the timer's 400 cycles,
-  and an engined SPI transaction of 16 and 256 frames at two rates.
 - A write bus error (WRITE_ERROR): the suite provokes a read error;
   a block writing into the hole.
 - An engine on line 1 served by core 1: the multicore suite with a

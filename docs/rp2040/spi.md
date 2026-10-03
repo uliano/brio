@@ -161,7 +161,8 @@ extern "C" void isr_spi1() {
 ## Bench findings
 
 The reference suite is `test_rp2040_spi`, green on the Pico and the
-WeAct board: five letters on the loop-back (LBM, no wire), five on
+WeAct board, clk_sys and clk_peri at 125 MHz: 38 verdicts, the 27 of
+five letters on the loop-back (LBM, no wire) and the 11 of five on
 four wires between SPI0 and SPI1 of the same chip - SPI0's TX, SCK
 and GPIO select into SPI1's RX, SCK and select pad, SPI1's TX back
 into SPI0's RX - with the client served from its own interrupt and
@@ -179,26 +180,116 @@ the roles inverted on the same wires for the last letter.
   discarded; a read with no out buffer clocks 0xFF; the select
   released after every transaction; an empty request completes on the
   spot.
-- THE POLLED PATH at every named rate carries 64 frames byte-exact.
-  The 1.6 us a frame at clk_peri / 2 this letter once read (the wire
-  alone 128 ns) was the host's earlier loop - the ISR's fill and take
-  called per frame through outlined accessors; the loop is now written
-  from the block's FIFOs and reads the wire's own figure on the RP2350
-  ([../rp2350/spi.md](../rp2350/spi.md)), and this chip's figure is
-  owed to its board (below).
-- THE ENGINES on the loop: a 128-byte block at 31.25 MHz in 296 us,
-  ISR-completed and exact - the letter's FIRST engined transaction,
-  whose code runs out of the flash for the first time, against a wire of
-  33 us. The same letter on the RP2350's same block split that kind of
-  figure into the XIP cache's fill and the wire, and the vendor's library
-  doing the same transfer there takes this driver's time to the cycle
-  inside the block ([../rp2350/spi.md](../rp2350/spi.md)): the 296 us is
-  not the engines' pace, and this chip's own split is owed to its board
-  (below);
-  a command frame on the pump then 32 data frames on the engines; a
-  polled request on the engines completing inside start() at 62.5 MHz;
-  a read with no out buffer through the transmit engine's fixed 0xFF
-  cell.
+- THE POLLED PATH at every named rate carries 64 frames byte-exact;
+  the suite times the whole request on the system timer, 37 us at
+  clk_peri / 2 and 32 us at / 4 against a wire of 8 and 16, a request's
+  own cost on top of the loop's. The loop's cost a frame is the next
+  item's.
+- **THE HOST ABOVE THE WIRE, `bench_rp2040` letter e** - the polled loop
+  in both its shapes, the pump, the price of a request - on a host with
+  no engines, SPI0 on the same pads with GP17 the select and GP22 the D/C
+  line, MISO floating, the receive-overrun flag read after every run and
+  clear on every one; the ruler SysTick's cycles at 125 MHz, the best of
+  five, at clk_peri / 2, / 4 and / 16 (62.5, 31.25 and 7.8125 MHz) in
+  mode 0 and in mode 3, each figure a frame by the difference of 16 and
+  256 frames:
+  - THE RECEIVE SHAPE (`spi.poll.rx`, eight frames in flight - written and
+    not yet read): **37 cycles an 8-bit frame and 44 a 16-bit one are the
+    Cortex-M0+'s floor** - the loop's three accesses of the block a frame,
+    the frame stored, the pointers - so the loop sets the pace at 62.5 MHz
+    in both widths (the wire 16 and 32, 19 and 35 with mode 0's gap) and
+    at 31.25 MHz on 8-bit frames in mode 3 (37 against 32); everywhere
+    else it reads the wire: 37.93 against mode 0's 38 at 31.25 MHz, 70 /
+    64 for 16-bit frames there, 152 / 128 and 280 / 256 at 7.8125. A frame
+    read and thrown away instead of stored costs 35 (8-bit) and 39
+    (16-bit).
+  - THE WRITE SHAPE (`spi.poll`, no in buffer, taken for 8-bit frames at
+    clk_peri / 2 on a run longer than the FIFO): the TNF-paced loop at
+    **21.00 cycles a frame in both modes** against the wire's 16 and mode
+    0's 19 - two accesses a frame, the Cortex-M0+'s floor again, x 1.31
+    the nominal wire where the receive shape would be x 2.31.
+  - THE RECEIVE SHAPE UNDER A LONG HANDLER: 100 receive requests of 256
+    frames on the loop-back at each of the three rates with the tick's
+    handler stretched to 1500 cycles - eight frames being 128, 256 and
+    1024 cycles - **100 exact and 0 overruns at every rate**, with 14, 13
+    and 32 of the stretched ticks landing inside the requests.
+  - THE PUMP (`spi.pump`, the receive on the interrupt): **87.25 to 87.75
+    cycles an 8-bit frame and 92.9 to 93.4 a 16-bit one at 62.5 and 31.25
+    MHz**, 75 of them inside the handler (19300 cycles for 256 frames at
+    62.5 MHz), one interrupt per FIFO level - 32 for 256 frames, where a
+    handler finds the eight in flight all back; at 7.8125 MHz 49 to 51
+    interrupts and the wire's own figures (152 / 129, and 280 / 256 for
+    16-bit frames); the overrun flag clear on every run. Above 7.8 MHz
+    the handler and not the wire is the pace: 256 frames at x 5.55 the
+    nominal wire at 62.5 MHz, x 2.76 at 31.25.
+  - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
+    0, 2 and 15 data bytes with it high, polled, nothing read back, at
+    7.8125 MHz): wall less the wire's cycles **323 for one byte, 462 for
+    three, 783 for sixteen**, of which the block's mode-0 gap is 24 / 72 /
+    384 and the phase boundary's drain (the data frames wait for the
+    command frame to come back whole, so D/C flips on the wire) one
+    frame's latency.
+- **`dma_min_frames` IS 13 IN THE TRAITS, THIS CHIP'S OWN CROSSOVER.** At
+  31.25 MHz an engined data phase costs 902 cycles over its frames, gap
+  included, then 38 a byte (letter d, two items down), a pumped one 284
+  cycles then 87.25 a frame (letter e): the two are equal at 12.5
+  frames. The Cortex-M0+'s handler, not the launch, is the dearer term
+  here, which is why the quotient is larger than the RP2350's ten and
+  not smaller.
+- THE ENGINES on the loop: a 128-byte block at 31.25 MHz, ISR-completed
+  and exact with ONE DMA interrupt; a command frame on the pump then 32
+  data frames on the engines; a polled request on the engines completing
+  inside start() at 62.5 MHz; a read with no out buffer through the
+  transmit engine's fixed 0xFF cell; 16-bit frames riding the half-word
+  engines exact with no SPI interrupt and one DMA interrupt; and a 16-bit
+  request on buffers one byte off a half-word going to the pump, exact
+  there. The letter's first engined block, timed, takes **152 us** where
+  letter d's walls give 46 warm and the wire 33: the cache's fill of what
+  an engined transaction still runs from the flash (two items down).
+- **WHAT AN ENGINED TRANSACTION COSTS, `bench_rp2040` letter d**, on the
+  loop-back, the half-word engines on channels 4 and 5, the core asleep
+  in the idle path between the start and the completion, the best of
+  four: 16 8-bit frames at 31.25 MHz take **1510 cycles, 826 of them
+  busy** - the DMA line's handler 170 of those with the meter's own 47,
+  where a 16-byte copy on the same loop is busy 279 with a handler of 79,
+  so the SPI request's `start()` costs some 450 cycles more than a copy's
+  launch - and the transaction's **FIXED COST, the wall less its frames'
+  nominal wire, is 998 cycles (8.0 us), of which 96 the block's mode-0
+  gap**: 902, 860 at 3.906 MHz and 919 for 16-bit frames. INSIDE THE
+  BLOCK THE ENGINES RUN AT THE WIRE WITH THE BLOCK'S GAP, by the
+  difference of 16 and 256 frames: **38.00 cycles a byte at 31.25 MHz**
+  (32 of bits and 6 of gap), 304.00 at 3.906 MHz (256 and 48), 35.00 a
+  byte in 16-bit frames (64 and 6 a frame) - 256 frames at x 1.29 and x
+  1.20 of the nominal wire, 4096 16-bit frames at x 1.09 with the
+  transaction's one interrupt.
+- **THE HOST'S HOT PATH LIVES IN SRAM, AND A FIRST REQUEST PAYS THE
+  CACHE NOTHING OF IT.** `rp2040/ld/rp2040_2m.ld` places the same ten
+  members the RP2350's script places
+  ([../pl022/README.md](../pl022/README.md), "The host above the wire")
+  into .data, listed before the code because an input section goes to
+  the first statement that matches it - so the flash holds the stage,
+  the vector table, the load image of .data and then the code, and every
+  image above booted that way. `bench_rp2040` letter e's `spi.cold` is
+  the instrument: `spi.req`'s three-byte polled request as the host's
+  VERY FIRST after `init()`, and again after every line of the XIP cache
+  is flushed (`Xip::flush()`), under the mask, the cache's misses
+  (accesses less hits) read around each: **2896 cycles and 40 misses
+  both times, against 849 and 0 warm**. An empty request through the
+  same call site, `start()` returning at its head, reads **2140 cycles
+  and 40 misses after a flush, 94 warm** (a build of the bench's binding):
+  every miss and 2046 of the 2047 extra cycles are the CALLER's - the
+  ruler's reads, the call site, the flash-side veneer and the counters'
+  read, some 51 cycles a miss - and the host's own code misses nothing.
+  THE SRAM IT COSTS: 1120 bytes for a host without engines and 1732 for
+  one with them, plus 16 bytes of veneer for each function that code
+  calls back in the flash (`clamp`, `configure`, `flush_rx`, `delay_us`
+  and the engines' verbs, eleven in the bench) - the bench's two hosts
+  take .data from 512 bytes to 3544. Every call across the boundary goes
+  through such a veneer (a push, a literal load, a move into ip, a pop, a
+  `bx`): the Cortex-M0+'s `bl` reaches 16 MB, and the SRAM lies 256 MB
+  from the flash. WHAT STILL PAYS THE FILL: the caller's lines, and on an
+  engined transaction the family's engine verbs (`program`, `begin`), the
+  DMA line's handler and the app's vector glue, which stay in the flash.
 - THE KERNEL over it, unchanged: four transactions through SpiBus
   with four replies, pumped and polled interleaved on one bus; six
   posted into a four-deep queue, one rejected at once and every
@@ -249,53 +340,19 @@ Driver gaps, each with its reason:
   does and a GPIO select does not; a program that wants it uses the
   peripheral's select on the host side.
 
-Implemented but not bench-verified, each with what would measure it
-(the board is not on the desk):
+Implemented but not bench-verified, each with what would measure it:
 
-- An engined block at the wire, and the 296 us of the first one as this
-  chip's XIP fill: on the RP2350 the first transaction after `init()`
-  misses 126 to 165 cache lines and every later one runs at the wire
-  plus mode 0's frame gap, as the vendor's library does
-  ([../rp2350/spi.md](../rp2350/spi.md)); here the flash is read through
-  the second stage's EBh at clk_sys / 4 by a Cortex-M0+, so a line costs
-  what this board measures. `bench_rp2040` letter d's `spi.dma` lines
-  (the best of four: warm) for the wire, and the first transaction timed
-  beside a repeat with `Xip`'s two counters for the split.
-- THE HOST'S HOT PATH IN SRAM: `rp2040/ld/rp2040_2m.ld` places the same
-  ten members the RP2350's script places
-  ([../pl022/README.md](../pl022/README.md), "The host above the wire")
-  into .data, listed before the code because an input section goes to
-  the first statement that matches it - so the flash holds the stage,
-  the vector table, the load image of .data and then the code. On this
-  core 1120 bytes for a host without engines and 1732 for one with
-  them; the bench's two hosts and the linker's eight veneers take
-  .data from 512 to 3544 bytes - the map read, nothing run.
-  `bench_rp2040` letter e's `spi.cold` is what would measure it: the
-  first three-byte request after `init()` and the same after
-  `Xip::flush()`, the cache's misses beside each, with this chip's price
-  of a line and the Cortex-M0+'s five-instruction veneer (a push, a
-  literal load, a `bx`) on every call across the flash/SRAM boundary.
-
-- Half-word engines carrying 16-bit frames with no SPI interrupt, a
-  16-bit request on odd-aligned buffers going to the pump, and ONE DMA
-  interrupt a transaction: `test_rp2040_spi` letter d.
-- The engined transaction's fixed cost, counted in the listing at
-  about 180 cycles for the data phase's launch and 95 for its one
-  interrupt (about 2.2 us at 125 MHz; [dma.md](dma.md)): `bench_rp2040`
-  letter d's `spi.dma` lines, 16 and 256 frames at two rates and 16-bit
-  frames up to 4096 - which also time a byte inside the transfer.
-- THE HOST ABOVE THE WIRE on this core: the polled loop in both its
-  shapes, the pump's cost per frame, the price of a three-byte command
-  and the receive shape's proof under a stretched handler - the IP
-  stratum's host, measured on the RP2350 in both of its architectures
-  ([../rp2350/spi.md](../rp2350/spi.md)) and compiled here into
-  `bench_rp2040`'s letter e under the same op names. The letter on this
-  board, with the vendor's `spi_write_read_blocking` and
-  `spi_write_blocking` built from the pinned pico-sdk beside it.
-- `dma_min_frames` as this chip's own number: the traits carry the
-  RP2350's quotient (ten frames) as a stand-in, the same block and the
-  same driver on a core whose interrupt entry is slower; letters d and
-  e of `bench_rp2040` give the two inputs.
+- The split of an engined block's first transaction: `test_rp2040_spi`
+  letter d's first 128-byte block takes 152 us where letter d of the
+  bench reads 46 warm - the cache's fill of the family's engine verbs,
+  the DMA line's handler and the caller's lines. The letter timing the
+  block twice, the first run and a repeat, with `Xip`'s two counters
+  beside each, as the RP2350's suite does, would split it.
+- The vendor's loop on this board: the pinned pico-sdk's
+  `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
+  the SDK's own placement, against letter e's 37 and 21 cycles a frame
+  at clk_peri / 2 - a program built by the SDK's own CMake and timed on
+  the same ruler, as on the RP2350 ([../rp2350/spi.md](../rp2350/spi.md)).
 
 - The per-bus timeout with `recover()`: a lost completion staged as
   the other targets' suites stage it (the ISR body run, the reply

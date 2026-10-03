@@ -133,7 +133,7 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
   event toggling GP25 at 2 Hz (read back through SIO), the uptime
   advancing with the host's clock.
 - The reference suite is green on both boards, the Pico and the WeAct
-  (52 verdicts in the all-key, 18 in the reset letter). What it
+  (58 verdicts in the all-key, 18 in the reset letter). What it
   measured, on the system timer as the ruler:
   - the ticker: 200 SysTick periods at 1000 Hz span 199999 us of the
     crystal's microseconds - the PLL's ratio exact to 5 ppm;

@@ -155,8 +155,8 @@
 //      each with its warm repeat and the cache's misses beside it, run
 //      first in the letter so that the first request is the first. The
 //      block's receive-overrun flag is read after every run. Each the best
-//      of five after one thrown away, spi.cold apart. THIS LETTER IS
-//      COMPILED FOR THE BOARD AND NOT YET RUN ON IT (docs/rp2040/spi.md).
+//      of five after one thrown away, spi.cold apart. Its readings are
+//      docs/rp2040/spi.md's.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -487,6 +487,11 @@ using DmaHost = SpiHost<0, spi_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, ui
 
 /// Set by the handler that ends the block under measure.
 volatile bool dma_done = false;
+/// DmaHost owns SPI0 from its init() to its release() in letter d, and
+/// only then are its two bodies called: letter e's Plain is the same
+/// instance, and an engined host's isr() run on Plain's frames would take
+/// them into its own stale tenure and leave Plain's pump waiting.
+volatile bool dma_host_live = false;
 
 constexpr uint32_t copy_wire_bps = 4u * SysClock::hz;
 constexpr uint16_t pace_y = 400u;
@@ -640,6 +645,7 @@ void td_dma() {
     // spi.dma on the loop-back
     (void)DmaHost::init(clock);
     DmaHost::loopback(true);
+    dma_host_live = true;
     for (uint32_t i = 0; i < sizeof spi_tx; ++i) {
         spi_tx[i] = static_cast<uint8_t>(0x31u + 3u * i);
     }
@@ -690,6 +696,7 @@ void td_dma() {
               per_byte_x100 % 100u / 10u, per_byte_x100 % 10u, " cycles against the wire's ",
               SysClock::hz / wire_bps, crlf);
     }
+    dma_host_live = false;
     DmaHost::release();
     bench.verdict("ran", true);
 }
@@ -993,14 +1000,14 @@ extern "C" void isr_dma_0() {
         (void)Paced::complete();
         dma_done = true;
     }
-    if (DmaHost::dma_isr()) {
+    if (dma_host_live && DmaHost::dma_isr()) {
         dma_done = true;
     }
     dma_meter.leave();
 }
 extern "C" void isr_spi0() {
     spi_meter.enter();
-    if (DmaHost::isr()) {
+    if (dma_host_live && DmaHost::isr()) {
         dma_done = true;
     }
     if (plain_live && Plain::isr()) {
