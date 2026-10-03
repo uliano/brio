@@ -345,10 +345,17 @@ subtracted and interrupts masked.
 - **The runtime path costs a constant 122 cycles** at a static rate,
   whatever the length: nominal + 122 at 1, 2, 5, 10, 50 and 100 us
   alike - the Q4.12 multiply, the slice bookkeeping and the one extra
-  loop turn that replaces an exact ceil. `delay_us_runtime(24, 1)`
-  called directly (the out-of-line stored-byte tail) is 171 cycles, of
-  which the loop is the nominal 24. Every path honours "at least" at
-  every length tested.
+  loop turn that replaces an exact ceil. `delay_us_runtime(cpu, us)`,
+  the stored-byte pattern, takes a SHORT path for a `us` under 256
+  (every setup time a driver keeps in a byte): one 8 x 8 MUL, the
+  quarter rounded up, `_delay_loop_2`'s 4-cycle turns - 39 cycles for
+  1 us at 24 MHz counted in the SPI host's listing (the rate byte's
+  `lds` 3, `mul` 2, `movw` 1, `eor` 1, `adiw` 2, two `lsr/ror` pairs
+  4, `sbiw` 2, `breq` 1 and six turns of `sbiw/brne` 23), where the
+  out-of-line fixed-point tail it used to call measured 171; a `us` of
+  256 or more still takes that tail. The short path is counted,
+  measured in the recovery session.
+  Every path honours "at least" at every length tested.
 - **A dynamic clock costs 157 cycles per call with a runtime `us`, and
   SIX with a constant one.** The rate is dispatched by INDEX into
   branches folded per rate, so no arithmetic derives the rate at wait

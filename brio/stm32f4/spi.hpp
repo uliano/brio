@@ -1038,17 +1038,16 @@ constexpr bool spi_engine_placed() {
 /// stream, or a polled block that never completed): the engine's own
 /// status code, in the range util/bus_master.hpp leaves to engines.
 inline constexpr uint8_t spi_dma_fault = bus_engine_status;
-/// The pump's receive buffer was overrun (26.3.13: a frame landed while
-/// the previous one still stood in it, which with two frames in flight
-/// means the handler came later than a frame time after RXNE). The frames
-/// from that one on are lost, so the transaction ends there with this
-/// code, the select released after the frame in flight has left the wire.
-inline constexpr uint8_t spi_overrun = bus_engine_status + 1;
-/// The polled loop's budget ran out: a flag it waited for never rose - a
-/// block whose clock does not run (the gate closed, SPE down, a mode
-/// fault that demoted it). The block is reset and reconfigured, and the
-/// transaction ends with this code.
-inline constexpr uint8_t spi_stalled = bus_engine_status + 2;
+// The two other codes this host answers are the vocabulary's
+// (util/spi_bus.hpp). spi_overrun: the pump's receive buffer was
+// overrun (26.3.13: a frame landed while the previous one still stood
+// in it, which with two frames in flight means the handler came later
+// than a frame time after RXNE); the frames from that one on are lost,
+// so the transaction ends there, the select released after the frame
+// in flight has left the wire. spi_stalled: the polled loop's budget
+// ran out - a flag it waited for never rose, a block whose clock does
+// not run (the gate closed, SPE down, a mode fault that demoted it);
+// the block is reset and reconfigured, and the transaction ends there.
 
 /**
  * SpiHost<n, pins, TxEngine, RxEngine>
@@ -1449,8 +1448,12 @@ public:
         const SpiClock code = clamp(r.clock);
         apply(r.mode, code, r.bits);
         const bool wide = spi_frame_is_halfword(r.bits);
-        edge(r.dc, r.cmd_len == 0u);   // low for a command phase, high for data alone
-        edge(r.cs, false);             // assert, active low
+        if (r.cmd_len != 0u) {
+            r.dc.clear();   // low for a command phase
+        } else {
+            r.dc.set();     // high for data alone
+        }
+        r.cs.clear();   // assert, active low
         if (r.cs_setup_us != 0u) {
             (void)delay_us(s.cs_rate, r.cs_setup_us);
         }
@@ -1468,7 +1471,7 @@ public:
             bool ok = true;
             if (r.cmd_len != 0u) {
                 ok = pump_write(r.cmd.get(), r.cmd_len, wide, budget);
-                edge(r.dc, true);
+                r.dc.set();
             }
             if (ok && r.len != 0u) {
                 if constexpr (has_engines) {
@@ -1476,7 +1479,7 @@ public:
                         s.t.polled = true;   // finish_dma() leaves the select to this path
                         launch_dma(r.tx.get(), r.rx.get(), r.len, wide);
                         spin_dma(r.len);
-                        edge(r.cs, true);
+                        r.cs.set();
                         return true;
                     }
                 }
@@ -1491,7 +1494,7 @@ public:
             if (!ok) {
                 stalled();
             }
-            edge(r.cs, true);
+            r.cs.set();
             return true;
         }
 
@@ -1560,7 +1563,7 @@ public:
             // The last command frame came back: the boundary. D/C moves
             // on an idle bus, then the data phase starts afresh.
             s.in_cmd = false;
-            edge(s.t.dc, true);
+            s.t.dc.set();
             if (s.t.len == 0u) {
                 return end_pump();
             }
@@ -1627,7 +1630,7 @@ public:
     /// ran out.
     static bool recover() {
         State& s = st_;
-        edge(s.t.cs, true);
+        s.t.cs.set();
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
@@ -1744,17 +1747,6 @@ private:
     static inline State st_{};
     static constexpr uint8_t tx_dummy_ = 0xFF;
     static constexpr uint16_t tx_dummy16_ = 0xFFFF;
-
-    // ---- the pins -----------------------------------------------------------------------
-
-    /// A select or D/C edge: one BSRR store, the null pin a predictable
-    /// branch (PinRef::set() and clear() say the same and are out of line
-    /// at -Os; the edge is on the transaction's path four times).
-    [[gnu::always_inline]] static void edge(const PinRef& p, bool high) {
-        if (p.port != nullptr) {
-            p.port->BSRR = high ? p.mask : (p.mask << 16);
-        }
-    }
 
     // ---- the configuration word -------------------------------------------------------
 
@@ -2017,7 +2009,7 @@ private:
     /// frame came back, so nothing is in flight.
     static bool end_pump() {
         S::rxne_interrupt(false);
-        edge(st_.t.cs, true);
+        st_.t.cs.set();
         return true;
     }
 
@@ -2154,7 +2146,7 @@ private:
         s.dma_active = false;
         s.dma_done = true;
         if (!s.t.polled) {
-            edge(s.t.cs, true);
+            s.t.cs.set();
             return true;
         }
         return false;

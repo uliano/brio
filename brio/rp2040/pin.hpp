@@ -197,14 +197,24 @@ struct Gpio {
 /// select or D/C line (rp2040/spi.hpp's Request): the pin number, or
 /// none. Every verb is a SIO word access on the pin's bit; a null
 /// reference does nothing and reads false.
+///
+/// The two edges are forced inline: left to -Os, gcc keeps the body
+/// behind its call sites as a clone taking the pin number alone, and
+/// an edge costs a BL and a return on top of its instructions - four
+/// times a transaction on the SPI host, counted in the release listing
+/// (docs/rp2040/spi.md). Inline, an edge is the pin's load, the range
+/// test, the shift and one store into GPIO_OUT_SET or GPIO_OUT_CLR
+/// (2.3.1.2: write-one registers on the single-cycle bus, so no read
+/// and no window); the range test stays a predictable branch, which is
+/// what makes an absent D/C pin cost one branch and not a verb.
 struct PinRef {
     uint8_t pin = 0xFFu;
 
     constexpr bool valid() const { return pin < gpio_count; }
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (valid()) { SIO->GPIO_OUT_SET = 1u << pin; }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (valid()) { SIO->GPIO_OUT_CLR = 1u << pin; }
     }
     void toggle() const {

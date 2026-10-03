@@ -70,16 +70,27 @@ constexpr bool port_exists(char p) {
 /// the bus AO and not by its client). A null PinRef (the default) means
 /// "no such pin": set/clear are no-ops, so an optional pin costs one
 /// branch. Build one with Pin<...>::ref().
+///
+/// The two edges are forced inline: left to -Os, gcc keeps the body
+/// behind its call sites, and an edge costs a BL and a return on top of
+/// its six instructions - four times a transaction on the SPI host,
+/// counted in the release listing and measured by the bench's letter e
+/// (docs/samc21/spi.md). Inline, an edge is the group pointer's load,
+/// the null test, the mask's load and one OUTSET or OUTCLR store
+/// through the APB bridge (28.8.6, 28.8.7: write-one registers, so no
+/// read and no window); the null test stays a predictable branch,
+/// which is what makes an absent D/C pin cost one branch and not a
+/// verb.
 struct PinRef {
     port_group_registers_t* group = nullptr;
     uint32_t mask = 0;
 
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (group != nullptr) {
             group->PORT_OUTSET = mask;
         }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (group != nullptr) {
             group->PORT_OUTCLR = mask;
         }

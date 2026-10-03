@@ -1797,6 +1797,7 @@ private:
             const bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
             r.dc.set();
             if (!whole) {
+                status_ = spi_stalled;   // the command phase's budget ran out
                 S::flush_rx();
                 return;
             }
@@ -1862,8 +1863,11 @@ private:
     /// where it is not (a command's parameters: measured, the tail's
     /// drain costs a short request more than reading two answers), and
     /// anything with an rx a character ahead on DRE and RXC. A budget
-    /// that ran out leaves the request completed as far as it went and
-    /// the receiver flushed.
+    /// that ran out leaves the request completed as far as it went, the
+    /// receiver flushed and the status spi_stalled (util/spi_bus.hpp):
+    /// the SERCOM clocked nothing back in a budget many times the
+    /// transaction's own length, so its clock is not running - the
+    /// arbiter's recover() is the way back.
     static void polled_transaction(const Request& r, uint16_t total) {
         uint32_t budget = spin_budget(total);
         bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
@@ -1888,6 +1892,7 @@ private:
             }
         }
         if (!whole) {
+            status_ = spi_stalled;
             S::flush_rx();
         }
     }

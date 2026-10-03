@@ -83,16 +83,26 @@ constexpr bool port_exists(char letter) { return gpio_port_present(letter); }
 /// "no such pin": set/clear are no-ops, so an optional pin costs one
 /// branch. Build one with Pin<...>::ref(). The stores are BSRR/BRR:
 /// atomic on the silicon, legal from any context.
+///
+/// The two edges are forced inline: left to -Os, gcc keeps the body
+/// behind its call sites, and an edge costs a BL and a return on top of
+/// its six instructions - four times a transaction on the SPI host,
+/// counted in the release listing (docs/stm32g0/spi.md). Inline, an
+/// edge is the port pointer's load, the null test, the mask's load and
+/// one BSRR or BRR store (7.4.7, 7.4.11: write-one registers, so no
+/// read and no window); the null test stays a predictable branch,
+/// which is what makes an absent D/C pin cost one branch and not a
+/// verb.
 struct PinRef {
     GPIO_TypeDef* port = nullptr;
     uint32_t mask = 0;
 
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (port != nullptr) {
             port->BSRR = mask;
         }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (port != nullptr) {
             port->BRR = mask;
         }

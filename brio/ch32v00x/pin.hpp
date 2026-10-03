@@ -78,19 +78,30 @@ struct Pad {
 
 /// A pin as a RUNTIME value: the port's registers and the mask. What a
 /// bus request carries for its chip select, so the bus AO can drive a
-/// pin it does not know the type of. The stores are BSHR/BCR, atomic
-/// against a handler on another pin of the same port. A null PinRef
-/// (the default) drives nothing. Build one with Pin<...>::ref().
+/// pin it does not know the type of. The stores are BSHR/BCR (RM
+/// 7.3.1.4, 7.3.1.5), atomic against a handler on another pin of the
+/// same port. A null PinRef (the default) drives nothing. Build one
+/// with Pin<...>::ref().
+///
+/// The two edges are forced inline: left to -Os, gcc keeps the body
+/// behind its call sites wherever it has two, and an edge costs a call
+/// and a return on top of its five instructions - four times a
+/// transaction on the SPI host, counted in the release listing
+/// (docs/ch32v00x/spi.md). Inline, an edge is the port pointer's load,
+/// the null test, the mask's load and one BSHR or BCR store (write-one
+/// registers: no read, no window); the null test stays a predictable
+/// branch, which is what makes an absent D/C pin cost one branch and
+/// not a verb.
 struct PinRef {
     GpioRegs* port = nullptr;
     uint32_t mask = 0;
 
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (port != nullptr) {
             port->BSHR = mask & 0xFFFFu;
         }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (port != nullptr) {
             port->BCR = mask & 0xFFFFu;
         }

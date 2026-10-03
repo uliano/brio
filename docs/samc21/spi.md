@@ -269,9 +269,11 @@ item a reader would apply without checking the row.
   the engines named, the command phase always does, and the handover is
   made inside `isr()`; `dma_isr(channel, flags)` is the DMAC-vector
   body, `isr()` takes TXC as well as RXC, and `status()` is the
-  completion's word - `spi_ok`, or `spi_dma_fault` (an engine-defined
+  completion's word - `spi_ok`, `spi_dma_fault` (an engine-defined
   BusDone code) when a transfer error or a bounded-timeout abandon ended
-  the request. The DMAC BLOCK is the app's: `Dmac::init()` once, before
+  the request, or `spi_stalled` (`util/spi_bus.hpp`'s code, one value
+  on every family) when a polled transaction's one spin budget ran out
+  with a flag never raised. The DMAC BLOCK is the app's: `Dmac::init()` once, before
   any engined `init()`. `recover()` is the verb a TIMED SpiBus calls on
   a transaction that never answered (util/bus_master.hpp): CS deasserted
   first, engines put away and re-claimed, the SERCOM reset and
@@ -384,8 +386,8 @@ A client answering a stream (the one-ahead pump):
   wants the polled loop or the engines. THE FIXED COST OF A REQUEST
   (`spi.req`: a polled request of 1, 3 and 16 bytes with a command byte,
   the D/C scripted on PB23 and the select on PA18 - two real pads, four
-  real edges - at 3 MHz): 575, 608 and 714 cycles above the wire, the
-  instrument's 82 inside (it was 833, 943 and 1658) - the phase boundary
+  real edges - at 3 MHz): 526, 559 and 665 cycles above the wire, the
+  instrument's 82 inside - the phase boundary
   is the 33 between one byte and three (the last command character read
   back, the D/C, the first data character's own start), and the 106
   from three to sixteen is the transmit-only phase's tail (TXC awaited,
@@ -395,11 +397,14 @@ A client answering a stream (the one-ahead pump):
   listing and measured with the polled path placed in SRAM (38 cycles
   less, so the flash is not the bulk of it): the bench's own request
   built on the stack and the interval, the ~35 instructions of start()
-  with the one-word compare, the four pin edges as calls into
-  `PinRef::set/clear` (outlined by the compiler, some 50 cycles of the
-  four), the loop's prologue, and the SERCOM's own start and finish
-  latencies at the boundaries. On the engined host the same three
-  requests read 572, 607 and 1256: the first two take the pump (below
+  with the one-word compare, the four pin edges inline through
+  `PinRef::set/clear` (pin.hpp forces the two verbs inline: each edge
+  is the group pointer's load, the null test, the mask's load and one
+  OUTSET or OUTCLR store - as calls they cost 49 cycles more on the
+  3-byte request, measured), the loop's prologue, and the SERCOM's own
+  start and finish latencies at the boundaries. On the engined host the
+  same three
+  requests read 547, 580 and 1237: the first two take the pump (below
   `dma_min_frames`), the third the engines - whose
   spin on the DMAC's completion makes a POLLED request pay the engines'
   fixed cost for no CPU saved, so for a polled request the engines buy
@@ -423,17 +428,21 @@ would ride a halfword beat into DATA, which the engines offer
 (dmac.md), born with a nine-bit device.
 
 Driver gaps, continued: **the pin edges through the IOBUS alias** -
-`PinRef::set/clear` store through the APB bridge and are calls at -Os
-(four of them a request, some 50 cycles); the single-cycle IOBUS alias
-(10.1.4) and an inline edge are pin.hpp's and would take a request's
-fixed cost under 550, not under 300: declined here because the rest of
-that cost is the request's shape and the SERCOM's own latencies, stated
-above. **The polled loop in SRAM** - a tenth at 12 MHz, measured;
+`PinRef::set/clear` store through the APB bridge, inline (four stores a
+request); the single-cycle IOBUS alias (10.1.4) is pin.hpp's and would
+take some 12 cycles more off a request's fixed cost, not the hundreds
+between it and 300: declined here because the rest of that cost is the
+request's shape and the SERCOM's own latencies, stated above. **The polled loop in SRAM** - a tenth at 12 MHz, measured;
 declined as a default because a placement of some 2 KB in `.ram_text`
 is the program's call (platform.md, "A handler in SRAM"), not the driver's.
 
 Implemented but not bench-verified:
 
+- A polled transaction's spin budget running out (`spi_stalled` in
+  `status()`, the receiver flushed, the select raised): no letter stops
+  the SERCOM's clock under a transaction. A request started with the
+  instance's GCLK channel or CTRLA.ENABLE down would measure it - the
+  wall of the budget and the code in the reply.
 - The polled transmit-only phase's TXC under a handler longer than a
   character: an early TXC is cleared by the next write (32.8.6) and the
   tail's wait is the last character's by the chapter's words; letter e

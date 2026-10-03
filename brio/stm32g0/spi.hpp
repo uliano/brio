@@ -1484,13 +1484,15 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // The host task
 // =============================================================================
 
-/// The polled pump's bounded wait ran out: the peripheral clocked no
-/// frame back in the budget a transaction is given (its own length at the
-/// slowest rate, many times over). An engine code, as spi_dma_fault is,
-/// reported in status() with the select raised and the FIFOs drained; it
-/// cannot happen on a host whose clock runs, and a report beats a frame
-/// of garbage returned in silence.
-inline constexpr uint8_t spi_stalled = bus_engine_status + 1u;
+// A polled wait that ran out ends the transaction with spi_stalled
+// (util/spi_bus.hpp's code): the peripheral clocked no frame back in
+// the budget a transaction is given (its own length at the slowest
+// rate, many times over), the select is raised and the FIFOs drained.
+// It cannot happen on a host whose clock runs, and a report beats a
+// frame of garbage returned in silence. No spi_overrun here: the
+// polled loops and the pump keep no more frames in flight than the
+// receive FIFO holds under the longest handler (the file header), so a
+// frame is never lost to one.
 
 /**
  * SpiHost<n, pins, TxEngine, RxEngine>
@@ -1963,11 +1965,11 @@ public:
         }
         apply(r.mode, clamp(r.clock), r.bits);
         if (r.cmd_len != 0u) {
-            pin_low(r.dc);
+            r.dc.clear();
         } else {
-            pin_high(r.dc);
+            r.dc.set();
         }
-        pin_low(r.cs);   // assert, active low
+        r.cs.clear();   // assert, active low
         if (r.cs_setup_us != 0u) {
             (void)delay_us(cs_rate_, r.cs_setup_us);
         }
@@ -2014,7 +2016,7 @@ public:
         } else {
             ok = run_polled<false>(r);
         }
-        pin_high(r.cs);   // release: transaction done
+        r.cs.set();   // release: transaction done
         if (!ok) {
             status_ = spi_stalled;
             S::flush_rx();
@@ -2098,7 +2100,7 @@ public:
     /// Returns false when a bounded wait ran out (a false engine is
     /// refusing, not hanging).
     static bool recover() {
-        pin_high(req_.cs);
+        req_.cs.set();
         if constexpr (has_engines) {
             (void)TxEngine::abandon();   // a block in flight is counted
             arm_engines();
@@ -2167,22 +2169,6 @@ private:
         }
     }(), "brio SpiHost: the DMA engines must carry uint8_t or uint16_t elements - "
          "the data register is a byte or a half-word wide, the frame's own width");
-
-    // ---- the pins: one store each through the port's set/reset registers ----
-
-    /// The select and the D/C edges, spelled here rather than through
-    /// PinRef's verbs so that a transaction's four edges are four inline
-    /// stores and never four calls: a null pin is one predictable test.
-    [[gnu::always_inline]] static void pin_low(const PinRef& p) {
-        if (p.port != nullptr) {
-            p.port->BRR = p.mask;
-        }
-    }
-    [[gnu::always_inline]] static void pin_high(const PinRef& p) {
-        if (p.port != nullptr) {
-            p.port->BSRR = p.mask;
-        }
-    }
 
     // ---- the data register, one access per frame ----------------------------
 
@@ -2462,7 +2448,7 @@ private:
         bool ok = true;
         if (r.cmd_len != 0u) {
             ok = pump_tx<wide, true>(r.cmd.get(), r.cmd_len, budget);
-            pin_high(r.dc);   // data phase (a no-op when len == 0)
+            r.dc.set();   // data phase (a no-op when len == 0)
         }
         if (ok && r.len != 0u) {
             if constexpr (has_engines) {
@@ -2547,16 +2533,16 @@ private:
         }
         if (!cmd) {
             S::rxne_interrupt(false);
-            pin_high(req_.cs);   // release: transaction done
+            req_.cs.set();   // release: transaction done
             return true;
         }
         // The command phase is over: D/C high, then the data phase on
         // the pump or on the engines - or nothing, for a command alone.
         in_cmd_ = false;
-        pin_high(req_.dc);
+        req_.dc.set();
         if (req_.len == 0u) {
             S::rxne_interrupt(false);
-            pin_high(req_.cs);
+            req_.cs.set();
             return true;
         }
         if constexpr (has_engines) {
@@ -2660,7 +2646,7 @@ private:
         dma_active_ = false;
         dma_done_ = true;
         if (!dma_polled_) {
-            pin_high(req_.cs);
+            req_.cs.set();
             return true;
         }
         return false;

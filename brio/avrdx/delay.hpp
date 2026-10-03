@@ -119,12 +119,37 @@ constexpr uint16_t delay_mult(uint32_t rate_hz) {
 }
 
 /// Runtime busy-wait: at least `us` microseconds at `cpu` cycles/us -
-/// the stored-byte driver pattern. Same contract and same tail as the
-/// fixed-point path (cpu cycles/us = cpu/4 loops/us = cpu << 10 in
-/// Q4.12), kept for callers that hold a cpu byte across a rebase. A cpu
-/// of 64 or more would overflow the Q4.12 factor; it saturates instead
-/// (a LONGER wait - the safe side), and no AVR Dx clock gets there.
+/// the stored-byte driver pattern, for a caller that holds a cpu byte
+/// across a rebase and a setup time it read out of a request. Two
+/// shapes, by the length:
+///
+///  - `us` under 256 (every setup time a driver stores in a byte): the
+///    cycle count is one 8 x 8 -> 16 multiply (MUL: 2 cycles), the loop
+///    turns are its quarter rounded UP, and the wait is _delay_loop_2's
+///    4-cycle turn over them (SBIW 2 cycles, BRNE 2 when taken - the
+///    instruction set manual's counts); "at least" holds by the
+///    ceiling, and the whole path is some 35 cycles for 1 us at 24 MHz
+///    where the fixed-point tail below costs 171 (counted in the
+///    listing: docs/avrdx/platform.md). The test on `us` folds away
+///    where the caller hands a byte, as the SPI host does.
+///  - longer: the fixed-point tail the dynamic dispatch shares (cpu
+///    cycles/us = cpu/4 loops/us = cpu << 10 in Q4.12). A cpu of 64 or
+///    more would overflow that factor; it saturates instead (a LONGER
+///    wait - the safe side), and no AVR Dx clock gets there.
 inline void delay_us_runtime(uint8_t cpu, uint32_t us) {
+    if (us < 256u) {
+        // At most 255 x 255 = 65025 cycles, 16257 turns: both half-words.
+        // The operands go through `unsigned` and not through uint16_t,
+        // whose product this core's 16-bit int would own and overflow.
+        const uint8_t n = static_cast<uint8_t>(us);
+        const uint16_t cycles =
+            static_cast<uint16_t>(static_cast<unsigned>(cpu) * static_cast<unsigned>(n));
+        const uint16_t turns = static_cast<uint16_t>((cycles + 3u) >> 2);
+        if (turns != 0u) {   // _delay_loop_2(0) would be 65536 turns
+            _delay_loop_2(turns);
+        }
+        return;
+    }
     const uint16_t mult =
         cpu >= 64 ? 0xFFFFu : static_cast<uint16_t>(static_cast<uint16_t>(cpu) << 10);
     delay_us_fixed(mult, us);

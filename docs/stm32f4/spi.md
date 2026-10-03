@@ -251,9 +251,9 @@ enable, DFF being enable-protected and BR, CPOL and CPHA "not to be
 changed when communication is ongoing".
 
 **The select and D/C edges are one BSRR store each**, the null D/C a
-predictable branch, inline (PinRef's own `set()` and `clear()` say the
-same and are out of line at -Os: four calls a transaction, gone). The
-setup time is tested before any call. **The receive buffer is not
+predictable branch, inline through the family's own `PinRef::set()` and
+`clear()` (pin.hpp forces the two verbs inline: left to -Os they are
+calls, four a transaction). The setup time is tested before any call. **The receive buffer is not
 flushed per request**: every path reads back every frame it clocks, so
 nothing stands in it when a transaction ends well; the two ends that
 leave a frame there - an overrun, a stall - and `recover()` flush it

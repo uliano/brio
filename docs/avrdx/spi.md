@@ -319,9 +319,11 @@ null test, the mask's load and one OUTSET/OUTCLR store, 10 cycles from
 a request on the stack and 13 from the engine's copy, where the
 out-of-line verb cost 22 plus the CALL; its null test is the one branch
 an absent D/C pin costs. `cs_setup_us` is tested before the delay is
-called; a nonzero setup goes through the stored-byte delay, 171 cycles
-for 1 us, a cost that stands out now that the request around it is
-about 200.
+called; a nonzero setup goes through the stored-byte delay's short
+path (a `us` under 256: one MUL, the quarter rounded up,
+`_delay_loop_2`'s turns), some 40 cycles for 1 us counted in the
+listing where the fixed-point tail cost 171 - measured in the recovery
+session (docs/avrdx/platform.md).
 
 **No `dma_min_frames`** on this family: there are no engines, so there
 is no fixed cost for the pump's per-byte one to be weighed against.

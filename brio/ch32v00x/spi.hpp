@@ -517,15 +517,15 @@ private:
 /// channel, or a polled block that never completed): the engine's own
 /// status code, in the range util/bus_master.hpp leaves to engines.
 inline constexpr uint8_t spi_dma_fault = bus_engine_status;
-/// The pump lost a frame: the receive buffer overran (16.2.7) because
-/// the handler read frame k later than one frame time after it came
-/// back - the transaction still ran to its end, every frame went OUT,
-/// one that came back is missing from the in buffer. The witness of a
-/// write-ahead threshold that was too low for the image it ran in.
-inline constexpr uint8_t spi_overrun = bus_engine_status + 1u;
-/// A polled frame's flag never came within the transaction's budget: a
-/// clock that stopped, a block that is dead. The select is released.
-inline constexpr uint8_t spi_stalled = bus_engine_status + 2u;
+// The two other codes this host answers are the vocabulary's
+// (util/spi_bus.hpp). spi_overrun: the pump lost a frame - the receive
+// buffer overran (16.2.7) because the handler read frame k later than
+// one frame time after it came back; the transaction still ran to its
+// end, every frame went OUT, one that came back is missing from the in
+// buffer - the witness of a write-ahead threshold that was too low for
+// the image it ran in. spi_stalled: a polled frame's flag never came
+// within the transaction's budget - a clock that stopped, a block that
+// is dead; the select is released.
 
 /// A frame's time on the wire in HCLK cycles: its bits at SCK = HCLK over
 /// two to the code plus one (16.3.1's BR table).
@@ -910,11 +910,11 @@ public:
         const SpiClock code = clamp(r.clock);
         apply(r, code);
         if (r.cmd_len != 0u) {
-            select_low(r.dc);
+            r.dc.clear();
         } else {
-            select_high(r.dc);
+            r.dc.set();
         }
-        select_low(r.cs);   // assert, active low
+        r.cs.clear();   // assert, active low
         if (r.cs_setup_us != 0u) {
             (void)delay_us(cs_rate_, r.cs_setup_us);
         }
@@ -934,13 +934,13 @@ public:
                     if (r.cmd_len != 0u) {
                         ok = poll_write_phase(r.bits, r.cmd.get(), r.cmd_len, budget);
                     }
-                    select_high(r.dc);
+                    r.dc.set();
                     if (ok) {
                         keep(r);
                         launch_dma();
                         spin_dma();
                     }
-                    select_high(r.cs);
+                    r.cs.set();
                     if (!ok) {
                         stalled();
                     }
@@ -950,7 +950,7 @@ public:
             if (r.cmd_len != 0u) {
                 ok = poll_write_phase(r.bits, r.cmd.get(), r.cmd_len, budget);
             }
-            select_high(r.dc);
+            r.dc.set();
             if (ok && r.len != 0u) {
                 if (r.rx.get() == nullptr) {
                     ok = poll_write_phase(r.bits, r.tx.get(), r.len, budget);
@@ -958,7 +958,7 @@ public:
                     ok = poll_duplex_phase(r.bits, r.tx.get(), r.rx.get(), r.len, budget);
                 }
             }
-            select_high(r.cs);
+            r.cs.set();
             if (!ok) {
                 stalled();
             }
@@ -1029,7 +1029,7 @@ public:
         // The phase ended: its last frame is back and read.
         if (in_cmd_) {
             in_cmd_ = false;
-            select_high(tenure_.dc);
+            tenure_.dc.set();
             if (tenure_.len == 0u) {
                 return finish_pump();
             }
@@ -1083,7 +1083,7 @@ public:
     /// peripheral reset and reconfigured to the applied state. False
     /// when a bounded wait ran out.
     static bool recover() {
-        select_high(tenure_.cs);
+        tenure_.cs.set();
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
@@ -1155,25 +1155,6 @@ private:
         tenure_.len = r.len;
         tenure_.cmd_len = r.cmd_len;
         tenure_.polled = r.polled;
-    }
-
-    // ---- the pins -----------------------------------------------------------
-
-    /// The select and the D/C edges: one store each into the port's
-    /// set and clear registers (RM 7.3.1.4 BSHR, 7.3.1.5 BCR - atomic by
-    /// construction, no read), the null D/C a predictable branch. The
-    /// PinRef verbs of pin.hpp are these stores behind a call the
-    /// compiler keeps out of line at -Os; four edges a transaction want
-    /// them inline here.
-    [[gnu::always_inline]] static void select_low(const PinRef& p) {
-        if (p.port != nullptr) {
-            p.port->BCR = p.mask & 0xFFFFu;
-        }
-    }
-    [[gnu::always_inline]] static void select_high(const PinRef& p) {
-        if (p.port != nullptr) {
-            p.port->BSHR = p.mask & 0xFFFFu;
-        }
     }
 
     // ---- the polled loops ---------------------------------------------------
@@ -1360,7 +1341,7 @@ private:
 
     [[gnu::always_inline]] static bool finish_pump() {
         S::rxne_interrupt(false);
-        select_high(tenure_.cs);
+        tenure_.cs.set();
         return true;
     }
 
@@ -1450,7 +1431,7 @@ private:
         dma_active_ = false;
         dma_done_ = true;
         if (!tenure_.polled) {
-            select_high(tenure_.cs);
+            tenure_.cs.set();
             return true;
         }
         return false;

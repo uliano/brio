@@ -436,16 +436,27 @@ private:
 /// select or D/C line: the pin number, or none. Every verb is a SIO word
 /// access on the pin's bit, in whichever half it falls; a null reference
 /// does nothing and reads false.
+///
+/// The two edges are forced inline: left to -Os, gcc keeps the body
+/// behind its call sites as a clone taking the pin number alone, and
+/// an edge costs a BL (a JAL on the other half) and a return on top of
+/// its instructions - four times a transaction on the SPI host,
+/// counted in the release listing (docs/rp2350/spi.md). Inline, an
+/// edge is the pin's load, the range test, the half's test, the shift
+/// and one store into GPIO_OUT_SET / GPIO_OUT_CLR or their HI twins
+/// (3.1.3: write-one registers on the single-cycle bus, so no read and
+/// no window); the range test stays a predictable branch, which is
+/// what makes an absent D/C pin cost one branch and not a verb.
 struct PinRef {
     uint8_t pin = 0xFFu;
 
     constexpr bool valid() const { return pin < gpio_count_max; }
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (!valid()) { return; }
         if (pin < 32u) { SIO->GPIO_OUT_SET = 1UL << pin; }
         else { SIO->GPIO_HI_OUT_SET = 1UL << (pin - 32u); }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (!valid()) { return; }
         if (pin < 32u) { SIO->GPIO_OUT_CLR = 1UL << pin; }
         else { SIO->GPIO_HI_OUT_CLR = 1UL << (pin - 32u); }

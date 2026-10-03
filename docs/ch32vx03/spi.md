@@ -399,8 +399,10 @@ the wire time and puts the DATAR read and the next write in adjacent
 instructions, the loop above it is 20.2.2's sequence (TXE then the next
 frame, RXNE then the previous one) with OVR watched beside RXNE; the
 pump below it writes k + 1 on RXNE(k), above it k + 2. An overrun on a
-receive ends the transaction with `spi_overrun`, the engine's second
-status code beside `spi_dma_fault`.
+receive ends the transaction with `spi_overrun`, and a polled flag that
+never comes within the transaction's one spin budget ends it with
+`spi_stalled` - the two codes every host spells from `util/spi_bus.hpp`
+beside the engines' own `spi_dma_fault` (design/spi-bus.md).
 
 THE THRESHOLD is `spi_write_ahead_min_frame_cycles`, the sum of two
 counted inputs stated in the header: the hold-off - the longest the
@@ -585,9 +587,12 @@ own.
   flight); on a write at /4 one interrupt per TWO frames (the overrun
   counted as the frame it is), 92 cycles a frame against 195 before. A
   POLLED REQUEST OF THREE BYTES - a command and two data, the D/C
-  scripted, the select and the D/C on two pads - costs 280 cycles above
-  its wire time at /16 (the stopwatch's 28 inside; 468 before), one byte
-  221 (332), sixteen 272 (1352): the price of a DCS command.
+  scripted, the select and the D/C on two pads - costs 255 cycles above
+  its wire time at /16 (the stopwatch's 28 inside), one byte 197,
+  sixteen 249: the price of a DCS command. Of the four pin edges each
+  is one BSHR or BCR store inline through `PinRef::set/clear` (pin.hpp
+  forces the two verbs inline; as calls they cost the 3-byte request
+  25 cycles more, measured).
 - **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
   two-in-flight shape run on the resource at every code and width, 1024
   frames a run, eight runs a point under a console print in flight,
@@ -791,6 +796,12 @@ Driver gaps:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **A polled wait that runs out** (`spi_stalled`): every polled loop
+  counts one spin budget down and ends the transaction with that code,
+  the select raised and the receive side flushed; no letter stops the
+  block's clock under a transaction. A request started with the
+  instance's APB gate closed (`Rcc` with SPI1's enable down) would
+  measure it: the wall of the budget, the code in the reply.
 - **The receive shapes' DATA**: letter e's receive lines land frames in a
   buffer with MISO floating, so the loop's and the pump's accounting is
   judged (no overrun, every frame counted) and the bytes are not; the

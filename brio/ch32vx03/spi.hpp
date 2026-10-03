@@ -950,16 +950,18 @@ private:
 // The host engine
 // =============================================================================
 
-/// A block the engine could not finish: a transfer error on either DMA
-/// channel, a polled block that never completed, a polled frame that
-/// never came back - the engine's own status code, in the range
-/// util/bus_master.hpp leaves to engines.
+/// A block the engines could not finish: a transfer error on either DMA
+/// channel, a polled block that never completed - the engines' own
+/// status code, in the range util/bus_master.hpp leaves to engines.
 inline constexpr uint8_t spi_dma_fault = bus_engine_status;
-/// A frame lost to the one-deep receive buffer: OVR stood (20.2.7) while
-/// two frames were in flight. The threshold below is written so that it
-/// does not happen; when it does, the transaction says so instead of
-/// handing back a run with a hole in it.
-inline constexpr uint8_t spi_overrun = static_cast<uint8_t>(bus_engine_status + 1u);
+// The two other codes this host answers are the vocabulary's
+// (util/spi_bus.hpp). spi_overrun: a frame lost to the one-deep receive
+// buffer - OVR stood (20.2.7) while two frames were in flight; the
+// threshold below is written so that it does not happen, and when it
+// does the transaction says so instead of handing back a run with a
+// hole in it. spi_stalled: a polled frame's flag never came within the
+// transaction's one spin budget - a clock that stopped, a block that is
+// dead; the select is released and the receive side flushed.
 
 /**
  * THE WRITE-AHEAD THRESHOLD. With two frames in flight (20.2.2's "data
@@ -1933,16 +1935,16 @@ private:
         uint32_t left = frames;   // a word: a half-word counter costs a zero-extension a turn
         do {
             while ((regs.STATR & spi_txe) == 0u) {
-                if (--spins == 0u) { budget = 0; return spi_dma_fault; }
+                if (--spins == 0u) { budget = 0; return spi_stalled; }
             }
             regs.DATAR = static_cast<uint16_t>(load_frame<wide>(src));
             src += step;
         } while (--left != 0u);
         while ((regs.STATR & spi_txe) == 0u) {
-            if (--spins == 0u) { budget = 0; return spi_dma_fault; }
+            if (--spins == 0u) { budget = 0; return spi_stalled; }
         }
         while ((regs.STATR & spi_bsy) != 0u) {
-            if (--spins == 0u) { budget = 0; return spi_dma_fault; }
+            if (--spins == 0u) { budget = 0; return spi_stalled; }
         }
         (void)regs.DATAR;
         (void)regs.STATR;
@@ -1977,12 +1979,12 @@ private:
             while (--left != 0u) {
                 src += step;
                 while ((regs.STATR & spi_txe) == 0u) {
-                    if (--spins == 0u) { st = spi_dma_fault; goto out; }
+                    if (--spins == 0u) { st = spi_stalled; goto out; }
                 }
                 regs.DATAR = static_cast<uint16_t>(load_frame<wide>(src));
                 uint16_t s;
                 while (((s = regs.STATR) & (spi_rxne | spi_ovr)) == 0u) {
-                    if (--spins == 0u) { st = spi_dma_fault; goto out; }
+                    if (--spins == 0u) { st = spi_stalled; goto out; }
                 }
                 if ((s & spi_ovr) != 0u) { st = spi_overrun; goto out; }
                 store_into<wide>(rx, regs.DATAR);
@@ -1994,7 +1996,7 @@ private:
                 const uint32_t next = load_frame<wide>(src);
                 __asm__ volatile("" : : "r"(next));
                 while ((regs.STATR & spi_rxne) == 0u) {
-                    if (--spins == 0u) { st = spi_dma_fault; goto out; }
+                    if (--spins == 0u) { st = spi_stalled; goto out; }
                 }
                 const uint16_t got = regs.DATAR;
                 regs.DATAR = static_cast<uint16_t>(next);
@@ -2005,7 +2007,7 @@ private:
         {
             uint16_t s;
             while (((s = regs.STATR) & (spi_rxne | spi_ovr)) == 0u) {
-                if (--spins == 0u) { st = spi_dma_fault; goto out; }
+                if (--spins == 0u) { st = spi_stalled; goto out; }
             }
             if ((s & spi_ovr) != 0u) { st = spi_overrun; goto out; }
             store_into<wide>(rx, regs.DATAR);
