@@ -346,10 +346,11 @@ above is what settles it: at the example's arithmetic a frame would be
 register moves with them: 0xF000 2220 with all four high, 0x0000 2220
 back.
 
-**A read of a pixel-clock-domain register costs 216 core cycles** (1.2
-us at 180 MHz): sixteen reads of CPSR took 3463 cycles. Five LCD_CLK
-periods at 6 MHz is 833 ns on its own, so 16.3.2's stall is nearly all
-of it and a polling loop on that register pays it every turn.
+**A read of a pixel-clock-domain register costs 216 to 219 core
+cycles** (1.2 us at 180 MHz): sixteen reads of CPSR took 3463 to 3516
+cycles. Five LCD_CLK periods at 6 MHz is 833 ns on its own, so 16.3.2's
+stall is nearly all of it and a polling loop on that register pays it
+every turn.
 
 **The position counter walks the whole frame.** Over 200 ms it covered
 x 0..279 and y 0..327 against a frame of 280 x 328 - porches and
@@ -404,11 +405,11 @@ clear, over the same starved fetch. A program that polls a status
 register it never armed polls a register that cannot answer.
 
 **AND THE UNDERRUN IS A STORM, NOT AN EVENT.** With the error vector
-armed over that same starved layer, the handler was entered **33194
-times in three frames** - one every 1.4 us, which is per PIXEL the FIFO
-could not serve and not once a line, let alone once a frame. The error
-vector is a thing to arm over a picture that is known good; the FLAG is
-the thing to watch over one that is not.
+armed over that same starved layer, the handler was entered **33188 to
+33194 times in three frames** - one every 1.4 us, which is per PIXEL the
+FIFO could not serve and not once a line, let alone once a frame. The
+error vector is a thing to arm over a picture that is known good; the
+FLAG is the thing to watch over one that is not.
 
 **THE BANDWIDTH THE DISPLAY TIER LIVES ON.** The accelerator filling
 the same memory as fast as it can, against three display
@@ -445,9 +446,9 @@ that: the board straps the interface so that replies leave on a pad the
 MCU is not wired to), so the initialization sequence - 106 bytes over
 SPI5 at 2812 kHz, ST's own for this panel - can only be measured by
 what it makes the device do. Command 0x35 turns the panel's
-tearing-effect output on, and the pad then saw **66 edges in 500 ms**
-against 32.7 frames: 33 pulses, one a frame. The panel took the
-sequence AND its frame timing is locked to the controller's.
+tearing-effect output on, and the pad then saw **64 to 66 edges in 500
+ms** against 32.7 frames: 32 or 33 pulses, one a frame. The panel took
+the sequence AND its frame timing is locked to the controller's.
 
 **And a person can look at it.** The suite's last letter paints eight
 colour bars with the accelerator and steps a block along the bottom

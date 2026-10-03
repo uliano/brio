@@ -451,16 +451,16 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
 - **The eight rates, and what the polled pump costs.** SCK 45000, 22500,
   11250, 5625, 2812, 1406, 703 and 351 kHz off PCLK2. Thirty-two frames
   timed at each: the measured frame time exceeds eight bits at the
-  stated rate by **239 to 295 ns (43 to 53 core cycles) at every code
+  stated rate by **241 to 300 ns (43 to 54 core cycles) at every code
   of the ladder** - a constant, which is what says it is the pump's own
   cost (one write, one RXNE spin, one read) and not a share of the
   rate. At PCLK2/256 that cost is 12 parts per thousand of a frame and
-  the measurement IS the wire: 23036 ns against the arithmetic's 22755.
+  the measurement IS the wire: 23042 ns against the arithmetic's 22755.
 - **A mode fault needs no pad and no second master**: SSI driven low
   under software management raises MODF, and the silicon has cleared
   SPE and MSTR with it - the host is a client until the sequence is
   run. **The flag is not up on the bus access that follows the store**:
-  it appeared **50 core cycles** later, and the clearing sequence's
+  it appeared **60 core cycles** later, and the clearing sequence's
   effect landed **46 core cycles** after its CR1 write. A peripheral on
   a half-rate APB answers a beat late, and a handler must read the flag
   rather than assume it from what it just wrote.
@@ -472,9 +472,9 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   eight times running, where a register the part does not implement
   reads 0x7E - so the byte is the device's and not the line's.
 - **The rate ladder against a real device**: exact at 22500 kHz and
-  below, wrong at 45000 kHz (the device's own datasheet stops at 10 MHz,
-  and what an over-clocked device returns is its business - 0xDB with an
-  occasional correct read).
+  below; at 45000 kHz exact in three runs of four and 0xFB, 0xDB in the
+  fourth (the device's own datasheet stops at 10 MHz, and what an
+  over-clocked device returns is its business).
 - **Two of the four modes read it**: mode 3 (the datasheet's) and mode
   0, the pair with CPOL and CPHA both flipped. What modes 1 and 2 return
   is printed and not judged - 0xD3 and 0xFF here, a timing accident of
@@ -488,10 +488,28 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   ISR-pumped and a polled one interleaved; a two-phase write-then-read
   Request reads the control block; six posted into a four-deep queue are
   all answered and the surplus rejected; an idle bus votes for a sleep.
-- **The DMA engines carry the data phase** both ways: a polled request
-  completes inside `start()` with the block byte-exact, and an
-  ISR-style one answers off the streams' vectors with the select
-  released by the completion (the gyroscope's letters on the F429).
+- **The DMA engines carry the data phase byte-exact, in ONE
+  interrupt.** Against the gyroscope, a pattern planted through the
+  polled loop in the registers the device only stores (REFERENCE and the
+  interrupt thresholds, 0x25 and 0x32..0x38): an ISR-style read of a
+  command and six data frames at 5.625 MHz comes back byte-exact with
+  one SPI5 interrupt (the command frame, on the pump) and one stream
+  completion (the receive stream's; none from the transmit stream), and
+  seven data-only frames come back in one interrupt in all. A polled
+  read of 24 frames at 11.25 and at 22.5 MHz - where the polled rule
+  sends the phase to the engines, the receive stream's completion seen -
+  is byte-exact against the loop's 24 at 5.625 MHz (the device's
+  auto-increment rolling over from 0x2D to 0x28).
+- **The pump in both shapes against the same device**: a command and
+  seven data frames ISR-style, one frame in flight at 22.5 and 11.25 MHz
+  and two at 5.625, byte-exact, one interrupt a frame, no overrun
+  counted.
+- **16-bit frames carry the device's bytes, the high byte first on the
+  wire**: four data-only frames read two registers a frame back, stored
+  low-first as the Request's rule says, through the polled loop (two in
+  flight at 5.625 MHz, one at 22.5), the pump at both rates (one
+  interrupt a frame) and the engines with a half-word element at 5.625
+  MHz (one interrupt).
 - **An engined request costs 3.0 us more than its wire, and ONE
   interrupt.** Measured on the F446's SPI1 at 180 MHz with MISO floating
   (`bench_stm32f4` letter d, the data phase alone, no command frame):
@@ -591,13 +609,14 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   N = 192 over R = 5: 76.8 MHz, locked; PLLI2SCFGR refused while it
   runs. I2SDIV 25 with ODD clear puts the arithmetic's 48000 Hz on the
   word select, and the pad's own rising edges counted over 200 ms give
-  **47805 Hz** - within a per cent, the window's resolution. CHSIDE
-  alternates as the frame does.
+  **47805 to 47950 Hz** - within a per cent, the window's resolution.
+  CHSIDE alternates as the frame does.
 - **The master clock output** moves the divisor to 256 x (2 x I2SDIV +
-  ODD): I2SDIV 3 gives 50000 Hz by the arithmetic and **49840 Hz**
-  measured on the word select, with MCK at 256 x that - 12.8 MHz, too
-  fast for a polling loop to count, and its pad read high on 1974 of
-  4000 samples, which is what says it is a clock and not a level.
+  ODD): I2SDIV 3 gives 50000 Hz by the arithmetic and **49835 to 49840
+  Hz** measured on the word select, with MCK at 256 x that - 12.8 MHz,
+  too fast for a polling loop to count, and its pad read high on 1974 to
+  1977 of 4000 samples, which is what says it is a clock and not a
+  level.
 
 - **On the STM32F411CE's SPI1 at PCLK2 = 96 MHz, against an ILI9481
   panel on a breadboard: THE INTERRUPT-PUMPED REQUEST AT PCLK2/8 NEEDS
@@ -680,19 +699,6 @@ Implemented, not bench-verified (each with what would measure it):
   `direction`: the engine's transactions are full duplex by
   construction, and the resource's simplex modes were driven by hand in
   the bidirectional letter alone.
-- 16-bit frames end to end: the frame size travels per request, the
-  pump packs two bytes low-first and the engines read the same bytes as
-  half-words, and the engines' time is measured (above) - but the device
-  on this bus speaks bytes and no wire joins MOSI to MISO on the desk, so
-  the DATA of a 16-bit frame is judged nowhere. A self-link wire on the
-  F446's SPI1 (PA7 to PA6) or a converter with 16-bit registers would
-  judge it.
-- The engined request and its single interrupt on the STM32F429's SPI5
-  against the gyroscope, and the three polled shapes and the pump's two
-  frames in flight against the same device: `test_stm32f4_spi` predates
-  both rounds and is owed a run on that board (its receive letters are
-  the one-in-flight shape at the device's rates, its kernel letter the
-  pump).
 - An overrun ending a transaction with `spi_overrun`, and a stall ending
   one with `spi_stalled`: neither path has been driven - the bench's
   handlers are shorter than the threshold's margin and the block always
