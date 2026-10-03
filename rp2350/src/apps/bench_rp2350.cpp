@@ -202,7 +202,19 @@
 //               cycles is the host's fixed cost per request. Then the same three requests on letter d's
 //               ENGINED host, plain lines: what a short polled request costs
 //               on a host whose engines exist for the long ones.
-//      Each the best of five after one thrown away (cold out of the flash).
+//        spi.cold  THE SAME THREE-BYTE REQUEST WITH ITS CODE COLD: the
+//               host's very first request after init() - as a program
+//               meets it - and then the request with EVERY LINE of the XIP
+//               cache invalidated first (Xip::invalidate_all(): the
+//               repeatable reading, and the worst a program meets after a
+//               phase that walked the flash), each with its warm repeat
+//               right behind it and the cache's misses beside each (Xip's
+//               two counters around the start). The bench line is the
+//               invalidated one; the plain lines carry all four. Run FIRST
+//               in the letter, before any other transaction of the host, so
+//               that the first request is the first.
+//      Each the best of five after one thrown away (cold out of the flash),
+//      spi.cold apart - there the one run IS the measurement.
 //      THE WIRE is the SCK rate over eight bits a byte, as in d.
 //
 // THE INSTRUMENT'S COST, and how a reader takes it out. Every number is RAW.
@@ -238,6 +250,7 @@
 #include "rp2350/core.hpp"
 #include "rp2350/delay.hpp"
 #include "rp2350/dma.hpp"
+#include "rp2350/flash.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
 #include "rp2350/platform.hpp"
@@ -1065,6 +1078,82 @@ void e_rx_proof() {
     Plain::loopback(false);
 }
 
+/// THE COLD REQUEST (spi.cold): the price of a DCS command when the XIP
+/// cache has not got the host's code. spi.req's three-byte request - a
+/// command byte with D/C low and two data bytes, polled, nothing read
+/// back, at 9.375 MHz - run four times from here, the first of them the
+/// host's VERY FIRST transaction after init(): (1) cold as a program meets
+/// it, (2) its repeat, warm; (3) with every line of the cache invalidated
+/// first (Xip::invalidate_all(), the maintenance by set and way of
+/// 4.4.1.1: the repeatable reading, nothing of the image warm, which is
+/// also the worst a program meets after a phase that walked the flash)
+/// and (4) its repeat. Each timed as e_once times a request, with the
+/// cache's misses beside it - Xip::accesses() less Xip::hits(), the
+/// counters cleared right before the start and read right after the wall
+/// - so a warm repeat's misses are the lines the request's own code and
+/// the glue around it still fetch from the flash. The bench line is (3).
+struct ColdRun {
+    BenchSample sample;
+    uint32_t misses;
+};
+
+ColdRun e_cold_once(bool invalidate) {
+    Plain::Request r{};
+    r.cs = SpiSelect::ref();
+    r.dc = SpiDc::ref();
+    r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(&dcs_command));
+    r.cmd_len = 1;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(source_buffer));
+    r.len = 2;
+    r.clock = e_rates[2].clock;
+    r.mode = SpiMode::mode0;
+    r.bits = SpiDataSize::bits8;
+    r.polled = true;
+    console_drain();
+    Plain::Resource::clear_pending(SpiInterrupt::overrun);
+    const BenchCounters before = counters();
+    if (invalidate) {
+        Xip::invalidate_all();
+    }
+    // UNDER THE MASK: a polled request needs no interrupt, and a tick
+    // landing inside this one run - one shot, no best of five - would
+    // add its handler's wall and, after the invalidate, its handler's
+    // own cold lines, which are not the host's.
+    disable_interrupts();
+    Xip::reset_counters();
+    const uint32_t t0 = Ruler::now();
+    (void)Plain::start(r);
+    const uint32_t wall = Ruler::now() - t0;
+    // Exact to one line: the reset is two stores a fetch apart, so one
+    // hit can land between them and leave the hit count a line ahead.
+    const uint32_t hits = Xip::hits();
+    const uint32_t accesses = Xip::accesses();
+    enable_interrupts();
+    const uint32_t misses = accesses > hits ? accesses - hits : 0u;
+    const BenchCounters after = counters();
+    return {bench_sample(wall, before, after), misses};
+}
+
+void e_cold() {
+    const SpiRate& rate = e_rates[2];
+    const uint32_t sck = Plain::sck_hz(rate.clock);
+    const uint32_t wire = e_wire_cycles(3, sck);
+    const uint32_t gap = e_gap_cycles(3, sck);
+    const ColdRun first = e_cold_once(false);
+    const ColdRun repeat = e_cold_once(false);
+    const ColdRun cold = e_cold_once(true);
+    const ColdRun warm = e_cold_once(false);
+    bench_line(serial, "spi.cold", 3, cold.sample, Ruler::hz(), sck / 8u);
+    print(serial, "  spi.cold: a command byte and 2 data bytes at ", rate.name,
+          " with every line of the XIP cache invalidated first: wall ", cold.sample.wall,
+          " cycles (the wire ", wire, ", ", wire + gap, " with the gap), ", cold.misses,
+          " XIP misses; the same request right after, warm: ", warm.sample.wall, " cycles, ",
+          warm.misses, " misses", crlf);
+    print(serial, "  spi.cold: the host's first request after init(): ", first.sample.wall,
+          " cycles, ", first.misses, " XIP misses; its repeat ", repeat.sample.wall, " cycles, ",
+          repeat.misses, " misses", crlf);
+}
+
 void te_host() {
     (void)SpiSelect::output(true);
     (void)SpiDc::output(true);
@@ -1073,6 +1162,7 @@ void te_host() {
     for (uint32_t i = 0; i < sizeof(source_buffer); ++i) {
         source_buffer[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
+    e_cold();   // FIRST: its first request must be the host's first
 
     // spi.poll (the write), spi.poll.rx (the receive) and spi.pump:
     // rates x widths x modes x sizes.

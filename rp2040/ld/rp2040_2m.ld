@@ -7,17 +7,17 @@
  * at 0x2004_0000 and 0x2004_1000 that are NOT striped.
  *
  * Written from scratch, the stm32g0 script's twin (the section names are
- * the ones every GNU ld bare-metal script shares), with the two things
- * this chip adds:
+ * the ones every GNU ld bare-metal script shares), with the things this
+ * chip adds:
  *
  *  - THE FIRST 256 BYTES OF FLASH ARE THE SECOND-STAGE BOOTLOADER (2.8.1):
  *    the bootrom copies them to SRAM, checks their CRC32 and runs them to
  *    set the XIP SSI up for this flash chip; the stage then vectors
  *    through the table it expects at flash offset 0x100 - VTOR written,
  *    SP and PC loaded from it (src/glue/boot2_*.S). So `.boot2` is the
- *    first output section, exactly 256 bytes, and `.text` MUST begin
- *    with the vector table at ORIGIN + 0x100; both are asserted below.
- *    Nothing here writes VTOR again.
+ *    first output section, exactly 256 bytes, and `.vectors` MUST begin
+ *    at ORIGIN + 0x100; both are asserted below. Nothing here writes
+ *    VTOR again.
  *
  *  - THE STACKS LIVE IN THE TWO UNSTRIPED BANKS, one core each: core 0's
  *    stack is the top of the bank at 0x2004_1000, core 1's the bank at
@@ -34,12 +34,35 @@
  *    1984K and `__brio_flash_end` says where; the header reads the
  *    symbol back and closes the storage if a script ever grew past it.
  *
- *  - CODE THAT RUNS WITH THE FLASH DISCONNECTED lives in `.ram_text`,
- *    an input section placed inside .data so the crt's copy loop moves
- *    it into SRAM with the initialized data: brio/rp2040/flash.hpp's
- *    engine calls the bootrom's flash functions from there, because
- *    while a sector is erased or a page programmed the XIP window is
- *    not there to fetch from.
+ *  - CODE THAT RUNS FROM SRAM lives in .data, so that the crt's copy
+ *    loop moves it there with the initialized data - two kinds of it.
+ *    `.ram_text`, an input section a function names for itself:
+ *    brio/rp2040/flash.hpp's engine calls the bootrom's flash functions
+ *    from there, because while a sector is erased or a page programmed
+ *    the XIP window is not there to fetch from. And THE SPI HOST'S HOT
+ *    PATH (brio/pl022/spi.hpp), placed here BY THE NAMES OF ITS
+ *    FUNCTIONS' SECTIONS: the first transaction after the host's init()
+ *    otherwise pays the XIP cache its fill of that code, a cost measured
+ *    on the RP2350 (docs/rp2350/spi.md) and owed to this board
+ *    (docs/rp2040/spi.md). The IP stratum cannot place its own code: a
+ *    section attribute takes a string literal and that file knows no
+ *    family and no linker script. `-ffunction-sections` names every
+ *    function's section for its mangled symbol, so this script names the
+ *    members it wants in SRAM, one pattern each, every instantiation of
+ *    the host at once.
+ *
+ *  - THE ORDER OF THE OUTPUT SECTIONS IS THE LINKER'S RULE AND NOT A
+ *    TASTE. An input section goes to the FIRST statement whose pattern
+ *    matches it, in the order the script lists them (ld's manual, "Input
+ *    Section Wildcard Patterns"): a pattern over `.text.*` names that
+ *    comes after the statement sweeping `.text .text.*` into the flash
+ *    would match nothing. So .data, which carries those patterns, is
+ *    listed BEFORE the code, and since an output section's load address
+ *    follows the same order within the flash region, the flash holds in
+ *    this order: the second stage, the vector table, the load image of
+ *    .data, then the bulk of the code and the read-only data. Nothing
+ *    reads the flash in that order but the crt's copy loop, which takes
+ *    .data by its symbols; the stage asks only for the table at 0x100.
  *
  * The .data/.bss/.noinit sections take the main 256 KB. .noinit is
  * NOLOAD and excluded from the crt's zero-fill: kernel/platform.hpp's
@@ -69,9 +92,48 @@ SECTIONS
     ASSERT(__boot2_end - __boot2_start == 256,
            "the second-stage bootloader must be exactly 256 bytes (src/glue/boot2_*.S)")
 
-    .text :
+    /* The vector table, where the second stage vectors to. */
+    .vectors :
     {
         KEEP(*(.vectors))
+        . = ALIGN(4);
+    } > flash
+    ASSERT(ADDR(.vectors) == ORIGIN(flash) + 0x100,
+           "the vector table must sit at flash offset 0x100, where the second stage vectors to")
+
+    .data :
+    {
+        . = ALIGN(4);
+        __data_start = .;
+        *(.ram_text .ram_text.*)
+        /* The SPI host's hot path (the file header), one member each:
+           start() with what it inlines (apply, the pin edges), the polled
+           shapes behind run_polled(), the pump's fill() and take() - its
+           isr() is inlined into the app's vector -, the tenure's copy,
+           the engines' serve test, launch and completion, the polled
+           wait on them. Left in the flash on purpose: init(), release(),
+           recover(), the fault settling, the rate chooser and the clamp,
+           the resource's configure() and flush_rx() - a rate change or a
+           fault, never a transaction's own path - and the client whole. */
+        *(.text._ZN4brio9Pl022Host*5startE*
+          .text._ZN4brio9Pl022Host*10run_polledE*
+          .text._ZN4brio9Pl022Host*4fillEv*
+          .text._ZN4brio9Pl022Host*4takeEv*
+          .text._ZN4brio9Pl022Host*11take_tenureE*
+          .text._ZN4brio9Pl022Host*13engines_serveE*
+          .text._ZN4brio9Pl022Host*10launch_dmaEv*
+          .text._ZN4brio9Pl022Host*13launch_framesI*
+          .text._ZN4brio9Pl022Host*10finish_dmaEh*
+          .text._ZN4brio9Pl022Host*8spin_dmaEv*)
+        . = ALIGN(4);
+        *(.data .data.*)
+        . = ALIGN(4);
+        __data_end = .;
+    } > ram AT > flash
+    __data_load_start = LOADADDR(.data);
+
+    .text :
+    {
         *(.text .text.*)
         *(.rodata .rodata.*)
 
@@ -83,26 +145,13 @@ SECTIONS
         KEEP(*(SORT(.init_array.*)))
         KEEP(*(.init_array))
         __init_array_end = .;
+        . = ALIGN(4);
     } > flash
-    ASSERT(ADDR(.text) == ORIGIN(flash) + 0x100,
-           "the vector table must sit at flash offset 0x100, where the second stage vectors to")
 
     .ARM.exidx :
     {
         *(.ARM.exidx* .gnu.linkonce.armexidx.*)
     } > flash
-
-    .data :
-    {
-        . = ALIGN(4);
-        __data_start = .;
-        *(.ram_text .ram_text.*)
-        . = ALIGN(4);
-        *(.data .data.*)
-        . = ALIGN(4);
-        __data_end = .;
-    } > ram AT > flash
-    __data_load_start = LOADADDR(.data);
 
     .bss (NOLOAD) :
     {

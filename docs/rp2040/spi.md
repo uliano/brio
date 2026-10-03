@@ -261,6 +261,20 @@ Implemented but not bench-verified, each with what would measure it
   what this board measures. `bench_rp2040` letter d's `spi.dma` lines
   (the best of four: warm) for the wire, and the first transaction timed
   beside a repeat with `Xip`'s two counters for the split.
+- THE HOST'S HOT PATH IN SRAM: `rp2040/ld/rp2040_2m.ld` places the same
+  ten members the RP2350's script places
+  ([../pl022/README.md](../pl022/README.md), "The host above the wire")
+  into .data, listed before the code because an input section goes to
+  the first statement that matches it - so the flash holds the stage,
+  the vector table, the load image of .data and then the code. On this
+  core 1120 bytes for a host without engines and 1732 for one with
+  them; the bench's two hosts and the linker's eight veneers take
+  .data from 512 to 3544 bytes - the map read, nothing run.
+  `bench_rp2040` letter e's `spi.cold` is what would measure it: the
+  first three-byte request after `init()` and the same after
+  `Xip::flush()`, the cache's misses beside each, with this chip's price
+  of a line and the Cortex-M0+'s five-instruction veneer (a push, a
+  literal load, a `bx`) on every call across the flash/SRAM boundary.
 
 - Half-word engines carrying 16-bit frames with no SPI interrupt, a
   16-bit request on odd-aligned buffers going to the pump, and ONE DMA

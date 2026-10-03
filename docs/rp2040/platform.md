@@ -30,8 +30,10 @@ their CRC32 and runs them; that SECOND STAGE programs the XIP serial
 interface for the flash chip in use and then vectors through the
 table it expects at flash offset 0x100 - it writes VTOR with that
 address and loads SP and PC from the table's first two words. So an
-image is the stage, then the vector table, then the code, and nothing
-in brio writes VTOR again. Every peripheral the reset controller
+image is the stage, then the vector table, then the load image of
+.data - which carries the code that runs from SRAM, the flash engine's
+and the SPI host's hot path ([flash.md](flash.md), [spi.md](spi.md)) -
+then the code, and nothing in brio writes VTOR again. Every peripheral the reset controller
 governs (2.14: the UARTs, SPIs, I2Cs, the timer, the PWM, the ADC,
 both PLLs, both PIOs, the DMA, the IO and pad banks, USB, SYSINFO) is
 HELD IN RESET at power-up: a driver's first act is releasing its

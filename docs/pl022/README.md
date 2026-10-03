@@ -272,6 +272,27 @@ polled loop on the same board is the figure beside them).
 - THE PINS are the family's run-time pin, driven by its own one-store
   verb; a null D/C line is skipped inside that verb; `cs_setup_us` is
   tested before any call.
+- THE HOT PATH IS A LIST, FOR A FAMILY'S LINKER SCRIPT TO PLACE. On a
+  chip that executes in place out of a flash behind a cache, the first
+  transaction after `init()` pays the cache its fill of the host's code
+  - on the RP2350 some 4700 cycles for a three-byte request that costs
+  690 warm, 66 lines of 8 bytes. This file cannot put its own code in
+  SRAM: a section attribute takes a string literal, and this file knows
+  no linker script. What it offers instead is that every member a
+  transaction runs is a function of its own under `-ffunction-sections`,
+  named for its symbol, so a family's script can place the set by
+  pattern: `start()` (with `apply()` and the pin edges inlined in it),
+  `run_polled()` (both polled loops inlined), `fill()` and `take()`
+  (`isr()` is inlined into the app's vector and calls them),
+  `take_tenure()`, `engines_serve()`, `launch_dma()`, `launch_frames()`,
+  `finish_dma()` and `spin_dma()`. `init()`, `release()`, `recover()`,
+  `clamp()`, the rate chooser, the resource's `configure()` and
+  `flush_rx()` and the client are a bring-up's, a rate change's or a
+  fault's, and belong in the flash. Both RP families place the set
+  ([../rp2350/spi.md](../rp2350/spi.md) has the numbers, the SRAM it
+  costs and the price a core pays for calls across the boundary); a
+  family whose code runs from SRAM or from a zero-wait flash places
+  nothing.
 
 ## What stays per family
 
@@ -279,7 +300,8 @@ The pin table and its function code; the reset or clock gate; the
 interrupt line and its controller; the crt's handler name an app binds;
 the DMA request numbers and the engine types that fill the slots; which
 rate is SSPCLK; the FIFO depth; the run-time pin type and the busy-wait;
-what SOD does to a pad on that silicon; and THE PUBLIC NAMES -
+what SOD does to a pad on that silicon; where the host's hot path runs
+(its linker script's business, the item above); and THE PUBLIC NAMES -
 `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine>` and `SpiClient<n,
 pins>`, the family's aliases of the three templates here, with the
 family's own defaults for the empty engine slots. An application that
