@@ -104,6 +104,11 @@
 //   l  THE DYNAMIC CLOCK: the link exact at 64, 16 and 2 MHz with the
 //      BR code re-resolved against a stated ceiling
 //   m  sleep: an SPI interrupt waking a WFI in Sleep mode
+//   s  THE HOST'S SHAPES, WIRELESS: the transmit-only polled loop, the
+//      packed receive, the frame-by-frame short receive, the half-word
+//      loop, the pump in every shape, a two-phase request both ways -
+//      each judged by the FIFO levels and OVR after it and by the count
+//      of completions, with nothing on MISO
 //   n  THE PEER: the spi_link command channel to the peer board, its
 //      ident and ten frames
 //   o  the matrix against the peer: four modes, both bit orders, and a
@@ -377,6 +382,11 @@ void peer_stop() {
 
 volatile bool host_done = false;
 volatile uint16_t host_isr_completions = 0;
+/// Letter s stretches the tick's handler to prove the receive loops lose
+/// nothing under a handler longer than every frame they keep in flight:
+/// `tick_stretch` turns of an empty loop after the tick, zero otherwise.
+volatile uint32_t tick_stretch = 0;
+volatile uint32_t ticks_stretched = 0;
 /// Letter j stages a LOST INTERRUPT: the body still runs (so the pump
 /// finishes and RXNE is acknowledged) but the completion is never
 /// posted, which is exactly the wedge util/bus_master.hpp's timeout is
@@ -2733,13 +2743,13 @@ private:
         return Host::Request{
             .cs = hand_cs ? PinRef{} : CsPin::ref(),
             .dc = {},
-            .cs_setup_us = 2,
             .cmd = {},
-            .cmd_len = 0,
             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx[i])),
             .rx = lend<Lease::reply>(rx[i]),
-            .len = payload,
             .reply = reply_to<Driver, SpiDone>(),
+            .len = payload,
+            .cmd_len = 0,
+            .cs_setup_us = 2,
             .clock = rate,
             .mode = SpiMode::mode0,
             .bits = SpiDataSize::bits8,
@@ -3389,6 +3399,159 @@ void tm_sleep() {
 }
 
 // =============================================================================
+// s - the host above the wire, WIRELESS: every shape of the two loops, and
+//     what the block holds after each
+// =============================================================================
+/// 256 bytes each: the packed receive run of the polled loop and the
+/// pump's longest transaction, with nothing on MISO - what is judged is
+/// the block's state after the run and the count of completions, not the
+/// bytes.
+uint8_t shape_tx[256];
+uint8_t shape_rx[256];
+
+struct ShapeResult {
+    bool done;
+    uint8_t ftlvl;
+    uint8_t frlvl;
+    bool ovr;
+    uint16_t completions;
+};
+
+ShapeResult run_shape(const uint8_t* tx, uint8_t* rx, uint16_t frames, SpiClock rate,
+                      SpiDataSize bits, bool polled, uint8_t cmd_len = 0,
+                      const uint8_t* cmd = nullptr) {
+    host_isr_completions = 0;
+    const bool done = host_xfer(tx, rx, frames, rate, SpiMode::mode0, bits, polled, cmd_len, cmd);
+    const ShapeResult r{done, S1::tx_level(), S1::rx_level(), S1::overrun(), host_isr_completions};
+    if (!done) {
+        (void)Host::recover();
+    }
+    print(serial, "  ", polled ? "polled" : "pumped ", frames, bits == SpiDataSize::bits16 ? " 16-bit" : " 8-bit",
+          rx != nullptr ? " read" : " write", cmd_len != 0u ? " after a command" : "", ": done ",
+          r.done ? 1u : 0u, " FTLVL ", r.ftlvl, " FRLVL ", r.frlvl, " OVR ", r.ovr ? 1u : 0u,
+          " completions ", r.completions, crlf);
+    return r;
+}
+
+/// A transaction that moved every frame it was given leaves both FIFOs
+/// empty, the overrun flag clear - the transmit-only shape clears the one
+/// its unread echoes raise - and, on the pump, exactly one completion.
+bool shape_clean(const ShapeResult& r, uint16_t completions) {
+    return r.done && r.ftlvl == 0u && r.frlvl == 0u && !r.ovr && r.completions == completions;
+}
+
+void ts_shapes() {
+    peer_stop();
+    software_cs_pads();
+    dma_host_live = false;
+    bus_ao_live = false;
+    bench.verdict("the host comes up on SPI1 with the self-link's pads, nothing wired",
+                  Host::init(clock));
+    for (uint16_t i = 0; i < 256u; ++i) {
+        shape_tx[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    static const uint8_t cmd[3] = {0x2C, 0x01, 0x02};
+
+    const ShapeResult a = run_shape(shape_tx, nullptr, 16, SpiClock::div4, SpiDataSize::bits8, true);
+    bench.verdict("THE TRANSMIT-ONLY POLLED SHAPE: 16 bytes at PCLK/4 paced on TXE, the "
+                  "echoes nobody read raised OVR and the tail cleared it with 35.5.11's "
+                  "sequence and drained them - both FIFOs empty, the flag clear",
+                  shape_clean(a, 0));
+    const ShapeResult b = run_shape(shape_tx, shape_rx, 255, SpiClock::div4, SpiDataSize::bits8, true);
+    bench.verdict("THE PACKED RECEIVE SHAPE: 255 bytes at PCLK/4 read two frames an access "
+                  "with two pairs in flight, the odd last one by a byte access with the "
+                  "threshold moved for it and moved back - empty FIFOs, no overrun, "
+                  "FRXTH at a quarter again",
+                  shape_clean(b, 0) && S1::rx_threshold() == SpiRxThreshold::quarter);
+    const ShapeResult c = run_shape(shape_tx, shape_rx, 3, SpiClock::div4, SpiDataSize::bits8, true);
+    bench.verdict("a short receive runs frame by frame, three in flight: three bytes at "
+                  "PCLK/4, empty FIFOs after",
+                  shape_clean(c, 0));
+    const ShapeResult d = run_shape(shape_tx, shape_rx, 64, SpiClock::div4, SpiDataSize::bits16, true);
+    bench.verdict("half-word frames polled, two in flight: 64 at PCLK/4, empty FIFOs after",
+                  shape_clean(d, 0));
+
+    const ShapeResult e = run_shape(shape_tx, nullptr, 16, SpiClock::div4, SpiDataSize::bits8, false);
+    bench.verdict("THE PUMP, write-only, 16 bytes at PCLK/4 with three in flight: the "
+                  "frames come back faster than the handler is entered and the count "
+                  "was stored before RXNE was armed - ONE completion, both FIFOs empty, "
+                  "no overrun (the arming order the bench caught, docs/stm32g0/spi.md)",
+                  shape_clean(e, 1));
+    const ShapeResult f = run_shape(shape_tx, shape_rx, 256, SpiClock::div4, SpiDataSize::bits8, false);
+    bench.verdict("the pump reading 256 bytes at PCLK/4: one completion, empty FIFOs, no "
+                  "overrun",
+                  shape_clean(f, 1));
+    const ShapeResult g = run_shape(shape_tx, shape_rx, 64, SpiClock::div4, SpiDataSize::bits16, false);
+    bench.verdict("the pump on half-word frames, 64 at PCLK/4: one completion, empty FIFOs",
+                  shape_clean(g, 1));
+
+    const ShapeResult h = run_shape(shape_tx, shape_rx, 8, SpiClock::div16, SpiDataSize::bits8, true, 3, cmd);
+    bench.verdict("a two-phase request polled - three command frames transmit-only, the "
+                  "D/C flip at their tail, eight data frames read back: empty FIFOs after",
+                  shape_clean(h, 0));
+    const ShapeResult i = run_shape(shape_tx, shape_rx, 8, SpiClock::div16, SpiDataSize::bits8, false, 3, cmd);
+    bench.verdict("the same two-phase request on the pump: the data phase primed from the "
+                  "handler that read the last command echo, one completion, empty FIFOs",
+                  shape_clean(i, 1));
+    const ShapeResult j = run_shape(shape_tx, nullptr, 1, SpiClock::div16, SpiDataSize::bits8, true, 1, nullptr);
+    bench.verdict("a command alone with a null buffer clocks one all-ones frame and ends "
+                  "clean", shape_clean(j, 0));
+
+    // THE RECEIVE SHAPES UNDER A HANDLER LONGER THAN WHAT THEY KEEP IN
+    // FLIGHT: the tick's handler stretched to some 1500 cycles - four
+    // byte frames at PCLK/2 are 64 - across a hundred receive runs at
+    // three rates, polled and pumped. What is in flight never exceeds
+    // the RXFIFO's capacity, the transmit FIFO drains into it and the
+    // clock stops, so a handler that holds the loop off delays it and
+    // loses nothing: every run completes (a lost frame never completes:
+    // the count never arrives), the levels are zero after, OVR clear.
+    struct Stretch {
+        const char* name;
+        SpiClock rate;
+        bool polled;
+    };
+    constexpr Stretch stretches[4] = {
+        {"polled at PCLK/2", SpiClock::div2, true},
+        {"polled at PCLK/4", SpiClock::div4, true},
+        {"polled at PCLK/16", SpiClock::div16, true},
+        {"pumped at PCLK/4", SpiClock::div4, false},
+    };
+    tick_stretch = 500;   // ~3 cycles a turn: about 1500 cycles a tick
+    for (const Stretch& st : stretches) {
+        ticks_stretched = 0;
+        uint16_t completed = 0;
+        uint16_t ovr_seen = 0;
+        uint16_t leftovers = 0;
+        for (uint16_t k = 0; k < 100u; ++k) {
+            host_isr_completions = 0;
+            const bool done = host_xfer(shape_tx, shape_rx, 256, st.rate, SpiMode::mode0,
+                                        SpiDataSize::bits8, st.polled);
+            if (done && Host::status() == spi_ok &&
+                host_isr_completions == (st.polled ? 0u : 1u)) {
+                ++completed;
+            } else {
+                (void)Host::recover();
+            }
+            if (S1::overrun()) {
+                ++ovr_seen;
+            }
+            if (S1::tx_level() != 0u || S1::rx_level() != 0u) {
+                ++leftovers;
+            }
+        }
+        print(serial, "  256-byte receive runs, ", st.name, ", the tick's handler stretched: ",
+              completed, " of 100 complete, OVR seen ", ovr_seen, ", FIFOs not empty after ",
+              leftovers, ", ticks that landed stretched ", ticks_stretched, crlf);
+        bench.verdict("A HUNDRED RECEIVE RUNS OF 256 BYTES UNDER A STRETCHED TICK HANDLER lose "
+                      "nothing: every one completes, OVR never stands, both FIFOs empty after "
+                      "each - what is in flight never exceeds the RXFIFO and the clock stops "
+                      "when the TXFIFO has drained into it",
+                      completed == 100u && ovr_seen == 0u && leftovers == 0u);
+    }
+    tick_stretch = 0;
+}
+
+// =============================================================================
 // n - the peer's command channel
 // =============================================================================
 
@@ -3965,7 +4128,16 @@ void banner() {
 // The vectors (app glue: this is the one vendor thing an app may contain)
 // ---------------------------------------------------------------------------
 
-extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
+extern "C" void SysTick_Handler() {
+    brio::Ticker::tick();
+    const uint32_t turns = tick_stretch;
+    if (turns != 0u) {
+        for (uint32_t i = 0; i < turns; ++i) {
+            asm volatile("" ::: "memory");
+        }
+        ticks_stretched = ticks_stretched + 1u;
+    }
+}
 extern "C" void BRIO_SUITE_CONSOLE_HANDLER() { (void)Serial::isr(); }
 
 /// SPI1's line is its own. Which host owns it is a flag, because two
@@ -4069,6 +4241,9 @@ int main() {
     bench.letter('l', "the dynamic clock: the BR code follows the rate",
                  tl_dynamic);
     bench.letter('m', "an SPI interrupt wakes a WFI in Sleep mode", tm_sleep);
+    bench.letter('s', "the host's shapes, WIRELESS: the two loops in every shape, the "
+                      "FIFOs and OVR after each, one completion per pumped transaction",
+                 ts_shapes);
     bench.letter('n', "THE PEER: the spi_link command channel to the peer board",
                  tn_peer_link);
     bench.letter('o', "the matrix against the peer: four modes, both orders",
