@@ -239,11 +239,12 @@ What the rows say:
 
 - A block costs what the chapter's restart costs - two to five stores -
   and the engines are no longer the dominant term of a transaction: on
-  every family what remains above the wire is the bus host's own
-  `start()`, the Request copied into the engine, the pins and the
-  compare (the SPI round's), and the frame gap the PL022 keeps between
-  frames in mode 0 and 2 (1.5 SCK periods: +19 per cent on 8-bit frames,
-  +9 on 16-bit; a display in mode 3 would not pay it).
+  every family what remained above the wire was the bus host's own
+  `start()` - the Request copied into the engine, the pins and the
+  compare - which letter e below took down, and the frame gap the PL022
+  keeps between frames in mode 0 and 2 (1.5 SCK periods: +19 per cent
+  on 8-bit frames, +9 on 16-bit; a display in mode 3 does not pay it,
+  and the DCS link's examples carry mode 3).
 - A copy by DMA is the controller's own rate, not the bus's: five cycles
   a word on the SAM and the G0, six an item on the CH32V203, and on the
   M4 slower than the core's own load-multiple block - the engine buys
@@ -266,9 +267,74 @@ What the rows say:
   about 1.15 KB of code per transaction against the SDK's two inlined
   calls, the SPI round's to shrink ([../rp2350/spi.md](../rp2350/spi.md)).
 
+## Letter e: the SPI host above the wire
+
+Measured on the bench boards after the SPI round, each line the best of
+its runs with the overrun flag read after every one; `spi.poll` a
+polled WRITE of 256 frames (no receive buffer: the display's pixel
+path), `spi.poll.rx` the same with one (the shape that keeps as many
+frames in flight as the receive side holds under any handler of the
+image - a FIFO's depth, two on a two-level buffer, and on a one-deep
+register two only above the family's computed rate threshold), `spi.pump`
+the write on interrupts, `spi.req` a polled request of one command byte
+and two of data at the family's /16 with the select and the D/C on
+real pads - the fixed cost = wall minus the wire's time, THE NUMBER OF
+THE ROUND, the price of a DCS command -, and the vendor's own polled
+full-duplex loop on the same board in a scratch program (ST's
+`HAL_SPI_TransmitReceive`, the EVT's 2Lines loop, the pico-sdk's
+blocking loop, the data sheet's sequence where no library was read).
+The rates named are SCK.
+
+| family (clock) | spi.poll x at /4, /16 | spi.poll.rx x at /4, /16 | spi.pump x at /4, /16; interrupts per 256 | spi.req 3 bytes, fixed cost (before) | the vendor's loop, x at /4, /16 |
+|---|---|---|---|---|---|
+| SAM C21J18A (48 MHz; 12 and 3 MHz) | 1.06, 1.01 | 1.33, 1.01 (42.6 cycles a character at 12 MHz: the two-flag turn does not fit a 32-cycle character behind two wait states, 39 from SRAM) | 11.76, 2.94; 258 (the handler, 377 cycles a character, outlasts the character at both rates) | 608 (943) | the data sheet's sequence, 1.14, 1.00 (36.6 cycles a character at 12 MHz: the bare loop is not wire-bound there either) |
+| STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.23, 1.01 | 5.31, 1.34; 86 (three byte frames an interrupt, the FIFO's capacity) | 399 (998) | HAL 5.29, 1.79 (one in flight and a tick call per turn) |
+| STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.44 (one in flight below the 237-cycle threshold), 1.00 (two) | 2.57, 1.00 (two in flight from /16); 256 | 251 (517) | HAL 2.97, 1.30 |
+| CH32V203C8T6 (144 MHz; 36 and 9 MHz) | 1.02, 1.00 | 1.62 (one in flight), 1.09 | 2.88 (two ahead on a write, 128 interrupts), 1.26; 256 | 280 (468) | the EVT's 2Lines loop 1.23, 1.00 - and it loses a frame in every run at /4 on 8-bit frames |
+| RP2350, Cortex-M33 (150 MHz; 37.5 and 9.375 MHz) | 1.02, 1.00 in mode 3 (1.21, 1.19 in mode 0: the block's gap) | 1.02, 1.00 | 1.68, 1.02; 32 | 309 (593) | pico-sdk 1.00 at /4 in mode 3, 1.00 at /16 |
+| RP2350, Hazard3 | 1.02, 1.00 | 1.02, 1.00 | 1.69, 1.02; 32 | 301 (621) | pico-sdk 1.19, 1.00 |
+
+What the rows say:
+
+- The polled WRITE is the wire's from the second-fastest rate on every
+  family measured (x 1.01 to 1.06 at /4), where the retrospective found
+  it at two to seven times the wire: every command phase and a
+  display's pixel run pay the wire and a fixed cost of 250 to 400
+  cycles a request on the 32-bit cores (600 on the M0+ behind two wait
+  states), where 470 to 1000 were.
+- The polled READ is bounded by the receive side: where the block has a
+  FIFO or a two-level buffer it reads at the wire too; on the one-deep
+  F1 lineage (the STM32F4, the CH32V203, the CH32V006) it keeps one
+  frame in flight below the family's threshold and pays the turnaround
+  every frame - 1.44 to 1.62 at /4 - because two in flight lose a frame
+  to any handler longer than the frame time, measured on every family
+  that tried it; above the threshold it is the wire's. A loop that
+  refills on TXE whenever it can - the EVT's shape - falls behind the
+  wire cumulatively at /4 and loses frames with nothing live but the
+  tick.
+- The pump is the handler's: where a frame outlasts the handler (the
+  FIFO families from /16, the one-deep ones from their threshold) the
+  bus never idles; faster than that the handler bounds the bus and the
+  thread, and the polled style or the engines are the bulk path - each
+  family's `dma_min_frames` is that quotient.
+- Priming before arming is the rule on every family with a write-ahead:
+  the G0, the CH32V203, the PL022 and the SAM each measured a handler
+  entering between the first two writes when the line was armed first,
+  a frame written twice or a FIFO overrun.
+- The vendor's loops are not wire-bound at /4 on any of these cores
+  (a tick call per turn in the HAL, a two-flag alternation elsewhere);
+  brio's write shape is ahead of every one of them and its read shape
+  within a fifth or ahead, the gaps named in each family's SPI document.
+
 ## Not covered yet
 
 Implemented, not bench-verified:
+
+- Letter e on the AVR128DB48 and the CH32V006: the hosts reworked and
+  their costs counted in the listings (an AVR polled byte 26 to 30
+  cycles against 32 of wire at CLK_PER/4, a CH32V006 3-byte request
+  about 300 cycles), their boards not on the desk; one run of each
+  bench app's letter e says the measured figures.
 
 - The skeleton on the RP2040 and the CH32V006: the apps build for every
   board type and their vectors read clean in the disassembly, their
