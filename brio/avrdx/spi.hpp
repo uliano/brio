@@ -17,10 +17,12 @@
  *
  *  TASKS - what an application names:
  *    SpiHost<n, route>    the transfer ENGINE: two-phase descriptor
- *                         transactions in one chip-select window, a
- *                         per-byte ISR pump or a polled loop, CS and DC
- *                         owned by the engine. Driven by
- *                         util/spi_bus.hpp (arbitration and replies).
+ *                         transactions in one chip-select window, the
+ *                         instance in BUFFER MODE with two bytes in
+ *                         flight on both completion styles - a polled
+ *                         loop or the RXCIE pump -, CS and DC owned by
+ *                         the engine. Driven by util/spi_bus.hpp
+ *                         (arbitration and replies).
  *    SpiClient<n, route>  the client side: selected(), preload/exchange,
  *                         the buffer-mode variants, the ISR bodies.
  *  A task owns its instance; two tasks on one Spi<n> is the app's bug.
@@ -243,18 +245,26 @@ constexpr uint8_t spi_division(SpiClock c) {
     }
 }
 
-/// The CTRLA bits (PRESC and CLK2X) that produce this rate.
+/// The CTRLA bits (PRESC and CLK2X) that produce this rate. The enum's
+/// order IS the register's: its two high bits are PRESC (DIV4 for div2
+/// and div4, DIV16 for div8 and div16, DIV64 for div32 and div64, DIV128
+/// for div128) and CLK2X belongs to the even member of each pair -
+/// div128 excepted, whose doubled twin would be div64 again. Arithmetic
+/// and no table, so a host's fold of a request's rate into its register
+/// byte is a handful of instructions in line.
 constexpr uint8_t spi_presc_bits(SpiClock c) {
-    switch (c) {
-        case SpiClock::div2: return static_cast<uint8_t>(SPI_PRESC_DIV4_gc | SPI_CLK2X_bm);
-        case SpiClock::div4: return static_cast<uint8_t>(SPI_PRESC_DIV4_gc);
-        case SpiClock::div8: return static_cast<uint8_t>(SPI_PRESC_DIV16_gc | SPI_CLK2X_bm);
-        case SpiClock::div16: return static_cast<uint8_t>(SPI_PRESC_DIV16_gc);
-        case SpiClock::div32: return static_cast<uint8_t>(SPI_PRESC_DIV64_gc | SPI_CLK2X_bm);
-        case SpiClock::div64: return static_cast<uint8_t>(SPI_PRESC_DIV64_gc);
-        default: return static_cast<uint8_t>(SPI_PRESC_DIV128_gc);
-    }
+    const uint8_t v = static_cast<uint8_t>(c);
+    const uint8_t presc = static_cast<uint8_t>(v & 0x06u);
+    const bool doubled = (v & 0x01u) == 0 && c != SpiClock::div128;
+    return static_cast<uint8_t>(presc | (doubled ? SPI_CLK2X_bm : 0));
 }
+static_assert(SPI_PRESC_DIV4_gc == 0x00 && SPI_PRESC_DIV16_gc == 0x02 &&
+              SPI_PRESC_DIV64_gc == 0x04 && SPI_PRESC_DIV128_gc == 0x06,
+              "spi_presc_bits reads PRESC off the enum's bits: the device header's codes");
+static_assert(spi_presc_bits(SpiClock::div2) == (SPI_PRESC_DIV4_gc | SPI_CLK2X_bm) &&
+              spi_presc_bits(SpiClock::div16) == SPI_PRESC_DIV16_gc &&
+              spi_presc_bits(SpiClock::div32) == (SPI_PRESC_DIV64_gc | SPI_CLK2X_bm) &&
+              spi_presc_bits(SpiClock::div128) == SPI_PRESC_DIV128_gc);
 
 /// The rate the CTRLA bits in force encode (the readback of the line
 /// above; PRESC DIV128 with CLK2X reads back as div64, its twin).
@@ -763,8 +773,7 @@ private:
  * The transfer ENGINE: the target-side half of the SPI stack, driven by
  * util/spi_bus.hpp (which owns arbitration and replies). This task owns
  * the wire: chip select, the D/C line of display-style devices, and the
- * byte pump under the SPI interrupt (no DMA on AVR Dx: one interrupt per
- * byte is the honest price).
+ * byte pump under the SPI interrupt (no DMA on AVR Dx).
  *
  * Transaction descriptor (Request) - two phases in ONE chip-select
  * window, covering every device on the bench:
@@ -786,9 +795,38 @@ private:
  * until its SpiDone comes back). A zero-total-length request completes
  * on the spot without touching the wire (SpiDone still arrives).
  *
- * Two completion styles, chosen per request by the `polled` flag: the
- * per-byte ISR pump (default) and the synchronous polled loop for bulk
- * transfers at fast clocks - see the flag's comment for the tradeoff.
+ * THE ENGINE RUNS THE INSTANCE IN BUFFER MODE (28.3.2.1.2): the
+ * transmitter is a shift register plus one buffer, so two bytes are in
+ * flight and the wire never waits for the software while the software
+ * keeps up; the receiver is a two-entry FIFO in front of the shifter,
+ * read at least every second transfer. Both completion styles are
+ * written from that chapter's three rules:
+ *
+ *  - a write to DATA is legal while DREIF is set (rule 1): the first
+ *    write of an idle transmitter goes straight to the shifter and the
+ *    next to the buffer, so a burst opens with one write and then waits
+ *    DREIF before each one that follows;
+ *  - a received byte lands in the FIFO when its transfer completes
+ *    (rule 2), and the FIFO must be read at least every second transfer
+ *    (rule 3). BOTH paths drain it to empty BEFORE every write: a byte
+ *    that arrives with the FIFO full waits in the shifter (28.5.5,
+ *    BUFOVF) and is lost only when the NEXT transfer starts - which is
+ *    what a write does. Drained first, a late loop or a late handler
+ *    (an interrupt of the console's or the tick's inside a burst) idles
+ *    the wire and loses nothing. There is no rate threshold on this
+ *    family: the write-ahead is safe at every division;
+ *  - TXCIF says shifter and buffer are both empty (28.3.2.1.2's last
+ *    paragraph): it is the end of a phase, and a CONDITION the register
+ *    keeps - it is cleared, write-one, before every burst it is to
+ *    close (docs/avrdx/spi.md "Buffer mode").
+ *
+ * The POLLED path completes inside start() and reads every field of the
+ * request through the reference it was lent (the arbiter's contract:
+ * the slot stays as it is until the dispatch ends) - it copies nothing.
+ * The PUMP (polled false) copies at launch what its tenure needs - the
+ * two pins, the data phase's spans and length - into the engine's own
+ * state, and runs on RXCIE: one interrupt per received byte, the handler
+ * popping the FIFO's head and writing byte k + 2 while k + 1 shifts.
  *
  * ISR wiring (app glue, as usual):
  *   ISR(SPI0_INT_vect) {
@@ -813,6 +851,13 @@ public:
         spi_route_exists(n, route) &&
         (route == SpiRoute::none || spi_pin(n, route, SpiSignal::sck).bonded);
 
+    /// THE LAYOUT: 21 bytes and no padding on this core (every type here
+    /// is byte-aligned): two PinRefs of three, three pointers of two, a
+    /// byte and a word of lengths, the reply's two, four bytes of
+    /// settings. The first fifteen are the TENURE's - what the pump
+    /// still needs once start() has returned - and lie together; the
+    /// rest is consumed inside start(). The field names are the
+    /// contract every stratum shares (docs/design/spi-bus.md).
     struct Request {
         PinRef cs;             ///< asserted low around the transaction
         PinRef dc;             ///< display D/C line; null = no such pin
@@ -827,45 +872,51 @@ public:
         ReplyTo<SpiDone> reply;
         // Per-transaction bus configuration: on a SHARED bus every
         // device names its own speed and mode in the request (ILI9481
-        // at 6 MHz, XPT2046 capped at ~2.5 MHz, ...); the engine
-        // reprograms the peripheral at each start(), which costs two
-        // register writes between transactions and nothing per byte.
-        // The rate is a DIVISION of CLK_PER, so it follows a clock
-        // change by itself; max_sck_hz() is the ceiling that clamps it.
+        // at 6 MHz, XPT2046 capped at ~2.5 MHz, ...); the engine folds
+        // both into the two register bytes the block takes, compares
+        // them with the pair it last wrote, and reprograms only on a
+        // change - nothing per byte. The rate is a DIVISION of CLK_PER,
+        // so it follows a clock change by itself; max_sck_hz() is the
+        // ceiling that clamps it.
         SpiClock clock = SpiClock::div16;
         SpiMode mode = SpiMode::mode0;
-        // Completion style, also the client's call: false = per-byte
-        // ISR pump (the kernel keeps running between bytes - right for
-        // slow clocks and short transfers); true = POLLED inside
-        // start(), completing synchronously. At fast clocks polling
-        // wins on every axis: a byte at div4 flies in 32 CPU cycles
-        // while an ISR entry alone costs more - the pump caps the bus
-        // near 27% and floods the CPU, the polled loop runs it near
-        // wire speed. The price is that THIS dispatch blocks for the
-        // whole transfer (bounded, chosen here); global interrupts
-        // stay enabled throughout - only the SPI's own IE is silenced.
+        // Completion style, also the client's call: false = the
+        // interrupt pump (the kernel keeps running between bytes -
+        // right for slow clocks and short transfers); true = POLLED
+        // inside start(), completing synchronously. The polled loop is
+        // wire-bound from CLK_PER/4 (a byte is 32 CPU cycles there and
+        // the loop fewer, counted in docs/avrdx/spi.md); the pump keeps
+        // two bytes in flight, so the wire runs while its handler does,
+        // but one interrupt per byte costs more than a byte at the fast
+        // divisions and the pump is CPU-bound there. The price of
+        // polling is that THIS dispatch blocks for the whole transfer
+        // (bounded, chosen here); global interrupts stay enabled
+        // throughout - the SPI's own interrupt is never armed for a
+        // polled request.
         bool polled = false;
         // Chip-select setup: microseconds the engine waits between
         // asserting CS and the first SCK edge. Most devices need tens of
-        // ns (the ~1.5 us the code path takes anyway). A device waking
+        // ns (what the code path takes anyway). A device waking
         // from shutdown on CS may need more: the MCP3550 datasheet
         // specifies tRDY <= 50 ns but only says "an internal power-up
         // delay must be observed" when exiting Shutdown (DS20001950F
         // 5.2) - MEASURED: SDO drives ~4 us after CS falls, and a frame
         // clocked 1.5 us after CS is lost (0x7FFFFF), 3.5 us is enough,
         // dac_adc uses 10. Spent spinning in start(), main context,
-        // bounded by this byte.
+        // bounded by this byte; tested before the delay is called, so
+        // a zero costs one branch.
         uint8_t cs_setup_us = 0;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    static_assert(sizeof(Request) == 21, "the request is 21 bytes with no padding on this core");
 
     /**
      * Host, MSB first, SSD set (the SS position stays free for a GPIO -
-     * chip selects are the engine's, not the peripheral's). Call after
-     * clock init, before sei(). CS/DC pins are configured by their
-     * owners (the device clients), not here; clock and mode travel
-     * per-request. `clock` is the app's brio::Clock tag: the per-request
-     * cs_setup_us delay is timed from Clock::hz.
+     * chip selects are the engine's, not the peripheral's), BUFFER MODE
+     * on. Call after clock init, before sei(). CS/DC pins are configured
+     * by their owners (the device clients), not here; clock and mode
+     * travel per-request. `clock` is the app's brio::Clock tag: the
+     * per-request cs_setup_us delay is timed from Clock::hz.
      *
      * `max_sck_hz` is an optional CEILING for the whole bus: with it set
      * the engine slows any request that would exceed it (and re-picks
@@ -887,10 +938,17 @@ public:
             ceiling_hz_ = max_sck_hz;
             rebase(clock_hz(clock));
             if (max_sck_hz != 0 && !ceiling_) return false;   // even /128 is too fast
-            cpol_ = false;
-            return S::init({.route = route, .role = SpiRole::host, .mode = SpiMode::mode0,
-                            .clock = ceiling_ ? *ceiling_ : SpiClock::div16,
-                            .client_select_disable = true});
+            if (!S::init({.route = route, .role = SpiRole::host, .mode = SpiMode::mode0,
+                          .clock = ceiling_ ? *ceiling_ : SpiClock::div16,
+                          .client_select_disable = true, .buffer_mode = true})) {
+                return false;
+            }
+            // The kept pair is what the registers HOLD, read back once:
+            // apply() can then never disagree with init() about the
+            // bits it does not fold (DORD, BUFWR) or the ones it does.
+            ctrla_ = S::regs().CTRLA;
+            ctrlb_ = S::regs().CTRLB;
+            return true;
         }
     }
 
@@ -934,21 +992,22 @@ public:
     /// peripheral is off): flipped inside an open select window it is
     /// one extra edge a selected client can count into the character.
     /// Prime FIRST, then assert the select.
-    static void prime(SpiMode mode, SpiClock clock) { apply_mode(mode, clamp(clock)); }
+    static void prime(SpiMode mode, SpiClock clock) { apply(mode, clamp(clock)); }
 
     /// Begin a transaction (called by SpiBus from main context).
     /// Returns true when the transaction completed synchronously
     /// (polled requests, and the degenerate zero-length one); false
     /// when it runs on the ISR and a TransferDone will follow.
+    ///
+    /// The request is LENT for this call and read through `r`: the
+    /// polled path, which completes before returning, keeps nothing;
+    /// the pump copies its tenure's fields in launch().
     static bool start(const Request& r) {
-        req_ = r;
-        pos_ = 0;
-        in_cmd_ = (r.cmd_len > 0);
-        if (total_len() == 0) {
+        if (static_cast<uint16_t>(r.cmd_len) + r.len == 0) {
             return true;  // nothing to move: complete on the spot
         }
-        apply_mode(r.mode, clamp(r.clock));
-        if (in_cmd_) {
+        apply(r.mode, clamp(r.clock));
+        if (r.cmd_len != 0) {
             r.dc.clear();
         } else {
             r.dc.set();
@@ -958,89 +1017,106 @@ public:
             delay_us_runtime(cycles_per_us_, r.cs_setup_us);
         }
         if (!r.polled) {
-            S::enable_interrupt(true);
-            S::write(first_byte());        // the ISR pumps the rest
+            launch(r);
             return false;
         }
-        // Polled pump: silence the SPI's own interrupt (the bound ISR
-        // would steal the bytes) - global interrupts STAY ENABLED, so
-        // UART/PIT/anything else preempt this loop freely. The last
-        // xfer() leaves INTFLAGS clear, so re-enabling IE is safe.
-        S::enable_interrupt(false);
-        // The loans are VIEWS: .get() hands out the raw pointer the
-        // loops index (Borrowed is not a container).
-        for (uint8_t i = 0; i < r.cmd_len; ++i) {
-            xfer(r.cmd.get()[i]);
+        // Polled: the SPI's own interrupt is not armed (the pump arms it
+        // at launch and its handler disarms it at the end, so an idle
+        // bus has it off), global interrupts STAY ENABLED - the
+        // console, the tick, anything else preempts these loops freely,
+        // and the drain-before-write discipline of burst() is what
+        // makes that safe. The loans are VIEWS: .get() hands out the
+        // raw pointer the loops index (Borrowed is not a container).
+        if (r.cmd_len != 0) {
+            burst<true, false>(r.cmd.get(), nullptr, r.cmd_len);
+            r.dc.set();                    // the data phase, even an empty one
         }
-        r.dc.set();                        // data phase (no-op if len == 0)
-        // Shape-specialized loops: the per-byte budget at div4 is 32
-        // cycles, so hoisting the tx/rx null checks out of the loop is
-        // not cosmetics - it is most of the headroom.
-        if (r.rx.get() == nullptr && r.tx.get() != nullptr) {   // bulk write
-            const uint8_t* p = r.tx.get();
-            for (uint16_t k = r.len; k != 0; --k) {
-                xfer(*p++);
-            }
-        } else if (r.rx.get() != nullptr && r.tx.get() == nullptr) {  // bulk read
-            uint8_t* p = r.rx.get();
-            for (uint16_t k = r.len; k != 0; --k) {
-                *p++ = xfer(0xFF);
-            }
-        } else {                                           // full duplex / none
-            for (uint16_t i = 0; i < r.len; ++i) {
-                const uint8_t in = xfer((r.tx.get() != nullptr) ? r.tx.get()[i] : 0xFF);
-                if (r.rx.get() != nullptr) {
-                    r.rx.get()[i] = in;
+        if (r.len != 0) {
+            // Shape-specialized loops: the per-byte budget at CLK_PER/4
+            // is 32 cycles, so the tx/rx null tests are decided once
+            // here and never inside a loop.
+            const uint8_t* const tx = r.tx.get();
+            uint8_t* const rx = r.rx.get();
+            if (rx == nullptr) {
+                if (tx != nullptr) {
+                    burst<true, false>(tx, nullptr, r.len);      // bulk write
+                } else {
+                    burst<false, false>(nullptr, nullptr, r.len); // clocks only
                 }
+            } else if (tx != nullptr) {
+                burst<true, true>(tx, rx, r.len);                 // full duplex
+            } else {
+                burst<false, true>(nullptr, rx, r.len);           // bulk read
             }
         }
         r.cs.set();                        // release: transaction done
-        S::enable_interrupt(true);
         return true;
     }
 
     /**
-     * SPI interrupt body - call from ISR(SPIn_INT_vect). Returns true
-     * when the transaction just completed (CS released): the edge on
-     * which the glue posts TransferDone to the bus AO.
+     * SPI interrupt body - call from ISR(SPIn_INT_vect). The pump runs
+     * on RXCIE: the vector fires with a byte at the FIFO's head, the body
+     * pops it (RXCIF falls with the last entry, 28.5.5), stores it where
+     * the request wanted it, and writes the byte two ahead while the
+     * next one shifts. A handler that ran late finds two bytes in the
+     * FIFO and the transmitter idle: it pops one and writes one, RXCIF
+     * stands, the vector re-enters at once for the other - two in flight
+     * again, nothing lost. Returns true when the transaction just
+     * completed (CS released): the edge on which the glue posts
+     * TransferDone to the bus AO.
      */
     [[gnu::always_inline]] static bool isr() {
-        const uint8_t in = S::take_normal().data;   // INTFLAGS then DATA: the IF clear sequence
-
-        if (!in_cmd_ && req_.rx.get() != nullptr) {
-            req_.rx.get()[pos_] = in;
+        const uint8_t in = S::regs().DATA;   // the pop
+        if (in_ != nullptr) {
+            *in_++ = in;
         }
-        ++pos_;
-
-        if (in_cmd_ && pos_ >= req_.cmd_len) {
+        if (--to_read_ != 0) {
+            if (to_write_ != 0) {
+                write_next();
+            }
+            return false;
+        }
+        if (in_cmd_) {                      // the command phase is over
             in_cmd_ = false;
-            pos_ = 0;
-            req_.dc.set();                 // command phase over
+            dc_.set();
+            if (len_ != 0) {
+                out_ = tx_;
+                in_ = rx_;
+                to_write_ = len_;
+                to_read_ = len_;
+                write_next();              // the shifter, then the buffer
+                if (to_write_ != 0) {
+                    write_next();
+                }
+                return false;
+            }
         }
-        if (!in_cmd_ && pos_ >= req_.len) {
-            req_.cs.set();                 // release: transaction done
-            return true;
-        }
-        S::write(next_byte());
-        return false;
+        cs_.set();                         // release: transaction done
+        S::regs().INTCTRL = 0;             // the pump's enable, off until the next launch
+        return true;
     }
 
-    /// The work-around for a wedged host: a demotion mid-transfer (SS
-    /// driven low with SSD clear stops the ISR pump dead, 28.3.2.1.3 -
-    /// measured) or a lost completion. The interrupt is silenced and
-    /// its flag cleared by the INTFLAGS-then-DATA sequence, the Host
-    /// role the hardware dropped is re-armed, the select window closed;
+    /// The work-around for a wedged host: a lost completion, or a
+    /// demotion mid-transfer (SS driven low with SSD clear stops the pump
+    /// dead, 28.3.2.1.3 - measured; init() sets SSD, so here it is the
+    /// chapter's note honoured and not a path a request can reach). The
+    /// pump's interrupt is silenced, the write-one flags cleared, the
+    /// receive FIFO and the shifter behind it drained, the Host role
+    /// re-armed if the hardware dropped it, the select window closed;
     /// start() reprograms mode and clock per request, so nothing else
     /// needs saving. The verb a timed SpiBus calls
     /// (util/bus_master.hpp).
     static void recover() {
         if constexpr (available) {
-            S::enable_interrupt(false);
-            (void)S::take_normal();
+            S::regs().INTCTRL = 0;
+            S::regs().INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_SSIF_bm | SPI_BUFOVF_bm);
+            for (uint8_t i = 0; i < 3 && S::rxc_flag(); ++i) {
+                (void)S::read();
+            }
             if (S::demoted()) {
                 S::restore_host();
             }
-            req_.cs.set();
+            cs_.set();
             in_cmd_ = false;
         }
     }
@@ -1049,69 +1125,175 @@ public:
     static void release() { S::release(); }
 
 private:
-    static SpiClock clamp(SpiClock c) {
-        if (!ceiling_) return c;
-        return spi_division(c) < spi_division(*ceiling_) ? *ceiling_ : c;
+    /// The ceiling is a slowest division: the enum is ordered by
+    /// division, so a request faster than it is a smaller member.
+    [[gnu::always_inline]] static SpiClock clamp(SpiClock c) {
+        if (ceiling_ && c < *ceiling_) return *ceiling_;
+        return c;
     }
 
-    static uint16_t total_len() {
-        return static_cast<uint16_t>(req_.cmd_len) + req_.len;
+    /// The two register bytes a request's settings fold into: the host's
+    /// fixed bits and the request's rate in CTRLA, the engine's fixed
+    /// bits (buffer mode, SSD) and the request's mode in CTRLB.
+    static constexpr uint8_t ctrla_of(SpiClock c) {
+        return static_cast<uint8_t>(SPI_MASTER_bm | SPI_ENABLE_bm | spi_presc_bits(c));
+    }
+    static constexpr uint8_t ctrlb_of(SpiMode m) {
+        return static_cast<uint8_t>(SPI_BUFEN_bm | SPI_SSD_bm | static_cast<uint8_t>(m));
     }
 
-    /// SCK must already sit at the new mode's idle level (CPOL) when CS
-    /// falls: devices that latch their SPI mode from SCK at the CS edge
-    /// (MCP3550: mode 0,0 vs 1,1) otherwise start the transaction in the
-    /// wrong mode. The AVR SPI updates the SCK output level when it is
-    /// ENABLED and at every transfer - NOT on a CTRLB write while it is
-    /// enabled (seen on the analyzer: SCK still low 10 us after CS fell
-    /// on the first mode-3 request after init; a known AVR quirk). So a
-    /// CPOL change is applied with the peripheral disabled: preset the
-    /// SCK pin's PORT.OUT to the new idle level (what the pin shows while
-    /// the SPI is off - no glitch), disable, write the mode, re-enable.
-    /// Three register writes, no clock edges on the bus, only when the
-    /// polarity changes between transactions.
-    static void apply_mode(SpiMode mode, SpiClock clock) {
-        const bool cpol = spi_cpol(mode);
-        if (cpol != cpol_) {
-            cpol_ = cpol;
+    /// apply(): the fold, one compare per byte, and nothing written on
+    /// the unchanged path - the common one on a bus of one device.
+    [[gnu::always_inline]] static void apply(SpiMode mode, SpiClock clock) {
+        const uint8_t a = ctrla_of(clock);
+        const uint8_t b = ctrlb_of(mode);
+        if (a != ctrla_ || b != ctrlb_) {
+            reprogram(a, b);
+        }
+    }
+
+    /// The change path, out of line. SCK must already sit at the new
+    /// mode's idle level (CPOL) when CS falls: devices that latch their
+    /// SPI mode from SCK at the CS edge (MCP3550: mode 0,0 vs 1,1)
+    /// otherwise start the transaction in the wrong mode. The AVR SPI
+    /// updates the SCK output level when it is ENABLED and at every
+    /// transfer - NOT on a CTRLB write while it is enabled (seen on the
+    /// analyzer: SCK still low 10 us after CS fell on the first mode-3
+    /// request after init; a known AVR quirk). So a CPOL change is
+    /// applied with the peripheral disabled: preset the SCK pin's
+    /// PORT.OUT to the new idle level (what the pin shows while the SPI
+    /// is off - no glitch), disable, write the mode, re-enable. Three
+    /// register writes, no clock edges on the bus, only when the
+    /// polarity changes between transactions; a rate or a CPHA change
+    /// is two stores with the instance enabled, as the resource's own
+    /// clock() and mode() verbs do.
+    [[gnu::noinline]] static void reprogram(uint8_t a, uint8_t b) {
+        auto& s = S::regs();
+        if (((b ^ ctrlb_) & 0x02u) != 0) {   // MODE bit 1 is CPOL
             if constexpr (route != SpiRoute::none) {
                 constexpr SpiPin sc = spi_pin(n, route, SpiSignal::sck);
                 if constexpr (sc.bonded) {
                     volatile PORT_t& port = port_by_letter(sc.port);
-                    if (cpol) port.OUTSET = static_cast<uint8_t>(1u << sc.pin);
+                    if ((b & 0x02u) != 0) port.OUTSET = static_cast<uint8_t>(1u << sc.pin);
                     else port.OUTCLR = static_cast<uint8_t>(1u << sc.pin);
                 }
             }
-            S::enable(false);
+            s.CTRLA = static_cast<uint8_t>(a & ~SPI_ENABLE_bm);
         }
-        S::mode(mode);
-        S::clock(clock);
-        S::enable(true);
+        s.CTRLB = b;
+        s.CTRLA = a;
+        ctrla_ = a;
+        ctrlb_ = b;
     }
 
-    /// One polled byte: write, spin on the completion flag (~1 byte
-    /// time), read back. Reading INTFLAGS (IF set) then DATA is the IF
-    /// clear sequence.
-    static uint8_t xfer(uint8_t out) {
-        S::write(out);
-        while (!S::if_flag()) {}
-        return S::read();
+    /// One polled burst of count >= 1 bytes, the loop of 28.3.2.1.2: the
+    /// first byte into the idle shifter; then, per byte, the FIFO
+    /// drained to empty, DREIF waited for, the byte written - two in
+    /// flight, the wire busy while this loop runs its turn; at the end
+    /// TXCIF (shifter and buffer both empty) and the last one or two
+    /// received bytes popped. The shape is a template parameter so that
+    /// no null test runs inside: `has_out` false clocks 0xFF, `has_in`
+    /// false discards. The spin is not bounded: with SSD set nothing
+    /// can take the clock generator from this host (28.3.2.1.3), and the
+    /// host clocks itself, so a transfer written always completes.
+    template <bool has_out, bool has_in>
+    [[gnu::always_inline]] static void burst(const uint8_t* out, uint8_t* in, uint16_t count) {
+        (void)out;
+        (void)in;
+        auto& s = S::regs();
+        // TXCIF is a condition the register keeps; BUFOVF with it, so
+        // that a flag read after this burst speaks of this burst.
+        s.INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_BUFOVF_bm);
+        s.DATA = has_out ? *out++ : 0xFF;
+        while (--count != 0) {
+            uint8_t f = s.INTFLAGS;
+            while ((f & SPI_RXCIF_bm) != 0) {
+                if constexpr (has_in) {
+                    *in++ = s.DATA;
+                } else {
+                    (void)s.DATA;
+                }
+                f = s.INTFLAGS;
+            }
+            while ((f & SPI_DREIF_bm) == 0) {
+                f = s.INTFLAGS;
+            }
+            s.DATA = has_out ? *out++ : 0xFF;
+        }
+        while ((s.INTFLAGS & SPI_TXCIF_bm) == 0) {
+        }
+        uint8_t f = s.INTFLAGS;
+        while ((f & SPI_RXCIF_bm) != 0) {
+            if constexpr (has_in) {
+                *in++ = s.DATA;
+            } else {
+                (void)s.DATA;
+            }
+            f = s.INTFLAGS;
+        }
     }
 
-    static uint8_t first_byte() { return in_cmd_ ? req_.cmd.get()[0] : data_byte(0); }
-
-    static uint8_t next_byte() {
-        return in_cmd_ ? req_.cmd.get()[pos_] : data_byte(pos_);
+    /// The pump's launch: the tenure's fields copied out of the lent
+    /// request (the pins; the data phase's spans and length, kept aside
+    /// while a command phase runs), the phase counters set, the write-one
+    /// flags cleared, RXCIE armed, and up to two bytes written - the
+    /// shifter's and the buffer's. A command phase never writes ahead of
+    /// its own end: the D/C edge must land between its last byte and
+    /// the data phase's first, so the data phase starts in the handler.
+    static void launch(const Request& r) {
+        cs_ = r.cs;
+        dc_ = r.dc;
+        if (r.cmd_len != 0) {
+            in_cmd_ = true;
+            out_ = r.cmd.get();
+            in_ = nullptr;
+            to_write_ = r.cmd_len;
+            to_read_ = r.cmd_len;
+            tx_ = r.tx.get();
+            rx_ = r.rx.get();
+            len_ = r.len;
+        } else {
+            in_cmd_ = false;
+            out_ = r.tx.get();
+            in_ = r.rx.get();
+            to_write_ = r.len;
+            to_read_ = r.len;
+        }
+        auto& s = S::regs();
+        s.INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_SSIF_bm | SPI_BUFOVF_bm);
+        s.INTCTRL = SPI_RXCIE_bm;          // the host owns the register: one store
+        write_next();
+        if (to_write_ != 0) {
+            write_next();
+        }
     }
 
-    static uint8_t data_byte(uint16_t i) {
-        return (req_.tx.get() != nullptr) ? req_.tx.get()[i] : 0xFF;
+    /// The next byte of the current phase into DATA: the source's, or a
+    /// dummy where the phase has none.
+    [[gnu::always_inline]] static void write_next() {
+        uint8_t v = 0xFF;
+        if (out_ != nullptr) {
+            v = *out_++;
+        }
+        S::regs().DATA = v;
+        --to_write_;
     }
 
-    static inline Request req_{};
-    static inline uint16_t pos_ = 0;
+    // The tenure: what the pump keeps of a request past start().
+    static inline PinRef cs_{};
+    static inline PinRef dc_{};
+    static inline const uint8_t* tx_ = nullptr;   ///< the data phase, waiting behind a command phase
+    static inline uint8_t* rx_ = nullptr;
+    static inline uint16_t len_ = 0;
+    // The current phase.
+    static inline const uint8_t* out_ = nullptr;  ///< next byte to write; null = 0xFF
+    static inline uint8_t* in_ = nullptr;         ///< next received byte's home; null = discard
+    static inline uint16_t to_write_ = 0;
+    static inline uint16_t to_read_ = 0;
     static inline bool in_cmd_ = false;
-    static inline bool cpol_ = false;           // init() leaves mode 0: SCK low
+    // The register pair last written (init() reads it back once).
+    static inline uint8_t ctrla_ = 0;
+    static inline uint8_t ctrlb_ = 0;
     static inline uint8_t cycles_per_us_ = 1;   // from Clock::hz at init()
     static inline uint32_t clk_per_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;

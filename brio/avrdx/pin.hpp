@@ -43,16 +43,25 @@ namespace brio {
 /// erratum DS80000915F 2.2.4 loses after a store to an address >= 64.
 /// OUTSET/OUTCLR sit in the extended I/O space (PORTA at 0x0400), and
 /// the store is one STD: 1 cycle against the LDD/OR/STD's 4.
+///
+/// The two edges are forced inline: left to -Os, gcc outlines the body
+/// behind its four call sites and an edge costs the CALL/RET on top of
+/// the body (counted at 22 cycles from a request on the stack), and the
+/// one CALL makes an interrupt handler that drives a select save the
+/// whole caller-clobbered register set (docs/avrdx/spi.md). Inline, an
+/// edge is the pointer's two loads, the null test, the mask's load and
+/// the store; the null test stays a predictable branch, which is what
+/// makes an absent D/C pin cost one branch and not a verb.
 struct PinRef {
     volatile PORT_t* port = nullptr;
     uint8_t mask = 0;
 
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (port != nullptr) {
             port->OUTSET = mask;
         }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (port != nullptr) {
             port->OUTCLR = mask;
         }

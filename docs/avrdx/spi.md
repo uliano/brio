@@ -97,7 +97,7 @@ RUNSTDBY control of its own.
 | `spi_max_host_sck_hz`, `spi_max_client_sck_hz` | the two ceilings of the timing tables |
 | `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
 | `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
-| `SpiHost<n, route>` | the transfer ENGINE: `Request` descriptors, `start()`, `isr()`, `status()` (always `spi_ok` here - no DMA path, no fault of its own; the verb keeps the app glue spelled as on every stratum), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp): interrupt silenced and cleared, a demoted host re-armed, the select window closed |
+| `SpiHost<n, route>` | the transfer ENGINE, the instance in BUFFER MODE: `Request` descriptors (21 bytes, no padding: two `PinRef`s, three pointers, the lengths, the reply, four settings - the field names every stratum shares), `start()` (a polled request completes inside it reading the lent request and copying nothing; the pump copies its tenure's fields at launch), `isr()` (the RXCIE pump: one interrupt per received byte, two bytes in flight), `status()` (always `spi_ok` here - no DMA path, no fault of its own; the verb keeps the app glue spelled as on every stratum), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp): the pump's interrupt silenced, the flags cleared and the FIFO drained, a demoted host re-armed, the select window closed |
 | `SpiClient<n, route>` | the client side: `selected()`, `preload()`, `exchange()`, the buffer-mode readbacks, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
 
 Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
@@ -226,7 +226,105 @@ select comes back high after each transaction, a command phase reaches
 the wire, a zero-length request completes without touching it, and a
 request faster than the engine's ceiling is slowed to the ceiling. Under
 a 24 -> 12 -> 24 MHz rebase a 1.5 MHz ceiling re-picks CLK_PER/16 ->
-CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz.
+CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz. Those
+verdicts were taken with the engine running the instance in normal mode;
+the engine now runs it in buffer mode (below) and the suite's letter `j`
+is owed a run.
+
+### The engine's cost, counted
+
+Every number in this section is COUNTED in the release listing of
+`bench_avr` (`-Os`, the AVR128DB48, CLK_PER 24 MHz) and is MEASURED by
+that app's letter `e` in the recovery session, which is where the
+bench lines (benchmark.md's `spi.poll`, `spi.poll.tx`, `spi.pump` and
+`spi.req`) get their figures. The engine is written from 28.3.2.1.2 and
+28.5.5; what the silicon offers the host and how each item is used:
+
+| the silicon's offer (section) | used? | how, and what it buys |
+|---|---|---|
+| buffer mode's two-level transmitter: a write is legal while DREIF is set, the first into the idle shifter, the next into the buffer (28.3.2.1.2, 1) | YES | two bytes in flight on both completion styles: the wire runs while the software prepares the next byte, so a loop shorter than a byte time is wire-bound. Normal mode (28.3.2.1.1) had one in flight and the bus idle between bytes |
+| the two-entry receive FIFO, read at least every second transfer (28.3.2.1.2, 2 and 3); the third byte waits in the shifter and is lost when the NEXT transfer starts (28.5.5, BUFOVF) | YES | both paths drain the FIFO to empty BEFORE every write: a late loop or a late handler then idles the wire and loses nothing, because without a write no transfer starts. There is no rate threshold for the write-ahead on this family |
+| TXCIF, set when shifter and buffer are both empty (28.3.2.1.2) | YES | the end of a phase; it is a condition the register keeps, cleared write-one before each burst it is to close |
+| RXCIF as the interrupt source (28.5.3 RXCIE, 28.5.5) | YES | the pump's one interrupt per received byte; the handler pops the FIFO's head and writes the byte two ahead. The vector needs no flag read: entry, then DATA |
+| DREIE and TXCIE | no | DREIF would wake a pump that has nothing left to write and TXCIF would need a second enable at the end of a phase; RXCIF alone carries both the data and the completion |
+| BUFWR | no | a client bit (28.3.2.1.2: "does not affect Host mode") |
+| the SS pin as a multi-host demotion (28.3.2.1.3) | no | SSD is set: the select pad is the engine's GPIO, and the polled spin needs no bound because nothing can take the clock generator from this host |
+| IF/WRCOL, the normal layout | no | the host never returns to normal mode; the resource keeps both layouts for its own verbs and for a client |
+
+**The polled loops** (`burst<out, in>`, four shapes, inlined into
+`start()` so no test of the spans runs per byte; `start()` is 274
+instructions in all, of which one request walks one shape):
+
+| shape | cycles per byte, steady state | against the wire |
+|---|---|---|
+| write-only (`tx` set, `rx` null - the display's) | 26: INTFLAGS read, the FIFO's one pop (DATA read, INTFLAGS read again), DREIF already up, LD, the DATA store, the loop's compare | wire-bound from CLK_PER/4 (32 a byte); at CLK_PER/2 (16) the loop is the limit at about 60 per cent of the wire |
+| full duplex (both set) | 29 to 30: the pop stored through a second pointer | wire-bound from CLK_PER/4 with two cycles to spare |
+| read-only (`tx` null) | 27: a constant 0xFF written | wire-bound from CLK_PER/4 |
+
+The old loop (`xfer()`: a CALL per byte, write DATA, spin IF, read
+DATA) cost 26 cycles of idle bus per byte on top of the wire - 55
+measured at CLK_PER/4, 58 per cent of the bus; the data sheet's own
+normal-mode sequence as a bare loop counts 21 above the wire (53 a byte
+at CLK_PER/4), and its buffer-mode sequence as a bare loop counts 31 a
+byte full duplex - within two cycles of the engine's, which is the same
+loop, the data sheet being this family's vendor.
+
+**A polled request's fixed cost** - the price of a DCS command, one
+command byte and two of data at CLK_PER/16, the select and the D/C on
+real pads (`spi.req`, n = 3): about 205 cycles above the wire's 384,
+counted along the executed path: 95 before the first byte (the entry,
+the length test, `apply()`'s fold and compare at 34 with no register
+access, the two edges at 10 to 14 each, the setup test, the burst's
+prologue), 56 between the phases (the TXCIF wait's last turn, the
+command's reply popped, the D/C edge, the data burst's prologue) and 56
+after the last byte (the pops, the select's edge, the return). The same
+path counted 485 on the old engine (the 21-byte copy at 126, `apply_mode`
+with four register accesses and two calls at about 60, four pin edges
+through a CALL at 25 each, a CALL per byte); the retrospective review
+measured about 670 for the whole transaction.
+
+**The pump** (`isr()`, the RXCIE handler): 71 cycles of body for a
+mid-transaction byte with both spans - the DATA pop, the store through
+`in_`, the 16-bit `to_read_` and `to_write_` kept in RAM, the byte two
+ahead loaded and written -, reached 42 cycles after the interrupt
+(the hardware entry, 15 pushes, the DATA load; the bench's instrument
+adds its stamp of some 70 cycles before the pop, letter `r`'s `stamp`
+line) and about 150 cycles of CPU per byte with the entry, the pushes,
+the pops and RETI; a handler that calls out (the app's `post<Bus>` on
+the completion edge) saves the whole caller-clobbered set whatever its
+body does. The byte two ahead is written about 105 cycles after the
+interrupt: at CLK_PER/16 (128 a byte) the write lands before the
+shifter empties, so the wire runs on, but the handler's 150 exceed the
+byte's 128 and the pump is CPU-bound by a sixth, the wire idling a few
+cycles a byte; from CLK_PER/32 (256) the wire is continuous and the
+core has room; at CLK_PER/4 (32) the bus runs near a fifth of its rate
+- polling is the bulk path, as before. What two in flight bought the
+pump is the wire running during the handler, from CLK_PER/16 up (one
+in flight left it idle for the whole handler at every rate); what it
+did not fix is one interrupt per byte, the silicon's (no DMA, no deeper
+FIFO), and the handler's own loads.
+
+**`apply()`**: the request's `mode` and `clock` folded into the two
+register bytes the block takes (CTRLA = MASTER, the PRESC/CLK2X bits
+of `spi_presc_bits()` - arithmetic on the enum, no table -, ENABLE;
+CTRLB = BUFEN, SSD, MODE), compared with the pair the engine last
+wrote: 34 cycles and no register access on the unchanged path, the
+case of a bus with one device. On a change the two bytes are stored,
+and when CPOL moves the SCK pad is preset and the instance disabled
+around the store (the quirk under "Two silicon facts" in
+[spi-bus.md](../design/spi-bus.md)).
+
+**The pins**: a `PinRef` edge inline is the pointer's two loads, the
+null test, the mask's load and one OUTSET/OUTCLR store, 10 cycles from
+a request on the stack and 13 from the engine's copy, where the
+out-of-line verb cost 22 plus the CALL; its null test is the one branch
+an absent D/C pin costs. `cs_setup_us` is tested before the delay is
+called; a nonzero setup goes through the stored-byte delay, 171 cycles
+for 1 us, a cost that stands out now that the request around it is
+about 200.
+
+**No `dma_min_frames`** on this family: there are no engines, so there
+is no fixed cost for the pump's per-byte one to be weighed against.
 
 **A caveat of the self-driven-MISO technique** (this desk, not the
 silicon): with MISO held HIGH by PORT and a TOGGLING pattern on MOSI,
@@ -365,6 +463,14 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Implemented but not bench-verified:**
 
+- the engine in buffer mode: the polled loops a byte ahead, the RXCIE
+  pump with two bytes in flight, `apply()` as the compare of two bytes,
+  the request read in place - every cost above is counted in the
+  listing and none is measured yet; `bench_avr`'s letter `e` (the four
+  bench lines, the BUFOVF flag read after every pumped run) and
+  `test_avr_spi`'s letters `j`, `l` and `m` on the desk's two boards
+  would measure it, and the display experiments' GRAM read-back would
+  judge the bytes;
 - an SPI interrupt as the wake from Idle (28.3.5's feature): the sleep
   story is [platform.md](platform.md)'s and no letter of either suite
   sleeps with a transfer pending;
