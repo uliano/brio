@@ -636,9 +636,10 @@ as they were - and AFTER, on the engines as they are:
   (the lap is now the enable alone), the pace exact to the cycle either
   way: lap to lap 122880 cycles, 0 .. 0 off, 100 kHz from TC0's overflow.
   The SPI request's launch fell by 958 cycles - the two engines' share,
-  now some fifty instructions together - and what remains (some 650) is
-  the host's own start: the 47-byte Request copied, the configuration
-  compared, the receive buffer flushed (spi.md). Per byte at 12 MHz the
+  now some fifty instructions together - and what remains is the host's
+  own start, which [spi.md](spi.md) measures and accounts for
+  (the Request's one copy, the mode-and-rate compare, the pins; its
+  letter e of the bench). Per byte at 12 MHz the
   two channels interleave at 35 cycles against the wire's 32, a
   descriptor write-back and fetch at every switch between them
   (25.6.2.5); the write-only request on ONE channel runs at 32.0, the

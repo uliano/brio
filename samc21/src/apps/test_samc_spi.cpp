@@ -319,14 +319,14 @@ bool link_xfer_bare(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
         .cs = {},
         .dc = {},
         .cmd = {},
-        .cmd_len = 0,
         .tx = lend<Lease::reply>(tx),
         .rx = lend<Lease::reply>(rx),
         .len = len,
-        .reply = {},
+        .cmd_len = 0,
+        .polled = true,
         .baud = baud,
         .mode = mode,
-        .polled = true,
+        .reply = {},
     };
     return Bus::start(r);   // polled: completes synchronously
 }
@@ -563,11 +563,11 @@ bool do_exchange(const Exchange& e) {
         Cs::clear();
         link_hold();
         DmaBus::Request r{
-            .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+            .cs = {}, .dc = {}, .cmd = {},
             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx)),
             .rx = lend<Lease::reply>(xrx),
-            .len = n, .reply = {},
-            .baud = e.baud, .mode = e.host_mode, .polled = true,
+            .len = n, .cmd_len = 0, .polled = true, .baud = e.baud,
+            .mode = e.host_mode, .reply = {},
         };
         (void)DmaBus::start(r);
         link_hold();
@@ -1242,14 +1242,14 @@ bool loopback_burst(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
         .cs = {},
         .dc = {},
         .cmd = {},
-        .cmd_len = 0,
         .tx = lend<Lease::reply>(tx),
         .rx = lend<Lease::reply>(rx),
         .len = len,
-        .reply = {},
+        .cmd_len = 0,
+        .polled = true,
         .baud = baud,
         .mode = mode,
-        .polled = true,
+        .reply = {},
     };
     return Loop::start(r);
 }
@@ -1289,12 +1289,11 @@ void tf_wireless() {
     if (ruler_ok) {
         auto timed = [&](uint8_t setup) {
             Loop::Request r{
-                .cs = {}, .dc = {}, .cs_setup_us = setup,
-                .cmd = {}, .cmd_len = 0,
+                .cs = {}, .dc = {}, .cmd = {},
                 .tx = lend<Lease::reply>(static_cast<const uint8_t*>(lb_tx)),
                 .rx = lend<Lease::reply>(lb_rx),
-                .len = 16, .reply = {},
-                .baud = command_baud, .mode = SpiMode::mode0, .polled = true,
+                .len = 16, .cmd_len = 0, .polled = true, .cs_setup_us = setup,
+                .baud = command_baud, .mode = SpiMode::mode0, .reply = {},
             };
             const uint32_t t0 = wall();
             (void)Loop::start(r);
@@ -1549,17 +1548,17 @@ private:
             .cs = {},
             .dc = {},
             .cmd = {},
-            .cmd_len = 0,
             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx[i])),
             .rx = lend<Lease::reply>(rx[i]),
             .len = payload,
-            .reply = reply_to<Driver, SpiDone>(),
-            .baud = command_baud,
-            .mode = SpiMode::mode0,
+            .cmd_len = 0,
             // The ISR PUMP, deliberately: this is where the engine's
             // asynchronous half meets the arbiter's, which is the shape
             // util/bus_master.hpp was written for.
             .polled = false,
+            .baud = command_baud,
+            .mode = SpiMode::mode0,
+            .reply = reply_to<Driver, SpiDone>(),
         };
     }
 };
@@ -1649,14 +1648,11 @@ void tg_kernel() {
     kl::SpiArb::init();
     {
         auto r = Loop::Request{
-            .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+            .cs = {}, .dc = {}, .cmd = {},
             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(kl::tx[0])),
             .rx = lend<Lease::reply>(kl::rx[0]),
-            .len = kl::payload,
-            .reply = reply_to<kl::Driver, SpiDone>(),
-            .baud = 255,
-            .mode = SpiMode::mode0,
-            .polled = false,
+            .len = kl::payload, .cmd_len = 0, .polled = false, .baud = 255,
+            .mode = SpiMode::mode0, .reply = reply_to<kl::Driver, SpiDone>(),
         };
         post<kl::SpiArb>(r);
     }
@@ -1717,11 +1713,11 @@ const uint8_t cmd3[3] = {0x5A, 0x0F, 0x33};
 
 bool polled_req(const uint8_t* txp, uint8_t* rxp, uint16_t len, uint8_t baud) {
     DmaLoop::Request r{
-        .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+        .cs = {}, .dc = {}, .cmd = {},
         .tx = lend<Lease::reply>(txp),
         .rx = lend<Lease::reply>(rxp),
-        .len = len, .reply = {},
-        .baud = baud, .mode = SpiMode::mode0, .polled = true,
+        .len = len, .cmd_len = 0, .polled = true, .baud = baud,
+        .mode = SpiMode::mode0, .reply = {},
     };
     return DmaLoop::start(r);
 }
@@ -1766,13 +1762,11 @@ void th_dma() {
     for (uint8_t i = 0; i < 16; ++i) dh::rx[i] = 0xEE;
     {
         DmaLoop::Request r{
-            .cs = {}, .dc = {},
-            .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
-            .cmd_len = 3,
+            .cs = {}, .dc = {}, .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
             .rx = lend<Lease::reply>(dh::rx),
-            .len = 16, .reply = {},
-            .baud = command_baud, .mode = SpiMode::mode0, .polled = true,
+            .len = 16, .cmd_len = 3, .polled = true, .baud = command_baud,
+            .mode = SpiMode::mode0, .reply = {},
         };
         ok = DmaLoop::start(r) && DmaLoop::status() == spi_ok;
     }
@@ -1820,13 +1814,11 @@ void th_dma() {
     dh::host_live = true;
     {
         DmaLoop::Request r{
-            .cs = {}, .dc = {},
-            .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
-            .cmd_len = 3,
+            .cs = {}, .dc = {}, .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
             .rx = lend<Lease::reply>(dh::rx),
-            .len = 24, .reply = {},
-            .baud = command_baud, .mode = SpiMode::mode0, .polled = false,
+            .len = 24, .cmd_len = 3, .polled = false, .baud = command_baud,
+            .mode = SpiMode::mode0, .reply = {},
         };
         ok = !DmaLoop::start(r);   // asynchronous: false = running on the ISRs
     }
@@ -1855,24 +1847,27 @@ void th_dma() {
     // request of n frames at 100 kHz, ISR-style, timed in CORE cycles -
     // the clock SCK is divided from, so a frame is exactly 8 x 480 of them
     // - from start() to the completion edge: n frames and a constant, not
-    // n - 1.
+    // n - 1. The lengths start at dma_min_frames: a shorter data phase
+    // takes the byte pump and its RXC, and this is the ENGINE's edge.
     {
         constexpr uint8_t slow = 239;   // 100 kHz: a frame is 80 us
         constexpr uint32_t frame = 8u * (SysClock::hz / spi_sck_hz(SysClock::hz, slow));
         // The first request moves the bus to this rate (apply()'s disable
         // and enable), so it is spent and the next two are timed.
         uint32_t took[3] = {0, 0, 0};
-        static constexpr uint16_t ns[3] = {2, 2, 6};
+        constexpr uint16_t short_n = DmaLoop::dma_min_frames;
+        constexpr uint16_t long_n = short_n + 4u;
+        static constexpr uint16_t ns[3] = {short_n, short_n, long_n};
         bool done_all = true;
         for (uint8_t k = 0; k < 3; ++k) {
             dh::request_done = false;
             dh::host_live = true;
             DmaLoop::Request r{
-                .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+                .cs = {}, .dc = {}, .cmd = {},
                 .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
                 .rx = {},
-                .len = ns[k], .reply = {},
-                .baud = slow, .mode = SpiMode::mode0, .polled = false,
+                .len = ns[k], .cmd_len = 0, .polled = false, .baud = slow,
+                .mode = SpiMode::mode0, .reply = {},
             };
             const uint32_t t0 = Ticker::cycles();
             (void)DmaLoop::start(r);
@@ -1884,14 +1879,14 @@ void th_dma() {
             done_all = done_all && dh::request_done;
         }
         const uint32_t per_frame = (took[2] - took[1]) / 4u;
-        const uint32_t constant = took[1] - 2u * per_frame;
-        print(serial, "  write-only at 100 kHz: 2 frames ", took[1], ", 6 frames ", took[2],
-              " core cycles - ", per_frame, " a frame (", frame, " due), the rest ",
-              constant, crlf);
+        const uint32_t constant = took[1] - short_n * per_frame;
+        print(serial, "  write-only at 100 kHz: ", short_n, " frames ", took[1], ", ", long_n,
+              " frames ", took[2], " core cycles - ", per_frame, " a frame (", frame,
+              " due), the rest ", constant, crlf);
         bench.verdict("TXC marks the END of the last frame: each frame adds one frame "
-                      "time, and two frames take more than two",
+                      "time, and n frames take more than n",
                       done_all && per_frame + frame / 100u >= frame &&
-                          per_frame <= frame + frame / 100u && took[1] > 2u * frame);
+                          per_frame <= frame + frame / 100u && took[1] > short_n * frame);
     }
 
     // 6. The ladder to the generator's top, timed on the crystal. The

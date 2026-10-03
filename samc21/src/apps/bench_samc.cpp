@@ -145,6 +145,35 @@
 //                  3 MHz, no command phase, no chip select, ISR-style;
 //        spi.dma.tx  the same, write-only (null rx): ONE channel, TXC the
 //                  edge.
+//   e  THE SPI HOST ABOVE THE WIRE (samc21/spi.hpp, docs/samc21/spi.md):
+//      the ENGINELESS host on letter d's pads (the same SERCOM1, PA16
+//      MOSI, PA17 SCK, PA19 MISO floating - the time is the wire's, the
+//      bytes are not judged), so what is measured is the polled loop and
+//      the byte pump and nothing of the DMAC. Every line the BEST of 8 by
+//      wall; the two rates are letter d's, BAUD 1 (12 MHz, f_ref/4) and
+//      BAUD 7 (3 MHz, f_ref/16); a frame is eight bits on this family:
+//        spi.poll  a POLLED WRITE data phase (tx set, rx null - the
+//                  display's bulk shape) of 16 and 256 frames, no command
+//                  phase, no select: wall against the wire's cycles is the
+//                  loop's shape; STATUS.BUFOVF is cleared before and read
+//                  after every run and the line after counts the runs it
+//                  stood - the overrun the two-level receive buffer raises
+//                  if a loop ever leaves more unread than it holds;
+//        spi.poll.rx  the same, the RECEIVE shape (tx and rx both set);
+//        spi.pump  the same two sizes and rates ISR-style (tx and rx), the
+//                  thread idling as letter d does: irq and isr are the
+//                  pump's shape (one interrupt a frame), busy its CPU cost;
+//                  BUFOVF read after every run as above;
+//        spi.req   THE FIXED COST OF A REQUEST, the price of a DCS command:
+//                  a polled request of 1, 3 and 16 bytes (cmd_len 1, len 0,
+//                  2 and 15, the D/C scripted) at 3 MHz, the select on PA18
+//                  (SERCOM1's SS pad, which a software-select host leaves
+//                  an ordinary GPIO) and the D/C on PB23 (the board's LED):
+//                  two real pads, two real edges each. The line after prints
+//                  wall minus the wire's cycles (128 a byte at 3 MHz) - the
+//                  instrument's `interval` of letter r is inside it;
+//        spi.req.eng  the same three requests on letter d's ENGINED host:
+//                  what a short request costs when the engines are named.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -172,7 +201,8 @@
 //           bytes - so x is about 2.5 there and the fixed cost is wall minus
 //           five cycles a beat.
 //   paced   4 bytes a period of TC0's overflow: 400 000 B/s.
-//   spi.dma SCK / 8 bytes a second: one frame of eight bits a byte.
+//   spi.dma, spi.poll, spi.poll.rx, spi.pump, spi.req  SCK / 8 bytes a
+//           second: one frame of eight bits a byte.
 //   r and t wire=0: an instrument's cost and an idle second carry no
 //           bytes.
 //
@@ -785,12 +815,13 @@ void spi_dma() {
                     [frames, baud, duplex] {
                         spi_done = false;
                         SpiHw::Request r{
-                            .cs = {}, .dc = {}, .cmd = {}, .cmd_len = 0,
+                            .cs = {}, .dc = {}, .cmd = {},
                             .tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx)),
                             .rx = duplex ? lend<Lease::reply>(static_cast<uint8_t*>(spi_rx))
-                                         : Borrowed<uint8_t, Lease::reply>{},
-                            .len = frames, .reply = {},
-                            .baud = baud, .mode = SpiMode::mode0, .polled = false,
+                                         : Borrowed<uint8_t,
+Lease::reply>{},
+                            .len = frames, .cmd_len = 0, .polled = false, .baud = baud,
+                            .mode = SpiMode::mode0, .reply = {},
                         };
                         return !SpiHw::start(r);
                     },
@@ -822,6 +853,181 @@ void td_dma() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// e - the SPI host above the wire: spi.poll, spi.pump, spi.req
+// =============================================================================
+namespace ee {
+
+/// The ENGINELESS host on letter d's pads: the polled loop and the byte
+/// pump, nothing of the DMAC. The two hosts share SERCOM1 and are never up
+/// at once; `live` routes SERCOM1_Handler to this one.
+using SpiPoll = SpiHost<1, dd::spi_pads>;
+volatile bool live = false;
+volatile bool done = false;
+
+/// The two real pads of spi.req: the select on SERCOM1's SS pad, which a
+/// software-select host never claims, and the D/C on the board's LED.
+using CsPin = Pin<'A', 18>;
+using DcPin = Pin<'B', 23>;
+
+constexpr uint8_t bauds[] = {1, 7};   // 12 MHz (f_ref/4) and 3 MHz (f_ref/16)
+constexpr uint16_t sizes_e[] = {16, 256};
+constexpr uint8_t req_baud = 7;       // spi.req at 3 MHz: 128 cycles a byte
+constexpr uint8_t cmd_byte = 0x2C;    // a DCS memory write, as a command byte
+
+/// A request over the shared buffers, the fields assigned by NAME (the
+/// descriptor's order is the host's own business).
+template <typename Host>
+typename Host::Request request(uint16_t len, bool duplex, uint8_t baud, bool polled) {
+    typename Host::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(dd::spi_tx));
+    r.rx = duplex ? lend<Lease::reply>(static_cast<uint8_t*>(dd::spi_rx))
+                  : Borrowed<uint8_t, Lease::reply>{};
+    r.len = len;
+    r.baud = baud;
+    r.mode = SpiMode::mode0;
+    r.polled = polled;
+    return r;
+}
+
+/// The wire's cycles for n frames at this BAUD.
+uint32_t wire_cycles(uint32_t n, uint8_t baud) {
+    return n * 8u * (SysClock::hz / spi_sck_hz(SysClock::hz, baud));
+}
+
+/// spi.poll (the WRITE shape: tx set, rx null) and spi.poll.rx (the
+/// RECEIVE shape: tx and rx set), two sizes, two rates, the best of 8;
+/// STATUS.BUFOVF cleared before and read after every run.
+void poll() {
+    for (const bool receive : {false, true}) {
+        for (const uint8_t baud : bauds) {
+            const uint32_t sck = spi_sck_hz(SysClock::hz, baud);
+            for (const uint16_t n : sizes_e) {
+                (void)drain();
+                BenchSample best{};
+                uint8_t overruns = 0;
+                Interval iv;
+                for (uint8_t run = 0; run < 8u; ++run) {
+                    SpiPoll::Resource::clear_status(SpiStatus::overflow);
+                    const auto r = request<SpiPoll>(n, receive, baud, true);
+                    iv.start();
+                    (void)SpiPoll::start(r);
+                    const BenchSample s = iv.stop();
+                    asm volatile("" ::: "memory");
+                    if (SpiPoll::Resource::overflow_flag()) {
+                        ++overruns;
+                    }
+                    if (run == 0u || s.wall < best.wall) {
+                        best = s;
+                    }
+                }
+                bench_line(serial, receive ? "spi.poll.rx" : "spi.poll", n, best, Ruler::hz(),
+                           sck / 8u);
+                print(serial, "  ", receive ? "receive (tx and rx)" : "write (rx null)", ", SCK ",
+                      sck, " Hz, wire ", wire_cycles(n, baud), " cycles, above it ",
+                      best.wall - wire_cycles(n, baud), ", BUFOVF after ", overruns, " of 8 runs",
+                      crlf);
+            }
+        }
+    }
+}
+
+/// spi.pump: the byte pump ISR-style, the thread idling; BUFOVF read after
+/// every run.
+void pump() {
+    for (const uint8_t baud : bauds) {
+        const uint32_t sck = spi_sck_hz(SysClock::hz, baud);
+        for (const uint16_t n : sizes_e) {
+            (void)drain();
+            uint32_t launch = 0;
+            bool ok = false;
+            uint8_t overruns = 0;
+            // best_dma's 8 runs; the overflow flag is cleared before each
+            // and read after it by the completion wait's done lambda.
+            const BenchSample s = dd::best_dma(
+                [n, baud] {
+                    done = false;
+                    SpiPoll::Resource::clear_status(SpiStatus::overflow);
+                    const auto r = request<SpiPoll>(n, true, baud, false);
+                    return !SpiPoll::start(r);
+                },
+                [&overruns] {
+                    if (!done) {
+                        return false;
+                    }
+                    if (SpiPoll::Resource::overflow_flag()) {
+                        ++overruns;
+                        SpiPoll::Resource::clear_status(SpiStatus::overflow);
+                    }
+                    return true;
+                },
+                launch, ok);
+            bench_line(serial, "spi.pump", n, s, Ruler::hz(), sck / 8u);
+            print(serial, "  full duplex, SCK ", sck, " Hz: launch ", launch, " cycles, completions ",
+                  ok ? "all" : "MISSING", ", wire ", wire_cycles(n, baud), " cycles, BUFOVF after ",
+                  overruns, " of 8 runs", crlf);
+        }
+    }
+}
+
+/// spi.req: the fixed cost of a polled request with a scripted D/C and a
+/// real select, on the engineless host and on the engined one.
+template <typename Host>
+void req(const char* op) {
+    static constexpr uint16_t lens[] = {0, 2, 15};
+    static const uint8_t cmd[1] = {cmd_byte};
+    for (const uint16_t len : lens) {
+        (void)drain();
+        const uint32_t bytes = 1u + len;
+        const BenchSample s = best_of_8([len] {
+            auto r = request<Host>(len, false, req_baud, true);
+            r.cs = CsPin::ref();
+            r.dc = DcPin::ref();
+            r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(cmd));
+            r.cmd_len = 1;
+            (void)Host::start(r);
+        });
+        bench_line(serial, op, bytes, s, Ruler::hz(), spi_sck_hz(SysClock::hz, req_baud) / 8u);
+        print(serial, "  cmd 1 + data ", len, ", status ", Host::status(), ": fixed = wall - wire = ",
+              s.wall - wire_cycles(bytes, req_baud), " cycles", crlf);
+    }
+}
+
+}  // namespace ee
+
+void te_spi_host() {
+    for (uint32_t i = 0; i < 256u; ++i) {
+        dd::spi_tx[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    ee::CsPin::output();
+    ee::CsPin::set();
+    ee::DcPin::output();
+    ee::DcPin::clear();
+    ee::live = true;
+    if (!ee::SpiPoll::init(clock)) {
+        print(serial, "  the engineless SPI host did not come up", crlf);
+        bench.verdict("ran", false);
+        return;
+    }
+    ee::poll();
+    ee::pump();
+    ee::req<ee::SpiPoll>("spi.req");
+    ee::SpiPoll::release();
+    ee::live = false;
+
+    if (!Dmac::init() || !dd::SpiHw::init(clock)) {
+        print(serial, "  the engined SPI host did not come up", crlf);
+        bench.verdict("ran", false);
+        return;
+    }
+    ee::req<dd::SpiHw>("spi.req.eng");
+    dd::SpiHw::release();
+    Dmac::release();
+    ee::CsPin::release();
+    ee::DcPin::release();
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console SERCOM5 ", console_baud, " 8N1 (BAUD gives ",
@@ -848,7 +1054,11 @@ extern "C" BENCH_PLACEMENT void DMAC_Handler() {
 }
 extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
     spi_meter.enter();
-    if (dd::SpiHw::isr()) {
+    if (ee::live) {
+        if (ee::SpiPoll::isr()) {
+            ee::done = true;
+        }
+    } else if (dd::SpiHw::isr()) {
         dd::spi_done = true;
     }
     spi_meter.leave();
@@ -870,6 +1080,7 @@ int main() {
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA: copy, fill, paced, spi.dma", td_dma);
+    bench.letter('e', "the SPI host above the wire: spi.poll, spi.pump, spi.req", te_spi_host);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED", " tick=",

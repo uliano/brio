@@ -825,11 +825,19 @@ public:
     static void enable_txc_interrupt(bool on) { enable_interrupt(SpiFlag::txc, on); }
     static void enable_ssl_interrupt(bool on) { enable_interrupt(SpiFlag::ssl, on); }
 
-    static bool dre_flag() { return (regs().SERCOM_INTFLAG & SpiFlag::dre) != 0u; }
-    static bool rxc_flag() { return (regs().SERCOM_INTFLAG & SpiFlag::rxc) != 0u; }
+    /// Inline, all three: a polled loop asks them once a character, and
+    /// a call per poll turn was a tenth of the character at 12 MHz.
+    [[gnu::always_inline]] static bool dre_flag() {
+        return (regs().SERCOM_INTFLAG & SpiFlag::dre) != 0u;
+    }
+    [[gnu::always_inline]] static bool rxc_flag() {
+        return (regs().SERCOM_INTFLAG & SpiFlag::rxc) != 0u;
+    }
     /// Host: the last character has been shifted out and DATA holds
     /// nothing new. Client: the host has raised SS (32.8.6).
-    static bool txc_flag() { return (regs().SERCOM_INTFLAG & SpiFlag::txc) != 0u; }
+    [[gnu::always_inline]] static bool txc_flag() {
+        return (regs().SERCOM_INTFLAG & SpiFlag::txc) != 0u;
+    }
     static bool ssl_flag() { return (regs().SERCOM_INTFLAG & SpiFlag::ssl) != 0u; }
     static bool error_flag() { return (regs().SERCOM_INTFLAG & SpiFlag::error) != 0u; }
 
@@ -884,6 +892,17 @@ public:
  * SpiDone comes back). A zero-total-length request completes on the spot
  * without touching the wire.
  *
+ * THE REQUEST IS LENT FOR THE CALL (util/bus_master.hpp's contract): it
+ * lies in a slot of the arbiter's that stays as it is until the dispatch
+ * ends, so a POLLED request, which completes inside start(), is read
+ * through the reference and copied NOWHERE; what runs on after start()
+ * returns - the byte pump, the engines - copies the descriptor once into
+ * req_, and that copy is forty bytes of inline load-multiple/store-
+ * multiple, never a call (the layout below is why: the two PinRefs, the
+ * three spans, the lengths and the settings packed with no padding, and
+ * the compiler expands a forty-byte struct assignment inline where it
+ * called memcpy for the forty-eight it was).
+ *
  * WHY THE CHIP SELECT IS A GPIO AND NOT THE PERIPHERAL'S. CTRLB.MSSEN
  * exists and this driver exposes it - but 32.6.3.5 says hardware SS is
  * raised "for a minimum of one baud cycle between each data sent", so it
@@ -892,6 +911,33 @@ public:
  * 32.6.3.3's "host with several clients" is the
  * arrangement: MSSEN clear, one ordinary output per client.
  *
+ * TWO CHARACTERS IN FLIGHT, FROM THE CHAPTER. "The SPI is single
+ * buffered for transmitting and double buffered for receiving. When
+ * transmitting data, the Data register can be loaded with the next
+ * character to be transmitted during the current transmission" (32.6.1;
+ * 32.2: "one-level transmit buffer, two-level receive buffer"); the
+ * host's sequence is 32.6.2.6.1's: a character written to DATA moves to
+ * the shift register, DRE rises once it has (three CLK_SERCOM_APB
+ * cycles after DATA empties, 32.6.2.6.2's last sentence), and RXC rises
+ * in the clock cycle the character's last bit is shifted in, its
+ * received twin then sitting in the two-level receive buffer. So the
+ * receive shapes of the polled loop, and the pump, keep the NEXT
+ * character in DATA while the current one shifts: write k + 1 on DRE,
+ * read k on RXC, the bus never idle between characters while the
+ * software is faster than a character. THE IN-FLIGHT COUNT IS THE
+ * RECEIVE BUFFER'S DEPTH, which is what makes it safe under every
+ * interrupt of the image with no rate threshold: the polled loop runs
+ * with interrupts enabled and the pump's handler can be late, and a
+ * handler that holds either for longer than a character lets k complete
+ * into the buffer and then k + 1 - two, the buffer's two levels (32.2,
+ * 32.6.2.7) - and then the bus STOPS for want of a k + 2 nobody wrote.
+ * A late reader idles the bus; it never overflows the receiver. The
+ * transmit-only shape of the polled loop keeps two in flight on DRE
+ * alone and lets the receiver overflow in silence, drained at its tail
+ * (write_phase). Measured by bench_samc's letter e: STATUS.BUFOVF read
+ * after every polled and every pumped run, at 12 and 3 MHz, under the
+ * console's and the tick's interrupts (docs/samc21/spi.md).
+ *
  * WHY RXC AND NOT DRE DRIVES THE PUMP. The two are one interrupt line
  * here, so the choice is which condition to arm. DRE means "the
  * transmit buffer is free" - true well before the character is on the
@@ -899,9 +945,26 @@ public:
  * been fully shifted in", which on a full-duplex bus is exactly "one
  * character has moved, both ways" - and reading DATA to clear it is the
  * same access that captures the received byte. One interrupt per
- * character, with nothing to disambiguate. It does mean the receiver
+ * character, with nothing to disambiguate: the handler reads k and
+ * writes k + 2 (k + 1 is already shifting). It does mean the receiver
  * must be enabled even for a write-only transfer, which costs the DI
  * pad and nothing else.
+ *
+ * THE PHASE BOUNDARY IS WHERE THE WRITE-AHEAD STOPS. The D/C line must
+ * change between the last command character and the first data one ON
+ * THE WIRE, so the first data character is written only once the last
+ * command character has been read back (and D/C raised) - one character
+ * in flight across that one boundary, two everywhere else; a request
+ * with no command phase, or none but the command, never meets it.
+ *
+ * THE RECEIVE BUFFER IS NOT FLUSHED AT EVERY START. Every character the
+ * pump or a receive shape of the polled loop writes is read back by it,
+ * so nothing stands in the receiver when a transaction ends; the two
+ * shapes that let the receiver overflow - the polled transmit-only data
+ * phase and the WRITE-ONLY engined request (below) - each drain the
+ * two-level buffer and clear BUFOVF (32.6.2.7) at their own tail, the
+ * request that made the spill paying for it. A polled loop whose
+ * bounded spin ran out flushes too, since a character may still land.
  *
  * THE PER-REQUEST CHIP-SELECT DELAY is part of that shared descriptor:
  * the Request carries cs_setup_us, spent spinning in start() (main
@@ -919,7 +982,8 @@ public:
  * reason: an engineless build must stay byte-identical, so the slots
  * default to NoDmaEngine and every DMA branch folds away under
  * `if constexpr`). With DmaTxEngine/DmaRxEngine named, the DATA PHASE
- * of every request runs on the DMAC, ONE INTERRUPT A TRANSACTION:
+ * of a request of at least dma_min_frames runs on the DMAC, ONE
+ * INTERRUPT A TRANSACTION:
  *  - with something to RECEIVE, two channels: the RX one drains DATA on
  *    the RXC trigger, the TX one feeds it on DRE, and the transaction is
  *    complete when the RECEIVE block completes - the last character is
@@ -933,10 +997,13 @@ public:
  *    shifted out (32.8.6, measured: spi.md). One channel is also no
  *    concurrent channels at all - erratum 1.10.4's precondition - on the
  *    path a display's bulk writes take.
- * The command phase stays on the byte pump (it is a few bytes with a DC
- * flip at its end); a null tx feeds 0xFF dummies from a held source
- * address, a null rx with something to receive is not a case (null rx IS
- * write-only).
+ * A data phase SHORTER than dma_min_frames takes the pump even with the
+ * engines named: below it the engines' fixed cost per transaction
+ * outweighs the pump's cost per character (the two numbers, measured,
+ * sit beside the constant). The command phase stays on the byte pump (it
+ * is a few bytes with a DC flip at its end); a null tx feeds 0xFF dummies
+ * from a held source address, a null rx with something to receive is not
+ * a case (null rx IS write-only).
  *
  * THE DMAC BLOCK IS THE APP'S: Dmac::init() once, before any engined
  * init() - the engines arm CHANNELS of a controller somebody else owns,
@@ -954,8 +1021,9 @@ public:
  * the window (samc21/sercom.hpp): a rise latched while the channel was
  * disabled, or the trigger's selection onto a standing request, is
  * served on the enable (docs/samc21/dmac.md). So launch_dma() starts its
- * channels and kicks NOTHING. RXC starts clear (flushed) and is a clean
- * rise. A two-channel transaction completes on the
+ * channels and kicks NOTHING. RXC is clear when the engines start (the
+ * pump read every command character back) and is a clean rise. A
+ * two-channel transaction completes on the
  * DMAC's vector and a write-only one on the SERCOM's, so AN APP THAT
  * NAMES ENGINES BINDS DMAC_Handler TOO (below) - polled requests
  * included: the spin waits on a flag one of the two handlers sets.
@@ -1035,23 +1103,57 @@ public:
     /// Whether the data phase rides the DMAC (the two engine slots).
     static constexpr bool has_engines = TxEngine::present;
 
+    /// THE SHORTEST DATA PHASE THE ENGINES SERVE, in frames: below it a
+    /// request takes the byte pump even with the engines named. The
+    /// engines' fixed cost per transaction over the pump's cost per
+    /// frame, both measured by bench_samc on the ATSAMC21J18A at 48 MHz
+    /// (docs/samc21/spi.md): an engined full-duplex request of 16 frames
+    /// at 12 MHz costs 1448 cycles above the wire (letter d, spi.dma),
+    /// of which the instrument's own some 360 (letter r: the interval,
+    /// the handler's stamps, the idle window's) - 1090 the request's;
+    /// a pumped frame costs 377 cycles of CPU (letter e, spi.pump, busy
+    /// over 256 frames: the handler, its entry and exit, the turn to the
+    /// next), of which the stamp pair 151 - 226 the frame's. 1090 / 226
+    /// = 4.8: a data phase of five or more frames is cheaper on the
+    /// engines, in CPU, for an ISR-style request. (A POLLED request spins
+    /// either way, so for it the engines buy wall time alone, and only
+    /// above some sixty frames at 12 MHz - stated in the document, the
+    /// one threshold kept.)
+    static constexpr uint16_t dma_min_frames = 5;
+
+    /// THE LAYOUT IS THE COST OF A COPY: forty bytes and no padding - the
+    /// two pin references, the three spans, then every narrow field
+    /// packed, the reply capsule closing the last word. The field NAMES
+    /// are the contract every target's SpiHost shares (a device client
+    /// fills them by name); the ORDER is this family's, chosen so that
+    /// the one copy an asynchronous request pays is ten words inline.
     struct Request {
         PinRef cs;   ///< asserted low around the transaction
         PinRef dc;   ///< display D/C line; null = no such pin
+        /// Phase 1, sent with DC low; LENT until the reply lands.
+        Borrowed<const uint8_t, Lease::reply> cmd;
+        /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
+        Borrowed<const uint8_t, Lease::reply> tx;
+        /// Phase 2 in, null = discard; LENT until the reply lands.
+        Borrowed<uint8_t, Lease::reply> rx;
+        uint16_t len;      ///< phase 2 length
+        uint8_t cmd_len;   ///< phase 1 length
+
+        /// Completion style, the client's call: false = per-character
+        /// ISR pump (the kernel keeps running between characters); true
+        /// = POLLED inside start(), completing synchronously. At fast
+        /// SCK the polled loop wins on every axis - a character at
+        /// f_ref/2 is sixteen CPU cycles while an ISR entry alone costs
+        /// more. The price is that THIS dispatch blocks for the whole
+        /// transfer (bounded, chosen here); global interrupts stay
+        /// enabled throughout - only the SERCOM's own RXC is silenced.
+        bool polled = false;
+
         /// Microseconds between the CS assertion and the first clock -
         /// what a device's datasheet calls CS setup (the same field, byte
         /// for byte, in every target's Request). Spent spinning in
         /// start(), main context; 0 = none.
         uint8_t cs_setup_us = 0;
-        /// Phase 1, sent with DC low; LENT until the reply lands.
-        Borrowed<const uint8_t, Lease::reply> cmd;
-        uint8_t cmd_len;
-        /// Phase 2 out, null = 0xFF dummies; LENT until the reply lands.
-        Borrowed<const uint8_t, Lease::reply> tx;
-        /// Phase 2 in, null = discard; LENT until the reply lands.
-        Borrowed<uint8_t, Lease::reply> rx;
-        uint16_t len;   ///< phase 2 length
-        ReplyTo<SpiDone> reply;
 
         /// Per-transaction bus configuration. On a SHARED bus every
         /// device names its own speed and mode in the request, and the
@@ -1069,17 +1171,12 @@ public:
         uint8_t baud = 0;
         SpiMode mode = SpiMode::mode0;
 
-        /// Completion style, the client's call: false = per-character
-        /// ISR pump (the kernel keeps running between characters); true
-        /// = POLLED inside start(), completing synchronously. At fast
-        /// SCK the polled loop wins on every axis - a character at
-        /// f_ref/2 is sixteen CPU cycles while an ISR entry alone costs
-        /// more. The price is that THIS dispatch blocks for the whole
-        /// transfer (bounded, chosen here); global interrupts stay
-        /// enabled throughout - only the SERCOM's own RXC is silenced.
-        bool polled = false;
+        ReplyTo<SpiDone> reply;
     };
     static_assert(std::is_trivially_copyable_v<Request>);
+    // Forty bytes, no padding: the size the inline copy was counted at.
+    static_assert(sizeof(Request) == 40,
+                  "brio SpiHost: the Request grew - count its copy in the listing again");
 
     // ---- lifecycle -----------------------------------------------------------
 
@@ -1121,6 +1218,7 @@ public:
         }
 
         applied_ = boot_config();
+        applied_key_ = key_of(applied_.mode, applied_.baud);
         if (!S::configure(applied_)) {
             return false;
         }
@@ -1166,6 +1264,9 @@ public:
     static void rebase(uint32_t hz) {
         ref_hz_ = hz;
         ceiling_ = ceiling_hz_ ? spi_baud_reg(hz, ceiling_hz_) : std::optional<uint8_t>{};
+        // A slower BAUD is a LARGER register value, so the ceiling is a
+        // floor on the byte; 0 (the fastest rate) is the identity.
+        floor_ = ceiling_ ? *ceiling_ : 0u;
         // The cs_setup timing follows the clock too - the one division
         // of delay_rate() is paid here, never at wait time.
         cs_rate_ = delay_rate(hz);
@@ -1209,16 +1310,19 @@ public:
     /// requests, and the degenerate zero-length one); false when it runs
     /// on the ISR and a TransferDone will follow. That is exactly
     /// util/bus_master.hpp's engine contract.
+    ///
+    /// A polled request is read through `r` from the first field to the
+    /// last and never copied; an asynchronous one is copied into req_
+    /// right before its first character goes out, and from then on the
+    /// handlers read the copy.
     static bool start(const Request& r) {
-        req_ = r;
-        pos_ = 0;
-        in_cmd_ = (r.cmd_len > 0);
         status_ = spi_ok;
-        if (total_len() == 0) {
+        const uint16_t total = static_cast<uint16_t>(r.cmd_len + r.len);
+        if (total == 0) {
             return true;   // nothing to move: complete on the spot
         }
         apply(r.mode, clamp(r.baud));
-        if (in_cmd_) {
+        if (r.cmd_len != 0) {
             r.dc.clear();
         } else {
             r.dc.set();
@@ -1231,81 +1335,58 @@ public:
             // Ticker runs - see the class comment.
             (void)delay_us(cs_rate_, r.cs_setup_us);
         }
-        S::flush_rx();  // a stale character would be captured as this one's
 
-        if constexpr (has_engines) {
-            if (!r.polled) {
-                if (in_cmd_) {
-                    // The command phase runs on the byte pump; isr()
-                    // hands over to the engines at its end.
-                    S::enable_rxc_interrupt(true);
-                    S::data(req_.cmd.get()[0]);
-                    return false;
-                }
-                launch_dma();
-                return false;   // dma_isr() is the completion edge
-            }
-            // Polled with engines: the command phase spins per byte,
-            // the data phase spins on the DMAC's completion - which
-            // still arrives through DMAC_Handler / dma_isr(), so the
-            // binding is not optional for polled requests either.
+        if (r.polled) {
+            // Polled: silence the SERCOM's own interrupt (the bound
+            // handler would steal the characters) - global interrupts
+            // STAY ENABLED, so the ticker and anything else preempt this
+            // loop freely.
             S::enable_rxc_interrupt(false);
-            for (uint8_t i = 0; i < r.cmd_len; ++i) {
-                (void)xfer(r.cmd.get()[i]);
+            if constexpr (has_engines) {
+                if (r.len >= dma_min_frames) {
+                    polled_engined(r);
+                    r.cs.set();
+                    return true;
+                }
             }
-            r.dc.set();
-            if (r.len != 0) {
-                launch_dma();
-                spin_dma();
-            }
-            r.cs.set();
+            polled_transaction(r, total);
+            r.cs.set();   // release: transaction done
             return true;
         }
 
-        if (!r.polled) {
-            S::enable_rxc_interrupt(true);
-            S::data(first_byte());   // the ISR pumps the rest
-            return false;
-        }
-        // Polled pump: silence the SERCOM's own interrupt (the bound
-        // handler would steal the characters) - global interrupts STAY
-        // ENABLED, so the ticker and anything else preempt this loop
-        // freely.
-        S::enable_rxc_interrupt(false);
-        // The loans are VIEWS: .get() hands out the raw pointer the
-        // loops index (Borrowed is not a container).
-        for (uint8_t i = 0; i < r.cmd_len; ++i) {
-            (void)xfer(r.cmd.get()[i]);
-        }
-        r.dc.set();   // data phase (a no-op when len == 0)
-        if (r.rx.get() == nullptr && r.tx.get() != nullptr) {          // bulk write
-            const uint8_t* p = r.tx.get();
-            for (uint16_t k = r.len; k != 0; --k) {
-                (void)xfer(*p++);
-            }
-        } else if (r.rx.get() != nullptr && r.tx.get() == nullptr) {   // bulk read
-            uint8_t* p = r.rx.get();
-            for (uint16_t k = r.len; k != 0; --k) {
-                *p++ = xfer(0xFF);
-            }
-        } else {                                                       // full duplex
-            for (uint16_t i = 0; i < r.len; ++i) {
-                const uint8_t in = xfer((r.tx.get() != nullptr) ? r.tx.get()[i] : 0xFF);
-                if (r.rx.get() != nullptr) {
-                    r.rx.get()[i] = in;
-                }
+        // Asynchronous: the one copy, then the first character(s).
+        req_ = r;
+        pos_ = 0;
+        wpos_ = 0;
+        total_ = total;
+        if constexpr (has_engines) {
+            engined_ = r.len >= dma_min_frames;
+            if (engined_ && r.cmd_len == 0) {
+                launch_dma(r.tx.get(), r.rx.get(), r.len);
+                return false;   // dma_isr() is the completion edge
             }
         }
-        r.cs.set();   // release: transaction done
-        return true;
+        // The first two characters BEFORE the interrupt is armed: the
+        // handler advances the same write index, and at 12 MHz the first
+        // character is back before start() has written the second. The
+        // second waits at the phase boundary (a command phase of one).
+        push(0);
+        wpos_ = 1;
+        if (total > 1u && r.cmd_len != 1u) {
+            push(1);
+            wpos_ = 2;
+        }
+        S::enable_rxc_interrupt(true);
+        return false;
     }
 
     /// SERCOM interrupt body - call from SERCOMn_Handler().
     ///
     /// ONE VECTOR, so the body starts by asking which source is both
-    /// raised AND enabled. Only RXC is ever armed by this engine (see the
-    /// class comment), and reading DATA is both the capture and the
-    /// acknowledgement.
+    /// raised AND enabled. Only RXC is ever armed by the pump (and TXC by
+    /// a write-only engined request), and reading DATA is both the
+    /// capture and the acknowledgement. The handler reads character k,
+    /// then writes k + 2: k + 1 is already shifting (the class comment).
     ///
     /// Returns true when the transaction just completed (CS released):
     /// the edge on which the app's glue posts TransferDone to the bus AO.
@@ -1320,45 +1401,50 @@ public:
             return false;
         }
         const uint8_t in = static_cast<uint8_t>(S::data());
-
-        if constexpr (has_engines) {
-            // Only the COMMAND phase ever runs on this pump: at its end
-            // the engines take the data phase and this interrupt goes
-            // quiet. The received byte is the command's echo - discarded,
-            // as the engineless path discards it too.
-            (void)in;
-            ++pos_;
-            if (pos_ >= req_.cmd_len) {
-                in_cmd_ = false;
-                S::enable_rxc_interrupt(false);
-                req_.dc.set();
-                if (req_.len == 0) {
-                    req_.cs.set();   // a command-only request: done here
-                    return true;
+        const uint16_t k = pos_;
+        const uint8_t cmd_len = req_.cmd_len;
+        if (k >= cmd_len && req_.rx.get() != nullptr) {
+            req_.rx.get()[k - cmd_len] = in;
+        }
+        pos_ = static_cast<uint16_t>(k + 1u);
+        if (pos_ == cmd_len) {
+            req_.dc.set();   // command phase over, on the wire
+            if constexpr (has_engines) {
+                if (engined_) {
+                    // The engines take the data phase; this interrupt
+                    // goes quiet until dma_isr() ends the transaction.
+                    S::enable_rxc_interrupt(false);
+                    launch_dma(req_.tx.get(), req_.rx.get(), req_.len);
+                    return false;
                 }
-                launch_dma();
-                return false;        // dma_isr() is the completion edge
             }
-            S::data(req_.cmd.get()[pos_]);
-            return false;
         }
-
-        if (!in_cmd_ && req_.rx.get() != nullptr) {
-            req_.rx.get()[pos_] = in;
-        }
-        ++pos_;
-
-        if (in_cmd_ && pos_ >= req_.cmd_len) {
-            in_cmd_ = false;
-            pos_ = 0;
-            req_.dc.set();   // command phase over
-        }
-        if (!in_cmd_ && pos_ >= req_.len) {
+        if (pos_ == total_) {
             S::enable_rxc_interrupt(false);
             req_.cs.set();   // release: transaction done
             return true;
         }
-        S::data(next_byte());
+        // The write-ahead: k + 2 in the steady state, one character per
+        // interrupt. At the phase boundary the first data character was
+        // held until the last command one was back - which is now - and
+        // two go out, so that two are in flight again.
+        uint16_t w = wpos_;
+        if (w == total_) {
+            return false;   // the last two are already in flight
+        }
+        if (w == cmd_len) {
+            if (pos_ < cmd_len) {
+                return false;   // held: the command phase is still on the wire
+            }
+            push(w);
+            ++w;
+            if (w == total_) {
+                wpos_ = w;
+                return false;
+            }
+        }
+        push(w);
+        wpos_ = static_cast<uint16_t>(w + 1u);
         return false;
     }
 
@@ -1431,7 +1517,6 @@ public:
             RxEngine::arm(S::data_address(), S::dma_rx_trigger());
         }
         Nvic::disable(S::irq());
-        in_cmd_ = false;
         dma_active_ = false;
         dma_done_ = false;
         bool ok = S::reset();
@@ -1494,23 +1579,24 @@ private:
      * new data in DATA" (32.8.6), measured to rise after the LAST frame:
      * enable to TXC is n frames plus a constant at every n and rate
      * (spi.md). The receiver stays on and its two-level buffer overflows
-     * harmlessly (ERROR is never armed, and start() flushes it). TXC is
+     * harmlessly (ERROR is never armed; finish_dma() drains it). TXC is
      * cleared BEFORE its interrupt is armed and the block started, so a
      * flag left by an earlier transaction cannot complete this one.
      */
-    static void launch_dma() {
+    static void launch_dma(const uint8_t* tx, uint8_t* rx, uint16_t len) {
         dma_done_ = false;
         dma_active_ = true;
-        if (req_.rx.get() == nullptr) {
+        write_only_ = (rx == nullptr);
+        if (rx == nullptr) {
             S::clear_flags(SpiFlag::txc);
             S::enable_txc_interrupt(true);
         } else {
-            (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.len));
+            (void)RxEngine::start(std::span<uint8_t>(rx, len));
         }
-        if (req_.tx.get() != nullptr) {
-            (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.len));
+        if (tx != nullptr) {
+            (void)TxEngine::start(std::span<const uint8_t>(tx, len));
         } else {
-            (void)TxEngine::start_fixed(&tx_dummy_, req_.len);
+            (void)TxEngine::start_fixed(&tx_dummy_, len);
         }
     }
 
@@ -1544,6 +1630,12 @@ private:
             // its claim.
             (void)TxEngine::complete();
         }
+        if (write_only_) {
+            // The receiver overflowed while the block ran (the class
+            // comment): the two characters it kept, BUFOVF and ERROR go
+            // here, with the request that made them.
+            S::flush_rx();
+        }
         dma_active_ = false;
         dma_done_ = true;
         if (!req_.polled) {
@@ -1556,8 +1648,8 @@ private:
     /// The polled request's wait on the DMAC completion - bounded, like
     /// every wait in this stratum (the slowest character is 512 x 9
     /// core-clock cycles, and the budget scales with the length).
-    static void spin_dma() {
-        uint32_t spins = 200000u + 6000u * static_cast<uint32_t>(req_.len);
+    static void spin_dma(uint16_t len) {
+        uint32_t spins = 200000u + 6000u * static_cast<uint32_t>(len);
         while (!dma_done_ && spins-- != 0u) {
         }
         if (!dma_done_) {
@@ -1576,12 +1668,9 @@ private:
     }
 
     /// A slower BAUD is a LARGER register value, so the ceiling clamps
-    /// from below.
-    static uint8_t clamp(uint8_t b) {
-        if (!ceiling_) {
-            return b;
-        }
-        return b < *ceiling_ ? *ceiling_ : b;
+    /// from below: one byte compared, no optional on this path.
+    [[gnu::always_inline]] static uint8_t clamp(uint8_t b) {
+        return b < floor_ ? floor_ : b;
     }
 
     static SpiConfig boot_config() {
@@ -1594,19 +1683,28 @@ private:
         return c;
     }
 
+    /// The mode and the rate as ONE half-word, the thing apply() compares.
+    [[gnu::always_inline]] static uint16_t key_of(SpiMode mode, uint8_t baud) {
+        return static_cast<uint16_t>((static_cast<uint16_t>(mode) << 8) | baud);
+    }
+
     /**
-     * Put the peripheral where this request wants it.
+     * Put the peripheral where this request wants it: ONE compare on the
+     * path a run of requests to one device takes, the change outlined.
      *
      * CTRLA (which is where CPOL and CPHA live on this peripheral) and
      * BAUD are BOTH enable-protected, so any change costs a
      * disable/enable pair - which is why the applied state is cached and
-     * the pair is paid only when something really moved. A run of
-     * requests to one device costs nothing at all.
+     * the pair is paid only when something really moved.
      */
-    static void apply(SpiMode mode, uint8_t baud) {
-        if (mode == applied_.mode && baud == applied_.baud) {
-            return;
+    [[gnu::always_inline]] static void apply(SpiMode mode, uint8_t baud) {
+        if (key_of(mode, baud) != applied_key_) {
+            apply_change(mode, baud);
         }
+    }
+
+    [[gnu::noinline]] static void apply_change(SpiMode mode, uint8_t baud) {
+        applied_key_ = key_of(mode, baud);
         applied_.mode = mode;
         applied_.baud = baud;
         (void)S::enable(false);
@@ -1615,32 +1713,217 @@ private:
         (void)S::enable(true);
     }
 
-    /// One polled character: write, spin on RXC (which is the character
-    /// having been fully shifted BOTH ways), read back. The spin is
-    /// bounded - a bus whose clock never runs must not hang the kernel -
-    /// and the bound is generous: the slowest character this generator
-    /// can produce is 512 x 9 core-clock cycles.
-    static uint8_t xfer(uint8_t out) {
-        S::data(out);
-        uint32_t spins = 200000u;
-        while (!S::rxc_flag() && spins-- != 0u) {
+    /// The bounded spin of a polled transaction: ONE budget for the whole
+    /// of it, generous - the slowest character this generator can
+    /// produce is 512 x 9 core-clock cycles, and a wait is a few
+    /// instructions a turn.
+    static uint32_t spin_budget(uint16_t frames) {
+        return 200000u + 6000u * static_cast<uint32_t>(frames);
+    }
+
+    /// Spin until an INTFLAG bit stands, charging the transaction's
+    /// budget one per turn. False when it ran out: the clock stopped, or
+    /// the peripheral is not what it was.
+    [[gnu::always_inline]] static bool wait_flag(uint8_t flag, uint32_t& budget) {
+        do {
+            if ((S::regs().SERCOM_INTFLAG & flag) != 0u) {
+                return true;
+            }
+        } while (--budget != 0u);
+        return false;
+    }
+
+    /**
+     * One phase of a polled transaction, the chapter's host sequence
+     * (32.6.2.6.1) a character AHEAD: character 0 into DATA; then, for
+     * every k, DRE and the write of k + 1, RXC and the read of k. The
+     * shape is a template parameter so the per-character loop carries
+     * no null test: the three shapes a request can take (write-only,
+     * read-only, both) and the fourth (neither: clock dummies, discard)
+     * are four instantiations of this one loop. Pointers walk and the
+     * budget counts down in a register: on this core's eight low
+     * registers an index, a count and the two flag masks spilled the
+     * budget to the stack, and a poll that found the flag still clear
+     * cost a load and a store (counted in the listing, measured as a
+     * fifth over the chapter's bare loop at 12 MHz).
+     */
+    template <bool has_tx, bool has_rx>
+    [[gnu::always_inline]] static bool run_phase(const uint8_t* tx, uint8_t* rx, uint32_t count,
+                                                 uint32_t& budget) {
+        if (count == 0u) {
+            return true;
         }
-        return static_cast<uint8_t>(S::data());
+        volatile uint32_t& data = S::regs().SERCOM_DATA;
+        data = has_tx ? *tx : 0xFFu;
+        uint32_t left = count - 1u;   // characters still to write
+        for (; left != 0u; --left) {
+            if (!wait_flag(SpiFlag::dre, budget)) {
+                return false;
+            }
+            if constexpr (has_tx) {
+                ++tx;
+                data = *tx;
+            } else {
+                data = 0xFFu;
+            }
+            if (!wait_flag(SpiFlag::rxc, budget)) {
+                return false;
+            }
+            const uint8_t in = static_cast<uint8_t>(data);
+            if constexpr (has_rx) {
+                *rx++ = in;
+            }
+        }
+        if (!wait_flag(SpiFlag::rxc, budget)) {
+            return false;
+        }
+        const uint8_t in = static_cast<uint8_t>(data);
+        if constexpr (has_rx) {
+            *rx = in;
+        }
+        return true;
     }
 
-    static uint16_t total_len() {
-        return static_cast<uint16_t>(req_.cmd_len) + req_.len;
+    /// A polled request whose data phase is long enough for the engines:
+    /// the command phase spun inline, the data phase on the engines, the
+    /// spin on the DMAC's completion - which still arrives through
+    /// DMAC_Handler / dma_isr(), so the binding is not optional for
+    /// polled requests either. Outlined: start()'s asynchronous path is
+    /// fetched through a 64-byte flash cache, and a branch this size in
+    /// the middle of it cost the launch 35 cycles (measured in SRAM).
+    [[gnu::noinline]] static void polled_engined(const Request& r) {
+        if constexpr (has_engines) {
+            uint32_t budget = spin_budget(r.cmd_len);
+            const bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
+            r.dc.set();
+            if (!whole) {
+                S::flush_rx();
+                return;
+            }
+            req_.polled = true;   // what finish_dma() asks
+            launch_dma(r.tx.get(), r.rx.get(), r.len);
+            spin_dma(r.len);
+        } else {
+            (void)r;
+        }
     }
 
-    static uint8_t first_byte() { return in_cmd_ ? req_.cmd.get()[0] : data_byte(0); }
-    static uint8_t next_byte() { return in_cmd_ ? req_.cmd.get()[pos_] : data_byte(pos_); }
-    static uint8_t data_byte(uint16_t i) {
-        return (req_.tx.get() != nullptr) ? req_.tx.get()[i] : 0xFF;
+    /**
+     * The TRANSMIT-ONLY data phase (a null rx: a display's pixels), paced
+     * on DRE alone: a character into DATA as soon as the one before it
+     * has moved to the shift register (32.6.2.6.1), the answers never
+     * read. Two characters are in flight at every instant and the
+     * receive side overflows in silence - BUFOVF stands, ERROR is never
+     * armed, both cleared at the tail. The end is TXC, "set when the
+     * data have been shifted out and there are no new data in DATA"
+     * (32.8.6; measured to close the LAST character, spi.md): cleared
+     * before the first character goes out, and if a handler holds the
+     * loop long enough for the shifter to run dry in between, raised
+     * early and cleared again by the next write ("cleared ... by writing
+     * new data to DATA", 32.8.6), so the tail's wait is the last
+     * character's whatever happened in between. One poll a character
+     * where the receive shape has two, and no reading side to overrun.
+     */
+    template <bool has_tx>
+    [[gnu::always_inline]] static bool write_phase(const uint8_t* tx, uint32_t count,
+                                                   uint32_t& budget) {
+        if (count == 0u) {
+            return true;
+        }
+        volatile uint32_t& data = S::regs().SERCOM_DATA;
+        S::clear_flags(SpiFlag::txc);
+        data = has_tx ? *tx : 0xFFu;
+        for (uint32_t left = count - 1u; left != 0u; --left) {
+            if (!wait_flag(SpiFlag::dre, budget)) {
+                return false;
+            }
+            if constexpr (has_tx) {
+                ++tx;
+                data = *tx;
+            } else {
+                data = 0xFFu;
+            }
+        }
+        const bool whole = wait_flag(SpiFlag::txc, budget);
+        S::flush_rx();   // the answers nobody read, and the overflow they left (32.6.2.7)
+        return whole;
     }
 
+    /// The two-level receive buffer's depth (32.2): what a reader may
+    /// leave unread, and what a transmit-only phase may leave behind
+    /// without a drain.
+    static constexpr uint8_t rx_depth = 2;
+
+    /// The whole of a polled transaction on the pump: the command phase
+    /// read back character by character (exact: its last answer is what
+    /// says the D/C may flip), the D/C flip, then the data phase in the
+    /// shape the two spans give it - transmit-only on DRE where it is
+    /// longer than the receive buffer (a display's row) and read back
+    /// where it is not (a command's parameters: measured, the tail's
+    /// drain costs a short request more than reading two answers), and
+    /// anything with an rx a character ahead on DRE and RXC. A budget
+    /// that ran out leaves the request completed as far as it went and
+    /// the receiver flushed.
+    static void polled_transaction(const Request& r, uint16_t total) {
+        uint32_t budget = spin_budget(total);
+        bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
+        r.dc.set();   // data phase (a no-op when len == 0)
+        if (whole) {
+            const uint8_t* tx = r.tx.get();
+            uint8_t* rx = r.rx.get();
+            if (rx == nullptr) {
+                if (r.len <= rx_depth) {
+                    // No longer than the receive buffer: nothing to
+                    // drain at the end, the answers read back as they
+                    // land - cheaper than a tail that drains.
+                    whole = tx != nullptr ? run_phase<true, false>(tx, nullptr, r.len, budget)
+                                          : run_phase<false, false>(nullptr, nullptr, r.len, budget);
+                } else {
+                    whole = tx != nullptr ? write_phase<true>(tx, r.len, budget)
+                                          : write_phase<false>(nullptr, r.len, budget);
+                }
+            } else {
+                whole = tx != nullptr ? run_phase<true, true>(tx, rx, r.len, budget)
+                                      : run_phase<false, true>(nullptr, rx, r.len, budget);
+            }
+        }
+        if (!whole) {
+            S::flush_rx();
+        }
+    }
+
+    /// The pump's character i of the whole stream, command phase first.
+    [[gnu::always_inline]] static uint8_t byte_at(uint16_t i) {
+        const uint8_t cmd_len = req_.cmd_len;
+        if (i < cmd_len) {
+            return req_.cmd.get()[i];
+        }
+        const uint8_t* tx = req_.tx.get();
+        return tx != nullptr ? tx[i - cmd_len] : 0xFFu;
+    }
+
+    /// One character into DATA once it is free: in the steady state it
+    /// is (DATA emptied at the character boundary and DRE rose three APB
+    /// cycles after it, 32.6.2.6.2, long before a handler gets here); the
+    /// second of two back-to-back writes waits those cycles. Bounded: a
+    /// DRE that never rises is a dead block, the bus timeout's business.
+    [[gnu::always_inline]] static void push(uint16_t i) {
+        for (uint8_t spins = 0; spins < 16u && !S::dre_flag(); ++spins) {
+        }
+        S::data(byte_at(i));
+    }
+
+    /// The asynchronous request's own copy (the class comment: forty
+    /// bytes inline, made once per tenure, read by the handlers).
     static inline Request req_{};
+    /// The pump's read index over the whole stream (command phase first)
+    /// and its write index, at most two ahead.
     static inline uint16_t pos_ = 0;
-    static inline bool in_cmd_ = false;
+    static inline uint16_t wpos_ = 0;
+    static inline uint16_t total_ = 0;
+    /// Whether this tenure's data phase goes to the engines at the
+    /// command phase's end (engine builds; a constant false otherwise).
+    static inline bool engined_ = false;
     /// The last completion's status (spi_ok / spi_dma_fault). Plain: it
     /// is written before the completion edge and read after it.
     static inline uint8_t status_ = spi_ok;
@@ -1648,15 +1931,21 @@ private:
     /// ticker doctrine.
     static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
+    /// The engined data phase in flight is write-only (TXC the edge, the
+    /// receiver spilling): finish_dma() drains it.
+    static inline bool write_only_ = false;
     /// The read-only transfer's dummy source (see launch_dma): a null tx
     /// clocks out 0xFF from this one cell.
     static constexpr uint8_t tx_dummy_ = 0xFF;
-    /// The configuration really in the registers - the cache `apply()`
-    /// compares against, and the thing a re-init overwrites wholesale.
+    /// The configuration really in the registers - the record a re-init
+    /// or recover() writes wholesale - and its mode-and-rate half-word,
+    /// the one thing apply() compares.
     static inline SpiConfig applied_{};
+    static inline uint16_t applied_key_ = 0;
     static inline uint32_t ref_hz_ = 0;
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<uint8_t> ceiling_{};
+    static inline uint8_t floor_ = 0;
     static inline DelayRate cs_rate_{};
 };
 

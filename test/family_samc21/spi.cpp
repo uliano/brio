@@ -335,14 +335,14 @@ void engined_verbs() {
         .cs = Pin<'B', 0>::ref(),
         .dc = {},
         .cmd = {},
-        .cmd_len = 0,
         .tx = lend<Lease::reply>(static_cast<const uint8_t*>(out)),
         .rx = lend<Lease::reply>(in),
         .len = 4,
-        .reply = {},
+        .cmd_len = 0,
+        .polled = true,
         .baud = 23,
         .mode = SpiMode::mode0,
-        .polled = true,
+        .reply = {},
     };
     (void)EnginedHost::start(r);
     (void)EnginedHost::isr();
@@ -373,16 +373,16 @@ void host_verbs() {
     const Host::Request r{
         .cs = Pin<'B', 0>::ref(),
         .dc = {},
-        .cs_setup_us = 4,
         .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(cmd)),
-        .cmd_len = 2,
         .tx = lend<Lease::reply>(static_cast<const uint8_t*>(out)),
         .rx = lend<Lease::reply>(in),
         .len = 4,
-        .reply = {},
+        .cmd_len = 2,
+        .polled = false,
+        .cs_setup_us = 4,
         .baud = 23,
         .mode = SpiMode::mode3,
-        .polled = false,
+        .reply = {},
     };
     (void)Host::start(r);
     (void)Host::isr();
@@ -427,7 +427,7 @@ void client_verbs() {
 
 // ---- what this peripheral does NOT have ----------------------------------------
 // 32.5.6 and 32.6.4.3 are both "Not applicable": the SPI publishes no
-// EVSYS generator and consumes no user, which under the EVSYS ruling
+// EVSYS generator and consumes no user, which under EVSYS's division of labour
 // (samc21/evsys.hpp - the fabric is that driver's, the vocabulary is each
 // peripheral's) means there is no vocabulary to publish. There is
 // nothing to assert about an absence, so this is a comment and not an

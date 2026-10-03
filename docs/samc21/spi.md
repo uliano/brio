@@ -46,6 +46,27 @@ character moved, both ways" - and reading DATA is both the capture and
 the acknowledgement. DRE merely means the transmit buffer is free. The
 host engine arms RXC and never DRE: one interrupt per character.
 
+**Two characters in flight is what the receive side holds.** "The SPI
+is single buffered for transmitting and double buffered for receiving.
+When transmitting data, the Data register can be loaded with the next
+character to be transmitted during the current transmission" (32.6.1;
+32.2: one-level transmit buffer, two-level receive buffer). A character
+written to DATA moves to the shift register and DRE rises once it has -
+three CLK_SERCOM_APB cycles after DATA empties (32.6.2.6.2's last
+sentence) - and RXC rises in the clock cycle its last bit is shifted in
+(32.6.2.6.1). So a host that writes k + 1 on DRE and reads k on RXC
+keeps the bus busy between characters, and keeps exactly TWO characters
+in flight - which is the receive buffer's depth: a reader held off for
+longer than a character (the polled loop by any handler of the image,
+the pump's handler by a late entry) lets k complete into the buffer and
+then k + 1, and then the bus STOPS for want of a k + 2 nobody wrote.
+Nothing can overflow the receiver that way, at any rate - measured:
+STATUS.BUFOVF read after every polled and every pumped run of the
+bench's letter e, at 12 and 3 MHz, under the console's and the tick's
+interrupts, never set. The textbook loop that writes k + 1 only after
+reading k leaves the bus idle for the whole turnaround: a fifth slower
+at 3 MHz and twice as slow at 12 (the bare loops, below).
+
 **A client's DATA write needs three SCK cycles to reach the shifter**
 (32.6.2.6.2), and those cycles ELAPSE ONLY WHILE SCK RUNS. So an answer
 written in the inter-character gap - where a poll loop reacting to RXC
@@ -193,37 +214,70 @@ item a reader would apply without checking the row.
   microseconds between the CS assertion and the first clock, spent
   spinning in start() in main context on samc21/delay.hpp's rate, which
   `rebase()` keeps current so it follows a clock change; measured
-  spending 100 asked as 101..103),
-  `start()`/`isr()` per the bus_master contract,
-  `baud_for()`/`sck_hz()` and the optional bus-wide SCK ceiling that
-  `rebase()` re-resolves, `prime()` for callers that frame CS by hand.
-  Configuration changes are cached: a run of requests to one device
-  costs no disable/enable pair at all.
+  spending 100 asked as 101..103). THE REQUEST IS FORTY BYTES AND NO
+  PADDING on this family - the two pin references, the three spans, the
+  lengths and the settings packed, the reply capsule last; the field
+  names are every target's, the order this family's - and it is LENT
+  FOR THE CALL (util/bus_master.hpp): a POLLED request is read through
+  the reference and copied nowhere, an asynchronous one is copied once
+  into the engine right before its first character goes out, forty bytes
+  of inline load-multiple/store-multiple (the compiler expands a struct
+  assignment of that size inline where it called memcpy for forty-eight,
+  and calls memcpy for a built-in copy of thirty-two: the size is pinned
+  by a static_assert for that reason). `apply()` compares the mode and
+  the rate as ONE half-word against the applied one and reaches the
+  disable/enable pair only on a change, so a run of requests to one
+  device costs no register write at all; the SCK ceiling clamps the
+  rate as one byte compare. `start()`/`isr()` per the bus_master
+  contract, `baud_for()`/`sck_hz()` and the optional bus-wide SCK ceiling
+  that `rebase()` re-resolves, `prime()` for callers that frame CS by
+  hand. THE POLLED LOOP is the chapter's host sequence a character
+  AHEAD: the command phase and any data phase with an rx write k + 1 on
+  DRE and read k on RXC (two in flight, the receive buffer's depth - the
+  silicon fact above, so no rate threshold and no hazard under the
+  image's interrupts); a transmit-only data phase (a null rx: a
+  display's pixels) paces on DRE alone, never reads the answers, ends on
+  TXC - which closes the LAST character (below) - and drains the receive
+  side at its tail. One budget bounds the whole transaction's spins,
+  counted down in a register. THE PUMP arms RXC and writes k + 2 from the
+  handler that reads k, so two are in flight there too; the first data
+  character waits for the last command one to be back (the D/C must
+  change on the wire between them), one in flight across that boundary
+  alone; the first two characters go out before the interrupt is armed
+  (the handler and start() advance the same write index, and at 12 MHz
+  the first character is back before start() has written the second).
+  Nothing is flushed at start(): every character the pump or a receive
+  shape writes is read back by it, and the two shapes that overflow the
+  receiver - the polled transmit-only phase, the write-only engined
+  request - drain it at their own tail.
   THE TWO ENGINE SLOTS default to `NoDmaEngine`, so an engineless build
   carries no DMA code at all (the Uart's shape); named, they take the
-  DATA PHASE onto the DMAC, both or neither, byte elements (the host's
-  frame is eight bits), ONE INTERRUPT A TRANSACTION: with something to
-  receive, two channels - the receive block's TCMPL is the edge, the
-  transmit block SILENT (armed `DmaCompletion::silent`: TERR alone, since
-  BLOCKACT NOACT does not silence TCMPL on this die, dmac.md) - and a
-  null tx feeds 0xFF dummies from a held source (`start_fixed`);
-  WRITE-ONLY (null rx), the transmit channel alone and the SERCOM's TXC
-  the edge, the receiver left on to overflow harmlessly. TXC is cleared
+  DATA PHASE of a request of at least `dma_min_frames` onto the DMAC,
+  both or neither, byte elements (the host's frame is eight bits), ONE
+  INTERRUPT A TRANSACTION: with something to receive, two channels - the
+  receive block's TCMPL is the edge, the transmit block SILENT (armed
+  `DmaCompletion::silent`: TERR alone, since BLOCKACT NOACT does not
+  silence TCMPL on this die, dmac.md) - and a null tx feeds 0xFF
+  dummies from a held source (`start_fixed`); WRITE-ONLY (null rx), the
+  transmit channel alone and the SERCOM's TXC the edge, the receiver
+  left on to overflow and drained by the completion. TXC is cleared
   before it is armed, and the handler that sees it asks the channel
   whether its last beat is written (a buffer run dry between two beats
-  raises TXC too). The command phase stays on the byte pump with the
-  handover made inside `isr()`; `dma_isr(channel, flags)` is the
-  DMAC-vector body, `isr()` takes TXC as well as RXC, and `status()` is
-  the completion's word - `spi_ok`, or `spi_dma_fault` (an
-  engine-defined BusDone code) when a transfer error or a bounded-timeout
-  abandon ended the request. The
-  DMAC BLOCK is the app's: `Dmac::init()` once, before any engined
-  `init()`. `recover()` is the verb a TIMED SpiBus calls on a
-  transaction that never answered (util/bus_master.hpp): CS deasserted
+  raises TXC too). `dma_min_frames` IS FIVE, from two measured numbers
+  (bench findings): the engines' fixed cost per transaction over the
+  pump's cost per frame - below it a request takes the pump even with
+  the engines named, the command phase always does, and the handover is
+  made inside `isr()`; `dma_isr(channel, flags)` is the DMAC-vector
+  body, `isr()` takes TXC as well as RXC, and `status()` is the
+  completion's word - `spi_ok`, or `spi_dma_fault` (an engine-defined
+  BusDone code) when a transfer error or a bounded-timeout abandon ended
+  the request. The DMAC BLOCK is the app's: `Dmac::init()` once, before
+  any engined `init()`. `recover()` is the verb a TIMED SpiBus calls on
+  a transaction that never answered (util/bus_master.hpp): CS deasserted
   first, engines put away and re-claimed, the SERCOM reset and
   reconfigured to the applied state - the wedge it targets is an
-  ISR-style completion that never posts (the 1.10.4 class of death
-  with no fault flag to see).
+  ISR-style completion that never posts (the 1.10.4 class of death with
+  no fault flag to see).
 - **`SpiClient<n, pads>`** - the polled surface plus ISR bodies:
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
@@ -290,15 +344,74 @@ A client answering a stream (the one-ahead pump):
 
 - `bench_samc` letter d, the host on SERCOM1 with MISO floating (the
   time is the wire's; dmac.md has the whole table): an engined
-  full-duplex request of 16 frames at 12 MHz takes 1928 cycles where it
-  took 2877, its launch 693 where it took 1651 - the engines' share of
-  that now some fifty instructions, the rest the host's own start (the
-  47-byte Request copied, the configuration compared, the receive buffer
-  flushed) - and ONE interrupt; a write-only one 1800 where 2869. Per
-  byte at 12 MHz the two channels interleave at 35 cycles against the
-  wire's 32 (a descriptor write-back and fetch at each switch, dmac.md);
-  the write-only one, on one channel, at 32.0. At 3 MHz both are the
-  wire's.
+  full-duplex request of 16 frames at 12 MHz takes 1960 cycles (1448
+  above the wire, of which the instrument's own some 360 - letter r's
+  interval, the handler's stamp pair, the idle window's), its launch 737,
+  ONE interrupt; a write-only one 1912, its completion handler draining
+  the receiver it let overflow. Per byte at 12 MHz the two channels
+  interleave at 35 cycles against the wire's 32 (a descriptor write-back
+  and fetch at each switch, dmac.md); the write-only one, on one
+  channel, at 32.0. At 3 MHz both are the wire's.
+- `bench_samc` letter e, THE HOST ABOVE THE WIRE: the engineless host on
+  the same pads, the best of 8, the instrument's figures of the same run
+  being ruler 65, stamp 151 (56 of it charged to a handler), interval
+  82. The polled loop (`spi.poll` the write shape, `spi.poll.rx` the
+  receive one, 256 frames): at 3 MHz the wire's, x = 1.01 both shapes
+  (it was 1.45 and 1.54 with one character in flight); at 12 MHz the
+  write shape 34 cycles a character against the wire's 32, x = 1.06
+  (was 3.06), the receive shape 43, x = 1.33 (was 3.43). The data
+  sheet's own sequence written bare over the registers in a scratch
+  program on the same board - no library exists for this family - is the
+  oracle: a character ahead, reading every answer back, it reads x =
+  1.14 at 12 MHz (36.6 cycles a character, 14 instructions a turn) and
+  1.00 at 3; the textbook loop with one in flight 2.04 and 1.26. THE
+  CORTEX-M0+ AT 48 MHz BEHIND TWO WAIT STATES OF FLASH CANNOT TURN A
+  TWO-FLAG POLL AROUND INSIDE A 32-CYCLE CHARACTER, whatever the driver:
+  the write shape beats the bare loop because it polls ONE flag; what
+  separates brio's receive loop from the bare one is the flash (the
+  same loops placed in SRAM read 1.05 and 1.21), not the budget - a
+  register count-down against a stack slot moved nothing.
+  STATUS.BUFOVF after every polled run: never. The pump (`spi.pump`, tx and rx): one interrupt a character,
+  226 cycles of `isr` an interrupt with the stamp pair inside (170 the
+  handler's body), BUFOVF never - and HANDLER-BOUND at both rates, 377
+  cycles of CPU a character whatever the clock: with two in flight the
+  handler's exit finds the next character already back and re-enters at
+  once, so a pumped transaction at a rate where a character is shorter
+  than the handler is a polled one with the interrupt's price added, the
+  thread starved until it ends (`launch` reads the whole transaction at
+  12 MHz: start() got the core back when it was over). The pump is for
+  rates where a character outlasts the handler; above them a program
+  wants the polled loop or the engines. THE FIXED COST OF A REQUEST
+  (`spi.req`: a polled request of 1, 3 and 16 bytes with a command byte,
+  the D/C scripted on PB23 and the select on PA18 - two real pads, four
+  real edges - at 3 MHz): 575, 608 and 714 cycles above the wire, the
+  instrument's 82 inside (it was 833, 943 and 1658) - the phase boundary
+  is the 33 between one byte and three (the last command character read
+  back, the D/C, the first data character's own start), and the 106
+  from three to sixteen is the transmit-only phase's tail (TXC awaited,
+  the receiver drained: a phase longer than the receive buffer pays it,
+  one of two characters is read back instead and does not). What it is
+  made of, counted in the
+  listing and measured with the polled path placed in SRAM (38 cycles
+  less, so the flash is not the bulk of it): the bench's own request
+  built on the stack and the interval, the ~35 instructions of start()
+  with the one-word compare, the four pin edges as calls into
+  `PinRef::set/clear` (outlined by the compiler, some 50 cycles of the
+  four), the loop's prologue, and the SERCOM's own start and finish
+  latencies at the boundaries. On the engined host the same three
+  requests read 572, 607 and 1256: the first two take the pump (below
+  `dma_min_frames`), the third the engines - whose
+  spin on the DMAC's completion makes a POLLED request pay the engines'
+  fixed cost for no CPU saved, so for a polled request the engines buy
+  wall time alone, and only where the loop is slower than the wire (12
+  MHz: 43 against 35 cycles a character), above some sixty frames; the
+  threshold stays one.
+- `dma_min_frames` = 5, the arithmetic: 1448 cycles above the wire for
+  an engined request of 16 frames at 12 MHz (letter d), less the
+  instrument's 360, is 1090 the request's; a pumped frame costs 377
+  cycles of CPU (letter e, busy over 256 frames), less the stamp pair's
+  151, is 226; 1090 / 226 = 4.8. Five or more frames are cheaper on the
+  engines in CPU for an ISR-style request.
 
 ## Not covered yet
 
@@ -309,8 +422,23 @@ host's Request is bytes and its frame eight bits; a nine-bit character
 would ride a halfword beat into DATA, which the engines offer
 (dmac.md), born with a nine-bit device.
 
+Driver gaps, continued: **the pin edges through the IOBUS alias** -
+`PinRef::set/clear` store through the APB bridge and are calls at -Os
+(four of them a request, some 50 cycles); the single-cycle IOBUS alias
+(10.1.4) and an inline edge are pin.hpp's and would take a request's
+fixed cost under 550, not under 300: declined here because the rest of
+that cost is the request's shape and the SERCOM's own latencies, stated
+above. **The polled loop in SRAM** - a tenth at 12 MHz, measured;
+declined as a default because a placement of some 2 KB in `.ram_text`
+is the program's call (platform.md, "A handler in SRAM"), not the driver's.
+
 Implemented but not bench-verified:
 
+- The polled transmit-only phase's TXC under a handler longer than a
+  character: an early TXC is cleared by the next write (32.8.6) and the
+  tail's wait is the last character's by the chapter's words; letter e
+  runs under the tick and the console alone, and the write-shape
+  numbers are its witness only for that.
 - Sleep: RUNSTDBY on silicon, SSDE as a wake source, erratum 1.17.20's
   standby cost - no letter sleeps this bus.
 - On silicon: SSDE/SSL, address recognition (FORM = 0x2 - refusals are
