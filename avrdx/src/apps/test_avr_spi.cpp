@@ -1,15 +1,17 @@
 // test_avr_spi - the SPI test SUITE for the AVR DA/DB target.
 //
-// SINGLE BOARD (a..j, `z`): route handling and teardown (including the
-// pinless NONE route and the two refusals the package and the errata
+// SINGLE BOARD (a..j and t, `z`): route handling and teardown (including
+// the pinless NONE route and the two refusals the package and the errata
 // impose), an ELECTRICAL measurement of all seven bit rates (the SPI's
 // own SCK event through a TCB frequency meter), the data path with the
 // MISO pin driven by this board's own PORT, the four transfer modes'
 // idle levels, the write-collision flag and its documented clear
 // sequence, the buffer mode's four flags and their clear disciplines,
 // the host demotion an SS pin can force, the two ISR bodies, the clock
-// rebase with an SCK ceiling, and the transfer engine (SpiHost) with
-// both its completion styles.
+// rebase with an SCK ceiling, the transfer engine (SpiHost) with both
+// its completion styles, and the read the silicon does not take - its
+// own sweep, then the engine through it under a handler that holds the
+// core at every phase (TCB2).
 //
 // TWO BOARDS (k..s, `y`): the same four pins with a second board
 // running `spi_peer` as a real client, driven IN BAND over the bus
@@ -882,6 +884,324 @@ void tj_engine() {
     verdict("the engine's release hands the pins back",
             !Mosi::is_output() && !Sck::is_output());
     Ss::input();
+    quiesce();
+}
+
+// ---- t: a read the silicon does not take, and the engine through it ---------
+//
+// The fact (docs/avrdx/spi.md, "A read that empties the FIFO as a byte
+// enters it is not taken"): with one byte in the receive FIFO, a DATA read
+// made in the cycle the next byte enters it returns the first byte and
+// leaves it there, the arrival queues behind it, RXCIF falls, and the next
+// read returns the first byte AGAIN. Shown first as the silicon's own
+// sweep (MISO held low for the byte in the FIFO and high for the arrival,
+// so the repeat is visible as a value), then provoked INSIDE the engine:
+// a TCB2 handler of a fixed length, fired at a swept time after each
+// request starts, holds the core so that the pump's handler reads at
+// every phase of the next arrival. The glue counts the entries that find
+// TXCIF up and RXCIF down - the one signature of that read. Every request
+// alternates the MISO level, so a byte read twice or left behind shows as
+// a wrong level in the next one.
+
+using T2 = Tcb<2>;
+volatile uint8_t hold_turns = 0;          ///< the TCB2 handler's length, 3-cycle turns
+volatile uint16_t untaken_entries = 0;    ///< engine entries with TXCIF up, RXCIF down
+
+template <uint8_t nops>
+[[gnu::always_inline]] inline void spin3(uint8_t cnt) {
+    __asm__ __volatile__("1: dec %0\n\tbrne 1b" : "+r"(cnt));
+    if constexpr (nops >= 1) __asm__ __volatile__("nop");
+    if constexpr (nops >= 2) __asm__ __volatile__("nop");
+}
+
+/// The receiver emptied at the resource level, the write-one flags cleared.
+void raw_drain() {
+    for (uint8_t k = 0; k < 4; ++k) (void)S0::read();
+    S0::clear_txc();
+    S0::clear_overflow();
+}
+
+/// One byte at the resource level, waited for.
+void raw_one(uint8_t v) {
+    S0::clear_txc();
+    S0::write(v);
+    while (!S0::txc_flag()) {
+    }
+}
+
+struct Untaken {
+    uint16_t normal = 0;
+    uint16_t repeated = 0;
+    uint16_t other = 0;
+    uint8_t cnt = 0;
+    uint8_t nops = 0;
+};
+
+template <uint8_t nops>
+void untaken_sweep(uint8_t span, Untaken& u) {
+    for (uint8_t cnt = 1; cnt < span; ++cnt) {
+        cli();
+        raw_drain();
+        miso_level(false);
+        raw_one(0xFF);                      // A = 0x00 waits in the FIFO
+        miso_level(true);
+        S0::clear_txc();
+        S0::write(0xFF);                    // B = 0xFF on its way
+        spin3<nops>(cnt);
+        const uint8_t d = S0::read();       // the read under test
+        while (!S0::txc_flag()) {
+        }
+        const uint8_t f = S0::flags();
+        const uint8_t r1 = S0::read();
+        const uint8_t f1 = S0::flags();
+        const uint8_t r2 = S0::read();
+        sei();
+        if (d == 0x00 && (f & SPI_RXCIF_bm) != 0 && r1 == 0xFF && (f1 & SPI_RXCIF_bm) == 0) {
+            ++u.normal;
+        } else if (d == 0x00 && (f & SPI_RXCIF_bm) == 0 && r1 == 0x00 && (f1 & SPI_RXCIF_bm) != 0 &&
+                   r2 == 0xFF) {
+            if (u.repeated == 0) {
+                u.cnt = cnt;
+                u.nops = nops;
+            }
+            ++u.repeated;
+        } else {
+            ++u.other;
+        }
+    }
+}
+
+/// Two bytes held, a third on its way, a read at each phase of its
+/// arrival: true when every read was taken (the first byte, then the
+/// second and the third by RXCIF).
+template <uint8_t nops>
+void two_held_sweep(uint8_t span, uint16_t& taken, uint16_t& other) {
+    for (uint8_t cnt = 1; cnt < span; ++cnt) {
+        cli();
+        raw_drain();
+        miso_level(false);
+        raw_one(0xFF);                      // A0 = 0x00
+        raw_one(0xFF);                      // A1 = 0x00
+        miso_level(true);
+        S0::clear_txc();
+        S0::write(0xFF);                    // B = 0xFF on its way
+        spin3<nops>(cnt);
+        const uint8_t d = S0::read();       // two in the FIFO: one stays
+        while (!S0::txc_flag()) {
+        }
+        uint8_t v[3] = {0x55, 0x55, 0x55};
+        uint8_t n = 0;
+        while (S0::rxc_flag() && n < 3) v[n++] = S0::read();
+        const bool ovf = S0::overflow_flag();
+        sei();
+        if (d == 0x00 && n == 2 && v[0] == 0x00 && v[1] == 0xFF && !ovf) ++taken;
+        else ++other;
+    }
+}
+
+/// One byte (or two, the second into the buffer) written, a flags read
+/// and a DATA read right behind it at each phase of the arrival. Counts
+/// the samples whose flags said the byte had arrived (TXCIF, or DREIF
+/// with two written) and whose read found nothing yet.
+template <uint8_t nops>
+void flag_sweep(bool two, uint8_t span, uint16_t& claimed, uint16_t& early) {
+    for (uint8_t cnt = 1; cnt < span; ++cnt) {
+        cli();
+        raw_drain();
+        S0::clear_txc();
+        S0::write(0xFF);                    // A, the shifter
+        if (two) S0::write(0xFF);           // B, the buffer
+        spin3<nops>(cnt);
+        const uint8_t f = S0::flags();
+        (void)S0::read();
+        while (!S0::txc_flag()) {
+        }
+        uint8_t after = 0;
+        while (S0::rxc_flag() && after < 3) {
+            (void)S0::read();
+            ++after;
+        }
+        sei();
+        // A read made before A arrived leaves A to be read after it.
+        const bool claims = two ? (f & (SPI_DREIF_bm | SPI_TXCIF_bm)) != 0 : (f & SPI_TXCIF_bm) != 0;
+        const uint8_t expected = two ? 1 : 0;
+        if (claims) {
+            ++claimed;
+            if (after > expected) ++early;
+        }
+    }
+}
+
+struct Swept {
+    uint16_t runs = 0;
+    uint16_t completed = 0;
+    uint16_t exact = 0;
+    uint16_t clean = 0;
+};
+
+/// 16 bytes full duplex at CLK_PER/16 under the TCB2 handler fired at C.
+void swept_request(bool polled, uint16_t C, bool level, Swept& w) {
+    static uint8_t out[16];
+    for (uint8_t i = 0; i < 16; ++i) out[i] = 0xFF;   // a constant MOSI: immune to coupling
+    static uint8_t in[16];
+    for (uint8_t i = 0; i < 16; ++i) in[i] = level ? 0x00 : 0xFF;
+    miso_level(level);
+    T2::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = C});
+    T2::enable_capt_interrupt(true);
+    const bool ok = run_engine({{}, {}, {}, 0, lend<Lease::reply>(static_cast<const uint8_t*>(out)),
+                                lend<Lease::reply>(static_cast<uint8_t*>(in)), 16, {},
+                                SpiClock::div16, SpiMode::mode0, polled, 0});
+    T2::enable_capt_interrupt(false);
+    T2::disable();
+    if (!ok) Host::recover();
+    bool exact = true;
+    for (uint8_t i = 0; i < 16; ++i) exact = exact && in[i] == (level ? 0xFF : 0x00);
+    ++w.runs;
+    if (ok) ++w.completed;
+    if (exact) ++w.exact;
+    if ((S0::flags() & (SPI_RXCIF_bm | SPI_BUFOVF_bm)) == 0) ++w.clean;
+}
+
+void tt_untaken() {
+    print(serial, "t a read that empties the FIFO as a byte enters it is not taken: the "
+                  "silicon's sweep, then the engine through it", crlf);
+    quiesce();
+    verdict("engine init on ALT1", Host::init(clock));
+
+    for (const SpiClock c : {SpiClock::div4, SpiClock::div16}) {
+        Host::prime(SpiMode::mode0, c);
+        const uint8_t span = c == SpiClock::div4 ? 40 : 120;
+        Untaken u;
+        untaken_sweep<0>(span, u);
+        untaken_sweep<1>(span, u);
+        untaken_sweep<2>(span, u);
+        print(serial, "  CLK_PER/", spi_division(c), ": one byte held, a read at each of ",
+              u.normal + u.repeated + u.other, " phases of the next arrival - taken ", u.normal,
+              ", returned again with RXCIF down ", u.repeated, " (spin ", u.cnt, " + ", u.nops,
+              " nops), other ", u.other, crlf);
+        verdict("the read in the arrival's cycle returns its byte again and drops RXCIF, at one phase",
+                u.repeated == 1 && u.other == 0);
+    }
+
+    // What the engine's reads rest on, at every phase too.
+    uint16_t taken = 0, other = 0, claimed = 0, early = 0;
+    for (const SpiClock c : {SpiClock::div4, SpiClock::div16}) {
+        Host::prime(SpiMode::mode0, c);
+        const uint8_t span = c == SpiClock::div4 ? 40 : 120;
+        two_held_sweep<0>(span, taken, other);
+        two_held_sweep<1>(span, taken, other);
+        two_held_sweep<2>(span, taken, other);
+        for (const bool two : {false, true}) {
+            flag_sweep<0>(two, span, claimed, early);
+            flag_sweep<1>(two, span, claimed, early);
+            flag_sweep<2>(two, span, claimed, early);
+        }
+    }
+    print(serial, "  two bytes held, a read at each of ", taken + other,
+          " phases of the third's arrival: taken ", taken, ", other ", other, crlf);
+    verdict("a read that leaves a byte in the FIFO is taken at every phase", other == 0);
+    print(serial, "  a flags read and a DATA read behind it at every phase: ", claimed,
+          " samples saw DREIF (two written) or TXCIF, ", early, " of them read before the byte", crlf);
+    verdict("DREIF or TXCIF seen: the byte is in the FIFO for the next load", claimed != 0 && early == 0);
+
+    uint8_t held_ok = 0;
+    for (const SpiClock c : {SpiClock::div2, SpiClock::div4, SpiClock::div16}) {
+        Host::prime(SpiMode::mode0, c);
+        for (uint8_t t = 0; t < 8; ++t) {
+            cli();
+            raw_drain();
+            miso_level(false);
+            raw_one(0xFF);                  // 0x00
+            raw_one(0xFF);                  // 0x00
+            miso_level(true);
+            raw_one(0xFF);                  // 0xFF, held in the shifter behind a full FIFO
+            S0::clear_txc();
+            const uint8_t first = S0::read();
+            S0::write(0xFF);                // a transfer starts right behind the read
+            while (!S0::txc_flag()) {
+            }
+            uint8_t v[4] = {0x55, 0x55, 0x55, 0x55};
+            uint8_t n = 0;
+            while (S0::rxc_flag() && n < 4) v[n++] = S0::read();
+            const bool ovf = S0::overflow_flag();
+            sei();
+            if (first == 0x00 && n == 3 && v[0] == 0x00 && v[1] == 0xFF && v[2] == 0xFF && !ovf) ++held_ok;
+        }
+    }
+    print(serial, "  three received unread (the FIFO full, one held in the shifter), a read and a "
+                  "write right behind it, CLK_PER/2, /4, /16: all three kept, BUFOVF clear, in ",
+          held_ok, " of 24", crlf);
+    verdict("a byte held behind a full FIFO enters it before the next write's transfer", held_ok == 24);
+
+    uint8_t empty_ok = 0;
+    uint8_t stale = 0;
+    Host::prime(SpiMode::mode0, SpiClock::div16);
+    for (uint8_t t = 0; t < 16; ++t) {
+        cli();
+        raw_drain();
+        miso_level(false);
+        raw_one(0xFF);
+        (void)S0::read();                   // the FIFO empty, the last byte read 0x00
+        miso_level(true);
+        stale = S0::read();                 // a read of the empty FIFO
+        const bool quiet = !S0::rxc_flag();
+        raw_one(0xFF);
+        const bool up = S0::rxc_flag();
+        const uint8_t v = S0::read();
+        const bool down = !S0::rxc_flag();
+        sei();
+        if (quiet && up && v == 0xFF && down) ++empty_ok;
+    }
+    print(serial, "  a read of the empty FIFO returns ", hex(stale),
+          " (the last byte read); the next byte raises RXCIF and is read alone, in ", empty_ok,
+          " of 16", crlf);
+    verdict("a read of the empty FIFO changes nothing after it", empty_ok == 16);
+
+    // The resource's init() stores one to RXCIF: over a byte in the FIFO.
+    uint8_t store_ok = 0;
+    for (uint8_t t = 0; t < 16; ++t) {
+        cli();
+        raw_drain();
+        raw_one(0xFF);                      // one byte in the FIFO, RXCIF up
+        S0::clear_rxc();
+        const bool dropped = !S0::rxc_flag();
+        raw_one(0xFF);                      // the next one arrives
+        const bool still = !S0::rxc_flag();
+        (void)S0::read();                   // with the flag down
+        const bool back = S0::rxc_flag();
+        (void)S0::read();
+        const bool empty = !S0::rxc_flag();
+        sei();
+        if (dropped && still && back && empty) ++store_ok;
+    }
+    print(serial, "  a one stored to RXCIF over a byte in the FIFO: the flag falls, stays down "
+                  "through the next arrival, and the first read brings it back for the second byte, in ",
+          store_ok, " of 16", crlf);
+    verdict("a store of one to RXCIF drops the flag and leaves the bytes", store_ok == 16);
+
+    bool level = false;
+    for (const bool polled : {false, true}) {
+        Swept w;
+        const uint16_t u0 = untaken_entries;
+        for (const uint8_t hold : {16, 18, 20, 22, 24, 26}) {
+            hold_turns = hold;
+            for (uint16_t C = 100; C < 700; ++C) {
+                level = !level;
+                swept_request(polled, C, level, w);
+            }
+        }
+        const uint16_t untaken = static_cast<uint16_t>(untaken_entries - u0);
+        print(serial, "  ", polled ? "polled" : "pumped", " 16 bytes at CLK_PER/16 under a held core, ",
+              w.runs, " runs: completed ", w.completed, ", every byte the level MISO held ", w.exact,
+              ", receiver empty after ", w.clean, "; handler entries with TXCIF up and RXCIF down ",
+              untaken, crlf);
+        if (!polled) {
+            verdict("the held core made the pump's read meet an arrival", untaken != 0);
+        }
+        verdict(polled ? "every polled request completed" : "every pumped request completed",
+                w.completed == w.runs);
+        verdict("and read every byte once, none left behind", w.exact == w.runs && w.clean == w.runs);
+    }
     quiesce();
 }
 
@@ -1942,12 +2262,12 @@ struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'a', ta_routes}, {'b', tb_rates}, {'c', tc_data}, {'d', td_modes},
     {'e', te_wrcol}, {'f', tf_buffer}, {'g', tg_demotion}, {'h', th_interrupts},
-    {'i', ti_rebase}, {'j', tj_engine},
+    {'i', ti_rebase}, {'j', tj_engine}, {'t', tt_untaken},
     {'k', tk_bringup}, {'l', tl_matrix}, {'m', tm_rates}, {'n', tn_mismatch},
     {'o', to_ss_midbyte}, {'p', tp_loss}, {'q', tq_demotion}, {'r', tr_mspi},
     {'s', ts_rebase},
 };
-constexpr char single_board[] = "abcdefghij";
+constexpr char single_board[] = "abcdefghijt";
 constexpr char two_board[] = "klmnopqrs";
 
 void run(TestFn fn) {
@@ -1972,7 +2292,8 @@ void run_set(const char* keys) {
 void help() {
     print(serial, "test_avr_spi: a routes | b bit rates | c data path | d modes | "
                   "e write collision | f buffer mode | g host demotion | "
-                  "h isr bodies | i rebase | j engine    -> z = all of a..j", crlf);
+                  "h isr bodies | i rebase | j engine | t the untaken read    -> z = a..j and t",
+          crlf);
     print(serial, "  two boards: k bring-up | l client matrix | m rates and the client "
                   "ceiling | n mismatches | o SS mid-byte | p undrained client | "
                   "q real demotion | r Host SPI | s rebase    -> y = all of k..s", crlf);
@@ -1989,6 +2310,9 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 
 ISR(SPI0_INT_vect) {
     if (engine_mode) {
+        if ((S0::flags() & (SPI_RXCIF_bm | SPI_TXCIF_bm)) == SPI_TXCIF_bm) {
+            untaken_entries = untaken_entries + 1;
+        }
         if (Host::isr()) engine_done = true;
         return;
     }
@@ -2003,6 +2327,13 @@ ISR(SPI0_INT_vect) {
         isr_data = r.data;
     }
     isr_count = isr_count + 1;
+}
+
+ISR(TCB2_INT_vect) {
+    T2::clear_capt();
+    T2::disable();                          // one shot: the request's own delay
+    uint8_t n = hold_turns;
+    if (n != 0) __asm__ __volatile__("1: dec %0\n\tbrne 1b" : "+r"(n));
 }
 
 ISR(TCB0_INT_vect) {

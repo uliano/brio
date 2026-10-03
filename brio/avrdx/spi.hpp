@@ -20,9 +20,10 @@
  *                         transactions in one chip-select window, the
  *                         instance in BUFFER MODE with two bytes in
  *                         flight on both completion styles - a polled
- *                         loop or the RXCIE pump -, CS and DC owned by
- *                         the engine. Driven by util/spi_bus.hpp
- *                         (arbitration and replies).
+ *                         loop or the RXCIE pump -, the received bytes
+ *                         READ BY COUNT, CS and DC owned by the engine.
+ *                         Driven by util/spi_bus.hpp (arbitration and
+ *                         replies).
  *    SpiClient<n, route>  the client side: selected(), preload/exchange,
  *                         the buffer-mode variants, the ISR bodies.
  *  A task owns its instance; two tasks on one Spi<n> is the app's bug.
@@ -78,7 +79,17 @@
  *    direction and lets the hardware gate it;
  *  - the SPI has one interrupt vector (SPIn_INT) for both layouts and
  *    one event generator (SCK level in host mode, evsys.hpp EvSpiSck);
- *    it has no event users and no DBGCTRL/RUNSTDBY of its own.
+ *    it has no event users and no DBGCTRL/RUNSTDBY of its own;
+ *  - A READ THAT EMPTIES THE FIFO AS A BYTE ENTERS IT IS NOT TAKEN
+ *    (measured, no erratum names it): the read returns the byte at the
+ *    head and leaves it there, the arriving byte queues behind it, and
+ *    RXCIF falls; the next read returns the SAME byte again and brings
+ *    the flag back. A read that leaves a byte behind never meets that
+ *    cycle, and neither does one made with nothing in flight. RXCIF is
+ *    therefore a hint and never a count: SpiHost reads what the
+ *    transmitter's flags prove has arrived, never empties the FIFO by a
+ *    polled read while a byte shifts, and in the pump, which may, drops
+ *    the repeated byte where the flags show the read was not taken.
  */
 
 #pragma once
@@ -91,6 +102,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/platform.hpp"
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
@@ -800,33 +812,60 @@ private:
  * flight and the wire never waits for the software while the software
  * keeps up; the receiver is a two-entry FIFO in front of the shifter,
  * read at least every second transfer. Both completion styles are
- * written from that chapter's three rules:
+ * written from that chapter's three rules and from the order 28.3.2.2.2
+ * gives the flags of one transfer's end - DREIF as the buffered byte
+ * moves into the shifter, then the received byte in the FIFO with RXCIF,
+ * and TXCIF when nothing is left to send (measured: a DATA read made
+ * one LDS after either DREIF or TXCIF is seen finds the byte there, at
+ * every phase of the arrival):
  *
  *  - a write to DATA is legal while DREIF is set (rule 1): the first
  *    write of an idle transmitter goes straight to the shifter and the
- *    next to the buffer, so a burst opens with one write and then waits
+ *    next to the buffer, so a burst opens with two writes and then waits
  *    DREIF before each one that follows;
  *  - a received byte lands in the FIFO when its transfer completes
  *    (rule 2), and the FIFO must be read at least every second transfer
- *    (rule 3). BOTH paths drain it to empty BEFORE every write: a byte
- *    that arrives with the FIFO full waits in the shifter (28.5.5,
- *    BUFOVF) and is lost only when the NEXT transfer starts - which is
- *    what a write does. Drained first, a late loop or a late handler
- *    (an interrupt of the console's or the tick's inside a burst) idles
- *    the wire and loses nothing. There is no rate threshold on this
- *    family: the write-ahead is safe at every division;
- *  - TXCIF says shifter and buffer are both empty (28.3.2.1.2's last
- *    paragraph): it is the end of a phase, and a CONDITION the register
- *    keeps - it is cleared, write-one, before every burst it is to
- *    close (docs/avrdx/spi.md "Buffer mode").
+ *    (rule 3). The engine READS BY COUNT: it keeps how many bytes it has
+ *    written and not yet read and reads what the TRANSMITTER's flags
+ *    prove has arrived - every written byte but the one shifting once
+ *    DREIF stands, every written byte once TXCIF does -, never by RXCIF,
+ *    which a read that empties the FIFO as a byte enters it loses (this
+ *    file's header). The polled loop never makes that read: it leaves
+ *    the newest byte in the FIFO until nothing shifts, so three bytes
+ *    are outstanding there - one waiting, two in flight - and a late
+ *    loop finds the FIFO full and the third byte held in the shifter,
+ *    which the next read lets in before the next write starts a transfer
+ *    (measured): BUFOVF cannot rise. The pump keeps two outstanding and
+ *    reads right behind each arrival, so a late handler can make that
+ *    read; it then drops the byte it is handed twice (isr()). A late
+ *    loop or a late handler (an interrupt of the console's or the
+ *    tick's inside a burst) idles the wire and loses nothing, at every
+ *    division;
+ *  - TXCIF says shifter and buffer are both empty: a CONDITION the
+ *    register keeps (docs/avrdx/spi.md "Buffer mode"), so it speaks of a
+ *    write only when it is cleared BEHIND that write, while the byte
+ *    shifts and no earlier emptiness can raise it again. A polled burst
+ *    clears it behind its last write with the two stores masked together
+ *    - an interrupt between them could let the byte finish and the clear
+ *    wipe the one edge the tail waits for -; the pump's launch clears it
+ *    behind its two writes, masked with them, and its handler behind the
+ *    first write of every refill.
+ *
+ * Between transactions the transmitter is idle and the receive FIFO
+ * empty: every burst and every pumped phase end so, and init() and
+ * recover() make it so (one DATA read whatever the flag says, then the
+ * FIFO drained).
  *
  * The POLLED path completes inside start() and reads every field of the
  * request through the reference it was lent (the arbiter's contract:
  * the slot stays as it is until the dispatch ends) - it copies nothing.
  * The PUMP (polled false) copies at launch what its tenure needs - the
  * two pins, the data phase's spans and length - into the engine's own
- * state, and runs on RXCIE: one interrupt per received byte, the handler
- * popping the FIFO's head and writing byte k + 2 while k + 1 shifts.
+ * state, and runs on RXCIE with TXCIE beside it: the handler reads by
+ * the same count and writes the next bytes until two are in flight. A
+ * read the silicon did not take costs one missed edge: the two in flight
+ * complete, TXCIF rises with RXCIF down, and the handler drops the
+ * repeated byte and reads both - a hiccup, not a stall.
  *
  * ISR wiring (app glue, as usual):
  *   ISR(SPI0_INT_vect) {
@@ -948,6 +987,14 @@ public:
             // bits it does not fold (DORD, BUFWR) or the ones it does.
             ctrla_ = S::regs().CTRLA;
             ctrlb_ = S::regs().CTRLB;
+            // Neither the disable in the resource's init nor its store
+            // of one to RXCIF empties the receive FIFO (the store drops
+            // the flag and leaves the bytes): what a former user left
+            // there is read out here.
+            flush();
+            ahead_ = 0;
+            to_write_ = 0;
+            in_cmd_ = false;
             return true;
         }
     }
@@ -1055,69 +1102,105 @@ public:
 
     /**
      * SPI interrupt body - call from ISR(SPIn_INT_vect). The pump runs
-     * on RXCIE: the vector fires with a byte at the FIFO's head, the body
-     * pops it (RXCIF falls with the last entry, 28.5.5), stores it where
-     * the request wanted it, and writes the byte two ahead while the
-     * next one shifts. A handler that ran late finds two bytes in the
-     * FIFO and the transmitter idle: it pops one and writes one, RXCIF
-     * stands, the vector re-enters at once for the other - two in flight
-     * again, nothing lost. Returns true when the transaction just
+     * on RXCIE and TXCIE. The body reads the flags once, reads out of the
+     * FIFO every byte the transmitter's flags prove has arrived (all it
+     * wrote once TXCIF stands, all but the one shifting once DREIF does,
+     * all but two otherwise) and stores them where the request wanted
+     * them, then writes the next bytes until two are in flight again,
+     * clearing TXCIF behind the first. In the steady state that is one
+     * byte read and one written per RXCIF; a handler that ran late finds
+     * the transmitter idle and TXCIF up, reads both and writes two. A
+     * read of this handler that emptied the FIFO as the next byte entered
+     * it was not taken (this file's header): RXCIF stays down, the next
+     * edge is TXCIF's once the two in flight are done, and an entry with
+     * TXCIF up and RXCIF down while bytes are due is that case and no
+     * other - the flags are read some twenty cycles past the edge that
+     * took the vector, so they have settled - and reads the repeated byte
+     * once more and drops it. Returns true when the transaction just
      * completed (CS released): the edge on which the glue posts
      * TransferDone to the bus AO.
      */
     [[gnu::always_inline]] static bool isr() {
-        const uint8_t in = S::regs().DATA;   // the pop
-        if (in_ != nullptr) {
-            *in_++ = in;
+        auto& s = S::regs();
+        const uint8_t f = s.INTFLAGS;
+        uint8_t keep = 0;                  // written bytes not yet received
+        uint8_t a = ahead_;
+        if ((f & SPI_TXCIF_bm) == 0) {
+            keep = (f & SPI_DREIF_bm) != 0 ? 1 : 2;
+        } else if ((f & SPI_RXCIF_bm) == 0 && a != 0) {
+            // Everything written has arrived and RXCIF says nothing has:
+            // a read of this handler met an arrival, and the byte it
+            // returned is still at the FIFO's head. Read again and drop.
+            (void)s.DATA;
         }
-        if (--to_read_ != 0) {
-            if (to_write_ != 0) {
-                write_next();
+        while (a > keep) {                 // read by count, whatever RXCIF says
+            const uint8_t in = s.DATA;
+            if (in_ != nullptr) {
+                *in_++ = in;
             }
-            return false;
+            --a;
         }
-        if (in_cmd_) {                      // the command phase is over
-            in_cmd_ = false;
-            dc_.set();
-            if (len_ != 0) {
+        if (to_write_ == 0) {
+            if (a != 0) {                  // the phase's last bytes still shift
+                ahead_ = a;
+                return false;
+            }
+            if (in_cmd_) {                 // the command phase is over
+                in_cmd_ = false;
+                dc_.set();
                 out_ = tx_;
                 in_ = rx_;
                 to_write_ = len_;
-                to_read_ = len_;
-                write_next();              // the shifter, then the buffer
-                if (to_write_ != 0) {
-                    write_next();
-                }
-                return false;
+            }
+            if (to_write_ == 0) {
+                cs_.set();                 // release: transaction done
+                s.INTCTRL = 0;             // the pump's enables, off until the next launch
+                ahead_ = 0;
+                return true;
             }
         }
-        cs_.set();                         // release: transaction done
-        S::regs().INTCTRL = 0;             // the pump's enable, off until the next launch
-        return true;
+        if (a < 2) {                       // two in flight again
+            write_next();
+            s.INTFLAGS = SPI_TXCIF_bm;     // behind the write: TXCIF speaks of it
+            ++a;
+            if (a < 2 && to_write_ != 0) {
+                write_next();
+                ++a;
+            }
+        }
+        ahead_ = a;
+        return false;
     }
 
     /// The work-around for a wedged host: a lost completion, or a
     /// demotion mid-transfer (SS driven low with SSD clear stops the pump
     /// dead, 28.3.2.1.3 - measured; init() sets SSD, so here it is the
     /// chapter's note honoured and not a path a request can reach). The
-    /// pump's interrupt is silenced, the write-one flags cleared, the
-    /// receive FIFO and the shifter behind it drained, the Host role
-    /// re-armed if the hardware dropped it, the select window closed;
-    /// start() reprograms mode and clock per request, so nothing else
-    /// needs saving. The verb a timed SpiBus calls
-    /// (util/bus_master.hpp).
+    /// pump's interrupt is silenced, the Host role re-armed if the
+    /// hardware dropped it, the bytes still in flight waited for (bounded:
+    /// two transfers at CLK_PER/128 with room to spare - a clock that
+    /// does not run ends the wait), the receive FIFO read out whatever
+    /// RXCIF says, the select window closed; start() reprograms mode and
+    /// clock per request, so nothing else needs saving. The verb a timed
+    /// SpiBus calls (util/bus_master.hpp).
     static void recover() {
         if constexpr (available) {
-            S::regs().INTCTRL = 0;
-            S::regs().INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_SSIF_bm | SPI_BUFOVF_bm);
-            for (uint8_t i = 0; i < 3 && S::rxc_flag(); ++i) {
-                (void)S::read();
-            }
+            auto& s = S::regs();
+            s.INTCTRL = 0;
             if (S::demoted()) {
                 S::restore_host();
             }
+            if (ahead_ != 0) {
+                // A turn is at least six cycles; two transfers at the
+                // slowest division are 2 x (8 x 128 + 2).
+                for (uint16_t i = 0; i < 512u && (s.INTFLAGS & SPI_TXCIF_bm) == 0; ++i) {
+                }
+            }
+            flush();
             cs_.set();
             in_cmd_ = false;
+            ahead_ = 0;
+            to_write_ = 0;
         }
     }
 
@@ -1186,60 +1269,138 @@ private:
         ctrlb_ = b;
     }
 
-    /// One polled burst of count >= 1 bytes, the loop of 28.3.2.1.2: the
-    /// first byte into the idle shifter; then, per byte, the FIFO
-    /// drained to empty, DREIF waited for, the byte written - two in
-    /// flight, the wire busy while this loop runs its turn; at the end
-    /// TXCIF (shifter and buffer both empty) and the last one or two
-    /// received bytes popped. The shape is a template parameter so that
-    /// no null test runs inside: `has_out` false clocks 0xFF, `has_in`
-    /// false discards. The spin is not bounded: with SSD set nothing
-    /// can take the clock generator from this host (28.3.2.1.3), and the
-    /// host clocks itself, so a transfer written always completes.
+    /// One polled burst of count >= 1 bytes, the loop of 28.3.2.1.2 read
+    /// by count, with the FIFO NEVER EMPTIED WHILE A BYTE SHIFTS: the
+    /// first byte into the idle shifter and the second into the buffer;
+    /// then, per byte, DREIF waited for - the byte before has moved into
+    /// the shifter, so every byte before THAT one is in the FIFO -, the
+    /// older of the two newest read whatever RXCIF says, so that one
+    /// stays, and the next written: two in flight and one waiting, the
+    /// wire busy while this loop runs its turn. A read that empties the
+    /// FIFO as a byte enters it is the one the silicon does not take
+    /// (this file's header); a read that leaves a byte behind never meets
+    /// that cycle (docs/avrdx/spi.md). The last write is masked together
+    /// with TXCIF's clear behind it, so that the tail's TXCIF means "every
+    /// byte written is in the FIFO, or held in the shifter behind a full
+    /// one", and the last one, two or three are read with nothing left
+    /// to arrive. The shape is a template parameter so that no null test
+    /// runs inside: `has_out` false clocks 0xFF, `has_in` false discards.
+    /// The spins are not bounded: with SSD set nothing can take the clock
+    /// generator from this host (28.3.2.1.3), and the host clocks itself,
+    /// so a transfer written always completes.
     template <bool has_out, bool has_in>
     [[gnu::always_inline]] static void burst(const uint8_t* out, uint8_t* in, uint16_t count) {
         (void)out;
         (void)in;
         auto& s = S::regs();
-        // TXCIF is a condition the register keeps; BUFOVF with it, so
-        // that a flag read after this burst speaks of this burst.
-        s.INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_BUFOVF_bm);
-        s.DATA = has_out ? *out++ : 0xFF;
-        while (--count != 0) {
-            uint8_t f = s.INTFLAGS;
-            while ((f & SPI_RXCIF_bm) != 0) {
-                if constexpr (has_in) {
-                    *in++ = s.DATA;
-                } else {
-                    (void)s.DATA;
+        // The last byte is taken before the loop, so that the source
+        // pointer ends with it.
+        uint8_t last = 0xFF;
+        if constexpr (has_out) {
+            last = out[count - 1u];
+        }
+        uint8_t tail = 1;                  // bytes not yet read at the last write
+        if (count != 1) {
+            tail = 2;
+            s.DATA = next_out<has_out>(out);       // the idle shifter: DREIF stays up
+            if (count != 2) {
+                tail = 3;
+                s.DATA = next_out<has_out>(out);   // the buffer
+                wait_dre();                        // the first in the FIFO: it stays
+                if (count != 3) {
+                    s.DATA = next_out<has_out>(out);
+                    count = static_cast<uint16_t>(count - 3u);
+                    for (;;) {
+                        wait_dre();
+                        read_in<has_in>(in);       // the older of two: one stays
+                        // An empty asm the count passes through, so that
+                        // gcc keeps it as the loop's counter: otherwise it
+                        // rewrites the exit as a compare against a
+                        // pointer's end or against the count it came in
+                        // with, and shuffles the pointers through other
+                        // registers to do it.
+                        __asm__("" : "+r"(count));
+                        if (--count == 0) {
+                            break;
+                        }
+                        s.DATA = next_out<has_out>(out);
+                    }
                 }
-                f = s.INTFLAGS;
             }
-            while ((f & SPI_DREIF_bm) == 0) {
-                f = s.INTFLAGS;
-            }
-            s.DATA = has_out ? *out++ : 0xFF;
+        }
+        {
+            // The last byte, then TXCIF cleared behind it while it shifts.
+            // Masked: with a handler between the two stores the byte could
+            // finish and the clear wipe the only edge the tail waits for.
+            AvrPlatform::CriticalSection cs;
+            s.DATA = last;
+            s.INTFLAGS = SPI_TXCIF_bm;
         }
         while ((s.INTFLAGS & SPI_TXCIF_bm) == 0) {
         }
-        uint8_t f = s.INTFLAGS;
-        while ((f & SPI_RXCIF_bm) != 0) {
-            if constexpr (has_in) {
-                *in++ = s.DATA;
-            } else {
-                (void)s.DATA;
-            }
-            f = s.INTFLAGS;
+        do {
+            read_in<has_in>(in);
+        } while (--tail != 0);
+    }
+
+    /// DREIF: room in the transmit buffer.
+    [[gnu::always_inline]] static void wait_dre() {
+        while ((S::regs().INTFLAGS & SPI_DREIF_bm) == 0) {
         }
+    }
+
+    /// A burst's next byte: the source's, or the dummy a shape without
+    /// one clocks.
+    template <bool has_out>
+    [[gnu::always_inline]] static uint8_t next_out(const uint8_t*& out) {
+        if constexpr (has_out) {
+            return *out++;
+        } else {
+            return 0xFF;
+        }
+    }
+
+    /// One byte out of the receive FIFO, the count having proved it is
+    /// there: stored, or discarded by a shape that wants none.
+    template <bool has_in>
+    [[gnu::always_inline]] static void read_in(uint8_t*& in) {
+        const uint8_t v = S::regs().DATA;
+        if constexpr (has_in) {
+            *in++ = v;
+        } else {
+            (void)v;
+        }
+    }
+
+    /// The receive FIFO emptied with the transmitter idle: one DATA read
+    /// whatever RXCIF says - the read that takes a byte the flag no longer
+    /// shows and brings the flag back -, then a read per entry the flag
+    /// shows (the FIFO's two and the shifter's one at most), BUFOVF
+    /// cleared. A read of an empty FIFO returns the last byte read and
+    /// changes nothing after it (docs/avrdx/spi.md).
+    static void flush() {
+        auto& s = S::regs();
+        (void)s.DATA;
+        for (uint8_t i = 0; i < 3u && (s.INTFLAGS & SPI_RXCIF_bm) != 0; ++i) {
+            (void)s.DATA;
+        }
+        s.INTFLAGS = SPI_BUFOVF_bm;
     }
 
     /// The pump's launch: the tenure's fields copied out of the lent
     /// request (the pins; the data phase's spans and length, kept aside
-    /// while a command phase runs), the phase counters set, the write-one
-    /// flags cleared, RXCIE armed, and up to two bytes written - the
-    /// shifter's and the buffer's. A command phase never writes ahead of
-    /// its own end: the D/C edge must land between its last byte and
-    /// the data phase's first, so the data phase starts in the handler.
+    /// while a command phase runs), up to two bytes written - the
+    /// shifter's and the buffer's - with the write-one flags cleared
+    /// behind them, the count set, and RXCIE and TXCIE armed last, over a
+    /// state already whole. The two stores and the clear are masked
+    /// together: a handler between the two writes could let the first
+    /// byte finish and raise TXCIF while the second had not yet gone, and
+    /// a TXCIF that predates a write tells the handler that byte has
+    /// arrived (measured: the read made for it found nothing, and the
+    /// byte, arriving after, was left over). A command phase never writes
+    /// ahead of its own end: the D/C edge must land between its last byte
+    /// and the data phase's first, so the data phase starts in the
+    /// handler.
     static void launch(const Request& r) {
         cs_ = r.cs;
         dc_ = r.dc;
@@ -1248,7 +1409,6 @@ private:
             out_ = r.cmd.get();
             in_ = nullptr;
             to_write_ = r.cmd_len;
-            to_read_ = r.cmd_len;
             tx_ = r.tx.get();
             rx_ = r.rx.get();
             len_ = r.len;
@@ -1257,27 +1417,41 @@ private:
             out_ = r.tx.get();
             in_ = r.rx.get();
             to_write_ = r.len;
-            to_read_ = r.len;
         }
         auto& s = S::regs();
-        s.INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_SSIF_bm | SPI_BUFOVF_bm);
-        s.INTCTRL = SPI_RXCIE_bm;          // the host owns the register: one store
-        write_next();
+        const uint8_t first = take_next();
+        uint8_t a = 1;
+        uint8_t second = 0;
         if (to_write_ != 0) {
-            write_next();
+            second = take_next();
+            a = 2;
         }
+        {
+            AvrPlatform::CriticalSection cs;
+            s.DATA = first;                // the idle shifter
+            if (a == 2) {
+                s.DATA = second;           // the buffer
+            }
+            s.INTFLAGS = static_cast<uint8_t>(SPI_TXCIF_bm | SPI_SSIF_bm | SPI_BUFOVF_bm);
+        }
+        ahead_ = a;
+        s.INTCTRL = static_cast<uint8_t>(SPI_RXCIE_bm | SPI_TXCIE_bm);
     }
 
-    /// The next byte of the current phase into DATA: the source's, or a
+    /// The current phase's next byte, counted out: the source's, or the
     /// dummy where the phase has none.
-    [[gnu::always_inline]] static void write_next() {
+    [[gnu::always_inline]] static uint8_t take_next() {
         uint8_t v = 0xFF;
         if (out_ != nullptr) {
             v = *out_++;
         }
-        S::regs().DATA = v;
         --to_write_;
+        return v;
     }
+
+    /// The next byte of the current phase into DATA: the source's, or a
+    /// dummy where the phase has none.
+    [[gnu::always_inline]] static void write_next() { S::regs().DATA = take_next(); }
 
     // The tenure: what the pump keeps of a request past start().
     static inline PinRef cs_{};
@@ -1289,7 +1463,8 @@ private:
     static inline const uint8_t* out_ = nullptr;  ///< next byte to write; null = 0xFF
     static inline uint8_t* in_ = nullptr;         ///< next received byte's home; null = discard
     static inline uint16_t to_write_ = 0;
-    static inline uint16_t to_read_ = 0;
+    /// Bytes written and not yet read out of the FIFO: 0, 1 or 2.
+    static inline uint8_t ahead_ = 0;
     static inline bool in_cmd_ = false;
     // The register pair last written (init() reads it back once).
     static inline uint8_t ctrla_ = 0;

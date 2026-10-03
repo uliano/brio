@@ -2,7 +2,8 @@
 // benchmark.md, util/bench.hpp): four letters that print NUMBERS, one
 // `bench` line per operation and size, in the grammar every family
 // prints. NOT A TEST: a letter's one verdict is "ran", except letter r,
-// whose verdicts judge the ruler every other line is read with.
+// whose verdicts judge the ruler every other line is read with, and
+// letter e, whose one verdict judges the pump it times.
 //
 // NOTHING TO WIRE. The console is USART2 on its ALT1 pins PF4 (TX) / PF5
 // (RX) through the board's USB bridge - the binding of console.cpp and
@@ -137,7 +138,10 @@
 //                    false): irq and isr are the pump's shape, the line
 //                    after prints both PER BYTE and the BUFOVF flag read
 //                    after the run (a one means the two-entry receive
-//                    FIFO overflowed: the pump lost a byte);
+//                    FIFO overflowed: the pump lost a byte). They run
+//                    AFTER the polled lines, on the receiver those left:
+//                    the letter's verdict is that every one of their
+//                    requests completed and left BUFOVF clear;
 //        spi.req     THE PRICE OF A DCS COMMAND: a polled request with a
 //                    one-byte command phase and a data phase of 0, 2 and
 //                    15 bytes (n = 1, 3, 16) at CLK_PER/16, the select on
@@ -644,7 +648,8 @@ void poll() {
 }
 
 /// spi.pump: the same full-duplex requests on the interrupt pump.
-void pump() {
+bool pump() {
+    bool all = true;
     for (const SpiClock c : rates) {
         for (const uint16_t n : lengths) {
             drain();
@@ -657,8 +662,10 @@ void pump() {
             print(serial, "  CLK_PER/", spi_division(c), ": per byte irq=",
                   (s.irq + n / 2u) / n, " isr=", (s.isr + n / 2u) / n, ", completions ",
                   ok ? "all" : "MISSING", ", BUFOVF after the run ", overflow ? "1" : "0", crlf);
+            all = all && ok && !overflow;
         }
     }
+    return all;
 }
 
 /// spi.req: the price of a DCS command - one command byte, a data
@@ -702,12 +709,12 @@ void te_spi() {
         return;
     }
     de::poll();
-    de::pump();
+    const bool pumped = de::pump();
     de::req();
     SpiHw::release();
     Cs::input();
     Dc::input();
-    bench.verdict("ran", true);
+    bench.verdict("every pumped request completed and left BUFOVF clear", pumped);
 }
 
 bool xtal = false;
