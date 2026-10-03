@@ -62,6 +62,28 @@ register. That single fact shapes both roles:
   one (measured: see the dummy byte below).
 - **A client that never drains keeps ONE frame** and raises the overrun
   for every frame after it (measured).
+- **A HOST MAY KEEP TWO FRAMES IN FLIGHT, AND THE RECEIVE BUFFER IS THE
+  PRICE.** 20.2.2: "if the TXE flag bit is set, data needs to be filled
+  into the data register to maintain a complete data flow" - one frame in
+  the shifter, the next in the transmit buffer, the clock never pausing.
+  But the receive buffer is one deep too: frame k stands in it while
+  k + 1 shifts, and if k is not read before k + 1 completes, 20.2.7's
+  overrun discards one. So a host that READS its answers may run two
+  frames ahead only where ONE FRAME TIME exceeds the longest the read can
+  be late, and a host that does not read them (a display's pixel path,
+  every command phase) may run two ahead at every rate and let the
+  receive side overrun - the transmit side goes on regardless (measured:
+  the frames sent, judged by the CRC unit, are all there). Measured on
+  the CH32V203C8T6 under a live console at 115200 (bench_vx03's letter
+  e, the overrun oracle): two frames in flight lose one in every run at
+  every frame of 128 core cycles or less, and in none at 256 or more.
+- **A DMA-fed transmit with CRCEN set is followed by the CRC frame on the
+  wire** (measured, bench_vx03's letter d): the receive block's
+  completion lands with BSY still up and RXNE rises once more after it -
+  the hardware sends the CRC after the block's last datum with no CRCNEXT
+  written, as the F1 lineage's own manual says and 20.2.5 does not. TCRCR
+  read while that frame shifts holds a value of the frame in flight;
+  20.4.7's "read when BSY is 0" is the rule.
 
 ### What may be written, and when
 
@@ -356,17 +378,72 @@ its `Request` is the other strata's VERBATIM: a chip select the bus AO
 asserts, a display D/C line, a CS setup time, a command phase and a data
 phase with optional out and in buffers, the mode/rate/frame size per
 request, and a `polled` flag choosing between the per-frame ISR pump and
-a synchronous spin inside `start()`. Beside it: `init(clock, max_sck_hz)`
-with an optional bus-wide SCK ceiling, `rebase()` for a dynamic clock's
-fan-out, `clock_for()` / `sck_hz()` / `reference_hz()`, `prime()` (mode
-and rate now, moving no data - a CPOL flip is an edge, so prime BEFORE
-the select falls), `bit_order()` (a property of the WIRE and so a
-bus-level verb), `pad_speed()` (the slew class of SCK and MOSI, a
-choice that survives the next `init()`), `start()`, `isr()`,
-`dma_rx_isr()` and `dma_tx_isr()` (the two channels' bodies, each reading
-its own flags; `dma_isr()` is both, for a program that binds the two
-vectors to one function), `status()`, `busy()`, `recover()`, `release()`
-and `claim_nss_pad()`.
+a synchronous spin inside `start()`. The Request is laid out with no
+padding - the two `PinRef`s, the three buffers and the reply in seven
+words, the lengths and the four settings in two (40 bytes where the old
+order had 48) - and it is LENT for the call: a polled request is read
+where it lies and nothing of it is copied; an asynchronous one has what
+its tenure needs - the pins, the buffers, the lengths, the width -
+stored into the engine's own Tenure in word stores, and the reply stays
+the arbiter's.
+
+The engine tells TWO SHAPES apart by the in buffer. A WRITE (no in
+buffer, and every command phase) keeps two frames in flight at every
+rate: the polled loop writes on TXE and never reads the answers - the
+tail waits TXE and then not BSY, and the DATAR-then-STATR read clears
+RXNE and OVR - and the pump reads frame k on RXNE and writes k + 2,
+counting an overrun as the frame it is and going on. A RECEIVE (an in
+buffer) keeps ONE frame in flight below the write-ahead threshold and
+two above it: the polled loop below it pins the next frame's load inside
+the wire time and puts the DATAR read and the next write in adjacent
+instructions, the loop above it is 20.2.2's sequence (TXE then the next
+frame, RXNE then the previous one) with OVR watched beside RXNE; the
+pump below it writes k + 1 on RXNE(k), above it k + 2. An overrun on a
+receive ends the transaction with `spi_overrun`, the engine's second
+status code beside `spi_dma_fault`.
+
+THE THRESHOLD is `spi_write_ahead_min_frame_cycles`, the sum of two
+counted inputs stated in the header: the hold-off - the longest the
+thread keeps the vector out, which on a platform where no interrupt
+nests is the longer of the image's longest handler and its longest
+masked window (bench_vx03's console handler with its stamps, 151
+instructions behind the hardware prologue and epilogue, about 200
+cycles; the kernel's `post()` of a Request under the producers' mask,
+47 instructions and the runtime's memcpy, about 130) - and the pump's
+own path from RXNE to the DATAR load (the prologue's 16 and seven
+instructions, two of them APB loads). `spi_write_ahead_code(bits,
+hclk_over_pclk)` turns it into the slowest BR code whose frame is longer,
+per width and per bus share, and `rebase()` keeps both codes;
+`write_ahead_from(bits)` reports them. At any HCLK a frame of 256 cycles
+is the first above the sum: SPI1's /32 for 8-bit frames and /16 for
+16-bit ones, one code lower on SPI2 and SPI3 above 72 MHz of HCLK. The
+oracle above agrees.
+
+`apply()` compares ONE WORD: the request's mode, rate code and width are
+folded into CTLR1's own bits over the applied base (CPHA and CPOL are
+`SpiMode`'s two bits in the register's places, BR the code, DFF the
+width), compared with the word in force, and written - with the
+disable/enable pair 20.4.1 demands - only on a change.
+
+`dma_min_frames` is the data phase at which the engines pay for
+themselves: their fixed cost per transaction over the pump's cost per
+frame, both from the bench (below); a shorter data phase takes the pump
+even with engines bound. Nothing is flushed at `start()`: the chapter
+gives no way for a frame to stand in the receive buffer at the start of
+a transaction but a tenure that ended without reading what it clocked,
+which is a fault path here, and every fault path drains the buffer.
+
+Beside it: `init(clock, max_sck_hz)` with an optional bus-wide SCK
+ceiling, `rebase()` for a dynamic clock's fan-out, `clock_for()` /
+`sck_hz()` / `reference_hz()`, `prime()` (mode and rate now, moving no
+data - a CPOL flip is an edge, so prime BEFORE the select falls),
+`bit_order()` (a property of the WIRE and so a bus-level verb),
+`pad_speed()` (the slew class of SCK and MOSI, a choice that survives
+the next `init()`), `start()`, `isr()`, `dma_rx_isr()` and
+`dma_tx_isr()` (the two channels' bodies, each reading its own flags;
+`dma_isr()` is both, for a program that binds the two vectors to one
+function), `status()`, `busy()`, `recover()`, `release()` and
+`claim_nss_pad()`.
 
 ### The client
 
@@ -485,19 +562,51 @@ own.
 - **The two instances' rate tables differ**, as their buses do: SPI1's
   ladder runs 72 MHz down to 562.5 kHz, SPI2's 36 MHz down to
   281.25 kHz.
-- **The polled loop, not the wire, is the limit at the fast end.** On
-  SPI1's strap a 256-byte polled burst costs 101 core cycles a frame at
-  /2 where the wire alone is 16, and 2133 at /256 where the wire is
-  2048; the two meet around /64. The DMA engines close that gap: a block
-  on them costs the wire's own time per frame, and a fixed cost per
-  transaction above it (the next finding).
+- **THE HOST ABOVE THE WIRE**, `bench_vx03`'s letter e on SPI1 with no
+  engines, MISO floating, each line the best of 4 from a fresh tick (the
+  wire's cycles a frame: 32 and 128 for 8-bit frames at /4 and /16, 64
+  and 256 for 16-bit ones). A POLLED WRITE of 256 frames runs at the
+  wire: 32, 128, 64 and 256 cycles a frame (x 1.00 to 1.02), where the
+  old loop - one frame in flight, the width reloaded per frame, every
+  verb a call - took 101, 197, 137 and 329 (x 1.28 to 3.15); the
+  vendor's own loop on the same board (the EVT's 2Lines_FullDuplex
+  shape, transcribed into a scratch program on brio's crt and console)
+  reads 39, 128, 64 and 256, and at /4 in 8-bit frames LOSES A FRAME IN
+  TWO RUNS OF FOUR with nothing live but the tick: a loop that refills on
+  TXE whenever it can falls behind a 32-cycle frame (its turn is 39) and
+  the receive side overruns, where 20.2.2's sequence - the next write
+  after the previous read - cannot fall behind and runs at 34. A POLLED
+  RECEIVE, one frame in flight below the threshold, is 51 and 139 cycles
+  a frame in 8-bit frames (x 1.62 and 1.09), 79 in 16-bit ones at /4
+  (x 1.24), and at /16 in 16-bit frames - two in flight - 256 (x 1.00).
+  THE PUMP, one interrupt a frame on a receive: 175 and 242 cycles a
+  frame in 8-bit frames (the handler's 103 with its stamps behind the
+  frame), 178 at /4 in 16-bit ones, and 257 at /16 (x 1.00, two in
+  flight); on a write at /4 one interrupt per TWO frames (the overrun
+  counted as the frame it is), 92 cycles a frame against 195 before. A
+  POLLED REQUEST OF THREE BYTES - a command and two data, the D/C
+  scripted, the select and the D/C on two pads - costs 280 cycles above
+  its wire time at /16 (the stopwatch's 28 inside; 468 before), one byte
+  221 (332), sixteen 272 (1352): the price of a DCS command.
+- **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
+  two-in-flight shape run on the resource at every code and width, 1024
+  frames a run, eight runs a point under a console print in flight,
+  loses a frame in every run at 32, 64 and 128 cycles a frame and in
+  none at 256 and above (five of eight at 16, where a run is too short
+  to meet an interrupt); the host under the same load, both shapes, the
+  pump and the loop, every code and width, finishes every run with no
+  overrun and `spi_ok` - a write tolerating what the oracle counts, a
+  receive never put in its way.
 - **THE ENGINED TRANSACTION'S FIXED COST**, `bench_vx03`'s letter d, a
-  write on SPI1 with MISO floating at 144 MHz: 571 cycles above the
-  frames' own wire time at /4, 561 at /16, ONE interrupt (the receive
-  channel's) - 1087 and 926, with two, before the engines were rewritten
-  ([dma.md](dma.md)). Of the 571: the instrument 107, the copy of the
-  `Request` into the host 130, the engines 334. 256 frames at /4 are
-  8763 cycles against 8192 of SCK, at /16 33329 against 32768.
+  write on SPI1 with MISO floating at 144 MHz: 530 cycles above the
+  frames' own wire time at /4, 523 at /16, ONE interrupt (the receive
+  channel's) - the launch 347 of it, the completion's handler 142 with
+  its stamps, the instrument 107 - against 571 with the Request copied
+  into the host, and 1087 with two interrupts before the engines were
+  rewritten ([dma.md](dma.md)). 256 frames at /4 are 8722 cycles against
+  8192 of SCK, at /16 33291 against 32768. The engines' own share, 530
+  less the instrument, over the pump's 103 cycles a frame is what
+  `dma_min_frames` states.
 - **16-bit frames through the engines**: a 256-frame write of half-words
   in 16966 cycles at /4 against 16384 of SCK (x 1.03), and 66118 at /16
   against 65536, one interrupt each - the pump took 52545 cycles and 256
@@ -508,7 +617,9 @@ own.
   a bitwise loop computes over the same buffer - and it did, 0x2E for
   8-bit frames under the polynomial 0x07 and 0xEA0D for 16-bit ones under
   0x1021: the half-word beat, and the order of the two bytes inside a
-  frame, are the Request's.
+  frame, are the Request's. The CRC frame follows the block on the wire
+  (above), and TCRCR read before it is out holds another number - 0x7D16
+  and 0x7E8B in two runs for the 16-bit block, 0xEA0D once BSY is down.
 - **THE STRAP IS CLEAN TO 36 MHz AND BREAKS AT 72.** Every BR code from
   /4 down carried 256 bytes byte-exact; /2 did not. Four kilobytes at
   /4 (36 MHz of SCK), sent as sixteen chunks, came back byte-exact.
@@ -658,9 +769,11 @@ Driver gaps:
 - **`Spi<2>` as a CLIENT under software management** (SSM with SSI
   driven low by the program instead of by the wire): the peer's select
   is a real wire here, so the software-selected client has no user.
-- **The CRC through the DMA engines**: the engines carry the data phase
-  and the CRC frame is CRCNEXT's, one frame after the block ends. Born
-  with the first device that checks one over a block.
+- **A CRC CHECKED over an engined block**: the hardware appends the
+  transmit CRC after a DMA-fed block (above), so the frame is there;
+  what no verb offers is the receive side's judgement - CRCERR after a
+  block whose far end sent its CRC. Born with the first device that
+  checks one over a block.
 - **The BR ladder under HSRXEN on the CH32V30x_D8 lots that have it**
   (FPCLK/3, /5 ... /9): declined, because a program cannot read its lot
   and /2, the one code both ladders share, is what the driver offers.
@@ -678,6 +791,18 @@ Driver gaps:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The receive shapes' DATA**: letter e's receive lines land frames in a
+  buffer with MISO floating, so the loop's and the pump's accounting is
+  judged (no overrun, every frame counted) and the bytes are not; the
+  strap from PA7 to PA6 (letter c of `test_vx03_spi`, which runs the
+  arbiter over the polled and pumped receives) would judge them.
+- **The write-ahead threshold on SPI2 and SPI3**: computed per bus share
+  by the same arithmetic (one code lower than SPI1's above 72 MHz of
+  HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
+  the oracle on a PB1 instance would measure it.
+- **The hold-off under a program's own handlers**: the constant is this
+  image's longest counted; a program whose handlers run longer than the
+  frame it runs at reads `spi_overrun` in its reply, which is the guard.
 - **The RECEIVED half of the engined data phase as the engines now are,
   16-bit frames included**: the transmitted half is judged by the CRC
   unit above, and what the receive engine lands in memory is judged by
