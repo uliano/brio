@@ -83,22 +83,27 @@ listener is therefore the pad, released.
   optional in buffer (null = discard), the per-request `mode`, `clock`
   and `bits`, `cs_setup_us`, and `polled` - false runs the frames on
   the receive interrupt in batches of up to eight in flight, true
-  spins inside `start()`. `init(clock, max_sck_hz)`, `rebase(pclk,
-  sys)`, `clock_for(hz)`, `sck_hz`, `ceiling_clock`, `prime()` for a
-  caller framing its own select, `loopback(on)` (kept through every
-  re-application: the wireless instrument), `isr()`, `dma_isr()`,
-  `status()`, `recover()`, `release()`. The engine slots take
-  `dma.hpp`'s `DmaTxEngine` / `DmaRxEngine` on any two channels, both
-  or neither, both of one element: `uint16_t` - SSPDR's width - carries
-  8- and 16-bit frames alike, each block at its frame's beat, and
-  `uint8_t` engines leave 16-bit frames to the pump. The data phase
-  moves as one block each way with the requests raised around the
-  engines; the transmit engine is bound to report a bus error alone
-  (IRQ_QUIET), so the receive block's completion is the transaction's
-  ONE DMA interrupt. A 16-bit request whose buffers are not half-word
-  aligned goes to the pump. Frames in a byte buffer: one byte per 8-bit
-  frame, two bytes low-first per 16-bit frame - on this little-endian
-  core, a half-word in memory.
+  spins inside `start()` in one of two shapes: a receive with eight
+  frames in flight, or a write that paces on TNF and reads nothing
+  (the IP stratum's page, "The host above the wire"). The request is
+  28 bytes here, laid out words first. `init(clock, max_sck_hz)`,
+  `rebase(pclk, sys)`, `clock_for(hz)`, `sck_hz`, `ceiling_clock`,
+  `prime()` for a caller framing its own select, `loopback(on)` (kept
+  through every re-application: the wireless instrument), `isr()`,
+  `dma_isr()`, `status()`, `recover()`, `release()`, and
+  `dma_min_frames` - the data-phase length below which a request takes
+  the pump even with engines bound, this chip's traits' number. The
+  engine slots take `dma.hpp`'s `DmaTxEngine` / `DmaRxEngine` on any
+  two channels, both or neither, both of one element: `uint16_t` -
+  SSPDR's width - carries 8- and 16-bit frames alike, each block at its
+  frame's beat, and `uint8_t` engines leave 16-bit frames to the pump.
+  The data phase moves as one block each way with the requests raised
+  around the engines; the transmit engine is bound to report a bus
+  error alone (IRQ_QUIET), so the receive block's completion is the
+  transaction's ONE DMA interrupt. A 16-bit request whose buffers are
+  not half-word aligned goes to the pump. Frames in a byte buffer: one
+  byte per 8-bit frame, two bytes low-first per 16-bit frame - on this
+  little-endian core, a half-word in memory.
 - `SpiClient<n, pins>`: `init(clock, Config)` (mode, format, bits,
   drive_output), `enable(first)` with the first answer in the FIFO
   before the host's clock, `write()` on TNF up to `frames_ahead` = 8,
@@ -174,10 +179,13 @@ the roles inverted on the same wires for the last letter.
   discarded; a read with no out buffer clocks 0xFF; the select
   released after every transaction; an empty request completes on the
   spot.
-- THE POLLED PATH at every named rate carries 64 frames byte-exact,
-  from 1.6 us a frame at clk_peri / 2 (the wire alone 128 ns) to 19.6
-  us at / 256 (the wire alone 16.4 us): the per-frame cost is the poll
-  until the divider is the larger of the two.
+- THE POLLED PATH at every named rate carries 64 frames byte-exact.
+  The 1.6 us a frame at clk_peri / 2 this letter once read (the wire
+  alone 128 ns) was the host's earlier loop - the ISR's fill and take
+  called per frame through outlined accessors; the loop is now written
+  from the block's FIFOs and reads the wire's own figure on the RP2350
+  ([../rp2350/spi.md](../rp2350/spi.md)), and this chip's figure is
+  owed to its board (below).
 - THE ENGINES on the loop: a 128-byte block at 31.25 MHz in 296 us,
   ISR-completed and exact - the letter's FIRST engined transaction,
   whose code runs out of the flash for the first time, against a wire of
@@ -262,6 +270,18 @@ Implemented but not bench-verified, each with what would measure it
   interrupt (about 2.2 us at 125 MHz; [dma.md](dma.md)): `bench_rp2040`
   letter d's `spi.dma` lines, 16 and 256 frames at two rates and 16-bit
   frames up to 4096 - which also time a byte inside the transfer.
+- THE HOST ABOVE THE WIRE on this core: the polled loop in both its
+  shapes, the pump's cost per frame, the price of a three-byte command
+  and the receive shape's proof under a stretched handler - the IP
+  stratum's host, measured on the RP2350 in both of its architectures
+  ([../rp2350/spi.md](../rp2350/spi.md)) and compiled here into
+  `bench_rp2040`'s letter e under the same op names. The letter on this
+  board, with the vendor's `spi_write_read_blocking` and
+  `spi_write_blocking` built from the pinned pico-sdk beside it.
+- `dma_min_frames` as this chip's own number: the traits carry the
+  RP2350's quotient (ten frames) as a stand-in, the same block and the
+  same driver on a core whose interrupt entry is slower; letters d and
+  e of `bench_rp2040` give the two inputs.
 
 - The per-bus timeout with `recover()`: a lost completion staged as
   the other targets' suites stage it (the ISR body run, the reply

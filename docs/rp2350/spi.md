@@ -140,6 +140,9 @@ Request and its two ISR bodies, the client's surface) is in
 - `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine>` and `SpiClient<n,
   pins>` - the public names, this chip's aliases of the three IP
   templates, with `NoDmaEngine` in both slots by default.
+- `Rp2350Pl022::dma_min_frames`, the data-phase length below which a
+  request takes the pump even with engines bound - TEN frames here, the
+  quotient of two of this chip's measurements (the bench findings).
 
 Beside them, at the foot of the file, is the VOCABULARY CHECK: the IP
 file spells the block's bit layout itself, because it may not read a
@@ -243,14 +246,89 @@ between the halves both are given; every verdict reads the same.
 - **THE PUMP BATCHES.** Sixteen frames on the loop-back cost **three to
   four interrupt entries**, not sixteen: the eight-deep FIFOs are what the
   engine is counting on.
-- **THE POLLED LADDER, WHERE THE TWO HALVES DIFFER MOST.** 64 frames on
-  the loop-back, Cortex-M33 then Hazard3: div2 55 / 61 us, div4 46 / 49,
-  div8 44 / 49, div16 70 / 75, div32 134 / 141, div64 263 / 269, div128
-  521 / 529, div256 1039 / 1046. Below div8 the WIRE sets the pace and the
-  two halves converge; at and above it the polling loop does, and **the
-  floor is 44 us on the Cortex-M33 half and 49 on the Hazard3 one - some
-  690 and 765 ns a frame** where the wire alone would want 213 and 106.
-  Every rate is byte-exact.
+- **THE POLLED LADDER.** 64 frames on the loop-back, Cortex-M33 then
+  Hazard3: div2 19 / 17 us, div4 20 / 19, div8 35 / 36, div16 68 / 68, and
+  the slower rungs the wire's own time. From div4 down the WIRE sets the
+  pace on both halves; at div2 the receive loop's three accesses a frame
+  do (the next item). Every rate is byte-exact.
+- **THE HOST ABOVE THE WIRE, `bench_rp2350` letter e** - the polled loop
+  in both its shapes, the pump, the price of a request - on a host with
+  no engines, SPI0 on the same pads with GP17 the select and GP22 the D/C
+  line, MISO floating, the receive-overrun flag read after every run and
+  clear on every one; Cortex-M33 / Hazard3, the best of five, at clk_peri
+  / 2, / 4 and / 16 in mode 0 and in mode 3:
+  - THE RECEIVE SHAPE (`spi.poll.rx`, eight frames in flight - written and
+    not yet read): 8-bit frames at 37.5 MHz **38.0 / 38.0 cycles a frame in
+    mode 0 and 32.0 / 32.0 in mode 3** - the wire with the block's gap, and
+    the wire - at 9.375 MHz 152 / 128, and 16-bit frames 70 / 64 and 280 /
+    256: the wire's own figures to the hundredth. At 75 MHz its three
+    accesses a frame set the pace: **24 / 28 cycles a frame** against a
+    16-cycle frame, 16-bit frames at the wire (35 / 32). The loop was 97 /
+    93 cycles a frame at 37.5 MHz before this host (the ISR's fill and
+    take called per frame, the width reloaded from a static): the same
+    request at /4 cost three times the wire.
+  - THE WRITE SHAPE (`spi.poll`, no in buffer): at /4 and /16 the same
+    figures - the receive loop discarding, since a frame read under the
+    wire costs nothing - and at **75 MHz the TNF-paced loop at 19.02 / 19.02
+    cycles a frame in mode 0 and 15.99 / 16.00 in mode 3**, the nominal
+    wire, which is the one rate the transmit-only shape is taken at, on
+    runs longer than the FIFO: its tail (up to eight reads after the wire
+    has finished) costs a short request 30 to 130 cycles the receive
+    shape spends under the wire instead - measured with the shape taken
+    unconditionally, the three-byte request 356 / 354 against 286 / 286.
+  - THE RECEIVE SHAPE UNDER A LONG HANDLER: 100 receive requests of 256
+    frames on the loop-back at each of the three rates with the tick's
+    handler stretched to 1500 cycles - eight frames being 128, 256 and
+    1024 cycles - **100 exact and 0 overruns at every rate on both
+    halves**, with 8 / 8 / 25 (Cortex-M33) and 8 / 9 / 26 (Hazard3) of the
+    stretched ticks landing inside the requests: the frames in flight
+    never exceed the receive FIFO's depth, so a handler that holds the
+    loop off cannot overrun it, whatever its length.
+  - THE PUMP (`spi.pump`, the receive on the interrupt): **40 to 63 cycles
+    a frame inside the handler** (was 86 to 119), one interrupt per FIFO
+    level - 32 or 33 for 256 frames at 75 and 37.5 MHz, where a handler
+    finds the eight in flight all back, 51 or 52 at 9.375 where it finds
+    four to five - the overrun flag clear on every run. Wall: 53 / 53
+    cycles a frame at 75 and 37.5 MHz, the handler's own entry, stamps and
+    refill between batches outlasting the eight frames in flight; the
+    wire's own 152 and 128 at 9.375. With the host as it was, the Hazard3
+    half RAISED the overrun flag at 37.5 MHz: `start()` armed the receive
+    interrupt BEFORE filling the FIFO, so the handler ran inside the fill
+    with both sides counting the same frames; the fill now comes first.
+  - THE PRICE OF A DCS COMMAND (`spi.req`, a command byte with D/C low and
+    0, 2 and 15 data bytes with it high, polled, nothing read back, at
+    9.375 MHz): wall less the wire's cycles **196..214 for one byte,
+    286..309 for three, 595..633 for sixteen** across the round's builds
+    on both halves (the band is the XIP cache's line alignment, which
+    every link moves) - of which the block's mode-0 gap is 24 / 72 / 384
+    and the phase boundary's drain (the data frames wait for the command
+    frame to come back whole, so D/C flips on the wire) one frame's
+    latency; the host's own code under 200. Before this host: 379 / 412,
+    593 / 636 and 937 / 935. On the engined host the same three requests
+    read the same within 15 cycles (they take the polled loop below
+    `dma_min_frames`), where before they cost 316, 669 and 979 with an
+    interrupt each.
+  - THE VENDOR'S LOOP ON THE SAME BOARD (pico-sdk 2.3.1's
+    `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
+    the SDK's own placement, built by its CMake with its crt, the select a
+    GPIO around the call, timed on the same TIMER1): full duplex at 75 MHz
+    **27.0 / 38.0 cycles a frame**, at 37.5 MHz 38.0 / 38.0 in mode 0 and
+    32.0 / 38.0 in mode 3, at 9.375 MHz the wire's 152 and 128; its
+    write-only loop 19.3 / 19.3 cycles a frame at 75 MHz in mode 0. So
+    this host's receive shape is ahead of the vendor's loop at 75 MHz on
+    both halves and at 37.5 MHz on Hazard3, its write shape reads the
+    vendor's at 75, and a 16-frame transfer costs the vendor 61 cycles
+    over the wire against this host's write of the same within the wire's
+    own time.
+- **`dma_min_frames` = 10**, the quotient the chip traits carry: the
+  engines' fixed cost per transaction (letter d after this round: 16
+  frames at 75 MHz, wall less the wire's cycles and less the block's
+  mode-0 gap, **514 / 473 cycles**) over the pump's cost per frame (letter
+  e's 49 / 48 cycles a frame in the handler plus the interrupt's own entry
+  and exit - the Cortex-M33's 24 cycles, the crt's 48 on Hazard3 - spread
+  over the eight frames a batch: 52 / 54) is 9.9 / 8.8, the larger rounded
+  up. A data phase shorter than that takes the pump even on a host with
+  engines bound.
 - **THE ENGINES ON THE LOOP-BACK.** 128 bytes at 37.5 MHz, ISR-completed,
   are exact with **ONE DMA interrupt**, and 64 16-bit frames ride the
   engines at a half-word beat exact with no pump interrupt and one DMA
@@ -272,13 +350,14 @@ between the halves both are given; every verdict reads the same.
 - **WHAT AN ENGINED TRANSACTION COSTS, `bench_rp2350` letter d**, the
   ruler TIMER1 on clk_sys, MISO floating (and the same on the loop-back),
   the core asleep between the start and the completion; Cortex-M33 /
-  Hazard3. `start()` returns after **353 / 322 cycles** - the request
-  copied, the select and the flush, both engines started - and the
-  transaction's ONE interrupt follows the last frame; with it a
-  transaction costs the core **about 700 / 480 busy cycles** whatever its
-  size, and its FIXED COST, the wall less its frames' own
-  time, is **about 550 / 530 cycles, 3.7 / 3.5 us**, the same at 16 and
-  256 frames and at both rates. THE FRAMES' OWN TIME IS NOT THE NOMINAL
+  Hazard3. `start()` returns after **316 / 267 cycles** - the request's
+  words copied into the tenure, one compare for the rate, the select,
+  both engines started - and the transaction's ONE interrupt follows the
+  last frame; with it a transaction costs the core **about 680 / 440 busy
+  cycles** whatever its size, and its FIXED COST, the wall less its
+  frames' own time, is **562 / 521 cycles at 16 frames (3.7 / 3.5 us),
+  of which 48 the block's gap**, the same at 256 frames and at both
+  rates. THE FRAMES' OWN TIME IS NOT THE NOMINAL
   WIRE'S: in mode 0 the PL022 raises its frame signal between two frames
   of a continuous transfer (12.3.4.10, and 12.3.4.12 for mode 2), and the
   gap is 1.5 SCK periods - measured 19 cycles a byte at 75 MHz where the
@@ -336,10 +415,13 @@ between the halves both are given; every verdict reads the same.
   Request copied 68 / 91 cycles, an unchanged `apply()` 75 / 64, the D/C
   line, the select and the flush 52 / 56, the two engine starts with
   their two SSPDMACR writes 158 / 123, the completion's handler through
-  `finish_dma()` 119 / 110. And its first transfer after `spi_init()`,
+  `finish_dma()` 119 / 110 - a census of the host before the SPI round,
+  whose first three items are now the tenure's seven word copies, one
+  compare, and no flush. And its first transfer after `spi_init()`,
   completed by its interrupt, pays the same price per line - 14 to 24
   misses, 1158 to 1996 cycles - because it touches six to seven times
-  fewer lines.
+  fewer lines; this host's first transaction after `init()` pays 10161 /
+  8549.
 - **THE CLIENT KEEPS UP ONE RUNG ABOVE THE CHAPTER'S CEILING.** On the
   four wires, the host polled and the client served from its own
   interrupt, 32 frames are exact both ways at **clk_peri / 8, 18.75 MHz**,
@@ -384,12 +466,16 @@ Request, a client on the DMA engines - are in
 [../pl022/README.md](../pl022/README.md) and are not repeated here.
 
 - The transaction path in SRAM: an engined transaction whose lines have
-  left the XIP cache pays 126 to 165 misses, about 70 us at 150 MHz (the
-  bench findings), which `start()`, the engines' starts and the
-  completion's handler placed in `.ram_text` would not pay - at about
-  1.1 KB of SRAM a host, and a section the IP stratum would name for
-  every family that carries the block. Declined while the path's own
-  size, six to seven times the vendor's transfer in cache lines, is open.
+  left the XIP cache pays its lines - 10161 / 8549 cycles for the first
+  after `init()` (the bench findings) - which `start()`, the engines'
+  starts and the completion's handler placed in `.ram_text` would not
+  pay. An attribute takes a string literal and not a trait, so the way
+  the IP stratum cannot take is a `Chip::hot_section`; the way this
+  family can is its own linker script placing the host's function
+  sections (`-ffunction-sections` gives each its own, named for the
+  symbol) into `.ram_text` by pattern - about 1.4 KB of SRAM for the two
+  shapes, the pump and the engines' launch - measured cold and warm
+  before it is taken.
 - The TI and the Microwire framings ON THE WIRE: both are codes
   `SpiConfig` takes and the resource reads back, and no device on this
   desk speaks either. The pair of instances could speak TI to each other

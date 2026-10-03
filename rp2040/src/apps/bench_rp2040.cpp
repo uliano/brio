@@ -137,6 +137,21 @@
 //                 16-frame wall less its wire time) and the time a byte
 //                 (the 16- and 256-frame walls' difference over the bytes
 //                 of the 240 frames between them) against the wire's.
+//   e  THE SPI HOST ABOVE THE WIRE (brio/pl022/spi.hpp over SPI0 on the
+//      same pads, GP17 the select and GP22 the D/C line, nothing on the
+//      wire), on a host WITHOUT engines so the polled loop and the pump
+//      are what runs - bench_rp2350's letter e on this chip, the same ops
+//      under the same names: spi.poll (a polled WRITE, no in buffer) and
+//      spi.poll.rx (the receive) of 16 and 256 frames at clk_peri / 2, / 4
+//      and / 16 in mode 0 and in mode 3, spi.poll16 and spi.poll16.rx the
+//      same in 16-bit frames, spi.pump and spi.pump16 the receives on the
+//      interrupt, the receive shape's proof under a tick handler stretched
+//      past eight frame times, and spi.req - a command byte and 0, 2 and
+//      15 data bytes with D/C scripted at clk_peri / 16, wall less the
+//      wire's cycles the host's fixed cost per request. The block's
+//      receive-overrun flag is read after every run. Each the best of five
+//      after one thrown away. THIS LETTER IS COMPILED FOR THE BOARD AND
+//      NOT YET RUN ON IT (docs/rp2040/spi.md).
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -166,6 +181,8 @@
 //   spi.dma the clock over the bits of a byte: 31.25 MHz / 8 = 3 906 250
 //           B/s at div4, 3.906 MHz / 8 = 488 281 at div32 - a 16-bit frame
 //           is two bytes of the same wire.
+//   spi.poll, spi.pump, spi.req  the same: 7 812 500 B/s at div2,
+//           3 906 250 at div4 and 976 562 at div16.
 //
 // THE INSTRUMENT'S COST, and how a reader subtracts it: every line is
 // RAW. A Stopwatch wall holds the `stopwatch` line's wall beyond the
@@ -183,6 +200,7 @@
 #include <stdint.h>
 
 #include <array>
+#include <atomic>
 #include <cstring>
 
 #include "rp2040/clock.hpp"
@@ -670,6 +688,209 @@ void td_dma() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// e - the SPI host above the wire: the polled loop, the pump, a request's price
+// =============================================================================
+using Plain = SpiHost<0, spi_pins>;   // no engines: the polled loop and the pump
+using SpiSelect = Pin<17>;
+using SpiDc = Pin<22>;
+volatile bool plain_live = false;
+volatile bool plain_done = false;
+uint8_t dcs_command = 0x2C;   // in SRAM, as a client's command byte would be
+volatile uint32_t tick_stretch = 0;
+constexpr uint32_t rx_proof_runs = 100;
+
+struct SpiRate { SpiClock clock; const char* name; };
+constexpr SpiRate e_rates[] = {{SpiClocks::div2, "62.5 MHz"}, {SpiClocks::div4, "31.25 MHz"}, {SpiClocks::div16, "7.8125 MHz"}};
+
+struct SpiReqRun {
+    BenchSample sample;
+    uint32_t spi_irq;
+    uint32_t spi_isr;
+    bool overrun;
+};
+
+/// One request on host H, polled or pumped, the core idling to a pumped
+/// one's completion with the flag read under the mask (the kernel loop's
+/// shape, so a completion between the read and the sleep is not lost).
+template <typename H>
+SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, SpiDataSize bits,
+                 bool polled, bool with_rx) {
+    typename H::Request r{};
+    r.cs = SpiSelect::ref();
+    if (cmd_len != 0u) {
+        r.dc = SpiDc::ref();
+        r.cmd = lend<Lease::reply>(static_cast<const uint8_t*>(&dcs_command));
+    }
+    r.cmd_len = cmd_len;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
+    r.rx = lend<Lease::reply>(with_rx ? spi_rx : nullptr);
+    r.len = frames;
+    r.clock = rate;
+    r.mode = mode;
+    r.bits = bits;
+    r.polled = polled;
+    drain();
+    H::Resource::clear_pending(SpiInterrupt::overrun);
+    plain_done = false;
+    const uint32_t irq0 = spi_meter.count();
+    const uint32_t isr0 = spi_meter.cycles();
+    const BenchCounters before = counters();
+    const uint32_t t0 = Ruler::now();
+    bool done = H::start(r);
+    while (!done) {
+        disable_interrupts();
+        done = plain_done;
+        if (done || Ruler::now() - t0 >= Ruler::hz() / 10u) {
+            enable_interrupts();
+            break;
+        }
+        Idle::idle();
+    }
+    const uint32_t wall = Ruler::now() - t0;
+    const BenchCounters after = counters();
+    const bool overrun = (H::Resource::raw_pending() & SpiInterrupt::overrun) != 0u;
+    if (!done) {
+        print(serial, "  STALLED: SSPSR ", hex(H::Resource::flags()), " SSPRIS ",
+              hex(H::Resource::raw_pending()), " SSPIMSC ", hex(H::Resource::interrupts()), crlf);
+        (void)H::recover();
+    }
+    return {bench_sample(wall, before, after), spi_meter.count() - irq0,
+            spi_meter.cycles() - isr0, overrun};
+}
+
+template <typename H>
+SpiReqRun e_best(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, SpiDataSize bits,
+                 bool polled, bool with_rx) {
+    bool overrun = e_once<H>(cmd_len, frames, rate, mode, bits, polled, with_rx).overrun;
+    SpiReqRun best{};
+    for (uint8_t run = 0; run < 5u; ++run) {
+        const SpiReqRun s = e_once<H>(cmd_len, frames, rate, mode, bits, polled, with_rx);
+        overrun = overrun || s.overrun;
+        if (run == 0u || s.sample.wall < best.sample.wall) {
+            best = s;
+        }
+    }
+    best.overrun = overrun;
+    return best;
+}
+
+const char* e_op(bool polled, SpiDataSize bits, bool with_rx) {
+    const bool wide = bits == SpiDataSize::bits16;
+    if (!polled) {
+        return wide ? "spi.pump16" : "spi.pump";
+    }
+    if (with_rx) {
+        return wide ? "spi.poll16.rx" : "spi.poll.rx";
+    }
+    return wide ? "spi.poll16" : "spi.poll";
+}
+
+void e_rx_proof() {
+    Plain::loopback(true);
+    for (const SpiRate& rate : e_rates) {
+        uint32_t exact = 0;
+        uint32_t overruns = 0;
+        drain();
+        // The meter is written by the handler and read here: a fence on
+        // either side of the loop, so the compiler reloads what it cannot
+        // see change.
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        const uint32_t ticks0 = tick_meter.count();
+        tick_stretch = 1500;
+        for (uint32_t run = 0; run < rx_proof_runs; ++run) {
+            for (uint32_t i = 0; i < 256u; ++i) {
+                spi_tx[i] = static_cast<uint8_t>(i * 7u + run);
+                spi_rx[i] = 0xEE;
+            }
+            Plain::Resource::clear_pending(SpiInterrupt::overrun);
+            Plain::Request r{};
+            r.cs = SpiSelect::ref();
+            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_tx));
+            r.rx = lend<Lease::reply>(static_cast<uint8_t*>(spi_rx));
+            r.len = 256;
+            r.clock = rate.clock;
+            r.mode = SpiMode::mode3;
+            r.polled = true;
+            (void)Plain::start(r);
+            if (std::memcmp(spi_tx, spi_rx, 256) == 0) {
+                ++exact;
+            }
+            if ((Plain::Resource::raw_pending() & SpiInterrupt::overrun) != 0u) {
+                ++overruns;
+            }
+        }
+        tick_stretch = 0;
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        const uint32_t ticks = tick_meter.count() - ticks0;
+        print(serial, "  spi.poll.rx under a tick handler of 1500 cycles (eight frames at ", rate.name,
+              " are ", 8u * (8u * Ruler::hz() / Plain::sck_hz(rate.clock)), "): ", rx_proof_runs,
+              " requests of 256 frames on the loop-back, ", exact, " exact, ", overruns, " overruns, ",
+              ticks, " ticks landed", crlf);
+    }
+    Plain::loopback(false);
+}
+
+void te_host() {
+    (void)SpiSelect::output(true);
+    (void)SpiDc::output(true);
+    (void)Plain::init(clock);
+    plain_live = true;
+    for (uint32_t i = 0; i < 512u; ++i) {
+        spi_tx[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    struct Shape { bool polled; bool with_rx; };
+    constexpr Shape shapes[] = {{true, false}, {true, true}, {false, true}};
+    for (const Shape& shape : shapes) {
+        for (const SpiRate& rate : e_rates) {
+            const uint32_t sck = Plain::sck_hz(rate.clock);
+            for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
+                const char* const op = e_op(shape.polled, bits, shape.with_rx);
+                const uint32_t frame_bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
+                for (const SpiMode mode : {SpiMode::mode0, SpiMode::mode3}) {
+                    uint32_t walls[2] = {0, 0};
+                    uint8_t k = 0;
+                    for (const uint16_t frames : {static_cast<uint16_t>(16), static_cast<uint16_t>(256)}) {
+                        const SpiReqRun run =
+                            e_best<Plain>(0, frames, rate.clock, mode, bits, shape.polled, shape.with_rx);
+                        walls[k++] = run.sample.wall;
+                        bench_line(serial, op, frames * frame_bytes, run.sample, Ruler::hz(), sck / 8u);
+                        print(serial, "  ", op, " ", frames, " frames of ", spi_data_bits(bits), " bits at ",
+                              rate.name, ", mode ", static_cast<uint8_t>(mode), ": the SPI vector irq ",
+                              run.spi_irq, " isr ", run.spi_isr, "; overrun flag ",
+                              run.overrun ? "RAISED" : "clear", crlf);
+                    }
+                    const uint32_t per_frame_x100 =
+                        walls[1] > walls[0] ? (walls[1] - walls[0]) * 100u / 240u : 0u;
+                    const uint32_t wire_frame = 8u * frame_bytes * Ruler::hz() / sck;
+                    print(serial, "  ", op, " at ", rate.name, ", ", spi_data_bits(bits), "-bit frames, mode ",
+                          static_cast<uint8_t>(mode), ": ", per_frame_x100 / 100u, '.',
+                          per_frame_x100 % 100u / 10u, per_frame_x100 % 10u,
+                          " cycles a frame by the difference of the two sizes, the wire's ", wire_frame,
+                          mode == SpiMode::mode0 ? " and with the block's gap " : " (no gap in mode 3) ",
+                          mode == SpiMode::mode0 ? wire_frame + 3u * Ruler::hz() / (2u * sck) : 0u, crlf);
+                }
+            }
+        }
+    }
+    e_rx_proof();
+    const SpiRate& req_rate = e_rates[2];
+    const uint32_t req_sck = Plain::sck_hz(req_rate.clock);
+    for (const uint16_t len : {static_cast<uint16_t>(0), static_cast<uint16_t>(2), static_cast<uint16_t>(15)}) {
+        const SpiReqRun run =
+            e_best<Plain>(1, len, req_rate.clock, SpiMode::mode0, SpiDataSize::bits8, true, false);
+        const uint32_t n = 1u + len;
+        const uint32_t wire = static_cast<uint32_t>(static_cast<uint64_t>(n) * 8u * Ruler::hz() / req_sck);
+        bench_line(serial, "spi.req", n, run.sample, Ruler::hz(), req_sck / 8u);
+        print(serial, "  spi.req: a command byte and ", len, " data bytes at ", req_rate.name, ": the wire ",
+              wire, " cycles, the fixed cost ", run.sample.wall > wire ? run.sample.wall - wire : 0u,
+              " cycles; overrun flag ", run.overrun ? "RAISED" : "clear", crlf);
+    }
+    plain_live = false;
+    Plain::release();
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_rp2040 - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console UART0 ", console_baud, " 8N1, ruler SysTick cycles", crlf);
@@ -703,11 +924,20 @@ extern "C" void isr_spi0() {
     if (DmaHost::isr()) {
         dma_done = true;
     }
+    if (plain_live && Plain::isr()) {
+        plain_done = true;
+    }
     spi_meter.leave();
 }
 extern "C" void isr_systick() {
     tick_meter.enter();
     brio::Ticker::tick();
+    if (tick_stretch != 0u) {
+        // Letter e's proof: a handler longer than eight frame times.
+        const uint32_t t0 = Ruler::now();
+        while (Ruler::now() - t0 < tick_stretch) {
+        }
+    }
     tick_meter.leave();
 }
 
@@ -724,6 +954,7 @@ int main() {
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA engines: copy, fill, paced, spi.dma", td_dma);
+    bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED",

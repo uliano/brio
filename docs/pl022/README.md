@@ -47,7 +47,8 @@ every family that drives an SPI. This file takes them.
   prescaler pair as pure arithmetic (`SpiClock`, `SpiClocks`,
   `spi_sck_hz`, `spi_clock_for`), the whole configuration and the two
   control words it becomes (`SpiConfig`, `spi_config_valid`,
-  `spi_cr0_of`, `spi_cr1_of`), every register's bit layout as constants
+  `spi_cr0_of`, `spi_cr1_of`) and the one word a host compares a
+  request against (`spi_control_word`), every register's bit layout as constants
   (`SpiControl0`, `SpiControl1`, `SpiDataField`, `SpiFlag`,
   `SpiInterrupt`, `SpiDmaControl`), the engine's own status code
   `spi_dma_fault`, the resource `Pl022Ssp<Chip, n>`, the host engine
@@ -86,8 +87,9 @@ The constants:
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the PL022 and therefore the family's fact, not this file's. It is the pump's window (how many frames may be in flight) and the client's `frames_ahead` |
+| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the PL022 and therefore the family's fact, not this file's. It is the pump's window (how many frames may be in flight), the polled loop's and the client's `frames_ahead` |
 | `no_pad` | what the family's pin set puts in a signal it does not route: a host with no receive pad is a write-only bus, and a client with no transmit pad is a listener |
+| `dma_min_frames` | below how many data frames a request takes the pump even on a host with engines bound: the engines' fixed cost per transaction over the pump's cost per frame, both MEASURED on the family's core and stated with their arithmetic in the family's document. A number of the core and the flash around the block, never of the block |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a
@@ -168,11 +170,108 @@ same by the vendor's own library doing the same transfer on the same
 board ([../rp2350/spi.md](../rp2350/spi.md)): a device that takes mode 1
 or 3 saves the 19 % by saying so.
 
+A data phase SHORTER THAN `dma_min_frames` takes the pump even with the
+engines bound, polled or not: the engines cost a transaction a fixed
+sum (two starts, one interrupt, the requests raised and dropped) that a
+short request never earns back, and the family's measured pair says
+where the two meet ([../rp2350/spi.md](../rp2350/spi.md): ten frames on
+both of that chip's cores). A command phase always runs on the pump or
+the polled loop, whatever the data phase does.
+
 What the host asks of an engine: `present`, `channel`, `element`,
 `Report` with `errors`, `arm(data, request[, high, report])`,
 `start(pointer, count)` at the frame's beat, `start_fixed(cell, count)`
 and `start_discard(cell, count)`, `complete()`, `busy()`, `service()`
 with `flag_complete` and `flag_error`, `abandon()`, `stop()`.
+
+## The host above the wire
+
+What the host's own code costs around and between the frames, and the
+shape it has - written from the block's register description and
+measured on the RP2350 in both of its architectures
+([../rp2350/spi.md](../rp2350/spi.md) carries the numbers; the vendor's
+polled loop on the same board is the figure beside them).
+
+- THE REQUEST IS LENT, AND THE POLLED PATH KEEPS NOTHING. The arbiter's
+  contract lends the request for the call; a polled request completes
+  inside `start()`, so it is read field by field through the reference
+  and no copy is made. The asynchronous path (the pump, the engines)
+  copies what its tenure needs into one working set, `tenure_`: the
+  request AS WORDS - one load and one store a word, inline on every core,
+  because a struct copy of this size is a `memcpy` call on a RISC-V
+  build at `-Os` and a byte copy on a core that cannot load a misaligned
+  word - plus the two advancing pointers and the counts the pump keeps.
+  The reply capsule is never copied: it is the arbiter's.
+- THE REQUEST IS LAID OUT WITHOUT PADDING: the four words first (the two
+  out buffers, the in buffer, the reply), then the two half-words (the
+  length, the prescaler pair), then the bytes - 28 bytes where the
+  family's `PinRef` is one byte, where the field order of the other
+  strata cost 36 with nine of padding. The names are the other strata's
+  and do not move; the order is this file's.
+- `apply()` IS ONE COMPARE. The prescaler pair, the mode and the width
+  are folded into the word the block takes (`spi_control_word`: SSPCPSR
+  over SSPCR0, a handful of shifts on the request's three bytes) and
+  held against the word last applied; equal, nothing is touched. A
+  request whose word differs is clamped to the bus's ceiling, compared
+  again, and only then pays the disable/enable pair the block demands
+  for its control registers (12.3.4.2 of the RP2350 data sheet). The
+  loop-back bit lives in SSPCR1 and outside the word.
+- THE FIFOS ARE THE WRITE-AHEAD, ON BOTH COMPLETION STYLES. A FIFO's
+  worth of frames is in flight at once, written with NO FLAG READ: a
+  transmit FIFO holding fewer than its depth cannot be full, and a
+  receive FIFO handed back no more than its depth cannot overrun
+  (12.3.3.4, 12.3.3.5) - which is what makes the receive-overrun
+  interrupt a thing the host need never arm.
+- THE POLLED LOOP HAS TWO SHAPES, by the request's `rx`. The RECEIVE
+  shape primes the transmit FIFO with the first `fifo_depth` frames and
+  then, per frame, waits for RNE, reads the frame and writes the one a
+  FIFO's depth ahead: three accesses of the block a frame (SSPSR, SSPDR
+  in, SSPDR out). The frames IN FLIGHT - written and not yet read back -
+  are never more than the receive FIFO's depth, so whatever handler
+  holds the loop off, the frames that can land in that FIFO are the ones
+  in flight and the FIFO holds them all: no handler can overrun this
+  shape, which the RP2350's bench proves with its tick handler stretched
+  past eight frame times. The TRANSMIT-ONLY shape - a null `rx`, which
+  is a display's pixel path, and every command phase - paces on TNF and
+  reads nothing per frame, two accesses a frame; the receive FIFO fills
+  and OVERRUNS BY DESIGN (a frame pushed on a full receive FIFO is
+  dropped and RORRIS raised while the block keeps shifting - harmless
+  with RORIM masked, which this host never arms), and the tail waits for
+  BSY to clear, drains the receive FIFO and clears the overrun. Both: the
+  width a template parameter, the buffers advancing pointers, no accessor
+  call, the waits bounded by ONE budget for the whole transaction - one
+  slowest frame per frame and one more - and a budget that runs out ends
+  the transaction with the engine's own status, the block left as it is
+  for the arbiter's `recover()` and the FIFOs drained. Measured on both
+  of the RP2350's cores: the write shape at the nominal wire (plus the
+  block's gap in modes 0 and 2) at every rate, clk_peri / 2 included;
+  the receive shape at the wire from clk_peri / 4 down and bound by its
+  three accesses a frame at / 2 - the vendor's full-duplex loop on the
+  same board reads the same number on the Cortex-M33 and a slower one on
+  Hazard3, its write-only loop the same as this one's.
+- THE PUMP is the same window on the interrupt. `start()` fills the
+  FIFO and THEN arms the receive level (RXIM, the FIFO at or above half)
+  and the timeout (RTIM, a frame waiting and no further frame for 32
+  bit periods - the tail's edge, measured to rise 130 to 190 cycles
+  after the last frame at 37.5 MHz in every one of the four modes);
+  each interrupt takes what came back and writes as many more. The
+  order matters: a fill with the line already armed let the handler run
+  INSIDE the fill with both sides counting the same frames, which was
+  measured to overrun the receive FIFO at 37.5 MHz on the Hazard3 half.
+  One interrupt per FIFO level, four to eight frames a handler; the
+  handler's own cost per frame is the family's number.
+- THE PHASE BOUNDARY DRAINS: the first data frame goes out only when the
+  last command frame has come back, so D/C flips between the two phases
+  on the wire. That drain is the one idle gap a two-phase request pays,
+  and a one-phase request pays none.
+- THE RECEIVE FIFO IS NOT FLUSHED AT `start()`. Every transaction takes
+  back every frame it wrote, so a frame can stand in the FIFO only after
+  a fault, and the fault paths - a polled wait that ran out, `recover()`
+  - are where it is drained. The chapter names no other way a frame
+  arrives.
+- THE PINS are the family's run-time pin, driven by its own one-store
+  verb; a null D/C line is skipped inside that verb; `cs_setup_us` is
+  tested before any call.
 
 ## What stays per family
 

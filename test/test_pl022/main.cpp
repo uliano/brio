@@ -385,6 +385,28 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(Engined::status() == spi_dma_fault);
     CHECK(regs().SSPDMACR == 0u);
 
+    // A data phase shorter than dma_min_frames takes the pump even with
+    // the engines bound: the FIFO filled, the line armed, no block.
+    fresh();
+    REQUIRE(Engined::init(clock));
+    static_assert(Engined::dma_min_frames == SimPl022::dma_min_frames);
+    Engined::Request brief{};
+    brief.cs = SimPl022PinRef{cs_pin};
+    brief.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    brief.len = Engined::dma_min_frames - 1u;
+    CHECK_FALSE(Engined::start(brief));
+    CHECK(TxEngine::blocks == 0u);
+    CHECK(regs().SSPDMACR == 0u);
+    CHECK(regs().SSPIMSC == (SpiInterrupt::rx | SpiInterrupt::rx_timeout));
+    CHECK(regs().SSPDR == out_buf[Engined::dma_min_frames - 2u]);
+    // And one exactly at the threshold rides them.
+    fresh();
+    REQUIRE(Engined::init(clock));
+    brief.len = Engined::dma_min_frames;
+    CHECK_FALSE(Engined::start(brief));
+    CHECK(TxEngine::blocks == 1u);
+    CHECK(TxEngine::length == Engined::dma_min_frames);
+
     // Sixteen-bit frames fall back to the pump on BYTE engines.
     fresh();
     REQUIRE(Engined::init(clock));

@@ -227,6 +227,9 @@ struct SimPl022 {
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 8;
     static constexpr uint8_t no_pad = 0xFFu;
+    /// No core measured anything here: a small number, so a test can
+    /// stage a data phase on either side of it.
+    static constexpr uint16_t dma_min_frames = 4;
 
     /// The two blocks, and the reset value the block comes up with:
     /// everything zero but SSPSR, whose transmit-FIFO bits are set.

@@ -131,6 +131,14 @@ struct Rp2040Pl022 {
     static constexpr uint8_t fifo_depth = 8;
     /// What a pin set puts in a signal it does not route.
     static constexpr uint8_t no_pad = 0xFFu;
+    /// Below how many data frames the pump beats the engines: the
+    /// engines' fixed cost per transaction over the pump's cost per
+    /// frame. THE RP2350's MEASURED PAIR STANDS IN (docs/rp2040/spi.md
+    /// says what would measure this chip's own - bench_rp2040's letters
+    /// d and e): the same block and the same driver, on a Cortex-M0+
+    /// whose interrupt entry and flash are both slower, so the quotient
+    /// is if anything smaller here.
+    static constexpr uint16_t dma_min_frames = 10;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? SPI0 : SPI1); }

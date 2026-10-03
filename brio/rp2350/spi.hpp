@@ -172,6 +172,15 @@ struct Rp2350Pl022 {
     static constexpr uint8_t fifo_depth = 8;
     /// What a pin set puts in a signal it does not route.
     static constexpr uint8_t no_pad = 0xFFu;
+    /// Below how many data frames the pump beats the engines, measured
+    /// by bench_rp2350 (docs/rp2350/spi.md): the engines' fixed cost per
+    /// transaction - letter d's spi.dma at 16 frames, wall less the
+    /// wire's cycles and less the block's mode-0 gap: 514 cycles on the
+    /// Cortex-M33, 473 on Hazard3 - over the pump's cost per frame -
+    /// letter e's spi.pump, the handler's 49 / 48 cycles a frame plus the
+    /// interrupt's own entry and exit over a batch of eight: 52 / 54 -
+    /// gives 9.9 / 8.8; the larger, rounded up.
+    static constexpr uint16_t dma_min_frames = 10;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? SPI0 : SPI1); }
