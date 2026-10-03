@@ -171,9 +171,12 @@ bench - generalize on the second specimen).
 
 On a SHARED bus every device names its own speed and mode: the
 descriptor carries `SpiClock clock` and `SpiMode mode` (defaults
-div16 / mode 0), and the engine reprograms CTRLA/CTRLB at each
-`start()` - two register writes between transactions, nothing per
-byte. `SpiHost<n>::init()` takes the clock tag and an optional SCK
+div16 / mode 0), and at each `start()` the engine folds them - with
+the frame size where the block has one - into the control word the
+block takes, compares it with the word in force and writes only on a
+change, with whatever disable the chapter asks around that write:
+nothing on the unchanged path, nothing per frame.
+`SpiHost<n>::init()` takes the clock tag and an optional SCK
 CEILING for the whole bus - no per-transaction rate, no mode; a
 request that asks for more than the ceiling is slowed to it. Rationale: the first two real clients on
 the bench already disagreed (a display comfortable at 6 MHz, a touch
@@ -188,24 +191,42 @@ SYNCHRONOUSLY inside start(), and the arbiter replies with whatever
 the engine's `status()` reports. The choice travels per-request in a
 `polled` flag - like the clock, the client knows its transaction.
 
-- **ISR pump** (default): one byte per interrupt (no DMA on AVR Dx).
-  `SpiHost<n>::isr()` returns true exactly when the transaction completed
-  (CS released) - the edge on which the app's ISR glue posts
+- **ISR pump** (default): the transaction runs on the block's receive
+  interrupt, `SpiHost<n>::isr()` returning true exactly when it
+  completed (CS released) - the edge on which the app's ISR glue posts
   `TransferDone{status}` to the bus AO, mirroring the uart edge
-  pattern. The kernel keeps dispatching between bytes. Right for slow
-  clocks and short transfers; at fast clocks it inverts: a byte at
-  div4 flies in 32 CPU cycles while an ISR entry alone costs more, so
-  the pump caps the bus near 27% and floods the CPU with interrupt
-  overhead (~5 us/byte measured).
-- **Polled** (`polled = true`): start() pumps the whole transaction in
-  a tight loop and returns done. GLOBAL interrupts stay enabled - only
-  the SPI's own IE is silenced (the bound ISR would steal bytes); what
-  blocks is that one dispatch, bounded and chosen by the client.
-  Measured ~55 cycles/byte at div4 (~2.3 us) with shape-specialized
-  loops - the tx/rx null checks are hoisted out because the per-byte
-  budget IS the loop body. Known next notch: SPI buffered mode
-  (BUFEN + DREIF-gated writes) would close the remaining inter-byte
-  gap toward wire speed.
+  pattern. The kernel keeps dispatching between frames. The handler
+  reads the frame that came back FIRST and then writes ahead as far as
+  the block's receive side can hold: a FIFO's depth where there is one,
+  two frames on a two-level receive buffer, and on a one-deep receive
+  register two frames only above a RATE THRESHOLD each family computes
+  in its header from named inputs - the longest handler its image
+  binds (no interrupt nests, so a handler that started just before the
+  flag rose holds the vector for its whole body), the core's exception
+  entry and exit, the vector's own entry-to-read - and one frame below
+  it, the bus idle for the turnaround; an overrun the arithmetic did
+  not foresee ends the transaction with the host's own code and is
+  counted. Right where a frame outlasts the handler; faster than that
+  the handler bounds the bus and the thread, and the polled style or
+  the engines are the bulk path.
+- **Polled** (`polled = true`): start() runs the whole transaction in
+  a loop and returns done. GLOBAL interrupts stay enabled - the block's
+  own interrupt is armed only by an asynchronous tenure; what blocks is
+  that one dispatch, bounded by one spin budget per transaction and
+  chosen by the client. The loop's SHAPE is the request's buffers': a
+  phase with no receive buffer (every command phase, a display's
+  pixels) paces on the transmit flag, never reads the answers and
+  clears the receive side at its tail - wire-bound from the family's
+  second-fastest rate -; a phase with one keeps as many frames in
+  flight as the receive side can hold under any handler of the image
+  (the same threshold as the pump's on a one-deep register, where one
+  frame in flight below it leaves the turnaround on the bus every
+  frame), the next frame fetched inside the wire's time. The polled
+  path reads the lent request in place and copies nothing; a request
+  of a few bytes costs the host a few hundred cycles above the wire on
+  every family, measured by letter e of each bench app
+  (design/benchmark.md) and stated in each family's SPI document beside
+  the vendor's own loop on the same board.
 
 On a synchronous completion the AO replies immediately and keeps
 draining the pending FIFO through any further synchronous requests
