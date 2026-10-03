@@ -291,7 +291,10 @@ The probes on this bench leave the three low-power bits CLEAR, which is
 what makes every span below the silicon's own and not the debugger's -
 and it is the first thing the suite prints. The register reads 0x300 on
 the CH32V203C8T6 behind its WCH-LinkE - the two watchdog freeze bits set
-- and 0x0 on the CH32V303VCT6 behind its CH549 link.
+- and 0x0 on the CH32V303VCT6 behind a CH549 link - and 0x307 after an
+  attach through a WCH-LinkE at firmware 2.10, which keeps the clocks
+  running through Sleep, Stop and Standby until the word is cleared
+  (measured; the probe's page says so).
 
 ### What this chapter has not got
 

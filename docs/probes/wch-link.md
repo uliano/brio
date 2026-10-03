@@ -40,6 +40,14 @@ attached is untested).
   to work with the part BEFORE re-checking pins. MounRiver ships
   `libmcuupdate.so`, so the older probe can be brought up to date
   rather than retired.
+- **An attach through the LinkE at firmware 2.10 is not free** - on a
+  CH32V303 running at 144 MHz every fresh attach of the fork rewrote
+  RCC_CFGR0 (0x00BCC40A read 0x00B4040A after it: the console's divisor
+  garbled until the program set the tree again) and set the debug
+  module's low-power word (CSR 0x7C0) to 0x307, which keeps the clocks
+  running through Sleep, Stop and Standby until something clears it -
+  measured; the CH549 kind below did neither. A suite that sleeps is
+  judged on this probe only after that word is written back to zero.
 - **The CH549 kind** - the probe a WeAct-branded WCH-Link is, its
   banner `WCH-Link-CH549 mode:RV version 2.12`, the same `1a86:8010` -
   attaches a CH32V303 over the two-wire port and programs it through

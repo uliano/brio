@@ -291,6 +291,7 @@ The rates named are SCK.
 | STM32G0B1RE (64 MHz; 16 and 4 MHz) | 1.04, 1.01 | 1.23, 1.01 | 5.31, 1.34; 86 (three byte frames an interrupt, the FIFO's capacity) | 399 (998) | HAL 5.29, 1.79 (one in flight and a tick call per turn) |
 | STM32F446RE (180 MHz; 22.5 and 5.625 MHz) | 1.01, 1.00 | 1.44 (one in flight below the 237-cycle threshold), 1.00 (two) | 2.57, 1.00 (two in flight from /16); 256 | 251 (517) | HAL 2.97, 1.30 |
 | CH32V203C8T6 (144 MHz; 36 and 9 MHz) | 1.02, 1.00 | 1.62 (one in flight), 1.09 | 2.88 (two ahead on a write, 128 interrupts), 1.26; 256 | 280 (468) | the EVT's 2Lines loop 1.23, 1.00 - and it loses a frame in every run at /4 on 8-bit frames |
+| CH32V303VCT6 (144 MHz; 36 and 9 MHz; the V4F, ilp32f) | 1.02, 1.00 | 1.36, 1.13 | 2.96 (128 interrupts), 1.25 (205) | 230 | not run on this board |
 | RP2350, Cortex-M33 (150 MHz; 37.5 and 9.375 MHz) | 1.02, 1.00 in mode 3 (1.21, 1.19 in mode 0: the block's gap) | 1.02, 1.00 | 1.68, 1.02; 32 | 309 (593) | pico-sdk 1.00 at /4 in mode 3, 1.00 at /16 |
 | RP2350, Hazard3 | 1.02, 1.00 | 1.02, 1.00 | 1.69, 1.02; 32 | 301 (621) | pico-sdk 1.19, 1.00 |
 

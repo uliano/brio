@@ -123,9 +123,12 @@ smallest chip").
 
 A WCH-LinkE (firmware 2.16) over the **two-wire** debug port this
 family has - PA13 = SWDIO, PA14 = SWCLK - not the CH32V00x's single
-wire; on the CH32V303 board, a WCH-Link of the CH549 kind at firmware
-2.12 on the same two pads, whose serial bridge forwards in blocks and
-can fall behind after a burst sent into a closed port
+wire; on the CH32V303 board a WCH-LinkE at firmware 2.10 on the same
+two pads, whose attach rewrites RCC_CFGR0 and sets the debug module's
+low-power bits on a running chip ([../probes/wch-link.md](../probes/wch-link.md));
+the WCH-Link of the CH549 kind that drove it before forwards its serial
+bridge in blocks and can fall behind after a burst sent into a closed
+port
 ([../probes/wch-link.md](../probes/wch-link.md)). WCH's OpenOCD fork at
 `/sw/wch-openocd` is the only OpenOCD that speaks the probes' SDI
 transport.

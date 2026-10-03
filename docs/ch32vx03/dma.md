@@ -559,9 +559,10 @@ ruler. On the CH32V203C8T6 the nine letters of a part with one
 controller run with the board bare: **38 verdicts in `z`**. On the
 CH32V303VCT6 DMA2's six letters ran beside DMA1's with the evaluation
 board's two crossed wires in place (PA2 to PC11, PC10 to PA3), every
-verdict passing; the receive ring of letters g and o is owed a run there
-(the gap list). Where one number is given below it is both parts'; where
-they differ each is named.
+verdict passing; the engines as they now are ran there too, **55
+verdicts in `z`** with those two wires absent and letter n declining by
+name, the receive ring of letters g and o among them. Where one number
+is given below it is both parts'; where they differ each is named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
   kilobytes copied flash to RAM take 24809 cycles as 4096 bytes, 12530
@@ -664,7 +665,9 @@ they differ each is named.
   at the storage's end; 200 bytes into the ring with nobody reading,
   ONE overrun counted, nothing of the overwritten lap delivered and the
   ten bytes after it read whole; and a run of 14 held while 140 more
-  landed, refused at its release, the second overrun counted.
+  landed, refused at its release, the second overrun counted. The
+  CH32V303VCT6 gave every one of those numbers again, the ring on its
+  DMA1 storage aligned to its own size.
 - **THE RING AT SPEED** (letter o, the CH32V203C8T6): TIM2's update
   copying TIM3's counter into a ring of 256 half-words, read behind the
   channel through `HardwareRing` with every element judged against the
@@ -680,7 +683,12 @@ they differ each is named.
   each refused at their release. Read in a tight loop across laps the
   count reached 256 again at every wrap and never went above it, and at
   the fast pace a read could land on zero, between a lap's last
-  decrement and the reload.
+  decrement and the reload. On the CH32V303VCT6: 131072 elements in
+  270997 looks at the slow pace and 131074 in 27249 at the fast one,
+  every step the pace's, nothing skipped or torn, the position 131073
+  against 131072 updates; seven stalls and seven overruns; four held
+  runs refused; the count never above 256, and zero read once in
+  100000 across 98 laps in one run and never in another.
 - **TWO CONTROLLERS ON ONE PAIR OF WIRES.** On the CH32V303VCT6, USART2's
   engines on DMA1 against UART4's on DMA2 across the board's crossed
   pair: thirty-six bytes out of USART2's transmit engine into UART4's
@@ -784,14 +792,13 @@ Implemented but not bench-verified, each with what would measure it:
   by none of the five addresses the suite reads from, on either part. A
   peripheral that raises it, or a write into flash (which 11.1 lists as a
   legal destination and the bench has not tried), would measure it.
-- **The reworked engines and the receive ring on the CH32V303**: every
-  image of the CH32V303VC builds and the family check compiles DMA2's
-  engines, copy engine and circular shape included, for all four parts,
-  with a transport's ring storage aligned to its own size on DMA1 so the
-  64 KB rule cannot refuse it; the suites and `bench_vx03`'s letter d ran
-  on the CH32V203C8T6 alone. One run of `test_vx03_dma` - letters g and
-  o, and n's two rings across the two controllers -, the serial pair and
-  the letter on the evaluation board would measure them.
+- **The reworked engines across the CH32V303's two controllers**: letter
+  n's two transports - USART2's engines on DMA1 against UART4's on DMA2,
+  each receive engine in its circular shape - and `test_vx03_serial`'s
+  engined pair, as the engines now are. The receive ring (letters g and
+  o) and `bench_vx03`'s letter d are measured on that part; what would
+  measure the pair is one run of each letter with the board's crossed
+  wires (PA2 to PC11, PC10 to PA3) in place.
 - **A ring restarted after a real transfer error**: `harvest()` starts a
   ring whose channel stopped again, measured with `abandon()` standing
   for the error, which no address the bench can name provokes (above).

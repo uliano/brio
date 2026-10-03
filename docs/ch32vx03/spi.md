@@ -592,7 +592,19 @@ own.
   sixteen 249: the price of a DCS command. Of the four pin edges each
   is one BSHR or BCR store inline through `PinRef::set/clear` (pin.hpp
   forces the two verbs inline; as calls they cost the 3-byte request
-  25 cycles more, measured).
+  25 cycles more, measured). On the CH32V303VCT6 - the V4F, the image
+  built under ilp32f, the same letter on the evaluation board's SPI1
+  pads with MISO undriven - the shapes land where the CH32V203C8T6's
+  do: the polled write of 256 frames at 32, 128, 64 and 256 cycles a
+  frame (x 1.00 to 1.02); the polled receive at 43 and 145 cycles a
+  frame in 8-bit frames (x 1.36 and 1.13), 79 at /4 in 16-bit ones
+  (x 1.24) and 256 at /16 (x 1.00); the pump on a receive at 178 and
+  240 cycles a frame in 8-bit frames (the handler 84 with its stamps),
+  183 at /4 in 16-bit ones and 257 at /16 (x 1.00); on a write at /4
+  one interrupt per two frames, 94 cycles a frame; the polled request
+  of three bytes 230 to 233 cycles above its wire time at /16, one byte
+  173 to 192, sixteen 234 to 236 (two runs); every line ended with
+  status 0 and no overrun standing.
 - **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
   two-in-flight shape run on the resource at every code and width, 1024
   frames a run, eight runs a point under a console print in flight,
@@ -601,7 +613,10 @@ own.
   to meet an interrupt); the host under the same load, both shapes, the
   pump and the loop, every code and width, finishes every run with no
   overrun and `spi_ok` - a write tolerating what the oracle counts, a
-  receive never put in its way.
+  receive never put in its way. On the CH32V303VCT6 the same boundary:
+  five to eight runs of eight lost a frame at 16 to 128 cycles a frame,
+  none at 256 and above, and the host's sixty-four points finished
+  every run `spi_ok` with no overrun.
 - **THE ENGINED TRANSACTION'S FIXED COST**, `bench_vx03`'s letter d, a
   write on SPI1 with MISO floating at 144 MHz: 530 cycles above the
   frames' own wire time at /4, 523 at /16, ONE interrupt (the receive
@@ -611,11 +626,16 @@ own.
   rewritten ([dma.md](dma.md)). 256 frames at /4 are 8722 cycles against
   8192 of SCK, at /16 33291 against 32768. The engines' own share, 530
   less the instrument, over the pump's 103 cycles a frame is what
-  `dma_min_frames` states.
+  `dma_min_frames` states. On the CH32V303VCT6: 588 to 596 cycles above
+  the wire at /4 and 570 to 589 at /16, ONE interrupt - the launch 373
+  to 395, the completion's handler 137 to 145 with its stamps - and 256
+  frames at /4 in 8785 cycles against 8192, at /16 in 33338 against
+  32768 (two runs).
 - **16-bit frames through the engines**: a 256-frame write of half-words
   in 16966 cycles at /4 against 16384 of SCK (x 1.03), and 66118 at /16
   against 65536, one interrupt each - the pump took 52545 cycles and 256
-  interrupts for the same frames at /4.
+  interrupts for the same frames at /4. The CH32V303VCT6: 16972 cycles
+  at /4 (x 1.03) and 66125 at /16, one interrupt each.
 - **THE TRANSMITTED DATA JUDGED WITH NO WIRE, by the CRC unit**: with
   CRCEN raised under SPE down, TCRCR accumulates every frame the shift
   register sends, so an engined write of 256 frames must leave there what
@@ -625,6 +645,8 @@ own.
   frame, are the Request's. The CRC frame follows the block on the wire
   (above), and TCRCR read before it is out holds another number - 0x7D16
   and 0x7E8B in two runs for the 16-bit block, 0xEA0D once BSY is down.
+  The CH32V303VCT6's TCRCR held the same 0x2E and 0xEA0D, the CRC frame
+  following the block there too.
 - **THE STRAP IS CLEAN TO 36 MHz AND BREAKS AT 72.** Every BR code from
   /4 down carried 256 bytes byte-exact; /2 did not. Four kilobytes at
   /4 (36 MHz of SCK), sent as sixteen chunks, came back byte-exact.
@@ -717,10 +739,12 @@ the letters that want either decline by name.
   engine, served one frame ahead from its own vector, and as the host
   over SPI2's client, all four modes and both bit orders in 8-bit frames
   and a run of 16-bit ones - thirty-two frames exact both ways in every
-  combination.
+  combination. The host side is the engine's polled request at /64, a
+  frame of 1024 core cycles, so it is the RECEIVE LOOP WITH TWO FRAMES IN
+  FLIGHT whose bytes these two letters judge, on SPI2 and on SPI3.
 - **The high-speed read** (above): at SPI2's /2, 36 MHz, 254 bytes of
   256 wrong without HSRXEN, 253 of them one bit late, none with it, in
-  8272 core cycles for the block against the wire's 8192. SPI1's /2 is
+  8282 core cycles for the block against the wire's 8192. SPI1's /2 is
   72 MHz of SCK, reached here through SPI1's second column, whose pads
   are SPI3's default ones and so ride the same wires to SPI2 - and there
   the far end is SPI2 as a CLIENT on a 72 MHz bus, taking a clock at its
@@ -730,16 +754,17 @@ the letters that want either decline by name.
   host's read.
   At /8 the same path is exact both ways.
 - **The clock counted on PB3 at /2** - 72 MHz of SCK, half the counting
-  timer's clock - came to 233 and 271 of 512 edges on this board, where
-  PB3 carries the jumper to PB13; every slower code counted exactly 512.
+  timer's clock - came to between 233 and 369 of 512 edges in four runs
+  on this board, where PB3 carries the jumper to PB13; every slower code
+  counted exactly 512.
   Whether the lost edges are the wire's load or the timer's input at its
   own ceiling is not separable here (the CH32V203C8T6, with nothing on
   PB3, counted all 512).
 - **Half-words through all four channels** (DMA1's 4 and 5 for SPI2,
   DMA2's 1 and 2 for SPI3, every channel moving 16-bit items into 16-bit
   frames) against the same bytes as 8-bit frames, a 256-byte block each
-  way, in core cycles: a 16-bit frame 64.6 at /2 (the wire's 64), 128.6
-  at /4, 256.6 at /8 and 512.6 at /16; a byte 32.3, 64.3, 128.3 and 256.3
+  way, in core cycles: a 16-bit frame 64.7 at /2 (the wire's 64), 128.7
+  at /4, 256.7 at /8 and 512.7 at /16; a byte 32.3, 64.3, 128.3 and 256.3
   cycles in either frame width. The engines add under one per cent to the
   wire at every rate, so a half-word frame halves the number of requests
   and costs nothing on the wire; the block was exact both ways at /4, /8
@@ -802,11 +827,14 @@ Implemented but not bench-verified, each with what would measure it:
   block's clock under a transaction. A request started with the
   instance's APB gate closed (`Rcc` with SPI1's enable down) would
   measure it: the wall of the budget, the code in the reply.
-- **The receive shapes' DATA**: letter e's receive lines land frames in a
-  buffer with MISO floating, so the loop's and the pump's accounting is
-  judged (no overrun, every frame counted) and the bytes are not; the
-  strap from PA7 to PA6 (letter c of `test_vx03_spi`, which runs the
-  arbiter over the polled and pumped receives) would judge them.
+- **The receive shapes' DATA, one frame in flight and on the pump**:
+  letter e's receive lines land frames in a buffer with MISO floating,
+  so the loop's and the pump's accounting is judged (no overrun, every
+  frame counted) and the bytes are not; the loop with two frames in
+  flight is judged byte for byte on the CH32V303VCT6 (letters f and g,
+  above). The strap from PA7 to PA6 (letter c of `test_vx03_spi`, which
+  runs the arbiter over the polled and pumped receives) would judge the
+  other two.
 - **The write-ahead threshold on SPI2 and SPI3**: computed per bus share
   by the same arithmetic (one code lower than SPI1's above 72 MHz of
   HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and

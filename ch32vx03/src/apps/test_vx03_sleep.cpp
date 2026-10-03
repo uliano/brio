@@ -994,7 +994,7 @@ void te_kernel() {
                   "the target really took, and the loop's own idle path is what stopped "
                   "the machine",
                   Probe::votes >= 1u && Probe::asked >= 1u && Probe::blips == 1u);
-    bench.verdict("THE DEADLINE WAS MET ON THE WALL: the RTC's alarm was placed where the "
+    bench.verdict("THE DEADLINE WAS MET ON THE CLOCK: the RTC's alarm was placed where the "
                   "kernel's nearest deadline was and its counter was read as the witness, "
                   "so a Stop no longer costs the program the time it slept",
                   wall_ms >= 500u && wall_ms < 700u);

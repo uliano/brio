@@ -32,9 +32,10 @@ third reads the array's erased pattern
 - **Debug**: the 2x5 header **P10** (`LINK`): PA14 = SWCLK on pin 1,
   PA13 = SWDIO on pin 3, the two-wire port this family has, with GND,
   3.3 V and 5 V on the pins below them. The probe brio drives it with
-  is a WeAct-branded WCH-Link of the CH549 kind at firmware 2.12
-  ([../probes/wch-link.md](../probes/wch-link.md)), on the two debug
-  pads, the two serial ones and GND.
+  is a WCH-LinkE at firmware 2.10 ([../probes/wch-link.md](../probes/wch-link.md):
+  its attach rewrites RCC_CFGR0 and sets the debug module's low-power
+  bits on a running chip), on the two debug pads, the two serial ones
+  and GND; a WCH-Link of the CH549 kind at 2.12 drove it before.
 - **Console**: USART1 on PA9 (TX, P10 pin 2) and PA10 (RX, pin 4), the
   instance's default pads, wired to the probe's own serial: one cable
   carries the debug port and the console, at 115200.
