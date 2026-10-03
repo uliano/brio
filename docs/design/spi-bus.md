@@ -98,15 +98,21 @@ The request event (two spans, a select, the bus's settings and the
 reply capsule) exceeds the 8-byte envelope guideline: a recorded,
 legal deviation - the request IS the arbitration token; the queues are
 per-AO, nobody else pays. Its size is paid per COPY, and the arbiter
-makes none of its own. A request that finds the bus idle is copied
-twice: by `post()` into the bus AO's queue slot (the kernel's copy,
-under the producers' mask) and by the engine's `start()` into its own
-descriptor, straight from that slot. One that finds the bus busy is
-copied once more, into the pending FIFO, and its turn hands that slot
-to `start()` by reference - the slot is written again only by a later
-push, so the engine has taken its copy long before. A retrying
-completion policy keeps one copy more, the request a retry starts
-again.
+makes none of its own: the request is LENT to `start()` for the call,
+lying in a slot of the arbiter's that stays as it is until the dispatch
+ends (the contract in util/bus_master.hpp). A request that finds the
+bus idle is built once, by `post()` in the bus AO's queue slot (the
+kernel's copy, under the producers' mask), and read there. A POLLED
+request completes inside `start()` and is copied nowhere else: the
+engine reads every field through the reference. An ASYNCHRONOUS one
+outlives the call, so the engine copies what its tenure needs - the two
+pins, the three buffers, the two lengths, the width and the completion
+style, laid out contiguously at the head of the Request so the copy is
+a run of word stores - and never the rate, the mode, the setup time or
+the reply, which are spent before `start()` returns. One that finds the
+bus busy is copied once more, into the pending FIFO, and its turn hands
+that slot to `start()` by reference. A retrying completion policy keeps
+one copy more, the request a retry starts again.
 
 ## The transaction descriptor (`SpiHost<n>::Request`)
 
