@@ -773,21 +773,23 @@ public:
     /// with bench_ch32's letters d and e). The engines' fixed cost per
     /// transaction: the launch's 59 instructions, the receive channel's
     /// completion vector with finish_dma() and the select's release (~61
-    /// instructions behind the hardware prologue and epilogue) - about
-    /// 355 cycles (dma.md). The pump's cost per frame: the handler's 42
-    /// instructions on the data path of an 8-bit frame with an in buffer
-    /// plus the prologue and epilogue - about 160 cycles. A data phase
-    /// of fewer frames than their quotient costs less on the pump.
-    static constexpr uint32_t engine_fixed_cycles = 355;
-    static constexpr uint32_t pump_frame_cycles = 160;
+    /// instructions behind the hardware prologue and epilogue) - 518
+    /// cycles net of the instrument, measured by bench_ch32's letter d
+    /// with the request built outside the stopwatch (docs/ch32v00x/
+    /// spi.md). The pump's cost per frame: the handler's data path of an
+    /// 8-bit frame with an in buffer plus the prologue and epilogue -
+    /// 164 cycles metered. A data phase of fewer frames than their
+    /// quotient costs less on the pump.
+    static constexpr uint32_t engine_fixed_cycles = 518;
+    static constexpr uint32_t pump_frame_cycles = 164;
     static constexpr uint16_t dma_min_frames =
         static_cast<uint16_t>((engine_fixed_cycles + pump_frame_cycles - 1u) / pump_frame_cycles);
     /// The receive loop's dead bus per frame - the poll's last turn, the
-    /// DATAR read, the DATAR write, counted at about 24 cycles - against
-    /// the same fixed cost: a polled request with an in buffer rides the
-    /// engines from this many frames on. The transmit-only loop never
-    /// does: it runs at the wire.
-    static constexpr uint32_t polled_gap_cycles = 24;
+    /// DATAR read, the DATAR write: 22 cycles measured at HCLK/4 (54 a
+    /// frame against the wire's 32) - against the same fixed cost: a
+    /// polled request with an in buffer rides the engines from this many
+    /// frames on. The transmit-only loop never does: it runs at the wire.
+    static constexpr uint32_t polled_gap_cycles = 22;
     static constexpr uint16_t dma_min_frames_polled = static_cast<uint16_t>(engine_fixed_cycles / polled_gap_cycles);
 
     // ---- lifecycle ----------------------------------------------------------
@@ -977,12 +979,18 @@ public:
             }
         }
         in_cmd_ = r.cmd_len != 0u;
-        S::rxne_interrupt(true);
+        // The first frames go in BEFORE the interrupt is armed: the flag
+        // stands until the handler reads DATAR, and a handler let in
+        // between the phase's first write and the store of its counts
+        // sees a count of zero, writes nothing, and the phase never ends
+        // - measured at HCLK/4, where the first frame is back seventeen
+        // instructions before begin_phase() has stored left_.
         if (in_cmd_) {
             begin_phase(r.cmd.get(), nullptr, r.cmd_len);   // the echo discarded
         } else {
             begin_phase(r.tx.get(), r.rx.get(), r.len);
         }
+        S::rxne_interrupt(true);
         return false;   // isr() pumps the rest
     }
 

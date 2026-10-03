@@ -794,7 +794,10 @@ using CsPin = Pin<'C', 3>;    // the select, as test_ch32_spi scripts it
 using DcPin = Pin<'C', 4>;    // the D/C line: a pad no jumper and no other letter uses
 
 volatile bool pump_done = false;
-bool poll_host_live = false;   // which host spi1_handler serves: letter e's or letter d's
+/// Which host spi1_handler serves: letter e's or letter d's. Volatile:
+/// the vector reads it, and a plain bool's `true` at the letter's start
+/// is a dead store to a compiler that sees the `false` at its end.
+volatile bool poll_host_live = false;
 
 /// A request on the work buffer: `frames` frames of `bits`, the out
 /// buffer the buffer's lower half, the in buffer its upper half or none.
