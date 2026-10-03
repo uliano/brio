@@ -218,32 +218,64 @@ the pin roles (an ENABLE cycle), not just write MASTER back.
 **The interrupt.** One vector, one interrupt per byte in normal mode,
 with the body's INTFLAGS-then-DATA read clearing IF. In buffer mode the
 body must write one to TXCIF/SSIF/BUFOVF and read DATA for RXCIF, or the
-vector re-enters immediately; with both halves in place a burst of eight
-bytes produces eight interrupts and then silence.
+vector re-enters immediately; with both halves in place and both RXCIE
+and TXCIE armed, eight bytes written one at a time produce ten
+interrupts - one RXC each, plus a TXC wherever the transmitter fell idle
+between them - and then silence.
 
 **The engine.** Both completion styles move the same bytes, the chip
 select comes back high after each transaction, a command phase reaches
 the wire, a zero-length request completes without touching it, and a
 request faster than the engine's ceiling is slowed to the ceiling. Under
 a 24 -> 12 -> 24 MHz rebase a 1.5 MHz ceiling re-picks CLK_PER/16 ->
-CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz. Those
-verdicts were taken with the engine running the instance in normal mode;
-the engine now runs it in buffer mode (below) and the suite's letter `j`
-is owed a run.
+CLK_PER/8 -> CLK_PER/16 and the measured SCK stays at 1.5 MHz. These
+verdicts are the engine in buffer mode (below).
 
-### The engine's cost, counted
+**A read that meets an arrival hides the byte.** A DATA read that
+empties the receive buffer in the CLK_PER cycle a received byte enters
+it leaves that byte in the buffer with RXCIF CLEAR. The next byte
+received does not raise RXCIF either, the one after waits in the
+shifter, and the transfer after that raises BUFOVF; RXCIF comes back
+only after a DATA read made with the flag down, which returns the hidden
+byte. Measured with one byte held in the buffer and a read placed at
+every cycle from 1 to some 360 after the write that starts the next
+byte: one position of 357 hides the byte, at CLK_PER/4 and at
+CLK_PER/16 alike - the position of the arrival. 28.5.5 says only that
+the flag clears when the buffer is empty, and the errata items this
+chapter cites (above) are not about it. A host that reads DATA only
+while RXCIF stands is never told about the hidden byte, and `SpiHost` is
+such a host (Not covered yet). Its polled loops read on a phase locked
+to the wire, and a handler that preempts them moves that phase: with
+interrupts masked, no run of `bench_avr`'s eight polled lines (letter
+`e`) left the receiver wrong, 16 runs each; with the tick running, the
+256-byte full-duplex loop at CLK_PER/4 ended with a byte standing in the
+buffer in four and in seven runs of eight (two series), and the
+write-only 16-byte loop at CLK_PER/4 hid one at the second run of one
+series of eight and in none of another. Once a byte is hidden, every
+polled read leaves its buffer unwritten (256 bytes of 256, MISO held
+high by this board's own PORT) and every pumped request waits for an
+interrupt that never comes - letter `e`'s `spi.pump` lines, which run
+after its polled ones: 21 interrupts in each 20 ms bound, the tick's
+alone, and BUFOVF set. `init()` does not clear the state: it writes one
+to RXCIF and reads nothing.
+
+### The engine's cost
 
 Every number in this section is COUNTED in the release listing of
-`bench_avr` (`-Os`, the AVR128DB48, CLK_PER 24 MHz) and is MEASURED by
-that app's letter `e` in the recovery session, which is where the
-bench lines (benchmark.md's `spi.poll`, `spi.poll.tx`, `spi.pump` and
-`spi.req`) get their figures. The engine is written from 28.3.2.1.2 and
-28.5.5; what the silicon offers the host and how each item is used:
+`bench_avr` (`-Os`, the AVR128DB48, CLK_PER 24 MHz) and, where a
+measured figure stands beside it, MEASURED by that app's letter `e` on
+rev. A5 at the same rate (benchmark.md's `spi.poll`, `spi.poll.tx`,
+`spi.pump` and `spi.req` lines). The pumped and request figures are a
+receiver in order: letter `e`'s code run with those lines first after
+`init()`, because the letter as written runs its polled lines first and
+they can hide a byte from the engine (above). The engine is
+written from 28.3.2.1.2 and 28.5.5; what the silicon offers the host and
+how each item is used:
 
 | the silicon's offer (section) | used? | how, and what it buys |
 |---|---|---|
 | buffer mode's two-level transmitter: a write is legal while DREIF is set, the first into the idle shifter, the next into the buffer (28.3.2.1.2, 1) | YES | two bytes in flight on both completion styles: the wire runs while the software prepares the next byte, so a loop shorter than a byte time is wire-bound. Normal mode (28.3.2.1.1) had one in flight and the bus idle between bytes |
-| the two-entry receive FIFO, read at least every second transfer (28.3.2.1.2, 2 and 3); the third byte waits in the shifter and is lost when the NEXT transfer starts (28.5.5, BUFOVF) | YES | both paths drain the FIFO to empty BEFORE every write: a late loop or a late handler then idles the wire and loses nothing, because without a write no transfer starts. There is no rate threshold for the write-ahead on this family |
+| the two-entry receive FIFO, read at least every second transfer (28.3.2.1.2, 2 and 3); the third byte waits in the shifter and is lost when the NEXT transfer starts (28.5.5, BUFOVF) | YES | both paths drain the FIFO to empty BEFORE every write: a late loop or a late handler then idles the wire and loses nothing, because without a write no transfer starts. There is no rate threshold for the write-ahead on this family. "Empty" is read off RXCIF, which the silicon can lose with a byte still in the buffer (Bench findings), and the engine does not survive that (Not covered yet) |
 | TXCIF, set when shifter and buffer are both empty (28.3.2.1.2) | YES | the end of a phase; it is a condition the register keeps, cleared write-one before each burst it is to close |
 | RXCIF as the interrupt source (28.5.3 RXCIE, 28.5.5) | YES | the pump's one interrupt per received byte; the handler pops the FIFO's head and writes the byte two ahead. The vector needs no flag read: entry, then DATA |
 | DREIE and TXCIE | no | DREIF would wake a pump that has nothing left to write and TXCIF would need a second enable at the end of a phase; RXCIF alone carries both the data and the completion |
@@ -255,19 +287,22 @@ bench lines (benchmark.md's `spi.poll`, `spi.poll.tx`, `spi.pump` and
 `start()` so no test of the spans runs per byte; `start()` is 274
 instructions in all, of which one request walks one shape):
 
-| shape | cycles per byte, steady state | against the wire |
-|---|---|---|
-| write-only (`tx` set, `rx` null - the display's) | 26: INTFLAGS read, the FIFO's one pop (DATA read, INTFLAGS read again), DREIF already up, LD, the DATA store, the loop's compare | wire-bound from CLK_PER/4 (32 a byte); at CLK_PER/2 (16) the loop is the limit at about 60 per cent of the wire |
-| full duplex (both set) | 29 to 30: the pop stored through a second pointer | wire-bound from CLK_PER/4 with two cycles to spare |
-| read-only (`tx` null) | 27: a constant 0xFF written | wire-bound from CLK_PER/4 |
+| shape | cycles per byte, steady state (counted) | measured, a byte beyond the sixteenth (256 bytes against 16) | against the wire |
+|---|---|---|---|
+| write-only (`tx` set, `rx` null - the display's) | 26: INTFLAGS read, the FIFO's one pop (DATA read, INTFLAGS read again), DREIF already up, LD, the DATA store, the loop's compare | 34.1 at CLK_PER/4, 129.4 at CLK_PER/16; 256 bytes x 1.08 and x 1.01 | wire-bound from CLK_PER/4 (32 a byte); at CLK_PER/2 (16) the loop is the limit at about 60 per cent of the wire (counted) |
+| full duplex (both set) | 29 to 30: the pop stored through a second pointer | 33.8 at CLK_PER/4, 130.2 at CLK_PER/16; 256 bytes x 1.08 and x 1.02 | wire-bound from CLK_PER/4 with two cycles to spare |
+| read-only (`tx` null) | 27: a constant 0xFF written | no line | wire-bound from CLK_PER/4 |
 
-The old loop (`xfer()`: a CALL per byte, write DATA, spin IF, read
-DATA) cost 26 cycles of idle bus per byte on top of the wire - 55
-measured at CLK_PER/4, 58 per cent of the bus; the data sheet's own
-normal-mode sequence as a bare loop counts 21 above the wire (53 a byte
-at CLK_PER/4), and its buffer-mode sequence as a bare loop counts 31 a
-byte full duplex - within two cycles of the engine's, which is the same
-loop, the data sheet being this family's vendor.
+The two cycles a byte beyond the wire's 32 and 128 are the block's and
+not the loop's: they are the same at both rates, the loop has some
+hundred cycles of slack a byte at CLK_PER/16, and the data sheet's own
+buffer-mode sequence (28.3.2.1.2) as a bare loop measures the same - 256
+bytes full duplex at x 1.09 at CLK_PER/4 (35.2 a byte; 31 counted) and x
+1.01 at CLK_PER/16, the engine's loop within a cycle a byte of it, the
+data sheet being this family's vendor. Its normal-mode sequence
+(28.3.2.1.1: write DATA, spin IF, read DATA, one byte in flight)
+measures 58.2 cycles a byte at CLK_PER/4 (x 1.81; 53 counted) and 156
+at CLK_PER/16 (x 1.21): what buffer mode buys.
 
 **A polled request's fixed cost** - the price of a DCS command, one
 command byte and two of data at CLK_PER/16, the select and the D/C on
@@ -277,28 +312,38 @@ the length test, `apply()`'s fold and compare at 34 with no register
 access, the two edges at 10 to 14 each, the setup test, the burst's
 prologue), 56 between the phases (the TXCIF wait's last turn, the
 command's reply popped, the D/C edge, the data burst's prologue) and 56
-after the last byte (the pops, the select's edge, the return). The same
-path counted 485 on the old engine (the 21-byte copy at 126, `apply_mode`
-with four register accesses and two calls at about 60, four pin edges
-through a CALL at 25 each, a CALL per byte); the retrospective review
-measured about 670 for the whole transaction.
+after the last byte (the pops, the select's edge, the return). Measured:
+229 above the wire on a receiver in order (wall 678, less the wire's 384
+and the stopwatch's floor of 65 - letter `r`'s `stopwatch` line), a
+ninth over the count; 169 for the command byte alone (n = 1) and 265
+with fifteen bytes of data (n = 16). Letter `e` takes its request lines
+after its polled ones and measures 196 there (wall 645): the receiver
+has hidden a byte by then, RXCIF stays down and the request's three pops
+are skipped.
 
 **The pump** (`isr()`, the RXCIE handler): 71 cycles of body for a
 mid-transaction byte with both spans - the DATA pop, the store through
 `in_`, the 16-bit `to_read_` and `to_write_` kept in RAM, the byte two
-ahead loaded and written -, reached 42 cycles after the interrupt
-(the hardware entry, 15 pushes, the DATA load; the bench's instrument
-adds its stamp of some 70 cycles before the pop, letter `r`'s `stamp`
-line) and about 150 cycles of CPU per byte with the entry, the pushes,
+ahead loaded and written -, 68 to 72 measured (the meter's `isr`, 142 to
+146 a byte, less letter `r`'s `stamp` of 74 for an empty body), reached
+42 cycles after the interrupt (the hardware entry, 15 pushes, the DATA
+load; the bench's instrument adds its stamp of some 70 cycles before the
+pop) and about 150 cycles of CPU per byte with the entry, the pushes,
 the pops and RETI; a handler that calls out (the app's `post<Bus>` on
 the completion edge) saves the whole caller-clobbered set whatever its
-body does. The byte two ahead is written about 105 cycles after the
-interrupt: at CLK_PER/16 (128 a byte) the write lands before the
-shifter empties, so the wire runs on, but the handler's 150 exceed the
-byte's 128 and the pump is CPU-bound by a sixth, the wire idling a few
-cycles a byte; from CLK_PER/32 (256) the wire is continuous and the
-core has room; at CLK_PER/4 (32) the bus runs near a fifth of its rate
-- polling is the bulk path, as before. What two in flight bought the
+body does. Measured whole: 372 to 373 cycles of wall a byte at CLK_PER/4
+and at CLK_PER/16 alike (256 bytes: x 11.6 and x 2.91), one interrupt a byte,
+every completion seen and BUFOVF clear after every run - with the
+bench's meter in the vector, whose enter-and-leave pair costs 217 cycles
+of wall (letter `r`'s `stamp` line), so about 155 a byte without it, the
+count's 150 within a thirtieth. The pump is therefore CPU-bound at both
+rates: about 1.2 times the wire at CLK_PER/16 (128 a byte) and nearly
+five at CLK_PER/4 (32) once the meter is taken out - polling is the bulk
+path. The byte two ahead is written about 105 cycles after the
+interrupt (counted), before the shifter empties at CLK_PER/16, so the
+wire runs on while the handler works, idling a few cycles a byte; from
+CLK_PER/32 (256 a byte) the wire is continuous and the core has room
+(counted, no line). What two in flight bought the
 pump is the wire running during the handler, from CLK_PER/16 up (one
 in flight left it idle for the whole handler at every rate); what it
 did not fix is one interrupt per byte, the silicon's (no DMA, no deeper
@@ -321,9 +366,10 @@ out-of-line verb cost 22 plus the CALL; its null test is the one branch
 an absent D/C pin costs. `cs_setup_us` is tested before the delay is
 called; a nonzero setup goes through the stored-byte delay's short
 path (a `us` under 256: one MUL, the quarter rounded up,
-`_delay_loop_2`'s turns), some 40 cycles for 1 us counted in the
-listing where the fixed-point tail cost 171 - measured in the recovery
-session (docs/avrdx/platform.md).
+`_delay_loop_2`'s turns), 39 cycles for 1 us counted in the listing,
+38 measured: the request of `spi.req` (n = 3) with a 1 us setup takes
+38 cycles more than without one, and 24 more for each further
+microsecond (docs/avrdx/platform.md).
 
 **No `dma_min_frames`** on this family: there are no engines, so there
 is no fixed cost for the pump's per-byte one to be weighed against.
@@ -461,18 +507,23 @@ client selects itself with INVEN on its own pulled-up SS pin.
   compile-proven on every package, but no wedge has been staged on AVR
   silicon (a demotion mid-transfer is the staging that would do it -
   the demotion itself is bench-measured, the timed recovery over it is
-  not).
+  not);
+- the engine counts what it receives by RXCIF, and a byte the silicon
+  hides from that flag (Bench findings) stops it: after one, a polled
+  read leaves its buffer unwritten and a pumped request never completes,
+  until DATA is read with the flag down - which nothing in the driver
+  does (`init()` writes RXCIF clear, `recover()` reads only while the
+  flag stands). Not written: reads counted against writes, with a DATA
+  read wherever the count says a byte is due and the flag does not.
 
 **Implemented but not bench-verified:**
 
-- the engine in buffer mode: the polled loops a byte ahead, the RXCIE
-  pump with two bytes in flight, `apply()` as the compare of two bytes,
-  the request read in place - every cost above is counted in the
-  listing and none is measured yet; `bench_avr`'s letter `e` (the four
-  bench lines, the BUFOVF flag read after every pumped run) and
-  `test_avr_spi`'s letters `j`, `l` and `m` on the desk's two boards
-  would measure it, and the display experiments' GRAM read-back would
-  judge the bytes;
+- the engine's bytes against a real client: `test_avr_spi`'s letters
+  `l` and `m` and a panel's memory read back would judge them, both on
+  the wire to a second device (a peer board);
+- the rates letter `e` does not run: the polled loop as the limit at
+  CLK_PER/2 and the pump's wire continuous from CLK_PER/32 are counted,
+  and a line at each rate would measure them;
 - an SPI interrupt as the wake from Idle (28.3.5's feature): the sleep
   story is [platform.md](platform.md)'s and no letter of either suite
   sleeps with a transfer pending;

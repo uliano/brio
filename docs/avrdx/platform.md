@@ -351,10 +351,15 @@ subtracted and interrupts masked.
   quarter rounded up, `_delay_loop_2`'s 4-cycle turns - 39 cycles for
   1 us at 24 MHz counted in the SPI host's listing (the rate byte's
   `lds` 3, `mul` 2, `movw` 1, `eor` 1, `adiw` 2, two `lsr/ror` pairs
-  4, `sbiw` 2, `breq` 1 and six turns of `sbiw/brne` 23), where the
-  out-of-line fixed-point tail it used to call measured 171; a `us` of
-  256 or more still takes that tail. The short path is counted,
-  measured in the recovery session.
+  4, `sbiw` 2, `breq` 1 and six turns of `sbiw/brne` 23), 38 measured
+  as what a 1 us `cs_setup_us` adds to an SPI request
+  ([spi.md](spi.md)), 24 more for each further microsecond. Called
+  with both operands loaded from RAM it measures 42, 66, 138 and 258
+  cycles for 1, 2, 5 and 10 us on `bench_avr`'s ruler, its stopwatch
+  floor subtracted and the two loads in them: the nominal plus 18. With
+  constant operands it folds to its bare turns - the suite's
+  `delay_us_runtime(24, 1) alone` line, 24 cycles, six turns. A `us` of
+  256 or more takes the fixed-point tail.
   Every path honours "at least" at every length tested.
 - **A dynamic clock costs 157 cycles per call with a runtime `us`, and
   SIX with a constant one.** The rate is dispatched by INDEX into
