@@ -559,9 +559,9 @@ ruler. On the CH32V203C8T6 the nine letters of a part with one
 controller run with the board bare: **38 verdicts in `z`**. On the
 CH32V303VCT6 DMA2's six letters ran beside DMA1's with the evaluation
 board's two crossed wires in place (PA2 to PC11, PC10 to PA3), every
-verdict passing; the engines as they now are ran there too, **55
-verdicts in `z`** with those two wires absent and letter n declining by
-name, the receive ring of letters g and o among them. Where one number
+verdict passing; the engines as they now are ran there too, **56
+verdicts in `z`** with the two wires in place, letter n and the receive
+ring of letters g and o among them. Where one number
 is given below it is both parts'; where they differ each is named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
@@ -792,13 +792,6 @@ Implemented but not bench-verified, each with what would measure it:
   by none of the five addresses the suite reads from, on either part. A
   peripheral that raises it, or a write into flash (which 11.1 lists as a
   legal destination and the bench has not tried), would measure it.
-- **The reworked engines across the CH32V303's two controllers**: letter
-  n's two transports - USART2's engines on DMA1 against UART4's on DMA2,
-  each receive engine in its circular shape - and `test_vx03_serial`'s
-  engined pair, as the engines now are. The receive ring (letters g and
-  o) and `bench_vx03`'s letter d are measured on that part; what would
-  measure the pair is one run of each letter with the board's crossed
-  wires (PA2 to PC11, PC10 to PA3) in place.
 - **A ring restarted after a real transfer error**: `harvest()` starts a
   ring whose channel stopped again, measured with `abandon()` standing
   for the error, which no address the bench can name provokes (above).
