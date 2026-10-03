@@ -48,6 +48,14 @@ attached is untested).
   running through Sleep, Stop and Standby until something clears it -
   measured; the CH549 kind below did neither. A suite that sleeps is
   judged on this probe only after that word is written back to zero.
+  AND ITS SERIAL BRIDGE TRANSMITS A QUARTER FAST: asked 115200, the
+  probe's TX clocks the target's receiver at 144000 (a 0x55 read back
+  as 0xA9 at the target's 115200 divisor, exact at a divisor for
+  144000; asked 92160 the target reads 0x55 at 115200), while its RX
+  decodes 115200 correctly (the target's banner clean at 115200 asked,
+  garbage at 92160) - so no one host setting serves both directions
+  and this probe is a DEBUG probe alone: a target's console goes
+  through another bridge, or the firmware is brought up to date first.
 - **The CH549 kind** - the probe a WeAct-branded WCH-Link is, its
   banner `WCH-Link-CH549 mode:RV version 2.12`, the same `1a86:8010` -
   attaches a CH32V303 over the two-wire port and programs it through
