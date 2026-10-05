@@ -30,12 +30,14 @@
  * the ruler counts the microseconds a caller spends.
  *
  * The FIFOs are NOT modelled: nothing moves an entry out of
- * IC_DATA_CMD and nothing ever fills the receive side, so the transmit
- * path runs (IC_STATUS says the transmit FIFO is never full and the
- * register holds the LAST entry the pump wrote) and the receive path has
- * nothing to read. A test that wants a received byte wants silicon: a
- * receive FIFO that never empties would hang the drain that every tenure
- * begins with, which is itself a fact about the driver worth knowing.
+ * IC_DATA_CMD and nothing fills the receive side by itself, so the
+ * transmit path runs (IC_TXFLR reads empty and the register holds the
+ * LAST entry the pump wrote) and the receive path reads what a test
+ * stages. The two LEVEL registers are plain memory a test writes: the
+ * driver reads IC_TXFLR and IC_RXFLR once and then stores or loads that
+ * many entries, so a test that sets IC_RXFLR to eight and raises RX_FULL
+ * has staged eight bytes, each reading back as the register's last value
+ * - which counts a batch without needing a FIFO behind it.
  *
  * WHAT IT RECORDS, beside the registers: the order of the observable
  * acts of a bring-up - which pad was claimed when, and when the block's
@@ -176,6 +178,8 @@ struct SimDwApbI2cBench {
 
     static inline uint32_t stamp = 0;             ///< ticks on every recorded act
     static inline uint32_t enabled_at = 0;        ///< when IC_ENABLE's enable last went up
+    static inline uint32_t enable_edges = 0;      ///< how often it went up
+    static inline uint32_t disable_edges = 0;     ///< and down
     static inline uint32_t resets = 0;
     static inline bool held[2]{};
 
@@ -212,6 +216,8 @@ struct SimDwApbI2cBench {
         pulses = 0;
         stamp = 0;
         enabled_at = 0;
+        enable_edges = 0;
+        disable_edges = 0;
         resets = 0;
         held[0] = held[1] = false;
         spins = 0;
@@ -420,8 +426,12 @@ private:
         if (on) {
             status = status | I2cEnableStatus::running;
             SimDwApbI2cBench::enabled_at = SimDwApbI2cBench::tick();
-        } else if (!stuck_enabled) {
-            status = status & ~I2cEnableStatus::running;
+            SimDwApbI2cBench::enable_edges = SimDwApbI2cBench::enable_edges + 1u;
+        } else {
+            SimDwApbI2cBench::disable_edges = SimDwApbI2cBench::disable_edges + 1u;
+            if (!stuck_enabled) {
+                status = status & ~I2cEnableStatus::running;
+            }
         }
     }
 };
@@ -442,6 +452,10 @@ struct SimI2cNoEngine {
     static constexpr bool present = false;
 };
 
+/// What an engine's channel reports, chosen at arm(): every block, or a
+/// bus error alone - a family's DmaReport, reached through the engine.
+enum class SimDwApbI2cReport : uint8_t { blocks, errors };
+
 /**
  * A DMA engine of no controller: the slot's whole vocabulary over a few
  * counters, so that a host's engine BRANCHES - the ones a family with no
@@ -456,9 +470,11 @@ struct SimDwApbI2cEngine {
     static constexpr uint8_t flag_complete = 1u << 0;
     static constexpr uint8_t flag_error = 1u << 1;
     using element = Elem;
+    using Report = SimDwApbI2cReport;
 
     static inline uint8_t next_flags = 0;   ///< what the next service() reports
     static inline uint32_t armed = 0;
+    static inline bool errors_only = false; ///< armed to report a bus error alone
     static inline uint32_t blocks = 0;
     static inline uint32_t faults = 0;
     static inline uint32_t length = 0;
@@ -471,9 +487,12 @@ struct SimDwApbI2cEngine {
         next_flags = 0;
         return f;
     }
-    static void arm(volatile void* data, SimDwApbI2cRequest request) {
+    static void arm(volatile void* data, SimDwApbI2cRequest request, bool high_priority = false,
+                    Report report = Report::blocks) {
         (void)data;
         (void)request;
+        (void)high_priority;
+        errors_only = report == Report::errors;
         armed = armed + 1u;
     }
     static bool start(Elem* buffer, uint32_t len) {
@@ -509,6 +528,7 @@ struct SimDwApbI2cEngine {
     static void reset() {
         next_flags = 0;
         armed = 0;
+        errors_only = false;
         blocks = 0;
         faults = 0;
         length = 0;

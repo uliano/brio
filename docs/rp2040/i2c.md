@@ -128,15 +128,19 @@ enable in this chip's IC_CON: the unstick is by hand.
   i2c_bus_error for a block that would not disable to take the
   address), `isr()`, `dma_isr()`, `status()`, `unstick()` (the pulses
   it took, 0 for a healthy wire, 0xFF for one that stays low),
-  `recover()` (the block reset and reconfigured), `release()`. The
-  pump writes entries while the FIFO takes them and refills on
-  TX_EMPTY at the FIFO's half, takes bytes on RX_FULL, ends a write on
-  STOP_DET and a read on the last byte. The engine slots take a
+  `recover()` (the block reset and reconfigured), `release()`, and the
+  two levels the pump runs at, `tx_level` and `rx_level` (half a FIFO
+  each). The pump writes a run into the room the transmit FIFO has and
+  refills on TX_EMPTY at its half, takes eight bytes an interrupt on
+  RX_FULL and the tail at the STOP, and ends EVERY tenure on its
+  STOP_DET (or on the abort); the address and the speed go into the
+  block only when they move. The engine slots take a
   `DmaTxEngine<ch, uint16_t>` and a `DmaRxEngine<ch>` on any two
   channels, both or neither, and serve a READ phase of three bytes or
   more: the plain read command poured from a fixed cell, the bytes
-  collected, the first entry (RESTART) and the last (STOP) through the
-  pump. A write phase stays on the pump.
+  collected by a receive engine armed to report a bus error alone, the
+  first entry (RESTART) and the last (STOP) through the pump. A write
+  phase stays on the pump.
 - `I2cClient<n, pins>`: `init(clock, Config)` (address, 10-bit, the
   general call, the fastest speed it will see), `events` (the sources
   `service()` reports on), `data_ready` / `take`, `data_wanted` /
@@ -210,12 +214,12 @@ the roles inverted for the last letter.
   the pull-ups' rise time. Counts that ignore the added cycles (the
   vendor's arithmetic) would run at 96, 376 and 912 on an ideal wire.
 - THE SCAN of 0x08..0x77 finds the one client; nobody home is
-  i2c_nack_addr inside 34 us at 400 kHz; the probe is served as one
+  i2c_nack_addr inside 34 to 38 us at 400 kHz; the probe is served as one
   read request and one STOP at the client.
 - THE SHAPES: a write of eight heard byte-exact with one STOP; a read
   of eight served as eight read requests, the host's NACK seen once;
   a write-then-read with ONE repeated START counted from the far end;
-  a 200-byte write in one tenure through the pump in 4.6 ms and 24
+  a 200-byte write in one tenure through the pump in 4.6 ms and 27
   interrupts, no overrun at the client.
 - THE VOCABULARY: a deaf address is i2c_nack_addr on a write, on the
   probe and on a read; a client refusing data (IC_SLV_DATA_NACK_ONLY)
@@ -224,8 +228,8 @@ the roles inverted for the last letter.
   eight bytes lengthens a 240 us read to 1027); bytes queued beyond a
   two-byte read are flushed at the host's NACK and reported
   (ABRT_SLVFLUSH_TXFIFO), the next read clean.
-- THE ENGINES: a 64-byte read at 400 kHz in 1.7 ms with one host
-  interrupt; a write-then-read with the write on the pump; the
+- THE ENGINES: a 64-byte read at 400 kHz in 1.6 ms with one host
+  interrupt (the STOP); a write-then-read with the write on the pump; the
   two-byte read and the probe on the pump of an engined host; a deaf
   address answered with the engines put away; eight 255-byte reads at
   1 MHz exact with TX_OVER never raised. THE REQUEST IS A LEVEL the
@@ -245,6 +249,45 @@ the roles inverted for the last letter.
   held low by a GPIO through nine clocks and a STOP, 0 again once
   released, and the bus works after it. THE ROLES INVERT on the same
   two wires: sixteen bytes exact both ways.
+- THE HOST'S COST, `bench_rp2040` letter i on the same self-link, the
+  I2C vectors in SRAM, the client served from its own vector and kept
+  out of the counts; the wire's time at the SCL period measured (316.6
+  cycles at 400 kHz: 3.6 cycles, 28 ns, over the counts - the pull-ups'
+  rise, the same at every speed, which keeps fast-mode-plus inside its
+  120 ns). Each figure the best of five; the fixed cost is wall less the
+  wire's time, in clk_sys cycles at 125 MHz:
+
+  | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
+  |---|---|---|---|---|---|
+  | write of 1 | 6974 (x 1.13) | 1 | 149 | 802 | 832 |
+  | write of 255 | 730 732 (x 1.00) | 31 | 8413 | 14 570 | 815 |
+  | read of 16 | 49 843 (x 1.01) | 2 | 580 | 1562 | 959 |
+  | read of 255 | 731 292 (x 1.00) | 32 | 13 378 | 21 927 | 1375 |
+  | register read, 1 + 1 | 13 174 (x 1.07) | 1 | 203 | 1052 | 890 |
+  | read of 255 on the engines | 730 671 (x 1.00) | 3 | 569 | 4842 | 754 |
+
+  A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
+  read is one every eight bytes, where one a byte took 285 interrupts and
+  four times the handler cycles for 255. The fixed cost is the same at
+  the three speeds (832, 832, 834 for a one-byte write) because the
+  address and the speed stay in the block between tenures: the cycle of
+  disable, IC_TAR and enable, which a new address still pays
+  (`i2c.write.readdr`), costs 736 cycles more at 100 kHz, 174 at 400 kHz
+  and 67 at 1 MHz - the disable waits on the block's own shutdown, which
+  follows the bus timing. A one-byte write's fixed cost is the thread's
+  start() (291 cycles with a ruler read), the one handler (149 with its
+  stamps) and the way out of the idle loop.
+- THE VENDOR, the pico-sdk 2.3.1's `i2c_write_blocking` /
+  `i2c_read_blocking` on the same wire (its own `i2c_init`, then this
+  driver's counts written over its own so the SCL is the same): a
+  one-byte write 6680 cycles, fixed 538, busy the whole wall - the
+  polled loop has no interrupt to enter and no idle to leave, and holds
+  the core 6680 cycles where this driver holds it 802. A long read is
+  where the polled loop pays: one command in flight, the bus held a
+  turn of the loop every byte - 255 bytes 750 723 cycles (x 1.02) and a
+  fixed cost of 20 834. The SDK's own counts give 96, 376 and 912 kHz on
+  an ideal wire and a spike filter of 46 cycles (368 ns) at 100 kHz,
+  its `lcnt / 16`.
 
 ## Not covered yet
 

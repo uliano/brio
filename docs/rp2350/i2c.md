@@ -252,7 +252,7 @@ what a block outside the processor should look like.
   one STOP; a read of eight is byte-exact with eight read requests, the
   host's NACK seen once and one STOP; a write-then-read shows **exactly
   one repeated START from the far end**; and a 200-byte write goes out in
-  ONE tenure in **4570 us** with **28 host interrupts** for 200 bytes -
+  ONE tenure in **4580 us** with **24 host interrupts** for 200 bytes -
   the FIFO refilled at its half - and no overrun at the client.
 - **THE VOCABULARY IS THE WIRE'S.** A deaf client is `i2c_nack_addr` on a
   write, a probe and a read alike; a client holding IC_SLV_DATA_NACK_ONLY
@@ -299,6 +299,47 @@ what a block outside the processor should look like.
   buffer off and a pull-down, and FUNCSEL at none.
 - **THE ROLES INVERT** on the same two wires, I2C1 hosting on GP15/GP14
   and I2C0 listening on GP13/GP12, sixteen bytes exact both ways.
+
+- **THE HOST'S COST**, `bench_rp2350` letter i on the same self-link and
+  the same image built for both halves, the I2C vectors in SRAM, the
+  client served from its own vector and kept out of the counts; the
+  wire's time at the SCL period measured (379.0 cycles at 400 kHz: 4.0
+  cycles, 26 ns, over the counts, the pull-ups' rise, which keeps
+  fast-mode-plus inside its 120 ns). The best of five each, clk_sys
+  cycles at 150 MHz, Cortex-M33 / Hazard3:
+
+  | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
+  |---|---|---|---|---|---|
+  | write of 1 | 7827 / 7837 (x 1.06) | 1 | 84 / 65 | 583 / 302 | 474 / 484 |
+  | write of 255 | 874 305 / 874 327 (x 1.00) | 31 | 5409 / 4795 | 23 866 / 8009 | 455 / 461 |
+  | read of 16 | 59 082 / 59 079 (x 1.00) | 2 | 361 / 310 | 2052 / 817 | 558 / 554 |
+  | read of 255 | 874 526 / 874 500 (x 1.00) | 32 | 9007 / 8441 | 30 017 / 11 017 | 676 / 634 |
+  | register read, 1 + 1 | 15 216 / 15 219 (x 1.03) | 1 | 120 / 96 | 1528 / 492 | 510 / 512 |
+  | read of 255 on the engines | 874 206 / 874 214 (x 1.00) | 3 | 337 / 255 | 9174 / 1588 | 356 / 348 |
+
+  A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
+  read is one every eight bytes, where one a byte took 285 interrupts
+  and three and a half times the handler cycles for 255. The address and
+  the speed stay in the block between tenures, so a one-byte write's
+  fixed cost is the same at the three speeds (474 on the M33); the
+  disable, IC_TAR and enable that a new address still pays costs 916
+  cycles more at 100 kHz, 241 at 400 kHz and 106 at 1 MHz - the disable
+  waits on the block's own shutdown, which follows the bus timing.
+  **A HANDLER IN FLASH IS A LOTTERY ON THE CORTEX-M33**: the one-STOP
+  handler measured 188 to 365 cycles across three flash builds of the
+  bench (558 with stamps added inside it), with up to six XIP cache
+  misses of about seventy cycles each in a tenure, against 84 from SRAM;
+  the Hazard3 builds of the same source ranged 57 to 287. The driver
+  places nothing (the application binds the vector); the bench measures
+  its handlers from SRAM so that a line reads the code.
+- **THE VENDOR**, the pico-sdk 2.3.1's `i2c_write_blocking` /
+  `i2c_read_blocking` built for each half, on the same wire with this
+  driver's counts written over its own: a one-byte write 7811 / 7838
+  cycles, fixed 459 / 486 - within a twentieth of this driver's - with
+  busy the whole wall where this driver's is 583 / 302. A read of 255
+  bytes keeps one command in flight and holds the bus a turn of its loop
+  every byte: 887 459 / 888 884 cycles, a fixed cost of 13 713 / 15 138
+  against 676 / 634.
 
 ## Not covered yet
 

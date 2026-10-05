@@ -155,10 +155,12 @@ TEST_CASE("a bring-up leaves the block set up, the pads last and the line after 
     CHECK(regs().IC_SDA_HOLD == 39u);
     CHECK(regs().IC_SDA_SETUP == 33u);
 
-    // The thresholds: every byte raises RX_FULL, the pump refills at
-    // the FIFO's half.
-    CHECK(regs().IC_RX_TL == 0u);
+    // The thresholds: half a FIFO each way - RX_FULL at eight bytes
+    // (RX_TL is the level less one), TX_EMPTY at eight entries or fewer.
+    CHECK(regs().IC_RX_TL == Block::fifo_depth / 2u - 1u);
     CHECK(regs().IC_TX_TL == Block::fifo_depth / 2u);
+    CHECK(Host::rx_level == 8u);
+    CHECK(Host::tx_level == 8u);
 
     // Nothing armed until a tenure, the block enabled, the line on.
     CHECK(regs().IC_INTR_MASK == 0u);
@@ -234,11 +236,10 @@ TEST_CASE("every tenure's last entry carries STOP, and the address is the target
         CHECK_FALSE(Host::start(r));
         CHECK(regs().IC_TAR == 0x42u);
         CHECK(last_entry() == i2c_write_entry(0x33, {.stop = true}));
-        // A write ends on its STOP: the sources armed are the abort, the
-        // stop and the receive level, and TX_EMPTY is NOT among them
-        // because every entry fit.
-        CHECK(regs().IC_INTR_MASK ==
-              (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::rx_full));
+        // A write ends on its STOP: the sources armed are the abort and
+        // the stop - no receive level, nothing is read, and no TX_EMPTY,
+        // every entry fit.
+        CHECK(regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
         CHECK_FALSE(Host::idle());
     }
 
@@ -426,6 +427,13 @@ TEST_CASE("the engines take the middle of a read phase, the pump its two ends") 
     CHECK(peer_regs().IC_DMA_CR == (I2cDmaControl::tx | I2cDmaControl::rx));
     CHECK((peer_regs().IC_INTR_MASK & (I2cInterrupt::tx_empty | I2cInterrupt::rx_full)) == 0u);
 
+    // The receive engine was armed quiet: a bus error reaches the line,
+    // its block's end does not. Under the engines only the abort and the
+    // STOP are armed on the block.
+    CHECK(RxEngine::errors_only);
+    CHECK_FALSE(TxEngine::errors_only);
+    CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
+
     // The block of commands is in: the transmit request goes off and the
     // LAST entry - the one that carries STOP - goes through the pump.
     TxEngine::next_flags = TxEngine::flag_complete;
@@ -433,9 +441,9 @@ TEST_CASE("the engines take the middle of a read phase, the pump its two ends") 
     CHECK(peer_regs().IC_DMA_CR == I2cDmaControl::rx);
     CHECK(peer_regs().IC_DATA_CMD == i2c_read_entry({.stop = true}));
 
-    // The receive block ending IS the tenure's end.
-    RxEngine::next_flags = RxEngine::flag_complete;
-    CHECK(Streamed::dma_isr());
+    // The STOP is the tenure's end, as on the pump: the requests off.
+    peer_regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Streamed::isr());
     CHECK(Streamed::status() == i2c_ok);
     CHECK(Streamed::idle());
     CHECK(peer_regs().IC_DMA_CR == 0u);
@@ -479,6 +487,171 @@ TEST_CASE("a short read stays on the pump, and a bus error ends the tenure") {
     CHECK(peer_regs().IC_DMA_CR == 0u);
 
     Streamed::release();
+}
+
+TEST_CASE("a long read is taken half a FIFO an interrupt, its tail at the STOP") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    uint8_t in[20]{};
+    Host::Request r{};
+    r.addr = 0x42;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = 20;
+    REQUIRE_FALSE(Host::start(r));
+    // Sixteen read commands fit; four remain, and with sixteen out the
+    // bytes coming back pace the refill: RX_FULL armed, TX_EMPTY not.
+    CHECK(regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::rx_full));
+    CHECK(last_entry() == i2c_read_entry());
+
+    // Eight bytes in: one entry takes them all (one level read) and pours
+    // the four commands left, the last with STOP; twelve are owed, still
+    // more than half a FIFO.
+    regs().IC_DATA_CMD = 0x5A;
+    regs().IC_RXFLR = 8;
+    regs().IC_INTR_STAT = I2cInterrupt::rx_full;
+    CHECK_FALSE(Host::isr());
+    CHECK(in[0] == 0x5A);
+    CHECK(in[7] == 0x5A);
+    CHECK(in[8] == 0x00);
+    CHECK(last_entry() == i2c_read_entry({.stop = true}));
+    CHECK((regs().IC_INTR_MASK & I2cInterrupt::rx_full) != 0u);
+
+    // Eight more: four owed, half a FIFO or less - RX_FULL stands down,
+    // the STOP takes the tail.
+    regs().IC_DATA_CMD = 0x6B;
+    regs().IC_INTR_STAT = I2cInterrupt::rx_full;
+    CHECK_FALSE(Host::isr());
+    CHECK(in[15] == 0x6B);
+    CHECK((regs().IC_INTR_MASK & I2cInterrupt::rx_full) == 0u);
+
+    regs().IC_DATA_CMD = 0x7C;
+    regs().IC_RXFLR = 4;
+    regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Host::isr());
+    CHECK(Host::status() == i2c_ok);
+    CHECK(in[16] == 0x7C);
+    CHECK(in[19] == 0x7C);
+    CHECK(regs().IC_INTR_MASK == 0u);
+}
+
+TEST_CASE("a read of half a FIFO or less is one interrupt: the STOP") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    uint8_t in[8]{};
+    Host::Request r{};
+    r.addr = 0x42;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(in));
+    r.rx_len = 8;
+    REQUIRE_FALSE(Host::start(r));
+    CHECK(regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
+
+    // A STOP with fewer bytes than were asked for is no success.
+    regs().IC_DATA_CMD = 0x11;
+    regs().IC_RXFLR = 7;
+    regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Host::isr());
+    CHECK(Host::status() == i2c_bus_error);
+
+    // The whole run at the STOP is.
+    REQUIRE_FALSE(Host::start(r));
+    regs().IC_DATA_CMD = 0x11;   // the start's own entry overwrote what the fake reads back
+    regs().IC_RXFLR = 8;
+    regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Host::isr());
+    CHECK(Host::status() == i2c_ok);
+    CHECK(in[7] == 0x11);
+}
+
+TEST_CASE("a long write refills on TX_EMPTY until its last entry is in") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    uint8_t out[20]{};
+    for (uint8_t i = 0; i < 20u; ++i) {
+        out[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    Host::Request r{};
+    r.addr = 0x42;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.tx_len = 20;
+    REQUIRE_FALSE(Host::start(r));
+    CHECK(regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det | I2cInterrupt::tx_empty));
+    CHECK(last_entry() == i2c_write_entry(0x3F));
+
+    // Half the FIFO drained: one level read, the four left, the last with
+    // STOP, and TX_EMPTY stands down.
+    regs().IC_TXFLR = 8;
+    regs().IC_INTR_STAT = I2cInterrupt::tx_empty;
+    CHECK_FALSE(Host::isr());
+    CHECK(last_entry() == i2c_write_entry(0x43, {.stop = true}));
+    CHECK((regs().IC_INTR_MASK & I2cInterrupt::tx_empty) == 0u);
+
+    regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Host::isr());
+    CHECK(Host::status() == i2c_ok);
+}
+
+TEST_CASE("the address and the speed are written into the block only when they move") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    const uint8_t out[1] = {0x55};
+    Host::Request r{};
+    r.addr = 0x42;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.tx_len = 1;
+    r.speed = I2cSpeed::fast_400k;
+    const auto one = [&r] {
+        REQUIRE_FALSE(Host::start(r));
+        regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+        REQUIRE(Host::isr());
+        CHECK(Host::status() == i2c_ok);
+    };
+
+    // The first tenure cycles the block: a disable, IC_TAR, an enable.
+    const uint32_t down0 = SimDwApbI2cBench::disable_edges;
+    one();
+    CHECK(regs().IC_TAR == 0x42u);
+    CHECK(SimDwApbI2cBench::disable_edges == down0 + 1u);
+
+    // The same address at the same speed after a tenure that ended on its
+    // STOP: the block is left enabled, its entries go straight in.
+    one();
+    one();
+    CHECK(SimDwApbI2cBench::disable_edges == down0 + 1u);
+
+    // Another speed: cycled, and the next one not.
+    r.speed = I2cSpeed::fast_plus_1m;
+    one();
+    CHECK(SimDwApbI2cBench::disable_edges == down0 + 2u);
+    one();
+    CHECK(SimDwApbI2cBench::disable_edges == down0 + 2u);
+
+    // Another address: cycled.
+    r.addr = 0x43;
+    one();
+    CHECK(regs().IC_TAR == 0x43u);
+    CHECK(SimDwApbI2cBench::disable_edges == down0 + 3u);
+
+    // A tenure that ended on an abort leaves the block cycled at the next
+    // start, the address unchanged: its STOP may still be on the wire, and
+    // a STOP_DET left standing would end the next tenure for it.
+    REQUIRE_FALSE(Host::start(r));
+    regs().IC_INTR_STAT = I2cInterrupt::tx_abrt;
+    regs().IC_TX_ABRT_SOURCE = I2cAbort::data_noack;
+    REQUIRE(Host::isr());
+    CHECK(Host::status() == i2c_nack_data);
+    one();
+    CHECK(SimDwApbI2cBench::disable_edges == down0 + 4u);
+
+    // So does a recover(): the block comes back from its reset enabled,
+    // and the next start cycles it once.
+    const uint32_t down1 = SimDwApbI2cBench::disable_edges;
+    CHECK(Host::recover());
+    one();
+    CHECK(SimDwApbI2cBench::disable_edges == down1 + 1u);
 }
 
 TEST_CASE("a client answers its own address and reports one event per call") {

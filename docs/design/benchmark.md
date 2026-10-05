@@ -411,6 +411,45 @@ What the rows say:
   the pad; at 1 Mbaud on the AVR the poll's own turn, about twenty
   cycles, is most of what the instrument reads.
 
+## Letter i: the I2C host
+
+Measured on the bench boards after the I2C round, each family's host
+against the bus partner its desk gives it (the self-link's other
+instance served from its own interrupt, a peer board's `twi_peer`, or a
+device soldered to the board - the family's document says which):
+`i2c.write` and `i2c.read` of 1, 2, 16 and 255 bytes, `i2c.wr` the
+register read (one byte written, a repeated START, 1, 2 or 16 read),
+`i2c.probe`, the same through each engine, at 100 kHz, 400 kHz and Fm+
+where the wire carries it; `wire` the bus's own time for the tenure at
+the measured SCL period, so the FIXED COST - wall minus wire, in core
+cycles - is the round's number, the price a requester pays for a
+tenure beyond the bits; the vendor's own tenure on the same board in a
+scratch program.
+
+| family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
+|---|---|---|---|---|---|---|---|
+| RP2040 (125 MHz; I2C1 on the self-link) | 832 (967), the same at 100 kHz and 1 MHz (1529 at 100 kHz before) | 890 (1011) | 1.00, 31 | 32 (285), 13 378 (54 955) | 802 | pico-sdk 2.3.1, polled: 538 fixed with the core held the whole wire (6680 busy); its 255-byte read 20 834 fixed against 1375 | 439 (574) |
+| RP2350, Cortex-M33 (150 MHz; the same) | 474 (699) | 510 (393, which answered at the last byte, a period before the bus was free) | 1.00, 31 | 32 (285), 9007 (32 319) | 583 | pico-sdk: 459 fixed, 7811 busy; its 255-byte read 13 713 fixed against 676 | 298 (353) |
+| RP2350, Hazard3 (150 MHz; the same) | 484 (731) | 512 (417) | 1.00, 31 | 32 (285), 8441 (30 597) | 302 | pico-sdk: 486 fixed, 7838 busy | 284 (316) |
+
+What the rows say:
+
+- The DW_apb_i2c host reads at half its receive FIFO and pours read
+  commands as the bytes come back, so a tenure of eight bytes or less
+  is one interrupt and a 255-byte read 32 where it was 285; every
+  tenure ends on its own STOP, and the block's disable - a wait the bus
+  timing sets, 1.5 us at 400 kHz and 6 at 100 - is paid only when the
+  address or the speed moves, which is what made the fixed cost the
+  same at every speed ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)).
+  The SDK's polled loop is cheaper by 55 per cent on the M0+ for a
+  one-byte tenure - no exception entry, no idle wake - and holds the
+  core for the whole wire time to get it; on the M33 and the Hazard3
+  the two are within a fifth.
+- On the RP2350's Cortex-M33 a handler's cost from flash moves with
+  where the linker puts it - 188 to 365 cycles across three builds of
+  one handler, up to six XIP misses a tenure; from SRAM 84. The bench
+  runs both I2C vectors from SRAM, before and after alike.
+
 ## Not covered yet
 
 Implemented, not bench-verified:

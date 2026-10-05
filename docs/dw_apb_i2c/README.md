@@ -84,7 +84,7 @@ The constants:
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the block and therefore the family's fact, not this file's; the engine puts the transmit threshold at its half |
+| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the block and therefore the family's fact, not this file's; the engine puts both thresholds at its half |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a
@@ -180,9 +180,80 @@ every reason, the engines' hand-over in the middle of a read phase, and a
 client that releases SDA on the n-th pulse of the unstick.
 
 What the fake does NOT model is the FIFOs: nothing moves an entry out of
-`IC_DATA_CMD` and nothing ever fills the receive side, so the transmit
-path runs and the register holds the LAST entry the pump wrote, while the
-receive path stays the bench's to judge.
+`IC_DATA_CMD` and nothing fills the receive side by itself, so the
+register holds the LAST entry the pump wrote. The two LEVEL registers are
+plain memory a test writes, and the driver reads each once and then moves
+that many entries - so a test stages half a FIFO of bytes by setting
+`IC_RXFLR` and raising RX_FULL, and judges the batch, the refill, the
+tail at the STOP and the masks the handler leaves, while the bytes' values
+and the wire's timing stay the bench's to judge.
+
+## The host's engine: what the block offers that bears on cost
+
+Each item of the block's programmer's model that decides what a tenure
+costs, used or declined, with its reason; the measured figures are each
+family's ([../rp2040/i2c.md](../rp2040/i2c.md),
+[../rp2350/i2c.md](../rp2350/i2c.md)).
+
+- **The command FIFO and its level (`IC_TXFLR`)** - used: the pump writes
+  a run into the room the FIFO has, one level read and then stores, the
+  request's fields held in registers for the run; no status read per
+  entry. A tenure of a FIFO or less is written whole by `start()`.
+- **The transmit threshold (`IC_TX_TL`, TX_EMPTY) with `TX_EMPTY_CTRL`** -
+  used at half the FIFO: a long write refills eight entries an interrupt,
+  the other eight the wire's slack. TX_EMPTY is armed only while entries
+  remain and, on a read, only while fewer than half a FIFO of read
+  commands are out.
+- **The receive threshold (`IC_RX_TL`, RX_FULL) and its level
+  (`IC_RXFLR`)** - used at half the FIFO, written once at `init()`: a
+  long read takes eight bytes an interrupt (one level read, then loads)
+  and pours the commands their room leaves in the same entry, so the
+  bytes coming back pace the refill and a 255-byte read is 32 interrupts
+  where one a byte was 285. RX_FULL is masked once half a FIFO or less is
+  owed: the tail is the STOP's. A deeper level (three quarters: TX_TL 4,
+  RX_TL 11) was measured too, on the RP2040 - 21 and 22 interrupts for
+  255 bytes, about a sixth fewer handler cycles - and declined: its
+  longest entry grows by a fifth (the latency every other vector waits
+  behind, no handler nesting over another) and the wire's slack halves
+  to four byte times.
+- **STOP_DET as every tenure's end** - used: a write, a read, the probe
+  and an engined read all complete on their STOP (or on TX_ABRT), so the
+  requester hears when the bus is free and the next `start()` finds the
+  block idle with nothing standing. A host's STOP_DET is raised for
+  any STOP on the bus (`STOP_DET_IF_MASTER_ACTIVE` reads 0 on these
+  chips): a second host's STOP is the multi-master gap's.
+- **`RX_FIFO_FULL_HLD_CTRL`** - used: a full receive FIFO holds SCL
+  instead of overrunning, and an empty command FIFO with no STOP holds it
+  too (the block's own rule), so a handler that comes late stretches the
+  bus and loses nothing.
+- **`IC_TAR` and `IC_CON` across tenures** - used: they take a write only
+  with ENABLE clear, and they are kept across a disable and between
+  tenures, so the disable/IC_TAR/enable cycle runs only when the address
+  or the speed moves, or when the last tenure did not end on its own STOP
+  (an abort, a recover). That cycle's disable waits for the block's own
+  shutdown, which follows the bus timing: about 6 us at 100 kHz and
+  1.5 us at 400 kHz, paid in the dispatch.
+- **`IC_TAR` written while enabled** - not offered: the register
+  description of the chips here takes a write only with `IC_ENABLE[0]`
+  clear, so a new address is always the disable/enable cycle above.
+- **The DMA requests (`IC_DMA_CR`) and watermarks (`IC_DMA_TDLR`,
+  `IC_DMA_RDLR`)** - used for the read phase, watermarks at their reset
+  value (single transfers, the chapter's advice); the receive engine is
+  armed to report a bus error alone and the STOP ends its tenure, so an
+  engined read is two interrupts - the transmit block's end, which hands
+  the pump the STOP entry, and the STOP; three when the block's end
+  finds no room for that entry and TX_EMPTY brings it - and the next
+  tenure takes the fast path. A write phase stays on the pump (the gap below).
+- **`IC_ENABLE.ABORT`** - used where an engine fails; a NACK or a lost
+  arbitration is the block's own abort, read off `IC_TX_ABRT_SOURCE` once.
+- **`IC_ENABLE.TX_CMD_BLOCK`** - declined for tenures: entries written
+  ahead of a START are what the FIFO is for, and the fast path already
+  writes them into an idle, enabled block.
+- **The interrupt decode** - one `IC_INTR_STAT` read an entry; the
+  sources not armed for the tenure never reach the handler, and a mask
+  bit is written only when it changes (a mirror of TX_EMPTY's and
+  RX_FULL's, written by `start()` with every source masked and by the
+  handler after).
 
 ## Not covered yet
 
