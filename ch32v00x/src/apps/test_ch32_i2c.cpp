@@ -65,7 +65,7 @@
 //      the wire and the vector untouched
 //   k  THE STUCK BUS: the peer holding SDA, unstick() counting the
 //      clocks until it lets go, and the STOPF its hand-made STOP leaves
-//      taken once by the event vector
+//      cleared with no entry of the event vector
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
@@ -1268,9 +1268,9 @@ void tk_unstick() {
     settle_ms(5);
     const bool held = !SdaPin::read();
     // The STOP unstick() makes by hand is seen by the instance's own
-    // slave half, which raises STOPF: the event vector must take it
-    // ONCE and clear it, not re-enter without end. Counted from before
-    // the call: the entry comes the moment unstick() re-enables the line.
+    // slave half, which raises STOPF with nothing in flight: unstick()
+    // clears it, and the event line - down between tenures - must not
+    // re-enter for it at all. Counted from before the call.
     host_isr_entries = 0;
     const uint32_t storms_before = storms;
     const uint8_t pulses = Host::unstick();
@@ -1283,8 +1283,8 @@ void tk_unstick() {
     const uint32_t idle_entries = host_isr_entries;
     print(serial, "  the event vector, idle, after the hand-made STOP: ", idle_entries, " entries, STAR1=",
           hex(H::status1()), crlf);
-    bench.verdict("the STOPF the hand-made STOP leaves is taken once and cleared - no storm on "
-                  "the event vector",
+    bench.verdict("the STOPF the hand-made STOP leaves is cleared - no storm on the event "
+                  "vector",
                   idle_entries <= 2u && storms == storms_before && (H::status1() & i2c_stopf) == 0u);
     const uint8_t after = Host::unstick();
     bench.verdict("with the wire free again unstick() clocks nothing", after == 0u);

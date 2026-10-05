@@ -35,7 +35,23 @@
  * sets STOP and reads N-1 and N. All of it is in `isr()`, phase by
  * phase, and the reason the ITBUFEN enable is switched on and off
  * during a tenure: TxE and RxNE interrupt only while the byte pump
- * needs them, BTF (under ITEVTEN alone) carries the rest.
+ * needs them, BTF (under ITEVTEN alone) carries the rest. ITEVTEN is
+ * the TENURE'S in turn - raised by start(), dropped at its end - because
+ * the BTF a STOP leaves standing until the condition is out (15.10.6)
+ * and the slave half's STOPF would otherwise enter the vector between
+ * tenures for nothing.
+ *
+ * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED AT EV8_2, the
+ * chapter's own end of a write (15.3, figure 15-4: TxE and BTF), where
+ * the last written byte's acknowledge is known. Requested a byte
+ * earlier, on the TxE that says that byte went into the shifter - the
+ * order WCH's interrupt example uses - it is a commitment made before
+ * the acknowledge: measured against a target refusing that byte, the
+ * refusal came back as a NACK on the address and at 400 kHz left the
+ * controller master with START and STOP both standing. Against an
+ * STM32G0 target both orders deliver every written byte; the BTF order
+ * costs the half bit SCL is held while the vector serves BTF
+ * (docs/ch32v00x/i2c.md).
  *
  * THERE IS NO RISE-TIME REGISTER, ON EITHER PART. 15.3's text names an
  * "R16_I2C1_RTR" the register list (table 15-1) does not carry - the
@@ -398,6 +414,19 @@ struct I2c {
 
     // ---- interrupts ----------------------------------------------------------
 
+    /// CTLR1's control bits, some set and some cleared, in ONE store
+    /// (i2c_start, i2c_stop, i2c_ack, i2c_pos ...): what a tenure's start
+    /// writes at once. No CTLR1 write may land while START or STOP stands
+    /// (the F1 lineage's rule, 15.10.1), and this is one write.
+    static void control(uint16_t set, uint16_t clear) {
+        regs().CTLR1 = static_cast<uint16_t>((regs().CTLR1 & ~clear) | set);
+    }
+    /// CTLR2's interrupt enables the same way (i2c_itevten, i2c_itbufen,
+    /// i2c_iterren): one store.
+    static void interrupts(uint16_t set, uint16_t clear) {
+        regs().CTLR2 = static_cast<uint16_t>((regs().CTLR2 & ~clear) | set);
+    }
+
     static void event_interrupt(bool on) { ctlr2(i2c_itevten, on); }
     /// ITBUFEN: TxE and RxNE reach the event vector too.
     static void buffer_interrupt(bool on) { ctlr2(i2c_itbufen, on); }
@@ -538,9 +567,10 @@ public:
         SdaPin::function(PinDrive::open_drain);
         status_ = i2c_ok;
         phase_ = Phase::idle;
-        S::event_interrupt(true);
-        S::error_interrupt(true);
-        S::buffer_interrupt(false);
+        // At rest the error line alone: the event line is a tenure's,
+        // raised by its start() and dropped by its end (the class
+        // comment).
+        S::interrupts(i2c_iterren, i2c_itevten | i2c_itbufen);
         Pfic::enable(S::event_irq());
         Pfic::enable(S::error_irq());
         return true;
@@ -576,7 +606,13 @@ public:
     /// produce, answered i2c_rejected through status() - the I2cHost
     /// contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
-        req_ = r;
+        // What the tenure's entries read, and nothing else of the Request:
+        // the reply and the speed are the arbiter's and start()'s.
+        t_.tx = r.tx;
+        t_.rx = r.rx;
+        t_.addr = r.addr;
+        t_.tx_len = r.tx_len;
+        t_.rx_len = r.rx_len;
         pos_ = 0;
         if (!speed_ok(r.speed)) {
             status_ = i2c_rejected;
@@ -605,10 +641,14 @@ public:
         // inside any per-bus timeout.
         (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
         apply(r.speed);
-        S::pos(false);
-        S::ack(false);
-        S::buffer_interrupt(false);
-        S::start();
+        // ONE CTLR1 store: START, with POS and ACK down for the address
+        // phase. Read after STAR1, it is also the second half of a stale
+        // STOPF's clear (15.10.6: STAR1 read, then a CTLR1 write) - the
+        // slave half's, which nothing between two tenures takes, the
+        // event line being down at rest. Then the tenure's event line.
+        (void)S::status1();
+        S::control(i2c_start, i2c_pos | i2c_ack);
+        S::interrupts(i2c_itevten, i2c_itbufen);
         return false;
     }
 
@@ -648,10 +688,10 @@ public:
                 // EV5: the address, with the direction bit.
                 if (phase_ == Phase::start_rx) {
                     prime_receive();
-                    S::data(static_cast<uint8_t>((req_.addr << 1) | 1u));
+                    S::data(static_cast<uint8_t>((t_.addr << 1) | 1u));
                     phase_ = Phase::addr_rx;
                 } else {
-                    S::data(static_cast<uint8_t>(req_.addr << 1));
+                    S::data(static_cast<uint8_t>(t_.addr << 1));
                     phase_ = Phase::addr_tx;
                 }
                 return false;
@@ -660,7 +700,7 @@ public:
                 if ((s1 & i2c_addr) == 0u) {
                     return false;
                 }
-                if (req_.tx_len == 0u) {
+                if (t_.tx_len == 0u) {
                     // The probe: acknowledged, and that was the question.
                     (void)S::clear_addr();
                     S::stop();
@@ -668,7 +708,7 @@ public:
                 }
                 if constexpr (has_engines) {
                     S::dma(true, false);
-                    (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
+                    (void)TxEngine::start(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
                     (void)S::clear_addr();
                     phase_ = Phase::tx_dma;
                     return false;
@@ -679,15 +719,15 @@ public:
                 return false;
 
             case Phase::tx:
-                if ((s1 & i2c_txe) != 0u && pos_ < req_.tx_len) {
-                    S::data(req_.tx.get()[pos_]);
+                if ((s1 & i2c_txe) != 0u && pos_ < t_.tx_len) {
+                    S::data(t_.tx.get()[pos_]);
                     ++pos_;
-                    if (pos_ >= req_.tx_len) {
+                    if (pos_ >= t_.tx_len) {
                         S::buffer_interrupt(false);   // BTF carries the end
                     }
                     return false;
                 }
-                if ((s1 & i2c_btf) != 0u && pos_ >= req_.tx_len) {
+                if ((s1 & i2c_btf) != 0u && pos_ >= t_.tx_len) {
                     return end_of_write();   // EV8_2
                 }
                 return false;
@@ -821,6 +861,12 @@ public:
         SclPin::function(PinDrive::open_drain);
         SdaPin::function(PinDrive::open_drain);
         S::clear_errors(i2c_errors);
+        // The STOP made by hand is seen by the instance's own slave half,
+        // which raises STOPF with nothing in flight (measured); cleared
+        // here, its sequence's two halves (15.10.6).
+        if (S::flag(i2c_stopf)) {
+            S::clear_stopf();
+        }
         Pfic::enable(S::event_irq());
         Pfic::enable(S::error_irq());
         if (!free_now) {
@@ -846,8 +892,7 @@ public:
         S::timing(table_[static_cast<uint8_t>(applied_)]);
         S::enable();
         S::ack(false);
-        S::event_interrupt(true);
-        S::error_interrupt(true);
+        S::interrupts(i2c_iterren, i2c_itevten | i2c_itbufen);
         Pfic::enable(S::event_irq());
         Pfic::enable(S::error_irq());
         return true;
@@ -880,17 +925,24 @@ private:
         }
     }(), "brio I2cHost: the DMA engines must carry uint8_t elements");
 
+    /// The one exit: the status set, the phase idled, and the event line
+    /// dropped with the buffer one, in one store. A STOP requested at BTF
+    /// leaves BTF standing until the condition goes out on the wire
+    /// (15.10.6: the hardware clears it "after initiating a start or stop
+    /// event"), and with the line up that is a vector re-entered for
+    /// nothing until then - measured, one entry at 400 kHz and two at
+    /// 100 kHz on every write tenure.
     static bool finish(uint8_t st) {
         status_ = st;
         phase_ = Phase::idle;
-        S::buffer_interrupt(false);
+        S::interrupts(0, i2c_itevten | i2c_itbufen);
         return true;
     }
 
     /// EV8_2: the last written byte is out. A repeated START opens the
     /// read half, or the STOP ends the tenure.
     static bool end_of_write() {
-        if (req_.rx_len != 0u) {
+        if (t_.rx_len != 0u) {
             phase_ = Phase::start_rx;
             S::start();
             return false;
@@ -902,11 +954,11 @@ private:
     /// The ACK/POS arrangement the read phase's length wants, set
     /// BEFORE the address goes out (15.3's receive procedures).
     static void prime_receive() {
-        if (req_.rx_len == 2u && !dma_serves_rx()) {
+        if (t_.rx_len == 2u && !dma_serves_rx()) {
             S::pos(true);
             S::ack(true);
         } else {
-            S::ack(req_.rx_len != 1u);
+            S::ack(t_.rx_len != 1u);
         }
     }
 
@@ -915,14 +967,14 @@ private:
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
                 S::dma(true, true);   // LAST: the block's last byte is NACKed
-                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
+                (void)RxEngine::start(std::span<uint8_t>(t_.rx.get(), t_.rx_len));
                 (void)S::clear_addr();
                 phase_ = Phase::rx_dma;
                 return false;
             }
         }
         pos_ = 0;
-        if (req_.rx_len == 1u) {
+        if (t_.rx_len == 1u) {
             // ACK is already clear (prime_receive): clear ADDR, then STOP
             // at once; the byte lands on RxNE.
             (void)S::clear_addr();
@@ -931,7 +983,7 @@ private:
             S::buffer_interrupt(true);
             return false;
         }
-        if (req_.rx_len == 2u) {
+        if (t_.rx_len == 2u) {
             // POS and ACK were set: clear ADDR, then ACK off - the NACK
             // lands on the second byte; one BTF delivers both.
             (void)S::clear_addr();
@@ -941,21 +993,21 @@ private:
         }
         (void)S::clear_addr();
         phase_ = Phase::rx;
-        S::buffer_interrupt(req_.rx_len > 3u);   // RxNE while more than three remain
+        S::buffer_interrupt(t_.rx_len > 3u);   // RxNE while more than three remain
         return false;
     }
 
     /// The receive pump, per the count's procedure.
-    static bool receive_step(uint16_t s1) {
-        uint8_t* out = req_.rx.get();
-        if (req_.rx_len == 1u) {
+    [[gnu::always_inline]] static bool receive_step(uint16_t s1) {
+        uint8_t* out = t_.rx.get();
+        if (t_.rx_len == 1u) {
             if ((s1 & i2c_rxne) == 0u) {
                 return false;
             }
             out[0] = S::data();
             return finish(i2c_ok);
         }
-        if (req_.rx_len == 2u) {
+        if (t_.rx_len == 2u) {
             if ((s1 & i2c_btf) == 0u) {
                 return false;
             }
@@ -965,12 +1017,12 @@ private:
             S::pos(false);
             return finish(i2c_ok);
         }
-        const uint8_t remaining = static_cast<uint8_t>(req_.rx_len - pos_);
+        const uint8_t remaining = static_cast<uint8_t>(t_.rx_len - pos_);
         if (remaining > 3u) {
             if ((s1 & i2c_rxne) != 0u) {
                 out[pos_] = S::data();
                 ++pos_;
-                if (req_.rx_len - pos_ == 3u) {
+                if (t_.rx_len - pos_ == 3u) {
                     S::buffer_interrupt(false);   // BTF from here on
                 }
             }
@@ -999,7 +1051,7 @@ private:
 
     static bool dma_serves_rx() {
         if constexpr (has_engines) {
-            return req_.rx_len >= 2u;
+            return t_.rx_len >= 2u;
         } else {
             return false;
         }
@@ -1077,7 +1129,15 @@ private:
     /// Half a standard-mode bit, for the unstick.
     static void spin_half_bit() { (void)delay_us(delay_rate_, 5); }
 
-    static inline Request req_{};
+    /// The tenure's own copy of the Request's fields its entries read.
+    struct Tenure {
+        Borrowed<const uint8_t, Lease::reply> tx;
+        Borrowed<uint8_t, Lease::reply> rx;
+        uint8_t addr;
+        uint8_t tx_len;
+        uint8_t rx_len;
+    };
+    static inline Tenure t_{};
     static inline uint8_t pos_ = 0;
     static inline volatile Phase phase_ = Phase::idle;
     static inline uint8_t status_ = i2c_ok;
