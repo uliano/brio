@@ -11,7 +11,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECTS = ("avrdx", "samc21", "stm32g0", "ch32v00x", "ch32vx03", "ch32x035", "rp2040", "stm32f4", "host")
+PROJECTS = ("avrdx", "samc21", "stm32g0", "ch32v00x", "ch32vx03", "ch32x035", "rp2040", "rp2350", "stm32f4", "host")
 
 
 def head_line(path):
@@ -83,7 +83,7 @@ def main(argv):
     elif args and args[0] == "all":
         args = args[1:]
     needle = args[0].lower() if args else ""
-    rows = [r for r in roster(projects) if needle in r[1].lower() or needle in r[3].lower()]
+    rows = [r for r in roster(projects) if needle in r[1].lower() or needle in r[4].lower()]
     if not rows:
         print("brio apps: nothing matches")
         return 1
