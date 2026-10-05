@@ -2,10 +2,9 @@
 // CH32V203 and the CH32V303: ch32vx03/i2c.hpp over RM ch. 19, the host
 // engine under its two vectors, the client half addressed by a real
 // controller, the DMA engines, and util/i2c_bus.hpp's arbiter with not
-// one line changed. Letters a..k are both series'; letters l..n are the
-// CH32V303 evaluation board's, where the chip's two controllers share one
-// bus, registered on that series' parts and compiled out of every other
-// image.
+// one line changed. Letters a..k are both series'; letters l..n are a
+// board's that wires the chip's two controllers onto one bus, registered
+// on every part with I2C2 and compiled out of every other image.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -54,21 +53,23 @@
 //    verdict claimed) when three command retries fail: a suite that
 //    hangs on an absent instrument is worse than one that says so.
 //
-//  - ON THE CH32V303 EVALUATION BOARD, THE CHIP'S OWN I2C2. That board
-//    wires I2C2's pads to I2C1's - PB10 to PB6, PB11 to PB7 - and puts a
-//    4.7 kOhm pull-up on each line, so one chip's two controllers share
-//    a bus: letters l..n make one the host and the other the target,
+//  - ON A BOARD THAT WIRES THEM, THE CHIP'S OWN I2C2. WCH's CH32V303
+//    evaluation board wires I2C2's pads to I2C1's - PB10 to PB6, PB11 to
+//    PB7 - with a 4.7 kOhm pull-up on each line, and a CH32V203C8 board
+//    can carry the same two wires and resistors: one chip's two
+//    controllers share a bus, and letters l..n make one the host and the
+//    other the target,
 //    the target POLLED from the loop that waits for the host (its clock
 //    stretching holds the bus while the loop comes round). The wires are
 //    looked for before a byte moves, and a peer letter that finds the
 //    bus pulled up by them and no peer answering declines instead of
 //    failing.
 //
-// THE PADS. PB6 and PB7 - and on the CH32V303 PB10 and PB11, I2C2's -
+// THE PADS. PB6 and PB7 - and on a part with I2C2 PB10 and PB11, I2C2's,
+// driven only after letters l..n have found the two wires to PB6/PB7 -
 // and nothing else. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
 // (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1
-// (the crystals), PB10/PB11 on the CH32V203 (I2C2's pads, which carry
-// another link on that bench), PB12..PB15 (the SPI link), PA0..PA8
+// (the crystals), PB12..PB15 (the SPI link), PA0..PA8
 // (other phases' straps) - and PB2, the LED, toggled per command as
 // every suite of this target does.
 //
@@ -97,7 +98,7 @@
 //   j  the flags, both vectors, the client's addresses and the PE
 //      cycle that drops an unclocked byte
 //   k  a ten-second stress with the error counters at both ends
-// and on the CH32V303 alone, over the board's two wires:
+// and on every part with I2C2, over the board's two wires:
 //   l  THE SELF-LINK: I2C1 the host, I2C2 the target - the probe, an
 //      absent address, a write, reads of one, two, three, four and
 //      eight bytes (the host's receive procedures, and THE TARGET AS A
@@ -549,11 +550,10 @@ bool ensure_link() {
     return false;
 }
 
-/// Whether this part is the one whose board wires I2C2 to I2C1 (letters
-/// l..n below), and the question a peer letter asks when no peer
-/// answered on a pulled-up bus.
-constexpr bool self_link_part =
-    device::device_class == DeviceClass::v30x_d8 && device::i2c_count >= 2u;
+/// Whether this part has the I2C2 a board can wire to I2C1 (letters l..n
+/// below), and the question a peer letter asks when no peer answered on
+/// a pulled-up bus. The wiring is the BOARD's, looked for at run time.
+constexpr bool self_link_part = device::i2c_count >= 2u;
 template <bool on = self_link_part>
 bool self_link_present();
 
@@ -2113,16 +2113,16 @@ void tr_late_start() {
 }
 
 // ===========================================================================
-// The CH32V303's self-link: the chip's two controllers on one bus (l..n)
+// The self-link: the chip's two controllers on one bus (l..n)
 // ===========================================================================
 //
-// On the CH32V303 evaluation board I2C2's pads are wired to I2C1's -
-// PB10 to PB6 (SCL) and PB11 to PB7 (SDA) - with a 4.7 kOhm pull-up on
-// each line: ONE CHIP'S TWO CONTROLLERS ON ONE BUS, one the host and the
-// other the target. On the CH32V203 board those two pads carry another
-// link and are never touched, so these letters are registered on the
-// CH32V303's parts alone - and there too the two wires are looked for
-// before a byte moves. THE TARGET IS POLLED from the loop that waits for
+// On a board that wires I2C2's pads to I2C1's - PB10 to PB6 (SCL) and
+// PB11 to PB7 (SDA) - with a pull-up on each line (WCH's CH32V303
+// evaluation board has them, 4.7 kOhm; a CH32V203C8 board can carry them):
+// ONE CHIP'S TWO CONTROLLERS ON ONE BUS, one the host and the other the
+// target. These letters are registered on every part with I2C2, and the
+// two wires are looked for before a byte moves: a board without them
+// declines by name. THE TARGET IS POLLED from the loop that waits for
 // the host's tenure (I2cClientOptions::interrupts false): its clock
 // stretching holds the bus while the loop comes round, which is what lets
 // one core be both ends. Every name below hangs on the letters' template
@@ -2682,7 +2682,7 @@ void tn_unstick() {
     }
 }
 
-/// The CH32V303's letters, registered where the part has the self-link.
+/// The self-link's letters, registered where the part has I2C2.
 template <bool on = self_link_part>
 void register_self_link_letters() {
     if constexpr (on) {
@@ -2734,7 +2734,7 @@ void banner() {
           device::part_name, crlf,
           "  the bus goes to a peer board running `twi_peer` (command address ",
           hex(twilink::command_addr), ") - letters b..k skip when it does not answer - or, "
-          "on the CH32V303 evaluation board, to the chip's own I2C2 (letters l..n)",
+          "where the board wires them, to the chip's own I2C2 (letters l..n)",
           crlf, "  PB1 runs at ", SysClock::pclk1_hz / 1'000'000u,
           " MHz: CTLR2.FREQ cannot state more than 60 (19.12.2)", crlf,
           "  the wire now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
@@ -2800,8 +2800,8 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
     }
 }
 
-// I2C2's vectors: letter m's host on the CH32V303, empty on every other
-// part.
+// I2C2's vectors: letter m's host on a part with I2C2, empty on every
+// other part.
 extern "C" BRIO_CH32_INTERRUPT void i2c2_ev_handler() { host2_event<>(); }
 extern "C" BRIO_CH32_INTERRUPT void i2c2_er_handler() { host2_error<>(); }
 

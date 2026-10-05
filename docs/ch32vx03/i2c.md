@@ -21,8 +21,10 @@ CH32V303 - and chapter 19 carries no class note: one block on all three.
 Driver: [brio/ch32vx03/i2c.hpp](../../brio/ch32vx03/i2c.hpp). Reference
 suite: `test_vx03_i2c`, which talks to a peer board running `twi_peer` -
 a board of another family, or one of the other series of this stratum -
-and, on the CH32V303 evaluation board, makes the chip's two controllers
-talk to each other.
+and, on a board that wires I2C2's pads to I2C1's (the CH32V303 evaluation
+board, the CH32V203C8T6 bench board), makes the chip's two controllers
+talk to each other; `bench_vx03`'s letter `i` prices the host over that
+same self-link.
 
 ## What the silicon does
 
@@ -98,6 +100,39 @@ A TxE served later than one byte time still falls back to the BTF
 order, which a target of another family takes, and a CH32V203C8T6
 target too.
 
+The CH32V203C8T6's own self-link (I2C1 the host, I2C2 the target, two
+wires and a 4.7 kOhm pull-up on each line) measured both orders again,
+one to four bytes written and a read of two, at 100 and 400 kHz, three
+runs a point:
+
+- **A target that ACKs every byte**: served from its own vector, it took
+  every written byte in BOTH orders; POLLED by the loop that waits for
+  the host (the suite's letters l and m), it LOST the last written byte
+  in every write-then-read with the START requested at BTF - the
+  CH32V303VCT6's finding, on this part too - and took every one with the
+  START requested on the TxE.
+- **A target that REFUSES the last written byte**: at BTF the host
+  answered `i2c_nack_data`, STOP alone left standing, and the next tenure
+  ran. On the TxE, the NACK arrived with the START still pending, and the
+  engine as it was answered `i2c_nack_addr` and set STOP beside the
+  standing START (CTLR1 0x301: master, both bits up) - the next tenure
+  ran here, where the CH32V006's twin of this block wedged it at 400 kHz.
+
+THE CHAPTER'S OWN ORDER IS BTF: 19.3 ends a write at EVT8_2 ("TxE=1,
+BTF=1, request to set the stop bit", figure 19-4), and 19.12.1's START
+bit, unlike its STOP bit, says nothing of a condition held to the end of
+the byte under way. The engine keeps the TxE order all the same, because
+the BTF order loses a byte to a polled CH32 target, measured twice, and
+answers the refusal instead: the phase between the request and SB is its
+own, a NACK in it is `i2c_nack_data`, and the START is withdrawn as the
+STOP is requested, in one CTLR1 store - START is a bit "the user code"
+may clear (19.12.1). Measured right after: one to four bytes, both
+speeds, the last refused - `i2c_nack_data`, CTLR1 0x201 (STOP alone),
+the next tenure running; acknowledged - every byte taken. BTF never rises
+behind a pending START on this silicon (polled from the request to SB,
+and no entry of the event vector there in a timeline), so unlike the
+STM32F4's block nothing is stored into DATAR to hold it down.
+
 ### BUSY is the wire, and it can be left standing
 
 19.12.7 defines BUSY as "SDA or SCL has a low level", cleared when a
@@ -135,6 +170,49 @@ longer than a tick goes out alone, into whatever holds the line. That
 is also why a tenure into a wire a foreign chip holds low is answered at
 once and not parked: its START leaves at the tick and loses at its first
 one bit.
+
+### What the engine takes from the chapter, and what it declines
+
+Every item that bears on a tenure's cost, measured on the CH32V203C8T6
+at 120 MHz (PB1 60 MHz) over the self-link:
+
+- **One data register, no FIFO, no byte counter, no automatic STOP**:
+  one interrupt a byte is this block's on the pump.
+- **EVT8_1 takes two bytes at once**: TxE is up within 47 cycles of
+  ADDR's clear and again of the first byte's store (the ruler's own read
+  inside that figure), so the entry that clears ADDR loads the data
+  register and the shifter itself, and requests the repeated START of a
+  one-byte index there too. USED.
+- **The data register before the START**: declined - EVT5 puts the
+  address there.
+- **The event vector is a level, and BTF stands after a write's STOP**
+  until that STOP is on the wire: a vector left on re-entered four times
+  at 100 kHz and once at 400 after every write, the thread starved
+  meanwhile (a timeline of the entries, below). ITEVTEN is the TENURE's:
+  raised by `start()`, taken down at the completion with the buffer
+  vector and the DMA requests in one CTLR2 store (`control2()`).
+- **The STOP on the last byte's TxE**: declined - no event marks a
+  controller's own STOP leaving, so the write ends at BTF (EVT8_2) and
+  the STOP's drain is the next `start()`'s: about a bit period when a
+  tenure is started at the completion - 1003 cycles after a write at 100
+  kHz, 211 at 400 - spent in the caller. A deferred START would need an
+  event this chapter has not got, or a timer and an interrupt a tenure.
+- **The receive procedures by count**: USED; the faster path that NACKs
+  and STOPs on the second-to-last RxNE is declined, its deadline (before
+  the last byte's acknowledge) being one no handler of a program
+  guarantees.
+- **The DMA rows**: a write phase of three bytes or more (two ride
+  EVT8_1) and a read phase of two or more run on the engines. THEY BUY NO
+  CPU TIME AT THIS BUS'S RATES: while a block is in flight the core may
+  not sleep (the bus matrix serves the core alone in a sleep), so a
+  255-byte write at 400 kHz keeps it awake for 473 thousand cycles where
+  the pump's 256 entries take 86 thousand and let it sleep between them -
+  the pump is this family's bulk path for I2C wherever the core has
+  nothing else to run.
+- **The START itself is slow on this silicon**: SB comes 1247 cycles
+  after START at 100 kHz and 431 at 400 (10.4 and 3.6 us, polled), the
+  largest single term of a short tenure's fixed cost after the target's
+  own service on the self-link.
 
 ### The pads are a column, the alert is not
 
@@ -400,6 +478,70 @@ measured on the pad that carries it, with no scope and no wire.
   401600 bytes moved, not one failure at either end and no byte
   mismatch.
 
+### The self-link on the CH32V203C8T6
+
+The bench board carries the two wires the CH32V303 evaluation board
+has - PB10 to PB6, PB11 to PB7 - and a 4.7 kOhm pull-up on each line, so
+`test_vx03_i2c`'s letters l, m and n run here as there (28 verdicts in
+`z`, the peer letters c to k declining by name: no peer board is on the
+bus): the probe, an absent address, an eight-byte write, reads of one to
+four and eight bytes, a write-then-read, the second address and the
+general call, the DMA host on channels 6 and 7, I2C2 as the host, and
+the target stuck mid-byte with `unstick()` reporting 4 pulses - every one
+byte-exact at 100 kHz and 400 kHz in both duty shapes.
+
+**The host above the wire: `bench_vx03`'s letter `i`**, at 120 MHz (PB1 =
+60 MHz; the app's 144 MHz has no I2C timing) with I2C2 the target SERVED
+FROM ITS OWN VECTOR, the SCL period counted on the pad by TIM4 (1200 core
+cycles at 100 kHz, 300 at 400: the stated rates exactly). `fixed` is
+wall less the wire (a START and an Sr a period, nine a byte, the STOP
+the next tenure's); `irq` and `isr` are the host's vectors alone; BEFORE
+is the engine this round started from; EVT is WCH's interrupt example
+(EXAM/I2C/I2C_7bit_Interrupt_Mode's host handler, its fixed six-byte
+tenure made a parameter, through the library) against the same target.
+At 400 kHz:
+
+| tenure | BEFORE irq, isr, fixed | now irq, isr, fixed | EVT irq, isr, fixed |
+|---|---|---|---|
+| write of 1 | 5, 711, 1787 | 3, 403, 1072 | 7, 1069, 1865 |
+| write of 2 | 6, 830, 1755 | 3, 422, 1104 | 8, 1243, 1865 |
+| write of 3 | 7, 950, 1755 | 4, 569, 1104 | - |
+| read of 1 | 3, 474, 1438 | 3, 398, 1224 | - |
+| register read 1+1 | 7, 1021, 2394 | 5, 688, 2006 | - |
+| register read 1+2 | 7, 1045, 2424 | 5, 712, 2036 | 8, 1383, 2310 |
+| register read 1+16 | 21, 3390, 2640 | 19, 2608, 2218 | 22, 4561, 2310 |
+| probe (ACK) | 2, 288, 958 | 2, 247, 794 | - |
+| write of 255, engines | 6, 783, x 1.00 | 4, 551, x 1.00 | - |
+| read of 255, engines | 3, 461, x 1.00 | 3, 417, x 1.00 | - |
+
+- **The pump's handler: 118 cycles a byte written and 131 a byte read**
+  (120 and 162 before; the EVT's 174 and 227), the stamps' own read of
+  the ruler inside each; the hardware prologue is outside the stamps. A
+  255-byte write is x 1.00 on the pump and the engines alike.
+- **Where a short tenure's fixed cost goes**, from the timeline of a
+  one-byte write at 400 kHz (every entry of the host's (H) and the
+  target's (T) vectors, cycles from the `start()` call): the START's SB
+  at 667 - the silicon's START, about a period and a half past the
+  model's one; the address's ADDR at 3563, its entry loading the byte;
+  the TARGET's ADDR at 3838, the bus stretched while the same core serves
+  it; BTF at 6651, the STOP requested and the tenure complete; the
+  target's RxNE at 6923, which the thread waits behind - the end seen at
+  7146. Of the 1072 cycles, the target - three entries, 217 cycles, and
+  the stretch its ADDR costs the wire - is about half: a target of
+  another chip would take the bus without them.
+- **What went**: the event vector's re-entries on a standing BTF (four
+  extra entries a write at 100 kHz, one at 400), the TxE entries EVT8_1
+  saves, `start()`'s read-modify-writes (264 to 140 cycles), the calls on
+  the hot path (`receive_step`, `ack`, `stop`, `clear_addr` were out of
+  line; none is now).
+- **The STOP's drain is the next tenure's**: `start()` at a completion
+  waits 1003 cycles after a write at 100 kHz and 211 at 400.
+- **The engines hold the core awake**: busy 473 thousand cycles for a
+  255-byte write at 400 kHz against the pump's 86 thousand.
+- **The longest single entry** of each host vector over the letter:
+  events 164 cycles, errors 165, the channels 125 (219, 171 and 152
+  before).
+
 ### On the CH32V303VCT6
 
 `test_vx03_i2c` at the same 96 MHz on WCH's evaluation board, in two
@@ -446,8 +588,7 @@ letters declining by name). What they measure:
   own second controller the target: with the START requested after BTF
   it took none of one, one of two, two of three and three of four
   written bytes; requested while the last byte shifts, every one - the
-  engine's order now, without a dummy byte in the data register, with
-  seven to ten event-vector entries for the whole tenure.
+  engine's order now, without a dummy byte in the data register.
 - **A target stuck mid-byte, with no foreign chip**: a read of zeros cut
   off four bit times into its first byte by taking the host through its
   reset line leaves I2C2 holding SDA low with SCL released high;
@@ -511,12 +652,17 @@ Driver gaps:
 
 Implemented, not bench-verified (each with what would measure it):
 
-- **The write-then-read's START from a CH32V203C8T6 host**, now that it
-  is requested before BTF: measured from the CH32V303VCT6 against its own
-  second controller and against a CH32V203C8T6 target; the CH32V203C8T6
-  as the host has not run the tenure shapes in this order - the suite on
-  that board against a peer, of this family or another, is what would
-  measure it.
+- **The write-then-read's START from a CH32V203C8T6 host against a chip
+  of another board.** Measured on its own self-link in both orders and
+  against a refused last byte (above); a peer board running `twi_peer` -
+  of this family or another - is what would measure it against a target
+  the core does not serve.
+- **The reworked engine on the CH32V303VCT6** (EVT8_1's two bytes, the
+  event vector the tenure's, the refusal behind a pending START): its
+  evaluation board was off the desk. The suite's letters l to n there,
+  and letter `i` of `bench_vx03`, would measure it - the V4F's handlers
+  call nothing on the hot path now, which its FPU tax makes worth a
+  number.
 - **The CH32V303VCT6 as the far end of a CH32V203C8T6.** The
   CH32V303VCT6 host against a CH32V203C8T6 target is measured (above);
   the other way round - the suite on the CH32V203C8T6, the peer on the

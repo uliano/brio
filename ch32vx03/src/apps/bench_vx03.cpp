@@ -215,6 +215,50 @@
 //                       the overrun and finishes; a receive must never see
 //                       one).
 //
+//   i  THE I2C HOST ABOVE THE WIRE on the self-link (the parts with I2C2;
+//      a part without it declines the letter by name, and the 32 KB
+//      tier's images leave it out, as they leave u): I2C1 the host on
+//      PB6/PB7, I2C2 the target at 0x3A on PB10/PB11 - wired to them on
+//      the bench board, a pull-up on each line - SERVED FROM ITS OWN TWO
+//      VECTORS (I2cClient<2>: each byte asked for comes from a pattern
+//      that restarts at every address match, and the byte its shifter
+//      wanted beyond the host's NACK is dropped by flush()). AT 120 MHz,
+//      NOT 144: CTLR2.FREQ cannot state the 72 MHz PB1 reaches at 144
+//      (RM 19.12.2), and 120 is the fastest HCLK whose PB1 it takes - the
+//      letter moves the core there, the console and the tick with it, and
+//      back at its end, every cycle it prints a 120 MHz one. Through the
+//      engineless host (the pump) and the host with DMA1 channels 6 and 7
+//      (the engines), ISR-style, the thread idling until the completion,
+//      each line the best of 8 at 100 and 400 kHz (DUTY 2):
+//        i2c.write      1, 2, 16 and 255 bytes (and 3, last)
+//        i2c.read       1, 2, 16 and 255 bytes, checked against the pattern
+//        i2c.wr         one byte written, a repeated START, 1, 2 and 16 read
+//        i2c.probe      the address alone, 0x3A (ACK) and 0x42 (NACK)
+//      irq and isr are the host's vectors' alone (I2C1's two, the two
+//      channels); busy is every meter's, the target's included; the line
+//      after each says what the TARGET's vectors took a tenure - the
+//      instrument's own share of the wall, the same core serving both
+//      ends. With an engine running the core may not sleep (this family's
+//      bus matrix serves the core alone in a sleep): busy then reads the
+//      idle loop's spin. THE WIRE is the tenure's own time at the SCL
+//      period MEASURED on the pad: TIM4's channel 1 is SCL's pad PB6, and
+//      in external clock mode 1 its count is SCL's rising edges, read
+//      twice inside a 255-byte read over 240 bytes. A START and each
+//      repeated START count a period, the address and each byte nine; the
+//      STOP is not counted (the engine completes when it REQUESTS it). The
+//      line after each says wall minus that wire - THE FIXED COST - and
+//      what start() took on a quiet bus. Then, per speed:
+//        per byte       the pump's handler cycles and entries per byte
+//        i2c.stop       start() called the moment a write, a read and a
+//                       register read completed, as an arbiter's dispatch
+//                       calls the next tenure: the last STOP's drain
+//        the timeline   a write of one byte and a register read of two,
+//                       every entry of the host's (H, E) and the target's
+//                       (T) vectors stamped from the start() call with
+//                       STAR1 as it found it - where the fixed cost goes
+//      and the longest single entry of each host vector, watched in a
+//      pass of its own.
+//
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = rmpt,de
 // build: monitor_speed = 115200
@@ -229,6 +273,7 @@
 #include "ch32vx03/delay.hpp"
 #include "ch32vx03/device.hpp"
 #include "ch32vx03/dma.hpp"
+#include "ch32vx03/i2c.hpp"
 #include "ch32vx03/pfic.hpp"
 #include "ch32vx03/platform.hpp"
 #include "ch32vx03/spi.hpp"
@@ -1576,6 +1621,511 @@ void tu_uart() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// i - the I2C host above the wire, on the self-link
+// =============================================================================
+
+/// THE RATE LETTER i RUNS AT. CTLR2.FREQ states PB1 in whole megahertz
+/// and RM 19.12.2 stops it at 60, and this app's 144 MHz puts PB1 at 72:
+/// no I2C timing exists there at all. 120 MHz is the fastest HCLK whose
+/// PB1 (60 MHz through the /2) the chapter takes - both speeds exact
+/// (CCR 300 and 50) - so the letter takes the core there, the console and
+/// the tick re-initialized at it, and back to 144 at its end. The ruler
+/// (the STK's composed count) reads the reload it runs at, so its cycles
+/// are 120 MHz ones inside the letter and every line says so.
+using I2cClock = Clock<ClockSource::pll, 120'000'000>;
+constexpr I2cClock i2c_clock;
+
+Meter i2c_meter;        ///< I2C1's two vectors: the host
+Meter i2c_dma_meter;    ///< DMA1 channels 6 and 7 under letter i: the host's engines
+Meter i2c_peer_meter;   ///< I2C2's two vectors: the target, the instrument
+/// Which host I2C1's vectors serve: 1 the pump, 2 the engines, 0 letter i
+/// is not running (the two channels are letter u's then).
+volatile uint8_t i2c_owner = 0;
+volatile bool i2c_done = false;
+/// The longest single entry of each of the host's vectors over the
+/// letter (R5's figure), cycles of the body between two reads of its own.
+uint32_t i2c_ev_max = 0;
+uint32_t i2c_er_max = 0;
+uint32_t i2c_dma_max = 0;
+/// Watched in a pass of its own: its two extra ruler reads are inside
+/// the meters' stamps, and every other line reads the bodies without them.
+volatile bool i2c_watching = false;
+[[gnu::always_inline]] inline void i2c_longest(uint32_t& max, uint32_t t0) {
+    const uint32_t d = Ruler::now() - t0;
+    if (d > max) {
+        max = d;
+    }
+}
+/// THE TIMELINE of one tenure: every entry of the host's and the
+/// target's vectors stamped against the start() call, with STAR1 as the
+/// entry found it - where a fixed cost goes, entry by entry.
+constexpr uint8_t i2c_trace_depth = 24;
+volatile bool i2c_tracing = false;
+uint32_t i2c_trace_base = 0;
+volatile uint8_t i2c_trace_n = 0;
+uint32_t i2c_trace_at[i2c_trace_depth];
+uint16_t i2c_trace_s1[i2c_trace_depth];
+char i2c_trace_who[i2c_trace_depth];
+[[gnu::always_inline]] inline void i2c_trace(char who, uint32_t t0, uint16_t s1) {
+    if (i2c_tracing && i2c_trace_n < i2c_trace_depth) {
+        i2c_trace_at[i2c_trace_n] = t0 - i2c_trace_base;
+        i2c_trace_s1[i2c_trace_n] = s1;
+        i2c_trace_who[i2c_trace_n] = who;
+        i2c_trace_n = static_cast<uint8_t>(i2c_trace_n + 1u);
+    }
+}
+alignas(4) uint8_t i2c_out[256];
+alignas(4) uint8_t i2c_in[256];
+alignas(4) uint8_t i2c_src[256];    ///< what the target transmits
+alignas(4) uint8_t i2c_sink[256];   ///< what the target received
+
+BenchCounters i2c_counters() {
+    return bench_counters<Plat>(tick_meter, usart_meter, i2c_meter, i2c_dma_meter, i2c_peer_meter);
+}
+
+constexpr uint8_t i2c_target = 0x3A;   ///< I2C2's own address on the self-link
+constexpr uint8_t i2c_nobody = 0x42;
+
+struct I2cOp {
+    const char* name;
+    uint8_t addr;
+    uint8_t tx;
+    uint8_t rx;
+};
+constexpr I2cOp i2c_ops[] = {
+    {"i2c.write", i2c_target, 1, 0},   {"i2c.write", i2c_target, 2, 0},
+    {"i2c.write", i2c_target, 16, 0},  {"i2c.write", i2c_target, 255, 0},
+    {"i2c.read", i2c_target, 0, 1},    {"i2c.read", i2c_target, 0, 2},
+    {"i2c.read", i2c_target, 0, 16},   {"i2c.read", i2c_target, 0, 255},
+    {"i2c.wr", i2c_target, 1, 1},      {"i2c.wr", i2c_target, 1, 2},
+    {"i2c.wr", i2c_target, 1, 16},     {"i2c.probe", i2c_target, 0, 0},
+    {"i2c.probe", i2c_nobody, 0, 0},
+    {"i2c.write", i2c_target, 3, 0},   // the third short write the polled-verb question asks for
+};
+constexpr uint8_t i2c_row_w16 = 2;
+constexpr uint8_t i2c_row_w255 = 3;
+constexpr uint8_t i2c_row_r16 = 6;
+constexpr uint8_t i2c_row_r255 = 7;
+
+struct I2cRun {
+    BenchSample s;
+    uint32_t start;
+    uint8_t status;
+};
+
+const char* i2c_status_name(uint8_t st) {
+    switch (st) {
+        case i2c_ok: return "ok";
+        case i2c_nack_addr: return "nack_addr";
+        case i2c_nack_data: return "nack_data";
+        case i2c_arb_lost: return "arb_lost";
+        case i2c_bus_error: return "bus_error";
+        case 0xFF: return "NEVER ANSWERED";
+        default: return "other";
+    }
+}
+
+/// The bus's own time for a tenure at an SCL period of `t` cycles: the
+/// START and each repeated START a period, the address and every byte
+/// nine. The STOP is not counted: the engine completes when it REQUESTS
+/// it, and what its drain costs the next tenure is its own line.
+uint32_t i2c_wire_cycles(uint32_t t, uint8_t tx, uint8_t rx) {
+    uint32_t periods = 1u + 9u + 9u * tx;
+    if (rx != 0u) {
+        if (tx != 0u) {
+            periods += 1u + 9u;
+        }
+        periods += 9u * rx;
+    }
+    return t * periods;
+}
+
+void i2c_idle_until_done() {
+    const uint32_t t0 = Ticker::ticks();
+    while (!i2c_done && Ticker::ticks() - t0 < 1000u) {
+        Plat::CriticalSection cs;
+        if (!i2c_done) {
+            Plat::idle();
+        }
+    }
+    // What the handlers wrote is read from memory after this: the meters
+    // and the timeline are plain words a handler stores.
+    asm volatile("" ::: "memory");
+}
+
+/// Everything that names I2C2 hangs on `on`, so a part without it forms
+/// none of it (the CH32V203C6's image declines the letter by name).
+template <bool on>
+struct I2cLetter {
+    using Res = I2c<on ? 1 : 1>;
+    using Pump = I2cHost<on ? 1 : 1>;
+    using Engined = I2cHost<on ? 1 : 1, i2c_default_pins<1>, DmaTxEngine<1, 6>, DmaRxEngine<1, 7>>;
+    using Target = I2cClient<on ? 2 : 2>;
+    using Scl = Pin<'B', on ? 6 : 6>;
+    using EdgeTim = Tim<on ? 4 : 4>;
+
+    static inline uint8_t pos = 0;
+
+    /// The target, served from its own two vectors: every byte it is
+    /// asked for comes from i2c_src, restarting at every address match,
+    /// and the byte its shifter wanted beyond the host's NACK is dropped
+    /// by flush() (docs/ch32vx03/i2c.md).
+    [[gnu::always_inline]] static void target_event() {
+        switch (Target::service()) {
+            case I2cClientEvent::addressed: pos = 0; break;
+            case I2cClientEvent::byte_received: i2c_sink[pos++] = Target::take(); break;
+            case I2cClientEvent::byte_wanted: Target::give(i2c_src[pos++]); break;
+            default: break;
+        }
+    }
+    [[gnu::always_inline]] static void target_error() {
+        if (Target::error_service() == I2cClientEvent::nacked) {
+            (void)Target::flush();
+        }
+    }
+
+    template <typename Host>
+    static typename Host::Request request(uint8_t addr, uint8_t tx, uint8_t rx, I2cSpeed speed) {
+        typename Host::Request r{};
+        r.addr = addr;
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(i2c_out));
+        r.tx_len = tx;
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_in));
+        r.rx_len = rx;
+        r.speed = speed;
+        return r;
+    }
+
+    static void quiet() {
+        const uint32_t t0 = Ticker::ticks();
+        while ((Res::stopping() || Res::busy()) && Ticker::ticks() - t0 < 10u) {
+        }
+    }
+
+    template <typename Host>
+    static void take(bool engines) {
+        i2c_owner = 0;
+        (void)Host::init(i2c_clock);
+        i2c_owner = engines ? 2u : 1u;
+    }
+
+    template <typename Host>
+    static I2cRun once(const typename Host::Request& r) {
+        quiet();
+        const BenchCounters c0 = i2c_counters();
+        const uint32_t q0 = i2c_meter.count() + i2c_dma_meter.count();
+        const uint32_t k0 = i2c_meter.cycles() + i2c_dma_meter.cycles();
+        i2c_done = false;
+        Stopwatch<Ruler> sw;
+        sw.start();
+        const bool sync = Host::start(r);
+        const uint32_t st = sw.elapsed();
+        if (!sync) {
+            i2c_idle_until_done();
+        }
+        const uint32_t w = sw.elapsed();
+        const BenchCounters c1 = i2c_counters();
+        BenchSample s = bench_sample(w, c0, c1);
+        s.irq = i2c_meter.count() + i2c_dma_meter.count() - q0;
+        s.isr = i2c_meter.cycles() + i2c_dma_meter.cycles() - k0;
+        return {s, st, (sync || i2c_done) ? Host::status() : static_cast<uint8_t>(0xFF)};
+    }
+
+    /// The SCL period on the wire: TIM4's channel 1 is PB6, SCL's own pad,
+    /// and in external clock mode 1 the counter IS the number of SCL
+    /// rising edges (test_vx03_i2c's instrument). Read twice inside a
+    /// 255-byte read through the engines, after the address and two data
+    /// bytes and 240 bytes later: every clock of those bytes, the
+    /// acknowledges and whatever the target stretched included.
+    static uint32_t scl_period(I2cSpeed speed) {
+        take<Engined>(true);
+        EdgeTim::init();
+        if (!EdgeTim::remap(0) || !EdgeTim::configure({.prescaler = 0, .period = 0xFFFF})) {
+            return 0;
+        }
+        if (!EdgeTim::capture_channel(0, {.select = TimChannelSelect::direct,
+                                          .polarity = TimCapturePolarity::rising,
+                                          .prescaler = TimCapturePrescaler::every,
+                                          .filter = 0,
+                                          .enable = true}) ||
+            !EdgeTim::slave({.mode = TimSlaveMode::external_clock1, .trigger = TimTrigger::ti1})) {
+            return 0;
+        }
+        EdgeTim::set_count(0);
+        EdgeTim::enable(true);
+        const auto r = request<Engined>(i2c_target, 0, 255, speed);
+        quiet();
+        i2c_done = false;
+        constexpr uint32_t first = 9u * 3u;
+        constexpr uint32_t last = first + 9u * 240u;
+        uint32_t t1 = 0, c1 = 0, t2 = 0, c2 = 0;
+        const uint32_t t0 = Ruler::now();
+        (void)Engined::start(r);
+        while (!i2c_done && Ruler::now() - t0 < I2cClock::hz / 10u) {
+            const uint32_t c = EdgeTim::count();
+            const uint32_t t = Ruler::now();
+            if (c1 == 0u && c >= first) {
+                c1 = c;
+                t1 = t;
+            } else if (c1 != 0u && c >= last) {
+                c2 = c;
+                t2 = t;
+                break;
+            }
+        }
+        i2c_idle_until_done();
+        EdgeTim::enable(false);
+        EdgeTim::release();
+        return c2 > c1 ? (t2 - t1 + (c2 - c1) / 2u) / (c2 - c1) : 0u;
+    }
+
+    template <typename Host>
+    static void ops(const char* suffix, I2cSpeed speed, uint32_t t, bool engines) {
+        take<Host>(engines);
+        BenchSample rows[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = {};
+        uint8_t row = 0;
+        uint8_t mismatched = 0;
+        for (const I2cOp& op : i2c_ops) {
+            const auto r = request<Host>(op.addr, op.tx, op.rx, speed);
+            I2cRun best{{UINT32_MAX, 0, 0, 0}, 0, 0};
+            const uint8_t want = op.addr == i2c_nobody ? i2c_nack_addr : i2c_ok;
+            uint8_t worst = want;
+            asm volatile("" ::: "memory");
+            const uint32_t p0 = i2c_peer_meter.count();
+            const uint32_t pk0 = i2c_peer_meter.cycles();
+            for (uint8_t run = 0; run < 8u; ++run) {
+                for (uint16_t i = 0; i < op.rx; ++i) {
+                    i2c_in[i] = 0;
+                }
+                const I2cRun one = once<Host>(r);
+                if (one.status != want) {
+                    worst = one.status;
+                }
+                for (uint16_t i = 0; i < op.rx; ++i) {
+                    if (i2c_in[i] != i2c_src[i]) {
+                        ++mismatched;
+                        break;
+                    }
+                }
+                if (one.s.wall < best.s.wall) {
+                    best = one;
+                }
+            }
+            const uint32_t wire = i2c_wire_cycles(t, op.tx, op.rx);
+            const uint32_t n = static_cast<uint32_t>(op.tx) + op.rx;
+            asm volatile("" ::: "memory");
+            const uint32_t peer_entries = (i2c_peer_meter.count() - p0 + 4u) / 8u;
+            const uint32_t peer_cycles = (i2c_peer_meter.cycles() - pk0 + 4u) / 8u;
+            char name[24] = {};
+            uint8_t k = 0;
+            for (const char* c = op.name; *c != '\0' && k < 15u; ++c) {
+                name[k++] = *c;
+            }
+            for (const char* c = suffix; *c != '\0' && k < 23u; ++c) {
+                name[k++] = *c;
+            }
+            bench_line(serial, name, n, best.s, I2cClock::hz,
+                       n == 0u ? 0u : static_cast<uint32_t>(static_cast<uint64_t>(n) * I2cClock::hz / wire));
+            print(serial, "  ", op.addr == i2c_nobody ? "absent address, " : "", "fixed=",
+                  static_cast<int32_t>(best.s.wall - wire), " start=", best.start, " status=",
+                  i2c_status_name(worst), "; the target ", peer_entries, " entries and ", peer_cycles,
+                  " cycles a tenure", crlf);
+            rows[row++] = best.s;
+            console_drain();
+        }
+        if (!engines) {
+            print(serial, "  per byte: written ",
+                  (rows[i2c_row_w255].isr - rows[i2c_row_w16].isr) / 239u, " cycles of handler and ",
+                  rows[i2c_row_w255].irq - rows[i2c_row_w16].irq, " interrupts in 239; read ",
+                  (rows[i2c_row_r255].isr - rows[i2c_row_r16].isr) / 239u, " cycles and ",
+                  rows[i2c_row_r255].irq - rows[i2c_row_r16].irq, " interrupts in 239", crlf);
+        }
+        if (mismatched != 0u) {
+            print(serial, "  READ DATA MISMATCHED in ", mismatched, " runs", crlf);
+        }
+    }
+
+    /// One tenure traced: the host's and the target's entries in order,
+    /// each with its time from the start() call and STAR1 as found.
+    static void trace(const char* what, uint8_t tx, uint8_t rx, I2cSpeed speed) {
+        take<Pump>(false);
+        const auto r = request<Pump>(i2c_target, tx, rx, speed);
+        quiet();
+        i2c_trace_n = 0;
+        i2c_done = false;
+        i2c_tracing = true;
+        i2c_trace_base = Ruler::now();
+        (void)Pump::start(r);
+        const uint32_t ret = Ruler::now() - i2c_trace_base;
+        i2c_idle_until_done();
+        const uint32_t end = Ruler::now() - i2c_trace_base;
+        i2c_tracing = false;
+        print(serial, "  the timeline of a ", what, " at ", speed == I2cSpeed::fast_400k ? "400" : "100",
+              " kHz: start() returned at ", ret, ", the thread saw the end at ", end, crlf, "   ");
+        for (uint8_t i = 0; i < i2c_trace_n; ++i) {
+            print(serial, " ", i2c_trace_who[i], "@", i2c_trace_at[i], "(", hex(i2c_trace_s1[i]), ")");
+        }
+        print(serial, crlf);
+        console_drain();
+    }
+
+    /// Every operation once with the host vectors' longest entry watched
+    /// (R5): a pass of its own, so no other line carries the watch.
+    template <typename Host>
+    static void watch(I2cSpeed speed, bool engines) {
+        take<Host>(engines);
+        i2c_watching = true;
+        for (const I2cOp& op : i2c_ops) {
+            (void)once<Host>(request<Host>(op.addr, op.tx, op.rx, speed));
+        }
+        i2c_watching = false;
+    }
+
+    static void stop_drain(I2cSpeed speed) {
+        take<Pump>(false);
+        const auto next = request<Pump>(i2c_target, 0, 0, speed);
+        const I2cOp firsts[] = {{"write", i2c_target, 2, 0}, {"read", i2c_target, 0, 2},
+                                {"wr", i2c_target, 1, 1}};
+        for (const I2cOp& op : firsts) {
+            const auto r = request<Pump>(op.addr, op.tx, op.rx, speed);
+            uint32_t best = UINT32_MAX;
+            uint32_t calm = UINT32_MAX;
+            for (uint8_t run = 0; run < 8u; ++run) {
+                quiet();
+                i2c_done = false;
+                (void)Pump::start(r);
+                i2c_idle_until_done();
+                i2c_done = false;
+                Stopwatch<Ruler> sw;
+                sw.start();
+                (void)Pump::start(next);
+                const uint32_t behind = sw.elapsed();
+                i2c_idle_until_done();
+                const uint32_t q = once<Pump>(next).start;
+                best = behind < best ? behind : best;
+                calm = q < calm ? q : calm;
+            }
+            print(serial, "bench i2c.stop after a ", op.name, " n=", static_cast<uint32_t>(op.tx) + op.rx,
+                  ": start() ", best, " cycles right behind its completion, ", calm,
+                  " on a quiet bus - the drain ", best - calm, " cycles", crlf);
+            console_drain();
+        }
+    }
+
+    static void run() {
+        for (uint16_t i = 0; i < 256u; ++i) {
+            i2c_out[i] = static_cast<uint8_t>(0xA0u + i);
+            i2c_src[i] = static_cast<uint8_t>(0x5Bu * i + 7u);
+        }
+        // The core to 120 MHz: the console drained first, then re-made at
+        // the new rate, the tick likewise.
+        console_drain();
+        const bool up = I2cClock::init();
+        (void)Serial::init(i2c_clock, console_baud);
+        (void)Ticker::init(i2c_clock);
+        print(serial, "  the core at 120 MHz (", up ? "PLL" : "FAILED",
+              "): PB1 60 MHz, the most CTLR2.FREQ states; every cycle below is a 120 MHz one", crlf);
+        const bool target_up = Target::init(i2c_clock, {.own = i2c_target}, {.interrupts = true});
+        print(serial, "  I2C1 the host on PB6/PB7, I2C2 the target at ", hex(i2c_target),
+              " on PB10/PB11 (", target_up ? "up" : "FAILED", "), served from its own vectors", crlf);
+        i2c_ev_max = 0;
+        i2c_er_max = 0;
+        i2c_dma_max = 0;
+        for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+            const uint32_t t = scl_period(speed);
+            print(serial, "  SCL at ", speed == I2cSpeed::fast_400k ? "400" : "100", " kHz: CKCFGR ",
+                  hex(Engined::timing_of(speed).ckcfgr), " states ", Engined::scl_hz(speed),
+                  " Hz, the wire ", t, " cycles a period = ", t != 0u ? I2cClock::hz / t : 0u, " Hz",
+                  crlf);
+            if (t == 0u) {
+                continue;
+            }
+            console_drain();
+            ops<Pump>("", speed, t, false);
+            ops<Engined>(".dma", speed, t, true);
+            stop_drain(speed);
+            watch<Pump>(speed, false);
+            watch<Engined>(speed, true);
+            trace("write of 1", 1, 0, speed);
+            trace("register read of 1+2", 1, 2, speed);
+        }
+        print(serial, "  the longest entry of each host vector: events ", i2c_ev_max, " cycles, errors ",
+              i2c_er_max, ", the channels ", i2c_dma_max, crlf);
+        console_drain();
+        i2c_owner = 0;
+        Pump::release();
+        Target::release();
+        // Back to the app's 144 MHz.
+        const bool back = SysClock::init();
+        (void)Serial::init(clock, console_baud);
+        (void)Ticker::init(clock);
+        print(serial, "  the core back at 144 MHz (", back ? "PLL" : "FAILED", ")", crlf);
+    }
+};
+
+constexpr bool i2c_self_link_part = device::i2c_count >= 2u;
+
+template <bool on = i2c_self_link_part>
+void ti_i2c() {
+    if constexpr (on) {
+        I2cLetter<on>::run();
+    } else {
+        print(serial, "  letter i declined on this part: no I2C2, so no self-link to measure the "
+                      "host against",
+              crlf);
+    }
+    bench.verdict("ran", true);
+}
+
+/// The vectors' bodies, empty on a part without I2C2.
+template <bool on = i2c_self_link_part>
+[[gnu::always_inline]] inline void i2c_host_event() {
+    if constexpr (on) {
+        using L = I2cLetter<on>;
+        if (i2c_owner == 2u ? L::Engined::isr() : L::Pump::isr()) {
+            i2c_done = true;
+        }
+    }
+}
+template <bool on = i2c_self_link_part>
+[[gnu::always_inline]] inline void i2c_host_error() {
+    if constexpr (on) {
+        using L = I2cLetter<on>;
+        if (i2c_owner == 2u ? L::Engined::error_isr() : L::Pump::error_isr()) {
+            i2c_done = true;
+        }
+    }
+}
+template <bool on = i2c_self_link_part>
+[[gnu::always_inline]] inline void i2c_host_dma() {
+    if constexpr (on) {
+        if (I2cLetter<on>::Engined::dma_isr()) {
+            i2c_done = true;
+        }
+    }
+}
+template <bool on = i2c_self_link_part>
+[[gnu::always_inline]] inline void i2c_target_event() {
+    if constexpr (on) {
+        I2cLetter<on>::target_event();
+    }
+}
+template <bool on = i2c_self_link_part>
+[[gnu::always_inline]] inline uint16_t i2c_target_status() {
+    if constexpr (on) {
+        return I2c<on ? 2 : 2>::status1();
+    } else {
+        return 0;
+    }
+}
+template <bool on = i2c_self_link_part>
+[[gnu::always_inline]] inline void i2c_target_error() {
+    if constexpr (on) {
+        I2cLetter<on>::target_error();
+    }
+}
+
 void banner() {
     print(serial, crlf, "bench_vx03 - ", device::part_name,
           " (clk=144 MHz PLL, ruler=STK cycles at 144 MHz, tick=STK 1000 Hz, console=USART1 ",
@@ -1613,6 +2163,16 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    if (i2c_owner == 2u) {
+        i2c_dma_meter.enter();
+        const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+        i2c_host_dma();
+        if (i2c_watching) {
+            i2c_longest(i2c_dma_max, t0);
+        }
+        i2c_dma_meter.leave();
+        return;
+    }
     if (loop_owner >= 2u) {
         loop_dma_meter.enter();
         if (loop_owner == 2u) {
@@ -1631,6 +2191,16 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
 /// USART2's receive channel under letter u: the circular ring's laps and
 /// their half and full marks, whose true is the edge as the USART's.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    if (i2c_owner == 2u) {
+        i2c_dma_meter.enter();
+        const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+        i2c_host_dma();
+        if (i2c_watching) {
+            i2c_longest(i2c_dma_max, t0);
+        }
+        i2c_dma_meter.leave();
+        return;
+    }
     loop_dma_meter.enter();
     if (loop_owner == 3u && LoopDma::dma_isr()) {
         loop_edge_at = Ruler::now();
@@ -1696,6 +2266,45 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     spi_meter.leave();
 }
 
+/// Letter i: I2C1 the host, I2C2 the target on the self-link.
+extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+    i2c_meter.enter();
+    const uint32_t t0 = (i2c_watching || i2c_tracing) ? Ruler::now() : 0u;
+    if (i2c_tracing) {
+        i2c_trace('H', t0, I2c<1>::status1());
+    }
+    i2c_host_event();
+    if (i2c_watching) {
+        i2c_longest(i2c_ev_max, t0);
+    }
+    i2c_meter.leave();
+}
+extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+    i2c_meter.enter();
+    const uint32_t t0 = (i2c_watching || i2c_tracing) ? Ruler::now() : 0u;
+    if (i2c_tracing) {
+        i2c_trace('E', t0, I2c<1>::status1());
+    }
+    i2c_host_error();
+    if (i2c_watching) {
+        i2c_longest(i2c_er_max, t0);
+    }
+    i2c_meter.leave();
+}
+extern "C" BRIO_CH32_INTERRUPT void i2c2_ev_handler() {
+    i2c_peer_meter.enter();
+    if (i2c_tracing) {
+        i2c_trace('T', Ruler::now(), i2c_target_status());
+    }
+    i2c_target_event();
+    i2c_peer_meter.leave();
+}
+extern "C" BRIO_CH32_INTERRUPT void i2c2_er_handler() {
+    i2c_peer_meter.enter();
+    i2c_target_error();
+    i2c_peer_meter.leave();
+}
+
 int main() {
     const bool clock_ok = SysClock::init();            // HSI x18 -> 144 MHz
     const bool serial_ok = Serial::init(clock, console_baud);
@@ -1710,6 +2319,8 @@ int main() {
     bench.letter('e', "the SPI host above the wire: polled, pumped, a request's price, the overrun oracle",
                  te_spi);
     bench.letter('u', "the serial transport on the crossed pair: transmit, receive, the edge", tu_uart);
+    bench.letter('i', "the I2C host above the wire on the self-link: tenures, their fixed cost, the STOP's drain",
+                 ti_i2c<>);
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a port that failed to come up would never return.
