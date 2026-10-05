@@ -75,7 +75,8 @@ The constants:
 | Member | Why it exists |
 |--------|---------------|
 | `instances` | how many of the block this family carries: the resource refuses a number past it |
-| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the PL011 and therefore the family's fact, not this file's |
+| `fifo_depth` | the two FIFOs' depth, which is a SYNTHESIS parameter of the PL011 and therefore the family's fact, not this file's; the receive level the transport programs, half of it, is what an entry for the level reads blind |
+| `copy_crossover` | the run length from which `write_bulk()` copies into the transmit ring with the runtime's `memcpy` (its two ends aligned alike) rather than its byte loop: a fact of the core and of the memory the code runs from, measured by the family's bench app (letter `u`) |
 
 The per-instance facts, each a template on the instance number so the
 answer is a compile-time constant - a register address, a line, a
@@ -180,6 +181,54 @@ order they were written. The trigger level is the transport's: an
 eighth of the FIFO for the transmitter (so each entry refills
 seven-eighths of it), half for the receiver.
 
+`tx_idle()` is the wire's: the ring empty, no transmit block in flight,
+and `UARTFR.BUSY` clear - which the block holds set "until the complete
+byte, including all the stop bits, has been sent". Proven on the pad on
+both families (their serial and DMA suites' letter `t`): `tx_idle()`
+turns true within a microsecond of the last stop bit's end, timed off
+the TX pad's own start bits.
+
+## The receive side
+
+The receive interrupt stands while the FIFO holds its trigger level or
+more, and the receive TIME-OUT rises when the FIFO holds a character and
+the line has been silent for 32 bit periods; both clear as the FIFO is
+read. The interrupt receiver is built on exactly that: it drains the
+FIFO whole on either, and AN ENTRY FOR THE LEVEL READS THE LEVEL BLIND -
+half the FIFO's depth with no `UARTFR` read between, the handler being
+the FIFO's one reader - because on this block a character's cost is its
+peripheral loads, and the flag test made two of each one. One entry per
+sixteen characters plus the time-out's, the tail of a burst delivered 32
+bit periods - 3.2 frames - after its last stop bit: the block's own
+time-out, which nothing programs.
+
+UNDER A RECEIVE ENGINE NO VECTOR ENDS A BURST. The time-out needs a
+character waiting in the FIFO, and the channel's single request moves
+each one as it lands: measured on both families, 17 characters taken by
+the engine and ten frames of silence after them leave `UARTRIS.RTRIS`
+clear and the FIFO empty. A run that FILLS is published and re-armed by
+its completion, whose `dma_isr()` answers the ring's edge - so a stream
+that fills runs is told once a run - and a run still filling is read
+off the engine's count by `harvest()`, the owner's verb. The engine
+moves bytes for a stream an owner reads by count or by its own pace;
+the burst path with an edge is the interrupt receiver, at one entry a
+level. Neither a circular shape (the RP2350's endless transfer count
+completes never, so it would take even the completion away) nor a chain
+of two channels (half-ring marks, no burst end) would give the engine a
+burst's end, and both are declined for that reason.
+
+THE ERRORS UNDER AN ENGINE are the vector's: the channel moves an
+entry's byte and not its flags (bits 8..11 of `UARTDR`), and `UARTRSR`
+speaks for the last character READ - the channel's - so the transport
+arms the four error interrupts with a receive engine and counts each
+received error in `isr()`, clearing it through `UARTICR`. No clear
+reads `UARTDR`, so none takes a byte the channel was owed; what a byte
+beat cannot do is drop the errored entry's own byte - a break arrives
+as a zero among the data. Measured on both families (their DMA suites'
+letter `v`, 64 slots of which four a break): through the interrupt
+receiver 60 bytes intact and in order, four BE; through the engine all
+60 in order with the four zeros among them, four BE.
+
 ## The engine slots
 
 With a family's DMA engine in the transmit slot the handler never
@@ -229,7 +278,9 @@ The host suite plays the wire and the core over that FIFO: a print of
 first bytes straight in and then one entry per 28 - whether the caller
 spins twice or a thousand times as fast as the wire, and none at all
 while the wire keeps up with it; every byte reaches the wire in order,
-and none is written into a full FIFO.
+and none is written into a full FIFO; and a receive run's completion
+answers the ring's empty -> non-empty edge from `dma_isr()`, a transmit
+completion none.
 
 What the fake does NOT model is the receive side: nothing fills it, so
 the receive path has nothing to read there and stays the bench's to
@@ -254,3 +305,10 @@ family's own document.
   them to a pad.
 - The stick-parity bit (`UARTLCR_H`'s SPS): born with a first protocol
   that uses it - a nine-bit address mark is the usual one.
+- An errored entry's byte under a receive engine: the channel's byte
+  beat moves a framed, parity-failed or break entry's data byte into the
+  ring with the good ones (its flags are counted, its byte is not
+  dropped). A half-word beat would carry each entry's flags with its
+  byte, into a ring of 16-bit entries the transport has not got - born
+  with a program that needs the errored bytes out of the stream under
+  an engine; the interrupt receiver drops them today.

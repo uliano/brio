@@ -77,18 +77,23 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   after a drain), `min_hz_for`, `can_baud`, `actual_baud(hz)`,
   `release()`; the counters `rx_overruns` (ring), `frame_errors`,
   `parity_errors`, `break_errors` (a break entry carries FE too, and
-  both are counted), `hw_overruns` (one per overrun event, from
-  UARTRSR), `clear_errors`. The two engine slots take `dma.hpp`'s
+  both are counted), `hw_overruns` (one per overrun event: UARTRSR's
+  sticky OE on the interrupt receiver, the OE interrupt under an
+  engine), `clear_errors`. The two engine slots take `dma.hpp`'s
   `DmaTxEngine` / `DmaRxEngine` ([dma.md](dma.md)): with a transmit
   engine the ring's runs leave as DMA blocks and `dma_isr()` (the
   line's ISR body) releases each and starts the next - a block start
   masks the engine's claim alone (six instructions, about 10 cycles,
   counted in the listing) and programs the channel with the mask down,
   two stores to the DMA block a block; with a receive
-  engine the run is filled straight from UARTDR, `harvest()`
-  publishes what TRANS_COUNT says has landed and re-arms, the
-  completion re-arms from the line, and UARTRSR's sticky errors are
-  read per harvest (the engine moves bytes, not the entries' flags);
+  engine the run is filled straight from UARTDR, a run that fills is
+  published and re-armed by its completion on the line - `dma_isr()`
+  answering the ring's edge - and a run still filling by `harvest()`,
+  which publishes what TRANS_COUNT says has landed and re-arms; the
+  error interrupts count each received error (the engine moves an
+  entry's byte, a break's zero included, and not its flags), and no
+  vector ends a burst under an engine
+  ([../pl011/README.md](../pl011/README.md), "The receive side");
   `dma_faults()` counts the blocks abandoned after a bus error.
 
 HOW THE TRANSMITTER STARTS, because the interrupt is an edge that
@@ -191,6 +196,39 @@ extern "C" void isr_uart0() {
   interrupts at x 0.99 of the wire and 256 bytes 31 (`bench_rp2040`
   letter p).
 
+- THE RECEIVE SIDE AND ITS EDGE (`bench_rp2040` letter u, UART1 under
+  LBE at 125 MHz, the meter's stamps inside `isr`): 256 bytes through the
+  interrupt receiver in 16 level entries and the time-out's, 12693
+  cycles at 115200 and 11101 at 1 Mbaud - 43 a byte - where the level
+  read with a flag test before every character took 16510 and 15500 (60
+  a byte); the receive engine 390 cycles for the same 256, two
+  completions. The edge from the burst's last stop bit (BUSY falling):
+  the time-out's 3.2 frames at 115200, and at 1 Mbaud 1.6 to 2.7 frames
+  from run to run (measured, not dissected); under the engine
+  `UARTRIS.RTRIS` never rose (17 bytes and ten frames of silence: the
+  FIFO empty, every byte moved), so the engine's burst edge is its
+  owner's poll - 2.4 frames at 115200 to 43 at 1 Mbaud on a 1 ms tick.
+- THE TRANSMIT SIDE through the same letter: 4096 bytes in 145 refills
+  at 25 cycles a byte (27 before), wire-bound (x 1.00) to UARTCLK / 16 =
+  7.8125 Mbaud; through the transmit engine in 40 to 47 blocks, about 3
+  cycles a byte, wire-bound too.
+- `tx_idle()` ON THE PAD (`test_rp2040_serial` letter t, eight frames of
+  0xFF at 9600 on GP4 with the loop-back off, the pad read through SIO):
+  true 0 us from the last stop bit's end, a bit being 104 us; under the
+  transmit engine (`test_rp2040_dma` letter t) the same.
+- THE COPY INTO THE RING: the byte loop 2 cycles and 9 a byte, the
+  runtime's `memcpy` about 54 and under one a byte with the two ends
+  aligned alike - the loop ahead at 8 bytes, `memcpy` at 12, the
+  family's `copy_crossover`.
+- AGAINST THE VENDOR: the pico-sdk 2.3.1 has no interrupt or DMA
+  receive, only `uart_read_blocking` and `uart_write_blocking`, POLLED
+  loops (a flag test and a data access a byte), run on the same board
+  and loop in a scratch program: 58 cycles a byte reading characters
+  already in the FIFO and 53 writing into an empty one, every cycle of
+  the wire's time the CPU's. This transport's interrupt receiver costs
+  43 a byte and its transmitter 25, and the core is free between
+  entries.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -208,11 +246,11 @@ Implemented but not bench-verified, each with what would measure it:
 
 - The bridge's ceiling board to host (the suite measures host to
   board): a `source` leg of the same host letter.
-- The receive timeout at the other rates of the ladder: the suite
-  measures it at 115200 and sees its cost at 120; a timed lone byte
-  per rung.
+- The receive timeout at the rates of the ladder other than 115200 and
+  1 Mbaud (letter u above) and 120 baud (the suite's cost at the
+  floor): a timed lone byte per rung.
 - `rebase` and `set_baud` under a running port: the suite.
-- The engined block start with its claim under the mask and the
-  channel bound once (two stores a block, [dma.md](dma.md)):
-  `test_rp2040_dma` letters i and j - the 4096-byte loop at 3 Mbaud and
-  the console's burst - on this chip's board.
+- Why a burst of 17 at 1 Mbaud is told 1.6 to 2.7 frames after its last
+  stop bit, under the 32 bit periods of the time-out (letter u; the
+  M33 and Hazard3 read 3.26 on the same source): the entries timed
+  against the RX pad would place each one.

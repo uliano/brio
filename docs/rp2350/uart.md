@@ -252,6 +252,44 @@ a number is given for each.
   one: the block start there is the engine's CLAIM alone under the mask
   and the block programmed after it
   ([../pl011/README.md](../pl011/README.md)).
+- THE RECEIVE SIDE AND ITS EDGE (`bench_rp2350` letter u, UART1 under
+  LBE at 150 MHz, one source on both architectures, the meter's stamps
+  inside `isr`): 256 bytes through the interrupt receiver in 16 level
+  entries and the time-out's - 7817 cycles at 1 Mbaud on the M33 and
+  6415 on Hazard3, 31 and 25 a byte, where the level read with a flag
+  test before every character took 9074 and 8970 (35 a byte on each);
+  the receive engine about 200 cycles for the same 256. The edge from
+  the burst's last stop bit: the time-out's 3.2 frames at 115200 and 1
+  Mbaud on both; under the engine `UARTRIS.RTRIS` never rose, so the
+  engine's burst edge is its owner's poll
+  ([../pl011/README.md](../pl011/README.md), "The receive side").
+- THE TRANSMIT SIDE through the same letter: 4096 bytes in 146 refills
+  at 17 cycles a byte on either core, wire-bound to UARTCLK / 16 = 9.375
+  Mbaud; through the transmit engine 47 blocks, under two cycles a byte.
+- `tx_idle()` ON THE PAD (`test_rp2350_serial` and `test_rp2350_dma`
+  letter t, eight frames of 0xFF at 9600 on GP4 with the loop-back off,
+  the pad read through SIO): true within 1 us of the last stop bit's end
+  on both architectures, through the interrupt transmitter and the
+  transmit engine alike.
+- THE COPY INTO THE RING: the byte loop 6 cycles a byte on both cores,
+  the runtime's `memcpy` about 27 (M33) and 29 (Hazard3) and under one a
+  byte with the two ends aligned alike - the loop ahead at 8 bytes,
+  `memcpy` at 12 on each: one `copy_crossover` for the chip.
+- AT UARTCLK / 16 A FRAME ARRIVES THAT NOBODY SENT: brought up at 9.375
+  Mbaud and switched to the loop-back, the instance holds a 0xFF in its
+  receive FIFO before a byte is written - seen on the M33 image in
+  each of three runs, and not on the Hazard3 image of the same source, not at
+  1 Mbaud, not on the RP2040 at its own UARTCLK / 16; which of the two
+  steps makes it is not separated. The interrupt receiver takes it as a
+  byte like any other and a receive engine moves it into its run: letter
+  u publishes and drains it before it measures, and a program bringing a
+  port up at that rate drains it too.
+- AGAINST THE VENDOR: the pico-sdk 2.3.1's `uart_read_blocking` and
+  `uart_write_blocking`, POLLED loops, on the same board and loop in a
+  scratch program: 34 and 29 cycles a byte reading characters already in
+  the FIFO (M33, Hazard3), 29 and 25 writing into an empty one, the CPU
+  the loop's for the whole wire time; this transport 31 and 25 a byte
+  receiving, 17 transmitting, the core free between entries.
 
 ## Not covered yet
 
@@ -282,3 +320,7 @@ Implemented but not bench-verified, each with what would measure it:
 - `rebase` under a dynamic clock: this target has no dynamic clock yet,
   so the verb is exercised only at a rate that does not change.
 - The bridge's ceiling board to host: the suite measures host to board.
+- The stray 0xFF at 9.375 Mbaud (above): which step - the bring-up or
+  the switch to the loop-back - puts it in the FIFO, and why on one
+  architecture's image and not the other's; a run that reads the FIFO
+  between the two steps on each image would separate it.

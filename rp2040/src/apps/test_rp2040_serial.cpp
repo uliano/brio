@@ -46,6 +46,9 @@
 //      FIFO's depth delivered
 //   e  bulk traffic: 4096 bytes at 3 Mbaud through write_bulk/read_bulk
 //      on the loop, byte-exact, the interrupts per byte counted
+//   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
+//      the pad read through SIO, and tx_idle() turning true at the last
+//      stop bit's end - never before it, within a bit time after
 //
 //   q  (by name only) THE PEER: UART1 echoes whatever it receives, at
 //      115200 8N1, for thirty seconds after the prompt returns - run it
@@ -658,6 +661,55 @@ void tw_console_errors() {
                   got > 1000u && pe == 0u);
 }
 
+// ---------------------------------------------------------------------------
+// t: tx_idle() is the wire's - the last stop bit off the pad
+// ---------------------------------------------------------------------------
+/// Eight frames of 0xFF at 9600 baud on GP4 with the loop-back OFF, so the
+/// pad carries them, the pad read through SIO's GPIO_IN (which follows a
+/// pad under any function): each frame has exactly one falling edge, its
+/// start bit, so the last one places the last stop bit's end ten bit times
+/// later; tx_idle() - the ring empty and UARTFR.BUSY clear - must turn true
+/// at that end and not before.
+void tt_tx_idle() {
+    constexpr uint32_t baud = 9600;
+    constexpr uint32_t bit_ns = 1'000'000'000u / baud;
+    const bool up = instrument_up(baud, {}, false);
+    spin_us(5000);
+    static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    bool level = Pin<4>::read();
+    uint32_t falls = 0;
+    uint32_t last_fall = 0;
+    uint32_t idle_at = 0;
+    bool idle_seen = false;
+    (void)Instrument::write_bulk(ones);
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < 12u * 10u * bit_ns / 1000u) {
+        const uint32_t t = us_now();
+        const bool now_level = Pin<4>::read();
+        if (level && !now_level) {
+            last_fall = t;
+            ++falls;
+        }
+        level = now_level;
+        if (!idle_seen && Instrument::tx_idle()) {
+            idle_at = t;
+            idle_seen = true;
+        }
+    }
+    const uint32_t stop_end = last_fall + 10u * bit_ns / 1000u;
+    const int32_t after = static_cast<int32_t>(idle_at - stop_end);
+    print(serial, "  8 frames of 0xFF at 9600 on GP4: ", falls, " start bits; tx_idle() ",
+          idle_seen ? "" : "NEVER ", "true ", after, " us from the last stop bit's end (a bit is ",
+          bit_ns / 1000u, " us; the edge and the idle are read on the 1 us timer)", crlf);
+    // Two timer steps of margin before the end: the fall is seen up to one
+    // late, the idle up to one early.
+    bench.verdict("tx_idle() IS THE WIRE'S: never before the last stop bit's end, and "
+                  "within a bit time after it",
+                  up && idle_seen && falls == 8u && after >= -2 &&
+                      after <= static_cast<int32_t>(bit_ns / 1000u));
+    Instrument::release();
+}
+
 void banner() {
     print(serial, crlf, "test_rp2040_serial - the RP2040 UART (datasheet 4.2, PL011), the instrument "
           "UART1 on GP4/GP5, clk_peri=", SysClock::pclk_hz, " Hz", crlf);
@@ -687,6 +739,7 @@ int main() {
     bench.letter('c', "the baud ladder on the loop-back, floor to ceiling", tc_ladder);
     bench.letter('d', "the FIFOs: timeout vs level, a break, an overrun", td_fifos);
     bench.letter('e', "bulk traffic at 3 Mbaud on the loop", te_bulk);
+    bench.letter('t', "tx_idle() on the pad: the last stop bit", tt_tx_idle);
     bench.letter('q', "PEER: echo on UART1 for 30 s (run on the other board first)", tq_peer, false);
     bench.letter('p', "the wire against the peer, 512 bytes", tp_wire, false);
     bench.letter('r', "PEER: 64 frames at 8N1 on UART1 in three seconds (the other board first)", tr_peer_sender, false);

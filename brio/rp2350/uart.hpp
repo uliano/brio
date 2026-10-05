@@ -172,6 +172,12 @@ struct Rp2350Pl011 {
     /// 32x12 receive - the same synthesis as the RP2040's).
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 32;
+    /// write_bulk()'s memcpy crossover (bench_rp2350 letter u at 150 MHz
+    /// from the XIP cache), the same on both cores: the byte loop 6
+    /// cycles a byte on the M33 and Hazard3 alike, the runtime's memcpy
+    /// about 27 and 29 and under one a byte with the two ends aligned
+    /// alike - the loop still ahead at 8 bytes, memcpy at 12 on each.
+    static constexpr uint32_t copy_crossover = 12;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? UART0 : UART1); }

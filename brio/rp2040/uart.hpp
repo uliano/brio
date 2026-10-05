@@ -99,6 +99,12 @@ struct Rp2040Pl011 {
     /// UART0 and UART1, both with 32-deep FIFOs (4.2.2.4/5).
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 32;
+    /// write_bulk()'s memcpy crossover on this core (bench_rp2040 letter
+    /// u, the Cortex-M0+ at 125 MHz from the XIP cache): the byte loop is
+    /// 2 cycles and 9 a byte, the runtime's memcpy about 54 and under one
+    /// a byte when the two ends share their word alignment - the loop
+    /// still ahead at 8 bytes, memcpy at 12.
+    static constexpr uint32_t copy_crossover = 12;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? UART0 : UART1); }

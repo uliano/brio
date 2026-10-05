@@ -487,12 +487,13 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     constexpr Clock clock;
     REQUIRE(Streamed::init(clock, 3'000'000));
 
-    // Both engines armed on the data register, the requests enabled, and
-    // the receive INTERRUPTS left off: the engine has the FIFO.
+    // Both engines armed on the data register, the requests enabled, the
+    // receive INTERRUPTS left off - the engine has the FIFO - and the four
+    // error interrupts on: under an engine they are where errors count.
     CHECK(TxEngine::armed == 1u);
     CHECK(RxEngine::armed == 1u);
     CHECK(SimPl011::regs<1>().UARTDMACR == (UartDmaControl::tx | UartDmaControl::rx));
-    CHECK(SimPl011::regs<1>().UARTIMSC == 0u);
+    CHECK(SimPl011::regs<1>().UARTIMSC == UartInterrupt::errors);
     CHECK(RxEngine::blocks == 1u);   // the first free run armed by init()
 
     // A queued byte starts a block instead of pending the line.
@@ -503,17 +504,19 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
 
     // A byte queued behind a running block cannot CLAIM the engine: it
     // waits in the ring, and the completion starts it as the next block.
+    // dma_isr() answers the RECEIVE edge, and a transmit completion is
+    // none.
     CHECK(Streamed::write_byte('y'));
     CHECK(TxEngine::blocks == started + 1u);
     TxEngine::next_flags = TxEngine::flag_complete;
-    CHECK(Streamed::dma_isr());
+    CHECK_FALSE(Streamed::dma_isr());
     CHECK(TxEngine::blocks == started + 2u);
     CHECK(TxEngine::length == 1u);
 
     // The completion releases exactly that run; nothing else is queued,
     // so the claim the pump took is given back and no next block starts.
     TxEngine::next_flags = TxEngine::flag_complete;
-    CHECK(Streamed::dma_isr());
+    CHECK_FALSE(Streamed::dma_isr());
     CHECK(TxEngine::blocks == started + 2u);
     CHECK_FALSE(TxEngine::busy());
     CHECK(Streamed::tx_idle());
@@ -521,15 +524,24 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     // A bus error throws the block away and is counted.
     CHECK(Streamed::dma_faults() == 0u);
     TxEngine::next_flags = TxEngine::flag_error;
-    CHECK(Streamed::dma_isr());
+    CHECK_FALSE(Streamed::dma_isr());
     CHECK(Streamed::dma_faults() == 1u);
 
-    // harvest() reads the sticky errors once per run and re-arms.
-    SimPl011::regs<1>().UARTRSR = UartReceiveStatus::overrun | UartReceiveStatus::frame;
-    (void)Streamed::harvest();
-    CHECK(SimPl011::regs<1>().UARTRSR == 0u);
+
+    // Each received error enters the line and is counted there, its
+    // status cleared through UARTICR; nothing reads UARTDR, the
+    // channel's.
+    SimPl011::raise<1>(UartInterrupt::overrun | UartInterrupt::frame);
+    REQUIRE(SimPl011::line_raised<1>());
+    CHECK_FALSE(Streamed::isr());
+    CHECK_FALSE(SimPl011::line_raised<1>());
     CHECK(Streamed::hw_overruns() == 1u);
     CHECK(Streamed::frame_errors() == 1u);
+    SimPl011::raise<1>(UartInterrupt::brk | UartInterrupt::frame);
+    CHECK_FALSE(Streamed::isr());
+    CHECK(Streamed::break_errors() == 1u);
+    CHECK(Streamed::frame_errors() == 2u);
+    (void)Streamed::harvest();
 
     // A COMPLETION IS ACTED ON ONCE. A run fills while harvest() holds
     // the guard: harvest() serves the completion the masked line owes
@@ -570,6 +582,23 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     RxEngine::ends_under_take = true;
     (void)Streamed::harvest();
     CHECK(RxEngine::blocks == before_the_race);
+
+    // A RECEIVE RUN THAT FILLS IS AN EDGE: its completion publishes the
+    // run onto a ring the consumer had drained, and dma_isr() answers
+    // true - the glue's RxActivity, with no poll; the next completion,
+    // over a ring the consumer has not drained, answers false.
+    while (Streamed::read_byte(sink)) {
+    }
+    (void)Streamed::harvest();   // what the run holds published, a run re-armed
+    while (Streamed::read_byte(sink)) {
+    }
+    REQUIRE(RxEngine::busy());
+    REQUIRE_FALSE(Streamed::rx_pending());
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK(Streamed::dma_isr());
+    CHECK(Streamed::rx_pending());
+    RxEngine::next_flags = RxEngine::flag_complete;
+    CHECK_FALSE(Streamed::dma_isr());
 
     Streamed::release();
     CHECK(SimPl011::regs<1>().UARTDMACR == 0u);

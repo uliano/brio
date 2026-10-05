@@ -98,13 +98,19 @@
  * The transmit FIFO's own data request (UARTDMACR.TXDMAE) paces it,
  * credit by credit, so no kick is ever needed. With a RECEIVE engine the
  * receive interrupts stay off and the engine fills the ring's free run
- * straight from UARTDR; what has arrived is read off the engine's own
- * count by harvest(), a VERB the owner calls at its own pace (a kernel
- * TimeEvent every few ticks is the shape), which publishes it and
- * re-arms the run - and reads UARTRSR once per harvest, since the engine
- * moves BYTES and the per-entry error flags of UARTDR are not among
- * them: an error is counted against the harvested run, not a byte. The
- * DMA and the handler never touch one FIFO at once.
+ * straight from UARTDR; a run that fills is published and re-armed by
+ * its completion on the DMA line, whose dma_isr() answers the ring's
+ * edge, and a run still filling is read off the engine's own count by
+ * harvest(), a VERB the owner calls at its own pace, which publishes it
+ * and re-arms the run. The engine moves BYTES and the per-entry error
+ * flags of UARTDR are not among them - a framed or break entry's byte
+ * lands in the ring like any other - so the error interrupts are armed
+ * under an engine and isr() counts each received error, clearing it
+ * through UARTICR and never reading UARTDR. NO VECTOR ENDS A BURST UNDER AN ENGINE: the receive time-out
+ * needs a character waiting, and the channel's single request leaves
+ * none (measured, docs/pl011/README.md) - the interrupt receiver is the
+ * burst path with an edge. The DMA and the handler never touch one FIFO
+ * at once.
  *
  * NOT built, each with its reason in docs/pl011/README.md: hardware flow
  * control, IrDA, the modem status inputs and outputs, the stick-parity
@@ -116,6 +122,7 @@
 
 #include <stdint.h>
 #include <concepts>
+#include <cstring>
 #include <optional>
 #include <span>
 
@@ -177,6 +184,12 @@ concept Pl011Chip =
         /// FIFOs were synthesized.
         { C::instances } -> std::convertible_to<uint8_t>;
         { C::fifo_depth } -> std::convertible_to<uint8_t>;
+        /// The run length from which the runtime's memcpy copies a run
+        /// into the transmit ring faster than a byte loop, its two ends
+        /// sharing their word alignment: a fact of the CORE and the
+        /// memory the code runs from, measured on each family (its bench
+        /// app's letter u), never this file's.
+        { C::copy_crossover } -> std::convertible_to<uint32_t>;
     } &&
     Platform<typename C::Platform> &&
     requires(volatile uint32_t& reg, uint32_t bits, typename C::Pins pins, uint8_t instance,
@@ -658,6 +671,15 @@ public:
             (void)U::read_data();
         }
         U::clear_receive_status();
+        if constexpr (has_rx_engine) {
+            // UNDER AN ENGINE THE ERRORS ARE THE VECTOR'S: the channel
+            // moves an entry's byte and drops its flags (bits 8..11 of
+            // UARTDR), and UARTRSR speaks for the last character READ -
+            // the channel's - so the error interrupts, one a received
+            // error, are where each one is counted (isr()).
+            U::clear_pending(UartInterrupt::errors);
+            U::interrupts(UartInterrupt::errors, true);
+        }
         m_dma_faults = 0;
         if constexpr (has_tx_engine) {
             TxEngine::arm(&U::regs().UARTDR, Chip::template tx_request<n>());
@@ -780,9 +802,22 @@ public:
     [[gnu::always_inline]] static bool isr() {
         const uint32_t active = U::pending();
         bool edge = false;
+        if constexpr (has_rx_engine) {
+            // The error interrupts, armed under an engine alone (init()):
+            // each received error counted, its status cleared through
+            // UARTICR - nothing here reads UARTDR, the channel's.
+            const uint32_t errors = active & UartInterrupt::errors;
+            if (errors != 0u) {
+                if ((errors & UartInterrupt::frame) != 0u) { m_frame_errors = m_frame_errors + 1; }
+                if ((errors & UartInterrupt::parity) != 0u) { m_parity_errors = m_parity_errors + 1; }
+                if ((errors & UartInterrupt::brk) != 0u) { m_break_errors = m_break_errors + 1; }
+                if ((errors & UartInterrupt::overrun) != 0u) { m_hw_overruns = m_hw_overruns + 1; }
+                U::clear_pending(errors);
+            }
+        }
         if constexpr (!has_rx_engine) {
             if ((active & (UartInterrupt::rx | UartInterrupt::rx_timeout)) != 0u) {
-                edge = receive();
+                edge = receive((active & UartInterrupt::rx) != 0u);
             }
         }
         if constexpr (!has_tx_engine) {
@@ -804,20 +839,28 @@ public:
      * starts the next run; a receive completion publishes and re-arms
      * here - unless harvest() met it first, under its guard, and served
      * it there: a completion is acted on ONCE.
-     * Returns true when something of this transport's was served.
+     *
+     * Returns the receive ring's empty -> non-empty edge across the
+     * completion's publish, the answer isr() gives: the same kernel glue
+     * posts RxActivity on it, so a stream that fills runs is told once a
+     * run with no poll. A BURST SHORTER THAN THE RUN HAS NO EDGE HERE,
+     * and none anywhere on this block: the receive time-out needs a
+     * character waiting in the FIFO, and the channel's single request
+     * leaves none (measured: UARTRIS.RTRIS never rises under an engine,
+     * docs/pl011/README.md) - a partial run is harvest()'s to publish,
+     * and the interrupt receiver, one entry a FIFO level plus the
+     * time-out's, is the burst path with an edge.
      */
     [[gnu::always_inline]] static bool dma_isr() {
-        bool mine = false;
+        bool edge = false;
         if constexpr (has_tx_engine) {
             const uint8_t f = TxEngine::service();
             if ((f & TxEngine::flag_error) != 0u) {
                 (void)TxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1u;
-                mine = true;
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
                 pump_tx();
-                mine = true;
             }
         }
         if constexpr (has_rx_engine) {
@@ -825,18 +868,18 @@ public:
             if ((f & RxEngine::flag_error) != 0u) {
                 (void)RxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1u;
-                mine = true;
             } else if ((f & RxEngine::flag_complete) != 0u) {
                 // The run filled: published and re-armed HERE, not left to
                 // harvest() - at 3 Mbaud a 32-deep FIFO overflows 100 us
                 // after the run ends, and the credits the overflow leaves
                 // behind would be spent reading nothing (measured).
+                const bool was_empty = m_rx.empty();
                 publish_rx();
                 rearm_rx();
-                mine = true;
+                edge = was_empty && !m_rx.empty();
             }
         }
-        return mine;
+        return edge;
     }
 
     /**
@@ -848,14 +891,6 @@ public:
         if constexpr (!has_rx_engine) {
             return false;
         } else {
-            const uint32_t status = U::receive_status();
-            if (status != 0u) {
-                if ((status & UartReceiveStatus::frame) != 0u) { m_frame_errors = m_frame_errors + 1; }
-                if ((status & UartReceiveStatus::parity) != 0u) { m_parity_errors = m_parity_errors + 1; }
-                if ((status & UartReceiveStatus::brk) != 0u) { m_break_errors = m_break_errors + 1; }
-                if ((status & UartReceiveStatus::overrun) != 0u) { m_hw_overruns = m_hw_overruns + 1; }
-                U::clear_receive_status();
-            }
             // The ring's producer side is shared with the line's handler
             // (a completion publishes and re-arms there): under the guard.
             typename Chip::Guard guard;
@@ -961,16 +996,7 @@ public:
             const uint32_t want = static_cast<uint32_t>(src.size()) - done;
             const uint32_t take =
                 want < room.size() ? want : static_cast<uint32_t>(room.size());
-            // Two pointers and no index, and the test at the bottom: a
-            // load, a store, two steps and one branch a byte, where an index
-            // re-adds both bases every byte. `take` is at least one here -
-            // the room is not empty and the run is not done.
-            const uint8_t* from = src.data() + done;
-            uint8_t* to = room.data();
-            uint8_t* const end = to + take;
-            do {
-                *to++ = *from++;
-            } while (to != end);
+            copy_run(room.data(), src.data() + done, take);
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
         }
@@ -1084,6 +1110,24 @@ private:
         }
     }
 
+    /// write_bulk()'s copy into the ring's free run: THE RUNTIME'S memcpy
+    /// WHERE ITS FIXED COST PAYS - a run of the family's `copy_crossover`
+    /// bytes or more whose two ends share their word alignment, which is
+    /// when its word block runs at all - and the byte loop below it: two
+    /// pointers and no index, the test at the bottom, a load, a store,
+    /// two steps and one branch a byte. `count` is at least one.
+    [[gnu::always_inline]] static void copy_run(uint8_t* to, const uint8_t* from, uint32_t count) {
+        if (count >= Chip::copy_crossover &&
+            ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+            std::memcpy(to, from, count);
+            return;
+        }
+        uint8_t* const end = to + count;
+        do {
+            *to++ = *from++;
+        } while (to != end);
+    }
+
     /// What the receive engine has landed since the last look, handed to
     /// the ring's consumer.
     static void publish_rx() {
@@ -1108,28 +1152,50 @@ private:
         }
     }
 
-    /// Drain the receive FIFO into the ring, attributing each entry's
-    /// error flags to its own byte. Returns the ring's empty -> non-empty
-    /// edge.
-    [[gnu::always_inline]] static bool receive() {
+    /// The receive level init() programs, half the FIFO, in entries.
+    static constexpr uint32_t rx_level_entries = Chip::fifo_depth / 2u;
+
+    /// One receive FIFO entry into the ring, its own error flags
+    /// attributed to it: a framed, parity-failed or break entry counted
+    /// and dropped.
+    [[gnu::always_inline]] static void take(uint32_t entry) {
+        if ((entry & UartDataError::dropped) != 0u) [[unlikely]] {
+            if ((entry & UartDataError::frame) != 0u) {
+                m_frame_errors = m_frame_errors + 1;
+            }
+            if ((entry & UartDataError::parity) != 0u) {
+                m_parity_errors = m_parity_errors + 1;
+            }
+            if ((entry & UartDataError::brk) != 0u) {
+                m_break_errors = m_break_errors + 1;
+            }
+            return;
+        }
+        if (!m_rx.push(static_cast<uint8_t>(entry))) [[unlikely]] {
+            m_rx_overruns = m_rx_overruns + 1;
+        }
+    }
+
+    /// Drain the receive FIFO into the ring. Returns the ring's empty ->
+    /// non-empty edge.
+    ///
+    /// AN ENTRY FOR THE LEVEL READS THE LEVEL BLIND. The receive interrupt
+    /// stands while the FIFO holds its trigger level or more (RP2040
+    /// 4.2.6.2), and this handler is the FIFO's one reader, so an entry
+    /// with RXMIS set finds `rx_level_entries` characters at least and
+    /// takes them with no UARTFR read between - one peripheral load a
+    /// character where the flag test made two, the loads the per-byte
+    /// cost is made of on this block. The rest, and an entry for the
+    /// time-out alone, go with the flag tested before every read.
+    [[gnu::always_inline]] static bool receive(bool level) {
         const bool was_empty = m_rx.empty();
+        if (level) {
+            for (uint32_t i = 0; i < rx_level_entries; ++i) {
+                take(U::read_data());
+            }
+        }
         while (!U::rx_empty()) {
-            const uint32_t entry = U::read_data();
-            if ((entry & UartDataError::dropped) != 0u) {
-                if ((entry & UartDataError::frame) != 0u) {
-                    m_frame_errors = m_frame_errors + 1;
-                }
-                if ((entry & UartDataError::parity) != 0u) {
-                    m_parity_errors = m_parity_errors + 1;
-                }
-                if ((entry & UartDataError::brk) != 0u) {
-                    m_break_errors = m_break_errors + 1;
-                }
-                continue;
-            }
-            if (!m_rx.push(static_cast<uint8_t>(entry))) {
-                m_rx_overruns = m_rx_overruns + 1;
-            }
+            take(U::read_data());
         }
         // THE OVERRUN IS READ FROM UARTRSR, NOT FROM THE ENTRIES: the OE
         // bit of a FIFO entry is a LIVE condition (cleared once there is

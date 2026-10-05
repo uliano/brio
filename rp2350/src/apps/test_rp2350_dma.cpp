@@ -83,6 +83,16 @@
 //      what lets an SPI host take one interrupt a transaction - and the
 //      copy engine: copy and fill at three beats, exact, the refusals
 //
+//   t  tx_idle() ON THE PAD under the transmit engine: eight frames on
+//      GP4 with the loop-back off, the pad read through SIO, tx_idle()
+//      turning true at the last stop bit's end
+//
+//   v  K BREAKS IN N SLOTS on UART1's loop-back: 64 slots, four of them
+//      a break, through the interrupt receiver (60 delivered, each break
+//      an entry counted and dropped) and through the receive engine
+//      (every byte sent delivered in order, the breaks' zero bytes among
+//      them, each break counted once by the error interrupt)
+//
 //   m  (by name only) diagnostic: the transmit engine alone on the loop
 //   n  (by name only) diagnostic: the receive engine alone on the loop
 //
@@ -953,6 +963,157 @@ void half_loop(const char* name) {
 void tm_tx_only() { half_loop<TxOnly>("the transmit engine alone, the receiver on its interrupt"); }
 void tn_rx_only() { half_loop<RxOnly>("the receive engine alone, the transmitter on its interrupt"); }
 
+// ---------------------------------------------------------------------------
+// t: tx_idle() is the wire's - the last stop bit off the pad
+// ---------------------------------------------------------------------------
+/// Eight frames of 0xFF at 9600 baud on GP4 with the loop-back OFF, so the
+/// pad carries them, the pad read through SIO's GPIO_IN (which follows a
+/// pad under any function): each frame has exactly one falling edge, its
+/// start bit, so the last one places the last stop bit's end ten bit times
+/// later; tx_idle() - the ring empty, no block in flight, UARTFR.BUSY clear - must
+/// turn true at that end and not before.
+void tt_tx_idle() {
+    constexpr uint32_t bit_us = 1'000'000u / 9600u;
+    uart1_isr = &TxOnly::isr;
+    const bool up = TxOnly::init(clock, 9600);
+    spin_us(5000);
+    static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    bool level = Pin<4>::read();
+    uint32_t falls = 0;
+    uint32_t last_fall = 0;
+    uint32_t idle_at = 0;
+    bool idle_seen = false;
+    (void)TxOnly::write_bulk(ones);
+    const uint32_t t0 = us_now();
+    while (us_now() - t0 < 12u * 10u * bit_us) {
+        const uint32_t t = us_now();
+        const bool now_level = Pin<4>::read();
+        if (level && !now_level) {
+            last_fall = t;
+            ++falls;
+        }
+        level = now_level;
+        if (!idle_seen && TxOnly::tx_idle()) {
+            idle_at = t;
+            idle_seen = true;
+        }
+    }
+    const int32_t after = static_cast<int32_t>(idle_at - (last_fall + 10u * 1'000'000u / 9600u));
+    print(serial, "  8 frames of 0xFF at 9600 on GP4 through the transmit engine: ", falls, " start bits; tx_idle() ",
+          idle_seen ? "" : "NEVER ", "true ", after,
+          " us from the last stop bit's end (a bit is ", bit_us, " us)", crlf);
+    // Two microseconds of margin before the end: the fall is seen up to
+    // one late, the idle up to one early.
+    bench.verdict("tx_idle() IS THE WIRE'S through the transmit engine: never before the last stop "
+                  "bit's end, and within a bit time after it",
+                  up && idle_seen && falls == 8u && after >= -2 &&
+                      after <= static_cast<int32_t>(bit_us));
+    TxOnly::release();
+    uart1_isr = nullptr;
+}
+
+/// K BREAKS IN N SLOTS on UART1's loop-back at 115200: 64 slots, four of
+/// them a break (UARTLCR_H.BRK held two frames) instead of their byte.
+/// Sent through the transmit engine; received by the interrupt receiver
+/// (TxOnly) and by the receive engine (Instrument), the stream judged
+/// against the 60 bytes that were sent.
+template <typename T>
+uint32_t breaks_through(uint8_t* got, uint32_t room, uint32_t& kept) {
+    constexpr uint32_t frame_us = 10u * 1'000'000u / 115200u + 1u;
+    const bool up = T::init(clock, 115200) && T::loopback(true);
+    spin_us(20 * frame_us);
+    uint8_t junk[32];
+    (void)T::harvest();
+    while (T::read_bulk(junk) != 0u) {
+    }
+    T::clear_errors();
+    kept = 0;
+    for (uint32_t i = 0; i < 64u; ++i) {
+        if (i == 9u || i == 24u || i == 41u || i == 58u) {
+            const uint32_t t0 = us_now();
+            while (!T::tx_idle() && us_now() - t0 < 100u * frame_us) {
+            }
+            T::Resource::break_send(true);
+            spin_us(2u * frame_us);
+            T::Resource::break_send(false);
+            spin_us(frame_us);
+            continue;
+        }
+        const uint8_t b = static_cast<uint8_t>(0x40u + i);
+        while (T::write_bulk({&b, 1}) == 0u) {
+        }
+        ++kept;
+    }
+    spin_us(80u * frame_us);
+    (void)T::harvest();
+    uint32_t n = 0;
+    while (n < room) {
+        const uint32_t k = T::read_bulk({got + n, room - n});
+        if (k == 0u) {
+            break;
+        }
+        n += k;
+    }
+    return up ? n : 0u;
+}
+
+void tv_breaks() {
+    static uint8_t got[128];
+    uint32_t kept = 0;
+    // The interrupt receiver: each break an entry flagged BE and FE, dropped.
+    uart1_isr = &TxOnly::isr;
+    const uint32_t n_irq = breaks_through<TxOnly>(got, sizeof got, kept);
+    uint32_t wrong = 0;
+    for (uint32_t i = 0, j = 0; i < 64u; ++i) {
+        if (i == 9u || i == 24u || i == 41u || i == 58u) {
+            continue;
+        }
+        if (j >= n_irq || got[j] != static_cast<uint8_t>(0x40u + i)) {
+            ++wrong;
+        }
+        ++j;
+    }
+    const uint32_t be = TxOnly::break_errors();
+    print(serial, "  64 slots, 4 breaks, the interrupt receiver: ", n_irq, " of ", kept,
+          " bytes back, ", wrong, " wrong, BE ", be, " FE ", TxOnly::frame_errors(), crlf);
+    bench.verdict("K BREAKS IN N SLOTS, the interrupt receiver: N - K bytes intact and in "
+                  "order, each break its own entry, counted and dropped",
+                  n_irq == kept && wrong == 0u && be == 4u);
+    TxOnly::release();
+    uart1_isr = nullptr;
+
+    // The receive engine: the channel moves the BYTE of every entry - a
+    // break's zero included, its flags living in bits the byte beat drops
+    // - the error interrupt counts each, and no clear reads UARTDR, so
+    // every byte sent is in the stream, in order.
+    uart1_isr = &Instrument::isr;
+    const uint32_t n_dma = breaks_through<Instrument>(got, sizeof got, kept);
+    uint32_t matched = 0;
+    uint32_t zeros = 0;
+    for (uint32_t j = 0, i = 0; j < n_dma; ++j) {
+        while (i < 64u && (i == 9u || i == 24u || i == 41u || i == 58u)) {
+            ++i;
+        }
+        if (i < 64u && got[j] == static_cast<uint8_t>(0x40u + i)) {
+            ++matched;
+            ++i;
+        } else if (got[j] == 0u) {
+            ++zeros;
+        }
+    }
+    const uint32_t be_dma = Instrument::break_errors();
+    print(serial, "  the same under the receive engine: ", n_dma, " bytes back, the ", matched,
+          " of ", kept, " sent among them in order, ", zeros, " break zeros, BE ", be_dma,
+          " FE ", Instrument::frame_errors(), crlf);
+    bench.verdict("AND UNDER THE ENGINE NO CLEAR TAKES A BYTE: every byte sent is in the "
+                  "stream and in order, each break counted once by the error interrupt; "
+                  "each break is also the zero byte of its entry, which a byte beat cannot "
+                  "tell from data (docs/pl011/README.md)",
+                  matched == kept && zeros == 4u && n_dma == kept + 4u && be_dma == 4u);
+    Instrument::release();
+    uart1_isr = nullptr;
+}
+
 void banner() {
     print(serial, crlf, "test_rp2350_dma - the RP2350 DMA (datasheet 12.6) on ",
           core_kind == CoreKind::hazard3 ? "RISC-V Hazard3" : "Arm Cortex-M33",
@@ -1047,6 +1208,8 @@ int main() {
     bench.letter('j', "the instrument's two engines on the loop-back", tj_instrument);
     bench.letter('k', "this console's transmit engine under a burst", tk_console_engine);
     bench.letter('l', "the engines: the beat per block, errors alone, copy and fill", tl_engines);
+    bench.letter('t', "tx_idle() on the pad under the transmit engine", tt_tx_idle);
+    bench.letter('v', "K breaks in N slots: the interrupt receiver and the engine", tv_breaks);
     bench.letter('m', "diagnostic: the transmit engine alone", tm_tx_only, false);
     bench.letter('n', "diagnostic: the receive engine alone", tn_rx_only, false);
 
