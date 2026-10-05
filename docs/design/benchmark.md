@@ -428,6 +428,7 @@ scratch program.
 
 | family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
 |---|---|---|---|---|---|---|---|
+| STM32G0B1RE (64 MHz; I2C2 on the self-link) | 1147 (1554), one interrupt (two) | 1852 (2377), two interrupts (four) | 1.00 through the pump (260 interrupts, 127 cycles a byte against the HAL's 168) and the engine (6) | 260 through the pump, 5 through the engine | 857 | HAL v1.4.7: 1362 and 2289 fixed | 509, an engined write to an absent address |
 | RP2040 (125 MHz; I2C1 on the self-link) | 832 (967), the same at 100 kHz and 1 MHz (1529 at 100 kHz before) | 890 (1011) | 1.00, 31 | 32 (285), 13 378 (54 955) | 802 | pico-sdk 2.3.1, polled: 538 fixed with the core held the whole wire (6680 busy); its 255-byte read 20 834 fixed against 1375 | 439 (574) |
 | RP2350, Cortex-M33 (150 MHz; the same) | 474 (699) | 510 (393, which answered at the last byte, a period before the bus was free) | 1.00, 31 | 32 (285), 9007 (32 319) | 583 | pico-sdk: 459 fixed, 7811 busy; its 255-byte read 13 713 fixed against 676 | 298 (353) |
 | RP2350, Hazard3 (150 MHz; the same) | 484 (731) | 512 (417) | 1.00, 31 | 32 (285), 8441 (30 597) | 302 | pico-sdk: 486 fixed, 7838 busy | 284 (316) |
@@ -445,6 +446,13 @@ What the rows say:
   one-byte tenure - no exception entry, no idle wake - and holds the
   core for the whole wire time to get it; on the M33 and the Hazard3
   the two are within a fifth.
+- A block with a byte counter and AUTOEND but no FIFO - the STM32G0's
+  - takes the pump's one interrupt a byte, and the tenure's fixed cost
+  is what is left to cut: the first data byte preloaded into TXDR
+  before the START, a read's last byte and a NACK both taken at STOPF,
+  the enables written in one store each way - one interrupt for a
+  one-byte write where there were two, a fifth under the HAL's
+  ([../stm32g0/i2c.md](../stm32g0/i2c.md)).
 - On the RP2350's Cortex-M33 a handler's cost from flash moves with
   where the linker puts it - 188 to 365 cycles across three builds of
   one handler, up to six XIP misses a tenure; from SRAM 84. The bench

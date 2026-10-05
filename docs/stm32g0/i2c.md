@@ -79,6 +79,23 @@ both instances' bodies. I2C1's line is its own everywhere - and it is
 also EXTI line 23, the wake, so arming the wake needs the EXTI's mask
 and not just WUPEN.
 
+**What the chapter offers a controller's transfer, and what the engine
+takes** - the inventory every cost below is read against:
+
+| offer (section) | taken? | why |
+|---|---|---|
+| NBYTES with AUTOEND (32.4.9) | yes | one CR2 store starts a tenure and the hardware NACKs a read's last byte and sends the STOP; the tenure's frame costs no interrupt but the STOPF |
+| TC with AUTOEND clear (32.4.9, 32.9.2) | yes, for a write-then-read alone | the repeated START is the CR2 store at TC; every other shape never raises TC and its enable stays down |
+| RELOAD and TCR past 255 bytes (32.4.9) | resource only | the Request's lengths are eight bits on every target (below, "Not covered yet") |
+| one TXDR and one RXDR, no FIFO (32.9.10, 32.9.11) | the silicon's | one interrupt per data byte is this block's pump; the engines below are the run's path |
+| the first byte written before the START (TXE stands at rest, 32.9.7) | yes | the TXIS for that byte never rises (the TXIS events count NBYTES, 32.4.9): a one-byte write is the STOPF alone, the vendor's library does the same |
+| a TXDR flush by writing TXE (32.9.7) | yes, at every start() | a byte an unanswered address left in TXDR refuses the next write (32.9.11) and would go out in its place |
+| the last byte of a read left in RXDR | yes | nothing follows it - the controller NACKs it and stops under AUTOEND - so RXIE goes down after the second-to-last and the STOPF entry reads it: a one-byte read is one interrupt |
+| NACKIE (table 181) | declined | a STOP follows every NACK by itself (32.4.9), so the STOPF entry reads NACKF from the status register and one entry serves a refused tenure |
+| the six enables at their flags' bit positions (table 181, 32.9.7) | yes | the pending mask is CR1 masked and shifted, no test per enable |
+| TXDMAEN and RXDMAEN (32.7) | yes, two engine slots | a half of two bytes or more rides a channel and takes no interrupt; a half of one is the pump's, which takes none for it either |
+| the independent kernel clock, the Fm+ drive, the wake, SMBus, the PEC, both filters | yes, measured (below) | none of them bears on a transfer's cost but the filters' share of the SCL period |
+
 ## Types and verbs
 
 `I2c<n>` carries the whole register description: the enable and 32.4.6's
@@ -87,8 +104,10 @@ general call, the wake, the SMBus enables and the PEC), the two own
 addresses with OA2's seven mask codes, the controller's transfer engine
 (`transfer()`, `transfer_now()`, `start()`, `stop()`, `reload()`), the
 data registers, the flags with their W1C clears, the interrupts, the two
-DMA enables, the SMBus time-outs and `smbus_probe()`, the wake with its
-EXTI line, and the fast-mode-plus drive in both of SYSCFG's flavours.
+DMA enables, `enables()` - the seven interrupt enables and the two DMA
+request enables (`I2cDmaEnable`) as one word in one store -, the SMBus
+time-outs and `smbus_probe()`, the wake with its EXTI line, and the
+fast-mode-plus drive in both of SYSCFG's flavours.
 Every field the register description gates is a verb that refuses, and
 the gates are not one rule but four: PE = 0 for TIMINGR, NOSTRETCH,
 ANFOFF, DNF and PECEN; START = 0 for CR2's address, direction and
@@ -117,13 +136,17 @@ same.
 `init(clock, kernel, filters, bus)`, `rebase(hz)` (a ClockUser),
 `speed_ok()`, `scl_hz()`, `start()`, `isr()`, `dma_isr()`, `status()`,
 `recover()`, `unstick()`, `fast_plus_drive()` and
-`spurious_bus_errors()`. The two DMA engine slots default to
-`NoDmaEngine` and every DMA branch folds away. Named, they carry the
-DATA of a tenure (32.7: the address cannot be moved by DMA) and both are
-armed for their errors alone: the tenure's own STOP after NBYTES proves
-every byte went through TXDR and RXDR, so a tenure takes the I2C's
-interrupts and no DMA one, and `finish()` completes the transmit engine
-on that proof ([dma.md](dma.md), "Two moments").
+`spurious_bus_errors()`. A tenure writes its interrupt and DMA enables
+in one store at `start()` and puts them back to ERRIE alone at its end,
+so nothing one tenure armed or dropped reaches the next. The two DMA
+engine slots default to `NoDmaEngine` and every DMA branch folds away.
+Named, they carry the DATA of a tenure (32.7: the address cannot be
+moved by DMA) - each half of two bytes or more; a half of one byte, or
+one with no buffer, stays on the pump - and both are armed for their
+errors alone: the tenure's own STOP after NBYTES proves every byte went
+through TXDR and RXDR, so a tenure takes the I2C's interrupts and no DMA
+one, and `finish()` completes the transmit engine on that proof
+([dma.md](dma.md), "Two moments").
 
 `I2cClient<n, pins>` is the target: `init(clock, addresses, speed,
 kernel, filters, no_stretch)`, `addressed()`, `host_reads()`,
@@ -190,7 +213,7 @@ the reason is in the findings.
 
 Measured by `test_stm32_i2c`. The findings down to "ES0548 2.10.2 did
 not fire once" are the SELF-LINK's (I2C1 host PB8/PB9, I2C2 client
-PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z`, 142
+PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z`, 147
 verdicts. The ones under "The peer bus" are a SECOND CHIP's, on the same
 two pads and the same pull-ups: 54 verdicts, against a SAM C21 and
 against a second STM32G0.
@@ -225,12 +248,15 @@ first loses that byte AND leaves RXNE standing on a level-driven vector,
 which is an endless handler that starves the program so completely that
 nothing can report it.
 
-**A NACK branch must return.** The STOP the peripheral sends by itself
-arrives as its own interrupt microseconds later; a branch that falls
-through to a general sweep clears that STOPF the moment it sets, and the
-tenure keeps its status, loses its flags and never completes. The
-symptom is an order dependency between letters, which is what a race
-usually looks like first.
+**NACKF and STOPF are two events microseconds apart.** The STOP the
+peripheral sends by itself after a NACK raises its own flag later; an
+entry that served NACKF and then swept the status register would clear
+that STOPF the moment it set, and the tenure would keep its status, lose
+its flags and never complete - the symptom an order dependency between
+letters, which is what a race usually looks like first. The engine
+takes no NACK interrupt at all: the STOPF entry reads NACKF, which
+stands until cleared, and names the refusal - the address's when the
+preloaded byte never left TXDR (TXE still clear), a byte's when it did.
 
 **Three flags no branch owns.** PECERR, TIMEOUT and ALERT ride the one
 ERRIE a plain I2C engine arms for BERR and ARLO. They are swept at the
@@ -363,6 +389,80 @@ preempt the interrupt reading it; and **a wire letter needs a flushed
 marker between its steps**, because an I2C storm starves main so
 completely that a letter which prints only at its end reports nothing at
 all.
+
+### The host's cost (bench_stm32 letter i)
+
+Letter `i` of `bench_stm32` runs every tenure shape on the self-link
+(I2C1 the host on PB8/PB9, I2C2 the client at 0x42 on PA11/PA12 from
+its own vector, both kernels on PCLK at 64 MHz, 2.2 kOhm pull-ups):
+writes and reads of 1, 2, 16 and 255 bytes, the register read (one
+written, a repeated START, 1, 2 and 16 read), the probe answered and
+not, a write to the address nobody answers - through the pump and
+through the engines (DMA1 channels 2 and 3), at the three speeds, the
+data judged after every run. `wire` is the bus's own time at the SCL
+period MEASURED as the slope of two engined writes (255 and 16 bytes),
+nine periods a byte with the address and one for the START and the
+STOP; `the rest` = wall - wire is the fixed cost of a tenure, the
+instrument's own share inside it (a stamp pair a handler, an idle turn
+or two, the ruler read in the Stopwatch: about 400 cycles, the same in
+every column). The vendor's column is ST's HAL v1.4.7 on the same board,
+the same client and the same TIMINGR words (`HAL_I2C_Master_Transmit_IT`,
+`_Receive_IT`, `Mem_Read_IT`, a zero-length transmit as the probe, the
+DMA variants), CubeMX's G0 handler shape on the vector. At 400 kHz:
+
+| tenure | the rest (cycles), interrupts: before | after | ST HAL |
+|---|---|---|---|
+| write 1 | 1554, 2 | 1147, 1 | 1362, 1 |
+| write 2 | 1554, 3 | 1149, 2 | 1361, 2 |
+| write 16 | 1572, 17 | 1167, 16 | 1374, 16 |
+| read 1 | 1502, 2 | 1352, 1 | 1545, 2 |
+| read 16 | 1529, 17 | 1357, 16 | 1560, 17 |
+| register read 1 + 1 | 2377, 4 | 1852, 2 | 2289, 4 |
+| register read 1 + 16 | 2375, 19 | 1860, 17 | 2313, 19 |
+| probe answered | 1420, 1 | 1223, 1 | 1393, 1 |
+| probe not answered | 1074, 2 | 809, 1 | - |
+| write 255 through the engine, x | 1.00 | 1.00 | 1.00 |
+
+- **The interrupts are the silicon's floor.** N for a write or a read of
+  N bytes, two for a one-byte register read, one for a probe either
+  way: the preload, the last byte at the STOP and the NACK at the STOP
+  each took one out, and the engines take every data byte - an engined
+  tenure is one interrupt (two for a register read), the STOPF (and the
+  TC).
+- **The pump's entry is 127 cycles a byte** (169 between the meter's
+  stamps, 42 of them the stamps' own), where it was 163 and ST's is
+  168; at 400 kHz a byte is 1193 cycles of wire, so the pump costs a
+  tenth of the core and keeps the wire's pace (x 1.00 at 255 bytes).
+  The decode is one mask from CR1 (the six enables sit at their flags'
+  positions) and one test for the six errors.
+- **`start()` is 228 cycles** (290 on the ruler, one read of it 62),
+  where it was 371: the tenure copies the five fields its entries read
+  and not the whole Request, and the CR2 word is built inline.
+- **The engines' fixed cost** is the channel programmed at `start()` (432
+  on the ruler where the pump's is 290) and one fewer branch in the
+  STOPF entry; from two bytes a half they save an interrupt a byte, and
+  a 255-byte write or read runs at x 1.00 at 400 kHz and 1.01 at the
+  1 MHz rung.
+- **At the 1 MHz rung the pump is the core's limit, not the wire's**:
+  both ends of the self-link are this core's interrupts, about 300
+  cycles of handler for a byte of 474 - a 255-byte write at x 1.11
+  (1.28 before), the engines at 1.01.
+- **Against ST's HAL**: every shape within a fifth and ahead - the HAL
+  preloads too, but its entry is the generic `I2C_Master_ISR_IT` (168
+  cycles a byte, 403 for its STOPF entry against 242), it reads a
+  one-byte read through an RXNE entry, and its register read takes four
+  interrupts to this engine's two.
+- **The rungs run fast on the standard's edges, measured as the slope**:
+  100 kHz at 106.5 kHz, 400 kHz at 482.8 kHz and 1 MHz at 1.216 MHz on
+  this self-link - the chooser charging tSYNC = 1000 / 750 / 500 ns where
+  the bus's own is near 440 (above). A bus that must not exceed its
+  mode's rate hands its measured edges to `init()`.
+- **The 1 MHz rung is not claimed as Fm+.** Released from low, SCL
+  reaches the input's threshold 8 cycles and SDA 12 cycles after the
+  same steps on a line already high (125 and 190 ns at 64 MHz, the
+  poll's turn the resolution) - on an RC edge about 90 and 130 ns from
+  30 to 70 per cent, the second over the 120 ns Fm+ allows a rise. The
+  data is byte-exact at that rung all the same, on this short link.
 
 ### The peer bus (letters n..r)
 
@@ -550,9 +650,13 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- **The engined tenure with both engines armed for their errors alone**
-  and completed on STOPF: letter `h` on the self-link (I2C1 PB8/PB9 to
-  I2C2 PA11/PA12 with its pull-ups, above) is what measures it.
+- **A data byte refused under an engine.** The NACK's name under an
+  engine is the transmit channel's count (the address's when it never
+  moved, measured by letter `i`'s write to the address nobody answers);
+  a byte refused mid-block is the other branch, and the self-link's
+  client refuses bytes only under byte control, which letter `c` stages
+  on the pump. Letter `c`'s refusal through the engined host would
+  measure it.
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of

@@ -90,7 +90,8 @@
 //   g  THE FILTERS: the analog one off and on, the digital one at four
 //      depths, measured as the timing shift they really are
 //   h  RELOAD PAST 255 BYTES through TCR, AUTOEND against a software
-//      STOP, and the host's DMA engines
+//      STOP, and the host's DMA engines - a write, a read, a register
+//      read - with the halves they leave to the pump right after them
 //   i  SMBus: the PEC end to end, PECERR staged, and THE TIME-OUTS -
 //      whose hold does each of the three really police
 //   j  THE WAKE FROM STOP: the client in Stop 1, woken by its address
@@ -2072,6 +2073,75 @@ void th_long() {
     }
     bench.verdict("the host's RX engine drains 64 bytes",
                   DmaHost::status() == i2c_ok && same(rx_buf, serve, 64));
+
+    // The register read on both engines: two bytes written, the repeated
+    // START, eight read.
+    for (uint16_t i = 0; i < 8u; ++i) {
+        rx_buf[i] = 0;
+    }
+    peer_rx[0] = 0;
+    peer_rx[1] = 0;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.tx_len = 2;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.rx_len = 8;
+    host_done = false;
+    (void)DmaHost::start(r);
+    for (uint32_t i = 0; i < 40'000'000UL && !host_done; ++i) {
+    }
+    // (The client's count restarts at every address match, the repeated
+    // START's included: the two written bytes are judged by content.)
+    const bool wr_ok = DmaHost::status() == i2c_ok && same(peer_rx, tx_buf, 2) &&
+                       same(rx_buf, serve, 8);
+    // AND THE HALVES THE ENGINES DO NOT CARRY, right after them on the
+    // same host: a one-byte write and a one-byte read (the pump's, the
+    // shortest half an engine takes being two), and a write of three with
+    // NO BUFFER, which the pump fills with 0xFF - the tenure an engined
+    // host once left with its transmit interrupt disarmed by the engine
+    // before it, its clock stretched to the arbiter's timeout.
+    peer_rx_n = 0;
+    r.tx_len = 1;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    r.rx_len = 0;
+    host_done = false;
+    (void)DmaHost::start(r);
+    for (uint32_t i = 0; i < 40'000'000UL && !host_done; ++i) {
+    }
+    const bool one_w = DmaHost::status() == i2c_ok && peer_rx_n == 1u && peer_rx[0] == tx_buf[0];
+    rx_buf[0] = 0;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.tx_len = 0;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(rx_buf));
+    r.rx_len = 1;
+    host_done = false;
+    (void)DmaHost::start(r);
+    for (uint32_t i = 0; i < 40'000'000UL && !host_done; ++i) {
+    }
+    const bool one_r = DmaHost::status() == i2c_ok && rx_buf[0] == serve[0];
+    peer_rx_n = 0;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.tx_len = 3;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(nullptr));
+    r.rx_len = 0;
+    host_done = false;
+    (void)DmaHost::start(r);
+    for (uint32_t i = 0; i < 40'000'000UL && !host_done; ++i) {
+    }
+    const bool filler = host_done && DmaHost::status() == i2c_ok && peer_rx_n == 3u &&
+                        peer_rx[0] == 0xFFu && peer_rx[1] == 0xFFu && peer_rx[2] == 0xFFu;
+    print(serial, "  DMA write-then-read 2+8 ", wr_ok ? "exact" : "WRONG", "; one byte written ",
+          one_w ? "exact" : "WRONG", ", one read ", one_r ? "exact" : "WRONG",
+          "; a write of three with no buffer: done ", host_done, " status ", DmaHost::status(),
+          ", client got ", peer_rx_n, crlf);
+    bench.verdict("the write-then-read on both engines: two written, the repeated START, "
+                  "eight read",
+                  wr_ok);
+    bench.verdict("a one-byte write and a one-byte read through the engined host (the pump's "
+                  "halves)",
+                  one_w && one_r);
+    bench.verdict("and a write with no buffer after them completes, the pump's filler on the "
+                  "wire",
+                  filler);
     dma_host_live = false;
     DmaHost::release();
     (void)Host::init(clock, I2cClock::pclk);
