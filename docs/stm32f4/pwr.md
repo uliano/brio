@@ -424,9 +424,9 @@ measurement instead of out of the verdict.
 **The console's ring being empty is not the wire being empty.** A Stop
 taken while the last character is still in the USART's shift register
 truncates it: the line's own CRLF was lost and the host resynchronized
-several bytes into the next line. The transport's `tx_idle()` reports
-the ring; TC reports the wire, and the suite waits for both before every
-measured sleep.
+several bytes into the next line. The transport's `tx_idle()` is the
+wire's - the ring empty and TC set ([usart.md](usart.md)) - and the suite
+waits for it before every measured sleep.
 
 **Standby works and comes back through the reset vector.** A token in an
 RTC backup register, the wake-up timer 2 s out, `Pwr::enter(standby)`:

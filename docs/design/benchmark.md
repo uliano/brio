@@ -346,6 +346,7 @@ program. `x` is read on the plain binding.
 | family (clock; the loop's top rate) | uart.tx x at the top rate, 256 and 4096 | uart.rx 256 x by rate; receive entries for 256 | the edge after the last stop bit | `tx_idle()` after the last stop bit | the core at about 1 Mbaud: transmit, receive (the vendor's receive) | the vendor's receive, x |
 |---|---|---|---|---|---|---|
 | SAM C21J18A (48 MHz OSC48M, 2 WS; 3 Mbaud) | the engine 1.03, 1.00; the interrupt transmitter 2.17, 2.14 (194 to 198 cycles a byte against a 160-cycle frame; 1.46 from SRAM) | the interrupt receiver 1.00 at 115200, 1.01 at 1 Mbaud, at 3 Mbaud 0.34 entries a character and lossless with no meter on the vectors; the engine 1.00, 1.02, 2.09 at 3 (its plain sender slower than the wire); 256 entries at 1 Mbaud, one completion under the engine | the interrupt receiver 416 to 424 cycles; the engine 656 to 763 at a block's end (1.37 frames at 1 Mbaud), a tail at the owner's ask | within a probe turn (94 to 308 cycles) at 115200, 1 and 3 Mbaud | the transmit engine 1 %, the interrupt receiver 44 to 46 % (32 %) | the data sheet's bare RXC handler: 1.01 at 1 Mbaud, 154 cycles a character against 211 to 221; at 3 Mbaud 241 of 256 lost |
+| STM32F446RE (180 MHz PLL, 5 WS, ART on; 5.625 Mbaud) | 1.02 (the engine 1.02), 1.00 (1.01) | the interrupt receiver 1.00, 1.00 and 1.02 at 115200, 1 and 5.625 Mbaud (a hardware overrun in two runs of four at 5.625 beside the bench's meters), the engine 1.00, 1.01 and 1.03; 256 entries for 256, the engine two USART entries a burst and one a half lap | the engine 1.0 frame at 115200 and 1 Mbaud, 1.5 at 5.625 Mbaud | +8 to +23 cycles at 115200 and 1 Mbaud, both transmitters | the transmit engine 0.7 %, the interrupt transmitter 12.5 %; the interrupt receiver 5.8 %, the engine 0.2 % | HAL v1.8.5 ReceiveToIdle_DMA: the edge at the same frame (497 cycles at 5.625 Mbaud against 508), one USART interrupt a burst against two |
 | STM32G0B1RE (64 MHz PLL, 2 WS; 2 Mbaud) | 1.05 (the engine 1.04: the first block's start), 1.00 (1.01) | the paced receiver 1.00, 1.02 and 1.05 at 115200, 1 and 2 Mbaud, the engine 1.00, 1.01 and 1.02; 64 entries for 256, the engine two marks | the paced receiver 1.06 frames at 115200, at 1 Mbaud the tail taken by the level's own entry; the engine's IDLE 1.06 frames and 1.40 to 1.53 at 1 Mbaud | +8 cycles (the interrupt transmitter) and -29 (the engine, inside the poll's resolution) at 9600 baud, a bit 6666 | transmit 19 % (the engine 3.5 %), receive 13 % (17 %: the HAL's FIFO receive) | HAL v1.4.7: its FIFO receive 107 cycles a byte against 84, and the length wanted up front; ReceiveToIdle_DMA's edge 1.04 and 1.34 to 1.49 frames, within 5 per cent |
 | RP2040 (125 MHz; 7.8125 Mbaud) | 1.05 (the engine 1.09: the first block's start in a cold image), 1.00 (1.00) | the interrupt receiver 1.00, 1.01 and 1.09 at 115200, 1 and 7.8125 Mbaud, the engine 1.00, 1.01 and 1.07; 21 entries for 256 at 1 Mbaud, the engine two completions | the interrupt receiver 3.17 frames at 115200 (RT), 1.3 to 2.7 at 1 Mbaud; the engine's tail at the owner's ask | 0 to 1 us after it at 9600 baud, a bit 104 us | transmit 2 % (25 cycles a byte), receive 3.4 % (43 a byte); the SDK's polled loop the whole wire time | pico-sdk 2.3.1, polled loops only: 58 cycles a byte read from the FIFO against 43 |
 | RP2350, Cortex-M33 (150 MHz; 9.375 Mbaud) | 1.02 (1.07), 1.00 (1.00) | 1.00, 1.01 and 1.10, the engine 1.00, 1.00 and 1.07; 20 entries for 256 at 1 Mbaud | 3.18 frames at 115200, 3.26 at 1 Mbaud; the engine's tail at the owner's ask | 0 to 1 us, a bit 104 us | 1.1 % (17 a byte), 2.1 % (31 a byte) | pico-sdk: 34 cycles a byte against 31 |
@@ -363,6 +364,16 @@ What the rows say:
   consumer starves while the hardware loses 1 to 6 frames in 256 - the
   core's limit, which the data sheet's own sequence (65 cycles a frame)
   meets too ([../avrdx/usart.md](../avrdx/usart.md)).
+- A one-level receiver whose flags clear by a status read and a data
+  read - the F1 lineage: the STM32F4, the CH32V203, the CH32V006 -
+  takes its engine's edge from IDLE and never reads the data register:
+  the vector's status read and the stream's next read finish each clear,
+  so no byte is taken, and because that clear also forgets the IDLE of a
+  burst of one frame, the vector takes RXNE once a burst to learn it
+  finished - two entries a burst where the HAL takes one, at the same
+  frame. The HAL's one entry is its read of DR under DMAR, which can
+  take a frame from the stream with no flag raised
+  ([../stm32f4/usart.md](../stm32f4/usart.md)).
 - A FIFO with a level and a time-out - the STM32G0's FULL USART -
   paces the interrupt receiver at half its depth, a quarter of an entry
   a character, and the time-out at ten bit times delivers the tail

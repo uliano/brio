@@ -23,7 +23,9 @@ the instance's cells of the request mapping, an engine on a part class
 whose manual was not read, a receive ring longer than one lap of the
 stream's count, and one pad twice. Bench: the console apps
 and the platform suite on the four boards, the engined console in
-`test_stm32f4_dma`.
+`test_stm32f4_dma`, the transport on USART6's single-wire loop in
+`test_stm32f4_serial` (the Nucleo-F446RE), its cost in `bench_stm32f4`
+letter u.
 
 ## What the silicon does
 
@@ -31,10 +33,40 @@ and the platform suite on the four boards, the engined console in
 CH32V00x stratum drives under WCH's names, and NOT the STM32G0's. The
 flags are cleared by READ SEQUENCES and not by a clear register (30.6.1):
 PE, FE, NE, ORE and IDLE by reading SR then DR; TC by reading SR then
-writing DR; RXNE by reading DR; LBD and CTS by writing 0 to SR. The
-handler is written around those sequences: it reads SR once, decides
-from that copy, and lets the DR read do the clearing - which is also
-why an overrun without a byte still reads DR.
+writing DR, or by writing 0; RXNE by reading DR; LBD and CTS by writing
+0 to SR. The interrupt receiver's handler is written around those
+sequences: it reads SR once, decides from that copy, and lets the DR read
+do the clearing - which is also why an overrun without a byte still reads
+DR.
+
+**What a status read begins, the stream's read of DR finishes** - and
+only for what that status read saw. Measured on the F446 with the
+receive stream running and no read of DR by the CPU, the facts behind
+`test_stm32f4_serial`'s letters d and f: a break's FE, seen by a read of SR, is gone
+after the stream reads the next frame; a FE raised AFTER a status read
+survives the stream's read of its own frame; a FE seen by a status read
+and raised again by the next frame is cleared by that frame's read - the
+same bit; and an IDLE cleared this way also forgets the idle the clearing
+frame armed, so a burst of one frame after it raises no IDLE (two frames
+do). The RM's own ORE note says the same of a frame arriving between the
+two reads (25.4.3). Every rule of the receive engine's vector below comes
+from those four measurements.
+
+**The receive side's offer, and what the transport takes of it:**
+
+| the chapter's offer | taken? | why |
+|---|---|---|
+| RDR, one level (25.4.3): no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | the block has nothing deeper to batch; at 5.625 Mbaud a byte is 320 cycles and the interrupt receiver keeps up with the console's and the tick's handlers beside it, an overrun counted when a longer one holds it off |
+| DMAR and a circular stream (25.4.13, dma.md) | the receive engine | the bulk path: no entry a byte, no re-arm between laps |
+| IDLE and IDLEIE: an idle frame after a frame (25.6.1) | the engine's burst edge | the end of a burst one frame after its last stop bit; the stream's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
+| RXNEIE beside DMAR | the engine's wait for a frame | RXNE is the stream's request and the interrupt both: the stream still takes the byte and the vector learns one came - the only way to know the clear finished, and the edge of a burst of one frame |
+| EIE (FE, NE, ORE under DMAR) and PEIE | counted by the engine's vector | an error is counted when it rises, then disarmed until the stream's next read finishes its clear |
+| the half and full marks of the stream's lap (dma.md) | the engine's edge with no silence | a stream that never pauses is told twice a lap |
+| a receiver time-out | none on this block | the STM32G0's RTOF is a later generation's |
+| LBD, the LIN break flag | not taken | the transport carries no LIN; a break reaches the receiver as the 0x00 frame with FE it is, and LBD rises beside it whether or not LIN is on (measured) |
+| HDSEL, single-wire half duplex | the loop of every suite letter | the receiver hears its own transmitter; this block has no loop-back bit |
+| the bit-band alias of CR1 (RM0390 2.2.5, PM0214 2.2.5) | the single-bit interrupt enables | one store, atomic against a handler that rewrites CR1's other bits - the engine's vector does |
+| TC, written 0 to clear (25.4.13 step 6) | at every transmit block's start | the stream's writes of DR do not run TC's software sequence; tx_idle() must not answer from the frame before the block |
 
 **Ten instances at most, and the NAME says what an instance has.**
 USART1, USART2 and USART6 on every part but the F410Tx (no USART6),
@@ -100,23 +132,32 @@ TX and RX inside the chip and leaves the RX pad alone.
   `write_data`/`write_word`, `read_data`/`read_word`, `data_address`.
   `UsartFlag` spells SR's bits, `receive_errors` and `rc_w0`.
 - `UartPins{tx, rx}` as `PinSel`s, `UartOptions{over8, one_bit,
-  half_duplex, rts, cts, rts_pin, cts_pin, tx_speed}` - the defaults
-  are the console's.
+  half_duplex, rts, cts, rts_pin, cts_pin, tx_speed,
+  single_wire_push_pull}` - the defaults are the console's. In half
+  duplex the TX pad is open drain on its pull-up unless
+  `single_wire_push_pull`, which drives it push-pull while a frame goes
+  out (the transmitter releases the pad between frames, 25.4.10, and the
+  pull-up holds it): for a line with no other driver, because the open
+  drain rises on the pull-up alone - 1 Mbaud carried, 2.8 not, against
+  11.25 push-pull (letter a).
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format = 8N1)`
   (the divisor from `apb_hz(clock, on_apb2)`, false when unreachable or
   for nine data bits), `isr()` (the vector's body: the RX edge as its
   return), `write_byte`, `write_bulk`, `read_byte`, `read_bulk`,
-  `read_span` and `consume` (the receive run in place), `rx_pending`, `tx_idle`, the counters `rx_overruns`,
+  `read_span` and `consume` (the receive run in place), `rx_pending`,
+  `tx_idle` (THE WIRE IS IDLE: the ring empty - an engine's block holds
+  its run there until its completion - and SR.TC set, cleared as every
+  transmit block starts), the counters `rx_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns`,
   `clear_errors`, `rebase(hz)` (the ClockUser verb: `hz` is SYSCLK and
   the bus rate is DERIVED from it with `apb_hz_at`, not read back from
   the RCC, because a dynamic clock fans the new rate out BEFORE the
   prescalers move), `set_baud(hz, baud)`, `divisor_for`,
   `min_hz_for`, `can_baud`, `actual_baud(fck)`, `kernel_hz<Clock>()`,
-  `release()`; with engines, `dma_isr()` (the streams' vectors' body),
-  `harvest()` (the receive edge for the owner's TimeEvent, below) and
-  `dma_faults()`. Refused at compile time: invalid or coincident pads,
+  `release()`; with engines, `dma_isr()` (the streams' vectors' body,
+  whose true is the receive edge as `isr()`'s), `harvest()` (the same
+  edge asked from the consumer's side, below) and `dma_faults()`. Refused at compile time: invalid or coincident pads,
   an engine off the instance's request cells, flow control on a UART, a
   flow pad missing, and with a receive engine a ring above 32768 bytes.
 - WITH A TRANSMIT ENGINE THE MASK COVERS THE CLAIM AND NOTHING ELSE. Two
@@ -139,16 +180,42 @@ TX and RX inside the chip and leaves the RX pad alone.
   bytes skipped - and a consumer looking once a millisecond keeps up when
   the ring holds a millisecond of the line (92 bytes at 921600). The ring
   must be read from one context, the consumer's.
-- `harvest()` IS THE EDGE, NOT A PUBLICATION. With nothing to publish, what
-  it adds is the moment to tell a consumer: true when the ring holds bytes
-  and its consumer has found it empty since the last true - read_span(),
-  read_byte() or read_bulk() coming back empty is what re-arms it - so a
-  consumer that drains to empty is told once per idle-to-busy transition,
-  the contract `isr()` has. It looks at the view, so it runs in the
-  consumer's main context and never in an interrupt; it reads the
-  receive errors (clearing one costs a byte, as the chapter's sequence
-  reads DR) and binds the stream again after a transfer error stopped
-  it, the ring restarted empty and the loss in `dma_faults()`.
+- THE RECEIVE ENGINE'S BURST EDGE IS THE USART'S VECTOR'S - and the
+  CPU never reads DR while the stream owns it. `isr()` runs a two-state
+  machine over the clears (the header's text, the measurements above):
+  waiting for the END of a burst with IDLEIE, PEIE and EIE armed, an
+  idle line or an error is counted, its clear begun by that status read,
+  the edge reported, and the vector turns to waiting for a FRAME -
+  those three disarmed, RXNEIE armed; the next entry that finds SxNDTR
+  moved knows the stream's read finished the clear, counts what stands
+  as a later frame's error, and turns back, reporting the edge again -
+  the edge of a burst of one frame, which raises no idle of its own. The
+  stream's half and full marks report it from `dma_isr()`. Two USART
+  interrupts a burst, none a byte; the edge one frame after the last
+  stop bit. The gate is the interrupt receiver's: true once per
+  idle-to-busy transition of the consumer, re-opened by a look that
+  finds the ring empty (and looks again, so a byte landing between is
+  in the run or raises the edge).
+- WHAT THE CHANNEL'S READ BOUNDS. A frame whose error rises while its
+  flag from the frame before stands (seen, not yet cleared) is cleared by
+  its own read unseen: a run of errored frames counts every other one,
+  errors separated by a clean frame count each (letter d). And A STATUS
+  READ ANYWHERE ELSE is the first half of the same clear: one landing
+  between an errored frame's flag and the stream's read of that frame -
+  a few cycles - clears it before the vector counts it, which a thread
+  polling SR in a tight loop does to three breaks in ten (letter d).
+  `tx_idle()` reads SR only once the ring is empty. No byte is ever
+  lost to either: they bound the COUNTS.
+- `harvest()` IS THE SAME GATE FROM THE CONSUMER'S SIDE: true when the
+  ring holds bytes and the consumer has found it empty since the last
+  true, from a vector or from here - so an owner that still asks is told
+  nothing twice. It reads neither SR nor DR, and it binds again a stream
+  a transfer error stopped (as every read verb does: the restart is the
+  consumer's, the view being its).
+- `write_bulk()` COPIES WITH memcpy where it pays: a run of 16 bytes or
+  more whose source and ring slot share their alignment modulo the word
+  takes the runtime's word path, any other the four-instruction byte
+  loop (memcpy would run the same loop behind a call).
 
 ## How to use it
 
@@ -171,7 +238,21 @@ const uint32_t real = Serial::actual_baud(Serial::kernel_hz<SysClock>());
 
 A faster link: `constexpr brio::UartOptions fast{.over8 = true, .tx_speed
 = brio::PinSpeed::high};` then `brio::Uart<1, pins, 64, 256,
-brio::NoDmaEngine, brio::NoDmaEngine, fast>`. A mode beyond the
+brio::NoDmaEngine, brio::NoDmaEngine, fast>`. A stream received without
+the CPU, its edge from three vectors - the USART's and the two streams'
+(dma.md's example has the cells):
+
+```cpp
+using Link = brio::Uart<6, link_pins, 256, 256, brio::DmaTxEngine<2, 6, 5>,
+                        brio::DmaRxEngine<2, 1, 5>>;
+extern "C" void USART6_IRQHandler() {
+    if (Link::isr()) { brio::post<LinkLines>(brio::RxActivity{}); }       // idle line, first frame
+}
+extern "C" void DMA2_Stream1_IRQHandler() {
+    if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }   // the lap's marks
+}
+extern "C" void DMA2_Stream6_IRQHandler() { (void)Link::dma_isr(); }      // transmit blocks
+``` A mode beyond the
 transport - a LIN break, a muted receiver - through `brio::Usart<1>`'s
 verbs on the same instance.
 
@@ -220,49 +301,103 @@ verbs on the same instance.
   bytes that arrived while a filled run waited for the next look
   ([dma.md](dma.md)). On the half-duplex echo the circular ring returns
   128 of 128 where the run returned 127, with no flag for the missing one.
-- `harvest()` costs 73 core cycles with nothing new and 100 with bytes
-  waiting (110 and 186 as the run's publisher): the error read, the
-  restart flag, one look of the view - SxNDTR and the lap count - and
-  the edge, with no call. Its edge is measured both ways in letter n: the
-  first bytes reported, not again to a consumer that has not drained, not
-  for an empty ring, and again once the consumer has drained; a consumer
-  asleep for three laps finds one overrun counted at its first look,
-  nothing offered, and the bytes after it whole.
-- AND `tx_idle()` IS NOT THE WIRE: it reports the transport's ring, and
-  the last character is still in the shift register when it answers
-  true. A Stop taken there truncates that character - measured, the
-  line's own CRLF lost - so a program that stops its clocks waits for
-  the USART's TC as well ([pwr.md](pwr.md)).
+- `harvest()` costs 57 core cycles with nothing new and 84 with bytes
+  waiting: the restart flag, one look of the view and the gate, no
+  register of the USART. The vectors' edge is measured both ways in
+  `test_stm32f4_dma` letter n: the first bytes reported, not again to a
+  consumer that has not drained, `harvest()` asked after them answering
+  false, and the next bytes reported once the consumer has drained; a
+  consumer asleep for three laps is told once, finds one overrun counted
+  at its first look, nothing offered, and the bytes after it whole. And
+  `brio stress` (letter u) with the consumer looking at most once a
+  millisecond and only after an edge reads every byte at 115200, 460800
+  and 921600: 10688, 30820 and 32200 of as many.
+
+**The single-wire loop** (`test_stm32f4_serial`, USART6 on PC6): 256
+bytes back whole and in order through both receivers at 115200, 1 Mbaud
+and 5.625 Mbaud (APB2 / 16), and through the engine at 11.25 Mbaud
+(OVER8 with ONEBIT, APB2 / 8 - BRR 0x20); every frame format of the task
+- 8N1, 8E1, 8O1, 7E1, 7O1, 8N2 - byte-exact at 1 Mbaud, a seven-bit
+frame's eighth bit being its parity bit as the stream stores it (DR's
+MSB, 25.6.2; the interrupt receiver hands it on too); the open drain on
+the internal pull-up whole at 1 Mbaud and 31 of 64 at 2.8125.
+
+**Errors under the engine** (letter d): 120 data bytes with 14 breaks
+between them, each followed by a clean frame - all 120 delivered intact
+and in order, the 14 breaks stored as the 0x00 frames they are, FE
+counted 14: no byte taken by a clear. Two breaks back to back count 1,
+three count 2. Ten breaks under a thread polling SR as fast as it can:
+7 counted. The interrupt receiver drops each break's frame and counts
+it (40 of 40 data bytes, FE 10 for 10).
+
+**`tx_idle()` is the wire's** (letter e): its first true lands 1570 and
+1579 cycles after the last stop bit's rising edge on the pad at 115200
+(a bit is 1562) - interrupt transmitter and transmit engine - and 202 and
+203 at 1 Mbaud (a bit is 180), the edge's EXTI latency taken off: within
+the few cycles of TC rising at the stop bit's end, on both paths. Before
+this round the verb was the ring's, a frame early.
+
+**The burst edge from the vector** (letter f, nothing polled): every
+burst of one frame told; a burst of 16 at 1 Mbaud told 1954 cycles after
+its last stop bit (1.0 frame) with two USART interrupts and none a byte;
+four laps of a 64-byte ring with no silence read whole on the lap's
+marks, nine stream interrupts.
+
+**The cost** (`bench_stm32f4` letter u on the same loop; each line raw,
+the instrument's 4 cycles a stamp pair in every isr): the receive engine
+takes 2 USART interrupts a burst and 1 stream interrupt a half lap; a
+16-byte burst at 115200 costs 1702 busy cycles (the BEFORE, the owner's
+poll a tick, 1716 and the edge 0.51 ms after the last stop bit), the
+edge comes 15904 cycles after it (1.0 frame), 2000 at 1 Mbaud (1.1),
+508 at 5.625 Mbaud (1.6, the handler's 197 cycles six tenths of a frame
+there). The interrupt receiver is one entry a byte, 90 cycles each; at
+5.625 Mbaud it has one frame of margin, and in the bench app, whose
+metered handlers sit beside it, it took a hardware overrun - one byte of
+256 - in two runs of four, where the suite's unmetered loop reads it
+whole. Each
+of the engine's two entries is about 197 cycles between the bench's
+stamps, the app's glue included: the idle-line one about 60 instructions
+and seven register accesses (SR, SxNDTR twice, CR1 and CR3 read and
+written), the first-frame one about 45 and eight. Transmit through the engine is wire-bound (x 1.00 at 115200
+and 1 Mbaud, 1.01 at 5.625 Mbaud for 4096 bytes, a block's completion
+and restart a frame's gap every 255 bytes), at 0.7 per cent of the core
+at 1 Mbaud (busy 52399 of 7.38 M cycles for 4096 bytes) against 12.5 per
+cent through the interrupt transmitter (919178).
+
+**Against the vendor** (ST's HAL v1.8.5, `HAL_UARTEx_ReceiveToIdle_DMA`
+in circular mode on the same loop and bursts, a scratch program): the
+edge at the same frame after the last stop bit (15881, 1985 and 497
+cycles at the three rates against brio's 15904, 2000 and 508), ONE USART
+interrupt a burst against brio's two, 188 cycles for its idle-line
+handler and callback against brio's two entries of about 197 each -
+brio pays one interrupt more a burst. The difference is the read the HAL
+makes and brio does not: `__HAL_UART_CLEAR_IDLEFLAG` reads SR then DR
+while DMAR is set, and a frame completing between the two reads is taken
+by the CPU and lost to the stream without a flag; the HAL also treats any
+receive error under DMA as fatal and aborts the reception. A gap above a
+fifth, named: the price of never reading DR.
 
 ## Not covered yet
 
 Driver gaps:
-- The IDLE line as the receive edge, with a receive engine: the edge is
-  `harvest()`'s, so a line's latency is the owner's polling period
-  rather than a frame time after its last byte, and IDLE's clearing
-  sequence (SR then DR) must not take a byte out of the stream's hands -
-  the UART round's, with SerialPort's posting order over a ring that can
-  be written over (util/ring.hpp).
 - Nine-bit words through the TASK (the resource's `write_word`/
   `read_word` speak them; the rings carry bytes) - declined, as on the
   other strata.
 - A wake from Stop: this USART has no wake unit (the G0's WUF); the
   power chapter says what a Stop does to a pending receive.
+- The receive errors' COUNTS under the engine are bounded, not exact
+  (above): exact counts would need the CPU's read of DR, which the
+  engine's rule forbids - declined.
 
 Implemented, not bench-verified (every mode of the resource beyond the
-console's - each waits for the wire or the peer that measures it):
-OVER8 and ONEBIT (a peer at a rate the console does not use), mute
-mode with both wakes, LIN's break and detection, single-wire half
-duplex against a second board (the port's own echo is measured,
-`test_stm32f4_dma` letters m and n), IrDA (an IR pair), the smartcard
-(no card on the desk), the synchronous clock (a timer capture on CK -
-the timer chapter's ruler), CTS/RTS flow control (a peer that asserts
-them), the IDLE/TC/PE/CTS/LBD interrupt enables, `set_baud` at run time
-(nothing changes the LINK's rate with the clock standing still),
-`read_bulk` over the interrupt-driven ring (compiled; the console drains
-its receive run in place, `read_span`/`consume`, and letter u measures
-`read_bulk` over the receive engine's ring), the instances beyond the
-consoles' (USART6 and the UARTs - compiled on every header that has
-them, none driven; USART1, USART2 and USART3 are the four boards'
-consoles), the frame formats beyond 8N1 (parity and two stops compile; a
-peer measures them).
+transport - each waits for the wire or the peer that measures it): mute
+mode with both wakes, LIN's break and detection, single-wire half duplex
+against a second board, IrDA (an IR pair), the smartcard (no card on the
+desk), the synchronous clock (a timer capture on CK - the timer
+chapter's ruler), CTS/RTS flow control (a peer that asserts them), the
+TC/CTS/LBD interrupt enables, `set_baud` at run time (nothing changes the
+LINK's rate with the clock standing still), the instances beyond USART2
+and USART6 driven on the F446 and the consoles' USART1 and USART3
+(UART4/5/7/8 compiled on every header that has them, none driven), the
+OVER8 and frame-format legs on the other three boards (the loop's pad is
+surveyed on the Nucleo-F446RE alone).

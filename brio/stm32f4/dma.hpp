@@ -1284,7 +1284,9 @@ private:
  *    SxNDTR reaches zero, before the reload - measured, two completions
  *    for two laps, docs/stm32f4/dma.md), so the count lags the counter by
  *    the handler's latency and never leads it. The half-transfer flag is
- *    not armed: a lap is one interrupt.
+ *    armed on request: a byte transport's receive ring wants the lap's
+ *    half and full marks as the edge of a stream that never falls silent,
+ *    a lap being otherwise one interrupt.
  *
  * What the circular shape cannot do is stop for a consumer that has not
  * caught up - the stream writes over what was not read - and the view
@@ -1369,7 +1371,8 @@ public:
      * after lap for as long as the binding stands, `data` the register it
      * is filled from. The completion and the transfer error interrupt -
      * a completion is a lap, counted by service_ring(), which the stream's
-     * vector must call - and the half-transfer flag is left unarmed.
+     * vector must call - and with `half_mark` the half-transfer one too,
+     * which service_ring() hands back without counting.
      *
      * False, and nothing touched, for a ring that is empty, longer than
      * SxNDTR counts (65535) or not aligned on its element (10.3.6). A
@@ -1382,20 +1385,20 @@ public:
      * (the wedge, docs/stm32f4/dma.md).
      */
     static bool arm(volatile void* data, std::span<uint8_t> ring,
-                    DmaPriority priority = DmaPriority::low) {
-        return arm_ring(data, ring.data(), ring.size(), priority);
+                    DmaPriority priority = DmaPriority::low, bool half_mark = false) {
+        return arm_ring(data, ring.data(), ring.size(), priority, half_mark);
     }
     static bool arm(volatile void* data, std::span<uint16_t> ring,
-                    DmaPriority priority = DmaPriority::low)
+                    DmaPriority priority = DmaPriority::low, bool half_mark = false)
         requires(sizeof(Elem) >= 2)
     {
-        return arm_ring(data, ring.data(), ring.size(), priority);
+        return arm_ring(data, ring.data(), ring.size(), priority, half_mark);
     }
     static bool arm(volatile void* data, std::span<uint32_t> ring,
-                    DmaPriority priority = DmaPriority::low)
+                    DmaPriority priority = DmaPriority::low, bool half_mark = false)
         requires(sizeof(Elem) >= 4)
     {
-        return arm_ring(data, ring.data(), ring.size(), priority);
+        return arm_ring(data, ring.data(), ring.size(), priority, half_mark);
     }
 
     /// SxNDTR, live (10.5.6): the elements still to land in the current
@@ -1524,7 +1527,8 @@ private:
     /// store of its own. CIRC is not kept in the binding word: a one-shot
     /// start after a transfer error stopped the ring is an ordinary block.
     template <typename T>
-    static bool arm_ring(volatile void* data, T* first, size_t count, DmaPriority priority) {
+    static bool arm_ring(volatile void* data, T* first, size_t count, DmaPriority priority,
+                         bool half_mark) {
         const uint32_t address = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(first));
         if (first == nullptr || count == 0u || count > dma_max_items ||
             (address & (sizeof(T) - 1u)) != 0u) {
@@ -1536,8 +1540,10 @@ private:
                           .direction = DmaDirection::peripheral_to_memory,
                           .memory_increment = false,
                           .priority = priority}) |
-                      dma_interrupt_enables(DmaInterrupts::completion);
-        st_.irq_flags = static_cast<uint8_t>(dma_interrupt_flags(DmaInterrupts::completion));
+                      dma_interrupt_enables(DmaInterrupts::completion) |
+                      (half_mark ? DMA_SxCR_HTIE : 0u);
+        st_.irq_flags = static_cast<uint8_t>(dma_interrupt_flags(DmaInterrupts::completion) |
+                                             (half_mark ? DmaFlag::half : 0u));
         bind();   // stopped, flags and laps cleared, SxPAR, SxFCR
         DMA_Stream_TypeDef& r = Stream::regs();
         const uint32_t word =

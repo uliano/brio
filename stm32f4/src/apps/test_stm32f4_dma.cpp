@@ -43,12 +43,12 @@
 //      own echo (single-wire half duplex): every byte, the laps counted,
 //      the stream never re-armed, and what one harvest() costs
 //   n  the circular receive's two edges: a lap the consumer slept
-//      through, counted and skipped, and harvest()'s edge re-armed by a
+//      through, counted and skipped, and the vectors' edge re-opened by a
 //      drain
 //   u  (outside z) brio stress: the host's stream into the receive
-//      engine at 115200, 460800 and 921600, the consumer paced by the
-//      tick as a TimeEvent would pace it - every byte accounted:
-//      brio stress --letters u --board <board>
+//      engine at 115200, 460800 and 921600, the consumer looking at most
+//      once a millisecond and only after an edge from the vectors - every
+//      byte accounted: brio stress --letters u --board <board>
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -1019,10 +1019,13 @@ struct EngineRun {
     uint32_t harvest_busy = 0;  ///< one harvest() with bytes waiting, the ruler included
 };
 
-/// Which transport owns the port right now, for the two stream vectors
-/// to dispatch on: 0 the plain interrupt-driven one, 1 the engined
-/// console, 2 the engined half-duplex loop, 3 letter u's.
+/// Which transport owns the port right now, for the USART's and the two
+/// stream vectors to dispatch on: 0 the plain interrupt-driven one, 1 the
+/// engined console, 2 the engined half-duplex loop, 3 letter u's.
 volatile uint8_t engined_console = 0;
+/// The edges the engined transports' vectors reported: what a program
+/// would post RxActivity on.
+volatile uint32_t engined_edges = 0;
 
 /// Wait for `Port`'s transmit ring to drain and its last frame to leave
 /// the shifter, then `ms` more for the line to settle.
@@ -1099,16 +1102,14 @@ EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms, bool
     r.rx_running = !ConsoleRxEngine::idle();
     Port::clear_errors();   // what the handover itself left behind is not the run's
 
-    // THE HARVEST RIDES ALONG WITH THE SENDING, because that is how a
-    // program uses this port: the owner asks for the edge and the
-    // consumer drains. On the half-duplex loop everything sent comes
-    // straight back, so the two directions are busy at once.
+    // THE CONSUMER DRAINS AS IT SENDS, the edge being the vectors' to
+    // report. On the half-duplex loop everything sent comes straight
+    // back, so the two directions are busy at once.
     const uint32_t t0 = Ticker::millis();
     for (;;) {
         if (r.queued < block) {
             r.queued += Port::write_bulk(std::span<const uint8_t>(line, sizeof(line)));
         }
-        (void)Port::harvest();
         uint8_t taken = 0;
         while (Port::read_byte(taken)) {
             if (r.first_gap == 0u && taken != line[r.harvested % sizeof(line)]) {
@@ -1132,7 +1133,6 @@ EngineRun run_engined(uint8_t which, uint16_t block, uint32_t rx_window_ms, bool
     // The tail: whatever is still in flight after the last byte left.
     const uint32_t r0 = Ticker::millis();
     while (Ticker::millis() - r0 <= rx_window_ms) {
-        (void)Port::harvest();
         uint8_t byte = 0;
         while (Port::read_byte(byte)) {
             if (r.first_gap == 0u && byte != line[r.harvested % sizeof(line)]) {
@@ -1228,6 +1228,10 @@ constexpr uint8_t loop_byte(uint16_t k) { return static_cast<uint8_t>(0x20u + k 
 /// Positions `from` .. `from + count - 1` of that stream through the
 /// half-duplex loop, and the line settled after them.
 void loop_send(uint16_t from, uint16_t count) {
+    if (count == 0u) {
+        wait_line<LoopSerial>(2);
+        return;
+    }
     static uint8_t block[192];
     for (uint16_t i = 0; i < count && i < sizeof(block); ++i) {
         block[i] = loop_byte(static_cast<uint16_t>(from + i));
@@ -1266,18 +1270,24 @@ void tn_receive_edges() {
     const bool up = LoopSerial::init(clock, 115200);
     LoopSerial::clear_errors();
 
-    // THE EDGE. harvest() reports bytes once per idle-to-busy transition:
-    // true when the ring holds bytes and its consumer has found it empty
-    // since the last true. A consumer that has not drained is not told
-    // twice; one that has, is told again by the next byte.
+    // THE EDGE, FROM THE VECTORS. The USART's idle line and a burst's
+    // first frame, and the lap's marks, report bytes once per idle-to-busy
+    // transition of the consumer: once, not again to a consumer that has
+    // not drained, and again once it has. harvest() asks the same gate
+    // from the consumer's side, and finds it closed once a vector told.
+    const uint32_t k0 = engined_edges;
     loop_send(0, 16);
-    const bool e_first = LoopSerial::harvest();
-    const bool e_again = LoopSerial::harvest();
+    const bool e_first = engined_edges != k0;
+    const bool e_harvest = LoopSerial::harvest();
+    const uint32_t k1 = engined_edges;
+    loop_send(16, 0);   // the line settled again: nothing new
+    const bool e_again = engined_edges != k1;
     bool order1 = false;
     const uint16_t d1 = loop_drain(0, order1);
     const bool e_empty = LoopSerial::harvest();
+    const uint32_t k2 = engined_edges;
     loop_send(16, 16);
-    const bool e_next = LoopSerial::harvest();
+    const bool e_next = engined_edges != k2;
     bool order2 = false;
     const uint16_t d2 = loop_drain(16, order2);
 
@@ -1287,13 +1297,13 @@ void tn_receive_edges() {
     // stream's head - skip rather than tear - and what arrives after it
     // reads whole.
     const uint32_t laps0 = ConsoleRxEngine::laps();
+    const uint32_t k_lap = engined_edges;
     loop_send(32, 160);
+    const bool e_lap = engined_edges != k_lap;
     const uint32_t laps1 = ConsoleRxEngine::laps();
     const uint32_t pending = LoopSerial::rx_pending();
     const uint8_t missed = LoopSerial::rx_overruns();
-    const bool e_skipped = LoopSerial::harvest();
     loop_send(192, 32);
-    const bool e_after = LoopSerial::harvest();
     bool order3 = false;
     const uint16_t d3 = loop_drain(192, order3);
     const uint8_t missed_after = LoopSerial::rx_overruns();
@@ -1304,15 +1314,16 @@ void tn_receive_edges() {
     engined_console = 0;
     (void)Serial::init(clock, 115200);
 
-    print(serial, "  the edge: ", e_first ? 1u : 0u, " at the first bytes, ", e_again ? 1u : 0u,
-          " asked again undrained, ", e_empty ? 1u : 0u, " drained and empty, ",
-          e_next ? 1u : 0u, " at the next bytes; drained ", d1, " and ", d2, crlf);
+    print(serial, "  the edge: ", e_first ? 1u : 0u, " at the first bytes, ", e_harvest ? 1u : 0u,
+          " from harvest() after it, ", e_again ? 1u : 0u, " again undrained, ", e_empty ? 1u : 0u,
+          " from harvest() drained and empty, ", e_next ? 1u : 0u, " at the next bytes; drained ",
+          d1, " and ", d2, crlf);
     bench.verdict("the port comes up in half duplex", up);
-    bench.verdict("harvest() reports the first bytes", e_first);
-    bench.verdict("and does not report them twice to a consumer that has not drained",
-                  !e_again);
-    bench.verdict("nor an empty ring", !e_empty);
-    bench.verdict("and reports the next bytes once the consumer has drained", e_next);
+    bench.verdict("the vectors report the first bytes", e_first);
+    bench.verdict("and harvest() asked after them answers false: the gate is one", !e_harvest);
+    bench.verdict("no second edge to a consumer that has not drained", !e_again);
+    bench.verdict("harvest() reports no empty ring", !e_empty);
+    bench.verdict("the vectors report the next bytes once the consumer has drained", e_next);
     bench.verdict("both drains read their 16 bytes in order",
                   d1 == 16u && d2 == 16u && order1 && order2);
     print(serial, "  a consumer asleep for ", laps1 - laps0, " lap(s): ", pending,
@@ -1322,9 +1333,9 @@ void tn_receive_edges() {
                   laps1 - laps0 == 3u);
     bench.verdict("the first look counts the lap once and skips to the stream's head",
                   missed == 1u && pending == 0u);
-    bench.verdict("so harvest() has nothing to report", !e_skipped);
     bench.verdict("what arrives after the skip is read whole and in order",
-                  e_after && d3 == 32u && order3 && missed_after == 1u);
+                  d3 == 32u && order3 && missed_after == 1u);
+    bench.verdict("the sleeping consumer was told once, at the stream's first bytes", e_lap);
     bench.verdict("no overrun in silicon, no fault", hw == 0u && faults == 0u);
 }
 
@@ -1358,7 +1369,8 @@ struct SinkLeg {
     uint32_t lost = 0;       ///< positions skipped there, in all
     uint32_t bad = 0;        ///< bytes matching no position near the expected one
     uint32_t first_gap = 0;  ///< which received byte first left the stream, 0 for none
-    uint32_t looks = 0;      ///< consumer turns, one a millisecond
+    uint32_t looks = 0;      ///< consumer turns: at most one a millisecond, after an edge
+    uint32_t seen = 0;       ///< the vectors' edge count at the last turn
     uint8_t rx_overruns = 0;
     uint8_t hw_overruns = 0;
     uint8_t line_errors = 0;
@@ -1421,6 +1433,7 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
         while (Port::read_byte(junk)) {
         }
         Port::clear_errors();
+        leg.seen = engined_edges - 1u;   // the first turn looks
         lfsr_state = 0x12345678u;
         uint8_t chunk[64];
         uint32_t last = Ticker::millis();
@@ -1430,8 +1443,11 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
                 continue;
             }
             last = now;
+            if (engined_edges == leg.seen) {
+                continue;   // no edge since the last look: nothing to read
+            }
+            leg.seen = engined_edges;
             ++leg.looks;
-            (void)Port::harvest();
             for (;;) {
                 const uint32_t n = Port::read_bulk(std::span<uint8_t>(chunk, sizeof(chunk)));
                 if (n == 0u) {
@@ -1510,12 +1526,33 @@ namespace {
 /// the port answers for its own streams, and nobody answers while the
 /// plain interrupt-driven console has it.
 [[gnu::always_inline]] inline void serve_engined() {
+    bool edge = false;
     if (engined_console == 1u) {
-        (void)DmaSerial::dma_isr();
+        edge = DmaSerial::dma_isr();
     } else if (engined_console == 2u) {
-        (void)LoopSerial::dma_isr();
+        edge = LoopSerial::dma_isr();
     } else if (engined_console == 3u) {
-        (void)StressSerial::dma_isr();
+        edge = StressSerial::dma_isr();
+    }
+    if (edge) {
+        engined_edges = engined_edges + 1u;
+    }
+}
+/// The USART's vector: the plain console's, or the engined transport's -
+/// whose idle-line and first-frame edges live here.
+[[gnu::always_inline]] inline void serve_usart() {
+    bool edge = false;
+    if (engined_console == 0u) {
+        (void)Serial::isr();
+    } else if (engined_console == 1u) {
+        edge = DmaSerial::isr();
+    } else if (engined_console == 2u) {
+        edge = LoopSerial::isr();
+    } else if (engined_console == 3u) {
+        edge = StressSerial::isr();
+    }
+    if (edge) {
+        engined_edges = engined_edges + 1u;
     }
 }
 }   // namespace
@@ -1523,27 +1560,15 @@ namespace {
 #if defined(STM32F446xx)
 extern "C" void DMA1_Stream6_IRQHandler() { serve_engined(); }
 extern "C" void DMA1_Stream5_IRQHandler() { serve_engined(); }
-extern "C" void USART2_IRQHandler() {
-    if (engined_console == 0u) {
-        (void)Serial::isr();
-    }
-}
+extern "C" void USART2_IRQHandler() { serve_usart(); }
 #elif defined(STM32F469xx)
 extern "C" void DMA1_Stream3_IRQHandler() { serve_engined(); }
 extern "C" void DMA1_Stream1_IRQHandler() { serve_engined(); }
-extern "C" void USART3_IRQHandler() {
-    if (engined_console == 0u) {
-        (void)Serial::isr();
-    }
-}
+extern "C" void USART3_IRQHandler() { serve_usart(); }
 #else
 extern "C" void DMA2_Stream7_IRQHandler() { serve_engined(); }
 extern "C" void DMA2_Stream2_IRQHandler() { serve_engined(); }
-extern "C" void USART1_IRQHandler() {
-    if (engined_console == 0u) {
-        (void)Serial::isr();
-    }
-}
+extern "C" void USART1_IRQHandler() { serve_usart(); }
 #endif
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }

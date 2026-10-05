@@ -254,8 +254,11 @@ is then a `RingCounter`: `remaining()` is SxNDTR read live and `laps()`
 the completions its ISR body `service_ring()` has counted - each one the
 end of a lap, the flag raised as the count reaches zero, so the lap count
 lags the counter by the handler's latency and never leads it, the order
-util/ring.hpp's `HardwareRing` is built on. The half-transfer flag is not
-armed: one interrupt a lap. What the circular shape cannot do is wait for
+util/ring.hpp's `HardwareRing` is built on. The half-transfer flag is
+armed on request (the binding's `half_mark`), and `service_ring()` hands
+it back without counting it: a byte transport's receive ring takes it, so
+a stream that never falls silent tells its consumer twice a lap. What the
+circular shape cannot do is wait for
 a consumer: one that falls a lap behind is written over, and the view
 counts that as its overrun and skips. Its own ISR body, so the one-shot
 shape's owners pay nothing for a count they have no use for.
@@ -269,7 +272,7 @@ shape's owners pay nothing for a count they have no use for.
 | direct mode | yes, the transfer engines | "an immediate and single transfer after each DMA request" (10.3.12) is a peripheral register's shape |
 | the FIFO, threshold and bursts (table 49) | the copy engine alone | memory to memory forbids direct mode (10.3.12), and sixteen-byte bursts are a third faster; a transport's runs have no length the burst rules could rely on |
 | circular mode, NDTR reloaded (10.3.8) | the receive engine's second shape | an unbounded stream (a serial line) wants a ring the stream never stops writing: SxNDTR is the producer index of a `HardwareRing` ([ring.md](../design/ring.md)), the completion the lap; the transmit side and a bounded block keep the one-shot shape |
-| the half-transfer flag | declined | a lap is the one event the ring's producer index needs; a half-lap edge is the receive edge's question, the USART's IDLE line's round |
+| the half-transfer flag | on request, the circular binding's `half_mark` | the lap's half and full marks are the receive edge of a stream with no silence in it, a byte transport's; the USART's idle line is the edge of one that pauses ([usart.md](usart.md)); a lap is otherwise one interrupt |
 | the double buffer (10.3.9) | declined | a `BlockSource`, born with its first block user (below) |
 | a software trigger or a chain | none on this controller | memory to memory starts on EN; no stream triggers another |
 | the gate (RCC_AHB1ENR) | once, at the binding | ES0206 2.2.7's read-back costs an AHB round trip every time it is paid |
@@ -330,14 +333,20 @@ using Tx = brio::DmaTxEngine<2, 7, 4>;     // DMA2 stream 7, channel 4
 using Rx = brio::DmaRxEngine<2, 2, 4>;     // DMA2 stream 2, channel 4
 using Serial = brio::Uart<1, console_pins, 64, 256, Tx, Rx>;
 
-extern "C" void DMA2_Stream7_IRQHandler() { (void)Serial::dma_isr(); }
-extern "C" void DMA2_Stream2_IRQHandler() { (void)Serial::dma_isr(); }
+// The edge comes from three vectors: the USART's (an idle line, a
+// burst's first frame) and the two streams' (the lap's marks).
+extern "C" void USART1_IRQHandler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" void DMA2_Stream7_IRQHandler() {
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" void DMA2_Stream2_IRQHandler() {
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
 
 Serial::init(clock, 115200);
 brio::print(serial, "this goes out through a stream", brio::crlf);
-// and every few ticks, from a kernel TimeEvent - the edge for a consumer
-// that has drained:
-if (Serial::harvest()) { brio::post<SerialLines>(brio::RxActivity{}); }
 ```
 
 **A ring the stream writes for ever** - the receive engine's circular
@@ -606,15 +615,11 @@ bytes sent after it read whole and in order. The run engine in the same
 place offered nothing, counted nothing and raised ORE.
 
 **What one `harvest()` costs** (the least of three, the ruler's own pair
-taken off): 73 core cycles with nothing new and 100 with bytes waiting,
-against 110 and 186 for the run engine's - which read SxNDTR and SxCR,
-published the run's count into a `Ring` and re-armed a full run through
-four calls (take(), the ring's publish(), full(), rearm_rx()). The
-circular one reads SxNDTR and the lap count, no SxCR, no call on its
-path. In the listing, the path with nothing new is about 30 instructions
-and no call, against about 53 across two calls; the code a harvest can
-reach is 196 bytes and a 60-byte re-binding taken only after a transfer
-error, against 176 and 226 bytes of the helpers it called.
+taken off): 57 core cycles with nothing new and 84 with bytes waiting -
+the restart flag, one look of the view (SxNDTR and the lap count) and the
+gate, no call and no register of the USART: the edge is the vectors' now
+([usart.md](usart.md)), and `harvest()` the same gate asked from the
+consumer's side by an owner that still asks.
 
 **The reset state**: both AHB1 gates closed, every flag register at zero,
 every stream's SxCR at zero and SxFCR at 0x21 (the FIFO empty, threshold a
@@ -633,12 +638,6 @@ Driver gaps, each with its reason:
   somebody has to keep. The paced transfer of `bench_stm32f4` names
   TIM1_UP's cell (DMA2 stream 5, channel 6, the same in the three tables)
   by hand.
-- **The receive EDGE from the peripheral.** The circular stream's bytes
-  are in the ring the moment they are stored, but nothing interrupts to
-  say so: a lap's completion is no message boundary, and the half-transfer
-  flag is not armed. The edge is `harvest()`'s, at the pace its owner
-  polls; the USART's IDLE line as the edge one frame after a burst is the
-  UART round's ([usart.md](usart.md)).
 - **The part classes whose manual is not on the desk** (F401, F410, F412,
   F413/F423) have no request table and an engine on them is refused,
   exactly as a clock above the reset rate is: RM0368, RM0401, RM0402 and

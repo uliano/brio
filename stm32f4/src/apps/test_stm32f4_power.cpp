@@ -313,13 +313,13 @@ void feed() {
 /// that is measured on the wall: a line of verdict is four milliseconds
 /// at 115200, and a drain placed inside a measurement is the measurement.
 ///
-/// AND THE RING BEING EMPTY IS NOT THE WIRE BEING EMPTY. `tx_idle()` says
-/// the transport has nothing left to hand the USART; the last character
-/// is then still in the shift register, and a Stop taken at that instant
-/// kills PCLK1 in the middle of it. Measured: the line's own CRLF lost
-/// and the host resynchronizing several bytes into the next line. TC is
-/// the wire's own flag, and this is the only place in the suite that
-/// reaches past the transport for it.
+/// AND THE RING BEING EMPTY IS NOT THE WIRE BEING EMPTY: the last
+/// character is still in the shift register when the ring empties, and a
+/// Stop taken at that instant kills PCLK1 in the middle of it - measured,
+/// the line's own CRLF lost and the host resynchronizing several bytes
+/// into the next line. `tx_idle()` is the wire's (the ring empty and TC
+/// set, stm32f4/usart.hpp); the TC loop after it reads the resource's
+/// flag once more and finds it set.
 void console_drain() {
     for (uint32_t i = 0; i < 20'000'000u && !Serial::tx_idle(); ++i) {
     }
