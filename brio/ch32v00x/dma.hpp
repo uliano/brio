@@ -614,7 +614,24 @@ private:
 
 /**
  * A receive engine: one caller-owned run filled from one peripheral
- * register, and asked how much has arrived.
+ * register, and asked how much has arrived - or, in its CIRCULAR SHAPE,
+ * a caller-owned ring filled for ever.
+ *
+ * THE CIRCULAR SHAPE is CFGR.CIRC (8.2.1: at a count of zero the channel
+ * reloads CNTR and its two addresses and goes on with no CPU in the
+ * path): arm_ring() is handed the ring's whole storage and binds it for
+ * good - PADDR, MADDR, the count every lap reloads, the word with CIRC,
+ * MINC, the beat, the lap's completion and the transfer error, and with
+ * `half_mark` the half lap's flag - and starts it. Nothing re-arms it
+ * afterwards. The producer index of that ring is the channel's own
+ * count, and this engine is util/ring.hpp's RingCounter for it:
+ * remaining() is CNTR, one load (8.2.1 orders a transfer as the read, the
+ * store and then the decrement, so the count never counts an element
+ * whose store has not been made), and laps() the completions lap()
+ * counted in the channel's handler - lagging the count by a handler's
+ * latency, never leading it. util/ring.hpp's HardwareRing is the
+ * consumer half. A circular channel never stops on its own: idle()
+ * after a transfer error (the hardware clears EN) is what says it has.
  */
 template <uint8_t ch, typename Elem = uint8_t>
 class DmaRxEngine {
@@ -716,6 +733,43 @@ public:
         taken_ = 0;
     }
 
+    /**
+     * THE CIRCULAR BINDING, which is also its start (the class header):
+     * `storage` the caller's whole ring, its element the beat, its length
+     * the count every lap reloads. False, and nothing started, for a
+     * storage off its beat's boundary. Calling it again restarts the
+     * ring at its first element with laps() at zero - the moment a
+     * HardwareRing over the same storage is clear()ed.
+     */
+    template <typename T, size_t N>
+    static bool arm_ring(volatile void* data, T (&storage)[N], bool half_mark = false,
+                         DmaPriority priority = DmaPriority::low) {
+        static_assert(dma_beat_fits<T, Elem>, "a beat wider than this binding's widest (its Elem)");
+        static_assert(N >= 2u && N <= 0xFFFFu,
+                      "brio DmaRxEngine: a ring of 2..65535 items - CNTR is sixteen bits (8.3.2)");
+        const uint32_t m = dma_address_of(&storage[0]);
+        if (!dma_aligned(m, dma_width_of<T>())) {
+            return false;
+        }
+        armed_ = DmaFlag::complete | DmaFlag::error | (half_mark ? DmaFlag::half : 0u);
+        word_ = dma_cfgr_priority(priority) | armed_;
+        capacity_ = 0;
+        taken_ = 0;
+        laps_ = 0;
+        Line::bind(dma_address_of(data));
+        Line::restart(word_ | dma_cfgr_beat<T>() | dma_cfgr_minc | dma_cfgr_circ, m,
+                      static_cast<uint16_t>(N));
+        return true;
+    }
+
+    /// CNTR, live: the elements still to land in the current lap.
+    [[gnu::always_inline]] static uint32_t remaining() { return Channel::count(); }
+    /// The completions lap() counted since arm_ring(): the ring's laps.
+    [[gnu::always_inline]] static uint32_t laps() { return laps_; }
+    /// The circular shape's completion, counted - from the channel's
+    /// handler, after service() reported it.
+    [[gnu::always_inline]] static void lap() { laps_ = laps_ + 1u; }
+
 private:
     template <typename T>
     [[gnu::always_inline]] static bool begin(uint32_t minc, uint32_t address, size_t length) {
@@ -731,6 +785,7 @@ private:
     static inline uint32_t word_ = 0;
     static inline uint32_t armed_ = 0;
     static inline uint32_t faults_ = 0;
+    static inline volatile uint32_t laps_ = 0;
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
 };

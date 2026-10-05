@@ -221,7 +221,7 @@
 // and the window's close is counted in both.
 //
 // build: boards = v006k8,v003f4
-// build: groups = rt,m,p,d,e
+// build: groups = rt,m,p,d,e,u,w
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -939,6 +939,382 @@ void te_spi_host() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// u - the serial transport; w - the console's bridge
+// =============================================================================
+// THE CH32V006 ALONE: the transmit side is USART2 on its column 3 (TX PD2,
+// AFIO table 7-11), the jumper PD2-PD4 on the board and nothing listening;
+// the receive side is the CONSOLE's own USART1, fed from the host through
+// the WCH-LinkE's bridge by `brio stress` (its `poke`: one burst of n bytes
+// halfway through the board's window) - this board has no loop. On the
+// CH32V003 there is no second instance and the letter declines by name.
+// USART1's channels are 4 out and 5 in, USART2's 6 and 7 (table 8-2).
+constexpr bool has_usart2 = device::has_usart2;
+
+template <bool on = has_usart2>
+struct LoopTypes {
+    using Irq = Uart<2, Plat, 64, 512, NoDmaEngine, NoDmaEngine, 3>;
+    using Txe = Uart<2, Plat, 64, 512, DmaTxEngine<6>, NoDmaEngine, 3>;
+};
+
+/// The console swapped for a measured receive: rings of 512 with the
+/// interrupt receiver, and the same with the receive engine on channel 5.
+using ConsoleBig = Uart<1, Plat, 512, 64>;
+using ConsoleDma = Uart<1, Plat, 512, 64, NoDmaEngine, DmaRxEngine<5>>;
+using ConsoleRxChannel = DmaChannel<5>;
+
+/// Which transport owns USART1 now: 0 Serial, 1 ConsoleBig, 2 ConsoleDma;
+/// and USART2: 0 none, 1 LoopIrq, 2 LoopTxe.
+volatile uint8_t console_owner = 0;
+volatile uint8_t loop_owner = 0;
+volatile bool rx_edge = false;
+volatile uint32_t rx_edge_at = 0;
+Meter loop_meter;      // USART2's vector
+Meter loop_dma_meter;  // channels 4, 5 (letter u's), 6 and 7
+
+BenchCounters loop_counters() {
+    return bench_counters<Plat>(tick_meter, usart_meter, loop_meter, loop_dma_meter);
+}
+
+/// The receive side's own: USART1's vector and the receive channel's,
+/// the tick left out - a burst poked half a second into the window would
+/// otherwise carry five hundred ticks.
+BenchCounters rx_counters() { return bench_counters<Plat>(usart_meter, loop_dma_meter); }
+
+void loop_wait_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 <= ms) {
+    }
+}
+
+constexpr const uint8_t* loop_pattern() { return reinterpret_cast<const uint8_t*>(filler<4096>.text); }
+
+/// uart.tx: n bytes through `Port`, idling while the ring is full and an
+/// interrupt is coming, spinning through the last frame.
+template <typename Port, typename Engine>
+BenchSample loop_tx(uint32_t n) {
+    console_drain();
+    const BenchCounters c0 = loop_counters();
+    Stopwatch<Ruler> sw;
+    sw.start();
+    uint32_t queued = 0;
+    for (;;) {
+        Plat::CriticalSection cs;
+        queued += Port::write_bulk(std::span<const uint8_t>(loop_pattern() + queued, n - queued));
+        if (queued >= n) {
+            break;
+        }
+        Plat::idle();
+    }
+    for (;;) {
+        Plat::CriticalSection cs;
+        if (Port::tx_idle() && Port::Resource::tx_complete()) {
+            break;
+        }
+        bool coming = Port::Resource::txe_interrupt();
+        if constexpr (Engine::present) {
+            coming = coming || Engine::busy();
+        }
+        if (coming) {
+            Plat::idle();
+        }
+    }
+    const uint32_t w = sw.elapsed();
+    return bench_sample(w, c0, loop_counters());
+}
+
+template <bool on = has_usart2>
+void loop_tx_rates() {
+    if constexpr (on) {
+        using L = LoopTypes<on>;
+        static constexpr uint32_t rates[] = {115200, 1'000'000, 3'000'000};
+        for (const uint32_t baud : rates) {
+            loop_owner = 1;
+            (void)L::Irq::init(clock, baud);
+            Pin<'D', 3>::input(PinPull::up);   // USART2's RX pad: nothing listens, idle high
+            const uint32_t wire = L::Irq::actual_baud(SysClock::hz) / 10u;
+            print(serial, "  USART2 at ", L::Irq::actual_baud(SysClock::hz), " baud", crlf);
+            for (const uint32_t n : {256u, 4096u}) {
+                bench_line(serial, "uart.tx", n, loop_tx<typename L::Irq, NoDmaEngine>(n), Ruler::hz(), wire);
+            }
+            loop_owner = 2;
+            (void)L::Txe::init(clock, baud);
+            Pin<'D', 3>::input(PinPull::up);
+            for (const uint32_t n : {256u, 4096u}) {
+                bench_line(serial, "uart.tx.dma", n, loop_tx<typename L::Txe, DmaTxEngine<6>>(n),
+                           Ruler::hz(), wire);
+            }
+        }
+        loop_owner = 0;
+        Pfic::disable(usart_irq_for(2));
+    }
+}
+
+/// uart.rx on the console: `brio stress` pokes a burst of n halfway
+/// through a window of a second; the consumer waits on the edge (or, with
+/// `poll`, asks harvest() once a tick), drains, and the line is timed from
+/// the first edge to the last byte consumed - (n - 1) frames of wire.
+/// Then the edge's latency after the last byte: CNTR (or the ring) is
+/// watched until the n-th byte lands, which is about half a stop bit
+/// before the line's end - a caveat: the host is the sender, so the stop
+/// bit itself is nobody's to timestamp here.
+template <typename Port, bool poll>
+void console_rx(uint8_t owner, uint32_t baud, uint32_t n, const char* op) {
+    print(serial, "HOST poke 0 ", baud, " 8N1 1000 ", n, crlf);
+    console_drain();
+    const uint32_t t_line = Ticker::millis();
+    console_owner = owner;
+    (void)Port::init(clock, baud);
+    rx_edge = false;
+    const BenchCounters c0 = rx_counters();
+    uint32_t got = 0;
+    uint32_t t_first = 0;
+    uint32_t t_last = 0;
+    uint32_t tick = Ticker::ticks();
+    while (got < n && Ticker::millis() - t_line < 1000u) {
+        bool edge = false;
+        {
+            Plat::CriticalSection cs;
+            edge = rx_edge;
+            rx_edge = false;
+        }
+        if constexpr (poll) {
+            if (Ticker::ticks() != tick) {
+                tick = Ticker::ticks();
+                edge = Port::harvest() || edge;
+            }
+        }
+        if (!edge) {
+            continue;
+        }
+        if (t_first == 0u) {
+            t_first = Ruler::now();
+        }
+        for (;;) {
+            const auto run = Port::read_span();
+            if (run.empty()) {
+                break;
+            }
+            got += static_cast<uint32_t>(run.size());
+            (void)Port::consume(static_cast<uint32_t>(run.size()));
+        }
+        t_last = Ruler::now();
+    }
+    const BenchCounters c1 = rx_counters();
+    const uint32_t wire = Port::actual_baud(SysClock::hz) / 10u;
+    const uint8_t ore = static_cast<uint8_t>(Port::hw_overruns());
+    const uint8_t lost = static_cast<uint8_t>(Port::rx_overruns());
+    while (Ticker::millis() - t_line < 1500u) {
+    }
+    console_owner = 0;
+    (void)Serial::init(clock, console_baud);
+    loop_wait_ms(300);
+    uint8_t junk = 0;
+    while (Serial::read_byte(junk)) {
+    }
+    const BenchSample s = bench_sample(t_last - t_first, c0, c1);
+    bench_line(serial, op, n > 1u ? n - 1u : 1u, s, Ruler::hz(), wire);
+    print(serial, "  received ", got, " of ", n, "; ORE ", ore, ", lost ", lost, crlf);
+}
+
+/// uart.edge on the console: the edge's latency after the n-th byte of a
+/// poked burst of 16 landed (the receive engine's own count watched).
+template <typename Port, bool poll>
+void console_edge(uint8_t owner, uint32_t baud) {
+    constexpr uint32_t n = 16;
+    print(serial, "HOST poke 0 ", baud, " 8N1 1000 ", n, crlf);
+    console_drain();
+    const uint32_t t_line = Ticker::millis();
+    console_owner = owner;
+    (void)Port::init(clock, baud);
+    const uint16_t start = ConsoleRxChannel::count();
+    uint32_t t_last = 0;
+    uint32_t at = 0;
+    uint32_t tick = Ticker::ticks();
+    rx_edge = false;
+    uint32_t seen = 0;
+    while (Ticker::millis() - t_line < 1000u) {
+        const uint16_t c = ConsoleRxChannel::count();
+        const uint32_t landed = static_cast<uint16_t>(start - c);
+        if (landed >= n && t_last == 0u) {
+            t_last = Ruler::now();
+            rx_edge = false;   // only an edge after the last byte is timed
+            tick = Ticker::ticks();   // the owner's poll: its next tick
+        }
+        if (t_last != 0u) {
+            if (rx_edge) {
+                at = rx_edge_at;
+                break;
+            }
+            if constexpr (poll) {
+                if (Ticker::ticks() != tick) {
+                    tick = Ticker::ticks();
+                    if (Port::harvest()) {
+                        at = Ruler::now();
+                        break;
+                    }
+                }
+            }
+        } else if (rx_edge) {
+            rx_edge = false;   // an edge before the last byte: the consumer drains
+            for (;;) {
+                const auto run = Port::read_span();
+                if (run.empty()) {
+                    break;
+                }
+                seen += static_cast<uint32_t>(run.size());
+                (void)Port::consume(static_cast<uint32_t>(run.size()));
+            }
+        }
+    }
+    const uint32_t frame = 10u * SysClock::hz / Port::actual_baud(SysClock::hz);
+    while (Ticker::millis() - t_line < 1500u) {
+    }
+    console_owner = 0;
+    (void)Serial::init(clock, console_baud);
+    loop_wait_ms(300);
+    uint8_t junk = 0;
+    while (Serial::read_byte(junk)) {
+    }
+    if (t_last == 0u || at == 0u) {
+        print(serial, "  the edge: ", t_last == 0u ? "the burst never landed" : "no edge in the window", crlf);
+        return;
+    }
+    const uint32_t wall = at - t_last;
+    bench_line(serial, "uart.edge", n, BenchSample{wall, wall, 0u, 0u}, Ruler::hz(), 0);
+    print(serial, "  the edge ", wall, " cycles after the last byte landed (about half a stop bit before "
+          "the line's end) = ", wall * 10u / frame, " tenths of a frame", crlf);
+}
+
+void tu_uart() {
+    if constexpr (!has_usart2) {
+        print(serial, "  letter u declined on this part: it has one USART, the console's", crlf);
+    } else {
+        loop_tx_rates();
+        print(serial, "  the receive side on the console: brio stress --letters u --board <board>", crlf);
+        static constexpr uint32_t rx_rates[] = {115200, 460800};
+        for (const uint32_t baud : rx_rates) {
+            for (const uint32_t n : {16u, 256u}) {
+                console_rx<ConsoleBig, false>(1, baud, n, "uart.rx");
+            }
+            for (const uint32_t n : {16u, 256u}) {
+                console_rx<ConsoleDma, false>(2, baud, n, "uart.rx.dma");
+            }
+            console_edge<ConsoleDma, false>(2, baud);
+        }
+    }
+    bench.verdict("ran", true);
+}
+
+/// The xorshift brio stress pumps and checks: three shifts, a byte a step.
+uint32_t xs_state = 0x12345678u;
+uint8_t xs_next() {
+    uint32_t s = xs_state;
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    xs_state = s;
+    return static_cast<uint8_t>(s);
+}
+
+void tw_bridge() {
+    print(serial, "  this letter needs brio stress on the other end of the console:", crlf,
+          "  brio stress --letters w --board <board>", crlf);
+    static constexpr uint32_t rates[] = {115200, 230400, 460800, 921600, 1'000'000, 1'500'000,
+                                         2'000'000, 3'000'000};
+    for (const uint32_t baud : rates) {
+        // SINK: the host pumps its xorshift; the board judges every byte.
+        print(serial, "HOST sink 0 ", baud, " 8N1 1500 0", crlf);
+        console_drain();
+        const uint32_t t_line = Ticker::millis();
+        console_owner = 1;
+        (void)ConsoleBig::init(clock, baud);
+        loop_wait_ms(100);
+        uint8_t junk = 0;
+        while (ConsoleBig::read_byte(junk)) {
+        }
+        ConsoleBig::clear_errors();
+        xs_state = 0x12345678u;
+        uint32_t in = 0;
+        uint32_t lost = 0;
+        uint32_t gaps = 0;
+        uint32_t bad = 0;
+        uint32_t first_gap = 0;
+        while (Ticker::millis() - t_line < 1500u) {
+            uint8_t b = 0;
+            while (ConsoleBig::read_byte(b)) {
+                ++in;
+                const uint32_t save = xs_state;
+                if (b == xs_next()) {
+                    continue;
+                }
+                // Not the next position: looked for among the next 255,
+                // the positions stepped over LOST (one gap); a byte that
+                // fits nowhere near is BAD and stands in for its place.
+                xs_state = save;
+                (void)xs_next();
+                uint32_t k = 1;
+                bool found = false;
+                for (; k <= 255u; ++k) {
+                    if (static_cast<uint8_t>(xs_next()) == b) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (first_gap == 0u) {
+                    first_gap = in;
+                }
+                if (found) {
+                    lost += k;
+                    ++gaps;
+                } else {
+                    ++bad;
+                    xs_state = save;
+                    (void)xs_next();
+                }
+            }
+        }
+        const uint16_t ore = ConsoleBig::hw_overruns();
+        const uint16_t fe = ConsoleBig::frame_errors();
+        const uint16_t ring = ConsoleBig::rx_overruns();
+        console_owner = 0;
+        (void)Serial::init(clock, console_baud);
+        loop_wait_ms(500);
+        while (Serial::read_byte(junk)) {
+        }
+        print(serial, "  sink at ", baud, ": ", in, " in, ", gaps, " gap(s) of ", lost, " lost, ", bad,
+              " bad, the first at byte ", first_gap, "; ORE ", ore, ", FE ", fe, ", ring ", ring, crlf);
+        // SOURCE: the board sends its xorshift; the host judges.
+        constexpr uint32_t window_ms = 1500;
+        const uint32_t count = baud / 10u / 4u;   // a quarter of a second of line
+        print(serial, "HOST source 0 ", baud, " 8N1 ", window_ms, " ", count, crlf);
+        console_drain();
+        const uint32_t t_src = Ticker::millis();
+        console_owner = 1;
+        (void)ConsoleBig::init(clock, baud);
+        loop_wait_ms(250);
+        xs_state = 0x12345678u;
+        uint32_t sent = 0;
+        while (sent < count && Ticker::millis() - t_src < window_ms - 400u) {
+            const uint8_t b = xs_next();
+            while (!ConsoleBig::write_byte(b)) {
+            }
+            ++sent;
+        }
+        while (!ConsoleBig::tx_idle() || !ConsoleBig::Resource::tx_complete()) {
+        }
+        while (Ticker::millis() - t_src < window_ms + 200u) {
+        }
+        console_owner = 0;
+        (void)Serial::init(clock, console_baud);
+        loop_wait_ms(300);
+        while (Serial::read_byte(junk)) {
+        }
+        print(serial, "  source at ", baud, ": ", sent, " sent", crlf);
+    }
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_ch32 - ", device::part_name,
           " (clk=48 MHz PLL, ruler=STK cycles at 48 MHz, tick=STK 1000 Hz, console=USART1 ",
@@ -959,9 +1335,54 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
 
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
     usart_meter.enter();
+    if constexpr (brio::test_letter_carried('u') || brio::test_letter_carried('w')) {
+        if (console_owner != 0u) {
+            bool edge = false;
+            if (console_owner == 1u) {
+                edge = ConsoleBig::isr();
+            } else if constexpr (brio::test_letter_carried('u')) {
+                edge = ConsoleDma::isr();
+            }
+            if (edge) {
+                rx_edge_at = Ruler::now();
+                rx_edge = true;
+            }
+            usart_meter.leave();
+            return;
+        }
+    }
     (void)Serial::isr();
     usart_meter.leave();
 }
+
+// Letter u's: USART2's vector and channel 6 (its transmit engine),
+// bodies formed only on a part with USART2.
+namespace {
+template <bool on = has_usart2 && brio::test_letter_carried('u')>
+[[gnu::always_inline]] inline void loop_usart_vector() {
+    if constexpr (on) {
+        loop_meter.enter();
+        if (loop_owner == 1u) {
+            (void)LoopTypes<on>::Irq::isr();
+        } else if (loop_owner == 2u) {
+            (void)LoopTypes<on>::Txe::isr();
+        }
+        loop_meter.leave();
+    }
+}
+template <bool on = has_usart2 && brio::test_letter_carried('u')>
+[[gnu::always_inline]] inline void loop_dma_vector() {
+    if constexpr (on) {
+        loop_dma_meter.enter();
+        if (loop_owner == 2u) {
+            (void)LoopTypes<on>::Txe::dma_isr();
+        }
+        loop_dma_meter.leave();
+    }
+}
+} // namespace
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { loop_usart_vector<>(); }
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { loop_dma_vector<>(); }
 
 // Letter d's vectors, empty in an image that does not carry the letter
 // (nothing enables their lines there).
@@ -1023,6 +1444,17 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+    if constexpr (brio::test_letter_carried('u')) {
+        if (console_owner == 2u) {   // letter u's console receive engine
+            loop_dma_meter.enter();
+            if (ConsoleDma::dma_isr()) {   // the lap's marks: an edge, as the USART's
+                rx_edge_at = Ruler::now();
+                rx_edge = true;
+            }
+            loop_dma_meter.leave();
+            return;
+        }
+    }
     if constexpr (brio::test_letter_carried('d')) {
         paced_meter.enter();
         const uint8_t f = Paced::service();
@@ -1046,6 +1478,9 @@ int main() {
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
     bench.letter('d', "the DMA: copy, fill, a paced block, the SPI's engines", td_dma);
     bench.letter('e', "the SPI host above the wire: polled, pumped, a request's fixed cost", te_spi_host);
+    bench.letter('u', "the serial transport: USART2's transmit, the console's receive and edge (brio stress)",
+                 tu_uart, false);
+    bench.letter('w', "the console's bridge, both ways at eight rates (brio stress)", tw_bridge, false);
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a port that failed to come up would never return.

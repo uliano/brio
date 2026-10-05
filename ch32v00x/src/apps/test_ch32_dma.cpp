@@ -4,7 +4,8 @@
 // error, the interrupt - and the two engine slots of ch32v00x/usart.hpp
 // exercised by THIS SUITE'S OWN CONSOLE, which transmits on channel 4
 // and receives on channel 5: every line printed here left the ring on
-// a DMA block, every keystroke arrived through a harvest.
+// a DMA block, every keystroke arrived through the channel's circular
+// ring.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -27,8 +28,8 @@
 //      judging only that each block ended one way or the other
 //   e  the console's transmit engine: a burst longer than the TX ring
 //      printed through it, the blocks counted, no fault
-//   f  the console's receive engine: what the harvest publishes is
-//      what was typed - this letter asks for a line and echoes it
+//   f  the console's receive engine: what the ring holds is what was
+//      typed - this letter asks for a line and echoes it
 //   g  the copy engine on channel 7: copy and fill at the three beats
 //      exact, polled and by its own interrupt, its refusals - a
 //      half-word run off its boundary (RM 8.3.6), a count of zero or
@@ -293,7 +294,6 @@ void tf_rx_engine() {
     const uint32_t t0 = Ticker::ticks();
     bool done = false;
     while (!done && Ticker::ticks() - t0 < 15'000u) {
-        (void)Serial::harvest();
         uint8_t c;
         while (Serial::read_byte(c)) {
             if (c == '\n' || c == '\r') {
@@ -304,7 +304,7 @@ void tf_rx_engine() {
         }
     }
     line[n] = '\0';
-    print(serial, crlf, "  harvested ", n, " byte(s): \"", line, "\"", crlf);
+    print(serial, crlf, "  read ", n, " byte(s): \"", line, "\"", crlf);
     bench.verdict("a line arrived through the receive engine", done);
     bench.verdict("with no software overrun and no fault",
                   Serial::rx_overruns() == 0u && Serial::dma_faults() == 0u);
@@ -397,10 +397,11 @@ void banner() {
 
 extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+/// Channel 4 is the transmit engine's alone: every entry is a block's
+/// completion (dma_isr()'s answer is the RECEIVE edge, none of its).
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() {
-    if (Serial::dma_isr()) {
-        tx_blocks = tx_blocks + 1u;
-    }
+    tx_blocks = tx_blocks + 1u;
+    (void)Serial::dma_isr();
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { (void)Serial::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
@@ -438,7 +439,6 @@ int main() {
     }
 
     for (;;) {
-        (void)Serial::harvest();   // the receive engine is asked every turn
         uint8_t c = 0;
         if (!Serial::read_byte(c)) {
             continue;

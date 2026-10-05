@@ -56,6 +56,23 @@ attached is untested).
   garbage at 92160) - so no one host setting serves both directions
   and this probe is a DEBUG probe alone: a target's console goes
   through another bridge, or the firmware is brought up to date first.
+- **THE LINKE AT FIRMWARE 2.16 CARRIES 921600 OUT AND 115200 IN.**
+  Measured with `brio stress` against a CH32V006 at 48 MHz on the
+  probe's own bridge (`bench_ch32` letter w: the board judges a sink of
+  the host's xorshift for a second and a half, and sources a quarter
+  second of its own for the host to judge, at each of eight rates). THE
+  TARGET'S BYTES reach the host byte-exact at 115200, 230400, 460800 and
+  921600 - every one of 2880, 5760, 11520 and 23040 in order - and
+  arrive as garbage from 1 Mbaud (1, 1.5 and 2 Mbaud) or not at all (3
+  Mbaud): the bridge does not run those rates. THE HOST'S BYTES reach the
+  target whole only at 115200 (12096 of 12096): above it every byte that
+  arrives is the right one - no bad byte, no framing error, no overrun on
+  the target - but whole runs of them never arrive, the bridge dropping
+  2.6 to 5 per cent of a sustained stream in 50 to 140 gaps a second
+  (1314 of 25070 at 230400, 2028 of 48990 at 460800, 2484 of 95680 at
+  921600, the first gap after 193 to 513 bytes), and from 1 Mbaud every
+  frame is a framing error. A burst shorter than the first gap crosses
+  at those rates (a command does); a sustained stream does not.
 - **The CH549 kind** - the probe a WeAct-branded WCH-Link is, its
   banner `WCH-Link-CH549 mode:RV version 2.12`, the same `1a86:8010` -
   attaches a CH32V303 over the two-wire port and programs it through

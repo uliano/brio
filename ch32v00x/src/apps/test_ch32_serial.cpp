@@ -66,6 +66,23 @@
 //      engine fed from the banged line, the transmit engine timed
 //   j  the flags and the vector: TC after TXE, IDLE once per line idle,
 //      one interrupt per enable
+//   q  ERRORS UNDER THE RECEIVE ENGINE: breaks banged into a continuous
+//      stream into USART2's ring - every data byte delivered intact and
+//      in order, no byte taken by a clear, the frame errors counted one a
+//      break; back-to-back breaks counting every other one
+//      (ch32v00x/usart.hpp's header); the interrupt receiver's breaks,
+//      dropped and counted
+//   r  tx_idle() IS THE WIRE'S: the moment it turns true against the last
+//      stop bit's start on the jumper (TIM2's channel 1 capturing PD4),
+//      for the interrupt transmitter and the transmit engine
+//   s  THE BURST EDGE FROM THE VECTOR, nothing polled, on banged bursts:
+//      one frame told, sixteen told within two frames of the last stop
+//      bit with two interrupts a burst and none a byte, four laps of the
+//      ring with no silence read whole on the lap's marks
+//   t  the transport's four rate verbs: can_baud() and min_hz_for() at
+//      the divisor's two ends, set_baud() moving a live port (the start
+//      bit measured on the jumper before and after) and refusing an
+//      unreachable rate, release() giving the instance and its pads back
 //   y  (outside z, host-assisted: brio stress) the CONSOLE's own error
 //      counters, provoked from the host side
 //   k  THE SYNCHRONOUS MODE, on the console's own USART1 (both parts):
@@ -1027,14 +1044,14 @@ void ti_dma() {
     Pfic::enable(dma_channel_irq(6));
     Pfic::enable(dma_channel_irq(7));
     settle_ms(3);
-    // The receive engine fed sixteen banged frames, then harvested.
+    // The receive engine fed sixteen banged frames, then read: the bytes
+    // are in the channel's ring as they land, nothing published.
     bang_idle(9600, 4);
     uint32_t seed = 0x12345678u;
     for (uint8_t i = 0; i < 16u; ++i) {
         bang_frame({.data = static_cast<uint16_t>(xorshift_step(seed) & 0xFFu), .baud = 9600});
     }
     settle_ms(2);
-    (void)DmaUart::harvest();
     uint32_t seed2 = 0x12345678u;
     uint8_t good = 0;
     uint8_t got = 0;
@@ -1045,9 +1062,9 @@ void ti_dma() {
             ++good;
         }
     }
-    print(serial, "  the receive engine on channel 7: ", got, " bytes harvested, ", good, " exact, faults ",
+    print(serial, "  the receive engine on channel 7: ", got, " bytes read, ", good, " exact, faults ",
           DmaUart::dma_faults(), crlf);
-    bench.verdict("USART2's receive engine on channel 7 delivers sixteen banged frames byte-exact through harvest()",
+    bench.verdict("USART2's receive engine on channel 7 delivers sixteen banged frames byte-exact into its ring",
                   up && got == 16u && good == 16u && DmaUart::dma_faults() == 0u);
     // The transmit engine: 256 bytes queued at once, the run timed -
     // 2560 bits at 9600 is 266.7 ms - and the ring empty at the end.
@@ -1126,6 +1143,343 @@ void tj_flags() {
     bench.verdict("one interrupt per event: RXNE and IDLE once for a clean frame, PE once for a bad parity, TXE once "
                   "when armed",
                   words_clean == 1u && idle_clean == 1u && pe_clean == 0u && pe_wrong == 1u && txe_n == 1u);
+    all_off();
+}
+
+// ===========================================================================
+// q, r, s - the transport's promises: errors under the engine, tx_idle()
+// on the jumper, the burst edge
+// ===========================================================================
+
+using PlainUart = Uart<2, P, 256, 64, NoDmaEngine, NoDmaEngine, column>;
+volatile uint32_t u2_edges = 0;
+volatile uint32_t u2_edge_at = 0;
+
+bool dma_edge_isr() {
+    const bool e = DmaUart::isr();
+    if (e) {
+        u2_edge_at = cycles_now();
+        u2_edges = u2_edges + 1u;
+    }
+    return e;
+}
+bool plain_edge_isr() {
+    const bool e = PlainUart::isr();
+    if (e) {
+        u2_edges = u2_edges + 1u;
+    }
+    return e;
+}
+
+constexpr uint8_t stream_byte(uint32_t i) { return static_cast<uint8_t>(i * 151u + 7u); }
+
+template <typename T>
+bool transport_on(IsrFn fn, uint32_t baud) {
+    all_off();
+    Dma::open();
+    u2_isr = fn;
+    const bool up = T::init(clock, baud);
+    RxPad::input(PinPull::up);   // the banged line, over the transport's floating input
+    Pfic::enable(dma_channel_irq(6));
+    Pfic::enable(dma_channel_irq(7));
+    settle_ms(3);
+    uint8_t b = 0;
+    while (T::read_byte(b)) {
+    }
+    T::clear_errors();
+    u2_edges = 0;
+    u2_interrupts = 0;
+    return up;
+}
+
+void tq_errors() {
+    if (!transport_on<DmaUart>(&dma_edge_isr, 9600)) {
+        bench.verdict("USART2 with both engines comes up", false);
+        all_off();
+        return;
+    }
+    // A continuous stream: frames back to back, a banged break after every
+    // eighth, each break followed by a clean frame.
+    constexpr uint32_t n = 64;
+    uint32_t breaks = 0;
+    bang_idle(9600, 2);
+    for (uint32_t i = 0; i < n; ++i) {
+        bang_frame({.data = stream_byte(i), .baud = 9600});
+        if (i % 8u == 7u && i + 1u < n) {
+            bang_break(9600, 12);
+            bang_idle(9600, 1);   // the break's own stop bit: a start bit wants a high line before it
+            ++breaks;
+        }
+    }
+    settle_ms(3);
+    uint32_t data = 0;
+    uint32_t zeros = 0;
+    bool in_order = true;
+    for (;;) {
+        const auto run = DmaUart::read_span();
+        if (run.empty()) {
+            break;
+        }
+        for (const uint8_t b : run) {
+            if (b == stream_byte(data)) {
+                ++data;
+            } else if (b == 0u) {
+                ++zeros;
+            } else {
+                in_order = false;
+            }
+        }
+        (void)DmaUart::consume(static_cast<uint32_t>(run.size()));
+    }
+    const uint16_t fe = DmaUart::frame_errors();
+    print(serial, "  ", n, " data bytes and ", breaks, " breaks through the receive engine: ", data,
+          " in order, ", zeros, " break frames; FE ", fe, ", ORE ", DmaUart::hw_overruns(), crlf);
+    bench.verdict("every data byte delivered, intact and in order: no byte taken by a clear",
+                  data == n && in_order);
+    bench.verdict("each break stored as the frame it is (0x00)", zeros == breaks);
+    bench.verdict("the frame errors counted one a break", fe == breaks);
+
+    uint16_t counts[2] = {0, 0};
+    for (uint8_t k = 0; k < 2u; ++k) {
+        (void)transport_on<DmaUart>(&dma_edge_isr, 9600);
+        bang_idle(9600, 2);
+        bang_frame({.data = 0x11, .baud = 9600});
+        bang_frame({.data = 0x12, .baud = 9600});
+        for (uint8_t i = 0; i < k + 2u; ++i) {
+            bang_break(9600, 12);
+            bang_idle(9600, 1);   // the break's own stop bit: a start bit wants a high line before it
+        }
+        bang_frame({.data = 0x22, .baud = 9600});
+        bang_frame({.data = 0x23, .baud = 9600});
+        settle_ms(3);
+        counts[k] = DmaUart::frame_errors();
+    }
+    print(serial, "  back to back: two breaks count ", counts[0], ", three count ", counts[1], crlf);
+    bench.verdict("back-to-back breaks count every other one (two count 1, three count 2)",
+                  counts[0] == 1u && counts[1] == 2u);
+
+    (void)transport_on<PlainUart>(&plain_edge_isr, 9600);
+    breaks = 0;
+    bang_idle(9600, 2);
+    for (uint32_t i = 0; i < 24u; ++i) {
+        bang_frame({.data = stream_byte(i), .baud = 9600});
+        if (i % 4u == 3u) {
+            bang_break(9600, 12);
+            bang_idle(9600, 1);   // the break's own stop bit: a start bit wants a high line before it
+            ++breaks;
+        }
+    }
+    settle_ms(3);
+    uint32_t back = 0;
+    bool ok = true;
+    uint8_t b = 0;
+    while (PlainUart::read_byte(b)) {
+        if (b != stream_byte(back)) {
+            ok = false;
+        }
+        ++back;
+    }
+    print(serial, "  the interrupt receiver: 24 bytes and ", breaks, " breaks, ", back, " delivered, FE ",
+          PlainUart::frame_errors(), crlf);
+    bench.verdict("the interrupt receiver drops each break's frame and counts it",
+                  back == 24u && ok && PlainUart::frame_errors() == breaks);
+    all_off();
+}
+
+/// Four 0x55 frames through `T` (bit 7 low: the stop bit starts with a
+/// rising edge), TIM2's channel 1 latching PD4's last rising edge off the
+/// jumper; the timer counts from it to tx_idle()'s first true, the count
+/// read after the answer (never early, a poll's few cycles late).
+template <typename T>
+int32_t idle_after_stop(IsrFn fn, uint32_t baud) {
+    static const uint8_t frames[4] = {0x55, 0x55, 0x55, 0x55};
+    (void)transport_on<T>(fn, baud);
+    RulerPad::input();
+    T2::init();
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFF});
+    (void)T2::capture_channel(0, {.select = TimChannelSelect::direct, .polarity = TimCapturePolarity::rising});
+    T2::clear_flags(T2::compare_flag(0));
+    T2::enable(true);
+    (void)T::write_bulk(std::span<const uint8_t>(frames, sizeof(frames)));
+    uint32_t t_idle = 0;
+    const uint32_t t0 = cycles_now();
+    for (;;) {
+        if (T::tx_idle()) {
+            t_idle = T2::count();
+            break;
+        }
+        if (cycles_now() - t0 > 20'000u * cycles_per_us) {
+            break;
+        }
+    }
+    const uint32_t edge = T2::compare(0);
+    all_off();
+    return static_cast<int32_t>((t_idle - edge) & 0xFFFFu);
+}
+
+void tr_tx_idle() {
+    if (!need_jumper()) {
+        print(serial, "  the jumper PD2-PD4 is ABSENT: tx_idle() on the pad measures nothing", crlf);
+        bench.verdict("the letter declines without its jumper, and says so", true);
+        return;
+    }
+    // 250000 and not a megabaud: at 48 MHz a bit of 1 Mbaud is 48 cycles,
+    // less than one turn of the poll with a tick landing in it, so the
+    // instrument could not say "within a bit" there.
+    static constexpr uint32_t rates[] = {115200, 250'000};
+    for (const uint32_t baud : rates) {
+        const uint32_t bit = SysClock::hz / baud;
+        const int32_t d_plain = idle_after_stop<PlainUart>(&plain_edge_isr, baud);
+        const int32_t d_dma = idle_after_stop<DmaUart>(&dma_edge_isr, baud);
+        print(serial, "  ", baud, " baud, a bit ", bit, " timer counts: tx_idle() true ", d_plain,
+              " counts after the stop bit's rising edge (interrupt transmitter), ", d_dma,
+              " (transmit engine)", crlf);
+        const int32_t lo = static_cast<int32_t>(bit);
+        const int32_t hi = static_cast<int32_t>(2u * bit);
+        bench.verdict("tx_idle() never before the last stop bit is out, within a bit after it: ",
+                      baud == 115200 ? "115200" : "250000",
+                      d_plain >= lo && d_plain <= hi && d_dma >= lo && d_dma <= hi);
+    }
+}
+
+/// Everything the engined transport holds, against the stream from `from`.
+uint32_t dma_read(uint32_t from, bool& in_order) {
+    uint32_t got = 0;
+    for (;;) {
+        const auto run = DmaUart::read_span();
+        if (run.empty()) {
+            return got;
+        }
+        for (uint32_t i = 0; i < run.size(); ++i) {
+            if (run[i] != stream_byte(from + got + i)) {
+                in_order = false;
+            }
+        }
+        got += static_cast<uint32_t>(run.size());
+        (void)DmaUart::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+void ts_edge() {
+    const bool up = transport_on<DmaUart>(&dma_edge_isr, 9600);
+    const uint32_t frame = 10u * SysClock::hz / 9600u;
+    bool all_told = true;
+    bang_idle(9600, 12);
+    for (uint8_t k = 0; k < 3u; ++k) {
+        bool ok = true;
+        (void)dma_read(0, ok);
+        const uint32_t e0 = u2_edges;
+        bang_frame({.data = 0x42, .baud = 9600});
+        bang_idle(9600, 24);
+        const uint32_t e1 = u2_edges;
+        uint8_t b = 0;
+        uint32_t got = 0;
+        while (DmaUart::read_byte(b)) {
+            ++got;
+        }
+        print(serial, "  a burst of one frame: ", e1 - e0, " edge(s), ", got, " byte read", crlf);
+        if (e1 == e0 || got != 1u) {
+            all_told = false;
+        }
+    }
+    bench.verdict("a burst of one frame is told, every time", up && all_told);
+
+    // Sixteen frames: the first frame's edge drained at once, as a
+    // consumer would; the last edge timed from the end of the last stop
+    // bit, which the banging thread knows to the cycle.
+    bool ok = true;
+    u2_interrupts = 0;
+    const uint32_t e0 = u2_edges;
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < 16u; ++i) {
+        bang_frame({.data = stream_byte(i), .baud = 9600});
+        if (u2_edges != e0) {
+            got += dma_read(got, ok);
+        }
+    }
+    const uint32_t t_end = cycles_now();
+    const uint32_t before = u2_edges;
+    while (u2_edges == before && cycles_now() - t_end < 5u * frame) {
+    }
+    const uint32_t late = u2_edge_at - t_end;
+    settle_ms(2);
+    got += dma_read(got, ok);
+    print(serial, "  16 frames: ", u2_edges - e0, " edge(s), the last ", late,
+          " cycles after the last stop bit (", late * 10u / frame, " tenths of a frame); ", u2_interrupts,
+          " USART interrupt(s); ", got, " read", crlf);
+    bench.verdict("the burst read whole, nothing polled", got == 16u && ok);
+    bench.verdict("its edge within two frame times of the last stop bit",
+                  u2_edges != before && late <= 2u * frame);
+    bench.verdict("at most two USART interrupts a burst, none a byte",
+                  u2_interrupts >= 1u && u2_interrupts <= 2u);
+
+    // Four laps of the 256-byte ring with no silence: the marks tell the
+    // consumer twice a lap, and it drains between two banged frames.
+    (void)dma_read(0, ok);
+    DmaUart::clear_errors();
+    uint32_t read = 0;
+    ok = true;
+    uint32_t seen = u2_edges;
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        bang_frame({.data = stream_byte(i), .baud = 9600});
+        if (u2_edges != seen) {
+            seen = u2_edges;
+            read += dma_read(read, ok);
+        }
+    }
+    settle_ms(3);
+    read += dma_read(read, ok);
+    print(serial, "  four laps without silence: ", read, " of 1024 read on the edges, laps missed ",
+          DmaUart::rx_overruns(), crlf);
+    bench.verdict("a stream with no silence is read whole on the lap's marks",
+                  read == 1024u && ok && DmaUart::rx_overruns() == 0u);
+    all_off();
+}
+
+// ===========================================================================
+// t - set_baud(), can_baud(), min_hz_for(), release()
+// ===========================================================================
+
+void tt_rate_verbs() {
+    // 14.3: BRR is the peripheral clock over the baud, sixteen at least
+    // and 0xFFFF at most.
+    constexpr uint32_t hz = SysClock::pclk_hz;
+    const bool ends = PlainUart::can_baud(hz, 3'000'000) && !PlainUart::can_baud(hz, 3'200'000) &&
+                      PlainUart::can_baud(hz, 733) && !PlainUart::can_baud(hz, 732) &&
+                      PlainUart::min_hz_for(115200) == 16u * 115200u;
+    print(serial, "  can_baud at 48 MHz: 3 Mbaud ", PlainUart::can_baud(hz, 3'000'000) ? "yes" : "no",
+          ", 733 ", PlainUart::can_baud(hz, 733) ? "yes" : "no", ", 732 ", PlainUart::can_baud(hz, 732) ? "yes" : "no",
+          "; min_hz_for(115200) ", PlainUart::min_hz_for(115200), crlf);
+    bench.verdict("can_baud() and min_hz_for() answer the divisor's two ends (16 and 0xFFFF)", ends);
+    if (!need_jumper()) {
+        return;
+    }
+    (void)transport_on<PlainUart>(&plain_edge_isr, 115200);
+    static const uint8_t ff[1] = {0xFF};
+    ruler_arm(true);
+    (void)PlainUart::write_bulk(std::span<const uint8_t>(ff, 1));
+    const auto before = ruler_read(50'000);
+    while (!PlainUart::tx_idle()) {
+    }
+    const bool moved = PlainUart::set_baud(hz, 9600);
+    const bool refused = !PlainUart::set_baud(hz, 4'000'000);
+    ruler_arm(true);
+    (void)PlainUart::write_bulk(std::span<const uint8_t>(ff, 1));
+    const auto after = ruler_read(50'000);
+    while (!PlainUart::tx_idle()) {
+    }
+    print(serial, "  the start bit at 115200: ", before ? *before : 0u, " cycles; after set_baud(9600): ",
+          after ? *after : 0u, " cycles (BRR ", usart_divisor(hz, 9600), ")", crlf);
+    bench.verdict("set_baud() moves a live port: the start bit is the new divisor",
+                  moved && before && *before == usart_divisor(hz, 115200) && after &&
+                      *after == usart_divisor(hz, 9600));
+    bench.verdict("and refuses an unreachable rate, the divisor left as it was",
+                  refused && U2::brr() == usart_divisor(hz, 9600));
+    PlainUart::release();
+    U2::bus_clock(true);   // the gate reopened to read what release() left
+    const bool gone = !U2::enabled() && U2::regs().CTLR1 == 0u;
+    print(serial, "  release(): CTLR1 ", hex(U2::regs().CTLR1), crlf);
+    bench.verdict("release() stops the port: UE and every enable clear", gone);
     all_off();
 }
 
@@ -1350,7 +1704,12 @@ extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)DmaUart::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)DmaUart::dma_isr(); }
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    if (DmaUart::dma_isr()) {   // the receive ring's lap marks: an edge, as the USART's
+        u2_edge_at = cycles_now();
+        u2_edges = u2_edges + 1u;
+    }
+}
 #endif   // BRIO_CH32_HAS_USART2
 
 int main() {
@@ -1372,6 +1731,10 @@ int main() {
     bench.letter('h', "hardware flow control: CTS holds, RTS follows the receiver", th_flow);
     bench.letter('i', "the DMA engines on USART2's channels 6 and 7: fed, then timed", ti_dma);
     bench.letter('j', "the flags and the vector: TXE, TC, RXNE, IDLE, PE, one interrupt each", tj_flags);
+    bench.letter('q', "errors under the receive engine: breaks in a stream, nothing stolen", tq_errors);
+    bench.letter('r', "tx_idle() against the last stop bit on the jumper", tr_tx_idle);
+    bench.letter('s', "the burst edge from the vector, nothing polled", ts_edge);
+    bench.letter('t', "the rate verbs: set_baud(), can_baud(), min_hz_for(), release()", tt_rate_verbs);
     bench.letter('y', "host-assisted (brio stress): the console's own error counters", ty_host, false);
 #endif
     bench.letter('k', "THE SYNCHRONOUS MODE on the console's USART1: CK counted by TIM2 off PD4, no wire", tk_synchronous);

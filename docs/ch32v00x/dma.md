@@ -71,7 +71,7 @@ engines do with each:
 | the address alignment of 8.3.5/8.3.6 | yes | a run off its beat's boundary is REFUSED, its caller falling back to whatever moves it otherwise |
 | the increments | yes | MINC per block (a run, or one fixed cell a bus write clocks out or a discard cell a bus read fills); PINC for the copy |
 | memory to memory | yes | `DmaCopyEngine`: no request, the channel runs from its enable |
-| circular mode | no | a transfer engine's block has an end; a circular receive whose producer index is the hardware's count is the shape the UART's receive wants, and is born with the ring that reads its producer index from outside; a circular player with its first block-stream user |
+| circular mode | the receive engine's circular shape (`arm_ring()`) | a byte transport's receive ring: the channel writes the whole storage lap after lap, its count the producer index of util/ring.hpp's `HardwareRing`, the completion a lap counted by `lap()` (the transport's vector); a transfer engine's block has an end, and a circular player waits for its first block-stream user |
 | the half-transfer flag | no | no engine acts on a midpoint before a stream does |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants: a transport whose completion another event proves arms the errors alone - the SPI host's transmit block (the receive block's end proves it), the I2C host's (BTF proves it) |
 | one flag register for seven channels | yes | a transport serving two channels in one handler body reads INTFR ONCE |
@@ -128,7 +128,15 @@ of one channel to another: there is nothing more to use or decline.
   receive side of a bus write); it answers `take()` (how many arrived
   since last asked: one CNTR read, nothing suspended), `full()`,
   `capacity()`, `idle()` (EN clear: stopped, or halted by a transfer
-  error). Both publish `present`, `channel`, `width`, `element`, the
+  error). Its CIRCULAR SHAPE, `arm_ring(data, storage, half_mark,
+  priority)`, binds the channel to a caller's whole ring storage and
+  starts it for good - CIRC, MINC, the beat, the lap's completion and
+  the error, and with `half_mark` the half lap - and makes the engine
+  util/ring.hpp's `RingCounter`: `remaining()` is CNTR (8.2.1's order:
+  the store before the decrement, so the count never counts an element
+  not yet in memory), `laps()` the completions `lap()` counted in the
+  channel's handler, lagging the count by a handler's latency and never
+  leading it. Both publish `present`, `channel`, `width`, `element`, the
   flag names, `service()` - the channel's ISR body over its armed
   flags - with an overload taking an INTFR the caller read once for
   two channels, and `block_flags()` to read it; `abandon()` halts the
@@ -182,12 +190,15 @@ receives on 5 (table 8-2):
 ```cpp
 using Serial = brio::Uart<1, P, 64, 128, brio::DmaTxEngine<4>, brio::DmaRxEngine<5>>;
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+// The receive edge from the vectors: the USART's (an idle line, a
+// burst's first frame) and the receive channel's (the lap's marks).
+extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { (void)Serial::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { (void)Serial::dma_isr(); }
-
-// in the loop, or from a TimeEvent every few ticks:
-if (Serial::harvest()) { /* the RX ring went from empty to non-empty */ }
 ```
 
 The SPI host with engines at DATAR's width, so that 16-bit frames ride
@@ -291,12 +302,10 @@ Driver gaps, each with its reason:
   (util/block_stream.hpp's two concepts over a circular channel and a
   pair of halves): born with their first block user on this family,
   a source the ADC's stall makes worth measuring first (adc.md).
-- The circular receive - the ring's storage written by the channel
-  for ever, its producer index the remaining count: born with the ring
-  that reads its producer index from outside, and adopted by the
-  USART's transport with the IDLE line as the edge that publishes.
-- Half-transfer as a verb of the engines: the flag and its enable are
-  the channel's (`DmaFlag::half`, `arm()`), no engine acts on it
+- Half-transfer as a verb of the transfer engines: the flag and its
+  enable are the channel's (`DmaFlag::half`, `arm()`), and the receive
+  engine's circular shape takes it on request (`arm_ring()`'s
+  `half_mark`, a byte transport's edge); no other engine acts on it
   until a stream needs the midpoint.
 
 Implemented but not bench-verified, each with what would measure it:
