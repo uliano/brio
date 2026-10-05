@@ -1,11 +1,13 @@
 // bench_avr - the benchmark skeleton on the AVR DA/DB (docs/design/
-// benchmark.md, util/bench.hpp): four letters that print NUMBERS, one
+// benchmark.md, util/bench.hpp): letters that print NUMBERS, one
 // `bench` line per operation and size, in the grammar every family
 // prints. NOT A TEST: a letter's one verdict is "ran", except letter r,
 // whose verdicts judge the ruler every other line is read with, and
-// letter e, whose one verdict judges the pump it times.
+// letters e and i, whose one verdict judges the engine each times.
 //
-// NOTHING TO WIRE. The console is USART2 on its ALT1 pins PF4 (TX) / PF5
+// NOTHING TO WIRE BUT LETTER I's BUS: one open-drain node with 1.5k
+// pull-ups to +5 V joining PA2 to PC2 (SDA) and PA3 to PC3 (SCL) - the
+// dual loop of test_avr_twi, VDDIO2 powered at VDD for PORTC. The console is USART2 on its ALT1 pins PF4 (TX) / PF5
 // (RX) through the board's USB bridge - the binding of console.cpp and
 // of test_avr_platform.cpp, the same Uart<2, Route::alt1> with its 64/256
 // rings and its three vectors - at 115200 8N1, the rate every other
@@ -53,8 +55,9 @@
 // stamps the window around AvrPlatform::idle()'s SLEEP in IDLE mode.
 //
 // THE METERS: one IsrMeter per bound vector - USART2_RXC (`rxc_meter`),
-// USART2_DRE (`dre_meter`), RTC_PIT (`tick_meter`), and letter u's two
-// USART4 vectors in their metered binding (`u4_meter`) - all on Ruler, the
+// USART2_DRE (`dre_meter`), RTC_PIT (`tick_meter`), letter u's two
+// USART4 vectors in their metered binding (`u4_meter`), and letter i's
+// two TWI0 vectors in theirs (`twim_meter`, `twis_meter`) - all on Ruler, the
 // enter() stamp the handler's first statement and leave() its last, the
 // driver's always_inline body between them. The counters are read under
 // AvrPlatform::CriticalSection: on an 8-bit core a 32-bit sum is four
@@ -220,6 +223,45 @@
 //      family; the data sheet's sequence (27.3.2.4: RXDATAH, then RXDATAL)
 //      as a bare RXC handler into a ring of its own runs in a scratch
 //      program beside this one, the number in docs/avrdx/usart.md.
+//   i  THE I2C HOST (avrdx/twi.hpp's I2cHost, docs/avrdx/twi.md):
+//      I2cHost<0> on TWI0's DEFAULT pair PA2 (SDA) / PA3 (SCL) against
+//      the SAME instance's client on the route's DUAL pair PC2 / PC3
+//      (address 0x42), the desk's bus node closing the circuit - the
+//      dual loop test_avr_twi runs, 1.5k pull-ups to +5 V. The client is
+//      served from its own vector (TWI0_TWIS) in Smart mode, so every
+//      byte costs the bus TWO handler latencies on this one core: the
+//      client's before the acknowledge and the host's after it. Both
+//      vectors are bound twice, chosen per run by GPR0's bit 7 as in
+//      letter u: metered (the IsrMeter around the body; irq and isr
+//      exact, the stamps stretching SCL) and plain (the body alone).
+//      Per speed (100 kHz, 400 kHz, 1 MHz with FMPEN on both pairs, the
+//      default timing Options - the specification's edges charged), the
+//      SCL period is MEASURED first: TCB0 in frequency mode on PA3's pin
+//      event (channel 0), the shortest period over four 16-byte writes.
+//      Then every op, the best of 8 by wall, metered (the thread idles
+//      between the vector's edges: busy is the core's) and plain (the
+//      thread SPINS on the completion edge, so nothing but the drivers'
+//      bodies runs: the wall the wire sees, `.bare`); n counts data
+//      bytes:
+//        i2c.write       n = 1, 2, 16, 255 bytes after the address;
+//        i2c.read        n = 1, 2, 16, 255, Smart mode off, and
+//        i2c.read.smart  the same with the engine's Smart mode on;
+//        i2c.wr          one byte written, a repeated START, n - 1 = 1,
+//                        2, 16 read (both modes, as the reads);
+//        i2c.probe       the address alone, ACKed (n=0), and
+//        i2c.probe.nack  to 0x77, nobody's: i2c_nack_addr;
+//        i2c.read.nack   a one-byte READ to 0x77: its address NACK is
+//                        i2c_nack_addr as a write's is.
+//      The line after each prints the wire's cycles, wall minus them
+//      (the tenure's fixed cost plus every frame's stretch), the client's
+//      entries, and on the metered line the split per run between the
+//      host's vector and the client's. The letter's verdict: every
+//      tenure completed with its status and every read is byte-exact
+//      (the client serves 0, 1, 2, ...).
+//      The vendor's column (`i2c.vendor`): no vendor library; the data
+//      sheet's own polled host sequence (29.3.2.2.3 - 29.3.2.2.5) runs in
+//      a scratch program beside this one against the same client, the
+//      numbers in docs/avrdx/twi.md.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -238,6 +280,13 @@
 //           (the same table), nothing loaded.
 //   spi.*   SCK / 8 bytes a second: one frame of eight bits a byte, the
 //           division exact at every rate (docs/avrdx/spi.md).
+//   i2c.*   the tenure's own time on the bus: its SCL rising edges -
+//           nine a frame (the address and every data byte with its
+//           acknowledge), one for a repeated START, one for the STOP -
+//           times the SCL period measured on PA3, as n data bytes over
+//           that time. The engine's completion edge is the STOP's
+//           COMMAND, a period before the STOP's own edge, so wall minus
+//           wire reads one SCL period low on every tenure.
 //   uart.*  the rate the generator really produces (the BAUD register
 //           read back, usart_actual_baud) over the ten bits of an 8N1
 //           frame: 11 524, 100 000, 200 000 and 300 000 B/s.
@@ -282,6 +331,7 @@
 #include "avrdx/tca.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"
+#include "avrdx/twi.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
 #include "util/bench.hpp"
@@ -333,12 +383,15 @@ IsrMeter<Ruler, Idle> dre_meter;
 IsrMeter<Ruler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> spi_meter;
 IsrMeter<Ruler, Idle> u4_meter;
+IsrMeter<Ruler, Idle> twim_meter;
+IsrMeter<Ruler, Idle> twis_meter;
 IsrMeter<Ruler, Idle> empty_meter;
 
 /// The counters, read quiescent and under the mask (the file header).
 BenchCounters counters() {
     P::CriticalSection cs;
-    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, u4_meter);
+    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, u4_meter,
+                                twim_meter, twis_meter);
 }
 
 TestBench<Serial> bench;
@@ -1007,6 +1060,293 @@ void tu_uart() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// i - the I2C host: i2c.write, i2c.read, i2c.wr, i2c.probe
+// =============================================================================
+namespace di {
+
+using Host = I2cHost<0, TwiRoute::def>;               // PA2 SDA, PA3 SCL
+using Client = I2cClient<0, TwiRoute::def, true>;     // PC2 SDA, PC3 SCL (dual)
+using Scl = Pin<'A', 3>;
+using ChScl = EventChannel<0>;                        // PORTA pin events: channels 0 and 1
+using SclMeter = FrequencyMeter<Tcb<0>>;
+
+constexpr uint8_t client_addr = 0x42;
+constexpr uint8_t absent_addr = 0x77;
+
+/// The binding GPR0 selects for the two TWI0 vectors (the file header):
+/// bit 7 marks the metered one, so the plain one is the first exit.
+constexpr uint8_t plain = 0x00;
+constexpr uint8_t metered = 0x81;
+
+volatile bool done = false;
+volatile uint8_t cl_tx = 0;            ///< the client's next byte to serve (its index)
+volatile uint16_t cl_entries = 0;      ///< client entries, counted in both bindings
+volatile uint16_t scl_min = 0xFFFFu;   ///< the shortest SCL period captured
+volatile uint8_t scl_caps = 0;
+
+/// The client, served from its own vector: Smart mode, so a received
+/// byte is answered by the SDATA read and a served one continues by the
+/// SDATA write. The host's closing NACK of a read is RXACK at a DIF
+/// with something already served (a live bit: the first DIF of a read
+/// still carries the previous tenure's).
+[[gnu::always_inline]] inline void serve() {
+    const auto s = Client::isr();
+    cl_entries = static_cast<uint16_t>(cl_entries + 1u);
+    if (s.address_or_stop()) {
+        cl_tx = 0;
+        Client::respond(TwiAck::ack);
+        return;
+    }
+    if (!s.data()) {
+        return;
+    }
+    if (s.host_reading()) {
+        if (cl_tx != 0u && s.nack()) {
+            Client::complete();
+            return;
+        }
+        Client::transmit(cl_tx);
+        cl_tx = static_cast<uint8_t>(cl_tx + 1u);
+        return;
+    }
+    (void)Client::receive(TwiAck::ack);
+}
+
+struct Speed {
+    I2cSpeed speed;
+    const char* name;
+};
+constexpr Speed speeds[] = {{I2cSpeed::standard_100k, "100 kHz"},
+                            {I2cSpeed::fast_400k, "400 kHz"},
+                            {I2cSpeed::fast_plus_1m, "1 MHz (Fm+)"}};
+constexpr uint8_t write_lengths[] = {1u, 2u, 16u, 255u};
+constexpr uint8_t wr_lengths[] = {1u, 2u, 16u};
+
+/// Both halves up at a speed: the host on the main pair, the client on
+/// the dual pair (its own pads in Fm+ too), the client's vector on.
+bool bring_up(I2cSpeed s, bool smart) {
+    Host::release();
+    if (!Host::init(clock, {.speed = s, .smart = smart})) {
+        return false;
+    }
+    return Client::init(clock, {.address = client_addr,
+                                .smart = true,
+                                .stop_interrupt = false,
+                                .data_interrupt = true,
+                                .address_interrupt = true,
+                                .fm_plus = s == I2cSpeed::fast_plus_1m});
+}
+
+/// SCL rising edges in a tenure: nine a frame (eight bits and the
+/// acknowledge), one for the repeated START, one for the STOP (the 9N+1
+/// docs/avrdx/twi.md counts on this bus).
+constexpr uint32_t rises(uint8_t tx, uint8_t rx, bool probe) {
+    if (probe) {
+        return 10u;
+    }
+    uint32_t r = 1u;   // the STOP
+    if (tx != 0u) {
+        r += 9u * (1u + tx);
+    }
+    if (rx != 0u) {
+        r += 9u * (1u + rx) + (tx != 0u ? 1u : 0u);
+    }
+    return r;
+}
+
+/// The SCL period on the wire, in CLK_PER cycles: the shortest period
+/// TCB0 captures between rising edges of PA3 over sixteen-byte writes
+/// (a stretched period is longer, never shorter).
+uint16_t measure_period(I2cSpeed s) {
+    ChScl::source(EvPin<Scl>{});
+    SclMeter::init(clock, ChScl{});
+    scl_min = 0xFFFFu;
+    scl_caps = 0;
+    Host::Request r{};
+    r.addr = client_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(mem_src));
+    r.tx_len = 16;
+    r.reply = {};
+    r.speed = s;
+    for (uint8_t k = 0; k < 4u; ++k) {
+        done = false;
+        if (!Host::start(r)) {
+            for (uint32_t i = 0; i < 200'000u && !done; ++i) {
+            }
+        }
+    }
+    Tcb<0>::enable_capt_interrupt(false);
+    Tcb<0>::disable();
+    ChScl::off();
+    return scl_min;
+}
+
+/// One tenure, the best of 8 by wall. Metered, the thread idles until
+/// the host vector's completion edge (busy is then the core's); plain,
+/// it SPINS on that edge, so the wall ends within a few cycles of it and
+/// no stamp runs anywhere (busy = wall: the line the wire sees). Bounded
+/// at 100 ms. `ok` is false if any run timed out or ended with another
+/// status than `expect`.
+BenchSample best_tenure(const Host::Request& r, uint8_t expect, bool spin, bool& ok,
+                        uint16_t& entries) {
+    BenchSample best{};
+    Stopwatch<Ruler> sw;
+    ok = true;
+    constexpr uint32_t bound = Ruler::hz() / 10u;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        done = false;
+        const uint16_t e0 = cl_entries;
+        const BenchCounters c0 = counters();
+        sw.start();
+        bool finished = Host::start(r);
+        if (spin) {
+            uint16_t k = 0;
+            while (!finished) {
+                if (done) {
+                    finished = true;
+                } else if (++k == 0u && sw.elapsed() >= bound) {
+                    break;
+                }
+            }
+        }
+        while (!finished) {
+            cli();
+            if (done) {
+                sei();
+                finished = true;
+                break;
+            }
+            if (sw.elapsed() >= bound) {
+                sei();
+                break;
+            }
+            Idle::idle();
+        }
+        const uint32_t wall = sw.elapsed();
+        const BenchSample smp = bench_sample(wall, c0, counters());
+        const uint16_t e = static_cast<uint16_t>(cl_entries - e0);
+        ok = ok && finished && Host::status() == expect;
+        if (run == 0u || smp.wall < best.wall) {
+            best = smp;
+            entries = e;
+        }
+        delay_us(clock, 50);   // the STOP on the wire before the next START
+    }
+    return best;
+}
+
+/// One op in both bindings: the metered line (irq and isr exact, the
+/// stamps stretching SCL) and the plain one, `name` with ".bare" (the
+/// wire's own wall). n counts the data bytes; the probe's is 0.
+bool op(const char* name, const char* bare, I2cSpeed s, uint16_t period, uint8_t addr,
+        uint8_t tx, uint8_t rx, bool probe, uint8_t expect) {
+    Host::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(mem_src));
+    r.tx_len = tx;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(mem_dst));
+    r.rx_len = rx;
+    r.reply = {};
+    r.speed = s;
+    const uint32_t wire = rises(tx, rx, probe) * period;
+    const uint16_t n = probe ? 0u : static_cast<uint16_t>(tx + rx);
+    const uint32_t wire_bps =
+        n == 0u ? 0u : static_cast<uint32_t>((static_cast<uint64_t>(n) * Ruler::hz() + wire / 2u) / wire);
+    bool all = true;
+    for (const uint8_t mode : {metered, plain}) {
+        drain();
+        const Share h0 = share(twim_meter);
+        const Share c0 = share(twis_meter);
+        GPR.GPR0 = mode;
+        bool ok = false;
+        uint16_t entries = 0;
+        const BenchSample smp = best_tenure(r, expect, mode == plain, ok, entries);
+        GPR.GPR0 = plain;
+        const Share h1 = share(twim_meter);
+        const Share c1 = share(twis_meter);
+        bench_line(serial, mode == plain ? bare : name, n, smp, Ruler::hz(), wire_bps);
+        print(serial, "  wire ", wire, " cycles (", rises(tx, rx, probe), " SCL rises x ",
+              period, "): above the wire ", static_cast<int32_t>(smp.wall - wire),
+              ", client entries ", entries);
+        if (mode == metered) {
+            // the share counters span all 8 runs: per run is /8
+            print(serial, "; per run host irq=", (h1.irq - h0.irq + 4u) / 8u, " isr=",
+                  (h1.cycles - h0.cycles + 4u) / 8u, ", client irq=", (c1.irq - c0.irq + 4u) / 8u,
+                  " isr=", (c1.cycles - c0.cycles + 4u) / 8u);
+        }
+        print(serial, ok ? "" : " - STATUS OR COMPLETION WRONG", crlf);
+        all = all && ok;
+    }
+    return all;
+}
+
+bool rx_pattern_ok(uint8_t rx) {
+    for (uint8_t k = 0; k < rx; ++k) {
+        if (mem_dst[k] != k) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace di
+
+void ti_i2c() {
+    using namespace di;
+    for (uint16_t i = 0; i < 256u; ++i) {
+        mem_src[i] = static_cast<uint8_t>(i * 7u + 3u);
+    }
+    GPR.GPR0 = plain;
+    bool all = true;
+    for (const Speed& sp : speeds) {
+        if (!bring_up(sp.speed, false)) {
+            print(serial, "  ", sp.name, ": the host or the client did not come up", crlf);
+            all = false;
+            continue;
+        }
+        const uint16_t period = measure_period(sp.speed);
+        print(serial, "-- ", sp.name, ": MBAUD=", Host::baud(), ", SCL period ", period,
+              " cycles measured (register floor ", twi_period_ticks(SysClock::hz, Host::baud(), 0),
+              "), ", SysClock::hz / period, " Hz", crlf);
+        for (const uint8_t n : write_lengths) {
+            all = op("i2c.write", "i2c.write.bare", sp.speed, period, client_addr, n, 0, false,
+                     i2c_ok) && all;
+        }
+        for (const bool smart : {false, true}) {
+            if (!bring_up(sp.speed, smart)) {
+                all = false;
+                continue;
+            }
+            for (const uint8_t n : write_lengths) {
+                all = op(smart ? "i2c.read.smart" : "i2c.read",
+                         smart ? "i2c.read.smart.bare" : "i2c.read.bare", sp.speed, period,
+                         client_addr, 0, n, false, i2c_ok) && all;
+                all = rx_pattern_ok(n) && all;
+            }
+            for (const uint8_t n : wr_lengths) {
+                all = op(smart ? "i2c.wr.smart" : "i2c.wr", smart ? "i2c.wr.smart.bare" : "i2c.wr.bare",
+                         sp.speed, period, client_addr, 1, n, false, i2c_ok) && all;
+                all = rx_pattern_ok(n) && all;
+            }
+        }
+        (void)bring_up(sp.speed, false);
+        all = op("i2c.probe", "i2c.probe.bare", sp.speed, period, client_addr, 0, 0, true,
+                 i2c_ok) && all;
+        all = op("i2c.probe.nack", "i2c.probe.nack.bare", sp.speed, period, absent_addr, 0, 0,
+                 true, i2c_nack_addr) && all;
+        // A READ to nobody: its address NACK is i2c_nack_addr as a write's is.
+        const bool read_nack = op("i2c.read.nack", "i2c.read.nack.bare", sp.speed, period,
+                                  absent_addr, 0, 1, true, i2c_nack_addr);
+        print(serial, "  a read addressed to nobody answers i2c_nack_addr: ",
+              read_nack ? "yes" : "NO", crlf);
+        all = read_nack && all;
+    }
+    Host::release();
+    GPR.GPR0 = plain;
+    bench.verdict("every tenure completed with its status, every read byte-exact", all);
+}
+
 bool xtal = false;
 
 void banner() {
@@ -1095,6 +1435,51 @@ ISR(USART4_DRE_vect, ISR_NAKED) {
                  "jmp bench_u4_dre_metered\n\t"
                  "jmp bench_u4_dre_counted\n\t" ::[gpr] "I"(_SFR_IO_ADDR(GPR_GPR0)));
 }
+// Letter i's TWI0 bindings, the same naked dispatch on GPR0's bit 7:
+// plain (the driver's body alone, the line the wire sees) or metered.
+#pragma GCC diagnostic push
+#if !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmisspelled-isr"
+#endif
+extern "C" {
+[[gnu::signal, gnu::used]] void bench_twim_plain() {
+    if (di::Host::isr()) {
+        di::done = true;
+    }
+}
+[[gnu::signal, gnu::used]] void bench_twim_metered() {
+    twim_meter.enter();
+    if (di::Host::isr()) {
+        di::done = true;
+    }
+    twim_meter.leave();
+}
+[[gnu::signal, gnu::used]] void bench_twis_plain() { di::serve(); }
+[[gnu::signal, gnu::used]] void bench_twis_metered() {
+    twis_meter.enter();
+    di::serve();
+    twis_meter.leave();
+}
+}
+#pragma GCC diagnostic pop
+ISR(TWI0_TWIM_vect, ISR_NAKED) {
+    asm volatile("sbis %[gpr], 7\n\t"
+                 "jmp bench_twim_plain\n\t"
+                 "jmp bench_twim_metered\n\t" ::[gpr] "I"(_SFR_IO_ADDR(GPR_GPR0)));
+}
+ISR(TWI0_TWIS_vect, ISR_NAKED) {
+    asm volatile("sbis %[gpr], 7\n\t"
+                 "jmp bench_twis_plain\n\t"
+                 "jmp bench_twis_metered\n\t" ::[gpr] "I"(_SFR_IO_ADDR(GPR_GPR0)));
+}
+// TCB0 as letter i's SCL period meter: the shortest capture wins.
+ISR(TCB0_INT_vect) {
+    const uint16_t t = di::SclMeter::period_ticks();
+    di::scl_caps = static_cast<uint8_t>(di::scl_caps + 1u);
+    if (di::scl_caps > 2u && t < di::scl_min) {
+        di::scl_min = t;
+    }
+}
 ISR(SPI0_INT_vect) {
     spi_meter.enter();
     if (de::SpiHw::isr()) {
@@ -1117,6 +1502,8 @@ int main() {
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('e', "the SPI host: spi.poll, spi.poll.tx, spi.pump, spi.req", te_spi);
     bench.letter('u', "the UART transport on USART4's loop: uart.tx, uart.rx, uart.edge", tu_uart);
+    bench.letter('i', "the I2C host on TWI0's dual loop: i2c.write, i2c.read, i2c.wr, i2c.probe",
+                 ti_i2c);
 
     banner();
     bench.prompt();

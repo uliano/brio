@@ -231,7 +231,10 @@ that speed is refused until the clock moves again. A speed CHANGE costs
 an ENABLE cycle and a force-idle, because MBAUD may not be written under
 a running host - paid at `start()`, only when the speed actually moves,
 never per byte. `quick_command(true)` turns every request into an
-address-only frame.
+address-only frame. Smart mode is the engine's default (`Options::smart`,
+the measured reason below), and `i2c_nack_addr` answers any address
+nobody acknowledged - a write's, a read's, the repeated START's -
+`i2c_nack_data` a written byte refused.
 
 **`I2cClient<n, route, on_dual_pins>`** is the other end: the whole
 address-match space as options, the four cases as verbs - `respond`
@@ -312,6 +315,79 @@ if (pulses == brio::Twi<0>::unstick_failed) { /* the line is not clocked free */
 Deciding WHEN to call it - noticing that a transaction is stuck at all -
 is a policy for the bus AO and is not built ([i2c-bus.md](../design/i2c-bus.md)).
 
+## What the silicon offers for the cost, and what the engine takes
+
+The chapter's whole offer that bears on what a tenure costs the core
+and the bus, each item used or declined:
+
+| item | where | the engine |
+|---|---|---|
+| one host interrupt per byte, WIF after a write, RIF after a read, SCL held while the flag stands | 29.3.2.2.4, 29.3.2.2.5, 29.3.4 | THE SHAPE: there is no FIFO, no byte counter, no automatic STOP and no DMA request on this TWI, so the byte is software's and the handler's latency to its MDATA access is time the BUS waits, every byte. The handler is written for that latency: the two common cases asked first with one masked compare each, a cursor and a count set up once per phase, every verb it touches inline so the vector carries no call |
+| Smart mode, host side (MCTRLA.SMEN) | 29.3.3.3, 29.5.9 | USED, the default: ACKACT = ACK is armed once per reading tenure and every byte but the last is answered by the MDATA read itself; the last sets ACKACT = NACK before the read (with ACK standing the read would acknowledge and clock one more byte in; with NACK it sends nothing) and the STOP command carries it. Nothing on a write: the action is not taken on a DATA write |
+| MCTRLB with ACKACT and MCMD in one store | 29.5.5, table 29-2 note 1 | USED: every command is one store |
+| the held START on a Busy bus | 29.3.2.2.3 | USED by construction: `start()` writes MADDR and never waits for the bus |
+| Quick Command (QCEN) | 29.3.3.5 | EXPOSED (`quick_command(true)`), not the probe's shape: the empty probe costs one interrupt either way |
+| FLUSH | 29.5.5, errata 2.15.2 / 2.14.3 | DECLINED: broken on every revision; `recover()` is the errata's ENABLE cycle |
+| the client's Smart mode | 29.3.3.3 | the client task's option; the bench's own client runs it |
+
+### The host's cost, measured (bench_avr letter i)
+
+The bench: TWI0's host on PA2/PA3 against the SAME instance's client on
+the dual pair PC2/PC3, served from its own vector in Smart mode (the
+dual loop of the findings below), 1.5k to 5 V, CLK_PER 24 MHz. Both handlers run on one
+core, so every byte waits TWO handler latencies - the client's before
+the acknowledge, the host's after it - and wall minus wire holds both.
+The SCL period is measured on PA3 (TCB0 between rising edges): 244, 82
+and 34 cycles at 100 kHz, 400 kHz and Fm+ with the default timing
+(98.4 kHz, 292.7 kHz, 705.9 kHz; the node's rise is 166 ns, over Fm+'s
+120 ns specification, so the divider's own Fm+ figure is the one run).
+`wire` is the tenure's SCL rising edges - nine a frame, one for a
+repeated START, one for the STOP - times that period; the engine's
+completion edge is the STOP's command, a period before the STOP's edge.
+Plain bindings (no stamps), the thread spinning on the edge, best of 8,
+in CLK_PER cycles; the vendor's column is the data sheet's own polled
+sequence (29.3.2.2.3 - 29.3.2.2.5) against the same client:
+
+| tenure | wire | before | after | the data sheet's loop |
+|---|---|---|---|---|
+| 1-byte write, 100 kHz | 4636 | 5437 | 5392 | 5150 |
+| 255-byte write, 100 kHz | 562420 | 587198 (x 1.04) | 579784 (x 1.03) | 576405 (x 1.02) |
+| 1-byte write, 400 kHz | 1558 | 2157 | 2067 | 1874 |
+| 1 + 1 register read, 400 kHz | 3116 | 4228 | 4125 | 3924 |
+| 255-byte write, 400 kHz | 189010 | 220307 (x 1.16) | 212733 (x 1.12) | 210715 (x 1.11) |
+| 255-byte read, 400 kHz | 189010 | 223278 (x 1.18) | 216381 (x 1.14) | 215202 (x 1.13) |
+| 255-byte write, Fm+ | 78370 | 114193 (x 1.45) | 106403 (x 1.35) | 104344 (x 1.33) |
+| 255-byte read, Fm+ | 78370 | 116684 (x 1.48) | 109601 (x 1.39) | 109198 (x 1.39) |
+
+(The reads after are the engine's default, Smart mode; before, the
+engine without it.)
+
+What the rows say:
+
+- A written byte costs the bus 29 to 30 cycles less than it did, at
+  every speed (the 255-byte writes, divided by their 256 frames): the
+  handler's path from the flag to the MDATA store is 31 cycles of body
+  after a 12-instruction prologue where it was about 50 after 15, and
+  its whole entry 76 cycles where it was about 105 (counted in the
+  release listing). The handler carried no call in bench_avr either
+  way; in `test_avr_twi` it called `Twi::address_read` and
+  `Twi::ack_action`, which that image had outlined for their several
+  call sites, and saved the whole call-clobbered set - every verb the
+  handler touches is always_inline now, so no image can.
+- Smart mode moves the bus on at the MDATA read instead of at the
+  command after it: 9 to 14 cycles less SCL held per received byte at
+  the three speeds (219862 against 216381 at 400 kHz, 112155 against
+  109601 at Fm+), the same bytes. It is the engine's default for that.
+- Against the data sheet's polled loop the interrupt engine is within 1
+  to 2 per cent on 255 bytes at every speed - the loop busy for the
+  whole tenure, the engine's thread free between the bytes - and 170 to
+  240 cycles behind on one-byte tenures: the request's fields, the START
+  through `start()` and the completion edge, where the loop has none.
+- What remains above the wire on a long tenure is the two handlers per
+  frame on one core - 85 cycles a frame in the polled loop, where the
+  host spins and only the client's handler is left, 92 under the engine
+  at 400 kHz. A client on another chip pays its own turnaround instead.
+
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, TWI0 on its DEFAULT route,
@@ -373,7 +449,10 @@ everything. The address the client was called on is readable from SDATA
 
 **The chapter's cases, as MSTATUS values.** M1 reads 0x62 (WIF, ACK
 received, clock held, bus Owner); M2 reads 0xA2 (RIF, not WIF - the two
-are mutually exclusive); M3 reads 0x72 (WIF with RXACK set). A client
+are mutually exclusive); M3 reads 0x72 (WIF with RXACK set) - for a
+read's address as for a write's, which the engine reports
+`i2c_nack_addr` either way (bench_avr letter i's one-byte read to an
+address nobody holds). A client
 that NACKs the second byte of a five-byte write stops the write there:
 the engine reports `i2c_nack_data`, the client kept exactly the two
 bytes it acknowledged, and the host's closing NACK on a read is visible

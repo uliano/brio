@@ -698,12 +698,12 @@ public:
     /// FLUSH is deliberately absent: DB errata 2.15.2 / DA 2.14.3 say a
     /// flush can leave the host stuck in the Unknown bus state on every
     /// silicon revision. recover() is the documented work-around.
-    static void host_command(TwiHostCmd cmd, TwiAck ack = TwiAck::ack) {
+    [[gnu::always_inline]] static void host_command(TwiHostCmd cmd, TwiAck ack = TwiAck::ack) {
         regs().MCTRLB = static_cast<uint8_t>((ack == TwiAck::nack ? TWI_ACKACT_bm : 0) |
                                              static_cast<uint8_t>(cmd));
     }
     /// ACKACT alone (what Smart mode will send on the next MDATA read).
-    static void ack_action(TwiAck a) {
+    [[gnu::always_inline]] static void ack_action(TwiAck a) {
         regs().MCTRLB = (a == TwiAck::nack) ? TWI_ACKACT_bm : 0;
     }
 
@@ -824,10 +824,10 @@ public:
     /// an RMW would write back every flag it read (and BUSSTATE with
     /// them). Only 0x1 in the BUSSTATE field has an effect, so a clear
     /// never moves the bus state by accident.
-    static void clear_host_flags(uint8_t mask) { regs().MSTATUS = mask; }
+    [[gnu::always_inline]] static void clear_host_flags(uint8_t mask) { regs().MSTATUS = mask; }
     /// Force the bus state machine to Idle (the only value BUSSTATE
     /// accepts from software).
-    static void force_idle() { regs().MSTATUS = TWI_BUSSTATE_IDLE_gc; }
+    [[gnu::always_inline]] static void force_idle() { regs().MSTATUS = TWI_BUSSTATE_IDLE_gc; }
 
     // ---- MBAUD / MADDR / MDATA (29.5.7 - 29.5.9) -------------------------
 
@@ -850,10 +850,10 @@ public:
 
     /// Writing MADDR issues the START (or the repeated START) and shifts
     /// the address packet out; bit 0 is the direction.
-    static void address_write(uint8_t addr7) {
+    [[gnu::always_inline]] static void address_write(uint8_t addr7) {
         regs().MADDR = static_cast<uint8_t>(addr7 << 1);
     }
-    static void address_read(uint8_t addr7) {
+    [[gnu::always_inline]] static void address_read(uint8_t addr7) {
         regs().MADDR = static_cast<uint8_t>((addr7 << 1) | 1u);
     }
     /// The raw register (reading it disturbs nothing, 29.5.8).
@@ -863,8 +863,8 @@ public:
     /// MDATA is the shift register itself: a WRITE commands a byte
     /// transmit, a READ takes the received byte (and, in Smart mode,
     /// sends the acknowledge action).
-    static void host_write(uint8_t v) { regs().MDATA = v; }
-    static uint8_t host_read() { return regs().MDATA; }
+    [[gnu::always_inline]] static void host_write(uint8_t v) { regs().MDATA = v; }
+    [[gnu::always_inline]] static uint8_t host_read() { return regs().MDATA; }
 
     // ---- SCTRLA (29.5.10) ------------------------------------------------
 
@@ -1230,7 +1230,9 @@ private:
  * the reply's status says whether anybody ACKed.
  *
  * Status codes (util/i2c_bus.hpp): i2c_ok, i2c_nack_addr, i2c_nack_data,
- * i2c_arb_lost, i2c_bus_error. On any NACK the engine still issues the
+ * i2c_arb_lost, i2c_bus_error. i2c_nack_addr is any ADDRESS nobody
+ * acknowledged - a write's, a read's, the repeated START's - and
+ * i2c_nack_data a written byte refused. On any NACK the engine still issues the
  * STOP so the bus is released; on arbitration lost the bus belongs to
  * the other host and no STOP is sent; on bus error the peripheral is
  * forced back to the idle bus state.
@@ -1300,7 +1302,13 @@ public:
         TwiSdaHold sda_hold = TwiSdaHold::off;
         TwiSdaSetup sda_setup = TwiSdaSetup::cycles4;
         TwiInputLevel input_level = TwiInputLevel::i2c;
-        bool smart = false;         ///< MCTRLA.SMEN: the ACK rides the MDATA read
+        /// MCTRLA.SMEN: the ACK rides the MDATA read (29.3.3.3). ON by
+        /// default: a received byte but the last is then answered by the
+        /// read itself, and the bus moves on at that read instead of at
+        /// the command after it - measured 9 to 14 cycles less SCL held
+        /// per byte (bench_avr letter i, docs/avrdx/twi.md). A write is
+        /// the same either way: the action is not taken on a DATA write.
+        bool smart = true;
         bool debug_run = false;
     };
 
@@ -1396,23 +1404,43 @@ public:
     /// True only for the one refusal that moves nothing: a speed the
     /// divider cannot make at the clock in force, answered i2c_rejected
     /// through status() - the I2cHost contract (docs/design/i2c-bus.md).
+    ///
+    /// The per-byte state is set up HERE, once: a cursor into the phase's
+    /// buffer and the count of bytes left in it, so the handler's byte is
+    /// a load, a store and a decrement (isr() below). In Smart mode a
+    /// tenure that reads arms ACKACT = ACK here, once, and every byte but
+    /// the last is then answered by the MDATA read alone.
     static bool start(const Request& r) {
-        req_ = r;
-        pos_ = 0;
+        // What the engine reads later, field by field (the reply capsule
+        // is the arbiter's): the address and the read phase for a
+        // repeated START, the write's length for the NACK's verdict.
+        addr_ = r.addr;
+        tx_len_ = r.tx_len;
+        rx_ = r.rx.get();
+        rx_len_ = r.rx_len;
         if (!T::speed_ok(r.speed)) {
             status_ = i2c_rejected;   // nothing armed: no ISR will follow
             return true;
         }
         status_ = i2c_ok;
-        quick_ = T::quick_command();
         if (r.speed != T::speed()) {
             (void)T::set_speed(r.speed);     // ENABLE cycle + force idle: between tenures
         }
-        if (!quick_ && r.tx_len == 0 && r.rx_len > 0) {
+        if (smart_ && r.rx_len != 0u) {
+            T::ack_action(TwiAck::ack);
+        }
+        if (T::quick_command()) {
+            phase_ = Phase::quick;
+            T::address_write(r.addr);
+        } else if (r.tx_len == 0u && r.rx_len != 0u) {
             phase_ = Phase::reading;
+            rx_next_ = r.rx.get();
+            left_ = r.rx_len;
             T::address_read(r.addr);
         } else {
             phase_ = Phase::writing;
+            tx_next_ = r.tx.get();
+            left_ = r.tx_len;
             T::address_write(r.addr);
         }
         return false;
@@ -1425,63 +1453,68 @@ public:
      * TWI host interrupt body - call from ISR(TWIn_TWIM_vect). Returns
      * true when the transaction just completed (STOP issued or bus
      * lost): the edge on which the glue posts TransferDone.
+     *
+     * ONE INTERRUPT PER BYTE IS THE SILICON'S (29.3.2.2.4, 29.3.2.2.5):
+     * no FIFO, no byte counter, no DMA, and SCL is held from the flag
+     * until software answers - so the handler's latency to its MDATA
+     * access is time the BUS waits, every byte. The two common cases are
+     * therefore asked first and with one test each - a byte gone out and
+     * acknowledged in the write phase (WIF alone among WIF, RXACK,
+     * ARBLOST and BUSERR), a byte come in in the read phase (RIF without
+     * ARBLOST or BUSERR) - and each is a cursor load, a store and a
+     * decrement; every rarer case (a NACK, a lost arbitration, a bus
+     * error, a quick command) falls through to the chapter's full
+     * decision below them. Every verb this body touches is always_inline,
+     * so the vector carries no call and saves only the registers it uses
+     * (a call would impose the whole call-clobbered set on this ABI).
      */
     [[gnu::always_inline]] static bool isr() {
-        const auto st = T::take_host();
+        const uint8_t st = T::take_host().status;
 
-        if (st.arbitration_lost()) {        // another host won: not our bus
-            T::clear_host_flags(TWI_ARBLOST_bm | TWI_WIF_bm);
-            return finish(i2c_arb_lost);
-        }
-        if (st.bus_error()) {               // protocol violation: force idle
-            T::clear_host_flags(TWI_BUSERR_bm | TWI_WIF_bm);
-            T::force_idle();
-            return finish(i2c_bus_error);
-        }
-        if (st.write_done()) {              // address or data byte went out
-            if (st.nack()) {                // NACK: release the bus, report
-                T::host_command(TwiHostCmd::stop);
-                return finish((phase_ == Phase::writing && pos_ == 0)
-                                  ? i2c_nack_addr : i2c_nack_data);
-            }
-            if (!quick_ && phase_ == Phase::writing && pos_ < req_.tx_len) {
-                T::host_write(req_.tx.get()[pos_++]);
+        constexpr uint8_t write_mask = TWI_WIF_bm | TWI_RXACK_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm;
+        constexpr uint8_t read_mask = TWI_RIF_bm | TWI_ARBLOST_bm | TWI_BUSERR_bm;
+        if ((st & write_mask) == TWI_WIF_bm && phase_ == Phase::writing) {
+            const uint8_t left = left_;
+            if (left != 0u) {               // the next data byte
+                const uint8_t* p = tx_next_;
+                T::host_write(*p);
+                tx_next_ = p + 1;
+                left_ = static_cast<uint8_t>(left - 1u);
                 return false;
             }
-            if (!quick_ && req_.rx_len > 0) {   // repeated START, direction read
+            if (rx_len_ != 0u) {            // repeated START, direction read
                 phase_ = Phase::reading;
-                pos_ = 0;
-                T::address_read(req_.addr);
+                rx_next_ = rx_;
+                left_ = rx_len_;
+                T::address_read(addr_);
                 return false;
             }
-            T::host_command(TwiHostCmd::stop);  // write / probe / quick command complete
+            T::host_command(TwiHostCmd::stop);  // a write or a probe complete
             return finish(i2c_ok);
         }
-        if (st.read_done()) {               // a data byte came in
-            if (quick_) {                   // a quick command in the read direction
-                T::host_command(TwiHostCmd::stop);
-                return finish(i2c_ok);
-            }
-            const bool last = static_cast<uint8_t>(pos_ + 1) >= req_.rx_len;
-            if (smart_) {
-                // Smart mode: the acknowledge action goes out with the
-                // MDATA read, so ACKACT is armed FIRST and no receive
-                // command follows - only the STOP after the last byte.
-                T::ack_action(last ? TwiAck::nack : TwiAck::ack);
-                req_.rx.get()[pos_++] = T::host_read();
-                if (!last) return false;
-                T::host_command(TwiHostCmd::stop, TwiAck::nack);
-                return finish(i2c_ok);
-            }
-            req_.rx.get()[pos_++] = T::host_read();
-            if (!last) {
-                T::host_command(TwiHostCmd::recv_trans, TwiAck::ack);
+        if ((st & read_mask) == TWI_RIF_bm && phase_ == Phase::reading) {
+            const uint8_t left = static_cast<uint8_t>(left_ - 1u);
+            uint8_t* p = rx_next_;
+            if (left != 0u) {
+                // Smart mode: the MDATA read itself sends the ACK and
+                // clocks the next byte in (29.3.3.3; ACKACT = ACK since
+                // start()). Otherwise the command does.
+                *p = T::host_read();
+                if (!smart_) T::host_command(TwiHostCmd::recv_trans, TwiAck::ack);
+                rx_next_ = p + 1;
+                left_ = left;
                 return false;
             }
+            // The last byte: NACK and STOP. In Smart mode ACKACT must
+            // read NACK BEFORE MDATA is read - with ACK standing the read
+            // would acknowledge the byte and clock in one more; with NACK
+            // it sends nothing (29.3.3.3) and the STOP command carries it.
+            if (smart_) T::ack_action(TwiAck::nack);
+            *p = T::host_read();
             T::host_command(TwiHostCmd::stop, TwiAck::nack);
             return finish(i2c_ok);
         }
-        return false;                       // spurious: nothing to do
+        return slow(st);
     }
 
     /// The errata's work-around for a wedged host (FLUSH is not usable:
@@ -1498,19 +1531,57 @@ public:
     static void release() { T::release(); }
 
 private:
-    enum class Phase : uint8_t { writing, reading };
+    enum class Phase : uint8_t { writing, reading, quick };
 
-    static bool finish(uint8_t code) {
+    [[gnu::always_inline]] static bool finish(uint8_t code) {
         status_ = code;
         return true;
     }
 
-    static inline Request req_{};
-    static inline uint8_t pos_ = 0;
+    /// Everything but the two common cases, in the chapter's order: a
+    /// lost arbitration or a bus error first (M4: the flags say nothing
+    /// else is valid), then a NACK, then a quick command's flag.
+    [[gnu::always_inline]] static bool slow(uint8_t st) {
+        if ((st & TWI_ARBLOST_bm) != 0u) {      // another host won: not our bus
+            T::clear_host_flags(TWI_ARBLOST_bm | TWI_WIF_bm);
+            return finish(i2c_arb_lost);
+        }
+        if ((st & TWI_BUSERR_bm) != 0u) {       // protocol violation: force idle
+            T::clear_host_flags(TWI_BUSERR_bm | TWI_WIF_bm);
+            T::force_idle();
+            return finish(i2c_bus_error);
+        }
+        if ((st & TWI_WIF_bm) != 0u) {
+            // WIF with RXACK set (M3, or a data byte refused), or WIF
+            // standing in a phase that sends nothing more (a quick
+            // command acknowledged): release the bus. A data byte has
+            // moved only in the write phase with fewer left than asked;
+            // an unacknowledged address - the write's, the read's, the
+            // repeated START's, the quick command's - is i2c_nack_addr.
+            T::host_command(TwiHostCmd::stop);
+            if ((st & TWI_RXACK_bm) == 0u) {
+                return finish(i2c_ok);
+            }
+            return finish((phase_ == Phase::writing && left_ != tx_len_) ? i2c_nack_data
+                                                                            : i2c_nack_addr);
+        }
+        if ((st & TWI_RIF_bm) != 0u) {          // a quick command in the read direction
+            T::host_command(TwiHostCmd::stop);
+            return finish(i2c_ok);
+        }
+        return false;                           // spurious: nothing to do
+    }
+
+    static inline uint8_t* rx_ = nullptr;
+    static inline uint8_t addr_ = 0;
+    static inline uint8_t tx_len_ = 0;
+    static inline uint8_t rx_len_ = 0;
+    static inline const uint8_t* tx_next_ = nullptr;
+    static inline uint8_t* rx_next_ = nullptr;
+    static inline uint8_t left_ = 0;
     static inline Phase phase_ = Phase::writing;
     static inline uint8_t status_ = i2c_ok;
     static inline bool smart_ = false;
-    static inline bool quick_ = false;
 };
 
 /*
