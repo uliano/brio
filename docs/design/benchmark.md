@@ -153,7 +153,7 @@ floor is busy cycles in one idle second.
 | family (board, clock) | ruler | stamp | window | memcpy 4096 x | memset 4096 x | print 4096: irq, isr, x | tick floor |
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz crystal) | 78 | 217 | 355 | 2.36 | 5.02 | 4463 (4096 DRE + 367 ticks), 130 (57), 0.99 | 365 k, 1.52 % |
-| SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 259 | 1.43 | 1.63 | 4452 (4096 SERCOM5 + ticks), 168 (111), 0.99 | 250 k, 0.52 % |
+| SAM C21J18A (48 MHz OSC48M, 2 WS) | 65 | 150 | 259 | 1.43 | 1.63 | 4453 (4096 SERCOM5 + ticks), 131 (87 with the handlers in SRAM), 0.99 | 250 k, 0.52 % |
 | STM32G0B1RE (64 MHz PLL, 2 WS, the prefetch and the FIFO on) | 62 | 118 | 213 | 1.41 | 1.58 | 869 (513 USART2 refills + 356 ticks), 205 a refill of up to eight = 41 a character, 1.00 | 207 k, 0.32 % |
 | CH32V203C8T6 (144 MHz PLL, zero-wait window) | 32 | 79 | 94 | 1.53 | 1.81 | 4453 (4097 USART1 + 356 ticks), 73 (41), 1.00 | 190 k, 0.13 % |
 | STM32F446RE (180 MHz PLL, 5 WS, ART on) | 1 | 27 | 133 | 1.37 | 1.50 | 4453 (4097 USART2 + 356 ticks), 71, 1.00 | 132 k, 0.07 % |
@@ -204,14 +204,15 @@ What the rows say, and the two platform columns:
   imposes. The family's clock task turns it on at init
   ([../stm32g0/clock.md](../stm32g0/clock.md)); the row above is that
   default, and the app's letter `f` keeps printing both columns.
-- SAM C21, code in SRAM: the two handlers placed in `.ram_text` (the
-  linker's input section inside `.data`, zero bytes when unused) cut
-  the print row's `isr` by 15 per cent as the transport is - its
-  per-byte body outlined at `-Os`, so the placed handler calls back into
-  the flash through a veneer - and by 35 per cent at every size with the
-  whole path inline, the tick's by 33. The placement pays once the
-  per-byte path has no call in it (overview.md's three rules for a hot
-  path), not before.
+- SAM C21, code in SRAM: the handlers placed in `.ram_text` (the
+  linker's input section inside `.data`, zero bytes when unused) run
+  the transport a third faster than from the flash behind two wait
+  states - the print's interrupt 131 cycles to 87, the loop's
+  transmitter 194 to 198 a byte to 129, its receiver 211 to 221 a
+  character to 140 - and the tick's by 33 per cent. The placement pays
+  because the per-byte path has no call in it (overview.md's three
+  rules for a hot path): a placed handler that calls back into the
+  flash goes through a veneer.
 
 ## Letter d: the engines on each controller
 
@@ -344,6 +345,7 @@ program. `x` is read on the plain binding.
 
 | family (clock; the loop's top rate) | uart.tx x at the top rate, 256 and 4096 | uart.rx 256 x by rate; receive entries for 256 | the edge after the last stop bit | `tx_idle()` after the last stop bit | the core at about 1 Mbaud: transmit, receive (the vendor's receive) | the vendor's receive, x |
 |---|---|---|---|---|---|---|
+| SAM C21J18A (48 MHz OSC48M, 2 WS; 3 Mbaud) | the engine 1.03, 1.00; the interrupt transmitter 2.17, 2.14 (194 to 198 cycles a byte against a 160-cycle frame; 1.46 from SRAM) | the interrupt receiver 1.00 at 115200, 1.01 at 1 Mbaud, at 3 Mbaud 0.34 entries a character and lossless with no meter on the vectors; the engine 1.00, 1.02, 2.09 at 3 (its plain sender slower than the wire); 256 entries at 1 Mbaud, one completion under the engine | the interrupt receiver 416 to 424 cycles; the engine 656 to 763 at a block's end (1.37 frames at 1 Mbaud), a tail at the owner's ask | within a probe turn (94 to 308 cycles) at 115200, 1 and 3 Mbaud | the transmit engine 1 %, the interrupt receiver 44 to 46 % (32 %) | the data sheet's bare RXC handler: 1.01 at 1 Mbaud, 154 cycles a character against 211 to 221; at 3 Mbaud 241 of 256 lost |
 | AVR128DB48 (24 MHz; 3 Mbaud) | 1.02 to 1.03, 1.00 | 1.00 at 115200 and 1 Mbaud, 1.02 at 2, 3.7 to 6.8 at 3 (the consumer starved); 256 and 255 to 1 Mbaud, about 1.5 frames an entry at 3 | -3 to +2 cycles at 115200; +69 to +77 at 1 to 3 Mbaud, under a frame | +35 to +37 cycles at 115200 (a bit is 208), +47 at 460800 (52), +26 at 1 Mbaud (24) | 25 %, 31 to 35 % (27 %) | the data sheet's sequence: 1.00 at 115200 and 1 Mbaud, 1.01 at 2, 2.9 at 3 |
 
 What the rows say:
@@ -357,6 +359,19 @@ What the rows say:
   consumer starves while the hardware loses 1 to 6 frames in 256 - the
   core's limit, which the data sheet's own sequence (65 cycles a frame)
   meets too ([../avrdx/usart.md](../avrdx/usart.md)).
+- The SERCOM has neither an idle flag nor a receiver time-out, so
+  under the engine the edge is a block's completion - half the ring -
+  and a tail shorter than a block waits for the owner's ask; the idle
+  detector a TC could build from the RX pad's edges is declined
+  ([../samc21/sercom.md](../samc21/sercom.md)). Its interrupt receiver
+  takes every level of the buffer an entry and keeps 3 Mbaud where the
+  data sheet's handler, a character an entry, loses nine in ten - at
+  37 to 43 per cent more cycles a character than that handler at 1
+  Mbaud: the shared vector's question, the RXC re-read that ends the
+  loop and the ring's tests, named in the family's document. At 3
+  Mbaud it has two frames of margin and no more: the bench's meters on
+  every vector cost it a character in most runs from the flash, none
+  from SRAM.
 - `tx_idle()` turns true after the last stop bit and never before it on
   the pad; at 1 Mbaud on the AVR the poll's own turn, about twenty
   cycles, is most of what the instrument reads.

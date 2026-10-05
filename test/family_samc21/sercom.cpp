@@ -19,7 +19,7 @@ static_assert(sercom_count >= 4, "every variant in the pack has at least SERCOM0
 
 // ---- the pad rules, at compile time ----------------------------------------
 // CTRLA.TXPO puts TxD on PAD[0] or PAD[2] and nowhere else, and the two
-// directions cannot share a pad.
+// directions share a pad only as 31.6.3.8's loop-back - one pin named twice.
 static_assert(uart_tx_pad_exists(SercomPad::pad0));
 static_assert(uart_tx_pad_exists(SercomPad::pad2));
 static_assert(!uart_tx_pad_exists(SercomPad::pad1));
@@ -36,7 +36,14 @@ constexpr UartPads pads{
 };
 static_assert(uart_pads_valid(pads));
 static_assert(!uart_pads_valid({.tx = SercomPad::pad1, .rx = SercomPad::pad0}));
-static_assert(!uart_pads_valid({.tx = SercomPad::pad0, .rx = SercomPad::pad0}));
+static_assert(uart_pads_valid({.tx = SercomPad::pad0,
+                               .rx = SercomPad::pad0,
+                               .tx_pin = {'A', 4, PinFunction::d},
+                               .rx_pin = {'A', 4, PinFunction::d}}));
+static_assert(!uart_pads_valid({.tx = SercomPad::pad0,
+                                .rx = SercomPad::pad0,
+                                .tx_pin = {'A', 4, PinFunction::d},
+                                .rx_pin = {'A', 5, PinFunction::d}}));
 static_assert(!uart_pads_valid({.tx = SercomPad::pad0,
                                 .rx = SercomPad::pad1,
                                 .tx_pin = {'C', 0, PinFunction::d}}));
@@ -171,6 +178,19 @@ void task_verbs() {
     using Wide = Uart<0, wide_pads, 1024, 1024>;
     static_assert(Ring<uint8_t, 1024, SamPlatform>::lock_free);
     (void)Wide::init(clock, 460800);
+
+    // The loop-back (31.6.3.8): the receiver on its own transmitter's pad,
+    // one pin named for both directions.
+    constexpr UartPads loop_pads{
+        .tx = SercomPad::pad0,
+        .rx = SercomPad::pad0,
+        .tx_pin = {'A', 4, PinFunction::d},
+        .rx_pin = {'A', 4, PinFunction::d},
+    };
+    using Loop = Uart<0, loop_pads>;
+    (void)Loop::init(clock, 3'000'000);
+    (void)Loop::tx_idle();
+    Loop::release();
 }
 
 // ---- the optional DMA engines -----------------------------------------------
@@ -232,6 +252,10 @@ void engined_uart_verbs() {
     (void)RxOnlySerial::write_byte('x');
     uint8_t b = 0;
     (void)RxOnlySerial::read_byte(b);
+    uint8_t run[8];
+    (void)RxOnlySerial::read_bulk(run);   // a consumer's release re-arms a stalled engine
+    (void)RxOnlySerial::read_span();
+    RxOnlySerial::consume(1);
     (void)RxOnlySerial::rx_pending();
     (void)RxOnlySerial::tx_idle();
     (void)RxOnlySerial::hw_overruns();

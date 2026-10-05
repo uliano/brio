@@ -74,7 +74,11 @@ and `dma_isr()` where a receive engine has a vector of its own - return
 bytes the consumer has not been told of, and the app's ISR glue posts
 one `RxActivity` on `true`. Told once: the next `true` waits until the
 consumer has found the ring empty, so there is no event flood and no
-lost wakeup. No owner polls for that edge on a timer. WHICH event of the
+lost wakeup. No owner polls for that edge on a timer - save the tail of
+a burst under a receive engine on a block with neither an idle flag nor
+a time-out (the SAM C21's SERCOM), which reaches the consumer when the
+owner asks `harvest()` for it ([../samc21/sercom.md](../samc21/sercom.md)).
+WHICH event of the
 silicon makes it is the family's, chosen from its chapter and stated in
 its serial document with its cost in the handler: a byte arriving in an
 empty ring on a receiver that takes one byte an interrupt, a FIFO level
@@ -98,7 +102,9 @@ own read is that read, and where a byte can complete between the status
 read and the data read the family's header names the race and bounds
 it. So errors injected into a stream under an engine cost exactly the
 bytes they hit: N bytes sent with K hit deliver N - K, in order, and the
-counters say K.
+counters say K - or, where the channel takes every frame and one status
+register serves the whole run (the SAM C21's), all N arrive and the
+errors are counted against the run.
 
 **`tx_idle()` means the wire is idle**, on every family: nothing queued
 in the transmit ring, no block in flight on a transmit engine, and the
@@ -135,7 +141,7 @@ port has that the others' has not.
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; `rxc()` takes every frame the two-level buffer holds in one entry, the edge the burst's FIRST byte (chapter 27 has no idle flag, time-out or FIFO level); `tx_idle()` is TXCIF, which the task OWNS - `dre()` clears it behind a run's last byte, and a resource user who clears it makes `tx_idle()` false until the next run ends; `write_bulk()` copies with avr-libc's `memcpy` from two bytes up; `set_baud()` and `release()` as on the other two |
-| samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins; ONE vector, `isr()` returns the edge; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, and `read_bulk()`, the receive run copied out |
+| samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins, one pin for both directions being the loop through the pad (31.6.3.8); ONE vector, `isr()` returns the edge and takes every level of the receive buffer an entry; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, and `read_bulk()`, the receive run copied out; the receive engine fills half the ring a block, its completion the edge, re-armed in the handler, and a tail shorter than a block the owner's `harvest()`; a transmit engine's block half the ring at most; `tx_idle()` is TXC, which every write to DATA clears, a channel's beat included; the run copy the runtime's `memcpy` from 20 bytes whose two ends share their word alignment, the byte loop otherwise |
 | stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and `read_bulk()`; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
 | ch32v00x | `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32v00x/usart.hpp`) | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s tables), the code a template parameter; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the channels table 8-2 gives the instance (the channel IS the request on this family, an engine elsewhere refused); USART2 refused at code 0, whose TX is the K8 package's reset pin; `UartOptions` as one trailing parameter (the frame, a single wire that is a BUS and not a loop on this silicon, the flow-control pair); BRR is PCLK over the baud, whole - no separate fractional field and no kernel-clock multiplexer |
 | stm32f4 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` (`stm32f4/usart.hpp`) | the classic SR/DR/BRR block (the CH32V00x's under ST's names): flags cleared by read sequences, the divisor in sixteenths or eighths (OVER8); the pads as `PinSel`s with the datasheet's AF; ten instances at most with a vector each, the U(S)ART name deciding FULL or not; the divisor from the instance's OWN APB clock (`apb_hz`), because the two buses run below HCLK; two OPTIONAL DMA engine slots (`stm32f4/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`) with `dma_isr()`, `dma_faults()` and `harvest()`, named by (controller, STREAM, channel) because a stream is the unit here and a peripheral reaches only the cells the request mapping gives it - checked at compile time against the reserve's per-part-class table and refused on a class whose manual was not read; clearing a receive error costs the byte in DR, this block's flags going away only by a read sequence ([../stm32f4/usart.md](../stm32f4/usart.md), [../stm32f4/dma.md](../stm32f4/dma.md)) |

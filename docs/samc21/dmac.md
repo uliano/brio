@@ -340,9 +340,12 @@ promise, not an inheritance from whatever a debugger left behind.
   times, `start_discard(cell, count)` drains `count` into one. A block
   starts on an IDLE channel - the previous one completed, was stopped,
   or never ran - which is what lets it write the slot and enable without
-  waiting. The receive side's asymmetry is its own: arrival is not an
-  event anyone is told about, so `take()` asks by harvesting and the
-  PACING is the caller's.
+  waiting. The receive side's asymmetry is its own: a byte's arrival
+  is not an event anyone is told about, a block's end is - so
+  `complete()`, from the handler on the channel's completion, counts the
+  whole run with no write-back read and no suspend (the Uart's edge,
+  sercom.md), and `take()` asks mid-block by harvesting, its PACING the
+  caller's.
 - **`DmaLoopEngine`** - one caller-owned table played into a
   peripheral for ever. `start(table, length)`, `complete()` from the
   handler (counts the lap, re-arms the same block), `laps()`,
@@ -819,7 +822,7 @@ Driver gaps (not built):
   remaining count: this controller has no circular mode (above) and no
   readable counter - BTCNT reaches the write-back only on a suspend
   (25.10.2), so every reading of "how far" is a harvest. The receive
-  engine stays a run a harvest re-arms; the shape is born with the
+  engine stays a run its completion re-arms; the shape is born with the
   ring's external-index half (design/ring.md) and its first user here.
 - A copy longer than 65535 elements in one call (BTCNT is sixteen bits):
   the caller's loop, a chain needing the linked descriptors declined

@@ -2091,6 +2091,20 @@ public:
         return fresh;
     }
 
+    /**
+     * The block ended - called from the DMAC handler when take_pending()
+     * names this channel with its completion. Every beat of the run has
+     * landed, so the count is the run's and not the write-back's: returns
+     * the beats not taken yet and takes them, with no suspend and no
+     * reading to validate - the receive twin of DmaTxEngine::complete().
+     * A block whose rest an owner's take() already counted returns zero.
+     */
+    static uint16_t complete() {
+        const uint16_t fresh = static_cast<uint16_t>(capacity_ - taken_);
+        taken_ = capacity_;
+        return fresh;
+    }
+
     /// Raise ONE software trigger on the channel - see DmaTxEngine::kick()
     /// for when an owner should and when the enable has already done it.
     static void kick() { Channel::trigger(); }

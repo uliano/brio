@@ -20,15 +20,17 @@
 // the host can verify an echoed one - so every leg is checked at both
 // ends, and the position of the first wrong byte is a number.
 //
-// WHY MOST LETTERS NEED THE HOST. This SERCOM's only wire is the console
-// itself: there is no second port, no loop-back bit in this silicon and
-// no jumper on the bench. A byte can
-// only be checked against something OUTSIDE the chip, so the letters that
-// stream traffic sit OUTSIDE z, driven by brio stress - which is
-// also the only thing that can speak a frame format the board is not
-// using, and therefore the only way to reach the receiver's error paths
-// at all. z keeps what the board can decide alone: the baud arithmetic,
-// the frame encoding, the ring contract, the engines' register facts.
+// TWO WIRES. The console's SERCOM5 reaches the host through the board's
+// CH340, and the letters that stream traffic over it sit OUTSIDE z, driven
+// by brio stress - the only peer that can speak a frame format or a rate
+// the board is not using, and so the only way to reach the receiver's
+// error paths at all. The second wire needs no peer: SERCOM1 with its
+// receiver on its own transmitter's pad (PAD[0], PA16 under function C),
+// 31.6.3.8's loop-back "through the pad" - nothing is wired to PA16. z
+// runs what the board decides alone: the baud arithmetic, the frame
+// encoding, the ring contract, the engines' register facts, and on the
+// loop the wire's idle, the receive engine's edge and the level loop at
+// the generator's top rate.
 //
 // THE CHOREOGRAPHY every host letter follows, so the console survives:
 //
@@ -43,9 +45,9 @@
 //   4. the board hands the console back at 115200 8N1 and prints its
 //      verdicts.
 //
-// What is exercised, letter by letter - a..d need nothing outside the
-// board and are what z runs; e..p stream traffic and are driven by
-// brio stress:
+// What is exercised, letter by letter - a..d, q, r and t need nothing
+// outside the board and are what z runs; e..p and s stream traffic over the
+// console and are driven by brio stress:
 //   a  the baud generator's arithmetic
 //   b  every frame format, written and read back
 //   c  the transmit ring's contract under pressure
@@ -62,6 +64,15 @@
 //   m  a MISMATCHED frame and the recovery from it
 //   n  ring pressure: eager against lazy harvests
 //   p  bursty traffic with idle gaps
+//   q  tx_idle() on the loop: never before the last stop bit, within a bit
+//      after it, for the plain transport and the transmit engine
+//   r  the receive engine on the loop: the edge from the vector at each
+//      half of the ring, the block boundary under a stream at the wire's
+//      rate, the tail by the owner's ask
+//   s  errors injected under the receive engine and the interrupt
+//      receiver (host): no byte taken to clear an error
+//   t  the interrupt receiver at the generator's top rate on the loop:
+//      every level an entry
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -93,9 +104,9 @@ constexpr UartPads console_pads{
     .rx_pin = {'B', 31, PinFunction::d},
 };
 
-// 512 each way: big enough that a harvest cadence of a few hundred
-// microseconds keeps up at 1 Mbaud, small enough that three
-// instantiations fit comfortably in 32 KB of SRAM.
+// 512 each way: the receive engine's blocks are its halves, 256 bytes,
+// and three instantiations - with the loop's three below - fit
+// comfortably in 32 KB of SRAM.
 constexpr uint32_t rx_ring = 512;
 constexpr uint32_t tx_ring = 512;
 
@@ -137,6 +148,8 @@ using brio::print;
 // a shape this transport refuses).
 enum class Mode : uint8_t { plain = 0, txdma = 1, rxdma = 2 };
 Mode live = Mode::plain;
+/// The receive edges the engine's vector returned (dma_isr()) in a leg.
+volatile uint32_t rx_vector_edges = 0;
 
 const char* mode_name(Mode m) {
     switch (m) {
@@ -366,7 +379,12 @@ struct Leg {
     UartFormat format{};
     uint32_t window_ms = 1200;
     uint32_t count = 0;         ///< bytes to emit, for `source`
-    uint32_t harvest_us = 200;  ///< how often the owner asks the RX engine
+    /// How often the owner asks the RX engine for the TAIL. The run is
+    /// published by the engine's vector at every filled half of the ring
+    /// (dma_isr()); what no completion reports - the tail of a stream that
+    /// stops short of a block's end - is the owner's ask, and a lazy one:
+    /// letter n measures what an eager cadence costs.
+    uint32_t harvest_us = 2000;
 
     /// What the board TELLS the host to use. Normally the same as its
     /// own settings; letter m deliberately makes them differ, which is
@@ -383,6 +401,8 @@ struct LegResult {
     uint32_t dropped;
     uint32_t sent;
     uint32_t first_bad;   ///< 1-based position of the first byte off the stream
+    uint32_t vector_edges;   ///< the receive engine's edges from its vector
+    uint32_t asks;           ///< the owner's harvest() calls
     bool drained;
     ErrCounts err;
 };
@@ -421,6 +441,7 @@ LegResult run_leg(const Leg& leg) {
     (void)mode_init(leg.mode, leg.baud, leg.format);
     spin_ms(120);
     mode_clear_errors();
+    rx_vector_edges = 0;
     DmaChannel<ch_tx>::clear_counters();
     DmaChannel<ch_rx>::clear_counters();
     DmaTxEngine<ch_tx>::clear_faults();
@@ -450,6 +471,9 @@ LegResult run_leg(const Leg& leg) {
         const uint32_t now = cycles_now();
         if (static_cast<int32_t>(now - next_harvest) >= 0) {
             mode_harvest();
+            if (leg.mode == Mode::rxdma) {
+                ++r.asks;
+            }
             next_harvest = now + harvest_gap;
         }
 
@@ -508,6 +532,7 @@ LegResult run_leg(const Leg& leg) {
 
     r.drained = drain();
     r.err = mode_errors();
+    r.vector_edges = rx_vector_edges;
     return r;
 }
 
@@ -528,6 +553,10 @@ void report(const Leg& leg, const LegResult& r) {
           " parity=", r.err.parity, " hw_overrun=", r.err.hw_overrun,
           " dma_faults=", r.err.dma_faults,
           " drained=", r.drained ? "yes" : "NO", crlf);
+    if (leg.mode == Mode::rxdma) {
+        print(plain, "     the engine's edges from its vector ", r.vector_edges,
+              ", the owner's asks ", r.asks, crlf);
+    }
 }
 
 // =============================================================================
@@ -761,12 +790,8 @@ void run_and_report(const Leg& leg, bool lossless) {
         bench.verdict("nothing was dropped on the way back", r.dropped == 0);
         bench.verdict("no hardware overrun", r.err.hw_overrun == 0);
     } else {
-        // A DMA receiver publishes only what a harvest has taken, and it
-        // has no run to fill between a block ending and the next harvest
-        // re-arming it. A gap there is the contract, not a defect, so the
-        // letter MEASURES it instead of pretending it away.
-        print(plain, "  (lossy by contract: the RX engine publishes at harvest "
-                     "granularity and is idle between blocks)", crlf);
+        print(plain, "  (lossy allowed at this rate: loss must be counted, never silent)",
+              crlf);
         bench.verdict("the stream is contiguous well past the start",
                       r.first_bad == 0 || r.first_bad > 256);
         bench.verdict("the transmitter was not left claiming a dead block",
@@ -783,16 +808,21 @@ Leg base_leg(Op op, Mode m) {
 
 void te_plain_echo() { run_and_report(base_leg(Op::echo, Mode::plain), true); }
 void tf_txdma_echo() { run_and_report(base_leg(Op::echo, Mode::txdma), true); }
-void tg_rxdma_echo() { run_and_report(base_leg(Op::echo, Mode::rxdma), false); }
+/// The receive engine publishes from its vector and re-arms in the same
+/// handler, so the block boundary is no gap: lossless, as the interrupt
+/// receiver is.
+void tg_rxdma_echo() { run_and_report(base_leg(Op::echo, Mode::rxdma), true); }
 /// THE DUPLEX LINK THE ERRATUM LEAVES. Both engines on one SERCOM are
 /// refused (erratum 1.10.4), so a link that wants bulk both ways takes
 /// the engine on the transmit side and keeps the receiver on RXC. Two
 /// rates, two claims:
 ///  - at 1 Mbaud the shape is LOSSLESS - every byte back, in order,
 ///    nothing dropped, no hardware overrun;
-///  - at 2 Mbaud the interrupt receiver is at its edge (one RXC entry
-///    per 240 cycles, two characters of FIFO), so a lost byte is
-///    allowed and SILENCE is not, as in letter k.
+///  - at 2 Mbaud the receiver takes every level an entry and keeps the
+///    stream but for a character or three when another handler holds it
+///    past two frames (the transmit engine's completion and the tick
+///    together), and the echo gains on the board's slow clock (below):
+///    loss is allowed and SILENCE is not, as in letter k.
 /// At both, NO TRANSMIT BLOCK MAY BE ABANDONED: the engine's channel is
 /// the only one in this image, so erratum 1.10.4 has nothing to corrupt
 /// it with, and an abandoned block is the dead-block predicate firing on
@@ -812,7 +842,19 @@ void th_duplex_echo() {
         dump_engines(s);
         bench.verdict("the transport drained at the end of the window", r.drained);
         bench.verdict("something crossed the wire", r.received != 0u);
-        bench.verdict("nothing was dropped on the way back", r.dropped == 0);
+        if (rate <= 1'000'000u) {
+            bench.verdict("nothing was dropped on the way back", r.dropped == 0);
+        } else {
+            // THE ECHO CAN FIND ITS TRANSMIT RING FULL at 2 Mbaud: 0 to 18
+            // characters a window in six runs, consistent with the board
+            // sending back slower than the bridge sends in - OSC48M is half
+            // a per cent off nominal on this board (docs/boards/
+            // samc21j.md), and half a per cent of the 105000 bytes a
+            // window carries is the ring's 511. Dropped is allowed there;
+            // uncounted is not.
+            bench.verdict("what the echo could not hold was counted",
+                          r.echoed + r.dropped == r.received);
+        }
         if (rate <= 1'000'000u) {
             bench.verdict("every received byte was on the stream, in order",
                           r.first_bad == 0);
@@ -961,10 +1003,14 @@ void tm_mismatch() {
 }
 
 void tn_pressure() {
-    // RING PRESSURE, both extremes, through the transport that has the
-    // most to lose. A lazy cadence gives the RX engine a whole block to
-    // fill between asks; an eager one asks far more often than any
-    // application would. NEITHER MAY WEDGE.
+    // THE OWNER'S ASK, both extremes, through the transport that has the
+    // most to lose. The engine's vector publishes every filled half of the
+    // ring and re-arms; the owner's harvest() is for the tail. A lazy ask
+    // (2 ms) is the shape letter g runs; an eager one (50 us) suspends the
+    // channel some twenty times a block, and measured, an ask landing on a
+    // block's last beats loses two to four characters at that boundary,
+    // uncounted (docs/samc21/sercom.md) - printed here, its first_bad a
+    // multiple of the block. NEITHER MAY WEDGE.
     static constexpr uint32_t cadences[] = {50, 2000};
     for (uint32_t us : cadences) {
         Leg leg = base_leg(Op::echo, Mode::rxdma);
@@ -979,17 +1025,440 @@ void tn_pressure() {
         bench.verdict("the transmitter is not left claiming a dead block",
                       !s.tx_busy);
         bench.verdict("bytes crossed", r.received != 0u);
+        if (us >= 2000u) {
+            bench.verdict("asked lazily, the stream is byte-exact", r.first_bad == 0);
+        }
     }
 }
 
 void tp_burst() {
     // Bursty traffic with idle gaps - the shape a console really sees,
-    // and the one an RX engine is worst at: nothing tells it a byte has
-    // arrived, so an idle line is exactly where the harvest cadence
-    // carries the whole latency.
+    // and the one an RX engine is worst at: a burst that stops short of
+    // a block's end has no edge on this silicon (no idle detector, no
+    // receiver time-out), so the owner's ask carries the tail's latency.
+    // The bytes are all there either way.
     Leg leg = base_leg(Op::burst, Mode::rxdma);
     leg.window_ms = 1400;
-    run_and_report(leg, false);
+    run_and_report(leg, true);
+}
+
+
+// =============================================================================
+// The loop: SERCOM1 listening on its own transmitter's pad
+// =============================================================================
+//
+// 31.6.3.8: RXPO and TXPO naming one pad put the receiver on the
+// transmitter's own signal, through the pad. PAD[0] of SERCOM1 is PA16
+// under function C; nothing is wired to it. Three transports over it,
+// never live at once (`loop_live`), each on channels of its own.
+
+constexpr UartPads loop_pads{
+    .tx = SercomPad::pad0,
+    .rx = SercomPad::pad0,
+    .tx_pin = {'A', 16, PinFunction::c},
+    .rx_pin = {'A', 16, PinFunction::c},
+};
+constexpr uint8_t ch_loop_tx = 8;
+constexpr uint8_t ch_loop_rx = 9;
+
+using LPlain = Uart<1, loop_pads, 512, 512>;
+using LTxDma = Uart<1, loop_pads, 512, 512, DmaTxEngine<ch_loop_tx>, NoDmaEngine>;
+/// A 1024 ring: the engine's blocks are its halves, 512 bytes.
+using LRxDma = Uart<1, loop_pads, 1024, 512, NoDmaEngine, DmaRxEngine<ch_loop_rx>>;
+using Sc1 = LPlain::Resource;
+
+enum class Loop : uint8_t { none, plain, txdma, rxdma };
+volatile Loop loop_live = Loop::none;
+/// The receive edges the loop's vectors returned.
+volatile uint32_t loop_edges = 0;
+
+uint32_t bit_cycles(uint32_t baud) { return SysClock::hz / baud; }
+
+/// A few frames of idle line after the transport comes up.
+void loop_settle(uint32_t baud) {
+    const uint32_t t0 = cycles_now();
+    while (cycles_now() - t0 < 40u * bit_cycles(baud)) {
+    }
+}
+
+/// Polled transmission through the resource, for a sender at the wire's
+/// own rate beside a receive engine (the pair of engines is refused):
+/// DATA written whenever DRE stands (31.6.2.5).
+[[gnu::always_inline]] inline bool loop_send_polled(uint8_t b) {
+    if (!Sc1::dre_flag()) {
+        return false;
+    }
+    Sc1::data(b);
+    return true;
+}
+
+// ---- q - tx_idle() on the pad ------------------------------------------------
+
+struct IdleProbe {
+    bool idle_before_init_write;   ///< a port that has sent nothing reads idle
+    bool idle_seen;
+    bool last_seen;                ///< the probe read the last byte itself
+    int32_t after_last;            ///< cycles from the last byte's flag to tx_idle()'s true
+    uint32_t turn;                 ///< one turn of the probe, in cycles
+    uint32_t received;
+};
+
+/// n bytes through U; once the transport has handed the hardware what
+/// SERCOM1's own vector must feed (`handed`), that vector's NVIC line is
+/// held off and the probe takes the receiver's levels itself, every
+/// level a turn, asking tx_idle() every turn - the TURN at which the last
+/// byte's flag is read (its stop bit, 31.6.2.6) and the turn at which
+/// tx_idle() first answers true are compared, and a turn measured in
+/// cycles over the whole probe. The DMAC's vector stays live: a transmit
+/// engine's completion is what releases its ring.
+template <typename U, typename Handed>
+IdleProbe probe_idle(uint32_t baud, uint32_t n, Handed handed) {
+    IdleProbe r{};
+    (void)U::init(clock, baud);
+    loop_settle(baud);
+    r.idle_before_init_write = U::tx_idle();
+    uint32_t s = lfsr_seed;
+    uint8_t out[64];
+    for (uint32_t i = 0; i < n; ++i) {
+        out[i] = lfsr_next(s);
+    }
+    (void)U::write_bulk(std::span<const uint8_t>(out, n));
+    uint32_t spins = 0;
+    while (!handed() && spins++ < 4'000'000u) {
+        asm volatile("" ::: "memory");
+    }
+    Nvic::disable(Sc1::irq());
+    uint32_t got = static_cast<uint32_t>(U::rx_pending());
+    uint32_t turn_last = 0;
+    uint32_t turn_idle = 0;
+    uint32_t turn = 0;
+    const uint32_t c0 = cycles_now();
+    for (; turn < 400'000u; ++turn) {
+        while (Sc1::rxc_flag()) {
+            (void)Sc1::data();
+            if (++got == n) {
+                turn_last = turn;
+                r.last_seen = true;
+            }
+        }
+        if (!r.idle_seen && U::tx_idle()) {
+            turn_idle = turn;
+            r.idle_seen = true;
+        }
+        if (r.idle_seen && got >= n) {
+            break;
+        }
+    }
+    const uint32_t c1 = cycles_now();
+    Nvic::enable(Sc1::irq());
+    r.turn = turn != 0u ? (c1 - c0) / turn : 0u;
+    r.received = got;
+    r.after_last = (static_cast<int32_t>(turn_idle) - static_cast<int32_t>(turn_last)) *
+                   static_cast<int32_t>(r.turn);
+    return r;
+}
+
+void report_idle(const char* what, uint32_t baud, const IdleProbe& r) {
+    print(plain, "  ", what, " at ", baud, ": received ", r.received, ", tx_idle() read true ",
+          r.after_last, " cycles after the receiver's last byte, a probe turn ", r.turn,
+          ", a bit ", bit_cycles(baud), ", a frame ", 10u * bit_cycles(baud), crlf);
+}
+
+/// THE RESOLUTION. The receiver's flag for the last character and the
+/// transmitter's TXC rise within a few tens of cycles of each other at
+/// every rate measured, either first, and the probe reads both once a
+/// turn. So tx_idle() is judged to within a turn: not before the
+/// receiver's last byte by more than one, and after it by no more than a
+/// bit or a turn, whichever is longer. A tx_idle() that answered on the
+/// ring alone leads the receiver by the last character still in DATA -
+/// a frame or more, several turns at every rate.
+void judge_idle(uint32_t baud, const IdleProbe& r) {
+    bench.verdict("a port that has sent nothing reads idle", r.idle_before_init_write);
+    bench.verdict("tx_idle() turned true", r.idle_seen);
+    bench.verdict("the probe read the last byte arrive", r.last_seen);
+    const int32_t turn = static_cast<int32_t>(r.turn);
+    const int32_t bit = static_cast<int32_t>(bit_cycles(baud));
+    bench.verdict("not before the last character left (within a probe turn)",
+                  r.idle_seen && r.last_seen && r.after_last >= -turn);
+    bench.verdict("within a bit time after it (or a probe turn, the longer)",
+                  r.idle_seen && r.last_seen && r.after_last <= (bit > turn ? bit : turn));
+}
+
+/// Does a channel's beat into DATA clear TXC, as a CPU write does
+/// (31.8.8)? TXC is left standing by one byte sent and drained, a block
+/// is started, and TXC is read once the block's first beats have landed
+/// and long before its end.
+void txc_under_the_engine() {
+    loop_live = Loop::txdma;
+    (void)LTxDma::init(clock, 115'200u);
+    loop_settle(115'200u);
+    static const uint8_t one[1] = {0x55};
+    static uint8_t block[32];
+    (void)LTxDma::write_bulk(std::span<const uint8_t>(one, 1));
+    uint32_t spins = 0;
+    while (!Sc1::txc_flag() && spins++ < 400'000u) {
+    }
+    const bool stood = Sc1::txc_flag();
+    (void)LTxDma::write_bulk(std::span<const uint8_t>(block, sizeof block));
+    const uint32_t t0 = cycles_now();
+    while (cycles_now() - t0 < 3u * 10u * bit_cycles(115'200u)) {
+    }
+    const bool after = Sc1::txc_flag();
+    spins = 0;
+    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
+    }
+    LTxDma::release();
+    loop_live = Loop::none;
+    print(plain, "  TXC standing before the block ", stood ? 1u : 0u,
+          ", three frames into it ", after ? 1u : 0u, crlf);
+    bench.verdict("a channel's beat into DATA clears TXC, as a CPU write does",
+                  stood && !after);
+}
+
+void tq_tx_idle() {
+    txc_under_the_engine();
+    constexpr uint32_t n = 48;
+    for (const uint32_t baud : {115'200u, 1'000'000u}) {
+        loop_live = Loop::plain;
+        const IdleProbe r = probe_idle<LPlain>(
+            baud, n, [] { return (Sc1::armed() & SercomFlag::dre) == 0u; });
+        LPlain::release();
+        loop_live = Loop::none;
+        report_idle("plain transport", baud, r);
+        judge_idle(baud, r);
+    }
+    for (const uint32_t baud : {115'200u, 1'000'000u, 3'000'000u}) {
+        loop_live = Loop::txdma;
+        // SERCOM1's vector feeds nothing here: its line is held off at once.
+        const IdleProbe r = probe_idle<LTxDma>(baud, n, [] { return true; });
+        LTxDma::release();
+        loop_live = Loop::none;
+        report_idle("transmit engine", baud, r);
+        judge_idle(baud, r);
+    }
+}
+
+// ---- r - the receive engine's edge from the vector -------------------------
+
+/// A stream of `n` bytes sent polled at the wire's rate into the receive
+/// engine; on every edge the vector returns the thread drains the ring,
+/// checking each byte against the pattern - and sends nothing while it
+/// does, so the line pauses but never a block boundary goes unserved by
+/// the handler. The tail - what no block completion reports - is the
+/// owner's ask at the end.
+struct EngineStream {
+    uint32_t sent, received, bad, edges, asks;
+    uint8_t hw_overruns, rx_overruns;
+};
+
+EngineStream engine_stream(uint32_t baud, uint32_t n) {
+    EngineStream r{};
+    loop_live = Loop::rxdma;
+    (void)LRxDma::init(clock, baud);
+    loop_settle(baud);
+    loop_edges = 0;
+    uint32_t s_tx = lfsr_seed;
+    uint32_t s_rx = lfsr_seed;
+    uint32_t seen = 0;
+    const auto drain_ring = [&] {
+        for (;;) {
+            const auto run = LRxDma::read_span();
+            if (run.empty()) {
+                break;
+            }
+            for (const uint8_t b : run) {
+                r.bad += b != lfsr_next(s_rx) ? 1u : 0u;
+            }
+            r.received += static_cast<uint32_t>(run.size());
+            LRxDma::consume(static_cast<uint32_t>(run.size()));
+        }
+    };
+    uint8_t next = lfsr_next(s_tx);
+    uint32_t spins = 0;
+    while (r.sent < n && spins++ < 20'000'000u) {
+        if (loop_send_polled(next)) {
+            ++r.sent;
+            next = lfsr_next(s_tx);
+        }
+        if (loop_edges != seen) {
+            seen = loop_edges;
+            drain_ring();
+        }
+    }
+    spins = 0;
+    while (!Sc1::txc_flag() && spins++ < 400'000u) {
+    }
+    // The tail: the stream stopped short of a block's end, and this
+    // silicon reports no idle line - the owner asks.
+    const uint32_t t0 = cycles_now();
+    while (cycles_now() - t0 < 20u * 10u * bit_cycles(baud)) {
+    }
+    ++r.asks;
+    (void)LRxDma::harvest();
+    drain_ring();
+    r.edges = loop_edges;
+    r.hw_overruns = LRxDma::hw_overruns();
+    r.rx_overruns = LRxDma::rx_overruns();
+    LRxDma::release();
+    loop_live = Loop::none;
+    return r;
+}
+
+void tr_engine_edge() {
+    constexpr uint32_t n = 1300;   // two blocks of 512 and a tail of 276
+    for (const uint32_t baud : {1'000'000u, 3'000'000u}) {
+        const EngineStream r = engine_stream(baud, n);
+        print(plain, "  ", baud, " baud: sent ", r.sent, ", received ", r.received, ", wrong ",
+              r.bad, ", edges from the vector ", r.edges, ", asks ", r.asks, ", hw_overrun ",
+              r.hw_overruns, ", rx_overrun ", r.rx_overruns, crlf);
+        bench.verdict("the whole stream crossed the loop", r.sent == n && r.received == n);
+        bench.verdict("byte-exact and in order", r.bad == 0u);
+        bench.verdict("each filled half of the ring was an edge from the vector",
+                      r.edges >= n / 512u);
+        bench.verdict("no byte lost at a block boundary (re-armed in the handler)",
+                      r.hw_overruns == 0u && r.rx_overruns == 0u);
+    }
+}
+
+
+// ---- s - errors injected under the receive engine (host) ---------------------
+
+/// The host sends `n` bytes of the pattern at 8E1 into a receiver at 8N1
+/// (brio stress's `poke`, at half the window): every frame whose parity
+/// bit is zero lands that zero where the receiver samples its stop bit,
+/// a frame error, its eight data bits intact. Under the RECEIVE ENGINE
+/// the channel reads every character - an error is counted from STATUS,
+/// which clears by being written (31.8.9), never by a read of DATA - so
+/// all n bytes arrive, byte-exact, and the count is the engine's
+/// granularity: one per run that saw errors. Under the INTERRUPT RECEIVER
+/// each hit character is dropped and counted: n - K delivered, in order,
+/// the counter K.
+struct ErrorLeg {
+    uint32_t received;
+    uint32_t edges;        ///< the engine's edges from its vector
+    uint32_t exact;        ///< bytes equal to the pattern at their position (engine)
+    bool in_order;         ///< the received bytes are the pattern's, in order, some skipped
+    ErrCounts err;
+};
+
+ErrorLeg error_leg(Mode m, uint32_t n) {
+    constexpr uint32_t window_ms = 1400;
+    print(plain, "  HOST poke ", static_cast<uint32_t>(m), " 115200 8E1 ", window_ms, " ", n,
+          crlf);
+    (void)drain();
+    mode_release();
+    (void)mode_init(m, 115200);
+    spin_ms(120);
+    mode_clear_errors();
+    rx_vector_edges = 0;
+    static uint8_t got[300];
+    ErrorLeg r{};
+    const uint32_t t0 = cycles_now();
+    const uint32_t window = (SysClock::hz / 1000u) * window_ms;
+    while (cycles_now() - t0 < window) {
+        if (r.received < sizeof got) {
+            r.received += mode_read_bulk(got + r.received, sizeof got - r.received);
+        }
+    }
+    // The owner's ask, once, for whatever no completion reported (nothing,
+    // on a burst of exactly one block).
+    mode_harvest();
+    if (r.received < sizeof got) {
+        r.received += mode_read_bulk(got + r.received, sizeof got - r.received);
+    }
+    r.err = mode_errors();
+    r.edges = rx_vector_edges;
+    back_to_console();
+    uint32_t sx = lfsr_seed;
+    r.in_order = true;
+    uint32_t at = 0;   // pattern position
+    uint32_t sy = lfsr_seed;
+    for (uint32_t i = 0; i < r.received && i < n; ++i) {
+        r.exact += got[i] == lfsr_next(sx) ? 1u : 0u;
+    }
+    for (uint32_t i = 0; i < r.received; ++i) {
+        while (at < n && lfsr_next(sy) != got[i]) {
+            ++at;
+        }
+        if (at >= n) {
+            r.in_order = false;
+            break;
+        }
+        ++at;
+    }
+    return r;
+}
+
+void ts_errors() {
+    // A whole block of the engine (half of the 512 ring): the run is
+    // published by the engine's own vector at its completion, and no
+    // owner's ask is on the path being proven.
+    constexpr uint32_t n = 256;
+    // What a frame-per-character reading predicts: the bytes whose even
+    // parity bit is zero (an even count of ones).
+    uint32_t s = lfsr_seed;
+    uint32_t zero_parity = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const uint8_t b = lfsr_next(s);
+        zero_parity += (__builtin_popcount(b) & 1) == 0 ? 1u : 0u;
+    }
+
+    const ErrorLeg e = error_leg(Mode::rxdma, n);
+    print(plain, "  receive engine: received ", e.received, " of ", n, ", equal to the pattern ",
+          e.exact, ", frame ", e.err.frame, " parity ", e.err.parity, " hw_overrun ",
+          e.err.hw_overrun, " (", zero_parity, " characters carry a zero parity bit)", crlf);
+    bench.verdict("under the engine every character arrived: none taken by a clear",
+                  e.received == n);
+    bench.verdict("each one byte-exact and in its place", e.exact == n);
+    bench.verdict("the errors were counted (one per run the engine published)",
+                  e.err.frame != 0u);
+    bench.verdict("published by the engine's vector, not the owner's ask", e.edges >= 1u);
+
+    const ErrorLeg i = error_leg(Mode::plain, n);
+    print(plain, "  interrupt receiver: received ", i.received, ", frame ", i.err.frame,
+          " parity ", i.err.parity, " hw_overrun ", i.err.hw_overrun, crlf);
+    bench.verdict("the interrupt receiver delivered n - K and counted K",
+                  i.received + i.err.frame == n);
+    bench.verdict("what it delivered is the pattern, in order, the hit ones skipped",
+                  i.in_order);
+}
+
+// ---- t - the interrupt receiver at the top rate ------------------------------
+
+void tt_levels() {
+    constexpr uint32_t baud = 3'000'000u;
+    constexpr uint32_t n = 400;
+    loop_live = Loop::plain;
+    (void)LPlain::init(clock, baud);
+    loop_settle(baud);
+    uint32_t s_tx = lfsr_seed;
+    uint32_t s_rx = lfsr_seed;
+    uint32_t sent = 0;
+    uint32_t received = 0;
+    uint32_t bad = 0;
+    uint8_t next = lfsr_next(s_tx);
+    uint32_t spins = 0;
+    // The ring holds 511: the stream is drained as it comes, between the
+    // polled writes, so the sender keeps the wire full.
+    while ((sent < n || received < n) && spins++ < 20'000'000u) {
+        if (sent < n && loop_send_polled(next)) {
+            ++sent;
+            next = lfsr_next(s_tx);
+        }
+        uint8_t b = 0;
+        if (LPlain::read_byte(b)) {
+            bad += b != lfsr_next(s_rx) ? 1u : 0u;
+            ++received;
+        }
+    }
+    const uint8_t hw = LPlain::hw_overruns();
+    LPlain::release();
+    loop_live = Loop::none;
+    print(plain, "  3 Mbaud, polled sender at the wire's rate: sent ", sent, ", received ",
+          received, ", wrong ", bad, ", hw_overrun ", hw, crlf);
+    bench.verdict("the interrupt receiver keeps a 3 Mbaud stream: every byte, in order",
+                  received == n && bad == 0u);
+    bench.verdict("no hardware overrun", hw == 0u);
 }
 
 // =============================================================================
@@ -1008,6 +1477,19 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
+extern "C" void SERCOM1_Handler() {
+    switch (loop_live) {
+        case Loop::plain:
+            if (LPlain::isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            break;
+        case Loop::txdma: (void)LTxDma::isr(); break;
+        case Loop::rxdma: (void)LRxDma::isr(); break;
+        default: break;
+    }
+}
+
 extern "C" void SERCOM5_Handler() {
     switch (live) {
         case Mode::plain: (void)UPlain::isr(); break;
@@ -1020,9 +1502,23 @@ extern "C" void SERCOM5_Handler() {
 extern "C" void DMAC_Handler() {
     while (const auto irq = brio::Dmac::take_pending()) {
         const uint8_t ch = irq->channel;
+        if (loop_live == Loop::txdma && ch == ch_loop_tx) {
+            (void)LTxDma::dma_isr(ch);
+            continue;
+        }
+        if (loop_live == Loop::rxdma && ch == ch_loop_rx) {
+            if (LRxDma::dma_isr(ch)) {
+                loop_edges = loop_edges + 1u;
+            }
+            continue;
+        }
         switch (live) {
             case Mode::txdma: (void)UTxDma::dma_isr(ch); break;
-            case Mode::rxdma: (void)URxDma::dma_isr(ch); break;
+            case Mode::rxdma:
+                if (URxDma::dma_isr(ch)) {
+                    rx_vector_edges = rx_vector_edges + 1u;
+                }
+                break;
             default: break;
         }
     }
@@ -1058,6 +1554,11 @@ int main() {
     bench.letter('n', "ring pressure: eager and lazy harvests (host)", tn_pressure,
                  false);
     bench.letter('p', "bursty traffic with idle gaps (host)", tp_burst, false);
+    bench.letter('q', "tx_idle() on the loop: the wire's idle", tq_tx_idle);
+    bench.letter('r', "the receive engine on the loop: the edge from the vector", tr_engine_edge);
+    bench.letter('s', "errors under the receive engine and the interrupt receiver (host)",
+                 ts_errors, false);
+    bench.letter('t', "the interrupt receiver at 3 Mbaud on the loop", tt_levels);
 
     if (serial_ok) {
         print(plain, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",

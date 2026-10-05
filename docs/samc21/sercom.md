@@ -2,9 +2,12 @@
 
 Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
 common ch. 30 (the baud generator, 30.6.2.3 table 30-2), USART
-ch. 31 - and errata DS80000740S items 1.17.15 and 1.17.16, both
-encoded in code (1.17.4 and 1.17.14 are named where their fields
-live). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
+ch. 31 (transmission and reception 31.6.2.5-31.6.2.6, the loop-back
+31.6.3.8, start-of-frame detection 31.6.3.9, the DMA and interrupt
+requests 31.6.4, INTFLAG and STATUS 31.8.8-31.8.9), the DMAC's
+write-back 25.6.2.5 - and errata DS80000740S items 1.17.15 and 1.17.16,
+both encoded in code (1.17.4 and 1.17.14 are named where their fields
+live), and 1.10.4 (the DMAC's, below). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine, RxEngine>` task, the engine slots
 optional and ONE of them at most). The family fixture is `test/family_samc21/sercom.cpp` plus
 its negatives under `brio check samc21`; the bench suite is
@@ -70,6 +73,52 @@ verbatim): PULLEN still works under the peripheral function, but the
 pull-up is not available - an idle RxD line must be held high by
 whatever drives it.
 
+**A receiver on its own transmitter's pad is a loop with no wire**
+(31.6.3.8: RXPO and TXPO naming one pad, "the loop-back is through the
+pad, so the signal is also available externally"). `UartPads` admits
+the pair when it names one pin for both directions (`uart_pads_loop_back`);
+the suite and the bench run SERCOM1 that way on PA16, which nothing is
+wired to, at every rate the generator makes.
+
+**The receive side, item by item** - what the chapter offers for
+taking a burst, and what this driver does with each:
+
+- THE TWO-LEVEL RECEIVE BUFFER (31.6.2.6): USED, every level an entry -
+  the handler reads RXC again after each character and leaves when it
+  reads clear, so one entry serves the two characters a late entry
+  finds, and the receiver keeps a 3 Mbaud stream (letter t).
+- RXC AS A DMA REQUEST (31.6.4.1, cleared by the channel's read of
+  DATA): USED by the optional receive engine, which fills half of the
+  ring a block and whose completion is the run's edge (below).
+- AN IDLE-LINE FLAG, A RECEIVER TIME-OUT: NOT IN THIS SILICON - the
+  receiver's interrupts are RXC, RXS, RXBRK and ERROR (31.6.4.2), and no
+  counter of bit times after the last stop bit exists. So the tail of a
+  run under the engine - the bytes after its last filled half - has no
+  edge of its own: the owner asks (`harvest()`).
+- AN IDLE DETECTOR BUILT AROUND THE SERCOM - the RX pad's edges through
+  EIC and EVSYS into a TC retriggered by each edge, its overflow the
+  idle line: DECLINED. It costs a TC, an event channel and an EIC line
+  per port, the EIC line on the RX pin's own EXTINT; the bulk receiver it
+  would serve is the engine's, whose runs fill its halves, and the
+  console - the burst receiver - is the interrupt receiver, which has an
+  edge on every character and ends a line at its terminator.
+- START-OF-FRAME DETECTION (31.6.3.9, CTRLB.SFDE, the RXS interrupt):
+  DECLINED for the edge - it says a character is beginning, not that a
+  run has ended; its use is the wake from standby, a power chapter's.
+- RXBRK: the break of the LIN and auto-baud formats (31.6.3.4-31.6.3.5),
+  which are not built.
+- THE ERRORS: STATUS's PERR, FERR and BUFOVF clear by being written
+  (31.6.2.6.2, 31.8.9) - NO READ OF DATA, so a clear never takes a byte
+  a channel was owed. The interrupt receiver reads STATUS before each
+  character (31.8.11) and drops the hit ones; the engine reads it once
+  a run (below). The ERROR interrupt is not armed (erratum 1.17.15).
+- IBON (31.6.2.6.2): BUFOVF raised at once instead of travelling with
+  the data - exposed (`SercomUartConfig::immediate_overflow`), off by
+  default: the counter is per event either way.
+- TXC (31.8.8): `tx_idle()`'s last clause - set when the stop bit has
+  left with nothing in DATA, cleared by any write to DATA, a channel's
+  beat included (measured, letter q).
+
 ## Types and verbs
 
 - **`Sercom<n>`** - the resource: bus clock (MCLK mask) and core
@@ -95,12 +144,19 @@ whatever drives it.
   `init(clock, baud, format)` speaking hertz off the clock tag,
   `isr()` as the ONE handler body honouring the edge-return contract
   (true on the RX ring's empty-to-non-empty transition - the kernel
-  wakeup), try-semantics `write_byte` and `write_bulk` (a run: as
+  wakeup), taking every level of the receive buffer an entry and
+  calling nothing (the body, the ring's verbs and the register
+  accesses all inline, so a handler placed in `.ram_text` runs from
+  SRAM whole, [platform.md](platform.md)), try-semantics `write_byte`
+  and `write_bulk` (a run: as
   many as fit, its first byte pushed and DRE armed before the rest is
   copied and armed again behind it, or with an engine the run queued
   whole and the engine pumped once - the verb `print` hands every
   string and number), `read_byte`, `read_bulk` and `read_span`/`consume` (the
-  receive run in place), error counters,
+  receive run in place), `tx_idle()` - THE WIRE IDLE: nothing queued, no
+  block in flight and TXC, the last stop bit gone (a port that has sent
+  nothing since `init()` is idle too: TXC is clear out of reset) -, error
+  counters,
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
   `release()`. Init
@@ -110,6 +166,16 @@ whatever drives it.
   reaches the wire. `ByteTransport` and `ClockUser` are
   static_asserted. The two engine slots default to `NoDmaEngine` -
   see "The optional DMA engines" below.
+- **THE COPY into the transmit ring and out of the receive one**
+  (`write_bulk`, `read_bulk`): an inline byte loop, six instructions a
+  byte - about ten cycles behind the flash's two wait states -, or the
+  runtime's `memcpy` for a run of `uart_copy_crossover` bytes (20) or
+  more whose two ends share their alignment in the word, where its word
+  path moves the run at about 1.3 cycles a byte past a fixed cost of
+  some 170 cycles. Across a misalignment `memcpy`'s byte path is the
+  same loop out of line and a call dearer (eleven cycles a byte
+  measured), so it is not called there. Measured with `bench_samc`'s
+  letter u, below.
 - **The resource's DMA constants** - `Sercom<n>::dma_rx_trigger()` /
   `dma_tx_trigger()` (table 25-2's codes, read off the device header
   per instance beside the GCLK id and APB mask - the family fixture
@@ -163,11 +229,17 @@ The engines are POLICIES, not features of the task:
   keeps the receiver on RXC, which a run-at-a-time consumer holds to
   2 Mbaud (letter h). Channels of OTHER owners triggered beside the
   engine are the program's to sequence (dmac.md).
-- **TX drains the ring in blocks.** `write_byte`, `write_bulk` and
-  `print` are unchanged; the engine is handed the ring's contiguous run
-  (`read_span`, design/ring.md) and its completion interrupt consumes
-  exactly the block it carried and starts the next - a wrapped ring
-  goes out in two blocks. The app's DMAC handler routes completions
+- **TX drains the ring in blocks of HALF THE RING at most.**
+  `write_byte`, `write_bulk` and `print` are unchanged; the engine is
+  handed the ring's contiguous run (`read_span`, design/ring.md), cut at
+  half the ring, and its completion interrupt consumes exactly the block
+  it carried and starts the next - a wrapped ring goes out in two
+  blocks. The cut is what keeps a producer longer than the ring on the
+  wire: a block's slots come back only at its completion, so a block of
+  the whole ring left the producer nothing to refill until the wire had
+  gone idle - measured, 4096 bytes through a 2048-byte ring at 3 Mbaud
+  ran at x 1.06, the second copy in the gap; cut at half, x 1.00
+  (letter u, below). The app's DMAC handler routes completions
   with `dma_isr(channel)`, which answers false for channels that are
   not this transport's. THE MASK COVERS THE CLAIM: a block start (from
   `write_byte`/`write_bulk` in main context or from the completion in
@@ -178,21 +250,36 @@ The engines are POLICIES, not features of the task:
   three stores into the descriptor slot and the channel's enable
   (dmac.md); an engined direction's ring is at most 65535 bytes, a run
   being one block and BTCNT sixteen bits (refused at compile time).
-- **RX fills the ring's free run and is HARVESTED on the caller's
-  clock.** A receive block completes only when the buffer fills -
-  on an idle line, never - so arrival is not an event anyone is told
-  about: `harvest()` suspends the channel, reads the validated
-  write-back (erratum 1.10.4, see dmac.md), publishes the fresh
-  bytes, and returns the same empty-to-non-empty edge `isr()` has, so
-  the same kernel glue works. Pacing is WHOEVER OWNS THE PORT's
-  policy - a kernel TimeEvent every few ticks is the shape brio
-  expects - and each harvest costs ~15 us of masked interrupts, 44 us
-  when the suspend never lands (dmac.md).
-  `harvest()` hands the channel a new run whenever the SILICON says it
-  is not running one, not only when the engine's own beat count says
-  the buffer filled: a reading that was refused leaves that count
-  behind, and a re-arm rule that trusted it alone would never fire
-  again.
+- **RX FILLS HALF THE RING A BLOCK, AND THE BLOCK'S COMPLETION IS THE
+  EDGE.** The engine is handed the ring's free run cut at half the
+  ring; when the block fills, the DMAC's vector - the app's binding
+  calls `dma_isr(channel)` - publishes the run (the completion says
+  every beat landed: `DmaRxEngine::complete()` counts it with no
+  write-back read and no suspend), hands the channel its next run IN
+  THE SAME HANDLER, and returns the empty-to-non-empty edge, so the
+  glue that posts `RxActivity` on `isr()`'s true posts it on
+  `dma_isr()`'s too. The channel waits for no owner between blocks: it
+  is idle from its last beat to that handler's re-arm, which the
+  receiver's two levels cover - a stream at 3 Mbaud crosses the block
+  boundaries byte-exact (letter r) - and a consumer told at every half
+  drains one while the channel fills the other. The edge costs 490
+  cycles of handler (549 between the bench's stamps, letter u) once a
+  half ring: 2.1 cycles a byte on a 256-byte block.
+- **THE TAIL IS THE OWNER'S ASK.** A run that stops short of its block's
+  end has no edge (no idle detector and no time-out in this silicon,
+  "The receive side, item by item" above), so `harvest()` stays a
+  public verb: it suspends the channel, reads the validated write-back
+  (erratum 1.10.4, dmac.md), publishes what landed and re-arms a
+  channel that is not running, returning the same edge. It runs whole
+  under the mask - the ring's producer side is the handler's too - about
+  700 cycles, 44 us when the suspend never lands (dmac.md). When to ask
+  is the owner's knowledge: at the end of a message of known length, a
+  terminator's expected time, or a lazy clock for a stream of unknown
+  length; an EAGER clock costs - measured, an ask every 50 us lost two
+  to five characters at a block boundary in every run, uncounted, where
+  an ask every 2 ms lost none (letter n, Bench findings). A consumer
+  that releases slots (`consume`, `read_byte`, `read_bulk`) re-arms an
+  engine a full ring left idle.
 - **THE STANDING REQUEST, AND WHY NEITHER DIRECTION KICKS.** A
   peripheral asserts its DMA request as a LEVEL - "my transmit buffer is
   free", "I have a character" - and the DMAC turns that level into a
@@ -234,10 +321,14 @@ The engines are POLICIES, not features of the task:
 - **What is traded away, and cannot be given back:** per-byte error
   attribution. With RXC armed, STATUS is read before each DATA and a
   corrupted byte is dropped precisely; with the channel consuming
-  RXC, STATUS is read once per harvest and its errors are counted
-  against the harvested run, not a byte. A protocol with its own
-  framing does not care; a console that wants exact frame-error
-  attribution should not take an RX engine.
+  RXC, STATUS is read once a run - at its completion or an owner's ask
+  - and its errors are counted against the run, not a byte; the hit
+  characters are delivered with the rest, their data bits as received.
+  No byte is lost to the count: STATUS clears by being written, never
+  by a read of DATA (letter s: 256 characters, 130 of them frame
+  errors, all 256 delivered byte-exact under the engine). A protocol
+  with its own framing does not care; a console that wants exact
+  frame-error attribution should not take an RX engine.
 
 `brio::Dmac::init()` comes before the engined `init()`: the engines
 configure their channels into a block that must already own its
@@ -267,6 +358,36 @@ int main() {
 }
 ```
 
+A bulk receiver on the engine takes its edge from the DMAC's vector and
+asks for a tail on its own clock:
+
+```cpp
+using Stream = brio::Uart<5, console_pads, 512, 64,
+                          brio::NoDmaEngine, brio::DmaRxEngine<1>>;
+
+extern "C" void SERCOM5_Handler() { (void)Stream::isr(); }   // the transmitter
+extern "C" void DMAC_Handler() {
+    while (const auto irq = brio::Dmac::take_pending()) {
+        if (Stream::dma_isr(irq->channel)) {     // a filled half of the ring
+            brio::post<Sink>(brio::RxActivity{});
+        }
+    }
+}
+// ... and where the owner knows a run should have ended:
+//     if (Stream::harvest()) { brio::post<Sink>(brio::RxActivity{}); }
+```
+
+A loop with no wire, for a test: one pin named for both directions.
+
+```cpp
+constexpr brio::UartPads loop_pads{
+    .tx = brio::SercomPad::pad0, .rx = brio::SercomPad::pad0,
+    .tx_pin = {'A', 16, brio::PinFunction::c},
+    .rx_pin = {'A', 16, brio::PinFunction::c},
+};
+using Loop = brio::Uart<1, loop_pads>;
+```
+
 ## Bench findings
 
 - The arithmetic is byte-exact on the wire: BAUD(48 MHz, 115200) =
@@ -285,9 +406,7 @@ int main() {
 - The engined transport, live on the console port's SERCOM5: print()
   through the TX engine is byte-exact on the wire (a six-line banner
   went out as seven DMA blocks - the ring wrap served as two spans,
-  exactly as designed); the RX engine with a tick-paced harvest
-  served a typed burst unchanged with the RXC interrupt never armed;
-  the transmit engine beside two memory-to-memory channels sprayed for
+  exactly as designed); the transmit engine beside two memory-to-memory channels sprayed for
   three seconds (`test_samc_dma` j: the erratum corrupting the churned
   channels' write-backs, 81 readings refused and 23 suspends lost in
   68409 rounds) carried 694 lines of 694 intact and in order, no block
@@ -304,15 +423,21 @@ times:
   |----------------|-------------|------------------------------------------|
   | irq TX + irq RX| 8384        | byte-exact both ways                     |
   | DMA TX + irq RX| 8384        | byte-exact both ways, 20 of 20, no block abandoned |
-  | irq TX + DMA RX| 8381..8384  | byte-exact or a few short: a gap         |
+  | irq TX + DMA RX| 8384        | byte-exact both ways: 32 edges from the engine's vector, the tail by an ask every 2 ms |
 
-  The interrupt receiver is exact; the DMA receiver can lose a byte at a
-  block boundary, and WHERE it loses them is its contract rather than a
-  defect - a block that fills has no run to continue into until a
-  harvest re-arms the channel, so whatever arrives in that gap is gone.
-  It is measured, not hidden: the suite prints the position of the first
-  missing byte. It never receives MORE than was sent (it did, while the
-  re-arm kicked: below).
+  The receive engine re-arms in its own completion handler, so a block
+  boundary is no gap: byte-exact in every run, at 115200 through the
+  bridge (letters g, p) and at 1 and 3 Mbaud on the loop, a polled
+  sender keeping the wire full across two boundaries (letter r: 1300 of
+  1300, two edges from the vector, no overrun). What does lose is an
+  owner's ask on an EAGER clock (letter n): asked every 50 us - some
+  twenty suspends a block - the stream lost two to five characters at a
+  block boundary in every run, uncounted (first_bad a multiple of the
+  block: 256, 512, 1024, 1280), where asked every 2 ms it lost none. The
+  suspend that lands on a block's last beats is the suspect, its
+  mechanism not isolated ("Not covered yet"); the engine's edge needs no
+  ask, and the tail wants one, not a clock of them. It never receives
+  MORE than was sent (it did, while the re-arm kicked: below).
 
   THE FOURTH SHAPE, DMA on both directions, is a compile error (erratum
   1.10.4, "The optional DMA engines" above), and this is what it did
@@ -328,20 +453,31 @@ times:
   was byte-exact.
 
 - **The duplex link the refusal leaves**, the transmit engine beside the
-  interrupt receiver, twenty runs of letter h: at 1 Mbaud 61500 to
-  62000 bytes each way, byte-exact on the board's side every time, no
-  hardware overrun; at 2 Mbaud 87000 to 88000, the interrupt receiver
-  overrunning in hardware in ten runs of twenty (one to three bytes,
-  each counted in `hw_overruns`) - one RXC entry per 240 cycles and two
-  characters of FIFO is its edge - and no transmit block abandoned in
-  any run of either rate. The host's own view of the echo above 115200 is the
+  interrupt receiver, letter h: at 1 Mbaud 64000 bytes each way,
+  byte-exact on the board's side every run, no hardware overrun; at
+  2 Mbaud 105000, the receiver taking every level an entry and
+  overrunning in hardware in about half the runs by one to three
+  characters (counted in `hw_overruns`: another handler - the transmit
+  engine's completion, the tick - held it past two frames), and no
+  transmit block abandoned in any run of either rate. At 2 Mbaud the
+  echo also finds its transmit ring full now and then - 0 to 18
+  characters a window in six runs, counted in `dropped` - consistent
+  with the board sending back slower than the bridge sends in: OSC48M
+  is half a per cent off nominal on this board
+  ([../boards/samc21j.md](../boards/samc21j.md)), and half a per cent of
+  105000 is the ring's 511. The host's own view of the echo above 115200 is the
   bridge's and is not judged: the plain transport's echo at 1 Mbaud,
   byte-exact on the board, reached the host 635 bytes short.
 
 - **Rates, through the interrupt transport, echoing:** 115200 and
-  1 Mbaud are byte-exact; 3 Mbaud loses, and the loss is ACCOUNTED FOR
-  in `hw_overruns` rather than silent - one RXC interrupt per byte is
-  300000 a second, which the two-deep FIFO does not survive.
+  1 Mbaud are byte-exact; at 3 Mbaud the RECEIVER keeps the stream - no
+  hardware overrun, every level an entry - and the echo loses in the
+  software ring instead (`rx_overruns`), ACCOUNTED FOR rather than
+  silent: the echo's transmitter feeds one character an entry, longer
+  than a 160-cycle frame (letter u's uart.tx: x 2.15 at 3 Mbaud), so the
+  receive ring fills behind it. On the loop, a polled sender at the
+  wire's rate, the interrupt receiver takes 400 characters of 400 at
+  3 Mbaud (letter t).
 - **Frame formats, against a host that can speak them:** 8E1, 8O1, 8N2,
   7E1 and 7N2 all carried the stream byte-exact both directions with no
   receive error raised. Frames narrower than eight bits carry only their
@@ -372,51 +508,77 @@ bridge between the pads and the PC - as much as of the driver.
   3 M are byte-exact. The bridge's divisor arithmetic has no exact
   2.5 M and the nearest is some 4% off, outside what a UART tolerates.
   A failure at one rate says nothing about the rate above it.
-- **The per-byte API is what limits a fast link.** A loop over
-  `write_byte()` pays a transport nudge every byte - arming DRE, or
-  `pump_tx()` with an engine. That plateaus at 98.4 kB/s (about 1 Mbaud
-  equivalent) at EVERY rate from 1 Mbaud up, the wire idling while the
-  CPU catches up. Fed this way the DMA transmit engine is SLOWER than
-  the interrupt, 57-64 kB/s at 92% CPU, because a pump_tx() per byte
-  starts a block for one byte.
-- **`write_bulk()` is what makes the transmit engine worth having.** The
-  same 64 KB at 3 Mbaud: 169343 B/s at 75% CPU through the interrupt
-  transport, and 297890 B/s - 99.3% of the wire - at 9% CPU through the
-  engine. At 1 Mbaud the engine saturates the wire at 5% CPU against
-  70% for the per-byte interrupt path.
-- **With the engine, transmit is limited by the BAUD GENERATOR and
-  nothing else.** Measured across four rates, the engined bulk path
-  costs 4% of the CPU at 46 kB/s, 5% at 100 kB/s and 8% at 298 kB/s -
-  a straight line whose slope is **7.6 CPU cycles per byte**, about
-  1.6% per 100 kB/s, over a fixed ~3% that belongs to the measuring
-  loop rather than the transport. Extrapolated, the CPU would not
-  saturate until roughly 6 MB/s, some twenty times what this peripheral
-  can emit at all. And those 7.6 cycles are the COPY INTO THE RING, not
-  the DMA: a path that handed the engine the application's own buffer
-  would not pay them either.
-- **Round trip, and it has a different ceiling from transmit.** Echoing
-  through the interrupt transport is lossless to 1 Mbaud when the ring
-  is drained a byte at a time, and to **2 Mbaud** when `read_bulk()`
-  drains it - both directions at once, zero loss. The two ceilings fail
-  differently, and the difference names the cause: the per-byte consumer
-  loses in the SOFTWARE ring (`rx_overruns` climbs, `hw_overruns` stays
-  0), while at 3 Mbaud the bulk consumer loses in the HARDWARE
-  (`hw_overruns` 143, `rx_overruns` 0). Bulk fixes the consumer; what
-  breaks at 3 Mbaud is the FILLER, which is still one RXC interrupt per
-  byte - 300000 a second, more than the two-deep FIFO survives. CPU
-  during the echo sits at 55-61% at every rate from 1 to 3 Mbaud, so it
-  is the interrupt RATE that gives way and not the total work.
-  (The ~50-58 kB/s each way these runs report is the HOST's USB
-  turnaround, not the board's: the meaningful measurement here is where
-  loss begins, not the rate achieved - and at that traffic. Pumped
-  harder, some 124 kB/s each way by `brio stress`, the 2 Mbaud echo's
-  interrupt receiver overruns in hardware in about half the runs, one to
-  three bytes, with the DMA transmitter beside it as in the duplex
-  record above.)
-- **At 115200 the console alone costs 11% of the CPU** through the
-  per-byte interrupt path and 6% with DMA on both directions - the shape
-  erratum 1.10.4 refuses - worth knowing, since every bench suite
-  prints.
+- **The transmitter's shapes, measured on the loop** (`bench_samc`
+  letter u, 4096 bytes, the wall from the first call to the last stop
+  bit): through the interrupt transport one DRE entry a byte, 194-198
+  cycles between the bench's stamps (about 140 the body), so the wire is held
+  to 1 Mbaud (x 1.02) and not at 3 Mbaud (x 2.15, 139 kB/s: the entry
+  outlasts the 160-cycle frame); through the transmit engine x 1.00 at
+  every rate, 298 kB/s at 3 Mbaud, six completions and 2 per cent of the
+  CPU - the copy into the ring and the idle loop's turns. The engine's
+  blocks are half the ring: a block of the whole ring left a producer
+  longer than the ring waiting for the wire to go idle (measured, x 1.06
+  at 3 Mbaud).
+- **The copy into the ring** (letter u's `uart.copy`, `write_bulk()`
+  timed at nine lengths and the four source alignments): the inline
+  byte loop costs about ten cycles a byte behind two wait states, the
+  runtime's `memcpy` about 170 cycles of call and tests and then 1.3 a
+  byte when the two ends share their alignment, eleven when they do not.
+  So a run of 20 bytes or more whose ends are co-aligned goes through
+  `memcpy`, the rest through the loop: a 1024-byte run 1749 cycles
+  co-aligned, 11566 otherwise.
+- **The receiver's shapes, measured on the loop** (letter u, bursts
+  of 16 and 256 from the transmit engine): the interrupt receiver one
+  entry a character up to 1 Mbaud, 211-221 cycles between the bench's
+  stamps, and at 3 Mbaud 0.34 to 0.37 entries a character (two or three
+  levels an entry, 110-116 cycles a character - the bench's own stamps
+  on every vector, the tick's included, cost it one character of 256 in
+  five runs of six; the suite, unmetered, none) where one level an entry
+  loses most of a burst (245 of 256, 53 overruns, measured). The
+  receive engine: one completion per filled half of the
+  ring, 549 cycles between the stamps - 2.1 a character on a 256-byte
+  block -, none per character.
+- **The edge's latency** (letter u's `uart.edge`, the cycles from the
+  sender's TXC to the ring holding the burst's last byte): the
+  interrupt receiver 424 cycles after a pended RXC (the handler's entry
+  and body, the stamp's own 65 inside); the engine's completion 659 to
+  766 cycles after TXC at 1 Mbaud and 115200 - within two frames at
+  1 Mbaud (480-cycle frames), a fifth of one at 115200. A run that stops
+  short of its block has no edge until the owner asks: 23000 to 30000
+  cycles on the bench's once-a-tick ask.
+- **The data sheet's own receive sequence, beside it** (a scratch
+  program: a bare handler reading RXC, STATUS and DATA, one character an
+  entry, 31.6.2.6, on the same loop and meters): 154 cycles a character
+  up to 1 Mbaud against this driver's 211-221 - a gap of 60 cycles:
+  the shared vector's question (INTENSET read beside INTFLAG: DRE is a
+  condition), the level loop's last RXC read, and the ring's full test
+  and the edge; at 3 Mbaud it lost 241 of 256 (115 error entries) where
+  this driver's level loop kept them.
+- **`tx_idle()` on the pad** (letter q, the loop's receiver read by the
+  probe itself, its handler held off): the receiver's flag for the last
+  character and TXC rise within one turn of the probe at every rate -
+  either first -, and `tx_idle()` answers within that turn of the last
+  byte, through the interrupt transport at 115200 and 1 Mbaud and
+  through the engine at 115200, 1 and 3 Mbaud. A channel's beat into
+  DATA clears TXC as a CPU write does, so an engined block never
+  answers on a TXC its previous frame left.
+- **No byte is taken by a clear** (letter s, the host sending 256
+  characters at 8E1 into an 8N1 receiver - every zero parity bit lands
+  on the receiver's stop sample): under the receive engine all 256
+  delivered byte-exact with 130 frame errors in the stream, counted once
+  for the run; under the interrupt receiver 126 delivered in order and
+  130 counted - exactly the characters whose parity bit is zero - three
+  runs of three.
+- **The console's print** enters 139 cycles a byte between the bench's
+  stamps (`bench_samc` letter p, 4096 bytes at 115200: 4097 SERCOM5
+  entries), its transmit and receive paths inline in the vector.
+- **The vector in SRAM** (`bench_samc_ram`, the handlers in `.ram_text`,
+  [platform.md](platform.md)): with no call left on either path the
+  whole entry runs from SRAM, a third off every figure - the print 92
+  cycles a byte, the loop's transmitter 129 and its receiver 140 a
+  character, and at 3 Mbaud the transmitter x 1.46 where it is 2.15
+  from the flash, the receiver 0.6 entries a character with no
+  overrun.
 - **Erratum 1.10.4 can turn the transmit channel into a writer of the
   SERCOM's own registers** - the measurement that makes the two-engine
   shape a compile error. A both-engines echo that stopped answering,
@@ -463,18 +625,28 @@ bridge between the pads and the PC - as much as of the driver.
 ## Not covered yet
 
 Driver gaps (not built):
-- A BULK RECEIVE PATH THAT PACES ITSELF. `read_bulk()` exists, but the
-  RX engine only publishes what `harvest()` takes, and how often to call
-  it is left entirely to the port owner - which at 3 Mbaud means every
-  hundred microseconds or so. Nothing in the driver helps a caller get
-  that right, and getting it wrong loses bytes.
-- A RECEIVE PATH WITH NO GAP AT ALL. The engine is idle between a block
-  filling and the next harvest re-arming it, and everything that arrives
-  in that window is lost. Two descriptors alternating on one channel
-  would close it; linked descriptors are legal on this silicon revision
-  but sit inside erratum 1.10.4's blast radius, so the shape is named
-  and not built. A caller that cannot afford the gap should take the
-  interrupt receiver, which has none.
+- AN EDGE FOR THE TAIL OF A RUN UNDER THE RECEIVE ENGINE. The engine's
+  edge is its block's completion; the bytes after the last filled half
+  are published when the owner asks. Declined because this silicon has
+  no idle flag and no receiver time-out, and the idle detector built
+  around the SERCOM (pad edges through EIC and EVSYS into a retriggered
+  TC) costs a TC, an event channel and an EIC line per port for a
+  receiver whose bursts the interrupt receiver serves ("The receive
+  side, item by item").
+- AN OWNER'S ASK THAT IS SAFE AT ANY CADENCE. Asked every 50 us, the
+  engine lost two to five characters at a block boundary, uncounted
+  (letter n); asked every 2 ms, none. The mechanism is not isolated: the
+  suspect is the suspend landing on a block's last beats. The ask that
+  needs no suspend - the DMAC's ACTIVE register, whose BTCNT is the
+  active channel's live count while ABUSY stands (25.8.14) - is
+  dmac.md's to build and measure.
+- A RECEIVE PATH WITH NO IDLE BEAT AT ALL. The engine is idle from a
+  block's last beat to its completion handler's re-arm, which the
+  receiver's two levels cover at 3 Mbaud with no other handler longer
+  than about two frames (320 cycles) beside it; a longer one - another
+  owner's - can overrun it. Two descriptors alternating on one channel
+  would close it; linked descriptors sit inside erratum 1.10.4's blast
+  radius, so the shape is named and not built.
 - DMA ON BOTH DIRECTIONS OF ONE PORT: refused, erratum 1.10.4 ("The
   optional DMA engines"); the duplex bulk link is the transmit engine
   beside the interrupt receiver, lossless to 1 Mbaud (letter h). Born
@@ -489,12 +661,20 @@ Driver gaps (not built):
   user.
 
 Implemented but not bench-verified:
-- The console's CPU share with ONE engine at 115200 (the 6% above is
-  the refused two-engine shape's): `serial_speed`'s occupancy, on its
-  transmit-engine transport.
+- The receive engine's re-arm by the consumer after a full ring left it
+  idle (`resume_rx()` on `consume`, `read_byte`, `read_bulk`): no run of
+  the suites fills the ring under the engine; a letter that holds its
+  consumer back for a block would.
+- `test_samc_dma`'s letter i - a burst typed by hand into the receive
+  engine, its edge now from the vector and its tail from a tick-paced
+  ask - needs a person at the keyboard.
+- The console's CPU share at 115200, through the interrupt transport
+  and with one engine, and the per-byte plateau through the bridge:
+  `serial_speed`'s occupancy and throughput, whose host side - the
+  checker of every byte at every rate - is not in `cli/`.
 - `rebase()` (no dynamic clock exists on this target to drive it);
   nine-bit frames (this transport's rings are bytes); the USART
-  personality on instances other than SERCOM5 (SERCOM1 and SERCOM3 run
-  the SPI and the I2C personalities on silicon, [spi.md](spi.md) and
-  [i2c.md](i2c.md), the USART only the console's instance); `release()`
-  beyond the suite's own transport handovers.
+  personality on SERCOM0, 2, 3 and 4 (SERCOM5 runs the console, SERCOM1
+  the loop's letters; SERCOM3 runs the I2C personality on silicon,
+  [i2c.md](i2c.md)); `release()` beyond the suites' own transport
+  handovers.

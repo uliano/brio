@@ -8,8 +8,9 @@
 // / PB31 (RX) = SERCOM5 PAD[0]/PAD[1] under function D, 115200 8N1 - the
 // binding of console.cpp and test_samc_platform.cpp, with the latter's
 // TestBench frame and polled prompt loop. Letter d drives PA16 and PA17
-// (SERCOM1's MOSI and SCK) and leaves PA19 (MISO) floating: nothing is
-// wired there and nothing should be. NO KERNEL AND NO AO: the letters are
+// (SERCOM1's MOSI and SCK) and leaves PA19 (MISO) floating, and letter u
+// makes PA16 a UART's loop (its TxD and its RxD): nothing is wired there
+// and nothing should be. NO KERNEL AND NO AO: the letters are
 // plain functions and the idle path is called by hand, masked, as the
 // kernel's loop calls it - what is measured is the transport, the
 // runtime, the DMA and the idle path, never a dispatch.
@@ -174,6 +175,33 @@
 //                  instrument's `interval` of letter r is inside it;
 //        spi.req.eng  the same three requests on letter d's ENGINED host:
 //                  what a short request costs when the engines are named.
+//   u  THE UART ON A LOOP (samc21/sercom.hpp, docs/samc21/sercom.md):
+//      SERCOM1 with TxD and RxD on one pad, PAD[0] = PA16 under function
+//      C - 31.6.3.8's loop-back through the pad, nothing wired - at
+//      115200, 1 Mbaud and 3 Mbaud (f_ref/16, the generator's top):
+//        uart.tx     256 and 4096 bytes through the plain transport (the
+//                    thread spins: busy = wall; irq and isr SERCOM1's)
+//                    and through the transmit engine (uart.tx.dma: the
+//                    thread idles between completions, busy is the CPU's
+//                    share; irq and isr the DMAC's); the loop's receive
+//                    interrupt disarmed;
+//        uart.rx     bursts of 16 and 256 into the interrupt receiver,
+//                    sent by the transmit engine (irq and isr SERCOM1's:
+//                    the receiver's alone), and into the receive engine
+//                    (uart.rx.dma), sent by the plain transmitter (irq and
+//                    isr the DMAC's), the transport brought up anew so a
+//                    256 burst is one block, the owner asking once a tick
+//                    for a tail; every burst checked byte for byte;
+//        uart.edge   the cycles (in `wall`) from the sender's TXC - the
+//                    thread masks once the transmitter holds the last
+//                    byte and stamps TXC's rise - to the receive ring
+//                    holding the burst, stamped in whichever context
+//                    published it: the interrupt receiver (a burst of
+//                    four, 115200) and the engine (16 - a tail, the ask -
+//                    and 256 - a block, the vector - at 115200 and 1 Mbaud);
+//        uart.copy   write_bulk() of 1 to 1024 bytes on the engined
+//                    transport, masked, the source at the four offsets from
+//                    a word: the copy into the ring and its crossover.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -203,6 +231,8 @@
 //   paced   4 bytes a period of TC0's overflow: 400 000 B/s.
 //   spi.dma, spi.poll, spi.poll.rx, spi.pump, spi.req  SCK / 8 bytes a
 //           second: one frame of eight bits a byte.
+//   uart.*  the loop's rate over the ten bits of an 8N1 frame; uart.edge
+//           wire=0 (a latency, not a rate).
 //   r and t wire=0: an instrument's cost and an idle second carry no
 //           bytes.
 //
@@ -303,7 +333,7 @@ IsrMeter<Ruler, Idle> sercom_meter;
 IsrMeter<TickRuler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> empty_meter;
 IsrMeter<Ruler, Idle> dmac_meter;
-IsrMeter<Ruler, Idle> spi_meter;
+IsrMeter<Ruler, Idle> sercom1_meter;
 
 /// The counters as ONE instant: read under the platform's guard. The tick
 /// is never quiescent, and an interrupt landing between bench_counters()'
@@ -327,14 +357,14 @@ class Interval {
 public:
     [[gnu::always_inline]] void start() {
         SamPlatform::CriticalSection guard;
-        c0_ = bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, spi_meter);
+        c0_ = bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter);
         sw_.start();
     }
     [[gnu::always_inline]] uint32_t elapsed() const { return sw_.elapsed(); }
     [[gnu::always_inline]] BenchSample stop() {
         SamPlatform::CriticalSection guard;
         const uint32_t wall = sw_.elapsed();
-        return bench_sample(wall, c0_, bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, spi_meter));
+        return bench_sample(wall, c0_, bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter));
     }
 
 private:
@@ -1028,6 +1058,434 @@ void te_spi_host() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// u - the UART transport on a loop: uart.tx, uart.rx, uart.edge
+// =============================================================================
+namespace uu {
+
+/// SERCOM1 as a USART whose receiver listens on its own transmitter's pad:
+/// TxD and RxD both on PAD[0], PA16 under function C - the loop-back
+/// "through the pad" of 31.6.3.8, no wire. PA16 is letter d's MOSI, with
+/// nothing wired to it; the three transports below and letter d's and e's
+/// SPI hosts share SERCOM1 and are never up at once (`live`).
+constexpr UartPads loop_pads{
+    .tx = SercomPad::pad0,
+    .rx = SercomPad::pad0,
+    .tx_pin = {'A', 16, PinFunction::c},
+    .rx_pin = {'A', 16, PinFunction::c},
+};
+constexpr uint8_t ch_tx = 4;
+constexpr uint8_t ch_rx = 5;
+
+/// The three shapes: the plain transport (a 4096 ring, so a 4096-byte run
+/// is queued in one call but its last byte), the transmit engine beside
+/// the interrupt receiver, the receive engine beside the interrupt
+/// transmitter (the pair is refused, erratum 1.10.4).
+using LoopIrq = Uart<1, loop_pads, 512, 4096>;
+using LoopTxE = Uart<1, loop_pads, 512, 2048, DmaTxEngine<ch_tx>, NoDmaEngine>;
+using LoopRxE = Uart<1, loop_pads, 512, 512, NoDmaEngine, DmaRxEngine<ch_rx>>;
+
+enum class Live : uint8_t { none, irq, txe, rxe };
+volatile Live live = Live::none;
+
+/// The edge's stamp: when the receive ring first holds `want` bytes, in
+/// whichever context published the last of them.
+volatile bool stamping = false;
+volatile uint32_t want = 0;
+volatile uint32_t edge_at = 0;
+volatile bool edge_seen = false;
+volatile bool edge_by_vector = false;
+
+/// `pending` is asked only while a stamp is wanted: outside letter u's
+/// edge lines the vectors pay one flag test for it.
+template <typename Pending>
+[[gnu::always_inline]] inline void check_edge(Pending pending, bool vector) {
+    if (stamping && !edge_seen && pending() >= want) {
+        edge_at = Ruler::now();
+        edge_seen = true;
+        edge_by_vector = vector;
+    }
+}
+
+constexpr uint32_t rates[] = {115'200u, 1'000'000u, 3'000'000u};
+
+/// A run's counters at one instant: every meter (for busy), and SERCOM1's
+/// and the DMAC's apart (the irq and isr a line names), with the ruler.
+struct Mark {
+    BenchCounters all, s1, dm, s5;
+    uint32_t t;
+};
+[[gnu::always_inline]] inline Mark mark() {
+    SamPlatform::CriticalSection guard;
+    return {bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter),
+            bench_counters<Idle>(sercom1_meter), bench_counters<Idle>(dmac_meter),
+            bench_counters<Idle>(sercom_meter), Ruler::now()};
+}
+struct Run {
+    BenchSample all, s1, dm, s5;
+};
+Run between(const Mark& a, const Mark& b) {
+    const uint32_t wall = b.t - a.t;
+    return {bench_sample(wall, a.all, b.all), bench_sample(wall, a.s1, b.s1),
+            bench_sample(wall, a.dm, b.dm), bench_sample(wall, a.s5, b.s5)};
+}
+/// The line: the wall and busy of the run, the irq and isr of the vector
+/// named.
+BenchSample line_of(const BenchSample& all, const BenchSample& vec) {
+    return {all.wall, all.busy, vec.irq, vec.isr};
+}
+
+const uint8_t* bytes_of(uint32_t n) {
+    return reinterpret_cast<const uint8_t*>(payload.data()) + (max_size - n);
+}
+
+uint32_t char_cycles(uint32_t baud) { return 10u * SysClock::hz / baud; }
+
+/// The console falls silent (letter p's drain: a line still leaving puts
+/// SERCOM5's interrupts in the run) and the loop's line idles a few frames.
+void settle(uint32_t baud) {
+    (void)drain();
+    const uint32_t t0 = Ruler::now();
+    const uint32_t c = 4u * char_cycles(baud);
+    while (Ruler::now() - t0 < c) {
+    }
+}
+
+/// The per-unit figures under a line: interrupts and handler cycles per
+/// byte, in hundredths.
+void per_byte(const char* what, const BenchSample& v, uint32_t n) {
+    const uint32_t irq100 = v.irq * 100u / n;
+    const uint32_t isr100 = v.isr * 100u / n;
+    print(serial, "  ", what, ": ", irq100 / 100u, '.', static_cast<char>('0' + irq100 % 100u / 10u),
+          static_cast<char>('0' + irq100 % 10u), " interrupts a byte, ", isr100 / 100u, '.',
+          static_cast<char>('0' + isr100 % 100u / 10u), static_cast<char>('0' + isr100 % 10u),
+          " handler cycles a byte", crlf);
+}
+
+template <typename U>
+void counters_line() {
+    print(serial, "  counters: frame ", U::frame_errors(), " parity ", U::parity_errors(),
+          " hw_overrun ", U::hw_overruns(), " rx_overrun ", U::rx_overruns(), crlf);
+}
+
+/// uart.tx: n bytes through U, then the wait until the last stop bit
+/// (TXC): the plain transport's thread SPINS (busy = wall, the shape is
+/// irq and isr), the engined one IDLES between completions (busy is the
+/// CPU's share). `handed` says the transport has given the hardware its
+/// last byte: DRE disarmed on the plain one, the engine free on the other.
+template <typename U, bool engined, typename Handed>
+Run tx_run(uint32_t n, Handed handed, bool& ok) {
+    const uint8_t* p = bytes_of(n);
+    const Mark a = mark();
+    uint32_t done = U::write_bulk(std::span<const uint8_t>(p, n));
+    uint32_t spins = 0;
+    while (done < n && spins++ < 40'000'000u) {
+        if constexpr (engined) {
+            disable_interrupts();
+            Idle::idle();
+        }
+        done += U::write_bulk(std::span<const uint8_t>(p + done, n - done));
+    }
+    spins = 0;
+    for (;;) {
+        if constexpr (engined) {
+            disable_interrupts();
+            if (handed()) {
+                enable_interrupts();
+                break;
+            }
+            Idle::idle();
+        } else if (handed()) {
+            break;
+        }
+        if (++spins > 40'000'000u) {
+            break;
+        }
+    }
+    spins = 0;
+    while (!U::Resource::txc_flag() && spins++ < 400'000u) {
+    }
+    const Mark b = mark();
+    ok = done == n && U::Resource::txc_flag();
+    return between(a, b);
+}
+
+void tx_lines() {
+    for (const uint32_t baud : rates) {
+        for (const uint32_t n : {256u, 4096u}) {
+            live = Live::irq;
+            bool ok = false;
+            (void)LoopIrq::init(clock, baud);
+            LoopIrq::Resource::enable_rxc_interrupt(false);   // the loop's receiver is not measured here
+            settle(baud);
+            const Run r = tx_run<LoopIrq, false>(
+                n, [] { return (LoopIrq::Resource::armed() & SercomFlag::dre) == 0u; }, ok);
+            LoopIrq::release();
+            live = Live::none;
+            bench_line(serial, "uart.tx", n, line_of(r.all, r.s1), Ruler::hz(), baud / 10u);
+            per_byte("SERCOM1", r.s1, n);
+            if (!ok) {
+                print(serial, "  the run did not complete", crlf);
+            }
+        }
+    }
+    for (const uint32_t baud : rates) {
+        for (const uint32_t n : {256u, 4096u}) {
+            live = Live::txe;
+            bool ok = false;
+            (void)LoopTxE::init(clock, baud);
+            LoopTxE::Resource::enable_rxc_interrupt(false);
+            settle(baud);
+            const uint32_t turns0 = Idle::idle_turns();
+            const Run r =
+                tx_run<LoopTxE, true>(n, [] { return !DmaTxEngine<ch_tx>::busy(); }, ok);
+            const uint32_t idle_turns = Idle::idle_turns() - turns0;
+            LoopTxE::release();
+            live = Live::none;
+            bench_line(serial, "uart.tx.dma", n, line_of(r.all, r.dm), Ruler::hz(), baud / 10u);
+            print(serial, "  DMAC ", r.dm.irq, " completions, SERCOM1 ", r.s1.irq,
+                  " interrupts, ", idle_turns, " idle turns, console ", r.s5.irq,
+                  " interrupts (rx ", Serial::rx_pending(), ", frame ", Serial::frame_errors(),
+                  "); CPU share ",
+                  r.all.busy * 100u / r.all.wall, " per cent", crlf);
+            if (!ok) {
+                print(serial, "  the run did not complete", crlf);
+            }
+        }
+    }
+}
+
+/// Compare what the ring holds with what was sent, and release it.
+template <typename U>
+uint32_t check_and_consume(const uint8_t* sent, uint32_t n) {
+    uint32_t bad = 0;
+    uint32_t seen = 0;
+    while (seen < n) {
+        const auto run = U::read_span();
+        if (run.empty()) {
+            break;
+        }
+        for (uint32_t i = 0; i < run.size() && seen < n; ++i, ++seen) {
+            bad += run[i] != sent[seen] ? 1u : 0u;
+        }
+        U::consume(static_cast<uint32_t>(run.size()));
+    }
+    return bad + (n - seen);
+}
+
+/// uart.rx through the interrupt receiver: the transmit engine sends the
+/// burst (its completions are the DMAC's, apart), the thread spins until
+/// the ring holds it; irq and isr are SERCOM1's - the receiver's shape,
+/// one entry for every byte or for every level the handler takes.
+void rx_lines() {
+    for (const uint32_t baud : rates) {
+        for (const uint32_t n : {16u, 256u}) {
+            live = Live::txe;
+            (void)LoopTxE::init(clock, baud);
+            settle(baud);
+            const uint8_t* p = bytes_of(n);
+            const Mark a = mark();
+            (void)LoopTxE::write_bulk(std::span<const uint8_t>(p, n));
+            uint32_t spins = 0;
+            while (LoopTxE::rx_pending() < n && spins++ < 4'000'000u) {
+            }
+            const Mark b = mark();
+            const Run r = between(a, b);
+            const uint32_t bad = check_and_consume<LoopTxE>(p, n);
+            bench_line(serial, "uart.rx", n, line_of(r.all, r.s1), Ruler::hz(), baud / 10u);
+            per_byte("SERCOM1 (the receiver)", r.s1, n);
+            print(serial, "  wrong or missing bytes ", bad, crlf);
+            counters_line<LoopTxE>();
+            LoopTxE::release();
+            live = Live::none;
+        }
+    }
+    // Through the receive engine: the interrupt transmitter sends (SERCOM1's
+    // entries are the TRANSMIT side here), the DMAC's interrupts are the
+    // receiver's; the transport is brought up anew before each burst so
+    // the burst starts the engine's first block. What the owner does with
+    // no edge is ask: harvest() once a tick, the thread spinning between.
+    for (const uint32_t baud : rates) {
+        for (const uint32_t n : {16u, 256u}) {
+            live = Live::rxe;
+            (void)LoopRxE::init(clock, baud);
+            settle(baud);
+            const uint8_t* p = bytes_of(n);
+            const Mark a = mark();
+            (void)LoopRxE::write_bulk(std::span<const uint8_t>(p, n));
+            uint32_t tick = Ticker::ticks();
+            uint32_t asks = 0;
+            uint32_t spins = 0;
+            while (LoopRxE::rx_pending() < n && spins++ < 4'000'000u) {
+                if (Ticker::ticks() != tick) {
+                    tick = Ticker::ticks();
+                    ++asks;
+                    (void)LoopRxE::harvest();
+                }
+            }
+            const Mark b = mark();
+            const Run r = between(a, b);
+            const uint32_t bad = check_and_consume<LoopRxE>(p, n);
+            bench_line(serial, "uart.rx.dma", n, line_of(r.all, r.dm), Ruler::hz(), baud / 10u);
+            per_byte("DMAC (the receiver)", r.dm, n);
+            print(serial, "  SERCOM1 (the transmitter) ", r.s1.irq, " interrupts; the owner asked ",
+                  asks, " times; wrong or missing bytes ", bad, crlf);
+            counters_line<LoopRxE>();
+            LoopRxE::release();
+            live = Live::none;
+        }
+    }
+}
+
+/// uart.edge: the cycles from the burst's last stop bit to the receive
+/// ring holding the burst's last byte, in the context that published it.
+/// The thread spins until the transmitter holds the burst's last byte
+/// (`handed`), then MASKS and spins on its TXC: TXC's rise is stamped
+/// exactly, and the receive side's interrupt, pended under the mask,
+/// runs the moment it lifts - so the number is the handler's own latency
+/// past the last stop bit. The receiver had the byte BEFORE that: it
+/// takes the frame at its stop bit's middle sample (31.6.2.6), seven
+/// sixteenths of a bit before TXC. The mask lasts the last two frames at
+/// most, which the receiver's two levels hold.
+template <typename U, typename Handed>
+void edge_once(const char* op, uint32_t baud, uint32_t n, Handed handed) {
+    settle(baud);
+    const uint8_t* p = bytes_of(n);
+    want = n;
+    edge_seen = false;
+    stamping = true;
+    (void)U::write_bulk(std::span<const uint8_t>(p, n));
+    uint32_t lead = 0;
+    while (!handed() && lead++ < 4'000'000u) {
+        asm volatile("" ::: "memory");   // the engine's busy flag is a plain bool
+    }
+    disable_interrupts();
+    uint32_t spins = 0;
+    while (!U::Resource::txc_flag() && spins++ < 400'000u) {
+    }
+    const uint32_t t_txc = Ruler::now();
+    enable_interrupts();
+    uint32_t tick = Ticker::ticks();
+    uint32_t asks = 0;
+    spins = 0;
+    while (!edge_seen && spins++ < 4'000'000u) {
+        if (Ticker::ticks() != tick) {
+            tick = Ticker::ticks();
+            ++asks;
+            (void)U::harvest();
+            check_edge([] { return U::rx_pending(); }, false);
+        }
+    }
+    stamping = false;
+    const uint32_t bad = check_and_consume<U>(p, n);
+    const BenchSample s{edge_seen ? edge_at - t_txc : 0u, 0u, 0u, 0u};
+    bench_line(serial, op, n, s, Ruler::hz(), 0u);
+    print(serial, "  at ", baud, " baud: the edge ", edge_seen ? "seen" : "NOT SEEN", " by the ",
+          edge_by_vector ? "vector" : "owner's ask", " (", asks, " asks), ",
+          static_cast<int32_t>(edge_at - t_txc), " cycles past TXC; a frame is ",
+          char_cycles(baud), " cycles; wrong or missing bytes ", bad, crlf);
+}
+
+void edge_lines() {
+    // The interrupt receiver's edge: a burst of four from the plain
+    // transmitter on the same vector, so no other handler is pended with
+    // the receiver's when the mask lifts - DRE disarms as the last byte
+    // enters DATA, two frames before its stop bit. ONE RATE: the handler
+    // serves a pended RXC at its own latency whatever the rate, and from
+    // 1 Mbaud the transmitter's and the receiver's entries leave the thread
+    // too little of a frame to mask before the last RXC (the write itself
+    // outlasts the four frames), so the stamps cannot be taken apart there.
+    for (const uint32_t baud : {115'200u}) {
+        live = Live::irq;
+        (void)LoopIrq::init(clock, baud);
+        edge_once<LoopIrq>("uart.edge", baud, 4u, [] {
+            return (LoopIrq::Resource::armed() & SercomFlag::dre) == 0u;
+        });
+        LoopIrq::release();
+        live = Live::none;
+    }
+    for (const uint32_t baud : {115'200u, 1'000'000u}) {
+        for (const uint32_t n : {16u, 256u}) {
+            live = Live::rxe;
+            (void)LoopRxE::init(clock, baud);
+            edge_once<LoopRxE>("uart.edge.dma", baud, n, [] {
+                return (LoopRxE::Resource::armed() & SercomFlag::dre) == 0u;
+            });
+            LoopRxE::release();
+            live = Live::none;
+        }
+    }
+}
+
+/// The copy into the ring: write_bulk() of n bytes on the engined
+/// transport, freshly brought up (the ring's head at its first slot), the
+/// source at each of the four offsets from a word - one of them shares the
+/// ring storage's alignment. The call is timed masked, from its entry to
+/// its return: the copy and the one pump that launches the block, so the
+/// difference of two sizes is the copy alone.
+void copy_lines() {
+    constexpr uint32_t baud = 3'000'000u;
+    for (const uint32_t n : {1u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 1024u}) {
+        uint32_t lo = 0xFFFFFFFFu;
+        uint32_t hi = 0;
+        uint32_t walls[4] = {};
+        for (uint32_t off = 0; off < 4u; ++off) {
+            live = Live::txe;
+            (void)LoopTxE::init(clock, baud);
+            LoopTxE::Resource::enable_rxc_interrupt(false);
+            settle(baud);
+            const uint8_t* p = bytes_of(max_size) + off;
+            disable_interrupts();
+            const uint32_t t0 = Ruler::now();
+            (void)LoopTxE::write_bulk(std::span<const uint8_t>(p, n));
+            const uint32_t w = Ruler::now() - t0;
+            enable_interrupts();
+            uint32_t spins = 0;
+            while (DmaTxEngine<ch_tx>::busy() && spins++ < 4'000'000u) {
+            }
+            LoopTxE::release();
+            live = Live::none;
+            walls[off] = w;
+            lo = w < lo ? w : lo;
+            hi = w > hi ? w : hi;
+        }
+        print(serial, "  uart.copy write_bulk n=", n, ": ", walls[0], ' ', walls[1], ' ', walls[2],
+              ' ', walls[3], " cycles at source offsets 0..3 (low ", lo, ", high ", hi, ')',
+              crlf);
+    }
+}
+
+/// The completions this letter's engines raise, from DMAC_Handler.
+[[gnu::always_inline]] inline bool dmac_dispatch(const DmaInterrupt& irq) {
+    if (live == Live::txe && irq.channel == ch_tx) {
+        (void)LoopTxE::dma_isr(irq.channel);
+        return true;
+    }
+    if (live == Live::rxe && irq.channel == ch_rx) {
+        (void)LoopRxE::dma_isr(irq.channel);
+        check_edge([] { return LoopRxE::rx_pending(); }, true);
+        return true;
+    }
+    return false;
+}
+
+}  // namespace uu
+
+void tu_uart() {
+    if (!Dmac::init()) {
+        print(serial, "  the DMAC did not come up", crlf);
+        bench.verdict("ran", false);
+        return;
+    }
+    (void)drain();
+    uu::tx_lines();
+    uu::rx_lines();
+    uu::edge_lines();
+    uu::copy_lines();
+    Dmac::release();
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console SERCOM5 ", console_baud, " 8N1 (BAUD gives ",
@@ -1048,20 +1506,35 @@ extern "C" BENCH_PLACEMENT void SERCOM5_Handler() {
 extern "C" BENCH_PLACEMENT void DMAC_Handler() {
     dmac_meter.enter();
     while (const auto irq = brio::Dmac::take_pending()) {
-        dd::dmac_dispatch(*irq);
+        if (!uu::dmac_dispatch(*irq)) {
+            dd::dmac_dispatch(*irq);
+        }
     }
     dmac_meter.leave();
 }
 extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
-    spi_meter.enter();
-    if (ee::live) {
-        if (ee::SpiPoll::isr()) {
-            ee::done = true;
-        }
-    } else if (dd::SpiHw::isr()) {
-        dd::spi_done = true;
+    sercom1_meter.enter();
+    switch (uu::live) {
+        case uu::Live::irq:
+            (void)uu::LoopIrq::isr();
+            uu::check_edge([] { return uu::LoopIrq::rx_pending(); }, true);
+            break;
+        case uu::Live::txe:
+            (void)uu::LoopTxE::isr();
+            uu::check_edge([] { return uu::LoopTxE::rx_pending(); }, true);
+            break;
+        case uu::Live::rxe: (void)uu::LoopRxE::isr(); break;
+        default:
+            if (ee::live) {
+                if (ee::SpiPoll::isr()) {
+                    ee::done = true;
+                }
+            } else if (dd::SpiHw::isr()) {
+                dd::spi_done = true;
+            }
+            break;
     }
-    spi_meter.leave();
+    sercom1_meter.leave();
 }
 extern "C" BENCH_PLACEMENT void SysTick_Handler() {
     tick_meter.enter();
@@ -1081,6 +1554,7 @@ int main() {
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA: copy, fill, paced, spi.dma", td_dma);
     bench.letter('e', "the SPI host above the wire: spi.poll, spi.pump, spi.req", te_spi_host);
+    bench.letter('u', "the UART on a loop: uart.tx, uart.rx, uart.edge", tu_uart);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED", " tick=",

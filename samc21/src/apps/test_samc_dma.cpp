@@ -86,6 +86,8 @@ using RxEngineSerial = brio::Uart<5, console_pads, 64, 256, brio::NoDmaEngine,
                                   brio::DmaRxEngine<ch_engine_rx>>;
 constexpr TxEngineSerial tx_engine_serial;
 constexpr RxEngineSerial rx_engine_serial;
+/// The receive edges the RX engine's vector answered (Uart::dma_isr()).
+volatile uint32_t rx_vector_edges = 0;
 
 /// Which instantiation owns SERCOM5: its vector serves that one's rings
 /// and nobody else's (the engined ones keep the other direction on the
@@ -293,11 +295,16 @@ extern "C" void DMAC_Handler() {
             }
         }
         // The engined Uart's own channel: the transmit one consumes what
-        // its block carried and starts the next run itself. A channel
-        // that is not its own simply answers false.
+        // its block carried and starts the next run itself; the receive
+        // one publishes its filled half of the ring and re-arms, answering
+        // the receive edge. A channel that is not its own answers false.
         switch (live) {
             case Console::tx_engine: (void)TxEngineSerial::dma_isr(ch); break;
-            case Console::rx_engine: (void)RxEngineSerial::dma_isr(ch); break;
+            case Console::rx_engine:
+                if (RxEngineSerial::dma_isr(ch)) {
+                    rx_vector_edges = rx_vector_edges + 1u;
+                }
+                break;
             default: break;
         }
         if (ch == ch_chain && irq->complete() && chain_running) {
@@ -1359,7 +1366,7 @@ void th_engine_tx() {
 }
 
 // =============================================================================
-// i - the RX engine and the tick-paced harvest (needs the runner)
+// i - the RX engine: the vector's edge and the tick-paced tail (needs the runner)
 // =============================================================================
 void ti_engine_rx() {
     clear_irq_counts();
@@ -1372,10 +1379,13 @@ void ti_engine_rx() {
     while (!RxEngineSerial::tx_idle() && spins-- != 0u) {
     }
 
-    // TICK-PACED, which is the whole contract: nothing tells this
-    // transport that bytes have arrived, so somebody has to ask, and how
-    // often is that somebody's policy. Ten milliseconds is this suite's
+    // TWO EDGES. Every filled half of the 64-byte ring - 32 bytes - is
+    // published by the engine's vector (Uart::dma_isr(), counted in
+    // rx_vector_edges); a burst that stops short of that has no edge on
+    // this silicon (no idle detector, no receiver time-out), so the owner
+    // asks for the tail, tick-paced. Ten milliseconds is this suite's
     // choice, not the driver's.
+    rx_vector_edges = 0;
     uint32_t polls = 0;
     uint32_t edges = 0;
     uint32_t first_byte_at = 0;
@@ -1409,7 +1419,8 @@ void ti_engine_rx() {
     const bool gave = give_console_back<RxEngineSerial>();
 
     print(serial, "  received ", got, " bytes in ", polls, " polls, ", edges,
-          " wake edges, first at ", first_byte_at, " ms", crlf, "  bytes: ");
+          " wake edges from the asks and ", rx_vector_edges, " from the vector, first at ",
+          first_byte_at, " ms", crlf, "  bytes: ");
     for (uint16_t i = 0; i < got; ++i) {
         const uint8_t c = received[i];
         print(serial, (c >= 0x20u && c < 0x7Fu) ? static_cast<char>(c) : '.');
@@ -1420,7 +1431,8 @@ void ti_engine_rx() {
     bench.verdict("the RXC interrupt was never armed",
                   (rx_armed & brio::SercomFlag::rxc) == 0);
     bench.verdict("something arrived", got != 0);
-    bench.verdict("harvest reported the empty -> non-empty edge", edges != 0);
+    bench.verdict("an edge was reported, by the vector or the ask",
+                  edges != 0 || rx_vector_edges != 0u);
     bench.verdict("read_byte() served the bytes unchanged", got != 0);
     bench.verdict("no hardware overrun", hw_over == 0);
     bench.verdict("no receive error over the burst", frame_err == 0);
@@ -1628,7 +1640,7 @@ int main() {
     bench.letter('r', "SERCOM5 receive through a DMA channel (send a burst)",
                  tr_uart_rx, false);
     bench.letter('h', "Uart's optional TX engine", th_engine_tx);
-    bench.letter('i', "Uart's RX engine + tick-paced harvest (send a burst)",
+    bench.letter('i', "Uart's RX engine: the vector's edge and the tick-paced tail (send a burst)",
                  ti_engine_rx, false);
     bench.letter('j', "the TX engine beside the churn (1.10.4 at the task level)",
                  tj_engine_churn);

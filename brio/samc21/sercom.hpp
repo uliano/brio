@@ -115,6 +115,7 @@
 
 #include <stdint.h>
 
+#include <cstring>
 #include <span>
 #include <optional>
 
@@ -198,14 +199,25 @@ constexpr uint8_t uart_txpo(SercomPad p) {
 /// RXPO is simply the pad number (31.8.1).
 constexpr uint8_t uart_rxpo(SercomPad p) { return static_cast<uint8_t>(p); }
 
+/// The LOOP-BACK pair: RxD on the very pad TxD drives, both directions
+/// on one pin (31.6.3.8: "configure RXPO and TXPO to use the same data
+/// pins for transmit and receive. The loop-back is through the pad, so
+/// the signal is also available externally"). The receiver hears its own
+/// transmitter with no wire - a loop at every rate the generator makes.
+constexpr bool uart_pads_loop_back(const UartPads& p) {
+    return p.tx == p.rx && p.tx_pin.port == p.rx_pin.port && p.tx_pin.pin == p.rx_pin.pin &&
+           p.tx_pin.function == p.rx_pin.function;
+}
+
 /// Is this pad/pin pair something the silicon and the package can do?
 /// The pad side is exact; the pin side is checked only as far as this
 /// header can know it (the group exists, the pin number is in range) -
 /// that a given PIN really reaches that PAD is the open device-table
-/// question of the file header.
+/// question of the file header. Two directions on one pad are the
+/// loop-back above, and only with one pin named twice.
 constexpr bool uart_pads_valid(const UartPads& p) {
-    return uart_tx_pad_exists(p.tx) && p.tx != p.rx && p.tx_pin.valid() &&
-           p.rx_pin.valid();
+    return uart_tx_pad_exists(p.tx) && (p.tx != p.rx || uart_pads_loop_back(p)) &&
+           p.tx_pin.valid() && p.rx_pin.valid();
 }
 
 /// CTRLB.CHSIZE (31.8.2). The codes are not the bit counts and are not
@@ -887,6 +899,21 @@ public:
  * RAM. 64/256 are kept as console-class defaults, not as a ceiling.
  */
 /**
+ * THE COPY'S CROSSOVER: the run length from which the transport's copy
+ * into or out of a ring calls the runtime's memcpy instead of its own
+ * byte loop (Uart::copy_run()), when the two ends share their alignment
+ * in the word. Measured with bench_samc's letter u - write_bulk() timed
+ * at nine lengths and the four source alignments, the figures in
+ * docs/samc21/sercom.md: the inline byte loop costs about nine and a half
+ * cycles a byte at 48 MHz behind two wait states; memcpy about 170 cycles
+ * of call, tests and tail, then under a cycle a byte when the ends are
+ * co-aligned (its word path) - so the two meet at about twenty bytes - and
+ * eleven a byte when they are not (its byte path, the same loop out of
+ * line), where it never pays and is not called.
+ */
+inline constexpr uint32_t uart_copy_crossover = 20;
+
+/**
  * The "no DMA engine" default of the two optional Uart engine slots.
  *
  * It is a TAG, not a base class: `present` is the only thing the task
@@ -964,8 +991,9 @@ class Uart {
 
     static_assert(uart_pads_valid(pads),
                   "these SERCOM pads cannot carry an asynchronous link: TxD exists "
-                  "only on PAD[0] and PAD[2] (CTRLA.TXPO), the two directions cannot "
-                  "share a pad, and both pins must be real ones on this device");
+                  "only on PAD[0] and PAD[2] (CTRLA.TXPO), the two directions share a "
+                  "pad only as the loop-back (31.6.3.8: one pin named for both), and "
+                  "both pins must be real ones on this device");
 
     // AN ENGINE IS CHECKED WHERE IT IS NAMED. `sizeof` demands a
     // COMPLETE type, which instantiates the engine here, at the template
@@ -1011,6 +1039,26 @@ class Uart {
     /// engineless Uart never odr-uses it and does not carry the byte.
     static inline volatile uint8_t m_dma_faults = 0;
     static inline uint32_t m_baud = 0;                  // for rebase()
+    /// A byte was handed to the transmitter since init(). TXC is clear out
+    /// of configure() and only a frame's departure sets it, so a port that
+    /// has sent nothing reads idle by this and not by the flag. Written by
+    /// the producer's verbs alone, in main context.
+    static inline bool m_tx_used = false;
+    /// The receive engine found the ring full at its last re-arm and was
+    /// left idle: the consumer's next release hands it the run it frees
+    /// (see rearm_rx()). Set in the DMAC's handler, read in main context.
+    static inline volatile bool m_rx_stalled = false;
+
+    /// The bound on a wait for the wire to fall idle (rebase(), set_baud()).
+    static constexpr uint32_t tx_drain_spins = 8'000'000u;
+    /// The longest run an engine moves as one block: half its ring. A
+    /// block's completion is where a receive run is published and a
+    /// transmit run's slots are freed, so the consumer of the one and the
+    /// producer of the other each work on one half while the channel runs
+    /// the other - the ring's half marks, on a controller with no
+    /// circular mode (samc21/dmac.hpp).
+    static constexpr uint32_t rx_block_most = rx_size / 2u;
+    static constexpr uint32_t tx_block_most = tx_size / 2u;
 
 public:
     /// Instances are empty tags for concept-based call sites (print(serial, ...)).
@@ -1071,6 +1119,8 @@ public:
         m_tx.clear();
         clear_errors();
         m_baud = baud;
+        m_tx_used = false;
+        m_rx_stalled = false;
 
         S::bus_clock(true);
         if (!S::core_clock(generator)) {
@@ -1134,19 +1184,12 @@ public:
     /// BAUD is enable-protected, so the instance is stopped around the
     /// write. Main context only.
     static void rebase(uint32_t hz) {
-        // Bounded, like every wait in this stratum. A full 256-byte ring
-        // at 9600 baud is a quarter of a second and one frame is about a
-        // millisecond, so both budgets are generous at any rate this
-        // transport reaches - and an instance that has never transmitted
-        // has TXC clear and simply falls through the second one, which
-        // is the right answer there (nothing is in flight).
-        constexpr uint32_t ring_drain_spins = 8'000'000u;
-        constexpr uint32_t frame_spins = 200'000u;
-        uint32_t spins = ring_drain_spins;
-        while (!m_tx.empty() && spins-- != 0u) {
-        }
-        spins = frame_spins;
-        while (!S::txc_flag() && spins-- != 0u) {
+        // Bounded, like every wait in this stratum: a full 256-byte ring
+        // at 9600 baud is a quarter of a second, and the budget is
+        // generous at any rate this transport reaches. tx_idle() is the
+        // wire's answer - the ring empty and the last stop bit gone.
+        uint32_t spins = tx_drain_spins;
+        while (!tx_idle() && spins-- != 0u) {
         }
         const std::optional<uint16_t> reg = sercom_baud_reg(hz, m_baud);
         if (!reg) {
@@ -1160,7 +1203,7 @@ public:
     /**
      * Change the rate under the running port: BAUD rewritten for `baud`
      * at the reference clock `hz`, once the TX side has gone idle the
-     * way rebase() waits for it (the same two bounded waits). False, and
+     * way rebase() waits for it (the same bounded wait). False, and
      * nothing written, when the generator cannot express the rate. Main
      * context only; the caller owns the agreement with the other end.
      */
@@ -1169,13 +1212,8 @@ public:
         if (!reg) {
             return false;
         }
-        constexpr uint32_t ring_drain_spins = 8'000'000u;
-        constexpr uint32_t frame_spins = 200'000u;
-        uint32_t spins = ring_drain_spins;
-        while (!m_tx.empty() && spins-- != 0u) {
-        }
-        spins = frame_spins;
-        while (!S::txc_flag() && spins-- != 0u) {
+        uint32_t spins = tx_drain_spins;
+        while (!tx_idle() && spins-- != 0u) {
         }
         (void)S::enable(false);
         S::baud_reg(*reg);
@@ -1217,6 +1255,16 @@ public:
     /// true"). Every empty->non-empty transition reports true and the
     /// consumer only empties the ring by draining it, so no wakeup is
     /// ever lost. Plain (non-kernel) apps may ignore the return value.
+    ///
+    /// THE RECEIVER IS A TWO-LEVEL BUFFER (31.6.2.6), and an entry takes
+    /// every level it finds: RXC is asked again after each character and
+    /// the loop ends when it reads clear. One entry per character on a
+    /// line slower than the handler, one per two where characters arrive
+    /// faster than an entry and its exit - the shape that decides whether
+    /// the receiver keeps up at the generator's top rate (sercom.md).
+    /// THE PATH IS CALL-FREE: the body, the ring's verbs and the register
+    /// accesses are all inline, so a handler placed in SRAM (.ram_text,
+    /// docs/samc21/platform.md) runs from SRAM entirely.
     // always_inline: a single call site (the vector binding in the app),
     // so inlining costs no flash and lets the compiler save only the
     // registers it actually uses - see ticker.hpp tick().
@@ -1248,43 +1296,85 @@ public:
     ///     }
     ///
     /// On the transmit channel a completion means the block this engine
-    /// handed over has left the wire, so exactly that many bytes are
+    /// handed over has gone into DATA, so exactly that many bytes are
     /// released from the ring and the next contiguous run is started.
     ///
-    /// Returns true when the interrupt belonged to this transport.
+    /// On the receive channel a completion means the block filled its run
+    /// - half the ring at most (rx_block_most) - and THIS IS THE ENGINE'S
+    /// EDGE: the run is published and the channel handed the next one
+    /// here, in the handler (DmaRxEngine::complete(), rearm_rx()). So the
+    /// engine waits for no
+    /// owner between blocks: the channel is idle from its last beat to
+    /// this handler's re-arm, which the receiver's two levels cover - two
+    /// frames at least before a third completing overflows - and a
+    /// stream that never pauses is published at every half of the ring.
+    /// WHAT HAS NO EDGE is a run that stops short of its block's end: this
+    /// silicon has no idle detector and no receiver time-out (DS60001479M
+    /// 31.6: RXC, RXS, RXBRK and the errors are the receiver's whole
+    /// interrupt list), so the tail of a burst is published when the
+    /// owner asks - harvest() - or when more bytes complete the block. The
+    /// interrupt receiver, which has an edge on every character, is this
+    /// family's burst path (docs/samc21/sercom.md).
+    ///
+    /// Returns true when the receive ring went from empty to non-empty -
+    /// the edge contract isr() has, so the same glue posts RxActivity on
+    /// it. A transmit completion, and a receive completion an owner's
+    /// harvest() already took (the channel re-armed under it), answer
+    /// false.
     [[gnu::always_inline]] static bool dma_isr(uint8_t channel) {
         if constexpr (has_tx_engine) {
             if (channel == TxEngine::channel) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
                     TxEngine::complete()));
                 pump_tx();
-                return true;
+                return false;
             }
         }
         if constexpr (has_rx_engine) {
             if (channel == RxEngine::channel) {
-                // A receive block completing means the buffer run filled
-                // up. Nothing is published here: only harvest() knows how
-                // much of it the consumer has been told about, and the
-                // pacing of that is the caller's (see harvest()).
-                return true;
+                // A channel enabled again is a block an owner's harvest()
+                // took and re-armed between the completion and this
+                // handler: nothing of it is left to publish.
+                if (!RxEngine::idle()) {
+                    return false;
+                }
+                // THE COUNT IS THE RUN'S: the completion says every beat
+                // landed, so no write-back is read and no suspend is
+                // made (DmaRxEngine::complete()) - the edge costs a status
+                // read, one index store and the re-arm's three descriptor
+                // stores and enable.
+                take_status();
+                const bool was_empty = m_rx.empty();
+                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(RxEngine::complete()));
+                rearm_rx();
+                return was_empty && !m_rx.empty();
             }
         }
         (void)channel;
         return false;
     }
 
-    /// Ask the receive engine what has arrived, and publish it.
+    /// Ask the receive engine what has arrived, publish it, and hand the
+    /// channel a new run when it has none.
     ///
-    /// WHY THIS IS A VERB AND NOT AN INTERRUPT. A receive block completes
-    /// only when the buffer fills, which on an idle line may be never, so
-    /// there is no event to wait for: the only way to learn how far a
-    /// receive channel has got is to SUSPEND it and read its write-back
-    /// (samc21/dmac.hpp's harvest, erratum 1.10.4 validation included).
-    /// That is a deliberate act with a cost, so this transport does not
-    /// schedule it - WHOEVER OWNS THE PORT DECIDES HOW OFTEN TO ASK, and
-    /// pays the latency it chose. A kernel TimeEvent every few ticks is
-    /// the shape brio expects.
+    /// THE OWNER'S VERB, for what no completion will report: the tail of
+    /// a run that stopped short of its block's end (a filled block is
+    /// published by dma_isr(), the engine's edge, at less cost). It also
+    /// publishes the rest of a block that completed under it, and re-arms
+    /// a channel that is not running. Learning how far a running channel
+    /// has got means
+    /// SUSPENDING it and reading its write-back (samc21/dmac.hpp's
+    /// harvest, erratum 1.10.4 validation included), so the owner's ask is
+    /// a deliberate act with a cost and the owner chooses when to pay it:
+    /// a line protocol at its terminator's expected time, a stream at its
+    /// end, a lazy kernel TimeEvent for a stream of unknown length - lazy:
+    /// asked every 50 us, a suspend landing on a block's last beats lost
+    /// characters at the boundary, uncounted (docs/samc21/sercom.md,
+    /// letter n of test_samc_uart), and the edge needs no ask. The ring's
+    /// producer side is the DMAC handler's too, so the whole verb runs
+    /// under the mask - the channel's own suspend handshake already does (dmac.md:
+    /// about 700 cycles), and what the verb adds around it is the status
+    /// read, one index store and a re-arm of three descriptor stores.
     ///
     /// WHAT IS TRADED AWAY, and it cannot be given back: per-byte error
     /// attribution. With RXC armed, STATUS is read for EACH character
@@ -1295,6 +1385,9 @@ public:
     /// protocol with its own framing does not care; a console that wants
     /// exact frame-error attribution should not take an RX engine.
     ///
+    /// NO BYTE IS TAKEN TO CLEAR AN ERROR: STATUS's bits are cleared by
+    /// writing them (31.8.9), DATA is read by the channel alone.
+    ///
     /// Returns true when the receive ring went from empty to non-empty -
     /// the same edge contract isr() has, so the same kernel glue works:
     /// post RxActivity on true. False, and free, without an engine.
@@ -1302,24 +1395,8 @@ public:
         if constexpr (!has_rx_engine) {
             return false;
         } else {
-            // STATUS first and once: at harvest granularity, which is
-            // the honest resolution this mode has.
-            const uint16_t st = S::status();
-            const uint16_t errors = static_cast<uint16_t>(st & SercomStatus::receive_errors);
-            if (errors != 0u) {
-                S::clear_status(errors);
-                S::clear_flags(SercomFlag::error);
-                if ((errors & SercomStatus::overflow) != 0u) {
-                    m_hw_overruns = m_hw_overruns + 1;
-                }
-                if ((errors & SercomStatus::frame_error) != 0u) {
-                    m_frame_errors = m_frame_errors + 1;
-                }
-                if ((errors & SercomStatus::parity_error) != 0u) {
-                    m_parity_errors = m_parity_errors + 1;
-                }
-            }
-
+            typename SamPlatform::CriticalSection cs;
+            take_status();
             const bool was_empty = m_rx.empty();
             const auto fresh = RxEngine::take();
             if (fresh && *fresh != 0u) {
@@ -1368,6 +1445,7 @@ public:
             nudge_blocked_tx();
             return false;
         }
+        m_tx_used = true;
         if constexpr (has_tx_engine) {
             pump_tx();
         } else {
@@ -1383,6 +1461,7 @@ public:
             return false;
         }
         b = *v;
+        resume_rx();
         return true;
     }
 
@@ -1422,6 +1501,10 @@ public:
      * engine pumped once: an engine starts on a block, and a first byte
      * of its own would be a block and a completion interrupt more every
      * run.
+     *
+     * THE COPY is copy_run(): the runtime's memcpy for a run of at least
+     * uart_copy_crossover bytes whose ends share their word alignment, the
+     * inline byte loop otherwise (the measurement is there).
      */
     static uint32_t write_bulk(std::span<const uint8_t> src) {
         uint32_t done = 0;
@@ -1444,18 +1527,12 @@ public:
             const uint32_t want = static_cast<uint32_t>(src.size()) - done;
             const uint32_t take =
                 want < room.size() ? want : static_cast<uint32_t>(room.size());
-            // Two pointers and no index, and the test at the bottom: a
-            // load, a store, two steps and one branch a byte, where an index
-            // re-adds both bases every byte. `take` is at least one here -
-            // the room is not empty and the run is not done.
-            const uint8_t* from = src.data() + done;
-            uint8_t* to = room.data();
-            uint8_t* const end = to + take;
-            do {
-                *to++ = *from++;
-            } while (to != end);
+            copy_run(room.data(), src.data() + done, take);
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
             done += take;
+        }
+        if (done != 0u) {
+            m_tx_used = true;
         }
         if constexpr (has_tx_engine) {
             if (done != 0u) {
@@ -1484,12 +1561,11 @@ public:
             const uint32_t want = static_cast<uint32_t>(dst.size()) - done;
             const uint32_t take =
                 want < run.size() ? want : static_cast<uint32_t>(run.size());
-            for (uint32_t i = 0; i < take; ++i) {
-                dst[done + i] = run[i];
-            }
+            copy_run(dst.data() + done, run.data(), take);
             m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(take));
             done += take;
         }
+        resume_rx();
         return done;
     }
 
@@ -1504,12 +1580,23 @@ public:
     static void consume(uint32_t count) {
         constexpr uint32_t most = decltype(m_rx)::capacity();
         m_rx.consume(static_cast<typename decltype(m_rx)::index_t>(count < most ? count : most));
+        resume_rx();
     }
 
     // ---- introspection -----------------------------------------------------
 
     static auto rx_pending() { return m_rx.count(); }
-    static bool tx_idle() { return m_tx.empty(); }
+
+    /// THE WIRE IS IDLE: nothing queued, no block in flight, and the last
+    /// stop bit off the pad. TXC is that last clause exactly - set when
+    /// the shifter has emptied with nothing new in DATA, cleared by any
+    /// write to DATA (31.6.2.5, 31.8.8), the transmit channel's beats
+    /// included, so it never answers for a frame before the current one.
+    /// The ring's emptiness covers the other two: the engine releases a
+    /// block's bytes only at its completion, when its last beat has
+    /// written DATA. A port that has sent nothing since init() has TXC
+    /// clear and is idle (m_tx_used).
+    static bool tx_idle() { return m_tx.empty() && (!m_tx_used || S::txc_flag()); }
 
     static uint8_t rx_overruns() { return m_rx_overruns; }
     static uint8_t frame_errors() { return m_frame_errors; }
@@ -1670,10 +1757,18 @@ private:
                     return;
                 }
             }
-            const auto run = m_tx.read_span();
+            auto run = m_tx.read_span();
             if (run.empty()) {
                 TxEngine::cancel();
                 return;
+            }
+            // HALF THE RING AT MOST: the block's completion is what frees
+            // its slots, so a block of the whole ring leaves a producer
+            // longer than the ring nothing to refill until the wire has
+            // gone idle - measured, a 4096-byte print through a 2048-byte
+            // ring waited a whole copy at 3 Mbaud (sercom.md).
+            if (run.size() > tx_block_most) {
+                run = run.first(tx_block_most);
             }
             // NO KICK. DRE is a level the DMAC latches on its rise, and a
             // rise while the channel is disabled with its trigger selected
@@ -1695,34 +1790,46 @@ private:
      * The engine writes straight into the ring's slots - the run
      * write_span() hands over is memory the SPSC invariant has already
      * made the producer's alone - and nothing becomes visible to the
-     * consumer until harvest() publishes it. An empty run means the ring
-     * is full: there is nowhere to put arriving bytes, so the channel is
-     * left idle and the losses show up as BUFOVF at the next harvest,
-     * counted like any other hardware overrun.
+     * consumer until the block's completion (dma_isr()) or an owner's
+     * harvest() publishes it. The run is HALF THE RING at
+     * most (rx_block_most): its completion is the engine's edge, and a
+     * consumer told at each half drains one while the channel fills the
+     * other.
+     *
+     * An empty run means the ring is full: there is nowhere to put
+     * arriving bytes, so the channel is left idle, the stall counted in
+     * rx_overruns() and flagged, and the losses show up as BUFOVF at the
+     * next harvest. Nothing would re-arm it - no block runs, so no
+     * completion comes - so the consumer's release does: resume_rx().
      */
     static void rearm_rx() {
         if constexpr (has_rx_engine) {
-            const auto room = m_rx.write_span();
+            auto room = m_rx.write_span();
             if (room.empty()) {
-                m_rx_overruns = m_rx_overruns + 1;
+                if (!m_rx_stalled) {
+                    m_rx_overruns = m_rx_overruns + 1;
+                    m_rx_stalled = true;
+                }
                 return;
             }
+            if (room.size() > rx_block_most) {
+                room = room.first(rx_block_most);
+            }
+            m_rx_stalled = false;
             (void)RxEngine::start(room);
         }
     }
 
-    /// One received character: STATUS first (it belongs to the character
-    /// about to be read), then DATA (which is what advances the FIFO and
-    /// clears RXC). A buffer overflow means the hardware ALREADY lost
-    /// bytes, but the one in hand is good; a frame or parity error means
-    /// this one is not.
-    static bool receive() {
+    /// STATUS read once and its receive errors counted and cleared - at the
+    /// engine's granularity, a run and not a byte, which is the honest
+    /// resolution this mode has. The bits clear by being written (31.8.9):
+    /// DATA is the channel's alone.
+    static void take_status() {
         const uint16_t st = S::status();
-        const uint8_t byte = static_cast<uint8_t>(S::data());
         const uint16_t errors = static_cast<uint16_t>(st & SercomStatus::receive_errors);
         if (errors != 0u) {
             S::clear_status(errors);
-            S::clear_flags(SercomFlag::error);   // the combined flag travels with them
+            S::clear_flags(SercomFlag::error);
             if ((errors & SercomStatus::overflow) != 0u) {
                 m_hw_overruns = m_hw_overruns + 1;
             }
@@ -1732,23 +1839,91 @@ private:
             if ((errors & SercomStatus::parity_error) != 0u) {
                 m_parity_errors = m_parity_errors + 1;
             }
-            if ((errors & (SercomStatus::frame_error | SercomStatus::parity_error)) != 0u) {
-                return false;   // drop the corrupted byte
+        }
+    }
+
+    /// The consumer freed slots: a receive engine left idle on a full ring
+    /// gets its run now. A flag test on the consumer's path; the re-arm
+    /// under the mask, the ring being the DMAC handler's to publish into.
+    [[gnu::always_inline]] static void resume_rx() {
+        if constexpr (has_rx_engine) {
+            if (m_rx_stalled) {
+                typename SamPlatform::CriticalSection cs;
+                if (m_rx_stalled && RxEngine::idle()) {
+                    m_rx_stalled = false;
+                    rearm_rx();
+                }
             }
         }
-        const bool was_empty = m_rx.empty();
-        if (!m_rx.push(byte)) {
-            m_rx_overruns = m_rx_overruns + 1;
-            return false;   // a full ring cannot be empty: no edge
+    }
+
+    /// The copy into the transmit ring's free run and out of the receive
+    /// ring's ready one: two pointers and the test at the bottom - a load,
+    /// a store, two steps and one branch a byte - unless the run is at
+    /// least uart_copy_crossover long AND its two ends share their
+    /// alignment in the word, where the runtime's memcpy moves it on its
+    /// word path; across a misalignment memcpy's byte path is this loop
+    /// out of line, a call dearer (rt/rt.cpp). `len` is at least one.
+    [[gnu::always_inline]] static void copy_run(uint8_t* to, const uint8_t* from, uint32_t len) {
+        constexpr uintptr_t word_mask = sizeof(uint32_t) - 1u;
+        if (len >= uart_copy_crossover &&
+            ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & word_mask) ==
+                0u) {
+            std::memcpy(to, from, len);
+            return;
         }
-        return was_empty;
+        uint8_t* const end = to + len;
+        do {
+            *to++ = *from++;
+        } while (to != end);
+    }
+
+    /// Every received character the two-level buffer holds: per character
+    /// STATUS first (it belongs to the character about to be read), then
+    /// DATA (which is what advances the FIFO and clears RXC), then RXC
+    /// asked again. A buffer overflow means the hardware ALREADY lost
+    /// bytes, but the one in hand is good; a frame or parity error means
+    /// this one is not, and it is dropped. The edge is the ring's empty ->
+    /// non-empty across the whole entry.
+    [[gnu::always_inline]] static bool receive() {
+        const bool was_empty = m_rx.empty();
+        bool pushed = false;
+        do {
+            const uint16_t st = S::status();
+            const uint8_t byte = static_cast<uint8_t>(S::data());
+            const uint16_t errors = static_cast<uint16_t>(st & SercomStatus::receive_errors);
+            bool keep = true;
+            if (errors != 0u) {
+                S::clear_status(errors);
+                S::clear_flags(SercomFlag::error);   // the combined flag travels with them
+                if ((errors & SercomStatus::overflow) != 0u) {
+                    m_hw_overruns = m_hw_overruns + 1;
+                }
+                if ((errors & SercomStatus::frame_error) != 0u) {
+                    m_frame_errors = m_frame_errors + 1;
+                    keep = false;
+                }
+                if ((errors & SercomStatus::parity_error) != 0u) {
+                    m_parity_errors = m_parity_errors + 1;
+                    keep = false;
+                }
+            }
+            if (keep) {
+                if (m_rx.push(byte)) {
+                    pushed = true;
+                } else {
+                    m_rx_overruns = m_rx_overruns + 1;
+                }
+            }
+        } while (S::rxc_flag());
+        return was_empty && pushed;
     }
 
     /// Feed the next byte and disarm when the ring drains (write_byte()
     /// re-arms). No race with write_byte(): a handler on this core runs
     /// to completion against the main context, so the ring test and the
     /// disarm are one indivisible step from main's point of view.
-    static void feed() {
+    [[gnu::always_inline]] static void feed() {
         if (const auto c = m_tx.pop()) {
             S::data(*c);
             if (m_tx.empty()) {
