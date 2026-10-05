@@ -172,6 +172,43 @@
 //               the host's thresholds send a polled phase by its shape
 //               (irq 1 = the engines' completion, 0 = the loop).
 //
+//   i  THE I2C HOST ABOVE THE WIRE (the STM32F429I-DISC1 alone): I2C3 on
+//      PA8/PC9 against the board's STMPE811 at 0x41 - the one device the
+//      board puts on that bus - through the engineless host (the pump) and
+//      the host with DMA1 streams 4 and 2 on channel 3 (the engines),
+//      ISR-style, the thread idling until the completion, each line the
+//      best of 8 at 100 and 400 kHz (DUTY 2; this block has no Fm+):
+//        i2c.write      1, 2, 16 and 255 bytes (and 3, last): SYS_CTRL2's
+//                       index, its reset value, then zeros into the
+//                       registers after it (the device's soft reset puts
+//                       every one back at the letter's end, and the letter
+//                       checks CHIP_ID)
+//        i2c.wr         the register read: the index, a repeated START, 1,
+//                       2, 16 and 255 bytes - the STMPE811 answers a read
+//                       no write opened with a NACK on its address
+//                       (measured, printed once), so a plain read is
+//                       measured through this shape alone
+//        i2c.probe      the address alone, 0x41 (ACK) and 0x42 (NACK)
+//      irq and isr are the I2C vectors' alone (events, errors, the two
+//      streams); busy is every meter's. THE WIRE is the tenure's own time
+//      at the SCL period MEASURED on the pad: the clock pad's input buffer
+//      polled through a 255-byte register read on the engines, its rising
+//      edges counted over 240 data bytes (every clock of them, the
+//      acknowledges included). A START and each repeated START count a
+//      period, the address and each byte nine; the STOP is not counted,
+//      because the engine completes when it REQUESTS the STOP. The line
+//      after each says wall minus that wire - THE FIXED COST - and what
+//      start() took on a quiet bus. Then, per speed:
+//        per byte       the pump's handler cycles and entries per byte,
+//                       the margin between the 16- and the 255-byte rows
+//        i2c.stop       start() called the moment a write, a read and a
+//                       register read completed, as an arbiter's dispatch
+//                       calls the next tenure: what it spends waiting for
+//                       the last STOP to leave, against a quiet bus
+//      and, last, the longest single entry of each vector, watched in a
+//      pass of its own (its two extra ruler reads would sit inside every
+//      other line's isr).
+//
 // THE COST OF THE INSTRUMENT, and how the reader subtracts it: every
 // line is RAW. A wall carries one ruler read (letter r's `ruler`); an isr
 // carries what each stamp pair records (the plain line after `stamp`) once
@@ -181,7 +218,7 @@
 // of a handler is outside the stamps, and a handler that lands between
 // P::idle()'s return and the window's close counts in both.
 //
-// NOTHING TO WIRE. Connect at 115200 8N1; `z` runs the six letters.
+// NOTHING TO WIRE. Connect at 115200 8N1; `z` runs every letter.
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -196,6 +233,7 @@
 #include "stm32f4/delay.hpp"
 #include "stm32f4/dma.hpp"
 #include "stm32f4/dwt.hpp"
+#include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
 #include "stm32f4/platform.hpp"
@@ -264,6 +302,8 @@ Meter dma_meter;     ///< letter d's DMA streams
 Meter spi_meter;     ///< letter d's SPI1 vector (a pumped request)
 Meter loop_meter;    ///< letter u's USART6 vector
 Meter loop_dma_meter;   ///< letter u's two DMA streams
+Meter i2c_meter;        ///< letter i's two I2C3 vectors (events, errors)
+Meter i2c_dma_meter;    ///< letter i's two DMA1 streams
 
 /// letter d's engines.
 using Copier = DmaCopyEngine<2, 4>;
@@ -307,7 +347,8 @@ constexpr auto print_pattern = [] {
 }();
 
 BenchCounters counters() {
-    return bench_counters<Idle>(usart_meter, tick_meter, dma_meter, spi_meter, loop_meter, loop_dma_meter);
+    return bench_counters<Idle>(usart_meter, tick_meter, dma_meter, spi_meter, loop_meter, loop_dma_meter,
+                                i2c_meter, i2c_dma_meter);
 }
 
 /// A compiler barrier: memory is what the code says it is on both sides.
@@ -1271,6 +1312,350 @@ void tu_uart() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// i - the I2C host above the wire, on the board's touch controller
+// =============================================================================
+#if defined(STM32F429xx)
+/// I2C3 on the STM32F429I-DISC1: PA8 SCL, PC9 SDA (AF4), the board's own
+/// pull-ups, the STMPE811 at 0x41 the one device on the wire.
+constexpr I2cPins i2c_pins{.scl = {'A', 8, PinFunction::af4}, .sda = {'C', 9, PinFunction::af4}};
+using I2cTxE = DmaTxEngine<1, 4, 3>;
+using I2cRxE = DmaRxEngine<1, 2, 3>;
+using I2cPump = I2cHost<3, i2c_pins>;
+using I2cDma = I2cHost<3, i2c_pins, I2cTxE, I2cRxE>;
+using I2cRes = I2c<3>;
+using I2cScl = Pin<'A', 8>;
+constexpr uint8_t i2c_peer = 0x41;     ///< the STMPE811
+constexpr uint8_t i2c_nobody = 0x42;   ///< nobody on this wire (test_stm32f4_i2c's scan)
+constexpr uint8_t stmpe_sys_ctrl1 = 0x03;
+constexpr uint8_t stmpe_sys_ctrl2 = 0x04;
+/// Which host the two vectors serve: 1 the pump, 2 the engines.
+volatile uint8_t i2c_owner = 0;
+/// The longest single entry of each vector over the letter, in cycles of
+/// the body between two ruler reads of its own (R5's figure).
+uint32_t i2c_ev_max = 0;
+uint32_t i2c_er_max = 0;
+uint32_t i2c_dma_max = 0;
+/// Watched in a pass of its own: its two extra ruler reads are inside
+/// the meters' stamps, and every other line reads the bodies without them.
+volatile bool i2c_watching = false;
+[[gnu::always_inline]] inline void i2c_longest(uint32_t& max, uint32_t t0) {
+    const uint32_t d = Ruler::now() - t0;
+    if (d > max) {
+        max = d;
+    }
+}
+volatile bool i2c_done = false;
+alignas(4) uint8_t i2c_out[256];
+alignas(4) uint8_t i2c_in[256];
+
+/// The operations, each a Request shape.
+struct I2cOp {
+    const char* name;
+    uint8_t addr;
+    uint8_t tx;
+    uint8_t rx;
+};
+constexpr I2cOp i2c_ops[] = {
+    {"i2c.write", i2c_peer, 1, 0},   {"i2c.write", i2c_peer, 2, 0},
+    {"i2c.write", i2c_peer, 16, 0},  {"i2c.write", i2c_peer, 255, 0},
+    {"i2c.wr", i2c_peer, 1, 1},      {"i2c.wr", i2c_peer, 1, 2},
+    {"i2c.wr", i2c_peer, 1, 16},     {"i2c.wr", i2c_peer, 1, 255},
+    {"i2c.probe", i2c_peer, 0, 0},   {"i2c.probe", i2c_nobody, 0, 0},
+    {"i2c.write", i2c_peer, 3, 0},   // the third short write the polled-verb question asks for
+};
+/// Where the per-byte figures come from: the rows of 16 and 255 data
+/// bytes, written and read.
+constexpr uint8_t i2c_row_w16 = 2;
+constexpr uint8_t i2c_row_w255 = 3;
+constexpr uint8_t i2c_row_r16 = 6;
+constexpr uint8_t i2c_row_r255 = 7;
+
+template <typename Host>
+typename Host::Request i2c_request(uint8_t addr, uint8_t tx, uint8_t rx, I2cSpeed speed) {
+    typename Host::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(i2c_out));
+    r.tx_len = tx;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_in));
+    r.rx_len = rx;
+    r.speed = speed;
+    return r;
+}
+
+/// The last tenure's STOP off the wire and BUSY down, outside every
+/// measurement; bounded at ten ticks.
+void i2c_quiet() {
+    const uint32_t t0 = Ticker::ticks();
+    while ((I2cRes::stopping() || I2cRes::busy()) && Ticker::ticks() - t0 < 10u) {
+    }
+}
+
+template <typename Host>
+void i2c_take(bool engines) {
+    i2c_owner = 0;
+    if (engines) {
+        Dma<1>::init();
+    }
+    (void)Host::init(clock);
+    i2c_owner = engines ? 2u : 1u;
+}
+
+/// One tenure, ISR-style, the thread idling until the completion: the
+/// sample (busy from every meter, irq and isr the I2C vectors' alone),
+/// the cycles start() itself took, and the status (0xFF: never answered).
+struct I2cRun {
+    BenchSample s;
+    uint32_t start;
+    uint8_t status;
+};
+
+template <typename Host>
+I2cRun i2c_once(const typename Host::Request& r) {
+    i2c_quiet();
+    const BenchCounters c0 = counters();
+    const uint32_t q0 = i2c_meter.count() + i2c_dma_meter.count();
+    const uint32_t k0 = i2c_meter.cycles() + i2c_dma_meter.cycles();
+    i2c_done = false;
+    Stopwatch<Ruler> sw;
+    sw.start();
+    const bool sync = Host::start(r);
+    const uint32_t st = sw.elapsed();
+    if (!sync) {
+        idle_until_set(i2c_done);
+    }
+    const uint32_t w = sw.elapsed();
+    const BenchCounters c1 = counters();
+    BenchSample s = bench_sample(w, c0, c1);
+    s.irq = i2c_meter.count() + i2c_dma_meter.count() - q0;
+    s.isr = i2c_meter.cycles() + i2c_dma_meter.cycles() - k0;
+    return {s, st, (sync || i2c_done) ? Host::status() : static_cast<uint8_t>(0xFF)};
+}
+
+/// The SCL period in core cycles, on the wire: a register read of 255
+/// bytes through the engines while the thread watches the clock pad's own input buffer
+/// (an open-drain alternate function: its IDR is the wire), the rising
+/// edges counted from the end of the second data byte over 240 bytes -
+/// every bit of them, the acknowledges included, with no software
+/// sequence inside the span to stretch it. 0 if the span was not seen.
+uint32_t i2c_scl_period(I2cSpeed speed) {
+    i2c_take<I2cDma>(true);
+    i2c_out[0] = 0x00;
+    const auto r = i2c_request<I2cDma>(i2c_peer, 1, 255, speed);
+    i2c_quiet();
+    i2c_done = false;
+    // The address, the index, the repeated START's own rising edge, the
+    // address again and two data bytes.
+    constexpr uint32_t first = 9u + 9u + 1u + 9u + 9u * 2u;
+    constexpr uint32_t span = 9u * 240u;
+    uint32_t edges = 0;
+    uint32_t t1 = 0;
+    uint32_t t2 = 0;
+    bool level = I2cScl::read();
+    const uint32_t t0 = Ruler::now();
+    (void)I2cDma::start(r);
+    while (!i2c_done && Ruler::now() - t0 < Ruler::hz() / 10u) {
+        const bool now = I2cScl::read();
+        if (now && !level) {
+            ++edges;
+            if (edges == first) {
+                t1 = Ruler::now();
+            } else if (edges == first + span) {
+                t2 = Ruler::now();
+            }
+        }
+        level = now;
+    }
+    idle_until_set(i2c_done);
+    if (t2 == 0u) {
+        print(serial, "  the SCL span was not seen: ", edges, " rising edges, status ",
+              i2c_done ? I2cDma::status() : 0xFFu, crlf);
+    }
+    return t2 != 0u ? (t2 - t1 + span / 2u) / span : 0u;
+}
+
+/// The bus's own time for a tenure at an SCL period of `t` cycles: the
+/// START and each repeated START a period, the address and every byte
+/// nine (eight bits and the acknowledge). The STOP is not counted: every
+/// engine of this lineage completes when it REQUESTS the STOP, and what
+/// the STOP's drain costs the next tenure is its own line (i2c.stop).
+uint32_t i2c_wire_cycles(uint32_t t, uint8_t tx, uint8_t rx) {
+    uint32_t periods = 1u + 9u;
+    periods += 9u * tx;
+    if (rx != 0u) {
+        if (tx != 0u) {
+            periods += 1u + 9u;
+        }
+        periods += 9u * rx;
+    }
+    return t * periods;
+}
+
+const char* i2c_status_name(uint8_t st) {
+    switch (st) {
+        case i2c_ok: return "ok";
+        case i2c_nack_addr: return "nack_addr";
+        case i2c_nack_data: return "nack_data";
+        case i2c_arb_lost: return "arb_lost";
+        case i2c_bus_error: return "bus_error";
+        case 0xFF: return "NEVER ANSWERED";
+        default: return "other";
+    }
+}
+
+/// Every operation through one host at one speed, each the best of 8 by
+/// wall, the worst status of the 8 printed after it.
+template <typename Host>
+void i2c_ops_on(const char* suffix, I2cSpeed speed, uint32_t t, bool engines) {
+    i2c_take<Host>(engines);
+    BenchSample rows[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = {};
+    uint8_t row = 0;
+    for (const I2cOp& op : i2c_ops) {
+        const auto r = i2c_request<Host>(op.addr, op.tx, op.rx, speed);
+        I2cRun best{{UINT32_MAX, 0, 0, 0}, 0, 0};
+        uint8_t worst = i2c_ok;
+        const uint8_t want = op.addr == i2c_nobody ? i2c_nack_addr : i2c_ok;
+        for (uint8_t run = 0; run < 8u; ++run) {
+            const I2cRun one = i2c_once<Host>(r);
+            if (one.status != want) {
+                worst = one.status;
+            }
+            if (one.s.wall < best.s.wall) {
+                best = one;
+            }
+        }
+        const uint32_t wire = i2c_wire_cycles(t, op.tx, op.rx);
+        const uint32_t n = static_cast<uint32_t>(op.tx) + op.rx;
+        char name[24] = {};
+        uint8_t k = 0;
+        for (const char* c = op.name; *c != '\0' && k < 15u; ++c) {
+            name[k++] = *c;
+        }
+        for (const char* c = suffix; *c != '\0' && k < 23u; ++c) {
+            name[k++] = *c;
+        }
+        bench_line(serial, name, n, best.s, Ruler::hz(),
+                   n == 0u ? 0u : static_cast<uint32_t>(static_cast<uint64_t>(n) * Ruler::hz() / wire));
+        print(serial, "  ", op.addr == i2c_nobody ? "absent address, " : "",
+              "fixed=", static_cast<int32_t>(best.s.wall - wire), " start=", best.start,
+              " status=", i2c_status_name(worst == i2c_ok || worst == want ? want : worst), crlf);
+        rows[row++] = best.s;
+        (void)console_drain();
+    }
+    // The margin between 16 and 255 bytes: what a byte costs the pump's
+    // handlers (the engines take none).
+    if (!engines) {
+        print(serial, "  per byte: written ", (rows[i2c_row_w255].isr - rows[i2c_row_w16].isr) / 239u,
+              " cycles of handler and ", rows[i2c_row_w255].irq - rows[i2c_row_w16].irq,
+              " interrupts in 239; read ", (rows[i2c_row_r255].isr - rows[i2c_row_r16].isr) / 239u,
+              " cycles and ", rows[i2c_row_r255].irq - rows[i2c_row_r16].irq, " interrupts in 239", crlf);
+    }
+}
+
+/// Every operation once through `Host` with the vectors' longest entry
+/// watched (R5): a pass of its own, so no other line carries the watch.
+template <typename Host>
+void i2c_watch(I2cSpeed speed, bool engines) {
+    i2c_take<Host>(engines);
+    i2c_watching = true;
+    for (const I2cOp& op : i2c_ops) {
+        (void)i2c_once<Host>(i2c_request<Host>(op.addr, op.tx, op.rx, speed));
+    }
+    i2c_watching = false;
+}
+
+/// start() called the moment a tenure completed, as an arbiter's dispatch
+/// calls the next one: what it spends waiting for the STOP to leave and
+/// BUSY to fall, against the same start() on a quiet bus.
+void i2c_stop_drain(I2cSpeed speed) {
+    i2c_take<I2cPump>(false);
+    const auto next = i2c_request<I2cPump>(i2c_peer, 0, 0, speed);
+    const I2cOp firsts[] = {{"write", i2c_peer, 2, 0}, {"read", i2c_peer, 0, 2}, {"wr", i2c_peer, 1, 1}};
+    for (const I2cOp& op : firsts) {
+        const auto r = i2c_request<I2cPump>(op.addr, op.tx, op.rx, speed);
+        uint32_t best = UINT32_MAX;
+        uint32_t quiet = UINT32_MAX;
+        for (uint8_t run = 0; run < 8u; ++run) {
+            i2c_quiet();
+            i2c_done = false;
+            (void)I2cPump::start(r);
+            idle_until_set(i2c_done);
+            i2c_done = false;
+            Stopwatch<Ruler> sw;
+            sw.start();
+            (void)I2cPump::start(next);
+            const uint32_t behind = sw.elapsed();
+            idle_until_set(i2c_done);
+            const uint32_t q = i2c_once<I2cPump>(next).start;
+            best = behind < best ? behind : best;
+            quiet = q < quiet ? q : quiet;
+        }
+        print(serial, "bench i2c.stop after a ", op.name, " n=", static_cast<uint32_t>(op.tx) + op.rx,
+              ": start() ", best, " cycles right behind its completion, ", quiet,
+              " on a quiet bus - the drain ", best - quiet, " cycles", crlf);
+        (void)console_drain();
+    }
+}
+#endif
+
+void ti_i2c() {
+    ruler_on();
+#if defined(STM32F429xx)
+    i2c_out[0] = stmpe_sys_ctrl2;   // a register index: SYS_CTRL2, its reset value after it,
+    i2c_out[1] = 0x0F;              // then zeros into the registers that follow
+    for (uint16_t i = 2; i < sizeof(i2c_out); ++i) {
+        i2c_out[i] = 0;
+    }
+    i2c_take<I2cPump>(false);
+    i2c_ev_max = 0;
+    i2c_er_max = 0;
+    i2c_dma_max = 0;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        uint32_t t = i2c_scl_period(speed);
+        print(serial, "  SCL at ", speed == I2cSpeed::fast_400k ? "400" : "100", " kHz: CCR ",
+              hex(I2cPump::timing_of(speed).ccr), " states ", I2cPump::scl_hz(speed), " Hz, the wire ",
+              t, " cycles a period = ", t != 0u ? Ruler::hz() / t : 0u, " Hz", crlf);
+        if (t == 0u) {
+            t = Ruler::hz() / I2cPump::scl_hz(speed);
+        }
+        (void)console_drain();
+        if (speed == I2cSpeed::standard_100k) {
+            // A read no write opened: the STMPE811's answer, measured.
+            i2c_take<I2cPump>(false);
+            const uint8_t plain = i2c_once<I2cPump>(i2c_request<I2cPump>(i2c_peer, 0, 1, speed)).status;
+            print(serial, "  a plain read of the STMPE811 (no index written first) answers ",
+                  i2c_status_name(plain), ": the read procedures are measured through i2c.wr", crlf);
+        }
+        i2c_out[0] = stmpe_sys_ctrl2;
+        i2c_ops_on<I2cPump>("", speed, t, false);
+        i2c_ops_on<I2cDma>(".dma", speed, t, true);
+        i2c_stop_drain(speed);
+        i2c_watch<I2cPump>(speed, false);
+        i2c_watch<I2cDma>(speed, true);
+    }
+    // The device back where its reset leaves it: SYS_CTRL1's soft reset.
+    i2c_take<I2cPump>(false);
+    i2c_out[0] = stmpe_sys_ctrl1;
+    i2c_out[1] = 0x02;
+    const uint8_t rst = i2c_once<I2cPump>(i2c_request<I2cPump>(i2c_peer, 2, 0, I2cSpeed::standard_100k)).status;
+    idle_for(10u);
+    i2c_out[0] = 0x00;
+    const uint8_t id = i2c_once<I2cPump>(i2c_request<I2cPump>(i2c_peer, 1, 2, I2cSpeed::standard_100k)).status;
+    const bool chip = id == i2c_ok && i2c_in[0] == 0x08 && i2c_in[1] == 0x11;
+    i2c_out[0] = stmpe_sys_ctrl2;
+    (void)i2c_once<I2cPump>(i2c_request<I2cPump>(i2c_peer, 1, 1, I2cSpeed::standard_100k));
+    print(serial, "  the STMPE811 soft-reset (", i2c_status_name(rst), "): CHIP_ID ", chip ? "0x0811" : "WRONG",
+          ", SYS_CTRL2 ", hex(i2c_in[0]), crlf);
+    print(serial, "  the longest entry of each vector: events ", i2c_ev_max, " cycles, errors ", i2c_er_max,
+          ", the streams ", i2c_dma_max, crlf);
+    bench.verdict("the device answers its identity after the letter", chip);
+#else
+    print(serial, "  letter i declined on this board: the I2C host is measured on the "
+                  "STM32F429I-DISC1's STMPE811 alone", crlf);
+#endif
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_stm32f4 - the benchmark skeleton: the ruler, memory, the console, "
           "the tick's floor, the DMA, the SPI host", crlf);
@@ -1361,6 +1746,44 @@ extern "C" void USART6_IRQHandler() {
 extern "C" void DMA2_Stream1_IRQHandler() { loop_dma_vector(); }
 extern "C" void DMA2_Stream6_IRQHandler() { loop_dma_vector(); }
 #endif
+#if defined(STM32F429xx)
+extern "C" void I2C3_EV_IRQHandler() {
+    i2c_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (i2c_owner == 2u ? I2cDma::isr() : I2cPump::isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_ev_max, t0);
+    }
+    i2c_meter.leave();
+}
+extern "C" void I2C3_ER_IRQHandler() {
+    i2c_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (i2c_owner == 2u ? I2cDma::error_isr() : I2cPump::error_isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_er_max, t0);
+    }
+    i2c_meter.leave();
+}
+/// The engines' two streams, DMA1 4 (transmit) and 2 (receive).
+[[gnu::always_inline]] inline void i2c_dma_vector() {
+    i2c_dma_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (I2cDma::dma_isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_dma_max, t0);
+    }
+    i2c_dma_meter.leave();
+}
+extern "C" void DMA1_Stream4_IRQHandler() { i2c_dma_vector(); }
+extern "C" void DMA1_Stream2_IRQHandler() { i2c_dma_vector(); }
+#endif
 extern "C" void SysTick_Handler() {
     tick_meter.enter();
     brio::Ticker::tick();
@@ -1383,6 +1806,7 @@ int main() {
     bench.letter('e', "the SPI host above the wire: polled, pumped, and a short request's fixed cost",
                  te_spi);
     bench.letter('u', "the serial transport on the single-wire loop: transmit, receive, the edge", tu_uart);
+    bench.letter('i', "the I2C host above the wire: tenures, their fixed cost, the STOP's drain", ti_i2c);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

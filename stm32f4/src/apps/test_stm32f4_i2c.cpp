@@ -801,7 +801,7 @@ void tg_speeds() {
                          {I2cSpeed::fast_400k, I2cDuty::ratio_16_9, "Fm 400k 16/9  "}};
     uint8_t exact = 0;
     bool all_ok = true;
-    uint32_t fastest[3] = {};
+    uint32_t wire_hz[3] = {};   ///< each row's mean rate on the pad
     for (uint8_t i = 0; i < 3u; ++i) {
         bus_ao_live = false;
         if (!DmaHost::init(clock, I2cHostConfig{.duty = rows[i].duty})) {
@@ -818,7 +818,11 @@ void tg_speeds() {
         const uint32_t stated = DmaHost::scl_hz(rows[i].speed);
         const uint32_t high = r.shortest == 0u ? 0u : SysClock::hz / r.shortest;
         const uint32_t low = r.average == 0u ? 0u : SysClock::hz / r.average;
-        fastest[i] = high;
+        // The ORDER is judged on the mean: it reads the same run after run
+        // (456 and 501 core cycles in the two fast rows), where the
+        // shortest gap moves with the polling loop's phase by more than the
+        // two fast rows differ (413 to 489 in the 16/9 row, measured).
+        wire_hz[i] = low;
         // The address with the write bit, the index, the address again
         // with the read bit and the 32 bytes: nine clocks a byte,
         // thirty-five bytes.
@@ -844,15 +848,14 @@ void tg_speeds() {
     bench.verdict("the three rows are three different rates ON THE WIRE, in the order the CCR "
                   "arithmetic puts them: fast mode at DUTY 2 above fast mode at 16/9, and both "
                   "well above standard mode",
-                  fastest[1] > fastest[2] && fastest[2] > fastest[0]);
+                  wire_hz[1] > wire_hz[2] && wire_hz[2] > wire_hz[0]);
     print(serial, "  (the count is nine clocks for each of the tenure's thirty-five bytes, plus "
                   "the STOP's own rise where the loop is still watching when it comes. The two "
                   "rates BRACKET the bit rate: the mean gap counts the two address phases, whose "
                   "software sequences stretch SCL low, so it reads slow; the shortest gap is one "
                   "bit period sampled by a polling loop that timestamps a little before the edge "
-                  "it sees, so it reads fast. What the CCR arithmetic states sits between them, "
-                  "and the numbers are printed rather than judged - one board, one set of "
-                  "pull-ups)",
+                  "it sees, so it reads fast. What the CCR arithmetic states sits between them; "
+                  "only the ORDER of the means is judged - one board, one set of pull-ups)",
           crlf);
 }
 

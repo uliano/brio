@@ -428,6 +428,7 @@ scratch program.
 
 | family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
 |---|---|---|---|---|---|---|---|
+| STM32F429ZI (180 MHz; the board's STMPE811 on I2C3) | 139 (961), three interrupts (seven) | 389 (816), five (ten) | 1.00 through the pump and the engines | - (the device answers no read a write did not open: reads are register reads) | 708 | HAL: 387 and 1171 fixed; 148 and 153 cycles a byte written and read, against 80 and 99 | 203 |
 | CH32V006K8U6 (48 MHz; the STM32G0's `twi_peer`) | 1398 (1896), four interrupts (five) | 2126 (2456) | 1.00 through the pump (264 interrupts) and the engine (9) | 262 through the pump, 9 through the engine | 1759 | WCH's polled master, its library having no interrupt-driven tenure: 766 and 907 fixed, the core held the whole tenure (3103 and 5581 busy) | 190 to 225 |
 | STM32G0B1RE (64 MHz; I2C2 on the self-link) | 1147 (1554), one interrupt (two) | 1852 (2377), two interrupts (four) | 1.00 through the pump (260 interrupts, 127 cycles a byte against the HAL's 168) and the engine (6) | 260 through the pump, 5 through the engine | 857 | HAL v1.4.7: 1362 and 2289 fixed | 509, an engined write to an absent address |
 | RP2040 (125 MHz; I2C1 on the self-link) | 832 (967), the same at 100 kHz and 1 MHz (1529 at 100 kHz before) | 890 (1011) | 1.00, 31 | 32 (285), 13 378 (54 955) | 802 | pico-sdk 2.3.1, polled: 538 fixed with the core held the whole wire (6680 busy); its 255-byte read 20 834 fixed against 1375 | 439 (574) |
@@ -447,6 +448,16 @@ What the rows say:
   one-byte tenure - no exception entry, no idle wake - and holds the
   core for the whole wire time to get it; on the M33 and the Hazard3
   the two are within a fifth.
+- On the F1 lineage's event machine - the STM32F4, the CH32V203, the
+  CH32V006 - one interrupt a byte is the silicon's, and the tenure's
+  fixed cost is the engine's: the event interrupt raised by `start()`
+  and dropped at the completion (the BTF a write's STOP leaves standing
+  had re-entered the vector sixteen times a write at 100 kHz on the
+  F4), the first two data bytes loaded in the ADDR entry. The F4's
+  one-byte write costs 139 cycles beyond the wire, the HAL's 387. The
+  wait in `start()` for the last STOP stays - nothing in either chapter
+  signals it leaving - and costs about one bit period when a tenure
+  follows another at once.
 - A block with a byte counter and AUTOEND but no FIFO - the STM32G0's
   - takes the pump's one interrupt a byte, and the tenure's fixed cost
   is what is left to cut: the first data byte preloaded into TXDR

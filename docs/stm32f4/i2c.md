@@ -152,6 +152,75 @@ must be programmed during EV6, before ADDR is cleared - so it stays on
 the byte pump. ITBUFEN must be off while a DMA request serves the same
 direction.
 
+**What the engine takes from the chapter, and what it declines.** Every
+item that bears on a tenure's cost, measured on the STM32F429I-DISC1 at
+180 MHz (APB1 45 MHz):
+- *One data register, no FIFO, no byte counter, no automatic STOP.* One
+  interrupt a byte is this block's, on the pump; the figure is the
+  handler's cycles a byte (bench findings).
+- *EV8_1 takes two bytes at once.* TxE rises 17 cycles after ADDR's clear
+  and again 20 cycles after the first byte's store, as that byte moves
+  into the shifter: the entry that clears ADDR loads the data register
+  and the shifter itself, so a write of one or two bytes, and a register
+  index, take no TxE interrupt at all. USED.
+- *The data register before the START.* Declined: at EV5 DR is where the
+  ADDRESS goes, so nothing can wait in it across the START.
+- *The repeated START during the last written byte.* "Setting the START
+  bit causes the interface to generate a ReStart condition at the end of
+  the current byte transfer" (27.3.3's note): requested on the TxE that
+  says the last byte went into the shifter, the bus turns around with no
+  stretch of the host's. USED, with a DUMMY STORE into DR right after the
+  request: with DR empty, BTF rises at the end of that byte and stands
+  until the Sr is out - 2950 cycles at 100 kHz and 700 at 400, measured -
+  a level the event vector re-entered for all that time. With the dummy
+  in DR, BTF never rises, the wire carries the index's nine clocks and the
+  Sr's own one and nothing more, SB comes at the same moment, and the
+  address stored at SB replaces the dummy: the register read back is the
+  one asked for (measured, polled; ST's library clears the same two flags
+  with a store into DR, I2C_Flush_DR). A NACK of that last byte arrives
+  with the START still pending: the engine answers it i2c_nack_data and
+  withdraws the START as it requests the STOP, in one CR1 store (27.6.1:
+  START is "set and cleared by software").
+- *The STOP on the TxE of the last byte* (27.3.3: "when either TxE or BTF
+  is set"). Declined: nothing marks a controller's own STOP leaving
+  (STOPF is the target half's), so a STOP requested a byte early would
+  give no event to complete on but that byte's TxE, and the next start()
+  would wait the whole byte. The write ends at BTF (EV8_2).
+- *The event vector, a level.* BTF stands after a write's STOP is
+  requested until that STOP is on the wire ("TxE and BTF are cleared by
+  hardware by the stop condition", figure 243), and a vector left on
+  re-entered the handler for all that time: sixteen extra entries a
+  write tenure at 100 kHz and three at 400, the thread starved meanwhile
+  (measured). ITEVTEN is the TENURE's: raised by start() and taken down
+  at the completion, with the buffer vector and the DMA requests, in one
+  CR2 store (`control2()`).
+- *The STOP's drain is the next tenure's.* With no event for the
+  controller's own STOP, and CR1 untouchable while STOP stands (27.6.1),
+  start() waits for it, bounded - a bit period after a completion when a
+  tenure is started at once: 1830 cycles at 100 kHz, 270 at 400, spent in
+  the caller (the arbiter's dispatch). The alternatives were weighed and
+  declined: a deferred START needs an event the chapter has not got, and
+  a timer of the bus's own would cost a timer and an interrupt a tenure
+  to free about ten microseconds at 100 kHz and one and a half at 400.
+- *The three receive procedures* (one byte, two with POS, N with the BTF
+  pair). USED. The faster EV7_1 path - RxNE to the end, the NACK and the
+  STOP programmed on the second-to-last RxNE - declined: it must complete
+  before the last byte's acknowledge, a deadline no handler of a program
+  guarantees, and 27.3.3 gives the BTF procedures for exactly that case.
+- *The DMA requests and LAST.* USED for a write phase of three bytes or
+  more (two ride EV8_1 with no interrupt; an engine adds its block start
+  and its completion) and a read phase of two or more. The transmit
+  stream's completion is 27.3.8's EOT: the requests go off, and the event
+  vector ends the write on BTF - or, with a read half to follow, the
+  buffer vector is armed for the TxE behind the last byte, where the
+  repeated START is requested as on the pump. A one-byte read stays on
+  the pump: its NACK must be programmed in EV6.
+- *PEC, SMBus, the 10-bit header, the noise filters' effect.* No tenure
+  shape asks for them (the gap lists below).
+- *The FMPI2C* of the F410/F412/F413/F446 is the STM32G0's block, its own
+  document ([fmpi2c.md](fmpi2c.md)); its board was not on the desk for
+  this measurement and nothing of it moved.
+
 ## Types and verbs
 
 **The resource, `I2c<n>`.** `number`, `on_apb2`, `event_irq`,
@@ -173,7 +242,9 @@ requests are `dma(on, last)` and `data_address`. Data and status are
 `smbus_host_matched`, `smbus_default_matched`; the clearing sequences
 are `clear_addr` (SR1 then SR2, returning SR2), `clear_stopf` (SR1 then
 a CR1 write) and `clear_errors`. The three interrupt enables are
-`event_interrupt`, `buffer_interrupt`, `error_interrupt`.
+`event_interrupt`, `buffer_interrupt`, `error_interrupt`, and `control2`
+writes CR2 whole - FREQ, the three enables, DMAEN and LAST - in one
+store.
 
 **The arithmetic.** `I2cSpeed` is `standard_100k` or `fast_400k` - this
 block has no Fm+. `I2cDuty` is `ratio_2` or `ratio_16_9`.
@@ -329,15 +400,17 @@ board's STMPE811 touch controller. `z` is 63 verdicts.
 
   | row | CCR | states | shortest gap | mean gap |
   |---|---|---|---|---|
-  | Sm 100k | 225 | 100000 Hz | 1732 = 103926 Hz | 1809 = 99502 Hz |
-  | Fm 400k duty 2 | 38 | 394736 Hz | 415 = 433734 Hz | 461 = 390455 Hz |
-  | Fm 400k 16/9 | 5 | 360000 Hz | 430 = 418604 Hz | 506 = 355731 Hz |
+  | Sm 100k | 225 | 100000 Hz | 1730 = 104046 Hz | 1803 = 99833 Hz |
+  | Fm 400k duty 2 | 38 | 394736 Hz | 442 = 407239 Hz | 456 = 394736 Hz |
+  | Fm 400k 16/9 | 5 | 360000 Hz | 470 = 382978 Hz | 501 = 359281 Hz |
 
-  What the arithmetic states sits inside each bracket. The MEAN is
-  stable run to run (461 core cycles both times in the fast row); the
-  shortest gap moves with the sampling phase (366 and 415 across two
-  runs of the same image), which is why the verdict is on the ORDER of
-  the three rows and not on any one number.
+  What the arithmetic states sits inside each bracket - in the fast row
+  the mean IS the stated rate, the address phases' stretch now under a
+  core cycle a clock. The MEAN is stable run to run; the
+  shortest gap moves with the sampling phase (366 to 442 in the duty-2
+  row, 413 to 489 in the 16/9 one, across runs of one image) by more
+  than the two fast rows differ, which is why the verdict is on the ORDER
+  of the three MEANS and not on any one number.
 - **The address scan.** Of the 112 addresses from 0x08 to 0x77 exactly
   one answers - 0x41, the STMPE811 the schematic names - and every
   other comes back `i2c_nack_addr`, none any other way. The scan is
@@ -389,6 +462,53 @@ board's STMPE811 touch controller. `z` is 63 verdicts.
   cycles and no longer: two adjacent stores are one bus cycle, and a
   microsecond-wide window makes the target deaf to a controller that
   opens its next tenure at once.
+
+**The host above the wire: `bench_stm32f4`'s letter `i`** on the same
+board and bus (benchmark.md's grammar; the letter's header says how the
+wire is counted: the SCL period measured on the pad - 1800 core cycles at
+100 kHz, 456 at 400, the stated rows exactly - a START and an Sr a period,
+nine a byte, the STOP left to the next tenure's line). `fixed` is wall
+less that wire; `irq` and `isr` are the I2C vectors' alone; BEFORE is the
+engine this round started from, HAL is ST's v1.8.5 (`HAL_I2C_Master_
+Transmit_IT`/`_DMA`, `HAL_I2C_Mem_Read_IT`/`_DMA`) on the same board in a
+scratch program with brio's crt, clock and ruler. At 400 kHz:
+
+| tenure | BEFORE irq, isr, fixed | now irq, isr, fixed | HAL irq, isr, fixed |
+|---|---|---|---|
+| write of 1 | 7, 853, 961 | 3, 327, 139 | 5, 758, 387 |
+| write of 2 | 7, 888, 865 | 3, 415, 174 | 6, 955, 426 |
+| write of 3 | 9, 1014, 961 | 4, 534, 153 | - |
+| register read 1+1 | 10, 1322, 816 | 5, 631, 389 | 9, 1996, 1171 |
+| register read 1+2 | 10, 1355, 880 | 5, 656, 424 | 10, 1837, 816 |
+| register read 1+16 | 24, 3253, 885 | 19, 2147, 458 | 23, 3843, 792 |
+| probe (ACK / NACK) | 2, 344 / 318 | 2, 198 / 198 | polled, fixed 578 |
+| write of 255, engines | 6, 774, x 1.00 | 4, 531, x 1.00 | 4, 807, x 1.00 |
+| register read 1+255, engines | 10, 1237, x 1.00 | 5, 618, x 1.00 | 1 + a polled index: busy 15648 |
+
+- **The pump costs 80 cycles of handler a byte written and 100 a byte
+  read** (99 at 100 kHz; 128 read before the receive step was inlined),
+  against the HAL's 148 and 153 - the margin between the 16- and the
+  255-byte rows, the stamps' own few cycles inside both. A 255-byte write
+  is x 1.00 on the pump and on the engines alike.
+- **The fixed cost of a short tenure fell to a fifth**: 961 to 139 cycles
+  for a one-byte write and 816 to 389 for a register read, under the
+  HAL's 387 and 816-1171. What went: the event vector's re-entries on a
+  standing BTF (sixteen extra entries a write at 100 kHz, three at 400),
+  the TxE entries EV8_1 saves, the repeated START's wait for BTF, start()'s
+  read-modify-writes (335 to 166 cycles on a quiet bus).
+- **The STOP's drain is the next tenure's**: start() called at a
+  completion waits 1830 cycles at 100 kHz and 270 at 400 for the STOP to
+  leave - before, a write's drain was spent in those re-entries instead,
+  with the thread starved; the HAL's own call waits for BUSY the same way
+  (1728 cycles at 100 kHz).
+- **The engines' fixed cost per tenure** is their start inside the ADDR
+  entry and one completion entry: a 16-byte write is 4 interrupts and 531
+  cycles of handler, a register read of 255 is 5 and 618.
+- **The longest single entry** of each vector over the letter: events 203
+  cycles, errors 174, the streams 104 (295, 554 and 191 before - the
+  error vector rebound an idle receive stream on every NACK).
+- **The STMPE811 NACKs a read no write opened** - its address, at once -
+  so a plain read is measured here through the register read only.
 
 `test_stm32f4_i2c` on the 32F469IDISCOVERY, I2C1 on PB8/PB9 under the
 board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
@@ -452,7 +572,20 @@ Implemented, not bench-verified (each with what would measure it):
 - A NACK on a DATA byte (`i2c_nack_data`): the device on this bus
   acknowledges every byte it is sent. A device that refuses one - an
   EEPROM mid-write, a client that runs out of buffer - would measure
-  it.
+  it, and above all the refusal of the LAST byte before a repeated
+  START, which arrives with that START pending and which the engine
+  answers by withdrawing it as it requests the STOP: the same order on
+  the CH32V203C8T6's self-link misreported that refusal before the
+  same answer was given there, and measured right after
+  ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)).
+- The reworked engine on the 32F469IDISCOVERY (EV8_1's two bytes, the
+  repeated START behind a dummy, the event vector the tenure's): the
+  board was off the desk; its suite against the FocalTech controller is
+  what would measure it, as letter `i` measured it on the DISC1.
+- EV8_1's fallback - TxE not seen within ten SR1 reads of ADDR's clear,
+  the byte left to the buffer vector: TxE rose within twenty cycles in
+  every tenure measured, so the branch never ran. A slower APB1 against
+  a faster core would make it run.
 - Arbitration lost (`i2c_arb_lost`): a second controller on the wire.
 - A bus error (`i2c_bus_error`) and the spurious-BERR count: the
   chapter raises it on a misplaced START or STOP, which wants another

@@ -35,7 +35,21 @@
  * ACK and reads N-2, the second sets STOP and reads N-1 and N. All of it
  * is in `isr()`, phase by phase, and it is the reason ITBUFEN is switched
  * on and off DURING a tenure: TxE and RxNE interrupt only while the byte
- * pump needs them, BTF (under ITEVTEN alone) carries the rest.
+ * pump needs them, BTF (under ITEVTEN alone) carries the rest. ITEVTEN
+ * itself is on from start() to the completion and off between tenures,
+ * because the flags that END a tenure are levels that outlive it - BTF
+ * stands until the STOP requested on it is on the wire - and a vector left
+ * on re-enters for all that time (isr() says what was measured).
+ *
+ * WHAT THE ENGINE TAKES FROM THE CHAPTER beyond the sequences, each
+ * measured on the STM32F429I-DISC1 (docs/stm32f4/i2c.md has the
+ * inventory and the numbers): the entry that clears ADDR loads the first
+ * TWO bytes itself (the data register and the shifter, TxE rising within
+ * twenty cycles of each store), so a write of one or two bytes and a
+ * register index take no per-byte interrupt at all; the repeated START
+ * of a write-then-read is requested while the last written byte shifts
+ * (27.3.3's note), with a dummy store into DR that keeps BTF down until
+ * the Sr; CR2's enables move in one store each time (control2()).
  *
  * THE RATE IS THE INSTANCE'S OWN APB1 CLOCK, never SYSCLK, and this
  * chapter needs it stated THREE times over: FREQ carries it in whole
@@ -511,15 +525,15 @@ struct I2c {
     }
 
     // ---- the control bits ---------------------------------------------------------
-    static void start() { cr1(I2C_CR1_START, true); }
-    static bool starting() { return (regs().CR1 & I2C_CR1_START) != 0u; }
-    static void stop() { cr1(I2C_CR1_STOP, true); }
-    static bool stopping() { return (regs().CR1 & I2C_CR1_STOP) != 0u; }
-    static void ack(bool on) { cr1(I2C_CR1_ACK, on); }
+    [[gnu::always_inline]] static void start() { cr1(I2C_CR1_START, true); }
+    [[gnu::always_inline]] static bool starting() { return (regs().CR1 & I2C_CR1_START) != 0u; }
+    [[gnu::always_inline]] static void stop() { cr1(I2C_CR1_STOP, true); }
+    [[gnu::always_inline]] static bool stopping() { return (regs().CR1 & I2C_CR1_STOP) != 0u; }
+    [[gnu::always_inline]] static void ack(bool on) { cr1(I2C_CR1_ACK, on); }
     /// POS: the ACK bit governs the NEXT byte to arrive rather than the
     /// current one - the two-byte receive's arrangement, and 27.6.1 says
     /// it is for that alone.
-    static void pos(bool on) { cr1(I2C_CR1_POS, on); }
+    [[gnu::always_inline]] static void pos(bool on) { cr1(I2C_CR1_POS, on); }
     static void general_call(bool on) { cr1(I2C_CR1_ENGC, on); }
     static void no_stretch(bool on) { cr1(I2C_CR1_NOSTRETCH, on); }
 
@@ -560,12 +574,12 @@ struct I2c {
     static volatile void* data_address() { return &regs().DR; }
 
     // ---- data and status -------------------------------------------------------------
-    static void data(uint8_t v) { regs().DR = v; }
-    static uint8_t data() { return static_cast<uint8_t>(regs().DR); }
-    static uint32_t status1() { return regs().SR1; }
-    static uint32_t status2() { return regs().SR2; }
-    static bool flag(uint32_t mask) { return (regs().SR1 & mask) != 0u; }
-    static bool busy() { return (regs().SR2 & I2C_SR2_BUSY) != 0u; }
+    [[gnu::always_inline]] static void data(uint8_t v) { regs().DR = v; }
+    [[gnu::always_inline]] static uint8_t data() { return static_cast<uint8_t>(regs().DR); }
+    [[gnu::always_inline]] static uint32_t status1() { return regs().SR1; }
+    [[gnu::always_inline]] static uint32_t status2() { return regs().SR2; }
+    [[gnu::always_inline]] static bool flag(uint32_t mask) { return (regs().SR1 & mask) != 0u; }
+    [[gnu::always_inline]] static bool busy() { return (regs().SR2 & I2C_SR2_BUSY) != 0u; }
     /// MSL: this side is the bus controller in the tenure under way.
     static bool host() { return (regs().SR2 & I2C_SR2_MSL) != 0u; }
     /// TRA: this side is transmitting in the tenure under way.
@@ -579,7 +593,7 @@ struct I2c {
     /// Returns SR2, which tells the direction (TRA) and which address
     /// matched. 27.6.7 warns that SR2 must be read ONLY when ADDR is found
     /// set or after STOPF is cleared, which is what the phases guarantee.
-    static uint32_t clear_addr() {
+    [[gnu::always_inline]] static uint32_t clear_addr() {
         (void)regs().SR1;
         return regs().SR2;
     }
@@ -600,8 +614,19 @@ struct I2c {
     static void buffer_interrupt(bool on) { cr2(I2C_CR2_ITBUFEN, on); }
     static void error_interrupt(bool on) { cr2(I2C_CR2_ITERREN, on); }
 
+    /// CR2 in ONE store: FREQ as the timing in force states it, and the
+    /// three interrupt enables with DMAEN and LAST as `enables` names them
+    /// (the I2C_CR2_IT* and DMA bits). What an engine switches inside a
+    /// tenure is three of these bits at once, and three read-modify-writes
+    /// over APB1 would be six bus accesses where this is one.
+    [[gnu::always_inline]] static void control2(uint8_t freq_mhz, uint32_t enables) {
+        regs().CR2 = (static_cast<uint32_t>(freq_mhz) & I2C_CR2_FREQ_Msk) |
+                     (enables & (I2C_CR2_ITERREN | I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN |
+                                 I2C_CR2_DMAEN | I2C_CR2_LAST));
+    }
+
 private:
-    static void cr1(uint32_t bit, bool on) {
+    [[gnu::always_inline]] static void cr1(uint32_t bit, bool on) {
         if (on) { regs().CR1 |= bit; } else { regs().CR1 &= ~bit; }
     }
     static void cr2(uint32_t bit, bool on) {
@@ -672,11 +697,13 @@ struct I2cHostConfig {
  * start(), no byte moved - the one synchronous completion of an I2C
  * engine, and the arbiter replies with status() for it.
  *
- * THE ENGINE SLOTS carry a write phase of any length and a read phase of
- * two bytes or more (CR2.LAST makes the block NACK the last byte a receive
- * run takes); a ONE-BYTE READ stays on the pump, whose ACK-before-ADDR
- * sequence the DMA path cannot express. Both engines or neither: a
- * write-then-read tenure needs both directions inside one tenure.
+ * THE ENGINE SLOTS carry a write phase of three bytes or more - two ride
+ * EV8_1's own entry with no interrupt, which an engine's block start and
+ * completion would only add to - and a read phase of two bytes or more
+ * (CR2.LAST makes the block NACK the last byte a receive run takes); a
+ * ONE-BYTE READ stays on the pump, whose ACK-before-ADDR sequence the DMA
+ * path cannot express. Both engines or neither: a write-then-read tenure
+ * needs both directions inside one tenure.
  *
  * THE PADS GO OUT OPEN DRAIN at `very_high`, which is what an I2C pad is:
  * the peripheral drives the lines low and lets the external pull-ups
@@ -788,11 +815,11 @@ public:
             TxEngine::arm(S::data_address());
             RxEngine::arm(S::data_address());
         }
-        status_ = i2c_ok;
-        phase_ = Phase::idle;
-        S::event_interrupt(true);
-        S::error_interrupt(true);
-        S::buffer_interrupt(false);
+        t_.status = i2c_ok;
+        t_.phase = Phase::idle;
+        // The error vector on, the event vector OFF until a tenure starts
+        // (isr()'s comment says why).
+        S::control2(t_.freq, idle_enables);
         Nvic::enable(S::event_irq);
         Nvic::enable(S::error_irq);
         return true;
@@ -842,57 +869,86 @@ public:
     /// i2c_rejected through status() - the I2cHost contract
     /// (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
-        req_ = r;
-        pos_ = 0;
         if (!speed_ok(r.speed)) {
-            status_ = i2c_rejected;
-            phase_ = Phase::idle;
+            t_.status = i2c_rejected;
+            t_.phase = Phase::idle;
             return true;
         }
-        status_ = i2c_ok;
-        phase_ = (r.tx_len == 0u && r.rx_len != 0u) ? Phase::start_rx : Phase::start_tx;
+        // The fields a tenure walks, and nothing else of the Request: the
+        // reply is the arbiter's, and a pointer and a count are what the
+        // handlers advance.
+        t_.addr = r.addr;
+        t_.tx = r.tx.get();
+        t_.tx_left = r.tx_len;
+        t_.rx = r.rx.get();
+        t_.rx_len = r.rx_len;
+        t_.rx_left = r.rx_len;
+        t_.status = i2c_ok;
+        t_.phase = (r.tx_len == 0u && r.rx_len != 0u) ? Phase::start_rx : Phase::start_tx;
         // The last tenure's STOP may still be on its way out: STOP stands
-        // in CR1 until the condition is on the wire, and a client that
-        // stretches the clock after the last acknowledge holds it there.
-        // 27.6.1 forbids any CR1 write while STOP stands - a second STOP
-        // request otherwise - so it is waited for before anything writes
-        // CR1, a speed change's PE cycle included, BOUNDED IN TIME
-        // (stop_drain_us). A clock held past the bound is a wedge: the
-        // tenure PARKS - no START and no vector - for the per-bus timeout
-        // to answer.
+        // in CR1 until the condition is on the wire - about a bit period
+        // after the completion edge, which comes when the STOP is
+        // REQUESTED, and longer when a client stretches the clock after the
+        // last acknowledge. 27.6.1 forbids any CR1 write while STOP stands
+        // - a second STOP request otherwise - and no event marks a
+        // controller's own STOP leaving (STOPF is the target half's), so
+        // this block cannot queue the START behind it: it is waited for
+        // here, before anything writes CR1, a speed change's PE cycle
+        // included, BOUNDED IN TIME (stop_drain_us). A clock held past the
+        // bound is a wedge: the tenure PARKS - no START and no vector - for
+        // the per-bus timeout to answer. What the wait costs a tenure
+        // started at once is docs/stm32f4/i2c.md's figure.
         if (!wait_for_us([] { return !S::stopping(); }, stop_drain_us)) {
             return false;
         }
-        // BUSY clears a moment after our STOP is seen; a bus still busy
-        // after bus_free_us is someone else's, and 27.3.3's START waits for
-        // BUSY to fall by itself.
+        // SR1 is read before SR2 and the CR1 store below: a STOPF or an
+        // ADDR the target half raised while the event vector was off
+        // between tenures is cleared by those two accesses - the chapter's
+        // own sequences (27.6.6, 27.6.7) - instead of entering the vector
+        // under the START. BUSY clears a moment after our STOP is seen; a
+        // bus still busy after bus_free_us is someone else's, and 27.3.3's
+        // START waits for BUSY to fall by itself.
+        (void)S::status1();
         (void)wait_for_us([] { return !S::busy(); }, bus_free_us);
         apply(r.speed);
-        S::pos(false);
-        S::ack(false);
-        S::buffer_interrupt(false);
-        S::start();
+        // The event vector on, the buffer vector and the DMA requests off:
+        // one store. Then ACK and POS down and START up: one
+        // read-modify-write.
+        S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN);
+        I2C_TypeDef& reg = S::regs();
+        reg.CR1 = (reg.CR1 & ~(I2C_CR1_ACK | I2C_CR1_POS)) | I2C_CR1_START;
         return false;
     }
 
     /// The engine's completion status, for the TransferDone payload.
-    static uint8_t status() { return status_; }
+    static uint8_t status() { return t_.status; }
 
-    /// The EVENT vector's body - call from the instance's I2Cn_EV handler.
-    /// Returns true when the tenure just completed: the edge the app's glue
-    /// posts TransferDone on.
+    /**
+     * The EVENT vector's body - call from the instance's I2Cn_EV handler.
+     * Returns true when the tenure just completed: the edge the app's glue
+     * posts TransferDone on.
+     *
+     * THE EVENT VECTOR IS ON FROM start() TO THE COMPLETION AND OFF
+     * BETWEEN TENURES. Its flags are levels, and the two that end a tenure
+     * stand after it: BTF until the STOP requested at EV8_2 is on the wire
+     * ("TxE and BTF are cleared by hardware by the stop condition",
+     * figure 243), which on a vector left on re-entered the handler
+     * without end - twenty entries a write tenure at 100 kHz, measured,
+     * the thread starved for a bit period. finish() takes ITEVTEN down
+     * with the buffer vector and the DMA requests in one CR2 store, and
+     * start() raises it.
+     */
     [[gnu::always_inline]] static bool isr() {
         const uint32_t s1 = S::status1();
         // STOPF is the TARGET half's flag - a STOP seen after a START this
         // host did not issue: another controller's, or the one unstick()
-        // makes by hand - and ITEVTEN routes it here in every phase. Left
-        // standing it re-enters this vector without end. Its sequence ends
-        // in a CR1 write, which must not happen while START or STOP stands
-        // (27.6.1), so it waits for them to leave - a bit time at most.
+        // makes by hand - and left standing it re-enters this vector. Its
+        // sequence ends in a CR1 write, which must not happen while START
+        // or STOP stands (27.6.1), so it waits for them to leave.
         if ((s1 & I2cFlag::stop) != 0u && !S::starting() && !S::stopping()) {
             S::clear_stopf();
         }
-        switch (phase_) {
+        switch (t_.phase) {
             case Phase::idle:
                 // Nothing in flight: an ADDR here is the target half's too,
                 // and its sequence (SR1 read above, then SR2) writes
@@ -903,68 +959,53 @@ public:
                 return false;
 
             case Phase::start_tx:
-            case Phase::start_rx:
+                // EV5: SR1 read above, then the address into DR clears SB.
                 if ((s1 & I2cFlag::start_bit) == 0u) {
                     return false;
                 }
-                // EV5: the address, with the direction bit. Reading SR1 -
-                // done above - then writing DR is what clears SB.
-                if (phase_ == Phase::start_rx) {
-                    prime_receive();
-                    S::data(static_cast<uint8_t>((req_.addr << 1) | 1u));
-                    phase_ = Phase::addr_rx;
-                } else {
-                    S::data(static_cast<uint8_t>(req_.addr << 1));
-                    phase_ = Phase::addr_tx;
+                S::data(static_cast<uint8_t>(t_.addr << 1));
+                t_.phase = Phase::addr_tx;
+                return false;
+
+            case Phase::start_rx:
+            case Phase::restart:
+                if ((s1 & I2cFlag::start_bit) == 0u) {
+                    return false;
                 }
+                prime_receive();
+                S::data(static_cast<uint8_t>((t_.addr << 1) | 1u));
+                t_.phase = Phase::addr_rx;
                 return false;
 
             case Phase::addr_tx:
                 if ((s1 & I2cFlag::address) == 0u) {
                     return false;
                 }
-                if (req_.tx_len == 0u) {
+                if (t_.tx_left == 0u) {
                     // The probe: acknowledged, and that was the question.
-                    (void)S::clear_addr();
+                    // SR1 was read above, so SR2 alone clears ADDR.
+                    (void)S::status2();
                     S::stop();
                     return finish(i2c_ok);
                 }
                 if constexpr (has_engines) {
-                    // 27.3.8: DMAEN before the ADDR flag is cleared.
-                    S::dma(true, false);
-                    (void)TxEngine::start(std::span<const uint8_t>(req_.tx.get(), req_.tx_len));
-                    (void)S::clear_addr();
-                    phase_ = Phase::tx_dma;
-                    return false;
+                    if (t_.tx_left >= dma_min_write) {
+                        // 27.3.8: DMAEN before the ADDR flag is cleared.
+                        S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_DMAEN);
+                        (void)TxEngine::start(std::span<const uint8_t>(t_.tx, t_.tx_left));
+                        (void)S::status2();
+                        t_.phase = Phase::tx_dma;
+                        return false;
+                    }
                 }
-                (void)S::clear_addr();
-                phase_ = Phase::tx;
-                S::buffer_interrupt(true);   // EV8_1 follows at once
-                return false;
+                (void)S::status2();   // ADDR cleared: EV8_1 follows
+                return first_bytes();
 
             case Phase::tx:
-                if ((s1 & I2cFlag::tx_empty) != 0u && pos_ < req_.tx_len) {
-                    S::data(req_.tx.get()[pos_]);
-                    ++pos_;
-                    if (pos_ >= req_.tx_len) {
-                        S::buffer_interrupt(false);   // BTF carries the end
-                    }
-                    return false;
-                }
-                if ((s1 & I2cFlag::byte_finished) != 0u && pos_ >= req_.tx_len) {
-                    return end_of_write();   // EV8_2
-                }
-                return false;
+                return transmit_step(s1);
 
             case Phase::tx_dma:
-                // The engine loaded every byte; BTF says the last one is out
-                // on the wire - 27.3.8's own order (disable the requests,
-                // then wait for BTF, then the STOP or the repeated START).
-                if ((s1 & I2cFlag::byte_finished) != 0u && !dma_busy()) {
-                    S::dma(false, false);
-                    return end_of_write();
-                }
-                return false;
+                return transmit_dma_step(s1);
 
             case Phase::addr_rx:
                 if ((s1 & I2cFlag::address) == 0u) {
@@ -1005,12 +1046,25 @@ public:
         if ((errs & I2cFlag::bus_error) != 0u) {
             ++spurious_berr_;
         }
-        if (phase_ == Phase::idle) {
+        if (t_.phase == Phase::idle) {
             return false;
         }
+        if ((errs & I2cFlag::ack_failure) != 0u && t_.phase == Phase::restart) {
+            // The LAST WRITTEN byte refused, its repeated START already
+            // requested (request_restart()): the NACK is the byte's, and the
+            // START still standing is withdrawn as the STOP is requested, in
+            // one CR1 store - START is "set and cleared by software"
+            // (27.6.1). Answered as an address NACK with STOP set beside the
+            // standing START, the CH32 twins of this block misreported the
+            // refusal and kept the controller master with both bits up
+            // (measured there; docs/stm32f4/i2c.md).
+            I2C_TypeDef& reg = S::regs();
+            reg.CR1 = (reg.CR1 & ~I2C_CR1_START) | I2C_CR1_STOP;
+            return finish(i2c_nack_data);
+        }
         if ((errs & I2cFlag::ack_failure) != 0u) {
-            const bool on_address = phase_ == Phase::addr_tx || phase_ == Phase::addr_rx ||
-                                    phase_ == Phase::start_tx || phase_ == Phase::start_rx;
+            const bool on_address = t_.phase == Phase::addr_tx || t_.phase == Phase::addr_rx ||
+                                    t_.phase == Phase::start_tx || t_.phase == Phase::start_rx;
             S::stop();   // 27.3.4: a controller that is NACKed sends the STOP
             if constexpr (has_engines) {
                 put_engines_away();
@@ -1035,10 +1089,13 @@ public:
 
     /// The DMA streams' interrupt body - call from BOTH streams' vectors
     /// (one vector per stream on this family, shared with nothing). The
-    /// receive block completing ends a read phase (the STOP after it); the
-    /// transmit block completing is only half the story (BTF on the event
-    /// vector says the last byte is out). A transfer error ends the tenure
-    /// with i2c_dma_fault. True when the tenure just completed.
+    /// receive block completing ends a read phase (the STOP after it). The
+    /// transmit block completing is 27.3.8's EOT: the DMA requests go off
+    /// and the event vector waits for BTF (a plain write's end) or, with a
+    /// read half to follow, the buffer vector for the TxE that says the
+    /// last byte went into the shifter - where the repeated START is
+    /// requested. A transfer error ends the tenure with i2c_dma_fault.
+    /// True when the tenure just completed.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
@@ -1049,6 +1106,10 @@ public:
             }
             if ((tx & TxEngine::flag_complete) != 0u) {
                 (void)TxEngine::complete();
+                if (t_.phase == Phase::tx_dma) {
+                    S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN |
+                                           (t_.rx_len != 0u ? I2C_CR2_ITBUFEN : 0u));
+                }
             }
             const uint8_t rx = RxEngine::service();
             if ((rx & RxEngine::flag_error) != 0u) {
@@ -1056,10 +1117,9 @@ public:
                 S::stop();
                 return finish(i2c_dma_fault);
             }
-            if ((rx & RxEngine::flag_complete) != 0u && phase_ == Phase::rx_dma) {
-                S::dma(false, false);
+            if ((rx & RxEngine::flag_complete) != 0u && t_.phase == Phase::rx_dma) {
                 S::stop();
-                return finish(i2c_ok);
+                return finish(i2c_ok);   // and the DMA requests off with the vectors
             }
         }
         return false;
@@ -1125,15 +1185,13 @@ public:
         if constexpr (has_engines) {
             put_engines_away();
         }
-        phase_ = Phase::idle;
-        S::buffer_interrupt(false);
+        t_.phase = Phase::idle;
         S::software_reset();
         S::timing(table_[static_cast<uint8_t>(applied_)]);
         (void)S::filter(cfg_.filter);
         S::enable();
         S::ack(false);
-        S::event_interrupt(true);
-        S::error_interrupt(true);
+        S::control2(t_.freq, idle_enables);   // the event vector waits for start()
         Nvic::enable(S::event_irq);
         Nvic::enable(S::error_irq);
         return true;
@@ -1171,8 +1229,10 @@ public:
     }
 
 private:
+    /// `restart`: the repeated START requested behind the last written
+    /// byte, SB not yet seen - the phase in which a NACK is that byte's.
     enum class Phase : uint8_t {
-        idle, start_tx, start_rx, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
+        idle, start_tx, start_rx, restart, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
     };
 
     static_assert([] {
@@ -1185,103 +1245,240 @@ private:
     }(), "brio I2cHost: the DMA engines must carry uint8_t elements - this data register is "
          "one byte wide");
 
+    /// What CR2 holds between tenures besides FREQ: the error vector
+    /// alone. A tenure adds the event vector, and inside it the buffer
+    /// vector or the DMA requests (control2(), one store each time).
+    static constexpr uint32_t idle_enables = I2C_CR2_ITERREN;
+
+    /// The shortest write phase the transmit engine carries. EV8_1 takes
+    /// two bytes with no interrupt at all - the data register and the
+    /// shifter behind it, TxE rising 17 cycles after ADDR's clear and 20
+    /// after the first byte's store (measured at 180 MHz with APB1 at 45)
+    /// - where an engine adds its block start and its completion entry.
+    static constexpr uint8_t dma_min_write = 3;
+
+    /// How many SR1 reads the entry that cleared ADDR spends waiting for
+    /// TxE before it leaves the byte to the buffer vector: about ten APB1
+    /// reads, several times the 17 to 20 cycles measured.
+    static constexpr uint8_t txe_polls = 10;
+
     static void claim_pads() {
         SclPin::function(pins.scl.function, {.open_drain = true, .speed = PinSpeed::very_high});
         SdaPin::function(pins.sda.function, {.open_drain = true, .speed = PinSpeed::very_high});
     }
 
-    static bool finish(uint8_t st) {
-        status_ = st;
-        phase_ = Phase::idle;
-        S::buffer_interrupt(false);
+    /// The tenure is over: the status, the phase, and CR2 back to the
+    /// error vector alone - the event and buffer vectors and the DMA
+    /// requests down in one store, so no flag a STOP or a repeated START
+    /// leaves standing re-enters the vector.
+    [[gnu::always_inline]] static bool finish(uint8_t st) {
+        t_.status = st;
+        t_.phase = Phase::idle;
+        S::control2(t_.freq, idle_enables);
         return true;
     }
 
-    /// EV8_2: the last written byte is out. A repeated START opens the read
-    /// half, or the STOP ends the tenure.
-    static bool end_of_write() {
-        if (req_.rx_len != 0u) {
-            phase_ = Phase::start_rx;
-            S::start();
+    /// TxE within a bound of SR1 reads.
+    [[gnu::always_inline]] static bool txe_soon() {
+        for (uint8_t i = 0; i < txe_polls; ++i) {
+            if (S::flag(I2cFlag::tx_empty)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The repeated START of a write-then-read, requested while the last
+    /// written byte is in the shifter: "setting the START bit causes the
+    /// interface to generate a ReStart condition at the end of the current
+    /// byte transfer" (27.3.3) - the peripheral turns the bus around with
+    /// no stretch of its own. And a DUMMY BYTE stored into DR right after
+    /// the request keeps TxE and BTF DOWN until SB: with the data register
+    /// empty, BTF rises at the end of that byte and stands until the Sr
+    /// is out - 2950 cycles at 100 kHz, 700 at 400, measured - and a level
+    /// on the event vector re-enters it all that while (twenty entries a
+    /// tenure at 100 kHz, measured). With the dummy in DR the byte ends,
+    /// the Sr follows with exactly the index's nine clocks and its own one
+    /// on the wire, SB comes at the same moment, and the address stored at
+    /// SB replaces the dummy: the device reads the register asked for
+    /// (measured; ST's library clears the same two flags with a store into
+    /// DR, I2C_Flush_DR). `shifting` false is a TxE served after its
+    /// byte's end, BTF already up: the Sr then leaves at once and no
+    /// dummy is stored.
+    [[gnu::always_inline]] static void request_restart(bool shifting) {
+        S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN);
+        t_.phase = Phase::restart;
+        S::start();
+        if (shifting) {
+            S::data(0x00);
+        }
+    }
+
+    /**
+     * EV8_1, in the entry that cleared ADDR. TxE rises 17 cycles after the
+     * clear and again 20 cycles after the first byte's store, as that byte
+     * moves into the shifter (measured), so the data register and the
+     * shifter take the first TWO bytes here with no interrupt for either,
+     * and a one-byte index before a read has its repeated START requested
+     * here too. What follows comes on TxE - one entry a byte, the
+     * silicon's, the data register being one byte deep.
+     */
+    [[gnu::always_inline]] static bool first_bytes() {
+        t_.phase = Phase::tx;
+        if (!txe_soon()) {
+            // Not seen in the bound: the buffer vector takes the byte.
+            S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
             return false;
         }
-        S::stop();
-        return finish(i2c_ok);
+        S::data(*t_.tx++);
+        --t_.tx_left;
+        if (t_.tx_left != 0u) {
+            if (txe_soon()) {
+                S::data(*t_.tx++);
+                --t_.tx_left;
+            }
+        } else if (t_.rx_len != 0u && txe_soon()) {
+            request_restart(true);
+            return false;
+        }
+        if (t_.tx_left != 0u || t_.rx_len != 0u) {
+            // TxE: the next byte, or the repeated START behind the last.
+            S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
+        }
+        // Otherwise every byte is in and BTF (the event vector) ends it.
+        return false;
+    }
+
+    /// EV8 on the buffer vector, and EV8_2 on the event vector.
+    [[gnu::always_inline]] static bool transmit_step(uint32_t s1) {
+        if ((s1 & I2cFlag::tx_empty) == 0u) {
+            return false;   // BTF implies TxE
+        }
+        if (t_.tx_left != 0u) {
+            S::data(*t_.tx++);
+            --t_.tx_left;
+            if (t_.tx_left == 0u && t_.rx_len == 0u) {
+                // BTF carries the end.
+                S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN);
+            }
+            return false;
+        }
+        if (t_.rx_len != 0u) {
+            // The last byte is in the shifter - or, a TxE served after its
+            // byte's end, out with BTF up.
+            request_restart((s1 & I2cFlag::byte_finished) == 0u);
+            return false;
+        }
+        if ((s1 & I2cFlag::byte_finished) != 0u) {
+            S::stop();   // EV8_2
+            return finish(i2c_ok);
+        }
+        return false;
+    }
+
+    /// The engine's write phase on the event vector: BTF, which proves the
+    /// block's end as well as the last byte's, or - with a read half to
+    /// follow, the buffer vector armed by the block's completion - the
+    /// TxE of the last byte in the shifter.
+    [[gnu::always_inline]] static bool transmit_dma_step(uint32_t s1) {
+        if constexpr (has_engines) {
+            if ((s1 & I2cFlag::tx_empty) == 0u) {
+                return false;
+            }
+            const bool finished = (s1 & I2cFlag::byte_finished) != 0u;
+            if (!finished && TxEngine::busy()) {
+                return false;
+            }
+            (void)TxEngine::complete();
+            if (t_.rx_len != 0u) {
+                request_restart(!finished);
+                return false;
+            }
+            if (finished) {
+                S::stop();
+                return finish(i2c_ok);
+            }
+        } else {
+            (void)s1;
+        }
+        return false;
     }
 
     /// The ACK/POS arrangement the read phase's length wants, set BEFORE
-    /// the address goes out (27.3.3's receive procedures).
-    static void prime_receive() {
-        if (req_.rx_len == 2u && !dma_serves_rx()) {
-            S::pos(true);
-            S::ack(true);
-        } else {
-            S::ack(req_.rx_len != 1u);
+    /// the address goes out (27.3.3's receive procedures), in one CR1
+    /// read-modify-write (START is down: SB is what brought us here).
+    [[gnu::always_inline]] static void prime_receive() {
+        uint32_t bits = t_.rx_len != 1u ? I2C_CR1_ACK : 0u;
+        if (t_.rx_len == 2u && !dma_serves_rx()) {
+            bits |= I2C_CR1_POS;
         }
+        I2C_TypeDef& reg = S::regs();
+        reg.CR1 = (reg.CR1 & ~(I2C_CR1_ACK | I2C_CR1_POS)) | bits;
     }
 
-    /// EV6 on a read: the procedure by count.
-    static bool begin_receive() {
+    /// EV6 on a read: the procedure by count. SR1 was read by the entry,
+    /// so SR2 alone clears ADDR.
+    [[gnu::always_inline]] static bool begin_receive() {
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
-                S::dma(true, true);   // LAST: the block's last byte is NACKed
-                (void)RxEngine::start(std::span<uint8_t>(req_.rx.get(), req_.rx_len));
-                (void)S::clear_addr();
-                phase_ = Phase::rx_dma;
+                // LAST: the block's last byte is NACKed (27.3.8).
+                S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_DMAEN | I2C_CR2_LAST);
+                (void)RxEngine::start(std::span<uint8_t>(t_.rx, t_.rx_len));
+                (void)S::status2();
+                t_.phase = Phase::rx_dma;
                 return false;
             }
         }
-        pos_ = 0;
-        if (req_.rx_len == 1u) {
+        t_.phase = Phase::rx;
+        if (t_.rx_len == 1u) {
             // ACK is already clear (prime_receive): clear ADDR, then STOP at
             // once; the byte lands on RxNE.
-            (void)S::clear_addr();
+            (void)S::status2();
             S::stop();
-            phase_ = Phase::rx;
-            S::buffer_interrupt(true);
+            S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
             return false;
         }
-        if (req_.rx_len == 2u) {
+        if (t_.rx_len == 2u) {
             // POS and ACK were set: clear ADDR, then ACK off - the NACK
-            // lands on the second byte; one BTF delivers both.
-            (void)S::clear_addr();
+            // lands on the second byte; one BTF delivers both. POS stays up
+            // until the next start() takes it down with ACK.
+            (void)S::status2();
             S::ack(false);
-            phase_ = Phase::rx;
             return false;
         }
-        (void)S::clear_addr();
-        phase_ = Phase::rx;
-        S::buffer_interrupt(req_.rx_len > 3u);   // RxNE while more than three remain
+        (void)S::status2();
+        if (t_.rx_len > 3u) {
+            // RxNE while more than three remain.
+            S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN | I2C_CR2_ITBUFEN);
+        }
         return false;
     }
 
     /// The receive pump, per the count's procedure.
-    static bool receive_step(uint32_t s1) {
-        uint8_t* out = req_.rx.get();
-        if (req_.rx_len == 1u) {
+    [[gnu::always_inline]] static bool receive_step(uint32_t s1) {
+        if (t_.rx_len == 1u) {
             if ((s1 & I2cFlag::rx_not_empty) == 0u) {
                 return false;
             }
-            out[0] = S::data();
+            *t_.rx = S::data();
             return finish(i2c_ok);
         }
-        if (req_.rx_len == 2u) {
+        if (t_.rx_len == 2u) {
             if ((s1 & I2cFlag::byte_finished) == 0u) {
                 return false;
             }
             S::stop();
-            out[0] = S::data();
-            out[1] = S::data();
-            S::pos(false);
+            t_.rx[0] = S::data();
+            t_.rx[1] = S::data();
             return finish(i2c_ok);
         }
-        const uint8_t remaining = static_cast<uint8_t>(req_.rx_len - pos_);
-        if (remaining > 3u) {
+        if (t_.rx_left > 3u) {
             if ((s1 & I2cFlag::rx_not_empty) != 0u) {
-                out[pos_] = S::data();
-                ++pos_;
-                if (req_.rx_len - pos_ == 3u) {
-                    S::buffer_interrupt(false);   // BTF from here on
+                *t_.rx++ = S::data();
+                --t_.rx_left;
+                if (t_.rx_left == 3u) {
+                    // BTF from here on.
+                    S::control2(t_.freq, idle_enables | I2C_CR2_ITEVTEN);
                 }
             }
             return false;
@@ -1289,42 +1486,40 @@ private:
         if ((s1 & I2cFlag::byte_finished) == 0u) {
             return false;
         }
-        if (remaining == 3u) {
+        if (t_.rx_left == 3u) {
             // N-2 in DR, N-1 in the shifter: NACK the one to come, read
             // N-2, which lets N in.
             S::ack(false);
-            out[pos_] = S::data();
-            ++pos_;
+            *t_.rx++ = S::data();
+            --t_.rx_left;
             return false;
         }
-        // remaining == 2: N-1 in DR, N in the shifter.
+        // Two left: N-1 in DR, N in the shifter.
         S::stop();
-        out[pos_] = S::data();
-        ++pos_;
+        *t_.rx++ = S::data();
         (void)wait_until([] { return S::flag(I2cFlag::rx_not_empty); });
-        out[pos_] = S::data();
-        ++pos_;
+        *t_.rx = S::data();
         return finish(i2c_ok);
     }
 
     static bool dma_serves_rx() {
         if constexpr (has_engines) {
-            return req_.rx_len >= 2u;
+            return t_.rx_len >= 2u;
         } else {
             return false;
         }
     }
-    static bool dma_busy() {
-        if constexpr (has_engines) {
-            return TxEngine::busy();
-        } else {
-            return false;
-        }
-    }
+    /// A tenure ended by an error: an engine block still in flight is
+    /// thrown away and its stream bound again. Only such a block: an idle
+    /// stream needs nothing, and rebinding one waits for its EN and writes
+    /// three registers (a NACKed probe took 573 cycles through the error
+    /// vector with the rebinding unconditional, measured).
     static void put_engines_away() {
         if constexpr (has_engines) {
-            (void)TxEngine::abandon();
-            RxEngine::arm(S::data_address());
+            (void)TxEngine::abandon();   // false, and nothing done, when no block holds it
+            if (t_.phase == Phase::rx_dma) {
+                RxEngine::arm(S::data_address());
+            }
             S::dma(false, false);
         }
     }
@@ -1350,6 +1545,7 @@ private:
             valid_[i] = t.has_value();
             table_[i] = t.value_or(I2cTiming{});
         }
+        t_.freq = table_[0].freq_mhz;   // FREQ is the APB clock's, the same on both rows
         delay_rate_ = delay_rate(sysclk);   // the busy-waits count CORE cycles
     }
 
@@ -1381,7 +1577,7 @@ private:
     }
 
     template <typename Pred>
-    static bool wait_until(Pred pred) {
+    [[gnu::always_inline]] static bool wait_until(Pred pred) {
         for (uint32_t spins = 400'000u; spins != 0u; --spins) {
             if (pred()) {
                 return true;
@@ -1393,10 +1589,23 @@ private:
     /// Half a standard-mode bit, for the unstick.
     static void spin_half_bit() { (void)delay_us(delay_rate_, 5); }
 
-    static inline Request req_{};
-    static inline uint8_t pos_ = 0;
-    static inline volatile Phase phase_ = Phase::idle;
-    static inline uint8_t status_ = i2c_ok;
+    /// The tenure in flight as the handlers walk it, and CR2's FREQ, in
+    /// ONE object: a handler loads one base address and reaches every
+    /// field by an offset from it, where separate statics cost a
+    /// literal-pool load from the flash apiece.
+    struct Tenure {
+        const uint8_t* tx;    ///< the next byte to write
+        uint8_t* rx;          ///< where the next byte read lands
+        uint8_t tx_left;
+        uint8_t rx_len;       ///< the read phase's length: its procedure
+        uint8_t rx_left;
+        uint8_t addr;
+        uint8_t freq;         ///< CR2.FREQ in force
+        uint8_t status;
+        volatile Phase phase;
+    };
+    static inline Tenure t_{nullptr, nullptr, 0, 0, 0, 0, 0, i2c_ok, Phase::idle};
+    // The configuration.
     static inline I2cSpeed applied_ = I2cSpeed::standard_100k;
     static inline I2cHostConfig cfg_{};
     static inline uint32_t pclk_hz_ = 0;
