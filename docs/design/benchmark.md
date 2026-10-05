@@ -429,6 +429,7 @@ scratch program.
 | family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz; the same TWI's client on PC2/PC3, served on the same core) | 509 (599) | 1009 (1112) | 1.12 (1.16), one interrupt a byte - the data sheet's own loop 1.11 | 1.14, smart mode | the plain binding is busy for the tenure, the client's handler on the same core | the data sheet's polled loop: 316 and 808 fixed, the core held the whole tenure | 95 (120); 305 metered |
+| ATSAMC21J18A (48 MHz OSC48M, 2 WS; the AVR's `twi_peer`, which stretches every byte about 220 cycles) | 975 through the pump, the plain binding (1205); 1340 metered | - | the engine 1.10 at 254 bytes - the peer's stretch -, three interrupts; the pump 1.24 | the engine one interrupt, 3007 cycles; the pump 103 467 (137 679) | - | the data sheet's loop: about 320 fixed on a one-byte write, the pump's wall about a fifth behind it; within half a per cent on long tenures | 383 |
 | STM32F429ZI (180 MHz; the board's STMPE811 on I2C3) | 139 (961), three interrupts (seven) | 389 (816), five (ten) | 1.00 through the pump and the engines | - (the device answers no read a write did not open: reads are register reads) | 708 | HAL: 387 and 1171 fixed; 148 and 153 cycles a byte written and read, against 80 and 99 | 203 |
 | CH32V203C8T6 (120 MHz for the letter - the bus clock's 60 MHz ceiling; I2C2 on the self-link, served on the same core) | 1072 (1787), three interrupts (five) | 2006 (2394), five (seven) | 1.00 through the pump (256 interrupts) and the engine (4, the core kept awake under a DMA block: 473 k busy against the pump's 86 k) | - | 1150 | the EVT: 1865 fixed in seven interrupts; 174 and 227 cycles a byte written and read, against 118 and 131 | 164 |
 | CH32V006K8U6 (48 MHz; the STM32G0's `twi_peer`) | 1398 (1896), four interrupts (five) | 2126 (2456) | 1.00 through the pump (264 interrupts) and the engine (9) | 262 through the pump, 9 through the engine | 1759 | WCH's polled master, its library having no interrupt-driven tenure: 766 and 907 fixed, the core held the whole tenure (3103 and 5581 busy) | 190 to 225 |
@@ -460,6 +461,14 @@ What the rows say:
   wait in `start()` for the last STOP stays - nothing in either chapter
   signals it leaving - and costs about one bit period when a tenure
   follows another at once.
+- The SAM C21's SERCOM offers a byte counter (ADDR.LEN) and smart mode:
+  an engined read is one interrupt a tenure; a write has no edge at its
+  counted end, so LEN = w + 1 makes the MB after byte w the edge that
+  sends the STOP or the repeated START - three interrupts, and a
+  255-byte write stays the pump's ([../samc21/i2c.md](../samc21/i2c.md)).
+  The AVR's TWI holds SCL from each flag until the software answers, so
+  a long tenure at 400 kHz runs at the handler's pace - 1.12, the data
+  sheet's own loop 1.11 ([../avrdx/twi.md](../avrdx/twi.md)).
 - A block with a byte counter and AUTOEND but no FIFO - the STM32G0's
   - takes the pump's one interrupt a byte, and the tenure's fixed cost
   is what is left to cut: the first data byte preloaded into TXDR

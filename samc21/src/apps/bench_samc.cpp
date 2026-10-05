@@ -4,7 +4,8 @@
 // prints. NOT A TEST: a letter's one verdict is "ran", except letter r,
 // whose verdicts judge the ruler every other line is read with.
 //
-// NOTHING TO WIRE. The console is the board's CH340 bridge on PB30 (TX)
+// NOTHING TO WIRE BUT LETTER I's BUS (PA22/PA23 to the peer board's
+// node, its file header below). The console is the board's CH340 bridge on PB30 (TX)
 // / PB31 (RX) = SERCOM5 PAD[0]/PAD[1] under function D, 115200 8N1 - the
 // binding of console.cpp and test_samc_platform.cpp, with the latter's
 // TestBench frame and polled prompt loop. Letter d drives PA16 and PA17
@@ -22,7 +23,7 @@
 //
 // WHERE THE VECTORS RUN. SERCOM5_Handler and SysTick_Handler (and
 // letter d's DMAC_Handler and SERCOM1_Handler) are bound through
-// BENCH_PLACEMENT. It is empty in this file, so the handlers -
+// BENCH_PLACEMENT (and letter i's SERCOM3_Handler). It is empty in this file, so the handlers -
 // and the ISR bodies they inline - execute from flash. bench_samc_ram.cpp
 // is this same file with BENCH_RAM_TEXT defined, which binds both
 // handlers through this family's documented option of the binding
@@ -202,6 +203,56 @@
 //        uart.copy   write_bulk() of 1 to 1024 bytes on the engined
 //                    transport, masked, the source at the four offsets from
 //                    a word: the copy into the ring and its crossover.
+//   i  THE I2C HOST (samc21/i2c.hpp, docs/samc21/i2c.md): SERCOM3 on PA22
+//      (SDA) / PA23 (SCL), function C - test_samc_i2c's pads - on the
+//      desk's 5 V node (1.5k pull-ups) against a SECOND BOARD running
+//      `twi_peer`, commanded in band over the same wires (twi_link.hpp,
+//      included by its relative path): per speed it is told to `serve` at
+//      0x2C for 15 s - a client that takes any write and answers a read
+//      with one counting stream - and the letter waits the deadline out
+//      before the next command. THE PEER IS A POLLED CLIENT: it stretches
+//      every byte by its own turnaround, so wall minus wire holds the
+//      peer's share beside the host's (the engined lines, whose bytes the
+//      DMA moves within a few cycles of the request, read the peer's share
+//      almost alone). Two hosts on the one SERCOM, brought up in turn:
+//      the engineless host (the byte pump, `i2c.*`) and the engined one
+//      with DmaTxEngine<6> and DmaRxEngine<7> (`i2c.*.dma`, a phase under
+//      its dma_min_bytes on its own pump) - in THIS image; the SRAM twin
+//      carries the pump alone, its RAM having no room for the engines'
+//      handler code beside the others' and a stack. SERCOM3_Handler (and,
+//      for the engined host, DMAC_Handler) bound metered or plain per run
+//      (a flag): every op is the BEST of 8 by wall, metered (the thread
+//      idles masked between the vector's edges, as letter d's waits) and
+//      plain (`.bare`: the thread spins on the completion edge and no
+//      stamp runs in either vector); n counts data bytes:
+//        i2c.write       n = 1, 2, 16, 255 bytes after the address;
+//        i2c.read        n = 1, 2, 16, 255, every read's bytes checked to
+//                        be the peer's consecutive stream;
+//        i2c.wr          one byte written, a repeated START, n - 1 = 1, 2,
+//                        16 read;
+//        i2c.probe       the address alone, ACKed (n=0);
+//        i2c.probe.nack  to 0x77, nobody's: i2c_nack_addr;
+//        i2c.read.nack   a one-byte READ to 0x77: i2c_nack_addr too;
+//        i2c.write.dma n=254  the engined write's longest block (LEN
+//                        counts to 255 and the engine writes LEN = w + 1;
+//                        its 255 is the pump's);
+//        i2c.write.nack.dma, i2c.read.nack.dma  16 bytes to 0x77 on the
+//                        engines: i2c_nack_addr from LENERR;
+//        i2c.write.nackdata(.dma)  after the speeds, the peer told to
+//                        NACK the 3rd byte it receives: a 16-byte write at
+//                        100 kHz on each host is i2c_nack_data.
+//      The line after each prints the wire's cycles and wall minus them,
+//      and after a metered line the fewest cycles start() took (one
+//      ruler read in them). Each speed closes with the engined host's
+//      count of start() calls that found the last engined read's SB
+//      standing and waited, and with eight pairs of engined 16-byte
+//      reads BACK TO BACK - the second started the moment the first's
+//      edge is seen, as an arbiter with a request queued does - judged
+//      both, with the second start()'s cycles.
+//      The letter's verdict: every tenure completed with its status, every
+//      read exact. No vendor library is on this desk: the data sheet's
+//      own sequence, polled, is the vendor's column, in a scratch program
+//      beside this one (the numbers in docs/samc21/i2c.md).
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -233,6 +284,15 @@
 //           second: one frame of eight bits a byte.
 //   uart.*  the loop's rate over the ten bits of an 8N1 frame; uart.edge
 //           wire=0 (a latency, not a rate).
+//   i2c.*   the tenure's own time on the bus: its SCL rising edges - nine
+//           a frame (the address and every data byte with its
+//           acknowledge), one for a repeated START, one for the STOP -
+//           times the SCL period the register pair in force gives on this
+//           node, 10 + BAUD + BAUDLOW + f x T_RISE cycles (33.6.2.4.1),
+//           T_RISE the node's 166 ns as the AVR128DB48's TCB meters measure
+//           it (test_avr_twi letter b): PA23 cannot be both SERCOM3's pad
+//           and an EIC line, so this chip cannot time its own SCL. As n
+//           data bytes over that time; the probes wire=0.
 //   r and t wire=0: an instrument's cost and an idle second carry no
 //           bytes.
 //
@@ -263,6 +323,7 @@
 #include "samc21/clock.hpp"
 #include "samc21/delay.hpp"
 #include "samc21/dmac.hpp"
+#include "samc21/i2c.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
@@ -273,6 +334,10 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+// The twi_link wire format the peer speaks: one file, included by its
+// relative path from every board that speaks it.
+#include "../../../avrdx/src/apps/twi_link.hpp"
+
 // The placement of the bound vectors and of letter r's stamp loop: flash
 // here; in bench_samc_ram.cpp, SRAM through the attribute this family's
 // binding pattern documents (docs/samc21/platform.md, "A handler in
@@ -281,7 +346,12 @@
 #define BENCH_PLACEMENT [[gnu::section(".ram_text")]]
 constexpr const char* bench_image = "bench_samc_ram";
 constexpr const char* vectors_in = "SRAM (.ram_text)";
+/// Letter i's DMA engines are this image's only: the SRAM twin has no
+/// room for their handler code beside the others' and a stack (the file
+/// header, letter i).
+constexpr bool i2c_engines = false;
 #else
+constexpr bool i2c_engines = true;
 #define BENCH_PLACEMENT
 constexpr const char* bench_image = "bench_samc";
 constexpr const char* vectors_in = "flash";
@@ -334,6 +404,7 @@ IsrMeter<TickRuler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> empty_meter;
 IsrMeter<Ruler, Idle> dmac_meter;
 IsrMeter<Ruler, Idle> sercom1_meter;
+IsrMeter<Ruler, Idle> sercom3_meter;
 
 /// The counters as ONE instant: read under the platform's guard. The tick
 /// is never quiescent, and an interrupt landing between bench_counters()'
@@ -357,14 +428,14 @@ class Interval {
 public:
     [[gnu::always_inline]] void start() {
         SamPlatform::CriticalSection guard;
-        c0_ = bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter);
+        c0_ = bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter, sercom3_meter);
         sw_.start();
     }
     [[gnu::always_inline]] uint32_t elapsed() const { return sw_.elapsed(); }
     [[gnu::always_inline]] BenchSample stop() {
         SamPlatform::CriticalSection guard;
         const uint32_t wall = sw_.elapsed();
-        return bench_sample(wall, c0_, bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter));
+        return bench_sample(wall, c0_, bench_counters<Idle>(sercom_meter, tick_meter, dmac_meter, sercom1_meter, sercom3_meter));
     }
 
 private:
@@ -1486,6 +1557,454 @@ void tu_uart() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// i - the I2C host: i2c.write, i2c.read, i2c.wr, i2c.probe
+// =============================================================================
+namespace di {
+
+/// SERCOM3 on PA22 (SDA, PAD[0]) / PA23 (SCL, PAD[1]), function C - the
+/// pads test_samc_i2c runs on - on the desk's 5 V node with the peer.
+constexpr I2cPads bus_pads{
+    .sda_pin = {'A', 22, PinFunction::c},
+    .scl_pin = {'A', 23, PinFunction::c},
+};
+using Pump = I2cHost<3, bus_pads>;
+constexpr uint8_t ch_i2c_tx = 6;   ///< free in every other letter
+constexpr uint8_t ch_i2c_rx = 7;
+using Eng = I2cHost<3, bus_pads, 0, DmaTxEngine<ch_i2c_tx>, DmaRxEngine<ch_i2c_rx>>;
+
+/// The bus's rise time, measured on this node by the AVR128DB48's
+/// TCB meters (test_avr_twi letter b: the SCL period over the register's
+/// floor): 166 ns. The chapter's formula (33.6.2.4.1) with it is the SCL
+/// period the wire field charges, and init() is told the same figure.
+constexpr uint32_t rise_ns = 166u;
+constexpr uint32_t rise_cycles = (SysClock::hz / 1000u * rise_ns + 500'000u) / 1'000'000u;
+
+constexpr uint8_t peer_addr = 0x2C;       ///< the address the peer serves at
+constexpr uint8_t absent_addr = 0x77;     ///< nobody's
+
+/// Which host the SERCOM3 vector serves, and whether it is metered.
+enum class Live : uint8_t { none, pump, engine };
+volatile Live live = Live::none;
+volatile bool metered = false;
+volatile bool done = false;
+
+/// Letter d's SPI buffers, reused: the letters run one at a time, and the
+/// SRAM-placed twin of this image has no room for two more.
+uint8_t (&i2c_tx)[256] = dd::spi_tx;
+uint8_t (&i2c_rx)[256] = dd::spi_rx;
+
+template <typename H>
+[[gnu::always_inline]] inline void serve_vector() {
+    if (H::isr()) {
+        done = true;
+    }
+}
+
+/// One tenure on the pump, spun to its completion, bounded: the command
+/// channel's own tenures.
+uint8_t link(uint8_t addr, const uint8_t* tx, uint8_t txn, uint8_t* rx, uint8_t rxn) {
+    Pump::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(tx);
+    r.tx_len = txn;
+    r.rx = lend<Lease::reply>(rx);
+    r.rx_len = rxn;
+    r.speed = I2cSpeed::standard_100k;
+    done = false;
+    live = Live::pump;
+    if (Pump::start(r)) {
+        return Pump::status();
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (!done) {
+        if (Ticker::millis() - t0 > 300u) {
+            (void)Pump::recover();
+            return 0xEE;
+        }
+    }
+    return Pump::status();
+}
+
+/// The command channel's frame and answer, in letter m's buffers (free
+/// while this letter runs: the SRAM twin's room is tight).
+uint8_t (&frame_buf)[twilink::max_payload + 4] =
+    reinterpret_cast<uint8_t (&)[twilink::max_payload + 4]>(mem_src);
+uint8_t (&resp_buf)[twilink::response_bytes] =
+    reinterpret_cast<uint8_t (&)[twilink::response_bytes]>(mem_dst);
+
+void settle_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < ms) {
+    }
+}
+
+/// One command frame to the peer and its ack collected (twi_link.hpp).
+bool command(twilink::Op op, const uint8_t* p, uint8_t len) {
+    for (uint8_t k = 0; k < 3u; ++k) {
+        uint8_t n = 0;
+        twilink::write_frame(
+            [&](uint8_t b) {
+                if (n < sizeof frame_buf) frame_buf[n++] = b;
+            },
+            op, p, len);
+        if (link(twilink::command_addr, frame_buf, n, nullptr, 0) == i2c_ok) {
+            settle_ms(2);
+            if (link(twilink::command_addr, nullptr, 0, resp_buf, twilink::response_bytes) == i2c_ok) {
+                twilink::Decoder dec;
+                for (const uint8_t b : resp_buf) {
+                    if (dec.feed(b) == twilink::Decoder::Result::frame) {
+                        const twilink::Frame& f = dec.frame();
+                        if (f.op == twilink::Op::ack && f.len == 2 && f.data[0] == twilink::byte_of(op)) {
+                            settle_ms(twilink::arm_ms);
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        settle_ms(400);
+    }
+    return false;
+}
+
+/// The peer becomes a client at peer_addr for `ms` milliseconds, serving
+/// 0, 1, 2, ... to a read and taking any write.
+bool serve(uint16_t ms) {
+    twilink::Params a{};
+    a.addr = peer_addr;
+    a.count = 0;
+    a.ms = ms;
+    uint8_t p[twilink::params_size];
+    twilink::put_params(p, a);
+    return command(twilink::Op::serve, p, twilink::params_size);
+}
+
+struct Speed {
+    I2cSpeed speed;
+    const char* name;
+};
+constexpr Speed speeds[] = {{I2cSpeed::standard_100k, "100 kHz"},
+                            {I2cSpeed::fast_400k, "400 kHz"},
+                            {I2cSpeed::fast_plus_1m, "1 MHz (Fm+)"}};
+constexpr uint8_t lengths[] = {1u, 2u, 16u, 255u};
+constexpr uint8_t wr_lengths[] = {1u, 2u, 16u};
+
+/// SCL rising edges in a tenure: nine a frame, one for a repeated START,
+/// one for the STOP.
+constexpr uint32_t rises(uint8_t tx, uint8_t rx, bool probe) {
+    if (probe) {
+        return 10u;
+    }
+    uint32_t r = 1u;
+    if (tx != 0u) {
+        r += 9u * (1u + tx);
+    }
+    if (rx != 0u) {
+        r += 9u * (1u + rx) + (tx != 0u ? 1u : 0u);
+    }
+    return r;
+}
+
+/// The SCL period the register pair in force produces on this node, in
+/// CLK_CPU cycles: 10 + BAUD + BAUDLOW + f x T_RISE (33.6.2.4.1).
+template <typename H>
+uint32_t period(I2cSpeed s) {
+    const I2cBaud b = H::baud_of(s);
+    return 10u + b.baud + (b.baudlow != 0u ? b.baudlow : b.baud) + rise_cycles;
+}
+
+/// One tenure, the best of 8 by wall: metered, the thread idles masked
+/// between the vector's edges as the kernel's loop does; plain, it spins
+/// on the edge and no stamp runs. Bounded at 100 ms.
+/// The fewest cycles a metered run's start() took, from just before the
+/// call to its return - one ruler read included (letter r's `ruler`).
+uint32_t launch_min = 0;
+
+template <typename H>
+BenchSample best_tenure(const typename H::Request& r, uint8_t expect, bool spin, bool& ok) {
+    BenchSample best{};
+    Interval iv;
+    ok = true;
+    launch_min = 0xFFFFFFFFu;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        done = false;
+        iv.start();
+        bool finished = false;
+        if (spin) {
+            finished = H::start(r);
+        } else {
+            const uint32_t t0 = Ruler::now();
+            finished = H::start(r);
+            const uint32_t launch = Ruler::now() - t0;
+            launch_min = launch < launch_min ? launch : launch_min;
+        }
+        while (!finished) {
+            if (spin) {
+                if (done) {
+                    finished = true;
+                } else if (iv.elapsed() >= SysClock::hz / 10u) {
+                    break;
+                }
+                continue;
+            }
+            disable_interrupts();
+            if (done) {
+                enable_interrupts();
+                finished = true;
+                break;
+            }
+            if (iv.elapsed() >= SysClock::hz / 10u) {
+                enable_interrupts();
+                break;
+            }
+            Idle::idle();
+        }
+        const BenchSample smp = iv.stop();
+        ok = ok && finished && H::status() == expect;
+        if (run == 0u || smp.wall < best.wall) {
+            best = smp;
+        }
+        (void)delay_us(clock, 100);   // the STOP on the wire, outside the next wall
+    }
+    return best;
+}
+
+template <typename H>
+bool op(const char* name, const char* bare, I2cSpeed s, uint8_t addr, uint8_t tx, uint8_t rx,
+        bool probe, uint8_t expect) {
+    typename H::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(i2c_tx));
+    r.tx_len = tx;
+    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_rx));
+    r.rx_len = rx;
+    r.speed = s;
+    const uint32_t wire = rises(tx, rx, probe) * period<H>(s);
+    const uint32_t n = probe ? 0u : static_cast<uint32_t>(tx) + rx;
+    const uint32_t wire_bps =
+        n == 0u ? 0u : static_cast<uint32_t>((static_cast<uint64_t>(n) * SysClock::hz + wire / 2u) / wire);
+    bool all = true;
+    for (const bool m : {true, false}) {
+        (void)drain();
+        metered = m;
+        bool ok = false;
+        for (uint8_t& b : i2c_rx) {
+            b = 0xEE;
+        }
+        const BenchSample smp = best_tenure<H>(r, expect, !m, ok);
+        metered = false;
+        // The peer serves one counting stream for its whole action (its
+        // index is not reset at an address): a read is exact when its bytes
+        // are consecutive.
+        bool exact = true;
+        if (expect == i2c_ok) {
+            for (uint8_t k = 1; k < rx; ++k) {
+                exact = exact && i2c_rx[k] == static_cast<uint8_t>(i2c_rx[0] + k);
+            }
+        }
+        bench_line(serial, m ? name : bare, n, smp, SysClock::hz, wire_bps);
+        print(serial, "  wire ", wire, " cycles (", rises(tx, rx, probe), " SCL rises x ",
+              period<H>(s), "): above the wire ", static_cast<int32_t>(smp.wall - wire));
+        if (m) {
+            print(serial, ", start() ", launch_min, " cycles");
+        }
+        print(serial, ok ? "" : " - STATUS OR COMPLETION WRONG", exact ? "" : " - READ NOT EXACT", crlf);
+        all = all && ok && exact;
+    }
+    return all;
+}
+
+/// The op names of one host: the pump's plain names, the engines' with
+/// ".dma", each with its ".bare" twin.
+struct Names {
+    const char* write[2];
+    const char* read[2];
+    const char* wr[2];
+    const char* probe[2];
+    const char* probe_nack[2];
+    const char* read_nack[2];
+};
+constexpr Names pump_names{{"i2c.write", "i2c.write.bare"},
+                           {"i2c.read", "i2c.read.bare"},
+                           {"i2c.wr", "i2c.wr.bare"},
+                           {"i2c.probe", "i2c.probe.bare"},
+                           {"i2c.probe.nack", "i2c.probe.nack.bare"},
+                           {"i2c.read.nack", "i2c.read.nack.bare"}};
+constexpr Names dma_names{{"i2c.write.dma", "i2c.write.dma.bare"},
+                          {"i2c.read.dma", "i2c.read.dma.bare"},
+                          {"i2c.wr.dma", "i2c.wr.dma.bare"},
+                          {"i2c.probe.dma", "i2c.probe.dma.bare"},
+                          {"i2c.probe.nack.dma", "i2c.probe.nack.dma.bare"},
+                          {"i2c.read.nack.dma", "i2c.read.nack.dma.bare"}};
+
+/// Two engined 16-byte reads BACK TO BACK, the second started the moment
+/// the first's completion edge is seen (the thread spinning on it), as an
+/// arbiter with a request queued would: the case the engined read's SB
+/// tail exists for (samc21/i2c.hpp). Eight pairs; prints how many second
+/// starts found SB standing, and judges both reads.
+bool back_to_back(I2cSpeed s) {
+    Eng::Request r[2]{};
+    for (uint8_t leg = 0; leg < 2u; ++leg) {
+        r[leg].addr = peer_addr;
+        r[leg].rx = lend<Lease::reply>(static_cast<uint8_t*>(i2c_rx + 16u * leg));
+        r[leg].rx_len = 16;
+        r[leg].speed = s;
+    }
+    const uint32_t w0 = Eng::tail_waits();
+    bool ok = true;
+    uint32_t lo = 0xFFFFFFFFu;
+    uint32_t hi = 0;
+    for (uint8_t k = 0; k < 8u; ++k) {
+        done = false;
+        bool sync = Eng::start(r[0]);
+        uint32_t spins = 0;
+        while (!sync && !done && ++spins < 4'000'000u) {
+        }
+        ok = ok && !sync && done && Eng::status() == i2c_ok;
+        done = false;
+        const uint32_t t0 = Ruler::now();
+        sync = Eng::start(r[1]);
+        const uint32_t gap = Ruler::now() - t0;
+        lo = gap < lo ? gap : lo;
+        hi = gap > hi ? gap : hi;
+        spins = 0;
+        while (!sync && !done && ++spins < 4'000'000u) {
+        }
+        ok = ok && !sync && done && Eng::status() == i2c_ok;
+        for (uint8_t i = 1; i < 32u; ++i) {
+            ok = ok && (i == 16u || i2c_rx[i] == static_cast<uint8_t>(i2c_rx[i - 1u] + 1u));
+        }
+        (void)delay_us(clock, 200);
+    }
+    print(serial, "  i2c.read.dma back to back, 8 pairs of 16: ", ok ? "all i2c_ok and exact" : "FAILED",
+          "; the second start() found SB standing ", Eng::tail_waits() - w0,
+          " times; that start() took ", lo, "..", hi, " cycles (a ruler read in it)", crlf);
+    return ok;
+}
+
+/// Every op at one speed, on host H.
+template <typename H>
+bool ops(I2cSpeed s, const Names& nm) {
+    bool all = true;
+    for (const uint8_t n : lengths) {
+        all = op<H>(nm.write[0], nm.write[1], s, peer_addr, n, 0, false, i2c_ok) && all;
+    }
+    for (const uint8_t n : lengths) {
+        all = op<H>(nm.read[0], nm.read[1], s, peer_addr, 0, n, false, i2c_ok) && all;
+    }
+    for (const uint8_t n : wr_lengths) {
+        all = op<H>(nm.wr[0], nm.wr[1], s, peer_addr, 1, n, false, i2c_ok) && all;
+    }
+    if constexpr (H::tx_engined) {
+        // LEN counts to 255 and the engined write needs LEN = w + 1: its
+        // longest block is 254 bytes, a 255-byte write the pump's.
+        all = op<H>(nm.write[0], nm.write[1], s, peer_addr, 254, 0, false, i2c_ok) && all;
+        // The engined phases' address NACK: LENERR + ERROR under LEN, the
+        // STOP the silicon's - i2c_nack_addr, for a write and a read.
+        all = op<H>("i2c.write.nack.dma", "i2c.write.nack.dma.bare", s, absent_addr, 16, 0, false,
+                    i2c_nack_addr) && all;
+        all = op<H>("i2c.read.nack.dma", "i2c.read.nack.dma.bare", s, absent_addr, 0, 16, false,
+                    i2c_nack_addr) && all;
+    }
+    all = op<H>(nm.probe[0], nm.probe[1], s, peer_addr, 0, 0, true, i2c_ok) && all;
+    all = op<H>(nm.probe_nack[0], nm.probe_nack[1], s, absent_addr, 0, 0, true, i2c_nack_addr) && all;
+    all = op<H>(nm.read_nack[0], nm.read_nack[1], s, absent_addr, 0, 1, true, i2c_nack_addr) && all;
+    return all;
+}
+
+}  // namespace di
+
+void ti_i2c() {
+    using namespace di;
+    for (uint16_t i = 0; i < 256u; ++i) {
+        i2c_tx[i] = static_cast<uint8_t>(i * 7u + 3u);
+    }
+    (void)GclkChannel::connect(Sercom<3>::gclk_slow_id(), 0);
+    live = Live::pump;
+    if (!Pump::init(clock, rise_ns)) {
+        print(serial, "  the I2C host did not come up", crlf);
+        bench.verdict("ran", false);
+        return;
+    }
+    if (!Dmac::init()) {
+        print(serial, "  the DMAC did not come up", crlf);
+        bench.verdict("ran", false);
+        return;
+    }
+    bool all = true;
+    for (const Speed& sp : speeds) {
+        live = Live::pump;
+        (void)Pump::init(clock, rise_ns);
+        if (!serve(15000u)) {
+            print(serial, "  THE PEER DID NOT ANSWER on 0x6B: board B must run twi_peer", crlf);
+            all = false;
+            break;
+        }
+        const uint32_t t0 = Ticker::millis();
+        print(serial, "-- ", sp.name, ": BAUD ", Pump::baud_of(sp.speed).baud, '/',
+              Pump::baud_of(sp.speed).baudlow, ", SCL period ", period<Pump>(sp.speed),
+              " cycles (", SysClock::hz / period<Pump>(sp.speed), " Hz) with the node's ", rise_ns,
+              " ns rise; the peer is twi_peer serving 0x2C", crlf);
+        all = ops<Pump>(sp.speed, pump_names) && all;
+        if constexpr (i2c_engines) {
+            live = Live::engine;
+            if (!Eng::init(clock, rise_ns)) {
+                print(serial, "  the engined host did not come up", crlf);
+                all = false;
+            } else {
+                const uint32_t w0 = Eng::tail_waits();
+                all = ops<Eng>(sp.speed, dma_names) && all;
+                print(serial, "  the engined reads' tail: ", Eng::tail_waits() - w0,
+                      " start() calls found SB standing and waited", crlf);
+                all = back_to_back(sp.speed) && all;
+                Eng::release();
+            }
+        }
+        live = Live::pump;
+        (void)Pump::init(clock, rise_ns);
+        print(serial, "  (", Ticker::millis() - t0, " ms with the peer serving)", crlf);
+        while (Ticker::millis() - t0 < 15100u) {
+        }
+    }
+    // A DATA NACK: the peer refuses the 3rd byte it receives, and a
+    // 16-byte write on each host is i2c_nack_data - the pump's on its MB
+    // with RXNACK, the engine's on LENERR with the block under way.
+    {
+        live = Live::pump;
+        (void)Pump::init(clock, rise_ns);
+        twilink::Params a{};
+        a.addr = peer_addr;
+        a.ms = 3000;
+        a.nack_at = 3;
+        uint8_t p[twilink::params_size];
+        twilink::put_params(p, a);
+        if (!command(twilink::Op::serve, p, twilink::params_size)) {
+            print(serial, "  THE PEER DID NOT TAKE THE NACKING SERVE", crlf);
+            all = false;
+        } else {
+            all = op<Pump>("i2c.write.nackdata", "i2c.write.nackdata.bare", I2cSpeed::standard_100k,
+                           peer_addr, 16, 0, false, i2c_nack_data) && all;
+            if constexpr (i2c_engines) {
+                live = Live::engine;
+                if (Eng::init(clock, rise_ns)) {
+                    all = op<Eng>("i2c.write.nackdata.dma", "i2c.write.nackdata.dma.bare",
+                                  I2cSpeed::standard_100k, peer_addr, 16, 0, false, i2c_nack_data) &&
+                          all;
+                    Eng::release();
+                }
+                live = Live::pump;
+            }
+            settle_ms(3100);
+            (void)Pump::init(clock, rise_ns);
+        }
+    }
+    Pump::release();
+    live = Live::none;
+    Dmac::release();
+    bench.verdict("every tenure completed with its status, every read byte-exact", all);
+}
+
 void banner() {
     print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console SERCOM5 ", console_baud, " 8N1 (BAUD gives ",
@@ -1504,13 +2023,26 @@ extern "C" BENCH_PLACEMENT void SERCOM5_Handler() {
     sercom_meter.leave();
 }
 extern "C" BENCH_PLACEMENT void DMAC_Handler() {
-    dmac_meter.enter();
+    // Letter i's plain runs leave this vector unmetered too (its stamps
+    // would sit inside the engined read's completion edge).
+    const bool m = di::live != di::Live::engine || di::metered;
+    if (m) {
+        dmac_meter.enter();
+    }
     while (const auto irq = brio::Dmac::take_pending()) {
-        if (!uu::dmac_dispatch(*irq)) {
+        if (i2c_engines && di::live == di::Live::engine) {
+            if constexpr (i2c_engines) {
+                if (di::Eng::dma_isr(irq->channel, irq->flags)) {
+                    di::done = true;
+                }
+            }
+        } else if (!uu::dmac_dispatch(*irq)) {
             dd::dmac_dispatch(*irq);
         }
     }
-    dmac_meter.leave();
+    if (m) {
+        dmac_meter.leave();
+    }
 }
 extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
     sercom1_meter.enter();
@@ -1536,6 +2068,23 @@ extern "C" BENCH_PLACEMENT void SERCOM1_Handler() {
     }
     sercom1_meter.leave();
 }
+extern "C" BENCH_PLACEMENT void SERCOM3_Handler() {
+    if (di::metered) {
+        sercom3_meter.enter();
+    }
+    if constexpr (i2c_engines) {
+        if (di::live == di::Live::engine) {
+            di::serve_vector<di::Eng>();
+        } else {
+            di::serve_vector<di::Pump>();
+        }
+    } else {
+        di::serve_vector<di::Pump>();
+    }
+    if (di::metered) {
+        sercom3_meter.leave();
+    }
+}
 extern "C" BENCH_PLACEMENT void SysTick_Handler() {
     tick_meter.enter();
     brio::Ticker::tick();
@@ -1555,6 +2104,8 @@ int main() {
     bench.letter('d', "the DMA: copy, fill, paced, spi.dma", td_dma);
     bench.letter('e', "the SPI host above the wire: spi.poll, spi.pump, spi.req", te_spi_host);
     bench.letter('u', "the UART on a loop: uart.tx, uart.rx, uart.edge", tu_uart);
+    bench.letter('i', "the I2C host against the peer: i2c.write, i2c.read, i2c.wr, i2c.probe",
+                 ti_i2c);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED", " tick=",

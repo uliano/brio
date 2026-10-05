@@ -994,11 +994,9 @@ bool move_slow(uint8_t generator) {
 /// engine's cached standard_100k, so its apply() will not rewrite
 /// CTRLA underneath these bits on same-speed tenures.
 bool timeouts_on(bool low, bool sext) {
-    I2cmConfig c{};
-    c.pads = bus_pads;
-    c.speed = I2cSpeed::standard_100k;
-    c.baud = I2cHw::baud_of(I2cSpeed::standard_100k);
-    c.inactive_timeout = I2cInactiveTimeout::us205;
+    // The engine's own configuration, the two enables added: the engine
+    // keeps relying on what it set (smart mode, the INACTOUT escape).
+    I2cmConfig c = I2cHw::configuration(I2cSpeed::standard_100k);
     c.scl_low_timeout = low;
     c.client_extend_timeout = sext;
     if (!Raw::configure(c) || !Raw::enable(true)) return false;
@@ -1105,18 +1103,20 @@ void tj_timeouts() {
                   "the tenure completes i2c_ok at the stretch's own pace",
                   base.status == i2c_ok && base.ms >= 40u);
 
-    // THE OBVIOUS READING, MEASURED AND OVERTURNED. 33.6.3.1 invites
-    // "enable LOWTOUT/SEXT and a client that hangs the bus becomes a
-    // status" - so both enables go in and the same 40 ms-per-byte
-    // client serves again. NOTHING COUNTS: the tenure completes i2c_ok
-    // at the stretch's own pace with not one time-out bit rising in
-    // the live-sampled STATUS. The tell is in the remedy each CTRLA
-    // description prescribes - "the HOST will release ITS clock hold
-    // ... a STOP will automatically be transmitted" - a STOP that is
-    // PHYSICALLY IMPOSSIBLE while a client holds SCL low; and indeed
-    // during the client's stretch the host's CLKHOLD never rises and
-    // the counters never start. THESE TIME-OUTS POLICE THE HOST'S OWN
-    // SIDE, not the wire.
+    // THE CHAPTER'S READING, MEASURED. 33.6.3.1: enable LOWTOUT and
+    // SEXTTOUT and a client that holds the bus becomes a status. Both
+    // enables go in - on the ENGINE'S OWN configuration
+    // (I2cHw::configuration()), which keeps smart mode, and configure()
+    // disarms every interrupt, which the engine arms again with each
+    // phase - and the same 40 ms-per-byte client serves again: the
+    // tenure ends inside the 25..35 ms window with i2c_bus_error, the
+    // client still holding SCL. THE TIME-OUTS SEE A CLIENT'S HOLD of
+    // SCL; the engine's finish() sweeps the W1C bits, so which of the
+    // two fired is not in the live sample (an earlier version of this
+    // letter reconfigured the resource behind an engine that kept none
+    // of its interrupts, timed out, re-initialized it WITHOUT the
+    // time-outs and then measured a client's hold on a host that had
+    // none armed).
     bench.verdict("LOWTOUTEN and SEXTTOEN both go in through configure()",
                   timeouts_on(true, true));
     if (!peer_act(Op::serve, a)) {
@@ -1128,15 +1128,11 @@ void tj_timeouts() {
     print(serial, "  both time-outs armed, client stretching 40 ms/byte: status=",
           hex(held.status), " in ", held.ms, " ms, STATUS bits seen live=",
           hex(held.status_seen), crlf);
-    bench.verdict("A CLIENT HOLDING SCL DOES NOT TRIP THEM: 80 ms of client "
-                  "stretch under both enables completes i2c_ok with no time-out "
-                  "bit ever rising - the host's SMBus time-outs police the "
-                  "HOST'S OWN clock hold, not the wire (the remedy the chapter "
-                  "prescribes, an automatic STOP, would be physically impossible "
-                  "under a client's hold - and the counters never start)",
-                  held.status == i2c_ok && held.ms >= 40u &&
-                      (held.status_seen &
-                       (I2cmStatus::low_timeout | I2cmStatus::sext_timeout)) == 0u);
+    bench.verdict("A CLIENT HOLDING SCL TRIPS THEM: under both enables a 40 ms "
+                  "client stretch ends the tenure inside the 25..35 ms window as "
+                  "i2c_bus_error - the SMBus time-outs bound a client's hold of the "
+                  "clock, as 33.6.3.1 reads",
+                  held.status == i2c_bus_error && held.ms >= 25u && held.ms <= 36u);
 
     // WHAT THEY DO POLICE, measured: the host's OWN hold. MB left
     // unserviced (the NVIC line down) is the host stretching for
@@ -1440,13 +1436,14 @@ void tk_kernel() {
 // l - THE TIMED BUS: a wedged tenure as a reply, on the arbiter's clock
 // ===========================================================================
 //
-// Letter j measured that the silicon's SMBus time-outs police the
-// HOST'S OWN clock hold and cannot see a wire a client wedged; this
-// letter runs the answer that CAN - util/bus_master.hpp's per-bus
-// timeout - against the same two stagings letter j
-// used: legal stretching (must pass untouched) and the held wire (must
-// come back i2c_timeout on the arbiter's clock, the engine recover()ed
-// in the same dispatch).
+// Letter j measured that the silicon's SMBus time-outs bound a client's
+// hold of SCL - when they are armed, on a slow clock weighed to 32 kHz;
+// a wire wedged by SDA (the START parked, no clock moving) and a bus
+// that runs without them are the arbiter's to answer. This letter runs
+// that answer - util/bus_master.hpp's per-bus timeout - against two
+// stagings: legal stretching (must pass untouched) and an SDA held low
+// (must come back i2c_timeout on the arbiter's clock, the engine
+// recover()ed in the same dispatch).
 
 namespace tl {
 
@@ -1596,7 +1593,8 @@ void tl_timed() {
                   tl::Driver::replies == 1 && wedge_status == i2c_timeout &&
                       reply_ms >= tl::timeout_ms && reply_ms < 55u);
     bench.verdict("and it lands while the wire is STILL HELD - the diagnosis is the "
-                  "timeout's, not the release's (letter j's silicon could never)",
+                  "timeout's, not the release's (no time-out of this silicon sees a START "
+                  "parked behind a held SDA)",
                   still_held);
 
     // Leg 3: THE GIVE-BACK. recover() ran inside the arbiter's own

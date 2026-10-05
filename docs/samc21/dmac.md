@@ -328,9 +328,9 @@ promise, not an inheritance from whatever a debugger left behind.
   away), and mid-block progress through `DmaChannel::harvest()` and
   nowhere else, so every write-back reading is validated against the
   slot.
-- **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart and SPI host
-  engines (see sercom.md and spi.md for the task-side contracts; a Uart
-  takes ONE of them, erratum 1.10.4 above): drain
+- **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart, SPI host and
+  I2C host engines (see sercom.md, spi.md and i2c.md for the task-side
+  contracts; a Uart takes ONE of them, erratum 1.10.4 above): drain
   a buffer into a peripheral, and fill a buffer from one. The transmit
   side's claim and programming are TWO verbs, `reserve()` (a
   test-and-set of its busy flag) and `launch(run)` (`cancel()` gives an
@@ -345,7 +345,11 @@ promise, not an inheritance from whatever a debugger left behind.
   `complete()`, from the handler on the channel's completion, counts the
   whole run with no write-back read and no suspend (the Uart's edge,
   sercom.md), and `take()` asks mid-block by harvesting, its PACING the
-  caller's.
+  caller's. `halt()` ends a block whose PERIPHERAL stopped asking - an
+  I2C client's NACK under ADDR.LEN, the transfer over with beats left -
+  and keeps the binding (trigger, interrupts, slot) for the next start;
+  `stop()` disarms the interrupts too, for an owner putting the engine
+  away.
 - **`DmaLoopEngine`** - one caller-owned table played into a
   peripheral for ever. `start(table, length)`, `complete()` from the
   handler (counts the lap, re-arms the same block), `laps()`,

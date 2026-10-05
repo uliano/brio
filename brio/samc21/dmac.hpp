@@ -1922,6 +1922,20 @@ public:
         busy_ = false;
     }
 
+    /// End the block in flight because its PERIPHERAL stopped asking -
+    /// an I2C client's NACK under ADDR.LEN, the host's transfer over with
+    /// beats left (samc21/i2c.hpp) - and KEEP THE BINDING: the channel
+    /// disabled (bounded, 25.8.18), its trigger, its armed interrupts and
+    /// its slot as arm() left them, so the next start() needs nothing
+    /// else. stop() is the other verb: it disarms the interrupts too,
+    /// for an owner that is putting the engine away. What was not moved
+    /// is the caller's; no completion follows a halted block.
+    static void halt() {
+        (void)Channel::enable(false);
+        in_flight_ = 0;
+        busy_ = false;
+    }
+
 private:
     /// The per-block half: three stores into the slot, the in-flight
     /// count, the enable. The channel is idle here - a reservation is
@@ -2120,6 +2134,15 @@ public:
     static void stop() {
         (void)Channel::enable(false);
         Channel::arm(DmaFlag::all, false);
+        capacity_ = 0;
+        taken_ = 0;
+    }
+
+    /// End the block in flight and keep the binding - DmaTxEngine::halt()'s
+    /// twin, for an owner whose peripheral stopped delivering before the
+    /// run was full. What landed is in the buffer; no completion follows.
+    static void halt() {
+        (void)Channel::enable(false);
         capacity_ = 0;
         taken_ = 0;
     }
