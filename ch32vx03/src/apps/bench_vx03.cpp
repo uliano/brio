@@ -1293,6 +1293,289 @@ void te_spi() {
     bench.verdict("ran", true);
 }
 
+// =============================================================================
+// u - the serial transport on the crossed pair
+// =============================================================================
+/// USART2 on PA2/PA3 is the transport measured; the fourth port on PB0/PB1
+/// is its peer through the board's crossed pair (PA2-PB1, PB0-PA3) - the
+/// stimulus a receive is measured on, sent through its own transmit
+/// engine (DMA1 channel 1) so that it adds one interrupt a burst. Both
+/// ports count PCLK1, 72 MHz: the top rate is 72 MHz / 16, 4.5 Mbaud.
+/// USART2's engines are DMA1's channels 7 out and 6 in (RM 11.2.3).
+constexpr uint16_t loop_ring = 512;
+using LoopTxEngine = DmaTxEngine<1, 7>;
+using LoopRxEngine = DmaRxEngine<1, 6>;
+using LoopIrq = Uart<2, Plat, loop_ring, loop_ring>;
+using LoopTxe = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, NoDmaEngine>;
+using LoopDma = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, LoopRxEngine>;
+/// The stimulus's transmit slot: DMA1's channel 1 on the CH32V203, DMA2's
+/// channel 5 on the CH32V303 (RM 11.2.3).
+using StimRow = DmaRequestOf<DmaRequest::uart4_tx>;
+using Stim = Uart<4, Plat, 64, loop_ring, UartFormat{},
+                  DmaTxEngine<StimRow::controller, StimRow::channel>, NoDmaEngine>;
+using LoopRes = Usart<2>;
+using StimRes = Usart<4>;
+
+Meter loop_meter;       // usart2_handler
+Meter loop_dma_meter;   // dma1_channel6_handler and dma1_channel7_handler under letter u
+
+/// Which shape owns USART2: 0 none, 1 LoopIrq, 2 LoopTxe, 3 LoopDma; and
+/// whether the fourth port is up as the stimulus.
+volatile uint8_t loop_owner = 0;
+volatile bool stim_up = false;
+volatile bool loop_edge = false;
+volatile uint32_t loop_edge_at = 0;
+
+constexpr uint32_t loop_rates[] = {115200, 1'000'000, 4'500'000};
+
+BenchCounters loop_counters() {
+    return bench_counters<Plat>(tick_meter, usart_meter, loop_meter, loop_dma_meter);
+}
+
+/// Give USART2 back; the owner forgotten after the release, whose stopped
+/// streams may still raise a flag their vector serves.
+void loop_down() {
+    const uint8_t was = loop_owner;
+    if (was == 1u) {
+        LoopIrq::release();
+    } else if (was == 2u) {
+        LoopTxe::release();
+    } else if (was == 3u) {
+        LoopDma::release();
+    }
+    loop_owner = 0;
+    if (stim_up) {
+        Stim::release();
+        stim_up = false;
+    }
+}
+
+void loop_wait_ms(uint32_t ms) {
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 <= ms) {
+    }
+}
+
+template <typename Port>
+bool loop_up(uint8_t owner, uint32_t baud, bool with_stim) {
+    loop_down();
+    loop_owner = owner;
+    bool up = Port::init(clock, baud);
+    if (with_stim) {
+        up = Stim::init(clock, baud) && up;
+        stim_up = true;
+    }
+    loop_wait_ms(2);
+    loop_edge = false;
+    return up;
+}
+
+/// The wire of the rate USART2 runs at: its divisor over ten bits a byte.
+uint32_t loop_wire() { return LoopIrq::actual_baud(72'000'000u) / 10u; }
+
+const uint8_t* loop_pattern() { return reinterpret_cast<const uint8_t*>(filler<4096>.text); }
+
+template <typename Port>
+uint32_t loop_drain(uint32_t at, bool& in_order) {
+    uint32_t got = 0;
+    const uint8_t* want = loop_pattern();
+    for (;;) {
+        const auto run = Port::read_span();
+        if (run.empty()) {
+            return got;
+        }
+        for (uint32_t i = 0; i < run.size(); ++i) {
+            if (run[i] != want[(at + got + i) % 4096u]) {
+                in_order = false;
+            }
+        }
+        got += static_cast<uint32_t>(run.size());
+        (void)Port::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+/// uart.tx: n bytes through the transport, idling while the ring is full
+/// and while an interrupt is coming, spinning through the last frame.
+template <typename Port>
+BenchSample loop_tx(uint32_t n) {
+    console_drain();
+    const BenchCounters c0 = loop_counters();
+    Stopwatch<Ruler> sw;
+    sw.start();
+    uint32_t queued = 0;
+    for (;;) {
+        Plat::CriticalSection cs;
+        queued += Port::write_bulk(std::span<const uint8_t>(loop_pattern() + queued, n - queued));
+        if (queued >= n) {
+            break;
+        }
+        Plat::idle();
+    }
+    for (;;) {
+        Plat::CriticalSection cs;
+        if (Port::tx_idle()) {
+            break;
+        }
+        if (LoopRes::txe_interrupt() || LoopTxEngine::busy()) {
+            Plat::idle();
+        }
+    }
+    const uint32_t w = sw.elapsed();
+    const BenchCounters c1 = loop_counters();
+    return bench_sample(w, c0, c1);
+}
+
+/// uart.rx: a burst of n sent by the fourth port's engine, received on
+/// USART2, the consumer idling until the edge and draining on it - or,
+/// with `poll`, asking harvest() once a tick (the owner's poll).
+template <typename Port, bool poll>
+BenchSample loop_rx(uint32_t n, uint32_t& got, bool& in_order) {
+    console_drain();
+    bool scrap = true;
+    (void)loop_drain<Port>(0, scrap);
+    Port::clear_errors();
+    loop_edge = false;
+    in_order = true;
+    got = 0;
+    const BenchCounters c0 = loop_counters();
+    Stopwatch<Ruler> sw;
+    sw.start();
+    (void)Stim::write_bulk(std::span<const uint8_t>(loop_pattern(), n));
+    uint32_t tick = Ticker::ticks();
+    const uint32_t t0 = tick;
+    while (got < n && Ticker::ticks() - t0 < 1000u) {
+        // The platform's idle() returns with interrupts ENABLED, so the
+        // flag is taken under a guard of its own after it: a vector between
+        // the read and the clear would be lost.
+        {
+            Plat::CriticalSection cs;
+            if (!loop_edge) {
+                Plat::idle();
+            }
+        }
+        bool edge = false;
+        {
+            Plat::CriticalSection cs;
+            edge = loop_edge;
+            loop_edge = false;
+        }
+        if constexpr (poll) {
+            if (Ticker::ticks() != tick) {
+                tick = Ticker::ticks();
+                if (Port::harvest()) {
+                    edge = true;
+                }
+            }
+        }
+        if (edge) {
+            got += loop_drain<Port>(got, in_order);
+        }
+    }
+    const uint32_t w = sw.elapsed();
+    const BenchCounters c1 = loop_counters();
+    return bench_sample(w, c0, c1);
+}
+
+/// uart.edge: a burst of 16 from the fourth port, its TC spun on, then
+/// the cycles to the edge that follows.
+template <typename Port, bool poll>
+BenchSample loop_edge_after(uint32_t& late) {
+    console_drain();
+    bool scrap = true;
+    (void)loop_drain<Port>(0, scrap);
+    StimRes::clear_flags(usart_tc);
+    loop_edge = false;
+    (void)Stim::write_bulk(std::span<const uint8_t>(loop_pattern(), 16));
+    uint32_t got = 0;
+    while (!StimRes::tx_complete()) {
+        if constexpr (!poll) {
+            if (loop_edge) {
+                loop_edge = false;
+                got += loop_drain<Port>(got, scrap);
+            }
+        }
+    }
+    const uint32_t t_tc = Ruler::now();
+    const BenchCounters c0 = loop_counters();
+    uint32_t tick = Ticker::ticks();
+    uint32_t at = 0;
+    late = 0;
+    for (;;) {
+        if (loop_edge) {
+            at = loop_edge_at;
+            break;
+        }
+        if constexpr (poll) {
+            if (Ticker::ticks() != tick) {
+                tick = Ticker::ticks();
+                if (Port::harvest()) {
+                    at = Ruler::now();
+                    break;
+                }
+            }
+        }
+        if (Ruler::now() - t_tc > Ruler::hz() / 100u) {
+            late = 1;
+            at = Ruler::now();
+            break;
+        }
+    }
+    const BenchCounters c1 = loop_counters();
+    (void)loop_drain<Port>(got, scrap);
+    return bench_sample(at - t_tc, c0, c1);
+}
+
+void tu_uart() {
+    bool all_up = true;
+    for (const uint32_t baud : loop_rates) {
+        all_up = loop_up<LoopIrq>(1, baud, false) && all_up;
+        const uint32_t wire = loop_wire();
+        print(serial, "  USART2 at ", LoopIrq::actual_baud(72'000'000u), " baud", crlf);
+        for (const uint32_t n : {256u, 4096u}) {
+            bench_line(serial, "uart.tx", n, loop_tx<LoopIrq>(n), Ruler::hz(), wire);
+        }
+        all_up = loop_up<LoopTxe>(2, baud, false) && all_up;
+        for (const uint32_t n : {256u, 4096u}) {
+            bench_line(serial, "uart.tx.dma", n, loop_tx<LoopTxe>(n), Ruler::hz(), wire);
+        }
+        all_up = loop_up<LoopTxe>(2, baud, true) && all_up;
+        for (const uint32_t n : {16u, 256u}) {
+            uint32_t got = 0;
+            bool in_order = false;
+            const BenchSample s = loop_rx<LoopTxe, false>(n, got, in_order);
+            bench_line(serial, "uart.rx", n, s, Ruler::hz(), wire);
+            if (got != n || !in_order) {
+                print(serial, "  received ", got, in_order ? " in order" : " OUT OF ORDER", "; ORE ",
+                      LoopTxe::hw_overruns(), " FE ", LoopTxe::frame_errors(), " stim idle ",
+                      Stim::tx_idle() ? 1 : 0, " pending ", LoopTxe::rx_pending(), crlf);
+            }
+        }
+        all_up = loop_up<LoopDma>(3, baud, true) && all_up;
+        for (const uint32_t n : {16u, 256u}) {
+            uint32_t got = 0;
+            bool in_order = false;
+            const BenchSample s = loop_rx<LoopDma, false>(n, got, in_order);
+            bench_line(serial, "uart.rx.dma", n, s, Ruler::hz(), wire);
+            if (got != n || !in_order) {
+                print(serial, "  received ", got, in_order ? " in order" : " OUT OF ORDER", "; ORE ",
+                      LoopDma::hw_overruns(), " FE ", LoopDma::frame_errors(), " ring ",
+                      LoopDma::rx_overruns(), crlf);
+            }
+        }
+        {
+            uint32_t late = 0;
+            const BenchSample e = loop_edge_after<LoopDma, false>(late);
+            bench_line(serial, "uart.edge", 16, e, Ruler::hz(), 0);
+            print(serial, "  the edge ", e.wall, " cycles after the last stop bit = ",
+                  e.wall * 10u / (Ruler::hz() / wire), " tenths of a frame",
+                  late != 0u ? " (TIMED OUT)" : "", crlf);
+        }
+        loop_down();
+    }
+    bench.verdict("the pair came up at every rate", all_up);
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_vx03 - ", device::part_name,
           " (clk=144 MHz PLL, ruler=STK cycles at 144 MHz, tick=STK 1000 Hz, console=USART1 ",
@@ -1318,15 +1601,75 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+    if constexpr (StimRow::controller == 1u && StimRow::channel == 1u) {
+        if (stim_up) {
+            (void)Stim::dma_isr();   // letter u's stimulus: not metered, one a burst
+            return;
+        }
+    }
     copy_meter.enter();
     copy_vector();
     copy_meter.leave();
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+    if (loop_owner >= 2u) {
+        loop_dma_meter.enter();
+        if (loop_owner == 2u) {
+            (void)LoopTxe::dma_isr();
+        } else {
+            (void)LoopDma::dma_isr();
+        }
+        loop_dma_meter.leave();
+        return;
+    }
     paced_meter.enter();
     paced_vector();
     paced_meter.leave();
+}
+
+/// USART2's receive channel under letter u: the circular ring's laps and
+/// their half and full marks, whose true is the edge as the USART's.
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    loop_dma_meter.enter();
+    if (loop_owner == 3u && LoopDma::dma_isr()) {
+        loop_edge_at = Ruler::now();
+        loop_edge = true;
+    }
+    loop_dma_meter.leave();
+}
+
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+    loop_meter.enter();
+    bool edge = false;
+    if (loop_owner == 1u) {
+        edge = LoopIrq::isr();
+    } else if (loop_owner == 2u) {
+        edge = LoopTxe::isr();
+    } else if (loop_owner == 3u) {
+        edge = LoopDma::isr();
+    }
+    if (edge) {
+        loop_edge_at = Ruler::now();
+        loop_edge = true;
+    }
+    loop_meter.leave();
+}
+
+/// The stimulus's slot on the CH32V303; nothing in the CH32V203's vector
+/// table names this body.
+extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() {
+    if constexpr (StimRow::controller == 2u) {
+        if (stim_up) {
+            (void)Stim::dma_isr();
+        }
+    }
+}
+
+extern "C" BRIO_CH32_INTERRUPT void uart4_handler() {
+    if (stim_up) {
+        (void)Stim::isr();
+    }
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
@@ -1366,6 +1709,7 @@ int main() {
     bench.letter('d', "the DMA engines: copy, fill, a paced block, SPI1's engined write", td_dma);
     bench.letter('e', "the SPI host above the wire: polled, pumped, a request's price, the overrun oracle",
                  te_spi);
+    bench.letter('u', "the serial transport on the crossed pair: transmit, receive, the edge", tu_uart);
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a port that failed to come up would never return.

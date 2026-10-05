@@ -1142,8 +1142,10 @@ private:
  * util/ring.hpp's HardwareRing<storage, DmaRxEngine<c, ch, Elem>> is the
  * consumer half, and a lap the consumer did not keep up with is that view's
  * accounting (its overruns()), because only the consumer knows where its
- * tail is. The half-transfer flag stays unarmed: the view reads the count
- * whenever it looks, and the wrap is the one edge the lap count needs. A
+ * tail is. The half-transfer flag is armed on request (`half_mark`): the
+ * view reads the count whenever it looks and the wrap is the one edge the
+ * lap count needs, but a byte transport's ring wants the lap's half and
+ * full marks as the edge of a stream that never falls silent. A
  * circular channel never stops on its own - EN stands, and with it the
  * bus-master count the channel holds (a program with a ring running does
  * not sleep on this family, the file header) - so the one way it stops by
@@ -1218,16 +1220,24 @@ public:
      * array - the consumer view's own, named in its type - and its element
      * is the beat; its length, the count every lap reloads, is a compile-
      * time fact and is checked here (CNTR counts 65535 at most). The lap and
-     * the error are armed and the PFIC line enabled; the channel comes out
+     * the error are armed, with `half_mark` the half lap too (service()
+     * hands it back; lap() is the completion's alone), and the PFIC line
+     * enabled; the channel comes out
      * stopped, and start() runs the ring. False, and nothing armed, when
      * `data` is not aligned to Elem, the storage not aligned to its element,
      * or - on the CH32V303's DMA1 - the storage across a 64 KB boundary.
      * The one-shot verbs stay usable on the same binding: a start(run)
      * replaces the ring until the next start().
      */
+    /// The same at the low priority, the half lap's mark asked for or
+    /// not: what a transport that names no DmaPriority spells.
+    template <typename T, size_t N>
+    static bool arm(volatile void* data, T (&storage)[N], bool half_mark) {
+        return arm(data, storage, DmaPriority::low, half_mark);
+    }
     template <typename T, size_t N>
     static bool arm(volatile void* data, T (&storage)[N],
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::low, bool half_mark = false) {
         static_assert(sizeof(T) <= sizeof(Elem),
                       "brio DmaRxEngine: a ring wider than this binding's beat - name the engine "
                       "with the wider element if the register gives it");
@@ -1237,7 +1247,10 @@ public:
                       "brio DmaRxEngine: a ring of 2..65535 items - CNTR is the count every lap "
                       "reloads, and it is sixteen bits (11.3.4)");
         ring_length_ = 0;
-        if (!arm(data, static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error), priority)) {
+        if (!arm(data,
+                 static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error |
+                                      (half_mark ? DmaFlag::half : 0u)),
+                 priority)) {
             return false;
         }
         const uint32_t m = dma_address(&storage[0]);

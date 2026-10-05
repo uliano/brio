@@ -130,6 +130,18 @@ both parts.
   clears ORE.
 - **IDLE rises once** after a frame followed by a line that stays high,
   and not again until RXNE has been set (18.10.1's note, measured).
+- **A read of STATR ARMS the clear; the next read of DATAR performs it,
+  on every flag standing at that read** - measured on the CH32V203C8T6
+  with the receive channel reading DATAR and the CPU never: a break's FE
+  raised after a status read is gone once the channel has read the
+  break's own frame, and one raised with no status read since the last
+  DATAR read stands (FE and IDLE both read 1 three milliseconds later);
+  and clearing IDLE that way also forgets the idle the clearing frame
+  armed, so one frame after an idle that was read raises no IDLE of its
+  own and two frames do. The STM32F4's block, under the same words in
+  its manual, clears only what the status read SAW
+  ([../stm32f4/usart.md](../stm32f4/usart.md)) - a difference of the
+  silicon the transport's receive engine is written from (below).
 
 ### The modes
 
@@ -192,6 +204,20 @@ both parts.
   low again when it is read. A change on the CTS line raises its flag in
   both directions and CTSIE carries it to the vector.
 
+### The receive side's offer, and what the transport takes of it
+
+| the chapter's offer | taken? | why |
+|---|---|---|
+| DATAR, one level: no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | nothing deeper to batch; 4.5 Mbaud on the crossed pair carried byte for byte |
+| DMAR and a circular channel ([dma.md](dma.md)) | the receive engine | the bulk path: no entry a byte, no re-arm |
+| IDLE and IDLEIE (18.10.1) | the engine's burst edge | one frame after the last stop bit; the channel's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
+| RXNEIE beside DMAR | the engine's wait for a frame | the channel still takes the byte and the vector learns one came (measured: one entry a frame, RXNE already clear, CNTR moved) - the edge of a burst of one frame |
+| EIE (FE, NE, ORE under DMAR) and PEIE | counted by the engine's vector | an error is counted when it rises and disarmed until the channel's next read clears it |
+| the half and full marks of the channel's lap | the engine's edge with no silence | a stream that never pauses is told twice a lap |
+| a receiver time-out | none on this block | |
+| the LIN break flag | not taken | the transport carries no LIN; a break reaches the receiver as the 0x00 frame with FE it is |
+| TC written 0 (18.10.1) | at every transmit block's start | the channel's writes of DATAR run no part of TC's software clear; `tx_idle()` must not answer from the frame before the block |
+
 ### The DMA requests are slots
 
 On this family the channel IS the request ([dma.md](dma.md)), and on the
@@ -222,9 +248,23 @@ through its pull ([dma.md](dma.md)). What the consumer did not keep
 up with - a lap written over its unread bytes, or a run written over
 while it was held - the ring counts and SKIPS, and `rx_overruns()`
 reports it; `consume()` answers whether the run it releases was intact.
-With a receive engine the handler's receive half is compiled out: RXNE
-is the channel's request, and a handler entered for TXE that read DATAR
-would take a byte from under the channel.
+With a receive engine the handler NEVER READS DATAR - RXNE is the
+channel's request, and a read would take a byte from under the channel -
+and its receive half is the two states of `usart.hpp`'s header, written
+from the clear measured above: WAITING FOR THE END (IDLEIE, PEIE, EIE),
+where an idle line or an error is counted, its clear armed by that status
+read and the edge reported, then WAITING FOR A FRAME (RXNEIE alone),
+whose entry reads NO STATR - a status read there would arm the clear the
+next frame's own read performs, and that frame's error would vanish
+unseen - but CNTR: a moved count turns the vector back and reports the
+edge again, which is the only edge a burst of one frame gets. The
+channel's half and full marks report it from `dma_isr()`. Two interrupts
+a burst, none a byte. WHAT THE CHANNEL'S READ BOUNDS is the counts and
+never the bytes: the frame after one whose error was counted loses its
+own (a run of errored frames counts every other one), so does the first
+frame of a burst after an idle the vector saw, and a status read anywhere
+else - `tx_idle()`, the interrupt transmitter's entry, a thread polling a
+flag - arms the clear for the next frame's error.
 Measured on the CH32V303VCT6's crossed pair:
 USART2's two engines on DMA1 against UART4's on DMA2, a message each way
 and then four kilobytes each way at 921600 baud, every byte in order and
@@ -342,10 +382,17 @@ lot-keyed registers of this die already said it is
   `frame_errors()`, `parity_errors()`, `noise_errors()`,
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/
   `set_baud()`/`rebase()`/`divisor_for()`/`can_baud()`/`min_hz_for()`,
-  `release()`, and the engine verbs `dma_isr()`, `harvest()` (the
-  receive ring's housekeeping and its edge: true when the ring holds
-  bytes and the consumer has found it empty since the last true, the
-  edge `isr()` gives), `dma_faults()`. THE FRAME IS ITS OWN PARAMETER
+  `release()`, `rx_skips()` (the receive ring's skips, never cleared -
+  util/serial_port.hpp's epoch; zero without an engine), and the engine
+  verbs `dma_isr()` (whose true is the receive edge, as `isr()`'s),
+  `harvest()` (the same edge asked from the consumer's side - true when
+  the ring holds bytes and the consumer has found it empty since the last
+  true from a vector or from here - and a stopped ring started again; it
+  reads neither STATR nor DATAR), `dma_faults()`. `tx_idle()` is THE
+  WIRE'S: the ring empty, no block in flight, and TC, cleared as every
+  transmit block starts. `write_bulk()` copies a run of 16 bytes or more
+  whose source and ring slot share their alignment with the runtime's
+  memcpy, any other with its byte loop. THE FRAME IS ITS OWN PARAMETER
   here, ahead of the engine slots, and `UartOptions` - the trailing one -
   carries what is left: `half_duplex` (the TX pad as an alternate-function
   open drain, the RX pad untouched) and `rts`/`cts` (the column's pads,
@@ -389,14 +436,19 @@ CH32V303:
 ```cpp
 using Loop = brio::Uart<2, P, 256, 256, brio::UartFormat{},
                         brio::DmaTxEngine<1, 7>, brio::DmaRxEngine<1, 6>>;
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+    if (Loop::isr()) { brio::post<LoopLines>(brio::RxActivity{}); }       // idle line, first frame
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    if (Loop::dma_isr()) { brio::post<LoopLines>(brio::RxActivity{}); }   // the lap's marks
+}
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Loop::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Loop::dma_isr(); }
 
 using Far = brio::Uart<4, P, 256, 256, brio::UartFormat{},
                        brio::DmaTxEngine<2, 5>, brio::DmaRxEngine<2, 3>>;
+extern "C" BRIO_CH32_INTERRUPT void uart4_handler() { (void)Far::isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { (void)Far::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() { (void)Far::dma_isr(); }
-// ... and harvest() from a TimeEvent the owner arms: the edge of new bytes
 ```
 
 The chapter beyond the transport, on the resource - a LIN break, a
@@ -440,16 +492,16 @@ U::enable(true);
 
 The reference suite is `test_vx03_serial`, at 144 MHz - PCLK2 144, PCLK1
 72 - with USART2 as the instrument on its default pads and the console
-untouched on USART1: 44 verdicts in `z` on the CH32V203C8T6, 47 on the
-CH32V303VCT6, whose letters n..p are that series' own. Almost every
+untouched on USART1: 56 verdicts in `z` on the CH32V203C8T6 with the
+crossed pair strapped, the CH32V303VCT6's letters n..p that series' own. Almost every
 letter needs no wire, and three facts of this silicon are why: the
 receive pad is a bit-banged transmitter (an input follows its own pull,
 which the output data register moves in a few cycles), a pad driven by a
 peripheral still reaches a TIMER CAPTURE input on the same pad (USART2's
 TX is TIM2's channel 3, the fourth port's remapped CK is TIM3's channel
 1), and the fourth serial port is a USART whose clock pad can be counted.
-Every fact above with a number is this suite's measurement. Two letters
-want a strap and detect its absence: the loopback PA2 to PA3, and the
+Every fact above with a number is this suite's measurement. The letters
+that want a strap detect its absence and say so: the loopback PA2 to PA3, and the
 crossed pair of USART2's pads with UART4's default ones - PA2-PB1 with
 PB0-PA3 on the CH32V203C8T6's board, PA2-PC11 with PC10-PA3 on the
 CH32V303 evaluation board - and the second is measured on both below.
@@ -484,6 +536,55 @@ CH32V303 evaluation board - and the second is measured on both below.
   way at 921600 baud - 923076 really, the divisor 78 of a 72 MHz bus - in
   44378 us each way, against 44373 for the bits alone, so the two
   controllers feed the two ports back to back.
+- **Errors under the receive engine** (letter q, the CH32V203C8T6's
+  crossed pair, the fourth port the sender): 120 data bytes with 14
+  breaks between them in a continuous stream - every data byte delivered
+  intact and in order, the 14 breaks stored as the 0x00 frames they are,
+  FE counted 14: no byte taken by a clear. Two breaks back to back count
+  1, three count 2. The interrupt receiver drops each break's frame and
+  counts it (40 of 40, FE 10 for 10). The breaks are banged on the
+  sender's pad: measured on the same board, the transmitter SENDS ITS
+  LAST BYTE AGAIN after an SBK break, so SBK put a repeated byte into
+  every stream it broke - a fact of the sender worth knowing, not of the
+  receiver.
+- **`tx_idle()` is the wire's** (letter r, TIM2's channel 3 latching
+  PA2's last rising edge): its first true lands 1263 to 1295 timer clocks
+  after the last stop bit starts at 115200 (a bit is 1250) and 151 to
+  186 at 1 Mbaud (a bit is 144), on the interrupt transmitter and the
+  transmit engine alike - TC at the stop bit's end, a poll's few clocks
+  late. Before this round the engined transport could answer from a TC
+  the frame before its block had left.
+- **The burst edge from the vector** (letter s, nothing polled): every
+  burst of one frame told; a burst of 16 at 1 Mbaud told about 1711
+  cycles after its last stop bit (1.1 frames) with two USART interrupts
+  and none a byte; four laps of the 256-byte ring with no silence read
+  whole on the lap's marks.
+- **The cost** (`bench_vx03` letter u, USART2 on the crossed pair, the
+  fourth port's engine the stimulus): the receive engine takes two USART
+  interrupts a burst and one channel interrupt a half lap, each entry
+  about 165 to 190 cycles between the bench's stamps - the idle-line one
+  reading STATR once, CNTR twice and writing CTLR1 and CTLR3, the
+  first-frame one CNTR alone and the same two writes; the edge lands
+  13497 cycles after the last stop bit at 115200 (1.0 frame), 1705 at 1
+  Mbaud (1.1) and 497 at 4.5 Mbaud (1.5), where the BEFORE - the owner
+  asking `harvest()` once a tick - was 50424, 120624 and 124450. A burst
+  of 16 at 1 Mbaud is read in 1.11 of its wire time (6.37 before). The
+  interrupt receiver is one entry a byte, about 150 cycles each. Transmit
+  is wire-bound through either path at 115200, 1 Mbaud and 4.5 Mbaud (x
+  1.00); the engine's interrupts are one a block, but the core does not
+  sleep while a channel runs on this family ([dma.md](dma.md)), so a
+  print through it costs the core its sleep, not its cycles.
+- **Against the vendor** (the EVT's `USART/USART_Idle_Recv`, openwch
+  ch32v20x baef005, moved to USART2 on the same pair and bursts, a
+  scratch program): its idle-line handler is one interrupt a short burst,
+  324 cycles - against brio's two of about 165 - and three for 256 bytes,
+  2144 cycles, because it copies every block out of a pair of one-shot
+  buffers into a ring of its own inside the handler (brio's 256 bytes:
+  three interrupts, 434 cycles, the consumer reading the channel's own
+  ring in place); its edge lands at the same frame (13613, 1871 and 613
+  cycles at the three rates). Its clear of IDLE is `USART_GetITStatus`
+  then `USART_ReceiveData` - a read of DATAR while the channel it has
+  just re-armed owns it.
 - **The receive ring** is `test_vx03_dma`'s letter g, with no wire: the
   channel circular over the storage from `init()`, a burst across the
   storage's end delivered whole with nobody reading, a lap the consumer
@@ -494,11 +595,9 @@ CH32V303 evaluation board - and the second is measured on both below.
 
 Driver gaps, each with its reason:
 
-- **The IDLE edge**: a receive engine's bytes are readable as they land,
-  and the owner learns of them by asking `harvest()` from a TimeEvent of
-  its own - the latency the poll period it chose. The USART's IDLE
-  interrupt (18.10.1) as the edge that ends a burst, publishing it one
-  frame after its last byte, is the serial round's.
+- **Exact error counts under the receive engine**: bounded, not exact
+  (above) - an exact count would need the CPU's read of DATAR, which the
+  engine's rule forbids; declined.
 - **A single-wire bus with a peer**, and with the pull-up the chapter
   asks for: the mode is armed and its exclusions hold, but the wire is
   released between frames and nothing on either board holds it - a
@@ -536,14 +635,10 @@ Implemented but not bench-verified, each with what would measure it:
   words across the pair and RX_BUSY under a frame are letter o's, and
   the CH32V303VCT6 answered no to each; what would measure them is a
   CH32V303 of a lot whose penultimate sixth digit is not zero.
-- **`error_interrupt()` (EIE, the FE/ORE/NE vector under DMAR)**: an
-  error provoked on a line a receive engine is draining is what would
-  raise it.
-- **The receive ring on a wire, and on the CH32V303**: measured on the
-  CH32V203C8T6 with bursts banged into the receive pad at 115200 baud;
-  the loopback strap and the crossed pair (letters l and n of
-  `test_vx03_serial`, n of `test_vx03_dma`) would carry it at a wire's
-  rate, and on the evaluation board through both controllers.
+- **The receive engine's edge and its error counts on the CH32V303**:
+  letters q, r and s of `test_vx03_serial` on the evaluation board's
+  crossed pair would measure them; the CH32V303VCT6's USART is assumed to
+  clear as the CH32V203C8T6's does, which only that run can say.
 - **The transport's `remap` parameter on a column other than the
   default**: the resource's `remap()` is measured through the fourth
   port's second column, and the transport's own path is compiled and

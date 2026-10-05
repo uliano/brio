@@ -87,6 +87,19 @@
 //      rate the loop takes clean
 //   m  the crossed pair when it is strapped: USART2 against the fourth
 //      port at two formats and two rates, with a stress pattern each way
+//   q  ERRORS UNDER THE ENGINE, on the crossed pair: breaks the fourth
+//      port puts into a continuous stream into USART2's receive ring -
+//      every data byte delivered intact and in order, no byte taken by a
+//      clear, the frame errors counted one a break; back-to-back breaks
+//      counting every other one (ch32vx03/usart.hpp's header); and the
+//      interrupt receiver's breaks, dropped and counted
+//   r  tx_idle() IS THE WIRE'S: the moment it turns true against the
+//      last stop bit's start on PA2, captured by TIM2's channel 3, for
+//      the interrupt transmitter and the transmit engine
+//   s  THE BURST EDGE FROM THE VECTOR, nothing polled: a burst of one
+//      frame told, a burst of 16 told within two frames of its last stop
+//      bit with two interrupts a burst and none a byte, four laps of the
+//      ring with no silence read whole on the lap's marks
 // and on the CH32V303RC and VC alone:
 //   n  THE CROSSED PAIR'S ENGINES: USART2's on DMA1 against UART4's on
 //      DMA2, a message each way through both transports, then four
@@ -137,7 +150,7 @@ using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 using Led = Pin<'B', 2>;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 20> bench;
 
 // ---- the instruments -------------------------------------------------------
 
@@ -185,6 +198,8 @@ constexpr bool v303_pair = device::device_class == DeviceClass::v30x_d8;
 /// The transport with both engines, for the loopback letter: USART2
 /// transmits on DMA channel 7 and receives on 6 (table 11-5).
 using Loop = Uart<2, P, 256, 256, UartFormat{}, DmaTxEngine<1, 7>, DmaRxEngine<1, 6>>;
+/// The same port with no engine: the interrupt receiver and transmitter.
+using Plain = Uart<2, P, 256, 256>;
 
 constexpr uint32_t pclk1 = SysClock::pclk1_hz;    ///< USART2's, USART4's
 constexpr uint32_t pclk2 = SysClock::pclk2_hz;    ///< USART1's, the console's
@@ -200,6 +215,11 @@ bool cross_known = false;
 
 /// True while the USART2 vector belongs to the Loop transport.
 volatile bool u2_transport = false;
+/// Which transport the USART2 vector serves while u2_transport: Loop, or
+/// with this set the engineless Plain; and the edges they reported.
+volatile bool u2_plain = false;
+volatile uint32_t u2_edges = 0;
+volatile uint32_t u2_edge_entries = 0;
 
 /// What the two vectors counted (letter j).
 volatile uint32_t u2_interrupts = 0;
@@ -1912,13 +1932,11 @@ void tl_loopback() {
     static const uint8_t message[] = "the channel is the request";
     constexpr uint8_t length = sizeof(message) - 1u;
     Loop::clear_errors();
-    (void)Loop::harvest();
     (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     Stopwatch w;
     uint8_t got = 0;
     uint8_t back[length] = {};
     while (got < length && w.us() < 50'000UL) {
-        (void)Loop::harvest();
         uint8_t b = 0;
         while (got < length && Loop::read_byte(b)) {
             back[got++] = b;
@@ -1931,7 +1949,7 @@ void tl_loopback() {
     print(serial, "  the engines carried ", got, " of ", length, " bytes in ", w.us(),
           " us, faults ", Loop::dma_faults(), ", overruns ", Loop::rx_overruns(), crlf);
     bench.verdict("the transmit engine drains the ring by whole blocks and the receive engine "
-                  "fills it, the run published by harvest() and identical byte for byte",
+                  "fills it, read as it lands and identical byte for byte",
                   opened && same && Loop::dma_faults() == 0u);
 
     // Four kilobytes at the highest rate the loop takes clean.
@@ -1952,7 +1970,6 @@ void tl_loopback() {
             }
             ++sent;
         }
-        (void)Loop::harvest();
         uint8_t b = 0;
         while (Loop::read_byte(b)) {
             if (b != static_cast<uint8_t>(xorshift(rx_state) & 0xFFu)) {
@@ -2106,6 +2123,340 @@ struct V303State {
     static inline volatile uint32_t upper_interrupts[4] = {};
 };
 
+// ===========================================================================
+// q, r, s - the transport's promises on the crossed pair
+// ===========================================================================
+
+/// The rate cross_break() times its low run at.
+uint32_t cross_baud = 115200;
+
+/// The fourth port bare on its default column - the crossed pair's - as
+/// the stimulus: TE alone, written by the CPU. Its own STATR is polled,
+/// which is a different instance's and arms no clear of USART2's.
+bool cross_sender_up(uint32_t baud) {
+    cross_baud = baud;
+    U4::bus_clock(true);
+    U4::reset();
+    CrossTxPad::function();
+    if (!U4::configure(UartFormat{}, usart_divisor(pclk1, baud))) {
+        return false;
+    }
+    U4::enable(true);
+    U4::transmitter(true);
+    wait_us(3000);
+    return true;
+}
+
+/// A byte into the stream: written as soon as the data register is free,
+/// so bytes follow back to back with no idle frame between them.
+void cross_byte(uint8_t b) {
+    while (!U4::tx_empty()) {
+    }
+    U4::write_data(b);
+}
+
+/// A break into the stream: after the frame in flight (TC), the fourth
+/// port's TX pad taken as a plain output and held low for twelve bit
+/// times, then high for one, then handed back. NOT SBK: measured on the
+/// CH32V203C8T6, the transmitter sends the byte it sent last AGAIN after
+/// an SBK break, so every SBK put a repeated byte into the stream - a
+/// fact of the sender, not of the receiver this letter judges.
+void cross_break() {
+    while (!U4::tx_complete()) {
+    }
+    const uint32_t bit = SysClock::hz / cross_baud;
+    CrossTxPad::output();
+    CrossTxPad::clear();
+    Stopwatch w;
+    while (w.cycles() < 12u * bit) {
+    }
+    CrossTxPad::set();
+    while (w.cycles() < 13u * bit) {
+    }
+    CrossTxPad::function();
+}
+
+template <typename T>
+bool transport_up(bool plain, uint32_t baud) {
+    // The block through its reset line first: a transport's init() writes
+    // CTLR3 only where it has something to put there, so the engines'
+    // DMAR, DMAT and EIE would outlive the transport that set them.
+    Pfic::disable(Irq::usart2);
+    U2::bus_clock(true);
+    U2::reset();
+    u2_plain = plain;
+    u2_transport = true;
+    const bool ok = T::init(clock, baud);
+    wait_us(2000);
+    uint8_t b = 0;
+    while (T::read_byte(b)) {
+    }
+    T::clear_errors();
+    u2_edges = 0;
+    u2_edge_entries = 0;
+    return ok;
+}
+
+constexpr uint8_t stream_byte(uint32_t i) { return static_cast<uint8_t>(i * 151u + 7u); }
+
+void tq_errors() {
+    all_off();
+    if (!has_fourth || !need_cross_wires()) {
+        print(serial, "  the crossed pair is absent: the errors under the engine measure "
+                      "nothing", crlf);
+        bench.verdict("the letter declines without its wires, and says so", true);
+        return;
+    }
+    constexpr uint32_t n = 120;
+    constexpr uint32_t every = 8;
+    const bool up = transport_up<Loop>(false, 115200) && cross_sender_up(115200);
+    uint32_t breaks = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        cross_byte(stream_byte(i));
+        if (i % every == every - 1u && i + 1u < n) {
+            cross_break();
+            ++breaks;
+        }
+    }
+    while (!U4::tx_complete()) {
+    }
+    wait_us(2000);
+    uint32_t data = 0;
+    uint32_t zeros = 0;
+    uint32_t got = 0;
+    bool in_order = true;
+    for (;;) {
+        const auto run = Loop::read_span();
+        if (run.empty()) {
+            break;
+        }
+        for (const uint8_t b : run) {
+            ++got;
+            if (b == stream_byte(data)) {
+                ++data;
+            } else if (b == 0u) {
+                ++zeros;
+            } else {
+                in_order = false;
+            }
+        }
+        (void)Loop::consume(static_cast<uint32_t>(run.size()));
+    }
+    const uint16_t fe = Loop::frame_errors();
+    print(serial, "  ", n, " data bytes and ", breaks, " breaks through the receive engine: ", data,
+          " data bytes in order, ", zeros, " break frames, ", got, " stored; FE ", fe, ", ORE ",
+          Loop::hw_overruns(), ", laps missed ", Loop::rx_overruns(), crlf);
+    bench.verdict("every data byte delivered, intact and in order: no byte taken by a clear",
+                  up && data == n && in_order);
+    bench.verdict("each break stored as the frame it is (0x00)", zeros == breaks);
+    bench.verdict("the frame errors counted one a break", fe == breaks);
+
+    // Back to back, in the middle of a stream.
+    uint16_t counts[2] = {0, 0};
+    for (uint8_t k = 0; k < 2u; ++k) {
+        (void)transport_up<Loop>(false, 115200);
+        cross_byte(0x11);
+        cross_byte(0x12);
+        for (uint8_t b = 0; b < k + 2u; ++b) {
+            cross_break();
+        }
+        cross_byte(0x22);
+        cross_byte(0x23);
+        wait_us(2000);
+        counts[k] = Loop::frame_errors();
+    }
+    print(serial, "  back to back: two breaks count ", counts[0], ", three count ", counts[1], crlf);
+    bench.verdict("back-to-back breaks count every other one (two count 1, three count 2)",
+                  counts[0] == 1u && counts[1] == 2u);
+    Loop::release();
+
+    // The interrupt receiver drops each break's frame and counts it.
+    (void)transport_up<Plain>(true, 115200);
+    breaks = 0;
+    for (uint32_t i = 0; i < 40u; ++i) {
+        cross_byte(stream_byte(i));
+        if (i % 4u == 3u) {
+            cross_break();
+            ++breaks;
+        }
+    }
+    wait_us(2000);
+    uint32_t back = 0;
+    bool ok = true;
+    uint8_t b = 0;
+    while (Plain::read_byte(b)) {
+        if (b != stream_byte(back)) {
+            ok = false;
+        }
+        ++back;
+    }
+    print(serial, "  the interrupt receiver: 40 bytes and ", breaks, " breaks, ", back,
+          " delivered, FE ", Plain::frame_errors(), crlf);
+    bench.verdict("the interrupt receiver drops each break's frame and counts it",
+                  back == 40u && ok && Plain::frame_errors() == breaks);
+    Plain::release();
+    all_off();
+}
+
+/// Four 0x55 frames (bit 7 low: the stop bit starts with a rising edge)
+/// through `T`, TIM2's channel 3 latching PA2's last rising edge; the
+/// timer clocks from that edge to tx_idle()'s first true.
+template <typename T>
+int32_t idle_after_stop(bool plain, uint32_t baud) {
+    static const uint8_t frames[4] = {0x55, 0x55, 0x55, 0x55};
+    (void)transport_up<T>(plain, baud);
+    T2::init();
+    (void)T2::configure({.prescaler = 0, .period = 0xFFFF});
+    (void)T2::capture_channel(2, {.select = TimChannelSelect::direct,
+                                  .polarity = TimCapturePolarity::rising});
+    T2::clear_flags(T2::all_flags);
+    T2::enable(true);
+    (void)T::write_bulk(std::span<const uint8_t>(frames, sizeof(frames)));
+    uint32_t t_idle = 0;
+    Stopwatch w;
+    // The stamp is taken AFTER the true answer: the flag stood when STATR
+    // was read, so the count read after it is never early - late by a
+    // poll's few cycles at most.
+    for (;;) {
+        if (T::tx_idle()) {
+            t_idle = T2::count();
+            break;
+        }
+        if (w.us() > 20'000u) {
+            break;
+        }
+    }
+    const uint32_t edge = T2::compare(2);
+    ruler_stop();
+    T::release();
+    return static_cast<int32_t>((t_idle - edge) & 0xFFFFu);
+}
+
+void tr_tx_idle() {
+    all_off();
+    static constexpr uint32_t rates[] = {115200, 1'000'000};
+    for (const uint32_t baud : rates) {
+        const uint32_t bit = timclk1 / baud;
+        const int32_t d_plain = idle_after_stop<Plain>(true, baud);
+        const int32_t d_dma = idle_after_stop<Loop>(false, baud);
+        print(serial, "  ", baud, " baud, a bit ", bit, " timer clocks: tx_idle() true ", d_plain,
+              " clocks after the stop bit's rising edge (interrupt transmitter), ", d_dma,
+              " (transmit engine)", crlf);
+        const int32_t lo = static_cast<int32_t>(bit);
+        const int32_t hi = static_cast<int32_t>(2u * bit);
+        bench.verdict("tx_idle() never before the last stop bit is out, within a bit after it: ",
+                      baud == 115200 ? "115200" : "1 Mbaud",
+                      d_plain >= lo && d_plain <= hi && d_dma >= lo && d_dma <= hi);
+    }
+    all_off();
+}
+
+/// Everything Loop holds, read away: the count, and whether each was the
+/// stream's byte at its place from `from` on.
+uint32_t loop_read(uint32_t from, bool& in_order) {
+    uint32_t got = 0;
+    for (;;) {
+        const auto run = Loop::read_span();
+        if (run.empty()) {
+            return got;
+        }
+        for (uint32_t i = 0; i < run.size(); ++i) {
+            if (run[i] != stream_byte(from + got + i)) {
+                in_order = false;
+            }
+        }
+        got += static_cast<uint32_t>(run.size());
+        (void)Loop::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+void ts_edge() {
+    all_off();
+    if (!has_fourth || !need_cross_wires()) {
+        print(serial, "  the crossed pair is absent: the edge measures nothing", crlf);
+        bench.verdict("the letter declines without its wires, and says so", true);
+        return;
+    }
+    const bool up = transport_up<Loop>(false, 1'000'000) && cross_sender_up(1'000'000);
+    const uint32_t frame = SysClock::hz / 100'000u;   // ten bits at 1 Mbaud, in core cycles
+    bool all_told = true;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        bool ok = true;
+        (void)loop_read(0, ok);
+        const uint32_t e0 = u2_edges;
+        cross_byte(0x42);
+        wait_us(200);
+        const uint32_t e1 = u2_edges;
+        const uint32_t got = loop_read(0, ok);
+        print(serial, "  a burst of one frame: ", e1 - e0, " edge(s), ", got, " byte read", crlf);
+        if (e1 == e0 || got != 1u) {
+            all_told = false;
+        }
+    }
+    bench.verdict("a burst of one frame is told, every time", up && all_told);
+
+    // Sixteen frames back to back: the edges, the entries, the last edge
+    // after the last stop bit on the cycle counter (U4's TC is the sender's
+    // own, a different instance's STATR).
+    bool ok = true;
+    (void)loop_read(0, ok);
+    wait_us(200);
+    u2_edge_entries = 0;
+    const uint32_t e0 = u2_edges;
+    uint32_t got = 0;
+    for (uint32_t i = 0; i < 16u; ++i) {
+        cross_byte(stream_byte(i));
+        if (u2_edges != e0) {
+            got += loop_read(got, ok);   // a first frame's edge: the consumer drains, as it would
+        }
+    }
+    U4::clear_flags(usart_tc);   // the last byte is still in flight: TC falls and rises again
+    while (!U4::tx_complete()) {
+    }
+    Stopwatch since;
+    const uint32_t before = u2_edges;
+    while (u2_edges == before && since.us() < 2000u) {
+    }
+    const uint32_t late = since.cycles();
+    wait_us(200);
+    got += loop_read(got, ok);
+    print(serial, "  16 frames: ", u2_edges - e0, " edge(s), the last about ", late,
+          " cycles after the last stop bit (", late * 10u / frame, " tenths of a frame); ",
+          u2_edge_entries, " USART interrupt(s); ", got, " read", crlf);
+    bench.verdict("the burst read whole, nothing polled", got == 16u && ok);
+    bench.verdict("its edge within two frame times of the last stop bit",
+                  u2_edges != before && late <= 2u * frame);
+    bench.verdict("at most two USART interrupts a burst, none a byte",
+                  u2_edge_entries >= 1u && u2_edge_entries <= 2u);
+
+    // Four laps of the 256-byte ring with no silence: told twice a lap.
+    (void)loop_read(0, ok);
+    Loop::clear_errors();
+    uint32_t read = 0;
+    ok = true;
+    uint32_t seen = u2_edges;
+    for (uint32_t i = 0; i < 1024u; ++i) {
+        cross_byte(stream_byte(i));
+        if (u2_edges != seen) {
+            seen = u2_edges;
+            read += loop_read(read, ok);
+        }
+    }
+    Stopwatch tail;
+    while (read < 1024u && tail.us() < 5000u) {
+        if (u2_edges != seen) {
+            seen = u2_edges;
+            read += loop_read(read, ok);
+        }
+    }
+    print(serial, "  four laps without silence: ", read, " of 1024 read on the edges, laps missed ",
+          Loop::rx_overruns(), crlf);
+    bench.verdict("a stream with no silence is read whole on the lap's marks",
+                  read == 1024u && ok && Loop::rx_overruns() == 0u);
+    Loop::release();
+    all_off();
+}
+
 /// UART4 with both its engines, where table 11-3 puts them: DMA2's
 /// channel 5 out and channel 3 in. With an engine on each side the port
 /// arms no interrupt of its own. `on` makes every use a dependent name.
@@ -2125,7 +2476,6 @@ struct PairPort {
 template <typename T>
 uint16_t drain_port() {
     uint16_t n = 0;
-    (void)T::harvest();
     uint8_t b = 0;
     while (T::read_byte(b)) {
         ++n;
@@ -2134,8 +2484,8 @@ uint16_t drain_port() {
 }
 
 /// One direction of an engined pair: `count` xorshift bytes written into
-/// `From` and read out of `To`, the receive side harvested as it goes and
-/// never more than 128 bytes in flight.
+/// `From` and read out of `To`, the receive side read as it goes and never
+/// more than 128 bytes in flight.
 struct PairRun {
     uint32_t received;
     uint32_t wrong;
@@ -2156,7 +2506,6 @@ PairRun pair_run(uint32_t count, uint32_t budget_us) {
             }
             ++sent;
         }
-        (void)To::harvest();
         uint8_t b = 0;
         while (To::read_byte(b)) {
             if (b != static_cast<uint8_t>(xorshift(rx_state) & 0xFFu)) {
@@ -2174,11 +2523,9 @@ template <typename From, typename To>
 bool pair_message(const uint8_t* msg, uint16_t len) {
     uint8_t seen[64] = {};
     uint16_t got = 0;
-    (void)To::harvest();
     (void)From::write_bulk(std::span<const uint8_t>(msg, len));
     Stopwatch w;
     while (got < len && w.us() < 50'000UL) {
-        (void)To::harvest();
         uint8_t b = 0;
         while (got < len && To::read_byte(b)) {
             seen[got++] = b;
@@ -2228,7 +2575,7 @@ void tn_pair_engines() {
               stale4, " bytes", crlf);
         bench.verdict("USART2's transmit engine on DMA1 pours a run into UART4's receive engine "
                       "on DMA2 and UART4's transmit engine one back into USART2's, byte for "
-                      "byte, each run published by harvest()",
+                      "byte, each read as it lands",
                       opened && forth_ok && back_ok);
 
         // Four kilobytes each way at 921600 baud.
@@ -2771,6 +3118,20 @@ void pair_dma_vector() {
     }
 }
 
+/// UART4's own vector while letter n's engined transport owns the port:
+/// the receive engine's two states live there (ch32vx03/usart.hpp), and
+/// a body that read DATAR would take a byte from under the channel.
+template <bool on = (has_fourth && v303_pair && device::dma_controller_count >= 2u)>
+bool pair_usart_vector() {
+    if constexpr (on) {
+        if (V303State<on>::engines) {
+            (void)PairPort<on>::Port::isr();
+            return true;
+        }
+    }
+    return false;
+}
+
 /// An upper port's vector body: counted, and its flags put down.
 template <uint8_t n>
 void upper_vector() {
@@ -2820,7 +3181,10 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
 /// flag counter of every other letter.
 extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
     if (u2_transport) {
-        (void)Loop::isr();
+        u2_edge_entries = u2_edge_entries + 1u;
+        if (u2_plain ? Plain::isr() : Loop::isr()) {
+            u2_edges = u2_edges + 1u;
+        }
         return;
     }
     const uint16_t st = U2::status();
@@ -2866,6 +3230,9 @@ extern "C" BRIO_CH32_INTERRUPT void uart4_handler() {
     if (!has_fourth) {
         return;
     }
+    if (pair_usart_vector<>()) {
+        return;   // the engined pair's transport owns the vector: its edge states
+    }
     u4_interrupts = u4_interrupts + 1u;
     const uint16_t st = U4::status();
     if ((st & brio::usart_tc) != 0u) {
@@ -2880,12 +3247,12 @@ extern "C" BRIO_CH32_INTERRUPT void uart4_handler() {
 /// or letter n runs. The engines switch their channels' lines on, so the
 /// vectors are bound whether or not a letter uses them.
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
-    if (u2_transport) {
-        (void)Loop::dma_isr();
+    if (u2_transport && !u2_plain && Loop::dma_isr()) {
+        u2_edges = u2_edges + 1u;
     }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
-    if (u2_transport) {
+    if (u2_transport && !u2_plain) {
         (void)Loop::dma_isr();
     }
 }
@@ -2920,6 +3287,10 @@ int main() {
     bench.letter('k', "hardware flow control: the CTS hold and the RTS hand", tk_flow);
     bench.letter('l', "the loopback PA2-PA3, when it is strapped", tl_loopback);
     bench.letter('m', "the crossed pair, when it is strapped", tm_cross);
+    bench.letter('q', "errors under the engine on the pair: breaks in a stream, nothing stolen",
+                 tq_errors);
+    bench.letter('r', "tx_idle() against the last stop bit on the pad", tr_tx_idle);
+    bench.letter('s', "the burst edge from the vector on the pair, nothing polled", ts_edge);
     register_v303_letters();
 
     if (serial_ok) {

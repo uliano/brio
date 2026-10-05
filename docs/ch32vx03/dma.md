@@ -173,10 +173,12 @@ bears on what a block costs is used or declined here with its reason:
   one circular block, the count its producer index and the completion a
   lap counted (below) - and declined by the block source for the
   contract's reason (below).
-- **The half-transfer flag**: declined - no engine acts on a midpoint (the
-  block source stops at every block, and a ring's consumer reads the
-  count whenever it looks, the wrap being the one edge the lap count
-  needs).
+- **The half-transfer flag**: taken on request by the receive engine's
+  circular shape (`half_mark`), for a byte transport whose ring wants the
+  lap's half and full marks as the receive edge of a stream that never
+  falls silent ([usart.md](usart.md)); declined elsewhere - the block
+  source stops at every block, and a ring's consumer reads the count
+  whenever it looks, the wrap being the one edge the lap count needs.
 - **Chaining, a linked descriptor, a self-trigger, a FIFO, a burst, a
   double buffer**: this controller has none of them; a block is restarted
   by software, and the four stores above are the whole of it.
@@ -414,8 +416,10 @@ pair in the same place, in the one-shot shape - `SpiHost` carries a
 block's data phase on them ([spi.md](spi.md)) and `I2cHost` a tenure's
 ([i2c.md](i2c.md)). `dma_isr()` is the ISR body of whichever channels
 the transport owns - on the receive channel a completion is a lap,
-counted, and nothing more -, `harvest()` the receive side's housekeeping
-and its edge ([usart.md](usart.md)), and `dma_faults()` counts the
+counted, and the lap's half and full marks are the receive edge, its true
+answer the edge `isr()` gives -, `harvest()` the same edge asked from the
+consumer's side and the ring's restart after an error
+([usart.md](usart.md)), and `dma_faults()` counts the
 blocks thrown away. THE MASK COVERS THE CLAIM: the transport's block
 start holds its guard over the transmit engine's `claim()` alone - eight
 instructions, against the whole channel load before (the listing in the
@@ -426,11 +430,10 @@ resource publishes its two slots as `dma_tx_slot` and `dma_rx_slot`.
 Without an engine every branch is compiled out and `init()` does not so
 much as touch CTLR3.
 
-`harvest()` is a VERB, not an interrupt: nothing marks a burst's end but
-the line going quiet, so whoever owns the port decides how often to ask.
-With a receive engine RXNE belongs to the channel, so the error flags are
-read once per harvest and counted against the harvest and not the byte -
-a console that wants exact attribution takes no receive engine.
+The receive edge comes from the vectors - the USART's idle line and a
+burst's first frame, the channel's lap marks - and the CPU never reads
+DATAR while the channel owns it: what a clear costs on this silicon, and
+the bounds it leaves on the error counts, are [usart.md](usart.md)'s.
 
 ## How to use it
 
@@ -537,12 +540,15 @@ using Serial = brio::Uart<2, P, 128, 128, brio::UartFormat{},
                           brio::DmaTxEngine<Tx::controller, Tx::channel>,
                           brio::DmaRxEngine<Rx::controller, Rx::channel>>;
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
+// The edge from the vectors: the USART's (an idle line, a burst's first
+// frame) and the receive channel's (the lap's half and full marks).
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Serial::dma_isr(); }
-
-// in the loop, or from a TimeEvent every few ticks:
-if (Serial::harvest()) { /* bytes the consumer has not seen since it found the ring empty */ }
 ```
 
 The CH32V303's UART4 is the same spelling, and the table puts both of
@@ -654,11 +660,11 @@ is given below it is both parts'; where they differ each is named.
   storage, its count at 128 with nothing arrived and one bus master
   counted; stopped by `abandon()` - standing for the transfer error that
   is the one way a ring stops - it was running again from its first byte
-  after the next `harvest()`, the fault counted. Then bursts banged into
-  the receive pad through its pull at 115200 baud, the core doing
-  nothing else: 100 bytes into the empty ring read back in order, with
-  ONE edge from `harvest()` and none on the two calls after; 60 more
-  ACROSS THE STORAGE'S END with no `harvest()` and no read between their
+  after the consumer's next look, the fault counted. Then bursts banged
+  into the receive pad through its pull at 115200 baud, the core doing
+  nothing else: 100 bytes into the empty ring read back in order, the
+  vectors reporting the edge and `harvest()` asked after it answering
+  false; 60 more ACROSS THE STORAGE'S END with no read between their
   bytes, all 60 in order and no overrun of either kind - where the run
   engine this shape replaced, measured with the same letter, delivered
   27 of the 60 and counted one hardware overrun, its run having stopped
@@ -778,11 +784,6 @@ Driver gaps, each with its reason:
   CH32V303's DMA1 on some lots: declined, because the strict 64 KB
   reading is the one every lot satisfies and a program cannot read which
   lot it runs on.
-- **The IDLE edge**: the transport's receive ring tells its owner of new
-  bytes when `harvest()` is asked, from a TimeEvent the owner arms - the
-  USART's IDLE interrupt as the edge that ends a burst is the serial
-  round's, and this round leaves the verb in its place
-  ([usart.md](usart.md)).
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -792,8 +793,8 @@ Implemented but not bench-verified, each with what would measure it:
   by none of the five addresses the suite reads from, on either part. A
   peripheral that raises it, or a write into flash (which 11.1 lists as a
   legal destination and the bench has not tried), would measure it.
-- **A ring restarted after a real transfer error**: `harvest()` starts a
-  ring whose channel stopped again, measured with `abandon()` standing
+- **A ring restarted after a real transfer error**: the consumer's next
+  look starts a ring whose channel stopped again, measured with `abandon()` standing
   for the error, which no address the bench can name provokes (above).
 - **The CH32V203's serial round trip on one pair of pads.** The engines
   themselves carry a wire's data in the two bus chapters - sixteen bytes

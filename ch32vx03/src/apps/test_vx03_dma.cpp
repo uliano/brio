@@ -69,9 +69,10 @@
 //   g  THE USART ENGINES: a run drained from the ring by the transmit
 //      engine, which needs no listener; the RECEIVE RING standing from
 //      init() - the channel circular over the whole ring's storage - and
-//      started again by harvest() after its channel stopped; then, with
-//      the board bare, bursts banged into the receive pad while the core
-//      reads nothing: one into an empty ring and its edge, one across the
+//      started again by the consumer's next look after its channel
+//      stopped; then, with the board bare, bursts banged into the receive
+//      pad while the core reads nothing: one into an empty ring and its
+//      edge from the vectors, one across the
 //      storage's end delivered whole, a lap the consumer did not keep up
 //      with counted once and skipped, and a run written over while it was
 //      held refused at its release - or, WITH THE JUMPER, the transmit
@@ -150,6 +151,9 @@ using Loop = Uart<2, P, 128, 128, UartFormat{},
                   DmaTxEngine<1, DmaRequestOf<DmaRequest::usart2_tx>::channel>,
                   DmaRxEngine<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>>;
 using LoopRx = DmaRxEngine<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>;
+/// The receive edges USART2's vector and its receive channel's reported:
+/// what a program would post RxActivity on.
+volatile uint32_t loop_edges = 0;
 /// The channel under the receive engine, asked directly by letter g.
 using LoopRxChannel = DmaChannel<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>;
 /// USART2's receive pad, the bit-banged line of letter g.
@@ -975,19 +979,22 @@ uint16_t read_all(const uint8_t* want, uint16_t most, bool& in_order) {
 }
 
 /// The ring with NO WIRE: bursts banged into PA3 while the core does
-/// nothing else, so no harvest() and no read runs between their bytes.
+/// nothing else, so no read runs between their bytes.
 void ring_on_a_banged_line() {
     const uint8_t* src = source_first_bytes();
-    (void)Loop::harvest();
     bool junk_in_order = true;
     (void)read_all(src, 0, junk_in_order);   // whatever the pad framed before the pull settled
     Loop::clear_errors();
 
-    // A burst into an empty ring, then the edge: true once, then not again
-    // until the consumer has found the ring empty.
+    // A burst into an empty ring, then the edge from the vectors - USART2's
+    // idle line, a burst's first frame, the lap's marks: reported once,
+    // and harvest() asked after it answers false, the gate being one;
+    // nor does harvest() report the ring the consumer has drained.
+    const uint32_t e0 = loop_edges;
     bang(src, 100);
-    const bool edge = Loop::harvest();
-    const bool edge_again = Loop::harvest();
+    const bool edge = loop_edges != e0;
+    const uint32_t e1 = loop_edges;
+    const bool edge_again = Loop::harvest() || loop_edges != e1;
     bool first_in_order = false;
     const uint16_t first = read_all(src, 100, first_in_order);
     const bool edge_drained = Loop::harvest();
@@ -995,15 +1002,16 @@ void ring_on_a_banged_line() {
           first_in_order ? " read back in order" : " read back WRONG", "; edges ", edge ? 1 : 0,
           edge_again ? 1 : 0, edge_drained ? 1 : 0, crlf);
     bench.verdict("a burst banged into the receive pad lands in the ring with no step of the "
-                  "core's, every byte in order - and harvest() reports the edge once",
+                  "core's, every byte in order - and the vectors report the edge once",
                   first == 100u && first_in_order && edge && !edge_again && !edge_drained);
 
-    // THE BURST ACROSS THE STORAGE'S END, with no harvest() and no read
-    // between its bytes: the ring is 128 long and 100 of it are behind
-    // the consumer, so these sixty wrap. A run engine stopped at its run's
-    // end and lost what came before the next harvest.
+    // THE BURST ACROSS THE STORAGE'S END, with no read between its bytes:
+    // the ring is 128 long and 100 of it are behind the consumer, so these
+    // sixty wrap. A run engine stopped at its run's end and lost what came
+    // before the next re-arm. The consumer drained: the vectors tell it.
+    const uint32_t e2 = loop_edges;
     bang(src + 100, 60);
-    const bool edge_b = Loop::harvest();
+    const bool edge_b = loop_edges != e2;
     bool second_in_order = false;
     const uint16_t second = read_all(src + 100, 60, second_in_order);
     print(serial, "  60 more across the storage's end: ", second,
@@ -1011,7 +1019,7 @@ void ring_on_a_banged_line() {
           LoopRxChannel::remaining(), ", overruns ", Loop::rx_overruns(), "/",
           Loop::hw_overruns(), crlf);
     bench.verdict("a burst across the end of the ring's storage arrives whole and in order with "
-                  "no harvest() between its bytes - nothing is lost between runs, there being "
+                  "no read between its bytes - nothing is lost between runs, there being "
                   "none - and no overrun of either kind is counted",
                   edge_b && second == 60u && second_in_order && Loop::rx_overruns() == 0u &&
                       Loop::hw_overruns() == 0u);
@@ -1100,7 +1108,8 @@ void tg_engines() {
                   opened && running && standing.circular && count + pending == 128u &&
                       masters == 1u);
 
-    // A RING WHOSE CHANNEL STOPPED is started again by the next harvest().
+    // A RING WHOSE CHANNEL STOPPED is started again by the consumer's next
+    // look - harvest() here, any read verb alike.
     // A transfer error is the one way a ring stops on its own (11.2.1: the
     // silicon drops EN), and abandon() - what the transport's handler calls
     // on one - stands for it here.
@@ -1127,16 +1136,13 @@ void tg_engines() {
         return;
     }
 
-    // With the strap, the same run comes back. harvest() is a VERB:
-    // nothing is published by it - the bytes land where the consumer
-    // reads them - and it is what reports the edge.
-    (void)Loop::harvest();
+    // With the strap, the same run comes back: the bytes land where the
+    // consumer reads them, nothing published and nothing polled.
     (void)Loop::write_bulk(std::span<const uint8_t>(message, length));
     uint16_t got = 0;
     uint8_t seen[64] = {};
     Stopwatch r;
     while (got < length && r.us() < 50'000UL) {
-        (void)Loop::harvest();
         uint8_t b = 0;
         while (got < length && Loop::read_byte(b)) {
             seen[got++] = b;
@@ -1561,8 +1567,8 @@ struct Dma2Engines {
 };
 
 /// UART4 with both its engines, where table 11-3 puts them: DMA2's channel
-/// 5 out and channel 3 in. With an engine on each side the port arms no
-/// interrupt of its own, so no UART4 vector is bound anywhere.
+/// 5 out and channel 3 in. The receive engine's edge states live in the
+/// port's own vector, which uart4_vector() serves.
 template <uint8_t C = 2, DmaRequest tx = DmaRequest::uart4_tx, DmaRequest rx = DmaRequest::uart4_rx>
 struct Dma2Cross {
     using TxRow = DmaRequestOf<tx>;
@@ -1617,7 +1623,6 @@ bool strapped() {
 template <typename Port>
 uint16_t drain() {
     uint16_t n = 0;
-    (void)Port::harvest();
     uint8_t b = 0;
     while (Port::read_byte(b)) {
         ++n;
@@ -2098,14 +2103,12 @@ void tn_dma2_uart4() {
         // USART2 out on DMA1's channel 7, UART4 in on DMA2's channel 3.
         static const uint8_t forth_msg[] = "one controller out, the other one in";
         constexpr uint16_t forth_len = sizeof(forth_msg) - 1u;
-        (void)Port4::harvest();
         (void)Loop::write_bulk(std::span<const uint8_t>(forth_msg, forth_len));
         uint8_t seen[64] = {};
         uint16_t got = 0;
         Stopwatch w;
         while (got < forth_len && w.us() < 50'000UL) {
-            (void)Port4::harvest();
-            uint8_t b = 0;
+                uint8_t b = 0;
             while (got < forth_len && Port4::read_byte(b)) {
                 seen[got++] = b;
             }
@@ -2119,12 +2122,10 @@ void tn_dma2_uart4() {
         // UART4 out on DMA2's channel 5, USART2 in on DMA1's channel 6.
         static const uint8_t back_msg[] = "and back the other way";
         constexpr uint16_t back_len = sizeof(back_msg) - 1u;
-        (void)Loop::harvest();
         (void)Port4::write_bulk(std::span<const uint8_t>(back_msg, back_len));
         got = 0;
         Stopwatch r;
         while (got < back_len && r.us() < 50'000UL) {
-            (void)Loop::harvest();
             uint8_t b = 0;
             while (got < back_len && Loop::read_byte(b)) {
                 seen[got++] = b;
@@ -2226,6 +2227,17 @@ void dma2_vector() {
     }
 }
 
+/// UART4's own vector while letter n's transport owns the port: the
+/// receive engine's two states live there (ch32vx03/usart.hpp).
+template <uint8_t C = 2>
+void uart4_vector() {
+    if constexpr (device::has_usart(4) && C <= device::dma_controller_count) {
+        if (Dma2State<C>::role == Dma2Role::uart4) {
+            (void)Dma2Cross<C>::Port::isr();
+        }
+    }
+}
+
 /// DMA1's eighth channel, the CH32V203's alone: the CH32V303's DMA1 has
 /// seven, and its vector table has no entry for an eighth.
 template <uint8_t ch = 8>
@@ -2267,7 +2279,9 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { note(4, brio::DmaC
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
     if (uart_mode) {
-        (void)Loop::dma_isr();
+        if (Loop::dma_isr()) {
+            loop_edges = loop_edges + 1u;
+        }
     } else {
         note(5, brio::DmaChannel<1, 6>::isr());
     }
@@ -2299,7 +2313,12 @@ extern "C" BRIO_CH32_INTERRUPT void dma2_channel11_handler() { dma2_vector<11>()
 
 extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Loop::isr(); }
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+    if (Loop::isr()) {
+        loop_edges = loop_edges + 1u;
+    }
+}
+extern "C" BRIO_CH32_INTERRUPT void uart4_handler() { uart4_vector<>(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
