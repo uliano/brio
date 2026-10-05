@@ -92,6 +92,16 @@
 //      prescalers and the shared vectors
 //   o  IRTIM: a 38 kHz carrier under a 1 kHz envelope on one pad, both
 //      polarities, and a USART as the envelope
+//   p  THE RECEIVE TRANSPORT: the paced receiver (RXFT, the receiver
+//      time-out for the tail) and the receive engine's edges (the line's
+//      IDLE, the ring's half and full marks) - each burst told by a
+//      vector within two frames of its last stop bit, a stream with no
+//      silence across a ring three times its size - and K breaks in N
+//      slots through both receivers: N - K delivered, FE = K, no byte
+//      taken from under the channel
+//   q  tx_idle() ON THE PAD: EXTI line 9 times PA9's start bits, and the
+//      wire's idle is the last stop bit's end, on the interrupt
+//      transmitter and on the transmit engine
 // Outside z, because they need a peer or a real Stop:
 //   y  streaming through the console across kernel clocks (uart_stress)
 //   w  WAKE FROM STOP, and ES0548 2.2.4 staged (uart_stress)
@@ -1711,16 +1721,16 @@ void te_fifo() {
     bench.verdict("the task carries the block byte-exact both ways, with the "
                   "SAME public verbs and one option between them",
                   plain_up && fifo_up && plain_exact && fifo_exact);
-    print(serial, "  AND THE LOOP CANNOT SHOW WHAT A FIFO IS FOR, which is "
-          "worth saying rather than dressing up: a single wire is its own "
-          "pacer, so the transmit and the receive event of each byte fall in "
-          "the SAME interrupt and there is never a second character waiting "
-          "to be drained. One interrupt a byte is the floor here whatever "
-          "FIFOEN says; the saving needs a link whose two directions are "
-          "independent, which is the host letter y's business.", crlf);
-    bench.verdict("and the FIFO costs nothing to turn on: no more interrupts "
-                  "than without it, and not one byte different",
-                  fifo_irqs <= plain_irqs + 2u);
+    print(serial, "  ON A SINGLE WIRE THE TWO SIDES OF A BYTE ARE ONE EVENT, so what "
+          "the FIFO buys shows only where BOTH sides ride a level: the transmitter "
+          "refills eight places when the FIFO runs empty and the receiver drains "
+          "at its threshold (the whole FIFO here), the receiver time-out taking "
+          "the tail - two entries per eight bytes where the one-register "
+          "transport takes one a byte.", crlf);
+    bench.verdict("and the FIFO pays on the loop: the task in FIFO mode takes under "
+                  "a sixth of the one-register transport's interrupts, not one byte "
+                  "different",
+                  fifo_irqs * 6u < plain_irqs);
 
     loop_down();
 }
@@ -3928,10 +3938,14 @@ void ty_streaming() {
     // AND THE SAME WITH FIFOEN FLIPPED UNDER IT, at the console's own rate
     // - on a console that HAS a FIFO. The task runs FIFO mode where the
     // instance has one (Serial::fifo_mode), so the leg streams with the
-    // enable the task was NOT built for, and puts it back. A BASIC
-    // instance has none (letter a measures the enable being dropped), so
-    // the leg names the fact and claims nothing rather than turning
-    // FIFOEN's refusal into a stream test.
+    // enable the task was NOT built for, and puts it back. THE PACE MOVES
+    // WITH THE VIEW: the task's receiver rides RXFT, which the one-register
+    // view has not got (33.8.4), so the leg arms RXNE in its place for the
+    // length of the stream - what it judges is the DRAIN, which reads ISR
+    // before every RDR and is right in both views. A BASIC instance has no
+    // FIFO (letter a measures the enable being dropped), so the leg names
+    // the fact and claims nothing rather than turning FIFOEN's refusal
+    // into a stream test.
     feed();
     [[maybe_unused]] bool fifo_ok = false;
     if constexpr (Usart<2>::is_full) {
@@ -3944,6 +3958,10 @@ void ty_streaming() {
             (void)Usart<2>::fifo_thresholds(UartFifoThreshold::half,
                                             UartFifoThreshold::none);
             Usart<2>::enable(true);
+            if constexpr (Serial::rx_paced) {
+                Usart<2>::rx_threshold_interrupt(false);
+                Usart<2>::rxne_interrupt(true);
+            }
         }
         Serial::clear_errors();
         uint8_t fifo_junk[64];
@@ -3969,6 +3987,10 @@ void ty_streaming() {
             Usart<2>::enable(false);
             (void)Usart<2>::fifo(built);
             Usart<2>::enable(true);
+            if constexpr (Serial::rx_paced) {
+                Usart<2>::rxne_interrupt(false);
+                Usart<2>::rx_threshold_interrupt(true);
+            }
         }
         host_settle();
         print(serial, "  with FIFOEN ", built ? "cleared" : "set",
@@ -3984,8 +4006,9 @@ void ty_streaming() {
                   "kernel clock it can take",
                   clean == tried && tried >= (console_mux ? 3u : 2u));
     if constexpr (Usart<2>::is_full) {
-        bench.verdict("and with FIFOEN flipped under it, without one line of "
-                      "the transport changing", fifo_ok);
+        bench.verdict("and with FIFOEN flipped under it - the receive pace moved "
+                      "to RXNE with it - without one line of the drain changing",
+                      fifo_ok);
     }
 }
 
@@ -4515,6 +4538,316 @@ void tv_lpuart_console() {
     tv_stop_leg();
 }
 
+
+// ---------------------------------------------------------------------------
+// p: the receive transport - the edge from a vector, and errors under the
+//    engine (design/serial.md; stm32g0/usart.hpp's UartTask)
+// q: tx_idle() is the wire's: the last stop bit off the pad
+// ---------------------------------------------------------------------------
+
+/// The transports these two letters drive, all on USART1's PA9. The
+/// receive ones run the single wire with the transmitter on its engine,
+/// so USART1's vector serves the receiver alone; the transmit ones run
+/// full duplex, the receiver on PA10's pull-up.
+using LoopTxCh = DmaTxEngine<1, 2>;
+using LoopRxCh = DmaRxEngine<1, 3>;
+using PacedLoop = Uart<1, u1_pins, 256, 64, LoopTxCh, NoDmaEngine, uart_half_duplex()>;
+using EngineLoop = Uart<1, u1_pins, 64, 64, LoopTxCh, LoopRxCh, uart_half_duplex()>;
+using PlainSender = Uart<1, u1_pins, 16, 64>;
+using EngineSender = Uart<1, u1_pins, 16, 64, LoopTxCh>;
+
+constexpr uint8_t mode_paced = 3;
+constexpr uint8_t mode_engine = 4;
+constexpr uint8_t mode_plain_tx = 5;
+constexpr uint8_t mode_engine_tx = 6;
+volatile uint32_t rx_edges = 0;       // the vectors' true answers
+volatile uint32_t rx_edge_at = 0;     // TIM2 at the last one
+
+template <typename T>
+bool transport_up(uint8_t mode, uint32_t baud) {
+    loop_down();
+    loop_irqs = 0;
+    rx_edges = 0;
+    loop_mode = mode;   // the vector serves T from its init on
+    const bool up = T::init(clock, baud);
+    spin_cycles(4u * SysClock::hz / (baud / 10u));   // TE's idle frame
+    uint8_t junk = 0;
+    while (T::read_byte(junk)) {
+    }
+    T::clear_errors();
+    loop_irqs = 0;
+    rx_edges = 0;
+    return up;
+}
+
+template <typename T>
+void transport_down() {
+    T::release();
+    loop_mode = 0;
+    loop_down();
+}
+
+/// Everything the consumer is owed, drained into `got` and judged against
+/// `want` (the stream without its hits); the count read.
+template <typename T>
+uint32_t drain_into(const uint8_t* want, uint32_t n, uint32_t& at, uint32_t& wrong) {
+    uint32_t read = 0;
+    for (;;) {
+        const std::span<const uint8_t> run = T::read_span();
+        if (run.empty()) {
+            break;
+        }
+        for (const uint8_t b : run) {
+            if (at >= n || b != want[at]) {
+                ++wrong;
+            }
+            ++at;
+        }
+        read += static_cast<uint32_t>(run.size());
+        (void)T::consume(static_cast<uint32_t>(run.size()));
+    }
+    return read;
+}
+
+/// A burst of `n` bytes from `src` round the loop, the consumer draining
+/// on every edge a vector reports; returns the cycles from the burst's
+/// last stop bit (TC rising) to the last edge, signed.
+template <typename T>
+int32_t burst_edge(const uint8_t* src, uint32_t n, uint32_t baud, uint32_t& got,
+                   uint32_t& wrong) {
+    const uint32_t frame = SysClock::hz / (baud / 10u);
+    uint32_t seen = 0;
+    uint32_t at = 0;
+    bool tc_seen = false;
+    uint32_t tc_at = 0;
+    got = 0;
+    wrong = 0;
+    U1::clear_flags(UsartClear::tc);
+    uint32_t queued = 0;
+    const uint32_t t0 = now();
+    while (queued < n && since(t0) < 40u * frame * n) {
+        queued += T::write_bulk({src + queued, n - queued});
+        if (rx_edges != seen) {
+            seen = rx_edges;
+            got += drain_into<T>(src, n, at, wrong);
+        }
+    }
+    for (;;) {
+        if (!tc_seen && T::tx_idle()) {
+            tc_at = now();
+            tc_seen = true;
+        }
+        if (rx_edges != seen) {
+            seen = rx_edges;
+            got += drain_into<T>(src, n, at, wrong);
+        }
+        if ((tc_seen && since(tc_at) > 6u * frame) || since(t0) > 40u * frame * n) {
+            break;
+        }
+    }
+    return static_cast<int32_t>(rx_edge_at - tc_at);
+}
+
+void tp_receive() {
+    feed();
+    console_drain();
+    static uint8_t stream[200];
+    for (uint32_t i = 0; i < sizeof stream; ++i) {
+        stream[i] = static_cast<uint8_t>(0x30u + (i * 7u) % 79u);
+    }
+
+    // --- the paced receiver: RXFT at half the FIFO, the time-out for the
+    // tail. 17 bytes at 115200: four levels of four and a tail of one.
+    constexpr uint32_t baud = 115200;
+    constexpr uint32_t frame = SysClock::hz / (baud / 10u);
+    bool up = transport_up<PacedLoop>(mode_paced, baud);
+    uint32_t got = 0;
+    uint32_t wrong = 0;
+    const int32_t paced_tail = burst_edge<PacedLoop>(stream, 17, baud, got, wrong);
+    const uint32_t paced_irqs = loop_irqs;
+    spin_us(10000);   // ten milliseconds of silence after the burst
+    const uint32_t quiet_irqs = loop_irqs - paced_irqs;
+    print(serial, "  the paced receiver, 17 bytes at 115200: ", got, " back (", wrong,
+          " wrong) in ", paced_irqs, " USART1 entries; the last edge ", paced_tail,
+          " cycles after the last stop bit (a frame is ", frame, "); ", quiet_irqs,
+          " entries in the 10 ms of silence after it", crlf);
+    bench.verdict("THE PACED RECEIVER: 17 bytes in one entry per level of four plus "
+                  "the tail's - five at most where RXFNE took seventeen - and the "
+                  "tail below the level delivered by the receiver time-out within "
+                  "two frames of the last stop bit; silence costs nothing after it",
+                  up && got == 17u && wrong == 0u && paced_irqs <= 6u &&
+                      paced_tail > 0 && paced_tail < static_cast<int32_t>(2u * frame) &&
+                      quiet_irqs == 0u);
+
+    // --- K breaks among N slots through the paced receiver.
+    constexpr uint32_t slots = 64;
+    constexpr uint32_t hits = 4;
+    auto is_hit = [](uint32_t i) { return i == 9u || i == 24u || i == 41u || i == 58u; };
+    static uint8_t kept[slots];
+    auto send_with_breaks = [&]<typename T>() {
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < slots; ++i) {
+            if (is_hit(i)) {
+                const uint32_t t1 = now();
+                while (!T::tx_idle() && since(t1) < 100u * frame) {
+                }
+                U1::send_break();
+                while ((U1::status() & UsartFlag::sbkf) != 0u && since(t1) < 100u * frame) {
+                }
+                spin_cycles(2u * frame);
+                continue;
+            }
+            const uint8_t b = stream[i];
+            kept[n++] = b;
+            while (T::write_bulk({&b, 1}) == 0u) {
+            }
+        }
+        const uint32_t t1 = now();
+        while (!T::tx_idle() && since(t1) < 100u * frame) {
+        }
+        spin_cycles(4u * frame);
+        return n;
+    };
+    up = transport_up<PacedLoop>(mode_paced, baud);
+    uint32_t want = send_with_breaks.template operator()<PacedLoop>();
+    uint32_t at = 0;
+    wrong = 0;
+    got = drain_into<PacedLoop>(kept, want, at, wrong);
+    const uint32_t fe_paced = PacedLoop::frame_errors();
+    print(serial, "  ", slots, " slots with ", hits, " breaks, the paced receiver: ", got,
+          " of ", want, " bytes back (", wrong, " wrong), FE ", fe_paced, ", PE ",
+          PacedLoop::parity_errors(), ", ORE ", PacedLoop::hw_overruns(), ", ring overruns ",
+          PacedLoop::rx_overruns(), crlf);
+    bench.verdict("K BREAKS IN N SLOTS, the interrupt receiver: N - K bytes delivered "
+                  "intact and in order, the break dropped by its own entry's flags, "
+                  "and the frame-error counter K",
+                  up && want == slots - hits && got == want && wrong == 0u &&
+                      fe_paced == hits && PacedLoop::hw_overruns() == 0u &&
+                      PacedLoop::rx_overruns() == 0u);
+    transport_down<PacedLoop>();
+
+    // --- the same under the receive engine: no clear reads RDR.
+    feed();
+    up = transport_up<EngineLoop>(mode_engine, baud);
+    want = send_with_breaks.template operator()<EngineLoop>();
+    at = 0;
+    wrong = 0;
+    got = drain_into<EngineLoop>(kept, want, at, wrong);
+    const uint32_t fe_engine = EngineLoop::frame_errors();
+    print(serial, "  the same under the receive engine: ", got, " of ", want, " back (",
+          wrong, " wrong), FE ", fe_engine, ", NE ", EngineLoop::noise_errors(), ", ORE ",
+          EngineLoop::hw_overruns(), ", ring overruns ", EngineLoop::rx_overruns(),
+          ", USART1 entries ", loop_irqs, crlf);
+    bench.verdict("K BREAKS IN N SLOTS UNDER THE ENGINE: N - K bytes delivered intact "
+                  "and in order - the channel was owed every one and got every one, "
+                  "no clear having read RDR (every flag of this block clears through "
+                  "ICR) and the break's own character not transferred (DDRE clear) - "
+                  "and the frame-error counter exactly K, one vector entry each",
+                  up && want == slots - hits && got == want && wrong == 0u &&
+                      fe_engine == hits && EngineLoop::hw_overruns() == 0u &&
+                      EngineLoop::rx_overruns() == 0u);
+
+    // --- the engine's edge: the line's IDLE after a burst ...
+    feed();
+    (void)transport_up<EngineLoop>(mode_engine, baud);
+    const int32_t idle_tail = burst_edge<EngineLoop>(stream, 17, baud, got, wrong);
+    print(serial, "  the receive engine, 17 bytes at 115200: ", got, " back (", wrong,
+          " wrong) on ", rx_edges, " edges; the last edge ", idle_tail,
+          " cycles after the last stop bit", crlf);
+    bench.verdict("THE ENGINE'S EDGE IS THE LINE'S IDLE: a burst told within two "
+                  "frames of its last stop bit, by the vector and no poll",
+                  got == 17u && wrong == 0u && idle_tail > 0 &&
+                      idle_tail < static_cast<int32_t>(2u * frame));
+
+    // ... and the half and full marks on a stream with no silence in it:
+    // 200 bytes at 1 Mbaud into a 64-byte ring, the consumer reading only
+    // when a vector says so.
+    feed();
+    (void)transport_up<EngineLoop>(mode_engine, 1'000'000);
+    (void)burst_edge<EngineLoop>(stream, sizeof stream, 1'000'000, got, wrong);
+    const uint32_t stream_edges = rx_edges;
+    print(serial, "  200 bytes at 1 Mbaud into the 64-byte ring, read on the edges "
+          "alone: ", got, " back (", wrong, " wrong) on ", stream_edges,
+          " edges, ring overruns ", EngineLoop::rx_overruns(), ", ORE ",
+          EngineLoop::hw_overruns(), ", laps ", LoopRxCh::laps(), crlf);
+    bench.verdict("A STREAM WITH NO SILENCE IS NEVER HELD: the ring's half and full "
+                  "marks tell the consumer twice a lap, and 200 bytes cross a 64-byte "
+                  "ring with no overrun where the line's IDLE alone would have come "
+                  "three laps late",
+                  got == sizeof stream && wrong == 0u && stream_edges >= 6u &&
+                      EngineLoop::rx_overruns() == 0u && EngineLoop::hw_overruns() == 0u);
+    transport_down<EngineLoop>();
+}
+
+/// tx_idle() against the pad: EXTI line 9 watches PA9's falling edges -
+/// each frame of 0xFF has exactly one, its start bit - and the last one
+/// places the last stop bit's end ten bit times later.
+template <typename T>
+void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& late,
+                    bool& ok) {
+    constexpr uint32_t baud = 9600;
+    constexpr uint32_t bit = SysClock::hz / baud;
+    ok = transport_up<T>(mode, baud);
+    (void)Exti::sense(9, ExtiSense::none);
+    // The pending bit is set only under an unmasked CPU interrupt
+    // (RM0444 13.4); the NVIC line stays down, so nothing is
+    // entered and the bit is polled.
+    ok = ok && Exti::select(9, 'A') && Exti::sense(9, ExtiSense::falling) &&
+         Exti::interrupt(9, true);
+    (void)Exti::clear(9);
+    static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint32_t last_fall = 0;
+    uint32_t falls = 0;
+    uint32_t idle_at = 0;
+    bool idle_seen = false;
+    (void)T::write_bulk({ones, sizeof ones});
+    const uint32_t t0 = now();
+    while (since(t0) < 12u * 10u * bit) {
+        const uint32_t t = now();
+        if (Exti::falling_pending(9)) {
+            Exti::clear_falling(1u << 9);
+            last_fall = t;
+            ++falls;
+        }
+        if (!idle_seen && T::tx_idle()) {
+            idle_at = t;
+            idle_seen = true;
+        }
+    }
+    const uint32_t stop_end = last_fall + 10u * bit;
+    early = idle_seen && idle_at < stop_end ? stop_end - idle_at : 0u;
+    late = idle_seen && idle_at >= stop_end ? idle_at - stop_end : 0u;
+    print(serial, "  ", name, ": ", falls, " start bits on PA9; tx_idle() ",
+          idle_seen ? "" : "NEVER ", "true ", early != 0u ? early : late,
+          early != 0u ? " cycles BEFORE" : " cycles after", " the last stop bit's end (a bit is ",
+          bit, ")", crlf);
+    ok = ok && idle_seen && falls == sizeof ones;
+    (void)Exti::release(9);
+    transport_down<T>();
+}
+
+void tq_tx_idle() {
+    feed();
+    console_drain();
+    constexpr uint32_t bit = SysClock::hz / 9600u;
+    uint32_t early = 0;
+    uint32_t late = 0;
+    bool ok = false;
+    tx_idle_on_pad<PlainSender>("the interrupt transmitter, 8 frames at 9600", mode_plain_tx,
+                                early, late, ok);
+    // The edge is seen by a poll of a few tens of cycles, so the stop
+    // bit's end it places is late by as much: 1/32 of a bit of margin.
+    bench.verdict("tx_idle() IS THE WIRE'S, on the interrupt transmitter: never before "
+                  "the last stop bit's end, and within a bit time after it",
+                  ok && early <= bit / 32u && late <= bit);
+    feed();
+    tx_idle_on_pad<EngineSender>("the transmit engine, 8 frames at 9600", mode_engine_tx,
+                                 early, late, ok);
+    bench.verdict("and on the transmit engine: TC cleared when the block starts, so "
+                  "no stop bit of an earlier block answers for this one",
+                  ok && early <= bit / 32u && late <= bit);
+}
+
 // ---------------------------------------------------------------------------
 // The menu
 // ---------------------------------------------------------------------------
@@ -4583,9 +4916,43 @@ extern "C" void USART1_IRQHandler() {
         (void)LoopFifoUart::isr();
         return;
     }
+    bool edge = false;
+    switch (loop_mode) {
+        case mode_paced: edge = PacedLoop::isr(); break;
+        case mode_engine: edge = EngineLoop::isr(); break;
+        case mode_plain_tx: (void)PlainSender::isr(); break;
+        case mode_engine_tx: (void)EngineSender::isr(); break;
+        default: break;
+    }
+    if (loop_mode >= mode_paced) {
+        if (edge) {
+            rx_edge_at = now();
+            rx_edges = rx_edges + 1u;
+        }
+        return;
+    }
     // Nothing of ours is armed here: silence the line rather than
     // re-entering for ever on a condition nobody will clear.
     brio::Nvic::disable(brio::Usart<1>::irq());
+}
+
+/// Channels 2 and 3 share this line (table 61): letters p and q's
+/// transmit engine and receive engine, the only channels of this suite
+/// that interrupt.
+extern "C" void DMA1_Channel2_3_IRQHandler() {
+    bool edge = false;
+    switch (loop_mode) {
+        case mode_paced: (void)PacedLoop::dma_isr(); break;
+        case mode_engine: edge = EngineLoop::dma_isr(); break;
+        case mode_engine_tx: (void)EngineSender::dma_isr(); break;
+        default:
+            brio::Nvic::disable(DMA1_Channel2_3_IRQn);
+            break;
+    }
+    if (edge) {
+        rx_edge_at = now();
+        rx_edges = rx_edges + 1u;
+    }
 }
 
 /// LPUART1'S LINE, WHICH IS USUALLY SOMEBODY ELSE'S TOO: USART3, USART4
@@ -4727,6 +5094,10 @@ int main() {
     bench.letter('n', "the LPUARTs: two instances, table 198, the shared "
                       "vectors", tn_lpuart);
     bench.letter('o', "IRTIM: a carrier, an envelope and one pad", to_irtim);
+    bench.letter('p', "the receive transport: the paced receiver, the engine's "
+                      "edges, K breaks in N slots", tp_receive);
+    bench.letter('q', "tx_idle() on the pad: the last stop bit, both transmitters",
+                 tq_tx_idle);
     bench.letter('y', "HOST: streaming across the kernel clocks", ty_streaming,
                  false);
     bench.letter('w', "HOST: the wake from Stop, and 2.2.4 staged", tw_wake,

@@ -1258,6 +1258,7 @@ public:
                                .priority = priority}) |
                dma_ccr_irq(irq);
         armed_ = dma_irq_flags(irq);
+        oneshot_armed_ = armed_;
         capacity_ = 0;
         taken_ = 0;
         Nvic::enable(Channel::irq());
@@ -1271,11 +1272,17 @@ public:
      * time fact and so is checked here (CNDTR holds 65535 at most).
      *
      * The word kept for the ring carries CIRC, MINC, the beat on both
-     * sides, the priority, TCIE (the lap) and TEIE (the error); HTIE stays
-     * clear. The storage and its length are kept beside the word, and
-     * the channel comes out stopped: start() runs the ring. The one-shot
-     * verbs stay usable on the same binding - a start(run) is a one-shot
-     * run that replaces the ring until the next start().
+     * sides, the priority, TCIE (the lap), HTIE (the half lap) and TEIE
+     * (the error). THE TWO MARKS ARE THE RING'S RECEIVE EDGE on a stream
+     * with no silence in it: 10.4.6 raises HTIF at half the count and
+     * TCIF at the reload, so a consumer the marks wake is never more than
+     * half a lap behind the channel - the transport's line edge (an idle
+     * line, a time-out) needs a pause the stream may never make. The
+     * storage and its length are kept beside the word, and the channel
+     * comes out stopped: start() runs the ring and reports the half mark
+     * through service(); a start(run) is a one-shot run on the same
+     * binding that replaces the ring until the next start(), with the
+     * one-shot's own flags.
      */
     template <typename T, size_t N>
     static void arm(volatile void* data, uint8_t request, T (&storage)[N],
@@ -1289,7 +1296,8 @@ public:
                       "brio DmaRxEngine: a ring of 2..65535 elements - CNDTR is the "
                       "count every lap reloads, and it is sixteen bits (10.6.4)");
         arm(data, request, priority, DmaIrq::complete_and_error);
-        ring_ccr_ = ccr_ | DMA_CCR_CIRC | dma_detail::beat_bits<T, true, DMA_CCR_MINC>();
+        ring_ccr_ = ccr_ | DMA_CCR_CIRC | DMA_CCR_HTIE |
+                    dma_detail::beat_bits<T, true, DMA_CCR_MINC>();
         ring_ = &storage[0];
         ring_length_ = static_cast<uint16_t>(N);
         laps_ = 0;
@@ -1322,6 +1330,7 @@ public:
             return false;
         }
         laps_ = 0;
+        armed_ = static_cast<uint8_t>(DmaFlag::complete | DmaFlag::half | DmaFlag::error);
         Channel::restart(ring_ccr_, ring_, ring_length_);
         return true;
     }
@@ -1415,6 +1424,7 @@ private:
         }
         capacity_ = static_cast<uint16_t>(length);
         taken_ = 0;
+        armed_ = oneshot_armed_;
         Channel::restart(ccr_ | dma_detail::beat_bits<T, increment, DMA_CCR_MINC>(), memory,
                          static_cast<uint16_t>(length));
         return true;
@@ -1422,6 +1432,7 @@ private:
 
     static inline uint32_t ccr_ = 0;
     static inline uint8_t armed_ = 0;
+    static inline uint8_t oneshot_armed_ = 0;   // the one-shot runs' flags, arm()'s DmaIrq
     static inline uint16_t capacity_ = 0;
     static inline uint16_t taken_ = 0;
     static inline uint32_t faults_ = 0;

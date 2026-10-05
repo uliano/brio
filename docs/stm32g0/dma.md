@@ -155,7 +155,7 @@ The controller's offer, item by item:
 |---|---|
 | the register file: CCR, CNDTR, CPAR, CMAR (10.6.3-10.6.6) | CPAR at `arm()`, CMAR and CNDTR a block, CCR's word kept in the engine |
 | the width fields PSIZE and MSIZE (10.4.5) | the beat per `start()`, equal on both sides; table 51's unequal widths (packing, zero-extension) stay the channel verbs' and the bench's - an engine moves one item a beat |
-| circular mode (10.4.5) | the player's (`DmaLoopEngine`), and the receive engine's second shape: a ring's storage written lap after lap, its count register the ring's producer index (`util/ring.hpp`'s `HardwareRing`), the transfer-complete flag counting laps; the half-transfer flag is used by neither |
+| circular mode (10.4.5) | the player's (`DmaLoopEngine`), and the receive engine's second shape: a ring's storage written lap after lap, its count register the ring's producer index (`util/ring.hpp`'s `HardwareRing`), the transfer-complete flag counting laps; the half-transfer flag armed on the ring alone, the edge of a stream with no silence |
 | a self-trigger or a chain between channels | none on this controller: a channel is one block; the DMAMUX's channel events (EGE) and request generators chain channels through the fabric, measured below and used by no engine |
 | the gate (5.4.9) | opened by `arm()`, once |
 | the flags (10.6.1, 10.6.2) | cleared by a write-one IFCR store of the three specific bits, never CGIFx (ES0548 2.4.1): one store a block start, one a completion |
@@ -212,9 +212,12 @@ is lost between runs: there are none. The engine is
 ([../design/ring.md](../design/ring.md)): Ring's consumer verbs, and the
 accounting of a lap the consumer did not keep up with (`overruns()`),
 which is the view's because only the consumer knows where its tail is.
-The half-transfer flag is not used: the view reads the counter whenever
-it looks, and the wrap is the one edge its arithmetic needs. The
-one-shot verbs stay usable on a ring binding - `start(run)` runs a block
+The half-transfer flag is not the view's: it reads the counter whenever
+it looks, and the wrap is the one edge its arithmetic needs. It is the
+OWNER'S: the ring's word carries HTIE beside TCIE, and `service()`
+reports the half mark while the ring runs, so the transport's handler
+can tell its consumer twice a lap on a stream that never pauses for the
+line's own end-of-burst flag. The one-shot verbs stay usable on a ring binding - `start(run)` runs a block
 that replaces the ring until the next `start()` - and a one-shot `arm()`
 leaves the ring the circular one bound where it was. The ring's length
 is a compile-time fact and is refused past CNDTR's 65535 at the `arm()`,
@@ -230,11 +233,13 @@ it stops its engines.
 its whole receive ring ([usart.md](usart.md)): a byte that lands is
 readable at once through `read_span()`, `read_byte()` and
 `read_bulk()`, the channel's completion handler counts a lap, and
-`harvest()` is left with the housekeeping (the receive errors read once,
-a channel a transfer error stopped started again with the view cleared)
+`harvest()` - run by the transport's two vectors, the USART's on the
+line's IDLE and the channel's on the half and full marks - is left with
+the housekeeping (the receive errors read and cleared through ICR, a
+channel a transfer error stopped started again with the view cleared)
 and with the edge a ring with no publish step cannot give by itself:
-true when bytes stand in a ring the consumer had found empty since the
-last true. `consume()` there answers whether the run was intact, and
+true when bytes stand in a ring the consumer had looked at and found
+empty since the last true. `consume()` there answers whether the run was intact, and
 `rx_overruns()` counts the laps a consumer lost.
 
 ### The two verbs a full-duplex bus needs
@@ -299,11 +304,13 @@ ring above:
 using Serial = brio::Uart<2, pins, 64, 256,
                           brio::DmaTxEngine<1, 6>, brio::DmaRxEngine<1, 7>>;
 extern "C" void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler() {
-    (void)Serial::dma_isr();   // a block sent, or a lap of the ring counted
+    // a block sent, or the ring's half or full mark: the edge on true
+    if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-// ... and somewhere in the loop, or on a TimeEvent - the edge, nothing
-// to publish:
-if (Serial::harvest()) { brio::post<SerialLines>(brio::RxActivity{}); }
+extern "C" void USART2_LPUART2_IRQHandler() {
+    // the line's IDLE, a receive error: the edge on true
+    if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+}
 ```
 
 A receive ring any peripheral fills, read in place:
@@ -517,7 +524,7 @@ transmit on channel 2, receive on channel 3 in the circular shape over a
 1 Mbaud:
 
 - At rest the channel is CIRCULAR, its count the ring's 64, the lap's
-  completion and the error armed and the half-transfer not.
+  completion, the half lap and the error armed.
 - **4096 bytes came back byte-exact in 40986 us against 40960 of wire**,
   read where the channel wrote them, through 64 laps each counted once
   by its own completion (a restart would have zeroed the count), with no
@@ -533,12 +540,13 @@ transmit on channel 2, receive on channel 3 in the circular shape over a
   with nobody reading: ONE overrun counted, nothing of the lapped bytes
   delivered (the view skips rather than tears), the next 20 exact - and
   no ORE: the silicon lost nothing, the consumer did.
-- **`harvest()` is an edge** over a ring nobody publishes into: true
-  once for bytes landing on a ring the consumer had drained, false asked
-  again, false while the consumer has not drained, true for the next
-  byte after a drain.
+- **The edge comes from the vectors** over a ring nobody publishes into:
+  the line's IDLE tells once for bytes landing on a ring the consumer had
+  drained, an owner's `harvest()` asked after it hears nothing new, a
+  consumer that has not drained is not told again, the next byte after a
+  drain is an edge again.
 - **What a harvest costs**, best of eight on the ruler with the ruler's
-  own 65..68 cycles taken out: 65..68 cycles with the consumer told and
+  own 65..68 cycles taken out: 65..71 cycles with the consumer told and
   still reading, 102..122 on a drained ring (the look at the producer
   included; two builds differing by one store on the restart path read
   102..105 and 122, the slower with the look behind a backward branch -
@@ -546,9 +554,10 @@ transmit on channel 2, receive on channel 3 in the circular shape over a
   states, measured and not dissected); a poll over the one-shot
   shape on the same stimulus - the
   receive errors, `take()`, the re-arm test - costs 115..125. In the
-  release listing (`-Os`, the console's transport) `harvest()` is 204
-  bytes and runs 20 instructions on the told path, about 40 with the
-  look, three peripheral reads at most (USART ISR, CCR, CNDTR), against
+  release listing (`-Os`, a transport with both engines) `harvest()` is
+  252 bytes and runs about 20 instructions on the told path, about 45
+  with the look (the ring's `waiting()`, which writes nothing), three
+  peripheral reads at most (USART ISR, CCR, CNDTR), against
   244 bytes, a 136-byte re-arm and about 50 instructions on the quiet
   path of a poll over the one-shot shape. The cost moved to the consumer: a run
   read costs two looks, `HardwareRing::read_span()` 112 bytes and
@@ -808,12 +817,6 @@ as does `util/` entire.
 
 Driver gaps:
 
-- **The line's IDLE edge** as the event that ends a received burst: the
-  ring needs no re-arm, but its owner still ASKS - `harvest()` on a
-  TimeEvent, the latency the owner chose - where the USART's IDLE flag
-  (or its receiver time-out) would post at a burst's end with no poll.
-  It is the UART round's, which takes the transports' receive edge as a
-  whole; this round gave the engine the shape the edge will stand on.
 - **The per-item cost is measured and not explained to the cycle**:
   5.00 cycles a word memory to memory, against two AHB accesses and a
   re-arbitration the chapter names but does not time. ST's application

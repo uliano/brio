@@ -93,7 +93,8 @@
 //   o  THE CIRCULAR RECEIVE: USART1's single wire as its own loop, its
 //      receive engine a ring the channel writes lap after lap - a stream
 //      across 64 laps, a burst with the consumer away, a consumer a lap
-//      behind, the edge harvest() reports and what harvest() costs
+//      behind, the edge the line's IDLE and the ring's marks report
+//      through the two vectors, and what harvest() costs
 //   u  (outside z) brio stress: byte-exact streaming both ways
 //      through the engines, up to the VCP's own measured ceiling
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
@@ -2430,7 +2431,6 @@ StressLeg stress_leg(const char* op, uint32_t baud, uint32_t window_ms,
     } else {                                       // sink: the board verifies
         uint8_t chunk[64];
         while (Ticker::ticks() < end) {
-            (void)Serial::harvest();
             const uint32_t n = Serial::read_bulk({chunk, sizeof chunk});
             for (uint32_t i = 0; i < n; ++i) {
                 if (chunk[i] != lfsr_next()) {
@@ -2933,7 +2933,7 @@ void tn_sleep_story() {
 // ring, and the letter judges that shape through the transport's own
 // verbs: what the channel holds, a stream across many laps, a burst that
 // arrives while the consumer is away, a consumer a lap behind, the edge
-// harvest() reports, and what harvest() costs.
+// the vectors report, and what harvest() costs.
 
 constexpr UartPins u1_pins{
     .tx = {'A', 9, PinFunction::af1},    // USART1_TX, the single wire
@@ -2948,6 +2948,7 @@ using U1 = Uart<1, u1_pins, 64, 16, U1Tx, U1Rx, uart_half_duplex()>;
 constexpr uint32_t u1_baud = 1'000'000;
 constexpr uint32_t u1_byte_cycles = SysClock::hz / (u1_baud / 10u);   // ten bits
 volatile bool u1_live = false;
+volatile uint32_t u1_edges = 0;   // the true answers of U1's two vectors
 
 /// The payload: a xorshift both ends run, so every byte checks itself.
 struct Stream {
@@ -3025,10 +3026,12 @@ void to_circular_receive() {
           U1Rx::laps(), crlf);
     bench.verdict("THE RECEIVE ENGINE IS A RING: the channel is circular over "
                   "the transport's whole 64-byte ring, its count at rest the "
-                  "ring's length, the lap's completion and the error armed and "
-                  "the half-transfer not",
+                  "ring's length, the lap's completion, the half lap and the "
+                  "error armed - the two marks that tell a consumer of a stream "
+                  "with no silence in it",
                   up && circular &&
-                      armed == static_cast<uint32_t>(DmaFlag::complete | DmaFlag::error) &&
+                      armed == static_cast<uint32_t>(DmaFlag::complete | DmaFlag::half |
+                                                     DmaFlag::error) &&
                       at_rest == 64u && U1Rx::laps() == 0u);
 
     // --- a stream across many laps, read as it lands.
@@ -3059,7 +3062,6 @@ void to_circular_receive() {
         if (sent_off < staged) {
             sent_off += U1::write_bulk({stage + sent_off, staged - sent_off});
         }
-        (void)U1::harvest();
         const std::span<const uint8_t> run = U1::read_span();
         uint32_t wrong = 0;
         Stream check = rx;
@@ -3096,11 +3098,9 @@ void to_circular_receive() {
     uint32_t bad2 = 0;
     u1_send(tx, 40);
     u1_settle(2);
-    (void)U1::harvest();
     const uint32_t first = u1_take(rx, 40, bad2);
-    u1_send(tx, 60);   // and nobody reads, harvests or re-arms meanwhile
+    u1_send(tx, 60);   // and nobody reads or re-arms meanwhile
     u1_settle(4);
-    (void)U1::harvest();
     const uint32_t burst = u1_take(rx, 60, bad2);
     print(serial, "  40 bytes read, the tail at 40 of 64; then 60 in one burst "
           "with the consumer away: ", burst, " of 60 read, ", bad2, " wrong, "
@@ -3120,12 +3120,10 @@ void to_circular_receive() {
     for (uint32_t i = 0; i < 80u; ++i) {
         (void)rx.next();   // the stream moves on whatever the consumer saw
     }
-    (void)U1::harvest();
     const uint32_t behind = u1_take(rx, 80, bad3);
     const uint8_t overruns = U1::rx_overruns();
     u1_send(tx, 20);
     u1_settle(2);
-    (void)U1::harvest();
     const uint32_t after = u1_take(rx, 20, bad3);
     print(serial, "  80 bytes with nobody reading: ", behind, " read, ring "
           "overruns ", overruns, "; the next 20: ", after, " read, ", bad3,
@@ -3137,33 +3135,33 @@ void to_circular_receive() {
                   behind == 0u && overruns == 1u && after == 20u && bad3 == 0u &&
                       U1::hw_overruns() == 0u);
 
-    // --- the edge harvest() reports.
+    // --- the edge THE VECTORS report: the line's IDLE through isr(), the
+    // ring's half and full marks through dma_isr(), both answering
+    // harvest()'s edge - counted where they are bound.
     uint32_t bad4 = 0;
-    (void)U1::harvest();
     (void)u1_take(rx, 64, bad4);   // drained: the consumer found it empty
-    const bool e0 = U1::harvest();
+    const uint32_t e0 = u1_edges;
     u1_send(tx, 5);
     u1_settle(2);
-    const bool e1 = U1::harvest();
-    const bool e2 = U1::harvest();
+    const uint32_t e1 = u1_edges;
+    const bool asked = U1::harvest();   // an owner asking too is told nothing twice
     const uint32_t part = u1_take(rx, 2, bad4);
     u1_send(tx, 3);
     u1_settle(2);
-    const bool e3 = U1::harvest();
+    const uint32_t e3 = u1_edges;
     const uint32_t rest = u1_take(rx, 64, bad4);
-    const bool e4 = U1::harvest();
     u1_send(tx, 1);
     u1_settle(2);
-    const bool e5 = U1::harvest();
+    const uint32_t e5 = u1_edges;
     const uint32_t last = u1_take(rx, 64, bad4);
-    print(serial, "  the edge: empty ", e0, ", 5 in ", e1, ", asked again ", e2,
-          ", 2 read and 3 more in ", e3, ", drained ", e4, ", 1 in ", e5,
-          " (", part, "+", rest, "+", last, " bytes, ", bad4, " wrong)", crlf);
-    bench.verdict("harvest() IS AN EDGE over a ring nobody publishes into: true "
-                  "once when bytes land on a ring the consumer had drained, "
-                  "false asked again, false while the consumer has not drained "
-                  "yet, true again for the next byte after a drain",
-                  !e0 && e1 && !e2 && !e3 && !e4 && e5 && part == 2u &&
+    print(serial, "  the edge: 5 in +", e1 - e0, ", harvest() asked as well ", asked,
+          ", 2 read and 3 more in +", e3 - e1, ", drained and 1 in +", e5 - e3, " (", part,
+          "+", rest, "+", last, " bytes, ", bad4, " wrong)", crlf);
+    bench.verdict("THE EDGE COMES FROM A VECTOR: the line's IDLE tells a burst on "
+                  "a ring the consumer had drained once, an owner's harvest() then "
+                  "hears nothing new, a consumer that has not drained is not told "
+                  "again, and the next byte after a drain is an edge again",
+                  e1 - e0 == 1u && !asked && e3 == e1 && e5 - e3 == 1u && part == 2u &&
                       rest == 6u && last == 1u && bad4 == 0u);
 
     // --- what harvest() costs, the ruler's own read taken out: on a ring
@@ -3212,7 +3210,11 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// USART1 has a line of its own on every part of this family; letter o's
 /// transport arms no interrupt there (both directions have an engine),
 /// and a vector left unbound would land in Default_Handler's spin.
-extern "C" void USART1_IRQHandler() { (void)U1::isr(); }
+extern "C" void USART1_IRQHandler() {
+    if (U1::isr()) {
+        u1_edges = u1_edges + 1u;
+    }
+}
 
 /// Channel 1 has a vector to itself (table 61) - and channel 1 is the
 /// loop engine's, so this body is a player's whole CPU cost: one lap
@@ -3238,7 +3240,9 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 /// every owner IS the dispatch.
 extern "C" void DMA1_Channel2_3_IRQHandler() {
     if (u1_live) {
-        (void)U1::dma_isr();   // letter o's single-wire USART1, both engines
+        if (U1::dma_isr()) {   // letter o's single-wire USART1, both engines
+            u1_edges = u1_edges + 1u;
+        }
         return;
     }
     if (ChB::isr() != 0u) {
@@ -3373,7 +3377,6 @@ int main() {
     }
 
     for (;;) {
-        (void)Serial::harvest();   // the RX engine's own pacing, once per turn
         uint8_t c = 0;
         if (!Serial::read_byte(c)) {
             continue;

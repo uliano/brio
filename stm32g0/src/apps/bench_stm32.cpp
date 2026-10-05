@@ -173,6 +173,24 @@
 //      image: stm32g0/ld/stm32g0b1re.ld gives the linker bank 1 alone,
 //      and the G071 and G031 have one bank.
 //
+//   u  THE SERIAL TRANSPORT ON A LOOP OF ITS OWN (stm32g0/usart.hpp's
+//      UartTask): USART1 on PA9, a vector of its own (`loop_meter`) and
+//      DMA1 channels 2 and 3 for its engines. uart.tx: 256 and 4096
+//      bytes through write_bulk() at 115200, 1 M and 2 Mbaud, full duplex
+//      with the receiver on PA10's pull-up, through the interrupt
+//      transmitter and the transmit engine, to the last stop bit (TC);
+//      busy is the transport's share (the write_bulk() calls that took
+//      bytes and the handlers), the thread's wait being a spin.
+//      uart.rx: bursts of 16 and 256 bytes round the single wire, the
+//      transmitter on its engine so USART1's vector is the receiver's,
+//      through the paced receiver and the receive engine. uart.edge: a
+//      burst of 17 with the consumer draining on every edge a vector
+//      reports, the last edge against TC rising, signed. And the copy
+//      into the ring: write_bulk's byte loop against the runtime's
+//      memcpy at the lengths a run takes, ends aligned alike and not.
+//      2 Mbaud is the loop's top rate: the single wire's rise on the
+//      pad's own pull-up (docs/stm32g0/usart.md).
+//
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
 //   print   115200 baud over the ten bits of an 8N1 frame (a start bit,
@@ -296,6 +314,7 @@ IsrMeter<Ruler, Idle> usart_meter;
 IsrMeter<TickRuler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> empty_meter;
 IsrMeter<Ruler, Idle> dma_meter;   // letter d: the three DMA vectors and SPI1's
+IsrMeter<Ruler, Idle> loop_meter;  // letter u: USART1's vector
 
 /// The counters at one instant, read UNDER THE MASK although every word
 /// of them is atomic on this core: the tick keeps running between two
@@ -308,7 +327,7 @@ BenchCounters counters_of(const Meters&... m) {
     const Idle::CriticalSection cs;
     return bench_counters<Idle>(m...);
 }
-BenchCounters counters() { return counters_of(usart_meter, tick_meter, dma_meter); }
+BenchCounters counters() { return counters_of(usart_meter, tick_meter, dma_meter, loop_meter); }
 
 /// The same instant with the two vectors kept apart, for letter p.
 struct Snapshot {
@@ -1103,6 +1122,323 @@ void te_host() {
     bench.verdict("ran", true);
 }
 
+
+// =============================================================================
+// u - the serial transport on a loop of its own: USART1 on PA9
+//     (stm32g0/usart.hpp's UartTask over design/serial.md)
+// =============================================================================
+/// USART1_TX on PA9 and USART1_RX on PA10, AF1 (DS13560 table 13): two pads
+/// nothing on the Nucleo-64s drives. The TRANSMIT ops run full duplex with
+/// the receiver on PA10's pull-up, so USART1's vector serves the
+/// transmitter alone; the RECEIVE ops run the single wire (33.5.15), the
+/// instance hearing its own frames, with the transmitter on its engine so
+/// that USART1's vector serves the receiver alone.
+constexpr UartPins loop_pins{
+    .tx = {'A', 9, PinFunction::af1},
+    .rx = {'A', 10, PinFunction::af1},
+};
+constexpr UartOptions single_wire = uart_half_duplex();
+
+/// The rings: a 256-byte burst needs a 512-byte receive ring; the 8 KB part
+/// takes a quarter of everything (and its long burst is 64 bytes).
+constexpr bool loop_big = SRAM_SIZE_MAX >= 0x4000UL;
+constexpr uint32_t loop_rx_ring = loop_big ? 512u : 128u;
+constexpr uint32_t loop_tx_ring = loop_big ? 256u : 64u;
+constexpr uint32_t loop_long = loop_big ? 256u : 64u;
+
+using LoopTx = DmaTxEngine<1, 2>;
+using LoopRx = DmaRxEngine<1, 3>;
+using TxPlain = Uart<1, loop_pins, 16, loop_tx_ring>;
+using TxEngined = Uart<1, loop_pins, 16, loop_tx_ring, LoopTx>;
+using RxPlain = Uart<1, loop_pins, loop_rx_ring, loop_tx_ring, LoopTx, NoDmaEngine, single_wire>;
+using RxEngined = Uart<1, loop_pins, loop_rx_ring, loop_tx_ring, LoopTx, LoopRx, single_wire>;
+
+enum class LoopMode : uint8_t { none, tx_plain, tx_engined, rx_plain, rx_engined };
+volatile LoopMode loop_mode = LoopMode::none;   // read by the vectors
+volatile uint32_t edge_at = 0;                  // the ruler at the last edge a vector reported
+volatile uint32_t edge_count = 0;
+
+/// The rates: the console's, about 1 Mbaud, and the loop's top rate - 2
+/// Mbaud, where the single wire's rise on the pad's own 40 k pull-up still
+/// carries a frame (docs/stm32g0/usart.md, "The baud generator"); the
+/// generator itself reaches 4 Mbaud (USARTDIV 16 at 64 MHz).
+constexpr std::array<uint32_t, 3> loop_rates{115200u, 1'000'000u, 2'000'000u};
+
+/// The vector pair apart, between two instants.
+struct LoopSnap {
+    uint32_t usart_irq, usart_isr, dma_irq, dma_isr;
+};
+LoopSnap loop_snap() {
+    const Idle::CriticalSection cs;
+    return {loop_meter.count(), loop_meter.cycles(), dma_meter.count(), dma_meter.cycles()};
+}
+void print_loop(const LoopSnap& a, const LoopSnap& b) {
+    print(serial, "  usart1: irq=", b.usart_irq - a.usart_irq, " isr=", b.usart_isr - a.usart_isr,
+          "  dma: irq=", b.dma_irq - a.dma_irq, " isr=", b.dma_isr - a.dma_isr, crlf);
+}
+
+std::span<const uint8_t> payload_bytes(uint32_t from, uint32_t n) {
+    return {reinterpret_cast<const uint8_t*>(payload.data()) + from, n};
+}
+
+template <typename T>
+bool loop_up(LoopMode mode, uint32_t baud) {
+    // The vector serves T from the init on: the receiver time-out rises
+    // as the receiver is enabled (33.8.10's note), before a byte moves.
+    loop_mode = mode;
+    const bool ok = T::init(clock, baud);
+    T::clear_errors();
+    // TE's idle frame (33.5.5) and anything the pad saw on the way.
+    const uint32_t frame = SysClock::hz / (baud / 10u);
+    Stopwatch<Ruler> sw;
+    sw.start();
+    while (sw.elapsed() < 4u * frame) {
+    }
+    uint8_t junk = 0;
+    while (T::read_byte(junk)) {
+    }
+    return ok;
+}
+
+bool loop_tc() { return (Usart<1>::status() & UsartFlag::tc) != 0u; }
+
+/// uart.tx: n bytes of the payload through write_bulk(), refused runs
+/// retried, then the wire to its last stop bit (TC). busy is the
+/// TRANSPORT'S share - every write_bulk() call that took bytes and the
+/// handlers - because the thread here waits by spinning, which a program
+/// with a kernel would spend idle.
+template <typename T>
+void run_uart_tx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
+    (void)drain();
+    if (!loop_up<T>(mode, baud)) {
+        print(serial, "  ", op, ": init refused at ", baud, crlf);
+        return;
+    }
+    Stopwatch<Ruler> sw;
+    const BenchCounters c0 = counters();
+    const LoopSnap v0 = loop_snap();
+    uint32_t thread = 0;
+    sw.start();
+    uint32_t sent = 0;
+    const uint32_t budget = SysClock::hz / (baud / 10u) * n * 2u + SysClock::hz / 100u;
+    while (sent < n && sw.elapsed() < budget) {
+        const uint32_t a = Ruler::now();
+        const uint32_t k = T::write_bulk(payload_bytes(print_max - n + sent, n - sent));
+        if (k != 0u) {
+            thread += Ruler::now() - a;
+            sent += k;
+        }
+    }
+    while (!(T::tx_idle() && loop_tc()) && sw.elapsed() < budget) {
+    }
+    const uint32_t wall = sw.elapsed();
+    const LoopSnap v1 = loop_snap();
+    BenchSample s = bench_sample(wall, c0, counters());
+    s.busy = thread + (v1.usart_isr - v0.usart_isr) + (v1.dma_isr - v0.dma_isr);
+    const uint32_t actual = T::actual_baud(SysClock::pclk_hz);
+    T::release();
+    loop_mode = LoopMode::none;
+    print(serial, "  ", op, " at ", baud, " baud (", actual, "), sent ", sent,
+          ", the thread's write_bulk ", thread, crlf);
+    bench_line(serial, op, n, s, Ruler::hz(), baud / 10u);
+    print_loop(v0, v1);
+}
+
+/// uart.rx: a burst of n bytes round the single wire, the transmitter on
+/// its engine; wall from the first byte queued to the last one in the
+/// receive ring, the data checked after.
+template <typename T>
+void run_uart_rx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
+    (void)drain();
+    if (!loop_up<T>(mode, baud)) {
+        print(serial, "  ", op, ": init refused at ", baud, crlf);
+        return;
+    }
+    Stopwatch<Ruler> sw;
+    const BenchCounters c0 = counters();
+    const LoopSnap v0 = loop_snap();
+    sw.start();
+    uint32_t sent = 0;
+    const uint32_t budget = SysClock::hz / (baud / 10u) * n * 2u + SysClock::hz / 100u;
+    while (sent < n && sw.elapsed() < budget) {
+        sent += T::write_bulk(payload_bytes(sent, n - sent));
+    }
+    while (static_cast<uint32_t>(T::rx_pending()) < n && sw.elapsed() < budget) {
+    }
+    const uint32_t wall = sw.elapsed();
+    const LoopSnap v1 = loop_snap();
+    const BenchSample s = bench_sample(wall, c0, counters());
+    uint8_t got[loop_long];
+    const uint32_t read = T::read_bulk({got, n});
+    uint32_t wrong = 0;
+    for (uint32_t i = 0; i < read; ++i) {
+        if (got[i] != static_cast<uint8_t>(payload[i])) {
+            ++wrong;
+        }
+    }
+    print(serial, "  ", op, " at ", baud, " baud: ", read, " of ", n, " back, ", wrong,
+          " wrong, ORE ", T::hw_overruns(), " FE ", T::frame_errors(), " ring overruns ",
+          T::rx_overruns(), crlf);
+    T::release();
+    loop_mode = LoopMode::none;
+    bench_line(serial, op, n, s, Ruler::hz(), baud / 10u);
+    print_loop(v0, v1);
+}
+
+/// uart.edge: a burst of 17 bytes - one past a multiple of any FIFO level,
+/// so the tail is the edge's to deliver - with the consumer draining on
+/// every edge a vector reports; wall = the ruler at the LAST edge minus the
+/// ruler at the burst's last stop bit (TC rising), signed: an edge that
+/// came before the stop bit ended prints negative.
+template <typename T>
+void run_uart_edge(const char* op, LoopMode mode, uint32_t baud) {
+    constexpr uint32_t n = 17u;
+    (void)drain();
+    if (!loop_up<T>(mode, baud)) {
+        print(serial, "  ", op, ": init refused at ", baud, crlf);
+        return;
+    }
+    const uint32_t frame = SysClock::hz / (baud / 10u);
+    edge_count = 0;
+    uint32_t seen = 0;
+    uint32_t got = 0;
+    uint32_t wrong = 0;
+    bool tc_seen = false;
+    uint32_t tc_at = 0;
+    Usart<1>::clear_flags(UsartClear::tc);
+    (void)T::write_bulk(payload_bytes(0, n));
+    const uint32_t t0 = Ruler::now();
+    const uint32_t settle = 4u * frame + SysClock::hz / 250u;   // 4 ms past the tail
+    for (;;) {
+        if (!tc_seen && loop_tc()) {
+            tc_at = Ruler::now();
+            tc_seen = true;
+        }
+        if (edge_count != seen) {
+            seen = edge_count;
+            for (;;) {
+                const std::span<const uint8_t> run = T::read_span();
+                if (run.empty()) {
+                    break;
+                }
+                for (const uint8_t b : run) {
+                    if (b != static_cast<uint8_t>(payload[got])) {
+                        ++wrong;
+                    }
+                    ++got;
+                }
+                (void)T::consume(static_cast<uint32_t>(run.size()));
+            }
+        }
+        const uint32_t now = Ruler::now();
+        if ((tc_seen && now - tc_at > settle) || now - t0 > SysClock::hz / 10u) {
+            break;
+        }
+    }
+    T::release();
+    loop_mode = LoopMode::none;
+    const int32_t latency = static_cast<int32_t>(edge_at - tc_at);
+    print(serial, "  ", op, " at ", baud, " baud: ", got, " of ", n, " bytes (", wrong,
+          " wrong) on ", edge_count, " edges; the last edge ", latency, " cycles after the "
+          "last stop bit = ", latency * 100 / static_cast<int32_t>(frame), "/100 of a frame",
+          tc_seen ? "" : " (TC NEVER SEEN)", crlf);
+    // The grammar's line with a SIGNED wall: the edge may precede the stop
+    // bit's end (a receiver flag rises at the stop bit's middle).
+    print(serial, "bench ", op, " n=", n, " wall=", latency, " busy=- irq=", edge_count,
+          " isr=- rate=- wire=- x=-", crlf);
+}
+
+/// write_bulk()'s copy: its byte loop (the shape in stm32g0/usart.hpp's
+/// write_bulk, two pointers and the test at the bottom) against the
+/// runtime's memcpy, at the lengths a run takes, with the source and the
+/// destination sharing their word alignment and not: the cycles of one
+/// copy, over 64 copies, the ruler's own read taken out.
+alignas(4) uint8_t copy_src[136];
+alignas(4) uint8_t copy_dst[136];
+volatile uint32_t copy_len = 0;
+
+// The loop is write_bulk's own; the attribute keeps GCC from replacing
+// it with a call to memcpy, which it does here (a global destination) and
+// does not do inside write_bulk (the listing).
+[[gnu::noinline, gnu::optimize("no-tree-loop-distribute-patterns")]]
+uint32_t time_byte_loop(uint32_t off_dst, uint32_t k) {
+    const uint32_t t0 = Ruler::now();
+    for (uint32_t rep = 0; rep < 64u; ++rep) {
+        const uint8_t* from = copy_src;
+        uint8_t* to = copy_dst + off_dst;
+        uint8_t* const end = to + k;
+        do {
+            *to++ = *from++;
+        } while (to != end);
+        asm volatile("" ::: "memory");
+    }
+    return Ruler::now() - t0;
+}
+[[gnu::noinline]] uint32_t time_memcpy(uint32_t off_dst) {
+    const uint32_t t0 = Ruler::now();
+    for (uint32_t rep = 0; rep < 64u; ++rep) {
+        std::memcpy(copy_dst + off_dst, copy_src, copy_len);
+        asm volatile("" ::: "memory");
+    }
+    return Ruler::now() - t0;
+}
+[[gnu::noinline]] uint32_t time_empty() {
+    const uint32_t t0 = Ruler::now();
+    for (uint32_t rep = 0; rep < 64u; ++rep) {
+        asm volatile("" ::: "memory");
+    }
+    return Ruler::now() - t0;
+}
+
+void run_copy_crossover() {
+    (void)drain();
+    uint32_t empty = 0xFFFFFFFFu;
+    for (uint8_t i = 0; i < 8u; ++i) {
+        const uint32_t e = time_empty();
+        empty = e < empty ? e : empty;
+    }
+    print(serial, "  write_bulk's copy, cycles a copy (byte loop / memcpy), aligned and "
+          "dst+1:", crlf);
+    for (const uint32_t k : {1u, 2u, 4u, 8u, 12u, 16u, 24u, 32u, 48u, 64u, 128u}) {
+        copy_len = k;
+        uint32_t best[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+        for (uint8_t i = 0; i < 8u; ++i) {
+            const uint32_t r[4] = {time_byte_loop(0, k), time_memcpy(0), time_byte_loop(1, k),
+                                   time_memcpy(1)};
+            for (uint8_t j = 0; j < 4u; ++j) {
+                best[j] = r[j] < best[j] ? r[j] : best[j];
+            }
+        }
+        print(serial, "  copy n=", k, ": aligned ", (best[0] - empty) / 64u, " / ",
+              (best[1] - empty) / 64u, "   dst+1 ", (best[2] - empty) / 64u, " / ",
+              (best[3] - empty) / 64u, crlf);
+    }
+}
+
+void tu_uart() {
+    run_copy_crossover();
+    print(serial, "  USART1 on PA9 (", loop_rx_ring, "/", loop_tx_ring, " rings): the transmit ops "
+          "full duplex, RX on PA10's pull-up; the receive ops on the single wire, the "
+          "transmitter on DmaTxEngine<1, 2>, the receive engine DmaRxEngine<1, 3>", crlf);
+    for (const uint32_t baud : loop_rates) {
+        for (const uint32_t n : {256u, 4096u}) {
+            run_uart_tx<TxPlain>("uart.tx", LoopMode::tx_plain, baud, n);
+            run_uart_tx<TxEngined>("uart.tx.dma", LoopMode::tx_engined, baud, n);
+        }
+    }
+    for (const uint32_t baud : loop_rates) {
+        for (const uint32_t n : {uint32_t{16}, loop_long}) {
+            run_uart_rx<RxPlain>("uart.rx", LoopMode::rx_plain, baud, n);
+            run_uart_rx<RxEngined>("uart.rx.dma", LoopMode::rx_engined, baud, n);
+        }
+    }
+    for (const uint32_t baud : {115200u, 1'000'000u}) {
+        run_uart_edge<RxPlain>("uart.edge", LoopMode::rx_plain, baud);
+        run_uart_edge<RxEngined>("uart.edge.dma", LoopMode::rx_engined, baud);
+    }
+    bench.verdict("ran", true);
+}
+
 void banner() {
     print(serial, crlf, "bench_stm32 - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console USART2 ", console_baud, " 8N1 (", Serial::actual_baud(SysClock::pclk_hz),
@@ -1129,10 +1465,58 @@ extern "C" void DMA1_Channel1_IRQHandler() {
 }
 extern "C" void DMA1_Channel2_3_IRQHandler() {
     dma_meter.enter();
-    if (spi_live && SpiHw::dma_isr()) {
-        spi_done = true;
+    bool edge = false;
+    switch (loop_mode) {
+        case LoopMode::tx_engined:
+            (void)TxEngined::dma_isr();
+            break;
+        case LoopMode::rx_plain:
+            (void)RxPlain::dma_isr();
+            break;
+        case LoopMode::rx_engined:
+            edge = RxEngined::dma_isr();
+            break;
+        default:
+            if (spi_live && SpiHw::dma_isr()) {
+                spi_done = true;
+            }
+            break;
     }
     dma_meter.leave();
+    if (edge) {
+        edge_at = Ruler::now();
+        edge_count = edge_count + 1u;
+    }
+}
+/// Letter u's loop. The switch picks the transport the letter brought up;
+/// the edge's stamp is taken after the meter's, outside the metered body.
+extern "C" void USART1_IRQHandler() {
+    loop_meter.enter();
+    bool edge = false;
+    switch (loop_mode) {
+        case LoopMode::tx_plain:
+            edge = TxPlain::isr();
+            break;
+        case LoopMode::tx_engined:
+            edge = TxEngined::isr();
+            break;
+        case LoopMode::rx_plain:
+            edge = RxPlain::isr();
+            break;
+        case LoopMode::rx_engined:
+            edge = RxEngined::isr();
+            break;
+        default:
+            // Nothing of ours is up: silence the line rather than re-enter
+            // for ever on a condition nobody clears.
+            Nvic::disable(Usart<1>::irq());
+            break;
+    }
+    loop_meter.leave();
+    if (edge) {
+        edge_at = Ruler::now();
+        edge_count = edge_count + 1u;
+    }
 }
 extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
     dma_meter.enter();
@@ -1169,6 +1553,7 @@ int main() {
     bench.letter('e', "the SPI host above the wire: polled, pumped, a request's fixed cost",
                  te_host);
     bench.letter('f', "the prefetch: the costs, m, p and t with PRFTEN off, then on", tf_prefetch);
+    bench.letter('u', "the serial transport on USART1's own loop: tx, rx, the edge", tu_uart);
 
     if (serial_ok) {
         const auto idcode = brio::DeviceIdcode::read();

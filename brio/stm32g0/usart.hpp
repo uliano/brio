@@ -96,6 +96,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <cstring>
 #include <optional>
 #include <span>
 
@@ -1366,17 +1367,29 @@ struct UartOptions {
     /// never leaves a tail behind: the FIFO drains on its own, so the
     /// condition always comes.
     ///
-    /// A RECEIVE threshold never replaces RXFNE in this task: a
-    /// threshold-only receiver leaves the tail below the threshold
-    /// unserved until something else happens, and a console cannot have
-    /// that. What the FIFO buys the receiver is SLACK - nine characters
-    /// a masked or busy core can be late by, where the one-register
-    /// receiver has one - and the drain of everything that arrived in
-    /// one entry. RXFT + the receiver time-out is the Modbus pattern,
-    /// and it is driven through the resource.
+    /// THE RECEIVER RIDES RXFT, by default at code 010, half the FIFO
+    /// (33.8.4): one entry drains four characters or more, and a handler
+    /// late by five frames still loses nothing (four places and the shift
+    /// register). A threshold alone would strand the tail below it, so
+    /// the line's own end-of-burst condition serves the tail - the
+    /// RECEIVER TIME-OUT where the instance has one (33.5.16: RTOF after
+    /// `rx_timeout` bit times of silence past the last stop bit, a FULL
+    /// USART's), the IDLE flag where it has not (an LPUART: one idle
+    /// frame, set once a burst - 33.8.10's note keeps it from rising
+    /// again before a character has). One entry per level plus one a
+    /// burst, where RXFNE costs one per character. `none` keeps RXFNE -
+    /// every character its own entry, the shape for a receiver that
+    /// must answer each byte at once.
     UartFifo fifo{};
-    UartFifoThreshold rx_threshold = UartFifoThreshold::none;
+    UartFifoThreshold rx_threshold = UartFifoThreshold::half;
     UartFifoThreshold tx_threshold = UartFifoThreshold::full_or_empty;
+    /// RTOR.RTO in bit times (33.8.7, 24 bits): how much silence ends a
+    /// burst for the paced receiver. Ten is an 8N1 frame's length - the
+    /// idle frame an LPUART waits for -, so the tail arrives within two
+    /// frames of the last stop bit; RTOF rises within two samples of it
+    /// (33.8.10's note). A pause that long inside a stream costs one entry
+    /// that finds what the FIFO holds, nothing more.
+    uint32_t rx_timeout = 10;
 
     /// The pad options of 33.8.3.
     bool swap = false;
@@ -1503,12 +1516,22 @@ struct UartRxRing<true, Owner, size, Engine> {
  * the consumer did not keep up with - a lap written over its unread bytes
  * - is counted and skipped by the ring, and rx_overruns() reports it.
  *
+ * THE RECEIVE EDGE COMES FROM A VECTOR, never from a poll. Without an
+ * engine the receiver rides RXFT with the line's end-of-burst flag for
+ * the tail (UartOptions), and isr() reports the ring's empty -> non-empty
+ * transition. With one, the line's IDLE enters isr() and the ring's half
+ * and full marks enter dma_isr(); both run harvest(), whose answer is the
+ * edge - so a burst is told within an idle frame of its last stop bit,
+ * and a stream that never pauses twice a lap.
+ *
  * WHAT AN RX ENGINE TRADES AWAY, and it cannot be given back: per-byte
- * error attribution. With RXNEIE armed, ISR is read for EACH character
- * before its RDR and a framed or parity-failed byte is dropped precisely.
- * With a channel consuming RXNE instead, nobody reads ISR per character -
- * harvest() reads it once per harvest and counts what it finds, which is
- * the honest resolution of that mode, and a framed byte stays in the ring.
+ * error attribution. With the interrupt receiver ISR is read for EACH
+ * character before its RDR and a framed or parity-failed byte is dropped
+ * precisely. With a channel consuming RXNE instead, each error enters the
+ * vector on its own (EIE, PEIE) and is counted there; the character it
+ * belongs to is not transferred (DDRE clear, 33.8.4), and no flag is ever
+ * cleared by a read of RDR - every one has its ICR bit - so the channel
+ * loses nothing to a clear.
  */
 template <typename Res, UartPins pins, uint32_t rx_size = 64,
           uint32_t tx_size = 256, typename TxEngine = NoDmaEngine,
@@ -1566,6 +1589,9 @@ class UartTask {
                       uart_fifo_threshold_valid(opts.tx_threshold),
                   "brio Uart: a FIFO threshold code is 000..101 (33.8.4); the remaining "
                   "combinations are Reserved");
+    static_assert(opts.rx_timeout >= 1u && opts.rx_timeout <= 0x00FF'FFFFu,
+                  "brio Uart: RTOR.RTO is 24 bits of bit times, and a time-out of none "
+                  "would raise RTOF at every character (33.8.7)");
     static_assert(usart_prescaler_valid(opts.prescaler),
                   "brio Uart: a Reserved PRESC code (33.8.14) - and the silicon turns "
                   "one into 1011, divide by 256, rather than ignoring it");
@@ -1609,11 +1635,16 @@ class UartTask {
     /// build never reads or writes it.
     static inline volatile uint8_t m_dma_faults = 0;
 
-    /// Whether the consumer has found the receive ring empty since the
-    /// last harvest() that reported an edge - what makes harvest()'s
-    /// answer an EDGE over a ring the channel fills with no step of
-    /// ours in between. Thread context on both sides; engined only.
-    static inline bool m_rx_drained = true;
+    /// Whether the consumer has looked at the receive ring and found it
+    /// empty since the last harvest() that reported an edge - what makes
+    /// harvest()'s answer an EDGE over a ring the channel fills with no
+    /// step of ours in between. TWO CONTEXTS: the consumer writes it, the
+    /// vectors that call harvest() test it and clear it. The consumer
+    /// sets it BEFORE it looks and clears it again when the look found
+    /// bytes, so a byte that lands between the look and the store can
+    /// only be reported twice - an RxActivity the drain finds nothing
+    /// for - and never not at all. Engined only.
+    static inline volatile bool m_rx_drained = true;
 
 public:
     constexpr UartTask() = default;
@@ -1644,6 +1675,23 @@ public:
     static_assert(opts.fifo.stated || !fifo_mode || S::has_fifo_mode,
                   "brio Uart: the default FIFO decision must follow the instance's "
                   "presence (RM0444 table 184): FIFOEN does not stick on a BASIC USART");
+
+    /// THE RECEIVER'S PACE as this instantiation resolved it: on RXFT at
+    /// `rx_threshold` with the line's end-of-burst flag for the tail
+    /// (UartOptions says why), where the FIFO is on, no engine owns the
+    /// receive and a threshold is named; otherwise RXFNE, a character an
+    /// entry - the one-register instance, and `rx_threshold = none`.
+    static constexpr bool rx_paced =
+        !RxEngine::present && fifo_mode && opts.rx_threshold != UartFifoThreshold::none;
+
+    /// THE END OF A BURST, the flag that delivers the tail and the
+    /// engine's edge: the receiver time-out (33.5.16) for the paced
+    /// receiver of an instance that has one, IDLE otherwise - an LPUART,
+    /// and every receive engine, because a channel can sit on a BASIC
+    /// USART or an LPUART and IDLE is the flag table 184 gives every
+    /// instance. ISR and ICR carry each at the same position.
+    static constexpr uint32_t rx_tail =
+        (RxEngine::present || !S::has_receiver_timeout) ? UsartFlag::idle : UsartFlag::rtof;
 
     /// The rate the baud divisor really divides, for the app's clock -
     /// the kernel clock the options name, through the prescaler they
@@ -1766,6 +1814,13 @@ public:
                 opts.cts_pin.function, {.pull = PinPull::up});
         }
 
+        // The receiver time-out's ENABLE is UE-protected (33.8.3); its
+        // value is not, and goes in with it.
+        if constexpr (rx_paced && rx_tail == UsartFlag::rtof) {
+            (void)S::receiver_timeout_enable(true);
+            (void)S::receiver_timeout(opts.rx_timeout);
+        }
+
         // CR3's two request bits are UE-protected like the rest of the
         // register, so they go in here, before the enable.
         if constexpr (has_tx_engine) {
@@ -1784,6 +1839,21 @@ public:
             RxEngine::arm(S::rx_data_address(), S::dma_rx_request(), RxRing::storage);
             m_rx_drained = true;
             (void)RxEngine::start();
+            // The vector serves the line's IDLE edge and every receive
+            // error as it happens: EIE raises FE, NE and ORE while DMAR is
+            // set (33.8.4), PEIE raises PE (33.8.1). DDRE stays clear, so
+            // a character with an error is not transferred and the next
+            // good one is (33.8.4) - and each error is ONE ENTRY, so the
+            // counters are exact rather than the once-a-look of a poll.
+            S::clear_flags(UsartClear::idle);
+            S::interrupts(UsartInterrupt::idle | UsartInterrupt::parity, true);
+            S::error_interrupt(true);
+        } else if constexpr (rx_paced) {
+            S::clear_flags(rx_tail);
+            S::rx_threshold_interrupt(true);
+            S::interrupts(rx_tail == UsartFlag::rtof ? UsartInterrupt::receiver_timeout
+                                                     : UsartInterrupt::idle,
+                          true);
         } else {
             S::rxne_interrupt(true);
         }
@@ -1799,80 +1869,86 @@ public:
     /// The ISR body of WHICHEVER DMA channel this transport owns -
     /// call it from the vector(s) the engines' channels report on.
     ///
-    ///     extern "C" void DMA1_Channel1_IRQHandler() { (void)Serial::dma_isr(); }
+    ///     extern "C" void DMA1_Channel2_3_IRQHandler() {
+    ///         if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
+    ///     }
     ///
     /// Each engine's channel reads ONLY its own flags (there is no
     /// "which channel interrupted" register on this controller), so this is
     /// safe to call from a shared vector that also serves other people's
-    /// channels: it answers for its own and returns false otherwise.
+    /// channels.
     ///
     /// On the transmit channel a completion means the block has left the
     /// ring, so exactly that many bytes are released and the next
-    /// contiguous run started. On the receive channel a completion is a
-    /// LAP of the ring, counted (the ring's producer index is the count
-    /// register plus these laps) and nothing more: the channel reloaded
-    /// itself, and every byte is already where the consumer reads it.
+    /// contiguous run started. On the receive channel the HALF and the
+    /// FULL marks of the ring's lap arrive here (stm32g0/dma.hpp's
+    /// circular arm): the full one is a lap, counted - the channel reloaded
+    /// itself and nothing is re-armed - and either one hands the edge to
+    /// harvest(), so a stream that never pauses for the line's IDLE still
+    /// tells its consumer twice a lap.
     ///
-    /// Returns true when something belonging to this transport was served.
+    /// Returns harvest()'s edge: true when the receive ring holds bytes
+    /// the consumer has not been told of - the same answer isr() gives,
+    /// so the same kernel glue posts RxActivity on it. False on a vector
+    /// entered for the transmit channel alone.
     [[gnu::always_inline]] static bool dma_isr() {
-        bool mine = false;
+        bool edge = false;
         if constexpr (has_tx_engine) {
             const uint8_t f = TxEngine::service();
             if ((f & TxEngine::flag_error) != 0u) {
                 (void)TxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1;
-                mine = true;
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
                     TxEngine::complete()));
                 pump_tx();
-                mine = true;
             }
         }
         if constexpr (has_rx_engine) {
             const uint8_t f = RxEngine::service();
-            if ((f & RxEngine::flag_error) != 0u) {
-                (void)RxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1;
-                mine = true;
-            } else if ((f & RxEngine::flag_complete) != 0u) {
-                (void)RxEngine::complete();   // a lap: counted, nothing re-armed
-                mine = true;
+            if (f != 0u) {
+                if ((f & RxEngine::flag_error) != 0u) {
+                    (void)RxEngine::abandon();   // harvest() starts it again
+                    m_dma_faults = m_dma_faults + 1;
+                } else if ((f & RxEngine::flag_complete) != 0u) {
+                    (void)RxEngine::complete();   // a lap: counted, nothing re-armed
+                }
+                edge = harvest();
             }
         }
-        return mine;
+        return edge;
     }
 
-    /// The receive engine's housekeeping, and the edge a ring the channel
-    /// fills cannot give by itself.
+    /// The receive engine's housekeeping and its edge, the body both of
+    /// this transport's vectors run on a receive event: isr() on the
+    /// line's IDLE and on a receive error, dma_isr() on the ring's half
+    /// and full marks. A public verb still, and IDEMPOTENT: an owner that
+    /// calls it as well is told nothing twice.
     ///
-    /// WHY THIS IS A VERB AND NOT AN INTERRUPT. The channel writes the
-    /// receive ring with no step of the CPU's in between - a byte that
-    /// lands is readable at once through read_span()/read_byte(), and
-    /// nothing has to be PUBLISHED - so there is no event per byte or per
-    /// run to wait for, only the lap. WHOEVER OWNS THE PORT DECIDES HOW
-    /// OFTEN TO ASK and pays the latency it chose; a kernel TimeEvent every
-    /// few ticks is the shape brio expects, until the line's IDLE edge
-    /// takes its place.
+    /// What it does: the receive error flags read and cleared through ICR
+    /// - no data-register read, so no byte is taken from under the
+    /// channel (33.8.11: every flag of this block clears by its ICR bit) -
+    /// and counted; a channel a transfer error stopped started again, the
+    /// ring cleared with it - its unread bytes gone with the abandoned
+    /// lap, which dma_faults() counted; and the edge.
     ///
-    /// What it does: the receive error flags read once and counted (nobody
-    /// reads ISR per character in this mode); a channel a transfer error
-    /// stopped started again, the ring cleared with it - its unread bytes
-    /// gone with the abandoned lap, which dma_faults() counted; and the
-    /// edge.
+    /// Returns true when the ring holds bytes and the consumer has looked
+    /// and found it EMPTY since the last true - the same edge contract
+    /// isr() has: every byte that lands after the consumer's last look at
+    /// an empty ring is reported by the next vector, and a consumer that
+    /// has not drained yet is not told twice. The look is the ring's
+    /// waiting(), which writes nothing, so a vector asks it while the
+    /// consumer holds a run. False, and free, without an engine.
     ///
-    /// Returns true when the ring holds bytes and the consumer has found
-    /// it EMPTY since the last true - the same edge contract isr() has, so
-    /// the same kernel glue works: every byte that lands after the
-    /// consumer's last look at an empty ring is reported by the next
-    /// harvest(), and a consumer that has not drained yet is not told
-    /// twice. False, and free, without an engine.
+    /// ONE RACE IS NAMED AND LEFT: the restart after a transfer error
+    /// clears the ring's view, which is not concurrent - a consumer holding
+    /// a run across it releases into the restarted ring. A transfer error
+    /// is a bus error on an address the binding fixed (10.4.7), never a
+    /// receive condition, and dma_faults() reports the lap it cost.
     static bool harvest() {
         if constexpr (!has_rx_engine) {
             return false;
         } else {
-            // The error flags once, at harvest granularity: nobody read
-            // ISR per character, so this is the resolution this mode has.
             const uint32_t st = S::status();
             const uint32_t errors = st & UsartFlag::receive_errors;
             if (errors != 0u) {
@@ -1894,14 +1970,13 @@ public:
             // THE SILICON IS ASKED, NOT THE ARITHMETIC: a ring never stops
             // on its own, so a channel that is not running was stopped by a
             // transfer error (10.4.7) - started again from the storage's
-            // first element, the view's positions with it. The consumer is
-            // this context, so the view's clear() has no reader to race.
+            // first element, the view's positions with it.
             if (RxEngine::idle()) {
                 m_rx.clear();
                 m_rx_drained = true;
                 (void)RxEngine::start();
             }
-            if (!m_rx_drained || m_rx.empty()) {
+            if (!m_rx_drained || m_rx.waiting() == 0u) {
                 return false;
             }
             m_rx_drained = false;
@@ -2003,12 +2078,13 @@ public:
     /// The instance's ONE interrupt body - call from the vector
     /// the device gives this instance (shared with others on this family).
     ///
-    /// Returns true when the RX ring transitioned empty -> non-empty: the
-    /// edge signal for kernel glue ("post RxActivity on true"). Every
-    /// empty->non-empty transition reports true and the consumer only
-    /// empties the ring by draining it, so no wakeup is ever lost. With a
-    /// receive engine no received byte passes through here and the edge
-    /// is harvest()'s.
+    /// Returns true when the RX ring holds bytes the consumer has not
+    /// been told of: the edge signal for kernel glue ("post RxActivity on
+    /// true"). Without an engine that is the ring's empty -> non-empty
+    /// transition, read across the whole entry; the consumer only empties
+    /// the ring by draining it, so no wakeup is ever lost. With a receive
+    /// engine no received byte passes through here: the entry is the
+    /// line's IDLE or a receive error, and the edge is harvest()'s.
     [[gnu::always_inline]] static bool isr() {
         USART_TypeDef& r = S::regs();
         const uint32_t st = r.ISR;
@@ -2027,54 +2103,32 @@ public:
         if constexpr (has_rx_engine) {
             // THE CHANNEL OWNS RXNE: it reads RDR into the ring the
             // consumer reads, and this body never touches RDR - a read
-            // here would take a byte from under the channel.
+            // here would take a byte from under the channel. IDLE is
+            // cleared through ICR; the errors are harvest()'s, through ICR
+            // too.
+            if ((st & (UsartFlag::idle | UsartFlag::receive_errors)) != 0u) {
+                r.ICR = UsartClear::idle;
+                edge = harvest();
+            }
         } else if constexpr (fifo_mode) {
-            // 33.5.4: the RXFIFO carries PE/NE/FE WITH EACH ENTRY and
-            // ISR reports the flags of the entry AT THE HEAD - so ISR is
-            // re-read before every RDR, or the attribution slides by one
-            // and a good byte inherits its neighbour's framing error.
-            for (;;) {
-                const uint32_t s = r.ISR;
-                if ((s & UsartFlag::rxne) == 0u) {
-                    break;
+            if constexpr (rx_paced) {
+                // The tail's flag, cleared BEFORE the drain: a character
+                // landing behind the drain's last look starts a time-out
+                // (or an idle frame) of its own.
+                if ((st & rx_tail) != 0u) {
+                    r.ICR = rx_tail;
                 }
-                const uint8_t b = static_cast<uint8_t>(r.RDR);
-                const uint32_t err = s & (UsartFlag::fe | UsartFlag::ne | UsartFlag::pe);
-                if (err != 0u) {
-                    r.ICR = err;
-                    if ((err & UsartFlag::fe) != 0u) {
-                        m_frame_errors = m_frame_errors + 1;
-                    }
-                    if ((err & UsartFlag::pe) != 0u) {
-                        m_parity_errors = m_parity_errors + 1;
-                    }
-                    if ((err & UsartFlag::ne) != 0u) {
-                        m_noise_errors = m_noise_errors + 1;
-                    }
-                }
-                if ((err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
-                    const bool was_empty = m_rx.empty();
-                    if (m_rx.push(b)) {
-                        edge = edge || was_empty;
-                    } else {
-                        m_rx_overruns = m_rx_overruns + 1;
-                    }
-                }
+            }
+            // An entry for the transmitter alone touches no ring.
+            if ((st & UsartFlag::rxne) != 0u) {
+                edge = receive_fifo(r, st);
             }
         } else if ((st & UsartFlag::rxne) != 0u) {
             const uint8_t b = static_cast<uint8_t>(r.RDR);   // clears RXNE
             const uint32_t err = st & (UsartFlag::fe | UsartFlag::ne | UsartFlag::pe);
             if (err != 0u) {
                 r.ICR = err;   // the ICR bits sit at the ISR positions
-                if ((err & UsartFlag::fe) != 0u) {
-                    m_frame_errors = m_frame_errors + 1;
-                }
-                if ((err & UsartFlag::pe) != 0u) {
-                    m_parity_errors = m_parity_errors + 1;
-                }
-                if ((err & UsartFlag::ne) != 0u) {
-                    m_noise_errors = m_noise_errors + 1;
-                }
+                count_errors(err);
             }
             if ((err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
                 const bool was_empty = m_rx.empty();
@@ -2085,12 +2139,16 @@ public:
                 }
             }
         }
-        if ((st & UsartFlag::ore) != 0u) {
-            r.ICR = USART_ICR_ORECF;   // or this handler re-enters for ever
-            m_hw_overruns = m_hw_overruns + 1;
+        if constexpr (!has_rx_engine) {
+            if ((st & UsartFlag::ore) != 0u) {
+                r.ICR = USART_ICR_ORECF;   // or this handler re-enters for ever
+                m_hw_overruns = m_hw_overruns + 1;
+            }
         }
 
-        if constexpr (fifo_mode) {
+        if constexpr (has_tx_engine) {
+            // The channel owns the transmitter; nothing of it is armed here.
+        } else if constexpr (fifo_mode) {
             // Fill while there is room, on whichever condition the
             // options armed: TXFT at the transmit threshold (by default
             // the FIFO run empty), TXFNF under `none`. Either way the
@@ -2166,12 +2224,15 @@ public:
     /// a receive engine, when the byte was written over while it was
     /// being read (the ring counts it in rx_overruns()).
     static bool read_byte(uint8_t& b) {
+        if constexpr (has_rx_engine) {
+            m_rx_drained = true;   // before the look (m_rx_drained says why)
+        }
         const auto v = m_rx.pop();
         if (!v) {
-            if constexpr (has_rx_engine) {
-                m_rx_drained = true;
-            }
             return false;
+        }
+        if constexpr (has_rx_engine) {
+            m_rx_drained = false;
         }
         b = *v;
         return true;
@@ -2213,16 +2274,7 @@ public:
             const uint32_t chunk = dst.size() < src.size() - queued
                                        ? static_cast<uint32_t>(dst.size())
                                        : static_cast<uint32_t>(src.size() - queued);
-            // Two pointers and no index, and the test at the bottom: a
-            // load, a store, two steps and one branch a byte, where an index
-            // re-adds both bases every byte. `chunk` is at least one here -
-            // the room is not empty and the run is not done.
-            const uint8_t* from = src.data() + queued;
-            uint8_t* to = dst.data();
-            uint8_t* const end = to + chunk;
-            do {
-                *to++ = *from++;
-            } while (to != end);
+            copy_run(dst.data(), src.data() + queued, chunk);
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(chunk));
             queued += chunk;
         }
@@ -2246,12 +2298,15 @@ public:
     static uint32_t read_bulk(std::span<uint8_t> dst) {
         uint32_t got = 0;
         while (got < dst.size()) {
+            if constexpr (has_rx_engine) {
+                m_rx_drained = true;   // before the look (m_rx_drained says why)
+            }
             auto src = m_rx.read_span();
             if (src.empty()) {
-                if constexpr (has_rx_engine) {
-                    m_rx_drained = true;
-                }
                 break;
+            }
+            if constexpr (has_rx_engine) {
+                m_rx_drained = false;
             }
             const uint32_t chunk = src.size() < dst.size() - got
                                        ? static_cast<uint32_t>(src.size())
@@ -2281,9 +2336,10 @@ public:
     /// less than a lap behind, and consume() says whether they were.
     static std::span<const uint8_t> read_span() {
         if constexpr (has_rx_engine) {
+            m_rx_drained = true;   // before the look (m_rx_drained says why)
             const std::span<const uint8_t> run = m_rx.read_span();
-            if (run.empty()) {
-                m_rx_drained = true;
+            if (!run.empty()) {
+                m_rx_drained = false;
             }
             return run;
         } else {
@@ -2305,7 +2361,33 @@ public:
     }
 
     static auto rx_pending() { return m_rx.count(); }
-    static bool tx_idle() { return m_tx.empty(); }
+
+    /// Every skip the receive ring has made since the program started,
+    /// never cleared - the epoch util/serial_port.hpp compares across its
+    /// runs to see a skip that fell between two of them (HardwareRing's
+    /// skips()). Zero, and free, without an engine: a Ring never skips.
+    static uint32_t rx_skips() {
+        if constexpr (has_rx_engine) {
+            return m_rx.skips();
+        } else {
+            return 0u;
+        }
+    }
+
+    /// THE WIRE IS IDLE: nothing queued, no block in flight, and TC - the
+    /// last frame's stop bit off the pad, the TXFIFO empty with it in FIFO
+    /// mode (33.5.5, step 8). TC cannot answer from a frame before the
+    /// current one: the handler's TDR store clears it (33.8.10), and a
+    /// transmit block clears it through ICR when it starts (pump_tx(),
+    /// 33.5.19's step 6), so a TC standing from the previous block is
+    /// gone before the block's first frame.
+    static bool tx_idle() {
+        if constexpr (has_tx_engine) {
+            return m_tx.empty() && !TxEngine::busy() && (S::status() & UsartFlag::tc) != 0u;
+        } else {
+            return m_tx.empty() && (S::status() & UsartFlag::tc) != 0u;
+        }
+    }
 
     /// The receive ring's losses to a consumer that did not keep up:
     /// without an engine, each byte a full ring refused; with one, each
@@ -2472,6 +2554,83 @@ private:
     static constexpr uint32_t tail_spins =
         fifo_mode ? 200'000u * (uint32_t{S::fifo_depth} + 1u) : 200'000u;
 
+    /// write_bulk()'s copy into the ring's free run. THE RUNTIME'S memcpy
+    /// WHERE ITS FIXED COST PAYS, the byte loop below it - measured with
+    /// bench_stm32's letter u on the Cortex-M0+ at two wait states: the
+    /// loop is 4 cycles and 9 a byte, memcpy 70 and under one a byte when
+    /// the two ends share their word alignment (its LDM/STM block, rt.cpp)
+    /// and its own byte loop otherwise, never ahead. So memcpy takes a run
+    /// of `copy_crossover` bytes or more whose ends are aligned alike - the
+    /// two cost the same near 13 - and the loop takes the rest: two
+    /// pointers and no index, the test at the bottom, a load, a store, two
+    /// steps and one branch a byte. `n` is at least one.
+    static constexpr uint32_t copy_crossover = 16;
+    [[gnu::always_inline]] static void copy_run(uint8_t* to, const uint8_t* from, uint32_t n) {
+        if (n >= copy_crossover &&
+            ((reinterpret_cast<uintptr_t>(to) ^ reinterpret_cast<uintptr_t>(from)) & 3u) == 0u) {
+            std::memcpy(to, from, n);
+            return;
+        }
+        uint8_t* const end = to + n;
+        do {
+            *to++ = *from++;
+        } while (to != end);
+    }
+
+    /// The three per-character error flags counted (the caller cleared
+    /// them): FE and PE drop the character, NE keeps it.
+    [[gnu::always_inline]] static void count_errors(uint32_t err) {
+        if ((err & UsartFlag::fe) != 0u) {
+            m_frame_errors = m_frame_errors + 1;
+        }
+        if ((err & UsartFlag::pe) != 0u) {
+            m_parity_errors = m_parity_errors + 1;
+        }
+        if ((err & UsartFlag::ne) != 0u) {
+            m_noise_errors = m_noise_errors + 1;
+        }
+    }
+
+    /// Drain the RXFIFO into the ring, from the entry's own ISR read `s`
+    /// on: per character one ISR load and its test, one RDR load and the
+    /// ring's push, inline - the error flags tested on the ISR word
+    /// already in hand and served off the character's path. The ring's
+    /// edge is read across the whole entry, empty at its start and not at
+    /// its end, since nothing consumes while a handler runs.
+    ///
+    /// 33.5.4: the RXFIFO carries PE/NE/FE WITH EACH ENTRY and ISR reports
+    /// the flags of the entry AT THE HEAD - so ISR is re-read before every
+    /// RDR, or the attribution slides by one and a good byte inherits its
+    /// neighbour's framing error.
+    [[gnu::always_inline]] static bool receive_fifo(USART_TypeDef& r, uint32_t s) {
+        const bool was_empty = m_rx.empty();
+        for (;; s = r.ISR) {
+            if ((s & UsartFlag::rxne) == 0u) {
+                break;
+            }
+            const uint32_t err = s & (UsartFlag::fe | UsartFlag::ne | UsartFlag::pe);
+            if (err != 0u) [[unlikely]] {
+                const uint8_t b = static_cast<uint8_t>(r.RDR);
+                r.ICR = err;   // after the RDR read: the flags are this entry's
+                count_errors(err);
+                if ((err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
+                    keep(b);
+                }
+                continue;
+            }
+            keep(static_cast<uint8_t>(r.RDR));
+        }
+        return was_empty && !m_rx.empty();
+    }
+
+    /// One received character into the ring, or counted as the ring's
+    /// overrun.
+    [[gnu::always_inline]] static void keep(uint8_t b) {
+        if (!m_rx.push(b)) [[unlikely]] {
+            m_rx_overruns = m_rx_overruns + 1;
+        }
+    }
+
     static void disarm_tx() {
         if constexpr (tx_on_threshold) {
             S::tx_threshold_interrupt(false);
@@ -2527,7 +2686,15 @@ private:
                     run = run.first(0xFFFFu);
                 }
             }
-            if (run.empty() || !TxEngine::launch(run)) {
+            if (run.empty()) {
+                TxEngine::unclaim();
+                return;
+            }
+            // 33.5.19, step 6: TC cleared before the channel starts, so
+            // tx_idle() never reads the previous block's stop bit as this
+            // one's - the channel's TDR stores are not the software clear.
+            S::clear_flags(UsartClear::tc);
+            if (!TxEngine::launch(run)) {
                 TxEngine::unclaim();
             }
         }

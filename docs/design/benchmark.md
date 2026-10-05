@@ -346,6 +346,7 @@ program. `x` is read on the plain binding.
 | family (clock; the loop's top rate) | uart.tx x at the top rate, 256 and 4096 | uart.rx 256 x by rate; receive entries for 256 | the edge after the last stop bit | `tx_idle()` after the last stop bit | the core at about 1 Mbaud: transmit, receive (the vendor's receive) | the vendor's receive, x |
 |---|---|---|---|---|---|---|
 | SAM C21J18A (48 MHz OSC48M, 2 WS; 3 Mbaud) | the engine 1.03, 1.00; the interrupt transmitter 2.17, 2.14 (194 to 198 cycles a byte against a 160-cycle frame; 1.46 from SRAM) | the interrupt receiver 1.00 at 115200, 1.01 at 1 Mbaud, at 3 Mbaud 0.34 entries a character and lossless with no meter on the vectors; the engine 1.00, 1.02, 2.09 at 3 (its plain sender slower than the wire); 256 entries at 1 Mbaud, one completion under the engine | the interrupt receiver 416 to 424 cycles; the engine 656 to 763 at a block's end (1.37 frames at 1 Mbaud), a tail at the owner's ask | within a probe turn (94 to 308 cycles) at 115200, 1 and 3 Mbaud | the transmit engine 1 %, the interrupt receiver 44 to 46 % (32 %) | the data sheet's bare RXC handler: 1.01 at 1 Mbaud, 154 cycles a character against 211 to 221; at 3 Mbaud 241 of 256 lost |
+| STM32G0B1RE (64 MHz PLL, 2 WS; 2 Mbaud) | 1.05 (the engine 1.04: the first block's start), 1.00 (1.01) | the paced receiver 1.00, 1.02 and 1.05 at 115200, 1 and 2 Mbaud, the engine 1.00, 1.01 and 1.02; 64 entries for 256, the engine two marks | the paced receiver 1.06 frames at 115200, at 1 Mbaud the tail taken by the level's own entry; the engine's IDLE 1.06 frames and 1.40 to 1.53 at 1 Mbaud | +8 cycles (the interrupt transmitter) and -29 (the engine, inside the poll's resolution) at 9600 baud, a bit 6666 | transmit 19 % (the engine 3.5 %), receive 13 % (17 %: the HAL's FIFO receive) | HAL v1.4.7: its FIFO receive 107 cycles a byte against 84, and the length wanted up front; ReceiveToIdle_DMA's edge 1.04 and 1.34 to 1.49 frames, within 5 per cent |
 | AVR128DB48 (24 MHz; 3 Mbaud) | 1.02 to 1.03, 1.00 | 1.00 at 115200 and 1 Mbaud, 1.02 at 2, 3.7 to 6.8 at 3 (the consumer starved); 256 and 255 to 1 Mbaud, about 1.5 frames an entry at 3 | -3 to +2 cycles at 115200; +69 to +77 at 1 to 3 Mbaud, under a frame | +35 to +37 cycles at 115200 (a bit is 208), +47 at 460800 (52), +26 at 1 Mbaud (24) | 25 %, 31 to 35 % (27 %) | the data sheet's sequence: 1.00 at 115200 and 1 Mbaud, 1.01 at 2, 2.9 at 3 |
 
 What the rows say:
@@ -359,6 +360,13 @@ What the rows say:
   consumer starves while the hardware loses 1 to 6 frames in 256 - the
   core's limit, which the data sheet's own sequence (65 cycles a frame)
   meets too ([../avrdx/usart.md](../avrdx/usart.md)).
+- A FIFO with a level and a time-out - the STM32G0's FULL USART -
+  paces the interrupt receiver at half its depth, a quarter of an entry
+  a character, and the time-out at ten bit times delivers the tail
+  within two frames; its receive engine's edge is the line's IDLE and
+  the ring's half and full marks, the same shape as the HAL's
+  ReceiveToIdle and within 5 per cent of its edge
+  ([../stm32g0/usart.md](../stm32g0/usart.md)).
 - The SERCOM has neither an idle flag nor a receiver time-out, so
   under the engine the edge is a block's completion - half the ring -
   and a tail shorter than a block waits for the owner's ask; the idle

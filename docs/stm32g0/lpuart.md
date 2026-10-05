@@ -97,7 +97,10 @@ SECOND register group, which only the G0B1 class has and which
   `has_irda()`, `has_smartcard()`, `has_autobaud()` are constant false.
 - `LpUart<n, pins, rx_size = 64, tx_size = 256, TxEngine, RxEngine,
   opts>` - every verb, every default and every option of `Uart`
-  (docs/stm32g0/usart.md), because it is the same task.
+  (docs/stm32g0/usart.md), because it is the same task - with one
+  resolution of its own: the paced receiver's tail is IDLE, this
+  peripheral having no receiver time-out (usart.md, "The receive
+  side"), measured with the whole console moved here (letter `v`).
 - `lpuart_brr(hz, baud)` / `lpuart_actual_baud(hz, brr)` /
   `lpuart_min_hz(baud)` (3 x) / `lpuart_max_hz(baud)` (4096 x) -
   constexpr, and the fixture pins ALL SIX rows of table 198 and ALL TEN

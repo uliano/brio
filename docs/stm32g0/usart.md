@@ -15,7 +15,7 @@ REPRODUCED, 2.11.2 applied, 2.2.4 STAGED AND REPRODUCED on a USART wake
 bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp`. The LPUARTs are
 [lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
-suite: `test_stm32_serial` (15 letters in `z`, 88 verdicts, wireless;
+suite: `test_stm32_serial` (17 letters in `z`, 95 verdicts, wireless;
 three more outside `z` through `brio stress`). Family fixture
 `test/family_stm32g0/usart.cpp` plus ELEVEN negatives under
 `brio check stm32g0` (an instance nowhere, an instance off a part, a
@@ -103,6 +103,19 @@ where the one-register transmitter left two. Two exclusions come with
 the bit: 33.8.1's note forbids it in LIN and IrDA mode, and 33.5.21 makes
 a wake from Stop on an ADDRESS MATCH need mute mode once the FIFO is on.
 
+**The receiver has a level, a time-out and an idle line, and no flag
+needs RDR to clear it.** RXFT rises when the RXFIFO holds the RXFTCFG
+level (33.8.10); RTOF when the line has been silent for RTOR.RTO bit
+times past the last stop bit (33.5.16, a FULL instance's), within two
+samples of it; IDLE after a whole idle frame, once a burst - 33.8.10's
+note keeps it from rising again until a character has. Every one of
+them, and FE, NE, PE and ORE, is cleared by its ICR bit (33.8.11): on
+this block no clear is a read sequence, so a receive channel is never
+robbed of a byte by an error being cleared. Under DMAR, EIE raises the
+vector on FE, NE and ORE and PEIE on PE, and with CR3.DDRE clear the
+character an error belongs to is NOT transferred and the next good one
+is (33.8.4).
+
 **TE sends an idle frame first** (33.5.5), which is why the pads are
 handed to the peripheral BEFORE UE/TE are raised - and why the RX pad
 gets a pull-up, so an unconnected line reads idle instead of noise.
@@ -172,13 +185,19 @@ a compile-time refusal in the task.
   on an instance with no FIFO), stated off (`.fifo = false`), and
   unstated - the default - in which the task decides. `tx_threshold`
   defaults to `full_or_empty` (the transmitter refills an EMPTY FIFO),
-  and `none` makes it ride TXFNF; `rx_threshold` defaults to `none`.
+  and `none` makes it ride TXFNF; `rx_threshold` defaults to `half` -
+  the receiver paced by RXFT, its tail by the receiver time-out where
+  the instance has one and by IDLE where it has not (an LPUART) - and
+  `none` keeps RXFNE, a character an entry; `rx_timeout` is RTOR.RTO in
+  bit times, 10 by default.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format)`,
   `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`write_bulk`,
   `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
   place; with a receive engine `consume()` answers whether the run was
-  intact), `rx_pending`, `tx_idle`, `rebase(hz)`,
+  intact), `rx_skips` (the ring's skip epoch, zero without an engine),
+  `rx_pending`, `tx_idle` (the wire's: nothing queued, no block in
+  flight, TC set), `rebase(hz)`,
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
@@ -186,7 +205,9 @@ a compile-time refusal in the task.
   decision as the instantiation resolved it: the option where it is
   stated, otherwise ON where the instance has the FIFO
   (`has_fifo_mode`: a FULL USART, every LPUART) unless `wake_from_stop`
-  is an address match. The public surface is
+  is an address match, and `rx_paced` and `rx_tail` - the receiver's
+  pace and the flag that ends a burst, as the instantiation resolved
+  them. The public surface is
   IDENTICAL to avrdx's and samc21's, which is what lets
   `util/serial_port.hpp` and `print()` compile here untouched.
 - `Rs485<n, pins, de_pin, assertion, deassertion, ...>` - the same task
@@ -277,9 +298,9 @@ is `if constexpr`-ed, so a feature a program does not name compiles to
 nothing.
 
 **The default is the FIFO, where the instance has one.** With `fifo`
-unstated the task turns it on (`fifo_mode`), the receiver drains
-everything that arrived in one entry and the transmitter rides TXFT at
-"TXFIFO becomes empty". Each refill reads the ring as a RUN - the
+unstated the task turns it on (`fifo_mode`), the receiver rides RXFT
+at half the FIFO with the time-out for the tail ("The receive side"
+below) and the transmitter rides TXFT at "TXFIFO becomes empty". Each refill reads the ring as a RUN - the
 contiguous characters `read_span()` hands over, stored while TXFNF
 stands and released with one `consume()` - so the release image's
 per-character loop is eight instructions (`ldr` ISR, `tst`, `bne`,
@@ -323,6 +344,92 @@ it:
   because folding `hz / usart_prescaler_divisor(div1)` to `hz` gives the
   same value and NOT the same code.
 
+## The receive side
+
+What chapter 33 offers a byte transport's RECEIVER, item by item:
+
+| item (RM0444) | used? |
+|---|---|
+| RXNE / RXFNE, a character waiting (33.8.10) | the one-register receiver's pace (a BASIC instance), and the FIFO's under `rx_threshold = none`; the request a receive channel answers |
+| the RXFIFO, eight deep, its flags per entry (33.5.4) | on wherever the instance has it; the drain reads ISR before every RDR, so each entry's FE/NE/PE are its own |
+| RXFT at RXFTCFG's level (33.8.4) | THE PACE of the FIFO receiver, at code 010 - half the FIFO: one entry drains four characters or more, and a handler five frames late loses nothing (four places and the shift register); three quarters would save a twelfth of an entry a character and leave three frames of slack, which the top rate (a frame is 320 cycles at 2 Mbaud) does not afford beside the image's longest handler |
+| the receiver time-out, RTOF after RTOR.RTO bit times (33.5.16) | the TAIL of the paced receiver on a FULL instance, at ten bit times: the characters below the level are delivered within two frames of the last stop bit, and a burst costs one entry more |
+| IDLE, one idle frame once a burst (33.8.10) | the tail where the instance has no time-out (an LPUART), and THE EDGE OF A RECEIVE ENGINE on every instance - a channel can sit on a BASIC USART or an LPUART, and IDLE is the flag table 184 gives them all |
+| EIE, PEIE under DMAR (33.8.1, 33.8.4) | armed with a receive engine: every error enters the vector once and is counted there, exactly |
+| DDRE (33.8.4) | left clear: a character with an error is not transferred, the next good one is, the channel keeps running |
+| the ICR clears (33.8.11) | every flag, errors included: no clear reads RDR, so none takes a byte from under a channel |
+| the character match, CMF (33.5.11) | declined: an end-of-line edge would serve a line protocol and nothing else; the time-out serves every stream, and the console's lines are the line assembler's |
+| OVRDIS (33.8.4) | declined as a default: it bypasses the RXFIFO (measured, letter e) and silences the overrun it would hide |
+| a channel's half and full marks, circular (RM0444 10.4.6) | the engine's edge on a stream with no silence ([dma.md](dma.md)) |
+| the single-wire loop, HDSEL (33.5.15) | the bench's loop: the receiver hears every frame its transmitter sends |
+
+**THE EDGE COMES FROM A VECTOR.** Without an engine `isr()` reports the
+ring's empty -> non-empty transition across one entry - a level or the
+tail. With one, the line's IDLE enters `isr()` and the ring's half and
+full marks enter `dma_isr()`, and both run `harvest()`: the receive
+errors read and cleared through ICR, a channel a transfer error stopped
+started again, and the EDGE - true when the ring holds bytes and the
+consumer has looked and found it empty since the last true, the look
+being the ring's `waiting()`, which writes nothing and so is a vector's
+to ask while the consumer holds a run. The consumer sets its "looked"
+flag before it looks and clears it when the look found bytes, so a byte
+landing between the two is reported twice at worst and never not at
+all. `harvest()` stays public and idempotent; no owner polls it.
+
+**THE COST**, counted in the release listing and measured with
+`bench_stm32` letter `u` on the Nucleo-G0B1RE at 64 MHz (USART1's single
+wire, the transmitter on its engine so USART1's vector serves the
+receiver alone; `isr` includes the meter's 118 cycles an entry):
+
+| receive of 256 bytes | entries | cycles an entry | cycles a byte |
+|---|---|---|---|
+| RXFNE, a character an entry (before) | 256 | 212 | 212 |
+| RXFT at half + the time-out (now), 115200 and 1 Mbaud | 64 | 335 | 84 |
+| the same at 2 Mbaud | 51 | 384 | 77 |
+| the receive engine (the DMA vector, a block of the transmitter's included) | 3 | 275 | 3.2 |
+
+The paced drain is 24 instructions a character with no call - the ISR
+load and its test, the RDR load and the ring's push inline; the error
+flags are tested on the ISR word in hand and served off the
+character's path - and an entry adds the prologue, the tail's ICR
+store and the edge's two ring loads. The engine's edge costs one entry
+of `isr()` (an ISR load, the IDLE clear) and a call of `harvest()`.
+
+**THE EDGE'S LATENCY**, from the burst's last stop bit (TC rising) to
+the vector's true, on a burst of 17 - one past four levels: the paced
+receiver 1.06 frames at 115200 (the time-out's ten bits, its two
+samples and the entry), and at 1 Mbaud the tail taken by the level's
+own entry before the stop bit has ended; the engine's IDLE 1.06 frames
+at 115200 and 1.40 at 1 Mbaud. Before this shape the engine's edge was
+its owner's poll - 4.4 and 15 frames on a 1 ms tick - and the
+one-register receiver's every character.
+
+**`tx_idle()` is the wire's**: the ring empty, no transmit block in
+flight, and TC - which the handler's TDR stores clear and a transmit
+block clears through ICR when it starts (33.5.19's step 6), so a TC
+left by the previous block never answers for this one.
+
+**THE COPY INTO THE RING.** `write_bulk()` copies a run of 16 bytes or
+more whose two ends share their word alignment with the runtime's
+`memcpy` and anything else with its byte loop: measured with letter `u`,
+the loop is 4 cycles and 9 a byte, `memcpy` 70 and under one a byte
+co-aligned - the two even near 13 - and on ends aligned differently
+`memcpy`'s own byte path, 62 cycles behind the loop at every length.
+
+**AGAINST THE VENDOR**, ST's HAL v1.4.7 on the same board and loop in a
+scratch program (brio's crt, clock and console around it): its FIFO
+receive (`HAL_UART_Receive_IT` with `HAL_UARTEx_EnableFifoMode` at half,
+`UART_RxISR_8BIT_FIFOEN`) is 107 cycles a byte on 256 bytes against
+brio's 84 - and it needs the length up front: its tail is taken one
+character an entry once fewer than a level remain. Its character-at-a-
+time receive is 184 cycles a byte and LOSES BYTES at 2 Mbaud (130 of
+256 wrong), where this transport's lost none at any rate.
+`HAL_UARTEx_ReceiveToIdle_DMA` - IDLE, the channel's half and full,
+EIE and PEIE, the shape adopted here - tells its burst 1.04 frames after
+the last stop bit at 115200 and 1.34 at 1 Mbaud (its transmit-complete
+callback the reference), brio's engine 1.06 and 1.40: the same edge,
+within the instrument's own reach.
+
 ## The two optional DMA engine slots
 
 `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` takes a
@@ -342,8 +449,12 @@ neither. `uart_engines_distinct()` lives here.
   same condition.
 - **`dma_isr()`** is the body of whichever channel vector the engines
   report on; each engine reads only its own channel's flags. On the
-  receive channel a completion is a LAP of the ring, counted and nothing
-  more.
+  receive channel the ring's HALF and FULL marks arrive: the full one is
+  a LAP, counted and nothing more, and either runs `harvest()`, whose
+  edge `dma_isr()` returns - a stream with no silence is told twice a
+  lap (letter `p` of `test_stm32_serial`: 200 bytes at 1 Mbaud across a
+  64-byte ring read on the edges alone, none lost). A transmit
+  completion is no edge.
 - **THE RECEIVE ENGINE RUNS A RING, NOT RUNS.** `init()` arms it in its
   circular shape over the whole receive ring's storage
   ([dma.md](dma.md), "The circular receive"): the channel writes the
@@ -362,19 +473,22 @@ neither. `uart_engines_distinct()` lives here.
   the ring and skipped, and `rx_overruns()` reports it (without an engine
   it counts a byte a full ring refused); `read_bulk()` does not count a
   run that came back torn, and `consume()` answers false for one.
-- **`harvest()`** is the owner's poll, and nothing is published in it:
-  it reads the receive errors once, starts again a channel a transfer
-  error stopped (the ring cleared with it, its unread bytes gone with the
-  abandoned lap, which `dma_faults()` counts), and reports the EDGE a
-  ring with no publish step cannot give by itself - true when bytes stand
-  in a ring the consumer had found empty since the last true, so the
-  kernel glue of `isr()` serves it unchanged. It costs 65..68 cycles with
-  the consumer told and still reading and 102..122 on a drained ring
-  ([dma.md](dma.md) has the listing).
-- **What is traded away** is per-byte error attribution: nobody reads
-  ISR per character, so `harvest()` reads it once and counts what it
-  finds, and a framed byte stays in the ring. `isr()` never touches RDR
-  where a receive engine is named: the channel owns RXNE.
+- **`harvest()`** is what the two vectors run on a receive event, and
+  nothing is published in it: it reads and clears the receive errors
+  through ICR, starts again a channel a transfer error stopped (the ring
+  cleared with it, its unread bytes gone with the abandoned lap, which
+  `dma_faults()` counts), and reports the EDGE a ring with no publish
+  step cannot give by itself ("The receive side" above). It stays a
+  public verb and is idempotent. It costs 71 cycles with the consumer
+  told and still reading and 106 on a drained ring (letter `o`).
+- **The errors are counted one by one**: EIE and PEIE enter `isr()` on
+  each, the character it belongs to is not transferred (DDRE clear), and
+  no clear reads RDR - letter `p`: 64 slots with 4 breaks, 60 bytes
+  delivered intact and in order, the frame-error counter 4, one entry
+  each. What is traded away is the per-character attribution of a
+  noise error: NE keeps its character, and under the engine nobody
+  knows which. `isr()` never touches RDR where a receive engine is named:
+  the channel owns RXNE.
 - **`write_byte()` still nudges on a refusal** when a TX engine is
   present, because `print()` answers a false by trying for ever.
 - **A block's start masks the CLAIM and nothing else.** The thread and
@@ -483,17 +597,34 @@ reports"** - and 33.8.4's second sentence is literal: with OVRDIS set
 the RXFIFO IS BYPASSED, so a FIFO-mode receiver collapses to ONE
 character in RDR (eleven in, the newest one out).
 
-**AND THE LOOP CANNOT SHOW WHAT A FIFO IS FOR.** 256 bytes round the
-loop through the task cost 258 interrupts with the FIFO stated off and
-258 with it on: a single wire is its own pacer, so each byte's receive
-event tops the transmit FIFO up in the same entry and there is never a
-second character waiting. One interrupt a byte is the floor here
-whatever FIFOEN says. What the letter does prove is that the FIFO COSTS
-NOTHING to turn on - no more interrupts, not one byte different, the
-same public verbs and one option between them. A link whose two
-directions are independent is where it shows, and the console is one:
-the table under "What the default buys" is `bench_stm32` printing 4096
-bytes through it.
+**ON THE LOOP THE FIFO PAYS WHERE BOTH SIDES RIDE A LEVEL.** 256 bytes
+round the single wire through the task cost 259 interrupts with the FIFO
+stated off and 36 with it on (`rx_threshold` at the whole FIFO, the
+transmitter refilling an empty one): a single wire makes the two sides
+of a byte one event, so the saving needs the receiver paced too, and
+the receiver time-out takes the tail. Not one byte different, the same
+public verbs and one option between them.
+
+### The receive transport and the wire's idle (letters `p` and `q`)
+
+- **The paced receiver**: 17 bytes at 115200 in 5 entries of USART1
+  where RXFNE took 17, the tail delivered 5775 cycles after the last
+  stop bit (a frame is 5555), and nothing entered in the 10 ms of
+  silence after it - RTOF rises once a burst, not once a time-out.
+- **K breaks in N slots**, both receivers: 64 slots, 4 of them a break
+  (SBKRQ) - 60 bytes delivered intact and in order, FE counted 4, no ORE
+  and no ring overrun, through the paced receiver and through the
+  engine (where each error was one entry of the vector).
+- **The engine's edges**: 17 bytes told by IDLE 5799 cycles after the
+  last stop bit; 200 bytes at 1 Mbaud into a 64-byte ring, read on the
+  vectors' edges alone - 7 edges, 3 laps, no overrun.
+- **`tx_idle()` on the pad**: EXTI line 9 timing PA9's start bits (eight
+  frames of 0xFF at 9600, one falling edge each), `tx_idle()` turned
+  true 8 cycles after the last stop bit's end on the interrupt
+  transmitter and 29 before it on the transmit engine - inside the
+  poll's own resolution; a bit is 6666 cycles. The ring alone, which
+  `tx_idle()` was, answers with up to nine frames still in the FIFO and
+  the shift register.
 
 ### The bit-banged line: parity, framing, noise, tolerance
 
@@ -759,15 +890,7 @@ which is the letter's 2/2 as on the Nucleo-64s.
 
 ## Not covered yet
 
-Driver gaps (every field of chapter 33 is implemented):
-- **The line's IDLE edge as the end of a received burst.** With a
-  receive engine the ring needs no re-arm, but its owner still polls
-  `harvest()` on a TimeEvent and pays that latency; the IDLE flag (or the
-  receiver time-out) posting at a burst's end is the UART round's, which
-  takes every transport's receive edge as a whole - this round gave the
-  receive engine the circular shape the edge will stand on.
-
-Declined with a reason:
+Declined with a reason (every field of chapter 33 is implemented):
 - **The synchronous DATA path.** The master's CK, its polarity, its
   phase and LBCL are all measured on the pad; a synchronous LINK needs
   a second node on CK, TX and RX, and the wires this desk carries
@@ -793,15 +916,12 @@ Implemented, not bench-verified:
   engine slots are ([lpuart.md](lpuart.md)).
 - `Rs485` as a TASK (the driver-enable timings are measured through the
   resource on the DE pad; the task's own `init()` path is compile-only).
-- The receive-threshold interrupt as a TRANSPORT pace (RXFT is measured
-  at every code; the task deliberately keeps RXFNE, because a
-  threshold-only receiver leaves the tail below the threshold unserved -
-  RXFT plus the receiver time-out is the Modbus pattern and it is driven
-  through the resource).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured
   on an LPUART, docs/stm32g0/lpuart.md).
-- The FIFO default off the STM32G0B1RE: the scores under "On the
-  STM32G071RB" and "On the STM32G031K8" are the one-register console's,
+- The FIFO default off the STM32G0B1RE, and with it the paced receiver
+  (RXFT, the time-out or IDLE for the tail) and letters `p` and `q`: the
+  scores under "On the STM32G071RB" and "On the STM32G031K8" are the
+  one-register console's,
   and the consoles that run in FIFO mode by default there - the
   G071RB's USART2, the LPUART1 three suites move to on the G031K8 - are
   compiled and not run (the G031K8's own USART2 is BASIC and keeps the
