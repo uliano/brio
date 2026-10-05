@@ -7,9 +7,11 @@
  * host-testable with a fake transport, target-agnostic (layering rule).
  *
  * Reception pipeline:
- *   ISR:      byte -> RX ring (always, lock-free); on the ring's
- *             empty -> non-empty EDGE the app glue posts RxActivity{}
- *             (see Uart::rxc()'s return value)
+ *   ISR:      bytes -> RX ring (an interrupt receiver's, lock-free, or a
+ *             receive engine's); when the ring holds bytes the consumer
+ *             has not been told of, the transport's vector returns true
+ *             and the app glue posts RxActivity{} (docs/design/serial.md,
+ *             "The burst edge comes from a vector")
  *   SerialPort: drains the ring, feeds a LineAssembler; each completed
  *             line is posted to LineSink as LineReceived{line} - a
  *             REFERENCE, the 80-byte payload never travels in a queue
@@ -57,9 +59,21 @@
  * Ring, whose consume() answers nothing, the release cannot refuse and
  * none of that is compiled.
  *
- * The contract assumes a byte stream with an "RX went non-empty" edge
- * from the ISR; a DMA/FIFO transport may change it (docs/design/
- * overview.md, "Authority of util/").
+ * A SKIP BETWEEN TWO RUNS IS SEEN. The same ring skips to its producer
+ * whenever a look finds a lap unread - in the drain's own read_span(), or
+ * in a count() asked between two drains - and the run handed out next is
+ * the stream after a gap, which the line begun in an assembler would
+ * otherwise swallow as its continuation. So such a transport also reports
+ * the ring's skip epoch (util/stream.hpp's SkippingSource, rx_skips()),
+ * the drain compares it at every run, and a change ends the line begun as
+ * torn - counted in torn_lines() - and skips the stream to its next end of
+ * line. One load and one compare a run, nothing a byte; a transport whose
+ * release can refuse and that does not report its skips is refused at
+ * compile time, and over a Ring nothing of it is compiled.
+ *
+ * The contract assumes a byte stream whose edge is told once until the
+ * ring is found empty - the transport's, whichever event of its silicon
+ * makes it (docs/design/overview.md, "Authority of util/").
  */
 
 #pragma once
@@ -106,7 +120,13 @@ public:
     /// precedes this AO in the pack.
     using LendsTo = Subscribers<LineSink>;
 
-    static void init() { Base::start(&running); }
+    static void init() {
+        if constexpr (SkippingSource<Transport>) {
+            // The stream starts here: a skip before it tears nothing.
+            seen_skips_ = static_cast<uint32_t>(Transport::rx_skips());
+        }
+        Base::start(&running);
+    }
 
     static void dispatch(const Event& e) { Base::dispatch(e); }
 
@@ -116,11 +136,12 @@ public:
                                     assembler_[1].overflow_count());
     }
 
-    /// Lines dropped because a run they were read from was written over
-    /// while it was read - the transport refused it at its release (a
-    /// HardwareRing behind it): the lines completed from that run, and the
-    /// line begun in the assemblers when it came. Always zero over a
-    /// transport whose release cannot refuse.
+    /// Lines dropped because the ring behind the transport (a HardwareRing)
+    /// lost bytes under them: the lines completed from a run written over
+    /// while it was read, which the transport refused at its release, and
+    /// the line begun in the assemblers when such a run came or when the
+    /// ring skipped between two runs. Always zero over a transport whose
+    /// release cannot refuse.
     static uint32_t torn_lines() { return torn_lines_; }
 
 private:
@@ -137,6 +158,9 @@ private:
 
     static void drain() {
         if constexpr (SpanSource<Transport>) {
+            static_assert(!release_can_refuse || SkippingSource<Transport>,
+                          "a transport whose release can refuse (a HardwareRing "
+                          "behind it) reports its ring's skips: rx_skips()");
             // A run at a time: the bytes read where the ring holds them,
             // then ONE release for every byte the assemblers took, and only
             // THEN the lines completed from them posted. A line points into
@@ -156,6 +180,7 @@ private:
                 const uint8_t* const end = first + run.size();
                 const uint8_t* next = first;
                 if constexpr (release_can_refuse) {
+                    see_skips();
                     if (resync_) {
                         next = skip_to_line_end(next, end);
                     }
@@ -230,6 +255,23 @@ private:
         }
     }
 
+    /// The ring's skip epoch against the one the drain saw last: a skip
+    /// since then, wherever it was made, put a gap between the bytes the
+    /// assemblers hold and the run in hand. The line begun - always in
+    /// the active assembler, which lends nothing - is ended and counted,
+    /// and the stream is skipped to its next end of line, the bytes before
+    /// it being the end of a line whose beginning the ring skipped. A
+    /// release refused moves the epoch too, after tear() has done the
+    /// same: then this finds nothing begun and changes nothing.
+    [[gnu::always_inline]] static void see_skips() {
+        const uint32_t skips = static_cast<uint32_t>(Transport::rx_skips());
+        if (skips != seen_skips_) {
+            seen_skips_ = skips;
+            torn_lines_ = torn_lines_ + end_begun_line(active_);
+            resync_ = true;
+        }
+    }
+
     /// The bytes before the next end of line, and the end of line itself,
     /// skipped; the line after it is the first whole one.
     static const uint8_t* skip_to_line_end(const uint8_t* next, const uint8_t* end) {
@@ -275,6 +317,7 @@ private:
     static inline uint8_t in_flight_ = 0;
     static inline bool resync_ = false;        // skip to the next end of line
     static inline uint32_t torn_lines_ = 0;
+    static inline uint32_t seen_skips_ = 0;    // the ring's skip epoch, as last seen
 };
 
 } // namespace brio

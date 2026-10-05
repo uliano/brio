@@ -85,6 +85,20 @@ concept SpanSource = requires(uint32_t n) {
     S::consume(n);
 };
 
+/// A SpanSource whose producer can lap it (a HardwareRing behind the
+/// transport), which says so twice: consume() answers whether the run it
+/// released was intact, and rx_skips() is the ring's skip epoch
+/// (HardwareRing::skips(): every skip since the start, never cleared). A
+/// reader that carries state across its runs compares the epoch from one
+/// run to the next, because a ring that skipped between two of them -
+/// in a look the reader did not make - hands out the stream after a gap
+/// as if it followed on.
+template <typename S>
+concept SkippingSource = SpanSource<S> && requires(uint32_t n) {
+    { S::consume(n) } -> std::same_as<bool>;
+    { S::rx_skips() } -> std::convertible_to<uint32_t>;
+};
+
 /// A full duplex transport is both.
 template <typename S>
 concept ByteTransport = ByteSink<S> && ByteSource<S>;

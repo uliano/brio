@@ -1037,3 +1037,94 @@ TEST_CASE("hardware ring: a lap missed while its completion is pending is counte
     CHECK(late > 0u);                   // the corner was really reached
     CHECK(delivered > 10000u);
 }
+
+TEST_CASE("hardware ring: skips() counts every skip, whichever look made it, and is never cleared") {
+    fresh8();
+    const uint32_t epoch = View8::skips();
+    Ch8::write(8);                      // a lap unread
+    CHECK(View8::count() == 0);         // a count() skips like a read_span()
+    CHECK(View8::skips() == epoch + 1u);
+    CHECK(View8::overruns() == 1u);
+    Ch8::write(6);
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 6);
+    Ch8::write(3);                      // the slot at the tail written over
+    CHECK_FALSE(View8::consume(6));     // a release refused is a skip too
+    CHECK(View8::skips() == epoch + 2u);
+    CHECK(View8::overruns() == 2u);
+    // overruns() restarts from zero; the epoch does not.
+    View8::clear_overruns();
+    CHECK(View8::overruns() == 0u);
+    CHECK(View8::skips() == epoch + 2u);
+    Ch8::write(9);
+    CHECK(View8::read_span().empty());
+    CHECK(View8::overruns() == 1u);
+    CHECK(View8::skips() == epoch + 3u);
+    // Nor does clear(): a restarted producer is not a skip, and the epoch
+    // a reader compares does not go back.
+    Ch8::reset();
+    View8::clear();
+    CHECK(View8::skips() == epoch + 3u);
+    CHECK(View8::overruns() == 1u);
+}
+
+TEST_CASE("hardware ring: waiting() looks and writes nothing") {
+    fresh8();
+    Ch8::write(3);
+    CHECK(View8::waiting() == 3u);
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 3);
+    // Asked while the run is held, as an interrupt body asks it: it sees
+    // the new elements and moves neither position.
+    Ch8::write(2);
+    CHECK(View8::waiting() == 5u);
+    CHECK(View8::consume(3));
+    CHECK(View8::waiting() == 2u);
+    CHECK(drain_all<View8>() == positions(3, 2));
+    CHECK(View8::waiting() == 0u);
+
+    // A lap missed reads as `size` or more, and is NOT counted or skipped:
+    // that is the consumer's next look's.
+    const uint32_t epoch = View8::skips();
+    Ch8::write(10);
+    CHECK(View8::waiting() == 10u);
+    CHECK(View8::waiting() == 10u);
+    CHECK(View8::skips() == epoch);
+    CHECK(View8::overruns() == 0u);
+    CHECK(View8::count() == 0u);        // the consumer's look counts it
+    CHECK(View8::skips() == epoch + 1u);
+    CHECK(View8::waiting() == 0u);
+}
+
+TEST_CASE("hardware ring: waiting() between a held run and a lap under it leaves the release its verdict") {
+    // The hazard waiting() exists for: a count() from an interrupt body,
+    // made while the consumer holds a run and the producer has lapped the
+    // ring, would skip the tail under the run - and the release that
+    // follows would then find a small queue and answer TRUE for a run the
+    // producer wrote over. waiting() leaves the tail where the consumer
+    // put it, so the release judges the run.
+    fresh8();
+    Ch8::write(2);
+    CHECK(drain_all<View8>() == positions(0, 2));
+    Ch8::write(6);                      // positions 2..7
+    auto run = View8::read_span();
+    REQUIRE(run.size() == 6);
+    Ch8::write(4);                      // 8..11: the slot at the tail written over
+    CHECK(View8::waiting() >= 8u);      // the edge test: elements, and a lap
+    CHECK_FALSE(View8::consume(6));
+    CHECK(View8::overruns() == 1u);
+}
+
+TEST_CASE("hardware ring: waiting() infers a pending completion as a look does") {
+    fresh8();
+    Ch8::write(5);
+    CHECK(View8::count() == 5);         // the view has looked: head 5
+    CHECK(View8::consume(5));
+    Ch8::hold(true);
+    Ch8::write(6);                      // 5..10, the wrap not yet counted
+    CHECK(Ch8::laps() == 0);
+    CHECK(View8::waiting() == 6u);      // a head of 3 behind 5: a lap added back
+    Ch8::hold(false);
+    CHECK(View8::waiting() == 6u);
+    CHECK(drain_all<View8>() == positions(5, 6));
+}

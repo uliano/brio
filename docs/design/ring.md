@@ -198,7 +198,10 @@ producer index - the counter IS it, head = size - remaining - and
 Ring's consumer verbs under Ring's names (`read_span()`/`consume(n)`,
 `pop()`, `count()`, `empty()`, `capacity()`, `clear()`), so a transport
 whose receive engine turns circular changes a type and not its code.
-With a byte element it is `util/stream.hpp`'s `SpanSource` itself.
+With a byte element it is `util/stream.hpp`'s `SpanSource` itself. What
+it adds is what a producer that cannot be stopped forces: the overrun
+count and the skip epoch (`overruns()`, `skips()`), and one look that
+writes nothing (`waiting()`) for a context that is not the consumer's.
 
 It is a second flavour and not Ring with a hook, because the hardware
 producer breaks the two things Ring's consumer stands on. Ring's
@@ -289,12 +292,42 @@ look judges `head - tail`:
 what a skip cost in elements is not invented here - the producer's
 peripheral, if it can tell, is the one to say.
 
+**A skip is an epoch.** Whichever look skips - the drain's own
+`read_span()`, a `count()` asked between two drains (a transport's
+`rx_pending()`), a release refused - the stream the consumer reads jumps
+there, and the run handed out next is the stream after a gap. A reader
+that carries state ACROSS its runs - `SerialPort`'s partial line
+([serial.md](serial.md)) - must learn of a jump its own calls did not
+make, and the empty run a skipping `read_span()` returns cannot tell it
+(an empty run is also a drained ring). So `skips()` counts every skip
+and is NEVER cleared: the reader keeps the value it saw last and
+compares it at every run, one load and one compare a run. `overruns()`
+is the same count less its value at the last `clear_overruns()`, so the
+two verbs that existed keep their meaning and a reader's epoch survives
+a `clear_errors()`. `clear()` does not move it: a restarted producer is
+not a skip.
+
 ### No critical section, no platform
 
-The view's state - the two positions and the overrun count - belongs to
+The view's state - the two positions and the skip count - belongs to
 the consumer alone, and the producer's two numbers arrive in one read
 each, so there is nothing to mask and no `Platform` parameter to read an
-atomic width from. A 32-bit lap count that a byte-atomic core would tear
+atomic width from.
+
+Every verb that looks may skip, and a skip moves the tail, so every verb
+is the CONSUMER's - but one. An interrupt body that wants the edge test
+(a transport's `harvest()` called from its vectors, [serial.md](serial.md))
+asks `waiting()`: the same look, laps first and the lap a pending
+completion has not counted added back against the head last recorded,
+that WRITES NOTHING - neither position moves, nothing is counted, a lap
+missed reads as `size` or more and is left for the consumer's next look.
+A `count()` there would be a defect, not a cost: made while the consumer
+holds a run and the producer has lapped it, it skips the tail under the
+run, and the release that follows finds a small queue and answers TRUE
+for a run the producer wrote over. `waiting()` reads the two positions
+whole - one word on every core with a DMA ring - and at worst stale,
+which can only make its answer larger: an edge reported early, never
+one missed. A 32-bit lap count that a byte-atomic core would tear
 is the producer's to read whole, because the producer is the one that
 knows its platform. The fences are Ring's: compiler-only, which is
 enough on the in-order cores with no data cache between a channel and
@@ -328,7 +361,12 @@ Hazard3) against Ring's 16-20, and `consume()` 30-37 against Ring's
 10-18; on the Cortex-M0+ each runs about 30 instructions on the path
 that hands or releases a run, with one load of the count register. The
 run is the unit: `pop()` pays two looks for one element (54-62
-instructions), so a consumer that can take a run takes it.
+instructions), so a consumer that can take a run takes it. `waiting()`
+is 17-18 instructions on the Cortex-M0+, the M4 and the QingKe V4B, one
+load of the count register, no store and no call; the skip epoch moves
+nothing on the paths that hand or release a run (`read_span()` and
+`consume()` are the same size with it), and `overruns()` and
+`clear_overruns()` pay a subtraction and a load each.
 
 ### Testing
 
@@ -349,8 +387,12 @@ released; `pop()` refusing an element written over under it; the byte
 view as a `SpanSource` and the 16-bit view counting beats; `clear()`
 with a restarted producer; positions running through 2^32; lossy
 traffic where every gap is counted and every released run is a slice of
-the stream; and the late corner, where a gap may be counted late but is
-never a repeat. On the silicon, the circular receive engines of the
+the stream; the late corner, where a gap may be counted late but is
+never a repeat; the skip epoch moved by every look that skips and by a
+refused release, through `clear_overruns()` and `clear()` unmoved; and
+`waiting()` asked while a run is held and while a lap is missed,
+moving no position and counting nothing, so the release that follows
+still refuses a run written over. On the silicon, the circular receive engines of the
 STM32F4, the STM32G0 and the CH32V203 produce into it and their
 transports read through it: a host's stream arrives whole at every rate
 the bridge carries where the run engine lost up to a tenth of it, a

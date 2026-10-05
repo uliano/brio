@@ -56,19 +56,74 @@ the first byte alone, so the SAM C21 takes one entry more than a print
 has bytes and the STM32G0's FIFO serves the first two bytes one an
 entry before its refills of eight.
 
-The receive-side ISR body returns the RX ring's empty -> non-empty
-EDGE: the app ISR glue posts one `RxActivity` event on true. No event
-flood, no lost wakeup - only draining empties the ring, so the next
-byte is an edge again.
+**The copy into the ring is a crossover.** `write_bulk()` copies the
+run into the ring's free run with a byte loop up to a length, and with
+the image's `memcpy` above it - the runtime's ([runtime.md](runtime.md)),
+avr-libc's on the AVR - where its fixed cost, the call and the alignment
+prologue, is paid back by its word moves. The length is each family's,
+counted in its release listing and stated in its serial document; below
+it the byte loop wins, and a console's typical print is below it.
+
+**The burst edge comes from a vector.** The receive side's interrupt
+bodies - `isr()` (the AVR's `rxc()`, its port having a vector a side),
+and `dma_isr()` where a receive engine has a vector of its own - return
+`true` when the receive ring holds
+bytes the consumer has not been told of, and the app's ISR glue posts
+one `RxActivity` on `true`. Told once: the next `true` waits until the
+consumer has found the ring empty, so there is no event flood and no
+lost wakeup. No owner polls for that edge on a timer. WHICH event of the
+silicon makes it is the family's, chosen from its chapter and stated in
+its serial document with its cost in the handler: a byte arriving in an
+empty ring on a receiver that takes one byte an interrupt, a FIFO level
+with the receiver's time-out for the tail below it, the line going idle
+after a burst, a circular engine's half and full marks. Wherever the
+silicon has an idle flag, a time-out or a level, the edge reaches the
+consumer within two frame times of a burst's last stop bit; and a stream
+with no silence is never held back - on a circular engine the half and
+full marks deliver the edge before the producer laps the ring.
+`harvest()` stays a public verb on an engined transport - the receive
+errors read and counted, a stream a transfer error stopped bound again -
+and the vectors call it; it is idempotent, so an owner that still calls
+it changes nothing. Its edge test, made in an interrupt body over a
+`HardwareRing`, asks `waiting()`, the one look that writes nothing
+([ring.md](ring.md)).
+
+**No byte is stolen by a clear.** While a receive engine owns the data
+register, the CPU never reads that register to clear an error flag:
+where the chapter clears a flag by a data-register read, the channel's
+own read is that read, and where a byte can complete between the status
+read and the data read the family's header names the race and bounds
+it. So errors injected into a stream under an engine cost exactly the
+bytes they hit: N bytes sent with K hit deliver N - K, in order, and the
+counters say K.
+
+**`tx_idle()` means the wire is idle**, on every family: nothing queued
+in the transmit ring, no block in flight on a transmit engine, and the
+last stop bit off the pad - the chapter's transmission-complete flag,
+never answering from a frame before the current block (an engine's
+writes do not run the flag's software clear, so the transport clears it
+when a block starts, as its chapter says). It turns true no earlier than
+the last stop bit and within a bit time after it, so a caller that
+switches a direction pin, a baud rate or a power state on it cuts no
+frame.
+
+**The interrupt receiver is the console's default.** A console reads
+lines a human or a script types - a few bytes a burst, with silence
+between - and the interrupt receiver, a byte or a FIFO level an entry,
+is every family's receive path unless the program asks for more. A
+receive engine with its edge is a STREAM's opt-in: a transport whose
+bytes arrive faster than its interrupts can take them, or a program
+that wants the CPU off the per-byte path, names an engine in the
+transport's slot. `SerialPort` runs over either (below).
 
 ### Realizations
 
 Common to all: fifteen verbs spelled identically - the run and the
 byte both ways, `write_bulk`, `write_byte`, `read_span` with `consume`
-and `read_byte`, then `init(clock, baud)`, `rx_pending`, `tx_idle`,
-`actual_baud`, `rebase`, `clear_errors` and the four counters
-`frame_errors`, `parity_errors`, `rx_overruns`, `hw_overruns` - the two
-rings, and the edge contract above; and four more everywhere but the
+and `read_byte`, then `init(clock, baud)`, `rx_pending`, `tx_idle` -
+the wire's, on every family -, `actual_baud`, `rebase`, `clear_errors`
+and the four counters `frame_errors`, `parity_errors`, `rx_overruns`,
+`hw_overruns` - the two rings, and the edge contract above; and four more everywhere but the
 CH32V00x, whose task has not got them: `set_baud(hz, baud)`, `release`,
 `can_baud` and `min_hz_for`. What differs is how the pins are named,
 how many vectors the silicon gives the port, and what each family's
@@ -128,6 +183,32 @@ cannot refuse, and none of this is compiled for it: the byte loop and
 its 14 instructions are the same either way. Validated on the host
 (`test_serial_port`, a real `HardwareRing` over a scripted channel that
 writes while a run is held).
+
+**A skip between two runs is seen.** The same ring also skips when a
+look finds a lap unread - in the drain's own `read_span()`, which then
+lends nothing, or in a `count()` asked between two drains - and the run
+it hands out next is the stream after a gap, which the line begun in an
+assembler would swallow as its continuation: a line delivered with a
+hole in it. So a transport whose release can refuse also reports its
+ring's skip epoch - `util/stream.hpp`'s `SkippingSource`: `rx_skips()`,
+`HardwareRing::skips()`, every skip since the start and never cleared -
+and the drain compares it at every run with the value it saw last. A
+change ends the line begun as torn, counted in `torn_lines()`, and skips
+the stream to its next end of line: the bytes before it end a line whose
+beginning the ring skipped - or, where the skip landed on a line's
+start, a whole line the drain cannot tell from one, dropped with the
+rest. One load and one compare a run, nothing a byte: counted at `-Os`
+over a `HardwareRing` transport, four instructions more a run on the
+Cortex-M0+, five on the QingKe V4B and six on the Cortex-M4, the byte
+loop instruction for instruction the same. A transport whose release
+can refuse and that does not report its skips is refused at compile
+time (`test/family_ch32x035/neg/`), and over a Ring none of it is
+compiled: compared with and without it, the objects of the consoles
+of the AVR, the SAM C21, the STM32G0, the STM32F4, the RP2040 and the
+CH32V203 (the last two over the USB CDC class) and of the three WCH
+fixtures are identical. Validated on the host
+(`test_serial_port`, the scripted channel lapping the ring between two
+drains, the skip made by the drain's own look and by one outside it).
 
 **Scheduling contract**: the line consumer must precede SerialPort in
 the Tenuto pack. The kernel then consumes every posted line before

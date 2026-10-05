@@ -409,12 +409,25 @@ concept RingCounter = requires {
  * learn that what it just read was overwritten under it. A run released
  * with true was intact when it was read.
  *
+ * A SKIP IS AN EPOCH. Whichever look skips - the drain's read_span(), a
+ * count() asked between two drains, a release refused - the stream the
+ * consumer reads jumps there, and a reader that carries state across its
+ * runs (util/serial_port.hpp's partial line) must learn of it even when
+ * its own calls did not make the jump. skips() counts every skip and is
+ * never cleared: the reader compares it across its runs, one load a run.
+ * overruns() is the same count since the last clear_overruns().
+ *
  * NO CRITICAL SECTION AND NO PLATFORM. The view's state is the consumer's
  * alone (one reader); the producer's two numbers arrive through Counter
- * in one read each. The fences are Ring's: compiler-only, enough on the
- * in-order cores with no data cache between the channel and the core
- * that every family with DMA has today - the assumption this contract
- * carries (docs/design/overview.md, "Authority of util/"). Validated on
+ * in one read each. Every verb that looks may skip, which moves the
+ * tail, so every verb is the consumer's - but one: waiting(), a look that
+ * writes nothing, is what an interrupt body asks for its edge test; a
+ * count() there would move the tail under a run the consumer holds and
+ * make its release answer true for bytes it never read. The fences are
+ * Ring's: compiler-only, enough on the in-order cores with no data cache
+ * between the channel and the core that every family with DMA has today
+ * - the assumption this contract carries (docs/design/overview.md,
+ * "Authority of util/"). Validated on
  * the host against a scripted counter (test/test_ring), and on the
  * silicon by the circular receive engines of the STM32F4, the STM32G0
  * and the CH32V203, whose transports read their receive ring through
@@ -491,15 +504,36 @@ public:
     }
 
     /// Elements unread right now - a look at the producer, which counts
-    /// and skips a lap missed as read_span() does. Always inline, as
-    /// Ring's count(): an edge test in an interrupt body calls it.
+    /// and skips a lap missed as read_span() does, and so moves the
+    /// consumer's tail: a CONSUMER-SIDE verb, as every verb above. An
+    /// interrupt body asks waiting() instead.
     [[gnu::always_inline]] static uint32_t count() { return look_unread(); }
     [[gnu::always_inline]] static bool empty() { return count() == 0u; }
 
+    /// Elements waiting, from a look that WRITES NOTHING: neither
+    /// position moves and nothing is counted, so a context other than
+    /// the consumer's - the engine's completion vector, the receiver's
+    /// edge vector - may ask it while the consumer holds a run. A lap
+    /// missed reads as `size` or more and is left for the consumer's next
+    /// look to count and skip. The positions are read whole (one word on
+    /// every core this view runs on) and at worst stale, which can only
+    /// make the answer larger: the edge test reports elements early and
+    /// never misses them. Always inline: an interrupt body calls it.
+    [[gnu::always_inline]] static uint32_t waiting() {
+        return look_quiet() - read_word(tail_);
+    }
+
     /// Laps the consumer did not keep up with, and runs written over
     /// while held, since the last clear_overruns(): each one a skip.
-    static uint32_t overruns() { return overruns_; }
-    static void clear_overruns() { overruns_ = 0u; }
+    static uint32_t overruns() { return skips_ - cleared_at_; }
+    static void clear_overruns() { cleared_at_ = skips_; }
+
+    /// Every skip since the program started, NEVER CLEARED (modulo
+    /// 2^32): an epoch a reader compares across its runs to learn that
+    /// the stream jumped between two of them, whichever look made the
+    /// jump. overruns() is this count less its value at the last
+    /// clear_overruns().
+    static uint32_t skips() { return skips_; }
 
     /// Both positions back to zero, for a producer (re)started at the
     /// storage's first element with its lap count at zero. NOT
@@ -515,29 +549,54 @@ private:
 
     static inline uint32_t tail_ = 0u;  // the consumer's position
     static inline uint32_t head_ = 0u;  // the producer's, as last looked at
-    // Counted by whichever context consumes and read by any other, which
-    // may poll it - so the load is a volatile one.
-    static inline volatile uint32_t overruns_ = 0u;
+    // The skips, counted by whichever context consumes, and the count at
+    // the last clear_overruns(); read by any other context, which may
+    // poll them - so the loads are volatile ones.
+    static inline volatile uint32_t skips_ = 0u;
+    static inline volatile uint32_t cleared_at_ = 0u;
 
     // ---- the bodies: always inline, so each public verb is one function --
 
-    /// Look at the producer: laps first, then the count, then the lap a
-    /// pending completion has not counted yet added back. Records the
-    /// head; the fence behind it keeps the slot reads that follow after
-    /// the look.
-    [[gnu::always_inline]] static uint32_t look() {
+    /// The producer's head from one read of each of its numbers: laps
+    /// first, then the count, then the lap a pending completion has not
+    /// counted yet added back against `last`, a head seen before.
+    [[gnu::always_inline]] static uint32_t head_from(uint32_t last) {
         const uint32_t laps = static_cast<uint32_t>(Counter::laps());
         // Whatever the counter's functions compile to, the lap count is
         // read before the count: the order that can only err low.
         std::atomic_signal_fence(std::memory_order_seq_cst);
         const uint32_t remaining = static_cast<uint32_t>(Counter::remaining());
         uint32_t head = (laps << shift) + ((size - remaining) & mask);
-        if (static_cast<int32_t>(head - head_) < 0) {
+        if (static_cast<int32_t>(head - last) < 0) {
             head += size;  // a wrap whose completion has not been counted yet
         }
+        return head;
+    }
+
+    /// Look at the producer and record the head; the fence behind it
+    /// keeps the slot reads that follow after the look.
+    [[gnu::always_inline]] static uint32_t look() {
+        const uint32_t head = head_from(head_);
         head_ = head;
         std::atomic_signal_fence(std::memory_order_acquire);
         return head;
+    }
+
+    /// The same look from outside the consumer: the last head read whole
+    /// and nothing recorded.
+    [[gnu::always_inline]] static uint32_t look_quiet() {
+        return head_from(read_word(head_));
+    }
+
+    /// One fresh read of a consumer's word, from any context.
+    [[gnu::always_inline]] static uint32_t read_word(const uint32_t& word) {
+        return *const_cast<const volatile uint32_t*>(&word);
+    }
+
+    /// A skip: one more in the epoch, the tail jumped to the head.
+    [[gnu::always_inline]] static void skip_to(uint32_t head) {
+        skips_ = skips_ + 1u;
+        tail_ = head;
     }
 
     /// A look, judged: the unread count, or a lap missed counted and
@@ -547,8 +606,7 @@ private:
         const uint32_t head = look();
         const uint32_t unread = head - tail_;
         if (unread >= size) {
-            overruns_ = overruns_ + 1u;
-            tail_ = head;
+            skip_to(head);
             return 0u;
         }
         return unread;
@@ -562,8 +620,7 @@ private:
         const uint32_t head = look();
         const uint32_t queued = head - tail;
         if (queued > size) {
-            overruns_ = overruns_ + 1u;
-            tail_ = head;
+            skip_to(head);
             return false;
         }
         tail_ = tail + (n < queued ? n : queued);

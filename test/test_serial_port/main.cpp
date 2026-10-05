@@ -4,7 +4,8 @@
 // a time over a transport that lends its receive ring in place - and,
 // over a transport lending a HardwareRing whose scripted channel writes
 // over a run while it is held, the rule that a line is posted only from a
-// run released clean.
+// run released clean; and, over the same channel lapping the ring between
+// two drains, the rule that a skip the drain did not make is seen.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -117,7 +118,7 @@ struct Channel {
 
 // Fake engined transport: a real HardwareRing over that channel, its
 // consumer half lent in place - consume() answering whether the run was
-// intact. Two hooks script the channel: `written_while_held` is written
+// intact, rx_skips() the ring's skip epoch. Two hooks script the channel: `written_while_held` is written
 // while the `lend`-th run lent from now is HELD, between the read_span()
 // that lent it and the consume() that releases it; `written_after_refusal`
 // right after a release is refused, as a channel that keeps receiving.
@@ -147,6 +148,7 @@ struct HwFake {
         }
         return intact;
     }
+    static uint32_t rx_skips() { return Rx::skips(); }
     static void feed(const char* s) { Channel::write(s); }
     static uint32_t queued() { return Rx::count(); }
     static void reset() {
@@ -163,6 +165,8 @@ struct HwFake {
 static_assert(!brio::SpanSource<ByteFake>);
 static_assert(brio::SpanSource<RunFake>);
 static_assert(brio::SpanSource<HwFake>);
+static_assert(!brio::SkippingSource<RunFake>);   // a Ring's release cannot refuse
+static_assert(brio::SkippingSource<HwFake>);
 
 // Sink AO: copies each received line during its dispatch (the only
 // window in which the reference is valid).
@@ -465,4 +469,137 @@ TEST_CASE("a line begun in a clean run and cut by a refused one is dropped and c
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
     CHECK(Sink::lines == Lines{"NEXT"});
+}
+
+// ---- a skip between two drains -------------------------------------------------
+
+TEST_CASE("a lap missed between two drains ends the line begun as torn, in the drain's own look") {
+    // "HEL" is released clean: a line begun. The channel then writes 17
+    // bytes with no drain between, a lap over the tail: the next drain's
+    // read_span() finds it, counts the overrun, skips to the head and
+    // lends nothing. The bytes after the skip are not the rest of "HEL":
+    // the begun line is dropped and counted, the stream resumes after the
+    // next end of line - never "HELS" or "HELSNEXT".
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("HEL");                          // 0..2
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    REQUIRE(Sink::lines.empty());
+    HwFake::feed("LO\nLOST LINE\nTAIL");          // 3..19: head 20, tail 3
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();                      // the skip, in read_span()
+    CHECK(Sink::lines.empty());
+    CHECK(HwFake::Rx::overruns() == 1u);
+    CHECK(HwFake::refusals == 0u);
+    HwFake::feed("S\nNEXT\n");                    // 20..26
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"NEXT"});
+    CHECK(Serial::torn_lines() == torn_before + 1u);
+    CHECK(HwFake::queued() == 0u);
+}
+
+TEST_CASE("a skip made by a look outside the drain is seen at the next run") {
+    // The same lap, found by a count() between two drains (a transport's
+    // rx_pending(), say): the drain never sees an empty run where the
+    // jump happened, only the epoch that moved.
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("HEL");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    HwFake::feed("LO\nLOST LINE\nTAIL");
+    CHECK(HwFake::queued() == 0u);                // the look that skips
+    CHECK(HwFake::Rx::overruns() == 1u);
+    HwFake::feed("S\nNEXT\nMORE\n");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"NEXT", "MORE"});
+    CHECK(Serial::torn_lines() == torn_before + 1u);
+}
+
+TEST_CASE("a skip with no line begun drops the fragment after it and counts nothing torn") {
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("A\n");                           // 0..1, a whole line
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    REQUIRE(Sink::lines == Lines{"A"});
+    HwFake::feed("0123456789abcdefg");            // 2..18: a lap over the tail
+    CHECK(HwFake::queued() == 0u);
+    HwFake::feed("hij\nB\n");                     // the end of a line the skip cut
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"A", "B"});
+    CHECK(Serial::torn_lines() == torn_before);
+}
+
+TEST_CASE("a skip in a stream of whole lines delivers no splice") {
+    // Lines of four bytes ("Lnn\n") arrive in bursts; the drain sleeps
+    // through one burst of more than a lap. Every line the sink gets is
+    // one the channel wrote whole, in the order it was written - none is
+    // the begun line completed with bytes from after the gap - and the
+    // stream resumes and stays whole. (Where the skip lands on a line's
+    // start, the drain cannot tell it from a cut and drops that line too:
+    // here the skip lands after line 8, so line 9 goes as well.)
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    std::vector<std::string> sent;
+    auto line = [&](uint32_t i) {
+        std::string l = "L";
+        l += static_cast<char>('0' + (i / 10u) % 10u);
+        l += static_cast<char>('0' + i % 10u);
+        sent.push_back(l);
+        return l + "\n";
+    };
+    uint32_t i = 0;
+    // Line 0 and half of line 1, then a drain: a line begun.
+    std::string burst = line(i++);
+    burst += line(i++).substr(0, 2);
+    HwFake::feed(burst.c_str());                  // 0..5
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    REQUIRE(Sink::lines == Lines{sent[0]});
+    // Slept through: the rest of line 1 and lines 2..7, 26 bytes.
+    std::string slept = "1\n";
+    for (int k = 0; k < 6; ++k) {
+        slept += line(i++);
+    }
+    HwFake::feed(slept.c_str());                  // 6..31
+    // Then a line a drain: line 8 lands before the first look and goes
+    // with the skip, line 9 starts where the skip landed.
+    for (int k = 0; k < 6; ++k) {
+        HwFake::feed(line(i++).c_str());
+        brio::post<Serial>(RxActivity{});
+        run_scheduler<Serial>();
+    }
+    CHECK(HwFake::Rx::overruns() == 1u);
+    CHECK(Serial::torn_lines() == torn_before + 1u);   // line 1, begun as "L0"
+    CHECK(Sink::lines == Lines{sent[0], sent[10], sent[11], sent[12], sent[13]});
+}
+
+TEST_CASE("a refused release and the skip it makes tear the line once") {
+    // The refusal case again, now that the refusal also moves the epoch:
+    // the run after it sees the epoch moved, finds nothing begun, and
+    // counts nothing more.
+    using Serial = SerialOver<HwFake>;
+    reset<HwFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    HwFake::feed("HEL");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    HwFake::feed("LO");
+    HwFake::written_while_held = "aaaaaaaaaaaaaaaaa";
+    HwFake::written_after_refusal = "aa\nONE\n";
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(HwFake::refusals == 1u);
+    CHECK(HwFake::Rx::overruns() == 1u);
+    CHECK(Sink::lines == Lines{"ONE"});
+    CHECK(Serial::torn_lines() == torn_before + 1u);
 }
