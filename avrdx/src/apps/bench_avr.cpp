@@ -25,12 +25,14 @@
 // counter of CLK_PER cycles (avrdx/tcb.hpp's CascadedCounter, the
 // instrument test_avr_platform takes its timings with), wrapping at 2^32
 // - 178 s at 24 MHz. TCB1 counts CLK_PER; its overflow event on channel
-// 4 clocks TCB2; a software event on channel 5 latches both halves into
+// 2 clocks TCB2; a software event on channel 5 latches both halves into
 // their CCMP registers (TCB2 through CASCADE, one CLK_PER behind), and
 // read() waits for both CAPT flags, bounded, then reads the two
 // captures. The console takes USART2 and the timebase the RTC's PIT at
 // 1024 Hz (avrdx/ticker.hpp), nothing else, so the two TCBs and the two
-// channels are free. now() is always_inline AND
+// channels are free. The carry is on channel 2 and not 4 because a PORTE
+// pin's event reaches channels 4 and 5 alone (16.5) and letter u takes
+// one of them. now() is always_inline AND
 // flatten, so the whole read lands inline in every vector and in every
 // loop that stamps, with no call; and it takes the platform's
 // CriticalSection around read(), because the read is a sequence and not
@@ -51,7 +53,8 @@
 // stamps the window around AvrPlatform::idle()'s SLEEP in IDLE mode.
 //
 // THE METERS: one IsrMeter per bound vector - USART2_RXC (`rxc_meter`),
-// USART2_DRE (`dre_meter`), RTC_PIT (`tick_meter`) - all on Ruler, the
+// USART2_DRE (`dre_meter`), RTC_PIT (`tick_meter`), and letter u's two
+// USART4 vectors in their metered binding (`u4_meter`) - all on Ruler, the
 // enter() stamp the handler's first statement and leave() its last, the
 // driver's always_inline body between them. The counters are read under
 // AvrPlatform::CriticalSection: on an 8-bit core a 32-bit sum is four
@@ -105,13 +108,10 @@
 //      a PIT period, so every one of its runs holds one).
 //   p  a print of 1, 16, 256 and 4096 bytes - print(serial, s) with s a
 //      static string in flash of that length (rows of 62 digits and a
-//      CRLF; the 1-byte one is the final LF), then the DRAIN: the
-//      transport has no verb for "the ring is empty and the shifter has
-//      finished" (Uart::tx_idle() is the ring alone), so the drain is
-//      tx_idle() and then the resource's TXCIF (27.5.5: the frame in the
-//      shift register has gone and TXDATA holds nothing new), cleared
-//      while the transmitter was idle just before the print and waited
-//      for with a bounded spin. Counters before the print and after the
+//      CRLF; the 1-byte one is the final LF), then the DRAIN: tx_idle(),
+//      which is the wire's - the ring empty and the last stop bit out,
+//      TXCIF cleared by the transport behind the run's last byte (27.5.5).
+//      Counters before the print and after the
 //      drain. busy = wall (the print and the drain spin); irq and isr are
 //      the transport's shape - one DRE interrupt per byte, the silicon's
 //      (TXDATA is one byte deep beside the shifter) - plus the ticks that
@@ -156,6 +156,70 @@
 //      sheet's own sequence (28.3.2.1.1 and 28.3.2.1.2) runs as a bare
 //      loop in a scratch program beside this one, the number in
 //      docs/avrdx/spi.md.
+//   u  THE UART TRANSPORT (avrdx/usart.hpp's Uart, docs/avrdx/usart.md):
+//      `Loop` = Uart<4, Route::def, 256, 256> on USART4's default route
+//      in internal loop-back (LBME: the receiver listens to the TXD pad
+//      PE0, RXD PE1 is not read) - test_avr_serial's single-board loop,
+//      nothing to wire. Four rates: 115200 and 1 000 000 in normal mode
+//      (BAUD 833 and 96), 2 000 000 and 3 000 000 in double speed (RXMODE
+//      CLK2X, BAUD 96 and 64 - CLK_PER / 8, the register's floor and the
+//      loop's top rate). The
+//      console, USART2, is never touched. The two USART4 vectors are bound
+//      FOUR WAYS at once, chosen per run by GPR0 (the general purpose
+//      register at I/O 0x1C, which SBIS/SBIC read without touching SREG):
+//      the vector is naked, a chain of skips and JMPs, and each binding is
+//      a handler gcc compiles whole with its own prologue -
+//        plain    (GPR0 = 0) the driver's body alone, the binding an app
+//                 writes, behind the dispatch's first exit (SBIS and JMP,
+//                 four cycles): the line the wire sees, isr=0;
+//        metered  (0x81) the IsrMeter around the body, as every other
+//                 vector here: irq and isr exact, but the stamps cost
+//                 about 220 cycles an entry - nearly a frame at 1 Mbaud
+//                 (240) and nearly three at 3 Mbaud (80);
+//        counted  (0x84) the body and a 16-bit entry count, twelve cycles:
+//                 how many entries the bytes took, printed as a note;
+//        stamped  (0x82, RXC only) the body, then TCB0's count stored as
+//                 the moment the entry left the body (uart.edge).
+//      Every op runs metered, counted and plain, ONE run each (the loop is
+//      deterministic); n counts bytes.
+//        uart.tx       256 and 4096 bytes queued by write_bulk() as the
+//                      ring takes them, the thread spinning on a full ring
+//                      (print's policy: busy = wall), the wall closed by
+//                      tx_idle(), the wire's (the last stop bit out) - the
+//                      receiver OFF, so the line is the transmitter's
+//                      alone; the plain run is `uart.tx.bare`;
+//        uart.rx       bursts of 16 and 256 bytes through the interrupt
+//                      receiver, SENT BY NO CPU: the transmitter off, PE0
+//                      is PORT's and TCA0's WO0 drives it (single slope,
+//                      PER one frame, the start bit from the compare match
+//                      to TOP), a stream of 0xFF frames back to back at
+//                      the generator's rate, so the receiver alone is
+//                      measured - on a loop the same core fed by the thread
+//                      at 3 Mbaud would measure the thread; the thread
+//                      drains the ring by read_span()/consume() as it goes
+//                      and sums the bytes; the wall runs from the timer's
+//                      enable to the n-th byte consumed; the line after
+//                      says what arrived and the three counters that can
+//                      move; the plain run is `uart.rx.bare`;
+//        uart.edge     the receive edge's latency, the stamped binding:
+//                      TCB0 free-running at CLK_PER in capture mode, its
+//                      capture fed by the TXD pad's rising edges (EVSYS
+//                      channel 4), so the last frame's stop bit begins at
+//                      the capture and ends one bit time later (S x BAUD /
+//                      64 CLK_PER, exact); the burst is sent by the
+//                      resource's polled send() and its last byte is 0x00,
+//                      whose stop bit is the only rising edge in it. n=1:
+//                      wall = TCB0 where rxc() returned true (the edge the
+//                      glue posts on) minus the stop bit's end - negative
+//                      when the edge comes first, RXCIF rising in the
+//                      middle of the stop bit (usart.md); n=16: the same
+//                      for the burst's LAST byte (the edge itself came with
+//                      the first). The pin event and the capture's
+//                      synchronizer add two or three cycles.
+//      The vendor's column (`uart.vendor`): no vendor library on this
+//      family; the data sheet's sequence (27.3.2.4: RXDATAH, then RXDATAL)
+//      as a bare RXC handler into a ring of its own runs in a scratch
+//      program beside this one, the number in docs/avrdx/usart.md.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -174,6 +238,9 @@
 //           (the same table), nothing loaded.
 //   spi.*   SCK / 8 bytes a second: one frame of eight bits a byte, the
 //           division exact at every rate (docs/avrdx/spi.md).
+//   uart.*  the rate the generator really produces (the BAUD register
+//           read back, usart_actual_baud) over the ten bits of an 8N1
+//           frame: 11 524, 100 000, 200 000 and 300 000 B/s.
 //   r and t wire=0: an instrument's cost and an idle second carry no
 //           bytes.
 //
@@ -212,6 +279,7 @@
 #include "avrdx/pin.hpp"
 #include "avrdx/platform.hpp"
 #include "avrdx/spi.hpp"
+#include "avrdx/tca.hpp"
 #include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"
@@ -243,7 +311,7 @@ constexpr uint32_t frame_bits = 10;  // 8N1
 using WatchLo = Tcb<1>;
 using WatchHi = Tcb<2>;
 using Watch = CascadedCounter<WatchLo, WatchHi>;
-using ChCarry = EventChannel<4>;
+using ChCarry = EventChannel<2>;
 using ChSnap = EventChannel<5>;
 
 /// TCB1 + TCB2 cascaded: CLK_PER cycles, 32 bits (the file header).
@@ -264,12 +332,13 @@ IsrMeter<Ruler, Idle> rxc_meter;
 IsrMeter<Ruler, Idle> dre_meter;
 IsrMeter<Ruler, Idle> tick_meter;
 IsrMeter<Ruler, Idle> spi_meter;
+IsrMeter<Ruler, Idle> u4_meter;
 IsrMeter<Ruler, Idle> empty_meter;
 
 /// The counters, read quiescent and under the mask (the file header).
 BenchCounters counters() {
     P::CriticalSection cs;
-    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter);
+    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, u4_meter);
 }
 
 TestBench<Serial> bench;
@@ -285,35 +354,12 @@ constexpr uint16_t max_size = 4096u;
 
 // ---- the console's drain ------------------------------------------------------
 
-/// CLK_PER cycles of one frame on the wire.
-constexpr uint32_t frame_cycles = SysClock::hz / console_baud * frame_bits;
-/// A spin count that outlasts several frames whatever a turn costs: every
-/// turn of the loops below is at least four cycles.
-constexpr uint16_t spin_bound = static_cast<uint16_t>(2u * frame_cycles);
-
-/// TXCIF, bounded: false when the flag never rose.
-bool wait_shifted() {
-    for (uint16_t i = 0; i < spin_bound; ++i) {
-        if (Usart2::txc_flag()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// Let the console fall silent - the ring empty, the last byte through
-/// the shifter - so its interrupt lands in nothing measured next. TXCIF
-/// may stand from any earlier idle moment, so it is cleared once DREIF
-/// says the last byte has entered the shifter (TXDATA empty: a frame
-/// still to run) and then waited for. With nothing left to send the wait
-/// runs out its bound, a few frames.
+/// Let the console fall silent - the ring empty, the last stop bit out -
+/// so its interrupt lands in nothing measured next: tx_idle() is the
+/// wire's (avrdx/usart.hpp).
 void drain() {
     while (!Serial::tx_idle()) {
     }
-    for (uint16_t i = 0; i < spin_bound && !Usart2::dre_flag(); ++i) {
-    }
-    Usart2::clear_txc();
-    (void)wait_shifted();
 }
 
 // ---- helpers --------------------------------------------------------------------
@@ -359,7 +405,8 @@ constexpr uint16_t reps = 1000u;
 /// What the meters and the ruler print beside letter r's runs.
 BenchCounters counters_with_empty() {
     P::CriticalSection cs;
-    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, empty_meter);
+    return bench_counters<Idle>(rxc_meter, dre_meter, tick_meter, spi_meter, u4_meter,
+                                empty_meter);
 }
 
 volatile uint32_t ruler_sink = 0;
@@ -511,7 +558,6 @@ void tp_print() {
     Stopwatch<Ruler> sw;
     for (const uint16_t n : sizes) {
         drain();
-        Usart2::clear_txc();  // the transmitter is idle: the flag starts clean
         const char* text = payload.data() + (max_size - n);
         const Share dre0 = share(dre_meter);
         const Share tick0 = share(tick_meter);
@@ -520,14 +566,12 @@ void tp_print() {
         print(serial, text);
         while (!Serial::tx_idle()) {
         }
-        const bool shifted = wait_shifted();
         const uint32_t wall = sw.elapsed();
         const BenchSample s = bench_sample(wall, c0, counters());
         const Share dre1 = share(dre_meter);
         const Share tick1 = share(tick_meter);
         print(serial, crlf, "  dre: irq=", dre1.irq - dre0.irq, " isr=", dre1.cycles - dre0.cycles,
-              "  tick: irq=", tick1.irq - tick0.irq, " isr=", tick1.cycles - tick0.cycles,
-              shifted ? "" : "  (TXCIF never rose: the wall ends at the bound)", crlf);
+              "  tick: irq=", tick1.irq - tick0.irq, " isr=", tick1.cycles - tick0.cycles, crlf);
         bench_line(serial, "print", n, s, Ruler::hz(), print_wire_bps);
     }
     bench.verdict("ran", true);
@@ -717,6 +761,252 @@ void te_spi() {
     bench.verdict("every pumped request completed and left BUFOVF clear", pumped);
 }
 
+// =============================================================================
+// u - the UART transport: uart.tx, uart.rx, uart.edge
+// =============================================================================
+namespace du {
+
+using Loop = Uart<4, Route::def, 256u, 256u>;   // TXD PE0, RXD PE1 (unused: LBME)
+using U4 = Loop::Resource;
+using Stamp = Tcb<0>;                           // CLK_PER, capture on the pad's rising edge
+using ChPad = EventChannel<4>;
+using Pad = Pin<'E', 0>;
+using Gen = Tca<0>;                             // uart.rx's sender: WO0 on PE0
+
+/// The binding GPR0 selects (the file header): bit 7 marks an
+/// instrumented binding, so the plain one is the dispatch's first exit.
+constexpr uint8_t plain = 0x00;
+constexpr uint8_t metered = 0x81;
+constexpr uint8_t stamped = 0x82;
+constexpr uint8_t counted = 0x84;
+
+volatile uint16_t rxc_entries = 0;
+volatile uint16_t dre_entries = 0;
+volatile uint16_t edge_at = 0;       ///< TCB0 where rxc() returned true
+volatile uint16_t last_at = 0;       ///< TCB0 at the last stamped entry
+volatile bool edge_seen = false;
+
+struct LoopRate {
+    uint32_t baud;
+    bool clk2x;
+};
+constexpr LoopRate loop_rates[] = {
+    {115'200u, false}, {1'000'000u, false}, {2'000'000u, true}, {3'000'000u, true}};
+
+/// The loop at a rate: the task's init (normal speed), loop-back, and in
+/// double speed RXMODE and the divisor rewritten under it.
+void loop_at(const LoopRate& r) {
+    Loop::init(clock, r.clk2x ? 115'200u : r.baud);
+    U4::loop_back(true);
+    if (r.clk2x) {
+        U4::rx_mode(UsartRxMode::clk2x);
+        U4::baud_reg(usart_baud_reg(SysClock::hz, r.baud, 8u));
+    }
+}
+
+uint32_t actual_baud() { return U4::actual_baud(SysClock::hz); }
+uint32_t wire_bps() { return actual_baud() / frame_bits; }
+/// One bit in CLK_PER cycles, in 1/64ths: S x BAUD (27.3.2.2.1).
+uint32_t bit64() { return static_cast<uint32_t>(U4::samples()) * U4::baud_reg(); }
+
+/// The receive ring emptied (nothing pending is this run's).
+void drain_rx() {
+    for (;;) {
+        const auto run = Loop::read_span();
+        if (run.empty()) {
+            return;
+        }
+        Loop::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+/// TXCIF, bounded by a few frames at the slowest rate.
+bool wait_txc() {
+    for (uint16_t i = 0; i < 4000u; ++i) {
+        if (U4::txc_flag()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+constexpr uint16_t tx_sizes[] = {256u, 4096u};
+constexpr uint16_t rx_sizes[] = {16u, 256u};
+constexpr uint8_t modes[] = {metered, counted, plain};
+
+/// The line, or the counted run's note: the binding decides.
+/// `moved` is the bytes the run carried (a receive run may take a few
+/// more than n before the thread sees n): the per-byte figures divide by it.
+void print_run(const char* op, const char* bare_op, uint8_t mode, uint16_t n, uint16_t moved,
+               const BenchSample& s, const Share& m0, const Share& m1, uint16_t entries) {
+    if (mode == metered) {
+        bench_line(serial, op, n, s, Ruler::hz(), wire_bps());
+        print(serial, "  ", actual_baud(), " baud, metered: per byte irq=",
+              (m1.irq - m0.irq + moved / 2u) / moved, " isr=",
+              (m1.cycles - m0.cycles + moved / 2u) / moved);
+    } else if (mode == counted) {
+        print(serial, "  ", actual_baud(), " baud, counted: ", entries, " entries for ", moved,
+              " bytes, wall ", s.wall);
+    } else {
+        bench_line(serial, bare_op, n, s, Ruler::hz(), wire_bps());
+        print(serial, "  ", actual_baud(), " baud, plain");
+    }
+}
+
+void tx_lines() {
+    U4::enable_rx(false);   // the line is the transmitter's alone
+    Stopwatch<Ruler> sw;
+    for (const uint16_t n : tx_sizes) {
+        for (const uint8_t mode : modes) {
+            drain();
+            GPR.GPR0 = mode;
+            const BenchCounters c0 = counters();
+            const uint16_t e0 = dre_entries;
+            const Share m0 = share(u4_meter);
+            sw.start();
+            uint16_t sent = static_cast<uint16_t>(Loop::write_bulk({mem_src, n}));
+            while (sent < n) {
+                sent = static_cast<uint16_t>(
+                    sent + Loop::write_bulk({mem_src + sent, static_cast<size_t>(n - sent)}));
+            }
+            while (!Loop::tx_idle()) {
+            }
+            const uint32_t wall = sw.elapsed();
+            const BenchSample s = bench_sample(wall, c0, counters());
+            const Share m1 = share(u4_meter);
+            const uint16_t e = static_cast<uint16_t>(dre_entries - e0);
+            GPR.GPR0 = plain;
+            print_run("uart.tx", "uart.tx.bare", mode, n, n, s, m0, m1, e);
+            print(serial, crlf);
+        }
+    }
+    U4::enable_rx(true);
+}
+
+/// uart.rx: TCA0 sends, the interrupt receiver takes. The transmitter is
+/// off, so PORT owns PE0 and TCA0's WO0 drives it: single slope, PER one
+/// frame, CMP0 at nine bits - high from BOTTOM to the match (eight data
+/// ones and the stop bit), low from the match to TOP (the start bit):
+/// a stream of 0xFF frames back to back at the generator's own rate,
+/// with no CPU in it. The count starts one cycle short of the match, so
+/// the first start bit begins as the timer is enabled. At 115200 the
+/// frame is 2082.5 CLK_PER and PER takes 2082: 0.02 per cent fast.
+void rx_lines() {
+    U4::enable_tx(false);
+    Pad::set();
+    Pad::output();
+    const uint16_t bit = static_cast<uint16_t>(bit64() / 64u);
+    const uint16_t frame = static_cast<uint16_t>(bit64() * frame_bits / 64u);
+    for (const uint16_t n : rx_sizes) {
+        for (const uint8_t mode : modes) {
+            drain();
+            drain_rx();
+            Loop::clear_errors();
+            (void)Gen::init({.mode = TcaMode::single_slope, .clock = TcaClock::div1,
+                             .period = static_cast<uint16_t>(frame - 1u),
+                             .compare0 = static_cast<uint16_t>(9u * bit), .route = 'E'});
+            Gen::disable();
+            Gen::output_value<0>(true);
+            Gen::count(static_cast<uint16_t>(9u * bit - 1u));
+            Gen::output<0>(true);
+            GPR.GPR0 = mode;
+            const BenchCounters c0 = counters();
+            const uint16_t e0 = rxc_entries;
+            const Share m0 = share(u4_meter);
+            Stopwatch<Ruler> sw;
+            uint16_t got = 0;
+            uint16_t sum = 0;
+            uint32_t turns = 0;
+            sw.start();
+            Gen::enable();
+            while (got < n && turns < 100'000u) {
+                ++turns;
+                const auto run = Loop::read_span();
+                if (!run.empty()) {
+                    for (const uint8_t b : run) {
+                        sum = static_cast<uint16_t>(sum + b);
+                    }
+                    got = static_cast<uint16_t>(got + run.size());
+                    Loop::consume(static_cast<uint32_t>(run.size()));
+                }
+            }
+            const uint32_t wall = sw.elapsed();
+            Gen::disable();   // the stream stops here: nothing after the wall is counted
+            const uint16_t e = static_cast<uint16_t>(rxc_entries - e0);
+            const uint8_t fe = Loop::frame_errors();
+            const uint8_t ring = Loop::rx_overruns();
+            const uint8_t hw = Loop::hw_overruns();
+            const BenchSample s = bench_sample(wall, c0, counters());
+            const Share m1 = share(u4_meter);
+            Gen::output_value<0>(true);   // the line parked high; a cut frame is drained below
+            GPR.GPR0 = plain;
+            print_run("uart.rx", "uart.rx.bare", mode, n, got, s, m0, m1, e);
+            print(serial, ", delivered ", got, '/', n,
+                  sum == static_cast<uint16_t>(0xFFu * got) ? " all 0xFF" : " NOT 0xFF",
+                  ", errors fe=", fe, " ring=", ring, " hw=", hw, crlf);
+            delay_us(clock, 200);
+        }
+    }
+    Gen::output<0>(false);
+    Gen::reset();
+    Gen::route('A');
+    drain_rx();
+    U4::enable_tx(true);
+}
+
+/// uart.edge: the stamped binding, the pad's capture, a burst ending in 0x00.
+void edge_lines() {
+    for (const uint16_t n : {static_cast<uint16_t>(1u), static_cast<uint16_t>(16u)}) {
+        drain();
+        drain_rx();
+        edge_seen = false;
+        const uint16_t e0 = rxc_entries;
+        GPR.GPR0 = stamped;
+        for (uint16_t i = 0; i + 1u < n; ++i) {
+            (void)U4::send(0x55u);
+        }
+        (void)U4::send(0x00u);
+        for (uint32_t i = 0; i < 100'000u && static_cast<uint16_t>(rxc_entries - e0) < n; ++i) {
+        }
+        (void)wait_txc();
+        GPR.GPR0 = plain;
+        const uint16_t cap = Stamp::capture();
+        const uint16_t entries = static_cast<uint16_t>(rxc_entries - e0);
+        const uint16_t bit = static_cast<uint16_t>((bit64() + 32u) / 64u);
+        const uint16_t at = n == 1u ? edge_at : last_at;
+        const int32_t latency = static_cast<int32_t>(static_cast<int16_t>(at - cap)) - bit;
+        print(serial, "bench uart.edge n=", n, " wall=", latency, " busy=0 irq=", entries,
+              " isr=0 rate=- wire=", wire_bps(), " x=-", crlf);
+        print(serial, "  ", actual_baud(), " baud: bit ", bit, " cycles, the stop bit began at ",
+              cap, ", ", n == 1u ? "the edge" : "the last byte", " left the handler at ", at,
+              edge_seen ? "" : " (NO EDGE)", crlf);
+        drain_rx();
+    }
+}
+
+}  // namespace du
+
+void tu_uart() {
+    using namespace du;
+    for (uint16_t i = 0; i < max_size; ++i) {
+        mem_src[i] = static_cast<uint8_t>(i * 13u + 7u);
+    }
+    GPR.GPR0 = plain;
+    Stamp::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .event_input = true});
+    ChPad::source(EvPin<Pad>{});
+    Stamp::capture_on(ChPad{});
+    for (const LoopRate& r : loop_rates) {
+        loop_at(r);
+        tx_lines();
+        rx_lines();
+        edge_lines();
+    }
+    Loop::release();
+    Stamp::disable();
+    ChPad::off();
+    bench.verdict("ran", true);
+}
+
 bool xtal = false;
 
 void banner() {
@@ -749,6 +1039,62 @@ ISR(RTC_PIT_vect) {
     brio::Ticker::pit();
     tick_meter.leave();
 }
+// Letter u's USART4 bindings (the file header): three handlers compiled
+// whole, the vector a naked jump on GPR0 - SBIC tests an I/O bit without
+// touching SREG, so the dispatch needs no prologue of its own.
+#pragma GCC diagnostic push
+#if !defined(__clang__)   // the language server's parser knows no such group
+#pragma GCC diagnostic ignored "-Wmisspelled-isr"
+#endif
+extern "C" {
+[[gnu::signal, gnu::used]] void bench_u4_rxc_metered() {
+    u4_meter.enter();
+    (void)du::Loop::rxc();
+    u4_meter.leave();
+}
+[[gnu::signal, gnu::used]] void bench_u4_rxc_stamped() {
+    const bool edge = du::Loop::rxc();
+    const uint16_t t = du::Stamp::count();
+    if (edge) {
+        du::edge_at = t;
+        du::edge_seen = true;
+    }
+    du::last_at = t;
+    du::rxc_entries = static_cast<uint16_t>(du::rxc_entries + 1u);
+}
+[[gnu::signal, gnu::used]] void bench_u4_rxc_counted() {
+    du::rxc_entries = static_cast<uint16_t>(du::rxc_entries + 1u);
+    (void)du::Loop::rxc();
+}
+[[gnu::signal, gnu::used]] void bench_u4_rxc_plain() { (void)du::Loop::rxc(); }
+[[gnu::signal, gnu::used]] void bench_u4_dre_plain() { du::Loop::dre(); }
+[[gnu::signal, gnu::used]] void bench_u4_dre_metered() {
+    u4_meter.enter();
+    du::Loop::dre();
+    u4_meter.leave();
+}
+[[gnu::signal, gnu::used]] void bench_u4_dre_counted() {
+    du::dre_entries = static_cast<uint16_t>(du::dre_entries + 1u);
+    du::Loop::dre();
+}
+}
+#pragma GCC diagnostic pop
+ISR(USART4_RXC_vect, ISR_NAKED) {
+    asm volatile("sbis %[gpr], 7\n\t"
+                 "jmp bench_u4_rxc_plain\n\t"
+                 "sbic %[gpr], 0\n\t"
+                 "jmp bench_u4_rxc_metered\n\t"
+                 "sbic %[gpr], 1\n\t"
+                 "jmp bench_u4_rxc_stamped\n\t"
+                 "jmp bench_u4_rxc_counted\n\t" ::[gpr] "I"(_SFR_IO_ADDR(GPR_GPR0)));
+}
+ISR(USART4_DRE_vect, ISR_NAKED) {
+    asm volatile("sbis %[gpr], 7\n\t"
+                 "jmp bench_u4_dre_plain\n\t"
+                 "sbic %[gpr], 0\n\t"
+                 "jmp bench_u4_dre_metered\n\t"
+                 "jmp bench_u4_dre_counted\n\t" ::[gpr] "I"(_SFR_IO_ADDR(GPR_GPR0)));
+}
 ISR(SPI0_INT_vect) {
     spi_meter.enter();
     if (de::SpiHw::isr()) {
@@ -770,6 +1116,7 @@ int main() {
     bench.letter('p', "a print of 1/16/256/4096 bytes through the console", tp_print);
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('e', "the SPI host: spi.poll, spi.poll.tx, spi.pump, spi.req", te_spi);
+    bench.letter('u', "the UART transport on USART4's loop: uart.tx, uart.rx, uart.edge", tu_uart);
 
     banner();
     bench.prompt();

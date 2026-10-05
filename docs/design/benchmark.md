@@ -327,6 +327,40 @@ What the rows say:
   brio's write shape is ahead of every one of them and its read shape
   within a fifth or ahead, the gaps named in each family's SPI document.
 
+## Letter u: the UART transport
+
+Measured on the bench boards after the serial round, each family on a
+loop of one of its own UARTs (the instance, the loop and what feeds the
+receiver named in the family's serial document): `uart.tx` a run of 256
+and 4096 bytes through `write_bulk()`, `uart.rx` a burst of 16 and 256
+bytes into the receive path with a consumer draining it, `uart.edge` the
+cycles from the burst's last stop bit to the edge leaving the handler -
+the contract's "within two frame times" ([serial.md](serial.md)) -, at
+115200 and up to the loop's top rate, every vector bound plain (as an
+app binds it), counted and metered; `tx_idle()` timed on the pad by the
+family's serial suite; the vendor's receive (its library, or the data
+sheet's sequence where none exists) on the same board in a scratch
+program. `x` is read on the plain binding.
+
+| family (clock; the loop's top rate) | uart.tx x at the top rate, 256 and 4096 | uart.rx 256 x by rate; receive entries for 256 | the edge after the last stop bit | `tx_idle()` after the last stop bit | the core at about 1 Mbaud: transmit, receive (the vendor's receive) | the vendor's receive, x |
+|---|---|---|---|---|---|---|
+| AVR128DB48 (24 MHz; 3 Mbaud) | 1.02 to 1.03, 1.00 | 1.00 at 115200 and 1 Mbaud, 1.02 at 2, 3.7 to 6.8 at 3 (the consumer starved); 256 and 255 to 1 Mbaud, about 1.5 frames an entry at 3 | -3 to +2 cycles at 115200; +69 to +77 at 1 to 3 Mbaud, under a frame | +35 to +37 cycles at 115200 (a bit is 208), +47 at 460800 (52), +26 at 1 Mbaud (24) | 25 %, 31 to 35 % (27 %) | the data sheet's sequence: 1.00 at 115200 and 1 Mbaud, 1.01 at 2, 2.9 at 3 |
+
+What the rows say:
+
+- A receiver with no idle flag, no time-out and no FIFO - the AVR's
+  chapter 27 - makes its edge on the burst's FIRST byte, and pays the
+  silicon's one interrupt a frame: 75 cycles for a frame alone in its
+  entry, 30 for each further frame the same entry takes from the
+  two-level buffer. That holds the wire to 2 Mbaud at 24 MHz; at 3 Mbaud
+  a frame lasts 80 cycles, the handler takes 75 of them, and the
+  consumer starves while the hardware loses 1 to 6 frames in 256 - the
+  core's limit, which the data sheet's own sequence (65 cycles a frame)
+  meets too ([../avrdx/usart.md](../avrdx/usart.md)).
+- `tx_idle()` turns true after the last stop bit and never before it on
+  the pad; at 1 Mbaud on the AVR the poll's own turn, about twenty
+  cycles, is most of what the instrument reads.
+
 ## Not covered yet
 
 Implemented, not bench-verified:

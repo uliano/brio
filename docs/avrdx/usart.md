@@ -64,6 +64,13 @@ Facts that matter to code:
   and the shift register on the way out; the same depth on the way in.
   BUFOVF is set when a start bit arrives with all three full, and it
   travels with its frame through the FIFO.
+- **RXCIF is a level, and RXDATAH carries it.** It stands while unread
+  data remain (27.5.5) and is bit 7 of RXDATAH (27.5.2), so the status
+  byte read after the shifting read says whether a second frame waits.
+- **TXCIF is set only when the shift register empties with nothing
+  behind it** (27.3.2.3), and a write to TXDATA does not clear it: one
+  left from an earlier idle moment stands through the next run until
+  someone writes it 1.
 - **Disabling the two directions is not symmetric.** The receiver stops
   at once and its buffer is flushed; the transmitter finishes what is
   in flight and then stops overriding TXD, which PORT gets back as an
@@ -75,6 +82,42 @@ Facts that matter to code:
 - **MPCM is a receiver filter**: with nine data bits the ninth bit,
   with five to eight the first stop bit, marks an address frame, and
   data frames are dropped until one arrives.
+
+### The receive side's offer, and what `Uart` takes of it
+
+The chapter offers the receive path these, each used or declined:
+
+- **The edge: RXCIF, used.** It is the only receive edge in Active mode:
+  no idle flag, no receiver time-out, no FIFO threshold exist in chapter
+  27. `rxc()` returns the ring's empty -> non-empty transition, so the
+  consumer hears the burst's FIRST byte, and a console ends a line at its
+  terminator, not at a silence.
+- **The start-of-frame detector (RXSIF, SFDEN), declined as an edge.**
+  It fires in Standby only (27.5.5, measured below: from Idle never),
+  and SFDEN left set in Active mode corrupts the frame a read of RXDATA
+  re-triggers (errata 2.16.2 / 2.15.2). It stays the standby wake verb
+  pair.
+- **An idle detector built from the RXD pad, declined.** The pad's edges
+  through EVSYS into a TCB in time-out mode would give a burst's end, at
+  the price of a TCB, an event channel and a pin channel per port (PORTE
+  and PORTF pins reach channels 4 and 5 only, 16.5) - for a consumer that
+  already ends a line at its terminator and a burst edge that is the
+  first byte's.
+- **The two-level buffer, used whole.** One `rxc()` entry takes every
+  frame the buffer holds - the loop ends on RXDATAH's RXCIF - so the
+  vector's entry and exit are paid once for two frames when the handler
+  is late, which is when it matters.
+- **DMA, circular mode: none on this family.**
+- **The clears: none to make.** FERR, PERR and BUFOVF travel with their
+  frame in RXDATAH and go with its read (27.3.2.4.1, 27.5.2); nothing
+  else is read to clear them, so no byte beside the hit one is lost
+  (`test_avr_serial` letter I). The vector's two other sources (RXSIE,
+  ABEIE) are the resource's to arm; an entry they make finds RXCIF clear
+  and takes nothing.
+- **The loop-back (LBME), used for the measurements.** It listens to the
+  TXD PAD, so with the transmitter off it hears whatever PORT or a timer's
+  waveform output drives there - which is how `bench_avr`'s letter u feeds
+  the receiver from TCA0 with no CPU in the sender.
 
 ## Types and verbs
 
@@ -93,7 +136,7 @@ tasks speak hertz and are `ClockUser`s.
 | `Usart<n>` interrupts | `enable_rxc_interrupt`, `enable_txc_interrupt`, `enable_dre_interrupt`, `enable_rxs_interrupt`, `enable_autobaud_error_interrupt` |
 | `Usart<n>` data | `receive()` / `receive_as<bits>()` -> `UsartFrame` (ISR body of `USARTn_RXC_vect`), `transmit(v)` / `transmit_as<bits>(v)`, `clear_txc()` (ISR body of `USARTn_TXC_vect`), the bounded `send`/`poll`/`wait`/`wait_line_idle` |
 | `Usart<n>` events | `XckEvent` (generator), `IrdaIn` (user) |
-| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once TX is idle), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, DREIE set again behind the rest), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`/`tx_idle`, the error counters, ISR bodies `rxc()` (returns the empty -> non-empty edge) and `dre()` |
+| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once `tx_idle()`), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, the rest copied in parts of at most `copy_part` (32) bytes, each published and DREIE set behind it), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`, `tx_idle` (the WIRE is idle: the ring empty and the last stop bit out - TXCIF, which the transport owns), the error counters, ISR bodies `rxc()` (takes every frame the buffer holds, returns the empty -> non-empty edge) and `dre()` |
 | `OneWire<n, route>` | `available`, `init(clock, baud, fmt)`, `talk()`/`listen()`, `line()`, `echo_matches(sent)` |
 | `Rs485<n, route>` | `available`, `init(clock, baud, fmt, one_wire)`, `drive_enable()`, `guard_bits` |
 | `SyncHost<n, route>` / `SyncClient<n, route>` | `available`, `init(...)`, `clock_pin()`, `invert_xck(bool)` (host), `max_xck_hz(hz)` (client) |
@@ -108,23 +151,31 @@ without an XDIR pin; loop-back or open drain without a TXD pad (the
 pinless route included); a non-normal receiver mode outside
 asynchronous operation.
 
-What a byte costs `Uart`: one interrupt each way - the silicon buffers
-three frames and offers no deeper FIFO to fill - and the code of the
-vector it lands in. That is why both bodies are always inline and
-`dre()` also flattens what it calls into itself, so its vector holds no
-call whatever the ring's own inlining: a ring verb is shared by every
-call site of its type in the image (`tx_idle()`'s `empty()`, another
-ring of the same shape), and one call in a vector saves the whole
-call-clobbered set. Counted in the release listing: the DRE vector
-bound to `dre()` is 36 instructions, four registers, SREG and RAMPZ
-saved and no call - 54 cycles from its first instruction to its RETI
-for a byte that leaves bytes queued (59 for the last, which also clears
-DREIE), plus the CPUINT's minimum response of six: 60 cycles, 2.5 us at
-24 MHz, against the 86.8 us a byte holds the wire at 115200. The RXC
-vector bound to `rxc()` alone is 62 instructions, six registers, SREG
-and RAMPZ and no call, 73 + 6 cycles for a clean byte; a binding that
-also posts from it (the console below) adds the kernel's `post()` as a
-call, and with it the call-clobbered set: 16 pushes.
+What a byte costs `Uart`, counted in the release listings (DS40002198B,
+the AVRxt column; the CPUINT's response of six cycles added):
+
+- **Receive: 75 cycles for a frame that is the entry's only one where the
+  binding discards the edge, 83 where it uses it, and 30 for each further
+  frame the same entry takes.** `rxc()` reads RXDATAH and
+  RXDATAL itself and tests the status byte's three flags with one AND on
+  the clean path: the vector bound to it alone saves four registers,
+  SREG and RAMPZ and calls nothing. It does NOT go through the
+  resource's `receive_as()`: once an image has a second call site of it
+  for the instance, its `UsartFrame` is built by an out-of-line
+  `frame_of()` into a stack frame, and the vector paid 207 cycles a frame
+  - sixteen pushes, a frame, a call and a five-byte copy. The edge is
+  fourteen cycles (the ring's count at entry, a flag per push, the test
+  at exit); a binding that posts from it (the console below) adds the
+  kernel's `post()` as a call, and with it the call-clobbered set: the
+  console's vector is 111 cycles for a byte that makes no edge.
+- **Transmit: 60 cycles a byte** (`dre()`, four registers, SREG and
+  RAMPZ, flattened so no ring verb is a call), 73 for a run's last byte,
+  which also clears DREIE and TXCIF.
+- **The run's copy: avr-libc's `memcpy`, 7 cycles a byte plus 17**, from
+  two bytes up. A loop in C over the free run's pointers is the same 7 at
+  best, and inside `write_bulk()` gcc makes it 13 (Z reloaded from a pair
+  for each access): there is no length below which the loop wins by more
+  than a few cycles, and none above which it wins at all.
 
 ## How to use it
 
@@ -221,13 +272,84 @@ U::disarm_start_of_frame();         // first thing on the way back
 ## Bench findings
 
 `test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
-and has two halves: `z` is the SINGLE-BOARD set (9 tests,
-108 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
+and has two halves: `z` is the SINGLE-BOARD set (11 tests,
+126 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
 103 verdicts) against a peer board running `usart_peer`, an instrument driven
 IN BAND over the very link under test. Two more commands stand outside
 `y` because they depend on how the desk is jumpered: `v`, the wiring
 probe, and `w`, the one-wire bus (6 verdicts on the shared-line desk; it
 skips itself on the crossed pair).
+
+### The transport's cost and its two contracts
+
+Measured by `bench_avr`'s letter u (its header says how: USART4's loop
+in LBME at 115200, 1, 2 and 3 Mbaud, the receive side fed by TCA0's
+waveform on the TXD pad with the transmitter off, every vector bound
+plain, counted and metered) and by `test_avr_serial`'s letters I and T,
+on the AVR128DB48 at 24 MHz. "Plain" is the vector bound to the driver's
+body alone, as an app binds it; its `x` is the wire's verdict, its cost
+the listing's count above.
+
+| op, plain binding | 115200 | 1 Mbaud | 2 Mbaud | 3 Mbaud |
+|---|---|---|---|---|
+| `uart.tx` 256 bytes, x | 1.00 | 1.00 | 1.01 | 1.03 |
+| `uart.tx` 4096 bytes, x | 0.99 | 1.00 | 1.00 | 1.00 |
+| `uart.rx` 16-byte burst, x | 1.00 | 1.06 | 1.34 to 1.46 | 5 to 17, the consumer starved |
+| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.02 | 3.7 to 6.8, the consumer starved |
+| receive entries for 256 bytes (counted) | 256 | 255 | 266 for 259 | 1.5 frames an entry |
+| the edge after the last stop bit's end, cycles | -3 to +2 | +70 | +76 | +77 |
+
+- **The transmit path is wire-bound at every rate the generator makes.**
+  One DRE interrupt a byte (the TX buffer is one frame ahead of the
+  shifter and DREIF rises once a frame), 60 cycles of the 80 a frame
+  lasts at 3 Mbaud. A 256-byte run's 1.03 there is its first part's copy
+  (about three frames once a run); before the copy went in parts of 32,
+  one copy of the whole run held the wire silent for 22 frames - 1.20.
+- **The receive path keeps the wire at 2 Mbaud with a consumer
+  draining it.** A frame alone in its entry costs 75 cycles (above); at
+  3 Mbaud a frame lasts 80, so the handler finishes just before the next
+  frame and enters again with one frame - the core is the receiver's
+  alone, the thread gets about five cycles a frame, and a consumer
+  falls behind the ring while the hardware loses almost nothing (BUFOVF
+  on 1 to 6 frames in 256 - consistent with the bench's metered tick
+  handler, 302 cycles on its longest pass, outlasting two frames). Bursts
+  the ring holds arrive whole. The 3 Mbaud
+  rows vary run to run for that reason.
+- **The burst edge reaches the consumer about 80 cycles after RXCIF**,
+  which rises inside the stop bit, at its majority samples: at 115200
+  that is the stop bit's end, faster it is a few bit times after it. There is no idle edge to wait for (the
+  inventory above): the edge is the burst's first byte.
+- **Before the receive path was rewritten** (the resource's
+  `receive_as()`, 207 cycles a frame), the same rows read: 1 Mbaud 1.02
+  at 256 bytes with the core 83 per cent in the handler, 2 Mbaud not
+  measured, 3 Mbaud 25 with the hardware losing frames; the edge 95
+  cycles after the stop bit at 115200 and 165 to 173 above it.
+- **The data sheet's own sequence** (27.3.2.4: RXDATAH, RXDATAL, the byte
+  into a 256-entry ring of 8-bit indices, one frame an entry; no vendor
+  library exists for this family) is 65 cycles a frame in its listing,
+  against `rxc()`'s 75 with the edge discarded and 83 with it used: the
+  edge's fourteen and the loop's re-read of RXDATAH, against the 45 a
+  second frame saves when the handler is late. Measured the same way: x 1.00, 1.00 and 1.01 at
+  115200, 1 and 2 Mbaud for 256 bytes; at 3 Mbaud the same starved
+  consumer (2.9). Its metered body is 104 cycles between the stamps,
+  `rxc()`'s 114.
+- **`tx_idle()` is the wire's**: on the pad (TCB0 capturing PE0's last
+  rising edge, the stop bit of a final 0x00) it turned true 37 CLK_PER
+  after the last stop bit's end at 115200 (a bit is 208), 47 at 460800
+  (52) and 26 at 1 Mbaud (24) - never before it; the poll's own turn is
+  about twenty of those cycles.
+- **Errors cost exactly the frames they hit**: 64 slots through the task,
+  four of them a break driven on the pad by PORT with the transmitter
+  off - 60 bytes delivered intact and in order, the frame-error counter
+  4, nothing else moved. Six frames into a receiver with its interrupt
+  off: the first entry takes all three the buffer kept (the two oldest
+  and the newest, which carries BUFOVF) and counts one hardware overrun.
+- **A handler longer than two frame times loses a received byte.** The
+  buffer holds two frames and the shifter a third, so the RXC entry may
+  wait two frame times: 2.1 ms at 9600, 240 cycles at 2 Mbaud, 160 at
+  3 Mbaud. The bench app's metered vectors run 282 to 410 cycles on
+  their longest pass; the console's longest is its RXC with the post,
+  182 with the response.
 
 ### The two boards, and what they cost the measurements
 
@@ -547,17 +669,6 @@ Driver gaps (not implemented):
 Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
-- **The transport's cost per byte on the silicon.** The cycles above
-  are counted in the listing; `bench_avr`'s letter p measures them on
-  a print (the DRE handler between its meter's two stamps counted at
-  28 cycles);
-- **the run verbs**: `write_bulk()` (a byte copied in seven
-  instructions, the first byte pushed and DREIE set before the copy,
-  set again behind it) and `read_span()`/`consume()`,
-  which every print and the console's SerialPort now take, are counted
-  in the release listing and have not run on the silicon;
-  `test_avr_serial`, the console and `bench_avr`'s letter p on a DB48
-  would measure them;
 - **`DBGCTRL.DBGRUN`**;
 - **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4

@@ -26,7 +26,10 @@ interrupt exactly as `write_byte` does, copies the rest and arms again
 behind it, because every one of those handlers disarms on the ring that
 one byte emptied (the SAM C21's and the AVR's as they pop it, the
 STM32G0's FIFO in the same entry, the others on the entry after): two
-nudges a run at most, the second idempotent. The PL011's writes an idle
+nudges a run at most, the second idempotent - but on the AVR, which
+copies the rest in parts of at most 32 bytes and publishes each with a
+nudge behind it, so that at 3 Mbaud the wire is not left idle while a
+whole run is copied ([../avrdx/usart.md](../avrdx/usart.md)). The PL011's writes an idle
 FIFO directly. Where the transmitter starts on a block - a DMA engine,
 a USB packet - the run is queued whole and nudged once behind it. A run
 that finds no room does what a refused byte does on the same transport.
@@ -131,7 +134,7 @@ port has that the others' has not.
 
 | stratum | realization | beyond the contract |
 |---|---|---|
-| avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; `set_baud()` and `release()` as on the other two |
+| avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; `rxc()` takes every frame the two-level buffer holds in one entry, the edge the burst's FIRST byte (chapter 27 has no idle flag, time-out or FIFO level); `tx_idle()` is TXCIF, which the task OWNS - `dre()` clears it behind a run's last byte, and a resource user who clears it makes `tx_idle()` false until the next run ends; `write_bulk()` copies with avr-libc's `memcpy` from two bytes up; `set_baud()` and `release()` as on the other two |
 | samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins; ONE vector, `isr()` returns the edge; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, and `read_bulk()`, the receive run copied out |
 | stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and `read_bulk()`; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
 | ch32v00x | `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32v00x/usart.hpp`) | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s tables), the code a template parameter; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the channels table 8-2 gives the instance (the channel IS the request on this family, an engine elsewhere refused); USART2 refused at code 0, whose TX is the K8 package's reset pin; `UartOptions` as one trailing parameter (the frame, a single wire that is a BUS and not a loop on this silicon, the flow-control pair); BRR is PCLK over the baud, whole - no separate fractional field and no kernel-clock multiplexer |

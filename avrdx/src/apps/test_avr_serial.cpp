@@ -1,12 +1,16 @@
 // test_avr_serial - the USART test SUITE for the AVR DA/DB target, in
 // two halves.
 //
-// SINGLE BOARD (a..i, `z`): instance and route handling (including the
-// pinless NONE route and the teardown), the whole frame-format matrix
+// SINGLE BOARD (a..i, I, T, `z`): instance and route handling (including
+// the pinless NONE route and the teardown), the whole frame-format matrix
 // through the internal loop-back, the receive FIFO's overflow, the
 // multiprocessor filter, the TXC/DRE semantics, an ELECTRICAL check of
 // the fractional baud generator (the start bit measured by a TCB
-// through the event system), the clock rebase, auto-baud and Host SPI.
+// through the event system), the clock rebase, auto-baud and Host SPI;
+// then the Uart task's own two contracts - errors injected into a stream
+// cost exactly the frames they hit (I), and tx_idle() is the wire's,
+// timed on the pad (T). Every lower-case letter was taken, hence the two
+// capitals.
 //
 // TWO BOARDS (j..u and w, `y`): a second board runs `usart_peer` and is
 // driven IN BAND over the very link under test (protocol:
@@ -652,6 +656,149 @@ void ti_mspi() {
     verdict("LSB first, sample trailing", mspi_pass(true, true));
     verdict("the SPI rate is CLK_PER / (2 x BAUD[15:6])",
             U4::actual_baud(SysClock::hz) == 1'000'000u);
+    quiesce();
+}
+
+// ---- I: errors injected into a stream under the Uart task ----------------------
+// N byte slots through the transport on the loop, K of them a BREAK
+// instead of a byte: the transmitter is turned off once tx_idle() says the
+// wire is idle (27.3.2.3.1: PORT takes the pad back as an input), PE0 is
+// driven low by PORT for twelve bit times - the loop-back receiver hears
+// the pad (measured with the transmitter off, bench_avr's uart.rx) and
+// takes the break as one frame with FERR and data 0 - and the transmitter
+// is turned on again. The other N - K bytes must arrive intact and in
+// order, and the frame-error counter must read K: the error flags travel
+// with their frame in RXDATAH and nothing else is read to clear them, so no
+// byte beside the hit one is lost. Then the hardware's own overflow: six
+// frames with the receive interrupt off leave three in the buffer (letter
+// c), and one entry of rxc() takes all three - the two oldest and the
+// newest, which carries BUFOVF - and counts one hardware overrun.
+
+void tI_injected() {
+    print(serial, "I errors injected into a stream through the Uart task (breaks, BUFOVF)", crlf);
+    quiesce();
+    constexpr uint8_t runs = 4;         // K breaks, one after each run
+    constexpr uint8_t per_run = 15;     // N = runs * (per_run + 1) = 64 slots
+    U4Tx::init(clock, 115'200u);
+    U4::loop_back(true);
+    verdict("tx_idle() before the first byte (nothing sent since init)", U4Tx::tx_idle());
+    uint8_t sent[runs * per_run];
+    for (uint8_t i = 0; i < sizeof sent; ++i) {
+        sent[i] = static_cast<uint8_t>(0x30 + i * 3u);
+    }
+    const uint32_t bit_us = 1'000'000u / 115'200u + 1u;
+    uint8_t got[sizeof sent + 8];
+    uint8_t n = 0;
+    uint8_t b = 0;
+    for (uint8_t r = 0; r < runs; ++r) {
+        const uint8_t* run = sent + r * per_run;
+        uint8_t queued = 0;
+        while (queued < per_run) {
+            queued = static_cast<uint8_t>(
+                queued + U4Tx::write_bulk({run + queued, static_cast<size_t>(per_run - queued)}));
+        }
+        while (!U4Tx::tx_idle()) {
+        }
+        // The run is in the ring (RXCIF rises before the sender's TXCIF):
+        // taken now, so the task's 32-byte ring holds one run at a time.
+        while (n < sizeof got && U4Tx::read_byte(b)) {
+            got[n++] = b;
+        }
+        U4::enable_tx(false);
+        TxPin::clear();
+        TxPin::output();
+        delay_us(clock, 12u * bit_us);      // the break: twelve bit times low
+        TxPin::set();
+        delay_us(clock, 2u * bit_us);
+        U4::enable_tx(true);
+    }
+    delay_us(clock, 2'000);
+    while (n < sizeof got && U4Tx::read_byte(b)) {
+        got[n++] = b;
+    }
+    bool in_order = n == sizeof sent;
+    for (uint8_t i = 0; in_order && i < n; ++i) {
+        in_order = got[i] == sent[i];
+    }
+    print(serial, "  ", runs * (per_run + 1), " slots, ", runs, " breaks: delivered ", n,
+          ", frame errors ", U4Tx::frame_errors(), ", parity ", U4Tx::parity_errors(),
+          ", ring ", U4Tx::rx_overruns(), ", hw ", U4Tx::hw_overruns(), crlf);
+    verdict("N - K bytes delivered, intact and in order", in_order);
+    verdict("the frame-error counter reads K", U4Tx::frame_errors() == runs);
+    verdict("no other counter moved",
+            U4Tx::parity_errors() == 0 && U4Tx::rx_overruns() == 0 && U4Tx::hw_overruns() == 0);
+
+    // BUFOVF: the receive interrupt off, six frames sent polled.
+    U4Tx::clear_errors();
+    U4::enable_rxc_interrupt(false);
+    for (uint8_t i = 0; i < 6; ++i) {
+        (void)U4::send(static_cast<uint16_t>(0xA0 + i));
+    }
+    delay_us(clock, 1'000);                 // six frames at 115200 are 521 us
+    U4::enable_rxc_interrupt(true);         // one entry takes what the buffer holds
+    delay_us(clock, 100);
+    n = 0;
+    while (n < sizeof got && U4Tx::read_byte(b)) {
+        got[n++] = b;
+    }
+    print(serial, "  six frames into a full buffer: delivered ", n, ":");
+    for (uint8_t i = 0; i < n; ++i) {
+        print(serial, " ", hex(got[i]));
+    }
+    print(serial, ", hw ", U4Tx::hw_overruns(), crlf);
+    verdict("the two oldest and the newest delivered",
+            n == 3 && got[0] == 0xA0 && got[1] == 0xA1 && got[2] == 0xA5);
+    verdict("one hardware overrun counted", U4Tx::hw_overruns() == 1);
+    verdict("RXCIF clear: the entry took the buffer whole", !U4::rxc_flag());
+    U4::enable_rxc_interrupt(false);
+    quiesce();
+}
+
+// ---- T: tx_idle() is the wire's, measured on the pad ---------------------------
+// TCB0 free-running at CLK_PER in capture mode, its capture fed by the TXD
+// pad's rising edges (channel 4, EvPin PE0): a burst whose last byte is 0x00
+// has one rising edge in its last frame, the start of the stop bit, so the
+// stop bit ends one bit time (S x BAUD / 64 CLK_PER) after the capture. The
+// thread spins on tx_idle() and reads TCB0 the moment it turns true: never
+// before the stop bit's end, and within one bit time after it at 115200
+// and 460800. At 1 Mbaud a bit is 24 CLK_PER, the poll's own turn about
+// twenty: printed, judged only for "never before". The receiver is off,
+// so no RXC entry lands in the poll.
+
+void tT_tx_idle() {
+    print(serial, "T tx_idle() against the last stop bit on the pad (TCB0 capture of PE0)", crlf);
+    quiesce();
+    static const uint8_t burst[16] = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55,
+                                      0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x00};
+    constexpr uint32_t rates[] = {115'200u, 460'800u, 1'000'000u};
+    for (const uint32_t baud : rates) {
+        U4Tx::init(clock, baud);
+        U4::enable_rx(false);
+        verdict("tx_idle() true before the first run", U4Tx::tx_idle());
+        T0::init({.mode = TcbMode::capture, .clock = TcbClock::div1, .event_input = true});
+        ChTx::source(EvPin<TxPin>{});
+        T0::capture_on(ChTx{});
+        const uint32_t queued = U4Tx::write_bulk({burst, sizeof burst});
+        const bool busy = !U4Tx::tx_idle();
+        while (!U4Tx::tx_idle()) {
+        }
+        const uint16_t at = T0::count();
+        delay_us(clock, 200);
+        const uint16_t cap = T0::capture();
+        const int32_t bit = static_cast<int32_t>(
+            (static_cast<uint32_t>(U4::baud_reg()) * U4::samples() + 32u) / 64u);
+        const int32_t after = static_cast<int32_t>(static_cast<int16_t>(at - cap)) - bit;
+        print(serial, "  ", baud, ": bit ", bit, " CLK_PER, tx_idle() turned true ", after,
+              " CLK_PER after the last stop bit", crlf);
+        verdict("the run queued whole and tx_idle() false behind it", queued == sizeof burst && busy);
+        verdict("tx_idle() never before the last stop bit's end", after >= 0);
+        if (baud <= 460'800u) {
+            verdict("and within one bit time after it", after <= bit);
+        }
+        U4Tx::release();
+        T0::disable();
+        ChTx::off();
+    }
     quiesce();
 }
 
@@ -2487,13 +2634,13 @@ struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'a', ta_instances}, {'b', tb_frames}, {'c', tc_overflow}, {'d', td_mpcm},
     {'e', te_txc_dre}, {'f', tf_baud_on_the_wire}, {'g', tg_rebase},
-    {'h', th_autobaud}, {'i', ti_mspi},
+    {'h', th_autobaud}, {'i', ti_mspi}, {'I', tI_injected}, {'T', tT_tx_idle},
     {'j', tj_link}, {'k', tk_baud}, {'l', tl_frames_cross}, {'m', tm_errors},
     {'n', tn_waveforms}, {'o', to_autobaud_foreign}, {'p', tp_mpcm_cross},
     {'q', tq_sync}, {'r', tr_rs485}, {'s', ts_irda}, {'t', tt_rebase_traffic},
     {'u', tu_lbme_pad}, {'v', tv_wiring}, {'w', tw_onewire}, {'x', tx_clocks},
 };
-constexpr char single_board[] = "abcdefghi";
+constexpr char single_board[] = "abcdefghiIT";
 constexpr char two_board[] = "jklmnopqrstu";
 
 void run(TestFn fn) {
@@ -2505,7 +2652,7 @@ void run(TestFn fn) {
 void help() {
     print(serial, "test_avr_serial, one board: a instances | b frames | c overflow | "
                   "d mpcm | e txc/dre | f baud on the wire | g rebase | h auto-baud | "
-                  "i host spi", crlf);
+                  "i host spi | I injected errors | T tx_idle on the pad", crlf);
     print(serial, "  two boards (needs usart_peer on the peer board): j link | k baud matrix | "
                   "l frame matrix | m errors | n waveforms | o auto-baud foreign | "
                   "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad",

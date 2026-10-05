@@ -84,6 +84,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <optional>
 #include <span>
 #include <avr/io.h>
@@ -926,8 +927,10 @@ private:
  * full, nothing counted - the caller decides whether to retry, drop or
  * block; print.hpp blocks), and write_bulk() is the same for a RUN: as
  * many as fit, the first byte pushed and DREIE set before the rest is
- * copied, and DREIE set again behind the rest. RX overflow (ring full,
- * byte lost) IS counted, as are the hardware error flags.
+ * copied, the rest published in parts of at most copy_part bytes with
+ * DREIE set behind each. tx_idle() is the WIRE's: nothing queued and the
+ * last stop bit out (TXCIF, which this task owns). RX overflow (ring
+ * full, byte lost) IS counted, as are the hardware error flags.
  */
 // Ring defaults sized for console-class traffic AND for lock-free rings:
 // both <= 256 keeps Ring's index_t at 8 bits, which on AVR (atomic_width
@@ -956,6 +959,11 @@ class Uart {
     static inline volatile uint8_t m_parity_errors = 0; // PERR: byte dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // BUFOVF: bytes lost in HW
     static inline uint32_t m_baud = 0;                   // for rebase()
+    // TXCIF speaks for this transport: set by dre() when it hands TXDATA
+    // a run's last byte and clears the flag behind it, false from init()
+    // until then - the flag's reset value is 0, so before the first run
+    // it would call an idle transmitter busy (tx_idle()).
+    static inline volatile bool m_txc_owned = false;
 
 public:
     /// Instances are empty tags for concept-based call sites (print(serial,...)).
@@ -997,6 +1005,7 @@ public:
         // context a second consumer of a ring whose consumer is dre().
         m_rx.clear();
         m_tx.clear();
+        m_txc_owned = false;
         clear_errors();
         U::baud_reg(usart_baud_reg(clock_hz(clock), baud));
         U::enable_rxc_interrupt(true);
@@ -1018,20 +1027,12 @@ public:
     static void rebase(uint32_t hz) {
         // Called BEFORE the clock actually changes (DynamicClock::set
         // fans out first, then switches), so the drain below runs at the
-        // rate the bytes were queued for.
-        while (!m_tx.empty()) {          // the DRE ISR keeps draining
+        // rate the bytes were queued for. tx_idle() is the wire's: the
+        // ring drained by the DRE ISR and the last stop bit out (TXCIF,
+        // owned by this transport since its first run) - a BAUD written
+        // a cycle later corrupts nothing in flight (27.5.10).
+        while (!tx_idle()) {
         }
-        while (!U::dre_flag()) {         // last byte in the shifter
-        }
-        // TWO frame times (10 bits each) at the CURRENT rate, recovered
-        // from the BAUD register, let the shifter finish: DREIF says the
-        // buffer is empty, the byte in the shifter may have just started
-        // (one frame) and the measure of "now" is loose (the second).
-        // Bench: one frame plus 1 us corrupted the last byte at several
-        // rates. TXCIF is not used: it is stale-set by any earlier idle
-        // period and cannot tell "done" from "still shifting".
-        const uint32_t old_hz = static_cast<uint32_t>(U::baud_reg()) * m_baud / 4u;
-        delay_us_runtime(cycles_per_us(old_hz), 2u * (10'000'000u / m_baud) + 2u);
         U::baud_reg(usart_baud_reg(hz, m_baud));
     }
 
@@ -1045,12 +1046,8 @@ public:
      */
     static bool set_baud(uint32_t hz, uint32_t baud) {
         if (!can_baud(hz, baud)) return false;
-        while (!m_tx.empty()) {
+        while (!tx_idle()) {
         }
-        while (!U::dre_flag()) {
-        }
-        const uint32_t old_hz = static_cast<uint32_t>(U::baud_reg()) * m_baud / 4u;
-        delay_us_runtime(cycles_per_us(old_hz), 2u * (10'000'000u / m_baud) + 2u);
         U::baud_reg(usart_baud_reg(hz, baud));
         m_baud = baud;
         return true;
@@ -1087,34 +1084,85 @@ public:
     /**
      * RX Complete interrupt body - call from ISR(USARTn_RXC_vect).
      *
-     * RXDATAH (status for the byte at the FIFO head) is read BEFORE
-     * RXDATAL (which advances the FIFO). Corrupted bytes (frame/parity) are
-     * counted and dropped; BUFOVF means the hardware already lost bytes.
+     * ONE ENTRY TAKES EVERY FRAME THE BUFFER HOLDS. The receive buffer is
+     * two frames deep with the shift register behind it (27.3.2.4) and
+     * RXCIF is a level - set while unread data remain (27.5.5) - so an
+     * entry that finds a second frame waiting takes it instead of
+     * returning to be entered again: the vector's entry and exit, about
+     * forty cycles, are paid once for both. Each frame is read in the
+     * order 27.3.2.4.1 fixes: RXDATAH, whose FERR, PERR and BUFOVF are
+     * THIS frame's, then RXDATAL, which shifts the buffer; RXDATAH read
+     * again holds the next frame's status and RXCIF (27.5.2), which ends
+     * the loop. The loop ends: one turn is under the shortest frame the
+     * generator makes (CLK_PER / 8 a bit in double speed, seven bits for
+     * 5N1: 56 cycles), so it drains faster than frames arrive.
      *
-     * Returns true when the RX ring transitioned empty -> non-empty: the
-     * edge signal for kernel glue ("post RxActivity to the serial AO on
-     * true"). Every empty->non-empty transition reports true and the
-     * consumer only empties the ring by draining it, so no wakeup is ever
-     * lost. Plain (non-kernel) apps may ignore the return value.
+     * NOTHING IS CLEARED BESIDE THE FRAME: the error flags travel with
+     * their frame and go with its read, and this transport arms neither
+     * the start-of-frame nor the auto-baud flags that share the vector.
+     * A frame with FERR or PERR is counted and dropped; BUFOVF marks the
+     * frame that arrived while the buffer was full - the frames lost are
+     * before it, and it is delivered.
+     *
+     * Returns true when the RX ring went empty -> non-empty in this entry:
+     * the edge the kernel glue posts RxActivity on. Every such transition
+     * reports true and the consumer only empties the ring by draining it,
+     * so no wakeup is ever lost. This silicon has no idle flag and no
+     * receiver time-out (usart.md's inventory): the edge is the burst's
+     * FIRST byte, and a line's end is the console's terminator.
      */
     // always_inline: single call site (the ISR binding) - see ticker.hpp
-    // pit() for the register-set rationale.
+    // pit() for the register-set rationale. The registers are read here
+    // and not through the resource's receive_as(): its UsartFrame, once
+    // the image has a second receive_as() call site for the instance, is
+    // built by an out-of-line frame_of() into a stack frame - a call in
+    // the vector and the whole call-clobbered set saved (counted in the
+    // release listings: 16 pushes, a frame and a call, where the flags
+    // tested in the status byte take none).
     [[gnu::always_inline]] static bool rxc() {
-        const UsartFrame f = U::template receive_as<UsartBits::eight>();
-        if (f.overflow) {
-            m_hw_overruns = m_hw_overruns + 1;
-        }
-        if (f.frame_error || f.parity_error) {
-            if (f.frame_error) m_frame_errors = m_frame_errors + 1;
-            if (f.parity_error) m_parity_errors = m_parity_errors + 1;
-            return false;  // drop the corrupted byte
+        auto& u = U::regs();
+        uint8_t status = u.RXDATAH;
+        // An entry with nothing to read is one the vector's two other
+        // sources made (RXSIE, ABEIE), which the resource arms and this
+        // transport does not: nothing to take.
+        if ((status & USART_RXCIF_bm) == 0) {
+            return false;
         }
         const bool was_empty = m_rx.empty();
-        if (!m_rx.push(static_cast<uint8_t>(f.data))) {
-            m_rx_overruns = m_rx_overruns + 1;
-            return false;  // full ring cannot be empty: no edge
-        }
-        return was_empty;
+        bool pushed = false;
+        do {
+            const uint8_t data = u.RXDATAL;   // shifts the buffer
+            // One test of the three flags on the clean path; the rare
+            // path counts each and drops a frame with FERR or PERR. The
+            // push is spelled on both paths, so the clean one carries no
+            // flag of its own.
+            if ((status & (USART_BUFOVF_bm | USART_FERR_bm | USART_PERR_bm)) == 0) {
+                if (m_rx.push(data)) {
+                    pushed = true;
+                } else {
+                    m_rx_overruns = m_rx_overruns + 1;
+                }
+            } else {
+                if ((status & USART_BUFOVF_bm) != 0) {
+                    m_hw_overruns = m_hw_overruns + 1;
+                }
+                if ((status & USART_FERR_bm) != 0) {
+                    m_frame_errors = m_frame_errors + 1;
+                }
+                if ((status & USART_PERR_bm) != 0) {
+                    m_parity_errors = m_parity_errors + 1;
+                }
+                if ((status & (USART_FERR_bm | USART_PERR_bm)) == 0) {
+                    if (m_rx.push(data)) {
+                        pushed = true;
+                    } else {
+                        m_rx_overruns = m_rx_overruns + 1;
+                    }
+                }
+            }
+            status = u.RXDATAH;
+        } while ((status & USART_RXCIF_bm) != 0);
+        return was_empty && pushed;
     }
 
     /**
@@ -1122,7 +1170,15 @@ public:
      * ISR(USARTn_DRE_vect).
      *
      * Feeds the next byte from the TX ring; disables itself when the ring
-     * drains (write_byte() re-enables it).
+     * drains (write_byte() re-enables it). The run's LAST byte also
+     * clears TXCIF, written after the byte is in TXDATA: the flag rises
+     * only "when the entire frame in the transmit shift register has been
+     * shifted out" with nothing behind it (27.3.2.3), a write to TXDATA
+     * does not clear it, and one left set by an earlier idle moment
+     * would make tx_idle() answer while this run is still on the wire.
+     * Clearing it BEFORE the write would race the previous frame's end
+     * (its TXCIF rising between the clear and the write); after it the
+     * frame just written is at least 56 CLK_PER from its stop bit.
      */
     // always_inline: single call site (the ISR binding) - see ticker.hpp
     // pit() for the register-set rationale. flatten: the calls inside are
@@ -1132,13 +1188,13 @@ public:
     // same shape elsewhere), and one call left in a vector saves the whole
     // call-clobbered set (counted in the release listings: 16 pushes and a
     // call to empty() where gcc kept it out of line, 6 and none flattened).
-    // Not on rxc(): there it leaves the received UsartFrame in a stack
-    // frame (12 pushes and a frame, against 8 and none).
     [[gnu::always_inline, gnu::flatten]] static void dre() {
         if (const auto c = m_tx.pop()) {
             U::template transmit_as<UsartBits::eight>(*c);
             if (m_tx.empty()) {
                 U::regs().CTRLA &= static_cast<uint8_t>(~USART_DREIE_bm);
+                U::regs().STATUS = USART_TXCIF_bm;   // a plain store: the W1C bits beside it read 0
+                m_txc_owned = true;
             }
         } else {
             U::regs().CTRLA &= static_cast<uint8_t>(~USART_DREIE_bm);
@@ -1146,6 +1202,9 @@ public:
     }
 
     // ---- byte transport (satisfies ByteSink / ByteSource) ----------------
+
+    /// The largest part write_bulk() copies before publishing it.
+    static constexpr size_t copy_part = 32u;
 
     /// Try to queue one byte for transmission; false when the TX ring is full.
     static bool write_byte(uint8_t b) {
@@ -1178,13 +1237,22 @@ public:
     ///
     /// THE FIRST BYTE GOES BEFORE THE COPY: it is pushed and DREIE set
     /// exactly as write_byte() does, so an idle transmitter starts on it
-    /// while the rest is copied. dre() clears DREIE when it pops the
-    /// ring's last byte, and that first byte was the ring, so the rest,
-    /// once published, sets it again - one more CTRLA read-modify-write,
-    /// idempotent, two a run at most.
+    /// while the rest is copied. THE REST GOES IN PARTS of at most
+    /// `copy_part` bytes, each published as soon as it is copied and
+    /// DREIE set behind it - dre() clears DREIE when it pops the ring's
+    /// last byte, so a part published after the ring ran dry needs it
+    /// again (a CTRLA read-modify-write, idempotent). One copy of a long
+    /// run would hold everything behind the first byte until its end:
+    /// 255 bytes are 1800 cycles of copy, 22 frames of a silent wire at
+    /// the 3 Mbaud top rate and seven at 1 Mbaud, where the transmitter
+    /// holds three frames (TXDATA, its buffer and the shift register,
+    /// 27.3.2.3). A part of 32 is copied in about 260 cycles, under the
+    /// wire time of the part before it at every rate the generator
+    /// makes; the first part leaves at most three frames of gap at the
+    /// top rate, once a run.
     static uint32_t write_bulk(std::span<const uint8_t> src) {
-        // write_byte()'s two steps, spelled here so the run's path holds no
-        // call: a full ring is its refusal, nothing to set.
+        // write_byte()'s two steps, spelled here: a full ring is its
+        // refusal, nothing to set.
         if (src.empty() || !m_tx.push(src[0])) {
             return 0;
         }
@@ -1196,22 +1264,31 @@ public:
                 break;
             }
             const size_t want = src.size() - queued;
-            const size_t take = want < room.size() ? want : room.size();
-            // Two pointers and no index, and the test at the bottom: a
-            // load, a store, two steps and one branch a byte, where an index
-            // re-adds both bases every byte. `take` is at least one here -
-            // the room is not empty and the run is not done.
-            const uint8_t* from = src.data() + queued;
-            uint8_t* to = room.data();
-            uint8_t* const end = to + take;
-            do {
-                *to++ = *from++;
-            } while (to != end);
+            size_t take = want < room.size() ? want : room.size();
+            if (take > copy_part) {
+                take = copy_part;
+            }
+            // THE COPY: avr-libc's memcpy from two bytes up, a store for
+            // one. memcpy is the byte loop at its floor - LD Z+, ST X+, a
+            // 16-bit count and BRCC, 7 cycles a byte (DS40002198B, the
+            // AVRxt column) - for a fixed 17: the argument moves, CALL,
+            // the two MOVWs and the RJMP into the loop, the count's last
+            // test and RET. A loop in C here is at best the same seven
+            // cycles, and inside this function, short of pointer
+            // registers at -Os, gcc makes it eleven instructions and
+            // thirteen cycles a byte (Z reloaded from a pair for each
+            // access, no post-increment): memcpy wins from two bytes.
+            // `take` is at least one here - the room is not empty and the
+            // run is not done.
+            const uint8_t* const from = src.data() + queued;
+            if (take >= 2u) {
+                memcpy(room.data(), from, take);
+            } else {
+                room[0] = *from;
+            }
             m_tx.publish(static_cast<typename decltype(m_tx)::index_t>(take));
+            U::regs().CTRLA |= USART_DREIE_bm;   // behind a ring dre() may have emptied
             queued += take;
-        }
-        if (queued > 1u) {
-            U::regs().CTRLA |= USART_DREIE_bm;   // the rest, behind a first byte dre() disarmed on
         }
         return static_cast<uint32_t>(queued);
     }
@@ -1232,7 +1309,22 @@ public:
     // ---- introspection ---------------------------------------------------
 
     static auto rx_pending() { return m_rx.count(); }
-    static bool tx_idle() { return m_tx.empty(); }
+    /// The WIRE is idle: nothing queued, and the last byte's stop bit
+    /// is off the pad - TXCIF, which dre() cleared behind the run's last
+    /// byte (27.3.2.3), so it answers for this run and never for an
+    /// earlier one. Before the first run since init() nothing has been
+    /// sent and the flag (reset 0) is not consulted. TXCIF is this
+    /// transport's: a caller that clears it through the resource makes
+    /// tx_idle() false until the next run ends.
+    static bool tx_idle() {
+        if (!m_tx.empty()) {
+            return false;
+        }
+        if (!m_txc_owned) {
+            return true;
+        }
+        return U::txc_flag();
+    }
 
     static uint8_t rx_overruns() { return m_rx_overruns; }
     static uint8_t frame_errors() { return m_frame_errors; }
