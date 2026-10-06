@@ -81,12 +81,22 @@
  * NACK and with STOP set beside the standing START, it was misreported as
  * i2c_nack_addr and left the controller master with both bits up
  * (measured; the CH32V00x's twin wedged its next tenure at 400 kHz). So
- * the phase between that request and SB is its own (`restart`): a NACK
- * there is i2c_nack_data, and the START is withdrawn as the STOP is
- * requested, in one CTLR1 store - START is a bit "the user code" may
- * clear (19.12.1). Measured: one to four bytes, 100 and 400 kHz, the
- * last refused - i2c_nack_data, STOP alone standing, the next tenure
- * running.
+ * the phase between that request and SB is its own (`restart`), and a
+ * NACK there is i2c_nack_data. THE REPEATED START IS NOT WITHDRAWN: the
+ * controller generates it after the refused byte all the same, and a
+ * CTLR1 store at the NACK that clears START and sets STOP - START is a
+ * bit "the user code" may clear (19.12.1) - races that generation. The
+ * race is won with the core at 48 MHz and above and LOST at 8 MHz: at
+ * 100 kHz every refusal left STOP standing over a controller still
+ * master of the bus (CTLR1 0x201, STAR2 MSL|BUSY|TRA) and the next tenure
+ * parked (measured on the CH32V203C8T6's self-link, docs/ch32vx03/i2c.md).
+ * So the refusal touches nothing at the NACK: the Sr is let out, and its
+ * SB closes the tenure with the one sequence EVT5 allows (19.3) - the
+ * address with the WRITE bit, and STOP requested behind it, "after the
+ * current byte transfer" (19.12.1) - a void write, Sr A P on the wire,
+ * its ADDR cleared or its own NACK taken before the tenure reports
+ * i2c_nack_data. 19.5.2's STOP after a NACK is that STOP, behind the Sr
+ * the controller sent of its own accord.
  *
  * THE BUS CLOCK IS PB1 AND THE CHAPTER PUTS A CEILING ON IT. CTLR2's
  * FREQ states that clock in whole megahertz and 19.12.2 confines the
@@ -1024,8 +1034,13 @@ public:
 
             case Phase::start_rx:
             case Phase::restart:
+            case Phase::refused:
                 if ((s1 & i2c_sb) == 0u) {
                     return false;
+                }
+                if (t_.phase == Phase::refused ||
+                    (t_.phase == Phase::restart && (s1 & i2c_af) != 0u)) {
+                    return close_refused();
                 }
                 prime_receive();
                 S::data(static_cast<uint8_t>((t_.addr << 1) | 1u));
@@ -1072,6 +1087,16 @@ public:
 
             case Phase::rx_dma:
                 return false;   // dma_isr() ends it
+
+            case Phase::closing:
+                // The void write's address acknowledged: ADDR cleared (STAR1
+                // read above, then STAR2), and the STOP requested behind it
+                // goes out.
+                if ((s1 & i2c_addr) == 0u) {
+                    return false;
+                }
+                (void)S::status2();
+                return finish(i2c_nack_data);
         }
         return false;
     }
@@ -1093,17 +1118,18 @@ public:
         uint8_t st = i2c_bus_error;
         if ((errs & i2c_af) != 0u && t_.phase == Phase::restart) {
             // The LAST WRITTEN byte refused, its repeated START already
-            // requested (request_restart()): the NACK is the byte's, and the
-            // START still standing is WITHDRAWN as the STOP is requested -
-            // one CTLR1 store, START being a bit "the user code" may clear
-            // (19.12.1). Left standing beside the STOP it kept the
-            // controller master with both bits up (measured on the
-            // CH32V203C8T6's self-link; the CH32V00x's twin wedged the next
-            // tenure at 400 kHz).
-            st = i2c_nack_data;
-            I2cRegs& reg = S::regs();
-            reg.CTLR1 = static_cast<uint16_t>((reg.CTLR1 & ~i2c_start) | i2c_stop);
-        } else if ((errs & i2c_af) != 0u) {
+            // requested (request_restart()): the NACK is the byte's, and
+            // the Sr the controller generates anyway is waited for - its SB
+            // closes the tenure (close_refused(), the file header). Nothing
+            // is written here, so nothing races the controller.
+            t_.phase = Phase::refused;
+            return false;
+        }
+        if ((errs & i2c_af) != 0u && t_.phase == Phase::closing) {
+            // The void write's address refused too: its STOP is requested.
+            return finish(i2c_nack_data);
+        }
+        if ((errs & i2c_af) != 0u) {
             const bool on_address = t_.phase == Phase::addr_tx || t_.phase == Phase::addr_rx ||
                                     t_.phase == Phase::start_tx || t_.phase == Phase::start_rx;
             st = on_address ? i2c_nack_addr : i2c_nack_data;
@@ -1247,8 +1273,12 @@ public:
 private:
     /// `restart`: the repeated START requested behind the last written
     /// byte, SB not yet seen - the phase in which a NACK is that byte's.
+    /// `refused`: that NACK taken, the Sr still coming; `closing`: the void
+    /// write that ends a refused tenure, its address out and its STOP
+    /// requested (close_refused()).
     enum class Phase : uint8_t {
-        idle, start_tx, start_rx, restart, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
+        idle, start_tx, start_rx, restart, refused, closing, addr_tx, addr_rx, tx, tx_dma, rx,
+        rx_dma,
     };
 
     static_assert([] {
@@ -1312,6 +1342,19 @@ private:
         S::control2(t_.freq, idle_enables | i2c_itevten);
         t_.phase = Phase::restart;
         S::start();
+    }
+
+    /// EVT5 of the Sr behind a refused last byte: the address with the
+    /// WRITE bit, which clears SB, and STOP requested behind it - "after the
+    /// current byte transfer" (19.12.1) - so the wire carries a void write
+    /// and the controller is left as a plain write leaves it. AF is cleared
+    /// here too, for the case in which this vector saw it first.
+    [[gnu::always_inline]] static bool close_refused() {
+        S::clear_errors(i2c_af);
+        S::data(static_cast<uint8_t>(t_.addr << 1));
+        S::stop();
+        t_.phase = Phase::closing;
+        return false;
     }
 
     /**

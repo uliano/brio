@@ -113,10 +113,8 @@ runs a point:
   START requested on the TxE.
 - **A target that REFUSES the last written byte**: at BTF the host
   answered `i2c_nack_data`, STOP alone left standing, and the next tenure
-  ran. On the TxE, the NACK arrived with the START still pending, and the
-  engine as it was answered `i2c_nack_addr` and set STOP beside the
-  standing START (CTLR1 0x301: master, both bits up) - the next tenure
-  ran here, where the CH32V006's twin of this block wedged it at 400 kHz.
+  ran. On the TxE, the NACK arrives with the START still pending - the
+  price of the order, which the next paragraphs answer.
 
 THE CHAPTER'S OWN ORDER IS BTF: 19.3 ends a write at EVT8_2 ("TxE=1,
 BTF=1, request to set the stop bit", figure 19-4), and 19.12.1's START
@@ -124,14 +122,37 @@ bit, unlike its STOP bit, says nothing of a condition held to the end of
 the byte under way. The engine keeps the TxE order all the same, because
 the BTF order loses a byte to a polled CH32 target, measured twice, and
 answers the refusal instead: the phase between the request and SB is its
-own, a NACK in it is `i2c_nack_data`, and the START is withdrawn as the
-STOP is requested, in one CTLR1 store - START is a bit "the user code"
-may clear (19.12.1). Measured right after: one to four bytes, both
-speeds, the last refused - `i2c_nack_data`, CTLR1 0x201 (STOP alone),
-the next tenure running; acknowledged - every byte taken. BTF never rises
-behind a pending START on this silicon (polled from the request to SB,
-and no entry of the event vector there in a timeline), so unlike the
-STM32F4's block nothing is stored into DATAR to hold it down.
+own, and a NACK in it is `i2c_nack_data`. BTF never rises behind a
+pending START on this silicon (polled from the request to SB, and no
+entry of the event vector there in a timeline), so unlike the STM32F4's
+block nothing is stored into DATAR to hold it down.
+
+THE REQUESTED START IS NOT WITHDRAWN. The controller generates the
+repeated START after the refused byte all the same, and a CTLR1 store at
+the NACK that clears START and sets STOP - START is a bit "the user
+code" may clear (19.12.1) - RACES that generation. Measured with the
+suite's letter `o` on the self-link (I2C2 the target, served from its own
+vector, refusing the last of one to four written bytes, four times a
+count, through the pump and the engines, at 100 and 400 kHz), with that
+one-store withdrawal: every refusal clean with the core at 96 and at 48
+MHz; with the core at 8 MHz (the HSI alone, PB1 8 MHz) at 100 kHz, all
+32 refusals answered `i2c_nack_data` and left STOP standing over a
+controller still master of the bus (CTLR1 0x201, STAR2 0x7 - MSL, BUSY,
+TRA) and the next tenure parked, the CH32V006's wedge at a slower core.
+So the engine writes nothing at the NACK: it waits for the Sr's SB and
+closes the tenure with the one sequence EVT5 allows (19.3) - the address
+with the WRITE bit, and STOP requested behind it, "after the current byte
+transfer" (19.12.1) - a void write, Sr A P on the wire, its ADDR cleared
+or its own NACK taken before the reply. Measured the same way: 192
+refusals of 192 answered `i2c_nack_data` with the controller let go
+(START and STOP down, MSL clear, 2 ms on) and the next tenure `i2c_ok`,
+at all three cores, three runs of the letter; at 8 MHz and 400 kHz the
+TARGET - served by the same core - is late with its own NACK in half the
+engined refusals, which then take the byte whole and end `i2c_ok`, an
+instrument's limit the letter counts apart. The price is the refusal's:
+one address byte on the wire; an acknowledged tenure pays for it only
+the SB entry's test, about ten cycles on a read half at 120 MHz (letter
+`i`).
 
 ### BUSY is the wire, and it can be left standing
 
@@ -209,6 +230,11 @@ at 120 MHz (PB1 60 MHz) over the self-link:
   the pump's 256 entries take 86 thousand and let it sleep between them -
   the pump is this family's bulk path for I2C wherever the core has
   nothing else to run.
+- **START cleared by the user code - a requested start withdrawn**
+  (19.12.1): declined. Behind a refused last byte the controller
+  generates the repeated START all the same, and the withdrawal races it
+  - lost with the core at 8 MHz (above); the refusal is closed from the
+  Sr's SB with a void write instead.
 - **The START itself is slow on this silicon**: SB comes 1247 cycles
   after START at 100 kHz and 431 at 400 (10.4 and 3.6 us, polled), the
   largest single term of a short tenure's fixed cost after the target's
@@ -482,9 +508,9 @@ measured on the pad that carries it, with no scope and no wire.
 
 The bench board carries the two wires the CH32V303 evaluation board
 has - PB10 to PB6, PB11 to PB7 - and a 4.7 kOhm pull-up on each line, so
-`test_vx03_i2c`'s letters l, m and n run here as there (28 verdicts in
-`z`, the peer letters c to k declining by name: no peer board is on the
-bus): the probe, an absent address, an eight-byte write, reads of one to
+`test_vx03_i2c`'s letters l to o run here as there (31 verdicts in `z`,
+the peer letters c to k declining by name: no peer board is on the bus;
+letter o is the refusal above): the probe, an absent address, an eight-byte write, reads of one to
 four and eight bytes, a write-then-read, the second address and the
 general call, the DMA host on channels 6 and 7, I2C2 as the host, and
 the target stuck mid-byte with `unstick()` reporting 4 pulses - every one
@@ -658,11 +684,11 @@ Implemented, not bench-verified (each with what would measure it):
   of this family or another - is what would measure it against a target
   the core does not serve.
 - **The reworked engine on the CH32V303VCT6** (EVT8_1's two bytes, the
-  event vector the tenure's, the refusal behind a pending START): its
-  evaluation board was off the desk. The suite's letters l to n there,
-  and letter `i` of `bench_vx03`, would measure it - the V4F's handlers
-  call nothing on the hot path now, which its FPU tax makes worth a
-  number.
+  event vector the tenure's, the refusal behind a pending START closed
+  by a void write): its evaluation board was off the desk. The suite's
+  letters l to o there, and letter `i` of `bench_vx03`, would measure it
+  - the V4F's handlers call nothing on the hot path now, which its FPU
+  tax makes worth a number.
 - **The CH32V303VCT6 as the far end of a CH32V203C8T6.** The
   CH32V303VCT6 host against a CH32V203C8T6 target is measured (above);
   the other way round - the suite on the CH32V203C8T6, the peer on the

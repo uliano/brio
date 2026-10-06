@@ -2,7 +2,7 @@
 // CH32V203 and the CH32V303: ch32vx03/i2c.hpp over RM ch. 19, the host
 // engine under its two vectors, the client half addressed by a real
 // controller, the DMA engines, and util/i2c_bus.hpp's arbiter with not
-// one line changed. Letters a..k are both series'; letters l..n are a
+// one line changed. Letters a..k are both series'; letters l..o are a
 // board's that wires the chip's two controllers onto one bus, registered
 // on every part with I2C2 and compiled out of every other image.
 //
@@ -57,7 +57,7 @@
 //    evaluation board wires I2C2's pads to I2C1's - PB10 to PB6, PB11 to
 //    PB7 - with a 4.7 kOhm pull-up on each line, and a CH32V203C8 board
 //    can carry the same two wires and resistors: one chip's two
-//    controllers share a bus, and letters l..n make one the host and the
+//    controllers share a bus, and letters l..o make one the host and the
 //    other the target,
 //    the target POLLED from the loop that waits for the host (its clock
 //    stretching holds the bus while the loop comes round). The wires are
@@ -66,7 +66,7 @@
 //    failing.
 //
 // THE PADS. PB6 and PB7 - and on a part with I2C2 PB10 and PB11, I2C2's,
-// driven only after letters l..n have found the two wires to PB6/PB7 -
+// driven only after letters l..o have found the two wires to PB6/PB7 -
 // and nothing else. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
 // (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1
 // (the crystals), PB12..PB15 (the SPI link), PA0..PA8
@@ -109,6 +109,14 @@
 //   n  A TARGET STUCK MID-BYTE: the chip's own target left holding SDA
 //      low by a host taken off the bus through its reset line, and
 //      unstick()'s clocks counted on the pad by the timer
+//   o  THE REFUSED LAST BYTE: I2C2 the target SERVED FROM ITS OWN VECTOR,
+//      refusing the last written byte of a write-then-read (one to four
+//      written, two read) - the NACK arriving with the repeated START
+//      already requested - through the pump and the engines, at 100 and
+//      400 kHz, the core at 96, 48 and 8 MHz (the console and the tick
+//      re-made at each, and back at 96): the status, the controller a
+//      millisecond on (START, STOP, MSL), the next tenure on the same
+//      host; each count also acknowledged whole, the control
 // and by name only, not in z, against the peer:
 //   r  THE LATE REPEATED START: a write of one to four bytes and a
 //      one-byte read with the repeated START requested AFTER BTF, the
@@ -550,7 +558,7 @@ bool ensure_link() {
     return false;
 }
 
-/// Whether this part has the I2C2 a board can wire to I2C1 (letters l..n
+/// Whether this part has the I2C2 a board can wire to I2C1 (letters l..o
 /// below), and the question a peer letter asks when no peer answered on
 /// a pulled-up bus. The wiring is the BOARD's, looked for at run time.
 constexpr bool self_link_part = device::i2c_count >= 2u;
@@ -573,7 +581,7 @@ bool need_peer() {
     // I2C2, has no peer on it by construction: the letter declines.
     if (self_link_present()) {
         print(serial, "  SKIPPED, no verdict claimed: the pull-ups are this board's own, on the "
-                      "wires to its own I2C2 (letters l..n) - no peer board is on this bus.",
+                      "wires to its own I2C2 (letters l..o) - no peer board is on this bus.",
               crlf);
         return false;
     }
@@ -2113,7 +2121,7 @@ void tr_late_start() {
 }
 
 // ===========================================================================
-// The self-link: the chip's two controllers on one bus (l..n)
+// The self-link: the chip's two controllers on one bus (l..o)
 // ===========================================================================
 //
 // On a board that wires I2C2's pads to I2C1's - PB10 to PB6 (SCL) and
@@ -2682,6 +2690,228 @@ void tn_unstick() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// o - the refused last byte, at three core clocks
+// ---------------------------------------------------------------------------
+
+/// THE SLOWER CORES letter o also runs at: the PLL at 48 MHz (PB1 48, the
+/// suite's own FREQ) and the HSI alone at 8 MHz (PB1 8; CTLR2.FREQ's
+/// floor is 4 MHz, 19.12.2). The slower the core, the later the error
+/// vector's answer to a NACK lands against what the controller does on
+/// its own after it - which is the race this letter looks for.
+using Core48 = Clock<ClockSource::pll, 48'000'000>;
+using Core8 = Clock<ClockSource::internal, 8'000'000>;
+
+/// What a run of refusals came to, over one core, one host, one speed.
+struct RefusalTally {
+    uint8_t refused;     ///< refusals tried
+    uint8_t nack_data;   ///< answered i2c_nack_data
+    uint8_t let_go;      ///< START and STOP down and MSL clear a millisecond on
+    uint8_t next_ok;     ///< the probe that followed on the same host: i2c_ok
+    uint8_t missed;      ///< i2c_ok: the TARGET was late with its NACK, the byte taken
+    uint8_t acked_ok;    ///< the controls - every byte acknowledged - exact
+    uint16_t first_bad_c1;   ///< CTLR1 and STAR2 of the first refusal not let go
+    uint16_t first_bad_s2;
+    uint8_t first_bad_st;
+};
+
+template <bool on>
+struct Refusal {
+    using L = Self<on>;
+    using C = typename L::Client2;
+
+    /// True while I2C2's vectors belong to this letter's target.
+    static inline volatile bool live = false;
+    /// The written byte the target refuses, counted from one; 0 = none.
+    static inline volatile uint8_t refuse_at = 0;
+    static inline volatile uint8_t took = 0;
+    static inline uint8_t pos = 0;
+
+    /// THE TARGET, SERVED FROM ITS OWN VECTOR, refusing byte `refuse_at`:
+    /// 19.12.1's ACK governs the byte being received, so it goes down as
+    /// the byte BEFORE the refused one is taken (or at the address match,
+    /// for the first) and back up once the refused one has arrived, so the
+    /// next address is answered.
+    [[gnu::always_inline]] static void event() {
+        switch (C::service()) {
+            case I2cClientEvent::addressed:
+                pos = 0;
+                if (!C::host_reads() && refuse_at == 1u) {
+                    C::acknowledge(false);
+                }
+                break;
+            case I2cClientEvent::byte_received:
+                (void)C::take();
+                took = static_cast<uint8_t>(took + 1u);
+                if (took == refuse_at) {
+                    C::acknowledge(true);
+                } else if (refuse_at != 0u && took + 1u == refuse_at) {
+                    C::acknowledge(false);
+                }
+                break;
+            case I2cClientEvent::byte_wanted:
+                C::give(L::value(0x70, pos));
+                pos = static_cast<uint8_t>(pos + 1u);
+                break;
+            default:
+                break;
+        }
+    }
+    [[gnu::always_inline]] static void error() {
+        if (C::error_service() == I2cClientEvent::nacked) {
+            (void)C::flush();
+        }
+        C::acknowledge(true);
+    }
+
+    /// One tenure, waited out on the tick for at most 20 ms.
+    template <typename HostT>
+    static uint8_t run(uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
+        typename HostT::Request r{};
+        r.addr = self_addr;
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+        r.tx_len = tx_len;
+        r.rx = lend<Lease::reply>(rx_buf);
+        r.rx_len = rx_len;
+        r.speed = speed;
+        host_done = false;
+        host_isr_entries = 0;
+        if (HostT::start(r)) {
+            return HostT::status();
+        }
+        const uint32_t t0 = Ticker::millis();
+        while (!host_done && Ticker::millis() - t0 < 20u) {
+        }
+        return host_done ? HostT::status() : no_answer;
+    }
+
+    /// One to four bytes written then two read, at one speed through one
+    /// host: each count once acknowledged whole (the control) and four
+    /// times with its last written byte refused.
+    template <typename HostT>
+    static RefusalTally point(I2cSpeed speed) {
+        RefusalTally t{};
+        for (uint8_t n = 1; n <= 4u; ++n) {
+            refuse_at = 0;
+            took = 0;
+            rx_buf[0] = 0xEE;
+            rx_buf[1] = 0xEE;
+            C::acknowledge(true);
+            const uint8_t ack_st = run<HostT>(n, 2, speed);
+            if (ack_st == i2c_ok && took == n && rx_buf[0] == L::value(0x70, 0) &&
+                rx_buf[1] == L::value(0x70, 1)) {
+                ++t.acked_ok;
+            }
+            for (uint8_t trial = 0; trial < 4u; ++trial) {
+                refuse_at = n;
+                took = 0;
+                C::acknowledge(true);
+                const uint8_t st = run<HostT>(n, 2, speed);
+                const uint32_t t0 = Ticker::millis();
+                while (Ticker::millis() - t0 < 2u) {
+                }
+                const uint16_t c1 = H::regs().CTLR1;
+                const uint16_t s2 = H::status2();
+                refuse_at = 0;
+                C::acknowledge(true);
+                const uint8_t next = run<HostT>(0, 0, speed);
+                const bool gone = (c1 & (i2c_start | i2c_stop)) == 0u && (s2 & i2c_msl) == 0u;
+                ++t.refused;
+                t.nack_data = static_cast<uint8_t>(t.nack_data + (st == i2c_nack_data ? 1u : 0u));
+                t.missed = static_cast<uint8_t>(t.missed + (st == i2c_ok ? 1u : 0u));
+                t.let_go = static_cast<uint8_t>(t.let_go + (gone ? 1u : 0u));
+                t.next_ok = static_cast<uint8_t>(t.next_ok + (next == i2c_ok ? 1u : 0u));
+                if ((!gone || next != i2c_ok) && t.first_bad_c1 == 0u) {
+                    t.first_bad_c1 = c1;
+                    t.first_bad_s2 = s2;
+                    t.first_bad_st = static_cast<uint8_t>(st << 4 | (next & 0x0Fu));
+                }
+                if (!gone || next != i2c_ok) {
+                    (void)HostT::recover();
+                    (void)HostT::unstick();
+                }
+            }
+        }
+        return t;
+    }
+
+    /// One host at one speed, its counts printed; true when every refusal
+    /// was answered i2c_nack_data with the bus let go and the next tenure
+    /// running, and every control was exact.
+    [[gnu::noinline]] static bool report(const char* core, I2cSpeed speed, bool engines) {
+        dma_host_live = engines;
+        const RefusalTally t = engines ? point<DmaHost>(speed) : point<Host>(speed);
+        dma_host_live = false;
+        print(serial, "  ", core, speed == I2cSpeed::fast_400k ? " 400 kHz " : " 100 kHz ",
+              engines ? "engines" : "pump   ", ": acked exact ", t.acked_ok, "/4; refused ",
+              t.refused, ": nack_data ", t.nack_data, " (target late ", t.missed, "), let go ",
+              t.let_go, ", next ok ", t.next_ok);
+        if (t.first_bad_c1 != 0u) {
+            print(serial, "; first stuck: status|next ", hex(t.first_bad_st), " CTLR1 ",
+                  hex(t.first_bad_c1), " STAR2 ", hex(t.first_bad_s2));
+        }
+        print(serial, crlf);
+        console_drain();
+        return t.acked_ok == 4u && t.nack_data != 0u && t.nack_data + t.missed == t.refused &&
+               t.let_go == t.refused && t.next_ok == t.refused;
+    }
+};
+
+/// Every core of the letter: the console and the tick re-made at it, the
+/// target and each host brought up at its rate - the one part of the
+/// letter that knows the clock.
+template <typename Clk>
+bool refusal_core(const char* core) {
+    using R = Refusal<self_link_part>;
+    constexpr Clk clk;
+    console_drain();
+    const bool up = Clk::init();
+    (void)Serial::init(clk, 115200);
+    (void)Ticker::init(clk);
+    print(serial, "  the core at ", core, " (", up ? "up" : "FAILED", "), PB1 ",
+          Clk::pclk1_hz / 1'000'000u, " MHz", crlf);
+    (void)R::C::init(clk, {.own = self_addr}, {.no_stretch = false, .interrupts = true});
+    R::live = true;
+    bool clean = up;
+    (void)Host::init(clk);
+    clean = R::report(core, I2cSpeed::standard_100k, false) && clean;
+    clean = R::report(core, I2cSpeed::fast_400k, false) && clean;
+    Host::release();
+    (void)DmaHost::init(clk);
+    clean = R::report(core, I2cSpeed::standard_100k, true) && clean;
+    clean = R::report(core, I2cSpeed::fast_400k, true) && clean;
+    DmaHost::release();
+    R::live = false;
+    R::C::release();
+    return clean;
+}
+
+template <bool on = self_link_part>
+void to_refusal() {
+    if constexpr (on) {
+        using L = Self<on>;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the refusal wants the self-link's two wires, and says so", true);
+            return;
+        }
+        for (uint8_t i = 0; i < 4u; ++i) {
+            tx_buf[i] = static_cast<uint8_t>(0xC1u + i);
+        }
+        const bool fast = refusal_core<SysClock>("96 MHz");
+        const bool mid = refusal_core<Core48>("48 MHz");
+        const bool slow = refusal_core<Core8>(" 8 MHz");
+        (void)refusal_core<SysClock>("96 MHz again");
+        bench.verdict("the last written byte refused at 96 MHz: i2c_nack_data, the bus let "
+                      "go, the next tenure ok",
+                      fast);
+        bench.verdict("... and at 48 MHz", mid);
+        bench.verdict("... and at 8 MHz", slow);
+        L::all_released();
+        host_ready();
+    }
+}
+
 /// The self-link's letters, registered where the part has I2C2.
 template <bool on = self_link_part>
 void register_self_link_letters() {
@@ -2693,6 +2923,8 @@ void register_self_link_letters() {
                      tm_self_swapped<>);
         bench.letter('n', "a target stuck mid-byte, and unstick()'s clocks counted",
                      tn_unstick<>);
+        bench.letter('o', "THE REFUSED LAST BYTE, the core at 96, 48 and 8 MHz",
+                     to_refusal<>);
     }
 }
 
@@ -2707,11 +2939,14 @@ bool self_link_present() {
     }
 }
 
-/// I2C2's two vectors: letter m's host, and nothing on any other part.
+/// I2C2's two vectors: letter m's host and letter o's target, and nothing
+/// on any other part.
 template <bool on = self_link_part>
 void host2_event() {
     if constexpr (on) {
-        if (Self<on>::host2_live && Self<on>::Host2::isr()) {
+        if (Refusal<on>::live) {
+            Refusal<on>::event();
+        } else if (Self<on>::host2_live && Self<on>::Host2::isr()) {
             host_done = true;
         }
     }
@@ -2719,7 +2954,9 @@ void host2_event() {
 template <bool on = self_link_part>
 void host2_error() {
     if constexpr (on) {
-        if (Self<on>::host2_live && Self<on>::Host2::error_isr()) {
+        if (Refusal<on>::live) {
+            Refusal<on>::error();
+        } else if (Self<on>::host2_live && Self<on>::Host2::error_isr()) {
             host_done = true;
         }
     }
@@ -2734,7 +2971,7 @@ void banner() {
           device::part_name, crlf,
           "  the bus goes to a peer board running `twi_peer` (command address ",
           hex(twilink::command_addr), ") - letters b..k skip when it does not answer - or, "
-          "where the board wires them, to the chip's own I2C2 (letters l..n)",
+          "where the board wires them, to the chip's own I2C2 (letters l..o)",
           crlf, "  PB1 runs at ", SysClock::pclk1_hz / 1'000'000u,
           " MHz: CTLR2.FREQ cannot state more than 60 (19.12.2)", crlf,
           "  the wire now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
@@ -2767,14 +3004,13 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
         }
         return;
     }
-    if (bus_ao_live) {
-        if (Host::isr()) {
-            brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
-        }
-        return;
-    }
+    // One body for the arbiter's tenures and the letters' own.
     if (Host::isr()) {
-        host_done = true;
+        if (bus_ao_live) {
+            brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
+        } else {
+            host_done = true;
+        }
     }
 }
 
@@ -2789,14 +3025,13 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
         }
         return;
     }
-    if (bus_ao_live) {
-        if (Host::error_isr()) {
-            brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
-        }
-        return;
-    }
+    // One body for the arbiter's tenures and the letters' own.
     if (Host::error_isr()) {
-        host_done = true;
+        if (bus_ao_live) {
+            brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
+        } else {
+            host_done = true;
+        }
     }
 }
 
