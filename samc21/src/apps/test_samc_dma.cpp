@@ -14,8 +14,9 @@
 //      three increment shapes, at lengths that cross alignment
 //   c  software-linked chains: TCMPL re-programs the next block, N
 //      blocks back to back, throughput measured
-//   d  suspend/resume and harvest(), including the erratum-1.10.4
-//      write-back validation shown REFUSING a scribbled write-back
+//   d  the live count read without a suspend (observe()), suspend/resume
+//      and harvest(), including the erratum-1.10.4 write-back validation
+//      shown REFUSING a scribbled write-back
 //   e  interrupts: TCMPL, an invalid descriptor, a real bus error, and
 //      INTPEND dispatch with two channels pending at once
 //   f  the console's own SERCOM5 transmitting through a DMA channel
@@ -678,6 +679,18 @@ void td_harvest() {
         while (Copy::busy() && spins-- != 0u) {
         }
     }
+
+    // THE READING WITHOUT A SUSPEND (observe(): ACTIVE's live count while
+    // this channel holds the active registers, the write-back otherwise),
+    // taken before the suspend below can spill anything.
+    const uint32_t a_before = brio::Dmac::active();
+    const uint32_t t_obs = cycles_now();
+    const auto seen = Copy::observe();
+    const uint32_t observe_cost = cycles_now() - t_obs;
+    print(serial, "  observe(): ACTIVE ", brio::hex(a_before), ", done=", seen ? seen->done : 0u,
+          ", cost ", observe_cost, " cycles", crlf);
+    bench.verdict("observe() mid-block reads the beats moved, with no suspend",
+                  seen && seen->done == paced && seen->remaining == total - paced);
 
     const uint32_t t0 = cycles_now();
     const auto mid = Copy::harvest();

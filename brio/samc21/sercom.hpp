@@ -1022,7 +1022,19 @@ class Uart {
     using RxPin = Pin<pads.rx_pin.port, pads.rx_pin.pin>;
 
     // One ring pair per instantiation (static inline -> .bss, no ctor).
-    static inline Ring<uint8_t, rx_size, SamPlatform> m_rx{};
+    //
+    // THE RECEIVE RING KNOWS WHERE ITS GAPS ARE when the handler fills it:
+    // a character lost on the handler's rare paths (a full ring, a frame
+    // or parity error, an overflow before the character in hand) is MARKED
+    // where it fell (util/ring.hpp's GapRing), and the skip epoch moves
+    // when the consumer crosses the mark - between the last character
+    // before the gap and the first after it. Under the receive engine the
+    // channel writes whole runs and STATUS is read once a run, so where in
+    // the run a loss fell is not known: a plain Ring, the epoch counted
+    // per run (m_rx_skips).
+    using RxRing = std::conditional_t<RxEngine::present, Ring<uint8_t, rx_size, SamPlatform>,
+                                      GapRing<uint8_t, rx_size, SamPlatform>>;
+    static inline RxRing m_rx{};
     static inline Ring<uint8_t, tx_size, SamPlatform> m_tx{};
 
     // Error counters, written in the handler, read from the main loop.
@@ -1034,10 +1046,16 @@ class Uart {
     static inline volatile uint8_t m_parity_errors = 0; // PERR: byte dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // BUFOVF: bytes lost in HW
     /// DMA blocks abandoned because the silicon had stopped running them
-    /// (erratum 1.10.4 - see nudge_blocked_tx() and harvest()). Touched
+    /// (erratum 1.10.4 - see nudge_blocked_tx()). Touched
     /// only from inside `if constexpr (has_*_engine)` branches, so an
     /// engineless Uart never odr-uses it and does not carry the byte.
     static inline volatile uint8_t m_dma_faults = 0;
+    /// THE RECEIVE ENGINE'S SKIP EPOCH: a step for every published run
+    /// that saw BUFOVF, FERR or PERR - characters lost in the hardware, or
+    /// delivered with their error - taken BEFORE that run is published,
+    /// never cleared (modulo 2^32). Touched only under `if constexpr
+    /// (has_rx_engine)`; the interrupt receiver's epoch is its GapRing's.
+    static inline volatile uint32_t m_rx_skips = 0;
     static inline uint32_t m_baud = 0;                  // for rebase()
     /// A byte was handed to the transmitter since init(). TXC is clear out
     /// of configure() and only a frame's departure sets it, so a port that
@@ -1048,6 +1066,14 @@ class Uart {
     /// left idle: the consumer's next release hands it the run it frees
     /// (see rearm_rx()). Set in the DMAC's handler, read in main context.
     static inline volatile bool m_rx_stalled = false;
+    /// THE RECEIVE BLOCK'S CLAIM: a block is armed on the channel and not
+    /// yet retired. Retiring it - publishing the rest of its run and
+    /// handing the channel the next one - belongs to whichever context
+    /// clears this first: the completion's handler (dma_isr()) or the
+    /// owner's ask (harvest()), never both. Set under the mask together
+    /// with the enable (rearm_rx()), so the handler never sees an armed
+    /// block on a channel that has not been started.
+    static inline volatile bool m_rx_armed = false;
 
     /// The bound on a wait for the wire to fall idle (rebase(), set_baud()).
     static constexpr uint32_t tx_drain_spins = 8'000'000u;
@@ -1120,7 +1146,10 @@ public:
         clear_errors();
         m_baud = baud;
         m_tx_used = false;
-        m_rx_stalled = false;
+        if constexpr (has_rx_engine) {
+            m_rx_stalled = false;
+            m_rx_armed = false;
+        }
 
         S::bus_clock(true);
         if (!S::core_clock(generator)) {
@@ -1262,9 +1291,11 @@ public:
     /// line slower than the handler, one per two where characters arrive
     /// faster than an entry and its exit - the shape that decides whether
     /// the receiver keeps up at the generator's top rate (sercom.md).
-    /// THE PATH IS CALL-FREE: the body, the ring's verbs and the register
-    /// accesses are all inline, so a handler placed in SRAM (.ram_text,
-    /// docs/samc21/platform.md) runs from SRAM entirely.
+    /// A CLEAN CHARACTER'S PATH IS CALL-FREE: the body, the ring's verbs
+    /// and the register accesses are all inline, so a handler placed in
+    /// SRAM (.ram_text, docs/samc21/platform.md) runs it from SRAM
+    /// entirely; a receive error and a full ring are calls out of line
+    /// (receive_hit(), receive_full()).
     // always_inline: a single call site (the vector binding in the app),
     // so inlining costs no flash and lets the compiler save only the
     // registers it actually uses - see ticker.hpp tick().
@@ -1316,10 +1347,16 @@ public:
     /// interrupt receiver, which has an edge on every character, is this
     /// family's burst path (docs/samc21/sercom.md).
     ///
+    /// THE BLOCK IS RETIRED ONCE. A completion and the owner's ask can
+    /// both find a block over - the ask finds the channel disabled before
+    /// the handler has run - and the one that clears the block's claim
+    /// (m_rx_armed) publishes the rest of its run and re-arms; the other
+    /// finds it cleared, or a newer block running, and does nothing.
+    ///
     /// Returns true when the receive ring went from empty to non-empty -
     /// the edge contract isr() has, so the same glue posts RxActivity on
     /// it. A transmit completion, and a receive completion an owner's
-    /// harvest() already took (the channel re-armed under it), answer
+    /// harvest() already retired (the channel re-armed under it), answer
     /// false.
     [[gnu::always_inline]] static bool dma_isr(uint8_t channel) {
         if constexpr (has_tx_engine) {
@@ -1332,12 +1369,17 @@ public:
         }
         if constexpr (has_rx_engine) {
             if (channel == RxEngine::channel) {
-                // A channel enabled again is a block an owner's harvest()
-                // took and re-armed between the completion and this
-                // handler: nothing of it is left to publish.
-                if (!RxEngine::idle()) {
+                // No block armed: the owner's harvest() retired it before
+                // this handler ran and is re-arming, or the ring is full
+                // and the engine stalled. A channel enabled again is a
+                // block the owner retired AND re-armed in between: it is
+                // the next block's, and nothing of the old one is left.
+                // The handler runs to completion against main context, so
+                // the claim needs no mask here.
+                if (!m_rx_armed || !RxEngine::idle()) {
                     return false;
                 }
+                m_rx_armed = false;
                 // THE COUNT IS THE RUN'S: the completion says every beat
                 // landed, so no write-back is read and no suspend is
                 // made (DmaRxEngine::complete()) - the edge costs a status
@@ -1355,33 +1397,48 @@ public:
     }
 
     /// Ask the receive engine what has arrived, publish it, and hand the
-    /// channel a new run when it has none.
+    /// channel a new run when its block is over.
     ///
     /// THE OWNER'S VERB, for what no completion will report: the tail of
     /// a run that stopped short of its block's end (a filled block is
-    /// published by dma_isr(), the engine's edge, at less cost). It also
-    /// publishes the rest of a block that completed under it, and re-arms
-    /// a channel that is not running. Learning how far a running channel
-    /// has got means
-    /// SUSPENDING it and reading its write-back (samc21/dmac.hpp's
-    /// harvest, erratum 1.10.4 validation included), so the owner's ask is
-    /// a deliberate act with a cost and the owner chooses when to pay it:
-    /// a line protocol at its terminator's expected time, a stream at its
-    /// end, a lazy kernel TimeEvent for a stream of unknown length - lazy:
-    /// asked every 50 us, a suspend landing on a block's last beats lost
-    /// characters at the boundary, uncounted (docs/samc21/sercom.md,
-    /// letter n of test_samc_uart), and the edge needs no ask. The ring's
-    /// producer side is the DMAC handler's too, so the whole verb runs
-    /// under the mask - the channel's own suspend handshake already does (dmac.md:
-    /// about 700 cycles), and what the verb adds around it is the status
-    /// read, one index store and a re-arm of three descriptor stores.
+    /// published by dma_isr(), the engine's edge, at less cost). When to
+    /// ask is the owner's knowledge - a line protocol at its terminator's
+    /// expected time, a stream at its end, a kernel TimeEvent for a stream
+    /// of unknown length - and the ask is safe at ANY cadence: measured
+    /// byte-exact asked every 50 us and at every turn of a loop
+    /// (docs/samc21/sercom.md, letters n and r of test_samc_uart).
+    ///
+    /// THE READING NEEDS NO SUSPEND. The DMAC's ACTIVE register holds the
+    /// receive channel's live count while it is the active channel, which
+    /// it is between its beats when no other channel is granted, and the
+    /// write-back holds it otherwise (DmaRxEngine::take_landed(),
+    /// DmaChannel::observe()). A count that is behind the beats is caught
+    /// up by the next ask or the completion; one ahead of them is never
+    /// read.
+    ///
+    /// THE MASK COVERS THE DECISION, the work is outside it. Two contexts
+    /// produce into the ring - this verb and the completion's handler - so
+    /// the reading, the publish and the choice of who retires a finished
+    /// block are one claim under the mask: the channel's state is asked
+    /// FIRST, and a block found over is published WHOLE from its run
+    /// (DmaRxEngine::complete()), never from a count read before it ended.
+    /// The retirement's work - the next run's three descriptor stores - is
+    /// done unmasked, and only the enable is masked again with the claim
+    /// it sets (rearm_rx()). A SUSPEND IS DECLINED, for a measured loss: a
+    /// suspend that lands as the block's last beat is pending stops the
+    /// channel before that beat, and the beat ends the block after the
+    /// resume (dmac.md) - so a suspending ask reads a count one short of
+    /// a block that is over by the time the channel is asked again, and a
+    /// re-arm decided from that later look starts the next run on the
+    /// slot the beat filled: one character lost, uncounted, at a block
+    /// boundary (docs/samc21/sercom.md, letter n).
     ///
     /// WHAT IS TRADED AWAY, and it cannot be given back: per-byte error
     /// attribution. With RXC armed, STATUS is read for EACH character
     /// before its DATA and a corrupted byte is dropped precisely. With
     /// the channel consuming RXC instead, nobody reads STATUS per
-    /// character - it is read HERE, once per harvest, and its errors are
-    /// counted against the whole harvested run rather than a byte. A
+    /// character - it is read at each publish, here and in the completion,
+    /// and its errors are counted against the run rather than a byte. A
     /// protocol with its own framing does not care; a console that wants
     /// exact frame-error attribution should not take an RX engine.
     ///
@@ -1395,35 +1452,36 @@ public:
         if constexpr (!has_rx_engine) {
             return false;
         } else {
-            typename SamPlatform::CriticalSection cs;
-            take_status();
-            const bool was_empty = m_rx.empty();
-            const auto fresh = RxEngine::take();
-            if (fresh && *fresh != 0u) {
-                m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(*fresh));
+            bool edge = false;
+            bool retired = false;
+            {
+                typename SamPlatform::CriticalSection cs;
+                if (m_rx_armed) {
+                    take_status();
+                    const bool was_empty = m_rx.empty();
+                    uint16_t fresh = 0;
+                    if (RxEngine::idle()) {
+                        // The block is over and its completion not yet
+                        // heard: this ask retires it, the handler will
+                        // find the claim cleared.
+                        m_rx_armed = false;
+                        retired = true;
+                        fresh = RxEngine::complete();
+                    } else {
+                        fresh = RxEngine::take_landed();
+                    }
+                    if (fresh != 0u) {
+                        m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+                        edge = was_empty;
+                    }
+                }
             }
-            // A refused reading (the write-back failed its consistency
-            // check) publishes NOTHING and is simply asked again next
-            // time: the bytes are in the buffer either way, only the
-            // count was doubted.
-
-            // WHEN TO HAND THE CHANNEL A NEW RUN. The obvious answer -
-            // "when the engine's own count says the block filled up" -
-            // has a hole big enough to kill the stream: take() publishes
-            // nothing when a reading is REFUSED, so `taken_` stops
-            // advancing, `full()` never becomes true, and a channel that
-            // has meanwhile finished (or died) is never re-armed. Every
-            // harvest after that reads the same stale write-back, refuses
-            // it again, and not one more byte is ever published. That is
-            // the shape a receive stream was found dead in.
-            //
-            // So the SILICON is asked first and the arithmetic second: a
-            // channel that is not running gets a new run whatever the
-            // count says.
-            if (RxEngine::idle() || RxEngine::full() || RxEngine::capacity() == 0u) {
+            if (retired) {
                 rearm_rx();
+            } else {
+                resume_rx();
             }
-            return was_empty && !m_rx.empty();
+            return edge;
         }
     }
 
@@ -1599,6 +1657,36 @@ public:
     static bool tx_idle() { return m_tx.empty() && (!m_tx_used || S::txc_flag()); }
 
     static uint8_t rx_overruns() { return m_rx_overruns; }
+
+    /**
+     * THE SKIP EPOCH (util/stream.hpp's SkippingSource, docs/design/
+     * serial.md): a count, modulo 2^32 and NEVER cleared - neither by
+     * clear_errors() nor by init() -, of the characters the line carried
+     * that the receive ring does not deliver clean. A reader that
+     * compares it at every run knows a run is not contiguous with the one
+     * before.
+     *
+     * THROUGH THE INTERRUPT RECEIVER it is the GapRing's skips(): a
+     * character dropped on a full ring or for a frame or parity error, and
+     * an overflow (BUFOVF: one at least lost in the hardware before the
+     * character in hand), each MARKED where it fell, the count moving when
+     * the consumer's read_span() crosses the mark - exactly between the
+     * run before the gap and the run after it. THROUGH THE RECEIVE ENGINE
+     * it is a step for every published run that saw BUFOVF, FERR or PERR,
+     * taken before that run is published: the run is delivered whole, its
+     * errors as received, and where in it a loss fell is not known. The
+     * engine's stall on a full ring loses characters in the hardware
+     * only, so BUFOVF's step is its loss. Rare paths only: nothing on a
+     * clean character's path.
+     */
+    static uint32_t rx_skips() {
+        if constexpr (has_rx_engine) {
+            return m_rx_skips;
+        } else {
+            return m_rx.skips();
+        }
+    }
+
     static uint8_t frame_errors() { return m_frame_errors; }
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t hw_overruns() { return m_hw_overruns; }
@@ -1636,6 +1724,7 @@ public:
             TxEngine::stop();
         }
         if constexpr (has_rx_engine) {
+            m_rx_armed = false;
             RxEngine::stop();
         }
         Nvic::disable(S::irq());
@@ -1796,11 +1885,22 @@ private:
      * consumer told at each half drains one while the channel fills the
      * other.
      *
+     * ONLY THE CONTEXT THAT RETIRED THE LAST BLOCK CALLS THIS (or init(),
+     * or the consumer resuming a stalled engine), with the block's claim
+     * clear - so neither the handler nor the owner's ask touches the
+     * engine while the slot is written, and the three stores run
+     * unmasked. The ENABLE and the claim it sets are one step under the
+     * mask: a completion handler pended across it sees either no claim
+     * or a started block, never a claim on a channel not yet enabled.
+     *
      * An empty run means the ring is full: there is nowhere to put
      * arriving bytes, so the channel is left idle, the stall counted in
-     * rx_overruns() and flagged, and the losses show up as BUFOVF at the
-     * next harvest. Nothing would re-arm it - no block runs, so no
-     * completion comes - so the consumer's release does: resume_rx().
+     * rx_overruns() and flagged, and the characters the line carries
+     * meanwhile beyond the receiver's two levels are lost in the
+     * hardware - BUFOVF, counted in hw_overruns() and rx_skips() at the
+     * next publish, before any character after the loss is published.
+     * Nothing would re-arm it - no block runs, so no completion comes -
+     * so the consumer's release does: resume_rx().
      */
     static void rearm_rx() {
         if constexpr (has_rx_engine) {
@@ -1816,20 +1916,29 @@ private:
                 room = room.first(rx_block_most);
             }
             m_rx_stalled = false;
-            (void)RxEngine::start(room);
+            (void)RxEngine::prepare(room);
+            typename SamPlatform::CriticalSection cs;
+            m_rx_armed = true;
+            RxEngine::launch();
         }
     }
 
     /// STATUS read once and its receive errors counted and cleared - at the
     /// engine's granularity, a run and not a byte, which is the honest
     /// resolution this mode has. The bits clear by being written (31.8.9):
-    /// DATA is the channel's alone.
+    /// DATA is the channel's alone. Called by whichever context holds the
+    /// receive block's claim, just BEFORE it publishes, so the skip epoch
+    /// moves no later than the first character after a loss is visible.
     static void take_status() {
         const uint16_t st = S::status();
         const uint16_t errors = static_cast<uint16_t>(st & SercomStatus::receive_errors);
         if (errors != 0u) {
             S::clear_status(errors);
             S::clear_flags(SercomFlag::error);
+            // ONE STEP OF THE SKIP EPOCH for the run: an overflow lost
+            // characters in the hardware, a frame or parity error was
+            // delivered as received - either way the run is not clean.
+            m_rx_skips = m_rx_skips + 1u;
             if ((errors & SercomStatus::overflow) != 0u) {
                 m_hw_overruns = m_hw_overruns + 1;
             }
@@ -1843,16 +1952,15 @@ private:
     }
 
     /// The consumer freed slots: a receive engine left idle on a full ring
-    /// gets its run now. A flag test on the consumer's path; the re-arm
-    /// under the mask, the ring being the DMAC handler's to publish into.
+    /// gets its run now. A flag test on the consumer's path, and no mask:
+    /// a stalled engine has no block, so no completion can come and the
+    /// handler cannot touch it - main context alone re-arms it, and
+    /// rearm_rx() masks only its enable.
     [[gnu::always_inline]] static void resume_rx() {
         if constexpr (has_rx_engine) {
             if (m_rx_stalled) {
-                typename SamPlatform::CriticalSection cs;
-                if (m_rx_stalled && RxEngine::idle()) {
-                    m_rx_stalled = false;
-                    rearm_rx();
-                }
+                m_rx_stalled = false;
+                rearm_rx();
             }
         }
     }
@@ -1892,31 +2000,70 @@ private:
             const uint16_t st = S::status();
             const uint8_t byte = static_cast<uint8_t>(S::data());
             const uint16_t errors = static_cast<uint16_t>(st & SercomStatus::receive_errors);
-            bool keep = true;
-            if (errors != 0u) {
-                S::clear_status(errors);
-                S::clear_flags(SercomFlag::error);   // the combined flag travels with them
-                if ((errors & SercomStatus::overflow) != 0u) {
-                    m_hw_overruns = m_hw_overruns + 1;
-                }
-                if ((errors & SercomStatus::frame_error) != 0u) {
-                    m_frame_errors = m_frame_errors + 1;
-                    keep = false;
-                }
-                if ((errors & SercomStatus::parity_error) != 0u) {
-                    m_parity_errors = m_parity_errors + 1;
-                    keep = false;
-                }
-            }
-            if (keep) {
-                if (m_rx.push(byte)) {
+            // THE CLEAN CHARACTER'S PATH STAYS IN THE BODY; the errors,
+            // the full ring and the gap marks they set are calls out of
+            // line (receive_hit(), receive_full()).
+            if (errors == 0u) [[likely]] {
+                if (m_rx.push(byte)) [[likely]] {
                     pushed = true;
                 } else {
-                    m_rx_overruns = m_rx_overruns + 1;
+                    receive_full();
                 }
+            } else {
+                pushed = receive_hit(errors, byte) || pushed;
             }
         } while (S::rxc_flag());
         return was_empty && pushed;
+    }
+
+    /// THE RARE PATHS, OUT OF LINE: a character that found the ring full,
+    /// and one that carries a receive error - counted, cleared, and its
+    /// loss marked where it fell. Kept out of the handler's body so the
+    /// clean character's path keeps its registers: inlined, the marks
+    /// spilled the character to the stack and the clean path cost 219 to
+    /// 231 cycles a character from the flash where out of line it costs
+    /// 218 (letter u of bench_samc; 139 from SRAM, bench_samc_ram).
+    [[gnu::noinline, gnu::cold]] static void receive_full() {
+        m_rx_overruns = m_rx_overruns + 1;
+        rx_lost();
+    }
+
+    /// True when the character was kept and pushed. BUFOVF marks the
+    /// characters lost before it, which is kept; FERR or PERR drop it.
+    [[gnu::noinline, gnu::cold]] static bool receive_hit(uint16_t errors, uint8_t byte) {
+        S::clear_status(errors);
+        S::clear_flags(SercomFlag::error);   // the combined flag travels with them
+        if ((errors & SercomStatus::overflow) != 0u) {
+            m_hw_overruns = m_hw_overruns + 1;
+            rx_lost();   // the characters lost BEFORE this one
+        }
+        bool keep = true;
+        if ((errors & SercomStatus::frame_error) != 0u) {
+            m_frame_errors = m_frame_errors + 1;
+            keep = false;
+        }
+        if ((errors & SercomStatus::parity_error) != 0u) {
+            m_parity_errors = m_parity_errors + 1;
+            keep = false;
+        }
+        if (!keep) {
+            rx_lost();
+            return false;
+        }
+        if (m_rx.push(byte)) {
+            return true;
+        }
+        receive_full();
+        return false;
+    }
+
+    /// A character the interrupt receiver lost, marked where it fell in
+    /// the GapRing. The receive engine never runs receive() - its RXC is
+    /// the channel's - so its ring, a plain Ring, has no mark to set.
+    [[gnu::always_inline]] static void rx_lost() {
+        if constexpr (!has_rx_engine) {
+            m_rx.lost();
+        }
     }
 
     /// Feed the next byte and disarm when the ring drains (write_byte()
@@ -1948,8 +2095,8 @@ inline constexpr UartPads sercom_probe_pads{
 
 static_assert(ByteTransport<Uart<0, detail::sercom_probe_pads>> &&
                   BulkSink<Uart<0, detail::sercom_probe_pads>> &&
-                  SpanSource<Uart<0, detail::sercom_probe_pads>>,
-              "Uart must satisfy the transport concepts");
+                  SkippingSource<Uart<0, detail::sercom_probe_pads>>,
+              "Uart must satisfy the transport concepts, the skip epoch included");
 static_assert(ClockUser<Uart<0, detail::sercom_probe_pads>>,
               "Uart must be listable among a dynamic clock's users");
 

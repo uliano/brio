@@ -5,7 +5,7 @@ common ch. 30 (the baud generator, 30.6.2.3 table 30-2), USART
 ch. 31 (transmission and reception 31.6.2.5-31.6.2.6, the loop-back
 31.6.3.8, start-of-frame detection 31.6.3.9, the DMA and interrupt
 requests 31.6.4, INTFLAG and STATUS 31.8.8-31.8.9), the DMAC's
-write-back 25.6.2.5 - and errata DS80000740S items 1.17.15 and 1.17.16,
+write-back 25.6.2.5 and its live count ACTIVE 25.8.14 - and errata DS80000740S items 1.17.15 and 1.17.16,
 both encoded in code (1.17.4 and 1.17.14 are named where their fields
 live), and 1.10.4 (the DMAC's, below). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine, RxEngine>` task, the engine slots
@@ -145,9 +145,12 @@ taking a burst, and what this driver does with each:
   `isr()` as the ONE handler body honouring the edge-return contract
   (true on the RX ring's empty-to-non-empty transition - the kernel
   wakeup), taking every level of the receive buffer an entry and
-  calling nothing (the body, the ring's verbs and the register
-  accesses all inline, so a handler placed in `.ram_text` runs from
-  SRAM whole, [platform.md](platform.md)), try-semantics `write_byte`
+  calling nothing on a clean character's path (the body, the ring's
+  verbs and the register accesses all inline, so a handler placed in
+  `.ram_text` runs that path from SRAM whole, [platform.md](platform.md);
+  a receive error and a full ring, the rare paths, are calls out of
+  line, which keep the clean path's registers: inline, the gap marks
+  spilled the character to the stack), try-semantics `write_byte`
   and `write_bulk` (a run: as
   many as fit, its first byte pushed and DRE armed before the rest is
   copied and armed again behind it, or with an engine the run queued
@@ -156,7 +159,19 @@ taking a burst, and what this driver does with each:
   receive run in place), `tx_idle()` - THE WIRE IDLE: nothing queued, no
   block in flight and TXC, the last stop bit gone (a port that has sent
   nothing since `init()` is idle too: TXC is clear out of reset) -, error
-  counters,
+  counters, `rx_skips()` (THE SKIP EPOCH, util/stream.hpp's
+  `SkippingSource`: a count, modulo 2^32 and never cleared - neither by
+  `clear_errors()` nor by `init()` -, that moves whenever the line
+  carried a character the ring will not deliver clean, and moves before
+  the next character it delivers is visible: through the interrupt
+  receiver once a character dropped on a full ring, carrying BUFOVF or
+  dropped for a frame or parity error; through the receive engine once a
+  publish whose run saw BUFOVF, FERR or PERR, the run delivered whole
+  with its errors as received; the engine's stall on a full ring loses
+  characters in the hardware only, so BUFOVF's step is its loss. A step
+  an event, not a character: the hardware reports an overflow, not how
+  many it lost. Bumped on those rare paths alone, nothing on a clean
+  character's),
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
   `release()`. Init
@@ -262,24 +277,41 @@ The engines are POLICIES, not features of the task:
   is idle from its last beat to that handler's re-arm, which the
   receiver's two levels cover - a stream at 3 Mbaud crosses the block
   boundaries byte-exact (letter r) - and a consumer told at every half
-  drains one while the channel fills the other. The edge costs 490
-  cycles of handler (549 between the bench's stamps, letter u) once a
-  half ring: 2.1 cycles a byte on a 256-byte block.
-- **THE TAIL IS THE OWNER'S ASK.** A run that stops short of its block's
-  end has no edge (no idle detector and no time-out in this silicon,
-  "The receive side, item by item" above), so `harvest()` stays a
-  public verb: it suspends the channel, reads the validated write-back
-  (erratum 1.10.4, dmac.md), publishes what landed and re-arms a
-  channel that is not running, returning the same edge. It runs whole
-  under the mask - the ring's producer side is the handler's too - about
-  700 cycles, 44 us when the suspend never lands (dmac.md). When to ask
-  is the owner's knowledge: at the end of a message of known length, a
-  terminator's expected time, or a lazy clock for a stream of unknown
-  length; an EAGER clock costs - measured, an ask every 50 us lost two
-  to five characters at a block boundary in every run, uncounted, where
-  an ask every 2 ms lost none (letter n, Bench findings). A consumer
-  that releases slots (`consume`, `read_byte`, `read_bulk`) re-arms an
-  engine a full ring left idle.
+  drains one while the channel fills the other. The edge costs 614 to
+  617 cycles between the bench's stamps (letter u) once a half ring: 2.4
+  cycles a byte on a 256-byte block. A BLOCK IS RETIRED ONCE: the
+  completion and the owner's ask (below) can both find it over, and the
+  one that clears its claim publishes the rest of its run and re-arms;
+  the claim is set with the enable, under the mask, so the handler never
+  finds a claim on a channel not yet started.
+- **THE TAIL IS THE OWNER'S ASK, AND IT NEEDS NO SUSPEND.** A run that
+  stops short of its block's end has no edge (no idle detector and no
+  time-out in this silicon, "The receive side, item by item" above), so
+  `harvest()` stays a public verb, returning the same edge. It reads how
+  far the block has got WITHOUT stopping the channel - the DMAC's ACTIVE
+  register holds the receive channel's live count between its beats
+  while no other channel is granted, its write-back holds it otherwise
+  (dmac.md, `observe()`) - and a count behind the beats is caught up by
+  the next ask or the completion, never one ahead of them. THE MASK
+  COVERS THE DECISION: two contexts produce into the ring, so the
+  channel's state (asked FIRST), the reading, STATUS and the publish are
+  one claim under the mask, and a block found over is published WHOLE
+  from its run, never from a count read before it ended; the next run's
+  three descriptor stores are written unmasked and only the enable is
+  masked again, with the claim it sets. The ask is 399 cycles called
+  masked mid-block (letter u). A SUSPENDING ASK - dmac.md's other
+  window - is DECLINED: it costs 826 cycles, masked whole, and it LOSES
+  a character: a suspend landing as the block's last beat is pending
+  reads the count one short, the resume lets that beat end the block,
+  and a re-arm decided from a later look at the channel starts the next
+  run on the slot the beat filled - uncounted, at a block boundary, two
+  to five a run asked every 50 us (Bench findings). Without it any
+  cadence is byte-exact: every 50 us and every 2 ms over the bridge
+  (letter n), at every turn of a loop at 1 and 3 Mbaud (letter r). When to ask is still the owner's knowledge - at
+  the end of a message of known length, a terminator's expected time,
+  a clock for a stream of unknown length - and the cost is the owner's
+  to pay. A consumer that releases slots (`consume`, `read_byte`,
+  `read_bulk`) re-arms an engine a full ring left idle (letter r).
 - **THE STANDING REQUEST, AND WHY NEITHER DIRECTION KICKS.** A
   peripheral asserts its DMA request as a LEVEL - "my transmit buffer is
   free", "I have a character" - and the DMAC turns that level into a
@@ -429,15 +461,41 @@ times:
   boundary is no gap: byte-exact in every run, at 115200 through the
   bridge (letters g, p) and at 1 and 3 Mbaud on the loop, a polled
   sender keeping the wire full across two boundaries (letter r: 1300 of
-  1300, two edges from the vector, no overrun). What does lose is an
-  owner's ask on an EAGER clock (letter n): asked every 50 us - some
-  twenty suspends a block - the stream lost two to five characters at a
-  block boundary in every run, uncounted (first_bad a multiple of the
-  block: 256, 512, 1024, 1280), where asked every 2 ms it lost none. The
-  suspend that lands on a block's last beats is the suspect, its
-  mechanism not isolated ("Not covered yet"); the engine's edge needs no
-  ask, and the tail wants one, not a clock of them. It never receives
-  MORE than was sent (it did, while the re-arm kicked: below).
+  1300, two edges from the vector, no overrun). The owner's ask is
+  byte-exact at any cadence: asked every 50 us - some four hundred asks
+  a block - and every 2 ms, 4928 of 4928 echoed in three runs of each
+  (letter n), and at every turn of the loop's sending loop at 1 and
+  3 Mbaud, each published byte checked as it appeared (letter r: 1300 of
+  1300, 1301 asks, none of them reading a count ahead of the bytes).
+  It never receives MORE than was sent (it did, while the re-arm kicked:
+  below).
+
+- **The suspending ask's loss, isolated.** An ask that SUSPENDS the
+  channel to read its count, every 50 us, lost two to five characters a
+  run at a block boundary, uncounted - no overrun, no error, first_bad a
+  multiple of the block - and every 2 ms none.
+  A trace of the asks (the channel's CHCTRLA, CHSTATUS, CHINTFLAG,
+  ACTIVE and write-back before and after each, and the same in the
+  completion's handler) caught the boundary: the ask before it read one
+  beat left, the next one published nothing and re-armed the channel,
+  the new block's end address 255 bytes past the old one's where 256 were
+  owed - so its first beat overwrote the old block's last byte, and the
+  completion's handler, finding the channel running again, published
+  nothing. A scratch probe on a beat-paced memory channel shows the
+  silicon half (dmac.md): a suspend landing as the last beat is pending
+  stops the channel BEFORE that beat, and the beat ends the block after
+  the resume. So the ask read "one beat left", resumed, the beat ended
+  the block within the same call, and the ask's re-arm test - asked of
+  the channel AFTER the reading - found it idle. Hence the ask's order
+  (above): the channel's state first, a finished block published whole
+  from its run, a running one read with no suspend at all.
+- **The consumer held back past the ring** (letter r, 1300 bytes at
+  1 Mbaud into the engine's 1024-byte ring, nothing drained until the
+  sender is done): the ring holds the stream's first 1024 bytes exact,
+  the engine stalls once (`rx_overruns` 1), the receiver overflows in
+  the hardware (`hw_overruns` 1), the consumer's release re-arms the
+  channel, which takes the two characters the receiver held, and the
+  skip epoch has moved when they become visible.
 
   THE FOURTH SHAPE, DMA on both directions, is a compile error (erratum
   1.10.4, "The optional DMA engines" above), and this is what it did
@@ -529,27 +587,29 @@ bridge between the pads and the PC - as much as of the driver.
   co-aligned, 11566 otherwise.
 - **The receiver's shapes, measured on the loop** (letter u, bursts
   of 16 and 256 from the transmit engine): the interrupt receiver one
-  entry a character up to 1 Mbaud, 211-221 cycles between the bench's
+  entry a character up to 1 Mbaud, 207-218 cycles between the bench's
   stamps, and at 3 Mbaud 0.34 to 0.37 entries a character (two or three
   levels an entry, 110-116 cycles a character - the bench's own stamps
   on every vector, the tick's included, cost it one character of 256 in
   five runs of six; the suite, unmetered, none) where one level an entry
   loses most of a burst (245 of 256, 53 overruns, measured). The
   receive engine: one completion per filled half of the
-  ring, 549 cycles between the stamps - 2.1 a character on a 256-byte
-  block -, none per character.
+  ring, 614 to 617 cycles between the stamps - 2.4 a character on a
+  256-byte block -, none per character; the owner's ask 399 cycles
+  mid-block (the call, masked around it), 507 when it retires a block
+  it found over and re-arms the channel.
 - **The edge's latency** (letter u's `uart.edge`, the cycles from the
   sender's TXC to the ring holding the burst's last byte): the
   interrupt receiver 424 cycles after a pended RXC (the handler's entry
-  and body, the stamp's own 65 inside); the engine's completion 659 to
-  766 cycles after TXC at 1 Mbaud and 115200 - within two frames at
+  and body, the stamp's own 65 inside); the engine's completion 731 to
+  838 cycles after TXC at 1 Mbaud and 115200 - within two frames at
   1 Mbaud (480-cycle frames), a fifth of one at 115200. A run that stops
-  short of its block has no edge until the owner asks: 23000 to 30000
+  short of its block has no edge until the owner asks: 12000 to 31000
   cycles on the bench's once-a-tick ask.
 - **The data sheet's own receive sequence, beside it** (a scratch
   program: a bare handler reading RXC, STATUS and DATA, one character an
   entry, 31.6.2.6, on the same loop and meters): 154 cycles a character
-  up to 1 Mbaud against this driver's 211-221 - a gap of 60 cycles:
+  up to 1 Mbaud against this driver's 207-218 - a gap of some 60 cycles:
   the shared vector's question (INTENSET read beside INTFLAG: DRE is a
   condition), the level loop's last RXC read, and the ring's full test
   and the edge; at 3 Mbaud it lost 241 of 256 (115 error entries) where
@@ -569,14 +629,32 @@ bridge between the pads and the PC - as much as of the driver.
   for the run; under the interrupt receiver 126 delivered in order and
   130 counted - exactly the characters whose parity bit is zero - three
   runs of three.
+- **The skip epoch, provoked**: under the receive engine letter s's 130
+  frame errors moved it once - one run published, delivered whole -,
+  under the interrupt receiver 130 times, once a dropped character; the
+  echo of letter h at 2 Mbaud moved it once for its one hardware
+  overrun; every clean leg of letters e, f, g, h, n, p and r left it
+  still.
+- **The console** (`console`, the interrupt transport under the line
+  assembler, a 64-byte receive ring at 115200): HELP, ERR and forty
+  `LED TOG` lines back to back answered forty OKs, every counter zero;
+  forty HELP lines back to back - each reply eight times its command,
+  printed blocking from the thread that drains the ring - filled the
+  ring, 111 characters dropped and counted in `rx_overruns`, 18 replies.
+- **A burst into the receive engine's 64-byte console ring**
+  (`test_samc_dma` letter i, 85 characters sent by a script at the
+  READY prompt, two runs): 85 delivered byte-exact each time, the
+  halves of 32 published by the vector's edge or by an ask that found
+  the block over, the tail by the tick-paced asks, no overrun, no
+  error.
 - **The console's print** enters 139 cycles a byte between the bench's
   stamps (`bench_samc` letter p, 4096 bytes at 115200: 4097 SERCOM5
   entries), its transmit and receive paths inline in the vector.
 - **The vector in SRAM** (`bench_samc_ram`, the handlers in `.ram_text`,
-  [platform.md](platform.md)): with no call left on either path the
-  whole entry runs from SRAM, a third off every figure - the print 92
-  cycles a byte, the loop's transmitter 129 and its receiver 140 a
-  character, and at 3 Mbaud the transmitter x 1.46 where it is 2.15
+  [platform.md](platform.md)): with no call left on a clean
+  character's path, either direction, the whole entry runs from SRAM, a
+  third off every figure - the print 92 cycles a byte, the loop's
+  transmitter 129 and its receiver 139 a character, and at 3 Mbaud the transmitter x 1.46 where it is 2.15
   from the flash, the receiver 0.6 entries a character with no
   overrun.
 - **Erratum 1.10.4 can turn the transmit channel into a writer of the
@@ -633,13 +711,6 @@ Driver gaps (not built):
   TC) costs a TC, an event channel and an EIC line per port for a
   receiver whose bursts the interrupt receiver serves ("The receive
   side, item by item").
-- AN OWNER'S ASK THAT IS SAFE AT ANY CADENCE. Asked every 50 us, the
-  engine lost two to five characters at a block boundary, uncounted
-  (letter n); asked every 2 ms, none. The mechanism is not isolated: the
-  suspect is the suspend landing on a block's last beats. The ask that
-  needs no suspend - the DMAC's ACTIVE register, whose BTCNT is the
-  active channel's live count while ABUSY stands (25.8.14) - is
-  dmac.md's to build and measure.
 - A RECEIVE PATH WITH NO IDLE BEAT AT ALL. The engine is idle from a
   block's last beat to its completion handler's re-arm, which the
   receiver's two levels cover at 3 Mbaud with no other handler longer
@@ -661,13 +732,6 @@ Driver gaps (not built):
   user.
 
 Implemented but not bench-verified:
-- The receive engine's re-arm by the consumer after a full ring left it
-  idle (`resume_rx()` on `consume`, `read_byte`, `read_bulk`): no run of
-  the suites fills the ring under the engine; a letter that holds its
-  consumer back for a block would.
-- `test_samc_dma`'s letter i - a burst typed by hand into the receive
-  engine, its edge now from the vector and its tail from a tick-paced
-  ask - needs a person at the keyboard.
 - The console's CPU share at 115200, through the interrupt transport
   and with one engine, and the per-byte plateau through the bridge:
   `serial_speed`'s occupancy and throughput, whose host side - the

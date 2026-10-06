@@ -1401,14 +1401,91 @@ public:
 
     // ---- progress -----------------------------------------------------------
 
-    /// How far the block has got - the ONE way to ask, and the one
-    /// place erratum 1.10.4 is answered.
+    /**
+     * How far the block has got, read WITHOUT stopping it - the arbiter's
+     * live count where the chapter keeps one, the write-back where the
+     * count was spilled, and nothing claimed where neither speaks for this
+     * block.
+     *
+     * ACTIVE (25.8.14) holds the ACTIVE channel's BTCNT, valid while
+     * ABUSY is set; ABUSY clears when that count is written back and sets
+     * when the next descriptor's count is read from the write-back. A
+     * channel paced one beat per trigger keeps its descriptor in the
+     * active registers between beats for as long as no other channel is
+     * granted (25.6.2.5: the count is written back only when a DIFFERENT
+     * channel is granted, or at the block's end) - measured on the
+     * USART's receive channel, ACTIVE's BTCNT one beat ahead of a
+     * write-back left by an earlier suspend and equal to it once spilled.
+     * So the reading is ACTIVE's when ABUSY stands with this channel's ID,
+     * and otherwise the write-back's, which then holds this channel's
+     * count as of the last time another channel took the active registers.
+     * Both run BEHIND the beats at worst, never ahead.
+     *
+     * WHAT THE WRITE-BACK SAYS IS JUDGED, as harvest() judges it: a VALID
+     * write-back that fails consistent() is refused and counted in
+     * violations() (erratum 1.10.4, or a previous block of this channel
+     * stopped mid-run whose descriptor differs). A write-back with VALID
+     * clear is a FINISHED descriptor - a previous block's, or this one's
+     * last - or the zeros reset() left, and no reading is taken from it:
+     * the progress reported is none, because a block's end is its
+     * completion's to report (TCMPL, or the channel found disabled), never
+     * a finished descriptor that may be an older block's with the same
+     * addresses.
+     *
+     * NO SUSPEND, so none of harvest()'s cost and none of its races: the
+     * channel keeps moving while it is read, and nothing masks interrupts
+     * here but the reads themselves. The descriptor slot is read as the
+     * reference, so the caller reads it where no other context rewrites
+     * the slot - the owner of the block, under whatever claim keeps its
+     * completion handler from starting the next one in between.
+     */
+    static std::optional<DmaProgress> observe() {
+        const uint16_t length = Dmac::descriptor(n).DMAC_BTCNT;
+        uint16_t remaining = length;
+        const uint32_t a = Dmac::active();
+        if ((a & DMAC_ACTIVE_ABUSY_Msk) != 0u &&
+            (a & DMAC_ACTIVE_ID_Msk) == DMAC_ACTIVE_ID(n)) {
+            remaining = static_cast<uint16_t>(a >> DMAC_ACTIVE_BTCNT_Pos);
+        } else {
+            const DmaDescriptor w = Dmac::read_write_back(n);
+            if (w.valid_bit()) {
+                if (!consistent(w, Dmac::read_descriptor(n))) {
+                    ++violations_;
+                    return std::nullopt;
+                }
+                remaining = w.btcnt;
+            }
+        }
+        if (remaining > length) {
+            ++violations_;
+            return std::nullopt;
+        }
+        return DmaProgress{
+            .remaining = remaining,
+            .done = static_cast<uint16_t>(length - remaining),
+            .complete = remaining == 0u,
+        };
+    }
+
+    /// How far the block has got, by STOPPING it - the way that does not
+    /// depend on which channel holds the active registers, and the one
+    /// the streaming engines take.
     ///
     /// The controller keeps BTCNT in an internal register and only spills
     /// it to the write-back section when the channel loses priority, is
     /// SUSPENDED, or is disabled (25.10.2). So a suspend is not a
     /// side-effect of asking, it IS the asking: the channel is suspended,
     /// the write-back read, and the channel resumed.
+    ///
+    /// A SUSPEND THAT LANDS AS A BLOCK'S LAST BEAT IS PENDING stops the
+    /// channel BEFORE that beat - enabled, SUSP set, no TCMPL, the
+    /// write-back not spilled again - and the beat moves after the resume,
+    /// ending the block: at once under a peripheral's standing request
+    /// (the USART's receive channel), at the next trigger where a software
+    /// trigger was taken by the suspend (measured, dmac.md). A reading
+    /// taken here can therefore be overtaken by the block's end within the
+    /// same call, and what the caller decides from it must not be decided
+    /// again from the channel's state read afterwards.
     ///
     /// THE READING IS THEN CHECKED, NOT BELIEVED. Everything in a
     /// write-back descriptor except BTCNT and BTCTRL.VALID is invariant -
@@ -1449,8 +1526,9 @@ public:
         // 70000 harvests under a five-channel load, which is exactly
         // often enough to be mistaken for silicon.
         //
-        // The cost is honest and bounded: a harvest measures ~700 cycles
-        // (15 us at 48 MHz), so that is how long interrupts are masked.
+        // The cost is honest and bounded: a harvest measures ~800 cycles
+        // (17 us at 48 MHz, test_samc_dma letter d), so that is how long
+        // interrupts are masked.
         // It is one more reason harvest() states that its PACING is the
         // caller's policy - a tight loop over it is not free. A suspend
         // that never lands is bounded by `spins` (harvest_spins below).
@@ -1997,8 +2075,10 @@ private:
  * that is not an accident: THE ARRIVAL OF DATA IS NOT AN EVENT ANYONE IS
  * TOLD ABOUT. A receive block completes only when the buffer is full,
  * which at an idle line may be never, so the only way to know how much
- * has arrived is to ASK - and asking means suspending the channel to
- * force the write-back (DmaChannel::harvest). Hence:
+ * has arrived is to ASK: take() suspends the channel to force the
+ * write-back (DmaChannel::harvest), take_landed() reads the arbiter's live
+ * count with no suspend (DmaChannel::observe) - the one the Uart takes.
+ * Hence:
  *
  *   HARVEST PACING IS THE CALLER'S. This engine never schedules itself.
  *   Whoever owns it decides how often to ask - a kernel TimeEvent every
@@ -2078,6 +2158,16 @@ public:
         return start_run<true>(run.data(), run.size());
     }
 
+    /// THE START IN TWO MOMENTS, for an owner whose claim on the channel
+    /// must cover the enable and nothing before it (samc21/sercom.hpp's
+    /// Uart): prepare() writes the slot's three words and the run's count
+    /// on an idle channel - the work, nothing masked - and launch() is the
+    /// enable, one select and one store. start() is the two together.
+    static bool prepare(std::span<uint8_t> run) {
+        return start_run<true, false>(run.data(), run.size());
+    }
+    static void launch() { Channel::start_block(); }
+
     /// Drain `count` elements into ONE cell - the destination held
     /// still. The SPI host's discard sink for a read-only phase that
     /// nobody keeps, where the completion still needs every character
@@ -2099,6 +2189,25 @@ public:
         const auto p = Channel::harvest();
         if (!p) {
             return std::nullopt;
+        }
+        const uint16_t fresh = static_cast<uint16_t>(p->done - taken_);
+        taken_ = p->done;
+        return fresh;
+    }
+
+    /**
+     * The beats landed since the last take, read WITHOUT SUSPENDING the
+     * channel (DmaChannel::observe(): ACTIVE's live count, or this
+     * block's write-back) and taken. Zero when none landed, when the
+     * reading speaks for no beat of this block, or when it was refused
+     * (counted in the channel's violations()). The caller HOLDS THE
+     * BLOCK: no completion handler may retire it and start the next one
+     * between the reading and the take - the owner's claim covers both.
+     */
+    static uint16_t take_landed() {
+        const auto p = Channel::observe();
+        if (!p || p->done <= taken_) {
+            return 0;
         }
         const uint16_t fresh = static_cast<uint16_t>(p->done - taken_);
         taken_ = p->done;
@@ -2148,7 +2257,7 @@ public:
     }
 
 private:
-    template <bool walks, typename T>
+    template <bool walks, bool enable = true, typename T>
     static bool start_run(T* p, size_t count) {
         constexpr uint16_t control = dma_engine_btctrl<T>(false, walks);
         if (count == 0u || count > 0xFFFFu || !dma_aligned(p)) {
@@ -2161,7 +2270,9 @@ private:
             walks ? dma_run_end(p, static_cast<uint32_t>(count)) : reinterpret_cast<uint32_t>(p);
         capacity_ = static_cast<uint16_t>(count);
         taken_ = 0;
-        Channel::start_block();
+        if constexpr (enable) {
+            Channel::start_block();
+        }
         return true;
     }
 

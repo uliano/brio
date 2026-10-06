@@ -1387,11 +1387,21 @@ void rx_lines() {
             uint32_t tick = Ticker::ticks();
             uint32_t asks = 0;
             uint32_t spins = 0;
+            uint32_t ask_least = 0xFFFFFFFFu;
+            uint32_t ask_most = 0;
             while (LoopRxE::rx_pending() < n && spins++ < 4'000'000u) {
                 if (Ticker::ticks() != tick) {
                     tick = Ticker::ticks();
                     ++asks;
+                    // THE ASK'S OWN COST: the call alone, masked around it
+                    // so no handler's entry is counted in it.
+                    disable_interrupts();
+                    const uint32_t t_ask = Ruler::now();
                     (void)LoopRxE::harvest();
+                    const uint32_t c_ask = Ruler::now() - t_ask;
+                    enable_interrupts();
+                    ask_least = c_ask < ask_least ? c_ask : ask_least;
+                    ask_most = c_ask > ask_most ? c_ask : ask_most;
                 }
             }
             const Mark b = mark();
@@ -1401,6 +1411,10 @@ void rx_lines() {
             per_byte("DMAC (the receiver)", r.dm, n);
             print(serial, "  SERCOM1 (the transmitter) ", r.s1.irq, " interrupts; the owner asked ",
                   asks, " times; wrong or missing bytes ", bad, crlf);
+            if (asks != 0u) {
+                print(serial, "  the owner's ask (harvest(), mid-burst): fewest ", ask_least,
+                      " cycles, most ", ask_most, crlf);
+            }
             counters_line<LoopRxE>();
             LoopRxE::release();
             live = Live::none;

@@ -68,7 +68,10 @@
 //      after it, for the plain transport and the transmit engine
 //   r  the receive engine on the loop: the edge from the vector at each
 //      half of the ring, the block boundary under a stream at the wire's
-//      rate, the tail by the owner's ask
+//      rate, the tail by the owner's ask; the owner asking at every turn;
+//      a consumer held back past the ring - the stall, the loss counted in
+//      the skip epoch before the bytes after it are visible, the re-arm by
+//      the consumer's release
 //   s  errors injected under the receive engine and the interrupt
 //      receiver (host): no byte taken to clear an error
 //   t  the interrupt receiver at the generator's top rate on the loop:
@@ -202,6 +205,8 @@ uint32_t mode_read_bulk(uint8_t* p, uint32_t n) {
     }
 }
 
+
+
 void mode_harvest() {
     switch (live) {
         case Mode::rxdma: (void)URxDma::harvest(); break;
@@ -226,6 +231,16 @@ void mode_clear_errors() {
 struct ErrCounts {
     uint8_t rx_overrun, frame, parity, hw_overrun, dma_faults;
 };
+
+/// The skip epoch of the live transport (never cleared: a leg reads its
+/// difference).
+uint32_t mode_skips() {
+    switch (live) {
+        case Mode::plain: return UPlain::rx_skips();
+        case Mode::txdma: return UTxDma::rx_skips();
+        default: return URxDma::rx_skips();
+    }
+}
 
 ErrCounts mode_errors() {
     switch (live) {
@@ -403,6 +418,7 @@ struct LegResult {
     uint32_t first_bad;   ///< 1-based position of the first byte off the stream
     uint32_t vector_edges;   ///< the receive engine's edges from its vector
     uint32_t asks;           ///< the owner's harvest() calls
+    uint32_t skips;          ///< how far rx_skips() moved over the window
     bool drained;
     ErrCounts err;
 };
@@ -441,6 +457,7 @@ LegResult run_leg(const Leg& leg) {
     (void)mode_init(leg.mode, leg.baud, leg.format);
     spin_ms(120);
     mode_clear_errors();
+    const uint32_t skips0 = mode_skips();
     rx_vector_edges = 0;
     DmaChannel<ch_tx>::clear_counters();
     DmaChannel<ch_rx>::clear_counters();
@@ -532,6 +549,7 @@ LegResult run_leg(const Leg& leg) {
 
     r.drained = drain();
     r.err = mode_errors();
+    r.skips = mode_skips() - skips0;
     r.vector_edges = rx_vector_edges;
     return r;
 }
@@ -551,7 +569,7 @@ void report(const Leg& leg, const LegResult& r) {
           " first_bad=", r.first_bad, crlf);
     print(plain, "     rx_overrun=", r.err.rx_overrun, " frame=", r.err.frame,
           " parity=", r.err.parity, " hw_overrun=", r.err.hw_overrun,
-          " dma_faults=", r.err.dma_faults,
+          " dma_faults=", r.err.dma_faults, " skips=", r.skips,
           " drained=", r.drained ? "yes" : "NO", crlf);
     if (leg.mode == Mode::rxdma) {
         print(plain, "     the engine's edges from its vector ", r.vector_edges,
@@ -1006,11 +1024,10 @@ void tn_pressure() {
     // THE OWNER'S ASK, both extremes, through the transport that has the
     // most to lose. The engine's vector publishes every filled half of the
     // ring and re-arms; the owner's harvest() is for the tail. A lazy ask
-    // (2 ms) is the shape letter g runs; an eager one (50 us) suspends the
-    // channel some twenty times a block, and measured, an ask landing on a
-    // block's last beats loses two to four characters at that boundary,
-    // uncounted (docs/samc21/sercom.md) - printed here, its first_bad a
-    // multiple of the block. NEITHER MAY WEDGE.
+    // (2 ms) is the shape letter g runs; an eager one (50 us) asks some
+    // four hundred times a block and races the completion at every boundary.
+    // Both must be byte-exact, with no loss and the skip epoch still, and
+    // neither may wedge.
     static constexpr uint32_t cadences[] = {50, 2000};
     for (uint32_t us : cadences) {
         Leg leg = base_leg(Op::echo, Mode::rxdma);
@@ -1025,9 +1042,9 @@ void tn_pressure() {
         bench.verdict("the transmitter is not left claiming a dead block",
                       !s.tx_busy);
         bench.verdict("bytes crossed", r.received != 0u);
-        if (us >= 2000u) {
-            bench.verdict("asked lazily, the stream is byte-exact", r.first_bad == 0);
-        }
+        bench.verdict("byte-exact, whatever the cadence", r.first_bad == 0);
+        bench.verdict("nothing lost: no overrun, the skip epoch still",
+                      r.err.hw_overrun == 0u && r.err.rx_overrun == 0u && r.skips == 0u);
     }
 }
 
@@ -1241,22 +1258,42 @@ void tq_tx_idle() {
 // ---- r - the receive engine's edge from the vector -------------------------
 
 /// A stream of `n` bytes sent polled at the wire's rate into the receive
-/// engine; on every edge the vector returns the thread drains the ring,
-/// checking each byte against the pattern - and sends nothing while it
-/// does, so the line pauses but never a block boundary goes unserved by
-/// the handler. The tail - what no block completion reports - is the
-/// owner's ask at the end.
+/// engine, in one of three shapes of its consumer:
+///
+///   edge   on every edge the vector returns the thread drains the ring,
+///          checking each byte against the pattern - and sends nothing
+///          while it does, so the line pauses but never a block boundary
+///          goes unserved by the handler;
+///   eager  the owner ASKS at every turn of the sending loop (harvest(),
+///          the run checked as it is published): the ask racing the
+///          completion at every block boundary, the shape an eager clock
+///          lost characters in;
+///   held   the consumer drains NOTHING until the sender is done, so the
+///          ring fills, the engine stalls and the receiver overflows in
+///          the hardware; the drain then checks the ring's bytes, the
+///          consumer's release re-arms the engine, and the skip epoch is
+///          read the moment the first character published after the loss
+///          is visible.
+///
+/// The tail - what no block completion reports - is the owner's ask at
+/// the end.
+enum class Consumer : uint8_t { edge, eager, held };
+
 struct EngineStream {
     uint32_t sent, received, bad, edges, asks;
     uint8_t hw_overruns, rx_overruns;
+    uint32_t skips;        ///< rx_skips() moved by this much over the stream
+    bool skip_first;       ///< (held) it had moved when the bytes after the loss became visible
+    uint32_t held_exact;   ///< (held) the ring's bytes before the loss, equal to the pattern
 };
 
-EngineStream engine_stream(uint32_t baud, uint32_t n) {
+EngineStream engine_stream(uint32_t baud, uint32_t n, Consumer how = Consumer::edge) {
     EngineStream r{};
     loop_live = Loop::rxdma;
     (void)LRxDma::init(clock, baud);
     loop_settle(baud);
     loop_edges = 0;
+    const uint32_t skips0 = LRxDma::rx_skips();
     uint32_t s_tx = lfsr_seed;
     uint32_t s_rx = lfsr_seed;
     uint32_t seen = 0;
@@ -1280,10 +1317,42 @@ EngineStream engine_stream(uint32_t baud, uint32_t n) {
             ++r.sent;
             next = lfsr_next(s_tx);
         }
-        if (loop_edges != seen) {
+        if (how == Consumer::eager) {
+            ++r.asks;
+            (void)LRxDma::harvest();
+            drain_ring();
+        } else if (how == Consumer::edge && loop_edges != seen) {
             seen = loop_edges;
             drain_ring();
         }
+    }
+    if (how == Consumer::held) {
+        // The ring as the stall left it: every byte of it the pattern's
+        // first ones. Then the release re-arms; whatever is published
+        // after it follows the loss, and the epoch must already have moved.
+        spins = 0;
+        while (!Sc1::txc_flag() && spins++ < 400'000u) {
+        }
+        for (;;) {
+            const auto run = LRxDma::read_span();
+            if (run.empty()) {
+                break;
+            }
+            for (const uint8_t b : run) {
+                r.held_exact += b == lfsr_next(s_rx) ? 1u : 0u;
+            }
+            r.received += static_cast<uint32_t>(run.size());
+            LRxDma::consume(static_cast<uint32_t>(run.size()));
+        }
+        const uint32_t t1 = cycles_now();
+        while (cycles_now() - t1 < 20u * 10u * bit_cycles(baud)) {
+        }
+        ++r.asks;
+        (void)LRxDma::harvest();
+        const auto after = LRxDma::read_span();
+        r.skip_first = !after.empty() && LRxDma::rx_skips() != skips0;
+        r.received += static_cast<uint32_t>(after.size());
+        LRxDma::consume(static_cast<uint32_t>(after.size()));
     }
     spins = 0;
     while (!Sc1::txc_flag() && spins++ < 400'000u) {
@@ -1295,10 +1364,13 @@ EngineStream engine_stream(uint32_t baud, uint32_t n) {
     }
     ++r.asks;
     (void)LRxDma::harvest();
-    drain_ring();
+    if (how != Consumer::held) {
+        drain_ring();
+    }
     r.edges = loop_edges;
     r.hw_overruns = LRxDma::hw_overruns();
     r.rx_overruns = LRxDma::rx_overruns();
+    r.skips = LRxDma::rx_skips() - skips0;
     LRxDma::release();
     loop_live = Loop::none;
     return r;
@@ -1310,13 +1382,42 @@ void tr_engine_edge() {
         const EngineStream r = engine_stream(baud, n);
         print(plain, "  ", baud, " baud: sent ", r.sent, ", received ", r.received, ", wrong ",
               r.bad, ", edges from the vector ", r.edges, ", asks ", r.asks, ", hw_overrun ",
-              r.hw_overruns, ", rx_overrun ", r.rx_overruns, crlf);
+              r.hw_overruns, ", rx_overrun ", r.rx_overruns, ", skips ", r.skips, crlf);
         bench.verdict("the whole stream crossed the loop", r.sent == n && r.received == n);
         bench.verdict("byte-exact and in order", r.bad == 0u);
         bench.verdict("each filled half of the ring was an edge from the vector",
                       r.edges >= n / 512u);
         bench.verdict("no byte lost at a block boundary (re-armed in the handler)",
                       r.hw_overruns == 0u && r.rx_overruns == 0u);
+        bench.verdict("the skip epoch did not move", r.skips == 0u);
+    }
+    // THE ASK AT ANY CADENCE: harvest() at every turn of the sending loop,
+    // racing the completion at both block boundaries.
+    for (const uint32_t baud : {1'000'000u, 3'000'000u}) {
+        const EngineStream r = engine_stream(baud, n, Consumer::eager);
+        print(plain, "  ", baud, " baud, the owner asking at every turn: received ", r.received,
+              ", wrong ", r.bad, ", asks ", r.asks, ", edges from the vector ", r.edges,
+              ", hw_overrun ", r.hw_overruns, ", skips ", r.skips, crlf);
+        bench.verdict("asked at every turn, the whole stream crossed", r.received == n);
+        bench.verdict("byte-exact and in order", r.bad == 0u);
+        bench.verdict("no loss, and the skip epoch did not move",
+                      r.hw_overruns == 0u && r.skips == 0u);
+    }
+    // THE CONSUMER HELD BACK past the ring (1024 bytes): the engine stalls,
+    // the receiver overflows, the loss is counted before the first
+    // character after it is visible, and the release re-arms.
+    {
+        constexpr uint32_t baud = 1'000'000u;
+        const EngineStream r = engine_stream(baud, n, Consumer::held);
+        print(plain, "  ", baud, " baud, the consumer held back: received ", r.received,
+              " (the ring's ", r.held_exact, " equal to the pattern), rx_overrun ",
+              r.rx_overruns, ", hw_overrun ", r.hw_overruns, ", skips ", r.skips, crlf);
+        bench.verdict("the ring held the stream's first 1024 bytes", r.held_exact == 1024u);
+        bench.verdict("the stall was counted (rx_overruns) and the overflow (hw_overruns)",
+                      r.rx_overruns == 1u && r.hw_overruns != 0u);
+        bench.verdict("the consumer's release re-armed: characters published after it",
+                      r.received > 1024u);
+        bench.verdict("the skip epoch had moved when they became visible", r.skip_first);
     }
 }
 
@@ -1339,6 +1440,7 @@ struct ErrorLeg {
     uint32_t exact;        ///< bytes equal to the pattern at their position (engine)
     bool in_order;         ///< the received bytes are the pattern's, in order, some skipped
     ErrCounts err;
+    uint32_t skips;        ///< how far rx_skips() moved
 };
 
 ErrorLeg error_leg(Mode m, uint32_t n) {
@@ -1350,6 +1452,7 @@ ErrorLeg error_leg(Mode m, uint32_t n) {
     (void)mode_init(m, 115200);
     spin_ms(120);
     mode_clear_errors();
+    const uint32_t skips0 = mode_skips();
     rx_vector_edges = 0;
     static uint8_t got[300];
     ErrorLeg r{};
@@ -1367,6 +1470,7 @@ ErrorLeg error_leg(Mode m, uint32_t n) {
         r.received += mode_read_bulk(got + r.received, sizeof got - r.received);
     }
     r.err = mode_errors();
+    r.skips = mode_skips() - skips0;
     r.edges = rx_vector_edges;
     back_to_console();
     uint32_t sx = lfsr_seed;
@@ -1413,12 +1517,17 @@ void ts_errors() {
     bench.verdict("the errors were counted (one per run the engine published)",
                   e.err.frame != 0u);
     bench.verdict("published by the engine's vector, not the owner's ask", e.edges >= 1u);
+    print(plain, "  the skip epoch moved ", e.skips, crlf);
+    bench.verdict("the skip epoch moved (the run is delivered, not clean)", e.skips != 0u);
 
     const ErrorLeg i = error_leg(Mode::plain, n);
     print(plain, "  interrupt receiver: received ", i.received, ", frame ", i.err.frame,
           " parity ", i.err.parity, " hw_overrun ", i.err.hw_overrun, crlf);
     bench.verdict("the interrupt receiver delivered n - K and counted K",
                   i.received + i.err.frame == n);
+    print(plain, "  the skip epoch moved ", i.skips, crlf);
+    bench.verdict("the skip epoch moved once for every dropped character",
+                  i.skips == static_cast<uint32_t>(i.err.frame + i.err.parity));
     bench.verdict("what it delivered is the pattern, in order, the hit ones skipped",
                   i.in_order);
 }

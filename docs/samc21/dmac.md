@@ -89,10 +89,25 @@ so a wait for it to clear succeeds instantly having reset nothing.
 The driver's `enable(false)` therefore waits, bounded, and `reset()`
 refuses when the disable did not complete - see the bench findings.
 
-**Suspend is the only window into progress.** The controller keeps
-BTCNT internally and spills it to the write-back only when the
-channel loses arbitration, suspends, or disables (25.10.2). So
-mid-block progress cannot be polled - `harvest()` suspends the
+**Two windows into progress: the arbiter's live count, and a
+suspend.** The controller keeps BTCNT in the ACTIVE channel's internal
+registers and writes it back only when a DIFFERENT channel is granted
+or the block ends (25.6.2.5), or when the channel suspends or disables
+(25.10.2) - but ACTIVE (25.8.14) shows those registers: the active
+channel's ID and its BTCNT, valid while ABUSY is set (cleared when the
+count is written back, set when the next descriptor's count is read
+from the write-back). A channel paced one beat per trigger keeps its
+descriptor there between beats for as long as no other channel is
+granted, so `observe()` reads ACTIVE when it names the channel and
+the write-back otherwise, WITHOUT stopping anything - measured on a
+paced memory channel (letter d: ACTIVE 0x2C8000, 44 beats left after
+20, exactly) and on the USART's receive channel, where ACTIVE's count
+ran one beat ahead of a write-back an earlier suspend had left and
+equalled it once spilled. The write-back half judges what it reads as
+`harvest()` does, and takes no reading from a FINISHED descriptor
+(VALID clear), which may be an older block's: a block's end is its
+completion's to report. `harvest()` is the other window, the one that
+does not depend on who holds the active registers: it suspends the
 channel, reads the write-back, resumes. Two silent edges live inside
 that handshake: a SUSPEND command on a disabled channel is dropped
 (25.6.3.2), and the block can END between the enabled-test and the
@@ -114,7 +129,12 @@ says "suspended" - so the wait could leave the mask only behind a
 software latch in every DMAC image's dispatch. A wait that runs out
 refuses the reading, counts it in `suspend_timeouts()` and leaves the
 suspend command as issued: nothing resumes a channel that may not
-have stopped.
+have stopped. And A SUSPEND THAT LANDS AS THE BLOCK'S LAST BEAT IS
+PENDING stops the channel BEFORE that beat - enabled, SUSP set, no
+TCMPL, the write-back not spilled again - and the beat moves after the
+resume, ending the block within the same call (bench findings): what a
+caller decides from such a reading must not be decided again from the
+channel's state read after it.
 
 **A TRIGGER IS AN EDGE, NOT A LEVEL - PER REQUEST SHAPE, AND THE SHAPE
 IS THE PERIPHERAL MODE'S.** A peripheral asserts its DMA request while
@@ -280,9 +300,10 @@ promise, not an inheritance from whatever a debugger left behind.
   flags/arming/status verbs, `waiting()` (enabled with no trigger
   pending and no beat moving, one select: beside a trigger that stands,
   a channel that cannot move - the half of sercom.md's dead-block
-  predicate only the channel can answer), `harvest()` -> `DmaProgress`
-  with the 1.10.4 validation, `violations()`/`suspend_timeouts()`
-  counters.
+  predicate only the channel can answer), `observe()` -> `DmaProgress`
+  (the live count with no suspend: ACTIVE, or the write-back judged),
+  `harvest()` -> `DmaProgress` (by a suspend), both with the 1.10.4
+  validation, `violations()`/`suspend_timeouts()` counters.
   Everything channel-addressed pays the CHID guard uniformly.
 - **The five engines** - `DmaTxEngine<ch, Elem>`,
   `DmaRxEngine<ch, Elem>`, `DmaLoopEngine<ch, Elem>`,
@@ -325,9 +346,9 @@ promise, not an inheritance from whatever a debugger left behind.
   (the caller decides a block is dead, never the engine - only the
   peripheral's owner can read the flags that make "dead" a fact rather
   than a timeout; what the abandonment loses is stated, not pretended
-  away), and mid-block progress through `DmaChannel::harvest()` and
-  nowhere else, so every write-back reading is validated against the
-  slot.
+  away), and mid-block progress through `DmaChannel::observe()` or
+  `DmaChannel::harvest()` and nowhere else, so every write-back reading
+  is validated against the slot.
 - **`DmaTxEngine` / `DmaRxEngine`** - the optional Uart, SPI host and
   I2C host engines (see sercom.md, spi.md and i2c.md for the task-side
   contracts; a Uart takes ONE of them, erratum 1.10.4 above): drain
@@ -344,8 +365,13 @@ promise, not an inheritance from whatever a debugger left behind.
   is not an event anyone is told about, a block's end is - so
   `complete()`, from the handler on the channel's completion, counts the
   whole run with no write-back read and no suspend (the Uart's edge,
-  sercom.md), and `take()` asks mid-block by harvesting, its PACING the
-  caller's. `halt()` ends a block whose PERIPHERAL stopped asking - an
+  sercom.md), `take_landed()` asks mid-block through `observe()`, with
+  no suspend, for an owner whose claim keeps the completion from
+  starting the next block between the reading and the take (the Uart's
+  ask), and `take()` asks by harvesting; the PACING is the caller's.
+  `prepare(run)` and `launch()` are `start(run)` in its two moments, the
+  slot's stores and the enable, for an owner that masks the enable with
+  the claim it sets and nothing before it (the Uart's re-arm). `halt()` ends a block whose PERIPHERAL stopped asking - an
   I2C client's NACK under ADDR.LEN, the transfer over with beats left -
   and keeps the binding (trigger, interrupts, slot) for the next start;
   `stop()` disarms the interrupts too, for an owner putting the engine
@@ -512,8 +538,9 @@ and the switch says so.
 - Throughput at 48 MHz: a 256-byte word-beat block in 971 cycles (20
   us, ~12 MB/s including setup); software-linked chains re-armed from
   the TCMPL handler run 804 cycles/block (~59700 blocks/s back to
-  back). A harvest measures ~700 cycles (~15 us, letter d's stopwatch
-  included), which is why its pacing is the caller's policy.
+  back). A harvest measures ~800 cycles (~17 us, letter d's stopwatch
+  included), which is why its pacing is the caller's policy; an
+  `observe()` of the same channel ~175 (letter d).
 - **Erratum 1.10.4 does not merely give a bad READING - it kills the
   TRANSFER**, and from outside it looks like a wedged serial port. The
   fingerprint, identical across three independent reproductions: a
@@ -579,7 +606,20 @@ and the switch says so.
   steal the SUSP flag the wait is watching - roughly one loss per
   70000 harvests under load, exactly rare enough to be mistaken for
   silicon. The whole suspend-read-resume sits in one critical
-  section (~15 us of masked interrupts per harvest).
+  section (~17 us of masked interrupts per harvest).
+- **A suspend that lands as the last beat is pending stops the channel
+  before that beat.** A beat-paced memory channel with one beat left,
+  triggered and suspended in the same breath (a scratch letter beside
+  letter d, three runs a shape): in some runs the beat landed first -
+  TCMPL and SUSP both set, the channel disabled -, in the others the
+  suspend did - the channel ENABLED, SUSP alone, no TCMPL, the last
+  byte NOT moved and the write-back not rewritten (an earlier spill's
+  count, or the previous block's final descriptor). After the resume the software trigger was gone (no PEND) and
+  the beat moved at the next one, which ended the block; a peripheral's
+  standing request moves it at once. That is what the Uart's ask lost
+  a character to while it suspended (sercom.md): the reading said one
+  beat left, the resume let the beat end the block, and the channel
+  then found idle was re-armed on the slot that beat had filled.
 - **A suspend lands at once or never.** With a budget of ZERO turns
   the wait refused no reading in letters d and g, and in letter j only
   on the churned channel erratum 1.10.4 corrupts (9 to 14 a run) -
@@ -823,11 +863,12 @@ Driver gaps (not built):
   the TSENS's and the timers' are measured with their drivers; a
   peripheral with no driver here publishes none.
 - A CIRCULAR RECEIVE, the shape whose producer index is the hardware's
-  remaining count: this controller has no circular mode (above) and no
-  readable counter - BTCNT reaches the write-back only on a suspend
-  (25.10.2), so every reading of "how far" is a harvest. The receive
-  engine stays a run its completion re-arms; the shape is born with the
-  ring's external-index half (design/ring.md) and its first user here.
+  remaining count: this controller has no circular mode (above). The
+  count itself is readable without a suspend while the channel holds
+  the active registers (ACTIVE, `observe()`), so what is missing is the
+  mode, not the counter. The receive engine stays a run its completion
+  re-arms; the shape is born with the ring's external-index half
+  (design/ring.md) and its first user here.
 - A copy longer than 65535 elements in one call (BTCNT is sixteen bits):
   the caller's loop, a chain needing the linked descriptors declined
   above.
