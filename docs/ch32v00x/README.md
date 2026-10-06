@@ -42,7 +42,7 @@ driver is measured on the bench.
 | [adc.md](adc.md) | ADC: the F1's converter - 12 bits with a third control register (low power, three watchdogs that can RESET THE CHIP) on the CH32V006, 10 bits with the F1's calibration, Vcal on channel 9 and a trigger delay register on the CH32V003 - the pads deriving their channel, VREFINT as the supply's ruler judged against the PVD's bracket, both groups, the timer triggers a group, the DMA, util's AnalogSampler over it unchanged; measured on both: tCONV to the cycle at four settings (1.47 Msps at the top of the first, 836 ksps of the second), six timer triggers and a seventh pacing the injection group (TIM3's CC1, or TIM2's CC3 where there is no TIM3), the signed injected offsets, the calibration and Vcal at 2/4 and 3/4 of AVDD, THE WATCHDOG SCAN (one watchdog per rank), the watchdog reset judged at the next boot - and THE STALL: a triggered, DMA-served run that occasionally stops converting until ADON is cycled, seen on both parts |
 | [pin.md](pin.md) | GPIO, EXTI and the REMAPS: the one-bit MODE nibble, pulls through OUTDR, BSHR/BCR, the ten lines (eight pads by port select, the PVD's and the AWU's), interrupt or event, AFIO_PCFR1's columns as constexpr tables every driver takes its pads from; measured: the pulls, the nibbles, the atomics, the software trigger raising a flag only on a line in INTENR, a line in event mode ending a WFE in eighteen cycles, port B's seven nibbles, TIM1's channel moved from PD2 to PC4 by its remap; on one jumper the levels, the edges (a pad's edge raising no flag on a line enabled nowhere, the software trigger's rule) and the scanner |
 | [opa.md](opa.md) | OPA: on the CH32V006 one amplifier behind a key pair, four positive pads, a negative pad or a programmable gain with the feedback switched in, the differential PGA and its bias, the output always on the ADC's channel 9; on the CH32V003 three bits of EXTEND_CTR, two pads a side, the output on PD4 (channel 7 through the pad) and no loop but a resistor; measured: the lock and the keys, the PGA reaching channel 9 at both rails, the differential sign, THE DIFFERENTIAL INPUT NETWORK a pull cannot drive, CMP2 not enabling on the CH32V006 - the comparators are the CH32V007's - and the CH32V003's amplifier open-loop as a comparator of its pads |
-| [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` and the WFI rule that forces it, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`, and the two watchdogs `Iwdg` and `Wwdg` (the IWDG biting at 255 ms for 258 computed at the measured LSI, the WWDG's step exact and ITS COUNTER NOT RUNNING UNARMED against the chapter's word); three real resets in the platform suite, three more in the watchdogs' |
+| [platform.md](platform.md) | Platform: `Ch32v00xPlatform` (the csrrci critical section, the WFE-shaped `idle()` entered UNMASKED, the WFI rule that forces the WFE and the lost edge that forces the unmask - measured to the cycle, `ebreak`, the `.noinit` breadcrumb), `Pfic` and the one handler attribute `BRIO_CH32_INTERRUPT` (the hardware prologue/epilogue MEASURED: 83 vs 92 cycles round trip, the default ON), the STK `BasicTicker`, `delay_us` on the STK counter, and the failing half - `Reset` (the flags as history, PINRSTF naming the pin alone on this family), `ResetReporter`, `fault_reset<P>()`, and the two watchdogs `Iwdg` and `Wwdg` (the IWDG biting at 255 ms for 258 computed at the measured LSI, the WWDG's step exact and ITS COUNTER NOT RUNNING UNARMED against the chapter's word); three real resets in the platform suite, three more in the watchdogs' |
 
 The headers not yet behind a document of their own:
 
@@ -284,12 +284,20 @@ loudly.
   USART both pending, the core asleep, the console silent. The
   "sleep first, unmask after" idle of the two Cortex-M0+ targets is
   therefore a deadlock here, and `Ch32v00xPlatform::idle()` sleeps as
-  a WFE instead: PFIC_SCTLR.WFITOWFE turns the next `wfi` into a
+  a WFE instead, UNMASKED: PFIC_SCTLR.WFITOWFE turns `wfi` into a
   wait-for-event and SEVONPEND makes every interrupt entering the
-  pending state a LATCHED event, so an interrupt that turned pending
-  between the kernel's queue check and the sleep makes the `wfi`
-  return at once. The unmask that follows is what lets it be taken.
-  WCH's own `__WFI()` is a WFE as well.
+  pending state a LATCHED event, so an interrupt taken between the
+  unmask and the sleep makes the `wfi` return at once.
+- **A WFE with MIE clear loses an edge on the cycle it goes to sleep.**
+  With interrupts masked the only wake left is SEVONPEND's "new
+  interrupt pending signal" (5.2, WFE item 3), an edge; one that
+  arrives on the very cycle the WFE enters its sleep is neither latched
+  for it nor seen by the sleeping core, the pending bit stands, and no
+  new edge comes - measured to the cycle, one position in every sleep
+  entry, WCH's doubled-`wfi` sequence included. A kernel that slept
+  masked hung on it, the tick pending and enabled; an ENABLED interrupt
+  with MIE set wakes the WFE by its level (item 2), which is why the
+  unmask comes before the sleep ([platform.md](platform.md)).
 - **MIE is not cleared on interrupt entry** (QingKe V2 manual 2.2,
   for the sake of its nesting mode). With nesting disabled in
   INTSYSCR, as this crt leaves it, a handler still runs with MIE set

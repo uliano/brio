@@ -38,6 +38,19 @@
 //      built (CH32V00X_HPE), and the same letter on both builds is the
 //      measurement the project's default rests on.
 //
+//   w  THE IDLE HOOK AGAINST THE TICK'S EDGE, PLACED TO THE CYCLE: with
+//      the STK running as the timebase, its CNT written so the compare
+//      comes D cycles later, D = 0..399, then the kernel's own shape - a
+//      masked check, idle(), until one tick (and, a second pass, two) -
+//      with the core's event latch set and clear by hand before each
+//      try. The edge so walks across every instruction of the idle path
+//      and of the loop around it, the sleep entry included. TIM2 at
+//      1 MHz is the clock of each try and its RESCUE: a try that takes
+//      its 50 ms period is a wake idle() lost. The writes to CNT shorten
+//      the ticks they land in, so kernel time runs fast during the
+//      letter. Prints the cycles from the edge to the caller's loop for
+//      an edge that finds the core asleep, and what an idle() costs
+//      when the latch makes it return at once.
 //   i  (by name only) THREE REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a .noinit token, so it is NOT in
 //      `z`: `z` has to be one console session a tool can judge from a
@@ -52,6 +65,10 @@
 //      against the symbols this image links - in `z`
 //
 // build: boards = v006k8,v003f4
+// build: groups = abcdeiw,t
+// (on the CH32V003 the suite is two images, test_ch32_platform-1 and -2:
+// with letter w the whole is 708 bytes over the part's 15 KB; `i` runs
+// as `--app test_ch32_platform-1` there)
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -65,6 +82,7 @@
 #include "ch32v00x/platform.hpp"
 #include "ch32v00x/reset.hpp"
 #include "ch32v00x/ticker.hpp"
+#include "ch32v00x/tim.hpp"
 #include "ch32v00x/usart.hpp"
 #include "kernel/panic.hpp"
 #include "util/print.hpp"
@@ -238,6 +256,104 @@ void tb_critical() {
                   calls >= 1u && calls < 20u);
     bench.verdict("and it comes back with interrupts enabled",
                   P::interrupts_enabled());
+}
+
+// ---------------------------------------------------------------------------
+// w - the idle hook against the tick's edge, placed to the cycle
+// ---------------------------------------------------------------------------
+using Rescue = Tim<2>;
+volatile uint32_t rescue_periods = 0;
+
+/// Clear the core's event latch (SETEVENT, then a wfi that it ends at
+/// once) and set it again if `latched`: the two states an idle() can be
+/// entered in. Masked.
+void event_latch(bool latched) {
+    pfic_sctlr() = pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend | sctlr_setevent;
+    const uint32_t settled = pfic_sctlr();
+    (void)settled;
+    __asm__ volatile("wfi" ::: "memory");
+    if (latched) {
+        pfic_sctlr() = pfic_sctlr() | sctlr_setevent;
+    }
+}
+
+void tw_edge() {
+    Rescue::init();
+    (void)Rescue::configure(TimConfig{.prescaler = static_cast<uint16_t>(SysClock::hz / 1'000'000u - 1u),
+                                      .period = 49'999u});
+    Rescue::interrupts(Rescue::update_interrupt, true);
+    Pfic::enable(Irq::tim2);
+    Rescue::enable(true);
+    console_drain();
+
+    constexpr uint32_t positions = 400;
+    uint32_t lost[2] = {0, 0};
+    uint32_t first_lost[2] = {0, 0};
+    uint32_t asleep_to_loop = 0;
+    for (uint32_t edges = 1; edges <= 2u; ++edges) {
+        for (uint32_t latched = 0; latched < 2u; ++latched) {
+            for (uint32_t d = 0; d < positions; ++d) {
+                uint32_t to_loop = 0;
+                bool rescued = false;
+                uint32_t took_us = 0;
+                {
+                    P::CriticalSection cs;
+                    event_latch(latched != 0u);
+                    const uint32_t r0 = rescue_periods;
+                    Rescue::set_count(0);
+                    const uint32_t t = Ticker::ticks();
+                    stk()->CNT = stk()->CMP - d;
+                    for (;;) {
+                        P::CriticalSection turn;   // the kernel's own shape
+                        if (Ticker::ticks() - t >= edges) {
+                            break;
+                        }
+                        P::idle();
+                    }
+                    to_loop = stk()->CNT;
+                    took_us = Rescue::count();
+                    rescued = rescue_periods != r0;
+                }
+                if (rescued || took_us > 1500u) {
+                    if (lost[edges - 1u] == 0u) {
+                        first_lost[edges - 1u] = d;
+                    }
+                    ++lost[edges - 1u];
+                }
+                if (edges == 1u && latched == 0u && d == positions - 1u) {
+                    asleep_to_loop = to_loop;
+                }
+            }
+        }
+    }
+
+    // An idle() the latch makes return at once: its whole cost, the two
+    // CNT reads around it included.
+    uint32_t at_once = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        P::CriticalSection cs;
+        event_latch(true);
+        const uint32_t c0 = cycles_now();
+        P::idle();
+        const uint32_t c1 = cycles_now();
+        disable_interrupts();
+        if (c1 > c0 && c1 - c0 < at_once) {
+            at_once = c1 - c0;
+        }
+    }
+
+    Rescue::enable(false);
+    Rescue::interrupts(Rescue::update_interrupt, false);
+    Pfic::disable(Irq::tim2);
+    Rescue::release();
+
+    print(serial, "  ", positions, " edge positions x 2 latch states: lost waiting for one tick ", lost[0],
+          " (first at D=", first_lost[0], "), for two ", lost[1], " (first at D=", first_lost[1], ")", crlf);
+    print(serial, "  an edge that finds the core asleep: ", asleep_to_loop,
+          " cycles to the caller's loop; an idle() the latch returns at once: ", at_once,
+          " cycles (two CNT reads included)", crlf);
+    bench.verdict("no edge position loses the wake, waiting for one tick", lost[0] == 0u);
+    bench.verdict("nor waiting for two (the sleep after a tick was taken)", lost[1] == 0u);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +596,12 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
 
+/// Letter w's rescue and clock: TIM2's update, counted.
+extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+    Rescue::clear_flags(Rescue::update_flag);
+    rescue_periods = rescue_periods + 1u;
+}
+
 /// The software interrupt: the first thing it does is read the cycle
 /// counter, which is letter e's whole measurement.
 extern "C" BRIO_CH32_INTERRUPT void software_handler() {
@@ -530,6 +652,7 @@ int main() {
     bench.letter('c', "the STK timebase and its CNT arithmetic", tc_ticker);
     bench.letter('d', "delay_us on the STK counter", td_delay);
     bench.letter('e', "the interrupt round trip, in cycles", te_latency);
+    bench.letter('w', "the idle hook against the tick's edge, placed to the cycle", tw_edge);
     bench.letter('i', "THREE REAL RESETS (reboots the board)", ti_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 

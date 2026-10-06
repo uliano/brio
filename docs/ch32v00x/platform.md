@@ -23,9 +23,20 @@ the findings below are the entries this document keeps in its place.
   which needs MIE set. Sleeping with MIE clear over a pending interrupt
   is a sleep nobody ends.
 - **The core can sleep as a WFE instead**: PFIC_SCTLR.WFITOWFE turns
-  the next `wfi` into a wait-for-event, and SEVONPEND makes every
-  interrupt entering the pending state an event, LATCHED, so a WFE
-  after the event returns at once (3.1's SCTLR).
+  `wfi` into a wait-for-event, and SEVONPEND makes every interrupt
+  entering the pending state an event, LATCHED, so a WFE after the
+  event returns at once (3.1's SCTLR). The manual's "the subsequent
+  WFI" reads as one-shot; on the CH32V006 WFITOWFE reads back set
+  after the `wfi` and the next `wfi` is a WFE again (measured).
+- **A WFE wakes on an enabled interrupt or on a pending EDGE** (5.2,
+  the WFE list): item (2), an enabled interrupt "generated", with the
+  handler run first - which takes MIE set - and item (3), SEVONPEND's
+  "new interrupt pending signal (the previously generated pending
+  signal does not take effect)" for any line, enabled or not. A
+  sleep entered with MIE clear has only item (3), and **an edge that
+  arrives on the cycle the WFE goes to sleep is lost**: not latched
+  for that WFE, not seen by the sleeping core (the finding below).
+  The pending bit then stands with no new edge to come.
 - **The hardware prologue/epilogue (HPE)** pushes the ten caller-saved
   registers (x1, x5..x7, x10..x15) to the USER STACK on entry - SP
   moves by 48 bytes - and pops them on MRET, two levels deep at most
@@ -62,8 +73,11 @@ the findings below are the entries this document keeps in its place.
 `Ch32v00xPlatform<TB>` ([brio/ch32v00x/platform.hpp](../../brio/ch32v00x/platform.hpp))
 is the concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
-destructor restores only what it found set), `idle()` is the WFE
-sequence above followed by the unmask, `break_here()` is `ebreak`,
+destructor restores only what it found set), `idle()` is the SCTLR
+store, the unmask, then the WFE - an interrupt taken between the
+unmask and the `wfi` latched its event, so the WFE returns, and one
+pending while the core sleeps is an enabled interrupt with MIE set, a
+wake by level that no edge timing can lose; `break_here()` is `ebreak`,
 `atomic_width` 4, the breadcrumb in `.noinit` - and with a Standby
 armed (SLEEPDEEP set by [sleep.md](sleep.md)'s site) `idle()` holds
 the ticker off across the WFE, since a tick turning pending would end
@@ -132,15 +146,49 @@ goes through `panic<P, ResetReporter>(code, context)`.
 
 ## Bench findings
 
-The reference suite is `test_ch32_platform` (thirty verdicts in `z`,
-nine more in letter `i`, which reboots the board three times), on the
-CH32V006K8U6 at 48 MHz. What it measured:
+The reference suite is `test_ch32_platform` (thirty-eight verdicts in
+`z`, nine more in letter `i`, which reboots the board three times), on
+the CH32V006K8U6 at 48 MHz. What it measured:
 
 - **The idle hook wakes.** With the console silent, two `idle()` calls
   covered the 635 us to the next tick and returned with interrupts
   enabled; a 5 ms window with interrupts masked advanced the tick by
   one (the STK interrupt is a pending bit: one tick delivered, the
   rest coalesced).
+- **No edge position loses the wake** (letter `w`): the STK's compare
+  placed by a CNT write at each of 400 cycles after the write, the
+  kernel's shape run against it - a masked check, `idle()`, until one
+  tick and until two - with the event latch set and clear by hand,
+  TIM2 timing each try and rescuing a lost one: 0 of 1600 tries lost.
+  The same letter built over the masked sleep this hook had before
+  (`wfi` with MIE clear, the unmask after) loses 2 of 800 in each
+  pass, one per latch state, and probing the edge to the cycle shows
+  where: the handler is entered a fixed time after the write while the
+  edge comes before the WFE decides (the latch ends it at once), 38 to
+  40 cycles after the edge once the core is asleep - and on the ONE
+  cycle between, the edge is lost and the core sleeps on with the STK
+  pending and enabled, for good (a debugger's halt was the only thing
+  that woke it). Twelve code layouts (the idle path shifted by 0 to 22
+  bytes): the masked sleep lost that one position in every one, the
+  unmasked none; WCH's sequence (SETEVENT, then two `wfi`) under the
+  same masked check loses 45 positions: the 44 from the check to the
+  second `wfi`, whose first `wfi` consumes the edge's latch, and the
+  one cycle of its own sleep entry. An edge on a line the PFIC
+  does not enable (TIM2's update, a SEVONPEND-only wake) keeps the
+  hole with the unmasked order too: one position per sleep entry.
+- **What the order costs**, in HCLK cycles at 48 MHz: from an edge
+  that finds the core asleep to the handler's first statement 25
+  against the masked order's 38 to 40 (the interrupt is taken by the
+  wake itself instead of after an unmask), to the caller's loop 113
+  against 120; an `idle()` the latch returns at once 54 against 63,
+  the call and two CNT reads included. The Sleep path compiles to a
+  leaf - one SCTLR load, its store, `csrsi`, `wfi`, eleven
+  instructions with the SLEEPDEEP test - and the Standby path is out
+  of line. The loop still turns twice per interrupt (200 turns over 100
+  quiet ticks, before and after): the waking edge leaves the latch set
+  and the next `idle()` returns at once. Clearing it after the wake
+  (SETEVENT and one more `wfi`) was measured at 101 turns for 100
+  ticks and 12 cycles more on every wake, and is not taken.
 - **The STK arithmetic holds.** CMP = 47999 as programmed; over 200
   reloads the CNT-delta accumulation `delay_us` is built on tracked
   the interrupt count to 622 cycles of error out of 9.6 million
@@ -202,9 +250,10 @@ letters ending in real resets):
 
 ## On the CH32V003F4P6
 
-The same suite, the same 30 verdicts, on the family's smallest part
+The same suite on the family's smallest part
 ([../boards/ch32v003f4.md](../boards/ch32v003f4.md)) built as
-`rv32ec_xw`: the reset flags and their history, the critical section,
+`rv32ec_xw`, as two images there (letter `t` apart: with letter `w`
+the whole is over the part's 15 KB): the reset flags and their history, the critical section,
 the STK timebase (CMP 47999 at 48 MHz), `delay_us` (100 us in 4858
 cycles), and `idle()` through the WFI-to-WFE conversion sleeping and
 waking on the tick as on the CH32V006 - the SRAM-resident WFE the
@@ -227,12 +276,14 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The idle hook's POWER: `idle()` is proven to sleep and wake, not to
-  sleep cheaply - whether the latched event is consumed by the `wfi`
-  or leaves the loop spinning is a current measurement with the probe
-  detached (a core in debug mode never sleeps, QingKe V2 manual 5.1).
-  The Standby it enters when [sleep.md](sleep.md)'s site has armed one
-  is measured the same way.
+- The idle hook's POWER: `idle()` is proven to sleep and wake, and the
+  loop to turn twice per interrupt and no more, not to sleep cheaply -
+  a current measurement with the probe detached (a core in debug mode
+  never sleeps, QingKe V2 manual 5.1). The Standby it enters when
+  [sleep.md](sleep.md)'s site has armed one is measured the same way.
+- The unmasked order on the CH32V003F4P6: the order was measured on the
+  CH32V006's V2C; the V2A's letter `w` (test_ch32_platform-1) on that
+  board would say the same of its core.
 - The HPE's saving on a handler that calls into the kernel: the
   minimal handler was measured; a letter timing the USART handler's
   round trip both ways would put a number on the larger case.

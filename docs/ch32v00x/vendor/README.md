@@ -26,10 +26,11 @@ trusted.
 NO ERRATA SHEET. WCH publishes none for this family that the desk
 could find; check the download page before each chapter, and until one
 exists the "Bench findings" section of each document under
-`docs/ch32v00x/` is where this family's errata are written - two stand
-already, in [../platform.md](../platform.md): a WFI that wakes only for
-an interrupt it can take, and a MIE that interrupt entry does not
-clear.
+`docs/ch32v00x/` is where this family's errata are written - three
+stand already, in [../platform.md](../platform.md): a WFI that wakes
+only for an interrupt it can take, a WFE with MIE clear that loses a
+pending edge arriving on the cycle it goes to sleep, and a MIE that
+interrupt entry does not clear.
 
 The desk's copies live in `~/Documenti/Elettronica/WCH/`, together
 with the factory image dumped from the bench module before its first

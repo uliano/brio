@@ -28,8 +28,9 @@
 // why that pin). Connect at 115200 8N1 and type:
 //   HELP | LED ON|OFF|TOG | UPTIME | BEATS | ERR
 //
-// Between keystrokes the CPU sleeps in WFI, woken by the system counter
-// or the USART. No polling anywhere.
+// Between keystrokes the CPU sleeps in the platform's idle (a WFE on
+// this core, ch32v00x/platform.hpp), woken by the system counter or the
+// USART. No polling anywhere.
 //
 // build: boards = v006k8,v003f4
 // build: monitor_speed = 115200

@@ -17,11 +17,10 @@
  * All-or-nothing masking, like the AVR's I flag and ARMv6-M's PRIMASK;
  * this core has no priority threshold that generic code could use.
  *
- * WHAT IS NOT HERE YET, and is deliberate rather than forgotten: no
- * sleep site (the AWU and the standby modes of RM ch. 5 have no user),
- * no reset.hpp to say WHICH reset happened, and no idle_until() - this
- * platform is not tickless, its timebase is the core counter and stops
- * with the core. Each arrives with the driver that needs it.
+ * WHAT IS NOT HERE, and is deliberate rather than forgotten: no
+ * idle_until() - this platform is not tickless, its timebase is the
+ * core counter and stops with the core. The sleep sites are
+ * ch32v00x/sleep.hpp's, which reset happened is ch32v00x/reset.hpp's.
  */
 
 #pragma once
@@ -43,8 +42,8 @@ struct Ch32v00xPlatform {
     using Timebase = TB;
 
     /**
-     * Entered with interrupts MASKED and nothing to do: sleep until the
-     * next interrupt.
+     * Entered with interrupts MASKED and nothing to do: unmask, then
+     * sleep until the next interrupt.
      *
      * NOT A PLAIN WFI, AND THIS IS THE CORE'S OWN RULE. The RISC-V
      * privileged specification lets WFI resume when an interrupt is
@@ -57,24 +56,49 @@ struct Ch32v00xPlatform {
      * Measured on the bench: the tick and the USART both pending, the
      * core asleep with MIE clear, the console silent.
      *
-     * The way out is the core's WFE. PFIC_SCTLR.WFITOWFE makes the NEXT
-     * wfi behave as a wait-for-EVENT, and SEVONPEND makes every
-     * interrupt entering the pending state an event, masked or not -
-     * with the event LATCHED, so an interrupt that turned pending
-     * between the caller's queue check and this instruction makes the
-     * wfi return at once instead of sleeping (3.1's SCTLR: "if the WFE
-     * instruction is not executed, the system will be woken up
-     * immediately after the next execution"). The core wakes and
-     * continues HERE, with MIE still clear; the unmask that follows is
-     * what lets the interrupt be taken. The lost-wakeup window is
-     * closed by the latch, not by instruction ordering. WCH's own
-     * __WFI() is a WFE too - with a manual SETEVENT and a doubled wfi,
-     * because it does not use SEVONPEND.
+     * So the instruction is the core's WFE, and it is executed with MIE
+     * SET. PFIC_SCTLR.WFITOWFE makes wfi a wait-for-EVENT, and SEVONPEND
+     * makes every interrupt entering the pending state an event,
+     * LATCHED: a WFE executed after the event returns at once (3.1's
+     * SCTLR: "if the WFE instruction is not executed, the system will
+     * be woken up immediately after the next execution"). The order is
+     * store, unmask, wfi, and each interleaving with an interrupt is
+     * covered:
+     *  - pending between the caller's check and the unmask: taken at
+     *    the unmask, and its pending edge latched - the WFE returns;
+     *  - pending between the unmask and the wfi: taken there, latched
+     *    the same way - the WFE returns, the caller's loop turns and
+     *    finds what the handler posted;
+     *  - pending while asleep, or ON the cycle the WFE goes to sleep:
+     *    an ENABLED interrupt with MIE set is a wake by 5.2's WFE item
+     *    (2), "woken up when an interrupt is generated", and the handler
+     *    runs before the instruction after the wfi.
+     * Measured on the CH32V006 with the STK's edge placed to the cycle
+     * across the whole sequence and the window between the unmask and
+     * the wfi widened by eight nops: no position loses the wake.
      *
-     * WFITOWFE is written before every wfi because the manual says
-     * "the subsequent WFI", one-shot, and the vendor's helpers re-set
-     * it each time; SEVONPEND is sticky but costs nothing to re-assert
-     * in the same store.
+     * WHY NOT SLEEP MASKED. With MIE clear the only wake left is 5.2's
+     * item (3), SEVONPEND's "NEW interrupt pending signal" - an EDGE -
+     * and the edge has a hole: a pending edge arriving on the very
+     * cycle the WFE goes to sleep is neither latched for that WFE nor
+     * seen by the sleeping core. Measured: exactly one cycle in each
+     * sleep entry, every layout, with the vendor's doubled wfi too.
+     * The pending bit then stands, the STK's CNTIF with it, so no new
+     * edge ever comes: the core sleeps for ever with the tick pending
+     * and enabled. A kernel loop entering sleep at a phase that walks
+     * against the tick's (anything asynchronous to it) meets that cycle
+     * sooner or later. The hole stays for a line the PFIC does NOT
+     * enable (a SEVONPEND-only wake, measured on TIM2's update): such a
+     * wake waits for its line's next edge.
+     *
+     * WFITOWFE and SEVONPEND read back set after a wfi (measured: the
+     * manual's "the subsequent WFI" is not one-shot here), so the store
+     * is not a re-arm; it stays because a WFE is what makes the unmask
+     * first safe, and this hook does not trust that nothing else wrote
+     * the register. The waking edge also leaves the latch set, so the
+     * NEXT idle() returns at once and the caller's loop turns twice per
+     * interrupt - measured, and left: clearing the latch would be one
+     * more store and wfi on every wake.
      *
      * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this
      * is the plain Sleep of QingKe 5.1 (the core clock gated, STK and
@@ -92,20 +116,19 @@ struct Ch32v00xPlatform {
      * from just before) still ends the first WFE at once: the kernel
      * loop simply turns and sleeps again, which is why a program that
      * wants a Standby lets the loop idle and does not call this once.
+     * The Standby is the cold path, out of line, so the Sleep the
+     * kernel loop takes every turn is a leaf: one load, one store, the
+     * unmask and the wfi.
      */
     static void idle() {
-        const bool deep = (pfic_sctlr() & sctlr_sleepdeep) != 0u;
-        if (deep) {
-            TB::pause();
-            stk()->SR = 0;
-            Pfic::clear_pending(Irq::systick);
+        const uint32_t sctlr = pfic_sctlr();
+        if ((sctlr & sctlr_sleepdeep) != 0u) {
+            idle_deep(sctlr);
+            return;
         }
-        pfic_sctlr() = (pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
-        __asm__ volatile("wfi" ::: "memory");
-        if (deep) {
-            TB::resume();
-        }
+        pfic_sctlr() = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
         enable_interrupts();
+        __asm__ volatile("wfi" ::: "memory");
     }
 
     /// mstatus.MIE readback: the one bit CriticalSection saves.
@@ -146,6 +169,19 @@ struct Ch32v00xPlatform {
     static PanicRecord& panic_record() { return panic_record_; }
 
 private:
+    /// idle() with SLEEPDEEP armed: the tick held off across the
+    /// Standby (idle()'s comment says why), then the same store, unmask
+    /// and wfi.
+    [[gnu::noinline]] static void idle_deep(uint32_t sctlr) {
+        TB::pause();
+        stk()->SR = 0;
+        Pfic::clear_pending(Irq::systick);
+        pfic_sctlr() = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
+        enable_interrupts();
+        __asm__ volatile("wfi" ::: "memory");
+        TB::resume();
+    }
+
     [[gnu::section(".noinit")]] static inline PanicRecord panic_record_;
 };
 
