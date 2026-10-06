@@ -66,13 +66,19 @@
 //   k  THE STUCK BUS: the peer holding SDA, unstick() counting the
 //      clocks until it lets go, and the STOPF its hand-made STOP leaves
 //      cleared with no entry of the event vector
+//   r  THE REPEATED START OF A WRITE-THEN-READ, requested on the TxE of
+//      the last written byte: one to four bytes written then four read,
+//      at both speeds, through the pump and the engines, the peer counting
+//      and summing what it took - then the peer REFUSING that last byte:
+//      i2c_nack_data, no START or STOP left standing, MSL clear, and the
+//      next tenure on the same host running
 //
 // With the peer attached `z` outlasts `brio run`'s default 60 s (the
 // peer's command windows are hundreds of milliseconds each): pass
 // `--timeout 400`.
 //
 // build: boards = v006k8,v003f4
-// build: groups = aiw,bc,de,fg,k
+// build: groups = aiw,bc,de,fg,k,r
 // (the kernel letter h is in no group of the CH32V003 build: its image
 // alone is 216 bytes over the part's 15 KB, and its prose is not for
 // shortening - it runs on the CH32V006)
@@ -1244,6 +1250,155 @@ void th_kernel() {
 }
 
 // ===========================================================================
+// r - the repeated START of a write-then-read, acknowledged and refused
+// ===========================================================================
+
+/// One write-then-read through the plain host or the DMA host.
+uint8_t either_tenure(bool dma, const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len,
+                      I2cSpeed speed) {
+    return dma ? dma_tenure(twilink::dut_addr, tx, tx_len, rx, rx_len, speed)
+               : host_tenure(twilink::dut_addr, tx, tx_len, rx, rx_len, speed);
+}
+
+/// The DMA host takes the vectors (the plain host keeps the command
+/// channel, so it is brought back before the peer is spoken to again).
+void bring_up(bool dma) {
+    if (dma) {
+        dma_host_live = true;
+        (void)DmaHost::init(clock);
+    }
+}
+void put_down(bool dma) {
+    if (dma) {
+        DmaHost::release();
+        dma_host_live = false;
+        host_ready();
+    }
+}
+
+/// THE REPEATED START IS REQUESTED ON THE TxE OF THE LAST WRITTEN BYTE
+/// (ch32v00x/i2c.hpp): one to four bytes written, then four read, at both
+/// speeds, through the pump and through the engines. Acknowledged, the
+/// peer counts and sums every written byte and the read is its pattern;
+/// with the LAST written byte refused, the tenure is i2c_nack_data, START
+/// is not left standing, the controller lets the bus go, and the next
+/// tenure on the same host runs.
+void tr_restart() {
+    if (!need_peer()) {
+        return;
+    }
+    bool ack_ok = true;
+    bool refuse_status = true;
+    bool refuse_clean = true;
+    bool refuse_next = true;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        for (const bool dma : {false, true}) {
+            // Acknowledged: one serve for the four tenures, counted at the end.
+            twilink::Params a{};
+            a.count = 0;   // the deadline ends it: a count would end it inside a tenure
+            a.ms = 300;
+            a.addr = twilink::dut_addr;
+            a.seed = static_cast<uint8_t>(0x50u + (dma ? 8u : 0u) + static_cast<uint8_t>(speed));
+            a.pattern = twilink::pattern_counting;
+            if (!peer_act(Op::serve, a)) {
+                bench.verdict("the peer accepted the serve", false);
+                return;
+            }
+            bring_up(dma);
+            uint16_t sum = 0;
+            uint8_t mism = 0;
+            uint8_t sts[4] = {};
+            uint32_t ev[4] = {};
+            for (uint8_t n = 1; n <= 4u; ++n) {
+                for (uint8_t i = 0; i < n; ++i) {
+                    tx_buf[i] = static_cast<uint8_t>(0x31u * n + i);
+                    sum = static_cast<uint16_t>(sum + tx_buf[i]);
+                }
+                for (uint8_t i = 0; i < 4u; ++i) {
+                    rx_buf[i] = 0xEE;
+                }
+                sts[n - 1u] = either_tenure(dma, tx_buf, n, rx_buf, 4, speed);
+                ev[n - 1u] = host_isr_entries;
+                uint8_t m = 0;
+                for (uint8_t i = 0; i < 4u; ++i) {
+                    if (rx_buf[i] != twilink::pattern_value(a.pattern, a.seed,
+                                                            static_cast<uint16_t>(4u * (n - 1u) + i))) {
+                        ++m;
+                    }
+                }
+                if (m != 0u) {
+                    print(serial, "    read after ", n, " written: ", hex(rx_buf[0]), " ",
+                          hex(rx_buf[1]), " ", hex(rx_buf[2]), " ", hex(rx_buf[3]), " (seed ",
+                          hex(a.seed), ")", crlf);
+                }
+                mism = static_cast<uint8_t>(mism + m);
+            }
+            put_down(dma);
+            settle_ms(350);
+            twilink::Report r{};
+            const bool rep = peer_report(r);
+            const bool good = rep && sts[0] == i2c_ok && sts[1] == i2c_ok && sts[2] == i2c_ok &&
+                              sts[3] == i2c_ok && mism == 0u && r.aux0 == 10u && r.sum == sum &&
+                              r.addr_hits == 8u;
+            ack_ok = ack_ok && good;
+            print(serial, "  ", i2c_speed_hz(speed) / 1000u, " kHz ", dma ? "engines" : "pump   ",
+                  " acknowledged: status ", sts[0], "/", sts[1], "/", sts[2], "/", sts[3],
+                  ", event entries ", ev[0], "/", ev[1], "/", ev[2], "/", ev[3], ", read mism ", mism,
+                  "; peer took ", r.aux0, " (10) sum ", hex(r.sum), " (", hex(sum), ") address hits ",
+                  r.addr_hits, " (8)", good ? "" : "  <- WRONG", crlf);
+
+            // Refused: the LAST written byte NACKed, one serve a point.
+            for (uint8_t n = 1; n <= 4u; ++n) {
+                twilink::Params f{};
+                f.count = 0;
+                f.ms = 150;
+                f.addr = twilink::dut_addr;
+                f.nack_at = n;
+                if (!peer_act(Op::serve, f)) {
+                    bench.verdict("the peer accepted the nack-at serve", false);
+                    return;
+                }
+                bring_up(dma);
+                for (uint8_t i = 0; i < n; ++i) {
+                    tx_buf[i] = static_cast<uint8_t>(0x70u + i);
+                }
+                const uint8_t st = either_tenure(dma, tx_buf, n, rx_buf, 4, speed);
+                const uint16_t c1 = H::regs().CTLR1;
+                settle_ms(1);
+                const uint16_t c1_later = H::regs().CTLR1;
+                const uint16_t s2_later = H::status2();
+                const uint8_t next = either_tenure(dma, nullptr, 0, nullptr, 0, speed);
+                put_down(dma);
+                settle_ms(200);
+                twilink::Report r{};
+                const bool rep = peer_report(r);
+                const bool st_ok = st == i2c_nack_data && rep &&
+                                   (r.flags & twilink::report_nacked) != 0u;
+                const bool clean = (c1_later & (i2c_start | i2c_stop)) == 0u &&
+                                   (s2_later & i2c_msl) == 0u;
+                refuse_status = refuse_status && st_ok;
+                refuse_clean = refuse_clean && clean;
+                refuse_next = refuse_next && next == i2c_ok;
+                print(serial, "  ", i2c_speed_hz(speed) / 1000u, " kHz ", dma ? "engines" : "pump   ",
+                      " ", n, " written, the last refused: status ", st, ", CTLR1 at the end ",
+                      hex(c1), " then ", hex(c1_later), ", STAR2 ", hex(s2_later),
+                      ", the next tenure ", next, "; peer flags ", hex(r.flags), " address hits ",
+                      r.addr_hits,
+                      st_ok && clean && next == i2c_ok ? "" : "  <- WRONG", crlf);
+            }
+        }
+    }
+    bench.verdict("one to four bytes written then four read, both speeds, pump and engines: "
+                  "every written byte taken by the peer, every read byte its pattern",
+                  ack_ok);
+    bench.verdict("the last written byte refused: i2c_nack_data, the peer's own NACK",
+                  refuse_status);
+    bench.verdict("and the controller lets the bus go: no START or STOP left standing, MSL clear",
+                  refuse_clean);
+    bench.verdict("the next tenure on the same host runs (i2c_ok)", refuse_next);
+}
+
+// ===========================================================================
 // k - the stuck bus
 // ===========================================================================
 
@@ -1387,6 +1542,9 @@ int main() {
     bench.letter('i', "THE REFUSAL, wireless: a speed the clock cannot make, i2c_rejected "
                       "inside start() through the arbiter", ti_refusal);
     bench.letter('k', "the stuck bus: the peer holding SDA, unstick() counting", tk_unstick);
+    bench.letter('r', "THE REPEATED START on the last byte's TxE: 1 to 4 written then read, "
+                      "acknowledged and the last refused, both speeds, pump and engines",
+                 tr_restart);
     bench.letter('w', "the wire probe: each line held low for 500 ms, for the other end to read (no verdict)",
                  tw_wire_probe, false);
 

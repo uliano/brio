@@ -3,8 +3,8 @@
 // (ch32v00x/i2c.hpp) against a PEER BOARD, one bench line per tenure
 // shape, size, speed and engine, in the grammar every family prints.
 //
-// WHY AN IMAGE OF ITS OWN: bench_ch32 is 37.9 KB of the CH32V006's 40 KB
-// of program flash (ch32v00x/ld/ch32v006k8.ld stops the image short of
+// WHY AN IMAGE OF ITS OWN: bench_ch32 fills nearly all of the CH32V006's
+// 40 KB of program flash (ch32v00x/ld/ch32v006k8.ld stops the image short of
 // the NV partition), and this letter - two instantiations of the host,
 // the pump's and the engines', and the peer's command channel - is about
 // ten more. The ruler, the idle adapter, the meters and the console are
@@ -39,7 +39,10 @@
 //      and 16 read; n counts both), i2c.probe (0x2C) and i2c.probe.nack
 //      (0x23, nobody), i2c.write.nack (1 and 2 bytes to 0x23: the NACK
 //      named from the address). Each the best of 8 runs, every byte read
-//      judged against the peer's pattern; the line's irq and isr are
+//      judged against the peer's pattern - a run whose tenure failed is
+//      not taken, nor one whose wall is under the wire, which no tenure
+//      can be: such a wall is a fault of the instrument, counted, printed
+//      and failing the letter; the line's irq and isr are
 //      I2C1's two vectors, channels 6 and 7 and the tick; a second line
 //      gives the wire in cycles, "the rest" above it (the fixed cost of
 //      the tenure) and start() alone (the best of 8, the completion
@@ -293,6 +296,11 @@ constexpr uint32_t i2c_periods(I2cShape k, uint8_t n) {
 /// The measured SCL period of each speed, in sixteenths of a cycle.
 uint32_t i2c_period_x16[2] = {};
 
+/// Walls the best-of filters refused for being under the bus's own time:
+/// an instrument fault, never a measurement, so the letter does not pass
+/// with one in it.
+uint32_t impossible_walls = 0;
+
 uint8_t* i2c_tx() { return ram; }
 uint8_t* i2c_rx() { return ram + 256; }
 
@@ -320,10 +328,15 @@ template <typename Host>
 void run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
     const typename Host::Request r = i2c_request<Host>(k, n, speed);
     const uint8_t s_ix = static_cast<uint8_t>(speed);
+    // The bus's own time for this tenure: a wall below it is impossible,
+    // and the best of the runs takes no such wall and no failed tenure.
+    const uint32_t wire = i2c_periods(k, n) * i2c_period_x16[s_ix] / 16u;
     console_drain();
     BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
     bool ok = true;
     bool data = true;
+    uint8_t below = 0;
+    uint32_t lowest = 0xFFFF'FFFFu;
     for (uint8_t run = 0; run < 8u; ++run) {
         for (uint32_t i = 0; i < n; ++i) {
             i2c_tx()[i] = static_cast<uint8_t>(0x40u + run + i);
@@ -349,10 +362,14 @@ void run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
             }
             peer_gave += r.rx_len;
         }
-        if (s.wall < best.wall) {
+        if (s.wall < wire) {
+            ++below;
+            lowest = s.wall < lowest ? s.wall : lowest;
+        } else if (st && s.wall < best.wall) {
             best = s;
         }
     }
+    impossible_walls += below;
     uint32_t launch = 0xFFFF'FFFFu;
     for (uint8_t run = 0; run < 8u; ++run) {
         i2c_done = false;
@@ -389,7 +406,6 @@ void run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
         }
     }
     const uint32_t bytes = k == I2cShape::wr ? 1u + n : k == I2cShape::probe_nack ? 0u : n;
-    const uint32_t wire = i2c_periods(k, n) * i2c_period_x16[s_ix] / 16u;
     const uint32_t wire_bps =
         bytes == 0u || wire == 0u
             ? 0u
@@ -397,7 +413,11 @@ void run_i2c(const char* op, I2cShape k, uint8_t n, I2cSpeed speed) {
     bench_line(serial, op, bytes, best, Ruler::hz(), wire_bps);
     print(serial, "  the wire ", wire, " cycles (", i2c_periods(k, n), " periods), the rest ",
           best.wall > wire ? best.wall - wire : 0u, ", start() ", launch,
-          data ? ", data exact" : ", DATA WRONG", ok ? "" : ", A TENURE FAILED", crlf);
+          data ? ", data exact" : ", DATA WRONG", ok ? "" : ", A TENURE FAILED");
+    if (below != 0u) {
+        print(serial, ", ", below, " WALLS BELOW THE WIRE REFUSED (the lowest ", lowest, ")");
+    }
+    print(serial, crlf);
 }
 
 /// The SCL period at `speed`, measured as the slope of two engined
@@ -407,6 +427,10 @@ void measure_period(I2cSpeed speed) {
     uint8_t j = 0;
     for (const uint8_t n : {uint8_t{16}, uint8_t{255}}) {
         const I2cDma::Request r = i2c_request<I2cDma>(I2cShape::write, n, speed);
+        // The register's own SCL rate is the fastest the bus can run (CCR
+        // rounded up, the rise time only adding): a wall under that wire
+        // is impossible and refused like a failed tenure.
+        const uint32_t floor = i2c_periods(I2cShape::write, n) * (Ruler::hz() / I2cDma::scl_hz(speed));
         uint32_t best = 0xFFFF'FFFFu;
         for (uint8_t run = 0; run < 4u; ++run) {
             Stopwatch<Ruler> sw;
@@ -419,7 +443,9 @@ void measure_period(I2cSpeed speed) {
                 }
                 peer_took += n;
             }
-            if (wall < best) {
+            if (wall < floor) {
+                ++impossible_walls;
+            } else if (ok && wall < best) {
                 best = wall;
             }
         }
@@ -472,6 +498,7 @@ void ti_i2c() {
                                              "i2c.wr.dma",         "i2c.probe.dma",
                                              "i2c.probe.nack.dma", "i2c.write.nack.dma"};
     bool all = true;
+    impossible_walls = 0;
     for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
         // The peer serves at 0x2C for a bounded window, counting what it
         // takes and what it gives; the window is waited out after the
@@ -519,7 +546,12 @@ void ti_i2c() {
     }
     i2c_mode = I2cMode::none;
     I2cPump::release();
-    bench.verdict("ran", all);
+    if (impossible_walls != 0u) {
+        print(serial, "  ", impossible_walls, " WALLS UNDER THE WIRE were refused: the ruler or the "
+                      "harness misread a tenure",
+              crlf);
+    }
+    bench.verdict("ran", all && impossible_walls == 0u);
 }
 
 void banner() {

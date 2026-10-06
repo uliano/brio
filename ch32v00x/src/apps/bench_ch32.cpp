@@ -9,7 +9,7 @@
 //
 // NOT A TEST. TestBench frames it (the menu, the ALL: line bin/brio
 // waits for); every letter ends with one verdict "ran", and letter r's
-// two verdicts on the ruler are the only ones that judge anything.
+// three verdicts on the ruler are the only ones that judge anything.
 //
 // THE BOARD AND THE RATES. The CH32V006K8U6 module or the CH32V003F4P6
 // board at 48 MHz (the HSI's 24 MHz doubled by the PLL), the rate
@@ -49,7 +49,11 @@
 //      family, as every wait of one tick period or more is
 //      (ch32v00x/delay.hpp), so the check reads TWO delay_us(clock, 500)
 //      back to back on the ruler: at least hz/1000 cycles, and under
-//      hz/1000 + 5 per cent.
+//      hz/1000 + 5 per cent. THE WRAP: consecutive reads for 200 tick
+//      periods with interrupts on, then 50 windows of 100 reads with
+//      interrupts masked, each straddling one restart of the counter -
+//      every step forward and under a tenth of a period (a composition
+//      that lost or added a period would step back or ahead by one).
 //      Then the instrument's cost, four lines with n=0 and wire=0; in
 //      the three averaged ones EVERY FIELD IS THE RUN'S TOTAL DIVIDED BY
 //      ITS UNITS, and the note line before each states the units and the
@@ -395,6 +399,44 @@ void tr_ruler() {
     bench.verdict("2 x 500 us on the ruler is at least hz/1000 cycles (at least, never early)",
                   first && second && took >= ms);
     bench.verdict("and under hz/1000 + 5 per cent", took < ms + ms / 20u);
+
+    // THE WRAP: the counter restarts every period, and the composed read
+    // must step over it (util/cycle_count.hpp). Interrupts on, the tick
+    // handler and the console's land between reads; masked, the restart
+    // falls inside a window the handler cannot enter.
+    console_drain();
+    uint32_t worst_on = 0;
+    {
+        uint32_t a = Ruler::now();
+        const uint32_t t0 = Ticker::ticks();
+        while (Ticker::ticks() - t0 < 200u) {
+            const uint32_t b = Ruler::now();
+            if (b - a > worst_on) {
+                worst_on = b - a;
+            }
+            a = b;
+        }
+    }
+    uint32_t worst_masked = 0;
+    for (uint8_t w = 0; w < 50u; ++w) {
+        fresh_tick();
+        while (stk()->CNT < stk()->CMP - 3000u) {
+        }
+        Plat::CriticalSection cs;
+        uint32_t a = Ruler::now();
+        for (uint8_t i = 0; i < 100u; ++i) {
+            const uint32_t b = Ruler::now();
+            if (b - a > worst_masked) {
+                worst_masked = b - a;
+            }
+            a = b;
+        }
+    }
+    print(serial, "  the wrap: the largest step between two reads, 200 periods with interrupts on ",
+          worst_on, ", 50 masked windows across a restart ", worst_masked, " cycles", crlf);
+    bench.verdict("every read steps forward across the counter's restart, by under a tenth of "
+                  "a period",
+                  worst_on < ms / 10u && worst_masked < ms / 10u);
 
     console_drain();
     const BenchSample reads = quiet_batches([] { ruler_reads<10>(); });

@@ -41,17 +41,37 @@
  * and the slave half's STOPF would otherwise enter the vector between
  * tenures for nothing.
  *
- * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED AT EV8_2, the
- * chapter's own end of a write (15.3, figure 15-4: TxE and BTF), where
- * the last written byte's acknowledge is known. Requested a byte
- * earlier, on the TxE that says that byte went into the shifter - the
- * order WCH's interrupt example uses - it is a commitment made before
- * the acknowledge: measured against a target refusing that byte, the
- * refusal came back as a NACK on the address and at 400 kHz left the
- * controller master with START and STOP both standing. Against an
- * STM32G0 target both orders deliver every written byte; the BTF order
- * costs the half bit SCL is held while the vector serves BTF
- * (docs/ch32v00x/i2c.md).
+ * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED WHILE THE LAST
+ * WRITTEN BYTE IS STILL GOING OUT, on the TxE that says it went into the
+ * shifter: 15.10.1's START bit, set in master mode, makes the controller
+ * repeat the start condition, and requested while a byte shifts it goes
+ * out as that byte ends (measured: every written byte taken, and no BTF
+ * entering the vector behind it). It is not the chapter's own end of a write - 15.3 ends a write at
+ * EV8_2 (TxE and BTF, figure 15-4), with SCL held low past the last
+ * acknowledge - and it is the order WCH's interrupt example uses: a
+ * POLLED target of this block's lineage loses the last written byte when
+ * the START comes after BTF (measured on the CH32V203C8T6 and the
+ * CH32V303VCT6, docs/ch32vx03/i2c.md), and a register index followed by
+ * a read is exactly that shape. The price is in the error path: the START
+ * is requested before the last byte's acknowledge is known, so the phase
+ * between the request and SB is its own (`restart`), and a NACK in it is
+ * the byte's - i2c_nack_data. THE REPEATED START IS NOT WITHDRAWN: the
+ * controller generates it after the refused byte all the same (measured:
+ * left alone, START clears and SB rises a few tens of cycles after the
+ * error vector sees AF), and a CTLR1 store that clears START and sets STOP
+ * races that generation - won at 100 kHz, lost at 400 kHz, where it left
+ * STOP standing over a master holding the bus and the next tenure stalled
+ * (measured, docs/ch32v00x/i2c.md). So the refusal lets the Sr go out and
+ * closes the tenure from its SB with the one sequence EV5 allows: the
+ * address with the WRITE bit and STOP requested behind it - a void write,
+ * Sr A P on the wire - its ADDR cleared or its own NACK taken before the
+ * tenure reports i2c_nack_data. Nothing else of the controller is touched,
+ * so nothing races it.
+ * The write half of a write-then-read runs on the byte pump with the
+ * engines too: the order needs an event when the last byte enters the
+ * shifter, which the transmit block gives only through its completion
+ * interrupt - and the transmit channel is armed for its errors alone, so
+ * that a plain write takes no DMA interrupt at all.
  *
  * THERE IS NO RISE-TIME REGISTER, ON EITHER PART. 15.3's text names an
  * "R16_I2C1_RTR" the register list (table 15-1) does not carry - the
@@ -66,7 +86,7 @@
  *
  * THE DMA REQUESTS ARE CHANNELS 6 (transmit) and 7 (receive), table
  * 8-2 of both manuals, and an engine on any other channel is refused. With engines a
- * write phase of any length and a read phase of two bytes or more run
+ * plain write of any length and a read phase of two bytes or more run
  * on them (CTLR2.LAST makes the controller NACK the last byte a
  * receive block takes, 15.10.2); a one-byte read stays on the pump,
  * whose ACK-before-ADDR sequence the DMA path cannot express.
@@ -469,13 +489,15 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * an I2C engine, and the arbiter replies with status() for it.
  *
  * THE ENGINE SLOTS: `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or
- * neither. A write phase runs on the transmit engine; a read phase of
+ * neither. A plain write runs on the transmit engine; a read phase of
  * two bytes or more on the receive engine under CTLR2.LAST; the one-
- * byte read on the pump. The transmit engine is armed for its ERRORS
- * ALONE: a write phase ends on BTF, which the event vector takes
- * anyway, with the channel's count at zero - the controller wrote the
- * last byte a byte time before it left the shifter - so the block's
- * own completion interrupt would prove nothing BTF does not.
+ * byte read and the write half of a write-then-read on the pump (the
+ * file header: its repeated START wants the TxE of the last byte). The
+ * transmit engine is armed for its ERRORS ALONE: a plain write ends on
+ * BTF, which the event vector takes anyway, with the channel's count at
+ * zero - the controller wrote the last byte a byte time before it left
+ * the shifter - so the block's own completion interrupt would prove
+ * nothing BTF does not.
  */
 template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDmaEngine,
           typename RxEngine = NoDmaEngine>
@@ -682,11 +704,16 @@ public:
 
             case Phase::start_tx:
             case Phase::start_rx:
+            case Phase::restart:
+            case Phase::refused:
                 if ((s1 & i2c_sb) == 0u) {
                     return false;
                 }
+                if (phase_ == Phase::refused || (phase_ == Phase::restart && (s1 & i2c_af) != 0u)) {
+                    return close_refused();
+                }
                 // EV5: the address, with the direction bit.
-                if (phase_ == Phase::start_rx) {
+                if (phase_ != Phase::start_tx) {
                     prime_receive();
                     S::data(static_cast<uint8_t>((t_.addr << 1) | 1u));
                     phase_ = Phase::addr_rx;
@@ -707,11 +734,17 @@ public:
                     return finish(i2c_ok);
                 }
                 if constexpr (has_engines) {
-                    S::dma(true, false);
-                    (void)TxEngine::start(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
-                    (void)S::clear_addr();
-                    phase_ = Phase::tx_dma;
-                    return false;
+                    // A PLAIN write on the transmit engine; the write half
+                    // of a write-then-read stays on the pump (the class
+                    // comment: the repeated START wants the TxE of its
+                    // last byte).
+                    if (t_.rx_len == 0u) {
+                        S::dma(true, false);
+                        (void)TxEngine::start(std::span<const uint8_t>(t_.tx.get(), t_.tx_len));
+                        (void)S::clear_addr();
+                        phase_ = Phase::tx_dma;
+                        return false;
+                    }
                 }
                 (void)S::clear_addr();
                 phase_ = Phase::tx;
@@ -719,18 +752,7 @@ public:
                 return false;
 
             case Phase::tx:
-                if ((s1 & i2c_txe) != 0u && pos_ < t_.tx_len) {
-                    S::data(t_.tx.get()[pos_]);
-                    ++pos_;
-                    if (pos_ >= t_.tx_len) {
-                        S::buffer_interrupt(false);   // BTF carries the end
-                    }
-                    return false;
-                }
-                if ((s1 & i2c_btf) != 0u && pos_ >= t_.tx_len) {
-                    return end_of_write();   // EV8_2
-                }
-                return false;
+                return transmit_step(s1);
 
             case Phase::tx_dma:
                 // BTF with the channel's count at zero: the engine wrote
@@ -739,7 +761,8 @@ public:
                 // by a whole byte time: its next write clears the flag.)
                 if ((s1 & i2c_btf) != 0u && dma_tx_drained()) {
                     dma_tx_done();
-                    return end_of_write();
+                    S::stop();   // EV8_2: a plain write's end
+                    return finish(i2c_ok);
                 }
                 return false;
 
@@ -754,6 +777,15 @@ public:
 
             case Phase::rx_dma:
                 return false;   // dma_isr() ends it
+
+            case Phase::closing:
+                // The void write's address acknowledged: ADDR cleared, and
+                // the STOP requested behind it goes out.
+                if ((s1 & i2c_addr) == 0u) {
+                    return false;
+                }
+                (void)S::clear_addr();
+                return finish(i2c_nack_data);
         }
         return false;
     }
@@ -773,6 +805,18 @@ public:
             return false;
         }
         uint8_t st = i2c_bus_error;
+        if ((errs & i2c_af) != 0u && phase_ == Phase::restart) {
+            // The LAST WRITTEN byte refused, its repeated START already
+            // requested (request_restart()): the NACK is the byte's, and
+            // the Sr the controller generates anyway is waited for - its
+            // SB closes the tenure (close_refused(), the class comment).
+            phase_ = Phase::refused;
+            return false;
+        }
+        if ((errs & i2c_af) != 0u && phase_ == Phase::closing) {
+            // The void write's address refused too: its STOP is requested.
+            return finish(i2c_nack_data);
+        }
         if ((errs & i2c_af) != 0u) {
             const bool on_address = phase_ == Phase::addr_tx || phase_ == Phase::addr_rx ||
                                     phase_ == Phase::start_tx || phase_ == Phase::start_rx;
@@ -912,8 +956,14 @@ public:
     }
 
 private:
+    /// `restart`: the repeated START requested behind the last written
+    /// byte, SB not yet seen - the phase in which a NACK is that byte's.
+    /// `refused`: that NACK taken, the Sr still coming; `closing`: the
+    /// void write that ends a refused tenure, its address out and its STOP
+    /// requested (close_refused()).
     enum class Phase : uint8_t {
-        idle, start_tx, start_rx, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
+        idle, start_tx, start_rx, restart, refused, closing, addr_tx, addr_rx, tx, tx_dma, rx,
+        rx_dma,
     };
 
     static_assert([] {
@@ -939,16 +989,55 @@ private:
         return true;
     }
 
-    /// EV8_2: the last written byte is out. A repeated START opens the
-    /// read half, or the STOP ends the tenure.
-    static bool end_of_write() {
-        if (t_.rx_len != 0u) {
-            phase_ = Phase::start_rx;
-            S::start();
+    /// EV8 on the buffer vector, and EV8_2 on the event vector. A plain
+    /// write drops the buffer vector with its last byte and ends on BTF; a
+    /// read half to follow keeps it, and the TxE that says the last byte
+    /// went into the shifter - or one served later, with BTF up - requests
+    /// the repeated START (the class comment).
+    [[gnu::always_inline]] static bool transmit_step(uint16_t s1) {
+        if ((s1 & i2c_txe) == 0u) {
+            return false;   // BTF implies TxE
+        }
+        if (pos_ < t_.tx_len) {
+            S::data(t_.tx.get()[pos_]);
+            ++pos_;
+            if (pos_ >= t_.tx_len && t_.rx_len == 0u) {
+                S::buffer_interrupt(false);   // BTF carries the end
+            }
             return false;
         }
+        if (t_.rx_len != 0u) {
+            request_restart();
+            return false;
+        }
+        if ((s1 & i2c_btf) != 0u) {
+            S::stop();   // EV8_2
+            return finish(i2c_ok);
+        }
+        return false;
+    }
+
+    /// The repeated START of a write-then-read, requested while the last
+    /// written byte is still in the shifter: the controller generates it at
+    /// the end of that byte (15.10.1's START bit). The buffer vector goes
+    /// down first, the TxE that brought this here having no more to say.
+    [[gnu::always_inline]] static void request_restart() {
+        S::interrupts(0, i2c_itbufen);
+        phase_ = Phase::restart;
+        S::start();
+    }
+
+    /// EV5 of the Sr behind a refused last byte: the address with the
+    /// WRITE bit, which clears SB, and STOP requested behind it - "after the
+    /// current byte transfer" (15.10.1) - so the wire carries a void write
+    /// and the controller is left as a plain write leaves it. AF is cleared
+    /// here too, for the case in which this vector saw it first.
+    [[gnu::always_inline]] static bool close_refused() {
+        S::clear_errors(i2c_af);
+        S::data(static_cast<uint8_t>(t_.addr << 1));
         S::stop();
-        return finish(i2c_ok);
+        phase_ = Phase::closing;
+        return false;
     }
 
     /// The ACK/POS arrangement the read phase's length wants, set

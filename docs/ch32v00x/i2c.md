@@ -60,6 +60,12 @@ pads).
   event"): requested at EVT8_2, either one leaves the event line
   asserted for the half a bit the condition takes to go out - measured,
   one or two vector entries for nothing at 400 and 100 kHz.
+- **A repeated START requested while a byte shifts survives that byte's
+  NACK** (measured): the controller generates the Sr after the refused
+  byte all the same, START clearing and SB rising a few tens of cycles
+  after the error vector sees AF; a CTLR1 store that clears START and
+  sets STOP while it does so leaves STOP standing over a master that
+  holds the bus (at 400 kHz; at 100 kHz the store lands first).
 
 **What the chapter offers a controller's transfer, and what the engine
 takes** - the inventory the costs below are read against:
@@ -69,9 +75,11 @@ takes** - the inventory the costs below are read against:
 | the event machine, SB / ADDR / TxE / RxNE / BTF on one vector and the five errors on another (15.3, 15.7) | yes | the silicon's: no byte counter and no FIFO, so the pump is one entry a data byte and the frame a few entries more (SB, ADDR, the end) |
 | ITBUFEN as a switch inside a tenure (15.10.2) | yes | TxE and RxNE reach the vector only while the pump needs them, BTF carries the ends |
 | ITEVTEN as a switch between tenures (15.10.2) | yes | up at `start()`, down at the end: the BTF that stands while the STOP goes out, and the slave half's STOPF, enter no vector between tenures |
-| the END of a write at BTF, EVT8_2 (15.3, figure 15-4) | yes, for the STOP and the repeated START | the last byte's acknowledge is known there; the repeated START requested on the TxE of the last byte instead - the order WCH's interrupt example uses - was measured too (the findings) |
+| the END of a write at BTF, EVT8_2 (15.3, figure 15-4) | yes, for a plain write's STOP | the last byte's acknowledge is known there |
+| START set while the last written byte shifts, the repeated START generated at its end (15.10.1) | yes, for a write-then-read | a polled CH32 target loses the last written byte when the repeated START comes after BTF ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)); requested on the TxE of that byte - the order WCH's interrupt example uses - it is on the wire as the byte ends (the findings) |
+| START cleared by the user code, a requested start withdrawn (15.10.1) | declined | behind a refused last byte the controller generates the repeated START all the same, and the withdrawal races it: won at 100 kHz, lost at 400 kHz with the bus left held (the findings); the refusal is closed from the Sr's SB instead |
 | POS and ACK for the two-byte and the N-byte receive (15.3, 15.10.1) | yes | the chapter's procedures by count |
-| DMAEN with LAST (15.8, 15.10.2) | yes, the engine slots | a write of any length and a read of two or more bytes take no entry a byte; a one-byte read stays on the pump, whose ACK-before-ADDR sequence the DMA path cannot express |
+| DMAEN with LAST (15.8, 15.10.2) | yes, the engine slots | a plain write of any length and a read of two or more bytes take no entry a byte; a one-byte read stays on the pump, whose ACK-before-ADDR sequence the DMA path cannot express, and so does the write half of a write-then-read: its repeated START wants the TxE of the last byte, which the transmit block gives only through a completion interrupt the channel is not armed for (a plain write takes no DMA interrupt) |
 | PEC (15.9), 10-bit addresses as a host (15.3) | declined | no Request shape asks for them ("Not covered yet") |
 | one CTLR1 store for START with POS and ACK down | yes | the address phase's control written once; read after STAR1 it is also the second half of a stale STOPF's clear |
 
@@ -100,10 +108,15 @@ takes** - the inventory the costs below are read against:
   event line is a tenure's (raised by `start()`, dropped at its end) and
   ITBUFEN is switched on and off within it so TxE/RxNE interrupt only
   while the byte pump needs them and BTF carries the rest. The repeated
-  START of a write-then-read is requested at BTF, 15.3's EVT8_2, when
-  the last written byte's acknowledge is known. `error_isr()` is the error vector's: a NACK becomes
-  `i2c_nack_addr` or `i2c_nack_data` by the phase it landed in, ARLO
-  `i2c_arb_lost`, the rest `i2c_bus_error`. A speed the clock cannot
+  START of a write-then-read is requested on the TxE that says the last
+  written byte went into the shifter, and goes out as that byte ends.
+  `error_isr()` is the error vector's: a NACK becomes `i2c_nack_addr` or
+  `i2c_nack_data` by the phase it landed in, ARLO `i2c_arb_lost`, the
+  rest `i2c_bus_error`. A NACK of the last written byte, its repeated
+  START already requested, is `i2c_nack_data`: the Sr the controller
+  generates all the same is waited for, and its SB closes the tenure
+  with a void write - the address with the write bit and STOP behind
+  it. A speed the clock cannot
   produce is answered `i2c_rejected` inside `start()` - the one
   synchronous completion, delivered through the arbiter with the wire
   and the vector untouched. Before its START, `start()` waits for the
@@ -118,14 +131,14 @@ takes** - the inventory the costs below are read against:
   clocks a stuck client free by hand and clears the STOPF its own STOP
   leaves, and `recover()` puts the peripheral back (SWRST, the timing
   rewritten). The engine slots are
-  `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a write
-  phase of any length and a read of two bytes or more run on them, the
-  one-byte read stays on the pump. A WRITE PHASE ENDS ON BTF, which the
-  event vector takes anyway, with the transmit channel's count read at
-  zero: the controller wrote the last byte a byte time before it left
-  the shifter, so the transmit engine is armed for its errors alone and
-  a write takes no DMA interrupt; a read ends on the receive block's
-  completion, its one. `dma_isr()` reads the controller's one flag
+  `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a plain write
+  of any length and a read of two bytes or more run on them; the
+  one-byte read and the write half of a write-then-read stay on the
+  pump. A PLAIN WRITE ENDS ON BTF, which the event vector takes anyway,
+  with the transmit channel's count read at zero: the controller wrote
+  the last byte a byte time before it left the shifter, so the transmit
+  engine is armed for its errors alone and a write takes no DMA
+  interrupt; a read ends on the receive block's completion, its one. `dma_isr()` reads the controller's one flag
   register once for both channels.
 - `I2cClient<1, pins>`: the target side - `init(clock, addresses,
   no_stretch)`, the polled surface (`addressed()`, `answer_address()`
@@ -162,8 +175,8 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 The reference suite is `test_ch32_i2c` on the CH32V006K8U6 at 48 MHz:
 its wire letters talk to a PEER BOARD running `twi_peer` (the shared
 twi_link protocol, the peer's pull-ups, both boards at 3.3 V) and
-decline when the wire reads low. On the CH32V003F4P6 it builds as five
-group images, green there against the same SAM C21 peer on the same
+decline when the wire reads low. On the CH32V003F4P6 it builds as six
+group images, the first five green there against the same SAM C21 peer on the same
 two pads (the scan in 13 ms, every tenure shape and receive procedure
 byte-exact, the two speeds at 94 and 330 kHz on the wire, the held SDA
 freed by four pulses); the
@@ -208,35 +221,52 @@ over the part's 15 KB. Against a SAM C21 peer:
   the STOPF its hand-made STOP leaves is cleared with no entry of the
   event vector.
 - **Against an STM32G0 peer** (its `twi_peer`, its 2.2 kOhm pull-ups)
-  the whole suite holds too: 52 verdicts, the four receive procedures,
-  the vocabulary, the engines and the kernel letter.
+  the whole suite holds too: 56 verdicts, the four receive procedures,
+  the vocabulary, the repeated START acknowledged and refused, the
+  engines and the kernel letter.
 
-### The repeated START: at BTF, and why
+### The repeated START: on the last byte's TxE, and the refusal
 
-The CH32V303VCT6, serving its own target from the same core, lost the
-last written byte of a write-then-read when its host requested the
-repeated START at BTF ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)).
-Against the STM32G0 target both orders were measured from this host -
-one to four bytes written, then four read, at 100 and 400 kHz: the
-target counts and sums every written byte, and answers the read
-byte-exact, EITHER WAY. What decides is the chapter and the refusal:
+A write-then-read turns around on a repeated START, and the engine
+requests it on the TxE that says the last written byte went into the
+shifter: 15.10.1's START bit repeats the start condition, and requested
+while a byte shifts it goes out as that byte ends, with no stretch of its
+own (measured below). 15.3 ends a write at EVT8_2 instead -
+"TxE=1, BTF=1", SCL held low past the last acknowledge - and WCH's polled
+EEPROM example requests its repeated START there; WCH's interrupt example
+requests it a byte earlier, as this engine does. What decides is the far
+end: a POLLED target of this block's lineage loses the last written byte
+when the START comes after BTF (the CH32V303VCT6 and the CH32V203C8T6,
+[../ch32vx03/i2c.md](../ch32vx03/i2c.md)), and a register index followed
+by a read is exactly that shape. Measured here against the STM32G0
+target (`test_ch32_i2c` letter r): one to four bytes written, then four
+read, at 100 and 400 kHz, through the pump and through the engines - the
+target counts and sums every written byte, the read is its pattern, and
+BTF never enters the vector behind the pending START (the pump's tenure
+takes 9, 10, 11 and 12 entries at both speeds, where the BTF order took
+13 to 16 at 100 kHz and 11 to 14 at 400).
 
-- 15.3 ends a write at EVT8_2 - "TxE=1, BTF=1" - and WCH's polled
-  EEPROM example requests its repeated START there (WCH's interrupt
-  example requests it a byte earlier, on the TxE that says the last
-  byte went into the shifter, writing a dummy byte to quiet it).
-- A START requested while the last byte is still shifting is a commitment
-  made before that byte's acknowledge. Measured with the target REFUSING
-  the last written byte: at BTF the host reports `i2c_nack_data` and the
-  next tenure runs; requested on the TxE, the refusal comes back as
-  `i2c_nack_addr` - the AF lands in the start phase - and at 400 kHz the
-  controller is left master with START and STOP both standing, the next
-  tenure stalled.
-
-The price of the BTF order is measured too: the half bit the host holds
-SCL while the vector serves BTF, and the entries BTF makes while the
-requested START goes out (15.10.6) - about 250 cycles of the bus and two
-entries of the vector at 100 kHz, one at 400 kHz.
+THE REFUSAL. The START is requested before the last byte's acknowledge
+is known, so a NACK of that byte arrives with the START standing (CTLR1
+0x101 at the error vector) and is `i2c_nack_data`. What the controller
+does next was measured from the error vector, STAR1 and CTLR1 polled with
+nothing written: it GENERATES THE REPEATED START ALL THE SAME - START
+clears and SB rises within a few tens of cycles. A CTLR1 store that
+clears START and sets STOP races that generation: at 100 kHz it lands
+first and the STOP alone goes out; at 400 kHz it lands while the Sr is
+under way, and the controller is left with STOP standing over a master
+that holds the bus (CTLR1 0x201, STAR2 MSL, BUSY and TRA, TxE up) and
+the next tenure stalls - at every count, pump and engines. So the engine
+touches nothing at the NACK: it waits for the Sr's SB and closes the
+tenure with the one sequence EV5 allows, the address with the WRITE bit
+and STOP requested behind it - a void write, Sr A P on the wire - its
+ADDR cleared (or its own NACK taken) before the reply. Measured, one to
+four bytes with the last refused, both speeds, pump and engines: sixteen
+of sixteen `i2c_nack_data`, CTLR1 back to PE alone and MSL clear within a
+millisecond, and the next tenure on the same host `i2c_ok`; the target
+saw the void write's address in fifteen and missed it once, which ended
+on that address's own NACK. The price of the order is the refusal's:
+one void write on the wire; an acknowledged tenure pays nothing for it.
 
 ### The host's cost (bench_ch32_i2c, letter i)
 
@@ -258,15 +288,15 @@ EVT library's polled master (its `CheckEvent` loops, the EEPROM example's
 shape, `ch32v00X_i2c.c`), the CPU spinning through the whole tenure, its
 wall ending once the STOP has gone out. At 400 kHz:
 
-| tenure | the rest (cycles), entries: before | after | the EVT, polled (busy = wall) |
-|---|---|---|---|
-| write 1 | 1896, 5 | 1398, 4 | 766 |
-| write 16 | 1896, 20 | 1398, 20 | 765 |
-| read 1 | 1406, 4 | 1148, 3 | 517 |
-| read 16 | 1792, 17 | 1495, 17 | 538 |
-| register read 1 + 1 | 2456, 8 | 2126, 8 | 907 |
-| probe answered | 1186, 3 | 937, 2 | 595 |
-| write 255 through the engine, x | 1.00 | 1.00 | - |
+| tenure | the rest (cycles), entries | the EVT, polled (busy = wall) |
+|---|---|---|
+| write 1 | 1418, 4 | 766 |
+| write 16 | 1418, 19 | 765 |
+| read 1 | 1164, 3 | 517 |
+| read 16 | 1508, 17 | 538 |
+| register read 1 + 1 | 1967, 7 | 907 |
+| probe answered | 945, 2 | 595 |
+| write 255 through the engine, x | 1.00 | - |
 
 - **`start()` is 190 cycles** (250 on the ruler, a read of it 60), where
   it was 421: the tenure copies the five fields its entries read and not
@@ -276,8 +306,12 @@ wall ending once the STOP has gone out. At 400 kHz:
   of them the stamps'), one a byte being this silicon's.
 - **The engines** take a 255-byte write or read in three entries of the
   I2C's own (SB, ADDR and the end) at x 1.00, the core busy 3 800 cycles
-  of its 285 000; their fixed cost is the pump's or under it (1227
-  cycles against 1398 for a 255-byte write).
+  of its 285 000; their fixed cost is the pump's or under it (1231
+  cycles against 1418 for a 255-byte write).
+- **The register read** (one byte written, the repeated START on its
+  TxE, one read) takes seven entries and 1967 cycles of fixed cost; under
+  the engines its write half is the pump's too (the inventory), and the
+  same tenure costs 2051.
 - **Against the EVT** the comparison is between two contracts: the
   polled loop's fixed cost is 350 to 1200 cycles under this engine's
   (no vector entry, no idle turn, no instrument stamp inside it) and its
@@ -298,8 +332,8 @@ Driver gaps, each with its reason:
   (the suite does); no separate verb.
 - A wake from Standby on an address match: this family's PWR chapter
   offers none.
-- The benchmark's I2C letter on the CH32V003: `bench_ch32_i2c` is an
-  18 KB image against that part's 15 KB, and splitting it - the pump's
+- The benchmark's I2C letter on the CH32V003: `bench_ch32_i2c` is a
+  19 KB image against that part's 15 KB, and splitting it - the pump's
   ops in one image and the engines' in another - is born with the part's
   return to the desk.
 
@@ -319,3 +353,12 @@ Implemented but not bench-verified, each with what would measure it:
 - A START into a wire ANOTHER HOST is clocking: ARLO is measured only
   against a held SDA; what the START puts on a live wire wants the
   peer's `arb` race and a scope.
+- The repeated START's order against a CH32 TARGET: the bus here
+  carries an STM32G0 target, which takes the last written byte in
+  either order; the loss the order avoids is measured on the CH32V203C8T6
+  and the CH32V303VCT6 ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)). A CH32
+  board running `twi_peer` on this bus, letter r against it, would
+  measure it from this host.
+- Letter r on the CH32V003: its own group image, the board being off
+  the desk (the engine is the CH32V006's, the same code on the same
+  registers).
