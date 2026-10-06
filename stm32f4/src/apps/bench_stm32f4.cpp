@@ -172,7 +172,8 @@
 //               the host's thresholds send a polled phase by its shape
 //               (irq 1 = the engines' completion, 0 = the loop).
 //
-//   i  THE I2C HOST ABOVE THE WIRE (the STM32F429I-DISC1 alone): I2C3 on
+//   i  THE I2C HOST ABOVE THE WIRE (the STM32F429I-DISC1 and the
+//      Nucleo-F446RE; declined by name elsewhere). On the DISC1: I2C3 on
 //      PA8/PC9 against the board's STMPE811 at 0x41 - the one device the
 //      board puts on that bus - through the engineless host (the pump) and
 //      the host with DMA1 streams 4 and 2 on channel 3 (the engines),
@@ -208,6 +209,17 @@
 //      and, last, the longest single entry of each vector, watched in a
 //      pass of its own (its two extra ruler reads would sit inside every
 //      other line's isr).
+//      On the Nucleo-F446RE, the SELF-LINK: I2C1 on PB8/PB9 and FMPI2C1
+//      on PC6/PC7, joined by the bench's two wires with a 2.2 kOhm pull-up
+//      on each line, each block the host in turn - I2C1 through the pump
+//      and DMA1 streams 6 and 0 on channel 1, FMPI2C1 (rows suffixed
+//      .fmp) through the pump and streams 5 and 2 on channel 2 - and the
+//      other the target at 0x3A SERVED FROM ITS OWN VECTORS on the same
+//      core (a byte sink, and a pattern source restarting at each address
+//      match; its entries metered apart, the instrument's share of the
+//      wall), the plain reads i2c.read of 1, 2, 16 and 255 bytes measured
+//      too, and every tenure's bytes checked at both ends. The SCL period
+//      is measured on PB8 for each host, i2c.stop for I2C1's.
 //
 // THE COST OF THE INSTRUMENT, and how the reader subtracts it: every
 // line is RAW. A wall carries one ruler read (letter r's `ruler`); an isr
@@ -233,6 +245,9 @@
 #include "stm32f4/delay.hpp"
 #include "stm32f4/dma.hpp"
 #include "stm32f4/dwt.hpp"
+#if defined(STM32F446xx)
+#include "stm32f4/fmpi2c.hpp"
+#endif
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/pin.hpp"
@@ -304,6 +319,7 @@ Meter loop_meter;    ///< letter u's USART6 vector
 Meter loop_dma_meter;   ///< letter u's two DMA streams
 Meter i2c_meter;        ///< letter i's two I2C3 vectors (events, errors)
 Meter i2c_dma_meter;    ///< letter i's two DMA1 streams
+Meter i2c_peer_meter;   ///< letter i's target on the Nucleo's self-link: the instrument
 
 /// letter d's engines.
 using Copier = DmaCopyEngine<2, 4>;
@@ -348,7 +364,7 @@ constexpr auto print_pattern = [] {
 
 BenchCounters counters() {
     return bench_counters<Idle>(usart_meter, tick_meter, dma_meter, spi_meter, loop_meter, loop_dma_meter,
-                                i2c_meter, i2c_dma_meter);
+                                i2c_meter, i2c_dma_meter, i2c_peer_meter);
 }
 
 /// A compiler barrier: memory is what the code says it is on both sides.
@@ -1329,7 +1345,39 @@ constexpr uint8_t i2c_peer = 0x41;     ///< the STMPE811
 constexpr uint8_t i2c_nobody = 0x42;   ///< nobody on this wire (test_stm32f4_i2c's scan)
 constexpr uint8_t stmpe_sys_ctrl1 = 0x03;
 constexpr uint8_t stmpe_sys_ctrl2 = 0x04;
-/// Which host the two vectors serve: 1 the pump, 2 the engines.
+#elif defined(STM32F446xx)
+/// THE SELF-LINK on the Nucleo-F446RE: I2C1 on PB8/PB9 and FMPI2C1 on
+/// PC6/PC7 (AF4), joined by the bench's two wires with a 2.2 kOhm pull-up
+/// on each line - each block the host in turn, the other the target at
+/// 0x3A, served from its own two vectors.
+constexpr I2cPins i2c_pins{.scl = {'B', 8, PinFunction::af4}, .sda = {'B', 9, PinFunction::af4}};
+/// RM0390 table 28: I2C1 on DMA1 streams 6 and 0, channel 1; FMPI2C1 on
+/// DMA1 streams 5 and 2, channel 2.
+using I2cTxE = DmaTxEngine<1, 6, 1>;
+using I2cRxE = DmaRxEngine<1, 0, 1>;
+using I2cPump = I2cHost<1, i2c_pins>;
+using I2cDma = I2cHost<1, i2c_pins, I2cTxE, I2cRxE>;
+using I2cRes = I2c<1>;
+using I2cTarget = I2cClient<1, i2c_pins>;
+constexpr FmpI2cPins fmp_pins{.scl = {'C', 6, PinFunction::af4}, .sda = {'C', 7, PinFunction::af4}};
+using FmpTxE = DmaTxEngine<1, 5, 2>;
+using FmpRxE = DmaRxEngine<1, 2, 2>;
+using FmpPump = FmpI2cHost<1, fmp_pins>;
+using FmpDma = FmpI2cHost<1, fmp_pins, FmpTxE, FmpRxE>;
+using FmpTarget = FmpI2cClient<1, fmp_pins>;
+using I2cScl = Pin<'B', 8>;
+constexpr uint8_t i2c_peer = 0x3A;     ///< the target, whichever block it is
+constexpr uint8_t i2c_nobody = 0x42;   ///< nobody on this wire
+alignas(4) uint8_t i2c_src[256];       ///< what the target transmits
+alignas(4) uint8_t i2c_sink[256];      ///< what the target received
+volatile uint16_t i2c_pos = 0;         ///< the target's place, from its address match
+volatile bool i2c_serving = false;     ///< the classic target is inside a read
+/// Tenures that ended other than they should, or moved the wrong bytes.
+uint32_t i2c_bad = 0;
+#endif
+#if defined(STM32F429xx) || defined(STM32F446xx)
+/// Which host the two vectors serve: 1 the pump, 2 the engines - and on
+/// the Nucleo 3 and 4 the FMPI2C1's, the classic block the target then.
 volatile uint8_t i2c_owner = 0;
 /// The longest single entry of each vector over the letter, in cycles of
 /// the body between two ruler reads of its own (R5's figure).
@@ -1356,6 +1404,7 @@ struct I2cOp {
     uint8_t tx;
     uint8_t rx;
 };
+#if defined(STM32F429xx)
 constexpr I2cOp i2c_ops[] = {
     {"i2c.write", i2c_peer, 1, 0},   {"i2c.write", i2c_peer, 2, 0},
     {"i2c.write", i2c_peer, 16, 0},  {"i2c.write", i2c_peer, 255, 0},
@@ -1370,9 +1419,26 @@ constexpr uint8_t i2c_row_w16 = 2;
 constexpr uint8_t i2c_row_w255 = 3;
 constexpr uint8_t i2c_row_r16 = 6;
 constexpr uint8_t i2c_row_r255 = 7;
+#else
+/// The target answers a read no write opened, so the plain reads are
+/// measured too.
+constexpr I2cOp i2c_ops[] = {
+    {"i2c.write", i2c_peer, 1, 0},   {"i2c.write", i2c_peer, 2, 0},
+    {"i2c.write", i2c_peer, 16, 0},  {"i2c.write", i2c_peer, 255, 0},
+    {"i2c.read", i2c_peer, 0, 1},    {"i2c.read", i2c_peer, 0, 2},
+    {"i2c.read", i2c_peer, 0, 16},   {"i2c.read", i2c_peer, 0, 255},
+    {"i2c.wr", i2c_peer, 1, 1},      {"i2c.wr", i2c_peer, 1, 2},
+    {"i2c.wr", i2c_peer, 1, 16},     {"i2c.probe", i2c_peer, 0, 0},
+    {"i2c.probe", i2c_nobody, 0, 0}, {"i2c.write", i2c_peer, 3, 0},
+};
+constexpr uint8_t i2c_row_w16 = 2;
+constexpr uint8_t i2c_row_w255 = 3;
+constexpr uint8_t i2c_row_r16 = 6;
+constexpr uint8_t i2c_row_r255 = 7;
+#endif
 
-template <typename Host>
-typename Host::Request i2c_request(uint8_t addr, uint8_t tx, uint8_t rx, I2cSpeed speed) {
+template <typename Host, typename Speed>
+typename Host::Request i2c_request(uint8_t addr, uint8_t tx, uint8_t rx, Speed speed) {
     typename Host::Request r{};
     r.addr = addr;
     r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(i2c_out));
@@ -1387,10 +1453,64 @@ typename Host::Request i2c_request(uint8_t addr, uint8_t tx, uint8_t rx, I2cSpee
 /// measurement; bounded at ten ticks.
 void i2c_quiet() {
     const uint32_t t0 = Ticker::ticks();
+#if defined(STM32F446xx)
+    // Either block may be the host; the wire is one.
+    while ((I2cRes::stopping() || I2cRes::busy() || FmpI2c<1>::busy()) &&
+           Ticker::ticks() - t0 < 10u) {
+    }
+#else
     while ((I2cRes::stopping() || I2cRes::busy()) && Ticker::ticks() - t0 < 10u) {
+    }
+#endif
+}
+
+#if defined(STM32F446xx)
+/// The owner a host type is: 1 and 2 the classic block's pump and
+/// engines, 3 and 4 the FMPI2C1's.
+template <typename Host>
+constexpr uint8_t i2c_owner_of() {
+    if constexpr (std::is_same_v<Host, I2cPump>) {
+        return 1;
+    } else if constexpr (std::is_same_v<Host, I2cDma>) {
+        return 2;
+    } else if constexpr (std::is_same_v<Host, FmpPump>) {
+        return 3;
+    } else {
+        return 4;
     }
 }
 
+/// The target the other block is: up at the self-link's address, the
+/// classic one with its three enables as init() leaves them, the FMPI2C1
+/// with the five events and the errors.
+void i2c_target_up(bool fmp) {
+    i2c_pos = 0;
+    i2c_serving = false;
+    if (fmp) {
+        (void)FmpTarget::init(clock, FmpI2cAddressConfig{.own = i2c_peer}, FmpI2cSpeed::fast_400k);
+        FmpTarget::interrupt(FmpI2cInterrupt::addr | FmpI2cInterrupt::rx | FmpI2cInterrupt::tx |
+                                 FmpI2cInterrupt::nack | FmpI2cInterrupt::stop |
+                                 FmpI2cInterrupt::error,
+                             true);
+    } else {
+        (void)I2cTarget::init(clock, I2cAddressConfig{.own = i2c_peer});
+    }
+}
+
+template <typename Host>
+void i2c_take(bool engines) {
+    i2c_owner = 0;
+    I2cDma::release();
+    FmpDma::release();
+    if (engines) {
+        Dma<1>::init();
+    }
+    constexpr uint8_t owner = i2c_owner_of<Host>();
+    i2c_target_up(owner <= 2u);
+    (void)Host::init(clock);
+    i2c_owner = owner;
+}
+#else
 template <typename Host>
 void i2c_take(bool engines) {
     i2c_owner = 0;
@@ -1400,6 +1520,7 @@ void i2c_take(bool engines) {
     (void)Host::init(clock);
     i2c_owner = engines ? 2u : 1u;
 }
+#endif
 
 /// One tenure, ISR-style, the thread idling until the completion: the
 /// sample (busy from every meter, irq and isr the I2C vectors' alone),
@@ -1438,10 +1559,11 @@ I2cRun i2c_once(const typename Host::Request& r) {
 /// edges counted from the end of the second data byte over 240 bytes -
 /// every bit of them, the acknowledges included, with no software
 /// sequence inside the span to stretch it. 0 if the span was not seen.
-uint32_t i2c_scl_period(I2cSpeed speed) {
-    i2c_take<I2cDma>(true);
+template <typename Dma, typename Speed>
+uint32_t i2c_scl_period(Speed speed) {
+    i2c_take<Dma>(true);
     i2c_out[0] = 0x00;
-    const auto r = i2c_request<I2cDma>(i2c_peer, 1, 255, speed);
+    const auto r = i2c_request<Dma>(i2c_peer, 1, 255, speed);
     i2c_quiet();
     i2c_done = false;
     // The address, the index, the repeated START's own rising edge, the
@@ -1453,7 +1575,7 @@ uint32_t i2c_scl_period(I2cSpeed speed) {
     uint32_t t2 = 0;
     bool level = I2cScl::read();
     const uint32_t t0 = Ruler::now();
-    (void)I2cDma::start(r);
+    (void)Dma::start(r);
     while (!i2c_done && Ruler::now() - t0 < Ruler::hz() / 10u) {
         const bool now = I2cScl::read();
         if (now && !level) {
@@ -1469,7 +1591,7 @@ uint32_t i2c_scl_period(I2cSpeed speed) {
     idle_until_set(i2c_done);
     if (t2 == 0u) {
         print(serial, "  the SCL span was not seen: ", edges, " rising edges, status ",
-              i2c_done ? I2cDma::status() : 0xFFu, crlf);
+              i2c_done ? Dma::status() : 0xFFu, crlf);
     }
     return t2 != 0u ? (t2 - t1 + span / 2u) / span : 0u;
 }
@@ -1505,8 +1627,8 @@ const char* i2c_status_name(uint8_t st) {
 
 /// Every operation through one host at one speed, each the best of 8 by
 /// wall, the worst status of the 8 printed after it.
-template <typename Host>
-void i2c_ops_on(const char* suffix, I2cSpeed speed, uint32_t t, bool engines) {
+template <typename Host, typename Speed>
+void i2c_ops_on(const char* suffix, Speed speed, uint32_t t, bool engines) {
     i2c_take<Host>(engines);
     BenchSample rows[sizeof(i2c_ops) / sizeof(i2c_ops[0])] = {};
     uint8_t row = 0;
@@ -1516,10 +1638,30 @@ void i2c_ops_on(const char* suffix, I2cSpeed speed, uint32_t t, bool engines) {
         uint8_t worst = i2c_ok;
         const uint8_t want = op.addr == i2c_nobody ? i2c_nack_addr : i2c_ok;
         for (uint8_t run = 0; run < 8u; ++run) {
+#if defined(STM32F446xx)
+            for (uint16_t i = 0; i < op.rx; ++i) {
+                i2c_in[i] = 0;
+            }
+#endif
             const I2cRun one = i2c_once<Host>(r);
             if (one.status != want) {
                 worst = one.status;
             }
+#if defined(STM32F446xx)
+            // THE BYTES, at both ends: what the target took is what was
+            // written, and what was read is the target's pattern from its
+            // start (it restarts at every address match).
+            bool moved = one.status == want;
+            for (uint16_t i = 0; i < op.rx && moved; ++i) {
+                moved = i2c_in[i] == i2c_src[i];
+            }
+            for (uint16_t i = 0; i < op.tx && moved && op.rx == 0u; ++i) {
+                moved = i2c_sink[i] == i2c_out[i];
+            }
+            if (!moved) {
+                ++i2c_bad;
+            }
+#endif
             if (one.s.wall < best.s.wall) {
                 best = one;
             }
@@ -1554,8 +1696,8 @@ void i2c_ops_on(const char* suffix, I2cSpeed speed, uint32_t t, bool engines) {
 
 /// Every operation once through `Host` with the vectors' longest entry
 /// watched (R5): a pass of its own, so no other line carries the watch.
-template <typename Host>
-void i2c_watch(I2cSpeed speed, bool engines) {
+template <typename Host, typename Speed>
+void i2c_watch(Speed speed, bool engines) {
     i2c_take<Host>(engines);
     i2c_watching = true;
     for (const I2cOp& op : i2c_ops) {
@@ -1611,7 +1753,7 @@ void ti_i2c() {
     i2c_er_max = 0;
     i2c_dma_max = 0;
     for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
-        uint32_t t = i2c_scl_period(speed);
+        uint32_t t = i2c_scl_period<I2cDma>(speed);
         print(serial, "  SCL at ", speed == I2cSpeed::fast_400k ? "400" : "100", " kHz: CCR ",
               hex(I2cPump::timing_of(speed).ccr), " states ", I2cPump::scl_hz(speed), " Hz, the wire ",
               t, " cycles a period = ", t != 0u ? Ruler::hz() / t : 0u, " Hz", crlf);
@@ -1649,9 +1791,70 @@ void ti_i2c() {
     print(serial, "  the longest entry of each vector: events ", i2c_ev_max, " cycles, errors ", i2c_er_max,
           ", the streams ", i2c_dma_max, crlf);
     bench.verdict("the device answers its identity after the letter", chip);
+#elif defined(STM32F446xx)
+    for (uint16_t i = 0; i < 256u; ++i) {
+        i2c_out[i] = static_cast<uint8_t>(0xA0u + i);
+        i2c_src[i] = static_cast<uint8_t>(0x5Bu * i + 7u);
+    }
+    i2c_bad = 0;
+    print(serial, "  the self-link: I2C1 on PB8/PB9 and FMPI2C1 on PC6/PC7, each the host in turn "
+                  "and the other the target at ", hex(i2c_peer), ", served from its own vectors",
+          crlf);
+    // I2C1 the host, FMPI2C1 the target.
+    i2c_ev_max = 0;
+    i2c_er_max = 0;
+    i2c_dma_max = 0;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+        uint32_t t = i2c_scl_period<I2cDma>(speed);
+        print(serial, "  I2C1 at ", speed == I2cSpeed::fast_400k ? "400" : "100", " kHz: CCR ",
+              hex(I2cDma::timing_of(speed).ccr), " states ", I2cDma::scl_hz(speed), " Hz, the wire ",
+              t, " cycles a period = ", t != 0u ? Ruler::hz() / t : 0u, " Hz", crlf);
+        if (t == 0u) {
+            t = Ruler::hz() / I2cDma::scl_hz(speed);
+        }
+        (void)console_drain();
+        i2c_ops_on<I2cPump>("", speed, t, false);
+        i2c_ops_on<I2cDma>(".dma", speed, t, true);
+        i2c_stop_drain(speed);
+        i2c_watch<I2cPump>(speed, false);
+        i2c_watch<I2cDma>(speed, true);
+    }
+    fence();   // the handlers wrote the three maxima
+    print(serial, "  the longest entry of each I2C1 host vector: events ", i2c_ev_max, " cycles, errors ",
+          i2c_er_max, ", the streams ", i2c_dma_max, crlf);
+    // FMPI2C1 the host, I2C1 the target.
+    i2c_ev_max = 0;
+    i2c_er_max = 0;
+    i2c_dma_max = 0;
+    for (const FmpI2cSpeed speed : {FmpI2cSpeed::standard_100k, FmpI2cSpeed::fast_400k}) {
+        uint32_t t = i2c_scl_period<FmpDma>(speed);
+        print(serial, "  FMPI2C1 at ", speed == FmpI2cSpeed::fast_400k ? "400" : "100",
+              " kHz: TIMINGR states ", FmpDma::scl_hz(speed), " Hz, the wire ", t,
+              " cycles a period = ", t != 0u ? Ruler::hz() / t : 0u, " Hz", crlf);
+        if (t == 0u) {
+            t = Ruler::hz() / FmpDma::scl_hz(speed);
+        }
+        (void)console_drain();
+        i2c_ops_on<FmpPump>(".fmp", speed, t, false);
+        i2c_ops_on<FmpDma>(".fmp.dma", speed, t, true);
+        i2c_watch<FmpPump>(speed, false);
+        i2c_watch<FmpDma>(speed, true);
+    }
+    fence();
+    print(serial, "  the longest entry of each FMPI2C1 host vector: events ", i2c_ev_max,
+          " cycles, errors ", i2c_er_max, ", the streams ", i2c_dma_max, crlf);
+    i2c_owner = 0;
+    I2cDma::release();
+    FmpDma::release();
+    I2cTarget::release();
+    FmpTarget::release();
+    print(serial, "  tenures that ended otherwise or moved the wrong bytes: ", i2c_bad, crlf);
+    bench.verdict("every tenure ended as it should and moved the right bytes, both hosts, both "
+                  "speeds, pump and engines",
+                  i2c_bad == 0u);
 #else
     print(serial, "  letter i declined on this board: the I2C host is measured on the "
-                  "STM32F429I-DISC1's STMPE811 alone", crlf);
+                  "STM32F429I-DISC1's STMPE811 and the Nucleo-F446RE's self-link alone", crlf);
 #endif
     bench.verdict("ran", true);
 }
@@ -1745,6 +1948,151 @@ extern "C" void USART6_IRQHandler() {
 }
 extern "C" void DMA2_Stream1_IRQHandler() { loop_dma_vector(); }
 extern "C" void DMA2_Stream6_IRQHandler() { loop_dma_vector(); }
+#endif
+#if defined(STM32F446xx)
+/// The two hosts' vectors, each block's own: the host's body when that
+/// block is the host (owners 1 and 2 the classic, 3 and 4 the FMPI2C1's),
+/// the target's otherwise - a byte sink and a pattern source from the
+/// address match on.
+extern "C" void I2C1_EV_IRQHandler() {
+    if (i2c_owner >= 3u) {
+        i2c_peer_meter.enter();
+        switch (I2cTarget::service()) {
+            case I2cClientEvent::addressed:
+                i2c_pos = 0;
+                i2c_serving = I2cTarget::host_reads();
+                I2c<1>::buffer_interrupt(true);
+                break;
+            case I2cClientEvent::byte_received:
+                i2c_sink[i2c_pos & 0xFFu] = I2cTarget::take();
+                i2c_pos = static_cast<uint16_t>(i2c_pos + 1u);
+                break;
+            case I2cClientEvent::byte_wanted:
+                // TxE stands between tenures too: a byte stored outside a
+                // read wedges the next one (docs/stm32f4/i2c.md), so the
+                // buffer vector goes quiet instead.
+                if (i2c_serving) {
+                    I2cTarget::give(i2c_src[i2c_pos & 0xFFu]);
+                    i2c_pos = static_cast<uint16_t>(i2c_pos + 1u);
+                } else {
+                    I2c<1>::buffer_interrupt(false);
+                }
+                break;
+            case I2cClientEvent::stop:
+                i2c_serving = false;
+                break;
+            default:
+                break;
+        }
+        i2c_peer_meter.leave();
+        return;
+    }
+    i2c_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (i2c_owner == 2u ? I2cDma::isr() : I2cPump::isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_ev_max, t0);
+    }
+    i2c_meter.leave();
+}
+extern "C" void I2C1_ER_IRQHandler() {
+    if (i2c_owner >= 3u) {
+        i2c_peer_meter.enter();
+        if (I2cTarget::error_service() == I2cClientEvent::nacked) {
+            // The host's closing NACK: the byte the shifter asked for ahead
+            // of it is dropped by a PE cycle (27.6.1: the address and the
+            // timing survive it), held down a few bus cycles.
+            i2c_serving = false;
+            I2c<1>::disable();
+            (void)I2c<1>::enabled();
+            (void)I2c<1>::enabled();
+            (void)I2c<1>::enabled();
+            I2c<1>::enable();
+            I2c<1>::ack(true);
+        }
+        i2c_peer_meter.leave();
+        return;
+    }
+    i2c_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (i2c_owner == 2u ? I2cDma::error_isr() : I2cPump::error_isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_er_max, t0);
+    }
+    i2c_meter.leave();
+}
+extern "C" void FMPI2C1_EV_IRQHandler() {
+    if (i2c_owner <= 2u) {
+        i2c_peer_meter.enter();
+        switch (FmpTarget::service()) {
+            case FmpI2cClientEvent::addressed:
+                i2c_pos = 0;
+                break;
+            case FmpI2cClientEvent::byte_received:
+                i2c_sink[i2c_pos & 0xFFu] = FmpTarget::take();
+                i2c_pos = static_cast<uint16_t>(i2c_pos + 1u);
+                break;
+            case FmpI2cClientEvent::byte_wanted:
+                FmpTarget::give(i2c_src[i2c_pos & 0xFFu]);
+                i2c_pos = static_cast<uint16_t>(i2c_pos + 1u);
+                break;
+            case FmpI2cClientEvent::nacked:
+                FmpTarget::flush();   // the byte asked for ahead of the NACK
+                break;
+            default:
+                break;
+        }
+        i2c_peer_meter.leave();
+        return;
+    }
+    i2c_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (i2c_owner == 4u ? FmpDma::isr() : FmpPump::isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_ev_max, t0);
+    }
+    i2c_meter.leave();
+}
+extern "C" void FMPI2C1_ER_IRQHandler() {
+    if (i2c_owner <= 2u) {
+        i2c_peer_meter.enter();
+        (void)FmpTarget::error_service();
+        i2c_peer_meter.leave();
+        return;
+    }
+    i2c_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (i2c_owner == 4u ? FmpDma::error_isr() : FmpPump::error_isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_er_max, t0);
+    }
+    i2c_meter.leave();
+}
+/// The engines' streams: I2C1's on DMA1 6 and 0, the FMPI2C1's on 5 and 2.
+template <typename Engined>
+[[gnu::always_inline]] inline void i2c_dma_vector() {
+    i2c_dma_meter.enter();
+    const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
+    if (Engined::dma_isr()) {
+        i2c_done = true;
+    }
+    if (i2c_watching) {
+        i2c_longest(i2c_dma_max, t0);
+    }
+    i2c_dma_meter.leave();
+}
+extern "C" void DMA1_Stream6_IRQHandler() { i2c_dma_vector<I2cDma>(); }
+extern "C" void DMA1_Stream0_IRQHandler() { i2c_dma_vector<I2cDma>(); }
+extern "C" void DMA1_Stream5_IRQHandler() { i2c_dma_vector<FmpDma>(); }
+extern "C" void DMA1_Stream2_IRQHandler() { i2c_dma_vector<FmpDma>(); }
 #endif
 #if defined(STM32F429xx)
 extern "C" void I2C3_EV_IRQHandler() {

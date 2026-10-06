@@ -9,10 +9,12 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// THE INSTRUMENT IS A DEVICE SOLDERED TO THE BOARD, which is why this
-// suite builds for the two Discovery boards alone: a bus driver measured
-// against nothing is a register read-back, and each of them carries its
-// touch-screen controller on a bus of its own. The letters know a PEER -
+// THE INSTRUMENT IS A DEVICE ON THE BUS, which is why this suite builds
+// for three boards alone: a bus driver measured against nothing is a
+// register read-back. Each Discovery board carries its touch-screen
+// controller on a bus of its own, and the Nucleo-F446RE's bench wires
+// I2C1 to the same chip's FMPI2C1, which this suite serves as a register
+// file. The letters know a PEER -
 // an address, an identity register with the bytes its datasheet gives it,
 // one register they may write and read back with nothing moving on the
 // board, and the way the device is put back where its reset leaves it -
@@ -48,6 +50,19 @@
 //                          read back here; the reset is the shared line's
 //                          pulse, 300 ms before the first report
 //
+//   Nucleo-F446RE
+//   I2C1   SCL PB8, SDA PB9 (AF4), wired to PC6 and PC7 with a 2.2 kOhm
+//          pull-up on each line (the bench's self-link)
+//   the peer               the chip's own FMPI2C1 on PC6/PC7 at 0x2C,
+//                          SERVED FROM ITS OWN TWO VECTORS: a register
+//                          file of this suite's own map (an identity at
+//                          0x00, a version at 0x02, a reset command at
+//                          0x03, a scratch register at 0x04, a fixed
+//                          pattern beyond), its pointer set by the first
+//                          written byte of a tenure - and able to REFUSE
+//                          a chosen written byte, which no device on the
+//                          other two boards does
+//
 // and the parts of the chapter that need no device are measured anyway:
 // the timing arithmetic against the registers in force, the address scan
 // against every address nobody answers, and the SCL frequency counted on
@@ -75,8 +90,15 @@
 //      touch controller in interrupt trigger mode, its INT counted on
 //      EXTI line 5 and its touch data polled for eight seconds while a
 //      human touches the panel - coordinates, event flags, touch ids
+//   m  (the Nucleo-F446RE) THE REFUSED LAST BYTE: the peer refusing the
+//      last of one to four written bytes of a write-then-read - the NACK
+//      arriving with the repeated START requested - through the pump and
+//      the engines, at 100 and 400 kHz, the core at 180, 48 and 16 MHz
+//      (a DynamicClock over the three): the status, the controller 2 ms
+//      on (START, STOP, MSL), the next tenure on the same host; each count
+//      also acknowledged whole, the control
 //
-// build: boards = f429zi,f469ni
+// build: boards = f429zi,f469ni,f446re
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -86,6 +108,9 @@
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
 #include "stm32f4/exti.hpp"
+#if defined(STM32F446xx)
+#include "stm32f4/fmpi2c.hpp"
+#endif
 #include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/ticker.hpp"
@@ -99,7 +124,14 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#if defined(STM32F446xx)
+/// The Nucleo-64 fits no crystal: its 8 MHz is the ST-LINK's clock output,
+/// taken in bypass.
+using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000,
+                             brio::HseMode::bypass>;
+#else
 using SysClock = brio::Clock<brio::ClockSource::pll_hse, 180'000'000, 8'000'000>;
+#endif
 constexpr SysClock clock;
 
 namespace {
@@ -174,6 +206,41 @@ constexpr uint8_t reg_period_active = 0x88;
 using TouchInt = Pin<'J', 5>;
 using TouchIrq = ExtInt<TouchInt>;
 volatile uint32_t touch_int_edges = 0;
+#elif defined(STM32F446xx)
+constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
+constexpr uint8_t console_instance = 2;
+constexpr uint8_t bus_instance = 1;
+constexpr I2cPins bus_pins{.scl = {'B', 8, PinFunction::af4}, .sda = {'B', 9, PinFunction::af4}};
+using SclPad = Pin<'B', 8>;
+using SdaPad = Pin<'B', 9>;
+/// I2C1's transmit request is DMA1 stream 6 on channel 1 and its receive
+/// DMA1 stream 0 on channel 1 (RM0390 table 28) - the reserve checks these
+/// two cells at compile time.
+using TxEngine = DmaTxEngine<1, 6, 1>;
+using RxEngine = DmaRxEngine<1, 0, 1>;
+/// THE PEER IS THE CHIP'S OWN FMPI2C1, on PC6 (SCL) and PC7 (SDA) at AF4
+/// (DS10693 table 11), the bench's two wires joining them to PB8 and PB9:
+/// a register file this suite serves from that block's own two vectors
+/// (the target below) - an identity at 0x00, a version at 0x02, a reset
+/// command at 0x03, a scratch register at 0x04, and a fixed pattern
+/// everywhere else, the pointer set by the first written byte of a tenure
+/// and advanced by every byte moved, as a register-mapped device's is.
+constexpr FmpI2cPins target_pins{.scl = {'C', 6, PinFunction::af4},
+                                 .sda = {'C', 7, PinFunction::af4}};
+using Target = FmpI2cClient<1, target_pins>;
+constexpr uint8_t reg_reset = 0x03;
+constexpr uint8_t reset_code = 0x02;
+constexpr PeerFacts peer{.name = "the chip's own FMPI2C1",
+                         .addr = 0x2C,
+                         .id_reg = 0x00,
+                         .id_len = 2,
+                         .id_bytes = {0x04, 0x46},
+                         .id_name = "ID (0x00, two bytes)",
+                         .ver_reg = 0x02,
+                         .ver_name = "VER (0x02)",
+                         .scratch_reg = 0x04,
+                         .scratch_name = "SCRATCH (0x04)",
+                         .scratch_patterns = {0x5A, 0xA5, 0x3C}};
 #else
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
@@ -310,6 +377,91 @@ uint8_t probe(uint8_t addr) { return tenure<Host>(addr, nullptr, 0, nullptr, 0);
 /// Whether `bytes` are the identity the datasheet gives the peer.
 bool is_peer_id(const uint8_t* bytes) { return peer_known && same(bytes, peer.id_bytes, peer.id_len); }
 
+#if defined(STM32F446xx)
+/// THE TARGET, served from FMPI2C1's own two vectors: the register file
+/// the board block describes. `refuse_at` makes it NACK one written byte
+/// of a tenure, counted from one (the index is the first): 23.7.2's NACK
+/// bit governs "the current received byte", so it is set as the byte
+/// BEFORE the refused one is taken - at the address match for the first.
+struct Regs {
+    static constexpr uint8_t size = 64;
+    static inline uint8_t file[size];
+    static inline uint8_t ptr = 0;
+    static inline bool indexed = false;   ///< the next written byte is the index
+    static inline volatile uint8_t took = 0;
+    static inline volatile uint8_t refuse_at = 0;
+
+    static void reset() {
+        for (uint8_t i = 0; i < size; ++i) {
+            file[i] = static_cast<uint8_t>(0x80u + i);
+        }
+        file[0] = peer.id_bytes[0];
+        file[1] = peer.id_bytes[1];
+        file[peer.ver_reg] = 0x01;
+        file[reg_reset] = 0x00;
+        file[peer.scratch_reg] = 0x00;
+    }
+
+    /// Up at `clock`, the five events and the errors interrupting.
+    template <typename C>
+    static bool up(C clk) {
+        reset();
+        const bool ok = Target::init(clk, FmpI2cAddressConfig{.own = peer.addr},
+                                     FmpI2cSpeed::fast_400k);
+        Target::interrupt(FmpI2cInterrupt::addr | FmpI2cInterrupt::rx | FmpI2cInterrupt::tx |
+                              FmpI2cInterrupt::nack | FmpI2cInterrupt::stop |
+                              FmpI2cInterrupt::error,
+                          true);
+        return ok;
+    }
+
+    [[gnu::always_inline]] static void event() {
+        switch (Target::service()) {
+            case FmpI2cClientEvent::addressed:
+                if (!Target::host_reads_last()) {
+                    indexed = true;
+                    took = 0;
+                    if (refuse_at == 1u) {
+                        Target::Resource::nack_next(true);
+                    }
+                }
+                break;
+            case FmpI2cClientEvent::byte_received: {
+                const uint8_t v = Target::take();
+                took = static_cast<uint8_t>(took + 1u);
+                if (refuse_at != 0u && took + 1u == refuse_at) {
+                    Target::Resource::nack_next(true);
+                }
+                if (indexed) {
+                    ptr = static_cast<uint8_t>(v % size);
+                    indexed = false;
+                } else {
+                    if (ptr == reg_reset && v == reset_code) {
+                        reset();
+                    } else if (ptr == peer.scratch_reg) {
+                        file[ptr] = v;
+                    }
+                    ptr = static_cast<uint8_t>((ptr + 1u) % size);
+                }
+                break;
+            }
+            case FmpI2cClientEvent::byte_wanted:
+                Target::give(file[ptr]);
+                ptr = static_cast<uint8_t>((ptr + 1u) % size);
+                break;
+            case FmpI2cClientEvent::nacked:
+                // The controller's closing NACK: the byte TXIS asked for
+                // ahead of it is dropped (23.7.7's TXE flush).
+                Target::flush();
+                break;
+            default:
+                break;
+        }
+    }
+    [[gnu::always_inline]] static void error() { (void)Target::error_service(); }
+};
+#endif
+
 #if defined(STM32F469xx)
 void spin_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::ticks();
@@ -330,6 +482,9 @@ uint8_t peer_reset() {
     ResetLine::set();
     spin_ms(300);
     return i2c_ok;
+#elif defined(STM32F446xx)
+    const uint8_t cmd[2] = {reg_reset, reset_code};
+    return tenure<Host>(peer_addr, cmd, 2, nullptr, 0);
 #else
     const uint8_t cmd[2] = {reg_sys_ctrl1, stmpe811_soft_reset};
     const uint8_t st = tenure<Host>(peer_addr, cmd, 2, nullptr, 0);
@@ -407,9 +562,16 @@ void ta_block() {
                       i2c_event_irq(1) != i2c_error_irq(1));
     print(serial, "  the noise filter register: ", S::has_filter ? "present" : "absent",
           "; an FMPI2C1 on this part: ", fmpi2c_present() ? "yes" : "no", crlf);
+#if defined(STM32F446xx)
+    bench.verdict("this part class has I2C_FLTR - the analog filter's off switch and the digital "
+                  "filter - and an FMPI2C1 beside the three, another block and another chapter "
+                  "(RM0390 ch. 23)",
+                  S::has_filter && fmpi2c_present());
+#else
     bench.verdict("this part class has I2C_FLTR - the analog filter's off switch and the digital "
                   "filter - and no FMPI2C1, which is another block and another chapter",
                   S::has_filter && !fmpi2c_present());
+#endif
 
     print(serial, "  APB1 = ", Host::reference_hz() / 1000u, " kHz, PCLK2 = ",
           SysClock::pclk2_hz / 1000u, " kHz, HCLK = ", SysClock::hz / 1000u, " kHz", crlf);
@@ -595,7 +757,7 @@ void td_scan() {
     bench.verdict("every address nobody answers comes back i2c_nack_addr, and nothing comes back "
                   "any other way",
                   other == 0u && nacked == (0x77u - 0x08u + 1u) - answered);
-    bench.verdict("the touch controller is one of them", peer_addr != 0u);
+    bench.verdict("the peer is one of them", peer_addr != 0u);
     print(serial, "  a second scan repeats it: ", probe(peer_addr) == i2c_ok ? "yes" : "NO",
           "; an address next to it still NACKs: ",
           probe(static_cast<uint8_t>(peer_addr + 1u)) == i2c_nack_addr ? "yes" : "NO", crlf);
@@ -889,7 +1051,7 @@ void th_write_back() {
         bench.verdict("a register written over this bus reads back exactly - the write path and "
                       "the read path are the same tenure with a repeated START between them",
                       wrote);
-#if !defined(STM32F469xx)
+#if defined(STM32F429xx)
         // And one pattern the DEVICE masks: with its ADC gate open this
         // part holds the temperature-sensor gate clear whatever is
         // written. A device rule and not a bus one, so it is printed and
@@ -1203,6 +1365,169 @@ void tk_recovery() {
 // the menu
 // =============================================================================
 
+#if defined(STM32F446xx)
+// =============================================================================
+// m - the refused last byte (the Nucleo-F446RE's self-link)
+// =============================================================================
+
+/// THE CORES letter m runs at: the boot rate, the PLL at 48 MHz and the
+/// HSI alone at 16 MHz - a DynamicClock over the three, whose switch parks
+/// on the HSI between PLL rates (clock.hpp). The slower the core, the later
+/// the error vector's answer to a NACK lands against what the controller
+/// does on its own after it.
+using Core48 = Clock<ClockSource::pll_hse, 48'000'000, 8'000'000, HseMode::bypass>;
+using Core16 = Clock<ClockSource::hsi, 16'000'000>;
+using Cores = DynamicClock<Rates<SysClock, Core48, Core16>, Ticker, Serial, Host, DmaHost>;
+constexpr Cores cores;
+
+/// What a run of refusals came to, over one core, one host, one speed.
+struct RefusalTally {
+    uint8_t refused;     ///< refusals tried
+    uint8_t nack_data;   ///< answered i2c_nack_data
+    uint8_t missed;      ///< i2c_ok: the TARGET was late with its NACK, the byte taken
+    uint8_t let_go;      ///< START and STOP down and MSL clear 2 ms on
+    uint8_t next_ok;     ///< the probe that followed on the same host: i2c_ok
+    uint8_t acked_ok;    ///< the controls - every byte acknowledged - exact
+    uint32_t first_cr1;  ///< CR1 and SR2 of the first refusal not let go
+    uint32_t first_sr2;
+    uint8_t first_st;    ///< its status, and the next tenure's, in two nibbles
+};
+
+/// One tenure, waited out on the tick for at most 20 ms.
+template <typename Bus>
+uint8_t run_ms(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len, I2cSpeed speed) {
+    typename Bus::Request r{};
+    r.addr = peer_addr;
+    r.tx = lend<Lease::reply>(tx);
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(rx);
+    r.rx_len = rx_len;
+    r.speed = speed;
+    xfer_done = false;
+    if (Bus::start(r)) {
+        return Bus::status();
+    }
+    const uint32_t t0 = Ticker::ticks();
+    while (!xfer_done && Ticker::ticks() - t0 < 20u) {
+    }
+    return xfer_done ? Bus::status() : parked;
+}
+
+/// One to four bytes written - the scratch register's index, then data -
+/// and two read, at one speed through one host: each count once
+/// acknowledged whole (the control) and four times with its LAST written
+/// byte refused, the NACK arriving with the repeated START requested.
+template <typename Bus>
+RefusalTally refusal_point(I2cSpeed speed) {
+    RefusalTally t{};
+    const uint8_t tx[4] = {peer.scratch_reg, 0x11, 0x22, 0x33};
+    uint8_t rx[2] = {};
+    for (uint8_t n = 1; n <= 4u; ++n) {
+        Regs::refuse_at = 0;
+        rx[0] = 0xEE;
+        rx[1] = 0xEE;
+        const uint8_t ack_st = run_ms<Bus>(tx, n, rx, 2, speed);
+        const uint8_t at = static_cast<uint8_t>(peer.scratch_reg + n - 1u);
+        if (ack_st == i2c_ok && Regs::took == n && rx[0] == Regs::file[at] &&
+            rx[1] == Regs::file[at + 1u]) {
+            ++t.acked_ok;
+        }
+        for (uint8_t trial = 0; trial < 4u; ++trial) {
+            Regs::refuse_at = n;
+            const uint8_t st = run_ms<Bus>(tx, n, rx, 2, speed);
+            const uint32_t t0 = Ticker::ticks();
+            while (Ticker::ticks() - t0 < 2u) {
+            }
+            const uint32_t cr1 = S::regs().CR1;
+            const uint32_t sr2 = S::regs().SR2;
+            Regs::refuse_at = 0;
+            const uint8_t next = run_ms<Bus>(nullptr, 0, nullptr, 0, speed);
+            const bool gone = (cr1 & (I2C_CR1_START | I2C_CR1_STOP)) == 0u &&
+                              (sr2 & I2C_SR2_MSL) == 0u;
+            ++t.refused;
+            t.nack_data = static_cast<uint8_t>(t.nack_data + (st == i2c_nack_data ? 1u : 0u));
+            t.missed = static_cast<uint8_t>(t.missed + (st == i2c_ok ? 1u : 0u));
+            t.let_go = static_cast<uint8_t>(t.let_go + (gone ? 1u : 0u));
+            t.next_ok = static_cast<uint8_t>(t.next_ok + (next == i2c_ok ? 1u : 0u));
+            if ((!gone || next != i2c_ok) && t.first_cr1 == 0u) {
+                t.first_cr1 = cr1;
+                t.first_sr2 = sr2;
+                t.first_st = static_cast<uint8_t>(st << 4 | (next & 0x0Fu));
+            }
+            if (!gone || next != i2c_ok) {
+                (void)Bus::recover();
+                (void)Bus::unstick();
+            }
+        }
+    }
+    return t;
+}
+
+/// One host at one speed, its counts printed; true when every refusal was
+/// answered i2c_nack_data (or, the target late, taken whole) with the bus
+/// let go and the next tenure running, and every control was exact.
+template <typename Bus>
+bool refusal_report(const char* core, I2cSpeed speed, bool engines) {
+    const RefusalTally t = refusal_point<Bus>(speed);
+    print(serial, "  ", core, speed == I2cSpeed::fast_400k ? " 400 kHz " : " 100 kHz ",
+          engines ? "engines" : "pump   ", ": acked exact ", t.acked_ok, "/4; refused ",
+          t.refused, ": nack_data ", t.nack_data, " (target late ", t.missed, "), let go ",
+          t.let_go, ", next ok ", t.next_ok);
+    if (t.first_cr1 != 0u) {
+        print(serial, "; first stuck: status|next ", hex(t.first_st), " CR1 ", hex(t.first_cr1),
+              " SR2 ", hex(t.first_sr2));
+    }
+    print(serial, crlf);
+    return t.acked_ok == 4u && t.nack_data != 0u && t.nack_data + t.missed == t.refused &&
+           t.let_go == t.refused && t.next_ok == t.refused;
+}
+
+/// Every core of the letter: the switch rebases the console, the tick and
+/// the two hosts; the target is brought up again at the new rate.
+template <uint8_t i>
+bool refusal_core(const char* core) {
+    const bool up = Cores::template set_index<i>();
+    (void)Regs::up(cores);
+    print(serial, "  the core at ", core, " (", up ? "up" : "FAILED", "), APB1 ",
+          Cores::pclk1_hz() / 1'000'000u, " MHz", crlf);
+    bool clean = up;
+    bus_ao_live = false;
+    dma_host_live = false;
+    (void)Host::init(cores);
+    clean = refusal_report<Host>(core, I2cSpeed::standard_100k, false) && clean;
+    clean = refusal_report<Host>(core, I2cSpeed::fast_400k, false) && clean;
+    Dma<1>::init();
+    (void)DmaHost::init(cores);
+    dma_host_live = true;
+    clean = refusal_report<DmaHost>(core, I2cSpeed::standard_100k, true) && clean;
+    clean = refusal_report<DmaHost>(core, I2cSpeed::fast_400k, true) && clean;
+    dma_host_live = false;
+    DmaHost::release();
+    return clean;
+}
+
+void tm_refusal() {
+    if (peer_addr == 0u) {
+        bench.verdict("the target answered at boot", false);
+        return;
+    }
+    const bool fast = refusal_core<0>("180 MHz");
+    const bool mid = refusal_core<1>(" 48 MHz");
+    const bool slow = refusal_core<2>(" 16 MHz");
+    (void)Cores::template set_index<0>();
+    (void)Regs::up(clock);
+    (void)host_ready();
+    bench.verdict("the LAST WRITTEN byte of a write-then-read refused - one to four written, "
+                  "both speeds, pump and engines, the core at 180 MHz: i2c_nack_data, the "
+                  "controller lets the bus go, and the next tenure runs",
+                  fast);
+    bench.verdict("... and the same with the core at 48 MHz", mid);
+    bench.verdict("... and at 16 MHz, the HSI alone", slow);
+    bench.verdict("the target is back at the boot rate and answers its identity",
+                  read_reg(reg_chip_id) == peer.id_bytes[0]);
+}
+#endif
+
 #if defined(STM32F469xx)
 // =============================================================================
 // l - a finger on the glass (by name only)
@@ -1303,8 +1628,7 @@ void tl_finger() {
 #endif
 
 void banner() {
-    print(serial, crlf, "test_stm32f4_i2c - I2C", bus_instance,
-          " with the board's own touch controller", crlf);
+    print(serial, crlf, "test_stm32f4_i2c - I2C", bus_instance, " with ", peer.name, crlf);
     bench.menu();
 }
 
@@ -1335,6 +1659,8 @@ void find_peer() {
 void board_prepare() {
 #if defined(STM32F469xx)
     (void)peer_reset();
+#elif defined(STM32F446xx)
+    (void)Regs::up(clock);
 #endif
 }
 
@@ -1350,6 +1676,15 @@ extern "C" void EXTI9_5_IRQHandler() {
         touch_int_edges = touch_int_edges + 1u;
     }
 }
+#define BRIO_I2C_EV_HANDLER I2C1_EV_IRQHandler
+#define BRIO_I2C_ER_HANDLER I2C1_ER_IRQHandler
+#define BRIO_I2C_TX_DMA_HANDLER DMA1_Stream6_IRQHandler
+#define BRIO_I2C_RX_DMA_HANDLER DMA1_Stream0_IRQHandler
+#elif defined(STM32F446xx)
+extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+// The peer: FMPI2C1's two vectors serve the register file.
+extern "C" void FMPI2C1_EV_IRQHandler() { Regs::event(); }
+extern "C" void FMPI2C1_ER_IRQHandler() { Regs::error(); }
 #define BRIO_I2C_EV_HANDLER I2C1_EV_IRQHandler
 #define BRIO_I2C_ER_HANDLER I2C1_ER_IRQHandler
 #define BRIO_I2C_TX_DMA_HANDLER DMA1_Stream6_IRQHandler
@@ -1450,6 +1785,9 @@ int main() {
     bench.letter('k', "the recovery verbs", tk_recovery);
 #if defined(STM32F469xx)
     bench.letter('l', "a finger on the glass: the touch controller reporting", tl_finger, false);
+#endif
+#if defined(STM32F446xx)
+    bench.letter('m', "THE REFUSED LAST BYTE, the core at 180, 48 and 16 MHz", tm_refusal);
 #endif
 
     if (serial_ok) {

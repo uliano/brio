@@ -51,6 +51,19 @@
  * (27.3.3's note), with a dummy store into DR that keeps BTF down until
  * the Sr; CR2's enables move in one store each time (control2()).
  *
+ * A REFUSED LAST BYTE IS CLOSED FROM THE Sr, NOT AT THE NACK. The NACK of
+ * the byte behind which the repeated START was requested arrives with
+ * START standing, and 27.6.1 forbids any CR1 access until the hardware
+ * clears that bit ("a risk of setting a second STOP, START or PEC
+ * request"), while 27.3.4 lets a NACKed controller answer with a repeated
+ * START. So the engine writes nothing at the NACK: the controller sends
+ * the Sr, and its SB is answered with the address and the WRITE bit and a
+ * STOP behind it - a void write - the tenure reporting i2c_nack_data once
+ * that address is acknowledged or refused. A CR1 store that withdrew the
+ * START and requested the STOP at the NACK left the event vector
+ * re-entering for ever with SB standing, the core at 48 MHz and the bus at
+ * 400 kHz (measured on the Nucleo-F446RE's self-link, docs/stm32f4/i2c.md).
+ *
  * THE RATE IS THE INSTANCE'S OWN APB1 CLOCK, never SYSCLK, and this
  * chapter needs it stated THREE times over: FREQ carries it in whole
  * megahertz (2 to 50 - 27.6.2; below 2 MHz no speed is legal and below
@@ -969,8 +982,13 @@ public:
 
             case Phase::start_rx:
             case Phase::restart:
+            case Phase::refused:
                 if ((s1 & I2cFlag::start_bit) == 0u) {
                     return false;
+                }
+                if (t_.phase == Phase::refused ||
+                    (t_.phase == Phase::restart && (s1 & I2cFlag::ack_failure) != 0u)) {
+                    return close_refused();
                 }
                 prime_receive();
                 S::data(static_cast<uint8_t>((t_.addr << 1) | 1u));
@@ -1018,6 +1036,16 @@ public:
 
             case Phase::rx_dma:
                 return false;   // dma_isr() ends it
+
+            case Phase::closing:
+                // The void write's address acknowledged: ADDR cleared (SR1
+                // read above, then SR2), and the STOP requested behind it
+                // goes out.
+                if ((s1 & I2cFlag::address) == 0u) {
+                    return false;
+                }
+                (void)S::status2();
+                return finish(i2c_nack_data);
         }
         return false;
     }
@@ -1051,15 +1079,18 @@ public:
         }
         if ((errs & I2cFlag::ack_failure) != 0u && t_.phase == Phase::restart) {
             // The LAST WRITTEN byte refused, its repeated START already
-            // requested (request_restart()): the NACK is the byte's, and the
-            // START still standing is withdrawn as the STOP is requested, in
-            // one CR1 store - START is "set and cleared by software"
-            // (27.6.1). Answered as an address NACK with STOP set beside the
-            // standing START, the CH32 twins of this block misreported the
-            // refusal and kept the controller master with both bits up
-            // (measured there; docs/stm32f4/i2c.md).
-            I2C_TypeDef& reg = S::regs();
-            reg.CR1 = (reg.CR1 & ~I2C_CR1_START) | I2C_CR1_STOP;
+            // requested (request_restart()): the NACK is the byte's, and
+            // NOTHING IS WRITTEN HERE. START stands, and 27.6.1 forbids any
+            // CR1 access until the hardware clears it - "a risk of setting a
+            // second STOP, START or PEC request" - while 27.3.4 lets a
+            // NACKed controller answer with a repeated START: the Sr the
+            // controller generates is waited for, and its SB closes the
+            // tenure (close_refused()).
+            t_.phase = Phase::refused;
+            return false;
+        }
+        if ((errs & I2cFlag::ack_failure) != 0u && t_.phase == Phase::closing) {
+            // The void write's address refused too: its STOP is requested.
             return finish(i2c_nack_data);
         }
         if ((errs & I2cFlag::ack_failure) != 0u) {
@@ -1231,8 +1262,12 @@ public:
 private:
     /// `restart`: the repeated START requested behind the last written
     /// byte, SB not yet seen - the phase in which a NACK is that byte's.
+    /// `refused`: that NACK taken, the Sr still coming; `closing`: the void
+    /// write that ends a refused tenure, its address out and its STOP
+    /// requested (close_refused()).
     enum class Phase : uint8_t {
-        idle, start_tx, start_rx, restart, addr_tx, addr_rx, tx, tx_dma, rx, rx_dma,
+        idle, start_tx, start_rx, restart, refused, closing, addr_tx, addr_rx, tx, tx_dma, rx,
+        rx_dma,
     };
 
     static_assert([] {
@@ -1312,6 +1347,21 @@ private:
         if (shifting) {
             S::data(0x00);
         }
+    }
+
+    /// EV5 of the Sr behind a refused last byte: the address with the
+    /// WRITE bit into DR - which clears SB and takes the dummy's place - and
+    /// STOP requested behind it, "after the current byte transfer" (27.6.1;
+    /// START is down here, the hardware having cleared it as the Sr went
+    /// out), so the wire carries a void write and the controller is left
+    /// as a plain write leaves it. AF is cleared here too, for the case in
+    /// which this vector saw it first.
+    [[gnu::always_inline]] static bool close_refused() {
+        S::clear_errors(I2cFlag::ack_failure);
+        S::data(static_cast<uint8_t>(t_.addr << 1));
+        S::stop();
+        t_.phase = Phase::closing;
+        return false;
     }
 
     /**

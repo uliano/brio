@@ -9,17 +9,19 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// THERE IS NO DEVICE ON THIS BUS, AND NO BYTE WAS EVER ACKNOWLEDGED HERE.
-// The block exists on one board of this stratum's three (the FMPI2C is the
-// F410's, F412's, F413/F423's and F446's), its two pads there are free
-// pins with nothing on them and no pull-ups of their own, and there is no
-// second device to wire. So this suite measures WHAT A BUS WITH NOBODY ON
-// IT SHOWS, which is more than it sounds:
+// THE BUS IS THE BENCH'S SELF-LINK, AND MOSTLY NOBODY ANSWERS ON IT. The
+// block exists on one board of this stratum's (the FMPI2C is the F410's,
+// F412's, F413/F423's and F446's), and the bench wires its two pads to the
+// same chip's I2C1. Every letter but m keeps I2C1 silent, so the suite
+// measures WHAT A BUS WITH NOBODY ANSWERING SHOWS, which is more than it
+// sounds; letter m makes I2C1 a target and moves bytes:
 //
-//   FMPI2C1   SCL PC6, SDA PC7 (AF4), pulled up by the PORT - some tens
-//             of kiloohms, which is far too weak for a real I2C edge and
-//             exactly enough to let the block drive, release and read its
-//             own wire
+//   FMPI2C1   SCL PC6, SDA PC7 (AF4), the port's pull-ups asked for as
+//             well; the bench's 2.2 kOhm resistors on each line hold the
+//             wire, and the port alone is enough to let the block drive,
+//             release and read its own wire on a board without them
+//   I2C1      SCL PB8, SDA PB9 (AF4), wired to PC6 and PC7: letter m's
+//             target at 0x3A, served from its own two vectors
 //
 //   - the register file at reset and every gate the chapter puts on a
 //     write;
@@ -40,8 +42,7 @@
 //     NACK;
 //   - and the arbiter over all of it.
 //
-// What is NOT here is the whole data path, and docs/stm32f4/fmpi2c.md says
-// so: a device on the bus is what would measure it.
+// and, in letter m, the whole data path against a real target.
 //
 // What is exercised, letter by letter:
 //   a  the block: presence, the gate, the reset values, the two vectors
@@ -56,6 +57,11 @@
 //   j  the DMA engines around a tenure that NACKs
 //   k  the recovery verbs
 //   l  the client, configured and never addressed
+//   m  THE SELF-LINK: FMPI2C1 the host, I2C1 the target - the probe, an
+//      absent address, a write, reads of one to four and eight bytes and
+//      a write-then-read at 100 and 400 kHz, the same through the DMA
+//      engines, and the last written byte of a write-then-read refused;
+//      declined by name where nothing answers 0x3A
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -67,6 +73,7 @@
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
 #include "stm32f4/fmpi2c.hpp"
+#include "stm32f4/i2c.hpp"
 #include "stm32f4/nvic.hpp"
 #include "stm32f4/syscfg.hpp"
 #include "stm32f4/ticker.hpp"
@@ -655,14 +662,19 @@ void tf_speeds() {
             // programmed halves are known exactly - so the measured period
             // less them is the SCL detection delay this board really pays,
             // against the 1000 / 750 / 500 ns the manual's tables assume.
+            // The MEAN gap is the period: a probe's nine clocks are the
+            // hardware's alone, nothing stretches them, while the shortest
+            // gap moves with the polling loop's phase - by up to 100 core
+            // cycles with a SYSCLK kernel and this board's 2.2 kOhm edges,
+            // more than the delay being measured.
             const FmpI2cTiming t = Host::timing_of(s);
             const uint32_t programmed_ns =
                 fmpi2c_scll_ns(ker, t) + fmpi2c_sclh_ns(ker, t);
             const uint32_t measured_ns =
-                r.shortest == 0u ? 0u
-                                 : static_cast<uint32_t>((static_cast<uint64_t>(r.shortest) *
-                                                          1000ULL) /
-                                                         (SysClock::hz / 1'000'000u));
+                r.average == 0u ? 0u
+                                : static_cast<uint32_t>((static_cast<uint64_t>(r.average) *
+                                                         1000ULL) /
+                                                        (SysClock::hz / 1'000'000u));
             const bool longer = measured_ns >= programmed_ns;
             print(serial, "  ", rows[k].name, " ", i == 0 ? "Sm  " : (i == 1 ? "Fm  " : "Fm+ "),
                   ": the arithmetic states ", Host::scl_hz(s), " Hz; the pad gave ", r.edges,
@@ -1203,6 +1215,235 @@ void tl_client() {
 }
 
 // =============================================================================
+// m - the self-link: FMPI2C1 the host, I2C1 the target
+// =============================================================================
+
+/// THE OTHER END, on this board: I2C1 on PB8/PB9 (AF4), joined to PC6/PC7
+/// by the bench's two wires with a 2.2 kOhm pull-up on each line, a target
+/// at 0x3A SERVED FROM ITS OWN TWO VECTORS - a byte sink, and a pattern
+/// source that restarts at every address match. `refuse_at` makes it NACK
+/// one written byte, counted from one: 27.6.1's ACK governs the byte being
+/// received, so it goes down as the byte BEFORE the refused one is taken
+/// (at the address match for the first) and back up with the refused one.
+constexpr I2cPins classic_pins{.scl = {'B', 8, PinFunction::af4},
+                               .sda = {'B', 9, PinFunction::af4}};
+using Classic = I2c<1>;
+using ClassicTarget = I2cClient<1, classic_pins>;
+constexpr uint8_t self_addr = 0x3A;
+
+struct Far {
+    static inline volatile bool live = false;
+    static inline volatile bool serving = false;
+    static inline volatile uint8_t pos = 0;
+    static inline volatile uint8_t took = 0;
+    static inline volatile uint8_t refuse_at = 0;
+    static inline uint8_t sink[32];
+
+    static uint8_t value(uint8_t i) { return static_cast<uint8_t>(0x47u + 0x1Du * i); }
+
+    [[gnu::always_inline]] static void event() {
+        switch (ClassicTarget::service()) {
+            case I2cClientEvent::addressed:
+                pos = 0;
+                serving = ClassicTarget::host_reads();
+                Classic::buffer_interrupt(true);
+                if (!serving) {
+                    took = 0;
+                    if (refuse_at == 1u) {
+                        ClassicTarget::acknowledge(false);
+                    }
+                }
+                break;
+            case I2cClientEvent::byte_received: {
+                const uint8_t v = ClassicTarget::take();
+                if (took < sizeof sink) {
+                    sink[took] = v;
+                }
+                took = static_cast<uint8_t>(took + 1u);
+                if (took == refuse_at) {
+                    ClassicTarget::acknowledge(true);
+                } else if (refuse_at != 0u && took + 1u == refuse_at) {
+                    ClassicTarget::acknowledge(false);
+                }
+                break;
+            }
+            case I2cClientEvent::byte_wanted:
+                // TxE stands between tenures too, and a byte stored outside
+                // a read wedges the next one (docs/stm32f4/i2c.md): only
+                // inside a read is DR written; otherwise the buffer vector
+                // goes quiet.
+                if (serving) {
+                    ClassicTarget::give(value(pos));
+                    pos = static_cast<uint8_t>(pos + 1u);
+                } else {
+                    Classic::buffer_interrupt(false);
+                }
+                break;
+            case I2cClientEvent::stop:
+                serving = false;
+                ClassicTarget::acknowledge(true);
+                break;
+            default:
+                break;
+        }
+    }
+    [[gnu::always_inline]] static void error() {
+        if (ClassicTarget::error_service() == I2cClientEvent::nacked) {
+            // The host's closing NACK: the byte the shifter asked for ahead
+            // of it is dropped by a PE cycle (27.6.1: the address and the
+            // timing survive it), held down a few bus cycles.
+            serving = false;
+            Classic::disable();
+            (void)Classic::enabled();
+            (void)Classic::enabled();
+            (void)Classic::enabled();
+            Classic::enable();
+        }
+        ClassicTarget::acknowledge(true);
+    }
+};
+
+/// The tenure shapes through one host at one speed against the far end:
+/// the probe, an absent address, a write of eight, reads of one, two,
+/// three, four and eight, a write of two then a read of four. Returns how
+/// many of the eight came back exact.
+template <typename Bus>
+uint8_t self_shapes(FmpI2cSpeed speed) {
+    uint8_t exact = 0;
+    uint8_t out[8];
+    uint8_t in[8];
+    for (uint8_t i = 0; i < 8u; ++i) {
+        out[i] = static_cast<uint8_t>(0x11u * (i + 1u));
+    }
+    exact = static_cast<uint8_t>(exact + (tenure<Bus>(self_addr, nullptr, 0, nullptr, 0, speed) ==
+                                                  i2c_ok ? 1u : 0u));
+    exact = static_cast<uint8_t>(exact + (tenure<Bus>(0x42, nullptr, 0, nullptr, 0, speed) ==
+                                                  i2c_nack_addr ? 1u : 0u));
+    Far::took = 0;
+    bool w = tenure<Bus>(self_addr, out, 8, nullptr, 0, speed) == i2c_ok && Far::took == 8u;
+    for (uint8_t i = 0; i < 8u && w; ++i) {
+        w = Far::sink[i] == out[i];
+    }
+    exact = static_cast<uint8_t>(exact + (w ? 1u : 0u));
+    const uint8_t counts[5] = {1, 2, 3, 4, 8};
+    for (const uint8_t c : counts) {
+        for (uint8_t i = 0; i < 8u; ++i) {
+            in[i] = 0xEE;
+        }
+        bool r = tenure<Bus>(self_addr, nullptr, 0, in, c, speed) == i2c_ok;
+        for (uint8_t i = 0; i < c && r; ++i) {
+            r = in[i] == Far::value(i);
+        }
+        exact = static_cast<uint8_t>(exact + (r ? 1u : 0u));
+    }
+    Far::took = 0;
+    for (uint8_t i = 0; i < 4u; ++i) {
+        in[i] = 0xEE;
+    }
+    bool c = tenure<Bus>(self_addr, out, 2, in, 4, speed) == i2c_ok && Far::took == 2u &&
+             Far::sink[0] == out[0] && Far::sink[1] == out[1];
+    for (uint8_t i = 0; i < 4u && c; ++i) {
+        c = in[i] == Far::value(i);
+    }
+    return static_cast<uint8_t>(exact + (c ? 1u : 0u));
+}
+
+/// One to four bytes written and two read, the LAST written byte refused,
+/// four times a count: how many came back i2c_nack_data, how many left
+/// the bus let go (START and STOP down, BUSY clear, 2 ms on) and how many
+/// were followed by a probe that ran.
+template <typename Bus>
+void self_refusals(FmpI2cSpeed speed, uint8_t& nacked, uint8_t& gone, uint8_t& next) {
+    const uint8_t out[4] = {0x21, 0x32, 0x43, 0x54};
+    uint8_t in[2];
+    for (uint8_t n = 1; n <= 4u; ++n) {
+        for (uint8_t trial = 0; trial < 4u; ++trial) {
+            Far::refuse_at = n;
+            const uint8_t st = tenure<Bus>(self_addr, out, n, in, 2, speed);
+            const uint32_t t0 = Ticker::ticks();
+            while (Ticker::ticks() - t0 < 2u) {
+            }
+            const bool free = (S::cr2() & (FMPI2C_CR2_START | FMPI2C_CR2_STOP)) == 0u && !S::busy();
+            Far::refuse_at = 0;
+            ClassicTarget::acknowledge(true);
+            const uint8_t after = tenure<Bus>(self_addr, nullptr, 0, nullptr, 0, speed);
+            nacked = static_cast<uint8_t>(nacked + (st == i2c_nack_data ? 1u : 0u));
+            gone = static_cast<uint8_t>(gone + (free ? 1u : 0u));
+            next = static_cast<uint8_t>(next + (after == i2c_ok ? 1u : 0u));
+            if (!free || after != i2c_ok) {
+                (void)Bus::recover();
+                (void)Bus::unstick();
+            }
+        }
+    }
+}
+
+void tm_self_link() {
+    // The far end first, so its pads are the peripheral's before a START.
+    Far::live = true;
+    Far::refuse_at = 0;
+    const bool far_up = ClassicTarget::init(clock, I2cAddressConfig{.own = self_addr});
+    if (!host_ready()) {
+        bench.verdict("the host came up", false);
+        return;
+    }
+    const uint8_t found = probe(self_addr);
+    if (!far_up || found != i2c_ok) {
+        // A board without the two wires: nothing answers, and the letter
+        // says so instead of failing.
+        print(serial, "  nothing answers ", hex(self_addr), " (status ", found,
+              "): this board does not wire I2C1 to FMPI2C1 - the letter declines by name", crlf);
+        ClassicTarget::release();
+        Far::live = false;
+        (void)host_ready();
+        return;
+    }
+    print(serial, "  I2C1 answers at ", hex(self_addr), " on PB8/PB9, wired to PC6/PC7", crlf);
+    uint8_t exact = 0;
+    for (const FmpI2cSpeed speed : {FmpI2cSpeed::standard_100k, FmpI2cSpeed::fast_400k}) {
+        const uint8_t e = self_shapes<Host>(speed);
+        print(serial, "  ", speed == FmpI2cSpeed::fast_400k ? "400" : "100",
+              " kHz, the pump: ", e, " of 9 shapes exact", crlf);
+        exact = static_cast<uint8_t>(exact + e);
+    }
+    bench.verdict("THE FMPI2C1'S FIRST ACKNOWLEDGED BYTES: the probe, an absent address, a write "
+                  "of eight, reads of one, two, three, four and eight and a write-then-read, "
+                  "byte-exact against I2C1 at 100 and 400 kHz",
+                  exact == 18u);
+
+    // The engines: the same shapes through DMA1 streams 5 and 2.
+    Dma<1>::init();
+    dma_host_live = true;
+    uint8_t dma_exact = 0;
+    if (DmaHost::init(clock, base_config)) {
+        dma_exact = self_shapes<DmaHost>(FmpI2cSpeed::fast_400k);
+    }
+    dma_host_live = false;
+    DmaHost::release();
+    print(serial, "  400 kHz, the engines: ", dma_exact, " of 9 shapes exact", crlf);
+    bench.verdict("... and through the DMA engines", dma_exact == 9u);
+
+    // The refusal of the last written byte, as this host sees it: its NACK
+    // stops the tenure by hardware (23.4.9), whatever comes after.
+    (void)host_ready();
+    Far::live = true;
+    uint8_t nacked = 0;
+    uint8_t gone = 0;
+    uint8_t next = 0;
+    self_refusals<Host>(FmpI2cSpeed::standard_100k, nacked, gone, next);
+    self_refusals<Host>(FmpI2cSpeed::fast_400k, nacked, gone, next);
+    print(serial, "  the last written byte refused, one to four written, both speeds: 32 "
+                  "refusals, i2c_nack_data ", nacked, ", the bus let go ", gone,
+          ", the next tenure ok ", next, crlf);
+    bench.verdict("the LAST WRITTEN byte of a write-then-read refused: i2c_nack_data, the bus "
+                  "let go, the next tenure running",
+                  nacked == 32u && gone == 32u && next == 32u);
+    ClassicTarget::release();
+    Far::live = false;
+    (void)host_ready();
+}
+
+// =============================================================================
 // the menu
 // =============================================================================
 
@@ -1217,6 +1458,18 @@ void banner() {
 // ---- the vectors ---------------------------------------------------------------------------
 
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
+
+// I2C1's two vectors: letter m's far end.
+extern "C" void I2C1_EV_IRQHandler() {
+    if (Far::live) {
+        Far::event();
+    }
+}
+extern "C" void I2C1_ER_IRQHandler() {
+    if (Far::live) {
+        Far::error();
+    }
+}
 
 extern "C" void FMPI2C1_EV_IRQHandler() {
     if (ev_n < 4u) {
@@ -1324,6 +1577,7 @@ int main() {
     bench.letter('j', "the DMA engines around a tenure that NACKs", tj_engines);
     bench.letter('k', "the recovery verbs", tk_recovery);
     bench.letter('l', "the client, configured and never addressed", tl_client);
+    bench.letter('m', "THE SELF-LINK: FMPI2C1 the host, I2C1 the target", tm_self_link);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED",

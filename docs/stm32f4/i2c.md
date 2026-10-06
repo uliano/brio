@@ -31,7 +31,10 @@ touch-screen controller the board carries on I2C3, and on the
 its MB1166 display board on I2C1 - whose register map is FocalTech's
 "Application Note for FT6x06 CTPM" (v1.0, the same document bound into
 the FT6236/FT6336/FT6436 series datasheet v0.3) and whose pins and
-timings are the FT6x06 datasheet v0.1.
+timings are the FT6x06 datasheet v0.1 - and on the Nucleo-F446RE, I2C1
+on PB8/PB9 wired to the same chip's FMPI2C1 on PC6/PC7 (a 2.2 kOhm
+pull-up on each line), the FMPI2C1 a register file the suite serves from
+its own vectors.
 
 ## What the silicon does
 
@@ -178,9 +181,18 @@ item that bears on a tenure's cost, measured on the STM32F429I-DISC1 at
   address stored at SB replaces the dummy: the register read back is the
   one asked for (measured, polled; ST's library clears the same two flags
   with a store into DR, I2C_Flush_DR). A NACK of that last byte arrives
-  with the START still pending: the engine answers it i2c_nack_data and
-  withdraws the START as it requests the STOP, in one CR1 store (27.6.1:
-  START is "set and cleared by software").
+  with the START still pending, and is answered `i2c_nack_data` - but
+  NOTHING IS WRITTEN AT THE NACK: 27.6.1 forbids any CR1 access while
+  START stands ("a risk of setting a second STOP, START or PEC request"),
+  and 27.3.4 lets a NACKed controller answer with a repeated START. The
+  controller sends the Sr, and its SB is answered with the address and
+  the WRITE bit and a STOP behind it - a void write, one address byte on
+  the wire, only when a byte is refused (the bench findings measure the
+  one-store withdrawal this replaced, and its hang).
+- *START cleared by software - a requested start withdrawn* (27.6.1's
+  START bit). Declined: behind a refused last byte it is a CR1 access
+  while START stands, which the same register's note forbids, and on the
+  wire it hung the event vector (the bench findings).
 - *The STOP on the TxE of the last byte* (27.3.3: "when either TxE or BTF
   is set"). Declined: nothing marks a controller's own STOP leaving
   (STOPF is the target half's), so a STOP requested a byte early would
@@ -218,8 +230,9 @@ item that bears on a tenure's cost, measured on the STM32F429I-DISC1 at
 - *PEC, SMBus, the 10-bit header, the noise filters' effect.* No tenure
   shape asks for them (the gap lists below).
 - *The FMPI2C* of the F410/F412/F413/F446 is the STM32G0's block, its own
-  document ([fmpi2c.md](fmpi2c.md)); its board was not on the desk for
-  this measurement and nothing of it moved.
+  document ([fmpi2c.md](fmpi2c.md)); on the Nucleo-F446RE it is this
+  block's partner on the self-link, and the host each block makes is
+  priced against the other in `bench_stm32f4`'s letter `i`.
 
 ## Types and verbs
 
@@ -510,6 +523,52 @@ scratch program with brio's crt, clock and ruler. At 400 kHz:
 - **The STMPE811 NACKs a read no write opened** - its address, at once -
   so a plain read is measured here through the register read only.
 
+`test_stm32f4_i2c` on the Nucleo-F446RE, I2C1 on PB8/PB9 against the
+chip's own FMPI2C1 on PC6/PC7 - two wires and a 2.2 kOhm pull-up on each
+line - SERVED FROM ITS OWN VECTORS as a register file (an identity at
+0x00, a reset command at 0x03, a scratch register at 0x04, a pointer the
+first written byte sets), at 0x2C. `z` is 67 verdicts: every letter of
+the DISC1's runs against it, and one more.
+
+- **The scan finds 0x2C alone** of the 112 addresses; the three receive
+  procedures agree byte for byte, the scratch register is written and
+  read back and the target's reset command restores it, the kernel's
+  arbiter and the DMA engines (DMA1 streams 6 and 0 on channel 1, RM0390
+  table 28) carry the same tenures, and the recovery verbs behave as on
+  the DISC1. SCL on the pad: 1803, 458 and 503 core cycles of mean gap
+  for the three rows, the stated rates within the brackets.
+- **THE REFUSED LAST BYTE** (letter `m`): the FMPI2C1 target refusing the
+  last of one to four written bytes of a write-then-read - its NACK bit
+  set as the byte before is taken (23.7.2) - four times a count, through
+  the pump and the engines, at 100 and 400 kHz, the core at 180, 48 and 16
+  MHz (a DynamicClock over the three, the console, the tick and the two
+  hosts its users). With the one-store withdrawal at the NACK: clean at
+  180 MHz and at 48 MHz and 100 kHz, then at 48 MHz and 400 kHz through
+  the pump the program HUNG - the event vector re-entering without end,
+  SR1 SB, SR2 MSL and BUSY, CR1 PE alone, CR2 the event and error
+  enables, the engine in its address phase of the next tenure - twice in
+  two runs. With the close from the Sr: 192 refusals of 192 answered
+  `i2c_nack_data`, the controller let go (START and STOP down, MSL clear,
+  2 ms on) and the next tenure `i2c_ok`, the target never late, at all
+  three cores; and every count acknowledged whole, byte-exact.
+
+**The host above the wire on the Nucleo-F446RE: `bench_stm32f4`'s letter
+`i`** on the same self-link, each block the host in turn and the other
+the target at 0x3A served from its own vectors on the same core (its
+entries counted apart, the instrument's share of the wall), the SCL
+period measured on PB8 - 456 core cycles at 400 kHz for I2C1, the stated
+rate - and the plain reads measured too, this target answering them. At
+400 kHz, I2C1 the host: a one-byte write 230 cycles beyond the wire in
+three interrupts, a register read 1+1 604 in five, a 255-byte write and
+read x 1.00 on the pump (256 interrupts) and on the engines (4 and 3);
+the pump 107 cycles of handler a byte written and 126 read; the STOP's
+drain 367 cycles; the longest entry 215 cycles of the event vector. The
+refusal's close costs an acknowledged tenure nothing measurable: the
+listing's transmit and receive steps are the same size, and the eight to
+ten cycles a byte the rows moved by between the two builds moved the
+FMPI2C1 host's rows too, whose code did not change - the image's layout
+under the flash accelerator, not the engine.
+
 `test_stm32f4_i2c` on the 32F469IDISCOVERY, I2C1 on PB8/PB9 under the
 board's 1.5 k pull-ups, against the MB1166's FocalTech touch controller,
 reset through the panel's shared line PH7. `z` is 63 verdicts, and one
@@ -569,19 +628,15 @@ Implemented, not bench-verified (each with what would measure it):
   have a board's touch controller; the 32F469IDISCOVERY's CS43L22 audio
   DAC on I2C2 (PH4/PH5, 100 kHz at most, its identity register 01h
   documented) is the device that would measure the third instance.
-- A NACK on a DATA byte (`i2c_nack_data`): the device on this bus
-  acknowledges every byte it is sent. A device that refuses one - an
-  EEPROM mid-write, a client that runs out of buffer - would measure
-  it, and above all the refusal of the LAST byte before a repeated
-  START, which arrives with that START pending and which the engine
-  answers by withdrawing it as it requests the STOP: the same order on
-  the CH32V203C8T6's self-link misreported that refusal before the
-  same answer was given there, and measured right after
-  ([../ch32vx03/i2c.md](../ch32vx03/i2c.md)).
 - The reworked engine on the 32F469IDISCOVERY (EV8_1's two bytes, the
-  repeated START behind a dummy, the event vector the tenure's): the
-  board was off the desk; its suite against the FocalTech controller is
-  what would measure it, as letter `i` measured it on the DISC1.
+  repeated START behind a dummy, the event vector the tenure's, the
+  refusal closed from the Sr): the board was off the desk; its suite
+  against the FocalTech controller is what would measure it, as letter
+  `i` measured it on the DISC1.
+- The refusal's close from the Sr on the STM32F429I-DISC1: measured on
+  the Nucleo-F446RE's self-link (the same engine, the same register
+  description); the DISC1's suite, off the desk, would say its device
+  letters are unmoved.
 - EV8_1's fallback - TxE not seen within ten SR1 reads of ADDR's clear,
   the byte left to the buffer vector: TxE rose within twenty cycles in
   every tenure measured, so the branch never ran. A slower APB1 against

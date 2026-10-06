@@ -33,7 +33,11 @@ one pad twice, a pad on an absent port, an engine off the request map,
 an engine on a part class whose manual was not read, one engine of two,
 and an engine whose element is not a byte. Bench: `test_stm32f4_fmpi2c`
 on the Nucleo-F446RE, the one board of this stratum whose part carries
-the block - with NOTHING on the bus.
+the block, its PC6 and PC7 wired to the same chip's I2C1 on PB8 and PB9
+with a 2.2 kOhm pull-up on each line - the classic block silent in every
+letter but one, and a target in that one; the other end of the classic
+block's own suite on the same wires ([i2c.md](i2c.md)), and of
+`bench_stm32f4`'s letter `i`.
 
 ## What the silicon does
 
@@ -330,12 +334,11 @@ extern "C" void FMPI2C1_ER_IRQHandler() { act(Peer::error_service()); }
 ## Bench findings
 
 The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
-pads are PC6 and PC7, which that package bonds and nothing on the board
-uses. **THERE IS NO DEVICE ON THIS BUS AND NO BYTE WAS EVER ACKNOWLEDGED
-HERE**: what follows is what a bus with nobody on it can be made to say,
-and the wire is held up by the PORT's own pull-ups - some tens of
-kiloohms - because the board has none. `test_stm32f4_fmpi2c` is 89
-verdicts over twelve letters.
+pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
+pull-up on each line. Letters a to l see that bus with I2C1 silent -
+what a bus with nobody answering can be made to say - and letter m makes
+I2C1 the target. `test_stm32f4_fmpi2c` is 92 verdicts over thirteen
+letters.
 
 **The register file at reset is the chapter's**, and the one non-zero
 value is ISR = 0x0001: TXE stands out of reset, so a transmitter that
@@ -383,18 +386,19 @@ BUS FASTER THAN THE ARITHMETIC STATES.** SCL was counted on the clock
 pad's own input buffer while an address phase ran - the pad is an
 open-drain alternate function, so its IDR is the wire - and the period
 measured less the tSCLL + tSCLH the register programs is the detection
-delay 23.4.9 calls tSYNC1 + tSYNC2. Over eight rows (three speeds on two
-kernel clocks, two on the third) it came out **between about 50 and
-500 ns**, always positive and always well under the 1000 / 750 / 500 ns
-tables 134 and 135 assume - the spread being what a polling loop that
-timestamps a little before the edge it sees can resolve against a 9 us
-period. So a bus solved against the defaults runs a few per cent fast:
-105 kHz measured where the arithmetic states 99.3 kHz, 466 kHz where it
-states 394.7 kHz, 1.12 MHz where it states 1.00 MHz. The rates are
-printed and not judged - one board, one set of pull-ups - but the
-direction is a design fact: `sync_ns` is an argument for exactly this
-reason, and an application that must not pass the standard's ceiling
-states its own measured one.
+delay 23.4.9 calls tSYNC1 + tSYNC2, judged on the MEAN gap of the
+probe's clocks (nothing stretches them; the shortest gap moves with the
+polling loop's phase by up to a hundred core cycles). Over eight rows
+(three speeds on two kernel clocks, two on the third) it came out
+**between about 150 and 400 ns** on the 2.2 kOhm wire, always positive
+and always well under the 1000 / 750 / 500 ns tables 134 and 135 assume.
+So a bus solved against the defaults runs FAST: 107 kHz measured where
+the arithmetic states 99.3 kHz, 494 kHz where it states 394.7 kHz -
+past fast mode's 400 kHz ceiling - and 1.36 MHz where it states 1.00
+MHz. The rates are printed and not judged - one board, one set of
+pull-ups - but the direction is a design fact: `sync_ns` is an argument
+for exactly this reason, and an application that must not pass the
+standard's ceiling states its own measured one.
 
 **A NACK on the address is a complete transaction, and its two flags come
 in order.** All 112 addresses from 0x08 to 0x77 answered `i2c_nack_addr`
@@ -463,6 +467,46 @@ came back to the peripheral after it.
 fire once on this die over the whole suite; the count is printed rather
 than judged.
 
+**THE FIRST ACKNOWLEDGED BYTES: the host against I2C1** (letter `m`),
+I2C1 a target at 0x3A served from its own two vectors - a byte sink and
+a pattern source - its byte asked for ahead of the host's closing NACK
+dropped by a PE cycle, its buffer interrupt silenced outside a read
+(TxE stands between tenures on that block, [i2c.md](i2c.md)). The
+probe, an absent address, a write of eight, reads of one, two, three,
+four and eight bytes and a write of two then a read of four, byte-exact
+at 100 and 400 kHz through the pump, and at 400 kHz through the DMA
+engines (DMA1 streams 5 and 2, channel 2): the byte pump, the TC branch
+that turns the write half into the read on one CR2 store, the receive
+path and the engines moving bytes. The LAST written byte of a
+write-then-read refused by the target (one to four written, four times
+a count, both speeds): 32 refusals of 32 `i2c_nack_data`, the bus let go
+(START and STOP down, BUSY clear, 2 ms on) and the next tenure `i2c_ok` -
+this block has no repeated START to withdraw, the STOP after a NACK
+being its own (23.4.9).
+
+**The target half answers a real controller.** As the peer of
+`test_stm32f4_i2c` on the same wires, `FmpI2cClient<1>` served from its
+own two vectors is a register file at 0x2C - the address match, each
+byte received and wanted, the controller's closing NACK (its byte asked
+for ahead dropped by 23.7.7's TXE flush) all reported by `service()` -
+through that suite's 67 verdicts, and CR2's NACK bit set as the byte
+before is taken refuses a chosen written byte (23.7.2: "a NACK is sent
+after current received byte"), 192 refusals of 192 on time with the core
+at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
+
+**What a tenure costs this host** (`bench_stm32f4`'s letter `i` on the
+same wires, I2C1 the target served on the same core, its entries counted
+apart; the SCL period measured on the pad, 364 core cycles at the 400
+kHz row - the 494 kHz above). At 400 kHz: a one-byte write 1144 cycles
+beyond the wire in two interrupts, a register read 1+1 1799 in four, a
+255-byte write and read x 1.00 on the pump (256 interrupts, 136 cycles
+of handler a byte written and 151 read) and on the engines (two
+interrupts), `start()` 315 cycles, the longest entry 518 cycles of the
+event vector. The fixed cost carries the target's: the classic block
+stretches SCL from its address match until its vector has run, on the
+same core; I2C1 as the host against this block as the target pays 230
+for the same write ([i2c.md](i2c.md)).
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -491,17 +535,9 @@ Driver gaps, each with its reason:
   on every other stratum.
 
 Implemented, not bench-verified (each with what would measure it):
-- **THE WHOLE DATA PATH.** No byte has ever been acknowledged on this
-  bus: every tenure this suite ran ended on the address. So the byte
-  pump, the repeated START of a write-then-read, `i2c_nack_data`, the TC
-  branch, the DMA engines actually MOVING bytes, and the client's
-  `service()` reporting anything but `none` are all compiled, reasoned
-  from a chapter that another stratum's identical block has proved, and
-  unmeasured here. A DEVICE ON THE BUS - any I2C part on two wires to PC6
-  and PC7 - would measure all of it in one letter.
-- The client role: it needs a controller at the other end of a wire, and
-  the boards of this stratum have none between them. A peer board, or a
-  wire from this block to one of the part's other I2C instances.
+- Fast-mode Plus with a byte acknowledged: the self-link's other end is
+  the classic I2C, a 400 kHz target; an Fm+ target on the wire would
+  measure the data path at 1 MHz.
 - Arbitration lost (`i2c_arb_lost`): a second controller on the wire.
 - A bus error and the spurious-BERR count: the chapter raises BERR on a
   misplaced START or STOP, which wants another controller misbehaving,
