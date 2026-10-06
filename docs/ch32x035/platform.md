@@ -51,10 +51,15 @@ question.
   a wait-for-event, and SEVONPEND makes every interrupt that turns
   pending an event, masked or not, LATCHED - "if the WFE instruction is
   not executed, the system will be woken up immediately after the next
-  execution of the instruction" (RM 7.5.2.38). That form is correct
-  under either reading, and it is the platform's - and it wakes on this
-  core: `idle()`, called with interrupts masked as the kernel calls it,
-  returns on the next tick with them enabled (measured).
+  execution of the instruction" (RM 7.5.2.38). That form is the
+  platform's, and it wakes on this core: `idle()`, called with interrupts
+  masked as the kernel calls it, returns on the next tick with them
+  enabled (measured). Whether it keeps the kernel's idle promise is not:
+  on the QingKe V2 a WFE entered masked lost a wake arriving on the
+  cycle it went to sleep, and on the V4B the latch a wake leaves made
+  the loop turn twice per interrupt until a second `wfi` consumed it -
+  both sister strata now unmask first and consume, and this one does
+  neither (Not covered yet).
 - **In Sleep the STK keeps its clock** and in a deep sleep every clock
   may stop (V4 manual 6.1); a core in debug mode enters no sleep at all,
   so a sleep observed with a probe halted on the core is not one.
@@ -289,6 +294,14 @@ Driver gaps, each with its reason:
   reset value, the reset on. Which traps raise it is a measurement - an
   exception taken inside the fault handler, the reset flags read at the
   next boot - that belongs with the fault body above, its first user.
+- **The idle promise** (design/kernel.md section 11: no lost wake, one
+  turn per wake): `idle()` still sleeps with interrupts MASKED and does
+  not consume the latch its wake leaves - the order the sister strata
+  measured and left, the QingKe V2 losing a wake for good in it and the
+  V4B turning twice per wake without the consume. Neither half is
+  measured on the V4C: the sister suites' letters `w` and the turn
+  letter, ported, with the board on the desk, measure the order as it
+  is before it changes.
 - **The debug module's freeze bits** (DBGMCU_CR, CSR 0x7C0, RM 23.2.1):
   no verb reads or writes them - on the CH32V203 a `csrw` to that CSR
   from the running program resets the part
