@@ -400,13 +400,65 @@ subtracted and interrupts masked.
   `SLPCTRL.CTRLA` at 0 and interrupts enabled, and waits at most one
   tick period. An unfinished console line leaves the USART's DRE
   interrupt armed, and THAT is then what does the waking - one wake per
-  frame, every ~250 cycles at 460800.
+  frame, every ~250 cycles at 460800. Letter `f` so proves the wake from
+  a sleep the tick finds, and the idle contract's second half with a
+  loose bound (at most 40 turns for 32 ticks); letters `w` and `k`
+  below are the contract's two halves to the cycle and to the turn.
 - **The generated sleep sequence is right.** In the disassembly the
-  `sei` is immediately followed by `sleep` (nothing can slip into the
-  lost-wakeup window), the disarming store to `SLPCTRL.CTRLA` is
-  immediately preceded by the erratum's NOP, and the arming store is
-  preceded by an `ldi` - not by another store, which is what 2.2.4
-  actually forbids.
+  `sei` is immediately followed by `sleep`, the disarming store to
+  `SLPCTRL.CTRLA` is immediately preceded by the erratum's NOP, and the
+  arming store is preceded by an `ldi` - not by another store, which is
+  what 2.2.4 actually forbids.
+- **No edge position loses the wake** (letter `w`, on the
+  AVR128DB48). TCB0's compare, started by the store that enables it,
+  raises its interrupt `pos` cycles later, `pos` = 0..255, against the
+  kernel's own shape - a masked check, `idle()`, until one edge, and in
+  a second pass until two, the second `pos` + 2 cycles after the first,
+  so that it walks across the handler, `idle()`'s tail, the loop's
+  re-check and the next sleep entry - on the three paths `idle()` has:
+  arming IDLE itself, taking an IDLE armed beforehand (a power
+  manager's), and taking an armed STANDBY with both timers running in
+  standby. TCB3, restarted at every try, is the rescue a lost wake would
+  wait for: 0 of 1536 tries lost, none late. The profile says why. An
+  edge at any instruction before the `sei` reaches the loop at ONE fixed
+  instant - the first 29 positions on the arming path, 23 on the armed
+  one - and that run joins the plateau of the edges that find the core
+  asleep with no step: an interrupt pending when SLEEP executes is taken
+  exactly as one arriving on the sleep's first cycle (the core pays the
+  wake rather than skipping the sleep), and SEI's one-instruction shadow
+  (DS40002198B, SEI: the instruction after it runs before any pending
+  interrupt) is what keeps a pending edge out until the SLEEP has been
+  issued. The second pass shows the same on the way back: an edge during
+  the first edge's handler is served right after its RETI, one during
+  `idle()`'s tail or the loop's re-check waits for the next `sei` and
+  is taken by the sleep it enters, one after it finds the core asleep.
+- **What the wake costs, in CLK_PER cycles at 24 MHz.** From an edge
+  that finds the core asleep to the caller's loop: 130 on the arming
+  path, 126 on the armed one (the four are the disarming NOP and store),
+  most of it the suite's TCB0 handler, which saves fifteen registers
+  (about 90 cycles with its response and RETI, taken awake). `idle()`
+  itself, its sleep and its wake included, is 29 cycles: 122 for an
+  `idle()` whose interrupt is already pending, less 93 for the same
+  interrupt taken awake through `sei`, `nop`, `cli`. Beside them the
+  core's own figures:
+  a response of six cycles (table 15-1: the ongoing instruction, the PC
+  pushed, the vector's JMP), five more when the interrupt wakes the core
+  (15.3.2.3) plus IDLE's six-cycle wake (13.3.3.2), and four for RETI.
+  STANDBY, with the main clock kept by the timers' `RUNSTDBY` request:
+  138 to 158 cycles, the more the sooner the edge follows the sleep's
+  entry - 12 to 28 over IDLE.
+- **One kernel turn per interrupt** (letter `k`). A `Tenuto` pack of
+  three quiet AOs, two with a periodic time event, turned as `run()`
+  turns it with the PIT the only interrupt: 100 turns over 100 ticks,
+  with `idle()`'s own IDLE and with IDLE armed beforehand alike (the
+  verdict allows one turn either side, for the phase of the window's
+  first and last tick). A quiet turn costs 323 cycles measured with an
+  interrupt pending, so that its `idle()` returns as soon as it has taken
+  it: 122 are that `idle()`, 201 the turn's own - `TimeEvents::process()`
+  (eight registers saved, the 32-bit tick read under a mask, the head of
+  the armed list found not due), three empty queues in `step()` and the
+  same three again under `idle_if_empty()`'s mask. 13.5 us at 24 MHz,
+  1.4 per cent of the 1024 Hz tick period.
 - **The ring is lock-free on this silicon and loses nothing.**
   50000 elements pushed by a 20 kHz TCB interrupt and popped in the
   main loop arrive in order, uncorrupted, in 625 ms with zero pushes
@@ -672,6 +724,9 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- **The idle contract on an AVR DA part.** Letters `w` and `k` build for
+  the AVR128DA48 and ran on the AVR128DB48 alone; the same two letters
+  on a DA board would measure it.
 - **`break_here()` with the OCD active.** The NOP half is proven; the
   half that halts in the debugger needs a debug session, which no
   console suite can be.

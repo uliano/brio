@@ -197,7 +197,11 @@ void Console::cmd_err(const Cmd&, Serial s) {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-ISR(USART2_RXC_vect) {
+// FLATTEN: post() is out of line wherever it has a second call site, and
+// a call in an AVR vector makes it save the whole call-clobbered set;
+// flattened, the post is inlined into this vector alone and the vector
+// saves the registers it uses (docs/avrdx/usart.md, the receive cost).
+ISR(USART2_RXC_vect, ISR_FLATTEN) {
     if (Serial::rxc()) {                       // empty -> non-empty edge
         brio::post<SerialLines>(brio::RxActivity{});
     }

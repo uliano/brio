@@ -557,7 +557,15 @@ Vector names are irreducibly target-specific glue and live in the app,
 never in portable code. The bodies are `[[gnu::always_inline]]`: an
 ISR body has exactly one call site by construction, so inlining costs
 no flash, and with the body visible the compiler saves only the
-registers actually used (measured: 16 pushes -> 8/9 per ISR). A family
+registers actually used (measured: 16 pushes -> 8/9 per ISR). A binding
+that POSTS is flattened (`ISR(vector, ISR_FLATTEN)` with avr-libc,
+`[[gnu::flatten]]` on a plain handler): `post()` is a template an image
+usually calls from more than one place, so the compiler keeps it out of
+line, and a call in a vector costs a core that saves the caller's
+registers in software the whole set - flattened, the post is inlined
+into that vector alone and the kernel stays as it is (measured on the
+AVR128DB48's console receive: 16 pushes -> 10, 108 -> 91 cycles a
+byte, 60 bytes of flash). A family
 whose linker script carries a `.ram_text` section may place a binding
 in SRAM: the SAM C21's page says what it buys
 ([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM").

@@ -26,8 +26,30 @@
 //
 // Commands: ? | a folded delay | b runtime delay | c delay across a
 // rebase | d delay_cycles | e critical section | f idle | g ring and
-// queue on the silicon | h timebase | i panic breadcrumb across real
-// resets | z = all
+// queue on the silicon | h timebase | k the kernel's turns | w the idle
+// path against an edge placed to the cycle | i panic breadcrumb across
+// real resets | z = all
+//
+// The two letters of the idle contract (design/kernel.md section 11):
+//   w  NO LOST WAKE: TCB0's compare, started at a known store, raises
+//      its interrupt P cycles later, P = 0..255, and the kernel's own
+//      shape runs against it - a masked check, idle(), until one edge
+//      (and, a second pass, two: the second edge then walks across the
+//      handler, idle()'s tail and the loop that re-enters the sleep).
+//      Three paths of idle(): the default (it arms IDLE itself), the
+//      power manager's (IDLE armed beforehand, idle() takes it), and
+//      the same with STANDBY armed and the two timers running in
+//      standby. TCB3, restarted at every try, is the RESCUE: a try it
+//      ends is a wake idle() lost (the alarm stops itself at its last
+//      edge, so nothing else could end that sleep). Prints the profile
+//      of edge-to-loop cycles over P - where the edge stops finding the
+//      core awake and starts finding it asleep.
+//   k  ONE TURN PER WAKE: a Tenuto pack of three quiet AOs, two with a
+//      periodic time event, turned as Tenuto::run() turns it over 100
+//      PIT ticks with the tick the only interrupt (once with idle()'s
+//      own IDLE, once with IDLE armed beforehand), and what one quiet
+//      turn costs - measured with an interrupt pending, so its idle()
+//      returns at once.
 
 // build: boards = db48,da48
 // build: monitor_speed = 460800
@@ -45,8 +67,12 @@
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
+#include "avrdx/sleep.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/panic.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/ring.hpp"
 
@@ -90,7 +116,8 @@ constexpr Serial serial;
 using DynClock = DynamicClock<SysClock, Serial>;
 
 // ---- the instrument ----------------------------------------------------------
-using Alarm = Tcb<0>;                ///< f's wake source, g's producer pace
+using Alarm = Tcb<0>;                ///< f's wake source, g's producer pace, w's edge
+using Rescue = Tcb<3>;               ///< w's rescue: a try it ends is a lost wake
 using WatchLo = Tcb<1>;
 using WatchHi = Tcb<2>;
 using Watch = CascadedCounter<WatchLo, WatchHi>;
@@ -110,9 +137,12 @@ void stopwatch_init() {
 }
 
 // ---- shared with the ISRs -----------------------------------------------------
-volatile uint8_t alarm_mode = 0;      ///< 0 off, 1 = f's alarm, 2 = g's producer
+volatile uint8_t alarm_mode = 0;      ///< 0 off, 1 = f's alarm, 2 = g's producer, 3 = w's edge
 volatile uint32_t alarm_stamp = 0;
 volatile bool alarm_ran = false;
+volatile uint8_t edge_hits = 0;       ///< w: the alarm's edges taken in this try
+volatile uint8_t edge_stop = 1;       ///< w: the edge at which the alarm parks
+volatile uint8_t rescue_hits = 0;     ///< w: the rescue's edges, ever
 
 Ring<uint16_t, 64, P> ring;
 static_assert(P::atomic_width == 1, "the AVR core moves one byte atomically");
@@ -192,6 +222,8 @@ void quiesce() {
     alarm_mode = 0;
     Alarm::enable_capt_interrupt(false);
     Alarm::disable();
+    Rescue::enable_capt_interrupt(false);
+    Rescue::disable();
     (void)Watchdog::off();
     Ticker::init();
     stopwatch_init();
@@ -765,6 +797,299 @@ void th_timebase() {
     quiesce();
 }
 
+// ---- w the idle path against an edge placed to the cycle ------------------------------
+// TCB0 is the edge: a periodic compare whose counting starts at the
+// store that enables it, so its CAPT interrupt is raised a FIXED number
+// of cycles after that store plus `pos`. For one edge the compare sits
+// at TOP and the counter is preset `pos` short of it; for two, the
+// compare is pos + 1, so the second edge comes pos + 2 cycles after the
+// first - across the handler, idle()'s tail, the loop's re-check and
+// the next sleep entry. The handler parks the compare at TOP at the
+// last edge asked for, so no later edge of the alarm can end a sleep
+// before the rescue does. TCB3 is the rescue: restarted at every try,
+// it fires 30000 cycles in - a try it ends is a wake idle() lost, and
+// the loop leaves on it (the one test the kernel's loop has not).
+constexpr uint16_t positions = 256;
+uint16_t to_loop_at[positions];        ///< edge-to-loop cycles at each position
+
+/// The profile as runs: constant ones (the edge finds the core asleep:
+/// what follows it is the same path whatever its position) and ones
+/// that fall by a cycle a step (the edge is pending before the sleep:
+/// the later it comes, the less of a fixed path is left after it).
+void print_profile(const uint16_t* v, uint16_t n) {
+    uint16_t a = 0;
+    while (a < n) {
+        uint16_t b = a;
+        if (b + 1u < n) {
+            const int32_t step = static_cast<int32_t>(v[b + 1u]) - static_cast<int32_t>(v[b]);
+            if (step == 0 || step == -1) {
+                while (b + 1u < n &&
+                       static_cast<int32_t>(v[b + 1u]) - static_cast<int32_t>(v[b]) == step) {
+                    ++b;
+                }
+            }
+        }
+        print(serial, "    pos ", a, "..", b, ": ", v[a]);
+        if (b != a) print(serial, "..", v[b]);
+        print(serial, crlf);
+        a = static_cast<uint16_t>(b + 1u);
+    }
+}
+
+void tw_edge() {
+    print(serial, "w the idle path against an edge placed to the cycle", crlf);
+    quiesce();
+    console_drain();
+    Ticker::pause();
+    alarm_mode = 3;
+
+    static const char* const path_name[3] = {
+        "idle() arming IDLE itself",
+        "IDLE armed beforehand (the power manager's branch)",
+        "STANDBY armed beforehand, the timers running in standby",
+    };
+    uint16_t lost[3][2] = {};
+    uint16_t asleep_to_loop[3] = {};
+    uint16_t slowest[3][2] = {};
+    bool profile_ok = true;
+    bool no_edge = false;                   // the instrument's own failure
+    uint16_t k_lo[3] = {}, k_hi[3] = {};    // the rescue-to-edge constant, per path
+    for (uint8_t path = 0; path < 3; ++path) {
+        const bool standby = path == 2;
+        (void)Alarm::init({.mode = TcbMode::periodic, .clock = TcbClock::div1,
+                           .compare = 0xFFFF, .run_standby = standby});
+        Alarm::enable_capt_interrupt(true);
+        (void)Rescue::init({.mode = TcbMode::periodic, .clock = TcbClock::div1,
+                            .compare = 29'999u, .run_standby = standby});
+        Rescue::enable_capt_interrupt(true);
+        if (path == 1) Sleep::arm(SleepMode::idle);
+        if (path == 2) Sleep::arm(SleepMode::standby);
+        for (uint8_t edges = 1; edges <= 2u; ++edges) {
+            // Silence first: a byte still going out would wake the core
+            // on its DRE interrupt, and in standby the halted USART
+            // would garble it.
+            console_drain();
+            for (uint16_t pos = 0; pos < positions; ++pos) {
+                bool rescued = false;
+                uint16_t to_loop = 0;
+                uint16_t exit_at = 0;
+                {
+                    P::CriticalSection cs;
+                    edge_hits = 0;
+                    edge_stop = edges;
+                    const uint8_t r0 = rescue_hits;
+                    Rescue::disable();
+                    Rescue::count(0);
+                    Rescue::clear_capt();
+                    Rescue::enable();
+                    Alarm::disable();
+                    if (edges == 1u) {
+                        Alarm::compare(0xFFFFu);
+                        Alarm::count(static_cast<uint16_t>(0xFFFFu - pos));
+                    } else {
+                        Alarm::compare(static_cast<uint16_t>(pos + 1u));
+                        Alarm::count(0);
+                    }
+                    Alarm::clear_capt();
+                    Alarm::enable();                // the counting starts here
+                    for (;;) {
+                        P::CriticalSection turn;    // the kernel's own shape,
+                        if (edge_hits >= edges || rescue_hits != r0) {
+                            break;                  // and the rescue's way out
+                        }
+                        P::idle();
+                    }
+                    // The alarm's counter has run since its LAST edge, the
+                    // rescue's since the try began.
+                    to_loop = Alarm::count();
+                    exit_at = Rescue::count();
+                    rescued = rescue_hits != r0;
+                    if (rescued && edge_hits == 0u) no_edge = true;
+                }
+                // One edge: the alarm's count is the edge-to-loop time,
+                // and the two counts fix the constant k between the
+                // rescue's start and an edge preset `pos` short of TOP.
+                // Two edges: a period shorter than the handler's way to
+                // its parking store lets edges past the second in, and
+                // edges coalesce in one flag, so the alarm's count does
+                // not say which edge it ran from - the rescue's does:
+                // the second edge comes (pos + 1) + (pos + 2) cycles
+                // after where the first would for one edge.
+                if (edges == 1u) {
+                    const uint16_t k = static_cast<uint16_t>(exit_at - pos - to_loop);
+                    if (pos == 0u) k_lo[path] = k_hi[path] = k;
+                    if (k < k_lo[path]) k_lo[path] = k;
+                    if (k > k_hi[path]) k_hi[path] = k;
+                } else if (!rescued) {
+                    to_loop = static_cast<uint16_t>(exit_at - k_lo[path] - 2u * pos - 3u);
+                }
+                to_loop_at[pos] = to_loop;
+                if (rescued) ++lost[path][edges - 1u];
+                if (to_loop > slowest[path][edges - 1u]) slowest[path][edges - 1u] = to_loop;
+            }
+            print(serial, "  ", path_name[path], ", ", edges == 1u ? "one edge" : "two edges",
+                  ": cycles from the edge waited for to the loop, by position", crlf);
+            print_profile(to_loop_at, positions);
+            if (edges == 1u) {
+                asleep_to_loop[path] = to_loop_at[positions - 1u];
+            }
+            // The last quarter of the walk finds the core asleep: in IDLE
+            // a constant there is the proof the walk reached past the
+            // sleep entry (STANDBY's wake drifts by a cycle or two with
+            // the sleep's length, and is printed, not judged).
+            for (uint16_t pos = positions - positions / 4u; pos < positions; ++pos) {
+                if (!standby && to_loop_at[pos] != to_loop_at[positions - 1u]) profile_ok = false;
+            }
+        }
+        Sleep::disarm();
+        Alarm::enable_capt_interrupt(false);
+        Alarm::disable();
+        Rescue::enable_capt_interrupt(false);
+        Rescue::disable();
+    }
+    alarm_mode = 0;
+    Ticker::resume();
+
+    for (uint8_t path = 0; path < 3; ++path) {
+        print(serial, "  ", path_name[path], ": lost ", lost[path][0], " of ", positions,
+              " waiting for one edge, ", lost[path][1], " of ", positions,
+              " for two; an edge that finds the core asleep reaches the loop in ",
+              asleep_to_loop[path], " cycles; the slowest try ", slowest[path][0], " / ",
+              slowest[path][1], "; the rulers' constant ", k_lo[path], "..", k_hi[path], crlf);
+    }
+    verdict("the alarm raised its edge in every try (the instrument)", !no_edge);
+    verdict("the walk reached past the sleep entry (a constant tail in IDLE)", profile_ok);
+    verdict("the two rulers agree to the cycle (one constant between them)",
+            k_lo[0] == k_hi[0] && k_lo[1] == k_hi[1] && k_lo[2] == k_hi[2]);
+    verdict("no edge position loses the wake: idle() arming IDLE itself",
+            lost[0][0] == 0u && lost[0][1] == 0u);
+    verdict("nor with IDLE armed beforehand (the power manager's branch)",
+            lost[1][0] == 0u && lost[1][1] == 0u);
+    verdict("nor with STANDBY armed beforehand", lost[2][0] == 0u && lost[2][1] == 0u);
+    bool prompt = true;
+    for (uint8_t path = 0; path < 3; ++path) {
+        if (slowest[path][0] >= 400u || slowest[path][1] >= 400u) prompt = false;
+    }
+    verdict("no try is late: every edge reaches the loop within 400 cycles", prompt);
+    quiesce();
+}
+
+// ---- k the kernel's turn: how many per interrupt, and what one costs ------------------
+// A pack shaped like a small program's: three AOs, two of them with a
+// periodic time event (500 ms and 1000 ms, so none fires in the 100
+// ticks this letter idles), none of them ever posted to.
+template <uint8_t N>
+struct Quiet {
+    struct Event { uint8_t n; };
+    static inline EventQueue<Event, 2, P> queue;
+    static inline TimeEvent<P, Quiet, Event> beat{Event{N}};
+    static void init() {
+        if constexpr (N != 0u) {
+            beat.arm_every(ticks_from_ms<P>(500u * N));
+        }
+    }
+    static void dispatch(const Event&) {}
+};
+using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
+
+/// One turn of Tenuto::run()'s loop, as it is written there.
+[[gnu::always_inline]] inline void kernel_turn() {
+    TimeEvents<P>::process();
+    if (!QuietKernel::step()) {
+        QuietKernel::idle_if_empty();
+    }
+}
+
+/// TCB0's CAPT flag raised under the mask: the next sei finds an
+/// interrupt pending, so an idle() returns as soon as it has taken it.
+void raise_alarm() {
+    Alarm::count(0xFFF0u);
+    while (!Alarm::capt_flag()) {
+    }
+}
+
+void tk_turns() {
+    print(serial, "k the kernel's turns: one per interrupt, and what a quiet one costs", crlf);
+    quiesce();
+    console_drain();
+    QuietKernel::init_all();
+
+    // Turns over 100 quiet ticks: the PIT is the only interrupt. Once
+    // with idle()'s own IDLE, once with IDLE armed beforehand.
+    uint32_t turns[2] = {0, 0};
+    for (uint8_t armed = 0; armed < 2u; ++armed) {
+        if (armed != 0u) Sleep::arm(SleepMode::idle);
+        uint32_t t = P::now();
+        while (P::now() == t) {             // start on a tick's edge
+        }
+        t = P::now();
+        uint32_t n = 0;
+        while (P::now() - t < 100u) {
+            kernel_turn();
+            ++n;
+        }
+        turns[armed] = n;
+    }
+    Sleep::disarm();
+
+    // A quiet turn whose idle() a pending interrupt returns at once, and
+    // that idle() alone the same way: the difference is the turn's own
+    // work (the time events' scan, three empty queues, the masked
+    // re-check). The PIT is held off so only the raised flag interrupts.
+    const uint32_t cost = stamp_cost();
+    Ticker::pause();
+    alarm_mode = 0;
+    (void)Alarm::init({.mode = TcbMode::periodic, .clock = TcbClock::div1, .compare = 0xFFFF});
+    Alarm::enable_capt_interrupt(true);
+    uint32_t turn_cycles = 0xFFFFFFFFu, idle_cycles = 0xFFFFFFFFu, isr_cycles = 0xFFFFFFFFu;
+    for (uint8_t i = 0; i < 16u; ++i) {
+        {
+            P::CriticalSection cs;          // the same interrupt taken awake
+            raise_alarm();
+            const uint32_t c0 = cycles_now();
+            sei();
+            __asm__ __volatile__("nop");    // SEI's shadow: one instruction first
+            cli();
+            const uint32_t c1 = cycles_now();
+            if (c1 - c0 - cost < isr_cycles) isr_cycles = c1 - c0 - cost;
+        }
+        {
+            P::CriticalSection cs;
+            raise_alarm();
+            const uint32_t c0 = cycles_now();
+            kernel_turn();
+            const uint32_t c1 = cycles_now();
+            if (c1 - c0 - cost < turn_cycles) turn_cycles = c1 - c0 - cost;
+        }
+        {
+            P::CriticalSection cs;
+            raise_alarm();
+            const uint32_t c0 = cycles_now();
+            P::idle();
+            const uint32_t c1 = cycles_now();
+            cli();
+            if (c1 - c0 - cost < idle_cycles) idle_cycles = c1 - c0 - cost;
+        }
+    }
+    Alarm::enable_capt_interrupt(false);
+    Alarm::disable();
+    Ticker::resume();
+    TimeEvents<P>::clear_all();
+
+    print(serial, "  100 quiet ticks: ", turns[0], " kernel turns with idle()'s own IDLE, ",
+          turns[1], " with IDLE armed beforehand", crlf);
+    print(serial, "  a quiet turn whose idle() a pending interrupt returns at once: ", turn_cycles,
+          " cycles; that idle() alone: ", idle_cycles, " cycles; the turn's own work: ",
+          static_cast<int32_t>(turn_cycles) - static_cast<int32_t>(idle_cycles), crlf);
+    print(serial, "  the same interrupt taken awake (sei, nop, cli): ", isr_cycles,
+          " cycles; so idle() itself, its sleep and wake included: ",
+          static_cast<int32_t>(idle_cycles) - static_cast<int32_t>(isr_cycles), crlf);
+    verdict("the kernel loop turns once per interrupt (100 ticks: 99..101 turns)",
+            turns[0] >= 99u && turns[0] <= 101u);
+    verdict("and so it does with IDLE armed beforehand", turns[1] >= 99u && turns[1] <= 101u);
+    quiesce();
+}
+
 // ---- i the breadcrumb across real resets ----------------------------------------------
 // This test spans four resets. Its state lives in `token`, a .noinit
 // object of this app, and every leg is entered from main() at boot.
@@ -930,9 +1255,9 @@ struct Test { char key; TestFn fn; };
 constexpr Test tests[] = {
     {'a', ta_folded}, {'b', tb_runtime}, {'c', tc_rebase}, {'d', td_cycles},
     {'e', te_critical}, {'f', tf_idle}, {'g', tg_ring}, {'h', th_timebase},
-    {'i', ti_reset},
+    {'k', tk_turns}, {'w', tw_edge}, {'i', ti_reset},
 };
-constexpr char all_keys[] = "abcdefghi";
+constexpr char all_keys[] = "abcdefghkwi";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -960,8 +1285,9 @@ void run_set(const char* keys) {
 void help() {
     print(serial, "test_avr_platform: a delay_us folded | b delay_us runtime | "
                   "c delay across a rebase | d delay_cycles | e critical section | "
-                  "f idle | g ring and queue | h timebase | i panic breadcrumb "
-                  "across four REAL resets    -> z = all of a..i", crlf);
+                  "f idle | g ring and queue | h timebase | k the kernel's turns | "
+                  "w the idle path against a placed edge | i panic breadcrumb "
+                  "across four REAL resets    -> z = all (i last)", crlf);
 }
 
 } // namespace
@@ -971,6 +1297,21 @@ ISR(USART2_DRE_vect) { Serial::dre(); }
 ISR(RTC_PIT_vect)    { Ticker::pit(); }
 
 ISR(TCB0_INT_vect) {
+    if (alarm_mode == 3) {
+        // The flag is taken before the edge is counted, so no edge is
+        // swallowed uncounted; once the last edge asked for is counted
+        // the compare parks and the flag is taken again - an edge
+        // between the two is past the last one, and a handler run for it
+        // would only lengthen the try.
+        (void)Alarm::take_flags();
+        const uint8_t hits = static_cast<uint8_t>(edge_hits + 1u);
+        edge_hits = hits;
+        if (hits >= edge_stop) {
+            Alarm::compare(0xFFFFu);       // no later edge before the rescue
+            (void)Alarm::take_flags();
+        }
+        return;
+    }
     (void)Alarm::take_flags();
     if (alarm_mode == 1) {
         alarm_stamp = cycles_now();
@@ -990,6 +1331,11 @@ ISR(TCB0_INT_vect) {
             }
         }
     }
+}
+
+ISR(TCB3_INT_vect) {
+    (void)Rescue::take_flags();
+    rescue_hits = static_cast<uint8_t>(rescue_hits + 1u);
 }
 
 int main() {

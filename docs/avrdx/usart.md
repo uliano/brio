@@ -165,9 +165,15 @@ the AVRxt column; the CPUINT's response of six cycles added):
   `frame_of()` into a stack frame, and the vector paid 207 cycles a frame
   - sixteen pushes, a frame, a call and a five-byte copy. The edge is
   fourteen cycles (the ring's count at entry, a flag per push, the test
-  at exit); a binding that posts from it (the console below) adds the
-  kernel's `post()` as a call, and with it the call-clobbered set: the
-  console's vector is 111 cycles for a byte that makes no edge.
+  at exit). A binding that posts from it (the console below) must be
+  FLATTENED: the kernel's `post()` is a template with vague linkage,
+  kept out of line wherever an image calls it twice, and a call in the
+  vector makes it save the call-clobbered set - sixteen pushes, 108
+  cycles for a byte that makes no edge and 150 for the byte that posts.
+  `ISR(vector, ISR_FLATTEN)` inlines the post into that vector alone:
+  ten pushes, 91 and 128 cycles (measured with the response and the
+  RETI, the vector run from a frame looped back to the receiver), 60
+  bytes of flash, the kernel unchanged.
 - **Transmit: 60 cycles a byte** (`dre()`, four registers, SREG and
   RAMPZ, flattened so no ring verb is a call), 73 for a run's last byte,
   which also clears DREIE and TXCIF.
@@ -184,7 +190,7 @@ A console (the shape every app uses):
 ```cpp
 using Serial = brio::Uart<2, brio::Route::alt1>;
 constexpr Serial serial;
-ISR(USART2_RXC_vect) { if (Serial::rxc()) brio::post<Lines>(brio::RxActivity{}); }
+ISR(USART2_RXC_vect, ISR_FLATTEN) { if (Serial::rxc()) brio::post<Lines>(brio::RxActivity{}); }
 ISR(USART2_DRE_vect) { Serial::dre(); }
 ...
 Serial::init(clock, 460800);
