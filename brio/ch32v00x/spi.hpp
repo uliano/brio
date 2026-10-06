@@ -770,11 +770,11 @@ public:
 
     /// THE PUMP AGAINST THE ENGINES, two counts from the release listings
     /// (test_ch32_spi, bench_ch32; the recovery session measures them
-    /// with bench_ch32's letters d and e). The engines' fixed cost per
+    /// with bench_ch32's letters s and e). The engines' fixed cost per
     /// transaction: the launch's 59 instructions, the receive channel's
     /// completion vector with finish_dma() and the select's release (~61
     /// instructions behind the hardware prologue and epilogue) - 518
-    /// cycles net of the instrument, measured by bench_ch32's letter d
+    /// cycles net of the instrument, measured by bench_ch32's letter s
     /// with the request built outside the stopwatch (docs/ch32v00x/
     /// spi.md). The pump's cost per frame: the handler's data path of an
     /// 8-bit frame with an in buffer plus the prologue and epilogue -

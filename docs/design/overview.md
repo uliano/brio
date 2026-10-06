@@ -389,12 +389,20 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   letters named to the TestBench, which registers those alone (so
   the others are never referenced and the linker drops them with
   their prose), and every other part's build emits the whole suite
-  as one image. On the CH32V00x, whose smallest part has 16 KB of
-  flash and 2 KB of RAM, this rule is what decides the shape of every
-  suite, and on the CH32V203 it is the 32 KB tier - four parts with no
-  board, whose preset is the link guard every suite passes - that a
-  suite is grouped for; on the other families the bench chip is not
-  the family's smallest and the rule costs nothing yet.
+  as one image - unless the suite names a larger part's own groups
+  (`groups.<board type>`), because its whole image comes within a few
+  per cent of that part's memory too: a suite is regrouped when an
+  image has under about five per cent of its flash or its RAM left
+  (the RAM's margin being the stack's room). The guard is a link, not
+  a fixture: `brio check` builds every app on every preset of its
+  family, the smallest part's among them, and fails on an image that
+  does not compile or fit; `brio fit` is the census of every image's
+  margins. On the CH32V00x, whose smallest part has 16 KB of flash and
+  2 KB of RAM, this rule is what decides the shape of every suite; on
+  the CH32V203 it is the 32 KB tier - four parts with no board - that a
+  suite is grouped for; on the STM32G0 it is the G031K8's 64 KB, on the
+  SAM C21 its one part's 32 KB of RAM; on the other families no image
+  comes near its part's memory yet.
 - **Package variability, the pattern.** The device header is the
   authority, at three granularities. A missing INSTANCE is compiled
   out in tiers on its header symbol (`#if defined(TCB4)`). An instance

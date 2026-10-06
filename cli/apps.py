@@ -40,15 +40,18 @@ def head_line(path):
 
 
 def groups_line(path):
-    """The groups of letters the app's '// build: groups' line names, or
+    """The groups of letters the app's '// build: groups' lines name, or
     None: the images it splits into on a board type its project lists as
-    splitting (its CMakeLists.txt's SPLIT_BOARDS)."""
+    splitting (its CMakeLists.txt's SPLIT_BOARDS) - the plain line - and
+    on one board type alone - a 'groups.<board type>' line, shown as
+    "<board type>: <groups>"."""
+    found = []
     with open(path, encoding="ascii", errors="replace") as f:
         for raw in f:
-            m = re.match(r"\s*//\s*build:\s*groups\s*=\s*(.*)", raw)
+            m = re.match(r"\s*//\s*build:\s*groups(?:\.([A-Za-z0-9_-]+))?\s*=\s*(.*)", raw)
             if m:
-                return m.group(1).strip()
-    return None
+                found.append((m.group(1) + ": " if m.group(1) else "") + m.group(2).strip())
+    return "; ".join(found) or None
 
 
 def boards_line(path):

@@ -107,7 +107,15 @@
 //   w  WAKE FROM STOP, and ES0548 2.2.4 staged (uart_stress)
 //   v  the console moved to LPUART1 on its own pads (uart_stress)
 //
+// THE G031K8 does not hold the suite whole (some 77 KB against its 64):
+// it builds two images, letters a to j - the instances, the generator,
+// the kernel clocks, the FIFOs and the modes - in one and k to y in the
+// other (the groups line below; design/overview.md, "A suite's image
+// fits the family's smallest chip"); the G071RB and the G0B1RE build
+// one.
+//
 // build: boards = g0b1re,g071rb,g031k8
+// build: groups = abcdefghij,klmnopqvwy
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -20,7 +20,10 @@
 //
 // ON THE 32 KB TIER the app is two images (the groups line below): the
 // skeleton's four letters in one, the engines and the SPI host in the
-// other - whole everywhere else.
+// other. ON THE CH32V203C8 the whole is within a few hundred bytes of the
+// part's 60 KB, so it is two images there too (the groups.v203c8 line):
+// the skeleton with the engines and the SPI host, then the serial
+// transport and the I2C host. Whole on the CH32V303.
 //
 // NO KERNEL. The suite's shape: a prompt loop over the console, which
 // here sleeps through BenchIdle<P, Ruler>::idle() when no byte is
@@ -260,7 +263,11 @@
 //      pass of its own.
 //
 // build: boards = v203c6,v203c8,v303vc
+// On the CH32V203C8 letters u and i sit in different images: letter i run
+// after letter u in one session stalls at its first tenure (each passes
+// alone), not yet explained - benchmark.md lists it.
 // build: groups = rmpt,de
+// build: groups.v203c8 = rmptdeu,i
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1353,13 +1360,26 @@ using LoopRxEngine = DmaRxEngine<1, 6>;
 using LoopIrq = Uart<2, Plat, loop_ring, loop_ring>;
 using LoopTxe = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, NoDmaEngine>;
 using LoopDma = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, LoopRxEngine>;
-/// The stimulus's transmit slot: DMA1's channel 1 on the CH32V203, DMA2's
-/// channel 5 on the CH32V303 (RM 11.2.3).
-using StimRow = DmaRequestOf<DmaRequest::uart4_tx>;
-using Stim = Uart<4, Plat, 64, loop_ring, UartFormat{},
-                  DmaTxEngine<StimRow::controller, StimRow::channel>, NoDmaEngine>;
 using LoopRes = Usart<2>;
-using StimRes = Usart<4>;
+
+/// Whether the part has the fourth port the pair needs: UART4 is the
+/// CH32V203C8's, RB's and the CH32V303's, and not the 32 KB tier's
+/// (parts/<part>.hpp). A part without it declines the letter by name,
+/// as letter i does without I2C2.
+constexpr bool uart_pair_part = device::has_usart(4u);
+
+/// The stimulus side of the pair, formed only where the fourth port
+/// exists: every name depends on `on`, so a part without UART4 never
+/// instantiates the port's types (whose static_asserts refuse the
+/// instance there). Its transmit slot is DMA1's channel 1 on the
+/// CH32V203, DMA2's channel 5 on the CH32V303 (RM 11.2.3).
+template <bool on>
+struct StimSide {
+    using Row = DmaRequestOf<on ? DmaRequest::uart4_tx : DmaRequest::uart4_tx>;
+    using Port = Uart<on ? 4 : 4, Plat, 64, loop_ring, UartFormat{}, DmaTxEngine<Row::controller, Row::channel>,
+                      NoDmaEngine>;
+    using Res = Usart<on ? 4 : 4>;
+};
 
 Meter loop_meter;       // usart2_handler
 Meter loop_dma_meter;   // dma1_channel6_handler and dma1_channel7_handler under letter u
@@ -1379,6 +1399,7 @@ BenchCounters loop_counters() {
 
 /// Give USART2 back; the owner forgotten after the release, whose stopped
 /// streams may still raise a flag their vector serves.
+template <bool on = uart_pair_part>
 void loop_down() {
     const uint8_t was = loop_owner;
     if (was == 1u) {
@@ -1389,9 +1410,11 @@ void loop_down() {
         LoopDma::release();
     }
     loop_owner = 0;
-    if (stim_up) {
-        Stim::release();
-        stim_up = false;
+    if constexpr (on) {
+        if (stim_up) {
+            StimSide<on>::Port::release();
+            stim_up = false;
+        }
     }
 }
 
@@ -1401,8 +1424,9 @@ void loop_wait_ms(uint32_t ms) {
     }
 }
 
-template <typename Port>
+template <typename Port, bool on = uart_pair_part>
 bool loop_up(uint8_t owner, uint32_t baud, bool with_stim) {
+    using Stim = typename StimSide<on>::Port;
     loop_down();
     loop_owner = owner;
     bool up = Port::init(clock, baud);
@@ -1473,8 +1497,9 @@ BenchSample loop_tx(uint32_t n) {
 /// uart.rx: a burst of n sent by the fourth port's engine, received on
 /// USART2, the consumer idling until the edge and draining on it - or,
 /// with `poll`, asking harvest() once a tick (the owner's poll).
-template <typename Port, bool poll>
+template <typename Port, bool poll, bool on = uart_pair_part>
 BenchSample loop_rx(uint32_t n, uint32_t& got, bool& in_order) {
+    using Stim = typename StimSide<on>::Port;
     console_drain();
     bool scrap = true;
     (void)loop_drain<Port>(0, scrap);
@@ -1523,8 +1548,10 @@ BenchSample loop_rx(uint32_t n, uint32_t& got, bool& in_order) {
 
 /// uart.edge: a burst of 16 from the fourth port, its TC spun on, then
 /// the cycles to the edge that follows.
-template <typename Port, bool poll>
+template <typename Port, bool poll, bool on = uart_pair_part>
 BenchSample loop_edge_after(uint32_t& late) {
+    using Stim = typename StimSide<on>::Port;
+    using StimRes = typename StimSide<on>::Res;
     console_drain();
     bool scrap = true;
     (void)loop_drain<Port>(0, scrap);
@@ -1570,54 +1597,62 @@ BenchSample loop_edge_after(uint32_t& late) {
     return bench_sample(at - t_tc, c0, c1);
 }
 
+template <bool on = uart_pair_part>
 void tu_uart() {
-    bool all_up = true;
-    for (const uint32_t baud : loop_rates) {
-        all_up = loop_up<LoopIrq>(1, baud, false) && all_up;
-        const uint32_t wire = loop_wire();
-        print(serial, "  USART2 at ", LoopIrq::actual_baud(72'000'000u), " baud", crlf);
-        for (const uint32_t n : {256u, 4096u}) {
-            bench_line(serial, "uart.tx", n, loop_tx<LoopIrq>(n), Ruler::hz(), wire);
-        }
-        all_up = loop_up<LoopTxe>(2, baud, false) && all_up;
-        for (const uint32_t n : {256u, 4096u}) {
-            bench_line(serial, "uart.tx.dma", n, loop_tx<LoopTxe>(n), Ruler::hz(), wire);
-        }
-        all_up = loop_up<LoopTxe>(2, baud, true) && all_up;
-        for (const uint32_t n : {16u, 256u}) {
-            uint32_t got = 0;
-            bool in_order = false;
-            const BenchSample s = loop_rx<LoopTxe, false>(n, got, in_order);
-            bench_line(serial, "uart.rx", n, s, Ruler::hz(), wire);
-            if (got != n || !in_order) {
-                print(serial, "  received ", got, in_order ? " in order" : " OUT OF ORDER", "; ORE ",
-                      LoopTxe::hw_overruns(), " FE ", LoopTxe::frame_errors(), " stim idle ",
-                      Stim::tx_idle() ? 1 : 0, " pending ", LoopTxe::rx_pending(), crlf);
+    if constexpr (on) {
+        using Stim = typename StimSide<on>::Port;
+        bool all_up = true;
+        for (const uint32_t baud : loop_rates) {
+            all_up = loop_up<LoopIrq>(1, baud, false) && all_up;
+            const uint32_t wire = loop_wire();
+            print(serial, "  USART2 at ", LoopIrq::actual_baud(72'000'000u), " baud", crlf);
+            for (const uint32_t n : {256u, 4096u}) {
+                bench_line(serial, "uart.tx", n, loop_tx<LoopIrq>(n), Ruler::hz(), wire);
             }
-        }
-        all_up = loop_up<LoopDma>(3, baud, true) && all_up;
-        for (const uint32_t n : {16u, 256u}) {
-            uint32_t got = 0;
-            bool in_order = false;
-            const BenchSample s = loop_rx<LoopDma, false>(n, got, in_order);
-            bench_line(serial, "uart.rx.dma", n, s, Ruler::hz(), wire);
-            if (got != n || !in_order) {
-                print(serial, "  received ", got, in_order ? " in order" : " OUT OF ORDER", "; ORE ",
-                      LoopDma::hw_overruns(), " FE ", LoopDma::frame_errors(), " ring ",
-                      LoopDma::rx_overruns(), crlf);
+            all_up = loop_up<LoopTxe>(2, baud, false) && all_up;
+            for (const uint32_t n : {256u, 4096u}) {
+                bench_line(serial, "uart.tx.dma", n, loop_tx<LoopTxe>(n), Ruler::hz(), wire);
             }
+            all_up = loop_up<LoopTxe>(2, baud, true) && all_up;
+            for (const uint32_t n : {16u, 256u}) {
+                uint32_t got = 0;
+                bool in_order = false;
+                const BenchSample s = loop_rx<LoopTxe, false>(n, got, in_order);
+                bench_line(serial, "uart.rx", n, s, Ruler::hz(), wire);
+                if (got != n || !in_order) {
+                    print(serial, "  received ", got, in_order ? " in order" : " OUT OF ORDER", "; ORE ",
+                          LoopTxe::hw_overruns(), " FE ", LoopTxe::frame_errors(), " stim idle ",
+                          Stim::tx_idle() ? 1 : 0, " pending ", LoopTxe::rx_pending(), crlf);
+                }
+            }
+            all_up = loop_up<LoopDma>(3, baud, true) && all_up;
+            for (const uint32_t n : {16u, 256u}) {
+                uint32_t got = 0;
+                bool in_order = false;
+                const BenchSample s = loop_rx<LoopDma, false>(n, got, in_order);
+                bench_line(serial, "uart.rx.dma", n, s, Ruler::hz(), wire);
+                if (got != n || !in_order) {
+                    print(serial, "  received ", got, in_order ? " in order" : " OUT OF ORDER", "; ORE ",
+                          LoopDma::hw_overruns(), " FE ", LoopDma::frame_errors(), " ring ",
+                          LoopDma::rx_overruns(), crlf);
+                }
+            }
+            {
+                uint32_t late = 0;
+                const BenchSample e = loop_edge_after<LoopDma, false>(late);
+                bench_line(serial, "uart.edge", 16, e, Ruler::hz(), 0);
+                print(serial, "  the edge ", e.wall, " cycles after the last stop bit = ",
+                      e.wall * 10u / (Ruler::hz() / wire), " tenths of a frame",
+                      late != 0u ? " (TIMED OUT)" : "", crlf);
+            }
+            loop_down();
         }
-        {
-            uint32_t late = 0;
-            const BenchSample e = loop_edge_after<LoopDma, false>(late);
-            bench_line(serial, "uart.edge", 16, e, Ruler::hz(), 0);
-            print(serial, "  the edge ", e.wall, " cycles after the last stop bit = ",
-                  e.wall * 10u / (Ruler::hz() / wire), " tenths of a frame",
-                  late != 0u ? " (TIMED OUT)" : "", crlf);
-        }
-        loop_down();
+        bench.verdict("the pair came up at every rate", all_up);
+    } else {
+        print(serial, "  letter u declined on this part: no UART4, so no crossed pair to measure the "
+                      "transport against",
+              crlf);
     }
-    bench.verdict("the pair came up at every rate", all_up);
     bench.verdict("ran", true);
 }
 
@@ -2126,6 +2161,86 @@ template <bool on = i2c_self_link_part>
     }
 }
 
+/// Letter u's USART2 vectors, formed only in an image that carries the
+/// letter on a part with the pair: elsewhere no loop shape is referenced
+/// and its rings - three kilobytes and a half - are not in the image.
+constexpr bool loop_carried = uart_pair_part && test_letter_carried('u');
+template <bool on = loop_carried>
+[[gnu::always_inline]] inline void loop_usart_vector() {
+    if constexpr (on) {
+        loop_meter.enter();
+        bool edge = false;
+        if (loop_owner == 1u) {
+            edge = LoopIrq::isr();
+        } else if (loop_owner == 2u) {
+            edge = LoopTxe::isr();
+        } else if (loop_owner == 3u) {
+            edge = LoopDma::isr();
+        }
+        if (edge) {
+            loop_edge_at = Ruler::now();
+            loop_edge = true;
+        }
+        loop_meter.leave();
+    }
+}
+/// DMA1's channel 7 under letter u: whether the loop's transmit engine
+/// owned it and was served.
+template <bool on = loop_carried>
+[[gnu::always_inline]] inline bool loop_tx_dma_vector() {
+    if constexpr (on) {
+        if (loop_owner >= 2u) {
+            loop_dma_meter.enter();
+            if (loop_owner == 2u) {
+                (void)LoopTxe::dma_isr();
+            } else {
+                (void)LoopDma::dma_isr();
+            }
+            loop_dma_meter.leave();
+            return true;
+        }
+    }
+    return false;
+}
+/// DMA1's channel 6 under letter u: the circular ring's laps and their
+/// half and full marks, whose true is the edge as the USART's.
+template <bool on = loop_carried>
+[[gnu::always_inline]] inline void loop_rx_dma_vector() {
+    if constexpr (on) {
+        loop_dma_meter.enter();
+        if (loop_owner == 3u && LoopDma::dma_isr()) {
+            loop_edge_at = Ruler::now();
+            loop_edge = true;
+        }
+        loop_dma_meter.leave();
+    }
+}
+
+/// Letter u's stimulus vectors, empty on a part without the fourth port:
+/// whether controller `c`'s channel `ch` is the stimulus's transmit slot
+/// and served it, and the port's own vector.
+template <uint8_t c, uint8_t ch, bool on = uart_pair_part>
+[[gnu::always_inline]] inline bool stim_dma_vector() {
+    if constexpr (on) {
+        using Side = StimSide<on>;
+        if constexpr (Side::Row::controller == c && Side::Row::channel == ch) {
+            if (stim_up) {
+                (void)Side::Port::dma_isr();
+                return true;
+            }
+        }
+    }
+    return false;
+}
+template <bool on = uart_pair_part>
+[[gnu::always_inline]] inline void stim_isr() {
+    if constexpr (on) {
+        if (stim_up) {
+            (void)StimSide<on>::Port::isr();
+        }
+    }
+}
+
 void banner() {
     print(serial, crlf, "bench_vx03 - ", device::part_name,
           " (clk=144 MHz PLL, ruler=STK cycles at 144 MHz, tick=STK 1000 Hz, console=USART1 ",
@@ -2151,11 +2266,8 @@ extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
-    if constexpr (StimRow::controller == 1u && StimRow::channel == 1u) {
-        if (stim_up) {
-            (void)Stim::dma_isr();   // letter u's stimulus: not metered, one a burst
-            return;
-        }
+    if (stim_dma_vector<1, 1>()) {   // letter u's stimulus: not metered, one a burst
+        return;
     }
     copy_meter.enter();
     copy_vector();
@@ -2173,14 +2285,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
         i2c_dma_meter.leave();
         return;
     }
-    if (loop_owner >= 2u) {
-        loop_dma_meter.enter();
-        if (loop_owner == 2u) {
-            (void)LoopTxe::dma_isr();
-        } else {
-            (void)LoopDma::dma_isr();
-        }
-        loop_dma_meter.leave();
+    if (loop_tx_dma_vector()) {
         return;
     }
     paced_meter.enter();
@@ -2201,46 +2306,16 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
         i2c_dma_meter.leave();
         return;
     }
-    loop_dma_meter.enter();
-    if (loop_owner == 3u && LoopDma::dma_isr()) {
-        loop_edge_at = Ruler::now();
-        loop_edge = true;
-    }
-    loop_dma_meter.leave();
+    loop_rx_dma_vector();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
-    loop_meter.enter();
-    bool edge = false;
-    if (loop_owner == 1u) {
-        edge = LoopIrq::isr();
-    } else if (loop_owner == 2u) {
-        edge = LoopTxe::isr();
-    } else if (loop_owner == 3u) {
-        edge = LoopDma::isr();
-    }
-    if (edge) {
-        loop_edge_at = Ruler::now();
-        loop_edge = true;
-    }
-    loop_meter.leave();
-}
+extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { loop_usart_vector(); }
 
 /// The stimulus's slot on the CH32V303; nothing in the CH32V203's vector
 /// table names this body.
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() {
-    if constexpr (StimRow::controller == 2u) {
-        if (stim_up) {
-            (void)Stim::dma_isr();
-        }
-    }
-}
+extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { (void)stim_dma_vector<2, 5>(); }
 
-extern "C" BRIO_CH32_INTERRUPT void uart4_handler() {
-    if (stim_up) {
-        (void)Stim::isr();
-    }
-}
+extern "C" BRIO_CH32_INTERRUPT void uart4_handler() { stim_isr(); }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
     spi_rx_meter.enter();
@@ -2318,7 +2393,7 @@ int main() {
     bench.letter('d', "the DMA engines: copy, fill, a paced block, SPI1's engined write", td_dma);
     bench.letter('e', "the SPI host above the wire: polled, pumped, a request's price, the overrun oracle",
                  te_spi);
-    bench.letter('u', "the serial transport on the crossed pair: transmit, receive, the edge", tu_uart);
+    bench.letter('u', "the serial transport on the crossed pair: transmit, receive, the edge", tu_uart<>);
     bench.letter('i', "the I2C host above the wire on the self-link: tenures, their fixed cost, the STOP's drain",
                  ti_i2c<>);
 

@@ -118,7 +118,16 @@
 //      with the probe attached, the two columns on the debug port's pads
 //      refused by init()
 //
+// THE 32 KB TIER does not hold the suite whole (some 29 KB against the
+// CH32V203C6's 28): its four parts build it as two images, letters a
+// to j - the generator, the frame and the modes of one port - in one,
+// k to s - the flow control, the loops and the pair - in the other (the
+// groups line below; design/overview.md, "A suite's image fits the
+// family's smallest chip"); every other part builds it as one image.
+// Letters n, o and p are the CH32V303's and in no group.
+//
 // build: boards = v203c6,v203c8,v303vc
+// build: groups = abcdefghij,klmqrs
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -271,9 +271,10 @@ one void write on the wire; an acknowledged tenure pays nothing for it.
 ### The host's cost (bench_ch32_i2c, letter i)
 
 The benchmark's I2C letter has an image of its own, `bench_ch32_i2c`:
-`bench_ch32` is 37.9 KB of this part's 40 KB of program flash, and two
-instantiations of the host and the peer's command channel are about ten
-more. It runs every tenure shape against the STM32G0 peer's `twi_peer`,
+`bench_ch32` whole is some 39 KB of this part's 40 KB of program flash
+and more than its 8 KB of RAM (it builds as two group images here), and
+two instantiations of the host and the peer's command channel are about
+ten kilobytes more. It runs every tenure shape against the STM32G0 peer's `twi_peer`,
 serving at 0x2C for a bounded window and holding its count of the bytes
 moved against this side's: writes and reads of 1, 2, 16 and 255 bytes,
 the register read (one written, a repeated START, 1, 2 and 16 read),

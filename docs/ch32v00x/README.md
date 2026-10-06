@@ -158,9 +158,12 @@ and the `ch32v003f4` presets build it as one image per group,
 `BRIO_TEST_LETTERS` naming its group and registering those letters
 alone - the menu of such an image says which letters it carries and
 that the others are in its sibling images. The `ch32v006k8` presets
-build the same source as one image with every letter. `brio flash J
-test_ch32_tim-2` names an image; the bare name is refused there with
-the list. The rule and its reasons: design/overview.md, "A suite's
+build the same source as one image with every letter, unless the
+suite names the CH32V006's own groups (`// build: groups.v006k8 =
+rtmpdes,uw`) because its whole image comes within a few per cent of
+that part's 40 KB or 8 KB - the benchmark skeleton does. `brio flash
+<board> test_ch32_tim-2` names an image; the bare name is refused
+there with the list. The rule and its reasons: design/overview.md, "A suite's
 image fits the family's smallest chip"; the mechanism:
 `util/testbench.hpp` and `ch32v00x/CMakeLists.txt`'s discovery.
 
@@ -409,6 +412,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- The regrouped images: the benchmark skeleton as two images on the
+  CH32V006 (whole, it is some 39 KB of the 40 and 64 bytes over the
+  8 KB of RAM) and its letter s - the SPI host's engines, moved out of
+  letter d so that the CH32V003's image of letter d fits that part -
+  in an image of its own there, and the CH32V003's new groups of the
+  I2C suite. `brio check ch32v00x` links each; one run of each image
+  on its board measures it.
 - The idle path's power, and Standby's: both are proven to sleep and
   wake (`test_ch32_platform` letter b, `test_ch32_sleep` letter d)
   but not to sleep cheaply - a current measurement on a bench meter,

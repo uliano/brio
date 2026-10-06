@@ -8,7 +8,8 @@
     brio duo <dut>:<cmd> <peer>:<script>
     brio fuses <board> [name=value ...]
     brio stress ...                the host end of the UART suites
-    brio check [avrdx|samc21|stm32g0|all] [filter]   the family compile fixtures
+    brio check [stratum|all] [filter]   the family compile fixtures, then the link guard
+    brio fit [stratum|all]         every app built on every preset: its flash and RAM margins
     brio prose [paths...]          the prose net (comments and documents)
     brio view <name>               watch a framebuffer a host program publishes
     brio gate [--against REF] [--preset P]...   images byte-identical to REF? (movers named)
@@ -41,6 +42,9 @@ def main(argv):
     if verb == "view":
         from cli import gfxview
         return gfxview.main([prog] + rest)
+    if verb == "fit":
+        from cli import fit
+        return fit.main([prog] + rest)
     if verb == "check":
         from cli import check
         return check.main([prog] + rest)

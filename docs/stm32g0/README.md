@@ -83,7 +83,11 @@ the HSE root is unbuilt anyway).
 `stm32g0/src/apps/*.cpp` - plus `experiments/*/stm32g0/*.cpp` - by
 their `// build:` header comment, the other two projects' grammar with
 this family's board names (`boards = g0b1re`, the default; an app that
-also runs on the other two Nucleos lists `g071rb` and `g031k8`). One
+also runs on the other two Nucleos lists `g071rb` and `g031k8`) and
+its groups of letters where the G031K8 cannot hold it whole (`groups =
+abcdefghij,klmnopqvwy`: one image per group on that part, `<app>-1`,
+`<app>-2`, ...; design/overview.md, "A suite's image fits the family's
+smallest chip"). One
 configure targets one part (`STM32G0_MCU`, full part number: it decides
 the device define `STM32G0B1xx`, the linker script `ld/<part>.ld`, the
 crt `src/glue/startup_<header>.cpp` and the board name, the part's last
@@ -235,19 +239,21 @@ halted or read over SWD until the replug ([../probes/st-link.md](../probes/st-li
 | `test_stm32_tim` | 118 | 114 | **108** | TIM4, TIM6, TIM7 and TIM15 - four instances the part has not got - and PB13..PB15, which the package does not bond |
 | `test_stm32_dma` | 74 | 65 | **62** (+ `u` 3, `w` 0) | DMA2, the console's DMA-fed rate (five channels, and the letters own all five) and the peripheral-to-peripheral leg; letter `o` (5) is built and not run on either smaller board |
 | `test_stm32_analog` | 139 | 136 | **67** | the DAC's letters and the comparators' - this part has neither block, so eight of the eighteen letters are compiled out ([adc.md](adc.md)) |
-| `test_stm32_serial` | 88 (+ y/w/v) | 83 | **79** (+ `y` 1, `v` 2, `w` 0) | USART2 is BASIC here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
+| `test_stm32_serial` | 88 (+ y/w/v) | 83 | **79** (+ `y` 1, `v` 2, `w` 0), counted on the one image it was before it outgrew the part | USART2 is BASIC here (no kernel-clock multiplexer, no wake), LPUART1's only bonded pads are the console's, and there is no LPUART2 |
 | `test_stm32_spi` | 38 (peer) | 38 (peer) | **38** (peer) | the eleven self-link letters, COMPILED OUT: SPI2's four pads are bonded to no pin of the LQFP32, so that instrument cannot exist here at any wiring |
 | `test_stm32_i2c` | 54 (peer) | 54 (peer) | **54** (peer) | the eleven self-link letters, skipped on the PROBE's answer like everywhere else - this package does bond I2C2's PA11/PA12, so what rules them out is the desk and not the plastic |
 | `test_stm32_nvm`, `test_stm32_journal` | 85, 52 | - | - | one flash bank: no storage attic |
 | `test_stm32_fdcan` | 96 | - | - | no FDCAN |
 
-**64 KB AND 8 KB ARE PART OF THE DESIGN HERE.** Every image on that
-board fits with the cuts named in its own suite: the largest is
-`test_stm32_serial` at **61928 bytes of 65536**, then `test_stm32_i2c`
-52676, `test_stm32_lptim` 50336 and `test_stm32_dma` 48168; the
-hungriest in RAM is `test_stm32_dma` at **6288 bytes**, which leaves the
-stack 1904 (its deepest letter's frame is 120 bytes, by `-fstack-usage`). One suite makes a real cut rather than
-losing letters: `test_stm32_dma` gives its three memory-to-memory
+**64 KB AND 8 KB ARE PART OF THE DESIGN HERE.** Every suite's image on
+that board fits with the cuts named in its own suite - `brio check
+stm32g0` links each, `brio fit stm32g0` lists what each takes - and one
+suite does not fit whole: `test_stm32_serial` is some 77 KB, so the
+G031K8 builds it as two group images (its groups line), each near 48
+KB. The hungriest in RAM are those two and `test_stm32_dma`, at about
+6.4 KB of the 8, which leaves the stack some 1.7 KB (the DMA suite's
+deepest letter's frame is 120 bytes, by `-fstack-usage`). One suite
+makes a real cut rather than losing letters: `test_stm32_dma` gives its three memory-to-memory
 buffers 256 words there instead of 512 (every claim restated for the
 length that fits) and gives the console's two DMA channels back to the
 letters. `test_stm32_spi` compiles its eleven self-link letters out - a

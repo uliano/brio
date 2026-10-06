@@ -485,6 +485,14 @@ What the rows say:
 
 ## Not covered yet
 
+Gaps:
+
+- `bench_vx03`'s letter i run after its letter u in one session stalls
+  at its first tenure on the CH32V203C8, each letter passing alone from
+  a fresh image - not yet explained (the USART loop's release stops its
+  engines), owed a look: the C8's two images keep the letters apart, the
+  CH32V303's whole image, whose `z` runs them in a row, would meet it.
+
 Implemented, not bench-verified:
 
 - Letter e on the AVR128DB48 and the CH32V006: the hosts reworked and

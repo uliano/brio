@@ -91,7 +91,11 @@ repo root is not a CMake project). Apps are auto-discovered from
 of any top-level experiment directory (which documents itself in its
 own README) - by their `// build:` header comment - the same
 grammar as the AVR project, board names of this family (`boards =
-c21j`; c21j is also the default). One configure targets one chip
+c21j`; c21j is also the default), and the groups of letters of an app
+whose whole image would leave its stack too little of the 32 KB of
+RAM (`groups = rmptuei,d`: one image per group, `<app>-1`, `<app>-2`;
+design/overview.md, "A suite's image fits the family's smallest
+chip"). One configure targets one chip
 variant (`SAMC21_MCU`); only the J18A has a preset today - the E/G
 variants have no board on the desk and are compile-checked by
 `brio check samc21` instead, which sweeps every positive TU in

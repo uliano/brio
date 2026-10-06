@@ -106,7 +106,7 @@
 //      and compared byte for byte, against the working rate's
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcdefgquvwxy,hirst
+// build: groups = abcdefgqy,hirstuvwx
 // build: monitor_speed = 115200
 
 #include <stdint.h>

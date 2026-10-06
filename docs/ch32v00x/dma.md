@@ -11,7 +11,8 @@ manual V1.9 (its chapter 8 is the same controller, table 8-2 the same
 rows but TIM3's), the QingKe V2 manual V1.3 (3.5 for the vector table
 the seven lines sit in). Driver: [brio/ch32v00x/dma.hpp](../../brio/ch32v00x/dma.hpp)
 and [brio/ch32v00x/dma_engine.hpp](../../brio/ch32v00x/dma_engine.hpp);
-reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letter d.
+reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
+(the controller) and s (the SPI host's engines).
 
 ## What the silicon does
 
@@ -331,8 +332,8 @@ Implemented but not bench-verified, each with what would measure it:
 - **The costs in time**: `bench_ch32`'s letter d - copy, fill and
   copy from flash at three sizes with the controller's cycles an item
   and the fixed cost a block, a block of 256 words paced by TIM1's
-  update at 10 kHz with its interrupts, busy and the pace's jitter,
-  and the SPI host's engined write of 16 and 256 frames of 8 and 16
+  update at 10 kHz with its interrupts, busy and the pace's jitter -
+  and its letter s, the SPI host's engined write of 16 and 256 frames of 8 and 16
   bits at HCLK/4 and HCLK/16 with MISO floating, the fixed cost a
   transaction against the listing's count above (about 350 cycles at
   the core's two and a half a straight-line instruction, the launch

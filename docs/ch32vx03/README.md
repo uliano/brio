@@ -116,8 +116,11 @@ declares its groups of letters (`// build: groups = abc,de`) builds
 there as one image per group - `<app>-1`, `<app>-2`, ... - each
 registering its own letters and carrying only their verdict prose,
 while every other part builds the same source as one image with every
-letter (design/overview.md, "A suite's image fits the family's
-smallest chip").
+letter - unless the suite names a part's own groups (`// build:
+groups.v203c8 = abcdefgh,ijklmnor`) because its whole image comes
+within a few per cent of that part's memory: the I2C suite and the
+benchmark skeleton are two images on the CH32V203C8 (design/
+overview.md, "A suite's image fits the family's smallest chip").
 
 ## The probe and the upload
 
@@ -501,11 +504,17 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified:
 
+- **The CH32V203C8's group images**: the I2C suite and the benchmark
+  skeleton, whole within a few bytes of the part's 60 KB, as two
+  images each, and the skeleton's serial-transport and I2C letters no
+  longer in the image of its other letters. `brio check ch32vx03`
+  links them; one run of each image on the board measures it.
 - **The eleven parts other than the CH32V203C8 and the CH32V303VC.**
   Every one has its table, its linker script and its preset, and the
   whole stratum compiles for all thirteen both ways the hardware
   prologue can be built (`brio check ch32vx03`); the CH32V203C6 preset
-  links every image and is the 32 KB / 10 KB tier's guard, and the
+  links every image (the check's link guard) and is the 32 KB / 10 KB
+  tier's guard, and the
   CH32V203RB's console links with its seventy-word vector table. What
   would measure them is a board.
 - **The KEY buttons on PA0**: no program has pressed either. The WeAct

@@ -732,6 +732,11 @@ Driver gaps (not built):
   user.
 
 Implemented but not bench-verified:
+- `bench_samc_ram` as its two group images: whole, the handlers' copy
+  in SRAM beside `bench_samc`'s buffers left its stack four bytes of
+  the 32 KB, so letter d's buffers went to an image of their own. The
+  figures under "The vector in SRAM" are the whole image's; one run of
+  each image measures them again.
 - The console's CPU share at 115200, through the interrupt transport
   and with one engine, and the per-byte plateau through the bridge:
   `serial_speed`'s occupancy and throughput, whose host side - the

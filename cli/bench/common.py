@@ -181,7 +181,10 @@ def apps_roster(project):
     what that configure happens to build). {"split_boards": [...] (the
     board types on which a suite with groups builds as one image per
     group - absent on a project with none), "apps": {app: {"boards": [...],
-    "groups": [...]|None, "monitor_speed": int|None}}}."""
+    "groups": [...]|None (the plain groups line, the split boards'),
+    "board_groups": {board type: [...]} (a "groups.<board type>" line's,
+    which splits the app on that board type alone), "monitor_speed":
+    int|None}}}."""
     path = os.path.join(ROOT, "build-cmake", "apps_%s.json" % project)
     if not os.path.isfile(path):
         die("build-cmake/apps_%s.json not found - configure the %s/ project "
@@ -193,8 +196,20 @@ def apps_roster(project):
 
 def apps_manifest(project):
     """The roster's apps alone: {app: {"boards": [...], "groups": [...]|None,
-    "monitor_speed": int|None}}."""
+    "board_groups": {...}, "monitor_speed": int|None}}."""
     return apps_roster(project)["apps"]
+
+
+def image_groups(info, btype, split):
+    """The groups an app builds as on a board type - its own
+    "groups.<board type>" line, else the plain line on a board type of
+    the split tier - or [] when it is one image there."""
+    own = (info.get("board_groups") or {}).get(btype)
+    if own:
+        return own
+    if btype in split:
+        return info.get("groups") or []
+    return []
 
 
 def resolve_app(name, app):
@@ -202,8 +217,10 @@ def resolve_app(name, app):
     if the app was never built for that board type (no
     '// build: boards' line naming it). On a board type the roster lists
     under "split_boards", a suite with groups is not one image but
-    "<app>-1", "<app>-2", ... (one per group of letters): those names
-    resolve to the app, and the bare name is refused with the list."""
+    "<app>-1", "<app>-2", ... (one per group of letters), and so is a suite
+    with a groups line of that board type's own on any board type: those
+    names resolve to the app, and the bare name is refused with the
+    list."""
     entry = board_entry(name)
     btype = entry["board"]
     spec = board_type(btype)
@@ -218,8 +235,8 @@ def resolve_app(name, app):
         die("no app '%s' under %s/src/apps/ (known to the last cmake configure "
             "of that project)" % (app, spec["project"]))
     info = apps[base]
-    groups = info.get("groups") or []
-    if btype in split and groups:
+    groups = image_groups(info, btype, split)
+    if groups:
         if group is None:
             die("app '%s' is not one image on board '%s' (type %s) but %d, one "
                 "per group of letters: %s"

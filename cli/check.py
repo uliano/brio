@@ -4,8 +4,18 @@ test/family*/ compiles for every package or variant of the stratum, and
 every negative TU is REFUSED. The fixtures are the shell scripts under
 cli/checks/, one per stratum (they call the cross compiler directly,
 with no CMake in between - and the rp2350 one calls TWO of them, the
-chip having two processor architectures); this module only picks and
-runs them."""
+chip having two processor architectures); this module picks and runs
+them.
+
+THEN THE LINK GUARD, when no filter is given: every app of the
+stratum's build project built on every release preset - the family's
+smallest part among them - by `brio fit` (cli/fit.py), so an app that
+claims a board type its image does not compile or fit on fails the
+check by name, and an image with under 5 per cent of its flash or RAM
+left is named. The fixtures prove the strata's headers on every part;
+only a link proves an app's image on its part. The presets build under
+build-cmake/fit/ (or $BRIO_FIT_INTO), apart from the directories
+`brio flash` builds in."""
 
 import os
 import subprocess
@@ -38,6 +48,10 @@ def main(argv):
             print("brio check: unknown stratum %r (one of %s, all)" % (n, ", ".join(SCRIPTS)))
             return 2
         status |= subprocess.call([os.path.join(ROOT, "cli", "checks", SCRIPTS[n])] + rest[1:])
+        if not rest[1:]:
+            from cli import fit
+            status |= fit.run([n], quiet=True)
+            sys.stdout.flush()   # before the next script writes to the same stream
     return status
 
 

@@ -193,7 +193,9 @@ both, in practice:
 - **Definition of done for a driver**: (1) systematic pass over the
   chapter's register description + errata; (2) a smoke TU compiled for
   every package - `avr-g++ -mmcu=avr128d{a,b}{28,48,64} -std=gnu++23
-  -Os -c -I brio` takes seconds, no hardware; (3) negative
+  -Os -c -I brio` takes seconds, no hardware - and `brio check` then
+  LINKS every app on every preset of the family (`brio fit` the census
+  of each image's flash and RAM, under 5 % left regrouped); (3) negative
   tests: what must be refused must FAIL to compile; (4) the
   `test_<target>_<subject>` suite on the bench; (5) `brio prose`
   clean over the files touched, and `brio gate` for every change that
@@ -431,7 +433,11 @@ brio check stm32f4 [name]       # same for the stm32f4 stratum (ALL TWENTY-THREE
 brio check rp2350 [name]        # same for the rp2350 stratum - the one fixture that crosses TWO
                                 # COMPILERS: every TU built four times (Cortex-M33 and Hazard3, each
                                 # for the QFN-80 and the QFN-60), util_all.cpp through both
-brio check all                  # every stratum above, in a row
+brio check all                  # every stratum above, in a row; each check ends with the
+                                # LINK GUARD: every app built on every release preset of
+                                # the stratum's project (build-cmake/fit/), a failure fatal
+brio fit [stratum|all]          # that build alone, and the census: each image's flash and
+                                # RAM against its linker script's regions, by margin
 brio prose [paths...]           # the prose net: no dates/process words/Doxygen tags in
                                 # comments and docs, every cited path exists, ASCII only;
                                 # "review" lines are claims of absence to re-read, not errors
@@ -495,7 +501,8 @@ brio fuses A bootsize=128  # read/write fuses over UPDI (fuses are
   package, so switching `configurePreset` switches which apps' targets
   exist; `// build: groups = abg,cdf` splits a suite into one image per
   group on a board type its project lists as splitting - the CH32V003,
-  and the CH32V203's four 32 KB parts - and changes nothing elsewhere),
+  the CH32V203's four 32 KB parts, the G031K8, the SAM C21 - and
+  `// build: groups.v006k8 = ...` on that board type alone),
   IDENTITY = the manifest `cli/bench/bench_boards.py` (which board
   sits where, its console by `/dev/serial/by-path` because the CH340s
   have no USB serial, its programmer), ORCHESTRATION = `bin/brio`.
@@ -564,16 +571,17 @@ compiles), `svd/` (the debugger's register map) - and the particulars
 below. `// build: boards = ...` gates which board types build an app;
 `// build: groups = ...` splits a suite into one image per group on a
 board type whose project lists it as splitting (the CH32V003, the
-CH32V203's four 32 KB parts) and changes nothing elsewhere.
+CH32V203's four 32 KB parts, the G031K8, the SAM C21) and
+`// build: groups.<board type> = ...` on that board type alone.
 
 | path | what it holds |
 |---|---|
 | `brio/` | the framework, one directory per stratum (the roster above); the headers' comments are the reference, `docs/<stratum>/README.md` the map. `brio/.clangd` routes each stratum to its own compile database; a fragment in each stratum and each project beside it |
 | `avrdx/` | the AVR project: `cmake/avr-mcus.cmake` (package -> mcu), `cmake/avr-refused-libc.rsp` (the linker's --wrap list refusing avr-libc's heap and stdio), `src/glue/ivsel_boot.cpp` in every image (vectors at BOOT start), the FLMAPLOCK and build-id defsyms; presets for the AVR128DB's three packages and the AVR128DA48 |
-| `samc21/`, `stm32g0/` | the SAM C21 and STM32G0 projects in the shared shape; the G0's presets for the G0B1RE, G071RB and G031K8 with one ld and crt per part |
+| `samc21/`, `stm32g0/` | the SAM C21 and STM32G0 projects in the shared shape; the G0's presets for the G0B1RE, G071RB and G031K8 with one ld and crt per part; the GROUP axis on the G031K8 and the SAM's one part |
 | `stm32f4/` | a PART TABLE (`cmake/stm32f4-parts.cmake`: part -> ST's device define, crt stem, board type), presets for the F429ZI, F446RE, F411CE and F469NI, the hard-float flags |
-| `ch32v00x/` | WCH's gcc at /sw/wch-riscv; `CH32V00X_MCU` names the part and derives its definition, ISA and ld; `src/glue/startup_ch32v00x.S` (the table whose first word is an instruction, two entries shorter on the CH32V003); the GROUP axis on the CH32V003; the crt paints the free RAM |
-| `ch32vx03/` | the same compiler with the full register file; a PART TABLE of the thirteen parts with their memories, board type, ISA and ABI (`cmake/ch32vx03-parts.cmake`); one ld per part, each stopping 4 KB short of the zero-wait window; a crt with a vector tail per device class and the FPU enabled under F; the GROUP axis on the four 32 KB parts; the C6 preset as the 32K tier's link guard |
+| `ch32v00x/` | WCH's gcc at /sw/wch-riscv; `CH32V00X_MCU` names the part and derives its definition, ISA and ld; `src/glue/startup_ch32v00x.S` (the table whose first word is an instruction, two entries shorter on the CH32V003); the GROUP axis on the CH32V003 (and per board type); the crt paints the free RAM |
+| `ch32vx03/` | the same compiler with the full register file; a PART TABLE of the thirteen parts with their memories, board type, ISA and ABI (`cmake/ch32vx03-parts.cmake`); one ld per part, each stopping 4 KB short of the zero-wait window; a crt with a vector tail per device class and the FPU enabled under F; the GROUP axis on the four 32 KB parts (and per board type); the C6 preset as the 32K tier's link guard |
 | `ch32x035/` | the shape of the two sibling WCH projects: a part table of the seven packages, one ld giving the image the whole 62 KB at the alias, a 55-word crt; no group axis, no svd |
 | `rp2040/` | the RP2040 project: the boot stage checked in as bytes, its own crt, `ld/` with `.ram_text` carried by `.data` (the flash engine and the PL022 host's hot path); the WeAct board's flash wants the OpenOCD built from git |
 | `rp2350/` | THE ONLY PROJECT WHOSE AXIS IS THE COMPILER: `cmake/toolchain-arm.cmake` and `cmake/toolchain-riscv.cmake` are two configures of the same sources, each setting `RP2350_ARCH`; a flash geometry and a PACKAGE (QFN-60 or QFN-80, a pad the package has not got a compile error) per configure; two crts binding the same handler names, each placing the IMAGE_DEF block - there is no second stage; the `-upload` target a rescue over the debug port, then programming as core 0 of the Arm pair, then a reset |

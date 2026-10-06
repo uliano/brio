@@ -18,8 +18,10 @@
 // engine, bound as that suite binds it. THE RAM BOUNDS THE SIZES: the one
 // work buffer is half the part's SRAM (4096 bytes on the CH32V006, 1024
 // on the CH32V003), and every size below that names "the buffer" is that
-// part's; on the CH32V003 the app builds as group images (design/
-// overview.md, "A suite's image fits the family's smallest chip").
+// part's. The app builds as group images on both parts (design/
+// overview.md, "A suite's image fits the family's smallest chip"): one
+// a letter or two on the CH32V003, and two on the CH32V006, whose 8 KB of
+// RAM does not hold letter u's rings beside the DMA letters' buffer.
 //
 // NO KERNEL. The suite's shape: a prompt loop over the console, which
 // here sleeps through BenchIdle<P, Ruler>::idle() when no byte is
@@ -35,10 +37,10 @@
 // Stopwatch takes one, the vectors included: no call on the hot path.
 //
 // THE METERS. One IsrMeter for each vector or group of vectors: the
-// STK's (the tick), USART1's (the transport's ISR body), and letter d's
-// three - DMA channel 1 (the copy engine), channels 2 and 3 with SPI1's
-// own (the SPI host's engines; letter e's pump shares that one), channel
-// 5 (the paced block). enter() is
+// STK's (the tick), USART1's (the transport's ISR body), letter d's two -
+// DMA channel 1 (the copy engine) and channel 5 (the paced block) - and
+// letter s's, channels 2 and 3 with SPI1's own (the SPI host's engines;
+// letter e's pump shares that one). enter() is
 // each handler's first statement and leave() its last, the body between
 // them as a suite binds it. The hardware prologue's entry and exit,
 // measured in docs/ch32v00x/platform.md, lie outside the stamps.
@@ -124,6 +126,10 @@
 //                    intervals' least and greatest against the period, a
 //                    note line - the pace's jitter as a polling core sees
 //                    it, its resolution the poll turn's.
+//   s  THE SPI HOST'S ENGINES (ch32v00x/spi.hpp, docs/ch32v00x/spi.md),
+//      each line from the transaction's start to its completion
+//      interrupt as letter d's blocks are - a letter of its own so that
+//      the CH32V003's image of letter d holds the controller alone:
 //        spi.dma     SpiHost<1> on DmaTxEngine<3, uint16_t> and
 //                    DmaRxEngine<2, uint16_t>, a WRITE (the receive side
 //                    discarding), no chip select, MISO left floating: the
@@ -178,7 +184,7 @@
 //        spi.poll      a POLLED write of 16 and 256 frames at HCLK/4 and
 //                      HCLK/16, the out buffer the work buffer and no in
 //                      buffer (the frames read back are discarded, as
-//                      letter d's are); spi.poll16 the same in 16-bit
+//                      letter s's are); spi.poll16 the same in 16-bit
 //                      frames. The best of 4 on a Stopwatch around
 //                      start(): wall against the wire's time, the gap
 //                      above it the loop's own.
@@ -225,7 +231,8 @@
 // and the window's close is counted in both.
 //
 // build: boards = v006k8,v003f4
-// build: groups = rt,m,p,d,e,u,w
+// build: groups = rt,m,p,d,s,e,uw
+// build: groups.v006k8 = rtmpdes,uw
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -604,19 +611,17 @@ void tt_tick() {
 }
 
 // ---------------------------------------------------------------------------
-// d - the DMA: copy and fill, a paced block, the SPI's engines
+// d - the DMA: copy and fill, a paced block
 // ---------------------------------------------------------------------------
 using Copier = DmaCopyEngine<1>;               // word beats at most
 using Paced = DmaTxEngine<5, uint32_t>;        // TIM1's update request (table 8-2)
 using PaceTimer = Tim<1>;
-using SpiDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 
 constexpr uint32_t pace_hz = 10'000;
 constexpr uint32_t pace_period = SysClock::hz / pace_hz;   // 4800 HCLK cycles
 
 volatile bool copy_done = false;
 volatile bool paced_done = false;
-volatile bool spi_done = false;
 bool dma_ready = false;   // letter d's peripherals brought up once
 
 /// The one word cell the paced block pours into, and the one the fill
@@ -765,6 +770,37 @@ void paced_lines() {
           " requests", crlf);
 }
 
+void td_dma() {
+    if (!dma_ready) {
+        Copier::arm(DmaPriority::high);
+        Paced::arm(&pace_cell);
+        dma_ready = true;
+    }
+    for (uint32_t i = 0; i < ram_bytes; ++i) {
+        ram[i] = static_cast<uint8_t>(i * 7u + 1u);
+    }
+    console_drain();
+    print(serial, "  the buffer: ", ram_bytes, " bytes; every line to the completion interrupt", crlf);
+    console_drain();
+    block_lines<BlockOp::copy>("copy", ram_bytes / 2u);
+    console_drain();
+    block_lines<BlockOp::copy_flash>("copy.flash", ram_bytes);
+    console_drain();
+    block_lines<BlockOp::fill>("fill", ram_bytes);
+    print(serial, "  copy faults: ", Copier::faults(), crlf);
+    console_drain();
+    paced_lines();
+    bench.verdict("ran", true);
+}
+
+// ---------------------------------------------------------------------------
+// s - the SPI host's engines
+// ---------------------------------------------------------------------------
+using SpiDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
+
+volatile bool spi_done = false;
+bool spi_ready = false;   // letter s's host brought up once (again after letter e)
+
 /// One SPI write of `frames` frames of `bits`, MISO floating: the line
 /// the round is judged by.
 BenchSample spi_run(uint16_t frames, SpiClock clock, SpiDataSize bits) {
@@ -798,27 +834,15 @@ void spi_lines(SpiClock clock, uint8_t div) {
     }
 }
 
-void td_dma() {
-    if (!dma_ready) {
-        Copier::arm(DmaPriority::high);
-        Paced::arm(&pace_cell);
+void ts_spi_dma() {
+    if (!spi_ready) {
         (void)SpiDma::init(clock);
-        dma_ready = true;
-    }
-    for (uint32_t i = 0; i < ram_bytes; ++i) {
-        ram[i] = static_cast<uint8_t>(i * 7u + 1u);
+        spi_ready = true;
     }
     console_drain();
-    print(serial, "  the buffer: ", ram_bytes, " bytes; every line to the completion interrupt", crlf);
-    console_drain();
-    block_lines<BlockOp::copy>("copy", ram_bytes / 2u);
-    console_drain();
-    block_lines<BlockOp::copy_flash>("copy.flash", ram_bytes);
-    console_drain();
-    block_lines<BlockOp::fill>("fill", ram_bytes);
-    print(serial, "  copy faults: ", Copier::faults(), crlf);
-    console_drain();
-    paced_lines();
+    print(serial, "  SpiHost<1> on DMA channels 3 and 2, a write of the buffer, MISO floating; every line to the "
+                  "completion interrupt",
+          crlf);
     console_drain();
     spi_lines(SpiClock::div4, 4);
     console_drain();
@@ -836,7 +860,7 @@ using CsPin = Pin<'C', 3>;    // the select, as test_ch32_spi scripts it
 using DcPin = Pin<'C', 4>;    // the D/C line: a pad no jumper and no other letter uses
 
 volatile bool pump_done = false;
-/// Which host spi1_handler serves: letter e's or letter d's. Volatile:
+/// Which host spi1_handler serves: letter e's or letter s's. Volatile:
 /// the vector reads it, and a plain bool's `true` at the letter's start
 /// is a dead store to a compiler that sees the `false` at its end.
 volatile bool poll_host_live = false;
@@ -957,7 +981,7 @@ void te_spi_host() {
     CsPin::output(true);
     DcPin::output(true);
     poll_host_live = true;
-    dma_ready = false;   // letter d brings its own host up again after this one
+    spi_ready = false;   // letter s brings its own host up again after this one
     for (uint32_t i = 0; i < ram_bytes; ++i) {
         ram[i] = static_cast<uint8_t>(i * 7u + 1u);
     }
@@ -1452,19 +1476,19 @@ namespace {
 } // namespace
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
-    if constexpr (brio::test_letter_carried('d')) {
+    if constexpr (brio::test_letter_carried('s')) {
         spi_dma_vector();
     }
 }
 
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
-    if constexpr (brio::test_letter_carried('d')) {
+    if constexpr (brio::test_letter_carried('s')) {
         spi_dma_vector();
     }
 }
 
 // SPI1's vector serves letter e's engineless host while that letter runs
-// and letter d's engined one otherwise; an image carrying neither leaves
+// and letter s's engined one otherwise; an image carrying neither leaves
 // it empty.
 extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     spi_meter.enter();
@@ -1477,7 +1501,7 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
             return;
         }
     }
-    if constexpr (brio::test_letter_carried('d')) {
+    if constexpr (brio::test_letter_carried('s')) {
         if (SpiDma::isr()) {
             spi_done = true;
         }
@@ -1518,7 +1542,8 @@ int main() {
     bench.letter('m', "memcpy and memset of the runtime against the core's floor", tm_memory);
     bench.letter('p', "a print through the console against the wire", tp_print);
     bench.letter('t', "the tick's floor: one second of idle turns", tt_tick);
-    bench.letter('d', "the DMA: copy, fill, a paced block, the SPI's engines", td_dma);
+    bench.letter('d', "the DMA: copy, fill, a paced block", td_dma);
+    bench.letter('s', "the SPI host's engines: an engined write at two rates and two widths", ts_spi_dma);
     bench.letter('e', "the SPI host above the wire: polled, pumped, a request's fixed cost", te_spi_host);
     bench.letter('u', "the serial transport: USART2's transmit, the console's receive and edge (brio stress)",
                  tu_uart, false);

@@ -856,7 +856,8 @@ no letter, there being no synchronous slave on this desk.
 
 ## On the STM32G031K8
 
-`test_stm32_serial` scores **79 of 88** on the Nucleo-G031K8 (DEV_ID
+`test_stm32_serial` scored **79 of 88** as one image on the
+Nucleo-G031K8 (DEV_ID
 0x466, REV_ID 0x1003). This part has **USART1 and USART2 and nothing
 else**, and the split moves one step further down table 183: **USART2 IS
 BASIC HERE** - no FIFO, no PRESC that divides, NO KERNEL-CLOCK
@@ -915,6 +916,10 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
+- `test_stm32_serial` as the G031K8's two group images (letters a to j,
+  and k to y): the suite outgrew the part's 64 KB whole, and the scores
+  under "On the STM32G031K8" are the one image's; one run of each image
+  on that board measures them.
 - The receive ring off the STM32G0B1RE: `test_stm32_dma`'s console
   carries both engines on the STM32G071RB too, and its letter `o` is
   built for both smaller parts; none of it has run there (the boards are

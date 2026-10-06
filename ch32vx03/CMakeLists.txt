@@ -16,7 +16,8 @@
 #  carrying its group's letters and the prose that judges them; every
 #  other part builds the same source as ONE image with every letter. What
 #  bounds a group is the smallest chip's memory, and the linker script is
-#  the guard (design/overview.md, "A suite's image fits the family's
+#  the guard; a larger part whose whole image comes too near its own
+#  memory names groups of its own (a "groups.<board type>" line) (design/overview.md, "A suite's image fits the family's
 #  smallest chip"; the mechanism is util/testbench.hpp and the discovery
 #  loop below).
 #
@@ -243,9 +244,13 @@ endfunction()
 #     <app>-1, <app>-2, ... - each compiled with BRIO_TEST_LETTERS set to
 #     its group's keys, which util/testbench.hpp reads to register those
 #     letters alone; on every other board the app is ONE image carrying
-#     every letter, and a groups line changes nothing there. The roster
-#     names the split boards and each app's groups, so bin/brio can
-#     resolve "<app>-<n>" and refuse the bare name where it is not an
+#     every letter, and a groups line changes nothing there - unless the
+#     app names that board type's own groups ("// build: groups.v203c8 =
+#     rmptde,ui"), for a whole image too near a larger part's memory:
+#     that line splits the app on that board type alone, and on a split
+#     board too it wins over the plain line. The roster names the split
+#     boards and each app's groups, plain and per board type, so bin/brio
+#     can resolve "<app>-<n>" and refuse the bare name where it is not an
 #     image.
 #
 #     WHICH BOARDS SPLIT IS READ OFF THE PART TABLE, not listed a second
@@ -275,14 +280,20 @@ foreach(_app_path IN LISTS APP_SOURCES)
 
     set(_boards v203c8)
     set(_groups "")
+    set(_board_groups_json "")
+    set(_own_groups "")
+    set(_own_groups_set FALSE)
     set(_monitor_speed "")
 
+    # A key may carry a board type after a dot: "groups.v203c8 = ..." is
+    # the groups line of that board type alone.
     file(STRINGS "${_app_path}" _build_lines REGEX "^// build:")
     foreach(_line IN LISTS _build_lines)
-        if(_line MATCHES "^// build:[ \t]*([A-Za-z_]+)[ \t]*=[ \t]*(.+)$")
+        if(_line MATCHES "^// build:[ \t]*([A-Za-z_]+)(\\.([A-Za-z0-9_-]+))?[ \t]*=[ \t]*(.+)$")
             set(_key "${CMAKE_MATCH_1}")
-            string(STRIP "${CMAKE_MATCH_2}" _value)
-            if(_key STREQUAL "boards")
+            set(_qual "${CMAKE_MATCH_3}")
+            string(STRIP "${CMAKE_MATCH_4}" _value)
+            if(_key STREQUAL "boards" AND _qual STREQUAL "")
                 string(REPLACE "," ";" _boards_raw "${_value}")
                 set(_boards "")
                 foreach(_b IN LISTS _boards_raw)
@@ -291,12 +302,31 @@ foreach(_app_path IN LISTS APP_SOURCES)
                 endforeach()
             elseif(_key STREQUAL "groups")
                 string(REPLACE "," ";" _groups_raw "${_value}")
-                set(_groups "")
+                set(_line_groups "")
+                set(_line_json "")
                 foreach(_g IN LISTS _groups_raw)
                     string(STRIP "${_g}" _g)
-                    list(APPEND _groups "${_g}")
+                    list(APPEND _line_groups "${_g}")
+                    if(_line_json STREQUAL "")
+                        set(_line_json "\"${_g}\"")
+                    else()
+                        set(_line_json "${_line_json},\"${_g}\"")
+                    endif()
                 endforeach()
-            elseif(_key STREQUAL "monitor_speed")
+                if(_qual STREQUAL "")
+                    set(_groups "${_line_groups}")
+                else()
+                    if(_board_groups_json STREQUAL "")
+                        set(_board_groups_json "\"${_qual}\":[${_line_json}]")
+                    else()
+                        set(_board_groups_json "${_board_groups_json},\"${_qual}\":[${_line_json}]")
+                    endif()
+                    if(_qual STREQUAL CH32VX03_BOARD)
+                        set(_own_groups "${_line_groups}")
+                        set(_own_groups_set TRUE)
+                    endif()
+                endif()
+            elseif(_key STREQUAL "monitor_speed" AND _qual STREQUAL "")
                 set(_monitor_speed "${_value}")
             endif()
         endif()
@@ -328,17 +358,27 @@ foreach(_app_path IN LISTS APP_SOURCES)
         endforeach()
         set(_groups_json "[${_groups_json}]")
     endif()
-    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":${_groups_json},\"monitor_speed\":${_speed_json}}")
+    set(_entry "\"${_app}\":{\"boards\":[${_boards_json}],\"groups\":${_groups_json},\"board_groups\":{${_board_groups_json}},\"monitor_speed\":${_speed_json}}")
     if(_manifest_entries STREQUAL "")
         set(_manifest_entries "${_entry}")
     else()
         set(_manifest_entries "${_manifest_entries},\n    ${_entry}")
     endif()
 
+    # The images THIS configure's board type builds the app as: the
+    # groups its own line names, else the plain line's on a board type
+    # of the split tier, else one image carrying every letter.
+    if(_own_groups_set)
+        set(_split "${_own_groups}")
+    elseif(CH32VX03_BOARD IN_LIST CH32VX03_SPLIT_BOARDS)
+        set(_split "${_groups}")
+    else()
+        set(_split "")
+    endif()
     if(CH32VX03_BOARD IN_LIST _boards)
-        if(CH32VX03_BOARD IN_LIST CH32VX03_SPLIT_BOARDS AND NOT _groups STREQUAL "")
+        if(NOT _split STREQUAL "")
             set(_i 0)
-            foreach(_g IN LISTS _groups)
+            foreach(_g IN LISTS _split)
                 math(EXPR _i "${_i} + 1")
                 ch32vx03_add_app(${_app}-${_i} ${_app_path})
                 target_compile_definitions(${_app}-${_i} PRIVATE "BRIO_TEST_LETTERS=\"${_g}\"")

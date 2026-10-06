@@ -278,7 +278,14 @@
 // and isr and not in wall - one tick, the `window` line's isr, at most at
 // either end of a run.
 //
+// THE G031K8 does not hold the bench whole: its 8 KB of RAM, not its
+// flash, is the limit (letter d's buffers alone take most of it), so it
+// builds three images there - the skeleton and the SPI host, the DMA,
+// the serial and I2C transports (the groups line below; design/
+// overview.md, "A suite's image fits the family's smallest chip").
+// The G071RB and the G0B1RE build one.
 // build: boards = g0b1re,g071rb,g031k8
+// build: groups.g031k8 = rmptfe,d,ui
 // build: monitor_speed = 115200
 
 #include <stdint.h>

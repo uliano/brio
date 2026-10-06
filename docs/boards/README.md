@@ -40,12 +40,18 @@ Three concerns, deliberately kept apart:
    image does not fit a part of its family declares its GROUPS of
    letters (`// build: groups = abg,cdf,e`): on a board type the
    project lists as splitting (the CH32V00x's `v003f4`, the CH32V203's
-   `v203c6`, `v203f6`, `v203g6` and `v203k6`) the suite builds as one
-   image per group - `<app>-1`, `<app>-2`, ... - each carrying the
-   letters its group names and registering those alone
-   (`util/testbench.hpp`'s selection), while on every other board the
-   suite is one image with every letter (design/overview.md, "A
-   suite's image fits the family's smallest chip").
+   `v203c6`, `v203f6`, `v203g6` and `v203k6`, the STM32G0's `g031k8`,
+   the SAM C21's `c21j`) the suite builds as one image per group -
+   `<app>-1`, `<app>-2`, ... - each carrying the letters its group
+   names and registering those alone (`util/testbench.hpp`'s
+   selection), while on every other board the suite is one image with
+   every letter - unless it names that board type's own groups
+   (`// build: groups.v006k8 = rtmpdes,uw`), which split it there
+   alone, on a split board too in place of the plain line
+   (design/overview.md, "A suite's image fits the family's smallest
+   chip"; the projects with the axis are those four). `brio check`
+   links every app on every preset of its project and `brio fit` lists
+   each image's flash and RAM against its part's.
 2. **Identity** - the bench MANIFEST, `cli/bench/bench_boards.py`: a
    plain dict naming each board on the desk by a POSITION (a letter),
    its type, the label the chip is expected to carry, its console and

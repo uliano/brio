@@ -78,7 +78,7 @@
 // `--timeout 400`.
 //
 // build: boards = v006k8,v003f4
-// build: groups = aiw,bc,de,fg,k,r
+// build: groups = ai,bcw,de,fk,g,r
 // (the kernel letter h is in no group of the CH32V003 build: its image
 // alone is 216 bytes over the part's 15 KB, and its prose is not for
 // shortening - it runs on the CH32V006)

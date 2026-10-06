@@ -139,9 +139,14 @@
 // arbiter, both roles and the arbitration - is simply bigger than the
 // tier. So the four 32 KB parts build it as one image per GROUP of
 // letters (the groups line below; design/overview.md, "A suite's image
-// fits the family's smallest chip") and every other part as one image.
+// fits the family's smallest chip"). The CH32V203C8 holds it whole only
+// to the last few bytes of its 60 KB, its self-link letters l to o
+// included, so it builds two images of its own (the groups.v203c8 line:
+// the wireless and peer letters, then the self-link's); the CH32V303
+// builds one.
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abcd,efgh,ijkr
+// build: groups.v203c8 = abcdefgh,ijklmnor
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -125,7 +125,7 @@ What a transaction costs beyond its frames' time is the host's own:
 `test_ch32_spi.lst` and `bench_ch32.lst` for the CH32V006, the cost
 model 2.5 cycles a straight-line instruction, the prologue's entry 29
 and exit 25 cycles measured in platform.md), and each is MEASURED on
-the CH32V006K8U6 at 48 MHz by `bench_ch32`'s letters d and e, MISO
+the CH32V006K8U6 at 48 MHz by `bench_ch32`'s letters s and e, MISO
 floating. A bench line holds its instrument: the stopwatch's 44 cycles
 in every wall, and on a pumped or engined line the meter's stamp pair,
 113 cycles a handler, of which `enter()` - the handler's first
@@ -245,7 +245,7 @@ statement - lies on the bus's dead time (letter r).
   to about 465; the rest is the controller's and the shifter's latency
   at the block's two ends. Inside the block the engines are the wire's: 32.0
   cycles a byte at HCLK/4 and 128.0 at HCLK/16 in both widths, one
-  interrupt a transaction. `bench_ch32`'s own letter d prints 878 above
+  interrupt a transaction. `bench_ch32`'s own letter s prints 878 above
   the wire: it builds the request inside the stopwatch (67 cycles, a
   40-byte `memset` among them) and idles through `BenchIdle` (136).
 - **The fixed cost of a request**, a 3-byte polled one (a command and
@@ -406,7 +406,7 @@ Implemented but not bench-verified, each with what would measure it:
   width is inside the same window by the count. What would measure it:
   a loop letter pumping at HCLK/2 and HCLK/4, the frames judged.
 - The host above the wire on the CH32V003F4P6 - `bench_ch32`'s letters
-  d and e and `test_ch32_spi`'s loop letters on its group images - and
+  s and e and `test_ch32_spi`'s loop letters on its group images - and
   the peer letters o, p and q on either part against `spi_peer`
   byte-exact through the hosts as they are: that board is off the
   desk, and the peer shares the pads with the jumper.
