@@ -45,6 +45,32 @@
 //   j  the system timer itself: the 64-bit read against the latched
 //      one, monotonic, an alarm 2 ms ahead and its interrupt latency,
 //      disarm, the raised flag, the force bit
+//   w  THE IDLE PATH AGAINST AN INTERRUPT'S EDGE, PLACED TO THE CYCLE:
+//      an edge put D cycles after its placement, D walking 400 cycles,
+//      then a fixed lead of bus reads and the kernel's own shape - a
+//      masked check, idle(), until one edge was served (and, a second pass, two: the sleep entered right
+//      after a handler) - so the edge crosses every instruction of the
+//      idle path and of the loop around it, the sleep entry included.
+//      Two edges: the tick's own (SysTick, a core exception, placed by a
+//      reload of D) and a peripheral line's (PWM slice 0 counting clk_sys
+//      to its wrap, placed by a counter write); each in both rungs the
+//      idle path has without a hook, light (SLEEPDEEP clear) and standby
+//      (set, through the sleep site). The system timer times each try
+//      and alarm 1 RESCUES it 50 ms out: a try that takes the rescue is
+//      a wake idle() lost for good, one that ends half a period past the
+//      edge it waited for is a wake deferred to the next edge. The SysTick
+//      reloads shorten the ticks they land in, so kernel time runs fast
+//      during the letter. Prints, per edge and rung, the cycles from an
+//      edge that finds the core asleep to the handler and to the caller's
+//      loop, the D from which the edge finds it asleep, and how far
+//      before the sleep the earliest edge lands
+//   k  THE KERNEL'S TURN: a Tenuto pack of three quiet AOs, two with a
+//      periodic time event, turned as Tenuto::run() turns it over 100
+//      ticks with the tick the only interrupt - one turn per tick, a
+//      turn more or fewer allowed at the window's ends - and what a turn
+//      costs: idle() with a line already pending (the WFI falls through,
+//      the unmask takes the line), and a quiet turn whose idle() finds
+//      one, on SysTick's counter
 //
 //   i  (by name only) FIVE REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a token in the watchdog's scratch
@@ -75,14 +101,20 @@
 
 #include <optional>
 
+#include "kernel/event_queue.hpp"
 #include "kernel/panic.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/delay.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
 #include "rp2040/platform.hpp"
+#include "rp2040/pwm.hpp"
 #include "rp2040/reset.hpp"
 #include "rp2040/resets.hpp"
+#include "rp2040/sleep.hpp"
 #include "rp2040/sysinfo.hpp"
 #include "rp2040/ticker.hpp"
 #include "rp2040/timer.hpp"
@@ -607,6 +639,365 @@ void tj_timer() {
 }
 
 // =============================================================================
+// w - the idle path against an interrupt's edge, placed to the cycle
+// =============================================================================
+// THE RESCUE: alarm 1 of the system timer, armed 50 ms after a try
+// begins. A try that takes it is a wake idle() lost for good.
+constexpr uint8_t rescue_alarm = 1;
+constexpr uint32_t rescue_us = 50'000u;
+volatile uint32_t rescue_fires = 0;
+
+// What the SysTick handler read of the counter on entry (the glue).
+volatile uint32_t tick_entry_val = 0;
+
+// The line's edge: slice 0's wrap. Its handler stamps the counter.
+using EdgeSlice = PwmSlice<0>;
+volatile uint32_t line_hits = 0;
+volatile uint32_t line_entry = 0;
+
+constexpr uint32_t tick_period = SysClock::hz / Ticker::ticks_per_second;
+
+/// The kernel's own interrupt: SysTick, its edge placed by a reload. A
+/// write to VAL clears the counter and the next cycle reloads it from
+/// LOAD (ARMv6-M B3.3), so LOAD = d, VAL written, LOAD back to the
+/// period puts the 1-to-0 transition that pends the exception d cycles
+/// after the reload - and the period after it is a whole one again.
+struct TickEdge {
+    static constexpr const char* name = "the tick (SysTick, a core exception)";
+    static constexpr uint32_t first_d = 8;   // the LOAD restore lands before the reload
+    static constexpr uint32_t period_us = 1000;
+    static void begin() {}
+    static void end() {}
+    /// Just after a tick: a whole period before the next natural edge.
+    static void sync() {
+        const uint32_t s = Ticker::ticks();
+        while (Ticker::ticks() == s) {
+        }
+    }
+    static uint32_t count() { return Ticker::ticks(); }
+    [[gnu::always_inline]] static void place(uint32_t d) {
+        SysTick->LOAD = d;
+        SysTick->VAL = 0;
+        SysTick->LOAD = tick_period - 1u;
+    }
+    static uint32_t since_edge() { return tick_period - 1u - SysTick->VAL; }
+    static uint32_t entry() { return tick_period - 1u - tick_entry_val; }
+};
+
+/// A peripheral line through the NVIC: PWM slice 0 counting clk_sys
+/// undivided to TOP 65535 (4.5.2), its wrap the edge. CTR is writable
+/// while the slice runs, so CTR = TOP - d puts the wrap d + 1 counts
+/// out; after it the counter reads the cycles since the wrap. The
+/// ticker is paused across the pass, so the wrap and the rescue are the
+/// only interrupts.
+struct LineEdge {
+    static constexpr const char* name = "a peripheral line (PWM wrap, through the NVIC)";
+    static constexpr uint32_t first_d = 2;
+    static constexpr uint32_t period_us = 65536u / (SysClock::hz / 1'000'000u);
+    static void begin() {
+        (void)Pwm::reset();
+        (void)EdgeSlice::configure(PwmSliceConfig{});
+        Pwm::clear_pending(EdgeSlice::bit);
+        Pwm::interrupts(EdgeSlice::bit, true);
+        Nvic::clear_pending(Pwm::irq());
+        Nvic::enable(Pwm::irq());
+        EdgeSlice::enable(true);
+        Ticker::pause();
+    }
+    static void end() {
+        Ticker::resume();
+        EdgeSlice::enable(false);
+        Pwm::interrupts(EdgeSlice::bit, false);
+        Nvic::disable(Pwm::irq());
+        Pwm::clear_pending(EdgeSlice::bit);
+        Nvic::clear_pending(Pwm::irq());
+    }
+    static void sync() {
+        const uint32_t s = line_hits;
+        while (line_hits == s) {
+        }
+    }
+    static uint32_t count() { return line_hits; }
+    [[gnu::always_inline]] static void place(uint32_t d) { EdgeSlice::ctr() = 0xFFFFu - d; }
+    static uint32_t since_edge() { return EdgeSlice::ctr(); }
+    static uint32_t entry() { return line_entry; }
+};
+
+struct TryResult {
+    uint32_t took_us;
+    uint32_t to_loop;    ///< cycles from the edge to the caller's loop, past the last edge
+    uint32_t entry;      ///< cycles from the edge to the handler's first statement
+    bool rescued;
+};
+
+/// One try: the edge placed d cycles out, then the kernel's own shape - a
+/// masked check, idle(), until `edges` edges were served - timed on the
+/// system timer, with the rescue armed.
+template <typename Edge>
+TryResult walk_try(uint32_t d, uint32_t edges) {
+    Edge::sync();
+    TryResult r{};
+    P::CriticalSection cs;
+    const uint32_t r0 = rescue_fires;
+    Timer::alarm_in(rescue_alarm, rescue_us);
+    // The edge first, then THE LEAD - a fixed run of bus reads - and the
+    // try's own reads, so the earliest positions pend before the loop's
+    // first masked check even through a line's own lag from its edge to
+    // the core (no handler can move the count meanwhile: the mask is up).
+    Edge::place(d);
+    for (uint8_t k = 0; k < 12u; ++k) {
+        (void)us_now();
+    }
+    const uint32_t n0 = Edge::count();
+    const uint32_t u0 = us_now();
+    for (;;) {
+        P::CriticalSection turn;   // the kernel's own shape
+        if (Edge::count() - n0 >= edges) {
+            break;
+        }
+        P::idle();
+    }
+    r.to_loop = Edge::since_edge();
+    r.entry = Edge::entry();
+    r.took_us = us_now() - u0;
+    Timer::disarm(rescue_alarm);
+    Timer::clear(rescue_alarm);
+    Nvic::clear_pending(Timer::irq(rescue_alarm));
+    r.rescued = rescue_fires != r0;
+    return r;
+}
+
+constexpr uint32_t walk_positions = 400;
+uint16_t walk_to_loop[walk_positions];
+
+using SleepSite = Rp2040SleepSite<SysClock>;
+
+/// What one sweep found: one rung, one or two edges.
+struct Sweep {
+    uint32_t lost;
+    uint32_t late;
+    uint32_t first_bad;
+    uint32_t slowest_us;
+    uint32_t crossed;        ///< the first D the edge finds the core asleep (one edge)
+    uint32_t asleep_entry;   ///< cycles from such an edge to the handler
+    uint32_t asleep_loop;    ///< and to the caller's loop
+    uint32_t earliest_loop;  ///< the first position's, to the caller's loop
+};
+
+/// Every position, one edge and two, in both rungs the idle path has
+/// without a hook (light: SLEEPDEEP clear; standby: set, through the sleep
+/// site). Swept with the console silent, printed after.
+template <typename Edge>
+void walk_edge() {
+    Sweep sweeps[2][2]{};
+    Edge::begin();
+    for (uint8_t rung = 0; rung < 2u; ++rung) {
+        (void)SleepSite::arm(rung == 0u ? SleepDepth::light : SleepDepth::standby);
+        for (uint32_t edges = 1; edges <= 2u; ++edges) {
+            Sweep& s = sweeps[rung][edges - 1u];
+            // One try discarded first: the code runs from flash, and the
+            // first pass through it is the XIP cache's fill, not the idle
+            // path's.
+            (void)walk_try<Edge>(Edge::first_d + walk_positions - 1u, edges);
+            for (uint32_t i = 0; i < walk_positions; ++i) {
+                const uint32_t d = Edge::first_d + i;
+                const TryResult r = walk_try<Edge>(d, edges);
+                if (r.took_us > s.slowest_us) {
+                    s.slowest_us = r.took_us;
+                }
+                // A wake lost for good waits for the rescue; one lost until
+                // the edge AFTER (a handler run past its own edge's wake)
+                // ends a whole period late. The bound sits half a period
+                // past the edge awaited.
+                const bool is_late = !r.rescued &&
+                                     r.took_us > (edges - 1u) * Edge::period_us + Edge::period_us / 2u;
+                if (r.rescued || is_late) {
+                    if (s.lost + s.late == 0u) {
+                        s.first_bad = d;
+                    }
+                    if (r.rescued) {
+                        ++s.lost;
+                    } else {
+                        ++s.late;
+                    }
+                }
+                if (edges == 1u) {
+                    walk_to_loop[i] = static_cast<uint16_t>(r.to_loop > 0xFFFFu ? 0xFFFFu : r.to_loop);
+                    s.asleep_entry = r.entry;
+                }
+            }
+            if (edges == 1u) {
+                // The plateau: an edge that finds the core asleep costs the
+                // same at every later position, and one that finds it awake
+                // costs a cycle more per cycle earlier - so the first D of
+                // three in a row on the plateau is where the edge crossed
+                // the sleep entry. (A lone try off the plateau further on
+                // is an XIP cache refill: the code runs from flash.)
+                const uint16_t plateau = walk_to_loop[walk_positions - 1u];
+                const auto on_plateau = [plateau](uint32_t k) {
+                    const uint16_t v = walk_to_loop[k];
+                    return v + 1u >= plateau && v <= plateau + 1u;
+                };
+                uint32_t crossed = 0;
+                while (crossed + 2u < walk_positions &&
+                       !(on_plateau(crossed) && on_plateau(crossed + 1u) && on_plateau(crossed + 2u))) {
+                    ++crossed;
+                }
+                s.crossed = Edge::first_d + crossed;
+                s.asleep_loop = plateau;
+                s.earliest_loop = walk_to_loop[0];
+            }
+        }
+    }
+    SleepSite::disarm();
+    Edge::end();
+
+    print(serial, "  ", Edge::name, ", D = ", Edge::first_d, "..", Edge::first_d + walk_positions - 1u,
+          " cycles after the placement:", crlf);
+    bool clean = true;
+    for (uint8_t rung = 0; rung < 2u; ++rung) {
+        for (uint32_t edges = 1; edges <= 2u; ++edges) {
+            const Sweep& s = sweeps[rung][edges - 1u];
+            print(serial, "    ", rung == 0u ? "light  " : "standby", " waiting for ", edges,
+                  edges == 1u ? " edge:  " : " edges: ", s.lost, " lost, ", s.late, " late");
+            if (s.lost + s.late != 0u) {
+                print(serial, " (first at D=", s.first_bad, ")");
+            }
+            print(serial, ", the slowest try ", s.slowest_us, " us", crlf);
+            if (edges == 1u) {
+                print(serial, "      an edge that finds the core asleep (D >= ", s.crossed, "): ",
+                      s.asleep_entry, " cycles to the handler, ", s.asleep_loop, " to the caller's loop; the "
+                      "earliest edge (D=", Edge::first_d, ") ", s.earliest_loop, " to the loop, ",
+                      s.earliest_loop - s.asleep_loop, " before the sleep took it", crlf);
+            }
+            clean = clean && s.lost == 0u && s.late == 0u;
+        }
+        console_drain();
+    }
+    bench.verdict("no edge position loses the wake or defers it a period, one edge or two, light or "
+                  "standby",
+                  clean);
+}
+
+void tw_edge() {
+    console_drain();
+    rescue_fires = 0;
+    Timer::clear(rescue_alarm);
+    Timer::interrupt(rescue_alarm, true);
+    Nvic::clear_pending(Timer::irq(rescue_alarm));
+    Nvic::enable(Timer::irq(rescue_alarm));
+
+    walk_edge<TickEdge>();
+    console_drain();
+    walk_edge<LineEdge>();
+
+    Timer::interrupt(rescue_alarm, false);
+    Nvic::disable(Timer::irq(rescue_alarm));
+    print(serial, "  the rescue fired ", rescue_fires, " time(s) in all", crlf);
+}
+
+// =============================================================================
+// k - the kernel's turn: how many per interrupt, and what one costs
+// =============================================================================
+// A pack shaped like a small program's: three AOs, two of them with a
+// periodic time event (500 ms and 1000 ms, so none fires in the 100 ms
+// this letter idles), none of them ever posted to.
+template <uint8_t N>
+struct Quiet {
+    struct Event { uint8_t n; };
+    static inline EventQueue<Event, 2, P> queue;
+    static inline TimeEvent<P, Quiet, Event> beat{Event{N}};
+    static void init() {
+        if constexpr (N != 0u) {
+            beat.arm_every(ticks_from_ms<P>(500u * N));
+        }
+    }
+    static void dispatch(const Event&) {}
+};
+using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
+
+/// One turn of Tenuto::run()'s loop, as it is written there.
+[[gnu::always_inline]] inline void kernel_turn() {
+    TimeEvents<P>::process();
+    if (!QuietKernel::step()) {
+        QuietKernel::idle_if_empty();
+    }
+}
+
+// The line a quiet turn's idle() finds pending: a spare one (table 2.3.2's
+// 26, wired to nothing), raised in software.
+constexpr IRQn_Type spare_line = SPARE_IRQ_0_IRQn;
+volatile uint32_t spare_hits = 0;
+
+/// SysTick's counter: clk_sys cycles, counting DOWN within one period.
+uint32_t systick_now() { return SysTick->VAL; }
+
+void tk_turns() {
+    console_drain();
+    spare_hits = 0;
+    QuietKernel::init_all();
+
+    // Turns over 100 quiet ticks: the tick is the only interrupt.
+    constexpr uint32_t window = 100;
+    const uint32_t t = Ticker::ticks();
+    uint32_t turns = 0;
+    while (Ticker::ticks() - t < window) {
+        kernel_turn();
+        ++turns;
+    }
+
+    // What a turn costs, read on SysTick's counter between two reads that
+    // fall inside one period (a pair the reload splits is discarded):
+    // idle() with a line already pending - the WFI falls through, the
+    // unmask takes the line's handler - and a quiet turn whose idle() does
+    // the same. The difference is the loop's own: the time events'
+    // process(), the empty step(), the masked check.
+    Nvic::clear_pending(spare_line);
+    Nvic::enable(spare_line);
+    uint32_t idle_cycles = 0xFFFF'FFFFu;
+    uint32_t turn_cycles = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        TickEdge::sync();
+        uint32_t c0 = 0;
+        uint32_t c1 = 0;
+        {
+            P::CriticalSection cs;
+            Nvic::set_pending(spare_line);
+            c0 = systick_now();
+            P::idle();
+            c1 = systick_now();
+        }
+        if (c0 > c1 && c0 - c1 < idle_cycles) {
+            idle_cycles = c0 - c1;
+        }
+        {
+            // The whole turn entered masked, as the loop enters
+            // idle_if_empty(): the line stays pending until the idle()'s
+            // own unmask, and every guard on the way nests.
+            P::CriticalSection cs;
+            Nvic::set_pending(spare_line);
+            c0 = systick_now();
+            kernel_turn();
+            c1 = systick_now();
+        }
+        if (c0 > c1 && c0 - c1 < turn_cycles) {
+            turn_cycles = c0 - c1;
+        }
+    }
+    Nvic::disable(spare_line);
+    TimeEvents<P>::clear_all();
+
+    print(serial, "  ", window, " quiet ticks: ", turns, " kernel turns", crlf);
+    print(serial, "  idle() with a line pending: ", idle_cycles, " cycles; a quiet turn whose idle() "
+          "finds one: ", turn_cycles, " (the loop's own ", turn_cycles - idle_cycles,
+          "); two counter reads in each", crlf);
+    bench.verdict("the kernel loop turns once per interrupt: 100 ticks, 100 turns (one more or "
+                  "one fewer at the window's ends)",
+                  turns + 1u >= window && turns <= window + 1u);
+    bench.verdict("the spare line ran once per pend", spare_hits == 32u);
+}
+
+// =============================================================================
 // i - five real resets (by name only)
 // =============================================================================
 void bank(uint8_t leg, uint8_t code = 0, uint8_t context = 0) {
@@ -742,12 +1133,28 @@ void banner() {
 
 // ---- target glue ------------------------------------------------------------
 extern "C" void isr_uart0() { (void)Serial::isr(); }
-extern "C" void isr_systick() { brio::Ticker::tick(); }
+extern "C" void isr_systick() {
+    tick_entry_val = SysTick->VAL;   // letter w: where the period stood on entry
+    brio::Ticker::tick();
+}
 extern "C" void isr_timer_0() {
     alarm_entry_us = brio::Timer::now_low();
     brio::Timer::clear(0);
     alarm_fires = alarm_fires + 1;
 }
+/// Letter w's rescue.
+extern "C" void isr_timer_1() {
+    brio::Timer::clear(rescue_alarm);
+    rescue_fires = rescue_fires + 1u;
+}
+/// Letter w's line: the counter first, which is the cycles since the wrap.
+extern "C" void isr_pwm_wrap() {
+    line_entry = EdgeSlice::ctr();
+    brio::Pwm::clear_pending(EdgeSlice::bit);
+    line_hits = line_hits + 1u;
+}
+/// Letter k's pending line (a software pend clears itself on entry).
+extern "C" void isr_spare_0() { spare_hits = spare_hits + 1u; }
 extern "C" void isr_hardfault() { brio::fault_reset<P>(0x77); }
 
 namespace {
@@ -791,6 +1198,8 @@ int main() {
     bench.letter('g', "the panic breadcrumb, no reset", tg_breadcrumb);
     bench.letter('h', "WFI idle over 200 ticks", th_idle);
     bench.letter('j', "the system timer and an alarm", tj_timer);
+    bench.letter('w', "the idle path against an interrupt's edge, placed to the cycle", tw_edge);
+    bench.letter('k', "the kernel's turn: how many per interrupt, what one costs", tk_turns);
     bench.letter('i', "FIVE REAL RESETS (reboots the board)", ti_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 

@@ -107,10 +107,14 @@ struct Rp2040Platform {
     /// site that arms it hands the idle path the function that does it
     /// (rp2040/sleep.hpp: the clocks onto the oscillator, the keyword,
     /// the tree restored after the wake) and takes it back when it
-    /// disarms. Called with interrupts masked, like the WFI it replaces,
-    /// and with the same closure of the lost-wakeup window: a wake that
-    /// is already pending ends the dormant state at once. Null = the
-    /// WFI, which is every other rung of the ladder.
+    /// disarms. Called with interrupts masked, like the WFI it replaces -
+    /// BUT ITS WAKE LIST IS THE DORMANT'S OWN: 2.11.3 ends the state on a
+    /// GPIO event or the RTC's interrupt and on nothing else, so a line
+    /// that was pending at the call, or turns pending on the way in, is
+    /// served after one of those and not at once. That is the deep rung's
+    /// bargain, the one the power model's round of votes exists to strike
+    /// (util/power.hpp). Null = the WFI, which is every other rung of the
+    /// ladder and keeps the wake of every line (docs/rp2040/platform.md).
     static inline void (*sleep_hook)() = nullptr;
 
     /// PRIMASK readback: the one bit CriticalSection saves and restores.

@@ -10,8 +10,9 @@ Appendix B. The drivers: `brio/rp2040/platform.hpp`, `nvic.hpp`,
 second stage `rp2040/src/glue/boot2_*.S`, the linker script
 `rp2040/ld/rp2040_2m.ld`. The reference suite: `test_rp2040_platform`
 (the boot state, the ticker against the system timer, `delay_us`, the
-reset controller, the SIO, the atomic aliases, the WFI idle, the
-breadcrumb, five real resets). The failing half of the platform - the
+reset controller, the SIO, the atomic aliases, the WFI idle, the idle
+path against an interrupt's edge placed to the cycle, the kernel's turn
+per interrupt, the breadcrumb, five real resets). The failing half of the platform - the
 causes, the watchdog, the timer - has its own documents:
 [reset.md](reset.md), [watchdog.md](watchdog.md), [timer.md](timer.md).
 
@@ -57,7 +58,11 @@ nothing short of the DORMANT state stops.
   else runs, and with both cores and the DMA asleep the clock enables
   switch to their SLEEP_EN set (all enabled at reset; the SLEEP state
   and the `sleep_hook` a dormant site installs in place of the WFI
-  are [sleep.md](sleep.md)'s); `now()`,
+  are [sleep.md](sleep.md)'s). The WFI path keeps the kernel's idle
+  contract - no wake lost wherever the interrupt lands, one return per
+  interrupt - measured below; the dormant hook's wake list is the
+  DORMANT state's own (a GPIO event, the RTC), so a line that is not
+  one of those waits for one; `now()`,
   `ticks_per_second` 1000, `atomic_width` 4, `panic_record()` in
   `.noinit`, `break_here()` = BKPT; `core_id()` = SIO's CPUID.
 - `Ticker` = `BasicTicker<1000>` on SysTick, `SysTickCounter` for a
@@ -132,9 +137,9 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
   SysTick ticker at 1000 Hz, WFI between events, the heartbeat time
   event toggling GP25 at 2 Hz (read back through SIO), the uptime
   advancing with the host's clock.
-- The reference suite is green on both boards, the Pico and the WeAct
-  (58 verdicts in the all-key, 18 in the reset letter). What it
-  measured, on the system timer as the ruler:
+- The reference suite is green on the WeAct (62 verdicts in the
+  all-key, 18 in the reset letter) and, letters `w` and `k` apart, on
+  the Pico. What it measured, on the system timer as the ruler:
   - the ticker: 200 SysTick periods at 1000 Hz span 199999 us of the
     crystal's microseconds - the PLL's ratio exact to 5 ppm;
   - `delay_us` is exact when warm, and THE FIRST CALL OF A COLD ROUTINE
@@ -145,7 +150,8 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
     PWM block among the ones the bootrom leaves in reset;
   - the WFI idle: 200 ticks of an empty loop keep the core awake 4 us
     (the WeAct) to 202 us (the Pico, with the console's traffic) of
-    199 ms;
+    199 ms - 200 `idle()` calls, one per tick (letter `h`, a bare
+    `idle()` loop, no kernel);
   - `.noinit` SRAM survives a core reset, a watchdog reset and a
     HardFault's reset - a fact the datasheet does not promise;
   - the breadcrumb: a `panic()` through `ResetReporter` and a
@@ -153,13 +159,55 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
     with their code and context; the causes word is a history
     ([reset.md](reset.md)).
 
+- THE IDLE CONTRACT HOLDS ON CORE 0, both halves of it, measured on
+  the WeAct at 125 MHz (letters `w` and `k`):
+  - NO WAKE IS LOST, wherever the interrupt lands. Letter `w` places an
+    edge D cycles after a placement, D walking 400 consecutive cycles,
+    then runs the kernel's own shape against it - a masked check,
+    `idle()`, until one edge was served, and in a second pass two (the
+    sleep entered right after a handler) - with alarm 1 of the system
+    timer as a rescue 50 ms out. Two edges: the TICK's own, SysTick
+    placed by a reload of D (a VAL write reloads on the next cycle,
+    ARMv6-M B3.3), and a PERIPHERAL LINE, PWM slice 0 counting clk_sys
+    to its wrap and placed by a counter write; each in the light rung
+    (SLEEPDEEP clear) and the standby rung (set, through
+    `Rp2040SleepSite`, every SLEEP_EN gate left open). 3200 tries: none
+    took the rescue, none ended a period late, the slowest one-edge try
+    4 us. The edge crosses the whole path: the earliest lands 141 to 143
+    cycles before the sleep takes it (a fixed lead of bus reads sits
+    between the placement and the loop, longer than the path from the
+    loop's masked check to the WFI, about 25 cycles in the listing), and
+    from D = 150 (the tick) and D = 142 (the line) on the edge finds the
+    core asleep.
+  - WHAT A WAKE COSTS, in clk_sys cycles: from an edge that finds the
+    core asleep to the handler's first statement 23 (SysTick) and 26
+    (the line), against the core's 15-cycle worst-case entry of a
+    zero-wait system (2.4.3.6.1); to the caller's loop, the handler
+    whole and the WFI's return, 94 and 93. The standby rung measures
+    the same: with the gates open, SLEEPDEEP changes nothing the core
+    does here - the SysTick edge, which 2.4.2.8.4's wake-up interrupt
+    controller does not take, ends a standby WFI as it ends a light one.
+  - ONE TURN PER INTERRUPT. A Tenuto pack of three quiet AOs, two of
+    them with a periodic time event, turned as `run()` turns it with the
+    tick the only interrupt: 100 turns over 100 ticks (letter `k`; a
+    turn more or fewer allowed at the window's ends). This core's WFI
+    has no event latch to leave behind - the WFE's event register is a
+    different instruction's - so nothing makes a turn find nothing.
+  - WHAT A TURN COSTS, on SysTick's counter: `idle()` with a line
+    already pending - the WFI falls through, the unmask takes the line's
+    handler - 63 cycles; a quiet turn entered masked whose `idle()`
+    finds one 196, so the loop's own share - the time events'
+    `process()`, the empty `step()`, the masked check - is 133 cycles.
+  - The first try of a sweep is discarded: the code runs from flash,
+    and the first pass is the XIP cache's fill (1786 cycles from the
+    edge to the loop against 91, measured); a lone try further on can
+    meet a refill the same way, which is why the asleep plateau is read
+    as three positions in a row.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- The power modes (the clock enables in sleep, DORMANT, the voltage
-  regulator's VSEL): `util/power.hpp`'s sites, born with the first
-  power-aware program.
 - The SIO's spinlocks, dividers and interpolators: a program's
   business (the FIFOs are the doorbell's, [multicore.md](multicore.md));
   nothing portable wants them today.
@@ -167,6 +215,25 @@ Driver gaps, each with its reason:
   measurement tool, born with the two-core contention question.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The idle contract on CORE 1. The type is the same template and the
+  WFI path the same instructions, but core 1 has its own SysTick, its
+  own NVIC and one wake of its own - the SIO FIFO's doorbell
+  (`SIO_IRQ_PROC1`), which is how an event sent to it arrives
+  ([multicore.md](multicore.md)). Letters `w` and `k` launched on core
+  1 with `Rp2040Platform<1>` and `CoreTicker<1>`, the rescue alarm
+  enabled in core 1's NVIC, the doorbell as a third edge placed by a
+  FIFO write from core 0, the counts handed back through SRAM.
+- The idle path through the DORMANT hook: a wake that is already
+  latched when the keyword is written (a GPIO dormant-wake event, the
+  RTC's alarm) is not shown to end the state at once. A pad the chip
+  drives itself, its dormant-wake event armed, PWM-placed edges walked
+  across `go_dormant()` with the RTC on the ring oscillator as the
+  rescue.
+- The standby rung with a pruned SLEEP_EN set: letter `w` walks it
+  with every gate open. The same letter with the program's own set,
+  the tick's and the rescue's clocks kept.
+- Letters `w` and `k` on the Pico: a `z` there.
 
 - `Resets::hold` on a running block and the block's state afterwards:
   a `test_rp2040_clock` letter cycling a UART and reading its

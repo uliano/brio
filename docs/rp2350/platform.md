@@ -38,7 +38,11 @@ on Hazard3 it is 3.8.1.23's, that `wfi` ignores mstatus.MIE and respects
 every other interrupt control. The two are the same promise in two
 spellings, which is why the kernel needs no target knowledge - and it is
 NOT the behaviour of the QingKe cores brio's other RISC-V strata run on,
-where the same sequence deadlocks.
+where the same sequence deadlocks. Neither sleep instruction has an
+event latch to leave behind (Hazard3's latch belongs to `h3.block`,
+3.8.6.3.1; the M33's event register to WFE), so a wake is one return of
+`idle()` and the kernel's loop turns once per interrupt - both halves of
+the contract measured below.
 
 **THE RULER IS THE PLATFORM TIMER, AND IT BELONGS TO EVERYBODY.** 3.1.8's
 64-bit counter is named for RISC-V and the datasheet is explicit that it
@@ -89,7 +93,8 @@ larger package and refuses at RUN time against SYSINFO's PACKAGE_SEL.
   `CriticalSection` (the RAII mask, PER CORE in both spellings, saved and
   restored rather than cleared), `idle()` (sleep then unmask, through
   `sleep_hook` when a low-power state that is not a sleep instruction has
-  armed one), `sleep_hook` (null until the power chapter), `break_here()`,
+  armed one), `sleep_hook` (null unless a dormant site has armed one,
+  [sleep.md](sleep.md)), `break_here()`,
   `now()`, `ticks_per_second`, `atomic_width` (4), `core_id()`,
   `on_own_core()` (what `EventQueue::push` checks before it copies),
   `Doorbell` (the bell a send to an AO of this core rings -
@@ -175,13 +180,18 @@ architectures from one source. Where the halves differ, both numbers:
 
 | What | Cortex-M33 | Hazard3 |
 |------|-----------|---------|
-| the suite | 60 pass, 0 fail | 60 pass, 0 fail |
+| the suite | 70 pass, 0 fail | 70 pass, 0 fail |
 | 200 kernel ticks on the ruler | 200000 us, 0 ppm | 200000 us, 0 ppm |
 | `idle()` calls covering 200 ticks | 200 | 200 |
 | awake in that span | 3 us of 199960 | 1 us of 199397 |
 | a wakeup raised INSIDE the mask | back in 3 us | back in 1 us |
 | a 5 ms masked window's ticks | 1 | 5 |
 | `Resets::release()` to RESET_DONE | 1 us | 0 us |
+| edge positions walked, lost / a period late | 3200, 0 / 0 | 3200, 0 / 0 |
+| the comparator's edge, the core asleep, to the handler / to the loop | 31 / 79 cycles | 31 / 90 (36 / 95 in standby) |
+| the PWM line's edge, the same | 31 / 76 cycles | 36 / 92 (41 / 97 in standby) |
+| kernel turns over 100 quiet ticks | 100 | 100 |
+| `idle()` with a line pending / a quiet turn that finds one | 57 / 167 cycles | 82 / 175 cycles |
 
 - The chip reports manufacturer 0x493, part 0x0004 and STEPPING 0x2 - A2,
   which is what makes RP2350-E9 live here - with PACKAGE_SEL saying
@@ -209,7 +219,56 @@ architectures from one source. Where the halves differ, both numbers:
   immediately after comes back in 3 us on one half and 1 us on the other,
   with the handler served once after the unmask - where a core that
   slept through it would have waited for the next tick, up to a
-  millisecond.
+  millisecond (letter `j`: a wake pending AT the call, on the
+  microsecond ruler; the edge at every instruction is letter `w`'s).
+- NO WAKE IS LOST WHEREVER THE INTERRUPT LANDS, on either half (letter
+  `w`). An edge is placed D cycles after a placement, D walking 400
+  consecutive cycles, and the kernel's own shape runs against it - a
+  masked check, `idle()`, until one edge was served, and in a second pass
+  two (the sleep entered right after a handler) - with TIMER0's alarm as
+  a rescue 50 ms out and TIMER1, switched to clk_sys (12.8.1.1's SOURCE),
+  timing each try in cycles on both halves. Two edges, placed the same
+  way on both: the PLATFORM TIMER'S COMPARATOR, the counter run on clk_sys
+  for the letter (MTIME_CTRL.FULLSPEED, 3.1.8) so that a counter write
+  places it - the kernel's own tick on Hazard3, the system line
+  SIO_IRQ_MTIMECMP on the Cortex-M33 -, and a PERIPHERAL LINE, PWM slice
+  0 counting clk_sys to its wrap, placed by a counter write, through the
+  NVIC on one half and Xh3irq on the other. Each in the light rung and in
+  standby through `Rp2350SleepSite`, which on Hazard3 releases the core's
+  power request (MSLEEP.POWERDOWN) and on the Cortex-M33 changes nothing
+  the core does. 3200 tries per half: none took the rescue, none ended a
+  period late. The edge crosses the whole path: the earliest lands 80 to
+  89 cycles before the sleep takes it (a fixed lead of bus reads sits
+  between the placement and the loop, longer than the path from the
+  loop's masked check to the sleep instruction, about 20 cycles in
+  either listing), and from D = 81 to 90 on the edge finds the core asleep.
+- WHAT A WAKE COSTS: from an edge that finds the core asleep to the
+  handler's first statement 31 cycles on the Cortex-M33 - its exception
+  entry, the vector fetched with the state saved - and 31 to 36 on
+  Hazard3, whose dispatch is the crt's own (the trap, the caller-saved
+  registers, `meinext` for a line); releasing the power request adds 5
+  cycles a wake there, the core waiting for its power-up acknowledge as
+  3.8.9 says. To the caller's loop, the handler whole and the return: 76
+  to 79 cycles on one half, 90 to 97 on the other. The datasheet gives
+  neither core's entry in cycles.
+- ONE TURN PER INTERRUPT, on both halves (letter `o`): a Tenuto pack of
+  three quiet AOs, two of them with a periodic time event, turned as
+  `run()` turns it with the tick the only interrupt - 100 turns over 100
+  ticks, a turn more or fewer allowed at the window's ends. On TIMER1's
+  cycles, `idle()` with a line already pending (the sleep falls through,
+  the unmask takes the line's handler) costs 57 cycles on the Cortex-M33
+  and 82 on Hazard3, and a quiet turn entered masked whose `idle()` finds
+  one 167 and 175: the loop's own share - the time events' `process()`,
+  the empty `step()`, the masked check - is 110 and 93 cycles. Letter `h`
+  (200 `idle()` calls over 200 ticks) proves the same of a bare `idle()`
+  loop, without the kernel.
+- WHAT THE FULL-SPEED COMPARATOR COSTS THE LETTER: the platform timer is
+  the ruler of both halves and the timebase of one, so the letter puts
+  it back on its microsecond tick at the value it would have reached
+  (TIMER0 counted the span) and the comparator a period out. Kernel time
+  on Hazard3 runs 150 times fast meanwhile - a tick every thousand
+  cycles - and the letters after it judge spans, never an absolute
+  count.
 - ERRATUM RP2350-E9, SHOWN: a free pad (GP22) driven low and released to
   its own pull-down reads 0; driven HIGH and released to the same
   pull-down it reads 1 and stays there; driven low and released to a
@@ -278,14 +337,29 @@ Implemented but not bench-verified, each with what would measure it:
 - CORE 1, on either architecture. The platform is per core and the
   tickers are per core by construction, and the suite proves that
   `on_own_core()` agrees with CPUID on core 0; nothing has launched a
-  second core here. The launch, the bell and the bridge are
+  second core here. The idle contract there would want letters `w` and
+  `o` launched on core 1 with `Rp2350Platform<1>` and `CoreTicker<1>`
+  (its own SysTick, its own comparator), the rescue enabled in core 1's
+  controller, and the SIO doorbell as a third edge placed from core 0. The launch, the bell and the bridge are
   [multicore.md](multicore.md)'s, whose own list names the letter that
   will measure each.
 - The QFN-60's run-time refusals: the stratum compiles for that package
   and the suite checks the die's own PACKAGE_SEL against the build's, but
   no QFN-60 part is on the bench.
-- `Ticker::advance`, `pause` and `resume`: born with the first sleep site
-  that stops the timebase, which is the power chapter's.
+- `Ticker::advance`: born with the first sleep site that stops the
+  timebase, which is the power chapter's; `pause` and `resume` run
+  around letter `w`'s passes and are judged by nothing there.
+- The Cortex-M33's SysTick edge across the idle path: letter `w` places
+  its edges by registers both halves have, and SysTick has no name on
+  the other one; the M33's tick wakes the same WFI by the same rule, and
+  the walk of it is the RP2040's letter `w` on a Cortex-M0+, not on this
+  core. A placement of SysTick's reload in a letter of the Arm half
+  alone would measure it.
+- The idle path through the DORMANT hook: its wake list is the dormant's
+  own (a GPIO event, the always-on timer's alarm), and a wake already
+  latched when the oscillator stops is not shown to end it at once. A
+  pad the chip drives itself, its dormant-wake event armed, edges walked
+  across the hook with the always-on timer as the rescue.
 - `Mtime` under a clk_ref that is not 12 MHz: the arithmetic refuses one
   that is not a whole number of megahertz, and only the 12 MHz crystal
   has been on the wire.
