@@ -136,7 +136,10 @@ enum class NvmReadMode : uint8_t {
 };
 
 /// CTRLB.SLEEPPRM: whether the NVM block powers down in sleep, and what
-/// wakes it. The reset value is WAKEUPACCESS; brio defaults to `disabled`
+/// wakes it. The reset value is WAKEUPACCESS, and an image that never
+/// calls `Nvm::init` keeps it: about 740 cycles (15 us at 48 MHz) on
+/// every wake from IDLE2, measured (docs/samc21/platform.md). `NvmConfig`
+/// defaults to `disabled` - for the image that calls `Nvm::init` -
 /// because an unexpected wake latency is worse than the microamps until
 /// both are measured.
 enum class NvmSleepPower : uint8_t {
