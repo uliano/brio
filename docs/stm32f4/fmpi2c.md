@@ -417,11 +417,16 @@ assume. Letter `f`, the mean rate on the pad:
 | HSI 16 MHz | Fm | 400000 Hz | 378947 Hz | 388 ns |
 
 Not one row runs above the speed asked. The APB1 delays STATED to
-`init()` give 99833, 392156 and 994475 Hz on the pad (1005586 for the
-last in a second run: 181 and 179 core cycles of mean gap, the poll's
-resolution) against the 99778, 391304 and 1000000 the arithmetic states
-- the period formula with the wire's own tSYNC, to the prescaler's
-resolution. A word solved against
+`init()` give 99778, 389610 and 1005586 Hz on the pad (1803 to 1805, 462
+and 179 core cycles of mean gap) against the 99778, 391304 and 1000000
+the arithmetic states - the period formula with the wire's own tSYNC, to
+the prescaler's resolution and to the instrument's. A turn of the loop
+that counts the edges is 26 to 29 core cycles at 180 MHz (the letter
+measures it: the cycles between the first and the last edge over the
+turns between them), each edge is dated to within one turn, so a mean of
+eight gaps is good to about four cycles - two per cent at Fm+, where the
+last row read 178 to 181 cycles from one image to the next at the same
+TIMINGR. The letter allows exactly that above the speed and no more. A word solved against
 the manual's budgets runs this wire FAST - 107.4 kHz, 497 kHz and 1.36
 MHz on APB1, past fast mode's 400 kHz ceiling - which is why the default
 is the floor.

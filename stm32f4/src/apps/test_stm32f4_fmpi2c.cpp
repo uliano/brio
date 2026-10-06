@@ -593,6 +593,11 @@ struct SclReading {
     uint32_t edges = 0;
     uint32_t shortest = 0;   ///< the shortest gap between two rising edges, in core cycles
     uint32_t average = 0;    ///< the mean gap over the whole tenure, in core cycles
+    /// One turn of the counting loop, in core cycles: the cycles from the
+    /// first rising edge to the last over the turns between them. Each
+    /// edge is dated to within one turn, so the mean of the gaps is good
+    /// to a turn over their number - the instrument's own resolution.
+    uint32_t poll = 0;
 };
 
 template <typename Pad = SclPad>
@@ -602,10 +607,15 @@ SclReading count_scl() {
     uint32_t last_val = SysTick->VAL;
     uint32_t shortest = 0xFFFFFFFFu;
     uint32_t total = 0;
+    uint32_t turns = 0;
+    uint32_t turns_at_last = 0;
     bool prev = Pad::read();
     for (uint32_t spins = 40'000'000u; spins != 0u && !xfer_done; --spins) {
         const uint32_t v = SysTick->VAL;
         const bool now = Pad::read();
+        if (r.edges != 0u) {
+            ++turns;
+        }
         if (now && !prev) {
             const uint32_t d = since(last_val, v, period);
             if (r.edges != 0u) {
@@ -616,11 +626,15 @@ SclReading count_scl() {
             }
             last_val = v;
             ++r.edges;
+            turns_at_last = turns;
         }
         prev = now;
     }
     r.shortest = shortest == 0xFFFFFFFFu ? 0u : shortest;
-    r.average = r.edges > 1u ? total / (r.edges - 1u) : 0u;
+    // Rounded to the nearest cycle, as the turn below.
+    const uint32_t gaps = r.edges > 1u ? r.edges - 1u : 1u;
+    r.average = r.edges > 1u ? (total + gaps / 2u) / gaps : 0u;
+    r.poll = turns_at_last == 0u ? 0u : (total + turns_at_last / 2u) / turns_at_last;
     return r;
 }
 
@@ -714,9 +728,10 @@ void tf_speeds() {
                 never_shorter = false;
             }
             // THE CEILING: the mean period is at least the one asked for,
-            // to the poll's resolution (a few core cycles in a mean of
-            // eight gaps).
-            if (measured_ns + 10u < asked_ns) {
+            // to the poll's resolution (a turn of the counting loop over
+            // the gaps, and the cycle the mean is rounded to).
+            const uint32_t gaps = r.edges > 1u ? r.edges - 1u : 1u;
+            if (measured_ns + gap_ns(r.poll / gaps + 1u) < asked_ns) {
                 never_faster = false;
             }
             if (rows[k].kernel == FmpI2cClock::pclk) {
@@ -762,17 +777,23 @@ void tf_speeds() {
         Host::fast_plus_drive(false);
         const uint32_t mean_hz = r.average == 0u ? 0u : SysClock::hz / r.average;
         const uint32_t want = fmpi2c_speed_hz(s);
+        // Within the prescaler's resolution below the speed, and above it
+        // no further than the poll resolves: a turn of the counting loop
+        // over the gaps, and the cycle the mean is rounded to.
+        const uint32_t gaps = r.edges > 1u ? r.edges - 1u : 1u;
+        const uint32_t slack = r.poll / gaps + 1u;
+        const uint32_t want_cycles = SysClock::hz / want;
         print(serial, "  APB1   ", speed_name(i), " told its wire (tSYNC ", sync_pclk[i],
               " ns): the arithmetic states ", Host::scl_hz(s), " Hz, the pad's mean ", mean_hz,
-              " Hz", crlf);
-        // Within the prescaler's resolution below the speed and a poll's
-        // noise above it.
-        if (mean_hz < want - want / 25u || mean_hz > want + want / 100u) {
+              " Hz = ", r.average, " core cycles against ", want_cycles, ", the poll's turn ",
+              r.poll, " over ", gaps, " gaps", crlf);
+        if (mean_hz < want - want / 25u || r.average + slack < want_cycles) {
             exact = false;
         }
     }
     bench.verdict("... and a wire whose measured tSYNC is stated runs at the speed asked, "
-                  "within four per cent under it and one over",
+                  "within four per cent under it and above it no further than the poll "
+                  "resolves",
                   exact);
 
     // ---- the other I2C of this family, on the same wire ----
