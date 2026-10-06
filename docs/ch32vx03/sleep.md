@@ -149,7 +149,9 @@ counter counts HCLK. Two things follow, and both are answered in the
 idle path rather than in the site: the timebase is PAUSED and its
 pending bit cleared immediately before the instruction - with the WFE
 idiom this core's idle uses, a tick that is merely pending would end the
-sleep before it began - and it is resumed immediately after. That costs
+sleep before it began - and it is resumed when the instruction returns,
+after the handler that ended the sleep, which the core runs first
+because the idle path sleeps with interrupts unmasked. That costs
 ONE TICK, knowingly: a tick already fired when the sleep begins is
 dropped instead of served. The timed site repairs it at no cost, its
 witness measuring the wall and subtracting only the ticks the counter
@@ -325,7 +327,10 @@ because the register answers nothing through a closed one.
   written together and read back off the silicon.
 - `stop_config`: LPDS and RAMLV, set or read - RAMLV from the kept copy.
 - `wait_for_interrupt`, `wait_for_event`, `enter`: the instruction, in
-  its two forms, and the deliberate one-shot that arms and stops.
+  its two forms, and the deliberate one-shot that arms and stops. The
+  bare WFI sleeps past every pending interrupt while mstatus.MIE is
+  clear (measured, [platform.md](platform.md)), so it is a verb for a
+  caller that sleeps unmasked.
 - `wakeup_flag` / `standby_flag` / `clear_wakeup_flag` /
   `clear_standby_flag` / `clear_flags`: the two flags and their
   write-one clears.
@@ -722,8 +727,3 @@ Implemented but not bench-verified, each with what would measure it:
   suite, because what a lowered core voltage does to the maximum clock
   rate is nowhere in the documents: what would measure it is a meter
   for the saving and a rate sweep for the price.
-- **`Pwr::wait_for_interrupt()`, the bare WFI.** Nothing in this
-  stratum uses it - the platform's idle path takes the WFE form, for
-  the reason [platform.md](platform.md) gives - so whether this core's
-  WFI wakes with the global mask clear is still that chapter's open
-  question, and the verb is there for the program that means to ask it.

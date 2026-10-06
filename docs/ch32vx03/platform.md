@@ -28,13 +28,22 @@ this document keeps in its place.
   another line may preempt it, and with INTSYSCR.INESTEN off - which is
   what the crt leaves - it holds the next line until MRET.
 - **A WFI sleep ends on an interrupt the controller RESPONDS to**
-  (6.2) - a wording that does not say whether the global mask must be
-  set for the wake, which is the question the smaller QingKe core
-  answers with a deadlock. The core can sleep as a WFE instead:
-  PFIC_SCTLR.WFITOWFE turns the next `wfi` into a wait-for-event and
+  (6.2), and with mstatus.MIE clear it responds to none: a `wfi`
+  executed masked on the CH32V203C8T6 slept past the STK and TIM2, both
+  pending and enabled, for as long as it was left - twenty seconds, and
+  five in a second run - until a debugger's halt woke it (measured; 6.2
+  lists a debug request among the wakes). The core can sleep as a WFE
+  instead: PFIC_SCTLR.WFITOWFE turns `wfi` into a wait-for-event and
   SEVONPEND makes every interrupt entering the pending state an event,
-  LATCHED, so a WFE after the event returns at once. That form is
-  correct under either reading, and it is what the platform uses.
+  LATCHED, so a WFE after the event returns at once. 6.2 gives a WFE
+  three wakes that matter here - an event; an ENABLED interrupt "when
+  an interrupt is generated", whose handler then runs first; and,
+  through SEVONPEND, "a new interrupt pending signal (the previously
+  generated pending signal does not take effect)" - and only the last,
+  an EDGE, reaches a core sleeping with MIE clear. The platform
+  therefore sleeps with MIE set. WFITOWFE and SEVONPEND stay set after
+  a `wfi` (measured: a WFE with no store before it still waits for an
+  event), so "the subsequent WFI" is not a one-shot on this core.
 - **A core in debug mode cannot enter any sleep mode at all** (6.1), so
   a sleep measured with a probe halted on the core is not a
   measurement.
@@ -112,9 +121,11 @@ this document keeps in its place.
 concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
 destructor restores only what it found set), `idle()` is the
-WFITOWFE/SEVONPEND sequence above followed by the unmask - guarded by
-the count of active bus masters and, with a deep mode armed, by a pause
-of the timebase ([sleep.md](sleep.md)) - `break_here()` is `ebreak`,
+WFITOWFE/SEVONPEND store (SLEEPONEXIT cleared in it, so the waking
+handler returns to the caller's loop), the unmask, then the `wfi` as a
+WFE - guarded by the count of active bus masters and, with a deep mode
+armed, out of line with a pause of the timebase ([sleep.md](sleep.md))
+- `break_here()` is `ebreak`,
 `atomic_width` 4, `now()` the timebase's tick count, and the breadcrumb
 a `PanicRecord` in `.noinit`. The interrupt verbs and the per-line
 enables are [brio/ch32vx03/pfic.hpp](../../brio/ch32vx03/pfic.hpp):
@@ -195,18 +206,62 @@ performs the reset.
 ## Bench findings
 
 The reference suite is `test_vx03_platform`, at 144 MHz from the HSI:
-on the CH32V203C8T6 letters `a` to `g` (forty verdicts), on the
-CH32V303VCT6 sixty-two in `z` - the same forty, the floating-point
+on the CH32V203C8T6 fifty-five verdicts in `z` - letters `a` to `g`
+(forty), the bus in sleep, the mask's shadow, the idle hook against the
+tick's edge and the runtime's functions - on the CH32V303VCT6 sixty-two
+in `z` before letter `w` joined it - the same forty, the floating-point
 unit's three letters, the bus in sleep and the mask's shadow - and on
-both nine more in letter `i`, which reboots the board three times. What
-it measured:
+both nine more in letter `i`, which reboots the board three times. On
+the 32 KB parts the suite is two images (`-1` with `a` to `g`, `i`, `t`
+and `w`, `-2` with `m` and `n`), both run on the CH32V203C8T6: 48 and 7
+verdicts. What it measured:
 
 - **The idle hook wakes.** With the console silent, two `idle()` calls
   covered the 626 us to the next tick (on the CH32V303VCT6 two as well,
   over 484 and 968 us in two runs) and returned with interrupts enabled;
   a 5 ms window with interrupts masked advanced the tick by one on both
   (the STK interrupt is a pending bit: one tick delivered, the rest
-  coalesced).
+  coalesced). Two calls and not one because the edge that woke the
+  last sleep also left the event latch set, so the next `idle()`
+  returns at once: the kernel loop turns twice per interrupt - before
+  the unmasked order and after it alike.
+- **No edge position loses the wake** (letter `w`, the CH32V203C8T6).
+  The STK's counter is written so its compare comes D cycles after a
+  masked check, D swept from 0 to 599 one cycle at a time, then the
+  kernel's loop - check, `idle()` - until one tick is served (and, a
+  second pass, two), with the event latch cleared and set by hand
+  before each try; TIM2 at 1 MHz clocks each try and rescues a lost one
+  at 50 ms. The handler's entry time steps one cycle per D, so the edge
+  is placed to the cycle across the whole sequence, the sleep entry
+  included. With the OLD order - the store, the `wfi` with MIE clear,
+  the unmask after - no position of 600 lost the wake in either latch
+  state, waiting for one tick or two; nor in twenty-four code layouts of
+  a probe that shifted the old body and the platform's by two and four
+  bytes at a time: the one cycle at which the CH32V00x's QingKe V2
+  loses an edge to its sleep entry
+  ([../ch32v00x/platform.md](../ch32v00x/platform.md)) is not on this
+  die. WCH's `__WFE()` - SETEVENT, then two WFEs - under
+  the same masked check loses fourteen positions in every layout (its
+  first `wfi` consumes the latch, an edge's included): the instrument
+  catches a lost wake where there is one. With the UNMASKED order the
+  platform takes - the store, the unmask, the `wfi` - none lost in the
+  suite's image, built with and without the hardware prologue, in the
+  32 KB tier's image, in twelve layouts of the probe, and with eight
+  `nop`s between the unmask and the `wfi`. What the order changed is the
+  cost, HCLK cycles with the hardware prologue:
+
+  | the idle order | edge to the handler | edge to the caller's loop | an `idle()` the latch returns at once |
+  |---|---|---|---|
+  | masked `wfi`, unmask after | 28 | 65 | 33 |
+  | unmask, then `wfi` | **22** | **61** | **28** |
+
+  (25 and 69 without the hardware prologue; the last column carries two
+  counter reads.) The handler now runs straight out of the sleep, by
+  6.2's second WFE item, instead of after an unmask. In the console's
+  kernel loop the Sleep path is thirteen instructions executed where it
+  was fifteen - one SCTLR load where there were two, the deep path out
+  of line - and a 180 s soak of 2986 commands at random intervals,
+  asynchronous to the tick, went without one unanswered.
 - **The STK arithmetic holds.** CMPLR = 143999 as programmed, CMPHR and
   CNTH both zero - the reload puts the low half back at the compare, so
   the high half of this 64-bit counter never moves. Over 200 reloads,
@@ -308,16 +363,17 @@ it measured:
   function the compiler cannot see into 101 (entry 15, body 43, with all
   twenty saved): some forty-five cycles for the twenty stores and twenty
   loads at 144 MHz, the price of calling out of a handler on this core.
-- **The bus in sleep** (letter `m`, CH32V303VCT6): a memory-to-memory
-  DMA1 block of 65535 words between two fixed addresses moves 48010
-  words in 2 ms with the core spinning - five cycles a word - and 37
+- **The bus in sleep** (letter `m`): a memory-to-memory DMA1 block of
+  65535 words between two fixed addresses moves 48010 words in 2 ms
+  with the core spinning - five cycles a word - on both parts, and
   across 1.9 ms of the platform's idle() with the bus-master count set
-  aside, six of them already moved when the core went to sleep and one
-  tick served by the one-shot wake: IN SLEEP THE DMA STALLS on the
-  CH32V303 as on the CH32V203, the bus matrix serving the core alone.
-  With the count standing, idle() over the working channel returned in
-  16 cycles.
-- **The mask's shadow** (letter `n`, CH32V303VCT6): whether an
+  aside 37 on the CH32V303VCT6 (six of them already moved when the core
+  went to sleep) and 26 to 28 on the CH32V203C8T6 (four), one tick
+  served by the one-shot wake: IN SLEEP THE DMA STALLS, the bus matrix
+  serving the core alone. With the count standing, idle() over the
+  working channel returned in 16 cycles on the CH32V303VCT6 and 13 on
+  the CH32V203C8T6.
+- **The mask's shadow** (letter `n`, both parts): whether an
   interrupt already on its way is taken AFTER the instruction that
   masks it - the question behind the manual's V2.5 note asking for a
   `fence.i` after a mask. A line (EXTI2's vector, pended by a store into
@@ -328,20 +384,29 @@ it measured:
   instruction, inside the masked region, or after the unmask. A pend
   takes three instructions to arrive: from three `nop`s of lead on,
   every trial was taken before the mask. The other 750 trials of each
-  variant are the race, and they split cleanly by the kind of mask:
+  variant are the race, and they split cleanly by the kind of mask -
+  and, for the global one, by the core:
 
-  | the mask | taken inside the masked region | the rest |
-  |---|---|---|
-  | `csrrci` on mstatus.MIE, the platform guard's own | **0** of 5000 | held until the `csrsi`, taken on the instruction after it |
-  | `csrrci` then `fence.i` | **0** of 5000 | the same |
-  | a store into PFIC_IRER, the line's own disable | **750** of 5000 (150 per thousand: every trial of the race) | - |
-  | a store into PFIC_IRER then `fence.i` | **750** of 5000 | - |
+  | the mask | taken inside the masked region, CH32V303VCT6 | CH32V203C8T6 | the rest |
+  |---|---|---|---|
+  | `csrrci` on mstatus.MIE, the platform guard's own | **0** of 5000 | **250** of 5000 | held until the `csrsi`, taken on the instruction after it |
+  | `csrrci` then `fence.i` | **0** of 5000 | **250** of 5000 | the same |
+  | a store into PFIC_IRER, the line's own disable | **750** of 5000 (150 per thousand: every trial of the race) | **750** of 5000 | - |
+  | a store into PFIC_IRER then `fence.i` | **750** of 5000 | **750** of 5000 | - |
 
   The same numbers, trial for trial, from an image built with the
-  hardware prologue and one built without it. So on this core the
-  global mask has NO shadow - an interrupt pended but not yet taken
-  when the `csrrci` retires is never taken after it, with or without
-  a `fence.i` - while a line's own disable has one of up to three
+  hardware prologue and one built without it, on each part. So on the
+  V4F the global mask has NO shadow - an interrupt pended but not yet
+  taken when the `csrrci` retires is never taken after it, with or
+  without a `fence.i`. The V4B's 250 are one lead alone, two `nop`s,
+  every trial of it: the interrupt is taken with mepc FOUR bytes past
+  the `csrrci` - the instruction after it, before any masked
+  instruction has run - and with MPIE clear, so the mask had already
+  taken effect when the trap came and the `mret` returns into the
+  region masked. No instruction of a critical section runs before such
+  a handler, so the section is whole on both cores; what differs is
+  only where mepc says the interrupt was taken. A line's own disable
+  has, on both, a shadow of up to three
   instructions (mepc 2 to 6 bytes past the store, a compressed `sw`
   and two compressed `nop`s, or the `sw` and the four-byte `fence.i`),
   and the `fence.i` does not close it. The note names PFIC_IENRx, the
@@ -359,8 +424,14 @@ Driver gaps, each with its reason:
 - The second route to the same reset, PFIC_SCTLR bit 31 with no key,
   and that register's SLEEPONEXIT: one way in is enough for a reboot,
   and SLEEPONEXIT has no user - a brio program sleeps in the kernel
-  loop's idle path and not on a handler's exit, and the rest of that
-  register's sleep bits are the power chapter's ([sleep.md](sleep.md)).
+  loop's idle path and not on a handler's exit, and that path clears
+  it - while the rest of that register's sleep bits are the power
+  chapter's ([sleep.md](sleep.md)).
+- The second kernel turn per interrupt: the edge that ends a sleep
+  leaves the event latch set, so the `idle()` after it returns at once.
+  Consuming the latch after the wake would cost a store and a `wfi` on
+  every wake against one wasted turn of the loop, and no measurement of
+  a kernel turn's cost on this part has priced that trade.
 - mepc and mtval are readable but do not cross a reset: the breadcrumb
   has one byte for the detail, and it carries the cause.
 
@@ -380,22 +451,14 @@ Implemented but not bench-verified, each with what would measure it:
   ([vendor/README.md](vendor/README.md)); the option bytes that would
   arm one are decoded and never written, by the flash chapter's own
   decision ([nvm.md](nvm.md)).
-- **The idle hook's POWER.** `idle()` is proven to sleep and wake, not
-  to sleep cheaply: whether the latched event is consumed by the `wfi`
-  or leaves the loop spinning is a current measurement with the probe
-  detached, since a core in debug mode never sleeps at all.
-- **Whether a bare `wfi` wakes with MIE clear on this core.** The
-  platform never does it - the WFE form is correct under both readings
-  of the specification - so the question stands open; a letter that
-  sleeps with the global mask clear over a pending tick, with an
-  independent watchdog armed as the way back, would answer it.
-- **Letter `m` on the CH32V203C8.** The finding it measures is that
-  part's own (the README's bare `wfi` against a DMA block), and the
-  letter asks it again through the platform's idle(); what would run it
-  there is that board.
-- **Letter `n` on the CH32V203C8**, the V4B's answer to the mask's
-  shadow: the letter builds for that part both ways the hardware
-  prologue can be built, and that board would run it.
+- **The idle hook's POWER.** `idle()` is proven to sleep and wake and
+  to turn the loop twice per interrupt, not to sleep cheaply: what a
+  sleep saves is a current measurement with the probe detached, since a
+  core in debug mode never sleeps at all.
+- **The unmasked idle order on the CH32V303's V4F.** The order is the
+  stratum's, so it reaches that part too, where letter `w` has not run:
+  that letter on the CH32V303VCT6, with `z` recounted there, would
+  measure it.
 - **What closes a line's own disable.** Letter `n` shows that a store
   into PFIC_IRER lets an interrupt already on its way through up to
   three instructions later and that a `fence.i` does not stop it; a

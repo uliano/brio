@@ -417,21 +417,22 @@ struct Pwr {
      * The plain wait-for-interrupt. On this core it sleeps until an
      * interrupt the core can TAKE arrives, which is why the platform's
      * idle path does not use it: with interrupts masked - the state the
-     * kernel's idle hook is entered in - a bare wfi here would sleep
-     * past every pending interrupt for ever on the sister family, and
-     * whether this core keeps the specification's promise instead has
-     * not been measured.
+     * kernel's idle hook is entered in - a bare wfi sleeps past every
+     * pending interrupt for ever (measured on the CH32V203C8,
+     * docs/ch32vx03/platform.md).
      */
     static void wait_for_interrupt() { __asm__ volatile("wfi" ::: "memory"); }
 
     /**
-     * The wait-for-EVENT form, which is the one that is correct under
-     * both readings: PFIC_SCTLR.WFITOWFE makes the next wfi wait for an
-     * event, SEVONPEND makes any interrupt turning pending one, and the
-     * event is LATCHED - so an interrupt that became pending between
-     * the decision to sleep and this instruction ends the wait at once
-     * instead of being slept past (2.3.1's third WFE shape, and the
-     * platform's own idle()).
+     * The wait-for-EVENT form: PFIC_SCTLR.WFITOWFE makes the next wfi
+     * wait for an event, SEVONPEND makes any interrupt turning pending
+     * one, and the event is LATCHED - so an interrupt that became
+     * pending between the decision to sleep and this instruction ends
+     * the wait at once instead of being slept past (2.3.1's third WFE
+     * shape). It sleeps in the mask state the caller left: with MIE
+     * clear an interrupt wakes it only as a NEW pending edge (QingKe V4
+     * manual 6.2), which is why the platform's idle() unmasks before
+     * its own wfi (ch32vx03/platform.hpp).
      */
     static void wait_for_event() {
         pfic_sctlr() = (pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
