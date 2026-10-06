@@ -57,10 +57,14 @@
  *      * tSCL IS NOT tSCLL + tSCLH. 32.4.9's own formula adds tSYNC1 +
  *        tSYNC2 - the SCL edge slopes, the filters and two to three
  *        kernel periods of synchronization - and the manual's example
- *        tables charge 250..1000 ns of it. A prediction that ignores it
- *        over-estimates the bus rate by up to 40 %. It is a BUS fact,
- *        not a chip one, so it is an ARGUMENT (I2cBusTiming::sync_ns),
- *        like the rise and fall times beside it.
+ *        tables charge 250..1000 ns of it. Its slopes are a BUS fact,
+ *        not a chip one, so the measured value is an ARGUMENT
+ *        (I2cBusTiming::sync_ns) beside the rise and fall times; left
+ *        unmeasured, the chooser charges the chip's own FLOOR under it
+ *        (the filters and two kernel periods an edge, no slope), so a
+ *        requested rate is a CEILING no wire exceeds - where the
+ *        manual's budgets and ST's own timing utility, charging more
+ *        than a short wire takes, run such a wire FASTER than asked.
  *      * SDADEL HAS NO +1 AND THE OTHER THREE DO: tSDADEL = SDADEL x
  *        tPRESC while tSCLDEL, tSCLL and tSCLH are all (field + 1) x
  *        tPRESC (32.9.5). One helper for all four would be wrong for
@@ -335,12 +339,22 @@ inline constexpr uint16_t i2c_analog_filter_max_ns = 260;
  *
  * `sync_ns` is the one number with no standard behind it. 32.4.9 makes
  * tSCL = tSYNC1 + tSYNC2 + [(SCLH+1) + (SCLL+1)] x (PRESC+1) x tI2CCLK,
- * and the two tSYNC terms are the SCL slopes plus the filter delays plus
- * two to three kernel periods each; its floor is 4 x tI2CCLK, and the
- * example tables 172..174 assume 1000 ns for Sm, 750 for Fm and
- * 250..655 for Fm+. THOSE ARE THE DEFAULTS HERE, so that this file's
- * arithmetic reproduces the manual's own tables, and a caller who has
- * measured its bus overrides them.
+ * and each tSYNC term is an SCL slope, the analog filter's delay (tAF,
+ * DS13560 table 75: 50..260 ns), the digital filter's DNF x tI2CCLK and
+ * two to three kernel periods of synchronization. Every one of those
+ * has a floor and only the slopes have no ceiling a driver can know -
+ * the example tables 172..174 charge 1000 / 750 / 250..655 ns, ST's own
+ * timing utility (I2C_GetTiming, shipped with the STM32Cube examples)
+ * charges the filter, two kernel periods and a "typical" rise and fall
+ * of 640 + 20 / 250 + 100 / 60 + 100 ns, and both run a wire with
+ * faster edges FASTER than asked (the bench measured 483 kHz for 400 on
+ * a 2.2 kOhm self-link). So the default here is ZERO, which means "not
+ * measured": the chooser then charges the FLOOR alone (i2c_sync_floor_
+ * cycles(), no slope at all), the fastest any wire can make, and the
+ * asked rate is a CEILING - a real wire only adds its slopes and runs
+ * slower. A caller who has measured its bus states its tSYNC1 + tSYNC2
+ * here and gets the asked rate itself; a value under the floor is
+ * physically impossible and the floor is charged instead.
  */
 struct I2cBusTiming {
     uint16_t rise_ns;
@@ -349,13 +363,13 @@ struct I2cBusTiming {
     uint16_t sync_ns;
 };
 
-/// Table 171 and table 169's columns, plus tables 172..174's own tSYNC
-/// assumption for the mode.
+/// Table 171 and table 169's columns, and no measured tSYNC: the rate a
+/// chooser solves against these is a ceiling on any wire.
 constexpr I2cBusTiming i2c_bus_timing(I2cSpeed s) {
     switch (s) {
-        case I2cSpeed::standard_100k: return {1000, 300, 250, 1000};
-        case I2cSpeed::fast_400k: return {300, 300, 100, 750};
-        default: return {120, 120, 50, 500};
+        case I2cSpeed::standard_100k: return {1000, 300, 250, 0};
+        case I2cSpeed::fast_400k: return {300, 300, 100, 0};
+        default: return {120, 120, 50, 0};
     }
 }
 
@@ -570,11 +584,11 @@ constexpr uint32_t i2c_min_stretch_cycles(const I2cTiming& t) {
  * WHAT A REGISTER VALUE REALLY PRODUCES - 32.4.9's own formula:
  *     tSCL = tSYNC1 + tSYNC2 + [(SCLH + 1) + (SCLL + 1)] x tPRESC
  *
- * `sync_ns` is the caller's tSYNC1 + tSYNC2 budget (see I2cBusTiming).
- * With each example table's own footnoted budget this reproduces every
- * cell of tables 172, 173 and 174 exactly - the static_asserts at the
- * bottom of this file are that check, and they also catch the one cell
- * where the manual's printed tSCL does not follow from its own rows.
+ * `sync_ns` is a tSYNC1 + tSYNC2 budget in nanoseconds, charged as
+ * given. With each example table's own footnoted budget this reproduces
+ * every cell of tables 172, 173 and 174 exactly - the static_asserts at
+ * the bottom of this file are that check, and they also catch the one
+ * cell where the manual's printed tSCL does not follow from its own rows.
  */
 constexpr uint32_t i2c_scl_period_cycles(uint32_t kernel_hz, const I2cTiming& t,
                                          uint32_t sync_ns) {
@@ -587,9 +601,40 @@ constexpr uint32_t i2c_scl_hz(uint32_t kernel_hz, const I2cTiming& t, uint32_t s
     return cycles == 0u ? 0u : kernel_hz / cycles;
 }
 
-/// The same with the mode's own default budget - the everyday form.
-constexpr uint32_t i2c_scl_hz(uint32_t kernel_hz, const I2cTiming& t, I2cSpeed s) {
-    return i2c_scl_hz(kernel_hz, t, i2c_bus_timing(s).sync_ns);
+/**
+ * THE FLOOR UNDER tSYNC1 + tSYNC2, in kernel cycles: 32.4.9's list for
+ * each of the two edges with the slope taken as zero - the analog
+ * filter's tAF(min) while it is on, DNF x tI2CCLK, and two kernel
+ * periods of synchronization - which is the manual's own "minimum value
+ * is 4 x tI2CCLK" (tables 172..174's footnotes) with the filters added.
+ * No wire detects its edges sooner, so a period solved against this
+ * floor is the SHORTEST the register value can make. tAF(min) is rounded
+ * DOWN, which only lowers the floor and keeps the claim true.
+ */
+constexpr uint32_t i2c_sync_floor_cycles(uint32_t kernel_hz, const I2cFilters& f) {
+    const uint32_t af =
+        f.analog ? i2c_ns_cycles_down(kernel_hz, i2c_analog_filter_min_ns) : 0u;
+    return 2u * (2u + static_cast<uint32_t>(f.digital) + af);
+}
+
+/// The tSYNC1 + tSYNC2 the arithmetic charges on this bus: the measured
+/// budget the caller stated, never less than the floor - and the floor
+/// alone when nothing was measured (sync_ns == 0, the default).
+constexpr uint32_t i2c_sync_cycles(uint32_t kernel_hz, const I2cFilters& f,
+                                   const I2cBusTiming& bus) {
+    const uint32_t floor = i2c_sync_floor_cycles(kernel_hz, f);
+    const uint32_t stated = i2c_ns_cycles_near(kernel_hz, bus.sync_ns);
+    return stated > floor ? stated : floor;
+}
+
+/// What a register value produces on this bus: the exact rate on a bus
+/// whose tSYNC was stated, and on an unmeasured one (the default) the
+/// fastest rate any wire can make - the CEILING the chooser guarantees.
+constexpr uint32_t i2c_scl_hz(uint32_t kernel_hz, const I2cTiming& t, const I2cFilters& f,
+                              const I2cBusTiming& bus) {
+    const uint32_t cycles =
+        i2c_scll_cycles(t) + i2c_sclh_cycles(t) + i2c_sync_cycles(kernel_hz, f, bus);
+    return cycles == 0u ? 0u : kernel_hz / cycles;
 }
 
 /**
@@ -620,11 +665,17 @@ constexpr uint8_t i2c_high_share(I2cSpeed s) {
 ///
 /// The method is the chapter's own, in four steps:
 ///
-///  1. The PERIOD in kernel cycles is kernel_hz / f_SCL, less the tSYNC
-///     budget; what remains is split between tSCLL and tSCLH in the
-///     mode's own ratio (above). Both halves are then rounded UP into
-///     prescaler units, so the produced period is never SHORTER than
-///     asked: a requested SCL is a CEILING.
+///  1. The PERIOD in kernel cycles is kernel_hz / f_SCL rounded UP, less
+///     the tSYNC the bus is charged (i2c_sync_cycles(): the floor unless
+///     the caller measured more); what remains is split between tSCLL
+///     and tSCLH in the mode's own ratio (above), each half raised if
+///     need be until table 171's tLOW(min) and tHIGH(min) hold on the
+///     wire with the floor's detection delay - half the floor per edge,
+///     ST's own tLOW = tAF(min) + tDNF + 2 x tI2CCLK + tSCLL. Both halves
+///     are then rounded UP into prescaler units, so the produced period
+///     is never SHORTER than asked: on an unmeasured bus the requested
+///     SCL is a CEILING on any wire, because the wire's slopes only add
+///     to the floor; on a measured one it is the rate itself.
 ///  2. SCLDEL comes from 32.4.5's setup condition, which is a LOWER
 ///     bound: (SCLDEL + 1) x tPRESC >= tr(max) + tSU;DAT(min).
 ///  3. SDADEL comes from its hold condition, also a lower bound:
@@ -664,18 +715,30 @@ constexpr std::optional<I2cTiming> i2c_timing_for(uint32_t kernel_hz, I2cSpeed s
     if (!i2c_clock_requirements_met(kernel_hz, s, filters)) {
         return {};
     }
-    const uint32_t total = kernel_hz / i2c_speed_hz(s);
-    const uint32_t sync = i2c_ns_cycles_near(kernel_hz, bus.sync_ns);
+    const uint32_t speed = i2c_speed_hz(s);
+    const uint32_t total = (kernel_hz + speed - 1u) / speed;
+    const uint32_t sync = i2c_sync_cycles(kernel_hz, filters, bus);
     if (total < sync + 2u) {
         return {};
     }
     const uint32_t budget = total - sync;
     const uint32_t den = static_cast<uint32_t>(i2c_low_share(s)) + i2c_high_share(s);
-    const uint32_t low = (budget * i2c_low_share(s) + den - 1u) / den;
+    uint32_t low = (budget * i2c_low_share(s) + den - 1u) / den;
     if (low >= budget) {
         return {};
     }
-    const uint32_t high = budget - low;
+    uint32_t high = budget - low;
+    // Table 171's minima on the WIRE, whose low (high) time is tSCLL
+    // (tSCLH) plus one edge's detection delay - at least half the floor.
+    const uint32_t edge = i2c_sync_floor_cycles(kernel_hz, filters) / 2u;
+    const uint32_t low_need = i2c_ns_cycles_up(kernel_hz, i2c_low_min_ns(s));
+    const uint32_t high_need = i2c_ns_cycles_up(kernel_hz, i2c_high_min_ns(s));
+    if (low + edge < low_need) {
+        low = low_need - edge;
+    }
+    if (high + edge < high_need) {
+        high = high_need - edge;
+    }
 
     // The two delay bounds, in KERNEL cycles (the prescaler divides them
     // below). Both are 32.4.5's, with tHD;DAT(min) = 0 on every non-SMBus
@@ -712,8 +775,9 @@ constexpr std::optional<I2cTiming> i2c_timing_for(uint32_t kernel_hz, I2cSpeed s
     return {};
 }
 
-/// The same with the mode's own standard limits and tSYNC budget - what
-/// every caller that has not measured its bus wants.
+/// The same with the mode's own standard limits and no measured tSYNC -
+/// what every caller that has not measured its bus wants: the asked rate
+/// is a ceiling.
 constexpr std::optional<I2cTiming> i2c_timing_for(uint32_t kernel_hz, I2cSpeed s,
                                                   const I2cFilters& filters = {}) {
     return i2c_timing_for(kernel_hz, s, filters, i2c_bus_timing(s));
@@ -1861,12 +1925,11 @@ public:
     /// ES0548 2.10.1 would otherwise refuse - at a 2 MHz core NO speed of
     /// the vocabulary is legal on PCLK, and all three are on HSI16.
     ///
-    /// `bus` is the BUS'S own edges and the SCL detection budget: a rise
-    /// time the bus does not have lands tSCLL below the specification
-    /// floor by the difference. Nullopt (the default) means "the
-    /// standard's own numbers and the manual's own tSYNC budget for each
-    /// mode", which
-    /// reproduces tables 172..174.
+    /// `bus` is the BUS'S own edges and its measured SCL detection delay
+    /// (I2cBusTiming). Nullopt (the default) means the standard's own
+    /// edge limits for each mode and no measured tSYNC, so each speed
+    /// asked is a ceiling the wire stays at or under; a bus that states
+    /// its measured tSYNC runs at the asked rate itself.
     ///
     /// The three speeds' TIMINGR values are resolved here (and at
     /// rebase()); one this kernel clock cannot produce is marked
@@ -1972,10 +2035,12 @@ public:
     /// core on PCLK they drop all of it.)
     static bool speed_ok(I2cSpeed s) { return valid_[static_cast<uint8_t>(s)]; }
     /// What a speed really runs at on this bus - the produced rate, not
-    /// the asked one.
+    /// the asked one: exact on a bus whose tSYNC init() was told, and on
+    /// an unmeasured one the fastest any wire makes (a real wire runs at
+    /// or below it).
     static uint32_t scl_hz(I2cSpeed s) {
-        return bus_ ? i2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], bus_->sync_ns)
-                    : i2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], s);
+        return i2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], filters_,
+                          bus_ ? *bus_ : i2c_bus_timing(s));
     }
     static I2cTiming timing_of(I2cSpeed s) { return table_[static_cast<uint8_t>(s)]; }
     static uint32_t kernel_hz() { return ker_hz_; }
@@ -2761,30 +2826,61 @@ static_assert(i2c_scldel_ns(16'000'000UL, I2cTiming{0x3, 0x13, 0xF, 2, 4}) == 12
 static_assert(i2c_sdadel_ns(16'000'000UL, I2cTiming{0x3, 0x13, 0xF, 2, 4}) == 500);
 
 // THE CHOOSER at the three rates the bench's own ladder uses, with the
-// standard's numbers. Every one lands inside the mode's band and never
-// above it.
+// standard's numbers and no measured tSYNC: priced at the floor - the
+// fastest wire there can be - every one lands at the speed asked and never
+// above it, so the speed is a CEILING.
+static_assert(i2c_sync_floor_cycles(64'000'000UL, I2cFilters{}) == 10);   // 2 x (2 + 3)
+static_assert(i2c_sync_floor_cycles(64'000'000UL, I2cFilters{false, 0}) == 4);
 static_assert(i2c_timing_for(64'000'000UL, I2cSpeed::standard_100k).has_value());
-static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL,
-                                                       I2cSpeed::standard_100k),
-                         I2cSpeed::standard_100k) <= 100'000);
-static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL,
-                                                       I2cSpeed::standard_100k),
-                         I2cSpeed::standard_100k) >= 95'000);
+static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::standard_100k),
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::standard_100k)) == 100'000);
 static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k),
-                         I2cSpeed::fast_400k) == 400'000);
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_400k)) == 400'000);
+static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_plus_1m),
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_plus_1m)) == 1'000'000);
+// A wire with slopes runs slower: the bench's own 438 ns at 64 MHz makes
+// 400 kHz into about 360.
+static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k),
+                         I2cFilters{}, I2cBusTiming{300, 300, 100, 438}) < 400'000);
+// A MEASURED wire stated to the chooser gets the rate itself, to the
+// prescaler's resolution (two kernel cycles here, 395 kHz).
 static_assert(i2c_scl_hz(64'000'000UL,
-                         *i2c_timing_for(64'000'000UL, I2cSpeed::fast_plus_1m),
-                         I2cSpeed::fast_plus_1m) == 1'000'000);
+                         *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k, I2cFilters{},
+                                         I2cBusTiming{300, 300, 100, 438}),
+                         I2cFilters{}, I2cBusTiming{300, 300, 100, 438}) == 395'061);
+// ... unless the period left after it cannot hold table 171's tLOW(min)
+// and tHIGH(min) with the floor's edge, which the chooser keeps over the
+// rate: 438 ns of a 1 MHz period leaves too little, and the bus slows.
+static_assert(i2c_scl_hz(64'000'000UL,
+                         *i2c_timing_for(64'000'000UL, I2cSpeed::fast_plus_1m, I2cFilters{},
+                                         I2cBusTiming{120, 120, 50, 438}),
+                         I2cFilters{}, I2cBusTiming{120, 120, 50, 438}) == 955'223);
+// A stated tSYNC under the floor is physically impossible: the floor wins.
+static_assert(i2c_sync_cycles(64'000'000UL, I2cFilters{}, I2cBusTiming{300, 300, 100, 20}) ==
+              10);
 // The chosen values meet 32.4.5's own two conditions.
 static_assert(i2c_setup_ok(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k),
                            i2c_bus_timing(I2cSpeed::fast_400k)));
 static_assert(i2c_hold_ok(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k),
                           I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_400k)));
-// And they reproduce the manual's own tSCLL/tSCLH for Fm at 16 MHz.
-static_assert(i2c_scll_ns(16'000'000UL, *i2c_timing_for(16'000'000UL,
-                                                        I2cSpeed::fast_400k)) == 1250);
-static_assert(i2c_sclh_ns(16'000'000UL, *i2c_timing_for(16'000'000UL,
-                                                        I2cSpeed::fast_400k)) == 500);
+// And, handed the tSYNC the manual's Fm column assumes (750 ns), they
+// reproduce that column's own tSCLL/tSCLH at 16 MHz.
+static_assert(i2c_scll_ns(16'000'000UL,
+                          *i2c_timing_for(16'000'000UL, I2cSpeed::fast_400k, I2cFilters{},
+                                          I2cBusTiming{300, 300, 100, 750})) == 1250);
+static_assert(i2c_sclh_ns(16'000'000UL,
+                          *i2c_timing_for(16'000'000UL, I2cSpeed::fast_400k, I2cFilters{},
+                                          I2cBusTiming{300, 300, 100, 750})) == 500);
+// THE ORACLE'S DIRECTION: ST's own I2C_GetTiming (the STM32Cube examples'
+// timing utility, CubeMX's method) answers 0x10A11626 for Fm and
+// 0x00610E1A for Fm+ at 64 MHz, solved against a typical 250 + 100 and
+// 60 + 100 ns of rise and fall - so on a wire with faster edges the same
+// words run at up to 477 kHz and 1.23 MHz, where this chooser's stay at
+// 400 kHz and 1 MHz.
+static_assert(i2c_scl_hz(64'000'000UL, i2c_timing_of(0x10A11626u), I2cFilters{},
+                         i2c_bus_timing(I2cSpeed::fast_400k)) == 477'611);
+static_assert(i2c_scl_hz(64'000'000UL, i2c_timing_of(0x00610E1Au), I2cFilters{},
+                         i2c_bus_timing(I2cSpeed::fast_plus_1m)) == 1'230'769);
 
 // ES0548 2.10.1's floors, as refusals: 16 MHz cannot do Fm+, and 2 MHz
 // cannot do ANY of the three - which is what makes the independent clock

@@ -50,7 +50,9 @@
 //   c  the kernel-clock multiplexer, and what each source can produce
 //   d  what the driver refuses, and that a refusal writes nothing
 //   e  the address scan: 112 addresses, 112 NACKs, and the STOP after one
-//   f  the speeds, with SCL counted on the pad
+//   f  the speeds, with SCL counted on the pad: no rate above the speed
+//      asked, a measured wire stated to init() run at the speed itself,
+//      and the classic I2C1's own arithmetic on the same wire beside it
 //   g  the SMBus time-out unit on an idle bus
 //   h  the noise filters and the Fm+ pad drive
 //   i  THE KERNEL: I2cBus over FmpI2cHost
@@ -125,12 +127,18 @@ using DmaHost = FmpI2cHost<1, fmp_pins, TxEngine, RxEngine>;
 
 using Peer = FmpI2cClient<1, fmp_pins>;
 
+/// I2C1 on PB8/PB9 (AF4), joined to PC6/PC7 by the bench's two wires: letter
+/// m's target, and letter f's second host.
+constexpr I2cPins classic_pins{.scl = {'B', 8, PinFunction::af4},
+                               .sda = {'B', 9, PinFunction::af4}};
+
 /// The two pads, read as inputs: what the wire is doing.
 using SclPad = Pin<'C', 6>;
 using SdaPad = Pin<'C', 7>;
 
-/// The board's own bus has no pull-ups, so the port's are asked for - and
-/// they are the reason the numbers below are what they are.
+/// The port's own pull-ups are asked for besides the bench's 2.2 kOhm pair:
+/// they let the block drive, release and read its own wire on a board
+/// without them.
 constexpr FmpI2cHostConfig base_config{.kernel = FmpI2cClock::pclk,
                                        .filters = {},
                                        .internal_pull_up = true,
@@ -587,16 +595,17 @@ struct SclReading {
     uint32_t average = 0;    ///< the mean gap over the whole tenure, in core cycles
 };
 
+template <typename Pad = SclPad>
 SclReading count_scl() {
     SclReading r{};
     const uint32_t period = systick_period();
     uint32_t last_val = SysTick->VAL;
     uint32_t shortest = 0xFFFFFFFFu;
     uint32_t total = 0;
-    bool prev = SclPad::read();
+    bool prev = Pad::read();
     for (uint32_t spins = 40'000'000u; spins != 0u && !xfer_done; --spins) {
         const uint32_t v = SysTick->VAL;
-        const bool now = SclPad::read();
+        const bool now = Pad::read();
         if (now && !prev) {
             const uint32_t d = since(last_val, v, period);
             if (r.edges != 0u) {
@@ -626,6 +635,21 @@ SclReading timed_probe(uint8_t addr, FmpI2cSpeed s) {
     return count_scl();
 }
 
+/// A mean gap in core cycles as nanoseconds.
+uint32_t gap_ns(uint32_t cycles) {
+    return static_cast<uint32_t>((static_cast<uint64_t>(cycles) * 1000ULL) /
+                                 (SysClock::hz / 1'000'000u));
+}
+
+const char* speed_name(uint8_t i) { return i == 0 ? "Sm  " : (i == 1 ? "Fm  " : "Fm+ "); }
+
+/// I2C1, the OTHER design of this family, on the same wire as a HOST: its
+/// own arithmetic (CCR, 27.6.8) beside this block's, the probe's clocks
+/// counted on PB8. Live only inside letter f.
+using ClassicHost = I2cHost<1, classic_pins>;
+using ClassicScl = Pin<'B', 8>;
+volatile bool classic_host_live = false;
+
 void tf_speeds() {
     struct Row {
         FmpI2cClock kernel;
@@ -636,8 +660,10 @@ void tf_speeds() {
                          {FmpI2cClock::hsi, "HSI   "}};
     bool all_nacked = true;
     bool never_shorter = true;
+    bool never_faster = true;
     uint32_t sm_pclk = 0;
     uint32_t fm_pclk = 0;
+    uint32_t sync_pclk[fmpi2c_speed_count] = {};
     for (uint8_t k = 0; k < 3u; ++k) {
         if (!host_ready(rows[k].kernel)) {
             all_nacked = false;
@@ -648,52 +674,58 @@ void tf_speeds() {
         for (uint8_t i = 0; i < fmpi2c_speed_count; ++i) {
             const FmpI2cSpeed s = static_cast<FmpI2cSpeed>(i);
             if (!Host::speed_ok(s)) {
-                print(serial, "  ", rows[k].name, " ",
-                      i == 0 ? "Sm  " : (i == 1 ? "Fm  " : "Fm+ "), ": refused at this kernel "
+                print(serial, "  ", rows[k].name, " ", speed_name(i), ": refused at this kernel "
                       "clock (ES0298 2.12.2)", crlf);
                 continue;
             }
             const SclReading r = timed_probe(0x42, s);
             const uint8_t st = Host::status();
             const uint32_t high = r.shortest == 0u ? 0u : SysClock::hz / r.shortest;
-            const uint32_t low = r.average == 0u ? 0u : SysClock::hz / r.average;
+            const uint32_t mean_hz = r.average == 0u ? 0u : SysClock::hz / r.average;
             // WHAT THE WIRE SAYS THE DETECTION DELAY IS. 23.4.9 makes
             // tSCL = tSYNC1 + tSYNC2 + tSCLL + tSCLH, and the two
             // programmed halves are known exactly - so the measured period
             // less them is the SCL detection delay this board really pays,
-            // against the 1000 / 750 / 500 ns the manual's tables assume.
-            // The MEAN gap is the period: a probe's nine clocks are the
-            // hardware's alone, nothing stretches them, while the shortest
-            // gap moves with the polling loop's phase - by up to 100 core
-            // cycles with a SYSCLK kernel and this board's 2.2 kOhm edges,
-            // more than the delay being measured.
+            // against the FLOOR the chooser charges when nothing was
+            // measured (two kernel periods an edge and the filters, no
+            // slope). The MEAN gap is the period: a probe's nine clocks
+            // are the hardware's alone, nothing stretches them, while the
+            // shortest gap moves with the polling loop's phase - by up to
+            // 100 core cycles with a SYSCLK kernel and this board's 2.2
+            // kOhm edges, more than the delay being measured.
             const FmpI2cTiming t = Host::timing_of(s);
-            const uint32_t programmed_ns =
-                fmpi2c_scll_ns(ker, t) + fmpi2c_sclh_ns(ker, t);
-            const uint32_t measured_ns =
-                r.average == 0u ? 0u
-                                : static_cast<uint32_t>((static_cast<uint64_t>(r.average) *
-                                                         1000ULL) /
-                                                        (SysClock::hz / 1'000'000u));
+            const uint32_t programmed_ns = fmpi2c_scll_ns(ker, t) + fmpi2c_sclh_ns(ker, t);
+            const uint32_t measured_ns = r.average == 0u ? 0u : gap_ns(r.average);
             const bool longer = measured_ns >= programmed_ns;
-            print(serial, "  ", rows[k].name, " ", i == 0 ? "Sm  " : (i == 1 ? "Fm  " : "Fm+ "),
-                  ": the arithmetic states ", Host::scl_hz(s), " Hz; the pad gave ", r.edges,
+            const uint32_t sync_ns = longer ? measured_ns - programmed_ns : 0u;
+            const uint32_t asked_ns = 1'000'000'000UL / fmpi2c_speed_hz(s);
+            print(serial, "  ", rows[k].name, " ", speed_name(i), ": the ceiling ",
+                  Host::scl_hz(s), " Hz; the pad gave ", r.edges,
                   " rising edges, the shortest gap ", r.shortest, " core cycles (", high,
-                  " Hz) and the mean ", r.average, " (", low, " Hz); tSCLL + tSCLH is ",
+                  " Hz) and the mean ", r.average, " (", mean_hz, " Hz); tSCLL + tSCLH is ",
                   programmed_ns, " ns of that ", measured_ns, " ns, so the detection delay is ",
-                  longer ? measured_ns - programmed_ns : 0u, " ns against the ",
-                  fmpi2c_bus_timing(s).sync_ns, " ns the table assumes; status ", st, crlf);
+                  sync_ns, " ns against the floor's ",
+                  fmpi2c_cycles_ns(ker, fmpi2c_sync_floor_cycles(ker, FmpI2cFilters{})),
+                  " ns; status ", st, crlf);
             if (st != i2c_nack_addr) {
                 all_nacked = false;
             }
             if (!longer) {
                 never_shorter = false;
             }
-            if (rows[k].kernel == FmpI2cClock::pclk && i == 0u) {
-                sm_pclk = high;
+            // THE CEILING: the mean period is at least the one asked for,
+            // to the poll's resolution (a few core cycles in a mean of
+            // eight gaps).
+            if (measured_ns + 10u < asked_ns) {
+                never_faster = false;
             }
-            if (rows[k].kernel == FmpI2cClock::pclk && i == 1u) {
-                fm_pclk = high;
+            if (rows[k].kernel == FmpI2cClock::pclk) {
+                sync_pclk[i] = sync_ns;
+                if (i == 0u) {
+                    sm_pclk = high;
+                } else if (i == 1u) {
+                    fm_pclk = high;
+                }
             }
         }
         Host::fast_plus_drive(false);
@@ -703,18 +735,88 @@ void tf_speeds() {
     bench.verdict("SCL really moves, and faster in fast mode than in standard: the pad's own "
                   "input buffer counted both",
                   sm_pclk != 0u && fm_pclk > sm_pclk);
-    bench.verdict("and every period on the wire is LONGER than the two halves TIMINGR programs, "
+    bench.verdict("every period on the wire is LONGER than the two halves TIMINGR programs, "
                   "which is 23.4.9's formula with a detection delay that cannot be negative",
                   never_shorter);
-    print(serial, "  (nine of those rising edges are the address phase - eight bits and the "
+    bench.verdict("AND NOT ONE OF THE EIGHT RUNS FASTER THAN THE SPEED ASKED: with no measured "
+                  "tSYNC the chooser charges the floor, and this wire's slopes only add to it",
+                  never_faster);
+
+    // ---- a MEASURED wire, stated to init() ----
+    // The detection delay the APB1 rows just measured, handed back: the
+    // chooser then subtracts the wire's own tSYNC instead of the floor, and
+    // the bus runs at the speed asked, to the prescaler's resolution.
+    bool exact = true;
+    for (uint8_t i = 0; i < fmpi2c_speed_count; ++i) {
+        const FmpI2cSpeed s = static_cast<FmpI2cSpeed>(i);
+        FmpI2cBusTiming wire = fmpi2c_bus_timing(s);
+        wire.sync_ns = static_cast<uint16_t>(sync_pclk[i]);
+        FmpI2cHostConfig c = base_config;
+        c.bus = wire;
+        if (sync_pclk[i] == 0u || !Host::init(clock, c) || !Host::speed_ok(s)) {
+            exact = false;
+            continue;
+        }
+        Host::fast_plus_drive(true);
+        const SclReading r = timed_probe(0x42, s);
+        Host::fast_plus_drive(false);
+        const uint32_t mean_hz = r.average == 0u ? 0u : SysClock::hz / r.average;
+        const uint32_t want = fmpi2c_speed_hz(s);
+        print(serial, "  APB1   ", speed_name(i), " told its wire (tSYNC ", sync_pclk[i],
+              " ns): the arithmetic states ", Host::scl_hz(s), " Hz, the pad's mean ", mean_hz,
+              " Hz", crlf);
+        // Within the prescaler's resolution below the speed and a poll's
+        // noise above it.
+        if (mean_hz < want - want / 25u || mean_hz > want + want / 100u) {
+            exact = false;
+        }
+    }
+    bench.verdict("... and a wire whose measured tSYNC is stated runs at the speed asked, "
+                  "within four per cent under it and one over",
+                  exact);
+
+    // ---- the other I2C of this family, on the same wire ----
+    // I2C1's arithmetic is CCR's (27.6.8), not this chapter's, and it is
+    // reported here beside it: the same probe, nobody answering, the
+    // clocks counted on PB8's own input buffer.
+    Host::release();
+    bool classic_ran = true;
+    if (ClassicHost::init(clock)) {
+        classic_host_live = true;
+        for (const I2cSpeed s : {I2cSpeed::standard_100k, I2cSpeed::fast_400k}) {
+            ClassicHost::Request rq{};
+            rq.addr = 0x42;
+            rq.speed = s;
+            xfer_done = false;
+            if (ClassicHost::start(rq)) {
+                classic_ran = false;
+                continue;
+            }
+            const SclReading r = count_scl<ClassicScl>();
+            const uint32_t mean_hz = r.average == 0u ? 0u : SysClock::hz / r.average;
+            const uint32_t stated = ClassicHost::scl_hz(s);
+            print(serial, "  I2C1 (CCR) ", s == I2cSpeed::fast_400k ? "Fm  " : "Sm  ",
+                  ": CCR states ", stated, " Hz, the pad's mean ", mean_hz, " Hz (",
+                  r.edges, " rising edges), status ", ClassicHost::status(), crlf);
+            if (r.edges < 9u || ClassicHost::status() != i2c_nack_addr) {
+                classic_ran = false;
+            }
+        }
+        classic_host_live = false;
+        ClassicHost::release();
+    } else {
+        classic_ran = false;
+    }
+    bench.verdict("the classic I2C1 ran the same probe on the same wire at both its speeds",
+                  classic_ran);
+    print(serial, "  (nine of the rising edges are the address phase - eight bits and the "
                   "acknowledge slot nobody filled - and the tenth, where the loop is still "
-                  "watching, is SCL going up for the STOP. The rates are PRINTED and not judged: "
-                  "this bus is pulled up by the port alone, some tens of kiloohms, so the rises "
-                  "are slow exponentials and one board is one specimen. What the detection delay "
-                  "column shows is the honest part - the manual's assumed tSYNC is generous "
-                  "here, so a bus solved against it runs a few per cent FASTER than the speed "
-                  "asked for, and an application that must not pass the standard's ceiling "
-                  "states its own measured sync_ns to init())",
+                  "watching, is SCL going up for the STOP. The bus is the bench's two 2.2 kOhm "
+                  "pull-ups with the port's own beside them; one board is one specimen. What "
+                  "the detection-delay column shows is why the default is the floor: the "
+                  "manual's 1000 / 750 / 500 ns and ST's own timing utility both charge more "
+                  "than a short wire takes, so a bus solved against them runs FASTER than "
+                  "asked, while one solved against the floor can only run slower)",
           crlf);
     (void)host_ready();
 }
@@ -1225,8 +1327,6 @@ void tl_client() {
 /// one written byte, counted from one: 27.6.1's ACK governs the byte being
 /// received, so it goes down as the byte BEFORE the refused one is taken
 /// (at the address match for the first) and back up with the refused one.
-constexpr I2cPins classic_pins{.scl = {'B', 8, PinFunction::af4},
-                               .sda = {'B', 9, PinFunction::af4}};
 using Classic = I2c<1>;
 using ClassicTarget = I2cClient<1, classic_pins>;
 constexpr uint8_t self_addr = 0x3A;
@@ -1459,15 +1559,19 @@ void banner() {
 
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
 
-// I2C1's two vectors: letter m's far end.
+// I2C1's two vectors: letter m's far end, and letter f's classic host.
 extern "C" void I2C1_EV_IRQHandler() {
     if (Far::live) {
         Far::event();
+    } else if (classic_host_live && ClassicHost::isr()) {
+        xfer_done = true;
     }
 }
 extern "C" void I2C1_ER_IRQHandler() {
     if (Far::live) {
         Far::error();
+    } else if (classic_host_live && ClassicHost::error_isr()) {
+        xfer_done = true;
     }
 }
 

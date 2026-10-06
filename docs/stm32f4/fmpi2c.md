@@ -101,13 +101,16 @@ tPRESC = (PRESC + 1) x tI2CCLK and
 
 **tSCL IS NOT tSCLL + tSCLH.** 23.4.9's own formula adds tSYNC1 + tSYNC2
 - the SCL slopes, the filter delays and two to three kernel periods of
-synchronization at each edge - whose floor is 4 x tI2CCLK and whose value
-the manual's example tables assume to be 1000 ns in Sm, 750 in Fm and
-500..655 in Fm+. It is a BUS fact and not a chip one, so the driver takes
-it as an argument (`FmpI2cBusTiming::sync_ns`) beside the rise and fall
-times, defaulting to the tables' own numbers so that the arithmetic
-reproduces them. What it costs to get that estimate wrong is measured
-below.
+synchronization at each edge - whose floor is 4 x tI2CCLK with the
+filters off and whose value the manual's example tables assume to be 1000
+ns in Sm, 750 in Fm and 500..655 in Fm+. Every term but the slopes has a
+floor (two kernel periods, DNF x tI2CCLK and tAF(min) an edge; DS10693
+states no tAF(min), so zero), and only the slopes are a BUS fact. So **a
+requested rate is a CEILING**: unless told the wire's measured tSYNC
+(`FmpI2cBusTiming::sync_ns`), the chooser charges that floor alone, the
+fastest any wire can make, and a real wire only adds its slopes and runs
+slower; told it, the bus runs at the rate asked. What the other choices
+cost is measured below.
 
 **THE KERNEL CLOCK HAS A FLOOR AND IT IS AN ERRATUM'S.** ES0298 2.12.2:
 below a kernel period that fits inside the transmitter's minimum data
@@ -246,7 +249,10 @@ The arithmetic, all constexpr: `fmpi2c_speed_hz`, `fmpi2c_bus_timing`,
 `fmpi2c_low_min_ns`, `fmpi2c_high_min_ns`, `fmpi2c_data_valid_max_ns`,
 `fmpi2c_min_kernel_hz`, `fmpi2c_datasheet_min_pclk_hz`,
 `fmpi2c_transmit_stall_risk`, `fmpi2c_clock_requirements_met`,
-`fmpi2c_timing_for` (the chooser), `fmpi2c_scl_hz`, `fmpi2c_scll_ns`,
+`fmpi2c_timing_for` (the chooser), `fmpi2c_sync_floor_cycles` and
+`fmpi2c_sync_cycles` (the tSYNC it charges), `fmpi2c_scl_hz` (on a bus:
+the ceiling unmeasured, the rate itself measured; or against a budget
+charged as given, the manual's tables), `fmpi2c_scll_ns`,
 `fmpi2c_sclh_ns`, `fmpi2c_sdadel_ns`, `fmpi2c_scldel_ns`,
 `fmpi2c_min_stretch_cycles`, `fmpi2c_setup_ok`, `fmpi2c_hold_ok`,
 `fmpi2c_hold_upper_ok`, `fmpi2c_timeout_code_for`, `fmpi2c_timeout_us`,
@@ -294,13 +300,16 @@ Bus::init(clock, FmpI2cHostConfig{.kernel = FmpI2cClock::hsi});
 ```
 
 **A bus whose edges are known.** The defaults are the specification's
-worst case and the manual's own tSYNC estimate; a board that has measured
-its wire states it, and gets a bus that keeps to the rate asked for:
+worst-case edges for the delays and no measured tSYNC, so each speed asked
+is a ceiling the wire stays at or under (about 2, 7 and 13 per cent under
+on this bench's wire at 45 MHz). A board that has measured its wire - the
+period less the register's tSCLL + tSCLH, which `test_stm32f4_fmpi2c`'s
+letter `f` prints - states it, and gets the rate asked for:
 
 ```cpp
 Bus::init(clock, FmpI2cHostConfig{
     .bus = FmpI2cBusTiming{.rise_ns = 250, .fall_ns = 60,
-                           .setup_ns = 100, .sync_ns = 400}});
+                           .setup_ns = 100, .sync_ns = 240}});
 ```
 
 **The DMA engines**, on the only two cells the request mapping gives:
@@ -337,7 +346,7 @@ The board is a Nucleo-F446RE at 180 MHz with 45 MHz on APB1, and the two
 pads are PC6 and PC7, wired to I2C1's PB8 and PB9 with a 2.2 kOhm
 pull-up on each line. Letters a to l see that bus with I2C1 silent -
 what a bus with nobody answering can be made to say - and letter m makes
-I2C1 the target. `test_stm32f4_fmpi2c` is 92 verdicts over thirteen
+I2C1 the target. `test_stm32f4_fmpi2c` is 95 verdicts over thirteen
 letters.
 
 **The register file at reset is the chapter's**, and the one non-zero
@@ -373,32 +382,76 @@ where a transmission can stall, while the APB clock (1.0) and SYSCLK
 
 | speed | PRESC | SCLL | SCLH | SDADEL | SCLDEL | states |
 |-------|-------|------|------|--------|--------|--------|
-| Sm 100 kHz | 3 | 56 | 44 | 3 | 14 | 99337 Hz |
-| Fm 400 kHz | 1 | 28 | 10 | 6 | 9 | 394736 Hz |
-| Fm+ 1 MHz | 0 | 13 | 7 | 3 | 8 | 1000000 Hz |
+| Sm 100 kHz | 3 | 61 | 49 | 3 | 14 | 99557 Hz |
+| Fm 400 kHz | 1 | 38 | 15 | 6 | 9 | 394736 Hz |
+| Fm+ 1 MHz | 0 | 25 | 14 | 3 | 8 | 1000000 Hz |
 
-Neither of the two that the kernel rate does not divide comes out above
+The rate stated is the fastest any wire can make of the word - the
+period's halves plus the floor under tSYNC, four kernel periods here - and
+neither of the two that the kernel rate does not divide comes out above
 the speed asked for: the period is rounded UP before it is split, which
 is what keeps a 400 kHz request at 394736 Hz and not at 401785.
 
-**THE MANUAL'S tSYNC BUDGET IS GENEROUS ON THIS BOARD, AND THAT MAKES THE
-BUS FASTER THAN THE ARITHMETIC STATES.** SCL was counted on the clock
-pad's own input buffer while an address phase ran - the pad is an
-open-drain alternate function, so its IDR is the wire - and the period
-measured less the tSCLL + tSCLH the register programs is the detection
-delay 23.4.9 calls tSYNC1 + tSYNC2, judged on the MEAN gap of the
-probe's clocks (nothing stretches them; the shortest gap moves with the
-polling loop's phase by up to a hundred core cycles). Over eight rows
-(three speeds on two kernel clocks, two on the third) it came out
-**between about 150 and 400 ns** on the 2.2 kOhm wire, always positive
-and always well under the 1000 / 750 / 500 ns tables 134 and 135 assume.
-So a bus solved against the defaults runs FAST: 107 kHz measured where
-the arithmetic states 99.3 kHz, 494 kHz where it states 394.7 kHz -
-past fast mode's 400 kHz ceiling - and 1.36 MHz where it states 1.00
-MHz. The rates are printed and not judged - one board, one set of
-pull-ups - but the direction is a design fact: `sync_ns` is an argument
-for exactly this reason, and an application that must not pass the
-standard's ceiling states its own measured one.
+**THE SPEED ASKED IS A CEILING ON THE WIRE, AND THE ORACLE'S IS NOT.**
+SCL was counted on the clock pad's own input buffer while an address
+phase ran - the pad is an open-drain alternate function, so its IDR is the
+wire - and the period measured less the tSCLL + tSCLH the register
+programs is the detection delay 23.4.9 calls tSYNC1 + tSYNC2, judged on
+the MEAN gap of the probe's clocks (nothing stretches them; the shortest
+gap moves with the polling loop's phase by up to a hundred core cycles).
+On the 2.2 kOhm wire it came out **between about 160 and 390 ns** over
+the eight rows (three speeds on two kernel clocks, two on the third) -
+always above the floor the chooser charges (22, 89 and 250 ns at 180, 45
+and 16 MHz), and well under the 1000 / 750 / 500 ns tables 134 and 135
+assume. Letter `f`, the mean rate on the pad:
+
+| kernel | speed | stated (the ceiling) | measured | tSYNC measured |
+|--------|-------|----------------------|----------|----------------|
+| APB1 45 MHz | Sm | 99557 Hz | 97985 Hz | 250 ns |
+| APB1 45 MHz | Fm | 394736 Hz | 372670 Hz | 239 ns |
+| APB1 45 MHz | Fm+ | 1000000 Hz | 865384 Hz | 245 ns |
+| SYSCLK 180 MHz | Sm | 98955 Hz | 97613 Hz | 161 ns |
+| SYSCLK 180 MHz | Fm | 396475 Hz | 375782 Hz | 162 ns |
+| SYSCLK 180 MHz | Fm+ | 1000000 Hz | 873786 Hz | 167 ns |
+| HSI 16 MHz | Sm | 98765 Hz | 98468 Hz | 280 ns |
+| HSI 16 MHz | Fm | 400000 Hz | 378947 Hz | 388 ns |
+
+Not one row runs above the speed asked. The APB1 delays STATED to
+`init()` give 99833, 392156 and 994475 Hz on the pad (1005586 for the
+last in a second run: 181 and 179 core cycles of mean gap, the poll's
+resolution) against the 99778, 391304 and 1000000 the arithmetic states
+- the period formula with the wire's own tSYNC, to the prescaler's
+resolution. A word solved against
+the manual's budgets runs this wire FAST - 107.4 kHz, 497 kHz and 1.36
+MHz on APB1, past fast mode's 400 kHz ceiling - which is why the default
+is the floor.
+
+**ST's own arithmetic is the oracle, and its error runs FAST.** The HAL
+takes a precomputed TIMINGR; ST computes it in CubeMX and in the timing
+utility its STM32Cube examples ship (`I2C_GetTiming()`, the
+`i2c_timing_utility.c` of STM32CubeH7's and STM32CubeU5's I2C examples,
+the same function in their boards' BSP bus files). It charges each half
+tAF(min) (50 ns, fixed in its source for every part) + tDNF + 2 x
+tI2CCLK, plus a "typical" rise and fall of 640 + 20 ns (Sm), 250 + 100
+(Fm) and 60 + 100 (Fm+), and keeps the candidate CLOSEST to the rate
+asked inside a band of plus or minus 20 per cent - so it lands on either
+side of the rate on its own model, and above it on a wire with faster
+edges than it assumes. At 45 MHz it answers 0x30A03234, 0x00F02136 and
+0x00400A12: on the fastest wire 107.1 kHz, 483.9 kHz and 1.32 MHz, and on
+this one (its halves plus the measured delays) 105.4 kHz, 450 kHz and
+1.10 MHz - all three above the rate asked, the Fm one past the mode's
+ceiling. The two methods share every inequality (the setup and hold
+bounds, 23.4.3's conditions) and differ in that one charge;
+`brio/stm32f4/fmpi2c.hpp` pins ST's three words at the bottom.
+
+**THE OTHER I2C OF THIS FAMILY KEEPS ITS STATED RATE.** The classic I2C1
+(CCR, RM0390 27.6.8), run as a host through the same probe on the same
+wire and counted on PB8: 100111 Hz against the 100000 its CCR states,
+396475 Hz against 394736 - within two core cycles of a period at 180 MHz,
+the poll's resolution. Its arithmetic is [i2c.md](i2c.md)'s; what the
+comparison shows is that its period does not grow by a detection delay
+the way this block's does, and that, CCR rounded up, its stated rate is
+its ceiling too.
 
 **A NACK on the address is a complete transaction, and its two flags come
 in order.** All 112 addresses from 0x08 to 0x77 answered `i2c_nack_addr`
@@ -496,10 +549,10 @@ at 180, 48 and 16 MHz ([i2c.md](i2c.md)).
 
 **What a tenure costs this host** (`bench_stm32f4`'s letter `i` on the
 same wires, I2C1 the target served on the same core, its entries counted
-apart; the SCL period measured on the pad, 364 core cycles at the 400
-kHz row - the 494 kHz above). At 400 kHz: a one-byte write 1144 cycles
-beyond the wire in two interrupts, a register read 1+1 1799 in four, a
-255-byte write and read x 1.00 on the pump (256 interrupts, 136 cycles
+apart; the SCL period measured on the pad, 484 core cycles at the 400
+kHz row - 371.9 kHz, under the ceiling as above). At 400 kHz: a one-byte
+write 1104 cycles beyond the wire in two interrupts, a register read 1+1
+1674 in four, a 255-byte write and read x 1.00 on the pump (256 interrupts, 136 cycles
 of handler a byte written and 151 read) and on the engines (two
 interrupts), `start()` 315 cycles, the longest entry 518 cycles of the
 event vector. The fixed cost carries the target's: the classic block

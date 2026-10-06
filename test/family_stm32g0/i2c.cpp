@@ -130,20 +130,24 @@ static_assert(!i2c_timing_for(2'000'000UL, I2cSpeed::standard_100k).has_value())
 static_assert(!i2c_timing_for(2'000'000UL, I2cSpeed::fast_400k).has_value());
 static_assert(!i2c_timing_for(2'000'000UL, I2cSpeed::fast_plus_1m).has_value());
 
-// The produced rate is inside the mode's band and NEVER above it.
-static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL,
-                                                       I2cSpeed::standard_100k),
-                         I2cSpeed::standard_100k) == 99'378);
+// The produced rate is inside the mode's band and NEVER above it: priced
+// at the tSYNC floor - the fastest wire there can be - it is the speed
+// asked at most.
+static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::standard_100k),
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::standard_100k)) == 100'000);
 static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k),
-                         I2cSpeed::fast_400k) == 400'000);
-static_assert(i2c_scl_hz(64'000'000UL,
-                         *i2c_timing_for(64'000'000UL, I2cSpeed::fast_plus_1m),
-                         I2cSpeed::fast_plus_1m) == 1'000'000);
-static_assert(i2c_scl_hz(16'000'000UL, *i2c_timing_for(16'000'000UL,
-                                                       I2cSpeed::standard_100k),
-                         I2cSpeed::standard_100k) == 100'000);
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_400k)) == 400'000);
+static_assert(i2c_scl_hz(64'000'000UL, *i2c_timing_for(64'000'000UL, I2cSpeed::fast_plus_1m),
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_plus_1m)) == 1'000'000);
+static_assert(i2c_scl_hz(16'000'000UL, *i2c_timing_for(16'000'000UL, I2cSpeed::standard_100k),
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::standard_100k)) == 98'765);
 static_assert(i2c_scl_hz(16'000'000UL, *i2c_timing_for(16'000'000UL, I2cSpeed::fast_400k),
-                         I2cSpeed::fast_400k) == 400'000);
+                         I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_400k)) == 400'000);
+// The digital filter raises the floor by two kernel periods a step.
+static_assert(i2c_sync_floor_cycles(64'000'000UL, I2cFilters{true, 4}) == 18);
+static_assert(i2c_scl_hz(64'000'000UL,
+                         *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k, I2cFilters{true, 4}),
+                         I2cFilters{true, 4}, i2c_bus_timing(I2cSpeed::fast_400k)) <= 400'000);
 
 // Every chosen value meets 32.4.5's two conditions at its own clock.
 static_assert(i2c_setup_ok(64'000'000UL,

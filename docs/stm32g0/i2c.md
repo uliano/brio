@@ -47,9 +47,13 @@ things about it decide the code:
 
 - **tSCL is not tSCLL + tSCLH.** 32.4.9 adds tSYNC1 + tSYNC2 - the edge
   slopes, the filters and two to three kernel periods of synchronization
-  - and the example tables charge 250..1000 ns of it. That is a BUS fact
-  and not a chip one, so it is an argument (`I2cBusTiming::sync_ns`),
-  exactly as the rise time is on the other two targets.
+  - and the example tables charge 250..1000 ns of it. Every term but the
+  slopes has a floor - tAF(min) (DS13560 table 75: 50 ns), DNF x tI2CCLK
+  and two kernel periods, per edge - and only the slopes are a BUS fact.
+  So **a requested rate is a CEILING**: unless told the wire's measured
+  tSYNC (`I2cBusTiming::sync_ns`), the chooser charges that floor alone,
+  the fastest any wire can make, and a real wire only adds its slopes and
+  runs slower; told it, the bus runs at the rate asked.
 - **SDADEL has no +1 and the other three do**: tSDADEL = SDADEL x
   tPRESC, while tSCLDEL, tSCLL and tSCLH are all (field + 1) x tPRESC.
 - **The kernel clock has three floors and all three bind**: 32.4.3's
@@ -116,8 +120,12 @@ and TEXTEN = 0 for the two halves of TIMEOUTR.
 
 The timing arithmetic goes both ways and is `constexpr` throughout:
 `i2c_timing_for(kernel_hz, speed, filters, bus)` solves 32.4.5's
-conditions for a register value, `i2c_scl_hz(kernel_hz, timing,
-sync_ns)` prices one, and `i2c_scll_ns` / `i2c_sclh_ns` /
+conditions for a register value, `i2c_scl_hz(kernel_hz, timing, filters,
+bus)` prices one on a bus (the ceiling when `bus` carries no measured
+tSYNC, the rate itself when it does) and `i2c_scl_hz(kernel_hz, timing,
+sync_ns)` against a budget charged as given (the manual's tables),
+`i2c_sync_floor_cycles` / `i2c_sync_cycles` name the floor and what is
+charged, and `i2c_scll_ns` / `i2c_sclh_ns` /
 `i2c_scldel_ns` / `i2c_sdadel_ns` / `i2c_min_stretch_cycles` name the
 four field times and 32.4.8's minimum stretch. `i2c_setup_ok()` and
 `i2c_hold_ok()` judge a hand-written TIMINGR against the chapter's two
@@ -171,6 +179,16 @@ I2cHw::init(clock, brio::I2cClock::hsi16);   // independent of the core rate
 extern "C" void I2C1_IRQHandler() {
     if (I2cHw::isr()) { brio::post<Sensors>(brio::TransferDone{I2cHw::status()}); }
 }
+```
+
+Each speed asked is a ceiling the wire stays at or under. A bus whose
+detection delay has been measured (letter `d` prints it: the period less
+the register's tSCLL + tSCLH) states it, and runs at the rate itself:
+
+```cpp
+I2cHw::init(clock, brio::I2cClock::pclk, {},
+            brio::I2cBusTiming{.rise_ns = 300, .fall_ns = 300,
+                               .setup_ns = 100, .sync_ns = 430});
 ```
 
 A request is the complete script of one tenure:
@@ -295,25 +313,44 @@ target's SDADEL and SCLDEL are solved against the fastest bus it expects,
 so a client is subject to the same 20 MHz floor - and HSI16 is 16 MHz,
 while the wake from Stop accepts HSI16 and nothing else (32.4.16).
 
-**The standard's worst-case edges make a real bus run FAST.** The
-chooser charges tSYNC = 1000 / 750 / 500 ns; this wire's own tSYNC,
-measured as the difference between the tenure's average period and the
-register's own tSCLL + tSCLH, is **438 ns**. So at a nominal 100 kHz the
-bus really runs at **105263 Hz - above the mode's own limit** - and
-handing the measured budget back to `init()` brings it to **99690 Hz**.
-The same hazard `avrdx/twi.hpp` and `samc21/i2c.hpp` record about their
-rise-time arguments, seen from the other side; state what the bench
-measures.
+**A requested rate is a ceiling, and the oracle's would not be.** This
+wire's own tSYNC, measured as the difference between a tenure's average
+period and the register's own tSCLL + tSCLH (a 32-byte tenure, duration /
+(9 x 33), the target in NOSTRETCH so it holds the clock for nothing, at
+64 MHz on PCLK), is **406 to 438 ns** at the three speeds - against the
+1000 / 750 / 500 ns the manual's tables charge, so a chooser solved
+against those runs this wire FAST: 105.3 kHz for 100, 464 kHz for 400,
+1.09 MHz for 1 (the register halves of that budget, 9062 / 1750 / 499
+ns, plus the measured delay). The default therefore charges the FLOOR
+under tSYNC - two kernel periods, tAF(min) and DNF x tI2CCLK an edge,
+10 kernel cycles (156 ns) at 64 MHz with the analog filter on - and the
+three rungs become 100 / 400 / 1000 kHz at most on any wire; on this one
+the same arithmetic over the measured delay gives 97.3, 363.6 and 790
+kHz. Stated to `init()`, the measured delay gives 99.5, 400 and 970 kHz -
+the last held under the rate by table 171's tLOW, which the chooser keeps
+with the floor's edge rather than trust a split of the stated delay
+between the two edges.
 
-The rates, at 64 MHz on PCLK, measured over a 32-byte tenure as
-duration / (9 x 33) with the target in NOSTRETCH so it holds the clock
-for nothing:
-
-| asked | register floor (tSCLL + tSCLH) | measured | standard-edge prediction |
-|-------|-------------------------------|----------|--------------------------|
-| 100 kHz | 9062 ns | 9500 ns | 10062 ns |
-| 400 kHz | 1750 ns | 2156 ns | 2500 ns |
-| 1 MHz (stretching) | 499 ns | 921 ns | 1000 ns |
+**ST's own arithmetic is the oracle, and its error runs FAST.** The HAL
+takes a precomputed TIMINGR; ST computes it in CubeMX and in the timing
+utility its STM32Cube examples ship (`I2C_GetTiming()`, the
+`i2c_timing_utility.c` of STM32CubeH7's and STM32CubeU5's I2C examples,
+and the same function in their boards' BSP bus files). That method
+charges each half tAF(min) (50 ns, fixed in the source for every part) +
+tDNF + 2 x tI2CCLK, plus a "typical" rise and fall of 640 + 20 ns (Sm),
+250 + 100 (Fm) and 60 + 100 (Fm+), and keeps the candidate CLOSEST to the
+rate asked inside a band of plus or minus 20 per cent - so it lands on
+either side of the rate on its own model, and on a wire with faster edges
+than it assumes, above it. At 64 MHz it answers 0x60702729, 0x10A11626
+and 0x00610E1A: on the fastest wire 109.6 kHz, 477.6 kHz and 1.23 MHz;
+on this one (its halves plus the measured 406..438 ns) 106.3 kHz, 426.7
+kHz and 928 kHz - two rungs of three above the rate asked, the Fm+ one
+below it because this wire's 422 ns exceed the 322 its typical edges
+make. It also answers an Fm+ word at 16 MHz, where ES0548 2.10.1 asks
+20. The two methods agree on everything but that charge -
+the setup and hold bounds and the 32.4.3 conditions are the same
+inequalities - and `i2c_scl_hz()` pins ST's words at the bottom of
+`brio/stm32g0/i2c.hpp`.
 
 **At 1 MHz this core cannot serve a NOSTRETCH target.** The window is
 nine microseconds - the byte before the one being missed - and an
@@ -452,11 +489,13 @@ DMA variants), CubeMX's G0 handler shape on the vector. At 400 kHz:
   cycles a byte, 403 for its STOPF entry against 242), it reads a
   one-byte read through an RXNE entry, and its register read takes four
   interrupts to this engine's two.
-- **The rungs run fast on the standard's edges, measured as the slope**:
-  100 kHz at 106.5 kHz, 400 kHz at 482.8 kHz and 1 MHz at 1.216 MHz on
-  this self-link - the chooser charging tSYNC = 1000 / 750 / 500 ns where
-  the bus's own is near 440 (above). A bus that must not exceed its
-  mode's rate hands its measured edges to `init()`.
+- **The rungs of this table were measured as the slope at 106.5 kHz,
+  482.8 kHz and 1.216 MHz** - TIMINGR words solved against the manual's
+  1000 / 750 / 500 ns of tSYNC, which this wire beats (above). The
+  ceiling default puts the same rungs near 97, 364 and 790 kHz on this
+  wire; the costs are a handler's and a channel's, but the wire's share
+  of each row moves with the rate and the table is not re-measured
+  there (below, "Implemented but not bench-verified").
 - **The 1 MHz rung is not claimed as Fm+.** Released from low, SCL
   reaches the input's threshold 8 cycles and SDA 12 cycles after the
   same steps on a line already high (125 and 190 ns at 64 MHz, the
@@ -586,9 +625,8 @@ instance without the independent clock - `kernel_clock()`, `timeouts()`,
 on a part that has not, which is the same claim about the same column
 asked of whichever instance is in it.
 
-Measured against the peer: the three speeds byte-exact both ways with SCL
-at **99 / 400 / 1000 kHz** (the 100 k rung at 99 kHz, the measured
-tSYNC budget rather than the standard's worst case), the tenure shapes
+Measured against the peer: the three speeds byte-exact both ways, the
+tenure shapes
 with the repeated START counted from the far end as two address matches,
 the whole vocabulary on the wire, commanded stretching at 2 ms a byte
 costing exactly 16 ms for eight, and the kernel letter running `I2cBus`
@@ -649,6 +687,18 @@ Driver gaps:
   vocabulary is born with its first device.
 
 Implemented but not bench-verified:
+
+- **The ceiling default on this wire.** The chooser's floor charge and
+  the stated-wire path are pinned against ST's own words and the
+  manual's tables at compile time, and the same arithmetic is measured
+  on the STM32F4's FMPI2C1 - the same register file - where no rung runs
+  above its speed and a stated wire runs within one per cent of it
+  ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)). Here the self-link's
+  pull-ups are off the desk: letter `d` of `test_stm32_i2c` (the bracket
+  - no rung above its speed - and the measured budget handed back) and
+  letter `i` of `bench_stm32` (the rungs as the slope, and the cost table
+  at the new rates) on the Nucleo-G0B1RE with the two 2.2 kOhm pull-ups
+  back would measure it.
 
 - **A data byte refused under an engine.** The NACK's name under an
   engine is the transmit channel's count (the address's when it never

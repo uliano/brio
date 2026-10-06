@@ -1160,18 +1160,22 @@ void ta_block() {
         }
         print(serial, "PRESC ", v->presc, " SCLL ", v->scll, " SCLH ", v->sclh,
               " SDADEL ", v->sdadel, " SCLDEL ", v->scldel, " -> ",
-              i2c_scl_hz(SysClock::hz(), *v, s), " Hz, tSCLL ",
+              i2c_scl_hz(SysClock::hz(), *v, I2cFilters{}, i2c_bus_timing(s)),
+              " Hz at most, tSCLL ",
               i2c_scll_ns(SysClock::hz(), *v), " ns tSCLH ",
               i2c_sclh_ns(SysClock::hz(), *v), " ns", crlf);
     }
-    bench.verdict("all three speeds reachable at 64 MHz, none above its band",
+    bench.verdict("all three speeds reachable at 64 MHz, none above its band on the "
+                  "fastest wire there can be",
                   i2c_timing_for(64'000'000UL, I2cSpeed::standard_100k).has_value() &&
                       i2c_scl_hz(64'000'000UL,
                                  *i2c_timing_for(64'000'000UL, I2cSpeed::fast_400k),
-                                 I2cSpeed::fast_400k) == 400'000 &&
+                                 I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_400k)) ==
+                          400'000 &&
                       i2c_scl_hz(64'000'000UL,
                                  *i2c_timing_for(64'000'000UL, I2cSpeed::fast_plus_1m),
-                                 I2cSpeed::fast_plus_1m) == 1'000'000);
+                                 I2cFilters{}, i2c_bus_timing(I2cSpeed::fast_plus_1m)) ==
+                          1'000'000);
 
     // ---- the refusals a register can be asked for ----
     // THE INSTANCE WITHOUT THE INDEPENDENT CLOCK IS THE ONE THAT REFUSES,
@@ -1435,13 +1439,16 @@ void td_speeds() {
 
     // THE BRACKET IS PHYSICAL AND TWO-SIDED, which is the only honest
     // shape for a stopwatch on a wire with no pad to spare:
-    //   * the FLOOR is tSCLL + tSCLH, the register's own contribution.
-    //     Nothing can make the clock shorter than that - a stretch, a
-    //     slow edge and a detection delay all ADD;
-    //   * the CEILING is the chooser's own prediction, which charges the
-    //     I2C standard's WORST-CASE edges (tSYNC = 1000 / 750 / 500 ns).
-    //     A real 2.2 kOhm bus is far quicker than that, so the measured
-    //     period lands INSIDE the bracket and nearer the floor.
+    //   * the FLOOR is the chooser's own prediction, tSCLL + tSCLH plus
+    //     the least detection delay any wire can have (the filters and
+    //     two kernel periods an edge): nothing makes the clock shorter -
+    //     a stretch, a slow edge and a third synchronization period all
+    //     ADD - so THE SPEED ASKED IS A CEILING;
+    //   * the CEILING on the period is tSCLL + tSCLH plus the tSYNC the
+    //     manual's example tables 172..174 charge for the mode (1000 /
+    //     750 / 500 ns) as their example. A 2.2 kOhm bus is far quicker
+    //     than that, so the measured period lands INSIDE the bracket and
+    //     nearer the floor.
     for (uint8_t i = 0; i < 3u; ++i) {
         const auto s = static_cast<I2cSpeed>(i);
         if (!Host::speed_ok(s)) {
@@ -1450,21 +1457,27 @@ void td_speeds() {
             continue;
         }
         const I2cTiming t = Host::timing_of(s);
-        const uint32_t floor_ns = i2c_scll_ns(Host::kernel_hz(), t) +
-                                  i2c_sclh_ns(Host::kernel_hz(), t);
-        const uint32_t predicted = 1'000'000'000UL / Host::scl_hz(s);
+        const uint32_t halves_ns = i2c_scll_ns(Host::kernel_hz(), t) +
+                                   i2c_sclh_ns(Host::kernel_hz(), t);
+        const uint32_t floor_ns = 1'000'000'000UL / Host::scl_hz(s);
+        constexpr uint32_t manual_sync_ns[3] = {1000, 750, 500};
+        const uint32_t worst_ns = halves_ns + manual_sync_ns[i];
         peer_overruns = 0;
         uint8_t st = 0;
         const uint32_t ns = measure_scl_ns(32, s, st);
         print(serial, "  ", i2c_speed_hz(s) / 1000u, " kHz: measured ", ns,
-              " ns/clock, floor ", floor_ns, " ns, standard-edge prediction ",
-              predicted, " ns, status ", st, ", client overruns ", peer_overruns, crlf);
+              " ns/clock (", ns != 0u ? 1'000'000'000UL / ns : 0u, " Hz), tSCLL + tSCLH ",
+              halves_ns, " ns, so this wire's tSYNC is ", ns > halves_ns ? ns - halves_ns : 0u,
+              " ns; the floor ", floor_ns, " ns (", Host::scl_hz(s), " Hz), the manual's "
+              "tables' budget ", worst_ns, " ns; status ", st, ", client overruns ", peer_overruns,
+              crlf);
         if (st == i2c_ok) {
-            bench.verdict("the measured period is at least tSCLL + tSCLH",
-                          ns + 30u >= floor_ns);
-            bench.verdict("... and no slower than the standard's worst-case edges "
-                          "would make it",
-                          ns <= predicted + 60u);
+            bench.verdict("the measured period is at least the chooser's floor - the rate "
+                          "is never above the speed asked",
+                          ns + 30u >= floor_ns && ns + 30u >= 1'000'000'000UL / i2c_speed_hz(s));
+            bench.verdict("... and no slower than the manual's own tSYNC budget would "
+                          "make it",
+                          ns <= worst_ns + 60u);
             bench.verdict("... with the tenure byte-exact",
                           peer_rx_n == 32u && same(peer_rx, tx_buf, 32));
         } else {
@@ -1509,13 +1522,12 @@ void td_speeds() {
     }
 
     // ---- AND THE BUDGET IS A KNOB, WHICH IS THE POINT OF STATING IT ----
-    // The legs above ran on the STANDARD'S worst-case edges, which a
-    // 2.2 kOhm bus beats by a wide margin - so the produced clock comes
-    // out FASTER than nominal, and at Sm that means a bus above the
-    // 100 kHz the mode allows. The cure is to state what the bench
-    // measures. The difference between
-    // the measured period and the register's own floor IS this wire's
-    // tSYNC, and handing it back closes the loop.
+    // The legs above ran on no measured tSYNC: the chooser charged the
+    // floor, so the wire's own slopes made the clock SLOWER than nominal -
+    // a ceiling kept, at the price of a bus below the rate asked. The
+    // cure is to state what the bench measures: the difference between
+    // the measured period and the register's own tSCLL + tSCLH IS this
+    // wire's tSYNC, and handing it back closes the loop.
     {
         const I2cTiming t0 = Host::timing_of(I2cSpeed::standard_100k);
         const uint32_t floor_ns = i2c_scll_ns(Host::kernel_hz(), t0) +
@@ -1528,14 +1540,18 @@ void td_speeds() {
         (void)Host::init(clock, I2cClock::pclk, I2cFilters{}, measured);
         uint8_t st2 = 0;
         const uint32_t after = measure_scl_ns(32, I2cSpeed::standard_100k, st2);
+        const uint32_t before_hz = before != 0u ? 1'000'000'000UL / before : 0u;
+        const uint32_t after_hz = after != 0u ? 1'000'000'000UL / after : 0u;
         print(serial, "  this wire's own tSYNC is ", wire_ns, " ns; at 100 kHz the "
-              "standard-edge budget gives ", 1'000'000'000UL / before,
-              " Hz and the measured one ", 1'000'000'000UL / after, " Hz", crlf);
-        bench.verdict("the standard's worst-case budget runs the bus ABOVE its mode "
-                      "on a fast wire",
-                      1'000'000'000UL / before > 100'000UL);
-        bench.verdict("... and a MEASURED budget brings it back under the limit",
-                      st2 == i2c_ok && 1'000'000'000UL / after <= 100'000UL);
+              "unmeasured default gives ", before_hz, " Hz and the measured budget ",
+              after_hz, " Hz", crlf);
+        bench.verdict("the unmeasured default keeps the bus at or under its mode on a real "
+                      "wire",
+                      before_hz <= 100'000UL);
+        bench.verdict("... and a MEASURED budget brings it to the rate asked, within one "
+                      "per cent and never further from it",
+                      st2 == i2c_ok && after_hz >= before_hz && after_hz >= 99'000UL &&
+                          after_hz <= 101'000UL);
         (void)Host::init(clock, I2cClock::pclk);
     }
 
@@ -1879,7 +1895,9 @@ void tg_filters() {
             continue;
         }
         print(serial, "SDADEL ", v->sdadel, " (", i2c_sdadel_ns(SysClock::hz(), *v),
-              " ns), SCL ", i2c_scl_hz(SysClock::hz(), *v, I2cSpeed::fast_400k), " Hz",
+              " ns), SCL ",
+              i2c_scl_hz(SysClock::hz(), *v, f, i2c_bus_timing(I2cSpeed::fast_400k)),
+              " Hz at most",
               crlf);
         if (last_sdadel != 0xFF && v->sdadel > last_sdadel) {
             shifts = false;

@@ -89,10 +89,12 @@ static_assert(fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::standard_100k).has_va
 static_assert(fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::fast_400k).has_value());
 static_assert(fmpi2c_scl_hz(16'000'000UL,
                             *fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::standard_100k),
-                            FmpI2cSpeed::standard_100k) == 100'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::standard_100k)) ==
+              98'765);
 static_assert(fmpi2c_scl_hz(16'000'000UL,
                             *fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::fast_400k),
-                            FmpI2cSpeed::fast_400k) == 400'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::fast_400k)) ==
+              400'000);
 // The chosen value meets 23.4.5's two bounds and the chapter's minimum
 // stretch is what its two delays make it.
 static_assert(fmpi2c_setup_ok(16'000'000UL,

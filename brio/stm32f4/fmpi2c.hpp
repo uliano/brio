@@ -72,8 +72,13 @@
  *   - tSCL IS NOT tSCLL + tSCLH. 23.4.9's own formula adds tSYNC1 + tSYNC2
  *     - the SCL slopes, the filters and two to three kernel periods of
  *     synchronization each - and the manual's example tables charge
- *     500..1000 ns of it. It is a BUS fact and not a chip one, so it is an
- *     argument (FmpI2cBusTiming::sync_ns) beside the rise and fall times.
+ *     500..1000 ns of it. Its slopes are a BUS fact and not a chip one, so
+ *     the measured value is an argument (FmpI2cBusTiming::sync_ns) beside
+ *     the rise and fall times; left unmeasured, the chooser charges the
+ *     chip's own FLOOR under it (the filters and two kernel periods an
+ *     edge, no slope), so a requested rate is a CEILING no wire exceeds -
+ *     where the manual's budgets and ST's own timing utility, charging
+ *     more than a short wire takes, run such a wire FASTER than asked.
  *   - SDADEL HAS NO +1 AND THE OTHER THREE DO - and here the manual
  *     disagrees with itself: 23.7.5's field description gives tSDADEL =
  *     SDADEL x tPRESC while 23.4.5's prose gives SDADEL x tPRESC +
@@ -290,12 +295,22 @@ inline constexpr uint16_t fmpi2c_analog_filter_max_ns = 260;
  * measured bus states them.
  *
  * `sync_ns` is the one number with no standard behind it. 23.4.9 makes
- * tSCL = tSYNC1 + tSYNC2 + [(SCLH+1) + (SCLL+1)] x tPRESC, and the two
- * tSYNC terms are the SCL slopes plus the filter delays plus two to three
- * kernel periods each; their floor is 4 x tI2CCLK, and the example tables
- * assume 1000 ns for Sm, 750 for Fm and 500..655 for Fm+. THOSE ARE THE
- * DEFAULTS HERE, so this file's arithmetic reproduces the manual's own
- * tables, and a caller who has measured its bus overrides them.
+ * tSCL = tSYNC1 + tSYNC2 + [(SCLH+1) + (SCLL+1)] x tPRESC, and each tSYNC
+ * term is an SCL slope, the analog filter's delay, the digital filter's
+ * DNF x tI2CCLK and two to three kernel periods of synchronization. Every
+ * one of those has a floor and only the slopes have no ceiling a driver
+ * can know - tables 134 and 135 charge 1000 / 750 / 500..655 ns, ST's own
+ * timing utility (I2C_GetTiming, shipped with the STM32Cube examples)
+ * charges the filter, two kernel periods and a "typical" rise and fall of
+ * 640 + 20 / 250 + 100 / 60 + 100 ns, and both run a wire with faster
+ * edges FASTER than asked (the bench measured 494 kHz for 400 on a 2.2
+ * kOhm self-link). So the default here is ZERO, which means "not
+ * measured": the chooser then charges the FLOOR alone
+ * (fmpi2c_sync_floor_cycles(), no slope at all), the fastest any wire can
+ * make, and the asked rate is a CEILING - a real wire only adds its slopes
+ * and runs slower. A caller who has measured its bus states its tSYNC1 +
+ * tSYNC2 here and gets the asked rate itself; a value under the floor is
+ * physically impossible and the floor is charged instead.
  */
 struct FmpI2cBusTiming {
     uint16_t rise_ns;
@@ -304,12 +319,13 @@ struct FmpI2cBusTiming {
     uint16_t sync_ns;
 };
 
-/// Table 131's columns, with tables 134 and 135's own tSYNC assumption.
+/// Table 131's columns, and no measured tSYNC: the rate a chooser solves
+/// against these is a ceiling on any wire.
 constexpr FmpI2cBusTiming fmpi2c_bus_timing(FmpI2cSpeed s) {
     switch (s) {
-        case FmpI2cSpeed::standard_100k: return {1000, 300, 250, 1000};
-        case FmpI2cSpeed::fast_400k: return {300, 300, 100, 750};
-        default: return {120, 120, 50, 500};
+        case FmpI2cSpeed::standard_100k: return {1000, 300, 250, 0};
+        case FmpI2cSpeed::fast_400k: return {300, 300, 100, 0};
+        default: return {120, 120, 50, 0};
     }
 }
 
@@ -521,7 +537,7 @@ constexpr uint32_t fmpi2c_min_stretch_cycles(const FmpI2cTiming& t) {
 /**
  * WHAT A REGISTER VALUE REALLY PRODUCES - 23.4.9's own formula:
  *     tSCL = tSYNC1 + tSYNC2 + [(SCLH + 1) + (SCLL + 1)] x tPRESC
- * `sync_ns` is the caller's tSYNC1 + tSYNC2 budget (see FmpI2cBusTiming).
+ * `sync_ns` is a tSYNC1 + tSYNC2 budget in nanoseconds, charged as given.
  * With each table's own footnoted budget this reproduces every cell of
  * tables 134 and 135 exactly - the static_asserts at the bottom of this
  * file are that check.
@@ -537,9 +553,40 @@ constexpr uint32_t fmpi2c_scl_hz(uint32_t kernel_hz, const FmpI2cTiming& t, uint
     return cycles == 0u ? 0u : kernel_hz / cycles;
 }
 
-/// The same with the mode's own default budget - the everyday form.
-constexpr uint32_t fmpi2c_scl_hz(uint32_t kernel_hz, const FmpI2cTiming& t, FmpI2cSpeed s) {
-    return fmpi2c_scl_hz(kernel_hz, t, fmpi2c_bus_timing(s).sync_ns);
+/**
+ * THE FLOOR UNDER tSYNC1 + tSYNC2, in kernel cycles: 23.4.9's list for
+ * each of the two edges with the slope taken as zero - the analog filter's
+ * tAF(min) while it is on, DNF x tI2CCLK, and two kernel periods of
+ * synchronization - which is the manual's own "minimum value is 4 x
+ * tI2CCLK" (tables 134 and 135's footnotes) with the filters added. No
+ * wire detects its edges sooner, so a period solved against this floor is
+ * the SHORTEST the register value can make. tAF(min) is zero here (above),
+ * which only lowers the floor and keeps the claim true.
+ */
+constexpr uint32_t fmpi2c_sync_floor_cycles(uint32_t kernel_hz, const FmpI2cFilters& f) {
+    const uint32_t af =
+        f.analog ? fmpi2c_ns_cycles_down(kernel_hz, fmpi2c_analog_filter_min_ns) : 0u;
+    return 2u * (2u + static_cast<uint32_t>(f.digital) + af);
+}
+
+/// The tSYNC1 + tSYNC2 the arithmetic charges on this bus: the measured
+/// budget the caller stated, never less than the floor - and the floor
+/// alone when nothing was measured (sync_ns == 0, the default).
+constexpr uint32_t fmpi2c_sync_cycles(uint32_t kernel_hz, const FmpI2cFilters& f,
+                                      const FmpI2cBusTiming& bus) {
+    const uint32_t floor = fmpi2c_sync_floor_cycles(kernel_hz, f);
+    const uint32_t stated = fmpi2c_ns_cycles_near(kernel_hz, bus.sync_ns);
+    return stated > floor ? stated : floor;
+}
+
+/// What a register value produces on this bus: the exact rate on a bus
+/// whose tSYNC was stated, and on an unmeasured one (the default) the
+/// fastest rate any wire can make - the CEILING the chooser guarantees.
+constexpr uint32_t fmpi2c_scl_hz(uint32_t kernel_hz, const FmpI2cTiming& t,
+                                 const FmpI2cFilters& f, const FmpI2cBusTiming& bus) {
+    const uint32_t cycles =
+        fmpi2c_scll_cycles(t) + fmpi2c_sclh_cycles(t) + fmpi2c_sync_cycles(kernel_hz, f, bus);
+    return cycles == 0u ? 0u : kernel_hz / cycles;
 }
 
 /**
@@ -571,12 +618,17 @@ constexpr uint8_t fmpi2c_high_share(FmpI2cSpeed s) {
  *
  * The method is the chapter's own, in four steps:
  *  1. The PERIOD in kernel cycles is kernel_hz / f_SCL ROUNDED UP, less the
- *     tSYNC budget; what remains is split between tSCLL and tSCLH in the
- *     mode's own ratio (above), and both halves are rounded UP into
- *     prescaler units. Every rounding is in the same direction on purpose:
- *     a requested SCL is a CEILING and the produced bus is never faster
- *     than the one asked for, at a kernel rate that divides the speed or
- *     at one that does not.
+ *     tSYNC the bus is charged (fmpi2c_sync_cycles(): the floor unless the
+ *     caller measured more); what remains is split between tSCLL and tSCLH
+ *     in the mode's own ratio (above), each half raised if need be until
+ *     table 133's tLOW(min) and tHIGH(min) hold on the wire with the
+ *     floor's detection delay - half the floor per edge, ST's own tLOW =
+ *     tAF(min) + tDNF + 2 x tI2CCLK + tSCLL - and both halves are rounded
+ *     UP into prescaler units. Every rounding is in the same direction on
+ *     purpose: on an unmeasured bus a requested SCL is a CEILING on any
+ *     wire, the wire's slopes only adding to the floor, at a kernel rate
+ *     that divides the speed or at one that does not; on a measured bus it
+ *     is the rate itself.
  *  2. SCLDEL comes from 23.4.5's setup condition, a LOWER bound:
  *     (SCLDEL + 1) x tPRESC >= tr(max) + tSU;DAT(min).
  *  3. SDADEL comes from its hold condition, also a lower bound:
@@ -614,17 +666,28 @@ constexpr std::optional<FmpI2cTiming> fmpi2c_timing_for(uint32_t kernel_hz, FmpI
     }
     const uint32_t speed_hz = fmpi2c_speed_hz(s);
     const uint32_t total = (kernel_hz + speed_hz - 1u) / speed_hz;
-    const uint32_t sync = fmpi2c_ns_cycles_near(kernel_hz, bus.sync_ns);
+    const uint32_t sync = fmpi2c_sync_cycles(kernel_hz, filters, bus);
     if (total < sync + 2u) {
         return {};
     }
     const uint32_t budget = total - sync;
     const uint32_t den = static_cast<uint32_t>(fmpi2c_low_share(s)) + fmpi2c_high_share(s);
-    const uint32_t low = (budget * fmpi2c_low_share(s) + den - 1u) / den;
+    uint32_t low = (budget * fmpi2c_low_share(s) + den - 1u) / den;
     if (low >= budget) {
         return {};
     }
-    const uint32_t high = budget - low;
+    uint32_t high = budget - low;
+    // Table 133's minima on the WIRE, whose low (high) time is tSCLL
+    // (tSCLH) plus one edge's detection delay - at least half the floor.
+    const uint32_t edge = fmpi2c_sync_floor_cycles(kernel_hz, filters) / 2u;
+    const uint32_t low_need = fmpi2c_ns_cycles_up(kernel_hz, fmpi2c_low_min_ns(s));
+    const uint32_t high_need = fmpi2c_ns_cycles_up(kernel_hz, fmpi2c_high_min_ns(s));
+    if (low + edge < low_need) {
+        low = low_need - edge;
+    }
+    if (high + edge < high_need) {
+        high = high_need - edge;
+    }
 
     // The two delay bounds, in KERNEL cycles (the prescaler divides them
     // below). Both are 23.4.5's, with tHD;DAT(min) = 0 on every non-SMBus
@@ -660,8 +723,9 @@ constexpr std::optional<FmpI2cTiming> fmpi2c_timing_for(uint32_t kernel_hz, FmpI
     return {};
 }
 
-/// The same with the mode's own standard limits and tSYNC budget - what
-/// every caller that has not measured its bus wants.
+/// The same with the mode's own standard limits and no measured tSYNC -
+/// what every caller that has not measured its bus wants: the asked rate
+/// is a ceiling.
 constexpr std::optional<FmpI2cTiming> fmpi2c_timing_for(uint32_t kernel_hz, FmpI2cSpeed s,
                                                         const FmpI2cFilters& filters = {}) {
     return fmpi2c_timing_for(kernel_hz, s, filters, fmpi2c_bus_timing(s));
@@ -879,8 +943,10 @@ constexpr bool fmpi2c_address_config_valid(const FmpI2cAddressConfig& c) {
 /// What init() takes besides the clock: which kernel clock to run on, the
 /// noise filters, whether the port's own weak pull-ups are wanted (a bench
 /// convenience on a bus with no pull-ups of its own - far too weak for a
-/// real one), and the bus's measured edges. Every field has the value a
-/// plain 100 kHz bus on the APB clock wants.
+/// real one), and the bus's measured edges and detection delay
+/// (FmpI2cBusTiming: without them each speed asked is a ceiling the wire
+/// stays at or under; with a measured tSYNC it is the rate itself). Every
+/// field has the value a plain 100 kHz bus on the APB clock wants.
 ///
 /// THE CLIENT TAKES THE SAME STRUCT, name notwithstanding: all four are
 /// properties of the PORT and not of the role - a target's delays are
@@ -1923,11 +1989,12 @@ public:
     /// 16 MHz, Fm+ is gone.)
     static bool speed_ok(FmpI2cSpeed s) { return valid_[static_cast<uint8_t>(s)]; }
     /// What a speed really runs at on this bus - the produced rate, not the
-    /// asked one.
+    /// asked one: exact on a bus whose tSYNC init() was told, and on an
+    /// unmeasured one the fastest any wire makes (a real wire runs at or
+    /// below it).
     static uint32_t scl_hz(FmpI2cSpeed s) {
-        return cfg_.bus
-                   ? fmpi2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], cfg_.bus->sync_ns)
-                   : fmpi2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], s);
+        return fmpi2c_scl_hz(ker_hz_, table_[static_cast<uint8_t>(s)], cfg_.filters,
+                             cfg_.bus ? *cfg_.bus : fmpi2c_bus_timing(s));
     }
     static FmpI2cTiming timing_of(FmpI2cSpeed s) { return table_[static_cast<uint8_t>(s)]; }
     /// The rate the arithmetic divides: this instance's KERNEL clock.
@@ -2687,44 +2754,67 @@ static_assert(fmpi2c_scldel_ns(8'000'000UL, FmpI2cTiming{0x0, 0x9, 0x3, 1, 3}) =
 static_assert(fmpi2c_min_stretch_cycles(FmpI2cTiming{0x0, 0x9, 0x3, 1, 3}) == 6);
 
 // THE CHOOSER at the three kernel clocks a 180 MHz part can put under this
-// block: its APB1 (45 MHz), SYSCLK (180 MHz) and the HSI (16 MHz). Every
-// one lands inside the mode's band and NEVER ABOVE IT - the period is
+// block: its APB1 (45 MHz), SYSCLK (180 MHz) and the HSI (16 MHz), with no
+// measured tSYNC. Priced at the floor - the fastest wire there can be -
+// every one lands inside the mode's band and NEVER ABOVE IT: the period is
 // rounded up before it is split, so a kernel rate the speed does not divide
 // (45 MHz against 400 kHz) still gives a bus no faster than the one asked
-// for.
+// for, and the floor is the least any wire adds, so no wire makes it
+// faster either.
+static_assert(fmpi2c_sync_floor_cycles(45'000'000UL, FmpI2cFilters{}) == 4);
+static_assert(fmpi2c_sync_floor_cycles(45'000'000UL, FmpI2cFilters{true, 3}) == 10);
 static_assert(fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::standard_100k).has_value());
 static_assert(fmpi2c_scl_hz(45'000'000UL,
                             *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::standard_100k),
-                            FmpI2cSpeed::standard_100k) <= 100'000);
-static_assert(fmpi2c_scl_hz(45'000'000UL,
-                            *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::standard_100k),
-                            FmpI2cSpeed::standard_100k) >= 99'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::standard_100k)) ==
+              99'557);
 static_assert(fmpi2c_scl_hz(45'000'000UL,
                             *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_400k),
-                            FmpI2cSpeed::fast_400k) <= 400'000);
-static_assert(fmpi2c_scl_hz(45'000'000UL,
-                            *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_400k),
-                            FmpI2cSpeed::fast_400k) >= 390'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::fast_400k)) ==
+              394'736);
 static_assert(fmpi2c_scl_hz(45'000'000UL,
                             *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_plus_1m),
-                            FmpI2cSpeed::fast_plus_1m) == 1'000'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::fast_plus_1m)) ==
+              1'000'000);
 static_assert(fmpi2c_scl_hz(180'000'000UL,
                             *fmpi2c_timing_for(180'000'000UL, FmpI2cSpeed::standard_100k),
-                            FmpI2cSpeed::standard_100k) == 100'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::standard_100k)) ==
+              98'955);
 static_assert(fmpi2c_scl_hz(180'000'000UL,
                             *fmpi2c_timing_for(180'000'000UL, FmpI2cSpeed::fast_400k),
-                            FmpI2cSpeed::fast_400k) == 400'000);
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::fast_400k)) ==
+              396'475);
 static_assert(fmpi2c_scl_hz(180'000'000UL,
                             *fmpi2c_timing_for(180'000'000UL, FmpI2cSpeed::fast_plus_1m),
-                            FmpI2cSpeed::fast_plus_1m) <= 1'000'000);
-// On the HSI the chooser reproduces the manual's own TIMES for Fm at
-// 16 MHz - twenty kernel cycles low and eight high - with a finer prescaler
-// than table 135's, which is the whole difference between solving the
-// inequalities and hand-picking a row.
+                            FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::fast_plus_1m)) ==
+              1'000'000);
+// A MEASURED wire stated to the chooser gets the rate itself, to the
+// prescaler's resolution - and a stated tSYNC under the floor is
+// physically impossible, so the floor is charged instead.
+static_assert(fmpi2c_scl_hz(45'000'000UL,
+                            *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_400k,
+                                               FmpI2cFilters{},
+                                               FmpI2cBusTiming{300, 300, 100, 250}),
+                            FmpI2cFilters{}, FmpI2cBusTiming{300, 300, 100, 250}) <= 400'000);
+static_assert(fmpi2c_scl_hz(45'000'000UL,
+                            *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_400k,
+                                               FmpI2cFilters{},
+                                               FmpI2cBusTiming{300, 300, 100, 250}),
+                            FmpI2cFilters{}, FmpI2cBusTiming{300, 300, 100, 250}) >= 390'000);
+static_assert(fmpi2c_sync_cycles(45'000'000UL, FmpI2cFilters{},
+                                 FmpI2cBusTiming{300, 300, 100, 20}) == 4);
+// Handed the tSYNC table 135's Fm column assumes (750 ns), the chooser
+// reproduces that column's TIMES on the HSI - twenty kernel cycles low and
+// eight high - with a finer prescaler than the table's, which is the whole
+// difference between solving the inequalities and hand-picking a row.
 static_assert(fmpi2c_scll_ns(16'000'000UL,
-                             *fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::fast_400k)) == 1250);
+                             *fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::fast_400k,
+                                                FmpI2cFilters{},
+                                                FmpI2cBusTiming{300, 300, 100, 750})) == 1250);
 static_assert(fmpi2c_sclh_ns(16'000'000UL,
-                             *fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::fast_400k)) == 500);
+                             *fmpi2c_timing_for(16'000'000UL, FmpI2cSpeed::fast_400k,
+                                                FmpI2cFilters{},
+                                                FmpI2cBusTiming{300, 300, 100, 750})) == 500);
 // The chosen values meet 23.4.5's own two conditions.
 static_assert(fmpi2c_setup_ok(45'000'000UL,
                               *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_400k),
@@ -2732,6 +2822,20 @@ static_assert(fmpi2c_setup_ok(45'000'000UL,
 static_assert(fmpi2c_hold_ok(45'000'000UL,
                              *fmpi2c_timing_for(45'000'000UL, FmpI2cSpeed::fast_400k),
                              FmpI2cFilters{}, fmpi2c_bus_timing(FmpI2cSpeed::fast_400k)));
+// THE ORACLE'S DIRECTION: ST's own I2C_GetTiming (the STM32Cube examples'
+// timing utility, CubeMX's method) answers 0x30A03234, 0x00F02136 and
+// 0x00400A12 at 45 MHz, solved against a typical rise and fall of 640 +
+// 20, 250 + 100 and 60 + 100 ns and a 50 ns analog filter - so on a wire
+// with faster edges the same words run at up to 107 kHz, 484 kHz and
+// 1.32 MHz, where this chooser's stay at the speed asked. (The words are
+// spelled as fields - PRESC, SCLL, SCLH, SDADEL, SCLDEL - because the
+// unpacking is compiled only on a part with the instance.)
+static_assert(fmpi2c_scl_hz(45'000'000UL, FmpI2cTiming{0x3, 0x34, 0x32, 0, 0xA}, FmpI2cFilters{},
+                            fmpi2c_bus_timing(FmpI2cSpeed::standard_100k)) == 107'142);
+static_assert(fmpi2c_scl_hz(45'000'000UL, FmpI2cTiming{0x0, 0x36, 0x21, 0, 0xF}, FmpI2cFilters{},
+                            fmpi2c_bus_timing(FmpI2cSpeed::fast_400k)) == 483'870);
+static_assert(fmpi2c_scl_hz(45'000'000UL, FmpI2cTiming{0x0, 0x12, 0x0A, 0, 0x4}, FmpI2cFilters{},
+                            fmpi2c_bus_timing(FmpI2cSpeed::fast_plus_1m)) == 1'323'529);
 
 // ES0298 2.12.2's floors, as refusals: the HSI's 16 MHz cannot do Fm+, and
 // a 2 MHz kernel cannot do any of the three - which is what makes the

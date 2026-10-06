@@ -1739,7 +1739,7 @@ void measure_period(I2cSpeed speed) {
     print(serial, "  ", i2c_speed_hz(speed) / 1000u, " kHz: the measured SCL period ", p16 / 16u,
           '.', (p16 % 16u) * 100u / 16u < 10u ? "0" : "", (p16 % 16u) * 100u / 16u,
           " cycles = ", Ruler::hz() * 16u / p16, " Hz; the register's own ",
-          I2cDma::scl_hz(speed), " Hz with the standard's edges", crlf);
+          I2cDma::scl_hz(speed), " Hz on the fastest wire there can be (the ceiling)", crlf);
 }
 
 /// The wire's rise from a released low, in cycles: a pad of the host's
