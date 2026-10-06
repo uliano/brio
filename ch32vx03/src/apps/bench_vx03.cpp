@@ -18,9 +18,9 @@
 // link guard) and for the CH32V303VC, whose V4F runs it under the ilp32f
 // ABI with the console wired the same way on WCH's evaluation board.
 //
-// ON THE 32 KB TIER the app is two images (the groups line below): the
-// skeleton's four letters in one, the engines and the SPI host in the
-// other. ON THE CH32V203C8 the whole is within a few hundred bytes of the
+// ON THE 32 KB TIER the app is three images (the groups line below): the
+// skeleton's four letters in one, the engines in the second and the SPI
+// host in the third. ON THE CH32V203C8 the whole is within a few hundred bytes of the
 // part's 60 KB, so it is two images there too (the groups.v203c8 line):
 // the skeleton with the engines and the SPI host, then the serial
 // transport and the I2C host. Whole on the CH32V303.
@@ -97,12 +97,11 @@
 //                    and busy HOLDS THE TICK HANDLER, added back because it
 //                    ran inside the window, beside the loop's own
 //                    turnaround; isr is the handler alone, so busy - isr
-//                    is what a turn costs besides it. A tick makes TWO
-//                    turns here (measured on the CH32V203C8T6): after
-//                    every wake the platform's WFE form finds an event
-//                    standing, and the next wfi returns at once on it -
-//                    so wall is half a tick period, and the note line's
-//                    two counts say so
+//                    is what a turn costs besides it. A tick makes ONE
+//                    turn: the platform's idle() consumes the event its
+//                    wake left standing (ch32vx03/platform.hpp), so wall
+//                    is a tick period, and the note line's two counts say
+//                    so
 //   m  memcpy and memset of the runtime (rt/rt.cpp), each the best of 8
 //      runs on a Stopwatch, at 1, 16, 256 and 4096 bytes between two
 //      static word-aligned buffers (the runtime's word path). Nothing
@@ -217,6 +216,16 @@
 //                       host's own threshold makes of it (a write tolerates
 //                       the overrun and finishes; a receive must never see
 //                       one).
+//        spi.held       THE HOLD-OFF AN IMAGE DECLARES (SpiHost's last
+//                       parameter) against the one it has: the default
+//                       host (200 cycles, two frames of a receive in
+//                       flight from /32) and one declaring 100 (from /16),
+//                       a receive of 1024 8-bit frames at /16 - a frame of
+//                       128 cycles, shorter than the console's handler -
+//                       pumped and polled, eight runs each under the same
+//                       load: the overruns and the statuses counted. The
+//                       declared-short host is the one that must lose
+//                       frames, the honest one none.
 //
 //   i  THE I2C HOST ABOVE THE WIRE on the self-link (the parts with I2C2;
 //      a part without it declines the letter by name, and the 32 KB
@@ -266,7 +275,7 @@
 // On the CH32V203C8 letters u and i sit in different images: letter i run
 // after letter u in one session stalls at its first tenure (each passes
 // alone), not yet explained - benchmark.md lists it.
-// build: groups = rmpt,de
+// build: groups = rmpt,d,e
 // build: groups.v203c8 = rmptdeu,i
 // build: monitor_speed = 115200
 
@@ -1049,10 +1058,17 @@ void td_dma() {
 // e - the SPI host above the wire
 // ---------------------------------------------------------------------------
 using SpiPlain = SpiHost<1, spi_pins>;   // no engines: the polled loop and the pump
+/// spi.held's second host: the same, DECLARING a hold-off of 100 cycles -
+/// shorter than this image's console handler with its stamps, about 200.
+using SpiShort = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, 100>;
 volatile bool spi_plain_done = false;
-/// Which host spi1_handler serves: letter d's engined one or letter e's
-/// plain one. A load and a branch before the body, the bench's own.
-bool spi_plain_active = false;
+/// Which host spi1_handler serves: letter e's plain one (zero, so the
+/// pump's path is a load and one branch before the body, the bench's
+/// own), letter d's engined one, or spi.held's short one.
+constexpr uint8_t spi1_plain = 0;
+constexpr uint8_t spi1_dma = 1;
+constexpr uint8_t spi1_short = 2;
+uint8_t spi1_serves = spi1_dma;
 
 /// Letter e's counters: SPI1's vector alone (each run starts on a fresh
 /// tick and ends inside it; spi.ahead and spi.live run under the console
@@ -1320,12 +1336,73 @@ void spi_live_report() {
     }
 }
 
+/// spi.held: THE HOLD-OFF AN IMAGE DECLARES against the one it has. A
+/// receive of 1024 8-bit frames at /16 - a frame of 128 cycles, between
+/// the two hosts' thresholds - eight runs under the console's interrupts
+/// on each host, the pump and the polled loop: the host declaring 100
+/// keeps two frames in flight there and the honest default one.
+template <typename H>
+void spi_held_line(const char* name, bool polled) {
+    constexpr uint16_t frames = 1024;
+    uint8_t overran = 0;
+    uint8_t faulted = 0;
+    uint8_t lost = 0;   // of those, spi_overrun: a frame lost to the receive buffer
+    uint8_t hung = 0;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        typename H::Request r{};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
+        r.rx = lend<Lease::reply>(static_cast<uint8_t*>(buffer_b));
+        r.len = frames;
+        r.mode = SpiMode::mode0;
+        r.clock = SpiClock::div16;
+        r.bits = SpiDataSize::bits8;
+        r.polled = polled;
+        spi_plain_done = false;
+        console_drain();
+        print(serial, live_line.text);
+        const bool sync = H::start(r);
+        uint32_t spins = 8'000'000UL;
+        while (!sync && !spi_plain_done && spins-- != 0u) {
+        }
+        if (!sync && !spi_plain_done) {
+            ++hung;
+            (void)H::recover();
+        }
+        if (Spi<1>::overrun()) {
+            ++overran;
+            Spi<1>::clear_overrun();
+        }
+        if (H::status() != spi_ok) {
+            ++faulted;
+            lost = static_cast<uint8_t>(lost + (H::status() == spi_overrun ? 1u : 0u));
+        }
+    }
+    console_drain();
+    const auto ahead = H::write_ahead_from(SpiDataSize::bits8);
+    print(serial, "  spi.held ", name, " (two in flight from /", ahead ? spi_division(*ahead) : 0u, ") ",
+          polled ? "polled" : "pump", " receive /16 8-bit: ", overran, " overruns, ", faulted,
+          " statuses not spi_ok (", lost, " spi_overrun), ", hung,
+          " never completed, in 8 runs under the console's interrupts", crlf);
+}
+
+void spi_held_report() {
+    for (const bool polled : {false, true}) {
+        spi1_serves = spi1_plain;
+        (void)SpiPlain::init(clock);
+        spi_held_line<SpiPlain>("hold-off 200 (the default)", polled);
+        spi1_serves = spi1_short;
+        (void)SpiShort::init(clock);
+        spi_held_line<SpiShort>("hold-off 100 (declared short)", polled);
+    }
+    spi1_serves = spi1_plain;
+}
+
 void te_spi() {
     console_drain();
     for (uint32_t k = 0; k < 4096u; ++k) {
         buffer_a[k] = static_cast<uint8_t>(k * 7u + 3u);
     }
-    spi_plain_active = true;
+    spi1_serves = spi1_plain;
     const bool up = SpiPlain::init(clock);
     const auto ahead8 = SpiPlain::write_ahead_from(SpiDataSize::bits8);
     const auto ahead16 = SpiPlain::write_ahead_from(SpiDataSize::bits16);
@@ -1340,7 +1417,8 @@ void te_spi() {
     console_drain();
     spi_ahead_report();
     spi_live_report();
-    spi_plain_active = false;
+    spi_held_report();
+    spi1_serves = spi1_dma;
     spi_up = false;   // letter d brings its own host up again
     bench.verdict("ran", true);
 }
@@ -2331,8 +2409,12 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
 
 extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     spi_meter.enter();
-    if (spi_plain_active) {
+    if (spi1_serves == spi1_plain) {
         if (SpiPlain::isr()) {
+            spi_plain_done = true;
+        }
+    } else if (spi1_serves == spi1_short) {
+        if (SpiShort::isr()) {
             spi_plain_done = true;
         }
     } else if (SpiDma::isr()) {

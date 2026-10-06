@@ -207,7 +207,7 @@ the CH32V006K8U6 at 48 MHz. What it measured:
   included); the consume costs 6 to 15 cycles a wake by code layout:
   from an edge that finds the core asleep to the caller's loop 118 to
   126 against 112, an `idle()` the latch returns at once 63 to 69
-  against 54, a quiet turn 293 to 295 against 287.
+  against 54, a quiet turn 290 to 295 against 287.
 - **The STK arithmetic holds.** CMP = 47999 as programmed; over 200
   reloads the CNT-delta accumulation `delay_us` is built on tracked
   the interrupt count to 622 cycles of error out of 9.6 million

@@ -97,12 +97,22 @@
 //      try. The edge so walks across every instruction of the idle path
 //      and of the loop around it, the sleep entry included, whatever the
 //      code's layout. TIM2 at 1 MHz is the clock of each try and its
-//      RESCUE: a try that takes its 50 ms period is a wake idle() lost.
-//      The writes to CNTL shorten the ticks they land in, so kernel time
-//      runs fast during the letter. Prints the cycles from the edge to
-//      the handler and to the caller's loop for an edge that finds the
-//      core asleep, and what an idle() costs when the latch makes it
-//      return at once
+//      RESCUE: a try that takes its 50 ms period is a wake idle() lost
+//      for good, and one that ends a whole tick period late is a wake
+//      lost until the next tick (the bound: 250 us for one tick, 1250 us
+//      for two). The writes to CNTL shorten the ticks they land in, so
+//      kernel time runs fast during the letter. Prints the cycles from
+//      the edge to the handler and to the caller's loop for an edge that
+//      finds the core asleep, and what an idle() costs when the latch
+//      makes it return at once
+//   o  THE KERNEL'S TURN: a Tenuto pack of three quiet AOs, two with a
+//      periodic time event, turned as Tenuto::run() turns it over 100
+//      ticks with the tick the only interrupt - one turn per tick when
+//      idle() consumes the event latch its wake left, two when it does
+//      not (judged: 100 to 102, one turn of allowance at each end of the
+//      window) - and what one quiet turn costs when the latch makes its
+//      idle() return at once: the turn an interrupt would cost twice
+//      over. (Not `k`: that letter is the V4F's interrupt storm.)
 //
 //   i  (by name only) THREE REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a .noinit token, so it is NOT in
@@ -122,7 +132,7 @@
 //      against the symbols this image links - in `z`
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcdefgitw,mn
+// build: groups = abcdefgitw,mno
 // (on the 32 KB parts the suite is two images, test_vx03_platform-1 and
 // -2: the whole is over the CH32V203C6's 28 KB of image; `i` runs as
 // `--app test_vx03_platform-1` there)
@@ -144,7 +154,11 @@
 #include "ch32vx03/ticker.hpp"
 #include "ch32vx03/tim.hpp"
 #include "ch32vx03/usart.hpp"
+#include "kernel/event_queue.hpp"
 #include "kernel/panic.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
@@ -1502,7 +1516,9 @@ void event_latch(bool latched) {
 /// cycles later, then the kernel's loop until `edges` ticks have been
 /// served. Masked throughout but for what idle() unmasks.
 struct EdgeTry {
-    bool lost;
+    bool lost;           ///< the rescue ended it: a wake lost for good
+    bool late;           ///< a whole tick period late: a wake lost until the next tick
+    uint32_t took_us;    ///< the try's span on the rescue's 1 MHz count
     uint32_t to_loop;    ///< the counter after the loop: cycles since the edge
     uint32_t to_entry;   ///< the counter at the handler's first statement
 };
@@ -1530,7 +1546,13 @@ EdgeTry edge_try(uint32_t d, uint32_t edges, bool latched) {
         rescued = rescue_periods != r0;
         r.to_entry = tick_entry;
     }
-    r.lost = rescued || took_us > 1500u;
+    // A wake lost for good waits for the rescue; one lost until the NEXT
+    // tick (a handler run after its edge's latch was consumed, say) ends a
+    // whole period late. The edges asked for land within 5 us of the
+    // period they need, so the bound sits a quarter period past that.
+    r.took_us = took_us;
+    r.lost = rescued;
+    r.late = !rescued && took_us > edges * 1000u - 750u;
     return r;
 }
 
@@ -1550,13 +1572,21 @@ void tw_edge() {
     constexpr uint32_t positions = 600;
     constexpr uint32_t shown = 6;
     uint32_t lost[2][2] = {{0, 0}, {0, 0}};
+    uint32_t late[2][2] = {{0, 0}, {0, 0}};
+    uint32_t slowest[2] = {0, 0};
     uint32_t where[2][2][shown] = {};
     EdgeTry asleep{};
     for (uint32_t edges = 1; edges <= 2u; ++edges) {
         for (uint32_t latched = 0; latched < 2u; ++latched) {
             for (uint32_t d = 0; d < positions; ++d) {
                 const EdgeTry r = edge_try(d, edges, latched != 0u);
-                if (r.lost) {
+                if (r.took_us > slowest[edges - 1u]) {
+                    slowest[edges - 1u] = r.took_us;
+                }
+                if (r.late) {
+                    ++late[edges - 1u][latched];
+                }
+                if (r.lost || r.late) {
                     uint32_t& n = lost[edges - 1u][latched];
                     if (n < shown) {
                         where[edges - 1u][latched][n] = d;
@@ -1595,21 +1625,93 @@ void tw_edge() {
     for (uint32_t e = 0; e < 2u; ++e) {
         for (uint32_t l = 0; l < 2u; ++l) {
             print(serial, "  waiting for ", e + 1u, " tick(s), latch ", l != 0u ? "set" : "clear",
-                  ": ", positions, " edge positions, ", lost[e][l], " lost");
+                  ": ", positions, " edge positions, ", lost[e][l] - late[e][l],
+                  " lost for good, ", late[e][l], " a tick late");
             for (uint32_t i = 0; i < lost[e][l] && i < shown; ++i) {
                 print(serial, i == 0u ? " at D=" : ",", where[e][l][i]);
             }
             print(serial, crlf);
         }
     }
+    print(serial, "  the slowest try: ", slowest[0], " us for one tick, ", slowest[1], " us for two",
+          crlf);
     print(serial, "  an edge that finds the core asleep: ", asleep.to_entry,
           " cycles to the handler's first statement, ", asleep.to_loop,
           " to the caller's loop; an idle() the latch returns at once: ", at_once,
           " cycles (two counter reads included)", crlf);
-    bench.verdict("no edge position loses the wake, waiting for one tick",
+    bench.verdict("no edge position loses the wake or serves it a tick late, waiting for one tick",
                   lost[0][0] + lost[0][1] == 0u);
     bench.verdict("nor waiting for two (the sleep after a tick was taken)",
                   lost[1][0] + lost[1][1] == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// o - the kernel's turn: how many per interrupt, and what one costs
+// ---------------------------------------------------------------------------
+// A pack shaped like a small program's: three AOs, two of them with a
+// periodic time event (500 ms and 1000 ms, so none fires in the 100 ms
+// this letter idles), none of them ever posted to.
+template <uint8_t N>
+struct Quiet {
+    struct Event {
+        uint8_t n;
+    };
+    static inline EventQueue<Event, 2, P> queue;
+    static inline TimeEvent<P, Quiet, Event> beat{Event{N}};
+    static void init() {
+        if constexpr (N != 0u) {
+            beat.arm_every(ticks_from_ms<P>(500u * N));
+        }
+    }
+    static void dispatch(const Event&) {}
+};
+using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
+
+/// One turn of Tenuto::run()'s loop, as it is written there.
+[[gnu::always_inline]] inline void kernel_turn() {
+    TimeEvents<P>::process();
+    if (!QuietKernel::step()) {
+        QuietKernel::idle_if_empty();
+    }
+}
+
+void to_turns() {
+    console_drain();
+    QuietKernel::init_all();
+
+    // Turns over 100 quiet ticks: the tick is the only interrupt (the
+    // console drained, nothing else enabled). The window opens and closes
+    // on a tick read, so a turn may straddle either end: 100 to 102.
+    const uint32_t t = Ticker::ticks();
+    uint32_t turns = 0;
+    while (Ticker::ticks() - t < 100u) {
+        kernel_turn();
+        ++turns;
+    }
+
+    // A quiet turn whose idle() the event latch returns at once - the
+    // turn an interrupt costs on top of the one that serves it when the
+    // waking edge is left latched - the two counter reads included.
+    uint32_t turn_cycles = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        {
+            P::CriticalSection cs;
+            event_latch(true);
+        }
+        const uint32_t c0 = cycles_now();
+        kernel_turn();
+        const uint32_t c1 = cycles_now();
+        if (c1 > c0 && c1 - c0 < turn_cycles) {
+            turn_cycles = c1 - c0;
+        }
+    }
+    TimeEvents<P>::clear_all();
+
+    print(serial, "  100 quiet ticks: ", turns, " kernel turns; a quiet turn whose idle() returns at once: ",
+          turn_cycles, " cycles (two counter reads included)", crlf);
+    bench.verdict("the kernel loop turns once per interrupt, not twice (the waking edge's latch "
+                  "is consumed)",
+                  turns >= 100u && turns <= 102u);
 }
 
 /// THE CH32V20x_D6 PORTC PROBE - a bench probe, outside the rule that
@@ -1759,6 +1861,7 @@ int main() {
     bench.letter('n', "the mask's shadow: a line taken after the instruction that masked it?",
                  tn_shadow);
     bench.letter('w', "the idle hook against the tick's edge, placed to the cycle", tw_edge);
+    bench.letter('o', "the kernel's turn: how many per interrupt, what one costs", to_turns);
     bench.letter('i', "THREE REAL RESETS (reboots the board)", ti_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 

@@ -13,8 +13,8 @@
  *    the configuration under the rules the chapter states, the data and
  *    status verbs, the sequences that clear each flag, and the ISR body
  *    that reads the raised-and-enabled sources. It decides nothing.
- *  - `SpiHost<n, pins, TxEngine, RxEngine>` is the ENGINE util/
- *    spi_bus.hpp's SpiBus drives: the Request is the other strata's
+ *  - `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the
+ *    ENGINE util/spi_bus.hpp's SpiBus drives: the Request is the other strata's
  *    VERBATIM (chip select, D/C, a command phase, a data phase with
  *    optional out and in, the per-request mode/rate/frame size, the
  *    polled or ISR-pumped completion), so an application written over
@@ -982,9 +982,13 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *      cycles; the kernel's post() of a 40-byte Request under the
  *      producers' mask - the copy by the runtime's memcpy between csrrci
  *      and csrsi - about 130; test_vx03_spi's console handler, 63
- *      instructions, about 120. The constant is the first, rounded; a
- *      program whose handlers are longer reads spi_overrun in its
- *      TransferDone, which is the guard the constant has;
+ *      instructions, about 120. The first, rounded, is the DEFAULT of the
+ *      host's `hold_off_cycles` parameter, and only a default: the figure
+ *      is a fact of the IMAGE, not of the family, so an image whose
+ *      handlers or masked windows are longer declares its own (and one
+ *      that knows its own are shorter may declare that), and an
+ *      spi_overrun in a TransferDone is the witness of a figure declared
+ *      too short;
  *  (b) the pump's own path from RXNE to the DATAR load: the hardware
  *      prologue's entry (16) and the seven instructions from the vector
  *      to the load - lui, the STATR load, the compiler's zero-extension
@@ -993,18 +997,26 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *
  * The polled receive loop reads under the same bound (an interrupt landing
  * between RXNE and its read is that latency), so it keeps the same rule.
- * On the BR ladder the first frame longer than the sum is 256 cycles -
+ * Under the default, on the BR ladder the first frame longer than the
+ * sum is 256 cycles -
  * SPI1's /32 for 8-bit frames and /16 for 16-bit ones at any HCLK, one
  * code lower on SPI2 and SPI3 above 72 MHz of HCLK, whose bus runs at
  * half; measured (bench_vx03's letter e): under a live console two frames
  * in flight lose one at every frame of 128 cycles and never at 256 or
- * above. A WRITE needs no threshold: it never reads the answers (the
+ * above; a hold-off of 300 moves 8-bit frames on SPI1 one code slower,
+ * to /64. A WRITE needs no threshold: it never reads the answers (the
  * class comment).
  */
-inline constexpr uint32_t spi_service_hold_off_cycles = 200;
+/// The hold-off of the images counted above: the default of SpiHost's
+/// `hold_off_cycles`.
+inline constexpr uint32_t spi_default_hold_off_cycles = 200;
 inline constexpr uint32_t spi_pump_read_cycles = 16u + 7u + 2u * 2u;
-inline constexpr uint32_t spi_write_ahead_min_frame_cycles =
-    spi_service_hold_off_cycles + spi_pump_read_cycles;
+
+/// The frame, in HCLK cycles, that a read can come after RXNE at the
+/// latest under a hold-off: a longer one keeps two in flight.
+constexpr uint32_t spi_write_ahead_min_frame_cycles(uint32_t hold_off_cycles) {
+    return hold_off_cycles + spi_pump_read_cycles;
+}
 
 /// A frame of `bits` bits at BR `code` in HCLK cycles, on a bus whose rate
 /// is HCLK over `hclk_over_pclk` (1 on PB2; 2 on PB1 above 72 MHz of
@@ -1014,10 +1026,15 @@ constexpr uint32_t spi_frame_cycles(uint8_t code, uint8_t bits, uint32_t hclk_ov
 }
 
 /// The smallest BR code at which a frame of `bits` bits lasts longer
-/// than the threshold on that bus; 8 when no code does.
+/// than the threshold under a hold-off on that bus; 8 when no code does.
+/// The hold-off is a template argument because it is the host's, fixed
+/// for the binding: the threshold is a constant of the loop rebase()
+/// runs, not one more argument to it.
+template <uint32_t hold_off_cycles>
 constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
     for (uint8_t code = 0; code < 8u; ++code) {
-        if (spi_frame_cycles(code, bits, hclk_over_pclk) > spi_write_ahead_min_frame_cycles) {
+        if (spi_frame_cycles(code, bits, hclk_over_pclk) >
+            spi_write_ahead_min_frame_cycles(hold_off_cycles)) {
             return code;
         }
     }
@@ -1025,7 +1042,7 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
 }
 
 /**
- * SpiHost<n, pins, TxEngine, RxEngine>
+ * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request
  * is the other strata's: the bus AO asserts the request's own chip
@@ -1113,11 +1130,30 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
  * IN SLEEP THE BUS MATRIX SERVES THE CORE ALONE on this family, so a
  * host with engines holds the program awake while a block is in flight;
  * `busy()` is what a sleep site asks.
+ *
+ * THE HOLD-OFF IS THE IMAGE'S: `hold_off_cycles` is the longest, in core
+ * cycles at the clock the host runs at, that this image keeps the host's
+ * vector from running: the longer of its longest handler (no interrupt
+ * nests over another) and its longest masked window. With the pump's own
+ * path to the DATAR read it is the write-ahead threshold (the arithmetic
+ * above the class, rebase() turning it into a code per width); its
+ * default, spi_default_hold_off_cycles, is the longest handler counted in
+ * this family's own bench and suite images. An image measures its own
+ * handlers with util/bench.hpp's IsrMeter, a stamp pair at each vector's
+ * first and last statement - `isr` over `irq` is a handler's body, the
+ * hardware prologue's entry and exit (docs/ch32vx03/platform.md) on top;
+ * bench_vx03 meters the tick (letter t), the console (p), the DMA's
+ * vectors (d) and this pump (e) that way - and an spi_overrun in a
+ * TransferDone says the figure it declared was too short.
  */
 template <uint8_t n, SpiPins pins = spi_default_pins<n>, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine>
+          typename RxEngine = NoDmaEngine, uint32_t hold_off_cycles = spi_default_hold_off_cycles>
 class SpiHost {
     using S = Spi<n>;
+
+    static_assert(hold_off_cycles > 0u,
+                  "brio SpiHost: a hold-off of zero cycles is no image's - an image with no "
+                  "handler of its own still has the tick's, and every critical section is one");
 
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
@@ -1275,8 +1311,8 @@ public:
         floor_code_ = ceiling_ ? static_cast<uint8_t>(*ceiling_) : uint8_t{0};
         cs_rate_ = delay_rate(hz);
         const uint32_t ratio = pclk_hz_ != 0u ? hz / pclk_hz_ : 1u;
-        ahead_code8_ = spi_write_ahead_code(8, ratio);
-        ahead_code16_ = spi_write_ahead_code(16, ratio);
+        ahead_code8_ = spi_write_ahead_code<hold_off_cycles>(8, ratio);
+        ahead_code16_ = spi_write_ahead_code<hold_off_cycles>(16, ratio);
     }
 
     /// The BR code that produces at most `hz` of SCK on this instance's
@@ -1961,9 +1997,16 @@ private:
      * onto the bus's dead time (a WORD, so the barrier zero-extends
      * nothing). Above it two: frame 0 written; for each next frame TXE
      * awaited and the frame written, then RXNE awaited and the previous
-     * frame read; the last frame read - OVR watched beside RXNE, a lost
-     * frame being the one hazard of the shape and spi_overrun its name.
-     * `frames` >= 1.
+     * frame read; the last frame read - OVR watched beside RXNE AND beside
+     * TXE, a lost frame being the one hazard of the shape and spi_overrun
+     * its name. Beside TXE too because a STATR read after a DATAR read is
+     * 20.2.7's clearing sequence: the loop spends its wait on TXE, so the
+     * first STATR read after an interrupt that let a frame overrun is the
+     * TXE poll's, and a poll that tested TXE alone cleared the flag
+     * unseen - measured on the CH32V203C8T6 (bench_vx03's spi.held): the
+     * frame lost, no overrun reported, and the transaction spinning out
+     * its whole budget for the frame that never came, to end
+     * spi_stalled. `frames` >= 1.
      */
     template <bool wide, bool ahead>
     static uint8_t poll_duplex(const uint8_t* tx, uint8_t* rx, uint16_t frames, uint32_t& budget) {
@@ -1978,11 +2021,12 @@ private:
         if constexpr (ahead) {
             while (--left != 0u) {
                 src += step;
-                while ((regs.STATR & spi_txe) == 0u) {
+                uint16_t s;
+                while (((s = regs.STATR) & (spi_txe | spi_ovr)) == 0u) {
                     if (--spins == 0u) { st = spi_stalled; goto out; }
                 }
+                if ((s & spi_ovr) != 0u) { st = spi_overrun; goto out; }
                 regs.DATAR = static_cast<uint16_t>(load_frame<wide>(src));
-                uint16_t s;
                 while (((s = regs.STATR) & (spi_rxne | spi_ovr)) == 0u) {
                     if (--spins == 0u) { st = spi_stalled; goto out; }
                 }
@@ -2795,6 +2839,16 @@ static_assert(!spi_rate_for(0, 1'000'000UL).has_value());
 static_assert(!spi_frame_is_halfword(SpiDataSize::bits8) &&
               spi_frame_is_halfword(SpiDataSize::bits16));
 static_assert(spi_frame_mask(SpiDataSize::bits8) == 0xFFu && spi_data_bits(SpiDataSize::bits16) == 16);
+
+// The write-ahead threshold: under the default hold-off a frame of 256
+// cycles is the first long enough - SPI1's /32 (code 4) for 8-bit frames
+// and /16 (code 3) for 16-bit ones, one code lower on a bus at half HCLK;
+// a hold-off of 300 moves both of SPI1's one code slower.
+static_assert(spi_frame_cycles(4, 8, 1) == 256u && spi_frame_cycles(3, 16, 1) == 256u);
+static_assert(spi_write_ahead_code<spi_default_hold_off_cycles>(8, 1) == 4u &&
+              spi_write_ahead_code<spi_default_hold_off_cycles>(16, 1) == 3u &&
+              spi_write_ahead_code<spi_default_hold_off_cycles>(8, 2) == 3u);
+static_assert(spi_write_ahead_code<300>(8, 1) == 5u && spi_write_ahead_code<300>(16, 1) == 4u);
 
 // The four modes.
 static_assert(!spi_mode_cpol(SpiMode::mode1) && spi_mode_cpha(SpiMode::mode1));

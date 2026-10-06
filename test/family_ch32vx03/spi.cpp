@@ -143,6 +143,11 @@ using Host2Dma = SpiHost<second_spi, spi_default_pins<second_spi>,
                          DmaTxEngine<1, Spi<second_spi>::dma_tx_channel>,
                          DmaRxEngine<1, Spi<second_spi>::dma_rx_channel>>;
 
+/// An image that declares its own hold-off (the class comment): the
+/// write-ahead codes rebase() derives move with it, the header's
+/// static_asserts pinning both the default's and a longer one's.
+using Host1SlowHandlers = SpiHost<1, spi_default_pins<1>, NoDmaEngine, NoDmaEngine, 300>;
+
 static_assert(!Host1::has_engines && Host1Dma::has_engines);
 static_assert(Client1::frames_ahead == 1, "one buffer, no FIFO (figure 20-1)");
 static_assert(Client1::has_nss_pad == pad_bonded(spi_default_pins<1>.nss));
@@ -286,6 +291,17 @@ void hosts()
     w.bits = SpiDataSize::bits16;
     (void)Host1Dma::start(w);
     Host1Dma::release();
+
+    (void)Host1SlowHandlers::init(clock);
+    Host1SlowHandlers::rebase(SysClock::hz);
+    (void)Host1SlowHandlers::write_ahead_from(SpiDataSize::bits8);
+    Host1SlowHandlers::Request slow{};
+    slow.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out_buf));
+    slow.rx = lend<Lease::reply>(in_buf);
+    slow.len = 8;
+    (void)Host1SlowHandlers::start(slow);
+    (void)Host1SlowHandlers::isr();
+    Host1SlowHandlers::release();
 
     (void)Host2::init(clock);
     Host2::release();

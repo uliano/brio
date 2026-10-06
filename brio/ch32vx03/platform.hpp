@@ -123,13 +123,42 @@ struct Ch32vx03Platform {
      * first safe, and this hook does not trust that nothing else wrote
      * the register - WCH's own `__WFI()` clears WFITOWFE.
      *
+     * ONE TURN PER WAKE: THE LATCH IS CONSUMED AFTER IT. The edge that
+     * wakes the WFE is an interrupt entering the pending state, so
+     * SEVONPEND latches it too, and left there it would end the NEXT
+     * idle() at once: the caller's loop would turn twice per interrupt,
+     * the second turn finding nothing (measured on the CH32V203C8: 200
+     * kernel turns over 100 quiet ticks, a wasted turn of a three-AO
+     * pack 141 cycles). So after the wake the hook writes SETEVENT - the
+     * SCTLR table's (QingKe V4 manual 3.1) "set the event to wake up the
+     * WFE case" - and executes one more wfi, which that event ends at
+     * once and which clears the latch whatever it held. This is safe
+     * because MIE is SET by then: an enabled interrupt pending around the
+     * consume is taken by its level (6.2's WFE item 2), its handler run
+     * before the caller's next masked check - it is not the latch that
+     * lets the caller see it. What the consume can eat is a latch whose
+     * interrupt has been or is being taken, or the edge of a line the
+     * PFIC does not enable, which wakes nothing the kernel waits for. It
+     * comes AFTER the sleep and not before it, where WCH's `__WFE()`
+     * puts its SETEVENT and first `wfi`: with the unmask first, an
+     * interrupt taken between the unmask and a consume placed before the
+     * sleep would have its latch eaten and its post found only at the
+     * next interrupt. Measured with the edge placed to the cycle across
+     * the whole sequence, the consume included: 101 turns over 100
+     * ticks, nothing lost and no wake a tick late. The consume is three
+     * instructions - an `ori`, the store, the `wfi` - and 5 to 7 cycles
+     * a wake (docs/ch32vx03/platform.md), against the 141 of the turn it
+     * saves.
+     *
      * AND IT SLEEPS ONLY WHILE THE CORE OWNS THE BUS. In a sleep of any
      * depth on this family no other master gets a cycle, so a DMA
      * channel or the USB controller that is working would not be slowed
      * by the sleep but broken by it (ch32vx03/bus_activity.hpp). With
      * masters active this hook therefore returns AT ONCE, interrupts
      * enabled, and the loop spins - a legal idle() under the Platform
-     * contract, and the honest one here.
+     * contract, and the honest one here, which turns the loop as often as
+     * it can for as long as a master works: one turn per wake is the
+     * promise of the sleep, not of the spin.
      *
      * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this
      * is the plain Sleep of RM 2.3.2 - the core clock gated, the
@@ -138,7 +167,10 @@ struct Ch32vx03Platform {
      * line: the timebase is paused and its pending bit cleared first,
      * because the STK stops with HCLK in a Stop and because SEVONPEND
      * makes a tick that is merely PENDING end the sleep before it
-     * begins.
+     * begins. The deep path does not consume the latch: a `wfi` with
+     * SLEEPDEEP armed is a second entry into that mode, and the one stale
+     * turn after a deep sleep is worth less than a second pass through
+     * that door.
      *
      * AND THAT COSTS ONE TICK, KNOWINGLY. A tick that had already
      * fired when the deep sleep begins is dropped instead of served,
@@ -159,9 +191,14 @@ struct Ch32vx03Platform {
             idle_deep(sctlr);
             return;
         }
-        pfic_sctlr() = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) &
-                       ~(sctlr_setevent | sctlr_sleeponexit);
+        const uint32_t wfe = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) &
+                             ~(sctlr_setevent | sctlr_sleeponexit);
+        pfic_sctlr() = wfe;
         enable_interrupts();
+        __asm__ volatile("wfi" ::: "memory");
+        // The latch the wake left, consumed: SETEVENT makes the next WFE
+        // return at once whatever the latch held, and that WFE clears it.
+        pfic_sctlr() = wfe | sctlr_setevent;
         __asm__ volatile("wfi" ::: "memory");
     }
 

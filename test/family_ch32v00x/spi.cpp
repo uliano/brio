@@ -26,7 +26,15 @@ using HostDma = SpiHost<1, spi1_default_pins, DmaTxEngine<3>, DmaRxEngine<2>>;
 using HostDma16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 constexpr SpiPins write_only{.sck = {'C', 5}, .mosi = {'C', 6}};
 using HostNoMiso = SpiHost<1, write_only>;
+// The hold-off an image declares (the class comment): a longer one moves
+// two frames in flight to a slower code, the default keeping /64 and /32.
+using HostSlowHandlers = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 600>;
 using Client = SpiClient<1>;
+
+static_assert(Host::write_ahead_from(SpiDataSize::bits8) == SpiClock::div64 &&
+              Host::write_ahead_from(SpiDataSize::bits16) == SpiClock::div32);
+static_assert(HostSlowHandlers::write_ahead_from(SpiDataSize::bits8) == SpiClock::div128 &&
+              HostSlowHandlers::write_ahead_from(SpiDataSize::bits16) == SpiClock::div64);
 
 static_assert(!Host::has_engines && HostDma::has_engines && HostDma16::has_engines);
 static_assert(std::is_trivially_copyable_v<Host::Request>);
@@ -95,6 +103,7 @@ void all_hosts() {
     host_verbs<HostDma>(buf);
     host_verbs<HostDma16>(buf);
     host_verbs<HostNoMiso>(buf);
+    host_verbs<HostSlowHandlers>(buf);
 }
 
 void client_verbs() {

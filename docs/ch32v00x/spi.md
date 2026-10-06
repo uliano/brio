@@ -72,8 +72,8 @@ the pads).
   write), the CRC verbs (`crc_next()`, `tx_crc()`, `rx_crc()`),
   `software_select()`, `high_speed_read()`, `dma_requests()`, the
   three interrupt enables and `isr()`, the raised-and-enabled sources.
-- `SpiHost<1, pins, TxEngine, RxEngine>` is the engine `SpiBus` (=
-  `BusMaster`) drives. Its `Request` carries the other strata's fields
+- `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles>` is the
+  engine `SpiBus` (= `BusMaster`) drives. Its `Request` carries the other strata's fields
   name for name: a chip select `PinRef` and a D/C line, a command phase
   (D/C low), a data phase with an optional out buffer (null = 0xFF
   dummies) and an optional in buffer (null = discard), the per-request
@@ -88,8 +88,14 @@ the pads).
   every frame went out, one that came back is missing) or
   `spi_stalled` (a polled flag never came within the transaction's
   budget). `init(clock, max_sck_hz)`, `rebase()`, `clock_for(hz)`,
-  `prime()` for a caller framing its own select, `bit_order()`,
-  `isr()`, `dma_isr()`, `recover()`, `release()`, `claim_nss_pad()`.
+  `write_ahead_from(bits)` (the fastest code a receive of that width
+  keeps two frames in flight at, the next section), `prime()` for a
+  caller framing its own select, `bit_order()`, `isr()`, `dma_isr()`,
+  `recover()`, `release()`, `claim_nss_pad()`. `hold_off_cycles` is
+  the IMAGE's: the longest, in core cycles at the clock the host runs
+  at, that the image keeps the host's vector from running - the longer
+  of its longest handler and its longest masked window - with a default
+  of 320 and a zero refused at compile time (the next section).
   The engine slots are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2,
   Elem>`, both or neither, on those two channels and no others (refused
   at compile time otherwise). Their `Elem` is the widest beat:
@@ -207,17 +213,36 @@ statement - lies on the bus's dead time (letter r).
   the console transport's receive path with its RxActivity post, about
   245 cycles behind the prologue and epilogue; the kernel's post() of a
   48-byte bus request under the mask, about 160; the bench app's USART
-  handler with its two stamps, about 300 - the constant is 320. The
-  entry is the prologue's 29 and the nine instructions to the read, 52.
-  A frame of more than 372 cycles: HCLK/64 and slower on 8-bit frames
-  (512 cycles), HCLK/32 and slower on 16-bit ones. At HCLK/64 the pump
+  handler with its two stamps, about 300. That first term is a fact of
+  the IMAGE and not of the family, so it is the host's template
+  parameter `hold_off_cycles`, declared by the application or its board
+  file, and 320 - the bench app's handler, rounded up - is only its
+  default. The entry is the prologue's 29 and the nine instructions to
+  the read, 52. Under the default, a frame of more than 372 cycles:
+  HCLK/64 and slower on 8-bit frames (512 cycles), HCLK/32 and slower
+  on 16-bit ones; an image that declares 600 gets /128 and /64 (both
+  pinned at compile time). An image measures its own term with
+  util/bench.hpp's `IsrMeter` in each of its vectors - `bench_ch32`
+  meters the tick (letter t), the console (p), the DMA's vectors (d,
+  s) and the pump (e), `isr` over `irq` a handler's body, the
+  hardware prologue's entry and exit ([platform.md](platform.md)) on
+  top - and its longest masked window in its listing. A hold-off of
+  zero does not compile: an image with no handler of its own still has
+  the tick's. At HCLK/64 the pump
   is AT THE WIRE, measured: 512.0 cycles an 8-bit frame and 1024.0 a
   16-bit one, x 1.00 over 256 frames, `spi_ok` and no OVR on every
   run, with the console's and the tick's handlers live beside it. An
   OVR seen in the handler's STATR read ends the transaction with
   `spi_overrun`, the lost frame counted so the phase still ends - the
-  witness of a threshold too low for the image it runs in, and the
-  guard the constant has. THE PHASE IS PRIMED BEFORE THE INTERRUPT IS
+  witness of a hold-off declared too short for the image it runs in.
+  Measured (`bench_ch32`'s letter e, `spi.held`, MISO floating): a
+  pumped receive of 1024 8-bit frames at HCLK/32 - 256 cycles a frame,
+  between the two thresholds - eight runs with a console line in
+  flight, on the default host (one frame in flight there) `spi_ok` in
+  8 of 8, on a host declaring 100 (two in flight from HCLK/32)
+  `spi_overrun` in 8 of 8: the console's handler, about 300 cycles
+  with its stamps, outlasts the frame the second one in flight leaves
+  it, while the pump's own (164 cycles a frame) does not. THE PHASE IS PRIMED BEFORE THE INTERRUPT IS
   ARMED: with RXNEIE raised first, at HCLK/4 the first frame came back
   seventeen instructions before `begin_phase()` had stored the count
   left to write, the handler found nothing to write and the phase never
@@ -410,10 +435,10 @@ Implemented but not bench-verified, each with what would measure it:
   the peer letters o, p and q on either part against `spi_peer`
   byte-exact through the hosts as they are: that board is off the
   desk, and the peer shares the pads with the jumper.
-- `spi_overrun` and `spi_stalled` as exits: no run raised either (no
-  OVR on any pumped line, no flag late on any polled one). Two frames
-  in flight under a handler longer than a frame, and a polled request
-  with the block held in reset under it, would provoke each.
+- `spi_stalled` as an exit: no run raised it (no flag late on any
+  polled line). A polled request with the block held in reset under it
+  would provoke it. (`spi_overrun` is measured: the hold-off declared
+  too short, above.)
 - The vendor's loop on the same board, counted above: its run beside
   letter e.
 - HSCR's high-speed read mode: its rate formula against a scope on

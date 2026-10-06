@@ -41,7 +41,13 @@ this document keeps in its place.
   through SEVONPEND, "a new interrupt pending signal (the previously
   generated pending signal does not take effect)" - and only the last,
   an EDGE, reaches a core sleeping with MIE clear. The platform
-  therefore sleeps with MIE set. WFITOWFE and SEVONPEND stay set after
+  therefore sleeps with MIE set.
+- **The waking edge is latched too.** An interrupt that wakes a WFE
+  enters the pending state, so SEVONPEND latches it as well, and the
+  NEXT WFE returns at once on it. PFIC_SCTLR.SETEVENT (V4 manual 3.1,
+  "set the event to wake up the WFE case") sets the latch by hand, and
+  a WFE executed over a set latch returns at once and clears it - the
+  pair that consumes it. WFITOWFE and SEVONPEND stay set after
   a `wfi` (measured: a WFE with no store before it still waits for an
   event), so "the subsequent WFI" is not a one-shot on this core.
 - **A core in debug mode cannot enter any sleep mode at all** (6.1), so
@@ -123,8 +129,12 @@ concept member for member: `CriticalSection` is pfic.hpp's
 destructor restores only what it found set), `idle()` is the
 WFITOWFE/SEVONPEND store (SLEEPONEXIT cleared in it, so the waking
 handler returns to the caller's loop), the unmask, then the `wfi` as a
-WFE - guarded by the count of active bus masters and, with a deep mode
-armed, out of line with a pause of the timebase ([sleep.md](sleep.md))
+WFE, and after the wake SETEVENT and one more `wfi`, which returns at
+once and consumes the latch the wake left, so the caller's loop turns
+once per interrupt (with MIE set by then, an interrupt pending around
+the consume is taken by its level, not found by the latch) - guarded by
+the count of active bus masters and, with a deep mode armed, out of
+line with a pause of the timebase and no consume ([sleep.md](sleep.md))
 - `break_here()` is `ebreak`,
 `atomic_width` 4, `now()` the timebase's tick count, and the breadcrumb
 a `PanicRecord` in `.noinit`. The interrupt verbs and the per-line
@@ -206,34 +216,37 @@ performs the reset.
 ## Bench findings
 
 The reference suite is `test_vx03_platform`, at 144 MHz from the HSI:
-on the CH32V203C8T6 fifty-five verdicts in `z` - letters `a` to `g`
+on the CH32V203C8T6 fifty-six verdicts in `z` - letters `a` to `g`
 (forty), the bus in sleep, the mask's shadow, the idle hook against the
-tick's edge and the runtime's functions - on the CH32V303VCT6 sixty-two
-in `z` before letter `w` joined it - the same forty, the floating-point
-unit's three letters, the bus in sleep and the mask's shadow - and on
-both nine more in letter `i`, which reboots the board three times. On
-the 32 KB parts the suite is two images (`-1` with `a` to `g`, `i`, `t`
-and `w`, `-2` with `m` and `n`), both run on the CH32V203C8T6: 48 and 7
-verdicts. What it measured:
+tick's edge, the kernel's turn and the runtime's functions - on the
+CH32V303VCT6 sixty-two in `z` before letters `w` and `o` joined it -
+the same forty, the floating-point unit's three letters, the bus in
+sleep and the mask's shadow - and on both nine more in letter `i`,
+which reboots the board three times. On the 32 KB parts the suite is
+two images (`-1` with `a` to `g`, `i`, `t` and `w`, `-2` with `m`, `n`
+and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
+48 and 7 verdicts. What it measured:
 
 - **The idle hook wakes.** With the console silent, two `idle()` calls
   covered the 626 us to the next tick (on the CH32V303VCT6 two as well,
   over 484 and 968 us in two runs) and returned with interrupts enabled;
   a 5 ms window with interrupts masked advanced the tick by one on both
   (the STK interrupt is a pending bit: one tick delivered, the rest
-  coalesced). Two calls and not one because the edge that woke the
-  last sleep also left the event latch set, so the next `idle()`
-  returns at once: the kernel loop turns twice per interrupt - before
-  the unmasked order and after it alike.
+  coalesced). Two calls and not one because the console's last
+  interrupt, taken while the letter printed and not inside an
+  `idle()`, left its latch standing: the first call returns at once on
+  it and consumes it.
 - **No edge position loses the wake** (letter `w`, the CH32V203C8T6).
   The STK's counter is written so its compare comes D cycles after a
   masked check, D swept from 0 to 599 one cycle at a time, then the
   kernel's loop - check, `idle()` - until one tick is served (and, a
   second pass, two), with the event latch cleared and set by hand
   before each try; TIM2 at 1 MHz clocks each try and rescues a lost one
-  at 50 ms. The handler's entry time steps one cycle per D, so the edge
+  at 50 ms, and a try that ends a whole tick period late (past 250 us
+  waiting for one tick, 1250 us for two) is a wake lost until the next
+  tick. The handler's entry time steps one cycle per D, so the edge
   is placed to the cycle across the whole sequence, the sleep entry
-  included. With the OLD order - the store, the `wfi` with MIE clear,
+  and the consume after the wake included. With the OLD order - the store, the `wfi` with MIE clear,
   the unmask after - no position of 600 lost the wake in either latch
   state, waiting for one tick or two; nor in twenty-four code layouts of
   a probe that shifted the old body and the platform's by two and four
@@ -247,21 +260,36 @@ verdicts. What it measured:
   platform takes - the store, the unmask, the `wfi` - none lost in the
   suite's image, built with and without the hardware prologue, in the
   32 KB tier's image, in twelve layouts of the probe, and with eight
-  `nop`s between the unmask and the `wfi`. What the order changed is the
-  cost, HCLK cycles with the hardware prologue:
+  `nop`s between the unmask and the `wfi`; and with the consume after
+  the wake, none lost and none a tick late in either latch state,
+  waiting for one tick or two, the slowest try 5 us for one tick and
+  1005 us for two. What the order and the consume cost, HCLK cycles
+  with the hardware prologue:
 
   | the idle order | edge to the handler | edge to the caller's loop | an `idle()` the latch returns at once |
   |---|---|---|---|
   | masked `wfi`, unmask after | 28 | 65 | 33 |
-  | unmask, then `wfi` | **22** | **61** | **28** |
+  | unmask, then `wfi` | 22 | 61 | 28 |
+  | unmask, `wfi`, then the consume (the platform's) | **23** | **68** | **33** |
 
-  (25 and 69 without the hardware prologue; the last column carries two
-  counter reads.) The handler now runs straight out of the sleep, by
+  (25 and 69 for the unmasked order without the hardware prologue; the
+  last column carries two counter reads.) The handler now runs straight out of the sleep, by
   6.2's second WFE item, instead of after an unmask. In the console's
   kernel loop the Sleep path is thirteen instructions executed where it
   was fifteen - one SCTLR load where there were two, the deep path out
   of line - and a 180 s soak of 2986 commands at random intervals,
-  asynchronous to the tick, went without one unanswered.
+  asynchronous to the tick, went without one unanswered. The consume
+  after the wake adds three: an `ori`, the store and the second `wfi`.
+- **One kernel turn per interrupt** (letter `o`): a Tenuto pack of
+  three quiet AOs, two of them with a periodic time event, turned as
+  `run()` turns it, the tick the only interrupt: 101 turns over 100
+  ticks with the latch consumed, 200 without it - the second turn of
+  each pair finding nothing, its `idle()` returning at once on the
+  latch the wake left. That turn costs 141 cycles (two counter reads
+  included); the consume costs 5 to 7 cycles a wake: from an edge that
+  finds the core asleep to the caller's loop 68 against 61, an `idle()`
+  the latch returns at once 33 against 28, a quiet turn 146 against
+  141.
 - **The STK arithmetic holds.** CMPLR = 143999 as programmed, CMPHR and
   CNTH both zero - the reload puts the low half back at the compare, so
   the high half of this 64-bit counter never moves. Over 200 reloads,
@@ -427,11 +455,6 @@ Driver gaps, each with its reason:
   loop's idle path and not on a handler's exit, and that path clears
   it - while the rest of that register's sleep bits are the power
   chapter's ([sleep.md](sleep.md)).
-- The second kernel turn per interrupt: the edge that ends a sleep
-  leaves the event latch set, so the `idle()` after it returns at once.
-  Consuming the latch after the wake would cost a store and a `wfi` on
-  every wake against one wasted turn of the loop, and no measurement of
-  a kernel turn's cost on this part has priced that trade.
 - mepc and mtval are readable but do not cross a reset: the breadcrumb
   has one byte for the detail, and it carries the cause.
 
@@ -452,13 +475,16 @@ Implemented but not bench-verified, each with what would measure it:
   arm one are decoded and never written, by the flash chapter's own
   decision ([nvm.md](nvm.md)).
 - **The idle hook's POWER.** `idle()` is proven to sleep and wake and
-  to turn the loop twice per interrupt, not to sleep cheaply: what a
+  to turn the loop once per interrupt, not to sleep cheaply: what a
   sleep saves is a current measurement with the probe detached, since a
   core in debug mode never sleeps at all.
-- **The unmasked idle order on the CH32V303's V4F.** The order is the
-  stratum's, so it reaches that part too, where letter `w` has not run:
-  that letter on the CH32V303VCT6, with `z` recounted there, would
-  measure it.
+- **The unmasked idle order and the consume on the CH32V303's V4F.**
+  Both are the stratum's, so they reach that part too, where letters
+  `w` and `o` have not run: those letters on the CH32V303VCT6, with `z`
+  recounted there, would measure them.
+- **Letter `o` in the 32 KB tier's second image**: the same source as
+  the CH32V203C8's, linked by the CH32V203C6 preset; `-2` run on the
+  CH32V203C8T6 would count it.
 - **What closes a line's own disable.** Letter `n` shows that a store
   into PFIC_IRER lets an interrupt already on its way through up to
   three instructions later and that a `fence.i` does not stop it; a

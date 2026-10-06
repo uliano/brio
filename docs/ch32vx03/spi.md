@@ -372,7 +372,7 @@ enables and requests shared with the SPI face (`dma_requests`,
 
 ### The host engine
 
-`SpiHost<n, pins, TxEngine, RxEngine>` is the engine
+`SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the engine
 [util/spi_bus.hpp](../../brio/util/spi_bus.hpp)'s `SpiBus` drives, and
 its `Request` is the other strata's VERBATIM: a chip select the bus AO
 asserts, a display D/C line, a CS setup time, a command phase and a data
@@ -404,22 +404,35 @@ never comes within the transaction's one spin budget ends it with
 `spi_stalled` - the two codes every host spells from `util/spi_bus.hpp`
 beside the engines' own `spi_dma_fault` (design/spi-bus.md).
 
-THE THRESHOLD is `spi_write_ahead_min_frame_cycles`, the sum of two
-counted inputs stated in the header: the hold-off - the longest the
-thread keeps the vector out, which on a platform where no interrupt
-nests is the longer of the image's longest handler and its longest
-masked window (bench_vx03's console handler with its stamps, 151
-instructions behind the hardware prologue and epilogue, about 200
-cycles; the kernel's `post()` of a Request under the producers' mask,
-47 instructions and the runtime's memcpy, about 130) - and the pump's
+THE THRESHOLD is `spi_write_ahead_min_frame_cycles(hold_off)`, the sum
+of two inputs: the HOLD-OFF - the longest, in core cycles at the clock
+the host runs at, that the image keeps the host's vector from running,
+which on a platform where no interrupt nests is the longer of the
+image's longest handler and its longest masked window - and the pump's
 own path from RXNE to the DATAR load (the prologue's 16 and seven
-instructions, two of them APB loads). `spi_write_ahead_code(bits,
-hclk_over_pclk)` turns it into the slowest BR code whose frame is longer,
-per width and per bus share, and `rebase()` keeps both codes;
-`write_ahead_from(bits)` reports them. At any HCLK a frame of 256 cycles
-is the first above the sum: SPI1's /32 for 8-bit frames and /16 for
-16-bit ones, one code lower on SPI2 and SPI3 above 72 MHz of HCLK. The
-oracle above agrees.
+instructions, two of them APB loads). The hold-off is a fact of the
+IMAGE and not of the family, so it is the host's template parameter
+`hold_off_cycles`, declared by the application or its board file; its
+default, 200, is the longest counted in this family's own images
+(bench_vx03's console handler with its stamps, 151 instructions behind
+the hardware prologue and epilogue, about 200 cycles; the kernel's
+`post()` of a Request under the producers' mask, 47 instructions and
+the runtime's memcpy, about 130), and a hold-off of zero does not
+compile - an image with no handler of its own still has the tick's.
+`spi_write_ahead_code<hold_off>(bits, hclk_over_pclk)` turns the sum
+into the slowest BR code whose frame is longer, per width and per bus
+share, and `rebase()` keeps both codes; `write_ahead_from(bits)`
+reports them. Under the default, at any HCLK a frame of 256 cycles is
+the first above the sum: SPI1's /32 for 8-bit frames and /16 for
+16-bit ones, one code lower on SPI2 and SPI3 above 72 MHz of HCLK; a
+declared 300 moves SPI1's to /64 and /32 (both pinned at compile time).
+The oracle above agrees with the default. An image measures its own
+hold-off with util/bench.hpp's `IsrMeter` in each of its vectors -
+`bench_vx03` meters the tick (letter t), the console (p), the DMA's
+vectors (d) and the pump (e), `isr` over `irq` a handler's body, the
+hardware prologue's entry and exit ([platform.md](platform.md)) on top
+- and its longest masked window in its listing; an `spi_overrun` in a
+reply is the witness of a figure declared too short.
 
 `apply()` compares ONE WORD: the request's mode, rate code and width are
 folded into CTLR1's own bits over the applied base (CPHA and CPOL are
@@ -617,6 +630,30 @@ own.
   five to eight runs of eight lost a frame at 16 to 128 cycles a frame,
   none at 256 and above, and the host's sixty-four points finished
   every run `spi_ok` with no overrun.
+- **A HOLD-OFF DECLARED TOO SHORT LOSES FRAMES, the honest one none**
+  (`bench_vx03`'s letter e, `spi.held`, MISO floating, the CH32V203C8T6
+  at 144 MHz): the default host (200 cycles, two frames of a receive in
+  flight from /32) and one declaring 100 (from /16), a receive of 1024
+  8-bit frames at /16 - 128 cycles a frame - eight runs each with a
+  console line in flight. The POLLED loop: the honest host `spi_ok` in
+  8 of 8, the declared-short one `spi_overrun` in 8 of 8 - the console's
+  handler, about 200 cycles, outlasting the frame the second one in
+  flight left it. The PUMP: `spi_ok` in 8 of 8 on both, because the
+  pump's own handler (about 105 cycles of metered body, the prologue's
+  16 and the epilogue's 25 around it) is longer than a 128-cycle frame:
+  two in flight there are bounded by the pump, and SPI1's line is
+  pending again as each of its handlers ends - no overrun in sixty-four
+  runs says the console's never got between two frames of one.
+- **THE TWO-IN-FLIGHT POLLED LOOP WATCHES OVR BESIDE TXE TOO**: in its
+  first form it tested OVR on the RXNE poll alone, and `spi.held` found
+  the declared-short host's lost frames reported as `spi_stalled` (4 and
+  5 runs of 8 in two passes, none as `spi_overrun`), each after the
+  transaction's whole spin budget. The loop waits on TXE, so the first
+  STATR read after an interrupt that let a frame overrun is the TXE
+  poll's - and a STATR read after a DATAR read is 20.2.7's clearing
+  sequence, so the flag fell unseen and the loop waited for the frame
+  that never came. With OVR tested on every STATR read of the loop: 8
+  of 8 `spi_overrun`, at once.
 - **THE ENGINED TRANSACTION'S FIXED COST**, `bench_vx03`'s letter d, a
   write on SPI1 with MISO floating at 144 MHz: 530 cycles above the
   frames' own wire time at /4, 523 at /16, ONE interrupt (the receive
@@ -839,9 +876,13 @@ Implemented but not bench-verified, each with what would measure it:
   by the same arithmetic (one code lower than SPI1's above 72 MHz of
   HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
   the oracle on a PB1 instance would measure it.
-- **The hold-off under a program's own handlers**: the constant is this
-  image's longest counted; a program whose handlers run longer than the
-  frame it runs at reads `spi_overrun` in its reply, which is the guard.
+- **The PUMP under a hold-off declared too short**: `spi.held` shows it
+  on the polled loop (above); on the pump at 144 MHz SPI1's ladder has
+  no frame between the pump's own handler and this image's longest - a
+  frame of 128 cycles is shorter than the pump itself, one of 256
+  outlasts the console's handler (SPI2's bus at half HCLK has the same
+  ladder in core cycles). An image with a handler longer than 256
+  cycles would put a rate there.
 - **The RECEIVED half of the engined data phase as the engines now are,
   16-bit frames included**: the transmitted half is judged by the CRC
   unit above, and what the receive engine lands in memory is judged by

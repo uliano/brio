@@ -214,6 +214,16 @@
 //                      select and the D/C line scripted on PC3 and PC4,
 //                      the best of 8; the note line gives wall less the
 //                      wire's cycles.
+//        spi.held      THE HOLD-OFF AN IMAGE DECLARES (SpiHost's last
+//                      parameter) against the one it has: the default
+//                      host (320 cycles, two frames of a receive in
+//                      flight from HCLK/64) and one declaring 100 (from
+//                      HCLK/32), a pumped receive of 1024 8-bit frames
+//                      at HCLK/32 - a frame of 256 cycles, shorter than
+//                      the console's handler - eight runs each with a
+//                      console line in flight: the overruns and the
+//                      statuses counted. The declared-short host is the
+//                      one that must lose frames, the honest one none.
 //      The vendor's own loop (the EVT's 2Lines_FullDuplex example, the
 //      Host side) is NOT in this app: it is a scratch program of the
 //      round, counted in its listing beside this host's.
@@ -856,14 +866,22 @@ void ts_spi_dma() {
 // e - the SPI host above the wire: the polled loops, the pump, a request
 // ---------------------------------------------------------------------------
 using SpiPoll = SpiHost<1>;   // no engines: the polled loops and the pump alone
+/// spi.held's second host: the same, DECLARING a hold-off of 100 cycles -
+/// shorter than this image's console handler with its stamps, about 300.
+using SpiShort = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 100>;
 using CsPin = Pin<'C', 3>;    // the select, as test_ch32_spi scripts it
 using DcPin = Pin<'C', 4>;    // the D/C line: a pad no jumper and no other letter uses
 
 volatile bool pump_done = false;
-/// Which host spi1_handler serves: letter e's or letter s's. Volatile:
-/// the vector reads it, and a plain bool's `true` at the letter's start
-/// is a dead store to a compiler that sees the `false` at its end.
-volatile bool poll_host_live = false;
+/// Which host spi1_handler serves: letter e's (zero, so its pump's path is
+/// a load and one branch before the body, the bench's own), spi.held's
+/// short one, or letter s's. Volatile: the vector reads it, and a plain
+/// store at the letter's start is a dead one to a compiler that sees the
+/// store at its end.
+constexpr uint8_t spi1_poll = 0;
+constexpr uint8_t spi1_short = 1;
+constexpr uint8_t spi1_dma = 2;
+volatile uint8_t spi1_serves = spi1_dma;
 
 /// A request on the work buffer: `frames` frames of `bits`, the out
 /// buffer the buffer's lower half, the in buffer its upper half or none.
@@ -976,11 +994,71 @@ void request_line(uint16_t len) {
           " cycles above the wire's ", wire_cycles, crlf);
 }
 
+/// A line the console carries while a run is on the wire: it fits the
+/// transport's ring whole, so print() returns at once and the USART's
+/// interrupts land in the run that follows.
+constexpr Filler<60> live_line = make_filler<60>();
+
+/// spi.held: THE HOLD-OFF AN IMAGE DECLARES against the one it has. A
+/// receive of 1024 8-bit frames at HCLK/32 - a frame of 256 cycles,
+/// between the two hosts' thresholds - eight runs under the console's
+/// interrupts on each host, pumped: the host declaring 100 keeps two
+/// frames in flight there and the honest default one.
+template <typename H>
+void held_line(const char* name) {
+    constexpr uint16_t frames = 1024;
+    uint8_t overran = 0;
+    uint8_t faulted = 0;
+    uint8_t hung = 0;
+    for (uint8_t run = 0; run < 8u; ++run) {
+        typename H::Request r{};
+        r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
+        r.rx = Borrowed<uint8_t, Lease::reply>{ram + ram_bytes / 2u};
+        r.len = frames;
+        r.clock = SpiClock::div32;
+        r.bits = SpiDataSize::bits8;
+        r.polled = false;
+        pump_done = false;
+        console_drain();
+        print(serial, live_line.text);
+        const bool sync = H::start(r);
+        uint32_t spins = 4'000'000UL;
+        while (!sync && !pump_done && spins-- != 0u) {
+        }
+        if (!sync && !pump_done) {
+            ++hung;
+            (void)H::recover();
+        }
+        if (Spi<1>::overrun()) {
+            ++overran;
+            Spi<1>::clear_overrun();
+        }
+        if (H::status() != spi_ok) {
+            ++faulted;
+        }
+    }
+    console_drain();
+    print(serial, "  spi.held ", name, " (two in flight from HCLK/", 2u << static_cast<uint8_t>(H::write_ahead_from(SpiDataSize::bits8)),
+          ") pump receive HCLK/32 8-bit: ", overran, " overruns, ", faulted, " statuses not spi_ok, ", hung,
+          " never completed, in 8 runs under the console's interrupts", crlf);
+}
+
+void held_lines() {
+    spi1_serves = spi1_poll;
+    (void)SpiPoll::init(clock);
+    held_line<SpiPoll>("hold-off 320 (the default)");
+    spi1_serves = spi1_short;
+    (void)SpiShort::init(clock);
+    held_line<SpiShort>("hold-off 100 (declared short)");
+    spi1_serves = spi1_poll;
+    (void)SpiPoll::init(clock);
+}
+
 void te_spi_host() {
     (void)SpiPoll::init(clock);
     CsPin::output(true);
     DcPin::output(true);
-    poll_host_live = true;
+    spi1_serves = spi1_poll;
     spi_ready = false;   // letter s brings its own host up again after this one
     for (uint32_t i = 0; i < ram_bytes; ++i) {
         ram[i] = static_cast<uint8_t>(i * 7u + 1u);
@@ -1001,7 +1079,8 @@ void te_spi_host() {
     request_line(0);
     request_line(2);
     request_line(15);
-    poll_host_live = false;
+    held_lines();
+    spi1_serves = spi1_dma;
     bench.verdict("ran", true);
 }
 
@@ -1487,14 +1566,22 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
     }
 }
 
-// SPI1's vector serves letter e's engineless host while that letter runs
+// SPI1's vector serves letter e's engineless hosts while that letter runs
 // and letter s's engined one otherwise; an image carrying neither leaves
 // it empty.
 extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     spi_meter.enter();
     if constexpr (brio::test_letter_carried('e')) {
-        if (poll_host_live) {
+        const uint8_t serves = spi1_serves;
+        if (serves == spi1_poll) {
             if (SpiPoll::isr()) {
+                pump_done = true;
+            }
+            spi_meter.leave();
+            return;
+        }
+        if (serves == spi1_short) {
+            if (SpiShort::isr()) {
                 pump_done = true;
             }
             spi_meter.leave();
