@@ -558,19 +558,21 @@ public:
     // consecutive reads of a 32 kHz pair that had run six milliseconds
     // gave 0, 216, 221, 225. The second command's own crossing covers
     // the first's landing gap, so the double-command read below returns
-    // the count AT THIS CALL'S ENTRY - measured 224, 233, 241, 249 on
-    // the same setup, the first value finally current. THE PRICE is two
-    // crossings per read: ~242 us at a 32.768 kHz counter clock (vs
-    // ~117 single), unmeasurably small at 48 MHz. A caller measuring an
-    // interval between two of its own reads never needed the fix (the
-    // lag cancelled) and now simply pays the double crossing; `*_raw()`
-    // still skips everything and says so. AND THE PIPELINE IS NEVER
-    // PRIMED - measured, because it was worth refuting: after a double
-    // read, a later SINGLE command returns the PREVIOUS read's second
-    // snapshot, stale by the whole inter-read gap (233 against a true
-    // 464 after a 6 ms gap; identical on the TCC). Two commands per
-    // call, always - no first-read-double-then-singles shortcut
-    // exists. docs/samc21/tc.md carries the numbers.
+    // a count CURRENT WITHIN THE CALL - at a 32 kHz counter clock the
+    // count at its entry, measured 224, 233, 241, 249 on the same setup,
+    // the first value finally current; at 48 MHz the snapshot is taken
+    // about 230 cycles into a read of 290 to 304 (docs/samc21/platform.md).
+    // THE PRICE is two crossings per read: ~242 us at a 32.768 kHz
+    // counter clock (vs ~117 single), 290 to 304 cycles at 48 MHz. A
+    // caller measuring an interval between two of its own reads never
+    // needed the fix (the lag cancelled) and now simply pays the double
+    // crossing; `*_raw()` still skips everything and says so. AND THE
+    // PIPELINE IS NEVER PRIMED - measured, because it was worth
+    // refuting: after a double read, a later SINGLE command returns the
+    // PREVIOUS read's second snapshot, stale by the whole inter-read gap
+    // (233 against a true 464 after a 6 ms gap; identical on the TCC).
+    // Two commands per call, always - no first-read-double-then-singles
+    // shortcut exists. docs/samc21/tc.md carries the numbers.
 
     static bool read_sync(uint32_t spins = 0xFFFFu) {
         return command(TcCommand::read_sync, spins) &&

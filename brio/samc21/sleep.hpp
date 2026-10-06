@@ -78,9 +78,11 @@
  *
  * The workaround the errata gives is "disable the systick interrupt
  * before entering standby and re-enable it after", and it costs
- * NOTHING here because of the paragraph above: the tick is frozen
- * across a standby whether or not its interrupt is enabled. So the
- * discipline is applied at the WFI, in two places and nowhere else:
+ * NOTHING here because of the paragraph above: kernel time stands still
+ * across a standby, and the guard is what holds it there whatever the
+ * SysTick counter does (measured running through a standby with the
+ * debug probe attached: samc21/ticker.hpp). So the discipline is
+ * applied at the WFI, in two places and nowhere else:
  *
  *   - `SamPlatform::idle()` (samc21/platform.hpp), which is where the
  *     kernel loop sleeps - it reads SLEEPCFG and holds a
@@ -365,8 +367,9 @@ struct Pm {
      *
      * The `SysTickInterruptGuard` is erratum 1.8.13's workaround and is
      * taken only when the armed mode is STANDBY - see the file header
-     * for why it costs nothing (the tick is frozen across a standby
-     * either way) and why it is at the WFI rather than at the arming.
+     * for why it costs nothing (kernel time stands still across a
+     * standby either way) and why it is at the WFI rather than at the
+     * arming.
      *
      * WARNING (19.6.3.3): the wake-up source must be configured,
      * ENABLED, and REACHABLE IN THE ARMED MODE before this runs.

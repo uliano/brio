@@ -15,9 +15,9 @@ microsecond busy-wait over SysTick), `samc21/sleep.hpp` (`Pm`,
 target-independent power model above the last of these is
 [design/power.md](../design/power.md). The crt is `samc21/src/glue/
 startup_samc21.cpp` + `samc21/ld/samc21j18a.ld` in the build project.
-The bench suites are `test_samc_platform` (the waking half and
-`delay_us`), `test_samc_sleep` (the stopping half) and
-`test_samc_timebase` (the standby-surviving site).
+The bench suites are `test_samc_platform` (the idle hook and the
+kernel's turn, the waking half and `delay_us`), `test_samc_sleep` (the
+stopping half) and `test_samc_timebase` (the standby-surviving site).
 
 These are one story - how a program on this silicon runs one event at
 a time, waits, keeps time and stops - told across one stratum header
@@ -100,19 +100,24 @@ and the source's own are both unnecessary, and OSCULP32K, whose
 register carries no such bit at all, serves a generator through standby
 just the same.
 
-**The kernel tick STOPS in standby.** SysTick is clocked from the CPU
-clock and the CPU clock stops, so kernel time stands still for exactly
-as long as the sleep lasts and every armed time event matures late by
-that amount. This does not travel from the AVR, where the tick is the
-RTC's PIT on a 32 kHz oscillator and runs through every sleep mode.
-The consequences are a rule and a restriction, both below.
+**The kernel tick STOPS in standby.** Kernel time stands still for
+exactly as long as the sleep lasts and every armed time event matures
+late by that amount, because every WFI this stratum issues at STANDBY
+holds the SysTick interrupt off (erratum 1.8.13's guard, below) - and
+not because SysTick's counter stops: measured on this bench, it runs
+on through a standby (the idle path's findings below). This does not
+travel from the AVR, where the tick is the RTC's PIT on a 32 kHz
+oscillator and runs through every sleep mode. The consequences are a
+rule and a restriction, both below.
 
 **Erratum 1.8.13 is live and its preconditions are the default.** With
 the standby back-bias option set - and STDBYCFG comes up at 0x0400,
 i.e. BBIASHS SET - a SysTick interrupt coinciding exactly with a
 standby entry can raise a hard fault. The workaround (disable that
-interrupt around standby entry) costs nothing here precisely because
-the tick is frozen across a standby either way. **1.8.14** (standby
+interrupt around standby entry) costs no kernel time this target's
+standby would keep: kernel time stands still across a standby by the
+rule above, and with SysTick's counter running in there the guard is
+also what keeps the tick from ending the standby every period. **1.8.14** (standby
 with VREGSMOD in performance mode switches to the low-power regulator
 and keeps requesting GCLK0; the workaround is SUPC.VREG.RUNSTDBY)
 and **1.8.7** (a DMA write performed while sleepwalking may not land
@@ -303,10 +308,8 @@ the supply already at working point, and is stated as such.
   volatile-access read (ring.hpp's own technique) restores the load
   inside the loop; a kernel path that crosses InterruptGuard barriers
   every turn is safe only by that accident.
-- WFI-then-enable runs continuously under a 1 kHz tick - a permanent
-  lost-wakeup stress - with no stall observed. Instrumented: over a
-  quarter second the idle loop turns 109000 times spinning and 250
-  times sleeping in IDLE0, i.e. exactly once per SysTick tick.
+- WFI-then-enable keeps the kernel's promise at every cycle of its
+  path, in all three modes: "The idle path, measured", below.
 - The vendored CMSIS 5.9.0 really does put "memory" clobbers on
   `cpsid`/`cpsie`/`msr primask` and even `wfi` - the InterruptGuard's
   barrier claim is the intrinsics', verified, not assumed.
@@ -374,6 +377,103 @@ Stopping:
   `SamPlatform::idle()` takes whatever is armed already. The erratum
   guard's SLEEPCFG read and the DSB cost about 50 bytes of flash in an
   image that idles, and nothing at all in one that does not.
+
+## The idle path, measured
+
+The kernel calls `idle()` masked when every queue is empty, and asks
+two things of it: NO LOST WAKE (it returns after any interrupt pending
+when it is called or arriving at any instruction of the path) and ONE
+TURN PER WAKE (it returns once per interrupt taken). ARMv6-M promises
+the first on paper - WFI wakes on an interrupt that would preempt with
+PRIMASK clear - and `test_samc_platform` asks the silicon, at 48 MHz on
+OSC48M, the flash behind two wait states.
+
+**Letter w walks an edge across the path.** An edge is placed D
+cycles after its setup, D = 0..399, and the try runs the kernel's own
+shape - a masked check, `idle()`, again until the edge is served - so
+the edge lands on every instruction of the check, the call, the
+SLEEPCFG read, the DSB, the WFI and the loop around them. Two edges:
+the kernel's own wake, the SysTick, placed through LOAD (a write to VAL
+clears it, the next clock reloads LOAD = D + 1, LOAD goes back to the
+period before that one-off count runs out - the second edge of a
+two-edge try is then measured a whole period after the first); and an
+NVIC line, a TC match, with the tick's interrupt held off so the line
+is the only wake. A TC pair at 48 MHz with RUNSTDBY is each try's
+stopwatch and its rescue: a try the rescue's 50 ms ends is a wake lost
+for good, one that ends a whole tick late a wake lost until the next
+tick. Seven passes of 400 positions - the tick in IDLE0 and IDLE2,
+waiting for one tick and for two (the sleep after a tick was taken);
+the line in IDLE0, IDLE2 and STANDBY, the last one walking `idle()`'s
+other branch, the erratum guard's - and in every one of them NO WAKE
+LOST AND NONE LATE. A TC with RUNSTDBY clear, halted in standby
+(35.7.2.1), is the witness that the STANDBY pass really slept in
+standby: it counts 1650 cycles of a 3048-cycle try where IDLE0 counts
+the whole of one.
+
+**What a wake costs, edge to the caller's loop**, an edge finding the
+core asleep:
+
+| mode | the tick | the line |
+|---|---|---|
+| IDLE0 | 126..132 cycles | 92..97 |
+| IDLE2 | 865..871 | 832..836 |
+| STANDBY (generator 0 held by the stopwatch) | - | 837..840 |
+
+The tick's figure carries its handler (`Ticker::tick()`), the line's
+carries the TC's (an INTFLAG read and clear) and is shown net of the
+synchronized COUNT read that stamps it (a read costs 290..304 cycles,
+its snapshot taken 229..241 cycles in). An edge already pending at the
+masked check reaches the loop in 182..186 cycles on the tick: the whole
+idle path walked once, the WFI falling through.
+
+**IDLE2 and STANDBY pay about 740 cycles - 15.4 us - at the wake, and
+it is the flash.** With NVMCTRL's CTRLB.SLEEPPRM at its reset value
+WAKEUPACCESS (no image here writes it: `Nvm::init` is the only verb
+that does) or at WAKEUPINSTANT, the IDLE2 wake costs 865..871 cycles
+on the tick; with SLEEPPRM DISABLED it costs 132, IDLE0's. IDLE0 does
+not put the flash in its low-power state at all. 27.5.1 says STANDBY
+does so whatever SLEEPPRM says, and table 45-13 gives 15.2 us for an
+idle wake with WAKEUPINSTANT - the same bill.
+
+**SysTick's counter runs through a standby on this bench.** Measured
+twice: across the line pass's STANDBY tries it counts as many cycles
+as the stopwatch does (1221 of 1471 against IDLE0's 475 of 725, the
+difference the stamp's own read), and across a 4.9 ms standby woken by
+the RTC on OSCULP32K with the stopwatch released it counts 225700
+cycles where the same IDLE0 counts 227828 - while the witness counts 80
+of its 16-cycle counts against 14260. Disabling the console's SERCOM
+and the RTC's COUNTSYNC across that standby moves nothing; what keeps
+the counter's clock running is not established (the attached debug
+probe is the candidate 19.5.6 leaves open). Kernel time stands still
+across a standby all the same: the SysTick interrupt is held off there
+by the erratum guard, and that guard is what keeps the tick from ending
+the standby every period.
+
+**The core's round trip and the hook's own cost**, on a line pended
+under the mask (the software interrupt, `Nvic::set_pending`) and taken
+at the unmask: 26 cycles from the `cpsie` to the handler's first load
+of the counter, 36..42 from there back to the thread - against the
+Cortex-M0+'s 15-cycle entry from zero-wait memory, the difference the
+vector and the handler fetched through the flash's two wait states. An
+`idle()` that a pending line makes return at once costs 96..114 cycles
+with that round trip inside it, so 30..45 of its own: the call, the
+SLEEPCFG read across the bridge, the DSB, the WFI that falls through,
+the `cpsie`.
+
+**Letter k: one turn per wake, and what a turn costs.** A Tenuto pack
+of three quiet AOs, two with a periodic time event (500 and 1000 ms),
+turned as `Tenuto::run()` turns it over 100 ticks with the tick the
+only interrupt: 100 turns, the window judged at 99..101 (a turn of
+allowance at each end - a wake pending at the start, a tick shortened
+by it). ARMv6-M's WFI has no event latch to leave behind, and none
+shows. A quiet turn whose `idle()` a pending line returns at once
+costs 309..321 cycles with the line's round trip inside it, so about
+250 of its own: `TimeEvents::process()` over the two armed events,
+`step()` over three empty queues, `idle_if_empty()`'s masked re-check
+and the hook - 79 instructions in the release listing, about three
+cycles each, the flash's two wait states and its 64-byte cache setting
+the rate
+("A handler in SRAM", below, measures the same rate on the handlers).
 
 ## Sleep, peripheral by peripheral
 
@@ -617,9 +717,14 @@ Implemented but not bench-verified:
   the placed handler to 15 per cent (6 for the body). Measured by the
   benchmark's letters p and t, the handlers in flash and in SRAM, once
   that body is inline (design/overview.md's first rule for a hot path).
-- `Nvic::set_pending` as a software interrupt source; priorities
-  other than the reset default (every line runs at 0 today, so
-  handler-vs-handler preemption is unexercised).
+- NVIC priorities other than the reset default (every line runs at 0
+  today, so handler-vs-handler preemption is unexercised).
+- **Erratum 1.8.13's hazard itself.** Letter w walks a TC line across
+  `idle()`'s STANDBY branch with the tick held off, and never the
+  tick's own edge across a standby entry - the coincidence the guard
+  exists to prevent. Measured by a variant without the guard walking
+  the SysTick edge across a STANDBY entry with BBIASHS set, the hard
+  faults counted through the panic record each one leaves.
 - A `BasicTicker` rate other than 1000 (the 125 Hz instantiation is
   compile-checked by the family TU only).
 - **Sleep CURRENT**, the biggest gap of the two sleep sections:
@@ -633,9 +738,13 @@ Implemented but not bench-verified:
   registers a SleepWalking DMA write may not reach). Nothing here
   streams DMA through a sleep; [dmac.md](dmac.md) still owns that gap.
 - **Whether a clock runs in standby with NOTHING requesting it.** Every
-  measurement in the section above uses a peripheral clocked from the
-  clock under test, and that peripheral is itself the request. The
-  unrequested case has no witness on this board.
+  peripheral measurement in the section above is itself a request.
+  SysTick is the one witness that is not, and it says generator 0 runs
+  through a standby on this bench with nothing of the image asking for
+  it ("The idle path, measured") - with the debug probe attached, which
+  19.5.6 allows to keep the power domains up. Measured with the probe
+  unplugged and the board powered on afresh, letter w's result read on
+  the console.
 - **The BODVDD as a wake source.** A detection is a supply crossing,
   and nothing here can make one while the CPU is stopped; INTFLAG.
   BODVDDDET was measured to be a TRANSITION and not a level, so a

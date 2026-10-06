@@ -46,7 +46,9 @@ struct SamPlatform {
     /// PRIMASK clears. So sleeping before unmasking closes the
     /// lost-wakeup window by construction: an interrupt that becomes
     /// pending between the caller's queue check and the WFI does not put
-    /// the core to sleep at all.
+    /// the core to sleep at all. Measured with an edge placed at every
+    /// cycle of this path, in IDLE0, IDLE2 and STANDBY: no wake lost or
+    /// late, one return per interrupt taken (docs/samc21/platform.md).
     ///
     /// THE ARMED MODE STANDS. This family selects the sleep depth in
     /// PM.SLEEPCFG, not in SCR.SLEEPDEEP, and the WFI instruction is the
@@ -65,9 +67,11 @@ struct SamPlatform {
     /// hard fault, so the kernel tick's interrupt is held off across the
     /// WFI whenever the armed mode is STANDBY. The register is read
     /// rather than a flag kept, because SLEEPCFG IS the state: it is what
-    /// the WFI will obey. The guard costs no ticks - SysTick is clocked
-    /// from the CPU clock, so it is frozen across a standby either way
-    /// (samc21/ticker.hpp's caveat, and samc21/sleep.hpp's tick rule).
+    /// the WFI will obey. Kernel time stands still across a standby with
+    /// the guard, whatever SysTick's COUNTER does in there - and on the
+    /// bench it RUNS (docs/samc21/platform.md), so the guard is also what
+    /// keeps the tick from ending the standby every period (samc21/
+    /// sleep.hpp's tick rule).
     ///
     /// The DSB is the ARM recommendation for WFI: it retires the posted
     /// writes - the SLEEPCFG store above all - before the core stops.

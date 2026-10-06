@@ -1,6 +1,9 @@
-// test_samc_platform - the reference bench suite for samc21/reset.hpp: the
-// reset controller, the watchdog, and the panic breadcrumb that has to
-// cross a real reset to be worth anything.
+// test_samc_platform - the reference bench suite for the SAM C21's
+// PLATFORM: the running half (samc21/platform.hpp's idle hook against an
+// interrupt's edge, the kernel's turn, delay_us on the SysTick counter)
+// and the failing half - samc21/reset.hpp: the reset controller, the
+// watchdog, and the panic breadcrumb that has to cross a real reset to be
+// worth anything.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -8,7 +11,9 @@
 // meant to keep passing through every later restructuring of the driver
 // under it.
 //
-// NOTHING TO WIRE, and nothing here costs any endurance.
+// NOTHING TO WIRE, and nothing here costs any endurance. Letter w writes
+// SysTick's LOAD and VAL to place its edges, so kernel time runs fast
+// while it runs.
 //
 // What is exercised, letter by letter:
 //   a  the boot story: RCAUSE read as the EXCLUSIVE register it is (one
@@ -24,6 +29,37 @@
 //   d  samc21/delay.hpp's delay_us on the SysTick counter: at-least
 //      never early, the sub-tick cap, and the refusals
 //
+//   w  THE IDLE HOOK AGAINST AN INTERRUPT'S EDGE, PLACED TO THE CYCLE:
+//      an edge D cycles after its placement, D = 0..399, then the
+//      kernel's own shape - a masked check, idle(), until the edge is
+//      served - so the edge walks across every instruction of the idle
+//      path and of the loop around it, the WFI included. Seven passes:
+//      the kernel's own wake (the SysTick, placed through LOAD) in IDLE0
+//      and IDLE2, waiting for one tick and for two (the sleep after a
+//      tick was taken); and an NVIC line (a TC match, the tick's
+//      interrupt held off so the line is the only wake) in IDLE0, IDLE2
+//      and STANDBY - the last one walking idle()'s other branch, the
+//      erratum guard's. A TC pair at 48 MHz through standby is each try's
+//      stopwatch and its RESCUE: a try the rescue's 50 ms ends is a wake
+//      lost for good, one that ends a whole tick late is a wake lost
+//      until the next tick. A TC with RUNSTDBY clear, halted in standby,
+//      is the witness that the STANDBY pass slept in standby. Prints the
+//      cycles from the edge to the caller's loop for an edge already
+//      pending and for one that finds the core asleep; the IDLE2 pass
+//      again under NVMCTRL's other two SLEEPPRM settings (what the wake
+//      from IDLE2 pays is the flash); what SysTick's counter does across
+//      a standby, held and unheld; the core's round trip on a pended
+//      line, and what an idle() a pending line returns at once costs.
+//      What it does not walk: the SysTick's own edge across a STANDBY
+//      entry (its interrupt is held off there by design - erratum
+//      1.8.13 - so it is no standby wake), and the hard fault that
+//      erratum describes.
+//   k  THE KERNEL'S TURN: a Tenuto pack of three quiet AOs, two with a
+//      periodic time event, turned as Tenuto::run() turns it over 100
+//      ticks with the tick the only interrupt - one turn per tick - and
+//      what one quiet turn costs when a pending line makes its idle()
+//      return at once: the turn every interrupt that wakes a quiet kernel
+//      pays.
 //   i  (by name only) SIX REAL RESETS. This letter reboots the board
 //      once per leg and resumes from a .noinit token, so it is NOT in
 //      `z`: `z` has to be one console session that a tool can judge
@@ -40,10 +76,16 @@
 // build: boards = c21j
 // build: monitor_speed = 115200
 
+#include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <optional>
 
+#include "kernel/event_queue.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/delay.hpp"
 #include "samc21/tc.hpp"
@@ -51,13 +93,17 @@
 #include "samc21/nvm.hpp"
 #include "samc21/pin.hpp"
 #include "samc21/platform.hpp"
+#include "samc21/osc32kctrl.hpp"
 #include "samc21/reset.hpp"
+#include "samc21/rtc.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/sleep.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
 
+using P = brio::SamPlatform;
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock;
 
@@ -753,6 +799,601 @@ void td_delay() {
     Ruler::release();
 }
 
+// ===========================================================================
+// w - the idle hook against an interrupt's edge, placed to the cycle
+// ===========================================================================
+//
+// THE PROMISE asked of the platform (design/kernel.md section 8's idle
+// call): idle() returns after any interrupt pending when it is called or
+// arriving at ANY instruction of the idle path - the masked check, the
+// call, the SLEEPCFG read, the DSB, the WFI - and once per interrupt
+// taken. ARMv6-M's WFI wakes on an interrupt that would preempt with
+// PRIMASK clear (B1.5.19 of the ARMv6-M ARM), so the promise holds by
+// construction on paper; this letter asks the silicon, at every cycle.
+
+/// The TC0+TC1 pair, 32 bits at CLK_MAIN undivided, RUNSTDBY set: each
+/// try's STOPWATCH (COUNT from zero at the try's start), its RESCUE (CC0
+/// at 50 ms, an interrupt that ends any sleep nothing else would), and,
+/// for the line passes, THE EDGE ITSELF (CC1 at D). With RUNSTDBY the
+/// pair asks for its clock through a standby (platform.md, "Sleep,
+/// peripheral by peripheral"), so the same instrument serves every mode.
+using Watch = Tc<0>;
+constexpr uint32_t tick_cycles = SysClock::hz / Ticker::ticks_per_second;   // 48 000
+constexpr uint32_t rescue_cycles = SysClock::hz / 20u;                      // 50 ms
+constexpr uint32_t positions = 400;
+constexpr uint32_t give_up = 16;   ///< failures that end a pass early
+constexpr uint32_t far_away = 0xFFFF'FF00u;
+
+volatile uint32_t rescue_periods = 0;
+volatile uint32_t line_edges = 0;
+
+/// A line no peripheral drives in this image: the software interrupt
+/// (`Nvic::set_pending`) whose handler stamps the SysTick counter.
+constexpr IRQn_Type spare_line = PTC_IRQn;
+volatile uint32_t spare_served = 0;
+volatile uint32_t spare_stamp = 0;
+
+bool watch_up() {
+    (void)Watch::enable(false);
+    const bool ok = Watch::init(0) &&
+                    Watch::configure(TcConfig{.mode = TcMode::count32,
+                                              .prescaler = TcPrescaler::div1,
+                                              .run_standby = true}) &&
+                    Watch::set_cc32(0, rescue_cycles) && Watch::set_cc32(1, far_away) &&
+                    Watch::enable(true);
+    Watch::clear_flags(static_cast<uint8_t>(Watch::overflow_flag | Watch::match_flag(0) |
+                                            Watch::match_flag(1)));
+    Watch::arm(static_cast<uint8_t>(Watch::match_flag(0) | Watch::match_flag(1)));
+    Nvic::clear_pending(Watch::irq());
+    Nvic::enable(Watch::irq());
+    return ok;
+}
+
+void watch_down() {
+    Watch::disarm(static_cast<uint8_t>(Watch::match_flag(0) | Watch::match_flag(1)));
+    (void)Watch::enable(false);
+    Watch::release();
+}
+
+/// The SysTick counter's distance from `a` down to `b`, folding one
+/// reload (it counts DOWN from LOAD).
+uint32_t down_cycles(uint32_t a, uint32_t b) {
+    return a >= b ? a - b : a + tick_cycles - b;
+}
+
+enum class EdgeSource : uint8_t {
+    tick,   ///< the kernel's own wake: SysTick, a core exception
+    line,   ///< an NVIC line: the watch's CC1 match
+};
+
+struct Try {
+    bool rescued;
+    uint32_t took;      ///< watch cycles from the try's start to the caller's loop
+    uint32_t to_loop;   ///< cycles from the edge to the caller's loop
+    uint32_t read;      ///< one synchronized COUNT read, for the line source
+    uint32_t ran;       ///< SysTick's cycles over the same span, for the line source
+};
+
+/// One try in the kernel's own shape - a masked check, idle(), until
+/// `edges` interrupts have been served - with the edge D cycles after the
+/// placement.
+///
+/// THE TICK is placed through LOAD: a write to VAL clears it, the next
+/// clock reloads LOAD (ARMv6-M ARM B3.3.1), so with LOAD = D + 1 for that
+/// one reload the 1-to-0 transition comes D + 2 cycles after the clear,
+/// and LOAD is back at the tick's period before it - so the period after
+/// the placed edge is a whole tick again (judged below: the second edge
+/// of a two-edge try is a period after the first). The natural edge is
+/// kept away (the counter far from zero, PENDSTCLR) so the tick taken is
+/// the placed one. These writes shorten the tick they land in, so kernel
+/// time runs fast during the letter.
+///
+/// THE LINE is placed through CC1: COUNT parked far from both matches,
+/// CC1 = D, then COUNT written to zero - the match comes D counter cycles
+/// after that write lands.
+Try edge_try(EdgeSource src, uint32_t d, uint32_t edges) {
+    Try r{};
+    P::CriticalSection cs;
+    const uint32_t r0 = rescue_periods;
+    if (src == EdgeSource::line) {
+        (void)Watch::set_count32(0x8000'0000u);
+        (void)Watch::set_cc32(1, d);
+        Watch::clear_flags(Watch::match_flag(1));
+        Nvic::clear_pending(Watch::irq());
+        const uint32_t e0 = line_edges;
+        (void)Watch::set_count32(0);
+        const uint32_t v0 = SysTick->VAL;
+        for (;;) {
+            P::CriticalSection turn;   // the kernel's own shape
+            if (line_edges != e0) {
+                break;
+            }
+            P::idle();
+        }
+        r.ran = down_cycles(v0, SysTick->VAL);
+        const uint32_t first = Watch::count32();
+        r.took = Watch::count32();
+        r.read = r.took - first;
+        r.to_loop = first - d;
+    } else {
+        while (SysTick->VAL < 4096u) {
+        }
+        SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk;
+        (void)Watch::set_count32(0);
+        const uint32_t t = Ticker::ticks();
+        SysTick->LOAD = d + 1u;
+        SysTick->VAL = 0u;
+        SysTick->LOAD = tick_cycles - 1u;
+        for (;;) {
+            P::CriticalSection turn;   // the kernel's own shape
+            if (Ticker::ticks() - t >= edges) {
+                break;
+            }
+            P::idle();
+        }
+        r.to_loop = tick_cycles - SysTick->VAL;   // since the reload the edge made
+        (void)Watch::count32();
+        r.took = Watch::count32();
+    }
+    r.rescued = rescue_periods != r0;
+    if (src == EdgeSource::line) {
+        (void)Watch::set_cc32(1, far_away);
+    }
+    return r;
+}
+
+struct Walk {
+    uint32_t lost = 0;           ///< tries the rescue ended
+    uint32_t late = 0;           ///< tries that ended a whole tick late
+    uint32_t first_bad = 0;
+    uint32_t fastest = 0xFFFF'FFFFu;
+    uint32_t slowest = 0;
+    uint32_t pending_to_loop = 0;   ///< D = 0: the edge is in before the check
+    uint32_t sleep_entry = 0;       ///< the D of the least to_loop: the sleep's entry
+    uint32_t least_to_loop = 0xFFFF'FFFFu;
+    uint32_t asleep_to_loop = 0;    ///< the last D: the edge finds the core asleep
+    uint32_t read = 0;
+    uint32_t took_last = 0;   ///< the last D's took and ran: what SysTick saw of it
+    uint32_t ran_last = 0;
+    uint32_t tried = 0;
+};
+
+Walk walk(EdgeSource src, uint32_t edges) {
+    Walk w;
+    // A wake lost until the NEXT tick ends a whole period late; the bound
+    // sits a quarter period short of that, far above any kept wake (the
+    // edges land within D + a few hundred cycles of the period they need).
+    const uint32_t late = edges * tick_cycles - tick_cycles * 3u / 4u;
+    for (uint32_t d = 0; d < positions; ++d) {
+        const Try t = edge_try(src, d, edges);
+        ++w.tried;
+        if (t.took > w.slowest) {
+            w.slowest = t.took;
+        }
+        if (t.took < w.fastest) {
+            w.fastest = t.took;
+        }
+        const bool bad = t.rescued || t.took > late;
+        if (bad) {
+            if (w.lost + w.late == 0u) {
+                w.first_bad = d;
+            }
+            if (t.rescued) {
+                ++w.lost;
+            } else {
+                ++w.late;
+            }
+            if (w.lost + w.late >= give_up) {
+                break;
+            }
+            continue;
+        }
+        if (d == 0u) {
+            w.pending_to_loop = t.to_loop;
+            w.read = t.read;
+        }
+        // While the edge lands before the WFI, every cycle later it lands
+        // is a cycle less to the loop, down to the edge that meets the WFI
+        // itself; past it the distance is the wake's own, and longer.
+        if (t.to_loop < w.least_to_loop) {
+            w.least_to_loop = t.to_loop;
+            w.sleep_entry = d;
+        }
+        w.asleep_to_loop = t.to_loop;
+        w.took_last = t.took - t.read;
+        w.ran_last = t.ran;
+    }
+    return w;
+}
+
+/// The STANDBY witness: TC2, 16 bits at CLK_MAIN with RUNSTDBY CLEAR, so
+/// "halted in standby" (35.7.2.1, CTRLA.RUNSTDBY) while the watch runs on
+/// - a positive sign that the PM really took the standby. SysTick cannot
+/// be that sign: measured below, its counter runs through a standby on
+/// this bench.
+using Witness = Tc<2>;
+
+struct Spans {
+    uint32_t watch;     ///< the watch, from its zero to the first read after the wake
+    uint32_t witness;   ///< the witness, across the same try and the two reads around it
+};
+
+/// One try with the line D = 2000 cycles out, the witness read on both
+/// sides.
+Spans witness_try(SleepMode mode) {
+    (void)Pm::set_sleep_mode(mode);
+    SysTickInterruptGuard quiet;
+    P::CriticalSection cs;
+    (void)Watch::set_count32(0x8000'0000u);
+    (void)Watch::set_cc32(1, 2000u);
+    Watch::clear_flags(Watch::match_flag(1));
+    Nvic::clear_pending(Watch::irq());
+    const uint32_t e0 = line_edges;
+    const uint16_t a = Witness::count16();
+    (void)Watch::set_count32(0);
+    for (;;) {
+        P::CriticalSection turn;
+        if (line_edges != e0) {
+            break;
+        }
+        P::idle();
+    }
+    const uint32_t w = Watch::count32();
+    const uint16_t b = Witness::count16();
+    (void)Watch::set_cc32(1, far_away);
+    (void)Pm::set_sleep_mode(SleepMode::idle0);
+    return Spans{w, static_cast<uint16_t>(b - a)};
+}
+
+/// THE OTHER STANDBY: no clock request of this letter's own holds
+/// generator 0 (the watch is released first) and the RTC on OSCULP32K is
+/// the wake, 160 of its ticks (4.9 ms) out. The witness, now at CLK_MAIN / 16 so that span
+/// fits its sixteen bits, says the standby was entered; SysTick, its
+/// period stretched to the whole 24 bits for the measurement (349 ms, so
+/// no reload can fold the reading - COUNTFLAG cannot tell, the erratum
+/// guard's read of CTRL in idle() clears it), says how far its counter
+/// ran through it. Its interrupt is held off either way. The watchdog is
+/// the backstop: a wake that never comes reboots the board into its
+/// banner instead of leaving it mute.
+volatile bool rtc_fired = false;
+
+struct Unheld {
+    bool woke;
+    uint32_t witness;   ///< the witness's counts across it, CLK_MAIN / 16
+    uint32_t systick;   ///< SysTick's cycles across it
+};
+
+Unheld unheld_sleep(SleepMode mode) {
+    Unheld u{false, 0, 0};
+    (void)Rtc::enable(false);
+    Osc32kctrl::rtc_clock(RtcClock::ulp_32k);
+    if (!Rtc::init() ||
+        !Rtc::configure(RtcConfig{.mode = RtcMode::count32, .prescaler = RtcPrescaler::div1}) ||
+        !Rtc::enable(true)) {
+        return u;
+    }
+    Rtc::disarm(RtcFlag::all);
+    Rtc::clear_flags(RtcFlag::all);
+    Rtc::arm(RtcFlag::compare0);
+    Nvic::clear_pending(Rtc::irq());
+    Nvic::enable(Rtc::irq());
+    (void)Watchdog::arm(WdtConfig{.period = WdtCycles::cyc4096});
+    {
+        SysTickInterruptGuard quiet;
+        P::CriticalSection cs;
+        rtc_fired = false;
+        (void)Rtc::set_comp32(Rtc::count32() + 160u);
+        (void)Pm::set_sleep_mode(mode);
+        SysTick->LOAD = SysTick_LOAD_RELOAD_Msk;
+        SysTick->VAL = 0u;
+        const uint16_t a = Witness::count16();
+        const uint32_t v0 = SysTick->VAL;
+        for (;;) {
+            P::CriticalSection turn;
+            if (rtc_fired) {
+                break;
+            }
+            P::idle();
+        }
+        const uint32_t v1 = SysTick->VAL;
+        u.systick = v0 - v1;
+        SysTick->LOAD = tick_cycles - 1u;
+        SysTick->VAL = 0u;
+        u.witness = static_cast<uint16_t>(Witness::count16() - a);
+        u.woke = rtc_fired;
+        (void)Pm::set_sleep_mode(SleepMode::idle0);
+    }
+    (void)Watchdog::disable();
+    restore_wdt_boot_regs();
+    Nvic::disable(Rtc::irq());
+    Rtc::disarm(RtcFlag::all);
+    Rtc::release();
+    return u;
+}
+
+void tw_edge() {
+    console_drain();
+    const bool up = watch_up();
+    bench.verdict("the watch (TC0+TC1, CLK_MAIN undivided, RUNSTDBY) comes up", up);
+    if (!up) {
+        return;
+    }
+
+    // WHERE A COUNT READ CAPTURES: COUNT written to zero and read straight
+    // back - the value is how far into Watch::count32() its snapshot is
+    // taken, which every line figure below carries and is shown net of.
+    uint32_t capture = 0xFFFF'FFFFu;
+    for (int i = 0; i < 8; ++i) {
+        P::CriticalSection cs;
+        (void)Watch::set_count32(0);
+        capture = std::min(capture, Watch::count32());
+    }
+
+    struct Pass {
+        const char* name;
+        SleepMode mode;
+        EdgeSource src;
+        uint32_t edges;
+    };
+    static constexpr Pass passes[] = {
+        {"IDLE0, the tick, waiting for one", SleepMode::idle0, EdgeSource::tick, 1},
+        {"IDLE0, the tick, waiting for two", SleepMode::idle0, EdgeSource::tick, 2},
+        {"IDLE2, the tick, waiting for one", SleepMode::idle2, EdgeSource::tick, 1},
+        {"IDLE2, the tick, waiting for two", SleepMode::idle2, EdgeSource::tick, 2},
+        {"IDLE0, a TC line", SleepMode::idle0, EdgeSource::line, 1},
+        {"IDLE2, a TC line", SleepMode::idle2, EdgeSource::line, 1},
+        {"STANDBY, a TC line", SleepMode::standby, EdgeSource::line, 1},
+    };
+    constexpr size_t pass_count = sizeof(passes) / sizeof(passes[0]);
+    Walk walks[pass_count];
+    bool armed = true;
+    for (size_t i = 0; i < pass_count; ++i) {
+        armed = Pm::set_sleep_mode(passes[i].mode) && armed;
+        if (passes[i].src == EdgeSource::line) {
+            // The line is the ONLY wake: a lost one waits for the rescue,
+            // not for the next tick.
+            SysTickInterruptGuard quiet;
+            walks[i] = walk(passes[i].src, passes[i].edges);
+        } else {
+            walks[i] = walk(passes[i].src, passes[i].edges);
+        }
+    }
+    (void)Pm::set_sleep_mode(SleepMode::idle0);
+
+    // The positive witness that the STANDBY pass slept in standby.
+    (void)Witness::enable(false);
+    const bool witness_ok =
+        Witness::init(0) &&
+        Witness::configure(TcConfig{.mode = TcMode::count16, .prescaler = TcPrescaler::div1}) &&
+        Witness::enable(true);
+    const Spans in_idle = witness_try(SleepMode::idle0);
+    const Spans in_standby = witness_try(SleepMode::standby);
+
+    // WHAT IDLE2 AND STANDBY PAY AT THE WAKE: the same IDLE2 pass again
+    // under each of NVMCTRL's two other sleep power settings (27.8.2
+    // CTRLB.SLEEPPRM; 27.5.1: STANDBY puts the flash in low power
+    // whatever it says), then the register put back as found.
+    const uint32_t ctrlb = Nvm::ctrlb();
+    const NvmConfig found{
+        .wait_states = FlashWaitStates::get(),
+        .cache = Nvm::cache_enabled(),
+        .read_mode = Nvm::read_mode(),
+        .sleep_power = static_cast<NvmSleepPower>((ctrlb & NVMCTRL_CTRLB_SLEEPPRM_Msk) >>
+                                                  NVMCTRL_CTRLB_SLEEPPRM_Pos),
+        .manual_write = Nvm::manual_write(),
+    };
+    constexpr NvmSleepPower settings[] = {NvmSleepPower::wake_on_exit, NvmSleepPower::disabled};
+    Walk nvm_walks[2];
+    for (size_t i = 0; i < 2u; ++i) {
+        NvmConfig c = found;
+        c.sleep_power = settings[i];
+        (void)Nvm::init(c);
+        armed = Pm::set_sleep_mode(SleepMode::idle2) && armed;
+        nvm_walks[i] = walk(EdgeSource::tick, 1);
+    }
+    (void)Pm::set_sleep_mode(SleepMode::idle0);
+    (void)Nvm::init(found);
+    const bool restored = Nvm::ctrlb() == ctrlb;
+
+    watch_down();
+    (void)Witness::enable(false);
+    const bool slow_witness =
+        Witness::configure(TcConfig{.mode = TcMode::count16, .prescaler = TcPrescaler::div16}) &&
+        Witness::enable(true);
+    const Unheld unheld_idle = unheld_sleep(SleepMode::idle0);
+    const Unheld unheld = unheld_sleep(SleepMode::standby);
+    (void)Witness::enable(false);
+    Witness::release();
+    bench.verdict("every mode armed and read back (19.6.3.3)", armed);
+
+    for (size_t i = 0; i < pass_count; ++i) {
+        const Walk& w = walks[i];
+        print(serial, "  ", passes[i].name, ": ", w.tried, " edge positions, lost ", w.lost,
+              ", late ", w.late);
+        if (w.lost + w.late != 0u) {
+            print(serial, " (first at D=", w.first_bad, ")");
+        }
+        print(serial, "; ", w.fastest, "..", w.slowest, " cycles a try", crlf);
+        const uint32_t net = passes[i].src == EdgeSource::line ? capture : 0u;
+        print(serial, "    edge to the caller's loop: ", w.pending_to_loop - net,
+              " cycles pending at D=0, ", w.asleep_to_loop - net,
+              " finding the core asleep (the least, ", w.least_to_loop - net, ", at D=",
+              w.sleep_entry, ")", crlf);
+        if (passes[i].src == EdgeSource::line) {
+            print(serial, "    the last try: ", w.took_last, " cycles on the watch, ", w.ran_last,
+                  " of them on SysTick (a COUNT read is ", w.read, " cycles, its snapshot ",
+                  capture, " in)", crlf);
+        }
+    }
+    print(serial, "  STANDBY witness (TC2, RUNSTDBY clear) over a line 2000 cycles out: ",
+          in_idle.witness, " of ", in_idle.watch, " watch cycles in IDLE0, ", in_standby.witness,
+          " of ", in_standby.watch, " in STANDBY", crlf);
+    static const char* const setting_names[] = {"WAKEUPINSTANT", "DISABLED"};
+    for (size_t i = 0; i < 2u; ++i) {
+        print(serial, "  IDLE2, the tick, NVMCTRL SLEEPPRM ", setting_names[i], ": lost ",
+              nvm_walks[i].lost, ", late ", nvm_walks[i].late, "; edge to the loop ",
+              nvm_walks[i].asleep_to_loop, " cycles finding the core asleep", crlf);
+    }
+    print(serial, "  (the image runs with SLEEPPRM ", static_cast<uint8_t>(found.sleep_power),
+          ", the reset value WAKEUPACCESS being 0)", crlf);
+    print(serial, "  generator 0 unheld, the RTC 160 ticks out: IDLE0 - the witness ",
+          unheld_idle.witness, " counts of 16 cycles, SysTick ", unheld_idle.systick,
+          " cycles; STANDBY - the witness ", unheld.witness, ", SysTick ", unheld.systick, crlf);
+    print(serial, "  (SysTick's counter ", unheld.systick * 2u > unheld_idle.systick ? "RAN" : "STOOD",
+          " through that standby, and through the line passes' it ",
+          walks[6].took_last - walks[6].ran_last < walks[4].took_last - walks[4].ran_last + 32u
+              ? "RAN"
+              : "STOOD",
+          "; kernel time stands still across a standby either way, the erratum guard "
+          "holding the tick's interrupt off)", crlf);
+    bench.verdict("the witness came up", witness_ok);
+    bench.verdict("STANDBY was entered: the witness stood still across it, by over a "
+                  "thousand cycles more than in IDLE0",
+                  in_standby.witness + 1000u < in_idle.witness);
+    bench.verdict("no lost or late wake under either other SLEEPPRM, and NVMCTRL put back",
+                  nvm_walks[0].lost + nvm_walks[0].late + nvm_walks[1].lost + nvm_walks[1].late ==
+                          0u &&
+                      restored);
+    for (size_t i = 0; i < pass_count; ++i) {
+        bench.verdict(passes[i].name, walks[i].lost == 0u && walks[i].late == 0u &&
+                                          walks[i].tried == positions);
+    }
+    bench.verdict("the placed tick leaves a whole period behind it (the second edge "
+                  "a tick after the first)",
+                  walks[1].fastest >= tick_cycles && walks[3].fastest >= tick_cycles);
+    bench.verdict("a STANDBY with generator 0 unheld: entered (the witness under a quarter "
+                  "of IDLE0's count) and woken by the RTC",
+                  slow_witness && unheld.woke && unheld_idle.woke &&
+                      unheld.witness * 4u < unheld_idle.witness);
+    bench.verdict("the walk reaches past the sleep's entry in every one-edge pass",
+                  [&] {
+                      for (size_t i = 0; i < pass_count; ++i) {
+                          if (passes[i].edges == 1u && walks[i].sleep_entry + 16u >= positions) {
+                              return false;
+                          }
+                      }
+                      return true;
+                  }());
+
+    // THE CORE'S ROUND TRIP on the spare line, pended under the mask and
+    // taken at the unmask: from the cpsie to the handler's first load of
+    // the counter, and from there back to the thread. The bracket is two
+    // back-to-back counter reads; every figure is the least of sixteen,
+    // which filters a tick landing inside one.
+    spare_served = 0;
+    Nvic::clear_pending(spare_line);
+    Nvic::enable(spare_line);
+    uint32_t bracket = 0xFFFF'FFFFu;
+    uint32_t entry = 0xFFFF'FFFFu;
+    uint32_t exit = 0xFFFF'FFFFu;
+    uint32_t at_once = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        disable_interrupts();
+        const uint32_t b0 = SysTick->VAL;
+        const uint32_t b1 = SysTick->VAL;
+        Nvic::set_pending(spare_line);
+        const uint32_t c0 = SysTick->VAL;
+        enable_interrupts();
+        const uint32_t c1 = SysTick->VAL;
+        const uint32_t h = spare_stamp;
+        bracket = std::min(bracket, down_cycles(b0, b1));
+        entry = std::min(entry, down_cycles(c0, h));
+        exit = std::min(exit, down_cycles(h, c1));
+
+        // An idle() a pending line returns at once: the hook's whole cost
+        // with the round trip it unmasks into.
+        disable_interrupts();
+        Nvic::set_pending(spare_line);
+        const uint32_t i0 = SysTick->VAL;
+        P::idle();
+        const uint32_t i1 = SysTick->VAL;
+        at_once = std::min(at_once, down_cycles(i0, i1));
+    }
+    Nvic::disable(spare_line);
+    print(serial, "  the core's round trip on a pended line: ", entry, " cycles to the handler's "
+          "first load, ", exit, " from there back to the thread (a counter read is ", bracket,
+          ")", crlf);
+    print(serial, "  an idle() a pending line returns at once: ", at_once,
+          " cycles, the round trip and two counter reads included", crlf);
+    bench.verdict("the spare line was taken once per pend (Nvic::set_pending as a "
+                  "software interrupt)",
+                  spare_served == 32u);
+    spare_served = 0;
+}
+
+// ===========================================================================
+// k - the kernel's turn: how many per interrupt, and what one costs
+// ===========================================================================
+// A pack shaped like a small program's: three AOs, two of them with a
+// periodic time event (500 ms and 1000 ms, so none fires in the 100 ms
+// this letter idles), none of them ever posted to.
+template <uint8_t N>
+struct Quiet {
+    struct Event {
+        uint8_t n;
+    };
+    static inline EventQueue<Event, 2, P> queue;
+    static inline TimeEvent<P, Quiet, Event> beat{Event{N}};
+    static void init() {
+        if constexpr (N != 0u) {
+            beat.arm_every(ticks_from_ms<P>(500u * N));
+        }
+    }
+    static void dispatch(const Event&) {}
+};
+using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
+
+/// One turn of Tenuto::run()'s loop, as it is written there.
+[[gnu::always_inline]] inline void kernel_turn() {
+    TimeEvents<P>::process();
+    if (!QuietKernel::step()) {
+        QuietKernel::idle_if_empty();
+    }
+}
+
+void tk_turns() {
+    console_drain();
+    QuietKernel::init_all();
+
+    // Turns over 100 quiet ticks: the tick is the only interrupt. The
+    // loop starts inside a tick and ends at the wake that completes the
+    // hundredth, so a kernel that turns once per wake turns 100 times; one
+    // turn of allowance at each end (a wake already pending at the start,
+    // a tick shortened by the start) makes the window 99..101.
+    const uint32_t t = Ticker::ticks();
+    uint32_t turns = 0;
+    while (Ticker::ticks() - t < 100u) {
+        kernel_turn();
+        ++turns;
+    }
+
+    // A quiet turn whose idle() a pending line returns at once: the turn
+    // an interrupt that wakes a quiet kernel costs, run under the mask
+    // (process() and step() save and restore it, the same instructions
+    // either way) with the line's round trip inside the idle().
+    Nvic::clear_pending(spare_line);
+    Nvic::enable(spare_line);
+    uint32_t turn_cycles = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        disable_interrupts();
+        Nvic::set_pending(spare_line);
+        const uint32_t c0 = SysTick->VAL;
+        kernel_turn();
+        const uint32_t c1 = SysTick->VAL;
+        enable_interrupts();
+        turn_cycles = std::min(turn_cycles, down_cycles(c0, c1));
+    }
+    Nvic::disable(spare_line);
+    spare_served = 0;
+    TimeEvents<P>::clear_all();
+
+    print(serial, "  100 quiet ticks: ", turns, " kernel turns; a quiet turn whose idle() a "
+          "pending line returns at once: ", turn_cycles,
+          " cycles (the line's round trip and two counter reads included)", crlf);
+    bench.verdict("the kernel loop turns once per interrupt (99..101 over 100 ticks)",
+                  turns >= 99u && turns <= 101u);
+}
+
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
@@ -761,6 +1402,29 @@ void td_delay() {
 // a spin loop - so every line this suite can raise is bound.
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+
+/// Letter w's watch: the placed edge (CC1) and the rescue (CC0).
+extern "C" void TC0_Handler() {
+    const uint8_t p = Watch::isr();
+    if ((p & Watch::match_flag(1)) != 0u) {
+        line_edges = line_edges + 1u;
+    }
+    if ((p & Watch::match_flag(0)) != 0u) {
+        rescue_periods = rescue_periods + 1u;
+    }
+}
+
+/// Letter w's unheld standby: its wake.
+extern "C" void RTC_Handler() {
+    (void)brio::Rtc::isr();
+    rtc_fired = true;
+}
+
+/// Letters w and k's spare line: a stamp and a count, nothing else.
+extern "C" void PTC_Handler() {
+    spare_stamp = SysTick->VAL;
+    spare_served = spare_served + 1u;
+}
 
 extern "C" void WDT_Handler() {
     if (brio::Watchdog::isr() != 0u) {
@@ -815,6 +1479,8 @@ int main() {
     bench.letter('b', "the watchdog as a configurable timer", tb_watchdog);
     bench.letter('c', "what OSCULP32K really runs at", tc_oscillator);
     bench.letter('d', "delay_us on the SysTick counter (samc21/delay.hpp)", td_delay);
+    bench.letter('w', "THE IDLE HOOK against an interrupt's edge, placed to the cycle", tw_edge);
+    bench.letter('k', "the kernel's turn: one per interrupt, and what one costs", tk_turns);
     bench.letter('i', "SIX REAL RESETS (reboots the board)", ti_resets, false);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 

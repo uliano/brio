@@ -209,10 +209,13 @@ SysTick is the independent witness.
   bit), so there is nothing to wait on. Waiting for that rise therefore
   does not work, and the reads stay one behind; what works is a SECOND
   READSYNC, whose own crossing covers the first's landing gap.
-  `read_sync()` issues it, so a synchronized read returns the count at
-  the CALL's entry - **224, 233, 241, 249** on the same setup, the first
-  value current. The price: **~242 us** per read at a 32.768 kHz counter
-  clock against ~117 single-command, unmeasurably small at 48 MHz. The
+  `read_sync()` issues it, so a synchronized read returns a count
+  current within the call - at a 32 kHz counter clock the count at its
+  entry, **224, 233, 241, 249** on the same setup, the first value
+  current; at a 48 MHz counter clock the snapshot lands about 230 cycles
+  into a read of 290 to 304. The price: **~242 us** per read at a
+  32.768 kHz counter clock against ~117 single-command, 290 to 304 core
+  cycles at 48 MHz. The
   TCC's `read_sync()` is the same silicon and carries the same
   discipline. And **there is no priming**: after a double read, a
   later single-command read returns the previous read's second

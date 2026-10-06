@@ -55,10 +55,13 @@
  * move to the RTC. init()'s clock_follows assertion below is what will
  * refuse to compile on that day, which is the point.
  *
- * ## The same caveat, in its second half: STANDBY FREEZES THIS TIMEBASE
+ * ## The same caveat, in its second half: STANDBY STOPS KERNEL TIME
  * Being clocked from the CPU clock has a consequence beyond rebasing:
- * in the PM's STANDBY sleep mode the CPU clock stops, so SysTick stops
- * and KERNEL TIME STANDS STILL for exactly as long as the sleep lasts.
+ * in the PM's STANDBY sleep mode KERNEL TIME STANDS STILL for exactly as
+ * long as the sleep lasts - the tick's interrupt held off across it by
+ * the erratum guard below, whatever the counter does (on the bench, with
+ * the debug probe attached, it was measured RUNNING through a standby:
+ * docs/samc21/platform.md).
  * Time events do not fire late by a little - they fire late by the
  * whole slept duration, and `millis()` under-reports the wall clock by
  * the same amount. IDLE is unaffected: MCLK and GCLK0 keep running
@@ -110,9 +113,10 @@ namespace brio {
  *
  * It lives here rather than in samc21/sleep.hpp because this file owns the
  * SysTick register; `SamPlatform::idle()` and `Pm::sleep()` are its two
- * users. It costs nothing in ticks: the counter is frozen across a
- * standby whether or not its interrupt is enabled (see the caveat in
- * this file's header).
+ * users. It costs nothing in ticks: kernel time stands still across a
+ * standby, and this guard is what makes it so whatever the counter does
+ * in there - which also keeps the tick from ending the standby every
+ * period (see the caveat in this file's header).
  *
  * Restoring rather than unconditionally setting is what makes it safe to
  * nest inside a `pause()`d ticker.

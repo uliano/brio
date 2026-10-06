@@ -70,9 +70,10 @@
  * clock_follows assertion is what refuses a dynamic clock that forgot
  * to list the ticker.
  * And a sleep mode that stops the CPU clock stops THIS TIMEBASE: kernel
- * time stands still for the whole sleep (the SAM's standby, the
- * STM32's Stop); `advance()` is the landing point of the resync a timed
- * sleep site performs from an RTC (samc21/sleep.hpp's
+ * time stands still for the whole sleep (the STM32's Stop; on the SAM's
+ * standby the erratum guard of samc21/ticker.hpp holds the tick off,
+ * whatever the counter does); `advance()` is the landing point of the
+ * resync a timed sleep site performs from an RTC (samc21/sleep.hpp's
  * SamTimedSleepSite). The other answer exists on the STM32G0: a
  * TICKLESS timebase on a low-power timer that counts through the Stop
  * (stm32g0/lptim_ticker.hpp, taken by stm32g0/platform.hpp as its
