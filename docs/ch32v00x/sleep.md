@@ -21,10 +21,24 @@ and a WFE do).
   - or a reset. Both are entered by WFI or WFE.
 - **The core wakes from a Standby on the HSI**, the PLL turned off by
   the hardware (2.3.3).
+- **SLEEPDEEP with PDDS clear is not a Sleep**, whatever 2.4.1's PDDS
+  row says ("0: Enter sleep mode"): measured, the STK and TIM2 stop
+  through it and the core wakes on the HSI, as from a Standby. The
+  sites set or clear the two bits together.
 - **The AWU** counts the 128 kHz LSI through a prescaler (RM 2.4.5,
   fifteen codes from /1 to /61440) up to a six-bit window and raises
-  EXTI line 9 at the match; its count cannot be read, and its window
+  EXTI line 9 at the match - and again at every period while it stays
+  enabled (measured); its count cannot be read, and its window
   cannot exceed 2.048 s at /4096 - or 30 s at the /61440 code.
+- **Line 9 reaches a WFE three ways** (QingKe V2 manual 5.2, RM 2.3.1
+  and 6.4.2): as an EXTI EVENT (item 1, no handler, no flag), as an
+  interrupt the PFIC does not enable, through SEVONPEND's "new
+  interrupt pending signal" (item 3 - an EDGE), and as an interrupt
+  the PFIC enables, with MIE set (item 2 - a pending line the core
+  takes, the handler run first). The edge has the hole platform.md
+  measures: one arriving on the cycle the WFE goes to sleep is lost,
+  and while line 9's flag stands the AWU's next match makes no new
+  one.
 - **The LSI is "about 128 kHz"** (the datasheet's own words).
 - **PWR's registers answer rubbish until its gate on the PB1 bus is
   open** (PWREN, RCC_PB1PCENR bit 28): 0x3F in every field on the
@@ -32,6 +46,9 @@ and a WFE do).
   it.
 - **A tick that turns pending ends a WFE** with SEVONPEND set, so a
   running STK never lets a Standby begin.
+- **No counter runs in a Standby**: the STK and TIM2 stop with HCLK, so
+  a wake that came late cannot be timed from inside; only a wake that
+  never comes shows.
 - **The two parts differ in PWR_CTLR alone**: the AWU's window,
   prescaler table and line are the same, and so is the PVD's flag;
   the PVD's threshold field is two bits from 1.87 to 2.66 V on the
@@ -60,8 +77,10 @@ current rate) because the core woke on the HSI.
 `Ch32TimedSleepSite<P, Clock>` lifts the no-deadline rule: `init()`
 MEASURES the LSI against the STK (64 undivided counts timed in HCLK
 cycles), `arm(deep)` converts `TimeEvents<P>::ticks_to_next()` into
-LSI counts at the measured rate rounded UP and picks the coarsest
-prescaler that keeps the window in six bits, and `disarm()` advances
+LSI counts at the measured rate rounded UP, picks the coarsest
+prescaler that keeps the window in six bits and ENABLES line 9 in the
+PFIC, `awu_isr()` is the vector's body (it closes the line again,
+leaving the flag as the witness), and `disarm()` advances
 kernel time by the alarm's span LESS the ticks the STK counted awake
 since arm() - when the AWU is what fired; when something else ended
 the Standby the span is unknown and nothing is advanced (late
@@ -73,11 +92,24 @@ armed it pauses the ticker and clears its pending bit before the WFE
 and resumes it after, so kernel time stands still for exactly the
 slept span and the tick cannot end the Standby before it begins.
 
+**What the timed site guarantees of its wake.** The AWU's match ends
+the Standby by the one path that is a LEVEL: line 9 an interrupt the
+PFIC enables, the WFE entered with MIE set, so the match is a pending
+line the sleeping core takes (5.2's WFE item 2) whenever it arrives -
+before the masked check (the check sees the flag and the loop does not
+sleep), between the check and the sleep (taken at the unmask, its
+latch ending the WFE at once), on the cycle of the sleep entry, or
+during the sleep. The EXTI event stays armed beside it. The price is
+the vector: an image using the timed site binds `awu_handler` to
+`awu_isr()`, as it binds the tick's.
+
 ## How to use it
 
 ```cpp
 using Site = brio::Ch32TimedSleepSite<P, SysClock>;
 using Power = brio::PowerManager<P, Site, brio::PowerConfig{}, Voters...>;
+
+extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
 
 Site::init();                       // the LSI on and measured
 brio::Tenuto<P, Power, ...>::run(); // the manager arms, the loop's idle path sleeps
@@ -91,10 +123,11 @@ are at the HSI's rate.
 
 ## Bench findings
 
-The reference suite is `test_ch32_sleep` (29 verdicts in `z` on the
-CH32V006K8U6, 28 on the CH32V003F4P6) at 48 MHz, the probe attached
-(so no current was drawn into a number - the meter with the probe
-detached is the desk's next step).
+The reference suite is `test_ch32_sleep` (36 verdicts in `z` on the
+CH32V006K8U6; on the CH32V003F4P6 two images, letters `a` to `e` in
+the first, 28 verdicts there, and letter `w` in the second) at 48 MHz,
+the probe attached (so no current was drawn into a number - the meter
+with the probe detached is the desk's next step).
 
 - **The LSI runs at 124 kHz on the CH32V006** (123.7..124.6 kHz across
   measurements, -3% of nominal) and at 125 kHz on the CH32V003
@@ -106,7 +139,8 @@ detached is the desk's next step).
   out, the timed site placing the AWU at prescaler /1024, window 35
   (297 ticks for the 296 that remained at arm time - rounded up, the
   "at least"; window 36 for 303 ticks on the CH32V003 at its LSI),
-  two `idle()` turns (the first ended by a stale event), the AWU
+  two `idle()` turns (the first ended by a stale event: the deep path
+  does not consume the latch, see platform.hpp), the AWU
   firing, SYSCLK read as the HSI at the wake and the PLL back after
   `disarm()`, kernel time advanced by 280 ticks (286 on the CH32V003) -
   the span less what the core spent awake printing and waking - and
@@ -115,6 +149,27 @@ detached is the desk's next step).
   tick, the tick counts through it.
 - **A disarm with no alarm fired advances by nothing**, the clock
   untouched: the accounting's other branch.
+- **The AWU's wake, swept to the cycle** (letter `w`): the AWU
+  re-matching every 3044 to 3081 cycles (about 63 us), each try locked
+  to one match and the next placed D = 0..399 cycles after the wait
+  ends, 16 tries a position, the kernel's masked check and `idle()`
+  around it. In a Sleep, timed and rescued by TIM2: the pending edge
+  alone (line 9 PFIC-disabled, no event) loses 13 of 6400 tries, all
+  between D = 234 and 266 and every one woken only by the 4 ms rescue
+  - the AWU's later matches never woke it; the event beside it (the
+  site's old shape) loses none; the line enabled (the site's shape)
+  loses none, its handler entered once per try that slept. In a
+  Standby, the clock put back after each try and the enabled line
+  ALONE (no event to fall back on), 12800 tries at 32 a position:
+  every one that slept (9721) woke, the handler once each. Twelve code
+  layouts (the suite's code shifted by 0 to 22 bytes): the pending
+  edge lost 4 to 26 tries in each, the level none in a Sleep and in a
+  Standby. Fifty Standbys through the timed site, each a 3 ms
+  deadline: all fifty ended by the AWU with one handler entry each,
+  the line open after every `arm()` and closed after every
+  `disarm()`. The event's own cover in a Standby is not measured -
+  a wake one AWU period late would leave no trace a counter could
+  read there - and the site does not lean on it.
 - **The PVD ladder brackets the supply**: on the CH32V006 no level
   reads low - the ladder ends at 2.66 V under a 3.3 V board - and the
   regulator is in its normal 1.2 V mode as found; on the CH32V003
@@ -144,6 +199,10 @@ Implemented but not bench-verified, each with what would measure it:
 - The AWU's long windows (the /10240 and /61440 codes, tens of
   seconds): the suite sleeps 300 ms; a letter outside `z` would wait
   the thirty seconds and time them against the host.
+- The level wake on the CH32V003F4P6: the sweep ran on the CH32V006's
+  V2C, and the site's enabled line has not ended a Standby on the V2A
+  yet; letters `d` (test_ch32_sleep-1) and `w` (test_ch32_sleep-2) on
+  that board would measure both.
 - The wake latency (the first instruction after the AWU's match to
   the PLL back): the cycle counter stops in Standby, so it is a
   scope's measurement on a pad toggled at the wake.

@@ -1,7 +1,8 @@
 // Sleep family smoke TU, both parts: PWR's verbs, the AWU's arithmetic
 // (the same table on both), each part's PVD levels, the two
 // sites satisfying util/power.hpp's SleepSite over a static and a
-// dynamic clock, and a PowerManager over each.
+// dynamic clock, the timed site's AWU vector body, and a PowerManager
+// over each.
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/exti.hpp"
 #include "ch32v00x/platform.hpp"
@@ -59,6 +60,7 @@ void sleep_verbs() {
     (void)Timed::init();
     (void)Timed::lsi_hz();
     (void)Timed::arm(SleepDepth::standby);
+    Timed::awu_isr();
     Timed::disarm();
     (void)Timed::last_advance();
     (void)TimedDyn::init();

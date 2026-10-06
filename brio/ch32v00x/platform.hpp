@@ -95,10 +95,29 @@ struct Ch32v00xPlatform {
      * manual's "the subsequent WFI" is not one-shot here), so the store
      * is not a re-arm; it stays because a WFE is what makes the unmask
      * first safe, and this hook does not trust that nothing else wrote
-     * the register. The waking edge also leaves the latch set, so the
-     * NEXT idle() returns at once and the caller's loop turns twice per
-     * interrupt - measured, and left: clearing the latch would be one
-     * more store and wfi on every wake.
+     * the register.
+     *
+     * ONE TURN PER WAKE: THE LATCH IS CONSUMED AFTER IT. The edge that
+     * wakes the WFE is an interrupt entering the pending state, so
+     * SEVONPEND latches it too, and left there it would end the NEXT
+     * idle() at once: the caller's loop would turn twice per interrupt,
+     * the second turn finding nothing (measured: 200 kernel turns over
+     * 100 quiet ticks, a wasted turn of a three-AO pack 287 cycles).
+     * So after the wake the hook writes SETEVENT - 3.1's "set the event
+     * to wake up the WFE case" - and executes one more wfi, which that
+     * event ends at once and which clears the latch whatever it held.
+     * This is safe because MIE is SET by then: an enabled interrupt
+     * pending around the consume is taken by level, its handler run
+     * before the caller's next masked check - it is not the latch that
+     * lets the caller see it. What the consume can eat is a latch whose
+     * interrupt has been or is being taken, or the edge of a line the
+     * PFIC does not enable, which wakes nothing the kernel waits for (a
+     * sleep site that wakes through such a line enables it instead:
+     * ch32v00x/sleep.hpp). Measured with the edge placed to the cycle
+     * across the whole sequence, the consume included, in twelve code
+     * layouts: 101 turns over 100 ticks, nothing lost and no wake a
+     * tick late. The consume is three instructions, 6 to 15 cycles a
+     * wake by layout, against the 287 of the turn it saves.
      *
      * WHAT DEPTH. SLEEPDEEP as found: out of reset it is clear, so this
      * is the plain Sleep of QingKe 5.1 (the core clock gated, STK and
@@ -118,7 +137,10 @@ struct Ch32v00xPlatform {
      * wants a Standby lets the loop idle and does not call this once.
      * The Standby is the cold path, out of line, so the Sleep the
      * kernel loop takes every turn is a leaf: one load, one store, the
-     * unmask and the wfi.
+     * unmask and the wfi, then the consume's store and wfi. The Standby
+     * path does not consume: a wfi with SLEEPDEEP armed is a Standby
+     * entry, and the one stale turn after a Standby is worth less than
+     * a second pass through that door.
      */
     static void idle() {
         const uint32_t sctlr = pfic_sctlr();
@@ -126,8 +148,13 @@ struct Ch32v00xPlatform {
             idle_deep(sctlr);
             return;
         }
-        pfic_sctlr() = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
+        const uint32_t wfe = (sctlr | sctlr_wfitowfe | sctlr_sevonpend) & ~sctlr_setevent;
+        pfic_sctlr() = wfe;
         enable_interrupts();
+        __asm__ volatile("wfi" ::: "memory");
+        // The latch the wake left, consumed: SETEVENT makes the next WFE
+        // return at once whatever the latch held, and that WFE clears it.
+        pfic_sctlr() = wfe | sctlr_setevent;
         __asm__ volatile("wfi" ::: "memory");
     }
 

@@ -12,9 +12,13 @@
  * the pins, drops the regulator to its low-power setting, and wakes
  * only through an EXTI line - a pad, the PVD, the AWU - or a reset
  * (RM 2.3.3). The choice is PFIC_SCTLR.SLEEPDEEP together with
- * PWR_CTLR.PDDS, and the platform's idle() then sleeps as it always
- * does: the site ARMS, the kernel loop's idle path sleeps, the model
- * of docs/design/power.md unchanged on the CH32V00x as on the others.
+ * PWR_CTLR.PDDS - both clear or both set: SLEEPDEEP with PDDS clear is
+ * not the Sleep RM 2.4.1's PDDS row names (measured: the STK and TIM2
+ * stop through it and the core wakes on the HSI, as from a Standby),
+ * so no site arms that pair. The platform's idle() then sleeps as it
+ * always does: the site ARMS, the kernel loop's idle path sleeps, the
+ * model of docs/design/power.md unchanged on the CH32V00x as on the
+ * others.
  *
  * WHAT A STANDBY DOES TO THIS PROGRAM, and what the sites answer:
  *  - THE CORE WAKES ON THE HSI. The hardware switches SYSCLK to the
@@ -330,8 +334,33 @@ static_assert(SleepSite<Ch32SleepSite<Clock<ClockSource::pll, 48'000'000>>>);
  * rate; disarm() advances kernel time by the programmed span when the
  * AWU is what fired, and by nothing otherwise (see the file header).
  *
- * The app binds the AWU vector when it wants a handler; the site
- * itself needs none - line 9 is armed as an EVENT and ends the WFE.
+ * THE AWU'S WAKE IS A LEVEL: arm() enables line 9 in the PFIC, and the
+ * app binds the AWU vector to awu_isr() -
+ *
+ *   extern "C" BRIO_CH32_INTERRUPT void awu_handler() { Site::awu_isr(); }
+ *
+ * - which an image using this site MUST do, as it binds the tick's
+ * (the crt's default handler is a spin). Why: idle() sleeps with MIE
+ * set, and an ENABLED interrupt with MIE set is a wake by the QingKe V2
+ * manual's WFE item (2), "woken up when an interrupt is generated",
+ * the handler run first - a pending line the sleeping core takes, not
+ * an edge it has to catch. A PFIC-disabled line wakes a WFE only by
+ * SEVONPEND's "new interrupt pending signal" (item (3)), an EDGE, and
+ * an edge that lands on the cycle the WFE goes to sleep is lost
+ * (platform.hpp's idle()); the AWU's next match makes no new one while
+ * the line's flag stands, so the core would sleep until something else
+ * woke it - in a Standby with no other source armed, for good. The
+ * line also stays an EXTI event (item (1)), as Awu::init() arms it.
+ * Measured with the AWU's edge locked to its own period and swept
+ * across the sleep entry: in a Sleep the pending edge alone loses
+ * positions, every one woken only by the rescue timer, while the event
+ * and the level lose none; in a Standby the level alone, with no event
+ * to fall back on, left no try asleep (docs/ch32v00x/sleep.md).
+ *
+ * The handler only closes the line again (one store): the EXTI flag it
+ * leaves standing is the witness disarm() reads, so the flag means the
+ * same whether the handler ran or not, and a line still pending under
+ * a closed enable wakes nothing - disarm() clears both.
  */
 template <Platform P, typename Clock>
 struct Ch32TimedSleepSite {
@@ -402,10 +431,15 @@ struct Ch32TimedSleepSite {
         prescaler_ = code;
         window_ = window;
         tick_at_arm_ = Ticker::ticks();
-        Awu::arm(code, window);
+        Awu::arm(code, window);   // the flag and the pending bit cleared
+        Pfic::enable(Irq::awu);   // the match a level wake (the comment above)
         alarm_armed_ = true;
         return true;
     }
+
+    /// The AWU vector's body (the app binds it, see above): the line
+    /// closed, the flag left standing as disarm()'s witness.
+    [[gnu::always_inline]] static void awu_isr() { Pfic::disable(Irq::awu); }
 
     /// Catch kernel time up by the FROZEN span: the alarm's programmed
     /// span minus what the STK itself counted since arm() - the AWU
@@ -417,6 +451,7 @@ struct Ch32TimedSleepSite {
     static void disarm() {
         if (alarm_armed_) {
             const bool by_alarm = Awu::fired();
+            Pfic::disable(Irq::awu);
             Awu::disarm();
             alarm_armed_ = false;
             const uint32_t awake = Ticker::ticks() - tick_at_arm_;   // wrap-safe
