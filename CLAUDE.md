@@ -256,7 +256,7 @@ both, in practice:
 
 Types PascalCase, functions/constants snake_case; private members
 trailing underscore; no `Ao` suffix on AO class names; queues speak
-push/pop (take for an element handed over in place); `std::optional` returns instead of bool + out-param; no
+push/pop (take, hold and release for an element handed over in place); `std::optional` returns instead of bool + out-param; no
 `*_from_isr` API doubling; no redundant `inline` on in-class
 definitions; concepts instead of virtual interfaces; use the
 freestanding libstdc++ (variant, optional, span, concepts, bit,

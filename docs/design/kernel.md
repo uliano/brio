@@ -82,9 +82,11 @@ force a system-wide event type and cost an indirect call per event).
 It states what it needs as a **concept**, `ActiveObject`:
 
 - a nested type `Event` - the AO's own event variant;
-- a static member `queue` whose `take()` hands over a `const Event*` -
-  the oldest waiting event IN ITS SLOT, or null - and whose `empty()`
-  yields `bool` (an `EventQueue`);
+- a static member `queue` (an `EventQueue`) whose `take()` hands over a
+  slot's NUMBER - the oldest waiting event's, or `none` - whose `at()`
+  yields the `const Event&` in that slot, whose `take_hold()` says
+  whether the AO held the slot it was just dispatched from, whose
+  `release()` takes a number back, and whose `empty()` yields `bool`;
 - static `init()` - called once by `Tenuto::init_all()` in pack order,
   before the first event is served; an Fsm-based AO calls
   `start(&initial)` here;
@@ -97,11 +99,26 @@ kernel is written assuming: dispatch is RTC and is only ever called
 from the loop, interrupts enabled, never re-entered; the AO's static
 data therefore needs no locking against other AOs (only ISRs are
 concurrent, and they touch nothing but the queue, through `post()`);
-the event a dispatch receives stays in its queue slot until the AO's
-next take, which never being re-entered makes the whole dispatch;
-`init()` must leave the AO in a real state; the queue is really an
+the event a dispatch receives stays in its queue slot, and the slot is
+the consumer's until it is RELEASED - by the loop right after the
+dispatch, unless the AO called the queue's `hold()` inside it, in which
+case by the AO itself, in a later dispatch of its own (section 4's
+third lease); a held slot is released once and by its owner; `init()`
+must leave the AO in a real state; the queue is really an
 `EventQueue`. Wherever this document says "contract" it means both
 halves.
+
+An ordinary AO sees none of this: `dispatch` keeps its signature, the
+loop releases what nobody held, and an AO that never calls `hold()`
+changes not one line. One that holds (the bus arbiter,
+[spi-bus.md](spi-bus.md)) keeps the `Held<Event>` that `hold()` returned,
+reads the event with `queue.at()` whenever it needs it, and calls
+`queue.release()` when it is done. Such an AO is served through its
+slot - by the loop, or by `serve_one<Ao>()` where a program pumps it by
+hand - and never by dispatching the copy `pop()` returns, which has no
+slot to hold: a `hold()` there would hand out the number of the slot
+`pop()` had already released. Like the rest of this half, the rule is
+stated and not checked.
 
 `Fsm<Derived, Alts...>` (section 5) is *one way* to satisfy the
 contract - it gives you `Event` and `dispatch` - not the contract
@@ -243,12 +260,35 @@ bytes of a nonvolatile write are `reply` loans and say so in their
 field types; the engine that walks such a buffer calls `.get()` and
 indexes the raw pointer, because a loan is a view and not a container.
 
+**The third lease: a held slot.** The two leases above are for what an
+event CARRIES. The event itself lives in a slot of its receiver's queue
+(section 5), and the receiver may keep that slot past the dispatch:
+`Lease::hold`, valid from the AO's `hold()` until the SAME AO's
+`release()` of it, which it issues in a later dispatch of its own. The
+lender is the AO's own queue and the borrower the AO, so the rule is
+one sentence: **a held slot is released by its owner, and by nobody
+else** - another AO releasing it would be a second consumer of the
+queue, and the consumer side's freedom from masks rests on there being
+one. `Held<E>` is the handle with the lease in its type: the slot's
+number, one byte, null by default (it pins the event type, not the
+owner: the rule above is what keeps the owner). A holder that lends
+onward from the slot for as long as it holds it - a request an engine
+would read across a whole transfer - would do it as a
+`Borrowed<..., Lease::hold>`; no engine does today, each keeping its
+own copy of the request, a choice each family's bus round revisits. The loop's
+`const Event&` is not a lease at all: it is the event's own lifetime,
+which for an event nobody holds ends with its dispatch. Like the other
+two, the lease names the rule at the point of use and does not enforce
+it; the debug epoch planned for `Borrowed` is the same mechanism one
+level down.
+
 **In use today.** `LineReceived` lends the line buffer for one
 dispatch (mutable: in-place tokenization is the point). Bus requests
 travel by value - the request IS the arbitration token: a few tens of
 bytes of addresses, lengths and the select, copied once into the bus
 queue by `post()` and once more by the engine that keeps it, the
-arbiter reading it in place ([spi-bus.md](spi-bus.md)'s copy
+arbiter HOLDING the slot while the request waits and while it is on
+the wire and reading it there ([spi-bus.md](spi-bus.md)'s copy
 accounting) - and lend the data buffers until `BusDone` - the borrowed
 surface is the structurally necessary minimum. Nothing is ever
 chopped into several events: one event = one envelope, the cargo
@@ -271,33 +311,245 @@ open.
 ## 5. Queues (`kernel/event_queue.hpp`)
 
 One `EventQueue<E, depth, Platform>` per AO, **multi-producer** (any
-ISR, any main-loop code, any timer) **single-consumer** (the
-scheduler). The kernel assumes no atomic read-modify-write from the
-machine (the smallest candidate cores have none), so the honest
-primitive for the PRODUCERS is a brief interrupts-off section - the
-platform's `CriticalSection`: `push` enters it, builds the event in
-its slot (a variant's alternative emplaced there), publishes it,
-leaves. The CONSUMER takes no mask at all: `take()` hands the oldest
-event over in its slot, each side writing only its own one-byte
-counter and reading the other's, with a compiler fence between a slot
-and the counter that publishes or releases it (a byte is one access on
-every platform, `atomic_width`). There are deliberately no
-`*_from_isr` twins: one always-safe API.
+ISR, any main-loop code, any timer) **single-consumer** (the AO's
+dispatch context: the loop, and the AO itself when it holds a slot). The
+kernel assumes no atomic read-modify-write from the machine (the
+smallest candidate cores have none), so the honest primitive for the
+PRODUCERS is a brief interrupts-off section - the platform's
+`CriticalSection` - and the CONSUMER takes no mask at all. There are
+deliberately no `*_from_isr` twins: one always-safe API.
 
-**Depth is the number of events that can WAIT.** The event being
-served is not one of them: the slot `take()` handed over stays the
-consumer's until its next take, so the queue holds `depth + 1` slots
-and a producer finds `depth` free places whether an event is being
-served or not. A post from inside a dispatch - an AO posting to itself
-- counts against the same depth as a post from anywhere else, and a
-full queue overflows at the same moment in every state; `capacity()`
-answers `depth`, `size()` the events waiting. The slot beyond depth is
-the storage the served event needs while its dispatch reads it, which
-lives in the queue rather than on the consumer's stack. Depth is a
-per-AO template parameter sized on that AO's real burst; it may be any
-number (no power-of-two rounding: rounding a depth of 5 to 8 would
-waste real RAM to speed up a wrap that is already two
-instructions).
+![the event queue: the slots, the ring of slot numbers, its three runs and three cursors](event-queue.svg)
+
+<sub>[open the diagram full size](https://raw.githubusercontent.com/uliano/brio/main/docs/design/event-queue.svg)</sub>
+
+### Two things kept apart: the slots and the ring
+
+A queue is two arrays, and the whole design is in keeping them apart.
+
+- The **slots**, `depth + 1` of them, each the size of the AO's
+  `Event`. `post()` BUILDS an event in a slot - a variant's alternative
+  emplaced there, under the mask: the one copy a post makes - and the
+  event STAYS in that slot, read in place by its dispatch, until the
+  slot is **released**: by the loop right after the dispatch, or later
+  by the AO when it held it (section 4's `Lease::hold`).
+- The **ring**, `depth + 2` positions of one byte each, holding slot
+  NUMBERS - `S1`, `S2` ... below - and nothing else. Nothing in the
+  ring is an event, and nothing is ever copied from one position to
+  another: what moves is three cursors, and what is written is one byte
+  at a time.
+
+### Three runs, three cursors
+
+The cursors cut the ring, in ring order, into three runs:
+
+| run | from | to | its positions hold |
+|---|---|---|---|
+| PENDING | `take` | `alloc` | the numbers of built events, oldest first |
+| FREE | `alloc` | `free` | the numbers of empty slots, in the order the producers will use them |
+| OUTSTANDING | `free` | `take` | nothing anyone reads: the positions of slots taken and not yet released |
+
+- `alloc` is the PRODUCERS' cursor, written only under the mask. A push
+  reads the number at `alloc`, builds the event in that slot and
+  advances `alloc`: the advance moves the number from the free run into
+  the pending run, and IS the publication. Allocation order is push
+  order, so the free run doubles as the order of the pending one - one
+  ring, not two.
+- `take` and `free` are the CONSUMER's, written without a mask. A take
+  reads the number at `take` and advances it: the slot is now
+  outstanding and its event is dispatched where it lies. A release
+  writes the slot's number at `free` and advances `free` - whichever
+  slot it is, in whatever order the slots come back.
+- The ring has ONE POSITION MORE than there are slots. The outstanding
+  run therefore always keeps a spare position while anything is
+  outstanding, and each test reads one pair of cursors: the pending run
+  is empty when `take` meets `alloc`, the free run when `alloc` meets
+  `free`. No count is shared between the two sides.
+
+### The example, step by step
+
+Four slots (`depth` 3), numbered 1 to 4 - S1 to S4 - so five positions
+`p0` to `p4`. In the tables a number in parentheses is STALE - left behind in the outstanding run and
+read by nobody - and a dash is a position never written.
+
+**Start.** Every slot free, the spare position at the end.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | S1 | S2 | S3 | S4 | - |
+| run | free | free | free | free | outstanding |
+| cursors | take, alloc | | | | free |
+
+**E1 arrives and is held long.** A producer finds S1 at `alloc` (p0),
+builds E1 in S1 and advances `alloc` to p1. The loop takes it - `take`
+to p1 - dispatches E1 in S1, and the AO holds it: from now on the AO
+keeps the number S1, which never moves.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | (S1) | S2 | S3 | S4 | - |
+| run | outstanding | free | free | free | outstanding |
+| cursors | | take, alloc | | | free |
+
+S1 = E1, held.
+
+**E2 arrives, held medium.** S2 from p1; `alloc` and `take` to p2.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | (S1) | (S2) | S3 | S4 | - |
+| run | outstanding | outstanding | free | free | outstanding |
+| cursors | | | take, alloc | | free |
+
+S1 = E1 held, S2 = E2 held.
+
+**E3 arrives, held long.** S3 from p2; `alloc` and `take` to p3. One
+free slot is left, S4.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | (S1) | (S2) | (S3) | S4 | - |
+| run | outstanding | outstanding | outstanding | free | outstanding |
+| cursors | | | | take, alloc | free |
+
+S1 = E1 held, S2 = E2 held, S3 = E3 held.
+
+**E2 finishes BEFORE E1.** Its holder releases S2: the number is
+written at `free` (p4) and `free` moves on, wrapping to p0. The old S2
+at p1 stays behind as a stale number in the outstanding run, read by
+nobody; S1's position is not touched, and that S1 is older does not
+matter - a release goes to the end of the free run whatever its order.
+This is the state the diagram draws.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | (S1) | (S2) | (S3) | S4 | S2 |
+| run | outstanding | outstanding | outstanding | free | free |
+| cursors | free | | | take, alloc | |
+
+S1 = E1 held, S3 = E3 held, S2 and S4 free.
+
+**E4 arrives, is fast, and is released at once.** The producer finds S4
+at p3 and advances `alloc` to p4; the loop takes it (`take` to p4),
+dispatches it, the AO does not hold it, and the loop releases S4: the
+number is written at `free` (p0), `free` to p1.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | S4 | (S2) | (S3) | (S4) | S2 |
+| run | free | outstanding | outstanding | outstanding | free |
+| cursors | | free | | | take, alloc |
+
+**E5 arrives and takes S2 - while S1 and S3 are still held.** The
+producer finds S2 at p4, builds E5 in it and advances `alloc`, wrapping
+to p0. Until the loop takes it, all three runs are on the ring at once.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | S4 | (S2) | (S3) | (S4) | S2 |
+| run | free | outstanding | outstanding | outstanding | pending |
+| cursors | alloc | free | | | take |
+
+**Then E5 is served and released, and E1 and E3 finish, in any order.**
+Each release writes one number at `free`: S2 at p1, then - say - S1 at
+p2 and S3 at p3, `free` ending at p4. The free run is p0 to p3 again,
+the spare position is p4 again, and the slots come out in a new order
+- S4, S2, S1, S3 - which nothing cares about.
+
+| | p0 | p1 | p2 | p3 | p4 |
+|---|---|---|---|---|---|
+| number | S4 | S2 | S1 | S3 | (S2) |
+| run | free | free | free | free | outstanding |
+| cursors | take, alloc | | | | free |
+
+### The questions a reader asks
+
+**Is anything copied?** One event, once: by `post()`, into its slot.
+After that every operation writes one byte - a cursor, or a slot number
+at `free` on a release. A held event is never moved, however long it
+is held and however many events pass beside it.
+
+**Does anybody point into the ring?** No. A holder keeps the SLOT's
+number (a `Held<E>`, section 4), which is fixed from `post()` to
+release; positions are the queue's own bookkeeping, and they can move
+under nobody's feet because nobody outside the queue knows them.
+`take()` returns the number and `at()` the event in that slot.
+
+**What if a slot is released twice?** Nothing checks it, and the queue
+is corrupted for good: the second release writes a number the free run
+already holds, so the queue reads full for ever (every push refused,
+`size()` zero, `overflows()` climbing) or hands one slot to two
+producers. One holder, one release - the lease's rule (section 4) is
+what keeps it.
+
+**Why does the consumer never mask?** Every cursor has ONE writer:
+`alloc` the producers (serialized among themselves by the mask), `take`
+and `free` the consumer. A producer reads only the free run, which the
+consumer filled before it moved `free`; the consumer reads only the
+pending run, whose positions nobody has touched since a producer read
+them; the consumer writes only the outstanding run, which no producer
+reads. A cursor is one byte, one access on every platform
+(`atomic_width`), and between a slot or a position and the cursor that
+publishes it sits a compiler fence - `std::atomic_signal_fence`, `Ring`'s
+idiom, correct because the queue belongs to one core (below). An empty
+queue costs the consumer two loads and a compare.
+
+**Why is a static queue still in `.bss`?** Every kernel static is all
+zero at boot and costs neither flash nor a copy at startup - the queue
+too, whenever its event's value-initialised state is all zero, as every
+`Fsm` event's is (`Entry`, the first alternative, carries nothing); an
+event type with non-zero defaults makes it a `.data` image - and the
+ring's natural first state - the slots' numbers in order, `free` at the
+end of them - is not zero. Three choices make it zero, and they cost the
+producers' masked window one XOR. `free` is stored as the position after
+it, the FENCE, zero at the start: the producer computes the position
+after `alloc` anyway to publish, and the queue is full when THAT meets
+the fence - the same test. Each position is kept one place ahead in the
+array, so the place a release writes IS the fence and the place a take
+reads is the next position it computes anyway - no step back anywhere.
+And each number is stored XOR its place in the array, with the slots
+numbered from 1: the first state, number i at place i, reads zero, and
+the spare position reads 0, the `none` an empty `take()` returns.
+Without them the whole queue, slots included, would be an initialised
+object in flash, copied at every boot.
+
+**How big must a queue be?** A COUNT, not a time. `depth` is the number
+of events that can be waiting OR HELD at once while a dispatch is in
+progress: the queue holds `depth + 1` slots, the extra one for the event
+being dispatched, so a post from inside a dispatch - an AO posting to
+itself - finds `depth` places like a post from anywhere else. The
+overflow moment, in one rule: **a push is refused when every slot is
+occupied, waiting or outstanding** (being dispatched, or held). With
+nothing being dispatched and nothing held the spare slot takes a waiting
+event too, so an idle queue accepts `depth + 1`; each hold takes one of
+the `depth` for as long as it lasts. An AO therefore sizes its depth as
+the events it holds at once plus its waiting peak - never from how long
+a hold lasts: a hold costs exactly its own slot for any duration, and
+whether something held ever ends (a transfer that never answers) is
+liveness, which belongs to the holder (a bus's timeout), not to the
+queue. `capacity()` answers `depth`, `size()` the events waiting. Depth
+may be any number up to 254 - the slot numbers 1 to `depth + 1` are
+bytes, and 0 is the `none` an empty `take()` returns - with no
+power-of-two rounding, which would waste real RAM to speed up a wrap
+that is already two instructions.
+
+### Why not the obvious ring with a release cursor
+
+The obvious way to let an AO keep a slot is a plain ring of events with
+a fourth cursor trailing the take: a slot is freed when the cursor
+passes it. But the cursor passes in order, so a slot is free only once
+every slot before it is - ONE LONG HOLD BLOCKS EVERY SLOT BEHIND IT,
+each event dispatched after it keeping its slot until the hold ends:
+head-of-line blocking. Simulated on one arrival stream beside the
+carousel, that ring lost 0.55 slots per dispatch for as long as a hold
+lasted and refused every push within a few dozen turns at any real
+depth, in every release order; the carousel lost exactly the hold's own
+slot at every duration and in every order (`test_event_queue`'s
+capacity cases). Keeping the numbers apart from the events is what buys
+it: a released number goes to the end of the free run, wherever it came
+from.
+
+### Where the queue stops
 
 `Ring` (SPSC, see [ring.md](ring.md)) is NOT the event queue: it stays
 at the BYTE level inside drivers - the ISR pushes bytes lock-free,
@@ -324,15 +576,41 @@ of a programming error rather than a statistic. A single-core
 platform has no such member, and its queues carry neither the check
 nor the counter's byte.
 
-**C++ note - `std::optional` returns.** `pop()` - `take()` with a copy
-out, for the code that drains a queue by hand, a test or a program
-pumping an AO outside a kernel - returns `std::optional<E>` (C++17):
-"an E, or nothing". The caller writes `if (auto e = q.pop())
-dispatch(*e);` and cannot forget to test, where a `bool pop(E& out)`
-would leave a half-written out-parameter around. A project style rule:
-optional returns instead of bool + out-param. `take()` returns a
-pointer or null instead, because what it hands over IS a place - a
-slot - and not a value.
+### What it costs
+
+Read in the release listing of a three-AO image with
+an interrupt that posts a one-byte event. The producers' masked window
+is the plain ring's within an instruction either way - the free-run
+test replacing a counter subtraction, one byte load and one XOR added:
+23 instructions on the AVR128DB48 (31 cycles),
+21 on the STM32G0B1RE's Cortex-M0+, 18 on the STM32F446RE's Cortex-M4F,
+22 on the CH32V006's QingKe V2. The consumer pays for the release: the
+queue's share of serving one event - take, the slot's address, the hold
+test, the release - is 36, 30, 27 and 31 instructions where a ring that
+freed its slot at the next take spent 17, 15, 13 and 15; on the AVR
+that is 23 cycles more, about a microsecond at 24 MHz, unmasked, beside
+a dispatch of a hundred cycles and up. A hold costs nothing on the
+path: `hold()` reads the slot's number back from the position the take
+just left. RAM: `depth + 2` bytes per queue more than such a ring (the
+ring of numbers and the hold flag), the slots unchanged, all of it in
+`.bss`. These are the figures of a loop that inlines take and release.
+In an image with a bus arbiter the compiler keeps `release()` out of
+line - the arbiter releases from several places - so a release on that
+queue is a call more (read on the STM32G0B1RE's SPI suite).
+
+**C++ note - `std::optional` returns, and a number for a place.**
+`pop()` - a take with a copy out and the slot released at once, for the
+code that drains a queue by hand, a test or a program pumping an AO
+that does not hold - returns `std::optional<E>` (C++17): "an E, or
+nothing". The caller writes `if (auto e = q.pop()) dispatch(*e);` and
+cannot forget to test, where a `bool pop(E& out)` would leave a
+half-written out-parameter around. A project style rule: optional
+returns instead of bool + out-param. `take()` returns a slot NUMBER
+instead, because what it hands over IS a place and not a value, and a
+number rather than a pointer because the release needs the number back
+and recovering it from a pointer is a division by `sizeof(E)`; its
+"nothing" is `none`, the one value no slot can have, which costs
+nothing where an `optional<uint8_t>` would cost a byte and a test.
 
 ## 6. State machines (`kernel/fsm.hpp`)
 
@@ -440,10 +718,12 @@ The loop (`run()`), one turn:
 
 1. `TimeEvents<P>::process()` - post every matured time event (main
    context, see section 9);
-2. `step()` - take ONE event from the highest-priority non-empty queue
-   and dispatch it in its slot, run-to-completion; an urgent event arriving during
-   a slow dispatch is served right after it because the next turn
-   rescans from the top;
+2. `step()` - take ONE event from the highest-priority non-empty queue,
+   dispatch it in its slot, run-to-completion, and release the slot
+   unless the AO held it (`serve_one<Ao>()` in `kernel/active_object.hpp`,
+   the same step a program that pumps an AO by hand calls); an urgent
+   event arriving during a slow dispatch is served right after it
+   because the next turn rescans from the top;
 3. if `step()` found nothing, `idle_if_empty()`: re-check every queue
    with interrupts masked and, if still empty, `P::idle()` - which
    re-enables interrupts and sleeps in one breath, so no wake-up can
@@ -694,6 +974,13 @@ when an event is sent to an AO of that core (section 12). Both are
 detected by `requires`; a single-core platform has neither and
 compiles nothing for them.
 
+The last OPTIONAL member is a host's alone: `interleave_point()`, which
+the queue's consumer verbs call at every boundary between two of their
+shared accesses - each place an interrupt could land - so that
+`test_event_queue` can push from there, at every single boundary and
+every pair of them, and check each interleaving against a model of the
+queue. No target platform has it, and nothing is compiled for it there.
+
 Every target stratum ships its implementation as `<stratum>/platform.hpp`
 (`AvrPlatform`, `SamPlatform`, `Stm32g0Platform<TB>`,
 `Ch32v00xPlatform<TB>`, `Rp2040Platform<core, TB>` - the last three
@@ -819,12 +1106,12 @@ two `HostCore` platforms stepped by hand).
 
 | Entity | Header | Role |
 |--------|--------|------|
-| `ActiveObject` (concept), `queue_on<Ao, P>` | `active_object.hpp` | what Tenuto requires of an AO; whether an AO's queue is P's (its core) |
-| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`, `on_own_core`, `Doorbell`) |
-| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | per-AO MPSC queue: the event built in its slot, `take()` handing it over in place, `depth` the events that can wait; overflow counter, the mispost check of a core-aware platform |
+| `ActiveObject` (concept), `queue_on<Ao, P>`, `serve_one<Ao>` | `active_object.hpp` | what Tenuto requires of an AO; whether an AO's queue is P's (its core); one event served in its slot, released unless held |
+| `Platform` (concept), `PanicRecord` | `platform.hpp` | what the kernel requires of the machine (+ the optional `idle_until`, `on_own_core`, `Doorbell`, and the host's `interleave_point`) |
+| `EventQueue<E, depth, P>`, `CoreAware` | `event_queue.hpp` | per-AO MPSC queue, the index carousel: the event built in its slot, `take()` handing over the slot's number, `at()` the event, `hold()`/`release()` keeping and returning a slot in any order, `depth` the events waiting or held at once; overflow counter, the mispost check of a core-aware platform |
 | `Overloaded`, `match`, `Entry`, `Exit`, `Fsm<Derived, Alts...>` | `fsm.hpp` | variant dispatch helpers, state machine base, Event, Status |
 | `post`, `Subscribers`, `publish`, `ReplyTo` (incl. `through`), `reply_to` | `post.hpp` | delivery primitives (the crossing `send` is util/inbox.hpp's, section 12) |
-| `Borrowed<T, Lease>`, `Lease` | `borrowed.hpp` | pointer payloads with their lease in the type |
+| `Borrowed<T, Lease>`, `Lease`, `Held<E>` | `borrowed.hpp` | pointer payloads with their lease in the type; a held queue slot's number with `Lease::hold` in its type |
 | `Pack<Aos...>`, `Tenuto<P, Aos...>` | `tenuto.hpp` | pack ordering questions (index, lends_ok); the loop: init_all/step/idle_if_empty/run |
 | `TimeEvents<P>` (incl. `ticks_to_next`, `next_deadline`), `TimeEvent<P, Ao, Ev>` | `time_event.hpp` | armed list + owned time events |
 | `ticks_from_ms`, `ticks_from_secs` | `time.hpp` | constexpr tick conversions |
@@ -839,7 +1126,7 @@ outside `kernel/` and the standard freestanding library):
     active_object.hpp   <- time_event.hpp, tenuto.hpp
     post.hpp            <- time_event.hpp, tenuto.hpp
     time_event.hpp      <- tenuto.hpp
-    borrowed.hpp        <- (util/ producers of loans; nothing in kernel/)
+    borrowed.hpp        <- event_queue.hpp (and util/ producers of loans)
 
 An app that only posts includes `kernel/post.hpp`; an app that runs
 includes `kernel/tenuto.hpp` and gets the contract with it.

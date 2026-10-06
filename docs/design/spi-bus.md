@@ -87,32 +87,57 @@ the arbiter shared with I2C - see [i2c-bus.md](i2c-bus.md).
 A SPI transaction OUTLIVES the
 dispatch that starts it - it completes on interrupts later. While the
 bus is busy the kernel happily delivers the next request event, which
-therefore needs a place to wait: a small internal pending FIFO in the
-AO (main-context only, no critical sections). Full FIFO = the request
-is answered IMMEDIATELY with `SpiDone{spi_rejected}` and counted -
-never silent, never blocking. The AO is a real 2-state FSM
-(idle/busy); the request's `ReplyTo<SpiDone>` capsule is the return
-channel, so the AO never knows who its clients are.
+therefore needs a place to wait - and it waits where `post()` built it:
+the AO HOLDS the request's slot in its own queue (Lease::hold,
+[kernel.md](kernel.md) sections 4 and 5) and keeps the slot's number in
+a small pending FIFO, one byte per waiting request (main-context only,
+no critical sections); the request on the wire is held the same way
+until its requester has been answered. Full FIFO = the request is
+answered IMMEDIATELY with `SpiDone{spi_rejected}`, counted, and not
+held - never silent, never blocking, while the clients keep at most
+2 x `pending_depth` + 2 requests outstanding at once (beyond that the
+queue itself drops and its `overflows()` counts). The control events (the
+completion, a sleep vote, a timeout and its marker) are never held.
+The AO is a real 2-state FSM (idle/busy); the request's
+`ReplyTo<SpiDone>` capsule is the return channel, read from the held
+slot before the slot is released, so the AO never knows who its
+clients are.
+
+The queue's depth is counted in those slots: `pending_depth` requests
+held waiting, the one held in flight, `pending_depth` more posted
+beyond them and waiting to be answered `spi_rejected`, a completion and
+a sleep vote (three more on a timed bus: a timeout or two and the
+marker), the queue's spare slot being the event being dispatched -
+where a request the FIFO has no room for is answered from. The slots
+are not reserved by event type: the second `pending_depth` is what
+keeps a burst of excess requests from crowding out a completion (an
+untimed bus would wedge) or a vote (the manager would wait for ever) -
+the headroom the copied FIFO gave when waiting requests lived outside
+the queue. A held request costs no copy and no time, however long its
+transfer lasts.
 
 The request event (two spans, a select, the bus's settings and the
 reply capsule) exceeds the 8-byte envelope guideline: a recorded,
 legal deviation - the request IS the arbitration token; the queues are
 per-AO, nobody else pays. Its size is paid per COPY, and the arbiter
-makes none of its own: the request is LENT to `start()` for the call,
-lying in a slot of the arbiter's that stays as it is until the dispatch
-ends (the contract in util/bus_master.hpp). A request that finds the
-bus idle is built once, by `post()` in the bus AO's queue slot (the
-kernel's copy, under the producers' mask), and read there. A POLLED
+makes none of its own: every request is built once, by `post()` in a
+slot of the bus AO's queue (the kernel's copy, under the producers'
+mask), and LENT from that slot to `start()` for the call (the contract
+in util/bus_master.hpp) - the slot of the event being dispatched when
+the bus is idle, its HELD slot when the request waited. A POLLED
 request completes inside `start()` and is copied nowhere else: the
 engine reads every field through the reference. An ASYNCHRONOUS one
 outlives the call, so the engine copies what its tenure needs - the two
 pins, the three buffers, the two lengths, the width and the completion
 style, laid out contiguously at the head of the Request so the copy is
 a run of word stores - and never the rate, the mode, the setup time or
-the reply, which are spent before `start()` returns. One that finds the
-bus busy is copied once more, into the pending FIFO, and its turn hands
-that slot to `start()` by reference. A retrying completion policy keeps
-one copy more, the request a retry starts again.
+the reply, which are spent before `start()` returns. (The slot stays
+held until the completion has been answered, so an engine could read
+the request there instead; whether one does is its own family's
+decision, measured on its hot path, and not yet part of the contract.)
+A request that waits costs one byte of FIFO and no copy, and a retrying
+completion policy starts the held request again from its slot: no copy
+and no storage either.
 
 ## The transaction descriptor (`SpiHost<n>::Request`)
 
@@ -228,10 +253,11 @@ the engine's `status()` reports. The choice travels per-request in a
   (design/benchmark.md) and stated in each family's SPI document beside
   the vendor's own loop on the same board.
 
-On a synchronous completion the AO replies immediately and keeps
-draining the pending FIFO through any further synchronous requests
-(`begin_chain`), going `busy` only when a transfer actually stays in
-flight. Both styles interleave freely on one bus. A zero-total-length
+On a synchronous completion the AO replies immediately, and whenever a
+transfer ends it keeps draining the pending FIFO through any further
+synchronous requests (`begin_waiting`, each answered and released in
+turn), going - or staying - `busy` only when a transfer actually stays
+in flight. Both styles interleave freely on one bus. A zero-total-length
 request completes on the spot, wire untouched - the reply still
 arrives (no silent hang).
 

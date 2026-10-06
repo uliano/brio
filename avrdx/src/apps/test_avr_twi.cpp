@@ -1344,7 +1344,7 @@ void tj_rebase() {
     uint8_t status = 0xFF;
     for (uint32_t i = 0; i < 800'000u && !replied; ++i) {
         service_client<Client>();
-        if (const auto e = Bus::queue.pop()) Bus::dispatch(*e);
+        (void)serve_one<Bus>();   // in its slot: the arbiter holds what waits
         if (const auto r = Sink::queue.pop()) {
             replied = true;
             status = r->status;
@@ -1375,7 +1375,7 @@ void tj_rebase() {
     post<Bus>(Host::Request{client_addr, lend<Lease::reply>(tx_buf), 1, {}, 0, reply_to<Sink, I2cDone>(),
                             I2cSpeed::fast_plus_1m});
     for (uint32_t i = 0; i < 100'000u && !replied; ++i) {
-        if (const auto e = Bus::queue.pop()) Bus::dispatch(*e);
+        (void)serve_one<Bus>();   // in its slot: the arbiter holds what waits
         if (const auto r = Sink::queue.pop()) {
             replied = true;
             status = r->status;

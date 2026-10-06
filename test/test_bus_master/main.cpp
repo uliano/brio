@@ -4,14 +4,18 @@
 // reports, a failure included - and a waiting request started from its
 // own FIFO slot across the ring's wrap), the completion-policy hook
 // (pass-through by default, a retry ladder, the per-request attempt
-// counter, the held copy a retry starts again once its slot is reused,
+// counter, the held slot a retry starts again whatever traffic passes,
 // a synchronous failure delivered unjudged, and a retrying master
 // voting NOT-OK on a PrepareSleep), and the per-bus timeout (a transfer
 // that never answers is recovered and answered bus_timeout; both halves
 // of the race with the real completion staged deterministically on the
 // virtual clock - the stale BusTimeout by queue order, the straggler
 // TransferDone by posting it from inside recover(), which is exactly
-// the window the real ISR has).
+// the window the real ISR has) - and the slots the arbiter HOLDS in its
+// own queue (kernel/event_queue.hpp's hold()): the waiting requests and
+// the one in flight held, a rejected request and every control event
+// not, every held slot released once its requester is answered, by a
+// completion, a timeout or a re-init.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -168,6 +172,13 @@ using TrClient = Client<3>;
 using TimedRetrying = brio::BusMaster<TrEngine, HostPlatform, 4, Policy2, timeout_ticks>;
 using TrSystem = brio::Tenuto<HostPlatform, TrClient, TimedRetrying>;
 
+// Each arbiter's queue in slots, from bus_master.hpp's arithmetic: depth
+// 2 x pending_depth + 3 (3 more on a timed bus), and the one slot more
+// every queue keeps for the event being dispatched.
+constexpr uint16_t plain_slots = 2 * 2 + 3 + 1;
+constexpr uint16_t retrying_slots = 2 * 4 + 3 + 1;
+constexpr uint16_t timed_slots = 2 * 2 + 6 + 1;
+
 void pump(bool retrying) {
     for (uint16_t i = 0; i < 200; ++i) {
         if (retrying ? !RetrySystem::step() : !PlainSystem::step()) {
@@ -249,6 +260,27 @@ void reset_timed() {
     while (TimedClient::queue.pop().has_value()) {}
     while (Timed::queue.pop().has_value()) {}
     TimedSystem::init_all();
+}
+
+/// The free slots of an AO's queue: filled with a control event until a
+/// push is refused, then copied back out - nothing is dispatched. Asked
+/// with nothing waiting, so the copies out are exactly the fill.
+template <typename Ao>
+uint16_t free_slots() {
+    REQUIRE(Ao::queue.empty());
+    uint16_t n = 0;
+    for (;;) {
+        const uint16_t before = Ao::queue.overflows();
+        brio::post<Ao>(TransferDone{bus_ok});
+        if (Ao::queue.overflows() != before) {
+            break;
+        }
+        ++n;
+    }
+    for (uint16_t i = 0; i < n; ++i) {
+        (void)Ao::queue.pop();
+    }
+    return n;
 }
 
 void reset_timed_retry() {
@@ -441,9 +473,9 @@ TEST_CASE("a retry policy re-starts the SAME request and passes the final status
 }
 
 TEST_CASE("a retry starts the held request again, not the FIFO slot it was popped from") {
-    // Request 2 is popped from FIFO slot 0 and goes out; request 6 then
-    // lands in that same slot. The retry of 2 must start 2: the held
-    // copy, which is why a retrying policy pays for one.
+    // Request 2 leaves FIFO position 0 and goes out; request 6 then
+    // lands in that same position. The retry of 2 must start 2: the
+    // request in its held queue slot, which nothing writes while held.
     reset_retry();
     for (uint8_t id = 1; id <= 5; ++id) {
         brio::post<Retrying>(retry_req(id));   // 1 in flight, 2..5 fill the FIFO
@@ -714,4 +746,175 @@ TEST_CASE("a retry is a new wire transfer: its own timeout clock, its own seq") 
     CHECK(TrClient::done == std::vector<uint8_t>{brio::bus_timeout});
     CHECK(Policy2::asked == 1);                   // the first failure only
     CHECK(TimedRetrying::attempt() == 0);
+}
+
+// ---- the held slots ------------------------------------------------------------
+
+TEST_CASE("the arbiter holds the waiting requests and the one in flight, nothing else") {
+    reset_plain();
+    constexpr uint16_t slots = plain_slots;
+    CHECK(free_slots<Plain>() == slots);
+    brio::post<Plain>(plain_req(1));          // in flight: held
+    brio::post<Plain>(plain_req(2));          // waiting: held
+    pump(false);
+    CHECK(free_slots<Plain>() == slots - 2);
+    brio::post<Plain>(TransferDone{bus_ok});  // 1 answered and released, 2 on the wire
+    pump(false);
+    CHECK(free_slots<Plain>() == slots - 1);
+    brio::post<Plain>(TransferDone{bus_ok});
+    pump(false);
+    CHECK(free_slots<Plain>() == slots);
+    CHECK(PlainClient::done == std::vector<uint8_t>{bus_ok, bus_ok});
+}
+
+TEST_CASE("a rejected request is not held: the kernel releases its slot") {
+    reset_plain();
+    constexpr uint16_t slots = plain_slots;
+    brio::post<Plain>(plain_req(1));          // in flight
+    brio::post<Plain>(plain_req(2));          // waiting
+    brio::post<Plain>(plain_req(3));          // waiting: the FIFO is full
+    brio::post<Plain>(plain_req(4));          // rejected
+    brio::post<Plain>(plain_req(5));          // rejected
+    pump(false);
+    CHECK(PlainClient::done == std::vector<uint8_t>{bus_rejected, bus_rejected});
+    CHECK(free_slots<Plain>() == slots - 3);  // three held, the two rejected gone
+    for (int i = 0; i < 3; ++i) {
+        brio::post<Plain>(TransferDone{bus_ok});
+        pump(false);
+    }
+    CHECK(PlainEngine::started == std::vector<uint8_t>{1, 2, 3});
+    CHECK(free_slots<Plain>() == slots);
+}
+
+TEST_CASE("the queue's headroom: 2 x pending_depth + 2 requests outstanding drop nothing") {
+    // The worst case the depth is sized for: the FIFO full and one in
+    // flight, all held; pending_depth + 1 more requests posted before the
+    // arbiter runs; the completion and a sleep vote behind them. Every
+    // slot is taken and nothing is dropped; one request more is the
+    // queue's own overflow, counted.
+    reset_plain();
+    brio::post<Plain>(plain_req(1));          // in flight
+    brio::post<Plain>(plain_req(2));          // waiting
+    brio::post<Plain>(plain_req(3));          // waiting: the FIFO is full
+    pump(false);
+    const uint16_t before = Plain::queue.overflows();
+    brio::post<Plain>(plain_req(4));          // to be rejected
+    brio::post<Plain>(plain_req(5));          // to be rejected
+    brio::post<Plain>(plain_req(6));          // to be rejected
+    brio::post<Plain>(TransferDone{bus_ok});
+    brio::post<Plain>(PrepareSleep{SleepDepth::standby,
+                                   brio::reply_to<PlainClient, SleepVote>()});
+    CHECK(Plain::queue.overflows() == before);
+    brio::post<Plain>(plain_req(7));          // one past the arithmetic
+    CHECK(Plain::queue.overflows() == before + 1);
+    pump(false);
+    CHECK(PlainClient::done == std::vector<uint8_t>{bus_rejected, bus_rejected,
+                                                    bus_rejected, bus_ok});
+    CHECK(PlainClient::votes == std::vector<bool>{false});   // 2 is on the wire
+    CHECK(PlainEngine::started == std::vector<uint8_t>{1, 2});
+    for (int i = 0; i < 2; ++i) {
+        brio::post<Plain>(TransferDone{bus_ok});
+        pump(false);
+    }
+    CHECK(free_slots<Plain>() == plain_slots);
+}
+
+TEST_CASE("a synchronous completion holds nothing, chained or not") {
+    reset_plain();
+    PlainEngine::synchronous = true;
+    brio::post<Plain>(plain_req(1));
+    pump(false);
+    CHECK(free_slots<Plain>() == plain_slots);
+    PlainEngine::synchronous = false;
+    brio::post<Plain>(plain_req(2));          // in flight
+    brio::post<Plain>(plain_req(3));          // waiting
+    brio::post<Plain>(plain_req(4));          // waiting
+    pump(false);
+    PlainEngine::synchronous = true;          // 3 and 4 finish inside start()
+    brio::post<Plain>(TransferDone{bus_ok});
+    pump(false);
+    CHECK(PlainEngine::started == std::vector<uint8_t>{1, 2, 3, 4});
+    CHECK(PlainClient::done == std::vector<uint8_t>(4, bus_ok));
+    CHECK(free_slots<Plain>() == plain_slots);
+}
+
+TEST_CASE("a held request outlives a PrepareSleep, which is never held") {
+    reset_plain();
+    brio::post<Plain>(plain_req(9));          // in flight, held
+    pump(false);
+    for (int round = 0; round < 10; ++round) {   // ten votes: the ring wraps past the hold
+        brio::post<Plain>(PrepareSleep{SleepDepth::standby,
+                                       brio::reply_to<PlainClient, SleepVote>()});
+        pump(false);
+    }
+    CHECK(PlainClient::votes == std::vector<bool>(10, false));
+    CHECK(free_slots<Plain>() == plain_slots - 1);   // the request's slot, and only it
+    brio::post<Plain>(TransferDone{engine_other});
+    pump(false);
+    // The reply capsule read from the held slot after all that traffic.
+    CHECK(PlainClient::done == std::vector<uint8_t>{engine_other});
+    CHECK(free_slots<Plain>() == plain_slots);
+}
+
+TEST_CASE("a retry restarts the request in its held slot, the ring turning meanwhile") {
+    reset_retry();
+    brio::post<Retrying>(retry_req(41));      // in flight
+    pump(true);
+    for (int round = 0; round < 12; ++round) {   // traffic through every other slot
+        brio::post<Retrying>(PrepareSleep{SleepDepth::standby,
+                                          brio::reply_to<RetryClient, SleepVote>()});
+        pump(true);
+    }
+    brio::post<Retrying>(TransferDone{engine_fault});   // retry: 41 again
+    pump(true);
+    for (int round = 0; round < 12; ++round) {
+        brio::post<Retrying>(PrepareSleep{SleepDepth::standby,
+                                          brio::reply_to<RetryClient, SleepVote>()});
+        pump(true);
+    }
+    brio::post<Retrying>(TransferDone{engine_fault});   // retry: 41 a third time
+    pump(true);
+    CHECK(RetryEngine::started == std::vector<uint8_t>{41, 41, 41});
+    CHECK(free_slots<Retrying>() == retrying_slots - 1);   // the request's held
+    brio::post<Retrying>(TransferDone{bus_ok});
+    pump(true);
+    CHECK(RetryClient::done == std::vector<uint8_t>{bus_ok});
+    CHECK(free_slots<Retrying>() == retrying_slots);
+}
+
+TEST_CASE("a timeout answers from the held slot and releases it") {
+    reset_timed();
+    constexpr uint16_t slots = timed_slots;
+    brio::post<Timed>(timed_req(1));          // in flight, held
+    brio::post<Timed>(timed_req(2));          // waiting, held
+    pump_timed<TimedSystem>();
+    CHECK(free_slots<Timed>() == slots - 2);
+    HostPlatform::ticks = timeout_ticks + 1;  // 1 never answers
+    pump_timed<TimedSystem>();                // recover, bus_timeout, the marker, 2 starts
+    CHECK(TimedEngine::recovered == 1);
+    CHECK(TimedClient::done == std::vector<uint8_t>{brio::bus_timeout});
+    CHECK(TimedEngine::started == std::vector<uint8_t>{1, 2});
+    CHECK(free_slots<Timed>() == slots - 1);  // 1's slot back, 2's held
+    brio::post<Timed>(TransferDone{bus_ok});
+    pump_timed<TimedSystem>();
+    CHECK(TimedClient::done == std::vector<uint8_t>{brio::bus_timeout, bus_ok});
+    CHECK(free_slots<Timed>() == slots);
+}
+
+TEST_CASE("a re-init gives back every slot the previous life held") {
+    reset_plain();
+    brio::post<Plain>(plain_req(1));          // in flight
+    brio::post<Plain>(plain_req(2));          // waiting
+    brio::post<Plain>(plain_req(3));          // waiting
+    pump(false);
+    CHECK(free_slots<Plain>() == plain_slots - 3);
+    PlainSystem::init_all();
+    CHECK(free_slots<Plain>() == plain_slots);
+    CHECK(PlainClient::done.empty());         // given back unanswered
+    brio::post<Plain>(plain_req(4));          // and the bus runs from idle
+    pump(false);
+    brio::post<Plain>(TransferDone{bus_ok});
+    pump(false);
+    CHECK(PlainClient::done == std::vector<uint8_t>{bus_ok});
+    CHECK(free_slots<Plain>() == plain_slots);
 }

@@ -696,12 +696,14 @@ void tg_ring() {
     }
     verdict("and what survived is the OLDEST 63, in order", contiguous && ring.empty());
 
-    // The kernel's own queue over the same platform: the overflow
+    // The kernel's own queue over the same platform: idle and holding
+    // nothing, it takes its depth and the spare slot a dispatch would
+    // use (kernel/event_queue.hpp, the overflow moment); the overflow
     // counter saturates instead of wrapping.
-    for (uint8_t i = 0; i < 4; ++i) queue.push(i);
-    verdict("the queue takes its depth", queue.size() == 4 && queue.overflows() == 0);
+    for (uint8_t i = 0; i < 5; ++i) queue.push(i);
+    verdict("the idle queue takes its depth + 1", queue.size() == 5 && queue.overflows() == 0);
     for (uint8_t i = 0; i < 3; ++i) queue.push(i);
-    verdict("overflow is counted, not fatal", queue.overflows() == 3 && queue.size() == 4);
+    verdict("overflow is counted, not fatal", queue.overflows() == 3 && queue.size() == 5);
     for (uint32_t i = 0; i < 70'000u; ++i) queue.push(0);
     verdict("the counter saturates instead of lying by wrapping",
             queue.overflows() == 0xFFFFu);

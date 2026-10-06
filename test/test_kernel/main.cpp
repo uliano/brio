@@ -1,5 +1,6 @@
 // Host tests for kernel/tenuto.hpp (+ active_object.hpp, post.hpp): priority order,
-// one-event-per-step, init ordering, idle gating, post/publish.
+// one-event-per-step, init ordering, idle gating, post/publish, the hold
+// (a slot kept past its dispatch, the loop releasing the rest).
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -313,7 +314,107 @@ struct Burst : brio::Fsm<Burst, Big> {
     }
 };
 
+// An AO that HOLDS: a Keep event's slot is kept past its dispatch
+// (kernel/event_queue.hpp's hold()) and released by a later Drop; Ping
+// posts to itself from its own dispatch, the hold in progress.
+struct Keep { uint8_t v; };
+struct Drop {};
+template <uint8_t depth>
+struct Keeper : brio::Fsm<Keeper<depth>, Keep, Drop, Hit> {
+    using Base = brio::Fsm<Keeper<depth>, Keep, Drop, Hit>;
+    using Event = typename Base::Event;
+    using Status = typename Base::Status;
+    static inline brio::EventQueue<Event, depth, HostPlatform> queue;
+    static inline brio::Held<Event> kept{};
+    static void init() { Base::start(&only); }
+    static void dispatch(const Event& e) { Base::dispatch(e); }
+    static Status only(const Event& e) {
+        return brio::match(e,
+            [](brio::Entry) { return Base::handled(); },
+            [](Keep) { kept = queue.hold(); return Base::handled(); },
+            [](Drop) {
+                trace.push_back("kp:drop" + std::to_string(std::get<Keep>(queue.at(kept)).v));
+                queue.release(kept);
+                kept = {};
+                return Base::handled();
+            },
+            [](Hit h) {
+                trace.push_back("kp:hit" + std::to_string(h.n));
+                if (h.n > 0) {
+                    brio::post<Keeper>(Hit{static_cast<uint8_t>(h.n - 1)});
+                }
+                return Base::handled();
+            },
+            [](auto) { return Base::unhandled(); }
+        );
+    }
+};
+
 } // namespace
+
+TEST_CASE("a hold survives the dispatch, the loop releases only what was not held") {
+    reset();
+    using Kp = Keeper<2>;                     // three slots
+    using KK = brio::Tenuto<HostPlatform, Kp>;
+    KK::init_all();
+    trace.clear();
+
+    brio::post<Kp>(Keep{7});
+    CHECK(KK::step());
+    CHECK(Kp::kept);
+    // A self-post chain beside the hold: the dispatched slot and the
+    // held one leave the depth's other place to the self-post, every turn.
+    brio::post<Kp>(Hit{5});
+    while (KK::step()) {}
+    CHECK(trace == Trace{"kp:hit5", "kp:hit4", "kp:hit3", "kp:hit2", "kp:hit1", "kp:hit0"});
+    CHECK(Kp::queue.overflows() == 0);
+    brio::post<Kp>(Drop{});                   // the hold ends in a later dispatch
+    CHECK(KK::step());
+    CHECK(trace.back() == "kp:drop7");
+    // Every slot back: three pushes accepted, the fourth refused.
+    for (uint8_t i = 0; i < 3; ++i) {
+        brio::post<Kp>(Hit{0});
+    }
+    CHECK(Kp::queue.overflows() == 0);
+    brio::post<Kp>(Hit{0});
+    CHECK(Kp::queue.overflows() == 1);
+    while (Kp::queue.pop()) {}
+}
+
+TEST_CASE("a hold takes one of the depth: a depth-1 AO holding cannot also self-post") {
+    reset();
+    using Kp = Keeper<1>;                     // two slots
+    using KK = brio::Tenuto<HostPlatform, Kp>;
+    KK::init_all();
+    trace.clear();
+
+    brio::post<Kp>(Keep{3});
+    CHECK(KK::step());
+    brio::post<Kp>(Hit{1});                   // fits: the spare slot
+    CHECK(KK::step());                        // its self-post finds every slot occupied
+    CHECK(Kp::queue.overflows() == 1);
+    CHECK_FALSE(KK::step());
+    CHECK(trace == Trace{"kp:hit1"});
+    brio::post<Kp>(Drop{});
+    CHECK(KK::step());
+    CHECK(trace.back() == "kp:drop3");
+}
+
+TEST_CASE("serve_one() pumps one AO by hand the way the loop does") {
+    reset();
+    using Kp = Keeper<2>;
+    Kp::init();
+    trace.clear();
+    CHECK_FALSE(brio::serve_one<Kp>());
+    brio::post<Kp>(Keep{9});
+    brio::post<Kp>(Hit{0});
+    CHECK(brio::serve_one<Kp>());             // held
+    CHECK(brio::serve_one<Kp>());             // released by serve_one
+    CHECK_FALSE(brio::serve_one<Kp>());
+    brio::post<Kp>(Drop{});
+    CHECK(brio::serve_one<Kp>());
+    CHECK(trace == Trace{"kp:hit0", "kp:drop9"});
+}
 
 TEST_CASE("a depth-1 AO can post to itself from its own dispatch") {
     reset();

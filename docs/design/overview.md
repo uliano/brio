@@ -509,9 +509,10 @@ their timer, and an application picks one in its board file:
   term stays where it is information: the `ActiveObject` concept and
   the prose.
 - Private members: trailing underscore (`head_`), not `m_`.
-- Queues speak push/pop; a consumer handed an element IN PLACE takes it
-  (`EventQueue::take()`: a pointer to the slot, valid until the next
-  take).
+- Queues speak push/pop; a consumer handed an element IN PLACE takes
+  it, may hold it, and releases it (`EventQueue::take()`: the slot's
+  number, the element read where it lies with `at()`; `hold()` keeps
+  the slot past the dispatch, `release()` gives it back, in any order).
 - No `*_from_isr` API doubling: one always-safe operation, revisit
   only with measurements (see [ring.md](ring.md)).
 - No redundant `inline` on in-class definitions.

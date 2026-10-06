@@ -11,9 +11,11 @@
  * its end, one after another, and nothing preempts an active object.
  *
  * The loop, in words: process matured time events; take ONE event from
- * the highest-priority non-empty queue and dispatch it IN ITS SLOT (the
- * queue hands it over by reference and keeps the slot until the AO's
- * next take - kernel/event_queue.hpp); if every queue
+ * the highest-priority non-empty queue, dispatch it IN ITS SLOT and
+ * release the slot unless the AO held it (serve_one(), kernel/
+ * active_object.hpp; the queue hands over the slot's number and the
+ * slot stays out of the producers' reach until released - kernel/
+ * event_queue.hpp); if every queue
  * was empty, re-check under the critical section and go idle - the
  * platform's idle() re-enables interrupts immediately followed by the
  * sleep instruction, so no wakeup can slip between the check and the
@@ -145,12 +147,7 @@ public:
 private:
     template <typename Ao>
     static bool try_one() {
-        const auto* e = Ao::queue.take();   // no copy, no critical section
-        if (e == nullptr) {
-            return false;
-        }
-        Ao::dispatch(*e);              // in its slot, run-to-completion, interrupts free
-        return true;
+        return serve_one<Ao>();
     }
 };
 

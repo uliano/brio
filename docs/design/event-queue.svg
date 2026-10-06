@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 560" font-family="DejaVu Sans, Verdana, sans-serif" font-size="13">
+  <!-- opaque background: the drawing is a self-contained white card, readable on light and dark pages alike -->
+  <rect x="0" y="0" width="880" height="560" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333333"/>
+    </marker>
+    <marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#777777"/>
+    </marker>
+  </defs>
+
+  <text x="24" y="28" font-size="18" font-weight="bold" fill="#111111">EventQueue: the slots, and the ring of slot numbers</text>
+  <text x="24" y="47" font-size="11" fill="#333333">depth 3: four slots, five positions - kernel.md section 5's example after E2 was released BEFORE E1</text>
+
+  <!-- ===== THE SLOTS ===== -->
+  <text x="24" y="98" font-size="15" font-weight="bold" fill="#111111">slots</text>
+  <text x="24" y="115" font-size="11" fill="#333333">events live here:</text>
+  <text x="24" y="129" font-size="11" fill="#333333">built by post(),</text>
+  <text x="24" y="143" font-size="11" fill="#333333">read in place</text>
+
+  <rect x="200" y="76" width="140" height="64" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
+  <text x="212" y="98" font-weight="bold" fill="#111111">S1</text>
+  <text x="212" y="116" font-size="11" fill="#333333">E1, held long</text>
+  <text x="212" y="131" font-size="11" fill="#333333">its AO keeps "S1"</text>
+
+  <rect x="370" y="76" width="140" height="64" fill="#ffffff" stroke="#555555" stroke-width="1.2" stroke-dasharray="5 3"/>
+  <text x="382" y="98" font-weight="bold" fill="#111111">S2</text>
+  <text x="382" y="116" font-size="11" fill="#333333">free: E2 released,</text>
+  <text x="382" y="131" font-size="11" fill="#333333">its old bytes unread</text>
+
+  <rect x="540" y="76" width="140" height="64" fill="#f0f0f0" stroke="#555555" stroke-width="1.2"/>
+  <text x="552" y="98" font-weight="bold" fill="#111111">S3</text>
+  <text x="552" y="116" font-size="11" fill="#333333">E3, held long</text>
+  <text x="552" y="131" font-size="11" fill="#333333">its AO keeps "S3"</text>
+
+  <rect x="710" y="76" width="140" height="64" fill="#ffffff" stroke="#555555" stroke-width="1.2" stroke-dasharray="5 3"/>
+  <text x="722" y="98" font-weight="bold" fill="#111111">S4</text>
+  <text x="722" y="116" font-size="11" fill="#333333">free: never used</text>
+  <text x="722" y="131" font-size="11" fill="#333333">yet</text>
+
+  <!-- a number in the FREE run names a slot: the next ones to build in -->
+  <line x1="615" y1="236" x2="770" y2="144" stroke="#777777" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#arrow-light)"/>
+  <line x1="735" y1="236" x2="452" y2="144" stroke="#777777" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#arrow-light)"/>
+  <text x="522" y="163" font-size="11" fill="#555555">a free number names a free slot</text>
+
+  <!-- ===== THE RING ===== -->
+  <text x="24" y="258" font-size="15" font-weight="bold" fill="#111111">ring</text>
+  <text x="24" y="275" font-size="11" fill="#333333">slot NUMBERS only,</text>
+  <text x="24" y="289" font-size="11" fill="#333333">one byte each;</text>
+  <text x="24" y="303" font-size="11" fill="#333333">nothing is copied</text>
+  <text x="24" y="317" font-size="11" fill="#333333">between positions</text>
+
+  <rect x="202" y="240" width="116" height="50" fill="#e6e6e6" stroke="#555555" stroke-width="1.2"/>
+  <text x="208" y="254" font-size="10" fill="#555555">p0</text>
+  <text x="260" y="273" font-size="15" fill="#777777" text-anchor="middle">(S1)</text>
+
+  <rect x="322" y="240" width="116" height="50" fill="#e6e6e6" stroke="#555555" stroke-width="1.2"/>
+  <text x="328" y="254" font-size="10" fill="#555555">p1</text>
+  <text x="380" y="273" font-size="15" fill="#777777" text-anchor="middle">(S2)</text>
+
+  <rect x="442" y="240" width="116" height="50" fill="#e6e6e6" stroke="#555555" stroke-width="1.2"/>
+  <text x="448" y="254" font-size="10" fill="#555555">p2</text>
+  <text x="500" y="273" font-size="15" fill="#777777" text-anchor="middle">(S3)</text>
+
+  <rect x="562" y="240" width="116" height="50" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
+  <text x="568" y="254" font-size="10" fill="#555555">p3</text>
+  <text x="620" y="273" font-size="15" font-weight="bold" fill="#111111" text-anchor="middle">S4</text>
+
+  <rect x="682" y="240" width="116" height="50" fill="#ffffff" stroke="#333333" stroke-width="1.7"/>
+  <text x="688" y="254" font-size="10" fill="#555555">p4</text>
+  <text x="740" y="273" font-size="15" font-weight="bold" fill="#111111" text-anchor="middle">S2</text>
+
+  <!-- the three runs, [from, to) -->
+  <path d="M 206 298 L 206 306 L 554 306 L 554 298" fill="none" stroke="#555555" stroke-width="1.2"/>
+  <text x="380" y="322" font-size="11" font-weight="bold" fill="#333333" text-anchor="middle">OUTSTANDING  [free, take)</text>
+  <text x="380" y="337" font-size="11" fill="#333333" text-anchor="middle">stale numbers, read by nobody: S1 and S3</text>
+  <text x="380" y="351" font-size="11" fill="#333333" text-anchor="middle">held, plus the one spare position</text>
+
+  <path d="M 566 298 L 566 306 L 794 306 L 794 298" fill="none" stroke="#333333" stroke-width="1.2"/>
+  <text x="680" y="322" font-size="11" font-weight="bold" fill="#333333" text-anchor="middle">FREE  [alloc, free)</text>
+  <text x="680" y="337" font-size="11" fill="#333333" text-anchor="middle">S4, then S2 - wherever S2</text>
+  <text x="680" y="351" font-size="11" fill="#333333" text-anchor="middle">came back from</text>
+
+  <!-- the three cursors -->
+  <line x1="200" y1="392" x2="200" y2="294" stroke="#333333" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="196" y="408" font-size="12" font-weight="bold" fill="#a3450f">free</text>
+  <text x="196" y="423" font-size="11" fill="#333333">the consumer's, unmasked:</text>
+  <text x="196" y="437" font-size="11" fill="#333333">a release writes a number here</text>
+
+  <line x1="560" y1="392" x2="560" y2="294" stroke="#333333" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <text x="556" y="408" font-size="12" font-weight="bold" fill="#a3450f">take, alloc</text>
+  <text x="556" y="423" font-size="11" fill="#333333">take: the consumer's, unmasked</text>
+  <text x="556" y="437" font-size="11" fill="#333333">alloc: the producers', masked</text>
+  <text x="556" y="451" font-size="11" fill="#333333">PENDING [take, alloc) is empty</text>
+
+  <!-- the wrap -->
+  <path d="M 798 265 L 830 265 L 830 470 L 176 470 L 176 265 L 196 265" fill="none" stroke="#777777" stroke-width="1.2" stroke-dasharray="6 4" marker-end="url(#arrow-light)"/>
+  <text x="503" y="486" font-size="11" fill="#555555" text-anchor="middle">a ring: after p4 comes p0</text>
+
+  <text x="24" y="518" font-size="11" fill="#333333">A push builds its event in the slot named at alloc, then advances alloc: the advance IS the publication.</text>
+  <text x="24" y="534" font-size="11" fill="#333333">A take advances take and hands over the number; a release writes the number at free and advances free - in any order.</text>
+  <text x="24" y="550" font-size="11" fill="#333333">Grey = OUTSTANDING, white = FREE, dashed slot = free slot. Every cursor has one writer: the consumer never masks.</text>
+</svg>

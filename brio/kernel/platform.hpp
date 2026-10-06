@@ -73,6 +73,13 @@
  *    sending core, `pop_all()` and `enable()` on this one - over
  *    whatever the chip has between its cores (a hardware FIFO with an
  *    interrupt line per core on the RP2040, a counter on the host).
+ *
+ * Optional member of a HOST platform only, detected the same way:
+ *  - interleave_point(): called by EventQueue's consumer verbs at every
+ *    boundary between two of their shared accesses - each place an
+ *    interrupt could land - so a host suite can push from there and
+ *    check every interleaving (test/test_event_queue). No target
+ *    platform has it, and no code is compiled for it there.
  */
 
 #pragma once
