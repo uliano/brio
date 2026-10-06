@@ -166,6 +166,13 @@
 //               on PC1 (two spare pads of this board, on no recorded
 //               wire) - and the line after each says wall minus the
 //               wire's cycles: the price of a DCS command.
+//        spi.short
+//               THE HOLD-OFF'S WITNESS: 256 frames of 8 bits pumped at /4
+//               by a host DECLARING a hold-off of one cycle (SpiHost's
+//               last parameter) - two frames in flight by that figure,
+//               one by the default's - and the line says the status, the
+//               overrun flag and the host's count: a hold-off declared
+//               shorter than the image's handlers shows as overruns.
 //        spi.req.e, spi.poll.e, spi.poll.rx.e
 //               the same short requests, and 256 frames written and read
 //               polled at /2 and /4, over letter d's ENGINED host: where
@@ -335,9 +342,15 @@ using FastSpi = SpiHost<1, spi1_pins, SpiTx, SpiRx>;
 /// frame goes through the pump. The two hosts share SPI1's vector, and
 /// `pump_host` says which one the vector serves (one predictable branch).
 using PumpSpi = SpiHost<1, spi1_pins>;
+/// letter e's witness: the same engineless host DECLARING a hold-off of
+/// one cycle - shorter than every handler this image binds, the pump's
+/// own among them - so its write-ahead threshold (51 cycles) keeps two
+/// 8-bit frames in flight from /4 where the honest default does from /16.
+using ShortHoldSpi = SpiHost<1, spi1_pins, NoDmaEngine, NoDmaEngine, 1>;
 using ReqCs = Pin<'C', 0>;   ///< letter e's select
 using ReqDc = Pin<'C', 1>;   ///< letter e's D/C
 volatile bool pump_host = false;
+volatile bool short_host = false;
 #endif
 volatile bool paced_done = false;
 volatile bool spi_done = false;
@@ -989,6 +1002,35 @@ void te_spi() {
     }
     PumpSpi::release();
     pump_host = false;
+
+    // spi.short: THE HOLD-OFF'S WITNESS. 256 frames of 8 bits pumped at
+    // /4 (64 cycles a frame) by a host whose declared hold-off is one
+    // cycle: by that figure two frames fit in flight, by the image's real
+    // handlers they do not, and the overrun count says so. The default
+    // keeps one frame in flight at this rate (the spi.pump lines above).
+    short_host = true;
+    (void)ShortHoldSpi::init(clock);
+    {
+        ShortHoldSpi::Request r{};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_out));
+        r.rx = lend<Lease::reply>(const_cast<uint8_t*>(spi_in));
+        r.len = 256;
+        r.clock = SpiClock::div4;
+        r.mode = SpiMode::mode0;
+        r.bits = SpiDataSize::bits8;
+        r.polled = false;
+        const SpiRun shorted = spi_best_of<ShortHoldSpi>(r, 6);
+        print(serial, "  spi.short: a hold-off declared at ", ShortHoldSpi::hold_off,
+              " cycle (threshold ", ShortHoldSpi::write_ahead_min_frame_cycles, " cycles, the default's ",
+              PumpSpi::write_ahead_min_frame_cycles, "): 256 frames pumped at SCK ",
+              ShortHoldSpi::sck_hz(SpiClock::div4), " Hz, ",
+              ShortHoldSpi::two_in_flight(SpiClock::div4, SpiDataSize::bits8) ? "two" : "one",
+              " in flight (the default: ", PumpSpi::two_in_flight(SpiClock::div4, SpiDataSize::bits8) ? "two" : "one",
+              "), worst status ", shorted.worst_status, ", OVR after a run: ", shorted.ovr ? "YES" : "no",
+              ", the host counted ", ShortHoldSpi::overruns(), crlf);
+    }
+    ShortHoldSpi::release();
+    short_host = false;
 
     // The same two shapes over the ENGINED host, where the thresholds
     // decide: spi.req.e, the three short polled requests at /16 (the pump,
@@ -1906,7 +1948,7 @@ extern "C" void DMA2_Stream3_IRQHandler() {
 }
 extern "C" void SPI1_IRQHandler() {
     spi_meter.enter();
-    const bool done = pump_host ? PumpSpi::isr() : FastSpi::isr();
+    const bool done = pump_host ? PumpSpi::isr() : short_host ? ShortHoldSpi::isr() : FastSpi::isr();
     if (done) {
         spi_done = true;
     }

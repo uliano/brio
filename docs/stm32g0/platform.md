@@ -45,7 +45,9 @@ on this core and is not written.
 
 **WFI wakes on a pending interrupt even under PRIMASK**, so the idle
 hook sleeps first and unmasks after, closing the lost-wakeup window by
-construction. What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
+construction - and a WFI is not an event latch: an interrupt that wakes
+it leaves nothing behind for the next one, so the loop turns once per
+interrupt. Both are measured to the cycle (letters `w` and `k`, below). What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
 0 out of reset and this file never writes it, so a bare WFI is Sleep -
 HCLK, SysTick and every peripheral keep running (5.3) - and with
 `stm32g0/sleep.hpp`'s site having armed a Stop, the same WFI is that
@@ -222,7 +224,7 @@ int main() {
 
 ## Bench findings
 
-The reference suite is `test_stm32_platform` (seven letters in `z`, 59
+The reference suite is `test_stm32_platform` (nine letters in `z`, 65
 verdicts; letter `i` outside it reboots the board six times -
 [reset.md](reset.md) carries the reset and watchdog half).
 What it measures of THIS chapter:
@@ -239,6 +241,39 @@ What it measures of THIS chapter:
   and it returns with interrupts enabled. (With the console still
   draining it returns in 85 us on the USART's own interrupt, which is
   the hook working, not failing.)
+- **No edge position loses the wake** (letter `w`): SysTick's next edge
+  placed D cycles after a write, D = 1..400 - LOAD set to D around the
+  VAL write that reloads it and put back at once, every placement
+  checked - and the kernel's shape run against it: a masked check,
+  `idle()`, until one tick, until two (the second edge a whole period
+  later, the sleep entered after a tick was taken), and a third pass with
+  the edge on an NVIC LINE (TIM14's compare on HCLK, the tick's interrupt
+  held off so that a lost wake would be lost for good). TIM2 at 1 MHz
+  times each try and rescues a lost one: 0 of 400 lost in each pass and
+  none late - the slowest try 9 us for one tick, 1009 for two. The walk
+  crosses the sleep: from D = 39 (the tick) and D = 24 (the line) on,
+  the edge found the core asleep; every nearer edge came before the WFI,
+  pending under PRIMASK, and the WFI fell through on it.
+- **What a wake costs**, in HCLK cycles at 64 MHz (two flash wait
+  states, the prefetch and the cache on): an edge that finds the core
+  asleep enters the tick's handler at 36 cycles against 31 when the core
+  is awake and spinning unmasked, reaches the handler's last statement
+  at 69 and the caller's loop at 135 (an awake spin is out at 95); a line
+  edge enters at 36 against 31 and reaches the loop at 113 against 88.
+  The handler's first statement is a VAL or count read, so each entry
+  figure carries the instructions before that read. An `idle()` that a
+  pending line returns at once costs 85 cycles, the line's handler round
+  trip included. The idle path is the masked check and `idle()`'s three
+  instructions, DSB, WFI and CPSIE (a call of its own in the suite's
+listing) - ST's
+  `HAL_PWR_EnterSLEEPMode` is a bare WFI run unmasked, the lost-wake
+  window left to its caller.
+- **One kernel turn per interrupt** (letter `k`): a Tenuto pack of three
+  quiet AOs, two with a periodic time event, turned as `run()` turns it
+  with the tick the only interrupt: 100 turns over 100 ticks. A quiet
+  turn whose `idle()` a pending line returns at once costs 281 cycles,
+  85 of them that `idle()` and its handler and 196 the turn's own -
+  `process()`, `step()` over three empty queues, the masked check.
 - **SysTick's VAL arithmetic is exact enough to build a delay on**:
   accumulating VAL deltas with the reload folded in across a wrap tracks
   the INTERRUPT count to 350..3100 ppm over 200 ticks (12.8 M cycles) -
@@ -365,7 +400,8 @@ caveat is about.
 ## On the STM32G071RB
 
 Every platform-level claim of this document holds on the Nucleo-G071RB
-(DEV_ID 0x460, REV_ID 0x2000): `test_stm32_platform` runs whole in
+(DEV_ID 0x460, REV_ID 0x2000), letters `w` and `k` aside (measured on
+the G0B1RE alone): `test_stm32_platform` runs in
 `z` (the reset flags, the critical section, the idle hook, SysTick's
 arithmetic, `delay_us` and both watchdogs), `test_stm32_sleep` likewise
 (all four depths and both sites - [pwr.md](pwr.md)), and
@@ -389,9 +425,10 @@ never-re-lock-the-PLL claim need no meter and stay.
 
 ## On the STM32G031K8
 
-`test_stm32_platform` runs whole on the Nucleo-G031K8 (DEV_ID 0x466,
+`test_stm32_platform` runs on the Nucleo-G031K8 (DEV_ID 0x466,
 REV_ID 0x1003), letter `i` included over its six real resets, with the
-same letters and the same verdicts as on the LQFP64 parts. The
+same letters and the same verdicts as on the LQFP64 parts, letters `w`
+and `k` aside (measured on the G0B1RE alone). The
 board's user LED is on PC6 (a Nucleo-32 fact), which nothing here
 judges.
 
@@ -421,7 +458,13 @@ Driver gaps (this chapter's option space the stratum does not touch):
   ([design/kernel.md](../design/kernel.md)).
 - A per-package pin-bonding table - [port.md](port.md) says why not.
 
-Implemented, not bench-verified: `Nvic::priority` (nothing assigns one,
+Implemented, not bench-verified: letters `w` and `k` on the
+STM32G071RB and the STM32G031K8 (the same image, run there, is the
+measurement); the idle path of `idle_until()` on the tickless
+timebase, whose arming adds instructions between the masked check and
+the WFI - the same WFI under PRIMASK closes it, and letter `w`'s walk
+over `Stm32g0Platform<LptimTicker>` with the LPTIM's compare as the
+edge is what would measure it; `Nvic::priority` (nothing assigns one,
 above); `abort()`'s and `HardFault_Handler`'s spins (the fault VECTOR is
 exercised, by `hard_fault_reset` - [reset.md](reset.md); the spins are
 what runs when no body is bound, and every suite binds one). The

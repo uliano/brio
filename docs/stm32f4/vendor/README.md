@@ -37,7 +37,8 @@ part class, keyed in `stm32f4/device_tables.hpp`.
 | STM32F411xC/xE device errata | **ES0287 Rev 6** | symlink to `.../es0287-*.pdf` | revisions A, 1 and 2 share REV_ID 0x1000; the black pill's part reads it |
 | STM32F469xx/F479xx device errata | **ES0321 Rev 14** | symlink to `.../es0321-*.pdf` | revisions A and 1 share REV_ID 0x1000 (table 2); the 32F469IDISCOVERY's part reads it; its bxCAN item is 2.15.1, its RTC items 2.11.x, its OTG_FS items 2.16.x, its QUADSPI items 2.4.x, its DSI items 2.8.1 .. 2.8.3 |
 | STM32 Cortex-M4 programming manual | **PM0214 Rev 10** | symlink to `~/Documenti/Elettronica/STM32/pm0214-*.pdf` | the core: PRIMASK/BASEPRI, SysTick, the NVIC, the FPU's CPACR and lazy stacking, the ISB the pending-interrupt test needs |
-| ARMv7-M Architecture Reference Manual | ARM DDI 0403E.e | symlink to `~/Documenti/Elettronica/STM32/ARM-CORTEX References/DDI0403E_e_armv7m_arm.pdf` | the architecture behind PM0214 |
+| ARMv7-M Architecture Reference Manual | ARM DDI 0403E.e | symlink to `~/Documenti/Elettronica/STM32/ARM-CORTEX References/DDI0403E_e_armv7m_arm.pdf` | the architecture behind PM0214; B1.5.19 (the WFI's wake-up events, PRIMASK ignored in deciding one), B3.3.1 (SysTick's reload after a write to its current value) |
+| Cortex-M4 Technical Reference Manual | ARM DDI 0439B | symlink to `~/Documenti/Elettronica/STM32/ARM-CORTEX References/DDI0439B_cortex_m4_r0p0_trm.pdf` | 3.9.1: the exception entry's and return's twelve cycles at zero wait states, the tail chain's six |
 | Cortex-M4 Devices Generic User Guide | ARM DUI 0553B | symlink to `.../DUI0553.pdf` | |
 | Introduction to system memory boot mode | AN2606 Rev 70 | symlink to `~/Documenti/Elettronica/STM32/an2606-*.pdf` | the ROM bootloader (DFU through BOOT0), the CLI's future fourth flash mechanism |
 | STM32F429I-DISC1 user manual | UM1670 Rev 6 | symlink to `.../STM32F429I-DISC1/um1670-*.pdf` | + the MB1075 schematics B01/C01/D02/E01 beside it |

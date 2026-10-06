@@ -192,7 +192,7 @@ The arithmetic: `i2s_frame_factor`, `i2s_fs_hz`, `i2s_prescaler_for`,
 `i2s_channel_is_32`, `i2s_config_valid`, `i2s_i2scfgr_of`,
 `i2s_i2spr_of`.
 
-`SpiHost<n, pins, TxEngine, RxEngine>` - the engine
+`SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` - the engine
 [the shared SPI bus](../design/spi-bus.md) drives, with the other
 strata's `Request` field for field: `cs`, `dc`, `cmd`, `tx`, `rx`,
 `len`, `cmd_len`, `bits`, `polled`, `cs_setup_us`, `clock`, `mode`,
@@ -204,10 +204,13 @@ max_sck_hz)`, `rebase(sysclk)`, `clock_for`, `sck_hz`, `max_sck_hz`,
 `spi_dma_fault`, `spi_overrun`, `spi_stalled`), `overruns` (the
 pump's count), `two_in_flight(clock, bits)` (what the write-ahead
 threshold says of a rate), `recover`, `release`, `claim_nss_pad`; the
-constants a program reads the thresholds off - `isr_entry_cycles`,
-`isr_to_read_cycles`, `longest_handler_cycles`,
-`write_ahead_min_frame_cycles`, `dma_fixed_cycles`, `dma_min_frames`,
-`polled_write_turn_cycles`, `polled_read_gap_cycles`; with engines, the
+constants a program reads the thresholds off - `hold_off` (the image's
+declared hold-off, below), `write_ahead_min_frame_cycles`,
+`dma_fixed_cycles`, `dma_min_frames`, `polled_write_turn_cycles`,
+`polled_read_gap_cycles` - and the arithmetic behind the first two at
+namespace level: `spi_isr_entry_cycles`, `spi_isr_to_read_cycles`,
+`spi_default_hold_off_cycles`, `spi_write_ahead_min_frame_cycles()`,
+`spi_frame_hclk_cycles()`, `spi_write_ahead_code()`; with engines, the
 transmit stream armed for its errors alone and the receive block's
 completion the transaction's one interrupt - and this stratum's three
 of its own: `sck_speed` and
@@ -297,26 +300,44 @@ five instructions - and writes the next frame owed; with two in flight
 frame k + 1 is already shifting and the write is k + 2, so the bus stays
 busy through the handler. Two in flight overruns the receive buffer if
 the read comes later than one frame time after RXNE, and the latest it
-can come is a handler that started just before RXNE running its whole
-body and exiting, then this vector entering and reading:
+can come is THE IMAGE'S HOLD-OFF - the longest it keeps this vector from
+running: a handler that started just before RXNE running its whole body
+(no interrupt nests over another) or a masked window as long - then its
+exit, this vector's entry and its read:
 
-    write_ahead_min_frame_cycles = (longest_handler_cycles + 2 x isr_entry_cycles + isr_to_read_cycles) x 5 / 4
-                                 = (150 + 24 + 16) x 5 / 4 = 237 HCLK cycles
+    write_ahead_min_frame_cycles = (hold_off_cycles + 2 x spi_isr_entry_cycles + spi_isr_to_read_cycles) x 5 / 4
+                                 = (150 + 24 + 16) x 5 / 4 = 237 HCLK cycles at the default
 
 with the inputs counted in the listing: the Cortex-M4's exception entry
-and exit 12 cycles each (PM0214 2.3.6), the handler's five instructions
-with two APB2 accesses at HCLK/2 about 16, the longest handler of the
-bench image 150 (letter d's DMA completion vector with its stamps; the
-console's transmit handler 71, the tick's 28, the kernel's longest
-masked window - `post()` of a Request into a bus AO's queue, 32
-instructions six of which are four-word multiples - about 62), and a
-quarter on top for the flash's wait states. A frame at BR code c is
+and exit 12 cycles each at zero wait states (the Cortex-M4 TRM, DDI
+0439B 3.9.1), the handler's five instructions with two APB2 accesses at
+HCLK/2 about 16, and a quarter on top for the flash's wait states.
+
+**The hold-off is the image's, and the image declares it**: SpiHost's
+last template parameter, `hold_off_cycles`, in core cycles at the clock
+the host runs at - the longer of the image's longest handler and its
+longest masked window. Its default, `spi_default_hold_off_cycles` = 150,
+is the bench images' own: letter d's DMA completion vector with its
+stamps in `bench_stm32f4` (125 cycles of body, its entry and exit on
+top); the console's transmit handler is 71, the tick's 28, the kernel's
+longest masked window - `post()` of a Request into a bus AO's queue, 32
+instructions six of which are four-word multiples - about 62. An image
+measures its own the way `bench_stm32f4` does: an `IsrMeter`
+(util/bench.hpp) around each handler it binds, its `isr` over `irq` a
+handler's body and the entry and exit added on top, and the masked
+windows counted in its release listing; the longest of them is the
+figure it declares. A hold-off of 0 is refused at compile time: an
+image with no handler of its own still has the tick's. The witness of
+a figure declared too short is `overruns()` - and `spi_overrun` in the
+transaction's status - at a rate just above the threshold it derives
+(measured, letter e's `spi.short` below); a figure declared too long
+only keeps one frame in flight where two would have held. A frame at BR code c is
 `bits x 2^(c + 1)` PCLK cycles, twice that in HCLK on APB2 at 180 MHz:
 so 8-bit frames keep two in flight from /16 (256 cycles) and 16-bit
 frames from /8, and faster than that one frame is in flight, the bus
-idle for the handler. `two_in_flight()` answers the same arithmetic for
-a program, and an application whose handlers run longer than the bench's
-sees it in `overruns()`. The D/C boundary drains to one frame either
+idle for the handler; a hold-off of 300 makes the threshold 425 and moves
+both a code slower, /32 and /16 (pinned beside the default's in the
+header). `two_in_flight()` answers the same arithmetic for a program. The D/C boundary drains to one frame either
 way: the first data frame is written only after the last command frame
 came back, because a frame queued in the transmit buffer goes out the
 moment the one before it ends.
@@ -369,6 +390,16 @@ r.mode    = brio::SpiMode::mode3;
 r.clock   = brio::SpiClock::div16;
 r.polled  = true;
 (void)Bus::start(r);                    // true: it is done, `who` is filled
+```
+
+An image whose handlers or masked windows run longer than the bench's
+declares its own hold-off - here 300 cycles, measured as "The host
+above the wire" says - and the pump keeps two frames in flight only
+where a frame outlasts it:
+
+```cpp
+using Bus = brio::SpiHost<5, spi5, brio::NoDmaEngine, brio::NoDmaEngine, 300>;
+static_assert(Bus::write_ahead_min_frame_cycles == 425);
 ```
 
 The same bus shared, through the arbiter - the client posts and gets a
@@ -548,6 +579,13 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   length - the bus never idle - and no overrun counted; with one, below
   the threshold, x = 1.76 at 11.25 MHz, 2.57 at 22.5, 4.28 at 45: the
   bus idle for the handler, as the arithmetic above says it must be.
+- **The hold-off's witness** (letter e's `spi.short`): the same
+  engineless host declaring a hold-off of one cycle - threshold 51, two
+  8-bit frames in flight from /4 where the default keeps one until /16 -
+  pumping 256 frames at SCK 22.5 MHz (a 64-cycle frame against the
+  pump's own 94-cycle handler) ends every one of six runs in
+  `spi_overrun`, the host counting six, while the default host's runs
+  at every rate and width beside it count none.
 - **A short polled request's fixed cost: 198, 251 and 246 cycles** for
   a command byte and 0, 2 and 15 data bytes at 5.625 MHz (wall minus
   the wire's time; D/C and the select on two pads, the data phase in the
@@ -699,16 +737,15 @@ Implemented, not bench-verified (each with what would measure it):
   `direction`: the engine's transactions are full duplex by
   construction, and the resource's simplex modes were driven by hand in
   the bidirectional letter alone.
-- An overrun ending a transaction with `spi_overrun`, and a stall ending
-  one with `spi_stalled`: neither path has been driven - the bench's
-  handlers are shorter than the threshold's margin and the block always
-  clocks. A handler longer than a frame bound beside the pump at a rate
-  with two in flight would measure the first, the gate closed under a
-  polled request the second.
-- The write-ahead threshold's inputs are the bench image's: an
-  application binding a handler longer than 150 cycles at a rate with
-  two in flight is the case the arithmetic does not cover, and
-  `overruns()` is what would show it.
+- A stall ending a transaction with `spi_stalled`: the block always
+  clocks on this bench; the gate closed under a polled request would
+  measure it.
+- A hold-off declared HONESTLY above the default: an image binding a
+  handler longer than 150 cycles beside the pump at /16 (two in flight
+  by the default, a 256-cycle frame) would count overruns with the
+  default and none with its own figure declared - a timer handler of a
+  few hundred cycles at a rate that keeps landing it in the frames is
+  that bench line. The too-short side is measured (`spi.short`).
 - The DCS link's commands and pixel rows over the transmit-only shape
   against a panel: the black pill's display (the breadboard finding)
   wants a run of its probe over this host.

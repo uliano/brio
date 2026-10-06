@@ -378,6 +378,11 @@ void audio_pll_smoke() {
 
 using Bus = SpiHost<1, spi1_pins>;
 using WriteOnlyBus = SpiHost<1, spi1_write_only>;
+/// An image that declares a longer hold-off than the bench's: the
+/// threshold follows it, and nothing else of the host changes.
+using SlowServiceBus = SpiHost<1, spi1_pins, NoDmaEngine, NoDmaEngine, 300>;
+static_assert(Bus::hold_off == spi_default_hold_off_cycles && Bus::write_ahead_min_frame_cycles == 237u);
+static_assert(SlowServiceBus::hold_off == 300u && SlowServiceBus::write_ahead_min_frame_cycles == 425u);
 using Peer = SpiClient<1, spi1_pins>;
 
 /// The engined host: the cells are the reserve's, so the engines only
@@ -448,6 +453,15 @@ void host_smoke() {
 
     (void)WriteOnlyBus::init(sys_clock);
     WriteOnlyBus::release();
+
+    (void)SlowServiceBus::init(sys_clock);
+    (void)SlowServiceBus::two_in_flight(SpiClock::div16, SpiDataSize::bits8);
+    typename SlowServiceBus::Request slow{};
+    slow.tx = Borrowed<const uint8_t, Lease::reply>{out};
+    slow.len = 4;
+    (void)SlowServiceBus::start(slow);
+    (void)SlowServiceBus::isr();
+    SlowServiceBus::release();
 }
 
 void client_smoke() {

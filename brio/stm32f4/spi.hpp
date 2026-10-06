@@ -1049,8 +1049,80 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 // not run (the gate closed, SPE down, a mode fault that demoted it);
 // the block is reset and reconfigured, and the transaction ends there.
 
+// ---- the write-ahead threshold, from the counts ---------------------------------
+
+/// The exception entry of a Cortex-M4, and its exit: 12 cycles each at
+/// zero wait states (the Cortex-M4 TRM, ARM DDI 0439B 3.9.1; the ART's
+/// cache serves the vector).
+inline constexpr uint32_t spi_isr_entry_cycles = 12;
+/// isr()'s entry to its DR read: the SR read, the RXNE and OVR tests and
+/// the DR read - five instructions with two APB2 accesses at HCLK/2,
+/// counted in bench_stm32f4.lst's SPI1 vector; the app's stamp and its
+/// host branch lie before them and are the app's (ten instructions there,
+/// one of them the ruler's read).
+inline constexpr uint32_t spi_isr_to_read_cycles = 16;
+/// The DEFAULT of SpiHost's `hold_off_cycles`: the longest the bench
+/// images keep the host's vector from running, at 180 MHz. No interrupt
+/// nests over another (design/kernel.md section 1), so a handler that
+/// started just before RXNE rose holds the vector for its whole body, and
+/// a masked window holds it as long. In bench_stm32f4.lst the longest
+/// handler is the DMA completion vector of an engined request (letter d:
+/// isr 125 with the meter's stamps, the entry and the exit on top); the
+/// console's transmit handler is 71, the tick's 28, and the kernel's
+/// longest masked window - post() of a Request into a bus AO's queue, 32
+/// instructions six of which are four-word multiples, counted in
+/// test_stm32f4_spi.lst's post<BusMaster<SpiHost<5, ...>>> - about 62.
+inline constexpr uint32_t spi_default_hold_off_cycles = 150;
+
+/// The shortest frame, in HCLK cycles, over which the pump keeps two
+/// frames in flight in an image whose hold-off is `hold_off`. Two in
+/// flight overrun the receive buffer if frame k is read later than one
+/// frame time after its RXNE (26.3.13), and the latest the read can come
+/// is the hold-off, the exit after it, this vector's entry and its read -
+/// with a quarter on top for the flash's wait states on the way: 237
+/// cycles at the default.
+constexpr uint32_t spi_write_ahead_min_frame_cycles(uint32_t hold_off) {
+    return (hold_off + 2u * spi_isr_entry_cycles + spi_isr_to_read_cycles) * 5u / 4u;
+}
+
+/// A frame's HCLK cycles at BR code `c` and width `bits`, on a bus whose
+/// clock is HCLK >> `ratio_shift`: bits x 2^(code + 1) bus cycles.
+constexpr uint32_t spi_frame_hclk_cycles(SpiClock c, SpiDataSize bits, uint8_t ratio_shift) {
+    return (bits == SpiDataSize::bits16 ? 16u : 8u) << (static_cast<uint8_t>(c) + 1u + ratio_shift);
+}
+
+/// The fastest BR code at which the pump keeps two frames in flight for
+/// a hold-off, a width and a bus ratio (every slower code does too); 8
+/// when no code does.
+constexpr uint8_t spi_write_ahead_code(uint32_t hold_off, SpiDataSize bits, uint8_t ratio_shift) {
+    for (uint8_t code = 0; code < 8u; ++code) {
+        if (spi_frame_hclk_cycles(static_cast<SpiClock>(code), bits, ratio_shift) >=
+            spi_write_ahead_min_frame_cycles(hold_off)) {
+            return code;
+        }
+    }
+    return 8;
+}
+
+// The default on an APB2 instance at HCLK = 2 x PCLK2 (180 MHz): 237
+// cycles, 8-bit frames two in flight from /16 (256 cycles), 16-bit ones
+// from /8.
+static_assert(spi_write_ahead_min_frame_cycles(spi_default_hold_off_cycles) == 237u);
+static_assert(spi_write_ahead_code(spi_default_hold_off_cycles, SpiDataSize::bits8, 1) ==
+              static_cast<uint8_t>(SpiClock::div16));
+static_assert(spi_write_ahead_code(spi_default_hold_off_cycles, SpiDataSize::bits16, 1) ==
+              static_cast<uint8_t>(SpiClock::div8));
+// A longer hold-off moves two in flight to a slower code: 300 cycles make
+// the threshold 425, so 8-bit frames from /32 (512 cycles) and 16-bit
+// ones from /16.
+static_assert(spi_write_ahead_min_frame_cycles(300u) == 425u);
+static_assert(spi_write_ahead_code(300u, SpiDataSize::bits8, 1) ==
+              static_cast<uint8_t>(SpiClock::div32));
+static_assert(spi_write_ahead_code(300u, SpiDataSize::bits16, 1) ==
+              static_cast<uint8_t>(SpiClock::div16));
+
 /**
- * SpiHost<n, pins, TxEngine, RxEngine>
+ * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request is
  * the other strata's, field for field: the bus AO asserts the request's
@@ -1091,9 +1163,10 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *    stays busy through the handler - and it overruns the receive buffer
  *    if the handler reads frame k later than one frame time after its
  *    RXNE (26.3.13). Two in flight is therefore chosen PER REQUEST, where
- *    a frame outlasts the latency that can delay the read, counted below
- *    (`write_ahead_min_frame_cycles`); below that one frame in flight,
- *    the bus idle for the handler. The D/C boundary drains to one frame
+ *    a frame outlasts the latency that can delay the read
+ *    (`write_ahead_min_frame_cycles`, from the image's `hold_off_cycles`
+ *    below); below that one frame in flight, the bus idle for the
+ *    handler. The D/C boundary drains to one frame
  *    either way: the first data frame is written only after the last
  *    command frame came back, because a frame preloaded into the Tx
  *    buffer goes out the moment the one before it ends, before any
@@ -1150,9 +1223,15 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * correctness parameter of the silicon.
  */
 template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine>
+          typename RxEngine = NoDmaEngine,
+          uint32_t hold_off_cycles = spi_default_hold_off_cycles>
 class SpiHost {
     using S = Spi<n>;
+
+    static_assert(hold_off_cycles > 0u,
+                  "brio SpiHost: hold_off_cycles is the longest this image keeps the host's "
+                  "vector from running, and it is never zero - an image with no handler of "
+                  "its own still has the tick's, and the kernel masks to post");
 
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
@@ -1230,41 +1309,27 @@ public:
 
     // ---- the two thresholds, from the counts ------------------------------------------
 
-    /// The exception entry of a Cortex-M4, and its exit: 12 cycles each
-    /// (PM0214 2.3.6, the stacking at zero wait states; the ART's cache
-    /// serves the vector).
-    static constexpr uint32_t isr_entry_cycles = 12;
-    /// isr()'s entry to its DR read: the SR read, the RXNE and OVR tests
-    /// and the DR read - five instructions with two APB2 accesses at
-    /// HCLK/2, counted in bench_stm32f4.lst's SPI1 vector; the app's
-    /// stamp and its host branch lie before them and are the app's (ten
-    /// instructions there, one of them the ruler's read).
-    static constexpr uint32_t isr_to_read_cycles = 16;
-    /// The longest HANDLER an image of this family binds, with its
-    /// stamps: no interrupt nests over another (design/kernel.md section
-    /// 1), so a handler that started just before RXNE rose holds the
-    /// vector for its whole body. In bench_stm32f4.lst it is the DMA
-    /// completion vector of an engined request (letter d: isr 125 with
-    /// the meter's stamps, the entry and the exit on top); the console's
-    /// transmit handler is 71, the tick's 28, and the kernel's longest
-    /// masked window - post() of a Request into a bus AO's queue, 32
-    /// instructions six of which are four-word multiples, counted in
-    /// test_stm32f4_spi.lst's post<BusMaster<SpiHost<5, ...>>> - about
-    /// 62. An application whose handlers run longer sees it in
-    /// overruns().
-    static constexpr uint32_t longest_handler_cycles = 150;
-    /// A frame must outlast the latest a read can come after RXNE - that
-    /// handler's body and exit, this vector's entry and its read - by a
-    /// quarter, the flash's wait states on the way, for two frames to be
-    /// kept in flight: 237 cycles. On this family at HCLK = 2 x PCLK2 a
-    /// frame is 8 x 2^(code + 2) HCLK cycles: 8-bit frames keep two in
-    /// flight from /16 (256 cycles) and 16-bit ones from /8; faster than
-    /// that one frame is in flight, the bus idle for the turnaround.
-    /// Letter e of bench_stm32f4 reads the overrun count after every
-    /// run at /2, /4, /8 and /16, both widths, with the console's and
-    /// the tick's handlers live.
-    static constexpr uint32_t write_ahead_min_frame_cycles =
-        (longest_handler_cycles + 2u * isr_entry_cycles + isr_to_read_cycles) * 5u / 4u;
+    /// THE IMAGE'S HOLD-OFF: the longest, in core cycles at the clock the
+    /// host runs at, that this image keeps the host's vector from running:
+    /// the longer of its longest handler (no interrupt nests over another)
+    /// and its longest masked window. A template parameter because it is a
+    /// fact of the image, not of the family - the application or its board
+    /// file declares its own; the default, `spi_default_hold_off_cycles`,
+    /// is the bench images' (counted there). A figure declared too short
+    /// shows as `overruns()` at a rate just above the threshold it derives;
+    /// one declared too long only keeps one frame in flight where two
+    /// would have held.
+    static constexpr uint32_t hold_off = hold_off_cycles;
+    /// The shortest frame two are kept in flight over, from the hold-off
+    /// (`spi_write_ahead_min_frame_cycles`): 237 cycles at the default. On
+    /// this family at HCLK = 2 x PCLK2 a frame is 8 x 2^(code + 2) HCLK
+    /// cycles: at the default 8-bit frames keep two in flight from /16
+    /// (256 cycles) and 16-bit ones from /8; faster than that one frame is
+    /// in flight, the bus idle for the turnaround. Letter e of
+    /// bench_stm32f4 reads the overrun count after every run at /2, /4, /8
+    /// and /16, both widths, with the console's and the tick's handlers
+    /// live.
+    static constexpr uint32_t write_ahead_min_frame_cycles = spi_write_ahead_min_frame_cycles(hold_off_cycles);
 
     /// The engines' fixed cost per transaction: 547 cycles (letter d of
     /// bench_stm32f4: wall minus the wire's time at SCK 22.5 MHz, the one
@@ -1805,9 +1870,7 @@ private:
     /// A frame's HCLK cycles at this code and width: bits x 2^(code + 1)
     /// PCLK cycles, times HCLK over PCLK.
     [[gnu::always_inline]] static bool two_ahead(SpiClock c, SpiDataSize bits) {
-        const uint32_t frame_cycles = (bits == SpiDataSize::bits16 ? 16u : 8u)
-                                      << (static_cast<uint8_t>(c) + 1u + st_.ratio_shift);
-        return frame_cycles >= write_ahead_min_frame_cycles;
+        return spi_frame_hclk_cycles(c, bits, st_.ratio_shift) >= write_ahead_min_frame_cycles;
     }
 
     static SpiConfig boot_config() {

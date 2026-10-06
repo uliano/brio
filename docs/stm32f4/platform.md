@@ -2,7 +2,9 @@
 
 Documents of record: PM0214 Rev 10 (the Cortex-M4 core: PRIMASK and
 BASEPRI, the NVIC, SysTick, the FPU's CPACR and lazy stacking, the
-ISB), RM0090 Rev 22 / RM0390 Rev 6 / RM0383 Rev 4 for the vector
+ISB, the sleep's entry and wake-up), ARM's ARMv7-M ARM (DDI 0403E.e:
+the WFI's wake-up events, SysTick's reload) and the Cortex-M4 TRM (DDI
+0439B: the exception entry's and return's cycles), RM0090 Rev 22 / RM0390 Rev 6 / RM0383 Rev 4 for the vector
 tables (RM0090 table 62 and its twins) and for what a WFI here enters
 (PWR ch. 5, which [clock.md](clock.md)'s regulator half touches today
 and the power chapter will own), and the three errata sheets ES0206
@@ -21,8 +23,8 @@ include of the core stratum's `cortexm/ticker.hpp` - `BasicTicker`,
 `stm32f4/src/glue/startup_stm32f4{29,46,11}.cpp` + `stm32f4/ld/<part>.ld`
 in the build project. The family fixture is
 `test/family_stm32f4/platform.cpp` under `brio check stm32f4`. The
-reference suite is `test_stm32f4_platform` (letters a..e, g), run on
-the three boards.
+reference suite is `test_stm32f4_platform` (letters a..e, g, w, k, t),
+run on the four boards.
 
 ## What the silicon does
 
@@ -72,7 +74,11 @@ aliases spin in Default_Handler.
 
 **WFI wakes on a pending interrupt even under PRIMASK**, so the idle
 hook sleeps first and unmasks after, closing the lost-wakeup window by
-construction. What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
+construction: the processor "ignores the value of PRIMASK in
+determining whether an asynchronous exception is a WFI wakeup event"
+(ARMv7-M ARM B1.5.19, PM0214 2.5.2), and a WFI is not WFE - no event
+latch is left standing by a wake, so the loop turns once per interrupt.
+Both are measured to the cycle (letters `w` and `k`, below). What the WFI enters is WHATEVER IS ARMED: SCR.SLEEPDEEP is
 0 out of reset and this file never writes it, so a bare WFI is Sleep -
 HCLK, SysTick and every peripheral keep running (RM0090 5.3.4) - and
 with a sleep site having armed a Stop, the same WFI is that Stop.
@@ -156,7 +162,8 @@ dispatch: `brio::delay_us(clock, 20);` - a millisecond or more is a
 ## Bench findings
 
 `test_stm32f4_platform`, letters a..e and g, 36 verdicts on each of the
-four boards:
+four boards, and letters `w`, `k` and `t` beside them in `z` (49
+verdicts on the Nucleo-F446RE):
 
 - **a**: DEV_ID 0x419 REV_ID 0x2003 with 2048 KB on the DISC1, 0x421 /
   0x1000 / 512 KB on the Nucleo-F446RE, 0x431 / 0x1000 / 512 KB on the
@@ -186,6 +193,45 @@ four boards:
   P 2 Q 5 (25 MHz) - every register the task's constant.
 - **g**: the record at 0x200002E8 in the main SRAM; nothing pending; a
   written record taken once with its code and context, then gone.
+- **w**, on the Nucleo-F446RE at 180 MHz: SysTick's next edge placed D
+  cycles after a write, D = 1..400 - LOAD set to D around the VAL write
+  that reloads it and put back at once (PM0214 4.5.2's single-shot
+  reload), every placement checked - and the kernel's shape run against
+  it: a masked check, `idle()`, until one tick, until two (the second
+  edge a whole period later), and a third pass with the edge on an NVIC
+  LINE (TIM9's compare, its timer clock HCLK, the tick's interrupt held
+  off so that a lost wake would be lost for good). TIM2 at 1 MHz times
+  each try and rescues a lost one: 0 of 400 lost in each pass and none
+  late - the slowest try 3 us for one tick, 1003 for two. The walk
+  crosses the sleep: from D = 16 (the tick) and D = 8 (the line) on the
+  edge found the core asleep, every nearer one came before the WFI and
+  the WFI fell through on it. Two facts of this core shaped the letter:
+  the first edge after other code ran pays the ART's misses (a line edge
+  entered at 38 cycles cold against 24 warm), so each walk opens with
+  one try it judges and does not measure; and a timer enabled by a store
+  starts counting where the write buffer delivers the store, which the
+  DSB in `idle()` waits for - so the walk reads the timer back after the
+  enable, or every line edge lands after the WFI.
+- **What a wake costs**, HCLK cycles at 180 MHz: an edge that finds the
+  core asleep enters the tick's handler at 20 cycles against 16 when the
+  core is awake and spinning unmasked (the Cortex-M4 TRM, DDI 0439B
+  3.9.1, gives at most 12 to the handler's first instruction and 12 for
+  the return, at zero wait states), reaches the handler's last statement at 52
+  and the caller's loop at 90 (an awake spin is out at 69); a line edge
+  enters at 25 against 21, the TIM9 count read through APB2 one cycle
+  apart by the bus clock's phase, and reaches the loop at 78..79 against
+  67. The handler's first statement is a VAL or count read, so each
+  entry figure carries the instructions before that read. An `idle()`
+  that a pending line returns at once costs 62 cycles, the line's
+  handler round trip included. ST's `HAL_PWR_EnterSLEEPMode` is a bare
+  WFI run unmasked, the lost-wake window left to its caller; this hook
+  is DSB, WFI, CPSIE.
+- **k**: a Tenuto pack of three quiet AOs, two with a periodic time
+  event, turned as `run()` turns it with the tick the only interrupt:
+  100 turns over 100 ticks. A quiet turn whose `idle()` a pending line
+  returns at once costs 195 cycles, 62 of them that `idle()` and its
+  handler and 133 the turn's own - `process()`, `step()` over three
+  empty queues, the masked check.
 
 Two desk facts outside the letters: OpenOCD's HLA transport returns
 garbage for memory read while the core sleeps in WFI (the vector table
@@ -211,7 +257,9 @@ Driver gaps (this chapter's option space the stratum does not touch):
   reset: the reset chapter's suite.
 - A per-package pin-bonding table - [port.md](port.md) says why not.
 
-Implemented, not bench-verified: `Nvic::priority` (nothing assigns one,
+Implemented, not bench-verified: letters `w` and `k` on the F429ZI, the
+F411CE and the F469NI (the same image, run there, is the measurement);
+`Nvic::priority` (nothing assigns one,
 above); `abort()`'s and `HardFault_Handler`'s spins (no suite has
 faulted the part yet); the cortex-debug launch entries
 ([README.md](README.md)), not driven end to end - halt-and-dump through
