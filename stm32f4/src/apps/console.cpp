@@ -266,6 +266,8 @@ void Console::cmd_err(const Cmd&, Serial s) {
                 " noise=", Serial::noise_errors(),
                 " hw_overruns=", Serial::hw_overruns(),
                 " line_overflows=", SerialLines::line_overflows(),
+                " torn=", SerialLines::torn_lines(),
+                " skips=", Serial::rx_skips(),
                 " q_drops=", SerialLines::queue.overflows(),
                 " baud=", Serial::actual_baud(Serial::kernel_hz<SysClock>()),
                 brio::crlf);

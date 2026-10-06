@@ -573,7 +573,9 @@ class Pl011Transport {
     using RxPad = typename Chip::template Pad<rx_pin>;
 
     // One ring pair per instantiation (static inline -> .bss, no ctor).
-    static inline Ring<uint8_t, rx_size, typename Chip::Platform> m_rx{};
+    // The receive ring marks where a byte was lost (util/ring.hpp's
+    // GapRing), so rx_skips() moves exactly at the gap.
+    static inline GapRing<uint8_t, rx_size, typename Chip::Platform> m_rx{};
     static inline Ring<uint8_t, tx_size, typename Chip::Platform> m_tx{};
 
     // Error counters, written in the handler, read from the main loop.
@@ -811,7 +813,15 @@ public:
                 if ((errors & UartInterrupt::frame) != 0u) { m_frame_errors = m_frame_errors + 1; }
                 if ((errors & UartInterrupt::parity) != 0u) { m_parity_errors = m_parity_errors + 1; }
                 if ((errors & UartInterrupt::brk) != 0u) { m_break_errors = m_break_errors + 1; }
-                if ((errors & UartInterrupt::overrun) != 0u) { m_hw_overruns = m_hw_overruns + 1; }
+                if ((errors & UartInterrupt::overrun) != 0u) {
+                    m_hw_overruns = m_hw_overruns + 1;
+                    // Frames the full FIFO refused: a gap, marked where
+                    // the ring's producer stands now - ahead of the run in
+                    // flight and the FIFO's content, which precede it. A
+                    // framed, parity-failed or break entry is moved by the
+                    // channel and delivered: no gap.
+                    m_rx.lost();
+                }
                 U::clear_pending(errors);
             }
         }
@@ -1059,6 +1069,17 @@ public:
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t break_errors() { return m_break_errors; }
     static uint8_t hw_overruns() { return m_hw_overruns; }
+
+    /// Every byte the line carried that the receive ring will not deliver,
+    /// since the program started, NEVER CLEARED (modulo 2^32) -
+    /// util/stream.hpp's SkippingSource, the epoch util/serial_port.hpp
+    /// compares at every run. Each loss is marked where it fell by the
+    /// receive ring (GapRing) and the count moves when the consumer
+    /// crosses the mark: an entry dropped for its flags or refused by a
+    /// full ring, at its place; an overrun's, behind the FIFO's depth of
+    /// entries it kept; under a receive engine an overrun's where the ring's producer
+    /// stood when the vector saw it, ahead of the bytes still in flight.
+    static uint32_t rx_skips() { return m_rx.skips(); }
     static void clear_errors() {
         m_rx_overruns = 0;
         m_frame_errors = 0;
@@ -1156,8 +1177,9 @@ private:
     static constexpr uint32_t rx_level_entries = Chip::fifo_depth / 2u;
 
     /// One receive FIFO entry into the ring, its own error flags
-    /// attributed to it: a framed, parity-failed or break entry counted
-    /// and dropped.
+    /// attributed to it: a framed, parity-failed or break entry counted,
+    /// dropped and marked a gap where it fell. An entry the full ring
+    /// refuses is counted here and marked by receive(), once.
     [[gnu::always_inline]] static void take(uint32_t entry) {
         if ((entry & UartDataError::dropped) != 0u) [[unlikely]] {
             if ((entry & UartDataError::frame) != 0u) {
@@ -1169,6 +1191,7 @@ private:
             if ((entry & UartDataError::brk) != 0u) {
                 m_break_errors = m_break_errors + 1;
             }
+            m_rx.lost();
             return;
         }
         if (!m_rx.push(static_cast<uint8_t>(entry))) [[unlikely]] {
@@ -1187,8 +1210,28 @@ private:
     /// character where the flag test made two, the loads the per-byte
     /// cost is made of on this block. The rest, and an entry for the
     /// time-out alone, go with the flag tested before every read.
+    ///
+    /// EVERY LOSS IS A GAP THE RING MARKS. An entry the full ring refuses
+    /// is marked once, behind the drain: nothing consumes while a handler
+    /// runs, so a ring that refuses one entry refuses every later one of
+    /// the entry, all lost at the same place - and the mark stays off the
+    /// per-entry path. An overrun is marked behind the FIFO's content
+    /// (overrun_drain()).
     [[gnu::always_inline]] static bool receive(bool level) {
         const bool was_empty = m_rx.empty();
+        const uint8_t refused = m_rx_overruns;
+        // THE OVERRUN IS READ FROM UARTRSR, NOT FROM THE ENTRIES: the OE
+        // bit of a FIFO entry is a LIVE condition (cleared once there is
+        // an empty space in the FIFO) - the first read makes the space,
+        // so the entries never carry it (measured); the status
+        // register's OE is sticky until written, and one overrun event
+        // is one count, however many frames it swallowed. It is read
+        // BEFORE the drain: an overrun standing at the entry fell with the
+        // FIFO full, and nothing has read it since.
+        if ((U::receive_status() & UartReceiveStatus::overrun) != 0u) [[unlikely]] {
+            overrun_drain();
+            level = false;   // the FIFO may hold less than the level now
+        }
         if (level) {
             for (uint32_t i = 0; i < rx_level_entries; ++i) {
                 take(U::read_data());
@@ -1197,18 +1240,27 @@ private:
         while (!U::rx_empty()) {
             take(U::read_data());
         }
-        // THE OVERRUN IS READ FROM UARTRSR, NOT FROM THE ENTRIES: the OE
-        // bit of a FIFO entry is a LIVE condition (cleared once there is
-        // an empty space in the FIFO) - the first read makes the space,
-        // so the entries never carry it (measured); the status
-        // register's OE is sticky until written, and one overrun event
-        // is one count, however many frames it swallowed.
-        if ((U::receive_status() & UartReceiveStatus::overrun) != 0u) {
-            m_hw_overruns = m_hw_overruns + 1;
-            U::clear_receive_status();
+        if (m_rx_overruns != refused) [[unlikely]] {
+            m_rx.lost(static_cast<uint8_t>(m_rx_overruns - refused));
         }
         U::clear_pending(UartInterrupt::rx_timeout);
         return was_empty && !m_rx.empty();
+    }
+
+    /// An overrun found at a receive entry: it fell when the FIFO was
+    /// full, and this handler - the FIFO's one reader - has read nothing
+    /// since, so the FIFO's depth of entries at its head came before the
+    /// frames it swallowed (measured: 48 frames into the 32-deep FIFO with
+    /// the line masked deliver exactly the first 32, in order). Those are
+    /// taken, the gap marked behind them, and the status cleared; the
+    /// drain goes on with what landed after.
+    [[gnu::noinline]] static void overrun_drain() {
+        m_hw_overruns = m_hw_overruns + 1;
+        U::clear_receive_status();
+        for (uint32_t i = 0; i < Chip::fifo_depth && !U::rx_empty(); ++i) {
+            take(U::read_data());
+        }
+        m_rx.lost();
     }
 
     /// Refill the FIFO from the ring on the transmit edge, a contiguous

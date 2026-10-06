@@ -59,17 +59,35 @@
  * Ring, whose consume() answers nothing, the release cannot refuse and
  * none of that is compiled.
  *
- * A SKIP BETWEEN TWO RUNS IS SEEN. The same ring skips to its producer
- * whenever a look finds a lap unread - in the drain's own read_span(), or
- * in a count() asked between two drains - and the run handed out next is
- * the stream after a gap, which the line begun in an assembler would
- * otherwise swallow as its continuation. So such a transport also reports
- * the ring's skip epoch (util/stream.hpp's SkippingSource, rx_skips()),
- * the drain compares it at every run, and a change ends the line begun as
- * torn - counted in torn_lines() - and skips the stream to its next end of
- * line. One load and one compare a run, nothing a byte; a transport whose
- * release can refuse and that does not report its skips is refused at
- * compile time, and over a Ring nothing of it is compiled.
+ * A SKIP BETWEEN TWO RUNS IS SEEN. The stream a ring hands out can jump:
+ * a HardwareRing skips to its producer whenever a look finds a lap unread
+ * - in the drain's own read_span(), or in a count() asked between two
+ * drains - and a receive interrupt drops a byte that finds its ring full,
+ * or that the receiver flagged as corrupt. The run handed out after such
+ * a gap is the stream after it, which the line begun in an assembler
+ * would otherwise swallow as its continuation. So a transport reports the
+ * gaps in its stream (util/stream.hpp's SkippingSource, rx_skips(), never
+ * cleared), the drain compares the count at every run - over EVERY
+ * transport that has it, whether its release can refuse or not - and a
+ * change ends the line begun as torn, counted in torn_lines(), and skips
+ * the stream to its next end of line. One load and one compare a run,
+ * nothing a byte. The count moves exactly at the gap where the ring
+ * knows where each one falls - a HardwareRing's skip, a GapRing's mark
+ * (util/ring.hpp), which hands out no run across a gap - so the line torn
+ * is the one the gap cut. A transport whose release can refuse and that
+ * does not report its skips is refused at compile time; over a transport
+ * without the verb (a test capture, a simulated port) nothing of it is
+ * compiled.
+ *
+ * A SILENCE ENDS THE SKIP. A gap can take the cut line's own end of line,
+ * and then the next end of line is a later, whole line's. So where the
+ * drain found the ring empty after the gap and the next run comes
+ * quiet_ticks (100 ms) or more after that look, the line is taken to have
+ * ended in the silence, and the run is drained as a line's beginning.
+ * Undecidable still: the next line close behind a gap that took a line's
+ * end (skipped as the cut line's tail), a sender pausing mid-line longer
+ * than the silence after a gap took its end, and a gap landing on a
+ * line's start (that whole line dropped with the fragment expected).
  *
  * The contract assumes a byte stream whose edge is told once until the
  * ring is found empty - the transport's, whichever event of its silicon
@@ -124,6 +142,7 @@ public:
         if constexpr (SkippingSource<Transport>) {
             // The stream starts here: a skip before it tears nothing.
             seen_skips_ = static_cast<uint32_t>(Transport::rx_skips());
+            quiet_ = false;
         }
         Base::start(&running);
     }
@@ -136,12 +155,12 @@ public:
                                     assembler_[1].overflow_count());
     }
 
-    /// Lines dropped because the ring behind the transport (a HardwareRing)
-    /// lost bytes under them: the lines completed from a run written over
-    /// while it was read, which the transport refused at its release, and
-    /// the line begun in the assemblers when such a run came or when the
-    /// ring skipped between two runs. Always zero over a transport whose
-    /// release cannot refuse.
+    /// Lines dropped because the ring behind the transport lost bytes
+    /// under them: the lines completed from a run written over while it
+    /// was read, which the transport refused at its release (a
+    /// HardwareRing), and the line begun in the assemblers when such a run
+    /// came or when the stream had a gap between two runs (rx_skips()
+    /// moved). Always zero over a transport that reports no gaps.
     static uint32_t torn_lines() { return torn_lines_; }
 
 private:
@@ -174,17 +193,32 @@ private:
             while (in_flight_ < 2) {
                 const std::span<const uint8_t> run = Transport::read_span();
                 if (run.empty()) {
+                    if constexpr (SkippingSource<Transport>) {
+                        if (resync_ || static_cast<uint32_t>(Transport::rx_skips()) != seen_skips_)
+                            [[unlikely]] {
+                            found_quiet();
+                        }
+                    }
                     break;
                 }
-                const uint8_t* const first = run.data();
+                const uint8_t* first = run.data();
                 const uint8_t* const end = first + run.size();
-                const uint8_t* next = first;
-                if constexpr (release_can_refuse) {
-                    see_skips();
-                    if (resync_) {
-                        next = skip_to_line_end(next, end);
+                if constexpr (SkippingSource<Transport>) {
+                    // A gap since the last run, or a resync under way: the
+                    // bytes up to the next end of line are skipped and
+                    // released as a run of their own, and this run is
+                    // done - the drain goes on from a fresh one, so the
+                    // byte loop below starts at its run's first byte or
+                    // not at all (a second back edge to the loop's head
+                    // costs the Cortex-M0+ three instructions a byte).
+                    const uint32_t skips = static_cast<uint32_t>(Transport::rx_skips());
+                    if (skips != seen_skips_ || resync_) [[unlikely]] {
+                        if (after_gap(skips, first, end)) {
+                            first = end;
+                        }
                     }
                 }
+                const uint8_t* next = first;
                 const uint8_t active_at_run = active_;
                 char* lines[2];
                 uint8_t held = 0;
@@ -255,34 +289,83 @@ private:
         }
     }
 
-    /// The ring's skip epoch against the one the drain saw last: a skip
-    /// since then, wherever it was made, put a gap between the bytes the
-    /// assemblers hold and the run in hand. The line begun - always in
-    /// the active assembler, which lends nothing - is ended and counted,
-    /// and the stream is skipped to its next end of line, the bytes before
-    /// it being the end of a line whose beginning the ring skipped. A
-    /// release refused moves the epoch too, after tear() has done the
-    /// same: then this finds nothing begun and changes nothing.
-    [[gnu::always_inline]] static void see_skips() {
-        const uint32_t skips = static_cast<uint32_t>(Transport::rx_skips());
+    /// The stream had a gap since the last run, or the drain is still
+    /// skipping to a line's end: `skips` is the epoch read for the run in
+    /// hand, [first, end) the run. An epoch moved since the drain saw it
+    /// last put a gap between the bytes the assemblers hold and the run:
+    /// the line begun - always in the active assembler, which lends
+    /// nothing - is ended and counted (seen()), and the stream is skipped
+    /// to its next end of line, the bytes before it being the end of a
+    /// line whose beginning the gap took. The bytes skipped - up to and
+    /// with the run's first end of line, or all of it - are released here
+    /// as a run of their own (a release refused tears as the drain's
+    /// does), and true says this run is done: the drain goes on from a
+    /// fresh one.
+    ///
+    /// A SILENCE ENDS THE SKIP. The gap may have taken the cut line's own
+    /// end of line, and then the next one is a later, whole line's. So
+    /// where the drain found the ring empty after the gap (found_quiet())
+    /// and this run arrived `quiet_ticks` or more after that look, the line
+    /// is taken to have ended in the silence: the skip ends, false is
+    /// returned, and the run is drained as the beginning of a line.
+    ///
+    /// OUT OF LINE, AND THE WHOLE OF IT: the rare path. Inline - or with
+    /// its release beside the drain's - its registers and its call crowd
+    /// the byte loop's on the Cortex-M0+ (two to three instructions a byte,
+    /// counted in the release listing); the per-run test is all a run
+    /// without a gap pays.
+    [[gnu::noinline]] static bool after_gap(uint32_t skips, const uint8_t* const first,
+                                            const uint8_t* const end) {
         if (skips != seen_skips_) {
-            seen_skips_ = skips;
-            torn_lines_ = torn_lines_ + end_begun_line(active_);
-            resync_ = true;
+            seen(skips);
+        } else if (quiet_ && static_cast<uint32_t>(P::now() - quiet_at_) >= quiet_ticks) {
+            resync_ = false;
+            quiet_ = false;
+            return false;
         }
-    }
-
-    /// The bytes before the next end of line, and the end of line itself,
-    /// skipped; the line after it is the first whole one.
-    static const uint8_t* skip_to_line_end(const uint8_t* next, const uint8_t* end) {
+        quiet_ = false;   // bytes came: only a later empty look is a silence
+        const uint8_t* next = first;
         while (next != end) {
             if (*next++ == '\n') {
                 resync_ = false;
                 break;
             }
         }
-        return next;
+        if (!release(static_cast<uint32_t>(next - first))) {
+            if constexpr (release_can_refuse) {
+                tear(0u, active_);
+            }
+        }
+        return true;
     }
+
+    /// A gap seen: the epoch recorded, the line begun ended and counted,
+    /// the skip to the next end of line armed.
+    static void seen(uint32_t skips) {
+        seen_skips_ = skips;
+        torn_lines_ = torn_lines_ + end_begun_line(active_);
+        resync_ = true;
+    }
+
+    /// The drain found the ring empty with a skip under way, or with a gap
+    /// crossed by that very look: the gap seen now, and the time of the
+    /// look kept - the start of a silence, if the next run is long coming.
+    [[gnu::noinline]] static void found_quiet() {
+        const uint32_t skips = static_cast<uint32_t>(Transport::rx_skips());
+        if (skips != seen_skips_) {
+            seen(skips);
+        }
+        quiet_at_ = P::now();
+        quiet_ = true;
+    }
+
+    /// The silence that ends a skip: 100 ms, longer than a USB serial
+    /// adapter holds a short packet back (an FTDI's default latency timer
+    /// is 16 ms) or splits a burst over its frames, and shorter than a
+    /// person or a script waits before the next command. One tick at
+    /// least.
+    static constexpr uint32_t quiet_ticks =
+        P::ticks_per_second / 10u != 0u ? P::ticks_per_second / 10u : 1u;
 
     /// A run refused at its release: the bytes the assemblers took from it
     /// are not the stream, and the ring has skipped to its producer. So
@@ -318,6 +401,8 @@ private:
     static inline bool resync_ = false;        // skip to the next end of line
     static inline uint32_t torn_lines_ = 0;
     static inline uint32_t seen_skips_ = 0;    // the ring's skip epoch, as last seen
+    static inline bool quiet_ = false;         // the ring found empty during a skip ...
+    static inline uint32_t quiet_at_ = 0;      // ... at this tick
 };
 
 } // namespace brio

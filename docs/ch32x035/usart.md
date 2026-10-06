@@ -165,7 +165,10 @@ true on the edge from an empty receive ring), `write_byte` and
 `write_bulk` (a run: as many as fit, its first byte pushed and TXEIE
 armed before the rest is copied, armed again behind it), `read_byte` and
 `read_span`/`consume` (the receive run in place), `tx_idle()`,
-`rx_pending()`; the counters
+`rx_pending()`, `rx_skips()` (every byte the receive ring will not
+deliver, never cleared - util/serial_port.hpp's epoch: the GapRing's
+crossings of the gaps `isr()` marks where it dropped a flagged byte or a
+full ring refused one); the counters
 `rx_overruns`, `hw_overruns`, `frame_errors`, `noise_errors`,
 `parity_errors` (saturating) and `clear_errors()`; `baud()`,
 `actual_baud(hclk)`, `divisor_for`, `min_hz_for`, `can_baud`;

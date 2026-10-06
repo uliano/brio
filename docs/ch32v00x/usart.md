@@ -192,9 +192,12 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   `consume()` (the receive run in place; with a receive engine
   `consume()` answers whether the run was intact), `rx_pending()`,
   `tx_idle()` (THE WIRE IS IDLE: the ring empty, no block in flight and
-  TC set, TC cleared as every transmit block starts), `rx_skips()` (the
-  receive ring's skips, never cleared - util/serial_port.hpp's epoch;
-  zero without an engine), the counters (`rx_overruns()` - a byte a full
+  TC set, TC cleared as every transmit block starts), `rx_skips()` (every
+  byte the receive ring will not deliver, never cleared -
+  util/serial_port.hpp's epoch: without an engine the GapRing's crossings
+  of the gaps `isr()` marks where it dropped a flagged byte or a full ring
+  refused one; with one the view's skips plus an overrun and a restart
+  after a transfer error), the counters (`rx_overruns()` - a byte a full
   ring refused, or with an engine a lap or a held run the ring skipped -,
   `frame_errors()`, `parity_errors()`, `noise_errors()`, `hw_overruns()`,
   `clear_errors()`), `rebase()`, `set_baud(hz, baud)` (the link moved

@@ -849,14 +849,15 @@ class Uart {
     /// there is a receive engine, so an engineless image has none of it.
     static inline uint8_t m_rx_storage[rx_size]{};
 
-    /// THE RECEIVE RING: the Ring the RXNE handler pushes into, or - with
+    /// THE RECEIVE RING: the GapRing the RXNE handler pushes into, marking
+    /// where it lost a byte (util/ring.hpp), or - with
     /// a receive engine - the view of the stream's own storage whose
     /// producer index is the engine (util/ring.hpp's HardwareRing over a
     /// RingCounter). A member template, so the view is named, and the
     /// storage with it, only on the branch that has the engine.
     template <bool hardware, typename Unused = void>
     struct RxRingOf {
-        using type = Ring<uint8_t, rx_size, Stm32f4Platform<>>;
+        using type = GapRing<uint8_t, rx_size, Stm32f4Platform<>>;
     };
     template <typename Unused>
     struct RxRingOf<true, Unused> {
@@ -873,6 +874,11 @@ class Uart {
     static inline volatile uint8_t m_noise_errors = 0;  // NE: byte kept, line suspect
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
     static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
+    // Under a receive engine, the bytes the stream lost beside the view's
+    // own skips - one an ORE, one a restart after a transfer error (an FE
+    // or PE frame is delivered: the stream moves it) - never cleared:
+    // rx_skips() is the view's skips plus this.
+    static inline volatile uint32_t m_rx_lost = 0;
     static inline uint32_t m_baud = 0;                  // for rebase()
     // The receive engine's two flags. `m_rx_drained`: the consumer has
     // found the ring empty since harvest() last reported the edge - what
@@ -1208,13 +1214,25 @@ public:
                     m_hw_overruns = m_hw_overruns + 1;
                 }
             }
-            if ((st & UsartFlag::rxne) != 0u && (err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
-                const bool was_empty = m_rx.empty();
-                if (m_rx.push(b)) {
-                    edge = was_empty;
+            // EVERY BYTE LOST IS A GAP MARKED WHERE IT FELL (the receive
+            // ring's lost()): one a full ring refuses or FE/PE drops, at
+            // its place; an overrun's behind the byte DR held, which
+            // survives it while the shift register's are lost (30.6.1).
+            if ((st & UsartFlag::rxne) != 0u) {
+                if ((err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
+                    const bool was_empty = m_rx.empty();
+                    if (m_rx.push(b)) {
+                        edge = was_empty;
+                    } else {
+                        m_rx_overruns = m_rx_overruns + 1;
+                        m_rx.lost();
+                    }
                 } else {
-                    m_rx_overruns = m_rx_overruns + 1;
+                    m_rx.lost();
                 }
+            }
+            if ((err & UsartFlag::ore) != 0u) {
+                m_rx.lost();
             }
         }
 
@@ -1390,15 +1408,23 @@ public:
 
     static auto rx_pending() { return m_rx.count(); }
 
-    /// Every skip the receive ring has made, never cleared (util/ring.hpp's
-    /// HardwareRing::skips()): the epoch util/serial_port.hpp compares
-    /// across its runs to learn that the stream jumped between two of
-    /// them. Zero, and free, without a receive engine - a Ring never skips.
+    /// Every byte the line carried that the receive ring will not deliver,
+    /// since the program started, NEVER CLEARED (modulo 2^32) -
+    /// util/stream.hpp's SkippingSource, the epoch util/serial_port.hpp
+    /// compares at every run. Without an engine: each byte a full ring
+    /// refused or FE/PE dropped, and an overrun's (one at least), each
+    /// marked where it fell by the GapRing, the count moving when the
+    /// consumer crosses the mark. With one: the view's skips (a lap
+    /// missed, a held run refused) plus m_rx_lost - an ORE, a restart after
+    /// a transfer error - counted when the vector or the look sees them,
+    /// so the line torn is the one begun when the consumer next looks,
+    /// which is the one the loss cut when the consumer keeps up with its
+    /// edges.
     static uint32_t rx_skips() {
         if constexpr (has_rx_engine) {
-            return m_rx.skips();
+            return m_rx.skips() + m_rx_lost;
         } else {
-            return 0u;
+            return m_rx.skips();
         }
     }
 
@@ -1516,6 +1542,9 @@ private:
     /// moment. Main context: the view is the consumer's.
     static void arm_rx() {
         if constexpr (has_rx_engine) {
+            if (m_rx_restart) {
+                m_rx_lost = m_rx_lost + 1u;   // the unread bytes went with the stopped stream
+            }
             m_rx_restart = false;
             (void)RxEngine::arm(S::data_address(), std::span<uint8_t>(m_rx_storage),
                                 DmaPriority::low, true);
@@ -1560,6 +1589,7 @@ private:
     [[gnu::always_inline]] static void count_errors(uint32_t err) {
         if ((err & UsartFlag::ore) != 0u) {
             m_hw_overruns = m_hw_overruns + 1;
+            m_rx_lost = m_rx_lost + 1u;
         }
         if ((err & UsartFlag::fe) != 0u) {
             m_frame_errors = m_frame_errors + 1;

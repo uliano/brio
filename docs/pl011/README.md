@@ -202,6 +202,21 @@ sixteen characters plus the time-out's, the tail of a burst delivered 32
 bit periods - 3.2 frames - after its last stop bit: the block's own
 time-out, which nothing programs.
 
+EVERY LOSS IS A GAP THE RING MARKS (util/ring.hpp's `GapRing`), and
+`rx_skips()` counts every byte the receive ring will not deliver, never
+cleared - util/serial_port.hpp's epoch, moving when the consumer crosses
+a mark: an entry dropped for its flags at its place; the entries a full
+ring refuses counted in the drain and marked once behind it, since a
+ring that refuses one entry of a drain refuses the rest; and an overrun
+behind the FIFO's depth of entries - read from `UARTRSR` BEFORE the
+drain, it fell with the FIFO full and the handler, its one reader, has
+read nothing since, so the 32 entries at its head came before the frames
+it swallowed (measured: 48 frames into the masked FIFO deliver exactly
+the first 32, in order).
+Under a receive engine an overrun is marked where the ring's producer
+stands when the error vector sees it, ahead of the run in flight and of
+the FIFO's content that precede the loss.
+
 UNDER A RECEIVE ENGINE NO VECTOR ENDS A BURST. The time-out needs a
 character waiting in the FIFO, and the channel's single request moves
 each one as it lands: measured on both families, 17 characters taken by
@@ -282,9 +297,16 @@ and none is written into a full FIFO; and a receive run's completion
 answers the ring's empty -> non-empty edge from `dma_isr()`, a transmit
 completion none.
 
-What the fake does NOT model is the receive side: nothing fills it, so
-the receive path has nothing to read there and stays the bench's to
-judge.
+The fake models THE RECEIVE FIFO as far as the interrupt receiver reads
+it: the wire lands a frame with its error bits as an entry, a read of
+`UARTDR` takes the oldest, `RXFE`/`RXFF` and `RXRIS` (the receive level)
+follow the entries, and a frame on a full FIFO is lost with `UARTRSR`'s
+OE and `OERIS` set; the time-out is raised by hand. Over it the suite
+drains a burst by the level, marks a framed entry a gap where it fell, a
+full ring's refusals one gap behind what it kept, and an overrun behind
+the 32 entries the full FIFO kept - the stream resuming after each. What it does
+not model is time: the time-out's 32 bit periods, and the engine's view
+of the FIFO, stay the bench's to judge.
 
 ## Not covered yet
 

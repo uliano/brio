@@ -30,10 +30,15 @@
  * by UARTICR, never set by the level alone. UARTICR clears what it is
  * written, and UARTMIS is kept equal to UARTRIS under UARTIMSC. The
  * shifter is not modelled: a byte leaves the FIFO when the wire takes
- * it. The RECEIVE side is not modelled at all - nothing ever fills it,
- * so the receive path has nothing to read; a test raises a receive
- * cause by hand when it wants an entry for the receiver alone. A test
- * that wants a received byte wants silicon.
+ * it. THE RECEIVE FIFO IS MODELLED TOO, as far as a transport's receive
+ * path reads it: the wire is a verb the test calls (`receive<i>()` lands
+ * a frame, its error bits with it, as an entry), a read of UARTDR takes
+ * the oldest entry, UARTFR's RXFE and RXFF follow the entries, RXRIS
+ * stands while the FIFO holds UARTIFLS's receive level or more, and a
+ * frame landing on a full FIFO is lost and sets UARTRSR's OE and OERIS -
+ * the overrun as the transport reads it (UARTRSR, never an entry). The
+ * receive time-out is raised by hand (`raise<i>()`): there is no time
+ * here.
  *
  * WHAT IT RECORDS, beside the registers: the order of the observable
  * acts of a bring-up - which pad was claimed when, and when UARTCR's
@@ -55,12 +60,13 @@
 namespace brio {
 
 /// UARTDR: a word in memory whose WRITE is an entry into the transmit
-/// FIFO (defined below the chip, which owns the FIFO). A read gives back
-/// the last word written - there is no receive side to read from.
+/// FIFO and whose READ takes the oldest entry of the receive FIFO
+/// (defined below the chip, which owns the FIFOs); `last` keeps the last
+/// word written.
 struct SimPl011Data {
     volatile uint32_t last;
     SimPl011Data& operator=(uint32_t v);
-    operator uint32_t() const { return last; }
+    operator uint32_t() const;
 };
 
 /// UARTICR: a write clears the UARTRIS bits it names.
@@ -116,6 +122,25 @@ struct SimPl011Interrupts {
     static void reset() { line_enabled[0] = line_enabled[1] = false; }
 
     static constexpr uint8_t slot(SimPl011Line line) { return static_cast<uint8_t>(line); }
+};
+
+/// The receive FIFO of each instance: its entries - a byte and its error
+/// bits, as UARTDR reads them - and the frames a full FIFO lost.
+struct SimPl011RxFifo {
+    SimPl011RxFifo() = delete;
+
+    static constexpr uint8_t depth = 32;
+
+    static inline uint16_t entry[2][depth]{};
+    static inline uint8_t head[2]{};       ///< the oldest entry
+    static inline uint8_t count[2]{};      ///< entries waiting for a read
+    static inline uint32_t lost[2]{};      ///< frames that landed on a full FIFO
+
+    static void reset(uint8_t i) {
+        head[i] = 0;
+        count[i] = 0;
+        lost[i] = 0;
+    }
 };
 
 /// The transmit FIFO of each instance: its entries, and what crossed it.
@@ -237,13 +262,14 @@ struct SimPl011 {
     template <uint8_t i>
     static constexpr Irq irq() { return i == 0 ? SimPl011Line::uart0 : SimPl011Line::uart1; }
 
-    static_assert(fifo_depth == SimPl011TxFifo::depth);
+    static_assert(fifo_depth == SimPl011TxFifo::depth && fifo_depth == SimPl011RxFifo::depth);
 
     template <uint8_t i>
     static bool reset() {
         block[i] = Regs{};
         block[i].UARTFR = flag_reset;
         SimPl011TxFifo::reset(i);
+        SimPl011RxFifo::reset(i);
         SimPl011Bench::held[i] = false;
         SimPl011Bench::resets = SimPl011Bench::resets + 1u;
         return true;
@@ -313,6 +339,7 @@ struct SimPl011 {
             block[i] = Regs{};
             block[i].UARTFR = flag_reset;
             SimPl011TxFifo::reset(i);
+            SimPl011RxFifo::reset(i);
         }
         SimPl011Bench::reset();
         SimPl011Interrupts::reset();
@@ -344,12 +371,51 @@ struct SimPl011 {
         return b;
     }
 
-    /// A receive cause raised by hand (the receive side is not modelled):
-    /// what the handler sees on an entry for the receiver alone.
+    /// A cause raised by hand - the receive time-out, which needs time,
+    /// or an error interrupt: what the handler sees on an entry for it.
     template <uint8_t i>
     static void raise(uint32_t bits) {
         block[i].UARTRIS = block[i].UARTRIS | bits;
         settle(i);
+    }
+
+    /// THE WIRE lands one frame on instance i: an entry of the receive
+    /// FIFO, its error bits (UartDataError) beside the byte - or, the FIFO
+    /// full, a frame lost: UARTRSR's OE and OERIS set (the PL011 TRM's
+    /// overrun), no entry.
+    template <uint8_t i>
+    static void receive(uint8_t byte, uint32_t errors = 0u) {
+        if (SimPl011RxFifo::count[i] == fifo_depth) {
+            SimPl011RxFifo::lost[i] = SimPl011RxFifo::lost[i] + 1u;
+            block[i].UARTRSR = block[i].UARTRSR | UartReceiveStatus::overrun;
+            block[i].UARTRIS = block[i].UARTRIS | UartInterrupt::overrun;
+            settle(i);
+            return;
+        }
+        const uint8_t tail =
+            static_cast<uint8_t>((SimPl011RxFifo::head[i] + SimPl011RxFifo::count[i]) % fifo_depth);
+        SimPl011RxFifo::entry[i][tail] = static_cast<uint16_t>(byte | (errors & 0xF00u));
+        SimPl011RxFifo::count[i] = static_cast<uint8_t>(SimPl011RxFifo::count[i] + 1u);
+        settle(i);
+    }
+
+    /// A read of UARTDR: the oldest receive entry, or 0 from an empty FIFO.
+    static uint32_t take_entry(uint8_t i) {
+        if (SimPl011RxFifo::count[i] == 0u) {
+            return 0u;
+        }
+        const uint16_t e = SimPl011RxFifo::entry[i][SimPl011RxFifo::head[i]];
+        SimPl011RxFifo::head[i] = static_cast<uint8_t>((SimPl011RxFifo::head[i] + 1u) % fifo_depth);
+        SimPl011RxFifo::count[i] = static_cast<uint8_t>(SimPl011RxFifo::count[i] - 1u);
+        settle(i);
+        return e;
+    }
+
+    /// Where RXIFLSEL puts the receive level, in entries.
+    static uint8_t rx_level(uint8_t i) {
+        constexpr uint8_t eighths[] = {1, 2, 4, 6, 7};
+        const uint32_t sel = (block[i].UARTIFLS & UartTriggerField::rx_bits) >> UartTriggerField::rx_lsb;
+        return static_cast<uint8_t>(fifo_depth * eighths[sel < 5u ? sel : 2u] / 8u);
     }
 
     /// The line as the interrupt controller sees it: enabled, and some
@@ -367,15 +433,24 @@ struct SimPl011 {
         return static_cast<uint8_t>(fifo_depth * eighths[sel < 5u ? sel : 2u] / 8u);
     }
 
-    /// UARTFR's three transmit flags from the entries, UARTMIS from UARTRIS
-    /// under UARTIMSC.
+    /// UARTFR's transmit and receive flags from the entries, RXRIS from
+    /// the receive level, UARTMIS from UARTRIS under UARTIMSC.
     static void settle(uint8_t i) {
-        constexpr uint32_t tx_flags = UartFlag::tx_full | UartFlag::tx_empty | UartFlag::busy;
+        constexpr uint32_t fifo_flags = UartFlag::tx_full | UartFlag::tx_empty | UartFlag::busy |
+                                        UartFlag::rx_full | UartFlag::rx_empty;
         const uint8_t n = SimPl011TxFifo::count[i];
-        uint32_t fr = block[i].UARTFR & ~tx_flags;
+        const uint8_t r = SimPl011RxFifo::count[i];
+        uint32_t fr = block[i].UARTFR & ~fifo_flags;
         if (n == fifo_depth) { fr |= UartFlag::tx_full; }
         if (n == 0u) { fr |= UartFlag::tx_empty; } else { fr |= UartFlag::busy; }
+        if (r == fifo_depth) { fr |= UartFlag::rx_full; }
+        if (r == 0u) { fr |= UartFlag::rx_empty; }
         block[i].UARTFR = fr;
+        if (r >= rx_level(i)) {
+            block[i].UARTRIS = block[i].UARTRIS | UartInterrupt::rx;
+        } else {
+            block[i].UARTRIS = block[i].UARTRIS & ~UartInterrupt::rx;
+        }
         block[i].UARTMIS = block[i].UARTRIS & block[i].UARTIMSC;
     }
     static void refresh_all() {
@@ -418,6 +493,10 @@ inline SimPl011Data& SimPl011Data::operator=(uint32_t v) {
     last = v;
     SimPl011::transmit(SimPl011::instance_of(this), static_cast<uint8_t>(v));
     return *this;
+}
+
+inline SimPl011Data::operator uint32_t() const {
+    return SimPl011::take_entry(SimPl011::instance_of(this));
 }
 
 inline SimPl011Clear& SimPl011Clear::operator=(uint32_t mask) {

@@ -1,7 +1,8 @@
 # Ring: the SPSC FIFO
 
-`util/ring.hpp` - `Ring<T, size, P>`, and beside it
-`HardwareRing<storage, Counter>`, the consumer half of a ring whose
+`util/ring.hpp` - `Ring<T, size, P>`; `GapRing<T, size, P>`, a Ring
+whose producer marks where it lost elements ([its own section](#gapring-a-ring-that-says-where-it-lost));
+and `HardwareRing<storage, Counter>`, the consumer half of a ring whose
 producer is the hardware ([its own section](#hardwarering-the-ring-whose-producer-is-the-hardware)).
 
 ## What it is for
@@ -185,6 +186,81 @@ vector 83 against 113, prologue and epilogue included (the DRE vector
 saves six registers lock-free and seven guarded; the RXC vector's
 sixteen are the kernel's post on the empty -> non-empty edge); 156
 bytes of flash; RAM identical.
+
+## GapRing: a ring that says where it lost
+
+### What it is for
+
+A receive interrupt loses bytes on rare paths - one that finds the ring
+full, one the receiver flags as framed or failing its parity, the frames
+a hardware overrun swallowed - and a consumer that carries state from
+one byte to the next (SerialPort's line begun) must learn WHERE the
+stream jumped. A count of the losses does not say: a byte a full ring
+refuses is lost behind everything the ring holds, up to a whole ring
+ahead of the consumer. `GapRing<T, size, P>` is Ring with the place: the
+producer marks each gap on the slot its next element fills, and the
+consumer is handed no run across a gap ([serial.md](serial.md), "The
+count moves where the gap falls").
+
+### The contract
+
+- Every slot carries a GAP BYTE beside its element: how many elements
+  were lost just before the one the slot holds. The producer's verbs are
+  Ring's (`push`, `write_span`/`publish`) and one more for its rare
+  paths, `lost()` - one element lost here - or `lost(n)`, n at once (a
+  drain that counted them): the byte of the free slot its next push will
+  fill is bumped, saturating at 255.
+- The consumer's verbs are Ring's under Ring's names. `read_span()` stops
+  before a slot a gap precedes; with the tail standing on one, it CROSSES
+  its gap first and lends from it; `consume(n)` never passes a gap not
+  crossed; `pop()` is a run of one. `skips()` counts every element lost,
+  NEVER CLEARED (modulo 2^32), and moves at the crossing - so a reader
+  comparing it after each `read_span()` sees it move between the last
+  element before a gap and the first after it. Every gap is kept, however
+  many stand: N elements with K lost deliver the other N - K, in order.
+- SPSC as Ring is: a slot's gap byte belongs to whoever owns the slot -
+  the producer writes it on its free slot and publishes it with the
+  element, the consumer reads and clears it on a slot of its own. The one
+  exception is a loss with nothing after it yet on an EMPTY ring, whose
+  gap sits on the producer's free slot: the consumer crosses it at its
+  next look under `P::CriticalSection`, the decision only.
+- Whether any gap stands is two counts of gap slots, the producer's marks
+  against the consumer's crossings - wide enough for a ring whose every
+  slot holds a gap (a byte up to 255 slots), and read under the guard
+  where that is wider than the platform's atomic width. The run is taken
+  BEFORE they are compared: a gap marked after the run's head was read
+  lies at or beyond that head, one marked before it is seen by the look
+  that follows - no run lent crosses a gap however the producer
+  interleaves.
+- The producer's tests are against immediates, never zero: on the AVR a
+  test against zero takes the zero register, which a receive vector that
+  did not use it then saves and restores at every entry. A new gap slot
+  is told by its byte BECOMING one.
+
+### What it costs
+
+The producer: nothing on `push()`; a load, a test and two or three
+stores a loss. The consumer: one load pair and a branch in `read_span()`
+and in `consume()` on the common path; only while a gap stands does it
+read the run's gap bytes, a byte apiece, out of line, returning a scalar
+- a span returned from a call travels through memory on a 32-bit core,
+and merged with the common path's it was copied there by a call to
+`memcpy` (seen in the STM32G0's listing, and gone). The memory: a byte a
+slot. Counted on the consoles in [serial.md](serial.md).
+
+### Testing
+
+`test/test_ring`: a ring with no loss behaves as Ring and its epoch stays;
+a byte lost to a full ring is a gap behind everything queued, crossed
+only when the tail reaches it; a discard into an empty ring crossed at
+the next look; `consume()` clamped at a gap and `pop()` crossing it;
+every gap kept when a second stands before the first is crossed; a
+stream with one loss in four delivering the other three in order, each
+gap seen at the run it opens; `lost(n)`; `clear()` forgetting the gaps
+and keeping the epoch; the guarded path and the saturating gap byte on
+a byte-atomic platform; and a random lossy numbered stream in which
+every run lent is consecutive, every jump is seen at the run it opens
+and only there, and every element sent is delivered or counted.
 
 ## HardwareRing: the ring whose producer is the hardware
 

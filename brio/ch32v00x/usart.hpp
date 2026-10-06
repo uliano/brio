@@ -655,8 +655,9 @@ struct UartOptions {
  * can be shared with a handler bare (atomic_width) or wants a guard.
  */
 /**
- * The receive ring a transport keeps: Ring, which the interrupt receiver
- * pushes into, without a receive engine; with one, the CONSUMER HALF of
+ * The receive ring a transport keeps: a GapRing, which the interrupt
+ * receiver pushes into and marks where it lost a byte, without a receive
+ * engine; with one, the CONSUMER HALF of
  * the ring the channel writes - util/ring.hpp's HardwareRing over a
  * storage array the transport owns (keyed by the transport's type), the
  * engine its RingCounter. A partial specialization, so that HardwareRing
@@ -664,7 +665,7 @@ struct UartOptions {
  */
 template <bool engine, typename Owner, uint16_t size, typename Engine, typename P>
 struct UartRxRing {
-    using type = Ring<uint8_t, size, P>;
+    using type = GapRing<uint8_t, size, P>;
 };
 template <typename Owner, uint16_t size, typename Engine, typename P>
 struct UartRxRing<true, Owner, size, Engine, P> {
@@ -942,17 +943,23 @@ struct Uart {
             }
         } else if ((status & usart_rxne) != 0u) {
             const uint8_t byte = static_cast<uint8_t>(regs().DATAR & 0xFFu);
+            // Every byte lost is a gap the receive ring marks where it
+            // fell (lost()): the flagged byte dropped here - with an
+            // overrun's, lost behind it in the shift register - and one a
+            // full ring refuses.
             if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
                 if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
                 if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
                 if ((status & usart_pe) != 0u) { bump(m_parity_errors); }
                 if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
+                m_rx.lost();
             } else {
                 const bool was_empty = m_rx.empty();
                 if (m_rx.push(byte)) {
                     rx_edge = was_empty;
                 } else {
                     bump(m_rx_overruns);
+                    m_rx.lost();
                 }
             }
         }
@@ -1107,14 +1114,22 @@ struct Uart {
 
     static auto rx_pending() { return m_rx.count(); }
 
-    /// Every skip the receive ring has made, never cleared (util/ring.hpp's
-    /// HardwareRing::skips()): util/serial_port.hpp's epoch. Zero, and
-    /// free, without a receive engine - a Ring never skips.
+    /// Every byte the line carried that the receive ring will not deliver,
+    /// since the program started, NEVER CLEARED (modulo 2^32) -
+    /// util/stream.hpp's SkippingSource, util/serial_port.hpp's epoch.
+    /// Without an engine: each byte the handler dropped for a flag or a
+    /// full ring, and an overrun's, each marked where it fell by the
+    /// GapRing, the count moving when the consumer crosses the mark. With
+    /// one: the view's skips (a lap missed, a held run refused) plus
+    /// m_rx_lost - an overrun, a restart after a transfer error (a framed
+    /// frame is stored: the channel moves it) - counted when the vector or
+    /// the look sees them, so the line torn is the one begun when the
+    /// consumer next looks.
     static uint32_t rx_skips() {
         if constexpr (has_rx_engine) {
-            return m_rx.skips();
+            return m_rx.skips() + m_rx_lost;
         } else {
-            return 0u;
+            return m_rx.skips();
         }
     }
 
@@ -1303,6 +1318,7 @@ private:
             if (RxEngine::idle()) {
                 (void)RxEngine::arm_ring(&regs().DATAR, RxRing::storage, true);
                 m_rx.clear();
+                m_rx_lost = m_rx_lost + 1u;   // the unread bytes went with the stopped lap
             }
         }
     }
@@ -1336,7 +1352,10 @@ private:
         if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
         if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
         if ((status & usart_pe) != 0u) { bump(m_parity_errors); }
-        if ((status & usart_ore) != 0u) { bump(m_hw_overruns); }
+        if ((status & usart_ore) != 0u) {
+            bump(m_hw_overruns);
+            m_rx_lost = m_rx_lost + 1u;
+        }
         m_rx_waiting = true;
         const uint16_t at = static_cast<uint16_t>(RxEngine::remaining());
         m_rx_at = at;
@@ -1391,6 +1410,9 @@ private:
     static inline uint16_t m_noise_errors = 0;
     static inline uint16_t m_hw_overruns = 0;
     static inline uint16_t m_dma_faults = 0;
+    /// Under a receive engine, the bytes lost beside the view's skips (an
+    /// overrun, a restart), never cleared: rx_skips()'s second term.
+    static inline volatile uint32_t m_rx_lost = 0;
 };
 
 } // namespace brio

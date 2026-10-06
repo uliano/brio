@@ -382,8 +382,12 @@ lot-keyed registers of this die already said it is
   `frame_errors()`, `parity_errors()`, `noise_errors()`,
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/
   `set_baud()`/`rebase()`/`divisor_for()`/`can_baud()`/`min_hz_for()`,
-  `release()`, `rx_skips()` (the receive ring's skips, never cleared -
-  util/serial_port.hpp's epoch; zero without an engine), and the engine
+  `release()`, `rx_skips()` (every byte the receive ring will not
+  deliver, never cleared - util/serial_port.hpp's epoch: without an
+  engine the GapRing's crossings of the gaps `isr()` marks where it
+  dropped a flagged byte or a full ring refused one; with one the view's
+  skips plus an overrun and a restart after a transfer error), and the
+  engine
   verbs `dma_isr()` (whose true is the receive edge, as `isr()`'s),
   `harvest()` (the same edge asked from the consumer's side - true when
   the ring holds bytes and the consumer has found it empty since the last

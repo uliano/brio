@@ -195,7 +195,14 @@ a compile-time refusal in the task.
   `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`write_bulk`,
   `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
   place; with a receive engine `consume()` answers whether the run was
-  intact), `rx_skips` (the ring's skip epoch, zero without an engine),
+  intact), `rx_skips` (every byte the receive ring will not deliver,
+  never cleared - util/serial_port.hpp's epoch: without an engine the
+  GapRing's crossings of the gaps `isr()` marks - a byte refused by a full
+  ring or dropped for FE or PE at its place, an overrun's behind the byte
+  RDR kept, or in FIFO mode behind the RXFIFO's depth of characters,
+  which an overrun standing at the entry fell after (33.5.4) -
+  with one the ring's skips plus an ORE, an FE or a PE the channel never
+  took, and a restart after a transfer error),
   `rx_pending`, `tx_idle` (the wire's: nothing queued, no block in
   flight, TC set), `rebase(hz)`,
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,

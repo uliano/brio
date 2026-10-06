@@ -85,17 +85,21 @@ concept SpanSource = requires(uint32_t n) {
     S::consume(n);
 };
 
-/// A SpanSource whose producer can lap it (a HardwareRing behind the
-/// transport), which says so twice: consume() answers whether the run it
-/// released was intact, and rx_skips() is the ring's skip epoch
-/// (HardwareRing::skips(): every skip since the start, never cleared). A
-/// reader that carries state across its runs compares the epoch from one
-/// run to the next, because a ring that skipped between two of them -
-/// in a look the reader did not make - hands out the stream after a gap
-/// as if it followed on.
+/// A SpanSource that reports the GAPS in its stream: rx_skips() counts
+/// every byte the line carried that the receive ring will not deliver -
+/// dropped on a full ring, lost to a hardware overrun, discarded for a
+/// frame or parity error, skipped with a lap the consumer missed - since
+/// the start, NEVER CLEARED (modulo 2^32), and moved on those rare paths
+/// alone. A reader that carries state across its runs compares it from
+/// one run to the next, because a run handed out after a gap is the
+/// stream after it, which would otherwise read as following on. Where
+/// the ring knows where each gap falls (util/ring.hpp's GapRing and
+/// HardwareRing) the count moves exactly between the run before the gap
+/// and the run after it. A transport whose consume() answers bool (a
+/// HardwareRing behind it, whose producer can lap a run while it is held)
+/// must be one of these.
 template <typename S>
-concept SkippingSource = SpanSource<S> && requires(uint32_t n) {
-    { S::consume(n) } -> std::same_as<bool>;
+concept SkippingSource = SpanSource<S> && requires {
     { S::rx_skips() } -> std::convertible_to<uint32_t>;
 };
 

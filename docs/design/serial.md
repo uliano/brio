@@ -139,8 +139,10 @@ byte both ways, `write_bulk`, `write_byte`, `read_span` with `consume`
 and `read_byte`, then `init(clock, baud)`, `rx_pending`, `tx_idle` -
 the wire's, on every family -, `actual_baud`, `rebase`, `clear_errors`
 and the four counters `frame_errors`, `parity_errors`, `rx_overruns`,
-`hw_overruns` - the two rings, and the edge contract above - and four
-more: `set_baud(hz, baud)`, `release`, `can_baud` and `min_hz_for`.
+`hw_overruns` - the two rings, and the edge contract above - and five
+more: `set_baud(hz, baud)`, `release`, `can_baud`, `min_hz_for` and
+`rx_skips`, every byte the receive ring will not deliver, never cleared
+(SerialPort's epoch, below).
 What differs is how the pins are named,
 how many vectors the silicon gives the port, and what each family's
 port has that the others' has not.
@@ -149,11 +151,11 @@ port has that the others' has not.
 |---|---|---|
 | avrdx | `Uart<n, Route, rx_size, tx_size>` (`avrdx/usart.hpp`) | the pins are a PORTMUX `Route`; THREE vectors, so the bodies are `rxc()` (the edge) and `dre()`; `rxc()` takes every frame the two-level buffer holds in one entry, the edge the burst's FIRST byte (chapter 27 has no idle flag, time-out or FIFO level); `tx_idle()` is TXCIF, which the task OWNS - `dre()` clears it behind a run's last byte, and a resource user who clears it makes `tx_idle()` false until the next run ends; `write_bulk()` copies with avr-libc's `memcpy` from two bytes up; `set_baud()` and `release()` as on the other two |
 | samc21 | `Uart<n, UartPads, rx_size, tx_size, TxEngine, RxEngine>` (`samc21/sercom.hpp`) | the pins are SERCOM pads with their pins, one pin for both directions being the loop through the pad (31.6.3.8); ONE vector, `isr()` returns the edge and takes every level of the receive buffer an entry; two OPTIONAL DMA engine slots (`NoDmaEngine` by default, compiling to nothing) with `dma_isr()`, `dma_faults()`, `harvest()`, and `read_bulk()`, the receive run copied out; the receive engine fills half the ring a block, its completion the edge, re-armed in the handler, and a tail shorter than a block the owner's `harvest()`; a transmit engine's block half the ring at most; `tx_idle()` is TXC, which every write to DATA clears, a channel's beat included; the run copy the runtime's `memcpy` from 20 bytes whose two ends share their word alignment, the byte loop otherwise |
-| stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and `read_bulk()`; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); the interrupt receiver PACED where the instance has the FIFO - RXFT at half its depth, one entry for four characters or more - with the burst's tail by the receiver time-out (RTOF, ten bit times) on a FULL USART and by IDLE on an LPUART (`rx_paced`, `rx_tail`); the receive engine's edge from the vectors, IDLE in `isr()` and the ring's half and full marks in `dma_isr()`, its errors entering the vector through EIE and PEIE and every flag cleared through ICR; `tx_idle()` is TC, cleared when a transmit block starts; the run copy the runtime's `memcpy` from 16 bytes whose ends share their word alignment; `rx_skips()` beside the engine's refusing `consume()`; `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
-| ch32v00x | `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32v00x/usart.hpp`) | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s tables), the code a template parameter; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the channels table 8-2 gives the instance (the channel IS the request on this family, an engine elsewhere refused); USART2 refused at code 0, whose TX is the K8 package's reset pin; `UartOptions` as one trailing parameter (the frame, a single wire that is a BUS and not a loop on this silicon, the flow-control pair); BRR is PCLK over the baud, whole - no separate fractional field and no kernel-clock multiplexer; the receive engine CIRCULAR over a `HardwareRing` with `rx_skips()`, and under it the CPU never reads DATAR (the clear by a status read and the channel's next read, as the CH32V203's), the edge the vector's - IDLE or the first frame, and the ring's half and full marks; `tx_idle()` is TC, cleared at every transmit block's start |
-| stm32f4 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` (`stm32f4/usart.hpp`) | the classic SR/DR/BRR block (the CH32V00x's under ST's names): flags cleared by read sequences, the divisor in sixteenths or eighths (OVER8); the pads as `PinSel`s with the datasheet's AF; ten instances at most with a vector each, the U(S)ART name deciding FULL or not; the divisor from the instance's OWN APB clock (`apb_hz`), because the two buses run below HCLK; two OPTIONAL DMA engine slots (`stm32f4/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`) with `dma_isr()`, `dma_faults()` and `harvest()`, named by (controller, STREAM, channel) because a stream is the unit here and a peripheral reaches only the cells the request mapping gives it - checked at compile time against the reserve's per-part-class table and refused on a class whose manual was not read; under a receive engine the CPU NEVER READS DR - the vector's one status read and the stream's next read of DR make each clear, which costs no byte and suppresses the IDLE of a burst of one frame, so the vector takes RXNE once a burst beside the stream to learn the clear finished: two USART entries a burst, its edge IDLE or that frame and the lap's half and full marks; `tx_idle()` is TC, written 0 at every transmit block's start; the single-bit interrupt enables are bit-band stores; `rx_skips()` beside the engine's refusing `consume()` ([../stm32f4/usart.md](../stm32f4/usart.md), [../stm32f4/dma.md](../stm32f4/dma.md)) |
+| stm32g0 | `Uart<n, UartPins, rx_size, tx_size, TxEngine, RxEngine, opts>` = `UartTask<Usart<n>, ...>` (`stm32g0/usart.hpp`) | the pins carry their AF; one vector and `isr()`; the same engine slots and `read_bulk()`; `UartOptions` as one trailing parameter (FIFO thresholds, single wire, ...); the interrupt receiver PACED where the instance has the FIFO - RXFT at half its depth, one entry for four characters or more - with the burst's tail by the receiver time-out (RTOF, ten bit times) on a FULL USART and by IDLE on an LPUART (`rx_paced`, `rx_tail`); the receive engine's edge from the vectors, IDLE in `isr()` and the ring's half and full marks in `dma_isr()`, its errors entering the vector through EIE and PEIE and every flag cleared through ICR; `tx_idle()` is TC, cleared when a transmit block starts; the run copy the runtime's `memcpy` from 16 bytes whose ends share their word alignment; `kernel_hz()` (the kernel-clock multiplexer), `noise_errors()` (NE exists here alone), `wakes()` (the wake from Stop); the same task over an LPUART is `LpUart` (`stm32g0/lpuart.hpp`) |
+| ch32v00x | `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32v00x/usart.hpp`) | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s tables), the code a template parameter; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the channels table 8-2 gives the instance (the channel IS the request on this family, an engine elsewhere refused); USART2 refused at code 0, whose TX is the K8 package's reset pin; `UartOptions` as one trailing parameter (the frame, a single wire that is a BUS and not a loop on this silicon, the flow-control pair); BRR is PCLK over the baud, whole - no separate fractional field and no kernel-clock multiplexer; the receive engine CIRCULAR over a `HardwareRing`, and under it the CPU never reads DATAR (the clear by a status read and the channel's next read, as the CH32V203's), the edge the vector's - IDLE or the first frame, and the ring's half and full marks; `tx_idle()` is TC, cleared at every transmit block's start |
+| stm32f4 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, opts>` (`stm32f4/usart.hpp`) | the classic SR/DR/BRR block (the CH32V00x's under ST's names): flags cleared by read sequences, the divisor in sixteenths or eighths (OVER8); the pads as `PinSel`s with the datasheet's AF; ten instances at most with a vector each, the U(S)ART name deciding FULL or not; the divisor from the instance's OWN APB clock (`apb_hz`), because the two buses run below HCLK; two OPTIONAL DMA engine slots (`stm32f4/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`) with `dma_isr()`, `dma_faults()` and `harvest()`, named by (controller, STREAM, channel) because a stream is the unit here and a peripheral reaches only the cells the request mapping gives it - checked at compile time against the reserve's per-part-class table and refused on a class whose manual was not read; under a receive engine the CPU NEVER READS DR - the vector's one status read and the stream's next read of DR make each clear, which costs no byte and suppresses the IDLE of a burst of one frame, so the vector takes RXNE once a burst beside the stream to learn the clear finished: two USART entries a burst, its edge IDLE or that frame and the lap's half and full marks; `tx_idle()` is TC, written 0 at every transmit block's start; the single-bit interrupt enables are bit-band stores ([../stm32f4/usart.md](../stm32f4/usart.md), [../stm32f4/dma.md](../stm32f4/dma.md)) |
 | rp2040 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2040/uart.hpp`), the family's alias of the IP stratum's `Pl011Transport` (`pl011/uart.hpp`) | the PL011 with its 32-deep FIFOs: the pins are GPIO numbers under function 2, and table 279 decides which of them carry which instance; one vector and `isr()`; `write_byte()` and `write_bulk()` WRITE AN IDLE FIFO DIRECTLY and arm the transmit interrupt only behind a full one, because the PL011's transmit interrupt is an edge that stays latched and not a level - so an idle transmitter takes 32 bytes with no interrupt, a long print takes one per FIFO level, and a refused byte writes nothing; the divisor's integer and fractional halves are latched by the LCR_H write that follows them; the same engine slots (`rp2040/dma.hpp`'s `DmaTxEngine`/`DmaRxEngine`, on any two distinct channels) with `dma_isr()`, `dma_faults()`, `harvest()`, `read_bulk()` - the receive run read off TRANS_COUNT by `harvest()`, the FIFO emptied and the credits cleared before a run, a run's completion onto a drained ring the engine's edge; the receive level's entry reads its sixteen entries without asking the flag register, the receive time-out (RT) the burst's tail; the four error interrupts armed and counted in `isr()` under an engine too; the run copy's crossover a member of the chip's traits (`copy_crossover`, 12 on both RP families) ([../rp2040/uart.md](../rp2040/uart.md)) |
-| ch32vx03 | `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32vx03/usart.hpp`), n = 1..8 | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s columns, the code a template parameter, a code of 0 writes no register at all, and a column on the debug port's pads is refused by `init()` while the probe's port is alive); the FRAME is a template parameter of its own here, ahead of the engines, where the CH32V00x carries it inside its options; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the SLOT - controller and channel - the request table gives the instance (UART4..UART8's are DMA2's on the CH32V303) (the channel IS the request on this family too, an engine elsewhere refused at compile time); `UartOptions` as the trailing parameter (a single wire that is a BUS and not a loop, the flow-control pair on a FULL instance); the divisor is the instance's OWN bus over the baud, whole - USART1 asks PCLK2 and every other port PCLK1 - and WHICH instances a part offers, and which are FULL, is the datasheet's table and not a header's: the fourth port is a USART4 on the CH32V203C8 alone, so the smartcard and the synchronous clock exist there and are compile errors on a UART; the CH32V303's lot-keyed MARK/SPACE parity and short words are verbs that ask the die; under a receive engine the CPU never reads DATAR - a status read here arms a clear of every flag standing at the NEXT data read, the channel's, so no byte is taken and the IDLE of a one-frame burst is forgotten with it: the vector takes RXNE once a burst beside the channel, two USART entries a burst, its edge IDLE or that frame and the ring's half and full marks; `tx_idle()` is TC, cleared at every transmit block's start; `rx_skips()` beside the engine's refusing `consume()` ([../ch32vx03/usart.md](../ch32vx03/usart.md)) |
+| ch32vx03 | `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32vx03/usart.hpp`), n = 1..8 | the pins are the instance's own under a REMAP CODE (`afio.hpp`'s columns, the code a template parameter, a code of 0 writes no register at all, and a column on the debug port's pads is refused by `init()` while the probe's port is alive); the FRAME is a template parameter of its own here, ahead of the engines, where the CH32V00x carries it inside its options; one vector and `isr()`; the same engine slots with `dma_isr()`, `dma_faults()` and `harvest()`, on the SLOT - controller and channel - the request table gives the instance (UART4..UART8's are DMA2's on the CH32V303) (the channel IS the request on this family too, an engine elsewhere refused at compile time); `UartOptions` as the trailing parameter (a single wire that is a BUS and not a loop, the flow-control pair on a FULL instance); the divisor is the instance's OWN bus over the baud, whole - USART1 asks PCLK2 and every other port PCLK1 - and WHICH instances a part offers, and which are FULL, is the datasheet's table and not a header's: the fourth port is a USART4 on the CH32V203C8 alone, so the smartcard and the synchronous clock exist there and are compile errors on a UART; the CH32V303's lot-keyed MARK/SPACE parity and short words are verbs that ask the die; under a receive engine the CPU never reads DATAR - a status read here arms a clear of every flag standing at the NEXT data read, the channel's, so no byte is taken and the IDLE of a one-frame burst is forgotten with it: the vector takes RXNE once a burst beside the channel, two USART entries a burst, its edge IDLE or that frame and the ring's half and full marks; `tx_idle()` is TC, cleared at every transmit block's start ([../ch32vx03/usart.md](../ch32vx03/usart.md)) |
 | ch32x035 | `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>` = the task over `Usart<n>` (`ch32x035/usart.hpp`), n = 1..4 | the CH32V203's parameter list and surface, verbatim: the pins the instance's own under a REMAP CODE (`afio.hpp`'s columns, a code of 0 writes no register, a column whose TX or RX sits on the debug port's pads refused by `init()` while the probe owns them, one whose TX pad shares its package pin with another refused at compile time); the frame a template parameter of its own; one vector and `isr()`; the two engine slots take `NoDmaEngine` alone - the DMA chapter is not written here - so `dma_isr()`, `harvest()` and `dma_faults()` answer false and zero; every instance counts its divisor in HCLK, the series having no bus prescaler, and which instances a part offers is read off its pins (the CH32X035F8U6 has no USART1) |
 | rp2350 | `Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>` (`rp2350/uart.hpp`) | THE SAME PL011, AND THE SAME DRIVER: the resource and the transport are the RP2040's verbatim because they are neither family's - they live in the IP stratum (`pl011/uart.hpp`), and what each family writes is a TRAITS type. So everything the row above says of the transport holds here, and what this file adds is the chip's: the pads march in groups of four as on the RP2040 but over a longer bank, and EVERY GROUP'S FLOW-CONTROL PADS CARRY DATA TOO under a SECOND function code - the CTS pad is also that instance's TX, the RTS pad also its RX - so a pad's function code is not a choice but a property of the pad, which is why the IP file keeps that code opaque and this file makes it a TYPE; UARTCLK is clk_peri as before; and the ONE interrupt line per instance is bound under ONE NAME on both of this chip's processor architectures, the interrupt numbering being shared between them ([../rp2350/uart.md](../rp2350/uart.md), [../pl011/README.md](../pl011/README.md)) |
 | host | none | `SerialPort` is host-tested over a scripted `ByteTransport` and over a transport lending a real ring's run, every case through both drains (`test_serial_port`); the IP stratum's own driver is tested against a PL011 made of RAM (`test_pl011`, `host/sim_pl011.hpp`), which is the second realization that proves it knows no chip |
@@ -200,31 +202,94 @@ its 14 instructions are the same either way. Validated on the host
 (`test_serial_port`, a real `HardwareRing` over a scripted channel that
 writes while a run is held).
 
-**A skip between two runs is seen.** The same ring also skips when a
-look finds a lap unread - in the drain's own `read_span()`, which then
-lends nothing, or in a `count()` asked between two drains - and the run
-it hands out next is the stream after a gap, which the line begun in an
-assembler would swallow as its continuation: a line delivered with a
-hole in it. So a transport whose release can refuse also reports its
-ring's skip epoch - `util/stream.hpp`'s `SkippingSource`: `rx_skips()`,
-`HardwareRing::skips()`, every skip since the start and never cleared -
-and the drain compares it at every run with the value it saw last. A
-change ends the line begun as torn, counted in `torn_lines()`, and skips
-the stream to its next end of line: the bytes before it end a line whose
-beginning the ring skipped - or, where the skip landed on a line's
-start, a whole line the drain cannot tell from one, dropped with the
-rest. One load and one compare a run, nothing a byte: counted at `-Os`
-over a `HardwareRing` transport, four instructions more a run on the
-Cortex-M0+, five on the QingKe V4B and six on the Cortex-M4, the byte
-loop instruction for instruction the same. A transport whose release
-can refuse and that does not report its skips is refused at compile
-time (`test/family_ch32x035/neg/`), and over a Ring none of it is
-compiled: compared with and without it, the objects of the consoles
-of the AVR, the SAM C21, the STM32G0, the STM32F4, the RP2040 and the
-CH32V203 (the last two over the USB CDC class) and of the three WCH
-fixtures are identical. Validated on the host
-(`test_serial_port`, the scripted channel lapping the ring between two
-drains, the skip made by the drain's own look and by one outside it).
+**A gap between two runs is seen.** The stream a ring hands out can
+jump. A `HardwareRing` skips when a look finds a lap unread - in the
+drain's own `read_span()`, which then lends nothing, or in a `count()`
+asked between two drains - and an interrupt receiver drops a byte that
+finds its ring full, that the receiver flags as framed or failing its
+parity, or that a hardware overrun swallowed. The run handed out after
+such a gap is the stream after it, which the line begun in an assembler
+would swallow as its continuation: a line delivered with a hole in it. So
+every transport reports the gaps in its stream - `util/stream.hpp`'s
+`SkippingSource`: `rx_skips()`, every byte the line carried that the
+receive ring will not deliver, since the start and NEVER CLEARED (modulo
+2^32), moved on those rare paths alone - and the drain compares it at
+every run with the value it saw last, over every transport that has it,
+whether its release can refuse or not. A change ends the line begun as
+torn, counted in `torn_lines()`, and skips the stream to its next end of
+line: the bytes before it end a line whose beginning the gap took.
+
+**The count moves where the gap falls.** A count bumped where a byte is
+lost does not say where: a byte a FULL ring refuses is lost behind
+everything the ring holds, up to a whole ring ahead of the consumer, and
+the run in hand when such a count moves was received before the loss - the
+drain would tear the line it holds and deliver the cut one spliced
+(measured on the host: `[LINE-TWO] [LINE-333] [FOURTAIL]`, the first line
+thrown away, the splice clean). So an interrupt receiver's ring MARKS each
+gap on the slot its next byte fills (`util/ring.hpp`'s `GapRing`, a gap
+byte a slot, [ring.md](ring.md)), hands out no run across a gap, and moves
+the count when the consumer CROSSES it - the meaning `HardwareRing`'s skip
+has, where the tail jumps to the producer. Every gap is kept: N bytes with
+K lost deliver the other N - K, in order (the CH32V203's interrupt
+receiver: 40 data bytes with 10 breaks, 40 delivered, FE 10). The handlers mark each loss where it fell: a byte dropped
+for its flags or refused by a full ring at its place (a FIFO drain that
+the ring refuses counts in its loop and marks once behind it, since a ring
+that refuses one byte of an entry refuses the rest); a byte an overrun
+swallowed behind the byte the data register kept, on a block without a
+FIFO; and on a FIFO (the STM32G0's FIFO mode, the PL011) behind the
+FIFO's depth of bytes at its head - an overrun standing at a receive
+entry fell with the FIFO full, and the handler, its one reader, has read
+nothing since (the PL011 measured: 48 frames into its masked 32-deep FIFO
+deliver exactly the first 32). Under a receive engine the losses -
+an overrun, a frame the channel does not take (the STM32G0's FE and PE,
+DDRE clear), a stream restarted after a transfer error - are counted
+where the vector or the look sees them, beside the ring's own skips: the
+line torn is the one begun when the consumer next looks, which is the one
+the loss cut when the consumer keeps up with its edges. The USB CDC class
+has no `rx_skips()`: its receive ring cannot drop - an OUT packet is armed
+only when the ring has its room - and over a transport without the verb
+(a test capture, a simulated port) nothing of this is compiled.
+
+**A silence ends the skip.** A gap can take the cut line's own end of
+line, and then the next end of line is a later, whole line's. So where the
+drain found the ring EMPTY after the gap and the next run arrives 100 ms
+or more after that look (`quiet_ticks`: longer than a USB serial adapter
+holds back a short packet, shorter than a person or a script waits before
+the next command), the line is taken to have ended in the silence and the
+run is drained as a line's beginning - a burst that overflows the ring,
+silence, then one command: the command is answered. What stays
+undecidable: a gap that took a line's end with the next line close behind
+it (that next line is skipped as the cut line's tail), a sender pausing
+longer than the silence in the middle of a line after a gap took its end
+(its tail is taken for a line), and a gap that lands on a line's start
+(the drain cannot tell it from a cut, and drops that whole line with the
+fragment it expects).
+
+The cost, counted at `-Os`: nothing a byte - the byte loop instruction for
+instruction the same, 24 an ordinary byte on the STM32G0's console
+(Cortex-M0+) as without the check - and on that console eighteen
+instructions a run: `GapRing`'s two tests (the run lent and the run
+released), four each, the epoch compare five, the skip's flag four, and
+one for the ring's slots standing behind the gap counts; on the AVR the
+epoch is a word in four registers, its compare thirteen instructions of
+a run's twenty-four. Everything after a gap - the tear,
+the skip, its release - is one out-of-line function: inline, its
+registers and its call cost the Cortex-M0+'s byte loop two to three
+instructions a byte. In the receive vectors the marks sit on the rare
+paths, and the AVR's RXC vector saves the registers it saved before (7
+in the serial suite's image, 16 in the console's, where the kernel's
+post saves the call-clobbered set). A transport whose release can refuse
+and that does not report its skips is refused at compile time
+(`test/family_ch32x035/neg/`). Validated on the host (`test_serial_port`:
+the scripted channel lapping a `HardwareRing` between two drains, the
+skip made by the drain's own look and by one outside it; a `GapRing`
+dropping bytes between two runs, while a run is held, on a full ring
+with lines queued before the gap, twice before the first gap is crossed,
+and the silence that ends a skip and the burst that does not;
+`test_ring`'s `GapRing` cases, a random lossy stream among them in which
+every run lent is consecutive and every jump is seen at the run it
+opens; `test_pl011`'s receive FIFO, the framed entry, the full ring and
+the overrun).
 
 **Scheduling contract**: the line consumer must precede SerialPort in
 the Tenuto pack. The kernel then consumes every posted line before

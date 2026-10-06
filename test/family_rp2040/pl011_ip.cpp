@@ -85,6 +85,7 @@ void pl011_transport_verbs() {
     (void)Plain::parity_errors();
     (void)Plain::break_errors();
     (void)Plain::hw_overruns();
+    (void)Plain::rx_skips();
     Plain::clear_errors();
     (void)Plain::min_hz_for(115200);
     (void)Plain::can_baud(Clock::hz, 3'000'000);

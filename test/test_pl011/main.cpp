@@ -3,13 +3,18 @@
 // (brio/host/sim_pl011.hpp). What is judged here is what a bench cannot
 // see cheaply - the exact WORDS a bring-up leaves in the block, and the
 // ORDER of the acts that make it - and what a bench cannot see at all:
-// that the driver compiles and runs with no silicon under it.
+// that the driver compiles and runs with no silicon under it; and the
+// receive side's losses, each a gap the ring marks where it fell, which a
+// bench cannot place.
 // Run with: ctest --preset host (or ctest --preset host -R test_pl011)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
 
 #include <stdint.h>
+
+#include <string>
+#include <vector>
 
 #include "host/sim_pl011.hpp"
 #include "pl011/uart.hpp"
@@ -369,7 +374,7 @@ TEST_CASE("a bulk run from idle goes straight into the FIFO, its tail queued beh
     CHECK(Port::write_bulk(run) == 5u);
     CHECK(SimPl011TxFifo::count[0] == 5u);
     CHECK((regs().UARTIMSC & UartInterrupt::tx) == 0u);
-    CHECK(regs().UARTDR == static_cast<uint32_t>('!'));   // the last one written
+    CHECK(regs().UARTDR.last == static_cast<uint32_t>('!'));   // the last one written
 
     // Longer than the FIFO's room: the room written, the rest queued with
     // TXIM armed, and the edge sends it in order.
@@ -602,4 +607,141 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
 
     Streamed::release();
     CHECK(SimPl011::regs<1>().UARTDMACR == 0u);
+}
+
+// ---- the receive side: every loss is a gap, marked where it fell ---------------
+
+namespace {
+
+// Everything the transport lends from now, run by run, with whether the
+// skip epoch moved before each run.
+struct Drained {
+    std::string bytes;
+    std::vector<bool> moved;
+};
+
+Drained drain_port(uint32_t& epoch) {
+    Drained d;
+    for (;;) {
+        const auto run = Port::read_span();
+        if (run.empty()) {
+            break;
+        }
+        d.moved.push_back(Port::rx_skips() != epoch);
+        epoch = Port::rx_skips();
+        d.bytes.append(reinterpret_cast<const char*>(run.data()), run.size());
+        Port::consume(static_cast<uint32_t>(run.size()));
+    }
+    return d;
+}
+
+void wire(const char* text) {
+    while (*text != 0) {
+        SimPl011::receive<0>(static_cast<uint8_t>(*text++));
+    }
+}
+
+} // namespace
+
+static_assert(brio::SkippingSource<Port>);
+
+TEST_CASE("a received burst reaches the ring by the level and the time-out") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    entries = 0;
+    uint32_t epoch = Port::rx_skips();
+    wire("0123456789abcdefghij");           // 20: the level (16) stands
+    REQUIRE(SimPl011::line_raised<0>());
+    serve();
+    CHECK(SimPl011RxFifo::count[0] == 0u);  // the level's entry takes the rest too
+    const Drained d = drain_port(epoch);
+    CHECK(d.bytes == "0123456789abcdefghij");
+    CHECK(d.moved == std::vector<bool>{false});
+}
+
+TEST_CASE("a framed entry is dropped and is a gap where it fell") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    uint32_t epoch = Port::rx_skips();
+    const uint32_t before = epoch;   // never cleared: the cases before count too
+    wire("AB");
+    SimPl011::receive<0>(0x00, UartDataError::frame | UartDataError::brk);
+    wire("CD");
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);   // below the level: the tail
+    serve();
+    CHECK(Port::frame_errors() == 1u);
+    CHECK(Port::break_errors() == 1u);
+    const Drained d = drain_port(epoch);
+    CHECK(d.bytes == "ABCD");
+    CHECK(d.moved == std::vector<bool>{false, true});   // the run after the gap
+    CHECK(Port::rx_skips() == before + 1u);
+}
+
+TEST_CASE("a full ring refuses the rest of the drain, one gap behind what it kept") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    uint32_t epoch = Port::rx_skips();
+    const uint32_t before = epoch;
+    // 63 fit in the 64-slot ring; 80 arrive in drains of 20 with no reader.
+    for (int k = 0; k < 4; ++k) {
+        wire("0123456789abcdefghij");
+        serve();
+    }
+    CHECK(Port::rx_overruns() == 17u);
+    CHECK(Port::rx_skips() == before);       // nothing crossed yet
+    wire("XY");                              // still refused: the ring is full
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    serve();
+    std::string kept = drain_port(epoch).bytes;
+    CHECK(kept.size() == 63u);
+    CHECK(kept.substr(60) == "012");
+    CHECK(Port::rx_skips() == before + 19u); // the crossing, at the ring's end
+    wire("after");
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    serve();
+    const Drained d = drain_port(epoch);
+    CHECK(d.bytes == "after");
+    // The crossing came with the empty look that ended the drain above:
+    // the epoch is seen moved at the next run, as SerialPort sees it - the
+    // first of two, "after" straddling the storage's end.
+    CHECK(d.moved == std::vector<bool>{true, false});
+}
+
+TEST_CASE("an overrun is a gap behind the FIFO's depth, the stream resumes after it") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200));
+    uint32_t epoch = Port::rx_skips();
+    const uint32_t before = epoch;
+    wire("ok");
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    serve();
+    // The handler held off: 33 frames on a 32-deep FIFO, the last one lost.
+    // The entries are masked meanwhile, as a core that does not serve them.
+    regs().UARTIMSC = 0u;
+    SimPl011::settle(0);
+    for (int k = 0; k < 33; ++k) {
+        SimPl011::receive<0>(static_cast<uint8_t>('a' + k % 26));
+    }
+    CHECK(SimPl011RxFifo::lost[0] == 1u);
+    regs().UARTIMSC = UartInterrupt::rx | UartInterrupt::rx_timeout;
+    SimPl011::settle(0);
+    serve();
+    CHECK(Port::hw_overruns() == 1u);
+    wire("NEXT");
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    serve();
+    const Drained d = drain_port(epoch);
+    // "ok", the 32 entries the full FIFO kept, then the gap - the frame
+    // it swallowed - and the stream after it.
+    std::string kept = "ok";
+    for (int k = 0; k < 32; ++k) {
+        kept += static_cast<char>('a' + k % 26);
+    }
+    CHECK(d.bytes == kept + "NEXT");
+    CHECK(d.moved == std::vector<bool>{false, true});
+    CHECK(Port::rx_skips() == before + 1u);
 }
