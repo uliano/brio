@@ -371,13 +371,14 @@ horizon itself, one entry each.
   born with its first user. A `qingke/` core stratum is due.
 - **The optimization rounds after the retrospective review** (the
   method and the state in private/memory/'s critical-review note): the
-  rulers and the platform, the util contracts, the DMA engines and the
-  SPI hosts are done, each with its letter in `benchmark.md`; next the
-  UART round (the IDLE edge, the byte stolen under a DMA request, an
-  early tx_idle, the SAM's per-byte copy in write_bulk), the I2C round,
-  the kernel round (the take-and-hold of a dispatched slot, Q2), then a
-  recovery session on the boards that were away (AVR, CH32V006, RP2040,
-  the F429's spi suite, CH32V303).
+  rulers and the platform, the util contracts, the DMA engines, the
+  SPI hosts, the UART and I2C transports and the kernel (the index
+  carousel, the idle promise measured on every core, the image's
+  hold-off) are done, each with its letter in `benchmark.md` or its
+  suite. What remains: `benchmark.md`'s skeleton table re-measured
+  whole, and a recovery session on the parts the rounds did not run
+  (the AVR128DA48, the G071RB and G031K8, the F429's spi suite, the
+  F411CE and F469NI, the Pico).
 - **Test consolidation per platform** when its chapters are closed: a
   two-level TestBench (groups over letters), few units per platform by
   domain, one logical unit on the host side, an .md per unit - the
