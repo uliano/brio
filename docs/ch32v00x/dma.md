@@ -309,7 +309,12 @@ letters a to d drive the channel's one-shot verbs:
   closed and two a channel with it open - and with it the same lines
   read 2170 and 1790 cycles, the paced block 1.00 of its pace, and the
   SPI host's engined write at the wire (spi.md). The CH32V003's
-  platform says why and how (platform.md, "On the CH32V003F4P6").
+  platform says why and how (platform.md, "On the CH32V003F4P6"). The
+  CH32V006's QingKe V2C does not stop it: the same letter there, its
+  `idle()` sleeping over the working channel, copies 2048 bytes in
+  3484 cycles - 6.0 cycles an item, the controller's own rate - and
+  runs the paced block at its pace, so that part's `idle()` sleeps over
+  a working channel.
 
 ## Not covered yet
 
@@ -326,12 +331,6 @@ Driver gaps, each with its reason:
   until a stream needs the midpoint.
 
 Implemented but not bench-verified, each with what would measure it:
-
-- **The CH32V006's controller in a Sleep**: whether the V2C's Sleep
-  stops it as the V2A's does is not measured, and its `idle()` sleeps
-  over a working channel as it always has; `bench_ch32` letter d on
-  that part, its copy and paced lines against the CH32V003's, would
-  say.
 
 - **The engines in their two moments** - the binding at `arm()`, five
   stores a block, the claim under the transport's mask, INTFR read

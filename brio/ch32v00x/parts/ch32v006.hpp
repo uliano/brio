@@ -108,9 +108,10 @@ inline constexpr bool usart_has_smartcard = false;
 /// V2A cannot).
 inline constexpr bool sleep_entry_from_sram = false;
 
-/// Whether the V2C's Sleep stops the DMA as the V2A's does is NOT
-/// measured (docs/ch32v00x/dma.md, its gap list); idle() sleeps over a
-/// working channel here, as it always has.
+/// The V2C's Sleep does not stop the DMA (measured - docs/ch32v00x/
+/// dma.md: a 2048-byte copy at the controller's own 6 cycles an item
+/// with idle() asleep over it), so idle() sleeps over a working
+/// channel here.
 inline constexpr bool sleep_stops_bus_masters = false;
 
 /// The vector table's length: entries 0..40 (USART2 at 39, OPCM at 40).
