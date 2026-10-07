@@ -366,9 +366,9 @@ stamps, the app's glue included: the idle-line one about 60 instructions
 and seven register accesses (SR, SxNDTR twice, CR1 and CR3 read and
 written), the first-frame one about 45 and eight. Transmit through the engine is wire-bound (x 1.00 at 115200
 and 1 Mbaud, 1.01 at 5.625 Mbaud for 4096 bytes, a block's completion
-and restart a frame's gap every 255 bytes), at 0.7 per cent of the core
-at 1 Mbaud (busy 52399 of 7.38 M cycles for 4096 bytes) against 12.5 per
-cent through the interrupt transmitter (919178).
+and restart a frame's gap every 255 bytes), at 0.6 per cent of the core
+at 1 Mbaud (busy 46048 of 7.38 M cycles for 4096 bytes) against 11.6 per
+cent through the interrupt transmitter (858022).
 
 **Against the vendor** (ST's HAL v1.8.5, `HAL_UARTEx_ReceiveToIdle_DMA`
 in circular mode on the same loop and bursts, a scratch program): the

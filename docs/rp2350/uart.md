@@ -201,8 +201,8 @@ a number is given for each.
 - THE CONSOLE'S PRINT (`bench_rp2350`'s letter p, 115200 8N1): 4096
   bytes take 146 entries of the console's handler on both halves - the
   first 32 bytes straight into the idle FIFO, then one entry per fall
-  through the level, each refilling 28 - and 60931 cycles of handler
-  bodies on the Cortex-M33 half, 69689 on the Hazard3 half (417 and 477
+  through the level, each refilling 28 - and 65170 cycles of handler
+  bodies on the Cortex-M33 half, 68666 on the Hazard3 half (446 and 470
   an entry, stamps included), against a wall of 53.3 M cycles the wire
   sets; 256 bytes take 8 entries, and a print of 1 or of 16 bytes takes
   none.
@@ -255,8 +255,8 @@ a number is given for each.
 - THE RECEIVE SIDE AND ITS EDGE (`bench_rp2350` letter u, UART1 under
   LBE at 150 MHz, one source on both architectures, the meter's stamps
   inside `isr`): 256 bytes through the interrupt receiver in 16 level
-  entries and the time-out's - 7817 cycles at 1 Mbaud on the M33 and
-  6415 on Hazard3, 31 and 25 a byte, where the level read with a flag
+  entries and the time-out's - 8004 cycles at 1 Mbaud on the M33 and
+  7624 on Hazard3, 31 and 30 a byte, where the level read with a flag
   test before every character took 9074 and 8970 (35 a byte on each);
   the receive engine about 200 cycles for the same 256. The edge from
   the burst's last stop bit: the time-out's 3.2 frames at 115200 and 1
@@ -288,7 +288,7 @@ a number is given for each.
   `uart_write_blocking`, POLLED loops, on the same board and loop in a
   scratch program: 34 and 29 cycles a byte reading characters already in
   the FIFO (M33, Hazard3), 29 and 25 writing into an empty one, the CPU
-  the loop's for the whole wire time; this transport 31 and 25 a byte
+  the loop's for the whole wire time; this transport 31 and 30 a byte
   receiving, 17 transmitting, the core free between entries.
 
 ## Not covered yet

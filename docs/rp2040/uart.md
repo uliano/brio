@@ -198,8 +198,8 @@ extern "C" void isr_uart0() {
 
 - THE RECEIVE SIDE AND ITS EDGE (`bench_rp2040` letter u, UART1 under
   LBE at 125 MHz, the meter's stamps inside `isr`): 256 bytes through the
-  interrupt receiver in 16 level entries and the time-out's, 12693
-  cycles at 115200 and 11101 at 1 Mbaud - 43 a byte - where the level
+  interrupt receiver in 16 level entries and the time-out's, 13408
+  cycles at 115200 and 13541 at 1 Mbaud - 53 a byte - where the level
   read with a flag test before every character took 16510 and 15500 (60
   a byte); the receive engine 390 cycles for the same 256, two
   completions. The edge from the burst's last stop bit (BUSY falling):
@@ -226,7 +226,7 @@ extern "C" void isr_uart0() {
   and loop in a scratch program: 58 cycles a byte reading characters
   already in the FIFO and 53 writing into an empty one, every cycle of
   the wire's time the CPU's. This transport's interrupt receiver costs
-  43 a byte and its transmitter 25, and the core is free between
+  53 a byte and its transmitter 25, and the core is free between
   entries.
 
 ## Not covered yet

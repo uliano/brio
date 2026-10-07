@@ -300,8 +300,8 @@ the listing's count above.
 |---|---|---|---|---|
 | `uart.tx` 256 bytes, x | 1.00 | 1.00 | 1.01 | 1.03 |
 | `uart.tx` 4096 bytes, x | 0.99 | 1.00 | 1.00 | 1.00 |
-| `uart.rx` 16-byte burst, x | 1.00 | 1.06 | 1.34 to 1.46 | 5 to 17, the consumer starved |
-| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.02 | 3.7 to 6.8, the consumer starved |
+| `uart.rx` 16-byte burst, x | 1.00 | 1.06 to 1.10 | 1.34 to 1.46 | 34 to 148, the consumer starved |
+| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.02 to 1.03 | 13.7 to 14.9, the consumer starved |
 | receive entries for 256 bytes (counted) | 256 | 255 | 266 for 259 | 1.5 frames an entry |
 | the edge after the last stop bit's end, cycles | -3 to +2 | +70 | +76 | +77 |
 
@@ -320,7 +320,11 @@ the listing's count above.
   on 1 to 6 frames in 256 - consistent with the bench's metered tick
   handler, 302 cycles on its longest pass, outlasting two frames). Bursts
   the ring holds arrive whole. The 3 Mbaud
-  rows vary run to run for that reason.
+  rows vary run to run for that reason, and the receive ring's gaps
+  deepen them: every frame the full ring refuses is a gap, `read_span()`
+  hands out no run across one, so the starved consumer pays a run's
+  overhead for each - the same letter on an image whose ring did not
+  mark its losses read 6.4 and 17 on the same board.
 - **The burst edge reaches the consumer about 80 cycles after RXCIF**,
   which rises inside the stop bit, at its majority samples: at 115200
   that is the stop bit's end, faster it is a few bit times after it. There is no idle edge to wait for (the

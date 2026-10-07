@@ -428,7 +428,7 @@ the same letter:
 
 | | the block start rebuilt (647 cycles) | two moments (37 cycles) |
 |---|---|---|
-| an engined SPI request, wall minus its wire (SCK 22.5 MHz) | 2472 cycles, 2 interrupts | 606 cycles, 1 interrupt |
+| an engined SPI request, wall minus its wire (SCK 22.5 MHz) | 2472 cycles, 2 interrupts | 652 to 664 cycles, 1 interrupt |
 | the same, 16-bit frames | the pump: 1 interrupt a frame, 2.35 x the wire at 256 frames | the engines: 1 interrupt, 1.01 x |
 | a 16-byte copy, start to completion | 1040 cycles | 86 cycles |
 | a transport's masked window | the whole start | the claim: twelve instructions |

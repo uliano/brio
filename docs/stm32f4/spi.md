@@ -570,10 +570,12 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   count printed beside it). The transmit-only shape: x = 1.14 at SCK 45
   MHz (37 cycles a turn against a 32-cycle frame), 1.01 at 22.5, 1.00
   at 11.25 and 5.625, and 1.00 to 1.01 in 16-bit frames at every rate.
-  The receive shape with one frame in flight: x = 2.14 at 45 MHz, 1.44
-  at 22.5, 1.19 at 11.25 (37, 29 and 25 cycles of idle bus a frame: the
-  turnaround and the block's restart from an idle shifter), 1.63 and
-  1.28 in 16-bit frames at 45 and 22.5 MHz; with two in flight, from
+  The receive shape with one frame in flight: x = 2.33 at 45 MHz, 1.60
+  at 22.5, 1.23 at 11.25 (43, 39 and 31 cycles of idle bus a frame: the
+  turnaround and the block's restart from an idle shifter; the same loop
+  read 1.44 at 22.5 MHz in an image that placed it elsewhere in the
+  flash, design/benchmark.md's gap on placement), 1.60 and 1.23 in
+  16-bit frames at 45 and 22.5 MHz; with two in flight, from
   5.625 MHz in 8-bit frames and from 11.25 in 16-bit ones, x = 1.00 -
   and no overrun counted in any run, at any rate, in either width. The
   loop as it was - `xfer()` per frame, one frame in flight, four calls a
@@ -633,7 +635,7 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   independently as figure 311 does, and calls `HAL_GetTick()` on every
   turn for its timeout. brio's receive shape at the same rates is
   wire-bound where the HAL's is not, and its one-in-flight loop (x =
-  1.44 at 22.5 MHz) is half the HAL's distance from the wire; a short
+  1.60 at 22.5 MHz) is under a third of the HAL's distance from the wire; a short
   request costs brio under half the HAL's.
 - **The tenure's copy and the listing.** `start()` is 348 instructions
   in all with the three shapes inlined (the receive-two shape out of

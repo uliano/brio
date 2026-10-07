@@ -740,11 +740,12 @@ the bus contract's and the same in both.
   which the instrument is 107 (the stopwatch and the vector's stamp pair):
   134 cycles of the engine's own - the launch, five stores and the
   ledger's count, and the completion's handler.
-- **THE SPI TRANSACTION'S FIXED COST went from 1087 to 571 cycles**, one
-  interrupt where there were two. Less the instrument (28 + one stamp pair
-  of 79; BEFORE two) and the request's copy (130), what the ENGINES cost
-  a transaction is 334 cycles - their launch, the receive channel's one
-  completion, both channels stopped - against 771 before. The per-frame
+- **THE SPI TRANSACTION'S FIXED COST went from 1087 to 514 cycles**, one
+  interrupt where there were two, and one idle turn per wake. Less the
+  instrument (28 + one stamp pair of 79; BEFORE two) and the request's
+  copy (130), what the ENGINES cost a transaction is 277 cycles - their
+  launch, the receive channel's one completion, both channels stopped -
+  against 771 before. The per-frame
   cost is the wire's: 256 frames at /4 are 8192 cycles of SCK and the
   block adds nothing per frame.
 - **A 16-bit frame is one 16-bit access**: a 256-frame write of half-words

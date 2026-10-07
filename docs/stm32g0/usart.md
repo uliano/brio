@@ -391,8 +391,8 @@ receiver alone; `isr` includes the meter's 118 cycles an entry):
 | receive of 256 bytes | entries | cycles an entry | cycles a byte |
 |---|---|---|---|
 | RXFNE, a character an entry (before) | 256 | 212 | 212 |
-| RXFT at half + the time-out (now), 115200 and 1 Mbaud | 64 | 335 | 84 |
-| the same at 2 Mbaud | 51 | 384 | 77 |
+| RXFT at half + the time-out (now), 115200 and 1 Mbaud | 64 | 371 | 93 |
+| the same at 2 Mbaud | 52 | 414 | 84 |
 | the receive engine (the DMA vector, a block of the transmitter's included) | 3 | 275 | 3.2 |
 
 The paced drain is 24 instructions a character with no call - the ISR
@@ -427,7 +427,7 @@ co-aligned - the two even near 13 - and on ends aligned differently
 scratch program (brio's crt, clock and console around it): its FIFO
 receive (`HAL_UART_Receive_IT` with `HAL_UARTEx_EnableFifoMode` at half,
 `UART_RxISR_8BIT_FIFOEN`) is 107 cycles a byte on 256 bytes against
-brio's 84 - and it needs the length up front: its tail is taken one
+brio's 93 - and it needs the length up front: its tail is taken one
 character an entry once fewer than a level remain. Its character-at-a-
 time receive is 184 cycles a byte and LOSES BYTES at 2 Mbaud (130 of
 256 wrong), where this transport's lost none at any rate.
