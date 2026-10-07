@@ -565,7 +565,13 @@ line, and a call in a vector costs a core that saves the caller's
 registers in software the whole set - flattened, the post is inlined
 into that vector alone and the kernel stays as it is (measured on the
 AVR128DB48's console receive: 16 pushes -> 10, 108 -> 91 cycles a
-byte, 60 bytes of flash). A family
+byte, 60 bytes of flash). On a core whose hardware prologue saves no
+f-register (the CH32V303's QingKe V4F), a binding in an image built
+with F is a naked trampoline - a call of an ordinary function, then
+MRET - so a call in the body costs no f-register save, and the
+stratum's check walks every such body in the linked image and fails on
+a floating-point instruction it reaches
+([../ch32vx03/platform.md](../ch32vx03/platform.md)). A family
 whose linker script carries a `.ram_text` section may place a binding
 in SRAM: the SAM C21's page says what it buys
 ([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM").

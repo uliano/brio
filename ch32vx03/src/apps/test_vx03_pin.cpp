@@ -1249,11 +1249,11 @@ void banner() {
 // the flags of its own vector first (Exti::isr), then counts what fired:
 // the two shared ones are where that matters, since one entry may carry
 // two lines.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void exti1_handler() {
+BRIO_CH32_VECTOR(exti1_handler) {
     line1_entry_cycles = brio::stk()->CNTL;
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti1));
     if (brio::Exti::served(fired, 1)) {
@@ -1261,7 +1261,7 @@ extern "C" BRIO_CH32_INTERRUPT void exti1_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void exti9_5_handler() {
+BRIO_CH32_VECTOR(exti9_5_handler) {
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti9_5));
     shared_entries = shared_entries + 1u;
     if (brio::Exti::served(fired, 5)) {
@@ -1276,7 +1276,7 @@ extern "C" BRIO_CH32_INTERRUPT void exti9_5_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void exti15_10_handler() {
+BRIO_CH32_VECTOR(exti15_10_handler) {
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti15_10));
     shared_entries = shared_entries + 1u;
     if (brio::Exti::served(fired, 12)) {

@@ -229,7 +229,7 @@ brio::Mco::off();
 The clock security system, once the crystal is running:
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT void nmi_handler() {
+BRIO_CH32_VECTOR(nmi_handler) {
     if (brio::Rcc::css_isr()) {
         // SYSCLK is already back on the HSI and the PLL is off
     }

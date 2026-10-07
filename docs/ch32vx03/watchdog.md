@@ -198,7 +198,7 @@ for (;;) {
 Its early-wake-up interrupt, which has one counter tick to act in:
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT void wwdg_handler() {
+BRIO_CH32_VECTOR(wwdg_handler) {
     if (brio::Wwdg::isr()) { brio::Wwdg::refresh(0x7F); }
 }
 ```

@@ -238,12 +238,13 @@ void Console::cmd_err(const Cmd&, Serial s) {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-// The two vectors this program owns. BRIO_CH32_INTERRUPT is the one
-// spelling of the handler attribute on this target - the hardware
-// prologue's or gcc's, whichever the image was built for (pfic.hpp).
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+// The two vectors this program owns. BRIO_CH32_VECTOR is the one
+// spelling of a binding on this target - the hardware prologue's
+// handler or gcc's, or on a part with the FPU a trampoline to an
+// ordinary function, whichever the image was built for (pfic.hpp).
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     if (Serial::isr()) {
         brio::post<SerialLines>(brio::RxActivity{});
     }

@@ -2266,18 +2266,18 @@ void banner() {
 // DMA1's vectors, eight on the CH32V203 and seven on the CH32V303.
 // Channels 6 and 7 are USART2's, so their bodies serve the transport
 // while letters g and n run and the bare channel the rest of the time.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { note(0, brio::DmaChannel<1, 1>::isr()); }
+BRIO_CH32_VECTOR(dma1_channel1_handler) { note(0, brio::DmaChannel<1, 1>::isr()); }
 // Channel 2 is TIM2's update, and serves letter o's ring while it runs.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if (!ring_vector()) {
         note(1, brio::DmaChannel<1, 2>::isr());
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { note(2, brio::DmaChannel<1, 3>::isr()); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() { note(3, brio::DmaChannel<1, 4>::isr()); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { note(4, brio::DmaChannel<1, 5>::isr()); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) { note(2, brio::DmaChannel<1, 3>::isr()); }
+BRIO_CH32_VECTOR(dma1_channel4_handler) { note(3, brio::DmaChannel<1, 4>::isr()); }
+BRIO_CH32_VECTOR(dma1_channel5_handler) { note(4, brio::DmaChannel<1, 5>::isr()); }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (uart_mode) {
         if (Loop::dma_isr()) {
             loop_edges = loop_edges + 1u;
@@ -2287,7 +2287,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (uart_mode) {
         (void)Loop::dma_isr();
     } else {
@@ -2295,30 +2295,30 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { dma1_eighth_vector(); }
+BRIO_CH32_VECTOR(dma1_channel8_handler) { dma1_eighth_vector(); }
 
 // DMA2's eleven, the CH32V303's alone: on the other series these bodies
 // are empty and nothing in the vector table names them.
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel1_handler() { dma2_vector<1>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel2_handler() { dma2_vector<2>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() { dma2_vector<3>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel4_handler() { dma2_vector<4>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { dma2_vector<5>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel6_handler() { dma2_vector<6>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel7_handler() { dma2_vector<7>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel8_handler() { dma2_vector<8>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel9_handler() { dma2_vector<9>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel10_handler() { dma2_vector<10>(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel11_handler() { dma2_vector<11>(); }
+BRIO_CH32_VECTOR(dma2_channel1_handler) { dma2_vector<1>(); }
+BRIO_CH32_VECTOR(dma2_channel2_handler) { dma2_vector<2>(); }
+BRIO_CH32_VECTOR(dma2_channel3_handler) { dma2_vector<3>(); }
+BRIO_CH32_VECTOR(dma2_channel4_handler) { dma2_vector<4>(); }
+BRIO_CH32_VECTOR(dma2_channel5_handler) { dma2_vector<5>(); }
+BRIO_CH32_VECTOR(dma2_channel6_handler) { dma2_vector<6>(); }
+BRIO_CH32_VECTOR(dma2_channel7_handler) { dma2_vector<7>(); }
+BRIO_CH32_VECTOR(dma2_channel8_handler) { dma2_vector<8>(); }
+BRIO_CH32_VECTOR(dma2_channel9_handler) { dma2_vector<9>(); }
+BRIO_CH32_VECTOR(dma2_channel10_handler) { dma2_vector<10>(); }
+BRIO_CH32_VECTOR(dma2_channel11_handler) { dma2_vector<11>(); }
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Loop::isr()) {
         loop_edges = loop_edges + 1u;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void uart4_handler() { uart4_vector<>(); }
+BRIO_CH32_VECTOR(uart4_handler) { uart4_vector<>(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

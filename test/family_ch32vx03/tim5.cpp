@@ -61,4 +61,4 @@ void exercise_wide_tasks() {
     (void)Knob::count();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim5_handler() { (void)Tim<5>::isr(); }
+BRIO_CH32_VECTOR(tim5_handler) { (void)Tim<5>::isr(); }

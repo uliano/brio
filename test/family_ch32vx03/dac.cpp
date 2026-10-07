@@ -138,7 +138,7 @@ void stream_verbs() {
 
 // The player's lap is counted in DMA2 channel 3's handler, as an
 // application binds it.
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() {
+BRIO_CH32_VECTOR(dma2_channel3_handler) {
     const uint8_t f = Wave1::service();
     if ((f & Wave1::flag_complete) != 0u) {
         Wave1::lap();

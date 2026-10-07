@@ -442,7 +442,7 @@ A copy and a fill on the copy engine, the completion on its interrupt:
 ```cpp
 using Copier = brio::DmaCopyEngine<1, 1>;
 Copier::arm();                                   // once: the gate, the mode
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { (void)Copier::service(); }
+BRIO_CH32_VECTOR(dma1_channel1_handler) { (void)Copier::service(); }
 
 alignas(4) uint32_t frame[1024];
 static const uint32_t black = 0;
@@ -513,7 +513,7 @@ using Sampler = brio::DmaRxEngine<Row::controller, Row::channel>;
 alignas(4) uint16_t samples[256];                // a power of two: the view's mask
 using Samples = brio::HardwareRing<samples, Sampler>;
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     const uint8_t f = Sampler::service();
     if ((f & Sampler::flag_error) != 0u) { (void)Sampler::abandon(); }
     else if ((f & Sampler::flag_complete) != 0u) { Sampler::lap(); }
@@ -542,13 +542,13 @@ using Serial = brio::Uart<2, P, 128, 128, brio::UartFormat{},
 
 // The edge from the vectors: the USART's (an idle line, a burst's first
 // frame) and the receive channel's (the lap's half and full marks).
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (Serial::dma_isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
 ```
 
 The CH32V303's UART4 is the same spelling, and the table puts both of

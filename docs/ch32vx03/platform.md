@@ -106,26 +106,32 @@ this document keeps in its place.
   its exceptions in fcsr's five sticky flags and never traps on them,
   and the rounding mode in frm is honoured (measured, below).
 - **The hardware prologue saves integer registers and nothing else**
-  (3.4, note 3): the sixteen above, never an f-register. A handler that
-  touches the FPU pays for its f-registers in software - WCH's compiler,
-  under the fast attribute and the ilp32f ABI, stores in the handler's
-  own prologue every caller-saved f-register the handler clobbers, and
-  ALL TWENTY of them (ft0..ft11, fa0..fa7) once it calls a function it
-  cannot see into, 80 bytes of user stack and forty memory accesses.
-  Counted in the platform suite's image for the CH32V303VC: twenty
-  f-registers saved by a handler that calls out, four by one that does
-  a float multiply and a multiply-add inline, none by one that touches
-  no f-register - and none by the USART transport's handler, whose
-  ring verbs and error counters are inlined, while a console's, whose
-  receive edge calls the kernel's `post`, saves all twenty: one call
-  anywhere in the body is enough, and in the console's image gcc places
-  the saves at the handler's entry, ahead of the branch that calls, so
-  an interrupt that only moves a transmitted byte pays them as well (the
-  platform suite's tick vector shows the other placement, its saves on
-  the one branch that needs them). Where a byte is short against the core, that entry is
-  the difference between a byte kept and a byte lost: the I2C suite's
-  refused last byte at 8 MHz and 400 kHz on this part
-  ([i2c.md](i2c.md)).
+  (3.4, note 3): the sixteen above, never an f-register. WCH's compiler,
+  under the fast attribute and the ilp32f ABI, stores in a handler's own
+  prologue every caller-saved f-register the handler clobbers, and ALL
+  TWENTY of them (ft0..ft11, fa0..fa7) once it calls a function -
+  without looking at the callee, a visible float-free one included - 80
+  bytes of user stack and forty memory accesses, placed at the entry
+  ahead of the branch that calls or shrink-wrapped onto it as the
+  function's shape decides. So in an image built with F a vector is not
+  an attributed handler but a NAKED TRAMPOLINE, a call of an ordinary
+  function and MRET (Types and verbs, below): the body saves what the
+  ABI asks of a callee and no caller-saved register, and since nothing
+  then saves the f-registers of the program it interrupts, the
+  stratum's check walks every trampoline's body in every linked image
+  and fails on a floating-point instruction it reaches. Measured on the
+  CH32V303VCT6, a trampoline against the attributed handler in images
+  built from one source: a receive vector that posts, bound as the
+  console binds its own, 65 cycles a byte against 105 (the twenty saves
+  gone, the kernel's `post` reached by a tail jump), about 35 cycles
+  less a transmit interrupt; a handler that calls out 65 cycles of
+  round trip against 100 (letter `l`); a leaf, which saved nothing
+  either way, 8 cycles more for the call and its return (letter `e`);
+  and the I2C suite's refused last byte at 8 MHz and 400 kHz, lost with
+  the saves and kept without them ([i2c.md](i2c.md)). Over the 24
+  images of the part, 68 handlers that saved f-registers in software -
+  66 of them all twenty - became one, the float trampoline of letters
+  `k` and `l`, and the images' flash 4552 bytes less.
 
 ## Types and verbs
 
@@ -148,18 +154,46 @@ a `PanicRecord` in `.noinit`. The interrupt verbs and the per-line
 enables are [brio/ch32vx03/pfic.hpp](../../brio/ch32vx03/pfic.hpp):
 `enable/disable/enabled/pending/set_pending/clear_pending/active` (the
 manual's ISR bank is the ENABLE status and its IPR the pending one;
-IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_INTERRUPT` is the one
-spelling of the handler attribute, expanding to WCH's fast attribute
-when the image is built with `CH32VX03_HPE` (the default) and to gcc's
-plain `interrupt` otherwise - one option for the whole image, because a
-fast handler under an HPE that is off corrupts the program it
-interrupted - and both spellings carry `no_icf`: gcc's identical code
-folding turns the second of two handlers of one body into a handler that
-CALLS the first, which ends in MRET, so the call never returns and the
-caller's frame stays on the stack; on the V4F that frame is the twenty
-f-registers such a caller saves, eighty bytes (measured on the
-CH32V303VCT6: the interrupted program's next return jumped to a saved
-float). Interrupt nesting is never enabled: the kernel's rule
+IENR/IRER/IPSR/IPRR are write-one). `BRIO_CH32_VECTOR(name) { body }`
+is the one spelling of a vector binding, and it follows two facts of
+the build. Without the F extension (every CH32V203 image) it is an
+attributed handler under the name - WCH's fast attribute when the image
+is built with `CH32VX03_HPE` (the default), gcc's plain `interrupt`
+otherwise, one option for the whole image because a fast handler under
+an HPE that is off corrupts the program it interrupted - and the
+attribute carries `no_icf`: gcc's identical code folding turns the
+second of two handlers of one body into a handler that CALLS the first,
+which ends in MRET, so the call never returns and the caller's frame
+stays on the stack; on the V4F that frame is the twenty f-registers
+such a caller saves, eighty bytes (measured on the CH32V303VCT6: the
+interrupted program's next return jumped to a saved float). With F and
+the hardware prologue (the CH32V303's images) it is the naked
+trampoline: `name` is two instructions - a `jal` to an ordinary
+`extern "C"` function `name_body` holding the braces (two bytes
+compressed where the body lies within its reach, four otherwise) and
+MRET - and the body ends in `ret`; two bodies that fold are ordinary
+functions, for which a fold returns where it should. With F
+and the hardware prologue off it stays the attributed handler of the
+plain `interrupt`, whose software prologue saves whatever a call may
+clobber, f-registers included. `BRIO_CH32_VECTOR_FLOAT(name)` is the
+binding of a body that does float work: the same trampoline with the
+twenty caller-saved f-registers stored on the user stack around the
+call - the set gcc saves for a handler that calls out, so fcsr is not
+among them, and a body that changes the rounding mode or raises a flag
+leaves it so for the program it interrupted - and where there is no F
+or no hardware prologue it is the plain binding. THE TRAMPOLINE'S
+PROMISE IS A CHECK: `brio check ch32vx03`, after linking every image,
+runs `cli/vector_guard.py` over the F images - from each vector table
+entry that is a plain trampoline it walks the body's calls, tail jumps
+and branches through the listing and fails on a floating-point
+instruction, an access to fcsr, frm or fflags, an indirect call or jump
+it cannot resolve (a switch's jump table it reads from the image, every
+entry required inside the function) or an undecoded four-byte
+instruction, naming the image, the vector and the chain of functions;
+its fixtures under `test/family_ch32vx03/guard/` are linked and must be
+let through or refused by name, the refusals a float operation reached
+through a call and a call through a pointer.
+Interrupt nesting is never enabled: the kernel's rule
 ([../design/kernel.md](../design/kernel.md), section 1).
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
 between the last section the linker placed and the stack top with one
@@ -198,9 +232,9 @@ attribute, and hands BOTH trap entries the fault body:
 ```cpp
 using P = brio::Ch32vx03Platform<>;
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void fault_handler() { brio::fault_reset<P>(); }
-extern "C" BRIO_CH32_INTERRUPT void breakpoint_handler() { brio::fault_reset<P>(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
+BRIO_CH32_VECTOR(breakpoint_handler) { brio::fault_reset<P>(); }
 
 int main() {
     const uint32_t flags = brio::Reset::take_flags();    // first, and once
@@ -282,16 +316,16 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   last column carries two counter reads.) On the CH32V303VCT6's V4F the
   platform's order and its consume lose nothing either - 2400 tries,
   none lost and none a tick late, the slowest 5 us for one tick and
-  1005 us for two, three runs alike - at 21 cycles from the edge to the
-  handler, 75 to the caller's loop and 30 for an `idle()` the latch
-  returns at once. The loop and `idle()` are the CH32V203C8's
-  instructions one for one in the two images, and no f-register is
-  touched on the way: neither the sleep path nor the loop uses one, and
-  the suite's tick vector, whose storm branch for letter `k` saves
-  twenty, keeps those saves on that branch (gcc's shrink-wrapping), so
-  the tick takes its path with none. The two cycles fewer to the
-  handler and seven more to the loop than the V4B's are the core's or
-  the image's layout, not chased. The handler now runs straight out of the sleep, by
+  1005 us for two, three runs alike - at 24 cycles from the edge to the
+  handler, 76 to the caller's loop and 29 for an `idle()` the latch
+  returns at once (21 and 75 with the tick bound as an attributed
+  handler, the trampoline's call the difference). The loop and `idle()`
+  are the CH32V203C8's instructions one for one in the two images, and
+  no f-register is touched on the way: neither the sleep path nor the
+  loop uses one, and the tick's body uses none (the stratum's check
+  says so of every image). The one cycle more to the handler and eight
+  more to the loop than the V4B's are the trampoline's call and the
+  core's or the image's layout, the rest not chased. The handler now runs straight out of the sleep, by
   6.2's second WFE item, instead of after an unmask. In the console's
   kernel loop the Sleep path is thirteen instructions executed where it
   was fifteen - one SCTLR load where there were two, the deep path out
@@ -308,7 +342,7 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   finds the core asleep to the caller's loop 68 against 61, an `idle()`
   the latch returns at once 33 against 28, a quiet turn 146 against
   141. The CH32V303VCT6 turns 101 times over the same 100 ticks, a
-  quiet turn 137 cycles.
+  quiet turn 140 cycles.
 - **The STK arithmetic holds.** CMPLR = 143999 as programmed, CMPHR and
   CNTH both zero - the reload puts the low half back at the compare, so
   the high half of this 64-bit counter never moves. Over 200 reloads,
@@ -342,9 +376,12 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   the pushes from the handler's code to the hardware but leaves them on
   the user stack; and 53 cycles against that family's 83 is what a
   bigger core does with the same measurement. Free in semantics, so it
-  is the default. The CH32V303VCT6's V4F, with the hardware prologue:
-  entry 16, body 12, and a whole trip of 50 to 66 cycles over two runs
-  of 64 rounds.
+  is the default. The CH32V303VCT6's V4F, with the hardware prologue
+  and the handler a trampoline: entry 18, body 12, exit 30, a whole
+  trip of 60 to 70 cycles over 64 rounds - against entry 15, exit 25
+  and 52 to 59 for the same handler bound as an attributed leaf, the
+  three cycles of the call on the way in and five of the body's return
+  on the way out being the trampoline's price where nothing is saved.
 - **corecfgr's 0x1F buys nothing measurable here.** Three thousand
   iterations of a loop with a load and a data-dependent branch over a
   pseudo-random byte table took 36811 HCLK cycles with the register as
@@ -397,19 +434,26 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   out 0x3EAAAAAA under it against 0x3EAAAAAB to nearest.
 - **Floating point under an interrupt storm** (letter `k`): 200000
   iterations of twenty float additions held in twenty f-registers, with
-  the core counter reprogrammed to interrupt every 400 cycles and its
-  handler squaring and summing twenty float locals of its own - 19671
-  interrupts over 54 ms - leave every one of the twenty accumulators
-  exact to the bit and every handler's own sum right. The compiler's
-  saves are all there is, and they are enough.
+  TIM6 at the core's clock interrupting every 400 cycles - the kernel's
+  tick going on beside it - and its handler, bound by the float
+  trampoline, squaring and summing twenty float locals of its own -
+  20378 interrupts over 56 ms - leave every one of the twenty
+  accumulators exact to the bit and every handler's own sum right. The
+  float trampoline's twenty stores and loads, with what the body saves
+  of the callee-saved ones, are all there is, and they are enough.
 - **What an interrupt pays for floating point** (letter `l`): letter
   `e`'s method on three lines raised by hand, best of 32 rounds each - a
-  handler that touches no f-register takes 56 cycles of round trip
-  (entry 14, body 12), one doing a float multiply and a multiply-add 67
-  (entry 13, body 32, with four f-registers saved), and one calling a
-  function the compiler cannot see into 101 (entry 15, body 43, with all
-  twenty saved): some forty-five cycles for the twenty stores and twenty
-  loads at 144 MHz, the price of calling out of a handler on this core.
+  plain trampoline whose body touches no f-register takes 60 cycles of
+  round trip (entry 16, body 12); the float trampoline with a float
+  multiply and a multiply-add in its body 111 (entry 41, body 26: the
+  twenty stores ahead of the body, the twenty loads after it); and a
+  plain trampoline whose body calls a function the compiler cannot see
+  into 65 (entry 17, body 21), the call costing no f-register. Bound as
+  attributed handlers in the same session the three took 54, 67 (the
+  compiler saving the f-registers the body used) and 100 (all
+  twenty, for the call): the float trampoline's set is the price of a
+  body that does float work, and the plain trampoline makes calling out
+  of a handler cost the call alone.
 - **The bus in sleep** (letter `m`): a memory-to-memory DMA1 block of
   65535 words between two fixed addresses moves 48010 words in 2 ms
   with the core spinning - five cycles a word - on both parts, and

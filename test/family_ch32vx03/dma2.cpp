@@ -255,18 +255,18 @@ void uart_on_dma2() {
 void uart4_verbs() { uart_on_dma2<4, DmaRequest::uart4_tx, DmaRequest::uart4_rx>(); }
 
 // The eleven vectors, bound the way an application binds them.
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel1_handler() { (void)DmaChannel<2, 1>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel2_handler() { (void)DmaChannel<2, 2>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() {
+BRIO_CH32_VECTOR(dma2_channel1_handler) { (void)DmaChannel<2, 1>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel2_handler) { (void)DmaChannel<2, 2>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel3_handler) {
     const uint8_t f = Player::service();
     if ((f & Player::flag_complete) != 0u) { Player::lap(); }
     if ((f & Player::flag_error) != 0u) { Player::fail(); }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel4_handler() { (void)DmaChannel<2, 4>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { (void)DmaChannel<2, 5>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel6_handler() { (void)DmaChannel<2, 6>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel7_handler() { (void)DmaChannel<2, 7>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel8_handler() { (void)DmaChannel<2, 8>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel9_handler() { (void)DmaChannel<2, 9>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel10_handler() { (void)DmaChannel<2, 10>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel11_handler() { (void)DmaChannel<2, 11>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel4_handler) { (void)DmaChannel<2, 4>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel5_handler) { (void)DmaChannel<2, 5>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel6_handler) { (void)DmaChannel<2, 6>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel7_handler) { (void)DmaChannel<2, 7>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel8_handler) { (void)DmaChannel<2, 8>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel9_handler) { (void)DmaChannel<2, 9>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel10_handler) { (void)DmaChannel<2, 10>::isr(); }
+BRIO_CH32_VECTOR(dma2_channel11_handler) { (void)DmaChannel<2, 11>::isr(); }

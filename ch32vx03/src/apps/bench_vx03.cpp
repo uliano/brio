@@ -2335,19 +2335,19 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 // Each vector carries its meter's stamps around the ISR body the suites
 // bind: enter() first, leave() last.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+BRIO_CH32_VECTOR(systick_handler) {
     tick_meter.enter();
     brio::Ticker::tick();
     tick_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     usart_meter.enter();
     (void)Serial::isr();
     usart_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     if (stim_dma_vector<1, 1>()) {   // letter u's stimulus: not metered, one a burst
         return;
     }
@@ -2356,7 +2356,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
     copy_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (i2c_owner == 2u) {
         i2c_dma_meter.enter();
         const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
@@ -2377,7 +2377,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
 
 /// USART2's receive channel under letter u: the circular ring's laps and
 /// their half and full marks, whose true is the edge as the USART's.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (i2c_owner == 2u) {
         i2c_dma_meter.enter();
         const uint32_t t0 = i2c_watching ? Ruler::now() : 0u;
@@ -2391,27 +2391,27 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
     loop_rx_dma_vector();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { loop_usart_vector(); }
+BRIO_CH32_VECTOR(usart2_handler) { loop_usart_vector(); }
 
 /// The stimulus's slot on the CH32V303; nothing in the CH32V203's vector
 /// table names this body.
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { (void)stim_dma_vector<2, 5>(); }
+BRIO_CH32_VECTOR(dma2_channel5_handler) { (void)stim_dma_vector<2, 5>(); }
 
-extern "C" BRIO_CH32_INTERRUPT void uart4_handler() { stim_isr(); }
+BRIO_CH32_VECTOR(uart4_handler) { stim_isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     spi_rx_meter.enter();
     spi_rx_vector();
     spi_rx_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
     spi_tx_meter.enter();
     spi_tx_vector();
     spi_tx_meter.leave();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     spi_meter.enter();
     if (spi1_serves == spi1_plain) {
         if (SpiPlain::isr()) {
@@ -2428,7 +2428,7 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
 }
 
 /// Letter i: I2C1 the host, I2C2 the target on the self-link.
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     i2c_meter.enter();
     const uint32_t t0 = (i2c_watching || i2c_tracing) ? Ruler::now() : 0u;
     if (i2c_tracing) {
@@ -2440,7 +2440,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
     }
     i2c_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     i2c_meter.enter();
     const uint32_t t0 = (i2c_watching || i2c_tracing) ? Ruler::now() : 0u;
     if (i2c_tracing) {
@@ -2452,7 +2452,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
     }
     i2c_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c2_ev_handler() {
+BRIO_CH32_VECTOR(i2c2_ev_handler) {
     i2c_peer_meter.enter();
     if (i2c_tracing) {
         i2c_trace('T', Ruler::now(), i2c_target_status());
@@ -2460,7 +2460,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c2_ev_handler() {
     i2c_target_event();
     i2c_peer_meter.leave();
 }
-extern "C" BRIO_CH32_INTERRUPT void i2c2_er_handler() {
+BRIO_CH32_VECTOR(i2c2_er_handler) {
     i2c_peer_meter.enter();
     i2c_target_error();
     i2c_peer_meter.leave();

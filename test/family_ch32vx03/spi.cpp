@@ -369,12 +369,12 @@ int main()
 
 /// The vectors an application binds: the instance's own, and the two DMA
 /// channels its engines ride.
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler()
+BRIO_CH32_VECTOR(spi1_handler)
 {
     if (Host1::isr()) {
         post<Arb>(TransferDone{Host1::status()});
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void spi2_handler() { (void)Client2::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void spi_dma_tx_handler() { (void)Host1Dma::dma_tx_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void spi_dma_rx_handler() { (void)Host1Dma::dma_rx_isr(); }
+BRIO_CH32_VECTOR(spi2_handler) { (void)Client2::isr(); }
+BRIO_CH32_VECTOR(spi_dma_tx_handler) { (void)Host1Dma::dma_tx_isr(); }
+BRIO_CH32_VECTOR(spi_dma_rx_handler) { (void)Host1Dma::dma_rx_isr(); }

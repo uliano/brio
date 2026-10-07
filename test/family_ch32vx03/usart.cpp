@@ -266,4 +266,4 @@ void uart_task_verbs() {
     Serial::release();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }

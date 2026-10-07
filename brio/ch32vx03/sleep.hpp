@@ -160,7 +160,7 @@
  * the alarm. An application using the timed site must not drive
  * ch32vx03/rtc.hpp's counter elsewhere, and must bind the vector:
  *
- *     extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() { Site::isr(); }
+ *     BRIO_CH32_VECTOR(rtc_alarm_handler) { Site::isr(); }
  *
  * WHAT THE SILICON SAID OF ALL THIS is in docs/ch32vx03/sleep.md, with
  * the numbers for both parts: a Stop woken by the alarm some sixty

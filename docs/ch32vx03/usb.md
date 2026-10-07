@@ -293,7 +293,7 @@ using SysClock = brio::Clock<brio::ClockSource::pll, 96'000'000, 8'000'000>;   /
 Usb::init(clock);
 Device::start();                                             // the pull-up: the host enumerates from here
 
-extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
 brio::print(Port{}, "hello", brio::crlf);                    // once the host has configured the port
 ```
 

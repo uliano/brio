@@ -1156,7 +1156,7 @@ struct UartRxRing<true, Owner, size, Engine, P> {
  *   using Serial = brio::Uart<1, Platform>;
  *   constexpr Serial serial;                 // tag for print(serial, ...)
  *   Serial::init(clock, 115200);
- *   extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { Serial::isr(); }
+ *   BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }
  *
  * `P` is the platform, which the rings need to know whether an index can
  * be shared with a handler bare (atomic_width) or wants a guard.
@@ -1344,7 +1344,7 @@ struct Uart {
      * The ISR body of WHICHEVER DMA channel this transport owns - bind
      * it to the vector(s) the engines' channels report on:
      *
-     *     extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Serial::dma_isr(); }
+     *     BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Serial::dma_isr(); }
      *
      * Each engine reads only its own channel's flags, so this is safe
      * on a vector another channel of the program shares nothing with.

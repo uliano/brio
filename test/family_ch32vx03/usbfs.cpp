@@ -183,13 +183,13 @@ void usbfs_stack_verbs() {
 // The vectors a program binds: the controller's, whose body is the
 // stack's, and the wake-up line's - vector 58 on the CH32V303, 60 on the
 // CH32V203 (Usb::wakeup_irq).
-extern "C" BRIO_CH32_INTERRUPT void usbfs_handler() { Device::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void usb_wakeup_handler() {
+BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
+BRIO_CH32_VECTOR(usb_wakeup_handler) {
     if constexpr (Usb::wakes_on_line18) {
         (void)Usb::wakeup_isr();
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void usbfs_wakeup_handler() {
+BRIO_CH32_VECTOR(usbfs_wakeup_handler) {
     if constexpr (!Usb::wakes_on_line18) {
         (void)Usb::wakeup_isr();
     }

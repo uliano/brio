@@ -2790,10 +2790,10 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
+BRIO_CH32_VECTOR(spi1_handler) {
     spi1_isr_entries = spi1_isr_entries + 1u;
     if (err_mode) {
         err_isr_entries = err_isr_entries + 1u;
@@ -2820,7 +2820,7 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void spi2_handler() {
+BRIO_CH32_VECTOR(spi2_handler) {
     if (served_on_spi2()) {
         return;   // the CH32V303's letters g: SPI2 as the client of SPI3
     }
@@ -2835,29 +2835,29 @@ extern "C" BRIO_CH32_INTERRUPT void spi2_handler() {
 
 /// SPI3's vector, the CH32V303's: the client of letter f. On the other
 /// series the body is empty and nothing in the vector table names it.
-extern "C" BRIO_CH32_INTERRUPT void spi3_handler() { served_on_spi3(); }
+BRIO_CH32_VECTOR(spi3_handler) { served_on_spi3(); }
 
 /// SPI1's engines: one vector per channel on this family, each servicing
 /// its own - the receive channel's the transaction's one interrupt, the
 /// transmit channel's armed for an error alone.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if (dma_host_live && Dma1::dma_rx_isr()) {
         host_done = true;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() {
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
     if (dma_host_live && Dma1::dma_tx_isr()) {
         host_done = true;
     }
 }
 
 /// SPI2's engines, the same way round.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel4_handler() {
+BRIO_CH32_VECTOR(dma1_channel4_handler) {
     if (dma_host_live && PeerDma::dma_rx_isr()) {
         host_done = true;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() {
+BRIO_CH32_VECTOR(dma1_channel5_handler) {
     if (dma_host_live && PeerDma::dma_tx_isr()) {
         host_done = true;
     }

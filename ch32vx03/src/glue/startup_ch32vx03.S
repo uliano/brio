@@ -41,16 +41,16 @@
  * WEAK alias for default_handler (a spin), and an app binds one by
  * defining the strong symbol -
  *
- *   extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
- *   extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { Serial::isr(); }
+ *   BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+ *   BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }
  *
- * The attribute is what makes gcc end the function with MRET, and WHICH
- * attribute is the project's CH32VX03_HPE option (BRIO_CH32_HPE here):
- * with it, this crt sets INTSYSCR.HWSTKEN and the handlers are declared
- * "WCH-Interrupt-fast" - the caller-saved registers pushed and popped by
- * the hardware (QingKe V4 manual 3.2, HPE depth 3) and no prologue in the
- * handler; without it, INTSYSCR stays at its reset value and a handler
- * saves what it clobbers in software. Interrupt NESTING (INESTEN) is
+ * The binding is what ends the vector with MRET (pfic.hpp says how,
+ * per build), and the project's CH32VX03_HPE option (BRIO_CH32_HPE here)
+ * decides who saves the registers: with it, this crt sets
+ * INTSYSCR.HWSTKEN and the caller-saved integer registers are pushed and
+ * popped by the hardware (QingKe V4 manual 3.2, HPE depth 3), no
+ * prologue in the handler; without it, INTSYSCR stays at its reset
+ * value and a handler saves what it clobbers in software. Interrupt NESTING (INESTEN) is
  * never set, which is where this crt parts company with WCH's own: the
  * kernel's rule (docs/design/kernel.md) is that an ISR body runs to
  * completion, on every target.
@@ -86,9 +86,10 @@
  * ABI the image was compiled for, never to a part name: a V4F part built
  * without F keeps the unit off. What the hardware prologue does NOT do
  * is save an FP register: it pushes the sixteen integer caller-saved
- * ones (3.4, note 3), and a handler that touches the FPU pays for its
- * f-registers in software (docs/ch32vx03/platform.md measures the
- * price).
+ * ones (3.4, note 3), which is why an image with F binds each vector as
+ * a trampoline whose body must touch no f-register, or as the float
+ * trampoline that saves the caller-saved ones itself (pfic.hpp,
+ * docs/ch32vx03/platform.md measures the price).
  *
  * reset_handler does the minimum an image needs: the global pointer and
  * the stack, copy .data from flash, zero .bss, paint the free RAM, walk
@@ -231,6 +232,9 @@ _start:
     .word   dma1_channel8_handler  /* 62 */
 #endif
 #endif
+    /* The table's length, as the symbol's size: what brio check's
+       vector guard (cli/vector_guard.py) reads its roots from. */
+    .size   _start, . - _start
     .option rvc
 
     .section .text.startup, "ax", @progbits

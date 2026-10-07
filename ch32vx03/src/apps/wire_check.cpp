@@ -166,4 +166,4 @@ int main()
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }

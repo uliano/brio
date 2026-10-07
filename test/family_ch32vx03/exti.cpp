@@ -161,9 +161,9 @@ void exti_verbs() {
     LineA::release();
 }
 
-/// A shared vector's body, the shape an app binds (the attribute is
-/// pfic.hpp's one spelling, and this TU is compiled both ways).
-extern "C" BRIO_CH32_INTERRUPT void exti9_5_handler() {
+/// A shared vector's body, the shape an app binds (the binding is
+/// pfic.hpp's one spelling, and this TU is compiled every way).
+BRIO_CH32_VECTOR(exti9_5_handler) {
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti9_5));
     if (brio::Exti::served(fired, 5)) {
         (void)fired;

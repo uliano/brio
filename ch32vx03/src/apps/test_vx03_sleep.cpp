@@ -2095,14 +2095,14 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The alarm's own vector, behind EXTI line 17 - the path that survives
 /// a Stop. In a timed round it runs the site's four acts; everywhere
 /// else it records what the wake found and acknowledges.
-extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() {
+BRIO_CH32_VECTOR(rtc_alarm_handler) {
     if (timed_round) {
         Timed::isr();
         alarm_hits = alarm_hits + 1u;
@@ -2114,21 +2114,21 @@ extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() {
 }
 
 /// The pad an instrument outside this board drives.
-extern "C" BRIO_CH32_INTERRUPT void exti0_handler() {
+BRIO_CH32_VECTOR(exti0_handler) {
     (void)brio::Exti::clear(0);
     exti0_hits = exti0_hits + 1u;
 }
 
 /// PA1's line, which the wire from PA6 drives (letter j): the time of the
 /// edge's arrival on TIM3's own counter.
-extern "C" BRIO_CH32_INTERRUPT void exti1_handler() {
+BRIO_CH32_VECTOR(exti1_handler) {
     exti1_count = EdgeTim::count();
     (void)brio::Exti::clear(1);
     exti1_hits = exti1_hits + 1u;
 }
 
 /// The supply monitor's own vector, on EXTI line 16.
-extern "C" BRIO_CH32_INTERRUPT void pvd_handler() {
+BRIO_CH32_VECTOR(pvd_handler) {
     (void)brio::Pwr::pvd_isr();
     pvd_hits = pvd_hits + 1u;
 }

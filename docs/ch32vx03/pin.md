@@ -310,7 +310,7 @@ Line::claim(brio::PinPull::up);                  // input + pull + EXTICR
 (void)Line::arm(true);
 brio::Pfic::enable(*Line::irq());                // exti1
 
-extern "C" BRIO_CH32_INTERRUPT void exti1_handler() {
+BRIO_CH32_VECTOR(exti1_handler) {
     const uint32_t fired = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti1));
     if (brio::Exti::served(fired, Line::line)) { /* ... */ }
 }

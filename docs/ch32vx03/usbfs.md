@@ -351,7 +351,7 @@ using SysClock = brio::Clock<brio::ClockSource::pll, 96'000'000, 8'000'000>;   /
 Usb::init(clock);
 Device::start();                                             // the pull-up: the host enumerates from here
 
-extern "C" BRIO_CH32_INTERRUPT void usbfs_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
 ```
 
 A program that knows its endpoints gives the pool exactly what they
@@ -365,7 +365,7 @@ The host's resume as a wake-up, on the line the part's class uses:
 
 ```cpp
 (void)Usb::arm_wakeup(true);
-extern "C" BRIO_CH32_INTERRUPT void usb_wakeup_handler() { (void)Usb::wakeup_isr(); }   // CH32V303: line 18
+BRIO_CH32_VECTOR(usb_wakeup_handler) { (void)Usb::wakeup_isr(); }   // CH32V303: line 18
 ```
 
 And a program that runs on either series takes whichever controller the
@@ -376,9 +376,9 @@ table states the one fact it needs for that as a macro too:
 ```cpp
 using Usb = std::conditional_t<brio::device::has_usbd, brio::Usbd<>, brio::Usbfs<>>;
 #if BRIO_CH32VX03_HAS_USBD
-extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
 #else
-extern "C" BRIO_CH32_INTERRUPT void usbfs_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
 #endif
 ```
 

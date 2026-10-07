@@ -224,7 +224,7 @@ struct ResetReporter {
  * The fault vector's BODY: record the wreck and reset. An app binds it
  * to the vectors an exception can arrive on -
  *
- *     extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
+ *     BRIO_CH32_VECTOR(fault_handler) {
  *         brio::fault_reset<brio::Ch32vx03Platform<>>();
  *     }
  *

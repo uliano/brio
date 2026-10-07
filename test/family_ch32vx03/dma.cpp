@@ -391,8 +391,8 @@ void transport_verbs() {
 
 // The engines' vectors: one handler a channel, each reading only its own
 // flags. The two the transport owns, bound the way an application does.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Fed::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Fed::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Fed::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) { (void)Fed::dma_isr(); }
 // The eighth channel's vector is bound where the part has the channel; on
 // the CH32V303 the crt carries no such entry and the body is empty.
 template <uint8_t ch>
@@ -401,4 +401,4 @@ void channel_isr_if_present() {
         (void)DmaChannel<1, ch>::isr();
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { channel_isr_if_present<8>(); }
+BRIO_CH32_VECTOR(dma1_channel8_handler) { channel_isr_if_present<8>(); }

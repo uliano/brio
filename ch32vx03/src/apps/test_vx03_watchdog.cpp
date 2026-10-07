@@ -678,14 +678,14 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The window watchdog's one vector: the early wake-up, one counter
 /// tick before the reset. This body does NOT refresh - the leg that
 /// arms it is about the interrupt arriving, not about surviving.
-extern "C" BRIO_CH32_INTERRUPT void wwdg_handler() {
+BRIO_CH32_VECTOR(wwdg_handler) {
     if (brio::Wwdg::isr()) {
         ewi_calls = ewi_calls + 1u;
         // The counter in .bss is this boot's; the one in the token is

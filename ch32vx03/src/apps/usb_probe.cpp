@@ -236,15 +236,15 @@ using SerialLines = brio::SerialPort<Serial, P, Console, 64>;
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() {
+BRIO_CH32_VECTOR(usart1_handler) {
     if (Serial::isr()) {
         brio::post<SerialLines>(brio::RxActivity{});
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() {
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) {
     usb_trace.stamp('i', brio::usbd()->ISTR);
     usb_trace.stamp('e', brio::usbd()->EPR[0].R);
     Device::isr();

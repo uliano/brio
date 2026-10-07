@@ -1,8 +1,11 @@
 // PFIC family smoke TU: the global mask that is a CSR bit, the guard
-// built on it, every per-line verb of the controller, and the handler
-// attribute in BOTH of its expansions - the fixture compiles this file
-// with BRIO_CH32_HPE=0 and =1, which is the only way one spelling with
-// two meanings gets proven.
+// built on it, every per-line verb of the controller, and the vector
+// binding in EVERY one of its expansions - the fixture compiles this
+// file with BRIO_CH32_HPE=0 and =1 on both ISAs, so the attributed
+// handler of either prologue and, on the CH32V303's parts with the
+// hardware prologue, the naked trampoline and its float sibling are
+// each compiled, which is the only way one spelling with several
+// meanings gets proven.
 #include "ch32vx03/pfic.hpp"
 
 using namespace brio;
@@ -46,9 +49,17 @@ uint32_t guarded_sum(const volatile uint32_t* p) {
     return total;
 }
 
-// A vector binding, which is what the attribute is for: the app's one
-// piece of vendor glue, and the thing that differs between the two HPE
-// builds.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+// A vector binding: the app's one piece of vendor glue, and the thing
+// that differs between the HPE builds and the two ABIs.
+BRIO_CH32_VECTOR(systick_handler) {
     Pfic::clear_pending(Irq::systick);
+}
+
+// The binding of a body that does float work (the same binding as the
+// one above where there is no F or no hardware prologue).
+volatile float pfic_float_in = 1.5f;
+volatile float pfic_float_out = 0.0f;
+BRIO_CH32_VECTOR_FLOAT(software_handler) {
+    pfic_float_out = pfic_float_in * pfic_float_in;
+    Pfic::clear_pending(Irq::software);
 }

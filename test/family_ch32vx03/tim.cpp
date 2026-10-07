@@ -331,7 +331,7 @@ using Latch = MeterLatch<uint32_t, Ch32vx03Platform<>, 0>;
 using WidthLatch = MeterLatch<uint32_t, Ch32vx03Platform<>, 1>;
 static_assert(MeterSource<Latch> && MeterSource<WidthLatch>);
 
-extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+BRIO_CH32_VECTOR(tim2_handler) {
     const uint16_t hit = Tim<2>::isr();
     if ((hit & Period::period_flag) != 0u) {
         Latch::store(Period::period_ticks());
@@ -341,7 +341,7 @@ extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim4_handler() {
+BRIO_CH32_VECTOR(tim4_handler) {
     if ((Tim<4>::isr() & Interval::capture_flag) != 0u) {
         if (const std::optional<uint32_t> d = Interval::interval()) {
             Latch::store(*d);
@@ -351,7 +351,7 @@ extern "C" BRIO_CH32_INTERRUPT void tim4_handler() {
 
 /// The vector bodies an application binds, in both their shapes: one
 /// line answering for everything, and the advanced timer's four.
-extern "C" BRIO_CH32_INTERRUPT void tim3_handler() { (void)Tim<3>::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void tim1_cc_handler() {
+BRIO_CH32_VECTOR(tim3_handler) { (void)Tim<3>::isr(); }
+BRIO_CH32_VECTOR(tim1_cc_handler) {
     (void)Tim<1>::isr(Tim<1>::vector_flags(Irq::tim1_cc));
 }

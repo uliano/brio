@@ -122,7 +122,7 @@ void exercise_wwdg() {
 
 /// The one vector either block has, as an application binds it: a
 /// handler with a single tick to refresh before the reset.
-extern "C" BRIO_CH32_INTERRUPT void wwdg_handler() {
+BRIO_CH32_VECTOR(wwdg_handler) {
     if (Wwdg::isr()) {
         Wwdg::refresh();
     }

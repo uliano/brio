@@ -1673,8 +1673,8 @@ struct I2cClientOptions {
  * ends with the host's NACK (AF, on the error vector); a write tenure
  * with STOPF.
  *
- *   extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() { act(Peer::service()); }
- *   extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() { act(Peer::error_service()); }
+ *   BRIO_CH32_VECTOR(i2c1_ev_handler) { act(Peer::service()); }
+ *   BRIO_CH32_VECTOR(i2c1_er_handler) { act(Peer::error_service()); }
  */
 template <uint8_t n, I2cPins pins = i2c_default_pins<n>>
 class I2cClient {

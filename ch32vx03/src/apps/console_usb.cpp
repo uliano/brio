@@ -244,7 +244,7 @@ void Console::cmd_err(const Cmd&, Serial s) {
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 // WHICH VECTOR IS THE PREPROCESSOR'S QUESTION, the one place this
 // program asks it: a handler is a symbol the image defines or does not,
@@ -255,7 +255,7 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 // single-buffered device arrives on; the high-priority one (shared with
 // the CAN's transmit) belongs to double-buffered and isochronous
 // endpoints, which this driver does not use.
-extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() {
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) {
     usb_trace.stamp('i', brio::usbd()->ISTR);
     usb_trace.stamp('e', brio::usbd()->EPR[0].R);
     Device::isr();
@@ -270,7 +270,7 @@ extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() {
 // The host/device controller's one line, which every event of this
 // block in device mode arrives on: the flags and the status as the
 // handler finds them, then the stack.
-extern "C" BRIO_CH32_INTERRUPT void usbfs_handler() {
+BRIO_CH32_VECTOR(usbfs_handler) {
     usb_trace.stamp('f', Usb::flags());
     usb_trace.stamp('s', Usb::status());
     Device::isr();

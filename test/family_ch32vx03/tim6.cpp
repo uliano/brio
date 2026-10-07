@@ -87,5 +87,5 @@ void exercise_basic() {
     Tick7::stop();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim6_handler() { (void)T6::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void tim7_handler() { (void)T7::isr(); }
+BRIO_CH32_VECTOR(tim6_handler) { (void)T6::isr(); }
+BRIO_CH32_VECTOR(tim7_handler) { (void)T7::isr(); }

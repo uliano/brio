@@ -234,7 +234,7 @@ brio::Dac::claim_stream<1, Player>();
 (void)brio::Tim<6>::master(brio::TimMasterMode::update);   // TIM6's TRGO is code 000
 brio::Tim<6>::enable(true);
 
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() {
+BRIO_CH32_VECTOR(dma2_channel3_handler) {
     const uint8_t f = Player::service();
     if ((f & Player::flag_complete) != 0u) { Player::lap(); }
     if ((f & Player::flag_error) != 0u) { Player::fail(); }

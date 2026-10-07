@@ -1246,21 +1246,21 @@ void banner() {
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The controller's one line: every event of this block in device mode.
-extern "C" BRIO_CH32_INTERRUPT void usbfs_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usbfs_handler) { Device::isr(); }
 /// The two wake-up vectors: the driver's line through its body, the
 /// other line counted by hand (letter s).
-extern "C" BRIO_CH32_INTERRUPT void usb_wakeup_handler() {
+BRIO_CH32_VECTOR(usb_wakeup_handler) {
     if constexpr (Usb::wakes_on_line18) {
         (void)Usb::wakeup_isr();
     } else if (brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::usb_wakeup)) != 0u) {
         other_hits = other_hits + 1u;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void usbfs_wakeup_handler() {
+BRIO_CH32_VECTOR(usbfs_wakeup_handler) {
     if constexpr (!Usb::wakes_on_line18) {
         (void)Usb::wakeup_isr();
     } else if (brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::usbfs_wakeup)) != 0u) {

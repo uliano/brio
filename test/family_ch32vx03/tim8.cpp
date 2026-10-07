@@ -138,12 +138,12 @@ void exercise_advanced_trio() {
 }
 
 // Their vector bodies, the four lines of an advanced timer each bound.
-extern "C" BRIO_CH32_INTERRUPT void tim8_up_handler() { (void)T8::isr(T8::vector_flags(Irq::tim8_up)); }
-extern "C" BRIO_CH32_INTERRUPT void tim8_cc_handler() { (void)T8::isr(T8::vector_flags(Irq::tim8_cc)); }
-extern "C" BRIO_CH32_INTERRUPT void tim8_brk_handler() { (void)T8::isr(T8::vector_flags(Irq::tim8_brk)); }
-extern "C" BRIO_CH32_INTERRUPT void tim8_trg_com_handler() {
+BRIO_CH32_VECTOR(tim8_up_handler) { (void)T8::isr(T8::vector_flags(Irq::tim8_up)); }
+BRIO_CH32_VECTOR(tim8_cc_handler) { (void)T8::isr(T8::vector_flags(Irq::tim8_cc)); }
+BRIO_CH32_VECTOR(tim8_brk_handler) { (void)T8::isr(T8::vector_flags(Irq::tim8_brk)); }
+BRIO_CH32_VECTOR(tim8_trg_com_handler) {
     (void)T8::isr(T8::vector_flags(Irq::tim8_trg_com));
 }
-extern "C" BRIO_CH32_INTERRUPT void tim9_up_handler() { (void)T9::isr(T9::vector_flags(Irq::tim9_up)); }
-extern "C" BRIO_CH32_INTERRUPT void tim10_cc_handler() { (void)T10::isr(T10::vector_flags(Irq::tim10_cc)); }
-extern "C" BRIO_CH32_INTERRUPT void tim5_handler() { (void)T5::isr(); }
+BRIO_CH32_VECTOR(tim9_up_handler) { (void)T9::isr(T9::vector_flags(Irq::tim9_up)); }
+BRIO_CH32_VECTOR(tim10_cc_handler) { (void)T10::isr(T10::vector_flags(Irq::tim10_cc)); }
+BRIO_CH32_VECTOR(tim5_handler) { (void)T5::isr(); }

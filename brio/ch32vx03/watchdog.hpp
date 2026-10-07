@@ -587,7 +587,7 @@ struct Wwdg {
      * The vector's BODY: true when the early wake-up was this
      * peripheral's doing, the flag cleared. An application binds it -
      *
-     *     extern "C" BRIO_CH32_INTERRUPT void wwdg_handler() {
+     *     BRIO_CH32_VECTOR(wwdg_handler) {
      *         if (brio::Wwdg::isr()) { brio::Wwdg::refresh(); }
      *     }
      *

@@ -399,7 +399,7 @@ brio::Adc<1>::start();
 with the channel's vector doing the two things a stream's glue does:
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     const uint8_t f = Source::service();
     if ((f & Source::flag_complete) != 0u) {
         (void)Source::complete();
@@ -492,7 +492,7 @@ And the sampler over the converter, walking a list at a software pace:
 using Sampler = brio::AnalogSampler<brio::Adc<1>, P, brio::Subscribers<Monitor>,
                                     Vin{}, brio::AdcInput::vrefint, brio::AdcInput::temperature>;
 
-extern "C" BRIO_CH32_INTERRUPT void adc1_2_handler() {
+BRIO_CH32_VECTOR(adc1_2_handler) {
     const uint8_t in = brio::Adc<1>::selected();
     const uint16_t v = brio::Adc<1>::result_counts();
     brio::post<Sampler>(brio::Sampled{v, in});

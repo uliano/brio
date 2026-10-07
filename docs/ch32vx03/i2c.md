@@ -354,8 +354,8 @@ With both DMA engines, which are the instance's own two channels:
 ```cpp
 using Dma = brio::I2cHost<1, brio::i2c_default_pins<1>,
                           brio::DmaTxEngine<1, 6>, brio::DmaRxEngine<1, 7>>;
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Dma::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Dma::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel6_handler) { (void)Dma::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Dma::dma_isr(); }
 ```
 
 A wire whose rise time has been measured, told to the block:
@@ -616,31 +616,25 @@ letters declining by name). What they measure:
   written bytes; requested while the last byte shifts, every one - the
   engine's order now, without a dummy byte in the data register.
 - **THE REFUSED LAST BYTE** (letter `o`, I2C2 the target served from
-  its own vector): with the core at 96 and at 48 MHz every refusal
+  its own vector): with the core at 96, 48 and 8 MHz every refusal
   answered `i2c_nack_data` with the bus let go and the next tenure
-  `i2c_ok`, and every control exact, pump and engines, 100 and 400 kHz;
-  with the core at 8 MHz the same at 100 kHz, and NOT at 400 kHz. There,
-  with two to four bytes written, the target took one byte fewer than
-  written: a control - every byte acknowledged - ended `i2c_ok` one
-  byte short (one control of four exact, or none), and a refusal ended
-  `i2c_nack_addr` with the target one byte short; the bus was let go
-  and the next tenure ran every time. That is this die's target losing
-  the last written byte before a late repeated START (above), at a core
-  where a 400 kHz byte is 180 cycles and every handler of both ends
-  saves the V4F's twenty f-registers on entry, each calling out of
-  line (a driver helper, the BusActivity count, the kernel's `post`),
-  which the hardware prologue never does ([platform.md](platform.md)). Images
-  of the suite with handlers flattened (none of them then calling out
-  or saving an f-register) split it: every handler flattened, the
-  letter passes at 8 MHz and 400 kHz (64 refusals of 64, every
-  control) and the suite 31 of 31; the host's four alone, the pump clean and
-  the engines' controls two of four; the target's two alone, every
-  control exact and the refusals taken whole by a target late with its
-  NACK (12 and 8 of 16, the instrument's limit the letter counts apart).
-  The loss wants a late host AND a late target, and the f-register
-  saves make both late. Three runs of the letter fail the same way as
-  the stratum stands; the client answering a standing byte before the
-  address, tried, changes nothing (the byte never raises RxNE).
+  `i2c_ok`, and every control exact, pump and engines, 100 and 400 kHz
+  - at 8 MHz and 400 kHz on the engines two or three refusals of
+  sixteen taken whole by a target late with its NACK, the instrument's
+  limit the letter counts apart, over four runs. That rung is where a
+  400 kHz byte is 180 core cycles and the handlers' entry is the
+  margin: with every handler of both ends saving the V4F's twenty
+  f-registers on entry - the attributed binding, each calling out of
+  line (a driver helper, the BusActivity count, the kernel's `post`) -
+  the target took one byte fewer than written whenever two to four
+  were, a control ending `i2c_ok` one byte short (one control of four
+  exact, or none) and a refusal `i2c_nack_addr`: this die's target
+  losing the last written byte before a late repeated START (above).
+  The loss wanted a late host AND a late target (images with the
+  host's handlers alone, or the target's alone, made cheap split it).
+  With the vectors bound as the trampolines the V4F's images use
+  ([platform.md](platform.md)) no handler saves an f-register and the
+  loss is gone: every control exact in four runs, the suite 31 of 31.
 - **A target stuck mid-byte, with no foreign chip**: a read of zeros cut
   off four bit times into its first byte by taking the host through its
   reset line leaves I2C2 holding SDA low with SCL released high;
@@ -682,13 +676,6 @@ letters declining by name). What they measure:
 
 Driver gaps:
 
-- **The CH32V303VCT6 at 8 MHz and 400 kHz** (above): a write of two
-  bytes or more before a repeated START loses its last byte to this
-  die's target when the handlers pay the V4F's f-register saves. The
-  remedy measured - every handler flattened - is the handler
-  attribute's, a choice that moves every image of the part
-  ([platform.md](platform.md)); 48 MHz is the slowest core measured
-  clean at 400 kHz here.
 - **10-bit addressing on the HOST side.** The tenure
   `docs/design/i2c-bus.md` describes carries a 7-bit address on every
   stratum, so the Request has no shape for a 10-bit one and the header

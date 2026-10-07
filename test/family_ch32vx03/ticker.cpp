@@ -33,4 +33,4 @@ void ticker_verbs() {
     Ticker::tick();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { Ticker::tick(); }

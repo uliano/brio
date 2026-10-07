@@ -176,7 +176,7 @@ void pwr_stop_here() {
 }
 
 /// The PVD's own vector, as an application binds it.
-extern "C" BRIO_CH32_INTERRUPT void pvd_handler() {
+BRIO_CH32_VECTOR(pvd_handler) {
     if (Pwr::pvd_isr()) {
         Pwr::clear_flags();
     }

@@ -411,7 +411,7 @@ The console, as every app has it:
 using Serial = brio::Uart<1, P>;                 // USART1, PA9/PA10, 8N1
 constexpr Serial serial;
 Serial::init(clock, 115200);
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 ```
 
 A second port with a frame of its own and the flow-control pair, on a
@@ -430,7 +430,7 @@ tail:
 ```cpp
 using Aux = brio::Uart<6, P>;                     // UART6, PC0/PC1
 Aux::init(clock, 57600);
-extern "C" BRIO_CH32_INTERRUPT void uart6_handler() { (void)Aux::isr(); }
+BRIO_CH32_VECTOR(uart6_handler) { (void)Aux::isr(); }
 ```
 
 The transport with both DMA engines, on the slots this instance's
@@ -440,19 +440,19 @@ CH32V303:
 ```cpp
 using Loop = brio::Uart<2, P, 256, 256, brio::UartFormat{},
                         brio::DmaTxEngine<1, 7>, brio::DmaRxEngine<1, 6>>;
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() {
+BRIO_CH32_VECTOR(usart2_handler) {
     if (Loop::isr()) { brio::post<LoopLines>(brio::RxActivity{}); }       // idle line, first frame
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (Loop::dma_isr()) { brio::post<LoopLines>(brio::RxActivity{}); }   // the lap's marks
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Loop::dma_isr(); }
+BRIO_CH32_VECTOR(dma1_channel7_handler) { (void)Loop::dma_isr(); }
 
 using Far = brio::Uart<4, P, 256, 256, brio::UartFormat{},
                        brio::DmaTxEngine<2, 5>, brio::DmaRxEngine<2, 3>>;
-extern "C" BRIO_CH32_INTERRUPT void uart4_handler() { (void)Far::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel5_handler() { (void)Far::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel3_handler() { (void)Far::dma_isr(); }
+BRIO_CH32_VECTOR(uart4_handler) { (void)Far::isr(); }
+BRIO_CH32_VECTOR(dma2_channel5_handler) { (void)Far::dma_isr(); }
+BRIO_CH32_VECTOR(dma2_channel3_handler) { (void)Far::dma_isr(); }
 ```
 
 The chapter beyond the transport, on the resource - a LIN break, a

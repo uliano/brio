@@ -107,5 +107,5 @@ void resource_verbs() {
     In::bus_clock(false);
 }
 
-extern "C" BRIO_CH32_INTERRUPT void spi2_handler() { (void)Out::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void spi3_handler() { (void)In::isr(); }
+BRIO_CH32_VECTOR(spi2_handler) { (void)Out::isr(); }
+BRIO_CH32_VECTOR(spi3_handler) { (void)In::isr(); }

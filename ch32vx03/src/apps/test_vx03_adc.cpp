@@ -1926,7 +1926,7 @@ void banner() {
 
 // The one vector both converters report on. In the samplers' letters it
 // carries the result into a kernel; everywhere else it counts.
-extern "C" BRIO_CH32_INTERRUPT void adc1_2_handler() {
+BRIO_CH32_VECTOR(adc1_2_handler) {
     if (adc_mode == AdcMode::sampling) {
         const uint8_t in = brio::Adc<1>::selected();
         const uint16_t v = brio::Adc<1>::result_counts();
@@ -1953,7 +1953,7 @@ extern "C" BRIO_CH32_INTERRUPT void adc1_2_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
+BRIO_CH32_VECTOR(dma1_channel1_handler) {
     const uint8_t f = Source::service();
     if ((f & Source::flag_complete) != 0u) {
         (void)Source::complete();
@@ -1965,7 +1965,7 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() {
 }
 
 /// Letter d's tear window: read CNTR and stop the channel, nothing else.
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     using Tear = brio::DmaChannel<1, 2>;
     const uint16_t left = Tear::remaining();
     Tear::enable(false);
@@ -1976,15 +1976,15 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void exti15_10_handler() {
+BRIO_CH32_VECTOR(exti15_10_handler) {
     const uint32_t up = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti15_10));
     if (up != 0u) {
         exti_calls = static_cast<uint16_t>(exti_calls + 1u);
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

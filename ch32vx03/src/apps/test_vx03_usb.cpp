@@ -725,14 +725,14 @@ void banner() {
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 // The controller's low-priority line, which every event of a
 // single-buffered device arrives on; the high-priority one, shared with
 // the CAN's transmit, belongs to the double-buffered and isochronous
 // endpoints this driver does not use.
-extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

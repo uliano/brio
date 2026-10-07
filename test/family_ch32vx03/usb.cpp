@@ -117,4 +117,4 @@ void usb_stack_verbs() {
     Device::stop();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void usb_lp_can1_rx0_handler() { Device::isr(); }
+BRIO_CH32_VECTOR(usb_lp_can1_rx0_handler) { Device::isr(); }

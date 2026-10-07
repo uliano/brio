@@ -124,4 +124,4 @@ void sleep_standby() { Site::enter_standby(); }
 
 /// The RTC alarm's own vector, as an application binds it: the four
 /// acts, in one call.
-extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() { Timed::isr(); }
+BRIO_CH32_VECTOR(rtc_alarm_handler) { Timed::isr(); }

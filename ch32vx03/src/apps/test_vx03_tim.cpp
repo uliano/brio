@@ -2305,17 +2305,17 @@ void banner() {
 // The vectors this program owns. Each body reads AND CLEARS the flags of
 // its own vector first, which on the advanced timer is the mask of the
 // line it was bound to.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void tim1_up_handler() {
+BRIO_CH32_VECTOR(tim1_up_handler) {
     if (Adv::isr(Adv::vector_flags(brio::Irq::tim1_up)) != 0u) {
         up_calls = up_calls + 1u;
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim1_cc_handler() {
+BRIO_CH32_VECTOR(tim1_cc_handler) {
     const uint16_t hit = Adv::isr(Adv::vector_flags(brio::Irq::tim1_cc));
     if (hit != 0u) {
         cc_calls = cc_calls + 1u;
@@ -2323,7 +2323,7 @@ extern "C" BRIO_CH32_INTERRUPT void tim1_cc_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim1_brk_handler() {
+BRIO_CH32_VECTOR(tim1_brk_handler) {
     const uint16_t hit = Adv::isr(Adv::vector_flags(brio::Irq::tim1_brk));
     if (hit != 0u) {
         brk_calls = brk_calls + 1u;
@@ -2331,13 +2331,13 @@ extern "C" BRIO_CH32_INTERRUPT void tim1_brk_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim1_trg_com_handler() {
+BRIO_CH32_VECTOR(tim1_trg_com_handler) {
     if (Adv::isr(Adv::vector_flags(brio::Irq::tim1_trg_com)) != 0u) {
         trg_calls = trg_calls + 1u;
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim3_handler() {
+BRIO_CH32_VECTOR(tim3_handler) {
     const uint16_t hit = Wave::isr();
     if (hit != 0u) {
         wave_calls = wave_calls + 1u;
@@ -2349,28 +2349,28 @@ extern "C" BRIO_CH32_INTERRUPT void tim3_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim8_up_handler() { tim8_body<>(brio::Irq::tim8_up); }
-extern "C" BRIO_CH32_INTERRUPT void tim8_cc_handler() { tim8_body<>(brio::Irq::tim8_cc); }
-extern "C" BRIO_CH32_INTERRUPT void tim8_brk_handler() { tim8_body<>(brio::Irq::tim8_brk); }
-extern "C" BRIO_CH32_INTERRUPT void tim8_trg_com_handler() {
+BRIO_CH32_VECTOR(tim8_up_handler) { tim8_body<>(brio::Irq::tim8_up); }
+BRIO_CH32_VECTOR(tim8_cc_handler) { tim8_body<>(brio::Irq::tim8_cc); }
+BRIO_CH32_VECTOR(tim8_brk_handler) { tim8_body<>(brio::Irq::tim8_brk); }
+BRIO_CH32_VECTOR(tim8_trg_com_handler) {
     tim8_body<>(brio::Irq::tim8_trg_com);
 }
-extern "C" BRIO_CH32_INTERRUPT void tim9_up_handler() {
+BRIO_CH32_VECTOR(tim9_up_handler) {
     advanced_body<9>(brio::Irq::tim9_up, v9_up, v9_cc);
 }
-extern "C" BRIO_CH32_INTERRUPT void tim9_cc_handler() {
+BRIO_CH32_VECTOR(tim9_cc_handler) {
     advanced_body<9>(brio::Irq::tim9_cc, v9_up, v9_cc);
 }
-extern "C" BRIO_CH32_INTERRUPT void tim10_up_handler() {
+BRIO_CH32_VECTOR(tim10_up_handler) {
     advanced_body<10>(brio::Irq::tim10_up, v10_up, v10_cc);
 }
-extern "C" BRIO_CH32_INTERRUPT void tim10_cc_handler() {
+BRIO_CH32_VECTOR(tim10_cc_handler) {
     advanced_body<10>(brio::Irq::tim10_cc, v10_up, v10_cc);
 }
-extern "C" BRIO_CH32_INTERRUPT void tim6_handler() { basic_body<6>(v6_up); }
-extern "C" BRIO_CH32_INTERRUPT void tim7_handler() { basic_body<7>(v7_up); }
+BRIO_CH32_VECTOR(tim6_handler) { basic_body<6>(v6_up); }
+BRIO_CH32_VECTOR(tim7_handler) { basic_body<7>(v7_up); }
 
-extern "C" BRIO_CH32_INTERRUPT void tim4_handler() {
+BRIO_CH32_VECTOR(tim4_handler) {
     const uint16_t hit = Quad::isr();
     if (period_arm && (hit & Period::period_flag) != 0u) {
         PeriodLatch::store(Period::period_ticks());

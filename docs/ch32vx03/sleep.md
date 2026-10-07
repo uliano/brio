@@ -410,7 +410,7 @@ placed where the nearest deadline is, its counter read as the witness:
 ```cpp
 using Site = brio::Ch32vx03TimedSleepSite<P, Clock>;   // the crystal, a 1024 Hz tick
 if (!Site::init()) { /* no crystal on this board: a plain site is what is left */ }
-extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() { Site::isr(); }
+BRIO_CH32_VECTOR(rtc_alarm_handler) { Site::isr(); }
 ```
 
 Standby, which is not a rung and does not come back the way the others

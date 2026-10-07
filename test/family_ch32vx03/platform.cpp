@@ -125,5 +125,5 @@ void interrupt_verbs() {
     Pfic::disable(Irq::usart1);
 }
 
-// The handler attribute is one spelling, whichever way the image is built.
-extern "C" BRIO_CH32_INTERRUPT void software_handler() { Pfic::clear_pending(Irq::software); }
+// The vector binding is one spelling, whichever way the image is built.
+BRIO_CH32_VECTOR(software_handler) { Pfic::clear_pending(Irq::software); }

@@ -165,9 +165,9 @@ void uart_tasks() {
 
 // The vectors this class's tail gives the four upper ports, bound the way
 // an application binds them.
-extern "C" BRIO_CH32_INTERRUPT void uart5_handler() { (void)Port5::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void uart6_handler() { (void)Port6::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void uart7_handler() { (void)Port7::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void uart8_handler() { (void)Port8::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel4_handler() { (void)Dma5::dma_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel2_handler() { (void)Dma5::dma_isr(); }
+BRIO_CH32_VECTOR(uart5_handler) { (void)Port5::isr(); }
+BRIO_CH32_VECTOR(uart6_handler) { (void)Port6::isr(); }
+BRIO_CH32_VECTOR(uart7_handler) { (void)Port7::isr(); }
+BRIO_CH32_VECTOR(uart8_handler) { (void)Port8::isr(); }
+BRIO_CH32_VECTOR(dma2_channel4_handler) { (void)Dma5::dma_isr(); }
+BRIO_CH32_VECTOR(dma2_channel2_handler) { (void)Dma5::dma_isr(); }

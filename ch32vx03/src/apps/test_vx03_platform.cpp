@@ -62,18 +62,22 @@
 //      multiply-add, fcsr's sticky flags after a division by zero and
 //      after an inexact quotient (the unit records, it never traps),
 //      and the rounding mode written, read back and seen in a result
-//   k  (a part with the FPU) FLOATING POINT UNDER AN INTERRUPT STORM:
-//      the loop keeps twenty float accumulators whose exact values are
-//      known while the core counter, reprogrammed to interrupt every
-//      few hundred cycles, runs a handler doing float arithmetic on
-//      twenty locals of its own; every accumulator is checked bit for
-//      bit, and every handler checks its own result
+//   k  (a part with the FPU and TIM6) FLOATING POINT UNDER AN INTERRUPT
+//      STORM: the loop keeps twenty float accumulators whose exact
+//      values are known while TIM6, at the core's clock, interrupts
+//      every 400 cycles - the kernel's tick going on beside it - with a
+//      handler doing float arithmetic on twenty locals of its own, bound
+//      by the float trampoline (BRIO_CH32_VECTOR_FLOAT, which stores the
+//      twenty caller-saved f-registers around its body); every
+//      accumulator is checked bit for bit, and every handler checks its
+//      own result
 //   l  (a part with the FPU) THE ROUND TRIP WITH FLOATING POINT, letter
 //      e's method on three handlers: one that touches no FP register,
-//      one that does float arithmetic, and one that CALLS a function
-//      the compiler cannot see into - the case where every caller-saved
-//      f-register is saved in software, because the hardware prologue
-//      pushes integer registers alone
+//      one that does float arithmetic (the float trampoline's twenty
+//      stores and loads around its body), and one that CALLS a function
+//      the compiler cannot see into - which under the plain trampoline
+//      saves no f-register at all, the hardware prologue pushing the
+//      integer ones
 //   m  THE BUS IN SLEEP: a memory-to-memory DMA1 block of 65535 words
 //      between two fixed addresses, the platform's idle() with the
 //      bus-master count that keeps it awake set aside, the core counter
@@ -744,8 +748,8 @@ const char* fs_name(uint32_t fs) {
     return fs == 0u ? "Off" : fs == 1u ? "Initial" : fs == 2u ? "Clean" : "Dirty";
 }
 
-/// The storm's state, shared with the core counter's handler. While it
-/// is on, the handler does float work instead of the kernel's tick.
+/// The storm's state, shared with TIM6's handler. While it is on, the
+/// handler does float work on TIM6's update instead of letter l's.
 struct Storm {
     volatile bool on = false;
     volatile uint32_t hits = 0;
@@ -763,15 +767,15 @@ volatile float storm_in[20] = {1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,
 inline constexpr float storm_expected = 2870.0f;   // sum of i*i, i = 1..20
 
 /// The storm handler's body: twenty float locals, each squared and
-/// summed, and the result checked. Inline into the vector binding, so
-/// the prologue the compiler writes is the one this work needs.
-template <bool fpu = device::has_fpu>
+/// summed, and the result checked - TIM6's update flag cleared first.
+/// Inline into the vector binding's body, under the float trampoline.
+template <bool fpu = device::has_fpu, uint8_t N = 6>
 [[gnu::always_inline]] inline bool storm_body() {
-    if constexpr (fpu) {
+    if constexpr (fpu && tim_present(N)) {
         if (!storm.on) {
             return false;
         }
-        stk()->SR = 0;
+        Tim<N>::clear_flags(Tim<N>::update_flag);
         float x0 = storm_in[0], x1 = storm_in[1], x2 = storm_in[2], x3 = storm_in[3];
         float x4 = storm_in[4], x5 = storm_in[5], x6 = storm_in[6], x7 = storm_in[7];
         float x8 = storm_in[8], x9 = storm_in[9], x10 = storm_in[10], x11 = storm_in[11];
@@ -791,7 +795,8 @@ template <bool fpu = device::has_fpu>
         if (h >= storm.limit) {
             // The storm ends itself: a loop that never ran again would
             // otherwise never end the letter.
-            stk()->CTLR = stk()->CTLR & ~stk_stie;
+            Tim<N>::interrupts(Tim<N>::update_interrupt, false);
+            Tim<N>::enable(false);
             storm.on = false;
         }
         return true;
@@ -854,8 +859,8 @@ void tj_fpu_state() {
                       "instruction would have trapped)", boot_fs != 0u);
 
         // What the crt's own last FP step does: FS back to Initial by
-        // hand, then fcsr written and nothing else. Masked, because the
-        // core counter's handler touches f-registers too.
+        // hand, then fcsr written and nothing else. Masked, so that no
+        // interrupt comes between the two steps.
         uint32_t fs_csr = 0;
         {
             P::CriticalSection cs;
@@ -936,9 +941,10 @@ void tj_fpu_state() {
     }
 }
 
-template <bool fpu = device::has_fpu>
+template <bool fpu = device::has_fpu, uint8_t N = 6>
 void tk_fpu_storm() {
-    if constexpr (fpu) {
+    if constexpr (fpu && tim_present(N)) {
+        using StormTimer = Tim<N>;
         // Twenty accumulators, their starting values and the step read
         // through volatile once, so the compiler keeps them in
         // f-registers and folds nothing.
@@ -956,24 +962,27 @@ void tk_fpu_storm() {
         float a15 = start[15], a16 = start[16], a17 = start[17], a18 = start[18],
               a19 = start[19];
 
-        // The storm: the core counter reprogrammed to interrupt every
-        // `period` cycles, its handler doing the float work above and not
-        // the kernel's tick, ending itself after `limit` interrupts.
+        // The storm: TIM6 counting at the core's clock, its update every
+        // `period` cycles raising a handler that does the float work above
+        // and ends itself after `limit` interrupts. The kernel's tick goes
+        // on beside it, a vector of its own.
         const uint32_t period = 400;
-        const uint32_t saved_cmp = stk()->CMPLR;
+        static_assert(StormTimer::clock_hz(clock) == SysClock::hz,
+                      "the storm's period is counted in core cycles");
         console_drain();
-        const uint32_t t_before = Ticker::ticks();
+        StormTimer::init();
+        (void)StormTimer::configure({.prescaler = 0, .period = period - 1u});
+        StormTimer::clear_flags(StormTimer::all_flags);
+        Pfic::clear_pending(StormTimer::irq());
+        Pfic::enable(StormTimer::irq());
         {
             P::CriticalSection cs;
             storm.hits = 0;
             storm.bad = 0;
             storm.limit = 2'000'000u;
             storm.on = true;
-            stk()->CTLR = 0;
-            stk()->SR = 0;
-            stk()->CNTL = 0;
-            stk()->CMPLR = period - 1u;
-            stk()->CTLR = stk_ste | stk_stie | stk_stclk | stk_stre;
+            StormTimer::interrupts(StormTimer::update_interrupt, true);
+            StormTimer::enable(true);
         }
         for (uint32_t i = 0; i < n; ++i) {
             a0 += step; a1 += step; a2 += step; a3 += step; a4 += step;
@@ -985,18 +994,15 @@ void tk_fpu_storm() {
         uint32_t hits = 0;
         {
             P::CriticalSection cs;
+            StormTimer::interrupts(StormTimer::update_interrupt, false);
+            StormTimer::enable(false);
             storm.on = false;
             hits = storm.hits;
-            stk()->CTLR = 0;
-            stk()->SR = 0;
-            stk()->CNTL = 0;
-            stk()->CMPLR = saved_cmp;
-            stk()->CTLR = stk_ste | stk_stie | stk_stclk | stk_stre;
         }
-        // The storm's span, handed back to the kernel's clock.
+        Pfic::disable(StormTimer::irq());
+        Pfic::clear_pending(StormTimer::irq());
         const uint32_t spent_ms =
             static_cast<uint32_t>((static_cast<uint64_t>(hits) * period) / (SysClock::hz / 1000u));
-        Ticker::advance(spent_ms);
 
         const float acc[20] = {a0, a1, a2, a3, a4, a5, a6, a7, a8, a9,
                                a10, a11, a12, a13, a14, a15, a16, a17, a18, a19};
@@ -1014,8 +1020,7 @@ void tk_fpu_storm() {
             }
         }
         print(serial, "  ", n, " iterations of twenty float adds under a storm of ", hits,
-              " interrupts, one every ", period, " cycles (", spent_ms, " ms, ",
-              Ticker::ticks() - t_before, " ticks handed back)", crlf);
+              " interrupts, one every ", period, " cycles (", spent_ms, " ms)", crlf);
         print(serial, "  the handler found its own twenty-local sum wrong ", storm.bad,
               " times", crlf);
         bench.verdict("the storm ran for the whole loop and ended with it",
@@ -1114,9 +1119,9 @@ void tl_fpu_trip() {
                       r0.seen == 32u && r1.seen == 32u && r2.seen == 32u);
         bench.verdict("the float handler's arithmetic is right (1.5*2.25 + 3*0.5 = 4.875)",
                       trip_out == 4.875f);
-        bench.verdict("a handler that calls out costs more than one that does float work, "
-                      "which costs no less than one that does neither (the software saves)",
-                      r2.best_trip > r1.best_trip && r1.best_trip >= r0.best_trip);
+        bench.verdict("the float handler costs the most (its trampoline's twenty saves), and "
+                      "one that calls out no less than one that does neither",
+                      r1.best_trip > r2.best_trip && r2.best_trip >= r0.best_trip);
     }
 }
 
@@ -1746,35 +1751,39 @@ void banner() {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-/// The core counter: the kernel's tick, or letter k's storm while it
-/// runs (on a part without the FPU the storm does not exist and this is
-/// the tick alone).
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+/// The core counter: the kernel's tick, and letter w's witness.
+BRIO_CH32_VECTOR(systick_handler) {
     if (tick_probe) {
         tick_entry = brio::stk()->CNTL;
     }
+    brio::Ticker::tick();
+}
+
+/// Letter k's storm while it runs, else letter l's float handler raised
+/// by hand: the one binding of this suite whose body does float work, so
+/// the float trampoline. Empty on a part without the FPU, where no table
+/// entry reaches it.
+BRIO_CH32_VECTOR_FLOAT(tim6_handler) {
     if (!storm_body()) {
-        brio::Ticker::tick();
+        trip_fp_body();
     }
 }
 
-/// Letter l's two floating-point handlers, on two lines no driver of
-/// this suite uses, raised by hand. Empty on a part without the FPU,
-/// where no table entry reaches them.
-extern "C" BRIO_CH32_INTERRUPT void tim6_handler() { trip_fp_body(); }
-extern "C" BRIO_CH32_INTERRUPT void tim7_handler() { trip_call_body(); }
+/// Letter l's handler that calls out, raised by hand: a plain
+/// trampoline, so the call costs no f-register.
+BRIO_CH32_VECTOR(tim7_handler) { trip_call_body(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// Letter w's rescue and clock: TIM2's update, counted.
-extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+BRIO_CH32_VECTOR(tim2_handler) {
     Rescue::clear_flags(Rescue::update_flag);
     rescue_periods = rescue_periods + 1u;
 }
 
 /// The software interrupt: the first thing it does is read the cycle
 /// counter, which is letter e's whole measurement.
-extern "C" BRIO_CH32_INTERRUPT void software_handler() {
+BRIO_CH32_VECTOR(software_handler) {
     sw_entry_cycles = brio::stk()->CNTL;
     brio::Pfic::clear_pending(brio::Irq::software);
     sw_hits = sw_hits + 1u;
@@ -1789,7 +1798,7 @@ extern "C" BRIO_CH32_INTERRUPT void software_handler() {
 /// Letter n's line: where the trap came from (mepc) and what mstatus
 /// said about it, then the pending bit withdrawn - a leaf, so the
 /// prologue is the same one on every device class.
-extern "C" BRIO_CH32_INTERRUPT void exti2_handler() {
+BRIO_CH32_VECTOR(exti2_handler) {
     uint32_t pc;
     uint32_t st;
     __asm__ volatile("csrr %0, mepc" : "=r"(pc));
@@ -1800,12 +1809,12 @@ extern "C" BRIO_CH32_INTERRUPT void exti2_handler() {
     shadow.hits = shadow.hits + 1u;
 }
 
-extern "C" BRIO_CH32_INTERRUPT void fault_handler() {
+BRIO_CH32_VECTOR(fault_handler) {
     token.vector = 3;
     brio::fault_reset<P>();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void breakpoint_handler() {
+BRIO_CH32_VECTOR(breakpoint_handler) {
     token.vector = 9;
     brio::fault_reset<P>();
 }

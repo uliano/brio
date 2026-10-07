@@ -498,7 +498,7 @@ A shared bus under the arbiter, with the transactions on the interrupt:
 
 ```cpp
 using Arb = brio::SpiBus<Bus, Platform, 4>;
-extern "C" BRIO_CH32_INTERRUPT void spi2_handler() {
+BRIO_CH32_VECTOR(spi2_handler) {
     if (Bus::isr()) { brio::post<Arb>(brio::TransferDone{Bus::status()}); }
 }
 r.polled = false;
@@ -513,10 +513,10 @@ for SPI1 and SPI2, DMA2 for the CH32V303's SPI3:
 using Fast = brio::SpiHost<1, brio::spi_default_pins<1>,
                            brio::DmaTxEngine<1, 3>, brio::DmaRxEngine<1, 2>>;
 Fast::init(clock);                         // arms both engines: the gate, DATAR
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() {
+BRIO_CH32_VECTOR(dma1_channel2_handler) {
     if (Fast::dma_rx_isr()) { /* the transaction completed: Fast::status() */ }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { (void)Fast::dma_tx_isr(); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) { (void)Fast::dma_tx_isr(); }
 
 using Third = brio::SpiHost<3, brio::spi3_default_pins,
                             brio::DmaTxEngine<2, 2>, brio::DmaRxEngine<2, 1>>;
@@ -611,13 +611,18 @@ own.
   do: the polled write of 256 frames at 32, 128, 64 and 256 cycles a
   frame (x 1.00 to 1.02); the polled receive at 43 and 145 cycles a
   frame in 8-bit frames (x 1.36 and 1.13), 79 at /4 in 16-bit ones
-  (x 1.24) and 256 at /16 (x 1.00); the pump on a receive at 178 and
-  240 cycles a frame in 8-bit frames (the handler 84 with its stamps),
-  183 at /4 in 16-bit ones and 257 at /16 (x 1.00); on a write at /4
-  one interrupt per two frames, 94 cycles a frame; the polled request
-  of three bytes 230 to 233 cycles above its wire time at /16, one byte
-  173 to 192, sixteen 234 to 236 (two runs); every line ended with
-  status 0 and no overrun standing.
+  (x 1.24) and 256 at /16 (x 1.00); the pump, its vector the naked
+  trampoline of the V4F's images ([platform.md](platform.md)), on a
+  receive at 157 and 232 cycles a frame in 8-bit frames, 174 at /4 in
+  16-bit ones and 257 at /16 (x 1.00); on a write at /4 one interrupt
+  per two frames in 8-bit frames, 82 cycles a frame, and 171 interrupts
+  for 256 16-bit frames, 110 cycles a frame - the handler entering
+  within a frame time often enough to take one frame at a time; the
+  polled request of three bytes 242 cycles above its wire time at /16,
+  one byte 196 to 199, sixteen 239 to 246 (three runs); every line
+  ended with status 0, and every line but the pump's 16-bit write at /4
+  with no overrun standing - that one with OVR standing after the run
+  in three passes of three (below, "Not covered yet").
 - **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
   two-in-flight shape run on the resource at every code and width, 1024
   frames a run, eight runs a point under a console print in flight,
@@ -832,6 +837,21 @@ the letters that want either decline by name.
 
 Driver gaps:
 
+- **The pump's write two ahead, against a handler that enters within a
+  frame**: the handler reads STATR for RXNE and OVR, then DATAR. A frame
+  that completes between the two loads is lost to the one-deep buffer
+  with OVR raised after the test, so the handler counts one frame where
+  two went by and leaves OVR standing; inside a run the next entry finds
+  it and counts the frame it lost, but at the run's last pair no entry
+  follows, and the transaction would wait for an answer that never
+  comes. That is the reading of a measurement, not a measurement: OVR
+  standing after the 16-bit write of 16 and of 256 frames at /4 on the
+  CH32V303VCT6's release image in three passes of `bench_vx03`'s letter
+  e, the run's status 0, and no OVR at all in two images of the same
+  app with a scratch probe compiled in, whose layout moved the
+  handler's entry. The remedy to measure on both parts: DATAR read
+  before the OVR test (20.2.7's clearing order), one more APB load a
+  frame.
 - **The hardware NSS arrangements as the ENGINE's select** (SSOE's
   output and the multi-host input). The bus AO's select is a GPIO on
   purpose - a hardware input's low level takes the host's role away, and

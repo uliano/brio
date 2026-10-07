@@ -606,16 +606,16 @@ void banner() {
 // The three vectors this program owns. The non-maskable one is the
 // clock security system's: the driver's body says whether the CSS was
 // the reason, and only this suite's own counters are touched here.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void rcc_handler() {
+BRIO_CH32_VECTOR(rcc_handler) {
     rcc_flags = rcc_flags | brio::Rcc::ready_isr();
     rcc_events = rcc_events + 1u;
 }
 
-extern "C" BRIO_CH32_INTERRUPT void nmi_handler() {
+BRIO_CH32_VECTOR(nmi_handler) {
     if (brio::Rcc::css_isr()) {
         css_events = css_events + 1u;
     } else {

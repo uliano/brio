@@ -42,3 +42,14 @@ written with - on the ilp32 and ilp32f ABIs this time, where the
 CH32V00x fixture proves the same headers on ilp32e. That is what
 `util_all.cpp` exists for: it includes EVERY kernel, util and gfx header
 and instantiates each service over this target's platform.
+
+THE VECTOR GUARD'S OWN FIXTURES. `guard/*.cpp` are not compiled with
+the rest: each is LINKED into an image for the CH32V303VC with the
+hardware prologue - the one build whose vectors are naked trampolines
+(`brio/ch32vx03/pfic.hpp`) - and `cli/vector_guard.py` is run over it.
+The TU's `// guard:` line says what the guard must answer: `pass`, or
+`fail <text>` with `<text>` in its report. One TU passes (a float
+trampoline's body, a jump table and a call chain under a plain one) and
+two must be refused by name (float work reached through a call, a call
+through a pointer): the proof that the check the project's own images
+pass is one that can fail.

@@ -1062,13 +1062,13 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The RTC's own vector: the second, the alarm and the overflow all
 /// arrive here.
-extern "C" BRIO_CH32_INTERRUPT void rtc_handler() {
+BRIO_CH32_VECTOR(rtc_handler) {
     rtc_irq_stamp = stamp();
     rtc_irq_count = brio::Rtc::count();
     rtc_irq_flags = brio::Rtc::isr();
@@ -1077,7 +1077,7 @@ extern "C" BRIO_CH32_INTERRUPT void rtc_handler() {
 
 /// The ALARM's second vector, behind EXTI line 17 - the path that
 /// survives a low-power mode.
-extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() {
+BRIO_CH32_VECTOR(rtc_alarm_handler) {
     alarm_irq_stamp = stamp();
     alarm_irq_count = brio::Rtc::count();
     (void)brio::Rtc::alarm_isr();
@@ -1085,7 +1085,7 @@ extern "C" BRIO_CH32_INTERRUPT void rtc_alarm_handler() {
 }
 
 /// The tamper vector: the event stood, both flags cleared.
-extern "C" BRIO_CH32_INTERRUPT void tamper_handler() {
+BRIO_CH32_VECTOR(tamper_handler) {
     (void)brio::Bkp::isr();
     tamper_irqs = tamper_irqs + 1u;
 }

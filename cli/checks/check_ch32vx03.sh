@@ -15,10 +15,19 @@
 # Every positive is compiled BOTH WAYS the project can build an image:
 # with the core's hardware prologue/epilogue (-DBRIO_CH32_HPE=1, the
 # CH32VX03_HPE option, WCH's interrupt attribute) and without it (gcc's
-# own prologue), since pfic.hpp's BRIO_CH32_INTERRUPT is one spelling
-# with two expansions and a fixture that binds a vector proves both.
+# own prologue), since pfic.hpp's BRIO_CH32_VECTOR is one spelling
+# with several expansions (the attributed handler of either prologue,
+# and on an F part with the hardware prologue the naked trampoline) and
+# a fixture that binds a vector proves each.
 # Negative: every test/family_ch32vx03/neg/*.cpp must FAIL to compile
 # for each part named on its "// mcu: <list>" line.
+# The vector guard's own proof: every test/family_ch32vx03/guard/*.cpp
+# is LINKED into an image for the CH32V303VC with the hardware prologue
+# (the one build whose vectors are trampolines) and cli/vector_guard.py
+# run over it, which must pass or fail as the TU's "// guard:" line
+# says - "pass", or "fail <text>" with <text> in the guard's report (the
+# function it must name). The guard over the project's own images runs
+# after the link guard (cli/check.py).
 #
 # No CMake coupling on purpose (same as the other six scripts): the
 # compiler is called directly, the sweep takes seconds, no hardware.
@@ -103,6 +112,42 @@ for tu in test/family_ch32vx03/neg/*.cpp; do
     done
     echo "NEG $line"
 done
+
+# The vector guard (cli/vector_guard.py) on images built to pass it and
+# to fail it: a float trampoline's body, a jump table and a call chain
+# it must let through; a float operation reached through a call and a
+# call through a pointer it must refuse, by name. Runs unfiltered or as
+# `brio check ch32vx03 guard`.
+case "guard" in *"$FILTER"*)
+    GUARD_ELF=/tmp/check_ch32vx03_guard.elf
+    LINK="-DCH32V303VC -DBRIO_CH32_HPE=1 $V4F ${COMMON/ -c / } -ffunction-sections -fdata-sections
+          -nostartfiles -nodefaultlibs -Wl,--gc-sections -T ch32vx03/ld/ch32v303vc.ld"
+    for tu in test/family_ch32vx03/guard/*.cpp; do
+        [ -e "$tu" ] || continue
+        want="$(sed -n 's|^// guard: ||p' "$tu")"
+        line="$(basename "$tu" .cpp):"
+        if ! $CXX $LINK ch32vx03/src/glue/startup_ch32vx03.S "$tu" -lgcc -o "$GUARD_ELF" 2>/tmp/check_ch32vx03_err; then
+            echo "GUARD $line does not link"; sed "s/^/    /" /tmp/check_ch32vx03_err | head -15
+            fail=1; continue
+        fi
+        report="$(python3 -m cli.vector_guard "$GUARD_ELF")"; status=$?
+        bad=0
+        case "$want" in
+            pass) [ "$status" -eq 0 ] && line="$line passed" || { line="$line REFUSED(BAD)"; bad=1; } ;;
+            fail\ *)
+                text="${want#fail }"
+                if [ "$status" -ne 0 ] && printf '%s' "$report" | grep -qF "$text"; then
+                    line="$line refused, naming '$text'"
+                else
+                    line="$line NOT REFUSED AS DUE(BAD)"; bad=1
+                fi ;;
+            *) line="$line missing '// guard: pass|fail <text>' line"; bad=1 ;;
+        esac
+        echo "GUARD $line"
+        [ "$bad" -eq 0 ] || { printf '%s\n' "$report" | sed "s/^/    /"; fail=1; }
+    done
+    ;;
+esac
 
 # The runtime (design/runtime.md), over this family's own compiler and
 # flags: cli/checks/rt_check.sh. Runs unfiltered or as `brio check ch32vx03 rt`.

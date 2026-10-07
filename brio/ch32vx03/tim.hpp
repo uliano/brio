@@ -2034,7 +2034,7 @@ struct TimPeriodMeter {
  * hands a util/meter_sampler.hpp MeterLatch.
  *
  *   using Edge = brio::TimIntervalMeter<brio::Tim<2>, 1>;
- *   extern "C" BRIO_CH32_INTERRUPT void tim2_handler() {
+ *   BRIO_CH32_VECTOR(tim2_handler) {
  *       if (brio::Tim<2>::isr() & Edge::capture_flag) {
  *           if (auto d = Edge::interval()) { Latch::store(*d); }
  *       }

@@ -387,7 +387,7 @@ of the interrupt:
 using Edge = brio::TimIntervalMeter<brio::Tim<3>, 1>;
 using Latch = brio::MeterLatch<uint32_t, P, 0>;
 
-extern "C" BRIO_CH32_INTERRUPT void tim3_handler() {
+BRIO_CH32_VECTOR(tim3_handler) {
     if ((brio::Tim<3>::isr() & Edge::capture_flag) != 0u) {
         if (const auto d = Edge::interval()) { Latch::store(*d); }
     }
@@ -398,13 +398,13 @@ An advanced timer's four vectors, each answering for its own flags -
 and a break vector that masks itself while its input stands:
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT void tim1_cc_handler() {
+BRIO_CH32_VECTOR(tim1_cc_handler) {
     const uint16_t hit = brio::Tim<1>::isr(
         brio::Tim<1>::vector_flags(brio::Irq::tim1_cc));
     // ... hit carries the capture/compare flags alone
 }
 
-extern "C" BRIO_CH32_INTERRUPT void tim8_brk_handler() {
+BRIO_CH32_VECTOR(tim8_brk_handler) {
     using T = brio::Tim<8>;
     if ((T::isr(T::vector_flags(brio::Irq::tim8_brk)) & T::break_flag) != 0u) {
         T::interrupts(T::break_interrupt, false);   // until BKIN has returned

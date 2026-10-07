@@ -2986,10 +2986,10 @@ void banner() {
 
 }  // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
-extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
+BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+BRIO_CH32_VECTOR(i2c1_ev_handler) {
     host_isr_entries = host_isr_entries + 1u;
     if (host_isr_entries > host_isr_budget) {
         host_stormed = true;
@@ -3019,7 +3019,7 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
     }
 }
 
-extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
+BRIO_CH32_VECTOR(i2c1_er_handler) {
     error_isr_entries = error_isr_entries + 1u;
     if (client_live) {
         return;
@@ -3042,15 +3042,15 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 
 // I2C2's vectors: letter m's host on a part with I2C2, empty on every
 // other part.
-extern "C" BRIO_CH32_INTERRUPT void i2c2_ev_handler() { host2_event<>(); }
-extern "C" BRIO_CH32_INTERRUPT void i2c2_er_handler() { host2_error<>(); }
+BRIO_CH32_VECTOR(i2c2_ev_handler) { host2_event<>(); }
+BRIO_CH32_VECTOR(i2c2_er_handler) { host2_error<>(); }
 
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
+BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }

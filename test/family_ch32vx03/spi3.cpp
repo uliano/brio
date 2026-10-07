@@ -122,6 +122,6 @@ void tasks() {
     (void)Kernel::step();
 }
 
-extern "C" BRIO_CH32_INTERRUPT void spi3_handler() { (void)Host3::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel1_handler() { (void)Host3Dma::dma_rx_isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma2_channel2_handler() { (void)Host3Dma::dma_tx_isr(); }
+BRIO_CH32_VECTOR(spi3_handler) { (void)Host3::isr(); }
+BRIO_CH32_VECTOR(dma2_channel1_handler) { (void)Host3Dma::dma_rx_isr(); }
+BRIO_CH32_VECTOR(dma2_channel2_handler) { (void)Host3Dma::dma_tx_isr(); }
