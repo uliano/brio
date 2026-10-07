@@ -53,9 +53,37 @@
 //   h  what the crt left in the core: INTSYSCR's hardware stack as the
 //      build asked and its nesting OFF, mtvec on the table with both mode
 //      bits, mstatus in machine mode, and misa as the core reports it
+//   w  THE IDLE HOOK AGAINST THE TICK'S EDGE, PLACED TO THE CYCLE: with
+//      the STK running as the timebase, its CNTL written so the compare
+//      comes D cycles later, D = 0..599, then the kernel's own shape - a
+//      masked check, idle(), until one tick (and, a second pass, two) -
+//      with the core's event latch set and clear by hand before each try.
+//      The edge so walks across every instruction of the idle path and of
+//      the loop around it, the sleep entry included, whatever the code's
+//      layout. TIM3 counting at 1 MHz is the clock of each try and its
+//      RESCUE: a try that takes its 50 ms period is a wake idle() lost for
+//      good, and one that ends a whole tick period late is a wake lost
+//      until the next tick (the bound: 250 us for one tick, 1250 us for
+//      two). The writes to CNTL shorten the ticks they land in, so kernel
+//      time runs fast during the letter. Prints the cycles from the edge
+//      to the handler and to the caller's loop for an edge that finds the
+//      core asleep, and what an idle() costs when the latch makes it
+//      return at once
+//   k  THE KERNEL'S TURN: a Tenuto pack of three quiet AOs, two with a
+//      periodic time event, turned as Tenuto::run() turns it over 100
+//      ticks with the tick the only interrupt - one turn per tick when
+//      idle() leaves no event latched behind its wake, two when it does
+//      (judged: 100 to 102, one turn of allowance at each end of the
+//      window) - and what one quiet turn costs when the latch makes its
+//      idle() return at once: the turn an interrupt would cost twice over
 //   t  the runtime's seven functions (rt/rt.cpp) over every alignment,
 //      length and overlap: rt/selftest.hpp's cases, the host suite's own,
 //      against the symbols this image links - in `z`
+//
+// TIM3 IS A BENCH INSTRUMENT HERE, outside the rule that an app reads no
+// register: this stratum has no timer driver (born with its first user),
+// and letter w needs one free-running 1 MHz count with an update
+// interrupt and nothing else - six registers of RM 13.4, named below.
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200
@@ -69,6 +97,10 @@
 #include "ch32x035/platform.hpp"
 #include "ch32x035/ticker.hpp"
 #include "ch32x035/usart.hpp"
+#include "kernel/event_queue.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 #include "rt/selftest.hpp"
@@ -541,6 +573,264 @@ void th_core() {
                       (misa & (1u << 0)) != 0u && (misa & (1u << 2)) != 0u);
 }
 
+// ---------------------------------------------------------------------------
+// w - the idle hook against the tick's edge, placed to the cycle
+// ---------------------------------------------------------------------------
+/// TIM3, RM 13.4: the general-purpose timer, 16 bits, clocked from HCLK
+/// (RM 3.3, the clock tree feeds TIM2/TIM3 from the HB bus; this series
+/// has no PB prescaler). Every register is sixteen bits wide and is
+/// accessed as such, as the register table lists them.
+struct Rescue {
+    static constexpr uintptr_t base = 0x40000400UL;
+    static volatile uint16_t& reg(uint32_t offset) {
+        return *reinterpret_cast<volatile uint16_t*>(base + offset);
+    }
+    static volatile uint16_t& ctlr1() { return reg(0x00); }
+    static volatile uint16_t& dmaintenr() { return reg(0x0C); }
+    static volatile uint16_t& intfr() { return reg(0x10); }
+    static volatile uint16_t& swevgr() { return reg(0x14); }
+    static volatile uint16_t& cnt() { return reg(0x24); }
+    static volatile uint16_t& psc() { return reg(0x28); }
+    static volatile uint16_t& atrlr() { return reg(0x2C); }
+    static constexpr uint16_t cen = 1u << 0;   ///< CTLR1: count
+    static constexpr uint16_t urs = 1u << 2;   ///< CTLR1: only an overflow raises UIF's interrupt
+    static constexpr uint16_t uie = 1u << 0;   ///< DMAINTENR: the update interrupt
+    static constexpr uint16_t uif = 1u << 0;   ///< INTFR: write 0 to clear
+    static constexpr uint16_t ug = 1u << 0;    ///< SWEVGR: load PSC and ATRLR now
+
+    /// 1 MHz, a 50 ms period, its update interrupt on the PFIC.
+    static void start() {
+        rcc()->APB1PCENR = rcc()->APB1PCENR | rcc_pb1_tim3;
+        ctlr1() = urs;
+        psc() = static_cast<uint16_t>(SysClock::hz / 1'000'000u - 1u);
+        atrlr() = 49'999u;
+        swevgr() = ug;   // PSC is preloaded (13.4.9): an update makes it current
+        intfr() = 0;
+        dmaintenr() = uie;
+        Pfic::clear_pending(Irq::tim3);
+        Pfic::enable(Irq::tim3);
+        ctlr1() = static_cast<uint16_t>(urs | cen);
+    }
+    static void stop() {
+        ctlr1() = 0;
+        dmaintenr() = 0;
+        intfr() = 0;
+        Pfic::disable(Irq::tim3);
+        Pfic::clear_pending(Irq::tim3);
+        rcc()->APB1PCENR = rcc()->APB1PCENR & ~rcc_pb1_tim3;
+    }
+};
+volatile uint32_t rescue_periods = 0;
+
+/// Letter w's witness in the STK handler: while armed, the handler's
+/// first statement records the counter - the cycles since the compare.
+volatile bool tick_probe = false;
+volatile uint32_t tick_entry = 0;
+
+/// Clear the core's event latch (SETEVENT, then a WFE it ends at once)
+/// and set it again if `latched`: the two states an idle() can be
+/// entered in. Masked; the read-back puts the store ahead of the wfi.
+void event_latch(bool latched) {
+    pfic_sctlr() = (pfic_sctlr() | sctlr_wfitowfe | sctlr_sevonpend | sctlr_setevent) &
+                   ~sctlr_sleeponexit;
+    const uint32_t landed = pfic_sctlr();
+    __asm__ volatile("wfi" ::"r"(landed) : "memory");
+    if (latched) {
+        pfic_sctlr() = pfic_sctlr() | sctlr_setevent;
+        const uint32_t set = pfic_sctlr();
+        __asm__ volatile("" ::"r"(set) : "memory");
+    }
+}
+
+/// One edge position: the counter written so the compare comes `d`
+/// cycles later, then the kernel's loop until `edges` ticks have been
+/// served. Masked throughout but for what idle() unmasks.
+struct EdgeTry {
+    bool lost;           ///< the rescue ended it: a wake lost for good
+    bool late;           ///< a whole tick period late: a wake lost until the next tick
+    uint32_t took_us;    ///< the try's span on the rescue's 1 MHz count
+    uint32_t to_loop;    ///< the counter after the loop: cycles since the edge
+    uint32_t to_entry;   ///< the counter at the handler's first statement
+};
+
+EdgeTry edge_try(uint32_t d, uint32_t edges, bool latched) {
+    EdgeTry r{};
+    uint32_t took_us = 0;
+    bool rescued = false;
+    {
+        P::CriticalSection cs;
+        event_latch(latched);
+        const uint32_t r0 = rescue_periods;
+        Rescue::cnt() = 0;
+        const uint32_t t = Ticker::ticks();
+        stk()->CNTL = stk()->CMPLR - d;
+        for (;;) {
+            P::CriticalSection turn;   // the kernel's own shape
+            if (Ticker::ticks() - t >= edges) {
+                break;
+            }
+            P::idle();
+        }
+        r.to_loop = stk()->CNTL;
+        took_us = Rescue::cnt();
+        rescued = rescue_periods != r0;
+        r.to_entry = tick_entry;
+    }
+    // A wake lost for good waits for the rescue; one lost until the NEXT
+    // tick ends a whole period late. The edges asked for land within 13 us
+    // of the period they need, so the bound sits a quarter period past that.
+    r.took_us = took_us;
+    r.lost = rescued;
+    r.late = !rescued && took_us > edges * 1000u - 750u;
+    return r;
+}
+
+void tw_edge() {
+    Rescue::start();
+    console_drain();
+    tick_probe = true;
+
+    constexpr uint32_t positions = 600;
+    constexpr uint32_t shown = 6;
+    uint32_t lost[2][2] = {{0, 0}, {0, 0}};
+    uint32_t late[2][2] = {{0, 0}, {0, 0}};
+    uint32_t slowest[2] = {0, 0};
+    uint32_t where[2][2][shown] = {};
+    EdgeTry asleep{};
+    for (uint32_t edges = 1; edges <= 2u; ++edges) {
+        for (uint32_t latched = 0; latched < 2u; ++latched) {
+            for (uint32_t d = 0; d < positions; ++d) {
+                const EdgeTry r = edge_try(d, edges, latched != 0u);
+                if (r.took_us > slowest[edges - 1u]) {
+                    slowest[edges - 1u] = r.took_us;
+                }
+                if (r.late) {
+                    ++late[edges - 1u][latched];
+                }
+                if (r.lost || r.late) {
+                    uint32_t& n = lost[edges - 1u][latched];
+                    if (n < shown) {
+                        where[edges - 1u][latched][n] = d;
+                    }
+                    ++n;
+                }
+                if (edges == 1u && latched == 0u && d == positions - 1u) {
+                    asleep = r;
+                }
+            }
+        }
+    }
+    tick_probe = false;
+
+    // An idle() the latch makes return at once: its whole cost, the two
+    // counter reads around it included.
+    uint32_t at_once = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        P::CriticalSection cs;
+        event_latch(true);
+        const uint32_t c0 = cycles_now();
+        P::idle();
+        const uint32_t c1 = cycles_now();
+        disable_interrupts();
+        if (c1 > c0 && c1 - c0 < at_once) {
+            at_once = c1 - c0;
+        }
+    }
+    Rescue::stop();
+
+    for (uint32_t e = 0; e < 2u; ++e) {
+        for (uint32_t l = 0; l < 2u; ++l) {
+            print(serial, "  waiting for ", e + 1u, " tick(s), latch ", l != 0u ? "set" : "clear",
+                  ": ", positions, " edge positions, ", lost[e][l] - late[e][l],
+                  " lost for good, ", late[e][l], " a tick late");
+            for (uint32_t i = 0; i < lost[e][l] && i < shown; ++i) {
+                print(serial, i == 0u ? " at D=" : ",", where[e][l][i]);
+            }
+            print(serial, crlf);
+        }
+    }
+    print(serial, "  the slowest try: ", slowest[0], " us for one tick, ", slowest[1], " us for two",
+          crlf);
+    print(serial, "  an edge that finds the core asleep: ", asleep.to_entry,
+          " cycles to the handler's first statement, ", asleep.to_loop,
+          " to the caller's loop; an idle() the latch returns at once: ", at_once,
+          " cycles (two counter reads included)", crlf);
+    bench.verdict("no edge position loses the wake or serves it a tick late, waiting for one tick",
+                  lost[0][0] + lost[0][1] == 0u);
+    bench.verdict("nor waiting for two (the sleep after a tick was taken)",
+                  lost[1][0] + lost[1][1] == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// k - the kernel's turn: how many per interrupt, and what one costs
+// ---------------------------------------------------------------------------
+// A pack shaped like a small program's: three AOs, two of them with a
+// periodic time event (500 ms and 1000 ms, so none fires in the 100 ms
+// this letter idles), none of them ever posted to.
+template <uint8_t N>
+struct Quiet {
+    struct Event {
+        uint8_t n;
+    };
+    static inline EventQueue<Event, 2, P> queue;
+    static inline TimeEvent<P, Quiet, Event> beat{Event{N}};
+    static void init() {
+        if constexpr (N != 0u) {
+            beat.arm_every(ticks_from_ms<P>(500u * N));
+        }
+    }
+    static void dispatch(const Event&) {}
+};
+using QuietKernel = Tenuto<P, Quiet<1>, Quiet<2>, Quiet<0>>;
+
+/// One turn of Tenuto::run()'s loop, as it is written there.
+[[gnu::always_inline]] inline void kernel_turn() {
+    TimeEvents<P>::process();
+    if (!QuietKernel::step()) {
+        QuietKernel::idle_if_empty();
+    }
+}
+
+void tk_turns() {
+    console_drain();
+    QuietKernel::init_all();
+
+    // Turns over 100 quiet ticks: the tick is the only interrupt (the
+    // console drained, nothing else enabled). The window opens and closes
+    // on a tick read, so a turn may straddle either end: 100 to 102.
+    const uint32_t t = Ticker::ticks();
+    uint32_t turns = 0;
+    while (Ticker::ticks() - t < 100u) {
+        kernel_turn();
+        ++turns;
+    }
+
+    // A quiet turn whose idle() the event latch returns at once - the
+    // turn an interrupt costs on top of the one that serves it when the
+    // waking edge is left latched - the two counter reads included.
+    uint32_t turn_cycles = 0xFFFF'FFFFu;
+    for (int i = 0; i < 16; ++i) {
+        {
+            P::CriticalSection cs;
+            event_latch(true);
+        }
+        const uint32_t c0 = cycles_now();
+        kernel_turn();
+        const uint32_t c1 = cycles_now();
+        if (c1 > c0 && c1 - c0 < turn_cycles) {
+            turn_cycles = c1 - c0;
+        }
+    }
+    TimeEvents<P>::clear_all();
+
+    print(serial, "  100 quiet ticks: ", turns,
+          " kernel turns; a quiet turn whose idle() returns at once: ", turn_cycles,
+          " cycles (two counter reads included)", crlf);
+    bench.verdict("the kernel loop turns once per interrupt, not twice (no event is left "
+                  "latched behind the wake)",
+                  turns >= 100u && turns <= 102u);
+}
+
 void banner() {
     print(serial, crlf, "test_x035_platform on ", device::part_name, " - the platform", crlf, crlf);
     bench.menu();
@@ -550,7 +840,18 @@ void banner() {
 }  // namespace
 
 // The vectors this program owns.
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+    if (tick_probe) {
+        tick_entry = brio::stk()->CNTL;
+    }
+    brio::Ticker::tick();
+}
+
+/// Letter w's rescue and clock: TIM3's update, counted.
+extern "C" BRIO_CH32_INTERRUPT void tim3_handler() {
+    Rescue::intfr() = 0;
+    rescue_periods = rescue_periods + 1u;
+}
 
 extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
 
@@ -596,6 +897,8 @@ int main() {
     bench.letter('f', "corecfgr, as the crt left it and cleared", tf_corecfgr);
     bench.letter('g', "the tick against the host's clock", tg_bracket);
     bench.letter('h', "what the crt left in the core's registers", th_core);
+    bench.letter('w', "the idle hook against the tick's edge, placed to the cycle", tw_edge);
+    bench.letter('k', "the kernel's turn: how many per interrupt, what one costs", tk_turns);
     bench.letter('t', "the runtime's seven functions at every alignment (rt/rt.cpp)", tt_runtime);
 
     if (serial_ok) {

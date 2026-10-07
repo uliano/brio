@@ -12,8 +12,8 @@ its own, the record a crash leaves, the watchdogs - is not written here
 Documents of record: the CH32X035 reference manual V1.8 (3.2 for the
 reset sources, 7.1 and table 7-1 for the PFIC and the vector table,
 7.5.2 for the PFIC's registers with 7.5.2.38 for PFIC_SCTLR, 7.5.3 for
-INTSYSCR and mtvec, 7.5.5 for the STK, ch. 19 for the electronic
-signature) and the QingKe V4 microprocessor manual V1.1 (table 1-1 for
+INTSYSCR and mtvec, 7.5.5 for the STK, 13.4 for TIM3, the suite's rescue
+timer, ch. 19 for the electronic signature) and the QingKe V4 microprocessor manual V1.1 (table 1-1 for
 the V4C, 2.2 for what a trap does to mstatus and 8.2 for what an MRET
 leaves in it, 3.4 for the hardware prologue, 6 for the sleep modes and
 what ends them, 8.3 for corecfgr).
@@ -51,15 +51,19 @@ question.
   a wait-for-event, and SEVONPEND makes every interrupt that turns
   pending an event, masked or not, LATCHED - "if the WFE instruction is
   not executed, the system will be woken up immediately after the next
-  execution of the instruction" (RM 7.5.2.38). That form is the
-  platform's, and it wakes on this core: `idle()`, called with interrupts
-  masked as the kernel calls it, returns on the next tick with them
-  enabled (measured). Whether it keeps the kernel's idle promise is not:
-  on the QingKe V2 a WFE entered masked lost a wake arriving on the
-  cycle it went to sleep, and on the V4B the latch a wake leaves made
-  the loop turn twice per interrupt until a second `wfi` consumed it -
-  both sister strata now unmask first and consume, and this one does
-  neither (Not covered yet).
+  execution of the instruction" (RM 7.5.2.38). 6.2 gives a WFE three
+  wakes that matter here: an event; an ENABLED interrupt, "and after
+  waking up, the microprocessor executes the interrupt function first" -
+  a level; and, with SEVONPEND, "a new interrupt pending signal" of any
+  line - an edge. Entered with MIE set, the WFE needs no edge: that is
+  the platform's form (the bench findings measure it).
+- **The waking edge is latched too** (measured): an interrupt that wakes
+  a WFE has turned pending, so SEVONPEND latches it, and the NEXT WFE
+  returns at once on it - a quiet kernel loop turned twice per tick with
+  nothing to consume the latch. PFIC_SCTLR.SETEVENT ("set the event to
+  wake up the WFE case", RM 7.5.2.38) sets the latch by hand, and a WFE
+  executed over a set latch returns at once and leaves it clear - the
+  pair that consumes it.
 - **In Sleep the STK keeps its clock** and in a deep sleep every clock
   may stop (V4 manual 6.1); a core in debug mode enters no sleep at all,
   so a sleep observed with a probe halted on the core is not one.
@@ -112,14 +116,23 @@ question.
 concept member for member: `CriticalSection` is pfic.hpp's
 `InterruptGuard` (one `csrrci` reads and clears mstatus.MIE, the
 destructor restores only what it found set, so guards nest), `idle()`
-is the WFITOWFE/SEVONPEND sequence above followed by the unmask,
+is one store of PFIC_SCTLR (WFITOWFE and SEVONPEND set, SETEVENT and
+SLEEPONEXIT clear - with SLEEPONEXIT set the waking handler's mret would
+sleep again), the unmask, the `wfi` that sleeps as a WFE, and after the
+wake SETEVENT and one more `wfi`, which returns at once and consumes the
+latch the wake left, so the caller's loop turns once per interrupt;
 `break_here()` is `ebreak`, `now()` the timebase's tick count,
 `ticks_per_second` the timebase's rate, `atomic_width` 4, and the
 breadcrumb a `PanicRecord` in `.noinit`, which the crt neither loads nor
-zeroes. With SLEEPDEEP found set - which no verb of this stratum does -
-`idle()` pauses the timebase across the sleep and clears its pending
-bit first, as the sibling strata's hooks do, because a tick that is
-merely pending would end the sleep before it began. There is no
+zeroes. In the release listing the Sleep path is a leaf of fourteen
+instructions, the consume three of them (an `ori`, the store and the
+second `wfi`). With SLEEPDEEP found set - which no verb of this stratum
+does - the path is `idle_deep()`, out of line: the timebase paused and
+its pending bit cleared first, as the sibling strata's hooks do,
+because a tick that is merely pending would end the sleep before it
+began, then the same store, unmask and `wfi`, and no consume, a second
+`wfi` with SLEEPDEEP armed being a second entry into that mode. There
+is no
 `idle_until()` (the timebase stops with the core) and no count of bus
 masters: on the CH32V203 and the CH32V303 no master but the core gets a
 bus cycle in a sleep, which is why that stratum's idle path counts them,
@@ -202,11 +215,16 @@ probe finds it and where the breadcrumb waits for the next boot's
 
 ## Bench findings
 
-The reference suite is `test_x035_platform` (42 verdicts in `z`, nothing
+The reference suite is `test_x035_platform` (51 verdicts in `z`, nothing
 wired) on a CH32X035F8U6 - WCH's evaluation board in its QFN20 edition,
 over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
 states, in the image built with the hardware prologue; where two numbers
-stand for one quantity they are two runs of `z`. What it measured:
+stand for one quantity they are two runs of `z`. Letters `b`, `w` and
+`k` ran in the same suite at 8 MHz instead - HPRE dividing the HSI by
+six, the flash at no wait state - which is the one line the image
+differs by: powered from the probe's 3V3, this board restarts under
+load at 48 MHz, a fact of the supply, which an image at 8 MHz does not
+meet. What it measured:
 
 - **The boot story** (letter `a`). The flags at boot read 0x18000000,
   SFTRSTF and PORRSTF, and `reset_flags()` reads them without disturbing
@@ -221,12 +239,39 @@ stand for one quantity they are two runs of `z`. What it measured:
 - **The critical section and the idle hook** (letter `b`). The guard
   masks, a nested one still masks, leaving the inner scope does not
   unmask and leaving the outer one does. A 5 ms window with interrupts
-  masked advanced the tick by one in both runs: the STK interrupt is a
-  pending bit, one tick delivered and the rest coalesced. With the
-  console silent, two `idle()` calls - each made with interrupts masked,
-  as the kernel makes it - covered the 507 us to the next tick (898 us in
-  the other run) and returned with interrupts enabled: the WFE form
-  wakes on this core.
+  masked advanced the tick by one: the STK interrupt is a pending bit,
+  one tick delivered and the rest coalesced. With the console silent,
+  two `idle()` calls - each made with interrupts masked, as the kernel
+  makes it - covered the 940 us to the next tick and returned with
+  interrupts enabled: the WFE form wakes on this core.
+- **No edge position loses the wake** (letter `w`). The STK's compare
+  placed 0 to 599 cycles ahead, one cycle a step, before the kernel's
+  own shape - a masked check, `idle()`, until one tick or two - with the
+  event latch set and cleared by hand before each try, so the edge walks
+  across every instruction of the idle path and of the loop around it,
+  the sleep entry and the consume included; TIM3 counting at 1 MHz is
+  each try's clock and its rescue (a try that reaches its 50 ms period
+  is a wake lost for good, one a tick period late a wake lost until the
+  next tick). 600 positions in each of the four cases: none lost and
+  none a tick late, the slowest try 85 us waiting for one tick and 1086
+  us for two, in today's order. In the masked order - the store, the
+  `wfi` with MIE clear, the unmask after, no consume - the same walk lost
+  none either, in this one code layout: the order this hook does not
+  use is the one the QingKe V2 loses an edge in, and the unmasked order
+  needs none. An edge that finds the core asleep reaches the handler's
+  first statement in 23 cycles and the caller's loop in 68 (masked
+  order: 28 and 66 - the handler waited for the unmask); an `idle()`
+  that the latch returns at once costs 23 cycles, two counter reads
+  included (24).
+- **One turn per wake** (letter `k`). A Tenuto pack of three quiet AOs,
+  two holding a periodic time event that does not fire in the window,
+  turned as `Tenuto::run()` turns it over 100 ticks with the tick the
+  only interrupt: 101 kernel turns, in two runs. Without the consume
+  the same pack turned 200 times, in two runs: the waking edge left
+  latched ended every second `idle()` at once. That wasted turn costs
+  126 cycles, two counter reads included; the consume costs three
+  instructions and, from the handler's first statement to the caller's
+  loop, 7 cycles a wake (45 against 38).
 - **The STK timebase** (letter `c`). CTLR reads 0xF - counting up on
   HCLK, reloading, interrupting - with CMPLR = 47999 as programmed and
   CMPHR and CNTH both zero: the reload puts the low half back at the
@@ -294,14 +339,6 @@ Driver gaps, each with its reason:
   reset value, the reset on. Which traps raise it is a measurement - an
   exception taken inside the fault handler, the reset flags read at the
   next boot - that belongs with the fault body above, its first user.
-- **The idle promise** (design/kernel.md section 11: no lost wake, one
-  turn per wake): `idle()` still sleeps with interrupts MASKED and does
-  not consume the latch its wake leaves - the order the sister strata
-  measured and left, the QingKe V2 losing a wake for good in it and the
-  V4B turning twice per wake without the consume. Neither half is
-  measured on the V4C: the sister suites' letters `w` and the turn
-  letter, ported, with the board on the desk, measure the order as it
-  is before it changes.
 - **The debug module's freeze bits** (DBGMCU_CR, CSR 0x7C0, RM 23.2.1):
   no verb reads or writes them - on the CH32V203 a `csrw` to that CSR
   from the running program resets the part
@@ -319,7 +356,15 @@ Implemented but not bench-verified, each with what would measure it:
   what is missing is a host that time-stamps the two lines as they
   arrive - the clock suite's letter `d` asks the same at two rates
   ([clock.md](clock.md)).
-- **The idle hook's POWER**: `idle()` proven to return is not `idle()`
-  proven to sleep cheaply - whether the latched event is consumed by the
-  `wfi` or leaves the loop spinning is a current measurement with the
-  probe detached.
+- **The idle promise at 48 MHz**: letters `w` and `k` ran at 8 MHz with
+  the flash at no wait state (the bench findings say why); the suite's
+  own image at 48 MHz, on a board powered from its own USB connector,
+  runs them at the rate the stratum's programs run at, two wait states
+  in the fetch.
+- **The deep path, `idle_deep()`**: no verb of this stratum sets
+  SLEEPDEEP, so the paused timebase, the unmask before the `wfi` and the
+  absent consume are unmeasured; the sleep site born with the power
+  chapter is its first user and its suite the measurement.
+- **The idle hook's POWER**: `idle()` proven to sleep once per wake is
+  not `idle()` proven to sleep cheaply - the current in Sleep is a
+  measurement with an ammeter and the probe detached.

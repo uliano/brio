@@ -28,7 +28,12 @@ kOhm, and the two jumpers the pin and USART suites detect.
   3.3 V, and the switch **S2**, which connects the regulator's output to
   the 3.3 V rail - open, the rail is whatever the headers' VCC pins are
   given. A red LED says the rail is up. **P3** is two pins on the 5 V
-  input, and a 0 Ohm link beside the regulator is not fitted.
+  input, and a 0 Ohm link beside the regulator is not fitted. Powered
+  from a WCH-LinkE's 3V3 through the debug header alone, the board
+  restarts about seventy times a second at 48 MHz whenever the core stays
+  busy - a suite's banner, a burst of console lines -, the restarts going
+  on with the core halted by the probe, and runs clean at 8 MHz: the
+  probe's 3V3 is not a supply this board is tested on.
 - **Debug**: the two-wire port on the header **P1** - **PC18 = SWDIO on
   pin 6, PC19 = SWCLK on pin 8**, with VCC on pin 2 and GND on pin 4 (the
   schematic's sheet; the reference calls the port "SDI"). A WCH-LinkE
