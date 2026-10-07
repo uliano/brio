@@ -218,9 +218,10 @@ probe finds it and where the breadcrumb waits for the next boot's
 The reference suite is `test_x035_platform` (51 verdicts in `z`, nothing
 wired) on a CH32X035F8U6 - WCH's evaluation board in its QFN20 edition,
 over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
-states, in the image built with the hardware prologue, the board
-powered from its own USB connector (from the probe's 3V3 it restarts
-under load at 48 MHz: [../boards/ch32x035-evt-f8u6.md](../boards/ch32x035-evt-f8u6.md));
+states, in the image built with the hardware prologue, the board's
+rail supplied (with none, fed through the pads' protection diodes, it
+restarts under load at 48 MHz:
+[../boards/ch32x035-evt-f8u6.md](../boards/ch32x035-evt-f8u6.md));
 where two numbers stand for one quantity they are two runs of `z`.
 Letters `w` and `k` also ran at 8 MHz - HPRE dividing the HSI by six,
 the flash at no wait state, the one line that image differs by - where
