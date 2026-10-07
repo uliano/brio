@@ -631,19 +631,23 @@ own.
   none at 256 and above, and the host's sixty-four points finished
   every run `spi_ok` with no overrun.
 - **A HOLD-OFF DECLARED TOO SHORT LOSES FRAMES, the honest one none**
-  (`bench_vx03`'s letter e, `spi.held`, MISO floating, the CH32V203C8T6
-  at 144 MHz): the default host (200 cycles, two frames of a receive in
-  flight from /32) and one declaring 100 (from /16), a receive of 1024
-  8-bit frames at /16 - 128 cycles a frame - eight runs each with a
-  console line in flight. The POLLED loop: the honest host `spi_ok` in
-  8 of 8, the declared-short one `spi_overrun` in 8 of 8 - the console's
-  handler, about 200 cycles, outlasting the frame the second one in
-  flight left it. The PUMP: `spi_ok` in 8 of 8 on both, because the
-  pump's own handler (about 105 cycles of metered body, the prologue's
-  16 and the epilogue's 25 around it) is longer than a 128-cycle frame:
-  two in flight there are bounded by the pump, and SPI1's line is
-  pending again as each of its handlers ends - no overrun in sixty-four
-  runs says the console's never got between two frames of one.
+  (`bench_vx03`'s letter e, `spi.held`, MISO floating, 144 MHz): the
+  default host (200 cycles, two frames of a receive in flight from /32)
+  and one declaring 100 (from /16), a receive of 1024 8-bit frames at
+  /16 - 128 cycles a frame - eight runs each with a console line in
+  flight. The POLLED loop, on the CH32V203C8T6 and the CH32V303VCT6
+  alike: the honest host `spi_ok` in 8 of 8, the declared-short one
+  `spi_overrun` in 6 to 8 runs of 8 on the CH32V303VCT6 over five passes -
+  the console's handler, about 200 cycles, outlasting the frame the
+  second one in flight left it. The PUMP, on the CH32V303VCT6: the
+  honest host `spi_ok` in 8 of 8 with no overrun, the declared-short
+  one `spi_overrun` in 8 of 8, the witness the class comment promises.
+  The bench app's selector of the host SPI1's vector serves is
+  volatile because gcc, seeing no reader of a plain one between two
+  stores of the main path, drops the first as dead: the short host's
+  interrupts then go to the plain host, which ends the transaction
+  after two entries with `spi_ok` and frames unread (measured: OVR
+  standing after 1 to 3 runs of 8, no entry of the short host's branch).
 - **THE TWO-IN-FLIGHT POLLED LOOP WATCHES OVR BESIDE TXE TOO**: in its
   first form it tested OVR on the RXNE poll alone, and `spi.held` found
   the declared-short host's lost frames reported as `spi_stalled` (4 and
@@ -876,13 +880,11 @@ Implemented but not bench-verified, each with what would measure it:
   by the same arithmetic (one code lower than SPI1's above 72 MHz of
   HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
   the oracle on a PB1 instance would measure it.
-- **The PUMP under a hold-off declared too short**: `spi.held` shows it
-  on the polled loop (above); on the pump at 144 MHz SPI1's ladder has
-  no frame between the pump's own handler and this image's longest - a
-  frame of 128 cycles is shorter than the pump itself, one of 256
-  outlasts the console's handler (SPI2's bus at half HCLK has the same
-  ladder in core cycles). An image with a handler longer than 256
-  cycles would put a rate there.
+- **The PUMP under a hold-off declared too short on the CH32V203C8T6**:
+  measured on the CH32V303VCT6 (above); the CH32V203C8T6's earlier
+  pump line was the plain host's vector serving the short host's
+  transaction, so `bench_vx03-1`'s letter e run there again would
+  measure it.
 - **The RECEIVED half of the engined data phase as the engines now are,
   16-bit frames included**: the transmitted half is judged by the CRC
   unit above, and what the receive engine lands in memory is judged by

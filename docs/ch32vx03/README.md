@@ -200,7 +200,11 @@ counter in `default_handler` and the interrupt number in mcause.
   leaf with every ring verb and the error counters' `bump()` inlined,
   and saves no f-register - in the platform suite's image and the bench
   app's for that part, counted - where a console's, whose receive edge
-  calls the kernel's `post`, still saves all twenty.
+  calls the kernel's `post`, still saves all twenty, as do the I2C
+  host's and target's handlers in that suite's image: at 8 MHz and 400
+  kHz those saves cost the CH32V303VCT6's own target the last byte of a
+  write before a repeated START, which an image with every handler
+  flattened keeps ([i2c.md](i2c.md)).
 - **The global mask leaves a critical section whole; a line's own
   disable does not.** The manual's V2.5 revision adds a note asking for
   a `fence.i` after a mask. Measured with a line pended by hand and
@@ -219,7 +223,9 @@ counter in `default_handler` and the interrupt number in mcause.
   the STK and TIM2 pending and enabled, woken only by a debugger's halt.
   The platform sleeps as a WFE with the mask lifted first, and the
   sleep entry swept to the cycle against the tick's edge loses no wake
-  in either order on that die ([platform.md](platform.md)).
+  in either order on that die; with the latch the wake leaves consumed
+  after it, none lost and one kernel turn per interrupt on both parts
+  ([platform.md](platform.md)).
 - **The reference manual's vector table is the union of four
   families.** Its table 9-2 names TIM8 at entries 59..62, which belong
   to the CH32V30x; the CH32V203's tail is USBFS, its wake-up, UART4 and

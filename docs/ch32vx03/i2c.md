@@ -573,7 +573,7 @@ At 400 kHz:
 `test_vx03_i2c` at the same 96 MHz on WCH's evaluation board, in two
 arrangements. With the board's own two wires - I2C2's pads to I2C1's,
 PB10 to PB6 and PB11 to PB7, a 4.7 kOhm pull-up on each line - the
-chip's two controllers share one bus and no peer board is on it (28
+chip's two controllers share one bus and no peer board is on it (31
 verdicts in `z`, the peer letters declining by name). With I2C1 wired
 to a CH32V203C8T6 board's I2C1 running `twi_peer`, a 4.7 kOhm pull-up on
 each line, a common ground and the board's own two wires off, every
@@ -615,6 +615,32 @@ letters declining by name). What they measure:
   it took none of one, one of two, two of three and three of four
   written bytes; requested while the last byte shifts, every one - the
   engine's order now, without a dummy byte in the data register.
+- **THE REFUSED LAST BYTE** (letter `o`, I2C2 the target served from
+  its own vector): with the core at 96 and at 48 MHz every refusal
+  answered `i2c_nack_data` with the bus let go and the next tenure
+  `i2c_ok`, and every control exact, pump and engines, 100 and 400 kHz;
+  with the core at 8 MHz the same at 100 kHz, and NOT at 400 kHz. There,
+  with two to four bytes written, the target took one byte fewer than
+  written: a control - every byte acknowledged - ended `i2c_ok` one
+  byte short (one control of four exact, or none), and a refusal ended
+  `i2c_nack_addr` with the target one byte short; the bus was let go
+  and the next tenure ran every time. That is this die's target losing
+  the last written byte before a late repeated START (above), at a core
+  where a 400 kHz byte is 180 cycles and every handler of both ends
+  saves the V4F's twenty f-registers on entry, each calling out of
+  line (a driver helper, the BusActivity count, the kernel's `post`),
+  which the hardware prologue never does ([platform.md](platform.md)). Images
+  of the suite with handlers flattened (none of them then calling out
+  or saving an f-register) split it: every handler flattened, the
+  letter passes at 8 MHz and 400 kHz (64 refusals of 64, every
+  control) and the suite 31 of 31; the host's four alone, the pump clean and
+  the engines' controls two of four; the target's two alone, every
+  control exact and the refusals taken whole by a target late with its
+  NACK (12 and 8 of 16, the instrument's limit the letter counts apart).
+  The loss wants a late host AND a late target, and the f-register
+  saves make both late. Three runs of the letter fail the same way as
+  the stratum stands; the client answering a standing byte before the
+  address, tried, changes nothing (the byte never raises RxNE).
 - **A target stuck mid-byte, with no foreign chip**: a read of zeros cut
   off four bit times into its first byte by taking the host through its
   reset line leaves I2C2 holding SDA low with SCL released high;
@@ -656,6 +682,13 @@ letters declining by name). What they measure:
 
 Driver gaps:
 
+- **The CH32V303VCT6 at 8 MHz and 400 kHz** (above): a write of two
+  bytes or more before a repeated START loses its last byte to this
+  die's target when the handlers pay the V4F's f-register saves. The
+  remedy measured - every handler flattened - is the handler
+  attribute's, a choice that moves every image of the part
+  ([platform.md](platform.md)); 48 MHz is the slowest core measured
+  clean at 400 kHz here.
 - **10-bit addressing on the HOST side.** The tenure
   `docs/design/i2c-bus.md` describes carries a 7-bit address on every
   stratum, so the Request has no shape for a 10-bit one and the header
@@ -683,12 +716,6 @@ Implemented, not bench-verified (each with what would measure it):
   against a refused last byte (above); a peer board running `twi_peer` -
   of this family or another - is what would measure it against a target
   the core does not serve.
-- **The reworked engine on the CH32V303VCT6** (EVT8_1's two bytes, the
-  event vector the tenure's, the refusal behind a pending START closed
-  by a void write): its evaluation board was off the desk. The suite's
-  letters l to o there, and letter `i` of `bench_vx03`, would measure it
-  - the V4F's handlers call nothing on the hot path now, which its FPU
-  tax makes worth a number.
 - **The CH32V303VCT6 as the far end of a CH32V203C8T6.** The
   CH32V303VCT6 host against a CH32V203C8T6 target is measured (above);
   the other way round - the suite on the CH32V203C8T6, the peer on the

@@ -118,7 +118,14 @@ this document keeps in its place.
   no f-register - and none by the USART transport's handler, whose
   ring verbs and error counters are inlined, while a console's, whose
   receive edge calls the kernel's `post`, saves all twenty: one call
-  anywhere in the body is enough.
+  anywhere in the body is enough, and in the console's image gcc places
+  the saves at the handler's entry, ahead of the branch that calls, so
+  an interrupt that only moves a transmitted byte pays them as well (the
+  platform suite's tick vector shows the other placement, its saves on
+  the one branch that needs them). Where a byte is short against the core, that entry is
+  the difference between a byte kept and a byte lost: the I2C suite's
+  refused last byte at 8 MHz and 400 kHz on this part
+  ([i2c.md](i2c.md)).
 
 ## Types and verbs
 
@@ -219,9 +226,8 @@ The reference suite is `test_vx03_platform`, at 144 MHz from the HSI:
 on the CH32V203C8T6 fifty-six verdicts in `z` - letters `a` to `g`
 (forty), the bus in sleep, the mask's shadow, the idle hook against the
 tick's edge, the kernel's turn and the runtime's functions - on the
-CH32V303VCT6 sixty-two in `z` before letters `w` and `o` joined it -
-the same forty, the floating-point unit's three letters, the bus in
-sleep and the mask's shadow - and on both nine more in letter `i`,
+CH32V303VCT6 seventy-one, the same with the floating-point unit's three
+letters beside them - and on both nine more in letter `i`,
 which reboots the board three times. On the 32 KB parts the suite is
 two images (`-1` with `a` to `g`, `i`, `t` and `w`, `-2` with `m`, `n`
 and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
@@ -236,7 +242,7 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   interrupt, taken while the letter printed and not inside an
   `idle()`, left its latch standing: the first call returns at once on
   it and consumes it.
-- **No edge position loses the wake** (letter `w`, the CH32V203C8T6).
+- **No edge position loses the wake** (letter `w`, both parts).
   The STK's counter is written so its compare comes D cycles after a
   masked check, D swept from 0 to 599 one cycle at a time, then the
   kernel's loop - check, `idle()` - until one tick is served (and, a
@@ -273,7 +279,19 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   | unmask, `wfi`, then the consume (the platform's) | **23** | **68** | **33** |
 
   (25 and 69 for the unmasked order without the hardware prologue; the
-  last column carries two counter reads.) The handler now runs straight out of the sleep, by
+  last column carries two counter reads.) On the CH32V303VCT6's V4F the
+  platform's order and its consume lose nothing either - 2400 tries,
+  none lost and none a tick late, the slowest 5 us for one tick and
+  1005 us for two, three runs alike - at 21 cycles from the edge to the
+  handler, 75 to the caller's loop and 30 for an `idle()` the latch
+  returns at once. The loop and `idle()` are the CH32V203C8's
+  instructions one for one in the two images, and no f-register is
+  touched on the way: neither the sleep path nor the loop uses one, and
+  the suite's tick vector, whose storm branch for letter `k` saves
+  twenty, keeps those saves on that branch (gcc's shrink-wrapping), so
+  the tick takes its path with none. The two cycles fewer to the
+  handler and seven more to the loop than the V4B's are the core's or
+  the image's layout, not chased. The handler now runs straight out of the sleep, by
   6.2's second WFE item, instead of after an unmask. In the console's
   kernel loop the Sleep path is thirteen instructions executed where it
   was fifteen - one SCTLR load where there were two, the deep path out
@@ -289,7 +307,8 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   included); the consume costs 5 to 7 cycles a wake: from an edge that
   finds the core asleep to the caller's loop 68 against 61, an `idle()`
   the latch returns at once 33 against 28, a quiet turn 146 against
-  141.
+  141. The CH32V303VCT6 turns 101 times over the same 100 ticks, a
+  quiet turn 137 cycles.
 - **The STK arithmetic holds.** CMPLR = 143999 as programmed, CMPHR and
   CNTH both zero - the reload puts the low half back at the compare, so
   the high half of this 64-bit counter never moves. Over 200 reloads,
@@ -478,10 +497,6 @@ Implemented but not bench-verified, each with what would measure it:
   to turn the loop once per interrupt, not to sleep cheaply: what a
   sleep saves is a current measurement with the probe detached, since a
   core in debug mode never sleeps at all.
-- **The unmasked idle order and the consume on the CH32V303's V4F.**
-  Both are the stratum's, so they reach that part too, where letters
-  `w` and `o` have not run: those letters on the CH32V303VCT6, with `z`
-  recounted there, would measure them.
 - **Letter `o` in the 32 KB tier's second image**: the same source as
   the CH32V203C8's, linked by the CH32V203C6 preset; `-2` run on the
   CH32V203C8T6 would count it.

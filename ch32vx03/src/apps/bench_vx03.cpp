@@ -1064,11 +1064,15 @@ using SpiShort = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, 100>;
 volatile bool spi_plain_done = false;
 /// Which host spi1_handler serves: letter e's plain one (zero, so the
 /// pump's path is a load and one branch before the body, the bench's
-/// own), letter d's engined one, or spi.held's short one.
+/// own), letter d's engined one, or spi.held's short one. VOLATILE: the
+/// vector is the only reader, and gcc, seeing none between two stores of
+/// the main path, drops the first as dead - spi.held's store of the
+/// short host, read in the listing - and that host's interrupts would go
+/// to the plain one.
 constexpr uint8_t spi1_plain = 0;
 constexpr uint8_t spi1_dma = 1;
 constexpr uint8_t spi1_short = 2;
-uint8_t spi1_serves = spi1_dma;
+volatile uint8_t spi1_serves = spi1_dma;
 
 /// Letter e's counters: SPI1's vector alone (each run starts on a fresh
 /// tick and ends inside it; spi.ahead and spi.live run under the console
