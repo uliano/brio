@@ -173,6 +173,20 @@
 //               one by the default's - and the line says the status, the
 //               overrun flag and the host's count: a hold-off declared
 //               shorter than the image's handlers shows as overruns.
+//        spi.window
+//               THE PUMP'S OVR WINDOW, swept: a pumped write of 2 and of
+//               3 frames of 8 bits at /4 and /8 by the same host, two in
+//               flight, SPI1's line masked at the NVIC around start()
+//               and unmasked after a number of empty turns that grows by
+//               one a run, 0 to 127, four sweeps - so the handler for
+//               frame 0 enters before frame 1 completes, after it, and
+//               ON it, where the completion falls between the handler's
+//               status read and its DR read. The line counts the runs
+//               that completed, those that took fewer interrupts than
+//               frames (frame 1 lost: with two frames the LAST frame's
+//               loss), those that ended spi_overrun, those that never
+//               completed (recovered after a bound) and those after which
+//               OVR stood; every run must complete.
 //        spi.req.e, spi.poll.e, spi.poll.rx.e
 //               the same short requests, and 256 frames written and read
 //               polled at /2 and /4, over letter d's ENGINED host: where
@@ -344,7 +358,7 @@ using FastSpi = SpiHost<1, spi1_pins, SpiTx, SpiRx>;
 using PumpSpi = SpiHost<1, spi1_pins>;
 /// letter e's witness: the same engineless host DECLARING a hold-off of
 /// one cycle - shorter than every handler this image binds, the pump's
-/// own among them - so its write-ahead threshold (51 cycles) keeps two
+/// own among them - so its write-ahead threshold (50 cycles) keeps two
 /// 8-bit frames in flight from /4 where the honest default does from /16.
 using ShortHoldSpi = SpiHost<1, spi1_pins, NoDmaEngine, NoDmaEngine, 1>;
 using ReqCs = Pin<'C', 0>;   ///< letter e's select
@@ -913,6 +927,78 @@ SpiRun spi_best_of(const typename Host::Request& r, uint8_t runs) {
 }
 #endif
 
+#if defined(STM32F446xx)
+/// spi.window (the header): one line, `frames` frames at `rate`.
+void spi_window_line(uint16_t frames, SpiClock rate) {
+    constexpr uint16_t delays = 128;
+    uint32_t done = 0;
+    uint32_t lost = 0;
+    uint32_t overran = 0;
+    uint32_t hung = 0;
+    uint32_t ovr = 0;
+    uint16_t first_lost = 0xFFFF;
+    uint16_t first_hung = 0xFFFF;
+    uint16_t last_hung = 0;
+    for (uint8_t sweep = 0; sweep < 4u; ++sweep) {
+        for (uint16_t d = 0; d < delays; ++d) {
+            ShortHoldSpi::Request r{};
+            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(spi_out));
+            r.len = frames;
+            r.clock = rate;
+            r.mode = SpiMode::mode0;
+            r.bits = SpiDataSize::bits8;
+            r.polled = false;
+            spi_done = false;
+            const uint32_t n0 = spi_meter.count();
+            Nvic::disable(Spi<1>::irq);
+            const bool sync = ShortHoldSpi::start(r);
+            for (uint32_t k = d; k != 0u; --k) {
+                asm volatile("");
+            }
+            Nvic::enable(Spi<1>::irq);
+            uint32_t spins = 20'000u;
+            while (!sync && !spi_done && spins-- != 0u) {
+            }
+            // The meter's count is a plain word the vector writes: the
+            // barrier makes the read below a fresh one.
+            asm volatile("" ::: "memory");
+            if (sync || spi_done) {
+                ++done;
+                if (spi_meter.count() - n0 < frames) {
+                    ++lost;
+                    if (d < first_lost) {
+                        first_lost = d;
+                    }
+                }
+                if (ShortHoldSpi::status() == spi_overrun) {
+                    ++overran;
+                }
+            } else {
+                ++hung;
+                if (d < first_hung) {
+                    first_hung = d;
+                }
+                last_hung = d;
+                (void)ShortHoldSpi::recover();
+            }
+            if (Spi<1>::overrun()) {
+                ++ovr;
+                Spi<1>::clear_overrun();
+            }
+        }
+    }
+    (void)console_drain();
+    print(serial, "  spi.window write of ", frames, " 8-bit frames at SCK ", ShortHoldSpi::sck_hz(rate),
+          " Hz, two in flight, the entry swept over ", delays, " delays x 4: ", done, " completed (",
+          lost, " with a frame lost, the first at delay ", first_lost, "; ", overran, " spi_overrun), ", hung,
+          " never completed");
+    if (hung != 0u) {
+        print(serial, " (delays ", first_hung, " to ", last_hung, ")");
+    }
+    print(serial, ", ", ovr, " with OVR standing after", crlf);
+}
+#endif
+
 void te_spi() {
     ruler_on();
 #if defined(STM32F446xx)
@@ -1028,6 +1114,11 @@ void te_spi() {
               " in flight (the default: ", PumpSpi::two_in_flight(SpiClock::div4, SpiDataSize::bits8) ? "two" : "one",
               "), worst status ", shorted.worst_status, ", OVR after a run: ", shorted.ovr ? "YES" : "no",
               ", the host counted ", ShortHoldSpi::overruns(), crlf);
+    }
+    // spi.window: the pump's OVR window swept (the header).
+    for (const SpiClock rate : {SpiClock::div4, SpiClock::div8}) {
+        spi_window_line(2, rate);
+        spi_window_line(3, rate);
     }
     ShortHoldSpi::release();
     short_host = false;

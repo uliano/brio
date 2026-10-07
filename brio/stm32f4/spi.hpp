@@ -1055,12 +1055,13 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 /// zero wait states (the Cortex-M4 TRM, ARM DDI 0439B 3.9.1; the ART's
 /// cache serves the vector).
 inline constexpr uint32_t spi_isr_entry_cycles = 12;
-/// isr()'s entry to its DR read: the SR read, the RXNE and OVR tests and
-/// the DR read - five instructions with two APB2 accesses at HCLK/2,
-/// counted in bench_stm32f4.lst's SPI1 vector; the app's stamp and its
-/// host branch lie before them and are the app's (ten instructions there,
-/// one of them the ruler's read).
-inline constexpr uint32_t spi_isr_to_read_cycles = 16;
+/// isr()'s entry to its DR read: the SR read, the RXNE test and the DR
+/// read - four instructions with two APB2 accesses at HCLK/2, counted in
+/// bench_stm32f4.lst's SPI1 vector (the OVR test is a second SR read
+/// AFTER the DR one: isr()); the app's stamp and its host branch lie
+/// before them and are the app's (ten instructions there, one of them the
+/// ruler's read).
+inline constexpr uint32_t spi_isr_to_read_cycles = 15;
 /// The DEFAULT of SpiHost's `hold_off_cycles`: the longest the bench
 /// images keep the host's vector from running, at 180 MHz. No interrupt
 /// nests over another (design/kernel.md section 1), so a handler that
@@ -1079,7 +1080,7 @@ inline constexpr uint32_t spi_default_hold_off_cycles = 150;
 /// flight overrun the receive buffer if frame k is read later than one
 /// frame time after its RXNE (26.3.13), and the latest the read can come
 /// is the hold-off, the exit after it, this vector's entry and its read -
-/// with a quarter on top for the flash's wait states on the way: 237
+/// with a quarter on top for the flash's wait states on the way: 236
 /// cycles at the default.
 constexpr uint32_t spi_write_ahead_min_frame_cycles(uint32_t hold_off) {
     return (hold_off + 2u * spi_isr_entry_cycles + spi_isr_to_read_cycles) * 5u / 4u;
@@ -1104,18 +1105,18 @@ constexpr uint8_t spi_write_ahead_code(uint32_t hold_off, SpiDataSize bits, uint
     return 8;
 }
 
-// The default on an APB2 instance at HCLK = 2 x PCLK2 (180 MHz): 237
+// The default on an APB2 instance at HCLK = 2 x PCLK2 (180 MHz): 236
 // cycles, 8-bit frames two in flight from /16 (256 cycles), 16-bit ones
 // from /8.
-static_assert(spi_write_ahead_min_frame_cycles(spi_default_hold_off_cycles) == 237u);
+static_assert(spi_write_ahead_min_frame_cycles(spi_default_hold_off_cycles) == 236u);
 static_assert(spi_write_ahead_code(spi_default_hold_off_cycles, SpiDataSize::bits8, 1) ==
               static_cast<uint8_t>(SpiClock::div16));
 static_assert(spi_write_ahead_code(spi_default_hold_off_cycles, SpiDataSize::bits16, 1) ==
               static_cast<uint8_t>(SpiClock::div8));
 // A longer hold-off moves two in flight to a slower code: 300 cycles make
-// the threshold 425, so 8-bit frames from /32 (512 cycles) and 16-bit
+// the threshold 423, so 8-bit frames from /32 (512 cycles) and 16-bit
 // ones from /16.
-static_assert(spi_write_ahead_min_frame_cycles(300u) == 425u);
+static_assert(spi_write_ahead_min_frame_cycles(300u) == 423u);
 static_assert(spi_write_ahead_code(300u, SpiDataSize::bits8, 1) ==
               static_cast<uint8_t>(SpiClock::div32));
 static_assert(spi_write_ahead_code(300u, SpiDataSize::bits16, 1) ==
@@ -1321,7 +1322,7 @@ public:
     /// would have held.
     static constexpr uint32_t hold_off = hold_off_cycles;
     /// The shortest frame two are kept in flight over, from the hold-off
-    /// (`spi_write_ahead_min_frame_cycles`): 237 cycles at the default. On
+    /// (`spi_write_ahead_min_frame_cycles`): 236 cycles at the default. On
     /// this family at HCLK = 2 x PCLK2 a frame is 8 x 2^(code + 2) HCLK
     /// cycles: at the default 8-bit frames keep two in flight from /16
     /// (256 cycles) and 16-bit ones from /8; faster than that one frame is
@@ -1602,15 +1603,25 @@ public:
     /// deadline (the class comment). True when the transaction just
     /// completed (CS released): the edge the app's glue posts TransferDone
     /// on.
+    ///
+    /// OVR IS READ AFTER DR, from a second SR load: the frame in flight
+    /// behind frame k may complete at any moment before the DR read, and
+    /// 26.3.13 then keeps frame k in the buffer and drops that one. A
+    /// status copy taken before the read would miss the OVR its
+    /// completion raises: frame k stored as if nothing happened, the loss
+    /// seen a handler late inside a run and, on the phase's last pair, by
+    /// no handler at all - a transaction that never completes, a hang
+    /// only a bus timeout ends (measured: docs/stm32f4/spi.md). The SR
+    /// load after the DR read sees every overrun up to the read, and
+    /// DR-then-SR is 26.3.13's clear. One APB load a frame.
     [[gnu::always_inline]] static bool isr() {
         SPI_TypeDef& r = S::regs();
         State& s = st_;
-        const uint32_t sr = r.SR;
-        if ((sr & SPI_SR_RXNE) == 0u) {
+        if ((r.SR & SPI_SR_RXNE) == 0u) {
             return false;
         }
         const uint16_t in = static_cast<uint16_t>(r.DR);
-        if ((sr & SPI_SR_OVR) != 0u) [[unlikely]] {
+        if ((r.SR & SPI_SR_OVR) != 0u) [[unlikely]] {
             return end_overrun();
         }
         const bool wide = spi_frame_is_halfword(s.t.bits);
@@ -2076,13 +2087,12 @@ private:
         return true;
     }
 
-    /// An overrun on the pump: DR was read, so the SR read completes
-    /// 26.3.13's clearing sequence; then the frame still shifting is let
-    /// out (26.3.10: TXE, then BSY) before the select rises, and the
-    /// frame it leaves is flushed. The transaction ends with spi_overrun.
+    /// An overrun on the pump: isr()'s SR read after its DR read was
+    /// 26.3.13's clearing sequence; the frame still shifting is let out
+    /// (26.3.10: TXE, then BSY) before the select rises, and the frame it
+    /// leaves is flushed. The transaction ends with spi_overrun.
     [[gnu::noinline]] static bool end_overrun() {
         State& s = st_;
-        (void)S::regs().SR;
         if (s.overruns != UINT16_MAX) {
             ++s.overruns;
         }

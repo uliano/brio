@@ -237,7 +237,15 @@ the engine's `status()` reports. The choice travels per-request in a
   at zero; an overrun the declared figure did not foresee ends the
   transaction with `spi_overrun` and is counted - the witness of a
   hold-off declared too short, measured on the three families that take
-  it by a host declaring a short one beside the honest default. Right
+  it by a host declaring a short one beside the honest default. On a
+  one-deep receive register the pump tests the overrun in a status read
+  made AFTER the data read: the frame in flight behind the one read may
+  complete at any moment before that read, a status copy taken before
+  it misses the overrun the completion raises, and on a phase's last
+  pair no interrupt follows - a transaction that never completes;
+  measured on the CH32V203C8T6, the CH32V303VCT6, the STM32F446RE and
+  the CH32V006K8U6 by a sweep of the handler's entry across the frame's
+  completion, every run completes at one status load a frame. Right
   where a frame outlasts the handler; faster than that
   the handler bounds the bus and the thread, and the polled style or
   the engines are the bulk path.

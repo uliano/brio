@@ -295,9 +295,17 @@ block is reset and reconfigured and the transaction ends with
 `spi_stalled`.
 
 **The pump keeps one or two frames in flight, by the rate.** The handler
-reads frame k FIRST - the SR read, the RXNE and OVR tests, the DR read:
-five instructions - and writes the next frame owed; with two in flight
-frame k + 1 is already shifting and the write is k + 2, so the bus stays
+reads frame k FIRST - the SR read, the RXNE test, the DR read: four
+instructions - then tests OVR in a SECOND SR read, after the DR read,
+and writes the next frame owed. The order is 26.3.13's: the frame in
+flight behind frame k may complete at any moment before the DR read,
+the buffer then keeps frame k and drops that one, and a status copy
+taken before the read would miss the OVR its completion raises - frame
+k stored as if nothing happened, the loss seen a handler late inside a
+run and, on the phase's last pair, by no handler at all: a transaction
+that never completes (measured, below). The SR read after the DR read
+sees every overrun up to the read and is the flag's clear. With two in
+flight frame k + 1 is already shifting and the write is k + 2, so the bus stays
 busy through the handler. Two in flight overruns the receive buffer if
 the read comes later than one frame time after RXNE, and the latest it
 can come is THE IMAGE'S HOLD-OFF - the longest it keeps this vector from
@@ -306,12 +314,12 @@ running: a handler that started just before RXNE running its whole body
 exit, this vector's entry and its read:
 
     write_ahead_min_frame_cycles = (hold_off_cycles + 2 x spi_isr_entry_cycles + spi_isr_to_read_cycles) x 5 / 4
-                                 = (150 + 24 + 16) x 5 / 4 = 237 HCLK cycles at the default
+                                 = (150 + 24 + 15) x 5 / 4 = 236 HCLK cycles at the default
 
 with the inputs counted in the listing: the Cortex-M4's exception entry
 and exit 12 cycles each at zero wait states (the Cortex-M4 TRM, DDI
-0439B 3.9.1), the handler's five instructions with two APB2 accesses at
-HCLK/2 about 16, and a quarter on top for the flash's wait states.
+0439B 3.9.1), the handler's four instructions with two APB2 accesses at
+HCLK/2 about 15, and a quarter on top for the flash's wait states.
 
 **The hold-off is the image's, and the image declares it**: SpiHost's
 last template parameter, `hold_off_cycles`, in core cycles at the clock
@@ -335,7 +343,7 @@ only keeps one frame in flight where two would have held. A frame at BR code c i
 `bits x 2^(c + 1)` PCLK cycles, twice that in HCLK on APB2 at 180 MHz:
 so 8-bit frames keep two in flight from /16 (256 cycles) and 16-bit
 frames from /8, and faster than that one frame is in flight, the bus
-idle for the handler; a hold-off of 300 makes the threshold 425 and moves
+idle for the handler; a hold-off of 300 makes the threshold 423 and moves
 both a code slower, /32 and /16 (pinned beside the default's in the
 header). `two_in_flight()` answers the same arithmetic for a program. The D/C boundary drains to one frame either
 way: the first data frame is written only after the last command frame
@@ -399,7 +407,7 @@ where a frame outlasts it:
 
 ```cpp
 using Bus = brio::SpiHost<5, spi5, brio::NoDmaEngine, brio::NoDmaEngine, 300>;
-static_assert(Bus::write_ahead_min_frame_cycles == 425);
+static_assert(Bus::write_ahead_min_frame_cycles == 423);
 ```
 
 The same bus shared, through the arbiter - the client posts and gets a
@@ -571,7 +579,7 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   loop as it was - `xfer()` per frame, one frame in flight, four calls a
   frame - ran at x = 2.85 at 22.5 MHz and 1.41 at 5.625 (107 to 119
   cycles a frame over the wire).
-- **The pump, one or two frames in flight.** The handler is 94 cycles
+- **The pump, one or two frames in flight.** The handler is 95 cycles
   with the bench's stamps (145 before: the Request's `bits` reloaded,
   three calls a frame, the next frame written last). With two in flight
   a 256-frame request runs at x = 1.00 at 5.625 MHz in 8-bit frames and
@@ -580,12 +588,32 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   the threshold, x = 1.76 at 11.25 MHz, 2.57 at 22.5, 4.28 at 45: the
   bus idle for the handler, as the arithmetic above says it must be.
 - **The hold-off's witness** (letter e's `spi.short`): the same
-  engineless host declaring a hold-off of one cycle - threshold 51, two
+  engineless host declaring a hold-off of one cycle - threshold 50, two
   8-bit frames in flight from /4 where the default keeps one until /16 -
   pumping 256 frames at SCK 22.5 MHz (a 64-cycle frame against the
-  pump's own 94-cycle handler) ends every one of six runs in
+  pump's own 95-cycle handler) ends every one of six runs in
   `spi_overrun`, the host counting six, while the default host's runs
   at every rate and width beside it count none.
+- **THE PUMP READS OVR AFTER THE DATA, and the window that reading it
+  before left is closed** (letter e's `spi.window`, the Nucleo-F446RE,
+  MISO floating): a pumped write of 2 and of 3 8-bit frames at SCK 22.5
+  and 11.25 MHz by the same short host - two in flight - SPI1's line
+  masked at the NVIC around `start()` and unmasked after 0 to 127 empty
+  turns, four sweeps, so that the handler for frame 0 enters before
+  frame 1 completes, after it, and on it. At 22.5 MHz the handler
+  cannot enter before frame 1 completes (512 of 512 runs lost it, every
+  one completed `spi_overrun`); at 11.25 MHz the boundary sits at the
+  sixteenth turn. With OVR tested in a status copy taken BEFORE the DR
+  read, 4 two-frame runs of 512 never completed, all at that turn - the
+  last frame lost with no interrupt to follow - while the three-frame
+  runs completed, the next frame's RXNE rising and its handler finding
+  the OVR a frame late. With the SR read after the DR read: 512 of 512
+  completed on every line, 453 of them `spi_overrun` with the last
+  frame lost and counted, no OVR standing after any; a scratch probe in
+  the handler counted the completions that fell between the two reads,
+  5 and 3 at 11.25 MHz, every one completed. The second SR read costs
+  the handler one or two cycles: 95 to 96 cycles with the stamps
+  against 93 to 94 the same session.
 - **A short polled request's fixed cost: 198, 251 and 246 cycles** for
   a command byte and 0, 2 and 15 data bytes at 5.625 MHz (wall minus
   the wire's time; D/C and the select on two pads, the data phase in the

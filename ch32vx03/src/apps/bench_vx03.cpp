@@ -226,6 +226,21 @@
 //                       load: the overruns and the statuses counted. The
 //                       declared-short host is the one that must lose
 //                       frames, the honest one none.
+//        spi.window     THE PUMP'S OVR WINDOW, swept: a pumped write of 2
+//                       and of 3 16-bit frames at /4 and /8 on the plain
+//                       host, two in flight, SPI1's line masked at the
+//                       PFIC around start() and unmasked after a number of
+//                       empty turns that grows by one a run, 0 to 127,
+//                       four sweeps - so the handler for frame 0 enters
+//                       before frame 1 completes, after it, and ON it,
+//                       where the completion falls between the handler's
+//                       status read and its DATAR read. The line counts
+//                       the runs that completed, those that took fewer
+//                       interrupts than frames (frame 1 lost and counted:
+//                       with two frames the LAST frame's loss), those that
+//                       never completed (recovered after a bound) and
+//                       those after which OVR stood; every run must
+//                       complete.
 //
 //   i  THE I2C HOST ABOVE THE WIRE on the self-link (the parts with I2C2;
 //      a part without it declines the letter by name, and the 32 KB
@@ -1401,6 +1416,91 @@ void spi_held_report() {
     spi1_serves = spi1_plain;
 }
 
+/// spi.window: THE PUMP'S OVR WINDOW, swept. A pumped WRITE of `frames`
+/// 16-bit frames at /4 or /8 (64 or 128 cycles a frame), two in flight: SPI1's line
+/// masked at the PFIC around start(), then `d` empty turns, then unmasked,
+/// so the handler for frame 0 enters at a delay that moves one turn a run
+/// across the moment frame 1 completes - before it (two interrupts), after
+/// it (one: the overrun counted as the frame it is), and on it, where the
+/// completion falls between the handler's status read and its DATAR read.
+/// Every delay from 0 to 127, four sweeps: the runs that completed, those
+/// that completed in fewer interrupts than frames (a frame lost and
+/// counted), those that never completed (recovered after a bound), and
+/// those after which OVR stood; the delays at which a frame was first lost
+/// and at which a run first and last hung. With two frames the loss is the
+/// LAST frame's; with three, the first pair's inside the run.
+void spi_window_line(uint16_t frames, SpiClock rate) {
+    constexpr uint16_t delays = 128;
+    uint32_t done = 0;
+    uint32_t lost = 0;
+    uint32_t hung = 0;
+    uint32_t ovr = 0;
+    uint16_t first_lost = 0xFFFF;
+    uint16_t first_hung = 0xFFFF;
+    uint16_t last_hung = 0;
+    for (uint8_t sweep = 0; sweep < 4u; ++sweep) {
+        for (uint16_t d = 0; d < delays; ++d) {
+            SpiPlain::Request r{};
+            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(buffer_a));
+            r.len = frames;
+            r.mode = SpiMode::mode0;
+            r.clock = rate;
+            r.bits = SpiDataSize::bits16;
+            spi_plain_done = false;
+            const uint32_t n0 = spi_meter.count();
+            Pfic::disable(Spi<1>::irq);
+            const bool sync = SpiPlain::start(r);
+            for (uint32_t k = d; k != 0u; --k) {
+                __asm__ volatile("");
+            }
+            Pfic::enable(Spi<1>::irq);
+            uint32_t spins = 20'000u;
+            while (!sync && !spi_plain_done && spins-- != 0u) {
+            }
+            // The meter's count is a plain word the vector writes: the
+            // barrier makes the read below a fresh one.
+            asm volatile("" ::: "memory");
+            if (sync || spi_plain_done) {
+                ++done;
+                if (spi_meter.count() - n0 < frames) {
+                    ++lost;
+                    if (d < first_lost) {
+                        first_lost = d;
+                    }
+                }
+            } else {
+                ++hung;
+                if (d < first_hung) {
+                    first_hung = d;
+                }
+                last_hung = d;
+                (void)SpiPlain::recover();
+            }
+            if (Spi<1>::overrun()) {
+                ++ovr;
+                Spi<1>::clear_overrun();
+            }
+        }
+    }
+    console_drain();
+    print(serial, "  spi.window write of ", frames, " 16-bit frames at /", spi_division(rate), ", two in flight, the entry swept over ",
+          delays, " delays x 4: ", done, " completed (", lost, " with a frame lost and counted, the first at delay ",
+          first_lost, "), ", hung, " never completed");
+    if (hung != 0u) {
+        print(serial, " (delays ", first_hung, " to ", last_hung, ")");
+    }
+    print(serial, ", ", ovr, " with OVR standing after", crlf);
+}
+
+void spi_window_report() {
+    spi1_serves = spi1_plain;
+    (void)SpiPlain::init(clock);
+    for (const SpiClock rate : {SpiClock::div4, SpiClock::div8}) {
+        spi_window_line(2, rate);
+        spi_window_line(3, rate);
+    }
+}
+
 void te_spi() {
     console_drain();
     for (uint32_t k = 0; k < 4096u; ++k) {
@@ -1422,6 +1522,7 @@ void te_spi() {
     spi_ahead_report();
     spi_live_report();
     spi_held_report();
+    spi_window_report();
     spi1_serves = spi1_dma;
     spi_up = false;   // letter d brings its own host up again
     bench.verdict("ran", true);

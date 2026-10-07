@@ -225,6 +225,22 @@
 //                      console line in flight: the overruns and the
 //                      statuses counted. The declared-short host is the
 //                      one that must lose frames, the honest one none.
+//        spi.window    THE PUMP'S OVR WINDOW, swept: a pumped write of 2
+//                      and of 3 frames of 8 bits at HCLK/32 and HCLK/64 by
+//                      the declared-short host, two in flight, SPI1's line
+//                      masked at the PFIC around start() and unmasked
+//                      after a number of empty turns that grows by one a
+//                      run, 0 to 511, two sweeps - so the handler for
+//                      frame 0 enters before frame 1 completes, after it,
+//                      and ON it, where the completion falls between the
+//                      handler's status read and its DATAR read. The line
+//                      counts the runs that completed, those that took
+//                      fewer interrupts than frames (frame 1 lost: with two
+//                      frames the LAST frame's loss), those that ended
+//                      spi_overrun, those that never completed (recovered
+//                      after a bound) and those after which OVR stood;
+//                      every run must complete. Not on the CH32V003: its
+//                      letter-e image has no room for it.
 //      The vendor's own loop (the EVT's 2Lines_FullDuplex example, the
 //      Host side) is NOT in this app: it is a scratch program of the
 //      round, counted in its listing beside this host's.
@@ -1057,6 +1073,89 @@ void held_lines() {
     (void)SpiPoll::init(clock);
 }
 
+/// spi.window is carried where the letter's image has room: the 16 KB
+/// part's would overflow its flash.
+constexpr bool window_carried = device::flash_bytes > 16u * 1024u;
+
+/// spi.window (the header): one line, `frames` frames at `clock`.
+void window_line(uint16_t frames, SpiClock clock, uint8_t div) {
+    constexpr uint16_t delays = 512;
+    uint32_t done = 0;
+    uint32_t lost = 0;
+    uint32_t overran = 0;
+    uint32_t hung = 0;
+    uint32_t ovr = 0;
+    uint16_t first_lost = 0xFFFF;
+    uint16_t first_hung = 0xFFFF;
+    uint16_t last_hung = 0;
+    for (uint8_t sweep = 0; sweep < 2u; ++sweep) {
+        for (uint16_t d = 0; d < delays; ++d) {
+            SpiShort::Request r{};
+            r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
+            r.len = frames;
+            r.clock = clock;
+            r.bits = SpiDataSize::bits8;
+            r.polled = false;
+            pump_done = false;
+            const uint32_t n0 = spi_meter.count();
+            Pfic::disable(Spi<1>::irq());
+            const bool sync = SpiShort::start(r);
+            for (uint32_t k = d; k != 0u; --k) {
+                __asm__ volatile("");
+            }
+            Pfic::enable(Spi<1>::irq());
+            uint32_t spins = 40'000u;
+            while (!sync && !pump_done && spins-- != 0u) {
+            }
+            // The meter's count is a plain word the vector writes: the
+            // barrier makes the read below a fresh one.
+            __asm__ volatile("" ::: "memory");
+            if (sync || pump_done) {
+                ++done;
+                if (spi_meter.count() - n0 < frames) {
+                    ++lost;
+                    if (d < first_lost) {
+                        first_lost = d;
+                    }
+                }
+                if (SpiShort::status() == spi_overrun) {
+                    ++overran;
+                }
+            } else {
+                ++hung;
+                if (d < first_hung) {
+                    first_hung = d;
+                }
+                last_hung = d;
+                (void)SpiShort::recover();
+            }
+            if (Spi<1>::overrun()) {
+                ++ovr;
+                Spi<1>::clear_overrun();
+            }
+        }
+    }
+    console_drain();
+    print(serial, "  spi.window write of ", frames, " 8-bit frames at HCLK/", div, ", two in flight, the entry swept over ",
+          delays, " delays x 2: ", done, " completed (", lost, " with a frame lost, the first at delay ", first_lost, "; ",
+          overran, " spi_overrun), ", hung, " never completed");
+    if (hung != 0u) {
+        print(serial, " (delays ", first_hung, " to ", last_hung, ")");
+    }
+    print(serial, ", ", ovr, " with OVR standing after", crlf);
+}
+
+void window_lines() {
+    spi1_serves = spi1_short;
+    (void)SpiShort::init(clock);
+    window_line(2, SpiClock::div32, 32);
+    window_line(3, SpiClock::div32, 32);
+    window_line(2, SpiClock::div64, 64);
+    window_line(3, SpiClock::div64, 64);
+    spi1_serves = spi1_poll;
+    (void)SpiPoll::init(clock);
+}
+
 void te_spi_host() {
     (void)SpiPoll::init(clock);
     CsPin::output(true);
@@ -1083,6 +1182,9 @@ void te_spi_host() {
     request_line(2);
     request_line(15);
     held_lines();
+    if constexpr (window_carried) {
+        window_lines();
+    }
     spi1_serves = spi1_dma;
     bench.verdict("ran", true);
 }

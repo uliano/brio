@@ -574,14 +574,14 @@ constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
  * handlers or masked windows are longer declares its own (and one that
  * knows its own are shorter may declare that), and an spi_overrun in a
  * TransferDone is the witness of a figure declared too short. The second and
- * third terms are the hardware prologue's 29 cycles and the nine
+ * third terms are the hardware prologue's 29 cycles and the seven
  * instructions from the vector to the DATAR read in bench_ch32's
  * spi1_handler (the app's own test of which host the vector serves,
- * then lui, lhu STATR, the compiler's zero-extension pair, andi, beqz,
- * lhu DATAR), two of them APB loads.
+ * then lui, lhu STATR, andi, beqz, lhu DATAR), two of them APB loads;
+ * the OVR test is a second STATR load AFTER the DATAR one (isr()).
  *
  * At 48 MHz an 8-bit frame is 16 cycles at /2 and doubles per code: under
- * the default the sum of 372 is first exceeded at /64 (512 cycles) for
+ * the default the sum of 368 is first exceeded at /64 (512 cycles) for
  * 8-bit frames and at /32 (512) for 16-bit ones; a hold-off of 600
  * moves both one code slower. Below those rates the pump keeps one
  * frame in flight, as the polled receive loop does at every rate - the
@@ -593,7 +593,7 @@ constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
 /// The hold-off of the images counted above: the default of SpiHost's
 /// `hold_off_cycles`.
 inline constexpr uint32_t spi_default_hold_off_cycles = 320;
-inline constexpr uint32_t spi_pump_read_cycles = 29u + 9u * 2u + 5u;   // HPE entry + nine instructions, two of them APB loads
+inline constexpr uint32_t spi_pump_read_cycles = 29u + 7u * 2u + 5u;   // HPE entry + seven instructions, two of them APB loads
 
 /// The frame, in HCLK cycles, that a read can come after RXNE at the
 /// latest under a hold-off: a longer one keeps two in flight.
@@ -659,15 +659,16 @@ constexpr SpiClock spi_write_ahead_from(SpiDataSize bits, uint32_t hold_off_cycl
  * THE PUMP RUNS ON RXNE: the frame that came back is the one witness the
  * bus is idle for the next, so TXE (a frame early) is never the pump's
  * edge. Per frame one interrupt - this silicon has no FIFO - and in the
- * handler the DATAR read is the seventh instruction of the body and
- * the next frame's write, PREPARED by the previous handler inside the
- * wire time, the eighth after it; the store of the frame read and the
- * walk to the frame after come behind the write. Above the threshold
+ * handler the DATAR read is the fifth instruction of the body, the
+ * STATR load that tests OVR the next, and the next frame's write,
+ * PREPARED by the previous handler inside the wire time, the ninth after
+ * the read; the store of the frame read and the walk to the frame after
+ * come behind the write. Above the threshold
  * (THE HOLD-OFF below decides it) the handler keeps two frames in flight
  * (the phase primed with two, the handler for frame k writing k + 2),
- * below it one. An OVR seen in the handler's STATR read ends the
- * transaction with spi_overrun, the lost frame counted so the phase
- * still ends.
+ * below it one. An OVR seen in the STATR read that follows the DATAR
+ * read gives the transaction spi_overrun, the lost frame counted so the
+ * phase still ends.
  *
  * THE ENGINE SLOTS: `DmaTxEngine<3, Elem>` and `DmaRxEngine<2, Elem>`,
  * both or neither, on the two channels table 8-2 wires to this instance
@@ -1038,24 +1039,23 @@ public:
     /// capture and the acknowledgement. True when the transaction just
     /// completed (CS released): the edge the app's glue posts
     /// TransferDone on.
+    ///
+    /// OVR IS READ AFTER DATAR, from a second STATR load: with two frames
+    /// in flight the one behind frame k may complete at any moment before
+    /// the DATAR read, and a status copy taken before it would miss the
+    /// OVR that completion raises - frame k + 1 lost uncounted, and the
+    /// phase waiting for a frame that never comes back. The load after
+    /// DATAR sees every overrun up to the read, and DATAR-then-STATR is
+    /// 16.2.7's clear: the flag goes down in the same handler, never left
+    /// standing for the next transaction's first. One APB load a frame.
     [[gnu::always_inline]] static bool isr() {
-        const uint32_t st = S::regs().STATR;
-        if ((st & spi_rxne) == 0u) {
+        if ((S::regs().STATR & spi_rxne) == 0u) {
             return false;
         }
-        const uint16_t in = S::regs().DATAR;   // the seventh instruction of the body
-        if ((st & spi_ovr) != 0u) {
-            // 16.2.7: the frame after this one ended while this one stood
-            // unread; the buffer kept this one and lost that one. Counted
-            // as read so the phase ends; the DATAR read above, followed
-            // by the next handler's STATR read, is what clears the flag.
+        const uint16_t in = S::regs().DATAR;   // the fifth instruction of the body
+        const bool lost = (S::regs().STATR & spi_ovr) != 0u;
+        if (lost) {
             status_ = spi_overrun;
-            if (to_read_ > 1u) {
-                --to_read_;
-                if (in_ != nullptr) {
-                    in_ += step_;
-                }
-            }
         }
         // The prepared frame out: with one in flight this is the bus's
         // restart, with two it keeps the buffer full. Then the frame
@@ -1066,6 +1066,15 @@ public:
         }
         if (in_ != nullptr) {
             store_in(in);
+        }
+        if (lost && to_read_ > 1u) {
+            // 16.2.7: the frame after this one ended while this one stood
+            // unread; the buffer kept this one and lost that one. Its slot
+            // is skipped and it is counted as read, so the phase ends.
+            --to_read_;
+            if (in_ != nullptr) {
+                in_ += step_;
+            }
         }
         if (left_ != 0u) {
             next_ = next_out();

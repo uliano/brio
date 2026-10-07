@@ -193,10 +193,13 @@ statement - lies on the bus's dead time (letter r).
   every frame, the fault exits flush) and `init()` and `recover()`
   flush what a reset or a `prime()` left.
 - **The pump and its threshold.** One interrupt a frame (no FIFO); in
-  the handler the DATAR read is the seventh instruction of the body
+  the handler the DATAR read is the fifth instruction of the body, the
+  STATR load that tests OVR the next - a status read AFTER the data
+  read, so that a frame completing at any moment before the read is
+  seen and 16.2.7's clear (DATAR then STATR) runs in the same handler -
   and the next frame's write - PREPARED by the previous handler inside
-  the wire time - the eighth after it; the store, the walk to the frame
-  after and the counters come behind the write: 42 instructions on an
+  the wire time - the ninth after the read; the store, the walk to the
+  frame after and the counters come behind the write: 42 instructions on an
   8-bit frame with an in buffer, about 160 cycles a frame with the
   prologue and epilogue - measured 164 cycles of metered body a frame,
   one ruler read of 49 inside it. Above a rate threshold the handler
@@ -217,8 +220,8 @@ statement - lies on the bus's dead time (letter r).
   the IMAGE and not of the family, so it is the host's template
   parameter `hold_off_cycles`, declared by the application or its board
   file, and 320 - the bench app's handler, rounded up - is only its
-  default. The entry is the prologue's 29 and the nine instructions to
-  the read, 52. Under the default, a frame of more than 372 cycles:
+  default. The entry is the prologue's 29 and the seven instructions to
+  the read, 48. Under the default, a frame of more than 368 cycles:
   HCLK/64 and slower on 8-bit frames (512 cycles), HCLK/32 and slower
   on 16-bit ones; an image that declares 600 gets /128 and /64 (both
   pinned at compile time). An image measures its own term with
@@ -232,7 +235,7 @@ statement - lies on the bus's dead time (letter r).
   is AT THE WIRE, measured: 512.0 cycles an 8-bit frame and 1024.0 a
   16-bit one, x 1.00 over 256 frames, `spi_ok` and no OVR on every
   run, with the console's and the tick's handlers live beside it. An
-  OVR seen in the handler's STATR read ends the transaction with
+  OVR seen in the STATR read after the DATAR read gives the transaction
   `spi_overrun`, the lost frame counted so the phase still ends - the
   witness of a hold-off declared too short for the image it runs in.
   Measured (`bench_ch32`'s letter e, `spi.held`, MISO floating): a
@@ -421,6 +424,30 @@ nak-ing corrupted frames (measured), not as silence.
   off ten times the default's 320 for an image that idles while a
   pump is in flight. `spi.held`'s runs wait in a spin and never sleep,
   which is why its default host is clean.
+- **THE PUMP READS OVR AFTER THE DATA, and the window that reading it
+  before left is closed** (`bench_ch32`'s letter e, `spi.window`, the
+  CH32V006K8U6): a pumped write of 2 and of 3 8-bit
+  frames at HCLK/32 and HCLK/64 by the host declaring 100 - two in
+  flight - with SPI1's line masked at the PFIC around `start()` and
+  unmasked after 0 to 511 empty turns, twice: the handler for frame 0
+  enters before frame 1 completes, after it, and on it. With OVR tested
+  in a status copy taken BEFORE the DATAR read, a completion between
+  the two reads went unseen: 3 and 2 runs of 1024 never completed with
+  two frames at HCLK/32 and HCLK/64 (the last frame lost uncounted, no
+  interrupt to follow) and 1 with three at HCLK/32 (inside the run),
+  and every two-frame run that
+  lost its last frame left OVR standing for the next transaction (972
+  of 1024 at HCLK/32, 889 at HCLK/64) - the clear's STATR half was the
+  NEXT handler's, and the last frame has none. With the STATR load
+  after the DATAR read: 1024 of 1024 completed on every line, 973 and
+  892 of them with the last frame lost and counted, no OVR standing
+  after any; a scratch probe in the handler counted the completions
+  that fell between the two reads - 2, 2, 2 and 1 a line, every one
+  completed. The load costs 6 cycles a frame: the handler's metered
+  body 177 cycles at HCLK/16 against 171 with OVR tested from the first
+  read (the same session), the pump 264.7 cycles a frame against 258.7
+  at HCLK/4 and against 258.9 at HCLK/16; at HCLK/64 the pump is still
+  at the wire.
 
 ## Not covered yet
 
@@ -439,6 +466,11 @@ Driver gaps, each with its reason:
   PC0) would free it, on a desk without the LED there.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The pump's OVR test after the DATAR read on the CH32V003F4P6: the
+  code is the CH32V006's, and `spi.window`, which measures it there, is
+  not in the 16 KB part's letter-e image (no room); a scratch image
+  carrying that line alone on the CH32V003 would measure it.
 
 - The pump at HCLK/2 on a loop letter: `bench_ch32`'s letter e pumps
   at HCLK/4, /16 and /64 whole (the finding above: the interrupt is

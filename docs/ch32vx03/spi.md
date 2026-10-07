@@ -392,7 +392,14 @@ buffer, and every command phase) keeps two frames in flight at every
 rate: the polled loop writes on TXE and never reads the answers - the
 tail waits TXE and then not BSY, and the DATAR-then-STATR read clears
 RXNE and OVR - and the pump reads frame k on RXNE and writes k + 2,
-counting an overrun as the frame it is and going on. A RECEIVE (an in
+counting an overrun as the frame it is and going on. THE PUMP TESTS OVR
+IN A STATR LOAD MADE AFTER THE DATAR ONE: the frame in flight behind
+frame k may complete at any moment before the read, and a status copy
+taken before it would miss the OVR that completion raises - frame k + 1
+lost uncounted and, on a phase's last pair, no interrupt after it: a
+transaction that never completes (measured, below). The load after the
+read sees every overrun up to it, and DATAR-then-STATR is 20.2.7's clear,
+so the flag goes down in the same handler. A RECEIVE (an in
 buffer) keeps ONE frame in flight below the write-ahead threshold and
 two above it: the polled loop below it pins the next frame's load inside
 the wire time and puts the DATAR read and the next write in adjacent
@@ -409,8 +416,9 @@ of two inputs: the HOLD-OFF - the longest, in core cycles at the clock
 the host runs at, that the image keeps the host's vector from running,
 which on a platform where no interrupt nests is the longer of the
 image's longest handler and its longest masked window - and the pump's
-own path from RXNE to the DATAR load (the prologue's 16 and seven
-instructions, two of them APB loads). The hold-off is a fact of the
+own path from RXNE to the DATAR load (the prologue's 16 and five
+instructions, two of them APB loads; the OVR test is a second STATR
+load after the DATAR one, below). The hold-off is a fact of the
 IMAGE and not of the family, so it is the host's template parameter
 `hold_off_cycles`, declared by the application or its board file; its
 default, 200, is the longest counted in this family's own images
@@ -615,14 +623,12 @@ own.
   trampoline of the V4F's images ([platform.md](platform.md)), on a
   receive at 157 and 232 cycles a frame in 8-bit frames, 174 at /4 in
   16-bit ones and 257 at /16 (x 1.00); on a write at /4 one interrupt
-  per two frames in 8-bit frames, 82 cycles a frame, and 171 interrupts
-  for 256 16-bit frames, 110 cycles a frame - the handler entering
-  within a frame time often enough to take one frame at a time; the
-  polled request of three bytes 242 cycles above its wire time at /16,
-  one byte 196 to 199, sixteen 239 to 246 (three runs); every line
-  ended with status 0, and every line but the pump's 16-bit write at /4
-  with no overrun standing - that one with OVR standing after the run
-  in three passes of three (below, "Not covered yet").
+  per two frames in 8-bit frames, 83 cycles a frame, and 170 to 171
+  interrupts for 256 16-bit frames, 106 cycles a frame - the handler
+  entering within a frame time often enough to take one frame at a
+  time; the polled request of three bytes 242 cycles above its wire
+  time at /16, one byte 196 to 199, sixteen 239 to 246 (three runs);
+  every line ended with status 0 and no overrun standing.
 - **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
   two-in-flight shape run on the resource at every code and width, 1024
   frames a run, eight runs a point under a console print in flight,
@@ -654,6 +660,33 @@ own.
   interrupts then go to the plain host, which ends the transaction
   after two entries with `spi_ok` and frames unread (measured: OVR
   standing after 1 to 3 runs of 8, no entry of the short host's branch).
+- **THE PUMP READS OVR AFTER THE DATA, and the window that reading it
+  before left is closed** (`bench_vx03`'s letter e, `spi.window`, MISO
+  floating): a pumped write of 2 and of 3 16-bit frames at /4 and /8,
+  two in flight, SPI1's line masked at the PFIC around `start()` and
+  unmasked after 0 to 127 empty turns, four sweeps, so that the handler
+  for frame 0 enters before frame 1 completes, after it, and on it.
+  With OVR tested in a status copy taken BEFORE the DATAR read, a
+  completion between the two reads went unseen and the two-frame runs
+  that met it never completed - the last frame lost uncounted, no
+  interrupt to follow: on the CH32V303VCT6 6 to 9 runs of 512 at /4
+  (delays 0 to 3, the earliest the handler can enter) and 4 to 8 at /8
+  (delay 28), over four passes; on the CH32V203C8T6 8 at /4 and 4 at
+  /8. The three-frame runs all completed, the next frame's RXNE rising
+  and its handler finding the OVR a frame late. Under the console's
+  interrupts the same window hung `spi.live`'s 16-bit pumped write at /4
+  in 1 to 4 runs of 8 on the CH32V303VCT6. With the STATR load after
+  the DATAR read: every run of every line completed on both parts, in
+  two passes each, no OVR standing after any, and `spi.live` never
+  completed 0 at every point; a scratch probe in the handler counted
+  the completions that fell between the two reads on the CH32V303VCT6 -
+  6 and 7 a line, every one completed. The load costs the handler
+  nothing measurable on a receive (89 to 98 cycles a frame with the
+  stamps against 92 to 102 on the CH32V303VCT6, the zero-extension
+  pair the old copy needed gone with it; 106 to 107 against 106 to 108
+  on the CH32V203C8T6) and a few cycles on a write two ahead (106 to
+  107 against 103 at /4 in 8-bit frames on the CH32V303VCT6, 119
+  against 114 on the CH32V203C8T6).
 - **THE TWO-IN-FLIGHT POLLED LOOP WATCHES OVR BESIDE TXE TOO**: in its
   first form it tested OVR on the RXNE poll alone, and `spi.held` found
   the declared-short host's lost frames reported as `spi_stalled` (4 and
@@ -837,21 +870,6 @@ the letters that want either decline by name.
 
 Driver gaps:
 
-- **The pump's write two ahead, against a handler that enters within a
-  frame**: the handler reads STATR for RXNE and OVR, then DATAR. A frame
-  that completes between the two loads is lost to the one-deep buffer
-  with OVR raised after the test, so the handler counts one frame where
-  two went by and leaves OVR standing; inside a run the next entry finds
-  it and counts the frame it lost, but at the run's last pair no entry
-  follows, and the transaction would wait for an answer that never
-  comes. That is the reading of a measurement, not a measurement: OVR
-  standing after the 16-bit write of 16 and of 256 frames at /4 on the
-  CH32V303VCT6's release image in three passes of `bench_vx03`'s letter
-  e, the run's status 0, and no OVR at all in two images of the same
-  app with a scratch probe compiled in, whose layout moved the
-  handler's entry. The remedy to measure on both parts: DATAR read
-  before the OVR test (20.2.7's clearing order), one more APB load a
-  frame.
 - **The hardware NSS arrangements as the ENGINE's select** (SSOE's
   output and the multi-host input). The bus AO's select is a GPIO on
   purpose - a hardware input's low level takes the host's role away, and

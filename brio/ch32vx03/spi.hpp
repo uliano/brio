@@ -990,10 +990,10 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *      spi_overrun in a TransferDone is the witness of a figure declared
  *      too short;
  *  (b) the pump's own path from RXNE to the DATAR load: the hardware
- *      prologue's entry (16) and the seven instructions from the vector
- *      to the load - lui, the STATR load, the compiler's zero-extension
- *      pair, andi, beqz, the DATAR load - two of them APB loads, counted
- *      in bench_vx03's listing.
+ *      prologue's entry (16) and the five instructions from the vector
+ *      to the load - lui, the STATR load, andi, beqz, the DATAR load -
+ *      two of them APB loads, counted in bench_vx03's listing (the OVR
+ *      test is a second STATR load AFTER the DATAR one: isr()).
  *
  * The polled receive loop reads under the same bound (an interrupt landing
  * between RXNE and its read is that latency), so it keeps the same rule.
@@ -1010,7 +1010,7 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
 /// The hold-off of the images counted above: the default of SpiHost's
 /// `hold_off_cycles`.
 inline constexpr uint32_t spi_default_hold_off_cycles = 200;
-inline constexpr uint32_t spi_pump_read_cycles = 16u + 7u + 2u * 2u;
+inline constexpr uint32_t spi_pump_read_cycles = 16u + 5u + 2u * 2u;
 
 /// The frame, in HCLK cycles, that a read can come after RXNE at the
 /// latest under a hold-off: a longer one keeps two in flight.
@@ -1076,8 +1076,9 @@ constexpr uint8_t spi_write_ahead_code(uint8_t bits, uint32_t hclk_over_pclk) {
  * write-ahead threshold (spi_write_ahead_code), one at and below it,
  * the bus idle for the handler's trip, because the one-deep receive
  * buffer would lose a frame to any handler longer than one; an overrun
- * there ends the transaction with spi_overrun. Per frame: one load, one
- * store, one interrupt either way.
+ * there ends the transaction with spi_overrun. Per frame: a DATAR load
+ * and a DATAR store, two STATR loads - RXNE before the read, OVR after it
+ * (isr()) - and one interrupt, either way.
  *
  * THE POLLED LOOPS are two. THE WRITE (no in buffer, and every command
  * phase): a frame written whenever TXE says the buffer is free - a frame
@@ -1484,26 +1485,32 @@ public:
     /// ever armed by this engine, and reading DATAR is both the capture
     /// and the acknowledgement. True when the transaction just completed
     /// (CS released): the edge the app's glue posts TransferDone on. The
-    /// path to the DATAR load is the threshold's input (a): STATR loaded,
+    /// path to the DATAR load is the threshold's input (b): STATR loaded,
     /// RXNE tested, DATAR loaded.
+    ///
+    /// OVR IS READ AFTER DATAR, from a second STATR load: the frame in
+    /// flight behind frame k may complete at any moment before the DATAR
+    /// load, and a status copy taken before it would miss the OVR that
+    /// completion raises - frame k + 1 lost uncounted, OVR left standing,
+    /// and on the phase's last pair no interrupt after it, so a
+    /// transaction that never completes. The load after DATAR sees every
+    /// overrun up to the read, and DATAR-then-STATR is 20.2.7's clear: the
+    /// flag goes down in the same handler. One APB load a frame.
     [[gnu::always_inline]] static bool isr() {
         SpiRegs& regs = S::regs();
-        const uint16_t st = regs.STATR;
-        if ((st & spi_rxne) == 0u) {
+        if ((regs.STATR & spi_rxne) == 0u) {
             return false;
         }
         const uint16_t in = regs.DATAR;
-        bool lost = false;
-        if ((st & spi_ovr) != 0u) {
-            // A frame was lost to the one-deep buffer; DATAR then STATR is
-            // 20.2.7's clear. On a receive that ends the tenure with its
-            // status; on a write the frame went out and is counted.
-            (void)regs.STATR;
+        const bool lost = (regs.STATR & spi_ovr) != 0u;
+        if (lost) {
+            // A frame was lost to the one-deep buffer. On a receive that
+            // ends the tenure with its status; on a write the frame went
+            // out and is counted.
             if (rx_ != nullptr) {
                 return end(spi_overrun);
             }
             ++rd_;
-            lost = true;
         }
         if (rx_ != nullptr) {
             store_frame(rx_, rd_, in);
