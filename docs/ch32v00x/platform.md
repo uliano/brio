@@ -87,7 +87,9 @@ wake by level that no edge timing can lose - and after the wake
 SETEVENT and one more `wfi`, which returns at once and consumes the
 latch the wake left, so the caller's loop turns once per interrupt
 (with MIE set by then, an interrupt pending around the consume is
-taken by its level, not found by the latch); `break_here()` is `ebreak`,
+taken by its level, not found by the latch) - on the CH32V003 a
+masked entry whose `wfi` runs from SRAM instead (below, "On the
+CH32V003F4P6"); `break_here()` is `ebreak`,
 `atomic_width` 4, the breadcrumb in `.noinit` - and with a Standby
 armed (SLEEPDEEP set by [sleep.md](sleep.md)'s site) `idle()` holds
 the ticker off across the WFE, since a tick turning pending would end
@@ -272,15 +274,73 @@ letters ending in real resets):
 The same suite on the family's smallest part
 ([../boards/ch32v003f4.md](../boards/ch32v003f4.md)) built as
 `rv32ec_xw`, as two images there (letters `k` and `t` apart: whole the
-suite is over the part's 15 KB): the reset flags and their history, the critical section,
-the STK timebase (CMP 47999 at 48 MHz), `delay_us` (100 us in 4858
-cycles), and `idle()` through the WFI-to-WFE conversion sleeping and
-waking on the tick as on the CH32V006 - the SRAM-resident WFE the
-vendor's CH32V003 package runs is not needed for a Sleep; whether a
-Standby needs it is the sleep tier's question. The QingKe V2A takes an
-interrupt FASTER than the V2C: with the hardware prologue, 24 cycles
-to the handler's first statement, 16 through a minimal body, 26 back
-to the raiser - 66 for the whole trip against the V2C's 83.
+suite is over the part's 15 KB): the reset flags and their history,
+the critical section, the STK timebase (CMP 47999 at 48 MHz),
+`delay_us` (100 us in 4858 to 4865 cycles), and the round trip - the
+QingKe V2A takes an interrupt FASTER than the V2C: with the hardware
+prologue, 24 cycles to the handler's first statement, 16 to 17
+through a minimal body, 26 to 27 back to the raiser - 66 to 68 for
+the whole trip against the V2C's 83.
+
+**The V2A's sleep entry wedges, and `idle()` sleeps another way
+there.** Letter `w`'s edge walk, behind its IWDG net, and a scratch
+walk over seven entry shapes (each 1600 tries, the IWDG rebooting
+each hang and the position logged in .noinit):
+
+| entry shape | hangs | lost |
+|---|---|---|
+| the V2C's (unmasked, from flash, consume after) | 4 a pass, consecutive | 0 |
+| the same without the consume | 4 a pass | 0 |
+| the V2C's from SRAM, with or without the vendor's spin | 4 a pass | 0 |
+| the V2C's with the hardware prologue off | 4 a pass | 0 |
+| masked, from flash, with or without a spin, with or without the consume | 4 a pass | 0 |
+| masked, from SRAM, a spin of 1 turn | 4 a pass | 0 |
+| masked, from SRAM, a spin of 19 turns (the vendor's shape) | 0 | 1 a pass |
+| `idle()` as shipped (below) | 0 | 0 |
+
+A hang is a core nothing reaches: not its own interrupt, not a later
+line's edge (TIM2's rescue), not the debugger's halt - with
+DBGMCU_CR.SLEEP keeping HCLK on in Sleep as well; a reset is the only
+way out. The window is four cycles wide at the wfi's entry, the
+same in every shape that hangs. The cure is the shape of the vendor's
+own CH32V003 WFE (the EVT's core_riscv.h, which the CH32V006's EVT
+has not): the wfi run masked from SRAM with a spin there after it,
+nothing fetched from flash in the first cycles after the wake. Its
+remaining hole - one position a pass, an edge on the entry cycle not
+seen - is the masked WFE's own, the one the CH32V006 measured of its
+masked order.
+
+`idle()` on the CH32V003 is that shape (platform.hpp, THE CH32V003):
+masked throughout, each `wfi` executed from SRAM with the 19-turn spin
+after it (`wfi_from_sram()`, twelve bytes of RAM in `.ram_text`), with
+two more parts the masked order needs - the latch the last wake left
+is emptied FIRST (SETEVENT and a `wfi` it ends at once, 5 cycles) and
+the PFIC asked whether an enabled line is pending, because after the
+wake the V2C's consume found the latch back (200 turns over 100
+ticks: the masked order takes the interrupt only after it) - and two
+reasons not to sleep at all: the tick's match closer than 96 cycles
+(the guard that keeps its edge off the entry) and a DMA channel at
+work ([dma.md](dma.md): the V2A's Sleep stops the controller).
+Measured: `w` 0 lost and 0 late in 1600 tries, the slowest 74 us for
+one tick, in the suite's layout and twice in a scratch walk's (once
+with DBGMCU_CR.SLEEP set); `k` 100 turns over 100 ticks, a quiet turn
+229 cycles; `z` 32/0 and 7/0 on the two images.
+
+**A Sleep on the V2A lasts at least about 3150 cycles at 48 MHz (66
+us)**: an edge 100 to 2400 cycles after the entry runs the core again
+3150 cycles after the entry, to five cycles, stamped in SRAM right
+after the `wfi`. So an edge that finds the core asleep reaches the
+caller's loop about 3100 cycles later (126 on the V2C), the tick floor
+of an idle loop is 746 000 cycles a second (1.6 %), and an interrupt
+that finds the core freshly asleep is served up to 66 us late - a
+handler hold-off of some 3150 cycles that a transport timed against
+the image's handlers alone does not foresee ([spi.md](spi.md)).
+
+The Standby path takes the masked SRAM `wfi` too, its EXTI lines that
+interrupt made EVENTS for the Standby's span (5.2's item (1), the
+vendor's deep WFE doing the same): with the unmasked entry the sleep
+suite's Standby walk ended in the net's reboot, with this one 12800
+Standbys all came back ([sleep.md](sleep.md)).
 
 ## Not covered yet
 
@@ -300,10 +360,17 @@ Implemented but not bench-verified, each with what would measure it:
   a current measurement with the probe detached (a core in debug mode
   never sleeps, QingKe V2 manual 5.1). The Standby it enters when
   [sleep.md](sleep.md)'s site has armed one is measured the same way.
-- The unmasked order and the consume on the CH32V003F4P6: both were
-  measured on the CH32V006's V2C; the V2A's letters `w`
-  (test_ch32_platform-1) and `k` (test_ch32_platform-2) on that board
-  would say the same of its core.
 - The HPE's saving on a handler that calls into the kernel: the
   minimal handler was measured; a letter timing the USART handler's
   round trip both ways would put a number on the larger case.
+- The CH32V003's late edge: an enabled line other than the tick whose
+  edge lands on the V2A's sleep-entry cycle itself waits, pending and
+  masked, for the next wake - inferred from the masked order's hole,
+  measured as one position per pass with the STK's edge and no guard;
+  a walk of a non-tick line's edge across the shipped entry would
+  measure it (the sleep suite's AWU walk does it for a line that is
+  also an EXTI event, which loses none).
+- The V2A's minimum Sleep at other clocks: about 3150 cycles was
+  measured at 48 MHz only; whether it is a time (66 us, about eight
+  LSI periods) or a cycle count is a run of the latency stamp at a
+  lower rung of the DynamicClock.

@@ -250,6 +250,27 @@ struct Dma {
 
     static void open() { rcc()->HBPCENR |= rcc_hb_dma1; }
     static uint32_t flags() { return dma()->INTFR; }
+
+    /// Whether any channel is moving data or waiting to: enabled AND
+    /// circular or with items left. EN stays set after a completed
+    /// non-circular block (CNTR at zero, the note above), so EN alone
+    /// would call a finished channel busy. One load with the controller's
+    /// clock off, two a channel with it on. What the CH32V003's idle()
+    /// asks before it sleeps: in that core's Sleep the controller moves
+    /// nothing (ch32v00x/platform.hpp, docs/ch32v00x/dma.md).
+    static bool any_working() {
+        if ((rcc()->HBPCENR & rcc_hb_dma1) == 0u) {
+            return false;
+        }
+        for (uint8_t i = 0; i < dma_channel_count; ++i) {
+            const DmaChannelRegs& c = dma()->channel[i];
+            const uint32_t cfgr = c.CFGR;
+            if ((cfgr & dma_cfgr_en) != 0u && ((cfgr & dma_cfgr_circ) != 0u || c.CNTR != 0u)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 /**

@@ -307,6 +307,14 @@ loudly.
   once and a kernel loop turn twice per interrupt: `idle()` consumes
   the latch after the wake (SETEVENT and one more `wfi`), 101 turns
   over 100 ticks for 6 to 15 cycles a wake.
+- **The CH32V003's sleep entry WEDGES the core**: an edge within a
+  four-cycle window at the QingKe V2A's `wfi` leaves it in a state no
+  interrupt, event or debugger halt ends - only a reset - in every
+  entry shape tried but the vendor's own (the `wfi` masked and run from
+  SRAM, a spin there after it), which that part's `idle()` therefore
+  uses ([platform.md](platform.md)); the V2A's Sleep also lasts at
+  least 66 us at 48 MHz and stops the DMA controller, so that `idle()`
+  does not sleep while a channel works ([dma.md](dma.md)).
 - **MIE is not cleared on interrupt entry** (QingKe V2 manual 2.2,
   for the sake of its nesting mode). With nesting disabled in
   INTSYSCR, as this crt leaves it, a handler still runs with MIE set

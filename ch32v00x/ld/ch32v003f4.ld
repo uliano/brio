@@ -57,6 +57,9 @@ SECTIONS
     {
         . = ALIGN(4);
         __data_start = .;
+        /* Code that runs from SRAM, copied by the crt with the data: the
+           core's sleep entry (brio/ch32v00x/platform.hpp says why). */
+        *(.ram_text .ram_text.*)
         *(.data .data.*)
         . = ALIGN(8);
         /* The global pointer addresses 4 KB around itself, so it is

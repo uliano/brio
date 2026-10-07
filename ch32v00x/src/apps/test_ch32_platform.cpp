@@ -53,7 +53,13 @@
 //      the ticks they land in, so kernel time runs fast during the
 //      letter. Prints the cycles from the edge to the caller's loop for
 //      an edge that finds the core asleep, and what an idle() costs
-//      when the latch makes it return at once.
+//      when the latch makes it return at once. THE NET: the letter arms
+//      the IWDG (about 256 ms) and the tick's handler feeds it from then
+//      on, so a sleep entry that WEDGES the core - which the rescue
+//      cannot end, measured on the CH32V003's V2A (docs/ch32v00x/
+//      platform.md) - reboots the board instead of needing a hand; the
+//      letter then never prints its tally, and the boot's flags say
+//      IWDGRSTF.
 //   k  THE KERNEL'S TURN: a Tenuto pack of three quiet AOs, two with a
 //      periodic time event, turned as Tenuto::run() turns it over 100
 //      ticks with the tick the only interrupt - one turn per tick when
@@ -276,6 +282,7 @@ void tb_critical() {
 // ---------------------------------------------------------------------------
 using Rescue = Tim<2>;
 volatile uint32_t rescue_periods = 0;
+volatile bool net_armed = false;   ///< letter w's IWDG, fed by the tick from its arming on
 
 /// Clear the core's event latch (SETEVENT, then a wfi that it ends at
 /// once) and set it again if `latched`: the two states an idle() can be
@@ -291,6 +298,12 @@ void event_latch(bool latched) {
 }
 
 void tw_edge() {
+    if (!net_armed) {
+        // /32 and a reload of 999: 256 ms at the 125 kHz this part's LSI
+        // runs at (sleep.md), five rescue periods. Never stopped again.
+        (void)Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div32, .reload = 999});
+        net_armed = true;
+    }
     Rescue::init();
     (void)Rescue::configure(TimConfig{.prescaler = static_cast<uint16_t>(SysClock::hz / 1'000'000u - 1u),
                                       .period = 49'999u});
@@ -680,7 +693,12 @@ void banner() {
 } // namespace
 
 // ---- target glue ------------------------------------------------------------
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+    brio::Ticker::tick();
+    if (net_armed) {
+        brio::Iwdg::refresh();
+    }
+}
 
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
 

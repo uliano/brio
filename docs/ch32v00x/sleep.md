@@ -170,6 +170,21 @@ with the probe detached is the desk's next step).
   `disarm()`. The event's own cover in a Standby is not measured -
   a wake one AWU period late would leave no trace a counter could
   read there - and the site does not lean on it.
+- **The AWU's walk on the CH32V003F4P6** (letter `w`, behind its IWDG
+  net): the AWU at 32 counts there (252 us), because a Sleep of the
+  V2A lasts at least 66 us (platform.md) and a period shorter than that
+  cannot tell a late wake from one on time. The platform's V2A entry
+  sleeps MASKED, so in a Sleep: the enabled line with its event (the
+  site's shape) loses none in 6400 tries; the pending edge alone loses
+  677, every one woken by the rescue (the control); the event beside a
+  PFIC-disabled line - the site's old shape - is late in 616, each
+  woken by the AWU's next match and none by the rescue: the latch the
+  entry empties first can hold that event, and the PFIC question after
+  it asks the ENABLED lines only. In a Standby, the platform's V2A
+  entry making the line's interrupt an EVENT for the span: 12800 tries,
+  11812 slept, none lost - where the entry the V2C uses ended the walk
+  in the net's reboot. Fifty Standbys through the timed site: all
+  ended by the AWU, its handler once each.
 - **The PVD ladder brackets the supply**: on the CH32V006 no level
   reads low - the ladder ends at 2.66 V under a 3.3 V board - and the
   regulator is in its normal 1.2 V mode as found; on the CH32V003
@@ -199,10 +214,12 @@ Implemented but not bench-verified, each with what would measure it:
 - The AWU's long windows (the /10240 and /61440 codes, tens of
   seconds): the suite sleeps 300 ms; a letter outside `z` would wait
   the thirty seconds and time them against the host.
-- The level wake on the CH32V003F4P6: the sweep ran on the CH32V006's
-  V2C, and the site's enabled line has not ended a Standby on the V2A
-  yet; letters `d` (test_ch32_sleep-1) and `w` (test_ch32_sleep-2) on
-  that board would measure both.
+- The handler's count in the CH32V003's Standby walk: of the 11812
+  tries that called `idle()`, 11262 entered the AWU's handler, so the
+  verdict "its handler runs once per wake" fails there by 550 - no try
+  was lost, and which ended through the loop's own check of the flag
+  rather than the handler is not recorded; a stamp of how each such
+  try ended would say whether the walk or the entry is short.
 - The wake latency (the first instruction after the AWU's match to
   the PLL back): the cycle counter stops in Standby, so it is a
   scope's measurement on a pad toggled at the wake.

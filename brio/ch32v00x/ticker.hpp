@@ -223,6 +223,13 @@ public:
         m_frac = static_cast<uint16_t>(f % tps);
     }
 
+    /// STK counts until its next match, read now: the compare less the
+    /// counter (the counter runs up to CMP and restarts from 0, RM
+    /// 6.5.4). In HCLK cycles - init() runs the STK on HCLK. Read masked
+    /// by the one caller, the CH32V003's idle(), which will not go to
+    /// sleep when the tick's edge is this close (platform.hpp says why).
+    [[gnu::always_inline]] static uint32_t cycles_to_tick() { return stk()->CMP - stk()->CNT; }
+
     /// Stop the periodic interrupt without losing the counters; time
     /// stands still while paused, resume() picks up where it was.
     static void pause() { stk()->CTLR = stk()->CTLR & ~stk_stie; }

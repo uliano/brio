@@ -31,7 +31,8 @@
 //      window while the console's own byte is the wake - the site
 //      advances by nothing, honestly, and says so
 //   w  THE AWU'S EDGE AGAINST THE SLEEP ENTRY: the AWU free-running at
-//      about 64 us, each try locked to one match by polling its flag and
+//      about 64 us (256 us on the CH32V003, whose Sleep lasts at least
+//      66 us), each try locked to one match by polling its flag and
 //      the next one placed D cycles after the wait ends, D = 0..399 -
 //      the edge so walks across the kernel's masked check, the sleep
 //      entry and the sleep itself, the LSI's own jitter spreading each D
@@ -45,6 +46,9 @@
 //      no event to fall back on - no counter runs in a Standby, so a
 //      lost wake there would be a try that never returns. Then fifty
 //      real Standbys through the timed site, each a 3 ms deadline.
+//      THE NET: the letter arms the IWDG (256 ms), fed before every try
+//      and by the tick, so a sleep entry that wedges the core reboots the
+//      board instead of needing a hand (the tally then never comes).
 //
 // build: boards = v006k8,v003f4
 // build: groups = abcde,w
@@ -61,6 +65,7 @@
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/pin.hpp"
 #include "ch32v00x/platform.hpp"
+#include "ch32v00x/reset.hpp"
 #include "ch32v00x/sleep.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "ch32v00x/tim.hpp"
@@ -333,6 +338,7 @@ void te_other_wake() {
 using Rescue = Tim<2>;
 volatile uint32_t rescue_periods = 0;
 volatile uint32_t awu_entries = 0;
+volatile bool net_armed = false;   ///< letter w's IWDG: fed by every try and by the tick
 
 /// How line 9 reaches the core: the timed site's old shape (an EXTI event
 /// and a PFIC-disabled interrupt line, SEVONPEND's pending edge), that
@@ -373,6 +379,7 @@ SweepResult awu_sweep(AwuPath path, bool standby, uint32_t awu_period, uint32_t 
     const uint32_t period = stk()->CMP + 1u;
     for (uint32_t d = 0; d < positions; ++d) {
         for (uint32_t k = 0; k < repeats; ++k) {
+            Iwdg::refresh();
             if (standby) {
                 (void)Plain::arm(SleepDepth::standby);
             }
@@ -444,14 +451,26 @@ void print_sweep(const char* name, const SweepResult& r) {
 }
 
 void tw_awu_edge() {
+    if (!net_armed) {
+        // THE NET: /32 and a reload of 999, 256 ms at the 125 kHz LSI -
+        // a sleep entry that wedges the core (measured on the CH32V003's
+        // V2A, docs/ch32v00x/platform.md) reboots the board instead of
+        // needing a hand. Fed before every try and by the tick; never
+        // stopped again.
+        (void)Iwdg::arm(IwdgConfig{.prescaler = IwdgPrescaler::div32, .reload = 999});
+        net_armed = true;
+    }
     if (!Awu::init()) {
         bench.verdict("the AWU initializes", false);
         return;
     }
     // The AWU free-running at 8 undivided LSI counts (about 64 us): it
     // matches again every period while enabled, which is what the sweep
-    // locks to. Its period over 32 matches is the lock's spread.
-    Awu::arm(0, 7);
+    // locks to. Its period over 32 matches is the lock's spread. On the
+    // CH32V003 32 counts (about 256 us): a Sleep there lasts at least
+    // 66 us (platform.hpp), so a wake on time and one a period late are
+    // told apart only by a period longer than that.
+    Awu::arm(0, device::sleep_entry_from_sram ? 31 : 7);
     const uint32_t period = stk()->CMP + 1u;
     uint32_t p_min = 0xFFFF'FFFFu, p_max = 0;
     {
@@ -488,11 +507,23 @@ void tw_awu_edge() {
 
     // Sleep: the counters run through it, so a late wake is timed. The
     // tick is held off by hand, as idle() holds it off for a Standby.
+    // Each sweep's line printed as it ends, so that a sweep the net
+    // cuts short is named by the last line before the reboot.
     Ticker::pause();
     const SweepResult a = awu_sweep(AwuPath::event_and_pending, false, awu_period, awu_period_us, 400, 16);
+    Ticker::resume();
+    print_sweep("Sleep, event + pending edge (the site's old shape)", a);
+    console_drain();
+    Ticker::pause();
     const SweepResult b = awu_sweep(AwuPath::pending_only, false, awu_period, awu_period_us, 400, 16);
+    Ticker::resume();
+    print_sweep("Sleep, pending edge alone", b);
+    console_drain();
+    Ticker::pause();
     const SweepResult c = awu_sweep(AwuPath::level, false, awu_period, awu_period_us, 400, 16);
     Ticker::resume();
+    print_sweep("Sleep, the line enabled (the site's shape)", c);
+    console_drain();
     // Standby: the entry is the same instructions with SLEEPDEEP armed;
     // the clock stops at the WFE, and the level is alone.
     const SweepResult s = awu_sweep(AwuPath::level_alone, true, awu_period, awu_period_us, 400, 32);
@@ -503,9 +534,6 @@ void tw_awu_edge() {
     Pfic::disable(Irq::tim2);
     Rescue::release();
 
-    print_sweep("Sleep, event + pending edge (the site's old shape)", a);
-    print_sweep("Sleep, pending edge alone", b);
-    print_sweep("Sleep, the line enabled (the site's shape)", c);
     print_sweep("Standby, the line enabled and no event", s);
     bench.verdict("each sweep crosses the sleep entry (some tries end at the check, some asleep)",
                   b.slept > 0u && b.slept < b.tries && c.slept > 0u && c.slept < c.tries &&
@@ -530,6 +558,7 @@ void tw_awu_edge() {
     uint32_t by_alarm = 0, most_turns = 0, line_wrong = 0;
     const uint32_t entries0 = awu_entries;
     for (uint32_t i = 0; i < standbys; ++i) {
+        Iwdg::refresh();
         Sleeper::alarm.arm(3);
         (void)Timed::arm(SleepDepth::deep);
         if (!Pfic::enabled(Irq::awu)) {
@@ -568,7 +597,12 @@ void banner() {
 
 } // namespace
 
-extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
+extern "C" BRIO_CH32_INTERRUPT void systick_handler() {
+    brio::Ticker::tick();
+    if (net_armed) {
+        brio::Iwdg::refresh();
+    }
+}
 extern "C" BRIO_CH32_INTERRUPT void usart1_handler() { (void)Serial::isr(); }
 
 /// The timed site's AWU wake is a level: its line enabled, this vector

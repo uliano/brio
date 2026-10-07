@@ -102,6 +102,17 @@ inline constexpr bool tim2_has_dead_time = true;
 inline constexpr bool usart_has_synchronous = false;
 inline constexpr bool usart_has_smartcard = false;
 
+/// The core's sleep entry: the QingKe V2C takes an edge on any cycle of
+/// the unmasked WFE from flash (measured - docs/ch32v00x/platform.md),
+/// so idle() runs its sleep in place (parts/ch32v003.hpp says why the
+/// V2A cannot).
+inline constexpr bool sleep_entry_from_sram = false;
+
+/// Whether the V2C's Sleep stops the DMA as the V2A's does is NOT
+/// measured (docs/ch32v00x/dma.md, its gap list); idle() sleeps over a
+/// working channel here, as it always has.
+inline constexpr bool sleep_stops_bus_masters = false;
+
 /// The vector table's length: entries 0..40 (USART2 at 39, OPCM at 40).
 inline constexpr uint8_t vector_count = 41;
 

@@ -295,6 +295,22 @@ letters a to d drive the channel's one-shot verbs:
   error path is armed on every engine and reachable by nothing the
   bench found.
 
+- **In the CH32V003's Sleep the controller moves nothing** (measured
+  with `bench_ch32` letter d on the CH32V003F4P6, the loop idling
+  through the platform's `idle()` until the completion interrupt): a
+  512-byte copy took 24535 cycles and a 256-byte fill 37810, each
+  finished only after the tick woke the core, and a block paced at 10
+  kHz ran 7.7 times slower than its pace - the controller served
+  requests only while the core was awake; behind the SPI host's
+  engines a receive overran and never completed. The QingKe V2A's
+  `idle()` therefore does not sleep while a channel works -
+  `Dma::any_working()`, a channel enabled and circular or with items
+  left (EN stays set after a block, above), one load with the gate
+  closed and two a channel with it open - and with it the same lines
+  read 2170 and 1790 cycles, the paced block 1.00 of its pace, and the
+  SPI host's engined write at the wire (spi.md). The CH32V003's
+  platform says why and how (platform.md, "On the CH32V003F4P6").
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -310,6 +326,12 @@ Driver gaps, each with its reason:
   until a stream needs the midpoint.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- **The CH32V006's controller in a Sleep**: whether the V2C's Sleep
+  stops it as the V2A's does is not measured, and its `idle()` sleeps
+  over a working channel as it always has; `bench_ch32` letter d on
+  that part, its copy and paced lines against the CH32V003's, would
+  say.
 
 - **The engines in their two moments** - the binding at `arm()`, five
   stores a block, the claim under the transport's mask, INTFR read

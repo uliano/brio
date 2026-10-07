@@ -219,6 +219,7 @@
 //                      host (320 cycles, two frames of a receive in
 //                      flight from HCLK/64) and one declaring 100 (from
 //                      HCLK/32), a pumped receive of 1024 8-bit frames
+//                      (512 on the CH32V003, half its work buffer)
 //                      at HCLK/32 - a frame of 256 cycles, shorter than
 //                      the console's handler - eight runs each with a
 //                      console line in flight: the overruns and the
@@ -1000,13 +1001,15 @@ void request_line(uint16_t len) {
 constexpr Filler<60> live_line = make_filler<60>();
 
 /// spi.held: THE HOLD-OFF AN IMAGE DECLARES against the one it has. A
-/// receive of 1024 8-bit frames at HCLK/32 - a frame of 256 cycles,
+/// receive of 1024 8-bit frames (512 on the CH32V003: the upper half of
+/// its 1024-byte work buffer is all the in buffer there is) at HCLK/32 -
+/// a frame of 256 cycles,
 /// between the two hosts' thresholds - eight runs under the console's
 /// interrupts on each host, pumped: the host declaring 100 keeps two
 /// frames in flight there and the honest default one.
 template <typename H>
 void held_line(const char* name) {
-    constexpr uint16_t frames = 1024;
+    constexpr uint16_t frames = ram_bytes / 2u < 1024u ? static_cast<uint16_t>(ram_bytes / 2u) : 1024u;
     uint8_t overran = 0;
     uint8_t faulted = 0;
     uint8_t hung = 0;
@@ -1039,7 +1042,7 @@ void held_line(const char* name) {
     }
     console_drain();
     print(serial, "  spi.held ", name, " (two in flight from HCLK/", 2u << static_cast<uint8_t>(H::write_ahead_from(SpiDataSize::bits8)),
-          ") pump receive HCLK/32 8-bit: ", overran, " overruns, ", faulted, " statuses not spi_ok, ", hung,
+          ") pump receive of ", frames, " frames at HCLK/32 8-bit: ", overran, " overruns, ", faulted, " statuses not spi_ok, ", hung,
           " never completed, in 8 runs under the console's interrupts", crlf);
 }
 

@@ -403,6 +403,24 @@ nak-ing corrupted frames (measured), not as silence.
   as a clock edge and read every frame one bit late (0x16 for 0x2C),
   so the shifter is enabled only once the peer's SS reads low on PC3,
   inside the 20 us it leaves before the first byte.
+- **The host above the wire on the CH32V003F4P6** (`bench_ch32` letters
+  s and e, MISO floating, the loop idling through the platform's
+  `idle()`): the engined write at the wire - 31.3 cycles a byte at
+  HCLK/4 against 32, 126.5 at HCLK/16 against 128, one DMA interrupt,
+  a fixed cost of 1160 to 1760 cycles a transaction - once the V2A's
+  `idle()` stopped sleeping over a working channel (dma.md: before it
+  the receive channel overran and the transaction never ended); the
+  polled write 1.04 of the wire at 256 frames of HCLK/4; the pump
+  with one frame in flight 576 cycles a frame at HCLK/4 and 579 at
+  HCLK/16; and `spi.held` at 512 frames (the part's half buffer): the
+  default host none not ok in eight runs, the host declaring 100
+  eight. BUT THE PUMP WITH TWO FRAMES IN FLIGHT OVERRUNS UNDER THE
+  V2A's SLEEP: at HCLK/64, where the default keeps two in flight, every
+  run ended `spi_overrun` with the loop idling between frames - a
+  Sleep of that core lasts at least 3150 cycles (platform.md), a hold-
+  off ten times the default's 320 for an image that idles while a
+  pump is in flight. `spi.held`'s runs wait in a spin and never sleep,
+  which is why its default host is clean.
 
 ## Not covered yet
 
@@ -430,11 +448,18 @@ Implemented but not bench-verified, each with what would measure it:
   `test_ch32_spi` letter pumps faster than HCLK/8; HCLK/2 at either
   width is inside the same window by the count. What would measure it:
   a loop letter pumping at HCLK/2 and HCLK/4, the frames judged.
-- The host above the wire on the CH32V003F4P6 - `bench_ch32`'s letters
-  s and e and `test_ch32_spi`'s loop letters on its group images - and
-  the peer letters o, p and q on either part against `spi_peer`
-  byte-exact through the hosts as they are: that board is off the
-  desk, and the peer shares the pads with the jumper.
+- `test_ch32_spi`'s loop letters on the CH32V003F4P6's group images,
+  and the peer letters o, p and q on either part against `spi_peer`
+  byte-exact through the hosts as they are: the jumper and the peer
+  are off that board's desk, and the peer shares the pads with the
+  jumper.
+- The CH32V003's default hold-off against its Sleep: the pump's two
+  frames in flight overrun when the image idles between frames (the
+  finding above), and nothing in the host or the platform keeps them
+  apart yet - a default that counts the Sleep's 3150 cycles, or an
+  `idle()` that does not sleep while a pumped transaction is in
+  flight, is the choice; `bench_ch32` letter e at HCLK/64 measures
+  either.
 - `spi_stalled` as an exit: no run raised it (no flag late on any
   polled line). A polled request with the block held in reset under it
   would provoke it. (`spi_overrun` is measured: the hold-off declared

@@ -109,6 +109,22 @@ inline constexpr bool tim2_has_dead_time = false;
 inline constexpr bool usart_has_synchronous = true;
 inline constexpr bool usart_has_smartcard = true;
 
+/// The core's sleep entry (QingKe V2A, measured - docs/ch32v00x/
+/// platform.md): an edge within a four-cycle window at the wfi's entry
+/// wedges the core for good - no interrupt, no event and no debug halt
+/// reaches it again, a reset does - unless the wfi runs MASKED from
+/// SRAM with a spin in SRAM after it, the vendor's own shape. So
+/// idle() sleeps that way and keeps the tick's edge off the entry
+/// (platform.hpp).
+inline constexpr bool sleep_entry_from_sram = true;
+
+/// In the V2A's Sleep the DMA controller moves NOTHING (measured, docs/
+/// ch32v00x/dma.md): a block started before the sleep ends only after
+/// the core wakes, a paced one is served only while it is awake, and a
+/// SPI receive behind the engines overruns. So idle() does not sleep
+/// while a channel works (Dma::any_working()).
+inline constexpr bool sleep_stops_bus_masters = true;
+
 /// The vector table's length: entries 0..38 (TIM2 last).
 inline constexpr uint8_t vector_count = 39;
 
