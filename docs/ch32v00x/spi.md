@@ -174,10 +174,10 @@ statement - lies on the bus's dead time (letter r).
   read placed inside the wire time. Twelve instructions a frame at 8
   bits, of which four on the bus's dead time (the poll's last turn, the
   DATAR read, the DATAR write): about 15 cycles a frame plus the poll
-  turn's phase, which the rate decides. Measured: 54 cycles a frame at
-  HCLK/4, 1.69 times the wire's 32 (22 cycles of dead bus), and 144 at
-  HCLK/16, 1.13 times (16 of dead bus); 87 and 285 a 16-bit frame, 1.36
-  and 1.11. A frame AHEAD in
+  turn's phase, which the rate decides. Measured: 56.7 cycles a frame at
+  HCLK/4, 1.77 times the wire's 32 (25 cycles of dead bus), and 149 at
+  HCLK/16, 1.16 times (21 of dead bus); 91 and 286 a 16-bit frame, 1.42
+  and 1.12. A frame AHEAD in
   that loop would be wire-bound but is refused by the same arithmetic
   as the pump's: two in flight lose a frame to any interrupt longer
   than a frame time, and a lost answer is a wrong read where an idle
@@ -201,7 +201,7 @@ statement - lies on the bus's dead time (letter r).
   the wire time - the ninth after the read; the store, the walk to the
   frame after and the counters come behind the write: 42 instructions on an
   8-bit frame with an in buffer, about 160 cycles a frame with the
-  prologue and epilogue - measured 164 cycles of metered body a frame,
+  prologue and epilogue - measured 177 cycles of metered body a frame,
   one ruler read of 49 inside it. Above a rate threshold the handler
   keeps TWO frames in flight (the phase primed with two, the handler
   for frame k writing k + 2), so the bus never idles through the
@@ -245,26 +245,28 @@ statement - lies on the bus's dead time (letter r).
   8 of 8, on a host declaring 100 (two in flight from HCLK/32)
   `spi_overrun` in 8 of 8: the console's handler, about 300 cycles
   with its stamps, outlasts the frame the second one in flight leaves
-  it, while the pump's own (164 cycles a frame) does not. THE PHASE IS PRIMED BEFORE THE INTERRUPT IS
+  it, while the pump's own (177 cycles a frame) does not. THE PHASE IS PRIMED BEFORE THE INTERRUPT IS
   ARMED: with RXNEIE raised first, at HCLK/4 the first frame came back
   seventeen instructions before `begin_phase()` had stored the count
   left to write, the handler found nothing to write and the phase never
   ended (measured: one frame read, fifteen left, none in flight); armed
-  after the prime, letter e pumps whole at every rate - 8.22 times the
-  wire at HCLK/4 and 2.04 at HCLK/16, handler-bound (the 164-cycle
+  after the prime, letter e pumps whole at every rate - 8.27 times the
+  wire at HCLK/4 and 2.06 at HCLK/16, handler-bound (the 177-cycle
   handler against frames of 32 and 128), 1.00 at HCLK/64 with two in
   flight - `spi_ok` and no OVR on every line.
 - **The engines against the pump**, two costs beside each other, both
-  MEASURED: the engines' fixed cost a transaction, 518 cycles net of
-  the instrument - an engined write of 16 or 256 frames at HCLK/4 or
-  HCLK/16 runs 675 cycles above the wire's time with the request built
-  before the stopwatch and the core spinning on the completion, less
-  the stopwatch's 44 and the handler's stamp pair -, over the pump's
-  164 a frame (the handler's metered body): `dma_min_frames` = 4 in the
-  header, a data phase shorter than that taking the pump even with
-  engines bound. A POLLED request takes the engines only with an in
-  buffer and from `dma_min_frames_polled` = 23 frames on (the same fixed
-  cost over the receive loop's 22 cycles of dead bus a frame); a polled
+  MEASURED in one session (letters s and e, three runs each): the
+  engines' fixed cost a transaction, 504 cycles net of the instrument -
+  an engined write of 16 or 256 frames at HCLK/4 or HCLK/16 runs 864
+  cycles above the wire's time on letter s, which carries 360 of
+  instrument (the request built inside the stopwatch 67, `BenchIdle`
+  136, the stopwatch's 44, the handler's stamp pair 113) -, over the
+  pump's 177 a frame (the handler's metered body): `dma_min_frames` = 3
+  in the header, a data phase shorter than that taking the pump even
+  with engines bound. A POLLED request takes the engines only with an
+  in buffer and from `dma_min_frames_polled` = 20 frames on (the same
+  fixed cost over the receive loop's 25 cycles of dead bus a frame); a
+  polled
   write never does, its loop running at the wire. The count the header
   carried before the measurement, 355 cycles, took the launch's 59
   instructions and the completion vector and missed `start()`'s 44
@@ -273,7 +275,7 @@ statement - lies on the bus's dead time (letter r).
   to about 465; the rest is the controller's and the shifter's latency
   at the block's two ends. Inside the block the engines are the wire's: 32.0
   cycles a byte at HCLK/4 and 128.0 at HCLK/16 in both widths, one
-  interrupt a transaction. `bench_ch32`'s own letter s prints 878 above
+  interrupt a transaction. `bench_ch32`'s own letter s prints 864 above
   the wire: it builds the request inside the stopwatch (67 cycles, a
   40-byte `memset` among them) and idles through `BenchIdle` (136).
 - **The fixed cost of a request**, a 3-byte polled one (a command and

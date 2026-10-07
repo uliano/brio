@@ -800,29 +800,31 @@ public:
                   offsetof(Request, reply) == 36u,
                   "the tenure's words are the first eight of the Request, the configuration the ninth");
 
-    /// THE PUMP AGAINST THE ENGINES, two counts from the release listings
-    /// (test_ch32_spi, bench_ch32; the recovery session measures them
-    /// with bench_ch32's letters s and e). The engines' fixed cost per
-    /// transaction: the launch's 59 instructions, the receive channel's
-    /// completion vector with finish_dma() and the select's release (~61
-    /// instructions behind the hardware prologue and epilogue) - 518
-    /// cycles net of the instrument, measured by bench_ch32's letter s
-    /// with the request built outside the stopwatch (docs/ch32v00x/
-    /// spi.md). The pump's cost per frame: the handler's data path of an
-    /// 8-bit frame with an in buffer plus the prologue and epilogue -
-    /// 164 cycles metered. A data phase of fewer frames than their
-    /// quotient costs less on the pump.
-    static constexpr uint32_t engine_fixed_cycles = 518;
-    static constexpr uint32_t pump_frame_cycles = 164;
+    /// THE PUMP AGAINST THE ENGINES, two costs measured in ONE session of
+    /// bench_ch32 on the CH32V006K8 (letters s and e, three runs each,
+    /// docs/ch32v00x/spi.md). The engines' fixed cost per transaction -
+    /// the launch, the receive channel's completion vector with
+    /// finish_dma() and the select's release: letter s's 864 cycles above
+    /// the wire, less the instrument that line carries (the request built
+    /// inside the stopwatch, BenchIdle, the stopwatch, the handler's stamp
+    /// pair: 360) - 504. The pump's cost per frame: the handler's metered
+    /// body for an 8-bit frame with an in buffer, letter e's 256-frame
+    /// write - 177 (176.3 to 176.7). A data phase of fewer frames than
+    /// their quotient costs less on the pump.
+    static constexpr uint32_t engine_fixed_cycles = 504;
+    static constexpr uint32_t pump_frame_cycles = 177;
     static constexpr uint16_t dma_min_frames =
         static_cast<uint16_t>((engine_fixed_cycles + pump_frame_cycles - 1u) / pump_frame_cycles);
     /// The receive loop's dead bus per frame - the poll's last turn, the
-    /// DATAR read, the DATAR write: 22 cycles measured at HCLK/4 (54 a
-    /// frame against the wire's 32) - against the same fixed cost: a
-    /// polled request with an in buffer rides the engines from this many
-    /// frames on. The transmit-only loop never does: it runs at the wire.
-    static constexpr uint32_t polled_gap_cycles = 22;
+    /// DATAR read, the DATAR write: 25 cycles measured at HCLK/4 in the
+    /// same session (56.7 a frame against the wire's 32) - against the
+    /// same fixed cost: a polled request with an in buffer rides the
+    /// engines from this many frames on. The transmit-only loop never
+    /// does: it runs at the wire.
+    static constexpr uint32_t polled_gap_cycles = 25;
     static constexpr uint16_t dma_min_frames_polled = static_cast<uint16_t>(engine_fixed_cycles / polled_gap_cycles);
+    static_assert(dma_min_frames == 3u && dma_min_frames_polled == 20u,
+                  "the two thresholds the measured costs give (docs/ch32v00x/spi.md)");
 
     // ---- lifecycle ----------------------------------------------------------
 
