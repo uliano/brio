@@ -1683,6 +1683,7 @@ void te_stretch() {
           " iterations per microsecond at this rate", crlf);
     console_drain();
     uint32_t last_us = base_us;
+    uint16_t last_hold = 0;
     bool monotone = true;
     bool linear = true;
     for (uint16_t hold : {20u, 50u, 100u}) {
@@ -1708,18 +1709,33 @@ void te_stretch() {
         if (us <= last_us) {
             monotone = false;
         }
-        const uint32_t err = us > predicted ? us - predicted : predicted - us;
-        if (err > predicted / 8u + 60u) {
-            linear = false;
+        // THE SLOPE, not the intercept: each commanded hold lands on top
+        // of the client's own turnaround, which already stretches SCL in
+        // the unstretched baseline, so a tenure runs a constant few us a
+        // byte short of base + 9 x hold (the client's ISR entry and its
+        // read, about 13 us a byte at 400 kHz, measured the same before
+        // and after any of the host's changes). Between two legs that
+        // constant cancels: the tenure must grow by nine times the
+        // hold's step, to within an eighth.
+        if (last_hold != 0u) {
+            const uint32_t step = 9u * static_cast<uint32_t>(hold - last_hold);
+            const uint32_t grew = us > last_us ? us - last_us : 0u;
+            const uint32_t err = grew > step ? grew - step : step - grew;
+            print(serial, "    from ", last_hold, " to ", hold, " us/byte the tenure grew ", grew,
+                  " us against ", step, crlf);
+            if (err > step / 8u) {
+                linear = false;
+            }
         }
         last_us = us;
+        last_hold = hold;
         if (st != i2c_ok || !same(rx_buf, answers, 8)) {
             linear = false;
         }
     }
     peer_stretch_us = 0;
     bench.verdict("a commanded stretch lengthens the tenure monotonically", monotone);
-    bench.verdict("... by nine holds, to within an eighth (the ISR's own turnaround)",
+    bench.verdict("... by nine holds a step, to within an eighth (the slope: the client's own turnaround cancels)",
                   linear);
     bench.verdict("... and the data is untouched by it (stretching is flow control)",
                   st == i2c_ok && same(rx_buf, answers, 8));

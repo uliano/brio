@@ -317,19 +317,21 @@ while the wake from Stop accepts HSI16 and nothing else (32.4.16).
 wire's own tSYNC, measured as the difference between a tenure's average
 period and the register's own tSCLL + tSCLH (a 32-byte tenure, duration /
 (9 x 33), the target in NOSTRETCH so it holds the clock for nothing, at
-64 MHz on PCLK), is **406 to 438 ns** at the three speeds - against the
-1000 / 750 / 500 ns the manual's tables charge, so a chooser solved
-against those runs this wire FAST: 105.3 kHz for 100, 464 kHz for 400,
-1.09 MHz for 1 (the register halves of that budget, 9062 / 1750 / 499
-ns, plus the measured delay). The default therefore charges the FLOOR
+64 MHz on PCLK), is **422 to 485 ns** at the three speeds on the desk's
+wire (the self-link's two nodes shared with two more boards' taps,
+2.2 kOhm pull-ups) - against the 1000 / 750 / 500 ns the manual's tables
+charge, so a chooser solved against those runs this wire FAST: 104.7 kHz
+for 100, 457 kHz for 400, 1.09 MHz for 1 (the register halves of that
+budget, 9062 / 1750 / 499 ns, plus the measured delay). The default therefore charges the FLOOR
 under tSYNC - two kernel periods, tAF(min) and DNF x tI2CCLK an edge,
 10 kernel cycles (156 ns) at 64 MHz with the analog filter on - and the
 three rungs become 100 / 400 / 1000 kHz at most on any wire; on this one
-the same arithmetic over the measured delay gives 97.3, 363.6 and 790
-kHz. Stated to `init()`, the measured delay gives 99.5, 400 and 970 kHz -
-the last held under the rate by table 171's tLOW, which the chooser keeps
-with the floor's edge rather than trust a split of the stated delay
-between the two edges.
+letter `d` measures 96.8, 359.6 and 790.5 kHz, none above its speed.
+Stated to `init()`, the measured delay brings the 100 kHz rung to the
+rate asked within one per cent (measured); the arithmetic gives 400 and
+970 kHz for the other two - the last held under the rate by table 171's
+tLOW, which the chooser keeps with the floor's edge rather than trust a
+split of the stated delay between the two edges.
 
 **ST's own arithmetic is the oracle, and its error runs FAST.** The HAL
 takes a precomputed TIMINGR; ST computes it in CubeMX and in the timing
@@ -359,9 +361,14 @@ NACK on an overrun follows, and the controller reads `i2c_nack_data`.
 With the target stretching, the same 1 MHz bus is byte-exact.
 
 **Clock stretching is linear and free of the data.** Commanded holds of
-20 / 50 / 100 us per event lengthened an 8-byte read to 307 / 588 /
-1057 us against 383 / 653 / 1103 predicted (nine holds: the address
-event and eight bytes), byte-exact throughout. With NOSTRETCH set, a
+20 / 50 / 100 us per event lengthen an 8-byte read by nine holds a step
+(the address event and eight bytes): from 20 to 50 us the tenure grew
+281 us against 270, from 50 to 100 by 469 against 450, byte-exact
+throughout. Each tenure runs about 13 us a byte short of the baseline
+plus nine holds - 282 / 563 / 1032 us against 422 / 692 / 1142 - because
+a commanded hold lands on top of the client's own turnaround, its ISR's
+entry and read, which already stretch SCL in the unstretched baseline;
+the suite judges the slope, where that constant cancels. With NOSTRETCH set, a
 late target raises OVR and **0xFF goes out in the missing byte's place**,
 exactly as 32.4.8 says, while the tenure itself completes - an underrun
 is not a fault the controller sees.
@@ -445,20 +452,22 @@ or two, the ruler read in the Stopwatch: about 400 cycles, the same in
 every column). The vendor's column is ST's HAL v1.4.7 on the same board,
 the same client and the same TIMINGR words (`HAL_I2C_Master_Transmit_IT`,
 `_Receive_IT`, `Mem_Read_IT`, a zero-length transmit as the probe, the
-DMA variants), CubeMX's G0 handler shape on the vector. At 400 kHz:
+DMA variants), CubeMX's G0 handler shape on the vector. At the 400 kHz
+rung - 369.9 kHz on the desk's wire under the ceiling default for brio,
+the HAL's TIMINGR words solved against the manual's budgets:
 
-| tenure | the rest (cycles), interrupts: before | after | ST HAL |
-|---|---|---|---|
-| write 1 | 1554, 2 | 1147, 1 | 1362, 1 |
-| write 2 | 1554, 3 | 1149, 2 | 1361, 2 |
-| write 16 | 1572, 17 | 1167, 16 | 1374, 16 |
-| read 1 | 1502, 2 | 1352, 1 | 1545, 2 |
-| read 16 | 1529, 17 | 1357, 16 | 1560, 17 |
-| register read 1 + 1 | 2377, 4 | 1852, 2 | 2289, 4 |
-| register read 1 + 16 | 2375, 19 | 1860, 17 | 2313, 19 |
-| probe answered | 1420, 1 | 1223, 1 | 1393, 1 |
-| probe not answered | 1074, 2 | 809, 1 | - |
-| write 255 through the engine, x | 1.00 | 1.00 | 1.00 |
+| tenure | the rest (cycles), interrupts: brio | ST HAL |
+|---|---|---|
+| write 1 | 1028, 1 | 1362, 1 |
+| write 2 | 1031, 2 | 1361, 2 |
+| write 16 | 1040, 16 | 1374, 16 |
+| read 1 | 1228, 1 | 1545, 2 |
+| read 16 | 1248, 16 | 1560, 17 |
+| register read 1 + 1 | 1651, 2 | 2289, 4 |
+| register read 1 + 16 | 1670, 17 | 2313, 19 |
+| probe answered | 1128, 1 | 1393, 1 |
+| probe not answered | 816, 1 | - |
+| write 255 through the engine, x | 1.00 | 1.00 |
 
 - **The interrupts are the silicon's floor.** N for a write or a read of
   N bytes, two for a one-byte register read, one for a probe either
@@ -489,13 +498,13 @@ DMA variants), CubeMX's G0 handler shape on the vector. At 400 kHz:
   cycles a byte, 403 for its STOPF entry against 242), it reads a
   one-byte read through an RXNE entry, and its register read takes four
   interrupts to this engine's two.
-- **The rungs of this table were measured as the slope at 106.5 kHz,
-  482.8 kHz and 1.216 MHz** - TIMINGR words solved against the manual's
-  1000 / 750 / 500 ns of tSYNC, which this wire beats (above). The
-  ceiling default puts the same rungs near 97, 364 and 790 kHz on this
-  wire; the costs are a handler's and a channel's, but the wire's share
-  of each row moves with the rate and the table is not re-measured
-  there (below, "Implemented but not bench-verified").
+- **The rungs are measured as the slope**: 98.0 kHz, 369.9 kHz and
+  827.1 kHz on the desk's wire under the ceiling default; the HAL's
+  column was taken at the words solved against the manual's 1000 / 750
+  / 500 ns of tSYNC, 106.5 kHz, 482.8 kHz and 1.216 MHz on the same
+  board. `the rest` is a handler's and a channel's cost and the wire's
+  share is taken out of it, so the two columns compare across the
+  rungs.
 - **The 1 MHz rung is not claimed as Fm+.** Released from low, SCL
   reaches the input's threshold 8 cycles and SDA 12 cycles after the
   same steps on a line already high (125 and 190 ns at 64 MHz, the
@@ -687,18 +696,6 @@ Driver gaps:
   vocabulary is born with its first device.
 
 Implemented but not bench-verified:
-
-- **The ceiling default on this wire.** The chooser's floor charge and
-  the stated-wire path are pinned against ST's own words and the
-  manual's tables at compile time, and the same arithmetic is measured
-  on the STM32F4's FMPI2C1 - the same register file - where no rung runs
-  above its speed and a stated wire runs within one per cent of it
-  ([../stm32f4/fmpi2c.md](../stm32f4/fmpi2c.md)). Here the self-link's
-  pull-ups are off the desk: letter `d` of `test_stm32_i2c` (the bracket
-  - no rung above its speed - and the measured budget handed back) and
-  letter `i` of `bench_stm32` (the rungs as the slope, and the cost table
-  at the new rates) on the Nucleo-G0B1RE with the two 2.2 kOhm pull-ups
-  back would measure it.
 
 - **A data byte refused under an engine.** The NACK's name under an
   engine is the transmit channel's count (the address's when it never
