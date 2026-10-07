@@ -639,9 +639,10 @@ own.
   alike: the honest host `spi_ok` in 8 of 8, the declared-short one
   `spi_overrun` in 6 to 8 runs of 8 on the CH32V303VCT6 over five passes -
   the console's handler, about 200 cycles, outlasting the frame the
-  second one in flight left it. The PUMP, on the CH32V303VCT6: the
-  honest host `spi_ok` in 8 of 8 with no overrun, the declared-short
-  one `spi_overrun` in 8 of 8, the witness the class comment promises.
+  second one in flight left it (5 of 8 on the CH32V203C8T6). The PUMP,
+  on both parts: the honest host `spi_ok` in 8 of 8 with no overrun,
+  the declared-short one `spi_overrun` in 8 of 8, the witness the class
+  comment promises.
   The bench app's selector of the host SPI1's vector serves is
   volatile because gcc, seeing no reader of a plain one between two
   stores of the main path, drops the first as dead: the short host's
@@ -880,11 +881,6 @@ Implemented but not bench-verified, each with what would measure it:
   by the same arithmetic (one code lower than SPI1's above 72 MHz of
   HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
   the oracle on a PB1 instance would measure it.
-- **The PUMP under a hold-off declared too short on the CH32V203C8T6**:
-  measured on the CH32V303VCT6 (above); the CH32V203C8T6's earlier
-  pump line was the plain host's vector serving the short host's
-  transaction, so `bench_vx03-1`'s letter e run there again would
-  measure it.
 - **The RECEIVED half of the engined data phase as the engines now are,
   16-bit frames included**: the transmitted half is judged by the CRC
   unit above, and what the receive engine lands in memory is judged by
