@@ -218,13 +218,13 @@ probe finds it and where the breadcrumb waits for the next boot's
 The reference suite is `test_x035_platform` (51 verdicts in `z`, nothing
 wired) on a CH32X035F8U6 - WCH's evaluation board in its QFN20 edition,
 over a WCH-LinkE - at 48 MHz from the HSI with the flash at two wait
-states, in the image built with the hardware prologue; where two numbers
-stand for one quantity they are two runs of `z`. Letters `b`, `w` and
-`k` ran in the same suite at 8 MHz instead - HPRE dividing the HSI by
-six, the flash at no wait state - which is the one line the image
-differs by: powered from the probe's 3V3, this board restarts under
-load at 48 MHz, a fact of the supply, which an image at 8 MHz does not
-meet. What it measured:
+states, in the image built with the hardware prologue, the board
+powered from its own USB connector (from the probe's 3V3 it restarts
+under load at 48 MHz: [../boards/ch32x035-evt-f8u6.md](../boards/ch32x035-evt-f8u6.md));
+where two numbers stand for one quantity they are two runs of `z`.
+Letters `w` and `k` also ran at 8 MHz - HPRE dividing the HSI by six,
+the flash at no wait state, the one line that image differs by - where
+the consume was measured before and after. What it measured:
 
 - **The boot story** (letter `a`). The flags at boot read 0x18000000,
   SFTRSTF and PORRSTF, and `reset_flags()` reads them without disturbing
@@ -259,14 +259,18 @@ meet. What it measured:
   none either, in this one code layout: the order this hook does not
   use is the one the QingKe V2 loses an edge in, and the unmasked order
   needs none. An edge that finds the core asleep reaches the handler's
-  first statement in 23 cycles and the caller's loop in 68 (masked
-  order: 28 and 66 - the handler waited for the unmask); an `idle()`
-  that the latch returns at once costs 23 cycles, two counter reads
-  included (24).
+  first statement in 23 cycles and the caller's loop in 68 at 8 MHz
+  (masked order: 28 and 66 - the handler waited for the unmask); an
+  `idle()` that the latch returns at once costs 23 cycles, two counter
+  reads included (24). At 48 MHz, two wait states in the fetch, the same
+  walk loses none and none is late in the four cases; the edge reaches
+  the handler in 43 cycles and the loop in 167, and an `idle()` the latch
+  returns at once costs 76.
 - **One turn per wake** (letter `k`). A Tenuto pack of three quiet AOs,
   two holding a periodic time event that does not fire in the window,
   turned as `Tenuto::run()` turns it over 100 ticks with the tick the
-  only interrupt: 101 kernel turns, in two runs. Without the consume
+  only interrupt: 101 kernel turns, in two runs at 8 MHz and one at 48
+  (a quiet turn 372 cycles there, 126 at 8 MHz). Without the consume
   the same pack turned 200 times, in two runs: the waking edge left
   latched ended every second `idle()` at once. That wasted turn costs
   126 cycles, two counter reads included; the consume costs three
@@ -356,11 +360,6 @@ Implemented but not bench-verified, each with what would measure it:
   what is missing is a host that time-stamps the two lines as they
   arrive - the clock suite's letter `d` asks the same at two rates
   ([clock.md](clock.md)).
-- **The idle promise at 48 MHz**: letters `w` and `k` ran at 8 MHz with
-  the flash at no wait state (the bench findings say why); the suite's
-  own image at 48 MHz, on a board powered from its own USB connector,
-  runs them at the rate the stratum's programs run at, two wait states
-  in the fetch.
 - **The deep path, `idle_deep()`**: no verb of this stratum sets
   SLEEPDEEP, so the paused timebase, the unmask before the `wfi` and the
   absent consume are unmeasured; the sleep site born with the power
