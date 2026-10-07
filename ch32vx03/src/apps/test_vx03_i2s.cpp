@@ -855,12 +855,12 @@ void banner() {
 
 }  // namespace
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// Each instance's vector: counted, the raised sources collected, and the
 /// enable of what was raised dropped so a standing source cannot spin it.
-BRIO_CH32_VECTOR(spi2_handler) {
+BRIO_CH32_LEAF_VECTOR(spi2_handler) {
     const uint32_t up = I2::isr();
     vec2 = vec2 + 1u;
     vec2_flags = vec2_flags | up;
@@ -875,7 +875,7 @@ BRIO_CH32_VECTOR(spi2_handler) {
     }
 }
 
-BRIO_CH32_VECTOR(spi3_handler) {
+BRIO_CH32_LEAF_VECTOR(spi3_handler) {
     const uint32_t up = I3::isr();
     vec3 = vec3 + 1u;
     vec3_flags = vec3_flags | up;

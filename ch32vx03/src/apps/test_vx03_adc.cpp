@@ -1976,15 +1976,15 @@ BRIO_CH32_VECTOR(dma1_channel2_handler) {
     }
 }
 
-BRIO_CH32_VECTOR(exti15_10_handler) {
+BRIO_CH32_LEAF_VECTOR(exti15_10_handler) {
     const uint32_t up = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti15_10));
     if (up != 0u) {
         exti_calls = static_cast<uint16_t>(exti_calls + 1u);
     }
 }
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

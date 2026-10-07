@@ -570,7 +570,9 @@ f-register (the CH32V303's QingKe V4F), a binding in an image built
 with F is a naked trampoline - a call of an ordinary function, then
 MRET - so a call in the body costs no f-register save, and the
 stratum's check walks every such body in the linked image and fails on
-a floating-point instruction it reaches
+a floating-point instruction it reaches; a leaf, which saves nothing
+under the attribute, keeps the attributed handler (the leaf form, held
+to being a leaf by the same check)
 ([../ch32vx03/platform.md](../ch32vx03/platform.md)). A family
 whose linker script carries a `.ram_text` section may place a binding
 in SRAM: the SAM C21's page says what it buys

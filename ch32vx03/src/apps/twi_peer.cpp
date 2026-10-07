@@ -777,8 +777,8 @@ void status() {
 
 }  // namespace
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Console::isr(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Console::isr(); }
 
 /// The instance's TWO vectors. The TARGET is POLLED (its three interrupt
 /// enables are down and its lines dark), so the only owner here is the
@@ -798,7 +798,7 @@ BRIO_CH32_VECTOR(i2c1_ev_handler) {
     Raw::buffer_interrupt(false);
 }
 
-BRIO_CH32_VECTOR(i2c1_er_handler) {
+BRIO_CH32_LEAF_VECTOR(i2c1_er_handler) {
     if (host_live) {
         if (Host::error_isr()) {
             host_status = Host::status();

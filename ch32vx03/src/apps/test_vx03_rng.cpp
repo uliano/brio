@@ -970,14 +970,14 @@ void banner() {
 
 }  // namespace
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// The generator's vector: the three sources reported, the latched ones
 /// cleared by the body, the word taken so DRDY goes down - and the storm
 /// stopped by the handler itself once the letter's count is reached.
-BRIO_CH32_VECTOR(rng_handler) {
+BRIO_CH32_LEAF_VECTOR(rng_handler) {
     const brio::RngEvent e = brio::Rng::isr();
     if (e.ready) {
         rng_last = brio::Rng::value();

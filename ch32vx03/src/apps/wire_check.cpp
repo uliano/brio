@@ -166,4 +166,4 @@ int main()
     }
 }
 
-BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { Serial::isr(); }

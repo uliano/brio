@@ -3183,8 +3183,8 @@ void banner() {
 
 }  // namespace
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// USART2's vector: the transport's body while letter l runs, and the
 /// flag counter of every other letter.
@@ -3235,7 +3235,7 @@ BRIO_CH32_VECTOR(usart2_handler) {
 }
 
 /// The fourth port's vector, the one at this device class's own tail.
-BRIO_CH32_VECTOR(uart4_handler) {
+BRIO_CH32_LEAF_VECTOR(uart4_handler) {
     if (!has_fourth) {
         return;
     }
@@ -3271,10 +3271,10 @@ BRIO_CH32_VECTOR(dma1_channel7_handler) {
 // vector table names them.
 BRIO_CH32_VECTOR(dma2_channel3_handler) { pair_dma_vector<>(); }
 BRIO_CH32_VECTOR(dma2_channel5_handler) { pair_dma_vector<>(); }
-BRIO_CH32_VECTOR(uart5_handler) { upper_vector<5>(); }
-BRIO_CH32_VECTOR(uart6_handler) { upper_vector<6>(); }
-BRIO_CH32_VECTOR(uart7_handler) { upper_vector<7>(); }
-BRIO_CH32_VECTOR(uart8_handler) { upper_vector<8>(); }
+BRIO_CH32_LEAF_VECTOR(uart5_handler) { upper_vector<5>(); }
+BRIO_CH32_LEAF_VECTOR(uart6_handler) { upper_vector<6>(); }
+BRIO_CH32_LEAF_VECTOR(uart7_handler) { upper_vector<7>(); }
+BRIO_CH32_LEAF_VECTOR(uart8_handler) { upper_vector<8>(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

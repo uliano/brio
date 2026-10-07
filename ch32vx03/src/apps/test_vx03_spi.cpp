@@ -2790,8 +2790,8 @@ void banner() {
 
 }  // namespace
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 BRIO_CH32_VECTOR(spi1_handler) {
     spi1_isr_entries = spi1_isr_entries + 1u;
@@ -2835,7 +2835,7 @@ BRIO_CH32_VECTOR(spi2_handler) {
 
 /// SPI3's vector, the CH32V303's: the client of letter f. On the other
 /// series the body is empty and nothing in the vector table names it.
-BRIO_CH32_VECTOR(spi3_handler) { served_on_spi3(); }
+BRIO_CH32_LEAF_VECTOR(spi3_handler) { served_on_spi3(); }
 
 /// SPI1's engines: one vector per channel on this family, each servicing
 /// its own - the receive channel's the transaction's one interrupt, the

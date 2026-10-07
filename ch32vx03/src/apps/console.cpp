@@ -241,8 +241,10 @@ void Console::cmd_err(const Cmd&, Serial s) {
 // The two vectors this program owns. BRIO_CH32_VECTOR is the one
 // spelling of a binding on this target - the hardware prologue's
 // handler or gcc's, or on a part with the FPU a trampoline to an
-// ordinary function, whichever the image was built for (pfic.hpp).
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+// ordinary function, whichever the image was built for (pfic.hpp) -
+// and BRIO_CH32_LEAF_VECTOR its form for a leaf, the tick here, which
+// stays the hardware prologue's handler even on that part.
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 BRIO_CH32_VECTOR(usart1_handler) {
     if (Serial::isr()) {

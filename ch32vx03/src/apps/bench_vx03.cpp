@@ -2335,13 +2335,13 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 // Each vector carries its meter's stamps around the ISR body the suites
 // bind: enter() first, leave() last.
-BRIO_CH32_VECTOR(systick_handler) {
+BRIO_CH32_LEAF_VECTOR(systick_handler) {
     tick_meter.enter();
     brio::Ticker::tick();
     tick_meter.leave();
 }
 
-BRIO_CH32_VECTOR(usart1_handler) {
+BRIO_CH32_LEAF_VECTOR(usart1_handler) {
     usart_meter.enter();
     (void)Serial::isr();
     usart_meter.leave();
@@ -2391,13 +2391,13 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
     loop_rx_dma_vector();
 }
 
-BRIO_CH32_VECTOR(usart2_handler) { loop_usart_vector(); }
+BRIO_CH32_LEAF_VECTOR(usart2_handler) { loop_usart_vector(); }
 
 /// The stimulus's slot on the CH32V303; nothing in the CH32V203's vector
 /// table names this body.
 BRIO_CH32_VECTOR(dma2_channel5_handler) { (void)stim_dma_vector<2, 5>(); }
 
-BRIO_CH32_VECTOR(uart4_handler) { stim_isr(); }
+BRIO_CH32_LEAF_VECTOR(uart4_handler) { stim_isr(); }
 
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
     spi_rx_meter.enter();
@@ -2452,7 +2452,7 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
     }
     i2c_meter.leave();
 }
-BRIO_CH32_VECTOR(i2c2_ev_handler) {
+BRIO_CH32_LEAF_VECTOR(i2c2_ev_handler) {
     i2c_peer_meter.enter();
     if (i2c_tracing) {
         i2c_trace('T', Ruler::now(), i2c_target_status());
@@ -2460,7 +2460,7 @@ BRIO_CH32_VECTOR(i2c2_ev_handler) {
     i2c_target_event();
     i2c_peer_meter.leave();
 }
-BRIO_CH32_VECTOR(i2c2_er_handler) {
+BRIO_CH32_LEAF_VECTOR(i2c2_er_handler) {
     i2c_peer_meter.enter();
     i2c_target_error();
     i2c_peer_meter.leave();

@@ -606,9 +606,9 @@ void banner() {
 // The three vectors this program owns. The non-maskable one is the
 // clock security system's: the driver's body says whether the CSS was
 // the reason, and only this suite's own counters are touched here.
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 BRIO_CH32_VECTOR(rcc_handler) {
     rcc_flags = rcc_flags | brio::Rcc::ready_isr();

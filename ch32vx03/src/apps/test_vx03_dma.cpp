@@ -2311,14 +2311,14 @@ BRIO_CH32_VECTOR(dma2_channel9_handler) { dma2_vector<9>(); }
 BRIO_CH32_VECTOR(dma2_channel10_handler) { dma2_vector<10>(); }
 BRIO_CH32_VECTOR(dma2_channel11_handler) { dma2_vector<11>(); }
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
-BRIO_CH32_VECTOR(usart2_handler) {
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart2_handler) {
     if (Loop::isr()) {
         loop_edges = loop_edges + 1u;
     }
 }
-BRIO_CH32_VECTOR(uart4_handler) { uart4_vector<>(); }
+BRIO_CH32_LEAF_VECTOR(uart4_handler) { uart4_vector<>(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

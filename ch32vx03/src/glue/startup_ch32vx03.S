@@ -87,8 +87,9 @@
  * without F keeps the unit off. What the hardware prologue does NOT do
  * is save an FP register: it pushes the sixteen integer caller-saved
  * ones (3.4, note 3), which is why an image with F binds each vector as
- * a trampoline whose body must touch no f-register, or as the float
- * trampoline that saves the caller-saved ones itself (pfic.hpp,
+ * a trampoline whose body must touch no f-register, as the float
+ * trampoline that saves the caller-saved ones and fcsr itself, or, a
+ * leaf, as the attributed handler that saves nothing (pfic.hpp,
  * docs/ch32vx03/platform.md measures the price).
  *
  * reset_handler does the minimum an image needs: the global pointer and

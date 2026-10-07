@@ -23,11 +23,13 @@
 # for each part named on its "// mcu: <list>" line.
 # The vector guard's own proof: every test/family_ch32vx03/guard/*.cpp
 # is LINKED into an image for the CH32V303VC with the hardware prologue
-# (the one build whose vectors are trampolines) and cli/vector_guard.py
-# run over it, which must pass or fail as the TU's "// guard:" line
-# says - "pass", or "fail <text>" with <text> in the guard's report (the
-# function it must name). The guard over the project's own images runs
-# after the link guard (cli/check.py).
+# (the one build whose vectors are trampolines or leaves) and
+# cli/vector_guard.py run over it, which must pass or fail as the TU's
+# "// guard:" line says - "pass", "pass <text>" with <text> in the
+# guard's report (a leaf candidate it must name), or "fail <text>" with
+# <text> in the report (the function or the vector it must name). The
+# guard over the project's own images runs after the link guard
+# (cli/check.py).
 #
 # No CMake coupling on purpose (same as the other six scripts): the
 # compiler is called directly, the sweep takes seconds, no hardware.
@@ -115,8 +117,11 @@ done
 
 # The vector guard (cli/vector_guard.py) on images built to pass it and
 # to fail it: a float trampoline's body, a jump table and a call chain
-# it must let through; a float operation reached through a call and a
-# call through a pointer it must refuse, by name. Runs unfiltered or as
+# it must let through, and a leaf vector with a jump table of its own; a
+# trampoline whose body is a leaf it must report; a float operation
+# reached through a call, a call through a pointer, a leaf vector that
+# calls out or does float work, a float trampoline that leaves fcsr
+# unsaved and a handler attributed by hand it must refuse, by name. Runs unfiltered or as
 # `brio check ch32vx03 guard`.
 case "guard" in *"$FILTER"*)
     GUARD_ELF=/tmp/check_ch32vx03_guard.elf
@@ -134,6 +139,13 @@ case "guard" in *"$FILTER"*)
         bad=0
         case "$want" in
             pass) [ "$status" -eq 0 ] && line="$line passed" || { line="$line REFUSED(BAD)"; bad=1; } ;;
+            pass\ *)
+                text="${want#pass }"
+                if [ "$status" -eq 0 ] && printf '%s' "$report" | grep -qF "$text"; then
+                    line="$line passed, reporting '$text'"
+                else
+                    line="$line NOT PASSED AND REPORTED AS DUE(BAD)"; bad=1
+                fi ;;
             fail\ *)
                 text="${want#fail }"
                 if [ "$status" -ne 0 ] && printf '%s' "$report" | grep -qF "$text"; then
@@ -141,7 +153,7 @@ case "guard" in *"$FILTER"*)
                 else
                     line="$line NOT REFUSED AS DUE(BAD)"; bad=1
                 fi ;;
-            *) line="$line missing '// guard: pass|fail <text>' line"; bad=1 ;;
+            *) line="$line missing '// guard: pass [<text>]|fail <text>' line"; bad=1 ;;
         esac
         echo "GUARD $line"
         [ "$bad" -eq 0 ] || { printf '%s\n' "$report" | sed "s/^/    /"; fail=1; }

@@ -62,8 +62,8 @@
  * (one `jal`, two bytes compressed where the body is within reach, four
  * otherwise) and the body's `ret`, against no instruction at all in an
  * attributed leaf - measured on the CH32V303VCT6 (the platform suite's
- * letter e) three cycles on the way in and five on the way out, where a
- * handler that calls out sheds forty memory operations. With F and the
+ * letter e) two cycles on the way in and two to five on the way out,
+ * where a handler that calls out sheds forty memory operations. With F and the
  * HPE OFF the binding stays the attributed handler of the plain
  * `interrupt` (gcc saves whatever a call might clobber, f-registers
  * included, in software): the f-register question is then the software
@@ -86,10 +86,44 @@
  * (cli/vector_guard.py). A body that NEEDS float binds with
  * BRIO_CH32_VECTOR_FLOAT(name) instead: the same trampoline with the
  * twenty caller-saved f-registers stored around the call - the set gcc
- * saves for a handler that calls out, so fcsr is not among them: a body
- * that changes the rounding mode or raises a flag leaves it changed for
- * the program it interrupted - and the guard leaves its body alone.
- * Without F, or with the HPE off, the two macros are one.
+ * saves for a handler that calls out - and fcsr too, which gcc does not
+ * save. The body starts from fcsr's RESET STATE (round to nearest, no
+ * flag), not from the interrupted program's: a handler's arithmetic is
+ * then the same whatever it interrupts - a program that sets another
+ * rounding mode for its own work does not change its handlers' results
+ * with it - and the flags the body finds are the ones it raised; the
+ * swap that clears fcsr is the instruction that reads it, so the
+ * choice costs nothing over inheriting. The interrupted program gets
+ * its own rounding mode and sticky flags back, whatever the body did to
+ * them. The guard checks that trampoline's stores and loads, fcsr's
+ * among them, and leaves its body alone; the platform suite's letter l
+ * judges both halves on the CH32V303VCT6 (the body finds 0, the
+ * program finds its 0x20 and its 0x81 after a body that raised NX).
+ * fcsr's four instructions cost twelve cycles of round trip there, 123
+ * against 111 in two images that differ in them alone.
+ *
+ * A LEAF NEEDS NO TRAMPOLINE. A body that calls nothing and touches no
+ * f-register saves nothing under the fast attribute, F or not, so the
+ * trampoline's call and return are its whole cost there.
+ * BRIO_CH32_LEAF_VECTOR(name) { body } binds it as the attributed
+ * handler of the hardware prologue even under F (without F, or with the
+ * HPE off, it is BRIO_CH32_VECTOR exactly, so those images do not move);
+ * measured on the CH32V303VCT6 in two images that differ in the
+ * binding alone, letter e's software interrupt 53..66 cycles of round
+ * trip against 57..70 under the trampoline (entry 16 against 18, exit
+ * 25 against 27..30), and the tick's edge to its
+ * handler's first statement 22 cycles against 24 (letter w). The
+ * promise is the guard's too, both ways: a vector bound leaf that gcc
+ * compiled with a call, a tail jump, an indirect transfer other than a
+ * jump table into itself, or an f-register touched FAILS the check,
+ * naming it; a trampoline whose body came out a leaf is REPORTED as a
+ * candidate for the leaf form (a line of the check's output, not a
+ * failure). The binding's mark in the image is an absolute symbol,
+ * `__brio_leaf_<name>`, which costs no byte of it. And since the three
+ * macros are the only bindings the guard can hold to a promise, any
+ * other entry of an F image's table - a handler attributed by hand
+ * among them - FAILS the check too, the crt's default handler alone
+ * excepted. Without F, or with the HPE off, the three macros are one.
  *
  * AND THE ATTRIBUTED FORM FORBIDS gcc TO MERGE TWO HANDLERS. Two
  * bindings with the same body - one transport's two DMA channels, each
@@ -127,7 +161,8 @@
 /// The binding of every vector of this target (see the file header):
 /// `BRIO_CH32_VECTOR(usart1_handler) { Serial::isr(); }` - the ONE place
 /// the handler's shape is chosen, from the hardware prologue option and
-/// the image's floating-point ABI.
+/// the image's floating-point ABI - with its float sibling
+/// BRIO_CH32_VECTOR_FLOAT and its leaf sibling BRIO_CH32_LEAF_VECTOR.
 #if defined(BRIO_CH32_HPE) && BRIO_CH32_HPE
 #define BRIO_CH32_HANDLER_ATTRIBUTE [[gnu::interrupt("WCH-Interrupt-fast"), gnu::no_icf]]
 #else
@@ -147,12 +182,17 @@
     extern "C" void name##_body()
 // The same trampoline for a body that does float work: the twenty
 // caller-saved f-registers (ft0..ft7 = f0..f7, fa0..fa7 = f10..f17,
-// ft8..ft11 = f28..f31) stored on the user stack around the call, a
-// frame of eighty bytes that keeps the stack's 16-byte alignment.
+// ft8..ft11 = f28..f31) and fcsr stored on the user stack around the
+// call, a frame of ninety-six bytes that keeps the stack's 16-byte
+// alignment. One csrrw reads the interrupted program's fcsr into t0 (a
+// register the hardware has saved) and writes zero, so the body starts
+// from fcsr's reset state - round to nearest, no flag raised - whatever
+// the program it interrupted had set (the header says why), and the
+// program finds its own rounding mode and flags again after MRET.
 #define BRIO_CH32_VECTOR_FLOAT(name)                                                       \
     extern "C" void name##_body();                                                         \
     extern "C" [[gnu::naked, gnu::no_icf]] void name() {                                   \
-        __asm__("addi sp, sp, -80\n\t"                                                     \
+        __asm__("addi sp, sp, -96\n\t"                                                     \
                 "fsw ft0, 0(sp)\n\t"  "fsw ft1, 4(sp)\n\t"  "fsw ft2, 8(sp)\n\t"           \
                 "fsw ft3, 12(sp)\n\t" "fsw ft4, 16(sp)\n\t" "fsw ft5, 20(sp)\n\t"          \
                 "fsw ft6, 24(sp)\n\t" "fsw ft7, 28(sp)\n\t" "fsw fa0, 32(sp)\n\t"          \
@@ -160,7 +200,11 @@
                 "fsw fa4, 48(sp)\n\t" "fsw fa5, 52(sp)\n\t" "fsw fa6, 56(sp)\n\t"          \
                 "fsw fa7, 60(sp)\n\t" "fsw ft8, 64(sp)\n\t" "fsw ft9, 68(sp)\n\t"          \
                 "fsw ft10, 72(sp)\n\t" "fsw ft11, 76(sp)\n\t"                              \
+                "csrrw t0, fcsr, zero\n\t"                                                  \
+                "sw t0, 80(sp)\n\t"                                                         \
                 "call " #name "_body\n\t"                                                  \
+                "lw t0, 80(sp)\n\t"                                                         \
+                "csrw fcsr, t0\n\t"                                                         \
                 "flw ft0, 0(sp)\n\t"  "flw ft1, 4(sp)\n\t"  "flw ft2, 8(sp)\n\t"           \
                 "flw ft3, 12(sp)\n\t" "flw ft4, 16(sp)\n\t" "flw ft5, 20(sp)\n\t"          \
                 "flw ft6, 24(sp)\n\t" "flw ft7, 28(sp)\n\t" "flw fa0, 32(sp)\n\t"          \
@@ -168,13 +212,24 @@
                 "flw fa4, 48(sp)\n\t" "flw fa5, 52(sp)\n\t" "flw fa6, 56(sp)\n\t"          \
                 "flw fa7, 60(sp)\n\t" "flw ft8, 64(sp)\n\t" "flw ft9, 68(sp)\n\t"          \
                 "flw ft10, 72(sp)\n\t" "flw ft11, 76(sp)\n\t"                              \
-                "addi sp, sp, 80\n\t"                                                      \
+                "addi sp, sp, 96\n\t"                                                      \
                 "mret");                                                                   \
     }                                                                                      \
     extern "C" void name##_body()
+// The leaf form: the attributed handler of the hardware prologue even
+// here, for a body that calls nothing and touches no f-register, which
+// then saves nothing in software and needs no trampoline. The absolute
+// symbol `__brio_leaf_<name>` is the binding's mark in the image, by
+// which the vector guard holds the body to that promise (it costs no
+// byte of the image: an absolute local symbol lives in the symbol table
+// alone).
+#define BRIO_CH32_LEAF_VECTOR(name)                              \
+    __asm__(".set __brio_leaf_" #name ", 1");                    \
+    extern "C" BRIO_CH32_HANDLER_ATTRIBUTE void name()
 #else
 #define BRIO_CH32_VECTOR(name) extern "C" BRIO_CH32_HANDLER_ATTRIBUTE void name()
 #define BRIO_CH32_VECTOR_FLOAT(name) BRIO_CH32_VECTOR(name)
+#define BRIO_CH32_LEAF_VECTOR(name) BRIO_CH32_VECTOR(name)
 #endif
 
 namespace brio {

@@ -8,7 +8,8 @@ ordinary function, the body, then MRET - and nothing saves the
 f-registers of the program it interrupts (brio/ch32vx03/pfic.hpp,
 BRIO_CH32_VECTOR). The promise that makes that correct - the body and
 everything it reaches use no f-register - is checked here, in the image
-as linked, never in the source:
+as linked, never in the source - and so is the leaf form's, the handler
+that needs no trampoline because it saves nothing:
 
     python3 -m cli.vector_guard IMAGE.elf...      (or: brio check ch32vx03)
 
@@ -35,14 +36,32 @@ the walk FAILS on
     D, and every compressed F instruction it has is decoded).
 
 An entry that is a trampoline storing the twenty caller-saved
-f-registers around its call (BRIO_CH32_VECTOR_FLOAT) is checked for the
-set it stores and loads and its body is left alone; an entry with a
-`<name>_body` beside it that is neither shape FAILS (a trampoline the
-guard does not recognize is one it has not checked); any other entry -
-the crt's default handler, a handler bound with an attribute of its own
-- is not a trampoline and owes the guard nothing. Each failure names the
-image, the vector, the chain of functions from its body and the
-instruction. Exit status 0 when every image passes, 1 otherwise."""
+f-registers and fcsr around its call (BRIO_CH32_VECTOR_FLOAT) is
+checked for the set it stores and loads - every f-register back from
+its own slot, fcsr saved before the call and written back after it from
+a slot of its own, the stack pointer back where it was - and its body is
+left alone; an entry with a `<name>_body` beside it that is neither
+shape FAILS (a trampoline the guard does not recognize is one it has not
+checked).
+
+An entry bound LEAF (BRIO_CH32_LEAF_VECTOR, the attributed handler,
+marked in the image by the absolute symbol `__brio_leaf_<name>`) is
+checked the other way: the handler itself must be a leaf - no call, no
+jump or branch out of it (a tail call), no indirect transfer but a jump
+table into itself, no floating-point instruction or CSR - and FAILS
+otherwise, since gcc has then saved in software what the trampoline
+exists to spare; a mark with no entry of the table under its name FAILS
+too. And a plain trampoline whose body, alone, is such a leaf is
+REPORTED as a candidate for the leaf form - a line of the output, never
+a failure.
+
+Every other entry FAILS but the crt's own `default_handler`, the spin
+every unbound vector aliases: a handler bound with an attribute of its
+own, or by any shape but the stratum's three macros, is one nothing
+checks - and an entry that is the start of no function fails too. Each
+failure names the image, the vector, the chain of functions from its
+body and the instruction. Exit status 0 when every image passes, 1
+otherwise."""
 
 import bisect
 import os
@@ -261,6 +280,36 @@ def fp_fault(mnemonic, operands):
     return None
 
 
+def fcsr_read(m, ops):
+    """The register a read of fcsr lands in, or None."""
+    if m == "frcsr" and len(ops) == 1:
+        return ops[0]
+    if m == "fscsr" and len(ops) == 2:
+        return ops[0]
+    if m == "csrr" and ops[1:] == ["fcsr"]:
+        return ops[0]
+    if m in ("csrrw", "csrrs", "csrrc") and len(ops) == 3 and ops[1] == "fcsr" and ops[0] != "zero":
+        return ops[0]
+    return None
+
+
+def fcsr_write(m, ops):
+    """The register a write of fcsr takes its value from, or None."""
+    if m == "fscsr" and len(ops) == 1:
+        return ops[0]
+    if m == "csrw" and len(ops) == 2 and ops[0] == "fcsr":
+        return ops[1]
+    if m == "csrrw" and len(ops) == 3 and ops[0] == "zero" and ops[1] == "fcsr":
+        return ops[2]
+    return None
+
+
+def sp_slot(o):
+    """(register, offset) of a load or store `reg,off(sp)`, or None."""
+    m = re.match(r"^(\w+),(-?\d+)\(sp\)$", o.split("#")[0].strip().replace(" ", ""))
+    return (m.group(1), int(m.group(2))) if m else None
+
+
 def classify(insns):
     """('plain', body) / ('float', body) / ('bad float', why) for a
     trampoline, None for anything else."""
@@ -275,45 +324,149 @@ def classify(insns):
         before = before[:-1]
     if not before and not after:
         return ("plain", body)
-    shape = re.compile(r"^(f[sl]w)$")
-    stored = {o.split(",")[0] for _a, m, o in before if m == "fsw"}
-    loaded = {o.split(",")[0] for _a, m, o in after if m == "flw"}
-    others = [(m, o) for _a, m, o in before + after
-              if not shape.match(m) and not (m == "addi" and o.startswith("sp,sp,"))]
-    if others:
-        return None
-    if stored != CALLER_SAVED_F or loaded != CALLER_SAVED_F:
+    # The float trampoline: the twenty caller-saved f-registers stored
+    # before the call and loaded after it, each from the slot it was
+    # stored in; fcsr read into an integer register and stored before
+    # the call, loaded and written back after it; the stack pointer
+    # moved down and back up by one multiple of sixteen; nothing else.
+    stored, loaded, adjust = {}, {}, 0
+    saved_fcsr = restored_fcsr = None   # the stack slot each one uses
+    pending = None                      # (register, slot) between the two halves of a step
+    for half, seq in (("before", before), ("after", after)):
+        for _a, m, o in seq:
+            ops = operands_of(o)
+            if m == "addi" and ops[:2] == ["sp", "sp"]:
+                adjust += int(ops[2], 0)
+                continue
+            if m in ("fsw", "flw"):
+                slot = sp_slot(o)
+                if slot is None or (m == "fsw") != (half == "before"):
+                    return None
+                (stored if m == "fsw" else loaded)[slot[0]] = slot[1]
+                continue
+            if half == "before" and fcsr_read(m, ops) is not None and pending is None:
+                pending = fcsr_read(m, ops)
+                continue
+            if half == "before" and m == "sw" and pending is not None and sp_slot(o) \
+                    and sp_slot(o)[0] == pending and saved_fcsr is None:
+                saved_fcsr, pending = sp_slot(o)[1], None
+                continue
+            if half == "after" and m == "lw" and sp_slot(o) and pending is None and restored_fcsr is None:
+                pending = sp_slot(o)
+                continue
+            if half == "after" and isinstance(pending, tuple) and fcsr_write(m, ops) == pending[0]:
+                restored_fcsr, pending = pending[1], None
+                continue
+            return None
+        if pending is not None:
+            return None
+    if set(stored) != CALLER_SAVED_F or set(loaded) != CALLER_SAVED_F:
         return ("bad float", "stores %s and loads %s" % (sorted(stored), sorted(loaded)))
+    if stored != loaded:
+        return ("bad float", "loads an f-register from a slot it was not stored in")
+    if saved_fcsr is None or restored_fcsr is None:
+        return ("bad float", "stores the twenty f-registers but does not save and restore fcsr")
+    if saved_fcsr != restored_fcsr or saved_fcsr in stored.values():
+        return ("bad float", "restores fcsr from a slot that is not its own")
+    if adjust != 0:
+        return ("bad float", "leaves the stack pointer moved by %d" % adjust)
     return ("float", body)
 
 
+def leaf_faults(data, funcs, fn):
+    """([(addr, why, mnemonic, operands)], jump tables read) of the
+    function `fn`: what makes it no leaf - a call, a jump or a branch out
+    of it (a tail call), an indirect transfer that is not a jump table
+    into itself, an f-register or a floating-point CSR touched. The list
+    is empty for a leaf."""
+    _name, end, insns = funcs[fn]
+    out, tables = [], 0
+    for k, (addr, m, o) in enumerate(insns):
+        why = fp_fault(m, o)
+        target = resolved_target(m, o)
+        if why is None and m in ("jal", "call", "jalr") and not (m == "jalr" and target is None):
+            why = "a call"
+        if why is None and target is None:
+            if m == "jr" and jump_table(data, insns, k, fn, end) is not None:
+                tables += 1
+                continue
+            why = "an indirect %s" % ("call" if m == "jalr" else "jump")
+        if why is None and isinstance(target, int) and not fn <= target < end:
+            why = "a jump out of the function (a tail call)"
+        if why is not None:
+            out.append((addr, why, m, o))
+    return out, tables
+
+
+def describe(faults):
+    """The first instruction of each kind of fault, with the count of the
+    others of that kind."""
+    parts, seen = [], {}
+    for f in faults:
+        seen.setdefault(f[1], []).append(f)
+    for why, fs in seen.items():
+        addr, _w, m, o = fs[0]
+        more = " (and %d more such instructions)" % (len(fs) - 1) if len(fs) > 1 else ""
+        parts.append("0x%x - %s: %s %s%s" % (addr, why, m, o, more))
+    return "; ".join(parts)
+
+
+LEAF_MARK = "__brio_leaf_"
+
+
 def guard(elf):
-    """(failures, summary line) for one image."""
+    """(failures, candidates, summary line) for one image."""
     with open(elf, "rb") as f:
         data = f.read()
     name = os.path.splitext(os.path.basename(elf))[0]
     if not single_float(data):
-        return [], "%s: not a single-float image, nothing to guard" % name
+        return [], [], "%s: not a single-float image, nothing to guard" % name
     named, sized = symbols(elf)
     funcs = listing(elf, sized)
     starts = sorted(funcs)
+    marked = {n[len(LEAF_MARK):] for n in named if n.startswith(LEAF_MARK)}
+    default = named.get("default_handler", (None, 0))[0]
 
     def owner(addr):
         i = bisect.bisect_right(starts, addr) - 1
         return starts[i] if i >= 0 and addr < funcs[starts[i]][1] else None
 
-    failures, walked, floats, others, reached, tables = [], 0, 0, 0, set(), 0
+    failures, candidates = [], []
+    walked, floats, leaves, others, reached, tables = 0, 0, 0, 0, set(), 0
     for index, entry in vector_table(elf, data, named):
-        if entry not in funcs:
+        if entry == default:
             others += 1
+            continue
+        if entry not in funcs:
+            failures.append("%s: entry %d is 0x%x, the start of no function" % (name, index, entry))
             continue
         vname, _end, insns = funcs[entry]
         kind = classify(insns)
+        if vname in marked:
+            # Bound LEAF: an attributed handler, which must call nothing,
+            # jump out nowhere and touch no f-register - else gcc has
+            # saved the twenty f-registers the trampoline exists to spare.
+            marked.discard(vname)
+            leaves += 1
+            if kind is not None:
+                failures.append("%s: vector %s (entry %d) is bound leaf and is a trampoline" % (name, vname, index))
+                continue
+            faults, n = leaf_faults(data, funcs, entry)
+            tables += n
+            if faults:
+                failures.append("%s: vector %s (entry %d) is bound leaf and is none: %s"
+                                % (name, vname, index, describe(faults)))
+            continue
         if kind is None:
             if vname + "_body" in named:
                 failures.append("%s: vector %s (entry %d) has a body, %s_body, and is not a trampoline the "
                                 "guard recognizes" % (name, vname, index, vname))
-            others += 1
+            else:
+                # Neither shape, no leaf mark, not the crt's spin: a
+                # handler bound some other way, which nothing checks.
+                failures.append("%s: vector %s (entry %d) is bound by none of the stratum's macros "
+                                "(BRIO_CH32_VECTOR, BRIO_CH32_VECTOR_FLOAT, BRIO_CH32_LEAF_VECTOR)"
+                                % (name, vname, index))
             continue
         if kind[0] == "bad float":
             failures.append("%s: vector %s (entry %d) is a float trampoline that %s" % (name, vname, index, kind[1]))
@@ -326,6 +479,9 @@ def guard(elf):
         if body is None:
             failures.append("%s: vector %s (entry %d) calls 0x%x, inside no function" % (name, vname, index, kind[1]))
             continue
+        if not leaf_faults(data, funcs, body)[0]:
+            candidates.append("%s: vector %s (entry %d): its body, %s, is a leaf - BRIO_CH32_LEAF_VECTOR "
+                              "binds it without the trampoline" % (name, vname, index, funcs[body][0]))
         parent = {body: None}
         todo = [body]
         while todo:
@@ -358,19 +514,22 @@ def guard(elf):
                 while f is not None:
                     chain.append(funcs[f][0])
                     f = parent[f]
-                addr, why, m, o = hits[0]
-                more = " (and %d more such instructions)" % (len(hits) - 1) if len(hits) > 1 else ""
-                failures.append("%s: vector %s (entry %d) reaches %s at 0x%x - %s: %s %s%s\n    via %s"
-                                % (name, vname, index, fname, addr, why, m, o, more, " <- ".join(chain)))
-    summary = ("%s: %d trampolines walked over %d functions (%d jump tables read), %d float trampolines "
-               "left alone, %d entries not trampolines" % (name, walked, len(reached), tables, floats, others))
-    return failures, summary
+                failures.append("%s: vector %s (entry %d) reaches %s at %s\n    via %s"
+                                % (name, vname, index, fname, describe(hits), " <- ".join(chain)))
+    for vname in sorted(marked):
+        failures.append("%s: %s is bound leaf and is no entry of the vector table" % (name, vname))
+    summary = ("%s: %d trampolines walked over %d functions (%d jump tables read), %d leaf vectors checked, "
+               "%d float trampolines checked, %d entries the crt's default handler"
+               % (name, walked, len(reached), tables, leaves, floats, others))
+    return failures, candidates, summary
 
 
 def run(elfs, quiet=False):
-    bad = 0
+    """Every image guarded: a failure printed always, a leaf candidate
+    always (a report, not a failure), an image's summary unless quiet."""
+    bad = ncand = 0
     for elf in elfs:
-        failures, summary = guard(elf)
+        failures, candidates, summary = guard(elf)
         if failures:
             bad += 1
             print("vector guard: FAIL " + summary)
@@ -378,7 +537,10 @@ def run(elfs, quiet=False):
                 print("  " + f)
         elif not quiet:
             print("vector guard: " + summary)
-    print("vector guard: %d images, %d failed" % (len(elfs), bad))
+        for c in candidates:
+            print("vector guard: candidate " + c)
+        ncand += len(candidates)
+    print("vector guard: %d images, %d failed, %d leaf candidates" % (len(elfs), bad, ncand))
     return 1 if bad else 0
 
 

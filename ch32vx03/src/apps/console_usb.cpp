@@ -244,7 +244,7 @@ void Console::cmd_err(const Cmd&, Serial s) {
 }  // namespace
 
 // ---- target glue ------------------------------------------------------------
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
 // WHICH VECTOR IS THE PREPROCESSOR'S QUESTION, the one place this
 // program asks it: a handler is a symbol the image defines or does not,

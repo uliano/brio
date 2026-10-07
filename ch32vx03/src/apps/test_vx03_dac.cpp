@@ -877,15 +877,15 @@ BRIO_CH32_VECTOR(dma2_channel3_handler) {
     }
 }
 
-BRIO_CH32_VECTOR(exti9_5_handler) {
+BRIO_CH32_LEAF_VECTOR(exti9_5_handler) {
     const uint32_t up = brio::Exti::isr(brio::Exti::vector_lines(brio::Irq::exti9_5));
     if (up != 0u) {
         exti_calls = static_cast<uint16_t>(exti_calls + 1u);
     }
 }
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

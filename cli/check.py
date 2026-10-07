@@ -21,7 +21,10 @@ AND ON THE ch32vx03 STRATUM, THE VECTOR GUARD over those images
 (cli/vector_guard.py): on the CH32V303's images a vector is a naked
 trampoline whose body must reach no floating-point instruction, and the
 guard walks every such body's call graph in the linked image and fails
-the check on one."""
+the check on one; a vector bound leaf must be one, a float trampoline
+must save the twenty and fcsr, any other binding but the crt's default
+handler fails, and a trampoline whose body is a leaf is reported as a
+candidate for the leaf form."""
 
 import os
 import subprocess

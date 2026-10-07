@@ -119,19 +119,25 @@ this document keeps in its place.
   ABI asks of a callee and no caller-saved register, and since nothing
   then saves the f-registers of the program it interrupts, the
   stratum's check walks every trampoline's body in every linked image
-  and fails on a floating-point instruction it reaches. Measured on the
-  CH32V303VCT6, a trampoline against the attributed handler in images
-  built from one source: a receive vector that posts, bound as the
-  console binds its own, 65 cycles a byte against 105 (the twenty saves
-  gone, the kernel's `post` reached by a tail jump), about 35 cycles
-  less a transmit interrupt; a handler that calls out 65 cycles of
-  round trip against 100 (letter `l`); a leaf, which saved nothing
-  either way, 8 cycles more for the call and its return (letter `e`);
-  and the I2C suite's refused last byte at 8 MHz and 400 kHz, lost with
-  the saves and kept without them ([i2c.md](i2c.md)). Over the 24
-  images of the part, 68 handlers that saved f-registers in software -
-  66 of them all twenty - became one, the float trampoline of letters
-  `k` and `l`, and the images' flash 4552 bytes less.
+  and fails on a floating-point instruction it reaches. A LEAF - a
+  handler that calls nothing and touches no f-register - saves nothing
+  under the fast attribute, F or not, so it is bound as the attributed
+  handler still (the leaf form), the check holding it to being one.
+  Measured on the CH32V303VCT6, a trampoline against the attributed
+  handler in images built from one source: a receive vector that posts,
+  bound as the console binds its own, 65 cycles a byte against 105 (the
+  twenty saves gone, the kernel's `post` reached by a tail jump), about
+  35 cycles less a transmit interrupt; a handler that calls out 65
+  cycles of round trip against 100 (letter `l`); a leaf 53 to 66 cycles
+  bound leaf against 57 to 70 as a trampoline, the call and its return
+  (letter `e`); and the I2C suite's refused last byte at 8 MHz and 400
+  kHz, lost with the saves and kept without them ([i2c.md](i2c.md)).
+  Over the 24 images of the part, one handler saves f-registers - the
+  float trampoline of letters `k` and `l` - where every vector bound by
+  the attribute would make 68 (66 of them saving all twenty); 89
+  vectors are leaves bound as such, and the images' flash is 4864 bytes
+  less than with every vector attributed (4552 for the trampolines, 312
+  for the leaves bound without one).
 
 ## Types and verbs
 
@@ -178,21 +184,46 @@ plain `interrupt`, whose software prologue saves whatever a call may
 clobber, f-registers included. `BRIO_CH32_VECTOR_FLOAT(name)` is the
 binding of a body that does float work: the same trampoline with the
 twenty caller-saved f-registers stored on the user stack around the
-call - the set gcc saves for a handler that calls out, so fcsr is not
-among them, and a body that changes the rounding mode or raises a flag
-leaves it so for the program it interrupted - and where there is no F
-or no hardware prologue it is the plain binding. THE TRAMPOLINE'S
-PROMISE IS A CHECK: `brio check ch32vx03`, after linking every image,
-runs `cli/vector_guard.py` over the F images - from each vector table
-entry that is a plain trampoline it walks the body's calls, tail jumps
-and branches through the listing and fails on a floating-point
-instruction, an access to fcsr, frm or fflags, an indirect call or jump
-it cannot resolve (a switch's jump table it reads from the image, every
-entry required inside the function) or an undecoded four-byte
-instruction, naming the image, the vector and the chain of functions;
-its fixtures under `test/family_ch32vx03/guard/` are linked and must be
-let through or refused by name, the refusals a float operation reached
-through a call and a call through a pointer.
+call - the set gcc saves for a handler that calls out - and fcsr in a
+word of the same frame (96 bytes, the 16-byte alignment kept), which
+gcc does not save: one `csrrw` reads the interrupted program's fcsr
+into `t0`, a register the hardware has saved, and writes zero, so the
+body starts from fcsr's reset state (round to nearest, no flag) and the
+program finds its rounding mode and its sticky flags as it left them
+after MRET. The reset state rather than the program's own is the
+choice that makes a handler's arithmetic the same whatever it
+interrupts - a program that sets another rounding mode for its own work
+does not change its handlers' results with it, and the flags a body
+finds are the ones it raised - and it costs nothing over inheriting,
+the swap being the instruction that reads fcsr. Where there is no F or
+no hardware prologue it is the plain binding. `BRIO_CH32_LEAF_VECTOR(name) { body }` is the binding of a
+leaf: with F and the hardware prologue it is the attributed handler of
+the fast attribute, which saves nothing for a body that calls nothing
+and touches no f-register, so it needs no trampoline; the image carries
+the absolute symbol `__brio_leaf_<name>` as the binding's mark, which
+costs no byte of it; and wherever else it is `BRIO_CH32_VECTOR`
+exactly. THE PROMISES ARE A CHECK: `brio check ch32vx03`, after linking
+every image, runs `cli/vector_guard.py` over the F images - from each
+vector table entry that is a plain trampoline it walks the body's calls,
+tail jumps and branches through the listing and fails on a
+floating-point instruction, an access to fcsr, frm or fflags, an
+indirect call or jump it cannot resolve (a switch's jump table it reads
+from the image, every entry required inside the function) or an
+undecoded four-byte instruction, naming the image, the vector and the
+chain of functions; a float trampoline must store and load the twenty
+and fcsr, each from its own slot, and its body is left alone; a vector
+bound leaf fails on a call, a jump or a branch out of it, an indirect
+transfer other than a jump table into itself, or a floating-point
+instruction, naming the vector; and a plain trampoline whose body came
+out a leaf is REPORTED as a candidate for the leaf form, a line of the
+output and not a failure; and any other entry of the table but the
+crt's `default_handler` - a handler attributed by hand among them -
+fails, the three macros being the only bindings the check can hold to
+a promise. Its fixtures under `test/family_ch32vx03/guard/` are linked
+and must be let through, reported or refused by name: the refusals a
+float operation reached through a call, a call through a pointer, a
+leaf that calls out, a leaf that does float work, a float trampoline
+that leaves fcsr unsaved and a handler attributed by hand.
 Interrupt nesting is never enabled: the kernel's rule
 ([../design/kernel.md](../design/kernel.md), section 1).
 `stack_untouched()` is the RAM ledger: the crt paints the free RAM
@@ -232,7 +263,7 @@ attribute, and hands BOTH trap entries the fault body:
 ```cpp
 using P = brio::Ch32vx03Platform<>;
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
 BRIO_CH32_VECTOR(breakpoint_handler) { brio::fault_reset<P>(); }
 
@@ -316,16 +347,17 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   last column carries two counter reads.) On the CH32V303VCT6's V4F the
   platform's order and its consume lose nothing either - 2400 tries,
   none lost and none a tick late, the slowest 5 us for one tick and
-  1005 us for two, three runs alike - at 24 cycles from the edge to the
-  handler, 76 to the caller's loop and 29 for an `idle()` the latch
-  returns at once (21 and 75 with the tick bound as an attributed
-  handler, the trampoline's call the difference). The loop and `idle()`
-  are the CH32V203C8's instructions one for one in the two images, and
-  no f-register is touched on the way: neither the sleep path nor the
-  loop uses one, and the tick's body uses none (the stratum's check
-  says so of every image). The one cycle more to the handler and eight
-  more to the loop than the V4B's are the trampoline's call and the
-  core's or the image's layout, the rest not chased. The handler now runs straight out of the sleep, by
+  1005 us for two, three runs alike - at 22 cycles from the edge to the
+  handler, 74 to the caller's loop and 32 for an `idle()` the latch
+  returns at once, the tick bound leaf (22 and 73 against 24 and 76
+  with the tick bound as a trampoline, in two images that differ in
+  that binding alone: its call and return the difference). The loop and
+  `idle()` are the CH32V203C8's instructions one for one in the two
+  images, and no f-register is touched on the way: neither the sleep
+  path nor the loop uses one, and the tick uses none (the stratum's
+  check says so of every image). The one cycle less to the handler and
+  five more to the loop than the V4B's are the core's or the image's
+  layout, not chased. The handler now runs straight out of the sleep, by
   6.2's second WFE item, instead of after an unmask. In the console's
   kernel loop the Sleep path is thirteen instructions executed where it
   was fifteen - one SCTLR load where there were two, the deep path out
@@ -342,7 +374,7 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   finds the core asleep to the caller's loop 68 against 61, an `idle()`
   the latch returns at once 33 against 28, a quiet turn 146 against
   141. The CH32V303VCT6 turns 101 times over the same 100 ticks, a
-  quiet turn 140 cycles.
+  quiet turn 142 cycles.
 - **The STK arithmetic holds.** CMPLR = 143999 as programmed, CMPHR and
   CNTH both zero - the reload puts the low half back at the compare, so
   the high half of this 64-bit counter never moves. Over 200 reloads,
@@ -377,11 +409,13 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   the user stack; and 53 cycles against that family's 83 is what a
   bigger core does with the same measurement. Free in semantics, so it
   is the default. The CH32V303VCT6's V4F, with the hardware prologue
-  and the handler a trampoline: entry 18, body 12, exit 30, a whole
-  trip of 60 to 70 cycles over 64 rounds - against entry 15, exit 25
-  and 52 to 59 for the same handler bound as an attributed leaf, the
-  three cycles of the call on the way in and five of the body's return
-  on the way out being the trampoline's price where nothing is saved.
+  and the handler bound leaf: entry 16, body 12, exit 22, a whole trip
+  of 50 to 59 cycles over 64 rounds (three runs). In two images that
+  differ in that binding alone the leaf took entry 16, exit 25 and 53
+  to 66 against entry 18, exit 27 to 30 and 57 to 70 as a trampoline:
+  two cycles of the call on the way in and two to five of the body's
+  return on the way out are the trampoline's price where nothing is
+  saved, the rest the image's layout.
 - **corecfgr's 0x1F buys nothing measurable here.** Three thousand
   iterations of a loop with a load and a data-dependent branch over a
   pseudo-random byte table took 36811 HCLK cycles with the register as
@@ -437,23 +471,31 @@ and `o`), run on the CH32V203C8T6 before letter `o` joined the second:
   TIM6 at the core's clock interrupting every 400 cycles - the kernel's
   tick going on beside it - and its handler, bound by the float
   trampoline, squaring and summing twenty float locals of its own -
-  20378 interrupts over 56 ms - leave every one of the twenty
+  23262 interrupts over 64 ms - leave every one of the twenty
   accumulators exact to the bit and every handler's own sum right. The
-  float trampoline's twenty stores and loads, with what the body saves
-  of the callee-saved ones, are all there is, and they are enough.
+  float trampoline's twenty stores and loads and fcsr's word, with what
+  the body saves of the callee-saved ones, are all there is, and they
+  are enough.
 - **What an interrupt pays for floating point** (letter `l`): letter
   `e`'s method on three lines raised by hand, best of 32 rounds each - a
-  plain trampoline whose body touches no f-register takes 60 cycles of
-  round trip (entry 16, body 12); the float trampoline with a float
-  multiply and a multiply-add in its body 111 (entry 41, body 26: the
-  twenty stores ahead of the body, the twenty loads after it); and a
-  plain trampoline whose body calls a function the compiler cannot see
-  into 65 (entry 17, body 21), the call costing no f-register. Bound as
-  attributed handlers in the same session the three took 54, 67 (the
-  compiler saving the f-registers the body used) and 100 (all
-  twenty, for the call): the float trampoline's set is the price of a
-  body that does float work, and the plain trampoline makes calling out
-  of a handler cost the call alone.
+  handler bound leaf that touches no f-register takes 50 cycles of
+  round trip (entry 14, body 12); the float trampoline with a float
+  multiply and a multiply-add in its body 126 (entry 47, body 29: the
+  twenty stores and fcsr's swap with zero ahead of the body, fcsr's
+  restore and the twenty loads after it; in two images that differ in
+  fcsr's four instructions alone, 123 and entry 47 against 111 and
+  entry 41, twelve cycles); and a plain trampoline whose body calls a
+  function the compiler cannot see into 65 (entry 17, body 21), the
+  call costing no f-register. Bound as attributed handlers the three
+  take 54, 67 (the compiler saving the f-registers the body used, and
+  fcsr not) and 100 (all twenty, for the call): the float trampoline's
+  set is the price of a body that does float work, and the plain
+  trampoline makes calling out of a handler cost the call alone. Then
+  fcsr across the float trampoline: with the program's fcsr set to
+  0x20 (round toward zero) and to 0x81 (round to nearest, ties to
+  max magnitude, with NX standing), the body finds 0 both times and
+  raises NX in it, and the program finds its 0x20 and its 0x81 after
+  the return.
 - **The bus in sleep** (letter `m`): a memory-to-memory DMA1 block of
   65535 words between two fixed addresses moves 48010 words in 2 ms
   with the core spinning - five cycles a word - on both parts, and

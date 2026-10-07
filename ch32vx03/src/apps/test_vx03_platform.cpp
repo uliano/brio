@@ -68,16 +68,19 @@
 //      every 400 cycles - the kernel's tick going on beside it - with a
 //      handler doing float arithmetic on twenty locals of its own, bound
 //      by the float trampoline (BRIO_CH32_VECTOR_FLOAT, which stores the
-//      twenty caller-saved f-registers around its body); every
+//      twenty caller-saved f-registers and fcsr around its body); every
 //      accumulator is checked bit for bit, and every handler checks its
 //      own result
 //   l  (a part with the FPU) THE ROUND TRIP WITH FLOATING POINT, letter
-//      e's method on three handlers: one that touches no FP register,
-//      one that does float arithmetic (the float trampoline's twenty
-//      stores and loads around its body), and one that CALLS a function
-//      the compiler cannot see into - which under the plain trampoline
-//      saves no f-register at all, the hardware prologue pushing the
-//      integer ones
+//      e's method on three handlers: one that touches no FP register
+//      (bound leaf), one that does float arithmetic (the float
+//      trampoline's twenty stores and loads and fcsr's word around its
+//      body), and one that CALLS a function the compiler cannot see into
+//      - which under the plain trampoline saves no f-register at all, the
+//      hardware prologue pushing the integer ones; then fcsr across the
+//      float trampoline: the program sets a rounding mode (and a flag),
+//      the body must find fcsr's reset state and raises NX in it, and the
+//      program must find its own fcsr after the return
 //   m  THE BUS IN SLEEP: a memory-to-memory DMA1 block of 65535 words
 //      between two fixed addresses, the platform's idle() with the
 //      bus-master count that keeps it awake set aside, the core counter
@@ -817,6 +820,12 @@ Trip trip_call;
 volatile float trip_in[4] = {1.5f, 2.25f, 3.0f, 0.5f};
 volatile float trip_out = 0.0f;
 volatile uint32_t callee_hits = 0;
+/// Letter l's witness of fcsr across the float trampoline: the body
+/// reads fcsr first and raises NX, only on the rounds that ask it to,
+/// so the timed rounds keep their body.
+volatile bool fcsr_probe = false;
+volatile uint32_t fcsr_in_body = 0;
+volatile float fcsr_third = 0.0f;
 
 /// What the calling handler calls: a function the compiler must assume
 /// clobbers every caller-saved register, the twenty f-registers among
@@ -830,6 +839,12 @@ template <bool fpu = device::has_fpu>
         Pfic::clear_pending(Irq::tim6);
         const float a = trip_in[0], b = trip_in[1], c = trip_in[2], d = trip_in[3];
         trip_out = a * b + c * d;
+        if (fcsr_probe) {
+            uint32_t f;
+            __asm__ volatile("frcsr %0" : "=r"(f));
+            fcsr_in_body = f;
+            fcsr_third = 1.0f / c;   // inexact: raises NX in the body's fcsr
+        }
         trip_fp.hits = trip_fp.hits + 1u;
         trip_fp.exit = stk()->CNTL;
     }
@@ -1106,6 +1121,33 @@ void tl_fpu_trip() {
         const TripResult r1 = measure_trip(irq_present<Irq::tim6>(), trip_fp);
         const TripResult r2 = measure_trip(irq_present<Irq::tim7>(), trip_call);
 
+        // fcsr across the float trampoline: the program sets a rounding
+        // mode (and a flag), the body must find the reset state and raise
+        // NX in it, and the program must find its own fcsr after.
+        bool fcsr_kept = true, fcsr_clean = true;
+        uint32_t taken = 0;
+        fcsr_probe = true;
+        Pfic::enable(Irq::tim6);
+        for (const uint32_t set : {0x20u, 0x81u}) {   // RTZ, no flag; RMM with NX standing
+            const uint32_t before = trip_fp.hits;
+            uint32_t after;
+            __asm__ volatile("fscsr %0" ::"r"(set) : "memory");
+            Pfic::set_pending(Irq::tim6);
+            uint32_t spin = 0;
+            while (trip_fp.hits == before && spin < 100'000u) {
+                ++spin;
+            }
+            __asm__ volatile("frcsr %0" : "=r"(after) :: "memory");
+            __asm__ volatile("fscsr zero" ::: "memory");
+            taken += trip_fp.hits - before;
+            print(serial, "  fcsr ", hex(set), " in the program: the body found ", hex(fcsr_in_body),
+                  ", the program after the return ", hex(after), crlf);
+            fcsr_kept = fcsr_kept && after == set;
+            fcsr_clean = fcsr_clean && fcsr_in_body == 0u;
+        }
+        Pfic::disable(Irq::tim6);
+        fcsr_probe = false;
+
         print(serial, "  no FP register    : entry ", r0.best_entry, ", body ", r0.best_body,
               ", round trip ", r0.best_trip, " cycles (", r0.seen, "/32 taken)", crlf);
         print(serial, "  float arithmetic  : entry ", r1.best_entry, ", body ", r1.best_body,
@@ -1122,6 +1164,10 @@ void tl_fpu_trip() {
         bench.verdict("the float handler costs the most (its trampoline's twenty saves), and "
                       "one that calls out no less than one that does neither",
                       r1.best_trip > r2.best_trip && r2.best_trip >= r0.best_trip);
+        bench.verdict("the float body starts from fcsr's reset state (round to nearest, no flag)",
+                      taken == 2u && fcsr_clean);
+        bench.verdict("and the program finds its rounding mode and its flags as it left them, "
+                      "whatever the body raised", taken == 2u && fcsr_kept);
     }
 }
 
@@ -1752,7 +1798,7 @@ void banner() {
 
 // ---- target glue ------------------------------------------------------------
 /// The core counter: the kernel's tick, and letter w's witness.
-BRIO_CH32_VECTOR(systick_handler) {
+BRIO_CH32_LEAF_VECTOR(systick_handler) {
     if (tick_probe) {
         tick_entry = brio::stk()->CNTL;
     }
@@ -1773,17 +1819,17 @@ BRIO_CH32_VECTOR_FLOAT(tim6_handler) {
 /// trampoline, so the call costs no f-register.
 BRIO_CH32_VECTOR(tim7_handler) { trip_call_body(); }
 
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// Letter w's rescue and clock: TIM2's update, counted.
-BRIO_CH32_VECTOR(tim2_handler) {
+BRIO_CH32_LEAF_VECTOR(tim2_handler) {
     Rescue::clear_flags(Rescue::update_flag);
     rescue_periods = rescue_periods + 1u;
 }
 
 /// The software interrupt: the first thing it does is read the cycle
 /// counter, which is letter e's whole measurement.
-BRIO_CH32_VECTOR(software_handler) {
+BRIO_CH32_LEAF_VECTOR(software_handler) {
     sw_entry_cycles = brio::stk()->CNTL;
     brio::Pfic::clear_pending(brio::Irq::software);
     sw_hits = sw_hits + 1u;
@@ -1798,7 +1844,7 @@ BRIO_CH32_VECTOR(software_handler) {
 /// Letter n's line: where the trap came from (mepc) and what mstatus
 /// said about it, then the pending bit withdrawn - a leaf, so the
 /// prologue is the same one on every device class.
-BRIO_CH32_VECTOR(exti2_handler) {
+BRIO_CH32_LEAF_VECTOR(exti2_handler) {
     uint32_t pc;
     uint32_t st;
     __asm__ volatile("csrr %0, mepc" : "=r"(pc));

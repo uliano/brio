@@ -1591,9 +1591,9 @@ void banner() {
 
 }  // namespace
 
-BRIO_CH32_VECTOR(systick_handler) { brio::Ticker::tick(); }
+BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 
-BRIO_CH32_VECTOR(usart1_handler) { (void)Serial::isr(); }
+BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 
 /// Both entries a trap can arrive on - the exception vector and the
 /// breakpoint one - record the cause and reset (letter s stages what
@@ -1603,7 +1603,7 @@ BRIO_CH32_VECTOR(fault_handler) { brio::fault_reset<P>(); }
 BRIO_CH32_VECTOR(breakpoint_handler) { brio::fault_reset<P>(); }
 
 /// The flash engine's own vector: the flags that stood, cleared.
-BRIO_CH32_VECTOR(flash_handler) {
+BRIO_CH32_LEAF_VECTOR(flash_handler) {
     flash_irq_flags = brio::Flash::isr();
     flash_irqs = flash_irqs + 1u;
 }
