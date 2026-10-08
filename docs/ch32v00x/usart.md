@@ -204,7 +204,9 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   with the clock standing still, the ring drained first, false and
   nothing written when unreachable), `can_baud(pclk, baud)`,
   `min_hz_for(baud)`, `release()` (the vector off, the channels stopped,
-  every enable cleared, the gate closed, the pads released), the engine
+  CTLR1 cleared, the block's reset pulsed - the vendor's DeInit, the one
+  act that withdraws a DMA request the block holds on the CH32V203
+  ([dma.md](dma.md)) - the gate closed, the pads released), the engine
   verbs `dma_isr()` (the ISR body of both channels, the controller's one
   flag register read once; its true is the receive edge, as `isr()`'s),
   `harvest()` (the same edge asked from the consumer's side, and a
@@ -220,7 +222,14 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   the edge reported; then WAITING FOR A FRAME (RXNEIE alone), whose
   entry reads NO STATR (it would arm the clear the next frame's own read
   performs) but CNTR: a moved count turns the vector back and reports
-  the edge again - the only edge a burst of one frame gets. The
+  the edge again - the only edge a burst of one frame gets. A frame the
+  channel NEVER takes (a channel a transfer error stopped, or one a held
+  request froze) would leave RXNE re-entering the vector for ever: the
+  entries that find the count unmoved - with no transmit engine, those
+  with TXEIE down - are counted, and the 255th gives the channel up
+  (`dma_faults()` counted, RXNEIE down, the edge reported) for the
+  consumer's next look to stop and bind again from the storage's first
+  element, as after a transfer error. The
   channel's half and full marks report it from `dma_isr()`. Two
   interrupts a burst, none a byte. WHAT THE CHANNEL'S READ BOUNDS is the
   counts, never the bytes: the frame after one whose error was counted
@@ -376,6 +385,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- `release()`'s reset pulse and the receive ring's stall bound: written
+  from the CH32V203's measurement and staged on no board of this family;
+  the no-wire image of [dma.md](dma.md)'s first item - USART2 released
+  without the pulse, then a TIM1-paced block on channel 6 - would
+  measure the first; TIM2 gated by hand with its channel 2 request
+  standing, then USART2's receive ring on channel 7 fed a frame through
+  its pad's pull, would stage the dead channel the second answers.
 - The engines on the CH32V003 (its USART1, the console): compiled for
   the part; `test_ch32_dma` on the CH32V003F4P6 would run them.
 - The run verbs, `write_bulk()` and `read_span()`/`consume()`, on the

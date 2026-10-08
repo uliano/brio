@@ -82,8 +82,48 @@ drives any transfer loaded on its channel. Measured on the CH32V303VCT6:
 a UART4 receiver left running with DMAR set held its request standing on
 DMA2's channel 3, and a transfer programmed there for TIM6's update moved
 all sixteen of its items in a few microseconds instead of one a period.
-Stopping a channel does not withdraw a request; turning the peripheral
-off does, which is what a transport's `release()` is for.
+Stopping a channel does not withdraw a request, and neither does turning
+the peripheral off.
+
+A RELEASED REQUESTER KEEPS THE REQUEST IT RAISED. A peripheral's DMA
+request, once raised, is held until the controller acknowledges it or the
+peripheral's reset line is pulsed: clearing its DMA enable (DMAT, DMAR,
+DMAEN, UDE), its UE or PE, or its counter's CEN leaves it standing, and
+gating its clock freezes it on the channel's OR. 11.2.3 says only that a
+channel's requests are switched on and off by each peripheral's own DMA
+bit, and RM0008 13.3.1 - the STM32F1's controller, this one's lineage -
+that a peripheral releases its request on the acknowledge; "switched off"
+measures as NO NEW request. The next owner's first enable then moves ONE
+item on the held request - from or to whatever PADDR now names - and the
+channel waits for the request to fall: a requester still clocked drops it
+(one stray item, then the new owner's stream), a gated one never does
+(the channel stalls after that item), and a level that stays up raises it
+again at once (the block runs to its end on the stray). Measured on the
+CH32V303VCT6 and the CH32V203C8T6 with USART2, I2C1 and TIM4 on DMA1's
+channels 6 and 7: a USART2 merely initialized with DMAT and released
+stalls the next I2C1 read on channel 7 after one item - the I2C's own
+address byte, read out of its data register before any data had come -
+and so does one whose DMAT and DMAR were cleared before the gate, or
+cleared after it with the clock opened again; one released with its
+reset pulsed, before the gate or after it, hands over clean, and a reset
+pulsed during the stall releases it at once; an I2C1 tenure abandoned
+with RxNE standing under DMAEN stalls the next USART2 transmit on the
+same channel after one byte unless the I2C's reset or its SWRST is
+pulsed; and a TIM4 stopped with UDE cleared but kept clocked hands the
+next owner one stray item. The channel itself is neither wedged nor
+marked: a memory-to-memory block on it runs whole through a frozen
+request, and a USART2 whose channel was never enabled holds one as well.
+SPI1's request does not outlive its release - an engined write abandoned
+with TXE standing under TXDMAEN, SPE then cleared and the gate closed,
+left nothing for a timer-paced block on channels 2 and 3. So a transport's
+`release()` pulses its block's reset before the gate where its block
+holds a request - the USART's and the I2C host's; the timers', the ADC's
+and the DAC's reset their blocks there already, and the SPI's, on SPI1's
+measurement, does not need to -
+and the incoming side needs nothing beyond its engine's `arm()`: the
+outgoing owner's release is the whole of the hand-over, because the
+incoming one cannot tell which requester holds the line and its own
+enable is what consumes the held request.
 
 ### A channel
 
@@ -555,7 +595,8 @@ The CH32V303's UART4 is the same spelling, and the table puts both of
 its engines on DMA2 - the handlers are then `dma2_channel5_handler` and
 `dma2_channel3_handler`. With an engine on each side the port arms no
 interrupt of its own, and `release()` is what takes its requests away
-from the two channels when the port is done with them.
+from the two channels when the port is done with them - through the
+block's reset line, the one act that withdraws a request already raised.
 
 ## Bench findings
 
@@ -707,6 +748,28 @@ is given below it is both parts'; where they differ each is named.
   the same DMA2 channel move all sixteen items at once (the section
   above); with the port released at the end of the letter, the staircase
   ran at the timer's pace again.
+- **A released requester hands over clean, and a held request is
+  answered** (`test_vx03_i2c` letters p and q, `test_vx03_dma` letter p,
+  on the CH32V303VCT6 and the CH32V203C8T6 alike): USART2's transmit
+  engine run and released, then I2C1's DMA read of sixteen on channel 7,
+  byte-exact with the channel's count at zero; I2C1's read stopped with
+  RxNE and BTF standing under DMAEN (STAR1 0x44, CTLR2 0x1930) and the
+  host released, then USART2's run of 51 bytes out on channel 7 in its
+  4 ms of wire. Built over releases that clear DMAT, DMAR, UE or PE and
+  close the gate with no reset, and over an I2C host and a USART receive
+  engine that end a write on any BTF, keep the event vector up through a
+  read block and leave a stalled ring's wait armed, the same images fail
+  on the CH32V303VCT6: the I2C read
+  takes its one stray item and stalls (count 15 of 16), the USART2 run
+  stalls after one byte (count 50 of 51), the write over the dead channel
+  6 reports `i2c_ok` with one byte of 32 at the target, and the read and
+  the receive ring over a dead channel storm their vectors (60001 and
+  100001 entries before the suites' guards silence them).
+  A TIMER'S COMPARE REQUEST IS HELD THE SAME WAY: TIM3's channel 1 compare
+  with CC1DE, matched once and its gate closed without a reset, moved one
+  item of an I2C1 write on channel 6 and stalled it (count 31 of 32, the
+  target holding one byte); TIM3's reset line, pulsed with the gate
+  closed, let it go and the same write landed whole.
 
 ### The engines' costs
 
@@ -797,6 +860,14 @@ Implemented but not bench-verified, each with what would measure it:
 - **A ring restarted after a real transfer error**: the consumer's next
   look starts a ring whose channel stopped again, measured with `abandon()` standing
   for the error, which no address the bench can name provokes (above).
+- **The held request on the other requesters.** The rule is measured
+  with USART2, I2C1, TIM4 and SPI1 on DMA1's channels 2, 3, 6 and 7; the
+  release's reset is every USART's and both I2C hosts', and the timers',
+  the ADC's and the DAC's reset theirs already. A hand-over on DMA2 -
+  UART4's receive channel 3 with TIM6's update request on the
+  CH32V303 - or SPI2's channels 4 and 5 shared with USART1's and I2C2's,
+  each owner released with and without its reset, is what would measure
+  it there, and say whether an SPI block other than SPI1 holds one.
 - **The CH32V203's serial round trip on one pair of pads.** The engines
   themselves carry a wire's data in the two bus chapters - sixteen bytes
   each way through SPI2's pair and a tenure's shapes through I2C1's,

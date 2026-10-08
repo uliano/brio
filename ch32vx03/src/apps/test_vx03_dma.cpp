@@ -33,8 +33,8 @@
 // finds no strap there and says so, and letter n takes those two wires,
 // each one looked for the same way before it is used.
 //
-// THE PADS. PA2 and PA3 in letter g (PA3 the banged line when the strap is
-// absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n. NEVER
+// THE PADS. PA2 and PA3 in letters g and p (PA3 the banged line when the
+// strap is absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n. NEVER
 // TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port), PA11/PA12
 // (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the CH32V203
 // board's KEY) - and PB2, the CH32V203 board's LED, left undriven, as in
@@ -87,6 +87,13 @@
 //      laps counted checked against the pace, the wrap seen from the core,
 //      a consumer stalling a lap and a half now and then, and a run held
 //      while the producer laps it
+//   p  THE RECEIVE RING OVER A CHANNEL THAT NEVER TAKES THE FRAME: TIM3's
+//      channel 1 request held on channel 6 by a gate closed without its
+//      reset, USART2's ring armed over it, frames into the receiver (banged,
+//      or round the jumper): the vector's wait for a frame giving the
+//      channel up within its bound - one DMA fault, no storm, the thread
+//      running - and, the request let go by TIM3's reset line, the ring
+//      started again by the consumer's next look and the next burst whole
 // and on the CH32V303 alone, the second controller:
 //   i  MEMORY TO MEMORY ON DMA2: its gate, a kilobyte copied on each of
 //      the eleven channels and verified, and every completion flag found
@@ -112,7 +119,7 @@
 //      its channel
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcdef,gho
+// build: groups = abcdef,ghop
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -1156,6 +1163,118 @@ void tg_engines() {
     bench.verdict("a run poured out by the transmit engine comes back through the receive "
                   "ring one byte for byte",
                   same && Loop::dma_faults() == 0u);
+
+    Loop::release();
+    uart_mode = false;
+    all_off();
+}
+
+// ===========================================================================
+// p - the receive ring over a channel that never takes the frame
+// ===========================================================================
+
+/// USART2's vector counted while letter p watches it, and silenced past a
+/// budget: a vector that storms reports the fact instead of starving the
+/// suite.
+volatile bool ring_watch = false;
+volatile uint32_t ring_entries = 0;
+volatile bool ring_stormed = false;
+constexpr uint32_t ring_entry_budget = 100'000;
+
+/// A REQUEST HELD ON CHANNEL 6 BY A PERIPHERAL WHOSE CLOCK IS GATED - the
+/// state a release that does not pulse its block's reset leaves
+/// (docs/ch32vx03/dma.md, "A released requester") - made at the register
+/// level, on purpose: TIM3's channel 1 compare with CC1DE (table 11-5's
+/// TIM3_CH1 row, USART2's receive channel), one match, the counter
+/// stopped and the gate closed. No pad. all_off()'s release of the timer
+/// - its reset line - lets it go.
+void hold_channel6() {
+    static_assert(DmaRequestOf<DmaRequest::tim3_ch1>::channel ==
+                      DmaRequestOf<DmaRequest::usart2_rx>::channel,
+                  "table 11-5: TIM3's channel 1 request and USART2's receive request share a "
+                  "channel");
+    Ruler::init();
+    (void)Ruler::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
+    (void)Ruler::set_compare(0, 16);
+    Ruler::interrupts(Ruler::compare_dma(0), true);
+    Ruler::enable(true);
+    wait_us(20);
+    Ruler::enable(false);
+    Ruler::bus_clock(false);
+}
+
+void tp_dead_ring() {
+    all_off();
+    need_jumper();
+    print(serial, "  the jumper PA2-PA3 is ", jumper ? "in place" : "ABSENT", crlf);
+
+    // The receive ring's channel enabled over the held request: it moves
+    // ONE item on the enable - USART2's empty data register - and waits
+    // for that request to fall, which a gated timer never does.
+    hold_channel6();
+    uart_mode = true;
+    const bool opened = Loop::init(clock, 115200);
+    RxPad::input(PinPull::up);
+    LoopRx::clear_faults();
+    const uint16_t armed_count = LoopRxChannel::remaining();
+
+    // Frames into the receiver: the first stands in the data register
+    // with nothing to take it, the next overrun it; the error and the line
+    // gone idle turn the vector to its wait for a frame, RXNE standing
+    // under RXNEIE.
+    const uint8_t* src = source_first_bytes();
+    ring_entries = 0;
+    ring_stormed = false;
+    ring_watch = true;
+    if (jumper) {
+        (void)Loop::write_bulk(std::span<const uint8_t>(src, 4));
+        Stopwatch w;
+        while (!Loop::tx_idle() && w.us() < 5'000UL) {
+        }
+    } else {
+        bang(src, 4);
+    }
+    wait_us(2'000);
+    ring_watch = false;
+    const uint32_t entries = ring_entries;
+    const bool stormed = ring_stormed;
+    const uint16_t faults = Loop::dma_faults();
+    const bool given_up = (Loop::Resource::regs().CTLR1 & usart_rxneie) == 0u;
+    print(serial, "  the ring armed over channel 6 held by TIM3 (count ", armed_count,
+          " of 128 after the enable), four frames sent: USART2's vector ", entries, " entries",
+          stormed ? " - STORMED, silenced by the suite" : "", ", dma_faults ", faults,
+          ", the wait for a frame ", given_up ? "given up (RXNEIE down)" : "STILL ARMED", crlf);
+    bench.verdict("A RECEIVE CHANNEL THAT NEVER TAKES THE FRAME leaves the thread running: the "
+                  "vector's wait for a frame gives the channel up within its bound of 255 "
+                  "entries - RXNEIE down, one DMA fault counted - and no storm",
+                  opened && !stormed && entries <= 300u && faults == 1u && given_up);
+
+    // The held request let go by TIM3's reset line; the consumer's next
+    // look starts the ring again and arms the wait for the end, and the
+    // next burst arrives whole.
+    Ruler::reset();
+    bool junk_in_order = true;
+    (void)read_all(src, 0, junk_in_order);   // the look that restarts it, and what stood
+    const uint16_t ctlr1 = Loop::Resource::regs().CTLR1;
+    const bool restarted = !LoopRx::idle() && (ctlr1 & usart_idleie) != 0u &&
+                           (ctlr1 & usart_rxneie) == 0u;
+    (void)read_all(src, 0, junk_in_order);
+    if (jumper) {
+        (void)Loop::write_bulk(std::span<const uint8_t>(src + 8, 10));
+        Stopwatch w;
+        while (!Loop::tx_idle() && w.us() < 5'000UL) {
+        }
+        wait_us(500);
+    } else {
+        bang(src + 8, 10);
+    }
+    bool in_order = false;
+    const uint16_t got = read_all(src + 8, 10, in_order);
+    print(serial, "  the request let go: the ring ", restarted ? "running again, the wait for the end armed" : "NOT RESTARTED",
+          ", ten frames after it: ", got, in_order ? " in order" : " NOT in order", crlf);
+    bench.verdict("... and with the held request let go by TIM3's reset line, the consumer's "
+                  "next look starts the ring again and the next burst arrives whole",
+                  restarted && got == 10u && in_order);
 
     Loop::release();
     uart_mode = false;
@@ -2313,6 +2432,14 @@ BRIO_CH32_VECTOR(dma2_channel11_handler) { dma2_vector<11>(); }
 BRIO_CH32_LEAF_VECTOR(systick_handler) { brio::Ticker::tick(); }
 BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 BRIO_CH32_LEAF_VECTOR(usart2_handler) {
+    if (ring_watch) {
+        ring_entries = ring_entries + 1u;
+        if (ring_entries > ring_entry_budget) {
+            ring_stormed = true;
+            brio::Usart<2>::rxne_interrupt(false);
+            return;
+        }
+    }
     if (Loop::isr()) {
         loop_edges = loop_edges + 1u;
     }
@@ -2337,6 +2464,7 @@ int main() {
     bench.letter('h', "the vectors: one line per channel", th_vectors);
     register_dma2_letters();
     bench.letter('o', "the receive ring at speed: a timer's staircase, lap after lap", to_ring);
+    bench.letter('p', "the receive ring over a channel that never takes the frame", tp_dead_ring);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

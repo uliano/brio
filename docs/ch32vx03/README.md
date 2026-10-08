@@ -374,7 +374,14 @@ counter in `default_handler` and the interrupt number in mcause.
   are an OR of the peripherals' requests, switched by each peripheral's
   DMA bit: a UART4 receiver left enabled made a timer's transfer on
   DMA2's channel 3 move all sixteen items at once. Stopping the channel
-  withdraws nothing; turning the peripheral off does ([dma.md](dma.md)).
+  withdraws nothing, and NEITHER DOES TURNING THE PERIPHERAL OFF: a
+  request once raised is held until the channel acknowledges it or the
+  peripheral's reset line is pulsed - DMA bits, UE, PE and CEN cleared
+  leave it standing, a gated clock freezes it on the OR, and the next
+  owner's first enable moves one stray item and then stalls behind it
+  (measured on both series with USART2, I2C1 and TIM4 on channels 6 and
+  7). So the transports' `release()` pulses the block's reset before the
+  gate ([dma.md](dma.md)).
 - **A conversion takes 12.5 cycles beyond its sampling time, not the
   manual's 11** - both datasheets, and the CH32V303VCT6 at all four long
   sampling codes ([adc.md](adc.md)).

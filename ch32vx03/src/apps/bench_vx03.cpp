@@ -797,10 +797,13 @@ void pacer_start() {
     Pacer::interrupts(tim_ude, true);
     Pacer::enable(true);
 }
-void pacer_stop() {
-    Pacer::enable(false);
-    Pacer::interrupts(tim_ude, false);
-}
+/// The pacer RELEASED, not only stopped: an update request it raised is
+/// held through CEN and UDE cleared until the channel acknowledges it or
+/// the timer is reset (docs/ch32vx03/dma.md, "A released requester"), and
+/// channel 7 is I2C1's receive channel and USART2's transmit one too.
+/// Tim::release() pulses the reset before the gate; pacer_start()'s init()
+/// opens it again.
+void pacer_stop() { Pacer::release(); }
 
 void paced_report() {
     for (uint16_t i = 0; i < paced_items; ++i) {

@@ -43,9 +43,11 @@
  * itself is on from start() to the completion and off between tenures:
  * the BTF a write's STOP is requested on stands until that STOP is on
  * the wire, and a vector left on re-enters for all that time (isr()
- * says what was measured). The entry that clears ADDR loads the first
- * TWO bytes itself (the data register and the shifter), so a write of
- * one or two bytes and a register index take no per-byte interrupt;
+ * says what was measured). A DMA read phase takes it down as well: the
+ * channel's completion ends that phase, and the event vector has nothing
+ * to serve in it (begin_receive()). The entry that clears ADDR loads the
+ * first TWO bytes itself (the data register and the shifter), so a write
+ * of one or two bytes and a register index take no per-byte interrupt;
  * CTLR2's enables move in one store each time (control2()).
  *
  * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED WHILE THE LAST
@@ -1000,7 +1002,7 @@ public:
      * 250 cycles at 120 MHz until the client saw the STOP), the thread
      * starved for that bit period. finish() takes ITEVTEN down with the
      * buffer vector and the DMA requests in one CTLR2 store, and start()
-     * raises it.
+     * raises it; a DMA read phase runs with it down (begin_receive()).
      */
     [[gnu::always_inline]] static bool isr() {
         const uint16_t s1 = S::status1();
@@ -1265,6 +1267,13 @@ public:
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::disable();
+        // THE RESET LINE BEFORE THE GATE, as recover()'s SWRST: a request
+        // DMAEN raised is held through DMAEN and PE cleared - a tenure
+        // abandoned mid-block leaves one - and a gated clock freezes it on
+        // the channel's OR, where it stalls the next owner of channel 6 or
+        // 7 after one item (measured on both series, docs/ch32vx03/dma.md,
+        // "A released requester").
+        S::reset();
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();
@@ -1422,16 +1431,32 @@ private:
         return false;
     }
 
-    /// The engine's write phase on the event vector: BTF, which proves the
-    /// block's end as well as the last byte's, or - a read half to follow,
-    /// the buffer vector armed by the block's completion - the TxE of the
-    /// last byte in the shifter.
+    /// The engine's write phase on the event vector: BTF, the last byte's
+    /// end, or - a read half to follow, the buffer vector armed by the
+    /// block's completion - the TxE of the last byte in the shifter.
+    ///
+    /// BTF PROVES THE BLOCK'S END ONLY WITH THE CHANNEL'S COUNT AT ZERO.
+    /// BTF is the data register empty at a byte's end: under a live channel
+    /// that is the block's last byte, the count long at zero - the channel
+    /// refills the register within a few bus cycles of each TxE, a byte
+    /// time ahead of BTF. A count still standing is a channel that stopped
+    /// serving - a request another peripheral left held on its OR froze
+    /// its handshake (docs/ch32vx03/dma.md) - and the bytes are not on the
+    /// wire: measured, such a channel moves ONE byte of the block and BTF
+    /// follows it with the rest of the count standing. That tenure ends
+    /// i2c_dma_fault, its STOP requested; one CNTR load on the one BTF
+    /// entry of a write.
     [[gnu::always_inline]] static bool transmit_dma_step(uint16_t s1) {
         if constexpr (has_engines) {
             if ((s1 & i2c_txe) == 0u) {
                 return false;
             }
             const bool finished = (s1 & i2c_btf) != 0u;
+            if (finished && TxEngine::progress().remaining != 0u) {
+                put_engines_away();
+                S::stop();
+                return finish(i2c_dma_fault);
+            }
             if (!finished && TxEngine::busy()) {
                 return false;
             }
@@ -1467,8 +1492,14 @@ private:
     [[gnu::always_inline]] static bool begin_receive() {
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
-                // LAST: the block's last byte is NACKed.
-                S::control2(t_.freq, idle_enables | i2c_itevten | i2c_dmaen | i2c_last);
+                // LAST: the block's last byte is NACKed. THE EVENT VECTOR
+                // GOES DOWN for the block: dma_isr() ends the phase and the
+                // event vector has nothing to serve in it - and over a
+                // channel that does not serve its request RxNE and BTF stand
+                // and would re-enter it for ever, the thread and the bus's
+                // timeout starved (measured: a request held on channel 7 by
+                // a released USART2). The error vector stays.
+                S::control2(t_.freq, idle_enables | i2c_dmaen | i2c_last);
                 (void)RxEngine::start(t_.rx, t_.rx_len);
                 (void)S::status2();
                 t_.phase = Phase::rx_dma;

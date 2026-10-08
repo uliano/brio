@@ -109,7 +109,15 @@
  * report it from dma_isr(), so a stream with no silence is told twice a
  * lap. Two interrupts a burst, none a byte; the edge gated once per
  * idle-to-busy transition of the consumer, re-opened when its look finds
- * the ring empty.
+ * the ring empty. A CHANNEL THAT NEVER TAKES THE FRAME - stopped by a
+ * transfer error, or frozen by a request another peripheral left on its
+ * OR (the CH32V203's measured rule, docs/ch32vx03/dma.md) - leaves RXNE
+ * standing under RXNEIE, and the wait would re-enter for ever: its
+ * entries that find the count unmoved are counted, and the 255th gives
+ * the channel up - a DMA fault counted, RXNEIE down, the edge reported,
+ * nothing else touched in the vector - and the consumer's next look
+ * restarts the ring from its first element and arms the wait for the
+ * end, as after a transfer error.
  *
  * WHAT THE CHANNEL'S READ BOUNDS - the counts, never the bytes. The frame
  * after one whose error was counted loses its own (a run of errored
@@ -901,7 +909,8 @@ struct Uart {
     }
 
     /// Transfer errors the engines reported (a fault is a block thrown
-    /// away). Always 0, and free, without an engine.
+    /// away), and receive channels given up on a frame they never took.
+    /// Always 0, and free, without an engine.
     static uint16_t dma_faults() { return m_dma_faults; }
 
     /// The divisor this clock and baud ask for (usart_divisor()).
@@ -1209,7 +1218,21 @@ struct Uart {
     static constexpr uint32_t min_hz_for(uint32_t baud) { return baud * 16u; }
 
     /// Stop the port and park its pads: the vector off, the engines'
-    /// channels stopped, UE clear, the gate closed, the pads released.
+    /// channels stopped, UE clear, the block's reset pulsed, the gate
+    /// closed, the pads released.
+    ///
+    /// THE RESET LINE BEFORE THE GATE. A channel of this controller is an
+    /// OR of the requests wired to it (RM table 8-2: USART2 shares 6 and 7
+    /// with I2C1, USART1's receive shares 5 with TIM1's update), and on the
+    /// CH32V203 and the CH32V303 - the same controller's lineage - a
+    /// request once raised is HELD until the channel acknowledges it or the
+    /// block is reset: clearing DMAT, DMAR and UE does not withdraw it, and
+    /// a gated clock freezes it on the OR, where the next owner's first
+    /// enable moves one item and the channel stalls
+    /// (docs/ch32vx03/dma.md). Whether this die holds one is not measured
+    /// (docs/ch32v00x/usart.md); the pulse - the vendor's own USART_DeInit,
+    /// two read-modify-writes of the bus's reset register - leaves none
+    /// either way, and takes CTLR3 with it.
     static void release() {
         Pfic::disable(usart_irq_for(instance));
         if constexpr (has_tx_engine) {
@@ -1219,7 +1242,7 @@ struct Uart {
             RxEngine::stop();
         }
         regs().CTLR1 = 0;
-        regs().CTLR3 = 0;
+        Resource::reset();
         Resource::bus_clock(false);
         Tx::release();
         if constexpr (!opts.half_duplex) {
@@ -1312,12 +1335,29 @@ private:
     /// A ring never stops on its own: a channel that is not running was
     /// stopped by a transfer error, and is bound again from the storage's
     /// first element with the view - the consumer's context.
+    ///
+    /// A ring the vector GAVE UP on (rx_stalled()) is bound again the
+    /// same way: its channel still enabled over a frozen handshake, the
+    /// binding's first store takes EN down.
+    ///
+    /// A RESTARTED RING WAITS FOR THE END: the vector's state is put back
+    /// with the channel - the wait for a frame it was in counted the old
+    /// lap's position, and a channel the vector gave up on left every
+    /// receive enable down. One read-modify-write of each control register
+    /// under the guard, the transmitter's TXEIE sharing CTLR1 with them;
+    /// the rare path only.
     static void restart_if_stopped() {
         if constexpr (has_rx_engine) {
-            if (RxEngine::idle()) {
+            if (RxEngine::idle() || m_rx_given_up) {
+                m_rx_given_up = false;
                 (void)RxEngine::arm_ring(&regs().DATAR, RxRing::storage, true);
                 m_rx.clear();
                 m_rx_lost = m_rx_lost + 1u;   // the unread bytes went with the stopped lap
+                typename P::CriticalSection cs;
+                m_rx_waiting = false;
+                regs().CTLR1 = static_cast<uint16_t>((regs().CTLR1 & ~usart_rxneie) |
+                                                     usart_idleie | usart_peie);
+                regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 | usart_eie);
             }
         }
     }
@@ -1358,6 +1398,7 @@ private:
         m_rx_waiting = true;
         const uint16_t at = static_cast<uint16_t>(RxEngine::remaining());
         m_rx_at = at;
+        m_rx_unmoved = 0;
         regs().CTLR1 = static_cast<uint16_t>((regs().CTLR1 & ~(usart_idleie | usart_peie)) | usart_rxneie);
         regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 & ~usart_eie);
         const bool edge = told();
@@ -1372,14 +1413,65 @@ private:
     /// its read finished the clear - back to waiting for the end, and the
     /// edge, which is the only one a burst of one frame gets. NO STATR
     /// READ: it would arm the clear the next frame's read performs.
+    ///
+    /// An entry with the count unmoved is the transmitter's, or a frame
+    /// the channel has not taken yet - or one it NEVER takes: RXNE is a
+    /// level, and over a channel that does not serve its request (a
+    /// transfer error stopped it, or another peripheral's held request
+    /// froze its handshake) this vector would be re-entered for ever, the
+    /// thread starved. So the entries that find the count unmoved with
+    /// nothing else armed to explain them are COUNTED, and the
+    /// rx_stall_entries-th gives the channel up (rx_stalled()); the count
+    /// then stays there, the state parked until the consumer's look
+    /// restarts the ring. Two compares and an add an entry, on this path
+    /// alone.
     [[gnu::always_inline]] static bool rx_frame_entry() {
         if (static_cast<uint16_t>(RxEngine::remaining()) == m_rx_at) {
-            return false;   // the transmitter's entry, or the frame not yet taken
+            if constexpr (!has_tx_engine) {
+                if ((regs().CTLR1 & usart_txeie) != 0u) {
+                    return false;   // the transmitter's entry, perhaps
+                }
+            }
+            if (m_rx_unmoved == rx_stall_entries) {
+                return false;   // given up already: the consumer's look restarts it
+            }
+            m_rx_unmoved = static_cast<uint8_t>(m_rx_unmoved + 1u);
+            if (m_rx_unmoved != rx_stall_entries) {
+                return false;   // the frame not yet taken
+            }
+            return rx_stalled();
         }
         m_rx_waiting = false;
         regs().CTLR1 = static_cast<uint16_t>((regs().CTLR1 & ~usart_rxneie) | usart_idleie | usart_peie);
         regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 | usart_eie);
         return told();
+    }
+
+    /// How many entries of the wait for a frame may find the channel's
+    /// count unmoved before the channel is given up. A live channel takes
+    /// RXNE's byte within its arbitration - a few bus cycles behind any
+    /// other channel's item - where one entry of this vector is tens of
+    /// cycles, so a frame not yet taken is one or two entries; 255 is
+    /// thousands of cycles of a channel that moved nothing. A channel a
+    /// higher-priority memory-to-memory block starves for that long is
+    /// given up too, and restarted by the consumer's next look.
+    static constexpr uint8_t rx_stall_entries = 255;
+
+    /// THE CHANNEL GIVEN UP: the fault counted, the ring marked for the
+    /// consumer's look to bind again (restart_if_stopped(), which stops
+    /// the channel and starts it from the storage's first element, as
+    /// after a transfer error) and the edge reported so the consumer comes.
+    /// RXNEIE goes down, the one enable of this state (IDLEIE, PEIE and EIE
+    /// are already down), so the standing RXNE re-enters nothing in
+    /// between; the state stays the wait for a frame with its count at the
+    /// bound, parked. The channel itself is left to the thread, so the
+    /// vector stays the few stores it is.
+    [[gnu::always_inline]] static bool rx_stalled() {
+        bump(m_dma_faults);
+        regs().CTLR1 = static_cast<uint16_t>(regs().CTLR1 & ~usart_rxneie);
+        m_rx_given_up = true;
+        m_rx_drained = false;
+        return true;
     }
 
     /// Saturating: a counter that wrapped would understate the damage.
@@ -1401,6 +1493,12 @@ private:
     /// when that wait began.
     static inline volatile bool m_rx_waiting = false;
     static inline volatile uint16_t m_rx_at = 0;
+    /// The entries of that wait that found the count unmoved
+    /// (rx_frame_entry()); the vector's alone.
+    static inline uint8_t m_rx_unmoved = 0;
+    /// The vector gave the channel up: set there, cleared by the
+    /// consumer's restart.
+    static inline volatile bool m_rx_given_up = false;
     static inline uint32_t m_baud = 0;
 
     static inline uint16_t m_rx_overruns = 0;

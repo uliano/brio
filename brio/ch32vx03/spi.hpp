@@ -1622,6 +1622,11 @@ public:
         return ok && cfg;
     }
 
+    /// SPE cleared and the gate closed, with NO reset pulse - unlike the
+    /// USART's and the I2C host's release(): a request this block raised
+    /// does not outlive SPE (measured on SPI1: a write abandoned with TXE
+    /// standing under TXDMAEN, released so, left nothing on channel 3 for
+    /// the next owner - docs/ch32vx03/dma.md, "A released requester").
     static void release() {
         if constexpr (has_engines) {
             TxEngine::stop();

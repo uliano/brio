@@ -105,7 +105,10 @@ takes** - the inventory the costs below are read against:
   `addr`, a tx span, an rx span, the reply, `speed` - one tenure that
   is a write, a read, a write-then-read with a repeated START, or the
   empty probe. `isr()` is the event vector's body, phase by phase; the
-  event line is a tenure's (raised by `start()`, dropped at its end) and
+  event line is a tenure's (raised by `start()`, dropped at its end, and
+  down through a DMA read phase, which the receive block's completion
+  ends - over a channel that does not serve, RxNE and BTF would stand
+  under it and starve the thread and the bus's timeout) and
   ITBUFEN is switched on and off within it so TxE/RxNE interrupt only
   while the byte pump needs them and BTF carries the rest. The repeated
   START of a write-then-read is requested on the TxE that says the last
@@ -130,7 +133,9 @@ takes** - the inventory the costs below are read against:
   raises inside a tenure, once no START or STOP stands. `unstick()`
   clocks a stuck client free by hand and clears the STOPF its own STOP
   leaves, and `recover()` puts the peripheral back (SWRST, the timing
-  rewritten). The engine slots are
+  rewritten); `release()` pulses the block's reset before the gate - the
+  vendor's DeInit, the one act that withdraws a request DMAEN raised on
+  the CH32V203 ([dma.md](dma.md)). The engine slots are
   `DmaTxEngine<6>` and `DmaRxEngine<7>`, both or neither: a plain write
   of any length and a read of two bytes or more run on them; the
   one-byte read and the write half of a write-then-read stay on the
@@ -138,7 +143,8 @@ takes** - the inventory the costs below are read against:
   with the transmit channel's count read at zero: the controller wrote
   the last byte a byte time before it left the shifter, so the transmit
   engine is armed for its errors alone and a write takes no DMA
-  interrupt; a read ends on the receive block's completion, its one. `dma_isr()` reads the controller's one flag
+  interrupt; a BTF with the count standing is a channel that stopped
+  serving, and ends the tenure `i2c_dma_fault` with its STOP; a read ends on the receive block's completion, its one. `dma_isr()` reads the controller's one flag
   register once for both channels.
 - `I2cClient<1, pins>`: the target side - `init(clock, addresses,
   no_stretch)`, the polled surface (`addressed()`, `answer_address()`
@@ -340,6 +346,13 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- `release()`'s reset pulse, the `i2c_dma_fault` on a BTF with the
+  transmit count standing and the read phase with the event line down:
+  written from the CH32V203's measurement and staged on no board of
+  this family. A transmit channel held dead by USART2 released without
+  the pulse ([dma.md](dma.md)'s first item) under a DMA write to the
+  peer would stage the first answer; the peer's letters g and h stand
+  for the healthy path.
 - The DMA engines on the CH32V003: `test_ch32_i2c` letter g in its
   group image against a peer, the board being off the desk (on the
   CH32V006 the letter and `bench_ch32_i2c`'s engined lines are green).

@@ -211,7 +211,11 @@ at 120 MHz (PB1 60 MHz) over the self-link:
   at 100 kHz and once at 400 after every write, the thread starved
   meanwhile (a timeline of the entries, below). ITEVTEN is the TENURE's:
   raised by `start()`, taken down at the completion with the buffer
-  vector and the DMA requests in one CTLR2 store (`control2()`).
+  vector and the DMA requests in one CTLR2 store (`control2()`) - and
+  down for a DMA read phase as well, which the receive channel's
+  completion ends: over a channel that does not serve, RxNE and BTF would
+  stand under it and the vector would starve the thread and the bus's
+  timeout.
 - **The STOP on the last byte's TxE**: declined - no event marks a
   controller's own STOP leaving, so the write ends at BTF (EVT8_2) and
   the STOP's drain is the next `start()`'s: about a bit period when a
@@ -255,9 +259,10 @@ driver drives it.
 Table 11-5 wires I2C1's transmit request to DMA channel 6 and its
 receive to 7, I2C2's to 4 and 5. On this family the channel IS the
 request, so an engine slot naming any other channel is refused at
-compile time. With engines a write phase of any length and a read phase
-of two bytes or more run on them, the read under CTLR2.LAST so the
-controller NACKs the block's last byte; a ONE-BYTE read stays on the
+compile time. With engines a write phase of three bytes or more (two
+ride EVT8_1's own entry) and a read phase of two bytes or more run on
+them, the read under CTLR2.LAST so the controller NACKs the block's last
+byte; a ONE-BYTE read stays on the
 pump, because its ACK-before-ADDR sequence has no DMA shape. IN SLEEP
 THE BUS MATRIX SERVES THE CORE ALONE on this family, so a transport with
 engines holds the program awake while a block is in flight - and stops
@@ -266,8 +271,22 @@ stays set after a block and an enabled channel is counted as a working
 bus master ([dma.md](dma.md)). The transmit channel's completion still
 raises its interrupt here, unlike the SPI host's: on this bus nothing
 comes back to prove it, and it is the edge the host acts on - the event
-vector ends a write on BTF only behind it, and a write-then-read's
-repeated START is requested on the TxE it arms.
+vector ends a write on BTF only behind it, and a BTF with the transmit
+channel's count not at zero ends the tenure `i2c_dma_fault`, its STOP
+requested: a stalled channel and not a written block (measured: with a
+request another peripheral left held on channel 6, the target took ONE
+byte of a write of 255, the count standing at 254 at that BTF). A
+write-then-read's repeated START is requested on the TxE the completion
+arms.
+
+`release()` pulses the reset line before the gate, as `recover()`'s
+SWRST does: a request raised under DMAEN is held through DMAEN and PE
+cleared, and a tenure abandoned mid-block leaves one - measured, it
+stalled the next USART2 transmit on channel 7 after one byte
+([dma.md](dma.md), "A released requester"). A release after a COMPLETED
+tenure leaves none (the completion drops DMAEN before a further request
+can rise), so the hazard is the release of an abandoned or stalled
+tenure - the state a timeout leaves.
 
 ### How many instances a part has
 
@@ -667,6 +686,21 @@ letters declining by name). What they measure:
   alone (the section above).
 - **This controller as the target of the CH32V203C8T6's**: one address
   match and six bytes byte-exact, closed on the far end's STOP.
+- **A held request on the host's channels** (letters p and q over the
+  self-link, on this board and the CH32V303VCT6 alike): USART2 released
+  with its transmit engine, then this host's DMA read of sixteen on
+  channel 7 byte-exact; this host's read abandoned with RxNE standing
+  under DMAEN and released, then USART2's run out whole on the same
+  channel. Over a transmit channel held dead by TIM3's gated compare
+  request a DMA write of 32 is answered `i2c_dma_fault` with the target
+  holding one byte and the count at 31 - the BTF check - and over a
+  receive channel held dead by a gated USART2 a DMA read of sixteen
+  enters the event vector twice, for the START and the address, and is
+  answered by the caller's 50 ms bound and `recover()`, the thread
+  running throughout; each holder's reset line lets its request go and
+  the same tenure runs whole. The engined read in `bench_vx03`'s letter
+  i: 255 bytes in 3 interrupts - SB, ADDR and the block's completion -
+  and 433 handler cycles on the CH32V303VCT6, 421 on the CH32V203C8T6.
 - **The late repeated START against a CH32V203C8T6 target** - the
   suite's by-name letter: the last written byte in all twelve probes,
   and in twelve more with that target answering the address before a

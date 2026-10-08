@@ -466,7 +466,12 @@ the next `init()`), `start()`, `isr()`, `dma_rx_isr()` and
 `dma_tx_isr()` (the two channels' bodies, each reading its own flags;
 `dma_isr()` is both, for a program that binds the two vectors to one
 function), `status()`, `busy()`, `recover()`, `release()` and
-`claim_nss_pad()`.
+`claim_nss_pad()`. `release()` closes the gate with SPE cleared and no
+reset pulse, unlike the USART's and the I2C host's: on this family a
+released USART or I2C holds a DMA request it raised, while SPI1 released
+so - an engined write abandoned with TXE standing under TXDMAEN - left
+nothing for a timer-paced block on channels 2 and 3 ([dma.md](dma.md),
+"A released requester").
 
 ### The client
 

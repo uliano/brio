@@ -233,6 +233,14 @@ the transmit engine's CLAIM alone - the busy flag's test-and-set, eight
 instructions - and programs the claimed channel, four stores, unmasked:
 no block is in flight that could complete under it ([dma.md](dma.md)).
 
+`release()` pulses the block's reset before it gates the clock: a
+transmit request is raised as soon as DMAT meets an idle transmitter -
+at `init()` already, with an engine - and is held through DMAT, DMAR and
+UE cleared. Left standing, it would be served by the next owner of
+USART2's channels (I2C1's, TIM4's, TIM2's) as one stray item, or stall
+it ([dma.md](dma.md), "A released requester"); the pulse is two
+read-modify-writes of the bus's reset register, at release only.
+
 THE RECEIVE ENGINE RUNS A RING, NOT RUNS. It is armed in its circular
 shape over the whole receive ring's storage, from `init()` to
 `release()`: the channel writes the storage lap after lap and is never
@@ -257,7 +265,19 @@ read and the edge reported, then WAITING FOR A FRAME (RXNEIE alone),
 whose entry reads NO STATR - a status read there would arm the clear the
 next frame's own read performs, and that frame's error would vanish
 unseen - but CNTR: a moved count turns the vector back and reports the
-edge again, which is the only edge a burst of one frame gets. The
+edge again, which is the only edge a burst of one frame gets. A frame
+the channel NEVER takes - a channel stopped by a transfer error, or one
+whose handshake another peripheral's held request froze - leaves RXNE
+standing under RXNEIE, a level that would re-enter the vector for ever
+with the thread starved: the entries of that wait that find the count
+unmoved (and, with no transmit engine, TXEIE down, so that they are not
+the transmitter's) are counted, and the 255th gives the channel up -
+`dma_faults()` counted, RXNEIE down, the edge reported, nothing else
+touched in the vector - and the consumer's next look stops the channel
+and starts the ring again from its first element, as after a transfer
+error, and re-arms the wait for the end. A live channel takes the frame in one or
+two entries; a channel a higher-priority memory-to-memory block starves
+for 255 of them is given up too. The
 channel's half and full marks report it from `dma_isr()`. Two interrupts
 a burst, none a byte. WHAT THE CHANNEL'S READ BOUNDS is the counts and
 never the bytes: the frame after one whose error was counted loses its
@@ -392,7 +412,9 @@ lot-keyed registers of this die already said it is
   `harvest()` (the same edge asked from the consumer's side - true when
   the ring holds bytes and the consumer has found it empty since the last
   true from a vector or from here - and a stopped ring started again; it
-  reads neither STATR nor DATAR), `dma_faults()`. `tx_idle()` is THE
+  reads neither STATR nor DATAR), `dma_faults()` (blocks a transfer
+  error threw away, and receive channels given up on a frame they never
+  took). `tx_idle()` is THE
   WIRE'S: the ring empty, no block in flight, and TC, cleared as every
   transmit block starts. `write_bulk()` copies a run of 16 bytes or more
   whose source and ring slot share their alignment with the runtime's
@@ -591,6 +613,14 @@ CH32V303 evaluation board - and the second is measured on both below.
   cycles at the three rates). Its clear of IDLE is `USART_GetITStatus`
   then `USART_ReceiveData` - a read of DATAR while the channel it has
   just re-armed owns it.
+- **A receive channel that never takes the frame** (`test_vx03_dma`
+  letter p, both parts): USART2's ring armed over channel 6 with TIM3's
+  compare request held there by a gate closed without a reset, the
+  channel's enable moving one item (count 127 of 128) and then nothing;
+  four frames banged in: the vector entered 256 times - the overrun's
+  entry and the 255 of the wait - gave the channel up with one DMA fault
+  counted, and the thread ran on; with TIM3's reset pulsed the consumer's
+  next look started the ring again and ten frames arrived whole.
 - **The receive ring** is `test_vx03_dma`'s letter g, with no wire: the
   channel circular over the storage from `init()`, a burst across the
   storage's end delivered whole with nobody reading, a lap the consumer

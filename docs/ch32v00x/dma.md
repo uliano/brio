@@ -25,7 +25,16 @@ reference suite `test_ch32_dma`; the costs in `bench_ch32`'s letters d
   timers' other events spread over all of them (TIM3's two events
   reach channels 1 and 4 alone on the CH32V006/007, the table's own
   footnote). The rows of one channel are an OR: whichever of its
-  peripherals has its DMA bit set drives the channel's transfer.
+  peripherals has its DMA bit set drives the channel's transfer. On the
+  CH32V203 and the CH32V303 - this controller's lineage - a request once
+  raised is moreover HELD until the channel acknowledges it or the
+  peripheral's reset line is pulsed, its DMA bit, its enable and a gated
+  clock notwithstanding, and the next owner of the channel takes one
+  stray item and stalls behind it ([../ch32vx03/dma.md](../ch32vx03/dma.md),
+  "A released requester"). Whether this die holds one is not measured
+  (below); the USART's and the I2C host's `release()` pulse the block's
+  reset before the gate - the vendor's own DeInit, correct either way -
+  and the timers' and the ADC's reset their blocks there already.
 - **A channel is the STM32F1's**: CFGR (direction, circular,
   memory-to-memory, the two increments, the two widths, the priority,
   three interrupt enables, EN), CNTR counting down as items move,
@@ -332,6 +341,20 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **Whether a released requester holds its request on this die**, and so
+  whether the releases' reset pulse is needed here or only harmless: an
+  image with no wire would measure it - USART2 initialized with DMAT
+  (its transmit request standing on channel 6 with TXE up) and released
+  WITHOUT the pulse, CTLR1 and CTLR3 cleared and the gate closed, then a
+  block on channel 6 paced by TIM1's channel 3 compare (that channel's
+  row of table 8-2), judged whole within its pace; and the same with the
+  pulse. Behind it, the guards that answer a channel which stops serving
+  - the I2C host's BTF with the transmit count standing answered
+  `i2c_dma_fault`, its read phase run with the event line down, the
+  receive ring's wait for a frame given up after 255 entries
+  ([usart.md](usart.md), [i2c.md](i2c.md)) - are compiled and staged on
+  none of this family's boards; that image, released without the pulse,
+  stages the dead channel they answer.
 - **The engines in their two moments** - the binding at `arm()`, five
   stores a block, the claim under the transport's mask, INTFR read
   once a handler - on every path that names one: `test_ch32_dma`

@@ -39,7 +39,8 @@
  * the TENURE'S in turn - raised by start(), dropped at its end - because
  * the BTF a STOP leaves standing until the condition is out (15.10.6)
  * and the slave half's STOPF would otherwise enter the vector between
- * tenures for nothing.
+ * tenures for nothing; a DMA read phase drops it too, the channel's
+ * completion ending that phase (begin_receive()).
  *
  * THE REPEATED START OF A WRITE-THEN-READ IS REQUESTED WHILE THE LAST
  * WRITTEN BYTE IS STILL GOING OUT, on the TxE that says it went into the
@@ -756,10 +757,20 @@ public:
 
             case Phase::tx_dma:
                 // BTF with the channel's count at zero: the engine wrote
-                // every byte and the last one is out on the wire. (BTF
-                // with bytes still to move would be the controller late
-                // by a whole byte time: its next write clears the flag.)
-                if ((s1 & i2c_btf) != 0u && dma_tx_drained()) {
+                // every byte and the last one is out on the wire. BTF with
+                // bytes still to move is a channel that stopped serving -
+                // a live one refills the data register within a few bus
+                // cycles of each TxE, a byte time ahead of BTF - and BTF
+                // is a level that would re-enter this vector for ever: the
+                // tenure ends i2c_dma_fault, its STOP requested (on the
+                // CH32V203, a request another peripheral left held on the
+                // channel's OR froze it so, docs/ch32vx03/dma.md).
+                if ((s1 & i2c_btf) != 0u) {
+                    if (!dma_tx_drained()) {
+                        put_engines_away();
+                        S::stop();
+                        return finish(i2c_dma_fault);
+                    }
                     dma_tx_done();
                     S::stop();   // EV8_2: a plain write's end
                     return finish(i2c_ok);
@@ -950,6 +961,13 @@ public:
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::disable();
+        // THE RESET LINE BEFORE THE GATE: on the CH32V203 and the CH32V303
+        // a request DMAEN raised is held through DMAEN and PE cleared and
+        // frozen on the channel's OR by the gate, stalling the next owner
+        // of channel 6 or 7 - USART2's here (docs/ch32vx03/dma.md). Not
+        // measured on this die (docs/ch32v00x/i2c.md); the pulse, the
+        // vendor's own I2C_DeInit, leaves none either way.
+        S::reset();
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();
@@ -1055,7 +1073,13 @@ private:
     static bool begin_receive() {
         if constexpr (has_engines) {
             if (dma_serves_rx()) {
-                S::dma(true, true);   // LAST: the block's last byte is NACKed
+                // DMAEN with LAST - the block's last byte is NACKed - and
+                // THE EVENT LINE DOWN, in one store: dma_isr() ends the
+                // phase and the event vector has nothing to serve in it,
+                // while over a channel that does not serve its request RxNE
+                // and BTF would stand and re-enter it for ever, the thread
+                // and the bus's timeout starved. The error line stays.
+                S::interrupts(i2c_dmaen | i2c_last, i2c_itevten);
                 (void)RxEngine::start(std::span<uint8_t>(t_.rx.get(), t_.rx_len));
                 (void)S::clear_addr();
                 phase_ = Phase::rx_dma;

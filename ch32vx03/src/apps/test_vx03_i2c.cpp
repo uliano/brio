@@ -2,7 +2,7 @@
 // CH32V203 and the CH32V303: ch32vx03/i2c.hpp over RM ch. 19, the host
 // engine under its two vectors, the client half addressed by a real
 // controller, the DMA engines, and util/i2c_bus.hpp's arbiter with not
-// one line changed. Letters a..k are both series'; letters l..o are a
+// one line changed. Letters a..k are both series'; letters l..q are a
 // board's that wires the chip's two controllers onto one bus, registered
 // on every part with I2C2 and compiled out of every other image.
 //
@@ -57,7 +57,7 @@
 //    evaluation board wires I2C2's pads to I2C1's - PB10 to PB6, PB11 to
 //    PB7 - with a 4.7 kOhm pull-up on each line, and a CH32V203C8 board
 //    can carry the same two wires and resistors: one chip's two
-//    controllers share a bus, and letters l..o make one the host and the
+//    controllers share a bus, and letters l..q make one the host and the
 //    other the target,
 //    the target POLLED from the loop that waits for the host (its clock
 //    stretching holds the bus while the loop comes round). The wires are
@@ -66,11 +66,14 @@
 //    failing.
 //
 // THE PADS. PB6 and PB7 - and on a part with I2C2 PB10 and PB11, I2C2's,
-// driven only after letters l..o have found the two wires to PB6/PB7 - and
-// nothing else. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the
-// debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
-// crystals), PB12..PB15 (the SPI link), PA0..PA8 (other phases' straps) -
-// and PB2, the LED, left undriven, as in every suite of this target.
+// driven only after letters l..q have found the two wires to PB6/PB7 -
+// and, in letter p alone, USART2's PA2 (its transmitter, driving whatever
+// input a strap puts there) and PA3 (its receiver, pulled up), released
+// at the letter's end. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
+// (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
+// crystals), PB12..PB15 (the SPI link), the rest of PA0..PA8 (other
+// phases' straps) - and PB2, the LED, left undriven, as in every suite of
+// this target.
 //
 // What is exercised, letter by letter:
 //   a  THE BLOCK AND THE ARITHMETIC: the reset values, the three
@@ -116,6 +119,19 @@
 //      re-made at each, and back at 96): the status, the controller a
 //      millisecond on (START, STOP, MSL), the next tenure on the same
 //      host; each count also acknowledged whole, the control
+//   p  THE HAND-OVER ON CHANNEL 7, the OR of USART2's transmit request and
+//      I2C1's receive one: USART2's transport with its transmit engine
+//      run and released, then I2C1's DMA read of sixteen judged
+//      byte-exact; and the mirror - I2C1's DMA read abandoned with RxNE
+//      standing under DMAEN and the host released, then USART2's run
+//      judged out whole in its wire time
+//   q  A CHANNEL THAT DOES NOT SERVE, staged by a request held on it by a
+//      peripheral gated without its reset (TIM3's on channel 6, USART2's
+//      on 7): a DMA write answered i2c_dma_fault with the target short of
+//      the block, and a DMA read with the event vector entered for the
+//      START and the address alone, the tenure answered by the caller's
+//      bound and recover(); each again with the request let go by the
+//      holder's reset line, whole
 // and by name only, not in z, against the peer:
 //   r  THE LATE REPEATED START: a write of one to four bytes and a
 //      one-byte read with the repeated START requested AFTER BTF, the
@@ -138,14 +154,12 @@
 // arbiter, both roles and the arbitration - is simply bigger than the
 // tier. So the four 32 KB parts build it as one image per GROUP of
 // letters (the groups line below; design/overview.md, "A suite's image
-// fits the family's smallest chip"). The CH32V203C8 holds it whole only
-// to the last few bytes of its 60 KB, its self-link letters l to o
-// included, so it builds two images of its own (the groups.v203c8 line:
-// the wireless and peer letters, then the self-link's); the CH32V303
-// builds one.
+// fits the family's smallest chip"). The CH32V203C8 builds two images of
+// its own (the groups.v203c8 line: the wireless and peer letters, then the
+// self-link's l to q); the CH32V303 builds one.
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abcd,efgh,ijkr
-// build: groups.v203c8 = abcdefgh,ijklmnor
+// build: groups.v203c8 = abcdefgh,ijklmnopqr
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -561,7 +575,7 @@ bool ensure_link() {
     return false;
 }
 
-/// Whether this part has the I2C2 a board can wire to I2C1 (letters l..o
+/// Whether this part has the I2C2 a board can wire to I2C1 (letters l..q
 /// below), and the question a peer letter asks when no peer answered on
 /// a pulled-up bus. The wiring is the BOARD's, looked for at run time.
 constexpr bool self_link_part = device::i2c_count >= 2u;
@@ -584,7 +598,7 @@ bool need_peer() {
     // I2C2, has no peer on it by construction: the letter declines.
     if (self_link_present()) {
         print(serial, "  SKIPPED, no verdict claimed: the pull-ups are this board's own, on the "
-                      "wires to its own I2C2 (letters l..o) - no peer board is on this bus.",
+                      "wires to its own I2C2 (letters l..q) - no peer board is on this bus.",
               crlf);
         return false;
     }
@@ -2124,7 +2138,7 @@ void tr_late_start() {
 }
 
 // ===========================================================================
-// The self-link: the chip's two controllers on one bus (l..o)
+// The self-link: the chip's two controllers on one bus (l..q)
 // ===========================================================================
 //
 // On a board that wires I2C2's pads to I2C1's - PB10 to PB6 (SCL) and
@@ -2915,6 +2929,314 @@ void to_refusal() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// p - the hand-over on channel 7; q - a channel that does not serve
+// ---------------------------------------------------------------------------
+
+/// THE OTHER OWNER OF CHANNEL 7. Table 11-5 wires USART2's transmit
+/// request and I2C1's receive request to the same channel of DMA1 - an OR
+/// - so USART2's transport with its transmit engine there is what letter
+/// p hands the channel to and takes it from.
+constexpr uint8_t shared_channel = DmaRequestOf<DmaRequest::usart2_tx>::channel;
+static_assert(shared_channel == DmaRequestOf<DmaRequest::i2c1_rx>::channel,
+              "table 11-5: USART2's transmit request and I2C1's receive request share a "
+              "channel");
+using Handed = Uart<2, P, 64, 64, UartFormat{}, DmaTxEngine<1, shared_channel>>;
+using SharedCh = DmaChannel<1, shared_channel>;
+using Ch6 = DmaChannel<1, DmaRequestOf<DmaRequest::i2c1_tx>::channel>;
+/// True while channel 7's vector and USART2's are that transport's.
+volatile bool handed_live = false;
+
+/// A REQUEST HELD ON A CHANNEL BY A PERIPHERAL WHOSE CLOCK IS GATED - the
+/// state a release that does not pulse its block's reset leaves
+/// (docs/ch32vx03/dma.md, "A released requester") - made here at the
+/// register level, on purpose, to stage a channel that does not serve.
+/// Channel 7: USART2 with DMAT and an idle transmitter, its TXE request
+/// raised at once, then the gate closed. Channel 6: TIM3's channel 1
+/// compare with CC1DE (table 11-5's TIM3_CH1 row), one match, the counter
+/// stopped and the gate closed. Neither touches a pad, and each is let go
+/// by its block's reset line, which acts with the clock gated.
+[[maybe_unused]] void hold_channel7() {
+    using U = Usart<2>;
+    U::bus_clock(true);
+    U::reset();
+    U::dma_transmit(true);
+    U::transmitter(true);
+    U::enable(true);
+    (void)delay_us(clock, 20);
+    U::bus_clock(false);
+}
+[[maybe_unused]] void free_channel7() { Usart<2>::reset(); }
+
+using Holder6 = Tim<3>;
+static_assert(DmaRequestOf<DmaRequest::tim3_ch1>::channel ==
+                  DmaRequestOf<DmaRequest::i2c1_tx>::channel,
+              "table 11-5: TIM3's channel 1 request and I2C1's transmit request share a "
+              "channel");
+[[maybe_unused]] void hold_channel6() {
+    Holder6::init();
+    (void)Holder6::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
+    (void)Holder6::set_compare(0, 16);
+    Holder6::interrupts(Holder6::compare_dma(0), true);
+    Holder6::enable(true);
+    (void)delay_us(clock, 20);
+    Holder6::enable(false);
+    Holder6::bus_clock(false);
+}
+[[maybe_unused]] void free_channel6() { Holder6::reset(); }
+
+/// Channel 7's and USART2's vectors while letter p's transport owns them.
+template <bool on = self_link_part>
+void handed_dma() {
+    if constexpr (on) {
+        (void)Handed::dma_isr();
+    }
+}
+template <bool on = self_link_part>
+void handed_isr() {
+    if constexpr (on) {
+        (void)Handed::isr();
+    }
+}
+
+/// A run out through USART2's transmit engine, waited for: true when the
+/// port drained it within `budget_ms`; `took_ms` what it took.
+template <bool on = self_link_part>
+bool handed_run(const uint8_t* run, uint16_t n, uint32_t budget_ms, uint32_t& took_ms) {
+    if constexpr (on) {
+        (void)Handed::write_bulk(std::span<const uint8_t>(run, n));
+        const uint32_t t0 = Ticker::millis();
+        while (!Handed::tx_idle() && Ticker::millis() - t0 < budget_ms) {
+        }
+        took_ms = Ticker::millis() - t0;
+        return Handed::tx_idle();
+    } else {
+        (void)run;
+        (void)n;
+        (void)budget_ms;
+        took_ms = 0;
+        return false;
+    }
+}
+
+/// What both of letter p's directions send through USART2.
+constexpr uint8_t handed_note[] = "channel 7 is the OR of USART2's and I2C1's requests";
+constexpr uint16_t handed_len = sizeof(handed_note) - 1u;
+
+template <bool on = self_link_part>
+void tp_handover() {
+    if constexpr (on) {
+        using L = Self<on>;
+        using C = typename L::Client2;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the hand-over wants the self-link's two wires, and says so", true);
+            return;
+        }
+
+        // THE OUTGOING OWNER: USART2's transport with its transmit engine,
+        // a run out through channel 7, then released. With DMAT set and the
+        // transmitter idle its request stands on the channel the moment
+        // the run is out - at init() already.
+        handed_live = true;
+        const bool up = Handed::init(clock, 115200);
+        uint32_t took = 0;
+        const bool sent = handed_run(handed_note, handed_len, 20, took);
+        Handed::release();
+        handed_live = false;
+
+        // THE INCOMING OWNER: I2C1's DMA host, a read of sixteen on the same
+        // channel from the chip's own target.
+        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
+        dma_host_live = true;
+        (void)DmaHost::init(clock);
+        L::clear();
+        L::seed = 0x27;
+        for (uint8_t i = 0; i < 16u; ++i) {
+            rx_buf[i] = 0xEE;
+        }
+        host_stormed = false;
+        const uint8_t rd = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
+                                                          I2cSpeed::fast_400k);
+        bool rd_exact = rd == i2c_ok;
+        for (uint8_t i = 0; i < 16u && rd_exact; ++i) {
+            rd_exact = rx_buf[i] == L::value(0x27, i);
+        }
+        const uint16_t left7 = SharedCh::remaining();
+        print(serial, "  USART2's run of ", handed_len, sent ? " sent" : " NOT SENT",
+              " and the port released; then I2C1's DMA read of 16 on channel ", shared_channel,
+              ": status ", rd, rd_exact ? ", byte-exact" : ", NOT exact", ", the channel's count ",
+              left7, host_stormed ? ", the event vector STORMED" : "", crlf);
+        bench.verdict("THE HAND-OVER: USART2's transmit engine released, then I2C1's DMA read of "
+                      "sixteen bytes on the same channel 7, byte-exact - the port's release() "
+                      "left no request held on the channel's OR",
+                      up && sent && rd_exact && left7 == 0u);
+
+        // Each half from a clean slate: what a failed first half leaves - a
+        // stalled tenure, a target mid-byte, a held request - goes with the
+        // three blocks' reset lines, which act with their clocks gated.
+        dma_host_live = false;
+        DmaHost::release();
+        C::release();
+        L::all_released();
+        Usart<2>::reset();
+        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
+        dma_host_live = true;
+        (void)DmaHost::init(clock);
+
+        // THE MIRROR: I2C1's read abandoned mid-block with RxNE standing
+        // under DMAEN - its channel stopped under it, the target served on
+        // until the data register and the shifter both hold a byte - and
+        // the host released. The target is let go with its own release;
+        // I2C1's block is not touched again until USART2 has run, its reset
+        // being what the question is about.
+        L::clear();
+        L::seed = 0x51;
+        DmaHost::Request r{};
+        r.addr = self_addr;
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+        r.tx_len = 0;
+        r.rx = lend<Lease::reply>(rx_buf);
+        r.rx_len = 32;
+        r.speed = I2cSpeed::standard_100k;
+        host_done = false;
+        host_isr_entries = 0;
+        (void)DmaHost::start(r);
+        const uint32_t t1 = Ticker::millis();
+        while (L::log.served < 4u && Ticker::millis() - t1 < 20u) {
+            L::template poll<C>();
+        }
+        DmaRxEngine<1, shared_channel>::stop();
+        const uint32_t t2 = Ticker::millis();
+        while (Ticker::millis() - t2 < 3u) {
+            L::template poll<C>();
+        }
+        const uint16_t star1 = H::status1();
+        const uint16_t ctlr2 = H::regs().CTLR2;
+        const bool standing = (star1 & i2c_rxne) != 0u && (ctlr2 & i2c_dmaen) != 0u;
+        dma_host_live = false;
+        DmaHost::release();
+        C::release();
+
+        handed_live = true;
+        const bool up2 = Handed::init(clock, 115200);
+        uint32_t took2 = 0;
+        const bool mirrored = handed_run(handed_note, handed_len, 20, took2);
+        const uint16_t faults = Handed::dma_faults();
+        Handed::release();
+        handed_live = false;
+        // 52 frames of ten bits at 115200 baud: 4.5 ms on the wire.
+        print(serial, "  I2C1's read stopped after ", L::log.served, " byte(s) asked (STAR1 ",
+              hex(star1), ", CTLR2 ", hex(ctlr2), "), the host released; then USART2's run of ",
+              handed_len, " on channel ", shared_channel, ": ", mirrored ? "out" : "NOT OUT",
+              " in ", took2, " ms, the channel's count ", SharedCh::remaining(), ", faults ",
+              faults, crlf);
+        bench.verdict("THE MIRROR: I2C1's DMA read abandoned with RxNE standing under DMAEN and "
+                      "the host released, then USART2's transmit engine on channel 7 sends its "
+                      "whole run in its wire time - the host's release() left no request held",
+                      standing && up2 && mirrored && took2 >= 4u && faults == 0u);
+        L::all_released();
+        host_ready();
+    }
+}
+
+template <bool on = self_link_part>
+void tq_dead_channel() {
+    if constexpr (on) {
+        using L = Self<on>;
+        using C = typename L::Client2;
+        L::all_released();
+        if (!L::wired()) {
+            bench.verdict("the dead channels want the self-link's two wires, and say so", true);
+            return;
+        }
+        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
+        dma_host_live = true;
+        (void)DmaHost::init(clock);
+
+        // A WRITE OVER A TRANSMIT CHANNEL THAT DOES NOT SERVE: TIM3's
+        // request held on channel 6, the gate closed under it. The channel
+        // moves one item on its enable and waits for that request to fall,
+        // which it never does: BTF comes with the block's count standing.
+        hold_channel6();
+        for (uint8_t i = 0; i < 32u; ++i) {
+            tx_buf[i] = static_cast<uint8_t>(0x30u + i);
+        }
+        L::clear();
+        const uint8_t wr = L::template tenure<DmaHost, C>(self_addr, tx_buf, 32, nullptr, 0,
+                                                          I2cSpeed::fast_400k);
+        const uint8_t took = L::log.in_n;
+        const uint16_t left6 = Ch6::remaining();
+        free_channel6();
+        print(serial, "  a DMA write of 32 over channel 6 held by TIM3: status ", wr,
+              wr == i2c_dma_fault ? " (i2c_dma_fault)" : "", ", the target took ", took,
+              ", the channel's count ", left6, crlf);
+        bench.verdict("A WRITE OVER A CHANNEL THAT DOES NOT SERVE is answered i2c_dma_fault, its "
+                      "STOP on the wire - never i2c_ok with the bytes missing: BTF with the "
+                      "block's count standing is a stalled channel",
+                      wr == i2c_dma_fault && took < 32u);
+        L::clear();
+        const uint8_t wr2 = L::template tenure<DmaHost, C>(self_addr, tx_buf, 32, nullptr, 0,
+                                                           I2cSpeed::fast_400k);
+        bool whole = wr2 == i2c_ok && L::log.in_n == 32u;
+        for (uint8_t i = 0; i < 32u && whole; ++i) {
+            whole = L::log.in[i] == tx_buf[i];
+        }
+        bench.verdict("... and with the held request let go by TIM3's reset line, the same "
+                      "write lands whole",
+                      whole);
+
+        // A READ OVER A RECEIVE CHANNEL THAT DOES NOT SERVE: USART2's
+        // request held on channel 7. RxNE and BTF stand with nothing to take
+        // them, and the event vector must not be what hears them: the
+        // tenure is the caller's bound to answer, and recover() - the verb
+        // the per-bus timeout calls - puts the host back.
+        hold_channel7();
+        L::clear();
+        L::seed = 0x63;
+        host_stormed = false;
+        const uint8_t rd = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
+                                                          I2cSpeed::fast_400k);
+        const uint32_t entries = host_isr_entries;
+        const bool stormed = host_stormed;
+        print(serial, "  a DMA read of 16 over channel 7 held by USART2: status ", rd,
+              rd == no_answer ? " (no answer: the caller's bound)" : "", ", the event vector ",
+              entries, " entries", stormed ? " - STORMED, silenced by the suite" : "",
+              ", the channel's count ", SharedCh::remaining(), crlf);
+        bench.verdict("A READ OVER A CHANNEL THAT DOES NOT SERVE leaves the thread running: the "
+                      "event vector entered for the START and the address alone, no storm, "
+                      "and the tenure answered by the caller's bound and recover()",
+                      rd == no_answer && !stormed && entries <= 4u);
+
+        // The target, mid-byte when the host was reset, let go; the wire
+        // clocked free; the channel freed; the same read again.
+        C::release();
+        (void)DmaHost::unstick();
+        free_channel7();
+        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
+        (void)DmaHost::init(clock);
+        L::clear();
+        L::seed = 0x63;
+        for (uint8_t i = 0; i < 16u; ++i) {
+            rx_buf[i] = 0xEE;
+        }
+        const uint8_t rd2 = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
+                                                           I2cSpeed::fast_400k);
+        bool exact = rd2 == i2c_ok;
+        for (uint8_t i = 0; i < 16u && exact; ++i) {
+            exact = rx_buf[i] == L::value(0x63, i);
+        }
+        bench.verdict("... and with the held request let go by USART2's reset line, a read of "
+                      "sixteen byte-exact",
+                      exact);
+        dma_host_live = false;
+        DmaHost::release();
+        C::release();
+        L::all_released();
+        host_ready();
+    }
+}
+
 /// The self-link's letters, registered where the part has I2C2.
 template <bool on = self_link_part>
 void register_self_link_letters() {
@@ -2928,6 +3250,12 @@ void register_self_link_letters() {
                      tn_unstick<>);
         bench.letter('o', "THE REFUSED LAST BYTE, the core at 96, 48 and 8 MHz",
                      to_refusal<>);
+        bench.letter('p', "THE HAND-OVER on channel 7: USART2 released, then I2C1's DMA read; "
+                          "and the mirror",
+                     tp_handover<>);
+        bench.letter('q', "a channel that does not serve: a DMA write answered i2c_dma_fault, a "
+                          "DMA read with the event vector quiet",
+                     tq_dead_channel<>);
     }
 }
 
@@ -2974,7 +3302,7 @@ void banner() {
           device::part_name, crlf,
           "  the bus goes to a peer board running `twi_peer` (command address ",
           hex(twilink::command_addr), ") - letters b..k skip when it does not answer - or, "
-          "where the board wires them, to the chip's own I2C2 (letters l..o)",
+          "where the board wires them, to the chip's own I2C2 (letters l..q)",
           crlf, "  PB1 runs at ", SysClock::pclk1_hz / 1'000'000u,
           " MHz: CTLR2.FREQ cannot state more than 60 (19.12.2)", crlf,
           "  the wire now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
@@ -3049,10 +3377,17 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
     }
 }
 BRIO_CH32_VECTOR(dma1_channel7_handler) {
+    if (handed_live) {
+        handed_dma<>();
+        return;
+    }
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
+// USART2's: letter p's transport, its interrupt receiver idle on a pulled
+// pad, and nothing on any other part.
+BRIO_CH32_VECTOR(usart2_handler) { handed_isr<>(); }
 
 int main() {
     const bool clock_ok = SysClock::init();

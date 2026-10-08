@@ -23,8 +23,13 @@
  * numbers. And the rows of one channel are an OR: every peripheral wired
  * to it whose DMA bit is set drives whatever transfer the channel holds -
  * measured, a receiver left running served a timer's transfer sixteen
- * items at once - so stopping a channel withdraws no request, and a
- * peripheral that is done with a channel is turned off.
+ * items at once - so stopping a channel withdraws no request. Nor does
+ * turning the peripheral off: a request once raised is held until the
+ * channel acknowledges it or the peripheral's reset line is pulsed, and a
+ * gated clock freezes it on the OR, where the next owner's first enable
+ * moves one stray item and stalls behind it (measured on both series,
+ * docs/ch32vx03/dma.md). A peripheral that is done with a channel is
+ * RESET - the transports' release() pulses the line before the gate.
  *
  * WHAT A CHANNEL IS. A configuration word (CFGR: direction, circular,
  * memory-to-memory, the two increments, the two widths, the priority,
