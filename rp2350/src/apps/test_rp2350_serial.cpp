@@ -135,7 +135,6 @@ constexpr UartPins alt_pins{
 };
 using AltInstrument = Uart<1, alt_pins, 512, 512>;
 
-using Led = Pin<25>;
 using ModeLine = Pin<21>;   // into the peer: low = echo, high = send
 
 TestBench<Serial, 16> bench;
@@ -876,7 +875,6 @@ int main() {
     const bool ruler_ok = brio::Mtime::start(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the facts: both pin columns, the divisor, the reset state", ta_facts);
@@ -912,7 +910,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

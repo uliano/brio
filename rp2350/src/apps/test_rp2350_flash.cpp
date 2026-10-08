@@ -120,7 +120,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;          // the board's LED: a keystroke marker
 using Ruler = Timer<0>;       // microseconds, independent of clk_sys
 using Chip = QmiWindow<0>;    // the window the board's flash sits in
 using Spare = QmiWindow<1>;   // nothing is attached to it on this board
@@ -827,7 +826,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
     const bool flash_ok = brio::Flash::init();
-    (void)Led::output(false);
     brio::enable_interrupts();
 
     bench.letter('a', "the engine, the chip's identity and the partition", ta_boot);
@@ -858,7 +856,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

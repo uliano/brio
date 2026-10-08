@@ -494,7 +494,7 @@ void te_pad() {
                   "no edge",
                   blind == 0u);
 
-    Led::output(false);
+    Led::analog();   // undriven at the letter's end: dark on every board
     quiet_everything();
 }
 
@@ -599,7 +599,7 @@ void tf_masks() {
                   vector_entries == 8u && entries[LedInt::line] == 8u);
 
     quiet_everything();
-    Led::output(false);
+    Led::analog();   // undriven again: dark
 }
 
 // =============================================================================
@@ -658,7 +658,7 @@ void tg_event() {
     bench.verdict("and a CPU event leaves NO pending bit to acknowledge", !event_flag);
 
     quiet_everything();
-    Led::output(false);
+    Led::analog();   // undriven again: dark
 }
 
 // =============================================================================
@@ -1004,7 +1004,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "SYSCFG: the gate, the map, the compensation cell", ta_syscfg);

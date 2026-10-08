@@ -45,7 +45,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
@@ -64,8 +63,6 @@ using Usb = brio::Usbd<>;
 using Cdc = brio::UsbCdcAcm<Usb, P, 0, 1, 2, 128, 128>;
 
 namespace {
-
-using Led = brio::Pin<'B', 2>;
 
 struct Descriptors {
     static constexpr auto device =
@@ -101,25 +98,13 @@ namespace {
 enum class IdleMode : uint8_t { spin, wfi, wfe };
 volatile IdleMode idle_mode = IdleMode::spin;
 
-struct Beat {};
-
-struct Console : brio::Fsm<Console, brio::LineReceived, Beat> {
+struct Console : brio::Fsm<Console, brio::LineReceived> {
     static inline brio::EventQueue<Event, 4, P> queue;
-    static inline brio::TimeEvent<P, Console, Beat> heartbeat{Beat{}};
 
-    static void init() {
-        Led::output();
-        start(&running);
-    }
+    static void init() { start(&running); }
 
     static Status running(const Event& e) {
         return brio::match(e,
-            [](brio::Entry) {
-                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](brio::Exit) { heartbeat.disarm(); return handled(); },
-            [](Beat) { Led::toggle(); return handled(); },
             [](brio::LineReceived l) { handle_line(l.line.get()); return handled(); },
             [](auto) { return unhandled(); });
     }

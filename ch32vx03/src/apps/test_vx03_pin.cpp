@@ -18,20 +18,20 @@
 // one pad to another pad's line: letter j tests for it first (a plain
 // output on PA6 read on PA1, both levels) and says "no wire" otherwise.
 //
-// THE PADS. Used here: PA1..PA4 (levels, pulls, the open drain, EXTI
-// line 1), PB3..PB8 (the whole-port verbs, EXTI lines 5 and 6), PB12/PB13
-// (the high configuration register, EXTI lines 12 and 13), PC13 (the
-// configuration LOCK), and on a package that bonds them every other pad
-// of ports C, D and E (letter i). A pad strapped to ANOTHER PAD of the
-// board is still usable here, the other end being a floating input while
-// this suite runs; a pad under a pull resistor is not a pull test's, and
-// PB4 is the pulls letter's fourth pad for that reason. Never touched:
-// PA9/PA10 (the console), PA13/PA14 (the debug port - taking them loses
-// the probe until a power cycle), PA11/PA12 (the USB pads), PC14/PC15
-// (the 32 kHz crystal, which the backup domain may own), the 8 MHz
-// crystal's pads where they are PD0/PD1 (this suite's tree does not run
-// on it), and PB2, which carries the LED and is toggled per command as
-// every suite of this target does, never as a test pad.
+// THE PADS. Used here: PA1..PA4 (levels, pulls, the open drain, EXTI line
+// 1), PB3..PB8 (the whole-port verbs, EXTI lines 5 and 6), PB12/PB13 (the
+// high configuration register, EXTI lines 12 and 13), PC13 (the
+// configuration LOCK), and on a package that bonds them every other pad of
+// ports C, D and E (letter i). A pad strapped to ANOTHER PAD of the board
+// is still usable here, the other end being a floating input while this
+// suite runs; a pad under a pull resistor is not a pull test's, and PB4 is
+// the pulls letter's fourth pad for that reason. Never touched: PA9/PA10
+// (the console), PA13/PA14 (the debug port - taking them loses the probe
+// until a power cycle), PA11/PA12 (the USB pads), PC14/PC15 (the 32 kHz
+// crystal, which the backup domain may own), the 8 MHz crystal's pads
+// where they are PD0/PD1 (this suite's tree does not run on it), and PB2,
+// which carries the LED and is left undriven, as in every suite of this
+// target, never as a test pad.
 //
 // THE TREE RUNS ON THE HSI on purpose: letter f writes the remap that
 // hands the oscillator's pads to GPIO, which would stop a crystal the
@@ -442,8 +442,8 @@ void td_port() {
                   "configuration register",
                   configured == 6u);
 
-    // The three MASKED stores, with the pin next to the mask driven high
-    // so that a store touching it would show.
+    // The three MASKED stores, with the output bit of the pin next to
+    // the mask set so that a store touching it would show.
     Led::set();
     Port<'B'>::out_set(port_mask);
     const uint32_t after_set = Port<'B'>::in() & port_mask;
@@ -1291,7 +1291,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the nibble: the gate, the reset state, all fifteen configurations",
@@ -1325,7 +1324,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

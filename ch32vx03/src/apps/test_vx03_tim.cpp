@@ -29,21 +29,20 @@
 // TIM7, the dual-edge capture register, TIM3's external trigger on PD2
 // and the internal-trigger links the class adds.
 //
-// THE PADS. TIM3's column 0 is PA6/PA7/PB0/PB1, TIM2's is PA0..PA3,
-// TIM1's is PA8 with PB13 for its complementary output and PB12 for its
-// break input, TIM4's is PB6..PB9. Of those this suite drives PA1,
-// PA6, PA7, PA8, PB6..PB9, PB12 and PB13; on the CH32V303 it adds PC6
-// and PA7 (TIM8's channel 1 and its complement, PA6 its break input),
-// PA4 (TIM9's channel 3), PC3 (TIM10's) and PD2 (TIM3's external
-// trigger). A pad strapped to another pad of the board is driven only
-// while the other end is an input, and a pad under a pull resistor is
-// judged against the level the resistor gives it (letter f).
+// THE PADS. TIM3's column 0 is PA6/PA7/PB0/PB1, TIM2's is PA0..PA3, TIM1's
+// is PA8 with PB13 for its complementary output and PB12 for its break
+// input, TIM4's is PB6..PB9. Of those this suite drives PA1, PA6, PA7,
+// PA8, PB6..PB9, PB12 and PB13; on the CH32V303 it adds PC6 and PA7
+// (TIM8's channel 1 and its complement, PA6 its break input), PA4 (TIM9's
+// channel 3), PC3 (TIM10's) and PD2 (TIM3's external trigger). A pad
+// strapped to another pad of the board is driven only while the other end
+// is an input, and a pad under a pull resistor is judged against the level
+// the resistor gives it (letter f).
 // NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port),
 // PA11/PA12 (the USB pads), PC14/PC15 and the 8 MHz crystal's pads (the
-// crystals), PB2 (the LED, toggled per command as every suite of this
-// target does) and PA0, which carries the KEY button and is TIM2's
-// channel 1 - so this suite uses TIM2's channel 2 and leaves its first
-// channel alone.
+// crystals), PB2 (the LED, left undriven, as in every suite of this
+// target) and PA0, which carries the KEY button and is TIM2's channel 1 -
+// so this suite uses TIM2's channel 2 and leaves its first channel alone.
 //
 // What is exercised, letter by letter:
 //   a  THE TIME BASE: the gate and the reset state, the prescaler and
@@ -137,7 +136,6 @@ using namespace brio;
 using P = Ch32vx03Platform<>;
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 using SysClock = Clock<ClockSource::pll, 144'000'000>;
 constexpr SysClock clock;
@@ -2384,7 +2382,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the time base: the gate, the counting, the two shadow registers",
@@ -2417,7 +2414,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

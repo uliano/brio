@@ -15,8 +15,7 @@
 // `peer_gpin_hz`, the last count in hertz (0 when nothing arrives), and
 // `peer_laps`, which says the program is alive. A debugger reads them
 // out of the ELF while the program runs - no console, no protocol, and
-// nothing for the other board to synchronize with. The LED blinks once
-// a lap for a human.
+// nothing for the other board to synchronize with. The LED stays dark.
 //
 // WIRING: this board's GP21 to the other board's clock input, the other
 // board's clock output to this board's GP20, and a common ground.
@@ -38,8 +37,6 @@ using namespace brio;
 using SysClock = Clock<ClockSource::pll, 125'000'000>;
 constexpr SysClock clock;
 
-using Led = Pin<25>;
-
 }  // namespace
 
 /// The last count of what arrives on GP20, in hertz; 0 when the source
@@ -52,7 +49,6 @@ volatile uint32_t peer_laps = 0;
 int main() {
     (void)SysClock::init();
     (void)Timer::init(clock);
-    Led::output();
 
     // Out: this board's crystal / 12 = 1 MHz on GP21.
     (void)ClockOut<0>::init(GpoutSource::xosc, 12);
@@ -64,7 +60,6 @@ int main() {
         const std::optional<uint32_t> hz = SysClock::count_hz(ClockIn<0>::count_source);
         peer_gpin_hz = hz ? *hz : 0u;
         peer_laps = ++laps;
-        Led::toggle();
         const uint32_t t0 = Timer::now_low();
         while (Timer::now_low() - t0 < 200'000u) {
         }

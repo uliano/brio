@@ -2508,7 +2508,6 @@ int main() {
     // needs no terminal.
     ili::hard_reset();
     ili::wake();
-    Led::clear();
 
     bench.letter('a', "the controller answers: the read registers and the device code", ta_identity);
     bench.letter('b', "the read format: a block written, its GRAM read back raw, the alignment found", tb_read_format);

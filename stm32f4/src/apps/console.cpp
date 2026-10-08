@@ -3,9 +3,9 @@
 //   SerialPort   turns RX bytes into LineReceived events (ping-pong line
 //              buffers, backpressure on the ring - see util/serial_port.hpp)
 //   Console  parses and routes each line, replies via blocking print
-//              (bounded by the wire rate), drives the blinker BY POSTING
-//   Blinker  owns the LED: heartbeat time event at 1 Hz, manual
-//              LED ON|OFF|TOG commands arrive as posted SetLed events
+//              (bounded by the wire rate), drives the lamp BY POSTING
+//   Lamp     owns the LED, dark from boot: the LED ON|OFF|TOG
+//              commands arrive as posted SetLed events
 //
 // Everything above the target glue is portable: the three AOs, their
 // events, their queues and every kernel and util header below them.
@@ -39,7 +39,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "stm32f4/clock.hpp"
 #include "stm32f4/flash.hpp"
 #include "stm32f4/nvic.hpp"
@@ -77,6 +76,7 @@ namespace {
 // header is compiled is the one question only the preprocessor can ask.
 #if defined(STM32F429xx)
 using Led = brio::Pin<'G', 13>;   // LD3 on the STM32F429I-DISC1
+constexpr bool led_lit_low = false;
 constexpr brio::UartPins console_pins{
     .tx = {'A', 9, brio::PinFunction::af7},    // USART1_TX
     .rx = {'A', 10, brio::PinFunction::af7},   // USART1_RX
@@ -85,6 +85,7 @@ constexpr uint8_t console_instance = 1;
 constexpr const char* banner_head = "STM32F429ZI brio console (clk=";
 #elif defined(STM32F469xx)
 using Led = brio::Pin<'G', 6>;    // LD1 on the 32F469IDISCOVERY, lit when low
+constexpr bool led_lit_low = true;
 constexpr brio::UartPins console_pins{
     .tx = {'B', 10, brio::PinFunction::af7},   // USART3_TX
     .rx = {'B', 11, brio::PinFunction::af7},   // USART3_RX
@@ -93,6 +94,7 @@ constexpr uint8_t console_instance = 3;
 constexpr const char* banner_head = "STM32F469NI brio console (clk=";
 #elif defined(STM32F411xE)
 using Led = brio::Pin<'C', 13>;   // the black pill's LED, lit when low
+constexpr bool led_lit_low = true;
 constexpr brio::UartPins console_pins{
     .tx = {'A', 9, brio::PinFunction::af7},
     .rx = {'A', 10, brio::PinFunction::af7},
@@ -101,6 +103,7 @@ constexpr uint8_t console_instance = 1;
 constexpr const char* banner_head = "STM32F411CE brio console (clk=";
 #else
 using Led = brio::Pin<'A', 5>;    // LD2 on the Nucleo-F446RE
+constexpr bool led_lit_low = false;
 constexpr brio::UartPins console_pins{
     .tx = {'A', 2, brio::PinFunction::af7},    // USART2_TX
     .rx = {'A', 3, brio::PinFunction::af7},    // USART2_RX
@@ -115,42 +118,18 @@ constexpr Serial serial;                                    // tag for print(ser
 constexpr uint32_t console_baud = 115200;
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};                                  // Blinker heartbeat
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output(led_lit_low);   // the dark level first
+        start(&steady);
     }
 
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) {
-                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](brio::Exit) {
-                heartbeat.disarm();
-                return handled();
-            },
-            [](Toggle) {
-                Led::toggle();
-                return handled();
-            },
-            [](SetLed s) {
-                apply(s);
-                return transition(&manual);
-            },
-            [](auto) { return unhandled(); }
-        );
-    }
-
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
             [](auto)     { return unhandled(); }
@@ -167,7 +146,7 @@ private:
     }
 };
 
-// ---- the console: parses lines, replies, commands the blinker ---------------
+// ---- the console: parses lines, replies, commands the lamp ------------------
 struct Console : brio::Fsm<Console, brio::LineReceived> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
@@ -217,7 +196,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});
+        brio::post<Lamp>(SetLed{mode});
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -300,7 +279,7 @@ int main()
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a UART that failed to come up would never return -
-    // the LED heartbeat below is then the only sign of life.
+    // a console that stays silent is then the diagnosis.
     if (serial_ok) {
         const brio::DeviceIdcode id = brio::DeviceIdcode::read();
         brio::print(serial, brio::crlf, banner_head,
@@ -310,5 +289,5 @@ int main()
                     "), type HELP", brio::crlf, "> ");
     }
 
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

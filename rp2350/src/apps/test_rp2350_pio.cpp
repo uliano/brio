@@ -102,7 +102,6 @@ constexpr UartPins console_pins{
 };
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
-using Led = Pin<25>;
 
 TestBench<Serial, 16> bench;
 
@@ -1248,7 +1247,6 @@ int main() {
     const bool dma_ok = brio::Dma::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output(false);
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless", ta_block);
@@ -1281,7 +1279,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

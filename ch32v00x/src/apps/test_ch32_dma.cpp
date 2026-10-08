@@ -66,7 +66,6 @@ using namespace brio;
 // on channel 5 (RM table 8-2).
 using Serial = Uart<1, P, 64, 128, DmaTxEngine<4>, DmaRxEngine<5>>;
 constexpr Serial serial;
-using Led = Pin<'C', 0>;
 
 // The channel the memory-to-memory letters use: 1, the ADC's, idle here.
 using Copier = DmaChannel<1>;
@@ -419,7 +418,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block and the refusals", ta_block);
@@ -447,7 +445,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

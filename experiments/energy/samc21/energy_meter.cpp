@@ -67,8 +67,6 @@ constexpr SysClock clock;
 
 namespace {
 
-using Led = brio::Pin<'B', 23>;  // the board's LED: alive-light
-
 // The shunt sense pair = SDADC pair 0. The pads are NOT claimed from
 // PORT: an analog input reaches the pad with no mux, and the reset
 // state (high-Z input) is exactly right for a sense lead.
@@ -318,7 +316,6 @@ bool node_mv(uint16_t& mv_out, uint16_t n) {
 }
 
 // ---- events -----------------------------------------------------------------
-struct Beat {};
 struct StimTick {};
 
 // ---- the world: the seeded stimulus -----------------------------------------
@@ -401,31 +398,6 @@ struct Stim : brio::Fsm<Stim, StimTick> {
                 timer.arm(next_gap());
             }
         }
-    }
-};
-
-// ---- the heartbeat: LED at 1 Hz = the meter is alive ------------------------
-struct Heart : brio::Fsm<Heart, Beat> {
-    static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Heart, Beat> beat{Beat{}};
-
-    static void init() {
-        Led::output();
-        start(&running);
-    }
-
-    static Status running(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) {
-                beat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](Beat) {
-                Led::toggle();
-                return handled();
-            },
-            [](auto) { return unhandled(); }
-        );
     }
 };
 
@@ -998,5 +970,5 @@ int main()
                     "), type HELP", brio::crlf, "> ");
     }
 
-    brio::Tenuto<P, Console, SerialLines, Stim, Heart>::run();
+    brio::Tenuto<P, Console, SerialLines, Stim>::run();
 }

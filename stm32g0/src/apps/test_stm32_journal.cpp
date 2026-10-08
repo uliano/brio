@@ -111,7 +111,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<2, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<'A', 5>;   // LD4
 
 TestBench<Serial> bench;
 
@@ -850,7 +849,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     brio::enable_interrupts();
 
@@ -890,7 +888,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -150,7 +150,6 @@ constexpr UartPads console_pads{
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
-using Led = Pin<'B', 23>;
 
 TestBench<Serial> bench;
 
@@ -1470,7 +1469,6 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     wdt_boot_config = WDT_REGS->WDT_CONFIG;
     wdt_boot_ewctrl = WDT_REGS->WDT_EWCTRL;
-    Led::output();
 
     brio::Nvic::enable(WDT_IRQn);
     brio::enable_interrupts();
@@ -1506,7 +1504,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

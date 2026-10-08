@@ -16,7 +16,7 @@ two header rows. Design files: WeAct's own repository
   output on GP23 would meet the button, so the pin-check wave leaves
   it out.
 - **LEDs**: a power LED and a user **LED on GP25**, the pin a Pico's
-  LED is on too (the console's heartbeat blinks it).
+  LED is on too, dark until the console's `LED` command drives it.
 - **Console**: none on board; the Debug Probe's UART bridge on
   **UART0 GP0 (TX) / GP1 (RX)**, function 2, crossed, is the console
   ([../probes/raspberry-pi-debug-probe.md](../probes/raspberry-pi-debug-probe.md)),

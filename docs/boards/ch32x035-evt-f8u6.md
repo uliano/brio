@@ -82,6 +82,6 @@ kOhm, and the two jumpers the pin and USART suites detect.
   detects its wire before it judges and says "no wire" otherwise: PA4 to
   PA5 (P1 pin 10 to P2 pin 11) for the pin suite, PB0 to PB1 (P2 pin 10
   to P2 pin 7) for the USART suite, and LED1 to PA0 for a hand at the
-  desk to see a keystroke. Manifest type `x035f8`; the project is
+  desk to see the console's `LED` command. Manifest type `x035f8`; the project is
   `ch32x035/`, preset `ch32x035f8-release`
   ([../ch32x035/README.md](../ch32x035/README.md)).

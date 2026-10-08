@@ -2,8 +2,9 @@
 // bench test of brio::DynamicClock. Type CLOCK <div> and CLK_PER changes
 // under the running program; if the console keeps talking, the rebase
 // fan-out did its job (Serial drained its TX at the old rate and took a
-// new BAUD before the switch), and if the LED keeps blinking at 1 Hz
-// the kernel timebase (RTC/PIT, time events) did not even notice.
+// new BAUD before the switch), and if UPTIME keeps counting true
+// seconds the kernel timebase (RTC/PIT, time events) did not even
+// notice.
 //
 //   SysClock = DynamicClock<Boot, Serial>: Boot is the static 24 MHz
 //   crystal configuration; Serial is the one clocked user here (a Twi
@@ -40,7 +41,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
@@ -63,44 +63,18 @@ constexpr SysClock clock;
 constexpr uint32_t baud = 115200;
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};                                  // Blinker heartbeat
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output();      // OUT resets low: the LED (PF2 to ground) dark
+        start(&steady);
     }
 
-    // Heartbeat state: 1 Hz toggle until a manual command takes over.
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) {
-                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](brio::Exit) {
-                heartbeat.disarm();
-                return handled();
-            },
-            [](Toggle) {
-                Led::toggle();
-                return handled();
-            },
-            [](SetLed s) {
-                apply(s);
-                return transition(&manual);   // exit disarms the heartbeat
-            },
-            [](auto) { return unhandled(); }
-        );
-    }
-
-    // Manual state: the LED belongs to the console commands.
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
             [](auto)     { return unhandled(); }
@@ -117,7 +91,7 @@ private:
     }
 };
 
-// ---- the console: parses lines, replies, commands the blinker ---------------
+// ---- the console: parses lines, replies, commands the lamp ------------------
 struct Console : brio::Fsm<Console, brio::LineReceived> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
@@ -219,7 +193,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});   // addressed command, AO to AO
+        brio::post<Lamp>(SetLed{mode});   // addressed command, AO to AO
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -282,5 +256,5 @@ int main() {
 
     // Pack order = priority AND correctness: the line CONSUMER (Console)
     // must precede the PRODUCER (SerialLines) - scheduling contract.
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

@@ -4,9 +4,9 @@
 //   SerialPort   turns RX bytes into LineReceived events (ping-pong line
 //              buffers, backpressure on the ring - see util/serial_port.hpp)
 //   Console  parses and routes each line, replies via blocking print
-//              (bounded, ~us at 460800), drives the blinker BY POSTING
-//   Blinker  owns the LED: heartbeat time event at 1 Hz, manual
-//              LED ON|OFF|TOG commands arrive as posted SetLed events
+//              (bounded, ~us at 460800), drives the lamp BY POSTING
+//   Lamp     owns the LED, dark from boot: the LED ON|OFF|TOG
+//              commands arrive as posted SetLed events
 //
 // Tenuto pack order is a CONTRACT here: Console (line consumer) must
 // precede SerialPort (line producer) so the ping-pong buffers are always
@@ -32,7 +32,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
@@ -52,44 +51,18 @@ using Serial = brio::Uart<2, brio::Route::alt1>;  // rings 64/256 (defaults)
 constexpr Serial serial;                          // tag for print(serial, ...)
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};                                  // Blinker heartbeat
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output();      // OUT resets low: the LED (PF2 to ground) dark
+        start(&steady);
     }
 
-    // Heartbeat state: 1 Hz toggle until a manual command takes over.
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) {
-                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](brio::Exit) {
-                heartbeat.disarm();
-                return handled();
-            },
-            [](Toggle) {
-                Led::toggle();
-                return handled();
-            },
-            [](SetLed s) {
-                apply(s);
-                return transition(&manual);   // exit disarms the heartbeat
-            },
-            [](auto) { return unhandled(); }
-        );
-    }
-
-    // Manual state: the LED belongs to the console commands.
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
             [](auto)     { return unhandled(); }
@@ -106,7 +79,7 @@ private:
     }
 };
 
-// ---- the console: parses lines, replies, commands the blinker ---------------
+// ---- the console: parses lines, replies, commands the lamp ------------------
 struct Console : brio::Fsm<Console, brio::LineReceived> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
@@ -156,7 +129,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});   // addressed command, AO to AO
+        brio::post<Lamp>(SetLed{mode});   // addressed command, AO to AO
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -220,5 +193,5 @@ int main() {
 
     // Pack order = priority AND correctness: the line CONSUMER (Console)
     // must precede the PRODUCER (SerialLines) - scheduling contract.
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

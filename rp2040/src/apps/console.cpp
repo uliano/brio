@@ -3,9 +3,9 @@
 //   SerialPort   turns RX bytes into LineReceived events (ping-pong line
 //              buffers, backpressure on the ring - see util/serial_port.hpp)
 //   Console  parses and routes each line, replies via blocking print
-//              (bounded by the wire rate), drives the blinker BY POSTING
-//   Blinker  owns the LED: heartbeat time event at 1 Hz, manual
-//              LED ON|OFF|TOG commands arrive as posted SetLed events
+//              (bounded by the wire rate), drives the lamp BY POSTING
+//   Lamp     owns the LED, dark from boot: the LED ON|OFF|TOG
+//              commands arrive as posted SetLed events
 //
 // Everything above the target glue is portable: the three AOs, their
 // events, their queues and every kernel and util header below them.
@@ -34,7 +34,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
@@ -69,42 +68,18 @@ constexpr Serial serial;                     // tag for print(serial, ...)
 constexpr uint32_t console_baud = 115200;
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};                                  // Blinker heartbeat
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output();      // low: GP25's LED dark
+        start(&steady);
     }
 
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) {
-                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](brio::Exit) {
-                heartbeat.disarm();
-                return handled();
-            },
-            [](Toggle) {
-                Led::toggle();
-                return handled();
-            },
-            [](SetLed s) {
-                apply(s);
-                return transition(&manual);
-            },
-            [](auto) { return unhandled(); }
-        );
-    }
-
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
             [](auto)     { return unhandled(); }
@@ -121,7 +96,7 @@ private:
     }
 };
 
-// ---- the console: parses lines, replies, commands the blinker ---------------
+// ---- the console: parses lines, replies, commands the lamp ------------------
 struct Console : brio::Fsm<Console, brio::LineReceived> {
     static inline brio::EventQueue<Event, 2, P> queue;
 
@@ -171,7 +146,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});
+        brio::post<Lamp>(SetLed{mode});
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -230,7 +205,7 @@ int main()
 
     // Guarded: print() BLOCKS until the transport accepts each byte, so
     // printing into a UART that failed to come up would never return -
-    // the LED heartbeat below is then the only sign of life.
+    // a console that stays silent is then the diagnosis.
     if (serial_ok) {
         const brio::ChipId id = brio::ChipId::read();
         brio::print(serial, brio::crlf, "RP2040 rev B", id.revision, " brio console (clk=",
@@ -239,5 +214,5 @@ int main()
                     "), type HELP", brio::crlf, "> ");
     }
 
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

@@ -135,7 +135,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;       // the board's LED: a keystroke marker
 using Ruler = Timer<0>;    // the microsecond ruler, which stops with the crystal
 using Waker = Pin<19>;     // the standing wire's driven end
 using Woken = Pin<8>;      // its other end, which a dormant watches
@@ -1305,7 +1304,6 @@ int main() {
     const bool aon_ok = brio::AonTimer::init(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output(false);
     boot_debug_pwrup = brio::Powman::debug_powerup_pending();
     brio::enable_interrupts();
 
@@ -1354,7 +1352,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -1006,7 +1006,6 @@ int main() {
     host_ok = Host::init(clock);
     Host::sck_speed(PinSpeed::medium);
     Host::mosi_speed(PinSpeed::medium);
-    Led::clear();
 
     // The banner waits for a terminal, at most two seconds: the
     // experiment runs with or without one.

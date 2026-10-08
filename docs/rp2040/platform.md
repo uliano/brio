@@ -99,7 +99,7 @@ int main() {
     SysClock::init();
     brio::Ticker::init(clock);
     brio::enable_interrupts();
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }
 ```
 
@@ -134,9 +134,9 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
   ([reset.md](reset.md)); the DHCSR write after it leaves the core
   faulting on BKPT as a probe-less power-on would.
 - The kernel console runs: three active objects over UART0, the
-  SysTick ticker at 1000 Hz, WFI between events, the heartbeat time
-  event toggling GP25 at 2 Hz (read back through SIO), the uptime
-  advancing with the host's clock.
+  SysTick ticker at 1000 Hz, WFI between events, the `LED` command
+  toggling GP25 (read back through SIO), the uptime advancing with the
+  host's clock.
 - The reference suite is green on the WeAct (62 verdicts in the
   all-key, 18 in the reset letter) and, letters `w` and `k` apart, on
   the Pico. What it measured, on the system timer as the ruler:

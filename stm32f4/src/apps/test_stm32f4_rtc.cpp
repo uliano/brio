@@ -118,18 +118,22 @@ using P = Stm32f4Platform<>;
 
 #if defined(STM32F429xx)
 using Led = Pin<'G', 13>;
+constexpr bool led_lit_low = false;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 #elif defined(STM32F469xx)
 using Led = Pin<'G', 6>;   // LD1, lit when low
+constexpr bool led_lit_low = true;
 constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
 constexpr uint8_t console_instance = 3;
 #elif defined(STM32F411xE)
-using Led = Pin<'C', 13>;
+using Led = Pin<'C', 13>;  // lit when low
+constexpr bool led_lit_low = true;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 #else
 using Led = Pin<'A', 5>;
+constexpr bool led_lit_low = false;
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 constexpr uint8_t console_instance = 2;
 #endif
@@ -1117,7 +1121,7 @@ void tm_output() {
     bench.verdict("the crystal still runs after RTC_AF1 has been driven",
                   quiet && noisy && noisy_ppm > -200 && noisy_ppm < 200);
 
-    Led::output(true);   // the LED off on the black pill, where this pad is it
+    Led::output(led_lit_low);   // dark: on the black pill this pad is the LED
 }
 
 // =============================================================================
@@ -1239,7 +1243,7 @@ void tn_timestamp() {
     bench.verdict("the timestamp goes off and its flags with it",
                   !Rtc::timestamp_enabled() && !Rtc::flag(RtcFlag::timestamp) &&
                       !Rtc::flag(RtcFlag::timestamp_overflow));
-    Led::output(true);
+    Led::output(led_lit_low);   // dark
 }
 
 // =============================================================================
@@ -1321,7 +1325,7 @@ void tw_tamper() {
     bench.verdict("the input disarms", Rtc::tamper_disarm(1));
     Rtc::clear_flags(RtcFlag::all);
     bench.verdict("and every flag is down", (Rtc::status() & RtcFlag::all) == 0u);
-    Led::output(true);
+    Led::output(led_lit_low);   // dark
 }
 
 // =============================================================================
@@ -1389,7 +1393,7 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output(true);
+    Led::output(led_lit_low);   // dark
     brio::enable_interrupts();
 
     const bool domain_ok = bring_up(brio::RtcClockSource::lse);

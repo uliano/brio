@@ -14,8 +14,7 @@
 //
 // NOTHING TO WIRE. The console is the WCH-Link's own serial (USART1 on
 // PD5/PD6) and every clock this suite measures is inside the chip. The
-// LED on PC0 marks a keystroke for a hand at the desk and is judged on
-// nothing.
+// LED on PC0 is left undriven, so it stays dark.
 //
 // What is exercised, letter by letter:
 //   a  the boot story: RCC_RSTSCKR read as the ACCUMULATING history it
@@ -139,7 +138,6 @@ using namespace brio;
 
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'C', 0>;
 
 TestBench<Serial> bench;
 
@@ -750,7 +748,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the boot story: the flags as the history they are", ta_boot);
@@ -784,7 +781,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

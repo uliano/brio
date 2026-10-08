@@ -118,7 +118,7 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
 ## Bench findings
 
 - Output drive and toggle: the board's LED on PB23, under PORT's own
-  output and under a kernel heartbeat alike.
+  output and under a kernel active object alike.
 - **The four event actions, separated.** A square wave carried to
   PORT event input 0 over an asynchronous channel, with the same pad
   read back: EVACT = OUT moves the pad whether it is PORT's own output

@@ -335,12 +335,14 @@ void tb_vrefint() {
     // Two probes for the record: the LED's own milliamps on the supply,
     // and (where the part calibrates) the reading with the calibration
     // register reset.
+    Led::output();
     Led::clear();
     console_drain();
     const uint16_t led_off = Adc::read_settled(4);
     Led::set();
     console_drain();
     const uint16_t led_on = Adc::read_settled(4);
+    Led::release();   // the pad undriven again: the LED dark whichever way it hangs
     print(serial, "  VREFINT with the LED off ", led_off, " (", Adc::supply_mv(led_off), " mV), on ", led_on, " (",
           Adc::supply_mv(led_on), " mV)", crlf);
     if constexpr (device::adc_has_calibration) {
@@ -1192,7 +1194,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless: reset values, the prescaler code, the arithmetic, the refusals", ta_block);
@@ -1228,7 +1229,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -1,6 +1,6 @@
 // console_usb - the brio kernel console over the chip's own USB-C: the
 // same three active objects as the console app (SerialPort, Console,
-// Blinker), the transport a CDC ACM port on the RP2350's controller
+// Lamp), the transport a CDC ACM port on the RP2350's controller
 // instead of a UART - nothing above the transport changed, and nothing
 // in the source changes between the Cortex-M33 build and the Hazard3
 // one. The host sees a serial port (/dev/ttyACM* on Linux, no driver to
@@ -32,7 +32,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/pin.hpp"
@@ -85,32 +84,22 @@ struct Descriptors {
 using Device = brio::UsbDevice<brio::Usb, Descriptors, Serial>;
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        (void)Led::output();
-        start(&beating);
+        (void)Led::output();   // low: GP25's LED dark
+        start(&steady);
     }
 
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) { heartbeat.arm_every(brio::ticks_from_ms<P>(500)); return handled(); },
-            [](brio::Exit) { heartbeat.disarm(); return handled(); },
-            [](Toggle) { Led::toggle(); return handled(); },
-            [](SetLed s) { apply(s); return transition(&manual); },
-            [](auto) { return unhandled(); });
-    }
-
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
-            [](auto) { return unhandled(); });
+            [](auto)     { return unhandled(); }
+        );
     }
 
 private:
@@ -168,7 +157,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});
+        brio::post<Lamp>(SetLed{mode});
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -241,5 +230,5 @@ int main() {
     brio::print(serial, brio::crlf, "RP2350 rev ", brio::hex(id.revision), " brio console over USB on ",
                 brio::core_kind == brio::CoreKind::hazard3 ? "Hazard3" : "Cortex-M33",
                 " (clk=PLL150, usb=", usb_ok ? "48MHz" : "FAILED", "), type HELP", brio::crlf, "> ");
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

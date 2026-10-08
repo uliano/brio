@@ -48,7 +48,7 @@
 //
 // THE PADS. PA11 and PA12 (the connector's, which this block reaches
 // through port A's clock), PA9/PA10 (the console) and PB2 (the LED,
-// toggled per command as every suite of this target does). Nothing
+// left undriven, as in every suite of this target). Nothing
 // else is touched, and no wire is needed.
 //
 // What is exercised, letter by letter:
@@ -120,7 +120,6 @@ constexpr SysClock clock;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 TestBench<Serial> bench;
 
@@ -739,7 +738,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool usb_ok = Usb::init(clock);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
     if (usb_ok) {
         Device::start();   // the pull-up: the host enumerates from here
@@ -777,7 +775,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

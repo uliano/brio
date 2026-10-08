@@ -2204,7 +2204,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output(false);
     brio::enable_interrupts();
 
     bench.letter('a', "the block, the prescaler and every refusal", ta_block);

@@ -108,7 +108,6 @@ constexpr UartPads console_pads{
 };
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
-using Led = Pin<'B', 23>;
 
 TestBench<Serial, 16> bench;
 
@@ -2122,7 +2121,6 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     const bool dma_ok = brio::Dmac::init();
     brio::Nvic::enable(brio::Dmac::irq());
-    Led::output();
     brio::enable_interrupts();
 
     factory = TsensCalibration::factory();
@@ -2179,7 +2177,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

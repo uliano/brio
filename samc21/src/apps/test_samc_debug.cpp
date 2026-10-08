@@ -92,7 +92,6 @@ constexpr UartPads console_pads{
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
 
-using Led = Pin<'B', 23>;
 
 TestBench<Serial> bench;
 
@@ -628,7 +627,6 @@ void tb_pac_map() {
     Pac::clear_all_flags();
     PORT_REGS->GROUP[1].PORT_DIR = dir_before;
     PORT_REGS->GROUP[1].PORT_DIRSET = dir_before;
-    Led::output();
     Pac::clear_all_flags();
 
     print(serial, "  with PORT protected, the same DIRTGL write: IOBUS ",
@@ -1982,7 +1980,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "PAC: the block, the keys and the balance rule",
@@ -2028,7 +2025,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

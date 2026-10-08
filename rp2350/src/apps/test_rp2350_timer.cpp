@@ -124,7 +124,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;          // the WeAct board's LED: a keystroke marker
 using Ruler = Timer<0>;       // the microsecond ruler every letter is judged by
 using Spare = Timer<1>;       // the instance a destructive letter may disturb
 
@@ -974,7 +973,6 @@ int main() {
     const bool wd_ok = brio::Watchdog::init(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output(false);
     brio::enable_interrupts();
 
     bench.letter('a', "the boot story", ta_boot);
@@ -1012,7 +1010,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -49,7 +49,6 @@ using namespace brio;
 
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'C', 0>;
 
 // The dynamic clock: the PLL's 48 MHz as the root, the ticker and the
 // console as the users it rebases. The root's source is the 24 MHz
@@ -263,7 +262,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the tree at boot", ta_tree);
@@ -290,7 +288,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -28,8 +28,8 @@
 // THE PADS. PA4 and PA5 (the two outputs, in analog mode throughout) and
 // PB9 (letter c's EXTI line 9). NEVER TOUCHED: PA9/PA10 (the console),
 // PA13/PA14 (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and
-// PD0/PD1 (the crystals) - and PB2, toggled per command as every suite of
-// this target does.
+// PD0/PD1 (the crystals) - and PB2, left undriven, as in every suite of
+// this target.
 //
 // What is exercised, letter by letter:
 //   a  THE HOLDING REGISTERS: the gate, a configuration read back, the
@@ -80,7 +80,6 @@ using namespace brio;
 using P = Ch32vx03Platform<>;
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 /// The one tree of this suite: the PLL on the HSI, ADCCLK 12 MHz.
 using SysClock = Clock<ClockSource::pll, 96'000'000>;
@@ -891,7 +890,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the holding registers: six placements, the configuration read back",
@@ -920,7 +918,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

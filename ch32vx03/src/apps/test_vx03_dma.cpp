@@ -33,12 +33,12 @@
 // finds no strap there and says so, and letter n takes those two wires,
 // each one looked for the same way before it is used.
 //
-// THE PADS. PA2 and PA3 in letter g (PA3 the banged line when the strap
-// is absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n.
-// NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port),
-// PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the
-// CH32V203 board's KEY) - and PB2, the CH32V203 board's LED, toggled per
-// command as every suite of this target does.
+// THE PADS. PA2 and PA3 in letter g (PA3 the banged line when the strap is
+// absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n. NEVER
+// TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port), PA11/PA12
+// (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the CH32V203
+// board's KEY) - and PB2, the CH32V203 board's LED, left undriven, as in
+// every suite of this target.
 //
 // What is exercised, letter by letter:
 //   a  MEMORY TO MEMORY: the block's gate, the three widths with and
@@ -137,7 +137,6 @@ using namespace brio;
 using P = Ch32vx03Platform<>;
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 using SysClock = Clock<ClockSource::pll, 144'000'000>;
 constexpr SysClock clock;
@@ -2324,7 +2323,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "memory to memory: the gate, the widths, the flags, the cost", ta_memory);
@@ -2356,7 +2354,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

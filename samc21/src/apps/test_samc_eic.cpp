@@ -965,6 +965,7 @@ void tu_button() {
           crlf);
     const uint32_t deadline = Ticker::millis() + 10'000UL;
     uint32_t edges = 0;
+    Led::output();   // each edge flips the LED, dark again after the window
     while (static_cast<int32_t>(Ticker::millis() - deadline) < 0) {
         if (ButtonInt::flag()) {
             ButtonInt::clear_flag();
@@ -972,6 +973,7 @@ void tu_button() {
             Led::toggle();
         }
     }
+    Led::input();   // undriven again: dark
     print(serial, "  edges seen: ", edges,
           edges >= 2u ? " - a real contact on a real pin" : " - nobody pressed it",
           crlf);
@@ -1022,7 +1024,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     const bool dma_ok = brio::Dmac::init();
     brio::Nvic::enable(brio::Dmac::irq());
@@ -1058,7 +1059,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

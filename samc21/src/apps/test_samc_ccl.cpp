@@ -73,7 +73,6 @@ constexpr UartPads console_pads{
 };
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
-using Led = Pin<'B', 23>;
 
 TestBench<Serial, 12> bench;
 
@@ -1708,7 +1707,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     const bool dma_ok = brio::Dmac::init();
     brio::Nvic::enable(brio::Dmac::irq());
@@ -1741,7 +1739,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

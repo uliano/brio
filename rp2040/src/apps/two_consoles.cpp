@@ -1,10 +1,10 @@
 // two_consoles - two kernels on two cores, each with a console of its
 // own: core 0's over UART0 (GP0 / GP1, the Debug Probe's bridge), core
 // 1's over UART1 (GP4 / GP5, a second bridge). The same three active
-// objects as the console app on core 0 - SerialPort, Console, Blinker -
+// objects as the console app on core 0 - SerialPort, Console, Lamp -
 // and two of them again on core 1, where the LED command CROSSES THE
 // BRIDGE: core 1 has no LED of its own (there is one, and core 0's
-// Blinker owns it), so its console sends the SetLed to core 0's Blinker
+// Lamp owns it), so its console sends the SetLed to core 0's Lamp
 // through util/inbox.hpp, and core 0's doorbell drain posts it.
 //
 // Type on either console at 115200 8N1:
@@ -30,7 +30,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/multicore.hpp"
 #include "rp2040/nvic.hpp"
@@ -69,32 +68,22 @@ constexpr Serial1 serial1;
 constexpr uint32_t console_baud = 115200;
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: core 0's, the one LED ---------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: core 0's, the one LED, dark until commanded ------------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 4, P0> queue;
-    static inline brio::TimeEvent<P0, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output();      // low: GP25's LED dark
+        start(&steady);
     }
 
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) { heartbeat.arm_every(brio::ticks_from_ms<P0>(500)); return handled(); },
-            [](brio::Exit) { heartbeat.disarm(); return handled(); },
-            [](Toggle) { Led::toggle(); return handled(); },
-            [](SetLed s) { apply(s); return transition(&manual); },
-            [](auto) { return unhandled(); });
-    }
-
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
-            [](auto) { return unhandled(); });
+            [](auto)     { return unhandled(); }
+        );
     }
 
 private:
@@ -107,9 +96,9 @@ private:
     }
 };
 
-// ---- a console on a core: parses lines, replies, commands the blinker ---------
+// ---- a console on a core: parses lines, replies, commands the lamp ----------
 // The LED command is the one line that knows which core it runs on: a
-// post on the Blinker's core, a send across the bridge from the other.
+// post on the Lamp's core, a send across the bridge from the other.
 template <typename Serial, typename P, uint8_t core>
 struct ConsoleOn : brio::Fsm<ConsoleOn<Serial, P, core>, brio::LineReceived> {
     using Base = brio::Fsm<ConsoleOn<Serial, P, core>, brio::LineReceived>;
@@ -166,12 +155,12 @@ private:
             return;
         }
         if constexpr (core == 0) {
-            brio::post<Blinker>(SetLed{mode});
+            brio::post<Lamp>(SetLed{mode});
             brio::print(s, "OK", brio::crlf);
         } else {
-            const uint16_t dropped = brio::Inbox<Blinker>::overflows();
-            brio::send<Blinker>(SetLed{mode});
-            brio::print(s, brio::Inbox<Blinker>::overflows() == dropped ? "OK (sent to core 0)" : "the bridge is full", brio::crlf);
+            const uint16_t dropped = brio::Inbox<Lamp>::overflows();
+            brio::send<Lamp>(SetLed{mode});
+            brio::print(s, brio::Inbox<Lamp>::overflows() == dropped ? "OK (sent to core 0)" : "the bridge is full", brio::crlf);
         }
     }
 
@@ -204,9 +193,9 @@ using Console1 = ConsoleOn<Serial1, P1, 1>;
 using Lines0 = Console0::Lines;
 using Lines1 = Console1::Lines;
 
-using K0 = brio::Tenuto<P0, Console0, Lines0, Blinker>;
+using K0 = brio::Tenuto<P0, Console0, Lines0, Lamp>;
 using K1 = brio::Tenuto<P1, Console1, Lines1>;
-using Drain0 = brio::Inboxes<Blinker>;   // what core 1 sends to core 0
+using Drain0 = brio::Inboxes<Lamp>;   // what core 1 sends to core 0
 
 /// Core 1's whole life: its ticker, its UART (the line enabled in its
 /// own NVIC), its kernel.

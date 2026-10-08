@@ -63,7 +63,6 @@ constexpr brio::UartPads console_pads{
 using Serial = brio::Uart<5, console_pads>;
 constexpr Serial serial;
 
-using Led = brio::Pin<'B', 23>;
 using Stim = brio::Pin<'A', 4>;     // AC AIN[0], driven as plain GPIO
 using CmpPad = brio::Pin<'A', 12>;  // AC CMP0, function H, read via PORT.IN
 
@@ -558,7 +557,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     // The slow sampling clock, before any letter runs. The LINEAR
     // divider, so the ratio is written where a reader can see it.
@@ -592,7 +590,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -119,7 +119,6 @@ constexpr UartPins instrument_pins{
 using Instrument = Uart<1, instrument_pins, 512, 512>;
 using U1 = Instrument::Resource;
 
-using Led = Pin<25>;
 
 TestBench<Serial, 16> bench;
 
@@ -742,7 +741,6 @@ int main() {
     const bool timer_ok = brio::Timer::init(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the facts: pins, divisor, reset state, refusals", ta_facts);
@@ -776,7 +774,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

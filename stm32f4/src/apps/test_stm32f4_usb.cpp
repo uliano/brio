@@ -110,11 +110,6 @@ constexpr uint8_t console_instance = 1;
 #endif
 using Serial = Uart<console_instance, console_pins>;
 constexpr Serial serial;
-#if defined(STM32F469xx)
-using Led = Pin<'G', 6>;    // LD1, lit when low
-#else
-using Led = Pin<'C', 13>;   // lit when low
-#endif
 using Usb = UsbFs;
 
 TestBench<Serial, 20> bench;
@@ -786,7 +781,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output(true);   // this LED is lit when low
     brio::enable_interrupts();
 
     // The port is brought up at boot so the host has something to open
@@ -829,7 +823,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

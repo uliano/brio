@@ -1397,8 +1397,7 @@ void tg_tc_capture_and_locks() {
                   "debugger is out of a console suite's reach and stays so",
                   (Timer3::debug_run(true), true));
     Timer3::release();
-    LedWave::release();
-    Led::output();
+    LedWave::release();   // PMUXEN off, DIR never set: the pad undriven
 }
 
 // ---------------------------------------------------------------------------
@@ -2241,7 +2240,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     const bool dma_ok = brio::Dmac::init();
     brio::Nvic::enable(brio::Dmac::irq());
@@ -2283,7 +2281,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -32,15 +32,15 @@
 // (channel 3) and PB1 (channel 9) its two outputs. OPA2: PB14 and PA7,
 // PB10 and PA5, PA2 (channel 2) and PA4 (channel 4). On the CH32V303 the
 // inputs and the first outputs are the same pads and the second outputs
-// are PE15 and PE14, with OPA3 on PB13 and PC5, PB2 and PC2, PA1
-// (channel 1) and PE7, and OPA4 on PB12 and PC4, PB1 and PC3, PA0
-// (channel 0) and PE8; on that board's evaluation wiring several of them
-// carry a wire to another pad left a floating input, which a pad driven by
-// its own port or by an amplifier drives with it, and PB2 is BOOT1 behind
-// ten kilohms to ground. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
-// (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
-// crystals), PA0 on the CH32V203's board (its KEY) - and PB2, toggled per
-// command as every suite of this target does.
+// are PE15 and PE14, with OPA3 on PB13 and PC5, PB2 and PC2, PA1 (channel
+// 1) and PE7, and OPA4 on PB12 and PC4, PB1 and PC3, PA0 (channel 0) and
+// PE8; on that board's evaluation wiring several of them carry a wire to
+// another pad left a floating input, which a pad driven by its own port or
+// by an amplifier drives with it, and PB2 is BOOT1 behind ten kilohms to
+// ground. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug
+// port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals),
+// PA0 on the CH32V203's board (its KEY) - and PB2, left undriven, as in
+// every suite of this target.
 //
 // What is exercised, letter by letter:
 //   a  OPA2 AS A COMPARATOR: its inputs driven to each rail in turn and
@@ -84,7 +84,6 @@ using namespace brio;
 using P = Ch32vx03Platform<>;
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 using SysClock = Clock<ClockSource::pll, 96'000'000>;
 constexpr SysClock clock;
@@ -848,7 +847,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "OPA2 as a comparator, its output read by the converter", ta_comparator);
@@ -875,7 +873,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

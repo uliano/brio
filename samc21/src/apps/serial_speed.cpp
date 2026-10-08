@@ -96,7 +96,6 @@ constexpr Plain plain_serial;
 constexpr Engined engined_serial;
 using Sc5 = Plain::Resource;
 
-using Led = Pin<'B', 23>;
 
 /// Which transport currently owns SERCOM5. Only one is ever initialized.
 bool engined = false;
@@ -604,7 +603,6 @@ extern "C" void DMAC_Handler() {
 int main() {
     const bool clock_ok = SysClock::init();
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     for (uint32_t i = 0; i < sizeof ramp; ++i) {
         ramp[i] = static_cast<uint8_t>(i);
@@ -634,7 +632,6 @@ int main() {
         if (c == '\r' || c == '\n') {
             continue;
         }
-        Led::toggle();
         if (c >= '0' && c < static_cast<uint8_t>('0' + rate_count)) {
             set_rate(static_cast<uint8_t>(c - '0'));
         } else if (c == 'p' || c == 'P') {

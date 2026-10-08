@@ -136,7 +136,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;
 
 TestBench<Serial> bench;
 
@@ -910,7 +909,6 @@ int main() {
     const bool ruler_ok = brio::Mtime::start(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the boot rate, the tree as init() left it, every clock counted", ta_boot);
@@ -951,7 +949,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

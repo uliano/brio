@@ -119,7 +119,6 @@ using namespace brio;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'C', 0>;
 
 using H = I2c<1>;
 using Host = I2cHost<1>;
@@ -1523,7 +1522,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless: reset values, the arithmetic, the refusals, "
@@ -1564,7 +1562,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

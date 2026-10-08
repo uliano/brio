@@ -61,7 +61,6 @@ constexpr UartPads console_pads{
 };
 using Serial = Uart<5, console_pads>;
 constexpr Serial serial;
-using Led = Pin<'B', 23>;
 
 TestBench<Serial> bench;
 
@@ -510,7 +509,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     // Captured before anything in this program can have written it, so
     // letter c has the fuses' own word to put back.
@@ -540,7 +538,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

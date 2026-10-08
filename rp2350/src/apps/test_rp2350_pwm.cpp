@@ -98,7 +98,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;
 using Ruler = Timer<0>;
 
 TestBench<Serial> bench;
@@ -1243,7 +1242,6 @@ int main() {
     const bool dma_ok = brio::Dma::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output(false);
     // A ramp in BOTH halves of every CC word: A rises by 100 a period and
     // B by 200, so the pad measured on the wire ends at 12600 of 15000.
     for (uint32_t i = 0; i < stream_levels; ++i) {
@@ -1284,7 +1282,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

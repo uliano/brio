@@ -163,7 +163,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;    // the WeAct board's LED: a keystroke marker
 using Free = Pin<22>;   // a pad this bench leaves unwired, for letter k
 
 TestBench<Serial, 18> bench;
@@ -1216,7 +1215,6 @@ int main() {
     brio::Timer<1>::source(brio::TimerSource::sysclk);   // letters w and o count cycles on it
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    (void)Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the boot story: identity, stepping, package, architecture", ta_boot);
@@ -1255,7 +1253,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

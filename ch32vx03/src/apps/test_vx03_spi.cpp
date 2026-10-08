@@ -50,8 +50,7 @@
 // PB15 (SPI2). NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the
 // debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
 // crystals), PA0 (the KEY), PB6/PB7 and PB10/PB11 (other phases' wires)
-// - and PB2, the LED, toggled per command as every suite of this target
-// does.
+// - and PB2, the LED, left undriven, as in every suite of this target.
 //
 // What is exercised, letter by letter:
 //   a  THE RATES: every BR code on both instances read back, with the
@@ -142,7 +141,6 @@ constexpr SysClock clock;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 TestBench<Serial> bench;
 
@@ -2867,7 +2865,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     third_pad_idle();
@@ -2897,7 +2894,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -159,7 +159,6 @@ using namespace brio;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 TestBench<Serial, 20> bench;
 
@@ -3312,7 +3311,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the baud generator: every standard rate on both buses", ta_divisor);
@@ -3350,7 +3348,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

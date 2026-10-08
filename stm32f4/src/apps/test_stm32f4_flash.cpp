@@ -90,19 +90,15 @@ using namespace brio;
 using P = Stm32f4Platform<>;
 
 #if defined(STM32F429xx)
-using Led = Pin<'G', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 #elif defined(STM32F469xx)
-using Led = Pin<'G', 6>;   // LD1, lit when low
 constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
 constexpr uint8_t console_instance = 3;
 #elif defined(STM32F411xE)
-using Led = Pin<'C', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 #else
-using Led = Pin<'A', 5>;
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 constexpr uint8_t console_instance = 2;
 #endif
@@ -907,7 +903,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     // The ruler: TIM2 free-running at 1 MHz over its whole 32 bits.
     const uint32_t tim_hz = Ruler::clock_hz(clock);
@@ -945,7 +940,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

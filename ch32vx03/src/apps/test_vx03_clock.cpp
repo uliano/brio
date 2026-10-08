@@ -82,7 +82,6 @@ using namespace brio;
 using P = Ch32vx03Platform<>;
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 // ---------------------------------------------------------------------------
 // The rates. Each is a static Clock task - the tuple of root, PLL ratio,
@@ -627,7 +626,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the tree as the registers hold it at boot", ta_tree);
@@ -657,7 +655,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

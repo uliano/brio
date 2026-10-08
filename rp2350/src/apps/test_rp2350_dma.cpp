@@ -137,7 +137,6 @@ constexpr UartPins instrument_pins{
 using InstrumentRx = DmaRxEngine<3>;
 using Instrument = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, InstrumentRx>;
 
-using Led = Pin<25>;
 
 TestBench<Serial, 16> bench;
 
@@ -1192,7 +1191,6 @@ int main() {
     brio::DmaLine<1>::enable();
     brio::DmaLine<2>::enable();
     brio::DmaLine<3>::enable();
-    (void)Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block as found, the refusals, the security read-back, an abort",
@@ -1231,7 +1229,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

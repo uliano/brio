@@ -97,7 +97,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<0, console_pins>;
 constexpr Serial serial;
 
-using Led = Pin<25>;
 
 TestBench<Serial> bench;
 
@@ -1022,7 +1021,6 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     const bool sha_ok = brio::Sha256::init();
     const bool trng_ok = brio::Trng::init();
-    (void)Led::output(false);
     brio::enable_interrupts();
 
     bench.letter('a', "the four blocks' boot story", ta_identity);
@@ -1054,7 +1052,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

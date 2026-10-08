@@ -152,7 +152,6 @@ using namespace brio;
 
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 // ---------------------------------------------------------------------------
 // The rates. 96 MHz is where everything is written: below
@@ -1614,7 +1613,6 @@ int main() {
     boot_record = brio::take_panic_record<P>();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the locks: which verb needs which, and a wrong one shut", ta_locks);
@@ -1686,7 +1684,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

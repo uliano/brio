@@ -63,7 +63,6 @@ using namespace brio;
 using P = Ch32x035Platform<>;
 using Serial = Uart<2, P>;
 constexpr Serial serial;
-using Led = Pin<'A', 0>;
 
 using Boot = Clock<ClockSource::internal, 48'000'000>;
 using SysClock = DynamicClock<Boot, Ticker, Serial>;
@@ -282,7 +281,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output(true);
     brio::enable_interrupts();
 
     bench.letter('a', "the tree as the registers hold it", ta_tree);
@@ -308,7 +306,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

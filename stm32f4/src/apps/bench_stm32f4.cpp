@@ -122,7 +122,7 @@
 //               WIRE is the pace: 4 bytes a microsecond.
 //        spi.dma, spi.dma16
 //               (the Nucleo-F446RE alone) an engined SpiHost request on
-//               SPI1 - SCK PA5 (the LED, given back after), MISO PA6
+//               SPI1 - SCK PA5 (the LED's pad, released after), MISO PA6
 //               floating on its pull-up, MOSI PA7 - DMA2 stream 3 out and
 //               stream 2 in, channel 3: 16 and 256 frames of 8 and of 16
 //               bits at SCK 22.5 and 5.625 MHz, ISR-style, the thread
@@ -296,19 +296,15 @@ namespace {
 using namespace brio;
 
 #if defined(STM32F429xx)
-using Led = Pin<'G', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 #elif defined(STM32F469xx)
-using Led = Pin<'G', 6>;   // LD1, lit when low
 constexpr UartPins console_pins{.tx = {'B', 10, PinFunction::af7}, .rx = {'B', 11, PinFunction::af7}};
 constexpr uint8_t console_instance = 3;
 #elif defined(STM32F411xE)
-using Led = Pin<'C', 13>;
 constexpr UartPins console_pins{.tx = {'A', 9, PinFunction::af7}, .rx = {'A', 10, PinFunction::af7}};
 constexpr uint8_t console_instance = 1;
 #else
-using Led = Pin<'A', 5>;
 constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3, PinFunction::af7}};
 constexpr uint8_t console_instance = 2;
 #endif
@@ -860,7 +856,6 @@ void td_dma() {
         }
     }
     FastSpi::release();
-    Led::output();
 #else
     print(serial, "  spi.dma declined on this board: the free pads are surveyed on the "
                   "Nucleo-F446RE alone", crlf);
@@ -1177,7 +1172,6 @@ void te_spi() {
     FastSpi::release();
     ReqCs::release();
     ReqDc::release();
-    Led::output();
 #else
     print(serial, "  letter e declined on this board: the free pads are surveyed on the "
                   "Nucleo-F446RE alone", crlf);
@@ -2276,7 +2270,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, console_baud);
     const bool tick_ok = brio::Ticker::init(clock);
     const bool ruler_ok = brio::CycleCounter::init();
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('r', "the ruler's self-check and the instrument's cost", tr_ruler);
@@ -2306,7 +2299,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

@@ -144,7 +144,7 @@ events), every fact about core 1 carried by an event that crossed:
   UART1, each on a Debug Probe's bridge, answers HELP, UPTIME (each
   core's own ticker), ERR and CORE on both with every counter at
   zero; the LED command typed on core 1 is a send across the bridge
-  to core 0's Blinker, and the pin follows it (read through the
+  to core 0's Lamp, and the pin follows it (read through the
   debugger after ON, OFF and TOG).
 - THE PROBE TRAP. OpenOCD's target script takes both cores as an SMP
   pair by default: programming halts both, and core 1 is left with

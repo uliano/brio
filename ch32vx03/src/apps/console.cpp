@@ -6,9 +6,9 @@
 //               buffers, backpressure on the ring - util/serial_port.hpp)
 //   Console     parses and routes each line, replies via blocking print,
 //               owns a 1 Hz time event whose count says the kernel's
-//               timers are alive, and drives the blinker BY POSTING
-//   Blinker     owns the LED: heartbeat time event at 1 Hz, manual
-//               LED ON|OFF|TOG commands arrive as posted SetLed events
+//               timers are alive, and drives the lamp BY POSTING
+//   Lamp        owns the LED, dark from boot: the LED ON|OFF|TOG
+//               commands arrive as posted SetLed events
 //
 // Everything above the glue is portable: the AOs, their events, their
 // queues, and every kernel and util header below them - the same files
@@ -73,45 +73,26 @@ constexpr Serial serial;           // tag for print(serial, ...)
 constexpr uint32_t console_baud = 115200;
 
 using Led = brio::Pin<'B', 2>;     // presumed the board's LED (see header)
+// The CH32V303's board is WCH's evaluation board, whose LED hangs from
+// 3.3 V and lights with the pad low; the WeAct CH32V203 board's lights
+// with it high (see header). The part's class names the board.
+constexpr bool led_lit_low =
+    brio::device::device_class == brio::DeviceClass::v30x_d8;
 
 // ---- events -----------------------------------------------------------------
 struct Beat {};                                    // Console's own heartbeat
-struct Toggle {};                                  // Blinker's heartbeat
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output(led_lit_low);   // the dark level first
+        start(&steady);
     }
 
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) {
-                heartbeat.arm_every(brio::ticks_from_ms<P>(500));
-                return handled();
-            },
-            [](brio::Exit) {
-                heartbeat.disarm();
-                return handled();
-            },
-            [](Toggle) {
-                Led::toggle();
-                return handled();
-            },
-            [](SetLed s) {
-                apply(s);
-                return transition(&manual);
-            },
-            [](auto) { return unhandled(); }
-        );
-    }
-
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
             [](auto)     { return unhandled(); }
@@ -191,7 +172,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});
+        brio::post<Lamp>(SetLed{mode});
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -268,5 +249,5 @@ int main()
                     "), type HELP", brio::crlf, "> ");
     }
 
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

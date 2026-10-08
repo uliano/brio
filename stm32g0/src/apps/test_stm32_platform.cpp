@@ -150,18 +150,6 @@ constexpr UartPins console_pins{
 using Serial = Uart<2, console_pins>;
 constexpr Serial serial;
 
-// The board's user LED, the one thing in this suite that is a BOARD fact
-// and not a part fact: the Nucleo-64s carry LD4 on PA5, the Nucleo-32
-// carries LD3 on PC6 (UM2591). Only the preprocessor can ask which
-// device header is compiled - blink.cpp and console.cpp ask it the same
-// way. Nothing is judged on it: the LED marks a keystroke for a hand at
-// the desk.
-#if defined(STM32G031xx)
-using Led = Pin<'C', 6>;   // LD3 on the Nucleo-32
-#else
-using Led = Pin<'A', 5>;   // LD4 on the Nucleo-64s
-#endif
-
 TestBench<Serial> bench;
 
 // What this boot was told, sampled once in main() before anything can
@@ -1647,7 +1635,6 @@ int main() {
     brio::Rcc::apb1_clock(RCC_APBENR1_DBGEN, true);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     brio::enable_interrupts();
 
@@ -1689,7 +1676,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

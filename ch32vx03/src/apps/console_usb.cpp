@@ -1,6 +1,6 @@
 // console_usb - the brio kernel console over the chip's own USB: the
 // same three active objects as the console app (SerialPort, Console,
-// Blinker), the transport a CDC ACM port instead of a UART - nothing
+// Lamp), the transport a CDC ACM port instead of a UART - nothing
 // above the transport changed. THE CONTROLLER IS THE PART'S: the
 // CH32V203's USB device controller (ch32vx03/usb.hpp, RM ch. 21) where
 // the part has one, and the host/device controller in device mode
@@ -58,7 +58,6 @@
 #include "kernel/fsm.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
-#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
 #include "util/serial_port.hpp"
@@ -76,6 +75,12 @@ constexpr SysClock clock;
 namespace {
 
 using Led = brio::Pin<'B', 2>;
+// The CH32V303's board is WCH's evaluation board, whose LED hangs from
+// 3.3 V and lights with the pad low (docs/boards/ch32v303-evt.md); the
+// WeAct CH32V203 board's lights with it high. The part's class names the
+// board.
+constexpr bool led_lit_low =
+    brio::device::device_class == brio::DeviceClass::v30x_d8;
 
 // The device controller with its CAN-safe 384 bytes of packet memory
 // where the part has one; the host/device controller with its buffers
@@ -107,32 +112,22 @@ struct Descriptors {
 using Device = brio::UsbDevice<Usb, Descriptors, Serial>;
 
 // ---- events -----------------------------------------------------------------
-struct Toggle {};
 struct SetLed { enum class Mode : uint8_t { on, off, tog } mode; };
 
-// ---- the blinker: owns the LED ----------------------------------------------
-struct Blinker : brio::Fsm<Blinker, Toggle, SetLed> {
+// ---- the lamp: owns the LED, dark until a command lights it -----------------
+struct Lamp : brio::Fsm<Lamp, SetLed> {
     static inline brio::EventQueue<Event, 2, P> queue;
-    static inline brio::TimeEvent<P, Blinker, Toggle> heartbeat{Toggle{}};
 
     static void init() {
-        Led::output();
-        start(&beating);
+        Led::output(led_lit_low);   // the dark level first
+        start(&steady);
     }
 
-    static Status beating(const Event& e) {
-        return brio::match(e,
-            [](brio::Entry) { heartbeat.arm_every(brio::ticks_from_ms<P>(500)); return handled(); },
-            [](brio::Exit) { heartbeat.disarm(); return handled(); },
-            [](Toggle) { Led::toggle(); return handled(); },
-            [](SetLed s) { apply(s); return transition(&manual); },
-            [](auto) { return unhandled(); });
-    }
-
-    static Status manual(const Event& e) {
+    static Status steady(const Event& e) {
         return brio::match(e,
             [](SetLed s) { apply(s); return handled(); },
-            [](auto) { return unhandled(); });
+            [](auto)     { return unhandled(); }
+        );
     }
 
 private:
@@ -190,7 +185,7 @@ private:
             brio::print(s, "usage: LED ON|OFF|TOG", brio::crlf);
             return;
         }
-        brio::post<Blinker>(SetLed{mode});
+        brio::post<Lamp>(SetLed{mode});
         brio::print(s, "OK", brio::crlf);
     }
 
@@ -300,5 +295,5 @@ int main()
                 clock_ok ? "XT48" : "FAILED", ", usb=", usb_ok ? "48MHz" : "FAILED",
                 ", tick=", tick_ok ? "STK" : "FAILED", "), type HELP", brio::crlf, "> ");
 
-    brio::Tenuto<P, Console, SerialLines, Blinker>::run();
+    brio::Tenuto<P, Console, SerialLines, Lamp>::run();
 }

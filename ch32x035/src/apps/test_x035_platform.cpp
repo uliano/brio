@@ -15,9 +15,9 @@
 // NOTHING TO WIRE. The console is USART2 on PA2/PA3, the pads WCH's
 // evaluation board brings to its "Serial port 2" header, wired to the
 // probe's own serial; every clock this suite measures is inside the chip.
-// The LED on PA0 marks a keystroke for a hand at the desk and is judged on
-// nothing: on WCH's QFN20 evaluation board it is the header P4's LED1,
-// jumpered to PA0, and it lights with the pad LOW.
+// The LED on PA0 is left undriven, so it stays dark: on WCH's QFN20
+// evaluation board it is the header P4's LED1, jumpered to PA0, and it
+// lights with the pad LOW.
 //
 // NOTHING HERE ENTERS STOP OR STANDBY: SLEEPDEEP is never set, and idle()
 // is the plain Sleep of RM 2.3.2.
@@ -117,7 +117,6 @@ using namespace brio;
 
 using Serial = Uart<2, P>;
 constexpr Serial serial;
-using Led = Pin<'A', 0>;
 
 TestBench<Serial> bench;
 
@@ -886,7 +885,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output(true);
     brio::enable_interrupts();
 
     bench.letter('a', "the boot story: the reset flags and the signature", ta_boot);
@@ -917,7 +915,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

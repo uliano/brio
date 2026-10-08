@@ -57,7 +57,6 @@ using namespace brio;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'C', 0>;
 using PosPad = Pin<'A', 2>;
 using NegPad = Pin<'A', 4>;        ///< the differential PGA's (CH32V006)
 using NegPadV003 = Pin<'D', 0>;    ///< OPN1 (CH32V003)
@@ -299,7 +298,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless: the lock as found, the keys, a configuration, the refusals", ta_block);
@@ -325,7 +323,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

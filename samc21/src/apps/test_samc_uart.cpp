@@ -124,7 +124,6 @@ using URxDma = Uart<5, console_pads, rx_ring, tx_ring, NoDmaEngine, DmaRxEngine<
 constexpr UPlain plain;
 
 using Sc5 = UPlain::Resource;
-using Led = Pin<'B', 23>;
 
 TestBench<UPlain, 20> bench;
 
@@ -1640,7 +1639,6 @@ extern "C" void DMAC_Handler() {
 int main() {
     const bool clock_ok = SysClock::init();
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
 
     const bool dma_ok = brio::Dmac::init();
     brio::Nvic::enable(brio::Dmac::irq());
@@ -1690,7 +1688,6 @@ int main() {
             continue;
         }
         print(plain, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

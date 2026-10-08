@@ -80,8 +80,8 @@ brio::Gpio::out_toggle(0x3f7ffffcu); // one word, one cycle
 - The pads read back as programmed: GP0 (UART TX) at 0x52 - input
   enabled, 4 mA, hysteresis, no pull - and GP1 (UART RX) at 0x5a with
   the pull-up the UART task asks for.
-- The LED on GP25 follows `Pin<25>` under the console's heartbeat
-  (GPIO_OUT's bit 25 toggling at 2 Hz through SIO).
+- The LED on GP25 follows `Pin<25>` (GPIO_OUT's bit 25 toggled through
+  SIO and read back).
 
 ## Not covered yet
 

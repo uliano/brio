@@ -56,7 +56,7 @@
 // nothing, and letter d stages what it prevents with a bare wfi.
 //
 // THE PADS. PA11/PA12 (the connector), PA9/PA10 (the console), PB2 (the
-// LED, toggled per command as every suite of this target does), and PB7
+// LED, left undriven, as in every suite of this target), and PB7
 // read once as a contrast in letter p. No wire is needed.
 //
 // What is exercised, letter by letter:
@@ -144,7 +144,6 @@ constexpr SysClock clock;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 TestBench<Serial> bench;
 
@@ -1273,7 +1272,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool usb_ok = Usb::init(clock);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
     if (usb_ok) {
         Device::start();   // the pull-up: the host enumerates from here
@@ -1315,7 +1313,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

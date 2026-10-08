@@ -28,8 +28,8 @@
 // THE PADS. PB12, PB13, PB15 and PA15, PB3, PB5 (the two columns' WS, CK
 // and SD), PB14 and PB4 released. NEVER TOUCHED: PA9/PA10 (the console),
 // PA13/PA14 (the debug port), PA11/PA12 (the USB pads), PC6 (the timers'
-// wire, and I2S2's MCK) - and PB2, toggled per command as every suite of
-// this target does.
+// wire, and I2S2's MCK) - and PB2, left undriven, as in every suite of
+// this target.
 //
 // What is exercised, letter by letter:
 //   a  THE REGISTER FACE with no wire: every configuration field of
@@ -86,7 +86,6 @@ using namespace brio;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 TestBench<Serial, 12> bench;
 
@@ -894,7 +893,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the register face, the clock and the dividers, with no wire", ta_face);
@@ -923,7 +921,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

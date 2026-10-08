@@ -114,7 +114,6 @@ constexpr UartPins instrument_pins{
 };
 using Instrument = Uart<1, instrument_pins, 1024, 1024, DmaTxEngine<2>, DmaRxEngine<3>>;
 
-using Led = Pin<25>;
 
 TestBench<Serial, 16> bench;
 
@@ -817,7 +816,6 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::DmaLine<0>::enable();
     brio::DmaLine<1>::enable();
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block as found, the refusals, a stalled channel aborted", ta_as_found);
@@ -853,7 +851,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

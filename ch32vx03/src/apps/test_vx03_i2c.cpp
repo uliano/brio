@@ -66,12 +66,11 @@
 //    failing.
 //
 // THE PADS. PB6 and PB7 - and on a part with I2C2 PB10 and PB11, I2C2's,
-// driven only after letters l..o have found the two wires to PB6/PB7 -
-// and nothing else. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
-// (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1
-// (the crystals), PB12..PB15 (the SPI link), PA0..PA8
-// (other phases' straps) - and PB2, the LED, toggled per command as
-// every suite of this target does.
+// driven only after letters l..o have found the two wires to PB6/PB7 - and
+// nothing else. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the
+// debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
+// crystals), PB12..PB15 (the SPI link), PA0..PA8 (other phases' straps) -
+// and PB2, the LED, left undriven, as in every suite of this target.
 //
 // What is exercised, letter by letter:
 //   a  THE BLOCK AND THE ARITHMETIC: the reset values, the three
@@ -186,7 +185,6 @@ constexpr SysClock clock;
 
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 
 TestBench<Serial> bench;
 
@@ -3060,7 +3058,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     bench.letter('a', "the block: the reset values, the three timing registers, the enable "
@@ -3111,7 +3108,6 @@ int main() {
             continue;
         }
         print(serial, static_cast<char>(c), crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

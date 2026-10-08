@@ -17,7 +17,7 @@
 // cable on that connector sees nothing change. The USB pads PC16/PC17 and
 // the debug port's PC18/PC19 are not touched. Letter `w` wants a jumper
 // PA4-PA5 and DETECTS it first; without it the letter says so and judges
-// nothing. The LED on PA0 marks a keystroke and is judged on nothing.
+// nothing. The LED on PA0 is left undriven, so it stays dark.
 //
 // What is exercised, letter by letter:
 //   a  the nibbles: every mode of this series into PA6 (CFGLR) and PB11
@@ -67,7 +67,6 @@ using namespace brio;
 
 using Serial = Uart<2, P>;
 constexpr Serial serial;
-using Led = Pin<'A', 0>;
 
 using Low = Pin<'A', 6>;      // CFGLR
 using High = Pin<'B', 11>;    // CFGHR, through its copy
@@ -313,7 +312,6 @@ int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output(true);
     brio::enable_interrupts();
 
     bench.letter('a', "the nibbles in the three configuration registers", ta_nibbles);
@@ -340,7 +338,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {

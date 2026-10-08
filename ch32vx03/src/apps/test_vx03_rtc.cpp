@@ -110,7 +110,6 @@ using namespace brio;
 
 using Serial = Uart<1, P>;
 constexpr Serial serial;
-using Led = Pin<'B', 2>;
 using TamperPad = Pin<'C', 13>;
 
 TestBench<Serial> bench;
@@ -1095,7 +1094,6 @@ int main() {
     boot_flags = brio::Reset::take_flags();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    Led::output();
     brio::enable_interrupts();
 
     // BEFORE the domain is opened: what the reset left.
@@ -1150,7 +1148,6 @@ int main() {
             continue;
         }
         brio::print(serial, static_cast<char>(c), brio::crlf);
-        Led::toggle();
         if (c == '?') {
             banner();
         } else if (!bench.handle(static_cast<char>(c))) {
