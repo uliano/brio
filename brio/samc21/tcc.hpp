@@ -158,9 +158,10 @@
  *    that can be turned into a compile error, and it is.
  *  - 1.21.11 Overflow DMA trigger: the OVF DMA trigger in DMAOS mode is
  *    broken FOR RAMP2C AND RAMP2CS ONLY. Those ramp modes are variant-L
- *    (36.8.17) and this family does not have them, so the item cannot
- *    be reached here - see `TccRamp::ramp2_critical`, which this driver
- *    refuses for that independent reason.
+ *    (36.8.17) and this family does not have them - see
+ *    `TccRamp::ramp2_critical`, which this driver refuses - and this
+ *    stratum drives no DMA from a timer (samc21/dmac.hpp), so the item
+ *    cannot be reached here twice over.
  *
  *  NOT THIS SILICON (revision B only - do not code around them):
  *  1.21.1 Circular Buffer in standby, 1.21.2 RAMP2 double restart,
@@ -310,7 +311,8 @@ enum class TccCommand : uint8_t {
     /// independently of CTRLB.LUPD (36.6.2.6).
     update = TCC_CTRLBSET_CMD_UPDATE_Val,
     read_sync = TCC_CTRLBSET_CMD_READSYNC_Val,
-    dma_one_shot = TCC_CTRLBSET_CMD_DMAOS_Val,
+    // CMD = DMAOS has no enumerator, nor CTRLA.DMAOS a field: this
+    // stratum drives no DMA from a timer (samc21/dmac.hpp).
 };
 
 /// CTRLBSET.IDXCMD: force the next RAMP2/RAMP2A cycle to be A or B.
@@ -477,9 +479,6 @@ struct TccConfig {
     uint8_t capture_enable = 0;
 
     bool run_standby = false;
-    /// CTRLA.DMAOS: one DMA trigger per DMAOS command instead of one per
-    /// cycle (36.6.5.1).
-    bool dma_one_shot = false;
     /// CTRLA.MSYNC: this CLIENT instance's counter is driven by its host
     /// (36.6.4). Legal only where `TCCn_MASTER_SLAVE_MODE` is 2.
     bool host_sync = false;
@@ -629,7 +628,7 @@ struct TccFaultConfig {
 //
 // `tcc_count()`, `tcc_cc_count(n)`, `tcc_wo_count(n)`, `tcc_size(n)`,
 // `tcc_gclk_id(n)`, `tcc_pair_role(n)`, the five extension probes and
-// the EVSYS/DMAC codes all live in the reserve, read out of the device
+// the EVSYS codes all live in the reserve, read out of the device
 // header's own `TCCn_*` constants.
 
 /// How many dead-time/swap slices an instance has: one per compare
@@ -815,11 +814,10 @@ public:
         return static_cast<IRQn_Type>(static_cast<int>(TCC0_IRQn) + n);
     }
 
-    // ---- the EVSYS and DMAC vocabularies this peripheral publishes ---------
+    // ---- the EVSYS vocabulary this peripheral publishes -----------------
     //
-    // evsys.hpp owns the fabric and not the vocabulary; dmac.hpp owns
-    // the channels and not the trigger table. Both come out of the
-    // device header, through the reserve - the TCC's generator codes are
+    // evsys.hpp owns the fabric and not the vocabulary. The codes come
+    // out of the device header, through the reserve - the TCC's generator codes are
     // NOT evenly spaced across instances (TCC0 spends seven of them,
     // TCC1 and TCC2 five each), so they are read and not computed.
     //
@@ -848,11 +846,6 @@ public:
     /// The user index a recoverable fault listens on.
     static constexpr uint8_t fault_user(TccFault f) {
         return match_user(static_cast<uint8_t>(f));
-    }
-
-    static constexpr uint8_t dma_trigger_overflow = tcc_dma_overflow_id(n);
-    static constexpr uint8_t dma_trigger_match(uint8_t ch) {
-        return static_cast<uint8_t>(tcc_dma_match0_id(n) + ch);
     }
 
     static tcc_registers_t& regs() {
@@ -963,7 +956,6 @@ public:
             TCC_CTRLA_RESOLUTION(static_cast<uint32_t>(c.resolution)) |
             TCC_CTRLA_CPTEN(c.capture_enable) |
             (c.run_standby ? TCC_CTRLA_RUNSTDBY_Msk : 0u) |
-            (c.dma_one_shot ? TCC_CTRLA_DMAOS_Msk : 0u) |
             (c.host_sync ? TCC_CTRLA_MSYNC_Msk : 0u);
 
         const uint8_t set = static_cast<uint8_t>(

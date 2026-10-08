@@ -44,10 +44,6 @@ static_assert(Tc<0>::match_generator(0) == 0x35 && Tc<0>::match_generator(1) == 
 static_assert(Tc<4>::overflow_generator == 0x40);
 static_assert(Tc<0>::event_user == 23 && Tc<4>::event_user == 27);
 
-// And the DMAC trigger ids, from the header's own constants.
-static_assert(Tc<0>::dma_trigger_overflow == TC0_DMAC_ID_OVF);
-static_assert(Tc<0>::dma_trigger_match(1) == TC0_DMAC_ID_MC1);
-
 static_assert(Tc<0>::irq() == TC0_IRQn && Tc<4>::irq() == TC4_IRQn);
 
 // ---- the refusals ----------------------------------------------------------

@@ -8,7 +8,6 @@
 // per-package pad table. The board's own SERCOM1 on PA16..PA19 is an
 // app-level fact and is not compiled here.
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/platform.hpp"
 #include "samc21/spi.hpp"
 #include "kernel/time.hpp"
@@ -256,8 +255,6 @@ void resource_verbs() {
     static_assert(Sp::gclk_core_id() == Sercom<0>::gclk_core_id());
     static_assert(Sp::apb_mask() == Sercom<0>::apb_mask());
     static_assert(Sp::irq() == Sercom<0>::irq());
-    static_assert(Sp::dma_rx_trigger() == Sercom<0>::dma_rx_trigger());
-    static_assert(Sp::dma_tx_trigger() == Sercom<0>::dma_tx_trigger());
 
     Sp::bus_clock(true);
     (void)Sp::core_clock(0);
@@ -280,7 +277,6 @@ void resource_verbs() {
     (void)Sp::mode();
     (void)Sp::receiver();
     (void)Sp::receiver(false);
-    (void)Sp::data_address();
 
     (void)Sp::pending();
     (void)Sp::flags();
@@ -314,42 +310,8 @@ void resource_verbs() {
 using Host = SpiHost<0, host_pads>;
 using Peer = SpiClient<0, client_pads>;
 
-// The ENGINED host: the data phase on two DMAC channels. The engineless
-// default must stay byte-identical (the md5 gate's claim); this
-// instantiation proves the DMA half of the template compiles on every
-// package, dma_isr() included. Its negatives live in neg/ (same channel
-// twice, one engine alone, a halfword element).
-#include "samc21/dmac.hpp"
-using EnginedHost = SpiHost<0, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
-static_assert(EnginedHost::has_engines);
-static_assert(!Host::has_engines);
-static_assert(std::is_trivially_copyable_v<EnginedHost::Request>);
-
-void engined_verbs() {
-    constexpr SysClock clock;
-    (void)Dmac::init();
-    (void)EnginedHost::init(clock);
-    static uint8_t out[4] = {1, 2, 3, 4};
-    static uint8_t in[4] = {};
-    const EnginedHost::Request r{
-        .cs = Pin<'B', 0>::ref(),
-        .dc = {},
-        .cmd = {},
-        .tx = lend<Lease::reply>(static_cast<const uint8_t*>(out)),
-        .rx = lend<Lease::reply>(in),
-        .len = 4,
-        .cmd_len = 0,
-        .polled = true,
-        .baud = 23,
-        .mode = SpiMode::mode0,
-        .reply = {},
-    };
-    (void)EnginedHost::start(r);
-    (void)EnginedHost::isr();
-    (void)EnginedHost::dma_isr(0, 0x2);
-    (void)EnginedHost::status();
-    EnginedHost::release();
-}
+// No engine slot: the data phase is the polled loop or the pump
+// (samc21/spi.hpp; neg/spi_engine_slot_absent.cpp).
 
 // The Request is the bus arbiter's token and must be copyable into its
 // pending FIFO (util/bus_master.hpp).
@@ -432,25 +394,18 @@ void client_verbs() {
 // peripheral's) means there is no vocabulary to publish. There is
 // nothing to assert about an absence, so this is a comment and not an
 // assertion - the guard against inventing one is that spi.hpp names no
-// event code at all. What the SERCOM DOES have, the two DMAC triggers,
-// comes from Sercom<n> and is checked above.
+// event code at all.
 
 
 // ---- the per-bus timeout instantiates over this engine ---------------------
-// A timed SpiBus static_asserts Bus::recover(); this engine's puts the
-// DMA channels away and re-claims them, resets and reconfigures the
-// SERCOM to the applied state, and closes the select window
-// (util/bus_master.hpp). Both flavours compile: bare and engined.
+// A timed SpiBus static_asserts Bus::recover(); this engine's resets and
+// reconfigures the SERCOM to the applied state and closes the select
+// window (util/bus_master.hpp).
 using TimedSpiBus = SpiBus<SpiHost<0, host_pads>, SamPlatform, 4, BusPassThrough,
                            ticks_from_ms<SamPlatform>(100)>;
-using TimedEnginedBus = SpiBus<EnginedHost, SamPlatform, 4, BusPassThrough,
-                               ticks_from_ms<SamPlatform>(100)>;
 
 void timed_bus_surface() {
     TimedSpiBus::init();
     (void)TimedSpiBus::stale_events();
-    TimedEnginedBus::init();
-    (void)TimedEnginedBus::stale_events();
     (void)SpiHost<0, host_pads>::recover();
-    (void)EnginedHost::recover();
 }

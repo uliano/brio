@@ -134,9 +134,9 @@
  * be decided after the edge, with the controller already writing the
  * buffer the caller holds (measured on the STM32G0, and again here -
  * docs/ch32vx03/adc.md). So the source stops itself at every block and
- * the handler re-arms the other buffer, which is the SAM C21's shape
- * and the STM32G0's; the four engine names are the same words in all
- * three strata (docs/design/block-stream.md).
+ * the handler re-arms the other buffer, the STM32G0's shape; the four
+ * engine names are the same words in both strata
+ * (docs/design/block-stream.md).
  */
 
 #pragma once

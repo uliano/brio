@@ -182,9 +182,8 @@
  *    for the buffer on both internal references. Measured in the suite.
  *  - 1.8.7 DMA Write Access in standby (ALL REVISIONS) names
  *    `SDADC: SWTRIG` among the registers a SleepWalking DMA write may
- *    fail to reach. The workaround is the application's - use Idle and
- *    not Standby when a DMA channel writes SWTRIG - and it is stated on
- *    `start()`; a driver cannot know which sleep mode is coming.
+ *    fail to reach. Unreachable here: this stratum's one DMA channel
+ *    writes a SERCOM's DATA, never in standby (samc21/dmac.hpp).
  *  - NOT this silicon, and each is a read-the-row trap: 1.18.1 (the APB
  *    clock having to be at least twice GCLK_SDADC or the first
  *    conversion of a sequence is invalid) is REVISION B ONLY; 1.18.3
@@ -199,8 +198,7 @@
  *
  * ---------------------------------------------------------------------
  * NOT BUILT (docs/samc21/sdadc.md carries the list): the converter as a
- * WAKE source, and erratum 1.8.7's SleepWalking obligation on SWTRIG,
- * which needs a DMA write during a standby; ANACTRL's CTLSDADC and
+ * WAKE source; ANACTRL's CTLSDADC and
  * BUFTEST, which 39.8.21 describes too thinly to measure against
  * anything; REFCTRL.REFRANGE, a real field no document of record
  * explains; and the C20 half of the family, which has no SDADC at all.
@@ -670,9 +668,9 @@ public:
 
     // ---- the vocabularies this peripheral publishes -------------------------
     //
-    // evsys.hpp owns the FABRIC and dmac.hpp owns the CHANNELS; the codes
-    // of their tables that belong to the SDADC live here, probed from the
-    // device header in samc21/device_tables.hpp.
+    // evsys.hpp owns the FABRIC; the codes of its tables that belong to
+    // the SDADC live here, probed from the device header in
+    // samc21/device_tables.hpp.
 
     /// Generator: a conversion result is available.
     static constexpr uint8_t resrdy_generator = sdadc_resrdy_generator();
@@ -683,8 +681,6 @@ public:
     static constexpr uint8_t start_event_user = sdadc_start_user();
     /// User: flush the pipeline and restart. Same restriction.
     static constexpr uint8_t flush_event_user = sdadc_flush_user();
-    /// DMAC trigger: the one DMA request this peripheral has (39.6.4).
-    static constexpr uint8_t dma_trigger_resrdy = sdadc_dma_resrdy_id();
 
     /// INTFLAG / INTENSET bits, named.
     static constexpr uint8_t flag_resrdy = SDADC_INTFLAG_RESRDY_Msk;
@@ -998,11 +994,6 @@ public:
      * SWTRIG.START. Write-only and self-clearing (39.8.17), so there is
      * nothing to read back and `false` means the register was busy, not
      * that the conversion failed.
-     *
-     * ERRATUM 1.8.7 (all revisions) names `SDADC: SWTRIG` among the
-     * registers a DMA write made during standby SleepWalking may not
-     * reach; the workaround is to use Idle instead, and it is the
-     * application's, since this header cannot know which sleep is coming.
      */
     static bool start(uint32_t spins = 0xFFFFu) {
         return write_sync(regs().SDADC_SWTRIG, SDADC_SYNCBUSY_SWTRIG_Msk,
@@ -1022,7 +1013,7 @@ public:
     static bool overrun() { return (regs().SDADC_INTFLAG & flag_overrun) != 0u; }
 
     /// RESULT as the silicon holds it: the whole 24-bit register, for a
-    /// caller checking the placement or moving it by DMA.
+    /// caller checking the placement.
     static uint32_t result_raw() {
         last_hit_ = (regs().SDADC_INTFLAG & flag_winmon) != 0u;
         return regs().SDADC_RESULT & SDADC_RESULT_RESULT_Msk;

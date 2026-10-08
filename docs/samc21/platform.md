@@ -120,9 +120,11 @@ rule above, and with SysTick's counter running in there the guard is
 also what keeps the tick from ending the standby every period. **1.8.14** (standby
 with VREGSMOD in performance mode switches to the low-power regulator
 and keeps requesting GCLK0; the workaround is SUPC.VREG.RUNSTDBY)
-and **1.8.7** (a DMA write performed while sleepwalking may not land
-on RTC.COUNT, the TC/TCC control and count registers, or ADC/SDADC
-SWTRIG) are live and stated where they belong; **1.8.5** (higher
+is live and stated where it belongs; **1.8.7** (a DMA write performed
+while sleepwalking may not land on RTC.COUNT, the TC/TCC control and
+count registers, or ADC/SDADC SWTRIG) is live and unreachable: the one
+DMA channel this stratum drives writes a SERCOM's DATA and is never
+configured to run in standby ([dmac.md](dmac.md)); **1.8.5** (higher
 standby current, no workaround) is a number, not a behaviour. NOT this
 silicon, revision B only: 1.8.1, 1.8.11, 1.8.6.
 
@@ -545,7 +547,9 @@ Every sleepwalking chain in this stratum depends on that bit.
 **A PAD CAN BE MOVED WHILE THE CPU IS STOPPED, and only one way.** The
 pull-walking that makes this stratum's pin tests wireless
 ([eic.md](eic.md)) is a CPU store and is therefore unavailable in a
-standby; the DMAC's own standby sequence is another chapter's (25.6.7).
+standby, and the DMAC cannot stand in for it: the one channel this
+stratum drives is the Uart's transmitter, never configured to run in
+standby (CHCTRLA.RUNSTDBY clear, 25.6.7).
 What is left is the PORT as an EVENT USER with EVACT = OUT, the one
 action 28.6.4 says survives a standby - and it does. The chain that
 every pin-driven sleep measurement here is built on:
@@ -708,6 +712,13 @@ Driver gaps (not built):
 - **The MPU**: nothing here needs memory protection; born with its
   first user. (The MTB trace is built - [mtb.md](mtb.md) - and DIVAS
   as the toolchain's division is ruled out, [divas.md](divas.md).)
+- **The DMA transmitter across a standby entry.** 25.6.7 makes a channel
+  with CHCTRLA.RUNSTDBY clear software's to suspend before standby (its
+  SYNCBUSY bits checked) and to resume after; the Uart's transmit engine
+  ([dmac.md](dmac.md)) is such a channel and nothing suspends it, so a
+  standby entered with a console block in flight is outside what this
+  stratum has run. Born with the first program that sleeps to standby
+  on a console whose Uart names `DmaTxEngine`.
 
 Implemented but not bench-verified:
 - **A handler in SRAM at its full gain.** The 35 per cent above was
@@ -734,9 +745,6 @@ Implemented but not bench-verified:
   erratum 1.8.5 do to it - is a measurement with an ammeter in the
   supply; errata 1.3.1 and 1.8.5 are both consumption claims and both
   are therefore out of reach.
-- **The DMAC across a standby** (25.6.7 and erratum 1.8.7's list of
-  registers a SleepWalking DMA write may not reach). Nothing here
-  streams DMA through a sleep; [dmac.md](dmac.md) still owns that gap.
 - **Whether a clock runs in standby with NOTHING requesting it.** Every
   peripheral measurement in the section above is itself a request.
   SysTick is the one witness that is not, and it says generator 0 runs

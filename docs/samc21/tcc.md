@@ -6,8 +6,7 @@ this silicon**. Driver: `samc21/tcc.hpp`, with its per-instance and
 per-pad data in `samc21/device_tables.hpp`. Family fixture
 `test/family_samc21/tcc.cpp` plus eight negatives under
 `brio check samc21`; the bench suites are `test_samc_tcc` and - for
-DMA-driven operation, the circular buffers and the advanced modes -
-`test_samc_timer_dma`.
+the circular buffers and the advanced modes - `test_samc_timer_modes`.
 
 ## What the silicon does
 
@@ -125,9 +124,11 @@ What the driver does with each live one:
 - **1.21.6 is code**: `clear_buffer_valid()` clears the flag TWICE, which
   is the whole documented workaround and the exact twin of the TC's
   1.20.3.
-- **1.21.11 is out of reach by construction**: it applies only to RAMP2C
-  and RAMP2CS, which 36.8.17 marks variant-L, and `tcc_wave_valid()`
-  refuses RAMP2C for that independent reason.
+- **1.21.11 is out of reach by construction, twice over**: it applies
+  only to RAMP2C and RAMP2CS, which 36.8.17 marks variant-L, and
+  `tcc_wave_valid()` refuses RAMP2C for that independent reason; and
+  this stratum drives no DMA from a timer ([dmac.md](dmac.md)), so
+  neither the DMAOS command nor CTRLA.DMAOS has a spelling here.
 - **1.21.5, 1.21.7 and 1.21.9 are stated caller obligations.** 1.21.5 is
   a property of the whole channel set (basic capture on the low channels,
   advance capture on the high ones) that no single register write can
@@ -169,7 +170,7 @@ between the structs.
 **Geometry**, all from the reserve: `tcc_count()`, `tcc_cc_count`,
 `tcc_wo_count`, `tcc_size`, `tcc_gclk_id`, `tcc_pair_role`, the five
 `tcc_has_*` probes, `tcc_ext_code`, `tcc_slice_count`, `tcc_max_count`,
-and the DMAC and EVSYS codes.
+and the EVSYS codes.
 
 **`Tcc<n>`** - `index`, `cc_count`, `wo_count`, `counter_bits`,
 `max_count`, `gclk_id`, `slice_count`, `has_dead_time`,
@@ -177,8 +178,7 @@ and the DMAC and EVSYS codes.
 `extension_code`, `is_pair_host`, `is_pair_client`, `irq()`;
 `overflow_generator`, `retrigger_generator`, `count_generator`,
 `match_generator(ch)`, `event_user(which)`, `match_user(ch)`,
-`fault_user(f)`, `dma_trigger_overflow`, `dma_trigger_match(ch)`;
-`init(generator)`, `bus_clock`, `clock`, `reset`, `enable`, `release`;
+`fault_user(f)`; `init(generator)`, `bus_clock`, `clock`, `reset`, `enable`, `release`;
 `configure`, `wave`, `wave_extension`, `drive`, `fault`, `event_config`
 and their readback twins; `command`, `retrigger`, `stop`, `update`,
 `ramp_index_command`, `count_down`, `lock_update`, `one_shot`;
@@ -436,52 +436,23 @@ standby, made 16 overflows in a 30 ms window awake, 15 in the same
 window spent in STANDBY with CTRLA.RUNSTDBY set, and 0 with it clear.
 See [platform.md](platform.md), "Sleep, peripheral by peripheral".
 
-## Bench findings, DMA and the advanced modes
+## Bench findings, the advanced modes
 
-From `test_samc_timer_dma` (10 letters, 101 verdicts). Wireless: TCC0's
-WO[0] reaches a TC capture channel through a combinational CCL LUT and an
-asynchronous EVSYS channel, with no pad in the path at all, and `tc.md`
-carries the capture side's own findings.
+From `test_samc_timer_modes` (6 letters, 73 verdicts a run). Wireless:
+TCC0's WO[0] reaches a TC capture channel through a combinational CCL
+LUT and an asynchronous EVSYS channel, with no pad in the path at all,
+and `tc.md` carries the capture side's own findings.
 
-**THE ROUND TRIP.** One DMA channel plays an eight-entry duty table into
-TCC0's CCBUF0 on the OVF trigger; two more drain the capture meter's CC0
-and CC1. Over **192 judged samples of each stream** the captured widths
-were the played table, in order, with a **worst error of ZERO ticks** and
-a phase that held across every lap boundary of the loop engine and every
-block boundary of the two ping-pong streams - which is what says not one
-beat was lost anywhere. The period did not move by a single tick
-throughout, no stream overran, and no write-back reading was refused
-(erratum 1.10.4).
-
-- **A TCC COMPARE REGISTER IS A WORD AND A DUTY STREAM'S BEAT MUST BE
-  ONE.** CCBUF is 32 bits on a 24-bit counter, and a HALFWORD write
-  lands in the low half alone: 0x00ABCDEF followed by a halfword 0x1234
-  reads back **0x00AB1234**. So the element type is `uint32_t`, not
-  because the value needs the width but because the register does.
-- **One DMA beat per waveform period is exactly one write per update
-  window**, which is why the round trip works at all: finding 1's
-  SYNCBUSY.CCx stands from a buffered write until the update consumes
-  it, and a beat delivered per OVF lands in a window the update has just
-  emptied. The beats moved and the periods captured agreed to within a
-  block over the whole run.
-- **When the DMA outruns the update, the DMAC sees nothing wrong.**
-  Flooded with software triggers, the loop played **1229 laps in 20 ms
-  against 25** paced by the TCC alone - and `faults()` and the erratum
-  1.10.4 refusal count both stayed at zero, because every beat the
-  controller moved, it moved. The loss is the peripheral's, in a store
-  the silicon discarded. **A discarded buffered write loses a value, it
-  does not corrupt one**: the waveform was still playing a table entry
-  afterwards, just not the one the beat count named.
-- **The hardware circular buffer plays two values for ever with no CPU
-  and no DMA.** WAVE.CICCEN0 set UNDER A RUNNING TIMER (WAVE is
+- **The hardware circular buffer plays two values for ever with no
+  CPU** (letter a). WAVE.CICCEN0 set UNDER A RUNNING TIMER (WAVE is
   write-synchronized and not enable-protected) made sixteen consecutive
   captured widths alternate between 1200 and 3600 with **nothing
   elsewhere**; **WAVE.CIPEREN** did the same for the PERIOD, alternating
-  4800 and 2400 ticks. The same two values through the DMA loop cost
-  **one interrupt per lap** - 122 laps in 20 ms, one every two waveform
-  periods - and reach exactly the same waveform. So the circular buffer
-  wins at two values and loses at three, which is the whole trade.
-- **NFRQ toggles on the PERIOD and not on a compare**: PER = 2399 gave a
+  4800 and 2400 ticks. And two values is exactly as deep as it goes: a
+  register and its buffer are two places and the chapter offers no
+  third, so a table of three or more needs a write at every update.
+- **NFRQ toggles on the PERIOD and not on a compare** (letter d, with
+  the next two): PER = 2399 gave a
   captured **4799**, and moving CC0 from 600 to 1800 changed **nothing**
   at all. **MFRQ** makes CC0 the top instead - the same move changed the
   period from 2399 to 3599, both twice CC0 + 1 to the tick, with PER
@@ -497,7 +468,8 @@ throughout, no stream overran, and no write-back reading was refused
   ramp of the two and idle in the other, not, as the name invites, given
   two duties.
 - **Recoverable fault B is the mirror of A**, on channel 1's event
-  input, and a pulse on it is a valid fault.
+  input, and a pulse on it is a valid fault (letter e, with the next
+  three).
 - **FCTRLn.FILTERVAL COUNTS GCLK_TCC CYCLES, NOT PRESCALED ONES** - the
   dead-time unit's story again, and not what 36.8.5's wording suggests.
   On one 93 kHz generic clock, the shortest pulse that still made a valid
@@ -514,7 +486,8 @@ throughout, no stream overran, and no write-back reading was refused
   the same held input raised nothing, and with CC1 at half the period it
   raised a fault. Qualifying fault B against CC0 instead gives a fault
   that never fires at any duty - correct behaviour on a wrong setup.
-- **EVACT0 = INCREMENT counts events and nothing else**: twenty pin
+- **EVACT0 = INCREMENT counts events and nothing else** (letter f, with
+  the erratum below): twenty pin
   pulses gave **COUNT = 20** exactly, with the counter's own clock
   slowed to 45.8 Hz so it could not contribute. **EVACT0 = COUNT** turns
   the counter into a gate: 20 ms with the line low advanced it **0**
@@ -537,9 +510,9 @@ throughout, no stream overran, and no write-back reading was refused
 
 Driver gaps (deliberate):
 
-- **CTRLA.DMAOS**, the one-shot DMA trigger of 36.6.5.1: a configuration
-  field only, because the per-cycle trigger is what every stream here
-  wants (bench-verified, above); born with its first user.
+- **The DMA requests, the DMAOS command and CTRLA.DMAOS** (36.6.5.1):
+  declined - this stratum drives no DMA from a timer ([dmac.md](dmac.md),
+  erratum 1.10.4).
 - **The debug fault.** `fault_on_debug()` sets DBGCTRL.FDDBD and
   `debug_fault_state()` reads STATUS.DFS, but staging a halted debugger
   is not something a console suite can do.
@@ -547,7 +520,8 @@ Driver gaps (deliberate):
   `max`, so a period past 65535 on a 24-bit instance has to be driven
   through the resource's own `set_cc_buffer()`.
 - **A task over the circular buffers.** WAVE.CIPEREN and CICCENx are
-  bench-verified (above) and no task wraps them.
+  bench-verified (above) and no task wraps them: born with its first
+  user.
 
 Not judged, and deliberately so:
 

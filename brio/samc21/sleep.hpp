@@ -163,8 +163,9 @@
  * 1.8.7 (a DMA WRITE performed while sleepwalking may not land on some
  * peripheral registers - RTC.COUNT, TC/TCC control and count registers,
  * ADC/SDADC SWTRIG - with "use Idle instead of Standby" as the only
- * workaround; nothing here can enforce it, and the affected drivers'
- * docs carry it), 1.8.5 (increased power consumption in standby, no
+ * workaround; unreachable in this stratum, whose one DMA channel writes
+ * a SERCOM's DATA and is never configured to run in standby,
+ * samc21/dmac.hpp), 1.8.5 (increased power consumption in standby, no
  * workaround - a number, not a behaviour).
  *
  * NOT this silicon (revision B only - the read-the-row trap the whole

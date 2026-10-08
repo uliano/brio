@@ -114,9 +114,9 @@ of the kind. The driver does not offer it.
   [dmac.md](dmac.md) already records. The bench looks for the symptom
   anyway and does not find it (below).
 - **1.8.7 DMA Write Access** (a DMA write during standby may not land;
-  RTC.COUNT is on the list) is live on every revision, and is a
-  caller obligation rather than something a driver can wrap: use Idle
-  rather than Standby when SleepWalking writes COUNT.
+  RTC.COUNT is on the list) names every revision and is unreachable
+  here: the stratum's one DMA channel writes a SERCOM's DATA, never
+  RTC.COUNT, and never in standby ([dmac.md](dmac.md)).
 
 ## Types and verbs
 
@@ -211,13 +211,13 @@ brio::Evsys::connect(user, channel,
 
 ## Bench findings
 
-`test_samc_rtc`, 8 letters / 125 verdicts, on the C21J at revision F,
+`test_samc_rtc`, 8 letters / 126 verdicts, on the C21J at revision F,
 wireless. The instruments: a TC0+TC1 pair as a 32-bit stopwatch
 clocked FROM THE BOARD'S 24 MHz CRYSTAL through generator 2
 (not from GCLK0, which is OSC48M - an RC 5100 ppm slow with a wander of
 its own, [clock.md](clock.md)), `samc21/freqm.hpp` measuring the RTC's
-source against the same crystal, and a DMA channel armed with no
-hardware trigger as the event witness.
+source against the same crystal, and TC4 in COUNT16 counting events
+(EVACT = COUNT, TCEI) on its EVSYS user 27 as the event witness.
 
 **THE COUNTER COUNTS ITS SOURCE, TICK FOR TICK**, on all four clock
 selects this board can reach. FREQM weighs the oscillator and the
@@ -249,12 +249,14 @@ intervals**, which is 24.8.1's sentence and the whole reason both codes
 are named. Over the same 50 ms window PER0 is raised at DIV1 and is
 silent at OFF, while the counter runs at the same rate in both.
 
-**Events, both kinds, with no CPU in the path.** A COMP0 event and a
-PER3 event each moved a 16-byte DMA block through an ASYNCHRONOUS EVSYS
-channel on a DMA channel armed with `dma_trigger_none` - the transfer
-is the witness, as in [evsys.md](evsys.md). The single interrupt vector
-carried the compare (INTFLAG 0x0100 acknowledged by the driver's ISR
-body).
+**Events, both kinds, counted exactly, with no CPU in the path**, each
+over an ASYNCHRONOUS EVSYS channel into the witness. One COMP0 match
+counts exactly 1. PER3 counts exactly 52 periods between two reads of
+the RTC's own COUNT 3328 ticks apart, both taken at the same phase of
+the 64-tick period (the phase found from the events, the reads placed
+half a period from it): one count per 64 source cycles, none lost and
+none extra, whatever the RC's rate. The single interrupt vector carried
+the compare (INTFLAG 0x0100 acknowledged by the driver's ISR body).
 
 **MATCHCLR observed doing both things at once**: with COMP0 at 1024 the
 counter sits at a few hundred and never approaches its own top, and
@@ -396,9 +398,6 @@ Driver gaps:
   as the alarm and reads the counter as the witness across a standby
   while SysTick stays the kernel's ticker ([platform.md](platform.md),
   "The timebase that survives standby").
-- **Erratum 1.8.7's caveat** - that a DMA write to RTC.COUNT during
-  standby SleepWalking may not land - is stated and unexercised: it
-  needs the DMAC across a sleep, which is [dmac.md](dmac.md)'s own gap.
 - **PERD** (24.6.5's "Periodic Daily" event) is not offered, because no
   register in the chapter and no symbol in the device header
   implements it.

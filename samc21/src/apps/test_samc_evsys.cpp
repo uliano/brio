@@ -10,26 +10,29 @@
 // (29.6.2.12), which is serviced exactly as a generator's would be. An
 // event system with no way to inject an event from software would need a
 // second peripheral just to be tested; this one only needs a USER, and
-// the DMAC is the one this stratum already has.
+// a timer counting events is the cheapest one the die offers.
 //
-// THE MEASUREMENT IS A DMA TRANSFER THAT HAPPENED. A channel is armed
-// with no hardware trigger at all - `dma_trigger_none`, EVACT trigger,
-// EVIE set - so the ONLY thing that can move its bytes is an event
-// arriving through EVSYS. If the destination buffer changes, the event
-// was routed. That is a stronger statement than any status bit: it is
-// the fabric doing its job end to end, and it is what exercises the
-// DMAC's EVACT paths on silicon.
+// THE MEASUREMENT IS A COUNT OF EVENTS THAT ARRIVED. TC4 runs in COUNT16
+// with EVCTRL.EVACT = COUNT and TCEI set (35.6.2.5.3): its counter
+// advances on an incoming event and on nothing else - the prescaler is
+// bypassed, and no clock tick moves it. Its user, TC4 EVU, is wired to
+// the channel under test (table 29-3 gives it all three paths), and the
+// counter, read through READSYNC, says how many events crossed. That is
+// a stronger statement than any status bit and stronger than "something
+// happened": a count of exactly N for N events is the fabric losing
+// none and inventing none, end to end, with no CPU in the path.
 //
 // What is exercised, letter by letter:
 //   a  the fabric: the user multiplexer's off-by-one, the ordering rule,
 //      the path/edge legality both ways, and the erratum-1.12.1 refusal
-//   b  AN EVENT MOVES BYTES: software event -> channel -> DMAC, with
-//      the transfer itself as the witness
+//   b  AN EVENT IS COUNTED: software event -> channel -> TC4's event
+//      input, with the counter itself as the witness, exactly one count
+//      per event
 //   c  the synchronous and resynchronized paths, which need a channel
 //      clock - and the status surface that only they have
 //   d  what the asynchronous path does NOT have: CHSTATUS and both
-//      interrupt flags read zero - and, measured rather than read
-//      anywhere, it does not carry a SOFTWARE event at all
+//      interrupt flags read zero - and that SOFTWARE events on that
+//      path reach a TC's event input, every one
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -37,11 +40,11 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -70,80 +73,42 @@ using brio::print;
 // ---------------------------------------------------------------------------
 // The fabric under test
 //
-// DMAC channel 0 is event user m = 5 (table 29-3), and the users are
-// numbered so that channel k is user 5 + k. The event channel is 0, whose
-// generic clock is EVSYS_GCLK_ID_0.
+// The witness is TC4, event user 27 (TC4 EVU, table 29-3): TC4 has its
+// generic clock channel to itself (35.5.3), so arming and releasing it
+// touches no other timer. The event channel is 0, whose generic clock is
+// EVSYS_GCLK_ID_0.
 // ---------------------------------------------------------------------------
-constexpr uint8_t dma_ch = 0;
-constexpr uint8_t user_dmac_ch0 = 5;
+using Witness = Tc<4>;
+constexpr uint8_t user_witness = Witness::event_user;
 constexpr uint8_t ev_ch = 0;
 constexpr uint8_t gen_slow = 5;      // a generator this suite builds for the clock
 
-using Copy = DmaChannel<dma_ch>;
 using GenSlow = Gclk<gen_slow>;
 
-// VOLATILE IN BOTH DIRECTIONS: the compiler cannot see the controller's
-// writes, and it cannot see its reads either - it will happily sink the
-// preparation of a buffer past the thing that starts the transfer.
-constexpr uint16_t payload = 16;
-volatile uint8_t src[payload];
-volatile uint8_t dst[payload];
+// COUNT16 on the normal-frequency waveform: the count action is refused
+// beside a PWM waveform (35.6.2.5.3), and nothing here drives a pad.
+constexpr TcConfig witness_cfg{.mode = TcMode::count16,
+                               .waveform = TcWaveform::normal_frequency};
+constexpr TcEventConfig witness_events{.action = TcEventAction::count,
+                                       .input_enable = true};
+static_assert(tc_event_config_valid(witness_cfg, witness_events),
+              "the witness counts events, which a PWM waveform would refuse");
 
-void fill_source(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        src[i] = static_cast<uint8_t>(seed + i);
-        dst[i] = 0;
-    }
+/// Arm the witness from zero: the software reset inside init() clears
+/// COUNT, and EVCTRL is written before the enable because it is
+/// enable-protected (35.6.2.1). GCLK_TC from generator 0 clocks the
+/// counter's own domain; the events are what it counts.
+bool witness_arm() {
+    return Witness::init(0) && Witness::configure(witness_cfg) &&
+           Witness::event_config(witness_cfg, witness_events) &&
+           Witness::enable(true);
 }
 
-bool destination_matches(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != static_cast<uint8_t>(seed + i)) {
-            return false;
-        }
-    }
-    return true;
-}
+/// How many events the witness has counted - a READSYNC read (35.6.8).
+uint16_t witnessed() { return Witness::count16(); }
 
-bool destination_untouched() {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != 0u) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// Arm the DMA channel so that ONLY an event can move it: no hardware
-/// trigger source, EVACT = trigger, EVIE set.
-bool arm_event_driven_copy(uint8_t seed) {
-    fill_source(seed);
-    if (!Copy::reset()) {
-        return false;
-    }
-    const DmaChannelConfig cfg{
-        .trigger = dma_trigger_none,
-        .action = DmaTriggerAction::block,
-        .event_action = DmaEventAction::trigger,
-        .event_input = true,
-    };
-    if (!Copy::configure(cfg)) {
-        return false;
-    }
-    const DmaTransfer t{
-        .source = &src[0],
-        .destination = &dst[0],
-        .beats = payload,
-        .beat = DmaBeat::byte,
-    };
-    if (!Copy::load(t)) {
-        return false;
-    }
-    return Copy::enable(true);
-}
-
-/// A short wait, long enough for a block of sixteen bytes to move and
-/// for any channel clock this suite uses to tick.
+/// A short wait, long enough for any channel clock this suite uses to
+/// tick several times over.
 void settle() {
     volatile uint32_t sink = 0;
     for (uint32_t i = 0; i < 100'000UL; ++i) {
@@ -170,17 +135,17 @@ void ta_fabric() {
     // caller never sees it - so this checks BOTH that plain numbers go
     // in and come out, AND that the register really holds the +1.
     bench.verdict("a user connects to a channel by its plain number",
-                  Evsys::attach(user_dmac_ch0, 3));
+                  Evsys::attach(user_witness, 3));
     bench.verdict("and reads back as the same plain number",
-                  Evsys::user_channel(user_dmac_ch0) == 3u);
-    const uint32_t raw = EVSYS_REGS->EVSYS_USER[user_dmac_ch0];
-    print(serial, "  USER[", user_dmac_ch0, "] for channel 3 holds ", raw,
+                  Evsys::user_channel(user_witness) == 3u);
+    const uint32_t raw = EVSYS_REGS->EVSYS_USER[user_witness];
+    print(serial, "  USER[", user_witness, "] for channel 3 holds ", raw,
           " - the register wants channel+1 (29.8.9)", crlf);
     bench.verdict("the register itself holds channel + 1", raw == 4u);
 
-    Evsys::disconnect(user_dmac_ch0);
+    Evsys::disconnect(user_witness);
     bench.verdict("disconnecting reports no channel",
-                  Evsys::user_channel(user_dmac_ch0) == Evsys::channel_count);
+                  Evsys::user_channel(user_witness) == Evsys::channel_count);
 
     // The path/edge relationship, which runs BOTH ways, and the erratum.
     bench.verdict("an asynchronous channel with an edge is refused",
@@ -205,36 +170,37 @@ void ta_fabric() {
 }
 
 // =============================================================================
-// b - an event moves bytes
+// b - an event is counted
 // =============================================================================
-void tb_event_moves_bytes() {
+void tb_event_counted() {
     Evsys::reset();
-    bench.verdict("the DMA channel arms with NO hardware trigger",
-                  arm_event_driven_copy(0x40));
-    bench.verdict("and nothing has moved yet", destination_untouched());
+    bench.verdict("the witness arms: TC4 counts events and nothing else",
+                  witness_arm());
+    settle();
+    bench.verdict("and with no event it has counted none - no clock tick "
+                  "moves a counter whose action is COUNT",
+                  witnessed() == 0u);
 
-    // A software event on an unrouted channel must do nothing - which is
-    // what makes the next verdict mean something.
+    // A software event on an unrouted channel must reach nobody - which
+    // is what makes the next verdicts mean something.
     Evsys::trigger(ev_ch);
     settle();
-    bench.verdict("a software event on a channel no user listens to moves "
-                  "nothing",
-                  destination_untouched());
+    bench.verdict("a software event on a channel no user listens to is "
+                  "counted by nobody",
+                  witnessed() == 0u);
 
     // Now route it. connect() writes the USER multiplexer first and the
     // channel second, which is 29.6.2.3's order.
     //
-    // THE PATH IS SYNCHRONOUS AND THAT IS NOT ARBITRARY: measured here,
-    // A SOFTWARE EVENT DOES NOT CROSS AN ASYNCHRONOUS CHANNEL. 29.6.2.12
-    // says a software event "can be serviced as any event generator"
-    // without qualifying by path, but the asynchronous path has no clock
-    // and no edge detector, and a register write has no width of its own
-    // to propagate - letter d holds the measurement.
+    // THE PATH IS SYNCHRONOUS so that this letter rests on the clocked
+    // delivery letter c measures on both clocked paths; what the
+    // asynchronous path does with a SOFTWARE event is letter d's
+    // question, asked there and not assumed here.
     bench.verdict("the channel's own generic clock is routed",
                   GenSlow::configure(GclkConfig{.source = GclkSource::osculp32k}) &&
                       GclkChannel::connect(Evsys::gclk_id(ev_ch), gen_slow));
-    bench.verdict("the DMAC's channel-0 user connects to event channel 0",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+    bench.verdict("TC4's event user connects to event channel 0",
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .path = EventPath::synchronous,
                                      .edge = EventEdge::rising}));
@@ -243,29 +209,37 @@ void tb_event_moves_bytes() {
     // is paced rather than issued immediately.
     settle();
 
+    Evsys::clear_flags(Evsys::detected_flag(ev_ch) | Evsys::overrun_flag(ev_ch));
     Evsys::trigger(ev_ch);
     settle();
+    const uint16_t one = witnessed();
+    print(serial, "  after one software event: the witness counts ", one,
+          ", EVD=", Evsys::detected(ev_ch) ? "1" : "0", crlf);
+    bench.verdict("THE EVENT WAS COUNTED, EXACTLY ONCE - software event to "
+                  "EVSYS to TC4, with no CPU in the path",
+                  one == 1u);
+    bench.verdict("and the channel's event-detected flag agrees from the "
+                  "other side of the fabric (29.6.2.10)",
+                  Evsys::detected(ev_ch));
 
-    print(serial, "  after one software event: dst[0..3] = ", dst[0], " ", dst[1],
-          " ", dst[2], " ", dst[3], crlf);
-    bench.verdict("THE EVENT MOVED THE BYTES - software event to EVSYS to "
-                  "DMAC, with no CPU in the path",
-                  destination_matches(0x40));
-    bench.verdict("and the channel completed rather than erroring",
-                  !Copy::fetch_error());
+    // Repeatable and exact: each event spaced by many channel-clock
+    // periods, so every one is a separate pulse the user acknowledges.
+    constexpr uint8_t more = 8;
+    for (uint8_t i = 0; i < more; ++i) {
+        Evsys::trigger(ev_ch);
+        settle();
+    }
+    const uint16_t total = witnessed();
+    print(serial, "  after ", more, " more spaced events: ", total, crlf);
+    bench.verdict("eight more events are eight more counts - none lost and "
+                  "none invented",
+                  total == static_cast<uint16_t>(1u + more));
+    bench.verdict("and none of them overran the channel (29.6.2.9)",
+                  !Evsys::overrun(ev_ch));
 
-    // The same again with a different pattern, to show it is repeatable
-    // and not a one-off left over from arming.
-    bench.verdict("the channel re-arms", arm_event_driven_copy(0x90));
-    bench.verdict("and is empty again", destination_untouched());
-    settle();
-    Evsys::trigger(ev_ch);
-    settle();
-    bench.verdict("a second event moves a second block", destination_matches(0x90));
-
-    Evsys::disconnect(user_dmac_ch0);
+    Evsys::disconnect(user_witness);
     GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
-    (void)Copy::enable(false);
+    Witness::release();
 }
 
 // =============================================================================
@@ -288,12 +262,12 @@ void tc_clocked_paths() {
     for (const auto path : {EventPath::synchronous, EventPath::resynchronized}) {
         const char* name = path == EventPath::synchronous ? "synchronous"
                                                           : "resynchronized";
-        bench.verdict("the channel arms", arm_event_driven_copy(0x20));
+        bench.verdict("the witness arms from zero", witness_arm());
 
         // Both clocked paths need an edge; the software event is a pulse,
         // so a rising edge is what there is to catch.
         const bool routed = Evsys::connect(
-            user_dmac_ch0, ev_ch,
+            user_witness, ev_ch,
             EventChannelConfig{.path = path, .edge = EventEdge::rising});
         bench.verdict("the ", name, routed);
         settle();   // erratum 1.12.4
@@ -303,13 +277,14 @@ void tc_clocked_paths() {
         Evsys::trigger(ev_ch);
         settle();
 
-        const bool moved = destination_matches(0x20);
+        const uint16_t counted = witnessed();
         const bool saw_event = Evsys::detected(ev_ch);
-        print(serial, "  ", name, ": bytes moved=", moved ? "yes" : "no",
+        print(serial, "  ", name, ": counted=", counted,
               " EVD=", saw_event ? "1" : "0",
               " OVR=", Evsys::overrun(ev_ch) ? "1" : "0", crlf);
 
-        bench.verdict("a clocked path carries the event to the DMAC", moved);
+        bench.verdict("a clocked path carries the event to TC4, counted once",
+                      counted == 1u);
         // THE STATUS SURFACE THE ASYNCHRONOUS PATH DOES NOT HAVE: EVD is
         // set when an event coming from the channel is detected, and it
         // is only ever set on these two paths (29.6.2.10).
@@ -317,8 +292,8 @@ void tc_clocked_paths() {
                       "clocked path has",
                       saw_event);
 
-        Evsys::disconnect(user_dmac_ch0);
-        (void)Copy::enable(false);
+        Evsys::disconnect(user_witness);
+        Witness::release();
     }
 
     GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
@@ -333,42 +308,53 @@ void tc_clocked_paths() {
 // and the whole channel status read as zero. Code that polls any of them
 // to pace an asynchronous channel is polling a constant - which is worth
 // proving rather than repeating.
+//
+// AND ONE QUESTION THE CHAPTER DOES NOT ANSWER: 29.6.2.12 says a
+// software event "can be serviced as any event generator" without
+// qualifying by path, while the asynchronous path has no clock and no
+// edge detector and a register write has no width of its own. Whether
+// the event arrives is the USER's input stage's business, so this letter
+// asks it of TC4's and counts the answer - spaced single events first,
+// then a back-to-back burst, then a control with the user disconnected:
+// TC4 takes every one of either kind.
 void td_async_is_silent() {
     Evsys::reset();
-    bench.verdict("the channel arms", arm_event_driven_copy(0x77));
+    bench.verdict("the witness arms", witness_arm());
     bench.verdict("routed asynchronously",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{.path = EventPath::asynchronous}));
     settle();
 
     Evsys::clear_flags(Evsys::detected_flag(ev_ch) | Evsys::overrun_flag(ev_ch));
 
+    constexpr uint8_t events = 8;
+    for (uint8_t i = 0; i < events; ++i) {
+        Evsys::trigger(ev_ch);
+        settle();
+    }
+    const uint16_t spaced = witnessed();
+
     // Several events in quick succession - which on a clocked path would
     // be exactly how an overrun is provoked.
-    for (uint8_t i = 0; i < 8u; ++i) {
+    for (uint8_t i = 0; i < events; ++i) {
         Evsys::trigger(ev_ch);
     }
     settle();
+    const uint16_t burst = static_cast<uint16_t>(witnessed() - spaced);
 
     const uint32_t chstatus = Evsys::channel_status();
-    print(serial, "  after eight back-to-back events: CHSTATUS=", hex(chstatus),
+    print(serial, "  software events on the asynchronous path: ", spaced, " of ",
+          events, " spaced ones counted, ", burst, " of ", events,
+          " back-to-back ones", crlf);
+    print(serial, "  after them: CHSTATUS=", hex(chstatus),
           " EVD=", Evsys::detected(ev_ch) ? "1" : "0",
           " OVR=", Evsys::overrun(ev_ch) ? "1" : "0", crlf);
 
-    // THE FINDING, and the chapter does not have it. 29.6.2.12 says a
-    // software event "can be serviced as any event generator" with no
-    // mention of the path; measured, EIGHT of them across an
-    // asynchronous channel move NOTHING, while one across a synchronous
-    // channel moves a whole block (letters b and c). The asynchronous
-    // path has no clock and no edge detector, and a register write has
-    // no width of its own - so there is nothing to propagate. What is
-    // NOT claimed here is anything about a hardware generator on the
-    // asynchronous path: this suite has no generator to wire, and the
-    // measurement is about the software event alone.
-    bench.verdict("A SOFTWARE EVENT DOES NOT CROSS AN ASYNCHRONOUS CHANNEL - "
-                  "eight of them moved nothing, where one on a clocked path "
-                  "moves a block",
-                  destination_untouched());
+    bench.verdict("A SOFTWARE EVENT DOES CROSS AN ASYNCHRONOUS CHANNEL into TC4's "
+                  "event input - every spaced one counted",
+                  spaced == events);
+    bench.verdict("and so does every one of a back-to-back burst",
+                  burst == events);
     bench.verdict("the event-detected flag stays ZERO on an asynchronous "
                   "channel (29.6.2.10)",
                   !Evsys::detected(ev_ch));
@@ -379,13 +365,26 @@ void td_async_is_silent() {
                   "(29.6.2.11)",
                   !Evsys::busy(ev_ch) && !Evsys::users_ready(ev_ch));
 
-    Evsys::disconnect(user_dmac_ch0);
-    (void)Copy::enable(false);
+    // The control: the same spaced events with the user disconnected
+    // must count nothing, or no count above means anything.
+    Evsys::disconnect(user_witness);
+    const uint16_t before = witnessed();
+    for (uint8_t i = 0; i < events; ++i) {
+        Evsys::trigger(ev_ch);
+        settle();
+    }
+    const uint16_t unhooked = static_cast<uint16_t>(witnessed() - before);
+    print(serial, "  with the user disconnected: ", unhooked, " counted", crlf);
+    bench.verdict("with TC4's user disconnected the same events count zero - "
+                  "whatever was counted above came through the channel",
+                  unhooked == 0u);
+
+    Witness::release();
 }
 
 void banner() {
-    print(serial, crlf, "test_samc_evsys - SAMC21J18A EVSYS (ch. 29) with the "
-          "DMAC as its user, clk=", SysClock::hz, " Hz", crlf);
+    print(serial, crlf, "test_samc_evsys - SAMC21J18A EVSYS (ch. 29) with a "
+          "TC counting events as its user, clk=", SysClock::hz, " Hz", crlf);
     bench.menu();
 }
 
@@ -394,35 +393,22 @@ void banner() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 
-/// The DMAC's line is bound because a transfer that completes raises it,
-/// and an unbound vector on this target is a silent death. Nothing here
-/// needs the completion - the destination buffer is the witness - so the
-/// handler only drains what it is told.
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
-
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     bench.letter('a', "the fabric, its off-by-one and its refusals", ta_fabric);
-    bench.letter('b', "an event moves bytes, with no CPU in the path",
-                 tb_event_moves_bytes);
+    bench.letter('b', "an event is counted, with no CPU in the path",
+                 tb_event_counted);
     bench.letter('c', "the synchronous and resynchronized paths", tc_clocked_paths);
     bench.letter('d', "what the asynchronous path does not have", td_async_is_silent);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

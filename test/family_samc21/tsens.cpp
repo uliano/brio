@@ -29,7 +29,6 @@ static_assert(Tsens::window_generator == 30);
 // USER 0: the first row of table 29-3, and the only START user on this
 // family that accepts every propagation path.
 static_assert(Tsens::start_event_user == 0);
-static_assert(Tsens::dma_trigger_resrdy == 1);
 
 // ---- the datum: signed 24 bits, two's complement -----------------------------
 

@@ -16,7 +16,7 @@
 //  - the analog comparator, whose positive input is a pad PORT is
 //    driving as a plain GPIO (the analog mux keeps the output driver).
 // The observers are the CCL's own OUT pads read back through PORT.IN,
-// a DMA block that either moved or did not, and the SysTick cycle
+// TC2 counting the events that reach it, and the SysTick cycle
 // stopwatch.
 //
 // Letters (z = all):
@@ -33,7 +33,7 @@
 //   e  the sequencers: DFF, JK, latch and RS against tables 37-2..37-5,
 //      FEEDBACK, the asynchronous clear, and ERRATUM 1.7.2 with a
 //      control on both sides
-//   f  events both ways: LUTOUT into a DMA witness, and an event INTO a
+//   f  events both ways: LUTOUT counted by a TC, and an event INTO a
 //      LUT on the asynchronous path table 29-3 restricts it to
 //   g  THE HEADLINE: what a CCL output costs in GCLK periods, measured
 //      against the AC's own fraction + 2 - the question
@@ -47,7 +47,6 @@
 #include "samc21/ac.hpp"
 #include "samc21/ccl.hpp"
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
@@ -1161,56 +1160,37 @@ void te_sequencers() {
 // f - events, both ways
 // =============================================================================
 
-// The DMA witness: a channel armed with NO hardware trigger, so only an
-// event can move its bytes.
-constexpr uint8_t dma_ch = 0;
-constexpr uint8_t user_dmac_ch0 = 5;
+// The event witness: TC2 in COUNT16 with EVACT = COUNT (35.6.2.5.3), so
+// its counter advances on an incoming event and on nothing else; its
+// user is TC2 EVU, event user 25 (table 29-3, all three paths). TC2 is
+// the timer no letter here drives: TC0, TC1 and TC4 are LUT inputs and
+// the pacer below. It shares a generic clock channel with TC3 (35.5.3),
+// which no letter uses either.
+using Witness = Tc<2>;
+constexpr uint8_t user_witness = Witness::event_user;
 constexpr uint8_t ev_ch = 2;
-using Copy = DmaChannel<dma_ch>;
 
-constexpr uint16_t payload = 16;
-volatile uint8_t src[payload];
-volatile uint8_t dst[payload];
+// COUNT16 on the normal-frequency waveform: the count action is refused
+// beside a PWM waveform (35.6.2.5.3), and nothing here drives a pad.
+constexpr TcConfig witness_cfg{.mode = TcMode::count16,
+                               .waveform = TcWaveform::normal_frequency};
+constexpr TcEventConfig witness_events{.action = TcEventAction::count,
+                                       .input_enable = true};
+static_assert(tc_event_config_valid(witness_cfg, witness_events),
+              "the witness counts events, which a PWM waveform would refuse");
 
-bool arm_event_driven_copy(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        src[i] = static_cast<uint8_t>(seed + i);
-        dst[i] = 0;
-    }
-    if (!Copy::reset()) {
-        return false;
-    }
-    if (!Copy::configure(DmaChannelConfig{.trigger = dma_trigger_none,
-                                          .action = DmaTriggerAction::block,
-                                          .event_action = DmaEventAction::trigger,
-                                          .event_input = true})) {
-        return false;
-    }
-    if (!Copy::load(DmaTransfer{.source = &src[0],
-                                .destination = &dst[0],
-                                .beats = payload,
-                                .beat = DmaBeat::byte})) {
-        return false;
-    }
-    return Copy::enable(true);
+/// Arm the witness from zero: the software reset inside init() clears
+/// COUNT, and EVCTRL is written before the enable because it is
+/// enable-protected (35.6.2.1). GCLK_TC from generator 0 clocks the
+/// counter's own domain; the events are what it counts.
+bool witness_arm() {
+    return Witness::init(0) && Witness::configure(witness_cfg) &&
+           Witness::event_config(witness_cfg, witness_events) &&
+           Witness::enable(true);
 }
 
-bool destination_matches(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != static_cast<uint8_t>(seed + i)) {
-            return false;
-        }
-    }
-    return true;
-}
-bool destination_untouched() {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != 0u) {
-            return false;
-        }
-    }
-    return true;
-}
+/// How many events the witness has counted - a READSYNC read (35.6.8).
+uint16_t witnessed() { return Witness::count16(); }
 
 void tf_events() {
     bench.verdict("the block came up on the slow clock",
@@ -1227,25 +1207,23 @@ void tf_events() {
                                           .event_out = true},
                                 true));
     Ccl::enable(true);
-    bench.verdict("the DMA channel arms with NO hardware trigger",
-                  arm_event_driven_copy(0x70));
+    bench.verdict("the witness arms: TC2 counts events and nothing else",
+                  witness_arm());
     bench.verdict("and the channel is routed to LUTOUT0 on the asynchronous "
                   "path",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = L0::event_generator,
                                      .path = EventPath::asynchronous}));
     settle_pad();
-    bench.verdict("nothing has moved yet", destination_untouched());
+    bench.verdict("nothing has been counted yet", witnessed() == 0u);
     drive<In0>(true);
     settle_pad();
-    print(serial, "  after one LUT output edge: dst[0..3] = ", dst[0], " ",
-          dst[1], " ", dst[2], " ", dst[3], crlf);
-    bench.verdict("A LUT OUTPUT EDGE MOVED THE BYTES - pad to truth table to "
-                  "EVSYS to DMAC, with no CPU in the path",
-                  destination_matches(0x70));
-    bench.verdict("and the channel completed rather than erroring",
-                  !Copy::fetch_error());
+    const uint16_t out_edges = witnessed();
+    print(serial, "  after one LUT output edge: counted ", out_edges, crlf);
+    bench.verdict("ONE LUT OUTPUT EDGE IS ONE COUNT - pad to truth table to "
+                  "EVSYS to TC2, with no CPU in the path",
+                  out_edges == 1u);
 
     // The control: with LUTEO clear the same edge reaches nothing.
     Ccl::enable(false);
@@ -1256,13 +1234,13 @@ void tf_events() {
     Ccl::enable(true);
     drive<In0>(false);
     settle_pad();
-    bench.verdict("the DMA channel re-arms", arm_event_driven_copy(0x90));
+    bench.verdict("the witness re-arms from zero", witness_arm());
     drive<In0>(true);
     settle_pad();
-    bench.verdict("with LUTEO clear the same edge moves nothing",
-                  destination_untouched());
-    Evsys::disconnect(user_dmac_ch0);
-    (void)Copy::enable(false);
+    bench.verdict("with LUTEO clear the same edge is counted by nobody",
+                  witnessed() == 0u);
+    Evsys::disconnect(user_witness);
+    Witness::release();
 
     // ---- IN: an event into a LUT ------------------------------------------
     //
@@ -1320,9 +1298,11 @@ void tf_events() {
     bench.verdict("with LUTEI clear the same events reach nothing",
                   !off_hi && off_lo);
 
-    // And the fact that follows from the two: a SOFTWARE event cannot
-    // drive this peripheral at all, because its user is asynchronous-only
-    // and a software event does not cross an asynchronous channel.
+    // And the question that follows from the two: can a SOFTWARE event
+    // drive this peripheral, whose user is asynchronous-only? 29.6.2.12
+    // does not qualify a software event by path, and the asynchronous
+    // path has no clock and no edge detector of its own - so the answer
+    // is this LUT's input stage's, and it is measured.
     Ccl::enable(false);
     (void)L0::configure(LutConfig{.in0 = LutInput::event,
                                   .truth = lut_truth_pass(0),
@@ -1392,18 +1372,16 @@ void tf_events() {
     bench.verdict("with the user disconnected nothing arrives, so the "
                   "sixteen above were really the events",
                   caught_unhooked == 0u);
-    bench.verdict("A SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL - "
-                  "every single one of sixteen reaches this LUT, where "
-                  "none reaches a DMA "
-                  "channel: what differs is the USER's input stage, not the "
-                  "path",
+    bench.verdict("A SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL TO "
+                  "THIS USER - every single one of sixteen reaches the LUT, "
+                  "caught by the edge detector of its own event input",
                   caught_single == 16u);
 
     // The second witness, and a different kind of one: the whole chain
-    // from a software event to memory - trigger -> asynchronous channel
-    // -> the CCL's edge detector -> the truth table -> LUTOUT0 -> a
-    // second channel -> the DMAC. A pad poll could in principle be
-    // fooled; a block of bytes that moved cannot.
+    // from a software event to a counter - trigger -> asynchronous
+    // channel -> the CCL's edge detector -> the truth table -> LUTOUT0
+    // -> a second channel -> TC2's event input. A pad poll could in
+    // principle be fooled; a counter that advanced by exactly one cannot.
     constexpr uint8_t ev_ch_out = 3;
     Ccl::enable(false);
     (void)L0::configure(LutConfig{.in0 = LutInput::event,
@@ -1412,23 +1390,24 @@ void tf_events() {
                                   .event_out = true},
                         true);
     Ccl::enable(true);
-    bench.verdict("the DMA channel re-arms behind LUTOUT0",
-                  arm_event_driven_copy(0x20) &&
-                      Evsys::connect(user_dmac_ch0, ev_ch_out,
+    bench.verdict("the witness re-arms behind LUTOUT0",
+                  witness_arm() &&
+                      Evsys::connect(user_witness, ev_ch_out,
                                      EventChannelConfig{
                                          .generator = L0::event_generator,
                                          .path = EventPath::asynchronous}));
     settle(8u * slow_period);
-    bench.verdict("and nothing has moved", destination_untouched());
+    bench.verdict("and nothing has been counted", witnessed() == 0u);
     Evsys::trigger(ev_ch);
     settle(16u * slow_period);
-    print(serial, "  after ONE software event: dst[0..3] = ", dst[0], " ",
-          dst[1], " ", dst[2], " ", dst[3], crlf);
-    bench.verdict("ONE software event moved a block of memory THROUGH THE "
-                  "CCL - the second witness agrees with the pad",
-                  destination_matches(0x20));
-    Evsys::disconnect(user_dmac_ch0);
-    (void)Copy::enable(false);
+    const uint16_t through_lut = witnessed();
+    print(serial, "  after ONE software event through the LUT: counted ",
+          through_lut, crlf);
+    bench.verdict("ONE software event is ONE count THROUGH THE CCL - the "
+                  "second witness agrees with the pad",
+                  through_lut == 1u);
+    Evsys::disconnect(user_witness);
+    Witness::release();
     print(serial, "  hammering the channel raises the output too (",
           hammered_high ? 1 : 0, "), which is expected once one event does",
           crlf);
@@ -1697,19 +1676,12 @@ extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 /// SERCOM0 is letter c's LUT input source; its vector is bound because
 /// an unserved transmit ring never drains.
 extern "C" void SERCOM0_Handler() { (void)Talker::isr(); }
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
 
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     bench.letter('a', "the block, and the enable-protection dispute", ta_block);
@@ -1724,8 +1696,7 @@ int main() {
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

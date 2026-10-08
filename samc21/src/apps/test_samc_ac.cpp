@@ -32,7 +32,7 @@
 //   d  the four window interrupt selections, each fired and each held
 //      silent
 //   e  the AC as an EVSYS GENERATOR: a comparator flip and a window
-//      transition, each moving a DMA block
+//      transition, each counted by a TC whose event action is COUNT
 //   f  the AC as an EVSYS USER: an EIC pin edge starting a single-shot
 //      comparison through SOC0 - a user table 29-3 marks ASYNCHRONOUS
 //      PATH ONLY
@@ -44,12 +44,12 @@
 
 #include "samc21/ac.hpp"
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/eic.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -98,19 +98,25 @@ using Window0 = AcWindow<0>;
 // sampling clock is the right one - ac_sync_probe owns the timing.
 constexpr uint8_t ac_gen = 0;
 
-// The event fabric: DMAC channel 0 is event user 5, and a transfer is
-// the witness that an event arrived. The event channel's own clock
-// comes from generator 6.
-constexpr uint8_t dma_ch = 0;
-constexpr uint8_t user_dmac_ch0 = 5;
+// The event fabric: the witness is TC4 in COUNT16 with EVACT = COUNT
+// (35.6.2.5.3), so its counter advances on an incoming event and on
+// nothing else; its user is TC4 EVU, event user 27 (table 29-3, all
+// three paths). TC4 has its generic clock channel to itself (35.5.3).
+// The event channel's own clock comes from generator 6.
+using Witness = Tc<4>;
+constexpr uint8_t user_witness = Witness::event_user;
 constexpr uint8_t ev_ch = 0;
 constexpr uint8_t ev_gen = 6;
-using Copy = DmaChannel<dma_ch>;
 using EvGen = Gclk<ev_gen>;
 
-constexpr uint16_t payload = 16;
-volatile uint8_t src[payload];
-volatile uint8_t dst[payload];
+// COUNT16 on the normal-frequency waveform: the count action is refused
+// beside a PWM waveform (35.6.2.5.3), and nothing here drives a pad.
+constexpr TcConfig witness_cfg{.mode = TcMode::count16,
+                               .waveform = TcWaveform::normal_frequency};
+constexpr TcEventConfig witness_events{.action = TcEventAction::count,
+                                       .input_enable = true};
+static_assert(tc_event_config_valid(witness_cfg, witness_events),
+              "the witness counts events, which a PWM waveform would refuse");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -181,52 +187,18 @@ bool pad_follows_pull() {
     return up && !down;
 }
 
-bool destination_matches(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != static_cast<uint8_t>(seed + i)) {
-            return false;
-        }
-    }
-    return true;
+/// Arm the witness from zero: the software reset inside init() clears
+/// COUNT, and EVCTRL is written before the enable because it is
+/// enable-protected (35.6.2.1). GCLK_TC from generator 0 clocks the
+/// counter's own domain; the events are what it counts.
+bool witness_arm() {
+    return Witness::init(0) && Witness::configure(witness_cfg) &&
+           Witness::event_config(witness_cfg, witness_events) &&
+           Witness::enable(true);
 }
 
-bool destination_untouched() {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != 0u) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool arm_event_driven_copy(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        src[i] = static_cast<uint8_t>(seed + i);
-        dst[i] = 0;
-    }
-    if (!Copy::reset()) {
-        return false;
-    }
-    const DmaChannelConfig cfg{
-        .trigger = dma_trigger_none,
-        .action = DmaTriggerAction::block,
-        .event_action = DmaEventAction::trigger,
-        .event_input = true,
-    };
-    if (!Copy::configure(cfg)) {
-        return false;
-    }
-    const DmaTransfer t{
-        .source = &src[0],
-        .destination = &dst[0],
-        .beats = payload,
-        .beat = DmaBeat::byte,
-    };
-    if (!Copy::load(t)) {
-        return false;
-    }
-    return Copy::enable(true);
-}
+/// How many events the witness has counted - a READSYNC read (35.6.8).
+uint16_t witnessed() { return Witness::count16(); }
 
 /// Wait out t_STARTUP without pretending to know it: READY is the
 /// chapter's own answer to "is the output valid yet" (40.8.8).
@@ -616,32 +588,31 @@ void te_generator() {
     bench.verdict("the comparator enables low", Comp0::enable(true) &&
                                                     wait_ready() &&
                                                     !Comp0::state());
-    // THE CHANNEL IS ROUTED BEFORE THE TRANSFER IS ARMED, and that
+    // THE CHANNEL IS ROUTED BEFORE THE WITNESS IS ARMED, and that
     // ordering is not cosmetic: writing CHANNELn attaches an edge
     // detector to a generator that already has a level, and the settle
     // that erratum 1.12.4 asks for is also where any event born of the
-    // routing itself is spent. Arming afterwards makes "nothing has
-    // moved yet" a statement about the STIMULUS and not about the setup.
-    bench.verdict("the DMAC's channel-0 user listens to the channel carrying "
-                  "COMP0",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+    // routing itself is spent. Arming afterwards makes "nothing counted
+    // yet" a statement about the STIMULUS and not about the setup.
+    bench.verdict("TC4's event user listens to the channel carrying COMP0",
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = Comp0::event_generator,
                                      .path = EventPath::resynchronized,
                                      .edge = EventEdge::rising}));
     settle();   // erratum 1.12.4: the first channel-clock tick is blind
-    bench.verdict("the DMA channel arms with no hardware trigger",
-                  arm_event_driven_copy(0x21));
+    bench.verdict("the witness arms: TC4 counts events and nothing else",
+                  witness_arm());
     settle();
-    bench.verdict("and nothing has moved yet", destination_untouched());
+    bench.verdict("and nothing has been counted yet", witnessed() == 0u);
 
     drive<Ain0>(true);
     settle();
-    print(serial, "  after the comparator flipped: dst[0..3] = ", dst[0], " ",
-          dst[1], " ", dst[2], " ", dst[3], crlf);
-    bench.verdict("A COMPARATOR FLIP MOVED THE BYTES - pad to AC to EVSYS to "
-                  "DMAC, with no CPU in the path",
-                  destination_matches(0x21));
+    const uint16_t flips = witnessed();
+    print(serial, "  after the comparator flipped once: counted ", flips, crlf);
+    bench.verdict("ONE COMPARATOR FLIP IS ONE COUNT - pad to AC to EVSYS to "
+                  "TC4, with no CPU in the path",
+                  flips == 1u);
 
     // --- the window's inside/outside state as a generator
     //
@@ -649,8 +620,8 @@ void te_generator() {
     // status" and is generated regardless of the interrupt selection -
     // so this letter leaves WINTSEL where it is and only moves the
     // state.
-    (void)Copy::enable(false);
-    Evsys::disconnect(user_dmac_ch0);
+    Evsys::disconnect(user_witness);
+    Witness::release();
     bench.verdict("the pair is rebuilt as a window",
                   Comp0::enable(false) &&
                       Comp0::configure(AcConfig{.positive = AcPositive::vscale,
@@ -663,46 +634,45 @@ void te_generator() {
                   Window0::configure(true, AcWindowInterrupt::above) &&
                       Comp0::enable(true) && Comp1::enable(true) && wait_ready());
     // Park OUTSIDE first, then move INSIDE: the event copies the
-    // inside/outside status, so that transition is its rising edge.
+    // inside/outside status, so that transition is one edge of it.
     drive<Ain1>(false);
     drive<Ain0>(false);
     settle();
+    bench.verdict("the witness arms from zero", witness_arm());
     bench.verdict("the channel now carries WIN0",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = Window0::event_generator,
                                      .path = EventPath::resynchronized,
                                      .edge = EventEdge::both}));
     settle();
-    // RE-POINTING A CHANNEL AT A NEW GENERATOR IS ITSELF AN EDGE for the
-    // detector, and an event raised while its user is not ready is HELD
-    // by the channel rather than dropped (29.2's USRRDY handshake) - so
-    // the first arming after a re-route can consume one. Measured here
-    // rather than assumed: the first block is reported, the SECOND
-    // arming is the one the verdict rests on.
-    bench.verdict("the DMA channel arms after the re-route",
-                  arm_event_driven_copy(0x72));
+    // RE-POINTING A CHANNEL AT A NEW GENERATOR CAN ITSELF BE AN EDGE for
+    // the detector, and an event raised while its user is not ready is
+    // HELD by the channel rather than dropped (29.2's USRRDY handshake).
+    // A counter makes that measurable instead of something to step
+    // around: what the re-route left standing is read and reported, a
+    // quiet window behind it must add nothing, and the verdict rests on
+    // the DIFFERENCE the stimulus makes.
+    const uint16_t on_reroute = witnessed();
+    print(serial, "  re-pointing the channel at WIN0 left ", on_reroute,
+          " event(s) standing", crlf);
     settle();
-    const bool moved_on_reroute = !destination_untouched();
-    print(serial, "  re-pointing the channel at WIN0 left an event standing: ",
-          moved_on_reroute ? "yes" : "no", crlf);
-    bench.verdict("the DMA channel arms once more", arm_event_driven_copy(0x72));
-    settle();
-    bench.verdict("and NOW nothing has moved - the channel is quiet with the "
+    const uint16_t parked = witnessed();
+    bench.verdict("and once that is spent the channel is quiet with the "
                   "window parked outside",
-                  destination_untouched());
+                  parked == on_reroute);
     drive<Ain1>(true);
     settle();
+    const uint16_t window_events = static_cast<uint16_t>(witnessed() - parked);
     print(serial, "  after the window went inside: WSTATE=",
-          window_state_name(Window0::state()), ", dst[0..3] = ", dst[0], " ",
-          dst[1], " ", dst[2], " ", dst[3], crlf);
-    bench.verdict("A WINDOW TRANSITION IS AN EVENT TOO, and it is generated "
-                  "from the inside/outside state whatever WINTSEL says "
-                  "(40.6.13)",
-                  destination_matches(0x72));
+          window_state_name(Window0::state()), ", counted ", window_events,
+          crlf);
+    bench.verdict("ONE WINDOW TRANSITION IS ONE EVENT, generated from the "
+                  "inside/outside state whatever WINTSEL says (40.6.13)",
+                  window_events == 1u);
 
-    (void)Copy::enable(false);
-    Evsys::disconnect(user_dmac_ch0);
+    Witness::release();
+    Evsys::disconnect(user_witness);
     GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
     (void)Window0::configure(false, AcWindowInterrupt::above);
     Ain0::configure({});
@@ -716,11 +686,11 @@ void te_generator() {
 //
 // SOC0 is user 34 and table 29-3 marks it ASYNCHRONOUS PATH ONLY, which
 // is a constraint on the CHANNEL and not on this peripheral - and a
-// HARDWARE generator does cross the asynchronous path (measured; a
-// SOFTWARE event does not reach every user's input stage). So the
-// stimulus is an EIC pin edge, moved by the pad's own internal pull,
-// and the measurement is a single-shot comparison that started with no
-// CPU in the path.
+// HARDWARE generator does cross the asynchronous path (measured, letter
+// e of test_samc_eic), while whether a SOFTWARE event does is each
+// user's input stage's own answer. So the stimulus is an EIC pin edge,
+// moved by the pad's own internal pull, and the measurement is a
+// single-shot comparison that started with no CPU in the path.
 void tf_user() {
     bench.verdict("PA16 follows its own internal pull, which is what the EIC\n"
                   "                stimulus needs",
@@ -832,19 +802,11 @@ void banner() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
-
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     bench.letter('a', "the block, its EVSYS codes and every refusal", ta_block);
@@ -857,8 +819,7 @@ int main() {
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

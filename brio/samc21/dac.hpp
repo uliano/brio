@@ -52,8 +52,8 @@
  *    drawn with W access in 41.8.8/41.8.9. THERE IS NO CODE READBACK,
  *    so `code()` reports what this driver last WROTE and says so.
  *
- * NOT PAC-PROTECTED, and it is the pair a DMA engine needs (41.5.8):
- * INTFLAG and DATABUF.
+ * NOT PAC-PROTECTED (41.5.8): INTFLAG and DATABUF, the pair an EMPTY
+ * handler feeding the converter writes.
  *
  * ---------------------------------------------------------------------
  * THE REFERENCE, and a NAME THAT LIES IN THE DEVICE HEADER.
@@ -347,17 +347,15 @@ public:
 
     // ---- the vocabularies this peripheral publishes -------------------------
     //
-    // evsys.hpp owns the FABRIC and dmac.hpp owns the CHANNELS; the
-    // codes of their tables that belong to the DAC live here, probed
-    // from the device header in samc21/device_tables.hpp.
+    // evsys.hpp owns the FABRIC; the codes of its tables that belong to
+    // the DAC live here, probed from the device header in
+    // samc21/device_tables.hpp.
 
     /// Generator: DATABUF became empty (41.6.5).
     static constexpr uint8_t empty_generator = dac_empty_generator();
     /// User: copy DATABUF into DATA and convert. TABLE 29-3 MARKS IT
     /// ASYNCHRONOUS PATH ONLY - `start_on()` enforces it.
     static constexpr uint8_t start_event_user = dac_start_user();
-    /// DMAC trigger: the one DMA request this peripheral has (41.6.3).
-    static constexpr uint8_t dma_trigger_empty = dac_dma_empty_id();
 
     /// INTFLAG / INTENSET bits, named.
     static constexpr uint8_t flag_underrun = DAC_INTFLAG_UNDERRUN_Msk;
@@ -584,7 +582,7 @@ public:
     /**
      * Write DATABUF: the value waits there until a START event copies it
      * into DATA (41.6.8.2). Writing it also clears INTFLAG.EMPTY. NOT
-     * PAC-protected, which is what lets a DMA channel feed it.
+     * PAC-protected (41.5.8).
      *
      * VOID AND NO WAIT, DELIBERATELY, and this is measured rather than
      * deduced: SYNCBUSY.DATABUF is not a bus crossing that finishes on

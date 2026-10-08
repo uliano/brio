@@ -487,7 +487,7 @@ brio gate --tokens [--strings] FILE...   # a source token-identical to REF? (--s
 # the PATH); its guts are the cli/ package. The verbs:
 brio list                  # serial devices, USB probes, the bench manifest
 brio flash A test_avr_pin  # cmake --build --target <app>, then avrdude/UPDI
-brio flash C test_samc_dma # ... or OpenOCD/SWD - the BOARD TYPE decides both
+brio flash C test_samc_uart # ... or OpenOCD/SWD - the BOARD TYPE decides both
 brio flash E console       # ... or OpenOCD/ST-LINK (a Nucleo in the example manifest)
                            # the project to build in and the flash mechanism
 brio run C z               # drive the console, judge "ALL: N pass, M fail"

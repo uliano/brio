@@ -63,11 +63,6 @@
 //   g  THE KERNEL LETTER: SpiBus (= BusMaster) over SpiHost inside a
 //      real kernel - queued requests, replies through ReplyTo,
 //      reject-when-full, and the PrepareSleep vote idle vs busy
-//   h  THE DMA HOST, WIRELESS (loop-back): the data phase on the two
-//      engines, ONE interrupt a transaction (the receive block's; the
-//      transmit block silent), a write-only request on ONE channel with
-//      TXC as its edge - and TXC timed against the frames it closes - and
-//      the rate ladder on the crystal
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -75,7 +70,6 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
 #include "samc21/platform.hpp"
@@ -176,13 +170,6 @@ using Bus = SpiHost<link_sercom, host_pads>;
 using Loop = SpiHost<link_sercom, loopback_pads>;
 using Peer = SpiClient<link_sercom, client_pads>;
 using Raw = Spi<link_sercom>;
-
-/// The engined host on the wire pads - letter d's full-DMA climb (both
-/// ends of the link on engines) and nothing else. Same two channels as
-/// letter h's loop-back twin; the two are never up at once, and each
-/// init() re-claims.
-using DmaBus = SpiHost<link_sercom, host_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
-volatile bool dma_bus_live = false;   ///< routes DMAC_Handler to DmaBus
 
 using Cs = Pin<'A', 18>;
 using SckPin = Pin<'A', 17>;
@@ -508,7 +495,6 @@ struct Exchange {
     uint8_t flags = 0;
     uint8_t spare = 0;   ///< spilink::spare_polled_pump forces the peer's polled loop
     uint16_t ms = 400;
-    bool dma_host = false;   ///< move THIS end's data phase onto the engines too
 };
 
 constexpr uint8_t max_exchange = 16;
@@ -553,29 +539,6 @@ bool do_exchange(const Exchange& e) {
     }
     settle();
     const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
-    if (e.dma_host) {
-        // BOTH ends on engines: this end's data phase rides DmaBus (a
-        // polled request whose spin still completes through
-        // DMAC_Handler), the peer's serve rides its own two channels.
-        (void)DmaBus::init(clock);
-        dma_bus_live = true;
-        DmaBus::prime(e.host_mode, e.baud);
-        Cs::clear();
-        link_hold();
-        DmaBus::Request r{
-            .cs = {}, .dc = {}, .cmd = {},
-            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx)),
-            .rx = lend<Lease::reply>(xrx),
-            .len = n, .cmd_len = 0, .polled = true, .baud = e.baud,
-            .mode = e.host_mode, .reply = {},
-        };
-        (void)DmaBus::start(r);
-        link_hold();
-        Cs::set();
-        dma_bus_live = false;
-        (void)link_command_mode();
-        return true;
-    }
     if (e.host_lsb) {
         // The engine's own apply() would re-state CTRLA without DORD, so
         // this leg drives the transaction with CS by hand and the raw
@@ -1042,54 +1005,47 @@ void td_rates() {
     static const uint32_t rates[] = {200'000UL, 500'000UL, 1'000'000UL, 2'000'000UL,
                                      3'000'000UL, 4'000'000UL, 6'000'000UL,
                                      8'000'000UL, 12'000'000UL, 24'000'000UL};
-    struct Climb {
-        uint32_t last_good = 0;
-        uint32_t first_bad = 0;
-        spilink::Report bad_r{};
-    };
-    // The DMA climb needs the controller up; letter h may not have run.
-    (void)Dmac::init();
-    Climb climbs[2];
-    for (uint8_t leg = 0; leg < 2; ++leg) {
-        const bool dma = leg == 1;
-        print(serial, dma ? "  -- both ends on DMA engines --"
-                          : "  -- both ends on polled pumps --", crlf);
-        Climb& c = climbs[leg];
-        for (uint8_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
-            const auto b = Bus::baud_for(rates[i]);
-            if (!b) continue;
-            Exchange e{};
-            e.baud = *b;
-            e.count = 8;
-            e.seed_a = 0x21;
-            e.seed_b = 0x84;
-            e.spare = dma ? 0u : spilink::spare_polled_pump;
-            e.dma_host = dma;
-            Verify v{};
-            spilink::Report r{};
-            const bool ok = exchange_exact(e, v, r);
-            const uint32_t real = spi_sck_hz(SysClock::hz, *b);
-            print(serial, "  SCK ", real / 1000u, " kHz (BAUD ", *b, "): ",
-                  ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
-                  " client mism=", r.mism, " client count=", r.count,
-                  " serve=", (r.aux2 & 0x04) != 0 ? "dma" : "pump", crlf);
-            if (ok && c.first_bad == 0) {
-                c.last_good = real;
-            } else if (!ok && c.first_bad == 0) {
-                c.first_bad = real;
-                c.bad_r = r;
-            }
+    // Both ends on polled pumps: spare_polled_pump asks a peer that has
+    // an engine for its polled loop, so the boundary measured here is
+    // the polled one whichever family answers. The serve= field prints
+    // what the peer reports it did; the SAM peer's only serve is its
+    // pump.
+    uint32_t last_good = 0;
+    uint32_t first_bad = 0;
+    spilink::Report bad_r{};
+    print(serial, "  -- both ends on polled pumps --", crlf);
+    for (uint8_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
+        const auto b = Bus::baud_for(rates[i]);
+        if (!b) continue;
+        Exchange e{};
+        e.baud = *b;
+        e.count = 8;
+        e.seed_a = 0x21;
+        e.seed_b = 0x84;
+        e.spare = spilink::spare_polled_pump;
+        Verify v{};
+        spilink::Report r{};
+        const bool ok = exchange_exact(e, v, r);
+        const uint32_t real = spi_sck_hz(SysClock::hz, *b);
+        print(serial, "  SCK ", real / 1000u, " kHz (BAUD ", *b, "): ",
+              ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
+              " client mism=", r.mism, " client count=", r.count,
+              " serve=", (r.aux2 & 0x04) != 0 ? "dma" : "pump", crlf);
+        if (ok && first_bad == 0) {
+            last_good = real;
+        } else if (!ok && first_bad == 0) {
+            first_bad = real;
+            bad_r = r;
         }
-        print(serial, "  ", dma ? "on engines" : "on pumps", " the link held to ",
-              c.last_good / 1000u, " kHz back to back");
-        if (c.first_bad != 0) {
-            print(serial, " and broke at ", c.first_bad / 1000u, " kHz");
-        }
-        print(serial, crlf);
     }
+    print(serial, "  on pumps the link held to ", last_good / 1000u, " kHz back to back");
+    if (first_bad != 0) {
+        print(serial, " and broke at ", first_bad / 1000u, " kHz");
+    }
+    print(serial, crlf);
     bench.verdict("the polled link is exact at the command rate and at least 2.5 "
                   "times faster",
-                  climbs[0].last_good >= 500'000UL);
+                  last_good >= 500'000UL);
     // THE SIGNATURE OF THE POLLED BOUNDARY: at the first rung that is
     // not exact, the peer still RECEIVED every character byte-exact
     // (its count full, its mismatches zero) while what the HOST read
@@ -1100,14 +1056,7 @@ void td_rates() {
     bench.verdict("wherever the polled climb breaks, the peer still hears every "
                   "byte exact there - the boundary is its ANSWER RELOAD, not the "
                   "wire",
-                  climbs[0].first_bad == 0 ||
-                      (climbs[0].bad_r.count == 8 && climbs[0].bad_r.mism == 0));
-    // The engines lift the reload boundary: with BOTH ends on DMA the
-    // link must clear at least what the polled loops could, and where
-    // it really stops is the print - the silicon's own answer.
-    bench.verdict("with BOTH ends on DMA engines the climb reaches at least "
-                  "2 MHz, above the polled loops",
-                  climbs[1].last_good >= 2'000'000UL);
+                  first_bad == 0 || (bad_r.count == 8 && bad_r.mism == 0));
 
     (void)link_command_mode();
     bench.verdict("the command channel survives the climb", command(Op::ping));
@@ -1688,267 +1637,6 @@ void tg_kernel() {
                   true);
 }
 
-// ===========================================================================
-// h - THE DMA HOST: the data phase on the two DMAC engines (WIRELESS)
-// ===========================================================================
-
-namespace dh {
-
-/// The loop-back host again, with the data phase on channels 0 and 1.
-/// Wireless: what the engines move is read back through the pad, so a
-/// missing byte, a swapped byte or a phase slip is a data mismatch and
-/// not an interpretation.
-using DmaLoop = SpiHost<link_sercom, loopback_pads, 0, DmaTxEngine<0>, DmaRxEngine<1>>;
-
-volatile bool request_done = false;
-volatile bool host_live = false;   ///< routes SERCOM1_Handler to DmaLoop::isr()
-/// The vectors a request took, counted by the two handlers below.
-volatile uint32_t dmac_entries = 0;
-volatile uint32_t dmac_tx_reports = 0;   ///< take_pending() naming the TX channel
-volatile uint32_t sercom_entries = 0;
-
-uint8_t tx[64];
-uint8_t rx[64];
-const uint8_t cmd3[3] = {0x5A, 0x0F, 0x33};
-
-bool polled_req(const uint8_t* txp, uint8_t* rxp, uint16_t len, uint8_t baud) {
-    DmaLoop::Request r{
-        .cs = {}, .dc = {}, .cmd = {},
-        .tx = lend<Lease::reply>(txp),
-        .rx = lend<Lease::reply>(rxp),
-        .len = len, .cmd_len = 0, .polled = true, .baud = baud,
-        .mode = SpiMode::mode0, .reply = {},
-    };
-    return DmaLoop::start(r);
-}
-
-}   // namespace dh
-
-void th_dma() {
-    using dh::DmaLoop;
-    // The DMAC BLOCK is the app's to initialize, once - the engines arm
-    // CHANNELS of a controller somebody else owns (the Uart's own
-    // contract, and the reason SpiHost::init cannot do it: a shared
-    // block re-initialized per transport would stop every other
-    // channel).
-    const bool dmac_ok = Dmac::init();
-    bench.verdict("the DMA loop-back host comes up (Dmac::init once, then "
-                  "DmaTxEngine<0> + DmaRxEngine<1> on SERCOM1's own trigger codes)",
-                  dmac_ok && DmaLoop::init(clock));
-    DmaTxEngine<0>::clear_faults();
-
-    for (uint8_t i = 0; i < 64; ++i) {
-        dh::tx[i] = static_cast<uint8_t>(0x23u + i * 5u);
-        if (dh::tx[i] == spilink::magic) dh::tx[i] = 0x5Au;
-        dh::rx[i] = 0xEE;
-    }
-
-    // 1. The polled full-duplex request: the whole data phase moved by
-    // the two channels, the CPU spinning on the DMAC's completion.
-    bool ok = dh::polled_req(dh::tx, dh::rx, 48, 23) && DmaLoop::status() == spi_ok;
-    uint16_t mism = 0;
-    for (uint8_t i = 0; i < 48; ++i) {
-        if (dh::rx[i] != dh::tx[i]) ++mism;
-    }
-    print(serial, "  polled DMA loop-back, 48 bytes at 1 MHz: mism=", mism,
-          " status=", DmaLoop::status(), crlf);
-    bench.verdict("a POLLED request's data phase rides the two channels byte-exact "
-                  "(RX drains on the RXC trigger, TX feeds on DRE, NO kick - the "
-                  "enable under the standing level fires the first beat itself)",
-                  ok && mism == 0);
-
-    // 2. Two phases: the command bytes on the byte pump, the data on the
-    // engines - the handover inside one chip-select window.
-    for (uint8_t i = 0; i < 16; ++i) dh::rx[i] = 0xEE;
-    {
-        DmaLoop::Request r{
-            .cs = {}, .dc = {}, .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
-            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
-            .rx = lend<Lease::reply>(dh::rx),
-            .len = 16, .cmd_len = 3, .polled = true, .baud = command_baud,
-            .mode = SpiMode::mode0, .reply = {},
-        };
-        ok = DmaLoop::start(r) && DmaLoop::status() == spi_ok;
-    }
-    mism = 0;
-    for (uint8_t i = 0; i < 16; ++i) {
-        if (dh::rx[i] != dh::tx[i]) ++mism;
-    }
-    bench.verdict("a TWO-PHASE polled request hands over from the byte pump to the "
-                  "engines mid-window, and rx captures the DATA phase alone",
-                  ok && mism == 0);
-
-    // 3. A null tx feeds dummies from a held source: in loop-back every
-    // received byte must be exactly 0xFF.
-    for (uint8_t i = 0; i < 16; ++i) dh::rx[i] = 0;
-    ok = dh::polled_req(nullptr, dh::rx, 16, command_baud) && DmaLoop::status() == spi_ok;
-    mism = 0;
-    for (uint8_t i = 0; i < 16; ++i) {
-        if (dh::rx[i] != 0xFFu) ++mism;
-    }
-    bench.verdict("a null tx sends 0xFF dummies from a HELD source address "
-                  "(increment off - one descriptor bit)",
-                  ok && mism == 0);
-
-    // 4. A null rx is WRITE-ONLY: the transmit channel alone, and the
-    // SERCOM's TXC the edge (the receiver overflows harmlessly). Polled,
-    // the spin still waits on the flag the SERCOM vector sets.
-    dh::dmac_entries = 0;
-    dh::sercom_entries = 0;
-    dh::host_live = true;
-    ok = dh::polled_req(dh::tx, nullptr, 16, command_baud) && DmaLoop::status() == spi_ok;
-    dh::host_live = false;
-    print(serial, "  write-only polled: DMAC entries ", dh::dmac_entries, ", SERCOM1 entries ",
-          dh::sercom_entries, crlf);
-    bench.verdict("a null rx runs on ONE channel and completes on TXC, spi_ok - no DMAC "
-                  "interrupt, one SERCOM interrupt",
-                  ok && dh::dmac_entries == 0u && dh::sercom_entries == 1u);
-
-    // 5. The ISR-style request: the command phase pumped by
-    // SERCOM1_Handler, the handover made INSIDE the interrupt, the
-    // completion posted by DMAC_Handler - both vectors in one request.
-    for (uint8_t i = 0; i < 24; ++i) dh::rx[i] = 0xEE;
-    dh::request_done = false;
-    dh::dmac_entries = 0;
-    dh::dmac_tx_reports = 0;
-    dh::host_live = true;
-    {
-        DmaLoop::Request r{
-            .cs = {}, .dc = {}, .cmd = lend<Lease::reply>(static_cast<const uint8_t*>(dh::cmd3)),
-            .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
-            .rx = lend<Lease::reply>(dh::rx),
-            .len = 24, .cmd_len = 3, .polled = false, .baud = command_baud,
-            .mode = SpiMode::mode0, .reply = {},
-        };
-        ok = !DmaLoop::start(r);   // asynchronous: false = running on the ISRs
-    }
-    {
-        const uint32_t t0 = Ticker::millis();
-        while (!dh::request_done && Ticker::millis() - t0 < 100u) {
-        }
-    }
-    dh::host_live = false;
-    mism = 0;
-    for (uint8_t i = 0; i < 24; ++i) {
-        if (dh::rx[i] != dh::tx[i]) ++mism;
-    }
-    print(serial, "  ISR-style request: done=", dh::request_done, " mism=", mism,
-          " status=", DmaLoop::status(), ", DMAC entries ", dh::dmac_entries,
-          " (the TX channel reported ", dh::dmac_tx_reports, " times)", crlf);
-    bench.verdict("an ISR-style request runs the command phase on the SERCOM vector, "
-                  "hands over to the engines inside the interrupt, and completes "
-                  "through the DMAC vector with spi_ok",
-                  ok && dh::request_done && mism == 0 && DmaLoop::status() == spi_ok);
-    bench.verdict("ONE DMAC interrupt for the data phase: the receive block's; the "
-                  "transmit block is silent (TCMPL disarmed)",
-                  dh::dmac_entries == 1u && dh::dmac_tx_reports == 0u);
-
-    // 5b. Does TXC mark the END of the last frame (32.8.6)? A write-only
-    // request of n frames at 100 kHz, ISR-style, timed in CORE cycles -
-    // the clock SCK is divided from, so a frame is exactly 8 x 480 of them
-    // - from start() to the completion edge: n frames and a constant, not
-    // n - 1. The lengths start at dma_min_frames: a shorter data phase
-    // takes the byte pump and its RXC, and this is the ENGINE's edge.
-    {
-        constexpr uint8_t slow = 239;   // 100 kHz: a frame is 80 us
-        constexpr uint32_t frame = 8u * (SysClock::hz / spi_sck_hz(SysClock::hz, slow));
-        // The first request moves the bus to this rate (apply()'s disable
-        // and enable), so it is spent and the next two are timed.
-        uint32_t took[3] = {0, 0, 0};
-        constexpr uint16_t short_n = DmaLoop::dma_min_frames;
-        constexpr uint16_t long_n = short_n + 4u;
-        static constexpr uint16_t ns[3] = {short_n, short_n, long_n};
-        bool done_all = true;
-        for (uint8_t k = 0; k < 3; ++k) {
-            dh::request_done = false;
-            dh::host_live = true;
-            DmaLoop::Request r{
-                .cs = {}, .dc = {}, .cmd = {},
-                .tx = lend<Lease::reply>(static_cast<const uint8_t*>(dh::tx)),
-                .rx = {},
-                .len = ns[k], .cmd_len = 0, .polled = false, .baud = slow,
-                .mode = SpiMode::mode0, .reply = {},
-            };
-            const uint32_t t0 = Ticker::cycles();
-            (void)DmaLoop::start(r);
-            const uint32_t m0 = Ticker::millis();
-            while (!dh::request_done && Ticker::millis() - m0 < 10u) {
-            }
-            took[k] = Ticker::cycles() - t0;
-            dh::host_live = false;
-            done_all = done_all && dh::request_done;
-        }
-        const uint32_t per_frame = (took[2] - took[1]) / 4u;
-        const uint32_t constant = took[1] - short_n * per_frame;
-        print(serial, "  write-only at 100 kHz: ", short_n, " frames ", took[1], ", ", long_n,
-              " frames ", took[2], " core cycles - ", per_frame, " a frame (", frame,
-              " due), the rest ", constant, crlf);
-        bench.verdict("TXC marks the END of the last frame: each frame adds one frame "
-                      "time, and n frames take more than n",
-                      done_all && per_frame + frame / 100u >= frame &&
-                          per_frame <= frame + frame / 100u && took[1] > short_n * frame);
-    }
-
-    // 6. The ladder to the generator's top, timed on the crystal. The
-    // point of the engines: back-to-back characters with the CPU out of
-    // the byte path, all the way to BAUD 0 = f_ref/2.
-    if (!ruler_ok) {
-        bench.verdict("the crystal ruler is available for the DMA rate ladder", false);
-    } else {
-        static const uint8_t bauds[] = {5, 2, 1, 0};   // 4, 8, 12, 24 MHz
-        bool exact_to_12m = true;
-        uint16_t mism_24m = 0;
-        bool none_short = true;
-        for (uint8_t k = 0; k < sizeof bauds; ++k) {
-            constexpr uint16_t n = 64;
-            for (uint8_t i = 0; i < n; ++i) dh::rx[i] = 0xEE;
-            const uint32_t t0 = wall();
-            (void)dh::polled_req(dh::tx, dh::rx, n, bauds[k]);
-            const uint32_t took = wall() - t0;
-            const uint32_t sck = spi_sck_hz(SysClock::hz, bauds[k]);
-            const uint32_t due = static_cast<uint32_t>(n) * 8u * (crystal_hz / sck);
-            mism = 0;
-            for (uint8_t i = 0; i < n; ++i) {
-                if (dh::rx[i] != dh::tx[i]) ++mism;
-            }
-            const uint32_t over_us =
-                (took > due ? took - due : 0u) / (crystal_hz / 1000000u);
-            print(serial, "  BAUD ", bauds[k], " = ", sck / 1000u, " kHz: 64 bytes in ",
-                  took, " crystal ticks (bits alone ", due, ", overhead ", over_us,
-                  " us for the WHOLE phase), mism=", mism, crlf);
-            if (bauds[k] == 0) {
-                mism_24m = mism;
-            } else if (mism != 0) {
-                exact_to_12m = false;
-            }
-            if (took < due) none_short = false;
-        }
-        bench.verdict("the DMA data phase is byte-exact THROUGH THE PAD to 12 MHz "
-                      "(f_ref/4) - back-to-back, no CPU in the byte path",
-                      exact_to_12m);
-        // The top rung is a LOOP-BACK SAMPLING boundary, not judged: at
-        // f_ref/2 the pad round trip meets the input sampler inside one
-        // 333 ns character, and what breaks cannot be attributed
-        // between the transmit and receive halves from one board. The
-        // wired SAM-SAM ladder is the instrument that can.
-        print(serial, "  the 24 MHz rung read ", 64 - mism_24m,
-              " of 64 correct - recorded, not judged (loop-back sampling at "
-              "f_ref/2)", crlf);
-        bench.verdict("and never faster than the arithmetic says (the bits are "
-                      "really on the wire)",
-                      none_short);
-    }
-
-    print(serial, "  engine faults across the letter: ", DmaTxEngine<0>::faults(), crlf);
-    bench.verdict("no 1.10.4-class fault was seen (two channels, low trigger "
-                  "density - the erratum's own density law)",
-                  DmaTxEngine<0>::faults() == 0);
-
-    DmaLoop::release();
-    Cs::set();
-    Cs::output();
-}
-
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -1962,15 +1650,6 @@ extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 /// or the protocol's. Both are SpiHost instantiations over the same
 /// Spi<1>, and only one of them ever has RXC armed at a time.
 extern "C" void SERCOM1_Handler() {
-    if (dh::host_live) {
-        dh::sercom_entries = dh::sercom_entries + 1u;
-        // Letter h's ISR-style request: the command phase pumped here,
-        // the handover to the engines made inside this very interrupt.
-        if (dh::DmaLoop::isr()) {
-            dh::request_done = true;
-        }
-        return;
-    }
     if (bus_ao_live) {
         if (Loop::isr()) {
             isr_completions = isr_completions + 1;
@@ -1985,22 +1664,6 @@ extern "C" void SERCOM1_Handler() {
 }
 
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
-
-/// The engines' completions and faults - letter h's loop-back twin or
-/// letter d's on-the-wire one, whichever is live.
-extern "C" void DMAC_Handler() {
-    dh::dmac_entries = dh::dmac_entries + 1u;
-    while (const auto irq = brio::Dmac::take_pending()) {
-        if (irq->channel == 0u) {
-            dh::dmac_tx_reports = dh::dmac_tx_reports + 1u;
-        }
-        if (dma_bus_live) {
-            (void)DmaBus::dma_isr(irq->channel, irq->flags);
-        } else if (dh::DmaLoop::dma_isr(irq->channel, irq->flags)) {
-            dh::request_done = true;
-        }
-    }
-}
 
 int main() {
     SysClock::init();
@@ -2034,7 +1697,6 @@ int main() {
                  te_client);
     bench.letter('f', "loop-back, the SCK ladder, nine bits, BUFOVF and MSSEN", tf_wireless);
     bench.letter('g', "THE KERNEL: SpiBus over SpiHost, util unchanged", tg_kernel);
-    bench.letter('h', "THE DMA HOST: the data phase on the two engines", th_dma);
 
     bench.menu();
     bench.prompt();

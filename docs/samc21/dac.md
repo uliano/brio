@@ -57,7 +57,7 @@ The chapter mixes them, and it disagrees with itself about one:
    and says so.
 
 INTFLAG and DATABUF are the two registers PAC write-protection does not
-cover (41.5.8) - the pair a DMA engine needs.
+cover (41.5.8) - the pair a feed writes.
 
 ### The reference, and a name that lies in the device header
 
@@ -86,6 +86,28 @@ requires a periodic START event generating sixteen events per value,
 with DATABUF reloaded every sixteen; `dac_config_valid()` refuses
 dithering without `EVCTRL.STARTEI` for that reason.
 
+### The event-paced shape: START, EMPTY, UNDERRUN
+
+**The pacing is a START event and not a rate.** 41.6.2.4 gives the
+converter no done flag, so nothing in the data path decides when the
+next value is due - a periodic event into the START user does, and
+whatever answers EMPTY only refills DATABUF behind it. Without a start
+event the first DATABUF write stands for ever (`SYNCBUSY.DATABUF`, see
+"Bench findings") and nothing moves at all.
+
+**INTFLAG.EMPTY is an EVENT, not a state, and the flag and the request
+differ.** 41.8.6 sets the flag "when data is transferred from DATABUF to
+DATA" and clears it on a write of DATABUF or of the flag; measured, on a
+converter just enabled whose DATABUF has never been written, EMPTY reads
+**clear** even though the buffer is empty - the flag marks the buffer
+BECOMING empty. The DMA request of the same name is the other way round
+by 41.6.3's own sentence: "As DATABUF is initially empty, a DMA request
+is generated whenever the DAC is enabled." So a feed driven by the
+interrupt is started by its owner, who writes the first value itself: a
+feed that waited for the flag would never begin. UNDERRUN is "a start
+conversion event ... when DATABUF is empty" (41.8.6), which only the
+event-driven shape can produce (41.6.4).
+
 ## Types and verbs
 
 `DacRef` is **this converter's own** reference vocabulary, deliberately
@@ -110,10 +132,10 @@ the one place every rule of the chapter is written down.
 `dac_data_word()` is table 41-1 as arithmetic, clamping rather than
 spilling into the neighbouring field.
 
-The EVSYS and DMAC vocabularies this peripheral publishes -
-`empty_generator`, `start_event_user`, `dma_trigger_empty` - live here
-and not in `evsys.hpp` or `dmac.hpp` ([evsys.md](evsys.md)): those
-files own the fabric and the channels, a peripheral owns its own codes.
+The EVSYS vocabulary this peripheral publishes - `empty_generator`,
+`start_event_user` - lives here and not in `evsys.hpp`
+([evsys.md](evsys.md)): that file owns the fabric, a peripheral owns its
+own codes.
 `adc_input_pad_port` / `adc_input_pad_pin` publish the pad erratum
 1.8.9's workaround wants, so a caller does not have to know the pinout.
 
@@ -151,18 +173,30 @@ brio::AcComparator<0>::configure({.positive = brio::AcPositive::pin0,
                                   .negative = brio::AcNegative::dac});
 ```
 
-A waveform with no CPU in the path - a timer overflow starts each
-conversion and the DMAC refills the buffer:
+A waveform paced by an event - a timer overflow starts each conversion
+and the DAC's own EMPTY interrupt refills the buffer, the first value
+the starter's because EMPTY is an event and not a state:
 
 ```
-brio::Dac::init(0, cfg_with_empty_event);
+brio::Dac::init(0, cfg);
 brio::Dac::enable(false);                       // EVCTRL is enable-protected
 brio::Dac::start_on(channel, {.generator = Pacer::overflow_generator,
                               .path = brio::EventPath::asynchronous});
-// DMA channel: trigger = brio::Dac::dma_trigger_empty, one beat per
-// request, source = the table in RAM, destination = &DAC_REGS->DAC_DATABUF
 brio::Dac::enable(true);
+brio::Dac::buffer(table[0]);
+brio::Dac::arm(brio::Dac::flag_empty);
+brio::Nvic::enable(brio::Dac::irq());
+
+extern "C" void DAC_Handler() {
+    if ((brio::Dac::isr() & brio::Dac::flag_empty) != 0) {
+        brio::Dac::buffer(table[next]);         // writing DATABUF clears EMPTY
+        next = (next + 1) % table_len;
+    }
+}
 ```
+
+The handler's deadline is ONE start event after the EMPTY, dithering or
+not - see "Dithering, LEFTADJ, and the two interrupts".
 
 ## Errata
 
@@ -193,35 +227,6 @@ is the standing trap in this errata sheet.
 - **NOT this silicon**: 1.9.1 (dithering with right-adjusted data giving
   16 LSB of INL) is **revision B only**, so `left_adjust` is not forced
   here.
-
-## Streaming via DMA
-
-A waveform is `DmaLoopEngine<ch, uint16_t>` armed on
-`Dac::dma_trigger_empty` with DATABUF as its destination: one
-caller-owned table, played for ever, one interrupt per LAP and none per
-sample. The contract, the hardening and the shape of the handler are in
-[dmac.md](dmac.md); two things belong to THIS chapter.
-
-**The pacing is a START event and not a rate.** 41.6.2.4 gives the
-converter no done flag, so nothing in the data path decides when the
-next value is due - a periodic event into the START user does, and the
-DMA request is only what refills DATABUF behind it. Without a start
-event the first DATABUF write stands for ever (see SYNCBUSY.DATABUF
-above) and the stream never moves at all.
-
-**INTFLAG.EMPTY is an EVENT, not a state**, and a DMA-fed DAC is where
-that bites: on a converter just enabled, whose DATABUF has never been
-written, EMPTY reads **zero** even though the buffer is empty - the flag
-marks the buffer BECOMING empty. So an owner that waits for the flag
-before giving the channel its first software trigger never starts, and
-pays an UNDERRUN and one lost period to discover it. What makes that
-first `kick()` right is the owner's own knowledge that it has just reset
-the converter, not the flag. Measured in `test_samc_analog_dma`.
-
-Streamed at 5 kHz against ADC0 on the shared PA02 pad, a 32-entry table
-came back **exact to 3..6 ADC counts** - the converter pair's own noise
-floor, against a table step of 120 - with no sample lost at any lap
-boundary over thousands of laps.
 
 ## Bench findings
 
@@ -323,19 +328,23 @@ board's 24 MHz crystal.
   answer is an UPPER BOUND of a few hundred nanoseconds - an order of
   magnitude under the 2857 ns table 45-31's 350 ksps conversion rate
   implies, which is a rate and not a settling time.
-- **THE NO-CPU CHAIN RUNS.** A TC2 overflow crosses an asynchronous
-  event channel into the DAC's START user, which copies DATABUF into
-  DATA and converts; DATABUF going empty pulls the next value out of a
-  table in RAM through the DMAC; and the same EMPTY crosses a second
-  channel into TC3, which counts it. The pad walks between both levels
-  of the waveform (0..3585 counts) while TC3 counts 39..40 EMPTY events,
-  the DMA block completes, and **with the pacer stopped the output holds
-  still** (spread 1 count) - the event really is the only thing starting
-  a conversion. A **SYNCHRONOUS** channel into that user is refused by
-  the driver, as table 29-3 requires.
-- **UNDERRUN IS WHAT 41.6.4 SAYS IT IS**: with the DMA block exhausted
-  and the pacer still running, a start event finds DATABUF empty and the
-  flag sets. It exists only in the event-driven shape.
+- **THE EVENT-PACED CHAIN RUNS, FED FROM ITS OWN INTERRUPT.** A TC2
+  overflow at about 1 kHz crosses an asynchronous event channel into the
+  DAC's START user, which copies DATABUF into DATA and converts; DATABUF
+  going empty raises EMPTY, and `DAC_Handler` answers it with the next
+  value of a 32-entry table in RAM; the same EMPTY crosses a second
+  channel into TC3, counting events (EVACT = COUNT). In a 40 ms window
+  the pad walks between both levels of the waveform (0..3583 counts),
+  the handler takes 32 EMPTY interrupts and the table's 32 values go out
+  (the first written by the starter), and TC3 counts 39 EMPTY events -
+  the pacer's rate over the window, not the table's length. **With the
+  pacer stopped the output holds still** (spread 2 counts) and the
+  handler writes nothing - the event really is the only thing starting a
+  conversion. A **SYNCHRONOUS** channel into that user is refused by the
+  driver, as table 29-3 requires.
+- **UNDERRUN IS WHAT 41.6.4 SAYS IT IS**: with the table played and the
+  pacer still running, a start event finds DATABUF empty and the flag
+  sets. It exists only in the event-driven shape.
 - **`SYNCBUSY.DATABUF` IS NOT A BUS CROSSING, and the chapter does not
   say so.** One DATABUF write with no start event configured leaves
   SYNCBUSY reading **0xC - DATABUF *and* DATA - and it stays there**;
@@ -374,44 +383,57 @@ same window with the same buffer write, it does not. See
 
 ## Dithering, LEFTADJ, and the two interrupts
 
-From `test_samc_analog` letters e and f, 23 verdicts.
+From `test_samc_analog` letters e and f, 25 verdicts.
 
 **Dithering delivers sub-LSB means, and the design of the measurement
 is most of the result.** 41.6.8.4 makes the sixteen sub-conversions the
 EVENT'S job, so the chain is a TC overflow into the START user with the
-DMAC refilling DATABUF; the witness has to average over WHOLE dither
-periods, and the numbers are chosen so that it does exactly:
+DAC's own EMPTY interrupt refilling DATABUF; the witness has to average
+over WHOLE dither periods, and the numbers are chosen so that it does
+exactly:
 
 | stage | setting | period |
 | --- | --- | --- |
-| pacer | TC2, count8, div1, PER 255 | one event / 256 CPU cycles |
-| dither | 16 events per value | one period / 4096 cycles |
+| pacer | TC2, count8, div4, PER 255 | one event / 1024 CPU cycles (46.875 kHz) |
+| dither | 16 events per value | one period / 16384 cycles |
 | ADC | div32, SAMPLEN 5 | one sample / 576 cycles |
-| average | 1024 samples | 589824 cycles = **144 periods** |
+| average | 1024 samples | 589824 cycles = **36 periods** |
 
-576/256 = 9/4 and 9 is coprime with 64, so the 1024 samples land on each
-of the sixteen sub-conversion slots exactly 64 times: the mean is the
-dithered mean and not a phase artefact. At 1024 accumulated 12-bit
+576/1024 = 9/16 and 9 is coprime with 256, so the 1024 samples land on
+each of the sixteen sub-conversion slots exactly 64 times: the mean is
+the dithered mean and not a phase artefact. At 1024 accumulated 12-bit
 samples with ADJRES 0 the result is 16 bits wide, so **one DAC LSB is 64
 counts and one sixteenth of one is 4** - the effect is under the ADC's
 own LSB and only the accumulation can see it.
 
-Six repeats of one dithered value span **1 count**. At base code 512:
+**THE EMPTY INTERRUPT'S DEADLINE IS ONE START EVENT, NOT SIXTEEN.**
+41.6.8.4 says "EMPTYx event and DMA request are therefore generated
+every 16 DATABUF to DATA transfers", and measured, the interrupt comes
+once per sixteen start events. But an UNDERRUN follows the EMPTY by ONE
+start event - 278 cycles after it at a 256-cycle pacer - whenever
+DATABUF has not been written by then: 41.8.6's "a start conversion
+event occurs when DATABUF is empty" is judged at every start event, not
+at the sixteenth. At a 187.5 kHz pacer
+(256 cycles an event) the interrupt feed underran 10 to 15 times in some
+3800 dither periods, and in nearly every one with a slower handler; at
+46.875 kHz (1024 cycles an event) it underran zero times in 956
+periods. The suite runs its pacer at the second rate and verdicts zero
+UNDERRUN across every accumulation.
+
+At base code 512, the five dither settings give, right-adjusted:
 
 | DATA[3:0] | 0 | 4 | 8 | 12 | 15 |
 | --- | --- | --- | --- | --- | --- |
-| mean | 32487 | 32504 | 32520 | 32535 | 32548 |
+| mean | 32487 | 32503 | 32520 | 32535 | 32547 |
 
-Every step is above the last and the whole swing is **61 counts where
-fifteen sixteenths of an LSB is 60** - i.e. about 4.1 counts per dither
-bit against 4.0 exact. The control is the same converter with dithering
-off: codes 512 and 513 read 32487 and 32552, **one whole LSB apart with
-nothing between them**.
+Every step is above the last and the whole swing is **60 counts, which
+is fifteen sixteenths of an LSB exactly** - 4 counts per dither bit. The
+control is the same converter with dithering off: codes 512 and 513 read
+32487 and 32550, **one whole LSB apart with nothing between them**.
 
 **CTRLB.LEFTADJ is a placement and not a scale**: code 512 reads 32487
-right-adjusted and 32488 left-adjusted, and the left-adjusted dither
-staircase (32487 / 32504 / 32519 / 32535 / 32547, swing 60) is the
-right-adjusted one. **ERRATUM 1.9.1** - dithering with
+right-adjusted and 32487 left-adjusted, and the left-adjusted dither
+staircase is the right-adjusted one, value for value. **ERRATUM 1.9.1** - dithering with
 right-adjusted data giving an INL of 16 LSB - is **revision B alone** on
 the E/G/J row, and the bench agrees with the row: a 16 LSB nonlinearity
 in one of the two arrangements could not hide in a swing of one.
@@ -426,7 +448,9 @@ carries that information, and leaves EMPTY to whoever feeds the buffer.
 
 ## Not covered yet
 
-Driver gaps: none - chapter 41 is implemented whole.
+Driver gaps:
+- **The DMA request** (EMPTY, 41.6.3): declined - this stratum drives
+  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
 
 Implemented but not bench-verified, each with what it waits for:
 - **VREFA** (`DacRef::vrefa`): the pin is PA03 and `claim_vrefa<P>()`

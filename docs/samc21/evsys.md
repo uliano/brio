@@ -5,8 +5,8 @@ errata DS80000740S items 1.12.1, 1.12.3 and 1.12.4, **all three live on
 every silicon revision including this one** (1.12.2 is revisions B..E and
 not this chip). Driver: `samc21/evsys.hpp`. Family fixture
 `test/family_samc21/evsys.cpp` plus one negative under
-`brio check samc21`; the bench suite is `test_samc_evsys`, which uses
-`samc21/dmac.hpp` as its event user.
+`brio check samc21`; the bench suite is `test_samc_evsys`, whose event
+user is a TC counting events (`samc21/tc.hpp`).
 
 ## What the silicon does
 
@@ -118,30 +118,31 @@ Evsys::trigger(0);
 
 ## Bench findings
 
-From `test_samc_evsys` (4 letters, 37 verdicts). Nothing to wire: the
-software event supplies the stimulus and the DMAC supplies the user.
+From `test_samc_evsys` (four letters). Nothing to wire: the software
+event supplies the stimulus, and TC4 in COUNT16 counting events
+(EVACT = COUNT, TCEI, 35.6.2.5.3) on its user 27 is the witness - its
+counter advances on an incoming event and on nothing else, so a count of
+exactly N for N events is the fabric losing none and inventing none.
 
-- **An event moves bytes with no CPU in the path.** A DMA channel armed
-  with *no hardware trigger* (`dma_trigger_none`, EVACT trigger, EVIE
-  set) copies its block when - and only when - a software event reaches
-  it through EVSYS.
-- **A SOFTWARE EVENT ON AN ASYNCHRONOUS CHANNEL DOES NOT REACH THE
-  DMAC - AND THE LIMIT IS THE USER'S, NOT THE PATH'S.** **Eight**
-  back-to-back software events on an asynchronous channel move nothing
-  through a DMA channel, while **one** on a synchronous or
-  resynchronized channel moves a whole block; 29.6.2.12 says a software
-  event "can be serviced as any event generator" and never qualifies by
-  path. Put a *different* user on the same asynchronous channel - a CCL
-  LUT, whose event input has an edge detector of its own - and
-  **sixteen of sixteen single software events arrive**
-  (`test_samc_ccl`), with a disconnected-user control catching none and
-  with one of them moving a DMA block through the LUT as a second
-  witness. So the asynchronous path does carry a software event; what a
-  register write has no width for is the DMAC's own trigger stage. A
-  hardware generator crosses that path for every user tried
-  (`test_samc_eic`, [eic.md](eic.md)).
-- **Both clocked paths work and both raise EVD**, the event-detected flag
-  that only they have.
+- **An event is counted, exactly once, with no CPU in the path.** With
+  no event the witness counts 0, and a software event on a channel no
+  user listens to counts 0 too; routed over a synchronous channel, one
+  software event counts 1 with EVD set, and eight more spaced ones bring
+  the count to exactly 9, with no overrun.
+- **A SOFTWARE EVENT CROSSES AN ASYNCHRONOUS CHANNEL, AND WHETHER IT
+  ARRIVES IS THE USER'S INPUT STAGE'S BUSINESS.** 29.6.2.12 says a
+  software event "can be serviced as any event generator" and never
+  qualifies by path, while the asynchronous path has no clock and no
+  edge detector and a register write has no width of its own. Measured
+  at TC4's event input: **eight of eight spaced software events and
+  eight of eight back-to-back ones** are counted on an asynchronous
+  channel, in every run of four; with the user disconnected the same
+  eight count zero. A CCL LUT, whose event input has an edge detector of
+  its own, catches sixteen of sixteen ([ccl.md](ccl.md)), and a hardware
+  generator crosses the same path for every user tried
+  ([eic.md](eic.md)).
+- **Both clocked paths carry a software event to TC4, counted once, and
+  both raise EVD**, the event-detected flag that only they have.
 - **The asynchronous path really is silent.** After eight events its
   overrun and event-detected flags are both zero, and CHSTATUS reports
   the channel neither busy nor ready - while the *unused* channels
@@ -185,9 +186,9 @@ Implemented but not bench-verified:
   suite is a software one, so `CHANNELn.EVGEN` is only ever written as
   zero here; the real generators are measured by the drivers that
   publish them - the EIC, the AC, the TC and TCC, the RTC, the three
-  converters, the TSENS, the CCL - each in its own suite, with the DMAC,
-  the PORT and the same peripherals as users. A code whose peripheral
-  has no driver here is compile-checked at most.
+  converters, the TSENS, the CCL - each in its own suite, with a TC
+  counting events, the PORT and the same peripherals as users. A code
+  whose peripheral has no driver here is compile-checked at most.
 - Falling-edge detection on its own (both-edge detection runs in the
   AC's and the TCC's suites); `overrun` actually being raised
   (provoking one needs a generator faster than its user).

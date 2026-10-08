@@ -21,9 +21,10 @@
 //     on against that same crystal, so the frequencies printed here are
 //     ABSOLUTE and not RC-scaled - and the RTC's own rate, counted on
 //     the same ruler, can be compared to them directly.
-//   - samc21/evsys.hpp + samc21/dmac.hpp are the event witness: a DMA
-//     channel armed with NO hardware trigger, so the only thing that can
-//     move its bytes is an RTC event.
+//   - samc21/evsys.hpp + TC4 are the event witness: TC4 in COUNT16 with
+//     EVACT = COUNT (35.6.2.5.3), so its counter advances on an incoming
+//     event and on nothing else, and the number it holds is the number
+//     of RTC events that arrived.
 //
 // THE SCALE, said once so no number below needs a footnote: everything
 // is weighed against the crystal. What is NOT crystal-stable is the RTC
@@ -40,8 +41,9 @@
 //      silencing every periodic event
 //   d  FREQCORR measured: the digital trim's sign, its size and its
 //      linearity, against a stopwatch
-//   e  events and interrupts: a compare and a periodic event each
-//      moving a DMA block, and MATCHCLR raising two flags at once
+//   e  events and interrupts: a compare event counted once, the
+//      periodic event counted exactly over a window, and MATCHCLR
+//      raising two flags at once
 //   f  what the read synchronization costs and what it hides
 //   g  mode 1: PER as TOP, two compares, and the period formula
 //   h  mode 2: the calendar's boundaries, the chapter's own leap rule,
@@ -57,7 +59,6 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/freqm.hpp"
 #include "samc21/nvic.hpp"
@@ -147,64 +148,64 @@ uint32_t spin_ticks(uint32_t ticks) {
 }
 
 // ---------------------------------------------------------------------------
-// The event witness: DMAC channel 0, which is EVSYS user 5 (table 29-3).
+// The event witness: TC4 counting events, which is EVSYS user 27 (TC4 EVU,
+// table 29-3, all three paths). The stopwatch holds TC0 and TC1; TC4 has
+// its generic clock channel to itself (35.5.3), so arming and releasing
+// it touches neither.
 // ---------------------------------------------------------------------------
-constexpr uint8_t dma_ch = 0;
-constexpr uint8_t user_dmac_ch0 = 5;
+using Witness = Tc<4>;
+constexpr uint8_t user_witness = Witness::event_user;
 constexpr uint8_t ev_ch = 0;
-using Copy = DmaChannel<dma_ch>;
 
-// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
-// controller's writes nor its reads, and will sink a buffer's
-// preparation past the thing that starts the transfer.
-constexpr uint16_t payload = 16;
-volatile uint8_t src[payload];
-volatile uint8_t dst[payload];
+// COUNT16 on the normal-frequency waveform: the count action is refused
+// beside a PWM waveform (35.6.2.5.3), and nothing here drives a pad.
+constexpr TcConfig witness_cfg{.mode = TcMode::count16,
+                               .waveform = TcWaveform::normal_frequency};
+constexpr TcEventConfig witness_events{.action = TcEventAction::count,
+                                       .input_enable = true};
+static_assert(tc_event_config_valid(witness_cfg, witness_events),
+              "the witness counts events, which a PWM waveform would refuse");
 
-void fill_source(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        src[i] = static_cast<uint8_t>(seed + i);
-        dst[i] = 0;
-    }
+/// Arm the witness from zero: the software reset inside init() clears
+/// COUNT, and EVCTRL is written before the enable because it is
+/// enable-protected (35.6.2.1). GCLK_TC from generator 0 clocks the
+/// counter's own domain; the events are what it counts.
+bool witness_arm() {
+    return Witness::init(0) && Witness::configure(witness_cfg) &&
+           Witness::event_config(witness_cfg, witness_events) &&
+           Witness::enable(true);
 }
 
-bool destination_matches(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != static_cast<uint8_t>(seed + i)) {
-            return false;
+/// How many events the witness has counted - a READSYNC read (35.6.8).
+uint16_t witnessed() { return Witness::count16(); }
+
+/// The RTC counter's phase, modulo `period`, at which the witness counts
+/// a periodic event: the counter is read, then the witness, so the event
+/// fell between the previous witness read and this one. Bounded by the
+/// stopwatch; nothing when no event arrives inside 50 ms.
+std::optional<uint32_t> periodic_phase(uint32_t period) {
+    const uint16_t n = witnessed();
+    const uint32_t t0 = ticks_now();
+    while (ticks_now() - t0 < stopwatch_hz / 20u) {
+        const uint32_t c = Rtc::count32();
+        if (witnessed() != n) {
+            return c % period;
         }
     }
-    return true;
+    return std::nullopt;
 }
 
-bool destination_untouched() {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != 0u) {
-            return false;
+/// Spin until the RTC counter sits within four ticks after phase `q` of
+/// `period`, and answer the counter there. Bounded by the stopwatch.
+std::optional<uint32_t> rtc_at_phase(uint32_t q, uint32_t period) {
+    const uint32_t t0 = ticks_now();
+    while (ticks_now() - t0 < stopwatch_hz / 20u) {
+        const uint32_t c = Rtc::count32();
+        if ((c + period - q) % period < 4u) {
+            return c;
         }
     }
-    return true;
-}
-
-/// Arm the DMA channel so that ONLY an event can move it.
-bool arm_event_driven_copy(uint8_t seed) {
-    fill_source(seed);
-    if (!Copy::reset()) {
-        return false;
-    }
-    if (!Copy::configure(DmaChannelConfig{.trigger = dma_trigger_none,
-                                          .action = DmaTriggerAction::block,
-                                          .event_action = DmaEventAction::trigger,
-                                          .event_input = true})) {
-        return false;
-    }
-    if (!Copy::load(DmaTransfer{.source = &src[0],
-                                .destination = &dst[0],
-                                .beats = payload,
-                                .beat = DmaBeat::byte})) {
-        return false;
-    }
-    return Copy::enable(true);
+    return std::nullopt;
 }
 
 // ---------------------------------------------------------------------------
@@ -840,7 +841,7 @@ void te_events() {
     bench.verdict("the RTC comes up on OSCULP32K at DIV1",
                   Rtc::init() && select_rtc_clock(RtcClock::ulp_32k) &&
                       Rtc::init() && Rtc::configure(cfg));
-    // Both event outputs armed at once; which one reaches the DMA channel
+    // Both event outputs armed at once; which one reaches the witness
     // is decided by the EVSYS channel's generator, one at a time.
     bench.verdict("EVCTRL takes the compare and the periodic outputs together",
                   Rtc::event_config(cfg, RtcEventConfig{.periodic_out = 0x08,
@@ -849,40 +850,67 @@ void te_events() {
     bench.verdict("the RTC enables", Rtc::enable(true));
 
     // ---- the compare event -------------------------------------------------
-    bench.verdict("the DMA channel arms with NO hardware trigger at all",
-                  arm_event_driven_copy(0x40));
-    bench.verdict("the DMAC's channel-0 user listens to the RTC's COMP0 "
-                  "generator on an asynchronous channel",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+    bench.verdict("the witness arms: TC4 counts events and nothing else",
+                  witness_arm());
+    bench.verdict("TC4's event user listens to the RTC's COMP0 generator on "
+                  "an asynchronous channel",
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = Rtc::compare_generator(0),
                                      .path = EventPath::asynchronous}));
-    bench.verdict("nothing has moved yet", destination_untouched());
+    bench.verdict("nothing has been counted yet", witnessed() == 0u);
     Rtc::clear_flags();
     bench.verdict("a compare is armed a few counter ticks ahead",
                   Rtc::set_comp32(Rtc::count32() + 64u));
     (void)spin_ticks(stopwatch_hz / 20u);   // 50 ms, about 1600 ticks
-    bench.verdict("AND THE COMPARE EVENT MOVED A DMA BLOCK - no CPU in the "
-                  "path, no hardware trigger on the channel",
-                  destination_matches(0x40));
+    const uint16_t compares = witnessed();
+    print(serial, "  one compare match: counted ", compares, crlf);
+    bench.verdict("THE COMPARE EVENT WAS COUNTED, EXACTLY ONCE - no CPU in "
+                  "the path",
+                  compares == 1u);
     bench.verdict("with the compare flag raised as well",
                   (Rtc::flags() & RtcFlag::compare0) != 0u);
 
     // ---- the periodic event ------------------------------------------------
-    // PEREO3 taps prescaler bit 5, so it fires at f/64 - about 512 Hz on
-    // a 32 kHz source, which is many times inside the window below.
+    //
+    // PEREO3 taps prescaler bit 5, so it fires once every 64 source
+    // cycles (24.6.8.1) - about 512 Hz on a 32 kHz source. Over a window
+    // whose two ends are read at the SAME phase of that 64-tick period,
+    // the number of events is exactly the elapsed count over 64, and
+    // that holds whatever the RC's rate. The phase is not assumed: it is
+    // found by watching the witness tick, and both ends are read half a
+    // period away from it, where no event can fall between the RTC read
+    // and the witness read.
+    constexpr uint32_t per = 64;
     bench.verdict("the channel is pointed at the PERIODIC generator instead",
-                  arm_event_driven_copy(0x70) &&
-                      Evsys::connect(user_dmac_ch0, ev_ch,
+                  witness_arm() &&
+                      Evsys::connect(user_witness, ev_ch,
                                      EventChannelConfig{
                                          .generator = Rtc::periodic_generator(3),
                                          .path = EventPath::asynchronous}));
-    (void)spin_ticks(stopwatch_hz / 20u);
-    bench.verdict("AND A PERIODIC INTERVAL EVENT MOVED ONE TOO",
-                  destination_matches(0x70));
-    Evsys::disconnect(user_dmac_ch0);
+    const auto phase = periodic_phase(per);
+    bench.verdict("the periodic event arrives, and its phase in the 64-tick "
+                  "period is found",
+                  phase.has_value());
+    const uint32_t quiet = ((phase ? *phase : 0u) + per / 2u) % per;
+    const auto c0 = rtc_at_phase(quiet, per);
+    const uint16_t n0 = witnessed();
+    (void)spin_ticks(stopwatch_hz / 10u);   // 100 ms, about 51 periods
+    const auto c1 = rtc_at_phase(quiet, per);
+    const uint16_t n1 = witnessed();
+    const uint32_t elapsed = (c0 && c1) ? *c1 - *c0 : 0u;
+    const uint32_t expected = (elapsed + per / 2u) / per;
+    const uint16_t periodic = static_cast<uint16_t>(n1 - n0);
+    print(serial, "  periodic PER3: ", elapsed, " RTC ticks between two reads "
+          "at phase ", quiet, " of 64, so ", expected, " periods; counted ",
+          periodic, crlf);
+    bench.verdict("THE PERIODIC EVENT IS COUNTED EXACTLY - one count per 64 "
+                  "source cycles, none lost and none extra",
+                  c0.has_value() && c1.has_value() && expected != 0u &&
+                      periodic == expected);
+    Evsys::disconnect(user_witness);
     Evsys::release_channel(ev_ch);
-    (void)Copy::enable(false);
+    Witness::release();
 
     // ---- the interrupt -----------------------------------------------------
     rtc_irq_seen = 0;
@@ -1380,21 +1408,11 @@ extern "C" void RTC_Handler() {
     rtc_irq_count = rtc_irq_count + 1u;
 }
 
-/// Bound because a completed transfer raises the line, and an unbound
-/// vector on this target is a silent death.
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
-
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     const bool watch_ok = stopwatch_start();
     brio::enable_interrupts();
 
@@ -1414,7 +1432,6 @@ int main() {
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
               " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED",
               " stopwatch=", watch_ok ? "up" : "FAILED", crlf);
         banner();
     }

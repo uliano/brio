@@ -737,9 +737,9 @@ public:
 
     // ---- the vocabularies this peripheral publishes -------------------------
     //
-    // evsys.hpp owns the FABRIC and dmac.hpp owns the CHANNELS; the codes
-    // of their tables that belong to the ADC live here, probed from the
-    // device header in samc21/device_tables.hpp.
+    // evsys.hpp owns the FABRIC; the codes of its tables that belong to
+    // the ADC live here, probed from the device header in
+    // samc21/device_tables.hpp.
 
     /// Generator: a conversion result is available.
     static constexpr uint8_t resrdy_generator = adc_resrdy_generator(n);
@@ -752,8 +752,6 @@ public:
     /// User: flush the pipeline. The device header spells it SYNC after
     /// table 29-3's row name; EVCTRL and 38.6.6 call it FLUSH.
     static constexpr uint8_t flush_event_user = adc_flush_user(n);
-    /// DMAC trigger: the one DMA request this peripheral has (38.6.4).
-    static constexpr uint8_t dma_trigger_resrdy = adc_dma_resrdy_id(n);
 
     /// INTFLAG / INTENSET bits, named.
     static constexpr uint8_t flag_resrdy = ADC_INTFLAG_RESRDY_Msk;

@@ -53,7 +53,8 @@
 //   g  the reference multiplexer, and the SAR/SDADC cross-check
 //   h  the post-processing: OFFSETCORR, GAINCORR, SHIFTCORR, the chopper
 //   i  the window monitor on a signed result
-//   j  the no-CPU chain: event in, DMAC out, a TC counting
+//   j  the event chain: event in, the converter's interrupt out, a TC
+//      counting
 //   k  the automatic sequence over the three pairs
 //
 // build: boards = c21j
@@ -65,7 +66,6 @@
 #include "samc21/adc.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/dac.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
@@ -158,19 +158,21 @@ uint32_t ticks_now() { return Stopwatch::count32(); }
 // ---------------------------------------------------------------------------
 // The event fabric (letter j): the same shape every SAM suite here uses.
 // ---------------------------------------------------------------------------
-constexpr uint8_t dma_ch = 0;
 constexpr uint8_t ev_start_channel = 0;    // TC2 overflow -> SDADC START
 constexpr uint8_t ev_result_channel = 1;   // SDADC RESRDY -> TC3 counts
 constexpr uint8_t ev_gen = 6;
-using Copy = DmaChannel<dma_ch>;
 using EvGen = Gclk<ev_gen>;
 using Pacer = Tc<2>;
 using Counter = Tc<3>;
 
-/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
-/// controller's reads nor its writes.
-constexpr uint16_t dma_results = 16;
-volatile uint32_t results[dma_results];
+/// Letter j's capture: SDADC_Handler stores the first `chain_results`
+/// RESULT words here (the whole register, which `sdadc_result_of()`
+/// decodes; 0xFFFFFFFF is no 24-bit value, so it marks an unwritten
+/// entry). VOLATILE because the handler writes what the letter reads.
+constexpr uint16_t chain_results = 16;
+volatile uint32_t results[chain_results];
+volatile uint16_t chain_taken = 0;   ///< results stored
+volatile uint16_t chain_seen = 0;    ///< RESRDY interrupts taken
 
 // ---------------------------------------------------------------------------
 // The PWM source (letter d): TCC1's two channels ARE this pair's two pads.
@@ -386,13 +388,11 @@ void ta_block() {
     print(serial, "  EVSYS: RESRDY generator ", Sdadc::resrdy_generator,
           ", WINMON ", Sdadc::winmon_generator, "; START user ",
           Sdadc::start_event_user, ", FLUSH user ", Sdadc::flush_event_user,
-          " (both asynchronous only); DMAC trigger ",
-          Sdadc::dma_trigger_resrdy, "; GCLK id ", Sdadc::gclk_id, crlf);
-    bench.verdict("the generator, user and trigger codes are the header's own",
+          " (both asynchronous only); GCLK id ", Sdadc::gclk_id, crlf);
+    bench.verdict("the generator, user and clock codes are the header's own",
                   Sdadc::resrdy_generator == 71u && Sdadc::winmon_generator == 72u &&
                       Sdadc::start_event_user == 32u &&
-                      Sdadc::flush_event_user == 33u &&
-                      Sdadc::dma_trigger_resrdy == 44u && Sdadc::gclk_id == 35u);
+                      Sdadc::flush_event_user == 33u && Sdadc::gclk_id == 35u);
 
     // THE PAD MAP, which is the most package-dependent one in this
     // stratum - and on the J all three pairs are here.
@@ -1652,9 +1652,17 @@ void ti_window() {
 }
 
 // =============================================================================
-// j - the no-CPU chain: event in, DMAC out, a TC counting
+// j - the event chain: event in, the converter's interrupt out, a TC counting
 // =============================================================================
-void tj_no_cpu() {
+//
+// A TC overflow crosses an ASYNCHRONOUS event channel into the SDADC's
+// START user, the conversion's RESRDY raises the converter's own
+// interrupt, whose handler reads the RESULT word into a buffer, and the
+// same RESRDY crosses a second channel into a timer that counts them.
+// The START and the count are the event system's alone; THE CPU IS IN
+// THE SAMPLE PATH, one handler entry a result, and the letter judges
+// that it took every one.
+void tj_event_chain() {
     Evsys::bus_clock(true);
     Evsys::reset();
     bench.verdict("the event channels' clock is routed",
@@ -1706,33 +1714,32 @@ void tj_no_cpu() {
                                      .generator = Sdadc::resrdy_generator,
                                      .path = EventPath::asynchronous}));
 
-    auto run = [](bool positive) -> uint32_t {
-        for (uint16_t i = 0; i < dma_results; ++i) {
+    /// Arm the capture: the buffer marked unwritten, the counters at
+    /// zero, RESRDY armed into the NVIC.
+    auto capture_on = [] {
+        for (uint16_t i = 0; i < chain_results; ++i) {
             results[i] = 0xFFFFFFFFul;
         }
-        drive_pair0(!positive, positive);
-        // THE DMA REQUEST IS THE RESRDY FLAG (39.6.4: "cleared when the
-        // RESULT register is read"), so a result left standing from the
-        // previous run would move one stale beat the moment the channel
-        // is enabled. Read it away first; clearing the flag alone is
-        // not the same thing.
+        // RESRDY is "cleared when the RESULT register is read" (39.8.7),
+        // so a result left standing from the previous run would enter
+        // the handler the moment the flag is armed, carrying the old
+        // polarity. Read it away first; clearing the flag alone is not
+        // the same thing.
         (void)Sdadc::result();
         Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
-        (void)Copy::reset();
-        const DmaChannelConfig ch{
-            .trigger = Sdadc::dma_trigger_resrdy,
-            .action = DmaTriggerAction::beat,
-        };
-        (void)Copy::configure(ch);
-        const DmaTransfer t{
-            .source = &Sdadc::regs().SDADC_RESULT,
-            .destination = &results[0],
-            .beats = dma_results,
-            .beat = DmaBeat::word,
-            .source_increment = false,
-        };
-        (void)Copy::load(t);
-        (void)Copy::enable(true);
+        chain_taken = 0;
+        chain_seen = 0;
+        Sdadc::arm(Sdadc::flag_resrdy);
+        Nvic::enable(Sdadc::irq());
+    };
+    auto capture_off = [] {
+        Nvic::disable(Sdadc::irq());
+        Sdadc::disarm(Sdadc::flag_resrdy);
+    };
+
+    auto run = [&](bool positive) -> uint32_t {
+        drive_pair0(!positive, positive);
+        capture_on();
         (void)Counter::enable(true);
         (void)Counter::set_count16(0);
         (void)Sdadc::enable(true);
@@ -1745,14 +1752,15 @@ void tj_no_cpu() {
         // cross into.
         const uint32_t counted = Counter::count16();
         (void)Counter::enable(false);
-        (void)Copy::enable(false);
+        capture_off();
         return counted;
     };
 
     const uint32_t counted_high = run(true);
+    const uint16_t seen_high = chain_seen;
     uint16_t filled_high = 0;
     uint16_t high_ok = 0;
-    for (uint16_t i = 0; i < dma_results; ++i) {
+    for (uint16_t i = 0; i < chain_results; ++i) {
         const uint32_t v = results[i];
         if (v != 0xFFFFFFFFul) {
             ++filled_high;
@@ -1761,23 +1769,28 @@ void tj_no_cpu() {
             }
         }
     }
-    print(serial, "  +VDD: ", filled_high, " of ", dma_results,
-          " results moved by the DMAC with no CPU in the path, ", high_ok,
-          " of them positive; TC3 counted ", counted_high,
-          " result-ready events", crlf);
-    bench.verdict("THE DMAC FILLED THE BUFFER FROM RESULT, one beat per "
-                  "conversion, with the CPU in a wait loop",
-                  filled_high == dma_results);
+    print(serial, "  +VDD: ", filled_high, " of ", chain_results,
+          " RESULT words taken by the RESRDY interrupt, ", high_ok,
+          " of them positive; the handler ran ", seen_high,
+          " times and TC3 counted ", counted_high, " result-ready events",
+          crlf);
+    bench.verdict("THE CONVERTER'S OWN INTERRUPT FILLED THE BUFFER FROM "
+                  "RESULT, one word per conversion the event started, with "
+                  "the letter in a wait loop",
+                  filled_high == chain_results);
     bench.verdict("and every one of them carries the polarity the pads held",
-                  high_ok == dma_results);
+                  high_ok == chain_results);
     bench.verdict("THE SDADC IS A GENERATOR TOO: TC3 counted at least the "
-                  "conversions the DMAC took",
-                  counted_high >= dma_results);
+                  "conversions the handler took",
+                  counted_high >= chain_results);
+    bench.verdict("...and the handler kept up with the event: one RESRDY "
+                  "interrupt for every result-ready event TC3 counted",
+                  near(seen_high, counted_high, 1u));
 
     const uint32_t counted_low = run(false);
     uint16_t filled_low = 0;
     uint16_t low_ok = 0;
-    for (uint16_t i = 0; i < dma_results; ++i) {
+    for (uint16_t i = 0; i < chain_results; ++i) {
         const uint32_t v = results[i];
         if (v != 0xFFFFFFFFul) {
             ++filled_low;
@@ -1786,24 +1799,19 @@ void tj_no_cpu() {
             }
         }
     }
-    print(serial, "  -VDD: ", filled_low, " moved, ", low_ok,
+    print(serial, "  -VDD: ", filled_low, " taken, ", low_ok,
           " of them negative; TC3 counted ", counted_low, crlf);
     bench.verdict("the same chain follows the pads to the other polarity",
-                  filled_low == dma_results && low_ok == dma_results);
+                  filled_low == chain_results && low_ok == chain_results);
 
     // A control: with the pacer stopped nothing moves at all.
-    for (uint16_t i = 0; i < dma_results; ++i) {
-        results[i] = 0xFFFFFFFFul;
-    }
-    (void)Sdadc::result();
-    Sdadc::clear_flags(Sdadc::flag_resrdy | Sdadc::flag_overrun);
-    (void)Copy::enable(true);
+    capture_on();
     (void)Sdadc::enable(true);
     wait_ms(30);
     (void)Sdadc::enable(false);
-    (void)Copy::enable(false);
-    bool untouched = true;
-    for (uint16_t i = 0; i < dma_results; ++i) {
+    capture_off();
+    bool untouched = chain_seen == 0u;
+    for (uint16_t i = 0; i < chain_results; ++i) {
         if (results[i] != 0xFFFFFFFFul) {
             untouched = false;
         }
@@ -1955,9 +1963,20 @@ void banner() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
+/// Letter j's capture: each RESRDY stores the RESULT word, whose read is
+/// what clears the flag (39.8.7), into the first free entry; results past
+/// the buffer are read and counted, never stored.
+extern "C" void SDADC_Handler() {
+    const uint8_t pending = brio::Sdadc::isr();
+    if ((pending & brio::Sdadc::flag_resrdy) == 0u) {
+        return;
+    }
+    const uint32_t word = brio::Sdadc::result_raw();
+    chain_seen = static_cast<uint16_t>(chain_seen + 1u);
+    const uint16_t n = chain_taken;
+    if (n < chain_results) {
+        results[n] = word;
+        chain_taken = static_cast<uint16_t>(n + 1u);
     }
 }
 
@@ -1966,8 +1985,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     bench.letter('a', "the block, its vocabularies, its disciplines, the "
@@ -1985,13 +2002,12 @@ int main() {
                  tg_reference);
     bench.letter('h', "the post-processing and the chopper", th_corrections);
     bench.letter('i', "the window monitor on a signed result", ti_window);
-    bench.letter('j', "the no-CPU chain: event in, DMAC out", tj_no_cpu);
+    bench.letter('j', "the event chain: event in, interrupt out", tj_event_chain);
     bench.letter('k', "the automatic sequence over the three pairs", tk_sequence);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

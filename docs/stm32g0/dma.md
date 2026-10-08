@@ -183,9 +183,8 @@ flight, so no completion can run under the programming.
 ### Reading a channel's progress costs nothing
 
 CNDTR is a live register the controller decrements and software may read
-at any time (10.6.4). The SAM C21's DMAC asks for a channel SUSPENDED,
-its write-back read and validated against an erratum that can corrupt
-it; there is no harvest ceremony on this silicon: `DmaRxEngine::take()`
+at any time (10.6.4), so there is no harvest ceremony on this silicon:
+`DmaRxEngine::take()`
 is one register read and a subtraction, and `remaining()` - the circular
 shape's producer index - is the register read alone.
 
@@ -326,18 +325,18 @@ const auto run = View::read_span();   // the bytes where the channel wrote them
 const bool intact = View::consume(static_cast<uint32_t>(run.size()));
 ```
 
-## The block stream's second implementation
+## The block stream
 
-`util/block_stream.hpp` is written against the SAM C21 and deliberately
-predates this implementation, so that friction shows up as "this concept
-does not fit" instead of as silent divergence
+`util/block_stream.hpp` is a fixed point a controller's stream
+machinery is measured against, so that friction shows up as "this
+concept does not fit" instead of as silent divergence
 (`docs/design/block-stream.md`). Both concepts are satisfied here as
 written, and the measurements are what say why.
 
-**`BlockPlayer` fits circular mode exactly, and gains by it.** The SAM
-C21's controller has no circular mode, so its loop engine re-arms from a
-completion interrupt: one interrupt per lap, and a window at every lap
-boundary in which the peripheral is unserved. Here CCR.CIRC reloads
+**`BlockPlayer` fits circular mode exactly, and gains by it.** A
+controller with no circular mode re-arms a loop from a completion
+interrupt: one interrupt per lap, and a window at every lap boundary in
+which the peripheral is unserved. Here CCR.CIRC reloads
 CNDTR and both current address registers in hardware, so the interrupt at
 the wrap only COUNTS the lap. Measured: a circular channel with its
 interrupt DISARMED and its NVIC line masked was still enabled 25 ms
@@ -395,16 +394,13 @@ Everything below is `test_stm32_dma` on a Nucleo-G0B1RE at 64 MHz, no
 wires.
 
 **A REQUEST IS A LEVEL SERVED ON ENABLE, NOT AN EDGE LATCHED ON THE
-RISE** - the opposite of the SAM C21's DMAC, and the reason this driver
-has no `kick()`, on any peripheral: `stm32g0/spi.hpp`'s engined host
+RISE** - the reason this driver has no `kick()`, on any peripheral: `stm32g0/spi.hpp`'s engined host
 kicks nothing either, and its data phase moves whole with the channels
 merely enabled. Staged on USART1 brought up with its pads never claimed
 (so nothing leaves the die) and TXE therefore standing: a channel armed
 over that standing request moved its whole four-byte block with no
 software trigger of any kind, and the control - the same channel over the
-same standing TXE with CR3.DMAT clear - moved nothing at all. The SAM
-C21's wedge (a channel enabled, its peripheral asking, and not one beat
-moving) has no analogue here.
+same standing TXE with CR3.DMAT clear - moved nothing at all.
 
 **Two memory-to-memory channels ALTERNATE, and the software priority
 does not enter into it.** 10.4.4 says so in a clause easy to read past:
@@ -481,9 +477,8 @@ peripheral of its own and never sees an interrupt.
 **The console's own transmit engine saturates the wire, and at 115200 the
 per-byte feed costs nothing.** A kilobyte took 88.97 ms fed byte by byte
 (11510 B/s) and 88.98 ms fed in bulk (11508 B/s), against the 11520 B/s
-115200 8N1 carries. On the SAM C21 the per-byte pump loses a third of
-the wire, but at MEGABAUD; here the wire is five hundred times slower
-than the pump, the ring is always full when a block ends, and every
+115200 8N1 carries: the wire is five hundred times slower than the
+pump, the ring is always full when a block ends, and every
 block the engine gets is a long one.
 
 **The timer round trip.** An eight-entry duty table played into TIM2's

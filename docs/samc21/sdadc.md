@@ -116,6 +116,14 @@ bit-exact. So the driver has three result verbs:
 `sdadc_raw_per_count` (256) is the factor between the first two, and it
 is the unit OFFSETCORR speaks.
 
+**A reading of RESULT is a word read.** RESULT is a 32-bit register
+holding a 24-bit datum whose TOP sixteen bits are the specified
+conversion, so a halfword access carries RESULT[15:0]: the eight bits
+below the specified datum plus half of it - not a narrower reading but
+a different number. A rail differential reads 8388607 raw, which does
+not fit a halfword at all. Reading RESULT is what clears RESRDY
+(39.8.7), and the DMA request of the same name too (39.6.4).
+
 ### The post-processing, which is why a Multislope wants this part
 
     Data = (Data0 + OFFSETCORR) x GAINCORR / 2^SHIFTCORR
@@ -294,15 +302,23 @@ for (uint8_t i = 0; i < 3; ++i) {
 }
 ```
 
-A conversion started by an event, with the result moved by the DMAC:
+A conversion started by an event, its result taken by the converter's
+own interrupt:
 
 ```cpp
 (void)Sdadc::enable(false);               // EVCTRL is enable-protected
 (void)Sdadc::start_on(channel, EventChannelConfig{
     .generator = Pacer::overflow_generator,
     .path = EventPath::asynchronous});    // the only path 39.6.6 allows
-// ...and a DMA channel on Sdadc::dma_trigger_resrdy reading
-// Sdadc::regs().SDADC_RESULT with word beats.
+Sdadc::arm(Sdadc::flag_resrdy);
+Nvic::enable(Sdadc::irq());
+(void)Sdadc::enable(true);
+
+extern "C" void SDADC_Handler() {
+    if ((brio::Sdadc::isr() & brio::Sdadc::flag_resrdy) != 0) {
+        words[taken++] = brio::Sdadc::result_raw();   // the word, which clears RESRDY
+    }
+}
 ```
 
 A window over a signed result:
@@ -324,10 +340,9 @@ and one device-level item; **one is this silicon**.
   which 39.8.2's own Note asks for with INTREF as well. **Reproduced
   with a control on both sides** (below).
 - **1.8.7 DMA Write Access** (all revisions) names `SDADC: SWTRIG` among
-  the registers a SleepWalking DMA write may fail to reach. The
-  workaround - use Idle rather than Standby when a DMA channel writes
-  SWTRIG - is the application's, and it is stated on `start()`; a driver
-  cannot know which sleep is coming.
+  the registers a SleepWalking DMA write may fail to reach - unreachable
+  here: the stratum's one DMA channel writes a SERCOM's DATA, never
+  SWTRIG, and never in standby ([dmac.md](dmac.md)).
 
 **NOT this silicon**, and each is the read-the-row trap the errata
 document sets over and over:
@@ -345,34 +360,6 @@ document sets over and over:
   every revision - so a full-scale differential against VDDANA is
   outside specification here whatever the errata say.
 - **1.18.4** (power consumption): revisions B..E.
-
-## Streaming via DMA
-
-A sampled stream is `DmaPingPongEngine<ch, uint32_t>` armed on
-`Sdadc::dma_trigger_resrdy` with RESULT as its source. The contract and
-the hardening are in [dmac.md](dmac.md); the one thing that belongs to
-THIS chapter is the ELEMENT TYPE, and it follows from the central
-measurement above.
-
-**THE ELEMENT IS A WORD, AND A HALFWORD WOULD NOT BE A NARROWER
-READING - IT WOULD BE A DIFFERENT NUMBER.** RESULT is a 32-bit register
-holding a 24-bit datum whose TOP sixteen bits are the specified
-conversion, so a halfword beat carries RESULT[15:0]: the eight bits
-below the specified datum plus half of it. `uint32_t` is the only honest
-element, and `sdadc_result_of()` / `sdadc_raw_signed()` are what turn a
-streamed word into a reading afterwards.
-
-Measured in `test_samc_analog_dma`, free-running on pair 0 with the pads
-under PORT: at a rail differential the raw value is 8388607 - which does
-not fit a halfword at all - and every streamed word matched the CPU's
-reading exactly. With the pair shorted at ground, where the datum is
-live and its low bits move, sixteen streamed readings spanned 102..305
-raw units around a CPU mean near -34600, inside the spread the CPU
-itself showed over eight readings. **The SINC filter's step response is
-part of the measurement**: after moving a pad, the first conversions are
-the filter refilling (39.6.2.3, which is what SKPCNT exists for), and
-six discarded conversions took the CPU's own spread from 19189 raw units
-down to 139.
 
 ## Bench findings
 
@@ -575,14 +562,16 @@ so the bit was cleared by hand to measure it.
   off stops it firing.
 - **OVERRUN** sets when a free-running converter writes RESULT before
   the previous value was read.
-- **THE NO-CPU CHAIN RUNS BOTH WAYS AT ONCE**: a TC2 overflow crosses an
+- **THE EVENT CHAIN RUNS BOTH WAYS AT ONCE**: a TC2 overflow crosses an
   asynchronous EVSYS channel into the SDADC's START user, each RESRDY
-  pulls one 32-bit DMA beat out of RESULT, and the same RESRDY crosses a
-  second channel into TC3 counting them. 16 of 16 results land with the
-  polarity the pads held, at both polarities, with 58 and 59 result-ready
-  events counted in the same 60 ms window; with the pacer stopped nothing
-  moves at all. A SYNCHRONOUS channel into the same user is refused, as
-  39.6.6 requires.
+  raises the converter's own interrupt, whose handler reads the RESULT
+  word into a buffer, and the same RESRDY crosses a second channel into
+  TC3 counting events (EVACT = COUNT). 16 of 16 words are taken with the
+  polarity the pads held, at both polarities; in the 60 ms window the
+  handler ran 59 times and TC3 counted 59 result-ready events - one
+  interrupt per event, none missed. With the pacer stopped nothing moves
+  at all. A SYNCHRONOUS channel into the same user is refused, as 39.6.6
+  requires.
 - **THE SEQUENCER RUNS THE WHOLE LIST FROM ONE START.** With all three
   pairs enabled and a different differential on each (+VDD, -VDD, zero),
   one `start()` gives **32767 / -32768 / -86 with SEQSTATE 0 / 1 / 2** -
@@ -667,6 +656,8 @@ the same vector.
 
 Driver gaps:
 
+- **The DMA request** (RESRDY, 39.6.4): declined - this stratum drives
+  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
 - **`ANACTRL.CTLSDADC` and `ANACTRL.BUFTEST` stay DECLINED, and this is
   the reason rather than an omission.** 39.8.21 calls the first
   "Debug/Characterization" and lists no values for it, and gives the
@@ -680,13 +671,10 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
-- **The converter as a WAKE source**, and erratum 1.8.7's SleepWalking
-  obligation on SWTRIG: exercising the second needs a DMA write during
-  a standby, which is [dmac.md](dmac.md)'s own gap - the sleep
-  measurement above sidesteps it by free-running, which is the
-  erratum's own escape (a free-running converter writes no trigger).
-  `CTRLA.ONDEMAND` is written and read back and nothing distinguishes
-  it here.
+- **The converter as a WAKE source**: RESRDY, WINMON and OVERRUN have
+  never driven the NVIC out of a sleep (the standby measurement above
+  free-runs, its witness an event). `CTRLA.ONDEMAND` is written and read
+  back and nothing distinguishes it here.
 - **`DBGCTRL.DBGRUN`** is written and its survival across a software
   reset measured; its effect under a halted debugger is untested.
 - **`util/analog_sampler.hpp`** has NOT been given this converter. Its

@@ -22,8 +22,8 @@ using brio::BlockDone;
 using brio::BlockReady;
 using brio::HostPlatform;
 
-// A scripted source honest to the ping-pong contract the SAM C21 engine
-// set: two buffers, at most one being filled and at most two pending,
+// A scripted source honest to the ping-pong contract util/block_stream.hpp
+// states: two buffers, at most one being filled and at most two pending,
 // an overrun SKIPPING the fill rather than tearing the held buffer, and
 // release() restarting a stalled stream. The `id` makes two sources two
 // (the MeterLatch convention).
@@ -96,7 +96,7 @@ static_assert(brio::BlockSource<SrcA>);
 static_assert(brio::BlockSource<SrcB>);
 
 // The playback half of the vocabulary, concept-checked against a
-// minimal fake (the SAM engines are concept-checked in the family
+// minimal fake (each family's engines are concept-checked in its own
 // fixture, where they are in scope).
 struct FakePlayer {
     using element = uint16_t;

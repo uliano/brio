@@ -223,7 +223,9 @@ Driver gaps - features of ch. 13 not built:
   `STATUSA.CRSTEXT` has a clearing verb but code that can call it is by
   definition already running.
 - **The DMA connection of the debug communication channels** (13.5.4),
-  which needs a peer on the other side to be worth anything.
+  which needs a peer on the other side to be worth anything - and a DMA
+  channel, which this stratum gives the Uart's transmitter alone
+  (erratum 1.10.4, [dmac.md](dmac.md)).
 - **The Program and Debug Interface Disable of 13.10**, which erratum
   1.8.15 says is not on this silicon anyway.
 

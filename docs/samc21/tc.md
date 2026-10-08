@@ -5,7 +5,7 @@ errata DS80000740S items 1.20.1 to 1.20.3, of which **one is this
 silicon**. Driver: `samc21/tc.hpp`. Family fixture
 `test/family_samc21/tc.cpp` plus four negatives under
 `brio check samc21`; the bench suites are `test_samc_tc` and - for
-DMA-driven operation and the advanced modes - `test_samc_timer_dma`.
+the advanced modes - `test_samc_timer_modes`.
 
 ## What the silicon does
 
@@ -73,8 +73,9 @@ as a two-deep FIFO: reading CCx is what lets the buffer move up
 asynchronous event inputs" while table 29-3 lists all three paths for
 TCnEVU, and 35.6.2.8's note 2 requires the asynchronous path for capture
 specifically - the asynchronous path is what every measurement below
-uses, and it works. The DMAC trigger ids are published from the
-header's own `TCn_DMAC_ID_*` too.
+uses, and it works. The DMAC requests (overflow, and one per channel)
+are not published: this stratum drives no DMA from a timer
+([dmac.md](dmac.md)).
 
 ## The errata: read the row, not the column
 
@@ -114,8 +115,8 @@ while generating PWM (35.6.2.5.3), and a capture action with no capture
 channel or no source for one.
 
 **`Tc<n>`** - `index`, `cc_count`, `gclk_id`, `can_pair`, `pair_index`,
-`irq()`, `overflow_generator`, `match_generator(ch)`, `event_user`,
-`dma_trigger_overflow`, `dma_trigger_match(ch)`; `init(generator)`,
+`irq()`, `overflow_generator`, `match_generator(ch)`, `event_user`;
+`init(generator)`,
 `bus_clock`, `pair_bus_clock`, `clock`, `reset`, `enable`, `release`;
 `configure`, `event_config`, `ctrla`, `evctrl`, `mode`; `command`,
 `retrigger`, `stop`, `count_down`; `read_sync`, `count8/16/32` and their
@@ -257,31 +258,17 @@ SysTick is the independent witness.
   design as written, measured on silicon: the AO paces PUBLICATION, not
   capture.
 
-## Bench findings, DMA and the advanced modes
+## Bench findings, the advanced modes
 
-From `test_samc_timer_dma`, ten letters, under four seconds. Nothing to
-wire, and the instrument is the finding it rests on: a TCC or TC
+From `test_samc_timer_modes`, letters b (the waveforms) and c (the
+capture actions and the locks). Nothing to wire, and the instrument is
+the finding it rests on: a TCC or TC
 waveform reaches a capture channel through a COMBINATIONAL CCL LUT
 published as an EVSYS generator, so both its edges are delayed by the
 same handful of cycles and both a period and a pulse width come out
 untouched. `Lut<0>`'s INSEL "TC" source is TC0's WO[0]
 and its "TCC" source is TCC0's WO[0], so one fabric carries either.
 
-- **A TC CAPTURE'S DMA REQUEST IS NOT A LEVEL WAITING TO BE RE-RISEN.**
-  25.8.8 makes a trigger the RISE of a peripheral's request, and
-  35.6.2.8 makes reading CCx the only thing that clears INTFLAG.MCx - so
-  an unread capture looks exactly like the standing request that wedges
-  a SERCOM's transmit engine or an ADC's stream. It does not behave like
-  one: a ping-pong stream **armed with MC0 already standing filled two
-  whole blocks in fifty waveform periods**, and - the discriminating
-  half - a stream stalled to a dead stop and then **re-enabled without
-  CHCTRLB being touched at all** picked up again with the flag still up.
-  Every capture asks again, read or not. `dmac.md` carries the same
-  finding from the controller's side.
-- **A DMA beat is the acknowledgement a CPU read would have been.** With
-  both capture channels streamed, **eight blocks each drained with
-  INTFLAG.ERR never rising** - where thirty periods with nothing read
-  raised it in the same letter.
 - **A capture register is TWO registers, and one read after a change is
   stale.** CCx has CCBUFx behind it, so a reading taken after the signal
   under test has been reconfigured hands back what the PREVIOUS
@@ -289,12 +276,11 @@ and its "TCC" source is TCC0's WO[0], so one fabric carries either.
   drain reports the previous mode's period, and an inverted output's
   width as the run before it. Draining both stages and then taking a
   whole fresh capture is what
-  makes a reading current; a reader keeping up with a running stream
+  makes a reading current; a reader keeping up with a running capture
   never notices.
 - **The captured period is the waveform's LESS ONE TICK**, every sample
   of it: the capture edge both latches COUNT and clears it, so 4800 ticks
-  read as **4799**, and 192 consecutive streamed samples were 4799 with
-  no exception.
+  read as **4799**.
 - **MFRQ toggles on every match**, so one waveform period is two counter
   periods: CC0 = 2399 gave a captured **4799** against 2 x (CC0+1) - 1
   exactly, half the width, and **499 per mille** on PA22.
@@ -349,6 +335,9 @@ Driver gaps (deliberate):
 - **A coordinated multi-channel update.** `CTRLA.ALOCK` and the UPDATE
   command are bench-verified (above), but no task uses `lock_update` to
   stage two channels changing together.
+- **The DMA requests** (the overflow's and each channel's, 35.6.4):
+  declined - this stratum drives no DMA from a timer ([dmac.md](dmac.md),
+  erratum 1.10.4).
 
 Not judged, and deliberately so:
 

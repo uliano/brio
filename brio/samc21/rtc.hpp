@@ -116,8 +116,9 @@
  *
  * NOT BUILT (docs/samc21/rtc.md carries the list): tasks of any kind (see
  * above); erratum 1.8.7's caveat that a DMA WRITE to RTC.COUNT during
- * standby SleepWalking may not land, which is stated and unexercised
- * because it needs the DMAC across a sleep; and the RTC as the kernel
+ * standby SleepWalking may not land, unreachable here (this stratum's one
+ * DMA channel writes a SERCOM's DATA, never in standby,
+ * samc21/dmac.hpp); and the RTC as the kernel
  * timebase, which stays SysTick's job (samc21/ticker.hpp says why -
  * samc21/sleep.hpp's SamTimedSleepSite uses this counter as an ALARM and
  * a WITNESS beside it instead).

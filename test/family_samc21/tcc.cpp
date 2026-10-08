@@ -77,7 +77,7 @@ static_assert(Tcc<1>::slice_count == 0 && Tcc<2>::slice_count == 0);
 
 static_assert(Tcc<0>::irq() == TCC0_IRQn && Tcc<2>::irq() == TCC2_IRQn);
 
-// ---- the EVSYS and DMAC vocabularies ---------------------------------------
+// ---- the EVSYS vocabulary --------------------------------------------------
 //
 // The generator codes are NOT evenly spaced: TCC0 spends seven of them
 // (OVF, TRG, CNT and four MCs), TCC1 and TCC2 five each. Reading them
@@ -99,10 +99,6 @@ static_assert(Tcc<2>::event_user(0) == EVENT_ID_USER_TCC2_EV_0);
 // The recoverable faults ARE the first two channel event inputs.
 static_assert(Tcc<0>::fault_user(TccFault::a) == EVENT_ID_USER_TCC0_MC_0);
 static_assert(Tcc<0>::fault_user(TccFault::b) == EVENT_ID_USER_TCC0_MC_1);
-
-static_assert(Tcc<0>::dma_trigger_overflow == TCC0_DMAC_ID_OVF);
-static_assert(Tcc<0>::dma_trigger_match(3) == TCC0_DMAC_ID_MC3);
-static_assert(Tcc<2>::dma_trigger_match(1) == TCC2_DMAC_ID_MC1);
 
 // ---- the refusals ----------------------------------------------------------
 
@@ -252,7 +248,6 @@ void resource_verbs() {
                             .resolution = TccResolution::dither64,
                             .capture_enable = 0x3,
                             .run_standby = true,
-                            .dma_one_shot = true,
                             .count_down = true,
                             .one_shot = true,
                             .lock_update = true};
@@ -318,7 +313,7 @@ void resource_verbs() {
     (void)T::enable(true);
     (void)T::enabled();
 
-    (void)T::command(TccCommand::dma_one_shot);
+    (void)T::command(TccCommand::read_sync);
     (void)T::command(TccCommand::none);   // cancels, through CTRLBCLR
     (void)T::ramp_index_command(TccRampIndexCommand::off);
     (void)T::retrigger();

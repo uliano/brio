@@ -193,88 +193,42 @@ void task_verbs() {
     Loop::release();
 }
 
-// ---- the optional DMA engines -----------------------------------------------
-// The engines live in samc21/dmac.hpp, not in sercom.hpp: including the
+// ---- the optional DMA engine -------------------------------------------------
+// The engine lives in samc21/dmac.hpp, not in sercom.hpp: including the
 // DMAC from the SERCOM would give every program with a serial port the
-// descriptor tables. So an application that wants one includes both
-// headers and names a channel, and the Uart takes it as a policy
-// parameter that DEFAULTS to NoDmaEngine - which is why every use above
-// still compiles unchanged, and why the release images of apps that name
-// no engine are byte-identical to the ones built before these parameters
-// existed.
+// descriptor sections. So an application that wants it includes both
+// headers and names it, and the Uart takes it in its ONE slot - the
+// transmit one - which DEFAULTS to NoDmaEngine, so every use above
+// compiles unchanged. A receive slot does not exist
+// (neg/uart_receive_engine_slot.cpp).
 #include "samc21/dmac.hpp"
 
-// The two spellings of the same per-instance device-header constants -
-// Sercom<n>'s (beside its GCLK id and APB mask) and the DMAC's trigger
-// table - must not drift. This is where both headers are legitimately in
-// scope, so this is where they are held together.
-static_assert(Sercom<0>::dma_rx_trigger() == dma_trigger_sercom_rx<0>());
-static_assert(Sercom<0>::dma_tx_trigger() == dma_trigger_sercom_tx<0>());
-static_assert(Sercom<3>::dma_rx_trigger() == dma_trigger_sercom_rx<3>());
-static_assert(Sercom<3>::dma_tx_trigger() == dma_trigger_sercom_tx<3>());
-static_assert(Sercom<sercom_count - 1>::dma_tx_trigger() ==
-              dma_trigger_sercom_tx<sercom_count - 1>());
-// And the instance count each header derives independently from the same
-// <INSTANCE>_REGS symbols.
-static_assert(sercom_count == dma_sercom_count,
-              "sercom.hpp and dmac.hpp must count the same instances");
-
-// ONE engine at most, on either side: DMA on the bulk direction and the
-// interrupt on the other. Both is a compile error - erratum 1.10.4, two
-// channels triggered concurrently (neg/uart_both_engines.cpp).
-using RxOnlySerial = Uart<0, pads, 64, 256, NoDmaEngine, DmaRxEngine<1>>;
-using TxOnlySerial = Uart<0, pads, 64, 256, DmaTxEngine<2>>;
+using TxEngined = Uart<0, pads, 64, 256, DmaTxEngine>;
 
 static_assert(!NoDmaEngine::present);
-static_assert(!Serial::has_tx_engine && !Serial::has_rx_engine);
-static_assert(!RxOnlySerial::has_tx_engine && RxOnlySerial::has_rx_engine);
-static_assert(TxOnlySerial::has_tx_engine && !TxOnlySerial::has_rx_engine);
-// The concepts hold whether or not an engine is named: adding the
-// parameters changed no part of the public surface.
-static_assert(ByteTransport<RxOnlySerial> && BulkSink<RxOnlySerial> &&
-              SpanSource<RxOnlySerial> && ClockUser<RxOnlySerial>);
-static_assert(ByteTransport<TxOnlySerial> && BulkSink<TxOnlySerial> &&
-              SpanSource<TxOnlySerial> && ClockUser<TxOnlySerial>);
-
-// The rule the Uart's static_assert asks, as a value.
-static_assert(uart_engines_not_concurrent<NoDmaEngine, NoDmaEngine>());
-static_assert(uart_engines_not_concurrent<DmaTxEngine<0>, NoDmaEngine>());
-static_assert(uart_engines_not_concurrent<NoDmaEngine, DmaRxEngine<1>>());
-static_assert(!uart_engines_not_concurrent<DmaTxEngine<0>, DmaRxEngine<1>>());
+static_assert(!Serial::has_tx_engine && TxEngined::has_tx_engine);
+static_assert(DmaTxEngine::present && DmaTxEngine::channel == 0);
+// The concepts hold whether or not the engine is named.
+static_assert(ByteTransport<TxEngined> && BulkSink<TxEngined> && SkippingSource<TxEngined> &&
+              ClockUser<TxEngined>);
+// The refused claim's breadcrumb names the refused owner.
+static_assert(dma_claim_refused_context(6) == 0xD6);
 
 void engined_uart_verbs() {
     constexpr SysClock clock;
-    (void)RxOnlySerial::init(clock, 115200);
-    (void)RxOnlySerial::isr();       // the transmitter's DRE, still an interrupt
-    (void)RxOnlySerial::dma_isr(1);  // the DMAC's vector, filtered per channel
-    (void)RxOnlySerial::dma_isr(9);  // a channel that is somebody else's
-    (void)RxOnlySerial::harvest();   // the RX pacing verb - the caller's policy
-    (void)RxOnlySerial::write_byte('x');
-    uint8_t b = 0;
-    (void)RxOnlySerial::read_byte(b);
-    uint8_t run[8];
-    (void)RxOnlySerial::read_bulk(run);   // a consumer's release re-arms a stalled engine
-    (void)RxOnlySerial::read_span();
-    RxOnlySerial::consume(1);
-    (void)RxOnlySerial::rx_pending();
-    (void)RxOnlySerial::tx_idle();
-    (void)RxOnlySerial::hw_overruns();
-    (void)RxOnlySerial::dma_faults();
-    RxOnlySerial::release();
-
-    (void)TxOnlySerial::init(clock, 9600);
-    (void)TxOnlySerial::isr();       // the receiver's RXC, still an interrupt
-    (void)TxOnlySerial::dma_isr(2);
-    (void)TxOnlySerial::write_byte('x');
-    (void)TxOnlySerial::write_bulk(std::span<const uint8_t>());
-    (void)TxOnlySerial::harvest();   // no RX engine: false, and free
-    (void)TxOnlySerial::dma_faults();
-    TxOnlySerial::release();
-
-    // The engine-less Uart keeps every verb it had, harvest() included -
-    // so a call site can be written once and gain an engine later
-    // without moving.
-    (void)Serial::harvest();
+    (void)TxEngined::init(clock, 9600);
+    (void)TxEngined::isr();          // the receiver's RXC, still an interrupt
+    TxEngined::dma_isr();            // the DMAC's one vector
+    (void)TxEngined::write_byte('x');
+    (void)TxEngined::write_bulk(std::span<const uint8_t>());
+    (void)TxEngined::dma_faults();
+    (void)TxEngined::tx_idle();
+    TxEngined::release();
+    // The claim, as a verb: one owner at a time.
+    (void)DmaTxEngine::claim(1);
+    (void)DmaTxEngine::owner();
+    DmaTxEngine::release(1);
+    (void)Serial::dma_faults();      // engineless: 0, and free
 }
 
 // ---- the ring's bulk API, which the TX engine drains through ----------------
@@ -291,10 +245,3 @@ void ring_span_verbs() {
     const auto rd = r.read_span();
     r.consume(static_cast<uint8_t>(rd.size()));
 }
-
-// Two engines of one transport must not name the same channel - the
-// SPI host's rule (samc21/spi.hpp); a Uart never has two.
-static_assert(uart_engines_distinct<NoDmaEngine, NoDmaEngine>());
-static_assert(uart_engines_distinct<DmaTxEngine<0>, NoDmaEngine>());
-static_assert(uart_engines_distinct<DmaTxEngine<0>, DmaRxEngine<1>>());
-static_assert(!uart_engines_distinct<DmaTxEngine<4>, DmaRxEngine<4>>());

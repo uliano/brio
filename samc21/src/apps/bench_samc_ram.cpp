@@ -12,14 +12,7 @@
 // and letters p and t are measured again in both images - the entry in
 // that document's "Not covered yet" - and is deleted then.
 //
-// TWO IMAGES (the groups line below; design/overview.md, "A suite's
-// image fits the family's smallest chip"): the handlers' copy in SRAM
-// takes some 4 KB of the 32 beside bench_samc's own buffers, and the
-// whole app would leave its stack a handful of bytes; letter d's buffers
-// go in an image of their own.
-//
 // build: boards = c21j
-// build: groups = rmptuei,d
 // build: monitor_speed = 115200
 
 #define BENCH_RAM_TEXT 1

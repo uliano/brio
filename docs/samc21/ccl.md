@@ -202,14 +202,15 @@ brio::Lut<1>::listen(channel, {.generator = some_generator,
 
 ## Bench findings
 
-From `test_samc_ccl` (7 letters, 141 verdicts, about two seconds).
+From `test_samc_ccl` (7 letters, 140 verdicts, about two seconds).
 **Nothing to wire.** The stimuli are a free pad walked between the rails
 by its own internal pull (which survives PMUXEN where the output driver
 does not - [port.md](port.md), [eic.md](eic.md)), TC and TCC waveforms
 the CCL takes internally, and the analog comparator fed from a
 GPIO-driven pad. The observers are the CCL's own OUT pads read back
-through PORT.IN, a DMA block that either moved or did not, and the
-SysTick cycle stopwatch.
+through PORT.IN, TC2 in COUNT16 counting the events that reach its
+EVSYS user (EVACT = COUNT, TCEI; user 25), and the SysTick cycle
+stopwatch.
 
 ### Enable protection: two gates, ANDed
 
@@ -313,10 +314,9 @@ The latency table below has its own section.
 
 ### Events, both ways
 
-- **A LUT output edge moves a block of memory**: a pad, a truth table,
-  LUTEO, an asynchronous EVSYS channel and a DMA channel armed with *no
-  hardware trigger at all*. With LUTEO clear the same edge moves
-  nothing.
+- **One LUT output edge is one count**: a pad, a truth table, LUTEO,
+  an asynchronous EVSYS channel and TC2's event input, the count exactly
+  1. With LUTEO clear the same edge is counted by nobody.
 - **An event reaches the truth table**, and it arrives as the one-GCLK
   strobe 37.6.2.4 describes rather than as a level. With LUTEI clear the
   same events reach nothing. A synchronous or resynchronized channel
@@ -324,14 +324,12 @@ The latency table below has its own section.
   the asynchronous path alone.
 - **A SOFTWARE EVENT *DOES* CROSS AN ASYNCHRONOUS CHANNEL.** Sixteen
   of sixteen single, spaced software events reach this LUT on an
-  asynchronous channel; the same sixteen with the user disconnected
-  reach nothing; and **one** of them moves a whole DMA block *through*
-  the LUT, which is a second witness of a different kind. Eight of them
-  move nothing through a DMA channel on the same path
-  (`test_samc_evsys`, [evsys.md](evsys.md)) - so the limit belongs to
-  the **user's input stage**, not to the path: a register write has no
-  width for the DMAC's trigger, and the CCL's own event edge detector
-  catches every one.
+  asynchronous channel, caught by the edge detector of its own event
+  input; the same sixteen with the user disconnected reach nothing; and
+  **one** of them, passed *through* the LUT to its LUTEO, counts exactly
+  1 at TC2 - a second witness of a different kind. Whether a software
+  event arrives on that path is the user's input stage's business, and
+  a TC's event input takes every one too ([evsys.md](evsys.md)).
 
 ### THE LATENCY TABLE - what a CCL output costs, and the answer to ac.md
 

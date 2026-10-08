@@ -418,15 +418,14 @@ void ta_block() {
     bench.verdict("and a pad with no TCC output on a function has none",
                   !tcc_wo_exists<'A', 22, 'e'> && !tcc_wo_exists<'B', 23, 'f'>);
 
-    // The EVSYS and DMAC vocabularies, read from the header rather than
-    // counted out: the generator codes are NOT evenly spaced.
+    // The EVSYS vocabulary, read from the header rather than counted
+    // out: the generator codes are NOT evenly spaced.
     print(serial, "  EVSYS gens: TCC0 OVF ", Timer::overflow_generator, " TRG ",
           Timer::retrigger_generator, " CNT ", Timer::count_generator, " MC0 ",
           Timer::match_generator(0), "; TCC1 OVF ", Timer1::overflow_generator,
           "; TCC2 OVF ", Timer2c::overflow_generator, crlf);
     print(serial, "  EVSYS users: TCC0 EV0 ", Timer::event_user(0), " MC0 ",
-          Timer::match_user(0), "; DMAC TCC0 OVF trigger ",
-          Timer::dma_trigger_overflow, crlf);
+          Timer::match_user(0), crlf);
     bench.verdict("the generator codes are NOT evenly spaced - TCC0 spends "
                   "seven of them and the other two five each, which is why "
                   "they are read from the header and not computed",

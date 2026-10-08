@@ -199,11 +199,10 @@ void ta_block() {
                       PwmWave::timer == 0u && PwmWave::channel == 0u);
     bench.verdict("and a pad with no waveform output has none", !tc_wo_exists<'A', 16>);
 
-    // The EVSYS and DMAC vocabularies this driver publishes.
+    // The EVSYS vocabulary this driver publishes.
     print(serial, "  EVSYS: TC3 OVF gen ", Timer3::overflow_generator,
           ", TC0 MC0 gen ", Timer0::match_generator(0), ", TC0 user ",
-          Timer0::event_user, "; DMAC TC0 OVF trigger ",
-          Timer0::dma_trigger_overflow, crlf);
+          Timer0::event_user, crlf);
     bench.verdict("the generator codes are the table's own (TC0 OVF 0x34, three "
                   "per instance)",
                   Timer0::overflow_generator == 0x34u &&

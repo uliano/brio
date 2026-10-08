@@ -43,7 +43,8 @@
 //   e  what a measurement costs in time, ruled by the crystal
 //   f  how wide the datapath really is: OVF found by sweeping GAIN
 //   g  the window monitor, all six modes and the two that disagree
-//   h  the no-CPU chain: event in on every path, DMAC out, WINMON counted
+//   h  the event chain: event in on every path, the RESRDY interrupt
+//      out, WINMON counted
 //   i  the four interrupt sources through the one vector
 //   j  drift under load - printed, and judged only if it clears the noise
 //   p  erratum 1.19.1's PAC write protection (BY NAME ONLY: it may reset
@@ -53,12 +54,12 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+#include <string.h>
 
 #include <optional>
 
 #include "kernel/panic.hpp"
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/freqm.hpp"
 #include "samc21/nvm.hpp"
@@ -148,12 +149,15 @@ using Stopwatch = Tc<0>;
 using Pacer = Tc<2>;
 using Counter = Tc<3>;
 
-constexpr uint8_t dma_ch = 0;
-using Copy = DmaChannel<dma_ch>;
-constexpr uint16_t dma_results = 16;
-/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
-/// controller's reads nor its writes.
-volatile uint32_t results[dma_results];
+/// Letter h's capture: while `chain_capture` is set, TSENS_Handler
+/// stores the first `chain_results` VALUE words here (the 24-bit field,
+/// which `tsens_signed()` decodes; 0xFFFFFFFF is no such value, so it
+/// marks an unwritten entry). VOLATILE because the handler writes what
+/// the letter reads.
+constexpr uint16_t chain_results = 16;
+volatile uint32_t results[chain_results];
+volatile bool chain_capture = false;
+volatile uint16_t chain_taken = 0;   ///< results stored
 
 constexpr uint8_t ev_start_channel = 0;    ///< pacer overflow -> TSENS START
 constexpr uint8_t ev_window_channel = 1;   ///< TSENS WINMON -> TC3 counts
@@ -385,10 +389,9 @@ void ta_block() {
     print(serial, "  GCLK_TSENS is peripheral channel ", Tsens::gclk_id,
           ", the vector is IRQ ", static_cast<uint32_t>(Tsens::irq()),
           ", the PAC id is ", Tsens::pac_id, crlf);
-    bench.verdict("its generic clock is channel 5, its DMA trigger 1, its "
-                  "window generator 30 and its START user 0",
-                  Tsens::gclk_id == 5u && Tsens::dma_trigger_resrdy == 1u &&
-                      Tsens::window_generator == 30u &&
+    bench.verdict("its generic clock is channel 5, its window generator 30 "
+                  "and its START user 0",
+                  Tsens::gclk_id == 5u && Tsens::window_generator == 30u &&
                       Tsens::start_event_user == 0u);
 
     bench.verdict("the block comes up on the main generator with the factory "
@@ -1454,14 +1457,19 @@ void tg_window() {
 }
 
 // =============================================================================
-// h - the no-CPU chain: event in on every path, DMAC out, WINMON counted
+// h - the event chain: event in on every path, the RESRDY interrupt out,
+//     WINMON counted
 // =============================================================================
 //
-// The stratum's signature letter, with one thing no other converter here
+// The stratum's event letter, with one thing no other converter here
 // could do: TABLE 29-3 GIVES THE TSENS START USER ALL THREE PROPAGATION
 // PATHS, where the DAC's and the SDADC's are asynchronous-only. So the
 // same chain is built three times, once per path, and all three must
-// move bytes.
+// deliver results. The START is the event system's alone; the VALUE is
+// taken by the converter's own RESRDY interrupt, so THE CPU IS IN THE
+// RESULT PATH - one handler entry a measurement - and a measurement the
+// path loses never raises the flag, which keeps the count below a
+// count of what the path delivered.
 //
 // AND THE CHANNEL'S OWN CLOCK IS PART OF THE EXPERIMENT, which is the
 // thing this letter had to learn on the bench. The pacer's overflow event
@@ -1472,7 +1480,7 @@ void tg_window() {
 // channel therefore runs on the generator the GENERATOR runs on (which is
 // what "synchronous" means in 29.6.2.6) and the resynchronized one on a
 // different but equally fast generator - the crystal.
-void th_no_cpu() {
+void th_event_chain() {
     bench.verdict("the crystal starts, for the resynchronized channel's own "
                   "clock",
                   crystal_up());
@@ -1535,13 +1543,36 @@ void th_no_cpu() {
     const int32_t reference = chain_ref ? *chain_ref : 0;
     print(serial, "  at GAIN ", chain_gain, " the same die reads ", reference,
           " - not a temperature any more, and the yardstick for every value "
-          "the DMAC brings back below", crlf);
+          "the interrupt brings back below", crlf);
+
+    /// Arm the capture: the buffer marked unwritten, RESRDY armed into
+    /// the NVIC. After tsens_up(), whose init() disables the vector.
+    auto capture_on = [] {
+        for (uint16_t i = 0; i < chain_results; ++i) {
+            results[i] = 0xFFFFFFFFul;
+        }
+        // RESRDY is "cleared when the VALUE register is read" (43.8.7),
+        // so a result left standing from a previous run would enter the
+        // handler the moment the flag is armed. Read it away first;
+        // clearing the flag alone is not the same thing.
+        (void)Tsens::value();
+        Tsens::clear_flags(Tsens::flag_all);
+        chain_taken = 0;
+        chain_capture = true;
+        Tsens::arm(Tsens::flag_result_ready);
+        Nvic::enable(Tsens::irq());
+    };
+    auto capture_off = [] {
+        Nvic::disable(Tsens::irq());
+        Tsens::disarm(Tsens::flag_all);
+        chain_capture = false;
+    };
 
     /// Run the chain once on one propagation path, with the channel clock
-    /// the path needs, and return how many beats the DMAC moved.
-    auto run = [&chain_cfg](EventPath path, EventEdge edge,
-                            uint8_t channel_generator) -> uint16_t {
-        for (uint16_t i = 0; i < dma_results; ++i) {
+    /// the path needs, and return how many results the handler took.
+    auto run = [&](EventPath path, EventEdge edge,
+                   uint8_t channel_generator) -> uint16_t {
+        for (uint16_t i = 0; i < chain_results; ++i) {
             results[i] = 0xFFFFFFFFul;
         }
         if (!GclkChannel::connect(Evsys::gclk_id(ev_start_channel),
@@ -1557,34 +1588,15 @@ void th_no_cpu() {
                                                 .edge = edge})) {
             return 0;
         }
-        // THE DMA REQUEST IS THE RESRDY FLAG (43.6.3: "cleared when the
-        // VALUE register is read"), so a result left standing from a
-        // previous run would move one stale beat the moment the channel
-        // is enabled. Read it away first; clearing the flag alone is
-        // not the same thing.
-        (void)Tsens::value();
-        Tsens::clear_flags(Tsens::flag_all);
-        (void)Copy::reset();
-        (void)Copy::configure(DmaChannelConfig{
-            .trigger = Tsens::dma_trigger_resrdy,
-            .action = DmaTriggerAction::beat,
-        });
-        (void)Copy::load(DmaTransfer{
-            .source = &Tsens::regs().TSENS_VALUE,
-            .destination = &results[0],
-            .beats = dma_results,
-            .beat = DmaBeat::word,
-            .source_increment = false,
-        });
-        (void)Copy::enable(true);
+        capture_on();
         (void)Tsens::enable(true);
         (void)Pacer::enable(true);
         wait_ms(60);
         (void)Pacer::enable(false);
         (void)Tsens::enable(false);
-        (void)Copy::enable(false);
+        capture_off();
         uint16_t filled = 0;
-        for (uint16_t i = 0; i < dma_results; ++i) {
+        for (uint16_t i = 0; i < chain_results; ++i) {
             if (results[i] != 0xFFFFFFFFul) {
                 ++filled;
             }
@@ -1594,7 +1606,7 @@ void th_no_cpu() {
 
     /// Are all sixteen values the same measurement the reference was?
     auto all_near_reference = [reference]() {
-        for (uint16_t i = 0; i < dma_results; ++i) {
+        for (uint16_t i = 0; i < chain_results; ++i) {
             if (results[i] == 0xFFFFFFFFul ||
                 !near_signed(tsens_signed(results[i]), reference, 400)) {
                 return false;
@@ -1605,24 +1617,25 @@ void th_no_cpu() {
 
     // The ASYNCHRONOUS path takes no channel clock at all, but the channel
     // still wants one connected, so it keeps the slow generator.
-    const uint16_t async_beats =
+    const uint16_t async_taken =
         run(EventPath::asynchronous, EventEdge::none, gen_slow);
-    print(serial, "  ASYNCHRONOUS path (channel on OSCULP32K): ", async_beats,
-          " of ", dma_results, " results moved by the DMAC with the CPU in a "
-          "wait loop; last value ", tsens_signed(results[dma_results - 1]), crlf);
-    bench.verdict("THE DMAC FILLED THE BUFFER FROM VALUE, one beat per "
-                  "measurement, with no CPU in the path",
-                  async_beats == dma_results);
+    print(serial, "  ASYNCHRONOUS path (channel on OSCULP32K): ", async_taken,
+          " of ", chain_results, " results taken by the RESRDY interrupt "
+          "with the letter in a wait loop; last value ",
+          tsens_signed(results[chain_results - 1]), crlf);
+    bench.verdict("THE CONVERTER'S OWN INTERRUPT FILLED THE BUFFER FROM VALUE, "
+                  "one entry per measurement the event started",
+                  async_taken == chain_results);
     bench.verdict("and every value it brought back is the same measurement the "
                   "CPU took at that GAIN",
                   all_near_reference());
 
     // The SYNCHRONOUS path on the generator the GENERATOR itself runs on -
     // which is what 29.6.2.6 means by synchronous.
-    const uint16_t sync_beats =
+    const uint16_t sync_taken =
         run(EventPath::synchronous, EventEdge::rising, gen_sys);
     print(serial, "  SYNCHRONOUS path (channel on the pacer's own 48 MHz "
-                  "generator): ", sync_beats, " of ", dma_results, crlf);
+                  "generator): ", sync_taken, " of ", chain_results, crlf);
 
     // The RESYNCHRONIZED path is the one that crosses domains, and it
     // needs a pulse WIDE ENOUGH FOR THE CHANNEL TO SEE. The pacer moves to
@@ -1633,15 +1646,15 @@ void th_no_cpu() {
     bench.verdict("the pacer moves to the crystal-derived 96 kHz generator - "
                   "same 1 kHz rate, a five-hundred-times WIDER pulse",
                   pacer_up(gen_ref, TcPrescaler::div16, 5));
-    const uint16_t resync_beats =
+    const uint16_t resync_taken =
         run(EventPath::resynchronized, EventEdge::rising, gen_sys);
     print(serial, "  RESYNCHRONIZED path (pacer on the crystal, channel on "
-                  "OSC48M - two domains that share nothing): ", resync_beats,
-          " of ", dma_results, crlf);
+                  "OSC48M - two domains that share nothing): ", resync_taken,
+          " of ", chain_results, crlf);
     bench.verdict("TABLE 29-3 IS EXACT AND THIS USER IS THE EXCEPTION: the "
                   "START user takes the synchronous and resynchronized paths "
                   "too, where the DAC's and the SDADC's take neither",
-                  sync_beats == dma_results && resync_beats == dma_results);
+                  sync_taken == chain_results && resync_taken == chain_results);
 
     // AND THE OTHER HALF OF THE SAME QUESTION, MEASURED RATHER THAN
     // ASSERTED. A SAMPLED PATH SAMPLES, and neither 29.6.2.6 nor
@@ -1659,62 +1672,49 @@ void th_no_cpu() {
     const uint16_t narrow_half =
         run(EventPath::resynchronized, EventEdge::rising, gen_xtal);
     print(serial, "  narrow 21 ns pulse: ASYNCHRONOUS on OSCULP32K ",
-          narrow_async, " of ", dma_results,
-          "; SYNCHRONOUS on the pacer's own 48 MHz ", sync_beats,
+          narrow_async, " of ", chain_results,
+          "; SYNCHRONOUS on the pacer's own 48 MHz ", sync_taken,
           "; SYNCHRONOUS on OSCULP32K ", narrow_slow,
           "; RESYNCHRONIZED on the 24 MHz crystal ", narrow_half, crlf);
     print(serial, "  wide 10.4 us pulse: SYNCHRONOUS on the pacer's own "
-                  "96 kHz generator ", wide_slow_sync, " of ", dma_results,
-          "; RESYNCHRONIZED on OSC48M ", resync_beats, crlf);
+                  "96 kHz generator ", wide_slow_sync, " of ", chain_results,
+          "; RESYNCHRONIZED on OSC48M ", resync_taken, crlf);
     bench.verdict("THE ASYNCHRONOUS PATH DOES NOT CARE ABOUT ANY OF THIS - it "
                   "has no clock to sample with, so a 21 ns pulse reaches a "
                   "channel clocked at 32 kHz and every event lands",
-                  narrow_async == dma_results);
+                  narrow_async == chain_results);
     bench.verdict("A SAMPLED PATH DOES: the same narrow event on a channel "
                   "clocked SLOWER than the generator is mostly not there when "
                   "the channel looks, and 24 MHz against 48 is no better than "
                   "32 kHz",
-                  narrow_slow < dma_results / 2u && narrow_half < dma_results / 2u);
+                  narrow_slow < chain_results / 2u && narrow_half < chain_results / 2u);
     bench.verdict("AND WIDENING THE PULSE IS NOT THE WHOLE ANSWER EITHER: a "
                   "synchronous channel on a 96 kHz generator loses a pulse as "
                   "wide as its OWN PERIOD, so 'synchronous' is not a licence "
                   "to clock the channel slowly - the channel clock is "
                   "ON-DEMAND, which erratum 1.12.1 leaves no alternative to, "
                   "and starting it costs about a period",
-                  wide_slow_sync < dma_results / 2u);
+                  wide_slow_sync < chain_results / 2u);
     bench.verdict("the channel goes back to a clock the chain can use",
                   GclkChannel::connect(Evsys::gclk_id(ev_start_channel),
                                        gen_slow));
 
     // The control: with the pacer stopped nothing moves.
-    for (uint16_t i = 0; i < dma_results; ++i) {
-        results[i] = 0xFFFFFFFFul;
-    }
-    (void)Tsens::value();
-    Tsens::clear_flags(Tsens::flag_all);
-    (void)Copy::reset();
-    (void)Copy::configure(DmaChannelConfig{.trigger = Tsens::dma_trigger_resrdy,
-                                           .action = DmaTriggerAction::beat});
-    (void)Copy::load(DmaTransfer{.source = &Tsens::regs().TSENS_VALUE,
-                                 .destination = &results[0],
-                                 .beats = dma_results,
-                                 .beat = DmaBeat::word,
-                                 .source_increment = false});
-    (void)Copy::enable(true);
+    capture_on();
     (void)Tsens::enable(true);
     wait_ms(60);
     (void)Tsens::enable(false);
-    (void)Copy::enable(false);
-    uint16_t idle_beats = 0;
-    for (uint16_t i = 0; i < dma_results; ++i) {
+    capture_off();
+    uint16_t idle_taken = 0;
+    for (uint16_t i = 0; i < chain_results; ++i) {
         if (results[i] != 0xFFFFFFFFul) {
-            ++idle_beats;
+            ++idle_taken;
         }
     }
-    print(serial, "  with the pacer stopped: ", idle_beats, " beats", crlf);
+    print(serial, "  with the pacer stopped: ", idle_taken, " results", crlf);
     bench.verdict("WITH NOTHING TRIGGERING, NOTHING MOVES - the chain is the "
                   "event's and not the enable's",
-                  idle_beats == 0u);
+                  idle_taken == 0u);
 
     // THE OTHER DIRECTION: the window monitor as an event GENERATOR,
     // counted by TC3. The window is placed to match every measurement, so
@@ -1778,7 +1778,6 @@ void th_no_cpu() {
 
     Tsens::release();
     Evsys::disconnect(Counter::event_user);
-    (void)Copy::reset();
     (void)Pacer::enable(false);
     Pacer::release();
     Counter::release();
@@ -1869,8 +1868,8 @@ void ti_interrupts() {
 //
 // The one thing a temperature sensor with no thermometer CAN be asked
 // about the temperature: does the number move when the die is made to
-// work? The baseline is taken first, then the CPU is held in a tight loop
-// with the DMAC churning memory for forty seconds, then the same batch is
+// work? The baseline is taken first, then the CPU is held for a minute
+// in a tight loop of spinning and copying memory, then the same batch is
 // taken again. NOTHING IS CLAIMED unless the shift clears the measured
 // noise - and a bench in a room with air moving in it is entitled to
 // drift either way.
@@ -1881,20 +1880,18 @@ void tj_drift() {
     bench.verdict("the baseline is taken", before.ok);
     print_batch("before the load", before);
 
-    // Forty seconds of work: the CPU spinning and the DMAC copying, which
-    // is as much of this die as a wireless suite can switch on.
-    static volatile uint32_t churn_src[64];
-    static volatile uint32_t churn_dst[64];
+    // A minute of work: the CPU spinning and copying a buffer in SRAM -
+    // the core and the memory are the load a wireless suite can switch
+    // on by itself.
+    static uint32_t churn_src[64];
+    static uint32_t churn_dst[64];
     for (uint16_t i = 0; i < 64; ++i) {
         churn_src[i] = i * 0x01010101ul;
     }
-    (void)Copy::reset();
-    (void)Copy::configure(DmaChannelConfig{.trigger = 0,
-                                           .action = DmaTriggerAction::block});
 
-    print(serial, "  loading the die for 60 seconds (CPU spinning, DMAC "
-                  "copying, TSENS measuring without pause), sampling the "
-                  "temperature every ten; nothing is printed until it ends",
+    print(serial, "  loading the die for 60 seconds (CPU spinning and "
+                  "copying memory, TSENS measuring without pause), sampling "
+                  "the temperature every ten; nothing is printed until it ends",
           crlf);
     constexpr uint8_t trend_points = 6;
     int32_t trend[trend_points];
@@ -1903,14 +1900,13 @@ void tj_drift() {
     uint32_t blocks = 0;
     uint32_t next_sample = 10'000UL;
     while (Ticker::millis() - t0 < 60'000UL) {
-        (void)Copy::load(DmaTransfer{.source = &churn_src[0],
-                                     .destination = &churn_dst[0],
-                                     .beats = 64,
-                                     .beat = DmaBeat::word});
-        (void)Copy::enable(true);
-        Copy::trigger();
+        memcpy(churn_dst, churn_src, sizeof churn_src);
+        // A compiler-only barrier that takes both addresses: the copy is
+        // the load, so it must reach memory although nothing reads it
+        // back - and a buffer whose address never escapes is one a plain
+        // "memory" clobber does not cover.
+        asm volatile("" : : "r"(churn_dst), "r"(churn_src) : "memory");
         spin(2000);
-        (void)Copy::enable(false);
         ++blocks;
         if (Ticker::millis() - t0 >= next_sample && trend_n < trend_points) {
             const auto v = Tsens::measure_average(10);
@@ -1919,7 +1915,6 @@ void tj_drift() {
             next_sample += 10'000UL;
         }
     }
-    (void)Copy::reset();
 
     const Batch after = take(64);
     bench.verdict("the second batch is taken", after.ok);
@@ -1961,8 +1956,8 @@ void tj_drift() {
     if (before.ok && after.ok) {
         const int32_t delta = after.mean - before.mean;
         const int32_t noise = before.spread() + after.spread();
-        print(serial, "  ", blocks, " DMA blocks in the minute; the reading "
-                      "moved ", delta, " centi-C (");
+        print(serial, "  ", blocks, " copy rounds in the minute; the "
+                      "reading moved ", delta, " centi-C (");
         print_celsius(delta);
         print(serial, " C) against a combined spread of ", noise, crlf);
         if (abs_signed(delta) > noise) {
@@ -2100,6 +2095,19 @@ extern "C" void HardFault_Handler() { brio::hard_fault_reset<brio::SamPlatform>(
 
 extern "C" void TSENS_Handler() {
     const uint8_t mask = brio::Tsens::isr();
+    if (chain_capture) {
+        // Letter h's capture: the VALUE word into the first free entry;
+        // results past the buffer are read and dropped.
+        if ((mask & brio::Tsens::flag_result_ready) != 0u) {
+            const uint32_t word = brio::Tsens::value_raw();
+            const uint16_t n = chain_taken;
+            if (n < chain_results) {
+                results[n] = word;
+                chain_taken = static_cast<uint16_t>(n + 1u);
+            }
+        }
+        return;
+    }
     tsens_last_mask = mask;
     if ((mask & brio::Tsens::flag_result_ready) != 0u) {
         // Reading VALUE is what clears RESRDY (43.8.7), so the handler
@@ -2109,18 +2117,11 @@ extern "C" void TSENS_Handler() {
     tsens_irqs = tsens_irqs + 1u;
 }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
 
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     factory = TsensCalibration::factory();
@@ -2136,8 +2137,8 @@ int main() {
                  te_timing);
     bench.letter('f', "how wide the datapath really is", tf_datapath_width);
     bench.letter('g', "the window monitor, all six modes", tg_window);
-    bench.letter('h', "the no-CPU chain: event in on every path, DMAC out",
-                 th_no_cpu);
+    bench.letter('h', "the event chain: event in on every path, interrupt out",
+                 th_event_chain);
     bench.letter('i', "the four interrupt sources through one vector",
                  ti_interrupts);
     bench.letter('j', "drift under load, printed and judged honestly",
@@ -2147,8 +2148,7 @@ int main() {
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "ok" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         const auto record = brio::take_panic_record<brio::SamPlatform>();
         if (pac_token.magic == pac_magic && pac_token.armed != 0u) {
             pac_token.armed = 0;

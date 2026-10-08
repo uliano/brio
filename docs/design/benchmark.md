@@ -260,7 +260,6 @@ SCK.
 
 | family | copy 4096 x (the DMA's rate) | fill 4096 x | copy fixed cost | paced x | spi.dma x, irq | spi fixed cost per transaction |
 |---|---|---|---|---|---|---|
-| SAM C21J18A | 2.89 (5 cycles a word) | 2.89 | ~390 cycles (745 with the instrument inside) | 1.00 | 1.26 at 12 MHz (35 cycles a frame: the two channels interleave; a write-only request on one channel 1.16), 1.04 at 3 MHz, 1 | 1421 cycles at 3 MHz (was 2365, two interrupts) |
 | STM32G0B1RE | 2.73 (5 cycles a word) | 2.73 | ~487 cycles (the instrument inside) | 1.00 | 1.06 at 8 MHz, 1.26 at 32 MHz; 16-bit frames 1.03, 1 | 1083 cycles (was 1291) |
 | STM32F446RE | 3.62 (slower than the runtime's memcpy: the engine saves CPU, not time) | 5.11 | 72 cycles (was 1027) | 1.00 | 1.04 at 22.5 MHz; 16-bit frames 1.01, 1 | 652 to 664 cycles = 3.7 us (was 13.7 us, two interrupts) |
 | CH32V006K8U6 | 6.82 at 2048 (6 cycles an item from SRAM, 8 from the flash) | 8.42 (8 cycles an item) | ~500 cycles (the instrument inside) | 1.00 | 1.10 at 12 MHz (32.0 cycles a byte, the wire's), 1.02 at 3 MHz; 16-bit frames 1.05, 1 | 864 cycles (871 in 16-bit frames) |
@@ -281,7 +280,7 @@ What the rows say:
   frames, +9 on 16-bit; a display in mode 3 does not pay it, and the DCS
   link's examples carry mode 3).
 - A copy by DMA is the controller's own rate, not the bus's: five cycles
-  a word on the SAM and the G0, six an item on the CH32V203, the
+  a word on the G0, six an item on the CH32V203, the
   CH32V303 and the CH32V006 (eight from the CH32V006's flash), and on
   the M4 slower than the core's own load-multiple block - the engine
   buys CPU time there, never wall time. The RP2040's and the RP2350's
@@ -404,7 +403,7 @@ receive, at the rate named.
 
 | family (clock; the loop's top rate) | uart.tx x at the top rate, 256 and 4096 | uart.rx 256 x by rate; receive entries for 256 | the edge after the last stop bit | `tx_idle()` after the last stop bit | the core at about 1 Mbaud: transmit, receive (the vendor's receive) | the vendor's receive, x |
 |---|---|---|---|---|---|---|
-| SAM C21J18A (48 MHz OSC48M, 2 WS; 3 Mbaud) | the engine 1.03, 1.00; the interrupt transmitter 2.20, 2.18 (197 to 198 cycles a byte against a 160-cycle frame; 1.43 from SRAM) | the interrupt receiver 1.00 at 115200, 1.01 at 1 Mbaud, at 3 Mbaud 0.33 entries a character and one character lost with the meters on the vectors from the flash - the skip after it taking the rest of the burst, so the 256 never arrive - (lossless from SRAM, 1.09); the engine 1.00, 1.02, 2.10 at 3 (its plain sender slower than the wire); 255 entries at 1 Mbaud, one completion under the engine | the interrupt receiver 424 cycles; the engine 731 to 838 at a block's end (1.5 frames at 1 Mbaud), a tail at the owner's ask | within a probe turn (94 to 308 cycles) at 115200, 1 and 3 Mbaud | the transmit engine 1 %, the interrupt receiver 46 % (32 %) | the data sheet's bare RXC handler: 1.01 at 1 Mbaud, 154 cycles a character against 223; at 3 Mbaud 241 of 256 lost |
+| SAM C21J18A (48 MHz OSC48M, 2 WS; 3 Mbaud) | the engine 1.02, 1.00; the interrupt transmitter 2.05, 2.03 (189 cycles an entry against a 160-cycle frame; 1.40 from SRAM) | the interrupt receiver 1.00 at 115200, 1.01 at 1 Mbaud, at 3 Mbaud 0.33 entries a character and one character lost with the meters on the vectors from the flash - the skip after it taking the rest of the burst, so the 256 never arrive - (lossless from SRAM, 1.09); 255 entries at 1 Mbaud | the interrupt receiver 424 cycles | within a probe turn (94 to 308 cycles) at 115200, 1 and 3 Mbaud | the transmit engine 1 %, the interrupt receiver 46 % (32 %) | the data sheet's bare RXC handler: 1.01 at 1 Mbaud, 154 cycles a character against 223; at 3 Mbaud 241 of 256 lost |
 | STM32F446RE (180 MHz PLL, 5 WS, ART on; 5.625 Mbaud) | 1.02 (the engine 1.02), 1.00 (1.01) | the interrupt receiver 1.00, 1.00 and 1.02 at 115200, 1 and 5.625 Mbaud, the engine 1.00, 1.01 and 1.03; 256 entries for 256, the engine two USART entries a burst and one a half lap | the engine 1.0 frame at 115200, 1.1 at 1 Mbaud, 1.5 at 5.625 Mbaud | +8 to +23 cycles at 115200 and 1 Mbaud, both transmitters | the transmit engine 0.6 %, the interrupt transmitter 11.6 %; the interrupt receiver 5.6 %, the engine 0.2 % | HAL v1.8.5 ReceiveToIdle_DMA: the edge at the same frame (497 cycles at 5.625 Mbaud against 502), one USART interrupt a burst against two |
 | CH32V203C8T6 (144 MHz PLL, zero-wait window; 4.5 Mbaud) | 1.00 (the engine 1.00), 1.00 (1.00) | the interrupt receiver 1.00, 1.00 and 1.01 at 115200, 1 and 4.5 Mbaud, the engine 1.00, 1.00 and 1.01; 256 entries for 256, the engine two USART entries a burst and one a half lap | the engine 1.0, 1.1 and 1.5 frames | +13 to +45 cycles at 115200 (a bit is 1250), within a bit at 1 Mbaud | the transmit engine 0.1 %, the interrupt transmitter 5.6 %; the interrupt receiver 10.4 %, the engine 0.1 % | the EVT's Idle_Recv: the edge at the same frame; 330 to 350 cycles a 16-byte burst against its 324, 434 to 496 a 256-byte one against its 2144 (it copies every block out inside its handler) |
 | CH32V303VCT6 (144 MHz PLL, zero-wait window, the V4F; 4.5 Mbaud) | 1.00 (the engine 1.00), 1.00 (1.00) | the interrupt receiver 1.00, 1.00 and 1.01 at 115200, 1 and 4.5 Mbaud, the engine 1.00, 1.00 and 1.01; 256 entries for 256 | the engine 1.0, 1.1 and 1.5 frames | not measured on this board | the transmit engine 0.1 %, the interrupt transmitter 5.1 %; the interrupt receiver 8.6 %, the engine 0.1 % | not run on this board |
@@ -472,20 +471,15 @@ What the rows say:
   the Cortex-M0+), and on the RP2040 the figure moves by up to 4 cycles a
   byte between two runs of one image: the XIP cache's state at the
   burst.
-- The SERCOM has neither an idle flag nor a receiver time-out, so
-  under the engine the edge is a block's completion - half the ring -
-  and a tail shorter than a block waits for the owner's ask; the idle
-  detector a TC could build from the RX pad's edges is declined
-  ([../samc21/sercom.md](../samc21/sercom.md)). Its interrupt receiver
-  takes every level of the buffer an entry and keeps 3 Mbaud where the
+- The SERCOM's receiver is its interrupt receiver alone (the family's
+  DMA serves its transmitter only,
+  [../samc21/sercom.md](../samc21/sercom.md)). It takes every level of the buffer an entry and keeps 3 Mbaud where the
   data sheet's handler, a character an entry, loses nine in ten - at 45
   per cent more cycles a character than that handler at 1 Mbaud: the
   shared vector's question, the RXC re-read that ends the loop and the
   ring's tests, named in the family's document. At 3 Mbaud it has two
   frames of margin and no more: the bench's meters on every vector cost
-  it a character from the flash, none from SRAM. The engine's edge at a
-  block's end is 731 to 838 cycles, the owner's ask reading the channel
-  without suspending it.
+  it a character from the flash, none from SRAM.
 - On the QingKe parts an engine's share of the core is what its wakes
   cost, and the idle path takes one turn per wake: the CH32V006's
   transmit engine is 2.3 per cent of the core at 1 Mbaud, 3.0 when a
@@ -513,7 +507,7 @@ partner's handlers included where they run on the same core.
 | family (clock; the partner) | 1-byte write, fixed cost at 400 kHz (before) | register read 1+1, fixed (before) | 255-byte write: x, interrupts | 255-byte read: interrupts (before), handler cycles | busy of a 1-byte write | the vendor | longest host entry (before) |
 |---|---|---|---|---|---|---|---|
 | AVR128DB48 (24 MHz; the same TWI's client on PC2/PC3, served on the same core) | 509 (599) | 1003 (1112) | 1.12 (1.16), one interrupt a byte - the data sheet's own loop 1.11 | 1.14, smart mode | 1056 metered; the plain binding is busy for the tenure, the client's handler on the same core | the data sheet's polled loop: 316 and 808 fixed, the core held the whole tenure | 95 (120); 305 metered |
-| ATSAMC21J18A (48 MHz OSC48M, 2 WS; the AVR's `twi_peer`, which stretches every byte about 220 cycles) | 978 through the pump, the plain binding (1205); 1341 metered | 1371 plain, 1835 metered | the engine 1.10 at 254 bytes - the peer's stretch -, three interrupts; the pump 1.24 | the engine one interrupt, 3005 cycles busy; the pump 104 575 (137 679) | 1505 metered | the data sheet's loop: about 320 fixed on a one-byte write, the pump's wall about a fifth behind it; within half a per cent on long tenures | 383 |
+| ATSAMC21J18A (48 MHz OSC48M, 2 WS; the AVR's `twi_peer`, which stretches every byte about 220 cycles) | 978 through the pump, the plain binding (1205); 1341 metered | 1371 plain, 1835 metered | the pump 1.24 | the pump 104 575 (137 679) | 1505 metered | the data sheet's loop: about 320 fixed on a one-byte write, the pump's wall about a fifth behind it; within half a per cent on long tenures | 383 |
 | STM32F429ZI (180 MHz; the board's STMPE811 on I2C3; the F429's figures, its board not on the desk) | 139 (961), three interrupts (seven) | 389 (816), five (ten) | 1.00 through the pump and the engines | - (the device answers no read a write did not open: reads are register reads) | 708 | HAL: 387 and 1171 fixed; 148 and 153 cycles a byte written and read, against 80 and 99 | 203 |
 | STM32F446RE (180 MHz; FMPI2C1 on the self-link, served on the same core) | 230, three interrupts | 611, five | 1.00 through the pump (256 interrupts, 98 cycles a byte) and the engines (4) | 256 through the pump (117 cycles a byte), 3 through the engines | 1225 | - | 214 |
 | STM32F446RE's FMPI2C1 (180 MHz; I2C1 on the self-link, served on the same core, its address-match stretch inside the figure) | 1131, two interrupts | 1680, four | 1.00 through the pump (256 interrupts, 128 cycles a byte) and the engines (2) | 256 through the pump (141 cycles a byte), 2 through the engines | 1168 | - | 509 |
@@ -551,12 +545,7 @@ What the rows say:
   255 bytes since the idle path takes one turn per wake (86 k when a
   stale event made two), and the CH32V006's one-byte write 1488 where it
   was 1759, the same cause.
-- The SAM C21's SERCOM offers a byte counter (ADDR.LEN) and smart mode:
-  an engined read is one interrupt a tenure; a write has no edge at its
-  counted end, so LEN = w + 1 makes the MB after byte w the edge that
-  sends the STOP or the repeated START - three interrupts, and a
-  255-byte write stays the pump's ([../samc21/i2c.md](../samc21/i2c.md)).
-  The AVR's TWI holds SCL from each flag until the software answers, so
+- The AVR's TWI holds SCL from each flag until the software answers, so
   a long tenure at 400 kHz runs at the handler's pace - 1.12, the data
   sheet's own loop 1.11 ([../avrdx/twi.md](../avrdx/twi.md)).
 - A block with a byte counter and AUTOEND but no FIFO - the STM32G0's

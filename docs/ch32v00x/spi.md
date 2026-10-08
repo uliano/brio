@@ -391,8 +391,8 @@ nak-ing corrupted frames (measured), not as silence.
   in both directions, LSb first with both ends agreeing byte-exact
   too, and a bit-order mismatch an EXACT two-way bit reversal; 0 of 40
   bursts slipped over ten rounds of each mode, on either part.
-- **The BR ladder against the peer** holds to HCLK/4 = 12 MHz exact
-  both ways and breaks at HCLK/2 = 24 MHz - where the peer still hears
+- **The BR ladder against a peer serving on DMA** holds to HCLK/4 =
+  12 MHz exact both ways and breaks at HCLK/2 = 24 MHz - where the peer still hears
   every character exact, so the boundary is its answer reload and not
   the wire.
 - **The kernel against the peer**: four transactions queued from one
@@ -468,6 +468,12 @@ Driver gaps, each with its reason:
   PC0) would free it, on a desk without the LED there.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The ladder against the SAM C21 `spi_peer` as it is: that peer serves
+  on its software pump alone (docs/samc21/dmac.md), so letter p meets
+  the pump's reload boundary and not the 12 MHz above, measured against
+  a DMA serve; the verdict's floor (750 kHz) sits under it. Letter p on
+  either part against that peer would measure where it now stops.
 
 - The pump's OVR test after the DATAR read on the CH32V003F4P6: the
   code is the CH32V006's, and `spi.window`, which measures it there, is

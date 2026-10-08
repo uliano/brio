@@ -3,10 +3,10 @@
 Documents of record: SAM C20/C21 data sheet DS60001479M ch. 32 (over the
 shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/spi.hpp` over `Sercom<n>`'s instance facts ([sercom.md](sercom.md)
-owns the address ladder, the clocks, the NVIC line and the DMAC trigger
-codes - one table, shared by every personality). Family fixture
-`test/family_samc21/spi.cpp` + ten negatives; bench suite `test_samc_spi`
-(8 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
+owns the address ladder, the clocks and the NVIC line - one table,
+shared by every personality). Family fixture
+`test/family_samc21/spi.cpp` + eight negatives; bench suite `test_samc_spi`
+(7 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
 or on a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
 format, one source file serving both architectures).
@@ -91,11 +91,13 @@ engine-owned window never sees it; a caller framing CS by hand must call
 **TXC closes the LAST frame.** "In Host mode, this flag is set when the
 data have been shifted out and there are no new data in DATA" (32.8.6) -
 measured to mean the END of the last frame and not its start: a
-write-only DMA block of n frames, timed from the channel's enable to TXC
-in core cycles, takes n frames and a constant at every n and rate (at
-100 kHz, 2 frames 9022 cycles and 6 frames 24375: 3838 a frame against
-3840; at 1 and 12 MHz the same shape). So a write-only transaction needs
-no receive channel to know it is over: TXC is its edge.
+write-only block of n frames fed back to back by a DMA channel (a
+measurement of the silicon, not a path of this driver), timed from the
+channel's enable to TXC in core cycles, takes n frames and a constant at
+every n and rate (at 100 kHz, 2 frames 9022 cycles and 6 frames 24375:
+3838 a frame against 3840; at 1 and 12 MHz the same shape). So a
+write-only transaction needs no reading side to know it is over: TXC is
+its edge, and the polled transmit-only phase ends on it.
 
 **Hardware SS frames a character, not a transaction.** CTRLB.MSSEN
 raises SS "for a minimum of one baud cycle between each data sent"
@@ -114,57 +116,29 @@ DO drives (32.6.3.4): a host then reads its own transmit line back -
 32 of 32 bytes identical on the bench, and nine-bit characters
 (CTRLB.CHSIZE = 9) loop 0x1FF and 0x100 back whole.
 
-**The DMA request shapes are not the USART's, and the kick doctrine
-inverts.** In UART mode a DMA channel armed while the peripheral's
-request LEVEL is already high sees no beat (the trigger latches on the
-RISE) and must be kicked once. In SPI HOST mode the TX request behaves
-as the OPPOSITE: enabling the channel with DRE
-already standing fires the first beat by itself, the chain sustains on
-the per-character rises, and a kick on top of that start is one EXTRA
-beat whose byte lands in a full transmit buffer and is DISCARDED in
-silence - measured three ways on the loop-back bench (with the kick,
-exactly one early character vanishes from the wire, the kick's own, at
-every rate; without it the stream is byte-exact). So `SpiHost`'s DMA
-launch kicks nothing; the trigger doctrine is PER SERCOM MODE, not per
-controller ([dmac.md](dmac.md) carries the qualification).
-
 **Table 45-59 agrees with the bench, and it is the STRICTER of the
 two.** The SPI timing table (simulation values, note 1: not covered by
 production test) prices the four directions at VDD > 4.5 V: host
 TRANSMISSION tSCK >= 2 x (tMOV 17.1 ns + the device's input setup) -
-about 29 MHz against an ideal device, so the 24 MHz TX stream the
-wire ladder certified is in spec; host RECEPTION tSCK >= 2 x (tMIS
+about 29 MHz against an ideal device, so the 24 MHz TX stream a
+client received byte-exact is in spec; host RECEPTION tSCK >= 2 x (tMIS
 50.7 ns + the device's output delay) - about 9.9 MHz against an IDEAL
 device and 6..7 MHz against a real one, so the loop-back's measured
 12 MHz exact EXCEEDS the paper (bench-true on this die at room
 temperature, not a design number) and the 24 MHz loop-back failure is
 attributed: 101 ns of receiver requirement against a 41 ns period is
-the RECEIVER, by the datasheet's own arithmetic. A CLIENT's response
+the RECEIVER, by the datasheet's own arithmetic. (The 24 MHz stream
+and the 12 and 24 MHz loop-back rungs were measured with a DMA-fed data
+phase, back to back: facts of the silicon, not paths of this driver.)
+A CLIENT's response
 path carries tSOSS (~41 ns) plus the far end's setup plus TWO APB
 PERIODS (41.7 ns at 48 MHz), which lands the paper ceiling for client
-transmission at a few MHz - exactly where the wire ladder measured
-the DMA-fed answer's 6 MHz. Design guidance, then: writes to a device
-up to 24 MHz, reads from a real device at 6..8 MHz by the paper
-(12 MHz is what this die did), a SAM client's responses ~6 MHz - and
+transmission at a few MHz; the client's software one-ahead pump binds
+first, at 2..3 MHz (bench findings). Design guidance, then: writes to a
+device up to 24 MHz, reads from a real device at 6..8 MHz by the paper
+(12 MHz is what this die did), a SAM client's responses a few MHz - and
 a fast SPI client is an FPGA's job, the two bus cycles in every
 answer being construction, not tuning.
-
-**The DMA data phase is real and it is fast.** With the two engine
-slots named, a request's data phase rides the DMAC: RX drains DATA on
-the RXC trigger (its completion IS the transaction's - the last
-character is on the wire until it has been shifted back in), TX feeds
-DATA on DRE, and both back-to-back with no CPU in the byte path; a
-write-only phase is TX alone, closed by TXC (above). In
-loop-back the phase is byte-exact through 12 MHz (f_ref/4); the 24 MHz
-rung reads 1 of 64 correct and is recorded, not judged - at f_ref/2
-the pad round trip meets the input sampler inside one 333 ns character
-and one board cannot attribute the breakage. On the wire, with both
-boards' ends on engines, the link is exact to 6 MHz back to back and
-breaks at 8 - where the peer still hears every byte exact, so even the
-hardware boundary is the ANSWER RELOAD (a DRE-triggered beat must land
-three SCK cycles before a character boundary, and at 8 MHz that window
-is under 625 ns of bus arbitration); the client's RECEIVE side stayed
-byte-exact to 24 MHz on the same climbs.
 
 **There is no event surface.** 32.5.6 and 32.6.4.3 are both "Not
 applicable" - this peripheral publishes nothing into `evsys.hpp`'s
@@ -206,7 +180,7 @@ item a reader would apply without checking the row.
   can). Role legality is checked IN THE ROLE (`spi_role_probe`), because
   the same harness is legal as a host and illegal as a client on the
   same row.
-- **`SpiHost<n, pads, generator, TxEngine, RxEngine>`** - the engine
+- **`SpiHost<n, pads, generator>`** - the engine
   `util/spi_bus.hpp` (= `BusMaster`) drives: the shared Request shape
   (cs/dc `PinRef`s, two-phase cmd + full-duplex data, `Borrowed<...,
   Lease::reply>` spans, `ReplyTo<SpiDone>`, per-request BAUD value and
@@ -247,39 +221,17 @@ item a reader would apply without checking the row.
   (the handler and start() advance the same write index, and at 12 MHz
   the first character is back before start() has written the second).
   Nothing is flushed at start(): every character the pump or a receive
-  shape writes is read back by it, and the two shapes that overflow the
-  receiver - the polled transmit-only phase, the write-only engined
-  request - drain it at their own tail.
-  THE TWO ENGINE SLOTS default to `NoDmaEngine`, so an engineless build
-  carries no DMA code at all (the Uart's shape); named, they take the
-  DATA PHASE of a request of at least `dma_min_frames` onto the DMAC,
-  both or neither, byte elements (the host's frame is eight bits), ONE
-  INTERRUPT A TRANSACTION: with something to receive, two channels - the
-  receive block's TCMPL is the edge, the transmit block SILENT (armed
-  `DmaCompletion::silent`: TERR alone, since BLOCKACT NOACT does not
-  silence TCMPL on this die, dmac.md) - and a null tx feeds 0xFF
-  dummies from a held source (`start_fixed`); WRITE-ONLY (null rx), the
-  transmit channel alone and the SERCOM's TXC the edge, the receiver
-  left on to overflow and drained by the completion. TXC is cleared
-  before it is armed, and the handler that sees it asks the channel
-  whether its last beat is written (a buffer run dry between two beats
-  raises TXC too). `dma_min_frames` IS FIVE, from two measured numbers
-  (bench findings): the engines' fixed cost per transaction over the
-  pump's cost per frame - below it a request takes the pump even with
-  the engines named, the command phase always does, and the handover is
-  made inside `isr()`; `dma_isr(channel, flags)` is the DMAC-vector
-  body, `isr()` takes TXC as well as RXC, and `status()` is the
-  completion's word - `spi_ok`, `spi_dma_fault` (an engine-defined
-  BusDone code) when a transfer error or a bounded-timeout abandon ended
-  the request, or `spi_stalled` (`util/spi_bus.hpp`'s code, one value
-  on every family) when a polled transaction's one spin budget ran out
-  with a flag never raised. The DMAC BLOCK is the app's: `Dmac::init()` once, before
-  any engined `init()`. `recover()` is the verb a TIMED SpiBus calls on
-  a transaction that never answered (util/bus_master.hpp): CS deasserted
-  first, engines put away and re-claimed, the SERCOM reset and
-  reconfigured to the applied state - the wedge it targets is an
-  ISR-style completion that never posts (the 1.10.4 class of death with
-  no fault flag to see).
+  shape writes is read back by it, and the one shape that overflows the
+  receiver - the polled transmit-only phase - drains it at its own tail.
+  THERE IS NO DMA DATA PHASE: the polled loop and the pump are the two
+  shapes (dmac.md, erratum 1.10.4). `status()` is the completion's word
+  - `spi_ok`, or `spi_stalled` (`util/spi_bus.hpp`'s code, one value on
+  every family) when a polled transaction's one spin budget ran out with
+  a flag never raised. `recover()` is the verb a TIMED SpiBus calls on a
+  transaction that never answered (util/bus_master.hpp): CS deasserted
+  first, the SERCOM reset and reconfigured to the applied state - the
+  wedge it targets is an ISR-style completion that never posts (a lost
+  interrupt).
 - **`SpiClient<n, pads>`** - the polled surface plus ISR bodies:
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
@@ -318,9 +270,8 @@ A client answering a stream (the one-ahead pump):
   bench: SAM SERCOM1 function C (PA16 MOSI, PA17 SCK, PA18 SS, PA19
   MISO) against an AVR128DB48 peer's SPI0 ALT1 (PE0-PE3), both boards
   at 5 V. And the SAM-SAM five-wire bench (both boards' PA16..PA19
-  straight through plus GND), which is where
-  the DMA findings below are measured. On either desk the same wires
-  carry a board as host (DOPO row 0x0) and as client (row 0x2).
+  straight through plus GND). On either desk the same wires carry a
+  board as host (DOPO row 0x0) and as client (row 0x2).
 - All four transfer modes x both bit orders byte-exact in both
   directions; a deliberate DORD mismatch is an EXACT two-way bit
   reversal at both ends.
@@ -328,34 +279,21 @@ A client answering a stream (the one-ahead pump):
   bits, never short (64-character bursts at 93 kHz to 4 MHz, polled-pump
   overhead 2.6..6.5 us per character, falling with rate).
 - Back-to-back characters (no inter-byte gap - one engine request)
-  bind at the PEER'S ANSWER RELOAD, and the ladder has three measured
+  bind at the PEER'S ANSWER RELOAD, and the ladder has two measured
   boundaries. The AVR peer's polled loop: exact to 500 kHz
   always, 1 MHz a coin toss (its 5..9 us polled turnaround against a
   10 us character), well below its CLK_PER/6 electrical ceiling. The
   SAM peer's polled loop (precomputed stream, one-ahead reload): exact
   to 2..3 MHz - and at the first failing rung the peer still hears
-  every byte exact, so the boundary is the reload, not the wire. Both
-  ends on DMA engines: exact to 6 MHz, breaking at 8 with the client
-  still hearing every byte - the hardware reload's own limit - and the
-  client's receive side byte-exact to 24 MHz throughout.
+  every byte exact, so the boundary is the reload, not the wire.
 - The kernel letter: four requests queued in one dispatch come back
   through their own ReplyTo in order; an over-full arbiter answers
   bus_rejected immediately; an idle bus votes ok on PrepareSleep, a busy
   one refuses. `util/spi_bus.hpp` and `util/bus_master.hpp` arbitrate
   this engine as written: nothing above the contract is target-specific.
 
-- `bench_samc` letter d, the host on SERCOM1 with MISO floating (the
-  time is the wire's; dmac.md has the whole table): an engined
-  full-duplex request of 16 frames at 12 MHz takes 1960 cycles (1448
-  above the wire, of which the instrument's own some 360 - letter r's
-  interval, the handler's stamp pair, the idle window's), its launch 737,
-  ONE interrupt; a write-only one 1912, its completion handler draining
-  the receiver it let overflow. Per byte at 12 MHz the two channels
-  interleave at 35 cycles against the wire's 32 (a descriptor write-back
-  and fetch at each switch, dmac.md); the write-only one, on one
-  channel, at 32.0. At 3 MHz both are the wire's.
-- `bench_samc` letter e, THE HOST ABOVE THE WIRE: the engineless host on
-  the same pads, the best of 8, the instrument's figures of the same run
+- `bench_samc` letter e, THE HOST ABOVE THE WIRE: the host on SERCOM1
+  with MISO floating (the time is the wire's), the best of 8, the instrument's figures of the same run
   being ruler 65, stamp 151 (56 of it charged to a handler), interval
   82. The polled loop (`spi.poll` the write shape, `spi.poll.rx` the
   receive one, 256 frames): at 3 MHz the wire's, x = 1.01 both shapes
@@ -383,7 +321,7 @@ A client answering a stream (the one-ahead pump):
   thread starved until it ends (`launch` reads the whole transaction at
   12 MHz: start() got the core back when it was over). The pump is for
   rates where a character outlasts the handler; above them a program
-  wants the polled loop or the engines. THE FIXED COST OF A REQUEST
+  wants the polled loop. THE FIXED COST OF A REQUEST
   (`spi.req`: a polled request of 1, 3 and 16 bytes with a command byte,
   the D/C scripted on PB23 and the select on PA18 - two real pads, four
   real edges - at 3 MHz): 526, 559 and 665 cycles above the wire, the
@@ -402,30 +340,15 @@ A client answering a stream (the one-ahead pump):
   is the group pointer's load, the null test, the mask's load and one
   OUTSET or OUTCLR store - as calls they cost 49 cycles more on the
   3-byte request, measured), the loop's prologue, and the SERCOM's own
-  start and finish latencies at the boundaries. On the engined host the
-  same three
-  requests read 547, 580 and 1237: the first two take the pump (below
-  `dma_min_frames`), the third the engines - whose
-  spin on the DMAC's completion makes a POLLED request pay the engines'
-  fixed cost for no CPU saved, so for a polled request the engines buy
-  wall time alone, and only where the loop is slower than the wire (12
-  MHz: 43 against 35 cycles a character), above some sixty frames; the
-  threshold stays one.
-- `dma_min_frames` = 5, the arithmetic: 1448 cycles above the wire for
-  an engined request of 16 frames at 12 MHz (letter d), less the
-  instrument's 360, is 1090 the request's; a pumped frame costs 377
-  cycles of CPU (letter e, busy over 256 frames), less the stamp pair's
-  151, is 226; 1090 / 226 = 4.8. Five or more frames are cheaper on the
-  engines in CPU for an ISR-style request.
+  start and finish latencies at the boundaries.
 
 ## Not covered yet
 
-Driver gaps (not built): **DMA engine slots on `SpiClient`** - the peer
-drives its channels through the raw engines, and a slot on the task
-waits for a device-shaped user. **Nine-bit frames on the engines** - the
-host's Request is bytes and its frame eight bits; a nine-bit character
-would ride a halfword beat into DATA, which the engines offer
-(dmac.md), born with a nine-bit device.
+Driver gaps (not built): **a DMA data phase**, on the host or the
+client - declined: erratum 1.10.4 ([dmac.md](dmac.md)): the full-duplex
+pair hung beside any third active channel, and one channel beside two
+others. **Nine-bit frames on the host** - the host's Request is bytes
+and its frame eight bits; born with a nine-bit device.
 
 Driver gaps, continued: **the pin edges through the IOBUS alias** -
 `PinRef::set/clear` store through the APB bridge, inline (four stores a
@@ -456,18 +379,12 @@ Implemented but not bench-verified:
   travelling overflow flavour.
 - Erratum 1.17.3's dummy-first-character (needs a host that RAISES SS
   mid-transmission on purpose; the peer holds it low, correctly).
-- A DMA-engined request under the kernel arbiter on the wire (letter g
-  runs the arbiter over the byte pump, letter h the engines ISR-style
-  in loop-back; the composition of the two is exercised, the product
-  is not).
 - The timed-bus path on this wire: `SpiBus`'s per-bus timeout and
   `recover()` are host-tested (deterministic race legs included) and
   compile-proven here, but no SPI wedge has been staged on silicon -
-  the I2C letter l is the mechanism's silicon witness (a held wire is
-  stageable; a dead DMA channel on demand is not).
-- The 24 MHz loop-back rung's attribution (transmit vs receive
-  sampling at f_ref/2) - the wired ladder brackets it between 6 and
-  8 MHz for the full link, but the single-board question stands.
+  the I2C letter l is the mechanism's silicon witness (a held wire
+  stages it there; here a SERCOM interrupt lost under a running pump
+  would).
 
 Stated, not enforced: `SercomPadPin`'s pin-reaches-pad claim is the
 caller's (sercom.md's open device-table question, unchanged here).

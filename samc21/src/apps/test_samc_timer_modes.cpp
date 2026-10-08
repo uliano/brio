@@ -1,5 +1,5 @@
-// test_samc_timer_dma - DMA-driven operation of the TC and the TCC, and
-// the advanced modes of both chapters.
+// test_samc_timer_modes - the advanced modes of the TC and the TCC
+// chapters, measured on an instrument made of the chip itself.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -13,7 +13,7 @@
 //   TCC0 WO[0] --> CCL LUT0 (INSEL = TCC, combinational pass-through)
 //              --> its OUTPUT VALUE as an EVSYS generator
 //              --> an ASYNCHRONOUS channel
-//              --> TC2's event input, EVACT = PPW
+//              --> TC2's event input, EVACT = PPW (or PWP, PW, STAMP)
 //
 // A combinational LUT is a wire with no clock in it (37.5.3, measured in
 // docs/samc21/ccl.md), so the LUT's output is a COPY of the waveform's
@@ -22,40 +22,24 @@
 // what lets a capture channel see a signal this chip generated, with no
 // pad, no pull and no wire, and it is why the numbers below are exact
 // arithmetic on 48'000'000 rather than a measurement of an oscillator.
-//
-// THE CHAIN, once both DMA halves are on it, has no CPU in the sample
-// path at all:
-//
-//   TCC0 MC0/OVF  --(DMA trigger)--> ch1 loop      -> next duty into CCBUF0
-//   TC2  MC0      --(DMA trigger)--> ch2 pingpong  -> period into a buffer
-//   TC2  MC1      --(DMA trigger)--> ch3 pingpong  -> width  into a buffer
-//
-// so what comes back out of the two capture streams IS the duty table
-// the loop engine is playing, rotated by a CONSTANT - and the constant
-// is the proof: an offset that follows its own arithmetic across block
-// boundary after block boundary means NOT ONE SAMPLE was lost at a lap
-// boundary, at a block boundary, or in the buffered write.
+// The same LUT with INSEL = TC carries TC0's WO[0] instead (37.6.2.4),
+// and the EIC line on PA16, walked between the rails by its own internal
+// pull, is the stimulus for the fault and counter event inputs.
 //
 // What is exercised, letter by letter:
-//   a  the shapes: the DMA trigger codes both drivers publish, what a
-//      TCC compare register is WIDE, and what a half-width write does
-//   b  A TRIGGER IS AN EDGE: an unread CCx is a STANDING request, so a
-//      capture stream armed late never starts - and the two cures
-//   c  THE ROUND TRIP: the duty table played and captured, every sample
-//      exact, the phase constant over every boundary
-//   d  when the DMA outruns the update: the discarded write, and what
-//      the engine's accounting can and cannot see
-//   e  the HARDWARE answer to the same problem: WAVE.CICCEN circular
-//      buffers against the software loop
-//   f  TC advanced: MFRQ and MPWM on a pad, PRESCSYNC under retrigger,
-//      the stamp and PWP capture actions, ALOCK
-//   g  TCC advanced waveforms: NFRQ, MFRQ, and dual-slope CRITICAL
-//   h  TCC advanced capture and the fault system's second half: fault B,
-//      the filter, the blanking window and the qualifier - erratum
-//      1.21.5 read and judged
-//   i  the counter event actions (increment, count-while-active, stamp)
-//      and ERRATUM 1.21.7 staged: dithering against an external
-//      RETRIGGER, with the pad as the witness
+//   a  the TCC's HARDWARE circular buffers: WAVE.CICCEN and CIPEREN
+//      alternate two duties and two periods with no CPU at all, and two
+//      values is as deep as they go
+//   b  TC advanced waveforms: MFRQ and MPWM through the LUT and on the
+//      pad, the 16-bit TcPwm task, DRVCTRL.INVEN
+//   c  TC advanced capture and the locks: PWP, PW and STAMP against PPW,
+//      PRESCSYNC under retrigger, CTRLA.ALOCK
+//   d  TCC advanced waveforms: NFRQ, MFRQ, dual-slope CRITICAL, RAMP2A
+//   e  TCC fault B, FILTERVAL (and what it counts), the blanking window
+//      and the qualifier
+//   f  the TCC counter event actions (increment, count-while-active) and
+//      ERRATUM 1.21.7 staged: dithering against an external RETRIGGER,
+//      with the captured widths as the witness
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
@@ -64,7 +48,6 @@
 
 #include "samc21/ccl.hpp"
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/eic.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
@@ -127,12 +110,6 @@ using Wo0 = TcWo<Wo0Pin>;
 using Wo1Pin = Pin<'A', 23>;
 using Wo1 = TcWo<Wo1Pin>;           // TC0, WO1
 
-/// TCC0's own pads, for the letters that need to SEE a waveform.
-using TccWo0Pin = Pin<'A', 8>;
-using TccWo0 = TccWo<TccWo0Pin, PinFunction::e>;    // TCC0/WO0
-using TccWo1Pin = Pin<'A', 9>;
-using TccWo1 = TccWo<TccWo1Pin, PinFunction::e>;    // TCC0/WO1
-
 /// The EIC stimulus pad: PA16 is EXTINT0, and it walks between the
 /// rails under its own internal pull.
 using EicPad = Pin<'A', 16>;
@@ -148,26 +125,6 @@ constexpr uint32_t tc_hz = SysClock::hz;
 constexpr uint8_t ev_wave_channel = 0;
 constexpr uint8_t ev_out_channel = 1;
 
-// ---- the DMA channels ------------------------------------------------------
-constexpr uint8_t ch_duty = 1;
-constexpr uint8_t ch_period = 2;
-constexpr uint8_t ch_width = 3;
-
-/// The duty table is played into TCC0's CCBUF0, and CCBUF0 IS A 32-BIT
-/// REGISTER (36.7's register summary; TCC0 is a 24-bit counter but its
-/// compare registers are words). So the beat is a WORD and the element
-/// type is uint32_t, and that is the rule rather than a detail: the
-/// element type feeds BEATSIZE and the end-address arithmetic
-/// together, so a beat
-/// narrower than the register is not a saving, it is a half-written
-/// register. Letter a measures what the half-write actually does.
-using DutyLoop = DmaLoopEngine<ch_duty, uint32_t>;
-
-/// The two capture streams. TC2 is a COUNT16 timer, so CC0 and CC1 are
-/// 16-bit registers and a HALFWORD beat is the whole of one.
-using PeriodStream = DmaPingPongEngine<ch_period, uint16_t>;
-using WidthStream = DmaPingPongEngine<ch_width, uint16_t>;
-
 // ---------------------------------------------------------------------------
 // The waveform's numbers
 // ---------------------------------------------------------------------------
@@ -179,25 +136,6 @@ using WidthStream = DmaPingPongEngine<ch_width, uint16_t>;
 
 constexpr uint32_t wave_top = 4799;
 constexpr uint32_t wave_period = wave_top + 1u;              // 4800 ticks
-constexpr uint32_t wave_hz = tc_hz / wave_period;            // 10 kHz
-
-/// Eight duties, well apart, all inside the period.
-constexpr uint16_t table_len = 8;
-volatile uint32_t duty_table[table_len] = {600,  1140, 1680, 2220,
-                                           2760, 3300, 3840, 4380};
-
-/// The capture blocks. 24 = three whole table laps, so a block boundary
-/// never coincides with a lap boundary and the two cannot cover for each
-/// other.
-constexpr uint16_t block_len = 24;
-volatile uint16_t period_a[block_len];
-volatile uint16_t period_b[block_len];
-volatile uint16_t width_a[block_len];
-volatile uint16_t width_b[block_len];
-
-/// Which TCC trigger the duty loop is armed on - letter a measures both,
-/// the rest of the suite uses whichever it settles on.
-uint8_t duty_trigger = Wave::dma_trigger_overflow;
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -212,8 +150,6 @@ void wait_ms(uint32_t ms) {
 bool near(uint32_t v, uint32_t target, uint32_t band) {
     return v > target ? (v - target) <= band : (target - v) <= band;
 }
-
-uint32_t abs_diff(uint32_t a, uint32_t b) { return a > b ? a - b : b - a; }
 
 /// What fraction of `samples` reads found the pad high, in per mille.
 /// The pad sampler: it needs ~30 waveform periods to be steady, and at
@@ -233,9 +169,9 @@ uint32_t duty_permille(uint32_t samples = 40'000UL) {
 // The chain, piece by piece
 // ---------------------------------------------------------------------------
 
-/// TCC0 as a plain single-slope PWM generator at 10 kHz, CC0 set to the
-/// table's first entry. Left DISABLED so the caller decides when the
-/// waveform - and therefore every trigger in the chain - starts.
+/// TCC0 as a plain single-slope PWM generator at 10 kHz, CC0 set to
+/// `first_duty`. Left DISABLED so the caller decides when the waveform -
+/// and therefore every capture in the chain - starts.
 bool wave_up(uint32_t first_duty) {
     if (!Wave::init(gen)) {
         return false;
@@ -274,8 +210,7 @@ bool tap_up_tc() { return tap_up(LutInput::tc); }
 
 /// TC2 as a period-and-pulse-width meter fed from the tap, on an
 /// ASYNCHRONOUS channel (35.6.2.8 note 2). Both channels capture:
-/// 35.6.2.8.2 says both are needed to characterize an input, and here
-/// both are also DMA sources.
+/// 35.6.2.8.2 says both are needed to characterize an input.
 bool meter_up() {
     Evsys::bus_clock(true);
     if (!Meter::init(gen)) {
@@ -301,9 +236,9 @@ bool meter_up() {
     return Meter::enable(true);
 }
 
-/// Take both capture channels' STANDING REQUESTS down: reading CCx is
-/// what clears INTFLAG.MCx (35.6.2.8), and INTFLAG.MCx IS the DMA
-/// request. See letter b for why this matters more than it looks.
+/// Take both capture channels' standing flags down: reading CCx is what
+/// clears INTFLAG.MCx (35.6.2.8), and a capture arriving on top of an
+/// unread one is dropped and raises INTFLAG.ERR (35.6.2.8.2).
 void drain_meter() {
     (void)Meter::cc16(0);
     (void)Meter::cc16(1);
@@ -311,9 +246,6 @@ void drain_meter() {
 }
 
 void chain_down() {
-    DutyLoop::stop();
-    PeriodStream::stop();
-    WidthStream::stop();
     (void)Wave::enable(false);
     Evsys::disconnect(Meter::event_user);
     Meter::release();
@@ -322,512 +254,22 @@ void chain_down() {
     Wave::release();
 }
 
-/// Everything up, both capture streams armed and started, the duty loop
-/// armed and started, and the waveform NOT yet enabled - so the caller
-/// starts the whole chain with one store and nothing has a request
-/// standing when its channel is armed.
-bool chain_up(uint16_t period_block = block_len,
-              uint16_t width_block = block_len) {
-    if (!wave_up(duty_table[0]) || !tap_up() || !meter_up()) {
-        return false;
-    }
-
-    DutyLoop::arm(&Wave::regs().TCC_CCBUF[0], duty_trigger);
-    PeriodStream::arm(&Meter::regs().TC_CC[0], Meter::dma_trigger_match(0));
-    WidthStream::arm(&Meter::regs().TC_CC[1], Meter::dma_trigger_match(1));
-    DutyLoop::clear_faults();
-    PeriodStream::clear_faults();
-    WidthStream::clear_faults();
-    DmaChannel<ch_duty>::clear_counters();
-    DmaChannel<ch_period>::clear_counters();
-    DmaChannel<ch_width>::clear_counters();
-
-    drain_meter();
-    Wave::clear_flags(0xFFFFFFFFu);
-
-    if (!DutyLoop::start(duty_table, table_len)) {
-        return false;
-    }
-    if (!PeriodStream::start(period_a, period_b, period_block)) {
-        return false;
-    }
-    if (!WidthStream::start(width_a, width_b, width_block)) {
-        return false;
-    }
-    return Wave::enable(true);
-}
-
 // ---------------------------------------------------------------------------
-// a - the shapes, the codes, and how wide a compare register is
-// ---------------------------------------------------------------------------
-void ta_shapes() {
-    bench.verdict("the TC publishes its DMAC trigger ids out of the device "
-                  "header, one OVF and one per channel, consecutively",
-                  Meter::dma_trigger_overflow == TC2_DMAC_ID_OVF &&
-                      Meter::dma_trigger_match(0) == TC2_DMAC_ID_MC0 &&
-                      Meter::dma_trigger_match(1) ==
-                          static_cast<uint8_t>(TC2_DMAC_ID_MC0 + 1u));
-    bench.verdict("and so does the TCC - and its four channels' ids follow "
-                  "MC0 in order",
-                  Wave::dma_trigger_overflow == TCC0_DMAC_ID_OVF &&
-                      Wave::dma_trigger_match(0) == TCC0_DMAC_ID_MC0 &&
-                      Wave::dma_trigger_match(3) ==
-                          static_cast<uint8_t>(TCC0_DMAC_ID_MC0 + 3u));
-    print(serial, "  trigger ids: TC2 OVF ", Meter::dma_trigger_overflow,
-          " MC0 ", Meter::dma_trigger_match(0), " MC1 ",
-          Meter::dma_trigger_match(1), "; TCC0 OVF ",
-          Wave::dma_trigger_overflow, " MC0 ", Wave::dma_trigger_match(0),
-          crlf);
-
-    bench.verdict("the element type IS the beat: a uint16_t stream moves "
-                  "HALFWORDS and a uint32_t stream WORDS",
-                  PeriodStream::beat == DmaBeat::hword &&
-                      WidthStream::beat == DmaBeat::hword &&
-                      DutyLoop::beat == DmaBeat::word);
-    bench.verdict("and the three engines sit on three different channels",
-                  DutyLoop::channel == ch_duty &&
-                      PeriodStream::channel == ch_period &&
-                      WidthStream::channel == ch_width);
-
-    // ---- how wide IS a TCC compare register, and what does a half
-    // write do? The register summary calls CCBUF 32-bit on a 24-bit
-    // counter, and the question a DMA element type asks is whether the
-    // low half can be written on its own.
-    bench.verdict("TCC0 comes up", wave_up(duty_table[0]));
-    const uint32_t before = Wave::cc(0);
-    volatile uint16_t* half =
-        reinterpret_cast<volatile uint16_t*>(&Wave::regs().TCC_CC[0]);
-    (void)Wave::set_cc(0, 0x00ABCDEFu);
-    const uint32_t full = Wave::cc(0);
-    *half = 0x1234u;
-    (void)Wave::sync_wait(TCC_SYNCBUSY_CC0_Msk);
-    const uint32_t after_half = Wave::cc(0);
-    print(serial, "  CC0: word write ", full, " (", hex(full),
-          "), then a HALFWORD 0x1234 into its low half -> ", hex(after_half),
-          crlf);
-    bench.verdict("a 24-bit counter's compare register is a 32-BIT register "
-                  "and a full word lands in it",
-                  full == 0x00ABCDEFu);
-    bench.verdict("A HALFWORD WRITE LANDS IN THE LOW HALF ALONE and leaves "
-                  "the upper bits standing - which is why a duty stream's "
-                  "element type must be as wide as the register, not as wide "
-                  "as the value",
-                  after_half == 0x00AB1234u);
-    (void)Wave::set_cc(0, before);
-    Wave::release();
-
-    bench.verdict("a stream refuses a zero length and a null buffer",
-                  !PeriodStream::start(period_a, period_b, 0) &&
-                      !PeriodStream::start(nullptr, period_b, block_len) &&
-                      !PeriodStream::start(period_a, period_a, block_len));
-    bench.verdict("and a loop refuses a null table", !DutyLoop::start(nullptr, 4));
-    PeriodStream::stop();
-    DutyLoop::stop();
-}
-
-// ---------------------------------------------------------------------------
-// b - what a TC capture's DMA request actually IS
-// ---------------------------------------------------------------------------
-//
-// THE QUESTION THIS LETTER ANSWERS, and it is the one dmac.hpp's kick()
-// comment makes unavoidable: 25.8.8 says a peripheral asserts its DMA
-// request as a LEVEL and the controller latches a pending trigger when
-// that level RISES, which is why a SERCOM transmit engine armed while
-// DRE already stands moves nothing, and why an ADC stream drains
-// RESULT before arming. A TC capture channel's flag is INTFLAG.MCx and
-// 35.6.2.8
-// makes READING CCx the only thing that clears it, so an unread capture
-// looks exactly like a standing request.
-//
-// IT DOES NOT BEHAVE LIKE ONE, and the discrimination is the point of
-// the letter: the stream is armed with MCx up, and then - separately -
-// re-enabled with MCx up and the trigger source NOT re-selected, which
-// is the one path where nothing that could look like a rise happens.
-void tb_standing_request() {
-    bench.verdict("the chain comes up and the meter is capturing",
-                  wave_up(duty_table[0]) && tap_up() && meter_up() &&
-                      Wave::enable(true));
-
-    // Let a few periods land with nobody reading CC0 or CC1 at all.
-    wait_ms(3);
-    const uint8_t standing = Meter::flags();
-    const bool mc_standing =
-        (standing & (Meter::match_flag(0) | Meter::match_flag(1))) ==
-        (Meter::match_flag(0) | Meter::match_flag(1));
-    const bool err_standing = (standing & Meter::error_flag) != 0u;
-    print(serial, "  after 3 ms (30 periods) with nothing read, TC2 INTFLAG = ",
-          hex(standing), crlf);
-    bench.verdict("both capture flags are STANDING, and INTFLAG.ERR with "
-                  "them: a capture arriving on top of an unread one is "
-                  "DROPPED (35.6.2.8.2)",
-                  mc_standing && err_standing);
-
-    // ---- ARM WITH THE REQUEST ALREADY UP.
-    PeriodStream::arm(&Meter::regs().TC_CC[0], Meter::dma_trigger_match(0));
-    PeriodStream::clear_faults();
-    DmaChannel<ch_period>::clear_counters();
-    const bool started = PeriodStream::start(period_a, period_b, block_len);
-    wait_ms(5);   // fifty waveform periods, two whole blocks
-    const uint32_t armed_laps = PeriodStream::laps();
-    print(serial, "  armed with MC0 already standing: ", armed_laps,
-          " blocks of ", block_len, " in 50 periods", crlf);
-    bench.verdict("A TC CAPTURE STREAM ARMED WITH ITS REQUEST ALREADY "
-                  "STANDING STARTS ANYWAY - which is NOT how a SERCOM's DRE "
-                  "or an ADC's RESRDY behave, and is the first half of this "
-                  "letter's finding",
-                  started && armed_laps >= 1u);
-
-    // ---- NOW THE DISCRIMINATION. The engine is stalled by now (two
-    // buffers filled, neither released), so no block is in flight and
-    // captures have been piling up unread for milliseconds - MCx is
-    // certainly standing again. release() re-enables the channel WITHOUT
-    // touching CHCTRLB, so nothing that could be mistaken for a rise of
-    // the selected source happens at all. If the request were a level
-    // latched only on its rise, THIS is where the stream would die.
-    wait_ms(3);
-    const bool was_stalled = PeriodStream::stalled();
-    const uint8_t before_release = Meter::flags();
-    const uint32_t laps_before = PeriodStream::laps();
-    (void)PeriodStream::release();
-    (void)PeriodStream::release();
-    wait_ms(5);
-    const uint32_t laps_after = PeriodStream::laps();
-    print(serial, "  stalled=", was_stalled ? "1" : "0", " with INTFLAG ",
-          hex(before_release), "; re-enabled without re-selecting TRIGSRC: ",
-          laps_after - laps_before, " more blocks in 50 periods", crlf);
-    bench.verdict("AND IT RESUMES FROM A DEAD STOP with the flag standing "
-                  "and the trigger source untouched - so a TC capture's DMA "
-                  "request is not a level waiting to be re-risen: every "
-                  "capture asks again, whether the previous one was read or "
-                  "not",
-                  was_stalled &&
-                      (before_release & Meter::match_flag(0)) != 0u &&
-                      laps_after > laps_before);
-    PeriodStream::stop();
-
-    // ---- AND THE ACKNOWLEDGEMENT IS STILL THE READ. The CPU read is
-    // what clears MCx (35.6.2.8) and a DMA beat is a read like any
-    // other: a stream that keeps up must therefore leave INTFLAG.ERR
-    // alone, where letter b's own first paragraph raised it in 30
-    // periods flat.
-    // INTFLAG.ERR is ONE flag for BOTH capture channels, so this half
-    // needs both of them drained: a stream on CC0 alone leaves CC1's
-    // captures piling up and raises ERR for a reason that has nothing to
-    // do with the question. (Measured: with only the period stream
-    // running, INTFLAG settles at MC1 | ERR.)
-    drain_meter();
-    PeriodStream::arm(&Meter::regs().TC_CC[0], Meter::dma_trigger_match(0));
-    WidthStream::arm(&Meter::regs().TC_CC[1], Meter::dma_trigger_match(1));
-    (void)PeriodStream::start(period_a, period_b, block_len);
-    (void)WidthStream::start(width_a, width_b, block_len);
-    const uint32_t t0 = Ticker::millis();
-    uint32_t drained_blocks = 0;
-    while (drained_blocks < 8u && Ticker::millis() - t0 < 200u) {
-        if (PeriodStream::ready() != nullptr) {
-            (void)PeriodStream::release();
-            ++drained_blocks;
-        }
-        if (WidthStream::ready() != nullptr) {
-            (void)WidthStream::release();
-        }
-    }
-    const uint8_t after = Meter::flags();
-    print(serial, "  ", drained_blocks, " blocks drained by DMA alone on both "
-          "channels, TC2 INTFLAG now ", hex(after), crlf);
-    bench.verdict("A DMA BEAT IS THE ACKNOWLEDGEMENT a CPU read would have "
-                  "been: with both streams keeping up, INTFLAG.ERR never "
-                  "rises at all where 30 unread periods raised it in letter "
-                  "b's first paragraph",
-                  drained_blocks >= 8u && (after & Meter::error_flag) == 0u);
-
-    // What the stream is actually carrying, and the off-by-one that is
-    // the counter's own: TC2 is reset by the same edge that captures, so
-    // between two edges it reaches PERIOD - 1.
-    while (PeriodStream::ready() == nullptr) {
-    }
-    const volatile uint16_t* buf = PeriodStream::ready();
-    uint32_t lo = 0xFFFFu;
-    uint32_t hi = 0;
-    for (uint16_t i = 0; i < block_len; ++i) {
-        const uint16_t v = buf[i];
-        if (v < lo) {
-            lo = v;
-        }
-        if (v > hi) {
-            hi = v;
-        }
-    }
-    (void)PeriodStream::release();
-    print(serial, "  the streamed period: ", lo, "..", hi, " ticks, against ",
-          wave_period, " - 1 = ", wave_period - 1u, crlf);
-    bench.verdict("and every sample of it is the waveform's own period LESS "
-                  "ONE TICK - the capture edge both latches COUNT and "
-                  "clears it, so a full period reads as PERIOD - 1",
-                  lo == wave_period - 1u && hi == wave_period - 1u);
-
-    PeriodStream::stop();
-    WidthStream::stop();
-    chain_down();
-}
-
-// ---------------------------------------------------------------------------
-// c - THE ROUND TRIP
-// ---------------------------------------------------------------------------
-//
-// One DMA channel plays a duty table into TCC0's CCBUF0; two more drain
-// TC2's two capture registers. What comes back must be the table itself,
-// rotated by a constant - and the constant has to hold across every lap
-// boundary of the loop engine AND every block boundary of the two
-// streams, or a sample was lost.
-void tc_round_trip() {
-    // THE VERDICT ON chain_up() IS PRINTED AT THE END OF THE LETTER AND
-    // NOT HERE, and that is not tidiness: a verdict line is about four
-    // milliseconds of console at 115200 where a block of this stream is
-    // two and a half, so a print between arming the streams and draining
-    // them fills BOTH buffers and overruns the engine before the first
-    // sample is judged. Measured: with the print in place the letter
-    // passed alone and failed inside `z`, which is the worst way to find
-    // it. The drain loop starts on the next instruction.
-    const bool chain_ok = chain_up();
-
-    // THE FIRST BLOCK OF EACH STREAM IS DISCARDED, and for two reasons
-    // that are both start-up and neither of them a defect: TC2's very
-    // first capture is a PARTIAL period (the meter was already counting
-    // when the waveform's first edge arrived), and CC0 was written
-    // DIRECTLY with the table's first entry before the loop engine
-    // existed, so the first few periods play that value while the DMA's
-    // first beats work their way through CCBUF and the update.
-    constexpr uint16_t want_blocks = 8;
-    uint16_t width_blocks = 0;
-    uint16_t period_blocks = 0;
-    uint32_t width_index = 0;
-    uint32_t period_index = 0;
-    int32_t phase = -1;
-    uint32_t width_bad = 0;
-    uint32_t period_bad = 0;
-    uint32_t period_lo = 0xFFFFFFFFu;
-    uint32_t period_hi = 0;
-    uint32_t width_worst = 0;
-    bool dumped = false;
-    uint16_t first_block[12] = {0};
-
-    const uint32_t t0 = Ticker::millis();
-    while ((width_blocks < want_blocks + 1u ||
-            period_blocks < want_blocks + 1u) &&
-           Ticker::millis() - t0 < 500u) {
-        if (const volatile uint16_t* w = WidthStream::ready()) {
-            if (width_blocks > 0u) {
-                if (!dumped) {
-                    // COPIED, NOT PRINTED. A print is four milliseconds of
-                    // console at 115200 and a block of this stream is two
-                    // and a half, so a dump inside the drain loop overruns
-                    // the engine it is dumping - which is exactly what it
-                    // did, and only when the letter ran inside `z` where
-                    // the timing happened to differ. The block is stashed
-                    // here and printed after the loop.
-                    for (uint16_t i = 0; i < 12u; ++i) {
-                        first_block[i] = w[i];
-                    }
-                    dumped = true;
-                }
-                for (uint16_t i = 0; i < block_len; ++i) {
-                    const uint16_t v = w[i];
-                    if (width_index == 0) {
-                        // Which table entry is this stream sitting on?
-                        for (uint16_t k = 0; k < table_len; ++k) {
-                            if (near(v, duty_table[k] - 1u, 8)) {
-                                phase = static_cast<int32_t>(k);
-                                break;
-                            }
-                        }
-                    }
-                    if (phase >= 0) {
-                        const uint32_t k = (width_index +
-                                            static_cast<uint32_t>(phase)) %
-                                           table_len;
-                        const uint32_t d = abs_diff(v, duty_table[k] - 1u);
-                        if (d > width_worst) {
-                            width_worst = d;
-                        }
-                        if (d > 2u) {
-                            ++width_bad;
-                        }
-                    } else {
-                        ++width_bad;
-                    }
-                    ++width_index;
-                }
-            }
-            (void)WidthStream::release();
-            ++width_blocks;
-        }
-        if (const volatile uint16_t* p = PeriodStream::ready()) {
-            if (period_blocks > 0u) {
-                for (uint16_t i = 0; i < block_len; ++i) {
-                    const uint16_t v = p[i];
-                    if (v < period_lo) {
-                        period_lo = v;
-                    }
-                    if (v > period_hi) {
-                        period_hi = v;
-                    }
-                    if (v != wave_period - 1u) {
-                        ++period_bad;
-                    }
-                    ++period_index;
-                }
-            }
-            (void)PeriodStream::release();
-            ++period_blocks;
-        }
-    }
-
-    const uint32_t laps = DutyLoop::laps();
-    const uint32_t w_over = WidthStream::overruns();
-    const uint32_t p_over = PeriodStream::overruns();
-    const uint32_t viol = DmaChannel<ch_duty>::violations() +
-                          DmaChannel<ch_period>::violations() +
-                          DmaChannel<ch_width>::violations();
-
-    print(serial, "  the first judged block, raw:");
-    for (uint16_t i = 0; i < 12u; ++i) {
-        print(serial, " ", first_block[i]);
-    }
-    print(serial, " ...", crlf);
-    print(serial, "  ", width_index, " widths and ", period_index,
-          " periods judged in ", Ticker::millis() - t0, " ms; duty loop laps ",
-          laps, " (", laps * table_len, " beats into CCBUF0)", crlf);
-    print(serial, "  phase: the stream sits on table entry ", phase,
-          "; worst width error ", width_worst, " tick(s), bad samples ",
-          width_bad, crlf);
-    print(serial, "  period ", period_lo, "..", period_hi, " against ",
-          wave_period - 1u, ", bad ", period_bad, "; overruns w=", w_over,
-          " p=", p_over, "; 1.10.4 refusals ", viol, crlf);
-
-    bench.verdict("the whole chain comes up with nothing standing anywhere",
-                  chain_ok);
-    bench.verdict("eight judged blocks of each stream arrived",
-                  width_blocks > want_blocks && period_blocks > want_blocks);
-    bench.verdict("THE CAPTURED WIDTHS ARE THE PLAYED TABLE, sample for "
-                  "sample and block after block, each one tick short for the "
-                  "counter's own reason - which is the proof that not one "
-                  "beat was lost at a lap boundary, at a block boundary, or "
-                  "in the buffered write",
-                  phase >= 0 && width_bad == 0u &&
-                      width_index >= 8u * block_len);
-    bench.verdict("and the period never moved by a single tick: a duty "
-                  "stream sweeping seven eighths of the range leaves TOP "
-                  "alone",
-                  period_bad == 0u && period_index >= 8u * block_len);
-    bench.verdict("no stream overran and no write-back reading was refused "
-                  "(erratum 1.10.4)",
-                  w_over == 0u && p_over == 0u && viol == 0u);
-    bench.verdict("the loop engine went round its table many times, so the "
-                  "duty really was re-armed from the TCMPL interrupt and the "
-                  "table really did repeat",
-                  laps >= 8u);
-    bench.verdict("ONE DMA BEAT PER WAVEFORM PERIOD: the beats the loop moved "
-                  "and the periods the meter captured agree to within a "
-                  "block, which is what makes a buffered write land in a "
-                  "window the update has just emptied",
-                  laps * table_len >= period_index &&
-                      laps * table_len <= period_index + 3u * block_len);
-
-    chain_down();
-}
-
-// ---------------------------------------------------------------------------
-// d - when the DMA outruns the update
-// ---------------------------------------------------------------------------
-//
-// Fact 8 of tcc.hpp: SYNCBUSY.CCx stands from a BUFFERED write until the
-// update consumes it, and a second write inside that window is DISCARDED
-// by the silicon. One DMA beat per update period is exactly one write
-// per window, which is why letter c works at all. This letter asks what
-// the OTHER side of that looks like - and what the DMAC's own accounting
-// can see of it, which is the honest half of the answer.
-void td_outrun() {
-    bench.verdict("the chain comes up", chain_up());
-    wait_ms(10);
-
-    // A clean reference first: how far does the loop get in 20 ms with
-    // nothing but the peripheral's own triggers?
-    const uint32_t laps0 = DutyLoop::laps();
-    wait_ms(20);
-    const uint32_t clean_laps = DutyLoop::laps() - laps0;
-
-    // Now flood the channel with software triggers. A kick is one
-    // pending bit and SWTRIGCTRL raises it only if clear, so a kick
-    // racing a real trigger is LOST rather than doubled - which means
-    // this cannot move MORE than one extra beat per kick, and usually
-    // moves fewer.
-    const uint32_t laps1 = DutyLoop::laps();
-    const uint32_t t0 = Ticker::millis();
-    uint32_t kicks = 0;
-    while (Ticker::millis() - t0 < 20u) {
-        DutyLoop::kick();
-        ++kicks;
-    }
-    const uint32_t flooded_laps = DutyLoop::laps() - laps1;
-    const uint32_t discarded = Wave::cc_buffer_valid(0) ? 1u : 0u;
-
-    print(serial, "  20 ms paced by the TCC alone: ", clean_laps,
-          " laps; the same 20 ms with ", kicks, " software triggers on top: ",
-          flooded_laps, " laps", crlf);
-    bench.verdict("A FLOODED CHANNEL MOVES ITS BEATS AT FULL SPEED - the "
-                  "DMAC has no idea the peripheral cannot take them, so the "
-                  "table is played far faster than the waveform updates",
-                  flooded_laps > 4u * clean_laps);
-    bench.verdict("and the DMAC's own accounting shows nothing wrong at all: "
-                  "every beat it moved, it moved - the loss is the "
-                  "PERIPHERAL'S, in a store the silicon discarded",
-                  DutyLoop::faults() == 0u &&
-                      DmaChannel<ch_duty>::violations() == 0u);
-    (void)discarded;
-
-    // What the waveform actually did while that was happening: the duty
-    // must still be one of the table's, because a discarded write leaves
-    // the previous value standing rather than corrupting it.
-    wait_ms(5);
-    drain_meter();
-    wait_ms(1);
-    const uint16_t w = Meter::cc16(1);
-    bool in_table = false;
-    for (uint16_t k = 0; k < table_len; ++k) {
-        if (near(w, duty_table[k], 60)) {
-            in_table = true;
-        }
-    }
-    print(serial, "  the waveform's width right after the flood: ", w,
-          " ticks - ", in_table ? "still a table entry" : "NOT a table entry",
-          crlf);
-    bench.verdict("A DISCARDED BUFFERED WRITE LOSES A VALUE, IT DOES NOT "
-                  "CORRUPT ONE: the waveform is still playing an entry of "
-                  "the table, just not the one the beat count says",
-                  in_table);
-
-    chain_down();
-}
-
-// ---------------------------------------------------------------------------
-// e - the HARDWARE answer: WAVE.CICCEN / WAVE.CIPEREN
+// a - the HARDWARE circular buffers: WAVE.CICCEN / WAVE.CIPEREN
 // ---------------------------------------------------------------------------
 //
 // 36.6.3.2: with WAVE.CICCENx set, at every update CCx and CCBUFx are
 // EXCHANGED rather than CCBUFx being copied one way - so a channel with
 // two values loaded ping-pongs between them for ever, with no CPU and no
 // DMA at all. WAVE is write-synchronized but NOT enable-protected
-// (fact 3), so the bit can be set under a running timer.
-//
-// Against the software loop of letter c, this is the same job done two
-// ways, and the letter records what each costs and where each stops.
-void te_circular() {
-    bench.verdict("TCC0 and the meter come up",
-                  wave_up(duty_table[0]) && tap_up() && meter_up());
-
-    // ---- the hardware circular buffer, two values.
+// (36.6.2.1), so the bit can be set under a running timer.
+void ta_circular() {
     constexpr uint32_t lo_duty = 1200;
     constexpr uint32_t hi_duty = 3600;
+    bench.verdict("TCC0 and the meter come up",
+                  wave_up(lo_duty) && tap_up() && meter_up());
+
+    // ---- the hardware circular buffer, two values.
     bench.verdict("CC0 and CCBUF0 are loaded with the two values, and "
                   "WAVE.CICCEN0 is set UNDER A RUNNING TIMER - WAVE is "
                   "write-synchronized but not enable-protected (36.6.2.1)",
@@ -872,7 +314,8 @@ void te_circular() {
     // place to put a third value.
     bench.verdict("and it is exactly TWO values deep, because a register "
                   "and its buffer are two places and the chapter offers no "
-                  "third - which is the whole difference from a DMA table",
+                  "third - so a table of three or more needs a write at every "
+                  "update",
                   Wave::cc_count == 4u);
 
     // ---- CIPEREN, the same for the period.
@@ -911,52 +354,14 @@ void te_circular() {
                   "hardware answer covers frequency as well as duty",
                   long_seen > 4u && short_seen > 4u && pother == 0u);
 
-    // ---- and now the same two values through the DMA loop, so the two
-    // are measured on one instrument.
-    (void)Wave::wave(TccWaveConfig{.waveform = TccWaveform::normal_pwm});
-    (void)Wave::set_period(wave_top);
-    (void)Wave::clear_buffer_valid(TCC_STATUS_CCBUFV0_Msk |
-                                   TCC_STATUS_PERBUFV_Msk);
-    static volatile uint32_t pair[2] = {lo_duty, hi_duty};
-    DutyLoop::arm(&Wave::regs().TCC_CCBUF[0], duty_trigger);
-    DutyLoop::clear_faults();
-    bench.verdict("a two-entry DMA table is armed on the same register",
-                  DutyLoop::start(pair, 2));
-    wait_ms(20);
-    const uint32_t dma_laps = DutyLoop::laps();
-    uint8_t dlo = 0;
-    uint8_t dhi = 0;
-    uint8_t dother = 0;
-    for (uint8_t i = 0; i < 16u; ++i) {
-        drain_meter();
-        while ((Meter::flags() & Meter::match_flag(1)) == 0u) {
-        }
-        const uint16_t v = Meter::cc16(1);
-        if (near(v, lo_duty, 40)) {
-            ++dlo;
-        } else if (near(v, hi_duty, 40)) {
-            ++dhi;
-        } else {
-            ++dother;
-        }
-    }
-    print(serial, "  DMA loop, same two values: ", dlo, " / ", dhi, " / ",
-          dother, " elsewhere, over ", dma_laps,
-          " laps - i.e. one interrupt every TWO waveform periods", crlf);
-    bench.verdict("THE SOFTWARE LOOP DOES THE SAME JOB AND COSTS AN "
-                  "INTERRUPT PER LAP, where the hardware costs nothing - so "
-                  "the circular buffer wins at two values and loses at three",
-                  dlo > 4u && dhi > 4u && dother == 0u && dma_laps > 20u);
-
     chain_down();
 }
 
 // ---------------------------------------------------------------------------
-// f - TC advanced: the two MATCH waveform modes, the 16-bit task, INVEN
+// b - TC advanced: the two MATCH waveform modes, the 16-bit task, INVEN
 // ---------------------------------------------------------------------------
 //
-// tc.md listed all three as implemented and never run on silicon. The
-// instrument is letter c's, with one bit changed: LUT0's INSEL is "TC"
+// The instrument is the suite's own, with one bit changed: LUT0's INSEL is "TC"
 // rather than "TCC", which on LUT0 means TC0's WO[0] - so a TC waveform
 // reaches the same capture meter over the same asynchronous channel, and
 // TC0's own pad PA22 is there to be read as well.
@@ -1017,7 +422,7 @@ bool meter_read(uint16_t& period, uint16_t& width, uint8_t fresh = 4) {
     return true;
 }
 
-void tf_tc_waveforms() {
+void tb_tc_waveforms() {
     bench.verdict("the meter comes up on LUT0's TC input, so TC0's WO[0] "
                   "reaches a capture channel with no pad in the path",
                   tap_up_tc() && meter_up());
@@ -1091,7 +496,7 @@ void tf_tc_waveforms() {
     Wo1Pin::configure({});
     Timer0::release();
 
-    // ---- the 16-bit TcPwm task, which tc.md listed as never run.
+    // ---- the 16-bit TcPwm task.
     // NPWM in COUNT16 fixes TOP at MAX, so the period is 65536 ticks -
     // and 65535 is exactly what a 16-bit capture register can hold.
     bench.verdict("the 16-bit TcPwm task brings TC0 up as an NPWM channel",
@@ -1152,9 +557,9 @@ void tf_tc_waveforms() {
 }
 
 // ---------------------------------------------------------------------------
-// g - TC advanced: the other capture actions, PRESCSYNC, ALOCK
+// c - TC advanced: the other capture actions, PRESCSYNC, ALOCK
 // ---------------------------------------------------------------------------
-void tg_tc_capture_and_locks() {
+void tc_tc_capture_and_locks() {
     // ---- PWP: the same capture with CC0 and CC1 SWAPPED. Nothing but
     // the EVACT changes, so this is the cleanest possible statement of
     // what 35.6.2.8.2's two orders differ in.
@@ -1348,7 +753,7 @@ void tg_tc_capture_and_locks() {
 
     // ---- CTRLA.ALOCK. The witness is THE PAD, because a register read
     // is not one: on the TCC a read of a compare register with a
-    // buffered write pending returns the BUFFERED value, and letter g
+    // buffered write pending returns the BUFFERED value, and this letter
     // asks whether the TC has the same trap.
     Led::configure({});
     using LedWave = TcWo<Led>;                // TC3, WO1
@@ -1401,11 +806,10 @@ void tg_tc_capture_and_locks() {
 }
 
 // ---------------------------------------------------------------------------
-// h - TCC advanced waveforms: NFRQ, MFRQ, dual-slope CRITICAL, RAMP2A
+// d - TCC advanced waveforms: NFRQ, MFRQ, dual-slope CRITICAL, RAMP2A
 // ---------------------------------------------------------------------------
 //
-// tcc.md listed all four as implemented and never run. The chain is
-// letter c's, back on LUT0's TCC input, and the measurements are
+// The instrument is back on LUT0's TCC input, and the measurements are
 // DIFFERENTIAL wherever a mode's arithmetic is what is in question: two
 // settings that differ by a known amount must produce two waveforms that
 // differ by the amount the chapter's formula predicts, which is a claim
@@ -1426,7 +830,7 @@ bool wave_mode_up(TccWaveform w, uint32_t per, uint32_t cc0, uint32_t cc2 = 0,
            Wave::enable(true);
 }
 
-void th_tcc_waveforms() {
+void td_tcc_waveforms() {
     bench.verdict("the meter comes up on LUT0's TCC input",
                   tap_up() && meter_up());
     uint16_t period = 0;
@@ -1559,7 +963,7 @@ void th_tcc_waveforms() {
 }
 
 // ---------------------------------------------------------------------------
-// i - the fault system's second half: fault B, filter, blanking, qualifier
+// e - the fault system's second half: fault B, filter, blanking, qualifier
 // ---------------------------------------------------------------------------
 //
 // Recoverable fault A is driven from a pin level through the event
@@ -1597,7 +1001,7 @@ void fault_pin_down() {
 constexpr uint32_t slow_per = 4687;          // ~100 ms at /1024
 
 /// A generic clock of 46875 Hz - OSC48M divided by 2^(9+1) - so that one
-/// GCLK_TCC CYCLE is 21.3 us. Letter i needs it to ask whether
+/// GCLK_TCC CYCLE is 21.3 us. Letter e needs it to ask whether
 /// FCTRLn.FILTERVAL counts generic clocks or PRESCALED ones, which is a
 /// question only two different prescalers on ONE generic clock can
 /// answer.
@@ -1689,7 +1093,7 @@ void pulse_pad(uint32_t us) {
 
 /// THE SLOW GENERATOR'S RATE IS MEASURED TOO, by counting it against the
 /// SysTick wall clock - because a divisor believed is a divisor that can
-/// be wrong, and every number letters i and j print rests on it.
+/// be wrong, and every number letters e and f print rests on it.
 uint32_t slow_gclk_measured = 0;
 uint32_t measure_slow_gclk(uint8_t generator) {
     if (!Counter::init(generator) ||
@@ -1717,7 +1121,7 @@ bool fault_b_seen(uint32_t settle_ms = 5) {
     return seen;
 }
 
-void ti_fault_b() {
+void te_fault_b() {
     bench.verdict("the 750 kHz stopwatch comes up and the pulse generator is "
                   "calibrated against it", watch_up() &&
                       (calibrate_pulse(), turns_per_us > 2u));
@@ -1748,9 +1152,8 @@ void ti_fault_b() {
     Wave::release();
 
     // ---- FILTERVAL, and the question is not whether it works but WHAT
-    // IT COUNTS. tcc.hpp says "prescaled clocks", following 36.8.5's
-    // wording - but this chapter has form: the dead times measure as
-    // GCLK_TCC cycles and are UNMOVED by a fourfold prescaler change,
+    // IT COUNTS. 36.8.5's wording is "prescaled clocks" - but this
+    // chapter has form: the dead times measure as GCLK_TCC cycles and are UNMOVED by a fourfold prescaler change,
     // where 36.8.7 reads the same way. Asserting a 320 us minimum from
     // FILTERVAL 15 at /1024 measures no rejection at 30 us, which is
     // the answer to a different question.
@@ -1841,7 +1244,7 @@ void ti_fault_b() {
                   "sixty-fourfold prescaler change on the same generic clock "
                   "leaves the threshold where it was, which is the dead-time "
                   "unit's story again and NOT what 36.8.5's 'prescaled "
-                  "clocks' or this driver's comment said",
+                  "clocks' says",
                   thr_f64 == thr_f1);
 
     // ---- BLANKING. The input is held HIGH for the whole measurement,
@@ -1922,15 +1325,14 @@ void ti_fault_b() {
 }
 
 // ---------------------------------------------------------------------------
-// j - the counter event actions, and ERRATUM 1.21.7 staged
+// f - the counter event actions, and ERRATUM 1.21.7 staged
 // ---------------------------------------------------------------------------
 //
-// tcc.md listed `increment`, `count_while_active` and `stamp` as never
-// run, and listed erratum 1.21.7 - dithering plus external RETRIGGER
-// events distorting pulses - as "a caller obligation this suite cannot
-// stage". It can: the retrigger comes from an EIC line over an
-// asynchronous channel, dithering is already built, and the pad's own
-// waveform, captured, is the witness.
+// 36.8.10's `increment` and `count_while_active` take the EIC line over
+// an asynchronous channel. Erratum 1.21.7 - dithering plus external
+// RETRIGGER events distorting pulses - is staged with TC0's overflow as
+// a periodic hardware retrigger, and the dithered waveform, captured
+// through the LUT, is the witness.
 
 /// TCC0 with the EIC line on its TCE0 counter event input.
 bool counter_event_up(TccEvent0Action action, uint8_t generator,
@@ -1962,7 +1364,7 @@ bool counter_event_up(TccEvent0Action action, uint8_t generator,
     return Wave::enable(true);
 }
 
-void tj_event_actions() {
+void tf_event_actions() {
     const bool slow_ok = SlowGclk::configure(
         GclkConfig{.source = GclkSource::osc48m, .div = 9, .div_pow2 = true});
     slow_gclk_measured = measure_slow_gclk(slow_gen);
@@ -2212,8 +1614,8 @@ void tj_event_actions() {
 // The console
 // ---------------------------------------------------------------------------
 void banner() {
-    print(serial, crlf, "test_samc_timer_dma - TC/TCC under DMA, and the "
-          "advanced modes", crlf);
+    print(serial, crlf, "test_samc_timer_modes - the advanced modes of the "
+          "TC and the TCC", crlf);
     bench.menu();
 }
 
@@ -2222,52 +1624,28 @@ void banner() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        if (!irq->complete()) {
-            continue;
-        }
-        switch (irq->channel) {
-        case ch_duty: (void)DutyLoop::complete(); break;
-        case ch_period: (void)PeriodStream::complete(); break;
-        case ch_width: (void)WidthStream::complete(); break;
-        default: break;
-        }
-    }
-}
-
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
-
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
-    bench.letter('a', "the shapes: trigger codes, beats, register width",
-                 ta_shapes);
-    bench.letter('b', "what a TC capture's DMA request actually is",
-                 tb_standing_request);
-    bench.letter('c', "THE ROUND TRIP: a duty table played and captured",
-                 tc_round_trip);
-    bench.letter('d', "when the DMA outruns the update", td_outrun);
-    bench.letter('e', "the hardware answer: circular CC and PER", te_circular);
-    bench.letter('f', "TC advanced: MFRQ, MPWM, the 16-bit task, INVEN",
-                 tf_tc_waveforms);
-    bench.letter('g', "TC advanced: PWP/PW/STAMP, PRESCSYNC, ALOCK",
-                 tg_tc_capture_and_locks);
-    bench.letter('h', "TCC advanced waveforms: NFRQ, MFRQ, DSCRITICAL, RAMP2A",
-                 th_tcc_waveforms);
-    bench.letter('i', "TCC fault B, the filter, the blanking and the qualifier",
-                 ti_fault_b);
-    bench.letter('j', "TCC counter event actions, and erratum 1.21.7 staged",
-                 tj_event_actions);
+    bench.letter('a', "TCC hardware circular buffers: CICCEN and CIPEREN",
+                 ta_circular);
+    bench.letter('b', "TC advanced: MFRQ, MPWM, the 16-bit task, INVEN",
+                 tb_tc_waveforms);
+    bench.letter('c', "TC advanced: PWP/PW/STAMP, PRESCSYNC, ALOCK",
+                 tc_tc_capture_and_locks);
+    bench.letter('d', "TCC advanced waveforms: NFRQ, MFRQ, DSCRITICAL, RAMP2A",
+                 td_tcc_waveforms);
+    bench.letter('e', "TCC fault B, the filter, the blanking and the qualifier",
+                 te_fault_b);
+    bench.letter('f', "TCC counter event actions, and erratum 1.21.7 staged",
+                 tf_event_actions);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

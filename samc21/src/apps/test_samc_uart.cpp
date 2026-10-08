@@ -1,18 +1,20 @@
 // test_samc_uart - the SERCOM USART transport (DS60001479M ch. 30/31),
-// all three shapes of it, byte for byte.
+// both shapes of it, byte for byte.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over a
 // serial console; z runs the self-contained ones and prints the ALL: line
 // bin/brio judges.
 //
-// WHAT THIS SUITE IS FOR. samc21/sercom.hpp's Uart can be built in three
-// shapes - interrupt on both directions, or DMA on ONE of them - and what
-// is checked here is the BYTES through each of them, on both sides at
-// once, with a pattern in which a lost, duplicated or reordered byte is
-// IDENTIFIED and not merely counted. The fourth shape, DMA on both, is a
-// compile error (erratum 1.10.4, uart_engines_not_concurrent()): letter
-// d states the refusal as a value, and letter h carries the duplex link
-// the refusal leaves at a rate where the choice matters.
+// WHAT THIS SUITE IS FOR. samc21/sercom.hpp's Uart is built in two shapes
+// - interrupt on both directions, or the DMA transmit engine (samc21/
+// dmac.hpp's DmaTxEngine) beside the interrupt receiver - and what is
+// checked here is the BYTES through each of them, on both sides at once,
+// with a pattern in which a lost, duplicated or reordered byte is
+// IDENTIFIED and not merely counted. The engine is one channel, channel 0,
+// claimed by one owner at a time (erratum 1.10.4, DS80000740S, leaves the
+// DMAC one lane): letter d exercises the claim as a value, letter x the
+// refusal of a second owner as the panic it is, and letter h carries the
+// duplex link at a rate where the shape matters.
 //
 // THE PATTERN is a 32-bit xorshift, low byte per step, seeded the same at
 // both ends (brio stress runs the identical arithmetic). The
@@ -28,9 +30,9 @@
 // receiver on its own transmitter's pad (PAD[0], PA16 under function C),
 // 31.6.3.8's loop-back "through the pad" - nothing is wired to PA16. z
 // runs what the board decides alone: the baud arithmetic, the frame
-// encoding, the ring contract, the engines' register facts, and on the
-// loop the wire's idle, the receive engine's edge and the level loop at
-// the generator's top rate.
+// encoding, the ring contract, the engine's facts and its claim, and on
+// the loop the wire's idle, the interrupt receiver's edge and its skip
+// past a loss, and the level loop at the generator's top rate.
 //
 // THE CHOREOGRAPHY every host letter follows, so the console survives:
 //
@@ -47,43 +49,49 @@
 //
 // What is exercised, letter by letter - a..d, q, r and t need nothing
 // outside the board and are what z runs; e..p and s stream traffic over the
-// console and are driven by brio stress:
+// console and are driven by brio stress; x stops the board and runs by its
+// name alone:
 //   a  the baud generator's arithmetic
 //   b  every frame format, written and read back
 //   c  the transmit ring's contract under pressure
-//   d  the engines' compile-time and register facts
+//   d  the transmit engine's facts and its claim: one owner at a time
 //   e  echo through the plain interrupt transport
 //   f  echo with the DMA transmitter
-//   g  echo with the DMA receiver
 //   h  echo at 1 and 2 Mbaud: the DMA transmitter beside the interrupt
-//      receiver, the duplex shape erratum 1.10.4 leaves
+//      receiver
 //   i  receive-only, sustained
-//   j  transmit-only, sustained
+//   j  transmit-only, sustained, through the DMA transmitter
 //   k  the same traffic at 115200, 1 M and 3 Mbaud
 //   l  the frame-format matrix, host-driven
 //   m  a MISMATCHED frame and the recovery from it
-//   n  ring pressure: eager against lazy harvests
-//   p  bursty traffic with idle gaps
+//   n  ring pressure on the interrupt receiver: a consumer that drains at
+//      once against one held past the ring - every gap in what the lazy
+//      one is handed carried by a move of the skip epoch, none silent
+//   p  bursty traffic with idle gaps, the DMA transmitter echoing
 //   q  tx_idle() on the loop: never before the last stop bit, within a bit
 //      after it, for the plain transport and the transmit engine
-//   r  the receive engine on the loop: the edge from the vector at each
-//      half of the ring, the block boundary under a stream at the wire's
-//      rate, the tail by the owner's ask; the owner asking at every turn;
-//      a consumer held back past the ring - the stall, the loss counted in
-//      the skip epoch before the bytes after it are visible, the re-arm by
-//      the consumer's release
-//   s  errors injected under the receive engine and the interrupt
-//      receiver (host): no byte taken to clear an error
+//   r  the interrupt receiver on the loop: one edge from the vector a
+//      burst; a consumer held back past the ring - the loss counted, the
+//      skip epoch moved at the first look after it and nothing the ring
+//      held across it handed out; the consumer's release recovering
+//   s  errors injected under the interrupt receiver (host): each hit
+//      character dropped, counted and skipped past
 //   t  the interrupt receiver at the generator's top rate on the loop:
 //      every level an entry
+//   x  THE ONE-USER RULE AS A PANIC: a second engined transport's init()
+//      while the loop's holds the claim - the board stops, and the boot
+//      banner after the next reset prints the breadcrumb (code 2,
+//      assert_failed; context 0xD6, the claim of SERCOM5 refused)
 //
 // build: boards = c21j
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <optional>
 #include <span>
 
+#include "kernel/panic.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/dmac.hpp"
 #include "samc21/nvic.hpp"
@@ -107,19 +115,15 @@ constexpr UartPads console_pads{
     .rx_pin = {'B', 31, PinFunction::d},
 };
 
-// 512 each way: the receive engine's blocks are its halves, 256 bytes,
-// and three instantiations - with the loop's three below - fit
-// comfortably in 32 KB of SRAM.
+// 512 each way: a ring of 512 holds 511 bytes, 44 ms of a 115200 stream -
+// the span letter n's lazy consumer is held past - and the four
+// instantiations, two here and two on the loop below, fit comfortably in
+// 32 KB of SRAM.
 constexpr uint32_t rx_ring = 512;
 constexpr uint32_t tx_ring = 512;
 
-constexpr uint8_t ch_tx = 6;
-constexpr uint8_t ch_rx = 7;
-
 using UPlain = Uart<5, console_pads, rx_ring, tx_ring>;
-using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<ch_tx>, NoDmaEngine>;
-using URxDma = Uart<5, console_pads, rx_ring, tx_ring, NoDmaEngine, DmaRxEngine<ch_rx>>;
-// The fourth shape, both engines, does not compile: erratum 1.10.4.
+using UTxDma = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine>;
 
 constexpr UPlain plain;
 
@@ -130,87 +134,51 @@ TestBench<UPlain, 20> bench;
 using brio::crlf;
 using brio::print;
 
+/// The engine's owner id each engined transport claims with: its SERCOM
+/// number plus one (samc21/dmac.hpp, DmaTxEngine::claim()).
+constexpr uint8_t console_owner = static_cast<uint8_t>(Sc5::index + 1u);
+
 // =============================================================================
-// The three transports behind one set of verbs
+// The two transports behind one set of verbs
 // =============================================================================
 //
-// THE THREE INSTANTIATIONS ARE NEVER LIVE AT ONCE. Each has its own rings
+// THE TWO INSTANTIATIONS ARE NEVER LIVE AT ONCE. Each has its own rings
 // and counters, and init() resets and reconfigures SERCOM5 from scratch,
-// so switching is a clean handover. Two of them name the same DMA
-// channel, and an engine is a set of STATIC members - one object per
-// channel, shared by every Uart that names it - so the interrupt handler
-// must tell exactly ONE of them about a completion. Telling two calls
-// DmaTxEngine::complete() twice: the second call clears `busy_` while the
-// block the first one just started is still in flight, and the next
-// pump_tx() reprograms a RUNNING channel. That cost this suite an hour
-// and three letters' worth of false evidence, which is why `live` gates
-// the dispatch in DMAC_Handler().
+// so switching is a clean handover. The engine is ONE set of static
+// members shared by every Uart that names it, and each Uart's dma_isr()
+// consumes its OWN ring by a completed block's length - so DMAC_Handler
+// tells exactly one transport about a completion: the one that holds the
+// claim (DmaTxEngine::owner()).
 
-// The numbers are brio stress's protocol (its mode 3, both engines, is
-// a shape this transport refuses).
-enum class Mode : uint8_t { plain = 0, txdma = 1, rxdma = 2 };
+// The numbers are brio stress's protocol.
+enum class Mode : uint8_t { plain = 0, txdma = 1 };
 Mode live = Mode::plain;
-/// The receive edges the engine's vector returned (dma_isr()) in a leg.
-volatile uint32_t rx_vector_edges = 0;
 
-const char* mode_name(Mode m) {
-    switch (m) {
-        case Mode::plain: return "irqTX+irqRX";
-        case Mode::txdma: return "dmaTX+irqRX";
-        default: return "irqTX+dmaRX";
-    }
-}
+const char* mode_name(Mode m) { return m == Mode::txdma ? "dmaTX+irqRX" : "irqTX+irqRX"; }
 
 bool mode_init(Mode m, uint32_t baud, const UartFormat& fmt = {}) {
     live = m;
-    switch (m) {
-        case Mode::plain: return UPlain::init(clock, baud, fmt);
-        case Mode::txdma: return UTxDma::init(clock, baud, fmt);
-        default: return URxDma::init(clock, baud, fmt);
-    }
+    return m == Mode::txdma ? UTxDma::init(clock, baud, fmt) : UPlain::init(clock, baud, fmt);
 }
 
 void mode_release() {
-    switch (live) {
-        case Mode::plain: UPlain::release(); break;
-        case Mode::txdma: UTxDma::release(); break;
-        default: URxDma::release(); break;
+    if (live == Mode::txdma) {
+        UTxDma::release();
+    } else {
+        UPlain::release();
     }
 }
 
-bool mode_tx_idle() {
-    switch (live) {
-        case Mode::plain: return UPlain::tx_idle();
-        case Mode::txdma: return UTxDma::tx_idle();
-        default: return URxDma::tx_idle();
-    }
-}
+bool mode_tx_idle() { return live == Mode::txdma ? UTxDma::tx_idle() : UPlain::tx_idle(); }
 
 uint32_t mode_write_bulk(const uint8_t* p, uint32_t n) {
     const std::span<const uint8_t> s(p, n);
-    switch (live) {
-        case Mode::plain: return UPlain::write_bulk(s);
-        case Mode::txdma: return UTxDma::write_bulk(s);
-        default: return URxDma::write_bulk(s);
-    }
+    return live == Mode::txdma ? UTxDma::write_bulk(s) : UPlain::write_bulk(s);
 }
 
 uint32_t mode_read_bulk(uint8_t* p, uint32_t n) {
     const std::span<uint8_t> s(p, n);
-    switch (live) {
-        case Mode::plain: return UPlain::read_bulk(s);
-        case Mode::txdma: return UTxDma::read_bulk(s);
-        default: return URxDma::read_bulk(s);
-    }
-}
-
-
-
-void mode_harvest() {
-    switch (live) {
-        case Mode::rxdma: (void)URxDma::harvest(); break;
-        default: break;
-    }
+    return live == Mode::txdma ? UTxDma::read_bulk(s) : UPlain::read_bulk(s);
 }
 
 /// An EMPTY bulk write: it queues nothing and returns zero, but it takes
@@ -220,10 +188,10 @@ void mode_harvest() {
 void mode_nudge() { (void)mode_write_bulk(nullptr, 0); }
 
 void mode_clear_errors() {
-    switch (live) {
-        case Mode::plain: UPlain::clear_errors(); break;
-        case Mode::txdma: UTxDma::clear_errors(); break;
-        default: URxDma::clear_errors(); break;
+    if (live == Mode::txdma) {
+        UTxDma::clear_errors();
+    } else {
+        UPlain::clear_errors();
     }
 }
 
@@ -231,31 +199,17 @@ struct ErrCounts {
     uint8_t rx_overrun, frame, parity, hw_overrun, dma_faults;
 };
 
-/// The skip epoch of the live transport (never cleared: a leg reads its
-/// difference).
-uint32_t mode_skips() {
-    switch (live) {
-        case Mode::plain: return UPlain::rx_skips();
-        case Mode::txdma: return UTxDma::rx_skips();
-        default: return URxDma::rx_skips();
-    }
-}
+/// The skip epoch of the live transport, modulo 2^8 (never cleared: a leg
+/// reads its difference).
+uint32_t mode_skips() { return live == Mode::txdma ? UTxDma::rx_skips() : UPlain::rx_skips(); }
 
 ErrCounts mode_errors() {
-    switch (live) {
-        case Mode::plain:
-            return {UPlain::rx_overruns(), UPlain::frame_errors(),
-                    UPlain::parity_errors(), UPlain::hw_overruns(),
-                    UPlain::dma_faults()};
-        case Mode::txdma:
-            return {UTxDma::rx_overruns(), UTxDma::frame_errors(),
-                    UTxDma::parity_errors(), UTxDma::hw_overruns(),
-                    UTxDma::dma_faults()};
-        default:
-            return {URxDma::rx_overruns(), URxDma::frame_errors(),
-                    URxDma::parity_errors(), URxDma::hw_overruns(),
-                    URxDma::dma_faults()};
+    if (live == Mode::txdma) {
+        return {UTxDma::rx_overruns(), UTxDma::frame_errors(), UTxDma::parity_errors(),
+                UTxDma::hw_overruns(), UTxDma::dma_faults()};
     }
+    return {UPlain::rx_overruns(), UPlain::frame_errors(), UPlain::parity_errors(),
+            UPlain::hw_overruns(), UPlain::dma_faults()};
 }
 
 // =============================================================================
@@ -281,9 +235,11 @@ uint32_t cycles_now() {
     return Ticker::cycles();
 }
 
+uint32_t ms_cycles(uint32_t ms) { return (SysClock::hz / 1000u) * ms; }
+
 void spin_ms(uint32_t ms) {
     const uint32_t t0 = cycles_now();
-    const uint32_t want = (SysClock::hz / 1000u) * ms;
+    const uint32_t want = ms_cycles(ms);
     while (cycles_now() - t0 < want) {
     }
 }
@@ -303,24 +259,23 @@ bool drain(uint32_t spins = 20'000'000UL) {
 }
 
 // =============================================================================
-// Raw observation of the two engines
+// Raw observation of the transmit engine
 // =============================================================================
 //
 // TAKEN while the transport under test is still live, PRINTED afterwards
 // through the console: the state that matters is the state at the end of
 // the window, and printing it out of the transport being measured would
-// perturb the very thing being read.
+// perturb the very thing being read. The channel's own registers are read
+// only while a transport holds the engine - the engine brings the block's
+// clock up at its arm() and stops it at its release().
 
 struct EngineSnapshot {
     uint8_t sercom_flags, sercom_armed;
     uint16_t sercom_status;
-    uint32_t busych, pendch;
-    bool tx_enabled, rx_enabled;
-    uint8_t tx_status, rx_status;
-    DmaDescriptor tx_loaded, rx_loaded, tx_wb, rx_wb;
-    bool tx_own, rx_own;
-    uint32_t tx_violations, rx_violations, rx_timeouts, tx_engine_faults;
-    bool tx_busy;
+    uint8_t owner;
+    bool busy, waiting;
+    uint16_t in_flight;
+    uint32_t faults;
 };
 
 EngineSnapshot snapshot() {
@@ -328,47 +283,20 @@ EngineSnapshot snapshot() {
     s.sercom_flags = Sc5::flags();
     s.sercom_armed = Sc5::armed();
     s.sercom_status = Sc5::status();
-    s.busych = Dmac::busy_channels();
-    s.pendch = Dmac::pending_channels();
-    s.tx_enabled = DmaChannel<ch_tx>::enabled();
-    s.rx_enabled = DmaChannel<ch_rx>::enabled();
-    s.tx_status = DmaChannel<ch_tx>::status();
-    s.rx_status = DmaChannel<ch_rx>::status();
-    s.tx_loaded = DmaChannel<ch_tx>::loaded();
-    s.rx_loaded = DmaChannel<ch_rx>::loaded();
-    s.tx_wb = Dmac::read_write_back(ch_tx);
-    s.rx_wb = Dmac::read_write_back(ch_rx);
-    s.tx_own = DmaChannel<ch_tx>::write_back_ok();
-    s.rx_own = DmaChannel<ch_rx>::write_back_ok();
-    s.tx_violations = DmaChannel<ch_tx>::violations();
-    s.rx_violations = DmaChannel<ch_rx>::violations();
-    s.rx_timeouts = DmaChannel<ch_rx>::suspend_timeouts();
-    s.tx_engine_faults = DmaTxEngine<ch_tx>::faults();
-    s.tx_busy = DmaTxEngine<ch_tx>::busy();
+    s.owner = DmaTxEngine::owner();
+    s.busy = DmaTxEngine::busy();
+    s.in_flight = DmaTxEngine::in_flight();
+    s.waiting = s.owner != 0u && DmaTxEngine::waiting();
+    s.faults = DmaTxEngine::faults();
     return s;
 }
 
-void print_descriptor(const char* what, const DmaDescriptor& d) {
-    print(plain, "        ", what, " ctrl=", hex(d.btctrl), " cnt=", d.btcnt,
-          " src=", hex(d.srcaddr), " dst=", hex(d.dstaddr), crlf);
-}
-
-void dump_engines(const EngineSnapshot& s) {
+void dump_engine(const EngineSnapshot& s) {
     print(plain, "  sercom intflag=", s.sercom_flags, " intenset=", s.sercom_armed,
-          " status=", s.sercom_status, " | dmac busych=", s.busych,
-          " pendch=", s.pendch, crlf);
-    print(plain, "  ch", ch_tx, " (tx) enabled=", s.tx_enabled ? 1u : 0u,
-          " chstatus=", s.tx_status, " write-back own=", s.tx_own ? "yes" : "no",
-          " blocks abandoned=", s.tx_engine_faults, crlf);
-    print_descriptor("loaded", s.tx_loaded);
-    print_descriptor("wrback", s.tx_wb);
-    print(plain, "  ch", ch_rx, " (rx) enabled=", s.rx_enabled ? 1u : 0u,
-          " chstatus=", s.rx_status, " write-back own=", s.rx_own ? "yes" : "no",
+          " status=", s.sercom_status, crlf);
+    print(plain, "  engine owner=", s.owner, " busy=", s.busy ? 1u : 0u, " in_flight=",
+          s.in_flight, " channel waiting=", s.waiting ? 1u : 0u, " blocks abandoned=", s.faults,
           crlf);
-    print_descriptor("loaded", s.rx_loaded);
-    print_descriptor("wrback", s.rx_wb);
-    print(plain, "  refused readings tx=", s.tx_violations, " rx=", s.rx_violations,
-          " rx suspend timeouts=", s.rx_timeouts, crlf);
 }
 
 // =============================================================================
@@ -393,12 +321,6 @@ struct Leg {
     UartFormat format{};
     uint32_t window_ms = 1200;
     uint32_t count = 0;         ///< bytes to emit, for `source`
-    /// How often the owner asks the RX engine for the TAIL. The run is
-    /// published by the engine's vector at every filled half of the ring
-    /// (dma_isr()); what no completion reports - the tail of a stream that
-    /// stops short of a block's end - is the owner's ask, and a lazy one:
-    /// letter n measures what an eager cadence costs.
-    uint32_t harvest_us = 2000;
 
     /// What the board TELLS the host to use. Normally the same as its
     /// own settings; letter m deliberately makes them differ, which is
@@ -415,9 +337,7 @@ struct LegResult {
     uint32_t dropped;
     uint32_t sent;
     uint32_t first_bad;   ///< 1-based position of the first byte off the stream
-    uint32_t vector_edges;   ///< the receive engine's edges from its vector
-    uint32_t asks;           ///< the owner's harvest() calls
-    uint32_t skips;          ///< how far rx_skips() moved over the window
+    uint32_t skips;       ///< how far rx_skips() moved over the window
     bool drained;
     ErrCounts err;
 };
@@ -441,10 +361,10 @@ char format_parity(const UartFormat& f) {
     }
 }
 
-/// One host-driven leg, start to finish (see the choreography at the top).
-LegResult run_leg(const Leg& leg) {
-    LegResult r{};
-
+/// Steps 1 and 2 of the choreography: the HOST line, the console drained
+/// and released, the transport under test brought up and settled, its
+/// counters cleared.
+void open_leg(const Leg& leg) {
     const uint32_t say_baud = leg.announce_other ? leg.announce_baud : leg.baud;
     const UartFormat say_format = leg.announce_other ? leg.announce_format : leg.format;
     print(plain, "  HOST ", op_name(leg.op), " ", static_cast<uint32_t>(leg.mode),
@@ -456,11 +376,14 @@ LegResult run_leg(const Leg& leg) {
     (void)mode_init(leg.mode, leg.baud, leg.format);
     spin_ms(120);
     mode_clear_errors();
+    DmaTxEngine::clear_faults();
+}
+
+/// One host-driven leg, start to finish (see the choreography at the top).
+LegResult run_leg(const Leg& leg) {
+    LegResult r{};
+    open_leg(leg);
     const uint32_t skips0 = mode_skips();
-    rx_vector_edges = 0;
-    DmaChannel<ch_tx>::clear_counters();
-    DmaChannel<ch_rx>::clear_counters();
-    DmaTxEngine<ch_tx>::clear_faults();
 
     // A frame narrower than eight bits carries only its low bits, so the
     // pattern is compared through the same mask the wire applies.
@@ -475,24 +398,13 @@ LegResult run_leg(const Leg& leg) {
     uint32_t s_rx = lfsr_seed;
     uint32_t s_tx = lfsr_seed;
     const uint32_t t0 = cycles_now();
-    const uint32_t window = (SysClock::hz / 1000u) * leg.window_ms;
-    const uint32_t harvest_gap = (SysClock::hz / 1'000'000u) * leg.harvest_us;
-    uint32_t next_harvest = t0;
+    const uint32_t window = ms_cycles(leg.window_ms);
     uint32_t turns = 0;
     uint8_t out[128];
     uint32_t out_have = 0;
     uint32_t out_done = 0;
 
     while (cycles_now() - t0 < window) {
-        const uint32_t now = cycles_now();
-        if (static_cast<int32_t>(now - next_harvest) >= 0) {
-            mode_harvest();
-            if (leg.mode == Mode::rxdma) {
-                ++r.asks;
-            }
-            next_harvest = now + harvest_gap;
-        }
-
         // ---- the receive half ------------------------------------------
         if (leg.op != Op::source) {
             const uint32_t got = mode_read_bulk(hop, sizeof hop);
@@ -548,9 +460,7 @@ LegResult run_leg(const Leg& leg) {
 
     r.drained = drain();
     r.err = mode_errors();
-    // The interrupt receiver's epoch is its SkipRing's, modulo 2^8.
-    r.skips = leg.mode != Mode::rxdma ? (mode_skips() - skips0) & 0xFFu : mode_skips() - skips0;
-    r.vector_edges = rx_vector_edges;
+    r.skips = (mode_skips() - skips0) & 0xFFu;
     return r;
 }
 
@@ -571,10 +481,6 @@ void report(const Leg& leg, const LegResult& r) {
           " parity=", r.err.parity, " hw_overrun=", r.err.hw_overrun,
           " dma_faults=", r.err.dma_faults, " skips=", r.skips,
           " drained=", r.drained ? "yes" : "NO", crlf);
-    if (leg.mode == Mode::rxdma) {
-        print(plain, "     the engine's edges from its vector ", r.vector_edges,
-              ", the owner's asks ", r.asks, crlf);
-    }
 }
 
 // =============================================================================
@@ -747,46 +653,51 @@ void tc_ring() {
     bench.verdict("and the whole lot goes out", drain());
 }
 
-void td_engines() {
-    bench.verdict("the plain transport names no engine",
-                  !UPlain::has_tx_engine && !UPlain::has_rx_engine);
-    bench.verdict("the TX-only one names exactly one",
-                  UTxDma::has_tx_engine && !UTxDma::has_rx_engine);
-    bench.verdict("the RX-only one names the other",
-                  !URxDma::has_tx_engine && URxDma::has_rx_engine);
-    // THE FOURTH SHAPE IS A COMPILE ERROR, so what the board can show of
-    // it is the predicate the Uart's static_assert asks: two engines on
-    // one transport are two channels triggered concurrently, erratum
-    // 1.10.4's condition, and the pair is refused at the template
-    // argument (test/family_samc21/neg/uart_both_engines.cpp fails to
-    // compile for that reason).
-    bench.verdict("both engines on one transport are refused (erratum 1.10.4)",
-                  !uart_engines_not_concurrent<DmaTxEngine<ch_tx>, DmaRxEngine<ch_rx>>() &&
-                      uart_engines_not_concurrent<DmaTxEngine<ch_tx>, NoDmaEngine>() &&
-                      uart_engines_not_concurrent<NoDmaEngine, DmaRxEngine<ch_rx>>());
+/// Two owner ids no Uart of this image claims with (a Uart's is its SERCOM
+/// number plus one: 2 on the loop, 6 on the console), so letter d's claims
+/// can never be mistaken for a transport's.
+constexpr uint8_t owner_a = 9;
+constexpr uint8_t owner_b = 10;
+
+void td_engine() {
+    bench.verdict("the plain transport names no engine", !UPlain::has_tx_engine);
+    bench.verdict("the engined one names the transmit engine", UTxDma::has_tx_engine);
+    bench.verdict("the engine is one channel, channel 0",
+                  DmaTxEngine::present && DmaTxEngine::channel == 0u);
     bench.verdict("an engineless transport reports no DMA faults, for free",
                   UPlain::dma_faults() == 0);
-
-    // The trigger codes are the device header's, read the same way from
-    // both sides of the wall: samc21/sercom.hpp names them per instance,
-    // samc21/dmac.hpp spells the same table from the DMAC's side.
-    bench.verdict("SERCOM5's RX trigger code is the header's",
-                  Sc5::dma_rx_trigger() == SERCOM5_DMAC_ID_RX);
+    // The trigger code is the device header's, read per instance by
+    // samc21/sercom.hpp beside the instance's other constants.
     bench.verdict("SERCOM5's TX trigger code is the header's",
                   Sc5::dma_tx_trigger() == SERCOM5_DMAC_ID_TX);
-    bench.verdict("and dmac.hpp's own table agrees",
-                  dma_trigger_sercom_rx<5>() == Sc5::dma_rx_trigger() &&
-                      dma_trigger_sercom_tx<5>() == Sc5::dma_tx_trigger());
 
-    // A channel has exactly ONE pending-trigger bit: a software trigger
-    // that races a real one still pending is LOST (25.8.8), and the
-    // register says so about itself - it reads back set exactly when a
-    // trigger was lost. (One that lands after a beat has started is a
-    // second beat, which is why the transport kicks neither direction:
-    // docs/samc21/sercom.md.)
-    DmaChannel<ch_tx>::clear_trigger_lost();
-    bench.verdict("no trigger is recorded lost on an idle channel",
-                  !DmaChannel<ch_tx>::trigger_lost());
+    // THE ONE-USER RULE AS A VALUE: the claim the engine's arm() makes,
+    // exercised directly with owners no transport uses. The console runs
+    // plain under z, so nobody holds the engine on entry. (A refused claim
+    // inside arm() is the panic letter x proves; claim() alone answers.)
+    const uint8_t on_entry = DmaTxEngine::owner();
+    const bool a_first = DmaTxEngine::claim(owner_a);
+    const bool b_refused = !DmaTxEngine::claim(owner_b);
+    const uint8_t held_by = DmaTxEngine::owner();
+    const bool a_again = DmaTxEngine::claim(owner_a);
+    DmaTxEngine::release(owner_a);
+    const uint8_t after_a = DmaTxEngine::owner();
+    const bool b_now = DmaTxEngine::claim(owner_b);
+    const uint8_t held_by_b = DmaTxEngine::owner();
+    DmaTxEngine::release(owner_b);
+    const uint8_t after_b = DmaTxEngine::owner();
+    print(plain, "  owner on entry ", on_entry, "; claim(", owner_a, ") ", a_first, ", claim(",
+          owner_b, ") ", !b_refused, " while ", held_by, " holds, claim(", owner_a, ") again ",
+          a_again, "; after release(", owner_a, ") ", after_a, "; claim(", owner_b, ") ", b_now,
+          ", held by ", held_by_b, "; after release(", owner_b, ") ", after_b, crlf);
+    bench.verdict("nobody holds the engine while the console runs plain", on_entry == 0u);
+    bench.verdict("a free engine is claimed", a_first && held_by == owner_a);
+    bench.verdict("a second owner is refused while the first holds it", b_refused);
+    bench.verdict("the holder's own claim again is granted", a_again);
+    bench.verdict("release() gives the claim back", after_a == 0u);
+    bench.verdict("and the other owner may take it then (one user at a time)",
+                  b_now && held_by_b == owner_b);
+    bench.verdict("its release leaves nobody holding the engine", after_b == 0u);
 }
 
 // =============================================================================
@@ -798,7 +709,7 @@ void run_and_report(const Leg& leg, bool lossless) {
     const EngineSnapshot s = snapshot();
     back_to_console();
     report(leg, r);
-    dump_engines(s);
+    dump_engine(s);
 
     bench.verdict("the transport drained at the end of the window", r.drained);
     bench.verdict("something crossed the wire", r.received != 0u || r.sent != 0u);
@@ -813,7 +724,7 @@ void run_and_report(const Leg& leg, bool lossless) {
         bench.verdict("the stream is contiguous well past the start",
                       r.first_bad == 0 || r.first_bad > 256);
         bench.verdict("the transmitter was not left claiming a dead block",
-                      !s.tx_busy);
+                      !s.busy);
     }
 }
 
@@ -826,14 +737,10 @@ Leg base_leg(Op op, Mode m) {
 
 void te_plain_echo() { run_and_report(base_leg(Op::echo, Mode::plain), true); }
 void tf_txdma_echo() { run_and_report(base_leg(Op::echo, Mode::txdma), true); }
-/// The receive engine publishes from its vector and re-arms in the same
-/// handler, so the block boundary is no gap: lossless, as the interrupt
-/// receiver is.
-void tg_rxdma_echo() { run_and_report(base_leg(Op::echo, Mode::rxdma), true); }
-/// THE DUPLEX LINK THE ERRATUM LEAVES. Both engines on one SERCOM are
-/// refused (erratum 1.10.4), so a link that wants bulk both ways takes
-/// the engine on the transmit side and keeps the receiver on RXC. Two
-/// rates, two claims:
+/// THE DUPLEX LINK. The Uart's one engine slot is the transmit one
+/// (samc21/sercom.hpp), so a link that wants bulk both ways takes the
+/// engine on the transmit side and keeps the receiver on RXC. Two rates,
+/// two claims:
 ///  - at 1 Mbaud the shape is LOSSLESS - every byte back, in order,
 ///    nothing dropped, no hardware overrun;
 ///  - at 2 Mbaud the receiver takes every level an entry and keeps the
@@ -842,10 +749,10 @@ void tg_rxdma_echo() { run_and_report(base_leg(Op::echo, Mode::rxdma), true); }
 ///    together), and the echo gains on the board's slow clock (below):
 ///    loss is allowed and SILENCE is not, as in letter k.
 /// At both, NO TRANSMIT BLOCK MAY BE ABANDONED: the engine's channel is
-/// the only one in this image, so erratum 1.10.4 has nothing to corrupt
-/// it with, and an abandoned block is the dead-block predicate firing on
-/// a live one - which a test of the engine's own "in flight" and the
-/// flags alone did at 2 Mbaud, where main context is preempted for a
+/// the only one the stratum drives, so erratum 1.10.4 has nothing to
+/// corrupt it with, and an abandoned block is the dead-block predicate
+/// firing on a live one - which a test of the engine's own "in flight" and
+/// the flags alone does at 2 Mbaud, where main context is preempted for a
 /// character time across a completion (samc21/sercom.hpp,
 /// nudge_blocked_tx()).
 void th_duplex_echo() {
@@ -857,7 +764,7 @@ void th_duplex_echo() {
         const EngineSnapshot s = snapshot();
         back_to_console();
         report(leg, r);
-        dump_engines(s);
+        dump_engine(s);
         bench.verdict("the transport drained at the end of the window", r.drained);
         bench.verdict("something crossed the wire", r.received != 0u);
         if (rate <= 1'000'000u) {
@@ -1020,41 +927,171 @@ void tm_mismatch() {
                   ok.err.frame == 0 && ok.err.parity == 0);
 }
 
+// ---- n - an eager consumer against a lazy one --------------------------------
+
+/**
+ * The judge of a consumer that may be skipped past a loss
+ * (util/ring.hpp's SkipRing): every run handed out either follows on from
+ * the run before - byte for byte the pattern's next - or comes after a
+ * move of the skip epoch, behind which the stream's place is found again
+ * by the first sync_len bytes that match the pattern at one place ahead
+ * (sixteen bytes: a chance match is 2^-128). A run off the pattern with no
+ * move before it is a SILENT JOIN - the one thing the ring promises never
+ * to hand out.
+ */
+struct StreamCheck {
+    static constexpr uint8_t sync_len = 16;
+    /// Further than the host sends in a window (115200 baud, under a
+    /// second): a place not found this far ahead is lost.
+    static constexpr uint32_t search_most = 32768;
+
+    uint32_t s = lfsr_seed;       ///< the generator before the next byte expected
+    uint32_t epoch = 0;           ///< the skip epoch at the last look, modulo 2^8
+    uint32_t delivered = 0;       ///< bytes the consumer was handed
+    uint32_t first_silent = 0;    ///< 1-based delivered index of a silent join
+    uint32_t gaps = 0;            ///< moves of the epoch between two looks
+    uint32_t jumped = 0;          ///< stream positions the resyncs skipped
+    uint32_t resyncs = 0;
+    uint32_t lost = 0;            ///< resyncs that found no place
+    bool syncing = false;
+    uint8_t held = 0;
+    uint8_t buf[sync_len]{};
+
+    void start(uint32_t epoch_now) { epoch = epoch_now & 0xFFu; }
+
+    /// One look: the run it handed out (empty included) and the epoch
+    /// read right after it.
+    void look(std::span<const uint8_t> run, uint32_t epoch_now) {
+        const uint32_t e = epoch_now & 0xFFu;
+        if (e != epoch) {
+            gaps += (e - epoch) & 0xFFu;
+            epoch = e;
+            syncing = true;
+            held = 0;
+        }
+        for (const uint8_t b : run) {
+            ++delivered;
+            if (syncing) {
+                buf[held++] = b;
+                if (held == sync_len) {
+                    resync();
+                }
+            } else if (b != lfsr_next(s) && first_silent == 0u) {
+                first_silent = delivered;
+            }
+        }
+    }
+
+    void resync() {
+        held = 0;
+        uint32_t c = s;
+        for (uint32_t ahead = 0; ahead < search_most; ++ahead) {
+            uint32_t t = c;
+            uint8_t k = 0;
+            while (k < sync_len && lfsr_next(t) == buf[k]) {
+                ++k;
+            }
+            if (k == sync_len) {
+                s = t;
+                jumped += ahead;
+                ++resyncs;
+                syncing = false;
+                return;
+            }
+            (void)lfsr_next(c);
+        }
+        ++lost;   // still syncing: the next sixteen bytes try again
+    }
+};
+
+struct ConsumerLeg {
+    StreamCheck check;
+    ErrCounts err;
+    uint32_t skips;   ///< how far rx_skips() moved, modulo 2^8
+    uint32_t holds;   ///< hold phases the window held
+    bool drained;
+};
+
+/// The host pumps (sink, 115200); the console's interrupt receiver fills
+/// its ring and the consumer takes it IN PLACE, a run a look (read_span()
+/// and consume(), SerialPort's shape). EAGER looks at every turn; LAZY
+/// looks for 150 ms and then holds 100 ms - longer than the 44 ms the
+/// ring's 511 bytes last at this rate, so every hold the host pumps
+/// through overflows it.
+ConsumerLeg consumer_leg(bool lazy) {
+    Leg leg = base_leg(Op::sink, Mode::plain);
+    leg.window_ms = 1400;
+    open_leg(leg);
+    ConsumerLeg r{};
+    const uint32_t skips0 = UPlain::rx_skips();
+    r.check.start(skips0);
+    const uint32_t look_c = ms_cycles(150);
+    const uint32_t hold_c = ms_cycles(100);
+    const uint32_t t0 = cycles_now();
+    const uint32_t window = ms_cycles(leg.window_ms);
+    bool holding = false;
+    uint32_t phase_t0 = t0;
+    for (uint32_t now = t0; now - t0 < window; now = cycles_now()) {
+        if (lazy && now - phase_t0 >= (holding ? hold_c : look_c)) {
+            holding = !holding;
+            phase_t0 = now;
+            r.holds += holding ? 1u : 0u;
+        }
+        if (holding) {
+            continue;
+        }
+        const auto run = UPlain::read_span();
+        r.check.look(run, UPlain::rx_skips());
+        UPlain::consume(static_cast<uint32_t>(run.size()));
+    }
+    // The last look, for what a final hold left standing.
+    for (;;) {
+        const auto run = UPlain::read_span();
+        r.check.look(run, UPlain::rx_skips());
+        if (run.empty()) {
+            break;
+        }
+        UPlain::consume(static_cast<uint32_t>(run.size()));
+    }
+    r.drained = drain();
+    r.err = mode_errors();
+    r.skips = (UPlain::rx_skips() - skips0) & 0xFFu;
+    return r;
+}
+
 void tn_pressure() {
-    // THE OWNER'S ASK, both extremes, through the transport that has the
-    // most to lose. The engine's vector publishes every filled half of the
-    // ring and re-arms; the owner's harvest() is for the tail. A lazy ask
-    // (2 ms) is the shape letter g runs; an eager one (50 us) asks some
-    // four hundred times a block and races the completion at every boundary.
-    // Both must be byte-exact, with no loss and the skip epoch still, and
-    // neither may wedge.
-    static constexpr uint32_t cadences[] = {50, 2000};
-    for (uint32_t us : cadences) {
-        Leg leg = base_leg(Op::echo, Mode::rxdma);
-        leg.harvest_us = us;
-        leg.window_ms = 900;
-        const LegResult r = run_leg(leg);
-        const EngineSnapshot s = snapshot();
+    for (const bool lazy : {false, true}) {
+        const ConsumerLeg r = consumer_leg(lazy);
         back_to_console();
-        print(plain, "  harvest every ", us, " us:", crlf);
-        report(leg, r);
-        bench.verdict("the transport drained, whatever the cadence", r.drained);
-        bench.verdict("the transmitter is not left claiming a dead block",
-                      !s.tx_busy);
-        bench.verdict("bytes crossed", r.received != 0u);
-        bench.verdict("byte-exact, whatever the cadence", r.first_bad == 0);
-        bench.verdict("nothing lost: no overrun, the skip epoch still",
-                      r.err.hw_overrun == 0u && r.err.rx_overrun == 0u && r.skips == 0u);
+        const StreamCheck& c = r.check;
+        print(plain, "  ", lazy ? "lazy (150 ms looking, 100 ms held)" : "eager (a look a turn)",
+              ": delivered ", c.delivered, ", holds ", r.holds, ", gaps ", c.gaps, " (skips ",
+              r.skips, "), resyncs ", c.resyncs, " jumping ", c.jumped, " positions, lost ",
+              c.lost, ", silent join at ", c.first_silent, crlf);
+        print(plain, "     rx_overrun=", r.err.rx_overrun, " (modulo 256) frame=", r.err.frame,
+              " parity=", r.err.parity, " hw_overrun=", r.err.hw_overrun, " drained=",
+              r.drained ? "yes" : "NO", crlf);
+        bench.verdict("bytes crossed", c.delivered != 0u);
+        bench.verdict("no silent join: every run follows on, or the epoch moved before it",
+                      c.first_silent == 0u);
+        bench.verdict("no hardware overrun", r.err.hw_overrun == 0u);
+        if (lazy) {
+            bench.verdict("the held ring overflowed and the loss was told: the epoch moved",
+                          c.gaps != 0u);
+            bench.verdict("behind every gap the stream was found again", c.lost == 0u);
+        } else {
+            bench.verdict("drained at once, nothing lost: the skip epoch still",
+                          c.gaps == 0u && r.skips == 0u);
+        }
     }
 }
 
+/// Bursty traffic with idle gaps - the shape a console really sees: the
+/// board's echo pauses 4 ms every 512 turns, the interrupt receiver's ring
+/// holds what arrives meanwhile, and the transmit engine starts a block
+/// onto an idle wire after every pause.
 void tp_burst() {
-    // Bursty traffic with idle gaps - the shape a console really sees,
-    // and the one an RX engine is worst at: a burst that stops short of
-    // a block's end has no edge on this silicon (no idle detector, no
-    // receiver time-out), so the owner's ask carries the tail's latency.
-    // The bytes are all there either way.
-    Leg leg = base_leg(Op::burst, Mode::rxdma);
+    Leg leg = base_leg(Op::burst, Mode::txdma);
     leg.window_ms = 1400;
     run_and_report(leg, true);
 }
@@ -1066,8 +1103,8 @@ void tp_burst() {
 //
 // 31.6.3.8: RXPO and TXPO naming one pad put the receiver on the
 // transmitter's own signal, through the pad. PAD[0] of SERCOM1 is PA16
-// under function C; nothing is wired to it. Three transports over it,
-// never live at once (`loop_live`), each on channels of its own.
+// under function C; nothing is wired to it. Two transports over it, never
+// live at once (`loop_live`).
 
 constexpr UartPads loop_pads{
     .tx = SercomPad::pad0,
@@ -1075,18 +1112,15 @@ constexpr UartPads loop_pads{
     .tx_pin = {'A', 16, PinFunction::c},
     .rx_pin = {'A', 16, PinFunction::c},
 };
-constexpr uint8_t ch_loop_tx = 8;
-constexpr uint8_t ch_loop_rx = 9;
 
 using LPlain = Uart<1, loop_pads, 512, 512>;
-using LTxDma = Uart<1, loop_pads, 512, 512, DmaTxEngine<ch_loop_tx>, NoDmaEngine>;
-/// A 1024 ring: the engine's blocks are its halves, 512 bytes.
-using LRxDma = Uart<1, loop_pads, 1024, 512, NoDmaEngine, DmaRxEngine<ch_loop_rx>>;
+using LTxDma = Uart<1, loop_pads, 512, 512, DmaTxEngine>;
 using Sc1 = LPlain::Resource;
+constexpr uint8_t loop_owner = static_cast<uint8_t>(Sc1::index + 1u);
 
-enum class Loop : uint8_t { none, plain, txdma, rxdma };
+enum class Loop : uint8_t { none, plain, txdma };
 volatile Loop loop_live = Loop::none;
-/// The receive edges the loop's vectors returned.
+/// The receive edges the loop's vector returned.
 volatile uint32_t loop_edges = 0;
 
 uint32_t bit_cycles(uint32_t baud) { return SysClock::hz / baud; }
@@ -1099,8 +1133,8 @@ void loop_settle(uint32_t baud) {
 }
 
 /// Polled transmission through the resource, for a sender at the wire's
-/// own rate beside a receive engine (the pair of engines is refused):
-/// DATA written whenever DRE stands (31.6.2.5).
+/// own rate beside the interrupt receiver: DATA written whenever DRE
+/// stands (31.6.2.5).
 [[gnu::always_inline]] inline bool loop_send_polled(uint8_t b) {
     if (!Sc1::dre_flag()) {
         return false;
@@ -1255,234 +1289,180 @@ void tq_tx_idle() {
     }
 }
 
-// ---- r - the receive engine's edge from the vector -------------------------
+// ---- r - the interrupt receiver's edge and its skip --------------------------
 
-/// A stream of `n` bytes sent polled at the wire's rate into the receive
-/// engine, in one of three shapes of its consumer:
-///
-///   edge   on every edge the vector returns the thread drains the ring,
-///          checking each byte against the pattern - and sends nothing
-///          while it does, so the line pauses but never a block boundary
-///          goes unserved by the handler;
-///   eager  the owner ASKS at every turn of the sending loop (harvest(),
-///          the run checked as it is published): the ask racing the
-///          completion at every block boundary, the shape an eager clock
-///          lost characters in;
-///   held   the consumer drains NOTHING until the sender is done, so the
-///          ring fills, the engine stalls and the receiver overflows in
-///          the hardware; the drain then checks the ring's bytes, the
-///          consumer's release re-arms the engine, and the skip epoch is
-///          read the moment the first character published after the loss
-///          is visible.
-///
-/// The tail - what no block completion reports - is the owner's ask at
-/// the end.
-enum class Consumer : uint8_t { edge, eager, held };
-
-struct EngineStream {
-    uint32_t sent, received, bad, edges, asks;
-    uint8_t hw_overruns, rx_overruns;
-    uint32_t skips;        ///< rx_skips() moved by this much over the stream
-    bool skip_first;       ///< (held) it had moved when the bytes after the loss became visible
-    uint32_t held_exact;   ///< (held) the ring's bytes before the loss, equal to the pattern
-};
-
-EngineStream engine_stream(uint32_t baud, uint32_t n, Consumer how = Consumer::edge) {
-    EngineStream r{};
-    loop_live = Loop::rxdma;
-    (void)LRxDma::init(clock, baud);
-    loop_settle(baud);
-    loop_edges = 0;
-    const uint32_t skips0 = LRxDma::rx_skips();
-    uint32_t s_tx = lfsr_seed;
-    uint32_t s_rx = lfsr_seed;
-    uint32_t seen = 0;
-    const auto drain_ring = [&] {
-        for (;;) {
-            const auto run = LRxDma::read_span();
-            if (run.empty()) {
-                break;
-            }
-            for (const uint8_t b : run) {
-                r.bad += b != lfsr_next(s_rx) ? 1u : 0u;
-            }
-            r.received += static_cast<uint32_t>(run.size());
-            LRxDma::consume(static_cast<uint32_t>(run.size()));
-        }
-    };
-    uint8_t next = lfsr_next(s_tx);
+/// A burst of `n` bytes of the generator `s`, sent polled at the wire's
+/// rate into the loop while nothing drains the ring - the receiver is
+/// LPlain's interrupt alone - and waited out to the last stop bit and a
+/// few frames more, so the vector has taken it all. The bytes sent.
+uint32_t loop_burst(uint32_t baud, uint32_t& s, uint32_t n) {
+    uint32_t sent = 0;
     uint32_t spins = 0;
-    while (r.sent < n && spins++ < 20'000'000u) {
+    uint8_t next = lfsr_next(s);
+    while (sent < n && spins++ < 20'000'000u) {
         if (loop_send_polled(next)) {
-            ++r.sent;
-            next = lfsr_next(s_tx);
-        }
-        if (how == Consumer::eager) {
-            ++r.asks;
-            (void)LRxDma::harvest();
-            drain_ring();
-        } else if (how == Consumer::edge && loop_edges != seen) {
-            seen = loop_edges;
-            drain_ring();
-        }
-    }
-    if (how == Consumer::held) {
-        // The ring as the stall left it: every byte of it the pattern's
-        // first ones. Then the release re-arms; whatever is published
-        // after it follows the loss, and the epoch must already have moved.
-        spins = 0;
-        while (!Sc1::txc_flag() && spins++ < 400'000u) {
-        }
-        for (;;) {
-            const auto run = LRxDma::read_span();
-            if (run.empty()) {
-                break;
+            ++sent;
+            if (sent < n) {
+                next = lfsr_next(s);
             }
-            for (const uint8_t b : run) {
-                r.held_exact += b == lfsr_next(s_rx) ? 1u : 0u;
-            }
-            r.received += static_cast<uint32_t>(run.size());
-            LRxDma::consume(static_cast<uint32_t>(run.size()));
         }
-        const uint32_t t1 = cycles_now();
-        while (cycles_now() - t1 < 20u * 10u * bit_cycles(baud)) {
-        }
-        ++r.asks;
-        (void)LRxDma::harvest();
-        const auto after = LRxDma::read_span();
-        r.skip_first = !after.empty() && LRxDma::rx_skips() != skips0;
-        r.received += static_cast<uint32_t>(after.size());
-        LRxDma::consume(static_cast<uint32_t>(after.size()));
     }
     spins = 0;
     while (!Sc1::txc_flag() && spins++ < 400'000u) {
     }
-    // The tail: the stream stopped short of a block's end, and this
-    // silicon reports no idle line - the owner asks.
-    const uint32_t t0 = cycles_now();
-    while (cycles_now() - t0 < 20u * 10u * bit_cycles(baud)) {
+    loop_settle(baud);
+    return sent;
+}
+
+/// Every run the ring hands out, checked against the generator `s`.
+struct Taken {
+    uint32_t got, bad;
+};
+Taken loop_take(uint32_t& s) {
+    Taken t{};
+    for (;;) {
+        const auto run = LPlain::read_span();
+        if (run.empty()) {
+            break;
+        }
+        for (const uint8_t b : run) {
+            t.bad += b != lfsr_next(s) ? 1u : 0u;
+        }
+        t.got += static_cast<uint32_t>(run.size());
+        LPlain::consume(static_cast<uint32_t>(run.size()));
     }
-    ++r.asks;
-    (void)LRxDma::harvest();
-    if (how != Consumer::held) {
-        drain_ring();
+    return t;
+}
+
+void tr_receiver_edge() {
+    // THE EDGE: the vector's return is the ring's empty -> non-empty across
+    // an entry, so a burst into an empty ring that nobody drains is ONE
+    // edge however long it is, and the next burst after the drain one more.
+    constexpr uint32_t n = 256;
+    for (const uint32_t baud : {1'000'000u, 3'000'000u}) {
+        loop_live = Loop::plain;
+        (void)LPlain::init(clock, baud);
+        loop_settle(baud);
+        const uint32_t skips0 = LPlain::rx_skips();
+        uint32_t s_tx = lfsr_seed;
+        uint32_t s_rx = lfsr_seed;
+        const uint32_t e0 = loop_edges;
+        uint32_t sent = loop_burst(baud, s_tx, n);
+        const uint32_t e1 = loop_edges;
+        Taken t = loop_take(s_rx);
+        sent += loop_burst(baud, s_tx, n);
+        const uint32_t e2 = loop_edges;
+        const Taken t2 = loop_take(s_rx);
+        t.got += t2.got;
+        t.bad += t2.bad;
+        const uint8_t hw = LPlain::hw_overruns();
+        const uint8_t over = LPlain::rx_overruns();
+        const uint32_t skips = (LPlain::rx_skips() - skips0) & 0xFFu;
+        LPlain::release();
+        loop_live = Loop::none;
+        print(plain, "  ", baud, " baud, two bursts of ", n, ": sent ", sent, ", received ", t.got,
+              ", wrong ", t.bad, ", edges ", e1 - e0, " then ", e2 - e1, ", hw_overrun ", hw,
+              ", rx_overrun ", over, ", skips ", skips, crlf);
+        bench.verdict("both bursts crossed the loop, byte-exact and in order",
+                      sent == 2u * n && t.got == 2u * n && t.bad == 0u);
+        bench.verdict("a burst into an empty ring is ONE edge from the vector",
+                      e1 - e0 == 1u && e2 - e1 == 1u);
+        bench.verdict("nothing lost, the skip epoch still",
+                      hw == 0u && over == 0u && skips == 0u);
     }
-    r.edges = loop_edges;
-    r.hw_overruns = LRxDma::hw_overruns();
-    r.rx_overruns = LRxDma::rx_overruns();
-    r.skips = LRxDma::rx_skips() - skips0;
-    LRxDma::release();
+
+    // THE CONSUMER HELD BACK past the ring (512: 511 held): 128 bytes taken
+    // as they come, then 700 sent with nobody draining - 511 held, 189
+    // dropped on the full ring, each counted and told to the ring - then
+    // the consumer's first look, then 128 more taken as they come.
+    constexpr uint32_t baud = 1'000'000u;
+    constexpr uint32_t before = 128;
+    constexpr uint32_t held = 700;
+    constexpr uint32_t after = 128;
+    constexpr uint32_t holds = 511;
+    loop_live = Loop::plain;
+    (void)LPlain::init(clock, baud);
+    loop_settle(baud);
+    const uint32_t skips0 = LPlain::rx_skips();
+    uint32_t s_tx = lfsr_seed;
+    uint32_t s_rx = lfsr_seed;
+    (void)loop_burst(baud, s_tx, before);
+    const Taken a = loop_take(s_rx);
+    const uint8_t over0 = LPlain::rx_overruns();
+    (void)loop_burst(baud, s_tx, held);
+    const uint32_t pending = static_cast<uint32_t>(LPlain::rx_pending());
+    const uint32_t dropped = static_cast<uint8_t>(LPlain::rx_overruns() - over0);
+    const uint32_t skips_held = (LPlain::rx_skips() - skips0) & 0xFFu;
+    // The look: the drop stands, so the ring skips to its head - the 511
+    // it held are behind the drop and are never handed out.
+    const auto look = LPlain::read_span();
+    const bool look_empty = look.empty();
+    const uint32_t skips_look = (LPlain::rx_skips() - skips0) & 0xFFu;
+    for (uint32_t i = 0; i < held; ++i) {
+        (void)lfsr_next(s_rx);   // what the consumer will never see
+    }
+    (void)loop_burst(baud, s_tx, after);
+    const Taken c = loop_take(s_rx);
+    const uint32_t skips_end = (LPlain::rx_skips() - skips0) & 0xFFu;
+    const uint8_t hw = LPlain::hw_overruns();
+    LPlain::release();
     loop_live = Loop::none;
-    return r;
+    print(plain, "  ", baud, " baud, the consumer held back: before ", a.got, " (wrong ", a.bad,
+          "); held ", pending, " of ", held, ", rx_overrun ", dropped, ", skips ", skips_held,
+          "; the first look ", look_empty ? "empty" : "NOT EMPTY", ", skips ", skips_look,
+          "; after ", c.got, " (wrong ", c.bad, "), skips ", skips_end, ", hw_overrun ", hw, crlf);
+    bench.verdict("before the hold: every byte, in order", a.got == before && a.bad == 0u);
+    bench.verdict("the ring held its 511 and counted the rest lost",
+                  pending == holds && dropped == held - holds && hw == 0u);
+    bench.verdict("the loss waits for the consumer: no skip before it looks", skips_held == 0u);
+    bench.verdict("its first look skips: nothing the ring held across the loss handed out",
+                  look_empty && skips_look == 1u);
+    bench.verdict("the release recovers: the next burst whole, in order, the epoch still",
+                  c.got == after && c.bad == 0u && skips_end == 1u);
 }
 
-void tr_engine_edge() {
-    constexpr uint32_t n = 1300;   // two blocks of 512 and a tail of 276
-    for (const uint32_t baud : {1'000'000u, 3'000'000u}) {
-        const EngineStream r = engine_stream(baud, n);
-        print(plain, "  ", baud, " baud: sent ", r.sent, ", received ", r.received, ", wrong ",
-              r.bad, ", edges from the vector ", r.edges, ", asks ", r.asks, ", hw_overrun ",
-              r.hw_overruns, ", rx_overrun ", r.rx_overruns, ", skips ", r.skips, crlf);
-        bench.verdict("the whole stream crossed the loop", r.sent == n && r.received == n);
-        bench.verdict("byte-exact and in order", r.bad == 0u);
-        bench.verdict("each filled half of the ring was an edge from the vector",
-                      r.edges >= n / 512u);
-        bench.verdict("no byte lost at a block boundary (re-armed in the handler)",
-                      r.hw_overruns == 0u && r.rx_overruns == 0u);
-        bench.verdict("the skip epoch did not move", r.skips == 0u);
-    }
-    // THE ASK AT ANY CADENCE: harvest() at every turn of the sending loop,
-    // racing the completion at both block boundaries.
-    for (const uint32_t baud : {1'000'000u, 3'000'000u}) {
-        const EngineStream r = engine_stream(baud, n, Consumer::eager);
-        print(plain, "  ", baud, " baud, the owner asking at every turn: received ", r.received,
-              ", wrong ", r.bad, ", asks ", r.asks, ", edges from the vector ", r.edges,
-              ", hw_overrun ", r.hw_overruns, ", skips ", r.skips, crlf);
-        bench.verdict("asked at every turn, the whole stream crossed", r.received == n);
-        bench.verdict("byte-exact and in order", r.bad == 0u);
-        bench.verdict("no loss, and the skip epoch did not move",
-                      r.hw_overruns == 0u && r.skips == 0u);
-    }
-    // THE CONSUMER HELD BACK past the ring (1024 bytes): the engine stalls,
-    // the receiver overflows, the loss is counted before the first
-    // character after it is visible, and the release re-arms.
-    {
-        constexpr uint32_t baud = 1'000'000u;
-        const EngineStream r = engine_stream(baud, n, Consumer::held);
-        print(plain, "  ", baud, " baud, the consumer held back: received ", r.received,
-              " (the ring's ", r.held_exact, " equal to the pattern), rx_overrun ",
-              r.rx_overruns, ", hw_overrun ", r.hw_overruns, ", skips ", r.skips, crlf);
-        bench.verdict("the ring held the stream's first 1024 bytes", r.held_exact == 1024u);
-        bench.verdict("the stall was counted (rx_overruns) and the overflow (hw_overruns)",
-                      r.rx_overruns == 1u && r.hw_overruns != 0u);
-        bench.verdict("the consumer's release re-armed: characters published after it",
-                      r.received > 1024u);
-        bench.verdict("the skip epoch had moved when they became visible", r.skip_first);
-    }
-}
-
-
-// ---- s - errors injected under the receive engine (host) ---------------------
+// ---- s - errors injected under the interrupt receiver (host) ------------------
 
 /// The host sends `n` bytes of the pattern at 8E1 into a receiver at 8N1
 /// (brio stress's `poke`, at half the window): every frame whose parity
 /// bit is zero lands that zero where the receiver samples its stop bit,
-/// a frame error, its eight data bits intact. Under the RECEIVE ENGINE
-/// the channel reads every character - an error is counted from STATUS,
-/// which clears by being written (31.8.9), never by a read of DATA - so
-/// all n bytes arrive, byte-exact, and the count is the engine's
-/// granularity: one per run that saw errors. Under the INTERRUPT RECEIVER
-/// each hit character is dropped, counted and told to the ring, whose next
-/// look skips what it holds: the consumer here reads as fast as it can, so
-/// most skips find the ring empty - at most n - K delivered, in order, the
-/// counter K, one skip a loss at most.
+/// a frame error, its eight data bits intact. The interrupt receiver
+/// drops each hit character, counts it and tells the ring, whose next
+/// look skips what it holds: the consumer here reads as fast as it can,
+/// so most skips find the ring empty - at most n - K delivered, in order,
+/// the counter K, one skip a loss at most.
 struct ErrorLeg {
     uint32_t received;
-    uint32_t edges;        ///< the engine's edges from its vector
-    uint32_t exact;        ///< bytes equal to the pattern at their position (engine)
     bool in_order;         ///< the received bytes are the pattern's, in order, some skipped
     ErrCounts err;
     uint32_t skips;        ///< how far rx_skips() moved
 };
 
-ErrorLeg error_leg(Mode m, uint32_t n) {
+ErrorLeg error_leg(uint32_t n) {
     constexpr uint32_t window_ms = 1400;
-    print(plain, "  HOST poke ", static_cast<uint32_t>(m), " 115200 8E1 ", window_ms, " ", n,
-          crlf);
+    print(plain, "  HOST poke ", static_cast<uint32_t>(Mode::plain), " 115200 8E1 ", window_ms,
+          " ", n, crlf);
     (void)drain();
     mode_release();
-    (void)mode_init(m, 115200);
+    (void)mode_init(Mode::plain, 115200);
     spin_ms(120);
     mode_clear_errors();
     const uint32_t skips0 = mode_skips();
-    rx_vector_edges = 0;
     static uint8_t got[300];
     ErrorLeg r{};
     const uint32_t t0 = cycles_now();
-    const uint32_t window = (SysClock::hz / 1000u) * window_ms;
+    const uint32_t window = ms_cycles(window_ms);
     while (cycles_now() - t0 < window) {
         if (r.received < sizeof got) {
             r.received += mode_read_bulk(got + r.received, sizeof got - r.received);
         }
     }
-    // The owner's ask, once, for whatever no completion reported (nothing,
-    // on a burst of exactly one block).
-    mode_harvest();
-    if (r.received < sizeof got) {
-        r.received += mode_read_bulk(got + r.received, sizeof got - r.received);
-    }
     r.err = mode_errors();
-    // The interrupt receiver's epoch is its SkipRing's, modulo 2^8.
-    r.skips = m != Mode::rxdma ? (mode_skips() - skips0) & 0xFFu : mode_skips() - skips0;
-    r.edges = rx_vector_edges;
+    r.skips = (mode_skips() - skips0) & 0xFFu;
     back_to_console();
-    uint32_t sx = lfsr_seed;
     r.in_order = true;
     uint32_t at = 0;   // pattern position
     uint32_t sy = lfsr_seed;
-    for (uint32_t i = 0; i < r.received && i < n; ++i) {
-        r.exact += got[i] == lfsr_next(sx) ? 1u : 0u;
-    }
     for (uint32_t i = 0; i < r.received; ++i) {
         while (at < n && lfsr_next(sy) != got[i]) {
             ++at;
@@ -1497,9 +1477,6 @@ ErrorLeg error_leg(Mode m, uint32_t n) {
 }
 
 void ts_errors() {
-    // A whole block of the engine (half of the 512 ring): the run is
-    // published by the engine's own vector at its completion, and no
-    // owner's ask is on the path being proven.
     constexpr uint32_t n = 256;
     // What a frame-per-character reading predicts: the bytes whose even
     // parity bit is zero (an even count of ones).
@@ -1510,22 +1487,10 @@ void ts_errors() {
         zero_parity += (__builtin_popcount(b) & 1) == 0 ? 1u : 0u;
     }
 
-    const ErrorLeg e = error_leg(Mode::rxdma, n);
-    print(plain, "  receive engine: received ", e.received, " of ", n, ", equal to the pattern ",
-          e.exact, ", frame ", e.err.frame, " parity ", e.err.parity, " hw_overrun ",
-          e.err.hw_overrun, " (", zero_parity, " characters carry a zero parity bit)", crlf);
-    bench.verdict("under the engine every character arrived: none taken by a clear",
-                  e.received == n);
-    bench.verdict("each one byte-exact and in its place", e.exact == n);
-    bench.verdict("the errors were counted (one per run the engine published)",
-                  e.err.frame != 0u);
-    bench.verdict("published by the engine's vector, not the owner's ask", e.edges >= 1u);
-    print(plain, "  the skip epoch moved ", e.skips, crlf);
-    bench.verdict("the skip epoch moved (the run is delivered, not clean)", e.skips != 0u);
-
-    const ErrorLeg i = error_leg(Mode::plain, n);
-    print(plain, "  interrupt receiver: received ", i.received, ", frame ", i.err.frame,
-          " parity ", i.err.parity, " hw_overrun ", i.err.hw_overrun, crlf);
+    const ErrorLeg i = error_leg(n);
+    print(plain, "  interrupt receiver: received ", i.received, " of ", n, ", frame ", i.err.frame,
+          " parity ", i.err.parity, " hw_overrun ", i.err.hw_overrun, " (", zero_parity,
+          " characters carry a zero parity bit)", crlf);
     bench.verdict("the interrupt receiver counted K and delivered n - K at most",
                   i.err.frame != 0u && i.received + i.err.frame <= n);
     print(plain, "  the skip epoch moved ", i.skips, crlf);
@@ -1573,14 +1538,75 @@ void tt_levels() {
     bench.verdict("no hardware overrun", hw == 0u);
 }
 
+// ---- x - the one-user rule as a panic ----------------------------------------
+
+/// THE REFUSAL, AS IT IS ENFORCED: the loop's engined transport holds the
+/// claim, and the console's engined transport's init() - a second owner's
+/// arm() - must panic (kernel/panic.hpp: the breadcrumb written with
+/// PanicCode::assert_failed and dma_claim_refused_context(6) = 0xD6, then
+/// the stop with interrupts masked). The proof is read at the next boot,
+/// where main() takes the record and the banner prints it. Reached past
+/// the init only when the refusal did NOT happen: everything is given
+/// back and the verdict is a failure.
+void tx_refusal() {
+    print(plain, "  the loop's engined transport (SERCOM1, owner ", loop_owner,
+          ") takes the claim; then the console's", crlf,
+          "  engined init (SERCOM5, owner ", console_owner,
+          ") must PANIC: THE BOARD STOPS HERE, interrupts masked.", crlf,
+          "  The proof is the breadcrumb at the next boot: the banner after a reset prints", crlf,
+          "  code ", static_cast<uint32_t>(PanicCode::assert_failed), " (assert_failed), context ",
+          hex(dma_claim_refused_context(console_owner)), crlf);
+    (void)drain();
+    loop_live = Loop::txdma;
+    const bool loop_up = LTxDma::init(clock, 115'200u);
+    const bool loop_holds = DmaTxEngine::owner() == loop_owner;
+    if (!loop_up || !loop_holds) {
+        LTxDma::release();
+        loop_live = Loop::none;
+        print(plain, "  the loop's engined transport did not come up (init ", loop_up,
+              ", owner ", DmaTxEngine::owner(), ")", crlf);
+        bench.verdict("the loop's engined transport holds the claim", false);
+        return;
+    }
+    mode_release();
+    const bool up = mode_init(Mode::txdma, 115200);
+    // Past this line only when the second owner's arm() was not refused.
+    const uint8_t owner = DmaTxEngine::owner();
+    UTxDma::release();
+    LTxDma::release();
+    loop_live = Loop::none;
+    (void)mode_init(Mode::plain, 115200);
+    spin_ms(150);
+    print(plain, "  the console's engined init RETURNED (", up, ", owner ", owner,
+          "): no panic", crlf);
+    bench.verdict("a second engined transport's init() panics while the claim is held", false);
+}
+
 // =============================================================================
 // The menu
 // =============================================================================
+
+/// The previous boot's panic record, taken once at boot (fetch-and-clear).
+std::optional<PanicRecord> boot_record;
+
+void print_boot_record() {
+    if (!boot_record) {
+        print(plain, "  no panic record from the previous boot", crlf);
+        return;
+    }
+    const bool assert_failed =
+        boot_record->code == static_cast<uint8_t>(PanicCode::assert_failed);
+    print(plain, "  PANIC RECORD from the previous boot: magic ", hex(boot_record->magic),
+          " (valid), code ", static_cast<uint32_t>(boot_record->code),
+          assert_failed ? " (assert_failed)" : "", ", context ",
+          hex(boot_record->context), crlf);
+}
+
 void banner() {
     print(plain, crlf,
           "test_samc_uart - SAMC21J18A SERCOM5 USART (ch. 30/31), clk=",
           SysClock::hz, " Hz", crlf,
-          "  letters e..p need brio stress on the other end", crlf);
+          "  letters e..p and s need brio stress on the other end; x stops the board", crlf);
     bench.menu();
 }
 
@@ -1597,51 +1623,35 @@ extern "C" void SERCOM1_Handler() {
             }
             break;
         case Loop::txdma: (void)LTxDma::isr(); break;
-        case Loop::rxdma: (void)LRxDma::isr(); break;
         default: break;
     }
 }
 
 extern "C" void SERCOM5_Handler() {
-    switch (live) {
-        case Mode::plain: (void)UPlain::isr(); break;
-        case Mode::txdma: (void)UTxDma::isr(); break;
-        default: (void)URxDma::isr(); break;
+    if (live == Mode::txdma) {
+        (void)UTxDma::isr();
+    } else {
+        (void)UPlain::isr();
     }
 }
 
-// ONLY THE LIVE TRANSPORT MAY BE TOLD - see the note beside `live`.
+// THE ENGINE TELLS ITS OWNER ALONE - see the note beside `live`: the
+// completion goes to the transport that holds the claim, and to no other.
 extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        const uint8_t ch = irq->channel;
-        if (loop_live == Loop::txdma && ch == ch_loop_tx) {
-            (void)LTxDma::dma_isr(ch);
-            continue;
-        }
-        if (loop_live == Loop::rxdma && ch == ch_loop_rx) {
-            if (LRxDma::dma_isr(ch)) {
-                loop_edges = loop_edges + 1u;
-            }
-            continue;
-        }
-        switch (live) {
-            case Mode::txdma: (void)UTxDma::dma_isr(ch); break;
-            case Mode::rxdma:
-                if (URxDma::dma_isr(ch)) {
-                    rx_vector_edges = rx_vector_edges + 1u;
-                }
-                break;
-            default: break;
-        }
+    const uint8_t owner = brio::DmaTxEngine::owner();
+    if (owner == loop_owner) {
+        LTxDma::dma_isr();
+    } else if (owner == console_owner) {
+        UTxDma::dma_isr();
     }
 }
 
 int main() {
+    // Taken FIRST and once: the record is fetch-and-clear.
+    boot_record = brio::take_panic_record<brio::SamPlatform>();
+
     const bool clock_ok = SysClock::init();
     const bool tick_ok = brio::Ticker::init(clock);
-
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
 
     const bool serial_ok = mode_init(Mode::plain, 115200);
     brio::enable_interrupts();
@@ -1649,11 +1659,10 @@ int main() {
     bench.letter('a', "the baud generator's arithmetic", ta_baud);
     bench.letter('b', "every frame format, written and read back", tb_format);
     bench.letter('c', "the transmit ring's contract under pressure", tc_ring);
-    bench.letter('d', "the engines' compile-time and register facts", td_engines);
+    bench.letter('d', "the transmit engine's facts and its claim", td_engine);
 
     bench.letter('e', "echo, plain transport (host)", te_plain_echo, false);
     bench.letter('f', "echo, DMA transmitter (host)", tf_txdma_echo, false);
-    bench.letter('g', "echo, DMA receiver (host)", tg_rxdma_echo, false);
     bench.letter('h', "echo at 1 and 2 Mbaud, DMA TX beside irq RX (host)",
                  th_duplex_echo, false);
     bench.letter('i', "receive-only sustained (host)", ti_sink, false);
@@ -1662,19 +1671,20 @@ int main() {
     bench.letter('l', "the frame-format matrix (host)", tl_formats, false);
     bench.letter('m', "a MISMATCHED frame, and the recovery (host)", tm_mismatch,
                  false);
-    bench.letter('n', "ring pressure: eager and lazy harvests (host)", tn_pressure,
+    bench.letter('n', "ring pressure: an eager consumer and a lazy one (host)", tn_pressure,
                  false);
     bench.letter('p', "bursty traffic with idle gaps (host)", tp_burst, false);
     bench.letter('q', "tx_idle() on the loop: the wire's idle", tq_tx_idle);
-    bench.letter('r', "the receive engine on the loop: the edge from the vector", tr_engine_edge);
-    bench.letter('s', "errors under the receive engine and the interrupt receiver (host)",
-                 ts_errors, false);
+    bench.letter('r', "the interrupt receiver on the loop: its edge and its skip",
+                 tr_receiver_edge);
+    bench.letter('s', "errors under the interrupt receiver (host)", ts_errors, false);
     bench.letter('t', "the interrupt receiver at 3 Mbaud on the loop", tt_levels);
+    bench.letter('x', "the one-user rule as a PANIC (stops the board)", tx_refusal, false);
 
     if (serial_ok) {
         print(plain, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
+        print_boot_record();
         banner();
     }
     bench.prompt();

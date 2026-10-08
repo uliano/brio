@@ -11,7 +11,10 @@ THE PROTOCOL, printed by the board and parsed here:
     HOST <op> <mode> <baud> <format> <window_ms> <count>
 
       op       echo | sink | source | burst | poke
-      mode     0 irqTX+irqRX, 1 dmaTX+irqRX, 2 irqTX+dmaRX, 3 dmaTX+dmaRX
+      mode     0 irqTX+irqRX, 1 dmaTX+irqRX, 3 dmaTX+dmaRX - the board's
+               transport shape, carried into the leg's result and not acted
+               on (test_samc_uart announces 0 and 1, test_stm32_serial 0,
+               test_stm32_dma 3)
       baud     the rate the board is about to switch to
       format   e.g. 8N1, 8E1, 7O2 - bits, parity, stop bits
       window   how long the board's window lasts, in milliseconds
@@ -57,7 +60,7 @@ is a count of bytes, never a rate.
 USE
 
     brio flash C test_samc_uart
-    brio stress --board <board> --letters efghijklmnp
+    brio stress --board <board> --letters efhijklmnp
 
     brio stress --board <board> --letters h --repeat 5
     brio stress --port /dev/ttyUSB0 --letters k
@@ -337,7 +340,7 @@ def main():
                          "are the manifest's)")
     ap.add_argument("--port", default=None,
                     help="the console device, when it is not a manifest board's")
-    ap.add_argument("--letters", default="efghijklmnp",
+    ap.add_argument("--letters", default="efhijklmnp",
                     help="which suite letters to drive, in order (the "
                          "default is the SAM's test_samc_uart; the STM32G0's "
                          "test_stm32_serial wants 'ywv', test_stm32_dma "

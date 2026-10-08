@@ -20,7 +20,7 @@ are the same peripheral at two addresses, but the device header gives
 each a role - `ADC0_MASTER_SLAVE_MODE` = 1, `ADC1_MASTER_SLAVE_MODE` =
 2 - and the roles are asymmetric in the registers: only ADC1 has a
 working `CTRLA.SLAVEEN`, only ADC0's `CTRLC.DUALSEL` means anything.
-Each has its own generic clock channel, its own DMA trigger and its own
+Each has its own generic clock channel, its own DMA request and its own
 interrupt vector.
 
 **The two pad maps OVERLAP but are different maps.** PA08 is ADC0/AIN8
@@ -98,6 +98,17 @@ driver does not know CLK_ADC at the moment `select()` is called.
 verdict has to be captured before the value - `result()` does, and
 `window_hit()` reports it for the last value read.
 
+**RESULT is sixteen bits whatever the resolution** (38.8.20), **and a
+result nobody read stays standing.** The RESRDY flag falls on a write of
+the flag as well as on a read of RESULT (38.8.7), while the DMA request
+of the same name falls only on the read (38.6.4) - the flag and the
+request differ - and OVERRUN is set when "RESULT is written before the
+previous value has been read" (38.8.7). The five warm-up conversions
+`init()` spends for erratum 1.4.6 are the usual standing result, so an
+owner arming a capture reads RESULT away first: the read takes down the
+flag and the request and leaves the next conversion nothing to overrun,
+where a write of the flag does the first alone.
+
 **One interrupt vector for all three sources** (RESRDY, OVERRUN,
 WINMON), so `isr()` returns the pending mask and the application
 dispatches. It clears OVERRUN and deliberately does not clear the other
@@ -134,11 +145,10 @@ MUXPOS codes; `AdcNegative` the seven MUXNEG ones. `AdcConfig` carries
 the whole configuration and `adc_config_valid(instance, cfg)` is the one
 place every rule of the chapter is written down.
 
-The EVSYS and DMAC vocabularies this peripheral publishes -
-`resrdy_generator`, `winmon_generator`, `start_event_user`,
-`flush_event_user`, `dma_trigger_resrdy` - live here and not in
-`evsys.hpp` or `dmac.hpp`: those files own the fabric and the channels,
-a peripheral owns its own codes ([evsys.md](evsys.md)).
+The EVSYS vocabulary this peripheral publishes - `resrdy_generator`,
+`winmon_generator`, `start_event_user`, `flush_event_user` - lives here
+and not in `evsys.hpp`: that file owns the fabric, a peripheral owns its
+own codes ([evsys.md](evsys.md)).
 
 ### One example per use
 
@@ -167,19 +177,26 @@ constexpr brio::AdcConfig cfg{
 static_assert(brio::adc_result_steps(cfg) == 65536);
 ```
 
-A conversion started by an event and taken away by the DMAC, with no
-CPU in the path (the asynchronous channel is not a preference - see the
+A conversion started by an event, its result taken by the converter's
+own interrupt (the asynchronous channel is not a preference - see the
 errata below):
 
 ```
 Meter::init(0, cfg, 48'000'000);
-Meter::enable(false);
+Meter::enable(false);                       // EVCTRL is enable-protected
 Meter::start_on(channel, brio::EventChannelConfig{
                              .generator = brio::Tc<2>::overflow_generator,
                              .path = brio::EventPath::asynchronous});
+(void)Meter::result();                      // no result left standing
+Meter::arm(Meter::flag_resrdy);
+brio::Nvic::enable(Meter::irq());
 Meter::enable(true);
-// DMA channel triggered by Meter::dma_trigger_resrdy, one beat per
-// conversion, source &Meter::regs().ADC_RESULT with no increment.
+
+extern "C" void ADC0_Handler() {
+    if ((Meter::isr() & Meter::flag_resrdy) != 0) {
+        buffer[taken++] = Meter::resrdy();   // reading RESULT clears RESRDY
+    }
+}
 ```
 
 The sampler AO (`util/analog_sampler.hpp`):
@@ -239,39 +256,6 @@ noisy) is live at every revision and is measured: see
 [dac.md](dac.md), where the output half is large and the reading half is
 declined, and where the workaround's "external wire" turns out to have
 zero length because PA02 is DAC/VOUT and ADC0/AIN0 at once.
-
-## Streaming via DMA
-
-A sampled stream is `DmaPingPongEngine<ch, uint16_t>` armed on
-`Adc<n>::dma_trigger_resrdy` with RESULT as its source: the engine fills
-one caller-owned buffer while the caller drains the other, and the
-accounting - laps, overruns, stalls - IS the API. The contract and the
-hardening are in [dmac.md](dmac.md); three things belong to THIS
-chapter.
-
-**The element is a halfword** because RESULT is 16 bits, whatever the
-resolution and however much of it the accumulation uses.
-
-**THE DMA REQUEST IS THE RESRDY FLAG, and reading RESULT is what takes
-it down** (38.6.4). Two consequences: clearing the flag by writing it is
-not enough - a stale RESULT moves a stale beat - and the request stands
-as a LEVEL, so a conversion left unread before the stream starts is a
-request the channel will serve. That conversion is a real one but NOT
-one of the stream's (the five warm-up conversions `init()` spends for
-erratum 1.4.6 are the usual source), so an owner arming a stream should
-**drain** it - read RESULT - rather than `kick()` past it. Measured:
-kicked instead, it lands in slot zero and shifts the whole capture by a
-sample.
-
-**Who reports a lost sample.** A stalled stream moves nothing, so the
-engine can count the STALL and not the loss; the count of samples that
-arrived unserved is INTFLAG.OVERRUN, here, and nowhere else.
-
-Measured in `test_samc_analog_dma`: at 5 kHz, event-started from a
-timer, 1992 samples in 400 ms (4980/s against 5000 nominal, inside a
-1 kHz tick's own quantization of the window), every block complete and
-every sample matching a static calibration of the source within 3..6
-counts.
 
 ## Bench findings
 
@@ -346,19 +330,16 @@ From `test_samc_adc`, 9 letters / 97 verdicts, wireless, on the C21J at
   exactly as printed, and the thresholds follow the resolution - at
   8 bits, full scale is 256 and a MODE1 threshold of 128 is the
   mid-point.
-- **THE NO-CPU CHAIN RUNS IN BOTH DIRECTIONS AT ONCE.** A TC2 overflow
-  crosses an asynchronous event channel into ADC0's START user; each
-  conversion's RESRDY pulls one DMA beat out of RESULT; the same RESRDY
-  crosses a second channel into TC3, which counts them. 16 of 16 results
-  land, every one at the rail the pad holds, at both rails, with 58
-  result-ready events counted in the same window. With the pacer stopped
-  **nothing moves at all** - the event really is the only thing starting
-  a conversion.
-- **THE DMA REQUEST IS THE RESRDY FLAG, and clearing the flag is not the
-  same as reading RESULT.** 38.6.4 says the request is "cleared when the
-  RESULT register is read". A result left standing from a previous run
-  moves one stale beat the instant the channel is enabled, so the remedy
-  is to read RESULT away, not to write the flag.
+- **THE EVENT CHAIN RUNS IN BOTH DIRECTIONS AT ONCE.** A TC2 overflow
+  at about 1 kHz crosses an asynchronous event channel into ADC0's START
+  user; each conversion's RESRDY raises the converter's own interrupt,
+  whose handler reads RESULT into a buffer; the same RESRDY crosses a
+  second channel into TC3, counting events (EVACT = COUNT). 16 of 16
+  results are taken, every one at the rail the pad holds, at both rails;
+  in the 60 ms window the handler ran 59 times and TC3 counted 59
+  result-ready events - one interrupt per event, none missed. With the
+  pacer stopped **nothing moves at all** - the event really is the only
+  thing starting a conversion.
 - **AVERAGING WORKS, AND THE BOARD IS ALMOST TOO QUIET TO SHOW IT.** The
   three internal sources span 1 count (1/4 VDDANA), 4 counts (1/4
   VDDCORE) and 5 counts (INTREF) over 64 single 12-bit readings. On the
@@ -376,8 +357,8 @@ From `test_samc_adc`, 9 letters / 97 verdicts, wireless, on the C21J at
   `AnalogSample` events received through the kernel, 25 on the scaled
   supply and 24 on the pad, **zero** results with an input code outside
   the list, each value attributed to the right input. A hardware
-  sequencer and a DMA trigger do not disturb the shape, because the
-  sampler uses neither.
+  sequencer does not disturb the shape, because the sampler does not use
+  it.
 - **ERRATUM 1.4.10 REPRODUCES, AND IT IS WORSE THAN ITS OWN SENTENCE.**
   A narrow probe sees nothing: with ADC1 enabled and ADC0 disabled,
   ADC0.SYNCBUSY reads 0x0000. Running the two converters in earnest is
@@ -396,9 +377,8 @@ From `test_samc_adc`, 9 letters / 97 verdicts, wireless, on the C21J at
   faster CLK_ADC or a higher source impedance is not measured.
 
 **Table 38-4, all four rows, with a real SleepWalking conversion.**
-An RTC periodic event on an ASYNCHRONOUS channel starts the conversions
-and the DMAC is not involved, so the CPU is out of the loop entirely:
-in a 30 ms window the converter ran 32 times awake, 31 or 32 times in a
+An RTC periodic event on an ASYNCHRONOUS channel starts the conversions,
+so the CPU is out of the loop entirely: in a 30 ms window the converter ran 32 times awake, 31 or 32 times in a
 STANDBY with CTRLA.RUNSTDBY set (both ONDEMAND values), and once or not
 at all with it clear (both ONDEMAND values). The result read at the
 wake is the quarter of full scale the internal divider owes. **ERRATUM
@@ -521,6 +501,8 @@ Driver gaps:
   `samc21/nvm.hpp` reads.
 - **No rebase / ClockUser**, deliberately: the converter has its own
   generic clock channel and a main-clock change does not move CLK_ADC.
+- **The DMA request** (RESRDY, 38.6.4): declined - this stratum drives
+  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
 
 Implemented but not bench-verified:
 - **The ADC as a WAKE source**: RESRDY, WINMON and OVERRUN have never

@@ -41,7 +41,8 @@
 //   g  AcNegative::dac - a comparator threshold from the DAC
 //   h  the transfer curve, honestly framed
 //   i  time: the startup, and a full-scale step timed by the comparator
-//   j  the no-CPU chain: an event starts it, the DMAC feeds DATABUF
+//   j  the event-paced DAC: an event starts each conversion, the DAC's
+//      own EMPTY interrupt feeds DATABUF from a table
 //   k  erratum 1.9.2: the EMPTY flag across a standby
 //
 // build: boards = c21j
@@ -53,7 +54,6 @@
 #include "samc21/adc.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/dac.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/osc32kctrl.hpp"
@@ -138,21 +138,23 @@ bool stopwatch_start() {
 uint32_t ticks_now() { return Stopwatch::count32(); }
 
 // ---------------------------------------------------------------------------
-// The event fabric (letter j).
+// The event fabric and the interrupt feed (letter j).
 // ---------------------------------------------------------------------------
-constexpr uint8_t dma_ch = 0;
 constexpr uint8_t ev_start_channel = 0;    // TC2 overflow -> DAC START
 constexpr uint8_t ev_empty_channel = 1;    // DAC EMPTY    -> TC3 counts
 constexpr uint8_t ev_gen = 6;
-using Feed = DmaChannel<dma_ch>;
 using EvGen = Gclk<ev_gen>;
 using Pacer = Tc<2>;
 using Counter = Tc<3>;
 
-/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
-/// controller's reads nor its writes.
+/// The table DAC_Handler plays into DATABUF, one value an EMPTY, and the
+/// handler's place in it. VOLATILE because the handler and the letter
+/// share them: the letter fills and arms, the handler advances.
 constexpr uint16_t wave_len = 32;
 volatile uint16_t wave[wave_len];
+volatile uint16_t feed_next = 0;     ///< the index the next EMPTY writes
+volatile uint16_t feed_left = 0;     ///< values still to write
+volatile uint32_t feed_empties = 0;  ///< EMPTY interrupts taken
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -301,11 +303,10 @@ void ta_block() {
 
     print(serial, "  EVSYS: EMPTY generator ", Dac::empty_generator,
           ", START user ", Dac::start_event_user,
-          " (asynchronous path only); DMAC trigger ", Dac::dma_trigger_empty,
-          "; GCLK id ", Dac::gclk_id, crlf);
-    bench.verdict("the generator, user and trigger codes are the header's own",
+          " (asynchronous path only); GCLK id ", Dac::gclk_id, crlf);
+    bench.verdict("the generator, user and clock codes are the header's own",
                   Dac::empty_generator == 79u && Dac::start_event_user == 38u &&
-                      Dac::dma_trigger_empty == 45u && Dac::gclk_id == 36u);
+                      Dac::gclk_id == 36u);
 
     // THE GEOMETRIC GIFT, stated as data rather than as a comment.
     bench.verdict("VOUT and ADC0/AIN0 ARE THE SAME PAD - erratum 1.8.9's "
@@ -1307,16 +1308,24 @@ void ti_timing() {
 }
 
 // =============================================================================
-// j - the no-CPU chain: an event starts it, the DMAC feeds DATABUF
+// j - the event-paced DAC, fed from its EMPTY interrupt
 // =============================================================================
 //
-// THE SIGNATURE MOVE OF THIS STRATUM, and this chapter has all the
-// pieces: a timer overflow crosses an asynchronous event channel into
-// the DAC's START user, which copies DATABUF into DATA and converts;
-// DATABUF going empty raises the DMA request that pulls the next value
-// out of a table in RAM; and the same EMPTY becomes an event a second
-// timer counts. Nothing in the path is the CPU.
-void tj_no_cpu() {
+// A timer overflow crosses an asynchronous event channel into the DAC's
+// START user, which copies DATABUF into DATA and converts; DATABUF
+// going empty raises INTFLAG.EMPTY, and DAC_Handler answers it with the
+// next value of a table in RAM; and the same EMPTY becomes an event a
+// second timer counts. THE CPU IS IN THE PATH for one DATABUF write a
+// conversion - the pacing and the conversion stay the event's, the
+// supply is the handler's (41.6.3 and 41.6.4: EMPTY is a DMA request
+// and an interrupt source alike).
+//
+// THE FIRST VALUE IS THE STARTER'S, because EMPTY is an EVENT and not a
+// state: 41.8.6 sets it when DATABUF is consumed, so a converter just
+// enabled whose buffer was never written reads it clear, and a feed
+// that waited for the flag would never begin. The letter writes wave[0]
+// itself and the handler writes the other wave_len - 1.
+void tj_event_feed() {
     for (uint16_t i = 0; i < wave_len; ++i) {
         wave[i] = static_cast<uint16_t>((i & 1u) != 0u ? 900u : 100u);
     }
@@ -1371,24 +1380,6 @@ void tj_no_cpu() {
                                      .generator = Dac::empty_generator,
                                      .path = EventPath::asynchronous}));
 
-    (void)Feed::reset();
-    const DmaChannelConfig ch{
-        .trigger = Dac::dma_trigger_empty,
-        .action = DmaTriggerAction::beat,
-    };
-    bench.verdict("a DMA channel is armed on the DAC's EMPTY trigger",
-                  Feed::configure(ch));
-    const DmaTransfer t{
-        .source = &wave[0],
-        .destination = &Dac::regs().DAC_DATABUF,
-        .beats = wave_len,
-        .beat = DmaBeat::hword,
-        .destination_increment = false,
-    };
-    bench.verdict("with the waveform in RAM as its source and DATABUF as its "
-                  "destination",
-                  Feed::load(t));
-
     bench.verdict("ADC0 watches the pad", adc0_up(pad_cfg));
     Adc0::select(AnalogIn<Vout>{});
 
@@ -1396,7 +1387,14 @@ void tj_no_cpu() {
     (void)Counter::enable(true);
     (void)Counter::set_count16(0);
     (void)Dac::enable(true);
-    (void)Feed::enable(true);
+    // The starter's value, then the handler's turn. UNDERRUN is left
+    // UNARMED: isr() would clear it, and the letter reads it below.
+    feed_empties = 0;
+    Dac::buffer(wave[0]);
+    feed_next = 1;
+    feed_left = static_cast<uint16_t>(wave_len - 1u);
+    Dac::arm(Dac::flag_empty);
+    Nvic::enable(Dac::irq());
     (void)Pacer::enable(true);
 
     // Sample the pad while the chain runs. A staircase alternating
@@ -1419,17 +1417,20 @@ void tj_no_cpu() {
     (void)Counter::enable(false);
 
     print(serial, "  while the chain ran the pad walked between ", lo, " and ",
-          hi, " counts; TC3 counted ", counted, " EMPTY events", crlf);
-    bench.verdict("THE PAD MOVED WITH NO CPU IN THE PATH - the ADC saw both "
-                  "levels of a waveform the DMAC fed and an event started",
+          hi, " counts; TC3 counted ", counted, " EMPTY events, the handler "
+          "took ", feed_empties, " EMPTY interrupts and wrote ",
+          feed_next, " of ", wave_len, " values (wave[0] the starter's)", crlf);
+    bench.verdict("THE PAD FOLLOWED THE TABLE - the ADC saw both levels of a "
+                  "waveform the EMPTY interrupt fed and an event started",
                   lo < 600u && hi > 3300u);
     bench.verdict("THE DAC IS A GENERATOR TOO: TC3 counted the buffer going "
                   "empty",
                   counted > 0u);
-    bench.verdict("and the DMA channel emptied its block",
-                  (Feed::flags() & DmaFlag::complete) != 0u);
+    bench.verdict("and the handler played the whole table into DATABUF, one "
+                  "value an EMPTY",
+                  feed_left == 0u && feed_next == wave_len);
 
-    // UNDERRUN: with the DMA exhausted, the next START event finds
+    // UNDERRUN: with the table played, the next START event finds
     // DATABUF empty. 41.6.4 says that is exactly what the flag means,
     // and it can only happen when events are what start conversions.
     Dac::clear_flags(Dac::flag_underrun);
@@ -1437,30 +1438,34 @@ void tj_no_cpu() {
     wait_ms(20);
     (void)Pacer::enable(false);
     const bool under = Dac::underrun();
-    print(serial, "  with the DMA exhausted and the pacer still running, "
+    print(serial, "  with the table played and the pacer still running, "
           "UNDERRUN reads ", yes_no(under), crlf);
     bench.verdict("UNDERRUN IS WHAT 41.6.4 SAYS IT IS - a start event with "
                   "nothing in DATABUF, and it exists only in the event-driven "
                   "shape",
                   under);
 
-    // A control: nothing moves without the pacer.
-    (void)Feed::enable(false);
-    (void)Feed::reset();
-    (void)Feed::configure(ch);
-    (void)Feed::load(t);
+    // A control: nothing moves without the pacer. DATA first - a value
+    // standing in DATABUF would make the DATA write a discarded one
+    // (41.6.7, see Dac::set()) - then the feed re-armed on the table.
+    Dac::disarm(Dac::flag_empty);
     (void)Dac::set(512);
     settle();
-    (void)Feed::enable(true);
+    Dac::buffer(wave[0]);
+    feed_next = 1;
+    feed_left = static_cast<uint16_t>(wave_len - 1u);
+    Dac::arm(Dac::flag_empty);
     wait_ms(20);
     const Spread still = spread_of<Adc0>(16);
     print(serial, "  with the pacer stopped the pad holds ", still.mean,
-          " counts, spread ", still.span(), crlf);
-    bench.verdict("with nothing starting conversions the DMA cannot move the "
+          " counts, spread ", still.span(), "; the handler wrote ",
+          feed_next - 1u, " values", crlf);
+    bench.verdict("with nothing starting conversions the feed cannot move the "
                   "output on its own - the event really is the trigger",
-                  still.span() < 64u);
+                  still.span() < 64u && feed_next == 1u);
 
-    (void)Feed::enable(false);
+    Nvic::disable(Dac::irq());
+    Dac::disarm(Dac::flag_empty);
     Evsys::disconnect(Counter::event_user);
     (void)Dac::enable(false);
     (void)Dac::stop_events();
@@ -1683,9 +1688,24 @@ extern "C" void RTC_Handler() {
     rtc_fired = true;
 }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
+/// The DAC's one vector, letter j's feed: each EMPTY writes the next
+/// value of the table into DATABUF, which is also what clears the flag
+/// (41.8.6). With the table played the handler disarms EMPTY instead -
+/// isr() leaves that flag standing by contract, and nothing else would
+/// clear it.
+extern "C" void DAC_Handler() {
+    const uint8_t pending = brio::Dac::isr();
+    if ((pending & brio::Dac::flag_empty) != 0u) {
+        feed_empties = feed_empties + 1u;
+        const uint16_t left = feed_left;
+        if (left != 0u) {
+            const uint16_t i = feed_next;
+            brio::Dac::buffer(wave[i]);
+            feed_next = static_cast<uint16_t>(i + 1u);
+            feed_left = static_cast<uint16_t>(left - 1u);
+        } else {
+            brio::Dac::disarm(brio::Dac::flag_empty);
+        }
     }
 }
 
@@ -1694,8 +1714,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     bench.letter('a', "the block, its vocabularies, its disciplines, the "
@@ -1712,15 +1730,14 @@ int main() {
     bench.letter('g', "a comparator threshold from the DAC", tg_comparator);
     bench.letter('h', "the transfer curve, honestly framed", th_curve);
     bench.letter('i', "time: the startup and a full-scale step", ti_timing);
-    bench.letter('j', "the no-CPU chain: event in, DMAC feeding DATABUF",
-                 tj_no_cpu);
+    bench.letter('j', "the event-paced DAC fed from its EMPTY interrupt",
+                 tj_event_feed);
     bench.letter('k', "erratum 1.9.2: the EMPTY flag across a standby",
                  tk_standby_erratum);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

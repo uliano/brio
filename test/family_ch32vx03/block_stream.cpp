@@ -12,7 +12,7 @@
 // mode - CNTR reloads itself, the lap interrupt only counts - and the
 // source does NOT, because "skip rather than tear" cannot be decided
 // after the edge on a channel that never stops (design/block-stream.md,
-// and the same decision on the SAM C21 and the STM32G0). So the source
+// and the same decision on the STM32G0). So the source
 // stops at every block and the handler re-arms the other buffer.
 #include "ch32vx03/adc.hpp"
 #include "ch32vx03/dma.hpp"

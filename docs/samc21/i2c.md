@@ -119,7 +119,7 @@ the time-out statuses auto-clear on the next tenure's ADDR write
 
 **The automatic length, as this silicon runs it** (ADDR.LEN + LENEN,
 33.10.9, 33.6.4.1.2; every point traced flag by flag against the peer at
-100 kHz):
+100 kHz; the host does not use it, the table below):
 
 - A WRITE under LEN = n raises MB after the address and after every data
   byte but the n-th, each with the clock held for the next DATA; after
@@ -137,15 +137,11 @@ the time-out statuses auto-clear on the next tenure's ADDR write
   ARBLOST, whether or not software swept the flag first. Waiting for SB
   to fall, then writing ADDR, is clean: the host holds the new START
   until its own STOP has left.
-- WITHOUT LEN the DMA feeds DATA past a client's NACK - the transmit
-  request rises again and the host sends the byte - so the NACK is seen
-  only at the block's end: LEN is what makes a DMA write safe.
-- Every DMA-served byte raises MB (a write) or SB (a read) and the beat
-  clears it within a few cycles: an armed flag is an interrupt per byte
-  (measured: seven entries for a six-byte block, six of them finding the
-  flag already gone).
 - An empty probe under LEN = 0 is the STOP after the address's ACK, again
   with no flag; to nobody, RXNACK and the STOP with no ERROR.
+- LEN is eight bits (33.10.9): 255 bytes is the longest counted tenure,
+  so a write that wants the MB after its last byte (LEN = n + 1) is at
+  most 254 bytes long.
 
 **Smart mode, as this silicon runs it** (CTRLB.SMEN, 33.6.3.2): the DATA
 read sends ACKACT and clocks the next byte in WHATEVER ACKACT SAYS -
@@ -162,10 +158,10 @@ ACK back first.
 
 | item | where | the engine |
 |---|---|---|
-| MB / SB, one interrupt a byte with the clock held | 33.6.2.4, 33.10.6 | THE PUMP: a build without engines, and a phase under `dma_min_bytes` on one with them. One STATUS snapshot a handler, the SYSOP wait inline (one load when the last operation synchronized long ago) |
-| smart mode | 33.6.3.2 | USED, always: a pumped read byte is one DATA load, no command and no SYSOP wait; the DMA requires it (33.6.4.1) |
-| the two DMA requests (TX, RX) | 33.6.4.1.2, table 33-2 | USED through the optional `TxEngine` / `RxEngine` slots, each on its own: an engined read ONE interrupt, an engined write THREE whatever its length (the shapes below) |
-| ADDR.LEN + LENEN | 33.10.9 | USED on the engined phases: LEN = r on a read (the NACK and STOP the silicon's), LEN = w + 1 on a write (the NACK protection, and the edge); NOT on the pump, whose every byte is software's anyway |
+| MB / SB, one interrupt a byte with the clock held | 33.6.2.4, 33.10.6 | THE PUMP, every tenure. One STATUS snapshot a handler, the SYSOP wait inline (one load when the last operation synchronized long ago) |
+| smart mode | 33.6.3.2 | USED, always: a pumped read byte is one DATA load, no command and no SYSOP wait |
+| the two DMA requests (TX, RX) | 33.6.4.1.2, table 33-2 | DECLINED: erratum 1.10.4 ([dmac.md](dmac.md)) - this stratum drives the DMAC for the Uart's transmitter alone |
+| ADDR.LEN + LENEN | 33.10.9 | DECLINED: its use would be to close a DMA phase; the pump closes a read by smart mode and a write by its last MB, every byte software's anyway. The resource keeps the verb (`I2cm::start_address_len`), its behaviour measured above |
 | quick command (QCEN) | 33.6.3.4 | DECLINED for the probe: an empty request costs one MB either way |
 | SCLSM = 1 | 33.6.2.4.5 | DECLINED: the engine's decisions are taken before the acknowledge (SCLSM = 0), and erratum 1.17.13 refuses it beside QCEN |
 | High-speed mode | 33.6.2.4.6 | REFUSED: errata 1.17.7 and 1.17.9 |
@@ -235,7 +231,7 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   specification floor), the Fm+ 1:2 split per the chapter's note,
   rounding that never lands above the request, and
   `i2c_scl_hz()` as the readback. Pinned by static_asserts.
-- **`I2cHost<n, pads, generator, TxEngine, RxEngine>`** - the engine
+- **`I2cHost<n, pads, generator>`** - the engine
   `util/i2c_bus.hpp` (= BusMaster) drives: the I2cHost Request every
   target shares, field for field ({addr, tx, tx_len, rx, rx_len,
   ReplyTo<I2cDone>, speed}; one tenure = write, read, or write-then-read
@@ -246,24 +242,14 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   bus_error), per-speed register pairs cached with `speed_ok()` and the
   refused-not-slowed rule (a speed the core cannot make is answered
   `i2c_rejected` inside `start()`, the one synchronous completion,
-  delivered through the arbiter). Its two optional DMA engine slots
-  (DmaTxEngine / DmaRxEngine from samc21/dmac.hpp, NoDmaEngine by
-  default, each slot on its own) take every phase of `dma_min_bytes` or
-  more: a READ of r bytes is ONE interrupt - LEN = r, the receive block's
-  completion the edge, `dma_isr()` returning it - and the next `start()`
-  waits, bounded, for the SB that block's automatic STOP leaves standing
-  (`tail_waits()` counts the waits that spun); a WRITE of w bytes is
-  THREE - LEN = w + 1, the address's MB starting the block, the block's
-  completion arming MB again, the MB after byte w for the STOP or the
-  repeated START - and a 255-byte write takes the pump (LEN counts to
-  255). The DMAC itself is the app's (Dmac::init() before an engined
-  init(), DMAC_Handler bound). `configuration(speed)` is the resource
+  delivered through the arbiter). Every tenure rides the byte pump, one
+  interrupt a byte; there is no DMA phase ([dmac.md](dmac.md), erratum
+  1.10.4). `configuration(speed)` is the resource
   configuration the engine runs, what a caller that reconfigures the
   resource behind it starts from. `unstick()` - nine open-drain pulses
   and a Stop by hand, which leaves a HEALTHY wire untouched (SDA read
   first; zero pulses is the answer and the action) - and `recover()`,
-  the init() tail re-run from the cached configuration with the engines
-  re-claimed: what a timed I2cBus calls on a tenure that never answered,
+  the init() tail re-run from the cached configuration: what a timed I2cBus calls on a tenure that never answered,
   and the ONLY way out of a parked START on this silicon (the release
   does not fire it - letter g). recover() fixes the PERIPHERAL;
   unstick() fixes the wire; neither replaces the other.
@@ -287,21 +273,6 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
     // wire's own answer (i2c_nack_addr is the address-scanner's probe
     // result).
 
-With the DMA engines - one interrupt for a read, three for a write,
-whatever their length:
-
-    using I2cHw = brio::I2cHost<3, my_pads, 0, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>>;
-    // main: brio::Dmac::init(); I2cHw::init(clock, measured_rise_ns); ...
-    extern "C" void DMAC_Handler() {
-        while (const auto irq = brio::Dmac::take_pending()) {
-            if (I2cHw::dma_isr(irq->channel, irq->flags)) {
-                brio::post<I2c>(brio::TransferDone{I2cHw::status()});
-            }
-        }
-    }
-    // SERCOM3_Handler as above: the address, a write's last byte and
-    // every error still come through it.
-
 ## The host's cost, measured (bench_samc letter i)
 
 SERCOM3 on PA22/PA23 at 48 MHz against an AVR128DB48 running
@@ -309,77 +280,54 @@ SERCOM3 on PA22/PA23 at 48 MHz against an AVR128DB48 running
 the register pair's on this node (481, 121 and 49 cycles at 100 kHz,
 400 kHz and Fm+, 166 ns rise); `wire` is the tenure's SCL rising edges
 times that period. THE PEER IS A POLLED CLIENT and stretches every byte
-by its own turnaround - about 220 cycles a frame at 400 kHz, which the
-engined 255-byte read, whose bytes the DMA takes within a few cycles,
-reads almost alone (x 1.20) - so the host's own share is the difference
-between the columns, and its CPU is `busy` and `isr`. Plain bindings,
-the thread spinning on the edge, best of 8, CLK_CPU cycles; before is
-the engine as it was (one interrupt a byte, smart mode off, the
-Request copied whole), after the pump of the same build without
-engines, engines the build with DmaTxEngine and DmaRxEngine; the vendor's
-column is the data sheet's own polled sequence (33.6.2.4, smart mode
-off) against the same peer:
+by its own turnaround - about 220 cycles a frame at 400 kHz, which a
+255-byte read reads almost alone (x 1.20 for the pump and the data
+sheet's loop alike) - so the host's own share is the difference between
+the columns, and its CPU is `busy` and `isr`. Plain bindings, the thread
+spinning on the edge, best of 8, CLK_CPU cycles; `naive` is the shape
+the pump is measured against (one interrupt a byte, smart mode off, the
+Request copied whole), `pump` the engine; the vendor's column is the
+data sheet's own polled sequence (33.6.2.4, smart mode off) against the
+same peer:
 
-| tenure | wire | before | after (pump) | engines | the data sheet's loop |
-|---|---|---|---|---|---|
-| 1-byte write, 400 kHz | 2299 | 3504 | 3212 | (pump) | 2623 |
-| 1 + 1 register read, 400 kHz | 4598 | 6135 | 5900 | (pump) | 5148 |
-| 16-byte write, 400 kHz | 18634 | 26004 | 23599 | 21454 | 22791 |
-| 255-byte read, 400 kHz | 278905 | 374672 (x 1.34) | 336537 (x 1.20) | 335790 (x 1.20) | 336033 (x 1.20) |
-| 254/255-byte write, 400 kHz | 278905 | 384787 (x 1.37) | 347330 (x 1.24) | 307871 (254: x 1.10) | 345970 (x 1.24) |
-| 255-byte read, 100 kHz | 1108705 | 1180721 (x 1.06) | 1137878 (x 1.02) | 1111460 (x 1.00) | 1134420 (x 1.02) |
-| 255-byte read, Fm+ | 112945 | 222014 (x 1.96) | 183626 (x 1.62) | 145945 (x 1.29) | 183300 (x 1.62) |
+| tenure | wire | naive | pump | the data sheet's loop |
+|---|---|---|---|---|
+| 1-byte write, 400 kHz | 2299 | 3504 | 3212 | 2623 |
+| 1 + 1 register read, 400 kHz | 4598 | 6135 | 5900 | 5148 |
+| 16-byte write, 400 kHz | 18634 | 26004 | 23599 | 22791 |
+| 255-byte read, 400 kHz | 278905 | 374672 (x 1.34) | 336537 (x 1.20) | 336033 (x 1.20) |
+| 255-byte write, 400 kHz | 278905 | 384787 (x 1.37) | 347330 (x 1.24) | 345970 (x 1.24) |
+| 255-byte read, 100 kHz | 1108705 | 1180721 (x 1.06) | 1137878 (x 1.02) | 1134420 (x 1.02) |
+| 255-byte read, Fm+ | 112945 | 222014 (x 1.96) | 183626 (x 1.62) | 183300 (x 1.62) |
 
 And the CPU, metered (the stamps' 56 cycles an entry inside isr), at
 400 kHz:
 
-| tenure | before: irq, isr, busy | after (pump) | engines |
-|---|---|---|---|
-| 16-byte write | 18, 4950, 9276 | 17, 3791, 8096 | 3, 929, 2124 |
-| 255-byte write | 265, 72939, 132721 | 264, 55018, 114721 | (pump) |
-| 16-byte read | 17, 5043, 9151 | 17, 3020, 7341 | 2, 293, 1399 |
-| 255-byte read | 264, 79007, 137679 | 263, 45364, 103467 | 8, 533, 3007 |
+| tenure | naive: irq, isr, busy | pump: irq, isr, busy |
+|---|---|---|
+| 16-byte write | 18, 4950, 9276 | 17, 3791, 8096 |
+| 255-byte write | 265, 72939, 132721 | 264, 55018, 114721 |
+| 16-byte read | 17, 5043, 9151 | 17, 3020, 7341 |
+| 255-byte read | 264, 79007, 137679 | 263, 45364, 103467 |
 
 What the rows say:
 
-- THE PUMP'S BYTE: 208 cycles an entry for a written byte where it was
-  275 (isr over entries, stamps included), 172 for a read byte where it
-  was 299: one STATUS snapshot where there were three loads, the SYSOP
-  wait inline, and on a read the DATA load alone - smart mode - where a
-  command and a SYSOP wait followed it. The bus feels it: a 255-byte read
-  at 400 kHz takes 374672 cycles before and 336537 after, at the peer's
-  own pace.
-- THE ENGINES: a read of any length is ONE interrupt (8 over 255 bytes
-  at 400 kHz are the tick's), 533 cycles of handler and 3007 of CPU for
-  the whole tenure where the pump spends 103467; a write is three
-  interrupts whatever its length. The engines' `start()` is the price:
-  about 380 cycles for a read, 255 for a write, against 200 for the
-  pump's (one ruler read taken out) - the block's launch on the DMAC.
-  Below `dma_min_bytes` the pump is the cheaper shape and takes the phase.
-- `x` OF A LONG WRITE AT 400 kHz is 1.10 on the engines, the peer's
-  stretch (the pump's 1.24 holds the handler's latency per byte as
-  well); against a client that does not stretch it would be the wire's.
+- THE PUMP'S BYTE: 208 cycles an entry for a written byte against the
+  naive shape's 275 (isr over entries, stamps included), 172 for a read
+  byte against 299: one STATUS snapshot where the naive shape has three
+  loads, the SYSOP wait inline, and on a read the DATA load alone -
+  smart mode - where a command and a SYSOP wait follow it. The bus feels
+  it: a 255-byte read at 400 kHz takes 374672 cycles naive and 336537
+  pumped, at the peer's own pace.
 - Against the data sheet's polled loop the pump is within half a per
   cent on long tenures and 590 to 750 cycles behind on one- and two-byte
   tenures - the START through `start()` (some 200 cycles), two interrupt
   entries and exits behind two flash wait states, and the completion
-  edge - where the loop spends the whole tenure busy; from 16 bytes on
-  the engines match the loop's wall (a 16-byte write 6 per cent ahead,
-  a read within 2) at a fraction of its CPU.
-- THE ENGINED READ'S TAIL WAIT never spun: eight pairs of engined reads
-  started back to back - the second the moment the first's completion
-  was seen - found SB fallen every time, the second `start()` reaching
-  its ADDR write well after the some hundred cycles SB stands. The
-  hazard itself is measured in a scratch program (an ADDR written while
-  SB stands kills the next tenure), so the wait stays: bounded, one
-  load when there is nothing to wait for.
-- IN SRAM (`bench_samc_ram`, the pump alone): the pump's entry costs 118
-  cycles for a written byte and 102 for a read one, against 208 and 172
-  from flash behind two wait states; at Fm+ a 255-byte write's wall
-  drops from 194073 to 193484, a 1-byte write's from 2062 to 1818. That
-  image has no room for the engines' handler code beside the others':
-  its stack is left 996 bytes, 732 of them used at the deepest letter
-  (painted and read over SWD).
+  edge - where the loop spends the whole tenure busy.
+- IN SRAM (`bench_samc_ram`): the pump's entry costs 118 cycles for a
+  written byte and 102 for a read one, against 208 and 172 from flash
+  behind two wait states; at Fm+ a 255-byte write's wall drops from
+  194073 to 193484, a 1-byte write's from 2062 to 1818.
 
 ## Bench findings (beyond the headline)
 
@@ -428,13 +376,9 @@ What the rows say:
 
 Driver gaps (not built), each with its reason:
 
-- **DMA engine slots on `I2cClient`**: born with its first user - and
-  erratum 1.17.5 sizes a client transmitter's block to the host's count,
-  which a client rarely knows.
-- **A 255-byte write on the engines**: LEN counts to 255 and the engined
-  write needs LEN = w + 1 for its edge, so 255 takes the pump; a block
-  without LEN would feed DATA past a client's NACK (measured), which is
-  no remedy.
+- **The DMA phases, on the host or the client, and the host's use of
+  ADDR.LEN**: declined - erratum 1.10.4 ([dmac.md](dmac.md)); the pump
+  closes a read by smart mode.
 - **The 4-wire PINOUT** (CTRLA.PINOUT, an external transceiver's
   shape): no user and no transceiver on the bench.
 - **High-speed mode**: REFUSED, because errata 1.17.7 and 1.17.9 break
@@ -462,9 +406,6 @@ Implemented but not bench-verified:
   for the 32 kHz pass of [osc32kctrl.md](osc32kctrl.md).
 - **The quick command** on silicon: written and read back, no tenure
   has used it.
-- **The engines' transfer-error path** (TERR on either channel ends the
-  tenure `i2c_bus_error`, the bus released): no staging provokes an AHB
-  error on a valid buffer.
 - **Sleep and RUNSTDBY**, the address-match wake included: no letter
   sleeps this bus.
 

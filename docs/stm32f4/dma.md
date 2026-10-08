@@ -643,7 +643,7 @@ Driver gaps, each with its reason:
   exactly as a clock above the reset rate is: RM0368, RM0401, RM0402 and
   RM0430 would each add one entry.
 - **The block-stream engines** (`util/block_stream.hpp`'s `BlockPlayer` and
-  `BlockSource`, which the SAM C21 and the STM32G0 have as
+  `BlockSource`, which the STM32G0 and the CH32Vx03 have as
   `DmaLoopEngine` / `DmaPingPongEngine`) are not built here. This
   controller's DOUBLE BUFFER is a better ping-pong than either of theirs -
   the hardware swaps the target, so there is no re-arm window and no race

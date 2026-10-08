@@ -507,8 +507,7 @@ public:
      * Write the whole COMPCTRLn. Every field is enable-protected
      * (writable only while COMPCTRLn.ENABLE is zero, 40.8.13), so this
      * disables first and leaves the comparator DISABLED: enable() is a
-     * separate, deliberate step, exactly as with the SERCOM and the
-     * DMAC channels.
+     * separate, deliberate step, exactly as with the SERCOM.
      *
      * A configuration this package cannot honour is REFUSED rather than
      * written - an input pin the device does not bond, hysteresis in

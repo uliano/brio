@@ -44,7 +44,8 @@
 //   d  CTRLC.R2R and SAMPCTRL.OFFCOMP, measured on the same input at
 //      three common modes
 //   e  DAC DITHERING (41.6.8.4): sub-LSB means between two adjacent
-//      codes, with the undithered control - and CTRLB.LEFTADJ on silicon
+//      codes, with the undithered control, DATABUF fed from the DAC's
+//      own EMPTY interrupt - and CTRLB.LEFTADJ on silicon
 //   f  the DAC's EMPTY and UNDERRUN interrupts through the NVIC
 //   g  the AC completed: COMP2, COMP3 and WINDOW 1 on silicon
 //   h  the BANDGAP as a comparator's negative input, VREFOE both ways,
@@ -67,7 +68,6 @@
 #include "samc21/adc.hpp"
 #include "samc21/clock.hpp"
 #include "samc21/dac.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
@@ -164,13 +164,6 @@ constexpr uint8_t ev_gen = 6;  ///< the generator the event channels run on
 using EvGen = Gclk<ev_gen>;
 using Pacer = Tc<2>;
 using Counter = Tc<3>;   ///< NB TC2 and TC3 SHARE generic clock channel 31
-constexpr uint8_t dma_ch = 0;
-using Feed = DmaChannel<dma_ch>;
-
-/// VOLATILE IN BOTH DIRECTIONS: the compiler sees neither the
-/// controller's reads nor its writes.
-constexpr uint16_t feed_len = 512;
-volatile uint16_t feed_buf[feed_len];
 
 bool event_clock_up() {
     Evsys::bus_clock(true);
@@ -1309,18 +1302,34 @@ void td_rail_to_rail() {
 //
 // THE WITNESS HAS TO AVERAGE OVER WHOLE DITHER PERIODS, and the numbers
 // were chosen so that it does EXACTLY:
-//   pacer   TC2, count8, div1, PER = 255  -> one event every 256 CPU cycles
-//   dither  16 events                     -> one period every 4096 cycles
+//   pacer   TC2, count8, div4, PER = 255  -> one event every 1024 CPU cycles
+//   dither  16 events                     -> one period every 16384 cycles
 //   ADC     div32, SAMPLEN 5              -> 18 CLK_ADC = 576 CPU cycles
-//   average 1024 samples                  -> 589824 cycles = 144 periods
-// 576 / 256 = 9/4 and 9 is coprime with 64, so the 1024 samples land on
-// each of the sixteen sub-conversion slots exactly 64 times. The mean is
+//   average 1024 samples                  -> 589824 cycles = 36 periods
+// 576 / 1024 = 9/16 and 9 is coprime with 256, so the 1024 samples land
+// on each of the sixteen sub-conversion slots exactly 64 times. The mean is
 // the dithered mean and not a phase artefact.
 //
 // The scale that makes it visible: 1024 accumulated 12-bit samples with
 // ADJRES 0 is a 16-bit result, so ONE DAC LSB IS 64 COUNTS and one
 // sixteenth of an LSB is 4. That is the whole point - the effect is
 // under the ADC's own LSB and only the accumulation can see it.
+//
+// THE FEED IS THE DAC'S OWN EMPTY INTERRUPT, so the CPU is in the path
+// for one DATABUF write a value. 41.6.8.4: "EMPTYx event and DMA request
+// are therefore generated every 16 DATABUF to DATA transfers", and it
+// names an interrupt on EMPTY as the way to feed it without the DMA -
+// but THE DEADLINE IS ONE EVENT, NOT SIXTEEN: measured, an UNDERRUN
+// follows the EMPTY by one start event (278 cycles at a 256-cycle pacer)
+// whenever the handler has not written DATABUF by then. So the pacer is
+// slowed to one event every 1024 cycles, where the feeding path - about
+// 105 cycles in the release listing (two calls, into Dac::buffer() and
+// the placement arithmetic of dac_data_word(), one APB read pair and
+// one APB write) plus the core's exception entry and return, plus a
+// console or tick handler it may wait behind - fits with room. The
+// letter judges the deadline met by UNDERRUN staying at zero across
+// every accumulation, and prints the EMPTY count against the elapsed
+// events.
 constexpr AdcConfig dither_witness{
     .reference = Ref::vddana,
     .prescaler = AdcPresc::div32,
@@ -1336,9 +1345,15 @@ uint32_t accumulate() {
     return Adc0::read(4'000'000UL);
 }
 
+/// Stop the interrupt feed: nothing refills DATABUF after this.
+void dither_feed_stop() {
+    Nvic::disable(Dac::irq());
+    Dac::disarm(Dac::flag_empty | Dac::flag_underrun);
+    dac_feed_from_isr = false;
+}
+
 bool dither_chain_up(bool left_adjust) {
-    (void)Feed::enable(false);
-    (void)Feed::reset();
+    dither_feed_stop();
     Dac::release();
     DacConfig cfg{};
     cfg.reference = DacRef::vddana;
@@ -1361,35 +1376,32 @@ bool dither_chain_up(bool left_adjust) {
     return Dac::enable(true);
 }
 
-/// Fill the feed buffer with one 14-bit value and start the DMA block.
-/// 512 values is 8192 events, 35 ms at this pacer - three accumulations
-/// long.
-bool dither_feed(uint16_t value14) {
-    for (uint16_t i = 0; i < feed_len; ++i) {
-        feed_buf[i] = dac_data_word(value14, Dac::config().left_adjust, true);
-    }
-    (void)Feed::enable(false);
-    (void)Feed::reset();
-    const DmaChannelConfig ch{
-        .trigger = Dac::dma_trigger_empty,
-        .action = DmaTriggerAction::beat,
-    };
-    if (!Feed::configure(ch)) {
-        return false;
-    }
-    const DmaTransfer t{
-        .source = &feed_buf[0],
-        .destination = &Dac::regs().DAC_DATABUF,
-        .beats = feed_len,
-        .beat = DmaBeat::hword,
-        .destination_increment = false,
-    };
-    if (!Feed::load(t)) {
-        return false;
-    }
+/**
+ * Start the interrupt feed on one 14-bit value: DAC_Handler writes it
+ * into DATABUF at every EMPTY, and the counters it keeps start at zero.
+ * THE FIRST VALUE IS WRITTEN HERE, by the starter, because EMPTY is an
+ * EVENT and not a state - 41.8.6 sets it when DATABUF is consumed, so a
+ * converter just enabled whose buffer was never written reads it clear,
+ * and a feed that waited for the flag would never begin. Called with
+ * the pacer stopped and the converter fresh from dither_chain_up().
+ */
+void dither_feed_start(uint16_t value14) {
+    dither_feed_stop();
+    dac_feed_value = value14;
+    dac_empty_irqs = 0;
+    dac_underrun_irqs = 0;
+    dac_irq_entries = 0;
     Dac::clear_flags(Dac::flag_empty | Dac::flag_underrun);
-    return Feed::enable(true);
+    Dac::buffer(value14);
+    dac_feed_from_isr = true;
+    Dac::arm(Dac::flag_empty | Dac::flag_underrun);
+    Nvic::enable(Dac::irq());
 }
+
+/// A new value for the running feed: the handler writes it at the next
+/// EMPTY, so DATA carries it within one dither period, and the
+/// accumulation that follows discards a whole reading first.
+void dither_value(uint16_t value14) { dac_feed_value = value14; }
 
 void te_dither() {
     bench.verdict("dithering without a start event is refused, because "
@@ -1406,11 +1418,11 @@ void te_dither() {
 
     bench.verdict("the event fabric is up", event_clock_up());
     const TcConfig pacer_cfg{.mode = TcMode::count8,
-                             .prescaler = TcPrescaler::div1,
+                             .prescaler = TcPrescaler::div4,
                              .waveform = TcWaveform::normal_pwm};
-    bench.verdict("TC2 paces one event every 256 CPU cycles - 187.5 kHz, so a "
-                  "14-bit value lasts 4096 cycles and the DAC stays inside its "
-                  "350 ksps ceiling",
+    bench.verdict("TC2 paces one event every 1024 CPU cycles - 46.875 kHz, so a "
+                  "14-bit value lasts 16384 cycles, the DAC well inside its "
+                  "350 ksps ceiling and its EMPTY handler inside one event",
                   Pacer::init(main_gen) && Pacer::configure(pacer_cfg) &&
                       Pacer::set_period8(255) &&
                       Pacer::event_config(pacer_cfg,
@@ -1418,24 +1430,27 @@ void te_dither() {
     bench.verdict("the DAC comes up DITHERING, with the pacer on its START "
                   "user", dither_chain_up(false));
     bench.verdict("the ADC watches PA02 with a 1024-sample accumulation, whose "
-                  "window is exactly 144 dither periods",
+                  "window is exactly 36 dither periods",
                   adc0_up(dither_witness) && Adc0::result_steps() == 65536u);
     Adc0::select(AnalogIn<Vout>{});
     (void)Adc0::sync_wait(ADC_SYNCBUSY_INPUTCTRL_Msk);
 
     // ---- the noise, BEFORE any band is chosen -------------------------------
     constexpr uint16_t base_code = 512;
-    bench.verdict("the DMA feeds DATABUF with the same 14-bit value block "
-                  "after block", dither_feed(base_code * 16u));
+    dither_feed_start(base_code * 16u);
     (void)Pacer::set_count8(0);
     (void)Pacer::enable(true);
     wait_ms(2);
+    bench.verdict("THE DAC'S OWN EMPTY INTERRUPT FEEDS DATABUF the same 14-bit "
+                  "value every time the buffer empties - the starter wrote the "
+                  "first one, the vector every one after it, and no start "
+                  "event found the buffer empty",
+                  dac_empty_irqs > 0u && dac_underrun_irqs == 0u);
     uint32_t lo = 0xFFFFFFFFu;
     uint32_t hi = 0;
+    const uint32_t fed0 = dac_empty_irqs;
+    const uint32_t ms0 = Ticker::millis();
     for (uint8_t i = 0; i < 6u; ++i) {
-        if (!dither_feed(base_code * 16u)) {
-            break;
-        }
         const uint32_t v = accumulate();
         if (v < lo) {
             lo = v;
@@ -1444,10 +1459,17 @@ void te_dither() {
             hi = v;
         }
     }
+    const uint32_t fed = dac_empty_irqs - fed0;
+    const uint32_t fed_ms = Ticker::millis() - ms0;
+    const uint32_t fed_events = fed_ms * 46'875UL / 1000UL;
     const uint32_t noise = hi - lo;
     print(serial, "  six accumulated readings of one dithered value span ",
           noise, " counts of a 16-bit scale, where ONE DAC LSB IS 64 and one "
           "sixteenth of one is 4", crlf);
+    print(serial, "  meanwhile the vector fed DATABUF ", fed, " times in ",
+          fed_ms, " ms of about ", fed_events, " start events: one EMPTY per ",
+          fed != 0u ? fed_events / fed : 0u, " events, where 41.6.8.4's "
+          "sixteen sub-conversions a value say 16", crlf);
     bench.verdict("THE NOISE IS MEASURED FIRST and it is smaller than the "
                   "sub-LSB step this letter is about",
                   noise < 24u);
@@ -1456,11 +1478,10 @@ void te_dither() {
     uint32_t means[5] = {};
     constexpr uint8_t dvals[5] = {0, 4, 8, 12, 15};
     for (uint8_t i = 0; i < 5u; ++i) {
-        if (!dither_feed(static_cast<uint16_t>(base_code * 16u + dvals[i]))) {
-            break;
-        }
+        dither_value(static_cast<uint16_t>(base_code * 16u + dvals[i]));
         means[i] = accumulate();
     }
+    const uint32_t right_underruns = dac_underrun_irqs;
     print(serial, "  dithered means for DATA[3:0] = 0 / 4 / 8 / 12 / 15: ",
           means[0], " ", means[1], " ", means[2], " ", means[3], " ", means[4],
           crlf);
@@ -1482,10 +1503,17 @@ void te_dither() {
                   "which is what 41.6.8.4's sixteen sub-conversions can add up "
                   "to and nothing else is",
                   swing > 36 && swing < 96);
+    print(serial, "  over the whole right-adjusted measurement: ",
+          dac_empty_irqs, " EMPTY interrupts, ", right_underruns,
+          " UNDERRUN", crlf);
+    bench.verdict("...AND THE FEED NEVER FELL BEHIND: no start event found "
+                  "DATABUF empty while the means were taken, so every "
+                  "accumulation saw the value it was given",
+                  right_underruns == 0u);
 
     // ---- the control: undithered, the same two codes ------------------------
     (void)Pacer::enable(false);
-    (void)Feed::enable(false);
+    dither_feed_stop();
     Dac::release();
     bench.verdict("the DAC comes back with dithering OFF", dac_up());
     dac_set(base_code);
@@ -1527,15 +1555,15 @@ void te_dither() {
     (void)Pacer::enable(false);
     bench.verdict("the dithering chain comes back, left-adjusted this time",
                   dither_chain_up(true));
+    dither_feed_start(static_cast<uint16_t>(base_code * 16u + dvals[0]));
     (void)Pacer::set_count8(0);
     (void)Pacer::enable(true);
     uint32_t lmeans[5] = {};
     for (uint8_t i = 0; i < 5u; ++i) {
-        if (!dither_feed(static_cast<uint16_t>(base_code * 16u + dvals[i]))) {
-            break;
-        }
+        dither_value(static_cast<uint16_t>(base_code * 16u + dvals[i]));
         lmeans[i] = accumulate();
     }
+    const uint32_t left_underruns = dac_underrun_irqs;
     const int32_t lswing =
         static_cast<int32_t>(lmeans[4]) - static_cast<int32_t>(lmeans[0]);
     print(serial, "  the same staircase LEFT-adjusted: ", lmeans[0], " ",
@@ -1547,10 +1575,12 @@ void te_dither() {
                   "LSB nonlinearity in one of them could not hide in a swing "
                   "of one",
                   near_signed(lswing, swing, 24));
+    bench.verdict("and the left-adjusted feed never fell behind either: zero "
+                  "UNDERRUN",
+                  left_underruns == 0u);
 
     (void)Pacer::enable(false);
-    (void)Feed::enable(false);
-    (void)Feed::reset();
+    dither_feed_stop();
     (void)Dac::enable(false);
     (void)Dac::stop_events();
     Dac::release();
@@ -2828,12 +2858,6 @@ void banner() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
-
 /// The DAC's one vector for both sources. The ISR body clears UNDERRUN
 /// (nothing else carries that information) and leaves EMPTY to whoever
 /// feeds the buffer - so this handler is what feeds it.
@@ -2883,8 +2907,6 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     locate_supply();
@@ -2916,8 +2938,7 @@ int main() {
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

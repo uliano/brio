@@ -94,8 +94,8 @@
  *    discarded and a bus error is generated" - and a bus error on a
  *    Cortex-M0+ is a HardFault. That is the samc21/sdadc.hpp position,
  *    taken for the same sentence in 39.6.8.
- * 3. NOT PAC-PROTECTED (43.5.8): CTRLB and INTFLAG - the pair a DMA
- *    engine and an ISR need. SEE THE ERRATUM BELOW: this is exactly the
+ * 3. NOT PAC-PROTECTED (43.5.8): CTRLB and INTFLAG - the pair an ISR
+ *    needs. SEE THE ERRATUM BELOW: this is exactly the
  *    sentence the silicon does not honour.
  * 4. NOT RESET BY A SOFTWARE RESET (43.8.1): GAIN, OFFSET, CAL and
  *    DBGCTRL. So a `reset()` keeps the calibration - which is what makes
@@ -455,9 +455,9 @@ public:
 
     // ---- the vocabularies this peripheral publishes -------------------------
     //
-    // evsys.hpp owns the FABRIC and dmac.hpp owns the CHANNELS; the codes
-    // of their tables that belong to the TSENS live here, probed from the
-    // device header in samc21/device_tables.hpp.
+    // evsys.hpp owns the FABRIC; the codes of its tables that belong to
+    // the TSENS live here, probed from the device header in
+    // samc21/device_tables.hpp.
 
     /// Generator: the window monitor matched (43.6.5).
     static constexpr uint8_t window_generator = tsens_winmon_generator();
@@ -465,9 +465,6 @@ public:
     /// it is user 0, the first row of that table, and the only converter
     /// user on this family that is not asynchronous-only.
     static constexpr uint8_t start_event_user = tsens_start_user();
-    /// DMAC trigger: the one DMA request this peripheral has (43.6.3),
-    /// set when a result is available and cleared when VALUE is read.
-    static constexpr uint8_t dma_trigger_resrdy = tsens_dma_resrdy_id();
 
     /// INTFLAG / INTENSET / INTENCLR bits, named.
     static constexpr uint8_t flag_result_ready = TSENS_INTFLAG_RESRDY_Msk;

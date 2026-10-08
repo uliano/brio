@@ -76,11 +76,11 @@ Encoded in code (each with its comment citing the item):
   workaround Microchip offers ("Multiple transfers must only be
   sequenced using linked descriptors on a single channel") forbids
   concurrency itself; nothing about the write-back's placement, a
-  priority or the arbitration. Applied where one driver owns the pair:
-  sercom.hpp's Uart takes ONE DMA engine (both is a compile error).
-  Everywhere else dmac.hpp validates every write-back reading against
-  the loaded descriptor and refuses inconsistent ones, and the owners
-  abandon dead blocks (dmac.md and sercom.md carry the measurements).
+  priority or the arbitration. Applied as a refusal of the controller
+  for every use but one: the Uart's transmit engine (dmac.hpp's
+  `DmaTxEngine`) on one channel, claimed by one owner at a time - a
+  second owner's claim panics at its `init()` (dmac.md carries the
+  measurements and the enforcement).
 
 NOT applicable to rev F (rev B..E items - do not code around them):
 - 1.10.1 DMAC CRCDATAIN two-instruction hazard - rev B only (and the

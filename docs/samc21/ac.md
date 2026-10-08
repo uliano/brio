@@ -8,7 +8,7 @@ stated nowhere, which is what the probe below measures). Driver:
 `samc21/ac.hpp` (`Ac` block + `AcComparator<n>` + `AcWindow<w>`).
 Family fixture `test/family_samc21/ac.cpp` plus four negatives under
 `brio check samc21`. Two bench SUITES and one probe, and the
-distinction matters: `test_samc_ac` (6 letters, 94 verdicts, wireless)
+distinction matters: `test_samc_ac` (6 letters, 93 verdicts, wireless)
 is the chapter's own, `test_samc_analog` carries what needs the DAC as
 a swept source (letters g to j), and `ac_sync_probe` is a PROBE - it
 answers one timing question and is not a reference test.
@@ -215,7 +215,7 @@ still needs its PMUX, and reading it back needs its input buffer
 
 ## Bench findings
 
-### From `test_samc_ac` (6 letters, 94 verdicts)
+### From `test_samc_ac` (6 letters, 93 verdicts)
 
 Nothing to wire. The stimulus is a pad driven by PORT and read by the
 comparator, and the second voltage is each comparator's own VDD
@@ -245,12 +245,13 @@ scaler.
   `outside` each raise INTFLAG.WIN0 on entering the state they name,
   and a window selecting `above` stays quiet through a below-to-inside
   move.
-- **A comparator flip moves a DMA block** - pad to AC to EVSYS to
-  DMAC, with no CPU in the path - and so does **a window transition**,
-  which is 40.6.13's "copy of the inside/outside status" measured:
-  the window's event is generated from the state regardless of WINTSEL
-  (the window was selecting `above` while the event carried the move
-  into `inside`).
+- **One comparator flip is one event** - pad to AC to EVSYS to TC4
+  counting events (EVACT = COUNT, TCEI, user 27), no CPU in the path,
+  the count exactly 1 - and so is **one window transition**, which is
+  40.6.13's "copy of the inside/outside status" measured: the window's
+  event is generated from the state regardless of WINTSEL (the window
+  was selecting `above` while the move into `inside`, over a
+  resynchronized channel detecting both edges, counted exactly 1).
 - **A PIN EDGE STARTS A COMPARISON.** An EIC line's edge, through an
   **asynchronous** EVSYS channel - the only path table 29-3 allows for
   SOC0 - starts a single-shot comparison on COMP0: before the edge
@@ -258,14 +259,14 @@ scaler.
   the flag is set and STATE answers correctly. With EVCTRL.COMPEI0
   cleared the same edge starts nothing, so the enable bit is the gate.
 - **Re-pointing an event channel at a new generator leaves an event
-  standing.** Measured, reproducibly: after `Evsys::connect()` moves
-  channel 0 from COMP0 to WIN0, the first DMA arming that follows
-  consumes a block even though the window has not moved. The reading
-  that fits is that the re-route looks like an edge to the channel's
-  detector and, with the user not yet ready, the channel HOLDS the
-  event (29.2's USRRDY handshake) until it is. The suite arms twice
-  and rests its verdict on the second, and prints the first as the
-  fact it is.
+  standing.** After `Evsys::connect()` moves channel 0 from COMP0 to
+  WIN0, the witness - armed from zero before the re-route - counts 1
+  although the window has not moved, and nothing more while the window
+  stays parked outside. The reading that fits is that the re-route
+  looks like an edge to the channel's detector and the channel delivers
+  it as an event (29.2's USRRDY handshake holds an event until its user
+  is ready). The suite prints the standing count as the fact it is and
+  rests the window's verdict on the difference the stimulus makes.
 - **A board fact**: PA04 and PA05 do NOT follow their own weak
   internal pull, though they reach both rails under PORT's output
   driver - so the suite's precondition is "does the pad go where PORT

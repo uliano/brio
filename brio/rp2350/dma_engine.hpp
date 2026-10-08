@@ -2,8 +2,8 @@
  * dma_engine.hpp
  *
  * The "no DMA engine" default of the two optional Uart engine slots, the
- * other families' tag verbatim (samc21/sercom.hpp is where its reasoning
- * is written): `present` is the only thing a transport asks of an engine,
+ * other families' tag verbatim (stm32g0/dma_engine.hpp is where its
+ * reasoning is written): `present` is the only thing a transport asks of an engine,
  * with `if constexpr`, so every engine branch disappears from a Uart that
  * names none. The real engines live in rp2350/dma.hpp (sixteen channels,
  * four interrupt lines, 12.6), so that a program with a serial port and

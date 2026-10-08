@@ -231,19 +231,20 @@ cheap escape is CLK_ULP32K, which needs no GCLK channel at all and is
 always running on this family - measured: a synchronous edge is detected
 with `EIC_GCLK_ID` disconnected and CKSEL = ULP32K.
 
-**A HARDWARE GENERATOR DOES CROSS AN ASYNCHRONOUS EVSYS CHANNEL.** An
-EXTINT rising edge routed through an **asynchronous** channel moves a
-whole DMA block, exactly as the same edge on a resynchronized channel
-does - where eight software events on an asynchronous channel move
-nothing through the DMAC. That limit belongs to the DMAC's own trigger
-stage and not to the path: [evsys.md](evsys.md) carries the
-reconciliation.
+**ONE PAD EDGE IS ONE COUNT, on either path.** The witness is TC4 in
+COUNT16 counting events (EVACT = COUNT, TCEI) on its EVSYS user: an
+EXTINT0 rising edge over a **resynchronized** channel counts exactly 1
+with the channel's EVD set, and the same edge over an **asynchronous**
+channel - no channel clock, no edge detector, no status - counts exactly
+1 too. A hardware generator crosses the asynchronous path as a software
+event does ([evsys.md](evsys.md)).
 
 **Every line is an event generator, not just EXTINT0-7.** 26.6.7's prose
 is narrower than its own EVCTRL register and than ch. 29's generator
-table. EXTINT9 (generator code 0x17) moves a DMA block through EVSYS; the
-same line with EVCTRL.EXTINTEO cleared still raises its INTFLAG and moves
-nothing, so the enable bit is the gate and the line is not.
+table. EXTINT9 (generator code 0x17) counts exactly 1 at TC4 through
+EVSYS; the same line with EVCTRL.EXTINTEO cleared still raises its
+INTFLAG and counts nothing, so the enable bit is the gate and the line is
+not.
 
 **A cleared level flag comes straight back** while the pin still matches,
 and a cleared edge flag does not - both measured, and the reason a

@@ -633,16 +633,14 @@ its own task for the same leg, and the LSb-first exchange rides that
 verb.
 
 **WHERE THE LADDER STOPS IS THE PEER'S ANSWER RELOAD AND NOT THE WIRE,
-AND WITH A G0 PEER IT DOES NOT STOP AT ALL.** Against the SAM C21 every
-BR code from PCLK/256 up to PCLK/8 carries eight frames byte-exact in
-both directions and PCLK/4 = 16 MHz breaks with **the peer's own count
-full and its mismatches zero** - it heard all eight characters exactly
-and could not put its answers on the shifter in time (the SAM serves
-through its DMA engines here, which is what its report's `serve=dma`
-says). A SAM C21 hosting the same peer meets that boundary at 6 MHz with
-both ends engined; a G0 host paced by its own frame pump gives that peer
-one rung more. **AGAINST A SECOND STM32G0 SERVING ON ITS OWN DMA
-CHANNELS THE WHOLE REGISTER VOCABULARY IS EXACT** - every code down to
+AND WITH A G0 PEER IT DOES NOT STOP AT ALL.** Against a SERCOM peer
+serving on DMA engines (its report's `serve=dma`) every BR code from
+PCLK/256 up to PCLK/8 carries eight frames byte-exact in both directions
+and PCLK/4 = 16 MHz breaks with **the peer's own count full and its
+mismatches zero** - it heard all eight characters exactly and could not
+put its answers on the shifter in time. **AGAINST A SECOND STM32G0
+SERVING ON ITS OWN DMA CHANNELS THE WHOLE REGISTER VOCABULARY IS
+EXACT** - every code down to
 PCLK/2 = 32 MHz, eight frames byte-exact both ways at each, which is the
 same ceiling the self-link's own two peripherals reach on letter `i`
 with both ends engined. The top rung is ASKED only when everything below
@@ -785,7 +783,8 @@ anyway, with SSI, CRCNEXT and FRXTH open; 35.5.9's disable procedure; and
 `spi_rate_for()` at all three rates of the ladder.
 
 Measured with this part on the link: the BR ladder is exact to
-PCLK/2 = 32 MHz whichever board hosts (the SAM peer broke at PCLK/4);
+PCLK/2 = 32 MHz whichever board hosts (a SERCOM peer serving on DMA
+broke at PCLK/4);
 the peer's SOFTWARE pump - the RXNE reload, against its DMA engines - is
 where the dies differ, and THIS one is the fastest of the three: as the
 peer it holds to PCLK/2 = 32 MHz, the whole ladder, where the G0B1RE as
@@ -812,9 +811,9 @@ must reach the registers itself:
   `SpiHost`'s Request is full-duplex only: a bidirectional device wants
   a direction turn in the middle of a transaction, which is a second
   Request shape and belongs with its first real user.
-- **no DMA engine slots on `SpiClient`.** The SAM C21 leaves them for a
-  device-shaped user and so does this; the bench drives the client's
-  channels raw, which is what a peer does anyway.
+- **no DMA engine slots on `SpiClient`.** Left for a device-shaped
+  user; the bench drives the client's channels raw, which is what a
+  peer does anyway.
 - **the tasks claim their pads at very-high speed with no knob.**
   `SpiHost` takes SCK and MOSI and `SpiClient::drive_output()` takes
   MISO at `PinSpeed::very_high`, and the bench measured that a client's
@@ -867,6 +866,12 @@ on every header of the pack, but no silicon has run it:
   odd address on the frame pump - and it needs the self-link, which is
   not on this desk; `bench_stm32`'s letter `d` times the path with MISO
   floating (the table above) and judges no data.
+- **The ladder against the SAM C21 `spi_peer` as it is.** That peer now
+  serves on its software pump alone (docs/samc21/dmac.md), so letter
+  `p`'s first climb against it meets the pump's reload boundary and
+  not the 8 MHz the figure above was measured at against a DMA serve;
+  the verdict's floor (1 MHz) sits under it. A G0 host against the SAM
+  peer would measure where it now stops.
 
 - **SPI3, on any board.** It exists only on the G0B1/G0C1 and its pads
   (PC10/PC11/PC12 at AF4) are not wired on this desk; the family fixture

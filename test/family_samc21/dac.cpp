@@ -24,7 +24,6 @@ static_assert(Dac::dither_steps == 16384);
 
 static_assert(Dac::empty_generator == 79);
 static_assert(Dac::start_event_user == 38);
-static_assert(Dac::dma_trigger_empty == 45);
 
 // ---- the pads: PA02 is VOUT, PA03 is VREFA, on every variant ---------------
 

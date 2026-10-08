@@ -33,8 +33,6 @@ static_assert(Adc<1>::resrdy_generator == 0x45);
 static_assert(Adc<1>::winmon_generator == 0x46);
 static_assert(Adc<0>::start_event_user == 28 && Adc<0>::flush_event_user == 29);
 static_assert(Adc<1>::start_event_user == 30 && Adc<1>::flush_event_user == 31);
-static_assert(Adc<0>::dma_trigger_resrdy == 42);
-static_assert(Adc<1>::dma_trigger_resrdy == 43);
 
 // ---- the clock arithmetic --------------------------------------------------
 
@@ -100,8 +98,8 @@ static_assert(adc_sample_cycles(AdcConfig{.resolution = AdcRes::bits10,
                                           .differential = true,
                                           .offset_compensation = true}) == 14);
 // 38.6.2.14: the correction's 13 cycles are charged PER CONVERSION in
-// single mode and ONCE in free-running mode - the distinction the bench
-// caught the first version of this arithmetic getting wrong.
+// single mode and ONCE in free-running mode (what the bench saw of it is
+// docs/samc21/adc.md's).
 static_assert(adc_conversion_cycles(AdcConfig{.correction = true}) == 26);
 static_assert(adc_conversion_cycles(AdcConfig{.free_running = true,
                                               .correction = true}) == 13);
@@ -211,7 +209,7 @@ static_assert(Adc<0>::input_code(AdcInput::scaled_supply) == 0x1B);
 
 // ---- util/analog_sampler.hpp's own contract, on this silicon ---------------
 //
-// THE POINT OF THE CAMPAIGN: the converter concept must be satisfiable
+// THE POINT: the converter concept must be satisfiable
 // with nothing in util/ changed. If any of these three fail, the sampler
 // needs an adapter and the util pass has a question to answer.
 

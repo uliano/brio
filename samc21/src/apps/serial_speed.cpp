@@ -41,8 +41,8 @@
 //   ?      this menu and the current state
 //   0..7   switch to that rate from the table, and STAY there
 //   p      switch transport: plain interrupt-driven <-> the DMA transmit
-//          engine (the receiver stays on RXC: a Uart takes one engine at
-//          most, erratum 1.10.4)
+//          engine (the receiver stays on RXC either way: samc21/sercom.hpp's
+//          Uart has no receive engine at all)
 //   t      transmit burst (64 KB) - throughput and occupancy
 //   e      echo window (2 s): everything received goes straight back
 //   s      status: rates asked and achieved, transport, error counters
@@ -86,12 +86,10 @@ constexpr UartPads console_pads{
 constexpr uint32_t rx_ring = 1024;
 constexpr uint32_t tx_ring = 1024;
 
-constexpr uint8_t ch_tx = 6;
-
 using Plain = Uart<5, console_pads, rx_ring, tx_ring>;
-// ONE engine, on the transmit side: sercom.hpp refuses the pair
-// (erratum 1.10.4), and transmit is the direction a burst measures.
-using Engined = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine<ch_tx>>;
+// The Uart's one engine slot is the transmit one (samc21/dmac.hpp's
+// DmaTxEngine, channel 0), and transmit is the direction a burst measures.
+using Engined = Uart<5, console_pads, rx_ring, tx_ring, DmaTxEngine>;
 constexpr Plain plain_serial;
 constexpr Engined engined_serial;
 using Sc5 = Plain::Resource;
@@ -594,11 +592,9 @@ extern "C" void SERCOM5_Handler() {
     }
 }
 
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)Engined::dma_isr(irq->channel);
-    }
-}
+// The engine claimed by the engined transport's init() is the one user
+// of the DMAC, so its completion is the vector's whole body.
+extern "C" void DMAC_Handler() { Engined::dma_isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -608,9 +604,6 @@ int main() {
         ramp[i] = static_cast<uint8_t>(i);
     }
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
-
     const bool serial_ok = Plain::init(clock, rates[rate_index]);
     brio::enable_interrupts();
 
@@ -618,8 +611,7 @@ int main() {
 
     if (serial_ok) {
         say("boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-            " tick=", tick_ok ? "SysTick" : "FAILED",
-            " dmac=", dma_ok ? "up" : "FAILED", crlf);
+            " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         menu();
     }
     say("> ");

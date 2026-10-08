@@ -4,20 +4,14 @@
 caller-owned buffers at a rate the CPU never touches per sample, and the
 active object that hands filled buffers to subscribers.
 
-## Why this exists before its second implementation
+## Why a fixed point
 
-Every other util contract earned its shape the same way: built against
-one target, then validated by another silicon implementing it untouched
-(the ring, the clock contracts, `FlashMedia`, `SleepSite`, `PwmChannel`,
-`MeterSource`, the analog pair). Block streams invert the order on
-purpose. Waveform playback and burst capture are generic applications -
-not one project's need - and the next platform (an STM32G0 is the named
-candidate) will bring its own DMA with its own shapes. Fixing the
-contract NOW, against the SAM C21's engines, plants the reference point:
-when that platform's stream machinery is built, the friction against
-these concepts is the measurement, and "this concept does not fit" is a
-finding instead of a silent divergence. If the contract has to move
-then, it moves in the open.
+Waveform playback and burst capture are generic applications - not one
+project's need - and every platform brings its own DMA with its own
+shapes. The contract is the fixed point those shapes are measured
+against: the friction a controller meets with these concepts is the
+measurement, and "this concept does not fit" is a finding instead of a
+silent divergence. If the contract has to move, it moves in the open.
 
 ## The two concepts
 
@@ -57,7 +51,7 @@ controller under them can do.
 | stratum | realization | beyond the contract |
 |---|---|---|
 | avrdx | none | this family has no DMA; an interrupt-fed source satisfying `BlockSource` from a handler is the stated shape and is born with its first user |
-| samc21 | `DmaPingPongEngine` (a `BlockSource`) and `DmaLoopEngine` (a `BlockPlayer`) in `samc21/dmac.hpp` | no hardware circular mode, so BOTH re-arm from the block-complete interrupt (a self-linked descriptor would leave erratum 1.10.4 nothing to judge a corrupted write-back against); neither kicks on its re-arm |
+| samc21 | none | the DMAC is driven for the Uart's transmitter alone: erratum 1.10.4 corrupts the live descriptor of concurrently triggered channels ([the target's document](../samc21/dmac.md)); an interrupt-fed source is the stated shape and is born with its first user |
 | stm32g0 | the same two names in `stm32g0/dma.hpp` | the player rides the controller's HARDWARE CIRCULAR MODE (the lap interrupt only counts); the source cannot (skip-rather-tear is undecidable after the edge, below) and stops itself at every block |
 | ch32v00x | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `ch32v00x/dma.hpp` | the controller has a circular mode (CFGR.CIRC) and no multiplexer - the channel is the request - so the two block engines would be the G0's shape on seven fixed channels; born with their first block user on this family, a source the ADC's stall makes worth measuring first ([the target's document](../ch32v00x/dma.md)) |
 | ch32vx03 | the same two names in `ch32vx03/dma.hpp`, each naming its controller first (`<c, ch, Elem>`) | the player rides the controller's HARDWARE CIRCULAR MODE as on the STM32G0, and on the CH32V303 it has the peripheral it was written for - the DAC, played for ever from DMA2's channel 3 and read back level by level; the source does not, for the same doctrine, and this stratum measured it again - a handler whose whole body is read-CNTR-and-disable found two or three of the next thirty-two items already written at the controller's own speed - so the source stops itself at every block and re-arms the other buffer from the completion. One family fact holds above both: in Sleep no bus master but the core gets a cycle, on either of the CH32V303's controllers, so a stream here holds the program awake or it stops ([the target's document](../ch32vx03/adc.md), whose converter is these engines' first user) |
@@ -66,7 +60,7 @@ controller under them can do.
 | stm32f4 | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `stm32f4/dma.hpp` | this controller's DOUBLE BUFFER is a better BlockSource than either shape above - the hardware swaps the memory pointer at every end of transaction, so there is no re-arm window and no race between a handler and a running stream, and CT names the half the caller may hold - while the player is plain circular mode as on the G0; born with their first block user, and the re-arm gap the transfer engines pay for meanwhile is measured ([the target's document](../stm32f4/dma.md)) |
 | rp2040 | none yet: `DmaTxEngine` and `DmaRxEngine` alone in `rp2040/dma.hpp` | this controller reaches the two shapes by a road none of the others has - a channel may CHAIN TO another at completion, and an address may WRAP at a power-of-two boundary - so a player is a pair of channels chained to each other, or one channel with a ring on its read side, and a ping-pong source is two channels chained the same way with no handler in the loop at all; born with their first block user on this family |
 | rp2350 | none yet: the same two engine names in `rp2350/dma.hpp` | the RP2040's chaining and its address wrap, plus a MODE in the top nibble of the transfer count that makes a channel re-arm ITSELF or run forever, which is the first hardware circular mode on this lineage and would carry a player with no second channel and no handler; two of the chapter's errata bear on exactly that road (a chain fired by an abort, a chain lost after a zero-length transfer) and are answered in the driver, so a block user here starts from the engines and not from the controller |
-| host | a scripted ping-pong source (`test_block_stream`) | honest to the engines' contract - overrun skips the lap, release restarts - so the relay's loan timing and stall drain are tested to the dispatch |
+| host | a scripted ping-pong source (`test_block_stream`) | honest to the contract - overrun skips the lap, release restarts - so the relay's loan timing and stall drain are tested to the dispatch |
 
 ## BlockRelay
 
@@ -149,15 +143,11 @@ step and would say nothing new.
 ## Validation
 
 Host: `test_block_stream` (a scripted ping-pong source honest to the
-SAM C21 engine's contract - overrun skips the lap, release restarts;
-loan timing, stall drain, coalesced wakeups, accounting pass-through).
-Silicon: `test_samc_analog_dma`'s kernel letter runs the relay over the
-live DAC-to-ADC chain with `DmaPingPongEngine` as the source; the
-family fixture concept-checks both SAM engines against both concepts.
+contract - overrun skips the lap, release restarts; loan timing, stall
+drain, coalesced wakeups, accounting pass-through).
 
-The second implementation: the STM32G0's `stm32g0/dma.hpp`, over a
-controller with a HARDWARE CIRCULAR MODE the SAM's lacks - and that is
-where the fixed point earned its keep. `BlockPlayer` fits the circular
+The STM32G0's `stm32g0/dma.hpp`, over a controller with a HARDWARE
+CIRCULAR MODE, is where the fixed point earned its keep. `BlockPlayer` fits the circular
 channel exactly and gains by it (the lap interrupt only counts; there
 is no re-arm window). `BlockSource` does NOT fit it, and the reason is
 this doctrine and not the API: a circular channel never stops, so
@@ -171,7 +161,7 @@ fixture concept-checks both engines. The contract is about blocks and
 not about DMA, proven the hard way - the controller's natural
 streaming mode is the one the contract cannot use for a source.
 
-The third: the CH32V203's and the CH32V303's (two controllers on the
+The CH32V203's and the CH32V303's (two controllers on the
 CH32V303), with the same circular mode, where the source's refusal of it
 was measured a second time - three items of the next half already
 written by the time the channel's own handler could disable it, two or

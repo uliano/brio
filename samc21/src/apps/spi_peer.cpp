@@ -15,6 +15,15 @@
 //    SECOND parks in DATA at once, and every received character loads
 //    the next-PLUS-ONE. Both serve() and run_exchange() are that pump.
 //
+//  - THE PUMP IS THE ONLY SERVE. Every exchange runs on this software
+//    pump, its reload boundary the polled loop's: this stratum drives the
+//    DMAC for one user alone, the Uart's transmitter, because erratum
+//    1.10.4 (DS80000740S) corrupts the live write-back descriptor under
+//    concurrent channel triggers (docs/samc21/dmac.md). So
+//    spilink::spare_polled_pump is accepted and changes nothing, and the
+//    report's aux2 carries the select telemetry alone (bit 0x04, the
+//    engined serve, is never set here).
+//
 //  - THE BUFFERING REGIMES COLLAPSE. This client is always buffered two
 //    deep and has no knob for anything else; PLOADEN plays for the
 //    first character the role a write-before-clock flag plays where one
@@ -61,10 +70,7 @@
 
 #include <stdint.h>
 
-#include <span>
-
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/nvm.hpp"
 #include "samc21/pin.hpp"
@@ -140,14 +146,7 @@ using SckPin = Pin<'A', 17>;
 using SsPin = Pin<'A', 18>;
 using MisoPin = Pin<'A', 19>;
 
-constexpr uint16_t firmware_version = 0x0201;   ///< see spi_link.hpp's Ident
-
-/// The exchange's DMA engines (channels 0/1 on SERCOM1's triggers).
-/// Armed once at boot; the SERCOM re-inits under them freely - the
-/// claim binds a DATA address and a trigger code, not a configuration.
-using PeerTx = DmaTxEngine<0>;
-using PeerRx = DmaRxEngine<1>;
-bool dmac_ok = false;
+constexpr uint16_t firmware_version = 0x0202;   ///< see spi_link.hpp's Ident
 
 bool crystal_ok = false;
 bool trace = false;
@@ -368,45 +367,6 @@ spilink::Report run_exchange(const spilink::Params& a) {
     {
         spilink::Stream out(a.pattern, a.seed_b);
         for (uint16_t i = 0; i < n; ++i) x_out[i] = out.next();
-    }
-
-    // THE DMA SERVE, and it is the default: preload P_B(0) through
-    // PLOADEN, hand P_B(1..n-1) to the transmit channel (whose enable
-    // under the standing DRE fires the first beat by itself - the SPI
-    // host measurement, relied on here for the client too and judged
-    // by the host's own read-back), and drain the n received bytes on
-    // the receive channel. The reload is then hardware: the polled
-    // loop's ~3 MHz boundary is gone and what remains is the silicon's.
-    // spare bit 0 (spilink::spare_polled_pump) asks for the polled
-    // loop instead, so both boundaries stay measurable.
-    if (dmac_ok && preload && (a.flags == 0u || a.flags == spilink::flag_expect_reversed)
-        && (a.spare & spilink::spare_polled_pump) == 0u) {
-        (void)PeerRx::start(std::span<uint8_t>(x_in, n));
-        Client::write(x_out[0]);          // PLOADEN: straight into the shifter
-        if (n > 1) {
-            (void)PeerTx::start(std::span<const uint8_t>(x_out + 1, n - 1u));
-        }
-        const uint32_t t0 = Ticker::millis();
-        while (!PeerRx::idle() && Ticker::millis() - t0 < a.ms) {
-        }
-        const bool all_in = PeerRx::idle();
-        PeerTx::stop();
-        PeerRx::stop();
-        PeerTx::arm(Spi<link_sercom>::data_address(),
-                    Sercom<link_sercom>::dma_tx_trigger());
-        PeerRx::arm(Spi<link_sercom>::data_address(),
-                    Sercom<link_sercom>::dma_rx_trigger());
-        r.aux0 = Client::flags();
-        r.aux1 = all_in ? 0u : 255u;
-        r.aux2 = 0x04;                    // marks the DMA serve in the report
-        Streams s(a);
-        const uint16_t got = all_in ? n : 0u;
-        for (uint16_t i = 0; i < got; ++i) {
-            account(r, x_in[i], s.next_expected());
-        }
-        if (r.count < a.count) r.flags |= spilink::report_timed_out;
-        if (Client::overflow()) r.flags |= spilink::report_bufovf;
-        return r;
     }
 
     uint16_t queued = 0;
@@ -689,13 +649,6 @@ void status() {
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
-/// The engines' completions: nothing to dispatch - the serve loop polls
-/// the receive channel - but the interrupts the claim arms must land
-/// somewhere that is not Default_Handler's silent spin.
-extern "C" void DMAC_Handler() {
-    while (brio::Dmac::take_pending()) {
-    }
-}
 extern "C" void SERCOM5_Handler() { (void)Console::isr(); }
 
 /// The peer never arms a SERCOM1 interrupt (everything here is polled),
@@ -717,15 +670,6 @@ int main() {
     for (uint8_t i = 0; i < 8; ++i) {
         const uint8_t nib = static_cast<uint8_t>((w0 >> (28u - 4u * i)) & 0xFu);
         label8[i] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + nib - 10);
-    }
-
-    // The DMAC block and the exchange's two engines - see run_exchange.
-    dmac_ok = brio::Dmac::init();
-    if (dmac_ok) {
-        PeerTx::arm(brio::Spi<link_sercom>::data_address(),
-                    brio::Sercom<link_sercom>::dma_tx_trigger());
-        PeerRx::arm(brio::Spi<link_sercom>::data_address(),
-                    brio::Sercom<link_sercom>::dma_rx_trigger());
     }
 
     // The crystal probe, for ident.xtal (the peer's clock quality is a

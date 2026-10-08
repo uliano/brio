@@ -322,18 +322,13 @@ struct Evsys {
      * whole subsystem testable without a single wire.
      *
      * WHAT AN ASYNCHRONOUS CHANNEL DOES WITH ONE IS THE USER'S
-     * BUSINESS, not the path's - measured twice, from opposite ends.
-     * Eight back-to-back software events on an asynchronous channel move
-     * nothing through a DMA channel, where one on a clocked path moves a
-     * whole block (docs/samc21/evsys.md); but sixteen of sixteen single
-     * ones reach a CCL LUT on that same asynchronous path, with a
-     * disconnected-user control catching none and one of them moving a
-     * DMA block THROUGH the LUT (docs/samc21/ccl.md). A register write has
-     * no width for the DMAC's trigger stage; the CCL's event input has
-     * an edge detector of its own and catches every one. So a channel
-     * meant for software events needs a clocked path FOR THE DMAC, and
-     * nothing here can promise more than that about a user it has never
-     * seen.
+     * BUSINESS, not the path's: a register write has no width of its
+     * own, and whether a user catches it is that user's input stage.
+     * Sixteen of sixteen single ones reach a CCL LUT on an asynchronous
+     * path, with a disconnected-user control catching none
+     * (docs/samc21/ccl.md); what a TC's event input makes of them is
+     * docs/samc21/evsys.md's. Nothing here can promise more than that
+     * about a user it has never seen.
      *
      * SWEVT IS WRITE-ONLY (the device header declares it `__O`), so
      * there is nothing to read back and no read-modify-write to get

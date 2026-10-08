@@ -27,10 +27,10 @@
 //      edge does not - proven by taking the clock away - plus the
 //      filter's minimum pulse width and CLK_ULP32K as the clock that
 //      needs no GCLK channel at all
-//   e  THE EVENT: an EIC edge through EVSYS into a DMA transfer, on the
-//      clocked path AND on the asynchronous one - which is the question
-//      docs/samc21/evsys.md left open, and a line above 7, which is the
-//      question 26.6.7's prose leaves open
+//   e  THE EVENT: an EIC edge through EVSYS, counted by a TC whose event
+//      action is COUNT, on the clocked path AND on the asynchronous one,
+//      and a line above 7, which is the question 26.6.7's prose leaves
+//      open
 //   f  the interrupt: one vector for sixteen lines, masked by INTENSET
 //
 // Outside z, because they need a human:
@@ -45,12 +45,12 @@
 #include <stdint.h>
 
 #include "samc21/clock.hpp"
-#include "samc21/dmac.hpp"
 #include "samc21/eic.hpp"
 #include "samc21/evsys.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
 #include "samc21/sercom.hpp"
+#include "samc21/tc.hpp"
 #include "samc21/ticker.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -105,23 +105,27 @@ using Nmi = ExtNmi<NmiPad>;
 constexpr uint8_t eic_gen = 6;
 using EicGen = Gclk<eic_gen>;
 
-// The event fabric: DMAC channel 0 is event user 5, and the transfer is
-// the witness that an event arrived.
-constexpr uint8_t dma_ch = 0;
-constexpr uint8_t user_dmac_ch0 = 5;
+// The event fabric: the witness is TC4 in COUNT16 with EVACT = COUNT
+// (35.6.2.5.3), so its counter advances on an incoming event and on
+// nothing else; its user is TC4 EVU, event user 27 (table 29-3, all
+// three paths). TC4 has its generic clock channel to itself (35.5.3),
+// so arming and releasing it touches no other timer.
+using Witness = Tc<4>;
+constexpr uint8_t user_witness = Witness::event_user;
 constexpr uint8_t ev_ch = 0;
-using Copy = DmaChannel<dma_ch>;
+
+// COUNT16 on the normal-frequency waveform: the count action is refused
+// beside a PWM waveform (35.6.2.5.3), and nothing here drives a pad.
+constexpr TcConfig witness_cfg{.mode = TcMode::count16,
+                               .waveform = TcWaveform::normal_frequency};
+constexpr TcEventConfig witness_events{.action = TcEventAction::count,
+                                       .input_enable = true};
+static_assert(tc_event_config_valid(witness_cfg, witness_events),
+              "the witness counts events, which a PWM waveform would refuse");
 
 volatile uint32_t eic_isr_count = 0;
 volatile uint32_t eic_isr_mask = 0;
 volatile uint32_t nmi_count = 0;
-
-// VOLATILE IN BOTH DIRECTIONS: gcc cannot see the controller's reads
-// either, and will sink a buffer's preparation past the thing that
-// starts the transfer.
-constexpr uint16_t payload = 16;
-volatile uint8_t src[payload];
-volatile uint8_t dst[payload];
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -179,54 +183,18 @@ bool pad_is_free() {
     return up && !down;
 }
 
-bool destination_matches(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != static_cast<uint8_t>(seed + i)) {
-            return false;
-        }
-    }
-    return true;
+/// Arm the witness from zero: the software reset inside init() clears
+/// COUNT, and EVCTRL is written before the enable because it is
+/// enable-protected (35.6.2.1). GCLK_TC from generator 0 clocks the
+/// counter's own domain; the events are what it counts.
+bool witness_arm() {
+    return Witness::init(0) && Witness::configure(witness_cfg) &&
+           Witness::event_config(witness_cfg, witness_events) &&
+           Witness::enable(true);
 }
 
-bool destination_untouched() {
-    for (uint16_t i = 0; i < payload; ++i) {
-        if (dst[i] != 0u) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// Arm the DMA channel so that ONLY an event can move it: no hardware
-/// trigger source at all, EVACT = trigger, EVIE set.
-bool arm_event_driven_copy(uint8_t seed) {
-    for (uint16_t i = 0; i < payload; ++i) {
-        src[i] = static_cast<uint8_t>(seed + i);
-        dst[i] = 0;
-    }
-    if (!Copy::reset()) {
-        return false;
-    }
-    const DmaChannelConfig cfg{
-        .trigger = dma_trigger_none,
-        .action = DmaTriggerAction::block,
-        .event_action = DmaEventAction::trigger,
-        .event_input = true,
-    };
-    if (!Copy::configure(cfg)) {
-        return false;
-    }
-    const DmaTransfer t{
-        .source = &src[0],
-        .destination = &dst[0],
-        .beats = payload,
-        .beat = DmaBeat::byte,
-    };
-    if (!Copy::load(t)) {
-        return false;
-    }
-    return Copy::enable(true);
-}
+/// How many events the witness has counted - a READSYNC read (35.6.8).
+uint16_t witnessed() { return Witness::count16(); }
 
 /// Bring the block up disabled, with GCLK_EIC from the slow generator.
 bool eic_up_slow() {
@@ -653,13 +621,14 @@ void td_clock() {
 }
 
 // =============================================================================
-// e - the event: an EIC edge through EVSYS, into a DMA transfer
+// e - the event: an EIC edge through EVSYS, counted by a TC
 // =============================================================================
 //
-// A HARDWARE GENERATOR ON THE ASYNCHRONOUS PATH, which is the case a
-// software event cannot stand in for: a software event does not reach
-// the DMAC's trigger stage at all (docs/samc21/evsys.md). The EIC is a
-// real generator, and it settles the question both ways.
+// A HARDWARE GENERATOR ON THE ASYNCHRONOUS PATH, which a software event
+// cannot stand in for: the EIC holds its event line for as long as the
+// condition lasts, so there is something with width to propagate, and
+// one pad edge is exactly one event - which is what makes a COUNT the
+// verdict and not merely "something arrived".
 //
 // It also settles a documentation dispute: 26.6.7 says the EIC's event
 // outputs are "External event from pin (EXTINT0-7)", while its own
@@ -680,34 +649,33 @@ void te_event() {
                                                     .asynchronous = true,
                                                     .event_out = true}) &&
                       Eic::enable(true));
-    bench.verdict("the DMA channel arms with no hardware trigger",
-                  arm_event_driven_copy(0x30));
-    bench.verdict("and nothing has moved yet", destination_untouched());
-    bench.verdict("the DMAC's channel-0 user connects to the channel carrying "
-                  "EXTINT0",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+    bench.verdict("the witness arms: TC4 counts events and nothing else",
+                  witness_arm());
+    bench.verdict("TC4's event user connects to the channel carrying EXTINT0",
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = LineA::event_generator,
                                      .path = EventPath::resynchronized,
                                      .edge = EventEdge::rising}));
     settle();   // erratum 1.12.4: the first tick after configure is blind
+    bench.verdict("and nothing has been counted yet", witnessed() == 0u);
+    Evsys::clear_flags(Evsys::detected_flag(ev_ch) | Evsys::overrun_flag(ev_ch));
     pull_to<PadA>(true);
     settle();
 
-    print(serial, "  after one pad edge: dst[0..3] = ", dst[0], " ", dst[1], " ",
-          dst[2], " ", dst[3], crlf);
-    bench.verdict("A PIN EDGE MOVED THE BYTES - pad to EIC to EVSYS to DMAC, "
+    const uint16_t clocked = witnessed();
+    print(serial, "  after one pad edge, resynchronized path: counted ", clocked,
+          ", EVD=", Evsys::detected(ev_ch) ? "1" : "0", crlf);
+    bench.verdict("ONE PIN EDGE IS ONE COUNT - pad to EIC to EVSYS to TC4, "
                   "with no CPU in the path",
-                  destination_matches(0x30));
+                  clocked == 1u);
+    bench.verdict("and the channel's event-detected flag saw it too "
+                  "(29.6.2.10)",
+                  Evsys::detected(ev_ch));
 
     // --- the same generator on the ASYNCHRONOUS path
-    //
-    // The asynchronous path has no clock and no edge detector; a software
-    // event measurably does not cross it. A hardware generator, on the
-    // other hand, holds its event line for as long as the condition
-    // lasts, so there is something with width to propagate.
-    (void)Copy::enable(false);
-    Evsys::disconnect(user_dmac_ch0);
+    Witness::release();
+    Evsys::disconnect(user_witness);
     (void)Eic::enable(false);
     arm_pad<PadA>(false);
     bench.verdict("line 0 is re-armed for the asynchronous path",
@@ -716,27 +684,27 @@ void te_event() {
                                                     .asynchronous = true,
                                                     .event_out = true}) &&
                       Eic::enable(true));
-    bench.verdict("the DMA channel arms again", arm_event_driven_copy(0x55));
+    bench.verdict("the witness arms again from zero", witness_arm());
     bench.verdict("routed through an ASYNCHRONOUS channel - no clock, no edge "
                   "detector, no status",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = LineA::event_generator,
                                      .path = EventPath::asynchronous}));
     settle();
+    bench.verdict("and nothing has been counted yet", witnessed() == 0u);
     pull_to<PadA>(true);
     settle();
-    const bool async_moved = destination_matches(0x55);
-    print(serial, "  asynchronous path, hardware generator: dst[0..3] = ",
-          dst[0], " ", dst[1], " ", dst[2], " ", dst[3], crlf);
-    bench.verdict("A HARDWARE GENERATOR DOES CROSS AN ASYNCHRONOUS CHANNEL, "
-                  "where a software event does not - the async path carries "
-                  "what has width, and a register write has none",
-                  async_moved);
+    const uint16_t async_count = witnessed();
+    print(serial, "  after one pad edge, asynchronous path: counted ",
+          async_count, crlf);
+    bench.verdict("A HARDWARE GENERATOR CROSSES AN ASYNCHRONOUS CHANNEL - one "
+                  "pad edge, one count, with no channel clock in the path",
+                  async_count == 1u);
 
     // --- a line above 7, which 26.6.7's prose says has no event
-    (void)Copy::enable(false);
-    Evsys::disconnect(user_dmac_ch0);
+    Witness::release();
+    Evsys::disconnect(user_witness);
     (void)Eic::enable(false);
     arm_pad<PadHigh>(false);
     bench.verdict("EXTINT9 senses a rising edge and drives its event output",
@@ -745,9 +713,9 @@ void te_event() {
                                                     .asynchronous = true,
                                                     .event_out = true}) &&
                       Eic::enable(true));
-    bench.verdict("the DMA channel arms once more", arm_event_driven_copy(0x66));
+    bench.verdict("the witness arms once more", witness_arm());
     bench.verdict("and listens to the channel carrying EXTINT9",
-                  Evsys::connect(user_dmac_ch0, ev_ch,
+                  Evsys::connect(user_witness, ev_ch,
                                  EventChannelConfig{
                                      .generator = LineHigh::event_generator,
                                      .path = EventPath::resynchronized,
@@ -755,15 +723,16 @@ void te_event() {
     settle();
     pull_to<PadHigh>(true);
     settle();
+    const uint16_t high_count = witnessed();
     print(serial, "  EXTINT9 (generator ", LineHigh::event_generator,
-          "): dst[0..3] = ", dst[0], " ", dst[1], " ", dst[2], " ", dst[3], crlf);
+          "): counted ", high_count, crlf);
     bench.verdict("EVERY LINE IS AN EVENT GENERATOR, not just EXTINT0-7: "
                   "26.6.7's prose is narrower than its own EVCTRL register "
                   "and than ch. 29's generator table",
-                  destination_matches(0x66));
+                  high_count == 1u);
 
     // --- and with the event output disabled, nothing crosses
-    (void)Copy::enable(false);
+    Witness::release();
     (void)Eic::enable(false);
     arm_pad<PadHigh>(false);
     bench.verdict("EXTINT9 keeps its sense but drops its event output",
@@ -771,17 +740,17 @@ void te_event() {
                                       EicLineConfig{.sense = EicSense::rising,
                                                     .asynchronous = true}) &&
                       Eic::enable(true));
-    bench.verdict("the DMA channel arms", arm_event_driven_copy(0x88));
+    bench.verdict("the witness arms", witness_arm());
     settle();
     Eic::clear_flags(0xFFFFu);
     pull_to<PadHigh>(true);
     settle();
     bench.verdict("the line still flags the edge", LineHigh::flag());
     bench.verdict("but nothing crosses EVSYS - EVCTRL.EXTINTEO is the gate",
-                  destination_untouched());
+                  witnessed() == 0u);
 
-    (void)Copy::enable(false);
-    Evsys::disconnect(user_dmac_ch0);
+    Witness::release();
+    Evsys::disconnect(user_witness);
     GclkChannel::disconnect(Evsys::gclk_id(ev_ch));
     (void)Eic::enable(false);
     Eic::release();
@@ -1011,22 +980,11 @@ extern "C" void NonMaskableInt_Handler() {
     }
 }
 
-/// Bound because a completed transfer raises the line, and an unbound
-/// vector on this target is a silent death. Nothing here needs the
-/// completion - the destination buffer is the witness.
-extern "C" void DMAC_Handler() {
-    while (const auto irq = brio::Dmac::take_pending()) {
-        (void)irq;
-    }
-}
-
 int main() {
     const bool clock_ok = SysClock::init();
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
 
-    const bool dma_ok = brio::Dmac::init();
-    brio::Nvic::enable(brio::Dmac::irq());
     brio::enable_interrupts();
 
     bench.letter('a', "the block, the pad map and the enable-protected "
@@ -1035,7 +993,7 @@ int main() {
     bench.letter('c', "the five senses, and edge versus level", tc_senses);
     bench.letter('d', "the clock: who needs it, and what the filter costs",
                  td_clock);
-    bench.letter('e', "an EIC edge through EVSYS into a DMA transfer", te_event);
+    bench.letter('e', "an EIC edge through EVSYS, counted by a TC", te_event);
     bench.letter('f', "one vector, sixteen lines, masked by INTENSET",
                  tf_interrupt);
     bench.letter('n', "THE NMI on PA08 (outside z)", tn_nmi, false);
@@ -1044,8 +1002,7 @@ int main() {
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "OSC48M" : "FAILED",
-              " tick=", tick_ok ? "SysTick" : "FAILED",
-              " dmac=", dma_ok ? "up" : "FAILED", crlf);
+              " tick=", tick_ok ? "SysTick" : "FAILED", crlf);
         banner();
     }
     bench.prompt();

@@ -95,7 +95,7 @@ the range are ignored, so a linear divisor above 255 means something
 on generator 1 alone.
 
 **And in the DIVSEL regime the width is also a CEILING**, measured by
-`test_samc_timer_dma` letter i, which counts generator 7 against the
+`test_samc_timer_modes` letter e, which counts generator 7 against the
 SysTick wall clock: **DIV = 8 and DIV = 9 give the SAME divisor of 512
 = 2^9** on that eight-bit field. So the rule is 2^(DIV+1) SATURATED at
 2^(width+1), and a DIV past the field's width buys nothing. The two

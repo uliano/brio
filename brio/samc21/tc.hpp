@@ -181,7 +181,8 @@ enum class TcCommand : uint8_t {
     /// The only way to read COUNT correctly (35.6.8) - `count16()` and
     /// friends issue it themselves.
     read_sync = TC_CTRLBSET_CMD_READSYNC_Val,
-    dma_one_shot = TC_CTRLBSET_CMD_DMAOS_Val,
+    // CMD = DMAOS (one DMA trigger per command) has no enumerator: this
+    // stratum drives no DMA from a timer (samc21/dmac.hpp).
 };
 
 /// EVCTRL.EVACT: what an incoming event DOES. The last four are the
@@ -261,9 +262,8 @@ struct TcEventConfig {
 
 // ---- geometry: samc21/device_tables.hpp is the authority -----------------------
 //
-// `tc_count()`, `tc_pair_role(n)` / `tc_can_pair(n)`, `tc_gclk_id(n)`
-// and the DMAC trigger ids `tc_dma_overflow_id(n)` /
-// `tc_dma_match0_id(n)` live in the reserve (device_tables.hpp),
+// `tc_count()`, `tc_pair_role(n)` / `tc_can_pair(n)` and `tc_gclk_id(n)`
+// live in the reserve (device_tables.hpp),
 // probed from the header's own `TCn_*` constants - see that file for
 // why they are probes and not per-variant tables.
 
@@ -338,10 +338,10 @@ public:
         return static_cast<IRQn_Type>(static_cast<int>(TC0_IRQn) + n);
     }
 
-    // ---- the EVSYS and DMAC vocabularies this peripheral publishes ---------
+    // ---- the EVSYS vocabulary this peripheral publishes -----------------
     //
-    // evsys.hpp owns the fabric and not the vocabulary; dmac.hpp owns
-    // the channels and not the trigger table. Both codes live here.
+    // evsys.hpp owns the fabric and not the vocabulary; the codes live
+    // here.
 
     /// Generator: overflow/underflow. TC0 OVF is 0x34 and each instance
     /// takes three consecutive codes.
@@ -358,11 +358,6 @@ public:
     /// docs/samc21/tc.md carries what the bench found.
     static constexpr uint8_t event_user = static_cast<uint8_t>(23u + n);
 
-    /// DMAC trigger ids, from the device header's own TCn_DMAC_ID_*.
-    static constexpr uint8_t dma_trigger_overflow = tc_dma_overflow_id(n);
-    static constexpr uint8_t dma_trigger_match(uint8_t ch) {
-        return static_cast<uint8_t>(tc_dma_match0_id(n) + ch);
-    }
 
     static tc_count16_registers_t& regs() { return regs_union().COUNT16; }
     static tc_count8_registers_t& regs8() { return regs_union().COUNT8; }

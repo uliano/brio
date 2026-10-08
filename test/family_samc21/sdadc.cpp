@@ -27,7 +27,6 @@ static_assert(Sdadc::resrdy_generator == 71);
 static_assert(Sdadc::winmon_generator == 72);
 static_assert(Sdadc::start_event_user == 32);
 static_assert(Sdadc::flush_event_user == 33);
-static_assert(Sdadc::dma_trigger_resrdy == 44);
 
 // ---- the pads: THE PACKAGE VARIATION, per variant --------------------------
 //

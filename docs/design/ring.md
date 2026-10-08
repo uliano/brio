@@ -174,7 +174,7 @@ consume clamping, spans interleaved with push/pop without losing
 order, the guarded path wrapping the span operations too, and the
 whole-buffer span at the 65536-slot boundary where the index-width
 trap lives. The first hardware consumer is the SAM C21 Uart's DMA TX
-engine (`test_samc_dma` at the bench).
+engine (`test_samc_uart` at the bench).
 
 ## Measured on the AVR's uart driver (-Os, avr-gcc 16.2)
 

@@ -100,8 +100,9 @@ the same threshold order. The bench says which is the silicon's.
 event action (START, **user 0** - the first row of table 29-3, and the
 only START user on this family granted all three propagation paths, where
 the DAC's and the SDADC's are asynchronous-only). One DMA request
-(RESRDY, trigger 1), set when a result is available and cleared when VALUE
-is read. One interrupt vector for all four flags.
+(RESRDY, 43.6.3), set when a result is available and cleared when VALUE
+is read - declined here (see "Not covered yet"). One interrupt vector for
+all four flags.
 
 ## Types and verbs
 
@@ -140,7 +141,7 @@ there is no index to carry, as in `Rtc`, `Dac` and `Sdadc`).
 
 - *Constants*: `gclk_id` (5), `pac_id` (12, published for erratum 1.19.1
   and for `samc21/pac.hpp`), `window_generator` (30), `start_event_user`
-  (0), `dma_trigger_resrdy` (1), the four `flag_*` masks, `irq()`.
+  (0), the four `flag_*` masks, `irq()`.
 - *Claim and release*: `init(generator, cfg)` and its compile-time twin
   `init<cfg>(generator)`; `release()`. `init()` writes every
   enable-protected register between the reset and the enable, in that
@@ -210,15 +211,21 @@ Evsys::connect(some_user, channel,
                                   .path = EventPath::asynchronous});
 ```
 
-**Paced by an event, harvested by the DMAC**, with the CPU in neither
-path:
+**Paced by an event, each result taken by the block's own interrupt**:
 
 ```cpp
-Tsens::enable(false);
+Tsens::enable(false);                     // EVCTRL is enable-protected
 Tsens::start_on(channel, EventChannelConfig{.generator = pacer_overflow,
                                             .path = EventPath::asynchronous});
+Tsens::arm(Tsens::flag_result_ready);
+Nvic::enable(Tsens::irq());
 Tsens::enable(true);
-// DMA channel: trigger = Tsens::dma_trigger_resrdy, source = TSENS_VALUE
+
+extern "C" void TSENS_Handler() {
+    if ((brio::Tsens::isr() & brio::Tsens::flag_result_ready) != 0) {
+        values[taken++] = brio::Tsens::value();   // reading VALUE clears RESRDY
+    }
+}
 ```
 
 ## Bench findings
@@ -361,15 +368,18 @@ silent" are both verdicts.
   needs the die to cross a threshold and come back.
 - **Reading VALUE clears WINMON**, exactly as it clears RESRDY (43.8.7).
 
-### The no-CPU chain, and what a "path" costs
+### The event chain, and what a "path" costs
 
-TC2 pacing at about 1 kHz through EVSYS into the START user, the DMAC
-lifting each result out of VALUE, TC3 counting the window monitor's own
-events - and every value the DMAC brings back compared against a reading
-the CPU took **at the same GAIN**.
+TC2 pacing at about 1 kHz through EVSYS into the START user, the block's
+own RESRDY interrupt taking each result out of VALUE, TC3 counting the
+window monitor's own events (EVACT = COUNT) - and every value the
+interrupt brings back compared against a reading the CPU took **at the
+same GAIN**.
 
-- **The DMAC fills the buffer from VALUE, one beat per measurement**, 16
-  of 16, with the CPU in a wait loop; with the pacer stopped, zero beats.
+- **The converter's own interrupt fills the buffer from VALUE, one entry
+  per measurement**, 16 of 16, with the letter in a wait loop, every
+  value the CPU's own reading at that GAIN; with the pacer stopped, zero
+  results.
 - **Table 29-3 is exact and this user is the exception**: the START user
   takes the asynchronous, synchronous AND resynchronized paths, all three
   at 16 of 16, where the DAC's and the SDADC's take only the first.
@@ -379,11 +389,11 @@ the CPU took **at the same GAIN**.
   one - and with the pacer's rate held at 1 kHz and only that width and
   the channel's clock changed:
 
-      pulse     path             channel clock        beats of 16
+      pulse     path             channel clock      results of 16
       21 ns     asynchronous     OSCULP32K                 16
       21 ns     synchronous      48 MHz (the pacer's)      16
       21 ns     synchronous      OSCULP32K                  1
-      21 ns     resynchronized   24 MHz crystal             1
+      21 ns     resynchronized   24 MHz crystal             3
       10.4 us   resynchronized   48 MHz                    16
       10.4 us   synchronous      96 kHz (the pacer's)       1
 
@@ -400,9 +410,8 @@ the CPU took **at the same GAIN**.
 
 ### The interrupts, through the one vector
 
-This block's vector is bound and driven. The DAC's and the SDADC's
-suites only read their flags and never bind theirs; the ADC's is driven
-through `util/analog_sampler.hpp`.
+This block's vector is bound and driven, as the ADC's, the DAC's and
+the SDADC's are in their own suites.
 
 - One started measurement produces exactly **one** interrupt, with RESRDY
   in the mask `isr()` returns; reading VALUE in the handler clears it, so
@@ -413,17 +422,17 @@ through `util/analog_sampler.hpp`.
 
 ### Drift under load - printed and declined
 
-- Baseline 2635 centi-C (spread 45 over 64 readings); then a minute of the
-  CPU spinning, the DMAC copying (154335 blocks) and the TSENS measuring
-  without pause, sampled every ten seconds: **2624, 2615, 2615, 2624, 2619,
-  2640 centi-C**; then 2636 (spread 59).
-- First-to-last 16 centi-C, whole-minute range 25, against the baseline
+- Baseline 2184 centi-C (spread 45 over 64 readings); then a minute of the
+  CPU alone spinning and copying memory (156238 copy rounds) while the
+  TSENS measures without pause, sampled every ten seconds: **2186, 2172,
+  2172, 2171, 2171, 2178 centi-C**; then 2171 (spread 48).
+- First-to-last -8 centi-C, whole-minute range 15, against the baseline
   batch's own spread of 45. **DECLINED**: the trend is inside the
   reading's own spread, so this bench cannot tell self-heating from noise
   and claims nothing. What is claimed is only that a minute of continuous
   conversion under load does not walk the reading away.
-- 64 single measurements spread **60 centi-C**; averaging ten narrows that
-  to **9**, which is why 43.6.2.3 asks for it.
+- 64 single measurements spread **39 centi-C**; averaging ten narrows that
+  to **12**, which is why 43.6.2.3 asks for it.
 
 ### Erratum 1.19.1, reproduced - and worse than it says
 
@@ -498,6 +507,9 @@ rather than a dropped store.
 ## Not covered yet
 
 Driver gaps (not built):
+
+- **The DMA request** (RESRDY, 43.6.3): declined - this stratum drives
+  the DMAC for the Uart's transmitter alone ([dmac.md](dmac.md)).
 
 - **A `MeterSource` or sampler adapter.** `util/analog_sampler.hpp`'s
   converter concept wants an unsigned reading and a `void select()`; this

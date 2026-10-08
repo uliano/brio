@@ -337,51 +337,6 @@ constexpr uint8_t tc_gclk_id(uint8_t n) {
     }
 }
 
-/// The DMAC trigger ids of one instance, from the device header's own
-/// `TCn_DMAC_ID_*` - dmac.hpp owns the channels and not the trigger
-/// table, so the codes live with the peripheral that raises them.
-constexpr uint8_t tc_dma_overflow_id(uint8_t n) {
-    switch (n) {
-#ifdef TC0_DMAC_ID_OVF
-    case 0: return TC0_DMAC_ID_OVF;
-#endif
-#ifdef TC1_DMAC_ID_OVF
-    case 1: return TC1_DMAC_ID_OVF;
-#endif
-#ifdef TC2_DMAC_ID_OVF
-    case 2: return TC2_DMAC_ID_OVF;
-#endif
-#ifdef TC3_DMAC_ID_OVF
-    case 3: return TC3_DMAC_ID_OVF;
-#endif
-#ifdef TC4_DMAC_ID_OVF
-    case 4: return TC4_DMAC_ID_OVF;
-#endif
-    default: return 0;
-    }
-}
-
-constexpr uint8_t tc_dma_match0_id(uint8_t n) {
-    switch (n) {
-#ifdef TC0_DMAC_ID_MC0
-    case 0: return TC0_DMAC_ID_MC0;
-#endif
-#ifdef TC1_DMAC_ID_MC0
-    case 1: return TC1_DMAC_ID_MC0;
-#endif
-#ifdef TC2_DMAC_ID_MC0
-    case 2: return TC2_DMAC_ID_MC0;
-#endif
-#ifdef TC3_DMAC_ID_MC0
-    case 3: return TC3_DMAC_ID_MC0;
-#endif
-#ifdef TC4_DMAC_ID_MC0
-    case 4: return TC4_DMAC_ID_MC0;
-#endif
-    default: return 0;
-    }
-}
-
 // -----------------------------------------------------------------------------
 // `PIN_P<pad>E_TC<n>_WO<k>` exists for exactly the pads a package bonds
 // to a timer's waveform output, and each pad carries exactly one of
@@ -696,44 +651,13 @@ constexpr uint8_t tcc_ext_code(uint8_t n) {
     }
 }
 
-// ---- the DMAC trigger ids and the EVSYS codes -------------------------------
+// ---- the EVSYS codes -------------------------------------------------------
 //
-// dmac.hpp owns the channels and not the trigger table, and evsys.hpp
-// owns the fabric and not the vocabulary - so both tables live with the
-// peripheral that raises them, probed from the device header's own
-// constants rather than counted out by hand. The TCC's generator codes
-// are NOT evenly spaced (TCC0 spends seven, TCC1 and TCC2 five each),
-// which is exactly why they are read and not computed.
-
-constexpr uint8_t tcc_dma_overflow_id(uint8_t n) {
-    switch (n) {
-#ifdef TCC0_DMAC_ID_OVF
-    case 0: return TCC0_DMAC_ID_OVF;
-#endif
-#ifdef TCC1_DMAC_ID_OVF
-    case 1: return TCC1_DMAC_ID_OVF;
-#endif
-#ifdef TCC2_DMAC_ID_OVF
-    case 2: return TCC2_DMAC_ID_OVF;
-#endif
-    default: return 0;
-    }
-}
-
-constexpr uint8_t tcc_dma_match0_id(uint8_t n) {
-    switch (n) {
-#ifdef TCC0_DMAC_ID_MC0
-    case 0: return TCC0_DMAC_ID_MC0;
-#endif
-#ifdef TCC1_DMAC_ID_MC0
-    case 1: return TCC1_DMAC_ID_MC0;
-#endif
-#ifdef TCC2_DMAC_ID_MC0
-    case 2: return TCC2_DMAC_ID_MC0;
-#endif
-    default: return 0;
-    }
-}
+// evsys.hpp owns the fabric and not the vocabulary - so the table lives
+// with the peripheral that raises the events, probed from the device
+// header's own constants rather than counted out by hand. The TCC's
+// generator codes are NOT evenly spaced (TCC0 spends seven, TCC1 and TCC2
+// five each), which is exactly why they are read and not computed.
 
 /// Generator: overflow/underflow. The three counter generators of one
 /// instance are consecutive (OVF, TRG, CNT) and the channel generators
@@ -1098,19 +1022,6 @@ constexpr uint8_t adc_gclk_id(uint8_t n) {
     }
 }
 
-/// The DMAC trigger id of this instance's one DMA request (RESRDY).
-constexpr uint8_t adc_dma_resrdy_id(uint8_t n) {
-    switch (n) {
-#ifdef ADC0_DMAC_ID_RESRDY
-    case 0: return ADC0_DMAC_ID_RESRDY;
-#endif
-#ifdef ADC1_DMAC_ID_RESRDY
-    case 1: return ADC1_DMAC_ID_RESRDY;
-#endif
-    default: return 0;
-    }
-}
-
 // ---- the EVSYS codes, from the device header's own constants ----------------
 
 constexpr uint8_t adc_resrdy_generator(uint8_t n) {
@@ -1323,16 +1234,6 @@ constexpr uint8_t dac_gclk_id() {
 #endif
 }
 
-/// The DMAC trigger id of the one DMA request this peripheral has
-/// (EMPTY, 41.6.3).
-constexpr uint8_t dac_dma_empty_id() {
-#ifdef DAC_DMAC_ID_EMPTY
-    return DAC_DMAC_ID_EMPTY;
-#else
-    return 0;
-#endif
-}
-
 /// EVSYS generator: the data buffer became empty.
 constexpr uint8_t dac_empty_generator() {
 #ifdef EVENT_ID_GEN_DAC_EMPTY
@@ -1428,16 +1329,6 @@ constexpr uint8_t sdadc_gclk_id() {
     return SDADC_GCLK_ID;
 #else
     return 0xFF;
-#endif
-}
-
-/// The DMAC trigger id of the one DMA request this peripheral has
-/// (RESRDY, 39.6.4).
-constexpr uint8_t sdadc_dma_resrdy_id() {
-#ifdef SDADC_DMAC_ID_RESRDY
-    return SDADC_DMAC_ID_RESRDY;
-#else
-    return 0;
 #endif
 }
 
@@ -1615,16 +1506,6 @@ constexpr uint8_t tsens_gclk_id() {
     return TSENS_GCLK_ID;
 #else
     return 0xFF;
-#endif
-}
-
-/// The DMAC trigger id of the one DMA request this peripheral has
-/// (RESRDY, 43.6.3).
-constexpr uint8_t tsens_dma_resrdy_id() {
-#ifdef TSENS_DMAC_ID_RESRDY
-    return TSENS_DMAC_ID_RESRDY;
-#else
-    return 0;
 #endif
 }
 
