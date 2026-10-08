@@ -666,13 +666,16 @@ void ti_mspi() {
 // driven low by PORT for twelve bit times - the loop-back receiver hears
 // the pad (measured with the transmitter off, bench_avr's uart.rx) and
 // takes the break as one frame with FERR and data 0 - and the transmitter
-// is turned on again. The other N - K bytes must arrive intact and in
-// order, and the frame-error counter must read K: the error flags travel
+// is turned on again. Each run is read before its break and the ring
+// looked at once after it - the look that skips the break, with nothing
+// queued - so the other N - K bytes must arrive intact and in order, the
+// frame-error counter must read K and the skips K: the error flags travel
 // with their frame in RXDATAH and nothing else is read to clear them, so no
 // byte beside the hit one is lost. Then the hardware's own overflow: six
 // frames with the receive interrupt off leave three in the buffer (letter
 // c), and one entry of rxc() takes all three - the two oldest and the
-// newest, which carries BUFOVF - and counts one hardware overrun.
+// newest, which carries BUFOVF - counts one hardware overrun and tells the
+// ring, whose next look skips the three: nothing joins the frames lost.
 
 void tI_injected() {
     print(serial, "I errors injected into a stream through the Uart task (breaks, BUFOVF)", crlf);
@@ -690,6 +693,7 @@ void tI_injected() {
     uint8_t got[sizeof sent + 8];
     uint8_t n = 0;
     uint8_t b = 0;
+    const uint32_t skips0 = U4Tx::rx_skips();
     for (uint8_t r = 0; r < runs; ++r) {
         const uint8_t* run = sent + r * per_run;
         uint8_t queued = 0;
@@ -711,6 +715,7 @@ void tI_injected() {
         TxPin::set();
         delay_us(clock, 2u * bit_us);
         U4::enable_tx(true);
+        (void)U4Tx::read_byte(b);           // the look that skips the break
     }
     delay_us(clock, 2'000);
     while (n < sizeof got && U4Tx::read_byte(b)) {
@@ -723,8 +728,10 @@ void tI_injected() {
     print(serial, "  ", runs * (per_run + 1), " slots, ", runs, " breaks: delivered ", n,
           ", frame errors ", U4Tx::frame_errors(), ", parity ", U4Tx::parity_errors(),
           ", ring ", U4Tx::rx_overruns(), ", hw ", U4Tx::hw_overruns(), crlf);
+    const uint32_t skips = (U4Tx::rx_skips() - skips0) & 0xFFu;
     verdict("N - K bytes delivered, intact and in order", in_order);
     verdict("the frame-error counter reads K", U4Tx::frame_errors() == runs);
+    verdict("one skip a break", skips == runs);
     verdict("no other counter moved",
             U4Tx::parity_errors() == 0 && U4Tx::rx_overruns() == 0 && U4Tx::hw_overruns() == 0);
 
@@ -737,17 +744,18 @@ void tI_injected() {
     delay_us(clock, 1'000);                 // six frames at 115200 are 521 us
     U4::enable_rxc_interrupt(true);         // one entry takes what the buffer holds
     delay_us(clock, 100);
+    const uint32_t queued = U4Tx::rx_pending();
+    const uint32_t skips1 = U4Tx::rx_skips();
     n = 0;
     while (n < sizeof got && U4Tx::read_byte(b)) {
         got[n++] = b;
     }
-    print(serial, "  six frames into a full buffer: delivered ", n, ":");
-    for (uint8_t i = 0; i < n; ++i) {
-        print(serial, " ", hex(got[i]));
-    }
-    print(serial, ", hw ", U4Tx::hw_overruns(), crlf);
-    verdict("the two oldest and the newest delivered",
-            n == 3 && got[0] == 0xA0 && got[1] == 0xA1 && got[2] == 0xA5);
+    const uint32_t skips_after = (U4Tx::rx_skips() - skips1) & 0xFFu;
+    print(serial, "  six frames into a full buffer: ", queued, " queued by one entry, ", n,
+          " delivered, skips ", skips_after, ", hw ", U4Tx::hw_overruns(), crlf);
+    verdict("one entry took the buffer's three: the two oldest and the newest", queued == 3);
+    verdict("the look after the overflow skips them: none delivered, one skip",
+            n == 0 && skips_after == 1);
     verdict("one hardware overrun counted", U4Tx::hw_overruns() == 1);
     verdict("RXCIF clear: the entry took the buffer whole", !U4::rxc_flag());
     U4::enable_rxc_interrupt(false);

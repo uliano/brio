@@ -4,8 +4,8 @@
 // see cheaply - the exact WORDS a bring-up leaves in the block, and the
 // ORDER of the acts that make it - and what a bench cannot see at all:
 // that the driver compiles and runs with no silicon under it; and the
-// receive side's losses, each a gap the ring marks where it fell, which a
-// bench cannot place.
+// receive side's losses, each reported to the ring and skipped at the
+// consumer's next look, which a bench cannot stage.
 // Run with: ctest --preset host (or ctest --preset host -R test_pl011)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
@@ -609,15 +609,17 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     CHECK(SimPl011::regs<1>().UARTDMACR == 0u);
 }
 
-// ---- the receive side: every loss is a gap, marked where it fell ---------------
+// ---- the receive side: every loss is reported, and skipped ---------------------
 
 namespace {
 
 // Everything the transport lends from now, run by run, with whether the
-// skip epoch moved before each run.
+// skip epoch moved before each run, and whether the empty look that ended
+// the drain moved it (a skip).
 struct Drained {
     std::string bytes;
     std::vector<bool> moved;
+    bool skipped = false;
 };
 
 Drained drain_port(uint32_t& epoch) {
@@ -625,6 +627,8 @@ Drained drain_port(uint32_t& epoch) {
     for (;;) {
         const auto run = Port::read_span();
         if (run.empty()) {
+            d.skipped = Port::rx_skips() != epoch;
+            epoch = Port::rx_skips();
             break;
         }
         d.moved.push_back(Port::rx_skips() != epoch);
@@ -660,7 +664,7 @@ TEST_CASE("a received burst reaches the ring by the level and the time-out") {
     CHECK(d.moved == std::vector<bool>{false});
 }
 
-TEST_CASE("a framed entry is dropped and is a gap where it fell") {
+TEST_CASE("a framed entry is dropped, reported, and the look after it skips") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Port::init(clock, 115200));
@@ -673,13 +677,22 @@ TEST_CASE("a framed entry is dropped and is a gap where it fell") {
     serve();
     CHECK(Port::frame_errors() == 1u);
     CHECK(Port::break_errors() == 1u);
-    const Drained d = drain_port(epoch);
-    CHECK(d.bytes == "ABCD");
-    CHECK(d.moved == std::vector<bool>{false, true});   // the run after the gap
-    CHECK(Port::rx_skips() == before + 1u);
+    CHECK(Port::rx_pending());               // "ABCD" queued, the loss told
+    Drained d = drain_port(epoch);
+    CHECK(d.bytes.empty());                  // never "ABCD": AB and CD joined
+    CHECK(d.skipped);
+    CHECK(Port::rx_skips() == ((before + 1u) & 0xFFu));
+    CHECK_FALSE(Port::rx_pending());
+    wire("EF");
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    serve();
+    d = drain_port(epoch);
+    CHECK(d.bytes == "EF");
+    CHECK(d.moved == std::vector<bool>{false});
+    CHECK_FALSE(d.skipped);
 }
 
-TEST_CASE("a full ring refuses the rest of the drain, one gap behind what it kept") {
+TEST_CASE("a full ring refuses the rest of the drain, and the look skips what it kept") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Port::init(clock, 115200));
@@ -691,26 +704,26 @@ TEST_CASE("a full ring refuses the rest of the drain, one gap behind what it kep
         serve();
     }
     CHECK(Port::rx_overruns() == 17u);
-    CHECK(Port::rx_skips() == before);       // nothing crossed yet
+    CHECK(Port::rx_skips() == before);       // nobody has looked yet
     wire("XY");                              // still refused: the ring is full
     SimPl011::raise<0>(UartInterrupt::rx_timeout);
     serve();
-    std::string kept = drain_port(epoch).bytes;
-    CHECK(kept.size() == 63u);
-    CHECK(kept.substr(60) == "012");
-    CHECK(Port::rx_skips() == before + 19u); // the crossing, at the ring's end
+    CHECK(Port::rx_overruns() == 19u);
+    Drained d = drain_port(epoch);
+    CHECK(d.bytes.empty());
+    CHECK(d.skipped);
+    CHECK(Port::rx_skips() == ((before + 1u) & 0xFFu));
     wire("after");
     SimPl011::raise<0>(UartInterrupt::rx_timeout);
     serve();
-    const Drained d = drain_port(epoch);
+    d = drain_port(epoch);
     CHECK(d.bytes == "after");
-    // The crossing came with the empty look that ended the drain above:
-    // the epoch is seen moved at the next run, as SerialPort sees it - the
-    // first of two, "after" straddling the storage's end.
-    CHECK(d.moved == std::vector<bool>{true, false});
+    // Two runs, "after" straddling the storage's end where the skip left
+    // the tail; the epoch still between them.
+    CHECK(d.moved == std::vector<bool>{false, false});
 }
 
-TEST_CASE("an overrun is a gap behind the FIFO's depth, the stream resumes after it") {
+TEST_CASE("an overrun is reported after the drain, and the look skips what it held") {
     fresh();
     constexpr Clock clock;
     REQUIRE(Port::init(clock, 115200));
@@ -731,17 +744,21 @@ TEST_CASE("an overrun is a gap behind the FIFO's depth, the stream resumes after
     SimPl011::settle(0);
     serve();
     CHECK(Port::hw_overruns() == 1u);
+    CHECK(SimPl011RxFifo::count[0] == 0u);   // the FIFO drained whole
     wire("NEXT");
     SimPl011::raise<0>(UartInterrupt::rx_timeout);
     serve();
-    const Drained d = drain_port(epoch);
-    // "ok", the 32 entries the full FIFO kept, then the gap - the frame
-    // it swallowed - and the stream after it.
-    std::string kept = "ok";
-    for (int k = 0; k < 32; ++k) {
-        kept += static_cast<char>('a' + k % 26);
-    }
-    CHECK(d.bytes == kept + "NEXT");
-    CHECK(d.moved == std::vector<bool>{false, true});
-    CHECK(Port::rx_skips() == before + 1u);
+    Drained d = drain_port(epoch);
+    // "ok", the 32 entries the full FIFO kept and "NEXT" are queued with
+    // the loss told: never handed out, since "NEXT" follows the frame the
+    // FIFO swallowed.
+    CHECK(d.bytes.empty());
+    CHECK(d.skipped);
+    CHECK(Port::rx_skips() == ((before + 1u) & 0xFFu));
+    wire("MORE");
+    SimPl011::raise<0>(UartInterrupt::rx_timeout);
+    serve();
+    d = drain_port(epoch);
+    CHECK(d.bytes == "MORE");
+    CHECK_FALSE(d.skipped);
 }

@@ -1,5 +1,6 @@
-// Host tests for util/ring.hpp: brio::Ring (the SPSC FIFO), brio::GapRing
-// (a Ring whose producer marks where it lost elements) and
+// Host tests for util/ring.hpp: brio::Ring (the SPSC FIFO), brio::SkipRing
+// (a Ring whose producer can drop elements and whose consumer skips past
+// the drop) and
 // brio::HardwareRing (the consumer half of a ring whose producer is the
 // hardware, driven here by a scripted circular channel).
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
@@ -14,7 +15,7 @@
 #include "util/stream.hpp"
 #include "host/platform.hpp"
 
-using brio::GapRing;
+using brio::SkipRing;
 using brio::HardwareRing;
 using brio::HostPlatform;
 using brio::Ring;
@@ -1131,13 +1132,13 @@ TEST_CASE("hardware ring: waiting() infers a pending completion as a look does")
     CHECK(drain_all<View8>() == positions(5, 6));
 }
 
-// ---- GapRing: the gaps, where they fall ---------------------------------------
+// ---- SkipRing: a drop, and the skip past it ----------------------------------
 
 namespace {
 
-// A producer of a numbered stream into a GapRing: every element is its own
-// position in the stream, so a jump is visible in the values, and an
-// element the ring refuses is lost() where it fell.
+// A producer of a numbered stream into a SkipRing: every element is its
+// own position in the stream, so a skip is visible in the values, and an
+// element the ring refuses is lost().
 template <typename R>
 struct Numbered {
     R& ring;
@@ -1145,7 +1146,7 @@ struct Numbered {
     uint32_t refused = 0;
     void send(uint32_t n) {
         for (uint32_t i = 0; i < n; ++i) {
-            if (!ring.push(next)) {
+            if (!ring.push(static_cast<uint32_t>(next))) {
                 ring.lost();
                 ++refused;
             }
@@ -1168,7 +1169,14 @@ std::vector<uint32_t> drain_runs(R& r, uint32_t& epoch, std::vector<bool>* moved
     for (;;) {
         const auto run = r.read_span();
         if (run.empty()) {
-            break;
+            if (r.skips() == epoch) {
+                break;
+            }
+            epoch = r.skips();   // a skip made by this look: look again
+            if (moved != nullptr) {
+                moved->push_back(true);
+            }
+            continue;
         }
         const uint32_t now = r.skips();
         if (moved != nullptr) {
@@ -1185,8 +1193,8 @@ std::vector<uint32_t> drain_runs(R& r, uint32_t& epoch, std::vector<bool>* moved
 
 } // namespace
 
-TEST_CASE("gap ring: with no loss it is a Ring, and the epoch stays") {
-    GapRing<uint8_t, 8, HostPlatform> r;
+TEST_CASE("skip ring: with no loss it is a Ring, and the epoch stays") {
+    SkipRing<uint8_t, 8, HostPlatform> r;
     CHECK(r.empty());
     CHECK(r.capacity() == 7);
     CHECK(r.push(1));
@@ -1198,136 +1206,178 @@ TEST_CASE("gap ring: with no loss it is a Ring, and the epoch stays") {
     CHECK(run[0] == 2);
     r.consume(1);
     CHECK(r.empty());
+    CHECK_FALSE(r.pop().has_value());
+    CHECK(r.read_span().empty());
     CHECK(r.skips() == 0u);
 }
 
-TEST_CASE("gap ring: a byte lost to a FULL ring is a gap behind everything queued") {
-    // The ring holds 0..6 when 7 and 8 are refused: the gap is after 6,
-    // a whole ring ahead of the consumer - not at the run in hand.
-    GapRing<uint32_t, 8, HostPlatform> r;
+TEST_CASE("skip ring: two bytes beside the Ring") {
+    static_assert(sizeof(SkipRing<uint8_t, 64, HostPlatform>) ==
+                  sizeof(Ring<uint8_t, 64, HostPlatform>) + 2u);
+    static_assert(sizeof(SkipRing<uint8_t, 256, HostPlatform>) ==
+                  sizeof(Ring<uint8_t, 256, HostPlatform>) + 2u);
+    static_assert(sizeof(SkipRing<uint8_t, 512, HostPlatform>) ==
+                  sizeof(Ring<uint8_t, 512, HostPlatform>) + 2u);
+}
+
+TEST_CASE("skip ring: a byte lost to a FULL ring skips everything queued") {
+    // The ring holds 0..6 when 7 and 8 are refused: the next look hands
+    // out nothing - 0..6 go with the drop - and the stream resumes with
+    // what came after it.
+    SkipRing<uint32_t, 8, HostPlatform> r;
     Numbered<decltype(r)> p{r};
     p.send(9);                          // 0..6 kept, 7 and 8 lost
     CHECK(p.refused == 2u);
-    CHECK(r.skips() == 0u);             // nothing crossed yet
-    auto run = r.read_span();
-    REQUIRE(run.size() == 7);
-    CHECK(run[6] == 6u);
-    r.consume(3);                       // room again: 9..11 land after the gap
-    p.send(3);
-    CHECK(r.skips() == 0u);
-    run = r.read_span();                // stops AT the gap, 3..6
-    REQUIRE(run.size() == 4);
-    CHECK(run[0] == 3u);
-    CHECK(run[3] == 6u);
-    CHECK(r.skips() == 0u);
-    r.consume(4);
-    run = r.read_span();                // the tail stands on the gap: crossed
-    CHECK(r.skips() == 2u);
-    REQUIRE(run.size() == 1);           // 9, up to the storage's end
-    CHECK(run[0] == 9u);
-    r.consume(1);
-    run = r.read_span();
-    REQUIRE(run.size() == 2);
-    CHECK(run[0] == 10u);
-    r.consume(2);
+    CHECK(r.count() == 7u);
+    CHECK(r.skips() == 0u);             // nothing looked at yet
+    CHECK(r.read_span().empty());       // the skip
+    CHECK(r.skips() == 1u);
     CHECK(r.empty());
-    CHECK(r.skips() == 2u);
+    p.send(3);                          // 9..11, across the storage's end
+    uint32_t epoch = r.skips();
+    std::vector<bool> moved;
+    CHECK(drain_runs(r, epoch, &moved) == std::vector<uint32_t>{9, 10, 11});
+    CHECK(moved == std::vector<bool>{false, false});
+    CHECK(r.skips() == 1u);
 }
 
-TEST_CASE("gap ring: a discard into an empty ring is crossed at the next look") {
-    GapRing<uint32_t, 8, HostPlatform> r;
+TEST_CASE("skip ring: a run read before the drop is released whole, the next look skips") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
+    Numbered<decltype(r)> p{r};
+    p.send(4);                          // 0..3
+    const auto run = r.read_span();
+    REQUIRE(run.size() == 4u);
+    p.lose(1);                          // 4 discarded while the run is held
+    p.send(2);                          // 5, 6
+    CHECK(run[3] == 3u);                // the run is the stream before the drop
+    r.consume(4);
+    CHECK(r.skips() == 0u);
+    CHECK(r.read_span().empty());       // 5, 6 go with the drop
+    CHECK(r.skips() == 1u);
+    p.send(1);
+    CHECK(r.pop().value() == 7u);
+}
+
+TEST_CASE("skip ring: a discard into an empty ring is skipped at the next look") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
     Numbered<decltype(r)> p{r};
     p.send(2);
     uint32_t epoch = 0;
     CHECK(drain_runs(r, epoch) == std::vector<uint32_t>{0, 1});
     p.lose(1);                          // 2 discarded with the ring empty
-    CHECK(r.read_span().empty());       // crossed, nothing after it yet
+    CHECK(r.read_span().empty());       // skipped, nothing behind it
     CHECK(r.skips() == 1u);
     p.send(2);
     std::vector<bool> moved;
+    epoch = r.skips();
     CHECK(drain_runs(r, epoch, &moved) == std::vector<uint32_t>{3, 4});
-    CHECK(moved == std::vector<bool>{true});
+    CHECK(moved == std::vector<bool>{false});
 }
 
-TEST_CASE("gap ring: consume() never passes the gap, pop() crosses it") {
-    GapRing<uint32_t, 8, HostPlatform> r;
+TEST_CASE("skip ring: a skip at the storage's wrap") {
+    // The data straddles the end of the storage when the drop falls: the
+    // tail jumps across the wrap to the head, and the next run is the
+    // stream after the drop, from the head's slot on.
+    SkipRing<uint32_t, 8, HostPlatform> r;
+    Numbered<decltype(r)> p{r};
+    p.send(6);                          // 0..5 in slots 0..5
+    r.consume(5);                       // the tail at slot 5
+    p.send(4);                          // 6..9 in slots 6, 7, 0, 1
+    p.lose(1);                          // 10
+    CHECK(r.count() == 5u);
+    CHECK(r.read_span().empty());
+    CHECK(r.skips() == 1u);
+    CHECK(r.empty());
+    p.send(3);                          // 11..13 in slots 2..4
+    uint32_t epoch = r.skips();
+    CHECK(drain_runs(r, epoch) == std::vector<uint32_t>{11, 12, 13});
+    p.send(5);                          // 14..18 across the wrap
+    CHECK(drain_runs(r, epoch) == std::vector<uint32_t>{14, 15, 16, 17, 18});
+    CHECK(r.skips() == 1u);
+}
+
+TEST_CASE("skip ring: many drops between two looks are one skip") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
+    Numbered<decltype(r)> p{r};
+    for (int k = 0; k < 50; ++k) {
+        p.send(3);
+        p.lose(7);
+    }
+    CHECK(r.read_span().empty());
+    CHECK(r.skips() == 1u);
+    CHECK(r.read_span().empty());       // the drops are behind: no second skip
+    CHECK(r.skips() == 1u);
+}
+
+TEST_CASE("skip ring: exactly 256 drops between two looks are still seen") {
+    // An epoch the producer incremented would read its old value again
+    // after 256 drops, and the consumer would join the two sides of
+    // them; one written as one past the consumer's copy cannot.
+    SkipRing<uint32_t, 8, HostPlatform> r;
+    Numbered<decltype(r)> p{r};
+    for (uint32_t n : {256u, 512u, 255u, 257u}) {
+        const uint32_t before = r.skips();
+        p.send(2);
+        p.lose(n);
+        p.send(2);
+        CHECK(r.read_span().empty());
+        CHECK(r.skips() == ((before + 1u) & 0xFFu));
+        CHECK(r.empty());
+    }
+}
+
+TEST_CASE("skip ring: skips() counts modulo 2^8, and every skip moves it") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
+    Numbered<decltype(r)> p{r};
+    uint32_t last = r.skips();
+    for (int k = 0; k < 600; ++k) {
+        p.send(1);
+        p.lose(1);
+        CHECK(r.read_span().empty());
+        const uint32_t now = r.skips();
+        REQUIRE(now != last);
+        REQUIRE(now == ((last + 1u) & 0xFFu));
+        last = now;
+    }
+}
+
+TEST_CASE("skip ring: pop() skips as read_span() does") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
     Numbered<decltype(r)> p{r};
     p.send(2);                          // 0, 1
+    CHECK(r.pop().value() == 0u);
     p.lose(1);                          // 2
     p.send(2);                          // 3, 4
-    r.consume(5);                       // clamped at the gap
-    CHECK(r.count() == 2u);
-    CHECK(r.skips() == 0u);
-    CHECK(r.pop().value() == 3u);       // the crossing, then the element
+    CHECK_FALSE(r.pop().has_value());   // the skip: 1, 3 and 4 with it
     CHECK(r.skips() == 1u);
-    CHECK(r.pop().value() == 4u);
-    CHECK_FALSE(r.pop().has_value());
+    CHECK(r.empty());
+    p.send(1);
+    CHECK(r.pop().value() == 5u);
+    p.lose(1);
+    CHECK_FALSE(r.pop().has_value());   // an empty ring skips too
+    CHECK(r.skips() == 2u);
 }
 
-TEST_CASE("gap ring: every gap is kept, however many stand before the first is crossed") {
-    GapRing<uint32_t, 8, HostPlatform> r;
+TEST_CASE("skip ring: the producer may ask count() while a drop stands") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
     Numbered<decltype(r)> p{r};
-    const uint32_t before = r.skips();
-    p.send(8);                          // 0..6, 7 lost: a gap after 6
-    r.consume(2);                       // 0, 1 read
-    p.send(3);                          // 8, 9 kept; 10 lost: a gap after 9
-    CHECK(p.refused == 2u);
-    r.consume(5);                       // 2..6: the tail on the first gap
-    r.consume(2);                       // refused: the gap is not crossed
+    p.send(3);
+    p.lose(1);
+    CHECK(r.count() == 3u);             // no skip from a count
+    CHECK_FALSE(r.empty());
+    CHECK(r.skips() == 0u);
+    r.consume(1);                       // consume() judges nothing
     CHECK(r.count() == 2u);
-    uint32_t epoch = r.skips();
-    std::vector<bool> moved;
-    p.send(2);                          // 11, 12 - after the room the reads made
-    CHECK(drain_runs(r, epoch, &moved) == std::vector<uint32_t>{8, 9, 11, 12});
-    // 8 alone up to the storage's end, after the first gap; 9 alone up to
-    // the second; 11 and 12 after it.
-    CHECK(moved == std::vector<bool>{true, false, true});
-    CHECK(r.skips() == before + 2u);
+    CHECK(r.read_span().empty());
+    CHECK(r.skips() == 1u);
 }
 
-TEST_CASE("gap ring: a stream with K losses among N delivers the other N - K, each gap seen") {
-    // The receiver's errors in a stream nobody reads meanwhile: every
-    // fourth element discarded. Every other one is delivered, in order,
-    // and the epoch moves at every run that begins after a gap.
-    GapRing<uint32_t, 64, HostPlatform> r;
-    Numbered<decltype(r)> p{r};
-    const uint32_t before = r.skips();
-    for (int k = 0; k < 10; ++k) {
-        p.send(3);
-        p.lose(1);
-    }
-    uint32_t epoch = r.skips();
-    std::vector<bool> moved;
-    const auto got = drain_runs(r, epoch, &moved);
-    CHECK(got.size() == 30u);
-    CHECK(moved.size() == 10u);
-    CHECK(moved[0] == false);
-    CHECK(moved[9] == true);
-    CHECK(r.read_span().empty());       // the last loss, crossed at the empty look
-    CHECK(r.skips() == before + 10u);
-}
-
-TEST_CASE("gap ring: lost(n) counts n elements at one place") {
-    GapRing<uint32_t, 8, HostPlatform> r;
-    const uint32_t before = r.skips();
-    CHECK(r.push(1u));
-    r.lost(5u);                         // five refused at once, behind the 1
-    r.lost(2u);                         // two more at the same place
-    CHECK(r.push(9u));
-    CHECK(r.pop().value() == 1u);
-    CHECK(r.skips() == before);
-    CHECK(r.pop().value() == 9u);       // crossed first
-    CHECK(r.skips() == before + 7u);
-}
-
-TEST_CASE("gap ring: clear() forgets a gap and keeps the epoch") {
-    GapRing<uint32_t, 8, HostPlatform> r;
+TEST_CASE("skip ring: clear() forgets a drop and keeps the epoch") {
+    SkipRing<uint32_t, 8, HostPlatform> r;
     Numbered<decltype(r)> p{r};
     p.send(1);
     p.lose(1);
-    p.send(1);
-    CHECK(r.pop().value() == 0u);
-    CHECK(r.pop().value() == 2u);
+    CHECK_FALSE(r.pop().has_value());
     CHECK(r.skips() == 1u);
     p.lose(1);
     p.send(1);
@@ -1338,35 +1388,33 @@ TEST_CASE("gap ring: clear() forgets a gap and keeps the epoch") {
     CHECK(r.skips() == 1u);
 }
 
-TEST_CASE("gap ring: on a byte-atomic core the guarded path, and a gap byte that saturates") {
-    using R = GapRing<uint8_t, 512, NarrowPlatform>;
+TEST_CASE("skip ring: on a byte-atomic core the guarded path") {
+    using R = SkipRing<uint8_t, 512, NarrowPlatform>;
     static_assert(!R::lock_free);
-    static_assert(sizeof(R::gaps_t) == 2u);   // wider than the atomic width: guarded
-    static_assert(sizeof(GapRing<uint8_t, 64, NarrowPlatform>::gaps_t) == 1u);
     static R r;
     for (uint32_t i = 0; i < 300u; ++i) {
         REQUIRE(r.push(static_cast<uint8_t>(i)));
     }
-    for (uint32_t i = 0; i < 300u; ++i) {   // more than a byte counts
-        r.lost();
-    }
-    REQUIRE(r.push(0xAA));
     const uint32_t entries = NarrowPlatform::CriticalSection::entries;
-    uint32_t epoch = 0;
-    const auto got = drain_runs(r, epoch);
-    REQUIRE(got.size() == 301u);
-    CHECK(got.back() == 0xAAu);
-    CHECK(r.skips() == 255u);           // saturated, never wrapped to "no gap"
+    const auto run = r.read_span();
+    CHECK(run.size() == 300u);
+    r.lost();
+    CHECK(r.read_span().empty());       // the skip, its head read under the guard
+    CHECK(r.skips() == 1u);
+    CHECK(r.empty());
+    REQUIRE(r.push(0xAA));
+    CHECK(r.pop().value() == 0xAAu);
     CHECK(NarrowPlatform::CriticalSection::entries > entries);
     CHECK(NarrowPlatform::CriticalSection::depth == 0u);
 }
 
-TEST_CASE("gap ring: lossy traffic - every jump in the stream is seen at the run it opens") {
+TEST_CASE("skip ring: lossy traffic - no run holds a drop, and every jump is a skip seen") {
     // A numbered stream through a small ring, the producer outrunning the
     // consumer at random and discarding at random: every run handed out
-    // is consecutive, and two runs whose elements do not follow on are
-    // separated by a move of the epoch - and only those.
-    GapRing<uint32_t, 16, HostPlatform> r;
+    // is consecutive, a run that does not follow on from the one before
+    // comes after a move of skips() - and only then -, skips() never moves
+    // over a look that hands out a run, and the stream never goes back.
+    SkipRing<uint32_t, 16, HostPlatform> r;
     Numbered<decltype(r)> p{r};
     uint32_t seed = 12345u;
     auto rnd = [&](uint32_t n) {
@@ -1376,6 +1424,7 @@ TEST_CASE("gap ring: lossy traffic - every jump in the stream is seen at the run
     uint32_t epoch = 0;
     uint32_t expected = 0;              // the element that follows the last one read
     uint32_t delivered = 0;
+    uint32_t skipped = 0;
     for (int step = 0; step < 20000; ++step) {
         if (rnd(10) == 0) {
             p.lose(1 + rnd(2));
@@ -1384,29 +1433,35 @@ TEST_CASE("gap ring: lossy traffic - every jump in the stream is seen at the run
         }
         uint32_t reads = rnd(3);
         while (reads-- > 0u) {
+            const uint32_t at_look = r.skips();
             const auto run = r.read_span();
             if (run.empty()) {
+                if (r.skips() != at_look) {
+                    ++skipped;
+                }
                 break;
             }
-            const uint32_t now = r.skips();
+            REQUIRE(r.skips() == at_look);   // a run lent moves nothing
+            // Consecutive: a dropped element never enters the ring, so a
+            // run holding a drop would jump inside.
             for (uint32_t k = 1; k < run.size(); ++k) {
                 REQUIRE(run[k] == run[k - 1] + 1u);
             }
-            if (now != epoch) {
+            if (r.skips() != epoch) {
                 REQUIRE(run[0] > expected);
             } else {
                 REQUIRE(run[0] == expected);
             }
-            epoch = now;
+            epoch = r.skips();
             const uint32_t take = 1u + rnd(static_cast<uint32_t>(run.size()));
             expected = run[take - 1u] + 1u;
             delivered += take;
             r.consume(static_cast<uint8_t>(take));
         }
     }
-    // Drained to the end: every element sent was delivered or is counted.
     delivered += static_cast<uint32_t>(drain_runs(r, epoch).size());
     CHECK(r.read_span().empty());
     CHECK(p.refused > 0u);
-    CHECK(delivered + r.skips() == p.next);
+    CHECK(skipped > 0u);
+    CHECK(delivered < p.next);
 }

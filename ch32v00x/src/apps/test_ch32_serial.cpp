@@ -71,7 +71,9 @@
 //      in order, no byte taken by a clear, the frame errors counted one a
 //      break; back-to-back breaks counting every other one
 //      (ch32v00x/usart.hpp's header); the interrupt receiver's breaks,
-//      dropped and counted
+//      dropped, counted and skipped - a reader that looks between them
+//      handed every data byte, one that does not handed nothing the ring
+//      held with a break behind it
 //   r  tx_idle() IS THE WIRE'S: the moment it turns true against the last
 //      stop bit's start on the jumper (TIM2's channel 1 capturing PD4),
 //      for the interrupt transmitter and the transmit engine
@@ -1258,31 +1260,61 @@ void tq_errors() {
     bench.verdict("back-to-back breaks count every other one (two count 1, three count 2)",
                   counts[0] == 1u && counts[1] == 2u);
 
+    // The interrupt receiver drops each break's frame, counts it and tells
+    // its ring, whose next look skips what it holds: read between the
+    // breaks, every data byte is handed out ...
     (void)transport_on<PlainUart>(&plain_edge_isr, 9600);
     breaks = 0;
     bang_idle(9600, 2);
-    for (uint32_t i = 0; i < 24u; ++i) {
-        bang_frame({.data = stream_byte(i), .baud = 9600});
-        if (i % 4u == 3u) {
-            bang_break(9600, 12);
-            bang_idle(9600, 1);   // the break's own stop bit: a start bit wants a high line before it
-            ++breaks;
-        }
-    }
-    settle_ms(3);
     uint32_t back = 0;
     bool ok = true;
     uint8_t b = 0;
-    while (PlainUart::read_byte(b)) {
-        if (b != stream_byte(back)) {
-            ok = false;
+    auto read_all = [&] {
+        settle_ms(1);
+        while (PlainUart::read_byte(b)) {
+            if (b != stream_byte(back)) {
+                ok = false;
+            }
+            ++back;
         }
-        ++back;
+    };
+    const uint32_t skips0 = PlainUart::rx_skips();
+    for (uint32_t i = 0; i < 24u; ++i) {
+        bang_frame({.data = stream_byte(i), .baud = 9600});
+        if (i % 4u == 3u) {
+            read_all();   // the four before the break
+            bang_break(9600, 12);
+            bang_idle(9600, 1);   // the break's own stop bit: a start bit wants a high line before it
+            ++breaks;
+            read_all();   // the skip, with nothing queued
+        }
     }
-    print(serial, "  the interrupt receiver: 24 bytes and ", breaks, " breaks, ", back, " delivered, FE ",
-          PlainUart::frame_errors(), crlf);
-    bench.verdict("the interrupt receiver drops each break's frame and counts it",
-                  back == 24u && ok && PlainUart::frame_errors() == breaks);
+    const uint32_t skips = (PlainUart::rx_skips() - skips0) & 0xFFu;
+    print(serial, "  the interrupt receiver, read between: 24 bytes and ", breaks, " breaks, ", back,
+          " delivered, FE ", PlainUart::frame_errors(), ", skips ", skips, crlf);
+    bench.verdict("the interrupt receiver drops each break's frame, counts it and skips it: a reader that "
+                  "looks between the breaks is handed every data byte",
+                  back == 24u && ok && PlainUart::frame_errors() == breaks && skips == breaks);
+    // ... and read after, nothing the ring held with a break behind it:
+    // no run joins the two sides.
+    const uint32_t skips1 = PlainUart::rx_skips();
+    for (uint32_t i = 0; i < 8u; ++i) {
+        bang_frame({.data = stream_byte(24u + i), .baud = 9600});
+        if (i == 3u) {
+            bang_break(9600, 12);
+            bang_idle(9600, 1);
+        }
+    }
+    settle_ms(3);
+    uint32_t joined = 0;
+    while (PlainUart::read_byte(b)) {
+        ++joined;
+    }
+    const uint32_t skips_after = (PlainUart::rx_skips() - skips1) & 0xFFu;
+    print(serial, "  read after: 8 bytes around a break, ", joined, " delivered, FE ",
+          PlainUart::frame_errors(), ", skips ", skips_after, crlf);
+    bench.verdict("bytes queued with a break among them are skipped whole, in one skip",
+                  joined == 0u && skips_after == 1u && PlainUart::frame_errors() == breaks + 1u);
     all_off();
 }
 

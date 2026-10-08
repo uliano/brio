@@ -904,10 +904,11 @@ private:
  *  - RX hardware error flags (frame / parity / buffer overflow) are
  *    counted; corrupted bytes (FERR/PERR) are dropped;
  *  - every byte the receive ring will not deliver - dropped on a full
- *    ring, discarded for FERR or PERR, lost to a buffer overflow - is a
- *    gap the receive ring MARKS where it falls (util/ring.hpp's GapRing),
- *    and rx_skips() counts them, never cleared: SerialPort compares it at
- *    every run and tears the line a gap cut.
+ *    ring, discarded for FERR or PERR, lost to a buffer overflow - is
+ *    reported to the receive ring (util/ring.hpp's SkipRing), whose
+ *    consumer's next look skips everything queued; rx_skips() counts the
+ *    skips, never cleared: SerialPort compares it at every run and tears
+ *    the line a loss cut.
  *
  * The empty default constructor is intentionally AVAILABLE: an instance
  * carries no state and acts as a zero-cost tag so call sites can read
@@ -953,9 +954,10 @@ class Uart {
                   "this package does not bond this USART's ALT1 position");
 
     // One ring pair per instantiation (static inline -> .bss, no ctor).
-    // The receive ring marks where rxc() lost a byte (GapRing): lost() is
-    // a test and three byte stores on the rare paths, nothing on push().
-    static inline GapRing<uint8_t, rx_size, AvrPlatform> m_rx{};
+    // The receive ring is told when rxc() lost a byte (SkipRing): lost()
+    // is a load, an increment and a store on the rare paths, nothing on
+    // push().
+    static inline SkipRing<uint8_t, rx_size, AvrPlatform> m_rx{};
     static inline Ring<uint8_t, tx_size, AvrPlatform> m_tx{};
 
     // Error counters, written in ISRs, read from the main loop. uint8_t
@@ -1109,11 +1111,11 @@ public:
      * the start-of-frame nor the auto-baud flags that share the vector.
      * A frame with FERR or PERR is counted and dropped; BUFOVF marks the
      * frame that arrived while the buffer was full - the frames lost are
-     * before it, and it is delivered. EVERY LOSS IS A GAP MARKED WHERE IT
-     * FELL: a frame the full ring refuses or the flags drop, after the
-     * frames pushed before it, and a buffer overflow before the frame that
-     * carries it - the receive ring's lost() (util/ring.hpp's GapRing), on
-     * the rare paths alone.
+     * before it, and it is delivered. EVERY LOSS IS REPORTED TO THE RING -
+     * a frame the full ring refuses or the flags drop, a buffer overflow -
+     * by its lost() (util/ring.hpp's SkipRing), on the rare paths alone;
+     * the consumer's next look skips everything queued, so where in the
+     * entry a loss fell does not matter.
      *
      * Returns true when the RX ring went empty -> non-empty in this entry:
      * the edge the kernel glue posts RxActivity on. Every such transition
@@ -1145,9 +1147,9 @@ public:
             // One test of the three flags on the clean path; the rare
             // path counts each and drops a frame with FERR or PERR. The
             // push is spelled on both paths, so the clean one carries no
-            // flag of its own. The rare path marks a buffer overflow's gap
-            // BEFORE it reads the frame: the frames lost are before this
-            // one, and the mark then needs no register the frame holds.
+            // flag of its own. The rare path reports a buffer overflow
+            // BEFORE it reads the frame: the report then needs no register
+            // the frame holds.
             if ((status & (USART_BUFOVF_bm | USART_FERR_bm | USART_PERR_bm)) == 0) {
                 const uint8_t data = u.RXDATAL;   // shifts the buffer
                 if (m_rx.push(data)) {
@@ -1350,14 +1352,12 @@ public:
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t hw_overruns() { return m_hw_overruns; }
 
-    /// Every byte the receive ring will not deliver since the program
-    /// started - dropped on a full ring, discarded for FERR or PERR, lost
-    /// to a buffer overflow (at least one a BUFOVF) - NEVER CLEARED
-    /// (modulo 2^32): util/stream.hpp's SkippingSource, the epoch
-    /// SerialPort compares at every run. It moves when the consumer is
-    /// handed the first byte after a gap, not when the gap is made
-    /// (GapRing); between two such crossings the losses are counted
-    /// modulo 2^8, the receive vector keeping a byte-wide count.
+    /// The skips the receive ring has made since the program started,
+    /// NEVER CLEARED (modulo 2^8): util/stream.hpp's SkippingSource, the
+    /// epoch SerialPort compares at every run. One moves at the consumer's
+    /// look after a byte dropped on a full ring, discarded for FERR or
+    /// PERR, or lost to a buffer overflow - the look that discards what
+    /// the ring held (SkipRing) -, never when the loss is made.
     static uint32_t rx_skips() { return m_rx.skips(); }
 
     static void clear_errors() {

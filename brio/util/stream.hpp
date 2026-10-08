@@ -85,17 +85,20 @@ concept SpanSource = requires(uint32_t n) {
     S::consume(n);
 };
 
-/// A SpanSource that reports the GAPS in its stream: rx_skips() counts
-/// every byte the line carried that the receive ring will not deliver -
-/// dropped on a full ring, lost to a hardware overrun, discarded for a
-/// frame or parity error, skipped with a lap the consumer missed - since
-/// the start, NEVER CLEARED (modulo 2^32), and moved on those rare paths
-/// alone. A reader that carries state across its runs compares it from
-/// one run to the next, because a run handed out after a gap is the
-/// stream after it, which would otherwise read as following on. Where
-/// the ring knows where each gap falls (util/ring.hpp's GapRing and
-/// HardwareRing) the count moves exactly between the run before the gap
-/// and the run after it. A transport whose consume() answers bool (a
+/// A SpanSource that reports the GAPS in its stream: rx_skips() is an
+/// EPOCH that moves whenever the stream the receive ring hands out jumps
+/// - bytes dropped on a full ring, lost to a hardware overrun, discarded
+/// for a frame or parity error, a lap the consumer missed -, NEVER
+/// CLEARED, and moved on those rare paths alone. A reader that carries
+/// state across its runs compares it from one run to the next, because a
+/// run handed out after a gap is the stream after it, which would
+/// otherwise read as following on. Only its change is meaningful: its
+/// width bounds the jumps between two compares (2^8 where a SkipRing
+/// counts its skips, 2^32 where a vector counts too), and a reader that
+/// compares after every look sees each one. Where the ring skips at the
+/// look that finds the gap (util/ring.hpp's SkipRing and HardwareRing)
+/// the epoch moves between the run before the gap and the run after it,
+/// never inside one. A transport whose consume() answers bool (a
 /// HardwareRing behind it, whose producer can lap a run while it is held)
 /// must be one of these.
 template <typename S>

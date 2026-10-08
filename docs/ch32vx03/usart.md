@@ -382,9 +382,9 @@ lot-keyed registers of this die already said it is
   `frame_errors()`, `parity_errors()`, `noise_errors()`,
   `hw_overruns()`, `clear_errors()`), `baud()`/`actual_baud()`/
   `set_baud()`/`rebase()`/`divisor_for()`/`can_baud()`/`min_hz_for()`,
-  `release()`, `rx_skips()` (every byte the receive ring will not
-  deliver, never cleared - util/serial_port.hpp's epoch: without an
-  engine the GapRing's crossings of the gaps `isr()` marks where it
+  `release()`, `rx_skips()` (the gaps in the stream the receive ring
+  hands out, never cleared - util/serial_port.hpp's epoch: without an
+  engine the SkipRing's skips, one at the consumer's look after `isr()`
   dropped a flagged byte or a full ring refused one; with one the view's
   skips plus an overrun and a restart after a transfer error), and the
   engine
@@ -545,8 +545,10 @@ CH32V303 evaluation board - and the second is measured on both below.
   breaks between them in a continuous stream - every data byte delivered
   intact and in order, the 14 breaks stored as the 0x00 frames they are,
   FE counted 14: no byte taken by a clear. Two breaks back to back count
-  1, three count 2. The interrupt receiver drops each break's frame and
-  counts it (40 of 40, FE 10 for 10). The breaks are banged on the
+  1, three count 2. The interrupt receiver drops each break's frame,
+  counts it and skips it: read between the breaks 40 of 40, FE 10 for
+  10, ten skips; read after them, 8 bytes around a break, none handed
+  out and one skip. The breaks are banged on the
   sender's pad: measured on the same board, the transmitter SENDS ITS
   LAST BYTE AGAIN after an SBK break, so SBK put a repeated byte into
   every stream it broke - a fact of the sender worth knowing, not of the

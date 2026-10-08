@@ -815,10 +815,10 @@ struct Uart {
 
         if ((status & usart_rxne) != 0u) {
             const uint8_t byte = static_cast<uint8_t>(regs().DATAR & 0xFFu);
-            // Every byte lost is a gap the receive ring marks where it
-            // fell (lost()): the flagged byte dropped here - with an
-            // overrun's, lost behind it in the shift register - and one a
-            // full ring refuses.
+            // Every byte lost is reported to the receive ring (lost()):
+            // the flagged byte dropped here - with an overrun's, lost in
+            // the shift register - and one a full ring refuses. The
+            // consumer's next look skips everything queued.
             if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
                 if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
                 if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
@@ -941,12 +941,11 @@ struct Uart {
 
     static auto rx_pending() { return m_rx.count(); }
 
-    /// Every byte the line carried that the receive ring will not deliver
-    /// - dropped for a flag or a full ring, and an overrun's - since the
-    /// program started, NEVER CLEARED (modulo 2^32): util/stream.hpp's
-    /// SkippingSource, the epoch util/serial_port.hpp compares at every
-    /// run. Each is marked where it fell by the GapRing, and the count
-    /// moves when the consumer crosses the mark.
+    /// The skips the receive ring has made since the program started,
+    /// NEVER CLEARED (modulo 2^8): util/stream.hpp's SkippingSource, the
+    /// epoch util/serial_port.hpp compares at every run - one at the
+    /// consumer's look after a byte dropped for a flag or a full ring, or
+    /// an overrun, the look that discards what the ring held (SkipRing).
     static uint32_t rx_skips() { return m_rx.skips(); }
 
     static uint32_t baud() { return m_baud; }
@@ -1050,7 +1049,7 @@ private:
         }
     }
 
-    static inline GapRing<uint8_t, rx_size, P> m_rx{};   // marks where isr() lost a byte
+    static inline SkipRing<uint8_t, rx_size, P> m_rx{};   // told when isr() lost a byte
     static inline Ring<uint8_t, tx_size, P> m_tx{};
     static inline uint32_t m_baud = 0;
     static inline uint16_t m_rx_overruns = 0;

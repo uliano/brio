@@ -42,8 +42,8 @@
 //      periods after it) against a burst delivered by the level (the
 //      16th byte), each timed; a break sent and counted as BE with no
 //      byte delivered; an overrun provoked with the line masked (48
-//      frames into a 32-deep FIFO), counted as OE with exactly the
-//      FIFO's depth delivered
+//      frames into a 32-deep FIFO), counted as OE, the look after it
+//      skipping what the ring held, and the stream after it whole
 //   e  bulk traffic: 4096 bytes at 3 Mbaud through write_bulk/read_bulk
 //      on the loop, byte-exact, the interrupts per byte counted
 //   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
@@ -432,16 +432,27 @@ void td_fifos() {
     Nvic::set_pending(U1::irq());
     spin_us(200);
     uint8_t drained[64];
+    const uint32_t skips0 = Instrument::rx_skips();
     const uint32_t delivered = Instrument::read_bulk(drained);
-    bool in_order = delivered == 32u;
-    for (uint32_t i = 0; i < delivered && in_order; ++i) {
-        in_order = drained[i] == i;
+    const uint32_t skips = (Instrument::rx_skips() - skips0) & 0xFFu;
+    // The stream after the overrun is the stream again.
+    for (uint8_t i = 0; i < 4u; ++i) {
+        U1::write_data(static_cast<uint8_t>(0x60u + i));
+    }
+    spin_us(200);
+    const uint32_t after = Instrument::read_bulk(drained);
+    bool in_order = after == 4u;
+    for (uint32_t i = 0; i < after && in_order; ++i) {
+        in_order = drained[i] == 0x60u + i;
     }
     print(serial, "  48 frames into the 32-deep FIFO, the line masked: OE counted ",
-          Instrument::hw_overruns(), ", ", delivered, " bytes delivered", crlf);
-    bench.verdict("the overrun is counted as OE and exactly the FIFO's depth is delivered, in "
-                  "order",
-                  Instrument::hw_overruns() >= 1u && in_order);
+          Instrument::hw_overruns(), ", ", delivered, " bytes delivered, skips ", skips,
+          "; then 4 more, ", after, " delivered", crlf);
+    bench.verdict("the overrun is counted as OE and the look after it skips what the ring "
+                  "held - the FIFO's depth taken by the entry - so nothing is handed out "
+                  "joined across the frames it swallowed; the stream after it is whole",
+                  Instrument::hw_overruns() >= 1u && delivered == 0u && skips == 1u &&
+                      in_order);
     (void)Instrument::set_baud(SysClock::pclk_hz, 115200);
 }
 

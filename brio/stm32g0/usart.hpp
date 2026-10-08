@@ -1461,7 +1461,7 @@ constexpr UartOptions uart_half_duplex(UartOptions base = {}) {
  */
 template <bool engine, typename Owner, uint32_t size, typename Engine>
 struct UartRxRing {
-    using type = GapRing<uint8_t, size, Stm32g0Platform<>>;
+    using type = SkipRing<uint8_t, size, Stm32g0Platform<>>;
 };
 template <typename Owner, uint32_t size, typename Engine>
 struct UartRxRing<true, Owner, size, Engine> {
@@ -1614,9 +1614,9 @@ class UartTask {
     using TxPin = Pin<pins.tx.port, pins.tx.pin>;
     using RxPin = Pin<pins.rx.port, pins.rx.pin>;
 
-    // The receive ring: without an engine a GapRing, which marks where
-    // the handler lost a character; the view over the channel's ring with
-    // one (UartRxRing above).
+    // The receive ring: without an engine a SkipRing, told by the handler
+    // that it lost a character; the view over the channel's ring with one
+    // (UartRxRing above).
     using RxRing = UartRxRing<RxEngine::present, UartTask, rx_size, RxEngine>;
     static_assert(!RxEngine::present || rx_size <= 0x8000u,
                   "brio Uart: the receive engine's ring is one circular block, and "
@@ -2132,13 +2132,7 @@ public:
             }
             // An entry for the transmitter alone touches no ring.
             if ((st & UsartFlag::rxne) != 0u) {
-                bool head = false;
-                uint32_t s = st;
-                if ((st & UsartFlag::ore) != 0u) [[unlikely]] {
-                    head = overrun_head(r, st);
-                    s = r.ISR;
-                }
-                edge = receive_fifo(r, s) || head;
+                edge = receive_fifo(r, st);
             }
         } else if ((st & UsartFlag::rxne) != 0u) {
             const uint8_t b = static_cast<uint8_t>(r.RDR);   // clears RXNE
@@ -2163,12 +2157,10 @@ public:
             if ((st & UsartFlag::ore) != 0u) {
                 r.ICR = USART_ICR_ORECF;   // or this handler re-enters for ever
                 m_hw_overruns = m_hw_overruns + 1;
-                if constexpr (!fifo_mode) {
-                    // RDR survives an overrun and the shift register's
-                    // characters are lost (33.5.4): the gap is behind the
-                    // character just taken.
-                    m_rx.lost();
-                }
+                // Characters lost in the silicon (33.5.4): wherever in this
+                // entry's drain they fell, the consumer's next look skips
+                // past all of it.
+                m_rx.lost();
             }
         }
 
@@ -2391,10 +2383,10 @@ public:
     /// Every character the line carried that the receive ring will not
     /// deliver, since the program started, NEVER CLEARED (modulo 2^32) -
     /// util/stream.hpp's SkippingSource, the epoch util/serial_port.hpp
-    /// compares at every run. Without an engine: each character a full
-    /// ring refused or FE/PE dropped, and an overrun's (one at least), each
-    /// marked where it fell by the GapRing, the count moving when the
-    /// consumer crosses the mark. With one: the ring's skips (a lap
+    /// compares at every run. Without an engine: the SkipRing's skips, one
+    /// at the consumer's look after a character a full ring refused or
+    /// FE/PE dropped, or an overrun - the ring discarding what it held. With
+    /// one: the ring's skips (a lap
     /// missed, a held run refused) plus m_rx_lost - an ORE, an FE or a PE
     /// the channel never took, a restart after a transfer error - counted
     /// when the vector sees them, so the line torn is the one begun when
@@ -2637,25 +2629,18 @@ private:
     /// RDR, or the attribution slides by one and a good byte inherits its
     /// neighbour's framing error.
     ///
-    /// A character the ring refuses is counted in the loop and its gap
-    /// marked ONCE, behind it: nothing consumes while a handler runs, so a
-    /// ring that refuses one character refuses every later one of the
-    /// entry, and they are all lost at the same place - the mark is exact,
-    /// and stays off the per-character path (inside the loop it costs
-    /// every character two instructions of register pressure on the
-    /// Cortex-M0+, counted in the release listing). A character FE or PE
-    /// drops is marked where it fell, on the error path.
+    /// A character the ring refuses or FE or PE drops is reported to the
+    /// ring where it is met, on its rare path: where in the stream it fell
+    /// is nobody's business, since the consumer's look after it skips
+    /// everything queued (util/ring.hpp's SkipRing), and nothing is kept
+    /// across the loop for it.
     [[gnu::always_inline]] static bool receive_fifo(USART_TypeDef& r, uint32_t s) {
         const bool was_empty = m_rx.empty();
-        const uint8_t refused = m_rx_overruns;
         for (;; s = r.ISR) {
             if ((s & UsartFlag::rxne) == 0u) {
                 break;
             }
             take(r, s);
-        }
-        if (m_rx_overruns != refused) [[unlikely]] {
-            m_rx.lost(static_cast<uint8_t>(m_rx_overruns - refused));
         }
         return was_empty && !m_rx.empty();
     }
@@ -2677,36 +2662,12 @@ private:
         keep(static_cast<uint8_t>(r.RDR));
     }
 
-    /// A receive entry that found ORE standing (`s` its ISR word): the
-    /// overrun fell with the RXFIFO full - its first entry, and the rest
-    /// of its depth, kept; the shift register's character and whatever
-    /// came during the overrun lost (33.5.4, "Overrun error") - and this
-    /// handler, the FIFO's one reader, has read nothing since. So the
-    /// FIFO's depth of characters at its head came before the gap: they
-    /// are taken and the gap is marked behind them; the entry's drain
-    /// goes on with what landed after. Returns the ring's empty ->
-    /// non-empty edge across these characters. Out of line: the rare path.
-    [[gnu::noinline]] static bool overrun_head(USART_TypeDef& r, uint32_t s) {
-        const bool was_empty = m_rx.empty();
-        const uint8_t refused = m_rx_overruns;
-        for (uint32_t i = 0; i < S::fifo_depth; ++i, s = r.ISR) {
-            if ((s & UsartFlag::rxne) == 0u) {
-                break;
-            }
-            take(r, s);
-        }
-        if (m_rx_overruns != refused) {
-            m_rx.lost(static_cast<uint8_t>(m_rx_overruns - refused));
-        }
-        m_rx.lost();
-        return was_empty && !m_rx.empty();
-    }
-
     /// One received character into the ring, or counted as the ring's
-    /// overrun (its gap marked by the caller, receive_fifo()).
+    /// overrun and reported lost.
     [[gnu::always_inline]] static void keep(uint8_t b) {
         if (!m_rx.push(b)) [[unlikely]] {
             m_rx_overruns = m_rx_overruns + 1;
+            m_rx.lost();
         }
     }
 

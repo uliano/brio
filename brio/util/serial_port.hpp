@@ -62,22 +62,23 @@
  * A SKIP BETWEEN TWO RUNS IS SEEN. The stream a ring hands out can jump:
  * a HardwareRing skips to its producer whenever a look finds a lap unread
  * - in the drain's own read_span(), or in a count() asked between two
- * drains - and a receive interrupt drops a byte that finds its ring full,
- * or that the receiver flagged as corrupt. The run handed out after such
- * a gap is the stream after it, which the line begun in an assembler
- * would otherwise swallow as its continuation. So a transport reports the
- * gaps in its stream (util/stream.hpp's SkippingSource, rx_skips(), never
- * cleared), the drain compares the count at every run - over EVERY
- * transport that has it, whether its release can refuse or not - and a
- * change ends the line begun as torn, counted in torn_lines(), and skips
- * the stream to its next end of line. One load and one compare a run,
- * nothing a byte. The count moves exactly at the gap where the ring
- * knows where each one falls - a HardwareRing's skip, a GapRing's mark
- * (util/ring.hpp), which hands out no run across a gap - so the line torn
- * is the one the gap cut. A transport whose release can refuse and that
- * does not report its skips is refused at compile time; over a transport
- * without the verb (a test capture, a simulated port) nothing of it is
- * compiled.
+ * drains - and a SkipRing skips to its producer at the look after a
+ * receive interrupt dropped a byte that found the ring full, or that the
+ * receiver flagged as corrupt. The run handed out after such a gap is the
+ * stream after it, which the line begun in an assembler would otherwise
+ * swallow as its continuation. So a transport reports the gaps in its
+ * stream (util/stream.hpp's SkippingSource, rx_skips(), never cleared),
+ * the drain compares the epoch at every run - over EVERY transport that
+ * has it, whether its release can refuse or not - and a change ends the
+ * line begun as torn, counted in torn_lines(), and skips the stream to
+ * its next end of line. One load and one compare a run, nothing a byte.
+ * Where the ring skips at the look that finds the gap (util/ring.hpp's
+ * HardwareRing and SkipRing), no run handed out holds one and the epoch
+ * moves between two runs, so no line is ever delivered across a gap: the
+ * line begun is torn, and what the ring held when the gap was found is
+ * skipped with it. A transport whose release can refuse and that does not
+ * report its skips is refused at compile time; over a transport without
+ * the verb (a test capture, a simulated port) nothing of it is compiled.
  *
  * A SILENCE ENDS THE SKIP. A gap can take the cut line's own end of line,
  * and then the next end of line is a later, whole line's. So where the

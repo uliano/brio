@@ -179,7 +179,8 @@ a number is given for each.
   1402 us.
 - A 1 ms break counts one BE (and one FE, on the same entry) and delivers
   no byte. Forty-eight frames into the 32-deep FIFO with the line masked
-  deliver exactly 32 in order and count one OE.
+  count one OE, and the look after them skips what the ring held:
+  nothing handed out, one skip, the four bytes after it whole.
 - THE TRANSMIT INTERRUPT, measured over the debug port with no firmware
   in the way: the core halted, UART1 configured by hand in loop-back at
   IBRD 0xFFFF (about 143 baud, 70 ms a frame, so the probe's reads
@@ -255,8 +256,8 @@ a number is given for each.
 - THE RECEIVE SIDE AND ITS EDGE (`bench_rp2350` letter u, UART1 under
   LBE at 150 MHz, one source on both architectures, the meter's stamps
   inside `isr`): 256 bytes through the interrupt receiver in 16 level
-  entries and the time-out's - 8004 cycles at 1 Mbaud on the M33 and
-  7624 on Hazard3, 31 and 30 a byte, where the level read with a flag
+  entries and the time-out's - 6783 cycles at 1 Mbaud on the M33 and
+  6971 on Hazard3, 27 a byte on each, where the level read with a flag
   test before every character took 9074 and 8970 (35 a byte on each);
   the receive engine about 200 cycles for the same 256. The edge from
   the burst's last stop bit: the time-out's 3.2 frames at 115200 and 1
@@ -288,8 +289,8 @@ a number is given for each.
   `uart_write_blocking`, POLLED loops, on the same board and loop in a
   scratch program: 34 and 29 cycles a byte reading characters already in
   the FIFO (M33, Hazard3), 29 and 25 writing into an empty one, the CPU
-  the loop's for the whole wire time; this transport 31 and 30 a byte
-  receiving, 17 transmitting, the core free between entries.
+  the loop's for the whole wire time; this transport 27 a byte
+  receiving on each, 17 transmitting, the core free between entries.
 
 ## Not covered yet
 

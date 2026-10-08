@@ -97,7 +97,9 @@
 //      IDLE, the ring's half and full marks) - each burst told by a
 //      vector within two frames of its last stop bit, a stream with no
 //      silence across a ring three times its size - and K breaks in N
-//      slots through both receivers: N - K delivered, FE = K, no byte
+//      slots through both receivers: FE = K; the interrupt receiver,
+//      read between the breaks, N - K delivered and a skip a break, read
+//      only at the end nothing the ring held; the engine N - K, no byte
 //      taken from under the channel
 //   q  tx_idle() ON THE PAD: EXTI line 9 times PA9's start bits, and the
 //      wire's idle is the last stop bit's end, on the interrupt
@@ -4692,17 +4694,38 @@ void tp_receive() {
     constexpr uint32_t hits = 4;
     auto is_hit = [](uint32_t i) { return i == 9u || i == 24u || i == 41u || i == 58u; };
     static uint8_t kept[slots];
-    auto send_with_breaks = [&]<typename T>() {
+    // The stream with its breaks, the consumer looking before and after
+    // each break when `read_between` - every read judged against `kept`,
+    // the stream without its hits - and the rest read at the end.
+    uint32_t at = 0;
+    auto send_with_breaks = [&]<typename T>(bool read_between, uint32_t& read) {
         uint32_t n = 0;
+        read = 0;
+        at = 0;
+        wrong = 0;
+        auto wire_idle = [&] {
+            const uint32_t t1 = now();
+            while (!T::tx_idle() && since(t1) < 100u * frame) {
+            }
+            spin_cycles(2u * frame);
+        };
         for (uint32_t i = 0; i < slots; ++i) {
             if (is_hit(i)) {
                 const uint32_t t1 = now();
                 while (!T::tx_idle() && since(t1) < 100u * frame) {
                 }
+                if (read_between) {
+                    spin_cycles(2u * frame);   // the tail's time-out
+                    read += drain_into<T>(kept, n, at, wrong);
+                }
                 U1::send_break();
                 while ((U1::status() & UsartFlag::sbkf) != 0u && since(t1) < 100u * frame) {
                 }
                 spin_cycles(2u * frame);
+                if (read_between) {
+                    wire_idle();
+                    read += drain_into<T>(kept, n, at, wrong);   // the skip, nothing queued
+                }
                 continue;
             }
             const uint8_t b = stream[i];
@@ -4710,37 +4733,46 @@ void tp_receive() {
             while (T::write_bulk({&b, 1}) == 0u) {
             }
         }
-        const uint32_t t1 = now();
-        while (!T::tx_idle() && since(t1) < 100u * frame) {
-        }
-        spin_cycles(4u * frame);
+        wire_idle();
+        spin_cycles(2u * frame);
+        read += drain_into<T>(kept, n, at, wrong);
         return n;
     };
     up = transport_up<PacedLoop>(mode_paced, baud);
-    uint32_t want = send_with_breaks.template operator()<PacedLoop>();
-    uint32_t at = 0;
-    wrong = 0;
-    got = drain_into<PacedLoop>(kept, want, at, wrong);
+    const uint32_t skips0 = PacedLoop::rx_skips();
+    uint32_t want = send_with_breaks.template operator()<PacedLoop>(true, got);
+    const uint32_t skips = (PacedLoop::rx_skips() - skips0) & 0xFFu;
     const uint32_t fe_paced = PacedLoop::frame_errors();
-    print(serial, "  ", slots, " slots with ", hits, " breaks, the paced receiver: ", got,
-          " of ", want, " bytes back (", wrong, " wrong), FE ", fe_paced, ", PE ",
+    print(serial, "  ", slots, " slots with ", hits, " breaks, the paced receiver read between: ",
+          got, " of ", want, " bytes back (", wrong, " wrong), FE ", fe_paced, ", PE ",
           PacedLoop::parity_errors(), ", ORE ", PacedLoop::hw_overruns(), ", ring overruns ",
-          PacedLoop::rx_overruns(), crlf);
-    bench.verdict("K BREAKS IN N SLOTS, the interrupt receiver: N - K bytes delivered "
-                  "intact and in order, the break dropped by its own entry's flags, "
-                  "and the frame-error counter K",
+          PacedLoop::rx_overruns(), ", skips ", skips, crlf);
+    bench.verdict("K BREAKS IN N SLOTS, the interrupt receiver read between them: N - K "
+                  "bytes delivered intact and in order, the break dropped by its own "
+                  "entry's flags, the frame-error counter K and one skip a break",
                   up && want == slots - hits && got == want && wrong == 0u &&
-                      fe_paced == hits && PacedLoop::hw_overruns() == 0u &&
+                      fe_paced == hits && skips == hits && PacedLoop::hw_overruns() == 0u &&
                       PacedLoop::rx_overruns() == 0u);
+    // Read only at the end: every byte the ring held when the first break
+    // was told goes with it, and the skip after the last break leaves
+    // nothing behind it either - no run joins two sides of a break.
+    PacedLoop::clear_errors();
+    const uint32_t skips1 = PacedLoop::rx_skips();
+    uint32_t joined = 0;
+    want = send_with_breaks.template operator()<PacedLoop>(false, joined);
+    const uint32_t skips_after = (PacedLoop::rx_skips() - skips1) & 0xFFu;
+    print(serial, "  the same read only at the end: ", joined, " delivered (", wrong,
+          " wrong), FE ", PacedLoop::frame_errors(), ", skips ", skips_after, crlf);
+    bench.verdict("read only after the stream, the bytes queued with the breaks are "
+                  "skipped whole, in one skip, and the frame-error counter is still K",
+                  up && joined == 0u && skips_after == 1u &&
+                      PacedLoop::frame_errors() == hits);
     transport_down<PacedLoop>();
 
     // --- the same under the receive engine: no clear reads RDR.
     feed();
     up = transport_up<EngineLoop>(mode_engine, baud);
-    want = send_with_breaks.template operator()<EngineLoop>();
-    at = 0;
-    wrong = 0;
-    got = drain_into<EngineLoop>(kept, want, at, wrong);
+    want = send_with_breaks.template operator()<EngineLoop>(false, got);
     const uint32_t fe_engine = EngineLoop::frame_errors();
     print(serial, "  the same under the receive engine: ", got, " of ", want, " back (",
           wrong, " wrong), FE ", fe_engine, ", NE ", EngineLoop::noise_errors(), ", ORE ",

@@ -160,17 +160,19 @@ taking a burst, and what this driver does with each:
   block in flight and TXC, the last stop bit gone (a port that has sent
   nothing since `init()` is idle too: TXC is clear out of reset) -, error
   counters, `rx_skips()` (THE SKIP EPOCH, util/stream.hpp's
-  `SkippingSource`: a count, modulo 2^32 and never cleared - neither by
-  `clear_errors()` nor by `init()` -, that moves whenever the line
-  carried a character the ring will not deliver clean, and moves before
-  the next character it delivers is visible: through the interrupt
-  receiver once a character dropped on a full ring, carrying BUFOVF or
-  dropped for a frame or parity error; through the receive engine once a
-  publish whose run saw BUFOVF, FERR or PERR, the run delivered whole
+  `SkippingSource`: never cleared - neither by `clear_errors()` nor by
+  `init()` -, it moves whenever the line carried a character the ring
+  will not deliver clean, between the run before and the run after:
+  through the interrupt receiver it is the receive ring's skips (a
+  `SkipRing`, modulo 2^8), one at the consumer's look after a character
+  dropped on a full ring, carrying BUFOVF or dropped for a frame or
+  parity error - the look discarding what the ring held; through the
+  receive engine (modulo 2^32) once a publish whose run saw BUFOVF, FERR
+  or PERR, taken before the run is published, the run delivered whole
   with its errors as received; the engine's stall on a full ring loses
   characters in the hardware only, so BUFOVF's step is its loss. A step
   an event, not a character: the hardware reports an overflow, not how
-  many it lost. Bumped on those rare paths alone, nothing on a clean
+  many it lost. Moved on those rare paths alone, nothing on a clean
   character's),
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
@@ -631,7 +633,9 @@ bridge between the pads and the PC - as much as of the driver.
   runs of three.
 - **The skip epoch, provoked**: under the receive engine letter s's 130
   frame errors moved it once - one run published, delivered whole -,
-  under the interrupt receiver 130 times, once a dropped character; the
+  under the interrupt receiver 130 times, once a dropped character, the
+  consumer reading faster than the characters land so that every skip
+  found the ring empty (three runs of three); the
   echo of letter h at 2 Mbaud moved it once for its one hardware
   overrun; every clean leg of letters e, f, g, h, n, p and r left it
   still.

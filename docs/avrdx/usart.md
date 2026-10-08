@@ -136,7 +136,7 @@ tasks speak hertz and are `ClockUser`s.
 | `Usart<n>` interrupts | `enable_rxc_interrupt`, `enable_txc_interrupt`, `enable_dre_interrupt`, `enable_rxs_interrupt`, `enable_autobaud_error_interrupt` |
 | `Usart<n>` data | `receive()` / `receive_as<bits>()` -> `UsartFrame` (ISR body of `USARTn_RXC_vect`), `transmit(v)` / `transmit_as<bits>(v)`, `clear_txc()` (ISR body of `USARTn_TXC_vect`), the bounded `send`/`poll`/`wait`/`wait_line_idle` |
 | `Usart<n>` events | `XckEvent` (generator), `IrdaIn` (user) |
-| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once `tx_idle()`), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, the rest copied in parts of at most `copy_part` (32) bytes, each published and DREIE set behind it), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`, `tx_idle` (the WIRE is idle: the ring empty and the last stop bit out - TXCIF, which the transport owns), the error counters, `rx_skips` (every byte the receive ring will not deliver, never cleared - util/serial_port.hpp's epoch: the GapRing's crossings of the gaps `rxc()` marks, a frame refused by a full ring or dropped for FERR or PERR at its place and a BUFOVF before the frame that carries it, on the rare paths alone - the RXC vector saves the registers it saved without them), ISR bodies `rxc()` (takes every frame the buffer holds, returns the empty -> non-empty edge) and `dre()` |
+| `Uart<n, Route, rx, tx>` | the interrupt-driven transport: `init(clock, baud)`, `rebase(hz)`, `set_baud(hz, baud)` (a new rate under the running port, once `tx_idle()`), `release()`, `can_baud`, `min_hz_for`, `actual_baud(hz)`, `write_byte`/`write_bulk` (a run: as many as fit, its first byte pushed and DREIE set before the rest is copied, the rest copied in parts of at most `copy_part` (32) bytes, each published and DREIE set behind it), `read_byte`/`read_span`/`consume` (the receive run in place), `rx_pending`, `tx_idle` (the WIRE is idle: the ring empty and the last stop bit out - TXCIF, which the transport owns), the error counters, `rx_skips` (the gaps in the stream the receive ring hands out, never cleared - util/serial_port.hpp's epoch: the SkipRing's skips, modulo 2^8, one at the consumer's look after `rxc()` reported a frame refused by a full ring, dropped for FERR or PERR, or a BUFOVF - on the rare paths alone, the RXC vector saving no register for them), ISR bodies `rxc()` (takes every frame the buffer holds, returns the empty -> non-empty edge) and `dre()` |
 | `OneWire<n, route>` | `available`, `init(clock, baud, fmt)`, `talk()`/`listen()`, `line()`, `echo_matches(sent)` |
 | `Rs485<n, route>` | `available`, `init(clock, baud, fmt, one_wire)`, `drive_enable()`, `guard_bits` |
 | `SyncHost<n, route>` / `SyncClient<n, route>` | `available`, `init(...)`, `clock_pin()`, `invert_xck(bool)` (host), `max_xck_hz(hz)` (client) |
@@ -300,9 +300,9 @@ the listing's count above.
 |---|---|---|---|---|
 | `uart.tx` 256 bytes, x | 1.00 | 1.00 | 1.01 | 1.03 |
 | `uart.tx` 4096 bytes, x | 0.99 | 1.00 | 1.00 | 1.00 |
-| `uart.rx` 16-byte burst, x | 1.00 | 1.06 to 1.10 | 1.34 to 1.46 | 34 to 148, the consumer starved |
-| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.02 to 1.03 | 13.7 to 14.9, the consumer starved |
-| receive entries for 256 bytes (counted) | 256 | 255 | 266 for 259 | 1.5 frames an entry |
+| `uart.rx` 16-byte burst, x | 1.00 | 1.06 | 1.21 | 9.7, the consumer starved |
+| `uart.rx` 256-byte burst, x | 1.00 | 1.00 | 1.04 | 3.9, the consumer starved |
+| receive entries for 256 bytes (counted) | 256 | 254 | 274 | 1.35 frames an entry (401 for 297) |
 | the edge after the last stop bit's end, cycles | -3 to +2 | +70 | +76 | +77 |
 
 - **The transmit path is wire-bound at every rate the generator makes.**
@@ -320,11 +320,15 @@ the listing's count above.
   on 1 to 6 frames in 256 - consistent with the bench's metered tick
   handler, 302 cycles on its longest pass, outlasting two frames). Bursts
   the ring holds arrive whole. The 3 Mbaud
-  rows vary run to run for that reason, and the receive ring's gaps
-  deepen them: every frame the full ring refuses is a gap, `read_span()`
-  hands out no run across one, so the starved consumer pays a run's
-  overhead for each - the same letter on an image whose ring did not
-  mark its losses read 6.4 and 17 on the same board.
+  rows vary run to run for that reason, and the receive ring's skips
+  shape them: a look after a frame the full ring refused, or a BUFOVF,
+  discards what the ring holds, so the letter, which counts bytes
+  consumed of a stream that does not stop, waits for what comes after.
+  With the meters on the vector (the metered binding) the handler
+  outlasts a frame at 2 and 3 Mbaud, a hardware overrun falls between
+  every two looks, every look skips and nothing is handed out at all -
+  the overload in which the skip delivers nothing
+  ([../design/ring.md](../design/ring.md)).
 - **The burst edge reaches the consumer about 80 cycles after RXCIF**,
   which rises inside the stop bit, at its majority samples: at 115200
   that is the stop bit's end, faster it is a few bit times after it. There is no idle edge to wait for (the

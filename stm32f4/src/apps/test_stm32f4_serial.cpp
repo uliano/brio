@@ -36,7 +36,9 @@
 //      the frame errors counted one a break, no byte taken by a clear;
 //      back-to-back breaks counting every other one (the bound the
 //      channel's read leaves, usart.hpp's header); and the interrupt
-//      receiver's breaks, dropped and counted
+//      receiver's breaks, dropped, counted and skipped - a reader that
+//      looks between them handed every data byte, one that does not
+//      handed nothing the ring held with a break behind it
 //   e  tx_idle() IS THE WIRE'S: the moment it turns true against the last
 //      stop bit's start on the pad (EXTI line 6, rising), for the
 //      interrupt transmitter and the transmit engine - never before the
@@ -403,23 +405,46 @@ void td_errors() {
     print(serial, "  ten breaks under a thread that polls SR: ", LoopDma::frame_errors(),
           " counted", crlf);
 
-    // The interrupt receiver drops what arrived with an error and counts it.
+    // The interrupt receiver drops what arrived with an error, counts it
+    // and tells its ring, whose next look skips what it holds: a reader
+    // that looks between the breaks is handed every data byte ...
     (void)up<LoopIrq>(1, 115200);
     breaks = 0;
+    bool ok = true;
+    uint32_t back = 0;
+    const uint32_t skips0 = LoopIrq::rx_skips();
     for (uint32_t i = 0; i < 40u; ++i) {
         put_byte(pattern(i));
         if (i % 4u == 3u) {
+            back += drain<LoopIrq>(back, ok);   // the four before the break
             put_break();
             ++breaks;
+            back += drain<LoopIrq>(back, ok);   // the skip, with nothing queued
+        }
+    }
+    const uint32_t skips = (LoopIrq::rx_skips() - skips0) & 0xFFu;
+    print(serial, "  the interrupt receiver, read between: 40 bytes and ", breaks, " breaks, ",
+          back, " delivered, FE ", LoopIrq::frame_errors(), ", skips ", skips, crlf);
+    bench.verdict("the interrupt receiver drops each break's frame, counts it and skips it: "
+                  "a reader that looks between the breaks is handed every data byte",
+                  back == 40u && ok && LoopIrq::frame_errors() == breaks && skips == breaks);
+    // ... and one that does not is handed nothing the ring held with a
+    // break behind it: no run joins the two sides.
+    const uint32_t skips1 = LoopIrq::rx_skips();
+    for (uint32_t i = 0; i < 8u; ++i) {
+        put_byte(pattern(40u + i));
+        if (i == 3u) {
+            put_break();
         }
     }
     wait_ms(2);
-    bool ok = true;
-    const uint32_t back = drain<LoopIrq>(0, ok);
-    print(serial, "  the interrupt receiver: 40 bytes and ", breaks, " breaks, ", back,
-          " delivered, FE ", LoopIrq::frame_errors(), crlf);
-    bench.verdict("the interrupt receiver drops each break's frame and counts it",
-                  back == 40u && ok && LoopIrq::frame_errors() == breaks);
+    bool joined_ok = true;
+    const uint32_t joined = drain<LoopIrq>(40, joined_ok);
+    const uint32_t skips_after = (LoopIrq::rx_skips() - skips1) & 0xFFu;
+    print(serial, "  read after: 8 bytes around a break, ", joined, " delivered, FE ",
+          LoopIrq::frame_errors(), ", skips ", skips_after, crlf);
+    bench.verdict("bytes queued with a break among them are skipped whole, in one skip",
+                  joined == 0u && skips_after == 1u && LoopIrq::frame_errors() == breaks + 1u);
     down();
 }
 

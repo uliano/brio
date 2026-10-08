@@ -1023,17 +1023,17 @@ class Uart {
 
     // One ring pair per instantiation (static inline -> .bss, no ctor).
     //
-    // THE RECEIVE RING KNOWS WHERE ITS GAPS ARE when the handler fills it:
-    // a character lost on the handler's rare paths (a full ring, a frame
-    // or parity error, an overflow before the character in hand) is MARKED
-    // where it fell (util/ring.hpp's GapRing), and the skip epoch moves
-    // when the consumer crosses the mark - between the last character
-    // before the gap and the first after it. Under the receive engine the
+    // THE RECEIVE RING SKIPS A LOSS when the handler fills it: a character
+    // lost on the handler's rare paths (a full ring, a frame or parity
+    // error, an overflow before the character in hand) is reported to the
+    // ring (util/ring.hpp's SkipRing), whose consumer's next look skips
+    // everything queued, the skip epoch moving between the last run before
+    // the loss and the first after it. Under the receive engine the
     // channel writes whole runs and STATUS is read once a run, so where in
     // the run a loss fell is not known: a plain Ring, the epoch counted
     // per run (m_rx_skips).
     using RxRing = std::conditional_t<RxEngine::present, Ring<uint8_t, rx_size, SamPlatform>,
-                                      GapRing<uint8_t, rx_size, SamPlatform>>;
+                                      SkipRing<uint8_t, rx_size, SamPlatform>>;
     static inline RxRing m_rx{};
     static inline Ring<uint8_t, tx_size, SamPlatform> m_tx{};
 
@@ -1054,7 +1054,7 @@ class Uart {
     /// that saw BUFOVF, FERR or PERR - characters lost in the hardware, or
     /// delivered with their error - taken BEFORE that run is published,
     /// never cleared (modulo 2^32). Touched only under `if constexpr
-    /// (has_rx_engine)`; the interrupt receiver's epoch is its GapRing's.
+    /// (has_rx_engine)`; the interrupt receiver's epoch is its SkipRing's.
     static inline volatile uint32_t m_rx_skips = 0;
     static inline uint32_t m_baud = 0;                  // for rebase()
     /// A byte was handed to the transmitter since init(). TXC is clear out
@@ -1666,12 +1666,13 @@ public:
      * compares it at every run knows a run is not contiguous with the one
      * before.
      *
-     * THROUGH THE INTERRUPT RECEIVER it is the GapRing's skips(): a
+     * THROUGH THE INTERRUPT RECEIVER it is the SkipRing's skips(): a
      * character dropped on a full ring or for a frame or parity error, and
      * an overflow (BUFOVF: one at least lost in the hardware before the
-     * character in hand), each MARKED where it fell, the count moving when
-     * the consumer's read_span() crosses the mark - exactly between the
-     * run before the gap and the run after it. THROUGH THE RECEIVE ENGINE
+     * character in hand), each reported to the ring, a skip made at the
+     * consumer's next read_span() - which discards what the ring held,
+     * so the count moves between the run before the loss and the run after
+     * it. THROUGH THE RECEIVE ENGINE
      * it is a step for every published run that saw BUFOVF, FERR or PERR,
      * taken before that run is published: the run is delivered whole, its
      * errors as received, and where in it a loss fell is not known. The
@@ -2001,7 +2002,7 @@ private:
             const uint8_t byte = static_cast<uint8_t>(S::data());
             const uint16_t errors = static_cast<uint16_t>(st & SercomStatus::receive_errors);
             // THE CLEAN CHARACTER'S PATH STAYS IN THE BODY; the errors,
-            // the full ring and the gap marks they set are calls out of
+            // the full ring and the losses they report are calls out of
             // line (receive_hit(), receive_full()).
             if (errors == 0u) [[likely]] {
                 if (m_rx.push(byte)) [[likely]] {
@@ -2018,17 +2019,18 @@ private:
 
     /// THE RARE PATHS, OUT OF LINE: a character that found the ring full,
     /// and one that carries a receive error - counted, cleared, and its
-    /// loss marked where it fell. Kept out of the handler's body so the
-    /// clean character's path keeps its registers: inlined, the marks
-    /// spilled the character to the stack and the clean path cost 219 to
-    /// 231 cycles a character from the flash where out of line it costs
-    /// 218 (letter u of bench_samc; 139 from SRAM, bench_samc_ram).
+    /// loss reported. Kept out of the handler's body so the clean
+    /// character's path keeps its registers: inlined, a rare path's
+    /// counters spill the character to the stack (counted in the release
+    /// listing); out of line the clean path costs 218 cycles a character
+    /// from the flash (letter u of bench_samc; 140 from SRAM,
+    /// bench_samc_ram).
     [[gnu::noinline, gnu::cold]] static void receive_full() {
         m_rx_overruns = m_rx_overruns + 1;
         rx_lost();
     }
 
-    /// True when the character was kept and pushed. BUFOVF marks the
+    /// True when the character was kept and pushed. BUFOVF reports the
     /// characters lost before it, which is kept; FERR or PERR drop it.
     [[gnu::noinline, gnu::cold]] static bool receive_hit(uint16_t errors, uint8_t byte) {
         S::clear_status(errors);
@@ -2057,9 +2059,9 @@ private:
         return false;
     }
 
-    /// A character the interrupt receiver lost, marked where it fell in
-    /// the GapRing. The receive engine never runs receive() - its RXC is
-    /// the channel's - so its ring, a plain Ring, has no mark to set.
+    /// A character the interrupt receiver lost, reported to the SkipRing.
+    /// The receive engine never runs receive() - its RXC is the channel's
+    /// - so its ring, a plain Ring, has nothing to report to.
     [[gnu::always_inline]] static void rx_lost() {
         if constexpr (!has_rx_engine) {
             m_rx.lost();

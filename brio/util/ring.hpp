@@ -59,12 +59,13 @@
  * laps it did not keep up with. Its contract carries its own
  * assumptions, stated where it is defined.
  *
- * AND A RING THAT SAYS WHERE IT LOST. GapRing (between the two) is a
- * Ring whose producer can lose elements - a receive interrupt's byte
- * that finds the ring full, or that the receiver flags as corrupt - and
- * marks each place, so that the consumer is handed no run across a gap
- * and learns of each one exactly where it falls: the skip epoch
- * HardwareRing has, for a producer that stores its index.
+ * AND A RING THAT SKIPS A DROP. SkipRing (between the two) is a Ring
+ * whose producer can drop elements - a receive interrupt's byte that
+ * finds the ring full, or that the receiver flags as corrupt - and says
+ * so in one byte, so that the consumer's next look skips to the head:
+ * the consumer is handed no run that holds a drop and learns of each
+ * skip between two runs - the skip epoch HardwareRing has, for a
+ * producer that stores its index.
  */
 
 #pragma once
@@ -83,13 +84,13 @@
 namespace brio {
 
 template <typename T, uint32_t size, Platform P>
-class GapRing;
+class SkipRing;
 
 template <typename T, uint32_t size, Platform P>
 class Ring {
-    // The gap-marking flavour reads the two indices and runs the bodies.
+    // The skipping flavour runs the read_span() body inline.
     template <typename, uint32_t, Platform>
-    friend class GapRing;
+    friend class SkipRing;
 
     static_assert(size > 1, "ring size must be at least 2");
     static_assert(std::has_single_bit(size),
@@ -351,211 +352,160 @@ private:
 };
 
 // =============================================================================
-// GapRing - a Ring whose producer can lose elements, and marks where
+// SkipRing - a Ring whose producer can drop, and whose consumer skips past it
 // =============================================================================
 
 /**
- * GapRing<T, size, P> - Ring's SPSC FIFO, and the GAPS in the stream it
- * carries. A receive ring's producer loses elements on rare paths - a
- * byte that finds the ring full, one the receiver flags as corrupt, the
- * frames a hardware overrun swallowed - and a consumer that carries state
- * from one element to the next (util/serial_port.hpp's line begun) must
- * learn where the stream jumped, or it joins the two sides of the gap.
+ * SkipRing<T, size, P> - Ring's SPSC FIFO for a producer that can DROP
+ * elements on rare paths - a receive interrupt's byte that finds the ring
+ * full, one the receiver flags as corrupt, the frames a hardware overrun
+ * swallowed - feeding a consumer that carries state from one element to
+ * the next (util/serial_port.hpp's line begun), which must never join the
+ * two sides of a drop.
  *
- * WHERE, NOT WHETHER. A count of the losses, compared by the consumer at
- * every run, says only that a loss happened since the last look - not
- * where: a byte lost to a FULL ring is lost behind everything the ring
- * holds, up to a whole ring ahead of the consumer, and the run in hand
- * when the count moves was received before it. So every slot carries a
- * GAP BYTE beside its element - how many elements were lost just before
- * the one the slot holds - which the producer's lost() bumps on the slot
- * its next push will fill, and the consumer is never handed a run across
- * a gap: read_span() stops before a slot whose gap byte is set, consume()
- * never passes one, and when the consumer's tail reaches it the next
- * read_span() or pop() CROSSES it - only then does skips() move, by the
- * gap's count. A reader that compares skips() after each read_span()
- * therefore sees it move between the last element before a gap and the
- * first after it: the meaning HardwareRing::skips() has, where a skip
- * jumps the tail to the producer. Every gap is kept, however many stand:
- * N elements sent with K lost deliver the other N - K.
+ * WHETHER, NOT WHERE. The consumer needs one fact: that the run it is
+ * handed follows on from the run before. So the ring keeps no place for a
+ * loss - only a DROP EPOCH, one byte the producer writes on its rare
+ * paths, beside the consumer's own copy, one byte more. A look that finds
+ * the two different SKIPS: the tail jumps to the head, everything queued
+ * discarded in one store - the drop is necessarily behind the head - and
+ * skips() moves. So a run handed out never holds a drop, and skips() moves
+ * between two runs, never inside one: HardwareRing's skip, for a producer
+ * that stores its index. What the skip throws away beside the drop - the
+ * clean elements queued with it - is lost only while elements are being
+ * lost anyway; under an overload so steady that a drop falls between
+ * every two looks, every look skips and nothing is handed out.
  *
- * SPSC AS RING IS. A slot's gap byte belongs to whoever owns the slot: the
- * producer writes it while the slot is its own - the free slot at its
- * index - and publishes it with the element; the consumer reads and
- * clears it while the slot is its own. The one exception is a gap marked
- * on the producer's free slot while the ring is EMPTY - a loss with
- * nothing after it yet - which the consumer crosses at its next look,
- * under P::CriticalSection: the decision only, a load and three stores.
+ * THE LOOK. read_span() and pop() take Ring's run or element FIRST and
+ * compare the epoch after: a drop marked before the run's head was read
+ * is seen by this compare, one marked after it lies beyond that head and
+ * is seen by the next look - so an element handed out was never queued
+ * behind a drop the look did not see. A look that finds the epoch moved
+ * takes it as seen, and only then reads the head it jumps to: a drop that
+ * lands between the compare and that read is behind the head too, and one
+ * that lands after the copy is taken moves the epoch past it again. Every
+ * look compares, an empty one included, so a drop with nothing after it
+ * yet is skipped - and skips() moves - at the next look.
  *
- * THE COST. The producer pays on its rare paths only: push() is Ring's,
- * and lost() a load, a test and two or three stores. The consumer pays,
- * on the common path, one load pair and a branch in each read_span() and
- * consume(): the count of gap slots the producer has marked against the
- * count the consumer has crossed - a gap stands somewhere while they
- * differ. Only then does it look at the run's gap bytes, a byte apiece,
- * out of line. The run is read BEFORE the count: a gap marked after the
- * run's head was read lies at or beyond that head, and one marked before
- * it is seen by the look that follows. The memory: a byte a slot.
+ * THE EPOCH CANNOT WRAP INTO SILENCE. lost() does not increment the
+ * epoch: it sets it ONE PAST THE CONSUMER'S COPY. Each byte has one
+ * writer - the producer the epoch, the consumer its copy - and the two
+ * differ exactly while a drop not yet skipped stands, however many drops
+ * fell since the last look: 256 of them, which an incremented byte would
+ * bring back to the copy's value, read as none. The price is the same
+ * load, of the copy instead of the epoch. And so skips() - the copy
+ * itself - counts the skips, one at each, modulo 2^8: a reader compares
+ * it at every look, and one look makes one skip at most.
  *
- * skips(): every element lost since the start, NEVER CLEARED (modulo
- * 2^32), moved when a gap is crossed. A gap byte saturates at 255 - more
- * losses in one place are a gap still, counted as 255. The two counts
- * that say a gap stands - the gap slots marked, the gap slots crossed -
- * are wide enough for a ring whose every slot holds a gap (a byte up to
- * 255 slots), and read under the guard where that is wider than the
- * platform's atomic width.
+ * THE COST. push(), write_span() and publish() are Ring's; lost() a load,
+ * an increment and a store, on the producer's rare path. The consumer:
+ * one load and a compare of the two bytes at every read_span() and pop(),
+ * and the skip itself out of line. consume() is Ring's - a run it
+ * releases was judged at its read. The memory: two bytes.
  *
  * The producer's verbs - push(), write_span()/publish(), lost() - run
  * where the consumer cannot interrupt them (an interrupt body, or a
  * context that has masked the consumer's), which is Ring's model already:
- * one producer.
+ * one producer. The consumer's verbs never move the producer's state;
+ * count(), empty() and full() never skip, so the producer may ask them.
  */
 template <typename T, uint32_t size, Platform P>
-class GapRing {
+class SkipRing {
     using Inner = Ring<T, size, P>;
 
 public:
     using index_t = typename Inner::index_t;
     static constexpr bool lock_free = Inner::lock_free;
 
-    /// A count of gap slots: up to a whole ring of them can stand.
-    using gaps_t = std::conditional_t<(size <= 255u), uint8_t,
-                   std::conditional_t<(size <= 65535u), uint16_t, uint32_t>>;
-
     static constexpr index_t capacity() { return Inner::capacity(); }
 
     // ---- the producer ------------------------------------------------------
 
     /// Append one element; false (nothing written) when the ring is full -
-    /// a loss the caller reports with lost().
+    /// a drop the caller reports with lost().
     [[gnu::always_inline]] bool push(const T& value) { return ring_.push(value); }
 
     /// The producer's free run and its publish, as Ring's.
     std::span<T> write_span() { return ring_.write_span(); }
     void publish(index_t n) { ring_.publish(n); }
 
-    /// An element lost HERE: the stream jumps between the last element
-    /// pushed and the next one. Producer side, the rare path only.
-    ///
-    /// The tests are against immediates and never against zero: on the
-    /// AVR a test against zero takes the zero register, which a receive
-    /// vector that did not use it then saves and restores at every entry
-    /// (counted in the release listing) - so a new gap slot is told by the
-    /// byte BECOMING one.
+    /// Elements were dropped: the stream the consumer reads has a gap
+    /// behind what is queued now. Producer side, the rare path only; one
+    /// call stands for any number of elements and any number of calls.
     [[gnu::always_inline]] void lost() {
-        uint8_t& gap = gap_[ring_.head_];
-        const uint8_t g = gap;
-        if (g != 0xFFu) {
-            const uint8_t now = static_cast<uint8_t>(g + 1u);
-            gap = now;
-            if (now == 1u) {
-                publish_made();
-            }
-        }
-    }
-
-    /// `n` elements lost here, at once (a drain that counted them).
-    [[gnu::always_inline]] void lost(uint32_t n) {
-        uint8_t& gap = gap_[ring_.head_];
-        const uint8_t g = gap;
-        const uint32_t sum = uint32_t{g} + n;
-        gap = static_cast<uint8_t>(sum < 0xFFu ? sum : 0xFFu);
-        if (g == 0u && n != 0u) {
-            publish_made();
-        }
+        const uint8_t copy = *const_cast<const volatile uint8_t*>(&seen_);
+        *const_cast<volatile uint8_t*>(&epoch_) = static_cast<uint8_t>(copy + 1u);
     }
 
     // ---- the consumer --------------------------------------------------------
 
-    /// The contiguous run ready to be read, as Ring's - but never across a
-    /// gap: it stops before the first slot a gap precedes, and a tail AT
-    /// such a slot crosses its gap first (skips() moves) and lends from it.
+    /// The contiguous run ready to be read, as Ring's - or, when a drop
+    /// stands, nothing: the skip made, everything queued discarded and
+    /// skips() moved.
     std::span<const T> read_span() {
-        const std::span<const T> whole = run();
-        const T* first = whole.data();
-        size_t n = whole.size();
-        if (gap_pending()) [[unlikely]] {
-            n = lend_at_gap(n);
+        const std::span<const T> run = whole_run();
+        const T* const first = run.data();
+        size_t n = run.size();
+        if (dropped()) [[unlikely]] {
+            skip();
+            n = 0u;
         }
-        return {first, n};   // one span built from two words: no copy of one
+        // One span built from two words on every path: two spans merged
+        // travel through memory on a 32-bit core, copied there by a call
+        // to memcpy (counted in the STM32G0's listing).
+        return {first, n};
     }
 
-    /// Release `n` elements of read_span(), clamped to what is queued and
-    /// never past a gap not yet crossed.
-    void consume(index_t n) {
-        if (gap_pending()) [[unlikely]] {
-            n = before_gap(n);
-        }
-        ring_.consume(n);
-    }
+    /// Release `n` elements of read_span(), clamped to what is queued, as
+    /// Ring's.
+    void consume(index_t n) { ring_.consume(n); }
 
-    /// Remove and return the oldest element, crossing a gap that stands
-    /// before it; nullopt when empty. A run of one: read_span()'s order.
+    /// Remove and return the oldest element; nullopt when empty, or when a
+    /// drop stands - the skip made, the element taken with the rest.
     std::optional<T> pop() {
-        const std::span<const T> one = read_span();
-        if (one.empty()) {
+        const std::optional<T> value = ring_.pop();
+        if (dropped()) [[unlikely]] {
+            skip();
             return std::nullopt;
         }
-        const T value = one[0];
-        consume(1u);
         return value;
     }
 
-    /// Elements queued, gaps or not (a snapshot, as Ring's).
+    /// Elements queued, a drop standing or not (a snapshot, as Ring's);
+    /// any side may ask, nothing is skipped.
     [[gnu::always_inline]] index_t count() const { return ring_.count(); }
     [[gnu::always_inline]] bool empty() const { return ring_.empty(); }
     [[gnu::always_inline]] bool full() const { return ring_.full(); }
 
-    /// Every element lost since the start: moved when the consumer crosses
-    /// a gap, never cleared. Consumer side.
-    uint32_t skips() const { return skips_; }
+    /// The skips made since the start, NEVER CLEARED, modulo 2^8 - each
+    /// one made inside a read_span() or pop() that then handed out nothing,
+    /// so a reader comparing it after each look sees it move between the
+    /// last run before a drop and the first after it. Consumer side.
+    uint32_t skips() const { return seen_; }
 
-    /// Reset to empty and forget the gaps not crossed. NOT concurrent, as
-    /// Ring's; skips() is kept.
+    /// Reset to empty and forget a drop not yet skipped. NOT concurrent,
+    /// as Ring's; skips() is kept.
     void clear() {
         ring_.clear();
-        for (uint8_t& g : gap_) {
-            g = 0u;
-        }
-        crossed_ = made_;
+        epoch_ = seen_;
     }
 
 private:
-    static constexpr index_t mask = Inner::mask;
-    static constexpr bool gaps_lock_free = sizeof(gaps_t) <= P::atomic_width;
-
-    // The counts first: at the object's head, each per-run look is one
-    // load at a short offset (a Cortex-M0+ load reaches 31 bytes).
-    gaps_t made_{0};            // gap slots marked (producer)
-    gaps_t crossed_{0};         // gap slots crossed (consumer)
-    uint32_t skips_{0};         // the epoch (consumer)
+    // The ring first, so its slots and indices sit at Ring's own offsets
+    // and push() is Ring's to the instruction; the two bytes behind it.
+    // At the object's head they would move the slots, and the
+    // Cortex-M0+'s receive loop of the PL011 then keeps other offsets in
+    // registers and spills its count, two instructions a character more
+    // (counted in the release listing).
     Inner ring_{};
-    uint8_t gap_[size]{};       // elements lost just before the slot's element
-
-    /// A new gap slot, published after its gap byte.
-    [[gnu::always_inline]] void publish_made() {
-        std::atomic_signal_fence(std::memory_order_release);
-        *const_cast<volatile gaps_t*>(&made_) = static_cast<gaps_t>(made_ + 1u);
-    }
-
-    /// A gap stands somewhere ahead: more gap slots marked than crossed.
-    [[gnu::always_inline]] bool gap_pending() const {
-        gaps_t made;
-        if constexpr (gaps_lock_free) {
-            made = *const_cast<const volatile gaps_t*>(&made_);
-        } else {
-            typename P::CriticalSection cs;
-            made = *const_cast<const volatile gaps_t*>(&made_);
-        }
-        std::atomic_signal_fence(std::memory_order_acquire);
-        return made != crossed_;
-    }
+    uint8_t epoch_{0};   // written by the producer only: one past seen_ on a drop
+    uint8_t seen_{0};    // written by the consumer only: the epoch last skipped
 
     /// Ring's read_span(), its body inline here: the one call a run would
     /// otherwise pay (Ring leaves its span verbs to the compiler, which
     /// keeps one with two call sites out of line, its span returned
     /// through memory on a 32-bit core).
-    [[gnu::always_inline]] std::span<const T> run() const {
+    [[gnu::always_inline]] std::span<const T> whole_run() const {
         if constexpr (lock_free) {
             return ring_.read_span_body();
         } else {
@@ -564,50 +514,20 @@ private:
         }
     }
 
-    /// A gap stands, and `lent` elements are in the run taken before that
-    /// was seen: the gap the tail stands on crossed - also on the
-    /// producer's free slot of an empty ring - and how many of the run
-    /// precede the next one. Out of line, the rare path, and a scalar
-    /// back: a span returned from a call travels through memory on a
-    /// 32-bit core, and merged with the common path's it is copied there
-    /// with a call.
-    [[gnu::noinline]] size_t lend_at_gap(size_t lent) {
-        const index_t tail = ring_.tail_;
-        cross(tail);
-        for (size_t i = 1; i < lent; ++i) {
-            if (gap_[(tail + i) & mask] != 0u) {
-                return i;
-            }
-        }
-        return lent;
+    /// A drop stands: the epoch read fresh, after the run's head, against
+    /// the consumer's copy.
+    [[gnu::always_inline]] bool dropped() const {
+        std::atomic_signal_fence(std::memory_order_acquire);
+        return *const_cast<const volatile uint8_t*>(&epoch_) != seen_;
     }
 
-    /// `n` clamped before the first gap not crossed among the elements it
-    /// would release.
-    [[gnu::noinline]] index_t before_gap(index_t n) {
-        const index_t tail = ring_.tail_;
-        const index_t queued = ring_.count();
-        const index_t most = n < queued ? n : queued;
-        for (index_t i = 0; i < most; ++i) {
-            if (gap_[(tail + i) & mask] != 0u) {
-                return i;
-            }
-        }
-        return most;
-    }
-
-    /// The crossing of the gap before the slot at `tail`, if one stands:
-    /// its count added to the epoch, its byte cleared, one more crossed.
-    /// Under the guard: on an empty ring the slot is the producer's free
-    /// one, whose byte it may be bumping.
-    void cross(index_t tail) {
-        typename P::CriticalSection cs;
-        const uint8_t g = gap_[tail];
-        if (g != 0u) {
-            skips_ = skips_ + g;
-            gap_[tail] = 0u;
-            crossed_ = static_cast<gaps_t>(crossed_ + 1u);
-        }
+    /// The skip: the epoch taken as seen, THEN the head read and the tail
+    /// jumped to it - a drop landing after the copy moves the epoch past
+    /// it again. Out of line: the rare path.
+    [[gnu::noinline]] void skip() {
+        *const_cast<volatile uint8_t*>(&seen_) = *const_cast<const volatile uint8_t*>(&epoch_);
+        std::atomic_signal_fence(std::memory_order_seq_cst);
+        ring_.consume(capacity());
     }
 };
 

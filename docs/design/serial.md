@@ -211,37 +211,40 @@ parity, or that a hardware overrun swallowed. The run handed out after
 such a gap is the stream after it, which the line begun in an assembler
 would swallow as its continuation: a line delivered with a hole in it. So
 every transport reports the gaps in its stream - `util/stream.hpp`'s
-`SkippingSource`: `rx_skips()`, every byte the line carried that the
-receive ring will not deliver, since the start and NEVER CLEARED (modulo
-2^32), moved on those rare paths alone - and the drain compares it at
-every run with the value it saw last, over every transport that has it,
-whether its release can refuse or not. A change ends the line begun as
-torn, counted in `torn_lines()`, and skips the stream to its next end of
-line: the bytes before it end a line whose beginning the gap took.
+`SkippingSource`: `rx_skips()`, an epoch that moves whenever the stream
+jumps, NEVER CLEARED, moved on those rare paths alone - and the drain
+compares it at every run with the value it saw last, over every
+transport that has it, whether its release can refuse or not. A change
+ends the line begun as torn, counted in `torn_lines()`, and skips the
+stream to its next end of line: the bytes before it end a line whose
+beginning the gap took.
 
-**The count moves where the gap falls.** A count bumped where a byte is
-lost does not say where: a byte a FULL ring refuses is lost behind
-everything the ring holds, up to a whole ring ahead of the consumer, and
-the run in hand when such a count moves was received before the loss - the
-drain would tear the line it holds and deliver the cut one spliced
-(measured on the host: `[LINE-TWO] [LINE-333] [FOURTAIL]`, the first line
-thrown away, the splice clean). So an interrupt receiver's ring MARKS each
-gap on the slot its next byte fills (`util/ring.hpp`'s `GapRing`, a gap
-byte a slot, [ring.md](ring.md)), hands out no run across a gap, and moves
-the count when the consumer CROSSES it - the meaning `HardwareRing`'s skip
-has, where the tail jumps to the producer. Every gap is kept: N bytes with
-K lost deliver the other N - K, in order (the CH32V203's interrupt
-receiver: 40 data bytes with 10 breaks, 40 delivered, FE 10). The handlers mark each loss where it fell: a byte dropped
-for its flags or refused by a full ring at its place (a FIFO drain that
-the ring refuses counts in its loop and marks once behind it, since a ring
-that refuses one byte of an entry refuses the rest); a byte an overrun
-swallowed behind the byte the data register kept, on a block without a
-FIFO; and on a FIFO (the STM32G0's FIFO mode, the PL011) behind the
-FIFO's depth of bytes at its head - an overrun standing at a receive
-entry fell with the FIFO full, and the handler, its one reader, has read
-nothing since (the PL011 measured: 48 frames into its masked 32-deep FIFO
-deliver exactly the first 32). Under a receive engine the losses -
-an overrun, a frame the channel does not take (the STM32G0's FE and PE,
+**A drop is skipped, not placed.** A count bumped where a byte is lost
+does not say where: a byte a FULL ring refuses is lost behind everything
+the ring holds, up to a whole ring ahead of the consumer, and the run in
+hand when such a count moves was received before the loss - the drain
+would tear the line it holds and deliver the cut one spliced (measured on
+the host: `[LINE-TWO] [LINE-333] [FOURTAIL]`, the first line thrown away,
+the splice clean). The consumer does not need the place, only the fact.
+So an interrupt receiver's ring keeps a DROP EPOCH (`util/ring.hpp`'s
+`SkipRing`, two bytes, [ring.md](ring.md)) that its handler moves on its
+rare paths - a byte dropped for its flags, refused by a full ring, or
+swallowed by an overrun, reported where the handler meets it - and the
+consumer's look that finds it moved SKIPS: the tail jumps to the head,
+everything queued is discarded with the drop, which is necessarily behind
+the head, and the epoch moves - between two runs, never inside one, the
+meaning `HardwareRing`'s skip has. No run handed out holds a drop, so no
+line is ever delivered across one: the line begun is torn, and the
+stream resumes at the next end of line or after a silence (below). What
+the skip throws away beside the drop - the whole lines queued with it -
+is lost only while bytes are being lost anyway. Under an overload so
+steady that a drop falls between every two looks, nothing is handed out
+at all ([ring.md](ring.md), "What a skip costs the stream"). A consumer
+that looks between two losses is handed every byte between them (the
+CH32V203's interrupt receiver, read between its breaks: 40 data bytes
+with 10 breaks, 40 delivered, FE 10, ten skips; read only after them,
+none of what the ring held). Under a receive engine the losses - an
+overrun, a frame the channel does not take (the STM32G0's FE and PE,
 DDRE clear), a stream restarted after a transfer error - are counted
 where the vector or the look sees them, beside the ring's own skips: the
 line torn is the one begun when the consumer next looks, which is the one
@@ -250,46 +253,58 @@ has no `rx_skips()`: its receive ring cannot drop - an OUT packet is armed
 only when the ring has its room - and over a transport without the verb
 (a test capture, a simulated port) nothing of this is compiled.
 
-**A silence ends the skip.** A gap can take the cut line's own end of
-line, and then the next end of line is a later, whole line's. So where the
-drain found the ring EMPTY after the gap and the next run arrives 100 ms
-or more after that look (`quiet_ticks`: longer than a USB serial adapter
-holds back a short packet, shorter than a person or a script waits before
-the next command), the line is taken to have ended in the silence and the
-run is drained as a line's beginning - a burst that overflows the ring,
-silence, then one command: the command is answered. What stays
-undecidable: a gap that took a line's end with the next line close behind
-it (that next line is skipped as the cut line's tail), a sender pausing
-longer than the silence in the middle of a line after a gap took its end
-(its tail is taken for a line), and a gap that lands on a line's start
-(the drain cannot tell it from a cut, and drops that whole line with the
-fragment it expects).
+**What the transport guarantees, and what it does not.** A LINE the
+transport delivers is intact: no byte of it was dropped, refused or
+flagged, and no two pieces of the stream were joined to make it. That is
+all: the UART's flags do not see a bit flipped inside a frame whose stop
+bit and parity come out right, and nothing in the receive path can. Data
+that must arrive intact over a long or noisy link carries a CRC in its
+own protocol; such a protocol need not read `rx_skips()` at all - a skip
+is one more hole its CRC catches - and pays nothing for it.
 
-The cost, counted at `-Os`: nothing a byte - the byte loop instruction for
-instruction the same, 24 an ordinary byte on the STM32G0's console
-(Cortex-M0+) as without the check - and on that console eighteen
-instructions a run: `GapRing`'s two tests (the run lent and the run
-released), four each, the epoch compare five, the skip's flag four, and
-one for the ring's slots standing behind the gap counts; on the AVR the
-epoch is a word in four registers, its compare thirteen instructions of
-a run's twenty-four. Everything after a gap - the tear,
-the skip, its release - is one out-of-line function: inline, its
-registers and its call cost the Cortex-M0+'s byte loop two to three
-instructions a byte. In the receive vectors the marks sit on the rare
-paths, and the AVR's RXC vector saves the registers it saved before (7
-in the serial suite's image, 16 in the console's, where the kernel's
-post saves the call-clobbered set). A transport whose release can refuse
-and that does not report its skips is refused at compile time
+**A silence ends the skip.** A drop can take the cut line's own end of
+line, and the skip can land in the middle of a line, so the bytes after
+it up to the next end of line are taken for the tail of a line whose
+beginning was lost. But where the drain found the ring EMPTY after the
+gap and the next run arrives 100 ms or more after that look
+(`quiet_ticks`: longer than a USB serial adapter holds back a short
+packet, shorter than a person or a script waits before the next
+command), the line is taken to have ended in the silence and the run is
+drained as a line's beginning - a burst that overflows the ring, silence,
+then one command: the command is answered. What stays undecidable: a skip
+with the next line close behind it (that next line is skipped as the cut
+line's tail), a sender pausing longer than the silence in the middle of a
+line after a drop took its end (its tail is taken for a line), and a drop
+that lands on a line's start (the drain cannot tell it from a cut, and
+drops that whole line with the fragment it expects).
+
+The cost, counted at `-Os`: nothing a byte - the byte loop instruction
+for instruction the same, 24 an ordinary byte on the STM32G0's console
+(Cortex-M0+) as without the check - and on that console sixteen
+instructions a run: `SkipRing`'s compare of its two bytes eight (an add
+each for an offset past the 64-byte ring's slots), the epoch compare
+four, the skip's flag four; `consume()` tests nothing. Everything after
+a gap - the tear, the skip to the next end of line, its release - is
+one out-of-line function, and so is the ring's own skip: inline, their
+registers and their calls cost the Cortex-M0+'s byte loop two to three
+instructions a byte. In the receive vectors the reports sit on the rare
+paths: the per-byte loops of the STM32G0's and the RP2040's consoles are
+the plain Ring's instruction for instruction (23 a character on the
+STM32G0's FIFO drain, 20 on the PL011's level loop), and the AVR's RXC
+vector saves no register for them (7 saved in the serial suite's image,
+10 in the console's, whose binding flattens the kernel's post). A transport whose release can refuse and that does
+not report its skips is refused at compile time
 (`test/family_ch32x035/neg/`). Validated on the host (`test_serial_port`:
 the scripted channel lapping a `HardwareRing` between two drains, the
-skip made by the drain's own look and by one outside it; a `GapRing`
+skip made by the drain's own look and by one outside it; a `SkipRing`
 dropping bytes between two runs, while a run is held, on a full ring
-with lines queued before the gap, twice before the first gap is crossed,
-and the silence that ends a skip and the burst that does not;
-`test_ring`'s `GapRing` cases, a random lossy stream among them in which
-every run lent is consecutive and every jump is seen at the run it
-opens; `test_pl011`'s receive FIFO, the framed entry, the full ring and
-the overrun).
+with lines queued before the drop, while both lines are in flight, and
+the silence that ends a skip and the burst that does not; a random lossy
+stream of numbered, checked lines in which every line delivered is a line
+sent, whole and in order; `test_ring`'s `SkipRing` cases, a random lossy
+stream among them in which every run handed out is consecutive and every
+jump comes after a skip; `test_pl011`'s receive FIFO, the framed entry,
+the full ring and the overrun).
 
 **Scheduling contract**: the line consumer must precede SerialPort in
 the Tenuto pack. The kernel then consumes every posted line before

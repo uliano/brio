@@ -202,20 +202,20 @@ sixteen characters plus the time-out's, the tail of a burst delivered 32
 bit periods - 3.2 frames - after its last stop bit: the block's own
 time-out, which nothing programs.
 
-EVERY LOSS IS A GAP THE RING MARKS (util/ring.hpp's `GapRing`), and
-`rx_skips()` counts every byte the receive ring will not deliver, never
-cleared - util/serial_port.hpp's epoch, moving when the consumer crosses
-a mark: an entry dropped for its flags at its place; the entries a full
-ring refuses counted in the drain and marked once behind it, since a
-ring that refuses one entry of a drain refuses the rest; and an overrun
-behind the FIFO's depth of entries - read from `UARTRSR` BEFORE the
-drain, it fell with the FIFO full and the handler, its one reader, has
-read nothing since, so the 32 entries at its head came before the frames
-it swallowed (measured: 48 frames into the masked FIFO deliver exactly
-the first 32, in order).
-Under a receive engine an overrun is marked where the ring's producer
-stands when the error vector sees it, ahead of the run in flight and of
-the FIFO's content that precede the loss.
+EVERY LOSS IS REPORTED TO THE RING (util/ring.hpp's `SkipRing`), whose
+consumer's next look skips everything queued, and `rx_skips()` counts
+the skips, never cleared - util/serial_port.hpp's epoch, moving between
+two runs: an entry dropped for its flags or refused by a full ring,
+reported on its rare path where the drain meets it, and an overrun read
+from `UARTRSR` after the drain - where in the drain a loss fell does not
+matter, since the skip takes everything the ring holds. An overrun
+standing at an entry fell with the FIFO full: the 32 entries the FIFO
+kept are taken by the drain and skipped with the rest (measured: 48
+frames into the masked FIFO, one OE, nothing handed out, one skip, and
+the stream after it whole). Under a receive engine an overrun is
+reported when the error vector sees it; the run in flight and the
+FIFO's content, which precede the loss, are published after the
+consumer's look (below, "Not covered yet").
 
 UNDER A RECEIVE ENGINE NO VECTOR ENDS A BURST. The time-out needs a
 character waiting in the FIFO, and the channel's single request moves
@@ -302,9 +302,9 @@ it: the wire lands a frame with its error bits as an entry, a read of
 `UARTDR` takes the oldest, `RXFE`/`RXFF` and `RXRIS` (the receive level)
 follow the entries, and a frame on a full FIFO is lost with `UARTRSR`'s
 OE and `OERIS` set; the time-out is raised by hand. Over it the suite
-drains a burst by the level, marks a framed entry a gap where it fell, a
-full ring's refusals one gap behind what it kept, and an overrun behind
-the 32 entries the full FIFO kept - the stream resuming after each. What it does
+drains a burst by the level, and skips a framed entry, a full ring's
+refusals and an overrun with everything queued beside them - nothing
+handed out joined across a loss, the stream resuming after each. What it does
 not model is time: the time-out's 32 bit periods, and the engine's view
 of the FIFO, stay the bench's to judge.
 
@@ -334,3 +334,11 @@ family's own document.
   byte, into a ring of 16-bit entries the transport has not got - born
   with a program that needs the errored bytes out of the stream under
   an engine; the interrupt receiver drops them today.
+- An overrun's place under a receive engine: the error vector reports
+  the loss to the ring when it sees it, and the bytes before the loss
+  still in the run in flight and in the FIFO are published after the
+  consumer's look has skipped, so a line among them can reach the
+  consumer joined to the stream after the loss. Exact would be the
+  report deferred until the FIFO's depth has been moved - born with a
+  program whose engine-fed lines must survive the channel's own stall;
+  the interrupt receiver is exact.

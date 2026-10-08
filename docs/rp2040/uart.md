@@ -158,8 +158,9 @@ extern "C" void isr_uart0() {
     baud);
   - a 1 ms break counts one BE (and one FE, on the same entry) and
     delivers no byte; 48 frames into the 32-deep FIFO with the line
-    masked deliver exactly 32 in order and count one OE - from
-    UARTRSR, as the entries never carry it;
+    masked count one OE - from UARTRSR, as the entries never carry it -
+    and the look after them skips what the ring held: nothing handed
+    out, one skip, the four bytes after it whole;
   - 4096 bytes round the loop at 3 Mbaud byte-exact in 13.7 ms (the
     wire's own 13.65).
 - ON THE CROSS LINK (this board's GP4 to the other's GP5 and back):
@@ -198,8 +199,9 @@ extern "C" void isr_uart0() {
 
 - THE RECEIVE SIDE AND ITS EDGE (`bench_rp2040` letter u, UART1 under
   LBE at 125 MHz, the meter's stamps inside `isr`): 256 bytes through the
-  interrupt receiver in 16 level entries and the time-out's, 13408
-  cycles at 115200 and 13541 at 1 Mbaud - 53 a byte - where the level
+  interrupt receiver in 16 level entries and the time-out's, 12882
+  cycles at 115200 and 11659 at 1 Mbaud - 46 a byte, moving by up to 4
+  a byte between two runs of one image with the XIP cache - where the level
   read with a flag test before every character took 16510 and 15500 (60
   a byte); the receive engine 390 cycles for the same 256, two
   completions. The edge from the burst's last stop bit (BUSY falling):
@@ -226,7 +228,7 @@ extern "C" void isr_uart0() {
   and loop in a scratch program: 58 cycles a byte reading characters
   already in the FIFO and 53 writing into an empty one, every cycle of
   the wire's time the CPU's. This transport's interrupt receiver costs
-  53 a byte and its transmitter 25, and the core is free between
+  46 a byte and its transmitter 25, and the core is free between
   entries.
 
 ## Not covered yet

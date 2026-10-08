@@ -6,15 +6,18 @@
 // over a run while it is held, the rule that a line is posted only from a
 // run released clean; and, over the same channel lapping the ring between
 // two drains, the rule that a skip the drain did not make is seen; and,
-// over a transport whose receive interrupt drops bytes into a GapRing - a
-// full ring, a discarded frame - the rule that the line the gap cut is
-// torn, and no other.
+// over a transport whose receive interrupt drops bytes into a SkipRing - a
+// full ring, a discarded frame - the rule that no line is ever delivered
+// spliced across a drop: the line begun is torn and counted, what the
+// ring held is skipped, and the stream resumes after its next end of
+// line or a silence.
 // Run with: ctest --preset host (or ctest --preset host -R <suite name>)
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <span>
 #include <string>
@@ -165,14 +168,14 @@ struct HwFake {
     }
 };
 
-// Fake interrupt receiver: a GapRing filled as a receive interrupt fills
-// it - a byte that finds the ring full is dropped and marked lost(), a
-// byte the receiver flags is discarded and marked the same - its consumer
-// half lent in place, rx_skips() the ring's epoch. `received_while_held`
-// arrives while the `lend`-th run lent from now is HELD, between its
-// read_span() and its consume().
-struct GapFake {
-    using Rx = brio::GapRing<uint8_t, 32, HostPlatform>;
+// Fake interrupt receiver: a SkipRing filled as a receive interrupt fills
+// it - a byte that finds the ring full is dropped and reported lost(), a
+// byte the receiver flags is discarded and reported the same - its
+// consumer half lent in place, rx_skips() the ring's skips.
+// `received_while_held` arrives while the `lend`-th run lent from now is
+// HELD, between its read_span() and its consume().
+struct SkipFake {
+    using Rx = brio::SkipRing<uint8_t, 32, HostPlatform>;
     static inline Rx ring;
     static inline const char* received_while_held = nullptr;
     static inline uint32_t lend = 1;
@@ -196,8 +199,8 @@ struct GapFake {
     }
     static void consume(uint32_t n) { ring.consume(static_cast<Rx::index_t>(n)); }
     static uint32_t rx_skips() { return ring.skips(); }
-    // The wire: each byte into the ring, or lost where it fell; a '~' is a
-    // frame the receiver flags, discarded and lost.
+    // The wire: each byte into the ring, or dropped and reported lost(); a
+    // '~' is a frame the receiver flags, discarded and reported the same.
     static void feed(const char* s) {
         while (*s) {
             const char c = *s++;
@@ -223,7 +226,7 @@ static_assert(brio::SpanSource<RunFake>);
 static_assert(brio::SpanSource<HwFake>);
 static_assert(!brio::SkippingSource<RunFake>);   // no rx_skips(): nothing compiled
 static_assert(brio::SkippingSource<HwFake>);
-static_assert(brio::SkippingSource<GapFake>);    // a Ring's gaps, reported
+static_assert(brio::SkippingSource<SkipFake>);   // a SkipRing's skips, reported
 
 // Sink AO: copies each received line during its dispatch (the only
 // window in which the reference is valid).
@@ -273,7 +276,7 @@ using Lines = std::vector<std::string>;
 
 } // namespace
 
-TEST_CASE_TEMPLATE("one line: assembled, delivered, CR ignored", T, ByteFake, RunFake, GapFake) {
+TEST_CASE_TEMPLATE("one line: assembled, delivered, CR ignored", T, ByteFake, RunFake, SkipFake) {
     using Serial = SerialOver<T>;
     reset<T>();
     T::feed("HELLO\r\n");
@@ -285,7 +288,7 @@ TEST_CASE_TEMPLATE("one line: assembled, delivered, CR ignored", T, ByteFake, Ru
 }
 
 TEST_CASE_TEMPLATE("a burst of many lines survives the two-buffer backpressure", T,
-                   ByteFake, RunFake, GapFake) {
+                   ByteFake, RunFake, SkipFake) {
     using Serial = SerialOver<T>;
     reset<T>();
     T::feed("A\nBB\nCCC\nDDDD\nEEEEE\n");   // 5 lines, 2 buffers
@@ -297,7 +300,7 @@ TEST_CASE_TEMPLATE("a burst of many lines survives the two-buffer backpressure",
 }
 
 TEST_CASE_TEMPLATE("ping-pong: the first line stays intact while the second assembles", T,
-                   ByteFake, RunFake, GapFake) {
+                   ByteFake, RunFake, SkipFake) {
     using Serial = SerialOver<T>;
     reset<T>();
     T::feed("AAAA\nBBBB\n");
@@ -308,7 +311,7 @@ TEST_CASE_TEMPLATE("ping-pong: the first line stays intact while the second asse
 }
 
 TEST_CASE_TEMPLATE("split arrival: a line completed across two edges", T, ByteFake, RunFake,
-                   GapFake) {
+                   SkipFake) {
     using Serial = SerialOver<T>;
     reset<T>();
     T::feed("HAL");
@@ -324,7 +327,7 @@ TEST_CASE_TEMPLATE("split arrival: a line completed across two edges", T, ByteFa
 }
 
 TEST_CASE_TEMPLATE("empty lines are delivered (the sink decides their meaning)", T,
-                   ByteFake, RunFake, GapFake) {
+                   ByteFake, RunFake, SkipFake) {
     using Serial = SerialOver<T>;
     reset<T>();
     T::feed("\n\nX\n");
@@ -335,7 +338,7 @@ TEST_CASE_TEMPLATE("empty lines are delivered (the sink decides their meaning)",
 }
 
 TEST_CASE_TEMPLATE("an overlong line is dropped and counted, the stream recovers", T,
-                   ByteFake, RunFake, GapFake) {
+                   ByteFake, RunFake, SkipFake) {
     using Serial = SerialOver<T>;
     reset<T>();
     const uint8_t before = Serial::line_overflows();
@@ -348,7 +351,7 @@ TEST_CASE_TEMPLATE("an overlong line is dropped and counted, the stream recovers
 }
 
 TEST_CASE_TEMPLATE("the drain stops AT the second line and leaves the rest queued", T,
-                   ByteFake, RunFake, GapFake) {
+                   ByteFake, RunFake, SkipFake) {
     // Both buffers lent after "A\nB\n": the bytes after the second
     // newline must still be in the transport, not taken and lost - the
     // run drain releases exactly what the assembler took.
@@ -662,139 +665,210 @@ TEST_CASE("a refused release and the skip it makes tear the line once") {
     CHECK(Serial::torn_lines() == torn_before + 1u);
 }
 
-// ---- a gap made by a receive interrupt, over a GapRing ---------------------------
+// ---- a drop made by a receive interrupt, over a SkipRing --------------------------
 
 TEST_CASE("a frame discarded between two runs tears the line it cut") {
     // "HEL" is drained: a line begun. The receiver discards a frame, then
-    // "LO" and two whole lines arrive: the run after the gap is not the
-    // rest of "HEL" - never "HELLO" - so the begun line is dropped and
-    // counted, and the stream resumes after the next end of line.
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
+    // "LO" and two whole lines arrive: the drain's next look skips all of
+    // it - never "HELLO", never "HEL" with anything after it - and the
+    // begun line is dropped and counted. What comes next soon after is the
+    // tail of a line whose beginning was skipped, up to its end of line.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
     const uint32_t torn_before = Serial::torn_lines();
-    GapFake::feed("HEL");
+    const uint32_t skips_before = SkipFake::ring.skips();
+    SkipFake::feed("HEL");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
     REQUIRE(Sink::lines.empty());
-    GapFake::feed("~LO\nNEXT\nMORE\n");
+    SkipFake::feed("~LO\nNEXT\nMORE\n");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"NEXT", "MORE"});
+    CHECK(Sink::lines.empty());
     CHECK(Serial::torn_lines() == torn_before + 1u);
-    CHECK(GapFake::queued() == 0u);
+    CHECK(SkipFake::queued() == 0u);
+    CHECK(SkipFake::ring.skips() == skips_before + 1u);
+    SkipFake::feed("TAIL\nAFTER\n");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    CHECK(Sink::lines == Lines{"AFTER"});
+    CHECK(Serial::torn_lines() == torn_before + 1u);
 }
 
-TEST_CASE("a full ring tears the line its gap cut, and not the lines queued before it") {
+TEST_CASE("a full ring: what it held is skipped, and the line the drop cut is never spliced") {
     // The drain sleeps while a burst longer than the ring arrives: the 31
-    // bytes the ring holds are whole lines and the head of a fourth; the
-    // rest of that fourth line is dropped where it fell, BEHIND the
-    // queued lines. Every line before the gap is delivered, the line the
-    // gap cut is torn, and the line after it is whole. (A count compared
-    // at the first run would tear the first line and deliver the cut one
-    // spliced.)
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
-    const uint32_t torn_before = Serial::torn_lines();
-    const uint32_t skips_before = GapFake::ring.skips();
-    GapFake::feed("LINE-ONE\nLINE-TWO\nLINE-333\nFOUR");  // 31 bytes: full
-    GapFake::feed("-CUT\n");                               // dropped: full
-    CHECK(GapFake::dropped == 5u);
+    // bytes the ring holds are whole lines and the head of a fourth, the
+    // rest of that fourth line dropped. The look skips them all - the
+    // drop is behind the head, and where is not kept - so "FOUR" never
+    // meets "TAIL", and the line after the tail is whole.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
+    const uint32_t skips_before = SkipFake::ring.skips();
+    SkipFake::feed("LINE-ONE\nLINE-TWO\nLINE-333\nFOUR");  // 31 bytes: full
+    SkipFake::feed("-CUT\n");                               // dropped: full
+    CHECK(SkipFake::dropped == 5u);
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"LINE-ONE", "LINE-TWO", "LINE-333"});
-    GapFake::feed("TAIL\nAFTER\n");     // "FOUR" + "TAIL" would be the splice
+    CHECK(Sink::lines.empty());
+    CHECK(SkipFake::ring.skips() == skips_before + 1u);
+    SkipFake::feed("TAIL\nAFTER\n");     // "FOUR" + "TAIL" would be the splice
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"LINE-ONE", "LINE-TWO", "LINE-333", "AFTER"});
-    CHECK(Serial::torn_lines() == torn_before + 1u);
-    CHECK(GapFake::ring.skips() == skips_before + 5u);
+    CHECK(Sink::lines == Lines{"AFTER"});
 }
 
-TEST_CASE("a gap made while a run is held is crossed after it, at the line it cut") {
+TEST_CASE("a drop made while a run is held: the run is the stream, the next look skips") {
     // "AB\nC" is lent as one run; while it is held the line goes on and
     // the ring fills behind it, so bytes are dropped with the run still
-    // unreleased. The run itself is the stream - it is released clean and
-    // "AB" goes out - and the gap falls behind what was queued: the line
-    // begun as "C" continues into what the ring holds, and the gap after
-    // that ends the line it cut.
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
+    // unreleased. The run was read before the drop - it is released clean
+    // and "AB" goes out - and the next look skips everything behind it:
+    // the line begun as "C" is torn, and the stream resumes after the
+    // next end of line.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
     const uint32_t torn_before = Serial::torn_lines();
-    GapFake::feed("AB\nC");
+    SkipFake::feed("AB\nC");
     // 27 more fit behind the held run: five lines, twelve bytes, 3 lost.
-    GapFake::received_while_held = "DEFG\nH\nI\nJ\nK\nL\nMNOPQRSTUVWXxyz";
+    SkipFake::received_while_held = "DEFG\nH\nI\nJ\nK\nL\nMNOPQRSTUVWXxyz";
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(GapFake::dropped == 3u);
-    CHECK(Sink::lines == Lines{"AB", "CDEFG", "H", "I", "J", "K", "L"});
-    GapFake::feed("3\nOK\n");           // "MNO..X" + "3" would be the splice
+    CHECK(SkipFake::dropped == 3u);
+    CHECK(Sink::lines == Lines{"AB"});
+    CHECK(Serial::torn_lines() == torn_before + 1u);
+    SkipFake::feed("3\nOK\n");           // "MNO..X" + "3" would be the splice
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"AB", "CDEFG", "H", "I", "J", "K", "L", "OK"});
+    CHECK(Sink::lines == Lines{"AB", "OK"});
     CHECK(Serial::torn_lines() == torn_before + 1u);
 }
 
-TEST_CASE("two gaps before the first is crossed: each tears the line it cut") {
-    // The ring fills, the drain takes two lines and stops (both buffers
-    // lent), the line refills the room and overflows again before the
-    // drain is back at the first gap. Each gap is kept where it fell: the
-    // first cuts "EEEEEE..", whose end it took, so the skip after it
-    // takes "ff" for that line's tail; the second cuts "GG..", and the
-    // skip after it takes "HH" - "II" is the first line whole.
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
+TEST_CASE("a drop while both lines are in flight skips what the ring held") {
+    // The drain takes two lines and stops (both buffers lent); the ring
+    // fills and drops before the drain is back. The rest of the queue
+    // goes with the drop - no line had begun, so none is torn - and the
+    // stream resumes after the next end of line.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
     const uint32_t torn_before = Serial::torn_lines();
-    GapFake::feed("A\nB\nCCCCCCCCC\nDDDDDDDDDD\nEEEEEE");   // 31: full
-    GapFake::feed("ee");                                     // lost: gap 1
+    SkipFake::feed("A\nB\nCCCCCCCCC\nDD");
     brio::post<Serial>(RxActivity{});
     auto e = Serial::queue.pop();
     REQUIRE(e.has_value());
     Serial::dispatch(*e);                 // "A" and "B" out, the drain stops
-    GapFake::feed("ff\nGG\n");           // the 4 freed take "ff\nG", "G\n" lost: gap 2
+    SkipFake::feed("DDDDDDDD\nEEEEEEEEEEEEE");   // 3 dropped: full
+    CHECK(SkipFake::dropped == 3u);
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"A", "B", "CCCCCCCCC", "DDDDDDDDDD"});
-    GapFake::feed("HH\nII\n");
+    CHECK(Sink::lines == Lines{"A", "B"});
+    SkipFake::feed("ee\nII\n");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"A", "B", "CCCCCCCCC", "DDDDDDDDDD", "II"});
-    CHECK(Serial::torn_lines() == torn_before + 2u);
+    CHECK(Sink::lines == Lines{"A", "B", "II"});
+    CHECK(Serial::torn_lines() == torn_before);
 }
 
-TEST_CASE("over a GapRing with no loss the epoch never moves and nothing is torn") {
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
+TEST_CASE("over a SkipRing with no loss the epoch never moves and nothing is torn") {
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
     const uint32_t torn_before = Serial::torn_lines();
-    const uint32_t skips_before = GapFake::ring.skips();
+    const uint32_t skips_before = SkipFake::ring.skips();
     for (int k = 0; k < 20; ++k) {
-        GapFake::feed("HELLO\nWORLD\n");
+        SkipFake::feed("HELLO\nWORLD\n");
         brio::post<Serial>(RxActivity{});
         run_scheduler<Serial>();
     }
     CHECK(Sink::lines.size() == 40u);
-    CHECK(GapFake::ring.skips() == skips_before);
+    CHECK(SkipFake::ring.skips() == skips_before);
     CHECK(Serial::torn_lines() == torn_before);
 }
 
-// ---- the skip after a gap ends at a silence ------------------------------------
-
-TEST_CASE("a gap that took the line's own end of line: a silence ends the skip") {
-    // "HELLO" is drained, a line begun; its end of line is lost. The look
-    // that crosses the gap finds the ring empty: the line is torn there.
-    // Three seconds later "ERR" arrives whole - after a silence the skip
-    // to the next end of line ends, and ERR is not taken for the cut
-    // line's tail.
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
-    const uint32_t torn_before = Serial::torn_lines();
-    GapFake::feed("HELLO");
+TEST_CASE("lossy traffic over a SkipRing: every line delivered is a line sent, whole") {
+    // Numbered lines, each carrying a check of its number, fed in bursts
+    // of random length while the drain runs at random and the receiver
+    // drops frames at random: a line delivered is exactly a line that was
+    // sent - never two joined across a drop, never one with a hole - in
+    // order, and some are delivered after every kind of loss.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
+    uint32_t seed = 4242u;
+    auto rnd = [&](uint32_t n) {
+        seed = seed * 1103515245u + 12345u;
+        return (seed >> 16) % n;
+    };
+    auto line_of = [](uint32_t k) {
+        char buf[16];
+        const uint32_t check = (k * 7919u + 13u) % 10000u;
+        std::snprintf(buf, sizeof buf, "%04u:%04u", static_cast<unsigned>(k % 10000u),
+                      static_cast<unsigned>(check));
+        return std::string(buf);
+    };
+    std::string wire;
+    uint32_t sent = 0;
+    for (int step = 0; step < 4000; ++step) {
+        if (wire.empty() || (wire.size() < 64u && rnd(2) == 0)) {
+            wire += line_of(sent++) + "\n";
+        }
+        const uint32_t n = rnd(12);
+        std::string burst = wire.substr(0, n);
+        wire.erase(0, n);
+        for (char& c : burst) {
+            if (rnd(40) == 0) {
+                c = '~';                  // a frame the receiver discards
+            }
+        }
+        SkipFake::feed(burst.c_str());
+        if (rnd(3) == 0) {
+            brio::post<Serial>(RxActivity{});
+            run_scheduler<Serial>();
+        }
+        if (wire.empty() && rnd(20) == 0) {
+            // Now and then a silence, between two lines: the sender's
+            // pause inside a line after a drop took its end is the case
+            // serial.md calls undecidable.
+            brio::post<Serial>(RxActivity{});
+            run_scheduler<Serial>();
+            HostPlatform::ticks += 1000u;
+        }
+    }
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    GapFake::feed("~");                   // the end of line, lost
+    REQUIRE(Sink::lines.size() > 100u);
+    uint32_t last = 0;
+    bool first = true;
+    for (const std::string& l : Sink::lines) {
+        REQUIRE(l.size() == 9u);
+        const uint32_t k = static_cast<uint32_t>(std::stoul(l.substr(0, 4)));
+        REQUIRE(l == line_of(k));
+        if (!first) {
+            REQUIRE(k != last);
+        }
+        first = false;
+        last = k;
+    }
+    CHECK(Sink::lines.size() < sent);
+    CHECK(Serial::torn_lines() > 0u);
+    CHECK(SkipFake::dropped > 0u);
+}
+
+// ---- the resync after a skip ends at a silence ---------------------------------
+
+TEST_CASE("a drop that took the line's own end of line: a silence ends the resync") {
+    // "HELLO" is drained, a line begun; its end of line is lost. The look
+    // that skips the drop finds the ring empty: the line is torn there.
+    // Three seconds later "ERR" arrives whole - after a silence the resync
+    // to the next end of line ends, and ERR is not taken for the cut
+    // line's tail.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
+    const uint32_t torn_before = Serial::torn_lines();
+    SkipFake::feed("HELLO");
+    brio::post<Serial>(RxActivity{});
+    run_scheduler<Serial>();
+    SkipFake::feed("~");                   // the end of line, lost
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
     CHECK(Serial::torn_lines() == torn_before + 1u);
     HostPlatform::ticks += 3000u;
-    GapFake::feed("ERR\n");
+    SkipFake::feed("ERR\n");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
     CHECK(Sink::lines == Lines{"ERR"});
@@ -803,38 +877,38 @@ TEST_CASE("a gap that took the line's own end of line: a silence ends the skip")
 
 TEST_CASE("a burst that overflows the ring, a silence, then one line: it is answered") {
     // The SAM C21's console case: lines back to back overflow the ring
-    // while the drain sleeps, the last gap takes a line's end; seconds
+    // while the drain sleeps, and the look skips all the ring held; seconds
     // later one command comes - and is delivered.
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
-    GapFake::feed("HELP\nHELP\nHELP\nHELP\nHELP\nHELP\nHE");   // 31: full
-    GapFake::feed("LP\nHELP\nHE");                                // all lost
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
+    SkipFake::feed("HELP\nHELP\nHELP\nHELP\nHELP\nHELP\nHE");   // 31: full
+    SkipFake::feed("LP\nHELP\nHE");                                // all lost
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"HELP", "HELP", "HELP", "HELP", "HELP", "HELP"});
+    CHECK(Sink::lines.empty());
     HostPlatform::ticks += 3000u;
-    GapFake::feed("ERR\n");
+    SkipFake::feed("ERR\n");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    CHECK(Sink::lines == Lines{"HELP", "HELP", "HELP", "HELP", "HELP", "HELP", "ERR"});
+    CHECK(Sink::lines == Lines{"ERR"});
 }
 
-TEST_CASE("bytes soon after the gap are still the cut line's tail") {
-    // No silence: what follows the gap within quiet_ticks of the empty
-    // look is skipped to its end of line, as before - the undecidable
-    // case where the gap took a line's end and the next line came at
-    // once costs that next line.
-    using Serial = SerialOver<GapFake>;
-    reset<GapFake>();
+TEST_CASE("bytes soon after the drop are still the cut line's tail") {
+    // No silence: what follows the drop within quiet_ticks of the empty
+    // look is skipped to its end of line - the undecidable case where the
+    // drop took a line's end and the next line came at once costs that
+    // next line.
+    using Serial = SerialOver<SkipFake>;
+    reset<SkipFake>();
     const uint32_t torn_before = Serial::torn_lines();
-    GapFake::feed("HEL");
+    SkipFake::feed("HEL");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
-    GapFake::feed("~");
+    SkipFake::feed("~");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
     HostPlatform::ticks += 5u;
-    GapFake::feed("LO\nNEXT\n");
+    SkipFake::feed("LO\nNEXT\n");
     brio::post<Serial>(RxActivity{});
     run_scheduler<Serial>();
     CHECK(Sink::lines == Lines{"NEXT"});

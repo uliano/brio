@@ -148,12 +148,12 @@ TX and RX inside the chip and leaves the RX pad alone.
   `read_span` and `consume` (the receive run in place), `rx_pending`,
   `tx_idle` (THE WIRE IS IDLE: the ring empty - an engine's block holds
   its run there until its completion - and SR.TC set, cleared as every
-  transmit block starts), `rx_skips` (every byte the receive ring will
-  not deliver, never cleared - util/serial_port.hpp's epoch: without an
-  engine the GapRing's crossings of the gaps `isr()` marks, a byte
-  refused by a full ring or dropped for FE or PE at its place and an
-  overrun's behind the byte DR kept; with one the view's skips plus an
-  ORE and a restart after a transfer error, an FE frame being stored),
+  transmit block starts), `rx_skips` (the gaps in the stream the receive
+  ring hands out, never cleared - util/serial_port.hpp's epoch: without
+  an engine the SkipRing's skips, one at the consumer's look after
+  `isr()` reported a byte refused by a full ring, dropped for FE or PE,
+  or an overrun; with one the view's skips plus an ORE and a restart
+  after a transfer error, an FE frame being stored),
   the counters `rx_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns`,
   `clear_errors`, `rebase(hz)` (the ClockUser verb: `hz` is SYSCLK and

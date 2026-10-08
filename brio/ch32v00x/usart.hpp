@@ -655,8 +655,8 @@ struct UartOptions {
  * can be shared with a handler bare (atomic_width) or wants a guard.
  */
 /**
- * The receive ring a transport keeps: a GapRing, which the interrupt
- * receiver pushes into and marks where it lost a byte, without a receive
+ * The receive ring a transport keeps: a SkipRing, which the interrupt
+ * receiver pushes into and tells when it lost a byte, without a receive
  * engine; with one, the CONSUMER HALF of
  * the ring the channel writes - util/ring.hpp's HardwareRing over a
  * storage array the transport owns (keyed by the transport's type), the
@@ -665,7 +665,7 @@ struct UartOptions {
  */
 template <bool engine, typename Owner, uint16_t size, typename Engine, typename P>
 struct UartRxRing {
-    using type = GapRing<uint8_t, size, P>;
+    using type = SkipRing<uint8_t, size, P>;
 };
 template <typename Owner, uint16_t size, typename Engine, typename P>
 struct UartRxRing<true, Owner, size, Engine, P> {
@@ -943,10 +943,10 @@ struct Uart {
             }
         } else if ((status & usart_rxne) != 0u) {
             const uint8_t byte = static_cast<uint8_t>(regs().DATAR & 0xFFu);
-            // Every byte lost is a gap the receive ring marks where it
-            // fell (lost()): the flagged byte dropped here - with an
-            // overrun's, lost behind it in the shift register - and one a
-            // full ring refuses.
+            // Every byte lost is reported to the receive ring (lost()):
+            // the flagged byte dropped here - with an overrun's, lost in
+            // the shift register - and one a full ring refuses. The
+            // consumer's next look skips everything queued.
             if ((status & (usart_fe | usart_ne | usart_pe | usart_ore)) != 0u) {
                 if ((status & usart_fe) != 0u) { bump(m_frame_errors); }
                 if ((status & usart_ne) != 0u) { bump(m_noise_errors); }
@@ -1114,13 +1114,12 @@ struct Uart {
 
     static auto rx_pending() { return m_rx.count(); }
 
-    /// Every byte the line carried that the receive ring will not deliver,
-    /// since the program started, NEVER CLEARED (modulo 2^32) -
-    /// util/stream.hpp's SkippingSource, util/serial_port.hpp's epoch.
-    /// Without an engine: each byte the handler dropped for a flag or a
-    /// full ring, and an overrun's, each marked where it fell by the
-    /// GapRing, the count moving when the consumer crosses the mark. With
-    /// one: the view's skips (a lap missed, a held run refused) plus
+    /// The gaps in the stream the receive ring hands out, since the
+    /// program started, NEVER CLEARED - util/stream.hpp's SkippingSource,
+    /// util/serial_port.hpp's epoch. Without an engine: the SkipRing's
+    /// skips (modulo 2^8), one at the consumer's look after a byte the
+    /// handler dropped for a flag or a full ring, or an overrun - the look
+    /// that discards what the ring held. With one: the view's skips (a lap missed, a held run refused) plus
     /// m_rx_lost - an overrun, a restart after a transfer error (a framed
     /// frame is stored: the channel moves it) - counted when the vector or
     /// the look sees them, so the line torn is the one begun when the

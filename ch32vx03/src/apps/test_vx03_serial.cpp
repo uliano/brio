@@ -92,7 +92,9 @@
 //      every data byte delivered intact and in order, no byte taken by a
 //      clear, the frame errors counted one a break; back-to-back breaks
 //      counting every other one (ch32vx03/usart.hpp's header); and the
-//      interrupt receiver's breaks, dropped and counted
+//      interrupt receiver's breaks, dropped, counted and skipped - a
+//      reader that looks between them handed every data byte, one that
+//      does not handed nothing the ring held with a break behind it
 //   r  tx_idle() IS THE WIRE'S: the moment it turns true against the
 //      last stop bit's start on PA2, captured by TIM2's channel 3, for
 //      the interrupt transmitter and the transmit engine
@@ -2279,30 +2281,60 @@ void tq_errors() {
                   counts[0] == 1u && counts[1] == 2u);
     Loop::release();
 
-    // The interrupt receiver drops each break's frame and counts it.
+    // The interrupt receiver drops each break's frame, counts it and tells
+    // its ring, whose next look skips what it holds: read between the
+    // breaks, every data byte is handed out ...
     (void)transport_up<Plain>(true, 115200);
     breaks = 0;
-    for (uint32_t i = 0; i < 40u; ++i) {
-        cross_byte(stream_byte(i));
-        if (i % 4u == 3u) {
-            cross_break();
-            ++breaks;
-        }
-    }
-    wait_us(2000);
     uint32_t back = 0;
     bool ok = true;
     uint8_t b = 0;
-    while (Plain::read_byte(b)) {
-        if (b != stream_byte(back)) {
-            ok = false;
+    auto read_all = [&] {
+        while (!U4::tx_complete()) {
         }
-        ++back;
+        wait_us(100);   // the last frame's stop bit and its entry
+        while (Plain::read_byte(b)) {
+            if (b != stream_byte(back)) {
+                ok = false;
+            }
+            ++back;
+        }
+    };
+    const uint32_t skips0 = Plain::rx_skips();
+    for (uint32_t i = 0; i < 40u; ++i) {
+        cross_byte(stream_byte(i));
+        if (i % 4u == 3u) {
+            read_all();   // the four before the break
+            cross_break();
+            ++breaks;
+            read_all();   // the skip, with nothing queued
+        }
     }
-    print(serial, "  the interrupt receiver: 40 bytes and ", breaks, " breaks, ", back,
-          " delivered, FE ", Plain::frame_errors(), crlf);
-    bench.verdict("the interrupt receiver drops each break's frame and counts it",
-                  back == 40u && ok && Plain::frame_errors() == breaks);
+    const uint32_t skips = (Plain::rx_skips() - skips0) & 0xFFu;
+    print(serial, "  the interrupt receiver, read between: 40 bytes and ", breaks, " breaks, ",
+          back, " delivered, FE ", Plain::frame_errors(), ", skips ", skips, crlf);
+    bench.verdict("the interrupt receiver drops each break's frame, counts it and skips it: "
+                  "a reader that looks between the breaks is handed every data byte",
+                  back == 40u && ok && Plain::frame_errors() == breaks && skips == breaks);
+    // ... and read after, nothing the ring held with a break behind it:
+    // no run joins the two sides.
+    const uint32_t skips1 = Plain::rx_skips();
+    for (uint32_t i = 0; i < 8u; ++i) {
+        cross_byte(stream_byte(40u + i));
+        if (i == 3u) {
+            cross_break();
+        }
+    }
+    wait_us(2000);
+    uint32_t joined = 0;
+    while (Plain::read_byte(b)) {
+        ++joined;
+    }
+    const uint32_t skips_after = (Plain::rx_skips() - skips1) & 0xFFu;
+    print(serial, "  read after: 8 bytes around a break, ", joined, " delivered, FE ",
+          Plain::frame_errors(), ", skips ", skips_after, crlf);
+    bench.verdict("bytes queued with a break among them are skipped whole, in one skip",
+                  joined == 0u && skips_after == 1u && Plain::frame_errors() == breaks + 1u);
     Plain::release();
     all_off();
 }

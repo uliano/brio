@@ -1,7 +1,8 @@
 # Ring: the SPSC FIFO
 
-`util/ring.hpp` - `Ring<T, size, P>`; `GapRing<T, size, P>`, a Ring
-whose producer marks where it lost elements ([its own section](#gapring-a-ring-that-says-where-it-lost));
+`util/ring.hpp` - `Ring<T, size, P>`; `SkipRing<T, size, P>`, a Ring
+whose producer can drop elements and whose consumer skips past a drop
+([its own section](#skipring-a-ring-that-skips-a-drop));
 and `HardwareRing<storage, Counter>`, the consumer half of a ring whose
 producer is the hardware ([its own section](#hardwarering-the-ring-whose-producer-is-the-hardware)).
 
@@ -187,80 +188,95 @@ saves six registers lock-free and seven guarded; the RXC vector's
 sixteen are the kernel's post on the empty -> non-empty edge); 156
 bytes of flash; RAM identical.
 
-## GapRing: a ring that says where it lost
+## SkipRing: a ring that skips a drop
 
 ### What it is for
 
-A receive interrupt loses bytes on rare paths - one that finds the ring
+A receive interrupt drops bytes on rare paths - one that finds the ring
 full, one the receiver flags as framed or failing its parity, the frames
 a hardware overrun swallowed - and a consumer that carries state from
-one byte to the next (SerialPort's line begun) must learn WHERE the
-stream jumped. A count of the losses does not say: a byte a full ring
-refuses is lost behind everything the ring holds, up to a whole ring
-ahead of the consumer. `GapRing<T, size, P>` is Ring with the place: the
-producer marks each gap on the slot its next element fills, and the
-consumer is handed no run across a gap ([serial.md](serial.md), "The
-count moves where the gap falls").
+one byte to the next (SerialPort's line begun) must never join the two
+sides of a drop. It needs ONE fact - that the run it is handed follows on
+from the run before - and not how much was lost, nor where.
+`SkipRing<T, size, P>` is Ring with that fact in two bytes: a DROP EPOCH
+the producer writes on its rare paths, and the consumer's own copy of
+it. A look that finds the two different SKIPS: the tail jumps to the
+head, everything queued discarded in one store - the drop is
+necessarily behind the head - and `skips()` moves. So no run handed out
+holds a drop, and the consumer learns of each skip between two runs:
+`HardwareRing`'s skip, for a producer that stores its index
+([serial.md](serial.md), "A drop is skipped, not placed").
 
 ### The contract
 
-- Every slot carries a GAP BYTE beside its element: how many elements
-  were lost just before the one the slot holds. The producer's verbs are
-  Ring's (`push`, `write_span`/`publish`) and one more for its rare
-  paths, `lost()` - one element lost here - or `lost(n)`, n at once (a
-  drain that counted them): the byte of the free slot its next push will
-  fill is bumped, saturating at 255.
-- The consumer's verbs are Ring's under Ring's names. `read_span()` stops
-  before a slot a gap precedes; with the tail standing on one, it CROSSES
-  its gap first and lends from it; `consume(n)` never passes a gap not
-  crossed; `pop()` is a run of one. `skips()` counts every element lost,
-  NEVER CLEARED (modulo 2^32), and moves at the crossing - so a reader
-  comparing it after each `read_span()` sees it move between the last
-  element before a gap and the first after it. Every gap is kept, however
-  many stand: N elements with K lost deliver the other N - K, in order.
-- SPSC as Ring is: a slot's gap byte belongs to whoever owns the slot -
-  the producer writes it on its free slot and publishes it with the
-  element, the consumer reads and clears it on a slot of its own. The one
-  exception is a loss with nothing after it yet on an EMPTY ring, whose
-  gap sits on the producer's free slot: the consumer crosses it at its
-  next look under `P::CriticalSection`, the decision only.
-- Whether any gap stands is two counts of gap slots, the producer's marks
-  against the consumer's crossings - wide enough for a ring whose every
-  slot holds a gap (a byte up to 255 slots), and read under the guard
-  where that is wider than the platform's atomic width. The run is taken
-  BEFORE they are compared: a gap marked after the run's head was read
-  lies at or beyond that head, one marked before it is seen by the look
-  that follows - no run lent crosses a gap however the producer
-  interleaves.
-- The producer's tests are against immediates, never zero: on the AVR a
-  test against zero takes the zero register, which a receive vector that
-  did not use it then saves and restores at every entry. A new gap slot
-  is told by its byte BECOMING one.
+- The producer's verbs are Ring's (`push`, `write_span`/`publish`) and
+  one more for its rare paths, `lost()`: elements were dropped, behind
+  what is queued now. One call stands for any number of elements and
+  any number of calls before the consumer's next look.
+- The consumer's verbs are Ring's under Ring's names. `read_span()` and
+  `pop()` take Ring's run or element FIRST and compare the epoch after;
+  when it moved they skip and hand out nothing - an empty run, a
+  `nullopt` - and `skips()` has moved. `consume(n)` is Ring's: a run it
+  releases was judged at its read. `count()`, `empty()` and `full()`
+  never skip, so the producer may ask them for its edge.
+- The order makes the guarantee. A drop marked before the run's head was
+  read is seen by the compare that follows; one marked after lies beyond
+  that head and is seen by the next look. A look that finds the epoch
+  moved takes it as seen and only THEN reads the head it jumps to: a drop
+  landing between the two is behind the head too, and one landing after
+  the copy is taken moves the epoch past it again. Every look compares,
+  an empty one included, so a drop with nothing behind it yet is skipped
+  - and `skips()` moves - at the next look.
+- ONE WRITER A BYTE, AND NO WRAP INTO SILENCE. `lost()` does not
+  increment the epoch: it sets it ONE PAST THE CONSUMER'S COPY. The
+  producer writes the epoch, the consumer its copy, and the two differ
+  exactly while a drop not yet skipped stands. An incremented byte would
+  read as its old value again after exactly 256 drops between two looks
+  - at 115200 baud a full ring refusing for 22 ms, a dispatch that long
+  - and the consumer would join the two sides of them. Written as one
+  past the copy it cannot, at the same price: a load of the copy
+  instead of the epoch.
+- `skips()` is the copy itself: the skips made since the start, NEVER
+  CLEARED, modulo 2^8. A reader compares it after each look, and one
+  look makes one skip at most, so the width is never in its way.
+- `clear()` forgets a drop not yet skipped, keeps `skips()`, and like
+  Ring's is not concurrent.
+
+### What a skip costs the stream
+
+What was queued with the drop goes with it: the clean bytes before the
+drop and the ones after it up to the head. They are lost only while
+bytes are being lost anyway, and what the consumer is handed is always
+the stream as it was - never two pieces of it joined. Under an overload
+so steady that a drop falls between every two looks, every look skips
+and nothing is handed out at all (measured: the AVR's metered receive
+vector at 2 and 3 Mbaud, longer than a frame, `bench_avr` letter `u`);
+the counters say why.
 
 ### What it costs
 
-The producer: nothing on `push()`; a load, a test and two or three
-stores a loss. The consumer: one load pair and a branch in `read_span()`
-and in `consume()` on the common path; only while a gap stands does it
-read the run's gap bytes, a byte apiece, out of line, returning a scalar
-- a span returned from a call travels through memory on a 32-bit core,
-and merged with the common path's it was copied there by a call to
-`memcpy` (seen in the STM32G0's listing, and gone). The memory: a byte a
-slot. Counted on the consoles in [serial.md](serial.md).
+The producer: nothing on `push()`, which is Ring's to the instruction -
+the ring sits first in the object, at Ring's own offsets, and the two
+bytes behind it; `lost()` a load, an increment and a store, on its rare
+path. The consumer: one load and a compare at every `read_span()` and
+`pop()`, the skip out of line. The memory: two bytes. Counted on the
+consoles in [serial.md](serial.md).
 
 ### Testing
 
 `test/test_ring`: a ring with no loss behaves as Ring and its epoch stays;
-a byte lost to a full ring is a gap behind everything queued, crossed
-only when the tail reaches it; a discard into an empty ring crossed at
-the next look; `consume()` clamped at a gap and `pop()` crossing it;
-every gap kept when a second stands before the first is crossed; a
-stream with one loss in four delivering the other three in order, each
-gap seen at the run it opens; `lost(n)`; `clear()` forgetting the gaps
-and keeping the epoch; the guarded path and the saturating gap byte on
-a byte-atomic platform; and a random lossy numbered stream in which
-every run lent is consecutive, every jump is seen at the run it opens
-and only there, and every element sent is delivered or counted.
+two bytes beside the Ring; a byte lost to a full ring skips everything
+queued; a run read before the drop is released whole and the next look
+skips; a discard into an empty ring skipped at the next look; a skip at
+the storage's wrap; many drops between two looks are one skip; exactly
+256, 512, 255 and 257 drops between two looks still seen; `skips()`
+counting modulo 2^8 and moving at every skip; `pop()` skipping as
+`read_span()` does; `count()` asked while a drop stands; `clear()`
+forgetting a drop and keeping the epoch; the guarded path on a
+byte-atomic platform; and a random lossy numbered stream in which every
+run handed out is consecutive, a run that does not follow on comes after
+a move of `skips()` and only then, and no look that hands out a run
+moves it.
 
 ## HardwareRing: the ring whose producer is the hardware
 

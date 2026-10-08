@@ -195,14 +195,14 @@ a compile-time refusal in the task.
   `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`write_bulk`,
   `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
   place; with a receive engine `consume()` answers whether the run was
-  intact), `rx_skips` (every byte the receive ring will not deliver,
-  never cleared - util/serial_port.hpp's epoch: without an engine the
-  GapRing's crossings of the gaps `isr()` marks - a byte refused by a full
-  ring or dropped for FE or PE at its place, an overrun's behind the byte
-  RDR kept, or in FIFO mode behind the RXFIFO's depth of characters,
-  which an overrun standing at the entry fell after (33.5.4) -
-  with one the ring's skips plus an ORE, an FE or a PE the channel never
-  took, and a restart after a transfer error),
+  intact), `rx_skips` (the gaps in the stream the receive ring hands
+  out, never cleared - util/serial_port.hpp's epoch: without an engine
+  the SkipRing's skips, one at the consumer's look after `isr()` reported
+  a byte refused by a full ring, dropped for FE or PE, or an overrun -
+  the look discarding what the ring held, so where in the entry's drain
+  the loss fell does not matter; with one the ring's skips plus an ORE,
+  an FE or a PE the channel never took, and a restart after a transfer
+  error),
   `rx_pending`, `tx_idle` (the wire's: nothing queued, no block in
   flight, TC set), `rebase(hz)`,
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,
@@ -391,15 +391,20 @@ receiver alone; `isr` includes the meter's 118 cycles an entry):
 | receive of 256 bytes | entries | cycles an entry | cycles a byte |
 |---|---|---|---|
 | RXFNE, a character an entry (before) | 256 | 212 | 212 |
-| RXFT at half + the time-out (now), 115200 and 1 Mbaud | 64 | 371 | 93 |
-| the same at 2 Mbaud | 52 | 414 | 84 |
+| RXFT at half + the time-out (now), 115200 and 1 Mbaud | 64 | 385 | 96 |
+| the same at 2 Mbaud | 52 | 442 | 90 |
 | the receive engine (the DMA vector, a block of the transmitter's included) | 3 | 275 | 3.2 |
 
-The paced drain is 24 instructions a character with no call - the ISR
-load and its test, the RDR load and the ring's push inline; the error
-flags are tested on the ISR word in hand and served off the
-character's path - and an entry adds the prologue, the tail's ICR
-store and the edge's two ring loads. The engine's edge costs one entry
+The paced drain is 23 instructions a character with no call in a
+console's vector - the ISR load and its test, the RDR load and the
+ring's push inline; the error flags are tested on the ISR word in hand
+and served off the character's path, a loss reported to the ring there -
+and an entry adds the prologue, the tail's ICR store and the edge's two
+ring loads. The bench's USART1 vector serves four transports in one
+function, and there gcc reloads the ring's address from the literal pool
+at every character: 25 instructions, the table's 96 cycles a byte; the
+same receiver's body in a function of its own reads 94, beside 95 for a
+plain Ring's (one session, the call inside the meter). The engine's edge costs one entry
 of `isr()` (an ISR load, the IDLE clear) and a call of `harvest()`.
 
 **THE EDGE'S LATENCY**, from the burst's last stop bit (TC rising) to
@@ -427,7 +432,7 @@ co-aligned - the two even near 13 - and on ends aligned differently
 scratch program (brio's crt, clock and console around it): its FIFO
 receive (`HAL_UART_Receive_IT` with `HAL_UARTEx_EnableFifoMode` at half,
 `UART_RxISR_8BIT_FIFOEN`) is 107 cycles a byte on 256 bytes against
-brio's 93 - and it needs the length up front: its tail is taken one
+brio's 96 - and it needs the length up front: its tail is taken one
 character an entry once fewer than a level remain. Its character-at-a-
 time receive is 184 cycles a byte and LOSES BYTES at 2 Mbaud (130 of
 256 wrong), where this transport's lost none at any rate.
