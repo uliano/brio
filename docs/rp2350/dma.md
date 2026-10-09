@@ -179,8 +179,18 @@ choice in it answers an item of the controller's own offer:
   (`docs/design/ring.md`). CHAIN_TO and MULTI_CHAN_TRIGGER: one start of
   an SPI pair in one store is the launch order an open question about
   the engined SPI is being bisected over ([spi.md](spi.md)), so the
-  launch keeps its order until that settles. HIGH_PRIORITY: kept as an
-  `arm()` option, contended by nothing yet.
+  launch keeps its order until that settles.
+- **The level** is one bit, CTRL.HIGH_PRIORITY (12.6.10): "in each
+  scheduling round, all high priority channels are considered first,
+  and then only a single low priority channel" - and 12.6.1 removes the
+  idle cycle the RP2040 inserted after a round of high channels. The
+  engines take docs/design/dma.md's rule in that bit: a receive engine
+  arms HIGH by default, a transmit engine and the copy engine normal, a
+  transport naming its engines' levels at the call. HERE THE BIT DECIDES
+  CORRECTNESS: two HIGH_PRIORITY channels always ready starve a normal
+  one (letter p, below), so the fixed HIGH of the transports' receive
+  engines is what keeps their rings, and an engine armed by hand beside
+  two HIGH channels that must not lose takes HIGH too.
 
 THE CLAIM. A transmit engine's owner may start blocks from two contexts
 - a transport's thread and its completion on the line - and "is the
@@ -254,7 +264,8 @@ BUSY).
   ISR body every engine folds in.
 - `DmaTxEngine<ch, Elem, line>` / `DmaRxEngine<ch, Elem, line>`: the
   other families' engine surface - `arm(data, dreq, high_priority,
-  report)`, `start` over a pointer and a count or a span of `uint8_t`,
+  report)` (`high_priority` true by default on a receive engine, false on
+  a transmit engine), `start` over a pointer and a count or a span of `uint8_t`,
   `uint16_t` or `uint32_t` no wider than `Elem`, `start_fixed` /
   `start_discard` (one cell, its own beat), and on the transmit engine
   the claim: `claim()`, `unclaim()`, `launch` / `launch_fixed`;
@@ -265,7 +276,8 @@ BUSY).
   `faults()`, `stop()`, and `Report` - `DmaReport` by a name a template
   reaches through the engine type. A receive engine clears the channel's
   request credits before every run.
-- `DmaCopyEngine<ch, line>`: `arm(report, high_priority)` (TREQ_SEL
+- `DmaCopyEngine<ch, line>`: `arm(report, high_priority)` (normal by
+  default; TREQ_SEL
   permanent; with `DmaReport::blocks` the completion on `line`, with
   `DmaReport::errors` routed nowhere and polled), `copy(dst, src, n)` and
   `fill(dst, cell, n)` - `n` ELEMENTS of `uint8_t`, `uint16_t` or
@@ -457,6 +469,36 @@ DMA engine, the console's transport naming one in its transmit slot.
   ONE interrupt, 224 / 327 busy cycles for its 256 microseconds; stamped
   against the ruler by a polling core, its steps are 150 cycles apart,
   250 of 255 within the poll's own 23-cycle turn.
+- **THE LINE AT THE RATE ASKED**, which a loop alone cannot tell (both
+  ends share one divisor): 1024 frames through the transmit engine leave
+  in 1003 to 1007 thousandths of their wire time at 3 Mbaud (letter j),
+  1000 to 1003 at 115200 (letter v), and eight start bits at 9600 lie
+  seven frames apart on the pad within two per mille (letter t), on both
+  halves.
+- **THE LEVEL DECIDES CORRECTNESS HERE**, letter p (`brio stress` the
+  sender, the console's ring on a receive engine over 8 KB, byte copies
+  of 16 KB back to back beside it, 1.5 s a leg at 115200, 1 Mbaud and
+  3 Mbaud). The ring at HIGH loses nothing beside two normal copies or
+  two HIGH_PRIORITY ones, and a ring at normal loses nothing beside ONE
+  HIGH_PRIORITY copy or two normal ones - but a ring at normal beside
+  TWO HIGH_PRIORITY copies is starved: on the Cortex-M33 7717 bytes of
+  94 500 lost at 1 Mbaud and 96 068 of 203 992 at 3 Mbaud, on Hazard3
+  6956 of 94 500 and 123 414 of 199 490 - run to run 7 to 17 per cent at
+  1 Mbaud and two fifths to two thirds at 3 Mbaud - every loss counted
+  as an overrun and skipped by the ring. The RP2040 runs the same load with
+  nothing lost ([../rp2040/dma.md](../rp2040/dma.md)): the round
+  12.6.10 describes is not the RP2040's round once 12.6.1's idle cycle
+  is gone, measured and not explained further.
+- **A RELEASED REQUESTER**, letter r (no wire), the RP2040's answer on
+  both halves: nothing reaches the next owner after the drivers'
+  `release()` and its own reset, nor from the PL011 or the PL022 with the
+  DMA enable cleared or the block disabled (12.1.5: "all request signals
+  are de-asserted"), nor from a stopped PWM slice; ONE stale sample from
+  the ADC disabled with DREQ_EN left set. The PWM's pulses bank credits
+  on a bound, untriggered channel, `DmaChannel::stop()` and a rebind
+  leave them (9 to 12 read on the next owner's channel), and the
+  TRIGGER drops them: the next owner, armed on a request that never
+  comes, moved nothing.
 
 ## Not covered yet
 
@@ -482,11 +524,15 @@ Driver gaps, each with its reason:
   writes, its producer index the channel's own count: born with the
   ring's view of a hardware producer (`docs/design/ring.md`) and the
   transport round that adopts it.
-- The HIGH_PRIORITY arbitration between channels: the suite runs one
-  channel at a time, so the field is written and never contended.
 
 Implemented but not bench-verified, each with what would measure it:
 
+- WHY two HIGH_PRIORITY channels always ready starve a normal one here and
+  not on the RP2040 (letter p): the measurement stands, the mechanism is
+  12.6.1's removed idle cycle by inference only. A letter counting the
+  normal channel's transfers against one, two and three HIGH channels of
+  known demand, read off its TRANS_COUNT over a fixed window, would place
+  the round.
 - A PACED block started right after its `arm()`: its first transfer
   comes 700 to 1200 cycles after the trigger at one request in 150,
   where a block started 100 cycles or more after the binding - or after

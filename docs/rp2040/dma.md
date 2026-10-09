@@ -82,6 +82,16 @@ raised between them, an order one mask write would not keep), the
 sniffer (not an engine's business). The gate - the block out of
 RESETS - is `Dma::init()`, once per program; no engine touches it.
 
+THE LEVEL is one bit, CTRL.HIGH_PRIORITY (2.5.7): "in each scheduling
+round, all high priority channels are considered first, and then only a
+single low priority channel, before returning to the high priority
+channels". The engines take docs/design/dma.md's rule in that one bit: a
+receive engine arms HIGH by default (its peripheral overruns when the
+channel is starved), a transmit engine and the copy engine normal, and a
+transport names its engines' levels at the call. On this chip the bit
+decides no correctness: nothing starved a receive ring at normal (letter
+p, below), and the Uart takes no level option.
+
 ## Types and verbs
 
 - `DmaSize`, `dma_size_of<Elem>()`, `Dreq` (table 119 by name, the
@@ -125,7 +135,9 @@ RESETS - is `Dma::init()`, once per program; no engine touches it.
   (the data register's width): a run of `uint8_t`, `uint16_t` or
   `uint32_t` up to it is legal, a wider one a compile error, one whose
   address is not aligned to its beat refused at run time (the caller's
-  pump takes it). `arm(data, dreq, high_priority, report)` binds once;
+  pump takes it). `arm(data, dreq, high_priority, report)` binds once,
+  `high_priority` true by default on a receive engine and false on a
+  transmit engine;
   `Report` names `DmaReport` through the engine. Transmit: `claim()`
   (the test-and-set a transport takes under its mask), `unclaim()`,
   `launch(run)` / `launch_fixed(cell, n)` on a claimed channel,
@@ -139,7 +151,8 @@ RESETS - is `Dma::init()`, once per program; no engine touches it.
   `flag_complete` / `flag_error`; no half event on this controller),
   `abandon()`, `faults()`, `stop()`. A receive engine clears the
   channel's request credits before every run.
-- `DmaCopyEngine<ch, line>`: `arm(report, high_priority)` (`blocks`:
+- `DmaCopyEngine<ch, line>`: `arm(report, high_priority)` (normal by
+  default; `blocks`:
   the completion on the line, `service()` its body; `errors`: polled,
   the channel on no line), `copy(dst, src, n)` and `fill(dst, cell, n)`
   in elements of the type the pointers carry, which is the beat;
@@ -286,6 +299,37 @@ travelled by DMA):
   96 the block's mode-0 gap; inside the block the engines run at the
   wire plus that gap, 38.00 cycles a byte at 31.25 MHz and 304.00 at
   3.906 MHz, 35.00 a byte in 16-bit frames.
+- THE LINE AT THE RATE ASKED, which a loop alone cannot tell (both ends
+  share one divisor): 1024 frames through the transmit engine leave in
+  1010 to 1016 thousandths of their wire time at 3 Mbaud (letter i), and
+  in 1001 to 1004 at 115200 (letter v); on the pad, eight start bits at
+  9600 lie seven frames apart within half a per cent (letter t, the
+  first edge seen up to a poll late).
+- THE LEVEL, letter p (`brio stress` the sender, the console's ring on a
+  receive engine over 8 KB, two byte copies of 16 KB back to back beside
+  it, a 1.5 s window a leg at 115200, 1 Mbaud and 3 Mbaud): every byte
+  in order and no overrun with the ring at HIGH beside two normal copies
+  and beside two HIGH_PRIORITY ones - AND with the ring at normal beside
+  two HIGH_PRIORITY copies, one, or two normal ones. The arbiter serves
+  one normal channel every round, and the bit decides no correctness on
+  this chip - where the RP2350's arbiter, the same text over a different
+  round, does ([../rp2350/dma.md](../rp2350/dma.md)).
+- A RELEASED REQUESTER, letter r (no wire): four requesters - UART1's
+  and SPI1's transmit, PWM slice 3's wrap, the ADC's FIFO - brought up
+  with their request standing and released, then the next owner's
+  channel bound on the same DREQ with four items and triggered. Moved:
+  none after the drivers' `release()` and the next owner's reset; none
+  from the PL011 or the PL022 with the DMA enable cleared or the block
+  disabled (4.2.5: "all request signals are deasserted"); none from a
+  stopped PWM slice; but ONE from the ADC disabled with DREQ_EN left set
+  - its sample stays in the FIFO and is requested. The live control
+  moved four of four (one of the ADC's one sample). IN THE CHANNEL: the
+  PWM's pulses bank credits on a bound, untriggered channel (6 and 9 in
+  5 us), `DmaChannel::stop()` leaves them (7 and 10 read after it) and a
+  rebind to another request too - and the TRIGGER drops them: the next
+  owner, armed on a request that never comes, moved nothing. A UART's or
+  an SPI's transmit banks nothing on an untriggered channel: its
+  handshake begins at the trigger.
 
 ## Not covered yet
 
@@ -303,9 +347,6 @@ Driver gaps, each with its reason:
 - `DmaSniffCalc::crc32_reversed`, `crc16_reversed` and `even_parity`,
   and the BSWAP option: written from 2.5.5.2 and not measured; a
   letter with their software twins.
-- The HIGH_PRIORITY arbitration between channels: the suite runs one
-  channel at a time; two channels started together, their order read
-  off the counts.
 
 Implemented but not bench-verified, each with what would measure it:
 

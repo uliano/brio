@@ -381,14 +381,18 @@ struct SimPl011 {
 
     /// THE WIRE lands one frame on instance i: an entry of the receive
     /// FIFO, its error bits (UartDataError) beside the byte - or, the FIFO
-    /// full, a frame lost: UARTRSR's OE and OERIS set (the PL011 TRM's
-    /// overrun), no entry.
+    /// full, a frame lost: UARTRSR's OE set, no entry, and OERIS raised
+    /// at the ONSET of OE alone - as the silicon does: an OE left standing
+    /// in UARTRSR hides every later overrun from the interrupt (measured
+    /// on the RP2040 and the RP2350, docs/pl011/README.md).
     template <uint8_t i>
     static void receive(uint8_t byte, uint32_t errors = 0u) {
         if (SimPl011RxFifo::count[i] == fifo_depth) {
             SimPl011RxFifo::lost[i] = SimPl011RxFifo::lost[i] + 1u;
-            block[i].UARTRSR = block[i].UARTRSR | UartReceiveStatus::overrun;
-            block[i].UARTRIS = block[i].UARTRIS | UartInterrupt::overrun;
+            if ((block[i].UARTRSR & UartReceiveStatus::overrun) == 0u) {
+                block[i].UARTRSR = block[i].UARTRSR | UartReceiveStatus::overrun;
+                block[i].UARTRIS = block[i].UARTRIS | UartInterrupt::overrun;
+            }
             settle(i);
             return;
         }
@@ -544,15 +548,17 @@ struct SimPl011Engine {
     static inline uint32_t length = 0;
     static inline bool running = false;
     static inline bool claimed = false;   ///< taken by claim(), no block started on it yet
+    static inline bool high = false;      ///< the level the last arm() asked for
 
     static uint8_t service() {
         const uint8_t f = next_flags;
         next_flags = 0;
         return f;
     }
-    static void arm(volatile void* data, SimPl011Request request) {
+    static void arm(volatile void* data, SimPl011Request request, bool high_priority) {
         (void)data;
         (void)request;
+        high = high_priority;
         armed = armed + 1u;
     }
     static bool start(const uint8_t* buffer, uint32_t len) {
@@ -624,6 +630,7 @@ struct SimPl011Engine {
         length = 0;
         running = false;
         claimed = false;
+        high = false;
     }
 };
 

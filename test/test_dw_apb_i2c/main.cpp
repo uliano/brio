@@ -432,6 +432,10 @@ TEST_CASE("the engines take the middle of a read phase, the pump its two ends") 
     // STOP are armed on the block.
     CHECK(RxEngine::errors_only);
     CHECK_FALSE(TxEngine::errors_only);
+    // Both at the normal level (docs/design/dma.md): the block holds SCL
+    // behind a starved channel in either direction, nothing is lost.
+    CHECK_FALSE(RxEngine::high);
+    CHECK_FALSE(TxEngine::high);
     CHECK(peer_regs().IC_INTR_MASK == (I2cInterrupt::tx_abrt | I2cInterrupt::stop_det));
 
     // The block of commands is in: the transmit request goes off and the

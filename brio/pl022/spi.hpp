@@ -787,8 +787,10 @@ public:
         if constexpr (has_engines) {
             // The receive block's completion is the transaction's, and the
             // proof of the transmit block's: that one reports errors alone.
+            // The transmit engine at the family's NORMAL level: a starved
+            // transmit holds SCK between two frames and loses nothing.
             TxEngine::arm(S::data_address(), S::dreq_tx, false, TxEngine::Report::errors);
-            RxEngine::arm(S::data_address(), S::dreq_rx);
+            arm_rx_engine();
         }
         // The pads go to the peripheral with the registers already
         // holding the idle polarity, then SSE: a pad handed over first
@@ -967,7 +969,7 @@ public:
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address(), S::dreq_rx);
+            arm_rx_engine();
         }
         Chip::Interrupts::disable(S::irq());
         tenure_.in_cmd = false;
@@ -1104,6 +1106,17 @@ private:
         S::dma_requests(true, true);
     }
 
+    /// The receive engine bound, at the family's HIGH level - the rule's
+    /// for an overrunning receive (docs/design/dma.md): the host's clock
+    /// does not wait for a starved receive channel, and a frame that lands
+    /// on a full receive FIFO is lost (SSPRIS.RORRIS). Every bind of it is
+    /// this one, so the level is stated once.
+    static void arm_rx_engine() {
+        if constexpr (has_engines) {
+            RxEngine::arm(S::data_address(), S::dreq_rx, true);
+        }
+    }
+
     /// One exit for the data phase. True when the ISR-style caller
     /// should post completion.
     static bool finish_dma(uint8_t st) {
@@ -1112,7 +1125,7 @@ private:
             status_ = st;
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address(), S::dreq_rx);
+            arm_rx_engine();
         } else if (TxEngine::busy()) {
             // The receive block completing is proof the transmit one did.
             (void)TxEngine::complete();
@@ -1136,7 +1149,7 @@ private:
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address(), S::dreq_rx);
+            arm_rx_engine();
             dma_active_ = false;
             status_ = spi_dma_fault;
         }

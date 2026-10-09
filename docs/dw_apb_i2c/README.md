@@ -238,8 +238,14 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   clear, so a new address is always the disable/enable cycle above.
 - **The DMA requests (`IC_DMA_CR`) and watermarks (`IC_DMA_TDLR`,
   `IC_DMA_RDLR`)** - used for the read phase, watermarks at their reset
-  value (single transfers, the chapter's advice); the receive engine is
-  armed to report a bus error alone and the STOP ends its tenure, so an
+  value (single transfers, the chapter's advice); BOTH ENGINES ARM AT THE
+  FAMILY'S NORMAL LEVEL, the rule's for a peripheral that waits
+  (docs/design/dma.md): a starved command channel leaves the transmit FIFO
+  empty and a starved receive channel leaves the receive FIFO full, and
+  the block holds SCL either way (`RX_FIFO_FULL_HLD_CTRL`, set by
+  `I2cConfig`'s default) - the bus slows, nothing is lost; the receive
+  engine is armed to report a bus error alone and the STOP ends its
+  tenure, so an
   engined read is two interrupts - the transmit block's end, which hands
   the pump the STOP entry, and the STOP; three when the block's end
   finds no room for that entry and TX_EMPTY brings it - and the next

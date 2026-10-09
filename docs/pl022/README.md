@@ -158,6 +158,12 @@ frame - two bytes low-first ARE a half-word on a little-endian core - and
 a 16-bit request whose buffers are not aligned to a half-word goes to the
 pump; byte engines leave every 16-bit request to the pump. The requests
 are raised around the engines and dropped at the end of the data phase.
+THE LEVELS ARE THE RULE'S (docs/design/dma.md): the receive engine at
+the family's high level - the host's clock does not wait for a starved
+receive channel, and a frame landing on a full receive FIFO is lost
+(SSPRIS's RORRIS) - the transmit engine at its normal one, a starved
+transmit holding SCK between two frames. Every bind of the receive
+engine is one function, `arm_rx_engine()`, so the level is stated once.
 
 WHAT AN ENGINED BLOCK COSTS ON THE WIRE is the block's and not a
 family's: with SPH = 0 (modes 0 and 2) the PL022 pulses its frame signal
@@ -179,7 +185,7 @@ both of that chip's cores). A command phase always runs on the pump or
 the polled loop, whatever the data phase does.
 
 What the host asks of an engine: `present`, `channel`, `element`,
-`Report` with `errors`, `arm(data, request[, high, report])`,
+`Report` with `errors`, `arm(data, request, high_priority[, report])`,
 `start(pointer, count)` at the frame's beat, `start_fixed(cell, count)`
 and `start_discard(cell, count)`, `complete()`, `busy()`, `service()`
 with `flag_complete` and `flag_error`, `abandon()`, `stop()`.

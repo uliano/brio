@@ -340,6 +340,10 @@ TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     CHECK(RxEngine::armed == 1u);
     CHECK(TxEngine::errors_only);
     CHECK_FALSE(RxEngine::errors_only);
+    // The levels are the rule's (docs/design/dma.md): the receive engine
+    // high, its FIFO the one that overruns; the transmit engine normal.
+    CHECK(RxEngine::high);
+    CHECK_FALSE(TxEngine::high);
     CHECK(regs().SSPDMACR == 0u);
 
     Engined::Request r{};

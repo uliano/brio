@@ -147,8 +147,10 @@ driver follows the register description and the tables.
   checked, the USB PLL brought to 48 MHz unless it is locked on that
   ratio already - or the crystal as it is -, clk_adc selected, the
   block cycled through reset, EN, READY waited for), `clock_hz`,
-  `enable`, `ready` / `wait_ready`, `temperature_sensor`, `release`;
-  the sampler's surface `select(input)` / `select_input()`,
+  `enable`, `ready` / `wait_ready`, `temperature_sensor`, `release` (the
+  block HELD in reset: a converter merely disabled with DREQ_EN set keeps
+  its sample in the FIFO and requests it - the next owner's channel reads
+  it, `test_rp2350_dma` letter r); the sampler's surface `select(input)` / `select_input()`,
   `selected()` (AINSEL as it stands, moved by the round-robin),
   `selected_input()` (the last select), `input_code`, `start()` (one
   shot), `result()`, `read()` (one conversion waited for, nullopt on a
@@ -190,7 +192,7 @@ using Block = brio::DmaRxEngine<10, uint16_t>;
 brio::Adc::divider(*brio::adc_divider_for(brio::Adc::clock_hz(), 10'000));
 brio::Adc::fifo({.enable = true, .dreq = true, .error_flag = true, .shift = false, .threshold = 1});
 brio::Adc::drain();
-Block::arm(brio::Adc::fifo_address(), brio::Adc::dreq);
+Block::arm(brio::Adc::fifo_address(), brio::Adc::dreq);   // HIGH_PRIORITY: a receive's default
 Block::start(samples, 256);
 brio::Adc::start_many(true);
 

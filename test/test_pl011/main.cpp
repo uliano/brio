@@ -497,6 +497,10 @@ TEST_CASE("the engine slots carry the requests and the blocks") {
     // error interrupts on: under an engine they are where errors count.
     CHECK(TxEngine::armed == 1u);
     CHECK(RxEngine::armed == 1u);
+    // The levels are the rule's (docs/design/dma.md): the receive engine
+    // high, its FIFO the one that overruns; the transmit engine normal.
+    CHECK(RxEngine::high);
+    CHECK_FALSE(TxEngine::high);
     CHECK(SimPl011::regs<1>().UARTDMACR == (UartDmaControl::tx | UartDmaControl::rx));
     CHECK(SimPl011::regs<1>().UARTIMSC == UartInterrupt::errors);
     CHECK(RxEngine::blocks == 1u);   // the first free run armed by init()
@@ -648,6 +652,71 @@ void wire(const char* text) {
 } // namespace
 
 static_assert(brio::SkippingSource<Port>);
+
+TEST_CASE("under an engine every overrun is reported, the source asleep from the loss to the next publish") {
+    using TxEngine = SimPl011Engine<0>;
+    using RxEngine = SimPl011Engine<1>;
+    using Streamed = Pl011Transport<SimPl011, 1, SimPl011Pins{.tx = 2, .rx = 3}, 64, 64,
+                                    TxEngine, RxEngine>;
+    fresh();
+    TxEngine::reset();
+    RxEngine::reset();
+    constexpr Clock clock;
+    REQUIRE(Streamed::init(clock, 3'000'000));
+    // The engine the sim plays takes nothing from the FIFO: 32 frames fill
+    // it, and every frame after them is refused.
+    for (uint32_t k = 0; k < SimPl011::fifo_depth; ++k) {
+        SimPl011::receive<1>(pattern(k));
+    }
+    const auto serve_streamed = [] {
+        uint32_t back_to_back = 0;
+        while (SimPl011::line_raised<1>()) {
+            (void)Streamed::isr();
+            back_to_back = back_to_back + 1u;
+            REQUIRE(back_to_back < 4u);
+        }
+    };
+    const uint32_t skips0 = Streamed::rx_skips();
+    // The onset: one entry, counted, reported, UARTRSR cleared and the
+    // source masked.
+    SimPl011::receive<1>(0x11);
+    REQUIRE(SimPl011::line_raised<1>());
+    serve_streamed();
+    CHECK(Streamed::hw_overruns() == 1u);
+    CHECK((SimPl011::regs<1>().UARTRSR & UartReceiveStatus::overrun) == 0u);
+    CHECK((SimPl011::regs<1>().UARTIMSC & UartInterrupt::overrun) == 0u);
+    // The episode's tail raises nothing: the source sleeps.
+    for (uint32_t k = 0; k < 100u; ++k) {
+        SimPl011::receive<1>(0x22);
+        CHECK_FALSE(SimPl011::line_raised<1>());
+    }
+    CHECK(Streamed::hw_overruns() == 1u);
+    // The next publish reports the tail - the bytes it hands over must not
+    // join what came before them - and wakes the source; the episode is
+    // still ONE overrun.
+    (void)Streamed::harvest();
+    uint8_t sink = 0;
+    while (Streamed::read_byte(sink)) {
+    }
+    CHECK(Streamed::rx_skips() != skips0);
+    CHECK((SimPl011::regs<1>().UARTIMSC & UartInterrupt::overrun) != 0u);
+    CHECK((SimPl011::regs<1>().UARTRSR & UartReceiveStatus::overrun) == 0u);
+    CHECK(Streamed::hw_overruns() == 1u);
+    // A loss after the publish is a new one: an entry and a count.
+    SimPl011::receive<1>(0x33);
+    REQUIRE(SimPl011::line_raised<1>());
+    serve_streamed();
+    CHECK(Streamed::hw_overruns() == 2u);
+    // AND THE COUNT SATURATES: three hundred episodes, a publish between
+    // each, read 255 and not 300 - 256.
+    for (uint32_t e = 0; e < 300u; ++e) {
+        (void)Streamed::harvest();
+        SimPl011::receive<1>(0x44);
+        serve_streamed();
+    }
+    CHECK(Streamed::hw_overruns() == 255u);
+    Streamed::release();
+}
 
 TEST_CASE("a received burst reaches the ring by the level and the time-out") {
     fresh();

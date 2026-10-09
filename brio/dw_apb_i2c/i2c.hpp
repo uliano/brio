@@ -1380,10 +1380,23 @@ private:
 
     /// The transmit engine reports its blocks (the STOP entry waits on
     /// one); the receive engine reports a bus error alone - the STOP
-    /// ends its tenure.
+    /// ends its tenure. BOTH AT THE FAMILY'S NORMAL LEVEL, the rule's for
+    /// a peripheral that waits (docs/design/dma.md): a starved command
+    /// channel leaves the transmit FIFO empty and the block holds SCL, and
+    /// a starved receive channel leaves the receive FIFO full and the
+    /// block holds SCL again (RX_FIFO_FULL_HLD_CTRL, I2cConfig's default,
+    /// pinned at the end of this file) - the bus slows, nothing is lost.
     static void arm_engines() {
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address(), S::dreq_tx);
+            TxEngine::arm(S::data_address(), S::dreq_tx, false);
+            arm_rx_engine();
+        }
+    }
+
+    /// The receive engine bound, its level and report as arm_engines()
+    /// states them - every bind of it is this one.
+    static void arm_rx_engine() {
+        if constexpr (has_engines) {
             RxEngine::arm(S::data_address(), S::dreq_rx, false, RxEngine::Report::errors);
         }
     }
@@ -1393,7 +1406,7 @@ private:
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
             RxEngine::stop();
-            RxEngine::arm(S::data_address(), S::dreq_rx, false, RxEngine::Report::errors);
+            arm_rx_engine();
             dma_active_ = false;
         }
     }

@@ -79,7 +79,11 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   `parity_errors`, `break_errors` (a break entry carries FE too, and
   both are counted), `hw_overruns` (one per overrun event: UARTRSR's
   sticky OE on the interrupt receiver, the OE interrupt under an
-  engine), `clear_errors`. The two engine slots take `dma.hpp`'s
+  engine - UARTRSR cleared and the source masked until the next publish,
+  [../pl011/README.md](../pl011/README.md)), `clear_errors`; each counter
+  holds at its top rather than wrapping. The receive engine arms at
+  HIGH_PRIORITY and the transmit engine at normal, and the Uart takes no
+  level option ([dma.md](dma.md)). The two engine slots take `dma.hpp`'s
   `DmaTxEngine` / `DmaRxEngine` ([dma.md](dma.md)): with a transmit
   engine the ring's runs leave as DMA blocks and `dma_isr()` (the
   line's ISR body) releases each and starts the next - a block start
@@ -162,7 +166,18 @@ extern "C" void isr_uart0() {
     and the look after them skips what the ring held: nothing handed
     out, one skip, the four bytes after it whole;
   - 4096 bytes round the loop at 3 Mbaud byte-exact in 13.7 ms (the
-    wire's own 13.65).
+    wire's own 13.65);
+  - THE RATE ASKED, which a loop cannot tell (both ends share one
+    divisor), timed on the ruler from the first write to `tx_idle()`:
+    every rung's frames in 1000 to 1003 thousandths of their wire time
+    from 120 baud to 4 Mbaud and 1011 at the 7.8125 Mbaud ceiling, where
+    the loop's receive levels share the one line with the refills
+    (`bench_rp2040`'s print, transmit alone, runs at x 1.00 there);
+    256 frames of every format in 1000 to 1001 - the parity and stop
+    bits really sent; at an exact 9600 the 64 frames of the ladder came
+    back in 66664 us of the 66666 they occupy, the receiver having the
+    last byte before its stop bit ends, which the rung's lower bound
+    allows.
 - ON THE CROSS LINK (this board's GP4 to the other's GP5 and back):
   512 bytes to a peer's echo and back byte-exact in 46 ms with no
   error counted; listening at 7E1 to the peer's 64 frames at 8N1,
@@ -174,6 +189,15 @@ extern "C" void isr_uart0() {
   the two traps of a receive engine - a break taken at enable over a
   low pad, and the request credits that outlive a completed run - are
   the transport's business now ([dma.md](dma.md)).
+- THE OVERRUN UNDER A RECEIVE ENGINE (`test_rp2040_dma` letter o, three
+  episodes of 5120 frames at 3 Mbaud into a 1024-byte ring nobody
+  reads): with the OE interrupt cleared through UARTICR alone, ONE
+  entry and one count for the three - UARTRSR's sticky OE left standing
+  hid the second and the third; with UARTRSR cleared too, 4058 to 4065
+  entries an episode, one a frame lost; with the source masked from the
+  loss to the next publish, one entry and one count an episode and the
+  vector quiet in the 10 ms after each
+  ([../pl011/README.md](../pl011/README.md)).
 - THROUGH THE DEBUG PROBE'S BRIDGE, the console's own ladder fed by
   the host: byte-exact at 115200, 460800, 921600, 1 M, 2 M and 3 M
   baud (142 KB at 3 M with no error and no overrun, host to board);

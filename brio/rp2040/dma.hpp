@@ -548,6 +548,18 @@ struct DmaSniffer {
 // with nothing to send. start() is claim() then launch(), for a caller
 // with one context.
 //
+// THE LEVEL IS THE PERIPHERAL'S (docs/design/dma.md), and this controller
+// has one bit of it, CTRL.HIGH_PRIORITY (2.5.7): "in each scheduling
+// round, all high priority channels are considered first, and then only a
+// single low priority channel". A normal channel therefore waits one round
+// of the high ones at most and is never starved outright, so here the
+// level decides no correctness and no transport offers it as an option
+// (docs/rp2040/dma.md measures a receive ring at normal beside two
+// HIGH_PRIORITY copies). The defaults are the rule's all the same, one bit
+// wide: a receive engine arms HIGH, its peripheral being the one that
+// overruns when starved; a transmit engine and the copy engine normal; and
+// a transport names its engines' levels at the call.
+//
 // THE NAMES ARE THE IP STRATA'S. brio/pl011/, brio/pl022/ and
 // brio/dw_apb_i2c/ drive this chip's engines through DmaReport (reached as
 // the engine's own `Report`), the binding, the claim and the typed runs,
@@ -710,6 +722,9 @@ public:
     /// Bind the channel: `data` is the register the runs are poured into,
     /// `dreq` the request that paces them, `report` what reaches the line
     /// (DmaReport). The line is enabled in the calling core's NVIC.
+    /// NORMAL priority by default, the rule's level for a transmit or a
+    /// paced output (the engines' section): a starved transmit leaves the
+    /// line idle a while, a paced output holds its last value a period.
     static void arm(volatile void* data, Dreq dreq, bool high_priority = false,
                     DmaReport report = DmaReport::blocks) {
         data_ = dma_address(data);
@@ -860,8 +875,11 @@ public:
     [[gnu::always_inline]] static uint8_t service() { return Binding::template service<line>(); }
 
     /// Bind the channel: `data` is the register the runs are filled
-    /// from, `dreq` the request that paces them.
-    static void arm(volatile void* data, Dreq dreq, bool high_priority = false,
+    /// from, `dreq` the request that paces them. HIGH_PRIORITY by
+    /// default, the rule's level for a receive (the engines' section): a
+    /// peripheral a receive channel empties overruns when the channel is
+    /// starved.
+    static void arm(volatile void* data, Dreq dreq, bool high_priority = true,
                     DmaReport report = DmaReport::blocks) {
         data_ = dma_address(data);
         base_ = dma_binding_word(ch, dreq, high_priority, report);
@@ -1004,7 +1022,9 @@ public:
     /// `DmaReport::blocks` every block's end reaches `line`, enabled in
     /// the calling core's NVIC; with `DmaReport::errors` the channel is
     /// left off every line and the caller polls busy() - a bus error then
-    /// stands in errors() and stops the block.
+    /// stands in errors() and stops the block. NORMAL priority by
+    /// default, the rule's level for a copy: no request paces it, and a
+    /// channel it outranked would wait behind it.
     static void arm(DmaReport report = DmaReport::blocks, bool high_priority = false) {
         const bool routed = report == DmaReport::blocks;
         base_ = dma_binding_word(ch, Dreq::permanent, high_priority, report);

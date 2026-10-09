@@ -31,24 +31,30 @@
 //      clk_peri / 16)
 //   b  THE INSTRUMENT: the loop-back proven, then every frame format
 //      (5..8 bits, none/even/odd parity, 1 or 2 stop bits: 24 of them)
-//      byte-exact on it at 115200
+//      byte-exact on it at 115200, and 256 frames of each timed against
+//      the frame's length on the wire
 //   c  the baud ladder on the loop-back, from the floor (120 baud at
 //      125 MHz) to the ceiling (7.8125 Mbaud = clk_peri / 16), each rung
 //      byte-exact and timed against the frame count - plus the receive
 //      timeout's 32 bit periods when the count is not a whole number of
 //      FIFO levels (a run of 8 is delivered by the timeout, not the
-//      level: at 120 baud that is 267 ms of the measure)
-//   d  the FIFOs: a single byte delivered by the receive TIMEOUT (32 bit
+//      level: at 120 baud that is 267 ms of the measure) - and THE RATE
+//      ASKED: each rung's frames out timed against their wire time, which
+//      a loop alone cannot tell (both ends share one divisor)
+//   d  the line at 115200 timed against the wire; the FIFOs: a single
+//      byte delivered by the receive TIMEOUT (32 bit
 //      periods after it) against a burst delivered by the level (the
 //      16th byte), each timed; a break sent and counted as BE with no
 //      byte delivered; an overrun provoked with the line masked (48
 //      frames into a 32-deep FIFO), counted as OE, the look after it
 //      skipping what the ring held, and the stream after it whole
 //   e  bulk traffic: 4096 bytes at 3 Mbaud through write_bulk/read_bulk
-//      on the loop, byte-exact, the interrupts per byte counted
+//      on the loop, byte-exact, the interrupts per byte counted, and the
+//      line timed against the wire at the rate asked
 //   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
 //      the pad read through SIO, and tx_idle() turning true at the last
-//      stop bit's end - never before it, within a bit time after
+//      stop bit's end - never before it, within a bit time after - and
+//      the start bits seven frames apart at the rate asked
 //
 //   q  (by name only) THE PEER: UART1 echoes whatever it receives, at
 //      115200 8N1, for thirty seconds after the prompt returns - run it
@@ -205,6 +211,51 @@ uint32_t round_trip(uint32_t count, UartBits bits, uint32_t budget_us, uint32_t*
     return good;
 }
 
+/// THE RATE ON THE WIRE, which a loop alone cannot tell: both ends share
+/// one divisor, so a wrong one is a slower or a faster loop and nothing
+/// else. `frames` frames of `bits` bit periods queued back to back on the
+/// instrument, timed on the ruler from the first write to tx_idle() - the
+/// last stop bit's end (docs/pl011/README.md) - against their time at the
+/// rate ASKED; the answer in thousandths. What the loop brings back is
+/// taken and thrown away meanwhile, the error counters cleared after it.
+uint32_t wire_permille(uint32_t baud, uint32_t bits = 10u, uint32_t frames = 1024u) {
+    static uint8_t out[256];
+    for (uint32_t i = 0; i < sizeof out; ++i) {
+        out[i] = static_cast<uint8_t>(i * 37u + 11u);
+    }
+    uint8_t sink[64];
+    const uint64_t wire_us = static_cast<uint64_t>(frames) * bits * 1'000'000u / baud;
+    const uint32_t budget = static_cast<uint32_t>(wire_us * 2u) + 20'000u;
+    uint32_t queued = 0;
+    const uint32_t t0 = us_now();
+    while (queued < frames && us_now() - t0 < budget) {
+        const uint32_t want = frames - queued;
+        queued += Instrument::write_bulk(std::span<const uint8_t>(out, want < sizeof out ? want : sizeof out));
+        while (Instrument::read_bulk(sink) != 0u) {
+        }
+    }
+    while (!Instrument::tx_idle() && us_now() - t0 < budget) {
+        while (Instrument::read_bulk(sink) != 0u) {
+        }
+    }
+    const uint32_t took = us_now() - t0;
+    spin_us(static_cast<uint32_t>(64ull * bits * 1'000'000u / baud) + 1000u);
+    while (Instrument::read_bulk(sink) != 0u) {
+    }
+    Instrument::clear_errors();
+    return wire_us == 0u ? 0u : static_cast<uint32_t>(1000ull * took / wire_us);
+}
+
+/// The verdict on wire_permille's answer: never faster than the rate
+/// asked by more than the divider's rounding and the ruler's tick, never
+/// slower by more than three per cent.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
+/// A frame's bit periods: the start bit, the data, the parity, the stops.
+uint32_t frame_bits(const UartFormat& f) {
+    return 1u + static_cast<uint32_t>(f.bits) + (f.parity != UartParity::none ? 1u : 0u) + f.stop_bits;
+}
+
 bool instrument_up(uint32_t baud, const UartFormat& fmt = {}, bool loop = true) {
     if (!Instrument::init(clock, baud, fmt)) {
         return false;
@@ -300,6 +351,9 @@ void tb_loopback_formats() {
 
     constexpr UartBits widths[] = {UartBits::five, UartBits::six, UartBits::seven, UartBits::eight};
     constexpr UartParity parities[] = {UartParity::none, UartParity::even, UartParity::odd};
+    bool timed = true;
+    uint32_t pm_low = 0xFFFFFFFFu;
+    uint32_t pm_high = 0;
     for (UartBits bits : widths) {
         bool all = true;
         print(serial, "  ", static_cast<uint8_t>(bits), " bits:");
@@ -311,6 +365,13 @@ void tb_loopback_formats() {
                 const uint32_t good = set ? round_trip(48, bits, 100'000u) : 0u;
                 const bool ok = set && good == 48u && Instrument::frame_errors() == 0u &&
                                 Instrument::parity_errors() == 0u;
+                // The frame's LENGTH on the wire: 256 frames timed against
+                // their bit periods at 115200 - a stop bit or a parity bit
+                // the block did not send would show here and nowhere else.
+                const uint32_t pm = set ? wire_permille(115200, frame_bits(f), 256u) : 0u;
+                timed = timed && wire_ok(pm);
+                pm_low = pm < pm_low ? pm : pm_low;
+                pm_high = pm > pm_high ? pm : pm_high;
                 print(serial, " ", fmt_name(f), ok ? " ok" : " BAD");
                 all = all && ok;
             }
@@ -318,6 +379,10 @@ void tb_loopback_formats() {
         print(serial, crlf);
         bench.verdict("every format of this width is byte-exact on the loop, no error flagged", all);
     }
+    print(serial, "  256 frames of each format in ", pm_low, " to ", pm_high,
+          " thousandths of their wire time at 115200", crlf);
+    bench.verdict("EVERY FORMAT TAKES ITS FRAME'S LENGTH ON THE WIRE: start, data, parity and stops "
+                  "at the rate asked, -1 % to +3 %", timed);
     (void)Instrument::set_format({});
 }
 
@@ -343,15 +408,28 @@ void tc_ladder() {
         const uint32_t good = set ? round_trip(count, UartBits::eight, expect_us * 2u + 200'000u, &took) : 0u;
         print(serial, "  ", baud, " baud (", actual, " real): ", good, "/", count, " bytes in ", took,
               " us (", expect_us, " us of frames", count % 16u != 0u ? " and timeout)" : ")", crlf);
-        // At least the frames' time (a loop cannot be early); at most
-        // that plus the timeout, 10 % and a millisecond of slack.
+        // At least the frames' time LESS ONE BIT PERIOD, because a
+        // receiver has the byte before the last stop bit has finished
+        // elapsing (measured: 66664 us for 64 frames at an exact 9600, of
+        // 66666); at most that plus the timeout, 10 % and a millisecond.
         const uint32_t frames_us = static_cast<uint32_t>(
             (static_cast<uint64_t>(count) * 10u * 1'000'000u) / actual);
-        bench.verdict("this rung is byte-exact and takes its frames' time: at least, and at "
-                      "most the timeout, 10 % and a millisecond over",
-                      set && good == count && took >= frames_us &&
+        const uint32_t bit_us = 1'000'000u / actual + 1u;
+        bench.verdict("this rung is byte-exact and takes its frames' time: at least, less the "
+                      "bit the receiver does not wait out, and at most the timeout, 10 % and a "
+                      "millisecond over",
+                      set && good == count && took + bit_us >= frames_us &&
                           took <= expect_us + expect_us / 10u + 1000u &&
                           Instrument::frame_errors() == 0u && Instrument::hw_overruns() == 0u);
+        // THE RATE ASKED, against the ruler: a run long enough that the
+        // ruler's tick is under a thousandth (a hundredth of a second of
+        // frames, sixteen at least, 1024 at most).
+        const uint32_t frames = baud / 100u < 16u ? 16u : baud / 100u > 1024u ? 1024u : baud / 100u;
+        const uint32_t pm = set ? wire_permille(baud, 10u, frames) : 0u;
+        print(serial, "    ", frames, " frames out in ", pm, " thousandths of their wire time at ", baud,
+              crlf);
+        bench.verdict("and the line runs at the rate ASKED: those frames in their wire time, -1 % to "
+                      "+3 %", wire_ok(pm));
     }
     bench.verdict("set_baud refuses 119 and 8000000",
                   !Instrument::set_baud(SysClock::pclk_hz, 119) &&
@@ -365,6 +443,10 @@ void td_fifos() {
         bench.verdict("the instrument", false);
         return;
     }
+    const uint32_t pm = wire_permille(115200);
+    print(serial, "  1024 frames out in ", pm, " thousandths of their wire time at 115200", crlf);
+    bench.verdict("the line runs at the rate asked: 1024 frames in their wire time at 115200, -1 % "
+                  "to +3 %", wire_ok(pm));
     // One frame at 115207 baud is 86.8 us; the receive timeout is 32 bit
     // periods, 277.8 us, after the last frame.
     constexpr uint32_t frame_us = 87;
@@ -476,6 +558,10 @@ void te_bulk() {
                   irqs * 4u < 4096u);
     bench.verdict("and the wire's time is what it took: 40960 bit periods = 13653 us, within 10 %",
                   took >= 13'000u && took <= 15'100u);
+    const uint32_t pm = wire_permille(3'000'000);
+    print(serial, "  1024 frames out in ", pm, " thousandths of their wire time at 3 Mbaud", crlf);
+    bench.verdict("THE LINE RUNS AT THE RATE ASKED: 1024 frames in their wire time at 3 Mbaud, -1 % "
+                  "to +3 % (the loop alone shares the divisor at both ends)", wire_ok(pm));
 }
 
 // -----------------------------------------------------------------------------
@@ -688,6 +774,7 @@ void tt_tx_idle() {
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     bool level = Pin<4>::read();
     uint32_t falls = 0;
+    uint32_t first_fall = 0;
     uint32_t last_fall = 0;
     uint32_t idle_at = 0;
     bool idle_seen = false;
@@ -697,6 +784,9 @@ void tt_tx_idle() {
         const uint32_t t = us_now();
         const bool now_level = Pin<4>::read();
         if (level && !now_level) {
+            if (falls == 0u) {
+                first_fall = t;
+            }
             last_fall = t;
             ++falls;
         }
@@ -717,6 +807,15 @@ void tt_tx_idle() {
                   "within a bit time after it",
                   up && idle_seen && falls == 8u && after >= -2 &&
                       after <= static_cast<int32_t>(bit_ns / 1000u));
+    // THE PAD'S OWN CLOCK: eight start bits back to back are seven frames
+    // apart, ten bit periods each at the rate asked.
+    const uint32_t span = last_fall - first_fall;
+    const uint32_t frames_us = 7u * 10u * 1'000'000u / baud;
+    print(serial, "  the first to the last start bit: ", span, " us (seven frames at 9600: ", frames_us,
+          " us)", crlf);
+    bench.verdict("THE PAD RUNS AT THE RATE ASKED: seven frames between the first and the last start "
+                  "bit, within a per cent of 9600 baud",
+                  falls == 8u && span * 100u >= frames_us * 99u && span * 100u <= frames_us * 101u);
     Instrument::release();
 }
 

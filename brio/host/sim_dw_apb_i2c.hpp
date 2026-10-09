@@ -475,6 +475,7 @@ struct SimDwApbI2cEngine {
     static inline uint8_t next_flags = 0;   ///< what the next service() reports
     static inline uint32_t armed = 0;
     static inline bool errors_only = false; ///< armed to report a bus error alone
+    static inline bool high = false;        ///< the level the last arm() asked for
     static inline uint32_t blocks = 0;
     static inline uint32_t faults = 0;
     static inline uint32_t length = 0;
@@ -487,11 +488,11 @@ struct SimDwApbI2cEngine {
         next_flags = 0;
         return f;
     }
-    static void arm(volatile void* data, SimDwApbI2cRequest request, bool high_priority = false,
+    static void arm(volatile void* data, SimDwApbI2cRequest request, bool high_priority,
                     Report report = Report::blocks) {
         (void)data;
         (void)request;
-        (void)high_priority;
+        high = high_priority;
         errors_only = report == Report::errors;
         armed = armed + 1u;
     }
@@ -529,6 +530,7 @@ struct SimDwApbI2cEngine {
         next_flags = 0;
         armed = 0;
         errors_only = false;
+        high = false;
         blocks = 0;
         faults = 0;
         length = 0;

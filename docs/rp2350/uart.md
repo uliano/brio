@@ -97,6 +97,8 @@ the register bit layouts, the resource's and the transport's verbs) is in
   and the pad type turns it into the one code that routes a UART there.
   The IP file needed no change for it.
 - `Rp2350Pl011` - the chip traits, which nothing above this file names.
+  The transport's receive engine arms at HIGH_PRIORITY and its transmit
+  engine at normal; the Uart takes no level option ([dma.md](dma.md)).
 - `Pl011<n>` and `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine,
   RxEngine>` - the public names, this chip's aliases of the two IP
   templates, with `NoDmaEngine` in both slots by default.
@@ -172,6 +174,13 @@ a number is given for each.
 - THE LADDER on the loop-back, each rung byte-exact and taking its
   frames' time: 144 baud (143 real), 300, 9600, 115200 (115207), 921600
   (921658), 2 M, 4 M and 9375000.
+- THE RATE ASKED, which a loop cannot tell (both ends share one divisor),
+  timed on the ruler from the first write to `tx_idle()`: every rung's
+  frames in 999 to 1003 thousandths of their wire time from 144 baud to
+  9375000, the bulk rungs to 3 Mbaud in 1000 to 1001, 256 frames of every
+  format in 999 to 1000 - the parity and stop bits really sent - and
+  1000 on the alternate pads; eight start bits at 9600 lie seven frames
+  apart within half a per mille on the pad. Both architectures alike.
 - THE TWO DELIVERIES: a lone byte reaches the ring 367 us after its write
   at 115207 baud - one frame (87 us) plus the 32-bit receive timeout
   (278 us); a burst of sixteen is delivered by the LEVEL, its first byte
@@ -247,6 +256,12 @@ a number is given for each.
 - The transport carries the kernel console and the pin-check tool on both
   architectures at 115200 through that bridge, with every error counter
   and the ring overrun at zero.
+- THE OVERRUN UNDER A RECEIVE ENGINE (`test_rp2350_dma` letter o), as on
+  the RP2040 and on both architectures: UARTRSR's sticky OE, cleared
+  through UARTICR alone, hides every overrun after the first; the vector
+  now clears it and masks the source until the next publish - one entry
+  and one count each of three episodes, the vector quiet after them
+  ([../pl011/README.md](../pl011/README.md)).
 - THE TWO DMA ENGINE SLOTS are measured in [dma.md](dma.md), whose suite
   puts an engine in each slot of the second instance under the loop-back
   (4096 bytes at 3 Mbaud exact) and runs its own console's transmitter on

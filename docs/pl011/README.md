@@ -42,8 +42,9 @@ manual either, which is exactly why they are the concept below.
   `UartTriggerField`, `UartBaudField`, `UartDmaControl`,
   `UartFifoLevel`), the resource `Pl011Uart<Chip, n>` and the task
   `Pl011Transport<Chip, n, pins, ...>` with its two ring buffers, its
-  error counters, its two optional DMA engine slots and its two ISR
-  bodies.
+  error counters (each saturating at its top: a count that wrapped would
+  read as a few errors after a storm of them), its two optional DMA engine
+  slots and its two ISR bodies.
 - Not here, by design: which pads carry the signals and under which
   function, how the block is taken out of reset, which interrupt
   controller owns the line and what it calls it, which rate of the
@@ -217,6 +218,22 @@ reported when the error vector sees it; the run in flight and the
 FIFO's content, which precede the loss, are published after the
 consumer's look (below, "Not covered yet").
 
+THE OVERRUN UNDER AN ENGINE has a trap of the block's: its interrupt
+rises from `UARTRSR`'s OE, which is STICKY - set "if data is received and
+the receive FIFO is already full", cleared only by a write of the
+register. Cleared through `UARTICR` alone, as the other errors are, the
+first overrun of a life leaves OE standing and EVERY LATER ONE RAISES
+NOTHING: measured on both families, three overrun episodes, one entry,
+one count, and the losses after the first never reported to the ring - a
+starved receive channel's gaps handed to the consumer joined. Cleared
+with `UARTRSR` too, a FIFO that stays full under a consumer that does not
+read raises it again with every frame that lands: 4058 entries for 5120
+frames at 3 Mbaud. So the vector clears both and MASKS the source until
+the next publish (`dma_isr()`'s completion or `harvest()`), which reports
+any frame lost while it slept before waking it: one entry and one count
+an episode (their DMA suites' letter o), and every loss before the
+consumer's next look - which skips them all - reported.
+
 UNDER A RECEIVE ENGINE NO VECTOR ENDS A BURST. The time-out needs a
 character waiting in the FIFO, and the channel's single request moves
 each one as it lands: measured on both families, 17 characters taken by
@@ -236,13 +253,15 @@ THE ERRORS UNDER AN ENGINE are the vector's: the channel moves an
 entry's byte and not its flags (bits 8..11 of `UARTDR`), and `UARTRSR`
 speaks for the last character READ - the channel's - so the transport
 arms the four error interrupts with a receive engine and counts each
-received error in `isr()`, clearing it through `UARTICR`. No clear
-reads `UARTDR`, so none takes a byte the channel was owed; what a byte
-beat cannot do is drop the errored entry's own byte - a break arrives
-as a zero among the data. Measured on both families (their DMA suites'
-letter `v`, 64 slots of which four a break): through the interrupt
-receiver 60 bytes intact and in order, four BE; through the engine all
-60 in order with the four zeros among them, four BE.
+received error in `isr()`, clearing it through `UARTICR` (and an overrun
+through `UARTRSR` as well, above). No clear reads `UARTDR`, so none takes
+a byte the channel was owed; what a byte beat cannot do is drop the
+errored entry's own byte - a break arrives as a zero among the data.
+Measured on both families (their DMA suites' letter `v`, 64 slots of
+which four a break, the consumer looking once a slot - the ring skips
+what it holds at the look after a drop): through the interrupt receiver
+60 bytes intact and in order, four BE; through the engine all 60 in
+order with the four zeros among them, four BE.
 
 ## The engine slots
 
@@ -262,7 +281,10 @@ ring's free run and is re-armed when it has ended, by the line's handler
 or by `harvest()` under the guard.
 
 What the transport asks of an engine, so a family's engines are written
-to it: `present`, `channel`, `arm(data, request)`, `claim()`,
+to it: `present`, `channel`, `arm(data, request, high_priority)` - the
+receive engine at the family's high level, its FIFO being the one that
+overruns when the channel is starved, the transmit engine at the normal
+one (docs/design/dma.md) -, `claim()`,
 `unclaim()`, `launch(span)`, `complete()`, `busy()`, `service()` with
 `flag_complete` and `flag_error`, `abandon()`, `stop()`; and of a
 receive engine `start(pointer, count)`, `take()`, `idle()`,
@@ -301,10 +323,14 @@ The fake models THE RECEIVE FIFO as far as the interrupt receiver reads
 it: the wire lands a frame with its error bits as an entry, a read of
 `UARTDR` takes the oldest, `RXFE`/`RXFF` and `RXRIS` (the receive level)
 follow the entries, and a frame on a full FIFO is lost with `UARTRSR`'s
-OE and `OERIS` set; the time-out is raised by hand. Over it the suite
-drains a burst by the level, and skips a framed entry, a full ring's
-refusals and an overrun with everything queued beside them - nothing
-handed out joined across a loss, the stream resuming after each. What it does
+OE set - and `OERIS` raised at OE's ONSET alone, as the silicon raises
+it; the time-out is raised by hand. Over it the suite drains a burst by
+the level, and skips a framed entry, a full ring's refusals and an
+overrun with everything queued beside them - nothing handed out joined
+across a loss, the stream resuming after each; and under an engine it
+checks the overrun's source asleep from the loss to the next publish,
+the loss reported at that publish, the next one an entry of its own, and
+the count held at 255 after three hundred. What it does
 not model is time: the time-out's 32 bit periods, and the engine's view
 of the FIFO, stay the bench's to judge.
 

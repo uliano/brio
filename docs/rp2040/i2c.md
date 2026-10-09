@@ -228,8 +228,11 @@ the roles inverted for the last letter.
   eight bytes lengthens a 240 us read to 1027); bytes queued beyond a
   two-byte read are flushed at the host's NACK and reported
   (ABRT_SLVFLUSH_TXFIFO), the next read clean.
-- THE ENGINES: a 64-byte read at 400 kHz in 1.6 ms with one host
-  interrupt (the STOP); a write-then-read with the write on the pump; the
+- THE ENGINES, both at the normal level (the block holds SCL behind a
+  starved channel either way, [dma.md](dma.md)): a 64-byte read at
+  400 kHz in 1.6 ms with one host interrupt (the STOP), its SCL 361 kHz
+  on the ruler - letter e's bracket, never above the rate asked;
+  a write-then-read with the write on the pump; the
   two-byte read and the probe on the pump of an engined host; a deaf
   address answered with the engines put away; eight 255-byte reads at
   1 MHz exact with TX_OVER never raised. THE REQUEST IS A LEVEL the

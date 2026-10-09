@@ -61,7 +61,8 @@
 //      phase; a read with no out buffer; the select released; and
 //      cs_setup_us MEASURED on the ruler
 //   c  THE POLLED PATH AT EVERY NAMED RATE, div2 to div256, 64 frames
-//      each, timed on the ruler, the frame period reported
+//      each, timed on the ruler, the frame period reported - none faster
+//      than its wire at the rate asked
 //   d  THE DMA ENGINES on the loop: 128-byte blocks with and without a
 //      command phase, ONE DMA interrupt a transaction (the transmit
 //      engine reports errors alone), the polled variant, 16-bit frames ON
@@ -70,7 +71,10 @@
 //      the first polled request are timed TWICE, cold and then warm, with
 //      the XIP cache's misses beside each: the first transaction after
 //      the host is brought up runs its code out of the flash, and that -
-//      not the engines - is what its figure measures
+//      not the engines - is what its figure measures; and THE RATE ON
+//      THE WIRE - a frame inside an engined block timed (the difference
+//      of a 2048- and a 256-frame block) against its SCK periods at the
+//      rate asked, in modes 3 and 0 and at 16 bits
 //   e  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
 //      the rejection, both sleep votes
 //   f  THE WIRE: sixteen frames both ways in modes 1 and 3 and at 16
@@ -307,6 +311,36 @@ uint8_t xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx
     return transfer_done ? transfer_status : 0xFEu;
 }
 
+/// THE RATE ON THE WIRE, which a loop alone cannot tell: the time ONE FRAME
+/// takes inside an engined block, from the difference of two polled blocks
+/// of 2048 and 256 frames - neither buffer named, the transmit engine
+/// pouring its fixed cell and the receive engine its sink - so the fixed
+/// cost of a transaction cancels; in thousandths of `bits` SCK periods
+/// plus `gap_halves` half periods at the rate ASKED (clk_peri over the
+/// divisor). The best of three of each block is taken.
+uint32_t frame_permille(SpiClock rate, SpiMode mode, SpiDataSize bits, uint32_t gap_halves) {
+    auto best = [&](uint16_t n) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t t0 = us_now();
+            (void)xfer<DmaHost>(nullptr, 0, nullptr, nullptr, n, mode, rate, bits, true);
+            const uint32_t took = us_now() - t0;
+            least = took < least ? took : least;
+        }
+        return least;
+    };
+    const uint32_t big = best(2048);
+    const uint32_t small = best(256);
+    const uint32_t width = bits == SpiDataSize::bits16 ? 16u : 8u;
+    // The frames' time in nanoseconds at the rate asked, 1792 of them.
+    const uint64_t want_ns = 1792ull * (2u * width + gap_halves) * rate.divisor() * 1'000'000'000ull /
+                             (2ull * SysClock::pclk_hz);
+    const uint64_t got_ns = static_cast<uint64_t>(big - small) * 1000u;
+    return want_ns == 0u ? 0u : static_cast<uint32_t>(1000ull * got_ns / want_ns);
+}
+
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
 // =============================================================================
 // a - the block, wireless
 // =============================================================================
@@ -491,6 +525,7 @@ void tc_rates() {
                               SpiClocks::div32, SpiClocks::div64, SpiClocks::div128,
                               SpiClocks::div256};
     uint8_t exact = 0;
+    uint8_t never_early = 0;
     for (uint8_t k = 0; k < 8u; ++k) {
         fill_pattern(tx_buf, 64, static_cast<uint8_t>(0xA0u + k));
         for (uint16_t i = 0; i < 64; ++i) {
@@ -509,10 +544,16 @@ void tc_rates() {
         if (ok) {
             ++exact;
         }
+        if (took * 1000u >= 64u * wire_ns) {
+            ++never_early;
+        }
     }
     bench.verdict("every named rate from clk_peri / 2 to / 256 carries 64 frames byte-exact on "
                   "the polled path",
                   exact == 8u);
+    bench.verdict("and none is faster than its wire: 64 frames take at least eight SCK periods each "
+                  "at the rate asked (the polled path's own cost the rest; letter d times the wire)",
+                  never_early == 8u);
     Host::release();
 }
 
@@ -651,6 +692,22 @@ void td_dma() {
     }
     bench.verdict("a read with no out buffer goes through the transmit engine's fixed 0xFF cell",
                   st5 == spi_ok && ff);
+    // THE RATE ON THE WIRE inside a block: mode 3 runs frame to frame with
+    // no gap (SPH = 1), mode 0 with the 1.5 SCK periods the block's frame
+    // gap takes (docs/rp2350/spi.md, the engines' bench findings).
+    const uint32_t m3_div4 = frame_permille(SpiClocks::div4, SpiMode::mode3, SpiDataSize::bits8, 0);
+    const uint32_t m3_div16 = frame_permille(SpiClocks::div16, SpiMode::mode3, SpiDataSize::bits8, 0);
+    const uint32_t m3_div64 = frame_permille(SpiClocks::div64, SpiMode::mode3, SpiDataSize::bits8, 0);
+    const uint32_t m0_div16 = frame_permille(SpiClocks::div16, SpiMode::mode0, SpiDataSize::bits8, 3);
+    const uint32_t w16_div16 = frame_permille(SpiClocks::div16, SpiMode::mode3, SpiDataSize::bits16, 0);
+    print(serial, "  a frame inside an engined block, in thousandths of its wire time at the rate "
+          "asked: mode 3 div4 ", m3_div4, ", div16 ", m3_div16, ", div64 ", m3_div64, "; mode 0 "
+          "div16 (with 1.5 SCK of gap) ", m0_div16, "; 16-bit mode 3 div16 ", w16_div16, crlf);
+    bench.verdict("THE ENGINES RUN AT THE RATE ASKED: a frame inside a block takes its SCK periods "
+                  "at clk_peri over the divisor - div4, div16 and div64 in mode 3, div16 in mode 0 "
+                  "with its gap and in 16-bit frames - each -1 % to +3 %",
+                  wire_ok(m3_div4) && wire_ok(m3_div16) && wire_ok(m3_div64) && wire_ok(m0_div16) &&
+                      wire_ok(w16_div16));
     spi0_owner = Spi0Owner::none;
     DmaHost::release();
 }

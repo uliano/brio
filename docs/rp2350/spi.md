@@ -142,7 +142,10 @@ Request and its two ISR bodies, the client's surface) is in
   templates, with `NoDmaEngine` in both slots by default.
 - `Rp2350Pl022::dma_min_frames`, the data-phase length below which a
   request takes the pump even with engines bound - TEN frames here, the
-  quotient of two of this chip's measurements (the bench findings).
+  quotient of two of this chip's measurements (the bench findings). The
+  host's receive engine arms at HIGH_PRIORITY, a frame landing on a full
+  receive FIFO being lost, its transmit engine at normal
+  ([dma.md](dma.md)).
 
 Beside them, at the foot of the file, is the VOCABULARY CHECK: the IP
 file spells the block's bit layout itself, because it may not read a
@@ -368,6 +371,11 @@ between the halves both are given; every verdict reads the same.
   same binding in the four modes, warm, by the difference of 16 and 256
   frames: 16.00 and 64.00 cycles a byte at 75 and 18.75 MHz, the nominal
   wire exactly, on both halves, where modes 0 and 2 give 19.00 and 76.00.
+  The same by `test_rp2350_spi` letter d against THE RATE ASKED (a frame
+  inside a block, from the difference of a 2048- and a 256-frame polled
+  block, against clk_peri over the divisor): 999 to 1001 thousandths at
+  clk_peri / 4, / 16 and / 64 in mode 3, in mode 0 with its gap and in
+  16-bit frames, on both halves.
   256 16-bit frames at 75 MHz take 9519 / 9499
   cycles, x 1.16, with ONE interrupt; the same request on the pump - byte
   engines, or a misaligned buffer - takes 25836 / 26644, x 3.15 / 3.25,

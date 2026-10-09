@@ -392,6 +392,7 @@ struct SimPl022Engine {
     static inline uint32_t length = 0;
     static inline uint8_t beat = 0;         ///< the last block's beat, in bytes
     static inline bool errors_only = false; ///< armed to report a bus error alone
+    static inline bool high = false;        ///< the level the last arm() asked for
     static inline bool fixed = false;       ///< the last block was a fixed cell
     static inline bool discarded = false;   ///< the last block went to a sink
     static inline bool running = false;
@@ -401,11 +402,11 @@ struct SimPl022Engine {
         next_flags = 0;
         return f;
     }
-    static void arm(volatile void* data, SimPl022Request request, bool high_priority = false,
+    static void arm(volatile void* data, SimPl022Request request, bool high_priority,
                     Report report = Report::blocks) {
         (void)data;
         (void)request;
-        (void)high_priority;
+        high = high_priority;
         errors_only = report == Report::errors;
         armed = armed + 1u;
     }
@@ -459,6 +460,7 @@ struct SimPl022Engine {
         length = 0;
         beat = 0;
         errors_only = false;
+        high = false;
         fixed = false;
         discarded = false;
         running = false;

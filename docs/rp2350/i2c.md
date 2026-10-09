@@ -266,9 +266,12 @@ what a block outside the processor should look like.
   SCL periods, and on this wire it comes to **99 kHz, 393 kHz and 970
   kHz** for the three speeds - never above the asked rate, and the
   shortfall is the pull-ups' rise time on a jumper.
-- **THE ENGINES.** A 64-byte read on the two engines takes 1527 us at 400
-  kHz with **two host interrupts for the whole tenure** - the commands
-  poured from a fixed cell, the bytes collected, byte-exact - and a
+- **THE ENGINES**, both at the normal level (the block holds SCL behind a
+  starved channel either way, [dma.md](dma.md)). A 64-byte read on the two
+  engines takes 1527 us at 400 kHz with **two host interrupts for the
+  whole tenure** - the commands poured from a fixed cell, the bytes
+  collected, byte-exact - its SCL 383 and 387 kHz on the ruler (the M33,
+  Hazard3), letter e's bracket, never above the rate asked; and a
   write-then-read puts the write on the pump, the repeated START and 32
   bytes back on the engines. A two-byte read and a probe stay on the pump;
   a deaf client on an engined read is `i2c_nack_addr` with the engines put

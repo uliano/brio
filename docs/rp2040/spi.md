@@ -100,7 +100,9 @@ listener is therefore the pad, released.
   The data phase moves as one block each way with the requests raised
   around the engines; the transmit engine is bound to report a bus
   error alone (IRQ_QUIET), so the receive block's completion is the
-  transaction's ONE DMA interrupt. A 16-bit request whose buffers are
+  transaction's ONE DMA interrupt. The receive engine arms at
+  HIGH_PRIORITY, a frame landing on a full receive FIFO being lost, the
+  transmit engine at normal ([dma.md](dma.md)). A 16-bit request whose buffers are
   not half-word aligned goes to the pump. Frames in a byte buffer: one
   byte per 8-bit frame, two bytes low-first per 16-bit frame - on this
   little-endian core, a half-word in memory.
@@ -262,6 +264,13 @@ the roles inverted on the same wires for the last letter.
   byte in 16-bit frames (64 and 6 a frame) - 256 frames at x 1.29 and x
   1.20 of the nominal wire, 4096 16-bit frames at x 1.09 with the
   transaction's one interrupt.
+- THE RATE ASKED, which a loop cannot tell (`test_rp2040_spi` letter d,
+  a frame inside an engined block timed by the difference of a 2048- and
+  a 256-frame polled block, neither buffer named): 1000, 999 and 999
+  thousandths of eight SCK periods at clk_peri / 4, / 16 and / 64 in
+  mode 3, 999 of nine and a half in mode 0 - the frame gap - and 999 of
+  sixteen in 16-bit frames, each against clk_peri over the divisor
+  asked; and no polled rate of letter c faster than its wire.
 - **THE HOST'S HOT PATH LIVES IN SRAM, AND A FIRST REQUEST PAYS THE
   CACHE NOTHING OF IT.** `rp2040/ld/rp2040_2m.ld` places the same ten
   members the RP2350's script places

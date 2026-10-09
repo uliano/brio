@@ -46,8 +46,8 @@
 //      the client's clock stretch priced; the flush of stale bytes at
 //      a read
 //   e  THE THREE SPEEDS byte-exact both ways and MEASURED on the ruler
-//   f  THE DMA ENGINES: a 64-byte read, a write-then-read, and the
-//      short reads that stay on the pump
+//   f  THE DMA ENGINES: a 64-byte read - its SCL timed on the ruler -, a
+//      write-then-read, and the short reads that stay on the pump
 //   g  THE KERNEL: I2cBus (= BusMaster) over I2cHost, the NACK in its
 //      place, the rejection, both votes, and THE TIMED BUS: a client
 //      holding the clock answered by the arbiter's per-bus timeout,
@@ -717,6 +717,13 @@ void tf_dma() {
     bench.verdict("a 64-byte read on the two engines: the commands poured from a fixed cell, the bytes "
                   "collected, byte-exact, the host's own interrupt untouched by the bytes",
                   st == i2c_ok && same(client_answers, rx_buf, 64) && i2c0_isr_entries <= 2u && client_stops == 1u);
+    // The rate on the wire under the engines, letter e's way: 9 x 65 SCL
+    // periods, the stopwatch around the whole tenure.
+    const uint32_t engined_scl = took == 0u ? 0u : static_cast<uint32_t>(9ULL * 65u * 1'000'000u / took);
+    print(serial, "  that read's SCL on the ruler: ", engined_scl / 1000u, " kHz (400 asked)", crlf);
+    bench.verdict("and the engines run the bus at the rate asked: SCL never above 400 kHz and within a "
+                  "quarter below it (letter e's bracket, the pull-ups' rise the difference)",
+                  st == i2c_ok && engined_scl <= 408'000u && engined_scl >= 300'000u);
     client_reset_tally();
     client_limit = 32;
     client_ahead = 8;

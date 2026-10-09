@@ -580,15 +580,18 @@ class Pl011Transport {
     static inline Ring<uint8_t, tx_size, typename Chip::Platform> m_tx{};
 
     // Error counters, written in the handler, read from the main loop.
-    // A byte moves in one access on these cores; they wrap at 255. Written
-    // as `x = x + 1` because compound ops on volatile are deprecated in
-    // C++20.
+    // A byte moves in one access on these cores. EVERY COUNTER SATURATES
+    // (bump()): a count that wraps reads as a few errors after a storm of
+    // them.
     static inline volatile uint8_t m_rx_overruns = 0;   // RX ring full, byte lost
     static inline volatile uint8_t m_frame_errors = 0;  // FE: byte dropped
     static inline volatile uint8_t m_parity_errors = 0; // PE: byte dropped
     static inline volatile uint8_t m_break_errors = 0;  // BE: a break, dropped
     static inline volatile uint8_t m_hw_overruns = 0;   // OE: the FIFO was full when a frame landed (UARTRSR)
     static inline volatile uint16_t m_dma_faults = 0;   // blocks the engines threw away
+    // Under a receive engine: the overrun interrupt masked by isr() after
+    // a loss, until publish_rx() hands the next run over.
+    static inline volatile bool m_overrun_quiet = false;
     static inline uint32_t m_baud = 0;                  // for rebase()
 
 public:
@@ -684,11 +687,17 @@ public:
             U::interrupts(UartInterrupt::errors, true);
         }
         m_dma_faults = 0;
+        m_overrun_quiet = false;
+        // THE LEVELS ARE THE RULE'S (docs/design/dma.md): the receive
+        // engine at the family's high level - the receive FIFO OVERRUNS
+        // when its channel is starved (UARTRSR's OE, frames lost) - the
+        // transmit engine at the normal one, a starved transmit leaving the
+        // line idle a while and losing nothing.
         if constexpr (has_tx_engine) {
-            TxEngine::arm(&U::regs().UARTDR, Chip::template tx_request<n>());
+            TxEngine::arm(&U::regs().UARTDR, Chip::template tx_request<n>(), false);
         }
         if constexpr (has_rx_engine) {
-            RxEngine::arm(&U::regs().UARTDR, Chip::template rx_request<n>());
+            RxEngine::arm(&U::regs().UARTDR, Chip::template rx_request<n>(), true);
             rearm_rx();
         }
         U::dma_requests(has_tx_engine, has_rx_engine);   // after the channels stand (port())
@@ -811,11 +820,11 @@ public:
             // UARTICR - nothing here reads UARTDR, the channel's.
             const uint32_t errors = active & UartInterrupt::errors;
             if (errors != 0u) {
-                if ((errors & UartInterrupt::frame) != 0u) { m_frame_errors = m_frame_errors + 1; }
-                if ((errors & UartInterrupt::parity) != 0u) { m_parity_errors = m_parity_errors + 1; }
-                if ((errors & UartInterrupt::brk) != 0u) { m_break_errors = m_break_errors + 1; }
+                if ((errors & UartInterrupt::frame) != 0u) { bump(m_frame_errors); }
+                if ((errors & UartInterrupt::parity) != 0u) { bump(m_parity_errors); }
+                if ((errors & UartInterrupt::brk) != 0u) { bump(m_break_errors); }
                 if ((errors & UartInterrupt::overrun) != 0u) {
-                    m_hw_overruns = m_hw_overruns + 1;
+                    bump(m_hw_overruns);
                     // Frames the full FIFO refused: the ring told when
                     // the vector sees it, its consumer's next look skipping
                     // what the ring holds. The run in flight and the FIFO's
@@ -826,6 +835,25 @@ public:
                     // or break entry is moved by the channel and
                     // delivered: no loss.
                     m_rx.lost();
+                    // THE STICKY STATUS CLEARED, THE SOURCE PUT TO SLEEP.
+                    // The overrun interrupt rises from UARTRSR's OE, which
+                    // stays set until UARTRSR is written: left standing,
+                    // the NEXT overrun raises nothing and every loss after
+                    // the first goes uncounted and unreported to the ring
+                    // (measured on both families, three overruns and one
+                    // entry). Cleared alone, a full FIFO under a consumer
+                    // that does not read raises it again with every frame
+                    // that lands - an entry a frame lost (measured: 4058
+                    // in 5120 frames at 3 Mbaud). So the write clears it
+                    // and the source is MASKED until the next publish
+                    // (publish_rx()): one report a loss between two
+                    // publishes is all the ring needs, since its
+                    // consumer's next look skips everything the publish
+                    // after it hands over. The write takes no byte: UARTDR
+                    // is the channel's, UARTRSR is not.
+                    U::clear_receive_status();
+                    U::interrupts(UartInterrupt::overrun, false);
+                    m_overrun_quiet = true;
                 }
                 U::clear_pending(errors);
             }
@@ -872,7 +900,7 @@ public:
             const uint8_t f = TxEngine::service();
             if ((f & TxEngine::flag_error) != 0u) {
                 (void)TxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1u;
+                bump(m_dma_faults);
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
                 pump_tx();
@@ -882,7 +910,7 @@ public:
             const uint8_t f = RxEngine::service();
             if ((f & RxEngine::flag_error) != 0u) {
                 (void)RxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1u;
+                bump(m_dma_faults);
             } else if ((f & RxEngine::flag_complete) != 0u) {
                 // The run filled: published and re-armed HERE, not left to
                 // harvest() - at 3 Mbaud a 32-deep FIFO overflows 100 us
@@ -929,7 +957,7 @@ public:
                 const uint8_t owed = RxEngine::service();
                 if ((owed & RxEngine::flag_error) != 0u) {
                     (void)RxEngine::abandon();
-                    m_dma_faults = m_dma_faults + 1u;
+                    bump(m_dma_faults);
                 }
             }
             publish_rx();
@@ -1091,6 +1119,17 @@ public:
     }
 
 private:
+    /// One count more, held at the counter's top: one compare on a rare
+    /// path. A volatile read and a volatile write, never a compound
+    /// operation on a volatile (deprecated since C++20).
+    template <typename T>
+    [[gnu::always_inline]] static void bump(volatile T& counter) {
+        const T v = counter;
+        if (v != static_cast<T>(~T{0})) {
+            counter = static_cast<T>(v + 1u);
+        }
+    }
+
     /// The port off or on WITH ITS DMA REQUESTS: the requests cleared
     /// before the UART is disabled and set again after it is enabled,
     /// because the PL011 re-asserts a request when the UART comes back
@@ -1152,12 +1191,27 @@ private:
     }
 
     /// What the receive engine has landed since the last look, handed to
-    /// the ring's consumer.
-    static void publish_rx() {
+    /// the ring's consumer - and the overrun interrupt woken again if a
+    /// loss put it to sleep (isr()), so that a loss after this publish is
+    /// a new one to report. A frame lost WHILE it slept is reported here,
+    /// before the wake: UARTRSR's OE, cleared by the entry that put it to
+    /// sleep, is set again by any frame the FIFO refused since - the same
+    /// episode's tail, counted once already, but its bytes must not reach
+    /// the consumer joined to what came before them.
+    [[gnu::always_inline]] static void publish_rx() {
         if constexpr (has_rx_engine) {
             const uint32_t fresh = RxEngine::take();
             if (fresh != 0u) {
                 m_rx.publish(static_cast<typename decltype(m_rx)::index_t>(fresh));
+            }
+            if (m_overrun_quiet) [[unlikely]] {
+                m_overrun_quiet = false;
+                if ((U::receive_status() & UartReceiveStatus::overrun) != 0u) {
+                    m_rx.lost();
+                    U::clear_receive_status();
+                }
+                U::clear_pending(UartInterrupt::overrun);
+                U::interrupts(UartInterrupt::overrun, true);
             }
         }
     }
@@ -1168,7 +1222,7 @@ private:
         if constexpr (has_rx_engine) {
             const auto room = m_rx.write_span();
             if (room.empty()) {
-                m_rx_overruns = m_rx_overruns + 1;
+                bump(m_rx_overruns);
                 return;
             }
             (void)RxEngine::start(room.data(), static_cast<uint32_t>(room.size()));
@@ -1185,19 +1239,19 @@ private:
     [[gnu::always_inline]] static void take(uint32_t entry) {
         if ((entry & UartDataError::dropped) != 0u) [[unlikely]] {
             if ((entry & UartDataError::frame) != 0u) {
-                m_frame_errors = m_frame_errors + 1;
+                bump(m_frame_errors);
             }
             if ((entry & UartDataError::parity) != 0u) {
-                m_parity_errors = m_parity_errors + 1;
+                bump(m_parity_errors);
             }
             if ((entry & UartDataError::brk) != 0u) {
-                m_break_errors = m_break_errors + 1;
+                bump(m_break_errors);
             }
             m_rx.lost();
             return;
         }
         if (!m_rx.push(static_cast<uint8_t>(entry))) [[unlikely]] {
-            m_rx_overruns = m_rx_overruns + 1;
+            bump(m_rx_overruns);
             m_rx.lost();
         }
     }
@@ -1236,7 +1290,7 @@ private:
         // register's OE is sticky until written, and one overrun event
         // is one count, however many frames it swallowed.
         if ((U::receive_status() & UartReceiveStatus::overrun) != 0u) [[unlikely]] {
-            m_hw_overruns = m_hw_overruns + 1;
+            bump(m_hw_overruns);
             U::clear_receive_status();
             m_rx.lost();
         }
