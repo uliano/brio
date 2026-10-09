@@ -231,7 +231,16 @@ whose buffers are not half-word aligned goes to the frame pump, decided
 before the select. The transmit engine is armed for its errors alone:
 the receive block's completion is the transaction's, and it proves the
 transmit block's, so a transaction takes ONE interrupt; its channel's
-vector is still bound, for an error.
+vector is still bound, for an error. THE RECEIVE CHANNEL ARMS AT
+`very_high` AND THE TRANSMIT ONE AT `high` (docs/design/dma.md): the
+host clocks a frame out whenever the transmit channel fills the TXFIFO,
+and a receive channel it outran would find the 32-bit RXFIFO full - OVR,
+the frame discarded and every one after it lost (35.5.11) - where a
+transmit channel that waits only stops the clock between two frames.
+`release()` on the host and on the client pulses the block's reset
+before the gate: a DMA enable left set raises its request again when the
+clock returns ([dma.md](dma.md), "A released requester holds nothing
+here").
 
 ```cpp
 using Tx = brio::DmaTxEngine<1, 1, uint16_t>;
@@ -866,6 +875,13 @@ on every header of the pack, but no silicon has run it:
   odd address on the frame pump - and it needs the self-link, which is
   not on this desk; `bench_stm32`'s letter `d` times the path with MISO
   floating (the table above) and judges no data.
+- **The engines' levels and the reset in `release()`, on the wire.** The
+  receive channel at `very_high` and the transmit one at `high`, and the
+  release's reset pulse, ride the engined letters (`i`, and the peer
+  link's), which need the self-link or the peer's four wires - neither on
+  this desk; letter `a` and the rest of `z` (33 verdicts) pass with them,
+  and `test_stm32_dma` letter `r` measures the release on SPI1 with no
+  wire ([dma.md](dma.md)).
 - **The ladder against the SAM C21 `spi_peer` as it is.** That peer now
   serves on its software pump alone (docs/samc21/dmac.md), so letter
   `p`'s first climb against it meets the pump's reload boundary and

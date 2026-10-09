@@ -40,6 +40,18 @@
  * no read, the beat's width from the caller's element type. The section
  * above the engines says it at length.
  *
+ * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (stm32g0/dma_engine.hpp's
+ * DmaPriority, docs/design/dma.md). The arbiter grants one single transfer
+ * at a time to the highest level asking, the lower channel number between
+ * equals (10.4.4), and alternates a memory-to-memory channel with any other
+ * requester - so one copy starves nothing, but two copies alternate with
+ * each other and a receive ring ranked below them waits for the pair. So
+ * the defaults are the rule's, by direction: the receive engine and the
+ * ping-pong source at very_high (their peripheral overruns), the transmit
+ * engine and the player at high (theirs waits or holds its last value), the
+ * copy at low (no request paces it); a transport names its own level at
+ * the call.
+ *
  * THE DRIVER OWNS THE FABRIC AND NOT THE REQUEST VOCABULARY. Table 55
  * numbers 77 request lines by peripheral, and no device header of this
  * pack declares one of those numbers (the DMAMUX_REQ_* spellings live in
@@ -165,15 +177,8 @@ constexpr DmaWidth dma_width_of() {
                                : DmaWidth::word;
 }
 
-/// CCR.PL (10.6.3): the software half of the arbitration. The hardware
-/// half is the channel INDEX, and it cannot be configured: on equal
-/// levels the lower-numbered channel wins (10.4.4).
-enum class DmaPriority : uint8_t {
-    low = 0,
-    medium = 1,
-    high = 2,
-    very_high = 3,
-};
+// CCR.PL's vocabulary, DmaPriority, is stm32g0/dma_engine.hpp's: a
+// transport names its engines' levels without this file.
 
 /**
  * CCR.DIR (10.6.3), and the register naming trap it carries. DIR does not
@@ -1029,9 +1034,11 @@ public:
     /// are poured into, `request` the peripheral's own DMAMUX request id,
     /// `irq` which events interrupt (dma_engine.hpp). Everything constant
     /// for the binding is written here and nowhere else; the channel
-    /// comes out stopped, nothing in flight.
+    /// comes out stopped, nothing in flight. `high` by default: a
+    /// peripheral a transmit channel feeds waits for it and loses nothing
+    /// (DmaPriority's rule).
     static void arm(volatile void* data, uint8_t request,
-                    DmaPriority priority = DmaPriority::low,
+                    DmaPriority priority = DmaPriority::high,
                     DmaIrq irq = DmaIrq::complete_and_error) {
         dma_detail::bind<n, ch>(data, request);
         ccr_ = dma_ccr_config({.direction = DmaDirection::memory_to_peripheral,
@@ -1248,9 +1255,11 @@ public:
 
     /// Bind the channel to a peripheral, ONE-SHOT (DmaTxEngine::arm()'s
     /// contract). It leaves the ring a circular arm() bound where it was,
-    /// so start() with no run still runs that ring.
+    /// so start() with no run still runs that ring. `very_high` by
+    /// default: a peripheral a receive channel empties overruns when the
+    /// channel is starved (DmaPriority's rule).
     static void arm(volatile void* data, uint8_t request,
-                    DmaPriority priority = DmaPriority::low,
+                    DmaPriority priority = DmaPriority::very_high,
                     DmaIrq irq = DmaIrq::complete_and_error) {
         dma_detail::bind<n, ch>(data, request);
         ccr_ = dma_ccr_config({.direction = DmaDirection::peripheral_to_memory,
@@ -1282,11 +1291,12 @@ public:
      * comes out stopped: start() runs the ring and reports the half mark
      * through service(); a start(run) is a one-shot run on the same
      * binding that replaces the ring until the next start(), with the
-     * one-shot's own flags.
+     * one-shot's own flags. `very_high` by default, the one-shot shape's
+     * level.
      */
     template <typename T, size_t N>
     static void arm(volatile void* data, uint8_t request, T (&storage)[N],
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::very_high) {
         static_assert(sizeof(T) <= sizeof(Elem),
                       "brio DmaRxEngine: a ring wider than the engine's element - the "
                       "binding's register does not give it");
@@ -1497,6 +1507,12 @@ public:
         return dma_detail::service<n, ch>(armed_);
     }
 
+    /// Bind the channel, MEM2MEM. `low` by default: no request paces a
+    /// copy, it asks for the bus on every single transfer of its block,
+    /// and a channel it outranked would wait for the whole block - the
+    /// arbiter's alternation (10.4.4) serves one other requester between
+    /// two of its transfers, not a ring ranked below a second copy
+    /// (DmaPriority's rule).
     static void arm(DmaPriority priority = DmaPriority::low,
                     DmaIrq irq = DmaIrq::complete_and_error) {
         dma_detail::bind<n, ch>(nullptr, dma_request_none);
@@ -1663,9 +1679,15 @@ public:
     /// into, `request` the peripheral's own DMAMUX request id. The CCR
     /// word - circular, memory to peripheral, the element's width, the
     /// two interrupt enables - is composed here once (the engines' two
-    /// moments, above).
+    /// moments, above). `high` by default, the rule's level for a paced
+    /// output (DmaPriority's): a late item leaves a timer's compare
+    /// register at its last value a period. THE DAC IS THIS DIE'S
+    /// EXCEPTION to "only slows": a trigger that finds its request not
+    /// yet acknowledged converts the old data and raises DMAUDR, and the
+    /// stream must be restarted (16.4.8) - a program that plays one
+    /// beside copies on higher channels ranks it at the call.
     static void arm(volatile void* data, uint8_t request,
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::high) {
         dma_detail::bind<n, ch>(data, request);
         ccr_ = dma_ccr_config({.direction = DmaDirection::memory_to_peripheral,
                                .circular = true,
@@ -1867,9 +1889,11 @@ public:
     /// `request` its own DMAMUX request id. The CCR word - NOT circular,
     /// peripheral to memory, the element's width, the two interrupt
     /// enables - is composed here once, so the swap in the handler is the
-    /// five stores of DmaChannel::restart().
+    /// five stores of DmaChannel::restart(). `very_high` by default: a
+    /// source's peripheral overruns when its channel is starved - the
+    /// ADC's OVR, a capture's CCxOF (DmaPriority's rule).
     static void arm(volatile void* data, uint8_t request,
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::very_high) {
         dma_detail::bind<n, ch>(data, request);
         ccr_ = dma_ccr_config({.direction = DmaDirection::peripheral_to_memory,
                                .circular = false,

@@ -1705,9 +1705,15 @@ struct I2c {
     /// makes the shared I2C2/I2C3 vector safe.
     [[gnu::always_inline]] static uint32_t isr() { return pending(); }
 
+    /// The interrupt line off, the block disabled and RESET, the clock
+    /// gated. THE RESET LINE BEFORE THE GATE is the release contract
+    /// (docs/design/dma.md): a DMA request the block raised - TXIS or
+    /// RXNE behind TXDMAEN or RXDMAEN, which an abandoned tenure leaves -
+    /// is not left standing for the next owner of its request line.
     static void release() {
         Nvic::disable(irq());
         (void)disable();
+        reset();
         bus_clock(false);
     }
 };
@@ -2506,9 +2512,18 @@ private:
 
     /// The two engines bound to THIS instance's TXDR and RXDR and their
     /// DMAMUX lines, both for their errors alone (the class comment).
+    ///
+    /// BOTH AT HIGH (DmaPriority's rule): the host does not overrun. A
+    /// byte its receive channel has not taken leaves RXNE up, and the
+    /// next one waits in the shift register with SCL stretched low until
+    /// RXDR is read; a byte its transmit channel has not written stretches
+    /// SCL after the ninth pulse until TXDR is (32.4.7) - a starved
+    /// channel slows the bus and loses nothing.
     static void arm_engines() {
-        TxEngine::arm(S::tx_address(), S::dma_tx_request(), {}, DmaIrq::error_only);
-        RxEngine::arm(S::rx_address(), S::dma_rx_request(), {}, DmaIrq::error_only);
+        TxEngine::arm(S::tx_address(), S::dma_tx_request(), DmaPriority::high,
+                      DmaIrq::error_only);
+        RxEngine::arm(S::rx_address(), S::dma_rx_request(), DmaPriority::high,
+                      DmaIrq::error_only);
     }
 
     /// The halves the engines carry this tenure, started, and the DMA

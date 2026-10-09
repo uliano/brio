@@ -343,6 +343,17 @@ void copy_engine() {
 /// transport reads it through, the ISR body.
 constexpr UartPins engine_pins{.tx = {'A', 2, PinFunction::af1}, .rx = {'A', 3, PinFunction::af1}};
 using EngineUart = Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<1, 5>>;
+/// The receive ring ranked by the program (docs/design/dma.md's knob), and
+/// the same engines with the FIFO off - no kick to compile there.
+using RankedUart = Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<1, 5>,
+                        UartOptions{.rx_priority = DmaPriority::low}>;
+using NoFifoUart = Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<1, 5>,
+                        UartOptions{.fifo = false}>;
+static_assert(RankedUart::options.rx_priority == DmaPriority::low &&
+              EngineUart::options.rx_priority == DmaPriority::very_high);
+static_assert(EngineUart::rx_kick == EngineUart::fifo_mode && !NoFifoUart::rx_kick);
+static_assert(EngineUart::rx_threshold_in_force == UartFifoThreshold::seven_eighths,
+              "under a receive engine the threshold is the wedge's watch");
 
 void engined_transport() {
     constexpr Clock<ClockSource::pll, 64'000'000> clock;
@@ -359,8 +370,20 @@ void engined_transport() {
     (void)intact;
     (void)EngineUart::rx_pending();
     (void)EngineUart::rx_overruns();
+    (void)EngineUart::rx_kicks();
+    (void)EngineUart::isr();
     EngineUart::clear_errors();
     EngineUart::release();
+    (void)RankedUart::init(clock, 115200);
+    (void)RankedUart::isr();
+    (void)RankedUart::dma_isr();
+    RankedUart::release();
+    (void)NoFifoUart::init(clock, 115200);
+    (void)NoFifoUart::isr();
+    (void)NoFifoUart::rx_kicks();
+    Usart<2>::rx_request_restart();
+    Usart<2>::dma_receive(true);
+    Usart<2>::dma_transmit(false);
 }
 
 }   // namespace

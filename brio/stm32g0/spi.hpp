@@ -2129,6 +2129,11 @@ public:
         }
         Nvic::disable(S::irq());
         (void)S::disable();
+        // THE RESET LINE BEFORE THE GATE (docs/design/dma.md, the release
+        // contract): a DMA request this block raised is not left standing
+        // for the next owner of its request line - an abandoned block
+        // leaves TXE up behind TXDMAEN.
+        S::reset();
         S::bus_clock(false);
         SckPin::release();
         MosiPin::release();
@@ -2562,9 +2567,18 @@ private:
     /// The two engines bound to THIS instance's DR and its two DMAMUX
     /// lines - the transmit one for its errors alone (the class comment
     /// says why one interrupt proves both blocks).
+    ///
+    /// THE RECEIVE SIDE AT VERY_HIGH, THE TRANSMIT AT HIGH (DmaPriority's
+    /// rule). The host clocks a frame out whenever the transmit channel
+    /// fills the TXFIFO, and the RXFIFO holds 32 bits: a receive channel
+    /// the transmit one outran would find it full - OVR, the frame
+    /// discarded and every frame after it lost (35.5.11). A transmit
+    /// channel that waits only stops the clock between two frames, which
+    /// the host owns.
     static void arm_engines() {
-        TxEngine::arm(S::data_address(), S::dma_tx_request(), {}, DmaIrq::error_only);
-        RxEngine::arm(S::data_address(), S::dma_rx_request());
+        TxEngine::arm(S::data_address(), S::dma_tx_request(), DmaPriority::high,
+                      DmaIrq::error_only);
+        RxEngine::arm(S::data_address(), S::dma_rx_request(), DmaPriority::very_high);
     }
 
     /// Whether the engines serve THIS request's data phase, decided
@@ -2975,6 +2989,7 @@ public:
     static void release() {
         Nvic::disable(S::irq());
         (void)S::disable();
+        S::reset();   // the release contract, as SpiHost::release()
         S::bus_clock(false);
         SckPin::release();
         MosiPin::release();

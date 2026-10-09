@@ -167,9 +167,11 @@ a compile-time refusal in the task.
   `flag(mask)`, `clear_flags(icr_mask)`, `read_data`/`read_word`,
   `write_data`/`write_word`, `stop_retries()` (33.8.4's one documented
   escape from the enable rule), the interrupt enables under the guard,
-  `dma_transmit`/`dma_receive`, `dma_rx_request()`/`dma_tx_request()`
-  (table 55's numbers, published by the peripheral that owns them),
-  `reset()`.
+  `dma_transmit`/`dma_receive` (legal with UE set: 33.8.4 gives DMAT and
+  DMAR no "only when UE = 0" clause), `rx_request_restart()` (DMAR
+  dropped and raised again, the receive engine's kick below),
+  `dma_rx_request()`/`dma_tx_request()` (table 55's numbers, published by
+  the peripheral that owns them), `reset()`.
 - `UsartFlag` / `UsartClear` / `UsartInterrupt` - every ISR bit by BOTH
   names the register description gives it (`rxne` and `rxfne`, `txe` and
   `txfnf`), every ICR twin, every CR1 enable.
@@ -178,8 +180,10 @@ a compile-time refusal in the task.
   `rx_threshold`/`tx_threshold`, `swap`, `invert_tx`/`invert_rx`/
   `invert_data`, `msb_first`, `half_duplex`, `one_bit`,
   `overrun_disable`, `driver_enable` + `de_pin`/`de_assertion`/
-  `de_deassertion`/`de_active_low`, `rts`/`cts` + their pads, and
-  `wake_from_stop`. Makers: `uart_half_duplex()`,
+  `de_deassertion`/`de_active_low`, `rts`/`cts` + their pads,
+  `wake_from_stop`, and `rx_priority` - the receive engine's level in
+  the DMA arbitration, `very_high` by default and refused on a port with
+  no receive engine (docs/design/dma.md). Makers: `uart_half_duplex()`,
   `uart_with_driver_enable()`. `fifo` is a `UartFifo`, THREE states a
   bool converts to: stated on (`.fifo = true`, refused at compile time
   on an instance with no FIFO), stated off (`.fifo = false`), and
@@ -188,7 +192,9 @@ a compile-time refusal in the task.
   and `none` makes it ride TXFNF; `rx_threshold` defaults to `half` -
   the receiver paced by RXFT, its tail by the receiver time-out where
   the instance has one and by IDLE where it has not (an LPUART) - and
-  `none` keeps RXFNE, a character an entry; `rx_timeout` is RTOR.RTO in
+  `none` keeps RXFNE, a character an entry; under a receive engine the
+  receive threshold is the task's (seven eighths, the FIFO wedge's watch)
+  and a stated `rx_threshold` is refused; `rx_timeout` is RTOR.RTO in
   bit times, 10 by default.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format)`,
@@ -208,7 +214,8 @@ a compile-time refusal in the task.
   `set_baud(hz, baud)`, `actual_baud`, `can_baud`, `min_hz_for`,
   `kernel_hz<Clock>()`, the counters (`rx_overruns`, `hw_overruns`,
   `frame_errors`, `parity_errors`, `noise_errors`, `dma_faults`,
-  `wakes`), `clear_errors`, `release()`, and `fifo_mode` - the FIFO
+  `wakes`, `rx_kicks` - eight bits each, SATURATING at 255: a storm of
+  errors never reads back as a few), `clear_errors`, `release()`, and `fifo_mode` - the FIFO
   decision as the instantiation resolved it: the option where it is
   stated, otherwise ON where the instance has the FIFO
   (`has_fifo_mode`: a FULL USART, every LPUART) unless `wake_from_stop`
@@ -359,7 +366,7 @@ What chapter 33 offers a byte transport's RECEIVER, item by item:
 |---|---|
 | RXNE / RXFNE, a character waiting (33.8.10) | the one-register receiver's pace (a BASIC instance), and the FIFO's under `rx_threshold = none`; the request a receive channel answers |
 | the RXFIFO, eight deep, its flags per entry (33.5.4) | on wherever the instance has it; the drain reads ISR before every RDR, so each entry's FE/NE/PE are its own |
-| RXFT at RXFTCFG's level (33.8.4) | THE PACE of the FIFO receiver, at code 010 - half the FIFO: one entry drains four characters or more, and a handler five frames late loses nothing (four places and the shift register); three quarters would save a twelfth of an entry a character and leave three frames of slack, which the top rate (a frame is 320 cycles at 2 Mbaud) does not afford beside the image's longest handler |
+| RXFT at RXFTCFG's level (33.8.4) | under a receive engine, THE WEDGE'S WATCH at code 100, seven eighths: the FIFO one entry and the shift register short of an overrun, where the kick still loses nothing (the bench finding below); without one, THE PACE of the FIFO receiver, at code 010 - half the FIFO: one entry drains four characters or more, and a handler five frames late loses nothing (four places and the shift register); three quarters would save a twelfth of an entry a character and leave three frames of slack, which the top rate (a frame is 320 cycles at 2 Mbaud) does not afford beside the image's longest handler |
 | the receiver time-out, RTOF after RTOR.RTO bit times (33.5.16) | the TAIL of the paced receiver on a FULL instance, at ten bit times: the characters below the level are delivered within two frames of the last stop bit, and a burst costs one entry more |
 | IDLE, one idle frame once a burst (33.8.10) | the tail where the instance has no time-out (an LPUART), and THE EDGE OF A RECEIVE ENGINE on every instance - a channel can sit on a BASIC USART or an LPUART, and IDLE is the flag table 184 gives them all |
 | EIE, PEIE under DMAR (33.8.1, 33.8.4) | armed with a receive engine: every error enters the vector once and is counted there, exactly |
@@ -458,7 +465,18 @@ neither. `uart_engines_distinct()` lives here.
 
 - **CR3.DMAT / CR3.DMAR** are set in `init()` before the enable, and the
   matching INTERRUPT is NOT armed: the request and the interrupt are the
-  same condition.
+  same condition. Neither bit is UE-protected (33.8.4), which is what
+  lets the vector drop and raise DMAR with the instance running.
+- **THE LEVELS ARE THE RULE'S** (docs/design/dma.md): the receive engine
+  arms at `UartOptions::rx_priority`, `very_high` unless the program
+  ranks another channel above its ring - the FIFO and the shift register
+  hold nine characters, and a channel starved past them loses the next
+  one - and the transmit engine at `high`, a starved transmit only
+  leaving the line idle. RM0444 10.4.4 alternates a memory-to-memory
+  channel with any other requester, so one copy never starves the ring;
+  two copies alternate with each other and do, and the ring at
+  `very_high` beside the same pair loses nothing (`test_stm32_dma`
+  letter `p`, below).
 - **`dma_isr()`** is the body of whichever channel vector the engines
   report on; each engine reads only its own channel's flags. On the
   receive channel the ring's HALF and FULL marks arrive: the full one is
@@ -514,7 +532,12 @@ neither. `uart_engines_distinct()` lives here.
 - **In FIFO mode** - the default where the instance has one - the two
   requests are TXFNF and RXFNE (33.5.19's two notes): still one request
   a character, with the FIFO as slack in front of each channel, and the
-  transmit threshold written but never armed.
+  transmit threshold written but never armed. THE RECEIVE FIFO STAYS ON
+  UNDER THE ENGINE, WITH A KICK: `isr()` drops and raises DMAR when an
+  entry for the line's IDLE, a receive error or RXFT at seven eighths
+  finds RXFNE still set - the cure for this silicon's FIFO wedge, the
+  bench finding below - and `rx_kicks()` counts it. Without the FIFO
+  (`.fifo = false`) there is nothing to wedge and nothing to watch.
 - **`release()` stops the instance before its channels**: 10.4.5 stops a
   circular transfer by stopping the peripheral's requests first, a ring
   having no idle moment of its own.
@@ -807,10 +830,98 @@ RTC's wake-up timer as the backstop:
   reaches further than the request path. Recorded as measured, not
   explained.
 
+### The receive FIFO under a starved channel (`test_stm32_dma` letters `p` and `q`)
+
+**A RECEIVE FIFO BEHIND A STARVED CHANNEL CAN WEDGE, AND IT IS THE
+SILICON.** Measured on the STM32G0B1RE (revision Z) with USART2's ring on
+DMA1's channel 7 and two memory-to-memory copies on channels 1 and 2 -
+the pair alternating with each other (RM0444 10.4.4) and the ring ranked
+below them: after a starvation of a little over one character time - two
+entries queued - the receiver can stop for good. RXFNE stands with one to
+four entries, DMAR is set, the channel is enabled with its count frozen,
+the DMAMUX routes the request with no overrun, ORE is clear, and nothing
+moves; new characters fill the FIFO, ORE follows, and the receiver is
+dead until it is initialized again. ST's HAL v1.4.7 alone, configured
+the CubeMX way on the same board under the same starvation, wedges in
+the same state register for register; it hides it during a stream only
+because its error handler treats every overrun under DMA as fatal and
+restarts the transfer - a loss each time. Every difference between the
+two sequences (DMAR before or after UE and the channel, the threshold
+code, IDLEIE, DMAT and the transmit channel, the receive channel's
+number, starved by number or by level) was measured shared or harmless.
+Neither ES0548 Rev 3 nor ES0418 Rev 5 lists it. How often a starvation
+wedges depends on the cycle at which the grant comes back - 0 to 17 % of
+the episodes for one length, moved by a few cycles of the copies' launch.
+
+What releases a wedge, and what does not:
+
+| action | releases | at what cost |
+|---|---|---|
+| DMAR cleared and set again | at once, every time | none - the standing entries are taken in order |
+| the DMAMUX channel routed to request 0 and back | at once, every time | none |
+| the channel's EN cleared and set | yes | the ring's position is lost |
+| a CPU read of RDR, or the FIFO drained | yes | the bytes read |
+| ORE or any ICR flag cleared, RQR.RXFRQ, the DMAMUX rewritten with its own value, a new character | NO | - |
+
+The DMAMUX toggle shows the request ASSERTED throughout - handed to the
+channel anew it is served within 200 cycles with no character arriving -
+so the channel takes no further request until it sees this one fall:
+10.4.3's handshake with a FIFO that keeps its request up across the
+acknowledge because another entry stands behind the one just read fits
+every fact, and nothing here can see the two signals themselves. With the
+FIFO off there is no second entry and the wedge never formed - but every
+starvation above one character then loses frames.
+
+**THE CURE IS A KICK, AND THE FIFO STAYS.** The receive engine's vector
+drops and raises DMAR (`Usart::rx_request_restart()`) when an entry for
+the line's IDLE, a receive error or RXFT finds RXFNE still set on a fresh
+read; RXFT is armed at seven eighths under an engine, the FIFO one entry
+and the shift register short of an overrun. The three are each needed:
+IDLE delivers the tail of a burst the threshold never reaches but comes a
+character after the burst ends, too late inside a long one; the threshold
+catches a wedge mid-stream; the error keeps a FIFO that both missed from
+staying dead. A healthy stream never kicks - the channel empties the FIFO
+within a few bus cycles of each character.
+
+Measured, the ring told `rx_priority = low` so the pair starves it for
+real (letter `q`, the host as the sender through the ST-LINK's bridge,
+two copies launched together every 5 ms, a 2.5 s window each, every byte
+of the xorshift stream judged with gaps located and measured):
+
+| baud, pair | longest starvation | STM32G0B1RE | STM32G071RB |
+|---|---|---|---|
+| 115200, 2 x 2048 B | 2.6 characters | 23104 bytes in sequence, 0 kicks | 23104 in sequence, 0 kicks |
+| 921600, 2 x 256 B | 4.3 characters | 153180 in sequence, 27 kicks | 146280 in sequence, 29 kicks |
+| 921600, 2 x 512 B | 6.8 to 7.2 characters | 153180 in sequence, 223 kicks | 146740 in sequence, 90 kicks |
+| 921600, 2 x 2048 B | 22 characters | 401 gaps of 2715 bytes, every one counted (`rx_skips()` 2715), the stream in sequence to its end | 401 gaps of 2584 bytes, `rx_skips()` 2584, in sequence to its end |
+| 921600, no copies, after | - | 153180 in sequence | 146280 in sequence |
+
+A kick at 4.3 characters is a wedge cured: that starvation alone queues
+five entries, short of the seven RXFT watches and with no IDLE inside a
+continuous stream. The same board without the kick, the oracle's
+measurement on the STM32G0B1RE: 28 of 992 frames delivered at 921600 with
+a 256-byte pair, the receiver dead at the end; with the FIFO off, 580 of
+993. With the ring at its default `very_high` the pair starves nothing
+(letter `p`: 115200 with a 2 KB pair, 921600 with 512 B and 2 KB pairs -
+every byte in sequence, no overrun, no kick, on both boards).
+
+WHAT THE KICK COSTS, read in the release listing of `test_stm32_dma`'s
+USART2 vector: an entry that does not kick pays a literal load, a mask
+test, one more ISR load and a branch over the vector it already had; a
+kick is a call to `rx_request_restart()` - the guard, a CR3 load, a BICS
+and two stores, the mask held for six instructions - and the saturating
+count, about twenty cycles. The RXFT entry is a LEVEL: under a starvation
+of seven characters or more the vector re-enters, kicking, until the
+channel is served (77201 kicks in 10 s with 256-byte pairs back to back at
+921600, where more than nine characters pile up between relaunches) - a cost that
+exists only past the point where the FIFO off already loses every frame.
+
 ## On the STM32G071RB
 
 `test_stm32_serial` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
-0x2000) and scores **83/83** against the G0B1RE's 88.
+0x2000) and scores **91/91** against the G0B1RE's 96, its console the
+FIFO-mode USART2 it defaults to; letters `y`, `w` and `v` pass there with
+`brio stress` as on the bigger part.
 
 **TABLE 183 IS A DIFFERENT ROW THERE, and the silicon says so.** The part
 has FOUR USARTs and one LPUART: USART1 and USART2 FULL, **USART3 and
@@ -925,25 +1036,26 @@ Implemented, not bench-verified:
   and k to y): the suite outgrew the part's 64 KB whole, and the scores
   under "On the STM32G031K8" are the one image's; one run of each image
   on that board measures them.
-- The receive ring off the STM32G0B1RE: `test_stm32_dma`'s console
-  carries both engines on the STM32G071RB too, and its letter `o` is
-  built for both smaller parts; none of it has run there (the boards are
-  not on the desk), and one run of the suite on each measures it. The ring
-  under an `LpUart` is the same task's and compile-only, as the LPUART's
-  engine slots are ([lpuart.md](lpuart.md)).
+- The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
+  built for it and has not run there (the board is not on the desk); one
+  run of the suite measures it. The ring under an `LpUart`, its kick
+  included, is the same task's and compile-only, as the LPUART's engine
+  slots are ([lpuart.md](lpuart.md)).
+- The kick racing a character that lands on the very toggle at rates
+  above 921600: the ST-LINK's bridge is the ceiling of the host-fed
+  letters, and an on-board sender above it would measure it.
 - `Rs485` as a TASK (the driver-enable timings are measured through the
   resource on the DE pad; the task's own `init()` path is compile-only).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured
   on an LPUART, docs/stm32g0/lpuart.md).
-- The FIFO default off the STM32G0B1RE, and with it the paced receiver
+- The FIFO default on the STM32G031K8, and with it the paced receiver
   (RXFT, the time-out or IDLE for the tail) and letters `p` and `q`: the
-  scores under "On the STM32G071RB" and "On the STM32G031K8" are the
-  one-register console's,
-  and the consoles that run in FIFO mode by default there - the
-  G071RB's USART2, the LPUART1 three suites move to on the G031K8 - are
-  compiled and not run (the G031K8's own USART2 is BASIC and keeps the
-  one-register transport, which `brio check stm32g0` proves at compile
-  time); one run of `test_stm32_serial` on each board measures it.
+  score under "On the STM32G031K8" is the one-register console's, and
+  the LPUART1 three suites move to there runs in FIFO mode by default
+  and is compiled, not run (the G031K8's own USART2 is BASIC and keeps
+  the one-register transport, which `brio check stm32g0` proves at
+  compile time); one run of `test_stm32_serial` on the board measures
+  it.
 - The default under a wake on an ADDRESS MATCH: a Uart naming
   `wake_from_stop = address_match` with `fifo` unstated keeps the FIFO
   off, and no suite builds one - letter w arms that wake through the

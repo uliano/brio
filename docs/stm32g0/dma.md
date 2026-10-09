@@ -118,6 +118,26 @@ handed in at `arm()`:
   `busy()`, `complete()` from the handler or `poll()`, `abandon()`. This
   surface is every family's.
 
+THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (docs/design/dma.md):
+`DmaPriority` lives in `stm32g0/dma_engine.hpp`, so a transport names a
+level without including the controller, and each engine's `arm()`
+defaults to the rule's level for its direction - the receive engine and
+the ping-pong source at `very_high` (their peripheral overruns: a USART's
+ORE, an SPI's OVR, the ADC's OVR, a capture's CCxOF), the transmit engine
+and the player at `high` (theirs waits, or holds its last value a
+period), the copy at `low` (no request paces it). The drivers name
+theirs at the call with the chapter's reason: the `Uart`'s ring at
+`UartOptions::rx_priority` (`very_high` by default) and its transmit at
+`high`, the `SpiHost`'s receive at `very_high` and transmit at `high`
+(35.5.11: the RXFIFO full, OVR discards the frame and every one after
+it), the `I2cHost`'s two at `high` (32.4.7: a byte not taken or not
+written stretches SCL, nothing overruns). One paced output on this die is
+an exception to "only slows": the DAC, whose trigger finding its request
+unacknowledged converts the old data and raises DMAUDR, the stream to be
+restarted (16.4.8) - the player stays at `high`, and a program that plays
+one beside copies on higher channels ranks it at the call. The raw
+channel's `DmaChannelConfig` keeps CCR.PL's reset value, `low`.
+
 `Elem` IS THE WIDEST BEAT the binding allows - the peripheral register's
 width - and one `sizeof` decides PSIZE, MSIZE and the address arithmetic
 together, so they cannot disagree; a type that is not 1, 2 or 4 bytes
@@ -414,14 +434,66 @@ tie-break, and it is exact: channel 1 was ahead every time, INCLUDING
 when it was the low-priority channel. The lower index wins and no
 register configures it.
 
-**THE PL FIELD'S OWN EFFECT IS DECLINED, NOT DISPROVED.** Two channels
+**PL BETWEEN TWO TIMER-PACED CHANNELS DID NOT SHOW.** Two channels
 over-requested at 32 million update events a second EACH - five times the
 throughput measured below - still finished within one or two counts of
-each other whichever way the two levels were set. This bench has
-therefore measured the ALTERNATION and the INDEX and has NOT shown PL
-reordering anything; a stimulus that keeps one channel's request standing
-while the other's is down is what would show it, and none of this suite's
-sources does that.
+each other whichever way the two levels were set (letter `c`). PL's
+effect is what letters `p` and `q` measure instead, below: the receive
+ring's channel read back at CCR.PL 3 and 0, and the pair starving it at
+the one and not at the other.
+
+**ONE COPY STARVES NOTHING; TWO DO, AND THE LEVEL IS WHAT KEEPS A RING
+FIRST** (`test_stm32_dma` letters `p` and `q`, outside `z`, with `brio
+stress` as the sender). The alternation above is between a memory-to-
+memory channel and ANY other requester, so a single copy of any length
+never starved USART2's receive ring (16 KB copies, 127 character times at
+921600, lost nothing). Two copies launched together on channels 1 and 2
+alternate with EACH OTHER, and a ring on channel 7 at their level waits
+for the pair: 2.6 character times at 115200 with 2 KB copies, 4.3 to 22
+at 921600 with 256 B to 2 KB ones. At the ring's default `very_high` the
+same pairs starved nothing - every byte of three 2.5 s legs in sequence,
+no overrun, no kick of the FIFO's cure, on the STM32G0B1RE and the
+STM32G071RB alike; told `rx_priority = low`, the ring was starved for
+real and the receive FIFO's kick absorbed every starvation up to nine
+characters with no byte lost, and past that every gap was counted
+([usart.md](usart.md), "The receive FIFO under a starved channel", has
+the table). The pair ran its blocks at about 3.5 cycles a byte each, the
+two together.
+
+**A RELEASED REQUESTER HOLDS NOTHING HERE** (`test_stm32_dma` letter
+`r`, no wire). docs/design/dma.md's release contract asks whether a
+peripheral's raised request outlives its release. The DMAMUX routes ONE
+request line to each channel (11.4.4), so a stray could only reach a
+channel that selects the SAME request again - the peripheral's next
+owner. Measured with USART1's transmit (TXE behind DMAT), SPI1's transmit
+(TXE behind TXDMAEN) and TIM3's update (one software update behind UDE),
+each brought up with its request standing and no channel listening, then
+released, then DMA1's channel 5 routed to the same request and enabled
+over four bytes into the requester's own register, on the STM32G0B1RE
+and the STM32G071RB alike:
+
+| the release | USART1_TX | SPI1_TX | TIM3_UP |
+|---|---|---|---|
+| A: block disabled, RESET pulsed, clock gated (the contract) | 0 | 0 | 0 |
+| B: DMA enable cleared, clock gated, no reset | 0 | 0 | 0 |
+| C: DMA enable left SET, clock gated, no reset | 0 | 0 | 0 |
+| ... and C's clock opened again, no reset | 0 | 4 | 1 |
+| D: DMA enable cleared, clock left on, no reset | 0 | 0 | 0 |
+| E: nothing released (the control) | 2 | 4 | 1 |
+
+Unlike the CH32V203's, a gated block here withdraws its request, and so
+does a DMA enable cleared with the clock on: no item reaches the next
+owner. What does survive is a DMA ENABLE LEFT SET: the moment anything
+opens the block's clock again without a reset, SPI1 asks again for every
+frame and TIM3 serves its pending update (USART1 asked for nothing, its
+UE being clear). Every release() of this stratum's transports therefore
+pulses the block's reset before the gate - the USART and LPUART tasks,
+the SPI host and client, the I2C resource, the ADC, the DAC, the timers
+- which clears every enable. THE DIRECTION MATTERS TO THE DETECTOR:
+USART1's standing transmit request moved nothing into a channel reading a
+RAM cell into RAM and two items into one writing TDR (the second into
+the shift register, then the wire's pace), so the incoming owner writes
+where the line's owner would.
 
 **Throughput.** 512 words (2048 bytes) memory to memory in 2638 cycles =
 5.15 cycles a word, about 49.7 MB/s at 64 MHz - the two AHB accesses
@@ -733,11 +805,12 @@ periods, rising moves 10 words, falling 10, both 20.
 
 ## On the STM32G071RB
 
-`test_stm32_dma`'s letters `a` to `n` run on the Nucleo-G071RB (DEV_ID
-0x460, REV_ID 0x2000) and score **65/65** against the G0B1RE's 69, the
-four missing verdicts being the two the part cannot have and the two that
-skip with them (letter `o` is built for this board and not run on it,
-below):
+`test_stm32_dma` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
+0x2000) and scores **74/74** against the G0B1RE's 78, the four missing
+verdicts being the two the part cannot have and the two that skip with
+them; letter `o`'s circular receive, letter `r`'s released requesters
+and, outside `z`, letters `p`, `q` and `u` pass there as on the bigger
+part (the receive FIFO's kick fired on this die too - [usart.md](usart.md)):
 
 - **There is ONE controller.** `dma_present(2)` is false, so `Dma<2>` and
   `DmaChannel<2, n>` do not compile there at all and DMA1's seven channels
@@ -839,16 +912,26 @@ Driver gaps:
 Implemented but not bench-verified: on the STM32G0B1RE, the circular
 receive at a half-word or word beat (compiled at all three in the
 family fixture; letter `o` runs bytes, the beat a USART gives - a
-converter's stream into a ring would measure the wider ones), and the
+converter's stream into a ring would measure the wider ones), the
 ring's restart after a transfer error (`harvest()` starting a channel
 10.4.7 stopped, the view cleared: a transfer error needs an address no
-transport hands the engine, so nothing stages it). On the STM32G071RB
-and the STM32G031K8, letter `o` (built for both, the boards not on the
-desk; one run of the suite on each measures it), and 10.4.5's
-peripheral-to-peripheral transfer: the leg is arranged over TIM6's
-update moving TIM3's compare into TIM4's, and those parts have no TIM4
-(the STM32G031K8 no TIM6 either), so it skips by name there;
-rearranging it over the timers they have would measure it.
+transport hands the engine, so nothing stages it), and the held request
+of an I2C, an ADC and a DAC (letter `r` stages USART1, SPI1 and TIM3 -
+an I2C request needs a tenure on a wire, a converter's a conversion; the
+reset in their release() is applied by reading). On the STM32G031K8,
+letter `o` and letters `p` and `q` (built for it, the board not on the
+desk; one run of the suite measures them - the console has no engines
+there, so `p` and `q` skip by name). On the STM32G071RB and the
+STM32G031K8, 10.4.5's peripheral-to-peripheral transfer: the leg is
+arranged over TIM6's update moving TIM3's compare into TIM4's, and those
+parts have no TIM4 (the STM32G031K8 no TIM6 either), so it skips by name
+there; rearranging it over the timers they have would measure it.
+
+A suite gap: letter `n`'s Stop leg counts its LPTIM1 alarm on the LSE
+and does not start it. After a power-on the backup domain has the LSE
+off and the core never leaves the Stop (seen on the STM32G071RB); once
+an image that starts it has run - `test_stm32_serial`'s wake letters do
+- the letter passes, the LSE surviving every reset but a power-on.
 
 Errata not staged, and why: 2.4.1 is a same-cycle coincidence between a
 hardware error and a CGIFx write, and the write does not exist in this

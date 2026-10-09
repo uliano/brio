@@ -203,8 +203,9 @@ void lpuart_verbs() {
     L::write_word(0x100);
     (void)L::tx_data_address();
     (void)L::rx_data_address();
-    (void)L::dma_transmit(true);
-    (void)L::dma_receive(true);
+    L::dma_transmit(true);
+    L::dma_receive(true);
+    L::rx_request_restart();
     L::rxne_interrupt(true);
     L::txe_interrupt(true);
     (void)L::txe_interrupt();

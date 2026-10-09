@@ -447,19 +447,26 @@ struct Lpuart {
     static volatile void* tx_data_address() { return &regs().TDR; }
     static volatile void* rx_data_address() { return &regs().RDR; }
 
-    static bool dma_transmit(bool on) {
-        if (enabled()) {
-            return false;
-        }
+    /// CR3.DMAT / CR3.DMAR (34.7.4): no "only when UE = 0" clause on
+    /// either, so both are written with the instance running - Usart's
+    /// verbs, the same guard for the same shared register.
+    static void dma_transmit(bool on) {
+        InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_DMAT) : (regs().CR3 & ~USART_CR3_DMAT);
-        return true;
     }
-    static bool dma_receive(bool on) {
-        if (enabled()) {
-            return false;
-        }
+    static void dma_receive(bool on) {
+        InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_DMAR) : (regs().CR3 & ~USART_CR3_DMAR);
-        return true;
+    }
+    /// DMAR dropped and raised again (Usart::rx_request_restart()): the
+    /// receive engine's kick. The wedge it cures was measured on a USART;
+    /// the LPUART's receive FIFO and its request take the kick by reading
+    /// (docs/stm32g0/lpuart.md).
+    static void rx_request_restart() {
+        InterruptGuard guard;
+        const uint32_t cr3 = regs().CR3;
+        regs().CR3 = cr3 & ~USART_CR3_DMAR;
+        regs().CR3 = cr3;
     }
 
     /// The DMAMUX rows of table 55, published by the peripheral that

@@ -46,9 +46,10 @@
  * written).
  *
  * Facts that shape the code (RM0444 33.5, 33.8; ES0548 rev Z):
- *  - BRR, CR1's frame fields, CR2, CR3, GTPR and PRESC are written only
- *    with UE = 0 (33.8.x "can only be written when the USART is
- *    disabled"); the task disables around every configuration, including
+ *  - BRR, CR1's frame fields, CR2, CR3's mode fields, GTPR and PRESC are
+ *    written only with UE = 0 (33.8.x "can only be written when the USART
+ *    is disabled" - for CR3 bit by bit, 33.8.4, and DMAT and DMAR carry
+ *    no such clause); the task disables around every configuration, including
  *    rebase(), and every resource verb below that touches such a field
  *    REFUSES while the instance is enabled rather than storing into a
  *    register the silicon ignores;
@@ -1167,30 +1168,47 @@ struct Usart {
     static volatile void* rx_data_address() { return &regs().RDR; }
 
     /**
-     * CR3.DMAT / CR3.DMAR (33.8.5): whether the peripheral raises a DMA
+     * CR3.DMAT / CR3.DMAR (33.8.4): whether the peripheral raises a DMA
      * REQUEST for the condition, instead of - or as well as - the
      * interrupt. With the bit set, TXE (or RXNE) drives the request line
      * and the channel clears the condition by writing (or reading) the
      * data register, so the matching interrupt must NOT also be armed:
      * both would serve the same byte.
      *
-     * Not part of configure(): CR3 is UE-protected as a whole, but these
-     * two bits are what an engine turns on AFTER the frame is settled,
-     * and an application without an engine never touches them.
+     * NOT UE-PROTECTED: 33.8.4 gives the "only when UE = 0" clause bit by
+     * bit, and DMAT and DMAR carry none, so either is written with the
+     * instance running. Not part of configure() all the same - an engine
+     * turns its bit on once the frame is settled, and an application
+     * without one never touches them. CR3 is read-modify-written here
+     * and by the receive engine's vector (rx_request_restart()), hence the
+     * guard.
      */
-    static bool dma_transmit(bool on) {
-        if (enabled()) {
-            return false;
-        }
+    static void dma_transmit(bool on) {
+        InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_DMAT) : (regs().CR3 & ~USART_CR3_DMAT);
-        return true;
     }
-    static bool dma_receive(bool on) {
-        if (enabled()) {
-            return false;
-        }
+    static void dma_receive(bool on) {
+        InterruptGuard guard;
         regs().CR3 = on ? (regs().CR3 | USART_CR3_DMAR) : (regs().CR3 & ~USART_CR3_DMAR);
-        return true;
+    }
+
+    /**
+     * DMAR dropped and raised again: THE RECEIVE REQUEST PRESENTED ANEW.
+     * The cure for this silicon's FIFO wedge (docs/stm32g0/usart.md, "The
+     * receive FIFO under a starved channel"): after a starvation of a
+     * little over a character time, a receive FIFO holding entries can
+     * keep its request standing while the channel takes no further one,
+     * and nothing but the request seen to fall restarts it - the DMAMUX
+     * routed away and back does the same, a cleared flag or a new
+     * character does not. Legal with UE set (33.8.4, above); the
+     * bracketed read and two stores, under a guard because CR3 is shared
+     * with the main context's verbs.
+     */
+    static void rx_request_restart() {
+        InterruptGuard guard;
+        const uint32_t cr3 = regs().CR3;
+        regs().CR3 = cr3 & ~USART_CR3_DMAR;
+        regs().CR3 = cr3;
     }
 
     /**
@@ -1380,6 +1398,11 @@ struct UartOptions {
     /// burst, where RXFNE costs one per character. `none` keeps RXFNE -
     /// every character its own entry, the shape for a receiver that
     /// must answer each byte at once.
+    ///
+    /// UNDER A RECEIVE ENGINE THE RECEIVE THRESHOLD IS THE TASK'S: seven
+    /// eighths, the FIFO wedge's watch (UartTask, "THE FIFO STAYS ON UNDER
+    /// A RECEIVE ENGINE"), and `rx_threshold` left at its default - a
+    /// value named there is refused, since nothing would read it.
     UartFifo fifo{};
     UartFifoThreshold rx_threshold = UartFifoThreshold::half;
     UartFifoThreshold tx_threshold = UartFifoThreshold::full_or_empty;
@@ -1425,6 +1448,16 @@ struct UartOptions {
 
     /// 33.5.21: what wakes the core out of Stop through this instance.
     UsartWakeSource wake_from_stop = UsartWakeSource::none;
+
+    /// The receive engine's level in the DMA arbitration (RM0444 10.4.4's
+    /// CCR.PL), `very_high` by default: RDR and the FIFO behind it hold
+    /// nine characters at most, and a channel starved past them loses the
+    /// next one to an overrun - which two memory-to-memory copies, each
+    /// alternating with the other, do to a ring ranked below them
+    /// (docs/design/dma.md). A program that ranks another channel above
+    /// its ring says so here; refused on a port with no receive engine,
+    /// which has no channel to rank.
+    DmaPriority rx_priority = DmaPriority::very_high;
 };
 
 /// A copy of `base` with the RS-485 driver enable filled in - the maker
@@ -1532,6 +1565,27 @@ struct UartRxRing<true, Owner, size, Engine> {
  * belongs to is not transferred (DDRE clear, 33.8.4), and no flag is ever
  * cleared by a read of RDR - every one has its ICR bit - so the channel
  * loses nothing to a clear.
+ *
+ * THE RECEIVE ENGINE ARMS AT `rx_priority`, very_high by default, and the
+ * transmit engine at high (docs/design/dma.md): a starved receive
+ * overruns, a starved transmit leaves the line idle a while.
+ *
+ * THE FIFO STAYS ON UNDER A RECEIVE ENGINE, WITH A KICK. On this silicon a
+ * channel starved for a little over a character time - two entries queued
+ * - can leave the receive FIFO WEDGED: entries standing, DMAR set, the
+ * channel enabled with its count frozen, and nothing moving until the
+ * request is seen to fall; the FIFO then fills and overruns, and the
+ * receiver is dead. ST's own HAL wedges the same way on the same board
+ * (docs/stm32g0/usart.md has the measurement and what does and does not
+ * release it). So isr() watches for it: an entry for the line's IDLE, a
+ * receive error, or RXFT - armed at seven eighths, the FIFO one entry and
+ * the shift register short of an overrun - that finds RXFNE still set
+ * drops DMAR and raises it again (Usart::rx_request_restart()), and the
+ * channel takes the standing entries at once with no byte lost. With it
+ * the FIFO absorbs any starvation up to the nine characters it and the
+ * shift register hold; without the FIFO (`.fifo = false`) the same
+ * starvation above one character loses frames. A healthy stream never
+ * kicks; rx_kicks() counts the kicks.
  */
 template <typename Res, UartPins pins, uint32_t rx_size = 64,
           uint32_t tx_size = 256, typename TxEngine = NoDmaEngine,
@@ -1561,6 +1615,13 @@ class UartTask {
     static_assert(uart_engines_distinct<TxEngine, RxEngine>(),
                   "the transmit and receive engines must use DIFFERENT DMA "
                   "channels: a channel moves data in one direction only");
+    static_assert(RxEngine::present || opts.rx_priority == DmaPriority::very_high,
+                  "brio Uart: rx_priority ranks the receive engine's channel - this port "
+                  "has no receive engine");
+    static_assert(!RxEngine::present || opts.rx_threshold == UartFifoThreshold::half,
+                  "brio Uart: under a receive engine the receive FIFO threshold is the "
+                  "task's (seven eighths, the wedge's watch - docs/stm32g0/usart.md); "
+                  "rx_threshold is the interrupt receiver's pace");
 
     // The instance-capability refusals of table 183/184, at the line the
     // application typed them on.
@@ -1641,6 +1702,19 @@ class UartTask {
     /// build never reads or writes it.
     static inline volatile uint8_t m_dma_faults = 0;
 
+    /// The receive request presented anew (isr()'s kick, rx_kicks()).
+    /// Touched only under a receive engine with the FIFO on.
+    static inline volatile uint8_t m_rx_kicks = 0;
+
+    /// EVERY COUNTER SATURATES at 255: a count that wraps reads as a few
+    /// errors after a storm of them. One compare on a rare path.
+    [[gnu::always_inline]] static void bump(volatile uint8_t& counter) {
+        const uint8_t v = counter;
+        if (v != 0xFFu) {
+            counter = static_cast<uint8_t>(v + 1u);
+        }
+    }
+
     /// Whether the consumer has looked at the receive ring and found it
     /// empty since the last harvest() that reported an edge - what makes
     /// harvest()'s answer an EDGE over a ring the channel fills with no
@@ -1689,6 +1763,18 @@ public:
     /// entry - the one-register instance, and `rx_threshold = none`.
     static constexpr bool rx_paced =
         !RxEngine::present && fifo_mode && opts.rx_threshold != UartFifoThreshold::none;
+
+    /// THE RECEIVE ENGINE'S KICK, where it applies: an engine over the
+    /// FIFO. Its watch is RXFT at seven eighths beside IDLE and the
+    /// receive errors (the class comment's "THE FIFO STAYS ON UNDER A
+    /// RECEIVE ENGINE"); without the FIFO there is no second entry to
+    /// wedge behind, and nothing to watch.
+    static constexpr bool rx_kick = RxEngine::present && fifo_mode;
+
+    /// The receive threshold CR3.RXFTCFG carries: the interrupt receiver's
+    /// pace, or under an engine the wedge's watch.
+    static constexpr UartFifoThreshold rx_threshold_in_force =
+        RxEngine::present ? UartFifoThreshold::seven_eighths : opts.rx_threshold;
 
     /// THE END OF A BURST, the flag that delivers the tail and the
     /// engine's edge: the receiver time-out (33.5.16) for the paced
@@ -1762,7 +1848,7 @@ public:
         }
         if constexpr (fifo_mode) {
             (void)S::fifo(true);
-            (void)S::fifo_thresholds(opts.rx_threshold, opts.tx_threshold);
+            (void)S::fifo_thresholds(rx_threshold_in_force, opts.tx_threshold);
         }
         if constexpr (opts.swap) {
             (void)S::swap(true);
@@ -1827,13 +1913,14 @@ public:
             (void)S::receiver_timeout(opts.rx_timeout);
         }
 
-        // CR3's two request bits are UE-protected like the rest of the
-        // register, so they go in here, before the enable.
+        // CR3's two request bits carry no UE clause (33.8.4); they go in
+        // before the enable all the same, so the first TXE and the first
+        // RXNE already find their requests armed.
         if constexpr (has_tx_engine) {
-            (void)S::dma_transmit(true);
+            S::dma_transmit(true);
         }
         if constexpr (has_rx_engine) {
-            (void)S::dma_receive(true);
+            S::dma_receive(true);
         }
 
         S::enable(true);
@@ -1841,8 +1928,11 @@ public:
 
         if constexpr (has_rx_engine) {
             // NOT S::rxne_interrupt(true): the channel consumes RXNE -
-            // into the whole receive ring, lap after lap, from here on.
-            RxEngine::arm(S::rx_data_address(), S::dma_rx_request(), RxRing::storage);
+            // into the whole receive ring, lap after lap, from here on -
+            // at the options' level, very_high unless the program says
+            // otherwise (UartOptions::rx_priority).
+            RxEngine::arm(S::rx_data_address(), S::dma_rx_request(), RxRing::storage,
+                          opts.rx_priority);
             m_rx_drained = true;
             (void)RxEngine::start();
             // The vector serves the line's IDLE edge and every receive
@@ -1854,6 +1944,12 @@ public:
             S::clear_flags(UsartClear::idle);
             S::interrupts(UsartInterrupt::idle | UsartInterrupt::parity, true);
             S::error_interrupt(true);
+            if constexpr (rx_kick) {
+                // The wedge's watch: RXFT at seven eighths enters the
+                // vector one entry and the shift register short of an
+                // overrun, where the kick still loses nothing.
+                S::rx_threshold_interrupt(true);
+            }
         } else if constexpr (rx_paced) {
             S::clear_flags(rx_tail);
             S::rx_threshold_interrupt(true);
@@ -1864,7 +1960,10 @@ public:
             S::rxne_interrupt(true);
         }
         if constexpr (has_tx_engine) {
-            TxEngine::arm(S::tx_data_address(), S::dma_tx_request());
+            // HIGH, a level below the receive ring: a transmit channel
+            // that waits leaves TXE standing and the line idle a while,
+            // and loses nothing.
+            TxEngine::arm(S::tx_data_address(), S::dma_tx_request(), DmaPriority::high);
         }
         // TXE is armed on demand by write_byte() when there is no engine.
 
@@ -1903,7 +2002,7 @@ public:
             const uint8_t f = TxEngine::service();
             if ((f & TxEngine::flag_error) != 0u) {
                 (void)TxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1;
+                bump(m_dma_faults);
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
                     TxEngine::complete()));
@@ -1915,7 +2014,7 @@ public:
             if (f != 0u) {
                 if ((f & RxEngine::flag_error) != 0u) {
                     (void)RxEngine::abandon();   // harvest() starts it again
-                    m_dma_faults = m_dma_faults + 1;
+                    bump(m_dma_faults);
                 } else if ((f & RxEngine::flag_complete) != 0u) {
                     (void)RxEngine::complete();   // a lap: counted, nothing re-armed
                 }
@@ -1960,16 +2059,16 @@ public:
             if (errors != 0u) {
                 S::clear_flags(errors);   // the ICR bits sit at the ISR positions
                 if ((errors & UsartFlag::ore) != 0u) {
-                    m_hw_overruns = m_hw_overruns + 1;
+                    bump(m_hw_overruns);
                 }
                 if ((errors & UsartFlag::fe) != 0u) {
-                    m_frame_errors = m_frame_errors + 1;
+                    bump(m_frame_errors);
                 }
                 if ((errors & UsartFlag::pe) != 0u) {
-                    m_parity_errors = m_parity_errors + 1;
+                    bump(m_parity_errors);
                 }
                 if ((errors & UsartFlag::ne) != 0u) {
-                    m_noise_errors = m_noise_errors + 1;
+                    bump(m_noise_errors);
                 }
                 if ((errors & (UsartFlag::ore | UsartFlag::fe | UsartFlag::pe)) != 0u) {
                     m_rx_lost = m_rx_lost + 1u;   // characters the channel never took
@@ -2107,7 +2206,7 @@ public:
             // the only place that can tell a wake from a plain byte.
             if ((st & UsartFlag::wuf) != 0u) {
                 r.ICR = UsartClear::wuf;
-                m_wakes = m_wakes + 1;
+                bump(m_wakes);
             }
         }
 
@@ -2117,6 +2216,21 @@ public:
             // here would take a byte from under the channel. IDLE is
             // cleared through ICR; the errors are harvest()'s, through ICR
             // too.
+            if constexpr (rx_kick) {
+                // THE KICK, before harvest() clears the errors: an entry for
+                // the line's IDLE, a receive error or the threshold that
+                // finds the FIFO STILL holding a character - a fresh read,
+                // a healthy channel having emptied it within a few bus
+                // cycles - is a request the channel is not serving, and
+                // DMAR dropped and raised presents it anew (the class
+                // comment). A threshold entry is a level: it re-enters while
+                // a starved channel leaves the FIFO above it.
+                if ((st & (UsartFlag::idle | UsartFlag::receive_errors | UsartFlag::rxft)) != 0u &&
+                    (r.ISR & UsartFlag::rxne) != 0u) {
+                    S::rx_request_restart();
+                    bump(m_rx_kicks);
+                }
+            }
             if ((st & (UsartFlag::idle | UsartFlag::receive_errors)) != 0u) {
                 r.ICR = UsartClear::idle;
                 edge = harvest();
@@ -2146,7 +2260,7 @@ public:
                 if (m_rx.push(b)) {
                     edge = was_empty;
                 } else {
-                    m_rx_overruns = m_rx_overruns + 1;
+                    bump(m_rx_overruns);
                     m_rx.lost();
                 }
             } else {
@@ -2156,7 +2270,7 @@ public:
         if constexpr (!has_rx_engine) {
             if ((st & UsartFlag::ore) != 0u) {
                 r.ICR = USART_ICR_ORECF;   // or this handler re-enters for ever
-                m_hw_overruns = m_hw_overruns + 1;
+                bump(m_hw_overruns);
                 // Characters lost in the silicon (33.5.4): wherever in this
                 // entry's drain they fell, the consumer's next look skips
                 // past all of it.
@@ -2422,7 +2536,8 @@ public:
     /// HardwareRing::overruns()).
     static uint8_t rx_overruns() {
         if constexpr (has_rx_engine) {
-            return static_cast<uint8_t>(m_rx.overruns());
+            const uint32_t n = m_rx.overruns();
+            return n > 0xFFu ? uint8_t{0xFF} : static_cast<uint8_t>(n);   // saturating
         } else {
             return m_rx_overruns;
         }
@@ -2431,6 +2546,19 @@ public:
     static uint8_t parity_errors() { return m_parity_errors; }
     static uint8_t noise_errors() { return m_noise_errors; }
     static uint8_t hw_overruns() { return m_hw_overruns; }
+
+    /// How many times the receive engine's vector presented the receive
+    /// request anew - the FIFO wedge's cure fired (isr(), "THE FIFO STAYS
+    /// ON UNDER A RECEIVE ENGINE"). A healthy stream never moves it; a
+    /// channel starved past a character time may. Always 0, and free,
+    /// without a receive engine or without the FIFO.
+    static uint8_t rx_kicks() {
+        if constexpr (rx_kick) {
+            return m_rx_kicks;
+        } else {
+            return 0;
+        }
+    }
 
     /// How many times WUF was seen in the handler - the only way to tell
     /// "the USART brought the core out of Stop" from "something else
@@ -2465,6 +2593,9 @@ public:
         m_parity_errors = 0;
         m_noise_errors = 0;
         m_hw_overruns = 0;
+        if constexpr (rx_kick) {
+            m_rx_kicks = 0;
+        }
         if constexpr (opts.wake_from_stop != UsartWakeSource::none) {
             m_wakes = 0;
         }
@@ -2607,13 +2738,13 @@ private:
     /// them): FE and PE drop the character, NE keeps it.
     [[gnu::always_inline]] static void count_errors(uint32_t err) {
         if ((err & UsartFlag::fe) != 0u) {
-            m_frame_errors = m_frame_errors + 1;
+            bump(m_frame_errors);
         }
         if ((err & UsartFlag::pe) != 0u) {
-            m_parity_errors = m_parity_errors + 1;
+            bump(m_parity_errors);
         }
         if ((err & UsartFlag::ne) != 0u) {
-            m_noise_errors = m_noise_errors + 1;
+            bump(m_noise_errors);
         }
     }
 
@@ -2666,7 +2797,7 @@ private:
     /// overrun and reported lost.
     [[gnu::always_inline]] static void keep(uint8_t b) {
         if (!m_rx.push(b)) [[unlikely]] {
-            m_rx_overruns = m_rx_overruns + 1;
+            bump(m_rx_overruns);
             m_rx.lost();
         }
     }

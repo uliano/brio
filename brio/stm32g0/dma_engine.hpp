@@ -24,11 +24,13 @@
  * because two headers cannot each define the same tag, and neither is
  * the other's natural home.
  *
- * Beside the tag, the two pieces of vocabulary an OWNER speaks to its
- * engines without including the controller: which of a channel's events
- * interrupt (DmaIrq, handed to arm()), and whether a buffer is aligned
- * for a beat of a given width (dma_beat_aligned, the test an engine's
- * start() makes and a driver makes first, to choose its pump instead).
+ * Beside the tag, the three pieces of vocabulary an OWNER speaks to its
+ * engines without including the controller: the level an engine arms at
+ * (DmaPriority, which a transport names for each engine in its slots),
+ * which of a channel's events interrupt (DmaIrq, handed to arm()), and
+ * whether a buffer is aligned for a beat of a given width
+ * (dma_beat_aligned, the test an engine's start() makes and a driver
+ * makes first, to choose its pump instead).
  */
 
 #pragma once
@@ -40,6 +42,40 @@ namespace brio {
 struct NoDmaEngine {
     NoDmaEngine() = delete;
     static constexpr bool present = false;
+};
+
+/**
+ * CCR.PL (RM0444 10.6.3): the software half of the arbitration. The
+ * hardware half is the channel INDEX and cannot be configured: between
+ * equal levels the lower-numbered channel wins (10.4.4). The DMAMUX in
+ * front of the controller routes one request line to each channel and
+ * ranks nothing (11.4.4).
+ *
+ * THE LEVEL IS THE PERIPHERAL'S (docs/design/dma.md). An engine whose
+ * peripheral OVERRUNS when its channel is starved - a receive ring, an
+ * SPI host's receive, a converter's stream - arms at `very_high`; one
+ * whose peripheral waits or holds its last value - a transmit, a paced
+ * output, an I2C host's receive under its stretched clock - at `high`; a memory-to-
+ * memory copy at `low`. THIS ARBITER'S OWN FACT bounds what the copy can
+ * do: a memory-to-memory channel is re-arbitrated after every single
+ * transfer and, whenever another channel is requesting, the arbiter
+ * ALTERNATES and grants that one, "which may be of lower priority than
+ * the memory-to-memory channel" (10.4.4) - so one copy never starves a
+ * ring, at any level. Two copies alternate with EACH OTHER, and a ring
+ * ranked below them waits for the pair - measured: two copies starved
+ * USART2's receive ring past a character time on the STM32G0B1RE, and
+ * the ring at `very_high` beside the same pair lost nothing
+ * (docs/stm32g0/dma.md); the levels are what keeps it first. The engines' defaults are those three by direction
+ * (stm32g0/dma.hpp), and every driver arms its engines at its own level,
+ * with its chapter's reason beside the call. It lives here, beside the
+ * tag, because a transport names its engines' levels and must not
+ * include the controller to do it.
+ */
+enum class DmaPriority : uint8_t {
+    low = 0,
+    medium = 1,
+    high = 2,
+    very_high = 3,
 };
 
 /**

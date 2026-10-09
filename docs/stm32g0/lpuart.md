@@ -85,7 +85,9 @@ SECOND register group, which only the G0B1 class has and which
   `driver_enable`, `flow_control`, `mute_mode`, `character_match`,
   `wake_from_stop` + `wake_line`, `request`, `send_break`, the flags and
   their ICR twins, the interrupt enables, `dma_transmit`/`dma_receive`
-  and the table-55 request ids - **LPUART1's are the two rows table 55
+  (legal with UE set, 34.7.4 giving DMAT and DMAR no UE clause),
+  `rx_request_restart()` (the receive engine's kick, usart.md's "The
+  receive FIFO under a starved channel") and the table-55 request ids - **LPUART1's are the two rows table 55
   calls `LPUART_RX` and `LPUART_TX` WITH NO INDEX AT ALL, 14 and 15, low
   down among the I2Cs and the SPIs and nowhere near the USARTs' block,
   while LPUART2 sits at 64/65 with the rest of the G0B1 class's
@@ -263,7 +265,11 @@ USART's own code, measured there on a USART):
   swap and the three inversions, MSB first, the break request.
 - The two DMA engine slots. They compile (the family fixture
   instantiates them and a negative refuses two engines on one channel)
-  and no byte has ever moved through one on an LPUART.
+  and no byte has ever moved through one on an LPUART - and with them the
+  receive FIFO's kick: the LPUART's FIFO and its request are the
+  USART's, and whether they wedge the same way behind a starved channel
+  is read, not measured. A ring on an LPUART beside the two copies of
+  `test_stm32_dma` letter `q` would measure both.
 - 7- and 9-bit words, parity and two stop bits.
 - LPUART2 on any kernel clock but PCLK, and LPUART2 as a wake source
   (its EXTI line 35 is in the second register group; only LPUART1's 28

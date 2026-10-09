@@ -65,8 +65,11 @@ A CONTROLLER THAT ARBITRATES DIFFERENTLY still takes the rule. The
 STM32G0's controller alternates a memory-to-memory channel with any
 other requester (RM0444 10.4.4), so ONE copy of any length never starved
 its ring - but two copies alternated with each other and did, and there
-the receive FIFO did not absorb the starvation, it wedged the receiver;
-the ring at the highest level cured both. The RP2040's arbiter serves
+the receive FIFO did not absorb the starvation, it wedged the receiver.
+The ring at the highest level is never starved by the pair; the wedge
+itself is the silicon's, and the Uart's vector cures it so that a ring a
+program ranks LOW loses nothing within the FIFO's nine characters and
+counts every gap past them ([../stm32g0/usart.md](../stm32g0/usart.md)). The RP2040's arbiter serves
 one low-priority channel every round, and no arrangement of copies
 starved a low receive channel; its HIGH_PRIORITY bit for the receive
 costs nothing measurable there. The rule is the same sentence on every
@@ -97,6 +100,17 @@ moves one stray item on it at its first enable and stalls behind it, or,
 with the old requester still clocked, gets its stream shifted by one
 ([../ch32vx03/dma.md](../ch32vx03/dma.md), "A released requester").
 
+THE STM32G0 MEASURED THE OTHER ANSWER, and the contract is the same
+sentence. Its DMAMUX routes one request line to each channel, so a stray
+could reach only the next owner of the SAME request; and there a gated
+block withdraws a raised request, and so does its DMA enable cleared with
+the clock on - USART1, SPI1 and TIM3 released every way with a request
+standing left the next owner nothing. What survives is the DMA enable
+LEFT SET: SPI1 and TIM3 ask again the moment anything opens the clock
+without a reset ([../stm32g0/dma.md](../stm32g0/dma.md), "A released
+requester holds nothing here"). The reset pulse clears that as well, so
+the rule does not change with the answer.
+
 So a transport's `release()` resets its peripheral BEFORE it gates its
 clock, wherever its block can hold a request, and the incoming owner
 needs nothing beyond its engine's `arm()`: the outgoing owner's release
@@ -107,10 +121,10 @@ CH32V303 family) says so in its driver and needs no pulse.
 
 ### Realizations
 
-Common: on the WCH strata every engine's level is the rule's - the
-defaults by direction, each driver's call naming its own - with
-`UartOptions::rx_priority` the knob, and every transport whose block
-holds a request resets it in `release()`. The rows of the other strata
+Common: on the WCH strata and the STM32G0 every engine's level is the
+rule's - the defaults by direction, each driver's call naming its own -
+with `UartOptions::rx_priority` the knob, and every transport whose block
+can raise a request resets it in `release()`. The rows of the other strata
 are this contract's pending waves: what each arms at today, and what
 its controller offers.
 
@@ -118,7 +132,7 @@ its controller offers.
 |---|---|---|
 | avrdx | none | the AVR DA/DB has no DMA controller |
 | samc21 | one engine: the Uart's transmit engine (`samc21/dmac.hpp`), at level 0 | PENDING its wave; the DMAC's four levels (LVLEN, CHCTRLB.LVL) and whether a SERCOM holds a raised request across its release are unmeasured; the rest of the controller is declined by erratum 1.10.4 ([../samc21/dmac.md](../samc21/dmac.md)) |
-| stm32g0 | every engine at the lowest level (`stm32g0/dma.hpp`) | PENDING its wave; the DMAMUX changes no arbitration (priority, then number), a memory-to-memory channel alternates with any other requester (RM0444 10.4.4); under two copies the receive FIFO wedged the receiver, the ring at the highest level cured it - measured, not yet the default |
+| stm32g0 | `DmaPriority` (`stm32g0/dma_engine.hpp`); the engines' defaults: receive and ping-pong source very_high, transmit and player high, copy low (`stm32g0/dma.hpp`) | the Uart's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C host's two at high; the DMAMUX ranks nothing (priority, then number), and a memory-to-memory channel alternates with any other requester (RM0444 10.4.4), so it takes TWO copies to starve a ring - and behind a starved channel the receive FIFO can WEDGE, which the Uart's vector cures with a kick (DMAR dropped and raised, [../stm32g0/usart.md](../stm32g0/usart.md)); a released block measured to hold NO request, but a DMA enable left set re-raises it when the clock returns, so every transport's `release()` resets its block ([../stm32g0/dma.md](../stm32g0/dma.md)) |
 | ch32v00x | `DmaPriority` (`ch32v00x/dma_engine.hpp`); the engines' defaults: receive very_high, transmit high, copy low (`ch32v00x/dma.hpp`) | the Uart's ring at `rx_priority`, its transmit at high; the SPI host's receive at very_high and transmit at high; the I2C host's two at high; the Uart and the I2C host reset their blocks in `release()` - the held request is the CH32V203's measurement, applied here by reading, the pulse correct either way ([../ch32v00x/dma.md](../ch32v00x/dma.md)) |
 | stm32f4 | every engine at the lowest level (`stm32f4/dma.hpp`) | PENDING its wave: the stream arbiter's four levels, its FIFO and its bursts |
 | rp2040 | every channel without HIGH_PRIORITY (`rp2040/dma.hpp`) | PENDING its wave: one bit, one low channel served every round - measured immune to the copies that starve the CH32's ring |

@@ -154,7 +154,15 @@ one with no buffer, stays on the pump - and both are armed for their
 errors alone: the tenure's own STOP after NBYTES proves every byte went
 through TXDR and RXDR, so a tenure takes the I2C's interrupts and no DMA
 one, and `finish()` completes the transmit engine on that proof
-([dma.md](dma.md), "Two moments").
+([dma.md](dma.md), "Two moments"). BOTH ARM AT `high` (docs/design/dma.md):
+a byte the receive channel has not taken leaves RXNE up and holds the
+next in the shift register with SCL stretched until RXDR is read, and a
+byte the transmit channel has not written stretches SCL after the ninth
+pulse until TXDR is (32.4.7) - a starved channel slows the bus and loses
+nothing. The resource's `release()` - the host's and the client's -
+pulses the block's reset before the gate, so a DMA enable a tenure left
+set cannot raise its request again for the next owner of the line
+([dma.md](dma.md), "A released requester holds nothing here").
 
 `I2cClient<n, pins>` is the target: `init(clock, addresses, speed,
 kernel, filters, no_stretch)`, `addressed()`, `host_reads()`,
@@ -697,6 +705,12 @@ Driver gaps:
 
 Implemented but not bench-verified:
 
+- **The held request of an I2C.** `test_stm32_dma` letter `r` measures a
+  released requester on USART1, SPI1 and TIM3 with no wire; an I2C's
+  TXIS or RXNE stands only inside a tenure on a wire, so its release is
+  reset by reading - the self-link's engined letters pass with it, and a
+  tenure abandoned mid-block, then released, then followed by the next
+  owner of its request line, would measure it.
 - **A data byte refused under an engine.** The NACK's name under an
   engine is the transmit channel's count (the address's when it never
   moved, measured by letter `i`'s write to the address nobody answers);

@@ -95,6 +95,15 @@
 //      across 64 laps, a burst with the consumer away, a consumer a lap
 //      behind, the edge the line's IDLE and the ring's marks report
 //      through the two vectors, and what harvest() costs
+//   r  A RELEASED REQUESTER: USART1, SPI1 and TIM3 each released five
+//      ways with a request standing, and what the next owner of the same
+//      request line moves - the release contract measured with no wire
+//   p  (outside z) brio stress: THE RING OUTRANKS TWO COPIES - the
+//      console's ring at its default level beside a pair of copies on
+//      channels 1 and 2, every byte judged
+//   q  (outside z) brio stress: THE RING RANKED LOW - the same pair
+//      starving it, the receive FIFO's kick absorbing what fits in nine
+//      characters, and every gap past that counted
 //   u  (outside z) brio stress: byte-exact streaming both ways
 //      through the engines, up to the VCP's own measured ceiling
 //   w  (outside z) the two rungs ABOVE that ceiling, for the numbers
@@ -121,6 +130,7 @@
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform.hpp"
+#include "stm32g0/spi.hpp"
 #include "stm32g0/ticker.hpp"
 #include "stm32g0/tim.hpp"
 #include "stm32g0/usart.hpp"
@@ -165,7 +175,11 @@ constexpr bool console_engines =
     dma_channel_present(1, 6) && dma_channel_present(1, 7);
 using ConsoleTx = ConsoleTxSlot<console_engines>;
 using ConsoleRx = ConsoleRxSlot<console_engines>;
-using Serial = Uart<2, console_pins, 64, 256, ConsoleTx, ConsoleRx>;
+/// The engined ring is 512 bytes, so letters p and q judge the channel and
+/// not a consumer that checks every byte at 921600 baud; the interrupt
+/// transport of the five-channel part keeps 64 (its 8 KB SRAM, below).
+constexpr uint32_t console_rx_size = console_engines ? 512u : 64u;
+using Serial = Uart<2, console_pins, console_rx_size, 256, ConsoleTx, ConsoleRx>;
 constexpr Serial serial;
 
 /// Which channel an engine sits on, for the boot line; -1 where the slot
@@ -2578,11 +2592,15 @@ void banner() {
           "  i  the timer round trip: a duty table played, a capture streamed",
           crlf,
           "  j  BlockRelay inside a real kernel", crlf,
+          "  r  a released requester, and the release contract", crlf,
+          "  p  the receive ring at its level beside two copies - OUTSIDE z", crlf,
+          "  q  the ring ranked low beside two copies: the FIFO's kick - "
+          "OUTSIDE z", crlf,
           "  u  the host peer (brio stress), to the VCP's ceiling - "
           "OUTSIDE z", crlf,
           "  w  the two rungs above that ceiling, judged by nothing - "
           "OUTSIDE z", crlf,
-          "  z  every letter but u and w", crlf);
+          "  z  every letter but p, q, u and w", crlf);
 }
 
 
@@ -3199,11 +3217,620 @@ void to_circular_receive() {
     quiet_everything();
 }
 
+// ---- p, q: the receive ring against two copies (OUTSIDE z) ------------------------
+//
+// docs/design/dma.md's rule on THIS arbiter. RM0444 10.4.4 re-arbitrates a
+// memory-to-memory channel after every single transfer and alternates it
+// with any other requester, so ONE copy never starves the ring; TWO copies
+// alternate with EACH OTHER, and a ring ranked below them waits for the
+// pair. Letter p runs the console's own ring at its default level beside
+// such a pair - DMA1's channels 1 and 2, the same block each, launched
+// together - and judges every byte the host sends; letter q opens the same
+// USART2 with UartOptions::rx_priority = low, so the pair does starve the
+// ring, and judges the receive FIFO's cure (docs/stm32g0/usart.md, "The
+// receive FIFO under a starved channel"): no wedge, no loss while a
+// starvation fits the nine characters the FIFO and the shift register hold,
+// and past that every gap counted. The host is brio stress's sink: the
+// xorshift both ends know, which is what lets the board find a gap, how
+// long it was, and pick the stream up again behind it.
+
+using CopyA = DmaCopyEngine<1, 1>;
+using CopyB = DmaCopyEngine<1, 2>;
+
+/// The same transport as the console, the ring ranked LOW (the knob under
+/// test). On a part without the console's engines it is the console's own
+/// type - letters p and q skip there by name.
+constexpr UartOptions low_ring_opts =
+    console_engines ? UartOptions{.rx_priority = DmaPriority::low} : UartOptions{};
+using LowSerial = Uart<2, console_pins, console_rx_size, 256, ConsoleTx, ConsoleRx, low_ring_opts>;
+volatile bool low_live = false;
+
+/// The xorshift stream, judged with gaps allowed: a byte out of sequence
+/// opens a HUNT, and four received bytes decide it - the first one
+/// corrupt and the next three in sequence (a bad byte, nothing lost), or
+/// all four in sequence k places further on (a gap of k bytes). Nothing
+/// within max_gap is a byte the checker cannot place, and the hunt goes on
+/// from the next one.
+struct GapCheck {
+    static constexpr uint32_t max_gap = 1024;
+    uint32_t state = 0x12345678u;
+    uint32_t base = 0;       // the state before the byte the hunt is placing
+    uint32_t got = 0;
+    uint32_t gaps = 0;
+    uint32_t lost = 0;
+    uint32_t bad = 0;
+    uint32_t unplaced = 0;
+    uint8_t held[4] = {};
+    uint8_t nheld = 0;
+
+    static uint8_t step(uint32_t& s) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return static_cast<uint8_t>(s & 0xFFu);
+    }
+    bool in_sequence() const { return nheld == 0u; }
+
+    void take(uint8_t b) {
+        ++got;
+        if (nheld == 0u) {
+            uint32_t s = state;
+            if (step(s) == b) {
+                state = s;
+                return;
+            }
+            base = state;
+        }
+        held[nheld++] = b;
+        if (nheld == 4u) {
+            place();
+        }
+    }
+
+    void place() {
+        uint32_t s = base;
+        uint8_t w[4];
+        for (uint8_t i = 0; i < 4u; ++i) {
+            w[i] = step(s);
+        }
+        if (w[1] == held[1] && w[2] == held[2] && w[3] == held[3]) {
+            ++bad;   // held[0] corrupt, the stream in step behind it
+            state = s;
+            nheld = 0;
+            return;
+        }
+        for (uint32_t k = 1; k <= max_gap; ++k) {
+            w[0] = w[1];
+            w[1] = w[2];
+            w[2] = w[3];
+            w[3] = step(s);
+            if (w[0] == held[0] && w[1] == held[1] && w[2] == held[2] && w[3] == held[3]) {
+                ++gaps;
+                lost += k;
+                state = s;
+                nheld = 0;
+                return;
+            }
+        }
+        // Not placed within max_gap: the first held byte is given up and
+        // the hunt goes on with the other three and the next byte.
+        ++unplaced;
+        held[0] = held[1];
+        held[1] = held[2];
+        held[2] = held[3];
+        nheld = 3;
+    }
+};
+
+struct LoadedLeg {
+    uint32_t baud;
+    uint16_t pair;          // bytes each copy moves, 0 = no copies
+    uint32_t got;
+    uint32_t gaps;
+    uint32_t lost;
+    uint32_t bad;
+    uint32_t unplaced;
+    bool tail_in_sequence;
+    uint32_t episodes;      // pairs launched
+    uint32_t pair_cycles;   // the longest pair, launch to both done
+    uint32_t skips;         // rx_skips() over the leg
+    uint8_t ore;
+    uint8_t kicks;
+    uint8_t faults;
+    uint8_t frame;
+    uint8_t level;          // the receive channel's CCR.PL, read back
+};
+
+/// The longest pair in character times, tenths: how long a ring ranked
+/// below the pair waited, at most (the two copies alternate with each
+/// other until one ends).
+uint32_t pair_chars_x10(const LoadedLeg& l) {
+    return static_cast<uint32_t>(uint64_t{l.pair_cycles} * l.baud / (SysClock::hz / 10u) / 10u);
+}
+
+/// A slot's channel control word, where the slot has an engine.
+template <class E>
+uint32_t engine_ccr() {
+    if constexpr (E::present) {
+        return DmaChannel<E::controller, E::channel>::control();
+    } else {
+        return 0;
+    }
+}
+
+constexpr uint32_t loaded_window_ms = 2500;
+constexpr uint32_t copy_period_ms = 5;
+
+uint8_t* copy_bytes_at(volatile uint32_t* words) {
+    return reinterpret_cast<uint8_t*>(const_cast<uint32_t*>(words));
+}
+
+/// One sink leg with the pair running: announce it to brio stress, move
+/// the console's rate, judge every byte for the window, launch the pair
+/// every copy_period_ms (each copy `pair` bytes of big_src into its own
+/// destination), come back to 115200. The pair's channels are polled -
+/// armed for their errors alone - so no copy vector runs in the window.
+template <class Port>
+LoadedLeg loaded_leg(uint32_t baud, uint16_t pair) {
+    constexpr Port port{};
+    LoadedLeg leg{};
+    leg.baud = baud;
+    leg.pair = pair;
+    print(port, "HOST sink 3 ", baud, " 8N1 ", loaded_window_ms, " 0", crlf);
+    uint32_t spins = 20'000'000u;
+    while ((!Port::tx_idle() || (Usart<2>::status() & UsartFlag::tc) == 0u) && spins-- != 0u) {
+    }
+    spin_cycles(SysClock::hz / 20u);
+    if (!Port::set_baud(SysClock::pclk_hz, baud)) {
+        return leg;
+    }
+    spin_cycles(SysClock::hz / 20u);
+    Port::clear_errors();
+    const uint32_t skips0 = Port::rx_skips();
+    leg.level = static_cast<uint8_t>((engine_ccr<ConsoleRx>() >> DMA_CCR_PL_Pos) & 3u);
+
+    if (pair != 0u) {
+        CopyA::arm(DmaPriority::low, DmaIrq::error_only);
+        CopyB::arm(DmaPriority::low, DmaIrq::error_only);
+    }
+    GapCheck check{};
+    const uint32_t end = Ticker::ticks() + loaded_window_ms;
+    uint32_t next_pair = Ticker::ticks();
+    bool running = false;
+    uint32_t launched = 0;
+    uint8_t chunk[64];
+    while (Ticker::ticks() < end) {
+        const uint32_t n = Port::read_bulk({chunk, sizeof chunk});
+        for (uint32_t i = 0; i < n; ++i) {
+            check.take(chunk[i]);
+        }
+        if (pair == 0u) {
+            continue;
+        }
+        if (running && CopyA::poll() && CopyB::poll()) {
+            const uint32_t d = cycles_now() - launched;   // an upper bound: one loop late
+            if (d > leg.pair_cycles) {
+                leg.pair_cycles = d;
+            }
+            running = false;
+        }
+        if (!running && Ticker::ticks() >= next_pair) {
+            next_pair = Ticker::ticks() + copy_period_ms;
+            launched = cycles_now();
+            (void)CopyA::copy(copy_bytes_at(&big_dst[0]), copy_bytes_at(&big_src[0]), pair);
+            (void)CopyB::copy(copy_bytes_at(&big_dst2[0]), copy_bytes_at(&big_src[0]), pair);
+            running = true;
+            ++leg.episodes;
+        }
+    }
+    spins = 1'000'000u;
+    while (pair != 0u && !(CopyA::poll() && CopyB::poll()) && spins-- != 0u) {
+    }
+    CopyA::stop();
+    CopyB::stop();
+    // What is still in the ring: the stream's tail, judged like the rest.
+    for (uint8_t k = 0; k < 16u; ++k) {
+        const uint32_t n = Port::read_bulk({chunk, sizeof chunk});
+        for (uint32_t i = 0; i < n; ++i) {
+            check.take(chunk[i]);
+        }
+    }
+    leg.got = check.got;
+    leg.gaps = check.gaps;
+    leg.lost = check.lost;
+    leg.bad = check.bad;
+    leg.unplaced = check.unplaced;
+    leg.tail_in_sequence = check.in_sequence();
+    leg.skips = Port::rx_skips() - skips0;
+    leg.ore = Port::hw_overruns();
+    leg.kicks = Port::rx_kicks();
+    leg.faults = Port::dma_faults();
+    leg.frame = Port::frame_errors();
+
+    spin_cycles(SysClock::hz / 50u);
+    (void)Port::set_baud(SysClock::pclk_hz, 115200);
+    for (uint8_t i = 0; i < 5; ++i) {
+        spin_cycles(SysClock::hz / 10u);   // brio stress's silence, as stress_leg()
+    }
+    Port::clear_errors();
+    return leg;
+}
+
+/// What the window could carry: the host pumps for the window less half a
+/// second, ten bits a character.
+constexpr uint32_t leg_capacity(uint32_t baud) {
+    return baud / 10u * (loaded_window_ms - 500u) / 1000u;
+}
+
+template <class Port>
+void print_leg(const LoadedLeg& l) {
+    constexpr Port port{};
+    print(port, "  ", l.baud, " baud, pair of ", l.pair, " B every ", copy_period_ms, " ms (",
+          l.episodes, " pairs, the longest ", l.pair_cycles, " cycles = ", pair_chars_x10(l),
+          " tenths of a character), ring at PL ", l.level, ": ", l.got, " bytes in, ", l.gaps,
+          " gaps (", l.lost, " bytes), ", l.bad, " bad, ", l.unplaced, " unplaced, tail ",
+          l.tail_in_sequence ? "in sequence" : "OUT of sequence", "; ORE ", l.ore,
+          ", kicks ", l.kicks, ", skips ", l.skips, ", faults ", l.faults, ", FE ", l.frame,
+          crlf);
+}
+
+bool leg_clean(const LoadedLeg& l) {
+    return l.got >= leg_capacity(l.baud) / 2u && l.gaps == 0u && l.bad == 0u &&
+           l.unplaced == 0u && l.tail_in_sequence && l.skips == 0u && l.ore == 0u;
+}
+
+struct PairCell {
+    uint32_t baud;
+    uint16_t pair;
+};
+
+template <bool engines = console_engines>
+void tp_ring_outranks_the_pair() {
+    if constexpr (!engines) {
+        print(serial, "  this part's DMA1 has ", Dma<1>::channels,
+              " channels: the console has no receive engine to rank - skipped", crlf);
+    } else {
+        print(serial, "  run it as: brio stress --port <the console> --letters p", crlf,
+              "  the console's ring at its default level beside two copies on DMA1's "
+              "channels 1 and 2", crlf);
+        constexpr PairCell cells[] = {{115200, 2048}, {921600, 512}, {921600, 2048}};
+        LoadedLeg legs[3];
+        for (uint8_t i = 0; i < 3u; ++i) {
+            legs[i] = loaded_leg<Serial>(cells[i].baud, cells[i].pair);
+            print_leg<Serial>(legs[i]);
+        }
+        bool clean = true;
+        bool very_high = true;
+        bool unkicked = true;
+        for (const LoadedLeg& l : legs) {
+            clean = clean && leg_clean(l);
+            very_high = very_high && l.level == 3u;
+            unkicked = unkicked && l.kicks == 0u;
+        }
+        bench.verdict("the receive ring arms at VERY_HIGH by default (CCR.PL read back "
+                      "off its channel - UartOptions::rx_priority)", very_high);
+        bench.verdict("THE RING OUTRANKS THE PAIR: every byte of every leg delivered in "
+                      "sequence - no gap, no overrun, no skip - beside two copies that "
+                      "alternate with each other (RM0444 10.4.4)", clean);
+        bench.verdict("and a healthy stream never kicks: the receive FIFO's cure fired not "
+                      "once in any leg (rx_kicks() 0)", unkicked);
+        quiet_everything();
+    }
+}
+
+template <bool engines = console_engines>
+void tq_ring_ranked_low() {
+    if constexpr (!engines) {
+        print(serial, "  this part's DMA1 has ", Dma<1>::channels,
+              " channels: the console has no receive engine to rank - skipped", crlf);
+    } else {
+        print(serial, "  run it as: brio stress --port <the console> --letters q", crlf,
+              "  the console reopened with rx_priority = low: the pair STARVES the ring, "
+              "the FIFO and its kick absorb it", crlf);
+        drain_console();
+        Serial::release();
+        low_live = true;
+        (void)LowSerial::init(clock, 115200);
+        constexpr PairCell cells[] = {
+            {115200, 2048}, {921600, 256}, {921600, 512},   // within the FIFO's nine characters
+            {921600, 2048},                                // past them
+            {921600, 0},                                   // and the pair gone
+        };
+        constexpr uint8_t count = sizeof cells / sizeof cells[0];
+        LoadedLeg legs[count];
+        for (uint8_t i = 0; i < count; ++i) {
+            legs[i] = loaded_leg<LowSerial>(cells[i].baud, cells[i].pair);
+        }
+        drain_console();
+        LowSerial::release();
+        low_live = false;
+        (void)Serial::init(clock, 115200);
+        spin_cycles(SysClock::hz / 100u);
+        for (uint8_t i = 0; i < count; ++i) {
+            print_leg<Serial>(legs[i]);
+        }
+        bool low = true;
+        uint32_t kicks = 0;
+        for (const LoadedLeg& l : legs) {
+            low = low && l.level == 0u;
+            kicks += l.kicks;
+        }
+        const bool within = leg_clean(legs[0]) && leg_clean(legs[1]) && leg_clean(legs[2]);
+        const LoadedLeg& past = legs[3];
+        const LoadedLeg& after = legs[4];
+        bench.verdict("rx_priority = low reaches the silicon: the receive channel's "
+                      "CCR.PL read back 0 in every leg", low);
+        bench.verdict("NO LOSS WITHIN THE FIFO: every starvation that fits the nine "
+                      "characters the FIFO and the shift register hold delivered every "
+                      "byte in sequence - no wedge, no overrun", within);
+        print(serial, "  the kick fired ", kicks, " times over the five legs (saturating "
+              "at 255 a leg)", crlf);
+        bench.verdict("PAST THE FIFO EVERY GAP IS COUNTED: the pair that starves the ring "
+                      "for some twenty characters lost bytes, and no more gaps than "
+                      "rx_skips() counted", past.gaps > 0u && past.gaps <= past.skips &&
+                          past.unplaced == 0u);
+        bench.verdict("AND THE RECEIVER KEEPS GOING: the starved leg delivered to its end "
+                      "(its tail in sequence, half the window's capacity or more) and the "
+                      "unloaded leg after it is byte-exact",
+                      past.tail_in_sequence && past.got >= leg_capacity(past.baud) / 2u &&
+                          leg_clean(after));
+        quiet_everything();
+    }
+}
+
+// ---- r: a released requester (the release contract) -----------------------------
+//
+// docs/design/dma.md's release contract asks whether a peripheral's DMA
+// request, once raised, outlives the peripheral's release. On this family
+// the DMAMUX routes ONE request line to each channel (RM0444 11.4.4), so a
+// stray can only reach a channel that selects the SAME request again - the
+// peripheral's next owner, through any channel. The letter measures it with
+// no wire: a requester brought up with its request standing and no channel
+// listening, released one of five ways, and then the INCOMING owner - DMA1's
+// channel 5 routed to the same request, four bytes of memory into the
+// requester's own register - enabled for 2000 cycles. Every item it moves
+// is a request that outlived the release. Where the requester's clock was
+// gated, it is opened again afterwards (no reset) and the count read once
+// more. MEASURED on the STM32G0B1RE: unlike the CH32V203's, a block here
+// holds nothing across its release - but a DMA enable left set raises the
+// request again as soon as anything opens the clock, which is what the
+// reset pulse in every release() takes away.
+//
+//   A  the contract: block disabled, RESET pulsed, clock gated
+//   B  the DMA enable cleared, block disabled, clock gated (no reset)
+//   C  the DMA enable left set, block disabled, clock gated (no reset)
+//   D  the DMA enable cleared, block disabled, clock left on (no reset)
+//   E  the control: nothing released - the request is live
+
+enum class Release : uint8_t { contract, enable_cleared_gated, enable_set_gated,
+                               enable_cleared_clocked, live };
+
+struct Handover {
+    uint16_t moved;           // items the incoming owner moved
+    uint16_t moved_ungated;   // and after the clock was opened again (B, C)
+};
+
+/// The incoming owner: DMA1 channel 5 on request `req`, four bytes of
+/// memory into the requester's own register `data` - the shape the next
+/// owner of a transmit or an update line has - given 2000 cycles. THE
+/// DIRECTION IS PART OF THE MEASUREMENT: USART1's transmit request,
+/// standing, moved nothing into a channel that read a RAM cell into RAM,
+/// and two frames' worth into one that wrote TDR, so the detector writes
+/// where the line's owner would.
+void incoming_arm(uint8_t req, volatile void* data) {
+    for (uint8_t i = 0; i < 4u; ++i) {
+        src_bytes[i] = 0;
+    }
+    (void)ChE::prepare(DmaTransfer{
+        .peripheral = data,
+        .memory = &src_bytes[0],
+        .count = 4,
+        .config = {.direction = DmaDirection::memory_to_peripheral,
+                   .peripheral_increment = false,
+                   .memory_increment = true,
+                   .peripheral_width = DmaWidth::byte,
+                   .memory_width = DmaWidth::byte}});
+    (void)DmaMux::request(ChE::mux_channel, req);
+    (void)ChE::enable(true);
+    spin_cycles(2000u);
+}
+uint16_t incoming_moved() { return static_cast<uint16_t>(4u - ChE::count()); }
+void incoming_stop() {
+    ChE::stop();
+    (void)DmaMux::release(ChE::mux_channel);
+}
+
+/// USART1's transmit request: TXE stands from the enable with DMAT set, and
+/// no pad carries the line (letter h's peripheral).
+Handover usart1_handover(Release how) {
+    Usart<1>::bus_clock(true);
+    Usart<1>::reset();
+    (void)Usart<1>::configure({}, 556);
+    Usart<1>::dma_transmit(true);
+    Usart<1>::enable(true);
+    spin_cycles(SysClock::hz / 10000u);
+    switch (how) {
+        case Release::contract:
+            Usart<1>::enable(false);
+            Usart<1>::reset();
+            Usart<1>::bus_clock(false);
+            break;
+        case Release::enable_cleared_gated:
+            Usart<1>::enable(false);
+            Usart<1>::dma_transmit(false);
+            Usart<1>::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            Usart<1>::enable(false);
+            Usart<1>::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            Usart<1>::enable(false);
+            Usart<1>::dma_transmit(false);
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    incoming_arm(Usart<1>::dma_tx_request(), Usart<1>::tx_data_address());
+    h.moved = incoming_moved();
+    if (how == Release::enable_cleared_gated || how == Release::enable_set_gated) {
+        Usart<1>::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved();
+    incoming_stop();
+    Usart<1>::bus_clock(true);
+    Usart<1>::enable(false);
+    Usart<1>::reset();
+    Usart<1>::bus_clock(false);
+    return h;
+}
+
+/// SPI1's transmit request: a host with TXDMAEN, TXE standing from SPE, no
+/// pad claimed.
+Handover spi1_handover(Release how) {
+    using S1 = Spi<1>;
+    S1::bus_clock(true);
+    S1::reset();
+    (void)S1::configure(SpiConfig{.dma_transmit = true});
+    S1::enable();
+    spin_cycles(SysClock::hz / 10000u);
+    switch (how) {
+        case Release::contract:
+            (void)S1::disable();
+            S1::reset();
+            S1::bus_clock(false);
+            break;
+        case Release::enable_cleared_gated:
+            (void)S1::disable();
+            (void)S1::dma_transmit(false);
+            S1::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            (void)S1::disable();
+            S1::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            (void)S1::disable();
+            (void)S1::dma_transmit(false);
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    incoming_arm(S1::dma_tx_request(), S1::data_address());
+    h.moved = incoming_moved();
+    if (how == Release::enable_cleared_gated || how == Release::enable_set_gated) {
+        S1::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved();
+    incoming_stop();
+    S1::bus_clock(true);
+    (void)S1::disable();
+    S1::reset();
+    S1::bus_clock(false);
+    return h;
+}
+
+/// TIM3's update request: UDE set and one software update, the counter
+/// never started - one request raised, none after it.
+Handover tim3_handover(Release how) {
+    T3::init();
+    (void)T3::configure({.prescaler = 0, .period = 0xFFFFu});
+    T3::interrupts(T3::update_dma, true);
+    T3::update();
+    spin_cycles(64u);
+    switch (how) {
+        case Release::contract:
+            T3::release();
+            break;
+        case Release::enable_cleared_gated:
+            T3::interrupts(T3::update_dma, false);
+            T3::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            T3::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            T3::interrupts(T3::update_dma, false);
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    incoming_arm(T3::dma_update_request(), &T3::regs().CCR1);
+    h.moved = incoming_moved();
+    if (how == Release::enable_cleared_gated || how == Release::enable_set_gated) {
+        T3::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved();
+    incoming_stop();
+    T3::bus_clock(true);
+    T3::release();
+    return h;
+}
+
+
+void tr_released_requester() {
+    quiet_everything();
+    const char* names[5] = {"A contract (reset)  ", "B enable cleared, gated",
+                            "C enable set, gated ", "D enable cleared, clocked",
+                            "E live (control)    "};
+    Handover u[5];
+    Handover s[5];
+    Handover t[5];
+    for (uint8_t i = 0; i < 5u; ++i) {
+        u[i] = usart1_handover(static_cast<Release>(i));
+        s[i] = spi1_handover(static_cast<Release>(i));
+        t[i] = tim3_handover(static_cast<Release>(i));
+    }
+    for (uint8_t i = 0; i < 5u; ++i) {
+        print(serial, "  ", names[i], ": USART1_TX ", u[i].moved, "/", u[i].moved_ungated,
+              "  SPI1_TX ", s[i].moved, "/", s[i].moved_ungated, "  TIM3_UP ", t[i].moved,
+              "/", t[i].moved_ungated, "  (items moved of 4 / after the clock reopened)",
+              crlf);
+    }
+    bench.verdict("THE CONTROL: a live request moves the incoming owner's items - two "
+                  "for USART1 (TDR and the shift register, then the wire's pace), the "
+                  "block for SPI1, the one update for TIM3: the detector sees a request",
+                  u[4].moved >= 1u && s[4].moved >= 1u && t[4].moved >= 1u);
+    bench.verdict("NO REQUEST OUTLIVES ITS RELEASE HERE: a gated clock withdraws a raised "
+                  "request whatever the DMA enable says, and so does the DMA enable cleared "
+                  "with the clock left on - the incoming owner moved nothing (B, C, D)",
+                  u[1].moved == 0u && s[1].moved == 0u && t[1].moved == 0u &&
+                      u[2].moved == 0u && s[2].moved == 0u && t[2].moved == 0u &&
+                      u[3].moved == 0u && s[3].moved == 0u && t[3].moved == 0u &&
+                      u[1].moved_ungated == 0u && s[1].moved_ungated == 0u &&
+                      t[1].moved_ungated == 0u);
+    bench.verdict("BUT A DMA ENABLE LEFT SET RAISES ITS REQUEST AGAIN WHEN THE CLOCK "
+                  "RETURNS, no reset in between: SPI1 (TXE behind TXDMAEN) and TIM3 (the "
+                  "pending update behind UDE) fed the incoming owner (C, reopened) - what "
+                  "the reset in release() takes away",
+                  s[2].moved_ungated >= 1u && t[2].moved_ungated >= 1u);
+    bench.verdict("THE CONTRACT HANDS OVER CLEAN: a requester released with its reset "
+                  "pulsed before the gate leaves the incoming owner of its request line "
+                  "nothing", u[0].moved == 0u && s[0].moved == 0u && t[0].moved == 0u &&
+                      u[0].moved_ungated == 0u && s[0].moved_ungated == 0u &&
+                      t[0].moved_ungated == 0u);
+    quiet_everything();
+}
+
 }   // namespace
 
 // ---- the vectors ----------------------------------------------------------------
 
-extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Serial::isr(); }
+/// The console's vector serves whichever transport has USART2 - letter q
+/// reopens it with the ring ranked low.
+extern "C" void BRIO_STM32G0_USART2_HANDLER() {
+    if (low_live) {
+        (void)LowSerial::isr();
+    } else {
+        (void)Serial::isr();
+    }
+}
 
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
@@ -3257,7 +3884,11 @@ extern "C" void DMA1_Channel2_3_IRQHandler() {
 /// channel, and the DMAMUX overrun. The console's own two engines live
 /// here, which is why they are served first.
 extern "C" void BRIO_STM32G0_DMA1_CH4_UP_HANDLER() {
-    (void)Serial::dma_isr();
+    if (low_live) {
+        (void)LowSerial::dma_isr();
+    } else {
+        (void)Serial::dma_isr();
+    }
 
     // The DMAMUX's own overrun shares this line (table 61). Letter k is
     // the only thing here that arms it, and it clears the flag itself -
@@ -3357,6 +3988,12 @@ int main() {
                  "channel frozen by a Stop", tn_sleep_story);
     bench.letter('o', "the circular receive: a ring the channel writes lap "
                  "after lap", to_circular_receive);
+    bench.letter('r', "a released requester: what the next owner of its request "
+                 "line finds", tr_released_requester);
+    bench.letter('p', "the receive ring at its level beside two copies (brio stress)",
+                 tp_ring_outranks_the_pair<>, false);
+    bench.letter('q', "the ring ranked LOW beside two copies: the FIFO's kick (brio "
+                 "stress)", tq_ring_ranked_low<>, false);
     bench.letter('u', "the host peer, and the VCP's ceiling", tu_stress, false);
     bench.letter('w', "the two rungs ABOVE the ceiling, judged by nothing",
                  tw_beyond, false);
