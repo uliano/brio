@@ -25,14 +25,19 @@
 //      duplex, IrDA, the smartcard and the synchronous clock, each refused
 //      where 14.4 .. 14.7 say it must be and each read back where it is not
 //   d  a frame's length: one byte of the console timed from the DATAR write
-//      to TC on the STK counter, against ten bit times of the divisor
+//      to TC on the STK counter, against ten bit times of the divisor; and
+//      THE RATE ON THE WIRE, which a frame against its own divisor cannot
+//      tell: a run of frames timed against its wire at the rate asked, on
+//      the console at 115200 and on USART4 (PB0, no wire needed to
+//      transmit) at the three rates letter w loops
 //   e  the break: USART4 opened on PB0/PB1, SBK set, and the time until the
 //      hardware clears it on the break frame's stop bit
 //   f  USART3's code 1 puts TX and RX on PC18/PC19, the debug port's pads:
 //      init() answers false while the probe owns them, and touches nothing
 //   w  (a jumper PB0-PB1, detected first) USART4 talking to itself: bytes
-//      at 115200, 1 Mbaud and 3 Mbaud through the transport, 8E1 and 7O1
-//      and 9N1 frames polled on the resource, a LIN break detected
+//      at 115200, 1 Mbaud and 3 Mbaud through the transport, each rate's
+//      run timed against its wire first, 8E1 and 7O1 and 9N1 frames
+//      polled on the resource, a LIN break detected
 //
 // build: boards = x035f8
 // build: monitor_speed = 115200
@@ -206,8 +211,34 @@ void tc_modes() {
 }
 
 // ---------------------------------------------------------------------------
-// d - a frame's length
+// d - a frame's length, and the rate on the wire
 // ---------------------------------------------------------------------------
+
+/// THE RATE ON THE WIRE, which neither a frame against its own divisor nor
+/// a loop can tell - both ends of a loop share one divisor, and a frame
+/// measured against BRR is the divisor measuring itself: `n` 8N1 frames
+/// polled into `U`'s DATAR on TXE - the data register one frame ahead of
+/// the shifter, so the line never idles - timed on the ticker's cycle
+/// count from the first store to TC, against `n` x 10 bit times at the
+/// rate ASKED, HCLK / `baud`; in thousandths. The port must be idle, its
+/// transport's ring empty (the transmit interrupt disarmed).
+template <typename U>
+uint32_t wire_permille(uint32_t baud, uint32_t n) {
+    const uint64_t wire = 10ull * n * SysClock::hz / baud;
+    U::clear_flags(usart_tc);
+    const uint32_t t0 = Ticker::cycles();
+    for (uint32_t i = 0; i < n; ++i) {
+        while (!U::tx_empty() && Ticker::cycles() - t0 < 4u * wire) {
+        }
+        U::write_data(static_cast<uint8_t>('0' + (i % 64u)));
+    }
+    while (!U::tx_complete() && Ticker::cycles() - t0 < 4u * wire) {
+    }
+    return static_cast<uint32_t>(1000ull * (Ticker::cycles() - t0) / wire);
+}
+
+bool on_the_wire(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
 void td_frame_time() {
     console_drain();
     uint32_t took = 0;
@@ -227,6 +258,33 @@ void td_frame_time() {
           "the divisor are ", expected, crlf);
     bench.verdict("the frame lasts ten bit times of the divisor, within two bit times",
                   took + 2u * Usart<2>::brr() >= expected && took <= expected + 2u * Usart<2>::brr());
+
+    // The runs: the console's 128 frames at the 115200 its init() asked
+    // (BRR 417 for 416.7, 0.8 thousandths slow by the divisor's own
+    // rounding), and USART4 on PB0 - a pad nothing else drives, no wire
+    // needed to transmit - at the three rates letter w loops, 1024 frames
+    // each: 115200, 1 Mbaud (48, exact) and 3 Mbaud (16, exact).
+    console_drain();
+    const uint32_t console_pm = wire_permille<Usart<2>>(115200, 128);
+    print(serial, crlf, "  the console: 128 frames in ", console_pm, " thousandths of their wire time at 115200",
+          crlf);
+    bench.verdict("the console's line runs at the rate asked: 128 frames at 115200 within -1 % to +3 % of "
+                  "their wire time", on_the_wire(console_pm));
+    const bool opened = Loop::init(clock, 115200);
+    (void)delay_us(clock, 200);   // TE's idle frame
+    static constexpr uint32_t rates[] = {115200, 1'000'000, 3'000'000};
+    uint32_t pm[3] = {};
+    bool moved = opened;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        moved = moved && Loop::set_baud(SysClock::hz, rates[k]);
+        pm[k] = moved ? wire_permille<U4>(rates[k], 1024) : 0u;
+    }
+    Loop::release();
+    print(serial, "  USART4 on PB0, 1024 frames: ", pm[0], " thousandths of their wire time at 115200, ", pm[1],
+          " at 1 Mbaud, ", pm[2], " at 3 Mbaud", crlf);
+    bench.verdict("and USART4's at each rate asked: 1024 frames at 115200, 1 Mbaud and 3 Mbaud, each within "
+                  "-1 % to +3 % of its wire time",
+                  moved && on_the_wire(pm[0]) && on_the_wire(pm[1]) && on_the_wire(pm[2]));
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +350,18 @@ bool wire_present() {
 
 bool loop_bytes(uint32_t baud) {
     if (!Loop::set_baud(SysClock::hz, baud)) {
+        return false;
+    }
+    // The rate on the wire first, which the loop alone cannot tell (both
+    // ends share the divisor): letter d's run, here across the jumper.
+    // The run's frames come back through the jumper faster than the
+    // receive interrupt need keep up with: what they leave is discarded
+    // below and their counts cleared, the pattern judged alone.
+    const uint32_t pm = wire_permille<U4>(baud, 1024);
+    print(serial, "  ", baud, " baud: 1024 frames in ", pm, " thousandths of their wire time", crlf);
+    (void)delay_us(clock, 100);
+    Loop::clear_errors();
+    if (!on_the_wire(pm)) {
         return false;
     }
     while (Loop::rx_pending() != 0u) {

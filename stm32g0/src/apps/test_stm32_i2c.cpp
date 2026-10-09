@@ -83,7 +83,13 @@
 //   c  THE VOCABULARY ON THE WIRE: nack_addr, nack_data, and a fault
 //      staged from the client's own pad
 //   d  THE THREE SPEEDS MEASURED, the Fm+ drive, and the whole ladder
-//      through the dynamic clock with the refusals it produces
+//      through the dynamic clock with the refusals it produces - each
+//      controller rate judged against the RATE ASKED: SCL never above it
+//      by more than 2 % and within a quarter below it (a self-link's
+//      target follows the controller's clock and cannot tell a wrong
+//      TIMINGR) - but for the 2 MHz core's rung, where the stopwatch
+//      times the two vectors and the rate rests on the 16 MHz rung's
+//      timed TIMINGR, the same register on the same kernel
 //   e  CLOCK STRETCHING: commanded, priced, and NOSTRETCH's underrun
 //   f  10-BIT ADDRESSING both ways, the second address under every mask,
 //      ADDCODE and DIR
@@ -91,7 +97,8 @@
 //      depths, measured as the timing shift they really are
 //   h  RELOAD PAST 255 BYTES through TCR, AUTOEND against a software
 //      STOP, and the host's DMA engines - a write, a read, a register
-//      read - with the halves they leave to the pump right after them
+//      read - with the halves they leave to the pump right after them;
+//      the 300-byte write's and the engined write's SCL against 400 kHz
 //   i  SMBus: the PEC end to end, PECERR staged, and THE TIME-OUTS -
 //      whose hold does each of the three really police
 //   j  THE WAKE FROM STOP: the client in Stop 1, woken by its address
@@ -107,7 +114,8 @@
 //      with the repeated START counted from the far end, general call
 //   p  the vocabulary against the peer (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
-//   q  the three speeds against a second chip
+//   q  the three speeds against a second chip, Sm's and Fm's SCL
+//      against the rate asked
 //   r  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
 //      the NACK in its place, the rejection, both votes, and the wedge
 //      the PEER holds answered by the per-bus timeout
@@ -262,7 +270,8 @@ uint32_t cycles_us(uint32_t cycles) {
 /// Nanoseconds, for the sub-microsecond periods a fast bus has.
 uint32_t cycles_ns(uint32_t cycles) {
     const uint32_t per_mhz = SysClock::hz() / 1'000'000UL;
-    return per_mhz == 0u ? 0u : (cycles * 1000u) / per_mhz;
+    return per_mhz == 0u ? 0u
+                         : static_cast<uint32_t>((static_cast<uint64_t>(cycles) * 1000u) / per_mhz);
 }
 
 /// A measurement window a transmit interrupt walks through is not a
@@ -1388,8 +1397,27 @@ uint32_t measure_scl_ns(uint8_t n, I2cSpeed s, uint8_t& status) {
     fill_pattern(tx_buf, n, 0x40);
     const uint32_t c = host_tenure_cycles(peer_addr, tx_buf, n, nullptr, 0, s, status);
     const uint32_t clocks = 9u * (static_cast<uint32_t>(n) + 1u);
-    return cycles_ns(c / clocks);
+    // The tenure's nanoseconds first, then the division by its clocks: a
+    // period of 64 cycles truncated to whole cycles would be 1.5 % coarse.
+    return cycles_ns(c) / clocks;
 }
+
+/// THE RATE ASKED, against the wire: an SCL period of `ns` in thousandths
+/// of the rate `asked_hz` - the speed the request named, never the one
+/// TIMINGR produced. A self-link shares the controller's clock with a
+/// target that only follows it, so nothing but a stopwatch can see a
+/// wrong TIMINGR; the tenure's START, STOP and the request's own cost sit
+/// inside the reading, a few thousandths of 297 periods.
+uint32_t scl_permille(uint32_t ns, uint32_t asked_hz) {
+    return ns == 0u ? 0u
+                    : static_cast<uint32_t>(1'000'000'000'000ull /
+                                            (static_cast<uint64_t>(ns) * asked_hz));
+}
+
+/// The verdict on it: never above the rate asked by more than 2 %, and
+/// within a quarter below it - the pull-ups' rise and the detection of
+/// each edge (32.4.9's tSYNC) only lengthen the period.
+bool scl_ok(uint32_t permille) { return permille <= 1020u && permille >= 750u; }
 
 void td_speeds() {
     if constexpr (!self_link_possible) {
@@ -1472,6 +1500,12 @@ void td_speeds() {
               "tables' budget ", worst_ns, " ns; status ", st, ", client overruns ", peer_overruns,
               crlf);
         if (st == i2c_ok) {
+            const uint32_t pm = scl_permille(ns, i2c_speed_hz(s));
+            print(serial, "    SCL in ", pm, " thousandths of the ", i2c_speed_hz(s) / 1000u,
+                  " kHz asked", crlf);
+            bench.verdict("THE RATE ASKED, ON THE WIRE: SCL never above it by more than "
+                          "2 % and within a quarter below it",
+                          scl_ok(pm));
             bench.verdict("the measured period is at least the chooser's floor - the rate "
                           "is never above the speed asked",
                           ns + 30u >= floor_ns && ns + 30u >= 1'000'000'000UL / i2c_speed_hz(s));
@@ -1580,6 +1614,7 @@ void td_speeds() {
     // with the core, so the same target serves every rung, and it
     // stretches again so a 2 MHz core can still answer in time.
     (void)peer_arm(answers, 8, I2cSpeed::fast_400k);
+    uint32_t mid_timingr = 0;   // 100 kHz's TIMINGR on the 16 MHz rung's kernel
     for (uint8_t rung = 0; rung < 3u; ++rung) {
         SysClock::set_index(rung);
         console_drain();
@@ -1612,6 +1647,17 @@ void td_speeds() {
             st = host_tenure(peer_addr, tx_buf, 16, nullptr, 0, I2cSpeed::standard_100k);
             bench.verdict("... and the link is byte-exact at 100 kHz on this rung",
                           st == i2c_ok && same(peer_rx, tx_buf, 16));
+            uint8_t st_t = 0;
+            const uint32_t pm = scl_permille(measure_scl_ns(32, I2cSpeed::standard_100k, st_t),
+                                             100'000u);
+            print(serial, "    100 kHz on this rung: SCL in ", pm, " thousandths of the rate "
+                  "asked", crlf);
+            if (rung == r_mid) {
+                mid_timingr = i2c_timingr(Host::timing_of(I2cSpeed::standard_100k));
+            }
+            bench.verdict("... at the rate asked: SCL never above 100 kHz by more than 2 % "
+                          "and within a quarter below it, TIMINGR re-chosen for this kernel",
+                          st_t == i2c_ok && scl_ok(pm));
         } else {
             // AND THE RESCUE: the same core rate with the instance's own
             // kernel on HSI16. This is what the independent clock is for
@@ -1632,6 +1678,27 @@ void td_speeds() {
             st = host_tenure(peer_addr, tx_buf, 16, nullptr, 0, I2cSpeed::standard_100k);
             bench.verdict("... and the bus runs byte-exact with the core at 2 MHz",
                           st == i2c_ok && same(peer_rx, tx_buf, 16));
+            // THE STOPWATCH CANNOT TIME THIS RUNG'S SCL, and says so. With
+            // the core at 2 MHz a tenure is paced by the two vectors this
+            // one core serves - the controller holds SCL low while TXDR
+            // waits for its TXIS entry, the target stretches until its own
+            // entry reads RXDR (32.4.9, 32.4.17) - so what the tenure takes
+            // is the software's, printed. No pad is spare to see SCL's
+            // edges. What sets the rate is TIMINGR on
+            // a 16 MHz kernel, and that is the 16 MHz rung's own register,
+            // which the leg above timed at the rate asked.
+            uint8_t st_t = 0;
+            const uint32_t pm = scl_permille(measure_scl_ns(32, I2cSpeed::standard_100k, st_t),
+                                             100'000u);
+            const uint32_t hsi_timingr = i2c_timingr(Host::timing_of(I2cSpeed::standard_100k));
+            print(serial, "    100 kHz on HSI16 with the core at 2 MHz: the tenure in ", pm,
+                  " thousandths of the rate asked - the two vectors' service at a 2 MHz "
+                  "core, not SCL; TIMINGR ", hex(hsi_timingr), ", the 16 MHz rung's ",
+                  hex(mid_timingr), crlf);
+            bench.verdict("... and its rate is the one timed at 16 MHz: the same TIMINGR on "
+                          "the same 16 MHz kernel, the stopwatch at a 2 MHz core timing the "
+                          "vectors and not the clock",
+                          st_t == i2c_ok && mid_timingr != 0u && hsi_timingr == mid_timingr);
             (void)Host::init(clock, I2cClock::pclk);
         }
     }
@@ -1991,6 +2058,8 @@ void th_long() {
     peer_rx_n = 0;
     peer_addr_hits = 0;
     uint16_t reloads = 0;
+    console_drain();
+    const uint32_t big_t0 = cycles_now();
     (void)H::transfer(peer_addr, false, 255, false, true);
     H::start();
     bool ok = true;
@@ -2025,14 +2094,20 @@ void th_long() {
     uint32_t spins = 8'000'000UL;
     while (!H::flag(I2cFlag::stop) && spins-- != 0u) {
     }
+    const uint32_t big_cycles = cycles_now() - big_t0;
     H::clear(I2cClear::all);
+    // 9 x 301 SCL periods: the address and 300 bytes, each with its ACK.
+    const uint32_t big_pm = scl_permille(cycles_ns(big_cycles) / (9u * 301u), 400'000u);
     print(serial, "  300-byte write: sent ", sent, ", TCR reloads ", reloads,
-          ", client received ", peer_rx_n, crlf);
+          ", client received ", peer_rx_n, "; SCL in ", big_pm,
+          " thousandths of the 400 kHz asked", crlf);
     bench.verdict("a 300-byte write goes through RELOAD and TCR", ok && sent == big);
     bench.verdict("... in exactly one reload past the first 255", reloads == 1u);
     bench.verdict("... and every byte arrives byte-exact",
                   peer_rx_n == big && same(peer_rx, tx_buf, big));
     bench.verdict("... in ONE tenure (one address match)", peer_addr_hits == 1u);
+    bench.verdict("... at the rate asked: SCL never above 400 kHz by more than 2 % and "
+                  "within a quarter below it, across the reload", ok && scl_ok(big_pm));
 
     // ---- AUTOEND against a software STOP ----
     // With AUTOEND clear the tenure ends at TC with SCL held, and the
@@ -2079,14 +2154,21 @@ void th_long() {
     r.rx_len = 0;
     r.speed = I2cSpeed::fast_400k;
     host_done = false;
+    console_drain();
+    const uint32_t dma_t0 = cycles_now();
     (void)DmaHost::start(r);
     for (uint32_t i = 0; i < 40'000'000UL && !host_done; ++i) {
     }
+    const uint32_t dma_cycles = cycles_now() - dma_t0;
+    // 9 x 65 SCL periods, the stopwatch around the whole tenure.
+    const uint32_t dma_pm = scl_permille(cycles_ns(dma_cycles) / (9u * 65u), 400'000u);
     print(serial, "  DMA write of 64: status ", DmaHost::status(), ", client got ",
-          peer_rx_n, crlf);
+          peer_rx_n, "; SCL in ", dma_pm, " thousandths of the 400 kHz asked", crlf);
     bench.verdict("the host's TX engine moves 64 bytes",
                   DmaHost::status() == i2c_ok && peer_rx_n == 64u &&
                       same(peer_rx, tx_buf, 64));
+    bench.verdict("... at the rate asked: SCL under the engine never above 400 kHz by more "
+                  "than 2 % and within a quarter below it", scl_ok(dma_pm));
 
     for (uint16_t i = 0; i < 64u; ++i) {
         rx_buf[i] = 0;
@@ -3204,6 +3286,7 @@ void tq_peer_speeds() {
                           {I2cSpeed::fast_plus_1m, "1M  "}};
     uint8_t exact = 0;
     bool sm_fm_ok = true;
+    uint32_t pm[3] = {};
     for (uint8_t i = 0; i < 3u; ++i) {
         twilink::Params a{};
         a.count = 64;
@@ -3220,9 +3303,14 @@ void tq_peer_speeds() {
             rx_buf[k] = 0xEE;
         }
         const bool legal = Host::speed_ok(rungs[i].speed);
+        const uint32_t w0 = cycles_now();
         const uint8_t ws = legal ? host_tenure(twilink::dut_addr, tx_buf, 8, nullptr, 0,
                                                rungs[i].speed)
                                  : 0xEEu;
+        // 9 x 9 SCL periods, the stopwatch around the whole write.
+        pm[i] = legal ? scl_permille(cycles_ns(cycles_now() - w0) / 81u,
+                                     i2c_speed_hz(rungs[i].speed))
+                      : 0u;
         const uint8_t rs = legal ? host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 8,
                                                rungs[i].speed)
                                  : 0xEEu;
@@ -3236,7 +3324,8 @@ void tq_peer_speeds() {
         const bool ok = legal && ws == i2c_ok && rs == i2c_ok && mism == 0u;
         print(serial, "  ", rungs[i].name, ": SCL ", Host::scl_hz(rungs[i].speed) / 1000u,
               " kHz, write=", ws, " read=", rs, " mism=", mism, " -> ",
-              ok ? "byte-exact both ways" : "NOT exact", crlf);
+              ok ? "byte-exact both ways" : "NOT exact", "; the write's SCL in ", pm[i],
+              " thousandths of the rate asked", crlf);
         if (ok) {
             ++exact;
         } else if (i < 2u) {
@@ -3247,6 +3336,10 @@ void tq_peer_speeds() {
     bench.verdict("Standard mode and Fast mode both carry a write and a read "
                   "byte-exact between TWO SEPARATE CHIPS",
                   sm_fm_ok);
+    bench.verdict("... at the rates asked: the write's SCL never above 100 or 400 kHz by "
+                  "more than 2 % and within a quarter below it (a short tenure: the "
+                  "request's own cost is inside the reading)",
+                  sm_fm_ok && scl_ok(pm[0]) && scl_ok(pm[1]));
     // FAST-MODE-PLUS IS THE RUNG THAT IS ABOUT THE WIRE AND THE FAR
     // END, not this controller: what a megahertz bus does here is a
     // property of these two jumpers, their 2.2 kOhm pull-ups and the

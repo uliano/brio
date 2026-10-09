@@ -584,8 +584,9 @@ Out::enable();                           // then feed Out::data() on TXE, left c
 `test_vx03_spi` on the CH32V203C8T6 at 144 MHz of HCLK (PB2 = 144 MHz,
 PB1 = 72 MHz), with two instruments: a strap from PA7 to PA6 that makes
 SPI1's own MOSI its MISO, and a peer board on SPI2's four wires running
-`spi_peer`. The CH32V303VCT6's findings follow in a section of their
-own.
+`spi_peer` (44 verdicts in `z` with the strap and no peer, the peer's
+letter declining by name). The CH32V303VCT6's findings follow in a
+section of their own.
 
 - **The clock is right on the pad that carries it.** SPI1 on its second
   column puts SCK on PB3, which is TIM2's channel 2 under that timer's
@@ -596,6 +597,21 @@ own.
 - **The two instances' rate tables differ**, as their buses do: SPI1's
   ladder runs 72 MHz down to 562.5 kHz, SPI2's 36 MHz down to
   281.25 kHz.
+- **THE ENGINES RUN AT THE RATE ASKED** (letter a, no wire, both parts).
+  A loop shares one clock at both ends and the edge count above is a
+  count, so neither can tell a bus whose rate is not the tree's: a frame
+  inside an engined block - the difference of a 2048- and a 256-frame
+  block, neither buffer named, the best of three each - is timed on the
+  core's counter, which counts HCLK, in thousandths of its SCK periods at
+  the instance's own bus over the division. SPI1 read 1000 at /4, /16 and
+  /64 and in 16-bit frames at /4, SPI2 1000 at /2 and /16: the clock does
+  not pause between frames while the engine refills (20.2.2), and each
+  bus divides as the clock tree says. The polled path is never faster
+  than its wire at the rate asked - SPI1 on its second column, 64 frames:
+  1272 cycles at /2 against the wire's 1024, 2259 at /4 against 2048,
+  131283 at /256 against 131072 - nor is letter c's polled ladder on the
+  strap, one frame in flight at the top codes (30 cycles a frame at /2
+  against 16, 52 at /4 against 32, 2049 at /256 against 2048).
 - **THE HOST ABOVE THE WIRE**, `bench_vx03`'s letter e on SPI1 with no
   engines, MISO floating, each line the best of 4 from a fresh tick (the
   wire's cycles a frame: 32 and 128 for 8-bit frames at /4 and /16, 64
@@ -824,7 +840,7 @@ own.
 
 ### On the CH32V303VCT6
 
-`test_vx03_spi` (26 verdicts in `z`) and `test_vx03_i2s` (15) on WCH's
+`test_vx03_spi` (32 verdicts in `z`) and `test_vx03_i2s` (15) on WCH's
 evaluation board at the same 144 MHz, over four jumper wires between
 SPI2's column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
 PB15-PB5, each looked for before a letter uses it - which carry I2S2 to
@@ -866,6 +882,17 @@ the letters that want either decline by name.
   and costs nothing on the wire; the block was exact both ways at /4, /8
   and /16 and at /2 with HSRXEN, and one bit late at /2 without it, in
   both widths.
+- **THE LINKS RUN AT THE RATE ASKED**: SPI2 and SPI3 both divide PB1, so
+  the link between them cannot tell a wrong bus; letters f to i time the
+  host's run on the core's counter in thousandths of the wire at PB1 over
+  the division. The polled host at /64, 32 frames: 1011 in 8-bit frames
+  and 1005 in 16-bit ones with SPI2 the host, 1009 and 1004 with SPI3 -
+  the polled request's fixed cost, about 300 cycles, inside a run of
+  32768 and 65536; letter h's blocks of 256 frames 1005 at /4 and 1011
+  at /2 with HSRXEN; letter i's rows 1011 at /2 in both widths, 1005 at
+  /4, 1002 at /8 and 1001 at /16 - the 80 to 90 cycles between the enable
+  and the receive channel's completion inside every block, the wire's
+  own time at every row.
 - **The I2S face**, I2S2 against I2S3 on WS, CK and SD: every field of
   I2S_CFGR and I2SPR written and read back on both instances; Philips,
   MSB- and LSB-justified and PCM in both frames carrying 96 words word for

@@ -24,7 +24,9 @@
 // alternate-function open-drain pad has no internal pull on this
 // family, and the Nucleo's two-wire node has its 2.2 kOhm pair. With
 // no peer on the desk both lines read low and every wire letter
-// declines with the reason.
+// declines with the reason - the lines read through port C's gate, which
+// the suite opens before it asks (shut, the port reads zero, and right
+// after a reset nothing else has opened it).
 //
 // THE HOST RUNS ON ITS TWO VECTORS (events on i2c1_ev, errors on
 // i2c1_er); a letter that wants a tenure waited out spins on a flag
@@ -50,10 +52,14 @@
 //      general call
 //   e  the vocabulary against the peer (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
-//   f  the two speeds against a second chip, byte-exact both ways
-//   g  THE DMA ENGINES: the same shapes on channels 6 and 7, and the
-//      interrupts they take - none for a write (BTF ends it), one per
-//      engined read
+//   f  the two speeds against a second chip, byte-exact both ways, each
+//      write timed and its SCL judged against the rate asked: never above
+//      it by more than 2 %, within a quarter below it
+//   g  THE DMA ENGINES: the same shapes on channels 6 and 7, a read at
+//      400 kHz besides, and the interrupts they take - none for a write
+//      (BTF ends it), one per engined read; the faults judged are the
+//      ones this run counted; the SCL of the engined tenures timed and
+//      judged against the rate asked
 //   h  THE KERNEL against the peer: I2cBus (= BusMaster) over I2cHost,
 //      the NACK in its place, the rejection, both votes, and two
 //      wedges the PEER holds: SDA, which this silicon answers by itself
@@ -236,7 +242,15 @@ uint8_t dma_tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
 }
 
 /// The wire has pull-ups: both lines read high with nothing driving.
+/// PORT C'S GATE IS OPENED FIRST: a read through a shut gate answers
+/// zero, and right after a reset nothing in this image has opened it -
+/// the console is on port D, and only a letter that configures a pad
+/// (the host's init(), the rise probe) opens port C as a side effect. A
+/// pad's mode is left alone, so the read is the same whether the host
+/// owns the pads or nobody does.
 bool wire_pulled_up() {
+    SclPin::P::clock_on();
+    SdaPin::P::clock_on();
     return SclPin::read() && SdaPin::read();
 }
 
@@ -400,6 +414,31 @@ bool need_peer() {
     bench.verdict("the peer answers on the command address (the peer board running twi_peer)",
                   false);
     return false;
+}
+
+// ---- the rate on the wire ---------------------------------------------------
+//
+// A rate asked of the host is judged on the wire: a tenure of `periods`
+// SCL periods (nine a byte, the address's included) timed on the ticker's
+// cycle count from start() to its completion, START, STOP and the
+// software around them inside - which only lowers the reading. The
+// bracket: never above the rate asked by more than 2 % (a divisor too
+// small would be), and within a quarter below it: the pull-ups' rise
+// (letter a measures it from the pad), the bytes' turnaround and the
+// tenure's two ends all add to the run.
+
+/// In 32 bits (the CH32V003 has no multiplier to spend on a 64-bit
+/// division): `periods` x HCLK / 100 fits for a tenure of 89 bytes.
+uint32_t scl_of(uint32_t cycles, uint32_t periods) {
+    if (cycles == 0u) {
+        return 0u;
+    }
+    const uint32_t q = periods * (SysClock::hz / 100u);
+    return (q / cycles) * 100u + ((q % cycles) * 100u) / cycles;
+}
+
+bool scl_bracket(uint32_t measured, uint32_t asked) {
+    return measured <= asked + asked / 50u && measured >= asked - asked / 4u;
 }
 
 // ===========================================================================
@@ -813,6 +852,7 @@ void tf_speeds() {
     };
     const Rung rungs[] = {{I2cSpeed::standard_100k, "100k"}, {I2cSpeed::fast_400k, "400k"}};
     uint8_t exact = 0;
+    uint8_t bracketed = 0;
     for (uint8_t i = 0; i < 2u; ++i) {
         twilink::Params a{};
         a.count = 64;
@@ -828,17 +868,13 @@ void tf_speeds() {
             tx_buf[k] = static_cast<uint8_t>(0xC0u + k);
             rx_buf[k] = 0xEE;
         }
-        // The tenure timed on the STK: 9 x (N + 1) SCL periods plus a
-        // START and a STOP, so the period is what the chooser predicts
-        // when the client does not stretch.
+        // The tenure timed on the ticker's cycle count: 9 x (N + 1) SCL
+        // periods plus a START and a STOP, so the period is what the
+        // chooser predicts when the client does not stretch.
         console_drain();
-        const uint32_t t0 = Ticker::ticks();
-        const uint32_t c0 = stk()->CNT;
+        const uint32_t c0 = Ticker::cycles();
         const uint8_t ws = host_tenure(twilink::dut_addr, tx_buf, 8, nullptr, 0, rungs[i].speed);
-        const uint32_t c1 = stk()->CNT;
-        const uint32_t t1 = Ticker::ticks();
-        const uint32_t period = stk()->CMP + 1u;
-        const uint32_t cycles = (t1 - t0) * period + c1 - c0;
+        const uint32_t cycles = Ticker::cycles() - c0;
         const uint8_t rs = host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 8, rungs[i].speed);
         uint8_t mism = 0;
         for (uint8_t k = 0; k < 8; ++k) {
@@ -849,18 +885,26 @@ void tf_speeds() {
         settle_ms(300);
         const bool ok = ws == i2c_ok && rs == i2c_ok && mism == 0u;
         // 8 data bytes + the address: 81 SCL periods, plus START/STOP.
-        const uint32_t scl_hz_measured = cycles != 0u ? (81UL * SysClock::hz) / cycles : 0u;
-        print(serial, "  ", rungs[i].name, ": SCL asked ", Host::scl_hz(rungs[i].speed) / 1000u,
-              " kHz, an 8-byte write took ", cycles, " cycles -> about ", scl_hz_measured / 1000u,
-              " kHz on the wire; write=", ws, " read=", rs, " mism=", mism, " -> ",
-              ok ? "byte-exact both ways" : "NOT exact", crlf);
+        const uint32_t scl_hz_measured = scl_of(cycles, 81u);
+        const uint32_t asked = i2c_speed_hz(rungs[i].speed);
+        print(serial, "  ", rungs[i].name, ": SCL asked ", asked / 1000u, " kHz (the chooser's ",
+              Host::scl_hz(rungs[i].speed) / 1000u, "), an 8-byte write took ", cycles,
+              " cycles -> about ", scl_hz_measured / 1000u, " kHz on the wire; write=", ws, " read=", rs,
+              " mism=", mism, " -> ", ok ? "byte-exact both ways" : "NOT exact", crlf);
         if (ok) {
             ++exact;
+        }
+        if (ws == i2c_ok && scl_bracket(scl_hz_measured, asked)) {
+            ++bracketed;
         }
     }
     bench.verdict("Standard mode and Fast mode both carry a write and a read byte-exact between "
                   "TWO SEPARATE CHIPS",
                   exact == 2u);
+    bench.verdict("and each runs the bus at the rate asked: an 8-byte write's SCL never above 100 or "
+                  "400 kHz by more than 2 % and within a quarter below it (the pull-ups' rise, the "
+                  "turnaround between bytes)",
+                  bracketed == 2u);
     bench.verdict("the command channel survives the ladder", command(Op::ping));
 }
 
@@ -892,8 +936,19 @@ void tg_dma() {
     }
     dma6_entries = 0;
     dma7_entries = 0;
+    // What THIS run counts: the engines' fault counters are the image's,
+    // and other letters (r's refusals through the engines) add to them.
+    const uint32_t tx_faults0 = DmaTxEngine<6>::faults();
+    const uint32_t rx_faults0 = DmaRxEngine<7>::faults();
+    // The write and the read timed on the ticker's cycle count, 153 SCL
+    // periods each (seventeen bytes, the address's included).
+    console_drain();
+    uint32_t c0 = Ticker::cycles();
     const uint8_t ws = dma_tenure(twilink::dut_addr, tx_buf, 16, nullptr, 0, link_speed);
+    const uint32_t w_scl = scl_of(Ticker::cycles() - c0, 153u);
+    c0 = Ticker::cycles();
     const uint8_t rs = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 16, link_speed);
+    const uint32_t r_scl = scl_of(Ticker::cycles() - c0, 153u);
     uint8_t mism = 0;
     for (uint8_t i = 0; i < 16; ++i) {
         if (rx_buf[i] != twilink::pattern_value(a.pattern, a.seed, i)) {
@@ -906,8 +961,26 @@ void tg_dma() {
     const uint8_t cs = dma_tenure(twilink::dut_addr, tx_buf, 4, rx_buf, 4, link_speed);
     const uint8_t r2 = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf + 8, 2, link_speed);
     const uint8_t r1 = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf + 12, 1, link_speed);
+    // And at 400 kHz: a 16-byte read on the engines, timed, its bytes the
+    // serve's next sixteen (the pattern runs on across the reads: 16 + 4 +
+    // 2 + 1 taken before it).
+    for (uint8_t i = 0; i < 16; ++i) {
+        rx_buf[16 + i] = 0xEE;
+    }
+    console_drain();
+    c0 = Ticker::cycles();
+    const uint8_t fs = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf + 16, 16, I2cSpeed::fast_400k);
+    const uint32_t f_scl = scl_of(Ticker::cycles() - c0, 153u);
+    uint8_t fmism = 0;
+    for (uint8_t i = 0; i < 16; ++i) {
+        if (rx_buf[16 + i] != twilink::pattern_value(a.pattern, a.seed, static_cast<uint16_t>(23u + i))) {
+            ++fmism;
+        }
+    }
     const uint32_t e6 = dma6_entries;
     const uint32_t e7 = dma7_entries;
+    const uint32_t tx_faults = DmaTxEngine<6>::faults() - tx_faults0;
+    const uint32_t rx_faults = DmaRxEngine<7>::faults() - rx_faults0;
     DmaHost::release();
     dma_host_live = false;
     // The plain host is the command channel's, and the DMA host's
@@ -918,21 +991,30 @@ void tg_dma() {
     twilink::Report r{};
     const bool rep = peer_report(r);
     print(serial, "  DMA: write16=", ws, " read16=", rs, " mism=", mism, " combined=", cs,
-          " read2=", r2, " read1(pump)=", r1, "; peer count=", r.count, " addr_hits=", r.addr_hits,
-          " faults tx=", DmaTxEngine<6>::faults(), " rx=", DmaRxEngine<7>::faults(), "; DMA interrupts ch6=",
-          e6, " ch7=", e7, crlf);
+          " read2=", r2, " read1(pump)=", r1, " read16 at 400k=", fs, " mism=", fmism, "; peer count=",
+          r.count, " addr_hits=", r.addr_hits, " faults this run tx=", tx_faults, " rx=", rx_faults,
+          "; DMA interrupts ch6=", e6, " ch7=", e7, crlf);
+    print(serial, "  SCL on the engines: the 16-byte write ", w_scl / 1000u, " kHz and read ", r_scl / 1000u,
+          " kHz (100 asked), the read at 400k ", f_scl / 1000u, " kHz", crlf);
     bench.verdict("a 16-byte write and a 16-byte read through the DMA engines complete i2c_ok, "
                   "byte-exact",
                   ws == i2c_ok && rs == i2c_ok && mism == 0u);
     bench.verdict("the combined tenure, the two-byte read (LAST's NACK) and the one-byte read "
                   "(the pump's) all complete",
                   cs == i2c_ok && r2 == i2c_ok && r1 == i2c_ok);
-    bench.verdict("the peer accounts every byte (16 + 16 + 4 + 4 + 2 + 1 = 43), no transfer fault",
-                  rep && r.count == 43u && DmaTxEngine<6>::faults() == 0u &&
-                      DmaRxEngine<7>::faults() == 0u);
-    bench.verdict("no write block interrupts (BTF ends a write), each of the three engined reads "
+    bench.verdict("a 16-byte read at 400 kHz on the engines completes i2c_ok, the serve's next "
+                  "sixteen bytes exact",
+                  fs == i2c_ok && fmism == 0u);
+    bench.verdict("the peer accounts every byte (16 + 16 + 4 + 4 + 2 + 1 + 16 = 59), and this run "
+                  "counts no transfer fault",
+                  rep && r.count == 59u && tx_faults == 0u && rx_faults == 0u);
+    bench.verdict("no write block interrupts (BTF ends a write), each of the four engined reads "
                   "once",
-                  e6 == 0u && e7 == 3u);
+                  e6 == 0u && e7 == 4u);
+    bench.verdict("and the engines run the bus at the rate asked: SCL never above 100 or 400 kHz by "
+                  "more than 2 % and within a quarter below it",
+                  ws == i2c_ok && rs == i2c_ok && fs == i2c_ok && scl_bracket(w_scl, 100'000u) &&
+                      scl_bracket(r_scl, 100'000u) && scl_bracket(f_scl, 400'000u));
     host_ready();
 }
 

@@ -80,7 +80,10 @@
 //      storage's end delivered whole, a lap the consumer did not keep up
 //      with counted once and skipped, and a run written over while it was
 //      held refused at its release - or, WITH THE JUMPER, the transmit
-//      run coming back through the receive ring
+//      run coming back through the receive ring; and either way the
+//      transmit engine's run timed on the core's counter against the wire
+//      at the rate asked, which a loop dividing one bus at both ends
+//      cannot tell
 //   h  THE VECTORS: a block on each of DMA1's channels, each one's flag
 //      reaching its own handler body and no other
 //   o  THE RECEIVE RING AT SPEED: the receive engine's circular shape on
@@ -97,17 +100,20 @@
 //      or round the jumper): the vector's wait for a frame giving the
 //      channel up within its bound - one DMA fault, no storm, the thread
 //      running - and, the request let go by TIM3's reset line, the ring
-//      started again by the consumer's next look and the next burst whole
+//      started again by the consumer's next look and the next burst whole,
+//      the port's transmit engine timed against the wire after it
 //   q  THE PRIORITY RULE (docs/design/dma.md): the Uart's levels as armed -
 //      the ring at very_high, its transmit engine at high, and the ring
-//      UartOptions::rx_priority moves - then the fourth port pouring the
+//      UartOptions::rx_priority moves; both ends' rates timed against the
+//      wire at 1 and 4.5 Mbaud - then the fourth port pouring the
 //      image's pattern into USART2's ring of 512 at 1 Mbaud and at 4.5
 //      Mbaud while a memory-to-memory copy of 2 KB runs back to back on
 //      DMA1's channel 3, a lower number than the ring's 6, at the copy
 //      engine's default level: every byte in order, no overrun, no channel
 //      given up; the copy's rate against its rate alone; and the CONTROL,
 //      the same load against a ring told rx_priority = low, which overruns
-//   r  AN OVERRUN AT A MESSAGE'S TAIL: a copy at the ring's own level on a
+//   r  AN OVERRUN AT A MESSAGE'S TAIL, both ends timed against the wire
+//      at 1 Mbaud first: a copy at the ring's own level on a
 //      lower channel starving the ring under a message's last frames, the
 //      vector held off until the channel has taken the frame DATAR held -
 //      ORE up with RXNE down and no frame after it: the vector entered a
@@ -136,12 +142,13 @@
 //   n  TWO CONTROLLERS ON ONE PAIR OF WIRES: USART2's engines on DMA1 and
 //      UART4's on DMA2, a run each way across the board's two wires -
 //      when the wires are there - with what each receiver framed while
-//      its pad floated drained and counted first, and both ports released
+//      its pad floated drained and counted first, each transmit engine
+//      timed against the wire after, and both ports released
 //      at the end, since a receiver left running keeps its request on
 //      its channel
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcdef,ghop,qr
+// build: groups = abcdef,gho,pqr
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -272,6 +279,52 @@ void wait_us(uint32_t us) {
     while (w.us() < us) {
     }
 }
+
+/**
+ * THE RATE ON THE WIRE, which a loop alone cannot tell: a transmitter and
+ * the receiver it reaches here both divide PB1 by one arithmetic, so a
+ * wrong bus rate is a slower or a faster stream and nothing else. The STK
+ * counts HCLK instead: `frames` 8N1 frames of the image's pattern queued
+ * into a transport `T` with write_bulk() as fast as its ring takes them,
+ * timed from the first queue to tx_idle() - the last stop bit's end -
+ * against their time at the rate ASKED; the answer in thousandths. What
+ * the transport receives meanwhile is read and thrown away, and its
+ * counters are cleared after.
+ */
+template <typename T>
+uint32_t wire_permille(uint32_t baud, uint32_t frames) {
+    const uint8_t* src = source_first_bytes();
+    const uint64_t wire = 10ULL * frames * SysClock::hz / baud;
+    const uint64_t budget = 2u * wire + SysClock::hz / 100u;
+    uint8_t b = 0;
+    uint32_t queued = 0;
+    Stopwatch w;
+    while (queued < frames && w.cycles() < budget) {
+        const uint32_t want = frames - queued;
+        queued += T::write_bulk(std::span<const uint8_t>(
+            src + (queued & (source_bytes - 1u)),
+            want < source_bytes - (queued & (source_bytes - 1u))
+                ? want
+                : source_bytes - (queued & (source_bytes - 1u))));
+        while (T::read_byte(b)) {
+        }
+    }
+    while (!T::tx_idle() && w.cycles() < budget) {
+        while (T::read_byte(b)) {
+        }
+    }
+    const uint32_t took = w.cycles();
+    wait_us(64u * 10u * 1'000'000u / baud + 1000u);
+    while (T::read_byte(b)) {
+    }
+    T::clear_errors();
+    return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * took / wire);
+}
+
+/// The verdict on a reading: never faster than the rate asked by more
+/// than the ruler's few cycles - every rate this suite asks divides PB1
+/// whole - and never slower by more than three per cent.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
 
 // ---------------------------------------------------------------------------
 // The handlers' counters, and which face channels 6 and 7 wear
@@ -1086,6 +1139,18 @@ void ring_on_a_banged_line() {
                   held_size != 0u && !intact && Loop::rx_overruns() == 2u);
 }
 
+/// Letter g's last step, either way round: the transmit engine's run at
+/// the rate asked - the jumper's loop, where there is one, divides PB1 at
+/// both ends, and the core's counter does not.
+void tg_rate() {
+    const uint32_t pm = wire_permille<Loop>(115200, 256);
+    print(serial, "  256 frames through the transmit engine in ", pm,
+          " thousandths of their wire time at 115200", crlf);
+    bench.verdict("the transmit engine runs the line at the rate asked: 256 frames in their wire "
+                  "time at 115200 on the core's counter, -1 % to +3 %",
+                  wire_ok(pm));
+}
+
 void tg_engines() {
     all_off();
     need_jumper();
@@ -1161,6 +1226,7 @@ void tg_engines() {
         bench.verdict("the round trip is skipped and says so: without the strap between "
                       "USART2's two pads a transmit engine has no receive engine to reach",
                       true);
+        tg_rate();
         Loop::release();
         uart_mode = false;
         all_off();
@@ -1188,6 +1254,7 @@ void tg_engines() {
     bench.verdict("a run poured out by the transmit engine comes back through the receive "
                   "ring one byte for byte",
                   same && Loop::dma_faults() == 0u);
+    tg_rate();
 
     Loop::release();
     uart_mode = false;
@@ -1302,6 +1369,12 @@ void tp_dead_ring() {
     bench.verdict("... and with the held request let go by TIM3's reset line, the consumer's "
                   "next look starts the ring again and the next burst arrives whole",
                   restarted && got == 10u && in_order);
+    const uint32_t pm = wire_permille<Loop>(115200, 256);
+    print(serial, "  then 256 frames through the transmit engine in ", pm,
+          " thousandths of their wire time at 115200", crlf);
+    bench.verdict("and the port runs at the rate asked after it: 256 frames in their wire time "
+                  "at 115200, -1 % to +3 %",
+                  wire_ok(pm));
 
     Loop::release();
     uart_mode = false;
@@ -2297,6 +2370,15 @@ void tn_dma2_uart4() {
         bench.verdict("and the way back, UART4's transmit engine on DMA2 into USART2's receive "
                       "engine on DMA1, with no fault counted on either port",
                       same_back && Loop::dma_faults() == 0u && Port4::dma_faults() == 0u);
+        // The two ends divide PB1 by one arithmetic: each transmit engine's
+        // run timed against the wire at the rate asked.
+        const uint32_t pm2 = wire_permille<Loop>(115200, 256);
+        const uint32_t pm4 = wire_permille<Port4>(115200, 256);
+        print(serial, "  256 frames in ", pm2, " (USART2 on DMA1) and ", pm4,
+              " (UART4 on DMA2) thousandths of their wire time at 115200", crlf);
+        bench.verdict("and both run at the rate asked: each transmit engine's 256 frames in their "
+                      "wire time at 115200, -1 % to +3 %",
+                      wire_ok(pm2) && wire_ok(pm4));
         // Both ports stopped, not only their channels: a receiver left
         // running with DMAR set raises its request again on the first noise
         // frame, and a request that stands on DMA2's channel 3 is what a
@@ -2524,6 +2606,45 @@ void print_cell(const char* what, const Cell& c) {
           c.entries, " entries", crlf);
 }
 
+/// THE TWO ENDS' RATES, which the stream alone cannot tell - the sender
+/// and the ring divide PB1 by one arithmetic: the fourth port's transmit
+/// engine pouring one 4 KB block with nothing listening, timed on the
+/// core's counter from the block's start to TC after its last frame, and
+/// USART2's own transmit engine through the transport of letters q and r
+/// (wire_permille), each in thousandths of the wire at the rate asked.
+struct EndRates {
+    uint32_t sender;
+    uint32_t port;
+};
+
+template <typename F>
+EndRates end_rates(uint32_t baud) {
+    EndRates r{0, 0};
+    // TE sends an idle frame after each open (18.2): out before the clock.
+    const uint32_t frames_us = 20u * 1'000'000u / baud + 10u;
+    if (F::open(baud)) {
+        wait_us(frames_us);
+        const uint64_t wire = 10ULL * source_bytes * SysClock::hz / baud;
+        const uint64_t budget = 2u * wire + SysClock::hz / 100u;
+        Stopwatch w;
+        (void)F::Engine::start(std::span<const uint8_t>(source_first_bytes(), source_bytes));
+        F::Port::clear_flags(usart_tc);   // TC stood for the idle line before the block
+        while (!F::finished() && w.cycles() < budget) {
+        }
+        while (!F::Port::tx_complete() && w.cycles() < budget) {
+        }
+        r.sender = static_cast<uint32_t>(1000ULL * w.cycles() / wire);
+    }
+    F::close();
+    fat_mode = 1;
+    (void)Fat::init(clock, baud);
+    wait_us(frames_us);
+    r.port = wire_permille<Fat>(baud, 1024);
+    Fat::release();
+    fat_mode = 0;
+    return r;
+}
+
 template <uint8_t n = 4>
 bool sender_wired() {
     if constexpr (device::has_usart(n)) {
@@ -2581,6 +2702,18 @@ void tq_priority() {
                       "by default, and UartOptions::rx_priority moves the ring's level",
                       ring_level == DmaPriority::very_high && tx_level == DmaPriority::high &&
                           low_level == DmaPriority::low);
+
+        // The rates the cells below stream at, on the wire.
+        const EndRates r1 = end_rates<F>(1'000'000UL);
+        const EndRates r4 = end_rates<F>(4'500'000UL);
+        print(serial, "  in thousandths of the wire: the sender's 4 KB block ", r1.sender,
+              " at 1 Mbaud and ", r4.sender, " at 4.5 Mbaud; USART2's transmit engine's 1024 "
+              "frames ", r1.port, " and ", r4.port, crlf);
+        bench.verdict("BOTH ENDS RUN AT THE RATE ASKED, which the stream alone cannot tell: the "
+                      "sender's block and USART2's own transmit engine in their wire time at 1 "
+                      "and 4.5 Mbaud on the core's counter, -1 % to +3 %",
+                      wire_ok(r1.sender) && wire_ok(r4.sender) && wire_ok(r1.port) &&
+                          wire_ok(r4.port));
 
         // The copy alone: its own rate, the reference for its cost.
         Copier::stop();
@@ -2671,6 +2804,13 @@ void tr_overrun_tail() {
         const uint8_t* src = source_first_bytes();
         constexpr uint16_t msg = 32;
         constexpr uint16_t lead = 28;
+        const EndRates rates = end_rates<F>(1'000'000UL);
+        print(serial, "  at 1 Mbaud: the sender's 4 KB block in ", rates.sender,
+              " and USART2's transmit engine's 1024 frames in ", rates.port,
+              " thousandths of their wire time", crlf);
+        bench.verdict("both ends run at the rate asked: in their wire time at 1 Mbaud, -1 % to "
+                      "+3 %",
+                      wire_ok(rates.sender) && wire_ok(rates.port));
         fat_mode = 1;
         const bool opened = Fat::init(clock, 1'000'000UL) && F::open(1'000'000UL);
         wait_us(500);

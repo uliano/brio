@@ -108,7 +108,14 @@
 //      packed receive, the frame-by-frame short receive, the half-word
 //      loop, the pump in every shape, a two-phase request both ways -
 //      each judged by the FIFO levels and OVR after it and by the count
-//      of completions, with nothing on MISO
+//      of completions, with nothing on MISO - and THE RATE ON THE WIRE:
+//      a frame inside a block timed against its SCK periods at the rate
+//      asked, at every BR code on the engines and the polled loop, in
+//      16-bit frames, and under a 1 MHz ceiling at the dynamic clock's
+//      16 and 2 MHz. A client is clocked by the host's SCK and cannot
+//      tell a wrong divisor; SCK is the host's whatever is wired, so this
+//      wireless timing stands for d, i, l and p, which set the same
+//      divisors over wires
 //   n  THE PEER: the spi_link command channel to the peer board, its
 //      ident and ten frames
 //   o  the matrix against the peer: four modes, both bit orders, and a
@@ -1616,13 +1623,15 @@ void td_ladder() {
                   "against ", floor_hi, " at PCLK/16, where the WIRE asks ",
           8u * spi_division(SpiClock::div2), " and ",
           8u * spi_division(SpiClock::div16), crlf);
-    bench.verdict("THIS CORE CANNOT MAKE A CONTINUOUS SPI CLOCK OUT OF SOFTWARE. "
-                  "A loop that keeps the transmit FIFO full still spends about "
-                  "three hundred cycles a frame - a poll of TXE, a store, a poll "
-                  "of RXNE, a load, and the two-cycle APB stall on each - so from "
-                  "PCLK/32 upward the frame period STOPS FOLLOWING THE RATE and "
-                  "the clock has a gap in it at every rung. A rate ladder driven "
-                  "by the CPU never presses the far end, however fast BR is set",
+    bench.verdict("THIS LOOP CANNOT MAKE A CONTINUOUS SPI CLOCK BESIDE A CLIENT ON "
+                  "THE SAME CORE. A hand loop that keeps the transmit FIFO full and "
+                  "reads every frame back spends about three hundred cycles a frame "
+                  "while the client's vector answers each one on this core, so from "
+                  "PCLK/32 upward the frame period STOPS FOLLOWING THE RATE and the "
+                  "clock has a gap in it at every rung - where the driver's own "
+                  "transmit-only loop, with no client to serve, holds the clock "
+                  "continuous at PCLK/2 (letter s times it). A ladder driven this way "
+                  "never presses the far end, however fast BR is set",
                   floored);
 
     // A LOST FRAME WITH NO FLAG TO SHOW FOR IT, and the reason is the
@@ -3440,6 +3449,51 @@ bool shape_clean(const ShapeResult& r, uint16_t completions) {
     return r.done && r.ftlvl == 0u && r.frlvl == 0u && !r.ovr && r.completions == completions;
 }
 
+// ---- THE RATE ON THE WIRE, which a self-link cannot tell ------------------
+//
+// The client of a self-link or a peer is clocked BY the host's SCK, so a
+// wrong divisor is a slower or a faster link and every byte still lands.
+// So the host's frame is TIMED against its SCK periods at the rate ASKED:
+// the difference of two blocks of 2048 and 256 frames - so a
+// transaction's fixed cost cancels - on the ticker's cycle count, neither
+// buffer named (the transmit side pours 0xFF, the receive side drains
+// into a held sink), the best of three of each; 35.5.9 makes the clock
+// continuous while TXFIFO holds a frame ("the clock signal is provided
+// continuously by the master until TXFIFO becomes empty"), so the frames
+// of a block carry no gap and the frame is its SCK periods alone. The
+// timing needs no wire - SCK is the host's whatever is on the far end -
+// so it runs here, at every BR code and at the dynamic clock's rungs, and
+// stands for the letters whose wires set the same divisor (d, i, l, p).
+
+/// One block of `n` frames through the polled host or the engined one,
+/// neither buffer named, the best of three, in core cycles.
+uint32_t block_cycles(bool engines, uint16_t n, SpiClock rate, SpiDataSize bits) {
+    uint32_t least = 0xFFFFFFFFu;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        const uint32_t t0 = cycles_now();
+        if (engines) {
+            (void)dma_xfer(nullptr, nullptr, n, rate, true, 0, nullptr, bits);
+        } else {
+            (void)host_xfer(nullptr, nullptr, n, rate, SpiMode::mode0, bits, true);
+        }
+        const uint32_t took = cycles_now() - t0;
+        least = took < least ? took : least;
+    }
+    return least;
+}
+
+/// A frame inside a block, in thousandths of its SCK periods at `sck_hz`
+/// - the rate ASKED, never the one the code produced.
+uint32_t frame_permille(bool engines, SpiClock rate, SpiDataSize bits, uint32_t sck_hz) {
+    const uint32_t big = block_cycles(engines, 2048, rate, bits);
+    const uint32_t small = block_cycles(engines, 256, rate, bits);
+    const uint32_t width = bits == SpiDataSize::bits16 ? 16u : 8u;
+    const uint64_t want = 1792ull * width * SysClock::hz() / sck_hz;
+    return big <= small ? 0u : static_cast<uint32_t>(1000ull * (big - small) / want);
+}
+
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
 void ts_shapes() {
     peer_stop();
     software_cs_pads();
@@ -3549,6 +3603,81 @@ void ts_shapes() {
                       completed == 100u && ovr_seen == 0u && leftovers == 0u);
     }
     tick_stretch = 0;
+
+    // ---- THE RATE ON THE WIRE: every BR code, timed ----
+    Dma<1>::bus_clock(true);
+    const bool engined_up = DmaHost::init(clock);
+    dma_host_live = true;
+    uint32_t engined[8];
+    uint32_t polled[8];
+    bool engined_ok = engined_up;
+    bool polled_ok = true;
+    for (uint8_t c = 0; c < 8u; ++c) {
+        const auto rate = static_cast<SpiClock>(c);
+        const uint32_t sck = SysClock::pclk_hz() / spi_division(rate);
+        engined[c] = frame_permille(true, rate, SpiDataSize::bits8, sck);
+        engined_ok = engined_ok && wire_ok(engined[c]);
+    }
+    const uint32_t w16_div2 = frame_permille(true, SpiClock::div2, SpiDataSize::bits16,
+                                             SysClock::pclk_hz() / 2u);
+    const uint32_t w16_div16 = frame_permille(true, SpiClock::div16, SpiDataSize::bits16,
+                                              SysClock::pclk_hz() / 16u);
+    dma_host_live = false;
+    DmaHost::release();
+    (void)Host::init(clock);
+    for (uint8_t c = 0; c < 8u; ++c) {
+        const auto rate = static_cast<SpiClock>(c);
+        polled[c] = frame_permille(false, rate, SpiDataSize::bits8,
+                                   SysClock::pclk_hz() / spi_division(rate));
+        polled_ok = polled_ok && wire_ok(polled[c]);
+    }
+    print(serial, "  a frame inside a block, in thousandths of its eight SCK periods at "
+          "PCLK/2 .. PCLK/256: engines");
+    for (uint8_t c = 0; c < 8u; ++c) {
+        print(serial, " ", engined[c]);
+    }
+    print(serial, "; the polled transmit-only loop");
+    for (uint8_t c = 0; c < 8u; ++c) {
+        print(serial, " ", polled[c]);
+    }
+    print(serial, "; 16-bit frames on the engines at PCLK/2 ", w16_div2, ", PCLK/16 ",
+          w16_div16, crlf);
+    bench.verdict("THE ENGINES RUN AT THE RATE ASKED: a frame inside a block takes its "
+                  "SCK periods at PCLK over the divisor, every one of the eight BR codes "
+                  "and 16-bit frames at PCLK/2 and /16, each -1 % to +3 % - with no gap "
+                  "between frames, the clock continuous while TXFIFO holds one (35.5.9)",
+                  engined_ok && wire_ok(w16_div2) && wire_ok(w16_div16));
+    bench.verdict("and so does the polled TRANSMIT-ONLY loop, PCLK/2 included: two byte "
+                  "frames packed into each half-word store on TXE, which stands while "
+                  "TXFIFO is at most half full (35.5.9), outrun sixteen cycles a frame - "
+                  "each code -1 % to +3 %",
+                  polled_ok);
+
+    // ---- and at the dynamic clock's other rungs: a 1 MHz ceiling ----
+    uint32_t rung_pm[2] = {};
+    const uint8_t rung_ix[2] = {r_mid, r_slow};
+    bool rungs_ok = true;
+    for (uint8_t k = 0; k < 2u; ++k) {
+        console_drain();
+        if (!SysClock::set_index(rung_ix[k])) {
+            rungs_ok = false;
+            continue;
+        }
+        (void)DmaHost::init(clock, 1'000'000);
+        dma_host_live = true;
+        rung_pm[k] = frame_permille(true, SpiClock::div2, SpiDataSize::bits8, 1'000'000u);
+        dma_host_live = false;
+        DmaHost::release();
+        rungs_ok = rungs_ok && wire_ok(rung_pm[k]);
+    }
+    (void)SysClock::set_index(r_fast);
+    console_drain();
+    (void)Host::init(clock);
+    print(serial, "  a 1 MHz ceiling on the engines, a PCLK/2 request clamped to it: at "
+          "16 MHz ", rung_pm[0], ", at 2 MHz ", rung_pm[1], " thousandths of 1 MHz", crlf);
+    bench.verdict("AND THE CEILING IS THE RATE ON THE WIRE at every rung: 1 MHz asked, the "
+                  "code re-resolved at 16 and at 2 MHz, a frame in its eight periods of "
+                  "1 MHz, -1 % to +3 %", rungs_ok);
 }
 
 // =============================================================================

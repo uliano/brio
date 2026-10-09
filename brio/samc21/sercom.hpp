@@ -748,11 +748,29 @@ public:
     /// discarded (31.6.2.1).
     static void baud_reg(uint16_t v) { regs().SERCOM_BAUD = v; }
 
-    /// Hand the instance back: interrupts off, disabled, core clock
-    /// released, bus clock off. The pads' PINS are the task's to release.
+    /**
+     * Hand the instance back: interrupts off, the instance RESET, core
+     * clock released, bus clock off. The pads' PINS are the task's to
+     * release.
+     *
+     * THE RESET COMES BEFORE THE GATE (docs/design/dma.md, the release
+     * contract). The transmitter's DMA request is a level - "set when the
+     * transmit buffer (TX DATA) is empty, cleared when DATA is written"
+     * (31.6.4.1) - and a GATED CLOCK HOLDS IT: an instance gated with
+     * ENABLE set reads DRE up behind the gate and hands the next channel
+     * bound to its trigger one stray beat. A disable before the gate
+     * withdraws it but leaves CTRLA and the rest standing; CTRLA.SWRST
+     * takes "all registers ... to their initial state, and the SERCOM will
+     * be disabled" (31.6.2.2, 31.8.1), so the gated instance holds nothing
+     * whatever state the transport was in (each of the three measured,
+     * docs/samc21/dmac.md, "A released requester"). reset() is the
+     * erratum-aware verb (1.17.16: an instance found disabled is enabled
+     * first), and it waits SYNCBUSY.SWRST out before the clocks go - a
+     * register access during the reset is an APB error (31.8.1).
+     */
     static void release(uint32_t spins = 0xFFFFu) {
         regs().SERCOM_INTENCLR = SercomFlag::all;
-        (void)enable(false, spins);
+        (void)reset(spins);
         GclkChannel::disconnect(gclk_core_id());
         bus_clock(false);
     }
@@ -1458,7 +1476,9 @@ public:
     /// claim first (a channel still writing DATA of a SERCOM being torn
     /// down is the one teardown order that matters; the claim given back
     /// is what lets another transport take the engine), then the NVIC
-    /// line, the peripheral, both clocks and the two pins.
+    /// line, the peripheral - reset before its clocks are gated, so no
+    /// transmit request stands behind it (Sercom::release()) - both
+    /// clocks and the two pins.
     static void release() {
         if constexpr (has_tx_engine) {
             TxEngine::release(engine_owner);
@@ -1480,7 +1500,7 @@ private:
      * its shifter has finished (TXC) - DRE is this channel's trigger, high
      * - and the channel says it is ENABLED with no trigger pending and no
      * beat moving (DmaTxEngine::waiting(): CHCTRLA.ENABLE, CHSTATUS.PEND
-     * and BUSY). A channel with beats left latches DRE's rise and fills
+     * and BUSY). A channel with beats left takes DRE's request and fills
      * DATA within one beat, so it cannot read that way; this one has lost
      * its trigger or is running a descriptor that is not the one
      * programmed. So the block is not slow, it is dead, and the only thing
@@ -1594,11 +1614,11 @@ private:
             if (run.size() > tx_block_most) {
                 run = run.first(tx_block_most);
             }
-            // NO KICK. DRE is a level the DMAC latches on its rise, and a
-            // rise while the channel is disabled with its trigger selected
-            // is served on the next enable, as is the claim's selection of
-            // the trigger onto a DRE already standing - so the enable
-            // fires the first beat by itself. Measured on 3376 block
+            // NO KICK. DRE is a level the channel serves as it finds it:
+            // standing at the enable - or when the claim selected the
+            // trigger onto it - it fires the first beat by itself (and a
+            // DRE that rose and fell while the channel was disabled leaves
+            // nothing, samc21/dmac.hpp). Measured on 3376 block
             // starts, after a DRE standing up to 1.8 ms among them: the
             // first beat had always landed by the next register read, and
             // a kick that came after it had started was a second beat

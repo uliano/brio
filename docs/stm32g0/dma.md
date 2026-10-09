@@ -551,7 +551,11 @@ per-byte feed costs nothing.** A kilobyte took 88.97 ms fed byte by byte
 (11510 B/s) and 88.98 ms fed in bulk (11508 B/s), against the 11520 B/s
 115200 8N1 carries: the wire is five hundred times slower than the
 pump, the ring is always full when a block ends, and every
-block the engine gets is a long one.
+block the engine gets is a long one. TIMED AGAINST THE WIRE at the rate
+ASKED - the kilobyte from its first store to TC against 1024 frames of
+ten bits at 115200, which no reader sharing the rate could tell - both
+feeds read **1000 and 1000 thousandths** of the wire's time on the
+STM32G0B1RE and the STM32G071RB, judged -1 % to +3 %.
 
 **The timer round trip.** An eight-entry duty table played into TIM2's
 CCR1 on its own update request, at a 16 kHz PWM, reads 521..522 per mille
@@ -596,6 +600,11 @@ transmit on channel 2, receive on channel 3 in the circular shape over a
   read where the channel wrote them, through 64 laps each counted once
   by its own completion (a restart would have zeroed the count), with no
   ring overrun, no ORE and no fault.
+- **The loop's rate is the rate asked**, which the loop itself cannot
+  tell, one divisor serving both ends: 1024 frames through the transmit
+  engine, timed from the first `write_bulk()` to TC against their time
+  at 1 Mbaud, read **1001 thousandths** on both parts (judged -1 % to
+  +3 %): the 16-byte transmit ring keeps the wire busy.
 - **A burst with the consumer away loses nothing.** With the tail at 40
   of the 64, 60 bytes landed with nobody reading, harvesting or
   re-arming, and all 60 read back exact - the ring wrapped the storage by
@@ -799,6 +808,17 @@ periods, rising moves 10 words, falling 10, both 20.
     by an LPTIM1 compare on LSE: 391 before, 391 on the wake, 382 a
     millisecond later. Not one request was served while HCLK was down
     and the very same block goes on afterwards.
+  - The alarm's oscillator is the letter's to start. A power-on leaves
+    the RTC domain's LSE off (RCC_BDCR's reset, 5.4.23), and a Stop whose
+    only way out counts on a stopped clock does not come back - this
+    suite arms no watchdog. So the letter starts the LSE when it is not
+    running (PWR's bus clock, DBP, LSEON), waits for LSERDY bounded at
+    4 s, puts DBP back as it found it and touches nothing else of the
+    domain - no reset, RTCSEL and the backup registers as they were -
+    and skips the Stop leg by name if the crystal never readies.
+    Measured on the STM32G071RB with LSEON and DBP cleared through the
+    debug port, the power-on state: LSERDY after 146 ms, the Stop leg
+    passed, RCC_BDCR back to 0x8103 and DBP clear again.
   - The wake needs its VECTOR BOUND. A Stop left through an EXTI direct
     line lands in the handler, and with none bound it lands in
     `Default_Handler` and never comes back.
@@ -806,7 +826,7 @@ periods, rising moves 10 words, falling 10, both 20.
 ## On the STM32G071RB
 
 `test_stm32_dma` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
-0x2000) and scores **74/74** against the G0B1RE's 78, the four missing
+0x2000) and scores **76/76** against the G0B1RE's 80, the four missing
 verdicts being the two the part cannot have and the two that skip with
 them; letter `o`'s circular receive, letter `r`'s released requesters
 and, outside `z`, letters `p`, `q` and `u` pass there as on the bigger
@@ -843,9 +863,10 @@ EXTI line.
 
 ## On the STM32G031K8
 
-`test_stm32_dma`'s letters `a` to `n` score **62 of 69** on the
-Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003); letter `o` is built for this
-board and not run on it (below). The controller here is **DMA1 with FIVE
+`test_stm32_dma`'s letters `a` to `n` scored **62 of 69** on the
+Nucleo-G031K8 (DEV_ID 0x466, REV_ID 0x1003), counted before letter `h`
+timed the console's line against the wire - that verdict, and letter `o`,
+are built for this board and not run on it (below). The controller here is **DMA1 with FIVE
 channels** and a
 DMAMUX with five channel multiplexers and four request generators, so
 DMA2's five channels (2 verdicts), the second bus master (1) and the
@@ -919,19 +940,14 @@ transport hands the engine, so nothing stages it), and the held request
 of an I2C, an ADC and a DAC (letter `r` stages USART1, SPI1 and TIM3 -
 an I2C request needs a tenure on a wire, a converter's a conversion; the
 reset in their release() is applied by reading). On the STM32G031K8,
-letter `o` and letters `p` and `q` (built for it, the board not on the
-desk; one run of the suite measures them - the console has no engines
+letter `o`, letter `h`'s rate verdict on the interrupt console, and
+letters `p` and `q` (built for it, the board not on the desk; one run of
+the suite measures them - the console has no engines
 there, so `p` and `q` skip by name). On the STM32G071RB and the
 STM32G031K8, 10.4.5's peripheral-to-peripheral transfer: the leg is
 arranged over TIM6's update moving TIM3's compare into TIM4's, and those
 parts have no TIM4 (the STM32G031K8 no TIM6 either), so it skips by name
 there; rearranging it over the timers they have would measure it.
-
-A suite gap: letter `n`'s Stop leg counts its LPTIM1 alarm on the LSE
-and does not start it. After a power-on the backup domain has the LSE
-off and the core never leaves the Stop (seen on the STM32G071RB); once
-an image that starts it has run - `test_stm32_serial`'s wake letters do
-- the letter passes, the LSE surviving every reset but a power-on.
 
 Errata not staged, and why: 2.4.1 is a same-cycle coincidence between a
 hardware error and a CGIFx write, and the write does not exist in this

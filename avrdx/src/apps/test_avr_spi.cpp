@@ -13,6 +13,16 @@
 // own sweep, then the engine through it under a handler that holds the
 // core at every phase (TCB2).
 //
+// THE RATE ON THE WIRE, which a board answering itself cannot tell by
+// its data: a frame inside a polled block of the engine timed on the
+// ruler (TCB3 + TCB2 cascaded at CLK_PER) by the difference of a 2048-
+// and a 256-frame block, against eight SCK periods at the division asked
+// plus the block's two-cycle gap, -1 % to +3 % - b at all seven divisions
+// (and the gap printed and judged the same at every one), d in all four
+// modes at CLK_PER/64, i under the 1.5 MHz ceiling at 24, 12 and 24 MHz
+// again, j under the 400 kHz ceiling. The divisions letters c, e, f, g, h
+// and t set are b's, on the same generator.
+//
 // TWO BOARDS (k..s, `y`): the same four pins with a second board
 // running `spi_peer` as a real client, driven IN BAND over the bus
 // under test
@@ -95,6 +105,17 @@ using SckMeter = FrequencyMeter<T0>;
 using ChMosi = EventChannel<4>;
 using T1 = Tcb<1>;
 using MosiCount = PulseCounter<T1>;
+
+// THE RULER of the wire-time verdicts (docs/design/benchmark.md, the
+// family's row): TCB3 and TCB2 cascaded into one 32-bit count of CLK_PER
+// cycles, the carry on event channel 2 and the snapshot on channel 3.
+// TCB2 is also letter t's one-shot, which configures it afresh; the ruler
+// runs only inside frame_mc() below.
+using RulerLo = Tcb<3>;
+using RulerHi = Tcb<2>;
+using Ruler = CascadedCounter<RulerLo, RulerHi>;
+using ChCarry = EventChannel<2>;
+using ChSnap = EventChannel<3>;
 
 // The transfer engine and the arbiter that rides it (util/spi_bus.hpp).
 using Host = SpiHost<0, SpiRoute::alt1>;
@@ -187,6 +208,155 @@ void miso_level(bool high) {
 /// One polled host byte at the resource level, bounded.
 std::optional<uint8_t> xfer(uint8_t out) { return S0::transfer(out, 200'000u); }
 
+/// The receiver emptied and its write-one flags cleared after a run that
+/// read nothing.
+void raw_flush() {
+    for (uint8_t k = 0; k < 4; ++k) (void)S0::read();
+    S0::clear_txc();
+    S0::clear_overflow();
+}
+
+// ---- the rate on the wire ------------------------------------------------------
+// A single board answers itself here, so nothing in the single-board half
+// can tell a wrong division by the data: a clock eight times too slow
+// carries the same bytes. Every letter that sets a rate therefore also
+// times A FRAME INSIDE A BLOCK on the ruler - the engine's polled path
+// with neither buffer named (it clocks 0xFF out and drops what comes
+// in), a block of 2048 frames less one of 256, the best of three each, so
+// the request's fixed cost cancels - and judges it against eight SCK
+// periods at the division ASKED (named here, not read from the driver's
+// table) plus the block's inter-frame gap: buffer mode puts two CLK_PER
+// cycles between frames that leave back to back (docs/avrdx/spi.md, the
+// engine's cost: the data sheet's own buffer-mode sequence measures the
+// same), and letter b prints the gap it measures at every division.
+// The window is every family's: -1 % to +3 %.
+
+constexpr uint32_t block_gap = 2;     ///< CLK_PER cycles between two frames of a block
+
+/// One frame inside a polled block of the engine, in thousandths of a
+/// CLK_PER cycle; 0 when a block did not complete. The engine must be
+/// initialised; the ruler is set up and put away here.
+/// No interrupt inside a run: the console's transmit vector, some hundred
+/// cycles an entry while a printed line drains, outlasts the three cycles
+/// a frame leaves the engine's loop at CLK_PER/2 (measured: 19.2 to 20.6
+/// cycles a frame with the line before still draining, 18.0 without), and
+/// the SCK meter's capture vector would enter on every SCK period - off
+/// for the run, a caller that meters again turns it back on.
+void quiet() {
+    while (!Serial::tx_idle()) {
+    }
+    T0::enable_capt_interrupt(false);
+}
+
+uint32_t frame_mc(SpiClock c, SpiMode m = SpiMode::mode0) {
+    quiet();
+    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Ruler::reset();
+    auto best = [&](uint16_t n) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t t0 = Ruler::read();
+            const bool ok = Host::start({{}, {}, {}, 0, {}, {}, n, {}, c, m, true, 0});
+            const uint32_t took = Ruler::read() - t0;
+            if (ok && took < least) least = took;
+        }
+        return least;
+    };
+    const uint32_t big = best(2048);
+    const uint32_t small = best(256);
+    RulerLo::disable();
+    RulerHi::disable();
+    ChCarry::off();
+    ChSnap::off();
+    if (big == 0xFFFFFFFFu || small == 0xFFFFFFFFu || big <= small) return 0;
+    return static_cast<uint32_t>((static_cast<uint64_t>(big - small) * 1000u) / 1792u);
+}
+
+/// The same frame through the data sheet's own buffer-mode sequence
+/// (28.3.2.1.2) as a bare loop: DREIF waited for, DATA written, nothing
+/// read - the receive FIFO's overflow is the receiver's and this host's
+/// clock does not wait for it. The instance must be a buffered host at
+/// `c`. It shows what the silicon does at a division where the engine's
+/// loop is the limit.
+/// One run of the bare sequence, everything it calls inlined (flatten):
+/// a poll of DREIF is the flag's load, a test and a branch, five cycles.
+[[gnu::flatten]] uint32_t bare_run(uint16_t n) {
+    const uint32_t t0 = Ruler::read();
+    for (uint16_t i = 1; i < n; ++i) {
+        while (!S0::dre_flag()) {
+        }
+        S0::write(0xFF);
+    }
+    while (!S0::dre_flag()) {
+    }
+    cli();
+    S0::write(0xFF);
+    S0::clear_txc();
+    sei();
+    while (!S0::txc_flag()) {
+    }
+    return Ruler::read() - t0;
+}
+
+uint32_t bare_frame_mc() {
+    quiet();
+    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Ruler::reset();
+    auto best = [&](uint16_t n) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t took = bare_run(n);
+            least = took < least ? took : least;
+            raw_flush();
+        }
+        return least;
+    };
+    const uint32_t big = best(2048);
+    const uint32_t small = best(256);
+    RulerLo::disable();
+    RulerHi::disable();
+    ChCarry::off();
+    ChSnap::off();
+    if (big <= small) return 0;
+    return static_cast<uint32_t>((static_cast<uint64_t>(big - small) * 1000u) / 1792u);
+}
+
+/// That frame in thousandths of its wire time: eight periods of SCK at
+/// CLK_PER / `division` plus the block's gap.
+uint32_t frame_permille(uint32_t mc, uint32_t division) {
+    return static_cast<uint32_t>(static_cast<uint64_t>(mc) / (8u * division + block_gap));
+}
+
+bool wire_ok(uint32_t pm) { return pm >= 990u && pm <= 1030u; }
+
+/// Thousandths of a cycle as "c.ddd", a sign in front when negative.
+void print_milli(int32_t m) {
+    if (m < 0) {
+        print(serial, "-");
+        m = -m;
+    }
+    const uint32_t f = static_cast<uint32_t>(m) % 1000u;
+    print(serial, static_cast<uint32_t>(m) / 1000u, ".", f < 100u ? "0" : "", f < 10u ? "0" : "", f);
+}
+
+/// The gap a frame shows beyond its eight SCK periods, in thousandths of
+/// a cycle.
+int32_t gap_mc(uint32_t mc, uint32_t division) {
+    return static_cast<int32_t>(mc) - static_cast<int32_t>(8000u * division);
+}
+
+/// The reading printed and judged.
+void frame_verdict(const char* what, uint32_t division, uint32_t mc) {
+    const uint32_t pm = frame_permille(mc, division);
+    print(serial, "  ", what, ": a frame inside a block ");
+    print_milli(static_cast<int32_t>(mc));
+    print(serial, " CLK_PER, eight SCK at CLK_PER/", division, " and a gap of ");
+    print_milli(gap_mc(mc, division));
+    print(serial, " -> ", pm, " thousandths of its wire time", crlf);
+    verdict("SCK runs at the division asked: a frame inside a block, -1 % to +3 % - ", what,
+            wire_ok(pm));
+}
+
 // ---- a: routes, pins and the refusals ----------------------------------------
 
 void ta_routes() {
@@ -252,7 +422,10 @@ void ta_routes() {
 
 // ---- b: the seven bit rates, measured ----------------------------------------
 
-void measure_rate(SpiClock c) {
+int32_t gaps[7];
+uint8_t gap_n = 0;
+
+void measure_rate(SpiClock c, uint32_t division) {
     if (!host(c)) { verdict("host init", false); return; }
     miso_level(true);
     SckMeter::init(clock, ChSck{}, TcbClock::div1);
@@ -278,20 +451,54 @@ void measure_rate(SpiClock c) {
             got >= 8 && m == expected);
     S0::release();
     T0::disable();
+    // The period above is one SCK against the driver's own table; the
+    // frames below are runs against the division asked: the data sheet's
+    // bare sequence - the silicon's rate and the block's gap - and the
+    // engine's polled block beside it.
+    if (!host(c, SpiMode::mode0, true)) { verdict("buffered host init", false); return; }
+    const uint32_t bare = bare_frame_mc();
+    S0::release();
+    gaps[gap_n++] = gap_mc(bare, division);
+    frame_verdict("the bare sequence", division, bare);
+    if (!Host::init(clock)) { verdict("engine init", false); return; }
+    const uint32_t mc = frame_mc(c);
+    Host::release();
+    print(serial, "  the engine's polled block: a frame ");
+    print_milli(static_cast<int32_t>(mc));
+    print(serial, " CLK_PER", crlf);
+    verdict("the engine's polled block is wire-bound here: its frame is the bare "
+            "sequence's within a thousandth",
+            mc + mc / 1000u >= bare && mc <= bare + bare / 1000u);
 }
 
 void tb_rates() {
     print(serial, "b the seven bit rates on SCK (the SPI's own SCK event -> TCB0 "
-                  "frequency meter, full period)", crlf);
+                  "frequency meter, full period), and a frame inside a block at each", crlf);
     quiesce();
+    gap_n = 0;
     ChSck::source(S0::SckEvent{});
-    measure_rate(SpiClock::div2);
-    measure_rate(SpiClock::div4);
-    measure_rate(SpiClock::div8);
-    measure_rate(SpiClock::div16);
-    measure_rate(SpiClock::div32);
-    measure_rate(SpiClock::div64);
-    measure_rate(SpiClock::div128);
+    measure_rate(SpiClock::div2, 2);
+    measure_rate(SpiClock::div4, 4);
+    measure_rate(SpiClock::div8, 8);
+    measure_rate(SpiClock::div16, 16);
+    measure_rate(SpiClock::div32, 32);
+    measure_rate(SpiClock::div64, 64);
+    measure_rate(SpiClock::div128, 128);
+    // The gap the verdicts charge is the block's, the same at every
+    // division: what each frame shows beyond its eight periods.
+    int32_t lo = gaps[0];
+    int32_t hi = gaps[0];
+    for (uint8_t i = 1; i < gap_n; ++i) {
+        lo = gaps[i] < lo ? gaps[i] : lo;
+        hi = gaps[i] > hi ? gaps[i] : hi;
+    }
+    print(serial, "  the block's gap beyond eight SCK periods: ");
+    print_milli(lo);
+    print(serial, " to ");
+    print_milli(hi);
+    print(serial, " CLK_PER over the seven divisions", crlf);
+    verdict("the block's gap is the same two cycles at every division (within a quarter cycle)",
+            gap_n == 7u && lo >= 1750 && hi <= 2250);
     quiesce();
 }
 
@@ -432,6 +639,10 @@ void check_mode(SpiMode m) {
     verdict("the mode reads back", S0::mode() == m);
     verdict("the transfer completed", v.has_value());
     S0::release();
+    // The mode's frame on the wire, at the letter's division.
+    if (!Host::init(clock)) { verdict("engine init", false); return; }
+    frame_verdict("this mode at CLK_PER/64", 64, frame_mc(SpiClock::div64, m));
+    Host::release();
 }
 
 void td_modes() {
@@ -762,6 +973,10 @@ void ti_rebase() {
     print(serial, "  24 MHz: min period ", t24, " ticks = ",
           t24 ? 24'000'000u / t24 : 0, " Hz", crlf);
     verdict("SCK is CLK_PER/16 at 24 MHz", t24 == 16);
+    // A request for CLK_PER/2 under the ceiling: the frame is the
+    // ceiling's, 1.5 MHz asked.
+    frame_verdict("CLK_PER/2 asked under the ceiling at 24 MHz", 16, frame_mc(SpiClock::div2));
+    T0::enable_capt_interrupt(true);
 
     verdict("switch to 12 MHz", DynClock::set(12'000'000u));
     verdict("the ceiling now resolves to CLK_PER/8",
@@ -776,6 +991,11 @@ void ti_rebase() {
     print(serial, "  12 MHz: min period ", t12, " ticks = ",
           t12 ? 12'000'000u / t12 : 0, " Hz", crlf);
     verdict("SCK is CLK_PER/8 at 12 MHz", t12 == 8);
+    // The ruler counts the CLK_PER in force: eight SCK at 12 MHz / 8 are
+    // 64 of its cycles - the clock itself being what the DynamicClock
+    // says it set (test_avr_clock's subject).
+    frame_verdict("CLK_PER/2 asked under the ceiling at 12 MHz", 8, frame_mc(SpiClock::div2));
+    T0::enable_capt_interrupt(true);
     verdict("the ceiling holds in Hz across the switch",
             near(static_cast<int32_t>(t24 ? 24'000'000u / t24 : 0),
                  static_cast<int32_t>(t12 ? 12'000'000u / t12 : 0), 1000));
@@ -784,6 +1004,8 @@ void ti_rebase() {
     verdict("engine re-init at 24 MHz", Host::init(DynClock{}, ceiling));
     const uint16_t back = measure_now();
     verdict("SCK is CLK_PER/16 again", back == 16);
+    frame_verdict("CLK_PER/2 asked under the ceiling, back at 24 MHz", 16,
+                  frame_mc(SpiClock::div2));
     T0::enable_capt_interrupt(false);
     quiesce();
 }
@@ -879,6 +1101,7 @@ void tj_engine() {
           clamped, crlf);
     verdict("the engine slowed the request to its ceiling", clamped == 64);
     T0::enable_capt_interrupt(false);
+    frame_verdict("CLK_PER/4 asked under a 400 kHz ceiling", 64, frame_mc(SpiClock::div4));
 
     Host::release();
     verdict("the engine's release hands the pins back",

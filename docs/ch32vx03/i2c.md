@@ -445,6 +445,16 @@ measured on the pad that carries it, with no scope and no wire.
   cost fast mode its high half entirely. Released from low, SCL is high
   again within 430 ns and SDA within 480 ns, an upper bound that
   includes the pad's own mode switch.
+- **SCL RUNS AT THE RATE ASKED, read against a clock the bus does not
+  share.** TIM4 counts a clock of PB1, the bus FREQ and CCR divide, so a
+  period in its ticks moves with a wrong PB1 and cannot tell it; letter
+  a reads TIM4's clock on the core's counter first - 96000 kHz, the
+  tree's figure - and the three rungs against it in thousandths of the
+  rate ASKED, 100 or 400 kHz: 1001, 1004 and 963 (DUTY 16/9's CCR 5 is
+  384 kHz by the arithmetic), each within the verdict's bracket - never
+  above by more than 2 %, never below by more than a quarter. The
+  self-link's letters time a whole tenure on the core's counter instead,
+  below.
 - **What the wire carries is the TARGET's rate and not the register's.**
   The same three rungs measured against the peer, whose target half is
   polled: 87 kHz, 251 kHz and 245 kHz, with the high halves unchanged
@@ -531,13 +541,43 @@ measured on the pad that carries it, with no scope and no wire.
 
 The bench board carries the two wires the CH32V303 evaluation board
 has - PB10 to PB6, PB11 to PB7 - and a 4.7 kOhm pull-up on each line, so
-`test_vx03_i2c`'s letters l to o run here as there (31 verdicts in `z`,
-the peer letters c to k declining by name: no peer board is on the bus;
-letter o is the refusal above): the probe, an absent address, an eight-byte write, reads of one to
-four and eight bytes, a write-then-read, the second address and the
-general call, the DMA host on channels 6 and 7, I2C2 as the host, and
-the target stuck mid-byte with `unstick()` reporting 4 pulses - every one
+`test_vx03_i2c`'s letters l to q run here as there (13 and 30 verdicts in
+the `z` of the part's two images, the peer letters c to k declining by
+name: no peer board is on the bus; letter o is the refusal above): the
+probe, an absent address, an eight-byte write, reads of one to four and
+eight bytes, a write-then-read, the second address and the general
+call, the DMA host on channels 6 and 7, I2C2 as the host, and the target
+stuck mid-byte with `unstick()` reporting 4 pulses - every one
 byte-exact at 100 kHz and 400 kHz in both duty shapes.
+
+**THE SELF-LINK'S SCL AT THE RATE ASKED.** Both controllers divide PB1,
+so the link cannot tell a wrong one by itself; each letter times a
+tenure on the core's counter from `start()` to its end, SCL's mean rate
+over the tenure's periods in thousandths of the rate asked - the START,
+the STOP and every clock either end stretched inside it, so it reads low
+by them and never high. On both parts alike within two thousandths:
+
+| letter | host, tenure | 100 kHz | 400 kHz DUTY 2 | 400 kHz DUTY 16/9 |
+|---|---|---|---|---|
+| l | I2C1's pump, a write of 32 (297 periods) | 994, 995 | 986 to 988 | 948, 949 |
+| l | I2C1's engines, a write of 16 (153) | - | 972 to 975 | - |
+| m | I2C2's pump, a write of 32 | 994, 995 | 987, 988 | 948 to 950 |
+| p | I2C1's engines, a read of 16 | - | 968, 969 | - |
+
+and letter o's write of sixteen through each host at each core, the
+target served from its own vector, 100 then 400 kHz: at 96 MHz 989 and
+951 to 956 (pump and engines alike); at 48 MHz 984 to 986 and 942 to
+950; at 8 MHz 933 to 940 and 758 to 769. The 8 MHz rung at 400 kHz is the
+lowest reading in the suite, a hundredth or two above the bracket's
+floor, and it is not the divisor's: the capture reads a data bit's
+period in the middle of the same write as 2500 ns at 400 kHz and 9875 at
+100 kHz there (a tick of TIM4 is 125 ns at that core), the wire's own,
+and the pump and the engines read the same mean - so the missing quarter
+lies between the bytes, where the one party both hosts share, the target
+served from its own vector at an 8 MHz core, holds the clock (not
+separated from the conditions' own share). Letter p's two runs of
+USART2's transmit engine read 1002 of their wire at 115200, TE's idle
+frame after the init counted.
 
 **The host above the wire: `bench_vx03`'s letter `i`**, at 120 MHz (PB1 =
 60 MHz; the app's 144 MHz has no I2C timing) with I2C2 the target SERVED
@@ -596,17 +636,21 @@ At 400 kHz:
 `test_vx03_i2c` at the same 96 MHz on WCH's evaluation board, in two
 arrangements. With the board's own two wires - I2C2's pads to I2C1's,
 PB10 to PB6 and PB11 to PB7, a 4.7 kOhm pull-up on each line - the
-chip's two controllers share one bus and no peer board is on it (31
+chip's two controllers share one bus and no peer board is on it (43
 verdicts in `z`, the peer letters declining by name). With I2C1 wired
 to a CH32V203C8T6 board's I2C1 running `twi_peer`, a 4.7 kOhm pull-up on
 each line, a common ground and the board's own two wires off, every
-peer letter runs (69 verdicts in `z`, all passing, the self-link
-letters declining by name). What they measure:
+peer letter runs and passes, the self-link letters declining by name -
+all but letter f's rate verdict, which that arrangement has not run
+(the list below). What they measure:
 
 - **The block is the CH32V203's**: the same reset values, RTR 2 alone;
   the same three rungs on the pad during a probe - 9979 ns of period at
   100 kHz (high 4947 ns), 2479 ns at 400 kHz and DUTY 2 (403 kHz, high
-  781 ns), 2583 ns at DUTY 16/9 (387 kHz); the same missing enable
+  781 ns), 2583 ns at DUTY 16/9 (387 kHz), against TIM4's clock read on
+  the core's counter at 96000 kHz: 1002, 1008 and 967 thousandths of the
+  rate asked, and the self-link's tenures within two thousandths of the
+  CH32V203C8T6's (the table above); the same missing enable
   protection, CKCFGR, FREQ and RTR each taking a write with PE set; the
   lines back high within 448 to 479 ns of release on the board's
   resistors (two runs, an upper bound as above); an absent address
@@ -657,7 +701,7 @@ letters declining by name). What they measure:
   host's handlers alone, or the target's alone, made cheap split it).
   With the vectors bound as the trampolines the V4F's images use
   ([platform.md](platform.md)) no handler saves an f-register and the
-  loss is gone: every control exact in four runs, the suite 31 of 31.
+  loss is gone: every control exact in four runs, the suite passing whole.
 - **A target stuck mid-byte, with no foreign chip**: a read of zeros cut
   off four bit times into its first byte by taking the host through its
   reset line leaves I2C2 holding SDA low with SCL released high;
@@ -736,6 +780,11 @@ Driver gaps:
 
 Implemented, not bench-verified (each with what would measure it):
 
+- **Letter f's SCL against a peer at the rate asked.** The three rungs
+  against a second chip are read against TIM4's clock as the core's
+  counter measures it and judged like letter a's; the desk's boards carry
+  their own self-links and no `twi_peer` board is on either bus, so a
+  peer on I2C1's wires is what would run it.
 - **The write-then-read's START from a CH32V203C8T6 host against a chip
   of another board.** Measured on its own self-link in both orders and
   against a refused last byte (above); a peer board running `twi_peer` -

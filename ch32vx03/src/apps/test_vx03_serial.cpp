@@ -47,6 +47,18 @@
 // 10-26 gives that class (letters m, n and o). Without them the letters
 // say so and pass nothing.
 //
+// THE RATE ON THE WIRE IS TIMED ON THE CORE'S COUNTER. A loop and the
+// crossed pair share one bus and one divisor arithmetic at both ends, and
+// TIM2 counts a clock of that same bus, so neither can tell a wrong bus
+// rate: letter b, the generator's, and every letter that loops or crosses
+// a wire (l, m, n, o, q, r, s) or drives an upper port (p) also sends a
+// run of frames back to back - through the bare port or the transport -
+// timed on the STK, which counts HCLK, from the first store to the last
+// stop bit's end, against their time at the rate ASKED, in thousandths,
+// -1 % to +3 %. The letters between them receive a line banged on the STK
+// itself or measure one frame's shape. What no counter on the chip can
+// tell is the HSI's own error under the PLL that clocks every one of them.
+//
 // THE CH32V303'S OWN LETTERS. UART5..UART8 carry no wire on the evaluation
 // board and need none for what letter p asks: the register face, a frame
 // read back off the TRANSMIT pad by software (a pad handed to the
@@ -60,8 +72,9 @@
 //      both peripheral buses, the divisor, the rate it really gives and
 //      the error in per mille, the rates the generator cannot serve
 //   b  the frame on the wire, measured by the timer: the start bit at
-//      four rates, the low run of every word length and parity, all
-//      four stop lengths, and TE's idle frame
+//      four rates and a run of frames at each timed against the wire,
+//      the low run of every word length and parity, all four stop
+//      lengths, and TE's idle frame
 //   c  the bit-banged line into the receiver: every format received, a
 //      parity error, a framing error, an overrun staged and cleared
 //   d  mute mode: the receiver asleep through frames until the line
@@ -84,9 +97,10 @@
 //      rises while a received byte waits and drops when it is read
 //   l  the loopback PA2-PA3 when it is strapped: a round trip at every
 //      format, the two DMA engines, and four kilobytes at the highest
-//      rate the loop takes clean
+//      rate the loop takes clean, the transmit engine timed at it
 //   m  the crossed pair when it is strapped: USART2 against the fourth
 //      port at two formats and two rates, with a stress pattern each way
+//      and each transmitter timed against the wire
 //   q  ERRORS UNDER THE ENGINE, on the crossed pair: breaks the fourth
 //      port puts into a continuous stream into USART2's receive ring -
 //      every data byte delivered intact and in order, no byte taken by a
@@ -94,19 +108,24 @@
 //      counting every other one (ch32vx03/usart.hpp's header); and the
 //      interrupt receiver's breaks, dropped, counted and skipped - a
 //      reader that looks between them handed every data byte, one that
-//      does not handed nothing the ring held with a break behind it
+//      does not handed nothing the ring held with a break behind it;
+//      both ends timed against the wire at the stream's rate first
 //   r  tx_idle() IS THE WIRE'S: the moment it turns true against the
 //      last stop bit's start on PA2, captured by TIM2's channel 3, for
-//      the interrupt transmitter and the transmit engine
+//      the interrupt transmitter and the transmit engine, each timed
+//      against the wire at 115200 and 1 Mbaud
 //   s  THE BURST EDGE FROM THE VECTOR, nothing polled: a burst of one
 //      frame told, a burst of 16 told within two frames of its last stop
 //      bit with two interrupts a burst and none a byte, four laps of the
-//      ring with no silence read whole on the lap's marks
+//      ring with no silence read whole on the lap's marks; both ends
+//      timed against the wire at 1 Mbaud
 // and on the CH32V303RC and VC alone:
 //   n  THE CROSSED PAIR'S ENGINES: USART2's on DMA1 against UART4's on
 //      DMA2, a message each way through both transports, then four
-//      kilobytes each way at 921600 baud with every counter read
-//   o  THE LOT'S REGISTERS on the pair: CTLR4 probed on both ports and
+//      kilobytes each way at 921600 baud with every counter read, and
+//      each transmit engine timed against the wire
+//   o  THE LOT'S REGISTERS on the pair, both ends timed against the wire
+//      at 9600 and USART2 at 1200: CTLR4 probed on both ports and
 //      every other register compared across the probe, then - where the
 //      die has it - the MARK and SPACE parity measured on the wire and
 //      judged by the far receiver's MS_ERR, the short words of M_EXT
@@ -114,7 +133,8 @@
 //      has not, CTLR4 and M_EXT stored RAW and the wire asked whether the
 //      register is absent or only write-only
 //   p  UART5..UART8 WITH NO WIRE: the gate, the divisor and the frame
-//      read back, a byte read off each TRANSMIT pad by software, a frame
+//      read back, a run of frames out of each timed against the wire, a
+//      byte read off each TRANSMIT pad by software, a frame
 //      banged into each RECEIVE pad through its pull, and each port's
 //      own vector reached by a transmission complete - and SW_CFG read
 //      with the probe attached, the two columns on the debug port's pads
@@ -302,6 +322,89 @@ bool wait_flag(uint16_t mask, uint32_t us = 200'000) {
 bool tx_settled(uint32_t us = 200'000) {
     return wait_flag(usart_txe, us) && wait_flag(usart_tc, us);
 }
+
+// ---- the rate on the wire --------------------------------------------------
+
+/**
+ * THE RATE ON THE WIRE, which a loop alone cannot tell: both ends of a
+ * loop or of the crossed pair divide one bus, PB1, by divisors from one
+ * arithmetic, so a wrong bus rate is a slower or a faster loop and nothing
+ * else - and TIM2, the frame ruler, counts a clock of the same bus. The
+ * core's STK counts HCLK instead, so `frames` frames of `bits` bit periods
+ * written back to back into the BARE port `U` - a store whenever TXE
+ * stands - are timed on it from the first store to TC, the last stop bit's
+ * end, against their time at the rate ASKED; the answer in thousandths.
+ * What the far receiver takes meanwhile is the caller's to drain.
+ */
+template <typename U>
+uint32_t usart_permille(uint32_t baud, uint32_t bits, uint32_t frames) {
+    const uint64_t wire = static_cast<uint64_t>(frames) * bits * SysClock::hz / baud;
+    const uint64_t budget = 2u * wire + SysClock::hz / 100u;
+    // A frame still in flight ends first, waited out by time: TC cannot
+    // say so, a write that followed no STATR read leaving it standing from
+    // the frame before (measured: a whole frame inside the reading).
+    const uint32_t frame = bits * SysClock::hz / baud;
+    Stopwatch w;
+    while (!U::tx_empty() && w.cycles() < budget) {
+    }
+    w.start();
+    while (w.cycles() < 2u * frame) {
+    }
+    w.start();
+    for (uint32_t i = 0; i < frames && w.cycles() < budget; ++i) {
+        while (!U::tx_empty() && w.cycles() < budget) {
+        }
+        U::write_data(static_cast<uint8_t>(i * 37u + 11u));
+        if (i == 0u) {
+            U::clear_flags(usart_tc);   // TC stood for the idle line before the run
+        }
+    }
+    while (!U::tx_complete() && w.cycles() < budget) {
+    }
+    const uint32_t took = w.cycles();
+    return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * took / wire);
+}
+
+/// The same through a TRANSPORT `T`: 8N1 frames queued with write_bulk()
+/// as fast as its transmit ring takes them, timed from the first queue to
+/// tx_idle() - the last stop bit's end (letter r) - against the rate
+/// asked. What the transport receives meanwhile is read and thrown away,
+/// and its counters are cleared after.
+template <typename T>
+uint32_t wire_permille(uint32_t baud, uint32_t frames) {
+    static uint8_t out[256];
+    for (uint32_t i = 0; i < sizeof out; ++i) {
+        out[i] = static_cast<uint8_t>(i * 37u + 11u);
+    }
+    const uint64_t wire = 10ULL * frames * SysClock::hz / baud;
+    const uint64_t budget = 2u * wire + SysClock::hz / 100u;
+    uint8_t b = 0;
+    uint32_t queued = 0;
+    Stopwatch w;
+    while (queued < frames && w.cycles() < budget) {
+        const uint32_t want = frames - queued;
+        queued += T::write_bulk(
+            std::span<const uint8_t>(out, want < sizeof out ? want : sizeof out));
+        while (T::read_byte(b)) {
+        }
+    }
+    while (!T::tx_idle() && w.cycles() < budget) {
+        while (T::read_byte(b)) {
+        }
+    }
+    const uint32_t took = w.cycles();
+    wait_us(64u * 10u * 1'000'000u / baud + 1000u);
+    while (T::read_byte(b)) {
+    }
+    T::clear_errors();
+    return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * took / wire);
+}
+
+/// The verdict on a reading: never faster than the rate asked by more
+/// than the ruler's few cycles and the divisor's rounding - under a
+/// thousandth at every rate this suite asks - and never slower by more
+/// than three per cent.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
 
 // ---- the ruler on the transmit pad -----------------------------------------
 
@@ -801,8 +904,12 @@ void tb_frame() {
     // The start bit IS the divisor: BRR peripheral clocks, and the ruler
     // counts the timer's own clock, which is twice PCLK1 here.
     const uint32_t bauds[4] = {9600, 115200, 921600, 3'000'000};
+    // A hundredth of a second of frames at least, and 16 at the slowest.
+    const uint32_t runs[4] = {16, 256, 1024, 1024};
     uint32_t good = 0;
-    for (uint32_t baud : bauds) {
+    uint32_t on_time = 0;
+    for (uint8_t k = 0; k < 4u; ++k) {
+        const uint32_t baud = bauds[k];
         if (!u2_up(UartFormat{}, baud)) {
             continue;
         }
@@ -812,8 +919,13 @@ void tb_frame() {
         ruler_start(psc, true);
         // 0xFF: the start bit alone is low, every data bit is high.
         const uint32_t got = measure_frame(0xFF, psc);
+        const uint32_t pm = usart_permille<U2>(baud, 10, runs[k]);
         print(serial, "  ", baud, " baud: the start bit is ", got, " timer clocks for ", want,
-              " asked (divisor ", brr, ")", crlf);
+              " asked (divisor ", brr, "); ", runs[k], " frames in ", pm,
+              " thousandths of their wire time on the core's counter", crlf);
+        if (wire_ok(pm)) {
+            ++on_time;
+        }
         // The two captures are two channels' own edge detectors on one
         // pad, so the ruler reads a width to one count: at 3 Mbaud that
         // count is 2.08 per cent of the bit, and the tolerance is never
@@ -831,6 +943,12 @@ void tb_frame() {
                   "measured on the transmit pad by the timer, every one within 2 per cent or "
                   "the ruler's one count",
                   good == 4u);
+    // TIM2 counts a clock of PB1, the bus the divisor divides, so the
+    // start bit above cannot tell a wrong bus rate; the STK counts HCLK.
+    bench.verdict("THE LINE RUNS AT THE RATE ASKED: at each of the four rates a run of frames "
+                  "back to back takes its wire time at that rate on the core's own counter, "
+                  "-1 % to +3 % - the timer above counts PB1's clock and cannot tell a wrong bus",
+                  on_time == 4u);
 
     // The word length: the low run of a zero byte is the start bit plus
     // every data bit plus the parity bit, all of them zero.
@@ -1996,6 +2114,15 @@ void tl_loopback() {
                   "xorshift pattern back in order and no error counted",
                   received == run_bytes && wrong == 0u && Loop::frame_errors() == 0u &&
                       Loop::hw_overruns() == 0u);
+    // A loop shares one divisor at both ends and cannot tell a wrong one:
+    // the transmit engine's run timed against the wire at the rate asked.
+    const uint32_t pm = wire_permille<Loop>(fast_baud, 1024);
+    print(serial, "  1024 frames through the transmit engine in ", pm,
+          " thousandths of their wire time at ", fast_baud, " baud (the divisor 78 gives 923077)",
+          crlf);
+    bench.verdict("and the loop runs at the rate asked: 1024 frames through the transmit engine "
+                  "in their wire time at 921600 baud, -1 % to +3 %",
+                  wire_ok(pm));
     Loop::release();
     all_off();
 }
@@ -2077,6 +2204,7 @@ void tm_cross() {
     const uint32_t bauds[2] = {115200, 19200};
     const char* names[2] = {"8N1 at 115200", "8E2 at 19200"};
     uint32_t clean = 0;
+    uint32_t timed = 0;
     for (uint8_t r = 0; r < 2; ++r) {
         if (!u2_up(rounds[r], bauds[r])) {
             continue;
@@ -2098,10 +2226,24 @@ void tm_cross() {
         const uint32_t back = cross_run(64, false);
         const uint16_t u2_errors = U2::status() & (usart_pe | usart_fe | usart_ne | usart_ore);
         const uint16_t u4_errors = U4::status() & (usart_pe | usart_fe | usart_ne | usart_ore);
+        // Both ends divide PB1 by one arithmetic, so the pair cannot tell a
+        // wrong bus rate: each transmitter's run timed on the core's counter
+        // at the rate asked - a start bit, the data, the parity, the stops.
+        const uint32_t bits = r == 0u ? 10u : 12u;
+        const uint32_t frames = r == 0u ? 256u : 32u;
+        const uint32_t pm2 = usart_permille<U2>(bauds[r], bits, frames);
+        const uint32_t pm4 = usart_permille<U4>(bauds[r], bits, frames);
+        wait_us(2000);
+        U2::clear_by_read();
+        U4::clear_by_read();
         print(serial, "  ", names[r], ": 64 bytes out with ", out, " wrong, 64 back with ",
-              back, " wrong; flags ", u2_errors, " and ", u4_errors, crlf);
+              back, " wrong; flags ", u2_errors, " and ", u4_errors, "; ", frames,
+              " frames in ", pm2, " and ", pm4, " thousandths of their wire time", crlf);
         if (out == 0u && back == 0u && u2_errors == 0u && u4_errors == 0u) {
             ++clean;
+        }
+        if (wire_ok(pm2) && wire_ok(pm4)) {
+            ++timed;
         }
         U4::bus_clock(false);
         U2::bus_clock(false);
@@ -2111,6 +2253,9 @@ void tm_cross() {
                   "formats and two rates, every xorshift byte arriving in order with no error "
                   "flag on either side",
                   clean == 2u);
+    bench.verdict("and both run at the rate asked: each transmitter's frames back to back in "
+                  "their wire time at 115200 and at 19200, -1 % to +3 %",
+                  timed == 2u);
     all_off();
 }
 
@@ -2131,6 +2276,8 @@ template <bool on>
 struct V303State {
     static inline volatile bool engines = false;
     static inline volatile uint32_t upper_interrupts[4] = {};
+    /// Letter p's readings, one a port, in thousandths of the wire.
+    static inline uint32_t upper_permille[4] = {};
 };
 
 // ===========================================================================
@@ -2220,6 +2367,16 @@ void tq_errors() {
     constexpr uint32_t n = 120;
     constexpr uint32_t every = 8;
     const bool up = transport_up<Loop>(false, 115200) && cross_sender_up(115200);
+    // The two ends' rates first, which the stream alone cannot tell: the
+    // sender's frames and the transport's own transmit engine timed.
+    const uint32_t pm4 = usart_permille<U4>(115200, 10, 256);
+    const uint32_t pm2 = wire_permille<Loop>(115200, 256);
+    print(serial, "  at 115200: the fourth port's 256 frames in ", pm4, " and USART2's engine's in ",
+          pm2, " thousandths of their wire time", crlf);
+    bench.verdict("both ends run at the rate asked: the sender's frames and the transport's "
+                  "transmit engine's in their wire time at 115200, -1 % to +3 %",
+                  wire_ok(pm4) && wire_ok(pm2));
+    (void)transport_up<Loop>(false, 115200);
     uint32_t breaks = 0;
     for (uint32_t i = 0; i < n; ++i) {
         cross_byte(stream_byte(i));
@@ -2372,10 +2529,28 @@ int32_t idle_after_stop(bool plain, uint32_t baud) {
     return static_cast<int32_t>((t_idle - edge) & 0xFFFFu);
 }
 
+/// A transport's transmit run at `baud`, brought up and released around
+/// the reading.
+template <typename T>
+uint32_t transport_permille(bool plain, uint32_t baud, uint32_t frames) {
+    (void)transport_up<T>(plain, baud);
+    const uint32_t pm = wire_permille<T>(baud, frames);
+    T::release();
+    return pm;
+}
+
 void tr_tx_idle() {
     all_off();
     static constexpr uint32_t rates[] = {115200, 1'000'000};
     for (const uint32_t baud : rates) {
+        const uint32_t frames = baud == 115200u ? 256u : 1024u;
+        const uint32_t pm_plain = transport_permille<Plain>(true, baud, frames);
+        const uint32_t pm_dma = transport_permille<Loop>(false, baud, frames);
+        print(serial, "  ", baud, " baud: ", frames, " frames in ", pm_plain,
+              " thousandths of their wire time through the interrupt transmitter, ", pm_dma,
+              " through the transmit engine", crlf);
+        bench.verdict("both transmitters run at the rate asked, -1 % to +3 % of the wire: ",
+                      baud == 115200 ? "115200" : "1 Mbaud", wire_ok(pm_plain) && wire_ok(pm_dma));
         const uint32_t bit = timclk1 / baud;
         const int32_t d_plain = idle_after_stop<Plain>(true, baud);
         const int32_t d_dma = idle_after_stop<Loop>(false, baud);
@@ -2418,6 +2593,14 @@ void ts_edge() {
         return;
     }
     const bool up = transport_up<Loop>(false, 1'000'000) && cross_sender_up(1'000'000);
+    const uint32_t pm4 = usart_permille<U4>(1'000'000, 10, 1024);
+    const uint32_t pm2 = wire_permille<Loop>(1'000'000, 1024);
+    print(serial, "  at 1 Mbaud: the fourth port's 1024 frames in ", pm4,
+          " and USART2's engine's in ", pm2, " thousandths of their wire time", crlf);
+    bench.verdict("both ends run at the rate asked: the sender's frames and the transport's "
+                  "transmit engine's in their wire time at 1 Mbaud, -1 % to +3 %",
+                  wire_ok(pm4) && wire_ok(pm2));
+    (void)transport_up<Loop>(false, 1'000'000);
     const uint32_t frame = SysClock::hz / 100'000u;   // ten bits at 1 Mbaud, in core cycles
     bool all_told = true;
     for (uint8_t k = 0; k < 3u; ++k) {
@@ -2645,6 +2828,16 @@ void tn_pair_engines() {
                           Loop::frame_errors() == 0u && Port4::hw_overruns() == 0u &&
                           Loop::hw_overruns() == 0u && Port4::dma_faults() == 0u &&
                           Loop::dma_faults() == 0u);
+        // Both divide PB1 by one arithmetic: each transmit engine's run
+        // timed against the wire at the rate asked, the far ring left to
+        // overflow - its verdict is above.
+        const uint32_t pm2 = wire_permille<Loop>(fast_baud, 1024);
+        const uint32_t pm4 = wire_permille<Port4>(fast_baud, 1024);
+        print(serial, "  1024 frames in ", pm2, " (USART2, DMA1) and ", pm4,
+              " (UART4, DMA2) thousandths of their wire time at 921600", crlf);
+        bench.verdict("and both run at the rate asked: each transmit engine's 1024 frames in "
+                      "their wire time at 921600 baud, -1 % to +3 %",
+                      wire_ok(pm2) && wire_ok(pm4));
         // Both ports stopped and not only their channels: a receiver left
         // running keeps its request on its channel (docs/ch32vx03/dma.md).
         S::engines = false;
@@ -2782,6 +2975,18 @@ void to_lot_registers() {
         port_on<U2>();
         port_on<U4>();
         wait_us(3000);
+        // The pair's rate, which its own frames cannot tell: each end's run
+        // on the core's counter at 9600, eleven bits a frame.
+        const uint32_t pm2 = usart_permille<U2>(baud, 11, 16);
+        const uint32_t pm4 = usart_permille<U4>(baud, 11, 16);
+        wait_us(2000);
+        U2::clear_by_read();
+        U4::clear_by_read();
+        print(serial, "  16 frames of 8E1 at 9600 in ", pm2, " and ", pm4,
+              " thousandths of their wire time", crlf);
+        bench.verdict("both ends run at the rate asked: 16 frames each in their wire time at "
+                      "9600, -1 % to +3 %",
+                      wire_ok(pm2) && wire_ok(pm4));
 
         if (present2 && present4) {
             // MARK on the wire: a zero byte's low run is the start bit and
@@ -2922,6 +3127,12 @@ void to_lot_registers() {
         port_on<U2>();
         port_on<U4>();
         wait_us(20'000);
+        const uint32_t pm_slow = usart_permille<U2>(1200, 10, 16);
+        wait_us(10'000);
+        print(serial, "  16 frames at 1200 in ", pm_slow, " thousandths of their wire time", crlf);
+        bench.verdict("and at 1200 baud, letter a's slowest standard rate: 16 frames in their "
+                      "wire time, -1 % to +3 %",
+                      wire_ok(pm_slow));
         U4::clear_by_read();
         uint32_t busy_seen = 0;
         uint32_t polls = 0;
@@ -3038,6 +3249,9 @@ bool upper_port() {
     const bool framed = U::configure(UartFormat{}, brr) && U::brr() == brr && !U::is_full;
     port_on<U>();
     wait_us(3000);   // TE's idle frame out
+    // The rate on the pad, on the core's counter: no far end to share it.
+    const uint32_t pm = usart_permille<U>(baud, 10, 16);
+    S::upper_permille[n - 5u] = pm;
 
     // Out: a byte read back off the transmit pad by software.
     U::write_data(0xA5);
@@ -3069,7 +3283,8 @@ bool upper_port() {
     print(serial, "  UART", n, " (TX P", U::pads.tx.port, U::pads.tx.pin, ", RX P",
           U::pads.rx.port, U::pads.rx.pin, ", vector ", static_cast<uint8_t>(U::irq),
           "): gate ", gate ? "open" : "SHUT", ", BRR ", U::brr(), ", out ", hex(out), ", in ",
-          hex(in), " (status ", hex(status), "), vector ran ", vec, crlf);
+          hex(in), " (status ", hex(status), "), vector ran ", vec, "; 16 frames in ", pm,
+          " thousandths of their wire time", crlf);
     upper_port_off<n>();
     return gate && framed && out == 0xA5u && in == 0x3Cu &&
            (status & (usart_fe | usart_ne | usart_pe)) == 0u && vec >= 1u;
@@ -3103,6 +3318,12 @@ void tp_upper_ports() {
                       "of this class's tail - with no wire, the receive side fed through the "
                       "pad's own pull because nothing else reaches it",
                       six && seven && eight);
+        using S = V303State<on>;
+        bench.verdict("THE FOUR RUN AT THE RATE ASKED: 16 frames out of each at 9600 in their wire "
+                      "time on the core's counter, -1 % to +3 % - the pad read by software above "
+                      "samples a bit at its middle and would not see a few per cent",
+                      wire_ok(S::upper_permille[0]) && wire_ok(S::upper_permille[1]) &&
+                          wire_ok(S::upper_permille[2]) && wire_ok(S::upper_permille[3]));
 
         // THE COLUMNS ON THE DEBUG PORT'S PADS: with the probe attached,
         // SW_CFG reads as the two-wire port alive and init() refuses both

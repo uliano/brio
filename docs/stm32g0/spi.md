@@ -19,9 +19,10 @@ Bench suite: `test_stm32_spi`, and it carries TWO INSTRUMENTS on one set
 of pads because a desk carries either (the suite probes for the wire at
 boot; its header comment is the map):
 letters `a`..`m` (89 verdicts) run on the Nucleo's own SPI1-to-SPI2
-self-link, letter `s` (15 verdicts) on no wire at all - the host's two
-loops in every shape, judged by what the block holds after each, and
-the receive shapes under a stretched tick handler -,
+self-link, letter `s` (18 verdicts) on no wire at all - the host's two
+loops in every shape, judged by what the block holds after each, the
+receive shapes under a stretched tick handler, and the rate on the wire
+at every BR code -,
 letters `n`..`r` (20 verdicts) on the link to a PEER BOARD
 running `spi_peer`, commanded in band over
 `avrdx/src/apps/spi_link.hpp`. The peer may be any of the three ports of
@@ -342,13 +343,17 @@ both ends).
 by the engine's own polled pump - one frame written, waited for, read -
 **all eight BR codes carry the link byte-exact in both directions, up to
 PCLK/2 = 32 MHz**, because the gap between frames is the HOST's loop and
-the client has all of it to answer in. Driven as a BURST instead, with
-the transmit FIFO kept full, the measured frame period **floors at about
-320 CPU cycles** (322 at PCLK/2 where the wire asks 16, 316 at PCLK/16
-where it asks 128): a poll of TXE, a store, a poll of RXNE, a load, each
-with its APB stall. **This core cannot make a continuous SPI clock out
-of software**, so a CPU-driven ladder never presses the far end however
-fast BR is set. The client's receive side is byte-exact at all eight
+the client has all of it to answer in. Driven as a BURST instead, by a
+hand loop that keeps the transmit FIFO full and reads every frame back
+while the client answers each frame on its own vector on the SAME core,
+the measured frame period **floors at about 320 CPU cycles** (322 at
+PCLK/2 where the wire asks 16, 316 at PCLK/16 where it asks 128), so
+that ladder never presses the far end however fast BR is set. The floor
+is not the host loop's own: the driver's transmit-only loop, with no
+client to serve, holds the clock continuous at PCLK/2 (below, "The rate
+on the wire"), so what the burst pays is the polls and the loads beside
+the client's per-frame vector; how the 320 cycles divide between them
+is owed a measurement on the self-link. The client's receive side is byte-exact at all eight
 rungs with OVR never rising. What slips is the client's ANSWER, and it
 slips NON-MONOTONICALLY (a faster rung passes above a slower one that
 failed), which is a late interrupt and not a ceiling - so the
@@ -562,6 +567,34 @@ every shape of the two loops by the FIFO levels, the flag and the count
 of completions after it. The handlers of the bench's image, for the
 record: the tick's 52 instructions (~80 cycles), the console's receive
 path 87, the stamped SPI vector ~370..400 cycles.
+
+**THE RATE ON THE WIRE, TIMED WITH NO WIRE.** A client - the self-link's
+SPI2 or a peer board - is clocked by the host's SCK and cannot tell a
+wrong divisor: every byte lands at whatever rate BR made. So letter `s`
+times the host's frame against its SCK periods at the rate ASKED - PCLK
+over the divisor the request named - from the difference of two blocks
+of 2048 and 256 frames (a transaction's fixed cost cancels), neither
+buffer named, on the ticker's cycle count, the best of three of each,
+judged -1 % to +3 %. 35.5.9 keeps the clock continuous while TXFIFO
+holds a frame ("provided continuously by the master until TXFIFO becomes
+empty"), so a frame inside a block carries no gap and the frame is its
+SCK periods alone. SCK is the host's whatever is wired, so the reading
+stands for letters `d`, `i`, `l` and `p`, which set the same divisors
+over wires this desk does not carry.
+
+| run | STM32G0B1RE | STM32G071RB |
+|---|---|---|
+| the engines, 8-bit frames, PCLK/2 .. PCLK/256 | 999 1000 1000 1000 1000 1000 999 1000 | 999 1000 1000 999 1000 1000 1000 1000 |
+| the polled transmit-only loop, PCLK/2 .. PCLK/256 | 1000 1000 1000 1000 1000 999 999 1000 | 999 1000 1000 1000 999 1000 1000 1000 |
+| the engines, 16-bit frames, PCLK/2 and PCLK/16 | 999, 999 | 999, 999 |
+| a 1 MHz ceiling on the engines at a 16 and a 2 MHz core | 1000, 1000 | 1000, 1000 |
+
+Every code is its wire, and the polled transmit-only loop too, PCLK/2
+included: two byte frames packed into each half-word store on TXE, which
+stands while TXFIFO is at most half full (35.5.9), outrun sixteen cycles
+a frame. At the dynamic clock's other rungs the stated ceiling is 1 MHz
+on the wire, PCLK/16 at 16 MHz and PCLK/2 at 2 MHz - the code re-resolved
+and the rate the one asked.
 
 **35.9.2's LDMA_TX, measured**: three 16-bit DMA accesses to an 8-bit
 frame size carry SIX frames with the bit clear and FIVE with it set, the
@@ -914,6 +947,14 @@ on every header of the pack, but no silicon has run it:
 
 **Findings left open, with what would settle them:**
 
+- **the burst ladder's 320-cycle floor** (letter d) is not the host
+  loop's own - the transmit-only loop holds PCLK/2's clock continuous
+  with no client to serve (letter s) - so it divides between the hand
+  loop's polls and loads and the client's per-frame vector on the same
+  core, in proportions not measured: the self-link's four wires and the
+  same burst with the client on its raw engines (letter i's arrangement)
+  would split them.
+
 - **the packed receive at PCLK/4 runs at 38 cycles a frame against the
   wire's 32** (x 1.23 on 256 frames): a loop turn of some 26
   instructions with four taken branches and three APB accesses per
@@ -937,8 +978,9 @@ on every header of the pack, but no silicon has run it:
 **Implemented, and the measurement declined with the reason:**
 
 - **the answer-turnaround ceiling of the ISR-driven client** (letter d):
-  a ceiling needs a clock the CPU cannot gap and this core cannot make
-  one, so what a CPU-driven ladder measures is its own loop. Measured
+  a ceiling needs a clock nothing gaps, and the burst loop reading every
+  frame back beside a client answering on the same core gaps it at every
+  rung, so what that ladder measures is the pair's own pace. Measured
   where it can be - both ends on DMA, letter i.
 - **the TI frame-format error** did not reproduce with the one staging a
   single board affords (a frame-size mismatch); printed, not claimed.

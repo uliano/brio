@@ -45,12 +45,17 @@
 //   b  THE LOOPBACK ON THE PUMP: the four modes at 8 and 16 bits,
 //      sixteen frames each through the ISR, byte-exact
 //   c  THE POLLED PATH AT EVERY RATE, /2 to /256, 64 bytes each, the
-//      burst timed on the STK and the frame period reported
+//      burst timed on the STK and the frame period reported - none
+//      faster than its wire at the rate asked
 //   d  THE DMA ENGINES on channels 2 and 3: 128-byte blocks with and
 //      without a command phase, timed, ONE DMA INTERRUPT a transaction
 //      (the receive channel's), 16-bit frames on the engines in
 //      half-word beats, and the fallback to the pump of a 16-bit
-//      request whose buffer sits off a half-word boundary
+//      request whose buffer sits off a half-word boundary; and THE RATE
+//      ON THE WIRE - a frame inside an engined block timed (the
+//      difference of two block lengths) against its SCK periods at the
+//      rate asked, /2 to /64, both clock phases, 16 bits, from SRAM
+//      buffers; and the same with no buffer named, on the host's cells
 //   e  THE HARDWARE CRC through the loop: TXCRCR against a bitwise
 //      reference, RXCRCR equal to it, CRCERR down
 //   f  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
@@ -232,7 +237,7 @@ uint8_t host_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_
 }
 
 uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx, uint16_t len,
-                 SpiClock rate, SpiDataSize bits, bool polled) {
+                 SpiClock rate, SpiDataSize bits, bool polled, SpiMode mode = SpiMode::mode0) {
     DmaHost::Request r{};
     r.cs = CsPin::ref();
     r.cmd = lend<Lease::reply>(cmd);
@@ -240,7 +245,7 @@ uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t
     r.tx = lend<Lease::reply>(tx);
     r.rx = lend<Lease::reply>(rx);
     r.len = len;
-    r.mode = SpiMode::mode0;
+    r.mode = mode;
     r.clock = rate;
     r.bits = bits;
     r.polled = polled;
@@ -264,6 +269,46 @@ void settle_ms(uint32_t ms) {
     while (Ticker::millis() - t0 < ms) {
     }
 }
+
+/// The SCK divisor a BR code ASKS for, HCLK / 2^(BR + 1) (16.3.1) - the
+/// rate the wire is judged against, never the host's own arithmetic.
+uint32_t asked_divisor(SpiClock rate) { return 2u << static_cast<uint8_t>(rate); }
+
+/// THE RATE ON THE WIRE, which the loop alone cannot tell (MOSI and MISO
+/// ride one SCK): the time ONE FRAME takes inside an engined block, from
+/// the difference of a `big_n`- and a `small_n`-frame block, so the
+/// transaction's fixed cost cancels; in thousandths of the frame's SCK
+/// periods at the rate ASKED. With no buffer named (the default, 2048 and
+/// 256 frames) the transmit engine pours the host's fixed 0xFF cell and
+/// the receive engine writes its discard cell. No gap is added: a frame
+/// written while another shifts follows it with none (16.2.2), so a frame
+/// is its bits alone. The best of three of each block; the arithmetic in
+/// 32 bits (the CH32V003 has no multiplier).
+uint32_t frame_permille(SpiClock rate, SpiMode mode, SpiDataSize bits, const uint8_t* tx = nullptr,
+                        uint8_t* rx = nullptr, uint16_t big_n = 2048, uint16_t small_n = 256) {
+    auto best = [&](uint16_t n) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t t0 = cycles_now();
+            (void)dma_xfer(nullptr, 0, tx, rx, n, rate, bits, false, mode);
+            const uint32_t took = cycles_now() - t0;
+            least = took < least ? took : least;
+        }
+        return least;
+    };
+    const uint32_t big = best(big_n);
+    const uint32_t small = best(small_n);
+    if (big <= small) {
+        return 0;
+    }
+    const uint32_t frames = static_cast<uint32_t>(big_n - small_n);
+    const uint32_t d = big - small;
+    const uint32_t frame_x1000 = (d / frames) * 1000u + ((d % frames) * 1000u) / frames;
+    const uint32_t width = bits == SpiDataSize::bits16 ? 16u : 8u;
+    return frame_x1000 / (width * asked_divisor(rate));
+}
+
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
 
 // ===========================================================================
 // The peer: spi_link.hpp over the bus under test
@@ -774,6 +819,7 @@ void tc_rates() {
     }
     host_ready();
     uint8_t exact = 0;
+    uint8_t never_early = 0;
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock rate = static_cast<SpiClock>(code);
         fill_pattern(tx_buf, 64, static_cast<uint8_t>(0xA0u + code));
@@ -786,17 +832,23 @@ void tc_rates() {
                                      SpiDataSize::bits8, true);
         const uint32_t cycles = cycles_now() - t0;
         const bool ok = st == spi_ok && same(tx_buf, rx_buf, 64);
-        // The wire's own time for 64 frames of 8 bits at this SCK.
-        const uint32_t sck = spi_sck_hz(SysClock::hz, rate);
-        const uint32_t wire_cycles = (64UL * 8UL * SysClock::hz) / sck;
+        // The wire's own time for 64 frames of 8 bits at the SCK ASKED.
+        const uint32_t sck = SysClock::hz / asked_divisor(rate);
+        const uint32_t wire_cycles = 64UL * 8UL * asked_divisor(rate);
         print(serial, "  /", 2u << code, " (", sck / 1000u, " kHz): 64 bytes polled in ", cycles,
               " cycles (", cycles / 64u, " per frame, the wire alone ", wire_cycles / 64u, ")",
               ok ? "  byte-exact" : "  MISMATCH", crlf);
         if (ok) {
             ++exact;
         }
+        if (cycles >= wire_cycles) {
+            ++never_early;
+        }
     }
     bench.verdict("all eight BR codes carry 64 bytes byte-exact on the polled path", exact == 8u);
+    bench.verdict("and none is faster than its wire: 64 frames take at least eight SCK periods each at "
+                  "the rate asked (the receive loop's own cost the rest; letter d times the wire)",
+                  never_early == 8u);
     bench.verdict("the chip select is released after the polled transactions too", CsPin::read_out());
 }
 
@@ -898,6 +950,36 @@ void td_dma() {
         ff = ff && rx_buf[i] == 0xFFu;
     }
     bench.verdict("and of 16 bits, the same cell read as a half-word", rd16 == spi_ok && ff);
+    // THE RATE ON THE WIRE inside a block, at the rates asked: the frames
+    // from tx_buf into rx_buf, both in SRAM - the difference of a 256- and
+    // a 32-frame block (128 and 16 at 16 bits, the buffer's half-words).
+    console_drain();
+    const uint32_t m0_div2 = frame_permille(SpiClock::div2, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
+    const uint32_t m0_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
+    const uint32_t m0_div16 = frame_permille(SpiClock::div16, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
+    const uint32_t m0_div64 = frame_permille(SpiClock::div64, SpiMode::mode0, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
+    const uint32_t m3_div16 = frame_permille(SpiClock::div16, SpiMode::mode3, SpiDataSize::bits8, tx_buf, rx_buf, 256, 32);
+    const uint32_t w16_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits16, tx_buf, rx_buf, 128, 16);
+    const uint32_t w16_div16 = frame_permille(SpiClock::div16, SpiMode::mode0, SpiDataSize::bits16, tx_buf, rx_buf, 128, 16);
+    print(serial, "  a frame inside an engined block, buffers in SRAM, in thousandths of its SCK periods at the rate "
+          "asked: mode 0 /2 ", m0_div2, ", /4 ", m0_div4, ", /16 ", m0_div16, ", /64 ", m0_div64, "; mode 3 /16 ",
+          m3_div16, "; 16-bit /4 ", w16_div4, ", /16 ", w16_div16, crlf);
+    bench.verdict("THE ENGINES RUN AT THE RATE ASKED: a frame inside a block takes its SCK periods at HCLK "
+                  "over the divisor - /2, /4, /16 and /64 in mode 0, /16 in mode 3, /4 and /16 in 16-bit "
+                  "frames - each -1 % to +3 %",
+                  wire_ok(m0_div2) && wire_ok(m0_div4) && wire_ok(m0_div16) && wire_ok(m0_div64) &&
+                      wire_ok(m3_div16) && wire_ok(w16_div4) && wire_ok(w16_div16));
+    // And with no buffer named - the host's own cells, 2048 and 256 frames:
+    // the transmit engine pours the 0xFF dummy, the receive engine writes
+    // its discard cell.
+    const uint32_t cell_div2 = frame_permille(SpiClock::div2, SpiMode::mode0, SpiDataSize::bits8);
+    const uint32_t cell_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits8);
+    const uint32_t cell16_div4 = frame_permille(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits16);
+    print(serial, "  the same with no buffer named (the host's dummy and discard cells): /2 ", cell_div2, ", /4 ",
+          cell_div4, "; 16-bit /4 ", cell16_div4, crlf);
+    bench.verdict("and a block with no buffer named runs at the wire too: /2 and /4, 8 and 16 bits, each -1 % to "
+                  "+3 % of its SCK periods",
+                  wire_ok(cell_div2) && wire_ok(cell_div4) && wire_ok(cell16_div4));
     DmaHost::release();
     dma_host_live = false;
     host_ready();

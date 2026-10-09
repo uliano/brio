@@ -58,14 +58,21 @@
 //      TIM2's channel 2 under TIM2's partial remap, and a pad driven by
 //      one peripheral still reaches another's input; the fastest code,
 //      at half the timer clock, judged only on a pad that carries no
-//      wire - and the effective bit rate of a saturated block on each
-//      instance
+//      wire - none faster than its wire at the rate asked - and the
+//      effective bit rate of a saturated block on each instance; then
+//      THE RATE ON THE WIRE, no wire needed: a frame inside an engined
+//      block timed on the core's counter (the difference of a 2048- and a
+//      256-frame block) against its SCK periods at the instance's own bus
+//      over the division, SPI1 at /4, /16, /64 and in 16-bit frames, SPI2
+//      at /2 and /16 - a loop shares one clock at both ends and cannot
+//      tell a wrong one
 //   b  THE HOST WITH ITS MISO HELD BY ITS OWN PORT, no wire: frames of
 //      all ones and all zeros read back, both widths, both bit orders,
 //      the four modes read back out of CTLR1
 //   c  THE LOOPBACK on SPI1: round trips at every mode, both widths,
-//      both orders, the hardware CRC against a bitwise reference, 4 KB
-//      at the fastest code that passes clean, both DMA engines - 16-bit
+//      both orders, the hardware CRC against a bitwise reference, the
+//      ladder none faster than its wire, 4 KB at the fastest code that
+//      passes clean, both DMA engines - 16-bit
 //      frames on them as half-words over aligned buffers, on the pump one
 //      byte off - and SpiBus (= BusMaster) over the whole of it
 //   d  THE PEER on SPI2: ping/ident/report, the four modes and both
@@ -82,14 +89,16 @@
 //   f  SPI3 AS THE CLIENT OF SPI2: the host engine polled, the client
 //      served one frame ahead from its own vector, all four modes and
 //      both bit orders in 8-bit frames and a 16-bit run, both directions
-//      compared byte for byte
+//      compared byte for byte, and the host's runs timed against the wire
+//      at the rate asked
 //   g  SPI3 AS THE HOST OVER SPI2'S CLIENT: the same matrix with the
-//      roles swapped
+//      roles swapped, timed the same way
 //   h  THE HIGH-SPEED READ: a 256-byte block each way through the four
 //      DMA channels (SPI2's on DMA1, SPI3's on DMA2) at BR /4 as the
 //      baseline, then at /2 without HSRXEN and with it - each side's wrong
 //      frames counted and sorted by kind, a frame read ONE BIT LATE being
-//      a sample taken before the answer's edge - and the verb's refusal at
+//      a sample taken before the answer's edge, /4 and /2 with the mode
+//      timed against the wire - and the verb's refusal at
 //      /4; then SPI1's /2, 72 MHz of SCK: SPI1 on its second column -
 //      SPI3's default pads, so the same wires - polled frame by frame over
 //      SPI2 as a client, /8 as the baseline, /2 without HSRXEN and with
@@ -102,7 +111,8 @@
 //      frames beside it, at /2 without and with HSRXEN, /4, /8 and /16 -
 //      the cost per frame and per byte against the core's counter and the
 //      frames compared - a measurement, the transfer granularity being a
-//      question the library has not settled
+//      question the library has not settled - and every row's blocks
+//      judged against the wire at the rate asked
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abe,cd
@@ -370,6 +380,69 @@ uint8_t dma_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t
     return Dma1::status();
 }
 
+// ---------------------------------------------------------------------------
+// The rate on the wire
+// ---------------------------------------------------------------------------
+
+/// One polled block of `n` frames through an ENGINED host `H`, neither
+/// buffer named - the transmit engine pouring its fixed cell and the
+/// receive engine its sink - in core cycles. The channels' vectors finish
+/// a polled block on this family, so they are the engined hosts' meanwhile.
+template <typename H>
+uint32_t engined_block(uint16_t n, SpiClock rate, SpiDataSize bits) {
+    typename H::Request r{};
+    r.cs = {};
+    r.len = n;
+    r.mode = SpiMode::mode0;
+    r.clock = rate;
+    r.bits = bits;
+    r.polled = true;
+    host_done = false;
+    const uint32_t t0 = cycles_now();
+    (void)H::start(r);
+    return cycles_now() - t0;
+}
+
+/**
+ * THE RATE ON THE WIRE, which a loop alone cannot tell - both ends of a
+ * loop share the one clock: the time ONE FRAME takes inside an engined
+ * block, from the difference of a 2048-frame and a 256-frame block (the
+ * best of three of each) so that the transaction's fixed cost cancels, in
+ * thousandths of its SCK periods at the rate ASKED - the bus clock the
+ * instance divides, `bus_hz`, over the code's division - on the core's
+ * counter, which counts HCLK. A host whose transmit buffer is refilled
+ * while TXE stands keeps a complete data flow (20.2.2) - the clock does not
+ * pause between frames - so nothing is added for a gap.
+ */
+template <typename H>
+uint32_t frame_permille(uint32_t bus_hz, SpiClock rate, SpiDataSize bits) {
+    auto best = [&](uint16_t n) {
+        uint32_t least = 0xFFFF'FFFFUL;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t c = engined_block<H>(n, rate, bits);
+            least = c < least ? c : least;
+        }
+        return least;
+    };
+    const uint32_t big = best(2048);
+    const uint32_t small = best(256);
+    const uint32_t width = bits == SpiDataSize::bits16 ? 16u : 8u;
+    const uint64_t want = 1792ULL * width * spi_division(rate) * SysClock::hz / bus_hz;
+    return want == 0u ? 0u : static_cast<uint32_t>(1000ULL * (big - small) / want);
+}
+
+/// The verdict on a reading: -1 % to +3 % of the wire at the rate asked.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
+/// A block's time in thousandths of its wire at the rate asked - `frames`
+/// frames of `width` bits at PB1 over `division` - which a link between
+/// two instances of one bus cannot tell wrong.
+uint32_t block_permille(uint32_t cycles, uint32_t frames, uint32_t width, uint32_t division) {
+    const uint64_t wire = static_cast<uint64_t>(frames) * width * division * SysClock::hz /
+                          SysClock::pclk1_hz;
+    return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * cycles / wire);
+}
+
 // ===========================================================================
 // a - the rates, and the clock measured on its own pad
 // ===========================================================================
@@ -458,6 +531,7 @@ void ta_rates() {
     constexpr uint16_t frames = 64;
     fill_pattern(tx_buf, frames, 0x5A);
     uint8_t exact_edges = 0;
+    uint8_t never_early = 0;
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock rate = static_cast<SpiClock>(code);
         SckCounter::set_count(0);
@@ -473,8 +547,13 @@ void ta_rates() {
         const uint32_t edges = SckCounter::count();
         const uint32_t want = 8UL * frames;
         const uint32_t sck = Moved::sck_hz(rate);
-        // The wire's own time for the burst at this SCK, in core cycles.
-        const uint32_t wire = static_cast<uint32_t>((8ULL * frames * SysClock::hz) / sck);
+        // The wire's own time for the burst at the rate ASKED - PB2 over the
+        // code's division, not what the driver believes - in core cycles.
+        const uint32_t wire = static_cast<uint32_t>(
+            (8ULL * frames * spi_division(rate) * SysClock::hz) / SysClock::pclk2_hz);
+        if (cycles >= wire) {
+            ++never_early;
+        }
         print(serial, "  /", spi_division(rate), " (", sck / 1000u, " kHz): ", edges,
               " rising edges on PB3 (want ", want, "), ", cycles, " cycles for ", frames,
               " frames (the wire alone ", wire, ")", crlf);
@@ -498,6 +577,10 @@ void ta_rates() {
                   "driven by one peripheral reaches another's input, and the counter follows SCK "
                   "to half the timer clock",
                   exact_edges == 8u);
+    bench.verdict("and no code is faster than its wire: 64 frames take at least eight SCK "
+                  "periods each at the rate asked, PB2 over the division (the polled path's own "
+                  "cost the rest; the engines below time the wire)",
+                  never_early == 8u);
 
     SckCounter::enable(false);
     SckCounter::release();
@@ -536,6 +619,45 @@ void ta_rates() {
     } else {
         print(serial, "  this part has one SPI: no second instance to time", crlf);
     }
+
+    // ---- THE RATE ON THE WIRE, inside an engined block, per instance ----
+    // No wire wanted: the transmit engine clocks the frames out whatever
+    // MISO reads. SPI1 divides PB2, SPI2 PB1 - the bus a loop could not
+    // tell wrong.
+    Dma<1>::open();
+    dma_host_live = true;
+    (void)Dma1::init(clock);
+    NssPad::release();   // the select pad is SCK's neighbour on this board
+    const uint32_t s1_d4 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
+                                                SpiDataSize::bits8);
+    const uint32_t s1_d16 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div16,
+                                                 SpiDataSize::bits8);
+    const uint32_t s1_d64 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div64,
+                                                 SpiDataSize::bits8);
+    const uint32_t s1_w4 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
+                                                SpiDataSize::bits16);
+    Dma1::release();
+    print(serial, "  a frame inside an engined block, in thousandths of its wire at the rate "
+                  "asked: SPI1 /4 ",
+          s1_d4, ", /16 ", s1_d16, ", /64 ", s1_d64, ", 16-bit /4 ", s1_w4, crlf);
+    bool engines_on_time = wire_ok(s1_d4) && wire_ok(s1_d16) && wire_ok(s1_d64) &&
+                           wire_ok(s1_w4);
+    if constexpr (has_two_spi) {
+        (void)PeerDma::init(clock);
+        const uint32_t s2_d2 = frame_permille<PeerDma>(SysClock::pclk1_hz, SpiClock::div2,
+                                                       SpiDataSize::bits8);
+        const uint32_t s2_d16 = frame_permille<PeerDma>(SysClock::pclk1_hz, SpiClock::div16,
+                                                        SpiDataSize::bits8);
+        PeerDma::release();
+        print(serial, "  SPI2 /2 ", s2_d2, ", /16 ", s2_d16, crlf);
+        engines_on_time = engines_on_time && wire_ok(s2_d2) && wire_ok(s2_d16);
+    }
+    dma_host_live = false;
+    bench.verdict("THE ENGINES RUN AT THE RATE ASKED: a frame inside a block takes its SCK "
+                  "periods at the instance's own bus over the division - SPI1 at /4, /16 and /64 "
+                  "and in 16-bit frames, SPI2 at /2 and /16 where the part has it - each -1 % to "
+                  "+3 % on the core's counter",
+                  engines_on_time);
     host_ready();
 }
 
@@ -785,6 +907,7 @@ void tc_loop() {
     // ---- the ladder, and 4 KB at the fastest code that is clean ----
     uint32_t best = 0;
     uint32_t first_bad = 0;
+    uint8_t never_early = 0;
     for (uint8_t code = 8; code-- > 0;) {
         const SpiClock rate = static_cast<SpiClock>(code);
         fill_pattern(tx_buf, chunk, static_cast<uint8_t>(0xA0u + code));
@@ -797,6 +920,12 @@ void tc_loop() {
                                      SpiDataSize::bits8, true);
         const uint32_t cycles = cycles_now() - t0;
         const bool ok = st == spi_ok && same(tx_buf, rx_buf, chunk);
+        // A polled read keeps one frame in flight at the top codes and is
+        // slower than its wire there; no code may be faster than it.
+        const uint64_t wire = 8ULL * chunk * spi_division(rate) * SysClock::hz / SysClock::pclk2_hz;
+        if (cycles >= wire) {
+            ++never_early;
+        }
         print(serial, "  /", spi_division(rate), " (", Host1::sck_hz(rate) / 1000u, " kHz): ",
               chunk, " bytes polled in ", cycles, " cycles (", cycles / chunk, " per frame)",
               ok ? "  byte-exact" : "  MISMATCH", crlf);
@@ -814,6 +943,10 @@ void tc_loop() {
     bench.verdict("the strap carries every BR code the block offers, or names the one it does "
                   "not",
                   best >= 1'000'000UL);
+    bench.verdict("and no code is faster than its wire: 256 frames take at least eight SCK "
+                  "periods each at the rate asked, PB2 over the division (letter a times the "
+                  "wire itself, on the engines)",
+                  never_early == 8u);
 
     // 4 KB at the fastest code that passed: the same chunk sixteen times,
     // which is what a 10 KB part can afford.
@@ -2195,6 +2328,7 @@ uint8_t link_in[2u * link_frames];
 struct LinkResult {
     uint16_t host_wrong;
     uint16_t client_wrong;
+    uint32_t cycles;   ///< the host's polled request, start() to its return
 };
 
 template <bool on, typename Host, typename Client, typename Sel>
@@ -2221,7 +2355,7 @@ LinkResult link_run(bool client_is_two, SpiMode mode, bool lsb, SpiDataSize bits
     L::rx_i = 0;
     if (!Client::init(clock, {.mode = mode, .bits = bits, .lsb_first = lsb,
                               .nss = SpiNss::hardware_input, .drive_output = true})) {
-        return {0xFFFFu, 0xFFFFu};
+        return {0xFFFFu, 0xFFFFu, 0};
     }
     if (client_is_two) {
         L::serve2 = true;
@@ -2246,10 +2380,12 @@ LinkResult link_run(bool client_is_two, SpiMode mode, bool lsb, SpiDataSize bits
     r.mode = mode;
     r.bits = bits;
     r.polled = true;
+    const uint32_t t0 = cycles_now();
     const bool done = Host::start(r);
+    const uint32_t took = cycles_now() - t0;
     (void)delay_us(clock, 50);
 
-    LinkResult res{0, 0};
+    LinkResult res{0, 0, took};
     for (uint16_t i = 0; i < n; ++i) {
         const uint16_t in = wide ? static_cast<uint16_t>(link_in[2u * i] |
                                                          (link_in[2u * i + 1u] << 8))
@@ -2265,7 +2401,7 @@ LinkResult link_run(bool client_is_two, SpiMode mode, bool lsb, SpiDataSize bits
         }
     }
     if (!done) {
-        res = {0xFFFFu, 0xFFFFu};
+        res = {0xFFFFu, 0xFFFFu, 0};
     }
     L::serve2 = false;
     L::serve3 = false;
@@ -2279,10 +2415,14 @@ LinkResult link_run(bool client_is_two, SpiMode mode, bool lsb, SpiDataSize bits
 }
 
 /// The mode-and-order matrix of one arrangement, and a 16-bit run in
-/// mode 0 - the count of clean runs out of nine.
+/// mode 0 - the count of clean runs out of nine. `on_time` says whether
+/// the first 8-bit run and the 16-bit one took their wire at the rate
+/// asked: 32 frames at PB1 over 64, the host's polled loop keeping two in
+/// flight, its request's fixed cost inside the reading.
 template <bool on, typename Host, typename Client, typename Sel>
-uint8_t link_matrix(bool client_is_two) {
+uint8_t link_matrix(bool client_is_two, bool& on_time) {
     uint8_t clean = 0;
+    uint32_t first_pm = 0;
     const SpiMode modes[4] = {SpiMode::mode0, SpiMode::mode1, SpiMode::mode2, SpiMode::mode3};
     for (SpiMode m : modes) {
         for (uint8_t order = 0; order < 2u; ++order) {
@@ -2292,6 +2432,9 @@ uint8_t link_matrix(bool client_is_two) {
             print(serial, "    mode ", static_cast<uint8_t>(m), order != 0u ? " LSB" : " MSB",
                   " first: the host read ", r.host_wrong, " frames wrong, the client ",
                   r.client_wrong, crlf);
+            if (m == SpiMode::mode0 && order == 0u) {
+                first_pm = block_permille(r.cycles, link_frames, 8, 64);
+            }
             if (r.host_wrong == 0u && r.client_wrong == 0u) {
                 ++clean;
             }
@@ -2299,8 +2442,12 @@ uint8_t link_matrix(bool client_is_two) {
     }
     const LinkResult w = link_run<on, Host, Client, Sel>(client_is_two, SpiMode::mode0, false,
                                                          SpiDataSize::bits16, link_frames);
+    const uint32_t wide_pm = block_permille(w.cycles, link_frames, 16, 64);
     print(serial, "    16-bit frames in mode 0: the host read ", w.host_wrong,
           " wrong, the client ", w.client_wrong, crlf);
+    print(serial, "    in thousandths of the wire at /64: 8-bit mode 0 ", first_pm, ", 16-bit ",
+          wide_pm, crlf);
+    on_time = wire_ok(first_pm) && wire_ok(wide_pm);
     if (w.host_wrong == 0u && w.client_wrong == 0u) {
         ++clean;
     }
@@ -2322,12 +2469,16 @@ void tf_spi3_client() {
                           true);
             return;
         }
+        bool on_time = false;
         const uint8_t clean = link_matrix<on, typename L::Host2, typename L::Client3,
-                                          typename L::Sel2>(false);
+                                          typename L::Sel2>(false, on_time);
         bench.verdict("SPI2's host engine and SPI3's client served one frame ahead from its own "
                       "vector exchange 32 frames exactly in all four modes, both bit orders, and "
                       "in 16-bit frames",
                       clean == 9u);
+        bench.verdict("and SPI2's host runs at the rate asked: 32 frames at PB1 over 64 in their "
+                      "wire time, 8-bit and 16-bit, -1 % to +3 % on the core's counter",
+                      on_time);
         L::all_released();
     }
 }
@@ -2347,11 +2498,15 @@ void tg_spi3_host() {
                           true);
             return;
         }
+        bool on_time = false;
         const uint8_t clean = link_matrix<on, typename L::Host3, typename L::Client2,
-                                          typename L::Sel3>(true);
+                                          typename L::Sel3>(true, on_time);
         bench.verdict("with the roles swapped - SPI3's host engine over SPI2's client - the same "
                       "matrix is exact both ways",
                       clean == 9u);
+        bench.verdict("and SPI3's host runs at the rate asked: 32 frames at PB1 over 64 in their "
+                      "wire time, 8-bit and 16-bit, -1 % to +3 % on the core's counter",
+                      on_time);
         L::all_released();
     }
 }
@@ -2685,6 +2840,15 @@ void th_high_speed_read() {
         print_block<on>("/4", base, true);
         print_block<on>("/2 without HSRXEN", plain, true);
         print_block<on>("/2 with HSRXEN", fast, true);
+        // The block's time against its wire at the rate asked - PB1 over
+        // the division, 256 frames - the channels' start inside it.
+        const uint32_t pm4 = block_permille(base.cycles, 256, 8, 4);
+        const uint32_t pm2 = block_permille(fast.cycles, 256, 8, 2);
+        print(serial, "  in thousandths of the wire at the rate asked: /4 ", pm4,
+              ", /2 with HSRXEN ", pm2, crlf);
+        bench.verdict("and the blocks run at the rate asked: 256 frames at /4 and at /2 in their "
+                      "SCK periods at PB1 over the division, -1 % to +3 % on the core's counter",
+                      wire_ok(pm4) && wire_ok(pm2));
         bench.verdict("at BR /4 the wires carry the block exactly both ways - the baseline the /2 "
                       "runs are read against",
                       base.done && base.host_wrong == 0u && base.client_wrong == 0u);
@@ -2753,6 +2917,7 @@ void ti_wide_frames() {
         constexpr uint32_t halves = BlockBuffers<on, uint16_t>::count;
         constexpr uint32_t bytes = BlockBuffers<on, uint8_t>::count;
         bool exact = true;
+        bool timed = true;
         for (const Row& row : rows) {
             const BlockResult wide = block_run<on, uint16_t>(row.rate, row.high_speed);
             const BlockResult narrow = block_run<on, uint8_t>(row.rate, row.high_speed);
@@ -2773,6 +2938,13 @@ void ti_wide_frames() {
                             narrow.done && narrow.host_wrong == 0u && narrow.client_wrong == 0u)) {
                 exact = false;
             }
+            const uint32_t pm_wide = block_permille(wide.cycles, halves, 16, row.divisor);
+            const uint32_t pm_narrow = block_permille(narrow.cycles, bytes, 8, row.divisor);
+            print(serial, "    in thousandths of the wire at the rate asked: ", pm_wide,
+                  " in 16-bit frames, ", pm_narrow, " in 8-bit ones", crlf);
+            if (!wire_ok(pm_wide) || !wire_ok(pm_narrow)) {
+                timed = false;
+            }
         }
         bench.verdict("half-words through all four channels - DMA1's for SPI2, DMA2's for SPI3, "
                       "every one moving 16-bit items into 16-bit frames - and the same bytes as "
@@ -2780,6 +2952,9 @@ void ti_wide_frames() {
                       "high-speed read; the costs are printed as measured, the row without the "
                       "mode beside them",
                       exact);
+        bench.verdict("and every row runs at the rate asked: both widths' blocks in their SCK "
+                      "periods at PB1 over the division, -1 % to +3 % on the core's counter",
+                      timed);
         L::all_released();
     }
 }

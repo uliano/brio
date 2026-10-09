@@ -36,6 +36,13 @@
 //    wire is proven as a BUS, a frame driven onto it from PD4's pull
 //    arriving through the transport, and the DMA receive engine is fed
 //    from the bit-banged line.
+// 4. NO LETTER IS A SELF-LOOP, but a timer capture of a start bit is the
+//    DIVISOR, not the rate: a divisor computed wrong would measure itself
+//    exactly. So letters b, c, i and t time a run of frames against its
+//    wire time at the rate ASKED, in thousandths, judged -1 % to +3 %.
+//    The receiving letters are fed by the banger, whose edges the cycle
+//    count places at the rate asked, and the receiver divides by the BRR
+//    letter c times.
 //
 // What is exercised, letter by letter:
 //   a  the instance and the facts: a reset pulse's register values, the
@@ -46,10 +53,15 @@
 //      frames measured on the jumper (start + data + parity as one low
 //      run, the stop length as the gap between two), the receiver fed
 //      each format from the banged line - 7, 8 and 9 data bits, both
-//      parities, the four stop lengths; and the single wire as a bus
+//      parities, the four stop lengths - and each format's run of 96
+//      frames timed against its bits at 9600; and the single wire as a
+//      bus, its run timed the same way
 //   c  the baud generator: a start bit measured to the cycle at eight
 //      rates from 2400 to 3 Mbaud (the bit IS the divisor), the
-//      fractional divisor, the receiver at 9600, the refusal below 16
+//      fractional divisor, and at each rate A RUN OF FRAMES timed against
+//      its wire at the rate asked - the start bit alone is the divisor,
+//      which a wrong one would match; the receiver at 9600, the refusal
+//      below 16
 //   d  the bit-banged line: a clean frame, a parity error, a framing
 //      error, noise, and the receiver's tolerance to a rate off by a few
 //      per cent
@@ -63,7 +75,8 @@
 //   h  hardware flow control: CTS held high stalls the transmitter, RTS
 //      rises while a received byte waits and drops when it is read
 //   i  the DMA engines on USART2's own channels 6 and 7: the receive
-//      engine fed from the banged line, the transmit engine timed
+//      engine fed from the banged line, the transmit engine's runs timed
+//      against the wire at 9600, 115200 and 3 Mbaud
 //   j  the flags and the vector: TC after TXE, IDLE once per line idle,
 //      one interrupt per enable
 //   q  ERRORS UNDER THE RECEIVE ENGINE: breaks banged into a continuous
@@ -83,8 +96,10 @@
 //      ring with no silence read whole on the lap's marks
 //   t  the transport's four rate verbs: can_baud() and min_hz_for() at
 //      the divisor's two ends, set_baud() moving a live port (the start
-//      bit measured on the jumper before and after) and refusing an
-//      unreachable rate, release() giving the instance and its pads back
+//      bit measured on the jumper before and after, a run through the
+//      interrupt transmitter timed against the wire at each rate) and
+//      refusing an unreachable rate, release() giving the instance and
+//      its pads back
 //   u  AN OVERRUN AT A BURST'S TAIL under the receive engine: a fill on
 //      channel 1 at the ring's own level starving the ring under a banged
 //      burst's last three frames, the vector held off until the channel
@@ -258,6 +273,106 @@ bool resource_up(const UartFormat& f, uint32_t baud) {
 /// Wait for the transmitter to be idle: TXE and TC both up.
 bool tx_idle(uint32_t timeout_us = 200'000) {
     return wait_flag(usart_txe, timeout_us) && wait_flag(usart_tc, timeout_us);
+}
+
+// ---- the rate on the wire ----------------------------------------------------
+//
+// A START BIT IS BRR CYCLES TO THE CYCLE (letter c), and that is the
+// divisor, not the rate: a divisor computed wrong would measure itself
+// exactly and pass. So every letter that sets a rate also times A RUN of
+// frames - from the first store into DATAR (or into the transport) to TC,
+// on the ticker's cycle count - against the run's wire time AT THE RATE
+// ASKED, HCLK over the baud the letter named, and reads it in thousandths.
+// The window is -1 % to +3 %: BRR is HCLK over the baud rounded to the
+// cycle, which costs at most half a cycle a sixteenth of a bit - 1.6
+// thousandths at 460800 and 921600 (104 and 52 for 104.2 and 52.1), 0.8
+// at 115200 (417 for 416.7), nothing at the other rates of letter c -
+// and the run's fixed cost, a store and a poll, stays under a thousandth.
+
+/// Frames enough for a hundredth of a second of wire, sixteen at least
+/// and 1024 at most (3.4 ms at 3 Mbaud, 160 cycles a frame).
+uint32_t run_frames(uint32_t baud) {
+    const uint32_t n = baud / 100u;
+    return n < 16u ? 16u : (n > 1024u ? 1024u : n);
+}
+
+/// 1000 x num / den, exact in 32 bits for a den under 429 M: three
+/// decimal digits of long division. The suite does no 64-bit division -
+/// libgcc's costs a kilobyte this image has not got to spare.
+uint32_t permille_ratio(uint32_t num, uint32_t den) {
+    if (den == 0u) {
+        return 0u;
+    }
+    uint32_t q = num / den;
+    uint32_t r = num % den;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        r *= 10u;
+        q = q * 10u + r / den;
+        r %= den;
+    }
+    return q;
+}
+
+/// The wire time of `n` frames of `halves` half bits at `baud`, in HCLK
+/// cycles: the half bit taken in 32nds of a cycle (HCLK x 16 / baud,
+/// 768 M over the baud) so the product stays in 32 bits for a run of up
+/// to two seconds; the truncation is under a thousandth of a cycle a
+/// half bit.
+uint32_t wire_cycles(uint32_t n, uint32_t halves, uint32_t baud) {
+    const uint32_t half_x32 = SysClock::hz * 16u / baud;
+    return (n * halves * half_x32) >> 5;
+}
+
+/// `took` cycles against `n` frames of `halves` half bits at `baud`.
+uint32_t permille_of(uint32_t took, uint32_t n, uint32_t halves, uint32_t baud) {
+    return permille_ratio(took, wire_cycles(n, halves, baud));
+}
+
+/// What the divisor in force gives against the rate asked, in thousandths:
+/// the reading a correct generator must show (BRR x baud / HCLK; the rates
+/// asked here are whole hundreds).
+uint32_t divisor_permille(uint32_t baud) {
+    return permille_ratio(U2::brr() * (baud / 100u), SysClock::pclk_hz / 100u);
+}
+
+bool on_the_wire(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
+/// The bare resource: `n` words polled into DATAR on TXE - the data
+/// register one frame ahead of the shifter, so the line never idles - and
+/// TC waited; the frame `halves` half bits long.
+uint32_t resource_permille(uint32_t baud, uint32_t halves, uint32_t n) {
+    U2::clear_flags(usart_tc);
+    const uint32_t budget = 4u * wire_cycles(n, halves, baud);
+    const uint32_t t0 = cycles_now();
+    for (uint32_t i = 0; i < n; ++i) {
+        while (!U2::tx_empty() && cycles_now() - t0 < budget) {
+        }
+        U2::write_word(static_cast<uint16_t>(0x55u + i));
+    }
+    while (!U2::tx_complete() && cycles_now() - t0 < budget) {
+    }
+    return permille_of(cycles_now() - t0, n, halves, baud);
+}
+
+/// The same through a transport: `n` 8N1 frames handed to write_bulk()
+/// as fast as it takes them, until tx_idle() - the wire's (letter r).
+template <typename T>
+uint32_t transport_permille(uint32_t baud, uint32_t n) {
+    static uint8_t frames[64];
+    for (uint32_t i = 0; i < sizeof(frames); ++i) {
+        frames[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    const uint32_t budget = 4u * wire_cycles(n, 20u, baud);
+    const uint32_t t0 = cycles_now();
+    uint32_t q = 0;
+    while (q < n && cycles_now() - t0 < budget) {
+        const uint32_t at = q % sizeof(frames);
+        const uint32_t len = sizeof(frames) - at < n - q ? sizeof(frames) - at : n - q;
+        q += T::write_bulk(std::span<const uint8_t>(frames + at, len));
+    }
+    while (!T::tx_idle() && cycles_now() - t0 < budget) {
+    }
+    return permille_of(cycles_now() - t0, n, 20u, baud);
 }
 
 // ---- the bit-banged line ----------------------------------------------------
@@ -585,11 +700,30 @@ void tb_formats() {
                       exact == 10u);
     }
     // The receiver, from the banged line at 9600: eight words per
-    // format, the parity computed the format's way.
+    // format, the parity computed the format's way. Before it, the
+    // format's run on the wire: 96 frames at 9600 against their bits -
+    // the start, the word (the parity bit inside it, 14.8.4) and the
+    // stop length - at the rate asked.
     uint8_t exact = 0;
+    uint8_t timed = 0;
     for (const Fmt& fmt : formats) {
         all_off();
         (void)resource_up(fmt.f, 9600);
+        const uint32_t word = static_cast<uint32_t>(fmt.f.bits == UartBits::seven ? 7u
+                                                    : fmt.f.bits == UartBits::eight ? 8u
+                                                                                    : 9u) +
+                              (fmt.f.parity != UartParity::none ? 1u : 0u);
+        const uint32_t stop_halves = fmt.f.stop == UartStop::half           ? 1u
+                                     : fmt.f.stop == UartStop::one          ? 2u
+                                     : fmt.f.stop == UartStop::one_and_half ? 3u
+                                                                            : 4u;
+        const uint32_t halves = 2u * (1u + word) + stop_halves;
+        const uint32_t pm = resource_permille(9600, halves, run_frames(9600));
+        print(serial, "  ", fmt.name, " on the wire: 96 frames of ", halves / 2u, halves % 2u != 0u ? ".5" : "",
+              " bits in ", pm, " thousandths of their time at 9600", on_the_wire(pm) ? "" : "  OFF", crlf);
+        if (on_the_wire(pm)) {
+            ++timed;
+        }
         const uint16_t mask = uart_data_mask(fmt.f);
         const uint16_t values[] = {0x000, 0x0FF, 0x055, 0x0AA, 0x1FF, 0x101, 0x07F, 0x080};
         uint8_t good = 0;
@@ -611,6 +745,9 @@ void tb_formats() {
     bench.verdict("the receiver takes every format from the banged line: 7, 8 and 9 data bits, both parities, the four "
                   "stop lengths",
                   exact == 10u);
+    bench.verdict("and every format's run takes its own bits at the rate asked: 96 frames at 9600 within -1 % to +3 % "
+                  "of their wire time, the half and the one-and-a-half stop included",
+                  timed == 10u);
     all_off();
 
     // The single wire as a bus: the transport with the half-duplex
@@ -645,10 +782,16 @@ void tb_formats() {
         settle_ms(3);
         uint8_t echo = 0;
         const bool echoed = WireUart::read_byte(echo);
+        // Its rate on the wire: the single wire's transport set to 9600,
+        // 96 frames through it.
+        const uint32_t pm = transport_permille<WireUart>(9600, run_frames(9600));
         print(serial, "  the single-wire transport: a frame driven on the wire ", heard ? "heard" : "NOT heard", " (",
-              hex(b), "); its own frame ", echoed ? "ECHOED" : "not echoed", crlf);
+              hex(b), "); its own frame ", echoed ? "ECHOED" : "not echoed", "; 96 frames out in ", pm,
+              " thousandths of their wire time at 9600", crlf);
         bench.verdict("the half-duplex option hears a frame driven onto its wire and not its own - a bus, not a loop",
                       up && heard && b == 0xC3u && !echoed);
+        bench.verdict("and drives its wire at the rate asked: 96 frames at 9600 within -1 % to +3 % of their wire time",
+                      on_the_wire(pm));
     }
     all_off();
 }
@@ -663,14 +806,24 @@ void tc_baud() {
     // jumper IS the divisor, in cycles (BRR counts sixteenths of a bit
     // in peripheral clocks, and the bit is sixteen of them).
     const uint32_t rates[] = {2400, 9600, 76800, 115200, 460800, 921600, 1'500'000, 3'000'000};
+    // And a run of frames at each rate against its wire time at the rate
+    // ASKED - the start bit is the divisor, which a wrong one would match.
     if (need_jumper()) {
         uint8_t exact = 0;
+        uint8_t timed = 0;
         for (const uint32_t baud : rates) {
             all_off();
             const bool ok_up = resource_up({}, baud);
             const uint32_t brr = usart_divisor(SysClock::pclk_hz, baud);
             const uint32_t actual = U2::actual_baud(SysClock::pclk_hz);
             ruler_arm(true);
+            // TC stands from TE's idle frame: a DATAR write alone does not
+            // clear it (14.8.1: a STATR read then a DATAR write, or a zero
+            // written), so it is cleared here and tx_idle() waits for this
+            // frame's end - measured: left standing, the run behind it
+            // queued behind the rest of this frame, 37 thousandths over at
+            // 2400.
+            U2::clear_flags(usart_tc);
             U2::write_data(0xFF);
             const auto bit = ruler_read(50'000);
             (void)tx_idle();
@@ -678,12 +831,23 @@ void tc_baud() {
             if (ok) {
                 ++exact;
             }
+            const uint32_t n = run_frames(baud);
+            const uint32_t pm = resource_permille(baud, 20u, n);
+            const uint32_t own = divisor_permille(baud);
+            if (ok_up && on_the_wire(pm)) {
+                ++timed;
+            }
             print(serial, "  ", baud, " baud: BRR ", brr, " (", brr / 16u, " and ", brr % 16u, "/16), actual ", actual,
-                  ", the start bit ", bit ? *bit : 0u, " cycles", ok ? "" : "  OFF", crlf);
+                  ", the start bit ", bit ? *bit : 0u, " cycles", ok ? "" : "  OFF", "; ", n, " frames in ", pm,
+                  " thousandths of their wire time (the divisor's own ", own, ")", on_the_wire(pm) ? "" : "  OFF",
+                  crlf);
         }
         bench.verdict("the start bit measures exactly BRR cycles at eight rates from 2400 to 3 Mbaud - the fractional "
                       "divisor included (76800 = 39 and 1/16)",
                       exact == 8u);
+        bench.verdict("and the line runs at the rate ASKED: at each of the eight rates a run of frames takes its wire "
+                      "time within -1 % to +3 % (BRR's rounding 1.6 thousandths at most)",
+                      timed == 8u);
     }
     // The receiver at 9600 from the banged line: 64 words exact.
     all_off();
@@ -1073,23 +1237,35 @@ void ti_dma() {
           DmaUart::dma_faults(), crlf);
     bench.verdict("USART2's receive engine on channel 7 delivers sixteen banged frames byte-exact into its ring",
                   up && got == 16u && good == 16u && DmaUart::dma_faults() == 0u);
-    // The transmit engine: 256 bytes queued at once, the run timed -
-    // 2560 bits at 9600 is 266.7 ms - and the ring empty at the end.
-    const uint32_t t0 = Ticker::millis();
+    // The transmit engine: 256 bytes queued at once, the run timed on the
+    // cycle count - 2560 bits at 9600 is 266.7 ms - against the wire at the
+    // rate asked, and the ring empty at the end.
+    const uint32_t t0 = cycles_now();
     uint32_t queued = 0;
     for (uint16_t i = 0; i < 256u; ++i) {
         if (DmaUart::write_byte(static_cast<uint8_t>(i))) {
             ++queued;
         }
     }
-    while (!DmaUart::tx_idle() && Ticker::millis() - t0 < 1000u) {
+    while (!DmaUart::tx_idle() && cycles_now() - t0 < SysClock::hz) {
     }
-    (void)wait_flag(usart_tc, 20'000);
-    const uint32_t took = Ticker::millis() - t0;
-    print(serial, "  the transmit engine on channel 6: ", queued, " bytes queued, the run took ", took,
-          " ms (267 for 2560 bits), faults ", DmaUart::dma_faults(), crlf);
-    bench.verdict("USART2's transmit engine on channel 6 moves a 256-byte ring in one run at the wire's pace",
-                  queued == 256u && took >= 260u && took <= 285u && DmaUart::dma_faults() == 0u);
+    const uint32_t pm = permille_of(cycles_now() - t0, 256u, 20u, 9600u);
+    print(serial, "  the transmit engine on channel 6: ", queued, " bytes queued, the run in ", pm,
+          " thousandths of its wire time at 9600, faults ", DmaUart::dma_faults(), crlf);
+    bench.verdict("USART2's transmit engine on channel 6 moves a 256-byte ring in one run at the wire's pace: "
+                  "2560 bits at 9600 within -1 % to +3 %",
+                  queued == 256u && on_the_wire(pm) && DmaUart::dma_faults() == 0u);
+    // And at the rates the engine is for: the port moved live, 1024 frames
+    // through the 256-byte ring - four laps, a block restarted from the
+    // channel's vector at each - at 115200 and at 3 Mbaud.
+    const bool moved = DmaUart::set_baud(SysClock::pclk_hz, 115200);
+    const uint32_t pm_115 = transport_permille<DmaUart>(115200, 1024);
+    const bool moved_3m = DmaUart::set_baud(SysClock::pclk_hz, 3'000'000);
+    const uint32_t pm_3m = transport_permille<DmaUart>(3'000'000, 1024);
+    print(serial, "  1024 frames through the engine: ", pm_115, " thousandths of their wire time at 115200, ", pm_3m,
+          " at 3 Mbaud; faults ", DmaUart::dma_faults(), crlf);
+    bench.verdict("and at 115200 and 3 Mbaud, 1024 frames through the ring within -1 % to +3 % of their wire time",
+                  moved && moved_3m && on_the_wire(pm_115) && on_the_wire(pm_3m) && DmaUart::dma_faults() == 0u);
     Pfic::disable(dma_channel_irq(6));
     Pfic::disable(dma_channel_irq(7));
     all_off();
@@ -1498,6 +1674,8 @@ void tt_rate_verbs() {
     const auto before = ruler_read(50'000);
     while (!PlainUart::tx_idle()) {
     }
+    // The run at the rate init() set, through the interrupt transmitter.
+    const uint32_t pm_before = transport_permille<PlainUart>(115200, run_frames(115200));
     const bool moved = PlainUart::set_baud(hz, 9600);
     const bool refused = !PlainUart::set_baud(hz, 4'000'000);
     ruler_arm(true);
@@ -1505,11 +1683,17 @@ void tt_rate_verbs() {
     const auto after = ruler_read(50'000);
     while (!PlainUart::tx_idle()) {
     }
+    const uint32_t pm_after = transport_permille<PlainUart>(9600, run_frames(9600));
     print(serial, "  the start bit at 115200: ", before ? *before : 0u, " cycles; after set_baud(9600): ",
           after ? *after : 0u, " cycles (BRR ", usart_divisor(hz, 9600), ")", crlf);
+    print(serial, "  the runs through the interrupt transmitter: 1024 frames in ", pm_before,
+          " thousandths of their wire time at 115200, then 96 in ", pm_after, " at 9600", crlf);
     bench.verdict("set_baud() moves a live port: the start bit is the new divisor",
                   moved && before && *before == usart_divisor(hz, 115200) && after &&
                       *after == usart_divisor(hz, 9600));
+    bench.verdict("and the line runs at each rate asked: a run at 115200 before the move and at 9600 after it, "
+                  "each within -1 % to +3 % of its wire time",
+                  on_the_wire(pm_before) && on_the_wire(pm_after));
     bench.verdict("and refuses an unreachable rate, the divisor left as it was",
                   refused && U2::brr() == usart_divisor(hz, 9600));
     PlainUart::release();

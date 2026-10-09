@@ -59,6 +59,18 @@
 // sleep. THE DOMAIN IS NEVER RESET: RTCSEL is left where it is and the
 // backup registers other suites wrote are not touched.
 //
+// THE RATE ON THE WIRE IS TIMED, because a loop cannot tell it: the
+// single wire shares one divisor between the transmitter and the receiver
+// it loops into, so a wrong divisor is a slower or a faster loop and
+// every byte still comes back. Every letter that loops or sets a rate on
+// a transmitter therefore times a run of its frames on TIM2 against
+// their time AT THE RATE ASKED, prints the reading in thousandths and
+// judges it -1 % to +3 % (res_wire_permille, port_wire_permille). The
+// letters whose rate is a RECEIVER's - f, g, i and the receive halves of
+// h, k and l - are fed by the bit-banged transmitter, which TIM2 paces at
+// the rate asked: a receiver that decodes it is within its own tolerance
+// of that rate, and no wire of its own is there to time.
+//
 // What is exercised, letter by letter (every letter runs on every part
 // this suite builds for; a leg whose instance, feature or pad the part
 // has not got prints the fact and claims nothing):
@@ -69,29 +81,38 @@
 //      split), is there a kernel-clock multiplexer (ES0548 2.11.2's
 //      subject)
 //   b  THE INSTRUMENT: the single-wire loop proven, and every frame
-//      format of 33.5.3 byte-exact on it
+//      format of 33.5.3 byte-exact on it - and each format's frame
+//      length timed on the wire at 115200
 //   c  the baud generator: both oversamplings, the twelve prescaler
-//      codes, and where the loop's own open-drain rise time gives out
+//      codes, and where the loop's own open-drain rise time gives out -
+//      every rung timed against the rate asked, OVER8's ceiling of
+//      8 Mbaud included
 //   d  the kernel clocks: the CONSOLE moved to HSI16 and to SYSCLK while
-//      it is talking, and USART1 run off the 32768 Hz crystal
+//      it is talking, its own line timed on each, and USART1 run off the
+//      32768 Hz crystal, timed
 //   e  the FIFOs: thresholds, RXFF/TXFE, the per-entry error flags,
-//      interrupts per kilobyte with and without, ORE and OVRDIS
+//      interrupts per kilobyte with and without, ORE and OVRDIS; the line
+//      under the FIFO and both transports' blocks timed on the wire
 //   f  the bit-banged transmitter: parity, framing, noise, the tolerance
 //      of tables 188/189, and ES0548 2.11.1 staged with its control
 //   g  auto-baud, all four modes, at rates the receiver was not told
-//   h  LIN: the break sent and timed, the break detected at both lengths
+//   h  LIN: the break sent and timed, the frames timed, the break
+//      detected at both lengths
 //   i  mute mode, the receiver time-out and the character match
-//   j  smartcard: 8E1.5 on one wire, the guard time, the CK ladder, the
-//      NACK staged from a pull, the retries counted
-//   k  IrDA: the 3/16 pulse and the low-power pulse measured, a
-//      bit-banged RZI frame decoded, the glitch filter as a threshold
-//   l  the pads' extras: SWAP, the three inversions, MSB first, the
-//      break request, the driver enable timed, RTS and CTS
-//   m  the synchronous master's CK, counted with no CPU
+//   j  smartcard: 8E1.5 on one wire, the character's twelve baud periods
+//      timed, the guard time, the CK ladder, the NACK staged from a pull,
+//      the retries counted
+//   k  IrDA: the 3/16 pulse and the low-power pulse measured, the SIR
+//      frames timed in both modes, a bit-banged RZI frame decoded, the
+//      glitch filter as a threshold
+//   l  the pads' extras: SWAP (its wire timed), the three inversions, MSB
+//      first, the break request, the driver enable timed, RTS and CTS
+//   m  the synchronous master's CK, counted with no CPU, and its frames
+//      timed
 //   n  the LPUARTs: both instances, both baud generators, the FIFOs, the
-//      prescalers and the shared vectors
+//      prescalers and the shared vectors - every rate timed on the wire
 //   o  IRTIM: a 38 kHz carrier under a 1 kHz envelope on one pad, both
-//      polarities, and a USART as the envelope
+//      polarities, and a USART as the envelope, its frames timed
 //   p  THE RECEIVE TRANSPORT: the paced receiver (RXFT, the receiver
 //      time-out for the tail) and the receive engine's edges (the line's
 //      IDLE, the ring's half and full marks) - each burst told by a
@@ -100,10 +121,11 @@
 //      slots through both receivers: FE = K; the interrupt receiver,
 //      read between the breaks, N - K delivered and a skip a break, read
 //      only at the end nothing the ring held; the engine N - K, no byte
-//      taken from under the channel
+//      taken from under the channel; both transports' lines timed
 //   q  tx_idle() ON THE PAD: EXTI line 9 times PA9's start bits, and the
 //      wire's idle is the last stop bit's end, on the interrupt
-//      transmitter and on the transmit engine
+//      transmitter and on the transmit engine - and the start bits seven
+//      frames apart at the rate asked
 // Outside z, because they need a peer or a real Stop:
 //   y  streaming through the console across kernel clocks (uart_stress)
 //   w  WAKE FROM STOP, and ES0548 2.2.4 staged (uart_stress)
@@ -580,6 +602,148 @@ uint8_t data_bits(const UartFormat& f) {
 }
 uint16_t data_mask(const UartFormat& f) {
     return static_cast<uint16_t>((1u << data_bits(f)) - 1u);
+}
+
+/// A frame's bit periods: the start bit, the word (33.5.5: the parity bit
+/// is one of its M bits), the stop bits.
+uint32_t frame_bits(const UartFormat& f) {
+    return 1u + static_cast<uint32_t>(f.bits) + f.stop_bits;
+}
+
+// ---------------------------------------------------------------------------
+// THE RATE ON THE WIRE, which a loop cannot tell
+// ---------------------------------------------------------------------------
+//
+// A single wire shares ONE divisor between the transmitter and the
+// receiver it loops into, so a wrong divisor is a slower or a faster loop
+// and nothing else: every byte still comes back. So every letter that
+// loops or sets a rate also TIMES A RUN of frames against the wire's
+// time AT THE RATE ASKED - never at the rate the divisor produced, which
+// is what a wrong one would hide - on TIM2 (one count a cycle at 64 MHz,
+// 15.6 ns), from the first store into TDR to TC, the last stop bit's end
+// (33.8.10: TC rises when "the transmission of a frame containing data is
+// complete", and a write to TDR clears it). The run is a hundredth of a
+// second of frames, sixteen at least and 1024 at most, so the ruler and
+// the start-up of the first frame (33.5.17: a full shift register "starts
+// shifting on the next baud clock edge") stay within a few thousandths;
+// the answer is in thousandths of the wire's time. TIM2 and every kernel
+// clock but the LSE derive from HSI16 on these boards (no HSE fitted), so
+// the oscillator's own error cancels and what is read is the divisor's;
+// against the LSE crystal the reading carries HSI16's trim as well.
+
+/// How many frames time a rate.
+uint32_t wire_frames(uint32_t baud) {
+    const uint32_t f = baud / 100u;
+    return f < 16u ? 16u : f > 1024u ? 1024u : f;
+}
+
+/// The verdict on a reading: never faster than the rate asked by more
+/// than the divisor's rounding and the ruler's tick, never slower by more
+/// than three per cent.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
+/// The lowest and highest of a set of readings, and whether every one
+/// passed.
+struct WireSpan {
+    uint32_t low = 0xFFFFFFFFu;
+    uint32_t high = 0;
+    bool ok = true;
+    void add(uint32_t pm) {
+        low = pm < low ? pm : low;
+        high = pm > high ? pm : high;
+        ok = ok && wire_ok(pm);
+    }
+};
+
+/// `frames` frames of `bits` bit periods written back to back into the
+/// resource `R`'s TDR (TXE, which is TXFNF under FIFOEN), timed to TC
+/// against their time at `baud`; 0 when the line never drained. A run
+/// shorter than ten milliseconds runs with interrupts masked - at 8 Mbaud
+/// a frame is 80 cycles and a tick's handler would gap it - and a longer
+/// one has a frame or more of slack in TDR. What the loop brings back is
+/// thrown away after it and every flag cleared.
+template <typename R>
+uint32_t res_wire_permille(uint32_t baud, uint32_t bits = 10u, uint32_t frames = 0u) {
+    if (frames == 0u) {
+        frames = wire_frames(baud);
+    }
+    const uint64_t wire = static_cast<uint64_t>(frames) * bits * SysClock::hz / baud;
+    const uint32_t budget = static_cast<uint32_t>(wire * 2u) + SysClock::hz / 50u;
+    const uint32_t bit = SysClock::hz / baud;
+    // The idle frame TE sends, and anything an earlier step left, off the
+    // wire first.
+    const uint32_t w0 = now();
+    while ((R::status() & UsartFlag::tc) == 0u && since(w0) < budget) {
+    }
+    spin_cycles(2u * bits * bit);
+    auto run = [&]() -> uint32_t {
+        uint32_t t0 = now();
+        for (uint32_t i = 0; i < frames; ++i) {
+            while ((R::status() & UsartFlag::txe) == 0u) {
+                if (since(t0) > budget) {
+                    return 0;
+                }
+            }
+            if (i == 0u) {
+                t0 = now();
+            }
+            R::write_data(static_cast<uint8_t>(i * 37u + 11u));
+        }
+        while ((R::status() & UsartFlag::tc) == 0u) {
+            if (since(t0) > budget) {
+                return 0;
+            }
+        }
+        return since(t0);
+    };
+    uint32_t took = 0;
+    if (wire < SysClock::hz / 100u) {
+        InterruptGuard guard;
+        took = run();
+    } else {
+        took = run();
+    }
+    spin_cycles(2u * bits * bit);
+    for (uint8_t i = 0; i < 16u && (R::status() & UsartFlag::rxne) != 0u; ++i) {
+        (void)R::read_word();
+    }
+    R::clear_flags(UsartClear::all);
+    return took == 0u ? 0u : static_cast<uint32_t>(1000ull * took / wire);
+}
+
+/// The same through a TRANSPORT: `frames` frames handed to write_bulk()
+/// and timed to tx_idle() - the wire's (letter q) - what the loop brings
+/// back read and thrown away meanwhile, the error counters cleared after.
+/// What is read is the divisor AND the transport's own gaps between
+/// frames, which is the transport's cost on the wire.
+template <typename Port>
+uint32_t port_wire_permille(uint32_t baud, uint32_t frames = 1024u) {
+    static uint8_t out[64];
+    for (uint32_t i = 0; i < sizeof out; ++i) {
+        out[i] = static_cast<uint8_t>(i * 37u + 11u);
+    }
+    uint8_t sink[32];
+    const uint64_t wire = static_cast<uint64_t>(frames) * 10u * SysClock::hz / baud;
+    const uint32_t budget = static_cast<uint32_t>(wire * 2u) + SysClock::hz / 50u;
+    uint32_t queued = 0;
+    const uint32_t t0 = now();
+    while (queued < frames && since(t0) < budget) {
+        const uint32_t want = frames - queued;
+        queued += Port::write_bulk(
+            {out, want < sizeof out ? want : static_cast<uint32_t>(sizeof out)});
+        while (Port::read_bulk(sink) != 0u) {
+        }
+    }
+    while (!Port::tx_idle() && since(t0) < budget) {
+        while (Port::read_bulk(sink) != 0u) {
+        }
+    }
+    const uint32_t took = since(t0);
+    spin_cycles(static_cast<uint32_t>(20ull * 10u * SysClock::hz / baud));
+    while (Port::read_bulk(sink) != 0u) {
+    }
+    Port::clear_errors();
+    return queued < frames ? 0u : static_cast<uint32_t>(1000ull * took / wire);
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,11 +1308,21 @@ void tb_loop() {
     uint8_t good = 0;
     uint8_t tried = 0;
     uint8_t errors = 0;
+    WireSpan formats_wire;
     for (const FormatCase& c : cases) {
         feed();
         const UartFormat f{.bits = c.bits, .parity = c.parity, .stop_bits = c.stops};
         if (!loop_up({.format = f, .baud = 115200})) {
             continue;
+        }
+        // The frame's LENGTH on the wire: 256 frames timed against their
+        // bit periods at 115200 - a stop bit or a parity bit the block did
+        // not send would show here and nowhere else.
+        const uint32_t pm = res_wire_permille<U1>(115200, frame_bits(f), 256u);
+        formats_wire.add(pm);
+        if (!wire_ok(pm)) {
+            print(serial, "  ", c.name, ": 256 frames in ", pm,
+                  " thousandths of their wire time", crlf);
         }
         const uint16_t mask = data_mask(f);
         bool ok = true;
@@ -1181,6 +1355,11 @@ void tb_loop() {
           crlf);
     bench.verdict("every word length, parity and stop-bit count of 33.5.3 is "
                   "byte-exact on the loop", good == tried && tried >= 13u);
+    print(serial, "  256 frames of each format in ", formats_wire.low, " to ",
+          formats_wire.high, " thousandths of their wire time at 115200", crlf);
+    bench.verdict("EVERY FORMAT TAKES ITS FRAME'S LENGTH ON THE WIRE: start, word and "
+                  "stops at the rate asked, -1 % to +3 % (the loop alone shares the "
+                  "divisor at both ends)", formats_wire.ok && tried >= 13u);
 
     // The break request, on the plain loop: 33.8.8's SBKRQ sends one
     // break character, which the receiver reads as a zero WITH a framing
@@ -1258,11 +1437,17 @@ void tc_baud() {
     (void)loop_up({.baud = 115200, .over8 = true});
     const uint32_t over8_good = loop_run(32);
     const uint16_t over8_brr = U1::brr();
+    const uint32_t over8_pm = res_wire_permille<U1>(115200);
     print(serial, "  OVER8 = 1 at 115200 on the loop: ", over8_good,
           " of 32 exact, BRR ", hex(over8_brr), " (USARTDIV ",
-          usart_actual_baud_over8(SysClock::pclk_hz, over8_brr), " baud)", crlf);
+          usart_actual_baud_over8(SysClock::pclk_hz, over8_brr), " baud); 1024 frames "
+          "in ", over8_pm, " thousandths of their wire time", crlf);
     bench.verdict("eight samples a bit carries the loop as well as sixteen",
                   over8_good == 32u);
+    bench.verdict("AND OVER8 RUNS AT THE RATE ASKED: 1024 frames in their wire time "
+                  "at 115200, -1 % to +3 % - OVER8's register lays USARTDIV out with "
+                  "bit 3 dropped (33.5.7), the loop alone would not see it halved",
+                  wire_ok(over8_pm));
 
     // The twelve prescaler codes, all at ONE line rate: 9600 is low
     // enough that even a 256-fold division leaves USARTDIV above 16
@@ -1275,26 +1460,35 @@ void tc_baud() {
     };
     uint8_t presc_ok = 0;
     uint8_t presc_tried = 0;
+    WireSpan presc_wire;
     for (UsartPrescaler p : codes) {
         feed();
         if (!loop_up({.baud = 9600, .prescaler = p})) {
             continue;
         }
         ++presc_tried;
-        if (loop_run(4) == 4u &&
-            static_cast<uint8_t>(U1::prescaler()) == static_cast<uint8_t>(p)) {
+        const bool exact = loop_run(4) == 4u &&
+                           static_cast<uint8_t>(U1::prescaler()) == static_cast<uint8_t>(p);
+        const uint32_t pm = res_wire_permille<U1>(9600);
+        presc_wire.add(pm);
+        if (exact && wire_ok(pm)) {
             ++presc_ok;
         } else {
             print(serial, "  PRESC code ", static_cast<uint32_t>(p),
-                  " (divide by ", usart_prescaler_divisor(p), ") FAILED", crlf);
+                  " (divide by ", usart_prescaler_divisor(p), ") FAILED: ", pm,
+                  " thousandths of the wire", crlf);
         }
     }
     print(serial, "  ", presc_ok, " of ", presc_tried,
           " prescaler codes carry 9600 baud on the loop, from divide-by-1 to "
-          "divide-by-256 - one line rate, twelve kernel rates", crlf);
+          "divide-by-256 - one line rate, twelve kernel rates; 96 frames each in ",
+          presc_wire.low, " to ", presc_wire.high, " thousandths of their wire time",
+          crlf);
     bench.verdict("all twelve of 33.8.14's implemented codes read back and "
-                  "deliver the rate the arithmetic promised",
-                  presc_ok == 12u && presc_tried == 12u);
+                  "deliver the rate the arithmetic promised - TIMED on the wire, "
+                  "-1 % to +3 % of 9600 each (BRR's rounding at /256, 26 for "
+                  "26.04, is 1.6 thousandths of it)",
+                  presc_ok == 12u && presc_tried == 12u && presc_wire.ok);
 
     // A Reserved code is refused, because the chapter's own note says
     // the silicon turns one into 1011 - a rate nobody asked for.
@@ -1310,21 +1504,33 @@ void tc_baud() {
     // pad's own 40 k pull-up, so a rising edge is an RC and not a
     // driver: this ladder measures the INSTRUMENT, not the USART, and
     // the register arithmetic above the break is checked separately.
+    // EVERY RUNG IS TIMED, the ones past the loop's ceiling included: the
+    // transmitter's frames end at TC whatever the pad's rise does to the
+    // receiver, so the generator is read where the loop cannot be.
     static const uint32_t ladder[] = {115200, 230400, 460800, 921600,
                                       1'000'000, 2'000'000, 4'000'000};
     uint32_t best = 0;
+    WireSpan ladder_wire;
     for (uint32_t baud : ladder) {
         feed();
         if (!loop_up({.baud = baud})) {
             print(serial, "  ", baud, " baud is unreachable at this clock", crlf);
+            ladder_wire.ok = false;
             continue;
         }
         const uint32_t good = loop_run(16);
-        print(serial, "  ", baud, " baud: ", good, " of 16 exact", crlf);
+        const uint32_t pm = res_wire_permille<U1>(baud);
+        ladder_wire.add(pm);
+        print(serial, "  ", baud, " baud: ", good, " of 16 exact; 1024 frames in ", pm,
+              " thousandths of their wire time", crlf);
         if (good == 16u) {
             best = baud;
         }
     }
+    bench.verdict("EVERY RUNG RUNS AT THE RATE ASKED, 115200 to 4 Mbaud: 1024 frames in "
+                  "their wire time, -1 % to +3 % (BRR's rounding, 69 for 69.4 at 921600, "
+                  "is the 6.4 thousandths the reading may run fast there)",
+                  ladder_wire.ok);
     print(serial, "  the open-drain loop is byte-exact to ", best,
           " baud; above it the rise time of the pad's own 40 k pull-up is "
           "what fails, not the generator", crlf);
@@ -1340,6 +1546,16 @@ void tc_baud() {
     (void)U1::oversampling(true);
     U1::set_brr(usart_brr_over8(SysClock::pclk_hz, 8'000'000).value());
     const uint16_t top8 = U1::brr();
+    // And OVER8's ceiling timed: 8 Mbaud, a frame every 80 cycles, through
+    // the FIFO so the store loop has eight frames of slack.
+    const bool top8_up = loop_up({.baud = 8'000'000, .over8 = true, .fifo = true});
+    const uint32_t top8_pm = top8_up ? res_wire_permille<U1>(8'000'000) : 0u;
+    print(serial, "  OVER8 at its ceiling, 8 Mbaud: 1024 frames in ", top8_pm,
+          " thousandths of their wire time", crlf);
+    bench.verdict("and OVER8's ceiling runs at the rate asked: 8 Mbaud, 1024 frames in "
+                  "their wire time, -1 % to +3 %", top8_up && wire_ok(top8_pm));
+    U1::enable(false);
+    U1::reset();
     print(serial, "  the generator's floor: BRR ", top16, " for 4 Mbaud at "
           "OVER8 = 0 and ", top8, " for 8 Mbaud at OVER8 = 1 - USARTDIV 16 "
           "either way, and 5 Mbaud / 9 Mbaud are REFUSED by the arithmetic",
@@ -1379,6 +1595,27 @@ bool console_kernel(UsartClock c, uint32_t ker_hz) {
     return true;
 }
 
+/// THE CONSOLE'S OWN WIRE, TIMED: a line of 64 characters written to the
+/// console and timed on TIM2 from the write to tx_idle(), against 64
+/// frames at 115200 - the rate asked - in thousandths. The line is itself
+/// part of the report.
+[[maybe_unused]] uint32_t console_wire_permille() {
+    static constexpr char line[] = "  (64 frames on the console's own wire, timed to its stop bit)\r\n";
+    static_assert(sizeof line - 1u == 64u);
+    console_drain();
+    const uint32_t t0 = now();
+    uint32_t queued = 0;
+    while (queued < 64u && since(t0) < SysClock::hz / 20u) {
+        queued += Serial::write_bulk(
+            {reinterpret_cast<const uint8_t*>(line) + queued, 64u - queued});
+    }
+    while (!Serial::tx_idle() && since(t0) < SysClock::hz / 20u) {
+    }
+    const uint32_t took = since(t0);
+    const uint64_t wire = 64ull * 10u * SysClock::hz / 115200u;
+    return static_cast<uint32_t>(1000ull * took / wire);
+}
+
 /// THE CONSOLE MOVED UNDER ITS OWN FEET - on a console that HAS a
 /// kernel-clock multiplexer. Where the part makes USART2 a BASIC
 /// instance there is no CCIPR field for it at all: it runs on PCLK, full
@@ -1392,27 +1629,36 @@ void td_console_kernel() {
 
         const bool to_hsi = console_kernel(UsartClock::hsi16, 16'000'000u);
         spin_us(2000);
+        const uint32_t pm_hsi = console_wire_permille();
         print(serial, "  the console is now on HSI16: BRR ", Usart<2>::brr(),
               " where PCLK wanted ", brr_pclk, ", and this line came out at "
-              "115200 all the same", crlf);
+              "115200 all the same - the one above in ", pm_hsi,
+              " thousandths of its wire time", crlf);
         const uint8_t err_hsi = static_cast<uint8_t>(
             Serial::frame_errors() + Serial::parity_errors() +
             Serial::noise_errors() + Serial::hw_overruns());
 
         const bool to_sysclk = console_kernel(UsartClock::sysclk, SysClock::hz);
         spin_us(2000);
+        const uint32_t pm_sys = console_wire_permille();
         print(serial, "  and now on SYSCLK: BRR ", Usart<2>::brr(),
-              " - the same 64 MHz PCLK divides, by a different route", crlf);
+              " - the same 64 MHz PCLK divides, by a different route; the line "
+              "above in ", pm_sys, " thousandths", crlf);
         const uint8_t err_sys = static_cast<uint8_t>(
             Serial::frame_errors() + Serial::parity_errors() +
             Serial::noise_errors() + Serial::hw_overruns());
 
         const bool back = console_kernel(UsartClock::pclk, SysClock::pclk_hz);
         spin_us(2000);
-        print(serial, "  and back on PCLK: BRR ", Usart<2>::brr(), crlf);
+        const uint32_t pm_pclk = console_wire_permille();
+        print(serial, "  and back on PCLK: BRR ", Usart<2>::brr(), "; the line above in ",
+              pm_pclk, " thousandths", crlf);
         bench.verdict("a console's kernel clock moves under it - HSI16, SYSCLK, "
                       "PCLK - and every one of these lines is its own witness",
                       to_hsi && to_sysclk && back && Usart<2>::brr() == brr_pclk);
+        bench.verdict("AND ON EACH KERNEL THE CONSOLE'S LINE RUNS AT THE RATE ASKED: 64 "
+                      "frames in their wire time at 115200, -1 % to +3 %",
+                      wire_ok(pm_hsi) && wire_ok(pm_sys) && wire_ok(pm_pclk));
         bench.verdict("with not one framing, parity, noise or overrun error "
                       "counted on the way",
                       err_hsi == 0u && err_sys == 0u &&
@@ -1444,8 +1690,10 @@ void td_lse_legs() {
         (void)loop_up({.baud = 2048, .kernel = UsartClock::lse});
         const uint16_t lse_brr = U1::brr();
         const uint32_t lse_good = loop_run(4);
+        const uint32_t lse_pm = res_wire_permille<U1>(2048);
         print(serial, "  USART1 on the LSE at 2048 baud: BRR ", lse_brr, ", ",
-              lse_good, " of 4 bytes exact on the loop", crlf);
+              lse_good, " of 4 bytes exact on the loop; 20 frames in ", lse_pm,
+              " thousandths of their wire time", crlf);
         bench.verdict("the 32768 Hz crystal drives a USART at USARTDIV 16 - "
                       "2048 baud, and it is byte-exact",
                       lse_brr == 16u && lse_good == 4u);
@@ -1453,11 +1701,16 @@ void td_lse_legs() {
         (void)loop_up({.baud = 4096, .over8 = true, .kernel = UsartClock::lse});
         const uint16_t lse8_brr = U1::brr();
         const uint32_t lse8_good = loop_run(4);
+        const uint32_t lse8_pm = res_wire_permille<U1>(4096);
         print(serial, "  and at 4096 baud with OVER8: BRR ", hex(lse8_brr), ", ",
-              lse8_good, " of 4 exact - eight samples a bit halves the floor",
-              crlf);
+              lse8_good, " of 4 exact - eight samples a bit halves the floor; 40 "
+              "frames in ", lse8_pm, " thousandths", crlf);
         bench.verdict("OVER8 doubles what a 32768 Hz kernel clock can carry",
                       lse8_good == 4u);
+        bench.verdict("AND THE CRYSTAL'S RATES ARE THE RATES ASKED: 2048 and 4096 baud "
+                      "timed against TIM2, -1 % to +3 % (the ruler runs on HSI16, so "
+                      "its trim is in the reading)",
+                      wire_ok(lse_pm) && wire_ok(lse8_pm));
     } else {
         print(serial,
               "  SKIPPED, no verdict claimed: a USART clocked by the 32768 Hz "
@@ -1526,6 +1779,16 @@ void te_fifo() {
     (void)loop_up({.baud = 115200, .fifo = true});
     bench.verdict("FIFOEN sticks on a FULL instance and the FIFO view is in "
                   "force", U1::fifo());
+    // The line under the FIFO, timed: 1024 frames stored on TXFNF.
+    const uint32_t fifo_pm = res_wire_permille<U1>(115200);
+    print(serial, "  1024 frames through the transmit FIFO in ", fifo_pm,
+          " thousandths of their wire time at 115200", crlf);
+    bench.verdict("and the line under the FIFO runs at the rate asked: 1024 frames in "
+                  "their wire time, -1 % to +3 %", wire_ok(fifo_pm));
+    // A fresh loop for the depth counts, and TE's idle frame off the wire
+    // first: it holds the shift register, and the count below wants it free.
+    (void)loop_up({.baud = 115200, .fifo = true});
+    spin_us(300);
 
     // Fill the transmit FIFO and watch TXFE fall and rise. 33.5.4: with
     // FIFOEN the TXE bit means TXFNF, "the FIFO is not full".
@@ -1686,10 +1949,12 @@ void te_fifo() {
         block[i] = static_cast<uint8_t>(i);
     }
     console_drain();
+    const uint32_t plain_t0 = now();
     (void)LoopUart::write_bulk(block);
     uint32_t spins = 0;
     while (!LoopUart::tx_idle() && spins++ < 4'000'000u) {
     }
+    const uint32_t plain_took = since(plain_t0);
     spin_us(3000);
     const uint32_t plain_irqs = loop_irqs;
     uint8_t sink[300];
@@ -1709,10 +1974,12 @@ void te_fifo() {
     const bool fifo_up = LoopFifoUart::init(clock, 115200);
     TxPin::function(u1_tx.function, {.pull = PinPull::up, .open_drain = true});
     console_drain();
+    const uint32_t fifo_t0 = now();
     (void)LoopFifoUart::write_bulk(block);
     spins = 0;
     while (!LoopFifoUart::tx_idle() && spins++ < 4'000'000u) {
     }
+    const uint32_t fifo_took = since(fifo_t0);
     spin_us(3000);
     const uint32_t fifo_irqs = loop_irqs;
     const uint32_t fifo_got = LoopFifoUart::read_bulk(sink);
@@ -1725,12 +1992,21 @@ void te_fifo() {
     LoopFifoUart::release();
     loop_mode = 0;
 
+    // The block's own time on the wire, write_bulk() to tx_idle(): the
+    // divisor and whatever gap the transport leaves between frames.
+    const uint64_t block_wire = 256ull * 10u * SysClock::hz / 115200u;
+    const uint32_t plain_pm = static_cast<uint32_t>(1000ull * plain_took / block_wire);
+    const uint32_t fifo_task_pm = static_cast<uint32_t>(1000ull * fifo_took / block_wire);
     print(serial, "  256 bytes round the loop through the TASK: ", plain_irqs,
           " interrupts without the FIFO (", plain_got, " bytes back), ",
-          fifo_irqs, " with it (", fifo_got, " back)", crlf);
+          fifo_irqs, " with it (", fifo_got, " back); the block on the wire in ",
+          plain_pm, " and ", fifo_task_pm, " thousandths of its time at 115200", crlf);
     bench.verdict("the task carries the block byte-exact both ways, with the "
                   "SAME public verbs and one option between them",
                   plain_up && fifo_up && plain_exact && fifo_exact);
+    bench.verdict("and both transports keep the wire busy: the 256-byte block in its "
+                  "wire time at 115200, -1 % to +3 %, no gap between frames worth a "
+                  "per cent", wire_ok(plain_pm) && wire_ok(fifo_task_pm));
     print(serial, "  ON A SINGLE WIRE THE TWO SIDES OF A BYTE ARE ONE EVENT, so what "
           "the FIFO buys shows only where BOTH sides ride a level: the transmitter "
           "refills eight places when the FIFO runs empty and the receiver drains "
@@ -2118,6 +2394,13 @@ void th_lin() {
     bench.verdict("33.5.13's LIN break is THIRTEEN zero bits, measured on the "
                   "pad the transmitter drives",
                   lin_ok && within(low_bits_x10, 125u, 137u));
+    // And the frames after it at the rate asked: 24 frames, a hundredth of
+    // a second of them, timed to TC on the same push-pull pad.
+    const uint32_t lin_pm = res_wire_permille<U1>(lin_baud);
+    print(serial, "  24 frames in LIN mode in ", lin_pm,
+          " thousandths of their wire time at 2400", crlf);
+    bench.verdict("and LIN mode's frames run at the rate asked: 24 frames in their wire "
+                  "time at 2400, -1 % to +3 %", wire_ok(lin_pm));
 
     // The break DETECTED, from the bit-banged line: ten bits with
     // LBDL = 0, eleven with LBDL = 1, and one bit short refused.
@@ -2603,6 +2886,17 @@ void tj_smartcard() {
     bench.verdict("the smartcard's single wire loops back like HDSEL's, which "
                   "is how a bench with no card sees its own frames",
                   echoed.has_value() && (*echoed & 0xFFu) == 0x3Bu);
+    // THE CARD'S CHARACTER ON THE WIRE, at the rate asked: sixteen frames
+    // back to back with GT = 0, each TWELVE baud periods - 33.5.17 calls
+    // twelve "the duration of one character" (start, eight data, parity,
+    // the 1.5 stop bits and the half baud clock smartcard mode delays every
+    // shift by) - timed to TC on a kernel prescaled to 250 kHz.
+    const uint32_t card_pm = res_wire_permille<U1>(card_baud, 12u);
+    print(serial, "  16 card characters in ", card_pm,
+          " thousandths of twelve baud periods each at 1200", crlf);
+    bench.verdict("and the card's wire runs at the rate asked through the /256 "
+                  "prescaler: 16 characters of twelve baud periods in their time, "
+                  "-1 % to +3 %", wire_ok(card_pm));
 
     // THE GUARD TIME delays TC and nothing else - 33.5.17's own sentence,
     // and TCBGT is the flag that does not wait for it.
@@ -2843,6 +3137,11 @@ void tk_irda() {
     bench.verdict("33.5.18's 3/16 pulse is three sixteenths of the bit "
                   "period, measured on the pad", irda_ok &&
                                                      within(sixteenths_x10, 27u, 33u));
+    const uint32_t ir_pm = res_wire_permille<U1>(ir_baud);
+    print(serial, "  16 SIR frames in ", ir_pm, " thousandths of their wire time at 1200",
+          crlf);
+    bench.verdict("and the SIR frames run at the rate asked: 16 frames in their wire "
+                  "time at 1200, -1 % to +3 %", wire_ok(ir_pm));
     print(serial, "  and the idle level is LOW with a HIGH pulse per zero - "
           "the opposite of the decoder's own input, which the chapter says "
           "in one sentence and no figure repeats", crlf);
@@ -2861,6 +3160,7 @@ void tk_irda() {
     U1::clear_flags(UsartClear::all);
     spin_us(3000);
     const uint32_t lp_pulse = irda_pulse_cycles(0x00);
+    const uint32_t ir_lp_pm = res_wire_permille<U1>(ir_baud);
     const uint32_t lp_clock = lp_ker / 64u;               // 62.5 kHz
     const uint32_t want_us = (3u * 1'000'000u) / lp_clock;
     print(serial, "  IrDA low-power with PSC = 64 on a 4 MHz kernel: the "
@@ -2870,6 +3170,11 @@ void tk_irda() {
                   "becomes three periods of the PSC clock - a width that no "
                   "longer moves with the baud rate",
                   lp_ok && permille_off(to_us(lp_pulse), want_us) <= 150u);
+    print(serial, "  and the frames on the /16 kernel: 16 in ", ir_lp_pm,
+          " thousandths of their wire time at 1200", crlf);
+    bench.verdict("while the FRAME still moves with it: 16 low-power frames in their "
+                  "wire time at 1200 on the prescaled kernel, -1 % to +3 %",
+                  wire_ok(ir_lp_pm));
 
     // THE DECODER, from a bit-banged RZI line. The decoder's input is
     // HIGH at rest and a LOW pulse is a zero - the transmit encoder's
@@ -3097,12 +3402,15 @@ void tl_pads() {
     } else {
         TxPin::release();
         const uint32_t good = loop_run(8);
+        const uint32_t swap_pm = res_wire_permille<U1>(115200);
         print(serial, "  CR2.SWAP: the single wire is now PA10 (the RX pad) "
-              "with PA9 given back, and ", good, " of 8 bytes went round it",
-              crlf);
+              "with PA9 given back, and ", good, " of 8 bytes went round it; "
+              "1024 frames in ", swap_pm, " thousandths of their wire time", crlf);
         bench.verdict("SWAP exchanges the PADS - the whole transport moves to "
                       "the other pin and nothing else changes",
                       rx_free && good == 8u);
+        bench.verdict("... the rate included: 1024 frames on the swapped wire in their "
+                      "time at 115200, -1 % to +3 %", wire_ok(swap_pm));
     }
 
     // THE THREE INVERSIONS, and the single-wire loop can only judge ONE
@@ -3219,10 +3527,9 @@ void tm_synchronous() {
         struct SyncCase { bool lbcl; bool cpol; };
         static const SyncCase scases[] = {{false, false}, {true, false}, {false, true}};
         uint8_t counted_ok = 0;
+        WireSpan sync_wire;
+        bool counter_failed = false;
         for (const SyncCase& c : scases) {
-            if (!exti_dma_ok) {
-                break;
-            }
             feed();
             U1::bus_clock(true);
             U1::reset();
@@ -3235,31 +3542,41 @@ void tm_synchronous() {
             U1::enable(true);
             spin_us(2000);
             const bool idle_level = DePin::read();
-            if (!edge_counter_up(3, 'B', DmaMuxEdge::rising)) {
-                print(serial, "  the edge counter would not come up", crlf);
-                break;
+            // The CK pulses, counted where the EXTI path into the DMAMUX
+            // is this die's (exti_dma_ok).
+            if (exti_dma_ok && !counter_failed) {
+                if (!edge_counter_up(3, 'B', DmaMuxEdge::rising)) {
+                    print(serial, "  the edge counter would not come up", crlf);
+                    counter_failed = true;
+                } else {
+                    console_drain();
+                    const uint32_t a = edge_count_reset();
+                    for (uint8_t i = 0; i < 8u; ++i) {
+                        (void)wait_flag(UsartFlag::txe);
+                        U1::write_word(static_cast<uint16_t>(0x80u + i));
+                    }
+                    (void)wait_flag(UsartFlag::tc);
+                    spin_us(2000);
+                    const uint32_t b = edge_count_reset();
+                    edge_counter_down(3);
+                    const uint32_t edges = b - a;
+                    const uint32_t per_byte_x10 = (edges * 10u) / 8u;
+                    print(serial, "  CLKEN, LBCL = ", c.lbcl ? 1u : 0u, ", CPOL = ",
+                          c.cpol ? 1u : 0u, ": CK idles ", idle_level ? "high" : "low",
+                          " and eight characters cost ", edges, " rising edges = ",
+                          per_byte_x10 / 10u, ".", per_byte_x10 % 10u, " a character",
+                          crlf);
+                    const uint32_t want = c.lbcl ? 64u : 56u;
+                    if (sync_ok && edges == want && idle_level == c.cpol) {
+                        ++counted_ok;
+                    }
+                }
             }
-            console_drain();
-            const uint32_t a = edge_count_reset();
-            for (uint8_t i = 0; i < 8u; ++i) {
-                (void)wait_flag(UsartFlag::txe);
-                U1::write_word(static_cast<uint16_t>(0x80u + i));
-            }
-            (void)wait_flag(UsartFlag::tc);
-            spin_us(2000);
-            const uint32_t b = edge_count_reset();
-            edge_counter_down(3);
-            const uint32_t edges = b - a;
-            const uint32_t per_byte_x10 = (edges * 10u) / 8u;
-            print(serial, "  CLKEN, LBCL = ", c.lbcl ? 1u : 0u, ", CPOL = ",
-                  c.cpol ? 1u : 0u, ": CK idles ", idle_level ? "high" : "low",
-                  " and eight characters cost ", edges, " rising edges = ",
-                  per_byte_x10 / 10u, ".", per_byte_x10 % 10u, " a character",
-                  crlf);
-            const uint32_t want = c.lbcl ? 64u : 56u;
-            if (sync_ok && edges == want && idle_level == c.cpol) {
-                ++counted_ok;
-            }
+            // The frames under the clock, at the rate asked, on every die:
+            // start and stop are on the data line as ever, CK pulsing only
+            // for the data.
+            const uint32_t pm = sync_ok ? res_wire_permille<U1>(sync_baud) : 0u;
+            sync_wire.add(pm);
         }
         if (need_exti_dma()) {
             bench.verdict("33.5.14's clock is one pulse a data bit with none for "
@@ -3267,6 +3584,11 @@ void tm_synchronous() {
                           "bit, and CPOL is the level CK rests at - all three "
                           "counted with no CPU in the path", counted_ok == 3u);
         }
+        print(serial, "  96 synchronous frames in each arrangement in ", sync_wire.low, " to ",
+              sync_wire.high, " thousandths of their wire time at 9600", crlf);
+        bench.verdict("and the synchronous frames run at the rate asked: 96 frames in "
+                      "their wire time at 9600 in each of the three arrangements, -1 % to "
+                      "+3 %", sync_wire.ok);
         print(serial, "  THE DATA PATH IS DECLINED and not faked: a synchronous "
               "link needs something at the other end to clock, and this desk has "
               "one board. The SLAVE half (CR2.SLVEN, DIS_NSS and the underrun "
@@ -3364,12 +3686,16 @@ void tn_lpuart2() {
         const bool l2_up =
             lp_loop_up<L2, Lp2Pin>(lp2_tx, 115200, UsartClock::pclk);
         const uint32_t l2_good = l2_up ? lp_run<L2>(8, 20000) : 0u;
+        const uint32_t l2_pm = l2_up ? res_wire_permille<L2>(115200) : 0u;
         print(serial, "  PC6 free: ", pc6_free ? "yes" : "NO",
               "; LPUART2 on its own single wire at 115200: ", l2_good,
-              " of 8 exact, BRR ", L2::brr(), crlf);
+              " of 8 exact, BRR ", L2::brr(), "; 1024 frames in ", l2_pm,
+              " thousandths of their wire time", crlf);
         bench.verdict("LPUART2 - the G0B1 class's second one, with its own "
                       "LPUART2SEL field and its own APB bit - runs the same way",
                       pc6_free && l2_up && l2_good == 8u);
+        bench.verdict("... at the rate asked: 1024 frames in their wire time at 115200, "
+                      "-1 % to +3 %", wire_ok(l2_pm));
     } else {
         print(serial,
               "  SKIPPED, no verdict claimed: a second single wire on PC6 at "
@@ -3421,6 +3747,7 @@ void tn_lpuart_wire() {
         const bool lse_running = RtcDomain::lse_ready();
         uint8_t lp_ok = 0;
         uint8_t lp_tried = 0;
+        WireSpan lp_wire;
         struct LpCase { UsartClock kernel; uint32_t baud; uint32_t timeout; const char* name; };
         static const LpCase lpcases[] = {
             {UsartClock::pclk, 115200, 20000, "PCLK 64 MHz at 115200"},
@@ -3442,8 +3769,11 @@ void tn_lpuart_wire() {
                 continue;
             }
             const uint32_t good = lp_run<L1>(4, c.timeout);
+            const uint32_t pm = res_wire_permille<L1>(c.baud);
+            lp_wire.add(pm);
             print(serial, "  LPUART1 ", c.name, ": BRR ", L1::brr(), ", ", good,
-                  " of 4 bytes round its own wire", crlf);
+                  " of 4 bytes round its own wire; ", wire_frames(c.baud), " frames in ",
+                  pm, " thousandths of their wire time", crlf);
             if (good == 4u) {
                 ++lp_ok;
             }
@@ -3451,6 +3781,10 @@ void tn_lpuart_wire() {
         bench.verdict("LPUART1 runs on PCLK, on HSI16 and on the 32768 Hz crystal, "
                       "byte-exact on its own single wire", lp_ok == lp_tried &&
                                                                lp_tried >= 3u);
+        bench.verdict("AT THE RATE ASKED on every kernel: each run's frames in their wire "
+                      "time, -1 % to +3 % (the twenty-bit LPUARTDIV of 34.4.7 averages "
+                      "the 3.4 kernel periods a bit is at 9600 on the LSE)",
+                      lp_wire.ok && lp_tried >= 3u);
 
         // The PCLK ceiling: 34.4.7 puts it at fck / 3, which from 64 MHz is
         // 21.3 Mbaud. The open-drain loop gives out long before that, and
@@ -3459,19 +3793,27 @@ void tn_lpuart_wire() {
         static const uint32_t lp_ladder[] = {115200, 460800, 921600, 2'000'000,
                                              4'000'000, 8'000'000};
         uint32_t lp_best = 0;
+        WireSpan lp_ladder_wire;
         for (uint32_t baud : lp_ladder) {
             if (!lp_loop_up<L1, Lp1Pin>(lp1_tx, baud, UsartClock::pclk)) {
                 print(serial, "  ", baud, " baud is outside 34.4.7's window at "
                       "this clock", crlf);
+                lp_ladder_wire.ok = false;
                 continue;
             }
             const uint32_t good = lp_run<L1>(8, 20000);
+            const uint32_t pm = res_wire_permille<L1>(baud);
+            lp_ladder_wire.add(pm);
             print(serial, "  LPUART1 at ", baud, " baud on PCLK: ", good,
-                  " of 8 exact", crlf);
+                  " of 8 exact; 1024 frames in ", pm, " thousandths of their wire time",
+                  crlf);
             if (good == 8u) {
                 lp_best = baud;
             }
         }
+        bench.verdict("EVERY RUNG OF THE LPUART'S LADDER RUNS AT THE RATE ASKED, 115200 "
+                      "to 8 Mbaud: 1024 frames in their wire time, -1 % to +3 %, past "
+                      "the loop's own ceiling too", lp_ladder_wire.ok);
         print(serial, "  34.4.7's own ceiling from a 64 MHz kernel is fck/3 = "
               "21.3 Mbaud; the open-drain loop is exact to ", lp_best,
               " and what fails above it is the pad's pull-up, not the divisor",
@@ -3487,17 +3829,23 @@ void tn_lpuart_wire() {
                                    UsartPrescaler::div1, true);
         const bool fifo_on = L1::fifo();
         const uint32_t fifo_good = fifo_up ? lp_run<L1>(8, 20000) : 0u;
+        const uint32_t lp_fifo_pm = fifo_up ? res_wire_permille<L1>(115200) : 0u;
         const bool presc_up =
             lp_loop_up<L1, Lp1Pin>(lp1_tx, 9600, UsartClock::pclk,
                                    UsartPrescaler::div64);
         const uint32_t presc_good = presc_up ? lp_run<L1>(4, 40000) : 0u;
+        const uint32_t lp_presc_pm = presc_up ? res_wire_permille<L1>(9600) : 0u;
         print(serial, "  LPUART1 with FIFOEN: ", fifo_good,
               " of 8 exact; with PRESC = /64 at 9600 baud: ", presc_good,
-              " of 4 - the LP column has both, and no OVER8 at all", crlf);
+              " of 4 - the LP column has both, and no OVER8 at all; their frames in ",
+              lp_fifo_pm, " and ", lp_presc_pm, " thousandths of the wire", crlf);
         bench.verdict("the LPUART's FIFO and prescaler work, and its baud "
                       "generator has no oversampling to choose",
                       fifo_on && fifo_good == 8u && presc_good == 4u &&
                           !Lpuart<1>::has_oversampling8);
+        bench.verdict("... both at the rate asked: 1024 frames through the FIFO at 115200 "
+                      "and 96 at 9600 through the /64 prescaler, -1 % to +3 %",
+                      wire_ok(lp_fifo_pm) && wire_ok(lp_presc_pm));
 
         // THE SHARED VECTORS. LPUART2 arrives on the CONSOLE's own line and
         // LPUART1 on the line USART3..6 share, so ONE handler serves several
@@ -3711,6 +4059,7 @@ void to_irtim() {
     (void)U1::configure({}, usart_brr(SysClock::pclk_hz, env_baud).value());
     U1::enable(true);
     (void)Irtim::envelope(IrtimEnvelope::usart1);
+    uint32_t env_pm = 0;   // the envelope's frames against their wire time
     if (!exti_dma_ok) {
         (void)need_exti_dma();
     } else if (edge_counter_up(9, 'B', DmaMuxEdge::rising)) {
@@ -3724,11 +4073,16 @@ void to_irtim() {
         // Then a 0x00, which holds the line low for the start bit and
         // eight data bits: nine bit times of silence in every frame.
         const uint32_t b0 = edge_count_reset();
+        uint32_t env_t0 = 0;
         for (uint8_t i = 0; i < 20u; ++i) {
             (void)wait_flag(UsartFlag::txe);
+            if (i == 0u) {
+                env_t0 = now();
+            }
             U1::write_word(0x00);
         }
         (void)wait_flag(UsartFlag::tc);
+        const uint32_t env_took = since(env_t0);
         const uint32_t b1 = edge_count_reset();
         edge_counter_down(9);
         const uint32_t sent_edges = b1 - b0;
@@ -3755,7 +4109,19 @@ void to_irtim() {
                       "zero character",
                       idle_rate == 0u &&
                           permille_off(sent_rate, want_nine_tenths) <= 120u);
+        // The envelope's own frames, timed to TC against 20 frames at the
+        // rate asked: the gate's length is the divisor's.
+        env_pm = static_cast<uint32_t>(1000ull * env_took / (200ull * SysClock::hz / env_baud));
     }
+    // Where the edges could not be counted the frames are timed all the
+    // same: the gate's length needs no counter.
+    if (env_pm == 0u) {
+        env_pm = res_wire_permille<U1>(env_baud);
+    }
+    print(serial, "  the envelope's frames took ", env_pm,
+          " thousandths of their wire time at 1200", crlf);
+    bench.verdict("and the envelope's frames run at the rate asked: their wire time at "
+                  "1200, -1 % to +3 %", wire_ok(env_pm));
 
     // The second USART code, which is a PER-PART fact: USART4 here,
     // USART2 on the G031 class. Both are the reserve's, not a driver's.
@@ -4767,6 +5133,13 @@ void tp_receive() {
                   "skipped whole, in one skip, and the frame-error counter is still K",
                   up && joined == 0u && skips_after == 1u &&
                       PacedLoop::frame_errors() == hits);
+    // The transport's line at the rate asked: 1024 frames through its
+    // transmit engine, write_bulk() to tx_idle().
+    const uint32_t paced_pm = port_wire_permille<PacedLoop>(baud);
+    print(serial, "  1024 frames through this transport's transmit engine in ", paced_pm,
+          " thousandths of their wire time at 115200", crlf);
+    bench.verdict("and its line runs at the rate asked: 1024 frames in their wire time "
+                  "at 115200, -1 % to +3 %", wire_ok(paced_pm));
     transport_down<PacedLoop>();
 
     // --- the same under the receive engine: no clear reads RDR.
@@ -4816,6 +5189,11 @@ void tp_receive() {
                   "three laps late",
                   got == sizeof stream && wrong == 0u && stream_edges >= 6u &&
                       EngineLoop::rx_overruns() == 0u && EngineLoop::hw_overruns() == 0u);
+    const uint32_t engine_pm = port_wire_permille<EngineLoop>(1'000'000);
+    print(serial, "  1024 frames through both engines in ", engine_pm,
+          " thousandths of their wire time at 1 Mbaud", crlf);
+    bench.verdict("and the engined line runs at the rate asked: 1024 frames in their "
+                  "wire time at 1 Mbaud, -1 % to +3 %", wire_ok(engine_pm));
     transport_down<EngineLoop>();
 }
 
@@ -4824,7 +5202,7 @@ void tp_receive() {
 /// places the last stop bit's end ten bit times later.
 template <typename T>
 void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& late,
-                    bool& ok) {
+                    bool& ok, uint32_t& pad_permille) {
     constexpr uint32_t baud = 9600;
     constexpr uint32_t bit = SysClock::hz / baud;
     ok = transport_up<T>(mode, baud);
@@ -4836,6 +5214,7 @@ void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& l
          Exti::interrupt(9, true);
     (void)Exti::clear(9);
     static const uint8_t ones[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    uint32_t first_fall = 0;
     uint32_t last_fall = 0;
     uint32_t falls = 0;
     uint32_t idle_at = 0;
@@ -4846,6 +5225,9 @@ void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& l
         const uint32_t t = now();
         if (Exti::falling_pending(9)) {
             Exti::clear_falling(1u << 9);
+            if (falls == 0u) {
+                first_fall = t;
+            }
             last_fall = t;
             ++falls;
         }
@@ -4857,10 +5239,14 @@ void tx_idle_on_pad(const char* name, uint8_t mode, uint32_t& early, uint32_t& l
     const uint32_t stop_end = last_fall + 10u * bit;
     early = idle_seen && idle_at < stop_end ? stop_end - idle_at : 0u;
     late = idle_seen && idle_at >= stop_end ? idle_at - stop_end : 0u;
+    // THE PAD'S OWN CLOCK: eight start bits back to back are seven frames
+    // apart, ten bit periods each at the rate asked.
+    pad_permille = static_cast<uint32_t>(1000ull * (last_fall - first_fall) / (70ull * bit));
     print(serial, "  ", name, ": ", falls, " start bits on PA9; tx_idle() ",
           idle_seen ? "" : "NEVER ", "true ", early != 0u ? early : late,
           early != 0u ? " cycles BEFORE" : " cycles after", " the last stop bit's end (a bit is ",
-          bit, ")", crlf);
+          bit, "); the first to the last start bit in ", pad_permille,
+          " thousandths of seven frames", crlf);
     ok = ok && idle_seen && falls == sizeof ones;
     (void)Exti::release(9);
     transport_down<T>();
@@ -4873,8 +5259,10 @@ void tq_tx_idle() {
     uint32_t early = 0;
     uint32_t late = 0;
     bool ok = false;
+    uint32_t pad_plain = 0;
+    uint32_t pad_engine = 0;
     tx_idle_on_pad<PlainSender>("the interrupt transmitter, 8 frames at 9600", mode_plain_tx,
-                                early, late, ok);
+                                early, late, ok, pad_plain);
     // The edge is seen by a poll of a few tens of cycles, so the stop
     // bit's end it places is late by as much: 1/32 of a bit of margin.
     bench.verdict("tx_idle() IS THE WIRE'S, on the interrupt transmitter: never before "
@@ -4882,10 +5270,13 @@ void tq_tx_idle() {
                   ok && early <= bit / 32u && late <= bit);
     feed();
     tx_idle_on_pad<EngineSender>("the transmit engine, 8 frames at 9600", mode_engine_tx,
-                                 early, late, ok);
+                                 early, late, ok, pad_engine);
     bench.verdict("and on the transmit engine: TC cleared when the block starts, so "
                   "no stop bit of an earlier block answers for this one",
                   ok && early <= bit / 32u && late <= bit);
+    bench.verdict("THE PAD RUNS AT THE RATE ASKED: on both transmitters the first and "
+                  "the last start bit are seven frames of 9600 apart, -1 % to +3 %",
+                  wire_ok(pad_plain) && wire_ok(pad_engine));
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,8 @@ reasons are erratum 1.10.4 and the measurements below. Family fixture
 `test/family_samc21/sercom.cpp` and the negatives
 `dmac_one_channel.cpp` and `uart_receive_engine_slot.cpp` under
 `brio check samc21`; the engine's bench letters are `test_samc_uart`'s
-(sercom.md).
+(sercom.md) - letter d reads its level back, letter w measures what a
+release leaves the next owner.
 
 ## What the silicon does
 
@@ -30,6 +31,30 @@ corrupts that entry corrupts the transfer.
 **No hardware circular mode.** 25.6.3.1 offers a self-linked descriptor
 and nothing else; a channel that repeats does so from linked descriptors
 or from the CPU.
+
+**Four arbitration levels, each switched on by hand.** A channel takes
+one of four levels (CHCTRLB.LVL), and while every level is enabled a
+higher number wins; within a level the lower channel number wins, or a
+round robin does (PRICTRL0.RRLVLENx); a level is enabled by CTRL.LVLENx,
+and a channel at a level not enabled is invisible to the arbiter
+(25.6.2.4; measured). The DMAC is also a host of the SRAM with a
+quality of service of its own (QOSCTRL, 25.8.7; 10.4.3), a separate knob
+from the channel's level. THE ENGINE ARMS AT LEVEL 2, the rule's next
+for a transmit ([../design/dma.md](../design/dma.md)): a starved
+transmit only leaves its line idle a while. With one channel in the
+image the level ranks it against nothing, and it is the rule's so that
+the day the controller admits a second user its order is already right;
+QOSCTRL stays at its reset value.
+
+**A request is the trigger line's level, and the channel keeps none.**
+CHCTRLB.TRIGSRC names one peripheral line, and a SERCOM's transmit line
+is a level - "set when the transmit buffer (TX DATA) is empty", "cleared
+when DATA is written" (31.6.4.1). A request standing when the channel is
+enabled, or when its trigger is selected onto it, is served at once: the
+enable of a block fires its first beat by itself. A request that came
+and went while the channel was disabled is not kept - a disabled channel
+leaves the queue of pending ones and its PEND is cleared (25.6.2.4,
+25.8.23) - measured below.
 
 What the one engine relies on beyond that - the end address of an
 incrementing side, the disable that drains before it clears, the silent
@@ -136,6 +161,48 @@ THE ENFORCEMENT, in three layers:
   translation unit, but "two different instantiations name this type" is
   nothing C++ can count without stateful metaprogramming, and it would
   refuse the legal in-turn shape too.
+
+## A released requester
+
+What a release leaves the next owner of the channel, measured by
+`test_samc_uart` letter w with no wire (the Uart's transmit engine on
+SERCOM1's loop through the pad, PA16, at 1 Mbaud): the engine's trigger
+standing - its last block over, the channel disabled by the block's end
+(25.6.2.6), DRE up behind it - then the transport released three ways,
+then the one channel bound again.
+
+- **The channel keeps no request.** DATA filled by hand behind the
+  engine's last block - the first character straight to the idle
+  shifter, so DRE fell and rose again with the channel disabled, the
+  second left in DATA, DRE low - and a block of one started: the loop
+  read 0xC1, 0xC2, then the block's 0xB1, in order. The beat waited for
+  DATA to empty; nothing kept from before the enable fired it.
+- **A disable withdraws the request.** Disabled and gated, as the
+  release did before it reset: the instance read through its bus clock
+  alone shows INTFLAG 0x00 with CTRLA's configuration standing
+  (0x40000004), and a channel bound to its trigger and enabled moved
+  nothing.
+- **A gated clock holds a request left standing.** Gated with ENABLE
+  set: INTFLAG reads 0x03 (DRE and TXC) behind the gate, and the channel
+  bound to that trigger took ONE stray beat - the first byte of its
+  block - and waited, enabled, for a rise that cannot come.
+- **The reset leaves nothing.** `release()` resets the SERCOM before
+  the gate (CTRLA.SWRST, 31.6.2.2, 31.8.1; `samc21/sercom.hpp`):
+  INTFLAG and CTRLA read zero behind it, and the channel bound to its
+  trigger moved nothing.
+- After each of the three, the channel bound to NO trigger (TRIGSRC 0)
+  moved nothing at its enable - `arm()` resets the block and the channel
+  (25.6.2.2) - and the next Uart on SERCOM1 sent its first 256 bytes
+  whole and in order, no fault: the outgoing owner's release is the whole
+  of the hand-over, and a Uart's own `init()` resets its SERCOM before it
+  arms the engine anyway.
+
+So the SAM C21 gives the STM32F4's answer of [../design/dma.md](../design/dma.md)
+at the peripheral - a disable withdraws a raised request, a gated clock
+does not - and keeps nothing in the channel, where the RP families keep
+a pacing request's credits. The stray reaches only the next binding of
+the SAME trigger, and the reset before the gate removes it whatever
+state the transport was released in.
 
 ## Not covered yet
 

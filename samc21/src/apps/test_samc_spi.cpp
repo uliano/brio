@@ -53,16 +53,22 @@
 //      BOTH directions, plus a deliberate DORD mismatch that is an exact
 //      two-way bit reversal and not a shrug
 //   d  the rate ladder against the peer, and where the peer stops
-//      keeping up (its own CLK_PER/6 client ceiling)
+//      keeping up (its own CLK_PER/6 client ceiling); the rungs' rates
+//      are timed on the wire by letter f, the same generator on the same
+//      SERCOM with no peer needed
 //   e  THE CLIENT ROLE: the peer becomes the HOST for a bounded burst
 //      (spilink::Op::host_burst) and this board answers as the client -
 //      the other DOPO row, PLOADEN, and the three-SCK-cycle rule
-//   f  the wireless remainder: 32.6.3.4 loop-back through the pad, the
-//      SCK ladder measured against the 24 MHz crystal, nine-bit
-//      characters, BUFOVF and IBON, and what CTRLB.MSSEN really drives
+//   f  the wireless remainder: 32.6.3.4 loop-back through the pad, THE
+//      SCK LADDER ON THE WIRE - a frame inside a polled block against its
+//      eight SCK periods at the rate asked, on the 24 MHz crystal, judged
+//      within -1 % and +3 % (a loop proves the bytes, never the rate) -
+//      nine-bit characters, BUFOVF and IBON, and what CTRLB.MSSEN really
+//      drives
 //   g  THE KERNEL LETTER: SpiBus (= BusMaster) over SpiHost inside a
 //      real kernel - queued requests, replies through ReplyTo,
-//      reject-when-full, and the PrepareSleep vote idle vs busy
+//      reject-when-full, and the PrepareSleep vote idle vs busy; the
+//      requests' rates timed on the wire
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -1206,6 +1212,50 @@ bool loopback_burst(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
 uint8_t lb_tx[64];
 uint8_t lb_rx[64];
 
+/// THE RATE ON THE WIRE, which a loop-back alone cannot tell: its receiver
+/// samples on the clock its transmitter shifts on, so a divisor wrong at
+/// both ends is a slower or faster loop and nothing else. So the time ONE
+/// FRAME takes inside a polled block is read from the difference of two
+/// blocks of 1024 and 128 frames - neither buffer named, the transmit-only
+/// shape pouring 0xFF dummies on DRE alone (samc21/spi.hpp, write_phase),
+/// the shape whose turn is the shortest - so the fixed cost of a request
+/// cancels; in thousandths of eight SCK periods at the rate ASKED, on the
+/// 24 MHz crystal (41.7 ns a tick, the oscillator the SERCOM does not run
+/// on: the reading judges the divisor and OSC48M together). No gap is
+/// added between frames: DATA is loaded while the frame before it shifts
+/// (32.6.1), and the readings at the slow rungs are that gap's
+/// measurement. The best of three of each block is taken. 0 when the
+/// ruler is down or the rate cannot be asked.
+uint32_t frame_permille(uint32_t hz, SpiMode mode = SpiMode::mode0) {
+    const auto b = Loop::baud_for(hz);
+    if (!ruler_ok || !b) {
+        return 0;
+    }
+    auto best = [&](uint16_t n) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            Loop::Request r{
+                .cs = {}, .dc = {}, .cmd = {}, .tx = {}, .rx = {},
+                .len = n, .cmd_len = 0, .polled = true,
+                .baud = *b, .mode = mode, .reply = {},
+            };
+            const uint32_t t0 = wall();
+            (void)Loop::start(r);
+            const uint32_t took = wall() - t0;
+            least = took < least ? took : least;
+        }
+        return least;
+    };
+    const uint32_t big = best(1024);
+    const uint32_t small = best(128);
+    const uint64_t want = 896ull * 8u * crystal_hz / hz;   // crystal ticks, at the rate asked
+    return big <= small ? 0u : static_cast<uint32_t>(1000ull * (big - small) / want);
+}
+
+/// The verdict on a reading: never faster than the rate asked by more than
+/// the ruler's own grain, at most three per cent slower.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
 void tf_wireless() {
     bench.verdict("the loop-back host comes up (DIPO and DOPO on ONE pad - "
                   "32.6.3.4's own arrangement)",
@@ -1262,44 +1312,43 @@ void tf_wireless() {
                       false);
     }
 
-    // The SCK ladder, timed on the CRYSTAL. A burst of N characters at
-    // BAUD b takes N x 8 SCK periods plus this pump's own per-character
-    // overhead, so the measurement is reported as both: the total and
-    // the excess over the arithmetic.
+    // THE SCK LADDER ON THE WIRE, timed on the CRYSTAL: letter d's rungs,
+    // the rates in hertz the host is asked for, each a frame inside a
+    // polled block against its eight SCK periods (frame_permille). The
+    // polled loop is faster than the frame up to 8 MHz - 48 core cycles a
+    // frame against the transmit-only turn's 34 (docs/samc21/spi.md) - and
+    // there the reading is the wire's; at 12 and 24 MHz the frame is 32 and
+    // 16 cycles, shorter than the turn, so the instrument cannot time them:
+    // printed, not judged - a DMA data phase would time them, and this
+    // stratum declines one (erratum 1.10.4, docs/samc21/dmac.md).
     if (!ruler_ok) {
         print(serial, "  the crystal ruler did not come up - the rate measurement "
                       "is skipped and the verdict declined",
               crlf);
         bench.verdict("the crystal ruler is available for the rate measurement", false);
     } else {
-        static const uint8_t bauds[] = {255, 119, 23, 5};
+        static const uint32_t judged[] = {93'750UL, 200'000UL, 500'000UL, 1'000'000UL,
+                                          2'000'000UL, 3'000'000UL, 4'000'000UL,
+                                          6'000'000UL, 8'000'000UL};
+        static const uint32_t untimed[] = {12'000'000UL, 24'000'000UL};
         bool all_in_band = true;
-        for (uint8_t i = 0; i < sizeof bauds; ++i) {
-            constexpr uint16_t n = 64;
-            const uint32_t t0 = wall();
-            (void)loopback_burst(lb_tx, lb_rx, n, bauds[i]);
-            const uint32_t took = wall() - t0;
-            const uint32_t sck = spi_sck_hz(SysClock::hz, bauds[i]);
-            // Crystal ticks the characters alone should cost. The
-            // division comes FIRST: n x 8 x 24e6 overflows 32 bits at
-            // these lengths, and the overflow shows up as an impossible
-            // negative overhead.
-            const uint32_t due = static_cast<uint32_t>(n) * 8u * (crystal_hz / sck);
-            const uint32_t over = took > due ? took - due : 0;
-            const uint32_t over_us = over / (crystal_hz / 1000000u);
-            print(serial, "  BAUD ", bauds[i], " = ", sck / 1000u, " kHz: 64 characters "
-                  "in ", took, " crystal ticks, the bits alone are ", due,
-                  ", polled-pump overhead ", over_us, " us total (",
-                  (over_us * 100u) / n, " hundredths of a us per character)", crlf);
-            // The bits must be there: the measured time can never be
-            // SHORTER than the arithmetic, and the per-character
-            // overhead of a polled pump on a 48 MHz core has to be a
-            // few microseconds, not tens.
-            if (took < due || over_us > 10u * n) all_in_band = false;
+        print(serial, "  a frame inside a polled block, in thousandths of its eight SCK periods "
+                      "at the rate asked:");
+        for (const uint32_t hz : judged) {
+            const uint32_t pm = frame_permille(hz);
+            print(serial, " ", hz / 1000u, " kHz ", pm);
+            all_in_band = all_in_band && wire_ok(pm);
         }
-        bench.verdict("every rate on the ladder really clocks the bits it says it "
-                      "does - measured against the 24 MHz crystal, never short",
-                      all_in_band);
+        print(serial, crlf, "  not timed (the polled turn outlasts the frame):");
+        for (const uint32_t hz : untimed) {
+            print(serial, " ", hz / 1000u, " kHz ", frame_permille(hz));
+        }
+        const uint32_t m3 = frame_permille(1'000'000UL, SpiMode::mode3);
+        print(serial, crlf, "  mode 3 at 1 MHz: ", m3, crlf);
+        bench.verdict("THE SCK LADDER RUNS AT THE RATES ASKED: 93.75 kHz to 8 MHz, a frame "
+                      "inside a polled block in its eight SCK periods within -1 % and +3 % on "
+                      "the 24 MHz crystal, no gap between frames - and mode 3 the same",
+                      all_in_band && wire_ok(m3));
     }
 
     // NINE-BIT CHARACTERS (CTRLB.CHSIZE). The engine is byte-oriented,
@@ -1628,6 +1677,15 @@ void tg_kernel() {
                   busy_votes == 1 && !busy_vote);
 
     bus_ao_live = false;
+    // The rates this letter's requests ask for, timed on the wire.
+    const uint32_t pm_cmd = frame_permille(command_hz);
+    const uint32_t pm_slow = frame_permille(spi_sck_hz(SysClock::hz, 255));
+    print(serial, "  a frame inside a polled block at the letter's rates, in thousandths of its "
+          "wire time: ", command_hz / 1000u, " kHz ", pm_cmd, ", ",
+          spi_sck_hz(SysClock::hz, 255), " Hz ", pm_slow, crlf);
+    bench.verdict("and the bus runs at the rates the requests ask: a frame inside a polled block "
+                  "in its eight SCK periods within -1 % and +3 %",
+                  wire_ok(pm_cmd) && wire_ok(pm_slow));
     Loop::release();
     Cs::set();
     Cs::output();

@@ -607,6 +607,59 @@ byte-exact to 2 Mbaud** (16 of 16 at 115200, 230400, 460800, 921600, 1 M
 and 2 M; 0 of 16 at 4 M) and what fails above it is the rise time of the
 pad's own 40 k pull-up, not the generator.
 
+### The rate on the wire, timed
+
+A single wire shares ONE divisor between the transmitter and the
+receiver it loops into, so a wrong divisor is a slower or a faster loop
+and every byte still comes back - the STM32F4's OVER8 ran at half its
+rate through every self-looped suite until a letter timed the wire. So
+every letter of `test_stm32_serial` that loops or sets a rate on a
+transmitter times a run of its frames on TIM2 (64 MHz, one count a
+cycle) from the first store into TDR to TC - the last stop bit's end -
+against the frames' time AT THE RATE ASKED, and judges the reading in
+thousandths: -1 % to +3 %, never the rate the divisor produced. A run is
+a hundredth of a second of frames, 16 at least and 1024 at most. The
+letters whose rate is a RECEIVER's (`f`, `g`, `i` and the receive halves
+of `h`, `k` and `l`) are fed by the bit-banged line, which TIM2 paces at
+the rate asked, so their decoding is the check. TIM2 and every kernel
+clock but the LSE derive from HSI16 on these boards (no HSE fitted): the
+oscillator's error cancels and what is read is the divisor; against the
+32768 Hz crystal the reading carries HSI16's trim too.
+
+| letter | what runs | rate asked | STM32G0B1RE | STM32G071RB |
+|---|---|---|---|---|
+| `b` | 256 frames of each of the 13 formats, each against its own length | 115200 | 1000 .. 1000 | 1000 .. 1000 |
+| `c` | OVER8 on the loop | 115200 | 999 | 999 |
+| `c` | the twelve PRESC codes, 96 frames each | 9600 | 998 .. 1000 | 998 .. 1000 |
+| `c` | the OVER16 ladder, 1024 frames a rung | 115200 .. 4 M | 1000, 993 at 921600 | 1000, 993 at 921600 |
+| `c` | OVER8 at its ceiling, through the FIFO | 8 M | 1000 | 1000 |
+| `d` | the console's own line on HSI16, SYSCLK, PCLK (64 frames) | 115200 | 1001, 1001, 1001 | 1001, 1001, 1001 |
+| `d` | USART1 on the LSE, OVER16 and OVER8 | 2048, 4096 | 1004, 1004 | 1002, 1002 |
+| `e` | 1024 frames through the transmit FIFO | 115200 | 1000 | 1000 |
+| `e` | the 256-byte block through the interrupt transport, without and with the FIFO | 115200 | 1000, 1001 | 1000, 1001 |
+| `h` | LIN mode's frames | 2400 | 1000 | 1000 |
+| `j` | smartcard characters of twelve baud periods (33.5.17), /256 kernel | 1200 | 998 | 998 |
+| `k` | SIR frames, normal and low-power (/16 kernel) | 1200 | 999, 999 | 999, 999 |
+| `l` | the swapped wire | 115200 | 1000 | 1000 |
+| `m` | the synchronous master's frames, three arrangements | 9600 | 1000 .. 1000 | 1000 .. 1000 |
+| `o` | the IRTIM envelope's frames | 1200 | 999 | 999 |
+| `p` | the paced transport's transmit engine, 1024 frames | 115200 | 1001 | 1001 |
+| `p` | both engines, 1024 frames | 1 M | 1001 | 1001 |
+| `q` | the first to the last of eight start bits on the pad (EXTI) | 9600 | 997 (interrupt), 999 (engine) | 997, 999 |
+
+Every reading is inside its window. The two that are not 1000 are the
+divisor's own rounding, stated at the verdict: 921600 from 64 MHz is
+BRR 69 for 69.4, a rate 6.4 thousandths fast (993); PRESC /256 at 9600 is
+BRR 26 for 26.04 (998). The LSE legs read 1001 to 1004, HSI16's trim
+against the crystal. The transports' 1001 is the start of the run - the
+first frame waits for the engine's launch and a full shift register
+starts "on the next baud clock edge" (33.5.17) - over 1024 frames; the
+pad's 997 and 999 are the poll that sees each start bit, a few tens of
+cycles in a 466 666-cycle span. The 4 Mbaud rung (OVER16) and the 8 Mbaud
+one (OVER8) are timed although the open-drain loop carries neither: TC
+ends the transmitter's frames whatever the pad's rise does to the
+receiver, so the generator is read where the loop cannot be.
+
 ### The kernel clocks
 
 **The console moves under itself and the verdict lines are the
@@ -919,7 +972,7 @@ exists only past the point where the FIFO off already loses every frame.
 ## On the STM32G071RB
 
 `test_stm32_serial` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
-0x2000) and scores **91/91** against the G0B1RE's 96, its console the
+0x2000) and scores **112/112** against the G0B1RE's 118, its console the
 FIFO-mode USART2 it defaults to; letters `y`, `w` and `v` pass there with
 `brio stress` as on the bigger part.
 
@@ -958,7 +1011,9 @@ edge raises it and nothing further arrives until somebody clears the
 pending bit. The sheet's "no workaround" is right for this purpose: the
 clear would need a CPU in the loop, which is the one thing a counter with
 no CPU cannot have. The smartcard CK ladder, the synchronous CK census
-and both IRTIM counts therefore skip by name.
+and both IRTIM counts therefore skip by name - and the frames of those
+letters are timed on the wire all the same, the rate needing no
+counter (the table above).
 
 ES0418 2.12.2 (data corruption on a noisy receive line) is the G0B1's
 2.11.1 and letter `f` stages it the same way; 2.12.3 is the prescaler
@@ -1035,7 +1090,7 @@ Implemented, not bench-verified:
 - `test_stm32_serial` as the G031K8's two group images (letters a to j,
   and k to y): the suite outgrew the part's 64 KB whole, and the scores
   under "On the STM32G031K8" are the one image's; one run of each image
-  on that board measures them.
+  on that board measures them, the rate on the wire among them.
 - The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
   built for it and has not run there (the board is not on the desk); one
   run of the suite measures it. The ring under an `LpUart`, its kick

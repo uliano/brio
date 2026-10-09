@@ -369,9 +369,12 @@ nak-ing corrupted frames (measured), not as silence.
   dummies; the select released after every transaction.
 - **The polled path at every rate**: all eight BR codes carry 64
   bytes byte-exact through the receive loop, timed with the request's
-  fixed cost spread over the 64 frames: 44 cycles a frame at HCLK/2
-  against the wire's 16, 64 at /4, 86 at /8, 169 at /16, 295 at /32,
-  548 at /64.
+  fixed cost spread over the 64 frames: 43 cycles a frame at HCLK/2
+  against the wire's 16, 64 at /4, 86 at /8, 169 at /16, 296 at /32,
+  547 at /64 on the CH32V006K8U6 (34, 47, 89, 145, 271, 537 on the
+  CH32V003F4P6) - none faster than its wire at the rate asked, the
+  receive loop's one frame in flight the rest; the loop is no
+  instrument for the rate, the engines below are.
 - **The engines on the loop**: a 128-byte block through both at HCLK/2
   byte-exact with ONE DMA interrupt and no fault on either channel
   (2916 cycles, 868 above the wire's 2048); a command frame on the pump
@@ -380,6 +383,28 @@ nak-ing corrupted frames (measured), not as silence.
   half-word beats with no SPI interrupt and one DMA interrupt; a 16-bit
   request off a half-word boundary on the pump, sixteen entries; a read
   with no out buffer clocking the fixed 0xFF cell at both widths.
+- **THE RATE ASKED, which the loop cannot tell** (MOSI and MISO ride
+  one SCK; letter d times ONE FRAME inside an engined block by the
+  difference of two block lengths, best of three, against its SCK
+  periods at HCLK over the divisor the BR code names, 16.3.1, with no
+  gap added - a frame written while another shifts follows it with
+  none, 16.2.2): from SRAM buffers, 256 and 32 frames, 999 to 1000
+  thousandths at HCLK/2, /4, /16 and /64 in mode 0, at /16 in mode 3
+  and at /4 and /16 in 16-bit frames (998 at 16-bit /4 once), on both
+  parts. The engines are the wire's at every rate the BR field offers
+  up to HCLK/2.
+- **THE HOST'S 0xFF CELL IS IN FLASH, and at HCLK/2 on the CH32V006
+  the transmit engine waits on it**: with no buffer named (2048 and 256
+  frames, the transmit engine pouring `tx_dummy_`, the receive engine
+  writing its discard cell in SRAM) a frame takes 1031 thousandths of
+  its wire at HCLK/2 on the CH32V006K8U6 - 16.5 cycles where 16 are the
+  wire's - and 1000 at HCLK/4 in both widths. The cause, measured by
+  swapping one end at a time at HCLK/2: a transmit source in SRAM 1000,
+  a receive destination in SRAM with the flash cell still the source
+  1031. The cell is a constant, placed in flash, and flash at 48 MHz
+  takes two wait states on this part (RM V1.5 18.3.1), one on the
+  CH32V003 (its RM 16.3.1) - where the same block reads 999 at HCLK/2.
+  `test_ch32_spi` letter d's verdict on the cells fails there for it.
 - **The hardware CRC is the arithmetic**: TXCRCR over six frames is
   what a bitwise loop over the same polynomial computes (0x5A), the
   receiver's RXCRCR over the looped-back frames is the same number,
@@ -460,6 +485,11 @@ nak-ing corrupted frames (measured), not as silence.
 
 Driver gaps, each with its reason:
 
+- The 0xFF cell in SRAM: `tx_dummy_` is a constant in flash, and at
+  HCLK/2 on the CH32V006 the transmit engine's reads of it, two wait
+  states each, cost half a cycle a frame over the wire (bench
+  findings); a two-byte cell in SRAM runs at the wire, as a named
+  buffer does.
 - The simplex modes (BIDIMODE/BIDIOE, RXONLY) beyond the resource's
   configuration bits: no user.
 - The hardware select arrangements as the ENGINE's select: the engine's
@@ -493,11 +523,10 @@ Implemented but not bench-verified, each with what would measure it:
   `test_ch32_spi` letter pumps faster than HCLK/8; HCLK/2 at either
   width is inside the same window by the count. What would measure it:
   a loop letter pumping at HCLK/2 and HCLK/4, the frames judged.
-- `test_ch32_spi`'s loop letters on the CH32V003F4P6's group images,
-  and the peer letters o, p and q on either part against `spi_peer`
-  byte-exact through the hosts as they are: the jumper and the peer
-  are off that board's desk, and the peer shares the pads with the
-  jumper.
+- The peer letters o, p and q on either part against `spi_peer`
+  byte-exact through the hosts as they are: the peer is off both
+  boards' desks, and it shares the pads with the jumper the loop
+  letters run on.
 - The CH32V003's default hold-off against its Sleep: the pump's two
   frames in flight overrun when the image idles between frames (the
   finding above), and nothing in the host or the platform keeps them

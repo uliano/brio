@@ -14,6 +14,17 @@
 // slowed clock cannot make, refused inside start() and answered
 // i2c_rejected through the arbiter.
 //
+// THE RATE ON THE WIRE: every letter that sets an SCL rate judges the
+// mean SCL period inside the bytes of its run (TCB0's period meter on
+// PA3, CLK_PER ticks) against the rate ASKED - never above it by more
+// than 2 %, and within a quarter below it, or within 2 % of the rate the
+// chapter's tLOW floor allows on this 50/50 clock where that is lower
+// (29.3.2.2.1, equation 29-5): b at the three speeds with the
+// specification's edges charged and with this bus's declared, j at 24,
+// 12 and 24 MHz again, r the three speeds against the peer's client, s
+// the rebase against it. The 100 kHz of letters c to i and of the
+// command channel k to q is b's.
+//
 // Reference test of avrdx/twi.hpp (docs/avrdx/twi.md): keep it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
@@ -329,13 +340,100 @@ volatile uint16_t meter_min = 0xFFFF;
 volatile uint16_t meter_max = 0;
 volatile uint16_t meter_caps = 0;
 volatile uint8_t meter_mode = 0;        // 0 = period, 1 = low width
+// The periods themselves, for the rate on the wire (scl_reading below).
+constexpr uint8_t meter_log_size = 96;
+volatile uint16_t meter_log[meter_log_size];
+volatile uint8_t meter_logged = 0;
 
 void meter_reset() {
     cli();
     meter_min = 0xFFFF;
     meter_max = 0;
     meter_caps = 0;
+    meter_logged = 0;
     sei();
+}
+
+// ---- the rate on the wire ------------------------------------------------------
+// One board's host and client share nothing of the divider - the client
+// follows whatever SCL it is given - so a self-link here CAN see the
+// rate; the letters that set one judge it against the rate ASKED, the
+// verdict every family's I2C suites share: SCL never above the rate
+// asked by more than 2 %, and within a quarter below it (the pull-ups'
+// rise). The reading is the MEAN of the SCL periods inside the bytes of
+// a run - every capture of the period meter within an eighth of the
+// shortest, which leaves out the gaps between bytes where the host holds
+// SCL for the software and a client stretches it - on the meter's CLK_PER
+// ticks, the generator's own clock, so a run of them resolves the input
+// synchronizer's tick.
+//
+// This TWI adds a second slowing beside the rise: its clock is a 50/50
+// duty cycle (29.3.2.2.1), so the high phase is as long as the low, and
+// step 3 of the chapter's BAUD procedure lengthens the low phase to the
+// mode's tLOW floor plus the fall charged (equation 29-5). Where that
+// floor bounds the rate below a quarter under the rate asked - Fm and
+// Fm+ with the specification's edges charged - the lower bound is the
+// floor's rate, computed here from equation 29-5 and the floors the
+// chapter names (4700, 1300, 500 ns), less 2 %.
+
+struct SclReading {
+    uint32_t mean_mt = 0;   ///< the mean in-byte period, thousandths of a CLK_PER tick
+    uint8_t n = 0;          ///< the periods it is the mean of
+};
+
+SclReading scl_reading() {
+    SclReading r{};
+    const uint8_t logged = meter_logged;
+    uint16_t least = 0xFFFF;
+    for (uint8_t i = 0; i < logged; ++i) {
+        least = meter_log[i] < least ? meter_log[i] : least;
+    }
+    const uint16_t cut = static_cast<uint16_t>(least + least / 8u);
+    uint32_t sum = 0;
+    for (uint8_t i = 0; i < logged; ++i) {
+        if (meter_log[i] <= cut) {
+            sum += meter_log[i];
+            ++r.n;
+        }
+    }
+    r.mean_mt = r.n == 0u ? 0u : static_cast<uint32_t>(sum * 1000ul / r.n);
+    return r;
+}
+
+/// The mode's tLOW floor as 29.3.2.2.1 step 3 names it.
+uint32_t chapter_low_floor_ns(I2cSpeed s) {
+    return s == I2cSpeed::standard_100k ? 4700u : (s == I2cSpeed::fast_400k ? 1300u : 500u);
+}
+
+/// The SCL period equation 29-5 leaves at `hz` with `fall_ns` charged,
+/// on a bus whose rise is `rise_ticks`: the low phase the floor and the
+/// fall need, rounded up to a tick, the high phase as long, the rise on
+/// top.
+uint32_t floor_period_ticks(uint32_t hz, I2cSpeed s, uint32_t fall_ns, uint32_t rise_ticks) {
+    const uint64_t half = (static_cast<uint64_t>(hz) * (chapter_low_floor_ns(s) + fall_ns) +
+                           999'999'999ull) / 1'000'000'000ull;
+    return static_cast<uint32_t>(2u * half) + rise_ticks;
+}
+
+/// The reading printed and judged: `fall_ns` is the fall the host was
+/// told to charge, `rise_ticks` what this bus adds beyond the register's
+/// floor.
+void scl_verdict(const char* name, const SclReading& r, uint32_t hz, I2cSpeed s, uint32_t fall_ns,
+                 uint32_t rise_ticks) {
+    const uint32_t asked = twi_scl_hz(s);
+    const uint32_t scl = r.mean_mt == 0u ? 0u
+                                          : static_cast<uint32_t>(static_cast<uint64_t>(hz) * 1000u /
+                                                                  r.mean_mt);
+    const uint32_t pm = static_cast<uint32_t>(static_cast<uint64_t>(scl) * 1000u / asked);
+    const uint32_t bound_hz = hz / floor_period_ticks(hz, s, fall_ns, rise_ticks);
+    const uint32_t bound_pm = static_cast<uint32_t>(static_cast<uint64_t>(bound_hz) * 980u / asked);
+    const uint32_t low_pm = bound_pm < 750u ? bound_pm : 750u;
+    print(serial, "    SCL over ", r.n, " in-byte periods: ", scl, " Hz = ", pm,
+          " thousandths of the ", asked, " asked (the tLOW floor's rate ", bound_hz,
+          " Hz; lower bound ", low_pm, ")", crlf);
+    verdict("SCL never above the rate asked by more than 2 % ", name, r.n >= 8u && pm <= 1020u);
+    verdict("and within a quarter below it, or within 2 % of the tLOW floor's rate where "
+            "that is lower (29.3.2.2.1) ", name, r.n >= 8u && pm >= low_pm);
 }
 
 void meter_stop() {
@@ -569,6 +667,7 @@ void measure_speed(I2cSpeed s, const char* name, uint16_t rise = 0, uint16_t fal
     const uint8_t baud = T::baud();
     const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(SysClock::hz, baud, 0));
     const uint16_t period = measure(0);
+    const SclReading run = scl_reading();
     const uint16_t low = measure(1);
     const uint16_t reg_low = twi_low_ticks(baud);           // (BAUD + 5), equation 29-4
     // The two bus properties this measurement resolves: the rise adds to
@@ -590,6 +689,8 @@ void measure_speed(I2cSpeed s, const char* name, uint16_t rise = 0, uint16_t fal
             low <= reg_low && low + 8 >= reg_low);
     verdict("tLOW meets the mode's specified minimum ", name, low_ns >= twi_low_min_ns(s));
     verdict("SCL does not exceed the mode's nominal rate ", name, hz <= twi_scl_hz(s));
+    scl_verdict(name, run, SysClock::hz, s, fall != 0u ? fall : twi_fall_budget_ns(s),
+                period > floor_ticks ? period - floor_ticks : 0u);
     T::release();
 }
 
@@ -602,7 +703,11 @@ void tb_speeds() {
     const uint16_t desk_rise = last_rise_ns;
     const uint16_t desk_fall = last_fall_ns;
     measure_speed(I2cSpeed::fast_400k, "Fm 400 kHz");
+    const uint16_t fm_rise = last_rise_ns;
+    const uint16_t fm_fall = last_fall_ns;
     measure_speed(I2cSpeed::fast_plus_1m, "Fm+ 1 MHz");
+    const uint16_t fmp_rise = last_rise_ns;
+    const uint16_t fmp_fall = last_fall_ns;
 
     // The default charges the specification's worst case, because that
     // is all a driver can know. A bus that DECLARES its own measured
@@ -612,6 +717,12 @@ void tb_speeds() {
     print(serial, "  this desk measures tR ~", desk_rise, " ns and tOF ~", desk_fall,
           " ns; declaring ", rise, "/", fall, " ns:", crlf);
     measure_speed(I2cSpeed::standard_100k, "Sm 100 kHz, timing declared", rise, fall);
+    // The same at the two fast modes, each with the edges measured at it
+    // (Fm+'s pads drive ten times harder, 29.3.3.1).
+    measure_speed(I2cSpeed::fast_400k, "Fm 400 kHz, timing declared",
+                  static_cast<uint16_t>(fm_rise + 40), static_cast<uint16_t>(fm_fall + 40));
+    measure_speed(I2cSpeed::fast_plus_1m, "Fm+ 1 MHz, timing declared",
+                  static_cast<uint16_t>(fmp_rise + 40), static_cast<uint16_t>(fmp_fall + 40));
 
     // Fast-mode Plus is the pads as much as the divider, and the engine
     // turns FMPEN on with the speed.
@@ -1297,6 +1408,7 @@ bool rebase_step(uint32_t hz, const char* what) {
     nack_traffic(6);
     meter_stop();
     const uint16_t period = meter_min;
+    const SclReading run = scl_reading();
     const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(hz, baud, 0));
     const uint16_t budget = static_cast<uint16_t>(
         twi_period_ticks(hz, baud, twi_rise_budget_ns(I2cSpeed::standard_100k)));
@@ -1305,6 +1417,11 @@ bool rebase_step(uint32_t hz, const char* what) {
           "..", budget, "), actual_scl_hz(0) = ", Host::actual_scl_hz(0), crlf);
     const bool tracked = period >= floor_ticks && period <= budget;
     verdict("MBAUD was re-derived and SCL stayed in the window ", what, tracked);
+    // Against 100 kHz asked, on the meter's ticks of the CLK_PER in force
+    // - the clock itself being what the DynamicClock says it set.
+    scl_verdict(what, run, hz, I2cSpeed::standard_100k,
+                twi_fall_budget_ns(I2cSpeed::standard_100k),
+                period > floor_ticks ? period - floor_ticks : 0u);
     return ok && tracked;
 }
 
@@ -2145,6 +2262,7 @@ void speed_round(I2cSpeed s, const char* name) {
     const uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 4,
                                             lend<Lease::reply>(rx_buf), 4, {}, s});
     const uint16_t period = meter_min;
+    const SclReading run = scl_reading();
     meter_stop();
     const uint8_t baud = T::baud();
 
@@ -2175,6 +2293,8 @@ void speed_round(I2cSpeed s, const char* name) {
     verdict("SCL never runs faster than the register allows at ", name,
             period >= floor_ticks);
     verdict("nor above the mode's nominal rate at ", name, hz <= twi_scl_hz(s));
+    scl_verdict(name, run, SysClock::hz, s, twi_fall_budget_ns(s),
+                period > floor_ticks ? period - floor_ticks : 0u);
     const uint16_t nominal_low = twi_low_ticks(baud);
     print(serial, "    the peer's turnaround stretches the longest SCL low to ",
           low_max, " ticks against the register's ", nominal_low, crlf);
@@ -2209,8 +2329,16 @@ bool two_board_step(uint32_t hz, const char* what) {
     }
     for (uint8_t i = 0; i < 4; ++i) tx_buf[i] = static_cast<uint8_t>(0xE1 + i);
     for (uint8_t i = 0; i < 8; ++i) rx_buf[i] = 0;
+    // The exchange's own SCL on the meter, the CLK_PER in force its tick.
+    ChScl::source(EvPin<Scl>{});
+    meter_mode = 0;
+    SclFreq::init(DynClock{}, ChScl{}, TcbClock::div1);
+    meter_reset();
     const uint8_t st = run_request<Client>({twilink::command_addr, lend<Lease::reply>(tx_buf), 4,
                                             lend<Lease::reply>(rx_buf), 4, {}});
+    const uint16_t period = meter_min;
+    const SclReading run = scl_reading();
+    meter_stop();
     bool exact = st == i2c_ok;
     for (uint8_t i = 0; i < 4; ++i) {
         exact = exact && rx_buf[i] == static_cast<uint8_t>(a.seed + i);
@@ -2222,6 +2350,9 @@ bool two_board_step(uint32_t hz, const char* what) {
     verdict("the exchange across the wire is exact ", what, exact);
     verdict("MBAUD was re-derived for this clock ", what,
             Host::actual_scl_hz(0) <= 100'000u && Host::actual_scl_hz(0) > 80'000u);
+    const uint16_t floor_ticks = static_cast<uint16_t>(twi_period_ticks(hz, baud, 0));
+    scl_verdict(what, run, hz, I2cSpeed::standard_100k, twi_fall_budget_ns(I2cSpeed::standard_100k),
+                period > floor_ticks ? period - floor_ticks : 0u);
     peer_settle();
     return exact;
 }
@@ -2292,8 +2423,8 @@ void help() {
                   "speeds | s rebase    -> y = all of k..s", crlf);
     print(serial, "  ONE open-drain bus, three taps of this board: PA2/PA3 (the host and "
                   "the combined client), PC2/PC3 (the DUAL client, and the bit-bang "
-                  "injector of tests h and n while Dual mode is off) and PB2/PB3; board "
-                  "B taps it with its own PA2/PA3. 1.5k pull-ups to +5 V; TWI1 stays "
+                  "injector of tests h and n while Dual mode is off) and PB2/PB3; the "
+                  "peer board taps it with its own PA2/PA3. 1.5k pull-ups to +5 V; TWI1 stays "
                   "disabled.", crlf);
 }
 
@@ -2325,6 +2456,11 @@ ISR(TCB0_INT_vect) {
     if (meter_caps <= 2) return;        // the arming capture is not traffic
     if (t < meter_min) meter_min = t;
     if (t > meter_max) meter_max = t;
+    const uint8_t k = meter_logged;
+    if (meter_mode == 0 && k < meter_log_size) {
+        meter_log[k] = t;
+        meter_logged = static_cast<uint8_t>(k + 1u);
+    }
 }
 
 int main() {

@@ -413,23 +413,67 @@ flatter the result:
 
 | speed | MBAUD | period | SCL | tLOW | mode floor |
 |---|---|---|---|---|---|
-| Sm 100 kHz | 115 | 244 ticks (register floor 240) | 98.36 kHz | 117 of 120 ticks = 4875 ns | 4700 ns |
-| Fm 400 kHz | 34 | 82 ticks (floor 78) | 292.7 kHz | 36 of 39 ticks = 1500 ns | 1300 ns |
+| Sm 100 kHz | 115 | 244 ticks (register floor 240) | 98.36 kHz | 116 of 120 ticks = 4833 ns | 4700 ns |
+| Fm 400 kHz | 34 | 82 ticks (floor 78) | 292.7 kHz | 35 of 39 ticks = 1458 ns | 1300 ns |
 | Fm+ 1 MHz | 10 | 34 ticks (floor 30) | 705.9 kHz | 15 of 15 ticks = 625 ns | 500 ns |
 
 The period exceeds the register's floor by exactly the rise time and the
 low time falls short of `BAUD + 5` by exactly the fall time, which is
 how both are read off the measurement: **tR = 166 ns on this bus at
 every speed** (it is the pull-up's job, and FMPEN does not help it), and
-**tOF = 125 ns in Standard and Fast mode but 0 in Fast-mode Plus** -
+**tOF = 166 ns in Standard and Fast mode but 0 in Fast-mode Plus** -
 the x10 pad drive of FMPEN collapses the fall below the meter's 42 ns
-tick. Charging nothing for tOF puts the measured tLOW at 4583 ns and
-1208 ns, i.e. BELOW the specified floor at both Sm and Fm: the
-equations' tOF is the difference.
+tick. Charging nothing for tOF would leave the low phase the floor
+itself in register ticks (113 and 32) and the pins that less the
+measured fall - 4541 ns and 1166 ns, BELOW the specified floor at both
+Sm and Fm: the equations' tOF is the difference.
 
 **Declaring the bus's real edges buys the speed back.** The same
-Standard mode with `rise_ns = 206, fall_ns = 165` gives MBAUD 113 and
-measures 100.000 kHz with tLOW 4791 ns - still above the floor.
+Standard mode with `rise_ns = 206, fall_ns = 206` gives MBAUD 113 and
+measures 100.000 kHz with tLOW 4750 ns - still above the floor.
+
+**The rate on the wire, against the rate ASKED.** Every letter of
+`test_avr_twi` that sets an SCL rate judges the MEAN of the SCL periods
+inside the bytes of its run - every capture of the period meter within an
+eighth of the shortest, which leaves out the gaps between bytes where the
+host holds SCL for its software and a client stretches it - on the
+meter's CLK_PER ticks, the generator's own clock, so the input
+synchronizer's tick is resolved over the run. The verdict every family's
+I2C suites share is: never above the rate asked by more than 2 %, and
+within a quarter below it. In thousandths of the rate asked:
+
+| speed, edges charged | MBAUD | mean in-byte SCL | reading | the tLOW floor's rate |
+|---|---|---|---|---|
+| Sm, the specification's (1000/300 ns) | 115 | 98.22 kHz | 982 | 98.36 kHz |
+| Fm, the specification's (300/300 ns) | 34 | 292.68 kHz | 731 | 292.68 kHz |
+| Fm+, the specification's (120/120 ns) | 10 | 705.88 kHz | 705 | 705.88 kHz |
+| Sm, this bus declared (206/206 ns) | 113 | 99.40 kHz | 994 | 100.00 kHz |
+| Fm, this bus declared (206/206 ns) | 32 | 307.69 kHz | 769 | 307.69 kHz |
+| Fm+, this bus declared (206/40 ns) | 8 | 800.00 kHz | 800 | 800.00 kHz |
+| Sm at 24, 12 and 24 MHz again (a rebase) | 115, 55, 115 | 98.18, 98.36, 98.16 kHz | 981, 983, 981 | 98.36 kHz |
+
+Nothing runs above the rate asked. Fm and Fm+ with the specification's
+edges charged run MORE than a quarter below it, and that is this TWI's
+clock and not its divider: the SCL clock "is designed to have a 50/50
+duty cycle" (29.3.2.2.1), its high phase as long as its low, so step 3
+of the chapter's procedure - which lengthens the LOW phase to the mode's
+tLOW floor plus the fall charged (equation 29-5) - lengthens the high
+phase with it, where the I2C modes ask far less of the high (0.6 us at
+Fm against a tLOW of 1.3). At Fm that is 2 x 39 ticks plus the bus's
+four of rise, 82 ticks and 292.7 kHz, at Fm+ 2 x 15 + 4 = 34 and
+705.9 kHz; at Fm+ the floor's rate reaches the quarter on this bus's
+rise only with a fall charged under about 80 ns. So the letters judge the lower bound as the
+quarter, or - where the floor's rate is lower - that rate, computed in
+the suite from equation 29-5 with the floors the chapter names, less
+2 %: every reading sits on the floor's rate exactly, the divider
+choosing what the procedure says. A bus that declares its edges gets
+Fm and Fm+ back inside the quarter.
+
+The fall the default charges at Sm and Fm is the I2C specification's tf
+of 300 ns (`twi_fall_budget_ns`); the data sheet's own figure for this
+pad's output fall, tOF in 39.16 (table 39-22), is 250 ns at both. With
+250 the floor's rate at Fm would be 2 x 38 + 4 = 80 ticks, 300.0 kHz,
+exactly on the quarter.
 
 **A host and a client of the SAME instance talk to each other.** Every
 Request shape moves real data both ways with the two halves on one pin
@@ -636,6 +680,17 @@ mechanism was not isolated and no verdict rests on it.)
 MBAUD moved 115 -> 55 -> 115, `actual_scl_hz` stayed at 100 kHz, and
 every exchange across the wire was exact.
 
+**Against an ATSAMC21J18A running its own `twi_peer`** (the SAM C21's,
+the same protocol) the SCL is what the bus makes with the DUT alone: the
+mean in-byte period 98.36 kHz (983 thousandths) at Sm, 292.6 kHz (731)
+at Fm and 705.0 kHz (705) at Fm+ through letter r's exchanges, and
+98.36 kHz (983) at every step of letter s's 24 -> 12 -> 24 MHz rebase,
+every exchange of s exact. Letter r's plain four-byte read there is NOT
+exact at Sm and Fm: the first three bytes right and the last wrong -
+0x00 with `i2c_bus_error` at Sm, 0x2F for 0x27 at Fm - and exact at
+Fm+, run after run, the same with the suite as it stood before its
+rate verdicts were added. It is not isolated.
+
 **A CLIENT WAKES ITS CHIP ON THE ADDRESS MATCH, AND THE WIRE PAYS FOR
 IT.** Measured by `test_avr_sleep` test m, which owns the sleep modes:
 this board is a client at 0x42 on the same office bus while the peer
@@ -696,6 +751,10 @@ implement):
   written, but the input transition level itself is not measured;
 - DBGCTRL.DBGRUN;
 - the timings of electricals 39.16 as numbers;
+- letter r's plain read against the SAM C21's `twi_peer`: its last byte
+  is wrong at Sm and Fm (above) - a logic analyser on the node through
+  that byte and its NACK, or the same letter against the AVR's
+  `twi_peer`, would tell the host's sample from the peer's drive;
 - TWI1, and every route other than TWI0 DEFAULT/ALT1/ALT2, are compiled
   for all eight packages and refused where they must be, but only TWI0's
   DEFAULT pair has carried traffic on this desk.

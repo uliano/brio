@@ -623,10 +623,10 @@ block's reset line, the one act that withdraws a request already raised.
 four-kilobyte pattern in the image itself and the core's own counter the
 ruler. On the CH32V203C8T6 the twelve letters of a part with one
 controller run with the board bare but for the core board's crossed pair
-to the fourth port (PB0 to PA3, which letters q and r take): **47
+to the fourth port (PB0 to PA3, which letters q and r take): **51
 verdicts in `z`**. On the CH32V303VCT6 DMA2's six letters run beside
 DMA1's with the evaluation board's two crossed wires in place (PA2 to
-PC11, PC10 to PA3): **65 verdicts in `z`**, letter n and the receive
+PC11, PC10 to PA3): **70 verdicts in `z`**, letter n and the receive
 ring of letters g, o, q and r among them. Where one number is given
 below it is both parts'; where they differ each is named.
 
@@ -715,6 +715,26 @@ below it is both parts'; where they differ each is named.
 - **The transmit engine needs no listener**: twenty-six bytes left the
   ring in one block at 115200 baud, `tx_idle()` true 2177 us after the
   run was queued, with no fault counted, on a pad with nothing attached.
+- **THE STREAMS RUN AT THE RATE ASKED, on the core's counter.** A sender
+  and the ring it feeds both divide PB1 by one arithmetic, so the
+  streams of letters q and r - and the jumper's loop of letter g, the two
+  controllers' pair of letter n - cannot tell a wrong bus rate by
+  themselves: each letter times its ports' transmitters from the first
+  queue to the last stop bit's end on the STK, which counts HCLK, in
+  thousandths of the run's time at the rate ASKED, -1 % to +3 %. USART2's
+  transmit engine, 256 frames at 115200: 1000 in letters g and p on both
+  parts, and 1000 beside UART4's on DMA2 in letter n on the CH32V303VCT6;
+  the fourth port's bare engine pouring one 4 KB block: 1000 at 1 Mbaud
+  and at 4.5 Mbaud (letters q and r, both parts); USART2's transmit engine
+  through letter q's transport, 1024 frames: 1000 at 1 Mbaud and 1002 to
+  1003 at 4.5 Mbaud - that transport's transmit ring is 64 bytes, so the
+  run goes out in sixteen or more blocks, each started by the last one's
+  completion vector, and the two or three frames over are a fifth of a
+  frame a block, what that restart would cost (not measured apart). TE's
+  idle frame after an init (18.2) is out before a
+  run is timed. Every rate here divides PB1 whole: the readings are the
+  wire's, and a ruler that runs from the HSI as the buses do cannot see
+  the HSI's own error ([usart.md](usart.md)).
 - **THE RECEIVE RING, WITH NO WIRE** (letter g, the CH32V203C8T6). From
   `init()` the receive channel runs circular over the whole 128-byte
   storage, its count at 128 with nothing arrived and one bus master

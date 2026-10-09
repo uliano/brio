@@ -164,7 +164,10 @@ taking a burst, and what this driver does with each:
   character's),
   `rebase(hz)` for the day a dynamic clock exists, `set_baud(hz,
   baud)` (a new rate under the running port, once TX is idle),
-  `release()`. Init
+  `release()` - the engine first, then the SERCOM RESET before its
+  clocks are gated (CTRLA.SWRST, 31.6.2.2: a gated instance left enabled
+  holds its transmit request and hands the next channel bound to its
+  trigger a stray beat, [dmac.md](dmac.md)). Init
   order is deliberate: clocks, reset, configure,
   enable, and only THEN the pads to the SERCOM - the transmitter
   idles high before the pad leaves PORT, so no glitch start bit
@@ -240,17 +243,16 @@ The engine is a POLICY, not a feature of the task:
   the channel disabled by the silicon, 25.6.2.8) is a block lost:
   abandoned, counted in `dma_faults()`, the next run started.
 - **THE STANDING REQUEST, AND WHY NOTHING KICKS.** DRE is a LEVEL -
-  "my transmit buffer is free" - and the DMAC turns it into a pending
-  trigger when it RISES. A block armed while the level is already high
-  could, on that reading alone, wait for an edge that has gone by. It
-  does not: a rise while the channel is DISABLED with its trigger
-  selected is latched and served on the next enable, and so is the
-  selection of the trigger onto a request already standing (dmac.md),
-  and the engine keeps its trigger selected from `init()` on. So the
-  enable fires the first beat by itself, and a software kick on top of
-  it is a SECOND beat when the first has started (PEND clears as a beat
-  starts, 25.8.23) - measured: a transmit kick doubled a byte into a
-  full DATA (Bench findings).
+  "my transmit buffer is free" (31.6.4.1) - and the channel serves it as
+  it finds it: standing when the channel is enabled, or when the claim
+  selects the trigger onto it, it fires the block's first beat at once.
+  So the enable fires the first beat by itself, and a software kick on
+  top of it is a SECOND beat when the first has started (PEND clears as
+  a beat starts, 25.8.23) - measured: a transmit kick doubled a byte
+  into a full DATA (Bench findings). The channel keeps nothing across
+  its own disable: a DRE that rose and fell while it was disabled fires
+  no beat at the next enable ([dmac.md](dmac.md), "A released
+  requester").
 - **THE DEAD-BLOCK PREDICATE, ON THE REFUSED-BYTE PATH.** A channel
   that waits ENABLED with no trigger pending and no beat moving while
   DRE - its trigger - and TXC both stand cannot be running, so the
@@ -524,6 +526,24 @@ bridge between the pads and the PC - as much as of the driver.
   over, read as in flight across its completion while the receive
   interrupt entered every 240 cycles. Asked of the channel - enabled, no
   PEND, no BUSY - and decided under the mask, it fired in none of twenty.
+- **THE RATE ON THE WIRE, which the loop cannot tell** (its receiver
+  samples on the divisor its transmitter shifts on): every loop letter
+  and every rate the suite sets times a run of frames through the
+  transmit engine - a hundredth of a second of frames, 16 at least and
+  1024 at most, the receiver unserved - from the first block's start to
+  TXC on the ticker's cycle count, against the run's wire time at the
+  rate ASKED. The ruler and the generator share OSC48M, so the reading
+  judges the divisor. Letter a's ladder: 9600 baud 998 to 999
+  thousandths of the wire, 115200 to 2 Mbaud 999 to 1000, 3 Mbaud 1002
+  to 1003 (the run's fixed cost of some tens of cycles in 163840);
+  letter b's frames at 115200, from 8N1's ten bits to 8O2's twelve and
+  5N2's eight, 999 to 1000; letters q, r, t and w at their own rates the
+  same, 999 to 1003. The window
+  is -1 % to +3 % ([../design/overview.md](../design/overview.md), "A
+  loop proves the bytes, never the rate"), and the divisor's rounding is
+  0.14 % at 9600 and less above.
+- **The engine's level, read back** (letter d): CHCTRLB.LVL 2 with
+  CTRL.LVLEN2 alone set ([dmac.md](dmac.md)).
 - **The kick, measured and retired.** A scratch probe started 400
   messages a run through the transmit engine in four shapes - after a
   full drain at once, after 30 us, after 1.8 ms of standing DRE, and
@@ -568,5 +588,4 @@ Implemented but not bench-verified:
   nine-bit frames (this transport's rings are bytes); the USART
   personality on SERCOM0, 2, 3 and 4 (SERCOM5 runs the console, SERCOM1
   the loop's letters; SERCOM3 runs the I2C personality on silicon,
-  [i2c.md](i2c.md)); `release()` beyond the suites' own transport
-  handovers.
+  [i2c.md](i2c.md)).

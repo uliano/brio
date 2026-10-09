@@ -346,10 +346,34 @@ What the rows say:
 - Clock stretching is flow control: a client holding every data byte
   2 ms stretched an 8-byte tenure to exactly 16 ms, data intact,
   i2c_ok.
-- The speeds: 25 tenures x 16 bytes in 41 ms at 100 kHz and 14 ms at
-  400 kHz - the peer's polled turnaround rides on top of the divisor,
-  a polled client pacing the bus exactly as the AVR's TWI measures it
-  from the other side.
+- The speeds: 25 tenures x 16 bytes in 40 ms at 100 kHz, 12 ms at
+  400 kHz and 6 ms at Fm+ - the peer's polled turnaround rides on top of
+  the divisor, a polled client pacing the bus exactly as the AVR's TWI
+  measures it from the other side.
+- THE SCL RATE ON THE WIRE (letter f; [../design/overview.md](../design/overview.md),
+  "A loop proves the bytes, never the rate"). A tenure's wall cannot
+  time the host's clock here - the polled peer stretches every byte, and
+  a clock that runs fast hides under one that waits - and PA23 cannot be
+  SERCOM3's pad and an EIC line at once. But its input buffer stays on
+  under the SERCOM function, so a loop in SRAM samples SCL through one
+  16-byte write over the IOBUS (single-cycle, 28.6.5, the pin's group in
+  continuous sampling, 28.8.10), four instructions a sample, and takes
+  SysTick's count at every rising edge; the mean of the rise-to-rise
+  intervals within a quarter of their median is the host's unhindered
+  period (the holds and stretches fall between bytes and before an
+  acknowledge). With the node's 166 ns rise given to `init()`: 100 kHz
+  at 997 to 998 thousandths of the rate asked (480.6 to 481.3 cycles a
+  period), 400 kHz at 1012 (118.5), Fm+ at 934 (51.3) - inside the
+  bracket, never more than 2 % above the rate asked and within a quarter
+  below it. At Fm+ the sampler is at its limit: an edge's own path and a
+  period nearly meet, so some 110 of 152 rises are caught and the reading
+  is the coarsest of the three.
+- A RISE BUDGET IS NOT A MARGIN. The formula (33.6.2.4.1) subtracts the
+  rise from the period the register pair makes, so a budget longer than
+  the bus's rise runs SCL FAST by the difference: the same letter with
+  `init(clock, 300)` on this 166 ns node measured 100 kHz at 1011 to
+  1012 thousandths and 400 kHz at 1070 to 1075 - 7 % above the rate
+  asked, outside the bracket. A program states the rise its bus has.
 - unstick(): 0 pulses on a healthy wire, and none SPENT - the verb
   reads SDA before driving anything - against exactly 4 with the peer
   releasing on the 4th falling edge, the same number the AVR's verb

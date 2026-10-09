@@ -297,6 +297,25 @@ letters a to d drive the channel's one-shot verbs:
   the poll's own latency). The width is the rate: 8, 16 and 32 MB/s.
 - **Five blocks in a row counted by their own handler**, the ISR
   body clearing as it went, no error.
+- **The engines on every path that names one**, on both parts unless
+  named: the console's two (letter e: 272 bytes in nine blocks with no
+  fault, and every command typed through the receive ring), USART2's
+  on the CH32V006K8U6 (`test_ch32_serial` letter i), the SPI host's on
+  the PC6-PC7 jumper (`test_ch32_spi` letter d: 16-bit frames in
+  half-word beats with no SPI interrupt, an odd buffer's 16-bit request
+  on the pump, and ONE DMA interrupt a transaction, the transmit
+  channel armed for its errors alone) and the I2C host's against an
+  STM32G0 peer on the CH32V006K8U6 (`test_ch32_i2c` letter g: a write
+  ended by BTF with no interrupt from its channel, one a read).
+- **The console's transmit engine at the rate asked** (letter e, timed
+  on the ticker's cycle count from the first byte handed over to
+  `tx_idle()`): 272 frames at 115200 in 1001 thousandths of their wire
+  time on both parts ([usart.md](usart.md)).
+- **`DmaCopyEngine`** (letter g, both parts): copy and fill at the
+  three beats, polled and by its own interrupt, exact; a half-word run
+  off its boundary, a count of zero or over CNTR's and a block on a
+  busy engine refused; `abandon()` stopping a 64-byte fill with 62 left
+  in CNTR on the CH32V003F4P6.
 - **A store into an enabled channel is refused**, the hardware
   dropping nothing on its own: the letter reconfigures under a
   running copy and gets false back.
@@ -358,24 +377,9 @@ Implemented but not bench-verified, each with what would measure it:
   ([usart.md](usart.md), [i2c.md](i2c.md)) - are compiled and staged on
   none of this family's boards; that image, released without the pulse,
   stages the dead channel they answer.
-- **The engines in their two moments** - the binding at `arm()`, five
-  stores a block, the claim under the transport's mask, INTFR read
-  once a handler - on every path that names one: `test_ch32_dma`
-  letters e and f (the console's own two engines), `test_ch32_serial`
-  letter i (USART2's), `test_ch32_spi` letter d on its jumper and
-  `test_ch32_i2c` letter g against the peer, on both parts. The
-  boards are off the desk; every image builds for both.
-- **The beat per block**: the SPI host's 16-bit frames in half-word
-  beats, byte-exact on the jumper with no SPI interrupt, and an odd
-  buffer's 16-bit request on the pump (`test_ch32_spi` letter d).
-- **One DMA interrupt a transaction**: the SPI host's transmit channel
-  armed for its errors alone (`test_ch32_spi` letter d counts the
-  vector's entries), and the I2C host's write ending on BTF with the
-  transmit channel's count at zero and no interrupt from it
-  (`test_ch32_i2c` letter g counts both vectors).
-- **`DmaCopyEngine`**: copy and fill at the three beats, polled and by
-  its interrupt, its refusals and `abandon()` (`test_ch32_dma` letter
-  g).
+- **The I2C host's engines on the CH32V003F4P6**: `test_ch32_i2c`
+  letter g in its group image against a peer, which that board's desk
+  has not got (on the CH32V006K8U6 the letter is green, above).
 - **The costs in time**: `bench_ch32`'s letter d - copy, fill and
   copy from flash at three sizes with the controller's cycles an item
   and the fixed cost a block, a block of 256 words paced by TIM1's

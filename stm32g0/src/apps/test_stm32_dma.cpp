@@ -76,7 +76,8 @@
 //   g  THE FIXED POINT: what circular mode gives (a player with no CPU)
 //      and what it cannot give (BlockSource's untorn block), measured
 //   h  the USART engines: the level-not-edge doctrine, and the console
-//      itself as the proof
+//      itself as the proof - its kilobyte timed against the wire at the
+//      rate asked, fed in bulk and byte by byte
 //   i  the timer round trip: a duty table played into a PWM and read off
 //      the pad, and a capture stream drained by a ping-pong engine
 //   j  BlockRelay inside a REAL KERNEL over the ping-pong engine
@@ -89,12 +90,16 @@
 //   m  DMA2's channels at every width, and a transfer between two
 //      peripherals
 //   n  the sleep story: a channel through Sleep, and a channel frozen by a
-//      Stop
+//      Stop - its LPTIM1 alarm on the LSE, which the letter starts when a
+//      power-on left it off (the domain never reset, RTCSEL untouched),
+//      the leg skipped by name if the crystal never readies
 //   o  THE CIRCULAR RECEIVE: USART1's single wire as its own loop, its
 //      receive engine a ring the channel writes lap after lap - a stream
 //      across 64 laps, a burst with the consumer away, a consumer a lap
 //      behind, the edge the line's IDLE and the ring's marks report
-//      through the two vectors, and what harvest() costs
+//      through the two vectors, what harvest() costs, and the line timed
+//      against the wire at the rate asked (a loop shares one divisor at
+//      both ends and cannot tell a wrong one)
 //   r  A RELEASED REQUESTER: USART1, SPI1 and TIM3 each released five
 //      ways with a request standing, and what the next owner of the same
 //      request line moves - the release contract measured with no wire
@@ -128,6 +133,7 @@
 #include "stm32g0/lptim.hpp"
 #include "stm32g0/pwr.hpp"
 #include "stm32g0/nvic.hpp"
+#include "stm32g0/rtc.hpp"
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform.hpp"
 #include "stm32g0/spi.hpp"
@@ -1513,7 +1519,8 @@ void th_console_rate() {
         }
     }
     drain();
-    const uint32_t per_byte_us = cycles_to_us(cycles_now() - t0);
+    const uint32_t per_byte_cycles = cycles_now() - t0;
+    const uint32_t per_byte_us = cycles_to_us(per_byte_cycles);
 
     drain();
     t0 = cycles_now();
@@ -1528,7 +1535,15 @@ void th_console_rate() {
         queued += want;
     }
     drain();
-    const uint32_t bulk_us = cycles_to_us(cycles_now() - t0);
+    const uint32_t bulk_cycles = cycles_now() - t0;
+    const uint32_t bulk_us = cycles_to_us(bulk_cycles);
+    // THE RATE ON THE WIRE, which the console cannot tell by being read:
+    // the kilobyte's time from the first store to TC against 1024 frames
+    // of ten bits AT THE RATE ASKED, in thousandths - on the ticker's
+    // cycle count (SysTick at 64 MHz, the tick count composed in).
+    const uint64_t wire = 1024ull * 10u * SysClock::hz / 115200u;
+    const uint32_t per_byte_pm = static_cast<uint32_t>(1000ull * per_byte_cycles / wire);
+    const uint32_t bulk_pm = static_cast<uint32_t>(1000ull * bulk_cycles / wire);
 
     print(serial, crlf);
     const uint32_t per_byte_bps =
@@ -1538,27 +1553,32 @@ void th_console_rate() {
           Serial::has_tx_engine ? "the TX engine" : "the interrupt transport",
           "): byte by byte ", per_byte_us, " us = ", per_byte_bps,
           " B/s, in bulk ", bulk_us, " us = ", bulk_bps,
-          " B/s, where 115200 8N1 carries 11520", crlf);
+          " B/s, where 115200 8N1 carries 11520 - ", per_byte_pm, " and ", bulk_pm,
+          " thousandths of the wire's time", crlf);
     print(serial, "  transport bill: dma faults ", Serial::dma_faults(),
           ", hw overruns ", Serial::hw_overruns(), ", ring overruns ",
           Serial::rx_overruns(), ", frame ", Serial::frame_errors(), crlf);
 
+    bench.verdict("THE CONSOLE'S LINE RUNS AT THE RATE ASKED: a kilobyte fed in bulk "
+                  "in its wire time at 115200, -1 % to +3 % - what a loop or a reader "
+                  "at the far end, sharing the rate, could not tell",
+                  bulk_pm >= 990u && bulk_pm <= 1030u);
     if constexpr (engines) {
         bench.verdict("fed in BULK the transmit engine saturates the wire: a "
                       "kilobyte at 115200 costs what 115200 costs, and the fact "
                       "you can READ this line is the end-to-end proof, since it "
                       "left the chip the same way",
-                      bulk_bps > 11000u && bulk_bps < 12000u);
+                      bulk_pm >= 990u && bulk_pm <= 1030u && bulk_bps > 11000u);
         bench.verdict("AND AT THIS RATE FEEDING IT BYTE BY BYTE COSTS NOTHING - "
                       "a per-byte pump loses a third of the wire at MEGABAUD, "
                       "and here "
                       "the wire is five hundred times slower than the pump, the "
                       "ring is always full when a block ends, and every block "
-                      "the engine gets is a long one. What the two feeds cost "
-                      "apart is a question for a rate this VCP may not reach "
+                      "the engine gets is a long one: byte by byte the kilobyte "
+                      "takes its wire time too, -1 % to +3 %. What the two feeds "
+                      "cost apart is a question for a rate this VCP may not reach "
                       "(letter u)",
-                      per_byte_bps + 200u >= bulk_bps &&
-                          bulk_bps + 200u >= per_byte_bps);
+                      per_byte_pm >= 990u && per_byte_pm <= 1030u);
         bench.verdict("and nothing was dropped or abandoned on the way",
                       Serial::dma_faults() == 0u && Serial::frame_errors() == 0u);
     } else {
@@ -2818,6 +2838,41 @@ constexpr LptimClock alarm_clock = LptimClock::lse;
 static_assert(lptim_clock_runs_in_stop(alarm_clock),
               "letter n's alarm has to survive the Stop it is the way out of");
 
+/// THE ALARM'S OSCILLATOR, STARTED BY THE LETTER THAT COUNTS ON IT. A
+/// Stop with an alarm on a clock that is not running has no way out (this
+/// suite arms no watchdog), and the LSE is off after a power-on: RCC_BDCR
+/// is the RTC domain's and its reset leaves LSEON clear (5.4.23). So the
+/// LSE is started here when it is not running - PWR's bus clock, DBP
+/// (4.1.2: the domain's write protection), LSEON - and waited for, bounded
+/// by the crystal's start-up; the domain is never reset, RTCSEL and the
+/// backup registers are not touched, and DBP is put back as it was. The
+/// LSI is RCC's own (5.2.6) and needs no gate. False = the oscillator
+/// never readied, and the Stop leg skips by name.
+bool alarm_clock_running() {
+    if constexpr (alarm_clock == LptimClock::lsi) {
+        // 5.4.24: nobody else asks for the LSI on this letter's path, so
+        // the alarm starts the oscillator it is about to count.
+        Rcc::lsi_enable(true);
+        return Rcc::lsi_wait_ready();
+    } else {
+        if (RtcDomain::lse_ready()) {
+            return true;
+        }
+        RtcDomain::pwr_bus_clock(true);
+        const bool was_unlocked = RtcDomain::unlocked();
+        RtcDomain::unlock(true);
+        RtcDomain::lse_enable(true);
+        const uint32_t t0 = Ticker::millis();
+        while (!RtcDomain::lse_ready() && Ticker::millis() - t0 < 4000u) {
+        }
+        const uint32_t took = Ticker::millis() - t0;
+        RtcDomain::unlock(was_unlocked);
+        print(serial, "  the LSE was off (a power-on leaves it so): started, LSERDY ",
+              RtcDomain::lse_ready() ? "after " : "NEVER in ", took, " ms", crlf);
+        return RtcDomain::lse_ready();
+    }
+}
+
 void tn_sleep_story() {
     quiet_everything();
     for (uint16_t i = 0; i < big_words; ++i) {
@@ -2868,6 +2923,14 @@ void tn_sleep_story() {
     // away); the alarm is LPTIM1 on a low-speed clock, which does not
     // (lptim.md). CNDTR is read on both sides of the Stop, and the wall
     // clock the RTC keeps says how long the board was in it.
+    if (!alarm_clock_running()) {
+        print(serial, "  SKIPPED, no verdict claimed: the Stop leg's way out is an "
+              "LPTIM1 alarm on the ", alarm_clock == LptimClock::lse ? "LSE" : "LSI",
+              ", and that oscillator never reported ready - a Stop with no alarm "
+              "running is a board that does not come back", crlf);
+        quiet_everything();
+        return;
+    }
     for (uint16_t i = 0; i < big_words; ++i) {
         big_dst[i] = 0;
     }
@@ -2890,14 +2953,9 @@ void tn_sleep_story() {
         DmaMux::request(ChA::mux_channel, NPace::dma_update_request());
     NPace::interrupts(NPace::update_dma, true);
 
-    // The alarm: LPTIM1 on the low-speed clock this board has, a compare
-    // match 60 ms out, its EXTI line open so it leaves Stop.
-    if constexpr (alarm_clock == LptimClock::lsi) {
-        // 5.4.24: nobody else asks for the LSI on this letter's path, so
-        // the alarm starts the oscillator it is about to count.
-        Rcc::lsi_enable(true);
-        (void)Rcc::lsi_wait_ready();
-    }
+    // The alarm: LPTIM1 on the low-speed clock this board has (running:
+    // alarm_clock_running() above), a compare match 60 ms out, its EXTI
+    // line open so it leaves Stop.
     Lp1d::init();
     Lp1d::kernel_clock(alarm_clock);
     const bool lp = Lp1d::configure({.prescaler = LptimPrescaler::div1}) &&
@@ -3027,6 +3085,45 @@ uint32_t u1_take(Stream& rx, uint32_t max, uint32_t& bad) {
         }
     }
     return got;
+}
+
+/// THE RATE ON THE WIRE, which a loop cannot tell: the single wire
+/// shares one divisor between the transmitter and the receiver it loops
+/// into, so a wrong divisor is a slower or a faster loop and nothing else.
+/// 1024 frames through the transmit engine, timed on the ticker's cycle
+/// count from the first write_bulk() to tx_idle() and TC - the last stop
+/// bit's end - against their time at the rate ASKED, in thousandths; what
+/// comes back is read and thrown away meanwhile. What is read is the
+/// divisor and whatever gap the 16-byte transmit ring leaves between the
+/// engine's runs.
+uint32_t u1_wire_permille() {
+    static uint8_t out[16];
+    for (uint32_t i = 0; i < sizeof out; ++i) {
+        out[i] = static_cast<uint8_t>(i * 37u + 11u);
+    }
+    uint8_t sink[16];
+    constexpr uint32_t frames = 1024;
+    const uint64_t wire = static_cast<uint64_t>(frames) * u1_byte_cycles;
+    const uint32_t budget = static_cast<uint32_t>(wire * 2u) + SysClock::hz / 50u;
+    uint32_t queued = 0;
+    const uint32_t t0 = cycles_now();
+    while (queued < frames && cycles_now() - t0 < budget) {
+        const uint32_t want = frames - queued;   // never a frame more than timed
+        queued += U1::write_bulk({out, want < sizeof out ? want : uint32_t{sizeof out}});
+        while (U1::read_bulk(sink) != 0u) {
+        }
+    }
+    while ((!U1::tx_idle() || (Usart<1>::status() & UsartFlag::tc) == 0u) &&
+           cycles_now() - t0 < budget) {
+        while (U1::read_bulk(sink) != 0u) {
+        }
+    }
+    const uint32_t took = cycles_now() - t0;
+    u1_settle(4);
+    while (U1::read_bulk(sink) != 0u) {
+    }
+    U1::clear_errors();
+    return queued < frames ? 0u : static_cast<uint32_t>(1000ull * took / wire);
 }
 
 void to_circular_receive() {
@@ -3211,6 +3308,15 @@ void to_circular_receive() {
           drained - ruler, " cycles on a drained, empty ring, ", told - ruler,
           " with a byte the consumer was told of and has not read (", one,
           " read after)", crlf);
+
+    // --- and the line itself at the rate asked.
+    const uint32_t pm = u1_wire_permille();
+    print(serial, "  1024 frames through the transmit engine in ", pm,
+          " thousandths of their wire time at ", u1_baud, " baud", crlf);
+    bench.verdict("THE LOOP RUNS AT THE RATE ASKED: 1024 frames through the transmit "
+                  "engine in their wire time at 1 Mbaud, -1 % to +3 % - what the "
+                  "stream above, sharing one divisor at both ends, could not tell",
+                  pm >= 990u && pm <= 1030u);
 
     U1::release();
     u1_live = false;

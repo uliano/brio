@@ -47,13 +47,27 @@
  * this type" is nothing C++ can count without stateful metaprogramming,
  * and it would also refuse the legal in-turn shape.
  *
+ * THE LEVEL IS THE RULE'S FOR A TRANSMIT: the NEXT of the arbiter's four
+ * (docs/design/dma.md, "The priority rule"). Each channel takes one of
+ * four levels (CHCTRLB.LVL), a higher number winning while every level is
+ * enabled, and a level is enabled by CTRL.LVLENx (25.6.2.4) - a channel
+ * at a level not enabled is invisible to the arbiter (25.8.1, measured).
+ * A starved transmit only leaves its line idle a while, so the engine
+ * arms at level 2, the one below an overrunning receive's 3; with ONE
+ * channel in the image the level ranks it against nothing, and it is
+ * stated rather than left at the reset value so the day the controller
+ * admits a second user its order is already the rule's. The bus's own
+ * QOSCTRL (25.8.7, the DMAC as a host of the SRAM, 10.4.3) is another
+ * knob and stays at its reset value.
+ *
  * TWO MOMENTS. arm() configures the binding ONCE - the block reset and
  * enabled with its descriptor sections registered, the channel reset and
- * configured (the trigger, TRIGACT beat), TCMPL and TERR armed, the NVIC
- * line opened, and the slot's constant half written: the fixed
- * destination (the SERCOM's DATA), no next descriptor. A block start then
- * writes what changes - BTCTRL (one literal), BTCNT and SRCADDR, three
- * stores into SRAM - and enables the channel with one store.
+ * configured (the trigger, TRIGACT beat, the level), TCMPL and TERR
+ * armed, the NVIC line opened, and the slot's constant half written: the
+ * fixed destination (the SERCOM's DATA), no next descriptor. A block
+ * start then writes what changes - BTCTRL (one literal), BTCNT and
+ * SRCADDR, three stores into SRAM - and enables the channel with one
+ * store.
  *
  * CHID IS WRITTEN ONCE. The channel registers sit behind a selector
  * (25.8.17: CHCTRLA, CHCTRLB, CHINTEN*, CHINTFLAG and CHSTATUS talk to
@@ -89,13 +103,27 @@
  * first beat of its next block (measured, dmac.md) - which no run from a
  * ring in SRAM provokes.
  *
- * THE STANDING REQUEST. A SERCOM's DRE is a level and the DMAC latches a
- * trigger on its RISE (25.8.8) - but a rise while the channel is disabled
- * with its trigger selected is latched and served on the next enable, and
- * so is the selection of a trigger onto a request already standing
- * (measured, dmac.md), so the enable of a block fires its first beat by
- * itself and nothing kicks: a software trigger after that beat started is
- * a SECOND beat into a full DATA (measured, docs/samc21/sercom.md).
+ * THE STANDING REQUEST. A SERCOM's transmit request is a level - "set
+ * when the transmit buffer is empty", "cleared when DATA is written"
+ * (31.6.4.1) - and the channel takes it as it finds it: a request that
+ * stands at the channel's enable, or when its trigger is selected onto
+ * it, is served at once, so the enable of a block fires its first beat by
+ * itself and nothing kicks - a software trigger after that beat started
+ * is a SECOND beat into a full DATA (measured, docs/samc21/sercom.md).
+ * What the channel does not do is keep a request across its own disable
+ * (25.6.2.4: a disabled channel leaves the queue of pending ones, PEND
+ * cleared, 25.8.23): a DRE that rose and fell again while the channel was
+ * disabled fires nothing at the next enable (measured,
+ * docs/samc21/dmac.md, "A released requester").
+ *
+ * A RELEASE LEAVES THE NEXT OWNER NOTHING. The channel keeps no request
+ * (above), and arm() resets the block (CTRL.SWRST, "all registers in the
+ * DMAC except DBGCTRL", 25.6.2.2) and the channel before it selects the
+ * next owner's trigger. The requester's own line is its owner's to
+ * withdraw: a SERCOM gated with ENABLE set holds DRE up and hands
+ * whoever selects its trigger next one stray beat, so samc21/sercom.hpp's
+ * Uart resets its SERCOM in release() before the gate (measured, the same
+ * section).
  *
  * Errata 1.10.1 (CRCDATAIN, rev B), 1.10.2 and 1.10.3 (linked descriptors,
  * E/G/J revisions B..D - the N family's row carries the marks under E and
@@ -111,6 +139,7 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <span>
 
 #include "sam.h"
@@ -158,6 +187,9 @@ public:
     static constexpr bool present = true;
     /// The one channel (the file header).
     static constexpr uint8_t channel = 0;
+    /// The arbitration level the channel arms at: the rule's for a
+    /// transmit, the next of four (the file header).
+    static constexpr uint8_t level = 2;
     using element = uint8_t;
 
     /**
@@ -272,6 +304,19 @@ public:
                (regs().DMAC_CHSTATUS & (DMAC_CHSTATUS_PEND_Msk | DMAC_CHSTATUS_BUSY_Msk)) == 0u;
     }
 
+    /// The level the armed channel reads back (CHCTRLB.LVL), when CTRL
+    /// enables that level - nothing when it does not, the channel then
+    /// invisible to the arbiter (25.6.2.4). For an owner that holds the
+    /// engine armed: the block's clock is off otherwise.
+    static std::optional<uint8_t> priority() {
+        const uint8_t lvl = static_cast<uint8_t>(
+            (regs().DMAC_CHCTRLB & DMAC_CHCTRLB_LVL_Msk) >> DMAC_CHCTRLB_LVL_Pos);
+        if ((regs().DMAC_CTRL & DMAC_CTRL_LVLEN(1u << lvl)) == 0u) {
+            return std::nullopt;
+        }
+        return lvl;
+    }
+
     /// The block's interrupt flags, taken and cleared in one INTPEND read
     /// and store (25.8.10: a write of {flags, id} clears them for that id).
     /// Zero when nothing is pending. The DMAC_Handler body, through the
@@ -344,11 +389,12 @@ private:
      * (refused by the silicon with either engine enabled, 25.8.1), the
      * two sections registered while it is stopped (BASEADDR and WRBADDR
      * are enable-protected: a write under DMAENABLE is discarded), CHID
-     * at 0 for good, level 0 alone enabled, the block on.
+     * at 0 for good, the engine's level alone enabled, the block on.
      *
-     * The level is the group macro DMAC_CTRL_LVLEN(): the per-level
-     * DMAC_CTRL_LVLEN0() masks to one bit, and a channel whose level is
-     * not enabled is INVISIBLE to the arbiter (25.8.1, measured).
+     * The level is the group macro DMAC_CTRL_LVLEN(), one bit a level:
+     * the per-level DMAC_CTRL_LVLEN0() masks to one bit, and a channel
+     * whose level is not enabled is INVISIBLE to the arbiter (25.8.1,
+     * measured).
      */
     static bool block_up() {
         Nvic::disable(Dmac::irq());
@@ -368,7 +414,8 @@ private:
         regs().DMAC_BASEADDR = reinterpret_cast<uint32_t>(&slot_);
         regs().DMAC_WRBADDR = reinterpret_cast<uint32_t>(&write_back_);
         regs().DMAC_CHID = static_cast<uint8_t>(DMAC_CHID_ID(channel));
-        regs().DMAC_CTRL = static_cast<uint16_t>(DMAC_CTRL_LVLEN(0x1u) | DMAC_CTRL_DMAENABLE_Msk);
+        regs().DMAC_CTRL =
+            static_cast<uint16_t>(DMAC_CTRL_LVLEN(1u << level) | DMAC_CTRL_DMAENABLE_Msk);
         return true;
     }
 
@@ -402,9 +449,9 @@ private:
     /// The channel from whatever state it is in: disabled (bounded - an
     /// SWRST under ENABLE is ignored silently), reset, the slot and its
     /// write-back cleared, CHCTRLB written (the trigger, TRIGACT beat,
-    /// level 0), the flags cleared, TCMPL and TERR armed, and the slot's
-    /// constant half: the destination, no next descriptor. arm() and
-    /// abandon() are the same act for a different reason.
+    /// the engine's level), the flags cleared, TCMPL and TERR armed, and
+    /// the slot's constant half: the destination, no next descriptor.
+    /// arm() and abandon() are the same act for a different reason.
     static bool take_channel() {
         if (!channel_off()) {
             return false;
@@ -419,7 +466,7 @@ private:
         clear(slot_);
         clear(write_back_);
         regs().DMAC_CHCTRLB = DMAC_CHCTRLB_TRIGACT(DMAC_CHCTRLB_TRIGACT_BEAT_Val) |
-                              DMAC_CHCTRLB_TRIGSRC(trigger_) | DMAC_CHCTRLB_LVL(0u);
+                              DMAC_CHCTRLB_TRIGSRC(trigger_) | DMAC_CHCTRLB_LVL(level);
         regs().DMAC_CHINTENCLR = flag_all;
         regs().DMAC_CHINTFLAG = flag_all;
         regs().DMAC_CHINTENSET = static_cast<uint8_t>(DMAC_CHINTENSET_TCMPL_Msk |

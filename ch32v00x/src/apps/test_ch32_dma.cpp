@@ -27,7 +27,9 @@
 //      handful of holes in the map and REPORTS what the silicon does,
 //      judging only that each block ended one way or the other
 //   e  the console's transmit engine: a burst longer than the TX ring
-//      printed through it, the blocks counted, no fault
+//      printed through it, the blocks counted, no fault, and the run
+//      timed against its wire at the rate asked - the host reading the
+//      console would not see a divisor a few per cent off
 //   f  the console's receive engine: what the ring holds is what was
 //      typed - this letter asks for a line and echoes it
 //   g  the copy engine on channel 7: copy and fill at the three beats
@@ -265,22 +267,40 @@ void td_error() {
 // e - the console's transmit engine
 // ---------------------------------------------------------------------------
 void te_tx_engine() {
+    // The line idle first: what the menu printed is out.
+    while (!Serial::tx_idle()) {
+    }
     const uint32_t blocks_before = tx_blocks;
     // Longer than the 128-byte TX ring: print() blocks on the full ring
-    // and the engine drains it run by run.
+    // and the engine drains it run by run. Timed on the ticker's cycle
+    // count from the first byte handed over to tx_idle() - TC after the
+    // last block - against 2720 bits at the rate asked: a console the
+    // host reads at 115200 tolerates a divisor a few per cent off, the
+    // run does not.
+    const uint32_t t0 = Ticker::cycles();
     for (uint8_t line = 0; line < 4u; ++line) {
         print(serial, "  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", crlf);
     }
     while (!Serial::tx_idle()) {
     }
+    const uint32_t took = Ticker::cycles() - t0;
+    // 272 frames of ten bits at 115200 (BRR 417 for 416.7: the divisor's
+    // own rounding is 0.8 thousandths slow).
+    // In 32 bits (the CH32V003 has no multiplier to spend on a 64-bit
+    // division): a run over 4 M cycles, three and a half times its wire,
+    // reads as 9999 rather than overflow.
+    constexpr uint32_t wire = static_cast<uint32_t>(2720ull * SysClock::hz / 115200u);
+    const uint32_t permille = took < 4'000'000u ? 1000u * took / wire : 9999u;
     (void)delay_us(clock, 500);
     const uint32_t blocks = tx_blocks - blocks_before;
     const bool drained = Serial::tx_idle();   // before the next print refills it
     print(serial, "  272 bytes through the transmit engine in ", blocks, " block(s), faults ",
-          Serial::dma_faults(), crlf);
+          Serial::dma_faults(), "; the run in ", permille, " thousandths of its wire time at 115200", crlf);
     bench.verdict("a burst longer than the ring went out in blocks", blocks >= 2u);
     bench.verdict("with no transfer fault", Serial::dma_faults() == 0u);
     bench.verdict("and the ring drained to empty", drained);
+    bench.verdict("at the rate asked: 2720 bits at 115200 within -1 % to +3 % of their wire time",
+                  permille >= 990u && permille <= 1030u);
 }
 
 // ---------------------------------------------------------------------------

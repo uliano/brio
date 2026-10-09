@@ -164,19 +164,43 @@ forbids.
 PCLK 64 MHz at 115200 (BRR 142222), HSI16 at 115200 (35556) and at 9600
 (426667), and the 32768 Hz crystal at 9600 (874) and at 300 (27962).
 
+**AND AT THE RATE ASKED, TIMED.** The single wire shares one divisor at
+both ends and cannot tell a wrong one, so letter `n` times a run of each
+rate's frames on TIM2 from the first store to TC against their time at
+the rate ASKED (usart.md, "The rate on the wire, timed", has the method
+and the USART's table): a hundredth of a second of frames, 16 at least
+and 1024 at most, judged -1 % to +3 %.
+
+| run | rate asked | STM32G0B1RE | STM32G071RB |
+|---|---|---|---|
+| LPUART1 on PCLK, HSI16 | 115200 | 1000, 1000 | 1000, 1000 |
+| LPUART1 on HSI16 | 9600 | 1000 | 1000 |
+| LPUART1 on the LSE | 9600, 300 | 1004, 1003 | 1002, 1001 |
+| LPUART1 on PCLK, the ladder | 115200 .. 8 M | 1000 at every rung | 1000 at every rung |
+| LPUART1 through the FIFO; through PRESC /64 | 115200; 9600 | 1000; 1000 | 1000; 1000 |
+| LPUART2 on PCLK | 115200 | 1000 | (absent) |
+
+The LSE readings carry HSI16's trim, TIM2 running on it; at 9600 the
+kernel is 3.41 periods a bit and the twenty-bit LPUARTDIV of 34.4.7
+averages them, the run's length exact where each bit's is not (ES0418
+2.13.1 below is about that jitter, a margin and not a rate).
+
 **The wire, not the divisor, is the ceiling.** 115200, 460800 and 921600
 are byte-exact on the open-drain loop; 2 Mbaud and above are not, and
-what fails is the rise time of the pad's own 40 k pull-up. 34.4.7's own
-ceiling from a 64 MHz kernel is fck/3 = 21.3 Mbaud and this bench cannot
-reach it.
+what fails is the rise time of the pad's own 40 k pull-up - while the
+transmitter's frames at 2, 4 and 8 Mbaud take exactly their time, so the
+divisor is right where the loop cannot carry it. 34.4.7's own ceiling
+from a 64 MHz kernel is fck/3 = 21.3 Mbaud and this bench cannot reach
+it.
 
 **The FIFO and the prescaler are both there** (the LP column of table
 184, and the silicon agrees - letter a writes FIFOEN and PRESC on every
 instance of the part): FIFOEN byte-exact at 115200, PRESC = /64 at 9600
-byte-exact. There is no OVER8 to choose.
+byte-exact, each at the rate asked. There is no OVER8 to choose.
 
 **LPUART2 runs the same way** on its own pad, with its own LPUART2SEL
-field and its own APB bit: 8 of 8 bytes at 115200, BRR 142222.
+field and its own APB bit: 8 of 8 bytes at 115200, BRR 142222, its
+frames at the rate asked.
 
 **CR2.CLKEN does not stick on either LPUART** while it sticks on all six
 USARTs - the third authority on the one row of table 184 that is NOT the

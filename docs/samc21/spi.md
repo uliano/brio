@@ -275,9 +275,22 @@ A client answering a stream (the one-ahead pump):
 - All four transfer modes x both bit orders byte-exact in both
   directions; a deliberate DORD mismatch is an EXACT two-way bit
   reversal at both ends.
-- The rate ladder against the crystal: every BAUD really clocks its
-  bits, never short (64-character bursts at 93 kHz to 4 MHz, polled-pump
-  overhead 2.6..6.5 us per character, falling with rate).
+- THE SCK LADDER ON THE WIRE (letter f, the loop-back through PA16, no
+  wire; [../design/overview.md](../design/overview.md), "A loop proves
+  the bytes, never the rate"): a frame inside a polled block - the
+  difference of a 1024- and a 128-frame block in the transmit-only shape,
+  the best of three, so a request's fixed cost cancels - against its
+  eight SCK periods at the rate ASKED, on the 24 MHz crystal (TC2+TC3,
+  41.7 ns). Every rung from 93.75 kHz to 6 MHz reads 1006 thousandths and
+  8 MHz 1007, mode 3 at 1 MHz 1006, and letter g's two rates the same.
+  The reading does not move with the rate, so there is no gap between
+  frames (DATA loaded while the frame before it shifts, 32.6.1) and the
+  six thousandths are OSC48M against the crystal - the oscillator the
+  SERCOM runs on, half a per cent off on this board
+  ([../boards/samc21j.md](../boards/samc21j.md)); the divisor is exact.
+  12 MHz reads 1036 and 24 MHz 1680: there the frame (32 and 16 core
+  cycles) is shorter than the polled loop's turn, so the instrument
+  does not time them (below).
 - Back-to-back characters (no inter-byte gap - one engine request)
   bind at the PEER'S ANSWER RELOAD, and the ladder has two measured
   boundaries. The AVR peer's polled loop: exact to 500 kHz
@@ -360,6 +373,13 @@ declined as a default because a placement of some 2 KB in `.ram_text`
 is the program's call (platform.md, "A handler in SRAM"), not the driver's.
 
 Implemented but not bench-verified:
+
+- The SCK at 12 and 24 MHz ON THE WIRE (BAUD 1 and 0): the polled
+  loop's transmit-only turn of some 34 core cycles outlasts their
+  frames, so a block's time is the loop's (1036 and 1680 thousandths of
+  the wire). A DMA data phase
+  would time them - declined, erratum 1.10.4 ([dmac.md](dmac.md)) - or a
+  meter on SCK.
 
 - A polled transaction's spin budget running out (`spi_stalled` in
   `status()`, the receiver flushed, the select raised): no letter stops

@@ -32,7 +32,16 @@
 // runs what the board decides alone: the baud arithmetic, the frame
 // encoding, the ring contract, the engine's facts and its claim, and on
 // the loop the wire's idle, the interrupt receiver's edge and its skip
-// past a loss, and the level loop at the generator's top rate.
+// past a loss, the level loop at the generator's top rate, and what a
+// released transport leaves the next owner of the DMA channel.
+//
+// A LOOP PROVES THE BYTES, NEVER THE RATE: its receiver samples on the
+// divisor its transmitter shifts on. So every letter that loops or sets a
+// rate also times a run of frames through the transmit engine against the
+// wire's time at the rate ASKED, prints the reading in thousandths and
+// judges it within -1 % and +3 % (wire_permille(), in the loop's section).
+// The host letters need no such reading: their far end is the bridge's
+// own divisor, and a wrong rate there is a broken stream.
 //
 // THE CHOREOGRAPHY every host letter follows, so the console survives:
 //
@@ -47,14 +56,17 @@
 //   4. the board hands the console back at 115200 8N1 and prints its
 //      verdicts.
 //
-// What is exercised, letter by letter - a..d, q, r and t need nothing
+// What is exercised, letter by letter - a..d, q, r, t and w need nothing
 // outside the board and are what z runs; e..p and s stream traffic over the
 // console and are driven by brio stress; x stops the board and runs by its
 // name alone:
-//   a  the baud generator's arithmetic
-//   b  every frame format, written and read back
+//   a  the baud generator's arithmetic, and its ladder - 9600 baud to
+//      3 Mbaud - timed on the loop's wire
+//   b  every frame format, written and read back, and each one's frame
+//      timed on the loop's wire against its own bits
 //   c  the transmit ring's contract under pressure
-//   d  the transmit engine's facts and its claim: one owner at a time
+//   d  the transmit engine's facts and its claim: one owner at a time;
+//      its level read back from the armed channel
 //   e  echo through the plain interrupt transport
 //   f  echo with the DMA transmitter
 //   h  echo at 1 and 2 Mbaud: the DMA transmitter beside the interrupt
@@ -69,15 +81,23 @@
 //      one is handed carried by a move of the skip epoch, none silent
 //   p  bursty traffic with idle gaps, the DMA transmitter echoing
 //   q  tx_idle() on the loop: never before the last stop bit, within a bit
-//      after it, for the plain transport and the transmit engine
+//      after it, for the plain transport and the transmit engine; the
+//      loop's rates timed
 //   r  the interrupt receiver on the loop: one edge from the vector a
 //      burst; a consumer held back past the ring - the loss counted, the
 //      skip epoch moved at the first look after it and nothing the ring
-//      held across it handed out; the consumer's release recovering
+//      held across it handed out; the consumer's release recovering;
+//      the loop's rates timed
 //   s  errors injected under the interrupt receiver (host): each hit
 //      character dropped, counted and skipped past
 //   t  the interrupt receiver at the generator's top rate on the loop:
-//      every level an entry
+//      every level an entry; the rate timed
+//   w  A RELEASED REQUESTER: the transmit engine's trigger standing, the
+//      transport released three ways (disabled and gated, gated with
+//      ENABLE set, Uart::release() with its reset), the one channel bound
+//      again - to no trigger, to the released SERCOM's own, and by the
+//      next Uart - and what each first enable moves (the release contract,
+//      docs/design/dma.md)
 //   x  THE ONE-USER RULE AS A PANIC: a second engined transport's init()
 //      while the loop's holds the claim - the board stops, and the boot
 //      banner after the next reset prints the breadcrumb (code 2,
@@ -88,6 +108,7 @@
 
 #include <stdint.h>
 
+#include <initializer_list>
 #include <optional>
 #include <span>
 
@@ -487,6 +508,13 @@ void report(const Leg& leg, const LegResult& r) {
 // z - what the board can decide on its own
 // =============================================================================
 
+// THE RATE ON THE WIRE, which a loop cannot tell (the loop's section below
+// holds the instrument): letters a and b time their rates and frames
+// there before the loop letters do.
+uint32_t wire_permille(uint32_t baud, const UartFormat& format = {});
+bool wire_ok(uint32_t permille);
+uint32_t frame_bits(const UartFormat& f);
+
 void ta_baud() {
     static constexpr uint32_t ref = 48'000'000;
     static_assert(sercom_baud_reg(ref, 3'000'000).value() == 0,
@@ -547,6 +575,23 @@ void ta_baud() {
     bench.verdict("can_baud refuses what the generator cannot make",
                   UPlain::can_baud(48'000'000, 3'000'000) &&
                       !UPlain::can_baud(48'000'000, 4'000'000));
+
+    // THE LADDER ON THE WIRE: each rung's divisor driving the loop's
+    // transmitter, a run of frames timed against its wire time at the rate
+    // ASKED - the arithmetic above is checked against its own inverse, and
+    // only the wire can tell a divisor that is wrong in both.
+    bool ladder_ok = true;
+    print(plain, "  the ladder on the loop, a run of frames in thousandths of its wire time:");
+    for (uint32_t baud : rates) {
+        const uint32_t pm = wire_permille(baud);
+        print(plain, " ", baud, " ", pm);
+        ladder_ok = ladder_ok && wire_ok(pm);
+    }
+    print(plain, crlf);
+    bench.verdict("EVERY RUNG RUNS AT THE RATE ASKED: 9600 baud to 3 Mbaud, a run of frames on the "
+                  "loop in its wire time within -1 % and +3 % (the divisor's own rounding is 0.14 % "
+                  "at 9600 and less above)",
+                  ladder_ok);
 }
 
 void tb_format() {
@@ -572,6 +617,9 @@ void tb_format() {
     };
     bool chsize_ok = true, parity_ok = true, stop_ok = true, dord_ok = true;
     uint32_t ctrla_seen = 0, ctrlb_seen = 0;
+    // What the console still holds - the letter before this one's last
+    // lines - goes out before the first re-init clears the ring.
+    (void)drain();
     for (const Row& row : rows) {
         const UartFormat f{.bits = row.bits, .parity = row.parity,
                            .two_stop = row.two_stop};
@@ -614,6 +662,24 @@ void tb_format() {
                   dord_ok);
     bench.verdict("the console survived the whole sweep",
                   Sc5::enabled() && UPlain::actual_baud(SysClock::hz) > 114'000u);
+
+    // THE FRAME ON THE WIRE: the same formats on the loop, a run of each
+    // timed against its frame's own length at 115200 - start, data,
+    // parity and stop bits - which the register readback above cannot
+    // show.
+    bool frames_ok = true;
+    print(plain, "  the frames on the loop at 115200, in thousandths of their wire time:");
+    for (const Row& row : rows) {
+        const UartFormat f{.bits = row.bits, .parity = row.parity, .two_stop = row.two_stop};
+        const uint32_t pm = wire_permille(115200, f);
+        print(plain, " ", format_bits(f), format_parity(f), f.two_stop ? '2' : '1', " (",
+              frame_bits(f), " bits) ", pm);
+        frames_ok = frames_ok && wire_ok(pm);
+    }
+    print(plain, crlf);
+    bench.verdict("every frame takes its own length on the wire: a run of each format on the loop "
+                  "within -1 % and +3 % of its bits at 115200",
+                  frames_ok);
 }
 
 void tc_ring() {
@@ -659,6 +725,11 @@ void tc_ring() {
 constexpr uint8_t owner_a = 9;
 constexpr uint8_t owner_b = 10;
 
+// The loop's engined transport for a reading of the armed engine (letter
+// d); the loop's section below holds the transport.
+bool arm_loop_engine();
+void release_loop_engine();
+
 void td_engine() {
     bench.verdict("the plain transport names no engine", !UPlain::has_tx_engine);
     bench.verdict("the engined one names the transmit engine", UTxDma::has_tx_engine);
@@ -698,6 +769,19 @@ void td_engine() {
     bench.verdict("and the other owner may take it then (one user at a time)",
                   b_now && held_by_b == owner_b);
     bench.verdict("its release leaves nobody holding the engine", after_b == 0u);
+
+    // THE LEVEL, read back from the armed channel: the loop's engined
+    // transport holds the engine for the reading and gives it back.
+    std::optional<uint8_t> level;
+    if (arm_loop_engine()) {
+        level = DmaTxEngine::priority();
+        release_loop_engine();
+    }
+    print(plain, "  the armed channel's level: ", level ? static_cast<uint32_t>(*level) : 0xFFu,
+          level ? "" : " (not enabled in CTRL)", crlf);
+    bench.verdict("the transmit engine arms at level 2 of four, the rule's NEXT for a transmit, "
+                  "with that level enabled in CTRL",
+                  level.has_value() && *level == DmaTxEngine::level && DmaTxEngine::level == 2u);
 }
 
 // =============================================================================
@@ -1143,6 +1227,105 @@ void loop_settle(uint32_t baud) {
     return true;
 }
 
+bool arm_loop_engine() {
+    loop_live = Loop::txdma;
+    if (LTxDma::init(clock, 115'200u)) {
+        return true;
+    }
+    release_loop_engine();
+    return false;
+}
+
+void release_loop_engine() {
+    LTxDma::release();
+    loop_live = Loop::none;
+}
+
+// ---- the rate on the wire ----------------------------------------------------
+//
+// A LOOP CANNOT TELL A WRONG RATE: its receiver samples on the divisor its
+// transmitter shifts on, so a divisor wrong at both ends is a slower or a
+// faster loop and nothing else. So every letter that loops or sets a rate
+// times a RUN of frames against the wire's time at the rate it ASKED -
+// never at the rate the divisor produced, which is what a wrong divisor
+// would hide - and prints the reading in thousandths of that time.
+//
+// The run goes through the transmit engine, x 1.00 of the wire at every
+// rate this generator makes (the interrupt transmitter is the CPU's at
+// 3 Mbaud, x 2.05: docs/samc21/sercom.md), with the loop's receiver
+// unserved - SERCOM1's line held off, the overflow in its buffer cleared
+// by the release - so the run is the transmitter's alone. It is timed on
+// the ticker's cycle count (one core cycle, OSC48M: the same oscillator as
+// the generator, so the reading judges the divisor and not the oscillator)
+// from the first block's start to the last stop bit (tx_idle(): TXC), a
+// hundredth of a second of frames - sixteen at least, 1024 at most, where
+// the run's fixed cost of some tens of cycles is a thousandth of a 3 Mbaud
+// run.
+
+/// The bits of one frame: start, data, parity, stop.
+uint32_t frame_bits(const UartFormat& f) {
+    uint32_t data = 8;
+    switch (f.bits) {
+        case UartBits::five: data = 5; break;
+        case UartBits::six: data = 6; break;
+        case UartBits::seven: data = 7; break;
+        case UartBits::nine: data = 9; break;
+        default: break;
+    }
+    return 1u + data + (f.parity != UartParity::none ? 1u : 0u) + (f.two_stop ? 2u : 1u);
+}
+
+/// The verdict on a reading: never faster than the rate asked by more than
+/// the ruler's own grain, at most three per cent slower.
+bool wire_ok(uint32_t permille) { return permille >= 990u && permille <= 1030u; }
+
+uint32_t wire_permille(uint32_t baud, const UartFormat& format) {
+    static uint8_t run[1024];
+    const uint32_t bits = frame_bits(format);
+    uint32_t frames = baud / (100u * bits);
+    frames = frames < 16u ? 16u : (frames > sizeof run ? static_cast<uint32_t>(sizeof run) : frames);
+    for (uint32_t i = 0; i < frames; ++i) {
+        run[i] = static_cast<uint8_t>(0x55u + i);
+    }
+    loop_live = Loop::txdma;
+    if (!LTxDma::init(clock, baud, format)) {
+        loop_live = Loop::none;
+        return 0;
+    }
+    loop_settle(baud);
+    Nvic::disable(Sc1::irq());   // the receiver unserved: the run is the transmitter's
+    uint32_t q = LTxDma::write_bulk(std::span<const uint8_t>(run, frames));
+    const uint32_t t0 = cycles_now();   // the first block started: its first beat is in DATA
+    const uint64_t wire =
+        static_cast<uint64_t>(bits) * frames * SysClock::hz / baud;
+    while (q < frames) {
+        q += LTxDma::write_bulk(std::span<const uint8_t>(run + q, frames - q));
+    }
+    while (!LTxDma::tx_idle()) {
+        if (cycles_now() - t0 > 2u * static_cast<uint32_t>(wire)) {
+            break;
+        }
+    }
+    const uint32_t took = cycles_now() - t0;
+    LTxDma::release();
+    loop_live = Loop::none;
+    return static_cast<uint32_t>(1000ull * took / wire);
+}
+
+/// The rungs a loop letter ran at, each timed: printed, and judged all at
+/// once.
+bool wire_rungs(std::initializer_list<uint32_t> rates) {
+    bool ok = true;
+    print(plain, "  on the wire, a run of frames in thousandths of its time at the rate asked:");
+    for (const uint32_t baud : rates) {
+        const uint32_t pm = wire_permille(baud);
+        print(plain, " ", baud, " ", pm);
+        ok = ok && wire_ok(pm);
+    }
+    print(plain, crlf);
+    return ok;
+}
+
 // ---- q - tx_idle() on the pad ------------------------------------------------
 
 struct IdleProbe {
@@ -1184,7 +1367,12 @@ IdleProbe probe_idle(uint32_t baud, uint32_t n, Handed handed) {
     uint32_t turn_idle = 0;
     uint32_t turn = 0;
     const uint32_t c0 = cycles_now();
-    for (; turn < 400'000u; ++turn) {
+    // The receiver is read on both sides of tx_idle(), so the longest gap
+    // between two reads is half a turn and not a whole one: at 3 Mbaud the
+    // two-level buffer holds two frames, 320 cycles, and a turn that read
+    // it once lost a character in some runs, whenever the transmit
+    // engine's completion interrupt landed in it.
+    auto take = [&] {
         while (Sc1::rxc_flag()) {
             (void)Sc1::data();
             if (++got == n) {
@@ -1192,10 +1380,14 @@ IdleProbe probe_idle(uint32_t baud, uint32_t n, Handed handed) {
                 r.last_seen = true;
             }
         }
+    };
+    for (; turn < 400'000u; ++turn) {
+        take();
         if (!r.idle_seen && U::tx_idle()) {
             turn_idle = turn;
             r.idle_seen = true;
         }
+        take();
         if (r.idle_seen && got >= n) {
             break;
         }
@@ -1287,6 +1479,9 @@ void tq_tx_idle() {
         report_idle("transmit engine", baud, r);
         judge_idle(baud, r);
     }
+    bench.verdict("and the loop runs at the rates asked: 115200, 1 and 3 Mbaud, a run of frames in "
+                  "its wire time within -1 % and +3 %",
+                  wire_rungs({115'200u, 1'000'000u, 3'000'000u}));
 }
 
 // ---- r - the interrupt receiver's edge and its skip --------------------------
@@ -1419,6 +1614,9 @@ void tr_receiver_edge() {
                   look_empty && skips_look == 1u);
     bench.verdict("the release recovers: the next burst whole, in order, the epoch still",
                   c.got == after && c.bad == 0u && skips_end == 1u);
+    bench.verdict("and the loop runs at the rates asked: 1 and 3 Mbaud, a run of frames in its "
+                  "wire time within -1 % and +3 %",
+                  wire_rungs({1'000'000u, 3'000'000u}));
 }
 
 // ---- s - errors injected under the interrupt receiver (host) ------------------
@@ -1536,6 +1734,289 @@ void tt_levels() {
     bench.verdict("the interrupt receiver keeps a 3 Mbaud stream: every byte, in order",
                   received == n && bad == 0u);
     bench.verdict("no hardware overrun", hw == 0u);
+    bench.verdict("and the loop runs at the rate asked: 3 Mbaud, a run of frames in its wire time "
+                  "within -1 % and +3 %",
+                  wire_rungs({3'000'000u}));
+}
+
+// ---- w - a released requester: what reaches the next owner -------------------
+//
+// The release contract (docs/design/dma.md): a peripheral done with a
+// channel leaves no request behind for the next owner. On this controller
+// the request a channel serves is ITS TRIGGER SELECTION's - CHCTRLB.TRIGSRC
+// names one peripheral line - and the transmitter's line is a level, "set
+// when the transmit buffer is empty" (31.6.4.1). Two things could outlive
+// a release: a rise the channel kept from before, and the level in the
+// gated SERCOM. Each is staged with the transmit engine's trigger standing
+// - the last block over, its channel disabled by its end (25.6.2.6), DRE
+// up behind it - and the release is run three ways: the SERCOM disabled
+// and gated, as the release did before the reset (staged here by hand,
+// the resource's verbs in its order); gated with ENABLE left set, a
+// release that skips the disable too; and Uart::release(), which resets
+// the SERCOM before the gate. Then the one channel is bound again:
+//
+//   1. to NO trigger (TRIGSRC 0), its destination a word of RAM, and a
+//      block started: anything that moves is a rise the release and the
+//      next arm() let through;
+//   2. to the RELEASED SERCOM's own trigger, the instance still gated: a
+//      beat that moves is a request the gated instance holds;
+//   3. by the next Uart on the same SERCOM, the whole hand-over: its
+//      first block on the loop, every byte, in order, nothing more.
+//
+// And a control first, on whether the channel keeps a rise at all: DATA
+// filled by hand behind the engine's last block - DRE falling and rising
+// again while the channel is disabled, then low - and a block of one
+// started: a kept rise would fire its beat into a full DATA at the enable.
+
+/// The owner id letter w's hand-staged bindings claim with: no Uart's (a
+/// Uart's is its SERCOM number plus one).
+constexpr uint8_t probe_owner = 11;
+/// What a hand-staged binding's channel writes: a word of RAM, the low
+/// byte a beat's.
+volatile uint32_t probe_sink = 0;
+constexpr uint32_t probe_mark = 0xA5A5A5A5u;
+/// Interrupt flags the DMAC raised while a hand-staged binding held the
+/// engine (DMAC_Handler takes them for it).
+volatile uint8_t probe_flags = 0;
+const uint8_t probe_run[4] = {0x5A, 0x5B, 0x5C, 0x5D};
+
+struct Bound {
+    bool armed;
+    bool moved;        ///< the sink was written
+    uint8_t beat;      ///< its low byte, a beat's
+    bool busy;         ///< the engine's block still claimed
+    bool waiting;      ///< the channel enabled with nothing pending or moving
+    uint8_t flags;     ///< what the DMAC raised
+};
+
+/// The one channel bound by hand to `trigger`, its destination the sink,
+/// a block of four started: what moved within a millisecond. The block is
+/// then abandoned and the claim given back.
+Bound bind_probe(uint8_t trigger) {
+    Bound b{};
+    probe_sink = probe_mark;
+    probe_flags = 0;
+    b.armed = DmaTxEngine::arm(probe_owner, &probe_sink, trigger);
+    if (b.armed) {
+        (void)DmaTxEngine::start(std::span<const uint8_t>(probe_run, sizeof probe_run));
+        spin_ms(1);
+        b.moved = probe_sink != probe_mark;
+        b.beat = static_cast<uint8_t>(probe_sink & 0xFFu);
+        b.busy = DmaTxEngine::busy();
+        b.waiting = DmaTxEngine::waiting();
+        b.flags = probe_flags;
+        (void)DmaTxEngine::abandon();
+        DmaTxEngine::clear_faults();
+    }
+    DmaTxEngine::release(probe_owner);
+    return b;
+}
+
+void print_bound(const char* what, const Bound& b) {
+    print(plain, "    bound to ", what, ": armed ", b.armed ? 1u : 0u, ", moved ",
+          b.moved ? 1u : 0u, " (the sink's low byte ", hex(b.beat), "), busy ", b.busy ? 1u : 0u,
+          ", waiting ", b.waiting ? 1u : 0u, ", DMAC flags ", hex(b.flags), crlf);
+}
+
+/// The loop's engined transport up, a run out and drained to its last
+/// stop bit, the receiver's ring emptied: the engine's trigger standing.
+bool stand_trigger(uint32_t baud, uint32_t n) {
+    loop_live = Loop::txdma;
+    if (!LTxDma::init(clock, baud)) {
+        return false;
+    }
+    loop_settle(baud);
+    static uint8_t out[64];
+    const uint32_t len = n < sizeof out ? n : static_cast<uint32_t>(sizeof out);
+    for (uint32_t i = 0; i < len; ++i) {
+        out[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    (void)LTxDma::write_bulk(std::span<const uint8_t>(out, len));
+    uint32_t spins = 0;
+    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
+    }
+    loop_settle(baud);
+    uint8_t sink[64];
+    while (LTxDma::read_bulk(std::span<uint8_t>(sink, sizeof sink)) != 0u) {
+    }
+    return LTxDma::tx_idle() && Sc1::dre_flag();
+}
+
+/// The three releases letter w compares.
+enum class Way : uint8_t { disabled, enabled, reset };
+
+/// A release staged by hand: the engine's release, then the resource's
+/// teardown WITHOUT CTRLA.SWRST - interrupts off, disabled unless
+/// `keep_enabled`, the core clock and the bus clock gated - then the pin,
+/// in Uart::release()'s order.
+void release_unreset(bool keep_enabled) {
+    DmaTxEngine::release(loop_owner);
+    Nvic::disable(Sc1::irq());
+    Sc1::enable_interrupt(SercomFlag::all, false);
+    if (!keep_enabled) {
+        (void)Sc1::enable(false);
+    }
+    GclkChannel::disconnect(Sc1::gclk_core_id());
+    Sc1::bus_clock(false);
+    Pin<'A', 16>::release();
+}
+
+/// What a released SERCOM1 holds, read through its bus clock alone (APB
+/// registers answer without the core clock) and gated again.
+struct Held {
+    uint8_t flags;
+    uint32_t ctrla;
+};
+Held read_released() {
+    Sc1::bus_clock(true);
+    const Held h{Sc1::flags(), Sc1::regs().SERCOM_CTRLA};
+    Sc1::bus_clock(false);
+    return h;
+}
+
+struct Handover {
+    uint32_t got;
+    uint32_t bad;
+    uint8_t faults;
+    bool idle;
+};
+
+/// The next owner: the Uart on SERCOM1 again, a run of 256 out on the loop
+/// and read back - every byte, in order, nothing more a millisecond after.
+Handover next_uart(uint32_t baud) {
+    Handover h{};
+    loop_live = Loop::txdma;
+    if (!LTxDma::init(clock, baud)) {
+        loop_live = Loop::none;
+        return h;
+    }
+    loop_settle(baud);
+    uint32_t s = lfsr_seed;
+    static uint8_t out[256];
+    for (uint8_t& b : out) {
+        b = lfsr_next(s);
+    }
+    (void)LTxDma::write_bulk(std::span<const uint8_t>(out, sizeof out));
+    uint32_t spins = 0;
+    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
+    }
+    h.idle = LTxDma::tx_idle();
+    loop_settle(baud);
+    spin_ms(1);
+    uint32_t r = lfsr_seed;
+    uint8_t in[64];
+    for (;;) {
+        const uint32_t got = LTxDma::read_bulk(std::span<uint8_t>(in, sizeof in));
+        if (got == 0u) {
+            break;
+        }
+        for (uint32_t i = 0; i < got; ++i) {
+            h.bad += in[i] != lfsr_next(r) ? 1u : 0u;
+        }
+        h.got += got;
+    }
+    h.faults = LTxDma::dma_faults();
+    LTxDma::release();
+    loop_live = Loop::none;
+    return h;
+}
+
+void tw_released_requester() {
+    // ---- the control: does the channel keep a rise? ----------------------
+    constexpr uint32_t slow = 115'200u;
+    const bool stood = stand_trigger(slow, 16);
+    // DATA filled by hand: the first write moves to the idle shifter at
+    // once (DRE falls and rises again while the channel is disabled), the
+    // second stays in DATA behind it: DRE low.
+    Sc1::data(0xC1u);
+    uint32_t spins = 0;
+    while (!Sc1::dre_flag() && spins++ < 10'000u) {
+    }
+    Sc1::data(0xC2u);
+    const bool dre_low = !Sc1::dre_flag();
+    static const uint8_t one[1] = {0xB1u};
+    (void)LTxDma::write_bulk(std::span<const uint8_t>(one, 1));
+    spins = 0;
+    while (!LTxDma::tx_idle() && spins++ < 4'000'000u) {
+    }
+    loop_settle(slow);
+    uint8_t seen[8] = {};
+    const uint32_t n_seen = LTxDma::read_bulk(std::span<uint8_t>(seen, sizeof seen));
+    LTxDma::release();
+    loop_live = Loop::none;
+    print(plain, "  control at ", slow, ": trigger standing ", stood ? 1u : 0u,
+          ", DATA filled by hand (DRE low ", dre_low ? 1u : 0u,
+          "), a block of one started: the loop read ", n_seen, " bytes:");
+    for (uint32_t i = 0; i < n_seen; ++i) {
+        print(plain, " ", hex(seen[i]));
+    }
+    print(plain, crlf);
+
+    // ---- the three releases, then the channel bound again ----------------
+    constexpr uint32_t baud = 1'000'000u;
+    static const char* const names[] = {"disabled and gated, no reset",
+                                        "gated with ENABLE set, no reset",
+                                        "Uart::release(), the reset before the gate"};
+    Bound none[3]{};
+    Bound own[3]{};
+    Held held[3]{};
+    Handover next[3]{};
+    bool stood_all = true;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        const Way way = static_cast<Way>(k);
+        stood_all = stand_trigger(baud, 64) && stood_all;
+        if (way == Way::reset) {
+            LTxDma::release();
+        } else {
+            release_unreset(way == Way::enabled);
+        }
+        loop_live = Loop::none;
+        held[k] = read_released();
+        none[k] = bind_probe(0u);
+        own[k] = bind_probe(Sc1::dma_tx_trigger());
+        next[k] = next_uart(baud);
+    }
+    bool none_still = true;
+    bool next_whole = true;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        print(plain, "  released ", names[k], ": the gated SERCOM1 reads INTFLAG ",
+              hex(held[k].flags), ", CTRLA ", hex(held[k].ctrla), crlf);
+        print_bound("no trigger", none[k]);
+        print_bound("the released SERCOM1's own", own[k]);
+        print(plain, "    the next Uart on SERCOM1: ", next[k].got, " of 256 back, ", next[k].bad,
+              " off the pattern, faults ", next[k].faults, next[k].idle ? "" : ", NOT idle", crlf);
+        none_still = none_still && none[k].armed && !none[k].moved;
+        next_whole = next_whole && next[k].got == 256u && next[k].bad == 0u &&
+                     next[k].faults == 0u && next[k].idle;
+    }
+    bench.verdict("the trigger stood at every release: the last block over and DRE up",
+                  stood && stood_all);
+    bench.verdict("THE CHANNEL KEEPS NO RISE: one that came and went while it was disabled fired "
+                  "no beat at its enable - the block of one waited for DATA to empty, and the loop "
+                  "read 0xC1, 0xC2, 0xB1 in order",
+                  dre_low && n_seen == 3u && seen[0] == 0xC1u && seen[1] == 0xC2u &&
+                      seen[2] == 0xB1u);
+    bench.verdict("a disable withdraws the transmit request: the gated instance reads DRE clear, "
+                  "its configuration standing, and the channel bound to its trigger moves nothing",
+                  (held[0].flags & SercomFlag::dre) == 0u && held[0].ctrla != 0u &&
+                      own[0].armed && !own[0].moved);
+    bench.verdict("A GATED CLOCK HOLDS A REQUEST LEFT STANDING: gated with ENABLE set, the instance "
+                  "reads DRE up behind the gate, and the channel bound to its trigger takes ONE "
+                  "stray beat - the next block's first byte - and waits",
+                  (held[1].flags & SercomFlag::dre) != 0u && own[1].armed && own[1].moved &&
+                      own[1].beat == probe_run[0] && own[1].waiting);
+    bench.verdict("Uart::release() leaves the instance reset behind the gate - INTFLAG and CTRLA "
+                  "zero - and the channel bound to its trigger moves nothing",
+                  held[2].flags == 0u && held[2].ctrla == 0u && own[2].armed && !own[2].moved);
+    bench.verdict("bound to no trigger after any of the three releases, the channel moves nothing "
+                  "at its enable",
+                  none_still);
+    bench.verdict("the next Uart's first block after any of them: 256 of 256 in order, no fault - "
+                  "the hand-over needs nothing of the next owner",
+                  next_whole);
+    bench.verdict("and the loop runs at the rate asked: 1 Mbaud, a run of frames in its wire time "
+                  "within -1 % and +3 %",
+                  wire_rungs({baud}));
 }
 
 // ---- x - the one-user rule as a panic ----------------------------------------
@@ -1643,6 +2124,10 @@ extern "C" void DMAC_Handler() {
         LTxDma::dma_isr();
     } else if (owner == console_owner) {
         UTxDma::dma_isr();
+    } else {
+        // Letter w's hand-staged bindings: the flags taken and kept, so a
+        // completion nobody consumes cannot hold the line up.
+        probe_flags = static_cast<uint8_t>(probe_flags | brio::DmaTxEngine::take_interrupt());
     }
 }
 
@@ -1679,6 +2164,8 @@ int main() {
                  tr_receiver_edge);
     bench.letter('s', "errors under the interrupt receiver (host)", ts_errors, false);
     bench.letter('t', "the interrupt receiver at 3 Mbaud on the loop", tt_levels);
+    bench.letter('w', "a released requester: what reaches the next owner of the channel",
+                 tw_released_requester);
     bench.letter('x', "the one-user rule as a PANIC (stops the board)", tx_refusal, false);
 
     if (serial_ok) {

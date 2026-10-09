@@ -219,7 +219,7 @@ brio::Usart<4>::send_break();
 
 ## Bench findings
 
-The reference suite is `test_x035_usart` (27 verdicts in `z`, letter `w`
+The reference suite is `test_x035_usart` (29 verdicts in `z`, letter `w`
 with its jumper PB0-PB1 in place) on a CH32X035F8U6 - WCH's evaluation
 board in its QFN20 edition, over a WCH-LinkE - at 48 MHz, the console on
 USART2 and the instance under test USART4 on its default column, PB0
@@ -256,8 +256,17 @@ and PB1. What it measured:
   port disabled; the flow-control pair takes RTSE and CTSE; mute mode
   takes the address-mark wake, the address 9 and RWU.
 - **A frame's length** (letter `d`): one 8N1 byte of the console timed
-  from the DATAR write to TC took 4440 HCLK cycles, against 4170 for ten
-  bit times of the divisor - 10.65 bit times.
+  from the DATAR write to TC took 4436 HCLK cycles, against 4170 for ten
+  bit times of the divisor - 10.64 bit times.
+- **THE RATE ASKED, which neither that frame nor a loop can tell** (a
+  frame against BRR is the divisor measuring itself, and both ends of a
+  loop share it; letter `d` times a RUN polled one frame ahead of the
+  shifter, from the first store to TC on the ticker's cycle count,
+  against its wire time at HCLK over the baud asked): the console's 128
+  frames at 115200 in 1001 thousandths (BRR 417 for 416.7 is 0.8
+  slow), and USART4 on PB0 - transmitting into a pad nothing else
+  drives, no wire needed - 1024 frames in 1000 at 115200 and at 1
+  Mbaud and 1001 at 3 Mbaud, a divisor of exactly 16.
 - **The break** (letter `e`): SBK set on USART4 at 115200 cleared itself
   4581 HCLK cycles later, 10.99 bit times of the 417-cycle divisor.
 - **The debug port's column is refused** (letter `f`): with SW_CFG at 0,
@@ -288,6 +297,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **Letter `w`'s runs across the jumper**: each rate's 1024 frames timed
+  against the wire before its eight bytes loop back (letter `d` times the
+  same three rates on the transmitter with no wire); the jumper PB0-PB1
+  would run them.
 - **The run verbs**, `write_bulk()` and `read_span()`/`consume()`:
   compiled for the seven parts and counted in the release listing, not
   run on the board - every suite's print and the console's line drain

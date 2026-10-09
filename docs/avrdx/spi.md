@@ -151,7 +151,7 @@ const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT20
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3).
-`test_avr_spi`: `z` = the single board, 161 verdicts; `y` = the same
+`test_avr_spi`: `z` = the single board, 184 verdicts; `y` = the same
 four pins against a second AVR128DB48 running `spi_peer` as a real
 client, 92 verdicts. The desk wires PORTE straight through (A.PEn -
 B.PEn), so MOSI, MISO, SCK and SS are one four-wire bus between the two
@@ -175,6 +175,40 @@ Exact at every rate, the 12 MHz one included - a two-tick period still
 reaches a TCB through the event system, though the capture ISR then
 catches only about one period per byte (the minimum of a burst is the
 measurement).
+
+**And a frame inside a block takes eight periods at the division ASKED,
+plus two cycles.** The period above is one SCK against the driver's own
+division table; a board answering itself cannot tell a wrong division by
+its data either. So the suite times A FRAME INSIDE A BLOCK on the ruler
+(TCB3 and TCB2 cascaded at CLK_PER): a block of 2048 frames less one of
+256, the best of three each, so the request's fixed cost cancels -
+through the data sheet's own buffer-mode sequence (28.3.2.1.2) as a bare
+loop, and through the engine's polled clocks-only shape - against eight
+SCK periods at CLK_PER over the division named in the test, in
+thousandths of a cycle:
+
+| division | bare sequence | engine | eight SCK + 2 | reading |
+|---|---|---|---|---|
+| CLK_PER/2 | 18.002 | 18.000 | 18 | 1000 |
+| CLK_PER/4 | 34.000 | 34.001 | 34 | 1000 |
+| CLK_PER/8 | 66.002 | 66.000 | 66 | 1000 |
+| CLK_PER/16 | 130.000 | 130.001 | 130 | 1000 |
+| CLK_PER/32 | 258.002 | 258.000 | 258 | 1000 |
+| CLK_PER/64 | 514.000 | 514.001 | 514 | 1000 |
+| CLK_PER/128 | 1026.002 | 1026.000 | 1026 | 1000 |
+
+The two cycles are buffer mode's, between two frames that leave back to
+back: the same at every division, in all four modes (514.001 at
+CLK_PER/64 in each), and through the bare sequence as through the
+engine - the chapter does not state them. Under a ceiling the frame is
+the ceiling's division: 130.001 for CLK_PER/2 asked under 1.5 MHz at
+24 MHz, 66.000 of the 12 MHz CLK_PER after a rebase (the ruler counting
+the clock in force), 514.000 for CLK_PER/4 asked under 400 kHz. At
+CLK_PER/2 a frame leaves the loop three cycles of slack: an interrupt
+inside the block costs frames there - the console's transmit vector
+while a printed line drained took the engine's frame to 19.2 to 20.6
+cycles and the bare sequence's to 18.9 - so the suite times every block
+with the console drained and no vector armed.
 
 **A host's MISO direction is overridden, and the override is latched at
 ENABLE.** With the SPI running, a PORT.DIRSET on the MISO position does
@@ -310,7 +344,7 @@ TXCIF clear, so the loop itself tests nothing but its count):
 | write-only (`tx` set, `rx` null - the display's) | 19: INTFLAGS read and DREIF tested, the older byte read and dropped, the count (SBIW, BREQ), LD, the DATA store, two MOVWs gcc keeps the source pointer through; 17 for a command phase, whose pointer stays in Z | 34.0 at CLK_PER/4, 130.45 at CLK_PER/16; 256 bytes x 1.09 and x 1.02 | wire-bound from CLK_PER/4 (32 a byte and the block's 2); at CLK_PER/2 (16 and 2) within a cycle of the wire (counted) |
 | full duplex (both set) | 23: the read stored through a second pointer, its increment a 16-bit add beside the store, a third MOVW | 34.0 at CLK_PER/4, 130.55 at CLK_PER/16; 256 bytes x 1.09 and x 1.02 | wire-bound from CLK_PER/4; at CLK_PER/2 about 1.3 times the wire (counted) |
 | read-only (`tx` null) | 19: a constant 0xFF written | no line | wire-bound from CLK_PER/4 |
-| clocks only (both null) | 15 | no line | wire-bound from CLK_PER/2 |
+| clocks only (both null) | 15 | 18.000 at CLK_PER/2, 34.001 at CLK_PER/4 (`test_avr_spi` letter b, a frame inside a block) | wire-bound from CLK_PER/2: the wire's 16 and the block's 2 |
 
 The loop keeps its count only through an empty asm the count passes
 through: without it gcc rewrites the exit as a compare against a

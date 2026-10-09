@@ -79,7 +79,9 @@
 //   a  THE BLOCK AND THE ARITHMETIC: the reset values, the three
 //      timing registers at both speeds and both duties, the enable
 //      protection measured, the wire's RISE TIME from the pad, and SCL
-//      itself measured by the capture while the host probes
+//      itself measured by the capture while the host probes - TIM4's
+//      clock read against the core's counter first, since the timer runs
+//      on PB1 with the divisor - and judged against the rate asked
 //   b  THE HOST WITH NO ANSWER: an absent address as i2c_nack_addr,
 //      the peer's command address as i2c_ok, BUSY before and after,
 //      then the STUCK BUS the peer makes and unstick() with its clocks
@@ -90,7 +92,8 @@
 //      far end
 //   e  the vocabulary on the wire (nack_addr from a deaf client,
 //      nack_data at a commanded byte) and commanded stretching priced
-//   f  the speeds against a second chip, each timed on the wire
+//   f  the speeds against a second chip, each timed on the wire and
+//      judged against the rate asked
 //   g  THE DMA ENGINES on channels 6 and 7
 //   h  THE KERNEL: I2cBus over I2cHost, the NACK in its place, the
 //      rejection, both votes, a wedge the peer holds and the per-bus
@@ -105,9 +108,12 @@
 //      absent address, a write, reads of one, two, three, four and
 //      eight bytes (the host's receive procedures, and THE TARGET AS A
 //      TRANSMITTER), a write-then-read, at 100 kHz and at 400 kHz in both
-//      duty shapes; the second address and the general call; the DMA
-//      host's write, read and write-then-read
-//   m  the same shapes with the roles swapped: I2C2 the host
+//      duty shapes, and a write of 32 at each rung timed on the core's
+//      counter against the rate asked - two controllers of one bus cannot
+//      tell a wrong one; the second address and the general call; the DMA
+//      host's write - timed the same way - read and write-then-read
+//   m  the same shapes with the roles swapped: I2C2 the host, its SCL
+//      timed the same way
 //   n  A TARGET STUCK MID-BYTE: the chip's own target left holding SDA
 //      low by a host taken off the bus through its reset line, and
 //      unstick()'s clocks counted on the pad by the timer
@@ -118,13 +124,17 @@
 //      400 kHz, the core at 96, 48 and 8 MHz (the console and the tick
 //      re-made at each, and back at 96): the status, the controller a
 //      millisecond on (START, STOP, MSL), the next tenure on the same
-//      host; each count also acknowledged whole, the control
+//      host; each count also acknowledged whole, the control; and at each
+//      core a write of sixteen through the pump and the engines timed on
+//      the core's counter against the rate asked, PB1 another rate at
+//      each, a data bit's SCL period read on the pad mid-write beside it
 //   p  THE HAND-OVER ON CHANNEL 7, the OR of USART2's transmit request and
 //      I2C1's receive one: USART2's transport with its transmit engine
 //      run and released, then I2C1's DMA read of sixteen judged
-//      byte-exact; and the mirror - I2C1's DMA read abandoned with RxNE
-//      standing under DMAEN and the host released, then USART2's run
-//      judged out whole in its wire time
+//      byte-exact, both owners timed against the rate asked; and the
+//      mirror - I2C1's DMA read abandoned with RxNE standing under DMAEN
+//      and the host released, then USART2's run judged out whole in its
+//      wire time at 115200 on the core's counter
 //   q  A CHANNEL THAT DOES NOT SERVE, staged by a request held on it by a
 //      peripheral gated without its reset (TIM3's on channel 6, USART2's
 //      on 7): a DMA write answered i2c_dma_fault with the target short of
@@ -453,6 +463,52 @@ uint32_t ticks_to_ns(uint32_t ticks) {
     return (ticks * 1000UL) / (SysClock::timclk1_hz / 1'000'000UL);
 }
 
+// ---------------------------------------------------------------------------
+// The rate on the wire
+// ---------------------------------------------------------------------------
+
+/// TIM4'S OWN CLOCK ON THE CORE'S COUNTER. TIM4 counts a clock of PB1, the
+/// bus whose rate the I2C's FREQ and CCR divide, so an SCL period read in
+/// its ticks cannot tell a wrong PB1 - the period and the ruler would move
+/// together. The STK counts HCLK: TIM4 free-running at a hundredth of its
+/// clock for 20 ms of HCLK is the clock the ticks are read against - the
+/// window's overshoot one turn of the loop, some ten cycles of 1.9 million.
+uint32_t meter_clock_hz() {
+    Meter::init();
+    (void)Meter::configure({.prescaler = 99, .period = 0xFFFF});
+    Meter::set_count(0);
+    const uint32_t c0 = Ticker::cycles();
+    Meter::enable(true);
+    while (Ticker::cycles() - c0 < SysClock::hz / 50u) {
+    }
+    const uint32_t n = Meter::count();
+    Meter::enable(false);
+    Meter::release();
+    return n * 100u * 50u;
+}
+
+/// The rate a speed ASKS for: 100 or 400 kHz, whatever CCR rounds it to.
+constexpr uint32_t asked_hz(I2cSpeed speed) {
+    return speed == I2cSpeed::standard_100k ? 100'000u : 400'000u;
+}
+
+/// SCL's mean rate over a tenure of `periods` SCL periods that took
+/// `cycles` of a core at `core_hz`, in thousandths of the rate asked: the
+/// START, the STOP and every clock either end stretched are inside it, so
+/// it reads low by them and never high. Every core here is a whole number
+/// of SCL periods at both rates, so the arithmetic stays in 32 bits.
+uint32_t scl_permille(uint32_t cycles, uint32_t periods, I2cSpeed speed, uint32_t core_hz) {
+    if (cycles == 0u) {
+        return 0;
+    }
+    return periods * (core_hz / asked_hz(speed)) * 1000u / cycles;
+}
+
+/// The verdict on an SCL reading: never above the rate asked by more than
+/// two per cent, and within a quarter below it - the pull-ups' rise, the
+/// conditions and the stretching the difference.
+bool scl_ok(uint32_t permille) { return permille <= 1020u && permille >= 750u; }
+
 // ===========================================================================
 // The peer's command channel (twi_link)
 // ===========================================================================
@@ -723,6 +779,9 @@ void ta_block() {
     }
 
     // ---- SCL ITSELF, measured on its own pad while the host probes ----
+    const uint32_t tim_hz = meter_clock_hz();
+    print(serial, "  TIM4 counts ", tim_hz / 1000u, " kHz on the core's counter (",
+          SysClock::timclk1_hz / 1000u, " by the clock tree)", crlf);
     host_ready();
     if (!meter_arm()) {
         bench.verdict("TIM4's channel 1 takes SCL's pad in PWM input mode", false);
@@ -740,6 +799,7 @@ void ta_block() {
                           {I2cSpeed::fast_400k, I2cDuty::ratio_2, "400k d2  "},
                           {I2cSpeed::fast_400k, I2cDuty::ratio_16_9, "400k d16/9"}};
     uint8_t measured = 0;
+    uint8_t on_rate = 0;
     for (uint8_t i = 0; i < 3u; ++i) {
         (void)Host::init(clock, rungs[i].duty);
         // A probe of an address nobody answers: nine SCL pulses, and the
@@ -749,12 +809,18 @@ void ta_block() {
         const uint32_t high = SclMeter::width_ticks();
         const uint32_t low = period > high ? period - high : 0u;
         const uint32_t asked = Host::scl_hz(rungs[i].speed);
-        const uint32_t seen = period != 0u ? SysClock::timclk1_hz / period : 0u;
-        print(serial, "  ", rungs[i].name, ": asked ", asked / 1000u, " kHz, measured ",
-              seen / 1000u, " kHz (period ", ticks_to_ns(period), " ns, high ",
-              ticks_to_ns(high), " ns, low ", ticks_to_ns(low), " ns), probe=", st, crlf);
+        const uint32_t seen = period != 0u ? tim_hz / period : 0u;
+        const uint32_t pm = 1000u * seen / asked_hz(rungs[i].speed);
+        print(serial, "  ", rungs[i].name, ": the arithmetic gives ", asked / 1000u,
+              " kHz, measured ", seen / 1000u, " kHz - ", pm, " thousandths of the ",
+              asked_hz(rungs[i].speed) / 1000u, " asked (period ", ticks_to_ns(period),
+              " ns, high ", ticks_to_ns(high), " ns, low ", ticks_to_ns(low), " ns), probe=", st,
+              crlf);
         if (period != 0u && high != 0u && st == i2c_nack_addr) {
             ++measured;
+        }
+        if (period != 0u && scl_ok(pm)) {
+            ++on_rate;
         }
     }
     // The high time is where the wire shows: the block releases SCL and
@@ -771,6 +837,11 @@ void ta_block() {
     bench.verdict("every rung was measured ON THE PAD with no wire and no scope, and each "
                   "probe reported nobody-home",
                   measured == 3u);
+    bench.verdict("AND SCL RUNS AT THE RATE ASKED: each rung's period, read against TIM4's "
+                  "clock as the core's counter measures it, never above 100 or 400 kHz by more "
+                  "than 2 % and within a quarter below - the timer alone shares PB1 with the "
+                  "divisor and could not tell",
+                  on_rate == 3u);
     meter_off();
     (void)Host::init(clock);
 }
@@ -1155,6 +1226,8 @@ void tf_speeds() {
                           {I2cSpeed::fast_400k, I2cDuty::ratio_2, "400k d2   "},
                           {I2cSpeed::fast_400k, I2cDuty::ratio_16_9, "400k d16/9"}};
     uint8_t exact = 0;
+    uint8_t on_rate = 0;
+    const uint32_t tim_hz = meter_clock_hz();
     if (!meter_arm()) {
         bench.verdict("TIM4's channel 1 takes SCL's pad in PWM input mode", false);
         return;
@@ -1190,10 +1263,15 @@ void tf_speeds() {
         }
         settle_ms(300);
         const bool ok = ws == i2c_ok && rs == i2c_ok && mism == 0u;
-        const uint32_t seen = period != 0u ? SysClock::timclk1_hz / period : 0u;
+        const uint32_t seen = period != 0u ? tim_hz / period : 0u;
+        const uint32_t pm = 1000u * seen / asked_hz(rungs[i].speed);
+        if (period != 0u && scl_ok(pm)) {
+            ++on_rate;
+        }
         print(serial, "  ", rungs[i].name, ": asked ",
               Host::scl_hz(rungs[i].speed) / 1000u, " kHz, on the wire ", seen / 1000u,
-              " kHz (high ", ticks_to_ns(high), " ns of ", ticks_to_ns(period),
+              " kHz, ", pm, " thousandths of the rate asked (high ", ticks_to_ns(high), " ns of ",
+              ticks_to_ns(period),
               " ns); write=", ws, " read=", rs, " mism=", mism, " -> ",
               ok ? "byte-exact both ways" : "NOT exact", crlf);
         if (ok) {
@@ -1207,6 +1285,9 @@ void tf_speeds() {
                   "byte-exact between TWO SEPARATE CHIPS - which is the highest rate this "
                   "chapter has, and the wire carries it",
                   exact == 3u);
+    bench.verdict("and each rung's SCL, read against TIM4's clock on the core's counter, is never "
+                  "above the rate asked by more than 2 % and within a quarter below it",
+                  on_rate == 3u);
     bench.verdict("the command channel survives the ladder", command(Op::ping));
 }
 
@@ -2222,6 +2303,8 @@ struct Self {
     /// that restarts with every read tenure.
     static inline uint8_t seed = 0x60;
     static inline uint8_t pos = 0;
+    /// The last tenure's length in core cycles, start() to its end seen.
+    static inline uint32_t last_cycles = 0;
 
     static uint8_t value(uint8_t s, uint8_t i) { return static_cast<uint8_t>(s + 0x1Du * i); }
 
@@ -2331,13 +2414,16 @@ struct Self {
         host_done = false;
         host_isr_entries = 0;
         uint8_t st = no_answer;
+        const uint32_t c0 = Ticker::cycles();
         if (HostT::start(r)) {
             st = HostT::status();
+            last_cycles = Ticker::cycles() - c0;
         } else {
             const uint32_t t0 = Ticker::millis();
             while (!host_done && Ticker::millis() - t0 < 50u) {
                 poll<C>();
             }
+            last_cycles = Ticker::cycles() - c0;
             st = host_done ? HostT::status() : no_answer;
         }
         const uint32_t t1 = Ticker::millis();
@@ -2414,6 +2500,23 @@ struct Self {
         return s;
     }
 
+    /// THE RATE ON THE WIRE, which the self-link cannot tell - both of its
+    /// controllers divide PB1: a write of 32 bytes, 297 SCL periods with
+    /// the address, timed on the core's counter, in thousandths of the rate
+    /// asked; 0 when the target did not take it whole.
+    template <typename HostT, typename C>
+    static uint32_t write_permille(I2cSpeed speed) {
+        for (uint8_t i = 0; i < 32u; ++i) {
+            tx_buf[i] = static_cast<uint8_t>(0x35u + 7u * i);
+        }
+        clear();
+        const uint8_t st = tenure<HostT, C>(self_addr, tx_buf, 32, nullptr, 0, speed);
+        if (st != i2c_ok || log.in_n != 32u) {
+            return 0;
+        }
+        return scl_permille(last_cycles, 9u * 33u, speed, SysClock::hz);
+    }
+
     static bool shapes_exact(const SelfShapes& s) {
         return s.probe == i2c_ok && s.absent == i2c_nack_addr && s.write == i2c_ok &&
                s.write_exact && s.reads_ok == 5u && s.combined_exact;
@@ -2467,11 +2570,17 @@ void tl_self_link() {
         uint8_t exact = 0;
         uint8_t over_all = 0;
         uint8_t flushed_all = 0;
+        uint8_t on_rate = 0;
         for (const SelfRung& g : self_rungs) {
             (void)Host::init(clock, g.duty);
             const SelfShapes s = L::template shapes<Host, C>(g.speed);
+            const uint32_t pm = L::template write_permille<Host, C>(g.speed);
             L::print_shapes(g.name, s, Host::scl_hz(g.speed));
+            print(serial, "      a write of 32 in ", pm, " thousandths of the SCL rate asked", crlf);
             console_drain();
+            if (scl_ok(pm)) {
+                ++on_rate;
+            }
             if (L::shapes_exact(s)) {
                 ++exact;
             }
@@ -2487,6 +2596,11 @@ void tl_self_link() {
                       "own data register, and every byte its shifter asked for beyond the "
                       "host's NACK was dropped by flush()",
                       target_up && exact == 3u && flushed_all == over_all);
+        bench.verdict("AND SCL RUNS AT THE RATE ASKED, which a link between two controllers of "
+                      "one bus cannot tell: a write of 32 at each rung, timed on the core's "
+                      "counter, never above 100 or 400 kHz by more than 2 % and within a quarter "
+                      "below",
+                      on_rate == 3u);
 
         // The second address and the general call reach the target.
         (void)Host::init(clock);
@@ -2524,6 +2638,8 @@ void tl_self_link() {
         L::seed = 0x33;
         const uint8_t dw = L::template tenure<DmaHost, C>(self_addr, tx_buf, 16, nullptr, 0,
                                                           I2cSpeed::fast_400k);
+        const uint32_t dw_pm = scl_permille(L::last_cycles, 9u * 17u, I2cSpeed::fast_400k,
+                                            SysClock::hz);
         bool dw_exact = L::log.in_n == 16u;
         for (uint8_t i = 0; i < 16u && dw_exact; ++i) {
             dw_exact = L::log.in[i] == tx_buf[i];
@@ -2557,11 +2673,15 @@ void tl_self_link() {
               dw_exact ? " exact" : " NOT exact", ", a read of 16 ", dr,
               dr_exact ? " exact" : " NOT exact", ", a write of 3 then a read of 8 ", dc,
               dc_exact ? " exact" : " NOT exact", " (the target took ", L::log.in_n,
-              "), unwedged ", DmaHost::unwedges(), " time(s)", crlf);
+              "), unwedged ", DmaHost::unwedges(), " time(s); the write in ", dw_pm,
+              " thousandths of the SCL rate asked", crlf);
         bench.verdict("the DMA host - channels 6 and 7 - writes sixteen bytes into the chip's "
                       "own target, reads sixteen back, and carries a write-then-read whole, "
                       "byte-exact",
                       dw == i2c_ok && dw_exact && dr_exact && dc_exact);
+        bench.verdict("and the engines run the bus at the rate asked: the write of 16 never above "
+                      "400 kHz by more than 2 % and within a quarter below",
+                      scl_ok(dw_pm));
         C::release();
         L::all_released();
         host_ready();
@@ -2586,19 +2706,28 @@ void tm_self_swapped() {
         const bool target_up = Client::init(clock, {.own = self_addr},
                                             {.no_stretch = false, .interrupts = false});
         uint8_t exact = 0;
+        uint8_t on_rate = 0;
         for (const SelfRung& g : self_rungs) {
             L::host2_live = true;
             (void)H2::init(clock, g.duty);
             const SelfShapes s = L::template shapes<H2, Client>(g.speed);
+            const uint32_t pm = L::template write_permille<H2, Client>(g.speed);
             L::print_shapes(g.name, s, H2::scl_hz(g.speed));
+            print(serial, "      a write of 32 in ", pm, " thousandths of the SCL rate asked", crlf);
             console_drain();
             if (L::shapes_exact(s)) {
                 ++exact;
+            }
+            if (scl_ok(pm)) {
+                ++on_rate;
             }
         }
         bench.verdict("I2C2 ON A WIRE AS THE HOST, I2C1 as its target: the same shapes, "
                       "byte-exact at 100 kHz and at 400 kHz in both duty shapes",
                       target_up && exact == 3u);
+        bench.verdict("and I2C2's SCL runs at the rate asked: a write of 32 at each rung never "
+                      "above 100 or 400 kHz by more than 2 % and within a quarter below",
+                      on_rate == 3u);
         L::host2_live = false;
         H2::release();
         Client::release();
@@ -2877,8 +3006,59 @@ struct Refusal {
 /// Every core of the letter: the console and the tick re-made at it, the
 /// target and each host brought up at its rate - the one part of the
 /// letter that knows the clock.
+/// A write of sixteen, every byte acknowledged, through `HostT` at `speed`
+/// with the core at `Clk`: SCL's mean rate over its 153 periods on the
+/// core's counter, in thousandths of the rate asked - PB1 is another rate
+/// at each core, and the core's counter is the one ruler here that does
+/// not run on it.
+template <typename Clk, typename HostT>
+uint32_t refusal_rate(I2cSpeed speed) {
+    using R = Refusal<self_link_part>;
+    R::refuse_at = 0;
+    R::took = 0;
+    R::C::acknowledge(true);
+    const uint32_t c0 = Ticker::cycles();
+    const uint8_t st = R::template run<HostT>(16, 0, speed);
+    const uint32_t took = Ticker::cycles() - c0;
+    return st == i2c_ok && R::took == 16u ? scl_permille(took, 9u * 17u, speed, Clk::hz) : 0u;
+}
+
+/// One SCL period on the pad, read by TIM4's capture in the MIDDLE of a
+/// write of sixteen through the pump - eight bytes' clocks after its start,
+/// a data bit's period and not a condition's - in nanoseconds of this
+/// core's timer clock; 0 when the meter or the tenure would not start.
 template <typename Clk>
-bool refusal_core(const char* core) {
+uint32_t mid_period_ns(I2cSpeed speed) {
+    using R = Refusal<self_link_part>;
+    if (!meter_arm()) {
+        return 0;
+    }
+    R::refuse_at = 0;
+    R::took = 0;
+    R::C::acknowledge(true);
+    Host::Request r{};
+    r.addr = self_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.tx_len = 16;
+    r.speed = speed;
+    host_done = false;
+    uint32_t ticks = 0;
+    if (!Host::start(r)) {
+        const uint32_t c0 = Ticker::cycles();
+        const uint32_t half = 9u * 8u * (Clk::hz / asked_hz(speed));
+        while (!host_done && Ticker::cycles() - c0 < half) {
+        }
+        ticks = SclMeter::period_ticks();
+        const uint32_t t0 = Ticker::millis();
+        while (!host_done && Ticker::millis() - t0 < 20u) {
+        }
+    }
+    meter_off();
+    return ticks * 1000u / (Clk::timclk1_hz / 1'000'000u);
+}
+
+template <typename Clk>
+bool refusal_core(const char* core, bool& on_rate) {
     using R = Refusal<self_link_part>;
     constexpr Clk clk;
     console_drain();
@@ -2891,10 +3071,27 @@ bool refusal_core(const char* core) {
     R::live = true;
     bool clean = up;
     (void)Host::init(clk);
+    const uint32_t pm100 = refusal_rate<Clk, Host>(I2cSpeed::standard_100k);
+    const uint32_t pm400 = refusal_rate<Clk, Host>(I2cSpeed::fast_400k);
+    print(serial, "  ", core, " a write of 16 through the pump in ", pm100,
+          " thousandths of 100 kHz and ", pm400, " of 400 kHz", crlf);
+    on_rate = scl_ok(pm100) && scl_ok(pm400);
+    // What the mean is made of: one SCL period on the pad in the middle of
+    // the same write, a data bit's, printed beside it.
+    print(serial, "  ", core, " a data bit's SCL period on the pad mid-write: ",
+          mid_period_ns<Clk>(I2cSpeed::standard_100k), " ns at 100 kHz, ",
+          mid_period_ns<Clk>(I2cSpeed::fast_400k), " ns at 400 kHz", crlf);
     clean = R::report(core, I2cSpeed::standard_100k, false) && clean;
     clean = R::report(core, I2cSpeed::fast_400k, false) && clean;
     Host::release();
     (void)DmaHost::init(clk);
+    dma_host_live = true;
+    const uint32_t dm100 = refusal_rate<Clk, DmaHost>(I2cSpeed::standard_100k);
+    const uint32_t dm400 = refusal_rate<Clk, DmaHost>(I2cSpeed::fast_400k);
+    dma_host_live = false;
+    print(serial, "  ", core, " the same through the engines in ", dm100,
+          " thousandths of 100 kHz and ", dm400, " of 400 kHz", crlf);
+    on_rate = on_rate && scl_ok(dm100) && scl_ok(dm400);
     clean = R::report(core, I2cSpeed::standard_100k, true) && clean;
     clean = R::report(core, I2cSpeed::fast_400k, true) && clean;
     DmaHost::release();
@@ -2915,15 +3112,23 @@ void to_refusal() {
         for (uint8_t i = 0; i < 4u; ++i) {
             tx_buf[i] = static_cast<uint8_t>(0xC1u + i);
         }
-        const bool fast = refusal_core<SysClock>("96 MHz");
-        const bool mid = refusal_core<Core48>("48 MHz");
-        const bool slow = refusal_core<Core8>(" 8 MHz");
-        (void)refusal_core<SysClock>("96 MHz again");
+        bool fast_rate = false;
+        bool mid_rate = false;
+        bool slow_rate = false;
+        bool again_rate = false;
+        const bool fast = refusal_core<SysClock>("96 MHz", fast_rate);
+        const bool mid = refusal_core<Core48>("48 MHz", mid_rate);
+        const bool slow = refusal_core<Core8>(" 8 MHz", slow_rate);
+        (void)refusal_core<SysClock>("96 MHz again", again_rate);
         bench.verdict("the last written byte refused at 96 MHz: i2c_nack_data, the bus let "
                       "go, the next tenure ok",
                       fast);
         bench.verdict("... and at 48 MHz", mid);
         bench.verdict("... and at 8 MHz", slow);
+        bench.verdict("AND SCL RUNS AT THE RATE ASKED AT EVERY CORE - PB1 at 48 and at 8 MHz: a "
+                      "write of 16 through the pump never above 100 or 400 kHz by more than 2 % "
+                      "and within a quarter below, on the core's counter",
+                      fast_rate && mid_rate && slow_rate);
         L::all_released();
         host_ready();
     }
@@ -3000,23 +3205,33 @@ void handed_isr() {
 }
 
 /// A run out through USART2's transmit engine, waited for: true when the
-/// port drained it within `budget_ms`; `took_ms` what it took.
+/// port drained it within `budget_ms`; `took` what it took in core cycles,
+/// from the queue to tx_idle() - the last stop bit's end.
 template <bool on = self_link_part>
-bool handed_run(const uint8_t* run, uint16_t n, uint32_t budget_ms, uint32_t& took_ms) {
+bool handed_run(const uint8_t* run, uint16_t n, uint32_t budget_ms, uint32_t& took) {
     if constexpr (on) {
+        const uint32_t c0 = Ticker::cycles();
         (void)Handed::write_bulk(std::span<const uint8_t>(run, n));
         const uint32_t t0 = Ticker::millis();
         while (!Handed::tx_idle() && Ticker::millis() - t0 < budget_ms) {
         }
-        took_ms = Ticker::millis() - t0;
+        took = Ticker::cycles() - c0;
         return Handed::tx_idle();
     } else {
         (void)run;
         (void)n;
         (void)budget_ms;
-        took_ms = 0;
+        took = 0;
         return false;
     }
+}
+
+/// A run's time in thousandths of its wire: `n` 8N1 frames at 115200,
+/// the rate both of letter p's runs ask, and one more - the idle frame TE
+/// sends before the first byte after an init (18.2), which both runs follow.
+uint32_t handed_permille(uint32_t cycles, uint16_t n) {
+    const uint64_t wire = 10ULL * (n + 1u) * SysClock::hz / 115200u;
+    return wire == 0u ? 0u : static_cast<uint32_t>(1000ULL * cycles / wire);
 }
 
 /// What both of letter p's directions send through USART2.
@@ -3058,6 +3273,8 @@ void tp_handover() {
         host_stormed = false;
         const uint8_t rd = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
                                                           I2cSpeed::fast_400k);
+        const uint32_t rd_pm = scl_permille(L::last_cycles, 9u * 17u, I2cSpeed::fast_400k,
+                                            SysClock::hz);
         bool rd_exact = rd == i2c_ok;
         for (uint8_t i = 0; i < 16u && rd_exact; ++i) {
             rd_exact = rx_buf[i] == L::value(0x27, i);
@@ -3067,10 +3284,18 @@ void tp_handover() {
               " and the port released; then I2C1's DMA read of 16 on channel ", shared_channel,
               ": status ", rd, rd_exact ? ", byte-exact" : ", NOT exact", ", the channel's count ",
               left7, host_stormed ? ", the event vector STORMED" : "", crlf);
+        print(serial, "  in thousandths of the rate asked: USART2's run ",
+              handed_permille(took, handed_len), " of its wire at 115200, the read's SCL ", rd_pm,
+              " of 400 kHz", crlf);
         bench.verdict("THE HAND-OVER: USART2's transmit engine released, then I2C1's DMA read of "
                       "sixteen bytes on the same channel 7, byte-exact - the port's release() "
                       "left no request held on the channel's OR",
                       up && sent && rd_exact && left7 == 0u);
+        bench.verdict("and both owners run at the rate asked: USART2's run in its wire time at "
+                      "115200, -1 % to +3 %, and the read's SCL never above 400 kHz by more than "
+                      "2 % and within a quarter below",
+                      handed_permille(took, handed_len) >= 990u &&
+                          handed_permille(took, handed_len) <= 1030u && scl_ok(rd_pm));
 
         // Each half from a clean slate: what a failed first half leaves - a
         // stalled tenure, a target mid-byte, a held request - goes with the
@@ -3126,15 +3351,18 @@ void tp_handover() {
         Handed::release();
         handed_live = false;
         // 52 frames of ten bits at 115200 baud: 4.5 ms on the wire.
+        const uint32_t pm2 = handed_permille(took2, handed_len);
         print(serial, "  I2C1's read stopped after ", L::log.served, " byte(s) asked (STAR1 ",
               hex(star1), ", CTLR2 ", hex(ctlr2), "), the host released; then USART2's run of ",
               handed_len, " on channel ", shared_channel, ": ", mirrored ? "out" : "NOT OUT",
-              " in ", took2, " ms, the channel's count ", SharedCh::remaining(), ", faults ",
-              faults, crlf);
+              " in ", pm2, " thousandths of its wire time, the channel's count ",
+              SharedCh::remaining(), ", faults ", faults, crlf);
         bench.verdict("THE MIRROR: I2C1's DMA read abandoned with RxNE standing under DMAEN and "
                       "the host released, then USART2's transmit engine on channel 7 sends its "
-                      "whole run in its wire time - the host's release() left no request held",
-                      standing && up2 && mirrored && took2 >= 4u && faults == 0u);
+                      "whole run in its wire time at 115200, -1 % to +3 % on the core's counter - "
+                      "the host's release() left no request held",
+                      standing && up2 && mirrored && pm2 >= 990u && pm2 <= 1030u &&
+                          faults == 0u);
         L::all_released();
         host_ready();
     }

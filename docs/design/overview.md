@@ -369,6 +369,21 @@ driver is made and WHAT it produces upward, not what the peripheral is.
   in energy. A FIFO threshold is wrong for a console: the tail below it
   waits for something else to happen. What the rules forbid is a choice
   made without asking.
+- **A loop proves the bytes, never the rate.** A suite's loop - a
+  loop-back, a single wire, a jumper, a crossed pair, a self-link -
+  shares one divisor at both ends, so a wrong divisor is a slower or a
+  faster loop and every byte still comes back. Every letter that loops
+  or sets a rate therefore times a run of frames against the wire's
+  time at the rate ASKED, never at the rate the divisor produced, and
+  judges the reading in thousandths: a UART run within -1 % to +3 %
+  (or the divisor's own rounding where that is larger, stated), an SPI
+  frame inside a block within the same of its clock periods and the
+  block's own gap, an I2C clock never above the rate asked and within a
+  quarter below it - or, where the block's own clock shape puts its
+  fastest legal rate lower (the AVR's TWI, whose clock is 50/50), within
+  that rate computed from the chapter, less 2 %. A reading outside its window is a finding to
+  explain, never a window to widen; a rate the instrument cannot time
+  is said so, with what would time it.
 - **A suite's image fits the family's smallest chip.** A bench suite
   is a menu of letters over the console, and its IMAGE is a sum: the
   base every image carries (crt, transport, TestBench, print), the

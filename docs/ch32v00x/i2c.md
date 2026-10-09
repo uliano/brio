@@ -231,9 +231,28 @@ over the part's 15 KB. Against a SAM C21 peer:
   the STOPF its hand-made STOP leaves is cleared with no entry of the
   event vector.
 - **Against an STM32G0 peer** (its `twi_peer`, its 2.2 kOhm pull-ups)
-  the whole suite holds too: 56 verdicts, the four receive procedures,
+  the whole suite holds too: 59 verdicts, the four receive procedures,
   the vocabulary, the repeated START acknowledged and refused, the
-  engines and the kernel letter.
+  engines and the kernel letter - on the first `z` after a flash and on
+  a second in the same boot, letter g judging the engines' faults its
+  own run counted (the counters are the image's, and letter r's
+  refusals through the engines add to them).
+- **THE RATE ASKED, on the wire** (a tenure timed on the ticker's
+  cycle count from `start()` to its completion, nine SCL periods a
+  byte with the address's, START, STOP and the software inside; the
+  bracket: never above the rate asked by more than 2 %, within a
+  quarter below it), against the STM32G0 peer: an 8-byte write on the
+  pump at about 95 kHz for 100 asked and 337 kHz for 400 - 950 and 844
+  thousandths -, on the engines a 16-byte write and read at about 97
+  kHz each and a 16-byte read at about 365 kHz for 400. The wire's
+  rise from the pad: SCL 93 cycles, SDA 107 (2 us).
+- **A port read through its shut gate answers zero** (RM 3.4.7's PB2
+  enable): right after a reset nothing has opened port C - the console
+  is on port D - and the two lines read low with the peer's pull-ups
+  on them, every wire letter skipping as if no peer were there until a
+  letter that configures a pad opened the gate as a side effect. The
+  suite opens it before it reads the lines; measured, the first `z`
+  after a flash is whole.
 
 ### The repeated START: on the last byte's TxE, and the refusal
 

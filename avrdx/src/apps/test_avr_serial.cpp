@@ -12,6 +12,22 @@
 // timed on the pad (T). Every lower-case letter was taken, hence the two
 // capitals.
 //
+// THE RATE ON THE WIRE, which a loop alone cannot tell (both ends share
+// one BAUD register): every single-board letter that moves frames also
+// times a run of them on the ruler (TCB1 + TCB2 cascaded at CLK_PER)
+// from the first store to the last stop bit's end, against the run's
+// length at the rate ASKED, and judges the reading in thousandths, -1 %
+// to +3 % - b every one of the 36 formats at 115200 (the frame's length:
+// parity and stop bits really sent) and USART0, USART1 and USART3 each on
+// its own generator; c 8N1 and d nine data bits at 115200; e 8N1 at 9600;
+// f every rung from the register's floor (1465 baud) through every rate
+// the two-board matrix k sets to both ceilings (1.5 Mbaud, and 3 Mbaud at
+// CLK2X); g through the task at 24, 12 and 24 MHz again; h at the BAUD
+// auto-baud learned, against the sender's 19200; i XCK in Host SPI mode
+// at 1 MHz; I and T through the task's transmit path. Letter a moves no
+// frame. The two-board letters' rates are all rungs of f, on the same
+// generator.
+//
 // TWO BOARDS (j..u and w, `y`): a second board runs `usart_peer` and is
 // driven IN BAND over the very link under test (protocol:
 // usart_link.hpp) -
@@ -89,6 +105,29 @@ using Meter = PulseWidthMeter<T0>;
 volatile uint16_t last_width = 0;
 volatile uint16_t captures = 0;
 
+// THE RULER of the wire-time verdicts (docs/design/benchmark.md, the
+// family's row): TCB1 and TCB2 cascaded into one 32-bit count of CLK_PER
+// cycles, the carry on event channel 2 and the snapshot on channel 3 -
+// a timer pair and two channels nothing else in this suite touches. A
+// read is a software pulse and two captures, some thirty cycles; one
+// cycle is the ruler's tick.
+using RulerLo = Tcb<1>;
+using RulerHi = Tcb<2>;
+using Ruler = CascadedCounter<RulerLo, RulerHi>;
+using ChCarry = EventChannel<2>;
+using ChSnap = EventChannel<3>;
+
+void ruler_up() {
+    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Ruler::reset();
+}
+void ruler_down() {
+    RulerLo::disable();
+    RulerHi::disable();
+    ChCarry::off();
+    ChSnap::off();
+}
+
 // The transport task, used only by the rebase test (its ISRs are bound
 // unconditionally; they are harmless while USART4 is configured as a
 // bare resource, because the resource never enables those interrupts).
@@ -121,6 +160,7 @@ void quiesce() {
     T0::enable_capt_interrupt(false);
     ChTx::off();
     EventChannel<5>::off();
+    ruler_down();
     captures = 0;
     last_width = 0;
 }
@@ -156,6 +196,131 @@ const char* fmt_name(const UsartFormat& f) {
     fmt_buf[i++] = f.two_stop ? '2' : '1';
     fmt_buf[i] = 0;
     return fmt_buf;
+}
+
+// ---- the rate on the wire ------------------------------------------------------
+// A loop cannot tell a wrong rate: the transmitter and the receiver share
+// one BAUD register, so a wrong divisor is a slower or a faster loop and
+// nothing else. Every letter below that moves frames therefore also times
+// A RUN of them on the ruler, from the first store to the last stop bit's
+// end (TXCIF, 27.3.2.3), against the run's length AT THE RATE ASKED - never
+// at the rate the register produced, which is what a wrong divisor would
+// hide - and judges the reading in thousandths: -1 % to +3 %, the window
+// every family's suites share. The fractional generator rounds BAUD to
+// the nearest 64th of a sample (27.3.2.2.1), at most 0.78 % at BAUD = 64,
+// the register's floor, and 0.16 % at every rung these letters ask.
+
+/// A frame's bit periods: the start bit, the data, the parity, the stops.
+uint8_t frame_bits(const UsartFormat& f) {
+    return static_cast<uint8_t>(1u + usart_data_bits(f.bits) +
+                                (f.parity != UsartParity::none ? 1u : 0u) + (f.two_stop ? 2u : 1u));
+}
+
+/// `frames` frames of `bits` bit periods at `baud`, in cycles of a
+/// CLK_PER at `hz` - the run's length at the rate asked.
+uint64_t wire_cycles(uint32_t hz, uint32_t baud, uint8_t bits, uint16_t frames) {
+    return baud == 0u ? 0u : static_cast<uint64_t>(frames) * bits * hz / baud;
+}
+
+uint32_t permille(uint32_t took, uint64_t wire) {
+    return wire == 0u ? 0u : static_cast<uint32_t>(1000ull * took / wire);
+}
+
+bool wire_ok(uint32_t pm) { return pm >= 990u && pm <= 1030u; }
+
+/// A run long enough that the ruler's tick and the run's fixed cost (the
+/// two reads and the TXCIF poll, under a hundred cycles) stay under a
+/// thousandth: a hundredth of a second of frames, 16 at least, 1024 at
+/// most.
+uint16_t run_frames(uint32_t baud) {
+    const uint32_t f = baud / 100u;
+    return f < 16u ? 16u : (f > 1024u ? 1024u : static_cast<uint16_t>(f));
+}
+
+/// Through the RESOURCE: `frames` copies of `value` stored the moment
+/// DREIF rises, TXCIF cleared behind the LAST store - masked with it, so
+/// an interrupt between the two cannot let the run end and the clear wipe
+/// the edge - and the ruler read when it rises. What a loop brings back
+/// is flushed after it. 0 when the run never ended. The loop is the
+/// suite's own, the flag read and the store inline, some thirty cycles a
+/// frame: the resource's send() - out of line, with a 32-bit spin bound
+/// and transmit()'s switch on the character size - takes 92 a frame and
+/// idles the line at 3 Mbaud (80 a frame; measured), and the generator is
+/// what is timed here.
+template <typename U, UsartBits B = UsartBits::eight>
+uint32_t wire_permille(uint32_t baud, uint8_t bits, uint16_t frames, uint16_t value = 0x55,
+                       uint32_t hz = SysClock::hz) {
+    // What an earlier store still shifts out is not this run's: the
+    // buffer empty, then two frames' time.
+    for (uint32_t s = 0; s < 4'000'000u && !U::dre_flag(); ++s) {
+    }
+    delay_us(clock, 2u * bits * 1'000'000u / baud + 10u);
+    // And the console quiet: its transmit vector, some hundred cycles an
+    // entry, is longer than the slack a frame leaves the loop at the top
+    // rates.
+    while (!Serial::tx_idle()) {
+    }
+    ruler_up();
+    U::clear_txc();
+    const uint32_t t0 = Ruler::read();
+    for (uint16_t i = 1; i < frames; ++i) {
+        for (uint16_t s = 0; s < 0xFFFFu && !U::dre_flag(); ++s) {
+        }
+        U::template transmit_as<B>(value);
+    }
+    for (uint16_t s = 0; s < 0xFFFFu && !U::dre_flag(); ++s) {
+    }
+    cli();
+    U::template transmit_as<B>(value);
+    U::clear_txc();
+    sei();
+    bool done = false;
+    for (uint32_t s = 0; s < 4'000'000u && !done; ++s) {
+        done = U::txc_flag();
+    }
+    const uint32_t took = Ruler::read() - t0;
+    ruler_down();
+    U::clear_txc();
+    U::flush_rx();
+    return done ? permille(took, wire_cycles(hz, baud, bits, frames)) : 0u;
+}
+
+/// Through the Uart TASK's transmit path: write_bulk() into its ring, one
+/// DRE entry a frame, and tx_idle() - TXCIF, which dre() clears behind a
+/// run's last byte - for the end. A receiver left on is the caller's to
+/// drain.
+template <typename Port>
+uint32_t task_wire_permille(uint32_t baud, uint16_t frames, uint8_t value = 0x55,
+                            uint32_t hz = SysClock::hz) {
+    uint8_t run[16];
+    for (uint8_t& b : run) {
+        b = value;
+    }
+    for (uint32_t s = 0; s < 4'000'000u && !Port::tx_idle(); ++s) {
+    }
+    while (!Serial::tx_idle()) {
+    }
+    ruler_up();
+    const uint32_t t0 = Ruler::read();
+    uint16_t queued = 0;
+    while (queued < frames) {
+        const uint16_t want = frames - queued < 16u ? static_cast<uint16_t>(frames - queued) : 16u;
+        queued = static_cast<uint16_t>(queued + Port::write_bulk({run, want}));
+    }
+    bool done = false;
+    for (uint32_t s = 0; s < 4'000'000u && !done; ++s) {
+        done = Port::tx_idle();
+    }
+    const uint32_t took = Ruler::read() - t0;
+    ruler_down();
+    return done ? permille(took, wire_cycles(hz, baud, 10u, frames)) : 0u;
+}
+
+/// The reading printed and judged, one line each.
+void wire_verdict(const char* what, uint32_t baud, uint16_t frames, uint32_t pm) {
+    print(serial, "  ", what, ": ", frames, " frames at ", baud, " baud in ", pm,
+          " thousandths of their wire time", crlf);
+    verdict("the line runs at the rate asked (-1 % to +3 %): ", what, wire_ok(pm));
 }
 
 // ---- a: instances, routes, teardown ------------------------------------------
@@ -239,6 +404,19 @@ bool smoke(UsartRoute route) {
     return true;
 }
 
+/// One instance's own generator on the wire: 1024 frames of 8N1 at
+/// 115200 through its loop-back, the instance released after.
+template <typename U>
+uint32_t instance_permille(UsartRoute route) {
+    if (!U::init({.route = route, .baud = usart_baud_reg(SysClock::hz, 115'200u),
+                  .loop_back = true})) {
+        return 0;
+    }
+    const uint32_t pm = wire_permille<U>(115'200u, 10u, 1024u);
+    U::release();
+    return pm;
+}
+
 void tb_frames() {
     print(serial, "b frame formats in loop-back on USART4 (default route, 115200)", crlf);
     quiesce();
@@ -246,20 +424,45 @@ void tb_frames() {
                                 UsartBits::eight, UsartBits::nine_low_first,
                                 UsartBits::nine_high_first};
     const UsartParity pars[3] = {UsartParity::none, UsartParity::even, UsartParity::odd};
+    // Each format's LENGTH on the wire too: 256 frames timed against
+    // their bit periods at 115200 - a parity bit or a second stop bit the
+    // transmitter did not send would show here and nowhere else.
+    bool timed = true;
+    uint32_t pm_low = 0xFFFFFFFFu;
+    uint32_t pm_high = 0;
     for (UsartBits b : sizes) {
         for (UsartParity p : pars) {
             for (uint8_t s = 0; s < 2; ++s) {
                 const UsartFormat f{.bits = b, .parity = p, .two_stop = s != 0};
                 if (!lbme4(f, 115'200u)) { verdict("init ", fmt_name(f), false); continue; }
                 verdict("USART4 ", fmt_name(f), frame_ok(f));
+                uint32_t pm = 0;
+                if (b == UsartBits::nine_low_first) {
+                    pm = wire_permille<U4, UsartBits::nine_low_first>(115'200u, frame_bits(f), 256u);
+                } else if (b == UsartBits::nine_high_first) {
+                    pm = wire_permille<U4, UsartBits::nine_high_first>(115'200u, frame_bits(f), 256u);
+                } else {
+                    pm = wire_permille<U4>(115'200u, frame_bits(f), 256u);
+                }
+                timed = timed && wire_ok(pm);
+                pm_low = pm < pm_low ? pm : pm_low;
+                pm_high = pm > pm_high ? pm : pm_high;
             }
         }
     }
+    print(serial, "  256 frames of each of the 36 formats in ", pm_low, " to ", pm_high,
+          " thousandths of their wire time at 115200", crlf);
+    verdict("EVERY FORMAT TAKES ITS FRAME'S LENGTH ON THE WIRE: start, data, parity and stops "
+            "at the rate asked, -1 % to +3 %", timed);
     // The other instances get an 8N1 pass: same code path, other
-    // silicon, and a real TXD pad each (see the header for the routes).
+    // silicon, and a real TXD pad each (see the header for the routes) -
+    // and each its own baud generator, timed on the wire.
     verdict("USART0 ALT1 8N1 loop-back", smoke<U0>(UsartRoute::alt1));
+    wire_verdict("USART0", 115'200u, 1024u, instance_permille<U0>(UsartRoute::alt1));
     verdict("USART1 default 8N1 loop-back", smoke<U1>(UsartRoute::def));
+    wire_verdict("USART1", 115'200u, 1024u, instance_permille<U1>(UsartRoute::def));
     verdict("USART3 ALT1 8N1 loop-back", smoke<U3>(UsartRoute::alt1));
+    wire_verdict("USART3", 115'200u, 1024u, instance_permille<U3>(UsartRoute::alt1));
     quiesce();
 }
 
@@ -302,6 +505,7 @@ void tc_overflow() {
     const auto again = roundtrip(0x5A);
     verdict("clean reception again after draining",
             again && again->clean() && again->data == 0x5A);
+    wire_verdict("8N1 on the loop", 115'200u, 1024u, wire_permille<U4>(115'200u, 10u, 1024u));
     quiesce();
 }
 
@@ -332,6 +536,10 @@ void td_mpcm() {
     (void)U4::wait_line_idle();
     delay_us(clock, 300);
     verdict("filtered again after re-arming MPCM", !U4::rxc_flag());
+    // Nine data bits on the wire: eleven bit periods a frame, data
+    // frames the filter drops.
+    wire_verdict("9N1 data frames", 115'200u, 1024u,
+                 wire_permille<U4, UsartBits::nine_low_first>(115'200u, frame_bits(f9), 1024u, 0x055));
     quiesce();
 }
 
@@ -391,6 +599,8 @@ void te_txc_dre() {
     verdict("all three frames arrived",
             a && b && c && a->data == 0xAA && b->data == 0x55 && c->data == 0x3C);
     U4::clear_txc();
+    wire_verdict("8N1 on the loop", 9600u, run_frames(9600u),
+                 wire_permille<U4>(9600u, 10u, run_frames(9600u)));
     quiesce();
 }
 
@@ -444,18 +654,35 @@ void measure_baud(uint32_t baud, bool clk2x) {
             captures >= 8 && near(static_cast<int32_t>(w) * 10, static_cast<int32_t>(exp10), 20));
     T0::enable_capt_interrupt(false);
     T0::disable();
+    // The pulse above is judged against the divisor; THE RUN is judged
+    // against the rate asked: a wrong BAUD would pass the first and fail
+    // this one.
+    const uint16_t frames = run_frames(baud);
+    wire_verdict(clk2x ? "this rung, CLK2X" : "this rung", baud, frames,
+                 wire_permille<U4>(baud, 10u, frames, 0xFF));
     U4::release();
 }
 
 void tf_baud_on_the_wire() {
-    print(serial, "f baud generator measured on PE0 (start bit -> EvPin -> TCB0 PW meter)", crlf);
+    print(serial, "f baud generator measured on PE0 (start bit -> EvPin -> TCB0 PW meter), "
+                  "each rung's run timed against the rate asked", crlf);
     quiesce();
     ChTx::source(EvPin<TxPin>{});
+    // The register's floor (BAUD 65529 at 24 MHz), every rate the
+    // two-board baud matrix (k) sets, and both ceilings: BAUD = 64 at
+    // 16 samples (1.5 Mbaud) and at 8 (3 Mbaud).
+    measure_baud(1465u, false);
+    measure_baud(2400u, false);
     measure_baud(9600u, false);
     measure_baud(115'200u, false);
+    measure_baud(230'400u, false);
     measure_baud(460'800u, false);
+    measure_baud(921'600u, false);
     measure_baud(1'000'000u, false);
+    measure_baud(1'500'000u, false);
     measure_baud(460'800u, true);
+    measure_baud(2'000'000u, true);
+    measure_baud(3'000'000u, true);
     quiesce();
 }
 
@@ -488,6 +715,19 @@ void tg_rebase() {
     (void)wait_captures(4, 100);
     const uint16_t t24 = last_width;
     const uint32_t us24 = Meter::us(t24);
+    // The run through the task at each clock, on a ruler that counts
+    // CLK_PER at the rate in force: the divisor re-derived for 12 MHz is
+    // judged against 115200, the clock itself being what the DynamicClock
+    // says it set (test_avr_clock's subject). 0xFF frames, as the
+    // exchanges', and what the loop brings back drained after.
+    auto drain = []() {
+        delay_us(clock, 200);
+        uint8_t b;
+        while (U4Tx::read_byte(b)) {
+        }
+    };
+    const uint32_t pm24 = task_wire_permille<U4Tx>(115'200u, 1024u, 0xFF);
+    drain();
 
     verdict("switch to 12 MHz", DynClock::set(12'000'000u));
     clear_captures();
@@ -497,12 +737,16 @@ void tg_rebase() {
     (void)wait_captures(4, 200);
     const uint16_t t12 = last_width;
     const uint32_t us12 = Meter::us(t12);
+    const uint32_t pm12 = task_wire_permille<U4Tx>(115'200u, 1024u, 0xFF, 12'000'000u);
+    drain();
 
     print(serial, "  24 MHz: ", t24, " ticks = ", us24, " us; 12 MHz: ", t12,
           " ticks = ", us12, " us", crlf);
     verdict("ticks follow CLK_PER (halved +-2)", near(t12 * 2, t24, 4));
     verdict("the bit time stands still (+-1 us)", near(static_cast<int32_t>(us12),
                                                        static_cast<int32_t>(us24), 1));
+    wire_verdict("at 24 MHz, through the task", 115'200u, 1024u, pm24);
+    wire_verdict("at 12 MHz, through the task", 115'200u, 1024u, pm12);
     verdict("back to 24 MHz", DynClock::set(24'000'000u));
     clear_captures();
     bool back = true;
@@ -510,6 +754,9 @@ void tg_rebase() {
     verdict("loop-back clean again at 24 MHz", back);
     (void)wait_captures(4, 100);
     verdict("bit time restored (+-2 ticks)", near(last_width, t24, 2));
+    const uint32_t pm_back = task_wire_permille<U4Tx>(115'200u, 1024u, 0xFF);
+    drain();
+    wire_verdict("back at 24 MHz, through the task", 115'200u, 1024u, pm_back);
 
     U4::enable_rxc_interrupt(false);
     quiesce();
@@ -594,6 +841,11 @@ void th_autobaud() {
     const auto after = roundtrip(0xC3);
     verdict("the link still round-trips at the measured rate",
             after && after->clean() && after->data == 0xC3);
+    // The loop round-trips at whatever BAUD the measurement left; the
+    // WIRE says whether it is the sender's: a run at the learned BAUD
+    // against the 19200 the sync field was sent at.
+    wire_verdict("at the learned BAUD", 19'200u, run_frames(19'200u),
+                 wire_permille<U4>(19'200u, 10u, run_frames(19'200u)));
 
     // LINAUTO insists the sync character be 0x55 (27.3.3.2.5): anything
     // else sets ISFIF, which is the deterministic way to reach errata
@@ -656,6 +908,16 @@ void ti_mspi() {
     verdict("LSB first, sample trailing", mspi_pass(true, true));
     verdict("the SPI rate is CLK_PER / (2 x BAUD[15:6])",
             U4::actual_baud(SysClock::hz) == 1'000'000u);
+    // XCK on the wire: 1024 frames of eight clock periods streamed
+    // through the double-buffered transmitter (27.3.3.1.4), against
+    // 1 MHz asked.
+    (void)Mspi::init(clock, 1'000'000u, {});
+    U4::loop_back(true);
+    const uint32_t pm = wire_permille<U4>(1'000'000u, 8u, 1024u);
+    print(serial, "  1024 frames at 1 MHz in ", pm, " thousandths of eight XCK periods each",
+          crlf);
+    verdict("XCK runs at the rate asked: 1024 frames of eight periods, -1 % to +3 %",
+            wire_ok(pm));
     quiesce();
 }
 
@@ -685,6 +947,11 @@ void tI_injected() {
     U4Tx::init(clock, 115'200u);
     U4::loop_back(true);
     verdict("tx_idle() before the first byte (nothing sent since init)", U4Tx::tx_idle());
+    // The task's transmit path on the wire, the receiver off meanwhile.
+    U4::enable_rx(false);
+    wire_verdict("through the task", 115'200u, 1024u, task_wire_permille<U4Tx>(115'200u, 1024u));
+    U4::enable_rx(true);
+    U4::flush_rx();
     uint8_t sent[runs * per_run];
     for (uint8_t i = 0; i < sizeof sent; ++i) {
         sent[i] = static_cast<uint8_t>(0x30 + i * 3u);
@@ -803,6 +1070,7 @@ void tT_tx_idle() {
         if (baud <= 460'800u) {
             verdict("and within one bit time after it", after <= bit);
         }
+        wire_verdict("through the task", baud, 1024u, task_wire_permille<U4Tx>(baud, 1024u));
         U4Tx::release();
         T0::disable();
         ChTx::off();

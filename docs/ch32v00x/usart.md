@@ -115,7 +115,12 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   again once it is read.
 - **The flags**: TXE returns within a bit of a write on an idle
   transmitter, TC at the end of the frame (1093 us for a 1042 us frame
-  at 9600); IDLE rises once after a frame followed by a frame's worth
+  at 9600); TC's clear is a PAIR, a STATR read then a DATAR write, or a
+  zero written (14.8.1), so a DATAR write that no status read preceded
+  leaves the TC of the frame before standing, and a wait for TC right
+  after it returns at once with the new frame still on the wire
+  (measured: a run timed behind such a wait queued behind the rest of
+  that frame, 37 thousandths over its wire time at 2400); IDLE rises once after a frame followed by a frame's worth
   of high line; PE once for a bad parity byte, which is still
   delivered; TXE with TXEIE re-enters the vector until it is disarmed,
   which is what the transport's ISR does when its ring runs dry.
@@ -317,7 +322,7 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 ## Bench findings
 
-The reference suite is `test_ch32_serial` (50 verdicts in `z`, five
+The reference suite is `test_ch32_serial` (55 verdicts in `z`, five
 of its letters on the jumper PD2 to PD4 that lends TIM2's channel 1 as
 the ruler, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
@@ -330,6 +335,33 @@ letter alone (6 verdicts): with one USART, the console's, there is no
 instrument for the rest, and every letter naming USART2 is compiled
 out there.
 
+- **THE RATE ASKED, which a start bit cannot tell** (the capture of
+  a start bit is BRR to the cycle - the divisor measuring itself, which
+  a divisor computed wrong would pass): letters b, c, i and t time a
+  run of frames from the first store to TC on the ticker's cycle count
+  against its wire time at the rate ASKED, HCLK over the baud named,
+  and judge it -1 % to +3 %. The bare resource, polled one frame ahead
+  of the shifter, at letter c's eight rates: 1003 thousandths at 2400
+  (24 frames), 1000 at 9600, 76800, 115200 and 1.5 Mbaud, 999 at 460800
+  and 921600 - the divisor's own 998 there, BRR 104 and 52 for 104.2
+  and 52.1, the rounding's largest - and 1003 at 3 Mbaud (1024 frames).
+  At 2400 the run is 240 bits, and the first frame's wait for the
+  generator's next bit - half a bit at 9600 on letter j's lone frame -
+  is most of the three. Every format of letter b, 96 frames at 9600,
+  in 1000: 9.5 to 12 bits a frame, the half and the one-and-a-half
+  stop and the parity bit inside the word as 14.8.4 spells it. The
+  single-wire transport at 9600 in 1000. The transmit engine on
+  channel 6: 256 frames at 9600 in 1000, 1024 frames - four laps of
+  its ring, the next block started from the channel's vector - in
+  1001 at 115200 and 1004 to 1005 at 3 Mbaud. The interrupt transmitter in
+  1001 at 115200 and, moved live by `set_baud()`, in 1000 at 9600.
+  The console's own USART1 through its transmit engine, on the
+  CH32V006K8U6 and the CH32V003F4P6 alike: 272 frames at 115200 in
+  1001 (`test_ch32_dma` letter e; BRR 417 for 416.7 is 0.8 thousandths
+  slow), where the host reading the console would take a divisor a few
+  per cent off without a sign. On the CH32V003F4P6 those two engines
+  carry the whole of that suite (34 verdicts), every command typed
+  arriving through the receive engine's ring.
 - **Errors under the receive engine** (letter q, banged frames at
   9600): 64 data bytes with 7 banged breaks between them in a continuous
   stream - all 64 delivered intact and in order, the 7 breaks stored as
@@ -430,8 +462,6 @@ Implemented but not bench-verified, each with what would measure it:
   channel a held request froze is not; TIM2 gated by hand with its
   channel 2 request standing, then USART2's receive ring on channel 7
   fed a frame through its pad's pull, would stage it.
-- The engines on the CH32V003 (its USART1, the console): compiled for
-  the part; `test_ch32_dma` on the CH32V003F4P6 would run them.
 - The run verbs, `write_bulk()` and `read_span()`/`consume()`, on the
   CH32V003: compiled and counted; one run of the console on that part
   would measure them.

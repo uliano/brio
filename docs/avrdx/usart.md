@@ -279,7 +279,7 @@ U::disarm_start_of_frame();         // first thing on the way back
 
 `test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
 and has two halves: `z` is the SINGLE-BOARD set (11 tests,
-126 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
+163 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
 103 verdicts) against a peer board running `usart_peer`, an instrument driven
 IN BAND over the very link under test. Two more commands stand outside
 `y` because they depend on how the desk is jumpered: `v`, the wiring
@@ -415,6 +415,48 @@ the listing's count above.
   Every measurement is the truncation of the nominal value: the
   fractional part never showed up as a wandering pulse width at these
   rates.
+- **And a run of frames takes its time at the rate ASKED.** The pulse
+  above is judged against the divisor, which a wrong BAUD would pass; a
+  loop-back cannot tell either, its two ends sharing one register. So
+  every single-board letter of `test_avr_serial` that moves frames times
+  a run of them on the ruler (TCB1 and TCB2 cascaded at CLK_PER, one
+  cycle a tick), from the first store to TXCIF after the last, against
+  the run's length at the rate asked - a hundredth of a second of
+  frames, 16 at least and 1024 at most - in thousandths:
+
+  | rate asked | path | frames | reading |
+  |---|---|---|---|
+  | 1465 (the register's floor, BAUD 65529) | the resource, polled | 16 | 1000 |
+  | 2400, 9600 | the resource | 24, 96 | 1000, 1000 |
+  | 115 200, 230 400 | the resource | 1024 | 999, 1000 |
+  | 460 800, 921 600 | the resource | 1024 | 998, 998 |
+  | 1 000 000, 1 500 000 (BAUD 64, the 16-sample ceiling) | the resource | 1024 | 1000, 1000 |
+  | 460 800, 2 000 000, 3 000 000 (BAUD 64, the CLK2X ceiling), CLK2X | the resource | 1024 | 1001, 1000, 1002 |
+  | 115 200, all 36 formats (5 to 9 bits, N/E/O, 1 or 2 stops) | the resource, 256 frames each | 256 | 999 to 1000 of each format's own frame length |
+  | 115 200 on USART0, USART1 and USART3, each its own generator | the resource | 1024 | 999 each |
+  | 115 200 through `Uart` (write_bulk, tx_idle) at 24, 12 and 24 MHz | the task | 1024 | 999, 1001, 999 |
+  | 460 800, 1 000 000 through `Uart` | the task | 1024 | 998, 1001 |
+  | 19 200 at the BAUD GENAUTO learned from a sync field sent at 19 200 | the resource | 192 | 1000 |
+  | 1 MHz XCK in Host SPI mode, eight periods a frame | the resource | 1024 | 1000 |
+
+  The readings are the fractional generator's own rounding and nothing
+  else: BAUD 833 at 115 200 runs 0.04 % fast, 208 at 460 800 and 104 at
+  921 600 0.16 % fast (998), the round divisors exact. Host SPI leaves
+  frames back to back through its double-buffered transmitter, no gap
+  between them. A frame's length really holds its parity bit and its
+  second stop bit in every format.
+- **The resource's polled `send()` does not keep the line busy at
+  3 Mbaud.** One frame there is 80 cycles; `send()` - out of line, its
+  flag read a call, its spin bound a 32-bit count and `transmit()` a
+  switch on the character size - took 92 a frame (a run read 1149
+  thousandths of its wire time), where a loop with the flag read and the
+  store inline, some 25 cycles, read 1002. `Uart`'s transmit path is
+  wire-bound there (above). At 2 Mbaud and below, 120 cycles a frame and
+  more, `send()` keeps up: the same runs through it read as the inline
+  loop's, within a thousandth.
+  The letters' runs wait for the console to drain before they start: its
+  DRE vector, some hundred cycles an entry, is longer than the slack a
+  frame leaves a polled loop at the top rates.
 - **The rate floor is the register's, not the protocol's.** At
   CLK_PER = 24 MHz, 300 baud is unreachable: BAUD would be 320000,
   nearly five times what the register holds. The slowest expressible

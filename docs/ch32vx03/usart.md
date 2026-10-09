@@ -548,8 +548,9 @@ U::enable(true);
 
 The reference suite is `test_vx03_serial`, at 144 MHz - PCLK2 144, PCLK1
 72 - with USART2 as the instrument on its default pads and the console
-untouched on USART1: 56 verdicts in `z` on the CH32V203C8T6 with the
-crossed pair strapped, the CH32V303VCT6's letters n..p that series' own. Almost every
+untouched on USART1: 63 verdicts in `z` on the CH32V203C8T6 with the
+crossed pair strapped, and 70 on the CH32V303VCT6, whose letters n..p are
+that series' own. Almost every
 letter needs no wire, and three facts of this silicon are why: the
 receive pad is a bit-banged transmitter (an input follows its own pull,
 which the output data register moves in a few cycles), a pad driven by a
@@ -577,6 +578,40 @@ CH32V303 evaluation board - and the second is measured on both below.
   counts, read 49 once on the CH32V303VCT6 (at 9600 in the same run,
   15001 for 15000), and the suite's tolerance is never tighter than that
   count.
+- **THE RATE ON THE WIRE, timed on the core's counter.** A loop and the
+  crossed pair divide one bus, PB1, by divisors from one arithmetic at
+  both ends, and TIM2 - the frame ruler above - counts a clock of the
+  same bus, so none of them can tell a wrong bus rate; the STK counts
+  HCLK. Every letter that loops or crosses a wire, letter b and letter p
+  send a run of frames back to back - through the bare port, a store
+  whenever TXE stands, or through a transport's `write_bulk()` - timed
+  from the first store to the last stop bit's end (TC, `tx_idle()`), in
+  thousandths of the run's time at the rate ASKED, judged -1 % to +3 %.
+  The same on both parts unless one is named:
+
+  | letter | port, path | rate, frames | reading |
+  |---|---|---|---|
+  | b | USART2 bare, 8N1 | 9600 x 16, 115200 x 256, 921600 x 1024, 3 Mbaud x 1024 | 1006, 1000, 998, 1000 |
+  | m | USART2 and the fourth port bare | 8N1 115200 x 256; 8E2 19200 x 32 | 1000 and 1000; 1000 and 1001 |
+  | q | the fourth port bare; USART2's transmit engine | 115200 x 256 | 1000; 1000 |
+  | r | USART2's interrupt transmitter; its transmit engine | 115200 x 256, 1 Mbaud x 1024 | 1000, 1000; 1000, 1000 |
+  | s | the fourth port bare; USART2's transmit engine | 1 Mbaud x 1024 | 1000; 1000 |
+  | n (CH32V303VCT6) | USART2's engine on DMA1; UART4's on DMA2 | 921600 x 1024 | 999; 999 |
+  | o (CH32V303VCT6) | USART2 and UART4 bare, 8E1; USART2 bare | 9600 x 16; 1200 x 16 | 1001 and 1005; 1006 |
+  | p (CH32V303VCT6) | UART5 to UART8 bare | 9600 x 16 | 1001 each |
+
+  The 998 and 999 at 921600 are the divisor's own rounding - 78 of a
+  72 MHz bus gives 923077 baud, 0.9984 of the wire. The 1001 to 1006 at
+  9600 and 1200 are a run of sixteen frames, where a thousandth is a
+  sixth of a bit: they are what the first start bit would cost if it
+  waits for the generator's next bit tick, up to a bit - not measured
+  apart. A run is started on a port whose previous frame has ended by
+  TIME: TC stood from a frame before, a write that follows no STATR read
+  leaving it set, and a run started on it read a whole frame long (1056
+  at 9600). What no counter on the chip can tell is the HSI's own error:
+  the PLL and with it HCLK, both buses and every timer run from it, so a
+  trim off by a per cent moves the wire and the ruler together; a run on
+  the board's crystal or a counter on the pad would measure it.
 - **A stale CTS enable spins the vector.** With CTSIE armed and the CTS
   pad moved by software the handler was re-entered without end, although
   it cleared the flag on every pass; the suite's body drops the enable
@@ -733,12 +768,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The run verbs on the CH32V303**: `write_bulk()` and
-  `read_span()`/`consume()` run on the CH32V203C8T6 - every suite's
-  print takes the first and the console's line drain the second - and
-  are compiled and counted for the CH32V303 with the USART handler a
-  leaf there, no f-register saved; one run of `test_vx03_serial` and the
-  console on the evaluation board would measure them.
+- **Letter l's rate on the wire**: the loopback's 921600 run through the
+  transmit engine is timed against the wire like every other loop, and
+  neither board carries the PA2-PA3 strap while the crossed pair is
+  wired; the strap in place of the pair is what would run it.
 - **The lot's four features on a die that has them**: the MARK and
   SPACE parity on the wire and the far receiver's MS_ERR, the short
   words across the pair and RX_BUSY under a frame are letter o's, and

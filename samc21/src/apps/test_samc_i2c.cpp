@@ -22,6 +22,13 @@
 // collecting the answer. Every letter below therefore drives the very
 // engine under test to command its own instrument.
 //
+// A RATE IS TIMED ON THE PAD, NOT TRUSTED: letter f samples SCL itself
+// through a tenure at each of the three speeds and judges the host's
+// clock against the rate asked - never more than 2 % above it, within a
+// quarter below (the pull-ups' rise) - since the peer's stretching hides
+// a clock that runs fast. Every other letter runs at the standard rate f
+// times.
+//
 // Letters that need the peer say so and FAIL LOUDLY rather than
 // hanging. Nothing here wears flash.
 
@@ -97,10 +104,14 @@ using I2cHw = I2cHost<3, bus_pads, core_gen>;
 using Raw = I2cm<3>;
 using Client = I2cClient<3, bus_pads, core_gen>;
 
-/// The bus's rise-time budget: 1.5k to 5 V on a breadboard node, whose
-/// rise measures 166 ns, so 300 ns is a conservative statement of the
-/// same wire.
-constexpr uint32_t bus_rise_ns = 300;
+/// The bus's rise time: 1.5k to 5 V on a breadboard node, whose rise the
+/// AVR128DB48's TCB meters measure at 166 ns (test_avr_twi letter b). It
+/// is the wire's figure and not a margin: 33.6.2.4.1's formula SUBTRACTS
+/// the rise from the period the divisor makes, so a budget longer than
+/// the wire's rise runs SCL faster than asked - at 300 ns on this node,
+/// 400 kHz ran at 1070 thousandths of its rate (letter f's pad reading,
+/// docs/samc21/i2c.md).
+constexpr uint32_t bus_rise_ns = 166;
 
 // ---------------------------------------------------------------------------
 // Engine completion glue - one vector, two consumers
@@ -660,6 +671,175 @@ void te_stretch() {
 // f - the three speeds
 // ===========================================================================
 
+// THE SCL RATE ON THE WIRE. A tenure's wall cannot time the host's clock
+// here: the peer is a POLLED client and stretches every byte by its own
+// turnaround (docs/samc21/i2c.md, the cost table), which hides a clock
+// that runs FAST under one that waits - and PA23 cannot be SERCOM3's pad
+// and an EIC line at once, so no timer captures it. But the pad's input
+// buffer stays on under the SERCOM function (I2cHost's pins are claimed
+// with INEN), so PORT reads the line: a loop in SRAM samples SCL through
+// one tenure and takes the SysTick count at every RISING edge, and the
+// interval between two rises is one SCL period wherever neither end held
+// the clock low. The host's own hold (its MB/SB, the pump's entry) and the
+// client's stretch fall between bytes and before an acknowledge, so most
+// intervals of a byte are the host's unhindered period: the median is
+// one, and the mean of the intervals within a quarter of it - the
+// sampler's grain of some eight cycles averaged out over a hundred and
+// more - is the period, against 1 / the rate ASKED. An interrupt landing
+// on the sampler stretches an interval out of the band and is dropped.
+
+using SclPad = Pin<'A', 23>;
+constexpr uint16_t scl_cap = 320;
+/// SysTick's count at each rising edge of SCL (it counts DOWN, and a
+/// tenure's interval between two rises is far under its 1 ms period).
+uint16_t scl_at[scl_cap];
+
+/// SysTick's count at every rising edge of SCL until the tenure's
+/// completion edge or the cap. The edge's own path is one load of the
+/// count and one store - the interval arithmetic waits for the end -
+/// because at Fm+ a path longer than a period missed every other rise.
+[[gnu::section(".ram_text"), gnu::noinline]] uint16_t sample_scl() {
+    // PORT through the IOBUS, the core's single-cycle port (28.6.5): over
+    // the APB bridge a read waits for the bridge and two PORT clocks of
+    // on-demand synchronization (28.6.2.2). The IOBUS cannot wait for the
+    // synchronizer, so the caller holds the pin's group in continuous
+    // sampling (CTRL.SAMPLING, 28.8.10) around the tenure.
+    volatile const uint32_t& in = PORT_IOBUS_REGS->GROUP[SclPad::port_letter - 'A'].PORT_IN;
+    volatile const uint32_t& count = SysTick->VAL;
+    const uint32_t mask = SclPad::mask;
+    uint16_t n = 0;
+    uint32_t prev = in & mask;
+    for (uint32_t idle = 0; idle < 4000u;) {
+        uint32_t now = prev;
+        uint32_t spin = 4096u;
+        // Written out, four samples a count, four instructions a sample:
+        // gcc rematerialized the mask inside the C loop on this core's
+        // eight low registers.
+        asm volatile(
+            ".syntax unified\n"
+            "1: ldr %[now], [%[in]]\n"
+            "   ands %[now], %[mask]\n"
+            "   cmp %[now], %[prev]\n"
+            "   bne 2f\n"
+            "   ldr %[now], [%[in]]\n"
+            "   ands %[now], %[mask]\n"
+            "   cmp %[now], %[prev]\n"
+            "   bne 2f\n"
+            "   ldr %[now], [%[in]]\n"
+            "   ands %[now], %[mask]\n"
+            "   cmp %[now], %[prev]\n"
+            "   bne 2f\n"
+            "   ldr %[now], [%[in]]\n"
+            "   ands %[now], %[mask]\n"
+            "   cmp %[now], %[prev]\n"
+            "   bne 2f\n"
+            "   subs %[spin], #1\n"
+            "   bne 1b\n"
+            "2:\n"
+            : [now] "=&l"(now), [spin] "+l"(spin)
+            : [in] "l"(&in), [mask] "l"(mask), [prev] "l"(prev)
+            : "cc", "memory");
+        if (spin == 0u) {
+            if (xfer_done) {
+                break;
+            }
+            ++idle;
+            continue;
+        }
+        prev = now;
+        if (now != 0u) {
+            scl_at[n] = static_cast<uint16_t>(count);
+            if (++n == scl_cap) {
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+uint16_t scl_iv[scl_cap];
+
+struct SclReading {
+    uint8_t status;
+    uint16_t edges;       ///< intervals recorded
+    uint16_t used;        ///< within a quarter of the median
+    uint32_t period_x16;  ///< their mean, in sixteenths of a core cycle
+    uint32_t permille;    ///< the SCL rate in thousandths of the rate asked
+};
+
+/// One write tenure of `n` bytes at `speed`, SCL sampled through it.
+SclReading sampled_write(const uint8_t* p, uint8_t n, I2cSpeed speed, uint32_t asked_hz) {
+    SclReading r{};
+    for (uint8_t i = 0; i < n; ++i) txbuf[i] = p[i];
+    const I2cHw::Request q{.addr = twilink::dut_addr,
+                           .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
+                           .tx_len = n,
+                           .rx = {},
+                           .rx_len = 0,
+                           .reply = {},
+                           .speed = speed};
+    volatile uint32_t& sampling = SclPad::port().PORT_CTRL;
+    const uint32_t was = sampling;
+    sampling = was | SclPad::mask;   // continuous: the IOBUS reads IN unsynchronized
+    xfer_done = false;
+    if (I2cHw::start(q)) {
+        sampling = was;
+        r.status = I2cHw::status();
+        return r;
+    }
+    const uint16_t rises = sample_scl();
+    sampling = was;
+    // The intervals, from the counts: SysTick counts down and wraps at
+    // its reload, and every interval is under one period.
+    const uint32_t period = SysTick->LOAD + 1u;
+    r.edges = rises > 0u ? static_cast<uint16_t>(rises - 1u) : 0u;
+    for (uint16_t i = 0; i < r.edges; ++i) {
+        const uint32_t a = scl_at[i];
+        const uint32_t b = scl_at[i + 1u];
+        const uint32_t d = a >= b ? a - b : a + period - b;
+        scl_iv[i] = static_cast<uint16_t>(d < 0xFFFFu ? d : 0xFFFFu);
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (!xfer_done && Ticker::millis() - t0 < 300u) {
+    }
+    r.status = xfer_done ? xfer_status : 0xEEu;
+    if (r.edges == 0u) {
+        return r;
+    }
+    // The median by a counting pass over a sorted copy (insertion sort:
+    // a few hundred entries, once).
+    static uint16_t sorted[scl_cap];
+    for (uint16_t i = 0; i < r.edges; ++i) {
+        uint16_t v = scl_iv[i];
+        uint16_t j = i;
+        while (j > 0u && sorted[j - 1u] > v) {
+            sorted[j] = sorted[j - 1u];
+            --j;
+        }
+        sorted[j] = v;
+    }
+    const uint32_t median = sorted[r.edges / 2u];
+    uint32_t sum = 0;
+    for (uint16_t i = 0; i < r.edges; ++i) {
+        const uint32_t v = scl_iv[i];
+        if (4u * v >= 3u * median && 4u * v <= 5u * median) {
+            sum += v;
+            ++r.used;
+        }
+    }
+    if (r.used == 0u) {
+        return r;
+    }
+    r.period_x16 = 16u * sum / r.used;
+    // rate / asked = (hz / period) / asked
+    r.permille = static_cast<uint32_t>(16'000ull * SysClock::hz / r.period_x16 / asked_hz);
+    return r;
+}
+
+/// The bracket: never above the rate asked by more than 2 %, within a
+/// quarter below it (the pull-ups' rise, which the divisor only budgets).
+bool scl_ok(uint32_t permille) { return permille >= 750u && permille <= 1020u; }
+
 void tf_speeds() {
     if (!engine_up()) {
         bench.verdict("the engine comes up", false);
@@ -674,7 +854,9 @@ void tf_speeds() {
     static const I2cSpeed speeds[] = {I2cSpeed::standard_100k, I2cSpeed::fast_400k,
                                       I2cSpeed::fast_plus_1m};
     static const char* const names[] = {"100k", "400k", "1M"};
+    static const uint32_t asked[] = {100'000UL, 400'000UL, 1'000'000UL};
     uint32_t took[3] = {};
+    SclReading scl[3] = {};
     bool all_ok = true;
     for (uint8_t s = 0; s < 3; ++s) {
         twilink::Params a{};
@@ -694,10 +876,15 @@ void tf_speeds() {
             }
         }
         took[s] = Ticker::millis() - t0;
+        scl[s] = sampled_write(w, 16, speeds[s], asked[s]);
         settle_ms(650);
         print(serial, "  ", names[s], ": 25 tenures x 16 bytes in ", took[s],
               " ms (the divisor says SCL = ", I2cHw::scl_hz(speeds[s]) / 1000u,
-              " kHz)", crlf);
+              " kHz); on the pad: status ", scl[s].status, ", ", scl[s].used, " of ",
+              scl[s].edges, " rise-to-rise intervals, the period ", scl[s].period_x16 / 16u, ".",
+              (scl[s].period_x16 % 16u) * 10u / 16u, " cycles, SCL at ", scl[s].permille,
+              " thousandths of the rate asked (BAUD ", I2cHw::baud_of(speeds[s]).baud,
+              ", BAUDLOW ", I2cHw::baud_of(speeds[s]).baudlow, ")", crlf);
     }
     bench.verdict("all 75 tenures across the THREE speeds - fast-mode-plus "
                   "included, this stratum's first on the wire - complete i2c_ok: "
@@ -706,6 +893,12 @@ void tf_speeds() {
                   all_ok);
     bench.verdict("and the wall time falls as the divisor shrinks: 100k > 400k > 1M",
                   took[0] > took[1] && took[1] > took[2]);
+    bench.verdict("THE THREE SPEEDS RUN AT THE RATES ASKED: SCL on the pad, sampled through a "
+                  "tenure, never above 100 kHz, 400 kHz and 1 MHz by more than 2 % and within "
+                  "a quarter below each",
+                  scl[0].status == i2c_ok && scl[1].status == i2c_ok &&
+                      scl[2].status == i2c_ok && scl_ok(scl[0].permille) &&
+                      scl_ok(scl[1].permille) && scl_ok(scl[2].permille));
     // THE REFUSED-NEVER-SLOWED RULE still has its proof: a core CLAIMED
     // at 6 MHz (a throwaway re-init - the claim drives the baud table,
     // and no tenure at another speed follows it) cannot make the

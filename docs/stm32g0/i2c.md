@@ -239,7 +239,7 @@ the reason is in the findings.
 
 Measured by `test_stm32_i2c`. The findings down to "ES0548 2.10.2 did
 not fire once" are the SELF-LINK's (I2C1 host PB8/PB9, I2C2 client
-PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z`, 147
+PA11/PA12, both AF6, 2.2 kOhm pull-ups): 13 letters in `z`, 155
 verdicts. The ones under "The peer bus" are a SECOND CHIP's, on the same
 two pads and the same pull-ups: 54 verdicts, against a SAM C21 and
 against a second STM32G0.
@@ -340,6 +340,36 @@ rate asked within one per cent (measured); the arithmetic gives 400 and
 970 kHz for the other two - the last held under the rate by table 171's
 tLOW, which the chooser keeps with the floor's edge rather than trust a
 split of the stated delay between the two edges.
+
+**THE RATE ASKED, JUDGED ON THE WIRE.** A self-link's target follows the
+controller's clock, so it carries every byte whatever TIMINGR made of
+the rate, and only the stopwatch can see a wrong one: every letter that
+sets an SCL rate times its tenure (9 SCL periods a byte and the address,
+START, STOP and the request's own cost inside the reading) against the
+speed the request NAMED and judges it - never above it by more than
+2 %, and within a quarter below it, the wire's tSYNC (above) being what
+only lengthens a period. On the STM32G0B1RE, in thousandths of the rate
+asked:
+
+| letter | tenure | rate asked | reading |
+|---|---|---|---|
+| `d` | 32 bytes, the target in NOSTRETCH, 64 MHz core on PCLK | 100 k, 400 k, 1 M | 967, 897, 782 |
+| `d` | 32 bytes on the 64 MHz and the 16 MHz rung, PCLK | 100 k | 969, 928 |
+| `h` | 300 bytes through RELOAD | 400 k | 920 |
+| `h` | 64 bytes on the transmit engine | 400 k | 909 |
+
+Each lands under its speed by this wire's tSYNC, which the default
+charges at its floor - the gap a stated `sync_ns` closes (the 100 kHz
+rung brought within a per cent, above); the 16 MHz rung's 928 is the
+same register shape on a kernel a quarter as fast, its fixed costs a
+larger share. AT A 2 MHz CORE THE STOPWATCH CANNOT TIME SCL: with the
+kernel on HSI16 the tenure takes 0.64 of the 100 kHz wire because the
+controller holds SCL low until its TXIS entry refills TXDR and the
+target stretches until its own entry reads RXDR (32.4.9, 32.4.17), both
+served by the one 2 MHz core - and no pad is spare for SCL's edges. That
+rung's rate rests on the register instead: its TIMINGR on HSI16 is
+0x1091222B, the very word the 16 MHz rung timed at 928 on a 16 MHz
+kernel, and the letter checks the identity.
 
 **ST's own arithmetic is the oracle, and its error runs FAST.** The HAL
 takes a precomputed TIMINGR; ST computes it in CubeMX and in the timing
@@ -720,6 +750,11 @@ Implemented but not bench-verified:
   measure it.
 - **I2C3** - present on this part, exercised in the family fixture and
   in letter a's refusals, but its pads carry no wire here.
+- **SCL against the rate asked between two chips** (letter `q`: the
+  write's SCL at 100 and 400 kHz judged never above the rate by more
+  than 2 % and within a quarter below it): the peer letters skip on a
+  desk that carries the self-link; one run of `q` against a `twi_peer`
+  measures it.
 - **The LQFP32's own self-link.** The STM32G031K8 bonds both ends of
   it (I2C1 on PB8/PB9, I2C2 on PA11/PA12), so the eleven self-link
   letters are compiled there and probe for it at boot - but that desk
@@ -785,6 +820,12 @@ not got would measure):
   transmitter whose tSU;DAT is under one kernel period, which on this
   bench means a bit-banged sender on a pad the peripheral must also own.
   The erratum is carried as the refusal it is instead.
+- **SCL at a 2 MHz core.** A tenure there is paced by the controller's
+  and the target's vectors on the one core (the 0.64 above), so the
+  stopwatch times the software and not the clock; a timer capture of
+  SCL's edges on a pad of its own would time it, and both ends of the
+  wire are alternate functions. The rate is carried by the register
+  instead - the 16 MHz rung's own TIMINGR on the same 16 MHz kernel.
 - **The Fm+ drive's electrical effect.** With the drive on and off the
   measured SCL period moves by less than the stopwatch's own resolution
   (921 vs 921 ns): 6.1.3 makes it a pad property and the period is
