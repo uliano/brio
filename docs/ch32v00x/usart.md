@@ -137,7 +137,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
 | DATAR, one level: no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | nothing deeper to batch |
 | DMAR and a CIRCULAR channel (8.2.1's CIRC, [dma.md](dma.md)) | the receive engine | the bulk path: the channel writes the whole receive storage lap after lap and is never re-armed, util/ring.hpp's `HardwareRing` reading it |
 | IDLE and IDLEIE (14.8.1) | the engine's burst edge | one frame after the last stop bit; the channel's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
-| RXNEIE beside DMAR | the engine's wait for a frame | the channel still takes the byte and the vector learns one came - the edge of a burst of one frame |
+| RXNEIE beside DMAR | the engine's wait for a frame | the channel still takes the byte and the vector learns one came - the edge of a burst of one frame; ORE raises it too, which is how an overrun with nothing left to take is found and cleared |
 | EIE (FE, NE, ORE under DMAR) and PEIE | counted by the engine's vector | an error is counted when it rises, disarmed until the channel's next read clears it |
 | the half and full marks of the channel's lap | the engine's edge with no silence | a stream that never pauses is told twice a lap |
 | a receiver time-out | none on this block | |
@@ -229,8 +229,25 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   with TXEIE down - are counted, and the 255th gives the channel up
   (`dma_faults()` counted, RXNEIE down, the edge reported) for the
   consumer's next look to stop and bind again from the storage's first
-  element, as after a transfer error. The
-  channel's half and full marks report it from `dma_isr()`. Two
+  element, as after a transfer error. AN OVERRUN WITH NOTHING TO TAKE
+  re-enters that wait the same way: a channel starved past a frame time
+  leaves ORE up and, once let go, takes the frame DATAR held, so with no
+  frame after it RXNE is down and RXNEIE - which ORE raises on its own
+  (14.8.4) - re-enters with nothing for the channel to move, until the
+  bound gives a live channel up and the restart's EIE re-enters on the
+  same ORE. So the wait's second entry with the count unmoved reads
+  STATR once and, finding ORE without RXNE, reads DATAR - the clear of
+  14.8.1 - and turns back to the wait for the end; with the count
+  unmoved no DATAR read has come since the status read that began the
+  wait, so the clear it armed is armed still and the two reads count
+  nothing twice and lose no count, the overrun counted once (measured,
+  below). A frame landing between the two loads loses its error flags
+  to the clear, as the frame after any counted error does; on the
+  CH32V203 and the CH32V303 the request it raised outlived the CPU's
+  read and the channel still stored its byte
+  ([../ch32vx03/usart.md](../ch32vx03/usart.md)), which this die has not
+  been asked. The channel's half and full marks report it from
+  `dma_isr()`. Two
   interrupts a burst, none a byte. WHAT THE CHANNEL'S READ BOUNDS is the
   counts, never the bytes: the frame after one whose error was counted
   loses its own (a run of errored frames counts every other one), so
@@ -240,8 +257,10 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   parameter: `format` (seven data bits with parity or eight, with or
   without - nine is refused, the rings carry bytes), `half_duplex`
   (the TX pad as AF open drain, the RX pad untouched), `rts` and `cts`
-  (the column's pads). Left at their defaults the options compile to
-  the code they replaced: every image byte-identical (measured).
+  (the column's pads), and `rx_priority` - the receive engine's level,
+  very_high by default ([../design/dma.md](../design/dma.md): DATAR holds
+  one frame, and a copy that outranks the ring overruns it), refused on a
+  port with no receive engine; the transmit engine arms at high.
 
 ## How to use it
 
@@ -298,7 +317,7 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 ## Bench findings
 
-The reference suite is `test_ch32_serial` (47 verdicts in `z`, five
+The reference suite is `test_ch32_serial` (50 verdicts in `z`, five
 of its letters on the jumper PD2 to PD4 that lends TIM2's channel 1 as
 the ruler, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
@@ -331,6 +350,18 @@ out there.
   last stop bit (1.0 frame at 9600) with two USART interrupts and none a
   byte; four laps of the 256-byte ring with no silence read whole on the
   lap's marks.
+- **An overrun at a burst's tail** (letter u, banged at 115200): a fill
+  on channel 1 at the ring's own level, which wins the tie against
+  channel 7 (8.2.1), starving the ring under a burst's last three frames,
+  the vector held off until the channel had taken the frame DATAR held -
+  ORE up, RXNE down, no frame after it. The vector entered THREE times,
+  no channel was given up, the overrun and the gap were each counted
+  once, the four frames before it and the one DATAR held arrived in
+  order, and the next burst of eight arrived whole. THE CONTROL, the
+  same image with the clear disabled: 256 entries - the overrun's and the
+  stall bound's 255 - the live channel given up as a DMA fault, the
+  frames before it thrown away by the restart, and the next burst lost
+  to the second storm the restart's own entry began.
 - **The rate verbs** (letter t): `can_baud()` yes at 3 Mbaud and no at
   3.2 from 48 MHz, yes at 733 baud and no at 732; `set_baud(9600)` on a
   live port gives a start bit of exactly 5000 cycles where 115200 gave
@@ -385,13 +416,20 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `release()`'s reset pulse and the receive ring's stall bound: written
-  from the CH32V203's measurement and staged on no board of this family;
-  the no-wire image of [dma.md](dma.md)'s first item - USART2 released
-  without the pulse, then a TIM1-paced block on channel 6 - would
-  measure the first; TIM2 gated by hand with its channel 2 request
-  standing, then USART2's receive ring on channel 7 fed a frame through
-  its pad's pull, would stage the dead channel the second answers.
+- `release()`'s reset pulse: written from the CH32V203's measurement and
+  staged on no board of this family; the no-wire image of
+  [dma.md](dma.md)'s first item - USART2 released without the pulse,
+  then a TIM1-paced block on channel 6 - would measure it.
+- The overrun clear's window on this die: whether a frame's request
+  outlives a CPU read of DATAR, so that a frame landing between the
+  clear's two loads keeps its byte; a fill starving the ring under one
+  banged frame, the CPU reading STATR and DATAR before the fill ends and
+  the channel's count read after it, would measure it.
+- The receive ring over a DEAD channel: the stall bound is measured
+  (letter u's control gave a live channel up at its 255th entry), the
+  channel a held request froze is not; TIM2 gated by hand with its
+  channel 2 request standing, then USART2's receive ring on channel 7
+  fed a frame through its pad's pull, would stage it.
 - The engines on the CH32V003 (its USART1, the console): compiled for
   the part; `test_ch32_dma` on the CH32V003F4P6 would run them.
 - The run verbs, `write_bulk()` and `read_span()`/`consume()`, on the

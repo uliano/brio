@@ -581,8 +581,12 @@ public:
         S::ack(false);
         if constexpr (has_engines) {
             // BTF ends a write phase: the transmit block's errors alone.
-            TxEngine::arm(S::data_address(), TxEngine::flag_error);
-            RxEngine::arm(S::data_address());
+            // Both at HIGH (DmaPriority's rule): the host does not overrun -
+            // a byte a starved channel has not moved leaves BTF up and SCL
+            // held low until it is, stretching the bus and losing nothing
+            // (15.3's notes).
+            TxEngine::arm(S::data_address(), TxEngine::flag_error, DmaPriority::high);
+            RxEngine::arm(S::data_address(), DmaPriority::high);
         }
         // The pads go to the peripheral only now. OPEN DRAIN is the
         // definition of the bus: the pull-ups own the idle level.

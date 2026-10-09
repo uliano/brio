@@ -85,6 +85,12 @@
 //      the divisor's two ends, set_baud() moving a live port (the start
 //      bit measured on the jumper before and after) and refusing an
 //      unreachable rate, release() giving the instance and its pads back
+//   u  AN OVERRUN AT A BURST'S TAIL under the receive engine: a fill on
+//      channel 1 at the ring's own level starving the ring under a banged
+//      burst's last three frames, the vector held off until the channel
+//      took the frame DATAR held - ORE up with RXNE down, no frame after
+//      it: the vector entered a handful of times, no channel given up, the
+//      overrun and the gap counted once each; the next burst whole
 //   y  (outside z, host-assisted: brio stress) the CONSOLE's own error
 //      counters, provoked from the host side
 //   k  THE SYNCHRONOUS MODE, on the console's own USART1 (both parts):
@@ -127,7 +133,7 @@ using namespace brio;
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 
-TestBench<Serial, 16> bench;
+TestBench<Serial, 17> bench;
 
 #if BRIO_CH32_HAS_USART2
 // The instrument: USART2 on column 3.
@@ -1515,6 +1521,127 @@ void tt_rate_verbs() {
 }
 
 // ===========================================================================
+// u - an overrun at a burst's tail under the receive engine: no storm
+// ===========================================================================
+
+/// THE STAGING. USART2's ring runs on channel 7 at very_high (the Uart's
+/// default); a fill on channel 1 at the same level wins every tie (8.2.1)
+/// and starves it. Under the mask: four frames banged at 115200 baud
+/// and taken, then the fill started and three more frames - the first
+/// lands in DATAR with nothing to take it, the next overrun it - and the
+/// fill's end lets the channel take the frame DATAR held; the line then
+/// idles. ORE stands with RXNE down and no frame after it, and the vector
+/// first looks only now: the state ch32v00x/usart.hpp's rx_overrun_probe
+/// answers. A storm would show as the vector entered hundreds of times
+/// and a channel given up.
+using Starver = DmaCopyEngine<1, uint8_t>;
+constexpr uint32_t storm_baud = 115200;
+
+/// A masked stretch begins right after a tick: the bit-banger's clock,
+/// cycles_now(), composes the tick count with STK's position, and with the
+/// tick's handler held off it stays right for two periods after the last
+/// tick counted and no longer - every masked stretch here is under 1.2 ms.
+void after_a_tick() {
+    const uint32_t m = Ticker::millis();
+    while (Ticker::millis() == m) {
+    }
+}
+
+void tu_overrun_tail() {
+    static uint8_t fill_dst[2048];
+    static const uint8_t fill_cell = 0x5Au;
+    if (!transport_on<DmaUart>(&dma_edge_isr, storm_baud)) {
+        bench.verdict("USART2 with both engines comes up", false);
+        all_off();
+        return;
+    }
+    Starver::arm(DmaPriority::very_high, false);
+    const uint16_t hw0 = DmaUart::hw_overruns();
+    const uint16_t f0 = DmaUart::dma_faults();
+    const uint32_t k0 = DmaUart::rx_skips();
+    bool filled = false;
+    after_a_tick();
+    {
+        P::CriticalSection cs;
+        bang_idle(storm_baud, 2);
+        for (uint32_t i = 0; i < 4u; ++i) {
+            bang_frame({.data = stream_byte(i), .baud = storm_baud});
+        }
+        filled = Starver::fill(fill_dst, &fill_cell, sizeof fill_dst);
+        for (uint32_t i = 4; i < 7u; ++i) {
+            bang_frame({.data = stream_byte(i), .baud = storm_baud});
+        }
+        while (Starver::busy()) {
+        }
+        bang_idle(storm_baud, 20);   // the line idle, IDLE up
+        u2_interrupts = 0;
+    }
+    settle_ms(2);
+    const uint32_t entries = u2_interrupts;
+    const uint16_t hw = static_cast<uint16_t>(DmaUart::hw_overruns() - hw0);
+    const uint16_t faults = static_cast<uint16_t>(DmaUart::dma_faults() - f0);
+    const uint32_t skips = DmaUart::rx_skips() - k0;
+    uint32_t got = 0;
+    bool in_order = true;
+    uint8_t b = 0;
+    while (DmaUart::read_byte(b)) {
+        if (got < 4u && b != stream_byte(got)) {
+            in_order = false;
+        }
+        ++got;
+    }
+    const uint16_t c1 = U2::regs().CTLR1;
+    const bool waiting_for_the_end = (c1 & usart_idleie) != 0u && (c1 & usart_rxneie) == 0u;
+    print(serial, "  seven frames, the fill ", filled ? "run" : "REFUSED", " under the last three: ",
+          got, " delivered, USART2's vector ", entries, " entries, ", hw, " overruns counted, ",
+          skips, " gaps, ", faults, " channels given up; the vector ",
+          waiting_for_the_end ? "waiting for the end" : "NOT waiting for the end", crlf);
+    bench.verdict("AN OVERRUN AT A BURST'S TAIL, ORE up with nothing in DATAR: no storm - a handful "
+                  "of entries, no channel given up - the overrun counted once and the gap once, the "
+                  "frames before it delivered in order",
+                  filled && entries <= 8u && faults == 0u && hw == 1u && skips == 1u &&
+                      got >= 4u && got < 7u && in_order && waiting_for_the_end);
+
+    // The next burst, whole - banged under the mask too: a bit at this
+    // rate is 417 cycles, and the tick's handler would stretch one.
+    after_a_tick();
+    {
+        P::CriticalSection cs;
+        bang_idle(storm_baud, 2);
+        for (uint32_t i = 0; i < 8u; ++i) {
+            bang_frame({.data = stream_byte(40u + i), .baud = storm_baud});
+        }
+        bang_idle(storm_baud, 2);
+    }
+    settle_ms(2);
+    uint32_t next = 0;
+    bool next_in_order = true;
+    uint8_t seen[8] = {};
+    while (DmaUart::read_byte(b)) {
+        if (next < 8u) {
+            seen[next] = b;
+            if (b != stream_byte(40u + next)) {
+                next_in_order = false;
+            }
+        }
+        ++next;
+    }
+    if (!next_in_order) {
+        print(serial, "  received:");
+        for (uint32_t i = 0; i < 8u; ++i) {
+            print(serial, " ", hex(seen[i]), "/", hex(stream_byte(40u + i)));
+        }
+        print(serial, crlf);
+    }
+    print(serial, "  the next burst: ", next, " of 8", next_in_order ? " in order" : " NOT in order",
+          crlf);
+    bench.verdict("... and the next burst arrives whole, nothing else counted",
+                  next == 8u && next_in_order && DmaUart::hw_overruns() - hw0 == 1u &&
+                      DmaUart::dma_faults() == f0);
+    all_off();
+}
+
+// ===========================================================================
 // y - host-assisted (outside z): the console's own error counters
 // ===========================================================================
 
@@ -1765,6 +1892,7 @@ int main() {
     bench.letter('r', "tx_idle() against the last stop bit on the jumper", tr_tx_idle);
     bench.letter('s', "the burst edge from the vector, nothing polled", ts_edge);
     bench.letter('t', "the rate verbs: set_baud(), can_baud(), min_hz_for(), release()", tt_rate_verbs);
+    bench.letter('u', "an overrun at a burst's tail under the receive engine: no storm", tu_overrun_tail);
     bench.letter('y', "host-assisted (brio stress): the console's own error counters", ty_host, false);
 #endif
     bench.letter('k', "THE SYNCHRONOUS MODE on the console's USART1: CK counted by TIM2 off PD4, no wire", tk_synchronous);

@@ -1171,7 +1171,10 @@ public:
                       "on the CH32V303, on DMA2's channel 5); an engine on any other slot would "
                       "never see a conversion (DmaRequestOf<DmaRequest::adc1> is how to spell "
                       "it)");
-        Engine::arm(data_address());
+        // VERY_HIGH (DmaPriority's rule): RDATAR holds one conversion and
+        // this converter has no overrun flag, so the next end of conversion
+        // writes over a sample a starved channel has not taken, unseen.
+        Engine::arm(data_address(), DmaPriority::very_high);
         return dma(true);
     }
 

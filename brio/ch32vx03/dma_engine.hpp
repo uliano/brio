@@ -97,6 +97,25 @@ constexpr bool dma_engines_distinct() {
     }
 }
 
+/**
+ * CFGR.PL: the software half of the arbitration, the channel index
+ * deciding between equal levels - the lower number wins (RM 11.2.1). It
+ * lives here, beside the tag, because a transport names the level of the
+ * engines in its slots and must not include the controller to do it.
+ *
+ * THE LEVEL IS THE PERIPHERAL'S (docs/design/dma.md). An engine whose
+ * peripheral OVERRUNS when its channel is starved - a receive ring, an SPI
+ * host's receive, a converter's stream - arms at `very_high`; one whose
+ * peripheral only waits or holds its last value - a transmit, a paced
+ * output, an I2C host's receive under its stretched clock - at `high`; a
+ * memory-to-memory copy at `low`, because no request paces it and it asks
+ * for the bus without a pause, so a channel it outranks moves nothing until
+ * its block is over. The engines' defaults are those three by direction
+ * (ch32vx03/dma.hpp), and every driver arms its engines at its own level,
+ * with its chapter's reason beside the call.
+ */
+enum class DmaPriority : uint8_t { low = 0, medium = 1, high = 2, very_high = 3 };
+
 // ---- the request table (RM 11.2.3) ------------------------------------------
 
 /**

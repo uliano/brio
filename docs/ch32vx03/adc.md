@@ -258,6 +258,9 @@ arms an engine on the data register and sets CTLR2.DMA in one verb,
 refusing at compile time an engine on any other slot - an engine on the
 wrong channel would wait for a datum that never comes, which is a wedge
 and not an error - and answering false where the die kept no DMA bit.
+The engine arms at VERY_HIGH ([../design/dma.md](../design/dma.md)):
+RDATAR holds one conversion and STATR has no overrun flag (12.3.1), so
+a sample a starved channel has not taken is written over in silence.
 
 The engine behind it is `DmaPingPongEngine`, this family's realization
 of [util/block_stream.hpp](../../brio/util/block_stream.hpp)'s

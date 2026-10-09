@@ -105,7 +105,12 @@ the pads).
   buffers sit on a half-word boundary and on the pump otherwise. The
   transmit engine is armed for its errors alone: ONE DMA INTERRUPT A
   TRANSACTION, the receive channel's, and `dma_isr()` reads the
-  controller's one flag register once for both channels. The data
+  controller's one flag register once for both channels. The receive
+  engine arms at very_high and the transmit at high
+  ([../design/dma.md](../design/dma.md)): DATAR's receive half holds one
+  frame, and a receive channel the transmit one outran would find the
+  next frame on top of its last (OVR, 16.2.7), while a transmit channel
+  that waits only stops the host's clock between two frames. The data
   phase's launch is the two engines' block starts and the two DMA
   requests raised around them, no mask (nothing completes under it).
   Which requests the engines take at all is a count (`dma_min_frames`,

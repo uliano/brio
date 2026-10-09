@@ -163,7 +163,13 @@ would move nothing.
 
 ONE INTERRUPT A TRANSACTION: every frame that comes back was clocked out
 first, so the receive block's completion proves the transmit block's, and
-the host arms its transmit engine for a transfer error alone. THE BEAT IS
+the host arms its transmit engine for a transfer error alone. THE RECEIVE
+ENGINE ARMS AT VERY_HIGH AND THE TRANSMIT AT HIGH
+([../design/dma.md](../design/dma.md)): DATAR's receive half holds one
+frame, and a receive channel the transmit one outran would find the next
+frame on top of its last - OVR, the frame lost (20.2.7) - while a
+transmit channel that waits only stops the host's clock between two
+frames. THE BEAT IS
 THE FRAME: a 16-bit request runs on the engines as half-words - DFF and
 the access to DATAR agreeing - when its buffers are half-word aligned
 (a misaligned one goes to the pump). And the requests are raised AFTER

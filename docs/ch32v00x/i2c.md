@@ -145,7 +145,11 @@ takes** - the inventory the costs below are read against:
   engine is armed for its errors alone and a write takes no DMA
   interrupt; a BTF with the count standing is a channel that stopped
   serving, and ends the tenure `i2c_dma_fault` with its STOP; a read ends on the receive block's completion, its one. `dma_isr()` reads the controller's one flag
-  register once for both channels.
+  register once for both channels. Both engines arm at high, the
+  transmit level of [../design/dma.md](../design/dma.md)'s rule: the host
+  does not overrun - a byte a starved channel has not moved leaves BTF
+  up and SCL held low until it is (15.3's notes), the bus slower and
+  nothing lost.
 - `I2cClient<1, pins>`: the target side - `init(clock, addresses,
   no_stretch)`, the polled surface (`addressed()`, `answer_address()`
   returning the direction, `take()`/`give()`, `stop_seen()`,

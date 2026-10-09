@@ -211,6 +211,11 @@ using Plain = Uart<1, P>;
 using TxOnly = Uart<1, P, 64, 128, DmaTxEngine<4>>;
 using RxOnly = Uart<1, P, 64, 64, NoDmaEngine, DmaRxEngine<5>>;
 using Both = Uart<1, P, 64, 128, DmaTxEngine<4>, DmaRxEngine<5>>;
+/// The receive ring ranked by the program (docs/design/dma.md's option).
+using Ranked = Uart<1, P, 64, 128, DmaTxEngine<4>, DmaRxEngine<5>, 0,
+                    UartOptions{.rx_priority = DmaPriority::high}>;
+static_assert(Ranked::options.rx_priority == DmaPriority::high &&
+              Both::options.rx_priority == DmaPriority::very_high);
 
 static_assert(!Plain::has_tx_engine && !Plain::has_rx_engine);
 static_assert(TxOnly::has_tx_engine && !TxOnly::has_rx_engine);
@@ -241,4 +246,5 @@ void all_uarts() {
     uart_verbs<TxOnly>();
     uart_verbs<RxOnly>();
     uart_verbs<Both>();
+    uart_verbs<Ranked>();
 }

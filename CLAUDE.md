@@ -24,7 +24,8 @@ Only ASCII <= 127 in every file of the repo (code, docs, this file).
   and contracts. `overview.md` (philosophy, the governing rule, the
   layering, the style, "a driver is written from its chapter", "a
   contract's unit is the run"), `kernel.md`, `clock.md`, `serial.md`,
-  `spi-bus.md`, `i2c-bus.md`, `can.md`, `ring.md`, `analog.md`,
+  `spi-bus.md`, `i2c-bus.md`, `can.md`, `ring.md`, `dma.md` (the engines'
+  priority rule and the release contract), `analog.md`,
   `nv-heap.md`, `nv-journal.md`, `power.md`, `meters.md`, `usb.md`,
   `runtime.md`, `benchmark.md` (the instrument a driver's cost is read
   with), `block-stream.md`, `gfx.md`, `simulation.md`; `architecture.svg`

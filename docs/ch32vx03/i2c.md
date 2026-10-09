@@ -259,7 +259,11 @@ driver drives it.
 Table 11-5 wires I2C1's transmit request to DMA channel 6 and its
 receive to 7, I2C2's to 4 and 5. On this family the channel IS the
 request, so an engine slot naming any other channel is refused at
-compile time. With engines a write phase of three bytes or more (two
+compile time. Both engines arm at HIGH, the transmit level of
+[../design/dma.md](../design/dma.md)'s rule and not a receive's: the
+host does not overrun - a byte a starved channel has not moved leaves
+BTF up and SCL held low until it is (19.3's notes), the bus slower and
+nothing lost. With engines a write phase of three bytes or more (two
 ride EVT8_1's own entry) and a read phase of two bytes or more run on
 them, the read under CTLR2.LAST so the controller NACKs the block's last
 byte; a ONE-BYTE read stays on the

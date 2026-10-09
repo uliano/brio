@@ -858,8 +858,13 @@ public:
         if constexpr (has_engines) {
             // The transmit block ends before the receive block does, which
             // is the one interrupt a transaction takes: its errors alone.
-            TxEngine::arm(S::data_address(), TxEngine::flag_error);
-            RxEngine::arm(S::data_address());
+            // The receive side at VERY_HIGH, the transmit at HIGH
+            // (DmaPriority's rule): DATAR's receive half holds one frame,
+            // and a receive channel the transmit one outran would find the
+            // next frame on top of its last (OVR, 16.2.7); a transmit channel that
+            // waits only stops the host's clock between two frames.
+            TxEngine::arm(S::data_address(), TxEngine::flag_error, DmaPriority::high);
+            RxEngine::arm(S::data_address(), DmaPriority::very_high);
         }
         // The pads go to the peripheral only now, with the registers
         // already holding the idle polarity: a pad handed over first

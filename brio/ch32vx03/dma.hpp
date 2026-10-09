@@ -114,6 +114,17 @@
  * never includes this file. TWO ENGINES OF ONE TRANSPORT NAME TWO SLOTS: a
  * channel moves data one way, and the table gives each direction its own.
  *
+ * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (ch32vx03/dma_engine.hpp's
+ * DmaPriority, docs/design/dma.md). The arbiter grants the bus item by item
+ * to the highest level asking, the lower channel number between equals,
+ * and a memory-to-memory channel asks without a pause: a receive ring it
+ * outranks moves nothing until its block is over - measured, a copy back
+ * to back on a lower channel at the ring's level overran USART2's ring,
+ * and with the ring a level above it no byte was lost at 1 or 4.5 Mbaud
+ * (docs/ch32vx03/dma.md). So the defaults are the rule's: the receive
+ * engine and the block source at very_high, the transmit engine and the
+ * player at high, the copy at low.
+ *
  * EVERY ENGINE STANDS ON `DmaBinding<c, ch>`, which is where this
  * controller's two moments are kept apart: what is constant for a binding
  * written once when the engine is armed, and per block the four stores the
@@ -178,9 +189,8 @@ constexpr uint8_t dma_width_bytes(DmaWidth w) {
 }
 constexpr uint32_t dma_width_mask(DmaWidth w) { return dma_width_bytes(w) - 1u; }
 
-/// CFGR.PL: the software half of the arbitration; ties go to the lower
-/// channel index (11.2.1).
-enum class DmaPriority : uint8_t { low = 0, medium = 1, high = 2, very_high = 3 };
+// CFGR.PL's vocabulary, DmaPriority, is ch32vx03/dma_engine.hpp's: a
+// transport names its engines' levels without this file.
 
 /// CFGR.DIR says WHICH SIDE IS THE SOURCE: 0 reads PADDR and writes
 /// MADDR, 1 the other way round.
@@ -956,10 +966,12 @@ public:
      * completion and the error by default; a transport whose completion is
      * proved by ANOTHER channel arms the error alone and takes no interrupt
      * per block. The PFIC line is enabled when anything is armed. False,
-     * and nothing armed, when `data` is not aligned to `Elem`.
+     * and nothing armed, when `data` is not aligned to `Elem`. `high` by
+     * default: a peripheral a transmit channel feeds waits for it, or holds
+     * its last value, where a starved receive overruns (DmaPriority's rule).
      */
     static bool arm(volatile void* data, uint8_t interrupts,
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::high) {
         stop();
         if ((dma_address(data) & dma_width_mask(width)) != 0u) {
             return false;
@@ -976,7 +988,7 @@ public:
         return true;
     }
     /// The completion and the error armed.
-    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::high) {
         return arm(data, static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error), priority);
     }
 
@@ -1197,8 +1209,10 @@ public:
     /// DmaTxEngine::arm()'s rules. False, and nothing armed, when `data` is
     /// not aligned to Elem. A ring an earlier circular arm() bound stays
     /// bound - its word is its own - and start() with no run runs it.
+    /// `very_high` by default: a peripheral a receive channel empties
+    /// overruns when the channel is starved (DmaPriority's rule).
     static bool arm(volatile void* data, uint8_t interrupts,
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::very_high) {
         stop();
         if ((dma_address(data) & dma_width_mask(width)) != 0u) {
             return false;
@@ -1215,7 +1229,7 @@ public:
         return true;
     }
     /// The completion and the error armed.
-    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::very_high) {
         return arm(data, static_cast<uint8_t>(DmaFlag::complete | DmaFlag::error), priority);
     }
 
@@ -1232,17 +1246,12 @@ public:
      * `data` is not aligned to Elem, the storage not aligned to its element,
      * or - on the CH32V303's DMA1 - the storage across a 64 KB boundary.
      * The one-shot verbs stay usable on the same binding: a start(run)
-     * replaces the ring until the next start().
+     * replaces the ring until the next start(). `very_high` by default, the
+     * one-shot shape's level.
      */
-    /// The same at the low priority, the half lap's mark asked for or
-    /// not: what a transport that names no DmaPriority spells.
-    template <typename T, size_t N>
-    static bool arm(volatile void* data, T (&storage)[N], bool half_mark) {
-        return arm(data, storage, DmaPriority::low, half_mark);
-    }
     template <typename T, size_t N>
     static bool arm(volatile void* data, T (&storage)[N],
-                    DmaPriority priority = DmaPriority::low, bool half_mark = false) {
+                    DmaPriority priority = DmaPriority::very_high, bool half_mark = false) {
         static_assert(sizeof(T) <= sizeof(Elem),
                       "brio DmaRxEngine: a ring wider than this binding's beat - name the engine "
                       "with the wider element if the register gives it");
@@ -1487,7 +1496,9 @@ public:
 
     /// Bind the channel: the gate, the mode, the priority, and whether the
     /// completion raises the channel's line (`interrupt`) or is asked for
-    /// by busy().
+    /// by busy(). `low` by default: a copy asks for the bus without a
+    /// pause, and a request-paced channel it outranked would move nothing
+    /// until its block ended (DmaPriority's rule).
     static void arm(DmaPriority priority = DmaPriority::low, bool interrupt = true) {
         stop();
         B::bind(nullptr);
@@ -1649,8 +1660,10 @@ public:
 
     /// Bind the channel to this peripheral; `data` is the register the
     /// table is poured into. The PFIC line is enabled here. False, and
-    /// nothing armed, when `data` is not aligned to Elem.
-    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+    /// nothing armed, when `data` is not aligned to Elem. `high` by
+    /// default: a paced output a late item reaches holds its last value
+    /// for a period (DmaPriority's rule).
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::high) {
         stop();
         if ((dma_address(data) & dma_width_mask(width)) != 0u) {
             return false;
@@ -1796,8 +1809,10 @@ public:
     }
 
     /// Bind the channel; `data` is the peripheral's data register. False,
-    /// and nothing armed, when it is not aligned to Elem.
-    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::low) {
+    /// and nothing armed, when it is not aligned to Elem. `very_high` by
+    /// default: a source's peripheral overwrites a sample its starved
+    /// channel has not taken (DmaPriority's rule).
+    static bool arm(volatile void* data, DmaPriority priority = DmaPriority::very_high) {
         stop();
         if ((dma_address(data) & dma_width_mask(width)) != 0u) {
             return false;

@@ -608,7 +608,10 @@ public:
         static_assert(sizeof(typename Engine::element) == dac_format_bytes(format),
                       "brio Dac: the element type is the beat - a 12-bit holding register takes "
                       "a half-word and the 8-bit one a byte");
-        Engine::arm(data_address(ch, format));
+        // HIGH (DmaPriority's rule): a trigger that finds the holding
+        // register not yet written converts what it holds (17.2.3) - the
+        // output keeps its last value a period - and nothing overruns.
+        Engine::arm(data_address(ch, format), DmaPriority::high);
         (void)dma(ch, true);
     }
 
@@ -628,7 +631,7 @@ public:
         static_assert(sizeof(typename Engine::element) == dac_dual_format_bytes(format),
                       "brio Dac: a dual 12-bit holding register takes a word, the dual 8-bit one "
                       "a half-word");
-        Engine::arm(dual_data_address(format));
+        Engine::arm(dual_data_address(format), DmaPriority::high);   // as claim_stream()
         (void)dma(1, true);
     }
 

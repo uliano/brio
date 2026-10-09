@@ -449,6 +449,7 @@ cites another stratum's.
 | the power model | [power.md](power.md) | each family's ladder mapping; where the tick stops and which site resyncs it |
 | the USB device stack | [usb.md](usb.md) | each family's endpoint controller behind the packet contract, and what its RAM or FIFO adds |
 | flash storage | [nv-heap.md](nv-heap.md), [nv-journal.md](nv-journal.md) | the geometries; the AVR keeps its small values in the EEPROM; a family may have the medium and mount NOTHING on it, by the NV review's decision |
+| DMA engines | [dma.md](dma.md) | the levels and the release are the WCH strata's today and every other family's pending wave; four levels or one bit, the arbiter's own tie rule |
 | block streams | [block-stream.md](block-stream.md) | the engine names identical wherever block engines exist, and several strata's transfer engines waiting for a block user; the circular mode serves a player and not a source |
 | meters | [meters.md](meters.md) | `TimIntervalMeter` is not a pulse-width meter; a family with no capture unit has no meter at all |
 | analog | [analog.md](analog.md) | `Ref` is several vocabularies because a reference is several different things, one of them the rail alone; `set`/`write` on the DAC |

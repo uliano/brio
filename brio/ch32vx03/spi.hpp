@@ -1693,10 +1693,18 @@ private:
     /// The engines bind DATAR once: the transmit side armed for its ERROR
     /// alone (the receive block's completion is the transaction's), the
     /// receive side for its completion and its error.
+    ///
+    /// THE RECEIVE SIDE AT VERY_HIGH, THE TRANSMIT AT HIGH (DmaPriority's
+    /// rule). The host clocks a frame out whenever the transmit channel
+    /// fills DATAR, and DATAR's receive half holds one frame: a receive
+    /// channel the transmit one outran would find the next frame on top of
+    /// its last - OVR, the frame lost (20.2.7's overrun). A transmit
+    /// channel that waits only stops the clock between two frames, which
+    /// the host owns.
     static void arm_engines() {
         if constexpr (has_engines) {
-            (void)TxEngine::arm(S::data_address(), TxEngine::flag_error);
-            (void)RxEngine::arm(S::data_address());
+            (void)TxEngine::arm(S::data_address(), TxEngine::flag_error, DmaPriority::high);
+            (void)RxEngine::arm(S::data_address(), DmaPriority::very_high);
         }
     }
 

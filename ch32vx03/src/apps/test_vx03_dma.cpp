@@ -34,7 +34,11 @@
 // each one looked for the same way before it is used.
 //
 // THE PADS. PA2 and PA3 in letters g and p (PA3 the banged line when the
-// strap is absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n. NEVER
+// strap is absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n;
+// in letters q and r PA3 and the fourth port's TX pad - PC10 on the
+// CH32V303, PB0 on the CH32V203 - which the board's crossed pair wires to
+// it (each letter looks for that wire first, and says so when it is not
+// there). NEVER
 // TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port), PA11/PA12
 // (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the CH32V203
 // board's KEY) - and PB2, the CH32V203 board's LED, left undriven, as in
@@ -94,6 +98,24 @@
 //      channel up within its bound - one DMA fault, no storm, the thread
 //      running - and, the request let go by TIM3's reset line, the ring
 //      started again by the consumer's next look and the next burst whole
+//   q  THE PRIORITY RULE (docs/design/dma.md): the Uart's levels as armed -
+//      the ring at very_high, its transmit engine at high, and the ring
+//      UartOptions::rx_priority moves - then the fourth port pouring the
+//      image's pattern into USART2's ring of 512 at 1 Mbaud and at 4.5
+//      Mbaud while a memory-to-memory copy of 2 KB runs back to back on
+//      DMA1's channel 3, a lower number than the ring's 6, at the copy
+//      engine's default level: every byte in order, no overrun, no channel
+//      given up; the copy's rate against its rate alone; and the CONTROL,
+//      the same load against a ring told rx_priority = low, which overruns
+//   r  AN OVERRUN AT A MESSAGE'S TAIL: a copy at the ring's own level on a
+//      lower channel starving the ring under a message's last frames, the
+//      vector held off until the channel has taken the frame DATAR held -
+//      ORE up with RXNE down and no frame after it: the vector entered a
+//      handful of times, no channel given up, the overrun and the gap each
+//      counted once, the bytes before it delivered; the next message whole;
+//      and a frame the CPU reads from under a starved channel - what the
+//      overrun's clear would do to a frame landing between its two loads -
+//      followed to see what the channel does with the request it raised
 // and on the CH32V303 alone, the second controller:
 //   i  MEMORY TO MEMORY ON DMA2: its gate, a kilobyte copied on each of
 //      the eleven channels and verified, and every completion flag found
@@ -119,7 +141,7 @@
 //      its channel
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcdef,ghop
+// build: groups = abcdef,ghop,qr
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -196,7 +218,10 @@ constexpr Pattern make_pattern() {
     return p;
 }
 
-constexpr Pattern source = make_pattern();
+/// Aligned to its own size where DMA1 is held to the 64 KB rule (the
+/// CH32V303's): a 4 KB block on a 4 KB boundary cannot straddle a 64 KB
+/// page, wherever the image grows to put it.
+alignas(DmaChannel<1, 1>::bounded_to_64k ? 4096 : 4) constexpr Pattern source = make_pattern();
 constexpr uint16_t source_bytes = 4096;
 
 alignas(4) uint8_t destination[source_bytes];
@@ -1180,6 +1205,8 @@ volatile bool ring_watch = false;
 volatile uint32_t ring_entries = 0;
 volatile bool ring_stormed = false;
 constexpr uint32_t ring_entry_budget = 100'000;
+/// The budget the binding silences the vector at; letter q's cells lift it.
+volatile uint32_t ring_budget = ring_entry_budget;
 
 /// A REQUEST HELD ON CHANNEL 6 BY A PERIPHERAL WHOSE CLOCK IS GATED - the
 /// state a release that does not pulse its block's reset leaves
@@ -2300,6 +2327,594 @@ void register_dma2_letters() {
     }
 }
 
+// ===========================================================================
+// q - the priority rule: a receive ring outranks the copies
+// ===========================================================================
+
+/// The receive transport of letters q and r: USART2 on both its engines,
+/// as letter g's, with a ring of 512 - room for a consumer behind a
+/// stream at 4.5 Mbaud - at the level the transport arms it at by
+/// default; and the same port told to arm its ring at low, the
+/// arrangement the priority rule replaces (UartOptions::rx_priority).
+using FatTx = DmaTxEngine<1, DmaRequestOf<DmaRequest::usart2_tx>::channel>;
+using FatRx = DmaRxEngine<1, DmaRequestOf<DmaRequest::usart2_rx>::channel>;
+using Fat = Uart<2, P, 512, 64, UartFormat{}, FatTx, FatRx>;
+using FatLow = Uart<2, P, 512, 64, UartFormat{}, FatTx, FatRx, 0,
+                    UartOptions{.rx_priority = DmaPriority::low}>;
+using FatTxChannel = DmaChannel<1, DmaRequestOf<DmaRequest::usart2_tx>::channel>;
+constexpr uint16_t fat_ring = 512;
+/// Which of the two owns USART2's vectors while letters q and r run: 1
+/// Fat, 2 FatLow, 0 neither.
+volatile uint8_t fat_mode = 0;
+
+/// THE LOAD: a memory-to-memory copy on DMA1's channel 3 - a lower number
+/// than the ring's 6 - of two kilobytes as bytes (about 12700 cycles, nine
+/// character times at 1 Mbaud), launched again from its own completion
+/// for as long as `copy_loop` stands: back to back.
+using Copier = DmaCopyEngine<1, 3>;
+constexpr uint16_t copy_bytes = 2048;
+volatile bool copy_loop = false;
+volatile uint32_t copies_done = 0;
+/// The copy engine's completion is channel 3's vector's while this stands.
+volatile bool copy_mode = false;
+
+void copy_once() { (void)Copier::copy(destination + copy_bytes, destination, copy_bytes); }
+
+/// THE SENDER: the fourth port's transmitter, fed by a bare transmit
+/// engine on its own slot with the image's pattern and no interrupt -
+/// UART4 on DMA2's channel 5 on the CH32V303, USART4 on DMA1's channel 1
+/// on the CH32V203 (table 11-5 and 11-3) - at the transmit level, high.
+/// Its TX pad is wired to USART2's RX, PA3, on both boards (PC10 on the
+/// evaluation board, PB0 on the core board). A template, so that nothing
+/// of it is formed on a part without the instance.
+template <uint8_t n = 4>
+struct Feeder {
+    using Port = Usart<n>;
+    static constexpr DmaSlot slot = Port::dma_tx_slot;
+    using Engine = DmaTxEngine<slot.controller, slot.channel, uint8_t>;
+    using TxPad = Pin<Port::pads.tx.port, Port::pads.tx.pin>;
+
+    static bool open(uint32_t baud) {
+        Port::bus_clock(true);
+        Port::reset();
+        if (!Port::configure(UartFormat{}, usart_divisor(usart_bus_hz<n>(clock), baud))) {
+            return false;
+        }
+        TxPad::function();
+        Port::dma_transmit(true);
+        Port::transmitter(true);
+        Port::enable(true);
+        return Engine::arm(Port::data_address(), uint8_t{0}, DmaPriority::high);
+    }
+
+    /// A block finished: the channel stopped, true. Polled - the engine
+    /// takes no interrupt.
+    static bool finished() {
+        if (Engine::busy() && Engine::progress().remaining == 0u) {
+            (void)Engine::complete();
+        }
+        return !Engine::busy();
+    }
+
+    static void close() {
+        Engine::stop();
+        Port::reset();
+        Port::bus_clock(false);
+        TxPad::release();
+    }
+};
+
+/// What the consumer read, judged against the pattern the sender pours.
+struct Sink {
+    uint32_t got = 0;
+    uint32_t bad = 0;
+};
+
+template <typename Port>
+void take(Sink& s) {
+    const uint8_t* src = source_first_bytes();
+    for (;;) {
+        const std::span<const uint8_t> run = Port::read_span();
+        if (run.empty()) {
+            return;
+        }
+        for (const uint8_t b : run) {
+            if (b != src[s.got & (source_bytes - 1u)]) {
+                s.bad = s.bad + 1u;
+            }
+            s.got = s.got + 1u;
+        }
+        (void)Port::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+/// One cell: `blocks` runs of the 4 KB pattern from the fourth port into
+/// USART2's ring at `baud`, the copies back to back beside it when `load`.
+struct Cell {
+    uint32_t sent = 0;
+    uint32_t got = 0;
+    uint32_t bad = 0;
+    uint32_t entries = 0;
+    uint32_t copies = 0;
+    uint32_t us = 0;
+    uint16_t hw = 0;
+    uint16_t ring = 0;
+    uint16_t faults = 0;
+    uint8_t level = 0;
+};
+
+template <typename Port, uint8_t mode, typename F>
+Cell stream_cell(uint32_t baud, uint16_t blocks, bool load) {
+    Cell c{};
+    const uint8_t* src = source_first_bytes();
+    fat_mode = mode;
+    const bool opened = Port::init(clock, baud) && F::open(baud);
+    c.level = static_cast<uint8_t>(LoopRxChannel::configuration().priority);
+    wait_us(500);
+    Sink junk{};
+    take<Port>(junk);   // what the pad framed before the sender drove it
+    Port::clear_errors();
+    const uint16_t f0 = Port::dma_faults();
+    copies_done = 0;
+    if (load) {
+        Copier::stop();
+        Copier::arm(DmaPriority::low, true);   // the copy engine's default, the rule's
+        copy_mode = true;
+        copy_loop = true;
+        copy_once();
+    }
+    ring_entries = 0;
+    ring_budget = 0xFFFF'FFFFUL;   // counted, never silenced: the control's starvation is the point
+    ring_watch = true;
+    Sink s{};
+    uint16_t started = 0;
+    Stopwatch w;
+    Stopwatch tail;
+    bool tail_running = false;
+    if (opened) {
+        (void)F::Engine::start(std::span<const uint8_t>(src, source_bytes));
+        started = 1;
+    }
+    const uint32_t budget_us = 40'000UL + (blocks * 4096UL * 10UL * 1000UL) / (baud / 1000UL);
+    while (opened && w.us() < budget_us) {
+        take<Port>(s);
+        if (F::finished()) {
+            if (started < blocks) {
+                (void)F::Engine::start(std::span<const uint8_t>(src, source_bytes));
+                started = static_cast<uint16_t>(started + 1u);
+            } else if (!tail_running) {
+                tail.start();
+                tail_running = true;
+            } else if (s.got >= static_cast<uint32_t>(blocks) * source_bytes || tail.us() > 3'000UL) {
+                break;
+            }
+        }
+    }
+    copy_loop = false;
+    {
+        Stopwatch q;
+        while (Copier::busy() && q.us() < 5'000UL) {
+        }
+    }
+    ring_watch = false;
+    ring_budget = ring_entry_budget;
+    take<Port>(s);
+    c.us = w.us();
+    c.sent = static_cast<uint32_t>(started) * source_bytes;
+    c.got = s.got;
+    c.bad = s.bad;
+    c.entries = ring_entries;
+    c.copies = copies_done;
+    c.hw = Port::hw_overruns();
+    c.ring = Port::rx_overruns();
+    c.faults = static_cast<uint16_t>(Port::dma_faults() - f0);
+    Port::release();
+    F::close();
+    Copier::stop();
+    Pfic::disable(dma_channel_irq(1, 3));
+    copy_mode = false;
+    fat_mode = 0;
+    return c;
+}
+
+void print_cell(const char* what, const Cell& c) {
+    print(serial, "  ", what, ": ", c.got, " of ", c.sent, " bytes, ", c.bad, " wrong, ",
+          c.hw, " hardware overruns, ", c.ring, " ring overruns, ", c.faults,
+          " channels given up; ", c.copies, " copies in ", c.us, " us; USART2's vector ",
+          c.entries, " entries", crlf);
+}
+
+template <uint8_t n = 4>
+bool sender_wired() {
+    if constexpr (device::has_usart(n)) {
+        using F = Feeder<n>;
+        return strapped<typename F::TxPad, Pin<'A', 3>>();
+    } else {
+        return false;
+    }
+}
+
+template <uint8_t n = 4>
+void tq_priority() {
+    all_off();
+    all_off2<2>();
+    if constexpr (!device::has_usart(n)) {
+        bench.verdict("the priority letter is skipped and says so: this part has no fourth serial "
+                      "port to send with",
+                      true);
+    } else {
+        using F = Feeder<n>;
+        const bool wired = sender_wired<n>();
+        print(serial, "  the wire: the fourth port's TX to PA3 ", wired ? "in place" : "ABSENT",
+              crlf);
+        if (!wired) {
+            bench.verdict("the priority letter is skipped and says so: it needs the fourth port's "
+                          "TX wired to USART2's RX",
+                          true);
+            return;
+        }
+
+        // The defaults the transport arms: the ring at very_high, its
+        // transmit channel at high (DmaPriority's rule).
+        // The transmit engine writes its word into CFGR with its first
+        // block, and a block's end leaves it there without EN.
+        fat_mode = 1;
+        (void)Fat::init(clock, 115200);
+        const DmaPriority ring_level = LoopRxChannel::configuration().priority;
+        (void)Fat::write_byte('\n');
+        {
+            Stopwatch w;
+            while (!Fat::tx_idle() && w.us() < 2'000UL) {
+            }
+        }
+        const DmaPriority tx_level = FatTxChannel::configuration().priority;
+        Fat::release();
+        fat_mode = 2;
+        (void)FatLow::init(clock, 115200);
+        const DmaPriority low_level = LoopRxChannel::configuration().priority;
+        FatLow::release();
+        fat_mode = 0;
+        print(serial, "  CFGR.PL: the ring ", static_cast<uint8_t>(ring_level), ", its transmit ",
+              static_cast<uint8_t>(tx_level), ", the ring told rx_priority = low ",
+              static_cast<uint8_t>(low_level), crlf);
+        bench.verdict("a Uart arms its receive ring at very_high and its transmit engine at high "
+                      "by default, and UartOptions::rx_priority moves the ring's level",
+                      ring_level == DmaPriority::very_high && tx_level == DmaPriority::high &&
+                          low_level == DmaPriority::low);
+
+        // The copy alone: its own rate, the reference for its cost.
+        Copier::stop();
+        Copier::arm(DmaPriority::low, true);
+        copy_mode = true;
+        copies_done = 0;
+        copy_loop = true;
+        Stopwatch w;
+        copy_once();
+        while (w.us() < 50'000UL) {
+        }
+        copy_loop = false;
+        while (Copier::busy()) {
+        }
+        const uint32_t alone = copies_done;
+        const uint32_t alone_us = w.us();
+        Copier::stop();
+        Pfic::disable(dma_channel_irq(1, 3));
+        copy_mode = false;
+        print(serial, "  the copy alone: ", alone, " copies of ", copy_bytes, " bytes in ",
+              alone_us, " us", crlf);
+
+        const Cell m1 = stream_cell<Fat, 1, F>(1'000'000UL, 4, true);
+        print_cell("1 Mbaud, the copies back to back", m1);
+        bench.verdict("AN UNPACED COPY ON A LOWER CHANNEL, BACK TO BACK, DOES NOT STARVE THE RING "
+                      "AT 1 MBAUD: every byte of 16 KB in order, no overrun of either kind, no "
+                      "channel given up",
+                      m1.got == m1.sent && m1.sent == 4u * source_bytes && m1.bad == 0u &&
+                          m1.hw == 0u && m1.ring == 0u && m1.faults == 0u && m1.copies > 0u);
+
+        const Cell m4 = stream_cell<Fat, 1, F>(4'500'000UL, 16, true);
+        print_cell("4.5 Mbaud, the copies back to back", m4);
+        bench.verdict("... nor at 4.5 Mbaud, the link's top rate: every byte of 64 KB in order, "
+                      "no overrun, no channel given up",
+                      m4.got == m4.sent && m4.sent == 16u * source_bytes && m4.bad == 0u &&
+                          m4.hw == 0u && m4.ring == 0u && m4.faults == 0u && m4.copies > 0u);
+
+        // What the rule costs the copy: its rate beside each stream against
+        // its rate alone, in thousandths.
+        const auto per_mille = [&](const Cell& c) {
+            return static_cast<uint32_t>((static_cast<uint64_t>(c.copies) * alone_us * 1000ULL) /
+                                         (static_cast<uint64_t>(c.us) * (alone != 0u ? alone : 1u)));
+        };
+        print(serial, "  the copy's rate beside the ring, against alone: ", per_mille(m1),
+              "/1000 at 1 Mbaud, ", per_mille(m4), "/1000 at 4.5 Mbaud", crlf);
+
+        // THE CONTROL: the same load against the ring a program armed at
+        // low - the arrangement the rule replaces, the copy on channel 3
+        // winning every tie against channel 6.
+        const Cell l1 = stream_cell<FatLow, 2, F>(1'000'000UL, 2, true);
+        print_cell("1 Mbaud, the ring at low (the control)", l1);
+        bench.verdict("and the load is real: with the ring told rx_priority = low the same copies "
+                      "overrun it",
+                      l1.level == static_cast<uint8_t>(DmaPriority::low) && l1.hw > 0u);
+        all_off2<2>();
+        all_off();
+    }
+}
+
+// ===========================================================================
+// r - an overrun at a message's tail: cleared, counted once, no storm
+// ===========================================================================
+
+/// The bytes the ring's channel has written since `at`, a count it read.
+uint16_t arrived_since(uint16_t at) {
+    return static_cast<uint16_t>((at - LoopRxChannel::remaining()) & (fat_ring - 1u));
+}
+
+template <uint8_t n = 4>
+void tr_overrun_tail() {
+    all_off();
+    all_off2<2>();
+    if constexpr (!device::has_usart(n)) {
+        bench.verdict("the overrun letter is skipped and says so: this part has no fourth serial "
+                      "port to send with",
+                      true);
+    } else {
+        using F = Feeder<n>;
+        const bool wired = sender_wired<n>();
+        print(serial, "  the wire: the fourth port's TX to PA3 ", wired ? "in place" : "ABSENT",
+              crlf);
+        if (!wired) {
+            bench.verdict("the overrun letter is skipped and says so: it needs the fourth port's "
+                          "TX wired to USART2's RX",
+                          true);
+            return;
+        }
+        const uint8_t* src = source_first_bytes();
+        constexpr uint16_t msg = 32;
+        constexpr uint16_t lead = 28;
+        fat_mode = 1;
+        const bool opened = Fat::init(clock, 1'000'000UL) && F::open(1'000'000UL);
+        wait_us(500);
+        Sink junk{};
+        take<Fat>(junk);
+        Fat::clear_errors();
+        // The staging's own block, at the ring's level on a lower channel:
+        // it wins the tie, and the ring is starved for as long as it runs.
+        Copier::stop();
+        Copier::arm(DmaPriority::very_high, false);
+
+        // 1. THE OVERRUN AT A MESSAGE'S TAIL. A message of 32 starts; when
+        // 28 have landed the copy starves the ring for nine frame times,
+        // the tail's frames overrun it, and the copy's end lets the channel
+        // take the frame DATAR held - ORE left up with RXNE down and no
+        // frame after it. All of it under the mask, so the vector first
+        // looks AFTER the channel took that frame, as a vector held off by
+        // another one does: the state the storm grew from.
+        const uint16_t hw0 = Fat::hw_overruns();
+        const uint16_t f0 = Fat::dma_faults();
+        const uint32_t k0 = Fat::rx_skips();
+        const uint16_t at0 = LoopRxChannel::remaining();
+        uint16_t before_copy = 0;
+        bool copied = false;
+        {
+            P::CriticalSection cs;
+            (void)F::Engine::start(std::span<const uint8_t>(src + 64, msg));
+            Stopwatch w;
+            while (arrived_since(at0) < lead && w.us() < 2'000UL) {
+            }
+            before_copy = arrived_since(at0);
+            copied = Copier::copy(destination + copy_bytes, destination, copy_bytes);
+            while (Copier::busy()) {
+            }
+            Stopwatch t;
+            while (t.us() < 300UL) {   // the tail sent and the line idle
+            }
+            ring_entries = 0;
+            ring_watch = true;
+        }
+        wait_us(3'000);
+        ring_watch = false;
+        (void)F::finished();
+        const uint32_t entries = ring_entries;
+        const uint16_t hw = static_cast<uint16_t>(Fat::hw_overruns() - hw0);
+        const uint16_t faults = static_cast<uint16_t>(Fat::dma_faults() - f0);
+        const uint32_t skips = Fat::rx_skips() - k0;
+        Sink s1{};
+        uint8_t first[msg] = {};
+        {
+            uint8_t b = 0;
+            while (Fat::read_byte(b)) {
+                if (s1.got < msg) {
+                    first[s1.got] = b;
+                }
+                s1.got = s1.got + 1u;
+            }
+        }
+        bool lead_in_order = s1.got >= lead && s1.got < msg;
+        for (uint16_t i = 0; i < lead && lead_in_order; ++i) {
+            lead_in_order = first[i] == src[64u + i];
+        }
+        const uint16_t ctlr1 = Fat::Resource::regs().CTLR1;
+        const bool waiting_for_the_end = (ctlr1 & usart_idleie) != 0u && (ctlr1 & usart_rxneie) == 0u;
+        print(serial, "  a message of ", msg, ", the copy at its tail (", before_copy,
+              " landed, the copy ", copied ? "run" : "REFUSED", "): ", s1.got,
+              " bytes delivered, USART2's vector ", entries, " entries, ", hw,
+              " overruns counted, ", skips, " gaps, ", faults, " channels given up; the vector ",
+              waiting_for_the_end ? "waiting for the end" : "NOT waiting for the end", crlf);
+        bench.verdict("AN OVERRUN AT A MESSAGE'S TAIL, ORE up with nothing in DATAR: no storm - a "
+                      "handful of entries, no channel given up - the overrun counted once and "
+                      "the gap once, the bytes before it delivered in order",
+                      opened && copied && entries <= 8u && faults == 0u && hw == 1u &&
+                          skips == 1u && lead_in_order && waiting_for_the_end);
+
+        // 2. The next message, whole: the vector left waiting for the end
+        // with nothing standing.
+        const uint32_t e2 = static_cast<uint32_t>(Fat::frame_errors()) + Fat::noise_errors() +
+                            Fat::parity_errors();
+        (void)F::Engine::start(std::span<const uint8_t>(src + 128, msg));
+        {
+            Stopwatch w;
+            while (!F::finished() && w.us() < 2'000UL) {
+            }
+        }
+        wait_us(500);
+        bool second_in_order = true;
+        uint16_t second = 0;
+        {
+            uint8_t b = 0;
+            while (Fat::read_byte(b)) {
+                if (second < msg && b != src[128u + second]) {
+                    second_in_order = false;
+                }
+                ++second;
+            }
+        }
+        const uint32_t e2_after = static_cast<uint32_t>(Fat::frame_errors()) +
+                                  Fat::noise_errors() + Fat::parity_errors();
+        print(serial, "  the next message: ", second, " of ", msg,
+              second_in_order ? " in order" : " NOT in order", ", errors counted ",
+              e2_after - e2, ", overruns ",
+              static_cast<uint16_t>(Fat::hw_overruns() - hw0), crlf);
+        bench.verdict("... and the next message arrives whole, nothing else counted",
+                      second == msg && second_in_order && e2_after == e2 &&
+                          Fat::hw_overruns() - hw0 == 1u && Fat::dma_faults() == f0);
+
+        // 3. THE WINDOW, STAGED WIDE: a frame lands while the ring is
+        // starved, and the CPU reads STATR and then DATAR under it - what
+        // the overrun's clear would do to a frame landing between its two
+        // loads. What the channel does with the request that frame raised,
+        // once the copy lets it go, is the measurement.
+        uint16_t c0 = 0;
+        uint16_t c1 = 0;
+        uint16_t c2 = 0;
+        uint16_t st = 0;
+        uint8_t cpu = 0;
+        {
+            P::CriticalSection cs;
+            c0 = LoopRxChannel::remaining();
+            (void)Copier::copy(destination + copy_bytes, destination, copy_bytes);
+            F::Port::write_data(0xA5);
+            Stopwatch w;
+            while (!Fat::Resource::rx_ready() && w.us() < 200UL) {
+            }
+            st = Fat::Resource::status();
+            cpu = Fat::Resource::read_data();
+            c1 = LoopRxChannel::remaining();
+            while (Copier::busy()) {
+            }
+            Stopwatch t;
+            while (t.us() < 50UL) {
+            }
+            c2 = LoopRxChannel::remaining();
+        }
+        wait_us(500);
+        uint16_t ring_after = 0;
+        uint8_t ring_byte = 0;
+        {
+            uint8_t b = 0;
+            while (Fat::read_byte(b)) {
+                ring_byte = b;
+                ++ring_after;
+            }
+        }
+        print(serial, "  a frame read by the CPU under a starved channel (STATR ", hex(st),
+              ", the CPU read ", hex(cpu), "): the channel moved ",
+              static_cast<uint16_t>((c0 - c1) & (fat_ring - 1u)), " before the copy ended and ",
+              static_cast<uint16_t>((c1 - c2) & (fat_ring - 1u)), " after; the ring then held ",
+              ring_after, ring_after != 0u ? " byte(s), the last " : " bytes", crlf);
+        if (ring_after != 0u) {
+            print(serial, "    ", hex(ring_byte), crlf);
+        }
+
+        // 4. And the port is whole after it.
+        (void)F::Engine::start(std::span<const uint8_t>(src + 192, msg));
+        {
+            Stopwatch w;
+            while (!F::finished() && w.us() < 2'000UL) {
+            }
+        }
+        wait_us(500);
+        bool third_in_order = true;
+        uint16_t third = 0;
+        {
+            uint8_t b = 0;
+            while (Fat::read_byte(b)) {
+                if (third < msg && b != src[192u + third]) {
+                    third_in_order = false;
+                }
+                ++third;
+            }
+        }
+        bench.verdict("... and after a frame read from under the channel, the next message whole "
+                      "too",
+                      third == msg && third_in_order && Fat::dma_faults() == f0);
+
+        Fat::release();
+        F::close();
+        Copier::stop();
+        fat_mode = 0;
+        all_off2<2>();
+        all_off();
+    }
+}
+
+/// USART2's vector body while letter q or r owns the port; true when it
+/// was theirs. Compiled only into an image that carries one of them.
+[[gnu::always_inline]] inline bool fat_isr() {
+    if constexpr (test_letter_carried('q') || test_letter_carried('r')) {
+        const uint8_t m = fat_mode;
+        if (m == 1u) {
+            if (Fat::isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+        if (m == 2u) {
+            if (FatLow::isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// USART2's two channels' body while letter q or r owns the port.
+inline bool fat_dma_isr() {
+    if constexpr (test_letter_carried('q') || test_letter_carried('r')) {
+        const uint8_t m = fat_mode;
+        if (m == 1u) {
+            if (Fat::dma_isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+        if (m == 2u) {
+            if (FatLow::dma_isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Channel 3's body while letter q's copies run on it: the block ended,
+/// counted, and the next one launched while the loop stands.
+inline bool copy_vector() {
+    if constexpr (test_letter_carried('q')) {
+        if (copy_mode) {
+            if (Copier::service() != 0u) {
+                copies_done = copies_done + 1u;
+                if (copy_loop) {
+                    copy_once();
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 /// A DMA2 channel's handler body, where the part has the controller: the
 /// bare channel's counters, or the engine or port the running letter
 /// handed the channel to.
@@ -2391,11 +3006,18 @@ BRIO_CH32_VECTOR(dma1_channel2_handler) {
         note(1, brio::DmaChannel<1, 2>::isr());
     }
 }
-BRIO_CH32_VECTOR(dma1_channel3_handler) { note(2, brio::DmaChannel<1, 3>::isr()); }
+BRIO_CH32_VECTOR(dma1_channel3_handler) {
+    if (!copy_vector()) {
+        note(2, brio::DmaChannel<1, 3>::isr());
+    }
+}
 BRIO_CH32_VECTOR(dma1_channel4_handler) { note(3, brio::DmaChannel<1, 4>::isr()); }
 BRIO_CH32_VECTOR(dma1_channel5_handler) { note(4, brio::DmaChannel<1, 5>::isr()); }
 
 BRIO_CH32_VECTOR(dma1_channel6_handler) {
+    if (fat_dma_isr()) {
+        return;
+    }
     if (uart_mode) {
         if (Loop::dma_isr()) {
             loop_edges = loop_edges + 1u;
@@ -2406,6 +3028,9 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
 }
 
 BRIO_CH32_VECTOR(dma1_channel7_handler) {
+    if (fat_dma_isr()) {
+        return;
+    }
     if (uart_mode) {
         (void)Loop::dma_isr();
     } else {
@@ -2434,11 +3059,14 @@ BRIO_CH32_LEAF_VECTOR(usart1_handler) { (void)Serial::isr(); }
 BRIO_CH32_LEAF_VECTOR(usart2_handler) {
     if (ring_watch) {
         ring_entries = ring_entries + 1u;
-        if (ring_entries > ring_entry_budget) {
+        if (ring_entries > ring_budget) {
             ring_stormed = true;
             brio::Usart<2>::rxne_interrupt(false);
             return;
         }
+    }
+    if (fat_isr()) {
+        return;
     }
     if (Loop::isr()) {
         loop_edges = loop_edges + 1u;
@@ -2465,6 +3093,8 @@ int main() {
     register_dma2_letters();
     bench.letter('o', "the receive ring at speed: a timer's staircase, lap after lap", to_ring);
     bench.letter('p', "the receive ring over a channel that never takes the frame", tp_dead_ring);
+    bench.letter('q', "the priority rule: an unpaced copy beside the receive ring", tq_priority<>);
+    bench.letter('r', "an overrun at a message's tail: no storm, counted once", tr_overrun_tail<>);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

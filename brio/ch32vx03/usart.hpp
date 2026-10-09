@@ -115,7 +115,9 @@
  * 6 and 7, 8 and 9, 10 and 11). A program with an engine running does not
  * sleep on this family, because in Sleep the bus matrix serves the core
  * alone (docs/ch32vx03/dma.md) - and a receive ring runs from init() to
- * release().
+ * release(). THE RING OUTRANKS THE COPIES: DATAR holds one frame, so the
+ * receive engine arms at very_high (UartOptions::rx_priority, the one
+ * knob) and the transmit engine at high, the rule of docs/design/dma.md.
  *
  * UNDER THE RECEIVE ENGINE THE CPU NEVER READS DATAR, and what a clear
  * costs is this silicon's own answer - measured on the CH32V203C8T6, and
@@ -137,14 +139,21 @@
  * vector turns to WAITING FOR A FRAME - those three disarmed, RXNEIE
  * armed (the channel still takes the byte; the interrupt only says one
  * came, and the channel's read of it finished the clear). That entry
- * READS NO STATR - a status read there would arm the clear again, and the
- * next frame's own error would be cleared by its own read unseen - but
- * CNTR alone: a moved count turns the vector back, reporting the edge
- * again, the edge of a burst of one frame. The channel's half and full
- * marks report it too, so a stream with no silence in it is told twice a
- * lap. Two interrupts a burst, none a byte, the edge gated as the
- * interrupt receiver's: once per idle-to-busy transition of the consumer,
- * re-opened when its look finds the ring empty. A CHANNEL THAT NEVER TAKES
+ * READS NO STATR - after the channel's read a status read would arm the
+ * clear again, and the next frame's own error would be cleared by its own
+ * read unseen - but CNTR alone: a moved count turns the vector back,
+ * reporting the edge again, the edge of a burst of one frame. The
+ * channel's half and full marks report it too, so a stream with no
+ * silence in it is told twice a lap. AN OVERRUN WITH NOTHING TO TAKE -
+ * ORE left up with RXNE down by a channel that was starved, and no frame
+ * after it - would re-enter that wait back to back (RXNEIE rides ORE): its
+ * second entry with the count UNMOVED, where no read of DATAR has come
+ * since the wait's own status read and a second one arms nothing new,
+ * reads STATR once and, finding ORE without RXNE, reads DATAR - the clear
+ * that status read armed - and turns back to the wait for the end
+ * (rx_overrun_probe). Two interrupts a burst, none a byte, the edge gated
+ * as the interrupt receiver's: once per idle-to-busy transition of the
+ * consumer, re-opened when its look finds the ring empty. A CHANNEL THAT NEVER TAKES
  * THE FRAME - stopped by a transfer error, or frozen by a request another
  * peripheral left held on its OR (docs/ch32vx03/dma.md) - leaves RXNE
  * standing under RXNEIE, and the wait would re-enter for ever: its entries
@@ -1129,6 +1138,14 @@ struct UartOptions {
     /// instance (Usart<n>::is_full).
     bool rts = false;
     bool cts = false;
+    /// The receive engine's level in its controller's arbitration (11.2.1's
+    /// PL), `very_high` by default: DATAR holds one frame, so a channel
+    /// starved for a frame time loses the next one to an overrun - which a
+    /// memory-to-memory copy a level above the ring, or at its level on a
+    /// lower channel, does (docs/design/dma.md). A program that ranks
+    /// another channel above its ring says so here; refused on a port with
+    /// no receive engine, which has no channel to rank.
+    DmaPriority rx_priority = DmaPriority::very_high;
 };
 
 /**
@@ -1216,6 +1233,9 @@ struct Uart {
                   "9 and 11)");
     static_assert(dma_engines_distinct<TxEngine, RxEngine>(),
                   "the two engines of a Uart must not share a DMA channel");
+    static_assert(RxEngine::present || opts.rx_priority == DmaPriority::very_high,
+                  "brio Uart: rx_priority ranks the receive engine's channel - this port has no "
+                  "receive engine");
 
     Uart() = default;   // a tag instance: constexpr Uart<1, P> serial;
 
@@ -1331,17 +1351,23 @@ struct Uart {
             m_rx_waiting = false;
             // The channel takes RXNE - into the whole receive ring, lap
             // after lap, from here on, its half and full marks the edge of
-            // a stream with no silence. A ring the engine refuses (its
-            // storage misplaced for the channel) is a port that cannot
-            // receive, which the caller is told.
-            if (!RxEngine::arm(Resource::data_address(), RxRing::storage, true)) {
+            // a stream with no silence - at the options' level, very_high
+            // unless the program says otherwise (UartOptions::rx_priority).
+            // A ring the engine refuses (its storage misplaced for the
+            // channel) is a port that cannot receive, which the caller is
+            // told.
+            if (!RxEngine::arm(Resource::data_address(), RxRing::storage, opts.rx_priority,
+                               true)) {
                 return false;
             }
             m_rx_drained = true;
             (void)RxEngine::start();
         }
         if constexpr (has_tx_engine) {
-            TxEngine::arm(Resource::data_address());
+            // HIGH, a level below the receive rings: a transmit channel
+            // that waits leaves the line idle a while (TXE stands, 18.10.1)
+            // and loses nothing.
+            TxEngine::arm(Resource::data_address(), DmaPriority::high);
         }
 
         Pfic::enable(usart_irq_for(instance));
@@ -1965,8 +1991,11 @@ private:
     /// the entries that find the count unmoved with nothing else armed to
     /// explain them are COUNTED, and the rx_stall_entries-th gives the
     /// channel up (rx_stalled()); the count then stays there, the state
-    /// parked until the consumer's look restarts the ring. Two compares
-    /// and an add an entry, on this path alone.
+    /// parked until the consumer's look restarts the ring. Or one with
+    /// nothing for the channel to take at all - an overrun that left ORE up
+    /// with RXNE down, which RXNEIE re-enters on: the rx_overrun_probe-th
+    /// unmoved entry asks STATR, the one status read of this state, and
+    /// clears it. Three compares and an add an entry, on this path alone.
     [[gnu::always_inline]] static bool rx_frame_entry() {
         if (static_cast<uint16_t>(RxEngine::remaining()) == m_rx_at) {
             if constexpr (!has_tx_engine) {
@@ -1978,16 +2007,63 @@ private:
                 return false;   // given up already: the consumer's look restarts it
             }
             m_rx_unmoved = static_cast<uint8_t>(m_rx_unmoved + 1u);
+            if (m_rx_unmoved == rx_overrun_probe) {
+                // THE OVERRUN WITH NOTHING TO TAKE (rx_overrun_probe): one
+                // status read, and DATAR read where it shows ORE with RXNE
+                // down - the clear the wait's own status read armed.
+                const uint16_t status = regs().STATR;
+                if ((status & (usart_ore | usart_rxne)) == usart_ore) {
+                    (void)regs().DATAR;
+                    return rx_wait_for_the_end();
+                }
+            }
             if (m_rx_unmoved != rx_stall_entries) {
                 return false;   // the frame not yet taken
             }
             return rx_stalled();
         }
+        return rx_wait_for_the_end();
+    }
+
+    /// Back to WAITING FOR THE END, and the edge: RXNEIE down, IDLEIE,
+    /// PEIE and EIE up. The channel moved, or the wait's overrun was
+    /// cleared (rx_frame_entry()).
+    [[gnu::always_inline]] static bool rx_wait_for_the_end() {
         m_rx_waiting = false;
         regs().CTLR1 = static_cast<uint16_t>((regs().CTLR1 & ~usart_rxneie) | usart_idleie | usart_peie);
         regs().CTLR3 = static_cast<uint16_t>(regs().CTLR3 | usart_eie);
         return told();
     }
+
+    /**
+     * The entry of the wait for a frame at which an unmoved count is asked
+     * WHY: an OVERRUN WITH NOTHING TO TAKE. A starved channel can leave ORE
+     * up with RXNE down - the frame it took at last is out of DATAR, the one
+     * the overrun lost never reached it - and when no frame follows (a
+     * message's tail), RXNEIE, which ORE raises on its own (18.10.4), re-enters
+     * the vector back to back with nothing for the channel to move until the
+     * stall bound gives a LIVE channel up, and the restart's EIE re-enters on
+     * the same ORE (measured, docs/ch32vx03/usart.md). So the second unmoved
+     * entry - the first one is the frame not yet taken that a contended
+     * channel shows - reads STATR once, and where ORE stands with RXNE down
+     * reads DATAR: the clear 18.10.1 prescribes, and the vector goes back to
+     * the wait for the end.
+     *
+     * WHAT THE TWO READS COST THE COUNTS: nothing, and the reason is the
+     * count unmoved. No DATAR read has been made since the status read that
+     * began this wait, so the clear that read armed is armed still and a
+     * second status read arms nothing new; the DATAR read performs it, over
+     * flags that read already saw and counted - the ORE among them, so the
+     * overrun is counted once, there - and an IDLE risen since, whose edge
+     * this entry reports itself. A frame completing between the two loads
+     * is the one the reads reach: the CPU's read of DATAR comes after its
+     * RXNE and clears its error flags unseen, but the request the frame
+     * raised outlives that read and the channel stores the frame when it is
+     * served - its byte is kept (measured, docs/ch32vx03/usart.md). A frame
+     * waiting for a starved channel shows RXNE, and nothing is read but the
+     * status.
+     */
+    static constexpr uint8_t rx_overrun_probe = 2;
 
     /// How many entries of the wait for a frame may find the channel's
     /// count unmoved before the channel is given up. A live channel takes
@@ -1995,8 +2071,9 @@ private:
     /// other channel's item - where one entry of this vector is tens of
     /// cycles, so a frame not yet taken is one or two entries; 255 is
     /// thousands of cycles of a channel that moved nothing. A channel a
-    /// higher-priority memory-to-memory block starves for that long is
-    /// given up too, and restarted by the consumer's next look.
+    /// memory-to-memory block outranks and starves for that long - a ring
+    /// a program armed below its copy (UartOptions::rx_priority) - is given
+    /// up too, and restarted by the consumer's next look.
     static constexpr uint8_t rx_stall_entries = 255;
 
     /// THE CHANNEL GIVEN UP: the fault counted, the ring marked for the

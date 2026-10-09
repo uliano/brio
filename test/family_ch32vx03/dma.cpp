@@ -193,6 +193,12 @@ using Usart2Rx = DmaRequestOf<DmaRequest::usart2_rx>;
 using Fed = Uart<2, P, 64, 64, UartFormat{}, DmaTxEngine<Usart2Tx::controller, Usart2Tx::channel>,
                  DmaRxEngine<Usart2Rx::controller, Usart2Rx::channel>>;
 using Plain = Uart<2, P>;
+/// The receive ring ranked by the program (docs/design/dma.md's option).
+using Ranked = Uart<2, P, 64, 64, UartFormat{}, DmaTxEngine<Usart2Tx::controller, Usart2Tx::channel>,
+                    DmaRxEngine<Usart2Rx::controller, Usart2Rx::channel>, 0,
+                    UartOptions{.rx_priority = DmaPriority::high}>;
+static_assert(Ranked::options.rx_priority == DmaPriority::high &&
+              Fed::options.rx_priority == DmaPriority::very_high);
 static_assert(Fed::has_tx_engine && Fed::has_rx_engine);
 static_assert(!Plain::has_tx_engine && !Plain::has_rx_engine);
 static_assert(Usart<2>::dma_tx_channel == 7 && Usart<2>::dma_rx_channel == 6);
@@ -383,6 +389,9 @@ void transport_verbs() {
     (void)Fed::dma_faults();
     (void)Fed::tx_idle();
     Fed::rebase(24'000'000UL);
+    (void)Ranked::init(clock, 115200);
+    (void)Ranked::isr();
+    (void)Ranked::dma_isr();
     Usart<2>::dma_transmit(true);
     Usart<2>::dma_receive(true);
     Usart<2>::dma_transmit(false);

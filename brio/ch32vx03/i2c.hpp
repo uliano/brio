@@ -836,8 +836,14 @@ public:
         S::enable();
         S::ack(false);
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address());
-            RxEngine::arm(S::data_address());
+            // BOTH AT HIGH (DmaPriority's rule): the host does not overrun.
+            // A byte its receive channel has not taken leaves RxNE up and the
+            // next one in the shift register, BTF, and the host holds SCL low
+            // until DATAR is read; a byte its transmit channel has not
+            // written holds SCL the same way - a starved channel stretches
+            // the bus and loses nothing (19.3's notes).
+            TxEngine::arm(S::data_address(), DmaPriority::high);
+            RxEngine::arm(S::data_address(), DmaPriority::high);
         }
         // The pads go to the peripheral only now. OPEN DRAIN is the
         // definition of the bus, and this family's pad has no pull in

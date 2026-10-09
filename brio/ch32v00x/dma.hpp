@@ -86,12 +86,18 @@
  * n in elements of the beat, on any channel, with no request - 8.2.1:
  * with MEM2MEM set the channel runs as soon as it is enabled.
  *
+ * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (ch32v00x/dma_engine.hpp's
+ * DmaPriority, docs/design/dma.md). The arbiter gives the bus to the
+ * highest level asking, the lower channel number between equals, and a
+ * memory-to-memory channel asks without a pause - so a receive channel it
+ * outranks moves nothing until its block is over. The defaults are the
+ * rule's: the receive engine at very_high, the transmit engine at high,
+ * the copy at low.
+ *
  * NOT COVERED YET: the loop and ping-pong engines a block stream is
  * served by (util/block_stream.hpp's two concepts: an ADC sampled into
- * caller-owned halves, a table played for ever) and the circular
- * receive whose producer index is the hardware's count - the first
- * born with their first block user, the second with the ring that
- * reads its producer index from outside.
+ * caller-owned halves, a table played for ever), born with their first
+ * block user.
  */
 
 #pragma once
@@ -102,6 +108,7 @@
 #include <span>
 
 #include "ch32v00x/device.hpp"
+#include "ch32v00x/dma_engine.hpp"
 #include "ch32v00x/pfic.hpp"
 
 namespace brio {
@@ -126,9 +133,8 @@ constexpr bool dma_aligned(uint32_t address, DmaWidth w) {
     return (address & (dma_width_bytes(w) - 1UL)) == 0UL;
 }
 
-/// CFGR.PL: the software half of the arbitration; ties go to the lower
-/// channel index (RM 8.2.1).
-enum class DmaPriority : uint8_t { low = 0, medium = 1, high = 2, very_high = 3 };
+// CFGR.PL's vocabulary, DmaPriority, is ch32v00x/dma_engine.hpp's: a
+// transport names its engines' levels without this file.
 
 /// CFGR.DIR says WHICH SIDE IS THE SOURCE: 0 reads PADDR and writes
 /// MADDR, 1 the other way round.
@@ -520,10 +526,13 @@ public:
      * is poured into, `interrupts` the flags whose interrupt the binding
      * wants (flag_complete and/or flag_error) - a transport whose
      * completion another event proves arms the errors alone -, `priority`
-     * CFGR.PL. The gate and the PFIC line are opened here, once.
+     * CFGR.PL, `high` by default: a peripheral a transmit channel feeds
+     * waits for it, or holds its last value, where a starved receive
+     * overruns (DmaPriority's rule). The gate and the PFIC line are opened
+     * here, once.
      */
     static void arm(volatile void* data, uint32_t interrupts = DmaFlag::complete | DmaFlag::error,
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::high) {
         armed_ = interrupts & dma_cfgr_irqs;
         word_ = dma_cfgr_dir | dma_cfgr_priority(priority) | armed_;
         busy_ = false;
@@ -681,9 +690,11 @@ public:
     }
     [[gnu::always_inline]] static uint32_t block_flags() { return Dma::flags(); }
 
-    /// Bind the channel to its peripheral (DmaTxEngine::arm()'s terms).
+    /// Bind the channel to its peripheral (DmaTxEngine::arm()'s terms),
+    /// `very_high` by default: a peripheral a receive channel empties
+    /// overruns when the channel is starved (DmaPriority's rule).
     static void arm(volatile void* data, uint32_t interrupts = DmaFlag::complete | DmaFlag::error,
-                    DmaPriority priority = DmaPriority::low) {
+                    DmaPriority priority = DmaPriority::very_high) {
         armed_ = interrupts & dma_cfgr_irqs;
         word_ = dma_cfgr_priority(priority) | armed_;
         capacity_ = 0;
@@ -760,11 +771,12 @@ public:
      * the count every lap reloads. False, and nothing started, for a
      * storage off its beat's boundary. Calling it again restarts the
      * ring at its first element with laps() at zero - the moment a
-     * HardwareRing over the same storage is clear()ed.
+     * HardwareRing over the same storage is clear()ed. `very_high` by
+     * default, the one-shot shape's level.
      */
     template <typename T, size_t N>
     static bool arm_ring(volatile void* data, T (&storage)[N], bool half_mark = false,
-                         DmaPriority priority = DmaPriority::low) {
+                         DmaPriority priority = DmaPriority::very_high) {
         static_assert(dma_beat_fits<T, Elem>, "a beat wider than this binding's widest (its Elem)");
         static_assert(N >= 2u && N <= 0xFFFFu,
                       "brio DmaRxEngine: a ring of 2..65535 items - CNTR is sixteen bits (8.3.2)");
@@ -846,6 +858,9 @@ public:
     /// The configuration, once: the gate, the channel stopped, the
     /// priority, the interrupt (complete and error) wanted or not. With
     /// no interrupt the line stays disabled and busy() is the witness.
+    /// `low` by default: a copy asks for the bus without a pause, and a
+    /// request-paced channel it outranked would move nothing until its
+    /// block ended (DmaPriority's rule).
     static void arm(DmaPriority priority = DmaPriority::low, bool interrupt = true) {
         armed_ = interrupt ? (DmaFlag::complete | DmaFlag::error) : 0u;
         word_ = dma_cfgr_mem2mem | dma_cfgr_minc | dma_cfgr_priority(priority) | armed_;

@@ -85,7 +85,7 @@ engines do with each:
 | the half-transfer flag | no | no engine acts on a midpoint before a stream does |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants: a transport whose completion another event proves arms the errors alone - the SPI host's transmit block (the receive block's end proves it), the I2C host's (BTF proves it) |
 | one flag register for seven channels | yes | a transport serving two channels in one handler body reads INTFR ONCE |
-| the priorities | yes | an argument of `arm()`, low by default; ties go to the lower channel number (8.2.1) |
+| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): a memory-to-memory channel asks for the bus on every cycle of its block, so a channel it outranks moves nothing until it ends - by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high, the SPI host's receive at very_high (OVR, 16.2.7) and transmit at high, the I2C host's two at high (the bus stretches, 15.3); ties go to the lower channel number (8.2.1) |
 | the software trigger | yes | MEM2MEM is the only one (figure 8-1): there is no trigger register beside it |
 | the gate | yes | opened once, by `arm()` |
 | the transfer error | yes | armed on every engine; it clears EN by itself (8.2.1) and an engine's `abandon()` halts the channel and counts the fault |
@@ -115,8 +115,10 @@ of one channel to another: there is nothing more to use or decline.
   TRANSFER ENGINES, in TWO MOMENTS. `arm(data, interrupts, priority)`
   binds the channel to its peripheral register: the gate opened, the
   channel stopped, PADDR written, the configuration word (direction,
-  priority, the interrupt enables the binding wants - `flag_complete`
-  and/or `flag_error`, both by default and with `arm(data, priority)`)
+  priority - high for the transmit engine and very_high for the receive
+  one unless named -, the interrupt enables the binding wants -
+  `flag_complete` and/or `flag_error`, both by default and with
+  `arm(data, priority)`)
   computed and kept, the PFIC line enabled. A block takes a span of
   uint8_t, uint16_t or uint32_t - the BEAT is the element, `Elem` the
   WIDEST the binding allows (the register's width; a wider span does
@@ -155,7 +157,8 @@ of one channel to another: there is nothing more to use or decline.
   empty slot never includes this file.
 - `DmaCopyEngine<ch, Elem>` is memory to memory on any channel (the
   number says where it sits in the arbitration and which vector
-  reports it): `arm(priority, interrupt)` once; `copy(dst, src, n)` -
+  reports it): `arm(priority, interrupt)` once, low unless named;
+  `copy(dst, src, n)` -
   the source the PADDR side, both increments - and `fill(dst, cell, n)`
   - the source one cell IN MEMORY, the caller's, PINC clear - with `n`
   in elements of the beat the pointers' type names, each refused while
@@ -391,6 +394,9 @@ Implemented but not bench-verified, each with what would measure it:
   the one-shot channel takes two widths and the engines always set
   them equal; a copy with PSIZE and MSIZE apart, compared against the
   table.
-- The priority arbitration between two channels running at once: the
-  suite runs one channel at a time; two memory-to-memory blocks
-  started together, their order read off the flags.
+- The level outranking the channel number: the tie rule is measured - a
+  fill on channel 1 at the receive ring's own level starved the ring on
+  channel 7 until it ended (`test_ch32_serial` letter u, the overrun it
+  stages) - and a level above the number is not; two memory-to-memory
+  blocks started together at two levels, their order read off the flags,
+  would measure it.

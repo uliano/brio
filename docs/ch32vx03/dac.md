@@ -188,7 +188,10 @@ registers a DMA writes (the format decides the beat), `dma_slot(ch)`,
 and `claim_stream<ch, Engine, format>()` / `claim_dual_stream<Engine,
 format>()`, which arm an engine on that register and set DMAENx in one
 verb, refused at compile time for an engine on any slot but the
-request's own and for an element whose width is not the format's. The
+request's own and for an element whose width is not the format's - the
+engine at HIGH ([../design/dma.md](../design/dma.md)): a trigger that
+finds the holding register not yet written converts what it holds, the
+output keeps its value a period, and nothing overruns (17.2.3). The
 arithmetic: `code_for_mv(mv, ref)` and `mv_for_code(code, ref)`,
 [util/analog.hpp](../../brio/util/analog.hpp)'s `dac_code` and `dac_mv`
 over this converter's full scale.

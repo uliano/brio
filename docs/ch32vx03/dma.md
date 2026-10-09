@@ -236,7 +236,21 @@ bears on what a block costs is used or declined here with its reason:
 - **The interrupts**: one vector a channel, each engine arming only what
   its owner needs - the SPI host's transmit engine its ERROR alone, the
   receive block's completion proving the transmit's.
-- **The priorities**: an argument of each engine's `arm()`.
+- **The priorities**: an argument of each engine's `arm()`, and THE LEVEL
+  IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): the arbiter
+  grants the bus item by item to the highest level asking, the lower
+  channel number between equals, and a memory-to-memory channel asks on
+  every cycle of its block - so a receive channel it outranks moves
+  nothing until the block ends, and one a level above it loses one item
+  time at most (measured below). The defaults are the rule's by direction
+  - the receive engine and the block source at very_high, the transmit
+  engine and the player at high, the copy at low - and each driver names
+  its engines' level with its chapter's reason: the USART's ring at
+  very_high (DATAR holds one frame) and its transmit at high, the SPI
+  host's receive at very_high (OVR, 20.2.7) and transmit at high, the I2C
+  host's two at high (the bus stretches, 19.3), the converter's stream at
+  very_high (no overrun flag: a sample is written over in silence), the
+  DAC's at high (a late trigger converts the value held).
 - **The transfer error**: TEIE armed with every engine; the hardware drops
   EN, and the controller's ledger gives the bus-master count back when
   software stops the channel.
@@ -369,7 +383,7 @@ second with one store more first for a channel whose EN may still stand),
 `DmaTxEngine<c, ch, Elem>` pours caller-owned runs into one peripheral
 register: `arm(data, priority)` and `arm(data, interrupts, priority)` -
 the second choosing which flags raise the channel's line, the completion
-and the error by default -, `start()` over a span of bytes, of half-words
+and the error by default; the level high unless named -, `start()` over a span of bytes, of half-words
 or (where `Elem` is 32 bits) of words, and over a pointer and a length;
 the two halves of `start()`, `claim()` (the busy flag's test-and-set, what
 a transport racing its own completion handler masks) and `launch()` (the
@@ -380,7 +394,8 @@ the block carried, so the owner releases exactly that much of its ring),
 `kick()`, `abandon()`, `faults()`, `busy()`, `in_flight()`, `progress()`.
 `DmaRxEngine<c, ch, Elem>` fills from one register in TWO SHAPES on one
 binding. THE ONE-SHOT SHAPE fills a run and stops - a bounded block, the
-receive half of a bus transaction: the same two `arm()`s, `start()` over
+receive half of a bus transaction: the same two `arm()`s, at very_high
+unless named, `start()` over
 the mutable spans, `start_discard(cell, n)`, `complete()` (the channel
 stopped - EN stays set after a completed block, and a channel left
 enabled holds the bus-master count), `take()` - how many arrived since
@@ -417,6 +432,7 @@ one across 64 KB on the CH32V303's DMA1. `arm()` refuses a data register
 that is not aligned to `Elem`.
 
 `DmaCopyEngine<c, ch>` is memory to memory: `arm(priority, interrupt)`,
+low unless named,
 `copy(dst, src, n)` and `fill(dst, cell, n)` - `n` in elements, the
 element type the beat, the fill's cell the caller's and in memory,
 because the controller reads an ADDRESS every beat -, `busy()` (which,
@@ -454,7 +470,10 @@ once, a burst wraps the storage's end with no CPU, and nothing is lost
 between runs because there are none. The two bus engines take the same
 pair in the same place, in the one-shot shape - `SpiHost` carries a
 block's data phase on them ([spi.md](spi.md)) and `I2cHost` a tenure's
-([i2c.md](i2c.md)). `dma_isr()` is the ISR body of whichever channels
+([i2c.md](i2c.md)). Each arms its engines at its own level (the offer's
+priorities above): the Uart's receive ring at very_high unless its
+`UartOptions::rx_priority` says otherwise, its transmit at high.
+`dma_isr()` is the ISR body of whichever channels
 the transport owns - on the receive channel a completion is a lap,
 counted, and the lap's half and full marks are the receive edge, its true
 answer the edge `isr()` gives -, `harvest()` the same edge asked from the
@@ -602,14 +621,14 @@ block's reset line, the one act that withdraws a request already raised.
 
 `test_vx03_dma` measures at 144 MHz, the source of every copy a
 four-kilobyte pattern in the image itself and the core's own counter the
-ruler. On the CH32V203C8T6 the nine letters of a part with one
-controller run with the board bare: **38 verdicts in `z`**. On the
-CH32V303VCT6 DMA2's six letters ran beside DMA1's with the evaluation
-board's two crossed wires in place (PA2 to PC11, PC10 to PA3), every
-verdict passing; the engines as they now are ran there too, **56
-verdicts in `z`** with the two wires in place, letter n and the receive
-ring of letters g and o among them. Where one number
-is given below it is both parts'; where they differ each is named.
+ruler. On the CH32V203C8T6 the twelve letters of a part with one
+controller run with the board bare but for the core board's crossed pair
+to the fourth port (PB0 to PA3, which letters q and r take): **47
+verdicts in `z`**. On the CH32V303VCT6 DMA2's six letters run beside
+DMA1's with the evaluation board's two crossed wires in place (PA2 to
+PC11, PC10 to PA3): **65 verdicts in `z`**, letter n and the receive
+ring of letters g, o, q and r among them. Where one number is given
+below it is both parts'; where they differ each is named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
   kilobytes copied flash to RAM take 24809 cycles as 4096 bytes, 12530
@@ -770,6 +789,26 @@ is given below it is both parts'; where they differ each is named.
   item of an I2C1 write on channel 6 and stalled it (count 31 of 32, the
   target holding one byte); TIM3's reset line, pulsed with the gate
   closed, let it go and the same write landed whole.
+- **THE PRIORITY RULE ON THE BENCH** (letter q, both parts): the fourth
+  port's transmitter fed by a bare engine poured 16 KB at 1 Mbaud and 64
+  KB at 4.5 Mbaud into USART2's ring of 512 on channel 6 while a 2 KB copy
+  ran back to back on channel 3 at the copy engine's default level - the
+  ring at very_high, the transport's default: every byte in order, no
+  overrun of either kind, no channel given up, the copy at 0.96 to 1.00
+  of its rate alone at 1 Mbaud and 0.92 to 0.98 at 4.5 Mbaud (the lower
+  figures the CH32V203C8T6's, whose sender shares DMA1 with the ring).
+  The CONTROL, the ring told `rx_priority = low` - every engine at the
+  lowest level, the arrangement the rule replaced, channel 3 winning
+  every tie against 6 - lost about seven bytes in eight to some nine
+  hundred overruns at 1 Mbaud. The CFGR read back carries the levels: PL
+  3 for the ring, 2 for its transmit channel after its first block, 0
+  for the ring told low.
+- **AN OVERRUN AT A MESSAGE'S TAIL** (letter r, both parts): a copy at
+  the ring's own level on a lower channel, the vector held off until the
+  channel took the frame DATAR held - no storm, three entries, the
+  overrun counted once - and a frame read by the CPU from under a starved
+  channel still arrived through the ring, the request it raised served
+  when the copy ended ([usart.md](usart.md)).
 
 ### The engines' costs
 

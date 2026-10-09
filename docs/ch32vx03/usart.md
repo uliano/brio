@@ -211,7 +211,7 @@ both parts.
 | DATAR, one level: no FIFO | the interrupt receiver takes every byte at RXNE, one entry a byte | nothing deeper to batch; 4.5 Mbaud on the crossed pair carried byte for byte |
 | DMAR and a circular channel ([dma.md](dma.md)) | the receive engine | the bulk path: no entry a byte, no re-arm |
 | IDLE and IDLEIE (18.10.1) | the engine's burst edge | one frame after the last stop bit; the channel's read finishes its clear, so the vector waits for the next frame with IDLEIE disarmed |
-| RXNEIE beside DMAR | the engine's wait for a frame | the channel still takes the byte and the vector learns one came (measured: one entry a frame, RXNE already clear, CNTR moved) - the edge of a burst of one frame |
+| RXNEIE beside DMAR | the engine's wait for a frame | the channel still takes the byte and the vector learns one came (measured: one entry a frame, RXNE already clear, CNTR moved) - the edge of a burst of one frame; ORE raises it too, which is how an overrun with nothing left to take is found and cleared |
 | EIE (FE, NE, ORE under DMAR) and PEIE | counted by the engine's vector | an error is counted when it rises and disarmed until the channel's next read clears it |
 | the half and full marks of the channel's lap | the engine's edge with no silence | a stream that never pauses is told twice a lap |
 | a receiver time-out | none on this block | |
@@ -276,15 +276,43 @@ the transmitter's) are counted, and the 255th gives the channel up -
 touched in the vector - and the consumer's next look stops the channel
 and starts the ring again from its first element, as after a transfer
 error, and re-arms the wait for the end. A live channel takes the frame in one or
-two entries; a channel a higher-priority memory-to-memory block starves
-for 255 of them is given up too. The
-channel's half and full marks report it from `dma_isr()`. Two interrupts
+two entries; a channel a memory-to-memory block outranks and starves for
+255 of them - a ring a program armed below its copy - is given up too.
+AN OVERRUN WITH NOTHING TO TAKE is the other way that wait re-enters
+without end: a channel starved past a frame time leaves ORE up, takes
+the frame DATAR held when it is let go, and with no frame after it - a
+message's tail - RXNE is down, the channel has nothing to move, and
+RXNEIE, which ORE raises on its own (18.10.4), re-enters the vector back
+to back until the bound gives a LIVE channel up; the restart's EIE then
+re-enters on the same ORE, counts it a second time, and the next storm
+begins. So the wait's second entry with the count unmoved reads STATR
+once and, finding ORE without RXNE, reads DATAR - 18.10.1's clear - and
+turns back to the wait for the end. That costs the counts nothing:
+with the count unmoved no DATAR read has come since the status read that
+began the wait, so the clear that read armed is armed still, a second
+status read arms nothing new, and the DATAR read performs it over flags
+that read already counted - the overrun among them, counted once - and
+an IDLE risen since, whose edge the entry reports. A frame landing
+between the two loads keeps its byte - the request it raised outlives
+the CPU's read and the channel moves DATAR's frame when it is served
+(measured below) - and loses its error flags to the clear, as the frame
+after any counted error does. The channel's half and full marks report
+it from `dma_isr()`. Two interrupts
 a burst, none a byte. WHAT THE CHANNEL'S READ BOUNDS is the counts and
 never the bytes: the frame after one whose error was counted loses its
 own (a run of errored frames counts every other one), so does the first
 frame of a burst after an idle the vector saw, and a status read anywhere
 else - `tx_idle()`, the interrupt transmitter's entry, a thread polling a
 flag - arms the clear for the next frame's error.
+
+THE RING OUTRANKS THE COPIES. DATAR holds one frame, so a receive
+channel starved for a frame time loses the next one: the receive engine
+arms at the controller's highest level, very_high, and the transmit
+engine at high - a transmit channel that waits leaves the line idle and
+loses nothing - the rule of [../design/dma.md](../design/dma.md).
+`UartOptions::rx_priority` is the one knob, for a program that ranks
+another channel above its ring; a port with no receive engine refuses
+it at compile time.
 Measured on the CH32V303VCT6's crossed pair:
 USART2's two engines on DMA1 against UART4's on DMA2, a message each way
 and then four kilobytes each way at 921600 baud, every byte in order and
@@ -421,9 +449,11 @@ lot-keyed registers of this die already said it is
   memcpy, any other with its byte loop. THE FRAME IS ITS OWN PARAMETER
   here, ahead of the engine slots, and `UartOptions` - the trailing one -
   carries what is left: `half_duplex` (the TX pad as an alternate-function
-  open drain, the RX pad untouched) and `rts`/`cts` (the column's pads,
+  open drain, the RX pad untouched), `rts`/`cts` (the column's pads,
   refused on an instance that is not full and on a package that does not
-  bond them). A remap code of 0 writes no AFIO register at all.
+  bond them) and `rx_priority` (the receive engine's level, very_high by
+  default, refused without a receive engine). A remap code of 0 writes no
+  AFIO register at all.
 
 ## How to use it
 
@@ -621,6 +651,49 @@ CH32V303 evaluation board - and the second is measured on both below.
   entry and the 255 of the wait - gave the channel up with one DMA fault
   counted, and the thread ran on; with TIM3's reset pulsed the consumer's
   next look started the ring again and ten frames arrived whole.
+- **An overrun at a message's tail** (`test_vx03_dma` letter r, both
+  parts, USART2's ring fed by the fourth port at 1 Mbaud): a 2 KB copy at
+  the ring's own level on a lower channel starving it under a message's
+  last frames, the vector held off until the channel had taken the frame
+  DATAR held - ORE up, RXNE down, no frame after it. The vector entered
+  THREE times (the overrun's entry, the frame not yet taken, the clear),
+  no channel was given up, the overrun and the gap were each counted
+  once, the 28 bytes that landed before the copy arrived in order with
+  the frame DATAR held (29 bytes on the CH32V303, whose sender is the
+  other controller's and ran on through the copy; 31 on the CH32V203,
+  whose sender the copy starved too, so that only one frame overran),
+  and the next message arrived whole with nothing else counted. THE CONTROL, the same
+  image with the clear disabled: 256 entries, the live channel given up
+  as a DMA fault, the bytes received before the overrun thrown away by
+  the restart, the overrun counted twice - and the NEXT message lost as
+  well, the restart's own entry starting a second storm that gave the
+  channel up under it.
+- **The clear's window, staged wide** (the same letter): a frame landed
+  while a copy starved the ring, and the CPU read STATR and DATAR under
+  it, as the clear would read a frame landing between its two loads. The
+  channel moved nothing while starved and ONE item when the copy let it
+  go, and the ring then held the frame: the request a frame raises
+  outlives a CPU read of its data, so the byte is not lost, and only its
+  error flags go with the clear.
+- **The ring against a copy** (`test_vx03_dma` letter q, both parts): the
+  fourth port pouring 16 KB at 1 Mbaud and 64 KB at 4.5 Mbaud into
+  USART2's ring of 512 while a 2 KB copy ran back to back on DMA1's
+  channel 3 - a lower number than the ring's 6 - at the copy engine's
+  default level: every byte in order, no overrun of either kind, no
+  channel given up, USART2's vector entered once; the copy at 0.96 to
+  1.00 of its rate alone at 1 Mbaud and 0.92 to 0.98 at 4.5 Mbaud. The
+  ring told `rx_priority = low` under the same copies: some nine hundred
+  overruns in 8 KB at 1 Mbaud, about a thousand bytes of 8192 delivered,
+  and the vector entered 145 to 150 thousand times in 85 ms, a starved
+  channel re-entering it back to back.
+- **The receive engine's edge and its error counts on the CH32V303**
+  (`test_vx03_serial` letters q and s on the evaluation board's crossed
+  pair): 120 data bytes and 14 breaks in a stream, every data byte in
+  order, each break stored as its 0x00 frame and counted, back-to-back
+  breaks counting every other one (two count 1, three count 2) - the
+  CH32V203C8T6's numbers, so this USART clears as that one does; a burst
+  of one frame told every time, a burst of 16 told within 1.1 frames of
+  its last stop bit with two USART interrupts.
 - **The receive ring** is `test_vx03_dma`'s letter g, with no wire: the
   channel circular over the storage from `init()`, a burst across the
   storage's end delivered whole with nobody reading, a lap the consumer
@@ -671,10 +744,6 @@ Implemented but not bench-verified, each with what would measure it:
   words across the pair and RX_BUSY under a frame are letter o's, and
   the CH32V303VCT6 answered no to each; what would measure them is a
   CH32V303 of a lot whose penultimate sixth digit is not zero.
-- **The receive engine's edge and its error counts on the CH32V303**:
-  letters q, r and s of `test_vx03_serial` on the evaluation board's
-  crossed pair would measure them; the CH32V303VCT6's USART is assumed to
-  clear as the CH32V203C8T6's does, which only that run can say.
 - **The transport's `remap` parameter on a column other than the
   default**: the resource's `remap()` is measured through the fourth
   port's second column, and the transport's own path is compiled and
