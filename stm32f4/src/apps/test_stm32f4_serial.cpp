@@ -15,22 +15,25 @@
 // the TX pad (RM0390 25.4.10), so everything the instance sends it also
 // receives. The loop is USART6 on PC6 (AF8, DS10693 table 11) - an APB2
 // instance, so its top rate is 90 MHz / 16 (5.625 Mbaud) and 90 MHz / 8
-// at OVER8 - on a pad no recorded wire reaches, its engines on DMA2's
-// stream 6 out and stream 1 in, channel 5 (RM0390 table 29). The pad is
-// driven PUSH-PULL while a frame goes out (UartOptions::
-// single_wire_push_pull), the internal pull-up holding the line the
+// at OVER8 - on a pad whose other ends stay quiet while the suite runs
+// (on the bench PC6 is also the I2C self-link's SCL, with its 2.2 kOhm
+// pull-up), its engines on DMA2's stream 6 out and stream 1 in, channel 5
+// (RM0390 table 29). The pad is driven PUSH-PULL while a frame goes out
+// (UartOptions::single_wire_push_pull), the pull-up holding the line the
 // transmitter releases between frames: the open drain rises on the
-// pull-up alone and carries 1 Mbaud, not 2.8 (letter a measures where it
-// gives out). The pad's own input feeds EXTI line 6 in alternate-function
-// mode, which is how letter e sees the stop bit start on the pad.
+// pull-up alone, and letter a measures where it gives out. The pad's own
+// input feeds EXTI line 6 in alternate-function mode, which is how letter
+// e sees the stop bit start on the pad.
 //
 // What is exercised, letter by letter:
 //   a  the loop proven: 256 bytes out and back whole and in order through
 //      both receivers at 115200, 1 Mbaud and 5.625 Mbaud, and at OVER8's
-//      11.25 Mbaud; and the open drain's ceiling, where it gives out
+//      11.25 Mbaud, timed against the wire - a loop alone cannot tell a
+//      wrong rate; and the open drain's ceiling, where it gives out
 //   b  the frame formats on the loop: 8N1, 8E1, 8O1, 7E1, 7O1, 8N2,
 //      byte-exact through the receive engine
-//   c  ONEBIT and OVER8 together, and the error counters at zero
+//   c  ONEBIT and OVER8 together at 2 Mbaud, timed against the wire, and
+//      the error counters at zero
 //   d  ERRORS UNDER THE ENGINE: breaks injected into a stream through the
 //      receive engine - every data byte delivered intact and in order,
 //      the frame errors counted one a break, no byte taken by a clear;
@@ -47,6 +50,12 @@
 //      frame told, a burst of 16 told within two frames of its last stop
 //      bit, two interrupts a burst and none a byte, and a stream of four
 //      laps with no silence in it read whole through the lap's marks
+//   g  THE RING AGAINST COPIES ON ITS OWN CONTROLLER (DMA2): the receive
+//      stream at its default level and at rx_priority = low, beside zero,
+//      two, three and four copies at very_high, at 5.625 and 11.25 Mbaud
+//      - the default never loses a byte, two copies starve nothing, four
+//      starve the ring armed low; and the overrun a starved stream leaves
+//      with nothing to take cleared, the vector quiet after it
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -94,9 +103,20 @@ using LoopIrq = Uart<6, loop_pins, 512, 512, NoDmaEngine, NoDmaEngine, loop_opts
 using LoopDma = Uart<6, loop_pins, ring, 512, TxEngine, RxEngine, loop_opts>;
 using LoopOd = Uart<6, loop_pins, 512, 512, NoDmaEngine, NoDmaEngine, loop_opts_od>;
 using LoopFast = Uart<6, loop_pins, 512, 512, TxEngine, RxEngine, loop_opts_fast>;
+/// Letter g's two receivers: the receive engine alone (the transmitter is
+/// the thread's, so a starved stream cannot slow the line), over a ring
+/// that holds a whole leg, at the default level and ranked low.
+constexpr uint32_t arb_ring = 8192;
+constexpr UartOptions arb_opts_low{.over8 = true, .one_bit = true, .half_duplex = true,
+                                   .tx_speed = PinSpeed::very_high,
+                                   .single_wire_push_pull = true,
+                                   .rx_priority = DmaPriority::low};
+using RingHigh = Uart<6, loop_pins, arb_ring, 64, NoDmaEngine, RxEngine, loop_opts_fast>;
+using RingLow = Uart<6, loop_pins, arb_ring, 64, NoDmaEngine, RxEngine, arb_opts_low>;
 using Res = Usart<6>;
 
-/// Who owns USART6 now: 0 nobody, 1 LoopIrq, 2 LoopDma, 3 LoopOd, 4 LoopFast.
+/// Who owns USART6 now: 0 nobody, 1 LoopIrq, 2 LoopDma, 3 LoopOd, 4 LoopFast,
+/// 5 RingHigh, 6 RingLow.
 volatile uint8_t owner = 0;
 volatile uint32_t usart_entries = 0;
 volatile uint32_t dma_entries = 0;
@@ -114,6 +134,10 @@ void down() {
         LoopOd::release();
     } else if (was == 4u) {
         LoopFast::release();
+    } else if (was == 5u) {
+        RingHigh::release();
+    } else if (was == 6u) {
+        RingLow::release();
     }
     owner = 0;   // after the release: a stopped stream raises its completion
 }
@@ -180,6 +204,39 @@ uint32_t drain(uint32_t from, bool& in_order, uint8_t mask = 0xFFu) {
     }
 }
 
+/// THE RATE ON THE WIRE, which a loop cannot tell: both ends share one
+/// divisor, so a wrong one is a slower loop and nothing else. 1024 frames
+/// sent back to back through the transmit engine are timed on the cycle
+/// counter from the first store to TC, against 1024 frames of ten bits at
+/// `baud` - enough that the run's fixed cost, some 1700 cycles, stays under
+/// a per cent at 11.25 Mbaud; the answer is in thousandths of the wire's
+/// time.
+template <typename Port>
+uint32_t wire_permille(uint32_t baud) {
+    static uint8_t frames[1024];
+    for (uint32_t i = 0; i < sizeof(frames); ++i) {
+        frames[i] = pattern(i);
+    }
+    Res::clear_flags(UsartFlag::tc);
+    const uint32_t t0 = CycleCounter::now();
+    uint32_t q = 0;
+    while (q < sizeof(frames)) {
+        q += Port::write_bulk(std::span<const uint8_t>(frames + q, sizeof(frames) - q));
+    }
+    while (!Res::tx_complete() || !Port::tx_idle()) {
+        if (CycleCounter::now() - t0 > SysClock::hz / 100u) {
+            break;
+        }
+    }
+    const uint32_t took = CycleCounter::now() - t0;
+    const uint64_t wire = 10ull * sizeof(frames) * SysClock::hz / baud;
+    wait_ms(1);
+    uint8_t b = 0;
+    while (Port::read_byte(b)) {
+    }
+    return static_cast<uint32_t>(1000ull * took / wire);
+}
+
 /// Send n, wait for the wire and a few frames more, read it all back.
 template <typename Port>
 bool round_trip(uint32_t n, uint32_t& got, uint8_t mask = 0xFFu) {
@@ -215,9 +272,12 @@ void ta_loop() {
     uint32_t got = 0;
     const bool up_f = up<LoopFast>(4, 11'250'000);
     const bool ok_f = round_trip<LoopFast>(256, got);
+    const uint32_t pm = wire_permille<LoopFast>(11'250'000);
     print(serial, "  11.25 Mbaud (OVER8, ONEBIT), receive engine: ", got, " of 256 back, BRR ",
-          hex(Res::brr()), crlf);
+          hex(Res::brr()), "; 1024 frames out in ", pm, " thousandths of their wire time", crlf);
     bench.verdict("OVER8 reaches APB2 / 8 = 11.25 Mbaud and the loop carries it", up_f && ok_f);
+    bench.verdict("and the line runs at the rate asked: 1024 frames in their wire time within "
+                  "three per cent", pm >= 1000u && pm <= 1030u);
     // The open drain: where the pull-up's rise gives out.
     static constexpr uint32_t od_rates[] = {1'000'000, 2'812'500};
     bool od_slow = false;
@@ -269,8 +329,12 @@ void tc_sampling() {
     uint32_t got = 0;
     const bool ok_up = up<LoopFast>(4, 2'000'000);
     const bool ok = round_trip<LoopFast>(256, got);
+    const uint32_t pm = wire_permille<LoopFast>(2'000'000);
     print(serial, "  OVER8 + ONEBIT at 2 Mbaud: BRR ", hex(Res::brr()), ", ", got, " of 256, NE ",
-          LoopFast::noise_errors(), crlf);
+          LoopFast::noise_errors(), "; 1024 frames out in ", pm,
+          " thousandths of their wire time", crlf);
+    bench.verdict("USARTDIV is fCK / (8 x baud) at OVER8 (RM0390 25.4.4): 2 Mbaud on the wire, "
+                  "1024 frames in their wire time within three per cent", pm >= 1000u && pm <= 1030u);
     bench.verdict("OVER8 lays the divisor out in eighths, bit 3 clear", (Res::brr() & 0x8u) == 0u &&
                                                                             Res::oversampling8());
     bench.verdict("ONEBIT and OVER8 carry the loop byte-exact, no noise counted",
@@ -589,6 +653,175 @@ void tf_edge() {
     down();
 }
 
+// ---- g  the receive ring against copies on its own controller -------------------------
+//
+// The loop's receive stream is DMA2's stream 1; DMA2 is also the one
+// controller that copies memory to memory. Each leg sends `arb_chars`
+// frames from the THREAD - a store into DR eleven bit times after the
+// last one at the earliest, by the cycle counter, no SR read (a status
+// read is half of every receive clear) and no stream (a starved transmit
+// stream would only slow the line) - while zero to four copies run back
+// to back on DMA2's streams 0, 4, 5 and 7 at very_high, and the ring -
+// big enough for the whole leg - is read only at the end and judged
+// against the pattern. The ring is armed at its default level and,
+// through UartOptions::rx_priority, at low.
+
+alignas(16) uint32_t copy_src[4][1024];
+alignas(16) uint32_t copy_dst[4][1024];
+using CopyA = DmaCopyEngine<2, 0>;   ///< below the ring's stream number
+using CopyB = DmaCopyEngine<2, 4>;   ///< above it, as the other two
+using CopyC = DmaCopyEngine<2, 5>;
+using CopyD = DmaCopyEngine<2, 7>;
+using RingStream = DmaStream<2, 1>;
+
+constexpr uint32_t arb_chars = 4096;
+
+struct ArbLeg {
+    uint32_t got = 0;       ///< bytes the ring holds
+    uint32_t lost = 0;      ///< positions of the pattern skipped over
+    uint32_t gaps = 0;      ///< places they were skipped
+    uint32_t copies = 0;    ///< copy blocks started under the stream
+    uint32_t entries = 0;   ///< USART6 vector entries during the leg
+    uint32_t after = 0;     ///< and in the millisecond of silence after it
+    uint32_t late = 0;      ///< the longest a store into DR waited past its time, cycles
+    uint8_t ore = 0;
+    uint8_t faults = 0;
+    DmaPriority level = DmaPriority::low;   ///< the ring stream's SxCR.PL, read back
+};
+
+/// The ring's content against the pattern: a byte that is not the next
+/// position's is looked for further on (the pattern's period is 256), the
+/// positions stepped over LOST.
+template <typename Port>
+void arb_judge(ArbLeg& leg) {
+    uint32_t pos = 0;
+    for (;;) {
+        const auto run = Port::read_span();
+        if (run.empty()) {
+            break;
+        }
+        for (const uint8_t b : run) {
+            uint32_t k = 0;
+            while (k < 256u && pattern(pos + k) != b) {
+                ++k;
+            }
+            if (k != 0u) {
+                leg.lost += k;
+                ++leg.gaps;
+            }
+            pos += k + 1u;
+            ++leg.got;
+        }
+        (void)Port::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+/// One copy engine kept busy: a block started whenever the last ended,
+/// 4 KB of word beats or of byte beats, sixteen bytes a burst.
+template <typename E>
+uint32_t keep_busy(uint8_t i, bool bytes) {
+    if (E::busy()) {
+        return 0;
+    }
+    const bool ok = bytes ? E::copy(reinterpret_cast<uint8_t*>(copy_dst[i]),
+                                    reinterpret_cast<const uint8_t*>(copy_src[i]), 4096u)
+                          : E::copy(copy_dst[i], copy_src[i], 1024u);
+    return ok ? 1u : 0u;
+}
+
+template <typename Port>
+ArbLeg arb_leg(uint8_t who, uint32_t baud, uint8_t copies, bool bytes) {
+    ArbLeg leg{};
+    (void)up<Port>(who, baud);
+    CopyA::arm(DmaPriority::very_high);
+    CopyB::arm(DmaPriority::very_high);
+    CopyC::arm(DmaPriority::very_high);
+    CopyD::arm(DmaPriority::very_high);
+    leg.level = RingStream::priority();
+    const uint32_t period = 11u * (SysClock::hz / baud);
+    uint32_t next = CycleCounter::now() + period;
+    for (uint32_t i = 0; i < arb_chars; ++i) {
+        for (;;) {
+            const int32_t d = static_cast<int32_t>(CycleCounter::now() - next);
+            if (d >= 0) {
+                if (static_cast<uint32_t>(d) > leg.late) {
+                    leg.late = static_cast<uint32_t>(d);
+                }
+                break;
+            }
+            if (copies >= 1u) { leg.copies += keep_busy<CopyA>(0, bytes); }
+            if (copies >= 2u) { leg.copies += keep_busy<CopyB>(1, bytes); }
+            if (copies >= 3u) { leg.copies += keep_busy<CopyC>(2, bytes); }
+            if (copies >= 4u) { leg.copies += keep_busy<CopyD>(3, bytes); }
+        }
+        Res::write_data(pattern(i));
+        next = CycleCounter::now() + period;   // never two stores closer than a frame
+    }
+    while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
+    }
+    wait_ms(1);
+    leg.entries = usart_entries;
+    wait_ms(1);
+    leg.after = usart_entries - leg.entries;
+    arb_judge<Port>(leg);
+    leg.ore = Port::hw_overruns();
+    leg.faults = Port::dma_faults();
+    return leg;
+}
+
+void tg_arbitration() {
+    for (uint32_t k = 0; k < 4u; ++k) {
+        for (uint32_t i = 0; i < 1024u; ++i) {
+            copy_src[k][i] = (i + k) * 2654435761u;
+        }
+    }
+    bool levels = true;
+    bool default_whole = true;
+    bool two_whole = true;
+    bool four_starve = true;
+    bool quiet = true;
+    static constexpr uint32_t rates[] = {5'625'000, 11'250'000};
+    for (const uint32_t baud : rates) {
+        for (uint8_t beat = 0; beat < 2u; ++beat) {
+            for (uint8_t copies = 0; copies <= 4u; ++copies) {
+                if (copies == 1u) {
+                    continue;
+                }
+                const ArbLeg lo = arb_leg<RingLow>(6, baud, copies, beat == 1u);
+                const ArbLeg hi = arb_leg<RingHigh>(5, baud, copies, beat == 1u);
+                print(serial, "  ", baud, beat == 1u ? " byte" : " word", ", ", copies,
+                      " copies | ring low: ", lo.lost, " of ", arb_chars, " lost in ", lo.gaps,
+                      " gaps, ORE ", lo.ore, ", ", lo.entries, " vector entries, the thread ",
+                      lo.late, " cycles late at worst | default: ", hi.lost, " lost, ORE ",
+                      hi.ore, ", ", hi.entries, " entries, ", hi.late, " late", crlf);
+                levels = levels && lo.level == DmaPriority::low &&
+                         hi.level == DmaPriority::very_high;
+                default_whole = default_whole && hi.got == arb_chars && hi.lost == 0u &&
+                                hi.faults == 0u;
+                if (copies <= 2u) {
+                    two_whole = two_whole && lo.got == arb_chars && lo.lost == 0u;
+                }
+                if (copies == 4u) {
+                    four_starve = four_starve && lo.lost > 0u;
+                }
+                quiet = quiet && lo.after == 0u && hi.after == 0u;
+            }
+        }
+    }
+    down();
+    bench.verdict("rx_priority reaches the silicon: the ring's SxCR.PL read back 0 when the "
+                  "options say low and 3 by default", levels);
+    bench.verdict("THE DEFAULT RING LOSES NOTHING: at very_high, beside up to four copies at "
+                  "very_high on its own controller, every byte in order at 5.625 and 11.25 "
+                  "Mbaud, word and byte beats", default_whole);
+    bench.verdict("two copies ranked above a ring armed low starve it of nothing: the arbiter "
+                  "serves it between them", two_whole);
+    bench.verdict("FOUR COPIES RANKED ABOVE A RING ARMED LOW DO STARVE IT - bytes lost in every "
+                  "leg: the level decides correctness on this controller", four_starve);
+    bench.verdict("THE OVERRUN WITH NOTHING TO TAKE IS CLEARED: after every starved leg the "
+                  "vector is quiet - no entry in a millisecond of silence", quiet);
+}
+
 void banner() {
     print(serial, crlf, "test_stm32f4_serial - the transport on USART6's single-wire loop", crlf);
     bench.menu();
@@ -608,6 +841,10 @@ extern "C" void USART6_IRQHandler() {
         edge = LoopOd::isr();
     } else if (owner == 4u) {
         edge = LoopFast::isr();
+    } else if (owner == 5u) {
+        edge = RingHigh::isr();
+    } else if (owner == 6u) {
+        edge = RingLow::isr();
     }
     if (edge) {
         edge_at = CycleCounter::now();
@@ -621,6 +858,10 @@ extern "C" void USART6_IRQHandler() {
         edge = LoopDma::dma_isr();
     } else if (owner == 4u) {
         edge = LoopFast::dma_isr();
+    } else if (owner == 5u) {
+        edge = RingHigh::dma_isr();
+    } else if (owner == 6u) {
+        edge = RingLow::dma_isr();
     }
     if (edge) {
         edge_at = CycleCounter::now();
@@ -648,6 +889,7 @@ int main() {
     bench.letter('d', "errors under the engine: breaks in a stream, nothing stolen", td_errors);
     bench.letter('e', "tx_idle() against the last stop bit on the pad", te_tx_idle);
     bench.letter('f', "the burst edge from the vector, nothing polled", tf_edge);
+    bench.letter('g', "the receive ring against copies on its own controller", tg_arbitration);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

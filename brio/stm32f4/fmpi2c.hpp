@@ -1685,10 +1685,19 @@ struct FmpI2c {
     [[gnu::always_inline]] static uint32_t isr() { return pending_event(); }
     [[gnu::always_inline]] static uint32_t error_isr() { return pending_error(); }
 
+    /// The interrupt lines off, the block disabled and RESET, the clock
+    /// gated. THE RESET LINE BEFORE THE GATE is the release contract
+    /// (docs/design/dma.md): on this family a raised request is held
+    /// through a gated clock while its enable stands - measured on four
+    /// other requesters, an abandoned tenure leaves TXDMAEN or RXDMAEN so -
+    /// and the next owner of the stream's cell takes a stray item; the
+    /// pulse takes it away (docs/stm32f4/dma.md, "A released requester").
+    /// The host and the client both release through here.
     static void release() {
         Nvic::disable(event_irq);
         Nvic::disable(error_irq);
         (void)disable();
+        reset();
         bus_clock(false);
     }
 };
@@ -1939,8 +1948,7 @@ public:
             // The engines are pointed at THIS instance's two data registers.
             // Unlike the other I2C's one DR, this block has a separate TXDR
             // and RXDR, so the two engines never share an address.
-            TxEngine::arm(S::tx_address());
-            RxEngine::arm(S::rx_address());
+            arm_engines();
         }
         status_ = i2c_ok;
         phase_ = Phase::idle;
@@ -2335,8 +2343,7 @@ public:
         phase_ = Phase::idle;
         if constexpr (has_engines) {
             put_engines_away();
-            TxEngine::arm(S::tx_address());
-            RxEngine::arm(S::rx_address());
+            arm_engines();
         }
         S::interrupt(FmpI2cInterrupt::transfer_complete, false);
         const bool ok = S::cycle();
@@ -2423,6 +2430,20 @@ private:
                 S::dma_transmit(true);
                 S::interrupt(FmpI2cInterrupt::tx, false);
             }
+        }
+    }
+
+    /// The two engines bound to THIS instance's TXDR and RXDR.
+    ///
+    /// BOTH AT HIGH (DmaPriority's rule): the host does not overrun. A byte
+    /// its receive stream has not taken leaves RXNE up and "the SCL line is
+    /// stretched low until FMPI2C_RXDR is read"; a byte its transmit stream
+    /// has not written stretches SCL after the ninth pulse until TXDR is
+    /// (RM0390 23.4.7) - a starved stream slows the bus and loses nothing.
+    static void arm_engines() {
+        if constexpr (has_engines) {
+            TxEngine::arm(S::tx_address(), DmaPriority::high);
+            RxEngine::arm(S::rx_address(), DmaPriority::high);
         }
     }
 

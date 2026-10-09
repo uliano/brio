@@ -226,7 +226,9 @@ interrupts and the two vectors' masked views (`interrupt`, `interrupts`,
 enables (`dma_transmit`, `dma_receive`), the SMBus time-outs (`timeouts`,
 `smbus_probe`), the Fast-mode Plus drive (`fast_plus_drive`,
 `fast_plus_scl`, `fast_plus_sda`), the wake that is not there
-(`wake_from_stop`), and `release`. The constants `number`, `event_irq`,
+(`wake_from_stop`), and `release` (the block disabled and its RCC reset
+pulsed before the gate - the release contract, docs/design/dma.md - for
+the host and the client alike). The constants `number`, `event_irq`,
 `error_irq`, `smbus_claimed`, `wakes_from_stop`, `has_ten_bit`,
 `has_fast_plus`.
 
@@ -236,7 +238,10 @@ for field: `init`, `rebase`, `speed_ok`, `timing_of`, `scl_hz`,
 `kernel_hz`, `reference_hz`, `transmit_stall_risk`,
 `spurious_bus_errors`, `fast_plus_drive`, `claim_smba_pad`, `idle`,
 `start`, `status`, `isr`, `error_isr`, `dma_isr`, `unstick`, `recover`,
-`release`.
+`release`. The engines arm at `high`, both: a byte RXDR still holds
+keeps SCL "stretched low until FMPI2C_RXDR is read", and an empty TXDR
+stretches it after the ninth pulse (RM0390 23.4.7) - a starved stream
+slows the bus and loses nothing.
 
 `FmpI2cClient<n, pins>` - the target side: `init`, `kernel_hz`,
 `general_call`, `byte_control`, `addressed`, `host_reads`,

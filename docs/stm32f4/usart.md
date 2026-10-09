@@ -21,7 +21,8 @@ family fixture is `test/family_stm32f4/usart.cpp` with the negatives
 that refuse an absent instance, flow control on a UART, an engine off
 the instance's cells of the request mapping, an engine on a part class
 whose manual was not read, a receive ring longer than one lap of the
-stream's count, and one pad twice. Bench: the console apps
+stream's count, a receive level on a port with no receive engine, and
+one pad twice. Bench: the console apps
 and the platform suite on the four boards, the engined console in
 `test_stm32f4_dma`, the transport on USART6's single-wire loop in
 `test_stm32f4_serial` (the Nucleo-F446RE), its cost in `bench_stm32f4`
@@ -81,10 +82,12 @@ ceilings ([clock.md](clock.md)) - 45 vs 90 MHz at 180.
 
 **The baud divisor** (30.3.4): USARTDIV = fCK / (8 x (2 - OVER8) x
 baud), a 12-bit mantissa and a 4-bit fraction in BRR. At OVER8 = 0 the
-register value is fCK / baud in sixteenths with no field arithmetic;
-at OVER8 = 1 the fraction has three bits and bit 3 must stay clear
-(30.6.3), for twice the reachable rate at half the receiver's
-tolerance. Below 16 the generator has nothing to divide by.
+register value is fCK / baud in sixteenths with no field arithmetic; at
+OVER8 = 1 fCK / baud is USARTDIV in EIGHTHS, the fraction three bits and
+bit 3 clear (30.6.3), for twice the reachable rate at half the
+receiver's tolerance - the manual's own example, 8 MHz and 9600 baud,
+is BRR 0x681, pinned in the family fixture. A USARTDIV below 1 - 16
+sixteenths, 8 eighths - is refused: fCK / 16 and fCK / 8 are the tops.
 
 **Every instance has a vector of its own** on this family - USART1_IRQn
 and so on - no sharing to sort out in a handler.
@@ -138,8 +141,10 @@ TX and RX inside the chip and leaves the RX pad alone.
   `single_wire_push_pull`, which drives it push-pull while a frame goes
   out (the transmitter releases the pad between frames, 25.4.10, and the
   pull-up holds it): for a line with no other driver, because the open
-  drain rises on the pull-up alone - 1 Mbaud carried, 2.8 not, against
-  11.25 push-pull (letter a).
+  drain rises on the pull-up alone (letter a) - and `rx_priority`, the
+  receive engine's level in its controller's arbitration, `very_high` by
+  default (below), refused at compile time on a port with no receive
+  engine.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
   RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format = 8N1)`
   (the divisor from `apb_hz(clock, on_apb2)`, false when unreachable or
@@ -155,17 +160,28 @@ TX and RX inside the chip and leaves the RX pad alone.
   or an overrun; with one the view's skips plus an ORE and a restart
   after a transfer error, an FE frame being stored),
   the counters `rx_overruns`,
-  `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns`,
+  `frame_errors`, `parity_errors`, `noise_errors`, `hw_overruns` - each
+  SATURATING at 255, so a storm of errors never reads as a few -
   `clear_errors`, `rebase(hz)` (the ClockUser verb: `hz` is SYSCLK and
   the bus rate is DERIVED from it with `apb_hz_at`, not read back from
   the RCC, because a dynamic clock fans the new rate out BEFORE the
   prescalers move), `set_baud(hz, baud)`, `divisor_for`,
   `min_hz_for`, `can_baud`, `actual_baud(fck)`, `kernel_hz<Clock>()`,
-  `release()`; with engines, `dma_isr()` (the streams' vectors' body,
+  `release()` (the streams stopped, the interrupts off, UE clear, the
+  block's RCC RESET pulsed before its gate closes - the release contract:
+  a raised request is held through a gated clock on this family,
+  [dma.md](dma.md)); with engines, `dma_isr()` (the streams' vectors' body,
   whose true is the receive edge as `isr()`'s), `harvest()` (the same
   edge asked from the consumer's side, below) and `dma_faults()`. Refused at compile time: invalid or coincident pads,
   an engine off the instance's request cells, flow control on a UART, a
   flow pad missing, and with a receive engine a ring above 32768 bytes.
+- THE RECEIVE ENGINE ARMS AT `rx_priority`, `very_high` by default, and
+  the transmit engine at `high` (docs/design/dma.md's rule): DR holds one
+  character, so a starved receive stream overruns, and a starved transmit
+  one leaves the line idle a while. On this controller the level decides
+  correctness: a ring armed low beside three copies at very_high on its
+  own DMA2 lost up to half of what came, the default ring nothing beside
+  four ([dma.md](dma.md), `test_stm32f4_serial` letter g).
 - WITH A TRANSMIT ENGINE THE MASK COVERS THE CLAIM AND NOTHING ELSE. Two
   contexts start blocks - a print in the loop and the completion handler
   starting the ring's next run - so the decision is masked: the ring's
@@ -202,6 +218,18 @@ TX and RX inside the chip and leaves the RX pad alone.
   idle-to-busy transition of the consumer, re-opened by a look that
   finds the ring empty (and looks again, so a byte landing between is
   in the run or raises the edge).
+- AN OVERRUN WITH NOTHING TO TAKE IS CLEARED BY THE VECTOR. A starved
+  stream that reads DR at last before any status read saw the ORE leaves
+  ORE up with RXNE down, and RXNEIE, which ORE raises on its own (RM0390
+  25.6.4), re-enters the wait for a frame back to back with nothing for
+  the stream to move - measured: the core held by the vector until the
+  next frame, at a message's tail for ever (SR 0xD8, RXNEIE armed, the
+  board stopped). So an entry that finds the stream unmoved and its status
+  read showing ORE without RXNE reads DR - the clear that read began, no
+  byte the stream was owed - counts the overrun unless the entry that
+  began the wait did, and turns back to waiting for the end: one compare
+  more on the unmoved entry. A frame completing between the two loads is
+  the one the DR read takes, inside an overrun already.
 - WHAT THE CHANNEL'S READ BOUNDS. A frame whose error rises while its
   flag from the frame before stands (seen, not yet cleared) is cleared by
   its own read unseen: a run of errored frames counts every other one,
@@ -322,11 +350,20 @@ verbs on the same instance.
 **The single-wire loop** (`test_stm32f4_serial`, USART6 on PC6): 256
 bytes back whole and in order through both receivers at 115200, 1 Mbaud
 and 5.625 Mbaud (APB2 / 16), and through the engine at 11.25 Mbaud
-(OVER8 with ONEBIT, APB2 / 8 - BRR 0x20); every frame format of the task
-- 8N1, 8E1, 8O1, 7E1, 7O1, 8N2 - byte-exact at 1 Mbaud, a seven-bit
-frame's eighth bit being its parity bit as the stream stores it (DR's
-MSB, 25.6.2; the interrupt receiver hands it on too); the open drain on
-the internal pull-up whole at 1 Mbaud and 31 of 64 at 2.8125.
+(OVER8 with ONEBIT, APB2 / 8 - BRR 0x10), 1024 frames leaving in their
+wire time; every frame format of the task - 8N1, 8E1, 8O1, 7E1, 7O1, 8N2
+- byte-exact at 1 Mbaud, a seven-bit frame's eighth bit being its parity
+bit as the stream stores it (DR's MSB, 25.6.2; the interrupt receiver
+hands it on too); the open drain on the internal pull-up alone whole at
+1 Mbaud and 31 of 64 at 2.8125, and whole at 2.8125 where the pad carries
+the bench's 2.2 kOhm I2C pull-up besides.
+
+**A loop cannot tell a wrong rate**: both ends share the divisor, so a
+divisor twice too large is a loop twice too slow and every byte still
+comes back. Letters a and c therefore time 1024 frames out through the
+transmit engine against their wire time - 10 x 1024 bit times - and judge
+it within three per cent; the OVER8 arithmetic is also pinned against
+the manual's example at compile time.
 
 **Errors under the engine** (letter d): 120 data bytes with 14 breaks
 between them, each followed by a clean frame - all 120 delivered intact
@@ -335,6 +372,13 @@ counted 14: no byte taken by a clear. Two breaks back to back count 1,
 three count 2. Ten breaks under a thread polling SR as fast as it can:
 7 counted. The interrupt receiver drops each break's frame and counts
 it (40 of 40 data bytes, FE 10 for 10).
+
+**The ring against copies on its own controller** (letter g, DMA2): the
+default ring loses nothing beside four copies at very_high at 5.625 and
+11.25 Mbaud; armed low (`rx_priority`), it loses nothing beside two and
+a third to a half of its frames beside three or four, the overrun count
+saturating at 255; the vector is quiet after every starved leg (the
+overrun with nothing to take, above). The table is [dma.md](dma.md)'s.
 
 **`tx_idle()` is the wire's** (letter e): its first true lands 1570 and
 1579 cycles after the last stop bit's rising edge on the pad at 115200

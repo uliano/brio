@@ -11,8 +11,10 @@ controller, 2.2.11, quoted below. ES0206 2.2.7 / ES0298 2.2.7, the delay
 after an RCC clock enable, reaches every peripheral and is answered in
 `stm32f4/clock.hpp`. Driver: `stm32f4/dma.hpp`; the per-part request cells
 and the presence facts are in `stm32f4/device_tables.hpp`. Bench suite:
-`test_stm32f4_dma`. Family fixture `test/family_stm32f4/dma.cpp` plus six
-negatives under `brio check stm32f4`.
+`test_stm32f4_dma`, and `test_stm32f4_serial` letter g for a receive
+ring against copies on its own controller. Family fixture
+`test/family_stm32f4/dma.cpp` plus six negatives under `brio check
+stm32f4`.
 
 ## What the silicon does
 
@@ -122,6 +124,16 @@ stream's flags is a single store and never a read-modify-write. There is no
 global bit as on the STM32G0, and therefore none of that controller's
 erratum about clearing it.
 
+**The arbiter ranks streams, port by port.** Each controller arbitrates
+its eight streams for each of its two AHB ports separately - "based on
+their priority for each of the two AHB master ports" - by SxCR.PL's four
+levels, the lower stream number winning between equals (10.3.4); a burst
+is indivisible, "AHB transfers are locked" for its beats (10.3.11). The
+two controllers meet only in the bus matrix, whose arbitration "uses a
+round-robin algorithm" (RM0090 2.1.10). Nothing in the chapter says how
+long a lower stream can wait behind a higher one that never stops asking
+- the copy - and the bench findings below measure it.
+
 **Errors come in three kinds and only two of them stop the stream**
 (10.3.18). TEIF is a bus error on a read or a write, or a write into the
 wrong memory address register under the double buffer, and the hardware
@@ -167,7 +179,7 @@ of the request mapping, and `stm32f4/usart.hpp` checks an engine's
 - `DmaStream<n, s>` - `controller`, `index`, `memory_to_memory_capable`,
   `regs()`, `irq()`; `enabled()` / `enable()` / `abort(spins)`;
   `configure(config)` / `control()` / `fifo_control()`; the read-backs
-  `channel()`, `circular()`, `double_buffer()`, `flow_controlled()`,
+  `channel()`, `circular()`, `priority()`, `double_buffer()`, `flow_controlled()`,
   `direct_mode()`, `direction()`, `fifo_status()`; `set_count()` /
   `count()`, `set_peripheral()`, `set_memory()`, `set_memory1()`;
   `current_target_is_m1()` / `set_idle_buffer(address)`; `prepare(t)` /
@@ -201,8 +213,22 @@ of the request mapping, and `stm32f4/usart.hpp` checks an engine's
   compile time on DMA1.
 - In `stm32f4/dma_engine.hpp`, beside the empty slot's `NoDmaEngine`,
   what a slot's owner names without including the controller:
-  `DmaPriority`, `DmaInterrupts` (`completion`, `errors_only`, `none`) and
+  `DmaPriority` (the level an engine arms at, by docs/design/dma.md's
+  rule), `DmaInterrupts` (`completion`, `errors_only`, `none`) and
   `dma_max_items` (65535, SxNDTR's sixteen bits).
+- The engines' levels, by DIRECTION as defaults: `DmaRxEngine` in both
+  shapes `very_high` (its peripheral overruns), `DmaTxEngine` `high` (its
+  peripheral waits), `DmaCopyEngine` `low` (no request paces it); the raw
+  `DmaStreamConfig` keeps SxCR.PL's reset value, `low`. Every transport
+  names its own at the call: the `Uart`'s receive ring at
+  `UartOptions::rx_priority` (`very_high` by default) and its transmit at
+  `high` ([usart.md](usart.md)), the SPI host's receive `very_high` and
+  transmit `high` ([spi.md](spi.md)), the I2C and FMPI2C hosts' two at
+  `high` - their bus stretches SCL rather than overrun ([i2c.md](i2c.md),
+  [fmpi2c.md](fmpi2c.md)). A DAC stream is the exception a program ranks
+  itself: a DMA underrun "disables" the DAC's transfers until both ends
+  are re-initialized (RM0090 14.3.7), so it does not only slow
+  ([dac.md](dac.md)).
 - In the reserve (`stm32f4/device_tables.hpp`): `dma_base`, `dma_present`,
   `dma_streams`, `dma_channels`, `dma_fifo_words`, `dma_stream_base`,
   `dma_stream_present`, `dma_clock_mask`, `dma_reset_mask`,
@@ -277,6 +303,7 @@ shape's owners pay nothing for a count they have no use for.
 | a software trigger or a chain | none on this controller | memory to memory starts on EN; no stream triggers another |
 | the gate (RCC_AHB1ENR) | once, at the binding | ES0206 2.2.7's read-back costs an AHB round trip every time it is paid |
 | write-one-to-clear flag registers (10.5.3) | one store a block | no read-modify-write, safe from any context |
+| the four priority levels and the stream-number tie (10.3.4) | yes, by direction, each transport naming its own | what a starved peripheral loses decides the level (docs/design/dma.md); a receive ring armed low beside three copies loses bytes, at very_high nothing (bench findings) |
 | the interrupt enables | chosen once (`DmaInterrupts`) | the SPI's transmit stream needs only its errors - the receive block's end proves the transmit block's |
 | memory to memory (DMA2) | `DmaCopyEngine` | copy and fill, the beat the element, the bursts from the addresses |
 | a timer's request through CHSEL | the paced transfer (bench letter d) | TIM1_UP on DMA2 stream 5, channel 6 - a cell of every manual's table |
@@ -413,8 +440,8 @@ if (Stream::abort()) {                       // waits for EN to read 0
 Measured on the STM32F429ZI at 180 MHz (over-drive) and on the
 STM32F469NI, where the console's engines sit on DMA1 (USART3: stream 3
 out, stream 1 in, channel 4 both - RM0386 table 29), before the receive
-engine's circular shape; `test_stm32f4_dma` runs 103 verdicts in `z` on
-the STM32F446RE with it, and letter u beside `brio stress`. The engines'
+engine's circular shape; `test_stm32f4_dma` runs 109 verdicts in `z` on
+the STM32F446RE with it, and letters u and p beside `brio stress`. The engines'
 costs are `bench_stm32f4`'s letter d on the STM32F446RE at 180 MHz.
 
 **A block start is one read and four stores, 37 cycles.** One
@@ -533,6 +560,70 @@ that point, 10.3.18's burst against the threshold, is `configure()`'s
 before the store - and a program that wants to know whether a stream is
 running asks later, as a handler or a poll would anyway. `Dma<n>::init()`
 is the way back for a stream a read-back wedged.
+
+**What a copy can starve: one or two copies nothing, three a ring armed
+low, nothing a ring at very_high.** `test_stm32f4_serial` letter g on
+the STM32F446RE: USART6's receive ring on DMA2's stream 1 at 5.625 and
+11.25 Mbaud (a frame every 320 and 160 cycles), fed by the thread one
+frame at a time, beside copies of 4 KB restarted the moment they end on
+DMA2's streams 0, 4, 5 and 7, all at very_high - the ring armed at its
+default level and at `rx_priority = low`; of 4096 frames, over two runs
+of the letter at both rates:
+
+| copies | ring at low | ring at very_high |
+|---|---|---|
+| none | 0 lost | 0 lost |
+| two | 0 lost | 0 lost |
+| three | 1505 to 1968 lost | 0 lost |
+| four | 167 to 2027 lost | 0 lost |
+
+Word and byte beats alike. While the ring is starved the USART's vector
+re-enters back to back on the frame standing in DR - its wait for a
+frame has RXNEIE armed (usart.md) - some 32000 to 159000 entries a leg,
+and the thread that feeds the line ran up to 28000 cycles late. So on
+this controller the level DECIDES CORRECTNESS, and it takes a third copy
+where the STM32G0's takes a second; why the third and not the second is
+not measured.
+
+**A copy on DMA2 never starves a ring on DMA1.** Letter p on the
+STM32F446RE, whose console is USART2 on DMA1: four copies of 4 KB kept
+busy on DMA2's streams 3 to 6 for the whole window - some 89000 blocks
+a leg - at low and at very_high, the host's stream at 115200 and 921600
+into the console's ring: every byte in order, no overrun, the two
+controllers meeting only in the bus matrix's round robin.
+
+**A released requester: a gated clock holds a raised request, a cleared
+enable withdraws it.** Letter r, no wire: four requesters brought up
+with their request standing and no stream listening, released five
+ways, then a stream on the requester's own cell enabled for 2000 cycles
+as its next owner, moving four items between memory and the requester's
+register (and once more after the requester's clock reopens, no reset).
+Items moved, of four, before / after the clock reopened:
+
+| release | USART6_TX | SPI1_TX | TIM1_UP | ADC1 |
+|---|---|---|---|---|
+| A: disabled, RESET pulsed, gated (the contract) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| B: the DMA enable cleared, gated | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| C: the DMA enable left SET, gated | 1 / 2 | 1 / 2 | 1 / 1 | 1 / 2 |
+| D: the DMA enable cleared, clocked | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| E: live (the control) | 2 / 2 | 4 / 4 | 1 / 1 | 1 / 1 |
+| F: the ADC's own `release()` (CR2 cleared, then gated) | - | - | - | 0 / 0 |
+
+So THIS controller is neither the CH32V203's nor the STM32G0's: a request
+standing when the clock is gated reaches the next owner of the cell while
+the clock is still off - the stream takes the stray item from the frozen
+request line, as the CH32V203's channel does - but clearing the DMA
+enable withdraws it, as on the STM32G0. Every transport's `release()`
+before this was C: UE, SPE or PE cleared, the request bit left set, the
+gate closed. Each now pulses its RCC reset before the gate - the Uart,
+the SPI host and client, the I2C host and client, the FMPI2C block (host
+and client); the timers and the DAC already did, the DAC for its own
+erratum besides ("DMA request not automatically cleared by clearing
+DMAEN", ES0206 2.6.1, ES0298 2.7.1). The ADC is the one transport that
+cannot: its reset line is every converter's and the common block's
+(RM0090 6.3.9), and its `release()` clears CR2 with the clock on - F, the
+B of the table - which hands over clean. QUADSPI has no verb that sets
+its DMAEN.
 
 **The abort's wait is real and short**: EN comes down in 33 core cycles on
 an idle stream and 74 on one in the middle of a memory-to-memory block -
@@ -689,7 +780,18 @@ Implemented but not bench-verified, each with what would measure it:
   the STM32F446RE; the F429's SPI and I2C suites and the F411's and F469's
   `test_stm32f4_dma` (letters m and n among them, the circular receive on
   DMA2 and on DMA1's other cells) are owed a run with the two-moment
-  engines and the circular shape.
+  engines and the circular shape - and letters p and r with the levels and
+  the release resets. On the F429 and the F411 letter p is the stronger
+  measurement: their console is USART1, its ring DMA2's stream 2, and the
+  four copies share its arbiter.
+- **The arbiter on DMA1.** Every copy runs on DMA2 (DMA1 cannot copy), so
+  what a busy stream ranked above a ring does on DMA1 is unmeasured; a
+  timer's update request at a rate the controller cannot keep up with is
+  the load that would measure it.
+- **The held request of the I2C and FMPI2C blocks** is not staged: a
+  standing request wants a tenure past its address phase. Both release
+  through the reset, applied by reading from the four requesters letter r
+  measures.
 - **The circular shape's half-word and word rings, and its restart.**
   `arm(data, ring)` over a span of `uint16_t` or `uint32_t` is compiled
   (the family fixture) and run nowhere - a converter's stream would

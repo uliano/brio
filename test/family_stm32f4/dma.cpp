@@ -285,6 +285,7 @@ void stream_verbs() {
     (void)Stream::fifo_control();
     (void)Stream::channel();
     (void)Stream::circular();
+    (void)Stream::priority();
     (void)Stream::double_buffer();
     (void)Stream::flow_controlled();
     (void)Stream::direct_mode();
@@ -535,6 +536,13 @@ void engined_console() {
         (void)Serial::dma_faults();
         Serial::clear_errors();
         Serial::release();
+        // The ring ranked by the program: rx_priority, a level the receive
+        // engine arms at (docs/design/dma.md).
+        constexpr UartOptions low_ring{.rx_priority = DmaPriority::low};
+        using LowSerial = Uart<1, console_pins, 64, 256, TxE, RxE, low_ring>;
+        static_assert(LowSerial::options.rx_priority == DmaPriority::low);
+        (void)LowSerial::init(Clock<ClockSource::hsi, 16'000'000>{}, 115200);
+        LowSerial::release();
     }
 }
 
@@ -542,6 +550,7 @@ void engined_console() {
 // free constants - the branch that must disappear from every console.
 using Plain = Uart<1, console_pins>;
 static_assert(!Plain::has_tx_engine && !Plain::has_rx_engine);
+static_assert(Plain::options.rx_priority == DmaPriority::very_high);
 
 void engined() {
     engined_console<usart_dma_placements(1, true).known>();

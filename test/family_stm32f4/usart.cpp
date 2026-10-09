@@ -47,7 +47,16 @@ static_assert(!usart_present(9) && !usart_present(10));
 static_assert(*usart_brr(45'000'000u, 115'200u) == 391);
 static_assert(*usart_brr(90'000'000u, 115'200u) == 781);
 static_assert(!usart_brr(1'000'000u, 115'200u).has_value());   // below 16
-static_assert(*usart_brr_over8(45'000'000u, 115'200u) == ((781u >> 3) << 4 | (781u & 7u)));
+// OVER8: USARTDIV = fCK / (8 x baud) (RM0390 25.4.4), the fraction in
+// eighths - the manual's own example (8 MHz, 9600: USARTDIV 104.125, BRR
+// 0x681), the console's rate on APB1, and APB2 / 8, the top a FULL
+// instance reaches (USARTDIV 1).
+static_assert(*usart_brr_over8(8'000'000u, 9'600u) == 0x681);
+static_assert(*usart_brr_over8(45'000'000u, 115'200u) == ((391u >> 3) << 4 | (391u & 7u)));
+static_assert(*usart_brr_over8(90'000'000u, 11'250'000u) == 0x10);
+static_assert(!usart_brr_over8(90'000'000u, 11'250'001u * 2u).has_value());   // below 8 eighths
+static_assert(usart_actual_baud_over8(90'000'000u, 0x10) == 11'250'000u);
+static_assert(usart_actual_baud_over8(8'000'000u, 0x681) == 9'603u);
 static_assert(usart_actual_baud(45'000'000u, 391) == 115'089);
 static_assert(usart_min_hz(115'200u) == 1'843'200u && usart_min_hz_over8(115'200u) == 921'600u);
 static_assert(uart_format_valid(UartFormat{}) && !uart_format_valid(UartFormat{UartBits::seven, UartParity::none}) &&

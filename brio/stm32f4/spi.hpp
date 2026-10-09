@@ -1401,8 +1401,8 @@ public:
         s.dma_active = false;
         s.dma_done = false;
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address(), DmaPriority::low, DmaInterrupts::errors_only);
-            RxEngine::arm(S::data_address());
+            TxEngine::arm(S::data_address(), DmaPriority::high, DmaInterrupts::errors_only);
+            arm_rx_engine();
         }
         // The pads go to the peripheral only now, with the registers
         // already holding the idle polarity: a pad handed over first would
@@ -1710,7 +1710,7 @@ public:
         if constexpr (has_engines) {
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
-            RxEngine::arm(S::data_address());
+            arm_rx_engine();
         }
         Nvic::disable(S::irq);
         s.in_cmd = false;
@@ -1734,6 +1734,13 @@ public:
         }
         Nvic::disable(S::irq);
         (void)S::disable();
+        // THE RESET LINE BEFORE THE GATE (docs/design/dma.md, the release
+        // contract): a request TXDMAEN or RXDMAEN raised is held through a
+        // gated clock while the bit stands - an abandoned block leaves it
+        // so - and the next owner of the stream's cell takes a stray item;
+        // the pulse takes it away (docs/stm32f4/dma.md, "A released
+        // requester").
+        S::reset();
         S::bus_clock(false);
         SckPin::release();
         MosiPin::release();
@@ -1894,6 +1901,22 @@ private:
         // The DMA requests are NOT part of the applied configuration:
         // launch_dma() raises them around the engines (see there).
         return c;
+    }
+
+    /// The receive engine bound to DR again - at init(), and wherever a
+    /// block it was running is thrown away.
+    ///
+    /// THE RECEIVE SIDE AT VERY_HIGH, THE TRANSMIT AT HIGH (DmaPriority's
+    /// rule). The host clocks a frame out whenever the transmit stream
+    /// fills DR, and the receive buffer holds ONE frame: a receive stream
+    /// the transmit one outran finds it full - OVR, and "all other
+    /// subsequently transmitted bytes are lost" (RM0090 28.3.10). A
+    /// transmit stream that waits only stops the clock between two frames,
+    /// which the host owns.
+    static void arm_rx_engine() {
+        if constexpr (has_engines) {
+            RxEngine::arm(S::data_address(), DmaPriority::very_high);
+        }
     }
 
     static void rebase_pclk(uint32_t pclk, uint32_t sysclk) {
@@ -2210,7 +2233,7 @@ private:
         if (st != spi_ok) {
             s.status = st;
             (void)TxEngine::abandon();
-            RxEngine::arm(S::data_address());
+            arm_rx_engine();
         } else if (TxEngine::busy()) {
             // The receive block completing is proof the transmit one did:
             // every frame that came back was clocked out first.
@@ -2235,7 +2258,7 @@ private:
         if (!s.dma_done) {
             S::dma_requests(false, false);
             (void)TxEngine::abandon();
-            RxEngine::arm(S::data_address());
+            arm_rx_engine();
             s.dma_active = false;
             s.status = spi_dma_fault;
         }
@@ -2406,6 +2429,7 @@ public:
     static void release() {
         Nvic::disable(S::irq);
         (void)S::disable();
+        S::reset();   // the release contract, as SpiHost::release()
         S::bus_clock(false);
         SckPin::release();
         MosiPin::release();

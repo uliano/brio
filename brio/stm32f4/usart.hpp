@@ -235,14 +235,18 @@ constexpr std::optional<uint16_t> usart_brr(uint32_t hz, uint32_t baud) {
     return static_cast<uint16_t>(div);
 }
 
-/// BRR at OVER8 = 1: fCK / baud in EIGHTHS, the mantissa in bits 15:4
-/// and the three-bit fraction in bits 2:0 with bit 3 clear.
+/// BRR at OVER8 = 1: USARTDIV = fCK / (8 x baud) (RM0390 25.4.4,
+/// equation 1), so fCK / baud is USARTDIV in EIGHTHS - its integer part
+/// the mantissa in bits 15:4, its three-bit fraction in bits 2:0 with bit
+/// 3 clear; 8 (a USARTDIV of 1, the rate fCK / 8) is the smallest the
+/// generator divides by. Pinned against the manual's own example in the
+/// family fixture (8 MHz, 9600 baud: 0x681).
 constexpr std::optional<uint16_t> usart_brr_over8(uint32_t hz, uint32_t baud) {
     if (hz == 0u || baud == 0u) {
         return std::nullopt;
     }
-    const uint32_t div = ((hz << 1) + baud / 2u) / baud;   // in eighths
-    if (div < 16u || div > 0xFFFFu) {
+    const uint32_t div = (hz + baud / 2u) / baud;   // USARTDIV in eighths
+    if (div < 8u || (div >> 3) > 0xFFFu) {
         return std::nullopt;
     }
     return static_cast<uint16_t>(((div >> 3) << 4) | (div & 0x7u));
@@ -254,7 +258,7 @@ constexpr uint32_t usart_actual_baud(uint32_t hz, uint16_t brr) {
 }
 constexpr uint32_t usart_actual_baud_over8(uint32_t hz, uint16_t brr) {
     const uint32_t eighths = (static_cast<uint32_t>(brr >> 4) << 3) | (brr & 0x7u);
-    return eighths == 0u ? 0u : (hz << 1) / eighths;
+    return eighths == 0u ? 0u : hz / eighths;
 }
 
 /// The smallest fCK that can produce `baud`: sixteen (eight) clocks a bit.
@@ -779,10 +783,19 @@ struct UartOptions {
     /// (25.4.10: TX is released when no data is transmitted). For a line
     /// with no other driver - the loop of a port that hears itself, or a
     /// link whose other end only listens - because the open drain rises on
-    /// the pull-up alone: measured on the F446's PC6, open drain carries 1
-    /// Mbaud and loses every frame at 2.8, push-pull carries 11.25 (OVER8,
-    /// APB2 / 8). Two drivers on one wire must keep the open drain.
+    /// the pull-up alone: measured on the F446's PC6 on its internal
+    /// pull-up, open drain carries 1 Mbaud and loses frames at 2.8125,
+    /// push-pull carries 11.25 (OVER8, APB2 / 8). Two drivers on one wire
+    /// must keep the open drain.
     bool single_wire_push_pull = false;
+    /// The receive engine's level in its controller's arbitration (RM0090
+    /// 10.3.4's SxCR.PL), `very_high` by default: DR holds one character,
+    /// and a stream starved past one character time loses the next to an
+    /// overrun - which three memory-to-memory copies on the ring's own
+    /// controller, ranked above it, do (docs/stm32f4/dma.md). A program
+    /// that ranks another stream above its ring says so here; refused on a
+    /// port with no receive engine, which has no stream to rank.
+    DmaPriority rx_priority = DmaPriority::very_high;
 };
 
 /**
@@ -837,6 +850,9 @@ class Uart {
     static_assert(!(opts.rts || opts.cts) || S::is_full,
                   "brio Uart: hardware flow control is a FULL instance's (USART1, 2, 3, 6 - "
                   "RM0090 table 148); UART4/5/7/8 have no CTS/RTS");
+    static_assert(RxEngine::present || opts.rx_priority == DmaPriority::very_high,
+                  "brio Uart: rx_priority ranks the receive engine's stream - this port has "
+                  "no receive engine");
     static_assert(!RxEngine::present || rx_size <= 32768u,
                   "brio Uart: with a receive engine the ring is the circular stream's whole "
                   "storage, and SxNDTR counts 65535 at most - the largest power of two that "
@@ -874,6 +890,15 @@ class Uart {
     static inline volatile uint8_t m_noise_errors = 0;  // NE: byte kept, line suspect
     static inline volatile uint8_t m_hw_overruns = 0;   // ORE: a byte lost in silicon
     static inline volatile uint8_t m_dma_faults = 0;    // blocks a dead stream lost
+
+    /// EVERY COUNTER SATURATES at 255: a count that wraps reads as a few
+    /// errors after a storm of them. One compare on a rare path.
+    [[gnu::always_inline]] static void bump(volatile uint8_t& counter) {
+        const uint8_t v = counter;
+        if (v != 0xFFu) {
+            counter = static_cast<uint8_t>(v + 1u);
+        }
+    }
     // Under a receive engine, the bytes the stream lost beside the view's
     // own skips - one an ORE, one a restart after a transfer error (an FE
     // or PE frame is delivered: the stream moves it) - never cleared:
@@ -892,6 +917,10 @@ class Uart {
     // frame the stream took since is told from an entry that was not one.
     static inline volatile bool m_rx_waiting = false;
     static inline volatile uint16_t m_rx_at = 0;
+    // Whether the entry that began the wait for a frame counted an ORE:
+    // the overrun cleared there with nothing to take is then not counted
+    // twice (rx_vector()).
+    static inline volatile bool m_rx_ore_counted = false;
 
     /// write_bulk()'s copy into the ring: the runtime's memcpy for a run
     /// of at least this many bytes whose source and destination share
@@ -1016,7 +1045,10 @@ public:
             S::rxne_interrupt(true);
         }
         if constexpr (has_tx_engine) {
-            TxEngine::arm(S::data_address());
+            // HIGH, a level below the receive ring: a transmit stream that
+            // waits leaves TXE standing and the line idle a while, and
+            // loses nothing.
+            TxEngine::arm(S::data_address(), DmaPriority::high);
         }
         // TXE is armed on demand by write_byte() when there is no engine.
 
@@ -1047,7 +1079,7 @@ public:
             const uint8_t f = TxEngine::service();
             if ((f & TxEngine::flag_error) != 0u) {
                 (void)TxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1;
+                bump(m_dma_faults);
             } else if ((f & TxEngine::flag_complete) != 0u) {
                 m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
                 pump_tx();
@@ -1057,7 +1089,7 @@ public:
             const uint8_t f = RxEngine::service_ring();   // a completion: one lap, counted there
             if ((f & RxEngine::flag_error) != 0u) {
                 (void)RxEngine::abandon();
-                m_dma_faults = m_dma_faults + 1;
+                bump(m_dma_faults);
                 m_rx_restart = true;
                 m_rx_drained = false;
                 edge = true;   // the consumer must come: its look re-binds the stream
@@ -1202,16 +1234,16 @@ public:
             const uint32_t err = st & UsartFlag::receive_errors;
             if (err != 0u) {
                 if ((err & UsartFlag::fe) != 0u) {
-                    m_frame_errors = m_frame_errors + 1;
+                    bump(m_frame_errors);
                 }
                 if ((err & UsartFlag::pe) != 0u) {
-                    m_parity_errors = m_parity_errors + 1;
+                    bump(m_parity_errors);
                 }
                 if ((err & UsartFlag::ne) != 0u) {
-                    m_noise_errors = m_noise_errors + 1;
+                    bump(m_noise_errors);
                 }
                 if ((err & UsartFlag::ore) != 0u) {
-                    m_hw_overruns = m_hw_overruns + 1;
+                    bump(m_hw_overruns);
                 }
             }
             // EVERY BYTE LOST IS REPORTED TO THE RECEIVE RING (its
@@ -1224,7 +1256,7 @@ public:
                     if (m_rx.push(b)) {
                         edge = was_empty;
                     } else {
-                        m_rx_overruns = m_rx_overruns + 1;
+                        bump(m_rx_overruns);
                         m_rx.lost();
                     }
                 } else {
@@ -1471,10 +1503,14 @@ public:
     }
 
     /// Stop the port and park its pads: interrupts off, UE clear, the
-    /// bus clock closed, the pins released. The engines' streams are
-    /// stopped first, because 10.3.17's warning is explicit - switch the
-    /// stream off and wait for EN to read 0 BEFORE the peripheral it
-    /// serves.
+    /// block RESET, the bus clock closed, the pins released. The engines'
+    /// streams are stopped first, because 10.3.17's warning is explicit -
+    /// switch the stream off and wait for EN to read 0 BEFORE the
+    /// peripheral it serves. THE RESET LINE BEFORE THE GATE is the release
+    /// contract (docs/design/dma.md): a request DMAT or DMAR raised is
+    /// HELD through a gated clock while the bit stands - the next owner of
+    /// the stream's cell takes a stray item - and the pulse takes it away
+    /// (docs/stm32f4/dma.md, "A released requester").
     static void release() {
         Nvic::disable(S::irq);
         if constexpr (has_tx_engine) {
@@ -1486,6 +1522,7 @@ public:
         S::regs().CR1 &= ~(USART_CR1_RXNEIE | USART_CR1_TXEIE | USART_CR1_IDLEIE | USART_CR1_PEIE);
         S::error_interrupt(false);
         S::enable(false);
+        S::reset();
         S::bus_clock(false);
         TxPin::release();
         if constexpr (!opts.half_duplex) {
@@ -1545,8 +1582,10 @@ private:
                 m_rx_lost = m_rx_lost + 1u;   // the unread bytes went with the stopped stream
             }
             m_rx_restart = false;
+            // At the options' level, very_high unless the program says
+            // otherwise (UartOptions::rx_priority): DR holds one character.
             (void)RxEngine::arm(S::data_address(), std::span<uint8_t>(m_rx_storage),
-                                DmaPriority::low, true);
+                                opts.rx_priority, true);
             m_rx.clear();
             m_rx_drained = true;
         }
@@ -1587,17 +1626,17 @@ private:
 
     [[gnu::always_inline]] static void count_errors(uint32_t err) {
         if ((err & UsartFlag::ore) != 0u) {
-            m_hw_overruns = m_hw_overruns + 1;
+            bump(m_hw_overruns);
             m_rx_lost = m_rx_lost + 1u;
         }
         if ((err & UsartFlag::fe) != 0u) {
-            m_frame_errors = m_frame_errors + 1;
+            bump(m_frame_errors);
         }
         if ((err & UsartFlag::pe) != 0u) {
-            m_parity_errors = m_parity_errors + 1;
+            bump(m_parity_errors);
         }
         if ((err & UsartFlag::ne) != 0u) {
-            m_noise_errors = m_noise_errors + 1;
+            bump(m_noise_errors);
         }
     }
 
@@ -1626,6 +1665,19 @@ private:
      * arming raises nothing: SxNDTR is read before the arming and again
      * after it, and a difference is served at once. Every turn reports the
      * edge, which covers every byte the stream had written by then.
+     *
+     * AN OVERRUN WITH NOTHING TO TAKE. A starved stream that reads DR at
+     * last before any status read saw the ORE leaves ORE up with RXNE
+     * down - the frame it took is out of DR, the one the overrun lost
+     * never reached it - and RXNEIE, which ORE raises on its own (RM0390
+     * 25.6.4), re-enters the wait for a frame back to back with nothing
+     * for the stream to move: measured, the vector held the core until
+     * the next frame, at a message's tail for ever. So an unmoved entry
+     * whose status read shows ORE without RXNE reads DR - the clear that
+     * read began (25.6.1), with no byte the stream was owed - counts the
+     * overrun unless the entry that began the wait already did, and turns
+     * back to waiting for the end. A frame completing between the two
+     * loads is the one the DR read takes, inside an overrun already.
      */
     [[gnu::always_inline]] static bool rx_vector(uint32_t st) {
         USART_TypeDef& r = S::regs();
@@ -1639,6 +1691,7 @@ private:
                 }
             }
             count_errors(st & UsartFlag::receive_errors);
+            m_rx_ore_counted = (st & UsartFlag::ore) != 0u;
             m_rx_waiting = true;
             const uint16_t at = static_cast<uint16_t>(RxEngine::remaining());
             m_rx_at = at;
@@ -1652,11 +1705,23 @@ private:
         }
         const uint16_t at = static_cast<uint16_t>(RxEngine::remaining());
         if (at == m_rx_at) {
-            return edge;
+            if ((st & (UsartFlag::ore | UsartFlag::rxne)) != UsartFlag::ore) {
+                return edge;   // the stream has a frame to take, or nothing stands
+            }
+            // The overrun with nothing to take: DR read, the clear done.
+            (void)r.DR;
+            if (!m_rx_ore_counted) {
+                count_errors(UsartFlag::ore);
+            }
+            m_rx_waiting = false;
+            r.CR1 = (r.CR1 & ~USART_CR1_RXNEIE) | USART_CR1_IDLEIE | USART_CR1_PEIE;
+            r.CR3 |= USART_CR3_EIE;
+            return told() || edge;
         }
         const uint32_t err = r.SR & UsartFlag::receive_errors;
         if (err != 0u) {
             count_errors(err);   // this read begins their clear: keep waiting for a frame
+            m_rx_ore_counted = (err & UsartFlag::ore) != 0u;
             m_rx_at = static_cast<uint16_t>(RxEngine::remaining());
         } else {
             m_rx_waiting = false;

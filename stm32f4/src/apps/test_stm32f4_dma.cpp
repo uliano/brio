@@ -45,10 +45,18 @@
 //   n  the circular receive's two edges: a lap the consumer slept
 //      through, counted and skipped, and the vectors' edge re-opened by a
 //      drain
+//   r  a released requester: USART6's transmit, SPI1's transmit, TIM1's
+//      update and ADC1's conversion, each with its request standing and
+//      released five ways, then a stream on its own cell as the next
+//      owner - what the release contract's reset buys on this silicon
 //   u  (outside z) brio stress: the host's stream into the receive
 //      engine at 115200, 460800 and 921600, the consumer looking at most
 //      once a millisecond and only after an edge from the vectors - every
 //      byte accounted: brio stress --letters u --board <board>
+//   p  (outside z) brio stress: letter u's sink at 115200 and 921600 with
+//      four copies kept busy on DMA2 at low and at very_high, the
+//      console's ring at its default level - every byte accounted:
+//      brio stress --letters p --board <board>
 //
 // build: boards = f429zi,f446re,f411ce,f469ni
 // build: monitor_speed = 115200
@@ -57,10 +65,14 @@
 
 #include <span>
 
+#include "stm32f4/adc.hpp"
 #include "stm32f4/clock.hpp"
 #include "stm32f4/dma.hpp"
+#include "stm32f4/dwt.hpp"
 #include "stm32f4/nvic.hpp"
+#include "stm32f4/spi.hpp"
 #include "stm32f4/ticker.hpp"
+#include "stm32f4/tim.hpp"
 #include "stm32f4/usart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -1414,6 +1426,49 @@ void judge(SinkLeg& leg, const uint8_t* run, uint32_t n) {
     }
 }
 
+// ---- p's load: copies kept busy on DMA2 beside the console's ring ----------------
+//
+// Four copy engines on DMA2's streams 3 to 6 - above stream 2, the ring's
+// on the parts whose console is USART1, so a tie of levels is the ring's
+// - each restarted the moment its last block ends, 4 KB of words a block.
+
+alignas(16) uint32_t load_src[4][1024];
+alignas(16) uint32_t load_dst[4][1024];
+using LoadA = DmaCopyEngine<2, 3>;
+using LoadB = DmaCopyEngine<2, 4>;
+using LoadC = DmaCopyEngine<2, 5>;
+using LoadD = DmaCopyEngine<2, 6>;
+uint8_t load_copies = 0;      ///< how many of the four a sink leg keeps busy
+uint32_t load_blocks = 0;     ///< blocks they started in the leg
+
+template <typename E>
+void keep_loaded(uint8_t i) {
+    if (!E::busy() && E::copy(load_dst[i], load_src[i], 1024u)) {
+        ++load_blocks;
+    }
+}
+
+void arm_load(DmaPriority level) {
+    LoadA::arm(level);
+    LoadB::arm(level);
+    LoadC::arm(level);
+    LoadD::arm(level);
+    load_blocks = 0;
+}
+
+void run_load() {
+    if (load_copies >= 1u) { keep_loaded<LoadA>(0); }
+    if (load_copies >= 2u) { keep_loaded<LoadB>(1); }
+    if (load_copies >= 3u) { keep_loaded<LoadC>(2); }
+    if (load_copies >= 4u) { keep_loaded<LoadD>(3); }
+}
+
+void end_load() {
+    while (LoadA::busy() || LoadB::busy() || LoadC::busy() || LoadD::busy()) {
+    }
+    load_copies = 0;
+}
+
 template <typename Port>
 SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
     SinkLeg leg{};
@@ -1438,6 +1493,7 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
         uint8_t chunk[64];
         uint32_t last = Ticker::millis();
         while (Ticker::millis() - t_line < window_ms) {
+            run_load();
             const uint32_t now = Ticker::millis();
             if (now == last) {
                 continue;
@@ -1461,6 +1517,7 @@ SinkLeg sink_leg(uint32_t baud, uint32_t window_ms) {
         leg.line_errors = static_cast<uint8_t>(Port::noise_errors() + Port::frame_errors() +
                                                Port::parity_errors());
         leg.faults = Port::dma_faults();
+        end_load();
         Port::release();
     }
     engined_console = 0;
@@ -1507,6 +1564,403 @@ void tu_stress() {
     bench.verdict("and every byte it sent arrived, in order, at every rung: none lost "
                   "between laps, no lap missed, no overrun in silicon",
                   all_whole);
+}
+
+// ---- p  brio stress: the console's ring beside four copies on DMA2 (OUTSIDE z) -----
+//
+// Letter u's sink, at 115200 and at the bridge's 921600, with four copies
+// kept busy on DMA2 the whole window: at their own level (low, the copy
+// engine's) and at very_high. The console's ring arms at its default
+// level. Where the console is USART1 (the F429 and the F411) the ring is
+// DMA2's stream 2 and shares the arbiter with the copies; where it is
+// USART2 or USART3 (the F446, the F469) it is DMA1's, and the copies reach
+// it only through the bus matrix. Every byte the host sent is judged.
+//
+//   brio stress --letters p --board <board>
+
+void tp_ring_beside_copies() {
+    print(serial, "  this letter needs brio stress on the other end of the console:", crlf,
+          "  brio stress --letters p --board <board>", crlf);
+    for (uint32_t k = 0; k < 4u; ++k) {
+        for (uint32_t i = 0; i < 1024u; ++i) {
+            load_src[k][i] = (i ^ k) * 2246822519u;
+        }
+    }
+    Block::init();
+    Dma<1>::init();
+    constexpr uint32_t rungs[] = {115200, 921600};
+    constexpr uint32_t window_ms = 1500;
+    static constexpr DmaPriority levels[] = {DmaPriority::low, DmaPriority::very_high};
+    bool all_whole = true;
+    bool all_fed = true;
+    bool all_loaded = true;
+    for (const uint32_t baud : rungs) {
+        for (const DmaPriority level : levels) {
+            arm_load(level);
+            load_copies = 4;
+            const SinkLeg leg = sink_leg<StressSerial>(baud, window_ms);
+            print(serial, "  sink at ", baud, " beside four copies at ",
+                  level == DmaPriority::low ? "low" : "very_high", " (", load_blocks,
+                  " blocks of 4 KB): ", leg.in, " byte(s) in, ", leg.gaps, " gap(s) of ",
+                  leg.lost, " lost, ", leg.bad, " bad; laps missed ", leg.rx_overruns,
+                  ", ORE ", leg.hw_overruns, ", line errors ", leg.line_errors, ", faults ",
+                  leg.faults, crlf);
+            if (!leg.up || leg.in < baud / 10u / 4u) {
+                all_fed = false;
+            }
+            if (load_blocks < 100u) {
+                all_loaded = false;
+            }
+            if (leg.gaps != 0u || leg.bad != 0u || leg.first_gap != 0u ||
+                leg.rx_overruns != 0u || leg.hw_overruns != 0u || leg.line_errors != 0u ||
+                leg.faults != 0u) {
+                all_whole = false;
+            }
+        }
+    }
+    bench.verdict("the host fed every leg (brio stress on the other end)", all_fed);
+    bench.verdict("the four copies ran the whole window, block after block", all_loaded);
+    bench.verdict("THE RING AT ITS DEFAULT LEVEL LOSES NOTHING beside four copies on DMA2, at "
+                  "their own level and at very_high: every byte in order, no overrun",
+                  all_whole);
+}
+
+// ---- r  a released requester (the release contract, no wire) -----------------------
+//
+// docs/design/dma.md's release contract asks whether a peripheral's DMA
+// request, once raised, outlives the peripheral's release. On this
+// controller a request line reaches a stream only through the CHSEL of
+// the one or two cells the request mapping gives it, so a stray can only
+// reach the NEXT OWNER OF THE SAME CELL. The letter measures it with no
+// wire: a requester brought up with its request standing and no stream
+// listening, released one of five ways, then the INCOMING owner - a
+// stream on the requester's own cell, four items between memory and the
+// requester's own register, the direction its owner would use - enabled
+// for 2000 cycles. Every item it moves is a request that outlived the
+// release. Where the requester's clock was gated it is opened again
+// afterwards, no reset, and the count read once more.
+//
+//   A  the contract: block disabled, RESET pulsed, clock gated
+//   B  the DMA enable cleared, block disabled, clock gated (no reset)
+//   C  the DMA enable left set, block disabled, clock gated (no reset)
+//   D  the DMA enable cleared, block disabled, clock left on (no reset)
+//   E  the control: nothing released - the request is live
+//
+// The requesters, none of them with a pad: USART6's transmit (TXE behind
+// DMAT), SPI1's transmit (TXE behind TXDMAEN, a host under software
+// select), TIM1's update (one UG behind UDE, the counter never started)
+// and ADC1's end of conversion (one software-started conversion behind
+// CR2.DMA). The ADC is the one whose reset line is shared - one line
+// resets every converter and the common block (RM0090 6.3.9, "common to
+// all ADCs") - so its driver's release() clears CR2 with the clock on and
+// gates it, and that release is measured as a sixth way, F; for the
+// other three the driver's release is the contract, A.
+//
+// MEASURED on the STM32F446RE: a cleared DMA enable withdraws a raised
+// request, the clock on or gated, but a gated clock does NOT - with the
+// enable left set the stream on the requester's cell takes an item while
+// the requester's clock is still gated, and more when it returns.
+
+enum class Release : uint8_t { contract, enable_cleared_gated, enable_set_gated,
+                               enable_cleared_clocked, live, driver };
+
+struct Handover {
+    uint16_t moved = 0;           ///< items the incoming owner moved
+    uint16_t moved_ungated = 0;   ///< and after the clock was opened again (B, C, F)
+};
+
+constexpr DmaPlacement u6_cell = usart_dma_placements(6, true).at[0];
+constexpr DmaPlacement spi1_cell = spi_dma_placements(1, true).at[0];
+constexpr DmaPlacement adc1_cell = adc_dma_placements(1).at[0];
+/// TIM1_UP's cell, the same in the three tables (RM0090 table 44, RM0390
+/// table 29, RM0383 table 28): the timers' rows are not in the reserve.
+constexpr DmaPlacement tim1_up_cell{2, 5, 6};
+static_assert(u6_cell.controller == 2u && spi1_cell.controller == 2u &&
+                  adc1_cell.controller == 2u,
+              "the incoming owners below are DMA2's streams");
+static_assert(u6_cell.stream != spi1_cell.stream && u6_cell.stream != adc1_cell.stream &&
+                  u6_cell.stream != tim1_up_cell.stream &&
+                  spi1_cell.stream != adc1_cell.stream &&
+                  spi1_cell.stream != tim1_up_cell.stream &&
+                  adc1_cell.stream != tim1_up_cell.stream,
+              "four requesters, four streams");
+
+alignas(4) volatile uint16_t handover_items[4];
+
+void spin_cycles(uint32_t n) {
+    const uint32_t t0 = CycleCounter::now();
+    while (CycleCounter::now() - t0 < n) {
+    }
+}
+
+/// The incoming owner: a stream on `cell`, four items of `width` between
+/// memory and the requester's register `data`, given 2000 cycles.
+template <uint8_t s>
+uint16_t incoming(uint8_t channel, volatile void* data, DmaDirection direction, DmaWidth width) {
+    using In = DmaStream<2, s>;
+    for (auto& v : handover_items) {
+        v = 0;
+    }
+    In::stop();
+    In::clear(DmaFlag::all);
+    DmaTransfer t{};
+    t.peripheral = data;
+    t.memory = handover_items;
+    t.count = 4;
+    t.config.channel = channel;
+    t.config.direction = direction;
+    t.config.memory_increment = true;
+    t.config.peripheral_width = width;
+    t.config.memory_width = width;
+    (void)In::load(t);
+    spin_cycles(2000u);
+    return static_cast<uint16_t>(4u - In::count());
+}
+template <uint8_t s>
+uint16_t incoming_moved() {
+    return static_cast<uint16_t>(4u - DmaStream<2, s>::count());
+}
+template <uint8_t s>
+void incoming_stop() {
+    DmaStream<2, s>::stop();
+    DmaStream<2, s>::clear(DmaFlag::all);
+}
+
+bool gated(Release how) {
+    return how == Release::enable_cleared_gated || how == Release::enable_set_gated ||
+           how == Release::driver;
+}
+
+Handover usart6_handover(Release how) {
+    using U = Usart<6>;
+    U::bus_clock(true);
+    U::reset();
+    (void)U::configure(UartFormat{}, 781);
+    U::dma_transmit(true);
+    U::transmitter(true);
+    U::enable(true);
+    spin_cycles(SysClock::hz / 10000u);
+    switch (how) {
+        case Release::contract:
+        case Release::driver:
+            U::enable(false);
+            U::reset();
+            U::bus_clock(false);
+            break;
+        case Release::enable_cleared_gated:
+            U::enable(false);
+            U::dma_transmit(false);
+            U::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            U::enable(false);
+            U::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            U::enable(false);
+            U::dma_transmit(false);
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    h.moved = incoming<u6_cell.stream>(u6_cell.channel, U::data_address(),
+                                       DmaDirection::memory_to_peripheral, DmaWidth::byte);
+    if (gated(how)) {
+        U::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved<u6_cell.stream>();
+    incoming_stop<u6_cell.stream>();
+    U::bus_clock(true);
+    U::enable(false);
+    U::reset();
+    U::bus_clock(false);
+    return h;
+}
+
+Handover spi1_handover(Release how) {
+    using S1 = Spi<1>;
+    S1::bus_clock(true);
+    S1::reset();
+    (void)S1::configure(SpiConfig{.dma_transmit = true});
+    S1::enable();
+    spin_cycles(SysClock::hz / 10000u);
+    switch (how) {
+        case Release::contract:
+        case Release::driver:
+            (void)S1::disable();
+            S1::reset();
+            S1::bus_clock(false);
+            break;
+        case Release::enable_cleared_gated:
+            (void)S1::disable();
+            S1::dma_transmit(false);
+            S1::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            (void)S1::disable();
+            S1::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            (void)S1::disable();
+            S1::dma_transmit(false);
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    h.moved = incoming<spi1_cell.stream>(spi1_cell.channel, S1::data_address(),
+                                         DmaDirection::memory_to_peripheral, DmaWidth::byte);
+    if (gated(how)) {
+        S1::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved<spi1_cell.stream>();
+    incoming_stop<spi1_cell.stream>();
+    S1::bus_clock(true);
+    (void)S1::disable();
+    S1::reset();
+    S1::bus_clock(false);
+    return h;
+}
+
+/// TIM1's update request: UDE and one software update, the counter never
+/// started - one request raised, none after it. The incoming owner writes
+/// zeros through TIMx_DMAR, which with DCR at its reset value lands in CR1:
+/// the counter stays stopped.
+Handover tim1_handover(Release how) {
+    using T1 = Tim<1>;
+    T1::init();
+    (void)T1::configure(TimConfig{.prescaler = 0, .period = 0xFFFFu});
+    T1::interrupts(T1::update_dma, true);
+    T1::update();
+    spin_cycles(64u);
+    switch (how) {
+        case Release::contract:
+        case Release::driver:
+            T1::release();
+            break;
+        case Release::enable_cleared_gated:
+            T1::interrupts(T1::update_dma, false);
+            T1::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            T1::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            T1::interrupts(T1::update_dma, false);
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    h.moved = incoming<tim1_up_cell.stream>(tim1_up_cell.channel, T1::dmar_address(),
+                                            DmaDirection::memory_to_peripheral, DmaWidth::half);
+    if (gated(how)) {
+        T1::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved<tim1_up_cell.stream>();
+    incoming_stop<tim1_up_cell.stream>();
+    T1::bus_clock(true);
+    T1::release();
+    return h;
+}
+
+/// ADC1's request: one software-started conversion behind CR2.DMA (DDS
+/// clear: no request after the stream's last item, and none was served).
+/// The incoming owner reads DR into memory, a half-word an item.
+Handover adc1_handover(Release how) {
+    using A1 = Adc<1>;
+    AdcCommon::reset();
+    (void)A1::init(clock, AdcConfig{.dma = true});
+    A1::start();
+    spin_cycles(SysClock::hz / 100000u);   // ten microseconds: one conversion and then some
+    switch (how) {
+        case Release::contract:
+            A1::release();
+            AdcCommon::reset();
+            break;
+        case Release::driver:
+            A1::release();
+            break;
+        case Release::enable_cleared_gated:
+            (void)A1::configure(AdcConfig{});
+            A1::bus_clock(false);
+            break;
+        case Release::enable_set_gated:
+            A1::bus_clock(false);
+            break;
+        case Release::enable_cleared_clocked:
+            (void)A1::configure(AdcConfig{});
+            break;
+        case Release::live:
+            break;
+    }
+    Handover h{};
+    h.moved = incoming<adc1_cell.stream>(adc1_cell.channel, A1::data_address(),
+                                         DmaDirection::peripheral_to_memory, DmaWidth::half);
+    if (gated(how)) {
+        A1::bus_clock(true);
+        spin_cycles(2000u);
+    }
+    h.moved_ungated = incoming_moved<adc1_cell.stream>();
+    incoming_stop<adc1_cell.stream>();
+    A1::bus_clock(true);
+    A1::release();
+    AdcCommon::reset();
+    return h;
+}
+
+void tr_released_requester() {
+    (void)CycleCounter::init();
+    Block::init();
+    const char* names[6] = {"A contract (reset)       ", "B enable cleared, gated  ",
+                            "C enable set, gated      ", "D enable cleared, clocked",
+                            "E live (control)         ", "F the driver's release() "};
+    Handover u[6];
+    Handover sp[6];
+    Handover t[6];
+    Handover ad[6];
+    for (uint8_t i = 0; i < 6u; ++i) {
+        u[i] = usart6_handover(static_cast<Release>(i));
+        sp[i] = spi1_handover(static_cast<Release>(i));
+        t[i] = tim1_handover(static_cast<Release>(i));
+        ad[i] = adc1_handover(static_cast<Release>(i));
+    }
+    for (uint8_t i = 0; i < 6u; ++i) {
+        print(serial, "  ", names[i], ": USART6_TX ", u[i].moved, "/", u[i].moved_ungated,
+              "  SPI1_TX ", sp[i].moved, "/", sp[i].moved_ungated, "  TIM1_UP ", t[i].moved,
+              "/", t[i].moved_ungated, "  ADC1 ", ad[i].moved, "/", ad[i].moved_ungated,
+              "  (items moved of 4 / after the clock reopened)", crlf);
+    }
+    bench.verdict("THE CONTROL: a live request moves the incoming owner's items on all four "
+                  "requesters - the detector sees a request",
+                  u[4].moved >= 1u && sp[4].moved >= 1u && t[4].moved >= 1u &&
+                      ad[4].moved >= 1u);
+    bench.verdict("A GATED CLOCK DOES NOT WITHDRAW A RAISED REQUEST: with the DMA enable left "
+                  "set, the next owner of the cell moved an item WHILE the requester's clock "
+                  "was gated, on all four (C)",
+                  u[2].moved >= 1u && sp[2].moved >= 1u && t[2].moved >= 1u &&
+                      ad[2].moved >= 1u);
+    bench.verdict("A CLEARED DMA ENABLE DOES: gated or clocked, nothing reached the next "
+                  "owner, nor when the clock returned (B, D)",
+                  u[1].moved == 0u && sp[1].moved == 0u && t[1].moved == 0u &&
+                      ad[1].moved == 0u && u[1].moved_ungated == 0u &&
+                      sp[1].moved_ungated == 0u && t[1].moved_ungated == 0u &&
+                      ad[1].moved_ungated == 0u && u[3].moved == 0u && sp[3].moved == 0u &&
+                      t[3].moved == 0u && ad[3].moved == 0u);
+    bench.verdict("THE CONTRACT HANDS OVER CLEAN: a requester released with its reset pulsed "
+                  "before the gate leaves the incoming owner of its cell nothing (A)",
+                  u[0].moved == 0u && sp[0].moved == 0u && t[0].moved == 0u &&
+                      ad[0].moved == 0u && u[0].moved_ungated == 0u &&
+                      sp[0].moved_ungated == 0u && t[0].moved_ungated == 0u &&
+                      ad[0].moved_ungated == 0u);
+    bench.verdict("THE ADC's OWN RELEASE HANDS OVER CLEAN without the shared reset: CR2 "
+                  "cleared with the clock on, then the gate - nothing moved, nothing when the "
+                  "clock returns (F)",
+                  ad[5].moved == 0u && ad[5].moved_ungated == 0u);
 }
 
 // ---- the menu -----------------------------------------------------------------------
@@ -1610,8 +2064,12 @@ int main() {
     bench.letter('m', "the circular receive, on the transmitter's own echo", tm_receive);
     bench.letter('n', "the circular receive's two edges: a lap missed, the drain",
                  tn_receive_edges);
+    bench.letter('r', "a released requester: what the next owner of its cell sees",
+                 tr_released_requester);
     bench.letter('u', "brio stress: the host's stream into the receive engine", tu_stress,
                  false);
+    bench.letter('p', "brio stress: the console's ring beside four copies on DMA2",
+                 tp_ring_beside_copies, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

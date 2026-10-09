@@ -212,7 +212,15 @@ namespace level: `spi_isr_entry_cycles`, `spi_isr_to_read_cycles`,
 `spi_default_hold_off_cycles`, `spi_write_ahead_min_frame_cycles()`,
 `spi_frame_hclk_cycles()`, `spi_write_ahead_code()`; with engines, the
 transmit stream armed for its errors alone and the receive block's
-completion the transaction's one interrupt - and this stratum's three
+completion the transaction's one interrupt - THE RECEIVE STREAM AT
+`very_high`, THE TRANSMIT AT `high` (docs/design/dma.md's rule): the
+receive buffer holds one frame, and a receive stream the transmit one
+outran finds it full - OVR, "all other subsequently transmitted bytes are
+lost" (RM0090 28.3.10) - where a waiting transmit only stops the clock
+between two frames; `release()` stops both streams, disables the block
+and pulses its RCC reset before the gate, the release contract (a raised
+request is held through a gated clock on this family, [dma.md](dma.md))
+- and this stratum's three
 of its own: `sck_speed` and
 `errata_apb_ceiling_hz`/`within_errata_ceiling`, because on this
 family the SCK pad's slew class is a correctness parameter and not a
@@ -223,8 +231,9 @@ below).
 `SpiClient<n, pins>` - a polled surface with an ISR body: `init`,
 `enable(first)`, `disable`, `write`, `writable`, `poll`, `selected`,
 `select`, `drive_output` (the dark listener), the error verbs,
-`isr()`, `release`, and `frames_ahead` = 1, this silicon's answer to
-the one number a portable client would need.
+`isr()`, `release` (the block reset before the gate, as the host's),
+and `frames_ahead` = 1, this silicon's answer to the one number a
+portable client would need.
 
 `SpiPins` and `I2sPins` name the pads with the alternate function the
 DATASHEET gives each signal there; the device header carries no pin

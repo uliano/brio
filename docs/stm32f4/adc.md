@@ -184,7 +184,13 @@ common status register, read-only), `data()` / `data_low()` /
   (the bus clock, the block's prescaler for this rate, the config, ADON -
   and refusing when no prescaler keeps fADC legal), `release()`. The
   RESET is deliberately not part of `init()`: one line resets every
-  converter together.
+  converter together - and not of `release()` either, for the same
+  reason: the release contract (docs/design/dma.md) is met by CR2 cleared
+  with the clock on, then the gate, measured to hand the next owner of
+  the converter's stream nothing ([dma.md](dma.md), "A released
+  requester"). A stream of conversions takes the receive engine's
+  default, `very_high`: an overrun "blocks" the DMA requests until OVR
+  and the stream are cleared (RM0090 13.8.1).
 - **`AdcConfig`**: resolution, alignment, scan, continuous, EOC per
   conversion or per sequence, both discontinuous modes with the regular
   one's count, auto-injection, the DMA pair, and the two triggers with

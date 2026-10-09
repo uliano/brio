@@ -825,8 +825,14 @@ public:
         S::enable();
         S::ack(false);
         if constexpr (has_engines) {
-            TxEngine::arm(S::data_address());
-            RxEngine::arm(S::data_address());
+            // BOTH AT HIGH (DmaPriority's rule): the host does not overrun.
+            // A byte its transmit stream has not written leaves TxE up and
+            // BTF rises, "stretching SCL low" until DR is written; a byte
+            // its receive stream has not taken does the same until DR is
+            // read (RM0090 27.3.3) - a starved stream slows the bus and
+            // loses nothing.
+            TxEngine::arm(S::data_address(), DmaPriority::high);
+            RxEngine::arm(S::data_address(), DmaPriority::high);
         }
         t_.status = i2c_ok;
         t_.phase = Phase::idle;
@@ -1236,6 +1242,13 @@ public:
         Nvic::disable(S::event_irq);
         Nvic::disable(S::error_irq);
         S::disable();
+        // THE RESET LINE BEFORE THE GATE (docs/design/dma.md, the release
+        // contract): on this family a raised request is held through a
+        // gated clock while its enable stands - measured on four other
+        // requesters, an abandoned tenure leaves DMAEN so - and the next
+        // owner of the stream's cell takes a stray item; the pulse takes it
+        // away (docs/stm32f4/dma.md, "A released requester").
+        S::reset();
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();
@@ -1568,7 +1581,7 @@ private:
         if constexpr (has_engines) {
             (void)TxEngine::abandon();   // false, and nothing done, when no block holds it
             if (t_.phase == Phase::rx_dma) {
-                RxEngine::arm(S::data_address());
+                RxEngine::arm(S::data_address(), DmaPriority::high);   // init()'s level
             }
             S::dma(false, false);
         }
@@ -1821,6 +1834,7 @@ public:
         Nvic::disable(S::event_irq);
         Nvic::disable(S::error_irq);
         S::disable();
+        S::reset();   // the release contract, as I2cHost::release()
         S::bus_clock(false);
         SclPin::release();
         SdaPin::release();

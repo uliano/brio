@@ -44,6 +44,17 @@
  * a compile-time one (stm32f4/usart.hpp's static_assert over
  * usart_dma_placement_valid()).
  *
+ * THE LEVEL AN ENGINE ARMS AT IS ITS PERIPHERAL'S (stm32f4/dma_engine.hpp's
+ * DmaPriority, docs/design/dma.md). Each controller arbitrates its streams
+ * by level, the lower stream number between equals, separately for each
+ * of its two ports (10.3.4); measured, one or two copies outranking a
+ * receive stream leave it served, three starve it for as long as they
+ * run. So the defaults are the rule's, by direction: the receive engine at
+ * very_high (its peripheral overruns), the transmit engine at high (its
+ * peripheral waits), the copy at low (no request paces it); a transport
+ * names its own level at the call. The raw stream's DmaStreamConfig keeps
+ * SxCR.PL's reset value, low.
+ *
  * THE DRIVER OWNS THE FABRIC AND NOT THE REQUEST VOCABULARY - the same
  * division the STM32G0 stratum draws, and for the same reason. This
  * file takes a plain channel number and knows nothing about USARTs; a
@@ -694,6 +705,11 @@ public:
         return static_cast<uint8_t>((regs().CR & DMA_SxCR_CHSEL_Msk) >> DMA_SxCR_CHSEL_Pos);
     }
     static bool circular() { return (regs().CR & DMA_SxCR_CIRC) != 0u; }
+    /// SxCR.PL: the level the stream arbitrates at (10.3.4). A read of
+    /// SxCR: not in the cycles right after an EN store (the wedge).
+    static DmaPriority priority() {
+        return static_cast<DmaPriority>((regs().CR & DMA_SxCR_PL_Msk) >> DMA_SxCR_PL_Pos);
+    }
     static bool double_buffer() { return (regs().CR & DMA_SxCR_DBM) != 0u; }
     static bool flow_controlled() { return (regs().CR & DMA_SxCR_PFCTRL) != 0u; }
     /// SxFCR.DMDIS inverted: true while the four-word FIFO is bypassed.
@@ -1061,7 +1077,14 @@ public:
     /// THE BINDING: `data` is the register the runs are poured into,
     /// `irqs` what the stream interrupts for. Opens the controller's gate,
     /// stops the stream, writes everything a block does not change.
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low,
+    /// `high` by default: a peripheral a transmit stream feeds waits for
+    /// it and loses nothing (DmaPriority's rule). THE DAC IS THIS
+    /// FAMILY'S EXCEPTION to "only slows": a trigger that finds its request
+    /// not yet acknowledged raises DMAUDR, and "DMA data transfers are then
+    /// disabled" until both ends are re-initialized (RM0090 14.3.7) - a
+    /// program that plays one beside copies on its controller ranks it at
+    /// the call.
+    static void arm(volatile void* data, DmaPriority priority = DmaPriority::high,
                     DmaInterrupts irqs = DmaInterrupts::completion) {
         st_.data = data;
         st_.control = dma_control_word(DmaStreamConfig{
@@ -1347,7 +1370,9 @@ public:
     /// THE ONE-SHOT BINDING: `data` is the register the blocks are filled
     /// from, `irqs` what the stream interrupts for. Opens the controller's
     /// gate, stops the stream, writes everything a block does not change.
-    static void arm(volatile void* data, DmaPriority priority = DmaPriority::low,
+    /// `very_high` by default: a peripheral a receive stream empties
+    /// overruns when the stream is starved (DmaPriority's rule).
+    static void arm(volatile void* data, DmaPriority priority = DmaPriority::very_high,
                     DmaInterrupts irqs = DmaInterrupts::completion) {
         st_.data = data;
         st_.control = dma_control_word(DmaStreamConfig{
@@ -1382,20 +1407,21 @@ public:
      * storage is clear()ed.
      *
      * NOTHING READS SxCR AFTER THE EN STORE, the one-shot start's rule
-     * (the wedge, docs/stm32f4/dma.md).
+     * (the wedge, docs/stm32f4/dma.md). `very_high` by default, the
+     * one-shot shape's level.
      */
     static bool arm(volatile void* data, std::span<uint8_t> ring,
-                    DmaPriority priority = DmaPriority::low, bool half_mark = false) {
+                    DmaPriority priority = DmaPriority::very_high, bool half_mark = false) {
         return arm_ring(data, ring.data(), ring.size(), priority, half_mark);
     }
     static bool arm(volatile void* data, std::span<uint16_t> ring,
-                    DmaPriority priority = DmaPriority::low, bool half_mark = false)
+                    DmaPriority priority = DmaPriority::very_high, bool half_mark = false)
         requires(sizeof(Elem) >= 2)
     {
         return arm_ring(data, ring.data(), ring.size(), priority, half_mark);
     }
     static bool arm(volatile void* data, std::span<uint32_t> ring,
-                    DmaPriority priority = DmaPriority::low, bool half_mark = false)
+                    DmaPriority priority = DmaPriority::very_high, bool half_mark = false)
         requires(sizeof(Elem) >= 4)
     {
         return arm_ring(data, ring.data(), ring.size(), priority, half_mark);
@@ -1642,7 +1668,10 @@ public:
 
     /// THE BINDING: the gate, the stream stopped, the FIFO at a full
     /// threshold, the configuration word kept. The completion is polled
-    /// (busy()), so the stream's interrupt stays off.
+    /// (busy()), so the stream's interrupt stays off. `low` by default: no
+    /// request paces a copy, it asks for a port at every burst of its
+    /// block, and three of them outranking a receive stream starve it for
+    /// as long as they run (DmaPriority's rule).
     static void arm(DmaPriority priority = DmaPriority::low) {
         st_.control = dma_control_word(DmaStreamConfig{
             .direction = DmaDirection::memory_to_memory,

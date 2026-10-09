@@ -640,6 +640,11 @@ own.
   time; the polled request of three bytes 242 cycles above its wire
   time at /16, one byte 196 to 199, sixteen 239 to 246 (three runs);
   every line ended with status 0 and no overrun standing.
+- **THE BEAT IS THE FRAME, on the strap** (letter c): sixteen 16-bit
+  frames over half-word aligned buffers ride both engines as half-words -
+  byte-exact through the loop, ONE channel interrupt for the transaction
+  and no SPI one; the same frames over buffers one byte off take the
+  pump, sixteen SPI interrupts and no channel one, byte-exact too.
 - **THE OVERRUN ORACLE AND THE HOST UNDER IT**: the vendor's
   two-in-flight shape run on the resource at every code and width, 1024
   frames a run, eight runs a point under a console print in flight,
@@ -930,12 +935,12 @@ Implemented but not bench-verified, each with what would measure it:
   by the same arithmetic (one code lower than SPI1's above 72 MHz of
   HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
   the oracle on a PB1 instance would measure it.
-- **The RECEIVED half of the engined data phase as the engines now are,
+- **The RECEIVED half of the engined data phase on the CH32V303VCT6,
   16-bit frames included**: the transmitted half is judged by the CRC
   unit above, and what the receive engine lands in memory is judged by
   nothing on a desk with no strap and no peer - the strap from PA7 to PA6
-  (letter c of `test_vx03_spi`) or the peer board on SPI2 (letter d)
-  would judge it byte for byte, both widths.
+  (letter c of `test_vx03_spi`, which judges it byte for byte, both
+  widths, on the CH32V203C8T6) or the peer board on SPI2 (letter d) would.
 
 - **The high-speed read at 72 MHz of SCK**, SPI1's /2 - the rate the
   mode is for - and **HSRXEN2**: on the CH32V303 board the only far end

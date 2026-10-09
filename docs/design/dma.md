@@ -72,9 +72,15 @@ program ranks LOW loses nothing within the FIFO's nine characters and
 counts every gap past them ([../stm32g0/usart.md](../stm32g0/usart.md)). The RP2040's arbiter serves
 one low-priority channel every round, and no arrangement of copies
 starved a low receive channel; its HIGH_PRIORITY bit for the receive
-costs nothing measurable there. The rule is the same sentence on every
-family; what the level buys depends on the arbiter, and is measured per
-family.
+costs nothing measurable there. The STM32F4's arbiter ranks its streams
+port by port (RM0090 10.3.4), and there one or two copies ranked above a
+receive ring on the same controller never starved it at 11.25 Mbaud,
+three or four did - a ring armed low lost up to half its frames - and
+the ring at the highest level lost nothing beside four; a copy on the
+other controller, DMA2 against a ring on DMA1, reaches it only through
+the bus matrix and starved nothing ([../stm32f4/dma.md](../stm32f4/dma.md)).
+The rule is the same sentence on every family; what the level buys
+depends on the arbiter, and is measured per family.
 
 ### The one knob: the receive ring's level
 
@@ -108,8 +114,13 @@ the clock on - USART1, SPI1 and TIM3 released every way with a request
 standing left the next owner nothing. What survives is the DMA enable
 LEFT SET: SPI1 and TIM3 ask again the moment anything opens the clock
 without a reset ([../stm32g0/dma.md](../stm32g0/dma.md), "A released
-requester holds nothing here"). The reset pulse clears that as well, so
-the rule does not change with the answer.
+requester holds nothing here"). The STM32F4 gave a third answer: a
+cleared DMA enable withdraws the request, but a gated clock does not -
+USART6, SPI1, TIM1 and ADC1 released with the enable left set and the
+clock gated handed the next owner of their cell a stray item while the
+clock was still off ([../stm32f4/dma.md](../stm32f4/dma.md), "A released
+requester"). The reset pulse clears every one of them, so the rule does
+not change with the answer.
 
 So a transport's `release()` resets its peripheral BEFORE it gates its
 clock, wherever its block can hold a request, and the incoming owner
@@ -121,8 +132,8 @@ CH32V303 family) says so in its driver and needs no pulse.
 
 ### Realizations
 
-Common: on the WCH strata and the STM32G0 every engine's level is the
-rule's - the defaults by direction, each driver's call naming its own -
+Common: on the WCH strata, the STM32G0 and the STM32F4 every engine's
+level is the rule's - the defaults by direction, each driver's call naming its own -
 with `UartOptions::rx_priority` the knob, and every transport whose block
 can raise a request resets it in `release()`. The rows of the other strata
 are this contract's pending waves: what each arms at today, and what
@@ -134,7 +145,7 @@ its controller offers.
 | samc21 | one engine: the Uart's transmit engine (`samc21/dmac.hpp`), at level 0 | PENDING its wave; the DMAC's four levels (LVLEN, CHCTRLB.LVL) and whether a SERCOM holds a raised request across its release are unmeasured; the rest of the controller is declined by erratum 1.10.4 ([../samc21/dmac.md](../samc21/dmac.md)) |
 | stm32g0 | `DmaPriority` (`stm32g0/dma_engine.hpp`); the engines' defaults: receive and ping-pong source very_high, transmit and player high, copy low (`stm32g0/dma.hpp`) | the Uart's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C host's two at high; the DMAMUX ranks nothing (priority, then number), and a memory-to-memory channel alternates with any other requester (RM0444 10.4.4), so it takes TWO copies to starve a ring - and behind a starved channel the receive FIFO can WEDGE, which the Uart's vector cures with a kick (DMAR dropped and raised, [../stm32g0/usart.md](../stm32g0/usart.md)); a released block measured to hold NO request, but a DMA enable left set re-raises it when the clock returns, so every transport's `release()` resets its block ([../stm32g0/dma.md](../stm32g0/dma.md)) |
 | ch32v00x | `DmaPriority` (`ch32v00x/dma_engine.hpp`); the engines' defaults: receive very_high, transmit high, copy low (`ch32v00x/dma.hpp`) | the Uart's ring at `rx_priority`, its transmit at high; the SPI host's receive at very_high and transmit at high; the I2C host's two at high; the Uart and the I2C host reset their blocks in `release()` - the held request is the CH32V203's measurement, applied here by reading, the pulse correct either way ([../ch32v00x/dma.md](../ch32v00x/dma.md)) |
-| stm32f4 | every engine at the lowest level (`stm32f4/dma.hpp`) | PENDING its wave: the stream arbiter's four levels, its FIFO and its bursts |
+| stm32f4 | `DmaPriority` (`stm32f4/dma_engine.hpp`); the engines' defaults: receive (both shapes) very_high, transmit high, copy low (`stm32f4/dma.hpp`) | the Uart's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C and FMPI2C hosts' two at high; a DAC stream the program's to rank, its underrun disabling the transfers (RM0090 14.3.7); the arbiter ranks per port, and it takes THREE copies above a ring on its controller to starve it; a gated clock HOLDS a raised request, a cleared enable withdraws it - the Uart, the SPI host and client, the I2C host and client and the FMPI2C block reset in `release()`, the timers and the DAC already did, the ADC clears CR2 with the clock on (its reset line is every converter's), measured clean ([../stm32f4/dma.md](../stm32f4/dma.md)) |
 | rp2040 | every channel without HIGH_PRIORITY (`rp2040/dma.hpp`) | PENDING its wave: one bit, one low channel served every round - measured immune to the copies that starve the CH32's ring |
 | ch32vx03 | `DmaPriority` (`ch32vx03/dma_engine.hpp`); the engines' defaults: receive and block source very_high, transmit and player high, copy low (`ch32vx03/dma.hpp`) | the Uart's ring at `rx_priority` and its transmit at high; the SPI host's receive very_high, transmit high; the I2C host's two at high; the converter's stream very_high, the DAC's high; the Uart and the I2C host reset their blocks in `release()`, the timers, the ADC and the DAC already did, the SPI host needs not (SPI1 measured) ([../ch32vx03/dma.md](../ch32vx03/dma.md)) |
 | ch32x035 | none | the stratum has no DMA driver |

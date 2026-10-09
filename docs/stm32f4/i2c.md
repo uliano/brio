@@ -290,8 +290,14 @@ counter. `start` begins a tenure and answers false whenever the wire
 moves; `status` is the completion code; `isr` and `error_isr` are the
 two vectors' bodies and `dma_isr` the streams'. `unstick` clocks a
 stuck client off SDA and `recover` puts the peripheral back where
-`start` is legal; `release` gives the pads back, and `claim_smba_pad`
-hands over the alert pad a program in SMBus mode wants.
+`start` is legal; `release` stops the streams, pulses the block's RCC
+reset before its gate - the release contract, docs/design/dma.md - and
+gives the pads back, and `claim_smba_pad` hands over the alert pad a
+program in SMBus mode wants. The engines arm at `high`, both: the host
+does not overrun - a byte its streams have not moved leaves TxE or RxNE
+up and BTF rises, "stretching SCL low" until DR is served (RM0090
+27.3.3) - so a starved stream slows the bus and loses nothing.
+`I2cClient::release` resets the block before the gate the same way.
 
 **The client task, `I2cClient<n, pins>`.** `init(clock, addresses,
 no_stretch)`, then the polled surface `addressed`, `answer_address`

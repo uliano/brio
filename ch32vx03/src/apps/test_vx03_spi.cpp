@@ -65,8 +65,9 @@
 //      the four modes read back out of CTLR1
 //   c  THE LOOPBACK on SPI1: round trips at every mode, both widths,
 //      both orders, the hardware CRC against a bitwise reference, 4 KB
-//      at the fastest code that passes clean, both DMA engines, and
-//      SpiBus (= BusMaster) over the whole of it
+//      at the fastest code that passes clean, both DMA engines - 16-bit
+//      frames on them as half-words over aligned buffers, on the pump one
+//      byte off - and SpiBus (= BusMaster) over the whole of it
 //   d  THE PEER on SPI2: ping/ident/report, the four modes and both
 //      orders exchanged, the dummy byte MEASURED, sink_slow, ss_pulse,
 //      host_burst with THIS board as the client, the engines under an
@@ -219,8 +220,11 @@ void console_drain() {
 // ---------------------------------------------------------------------------
 
 constexpr uint16_t chunk = 256;
-uint8_t tx_buf[chunk];
-uint8_t rx_buf[chunk];
+/// Half-word aligned, so a 16-bit request over them is the engines' to
+/// carry (ch32vx03/spi.hpp, "THE BEAT IS THE FRAME"); letter c moves one
+/// byte in for the misaligned case.
+alignas(4) uint8_t tx_buf[chunk];
+alignas(4) uint8_t rx_buf[chunk];
 uint8_t cmd_buf[4];
 
 void fill_pattern(uint8_t* p, uint16_t n, uint8_t seed) {
@@ -295,6 +299,7 @@ bool need_loop() {
 
 volatile bool host_done = false;
 volatile uint32_t spi1_isr_entries = 0;
+volatile uint32_t spi1_dma_entries = 0;   ///< SPI1's two channel vectors, together
 volatile bool dma_host_live = false;
 volatile bool bus_ao_live = false;
 volatile bool peer_client_live = false;
@@ -923,16 +928,41 @@ void tc_loop() {
     bench.verdict("a command frame on the pump then 32 data frames on the engines, exact",
                   cds == spi_ok && same(tx_buf, rx_buf, 32));
 
+    // THE BEAT IS THE FRAME: sixteen 16-bit frames over half-word aligned
+    // buffers ride the engines as half-words, one channel interrupt for the
+    // transaction and no SPI one; the same frames over buffers one byte
+    // off take the pump, an interrupt a frame.
     fill_pattern(tx_buf, 32, 0x42);
     for (uint16_t i = 0; i < 32; ++i) {
         rx_buf[i] = 0xEE;
     }
     spi1_isr_entries = 0;
+    spi1_dma_entries = 0;
     const uint8_t hs = dma_xfer(nullptr, 0, tx_buf, rx_buf, 16, SpiClock::div8,
                                 SpiDataSize::bits16, false);
-    bench.verdict("16-bit frames fall back to the pump on an engined host, sixteen ISR entries, "
-                  "exact",
-                  hs == spi_ok && same(tx_buf, rx_buf, 32) && spi1_isr_entries == 16u);
+    const uint32_t hs_isr = spi1_isr_entries;
+    const uint32_t hs_dma = spi1_dma_entries;
+    const bool hs_same = same(tx_buf, rx_buf, 32);
+    fill_pattern(tx_buf + 1, 32, 0x24);
+    for (uint16_t i = 0; i < 33; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    spi1_isr_entries = 0;
+    spi1_dma_entries = 0;
+    const uint8_t ps = dma_xfer(nullptr, 0, tx_buf + 1, rx_buf + 1, 16, SpiClock::div8,
+                                SpiDataSize::bits16, false);
+    const uint32_t ps_isr = spi1_isr_entries;
+    const uint32_t ps_dma = spi1_dma_entries;
+    print(serial, "  16 frames of 16 bits on the engined host: aligned ", hs_isr, " SPI and ",
+          hs_dma, " channel interrupt(s); one byte off ", ps_isr, " SPI and ", ps_dma,
+          " channel interrupt(s)", crlf);
+    bench.verdict("16-bit frames over aligned buffers ride the engines as half-words: one "
+                  "channel interrupt, no SPI one, exact",
+                  hs == spi_ok && hs_same && hs_isr == 0u && hs_dma == 1u);
+    bench.verdict("over buffers one byte off they fall back to the pump: sixteen SPI "
+                  "interrupts, no channel one, exact",
+                  ps == spi_ok && same(tx_buf + 1, rx_buf + 1, 32) && ps_isr == 16u &&
+                      ps_dma == 0u);
     Dma1::release();
     dma_host_live = false;
 
@@ -2839,11 +2869,13 @@ BRIO_CH32_LEAF_VECTOR(spi3_handler) { served_on_spi3(); }
 /// its own - the receive channel's the transaction's one interrupt, the
 /// transmit channel's armed for an error alone.
 BRIO_CH32_VECTOR(dma1_channel2_handler) {
+    spi1_dma_entries = spi1_dma_entries + 1u;
     if (dma_host_live && Dma1::dma_rx_isr()) {
         host_done = true;
     }
 }
 BRIO_CH32_VECTOR(dma1_channel3_handler) {
+    spi1_dma_entries = spi1_dma_entries + 1u;
     if (dma_host_live && Dma1::dma_tx_isr()) {
         host_done = true;
     }

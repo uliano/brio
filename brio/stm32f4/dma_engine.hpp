@@ -3,9 +3,9 @@
  *
  * The "no DMA engine" tag of every optional engine slot in this stratum
  * - the Uart's two and the bus hosts' pairs - and the three things a
- * slot's owner names without the controller: an engine's priority, what
- * it is armed to interrupt for, and the longest block. The STM32G0's file, for the same
- * reasons.
+ * slot's owner names without the controller: the level an engine arms
+ * at, what it is armed to interrupt for, and the longest block. The
+ * STM32G0's file, for the same reasons.
  *
  * IT IS A TAG, NOT A BASE CLASS: `present` is the only thing a task asks
  * about, and it asks with `if constexpr`, so every engine branch - the
@@ -31,9 +31,35 @@ struct NoDmaEngine {
     static constexpr bool present = false;
 };
 
-/// SxCR.PL (10.5.5): the software half of the arbitration. The hardware
-/// half is the stream INDEX and cannot be configured: on equal levels
-/// the lower-numbered stream wins (10.3.4).
+/**
+ * SxCR.PL (RM0090 10.5.5): the software half of the arbitration. The
+ * hardware half is the stream INDEX and cannot be configured: between
+ * equal levels the lower-numbered stream wins (10.3.4).
+ *
+ * THE LEVEL IS THE PERIPHERAL'S (docs/design/dma.md). An engine whose
+ * peripheral OVERRUNS when its stream is starved - a receive ring, an SPI
+ * host's receive - arms at `very_high`; one whose peripheral waits - a
+ * transmit, a paced output, an I2C host under its stretched clock - at
+ * `high`; a memory-to-memory copy at `low`.
+ *
+ * THIS ARBITER'S OWN FACTS bound what a copy can do. Each controller
+ * arbitrates its eight streams by these levels separately for each of its
+ * two AHB ports, the memory port and the peripheral port (10.3.4), and
+ * the two controllers meet only in the bus matrix, which serves its
+ * masters round robin (RM0090 2.1.10). Measured on the STM32F446RE, a
+ * USART's receive ring on DMA2 at 11.25 Mbaud - a frame every 160 cycles:
+ * one or two copies ranked above the ring, back to back, never starved it;
+ * three or four did, and it lost a third to a half of what came; ranked
+ * very_high it lost nothing beside four (docs/stm32f4/dma.md). A copy on
+ * DMA2 never outranks a DMA1 stream at all - it only shares the memory -
+ * and four of them left a ring on DMA1 whole.
+ *
+ * The engines' defaults are those three by direction (stm32f4/dma.hpp),
+ * and every driver arms its engines at its own level, with its chapter's
+ * reason beside the call. It lives here, beside the tag, because a
+ * transport names its engines' levels and must not include the controller
+ * to do it.
+ */
 enum class DmaPriority : uint8_t {
     low = 0,
     medium = 1,
