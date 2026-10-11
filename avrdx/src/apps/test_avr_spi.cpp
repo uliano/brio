@@ -44,7 +44,7 @@
 // regimes (l), its CLK_PER/6 ceiling (m), what it keeps undrained and
 // its write collision (p) - and against a SAM C21 those are PRINTED,
 // what is portable judged: l MEASURES which alignment arrived, m judges
-// the rates up to CLK_PER/16, p judges that the reports came and the
+// the rates up to CLK_PER/8, p judges that the reports came and the
 // bursts were received. r is SKIPPED there: Host SPI frames no select,
 // and only the avrdx peer's client selects itself. The AVR client's
 // facts are judged in test_samc_spi h, where the AVR is the peer. k, n,
@@ -1950,10 +1950,11 @@ void tm_rates() {
                                        {SpiClock::div32, "CLK_PER/32 (750 kHz)"},
                                        {SpiClock::div64, "CLK_PER/64 (375 kHz)"},
                                        {SpiClock::div128, "CLK_PER/128 (187.5 kHz)"}};
-    // CLK_PER/8 is inside an AVR client's ceiling and judged there; a
-    // client of another silicon has its own (the SAM C21's paper
-    // ceiling for a client's answers is a few MHz, docs/samc21/spi.md),
-    // so against it that rung is printed and the four below it judged.
+    // CLK_PER/8 is inside an AVR client's ceiling, and inside a SAM C21
+    // client's too: measured exact both ways in every run against that
+    // peer (and to 6 MHz, docs/samc21/spi.md), so all five rungs are
+    // judged against either peer. A client of any other silicon has its
+    // own ceiling, and against it the top rung is printed.
     for (const RateCase& rc : inside) {
         Exchange e{};
         e.rate = rc.c;
@@ -1964,7 +1965,7 @@ void tm_rates() {
         spilink::Report r{};
         const bool ok = exchange_exact(e, v, r);
         if (!ok) dump_exchange(e, v, r);
-        if (rc.c == SpiClock::div8 && !peer_avr()) {
+        if (rc.c == SpiClock::div8 && !peer_avr() && peer_arch != spilink::peer_samc21) {
             print(serial, "  the peer (kind ", hex(peer_arch), ") at ", rc.name, ": ",
                   ok ? "exact both ways" : "NOT exact", ", host mism=", v.mism,
                   " client mism=", r.mism, " count=", r.count, crlf);

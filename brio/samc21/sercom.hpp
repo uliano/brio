@@ -19,19 +19,22 @@
  *              error counters, an init() that speaks HERTZ, and the
  *              ByteSink/ByteSource surface print.hpp writes to.
  *
- * SCOPE, honestly. USART mode only, asynchronous, internal clock, 16x
- * ARITHMETIC oversampling - what a console needs, and no more. The
+ * SCOPE, honestly. USART mode only. The RESOURCE speaks the chapter's
+ * clocking and coding space: every CTRLA.SAMPR regime (16x, 8x and 3x
+ * arithmetic, 16x and 8x fractional, table 30-2), the sample adjustment,
+ * the synchronous mode with an internal or an external XCK and either
+ * polarity (31.6.2.3.1, the 8-bit BAUD of table 30-2), the IrDA coder
+ * (31.6.3.3, ENC and RXPL), and the two directions switched at run time
+ * (CTRLB.TXEN/RXEN, 31.8.2). The TASK above it is the console's:
+ * asynchronous, internal clock, 16x arithmetic on generator 0. The
  * SERCOM's other personalities are whole chapters of their own and get
  * their own headers - SPI host/client is ch. 32 in samc21/spi.hpp, which
  * reaches the registers through Sercom<n>::spi_regs() and shares this
  * class's per-instance facts (clocks, NVIC line); I2C host/client is
- * ch. 33, in samc21/i2c.hpp. Inside
- * USART mode, what is NOT BUILT rather than half-built (the fractional
- * and 3x baud regimes, the synchronous role, handshaking, RS485, LIN,
- * IrDA, auto-baud, start-of-frame detection) is listed with its reasons
- * in docs/samc21/sercom.md. The baud arithmetic below names its
- * oversampling explicitly so a second regime slots in without moving
- * anything.
+ * ch. 33, in samc21/i2c.hpp. Inside USART mode, what is NOT BUILT rather
+ * than half-built (handshaking, RS485, LIN, collision detection,
+ * auto-baud, start-of-frame detection) is listed with its reasons in
+ * docs/samc21/sercom.md.
  *
  * ONE INTERRUPT VECTOR, NOT TWO, whatever a two-vector transport would
  * lead one to expect. A SERCOM has exactly ONE line in the NVIC
@@ -105,6 +108,10 @@
  *    a fact with no code behind it must at least be visible;
  *  - erratum 1.17.14 (standby over-consumption with RUNSTDBY = 0 and the
  *    receiver disabled) is a sleep-current fact: nothing here sleeps;
+ *  - erratum 1.17.19: SWRST clears DBGCTRL too (see reset());
+ *  - erratum 1.17.12 (collision detection does not abort when the APB
+ *    clock is slower than the core clock) and 1.17.2 (auto-baud, rev B..E)
+ *    belong to features this file does not build;
  *  - erratum 1.10.4 (the DMAC's, concurrent channel triggers corrupting
  *    the write-back): the Uart has ONE optional engine slot, the
  *    TRANSMIT one, filled by samc21/dmac.hpp's DmaTxEngine - the one DMA
@@ -116,6 +123,7 @@
 
 #include <stdint.h>
 
+#include <cstddef>
 #include <cstring>
 #include <span>
 #include <optional>
@@ -200,6 +208,14 @@ constexpr uint8_t uart_txpo(SercomPad p) {
 /// RXPO is simply the pad number (31.8.1).
 constexpr uint8_t uart_rxpo(SercomPad p) { return static_cast<uint8_t>(p); }
 
+/// Where XCK lands for the TXPO code that puts TxD on `tx` (31.8.1's
+/// table): PAD[1] beside a PAD[0] transmitter, PAD[3] beside a PAD[2]
+/// one. The pad is the clock's in a synchronous configuration and in an
+/// asynchronous one on an external clock, and unused otherwise.
+constexpr SercomPad uart_xck_pad(SercomPad tx) {
+    return tx == SercomPad::pad2 ? SercomPad::pad3 : SercomPad::pad1;
+}
+
 /// The LOOP-BACK pair: RxD on the very pad TxD drives, both directions
 /// on one pin (31.6.3.8: "configure RXPO and TXPO to use the same data
 /// pins for transmit and receive. The loop-back is through the pad, so
@@ -251,20 +267,112 @@ struct UartFormat {
     bool lsb_first = true;
 };
 
+/// CTRLA.SAMPR (31.8.1): samples a bit, and which of the two baud
+/// generators of table 30-2 divides the reference. The codes are the
+/// register's; 0x5..0x7 are reserved and have no name here.
+enum class UartSampling : uint8_t {
+    x16_arithmetic = SERCOM_USART_INT_CTRLA_SAMPR_16X_ARITHMETIC_Val,
+    x16_fractional = SERCOM_USART_INT_CTRLA_SAMPR_16X_FRACTIONAL_Val,
+    x8_arithmetic = SERCOM_USART_INT_CTRLA_SAMPR_8X_ARITHMETIC_Val,
+    x8_fractional = SERCOM_USART_INT_CTRLA_SAMPR_8X_FRACTIONAL_Val,
+    x3_arithmetic = SERCOM_USART_INT_CTRLA_SAMPR_3X_ARITHMETIC_Val,
+};
+
+/// S of table 30-2: the samples one bit takes under `s`.
+constexpr uint8_t uart_samples(UartSampling s) {
+    switch (s) {
+        case UartSampling::x8_arithmetic:
+        case UartSampling::x8_fractional: return 8;
+        case UartSampling::x3_arithmetic: return 3;
+        default: return 16;
+    }
+}
+
+/// The fractional generator: BAUD's top three bits are FP (31.8.4).
+constexpr bool uart_fractional(UartSampling s) {
+    return s == UartSampling::x16_fractional || s == UartSampling::x8_fractional;
+}
+
 /// Everything one instance is configured with. `baud` is the BAUD
-/// REGISTER value - sercom_baud_reg() computes it from a reference rate
-/// and a bit rate: the resource speaks the register, the task speaks
-/// hertz.
+/// REGISTER value - sercom_uart_baud_reg() computes it from a reference
+/// rate and a bit rate under the configuration's sampling, and
+/// sercom_sync_baud_reg() the synchronous one: the resource speaks the
+/// register, the task speaks hertz.
+///
+/// THE CLOCKING IS TWO BITS, KEPT AS TWO. CTRLA.CMODE chooses
+/// asynchronous or synchronous framing, CTRLA.MODE the internal
+/// generator or the XCK pad as the reference (31.6.2.3); all four
+/// pairings are the chapter's. Synchronous on the internal clock is the
+/// HOST (XCK an output at f_ref / (2 x (BAUD + 1)), the eight low bits of
+/// BAUD); synchronous on an external clock the CLIENT (the shift
+/// registers run on XCK itself, "up to the system frequency", BAUD
+/// ignored); asynchronous on an external clock takes XCK as the baud
+/// generator's reference. XCK's pad is uart_xck_pad(pads.tx), the pin
+/// behind it the caller's (pads are the SERCOM's, pins are PORT's).
 struct SercomUartConfig {
     UartPads pads{};
     UartFormat format{};
     uint16_t baud = 0;
+    /// CTRLA.SAMPR. Asynchronous only: a synchronous configuration has
+    /// nothing to sample and must leave it at its reset value.
+    UartSampling sampling = UartSampling::x16_arithmetic;
+    /// CTRLA.SAMPA (31.6.3.10): which three samples vote - 0 is 7-8-9 of
+    /// 16 (3-4-5 of 8), each step two samples later (one of 8).
+    uint8_t sample_adjust = 0;
+    bool synchronous = false;         ///< CTRLA.CMODE
+    bool external_clock = false;      ///< CTRLA.MODE = 0x0: the reference is XCK
+    /// CTRLA.CPOL, synchronous only: TxD changes on the FALLING XCK edge
+    /// and RxD is sampled on the rising one (0: the other way round).
+    bool invert_clock = false;
+    /// CTRLB.ENC (31.6.3.3): the IrDA coder - a 0 bit sent as a HIGH
+    /// pulse of 3/16 of a bit, a LOW pulse of at least RXPL + 2 core
+    /// clocks taken as a 0 on reception. Asynchronous at 16x arithmetic
+    /// only.
+    bool irda = false;
+    uint8_t rx_pulse = 0;             ///< RXPL (31.8.5), IrDA only
     bool rx = true;                   ///< CTRLB.RXEN
     bool tx = true;                   ///< CTRLB.TXEN
     bool run_standby = false;         ///< CTRLA.RUNSTDBY (see erratum 1.17.14)
     bool immediate_overflow = false;  ///< CTRLA.IBON
     bool debug_stop = false;          ///< DBGCTRL.DBGSTOP (see erratum 1.17.4)
 };
+
+/**
+ * Is this a configuration the chapter offers? The pads as
+ * uart_pads_valid() reads them, and the rules that live between the
+ * fields:
+ *  - SAMPA is two bits;
+ *  - a synchronous configuration samples nothing (SAMPR at its reset
+ *    value), keeps RxD off the XCK pad, and as the host - the internal
+ *    clock - has a BAUD of eight bits (31.6.2.3);
+ *  - the fractional generator's integer part is at least 1 (30.6.2.3:
+ *    "the BAUD setting must be greater than or equal to 1");
+ *  - the IrDA coder wants asynchronous framing at 16x with the
+ *    arithmetic generator, 31.6.3.3's list ("16x sample rate
+ *    (CTRLA.SAMPR[0]=0)" - read as the one code both halves of that
+ *    sentence admit, 0x0), and RXPL means something under it alone.
+ */
+constexpr bool sercom_uart_config_valid(const SercomUartConfig& c) {
+    if (!uart_pads_valid(c.pads) || c.sample_adjust > 3u) {
+        return false;
+    }
+    if (c.synchronous) {
+        if (c.sampling != UartSampling::x16_arithmetic || c.irda ||
+            c.pads.rx == uart_xck_pad(c.pads.tx)) {
+            return false;
+        }
+        if (!c.external_clock && c.baud > 0xFFu) {
+            return false;
+        }
+    }
+    if (uart_fractional(c.sampling) && (c.baud & SERCOM_USART_INT_BAUD_FRAC_BAUD_Msk) == 0u) {
+        return false;
+    }
+    if (c.irda && c.sampling != UartSampling::x16_arithmetic) {
+        return false;
+    }
+    return c.irda || c.rx_pulse == 0u;
+}
 
 // =============================================================================
 // The baud arithmetic (pure: no register is touched below this line)
@@ -368,6 +476,144 @@ constexpr uint32_t sercom_min_ref_hz(uint32_t baud, uint8_t samples = 16) {
     return baud * samples;
 }
 
+/**
+ * The BAUD register for a bit rate on the FRACTIONAL generator (CTRLA.
+ * SAMPR = 0x1 or 0x3), table 30-2:
+ *
+ *     f_baud = f_ref / (S x (BAUD + FP/8))
+ *
+ * so 8 x BAUD + FP = 8 x f_ref / (S x f_baud), rounded to nearest, and
+ * the register is FP in bits 15:13 over a 13-bit BAUD (31.8.4). Where the
+ * arithmetic generator's step is 1/65536 of the reference spread over a
+ * frame, this one's is an eighth of a sample: coarse at the top rates,
+ * EXACT wherever S x f_baud divides 8 x f_ref - 3750 baud on a 24 MHz
+ * reference is 400.0, where the arithmetic one is 0.1 % off.
+ *
+ * Nullopt above the mode's own f_ref / S, for an integer part outside
+ * 1..8191 (30.6.2.3: "the BAUD setting must be greater than or equal to
+ * 1"), and for a reference above sercom_fractional_ref_most - the
+ * rounded eightfold, 8.5 x f_ref at most, must fit 32 bits, and 500 MHz
+ * is far past any GCLK this family makes. Every other product stays
+ * inside 32 bits: S x f_baud <= f_ref.
+ */
+inline constexpr uint32_t sercom_fractional_ref_most = 500'000'000u;
+
+constexpr std::optional<uint16_t> sercom_fractional_baud_reg(uint32_t ref_hz, uint32_t baud,
+                                                             uint8_t samples = 16) {
+    if (ref_hz == 0u || baud == 0u || samples == 0u || ref_hz > sercom_fractional_ref_most) {
+        return {};
+    }
+    if (baud > ref_hz / samples) {
+        return {};
+    }
+    const uint32_t per_bit = static_cast<uint32_t>(samples) * baud;
+    const uint32_t eighths = (8u * ref_hz + per_bit / 2u) / per_bit;
+    const uint32_t whole = eighths >> 3;
+    if (whole < 1u || whole > 0x1FFFu) {
+        return {};
+    }
+    return static_cast<uint16_t>(SERCOM_USART_INT_BAUD_FRAC_FP(eighths & 7u) |
+                                 SERCOM_USART_INT_BAUD_FRAC_BAUD(whole));
+}
+
+/// What a fractional BAUD register really produces: f_ref x 8 /
+/// (S x (8 x BAUD + FP)). Zero for a register whose integer part is 0
+/// (not a legal setting).
+constexpr uint32_t sercom_fractional_actual_baud(uint32_t ref_hz, uint16_t reg,
+                                                 uint8_t samples = 16) {
+    const uint32_t whole = reg & SERCOM_USART_INT_BAUD_FRAC_BAUD_Msk;
+    const uint32_t fp = (reg & SERCOM_USART_INT_BAUD_FRAC_FP_Msk) >> SERCOM_USART_INT_BAUD_FRAC_FP_Pos;
+    const uint32_t eighths = 8u * whole + fp;
+    if (whole == 0u || samples == 0u || ref_hz > sercom_fractional_ref_most) {
+        return 0;
+    }
+    return (8u * ref_hz) / (static_cast<uint32_t>(samples) * eighths);
+}
+
+/// The BAUD register under a whole sampling regime: the arithmetic or the
+/// fractional generator at its S.
+constexpr std::optional<uint16_t> sercom_uart_baud_reg(uint32_t ref_hz, uint32_t baud,
+                                                       UartSampling s) {
+    return uart_fractional(s) ? sercom_fractional_baud_reg(ref_hz, baud, uart_samples(s))
+                              : sercom_baud_reg(ref_hz, baud, uart_samples(s));
+}
+
+/// What `reg` produces under `s` at `ref_hz`.
+constexpr uint32_t sercom_uart_actual_baud(uint32_t ref_hz, uint16_t reg, UartSampling s) {
+    return uart_fractional(s) ? sercom_fractional_actual_baud(ref_hz, reg, uart_samples(s))
+                              : sercom_actual_baud(ref_hz, reg, uart_samples(s));
+}
+
+/// A sampling regime and the BAUD register it takes.
+struct SercomBaud {
+    UartSampling sampling = UartSampling::x16_arithmetic;
+    uint16_t reg = 0;
+};
+
+/**
+ * THE GENERATOR CLOSEST TO THE RATE, at a given S (16 or 8): both of
+ * table 30-2's asynchronous generators asked, the one whose actual rate
+ * lies nearer the request kept, the arithmetic one on a tie. Neither is
+ * better everywhere: the arithmetic one's step is 1/65536 of the
+ * reference (921600 baud on 24 MHz: -0.001 %, the fractional +0.16 %),
+ * the fractional one is exact wherever S x f_baud divides 8 x f_ref (3750
+ * baud on 24 MHz: exact, the arithmetic +0.1 %). Nullopt when neither
+ * can express the rate, or for an S with no fractional generator (3).
+ */
+constexpr std::optional<SercomBaud> sercom_closest_baud(uint32_t ref_hz, uint32_t baud,
+                                                        uint8_t samples = 16) {
+    if (samples != 16u && samples != 8u) {
+        return {};
+    }
+    const UartSampling ar = samples == 8u ? UartSampling::x8_arithmetic
+                                          : UartSampling::x16_arithmetic;
+    const UartSampling fr = samples == 8u ? UartSampling::x8_fractional
+                                          : UartSampling::x16_fractional;
+    const std::optional<uint16_t> a = sercom_uart_baud_reg(ref_hz, baud, ar);
+    const std::optional<uint16_t> f = sercom_uart_baud_reg(ref_hz, baud, fr);
+    if (!a && !f) {
+        return {};
+    }
+    if (!f) {
+        return SercomBaud{ar, *a};
+    }
+    if (!a) {
+        return SercomBaud{fr, *f};
+    }
+    const uint32_t got_a = sercom_uart_actual_baud(ref_hz, *a, ar);
+    const uint32_t got_f = sercom_uart_actual_baud(ref_hz, *f, fr);
+    const uint32_t err_a = got_a > baud ? got_a - baud : baud - got_a;
+    const uint32_t err_f = got_f > baud ? got_f - baud : baud - got_f;
+    return err_f < err_a ? SercomBaud{fr, *f} : SercomBaud{ar, *a};
+}
+
+/**
+ * The synchronous HOST's BAUD (table 30-2's third row, 31.6.2.3: the
+ * eight low bits of the register):
+ *
+ *     f_xck = f_ref / (2 x (BAUD + 1))
+ *
+ * rounded to the nearest divisor. Nullopt above f_ref / 2 and below
+ * f_ref / 512. A synchronous CLIENT has no BAUD at all - its shift
+ * registers run on XCK (31.6.2.3.1).
+ */
+constexpr std::optional<uint8_t> sercom_sync_baud_reg(uint32_t ref_hz, uint32_t xck_hz) {
+    if (ref_hz == 0u || xck_hz == 0u || xck_hz > ref_hz / 2u) {
+        return {};
+    }
+    const uint32_t two_f = 2u * xck_hz;
+    const uint32_t divisor = (ref_hz + xck_hz) / two_f;   // BAUD + 1, rounded
+    if (divisor < 1u || divisor > 256u) {
+        return {};
+    }
+    return static_cast<uint8_t>(divisor - 1u);
+}
+
+/// What a synchronous host's BAUD really puts on XCK.
+constexpr uint32_t sercom_sync_actual_hz(uint32_t ref_hz, uint8_t reg) {
+    return ref_hz / (2u * (static_cast<uint32_t>(reg) + 1u));
+}
+
 // =============================================================================
 // The resource
 // =============================================================================
@@ -408,9 +654,14 @@ struct SercomStatus {
 /// disabled (it is enable-protected), and enable() sets the bit
 /// afterwards in a store of its own.
 constexpr uint32_t sercom_uart_ctrla(const SercomUartConfig& c) {
-    return SERCOM_USART_INT_CTRLA_MODE(SERCOM_USART_INT_CTRLA_MODE_USART_INT_CLK_Val) |
-           SERCOM_USART_INT_CTRLA_CMODE(SERCOM_USART_INT_CTRLA_CMODE_ASYNC_Val) |
-           SERCOM_USART_INT_CTRLA_SAMPR(SERCOM_USART_INT_CTRLA_SAMPR_16X_ARITHMETIC_Val) |
+    return SERCOM_USART_INT_CTRLA_MODE(c.external_clock
+                                           ? SERCOM_USART_EXT_CTRLA_MODE_USART_EXT_CLK_Val
+                                           : SERCOM_USART_INT_CTRLA_MODE_USART_INT_CLK_Val) |
+           SERCOM_USART_INT_CTRLA_CMODE(c.synchronous ? SERCOM_USART_INT_CTRLA_CMODE_SYNC_Val
+                                                      : SERCOM_USART_INT_CTRLA_CMODE_ASYNC_Val) |
+           (c.invert_clock ? SERCOM_USART_INT_CTRLA_CPOL_Msk : 0u) |
+           SERCOM_USART_INT_CTRLA_SAMPR(static_cast<uint32_t>(c.sampling)) |
+           SERCOM_USART_INT_CTRLA_SAMPA(static_cast<uint32_t>(c.sample_adjust)) |
            SERCOM_USART_INT_CTRLA_TXPO(uart_txpo(c.pads.tx)) |
            SERCOM_USART_INT_CTRLA_RXPO(uart_rxpo(c.pads.rx)) |
            SERCOM_USART_INT_CTRLA_FORM(
@@ -427,9 +678,28 @@ constexpr uint32_t sercom_uart_ctrlb(const SercomUartConfig& c) {
     return SERCOM_USART_INT_CTRLB_CHSIZE(static_cast<uint32_t>(c.format.bits)) |
            (c.format.two_stop ? SERCOM_USART_INT_CTRLB_SBMODE_Msk : 0u) |
            (c.format.parity == UartParity::odd ? SERCOM_USART_INT_CTRLB_PMODE_Msk : 0u) |
+           (c.irda ? SERCOM_USART_INT_CTRLB_ENC_Msk : 0u) |
            (c.tx ? SERCOM_USART_INT_CTRLB_TXEN_Msk : 0u) |
            (c.rx ? SERCOM_USART_INT_CTRLB_RXEN_Msk : 0u);
 }
+
+// ONE VIEW FOR BOTH CLOCKINGS. The device header gives the USART two
+// register sets, USART_INT and USART_EXT, at one address; CTRLA.MODE is
+// what chooses between them, and they are the same layout - checked
+// here on the fields this file writes, so the INT view below speaks for
+// the external-clock configurations too.
+static_assert(SERCOM_USART_EXT_CTRLA_MODE_Pos == SERCOM_USART_INT_CTRLA_MODE_Pos &&
+                  SERCOM_USART_EXT_CTRLA_CMODE_Pos == SERCOM_USART_INT_CTRLA_CMODE_Pos &&
+                  SERCOM_USART_EXT_CTRLA_CPOL_Pos == SERCOM_USART_INT_CTRLA_CPOL_Pos &&
+                  SERCOM_USART_EXT_CTRLA_SAMPR_Pos == SERCOM_USART_INT_CTRLA_SAMPR_Pos &&
+                  SERCOM_USART_EXT_CTRLB_ENC_Pos == SERCOM_USART_INT_CTRLB_ENC_Pos &&
+                  SERCOM_USART_EXT_CTRLB_TXEN_Pos == SERCOM_USART_INT_CTRLB_TXEN_Pos,
+              "the USART_EXT and USART_INT views must share their layout");
+static_assert(offsetof(sercom_usart_ext_registers_t, SERCOM_RXPL) ==
+                  offsetof(sercom_usart_int_registers_t, SERCOM_RXPL) &&
+              offsetof(sercom_usart_ext_registers_t, SERCOM_BAUD) ==
+                  offsetof(sercom_usart_int_registers_t, SERCOM_BAUD),
+              "the USART_EXT and USART_INT views must share their layout");
 
 /**
  * One SERCOM instance, seen through its USART_INT register view.
@@ -662,8 +932,10 @@ public:
     }
 
     /**
-     * Everything back to its reset value (DBGCTRL excepted), instance
-     * disabled.
+     * Everything back to its reset value, instance disabled - DBGCTRL
+     * INCLUDED although 31.6.2.2 excepts it: erratum 1.17.19 (live on
+     * every revision) has SWRST clear it, which is harmless here because
+     * configure() writes DBGCTRL after any reset.
      *
      * ERRATUM 1.17.16: SWRST does nothing while ENABLE = 0 - which is
      * exactly the state a freshly booted instance is in, so the obvious
@@ -696,6 +968,14 @@ public:
      * the two directions are really up. A driver that returned as soon
      * as SYNCBUSY.ENABLE cleared would hand back a transmitter that is
      * not enabled yet.
+     *
+     * ON AN EXTERNAL CLOCK THAT SECOND HALF WAITS FOR XCK: the directions
+     * come up in XCK's domain, and with the far host not yet clocking
+     * SYNCBUSY.CTRLB does not clear - measured, a synchronous client's
+     * enable timed out every time and the client then received every
+     * frame the host clocked (test_avr_serial q against this SERCOM). The
+     * false is then the CTRLB half's alone; a caller on an external clock
+     * bounds the wait short and judges enabled().
      */
     static bool enable(bool on, uint32_t spins = 0xFFFFu) {
         const uint32_t v = regs().SERCOM_CTRLA;
@@ -714,13 +994,15 @@ public:
      * DISCARDED, not refused - so this disables first and leaves the
      * instance disabled: enable(true) is a separate, deliberate step.
      *
-     * False (and nothing programmed) when the pad choice is not one the
-     * silicon offers, or when a synchronization did not complete. The
+     * False (and nothing programmed) when the configuration is not one
+     * the chapter offers (sercom_uart_config_valid()), or when a
+     * synchronization did not complete. RXPL is written with the rest:
+     * it is enable-protected too (31.8.5). The
      * PORT side of the pads is NOT touched here: pads are the SERCOM's,
      * pins are PORT's and the task's.
      */
     static bool configure(const SercomUartConfig& cfg, uint32_t spins = 0xFFFFu) {
-        if (!uart_pads_valid(cfg.pads)) {
+        if (!sercom_uart_config_valid(cfg)) {
             return false;
         }
         if (!enable(false, spins)) {
@@ -736,11 +1018,69 @@ public:
             return false;
         }
         regs().SERCOM_BAUD = cfg.baud;
+        regs().SERCOM_RXPL = cfg.rx_pulse;
         regs().SERCOM_DBGCTRL =
             cfg.debug_stop ? static_cast<uint8_t>(SERCOM_USART_INT_DBGCTRL_DBGSTOP_Msk) : 0u;
         clear_status(SercomStatus::receive_errors);
         regs().SERCOM_INTFLAG = SercomFlag::all;
         return true;
+    }
+
+    /// The compile-time twin: a configuration the chapter does not offer
+    /// is a compile error rather than a false at run time.
+    template <SercomUartConfig cfg>
+    static bool configure(uint32_t spins = 0xFFFFu) {
+        static_assert(sercom_uart_config_valid(cfg),
+                      "this USART configuration is not one the chapter offers: TxD on "
+                      "PAD[0] or PAD[2] only, SAMPA two bits, a synchronous link with no "
+                      "sampling regime, RxD off its XCK pad and (as the host) an 8-bit "
+                      "BAUD, a fractional BAUD of at least 1, IrDA asynchronous at 16x "
+                      "arithmetic only and RXPL under IrDA alone (31.6.2.3, 31.6.3.3, "
+                      "31.8.1, 30.6.2.3)");
+        return configure(cfg, spins);
+    }
+
+    // ---- the two directions at run time (31.8.2) --------------------------
+
+    /**
+     * CTRLB.TXEN while the instance runs - the one CTRLB bit pair that is
+     * not enable-protected, and WRITE-SYNCHRONIZED: SYNCBUSY.CTRLB stands
+     * from the write until the direction is really up or down, and a
+     * second CTRLB write inside that window is an APB error (31.8.10), so
+     * the verb waits the previous one out first and its own afterwards,
+     * bounded both times.
+     *
+     * OFF IS NOT IMMEDIATE, AND IT IS NOT A RELEASE. The disable "will
+     * not become effective until ongoing and pending transmissions are
+     * completed" (31.8.2), and then the transmitter sends nothing - but
+     * the pad stays DRIVEN at the idle level, high: measured on SERCOM1's
+     * PA18 under its pull-down (the pull live under the mux - the pad
+     * falls with the instance disabled), the pad stood high with TXEN
+     * and RXEN both off, fell when handed to PORT and rose again when
+     * handed back to the SERCOM, the transmitter still off
+     * (test_samc_uart letter g). 31.6.3.7's step 3 tri-states TxD after a
+     * COLLISION, and that is the only release the chapter describes. A
+     * pad that must carry no driver is taken from the SERCOM (PMUXEN,
+     * Pin::release()) or the instance disabled; a byte written while the
+     * transmitter is off waits in DATA and goes out at the re-enable
+     * (measured the same way).
+     */
+    static bool enable_tx(bool on, uint32_t spins = 0xFFFFu) {
+        return direction(SERCOM_USART_INT_CTRLB_TXEN_Msk, on, spins);
+    }
+
+    /// CTRLB.RXEN, the same way. Off "will disable the USART receiver,
+    /// flush the two-level receive buffer" and clear FERR, PERR and
+    /// BUFOVF (31.8.2): a character in flight is lost.
+    static bool enable_rx(bool on, uint32_t spins = 0xFFFFu) {
+        return direction(SERCOM_USART_INT_CTRLB_RXEN_Msk, on, spins);
+    }
+
+    static bool tx_enabled() {
+        return (regs().SERCOM_CTRLB & SERCOM_USART_INT_CTRLB_TXEN_Msk) != 0u;
+    }
+    static bool rx_enabled() {
+        return (regs().SERCOM_CTRLB & SERCOM_USART_INT_CTRLB_RXEN_Msk) != 0u;
     }
 
     static uint16_t baud_reg() { return regs().SERCOM_BAUD; }
@@ -789,7 +1129,12 @@ public:
         return static_cast<uint8_t>(regs().SERCOM_INTFLAG & regs().SERCOM_INTENSET);
     }
 
-    static uint8_t flags() { return regs().SERCOM_INTFLAG; }
+    /// The flag reads are FORCED INLINE: each is one load and a mask, and
+    /// they are what a polled loop tests on every turn - left to -Os, gcc
+    /// keeps them out of line in a program that calls them from several
+    /// places, and a polled receiver then pays a call a character
+    /// (counted in a polled peer's release listing).
+    [[gnu::always_inline]] static uint8_t flags() { return regs().SERCOM_INTFLAG; }
     static uint8_t armed() { return regs().SERCOM_INTENSET; }
 
     /// The write-one-to-clear half of INTFLAG (TXC, RXS, CTSIC, RXBRK,
@@ -811,11 +1156,17 @@ public:
     static void enable_rxc_interrupt(bool on) { enable_interrupt(SercomFlag::rxc, on); }
     static void enable_txc_interrupt(bool on) { enable_interrupt(SercomFlag::txc, on); }
 
-    static bool dre_flag() { return (regs().SERCOM_INTFLAG & SercomFlag::dre) != 0u; }
-    static bool rxc_flag() { return (regs().SERCOM_INTFLAG & SercomFlag::rxc) != 0u; }
+    [[gnu::always_inline]] static bool dre_flag() {
+        return (regs().SERCOM_INTFLAG & SercomFlag::dre) != 0u;
+    }
+    [[gnu::always_inline]] static bool rxc_flag() {
+        return (regs().SERCOM_INTFLAG & SercomFlag::rxc) != 0u;
+    }
     /// Set when the shifter has emptied and DATA holds nothing new;
     /// cleared by writing DATA. An exact "the last byte is out".
-    static bool txc_flag() { return (regs().SERCOM_INTFLAG & SercomFlag::txc) != 0u; }
+    [[gnu::always_inline]] static bool txc_flag() {
+        return (regs().SERCOM_INTFLAG & SercomFlag::txc) != 0u;
+    }
 
     // ---- status and data --------------------------------------------------
 
@@ -836,6 +1187,20 @@ public:
             (void)data();
         }
         clear_status(SercomStatus::receive_errors);
+    }
+
+private:
+    /// One CTRLB direction bit, written as the whole register: the other
+    /// CTRLB bits are enable-protected, so on a running instance their
+    /// share of the store is discarded (31.6.2.1) - and it carries the
+    /// values they already hold anyway.
+    static bool direction(uint32_t bit, bool on, uint32_t spins) {
+        if (!wait_sync(SERCOM_USART_INT_SYNCBUSY_CTRLB_Msk, spins)) {
+            return false;
+        }
+        const uint32_t v = regs().SERCOM_CTRLB;
+        regs().SERCOM_CTRLB = on ? (v | bit) : (v & ~bit);
+        return wait_sync(SERCOM_USART_INT_SYNCBUSY_CTRLB_Msk, spins);
     }
 };
 

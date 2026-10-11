@@ -1,12 +1,15 @@
 # SERCOM - USART mode (SAM C21)
 
 Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
-common ch. 30 (the baud generator, 30.6.2.3 table 30-2), USART
-ch. 31 (transmission and reception 31.6.2.5-31.6.2.6, the loop-back
-31.6.3.8, start-of-frame detection 31.6.3.9, the DMA and interrupt
-requests 31.6.4, INTFLAG and STATUS 31.8.8-31.8.9) - and errata
-DS80000740S items 1.17.15 and 1.17.16, both encoded in code (1.17.4 and
-1.17.14 are named where their fields live), and 1.10.4 (the DMAC's,
+common ch. 30 (the baud generators, 30.6.2.3 table 30-2), USART
+ch. 31 (clock generation and the synchronous clock 31.6.2.3, transmission
+and reception 31.6.2.5-31.6.2.6, IrDA 31.6.3.3, the loop-back 31.6.3.8,
+start-of-frame detection 31.6.3.9, sample adjustment 31.6.3.10, the DMA
+and interrupt requests 31.6.4, CTRLA to RXPL 31.8.1-31.8.5, INTFLAG and
+STATUS 31.8.8-31.8.9) - and errata DS80000740S items 1.17.15 and
+1.17.16, both encoded in code (1.17.4, 1.17.14 and 1.17.19 are named
+where their fields live, 1.17.2 and 1.17.12 where the features they
+touch are listed as not built), and 1.10.4 (the DMAC's,
 [dmac.md](dmac.md)). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine>` task, the one engine slot - the
 transmit one - optional). The family fixture is `test/family_samc21/sercom.cpp` plus
@@ -60,13 +63,53 @@ interrupt does not wake the device (1.17.15 - so it is never enabled
 at all; errors are taken on the RXC path, where STATUS must be read
 before DATA anyway, 31.8.11).
 
-**The baud generator, 16x arithmetic** (table 30-2):
-`BAUD = 65536 x (1 - 16 x f_baud / f_ref)`, f_ref being the
-instance's GCLK core clock, with f_baud <= f_ref/16. BAUD = 0 is a
-LEGAL value - the fastest rate - which is why the driver's arithmetic
-returns an optional rather than overloading zero. TXC is exact:
-cleared by every DATA write and set only when the shifter empties with
-nothing queued - "the last byte is on the wire", no timing guesswork.
+**Two baud generators, three sample counts** (table 30-2, CTRLA.SAMPR):
+the ARITHMETIC one, `BAUD = 65536 x (1 - S x f_baud / f_ref)`, a 16-bit
+register whose step is 1/65536 of the reference averaged over a frame;
+the FRACTIONAL one, `f_baud = f_ref / (S x (BAUD + FP/8))`, a 13-bit
+integer part of at least 1 under a 3-bit fraction in BAUD's top bits
+(31.8.4) - an eighth of a sample, coarse at the top rates and EXACT
+wherever S x f_baud divides 8 x f_ref. f_ref is the instance's GCLK core
+clock, S is 16, 8 or 3 (SAMPR 0x0..0x4: 16x and 8x on either generator,
+3x arithmetic only, 0x5-0x7 reserved), and f_baud <= f_ref / S. Neither
+generator is better everywhere: on a 24 MHz reference 921 600 baud is
+-0.001 % on the arithmetic one and +0.16 % on the fractional, 3750 baud
++0.1 % and exact. BAUD = 0 is a LEGAL arithmetic value - the fastest
+rate - which is why the arithmetic returns an optional rather than
+overloading zero. SAMPA (31.6.3.10) moves the three voting samples later,
+two samples a step at 16x. TXC is exact: cleared by every DATA write and
+set only when the shifter empties with nothing queued - "the last byte
+is on the wire", no timing guesswork.
+
+**The synchronous mode is two bits, not one** (31.6.2.3): CTRLA.CMODE
+chooses synchronous framing and CTRLA.MODE the clock - the internal
+generator (the HOST: XCK an output at f_ref / (2 x (BAUD + 1)), the
+EIGHT low bits of BAUD) or the XCK pad (the CLIENT: the shift registers
+run on XCK itself, "up to the system frequency", BAUD ignored). XCK
+lands on the pad TXPO puts beside TxD - PAD[1] next to PAD[0], PAD[3]
+next to PAD[2] - so RxD cannot be there. CTRLA.CPOL swaps the edges:
+0 changes TxD on the rising XCK edge and samples RxD on the falling
+one, 1 the other way round (31.6.2.3.1). The asynchronous mode on an
+external clock takes XCK as the baud generator's reference.
+
+**The IrDA coder** (31.6.3.3, CTRLB.ENC) works asynchronous at 16x on
+the arithmetic generator (the section's "16x sample rate
+(CTRLA.SAMPR[0]=0)" read as the one code both halves of it admit). It
+TRANSMITS a 0 bit as a HIGH pulse of 3/16 of a bit and nothing else -
+there is no programmable transmit pulse - and receives a LOW pulse of at
+least RXPL + 2 core clocks (31.8.5) as a 0: "the polarity of the
+transmitter and receiver are opposite".
+
+**The two directions switch at run time** (31.8.2): CTRLB.TXEN and RXEN
+are the CTRLB bits that are not enable-protected, and they are
+write-synchronized like the rest of CTRLB. Disabling the transmitter
+"will not become effective until ongoing and pending transmissions are
+completed"; disabling the receiver flushes the two-level buffer and
+clears FERR, PERR and BUFOVF. A DISABLED TRANSMITTER STILL DRIVES ITS
+PAD at the idle level (measured, Bench findings) - the one release the
+chapter describes, TxD tri-stated, is 31.6.3.7's after a collision - so
+a pad that must carry no driver is taken from the SERCOM or the instance
+disabled.
 
 **A SERCOM input pin can only pull DOWN** (31.5.1, verified
 verbatim): PULLEN still works under the peripheral function, but the
@@ -81,6 +124,27 @@ the suite and the bench run SERCOM1 that way on PAD[2], PA18 (TXPO 0x1,
 RXPO 0x2), at every rate the generator makes - a pad nothing drives but
 this board: on a desk whose four SERCOM1 wires reach an AVR128DB48's
 USART4, PA18 meets that board's RxD, an input.
+
+**The transmit side, item by item** - what the chapter offers that bears
+on a run's cost:
+
+- THE TRANSMIT BUFFER, DATA ahead of the shift register (31.6.2.5): USED -
+  one frame queued behind the one on the wire, so a writer that keeps
+  DRE served puts frames back to back.
+- DRE AS A DMA REQUEST (31.6.4.1): USED by the optional transmit engine,
+  the stratum's one DMA user (below).
+- TXC (31.8.8): USED, `tx_idle()`'s last clause.
+- THE BAUD GENERATORS: every regime offered at the resource
+  (`UartSampling`, `sercom_closest_baud()` asking both at one S); the
+  task stays on 16x arithmetic, generator 0, which is the console's.
+- 8x SAMPLING: OFFERED - twice the rate on one reference (the ceiling
+  f_ref / 8) for a receiver with half the samples to vote on; 3x the same
+  again (f_ref / 3) with three.
+- THE SYNCHRONOUS MODE: OFFERED at the resource - a bit in two reference
+  clocks as the host, no oversampling at all.
+- TE (RS-485, TXPO 0x3, GTIME), RTS/CTS (TXPO 0x2), LIN's header
+  generation (LINCMD, BRKLEN, HDRDLY), collision detection (COLDEN): NOT
+  BUILT - "Not covered yet".
 
 **The receive side, item by item** - what the chapter offers for
 taking a burst, and what this driver does with each:
@@ -119,11 +183,35 @@ taking a burst, and what this driver does with each:
 - **`Sercom<n>`** - the resource: bus clock (MCLK mask) and core
   clock (GCLK channel) wiring, reset/enable with their bounded sync
   waits, `configure(SercomUartConfig)` writing the whole
-  configuration while disabled, the flag verbs with the W1C half
-  spelled out (RXC and DRE are conditions and ignore writes),
-  `pending()` = INTFLAG AND INTENSET (the shared vector's one
-  question), STATUS with its read-before-DATA discipline, DATA,
-  `flush_rx()`.
+  configuration while disabled (RXPL with it) and refusing one the
+  chapter does not offer, `configure<cfg>()` its compile-time twin,
+  `enable_tx(bool)` / `enable_rx(bool)` - the two directions on a
+  running instance, each waiting a CTRLB synchronization out before its
+  write and its own after (31.8.10's APB error) - with `tx_enabled()` /
+  `rx_enabled()`, the flag verbs with the W1C half spelled out (RXC and
+  DRE are conditions and ignore writes; the flag reads forced inline,
+  the test of every turn of a polled loop), `pending()` = INTFLAG AND
+  INTENSET (the shared vector's one question), STATUS with its
+  read-before-DATA discipline, DATA, `flush_rx()`.
+- **`SercomUartConfig`** - pads, frame, BAUD register, `UartSampling`
+  (CTRLA.SAMPR's five codes), `sample_adjust` (SAMPA), `synchronous`
+  (CMODE), `external_clock` (MODE 0x0), `invert_clock` (CPOL), `irda`
+  (ENC) with `rx_pulse` (RXPL), the two direction enables, RUNSTDBY,
+  IBON, DBGSTOP. `sercom_uart_config_valid()` is the chapter's rules
+  between them: SAMPA two bits; a synchronous link samples nothing,
+  keeps RxD off the XCK pad (`uart_xck_pad(tx)`) and as the host has an
+  8-bit BAUD; a fractional BAUD's integer part at least 1; IrDA
+  asynchronous at 16x arithmetic, and RXPL under it alone. The
+  USART_EXT view is static_asserted to share USART_INT's layout, so one
+  view speaks for both clockings.
+- **The baud arithmetic**, pure and constexpr: `sercom_baud_reg()` /
+  `sercom_actual_baud()` (arithmetic, any S), `sercom_fractional_baud_reg()`
+  / `sercom_fractional_actual_baud()`, `sercom_uart_baud_reg()` /
+  `sercom_uart_actual_baud()` under a whole `UartSampling`,
+  `sercom_closest_baud()` (the generator nearer the rate at S = 16 or 8,
+  the arithmetic one on a tie), `sercom_sync_baud_reg()` /
+  `sercom_sync_actual_hz()` (the host's XCK). Every product inside 32
+  bits.
 - **`UartPads`** - which pad carries each direction plus where those
   pads come out (`SercomPadPin`: port, pin, PMUX function). The pad
   side is checked exactly (`uart_pads_valid` refuses TxD anywhere but
@@ -310,6 +398,38 @@ extern "C" void SERCOM5_Handler() {     // the receiver
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
 extern "C" void DMAC_Handler() { Serial::dma_isr(); }   // the transmit blocks
+```
+
+A synchronous host on a crystal generator - the resource, configured once,
+polled (XCK's pin is the caller's to mux):
+
+```cpp
+constexpr brio::UartPads link_pads{
+    .tx = brio::SercomPad::pad2, .rx = brio::SercomPad::pad0,   // XCK on PAD[3]
+    .tx_pin = {'A', 18, brio::PinFunction::c},
+    .rx_pin = {'A', 16, brio::PinFunction::c},
+};
+using Link = brio::Sercom<1>;
+Link::bus_clock(true);
+(void)Link::core_clock(2);                       // generator 2 on the 24 MHz XOSC
+(void)Link::configure<brio::SercomUartConfig{
+    .pads = link_pads,
+    .baud = brio::sercom_sync_baud_reg(24'000'000, 1'000'000).value(),   // 11
+    .synchronous = true}>();
+(void)Link::enable(true);
+```
+
+An asynchronous rate on whichever generator lands nearer it, and the
+receiver switched off and on under the running instance:
+
+```cpp
+constexpr auto b = brio::sercom_closest_baud(24'000'000, 3750).value();  // fractional, 400.0
+(void)Link::configure({.pads = link_pads, .baud = b.reg, .sampling = b.sampling});
+(void)Link::enable(true);
+(void)Link::enable_rx(false);                   // buffer flushed, errors cleared
+(void)Link::enable_rx(true);
+// A pad that must carry no driver is TAKEN, not disabled:
+brio::Pin<'A', 18>::release();                  // TxD's pad back to PORT
 ```
 
 A loop with no wire, for a test: one pin named for both directions.
@@ -544,6 +664,56 @@ bridge between the pads and the PC - as much as of the driver.
   is -1 % to +3 % ([../design/overview.md](../design/overview.md), "A
   loop proves the bytes, never the rate"), and the divisor's rounding is
   0.14 % at 9600 and less above.
+- **The resource's regimes on the loop** (letter g, polled - DATA fed
+  whenever DRE stands, every frame read back as it lands - on generator
+  0, OSC48M, so the reading judges the divisor): 16x arithmetic at
+  115200 (BAUD 63019) 1000 thousandths of the wire, 16x fractional at
+  3750 (800.0) 1000 and at 115200 (26.0, the fractional step +0.16 %)
+  998, 8x arithmetic at 2 Mbaud (43691) 1003 to 1004, 8x fractional at
+  2 Mbaud (3.0) 1005, 3x arithmetic at 2 Mbaud (57344) 1003 to 1004 -
+  every frame byte-exact through the pad. Past 2 Mbaud the run is the
+  polled turn's and not the wire's: 3 Mbaud read 1007 to 1015 and
+  4 Mbaud 1031 to 1034 whatever the regime (8x or 3x).
+- **A synchronous host hears itself through the pad**: at 1 MHz (BAUD
+  23, f_ref / (2 x 24)), CPOL 0 and 1, 256 frames of 256 byte-exact, 1001
+  to 1002 thousandths of the wire, the internal XCK with no pin muxed.
+- **The two directions at run time**: `enable_rx(false)` takes nothing
+  (four frames sent, none received), `enable_rx(true)` takes every frame
+  after it. `enable_tx(false)` sends nothing - and its pad stays DRIVEN:
+  PA18 under the mux's pull-down read high with TXEN and RXEN both off,
+  low with the instance disabled (the pull is live), low when handed to
+  PORT under the same pull, and high again when handed back to the SERCOM
+  with the transmitter still off. A byte written while the transmitter
+  was off went out when it came back.
+- **The IrDA coder's sense on the pad** (9600): TxD idles LOW, and a
+  0x00 frame read high in 15 to 16 per cent of its samples - nine 0 bits
+  each a HIGH pulse of 3/16 of a bit is 17 per cent - and the coder's own
+  receiver, which takes a LOW pulse as a 0, reads nothing clean of it
+  through the pad. A far IrDA receiver that expects low pulses on an
+  idle-high line reads this transmitter only inverted.
+- **ACROSS THE WIRE, against an AVR128DB48's USART4** (`test_avr_serial`'s
+  two-board letters, SERCOM1 on the crossed pair, generator 2 on the
+  24 MHz crystal, each rate on the generator closest to it): every rate
+  from 2400 baud to 1 Mbaud at 16x and 2 Mbaud at 8x (fractional, 3.0)
+  echoed byte-exact with no error at either end; 5N1, 6O2, 7E1, 8O2,
+  8E2, 9N1 and 9E1 the same at 115 200; a start bit at 9600 2500 ticks
+  of the far crystal against 2500, and the fractional generator at 3750
+  baud (400.0) a nine-bit low of 57600.8 to 57601.0 far ticks against
+  57600.0 - -14 to -17 ppm, the far ruler's one tick. The synchronous
+  CLIENT took the far host's 8 frames exact at 100 kHz and 1 MHz with
+  CPOL 0 and 1 (the far INVEN followed by CPOL), and the HOST put XCK on
+  PA19 at 100 kHz and 1 MHz exact, and at 12 MHz (BAUD 0) - past the far
+  client's own ceiling, its frames corrupted there as that chip's
+  datasheet says. The IrDA RECEIVER took the far coder's six frames
+  (low pulses on an idle-high line) clean at 115 200; the far receiver
+  read this coder's frames only with its RxD pin inverted (above).
+- **On an external clock the enable does not complete until XCK runs**:
+  a synchronous client's `enable(true)` timed out on SYNCBUSY.CTRLB
+  every time with the far host not yet clocking - while SYNCBUSY.ENABLE
+  had cleared and the client went on to receive every frame the host
+  clocked. The direction enables are synchronized in XCK's domain; a
+  caller on an external clock bounds that wait short and judges
+  `enabled()`.
 - **The engine's level, read back** (letter d): CHCTRLB.LVL 2 with
   CTRL.LVLEN2 alone set ([dmac.md](dmac.md)).
 - **The kick, measured and retired.** A scratch probe started 400
@@ -572,11 +742,18 @@ Driver gaps (not built):
   which 25.6.7 makes software's to suspend before standby; nothing does
   (dmac.md). Born with the first program that sleeps to standby with an
   engined Uart.
-- Within USART: fractional and 3x-arithmetic baud, synchronous mode
-  and XCK, RTS/CTS handshaking, RS-485/TE, LIN, IrDA, collision
-  detection, auto-baud, start-of-frame/RXS wake, 9-bit data uses,
-  DBGCTRL policy (1.17.4: DBGSTOP does not actually halt
-  transmission - the field is exposed, the erratum named).
+- Within USART: RS-485/TE with its guard time, collision detection
+  (erratum 1.17.12: it does not abort when the APB clock is slower than
+  the core clock) and auto-baud with break detection (erratum 1.17.2 on
+  revisions B..E) - born with the two-board letters of `test_samc_uart`
+  against an AVR peer that would measure them; RTS/CTS handshaking (TXPO
+  0x2) and LIN's header generation - born with their first user;
+  start-of-frame/RXS wake - a power chapter's; the Uart task on any
+  generator but 0, on another sampling regime or synchronous - the task
+  is the console's, and the resource carries those configurations;
+  9-bit data uses of the task (its rings are bytes); DBGCTRL policy
+  (1.17.4: DBGSTOP does not actually halt transmission - the field is
+  exposed, the erratum named).
 - A per-package pad table (which pins reach which pads): the same
   device-table job [port.md](port.md) leaves open, born with its first
   user.
@@ -586,6 +763,12 @@ Implemented but not bench-verified:
   and with one engine, and the per-byte plateau through the bridge:
   `serial_speed`'s occupancy and throughput, whose host side - the
   checker of every byte at every rate - is not in `cli/`.
+- RXPL other than 0 (a far IrDA sender whose pulse it would filter -
+  `test_avr_serial` s sweeps the AVR's RXPL, not this one's), SAMPA's
+  voting windows (a letter of this suite receiving a far bit-banger's
+  distorted cell), the asynchronous mode on an external clock (its first
+  user), the 8x and 3x regimes across a wire (the far AVR's own rates are
+  16x or its CLK2X).
 - `rebase()` (no dynamic clock exists on this target to drive it);
   nine-bit frames (this transport's rings are bytes); the USART
   personality on SERCOM0, 2, 3 and 4 (SERCOM5 runs the console, SERCOM1

@@ -280,15 +280,26 @@ U::disarm_start_of_frame();         // first thing on the way back
 `test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
 and has two halves: `z` is the SINGLE-BOARD set (11 tests,
 163 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
-103 verdicts) against a peer board running `usart_peer`, an instrument driven
-IN BAND over the very link under test. Two more commands stand outside
-`y` because they depend on how the desk is jumpered: `v`, the wiring
-probe, and `w`, the one-wire bus (6 verdicts on the shared-line desk; it
-skips itself on the crossed pair). The peer names itself in its ident -
-the version's high byte names the implementation (`usart_link.hpp`), and
-`j` judges only that the label names a board other than this one; a leg
-the peer REFUSES (`report_cfg_failed`, a capability its silicon has not
-got) is printed SKIPPED and judged nothing. The peer is DARK until
+110 verdicts and one SKIPPED leg against this desk's peer)
+against a peer board driven IN BAND over the very link under test
+(`usart_link.hpp`). On this desk the peer is a SAM C21, its SERCOM1 on
+the four link wires as the crossed pair - PE0 to its RxD, PE1 to its
+TxD, PE2 to its XCK, PE3 to a pad its USART does not take - with every
+rate from its own 24 MHz crystal. Three more commands stand outside `y`:
+`v`, the wiring probe (run beside the peer's own), `w`, the one-wire bus
+on this board's TXD pad (a single PE0-PE0 wire to an avrdx peer, or the
+crossed pair itself against a samc21 peer, whose RXD pin meets PE0), and
+`x`, the clock comparison. The peer names itself in its ident - the
+version's high byte names the implementation (`usart_link.hpp`), and `j`
+judges only that the label names a board other than this one. A letter
+gates on that kind where a fact is the AVR's own or a capability the
+peer's silicon has not got, and prints the reason: `x` runs at 3750 baud
+against a samc21 peer (exact on both generators) and at 3600 against an
+avrdx one (one BAUD both ends), `w` runs on the crossed pair against a
+samc21 peer, `s` skips the fixed-pulse case against it (its IrDA coder
+sends 3/16 pulses only) and inverts PE1 for its pulses, `v` takes PE3
+either open or to the peer's PE3-role pin. A leg the peer REFUSES
+(`report_cfg_failed`) is printed SKIPPED and judged nothing. The peer is DARK until
 addressed (`usart_link.hpp`, the dark discipline): while it searches for
 the wiring its transmitter is released and neither PE0 nor PE1 is
 pulled, and it naks a bad checksum only within `engage_ms` of a frame
@@ -376,41 +387,40 @@ the listing's count above.
   their longest pass; the console's longest is its RXC with the post,
   182 with the response.
 
-### The two boards, and what they cost the measurements
+### The two boards
 
-- **The two boards' clocks agree to the tick**: a stream of 0xFF frames
-  at 9600 puts the peer's start bit - the only low pulse on the line - at
-  **2500 CLK_PER ticks against a nominal 2500**, measured in the DUT's
-  crystal time. The auto-baud findings below were measured against a
-  genuinely foreign clock: the peer on its internal OSCHF, **+0.24 to
-  +0.28 % fast** - the offset every learned BAUD reproduced. (Running a
-  board on OSCHF recreates that condition at will.)
-- **The link topology is discovered, not assumed, and never latched.**
-  The apps support two wirings - the crossed full-duplex pair and a
-  single wire between the two TXD pads - and find out which one the desk
-  has by alternating their command-mode configuration until a frame
-  arrives. A topology is believed only while the command channel keeps
-  proving it: after `rediscover_ms` (3 s) of silence the peer stops
-  believing and goes back to alternating, which is what lets the desk be
-  re-jumpered under two running firmwares. While it is still guessing
-  the peer drives NOTHING - a probe that idled its TXD high would, on a
-  shared desk, fight the other board's transmitter for as long as it
-  guessed wrong. The figures below were taken on the crossed pair;
-  everything except the synchronous roles was also measured half duplex
-  through the single shared wire, with LBME at both ends.
+- **The DUT discovers the link's topology, and never latches it.** The
+  suite supports two wirings - the crossed full-duplex pair and a single
+  wire between the two TXD pads - and finds out which one the desk has
+  by pinging in each in turn (the shared one first, where its own
+  transmitter drives only while it talks); a topology is believed while
+  the command channel keeps proving it. A peer whose desk fixes the
+  crossed pair - the samc21 one - is full duplex always and answers
+  nothing in the shared topology, so the DUT settles on the pair.
+- **The two crystals agree to the tick.** The peer's start bit at 9600 -
+  the only low pulse of a stream of 0xFF - is 2500 CLK_PER ticks against
+  a nominal 2500 in this board's crystal time; `x`'s sixteen nine-bit
+  lows at 3750 baud average 57600.8 to 57601.0 ticks against 57600.0
+  (spread 57600 to 57601): -14 to -17 ppm, the ruler's one tick. Every
+  rate below is therefore a FOREIGN sender exact to the crystal, and
+  what a reading departs from is this board's own divisor.
+- **The wiring probe names the crossed pair from both ends** (`v` beside
+  the peer's own probe): PE0 hears the peer's PE1-role pin, PE1 its
+  PE0-role pin, PE2 its XCK and PE3 the pad wire 4 reaches, by the edge
+  rate each pin hears (47, 23, 95, 191 edges in six seconds here; the
+  peer's pads counted 23, 47, 94, 188).
+- **A refused leg is skipped, not judged.** A peer bug that refused the
+  synchronous client (its enable on an external clock timed out until
+  XCK ran, since fixed) took `q`'s four host legs down the refusal path:
+  each printed SKIPPED with the refused op and counted nothing, the
+  letter's other three verdicts unaffected.
 
 ### Facts measured on the wire
 
-- **The loop-back is taken at the TXD PAD, and it hears the OUTSIDE.**
+- **The loop-back is taken at the TXD PAD.**
   With PORTMUX at NONE the peripheral still transmits - DREIF, TXCIF and
   the timing all behave - but LBME delivers nothing at all, so the driver
-  refuses loop-back and open drain on a pinless route. And with the
-  instance routed, a receiver in loop-back reads frames that ANOTHER
-  BOARD drives onto that pad: the peer bit-banged 0x5A onto the DUT's TXD
-  while the DUT held the pin as an input under its pull-up (the errata
-  2.16.1 open-drain discipline) and every frame arrived clean. One-wire
-  collision detection is therefore electrically real, not just a
-  register feature.
+  refuses loop-back and open drain on a pinless route.
 - **The baud generator is exact to the tick.** Measuring the start bit
   of a stream of 0xFF frames against the divisor's own nominal
   `S x BAUD / 64` CLK_PER cycles:
@@ -472,6 +482,12 @@ the listing's count above.
   CLK_PER = 24 MHz, 300 baud is unreachable: BAUD would be 320000,
   nearly five times what the register holds. The slowest expressible
   asynchronous rate at this clock is **1465 baud**.
+- **The loop-back receiver hears the OUTSIDE.** With the instance
+  routed, a receiver in loop-back reads frames another board drives onto
+  that pad: the peer bit-banged 0x5A onto this board's TXD while it held
+  the pin as an input under its pull-up (the errata 2.16.1 open-drain
+  discipline), and the frames arrived clean (three of them, no FERR).
+  One-wire collision detection is therefore electrically real.
 - **Every rate the register can express works across the wire.** 2400,
   9600, 115 200, 230 400, 460 800, 921 600 and 1 000 000 in normal mode,
   and 2 000 000 in double speed (BAUD 96, the only way to reach it at
@@ -485,44 +501,41 @@ the listing's count above.
   the receiver never looks past the first stop bit.
 - **Where FERR really begins.** Table 27-4 recommends -4.19/+4.14 % for
   D = 9 (8N1). With the peer's USART deliberately off rate and sending
-  0x00 - the frame whose stop bit has the least margin - the DUT stayed
-  clean at +4 % and -5 % and flagged FERR on every frame from **+5 %**
-  and **-6 %**. Bit-banged from the peer with a four-bit idle between
-  frames, the negative side matched (**clean to -4 %, FERR from -5 %**)
-  and the positive side never flagged at all up to +6 %: a sender that
-  is too FAST finishes early, so the stop-bit sample lands on the idle
-  line, which is high anyway. Only a slow sender pushes a low data bit
-  under that sample.
+  0x00 - the frame whose stop bit has the least margin - this board
+  stayed clean at -5 % and +4 % (where one frame of eight was lost) and
+  flagged FERR from **+5 %** and **-6 %**. Bit-banged from the peer's
+  crystal with a four-bit idle between frames, the negative side matched
+  (**clean to -5 %, FERR at -6 %**) and the positive side never flagged
+  up to +6 %: a sender that is too FAST finishes early, so the stop-bit
+  sample lands on the idle line, which is high anyway. Only a slow
+  sender pushes a low data bit under that sample.
 - **A start bit has to last most of a bit.** The peer put low pulses of
-  6, 30, 150, 625, 1250, 1562, 1875 and 2500 CPU cycles on an otherwise
-  idle line, against a 9600 receiver whose bit is 2500 cycles. Nothing
-  at or below **625 cycles (a quarter bit)** was ever taken as a start
-  bit; the boundary sits at **half a bit**, where it is marginal -
-  across runs the narrowest accepted pulse was sometimes 1250 cycles and
-  sometimes 1562. That is the majority vote of samples 8, 9 and 10 of 16
-  seen from outside.
+  6, 30, 150, 625, 1250, 1562, 1875 and 2500 ticks on an otherwise idle
+  line, against a 9600 receiver whose bit is 2500 ticks. Nothing at or
+  below **1250 ticks (half a bit)** was taken as a start bit; 1562 was.
+  That is the majority vote of samples 8, 9 and 10 of 16 seen from
+  outside.
 - **One displaced bit boundary is not a rate error.** Stretching a
   single data cell of a bit-banged frame shifts everything after it by
-  that much and nothing else: the frame survived +40 % and broke at
-  **+50 %**, half a cell, which is exactly where the stop bit's sample
-  point crosses into its neighbour. Ten times the tolerance of a
-  UNIFORM rate error, and a useful reminder that the operational-range
-  tables are about the accumulated error, not about jitter.
+  that much and nothing else: the frame survived +50 % and broke at
+  **+60 %**. Ten times the tolerance of a UNIFORM rate error - the
+  operational-range tables are about the accumulated error, not about
+  jitter.
 - **The auto-baud window (CTRLD.ABW) measures a bit PAIR.** In LINAUTO,
   with one cell of the 0x55 sync field stretched (which moves the
-  interval between two edges by half that percentage), the acceptance
-  edge sat between +28 and +32 % for WDW1, +32 and +36 % for WDW0, +40
-  and +44 % for WDW2, and beyond +44 % for WDW3. Halved, that is
-  14-16 %, 16-18 %, 20-22 % and >22 % of a bit pair - the documented
-  15 %, 18 %, 21 % and 25 % windows, measured.
-- **Auto-baud against a foreign clock works, and measures it.** The peer
-  sent a break, a 0x55 sync field and payload at 9600, 57 600, 230 400
-  and an odd 123 456 baud, from its own oscillator. Both GENAUTO (with
-  WFB armed) and LINAUTO learned the rate, and the BAUD they wrote was
-  consistently **-0.17 to -0.25 %** away from the value the DUT computes
-  for the same nominal rate - exactly the sender's OSCHF offset measured
-  above, and nothing else. The payload then arrived clean at the learned
-  rate.
+  interval between two edges by half that percentage), WDW1 accepted to
+  +28 % and refused from +32 %, WDW2 accepted to +36 % and refused from
+  +40 %, WDW3 accepted every step to +44 %; WDW0's edge is marginal at
+  +32 % (refused there, accepted at +36 % in the same run). Halved, that
+  is 14-16 %, 18-20 % and more than 22 % of a bit pair - the documented
+  15 %, 21 % and 25 % windows, with WDW0's 18 % between them.
+- **Auto-baud against a foreign clock works.** The peer sent a break, a
+  0x55 sync field and payload at 9600, 57 600, 230 400 and an odd
+  123 456 baud from its own crystal. Both GENAUTO (with WFB armed) and
+  LINAUTO learned the rate, and the BAUD they wrote was this board's own
+  divisor for the rate in every case (10000, 1667, 417, 778): two
+  crystals a tick apart leave nothing for the measurement to see. The
+  payload then arrived clean at the learned rate.
 - **BDF must be latched, not read afterwards.** The break-detected flag
   is cleared by the next DATA frame, and in a real auto-baud frame the
   payload follows the sync field immediately: a test that reads BDF
@@ -541,15 +554,16 @@ the listing's count above.
   BDF clear; after `recover()` (errata 2.16.3's RXEN toggle) the very
   next sync field is learned.
 - **A break from outside is a frame error with data zero.** Twenty bit
-  times of low from the peer's PORT arrive at a normal receiver as one
-  frame with FERR and 0x00.
+  times of low from the peer arrive at a normal receiver as one frame
+  with FERR and 0x00.
 - **The receive FIFO keeps three frames, and the third is the NEWEST.**
   Eight frames flooded at full rate with nothing read leave exactly
   three readable: the two oldest and then the LAST frame on the line,
   not the third one sent - the shift register keeps taking new frames
   while the buffer stays full. BUFOVF marks that third frame and only
   it, and draining is the whole recovery. Measured both in loop-back and
-  from the other board.
+  from the other board (eight frames blasted, three drained, the last
+  0xB7 with BUFOVF).
 - **Parity errors are counted, not delivered.** The peer sending odd
   parity into a receiver configured for even flags PERR on every frame,
   and the data is still readable in the resource's `UsartFrame`; through
@@ -574,71 +588,64 @@ the listing's count above.
 - **RS-485's XDIR is exactly guard + frame.** Measured on PE3 with a TCB
   pulse-width meter through the event system, with the peer receiving the
   frames: **27 500 CLK_PER ticks at 9600** against an expected 27 500
-  (one baud clock of guard plus ten frame bits, exact) and **2290-2291
-  at 115 200** against an expected 2288.
+  (one baud clock of guard plus ten frame bits, exact) and **2291 at
+  115 200** against an expected 2288.
 - **IRCOM works on a wire, and TXPL is a TRANSMITTER knob only.** Both
   ends in IRCOM at 115 200 round-trip cleanly with the default 3/16
-  pulses and with a fixed 60-CLK_PER pulse. With TXPL = 0xFF the
-  transmitter really does become plain asynchronous - a normal
-  asynchronous receiver on the other board read all six frames clean -
-  but the IRCOM RECEIVER still expects pulses, and a plain asynchronous
-  sender is NOT readable by it. A pulse-coded transmitter into a plain
-  receiver is not readable either.
+  pulses - against this desk's peer only with PE1's INVEN, because its
+  coder sends a 0 as a HIGH pulse on an idle-LOW line where this one
+  sends and takes LOW pulses on an idle-high line (uninverted, every
+  echo was wrong while the peer still read this board's frames). With
+  TXPL = 0xFF the transmitter really does become plain asynchronous - a
+  normal asynchronous receiver on the other board read all six frames
+  clean - but the IRCOM RECEIVER still expects pulses, and a plain
+  asynchronous sender is NOT readable by it (five echoes of six wrong). A
+  pulse-coded transmitter into a plain receiver is not readable either.
 - **RXPL counts PERIPHERAL CLOCK cycles, not receiver samples.** At
   115 200 on a 24 MHz CLK_PER a bit is 208 peripheral clocks and the
-  3/16 pulse is 39 of them. Sweeping the DUT's RXPL against that pulse:
-  0, 6 and 20 pass; **40, 60, 100 and 127 block completely**. Rejection
-  starts exactly where RXPL + 1 exceeds the pulse width in CLK_PER, not
-  where it exceeds three of sixteen samples.
-- **The one-wire bus works, collision detection included.** With the two
-  TXD pads jumpered and both boards in LBME + ODME (pads left as inputs
-  under their pull-ups, errata 2.16.1), the DUT and the peer exchanged
-  frames half duplex at 19 200 with an explicit talk/listen turnaround:
-  every frame came back through the DUT's own echo path and the peer
-  answered each one. Then, with the peer commanded to transmit into the
-  DUT's NEXT frame 150 us after the trigger, the echo of an all-ones
-  frame differed from what was sent - the open-drain wired-AND of two
-  transmitters, seen exactly where 27.3.3.2.6 says to look for it. A
-  responder cannot collide with the frame that triggered it: it only
-  knows a frame began once it has all of it.
-- **Both synchronous roles work on a real XCK.** With the DUT as
+  3/16 pulse is 39 of them. Sweeping this board's RXPL against the peer's
+  pulse: 0, 6 and 20 pass; **40, 60, 100 and 127 block completely**.
+  Rejection starts exactly where RXPL + 1 exceeds the pulse width in
+  CLK_PER, not where it exceeds three of sixteen samples.
+- **The one-wire bus works, collision detection included.** On PE0's
+  wire - here the crossed pair itself, the peer's RXD pin meeting PE0 -
+  with this board in LBME + ODME (the pad an input under its pull-up,
+  errata 2.16.1) and the peer pulling the wire low or releasing it, the
+  two exchanged frames half duplex at 19 200: every frame came back
+  through this board's own echo path and the peer answered each one.
+  Then, with the peer commanded to transmit into this board's NEXT frame
+  150 us after the trigger, the echo of an all-ones frame differed from
+  what was sent - the wired-AND of two open-drain transmitters, seen
+  exactly where 27.3.3.2.6 says to look for it. A responder cannot
+  collide with the frame that triggered it: it only knows a frame began
+  once it has all of it.
+- **Both synchronous roles work on a real XCK.** With this board as
   SyncHost driving XCK on PE2 and the peer as a client, eight frames
   arrived with an exact checksum and zero errors at **100 kHz and
   1 MHz**, in **both INVEN phases** (host and client must invert
   together: INVEN on the host's output inverts the physical waveform, so
   a client that does not follow samples on the wrong edge). With the
-  roles reversed - the peer driving XCK, the DUT as SyncClient - the same
-  eight frames arrived exactly at both rates. **The client's CLK_PER/4
-  ceiling is real**: at an XCK of 12 MHz, twice the 6 MHz ceiling at
-  CLK_PER = 24 MHz, the DUT reads seven or eight frames whose checksum
-  is wrong every time (0x351, 0x452, 0x2b7 against an expected 0x31c) -
-  corrupted, never clean, run after run. Note that 12 MHz is the only
-  rate above the ceiling this clock can produce: with S = 2 the host's
-  divisor is an integer, so the achievable XCK rates near the top are
-  CLK_PER/2 = 12 MHz, CLK_PER/4 = 6 MHz, CLK_PER/6 = 4 MHz.
+  roles reversed - the peer driving XCK, this board as SyncClient - the
+  same eight frames arrived exactly at both rates. **The client's
+  CLK_PER/4 ceiling is real**: at an XCK of 12 MHz, twice the 6 MHz
+  ceiling at CLK_PER = 24 MHz, this board read five frames whose checksum
+  is wrong (0x1ee and 0x4de against an expected 0x31c) - corrupted,
+  never clean.
 - **A synchronous client has to read as it goes.** Eight frames do not
   fit in a three-deep receive FIFO, and in synchronous mode they arrive
   as fast as the host clocks them: draining after the fact returns three
-  frames whatever the wire did. This is not a silicon fact, it is the
-  FIFO depth above - but it is the one that makes a client direction
-  look broken unless the reader collects live.
+  frames whatever the wire did - the FIFO depth above, and the reason a
+  client direction looks broken unless the reader collects live.
 - **Rebase is transparent, under real traffic too.** 24 -> 12 -> 24 MHz
   with the USART among a `DynamicClock`'s users: loop-back traffic stays
   clean across every switch and the bit time holds at 8.7 us (208
   CLK_PER ticks at 24 MHz, 104 at 12 MHz). Streaming 96 counted bytes
   through the `Uart` task across the same two switches, the other board
-  received all 96 with an exact checksum and zero FERR, PERR and BUFOVF.
+  received all 96 with an exact checksum and zero FERR, PERR and BUFOVF;
+  its span over the stream, 209 609 ticks against 11 503 for 95 gapless
+  frames, is this board's paced writes, not the wire.
 - **Host SPI runs in loop-back in all four phase/order combinations**
   and the rate is exactly CLK_PER / (2 x BAUD[15:6]).
-- **Host SPI talks to a real SPI client exactly**, in all four
-  phase/polarity combinations and in both bit orders, twelve bytes each
-  way at 750 kHz - `MspiHost` on USART4 (TXD PE0, RXD PE1, XCK PE2)
-  against `avrdx/spi.hpp`'s client on SPI0 ALT1, straight across the
-  desk's PORTE link (`test_avr_spi` test `r`). `sample_trailing` (UCPHA)
-  and `invert_sck` map onto the SPI chapter's CPHA and CPOL bit for bit,
-  so `SpiMode` 0..3 = `{invert_sck, sample_trailing}`, and `lsb_first`
-  (UDORD) onto DORD. There is no client select in this mode: the client
-  at the other end has to select itself.
 - **`release()` really releases**: PORTMUX reads NONE again, the TXD
   pin's direction bit is back to input, and `MspiHost::release()` also
   clears the INVEN `invert_sck` put on the XCK PIN - a PORT bit the
@@ -650,16 +657,16 @@ the listing's count above.
 
 Measured by `test_avr_sleep` (set `y`, 10 verdicts on this alone) rather
 than by `test_avr_serial`: it needs a device that is genuinely asleep,
-and that suite owns the sleep modes. The peer sends one commanded byte at
-a commanded rate on the shared one-wire link while the DUT waits in
+and that suite owns the sleep modes. A second AVR128DB48 sent one
+commanded byte at a commanded rate on a shared one-wire link while the DUT waited in
 Standby with `SFDEN` armed and `RXSIE` on. Three main-clock restart
 times are swept - a crystal (1.77 ms), OSCHF with the regulator asleep
 (313 us) and OSCHF with `PMODE = FULL` (23.6 us), all measured in
 platform.md.
 
 - **It works through LBME.** The detector listens to whatever the
-  receiver listens to, so on this desk - one wire between the two TXD
-  pads - it is the TXD PAD that wakes the device. That is a fact of this
+  receiver listens to, so on that wiring - one wire between the two TXD
+  pads - it is the TXD PAD that wakes the device. That is a fact of the
   wiring, not a promise of chapter 27.
 - **With the main clock kept alive, a start bit wakes the device at
   every rate and the WAKING FRAME survives**: 9600, 115200 and 460800
@@ -737,16 +744,15 @@ Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
 - **`DBGCTRL.DBGRUN`**;
-- **the suite's refusal path** (a leg the peer refuses, printed SKIPPED
-  and judged nothing): the avrdx `usart_peer` refuses no configuration
-  the suite asks of it, so no run has taken the path; a peer of another
-  silicon that cannot serve a leg's configuration would;
-- **the peer's dark discipline, its span and its repeated blast**: the
-  avrdx `usart_peer` releases its pads while searching, naks only while
-  engaged, stamps every received character and repeats a blast, and the
-  suite reads the 16-byte Report and prints the span in letter `t` -
-  compiled for every package, the two-board half not run since: its
-  peer on this desk is a SAM C21, whose `usart_peer` is not written yet;
+- **IRCOM's fixed transmit pulse across the wire** (TXPLCTRL other than
+  0): this desk's peer transmits 3/16 pulses only, and `s` skips the leg
+  by its kind - an avrdx peer would measure it;
+- **Host SPI against a real SPI client** (`MspiHost` against
+  `avrdx/spi.hpp`'s client, `test_avr_spi` r): this desk's SPI peer is a
+  SAM C21, whose SERCOM is not a USART while it is an SPI - an avrdx SPI
+  peer would measure it;
+- **the repeated blast** of `usart_link.hpp`: no letter of `y` repeats
+  one;
 - **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4
   default were driven, on 48-pin silicon only. USART2 is the bench

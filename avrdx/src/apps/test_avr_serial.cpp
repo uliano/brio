@@ -51,8 +51,11 @@
 // PAD, so a pinless route receives nothing (measured, and what
 // usart.hpp refuses). The two-board half needs the crossed pair - this
 // board's PE0 to the peer's PE1, PE1 to the peer's PE0, PE2 to PE2,
-// GND to GND - with `usart_peer` flashed on the peer. Test `w` alone
-// wants a single PE0-PE0 wire instead and is therefore NOT part of `y`.
+// GND to GND - with `usart_peer` flashed on the peer. Test `w` wants a
+// shared wire on this board's TXD pad: a single PE0-PE0 wire to an avrdx
+// peer, or the crossed pair itself against a samc21 peer, which puts its
+// single wire on this board's TXD pad by itself (its RXD pin meets PE0);
+// it is NOT part of `y`.
 // USART0's default route is NOT usable on this board: TXD would be PA0,
 // the 24 MHz crystal pin. The per-instance loop-back smoke therefore
 // uses USART0 ALT1 (PA4/PA5), USART1 default (PC0/PC1) and USART3 ALT1
@@ -1173,9 +1176,18 @@ void xck_invert(bool on) {
     else c &= static_cast<uint8_t>(~PORT_INVEN_bm);
 }
 
+/// RXD's INVEN (PE1): the one inversion this end can supply to a peer
+/// whose IrDA coder pulses the other way (letter s).
+void rxd_invert(bool on) {
+    volatile uint8_t& c = pinctrl_of('E', 1);
+    if (on) c |= PORT_INVEN_bm;
+    else c &= static_cast<uint8_t>(~PORT_INVEN_bm);
+}
+
 /// Command mode, the state everything returns to.
 bool link_command_mode() {
     xck_invert(false);
+    rxd_invert(false);
     const bool ok = U4::init({.route = UsartRoute::def,
                               .baud = usart_baud_reg(SysClock::hz, link::command_baud),
                               .tx = !shared_line(),
@@ -1327,6 +1339,16 @@ bool peer_ident(link::Ident& d) {
     }
     d = link::get_ident(f.data);
     return true;
+}
+
+/// Which implementation the peer is (usart_link.hpp: Ident::version's
+/// high byte), asked afresh by every letter that gates on it - a desk can
+/// change peers between letters; 0 when it did not answer. A gate on it
+/// is for a fact that is the AVR's own (or a capability the peer's
+/// silicon has not got), and prints its reason.
+uint8_t ask_peer_kind() {
+    link::Ident d{};
+    return peer_ident(d) ? link::peer_kind(d.version) : 0;
 }
 
 /// Ask for the report of the last action, after giving the peer's bound
@@ -1567,8 +1589,16 @@ bool dut_autobaud(uint32_t fallback, bool lin, UsartAbWindow w = UsartAbWindow::
 /// IRCOM on the DUT: the IrdaLink task on the crossed pair, the resource
 /// on a shared line (the task has no loop-back knob, and here the
 /// receiver must listen to the pad).
-bool dut_ircom(uint8_t txpl, uint8_t rxpl, uint32_t rate = 115'200) {
-    if (!shared_line()) return Irda::init(clock, rate, txpl, rxpl);
+/// `invert_rx` sets PE1's INVEN first, for a peer whose coder pulses the
+/// other way (letter s) - BEFORE the receiver is up, because toggling
+/// INVEN is an edge on the pin (DS40002247B 18.3.2.3), and flushed after.
+bool dut_ircom(uint8_t txpl, uint8_t rxpl, uint32_t rate = 115'200, bool invert_rx = false) {
+    rxd_invert(invert_rx);
+    if (!shared_line()) {
+        const bool ok = Irda::init(clock, rate, txpl, rxpl);
+        U4::flush_rx();
+        return ok;
+    }
     const uint16_t r = usart_baud_reg(SysClock::hz, rate);
     if (r == 0) return false;
     const bool ok = U4::init({.route = UsartRoute::def, .mode = UsartMode::ircom,
@@ -1594,21 +1624,28 @@ void watch_incoming() {
 // peer transmits 0x00 frames - START plus eight zero bits = nine bit
 // times of continuous low, timed by ITS baud generator, i.e. by ITS
 // crystal with no software in the path - and the DUT's pulse-width
-// meter reads each pulse in ITS own crystal time. At 3600 baud the
-// pulse is ~60000 ticks (17 ppm per tick); sixteen pulses averaged
-// resolve a few ppm. Both boards compute the same BAUD register value
-// for the rate, so the expected width is exactly 9 x reg / 4 ticks
-// (S = 16) and the ratio measured/expected is the ratio of the two
-// clocks, nothing else. Each capture reads one tick short at div1
-// (test_avr_timer's finding: capture = interval - 1 CLK_PER), which
-// at 60000 ticks would masquerade as 17 ppm - corrected below.
+// meter reads each pulse in ITS own crystal time. The rate is one at
+// which the PEER's generator is what this board's is, so that the
+// expected width is exactly 9 x reg / 4 ticks (S = 16, reg this board's
+// BAUD) and the ratio measured/expected is the ratio of the two clocks,
+// nothing else: 3600 baud against an avrdx peer (both ends compute BAUD
+// 26667, the same quantization at both ends), 3750 against a samc21 one
+// (BAUD 25600 here, exact; 400.0 on that peer's FRACTIONAL generator,
+// exact too - its arithmetic one would be 0.1 % off at either rate). The
+// pulse is about 60000 ticks (17 ppm per tick); sixteen pulses averaged
+// resolve a few ppm. Each capture reads one tick short at div1
+// (test_avr_timer's finding: capture = interval - 1 CLK_PER), which at
+// 60000 ticks would masquerade as 17 ppm - corrected below.
 
 void tx_clocks() {
     print(serial, "x clock comparison: the peer board's 9-bit low pulses in this board's crystal time", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
-    constexpr uint32_t rate = 3600;
+    const uint8_t kind = ask_peer_kind();
+    const uint32_t rate = kind == link::peer_samc21 ? 3750u : 3600u;
     const uint16_t reg = usart_baud_reg(SysClock::hz, rate);
+    print(serial, "  peer kind ", hex(kind), ": ", rate, " baud (BAUD ", reg,
+          " here, the peer's generator exact or identical there)", crlf);
     link::Params a{};
     a.cfg.rate = rate;
     a.count = 40;
@@ -1664,9 +1701,12 @@ void tx_clocks() {
 // Not part of `y`: it needs the peer's own console command '2' started
 // at the same time, and it is the answer to "is the desk wired the way
 // this suite expects?" - a question no in-band protocol can ask when
-// the wires are the thing that is broken. Each board drives its own PE0 with
-// a slow square wave (the DUT at 5 Hz, the peer at 7) and counts the
-// edges on the pins it only listens to.
+// the wires are the thing that is broken. Each board drives its four link
+// pins with four square waves - PE0..PE3 at 2, 4, 8 and 16 Hz here, and on
+// the peer the pin each of the DUT's would meet in the crossed-pair
+// convention at the rate of the DUT pin it stands for - and counts the
+// edges on them while the other drives: the rate a pin hears names the
+// far pin it is tied to.
 
 constexpr uint16_t probe_ms = 6000;
 constexpr uint16_t probe_half_ms[4] = {250, 125, 62, 31};
@@ -1723,10 +1763,14 @@ void tv_wiring() {
         if (src >= 0) print(serial, "the peer's PE", static_cast<uint8_t>(src), crlf);
         else if (src == -1) print(serial, "nothing", crlf);
         else print(serial, "several drivers or noise", crlf);
+        // PE3 is open on a desk of three wires and meets the peer's
+        // PE3-role pin on one of four (an avrdx peer's PE3, a samc21 peer's
+        // PA17): both are the crossed pair.
         const int8_t want = i == 0 ? 1 : (i == 1 ? 0 : (i == 2 ? 2 : -1));
-        if (src != want) crossed = false;
+        if (src != want && !(i == 3 && src == 3)) crossed = false;
     }
-    verdict("the desk carries the crossed pair (PE0-PE1, PE1-PE0, PE2-PE2)", crossed);
+    verdict("the desk carries the crossed pair (PE0-PE1, PE1-PE0, PE2-PE2, PE3 open or PE3-PE3)",
+            crossed);
     quiesce();
     (void)link_command_mode();
 }
@@ -1748,7 +1792,11 @@ void tj_link() {
     const bool got = peer_ident(d);
     verdict("IDENT answered", got);
     if (got) {
-        print(serial, "  peer label='", d.label, "' clock=", d.xtal ? "XTAL" : "OSCHF",
+        // The label is NUL PADDED, not terminated: eight characters fill it.
+        char label[9] = {};
+        for (uint8_t i = 0; i < 8; ++i) label[i] = d.label[i];
+        print(serial, "  peer label='", static_cast<const char*>(label), "' clock=",
+              d.xtal ? "XTAL" : "RC",
               " sanity=", hex(d.sanity), " fw=", hex(d.version), crlf);
         // A SECOND CHIP, not a name: the label is the peer's id, and the
         // half needs only that it is NOT this board - which board sits
@@ -1761,8 +1809,8 @@ void tj_link() {
         verdict("the peer names a board, and not this one", n != 0 && !same);
         verdict("the peer runs usart_peer", d.sanity == link::ident_sanity);
         if (!d.xtal) {
-            print(serial, "  NOTE: the peer board's 24 MHz crystal did not start - its rates come "
-                          "from OSCHF", crlf);
+            print(serial, "  NOTE: the peer board's time base is not its crystal - its rates come "
+                          "from an RC oscillator", crlf);
         }
     } else {
         verdict("the peer names a board, and not this one", false);
@@ -2650,17 +2698,42 @@ void tr_rs485() {
 
 // ---- s: IRCOM on the wire -------------------------------------------------------
 
+/// THE PULSE SENSE OF A SAMC21 PEER'S CODER. This board's IRCOM pins carry
+/// "the inverted values of the infrared pulse" (DS40002247B 27.3.3.2.7): a
+/// 0 bit leaves as a LOW pulse on an idle-high line, and a LOW pulse is
+/// what the receiver takes as a 0. The SAM C21 transmits a 0 bit as a HIGH
+/// pulse and takes an accepted LOW pulse as a 0 (DS60001479M 31.6.3.3, the
+/// note under figure 31-10). So this board's frames reach that peer as
+/// they are, and the peer's reach this receiver only inverted - which only
+/// this end can supply, PE1's INVEN (the SAM C21's PORT has no inversion).
+/// The reading is the letter's first verdict pair: inverted the peer's
+/// frames read clean, uninverted they do not.
+constexpr bool samc21_irda_inverted = true;
+
 void ts_irda() {
     print(serial, "s IRCOM across the wire at 115200 (the mode's IrDA ceiling)", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
+    const uint8_t kind = ask_peer_kind();
+    const bool sam = kind == link::peer_samc21;
+    const bool inv = sam && samc21_irda_inverted;
 
-    struct IrCase { uint8_t txpl; uint8_t rxpl; const char* name; bool expect; };
+    struct IrCase { uint8_t txpl; uint8_t rxpl; const char* name; bool expect; bool inverted; };
     const IrCase cases[] = {
-        {0x00, 0x00, "3/16 pulses both ways", true},
-        {0x3C, 0x00, "a fixed 60-cycle pulse", true},
+        {0x00, 0x00, "3/16 pulses both ways", true, inv},
+        {0x00, 0x00, "3/16 pulses with the peer's sense not matched", false, !inv},
+        {0x3C, 0x00, "a fixed 60-cycle pulse", true, inv},
     };
     for (const IrCase& ic : cases) {
+        // The mismatched sense is a question for a samc21 peer alone: an
+        // avrdx peer's pins pulse the way this board's do.
+        if (ic.inverted != inv && !sam) continue;
+        if (ic.txpl != 0u && sam) {
+            print(serial, "  SKIPPED, no verdict claimed: ", ic.name, " - the samc21 peer's IrDA "
+                          "coder transmits 3/16 of a bit only (DS60001479M 31.6.3.3); a fixed "
+                          "TXPLCTRL pulse is a capability its silicon has not got", crlf);
+            continue;
+        }
         link::Cfg pc{};
         pc.mode = link::Mode::ircom;
         pc.rate = 115'200;
@@ -2674,14 +2747,19 @@ void ts_irda() {
             (void)link_command_mode();
             continue;
         }
-        const bool up = dut_ircom(ic.txpl, ic.rxpl);
+        const bool up = dut_ircom(ic.txpl, ic.rxpl, 115'200, ic.inverted);
         const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
         link::Report r{};
         const bool have = peer_report(r, 10);
-        print(serial, "  ", ic.name, ": wrong=", bad, " peer count=", have ? r.count : 0,
-              crlf);
+        print(serial, "  ", ic.name, ic.inverted ? " (PE1 inverted)" : "", ": wrong=", bad,
+              " peer count=", have ? r.count : 0, " ferr=", have ? r.ferr : 0, crlf);
+        if (bad != 0 && bad != 6) {
+            print(serial, "    first mismatch: sent ", hex(echo_first_sent), " got ",
+                  hex(echo_first_got), " flags ", hex(echo_first_flags), crlf);
+        }
         verdict(ic.name, ic.expect ? " works" : " blocks reception",
                 up && (ic.expect ? bad == 0 : bad == 6));
+        (void)link_command_mode();
     }
 
     // The RXPL filter, swept rather than guessed: at 115200 on a 24 MHz
@@ -2699,7 +2777,7 @@ void ts_irda() {
             a.count = 6;
             a.ms = bound_ms(115'200, 24);
             if (!peer_act(link::Op::echo, a)) { (void)link_command_mode(); continue; }
-            const bool up = dut_ircom(0x00, rx);
+            const bool up = dut_ircom(0x00, rx, 115'200, inv);
             const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
             print(serial, "  RXPL ", rx, " (", rx + 1, " samples needed): wrong=", bad,
                   crlf);
@@ -2886,19 +2964,33 @@ void tu_lbme_pad() {
     (void)link_command_mode();
 }
 
-// ---- w: the one-wire bus (needs the PE0-PE0 jumper) -----------------------------
+// ---- w: the one-wire bus (a shared wire on this board's TXD pad) ---------------
+//
+// The wire is THIS board's TXD pad, PE0, with both transmitters on it:
+// against an avrdx peer that is a single PE0-PE0 jumper (the shared
+// topology); against a samc21 peer it is the crossed pair itself - that
+// peer's RXD pin meets PE0, and on onewire and collide it puts its single
+// wire there by itself (TxD and RxD on one pad, and its other data pad
+// released). The version's high byte says which (usart_link.hpp).
 
 void tw_onewire() {
-    print(serial, "w one-wire on a SHARED line - REQUIRES THE TWO TXD PADS JUMPERED "
-                  "(PE0 to PE0)", crlf);
+    print(serial, "w one-wire on a SHARED line: this board's TXD pad (PE0) and one pad of "
+                  "the peer's", crlf);
     quiesce();
     if (!ensure_link()) { verdict("the peer is reachable", false); return; }
     if (!shared_line()) {
-        print(serial, "  SKIPPED: this desk carries the crossed full-duplex pair, which "
-                      "has no shared line for two transmitters to share", crlf);
-        return;
+        const uint8_t kind = ask_peer_kind();
+        if (kind != link::peer_samc21) {
+            print(serial, "  SKIPPED: this desk carries the crossed full-duplex pair and the peer "
+                          "(kind ", hex(kind), ") cannot put its transmitter on this board's "
+                          "TXD wire - an avrdx peer needs the PE0-PE0 jumper", crlf);
+            return;
+        }
+        print(serial, "  (the crossed pair and a samc21 peer: it joins PE0's wire through its "
+                      "RXD pin, the test runs)", crlf);
+    } else {
+        print(serial, "  (this desk carries the shared wire: the test runs)", crlf);
     }
-    print(serial, "  (this desk carries the shared wire: the test runs)", crlf);
     link::Params a{};
     a.cfg.rate = 19'200;
     a.count = 4;
@@ -2906,6 +2998,7 @@ void tw_onewire() {
     verdict("the peer joins the one-wire line", peer_act(link::Op::onewire, a));
     verdict("DUT one-wire init", Line::init(clock, 19'200u));
     bool echoed = true, answered = true;
+    uint16_t first_back = 0xFFFF, first_flags = 0;
     for (uint8_t i = 0; i < 4; ++i) {
         const uint8_t v = static_cast<uint8_t>(0xA5 + i);
         Line::talk();
@@ -2913,8 +3006,20 @@ void tw_onewire() {
         echoed = echoed && Line::echo_matches(v, 400'000u);
         (void)Line::listen(400'000u);
         const auto back = U4::wait(400'000u);
-        answered = answered && back && back->clean() &&
-                   static_cast<uint8_t>(back->data) == static_cast<uint8_t>(v ^ 0xFFu);
+        const bool ok = back && back->clean() &&
+                        static_cast<uint8_t>(back->data) == static_cast<uint8_t>(v ^ 0xFFu);
+        if (!ok && answered) {
+            first_back = back ? back->data : 0xFFFF;
+            first_flags = back ? static_cast<uint16_t>((back->frame_error ? 1u : 0u) |
+                                                       (back->parity_error ? 2u : 0u) |
+                                                       (back->overflow ? 4u : 0u))
+                               : 0x8000u;
+        }
+        answered = answered && ok;
+    }
+    if (!answered) {
+        print(serial, "    first wrong answer: ", hex(first_back), " flags ", hex(first_flags),
+              " (0xffff/0x8000: none came)", crlf);
     }
     verdict("every frame comes back through the DUT's own echo path", echoed);
     verdict("the peer answers half duplex on the same wire", answered);
@@ -2976,8 +3081,8 @@ void help() {
                   "l frame matrix | m errors | n waveforms | o auto-baud foreign | "
                   "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad",
           crlf);
-    print(serial, "  v wiring probe (with the peer board's '2') | w one-wire (needs the "
-                  "PE0-PE0 jumper) | x clock comparison (ppm); none of these is in y",
+    print(serial, "  v wiring probe (with the peer board's '2') | w one-wire (a PE0-PE0 "
+                  "jumper, or a samc21 peer) | x clock comparison (ppm); none of these is in y",
           crlf);
     print(serial, "  z = all single-board, y = all two-board", crlf);
 }

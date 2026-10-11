@@ -57,8 +57,8 @@
 //   4. the board hands the console back at 115200 8N1 and prints its
 //      verdicts.
 //
-// What is exercised, letter by letter - a..d, q, r, t and w need nothing
-// outside the board and are what z runs; e..p and s stream traffic over the
+// What is exercised, letter by letter - a..d, g, q, r, t and w need
+// nothing outside the board and are what z runs; e..p and s stream traffic over the
 // console and are driven by brio stress; x stops the board and runs by its
 // name alone:
 //   a  the baud generator's arithmetic, and its ladder - 9600 baud to
@@ -68,6 +68,11 @@
 //   c  the transmit ring's contract under pressure
 //   d  the transmit engine's facts and its claim: one owner at a time;
 //      its level read back from the armed channel
+//   g  the RESOURCE past the console's regime, polled on the loop: every
+//      sampling regime and the synchronous host timed on the wire, RXEN
+//      and TXEN switched at run time (a disabled transmitter still drives
+//      its pad, read under the pad's pull-down), the IrDA coder's pulse
+//      sense on the pad
 //   e  echo through the plain interrupt transport
 //   f  echo with the DMA transmitter
 //   h  echo at 1 and 2 Mbaud: the DMA transmitter beside the interrupt
@@ -151,7 +156,7 @@ constexpr UPlain plain;
 
 using Sc5 = UPlain::Resource;
 
-TestBench<UPlain, 20> bench;
+TestBench<UPlain, 21> bench;
 
 using brio::crlf;
 using brio::print;
@@ -1330,6 +1335,295 @@ bool wire_rungs(std::initializer_list<uint32_t> rates) {
     return ok;
 }
 
+// ---- g - the resource's clocking and its directions, on the loop -------------
+//
+// What the RESOURCE offers past the console's regime (docs/samc21/sercom.md),
+// each driven POLLED on the loop's pad - the transmitter fed whenever DRE
+// stands, every frame read back as it lands - and timed from the first
+// DATA write to TXC against the run's wire time at the rate ASKED, on the
+// core clock that is generator 0's own, so the reading judges the divisor:
+//  - every sampling regime: 16x and 8x on both generators, 3x arithmetic,
+//    at rates up to 2 Mbaud - a polled turn that both feeds DATA and reads
+//    the loop back is the CPU's, not the wire's, past that (measured:
+//    3 and 4 Mbaud read 1015 and 1033 whatever the regime);
+//  - a synchronous host hearing itself through the pad (the internal XCK,
+//    PA19 not muxed: nothing leaves the chip but TxD);
+//  - RXEN and TXEN switched on a running instance: a disabled receiver
+//    takes nothing; a disabled transmitter sends nothing - and does NOT
+//    release its pad, which is the measured fact here: read under the
+//    pad's pull, a pull-DOWN under the SERCOM's mux (31.5.1), the pad
+//    falls with the instance disabled or the pad handed to PORT, and
+//    rises again when it is handed back to the SERCOM with the
+//    transmitter still off - driven, not floating. THE CONDITION: the pad
+//    meets the far board's RxD, which must hold no pull - its dark
+//    console, or its USART peer while that SEARCHES (no pull on any link
+//    pad, usart_link.hpp's dark discipline), both qualify; a far board
+//    pulling its RxD up would make the reading its pull's;
+//  - the IrDA coder's pulse sense, which the loop cannot hear (31.6.3.3:
+//    "the polarity of the transmitter and receiver are opposite"): the
+//    pad's idle level read, and a 0x00 frame sampled, high in its pulses.
+
+using LoopPad = Pin<'A', 18>;
+
+/// The resource up on the loop's pad under `c`, polled: no interrupt.
+bool resource_up(const SercomUartConfig& c) {
+    Nvic::disable(Sc1::irq());
+    loop_live = Loop::none;
+    Sc1::bus_clock(true);
+    if (!Sc1::core_clock(0) || !Sc1::reset() || !Sc1::configure(c) || !Sc1::enable(true)) {
+        return false;
+    }
+    LoopPad::function(PinFunction::c, {.input_enable = true});
+    loop_settle(115200);
+    Sc1::flush_rx();
+    return true;
+}
+
+void resource_down() {
+    Sc1::release();
+    LoopPad::release();
+    LoopPad::input();
+}
+
+struct ResourceRun {
+    bool up = false;
+    uint32_t sent = 0;
+    uint32_t got = 0;
+    uint32_t bad = 0;
+    uint32_t permille = 0;
+};
+
+/// `frames` frames out and back through the pad, `bits` a frame, at the
+/// rate `baud` asked. The frame's value walks so a slip is a mismatch.
+ResourceRun resource_run(const SercomUartConfig& c, uint32_t baud, uint32_t bits) {
+    ResourceRun r{};
+    r.up = resource_up(c);
+    if (!r.up) {
+        resource_down();
+        return r;
+    }
+    uint32_t frames = baud / (100u * bits);
+    frames = frames < 16u ? 16u : (frames > 256u ? 256u : frames);
+    const uint64_t wire = static_cast<uint64_t>(bits) * frames * SysClock::hz / baud;
+    // The bound is a count of turns, not a clock read: the ticker's cycle
+    // count costs some tens of cycles, and a turn has to be shorter than
+    // a 3x frame at 4 Mbaud (120 cycles) for the run to be the wire's.
+    while (!Sc1::dre_flag()) {
+    }
+    Sc1::data(0x35u);
+    const uint32_t t0 = cycles_now();
+    r.sent = 1;
+    for (uint32_t turns = 64u * static_cast<uint32_t>(wire); r.got < frames && turns != 0u;
+         --turns) {
+        if (r.sent < frames && Sc1::dre_flag()) {
+            Sc1::data(static_cast<uint8_t>(0x35u + r.sent));
+            ++r.sent;
+        }
+        if (Sc1::rxc_flag()) {
+            const uint16_t st = Sc1::status();
+            const uint8_t d = static_cast<uint8_t>(Sc1::data());
+            if ((st & SercomStatus::receive_errors) != 0u) {
+                Sc1::clear_status(st & SercomStatus::receive_errors);
+                ++r.bad;
+            } else if (d != static_cast<uint8_t>(0x35u + r.got)) {
+                ++r.bad;
+            }
+            ++r.got;
+        }
+    }
+    const uint32_t spin0 = cycles_now();
+    while (!Sc1::txc_flag() && cycles_now() - spin0 < ms_cycles(2)) {
+    }
+    const uint32_t took = cycles_now() - t0;
+    r.permille = static_cast<uint32_t>(1000ull * took / wire);
+    resource_down();
+    return r;
+}
+
+struct RegimeRung {
+    UartSampling sampling;
+    uint32_t baud;
+    const char* name;
+};
+
+void tg_resource() {
+    print(plain, "  regime        rate     BAUD    sent got bad  wire (thousandths)", crlf);
+    const RegimeRung rungs[] = {
+        {UartSampling::x16_arithmetic, 115200, "16x arith"},
+        {UartSampling::x16_fractional, 3750, "16x frac"},
+        {UartSampling::x16_fractional, 115200, "16x frac"},
+        {UartSampling::x8_arithmetic, 2'000'000, "8x arith"},
+        {UartSampling::x8_fractional, 2'000'000, "8x frac"},
+        {UartSampling::x3_arithmetic, 2'000'000, "3x arith"},
+    };
+    bool every = true, timed = true;
+    for (const RegimeRung& g : rungs) {
+        const auto reg = sercom_uart_baud_reg(SysClock::hz, g.baud, g.sampling);
+        if (!reg) {
+            every = false;
+            continue;
+        }
+        const ResourceRun r = resource_run(
+            {.pads = loop_pads, .baud = *reg, .sampling = g.sampling}, g.baud, 10);
+        print(plain, "  ", g.name, "  ", g.baud, "  ", *reg, "  ", r.sent, " ", r.got, " ", r.bad,
+              "  ", r.permille, crlf);
+        every = every && r.up && r.got == r.sent && r.sent >= 16u && r.bad == 0u;
+        timed = timed && wire_ok(r.permille);
+    }
+    bench.verdict("every sampling regime carries its frames through the pad, byte-exact", every);
+    bench.verdict("and each runs at the rate asked (16x and 8x on both generators, 3x)", timed);
+
+    // The synchronous host, both clock polarities, the internal XCK at 1 MHz.
+    {
+        const uint8_t reg = sercom_sync_baud_reg(SysClock::hz, 1'000'000).value();
+        bool both = true, both_timed = true;
+        for (uint8_t pol = 0; pol < 2; ++pol) {
+            const ResourceRun r = resource_run({.pads = loop_pads, .baud = reg,
+                                                .synchronous = true, .invert_clock = pol != 0},
+                                               1'000'000, 10);
+            print(plain, "  sync host 1 MHz, CPOL ", pol, ": sent ", r.sent, " got ", r.got,
+                  " bad ", r.bad, ", wire ", r.permille, crlf);
+            both = both && r.up && r.got == r.sent && r.sent >= 16u && r.bad == 0u;
+            both_timed = both_timed && wire_ok(r.permille);
+        }
+        bench.verdict("a synchronous host hears its own frames through the pad, either CPOL",
+                      both);
+        bench.verdict("at f_ref / (2 (BAUD + 1)): 1 MHz from BAUD 23", both_timed);
+    }
+
+    const uint16_t reg115 = sercom_baud_reg(SysClock::hz, 115200).value();
+    const SercomUartConfig plain_cfg{.pads = loop_pads, .baud = reg115};
+
+    // RXEN at run time: a disabled receiver takes nothing; on again, all.
+    {
+        bool up = resource_up(plain_cfg);
+        up = Sc1::enable_rx(false) && up;
+        const bool rx_off = !Sc1::rx_enabled();
+        for (uint8_t i = 0; i < 4; ++i) {
+            while (!Sc1::dre_flag()) {
+            }
+            Sc1::data(static_cast<uint8_t>(0xA0u + i));
+        }
+        spin_ms(1);
+        const bool heard_off = Sc1::rxc_flag();
+        up = Sc1::enable_rx(true) && up;
+        uint8_t got = 0;
+        for (uint8_t i = 0; i < 4; ++i) {
+            while (!Sc1::dre_flag()) {
+            }
+            Sc1::data(static_cast<uint8_t>(0xB0u + i));
+            const uint32_t w0 = cycles_now();
+            while (!Sc1::rxc_flag() && cycles_now() - w0 < ms_cycles(1)) {
+            }
+            if (Sc1::rxc_flag() && static_cast<uint8_t>(Sc1::data()) == 0xB0u + i) ++got;
+        }
+        resource_down();
+        print(plain, "  RXEN off: rx_enabled ", rx_off ? 0 : 1, ", heard ", heard_off ? 1 : 0,
+              "; on again: ", got, " of 4", crlf);
+        bench.verdict("enable_rx(false): the receiver takes nothing", up && rx_off && !heard_off);
+        bench.verdict("enable_rx(true): every frame after it read back", up && got == 4u);
+    }
+
+    // TXEN at run time: the pad driven high, then TRI-STATED under the
+    // SERCOM's pull-down (31.5.1); a write while off sends nothing. The
+    // pull itself is proven first, on the pad with the instance disabled.
+    {
+        bool up = resource_up(plain_cfg);
+        LoopPad::function(PinFunction::c, {.input_enable = true, .pull = PinPull::down});
+        (void)Sc1::enable(false);
+        spin_ms(1);
+        const bool high_disabled = LoopPad::read();
+        up = Sc1::enable(true) && up;
+        spin_ms(1);
+        const bool high_on = LoopPad::read();
+        up = Sc1::enable_rx(false) && up;
+        up = Sc1::enable_tx(false) && up;
+        spin_ms(1);
+        const bool high_both_off = LoopPad::read();
+        up = Sc1::enable_rx(true) && up;
+        spin_ms(1);
+        const bool off_flag = !Sc1::tx_enabled();
+        const bool high_off = LoopPad::read();
+        // Driven, or floating at the level it had? Take the pad to PORT
+        // under the same pull-down - it falls - and hand it back to the
+        // SERCOM, the transmitter still off: a floating pad stays low, a
+        // driven one rises.
+        LoopPad::release();
+        LoopPad::input(PinPull::down);
+        spin_ms(1);
+        const bool high_released = LoopPad::read();
+        LoopPad::function(PinFunction::c, {.input_enable = true, .pull = PinPull::down});
+        spin_ms(1);
+        const bool high_remuxed = LoopPad::read();
+        print(plain, "  the pad under its pull-down: instance disabled ",
+              high_disabled ? "HIGH" : "low", ", TXEN and RXEN off ",
+              high_both_off ? "HIGH" : "low", "; TXEN off, the pad to PORT ",
+              high_released ? "HIGH" : "low", " and back to the SERCOM ",
+              high_remuxed ? "HIGH" : "low", crlf);
+        Sc1::flush_rx();
+        Sc1::data(0x5A);
+        spin_ms(1);
+        const bool sent_off = Sc1::rxc_flag();
+        Sc1::flush_rx();
+        up = Sc1::enable_tx(true) && up;
+        spin_ms(1);
+        const bool high_again = LoopPad::read();
+        const bool queued_went = Sc1::rxc_flag();
+        resource_down();
+        print(plain, "  TXEN on: pad ", high_on ? "high" : "LOW", "; off: tx_enabled ",
+              off_flag ? 0 : 1, ", pad ", high_off ? "HIGH" : "low", ", a write sent ",
+              sent_off ? 1 : 0, "; on again: pad ", high_again ? "high" : "LOW",
+              ", the write while off went out ", queued_went ? 1 : 0, crlf);
+        bench.verdict("the transmitter drives its idle high over the pad's pull-down", up && high_on);
+        bench.verdict("the pull-down is live under the mux: the disabled instance's pad falls",
+                      !high_disabled);
+        bench.verdict("enable_tx(false) does NOT release TxD: the pad stays DRIVEN high "
+                      "(to PORT it falls, back to the SERCOM it rises, the transmitter off)",
+                      off_flag && high_off && high_both_off && !high_released && high_remuxed);
+        bench.verdict("and a write while the transmitter is off puts nothing on the wire",
+                      !sent_off);
+        bench.verdict("enable_tx(true) drives the idle high again", high_again);
+    }
+
+    // The IrDA coder's sense: the pad's idle level, and a 0x00 frame
+    // sampled at 9600 (nine 0 bits, so 9 x 3/16 of a bit HIGH if a 0 is a
+    // high pulse: 17 % of the frame's ten bits).
+    {
+        const uint16_t reg = sercom_baud_reg(SysClock::hz, 9600).value();
+        const bool up = resource_up({.pads = loop_pads, .baud = reg, .irda = true});
+        spin_ms(2);
+        const bool idle_high = LoopPad::read();
+        Sc1::flush_rx();
+        uint32_t samples = 0, high = 0;
+        while (!Sc1::dre_flag()) {
+        }
+        Sc1::data(0x00);
+        const uint32_t t0 = cycles_now();
+        const uint32_t frame = 10u * bit_cycles(9600);
+        while (cycles_now() - t0 < frame) {
+            ++samples;
+            if (LoopPad::read()) ++high;
+        }
+        spin_ms(1);
+        bool clean = false;
+        for (uint8_t k = 0; k < 4 && Sc1::rxc_flag(); ++k) {
+            const uint16_t st = Sc1::status();
+            const uint8_t d = static_cast<uint8_t>(Sc1::data());
+            if ((st & SercomStatus::receive_errors) == 0u && d == 0x00u) clean = true;
+            Sc1::clear_status(SercomStatus::receive_errors);
+        }
+        resource_down();
+        const uint32_t pc = samples ? (100u * high) / samples : 0u;
+        print(plain, "  IrDA at 9600: the pad idles ", idle_high ? "HIGH" : "LOW",
+              "; a 0x00 frame high in ", high, " of ", samples, " samples (", pc,
+              " %, 17 % if a 0 is a high pulse of 3/16); read back clean: ", clean ? 1 : 0, crlf);
+        bench.verdict("IrDA: TxD idles LOW and a 0 bit leaves as a HIGH pulse of about 3/16",
+                      up && !idle_high && pc >= 12u && pc <= 22u);
+        bench.verdict("so the coder's own receiver, which takes a LOW pulse as a 0, cannot "
+                      "read it through the pad", !clean);
+    }
+}
+
 // ---- q - tx_idle() on the pad ------------------------------------------------
 
 struct IdleProbe {
@@ -2149,6 +2443,7 @@ int main() {
     bench.letter('b', "every frame format, written and read back", tb_format);
     bench.letter('c', "the transmit ring's contract under pressure", tc_ring);
     bench.letter('d', "the transmit engine's facts and its claim", td_engine);
+    bench.letter('g', "the resource's regimes and its directions, on the loop", tg_resource);
 
     bench.letter('e', "echo, plain transport (host)", te_plain_echo, false);
     bench.letter('f', "echo, DMA transmitter (host)", tf_txdma_echo, false);

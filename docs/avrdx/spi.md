@@ -162,8 +162,8 @@ PE1 to PA18, PE2 to PA19, PE3 to PA17), and `y` asks which: the ident's
 version, its high byte (`spi_link.hpp`). Against it the verdicts that
 are facts about an AVR CLIENT are printed, not judged - `l` MEASURES
 which alignment each regime delivers (that peer maps the regimes, the
-table in `spi_link.hpp`), `m` judges the rates up to CLK_PER/16 and
-prints the rest, `p` judges that every report came and every burst
+table in `spi_link.hpp`), `m` judges the rates up to CLK_PER/8
+(3 MHz, exact in every run against that peer) and prints the rest, `p` judges that every report came and every burst
 arrived - and `r` is SKIPPED (Host SPI frames no select; only the avrdx
 peer's client selects itself). Those AVR-client facts are judged by
 `test_samc_spi` letter h, where the AVR is the peer and the SAM the
@@ -172,7 +172,7 @@ one polled request of this engine, beside a gapped control - from 1.5
 to 12 MHz, the rungs between the crystal's divisions run with this
 board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
 peer to 8 MHz and prints every other peer's ladder. Measured: `z` 184 of
-184 with that peer attached, `y` 90 of 90 - `l` read a dummy leading
+184 with that peer attached, `y` 91 of 91 - `l` read a dummy leading
 every normal and buffer combination of that peer and none of its
 buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
 CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12

@@ -67,6 +67,125 @@ static_assert(sercom_actual_baud(48'000'000, 63019) == 115219);
 static_assert(sercom_actual_baud(48'000'000, 0) == 3'000'000);
 static_assert(sercom_min_ref_hz(115200) == 1'843'200);
 
+// ---- every sampling regime (CTRLA.SAMPR, table 30-2) -------------------------
+static_assert(uart_samples(UartSampling::x16_arithmetic) == 16 &&
+              uart_samples(UartSampling::x16_fractional) == 16 &&
+              uart_samples(UartSampling::x8_arithmetic) == 8 &&
+              uart_samples(UartSampling::x8_fractional) == 8 &&
+              uart_samples(UartSampling::x3_arithmetic) == 3);
+static_assert(uart_fractional(UartSampling::x16_fractional) &&
+              uart_fractional(UartSampling::x8_fractional) &&
+              !uart_fractional(UartSampling::x16_arithmetic) &&
+              !uart_fractional(UartSampling::x3_arithmetic));
+static_assert(static_cast<uint8_t>(UartSampling::x3_arithmetic) == 0x4);
+// The arithmetic generator on a 24 MHz crystal reference: the console rate
+// and the rate letter x of test_avr_serial needs, where it is 0.1 % off.
+static_assert(sercom_baud_reg(24'000'000, 115200).value() == 60503);
+static_assert(sercom_actual_baud(24'000'000, 60503) == 115196);
+static_assert(sercom_baud_reg(24'000'000, 3750).value() == 65372);
+static_assert(sercom_actual_baud(24'000'000, 65372) == 3753);
+// 8x arithmetic: the condition is f_ref / 8.
+static_assert(sercom_uart_baud_reg(24'000'000, 3'000'000, UartSampling::x8_arithmetic).value() == 0);
+static_assert(!sercom_uart_baud_reg(24'000'000, 3'000'001, UartSampling::x8_arithmetic));
+static_assert(!sercom_uart_baud_reg(24'000'000, 1'500'001, UartSampling::x16_arithmetic));
+// 3x arithmetic: f_ref / 3.
+static_assert(sercom_uart_baud_reg(24'000'000, 8'000'000, UartSampling::x3_arithmetic).value() == 0);
+// The FRACTIONAL generator: 8 x BAUD + FP = 8 f_ref / (S f_baud), FP in
+// bits 15:13. Exact where S f_baud divides 8 f_ref.
+static_assert(sercom_fractional_baud_reg(24'000'000, 3750).value() == 400);   // 400.0
+static_assert(sercom_fractional_actual_baud(24'000'000, 400) == 3750);
+static_assert(sercom_fractional_baud_reg(24'000'000, 9600).value() == ((2u << 13) | 156u));  // 156.25
+static_assert(sercom_fractional_actual_baud(24'000'000, (2u << 13) | 156u) == 9600);
+static_assert(sercom_fractional_baud_reg(24'000'000, 2'000'000, 8).value() == ((4u << 13) | 1u));
+static_assert(sercom_fractional_actual_baud(24'000'000, (4u << 13) | 1u, 8) == 2'000'000);
+static_assert(sercom_fractional_baud_reg(24'000'000, 1'500'000).value() == 1);   // the 16x ceiling
+static_assert(!sercom_fractional_baud_reg(24'000'000, 1'500'001));
+static_assert(!sercom_fractional_baud_reg(24'000'000, 183));   // integer part past 8191
+static_assert(sercom_fractional_baud_reg(24'000'000, 184).has_value());
+static_assert(sercom_fractional_actual_baud(24'000'000, 0) == 0);   // integer part 0: not legal
+static_assert(!sercom_fractional_baud_reg(600'000'000, 9600));      // past the 32-bit guard
+// The closest of the two generators, per rate.
+static_assert(sercom_closest_baud(24'000'000, 3750)->sampling == UartSampling::x16_fractional);
+static_assert(sercom_closest_baud(24'000'000, 3750)->reg == 400);
+static_assert(sercom_closest_baud(24'000'000, 115200)->sampling == UartSampling::x16_arithmetic);
+static_assert(sercom_closest_baud(24'000'000, 921600)->sampling == UartSampling::x16_arithmetic);
+static_assert(sercom_closest_baud(24'000'000, 1'000'000)->sampling == UartSampling::x16_fractional);
+static_assert(sercom_closest_baud(24'000'000, 2'000'000, 8)->sampling == UartSampling::x8_fractional);
+static_assert(!sercom_closest_baud(24'000'000, 2'000'000, 16));
+static_assert(!sercom_closest_baud(24'000'000, 9600, 3));   // no fractional generator at 3x
+// The synchronous host: f_xck = f_ref / (2 (BAUD + 1)), eight bits.
+static_assert(sercom_sync_baud_reg(24'000'000, 100'000).value() == 119);
+static_assert(sercom_sync_baud_reg(24'000'000, 1'000'000).value() == 11);
+static_assert(sercom_sync_baud_reg(24'000'000, 12'000'000).value() == 0);
+static_assert(!sercom_sync_baud_reg(24'000'000, 12'000'001));
+static_assert(sercom_sync_baud_reg(24'000'000, 46'875).value() == 255);
+static_assert(!sercom_sync_baud_reg(24'000'000, 46'000));
+static_assert(sercom_sync_actual_hz(24'000'000, 11) == 1'000'000);
+
+// ---- the configuration's own rules -------------------------------------------
+// The crossed pair the samc21 usart_peer uses: TxD PAD[2], RxD PAD[0],
+// XCK on PAD[3] beside it.
+constexpr UartPads link_pads{
+    .tx = SercomPad::pad2,
+    .rx = SercomPad::pad0,
+    .tx_pin = {'A', 6, PinFunction::d},
+    .rx_pin = {'A', 4, PinFunction::d},
+};
+static_assert(uart_xck_pad(SercomPad::pad2) == SercomPad::pad3);
+static_assert(uart_xck_pad(SercomPad::pad0) == SercomPad::pad1);
+constexpr SercomUartConfig sync_host{.pads = link_pads, .baud = 11, .synchronous = true};
+constexpr SercomUartConfig sync_client{
+    .pads = link_pads, .synchronous = true, .external_clock = true, .invert_clock = true};
+constexpr SercomUartConfig ir{.pads = link_pads, .baud = 60503, .irda = true, .rx_pulse = 19};
+constexpr SercomUartConfig frac{.pads = link_pads, .baud = 400,
+                                .sampling = UartSampling::x16_fractional, .sample_adjust = 3};
+static_assert(sercom_uart_config_valid(sync_host) && sercom_uart_config_valid(sync_client) &&
+              sercom_uart_config_valid(ir) && sercom_uart_config_valid(frac));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .sample_adjust = 4}));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .baud = 256, .synchronous = true}));
+static_assert(sercom_uart_config_valid(
+    {.pads = link_pads, .baud = 256, .synchronous = true, .external_clock = true}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = {.tx = SercomPad::pad2, .rx = SercomPad::pad3, .tx_pin = {'A', 6, PinFunction::d},
+              .rx_pin = {'A', 7, PinFunction::d}},
+     .synchronous = true}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = link_pads, .sampling = UartSampling::x8_arithmetic, .synchronous = true}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = link_pads, .baud = 0x2000, .sampling = UartSampling::x16_fractional}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = link_pads, .sampling = UartSampling::x8_arithmetic, .irda = true}));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .synchronous = true, .irda = true}));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .rx_pulse = 1}));
+// The register words carry them.
+static_assert((sercom_uart_ctrla(sync_host) & SERCOM_USART_INT_CTRLA_CMODE_Msk) != 0);
+static_assert((sercom_uart_ctrla(sync_host) & SERCOM_USART_INT_CTRLA_MODE_Msk) ==
+              SERCOM_USART_INT_CTRLA_MODE_USART_INT_CLK);
+static_assert((sercom_uart_ctrla(sync_client) & SERCOM_USART_INT_CTRLA_MODE_Msk) == 0);
+static_assert((sercom_uart_ctrla(sync_client) & SERCOM_USART_INT_CTRLA_CPOL_Msk) != 0);
+static_assert((sercom_uart_ctrla(sync_host) & SERCOM_USART_INT_CTRLA_TXPO_Msk) ==
+              SERCOM_USART_INT_CTRLA_TXPO(1));
+static_assert((sercom_uart_ctrla(frac) & SERCOM_USART_INT_CTRLA_SAMPR_Msk) ==
+              SERCOM_USART_INT_CTRLA_SAMPR(1));
+static_assert((sercom_uart_ctrla(frac) & SERCOM_USART_INT_CTRLA_SAMPA_Msk) ==
+              SERCOM_USART_INT_CTRLA_SAMPA(3));
+static_assert((sercom_uart_ctrlb(ir) & SERCOM_USART_INT_CTRLB_ENC_Msk) != 0);
+static_assert((sercom_uart_ctrlb(frac) & SERCOM_USART_INT_CTRLB_ENC_Msk) == 0);
+
+void link_resource_verbs() {
+    using Sc = Sercom<1>;
+    (void)Sc::configure<sync_host>();
+    (void)Sc::configure<sync_client>();
+    (void)Sc::configure<ir>();
+    (void)Sc::configure<frac>();
+    (void)Sc::enable_tx(false);
+    (void)Sc::enable_tx(true);
+    (void)Sc::enable_rx(false);
+    (void)Sc::enable_rx(true, 100);
+    (void)Sc::tx_enabled();
+    (void)Sc::rx_enabled();
+}
+
 using Serial = Uart<0, pads>;
 static_assert(ByteTransport<Serial> && BulkSink<Serial> && SpanSource<Serial>);
 static_assert(ClockUser<Serial>);

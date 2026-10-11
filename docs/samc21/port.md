@@ -131,6 +131,17 @@ brio::Pin<'B', 31>::function(brio::PinFunction::d, {.input_enable = true});
   wave periods the OUT action keeps driving the pad (a hundred EXTINT
   detections of it) and the TGL action produces none. "In Standby mode,
   only the Out action is possible" holds.
+- **SET and CLR, driven by a timer's compare events.** TC0+TC1 counting
+  a 24 MHz crystal generator as one 32-bit counter, the match events of
+  its two compare channels (EVCTRL.MCEO0 and MCEO1) on two asynchronous
+  channels to event inputs 0 (CLR) and 1 (SET), both naming one pad under
+  PORT's own output: twenty edges a run - a 6-tick pulse with both
+  compares written ahead of it, four pulses of 300 ticks, a 9600-baud
+  frame, each channel's next compare written by the CPU between its
+  edges - every match flag seen in order, and the pad read back at the
+  level its edge was for after each of the nineteen whose successor was
+  5 us or more away, none wrong, in three runs of three. The edges' own
+  timing (28.6.4's "up to three clock cycles") is a far meter's to read.
 - **This is what makes a pad move while the CPU is stopped**, which is
   the one thing the pull-walking of [eic.md](eic.md) cannot do (its
   every step is a CPU store). The chain is in
@@ -159,8 +170,7 @@ Implemented but not bench-verified:
   the engine; the drive strength wants a load and a meter). The pulls
   and `release()` are what every pad-driven letter of this stratum
   stands on (above).
-- **Event inputs 1..3 and the SET / CLEAR actions**: input 0 carries the
-  OUT and TGL measurements and input 1 the AC's stimulus, both with
-  EVACT = OUT; SET and CLR are written, read back and never watched.
-  Nor has one pin been addressed by several inputs at once, which is
-  where table 28-3's priority rule would show.
+- **Event inputs 2 and 3**, and one pin addressed by several inputs at
+  the same instant, which is where table 28-3's priority rule would show
+  (the SET and CLR inputs above name one pin, never at once). A letter
+  firing two inputs on one pad from one generator would measure it.

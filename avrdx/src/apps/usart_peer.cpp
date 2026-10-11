@@ -279,6 +279,10 @@ bool command_mode() {
 /// found, in command mode) when this silicon cannot express it.
 bool apply_cfg(const link::Cfg& c) {
     if (!c.apply) return true;
+    // CTRLC.SBMODE: one or two stop bits and nothing else - the half and
+    // one-and-a-half stops usart_link.hpp encodes (0x81, 0x83) are a
+    // capability this USART has not got, refused like any other.
+    if (c.stop != 1u && c.stop != 2u) return false;
     UsartConfig u{};
     u.route = UsartRoute::def;
     switch (c.mode) {
