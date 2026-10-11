@@ -33,7 +33,7 @@ on the F446's SPI2 - and the peer's `ident` names which one answered
 two wirings exclude each other, the suite PROBES which one is fitted
 before any letter runs, and the letters whose instrument is absent skip
 themselves with the reason printed and no verdict claimed. Family
-fixture `test/family_stm32g0/spi.cpp` plus sixteen negatives under
+fixture `test/family_stm32g0/spi.cpp` plus eighteen negatives under
 `brio check stm32g0`.
 
 ## What the silicon does
@@ -159,7 +159,11 @@ forty bytes with no padding, and a designated initializer follows it.
 A polled request is read through the reference and copied nowhere
 (the arbiter lends it for the call); an asynchronous one is copied once,
 ten word moves, because the pump reads it for its whole tenure.
-`init(clock, max_sck_hz = 0)`, `start(req)` (true = completed inside
+`init(clock, max_sck_hz = 0)` (the shared surface) and `init(clock,
+Config)` - `Config` being `max_sck_hz`, `sck_speed` and `mosi_speed`,
+the classes of the two pads a host drives ("The pads") -, `sck_speed()`
+and `mosi_speed()` (each moving its class between transactions),
+`start(req)` (true = completed inside
 start, false = the ISR posts `TransferDone`), `isr()`, `dma_isr()`,
 `status()` (`spi_ok`, `spi_dma_fault`, or `spi_stalled` when a polled
 wait ran out of its budget - the peripheral clocked nothing, the select
@@ -182,7 +186,9 @@ frames. Below eight bits a frame is still one byte, right-aligned, with
 the unused top bits ignored on the way out and read back as zero.
 
 `SpiClient<n, pins>` - the other end: the polled RUNS and, as their
-degenerate case, the per-frame verbs. `init(clock, Config)`, `enable()`
+degenerate case, the per-frame verbs. `init(clock, Config)` (the
+`SpiConfig` fields a client can be told, `drive_output`, and
+`miso_speed`, the class of the one pad a client drives), `enable()`
 (SPE up, the FIFO left for a run to fill) and `enable(first, second)`
 (SPE up with the first TWO answers already in the FIFO),
 `answer(out, spins)`, `exchange(out, in, spins)`, `receive(in, spins)` -
@@ -256,6 +262,55 @@ fastest on this desk, and inside this client's 32 MHz (DS13560 table 76,
 2.7..3.6 V). As the client of the F446's `host_burst` (letter r below,
 twelve frames at 1.406 MHz) the exchange run is exact both ways.
 
+## The pads
+
+The SPI's pads are GPIO pads in an alternate function, and what the
+silicon offers there that bears on a wire is the output stage's SLEW
+CLASS - OSPEEDR, four classes (RM0444 7.5.3 "very low, low, high, very
+high", brio's `PinSpeed` `low`, `medium`, `high`, `very_high`), their
+reach in the data sheet's output timing (DS13560 table 58, 2.7..3.6 V):
+2 MHz at 50 pF, 10 MHz at 50 pF, 30 MHz at 50 pF, 60 MHz at 30 pF. Each
+item used or declined:
+
+- **The class of every DRIVEN pad, as configuration** - USED.
+  `SpiHost::Config` names `sck_speed` and `mosi_speed`,
+  `SpiClient::Config` names `miso_speed`. `init()` writes each with its
+  pad's alternate function, once; the client's `drive_output(true)`
+  re-applies its class wherever it hands the answer line back; no
+  transaction touches OSPEEDR. The host's `sck_speed()` and
+  `mosi_speed()` move a class between transactions for a program that
+  weighs it, and the next `init()` writes the `Config`'s again. The
+  default is `very_high` on all three, the class the SPI's timing is
+  characterized at (OSPEEDR = 11 at 30 pF: DS13560 table 76, DS12232 and
+  DS12992 the same); no erratum of ES0548 names a pad.
+- **An input's class** - none to give: OSPEEDR acts on the output stage,
+  so a host's MISO and a client's SCK, MOSI and NSS have no field, and a
+  class named for one does not compile (two negative TUs).
+- **The select as a hardware output** - `claim_nss_pad()` hands it at
+  `very_high` and has no field: SSOE and NSSP are measured on the
+  self-link, where the default holds, and no program drives them on a
+  wire.
+- **The FT_c pads** (RM0444 7.5.3's note: they "cannot be set to high
+  speed and to very high speed") - NOT CHECKED: which pad is one is the
+  data sheet's pin table (on the G0B1, PD0 and PD2, the UCPD's CC lines,
+  PD0 carrying SPI2_NSS), and no header of the pack carries it (the gap
+  list).
+
+COST, read in the release listings: `init()` stores each class in the
+task's state (one byte store) and hands it to the pad's
+read-modify-write; `drive_output()` loads the client's once; `start()`,
+the pump, the engines and the runs contain no GPIO access but the
+select's BSRR store.
+
+ON A BUS OF WIRES THE CLASS IS A CORRECTNESS PARAMETER OF EVERY PAD, and
+which class is the BUS's: a fast edge on SCK is seen twice at a far
+client, a fast edge on MOSI or MISO couples into the clock beside it, and
+either puts the far client's stream one bit out of place from that frame
+on. On the desk's jumper wires to the STM32F446RE this host runs MOSI at
+`high`, and this board's `spi_peer` answers at `high` in modes 0 and 3
+and at `medium` in 1 and 2 ("The peer link"); the self-link's short
+wires keep the default.
+
 ## How to use it
 
 **A device on a bus, through the arbiter.** The chip select is a GPIO
@@ -275,6 +330,8 @@ using Cs  = brio::Pin<'A', 15>;
 
 Cs::output(true);                 // deasserted
 (void)Bus::init(clock, 8'000'000);   // 8 MHz ceiling for the whole bus
+// ... or, on a bus of long wires, the two driven pads a class down:
+// (void)Bus::init(clock, {.max_sck_hz = 8'000'000, .mosi_speed = brio::PinSpeed::high});
 
 brio::post<Arb>(Bus::Request{
     .cs = Cs::ref(),
@@ -744,7 +801,7 @@ that verb.
 
 **THE HOST'S DATA PAD IS AN AGGRESSOR ON THE CLOCK AT THE FAR END, AND
 THE RISING-EDGE MODES ARE ITS VICTIMS.** With MOSI at the very-high
-class `SpiHost::init()` gives it, letter `x` (the slip statistics,
+class `SpiHost`'s default gives it, letter `x` (the slip statistics,
 outside `z`) slipped **9 and 10 bursts of 40** in two runs, every one in
 mode 0 or mode 3 - the two that SAMPLE on the rising edge, the host's
 MOSI changing while SCK is LOW - and always the same way: both ends
@@ -754,29 +811,35 @@ the command rate itself letter `p`'s first rung failed in three runs of
 four.
 With the pad ONE NOTCH DOWN, at `high`, the slip is gone - **0 of 40**
 in two runs, and 0 of 40 at `medium` and at `low` too - and the clock pad keeps its
-class, being the edge the client samples on. So the suite re-states the
-peer link's MOSI at `high` after every init (`peer_link_pads()`); the
-self-link letters and letter `s` keep the driver's very-high.
+class, being the edge the client samples on. So every peer letter's
+init is handed MOSI at `high` (`peer_link_config`); the self-link
+letters and letter `s` keep the driver's very-high. x is 0 of 40, and
+letter p ten runs of ten exact at every judged rung.
 
 **AND THE PEER'S OWN ANSWER LINE IS THE OTHER AGGRESSOR**, walked with
 the stm32f4 peer's console (its MISO class) and this end's MOSI at
 `high`, ten bursts a mode: at `very_high` 12 of 40 (modes 0, 1 and 3),
 at `high` 7 of 40 and at `medium` 12 of 40 (all in modes 1 and 2, the
-falling-edge modes), at `low` 0 of 40 - the class that peer re-states.
+falling-edge modes), at `low` 0 of 40 - the class that peer names in its
+client's `Config`.
 
 **THE LADDER CLIMBS TO WHERE THE PEER'S CLIENT SPECIFICATION ENDS.** The
 F446 peer serves every window as one call of its driver's run
 (`SpiClient::answer`/`exchange`, written on TXE) and an exchange on its
 DMA1 streams by default (its report's `serve=dma`), the run with
 `spilink::spare_polled_pump`: both are byte-exact in both directions at
-every code from PCLK/256 to PCLK/4 = 16 MHz, seven runs of seven, where
-the RXNE reload that peer ran before broke at 1 MHz (500 kHz exact, the
-floor verdict failing). The top rung, PCLK/2 = 32 MHz, is OUTSIDE that
-client's specification - DS10693 table 63 gives an F446 slave 22.5 MHz,
-its tv(SO) and this host's setup inside half a clock - and there the
-answer path fails on both serves: the DMA serve still hears all eight
-characters exact (the signature verdict passes), the run loses one. It
-is a figure, not a fault to fix.
+every code from PCLK/256 to PCLK/4 = 16 MHz, twelve runs of twelve,
+where the RXNE reload that peer ran before broke at 1 MHz (500 kHz
+exact, the floor verdict failing). The top rung, PCLK/2 = 32 MHz, is
+OUTSIDE that client's specification - DS10693 table 63 gives an F446
+slave 22.5 MHz, its tv(SO) and this host's setup inside half a clock -
+so letter p asks the peer's ident and prints a rung above the ceiling
+its kind names without judging it (the stm32f4 peer 22.5 MHz, the
+stm32g0 one the 32 MHz of DS13560 table 76; a kind whose data sheet the
+suite has not read is judged at every rung). There the answer path
+fails on both serves: the DMA serve hears all eight characters exact
+and this end reads all eight wrong, in twelve runs of twelve; the run
+loses one. It is a figure, not a fault to fix.
 
 **The arbiter over a SECOND CHIP.** Letter `q` runs `SpiBus`
 (= `BusMaster`) over `SpiHost` with the F446 answering: four
@@ -817,7 +880,7 @@ of 14 (0 of 6 on the per-frame loop), at low in 0 of 4. The F446 peer
 now hosts at medium.
 
 **THE G0 `spi_peer` MEASURED FROM THE F446** (`test_stm32f4_spi`, SPI2
-at PCLK1 = 45 MHz hosting, its SCK at medium and its MOSI at high): the
+at PCLK1 = 45 MHz hosting, its SCK and its MOSI at medium): the
 exchange on the peer's DMA serve byte-exact both ways at every code to
 PCLK1/2 = 22.5 MHz, from the polled host (eight frames) and from the
 F446's DMA1 engines (thirty-two), and the peer's polled run to 22.5 MHz
@@ -894,16 +957,12 @@ must reach the registers itself:
 - **no DMA engine slots on `SpiClient`.** Left for a device-shaped
   user; the bench drives the client's channels raw, which is what a
   peer does anyway.
-- **the tasks claim their pads at very-high speed with no knob.**
-  `SpiHost` takes SCK and MOSI and `SpiClient::drive_output()` takes
-  MISO at `PinSpeed::very_high`, and the bench measured that a client's
-  MISO at that speed slips the falling-edge modes on a jumper-wire bus,
-  and a host's SCK and MOSI their own modes (above, and the F446's
-  suite). The pad speed is the WIRE's electrical question, not the
-  peripheral's; today a program that wants another re-states the pad
-  after `init()` (the stm32g0 `spi_peer` does, by mode), and a `PinSpeed`
-  field on the two tasks' configs is the driver's answer, born with its
-  second user.
+- **no check that a pad can take the class asked.** RM0444 7.5.3's
+  FT_c pads take very low and low alone, and which pad is one is the
+  data sheet's pin table, which no header of the pack carries (on the
+  G0B1, PD0 - SPI2_NSS - and PD2): `claim_nss_pad()` on PD0 asks it for
+  very-high. Born with the device tables' pin-level bonding
+  (design/overview.md's open item).
 - **a wide frame on byte engines, or from an odd address, runs on the
   frame pump.** Engines of `uint8_t` cannot carry a 9..16-bit frame and
   a half-word beat cannot read a buffer that is not half-word aligned

@@ -417,6 +417,11 @@ void host_smoke() {
     static_assert(!Bus::has_engines);
     (void)Bus::init(sys_clock);
     (void)Bus::init(sys_clock, 5'000'000u);
+    // The pads' classes as configuration: written by init(), once.
+    (void)Bus::init(sys_clock, Bus::Config{.max_sck_hz = 5'000'000u,
+                                           .sck_speed = PinSpeed::medium,
+                                           .mosi_speed = PinSpeed::high});
+    (void)Bus::init(sys_clock, {.mosi_speed = PinSpeed::low});
     Bus::rebase(16'000'000u);
     (void)Bus::clock_for(1'000'000u);
     (void)Bus::sck_hz(SpiClock::div8);
@@ -483,7 +488,9 @@ void client_smoke() {
                                                       .frame_format = SpiFrameFormat::motorola,
                                                       .crc = true,
                                                       .crc_polynomial = 0x1021u | 1u,
-                                                      .drive_output = false});
+                                                      .drive_output = false,
+                                                      .miso_speed = PinSpeed::low});
+    (void)Peer::init(sys_clock, {.drive_output = true, .miso_speed = PinSpeed::medium});
     Peer::drive_output(true);
     Peer::enable(0xA5u);
     Peer::enable();

@@ -291,6 +291,16 @@ void spi_second_instance() {
 void spi_tasks() {
     constexpr SysClock clock;
     (void)Host::init(clock, 8'000'000);
+    // The pads' classes as configuration: written by init(), once; the
+    // two verbs move them between transactions.
+    (void)Host::init(clock, Host::Config{.max_sck_hz = 8'000'000,
+                                         .sck_speed = PinSpeed::medium,
+                                         .mosi_speed = PinSpeed::high});
+    (void)Host::init(clock, {.mosi_speed = PinSpeed::low});
+    Host::sck_speed(PinSpeed::high);
+    (void)Host::sck_speed();
+    Host::mosi_speed(PinSpeed::medium);
+    (void)Host::mosi_speed();
     (void)Host::clock_for(1'000'000);
     (void)Host::sck_hz(SpiClock::div8);
     (void)Host::max_sck_hz();
@@ -347,6 +357,8 @@ void spi_tasks() {
 #endif
 
     (void)Peer::init(clock, {.mode = SpiMode::mode0, .bits = SpiDataSize::bits8});
+    (void)Peer::init(clock, {.mode = SpiMode::mode1, .drive_output = true,
+                             .miso_speed = PinSpeed::medium});
     Peer::enable(0xA5, 0x5A);
     Peer::enable();
     // The runs at both frame widths, every verb, with and without a pad.

@@ -48,8 +48,9 @@
 //    exchange, sink_slow, ss_pulse, host_burst.
 //
 //  - THE ANSWER LINE'S EDGE RATE IS THIS APP'S, NOT THE DRIVER'S, AND IT
-//    DEPENDS ON THE MODE. SpiClient hands MISO to the peripheral at
-//    VERY-HIGH speed, and on this jumper-wire bus that edge is an
+//    DEPENDS ON THE MODE. SpiClient's default class for MISO is
+//    VERY-HIGH (its Config::miso_speed), and on this jumper-wire bus that
+//    edge is an
 //    AGGRESSOR on the clock beside it. Measured against the STM32F446RE
 //    host it is paired with (test_stm32f4_spi letter x, ten bursts a mode
 //    at the command rate, the host's SCK at medium): at very-high 11 of 40
@@ -64,7 +65,7 @@
 //    LOW clock and the slip never shows - and ONE NOTCH SLOWER, at medium,
 //    in modes 1 and 2 (console 's' cycles the base class). A HOST's data
 //    and clock pads are the same kind of aggressor (docs/stm32g0/spi.md;
-//    the stm32f4 suite hosts with its SCK at medium and its MOSI at high).
+//    the stm32f4 suite hosts with its SCK and its MOSI at medium).
 //
 // THE DARK LISTENER discipline: the command-mode client never drives
 // MISO (drive_output = false, which leaves the pad in analog), the
@@ -160,9 +161,9 @@ constexpr uint16_t firmware_version = 0x0301;   ///< see spi_link.hpp's Ident
 /// THE ANSWER LINE'S EDGE RATE (see the header): HIGH in the two modes
 /// that sample on the rising edge, and ONE NOTCH SLOWER in the two that
 /// sample on the falling one - where this edge lands on an SCK just
-/// settled high. init() rewrites the pad, so the choice is re-stated after
-/// every init that drives the output; the console's 's' cycles the base
-/// class for the bench.
+/// settled high. Every init that drives the output names it in the
+/// client's Config (miso_class()); the console's 's' cycles the base class
+/// for the bench.
 PinSpeed miso_speed = PinSpeed::high;
 /// The class the last init asked for: the base, or a notch below it in
 /// modes 1 and 2.
@@ -185,12 +186,11 @@ const char* speed_name(PinSpeed s) {
     }
 }
 
-void restate_miso_speed(uint8_t mode = 0) {
+/// The answer line's class for a window in this SPI mode (0..3).
+PinSpeed miso_class(uint8_t mode) {
     const bool falling_edge_sampler = mode == 1u || mode == 2u;
     miso_applied = falling_edge_sampler ? one_notch_slower(miso_speed) : miso_speed;
-    if (MisoPin::has_function()) {
-        MisoPin::function(link_pins.miso.function, {.speed = miso_applied});
-    }
+    return miso_applied;
 }
 
 /// The exchange's DMA engines, on DMA1 channels 1 and 2 - the two
@@ -306,9 +306,9 @@ bool arm_answer() {
                                          .bits = SpiDataSize::bits8,
                                          .lsb_first = false,
                                          .nss = SpiNss::hardware_input,
-                                         .drive_output = true});
+                                         .drive_output = true,
+                                         .miso_speed = miso_class(0)});
     hold_nss_up();
-    restate_miso_speed();
     return ok;
 }
 
@@ -325,9 +325,9 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_output = true,
                                          .bits = SpiDataSize::bits8,
                                          .lsb_first = c.dord != 0,
                                          .nss = nss,
-                                         .drive_output = drive_output});
+                                         .drive_output = drive_output,
+                                         .miso_speed = miso_class(c.mode & 0x03u)});
     hold_nss_up();
-    restate_miso_speed(c.mode & 0x03u);
     return ok;
 }
 

@@ -143,16 +143,16 @@ using Host = SpiHost<2, link_pins>;
 using Raw = Spi<2>;
 
 // The two pads this app names outside the driver: the answer line (the
-// console's "is MISO driven" reading, and its slew class) and the
+// console's "is MISO driven" reading) and the
 // select, which is a GPIO this end drives in two of the actions.
 using MisoPin = Pin<link_pins.miso.port, link_pins.miso.pin>;
 using NssPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
 
 constexpr uint16_t firmware_version = 0x0401;   ///< see spi_link.hpp's Ident
 
-/// THE ANSWER LINE'S SLEW CLASS, AND IT IS A MEASUREMENT. The driver
-/// hands every pad out at very-high, which is ES0298 2.14.5 speaking
-/// about the SCK pad of a HOST; on a bus of jumper wires that edge is
+/// THE ANSWER LINE'S SLEW CLASS, AND IT IS A MEASUREMENT. The driver's
+/// default class is very-high, which is ES0298 2.14.5 speaking about the
+/// SCK pad of a HOST; on a bus of jumper wires that edge is
 /// an AGGRESSOR at the CLIENT's end, and the four classes were walked
 /// with the console's 's' against an STM32G0B1RE host's slip statistics
 /// (test_stm32_spi letter x: ten bursts of eight frames in each mode,
@@ -165,16 +165,15 @@ constexpr uint16_t firmware_version = 0x0401;   ///< see spi_link.hpp's Ident
 ///   medium     12 of 40, modes 1 and 2 again
 ///   low        0 of 40
 ///
-/// The rate ladder does not reach the pad's class: this client's answer
-/// reload breaks first (the host's ladder exact to 500 kHz and breaking
-/// at 1 MHz with every character heard), so the slow pad costs nothing
-/// here. This app therefore re-states the pad at LOW after every init
-/// that drives it, and the console's 's' cycles the four classes for
-/// the bench.
+/// The rate ladder does not find the slow pad: at low the host's ladder
+/// is exact to 16 MHz on both serves (letter p), above DS10693 table 58's
+/// 4 MHz for the class at 50 pF - the wire is lighter than that. Every
+/// init that drives the pad therefore names LOW in the client's Config,
+/// and the console's 's' cycles the four classes for the bench.
 PinSpeed miso_speed = PinSpeed::low;
 
 /// THE CLOCK PAD'S SLEW CLASS WHEN THIS END HOSTS (Op::host_burst), AND IT
-/// IS A MEASUREMENT TOO. SpiHost::init() hands SCK out at very-high, and
+/// IS A MEASUREMENT TOO. SpiHost's default class for SCK is very-high, and
 /// against the STM32G0B1RE's client on these wires that edge is seen
 /// twice at the far end: twelve frames at 1.406 MHz, the far client's
 /// stream one bit out of place from a random frame in every run (an edge
@@ -195,11 +194,6 @@ const char* speed_name(PinSpeed s) {
     }
 }
 
-void restate_miso_speed() {
-    if (MisoPin::has_function()) {
-        MisoPin::function(link_pins.miso.function, {.speed = miso_speed});
-    }
-}
 
 bool trace = false;
 
@@ -303,9 +297,9 @@ bool arm_answer() {
                                          .bits = SpiDataSize::bits8,
                                          .lsb_first = false,
                                          .nss = SpiNss::hardware_input,
-                                         .drive_output = true});
+                                         .drive_output = true,
+                                         .miso_speed = miso_speed});
     hold_nss_up();
-    restate_miso_speed();
     return ok;
 }
 
@@ -320,9 +314,9 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_output = true,
                                          .bits = SpiDataSize::bits8,
                                          .lsb_first = c.dord != 0,
                                          .nss = nss,
-                                         .drive_output = drive_output});
+                                         .drive_output = drive_output,
+                                         .miso_speed = miso_speed});
     hold_nss_up();
-    restate_miso_speed();
     return ok;
 }
 
@@ -588,12 +582,11 @@ spilink::Report run_host_burst(const spilink::Params& a) {
     if (div < 2u) div = 2u;
     const uint32_t pclk = SysClock::pclk1_hz;
     const auto code = spi_rate_for(pclk, pclk / div);
-    if (!Host::init(clock) || !code) {
+    if (!Host::init(clock, {.sck_speed = burst_sck_speed}) || !code) {
         r.flags |= spilink::report_cfg_failed;
         (void)go_dark();
         return r;
     }
-    Host::sck_speed(burst_sck_speed);
     const SpiClock rate = *code;
     r.aux1 = static_cast<uint8_t>(static_cast<uint8_t>(rate));   // the BR code itself
     (void)Host::bit_order(a.cfg.dord != 0);

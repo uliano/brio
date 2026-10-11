@@ -26,7 +26,8 @@ pad on an absent port, an engine off the request map, an engine on a
 part class whose manual was not read, one engine of two, two engines
 on one stream, engines a word wide, the audio face on an instance that
 has none, on a part class that is not known, an extension block that
-does not exist, and a client run of 32-bit words. Bench:
+does not exist, a client run of 32-bit words, and a slew class named
+for a pad the task does not drive. Bench:
 `test_stm32f4_spi` on the STM32F429I-DISC1, against the gyroscope and
 the display controller the board carries on SPI5, and on the
 Nucleo-F446RE's SPI2 against the STM32G0B1RE it is paired with on the
@@ -104,7 +105,8 @@ three of them are answered as code:
   class at a 30 pF load: 84 MHz of APB at `high` or `very_high`, 75 at
   `medium`, 25 at `low` - halved for I2S. It is a PAD fact and not a
   rate fact: the SPI's own bit rate does not enter it. Every pad this
-  driver hands over goes out at `very_high`.
+  driver hands over goes out at `very_high` unless the task's `Config`
+  names another class ("The pads").
 
 **The audio face is one bit of I2SCFGR**, and which instances have it
 is the manual's memory map and not the header - every SPI_TypeDef of
@@ -203,7 +205,10 @@ strata's `Request` field for field: `cs`, `dc`, `cmd`, `tx`, `rx`,
 `len`, `cmd_len`, `bits`, `polled`, `cs_setup_us`, `clock`, `mode`,
 `reply` - in THAT order, 40 bytes with no padding, the first nine words
 being what the asynchronous path keeps for its tenure. `init(clock,
-max_sck_hz)`, `rebase(sysclk)`, `clock_for`, `sck_hz`, `max_sck_hz`,
+max_sck_hz)` (the shared surface) and `init(clock, Config)` - `Config`
+being `max_sck_hz`, `sck_speed` and `mosi_speed`, the classes of the two
+pads a host drives ("The pads") - `rebase(sysclk)`, `clock_for`,
+`sck_hz`, `max_sck_hz`,
 `ceiling_clock`, `reference_hz` (the instance's APB clock), `prime`,
 `bit_order`, `lsb_first`, `start`, `isr`, `dma_isr`, `status` (`spi_ok`,
 `spi_dma_fault`, `spi_overrun`, `spi_stalled`), `overruns` (the
@@ -231,10 +236,13 @@ of its own: `sck_speed` and
 family the SCK pad's slew class is a correctness parameter and not a
 taste, and `mosi_speed`, because on a bus of wires the data pad's edge
 is one too and no erratum speaks for it (the breadboard finding
-below).
+below) - each verb moving between transactions the class `init()`
+wrote from the `Config`.
 
 `SpiClient<n, pins>` - the polled RUNS and, as their degenerate case,
-the per-frame verbs, with an ISR body: `init`, `enable()` (SPE up, the
+the per-frame verbs, with an ISR body: `init(clock, Config)` (the
+`SpiConfig` fields a client can be told, `drive_output`, and
+`miso_speed`, the class of the one pad a client drives), `enable()` (SPE up, the
 transmit buffer left empty for a run) and `enable(first)` (SPE up with
 the first answer written), `answer(out, spins)`, `exchange(out, in,
 spins)`, `receive(in, spins)` - each returning a `Run` (`count`, and a
@@ -471,6 +479,56 @@ loses one); it is a figure, never a fault to fix. As the client of the
 G0's `host_burst` (letter r of this stratum's suite, twelve frames at 2
 MHz) the exchange run is exact both ways.
 
+## The pads
+
+The SPI's pads are GPIO pads in an alternate function, and what the
+silicon offers there that bears on a wire is the output stage's SLEW
+CLASS - OSPEEDR, four classes (RM0390 7.4.3 "low, medium, fast, high",
+brio's `PinSpeed` `low`, `medium`, `high`, `very_high`), their reach in
+DS10693 table 58 at 2.7 V and up: 4 MHz at 50 pF, 25 MHz at 50 pF, 50
+MHz at 40 pF, 100 MHz at 30 pF. Each item used or declined:
+
+- **The class of every DRIVEN pad, as configuration** - USED.
+  `SpiHost::Config` names `sck_speed` and `mosi_speed`,
+  `SpiClient::Config` names `miso_speed`. `init()` writes each with its
+  pad's alternate function, once; the client's `drive_output(true)`
+  re-applies its class wherever it hands the answer line back; no
+  transaction touches OSPEEDR. The host's `sck_speed()` and
+  `mosi_speed()` move a class between transactions for a program that
+  weighs it, and the next `init()` writes the `Config`'s again. The
+  default is `very_high` on all three: ES0298 2.14.5 (table 5, and its
+  ES0206 / ES0287 twins) asks a host's SCK for high or very-high above
+  75 MHz of APB, and table 63 characterizes the SPI's timing at no
+  slower than high (OSPEEDR = 10, 30 pF).
+- **An input's class** - none to give: OSPEEDR acts on the output stage,
+  so a host's MISO and a client's SCK, MOSI and NSS have no field, and a
+  class named for one does not compile (two negative TUs).
+- **The select as a hardware output** - `claim_nss_pad()` hands it at
+  `very_high` and has no field: no program drives SSOE on a wire (the
+  gap list).
+- **The erratum's table** - `spi_errata_apb_ceiling_hz()` and
+  `within_errata_ceiling()`: `init()` accepts a class below the
+  erratum's for its APB clock, as the verb does, and the predicate
+  answers - letter l of the F446 suite stages exactly that.
+- **The I/O compensation cell** (RM0390 8.1, `Syscfg::compensation_cell`)
+  - DECLINED in the driver: a chip-wide measure for the supply's
+  switching noise, the application's to own (stm32f4/syscfg.hpp), and on
+  this desk's wires it changes nothing measured (Bench findings).
+
+COST, read in the release listings: `init()` stores each class in the
+task's state (one byte store) and hands it to the pad's
+read-modify-write; `drive_output()` loads the client's once; `start()`,
+the pump, the engines and the runs contain no GPIO access but the
+select's BSRR store.
+
+ON A BUS OF WIRES THE CLASS IS A CORRECTNESS PARAMETER OF EVERY PAD, and
+which class is the BUS's: a fast edge on SCK is seen twice at a far
+client, a fast edge on MOSI or MISO couples into the clock beside it, and
+either puts the far client's stream one bit out of place from that frame
+on. On the desk's jumper wires to the STM32G0B1RE this host runs SCK
+and MOSI at `medium` and this board's client answers at `low` (Bench
+findings); a printed board's short traces keep the default.
+
 ## How to use it
 
 A bus with one device on it, no arbiter, polled - the shape a device
@@ -495,6 +553,22 @@ r.mode    = brio::SpiMode::mode3;
 r.clock   = brio::SpiClock::div16;
 r.polled  = true;
 (void)Bus::start(r);                    // true: it is done, `who` is filled
+```
+
+The same bus on jumper wires, its two driven pads a class or two down -
+the wire's property, written once at `init()`:
+
+```cpp
+Bus::init(clock, {.max_sck_hz = 10'000'000,
+                  .sck_speed = brio::PinSpeed::medium,
+                  .mosi_speed = brio::PinSpeed::medium});
+```
+
+and a client's answer line the same way:
+
+```cpp
+using Peer = brio::SpiClient<5, spi5>;
+Peer::init(clock, {.mode = brio::SpiMode::mode0, .miso_speed = brio::PinSpeed::low});
 ```
 
 An image whose handlers or masked windows run longer than the bench's
@@ -846,9 +920,9 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   ways at every code on the polled host against the peer's DMA serve,
   thirty-two on the ENGINED host (DMA1 streams 4 and 3, asynchronous, one
   interrupt a transaction), and the peer's polled client run to 22.5 MHz
-  too (informational). One run in nine of the engined climb lost one to
-  three frames at both ends at 11.25 MHz alone, the rungs above and below
-  exact (see the pads, below).
+  too (informational) - with the MOSI pad at medium (the pads, below);
+  at high the engined climb slipped at 11.25 MHz in about one run in
+  six.
 - **THE ARBITER OVER A SECOND CHIP** (letter q): four transactions
   queued from one dispatch, ISR-pumped at the command rate, come back in
   order, spi_ok, the 24 bytes read back exact by the peer; six into a
@@ -878,8 +952,20 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   bursts of 40 in every mode at high, p breaks from 351 kHz, and letter r
   of the G0's suite (this board's `host_burst`) slips in every run at
   very-high and in two of four at high - and is exact at medium and at
-  low; MOSI at very-high costs p a rung in three runs of three, none at
-  high. So the suite hosts at SCK medium, MOSI high. The far client's
+  low. MOSI's edge slips the far client where the frames run back to
+  back: thirty bursts of 32 frames on the DMA host at PCLK1/4 = 11.25
+  MHz slip in 6 to 13 of 30 at high and 16 to 23 of 30 at very-high, the
+  same signature (both ends wrong from one frame on), and in none of 270
+  at medium (PCLK1/2, /4 and /8, polled and engined host, the peer's DMA
+  serve and its run) nor of 60 at low; with MOSI at medium SCK at high
+  holds that rung too (0 of 30), SCK staying medium for r and x. The
+  I/O compensation cell (RM0390 8.1) changes nothing: 10 of 30 at high
+  with it on, 16 of 30 at very-high. So the suite hosts at SCK medium,
+  MOSI medium, and letter x's second part counts that rung (0 of 30).
+  It is the rung letter p's engined climb is judged on: with MOSI at
+  high, p ALONE slips there in 2 runs of 12 (and z in 1 of 4) - the pad,
+  not a state an earlier letter leaves; at medium p is exact in 12 runs
+  of 12 and z in 3 of 3. The far client's
   MISO is the aggressor in modes 1 and 2 (the falling-edge samplers):
   11 of 40 at very-high, 8 and 11 at high, 0 at medium and low - while
   medium costs p's 22.5 MHz rung - which is why the stm32g0 peer answers

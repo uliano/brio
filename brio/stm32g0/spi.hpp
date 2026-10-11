@@ -1807,6 +1807,23 @@ public:
 
     // ---- lifecycle ----------------------------------------------------------
 
+    /// What the bus is, beyond the clock it runs from: the SCK ceiling and
+    /// the slew classes (OSPEEDR, RM0444 7.5.3) of the two pads this end
+    /// drives - MISO and the select are inputs here, and an input has no
+    /// output speed. The classes are a property of the WIRE, written once
+    /// by init() and never per transaction. `very_high` is the default on
+    /// both, the class the data sheets characterize the SPI's timing at
+    /// (OSPEEDR = 11 at 30 pF: DS13560 table 76 and its DS12232 and
+    /// DS12992 twins); no erratum of ES0548 names a pad. A bus of
+    /// long wires asks one class or two DOWN, and on such a bus the class
+    /// is a correctness parameter of every pad (docs/stm32g0/spi.md, "The
+    /// pads").
+    struct Config {
+        uint32_t max_sck_hz = 0;   ///< the ceiling; 0 = none
+        PinSpeed sck_speed = PinSpeed::very_high;
+        PinSpeed mosi_speed = PinSpeed::very_high;
+    };
+
     /// Bring the instance up as a host: bus clock, reset,
     /// configuration, pads, the NVIC line.
     ///
@@ -1815,22 +1832,26 @@ public:
     /// baud arithmetic comes from its pclk_hz and never from a second
     /// statement of the rate.
     ///
-    /// `max_sck_hz` is an optional CEILING for the whole bus: with it set
-    /// the engine slows any request that would exceed it and re-resolves
-    /// the limit after a clock change, which is what makes rebase()
-    /// meaningful. 0 = no ceiling.
+    /// `cfg.max_sck_hz` is an optional CEILING for the whole bus: with it
+    /// set the engine slows any request that would exceed it and
+    /// re-resolves the limit after a clock change, which is what makes
+    /// rebase() meaningful. 0 = no ceiling. SCK and MOSI go out at the
+    /// classes `cfg` names, whatever a verb set before.
     ///
     /// Returns false when the ceiling cannot be produced at this clock,
     /// or when the boot configuration is refused.
     template <typename Clock>
-    static bool init(Clock clock, uint32_t max_sck_hz = 0) {
+    static bool init(Clock clock, const Config& cfg) {
         static_assert(clock_follows<Clock, SpiHost>(),
                       "this SpiHost is initialized with a DynamicClock that does not "
                       "list it among its Users: its SCK ceiling and its cs_setup timing "
                       "would go stale on a clock change");
 
         Nvic::disable(S::irq());
+        const uint32_t max_sck_hz = cfg.max_sck_hz;
         ceiling_hz_ = max_sck_hz;
+        sck_speed_ = cfg.sck_speed;
+        mosi_speed_ = cfg.mosi_speed;
         // PCLK is what BR divides (35.9.1), and in this stratum PPRE is
         // pinned at 1 by every Clock task, so PCLK == HCLK == SYSCLK and
         // clock_hz() - which folds for a static clock and asks a dynamic
@@ -1864,8 +1885,8 @@ public:
         // SCK cannot tell a glitch from a clock edge. SPE is raised LAST
         // for the same reason - with hardware NSS output it is the edge
         // that asserts NSS (35.5.5).
-        SckPin::function(pins.sck.function, {.speed = PinSpeed::very_high});
-        MosiPin::function(pins.mosi.function, {.speed = PinSpeed::very_high});
+        apply_sck_pad();
+        apply_mosi_pad();
         if constexpr (pins.miso.valid()) {
             MisoPin::function(pins.miso.function);
         }
@@ -1881,6 +1902,11 @@ public:
         S::flush_rx();
         Nvic::enable(S::irq());
         return true;
+    }
+    /// The shared SpiHost surface: a ceiling alone, both pads `very_high`.
+    template <typename Clock>
+    static bool init(Clock clock, uint32_t max_sck_hz = 0) {
+        return init(clock, Config{.max_sck_hz = max_sck_hz});
     }
 
     /// PCLK changed (DynamicClock fan-out).
@@ -1948,6 +1974,23 @@ public:
         return ok;
     }
     static bool lsb_first() { return applied_.lsb_first; }
+
+    /// The SCK pad's slew class, Config::sck_speed from init(); the verb
+    /// moves it between transactions for a program that weighs the
+    /// wire's effect (the bus must be idle). The next init() writes the
+    /// Config's class again.
+    static void sck_speed(PinSpeed sp) {
+        sck_speed_ = sp;
+        apply_sck_pad();
+    }
+    static PinSpeed sck_speed() { return sck_speed_; }
+    /// The MOSI pad's slew class, Config::mosi_speed from init(), moved
+    /// the same way.
+    static void mosi_speed(PinSpeed sp) {
+        mosi_speed_ = sp;
+        apply_mosi_pad();
+    }
+    static PinSpeed mosi_speed() { return mosi_speed_; }
 
     // ---- the transfer -------------------------------------------------------
 
@@ -2774,6 +2817,12 @@ private:
     static inline uint32_t ceiling_hz_ = 0;
     static inline std::optional<SpiClock> ceiling_{};
     static inline DelayRate cs_rate_{};
+    /// The two driven pads' classes (Config, the verbs).
+    static inline PinSpeed sck_speed_ = PinSpeed::very_high;
+    static inline PinSpeed mosi_speed_ = PinSpeed::very_high;
+
+    static void apply_sck_pad() { SckPin::function(pins.sck.function, {.speed = sck_speed_}); }
+    static void apply_mosi_pad() { MosiPin::function(pins.mosi.function, {.speed = mosi_speed_}); }
 };
 
 // =============================================================================
@@ -2869,6 +2918,15 @@ public:
         SpiClock clock = SpiClock::div16;
         /// Whether the MISO pad is handed to the peripheral at all.
         bool drive_output = true;
+        /// The answer line's slew class (OSPEEDR, RM0444 7.5.3), written
+        /// wherever drive_output() hands the pad over - the one pad a
+        /// client drives (SCK, MOSI and NSS are its inputs, and an input
+        /// has no output speed). `very_high` by default, the class the
+        /// data sheets characterize tv(SO) at (DS13560 table 76); on a
+        /// bus of wires the answer edge is an aggressor on the clock
+        /// beside it, and the class that cures it is the bus's
+        /// (docs/stm32g0/spi.md, "The pads").
+        PinSpeed miso_speed = PinSpeed::very_high;
     };
 
     /// Bring the instance up as a client.
@@ -2895,20 +2953,21 @@ public:
         if constexpr (has_nss_pad) {
             NssPin::function(pins.nss.function);
         }
+        miso_speed_ = cfg.miso_speed;
         drive_output(cfg.drive_output);
         S::flush_rx();
         Nvic::enable(S::irq());
         return true;
     }
 
-    /// Hand the answer line to the peripheral, or take it back. A DARK
-    /// listener keeps it false and opens it for exactly the window it
-    /// answers in; taking it back leaves the pad in analog, the reset
-    /// state, driving nothing.
+    /// Hand the answer line to the peripheral at the Config's class, or
+    /// take it back. A DARK listener keeps it false and opens it for
+    /// exactly the window it answers in; taking it back leaves the pad in
+    /// analog, the reset state, driving nothing.
     static void drive_output(bool on) {
         if constexpr (pins.miso.valid()) {
             if (on) {
-                MisoPin::function(pins.miso.function, {.speed = PinSpeed::very_high});
+                MisoPin::function(pins.miso.function, {.speed = miso_speed_});
             } else {
                 MisoPin::release();
             }
@@ -3465,6 +3524,7 @@ private:
     }
 
     static inline SpiDataSize bits_ = SpiDataSize::bits8;
+    static inline PinSpeed miso_speed_ = PinSpeed::very_high;
 };
 
 // =============================================================================

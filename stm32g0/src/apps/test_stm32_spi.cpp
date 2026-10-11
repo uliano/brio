@@ -43,8 +43,8 @@
 // an stm32f4 one on its SPI2 by function (SPI's own MOSI/MISO naming
 // carries the direction, so nothing is crossed), plus a dedicated GND,
 // both boards at 3.3 V. On the peer link the host's MOSI pad goes out
-// one class below the driver's (peer_link_pads(), with the measurement
-// that asks for it). The instrument
+// one class below the driver's default (peer_link_config(), with the
+// measurement that asks for it). The instrument
 // is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture. Letters
@@ -124,7 +124,9 @@
 //      ident and ten frames
 //   o  the matrix against the peer: four modes, both bit orders, and a
 //      DORD mismatch as an exact two-way bit reversal
-//   p  the BR ladder against the peer, and where its answer reload stops
+//   p  the BR ladder against the peer, and where its answer reload stops;
+//      a rung above the peer's documented client ceiling (by the kind its
+//      ident names) is printed and not judged
 //   q  THE KERNEL against the peer: SpiBus (= BusMaster) over SpiHost
 //      with a SECOND CHIP reading the bytes back - the rejection, both
 //      sleep votes and the per-bus timeout with recover()
@@ -645,19 +647,16 @@ bool link_quiet = false;
 void link_hold() { (void)delay_us(clock, 30); }
 
 /// SPI1 as the command channel's host, PA15 as its GPIO chip select.
-/// THE PEER LINK'S DATA PAD ONE NOTCH DOWN. SpiHost::init() hands MOSI
-/// out at very-high, and on a bus of jumper wires that edge is an
-/// AGGRESSOR on the clock at the far end: against the stm32f4 peer, modes
-/// 0 and 3 - the two that SAMPLE on the rising edge, the host's MOSI
-/// changing while SCK is LOW - slipped one bit (both ends disagreeing from
-/// the same frame on) in 9 and 10 of 40 bursts of letter x, and in 0 of 40
-/// with this pad at high, medium or low (docs/stm32g0/spi.md). The clock
-/// pad keeps its class: it is the edge the client samples on. Re-stated
-/// after every init that hands the pads out for the peer letters.
-void peer_link_pads() {
-    Pin<host_pins.mosi.port, host_pins.mosi.pin>::function(host_pins.mosi.function,
-                                                           {.speed = PinSpeed::high});
-}
+/// THE PEER LINK'S DATA PAD ONE NOTCH DOWN. The driver's default class is
+/// very-high, and on a bus of jumper wires that edge is an AGGRESSOR on
+/// the clock at the far end: against the stm32f4 peer, modes 0 and 3 -
+/// the two that SAMPLE on the rising edge, the host's MOSI changing while
+/// SCK is LOW - slipped one bit (both ends disagreeing from the same frame
+/// on) in 9 and 10 of 40 bursts of letter x, and in 0 of 40 with this pad
+/// at high, medium or low (docs/stm32g0/spi.md). The clock pad keeps its
+/// class: it is the edge the client samples on. The Config every peer
+/// letter's init() is handed.
+constexpr Host::Config peer_link_config{.mosi_speed = PinSpeed::high};
 
 bool link_command_mode() {
     peer_stop();
@@ -665,8 +664,7 @@ bool link_command_mode() {
     bus_ao_live = false;
     sleep_probe_live = false;
     software_cs_pads();
-    const bool ok = Host::init(clock);
-    peer_link_pads();
+    const bool ok = Host::init(clock, peer_link_config);
     dec.reset();
     return ok;
 }
@@ -3805,9 +3803,36 @@ void to_peer_matrix() {
 // p - the rate ladder against the peer
 // =============================================================================
 
+/// THE PEER'S DOCUMENTED CLIENT CEILING, by the implementation its ident
+/// names (spi_link.hpp lets a host use the kind to expect a capability,
+/// never to decide correctness - and a rung above the ceiling is exactly
+/// a rung whose correctness no data sheet promises). The stm32f4 peer
+/// answers on the F446's SPI2, whose slave mode DS10693 table 63 gives
+/// 22.5 MHz (note 2: tv(SO) and the host's setup inside half a clock);
+/// the stm32g0 peer's SPI1 is 32 MHz in full duplex at 2.7..3.6 V on
+/// every G0 data sheet (DS13560 table 76, DS12232 and DS12992 the same) -
+/// this ladder's top, so nothing above it. Zero for a kind whose data
+/// sheet this suite has not read: every rung judged.
+uint32_t peer_client_ceiling_hz(uint8_t kind) {
+    switch (kind) {
+        case spilink::peer_stm32f4: return 22'500'000u;
+        case spilink::peer_stm32g0: return 32'000'000u;
+        default: return 0u;
+    }
+}
+
 void tp_peer_rates() {
     if (!need_peer()) {
         return;
+    }
+    spilink::Ident id{};
+    const uint32_t ceiling = peer_ident(id) ? peer_client_ceiling_hz(spilink::peer_kind(id.version))
+                                            : 0u;
+    if (ceiling != 0u) {
+        print(serial, "  the peer (fw ", hex(id.version), ") is specified as a client to ",
+              ceiling / 1000u, " kHz: a rung above it is printed, not judged", crlf);
+    } else {
+        print(serial, "  no client ceiling known for this peer: every rung judged", crlf);
     }
 
     // The BR codes, not a frequency ladder: a Request's clock IS a
@@ -3836,10 +3861,15 @@ void tp_peer_rates() {
         spilink::Report r{};
         const bool ok = exchange_exact(e, v, r);
         const uint32_t real = Host::sck_hz(c);
-        print(serial, "  SCK PCLK/", spi_division(c), " = ", real / 1000u, " kHz: ",
+        const bool above = ceiling != 0u && real > ceiling;
+        print(serial, above ? "  [informational, above the peer's ceiling] SCK PCLK/" : "  SCK PCLK/",
+              spi_division(c), " = ", real / 1000u, " kHz: ",
               ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
               " client mism=", r.mism, " client count=", r.count, " serve=",
               (r.aux2 & 0x04u) != 0u ? "dma" : "pump", crlf);
+        if (above) {
+            continue;
+        }
         if (ok && first_bad == 0u) {
             last_good = real;
         } else if (!ok && first_bad == 0u) {

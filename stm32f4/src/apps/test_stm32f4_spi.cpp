@@ -90,7 +90,8 @@
 //      host_burst
 //   l  ES0298 2.14.5 staged: the SCK pad's class against the peer's known
 //      stream at /2
-//   x  (OUTSIDE z) slip statistics against the peer, each mode ten times
+//   x  (OUTSIDE z) slip statistics against the peer, each mode ten times,
+//      then thirty bursts of 32 frames on the DMA host at PCLK1/4
 //
 // build: boards = f429zi,f446re
 // build: monitor_speed = 115200
@@ -174,9 +175,6 @@ using DmaHost = SpiHost<2, link_pins, TxEngine, RxEngine>;
 using Client = SpiClient<2, link_pins>;
 
 using CsPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
-using SckPad = Pin<link_pins.sck.port, link_pins.sck.pin>;
-using MisoPad = Pin<link_pins.miso.port, link_pins.miso.pin>;
-using MosiPad = Pin<link_pins.mosi.port, link_pins.mosi.pin>;
 
 volatile bool bus_ao_live = false;
 volatile bool dma_host_live = false;
@@ -231,7 +229,7 @@ BootState boot;
 // =============================================================================
 
 /// THE LINK'S PADS ONE OR TWO CLASSES DOWN, AND THEY ARE MEASUREMENTS.
-/// SpiHost::init() hands SCK and MOSI out at very-high (ES0298 2.14.5's
+/// SpiHost's default class for SCK and MOSI is very-high (ES0298 2.14.5's
 /// table at its widest), and on these jumper wires both edges are
 /// aggressors at the far client:
 ///  - SCK: with this board hosting the G0B1RE's client the client's
@@ -243,24 +241,25 @@ BootState boot;
 ///    one of those runs is exact. Medium is inside the erratum's table
 ///    for this instance (75 MHz of APB ceiling against APB1's 45); letter
 ///    l walks the class against the erratum itself.
-///  - MOSI: at very-high letter p's ladder lost a rung - one to four frames
-///    wrong at both ends, at 11.25 MHz mostly - in three runs of three; at
-///    high in none of three. Medium buys nothing more (x 12 of 40 either
-///    way, the far client's MISO being the aggressor there - the stm32g0
-///    spi_peer's header).
+///  - MOSI: the same slip, from the DATA edge coupled into the clock
+///    beside it, where the frames run back to back: thirty bursts of 32
+///    frames on the DMA host at PCLK1/4 = 11.25 MHz slip in 6 to 13 of 30
+///    at high and 16 to 23 at very-high, the far client and this end
+///    disagreeing from the same frame on - and in 0 of 270 at medium
+///    (PCLK1/2, /4 and /8, either host, either serve; 0 of 60 at low).
+///    The I/O compensation cell (RM0390 8.1) changes nothing (10 of 30 at
+///    high with it on). Medium's own reach is 25 MHz at 50 pF (DS10693
+///    table 58), above the 11.25 MHz a 22.5 MHz SCK toggles the data at.
+///    Letter x's second part counts that rung.
 PinSpeed peer_sck_speed = PinSpeed::medium;
-PinSpeed peer_mosi_speed = PinSpeed::high;
+PinSpeed peer_mosi_speed = PinSpeed::medium;
 
-void peer_link_pads() {
-    Host::sck_speed(peer_sck_speed);
-    Host::mosi_speed(peer_mosi_speed);
-}
-
-/// The DMA host's pads, the same classes - it is the same instance and the
-/// same wires, under a second set of statics.
-void peer_link_pads_dma() {
-    DmaHost::sck_speed(peer_sck_speed);
-    DmaHost::mosi_speed(peer_mosi_speed);
+/// The Config every host init of the peer letters is handed - the same
+/// classes on the engined host, which is the same instance and the same
+/// wires under a second set of statics.
+template <typename H>
+typename H::Config peer_link_config() {
+    return {.sck_speed = peer_sck_speed, .mosi_speed = peer_mosi_speed};
 }
 
 bool link_command_mode() {
@@ -268,9 +267,7 @@ bool link_command_mode() {
     dma_host_live = false;
     host_swallow_completion = false;
     CsPin::output(true);
-    const bool ok = Host::init(clock);
-    peer_link_pads();
-    return ok;
+    return Host::init(clock, peer_link_config<Host>());
 }
 
 // =============================================================================
@@ -496,11 +493,10 @@ uint8_t xrx[max_exchange];
 bool dma_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate, SpiMode mode) {
     dma_host_live = true;
     CsPin::output(true);
-    if (!DmaHost::init(clock)) {
+    if (!DmaHost::init(clock, peer_link_config<DmaHost>())) {
         dma_host_live = false;
         return false;
     }
-    peer_link_pads_dma();
     DmaHost::prime(mode, rate);
     CsPin::clear();
     link_hold();
@@ -1394,12 +1390,13 @@ bool run_as_client(const spilink::Params& a) {
                               .bits = SpiDataSize::bits8,
                               .lsb_first = false,
                               .nss = SpiNss::hardware_input,
-                              .drive_output = true})) {
+                              .drive_output = true,
+                              // The answer line at LOW, the class the
+                              // stm32f4 spi_peer measured for this client
+                              // against the G0B1RE host (its header).
+                              .miso_speed = PinSpeed::low})) {
         return false;
     }
-    // The answer line at LOW, the class the stm32f4 spi_peer measured for
-    // this client against the G0B1RE host (its header).
-    MisoPad::function(link_pins.miso.function, {.speed = PinSpeed::low});
     const uint16_t n = a.count < sizeof crx ? a.count : sizeof crx;
     spilink::Stream out(a.pattern, a.seed_b);
     for (uint16_t i = 0; i < n; ++i) {
@@ -1540,6 +1537,7 @@ void tl_errata_pad() {
 // =============================================================================
 
 constexpr uint8_t slip_rounds = 10;
+constexpr uint8_t dma_slip_rounds = 30;
 
 void tx_peer_slips() {
     if (!need_peer()) {
@@ -1569,6 +1567,27 @@ void tx_peer_slips() {
         total = static_cast<uint8_t>(total + slips);
     }
     print(serial, "  ", total, " of ", 4u * slip_rounds, " bursts slipped", crlf);
+
+    // THE BACK-TO-BACK RUNG: the DMA host at PCLK1/4, where the frames run
+    // without a gap and the MOSI pad's class showed (peer_mosi_speed's
+    // comment) - thirty bursts of thirty-two frames.
+    uint8_t dma_slips = 0;
+    print(serial, "  the DMA host at PCLK1/4, ", dma_slip_rounds, " bursts of 32 frames:");
+    for (uint8_t k = 0; k < dma_slip_rounds; ++k) {
+        Exchange e{};
+        e.rate = SpiClock::div4;
+        e.count = 32;
+        e.engines = true;
+        e.seed_a = static_cast<uint8_t>(0x43u + 5u * k);
+        e.seed_b = static_cast<uint8_t>(0x29u + 3u * k);
+        Verify v{};
+        spilink::Report r{};
+        if (!exchange_exact(e, v, r)) {
+            ++dma_slips;
+            print(serial, " [", v.idx, "/", r.idx, r.count != e.count ? "!" : "", "]");
+        }
+    }
+    print(serial, "  -> ", dma_slips, " of ", dma_slip_rounds, crlf);
     (void)link_command_mode();
     print(serial, "  the command channel afterwards: ", command(Op::ping) ? "answers" : "DEAD",
           crlf);
@@ -1793,9 +1812,7 @@ bool host_ready() {
     bus_ao_live = false;
     dma_host_live = false;
     deselect_all();
-    const bool ok = Host::init(clock);
-    Host::sck_speed(PinSpeed::very_high);
-    return ok;
+    return Host::init(clock);
 }
 
 /// One polled transaction against the gyroscope, the arbiter skipped:
@@ -2460,7 +2477,6 @@ void tk_engines() {
         bench.verdict("the engined host came up", false);
         return;
     }
-    DmaHost::sck_speed(PinSpeed::very_high);
     dma_host_live = true;
 
     const uint8_t want = who_am_i_seen;
@@ -2592,8 +2608,7 @@ void tl_pad_speed() {
     bench.verdict("at the pad class the driver hands over - very high - the last received bit is "
                   "captured and the identity is exact",
                   exact >= 1u);
-    Host::sck_speed(PinSpeed::very_high);
-    (void)host_ready();
+    (void)host_ready();   // the pads back at the default class
 }
 
 // =============================================================================
