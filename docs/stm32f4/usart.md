@@ -30,8 +30,11 @@ stream's count, a receive level on a port with no receive engine, and
 one pad twice. Bench: the console apps
 and the platform suite on the four boards, the engined console in
 `test_stm32f4_dma`, the transport on USART6's single-wire loop in
-`test_stm32f4_serial` (the Nucleo-F446RE), its cost in `bench_stm32f4`
-letter u.
+`test_stm32f4_serial` (the Nucleo-F446RE) - and, under its second
+all-key `t`, USART1 against the desk's STM32G0B1RE running `usart_peer`
+("Against a far board" below) - its cost in `bench_stm32f4` letter u.
+The instrument for a far board's suite is this stratum's `usart_peer`
+("The peer" below).
 
 ## What the silicon does
 
@@ -432,6 +435,93 @@ by the CPU and lost to the stream without a flag; the HAL also treats any
 receive error under DMA as fatal and aborts the reception. A gap above a
 fifth, named: the price of never reading DR.
 
+### Against a far board: the STM32G0B1RE's `usart_peer` (the second all-key `t`)
+
+The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,
+CROSSED - PA9 (AF7) to its PA10, PA10 from its PA9 - the far board
+running the stm32g0 `usart_peer` (firmware 0x0300), driven IN BAND with
+the protocol every architecture on the link compiles
+(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `4` of
+`test_stm32f4_serial` run under the second all-key `t` and never under
+`z`, which runs with the far board on its dark console. The far peer's
+core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
+usart.md, "The peer"), so every rate it times is crystal against
+crystal. Score: **94 of 94**, what this USART has no word for SKIPPED
+with its reason.
+
+- **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
+  another die, a crystal-referenced time base), a bad checksum NAKed, a
+  desync recovered, a synchronous client refused and the peer at once in
+  command mode again.
+- **Two crystals**: three gapless runs of 4000 frames at 1 Mbaud (90 MHz
+  / 90, exact) timed by the far chip at -14, -5 and +1 ppm - the
+  ST-LINK's 8 MHz against the far LSE, within their tolerances; the far
+  chip's own 1 Mbaud blast on this DWT +2534 ppm, its divisor (64 of its
+  64.2 MHz core) and nothing else.
+- **The baud matrix** (`2`) on the two dividers' COMMON ladder: this
+  USART divides 90 MHz by any whole k from 8 (OVER8's three-bit fraction
+  counts eighths), the far one 64 MHz by a whole n (its OVER8 adds no
+  resolution), and they meet where k / n = 7 / 5 - above 2 Mbaud at
+  2.56, 3.2, 4.267 and 6.4 Mbaud, this end 0.45 % above the rate and
+  0.15 % from the far end. At 9600, 115200, 921600, 1, 1.5, 2 Mbaud and
+  those four: 16 frames echoed by the far chip, every one equal; this
+  transmitter timed by the far receiver over 25 ms of frames within
+  200 ppm of its divisor's error and the clocks' (measured within 25 ppm
+  at every rung: 921600 -3514 against -3508 + -14, 6.4 Mbaud +4465
+  against +4464 + -14); the far blast whole on the polled receiver; and
+  1024 frames whole through the interrupt receiver and through the
+  receive engine (DMA2 stream 2 channel 4) at every rung - OVER8's task
+  above 5.625 Mbaud, the interrupt receiver keeping up at 6.4 Mbaud, 281
+  cycles a frame.
+- **The frame matrix** (`3`) at 115200: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
+  8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1, 6E1 and 9E1 SKIPPED
+  (M counts the parity bit: no word length for them here); the half stop
+  bits timed as LENGTHS by the far receiver, 19 and 21 half bits within
+  25 ppm of an 8N1 run.
+- **The receiver's errors from a foreign sender** (`4`): odd parity into
+  an even receiver, PE on each and the data readable; THE FE ONSET with
+  the far divisor 0..8 % off 9600, back to back: clean within 4 % either
+  way, FE from +5 % and -6 % (25.4.5's 3.75 % at OVER16 with no
+  fraction, NE rising from 4 %); a run of 8 read late - ORE, DR keeping
+  the run's first frame, the rest lost (one data register); THE START
+  BIT'S VOTE, one low pulse of w ticks on the idle line at 9600 (a
+  sixteenth is 156): nothing under 1350, a start with NE from 1350 to
+  1500 and a clean start from 1550 with ONEBIT clear, a start from 1350
+  and NE at no width with ONEBIT set; a break of 20 bit times one frame
+  with FE and data 0x00, and LBD SET WITH LIN MODE OFF as well as on -
+  the detector runs whatever LINEN says (25.6.1's description of the bit
+  ties it to no mode).
+
+## The peer: `usart_peer` (the instrument a far board's suite drives)
+
+This stratum's port of the protocol's instrument
+(`stm32f4/src/apps/usart_peer.cpp`, firmware 0x0400, the F446RE): one
+polled loop on USART1's PA9/PA10 (APB2, 90 MHz), dark until a frame
+checks out, a bounded action after every ack. The engine is this
+chapter's:
+
+| the chapter's offer | in the peer |
+|---|---|
+| one data register and the shifter | the echo and the sink polled a character at a time: SR read once a turn, then DR, THEN the echo's DR write - ES0298 2.13.2's own order (a DR write between the SR and the DR read clears PE in full duplex) |
+| transmit and receive DMA | DECLINED: the polled loop costs a fraction of a frame (below), and a blast is a TXE poll and a store, gapless at 6.4 Mbaud |
+| OVER8 | USED where it is closer to the rate (eighths: 90 MHz / k, k >= 8), and alone under the protocol's clk2x flag; 11.25 Mbaud is the ceiling |
+| TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF1) | USED: THE WAVEFORM ENGINE - the stm32g0 peer's shape on this chip's parts: TIM1 at 180 MHz (APB2's timer clock), DMA2 stream 6 channel 0 (TIM1_CH1/2/3 share it, table 29, one CCxDE at a time), direct mode on half-words, the absolute compares, the pad sampled and the run timed whole |
+| HDSEL | USED for the shared wire: the single wire on PA9 (the far G0 swaps its own onto the same wire), open drain on its pull-up |
+| the four stop codes | served on this FULL instance (25.4.3 recommends the halves for smartcard mode and forbids them nowhere else) |
+| eight- and nine-bit words | 7+P, 8, 8+P and 9 served; 5, 6 and 7 data bits without parity, 6+P and 9+P REFUSED |
+| synchronous master | REFUSED: no slave on this USART (25.4.9) and the CK pad, PA8, reaches the far board only through a strap the desk has not got |
+| IrDA SIR | IREN to 115200, PSC from the requested filter, the low-power pulse from the requested width; no line inversion on this USART |
+| LIN, mute, smartcard | the DUT's subjects |
+
+The time base is the crystal: the ST-LINK's 8 MHz in bypass through the
+PLL, a DWT cycle and a TIM1 count each 2/15 of a 24 MHz tick. **The
+cost**: the echo's clean character is 23 instructions with no call
+(release listing) - the SR load and its tests, the DWT stamp, the DR
+load, the DR store and the count - some 35 cycles against the 281 of a
+6.4 Mbaud frame. The engine's floor: an interval of 8 counts (44 ns)
+played, of 6 the compare was written after the counter passed it; 12 is
+the floor the peer keeps.
+
 ## Not covered yet
 
 Driver gaps:
@@ -460,13 +550,20 @@ Implemented, not bench-verified, for the transport:
 
 Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): mute
-mode with both wakes, LIN's break and detection, single-wire half duplex
+mode with both wakes, LIN's break as a SENDER (its detection is measured
+from the far board, above), single-wire half duplex
 against a second board, IrDA (an IR pair), the smartcard (no card on the
 desk), the synchronous clock (a timer capture on CK - the timer
 chapter's ruler), CTS/RTS flow control (a peer that asserts them), the
 TC/CTS/LBD interrupt enables, `set_baud` at run time (nothing changes the
-LINK's rate with the clock standing still), the instances beyond USART2
-and USART6 driven on the F446 and the consoles' USART1 and USART3
+LINK's rate with the clock standing still), the instances beyond USART1,
+USART2 and USART6 driven on the F446 and the consoles' USART1 and USART3
 (UART4/5/7/8 compiled on every header that has them, none driven), the
 OVER8 and frame-format legs on the other three boards (the loop's pad is
 surveyed on the Nucleo-F446RE alone).
+
+Implemented, not bench-verified, in the peer: the ops no letter judges
+yet - `bitbang` and `drive_rxd` beyond the break, `glitch` beyond the
+start bit's vote, `onewire`, `collide`, the repeated blast,
+`autobaud_tx`, `send_mpcm`, IrDA, and the half stop codes as a SENDER;
+the two-board letters past the core set measure them.

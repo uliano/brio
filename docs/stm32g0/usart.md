@@ -15,13 +15,19 @@ REPRODUCED, 2.11.2 applied, 2.2.4 STAGED AND REPRODUCED on a USART wake
 bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp`. The LPUARTs are
 [lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
-suite: `test_stm32_serial` (17 letters in `z`, 95 verdicts, wireless;
-three more outside `z` through `brio stress`). Family fixture
-`test/family_stm32g0/usart.cpp` plus ELEVEN negatives under
-`brio check stm32g0` (an instance nowhere, an instance off a part, a
-pad used twice, two engines on one channel, FIFO mode on a BASIC
-instance, a Reserved prescaler code, a Reserved threshold code, a wake
-on PCLK, DE without a pad, and DE together with RTS).
+suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless;
+three more outside `z` through `brio stress`; four under the second
+all-key `t`, 97 verdicts, against the desk's STM32F446RE running
+`usart_peer` - "Against a far board" below). The instrument for a far
+board's suite is this stratum's `usart_peer` ("The peer" below). Family
+fixture `test/family_stm32g0/usart.cpp` plus SIXTEEN negatives under
+`brio check stm32g0` (an instance nowhere, an instance off a part on
+two parts, a pad used twice, two engines on one channel, FIFO mode on a
+BASIC instance, a Reserved prescaler code, a Reserved threshold code, a
+wake on PCLK, DE without a pad, DE together with RTS, a Uart a dynamic
+clock does not list, a receive level with no receive engine, a receive
+ring past the counter, a receive threshold under an engine, and the
+driven single wire on a full-duplex link).
 
 ## What the silicon does
 
@@ -61,7 +67,14 @@ ignore it - on this family's LPTIM a forbidden write lands anyway
 With OVER8 = 1, USARTDIV = 2 x that and then BRR[15:4] = USARTDIV[15:4],
 BRR[2:0] = USARTDIV[3:0] >> 1, BRR[3] = 0 - the low bit of the fraction
 is DROPPED and bit 3 must be clear. USARTDIV >= 16 either way, which
-puts the ceiling at kernel/16 and kernel/8. And what the divisor divides
+puts the ceiling at kernel/16 and kernel/8. **OVER8 buys range and no
+resolution**: with USARTDIV's last bit dropped, the rate is
+2 x kernel / (an EVEN USARTDIV) - kernel / n for a whole n, as at
+OVER16 - so the two encodings make the same lattice of rates, OVER8
+alone reaching n = 8..15 (33.5.7's first example writes 1667 and the
+generator divides by 1666). A rate between two rungs of kernel / n is
+not reachable by choosing the oversampling: at 64 MHz, 7.5 Mbaud is
+n = 8.53, 5 % from either neighbour. And what the divisor divides
 is `usart_ker_ck_pres`: the KERNEL clock the CCIPR multiplexer chose,
 AFTER the PRESC prescaler - never PCLK by assumption.
 
@@ -86,7 +99,13 @@ byte in RDR, so a framed or parity-failed byte is dropped precisely and
 a noisy one is kept and counted. **In FIFO mode 33.5.4 stores those
 three flags WITH EACH ENTRY**, so a draining handler must read ISR
 BEFORE every RDR or the attribution slides by one and a good byte
-inherits its neighbour's framing error.
+inherits its neighbour's framing error. **And the flags are cleared
+BEFORE the RDR read that pops their entry**: a flag the next entry
+carries too is the same ISR bit, still standing, and a clear after the
+pop takes the next entry's with it - measured from a foreign sender, six
+frames of the wrong parity drained from the RXFIFO read three PE with
+the clear after the read and six with it before (letter `4`); the task
+clears first.
 
 **The FIFOs are the transport's default, where the instance has them.**
 A FULL USART and every LPUART carry an 8-deep transmit FIFO and an
@@ -125,7 +144,12 @@ LBME here; CR3.HDSEL connects TX and RX internally, drops the RX pin and
 RELEASES the TX pin whenever nothing is transmitted, so the pad is
 alternate-function OPEN DRAIN with a pull-up - 33.5.15 asks for an
 external one and the internal 40 k serves - and the instance hears every
-byte it sends. The whole bench suite is built on it.
+byte it sends. The whole bench suite is built on it. Where the line has
+no other driver - the loop of a port that hears itself, or a link whose
+far end only listens - the option `single_wire_push_pull` drives the pad
+push-pull while a frame goes out, the pull-up holding it between frames:
+the open drain rises on the pull-up alone, an RC a link wire's load
+slows further (the baud generator's findings below).
 
 **One pad, three jobs.** `USARTn_RTS_DE_CK` is the flow-control RTS, the
 RS-485 driver enable AND the synchronous clock (DS13560's tables; ch. 33
@@ -178,7 +202,10 @@ a compile-time refusal in the task.
 - `UartOptions` - the constexpr struct that is the task's LAST template
   argument: `kernel_clock`, `prescaler`, `over8`, `fifo` +
   `rx_threshold`/`tx_threshold`, `swap`, `invert_tx`/`invert_rx`/
-  `invert_data`, `msb_first`, `half_duplex`, `one_bit`,
+  `invert_data`, `msb_first`, `half_duplex`, `tx_speed` (the TX pad's
+  slew class, low by default), `single_wire_push_pull` (the half-duplex
+  pad driven while a frame goes out, refused at compile time without
+  `half_duplex`), `one_bit`,
   `overrun_disable`, `driver_enable` + `de_pin`/`de_assertion`/
   `de_deassertion`/`de_active_low`, `rts`/`cts` + their pads,
   `wake_from_stop`, and `rx_priority` - the receive engine's level in
@@ -612,9 +639,15 @@ byte-exact to 460800 on the paired desk** (16 of 16 at 115200, 230400
 and 460800; 0 of 16 at 921600, 1 M, 2 M and 4 M), and what fails above
 it is the rise time of the pad's own 40 k pull-up into the LINK WIRE PA9
 carries to the far board's receive pad - some 15 cm of jumper and a
-second chip's input, held hi-Z by that board's dark console. With PA9
-unloaded the same loop was byte-exact to 2 Mbaud. The generator is not
-in it: every rung runs at its rate on the wire (below).
+second chip's input, held hi-Z by that board's dark console. **THE
+DRIVEN LOOP** (the pad push-pull at very high speed while a frame goes
+out, `single_wire_push_pull`'s shape) **is byte-exact at every rung,
+115200 to 4 Mbaud, and at OVER8's 8 Mbaud**, 16 of 16 each, on the same
+loaded wire: the generator's ceiling, the wire no longer in it - which
+is why letter `p`, `test_stm32_dma` letter `o` and `bench_stm32` letter
+`u` run their 1 and 2 Mbaud streams on a driven single wire. The open
+drain's ceiling stays a figure of the desk. The generator is not in
+either: every rung runs at its rate on the wire (below).
 
 ### The rate on the wire, timed
 
@@ -712,12 +745,11 @@ public verbs and one option between them.
   (SBKRQ) - 60 bytes delivered intact and in order, FE counted 4, no ORE
   and no ring overrun, through the paced receiver and through the
   engine (where each error was one entry of the vector).
-- **The engine's edges**: 17 bytes told by IDLE 5799 cycles after the
+- **The engine's edges**: 17 bytes told by IDLE 5805 cycles after the
   last stop bit; 200 bytes at 1 Mbaud into a 64-byte ring, read on the
-  vectors' edges alone - 7 edges, 3 laps, no overrun - with PA9
-  unloaded: on the paired desk the 1 Mbaud stream does not survive the
-  loop (0 back, the open-drain ceiling above), and that verdict fails
-  there.
+  vectors' edges alone - 7 edges, 3 laps, no overrun - on the driven
+  single wire (the open drain's rise into the link wire gives out below
+  1 Mbaud, above).
 - **`tx_idle()` on the pad**: EXTI line 9 timing PA9's start bits (eight
   frames of 0xFF at 9600, one falling edge each), `tx_idle()` turned
   true 8 cycles after the last stop bit's end on the interrupt
@@ -981,6 +1013,78 @@ channel is served (77201 kicks in 10 s with 256-byte pairs back to back at
 921600, where more than nine characters pile up between relaunches) - a cost that
 exists only past the point where the FIFO off already loses every frame.
 
+### Against a far board: the STM32F446RE's `usart_peer` (the second all-key `t`)
+
+The desk pairs this board's USART1 with the STM32F446RE's, CROSSED - PA9
+to its PA10, PA10 from its PA9 - the far board running the stm32f4
+`usart_peer` (firmware 0x0400), driven IN BAND with the protocol every
+architecture on the link compiles (`avrdx/src/apps/usart_link.hpp`): an
+ack before every action, a bounded action, the peer back in command
+mode by itself. Letters `1` to `4` run under the second all-key `t` and
+never under `z`, which runs with the far board on its dark console. The
+far peer's time base is its crystal (the ST-LINK's 8 MHz in bypass), so
+what it times is THIS core's HSI16 - and this board times the same HSI
+against its own LSE over the very window of each run: TIM16 captures the
+LSE every eight periods (TISEL 2, table 140) and DMA1 channel 4 moves
+each capture into a ring of 1024 for the length of the set, so every
+rate verdict is the divisor's on the wire with the oscillator's walk
+taken out. Score: **97 of 97**, the refusals SKIPPED with their reason.
+
+- **The rendezvous and the refusal path** (`1`): ping, IDENT (kind
+  0x04, another die's unique ID, a crystal time base), a bad checksum
+  NAKed, a desync recovered; the far USART's refusals - a synchronous
+  client, a seven-bit word - acked, reported `report_cfg_failed`, the
+  peer at once in command mode again.
+- **THIS HSI16 against two crystals at once**: three gapless runs of
+  4000 frames at 1 Mbaud (64 MHz / 64 here, 90 MHz / 90 there) timed by
+  the far crystal at +2625, +2713 and +2618 ppm, and the same three
+  windows timed by this board's LSE at +2617, +2697 and +2620 - two
+  crystals agreeing within 16 ppm over the same 40 ms, the HSI 0.26 %
+  fast at its factory trim and WANDERING: a few hundred ppm between runs
+  a tenth of a second apart (a 1 Mbaud reference taken beside a run left
+  the 9600 rung 500..700 ppm away three times in ten, which is why the
+  verdict reads the run's own window). The far crystal's 1 Mbaud blast
+  reads -3097 ppm on this ruler, the HSI's error seen from the other
+  side.
+- **The baud matrix** (`2`), on the two dividers' COMMON ladder: this
+  USART makes 64 MHz / n (OVER8 adds no resolution, above), the far one
+  90 MHz / k, and the two meet where k / n = 7 / 5 - above 2 Mbaud at
+  2.56, 3.2, 4.267 and 6.4 Mbaud, 0.15 % apart. At 9600, 115200, 921600,
+  1, 1.5, 2 Mbaud and those four: 16 frames echoed by the far chip, every
+  one equal; this transmitter timed by the far receiver over 25 ms of
+  frames within 100 ppm of the divisor's error plus the HSI's over the
+  run (measured within 40 ppm at every rung: 9600 +2686 against +2720,
+  921600 +9364 against +9324 - BRR 69 for 69.4 - and 6.4 Mbaud +2824
+  against +2816); the far blast whole on the polled receiver (16000 of
+  16000 at 6.4 Mbaud, a hundred cycles a frame, on a lean loop: the ISR
+  load, the stamp, the RDR load and the count); and 1024 frames whole
+  through the interrupt receiver and through the receive engine (DMA1
+  channel 3) at every rung, OVER8's task above 4 Mbaud.
+- **The frame matrix** (`3`) at 115200: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
+  8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1 and 6E1 SKIPPED (the
+  far USART refuses them: M counts its parity bit and has no seven-bit
+  word), 9E1 SKIPPED here (no word length on this USART either); the
+  half stop bits timed as LENGTHS by the far receiver, 19 and 21 half
+  bits within 100 ppm of an 8N1 run with the HSI taken out.
+- **The receiver's errors from a foreign sender** (`4`): six frames of
+  odd parity into an even receiver, PE on each, the data readable; THE
+  FE ONSET with the far divisor 0..8 % off 9600, back to back (a fast
+  sender's frames with idle between them never fail the stop bit): clean
+  within 4 % either way, FE from +5 % and -6 % (33.5.8's tables 188/189
+  give 3.75 % at OVER16 and BRR[3:0] = 0, NE rising first from 4 %); a
+  run of 16 read late - ORE, and the RXFIFO's eight plus the shift
+  register's one kept in order (the tenth frame is the overrun, as the
+  loop measured); THE START BIT'S VOTE, one low pulse of w ticks on the
+  idle line at 9600 (a sixteenth is 156): nothing under 1350, a start
+  with NE from 1350 to about 1700 with ONEBIT clear, and with ONEBIT set
+  a start from about 1400 and no NE at any width - the threshold blurred
+  by a sample's phase from run to run; a break of 20 bit times one frame
+  with FE and data 0x00, LBDF only in LIN mode; THE FIFO'S PER-ENTRY
+  FLAGS drained late - six wrong-parity frames, three PE with the clear
+  after the RDR read, six with it before (above); and through the task,
+  odd parity counted six of six and nothing delivered, a break one frame
+  error and nothing delivered.
+
 ## On the STM32G071RB
 
 `test_stm32_serial` runs on the Nucleo-G071RB (DEV_ID 0x460, REV_ID
@@ -1079,6 +1183,58 @@ the 32768 Hz LSE (1062 bytes, 0 wrong, BRR 874) and the Stop 1 ended by
 a start bit on that LPUART, 590 ms deep with the character intact -
 which is the letter's 2/2 as on the Nucleo-64s.
 
+## The peer: `usart_peer` (the instrument a far board's suite drives)
+
+This stratum's port of the protocol's instrument
+(`stm32g0/src/apps/usart_peer.cpp`, firmware 0x0300, built for the
+G0B1RE and the G071RB): one polled loop on USART1's PA9/PA10, dark until
+a frame checks out (PA9 an input, no pull on either pad; a NAK only
+while engaged), a bounded action after every ack. The surface is the
+protocol's; the engine is this chapter's, item by item:
+
+| the chapter's offer | in the peer |
+|---|---|
+| the 8-deep FIFOs (33.5.4) | USED: the echo and the sink drain the RXFIFO polled, the ISR word read before each RDR and its flags cleared before the pop; a blast keeps the TXFIFO topped up, gapless at 6.4 Mbaud with no DMA |
+| transmit and receive DMA | DECLINED: the FIFO is eight frames of slack under a loop of a fraction of a frame (below) |
+| OVER8 | USED where it is closer to the rate, and alone under the protocol's clk2x flag - for range: it adds no resolution (above) |
+| the kernel-clock multiplexer | PCLK; HSI16 DECLINED - a lower ceiling and the same oscillator |
+| TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF2) | USED: THE WAVEFORM ENGINE - the pad re-muxed to the timer with the channel forced high (no edge), toggle mode with CCR preload off, the first compare by the CPU and every later one by DMA1 channel 1 on the channel's own request from a table of ABSOLUTE compares; the prescaler per action so the longest interval fits half the counter; the CPU sampling the pad meanwhile and counting its transitions, and the run timed whole, so a compare written too late (an edge a wrap later) is caught |
+| SWAP + HDSEL | USED for the shared wire: the single wire on PA10, the far TX's, open drain on its pull-up, the reply's own echo flushed |
+| TXINV / RXINV | USED for IrDA alone: two ST SIR ENDECs face each other with opposite polarities (33.5.18) - a reading the first IrDA leg confirms |
+| the 0.5 / 1.5 stop codes | served (33.5.5 recommends them for smartcard mode and forbids them nowhere) |
+| seven-, eight- and nine-bit words | 6+P, 7, 7+P, 8, 8+P and 9 served; 5 and 6 data bits without parity and 9 with REFUSED |
+| synchronous master and slave | REFUSED: USART1's CK pads carry another wire on this desk, and the far clock reaches PB3 only through a strap the desk has not got |
+| IrDA SIR | IREN to 115200, PSC from the requested filter, the low-power pulse from the requested width |
+| auto-baud, the receiver time-out, LIN, mute, DE | the DUT's subjects: the peer feeds them (send, brk, autobaud_tx, send_mpcm) |
+
+**THE TIME BASE IS TRACKED, NOT MEASURED ONCE.** The core runs the HSI16
+through the PLL, 0.26..0.33 % fast on this die and wandering hundreds of
+ppm over seconds - measured once at boot it read +3326 ppm and a minute
+later +2950..+3093, and three calibrate runs a second apart then read
++164, +8 and +76 ppm against the far crystal. So the peer measures its
+core against the LSE ALL THE TIME, in hardware - TIM16 capturing the LSE
+every eight periods, DMA1 channel 2 moving each capture into a ring of
+1024 (250 ms) - takes the rate over the last 250 ms into every divisor
+and edge before each action, and converts a span at the rate over the
+span's own window. Then: -5, -9, -7 ppm against the far crystal (and -14,
+-5, +1 in a later run). The ring is WALKED AGAINST THE CHANNEL - one
+subtraction an entry, stopping eight short of the write head: a walk
+with a modulo a step (a library division on this core) took several
+capture periods and read a torn ring, 450..950 ppm out.
+
+**The cost.** The echo's clean character is some thirty instructions with no
+call (release listing): the ISR load and its test, the TIM2 stamp, the
+RDR load, the TDR store and the count, the mask and the bound held on
+the stack - some fifty cycles against the hundred of a 6.4 Mbaud frame
+(85 at 7.5); the sink is the same less the store, and its 16000 frames
+at 6.4 Mbaud arrived whole with every span within 40 ppm. The engine's
+floor is a DMA reload: an interval of 10 counts (156 ns) played, of 8
+the compare was written after the counter passed it; 12 is the floor
+the peer keeps, and the lead before the first compare is 10 us (a 64-bit
+division sat inside it once and the first edge came before the
+sampler's first look - the bound is computed before the counter
+restarts).
+
 ## Not covered yet
 
 Declined with a reason (every field of chapter 33 is implemented):
@@ -1099,25 +1255,30 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
-- The single-wire loop's legs above 460800 ON THE PAIRED DESK: the
-  1 Mbaud stream across a 64-byte ring (letter `p`) and `bench_stm32`
-  `u`'s receive lines at 1 and 2 Mbaud were measured with PA9 unloaded,
-  and the link wire's load now holds the open-drain loop below them
-  (above). What would measure them here: a loop whose transmitter
-  drives the pad, or the ring fed by the far board's `usart_peer` at
-  1..7.5 Mbaud (born with the serial suites' two-board half).
-- `test_stm32_serial` as the G031K8's two group images (letters a to j,
-  and k to y): the suite outgrew the part's 64 KB whole, and the scores
-  under "On the STM32G031K8" are the one image's; one run of each image
-  on that board measures them, the rate on the wire among them.
+- `test_stm32_serial` as the G031K8's three group images (letters a to
+  j, k to y, and the two-board set): the suite outgrew the part's 64 KB
+  whole, and the scores under "On the STM32G031K8" are the one image's;
+  one run of each image on that board measures them, the rate on the
+  wire among them (no board is paired with it on the desk).
+- The two-board letters past the core set - the engine's shapes, the
+  ring beyond the bridge, the shared wire against a second chip, IDLE
+  under a faster sender: their peer ops (`bitbang`, `glitch` beyond the
+  start bit's vote, `drive_rxd`, `onewire`, `collide`, the repeated
+  blast) are served by both STM32 peers and measured by no letter yet.
+- The peer's IrDA (its inversions a reading of 33.5.18 to confirm),
+  `autobaud_tx`, `send_mpcm` and the 0.5 / 1.5 stop codes as a SENDER:
+  served, judged by no letter yet.
+- `usart_peer` on the STM32G071RB: built, never run (not on the desk).
 - The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
   built for it and has not run there (the board is not on the desk); one
   run of the suite measures it. The ring under an `LpUart`, its kick
   included, is the same task's and compile-only, as the LPUART's engine
   slots are ([lpuart.md](lpuart.md)).
 - The kick racing a character that lands on the very toggle at rates
-  above 921600: the ST-LINK's bridge is the ceiling of the host-fed
-  letters, and an on-board sender above it would measure it.
+  above 921600: the far board's blast now reaches this receiver at
+  6.4 Mbaud (letter `2`, the receive engine whole), and a letter that
+  streams it for seconds against the ring's copies would measure the
+  kick itself.
 - `Rs485` as a TASK (the driver-enable timings are measured through the
   resource on the DE pad; the task's own `init()` path is compile-only).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured

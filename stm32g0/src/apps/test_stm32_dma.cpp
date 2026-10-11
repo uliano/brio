@@ -3023,7 +3023,14 @@ using U1Rx = DmaRxEngine<1, 3>;
 // The receive ring is the subject (64 bytes, the letter's geometry); the
 // transmit ring is the smallest that keeps the wire busy, every byte of
 // SRAM counting on the 8 KB part.
-using U1 = Uart<1, u1_pins, 64, 16, U1Tx, U1Rx, uart_half_duplex()>;
+// The single wire is DRIVEN - push-pull while a frame goes out, the
+// pull-up holding it between frames: PA9 also carries the link wire to the
+// far board's receive pad (held hi-Z by its dark console), and the open
+// drain's rise on the pad's 40 k pull-up into that load gives out below
+// 1 Mbaud (docs/stm32g0/usart.md, "The baud generator").
+using U1 = Uart<1, u1_pins, 64, 16, U1Tx, U1Rx,
+                uart_half_duplex({.tx_speed = PinSpeed::very_high,
+                                  .single_wire_push_pull = true})>;
 constexpr uint32_t u1_baud = 1'000'000;
 constexpr uint32_t u1_byte_cycles = SysClock::hz / (u1_baud / 10u);   // ten bits
 volatile bool u1_live = false;

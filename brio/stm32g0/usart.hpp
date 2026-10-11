@@ -1426,6 +1426,19 @@ struct UartOptions {
     /// comes back through the receiver.
     bool half_duplex = false;
 
+    /// The output driver's slew class on the TX pad (OSPEEDR, 7.4.3): low
+    /// serves the console rates; a multi-megabaud link asks for more.
+    PinSpeed tx_speed = PinSpeed::low;
+    /// In half duplex, drive the pad PUSH-PULL while a frame goes out, the
+    /// pull-up holding the line the transmitter releases between frames
+    /// (33.5.15: "the TX pin is always released when no data is
+    /// transmitted"). For a line with no other driver - the loop of a port
+    /// that hears itself, or a link whose far end only listens - because
+    /// the open drain rises on the pull-up alone, an RC that a link wire's
+    /// load slows further (docs/stm32g0/usart.md, "The baud generator").
+    /// Two drivers on one wire must keep the open drain.
+    bool single_wire_push_pull = false;
+
     /// 33.5.8 / 33.8.4: one sample a bit (more tolerance, no noise flag)
     /// and the overrun that overwrites instead of dropping.
     bool one_bit = false;
@@ -1602,6 +1615,9 @@ class UartTask {
                                    : uart_pins_valid(pins),
                   "brio Uart: the two pads must be real pins of present ports, and TX "
                   "and RX cannot be the same pad (in half duplex only TX is claimed)");
+    static_assert(opts.half_duplex || !opts.single_wire_push_pull,
+                  "brio Uart: single_wire_push_pull drives the ONE pad of a half-duplex "
+                  "line (33.5.15); a full-duplex TX pad is push-pull already");
 
     // AN ENGINE IS CHECKED WHERE IT IS NAMED. `sizeof` demands a COMPLETE
     // type, which instantiates the engine right here, at the template
@@ -1887,12 +1903,15 @@ public:
         if constexpr (opts.half_duplex) {
             // 33.5.15: ONE pad, alternate function OPEN DRAIN with a
             // pull-up - the chapter asks for an external one and the
-            // 40 k internal one serves. The RX pad is not claimed at all;
-            // it "is no longer used".
+            // 40 k internal one serves - or push-pull where the options
+            // say the line has no other driver. The RX pad is not
+            // claimed at all; it "is no longer used".
             TxPin::function(pins.tx.function,
-                            {.pull = PinPull::up, .open_drain = true});
+                            {.pull = PinPull::up,
+                             .open_drain = !opts.single_wire_push_pull,
+                             .speed = opts.tx_speed});
         } else {
-            TxPin::function(pins.tx.function);
+            TxPin::function(pins.tx.function, {.speed = opts.tx_speed});
             RxPin::function(pins.rx.function, {.pull = PinPull::up});
         }
         if constexpr (opts.driver_enable) {
@@ -2249,10 +2268,15 @@ public:
                 edge = receive_fifo(r, st);
             }
         } else if ((st & UsartFlag::rxne) != 0u) {
-            const uint8_t b = static_cast<uint8_t>(r.RDR);   // clears RXNE
+            // The flags cleared BEFORE the read that frees RDR: a character
+            // that lands in it the moment it is read raises its own (the
+            // FIFO path's rule, take() below).
             const uint32_t err = st & (UsartFlag::fe | UsartFlag::ne | UsartFlag::pe);
             if (err != 0u) {
                 r.ICR = err;   // the ICR bits sit at the ISR positions
+            }
+            const uint8_t b = static_cast<uint8_t>(r.RDR);   // clears RXNE
+            if (err != 0u) {
                 count_errors(err);
             }
             if ((err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
@@ -2758,7 +2782,13 @@ private:
     /// 33.5.4: the RXFIFO carries PE/NE/FE WITH EACH ENTRY and ISR reports
     /// the flags of the entry AT THE HEAD - so ISR is re-read before every
     /// RDR, or the attribution slides by one and a good byte inherits its
-    /// neighbour's framing error.
+    /// neighbour's framing error. AND THE FLAGS ARE CLEARED BEFORE THE RDR
+    /// READ THAT POPS THEIR ENTRY: a flag the next entry also carries is
+    /// the same ISR bit, standing, and a clear after the pop takes the next
+    /// entry's flag with it - measured from a foreign sender, six frames
+    /// of the wrong parity drained from the FIFO counted three, every other
+    /// one delivered as good (test_stm32_serial letter 4); the clear first,
+    /// six of six.
     ///
     /// A character the ring refuses or FE or PE drops is reported to the
     /// ring where it is met, on its rare path: where in the stream it fell
@@ -2780,8 +2810,8 @@ private:
     [[gnu::always_inline]] static void take(USART_TypeDef& r, uint32_t s) {
         const uint32_t err = s & (UsartFlag::fe | UsartFlag::ne | UsartFlag::pe);
         if (err != 0u) [[unlikely]] {
+            r.ICR = err;   // BEFORE the RDR read: the next entry's flags are its own
             const uint8_t b = static_cast<uint8_t>(r.RDR);
-            r.ICR = err;   // after the RDR read: the flags are this entry's
             count_errors(err);
             if ((err & (UsartFlag::fe | UsartFlag::pe)) == 0u) {
                 keep(b);

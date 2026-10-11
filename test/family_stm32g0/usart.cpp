@@ -187,6 +187,11 @@ static_assert(uart_with_driver_enable({}, {'A', 12, PinFunction::af1}, 3, 4).dri
 
 using Fifo = Uart<1, u1, 128, 512, NoDmaEngine, NoDmaEngine, fifo_opts>;
 using Loop = Uart<1, u1, 64, 64, NoDmaEngine, NoDmaEngine, loop_opts>;
+// The driven single wire: push-pull while a frame goes out, at a faster
+// slew class.
+constexpr UartOptions driven_opts =
+    uart_half_duplex({.tx_speed = PinSpeed::very_high, .single_wire_push_pull = true});
+using Driven = Uart<1, u1, 64, 64, NoDmaEngine, NoDmaEngine, driven_opts>;
 using Waker = Uart<1, u1, 64, 64, NoDmaEngine, NoDmaEngine, wake_opts>;
 constexpr PinSel de_pad{'A', 12, PinFunction::af1};   // USART1_RTS_DE, DS13560 table 13
 using Rs485Link = Rs485<1, u1, de_pad, 8, 8>;
@@ -206,6 +211,7 @@ void usart_tail_verbs() {
     constexpr SysClock clock;
     (void)Fifo::init(clock, 115200);
     (void)Loop::init(clock, 9600);
+    (void)Driven::init(clock, 4'000'000);
     (void)Waker::init(clock, 9600);
     (void)Rs485Link::init(clock, 9600);
     (void)Fifo::isr();

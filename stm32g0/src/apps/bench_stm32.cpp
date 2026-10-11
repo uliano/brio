@@ -1180,7 +1180,12 @@ constexpr UartPins loop_pins{
     .tx = {'A', 9, PinFunction::af1},
     .rx = {'A', 10, PinFunction::af1},
 };
-constexpr UartOptions single_wire = uart_half_duplex();
+/// The single wire is DRIVEN - push-pull while a frame goes out, the pull-up
+/// holding it between frames: PA9 also carries the link wire to the far
+/// board's receive pad (hi-Z under its dark console), and the open drain's
+/// rise on the pad's 40 k pull-up into that load gives out above 460800.
+constexpr UartOptions single_wire =
+    uart_half_duplex({.tx_speed = PinSpeed::very_high, .single_wire_push_pull = true});
 
 /// The rings: a 256-byte burst needs a 512-byte receive ring; the 8 KB part
 /// takes a quarter of everything (and its long burst is 64 bytes).
