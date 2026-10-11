@@ -17,7 +17,7 @@ library's 0x035E06x1 for this part
 page is the schematic's and the reference's, with what the suites
 confirmed on the board: the debug port and the console on the pads
 below, PC14 reading low under its pull-up against the CC1 line's 5.1
-kOhm, and the two jumpers the pin and USART suites detect.
+kOhm, and the jumper the pin suite detects.
 
 - **Clock**: no crystal - the series has no oscillator for one - so the
   apps run the 48 MHz HSI undivided
@@ -63,8 +63,12 @@ kOhm, and the two jumpers the pin and USART suites detect.
   USB PD one (`SCHPCB/CH32X035USBPD_CH211`).
 - **Buttons**: **S4 (`Download`)** ties PC17 to 3.3 V through 4.7 kOhm
   while pressed, which at power-up selects WCH's boot loader (the
-  reference: PC17 "can choose the boot mode when the chip is powered
-  on"). There is **no reset button**: the QFN20 has no reset pin, and a
+  reference: the chip "powers up and detects USB_P (PC17) high level to
+  enter BOOT"). ANY PULL-UP ON PC17 DOES THE SAME: a resistor from PC17 to
+  a live rail - an I2C pull-up on the pad, I2C1's SDA on its column 2 -
+  holds it high at every power-up, so such a pull-up hangs from a pad the
+  program drives high only once it runs (the desk hangs its two from
+  PB3). There is **no reset button**: the QFN20 has no reset pin, and a
   reset is the probe's or the supply's.
 - **The headers**, two of 7x2, carry every pad the package bonds:
 
@@ -79,9 +83,12 @@ kOhm, and the two jumpers the pin and USART suites detect.
   | 13 | PC15 | 14 | PC17 | | 13 | GND | 14 | GND |
 
 - **The jumpers the suites want**, none of them required - each suite
-  detects its wire before it judges and says "no wire" otherwise: PA4 to
-  PA5 (P1 pin 10 to P2 pin 11) for the pin suite, PB0 to PB1 (P2 pin 10
-  to P2 pin 7) for the USART suite, and LED1 to PA0 for a hand at the
-  desk to see the console's `LED` command. Manifest type `x035f8`; the project is
+  detects its wire before it judges and says "no wire" otherwise: PB11
+  to PB12 (P2 pin 5 to P2 pin 6) for the pin suite, and LED1 to PA0 for a
+  hand at the desk to see the console's `LED` command. A jumper never
+  sits on a pad wired to another board: PA4..PA7, PB0, PB1, PB3, PC16
+  and PC17 carry the desk's links to a CH32V006K8U6 (SPI1, USART4, I2C1
+  and its pull-up rail), and the USART suite's two-board letters run
+  across PB0/PB1 against that board's peer. Manifest type `x035f8`; the project is
   `ch32x035/`, preset `ch32x035f8-release`
   ([../ch32x035/README.md](../ch32x035/README.md)).

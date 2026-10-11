@@ -9,15 +9,24 @@
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test.
 //
-// NOTHING TO WIRE for `z`. The pads it drives are free on WCH's QFN20
-// evaluation board - PA5, PA6 and PA7 and PB11 and PB12 go to its pin
-// headers and nowhere else - and the one it only reads, PC14, is the
-// board's CC1 line, which the board ties to ground through 5.1 kOhm at the
-// USB-C connector: it is configured as an input and never driven, so a
-// cable on that connector sees nothing change. The USB pads PC16/PC17 and
-// the debug port's PC18/PC19 are not touched. Letter `w` wants a jumper
-// PA4-PA5 and DETECTS it first; without it the letter says so and judges
-// nothing. The LED on PA0 is left undriven, so it stays dark.
+// NOTHING TO WIRE for `z`, and the far board DARK. The pads it drives go to
+// the board's pin headers: PB11 and PB12 to nothing else, PA5, PA6 and PA7
+// to the desk's SPI link, wired to a CH32V006's SPI pads - which its dark
+// console (or a peer still searching) leaves floating inputs, so a driven
+// pad reads its own level and a pull moves the wire with it (a wire and a
+// floating pad add some tens of picofarads, under a microsecond on the
+// weakest pull here). PB3, the desk's I2C pull-up rail, is never touched:
+// it stays floating from every reset. The one pad the suite only reads,
+// PC14, is the board's CC1 line, which the board ties to ground through
+// 5.1 kOhm at the USB-C connector: it is configured as an input and never
+// driven. The USB pads PC16/PC17 (the desk's I2C wires) and the debug
+// port's PC18/PC19 are not touched. Letter `w` wants a jumper PB11-PB12
+// and DETECTS it first; without it the letter says so and judges nothing.
+// The LED on PA0 is left undriven, so it stays dark.
+//
+// THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
+// that drives a link pad from a sagging rail refuses every letter and
+// says so.
 //
 // What is exercised, letter by letter:
 //   a  the nibbles: every mode of this series into PA6 (CFGLR) and PB11
@@ -27,7 +36,7 @@
 //   b  the levels: a driven pad read back through INDR, the set/reset
 //      halves and the toggle on one pin and on three at once, the runtime
 //      PinRef, the whole-port write
-//   c  the pulls: up and down on a pad that has both, up on pads that have
+//   c  the pulls: up and down on a pad that has both, up on a pad that has
 //      no pull-down and the refusal of the down there
 //   d  the high byte: PC14's output data bit set and cleared through BSXR
 //      and BCR while it is a pulled input, and the level the board's CC
@@ -35,7 +44,7 @@
 //   e  AFIO: the remap field of a peripheral no program uses here written
 //      and read back, the debug port's field as it stands, and the EXTI
 //      multiplexer's three codes written and read back
-//   w  (a jumper PA4-PA5, detected first) the levels across a wire both
+//   w  (a jumper PB11-PB12, detected first) the levels across a wire both
 //      ways, and a pull against a driver
 //   l  (by name only) THE LOCK: PB12's configuration frozen until the next
 //      reset, a reconfiguration left without effect, the copy unchanged -
@@ -52,6 +61,7 @@
 #include "ch32x035/pfic.hpp"
 #include "ch32x035/pin.hpp"
 #include "ch32x035/platform.hpp"
+#include "ch32x035/pwr.hpp"
 #include "ch32x035/ticker.hpp"
 #include "ch32x035/usart.hpp"
 #include "util/print.hpp"
@@ -71,10 +81,10 @@ constexpr Serial serial;
 using Low = Pin<'A', 6>;      // CFGLR
 using High = Pin<'B', 11>;    // CFGHR, through its copy
 using Pulled = Pin<'A', 7>;   // a pad with both pulls
-using NoDown = Pin<'B', 3>;   // a pad with the pull-up alone
+using NoDown = Pin<'B', 12>;  // a pad with the pull-up alone
 using Cc1 = Pin<'C', 14>;     // CFGXR; the board's CC1, read only
-using WireOut = Pin<'A', 4>;
-using WireIn = Pin<'A', 5>;
+using WireOut = Pin<'B', 11>;
+using WireIn = Pin<'B', 12>;
 using Locked = Pin<'B', 12>;
 
 TestBench<Serial> bench;
@@ -184,9 +194,9 @@ void tc_pulls() {
 
     const bool nodown_up = NoDown::input(PinPull::up);
     settle();
-    const bool pb3_up = NoDown::read();
+    const bool pb12_up = NoDown::read();
     const bool nodown_down = NoDown::input(PinPull::down);
-    bench.verdict("PB3 takes the pull-up and reads high", nodown_up && pb3_up);
+    bench.verdict("PB12 takes the pull-up and reads high", nodown_up && pb12_up);
     bench.verdict("and refuses a pull-down it has not got, writing nothing",
                   !nodown_down && NoDown::nibble() == pin_nibble_pulled);
     NoDown::release();
@@ -240,10 +250,12 @@ void te_afio() {
 }
 
 // ---------------------------------------------------------------------------
-// w - across a wire, PA4-PA5
+// w - across a wire, PB11-PB12
 // ---------------------------------------------------------------------------
 bool wire_present() {
-    (void)WireIn::input(PinPull::down);
+    // PB12 has no pull-down: the driver's high is seen against the pad
+    // floating, its low against the pull-up, which is the one to beat.
+    (void)WireIn::input();
     WireOut::output(true);
     settle();
     const bool sees_high = WireIn::read();
@@ -258,7 +270,7 @@ bool wire_present() {
 
 void tw_wire() {
     if (!wire_present()) {
-        print(serial, "  no wire: PA4-PA5 is not strapped, nothing judged", crlf);
+        print(serial, "  no wire: PB11-PB12 is not strapped, nothing judged", crlf);
         return;
     }
     (void)WireIn::input();
@@ -269,7 +281,7 @@ void tw_wire() {
         settle();
         follows = WireIn::read() == level && follows;
     }
-    bench.verdict("PA5 follows PA4 through the wire, eight edges", follows);
+    bench.verdict("PB12 follows PB11 through the wire, eight edges", follows);
     (void)WireIn::input(PinPull::up);
     WireOut::output(false);
     settle();
@@ -296,8 +308,13 @@ void tl_lock() {
                   after == before);
 }
 
+/// The supply as the voltage detector read it at boot (main()).
+bool supply_ok = true;
+
 void banner() {
     print(serial, crlf, "test_x035_pin on ", device::part_name, " - GPIO and AFIO", crlf, crlf);
+    print(serial, "  supply at boot: ", supply_ok ? "above 3.0 V" : "UNDER 3.0 V, every letter refused",
+          " (the voltage detector at PLS 10)", crlf, crlf);
     bench.menu();
     print(serial, crlf);
 }
@@ -314,17 +331,26 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
 
+    // THE SUPPLY before any link pad is driven (the desk's rule).
+    brio::Pwr::pvd(brio::PvdLevel::v3_0);
+    (void)brio::delay_us(clock, 200);
+    supply_ok = !brio::Pwr::supply_low();
+
     bench.letter('a', "the nibbles in the three configuration registers", ta_nibbles);
     bench.letter('b', "the levels, the set/reset halves, the toggle", tb_levels);
     bench.letter('c', "the pulls", tc_pulls);
     bench.letter('d', "the high byte: PC14's data bit through BSXR", td_high_byte);
     bench.letter('e', "AFIO: a remap field, the debug port, the EXTI multiplexer", te_afio);
-    bench.letter('w', "across a jumper PA4-PA5, detected first", tw_wire);
+    bench.letter('w', "across a jumper PB11-PB12, detected first", tw_wire);
     bench.letter('l', "the configuration lock, until the next reset", tl_lock, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=",
-                    tick_ok ? "STK" : "FAILED", brio::crlf);
+                    tick_ok ? "STK" : "FAILED", " supply=", supply_ok ? "above 3.0 V" : "LOW", brio::crlf);
+        if (!supply_ok) {
+            brio::print(serial, "SUPPLY UNDER 3.0 V (the PVD at PLS 10): every letter refused, the link "
+                                "pads left floating", brio::crlf);
+        }
         banner();
         bench.prompt();
     }
@@ -340,6 +366,8 @@ int main() {
         brio::print(serial, static_cast<char>(c), brio::crlf);
         if (c == '?') {
             banner();
+        } else if (!supply_ok) {
+            brio::print(serial, "refused: the supply is under 3.0 V", brio::crlf);
         } else if (!bench.handle(static_cast<char>(c))) {
             brio::print(serial, "unknown letter (? for the menu)", brio::crlf);
         }

@@ -42,9 +42,10 @@ One document per peripheral driver is the shape
 |--------|-------|
 | [device.hpp](../../brio/ch32x035/device.hpp) + [parts/](../../brio/ch32x035/parts/) | the register map and the part table: the seven parts, each with its memories, its package, the pads it bonds and the pads it SHORTS together inside (the datasheet's notes 4 to 7), the USARTs it offers beside the model table's count, and what else it carries; RCC, GPIO, AFIO, the USART and the core's STK and PFIC mapped for the drivers, the EXTI and PWR mapped for the reader, the flash interface's option bytes and the electronic signature decoded READ-ONLY; the interrupt numbers are the vector table's word indices |
 | [platform.md](platform.md) | Platform: `Ch32x035Platform` (the `csrrci` critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb, the stack ledger), `Pfic` and `BRIO_CH32_INTERRUPT` with `no_icf`, the 64-bit STK `Ticker`, `delay_us`, and what the crt writes into the core - measured on the CH32X035F8U6 by `test_x035_platform` (51 verdicts): the WFE idle entered unmasked and the latch its wake leaves consumed - no edge position of 600 losing the wake or serving it a tick late, one kernel turn per tick where the unconsumed latch gave two (at 48 MHz and at 8 MHz), the STK's compare and its CNT arithmetic within 30 ppm of the interrupt count over 200 reloads, `delay_us` 112 to 124 cycles late and never early, an interrupt round trip of 100 to 104 cycles at 48 MHz with the hardware prologue, corecfgr's 0x1F making a timed loop 7.3 per cent SLOWER, INTSYSCR and mtvec as the crt wrote them and an MPP no MRET changes, and the reset flags, the signature and the chip-identifier word read at boot |
-| [clock.md](clock.md) | RCC: ONE root (the 48 MHz HSI) and ONE divider (HPRE, /6 out of reset), the user trim, the flash's wait states sequenced around every change, the clock output on PB9 where the package bonds it, the gates, the resets and the reset flags; `Clock<internal, hz>` and `DynamicClock<Boot, Users...>` - measured on the CH32X035F8U6 by `test_x035_clock` (21 verdicts): the whole HPRE ladder from 48 MHz down to 3 MHz and back with the tick, a busy-wait and the console exact at every rung and nothing of the tree written but HPRE and the wait states, the trim a step each way, RCC_AHBPCENR's reset value, fifteen gates opened and closed; RMVF a LEVEL, and the power controller's reset line refused after a pulse on it cut the part off its debug port |
-| [pin.md](pin.md) | GPIO and AFIO: the F1's nibble with NO speed and NO open-drain output, 24 pins a port over THREE configuration registers, CFGHR written whole from a RAM copy as WCH's library does it, BSHR and BSXR for the two halves of a port, the pull in the output register and a pull-down on PA0..PA15, PC16 and PC17 alone, the bonding and the shorted pads refused at compile time, the one-way lock; the remap fields of AFIO_PCFR1 with the USARTs' columns as data, the debug port's field read and written only by a verb nobody reaches by accident, the EXTI port multiplexer - measured on the CH32X035F8U6 by `test_x035_pin` (21 verdicts): every nibble in each of the three registers, CFGHR reading back what its copy wrote on a die the vendor's caution is not for, the levels, BSXR on PC14, the pulls, a remap field, the debug port's field and the EXTI multiplexer's three codes, and the levels across a jumper; a port read through its shut gate answering with the last word the bus carried |
-| [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface, its engine slots taking the empty tag alone - measured on the CH32X035F8U6 by `test_x035_usart` (27 verdicts): the divisor in HCLK, every frame and mode register by register with the chapter's exclusions refused, a frame's length and the break's timed, the debug port's column refused, and USART4 across a jumper at 115200, 1 Mbaud and 3 Mbaud with 8E1, 7O1 and 9N1 frames and a LIN break detected |
+| [clock.md](clock.md) | RCC: ONE root (the 48 MHz HSI) and ONE divider (HPRE, /6 out of reset), the user trim, the flash's wait states sequenced around every change, the clock output on PB9 where the package bonds it, the gates, the resets and the reset flags; `Clock<internal, hz>` and `DynamicClock<Boot, Users...>` - measured on the CH32X035F8U6 by `test_x035_clock` (21 verdicts): the whole HPRE ladder from 48 MHz down to 3 MHz and back with the tick, a busy-wait and the console exact at every rung and nothing of the tree written but HPRE and the wait states, the trim a step each way and, against the desk's CH32V006K8U6 crystal, the HSI at -0.25 per cent and the trim's step at 116 to 118 kHz on average from 7 to 28, RCC_AHBPCENR's reset value, fifteen gates opened and closed; RMVF a LEVEL, and the power controller's reset line refused after a pulse on it cut the part off its debug port |
+| [pwr.md](pwr.md) | PWR: the programmable voltage detector alone - PLS's four thresholds and PVD0, no enable bit - the check every image that drives a link pad makes at boot (3.0 V), reading "not low" on the CH32X035F8U6's 3.3 V rail |
+| [pin.md](pin.md) | GPIO and AFIO: the F1's nibble with NO speed and NO open-drain output, 24 pins a port over THREE configuration registers, CFGHR written whole from a RAM copy as WCH's library does it, BSHR and BSXR for the two halves of a port, the pull in the output register and a pull-down on PA0..PA15, PC16 and PC17 alone, the bonding and the shorted pads refused at compile time, the one-way lock; the remap fields of AFIO_PCFR1 with the USARTs' columns as data, the debug port's field read and written only by a verb nobody reaches by accident, the EXTI port multiplexer - measured on the CH32X035F8U6 by `test_x035_pin` (19 verdicts in `z`, two more on its jumper): every nibble in each of the three registers, CFGHR reading back what its copy wrote on a die the vendor's caution is not for, the levels, BSXR on PC14, the pulls, a remap field, the debug port's field and the EXTI multiplexer's three codes, and the levels across a jumper; a port read through its shut gate answering with the last word the bus carried |
+| [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface, its engine slots taking the empty tag alone - measured on the CH32X035F8U6 by `test_x035_usart` (23 verdicts single-board, 66 against the desk's CH32V006K8U6 on its crystal across USART4's PB0/PB1): the divisor in HCLK, every frame and mode register by register, a frame's length and the break's timed, the debug port's column refused, half duplex deaf to its own frames and hearing a second chip's; across the wire every rate from 115200 to 3 Mbaud echoed and timed by the far receiver within 500 ppm of HSI / BRR, nine frame formats with half and one-and-a-half stop bits, PE, FE onset, glitches, ORE and the break from a crystal sender, mute woken both ways, IrDA, LIN's two detection lengths, and the transport's sustained receive clean to 2 Mbaud, its ceiling measured above it |
 | [vendor/README.md](vendor/README.md) | The documents of record with their revisions - the reference manual V1.8, the datasheet V1.7, the QingKe V4 manual, the probe's manual, and the EVT package as the vendor's only voice on quirks; the no-errata statement; where the documents disagree, and which of those items the CH32X035F8U6 has answered |
 
 [afio.hpp](../../brio/ch32x035/afio.hpp) and
@@ -210,6 +211,11 @@ next section, and what is still owed the list at the end of this page.
 - **The USB blocks' clocks are on out of reset**: RCC_AHBPCENR resets to
   0x00021004 - the USB PD controller's gate, the USB host/device
   controller's, and SRAMEN, the SRAM's clock in Sleep (3.4.5).
+- **A lot may have no I2C**: table 2-1's note 3 (and the notes of 1.4.12
+  and 1.4.16) - "the channel 3, channel 7, channel 11, channel 15 and
+  I2C functions ... are not applicable to products with a lot number
+  with the penultimate bit 5 being 0". Every part of the series, and no
+  register to ask (the I2C gap below).
 - **The EXTI's port codes are not the sibling families' order**:
   AFIO_EXTICR's two bits a line are 00 port A, 10 port B and 11 port C,
   with 01 reserved (8.3.2.2).
@@ -289,8 +295,9 @@ Driver gaps, each with its reason:
   watchdog chapter, in one file as on the sibling strata. Until then the
   reset flags are `Rcc`'s verbs ([clock.md](clock.md)), and a trap
   lands in the crt's weak spins and leaves no record for the next boot.
-- **The power chapter - PWR, the auto-wakeup and a sleep site (RM
-  ch. 2, 4)**: this series has no RTC, so the AWU on the HSI divided by
+- **The power chapter's low-power half - the sleep modes, the
+  auto-wakeup and a sleep site (RM ch. 2, 4)**: the voltage detector is
+  [pwr.md](pwr.md)'s; this series has no RTC, so the AWU on the HSI divided by
   1024 is the only wake a Stop or a Standby has, and a sleep site is
   born with it as its wake; until then `idle()` is the plain Sleep and
   nothing in the stratum sets SLEEPDEEP.
@@ -305,8 +312,15 @@ Driver gaps, each with its reason:
   and TIM3 (RM ch. 12, 13), the amplifiers and comparators (RM
   ch. 17)**: born with their first user. The timers' remap fields are
   named in `afio.hpp`; their columns come with the driver.
-- **I2C and SPI (RM ch. 15, 16)**: a peer on the wire, or the board's
-  own jumpers, and a first user.
+- **I2C and SPI (RM ch. 15, 16)**: the desk's partner, a CH32V006K8U6,
+  is wired to both (SPI1 on PA4..PA7, I2C1 on PC16/PC17 with its pull-ups
+  hung from PB3), and each driver is born with its suite against that
+  partner's peer. THE I2C MAY NOT BE THERE: the datasheet's table 2-1
+  note 3 withdraws it - and the ADC's channels 3, 7, 11 and 15, VREFINT
+  among them - from every lot whose lot number has 0 in its penultimate
+  fifth digit; no register names a die's lot and the bench part's
+  marking is unreadable, so the I2C driver's first verdict probes the
+  block (the part table's comments carry the note).
 - **The USB host/device controller (RM ch. 18)**: the CH32V303's block,
   which [brio/ch32vx03/usbfs.hpp](../../brio/ch32vx03/usbfs.hpp) drives
   in device mode; a second family carrying it is the moment an IP
@@ -339,13 +353,12 @@ Implemented but not bench-verified, each with what would measure it:
 
 - **What the four suites have not measured**, each in its document's
   list with what would measure it: what the hardware prologue buys (the
-  platform suite's letter `e` in an image built without it), the HSI's
-  accuracy (a host that time-stamps the brackets of the platform suite's
-  `g` and the clock suite's `d`), the trim's step in hertz and the clock
+  platform suite's letter `e` in an image built without it), the clock
   output's waveform (a package that bonds PB9, and a counter), the reset
   flags one event at a time, the idle hook's power, the lock (the pin
-  suite's `l`, by name), half a stop bit, and what the USART's modes do
-  on a wire (a logic analyser, or a letter across the jumper).
+  suite's `l`, by name), and what the USART's smartcard, clock and
+  flow-control pair do on a wire (a logic analyser, or pads this package
+  does not bond).
 - **The six parts other than the CH32X035F8U6.** Every one has its
   table, its linker script and its preset, and the whole stratum
   compiles for all seven both ways the hardware prologue can be built

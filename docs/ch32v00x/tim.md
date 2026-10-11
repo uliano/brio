@@ -55,8 +55,19 @@ the default pads).
   every period.
 - **The default pads on the CH32V006**: TIM1 CH1..4 on PD2, PA1, PC3,
   PC4, CH1N..3N on PD0, PA2, PD1 (SWDIO's pad), BKIN on PC2, ETR on
-  PC5; TIM2 CH1/ETR on PD4, CH2..4 on PD3, PC0, PD7. The remaps are
-  AFIO's, not touched yet.
+  PC5; TIM2 CH1/ETR on PD4, CH2..4 on PD3, PC0, PD7. The remap columns
+  are AFIO's tables 7-8 and 7-9-1 (`Tim<n>::remap(code)`, the pads
+  `afio_tim1_pads()`/`afio_tim2_pads()` name): TIM1's code 0100 puts CH4
+  on PD1, the SWIO pad, and 0110 (CH2 PB0, CH3 PB1, CH4 PB2) keeps every
+  TIM1 signal off the debug port - a signal is claimed only by its
+  channel's enable.
+- **A stopped counter HOLDS its outputs** (11.4.1, the note under
+  OE_MODE: "the current output pin state is maintained when ... the
+  counter is disabled"): a channel forced high on a timer that has not
+  run since its reset drives the pad LOW, the reset level, until CEN is
+  set - measured, a pad handed to TIM1's channel 2 that way held the
+  line low until the first list's counter started. A forced level is
+  seen at the pad once the counter runs, and a stop then holds it.
 
 - **Two parts**: TIM1 and TIM2 are the same on the CH32V003 and the
   CH32V006; TIM3 is the CH32V006's (`BRIO_CH32_HAS_TIM3`), and so is
@@ -174,6 +185,15 @@ refusing a pair dead time on TIM2 where the part has none.
   then active from the first count - the pulse runs from the trigger
   to the period, delay + width + 1 (measured) - so `TimOnePulse::
   setup` ends with an update of its own.
+- **A compare channel paces DMA one item a match** (TIM1's CH2 request
+  on channel 3 and CH3's on 6, table 8-2): `usart_peer`'s edge lists -
+  absolute compare values streamed into CHxCVR by a DmaTxEngine of
+  32-bit beats, the channel in toggle mode, preload off - put 8N1 frames
+  at 9600 on PB0 and PB1 that a second chip's USART received byte for
+  byte, a cell stretched by 10 to 70 per cent, a 13-bit break ahead of a
+  frame and breaks of 9 to 20 bits; one item a match and no CPU between
+  edges, the list ended by a value half the counter away that the last
+  edge's request moves and no match reaches.
 - **The break, staged from the pad's own pull**: PC2 pulled down with
   BKP active-high leaves MOE set; pulled up, MOE drops by hardware and
   BIF rises - and stands, unclearable, while the input does; under
@@ -184,15 +204,16 @@ refusing a pair dead time on TIM2 where the part has none.
 
 Driver gaps, each with its reason:
 
-- The DMA burst (DMACFGR/DMAADR) and the timers' requests as engine
-  sources: born with a stream that needs them (TIM2's request is
-  proven to pace a channel every period; TIM3's serves once).
+- The DMA burst (DMACFGR/DMAADR) and the timers' requests as a task of
+  their own (an engine bound to a channel's compare register): born
+  with a second stream that needs them - the requests themselves are
+  proven, TIM2's to pace a channel every period, TIM1's CH2 and CH3 a
+  channel a match (above), TIM3's once.
 - The encoder modes as a task: the resource has the three SMS codes; a
   task needs an encoder on the desk.
 - The COM event and the commutation preload (CCPC/CCUS): motor
   control's, no user.
 - TIM3's matches as ADC triggers: the ADC chapter's.
-- The pad remaps: AFIO's.
 
 Implemented but not bench-verified, each with what would measure it:
 

@@ -324,3 +324,139 @@ TEST_CASE("a suite may name its own all-key") {
     CHECK(order == "ab");                     // ta then tb, in registration order
     CHECK(contains(Capture::text, "ALL: 4 pass, 1 fail\r\n"));
 }
+
+// ---- the second set ----------------------------------------------------------
+// A bench with a second all-key: the single-board letters under z, the
+// two-board ones under the second key, each set closed by its own ALL:.
+
+namespace {
+
+using TwoKey = brio::TwoKeyTestBench<Capture, 'y'>;
+TwoKey* active2 = nullptr;
+
+void t2a() {
+    order.push_back('a');
+    active2->verdict("single one", true);
+}
+void t2b() {
+    order.push_back('b');
+    active2->verdict("single two", false);
+}
+void t2j() {
+    order.push_back('j');
+    active2->verdict("peer one", true);
+    active2->verdict("peer two", true);
+}
+void t2k() {
+    order.push_back('k');
+    active2->verdict("peer three", false);
+}
+void t2v() {
+    order.push_back('v');
+    active2->verdict("by name", true);
+}
+
+/// a, b in z; j, k in y, registered interleaved; v by name only.
+TwoKey make_two() {
+    TwoKey b;
+    REQUIRE(b.letter('a', "single a", t2a));
+    REQUIRE(b.second_letter('j', "peer j", t2j));
+    REQUIRE(b.letter('b', "single b", t2b));
+    REQUIRE(b.second_letter('k', "peer k", t2k));
+    REQUIRE(b.letter('v', "by name v", t2v, false));
+    return b;
+}
+
+} // namespace
+
+TEST_CASE("a bench without a second set pays nothing for the possibility") {
+    // The empty member of the default bench: its size is that of the same
+    // table with no mask at all, which the explicit NUL argument spells.
+    static_assert(sizeof(brio::TestBench<Capture>) == sizeof(brio::TestBench<Capture, 24, '\0'>));
+    static_assert(sizeof(brio::TestBench<Capture>) < sizeof(brio::TwoKeyTestBench<Capture, 'y'>));
+    CHECK(true);
+}
+
+TEST_CASE("the first all-key runs its own set alone, the second never") {
+    Capture::clear();
+    order.clear();
+    TwoKey b = make_two();
+    active2 = &b;
+    const auto t = b.handle('z');
+    REQUIRE(t.has_value());
+    CHECK(order == "ab");
+    CHECK(t->pass == 1);
+    CHECK(t->fail == 1);
+    CHECK(find_marked(Capture::text, "ALL:") == "ALL: 1 pass, 1 fail\r");
+}
+
+TEST_CASE("the second all-key runs its set alone, in registration order, "
+          "and closes with an ALL: line of its own") {
+    Capture::clear();
+    order.clear();
+    TwoKey b = make_two();
+    active2 = &b;
+    const auto t = b.handle('y');
+    REQUIRE(t.has_value());
+    CHECK(order == "jk");
+    CHECK(t->pass == 2);
+    CHECK(t->fail == 1);
+    CHECK(contains(Capture::text, "-- peer j\r\n"));
+    CHECK(contains(Capture::text, "  -> 2 pass, 0 fail\r\n"));
+    CHECK(contains(Capture::text, "  -> 0 pass, 1 fail\r\n"));
+    const std::string marked = find_marked(Capture::text, "ALL:");
+    CHECK(marked == "ALL: 2 pass, 1 fail\r");
+    std::smatch m;
+    REQUIRE(std::regex_search(marked, m, summary_re));
+    CHECK(m[1] == "2");
+
+    Capture::clear();
+    order.clear();
+    REQUIRE(b.handle('Y').has_value());       // a lower-case key answers in caps too
+    CHECK(order == "jk");
+}
+
+TEST_CASE("a second-set letter and a by-name letter each run by name") {
+    Capture::clear();
+    order.clear();
+    TwoKey b = make_two();
+    active2 = &b;
+    const auto t = b.handle('k');
+    REQUIRE(t.has_value());
+    CHECK(t->fail == 1);
+    (void)b.handle('v');
+    CHECK(order == "kv");
+    CHECK(Capture::text.find("ALL:") == std::string::npos);
+}
+
+TEST_CASE("the menu marks the second set and names its key") {
+    Capture::clear();
+    TwoKey b = make_two();
+    active2 = &b;
+    b.menu();
+    CHECK(contains(Capture::text, "  a  single a\r\n"));
+    CHECK(contains(Capture::text, "  j  peer j   (in y, not in z)\r\n"));
+    CHECK(contains(Capture::text, "  v  by name v   (by name only, not in z)\r\n"));
+    CHECK(contains(Capture::text, "  z  every letter above\r\n"));
+    CHECK(contains(Capture::text, "  y  every letter marked in y\r\n"));
+    CHECK(!std::regex_search(Capture::text, summary_re));
+}
+
+TEST_CASE("registration refuses the second all-key in either case and a key "
+          "taken by the other set") {
+    TwoKey b = make_two();
+    active2 = &b;
+    CHECK(!b.letter('y', "the second key", t2a));
+    CHECK(!b.second_letter('Y', "the second key in caps", t2a));
+    CHECK(!b.second_letter('a', "a first-set key", t2a));
+    CHECK(!b.letter('j', "a second-set key", t2a));
+    CHECK(!b.second_letter('z', "the first key", t2a));
+    CHECK(b.letter_count() == 5);
+
+    // An upper-case second key leaves its lower case free.
+    brio::TwoKeyTestBench<Capture, 'Y'> upper;
+    active2 = nullptr;
+    CHECK(upper.letter('y', "an ordinary y", t2a));
+    CHECK(upper.second_letter('j', "peer j", t2j));
+    CHECK(!upper.letter('Y', "the key itself", t2a));
+}

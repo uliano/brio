@@ -54,12 +54,24 @@
  * the letters' totals separately. A test that spans a RESET (the reset
  * suites bank their tally in .noinit and resume) drives end_letter() by
  * hand - which is why it is public.
+ *
+ * A SECOND SET. A suite whose letters fall into two classes that must
+ * never run under one key - the single-board letters, runnable with the
+ * far board dark, and the two-board letters, which need a peer and FAIL
+ * loudly without one - names a second all-key as a template argument
+ * (TwoKeyTestBench<Serial, 'y'>) and registers that class with
+ * second_letter(). The first all-key never runs them, the second runs
+ * them alone in registration order and closes with an ALL: line of its
+ * own, each is also run by name. An image whose bench names no second
+ * key compiles none of it: the set's mask is an empty member and every
+ * branch that reads it is `if constexpr`.
  */
 
 #pragma once
 
 #include <stdint.h>
 #include <optional>
+#include <type_traits>
 
 #include "util/print.hpp"
 #include "util/stream.hpp"
@@ -125,10 +137,22 @@ constexpr uint8_t test_letters_default_max() {
     return n;
 }
 
+namespace detail {
+/// The second set's mask in a bench that has no second set.
+struct NoSecondSet {};
+} // namespace detail
+
 /// The letter menu, the verdict lines and the two tallies bin/brio reads.
 /// `max_letters` bounds the static table; registration beyond it fails.
-template <ByteSink Sink, uint8_t max_letters = test_letters_default_max()>
+/// `second_all_key`, when not NUL, names the SECOND SET's all-key (the
+/// header's "A SECOND SET").
+template <ByteSink Sink, uint8_t max_letters = test_letters_default_max(),
+          char second_all_key = '\0'>
 class TestBench {
+    static constexpr bool has_second_set = second_all_key != '\0';
+    static_assert(!has_second_set || max_letters <= 32,
+                  "the second set is a mask over at most 32 registered letters");
+
 public:
     /// A test is a plain function: it prints what it measured and calls
     /// verdict() for each thing that had to be true.
@@ -167,18 +191,41 @@ public:
         return register_letter(key, title, fn, in_all);
     }
 
+    /// Register one letter of the SECOND SET: out of the first all-key,
+    /// run by the second and by name. The same refusals as letter(), and
+    /// the second all-key is refused as a key too.
+    [[gnu::always_inline]] bool second_letter(char key, const char* title, TestFn fn)
+        requires has_second_set
+    {
+        if (!test_letter_carried(key)) {
+            return true;
+        }
+        const uint8_t at = count_;
+        if (!register_letter(key, title, fn, false)) {
+            return false;
+        }
+        second_ |= 1UL << at;
+        return true;
+    }
+
     /// The letter list, one per line, with the all-key last. A suite
     /// prints its own headline before calling this.
     void menu() const {
         for (uint8_t i = 0; i < count_; ++i) {
             if (letters_[i].in_all) {
                 print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title, crlf);
+            } else if (in_second_set(i)) {
+                print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title,
+                      "   (in ", second_all_key, ", not in ", all_key_, ")", crlf);
             } else {
                 print(Sink{}, "  ", letters_[i].key, "  ", letters_[i].title,
                       "   (by name only, not in ", all_key_, ")", crlf);
             }
         }
         print(Sink{}, "  ", all_key_, "  every letter above", crlf);
+        if constexpr (has_second_set) {
+            print(Sink{}, "  ", second_all_key, "  every letter marked in ", second_all_key, crlf);
+        }
         if (test_letters != nullptr) {
             print(Sink{}, "  (this image carries the letters ", test_letters,
                   " of the suite; the other letters are in its other images)", crlf);
@@ -210,6 +257,9 @@ public:
      * runs every letter marked in_all, in REGISTRATION order, and closes
      * with the ALL: line bin/brio's default marker waits for.
      *
+     * The second all-key, where the bench has one, runs every letter of
+     * the second set the same way and closes with its own ALL: line.
+     *
      * Nothing at all is printed for an unregistered key: what to say
      * about it is the app's business.
      */
@@ -226,6 +276,21 @@ public:
             }
             print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
             return t;
+        }
+        if constexpr (has_second_set) {
+            if (is_key(second_all_key, c)) {
+                Totals t{0, 0};
+                for (uint8_t i = 0; i < count_; ++i) {
+                    if (!in_second_set(i)) {
+                        continue;
+                    }
+                    run(letters_[i]);
+                    t.pass = static_cast<uint16_t>(t.pass + passed_);
+                    t.fail = static_cast<uint16_t>(t.fail + failed_);
+                }
+                print(Sink{}, "ALL: ", t.pass, " pass, ", t.fail, " fail", crlf);
+                return t;
+            }
         }
         const Entry* e = find(c);
         if (e == nullptr) {
@@ -275,6 +340,23 @@ private:
                 c == static_cast<char>(all_key_ - ('a' - 'A')));
     }
 
+    /// The second all-key by the same rule: a lower-case key answers to
+    /// its upper case too, an upper-case key to itself alone.
+    static constexpr bool is_key(char key, char c) {
+        return c == key || (key >= 'a' && key <= 'z' && c == static_cast<char>(key - ('a' - 'A')));
+    }
+
+    /// Whether registered letter `i` belongs to the second set - never,
+    /// in a bench without one.
+    bool in_second_set(uint8_t i) const {
+        if constexpr (has_second_set) {
+            return ((second_ >> i) & 1UL) != 0u;
+        } else {
+            (void)i;
+            return false;
+        }
+    }
+
     const Entry* find(char key) const {
         for (uint8_t i = 0; i < count_; ++i) {
             if (letters_[i].key == key) {
@@ -290,6 +372,11 @@ private:
         }
         if (is_all_key(key) || find(key) != nullptr) {
             return false;
+        }
+        if constexpr (has_second_set) {
+            if (is_key(second_all_key, key) || is_all_key(second_all_key)) {
+                return false;
+            }
         }
         letters_[count_] = Entry{key, title, fn, in_all};
         ++count_;
@@ -315,6 +402,13 @@ private:
     uint16_t passed_ = 0;
     uint16_t failed_ = 0;
     char all_key_ = 'z';
+    /// The second set as one bit per registered letter.
+    [[no_unique_address]] std::conditional_t<has_second_set, uint32_t, detail::NoSecondSet> second_{};
 };
+
+/// A bench with a second set: `second_all_key` runs the letters
+/// second_letter() registers (the header's "A SECOND SET").
+template <ByteSink Sink, char second_all_key, uint8_t max_letters = test_letters_default_max()>
+using TwoKeyTestBench = TestBench<Sink, max_letters, second_all_key>;
 
 } // namespace brio

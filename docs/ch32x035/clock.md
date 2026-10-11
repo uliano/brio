@@ -223,6 +223,17 @@ letter `a`. What they measured:
 - **The trim takes a step each way** (letter `c`): 16 to 17 and then to
   15, each read back and the centre restored after, with a console line
   read clean at each of the two trims.
+- **THE HSI AGAINST A CRYSTAL, and the trim's step in hertz**
+  (`test_x035_usart` letter `j`, the desk's CH32V006K8U6 on its 24 MHz
+  crystal timing a gapless run of 4000 frames at 1 Mbaud - a divisor of
+  48, so the oscillator's error alone - on its own clock): -2480 to -2701
+  ppm at the factory calibration and the trim's centre over two sessions'
+  runs - -0.25 per cent, inside table 3-9's -1.7 to +1.6 per cent; the
+  oscillator wanders by tens to a few hundred ppm between runs a fraction
+  of a second apart. Stepped from 7 to 28, every step raises it, by 71
+  to 183 kHz, the mean 116 to 118 kHz
+  against the manual's "about 110KHz" (3.4.1): -25610 ppm at 7, -292 at
+  17 - the trim nearest 48 MHz on this die - and +25302 at 28.
 - **The clock output's multiplexer** (letter `e`): the source field takes
   SYSCLK, the HSI and nothing, and reads each back; `Mco::init()`
   answers false on this package, which does not bond PB9, and `off()`
@@ -283,14 +294,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The trim's step in hertz**: letter `c` moves the trim a step each
-  way with the console still reading; how many hertz a step is - the
-  manual's "about 110KHz" - wants a counter on the clock output, which
-  the QFN20 does not bond.
-- **The HSI's accuracy against table 3-9**: letter `d` brackets 3000
-  ticks at 48 MHz and at the reset clock's 8 MHz and runs to its count
-  at both, the tree back at 48 MHz after; what is missing is a host that
-  time-stamps the two lines of each bracket as they arrive.
 - **The clock output's waveform**: the multiplexer is measured (letter
   `e`); what leaves PB9 wants a package that bonds it and a counter on
   the pad.

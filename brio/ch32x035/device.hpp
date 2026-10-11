@@ -20,8 +20,9 @@
  * one die, one memory size, seven packages.
  *
  * WHAT THIS FILE MAPS. The blocks the stratum's drivers reach - RCC, GPIO
- * and AFIO, the USART, the core's STK and PFIC - and three it only
- * describes: the EXTI's six registers, PWR's two, and FLASH with its
+ * and AFIO, the USART, the core's STK and PFIC, PWR's two registers for
+ * the voltage detector (pwr.hpp) - and two it only describes: the EXTI's
+ * six registers, and FLASH with its
  * option bytes and the electronic signature, decoded READ-ONLY (no verb
  * of this stratum programs, erases or unlocks anything). A block this
  * stratum has no driver for (DMA, ADC, the timers, I2C, SPI, USBFS, USBPD,
@@ -362,9 +363,9 @@ inline constexpr uint16_t usart_psc_mask = 0x00FFU;
 inline constexpr uint16_t usart_gt_mask  = 0xFF00U;
 
 // ---- PWR (RM ch. 2) -------------------------------------------------------
-// Mapped for the reader: the sleep modes' PDDS, the PVD's threshold and
-// its output, the flash's low-power bits. The power chapter has no
-// driver in this stratum.
+// The sleep modes' PDDS, the PVD's threshold and its output, the flash's
+// low-power bits. The PVD's verbs are pwr.hpp's; the low-power modes have
+// no driver in this stratum.
 struct PwrRegs {
     volatile uint32_t CTLR;   ///< 0x00 PDDS, PLS[1:0], LP_REG, LP[1:0]; reset 0x00000400
     volatile uint32_t CSR;    ///< 0x04 PVD0, FLASH_ACK

@@ -160,6 +160,7 @@ enum class Op : uint8_t {
     collide = 0x0F,      ///< transmit into the DUT's frame, on purpose
     report = 0x10,       ///< ack + Report of the last action
     standby = 0x11,      ///< let go of the line entirely for `ms`
+    calibrate = 0x12,    ///< time the DUT's gapless frames against the peer's clock
 
     ack = 0x40,
     nak = 0x41,
@@ -281,6 +282,23 @@ inline constexpr uint8_t flag_clk2x = 0x01;
 inline constexpr uint8_t flag_invert_xck = 0x02;
 inline constexpr uint8_t flag_mpcm = 0x04;
 
+/// `Cfg::stop`: 1 and 2 count whole stop bits; a value with stop_halves
+/// set counts HALF bits in its low bits - stop_half (0.5) and
+/// stop_one_half (1.5), the frames a USART with the four-code STOP field
+/// sends. A peer that has not got them refuses them.
+inline constexpr uint8_t stop_halves = 0x80;
+inline constexpr uint8_t stop_half = stop_halves | 1u;
+inline constexpr uint8_t stop_one_half = stop_halves | 3u;
+
+/// A frame's length on the wire in HALF bit times: start, data, parity
+/// and stop - what calibrate's nominal span is counted in.
+constexpr uint16_t frame_half_bits(uint8_t bits, uint8_t parity, uint8_t stop) {
+    const uint8_t data = bits >= bits9_low ? 9u : bits;
+    const uint8_t stop_halfs = (stop & stop_halves) != 0u ? static_cast<uint8_t>(stop & 0x0Fu)
+                                                          : static_cast<uint8_t>(2u * stop);
+    return static_cast<uint16_t>(2u * (1u + data + (parity != 0u ? 1u : 0u)) + stop_halfs);
+}
+
 /// What the peer's link should become. `apply == 0` leaves it alone
 /// (the action runs at whatever the last command left behind).
 struct Cfg {
@@ -367,6 +385,20 @@ inline constexpr uint8_t pattern_prbs = 2;       ///< an 8-bit LFSR seeded with 
 ///                               with a pin swap puts its single wire on
 ///                               the pad that meets the DUT's), open drain,
 ///                               taking the wire only to reply
+///   calibrate                   count = frames the DUT sends GAPLESS at
+///                               cfg.rate once settle_ms has passed after
+///                               the ack, ms = deadline. The peer stamps
+///                               each frame as it completes and reports
+///                               the first-to-last span (Report::span)
+///                               and the DUT's rate error against the
+///                               peer's clock (Report::aux16, calibrate's
+///                               entry). A peer whose Ident::xtal is 0
+///                               ADOPTS the DUT as its reference - trims
+///                               its oscillator and carries the residual
+///                               in every rate, tick and edge it computes
+///                               from then on - and reports xtal = 2; a
+///                               crystal peer adopts nothing and reports
+///                               the DUT's error
 struct Params {
     Cfg cfg{};
     uint16_t count = 0;
@@ -419,15 +451,19 @@ struct Ident {
     char label[8] = {};      ///< the peer's board label, NUL padded
     /// 1 when the peer's TIME BASE is crystal-referenced (its own crystal
     /// started, or its core clock was measured against one at boot), 0
-    /// when its rates come from an RC oscillator's nominal value.
+    /// when its rates come from an RC oscillator's nominal value, 2 when
+    /// that RC oscillator has ADOPTED a DUT as its reference through
+    /// calibrate (trimmed, the residual carried) - as good as the DUT's
+    /// clock and no better.
     uint8_t xtal = 0;
     uint8_t sanity = 0;
     /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
     /// IMPLEMENTATION and is allocated here, once, for every
     /// architecture that speaks this protocol - as spi_link.hpp
     /// allocates its own: 0x01 the avrdx peer, 0x02 the samc21 peer, 0x03
-    /// the stm32g0 peer, 0x04 the stm32f4 peer. The
-    /// low byte is that peer's own revision. A DUT may use the high byte
+    /// the stm32g0 peer, 0x04 the stm32f4 peer, 0x05 the ch32vx03 peer
+    /// (twi_link.hpp's, reserved here), 0x06 the ch32v00x peer, 0x07 the
+    /// ch32x035 peer. The low byte is that peer's own revision. A DUT may use the high byte
     /// to expect a capability, never to decide correctness: what a peer
     /// can do it answers with, and what it cannot it refuses.
     uint16_t version = 0;
@@ -438,6 +474,9 @@ inline constexpr uint8_t peer_avrdx = 0x01;
 inline constexpr uint8_t peer_samc21 = 0x02;
 inline constexpr uint8_t peer_stm32g0 = 0x03;
 inline constexpr uint8_t peer_stm32f4 = 0x04;
+inline constexpr uint8_t peer_ch32vx03 = 0x05;   ///< reserved: twi_link.hpp's peer
+inline constexpr uint8_t peer_ch32v00x = 0x06;
+inline constexpr uint8_t peer_ch32x035 = 0x07;
 
 /// Which implementation answered: the version's high byte.
 constexpr uint8_t peer_kind(uint16_t version) { return static_cast<uint8_t>(version >> 8); }
@@ -479,17 +518,41 @@ struct Report {
     uint8_t flags = 0;
     /// Per-op extra: the BAUD register the peer used (brk, autobaud_tx),
     /// a bit's nominal length in 24 MHz ticks (bitbang), the pulse width
-    /// it was asked for (glitch), the byte it collided with (collide).
+    /// it was asked for (glitch), the byte it collided with (collide);
+    /// calibrate: the DUT's character rate against the peer's clock in
+    /// parts per million as an int16 (calibrate_ppm()), positive when the
+    /// DUT runs fast, saturated at the int16 range.
     uint16_t aux16 = 0;
     uint8_t op = 0;          ///< which action this report belongs to
     uint8_t ms = 0;          ///< how long it took, capped at 255
-    /// sink and echo: 24 MHz ticks from the FIRST to the LAST character
-    /// the peer received (each stamped when the peer saw it complete), so
-    /// (count - 1) frame times of the DUT's transmitter as a FOREIGN
-    /// receiver measured them. 0 = not measured (another op, fewer than
-    /// two characters, or a peer that cannot time them).
+    /// sink, echo and calibrate: 24 MHz ticks from the FIRST to the LAST
+    /// character the peer received (each stamped when the peer saw it
+    /// complete), so (count - 1) frame times of the DUT's transmitter as
+    /// a FOREIGN receiver measured them - on the peer's clock as it was
+    /// before calibrate adopted anything. 0 = not measured (another op,
+    /// fewer than two characters, or a peer that cannot time them).
     uint32_t span = 0;
 };
+
+/// calibrate's span had the DUT's clock been exact: `frames - 1` frames of
+/// `half_bits` half bit times at `rate`, in 24 MHz ticks.
+constexpr uint32_t nominal_span(uint32_t rate, uint16_t half_bits, uint16_t frames) {
+    if (rate == 0u || frames < 2u) return 0u;
+    return static_cast<uint32_t>((static_cast<uint64_t>(frames - 1u) * half_bits * 12'000'000ull +
+                                  rate / 2u) / rate);
+}
+
+/// calibrate's error: the DUT's rate against the peer's clock in ppm,
+/// positive when the measured span is SHORTER than the nominal one (the
+/// DUT fast), saturated to int16.
+constexpr int16_t calibrate_ppm(uint32_t nominal, uint32_t measured) {
+    if (nominal == 0u || measured == 0u) return 0;
+    const int64_t ppm = (static_cast<int64_t>(nominal) - static_cast<int64_t>(measured)) * 1'000'000 /
+                        static_cast<int64_t>(measured);
+    return static_cast<int16_t>(ppm > 32767 ? 32767 : (ppm < -32768 ? -32768 : ppm));
+}
+static_assert(nominal_span(115'200, 20, 101) == 208'333u, "100 8N1 frames at 115200: 8.68 ms");
+static_assert(calibrate_ppm(1'000'000, 990'000) == 10'101, "a span 1 % short is a DUT 1.01 % fast");
 
 constexpr void put_report(uint8_t* p, const Report& r) {
     put16(p, r.count);

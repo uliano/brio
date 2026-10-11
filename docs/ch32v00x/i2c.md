@@ -186,52 +186,16 @@ The reference suite is `test_ch32_i2c` on the CH32V006K8U6 at 48 MHz:
 its wire letters talk to a PEER BOARD running `twi_peer` (the shared
 twi_link protocol, the peer's pull-ups, both boards at 3.3 V) and
 decline when the wire reads low. On the CH32V003F4P6 it builds as six
-group images, the first five green there against the same SAM C21 peer on the same
-two pads (the scan in 13 ms, every tenure shape and receive procedure
-byte-exact, the two speeds at 94 and 330 kHz on the wire, the held SDA
-freed by four pulses); the
-kernel letter is left out of that build, its image alone 216 bytes
-over the part's 15 KB. Against a SAM C21 peer:
+group images, the kernel letter left out of that build, its image alone
+216 bytes over the part's 15 KB. What needs no peer:
 
 - **The reset values are table 15-1's**, both speeds resolve exactly
   at 48 MHz (CCR 240 and 40), the own addresses land as spelled.
-- **The wire's rise time, measured from the pad** (the wireless
-  letter pulls each line low as an open-drain output, releases it and
-  counts the cycles until it reads high): 1 us on either line with
-  the peer's 1.5 kOhm pull-ups - and 283 us on a line whose pull-up
-  it was NOT on, which a meter at rest reported as 3.3 V all the
-  same. A slow line is what the scan's `i2c_arb_lost` on every START
-  looks like from the register side, and the probe is the one that
-  tells a pull-up from a leakage.
 - **OADDR1's bit 14 reads zero** when written: reserved, not the F1's
   fixed one.
 - **CKCFGR and FREQ take a write with PE set**: no enable lock.
-- **The scan**: 112 addresses probed with the empty request in 14 ms,
-  the peer's command address the only answer, every other one
-  `i2c_nack_addr`.
-- **Every tenure shape is byte-exact** - write, read, write-then-read on
-  a repeated START, the four receive procedures by count (1, 2, 3 and
-  4 bytes, each counted by the peer), the general call - and so is the
-  vocabulary: a NACK on the address and on a commanded byte come back
-  as `i2c_nack_addr` and `i2c_nack_data`.
-- **Stretching is flow control**: a client stretching every byte of an
-  8-byte write by 2 ms makes the tenure 16 ms long and it completes
-  `i2c_ok`.
-- **The two speeds on the wire**: an 8-byte write at 100 kHz runs at
-  about 93 kHz, at 400 kHz about 324 kHz - CCR rounded up, the wire's
-  rise time and the interrupt turnaround between bytes all counted -
-  byte-exact both ways.
-- **The arbiter over the engine** carries queued tenures in order with
-  a NACK delivered in its place, rejects what its queue cannot hold,
-  votes for a sleep idle and against it busy. A held SDA is answered
-  `i2c_arb_lost` in the same millisecond, the line still low; a clock
-  held for 45 ms is answered `i2c_timeout` at the arbiter's 20, and
-  the `recover()`ed engine carries the next tenure `i2c_ok`.
-- **`unstick()`** clocks four pulses before the peer lets SDA go, and
-  the STOPF its hand-made STOP leaves is cleared with no entry of the
-  event vector.
 - **Against an STM32G0 peer** (its `twi_peer`, its 2.2 kOhm pull-ups)
-  the whole suite holds too: 59 verdicts, the four receive procedures,
+  the whole suite holds: 59 verdicts, the four receive procedures,
   the vocabulary, the repeated START acknowledged and refused, the
   engines and the kernel letter - on the first `z` after a flash and on
   a second in the same boot, letter g judging the engines' faults its
@@ -385,6 +349,12 @@ Implemented but not bench-verified, each with what would measure it:
   that run stands for both parts by decision - the block, the engine
   and the arbiter are the same code on the same registers, and the
   wire letters around it run green on the CH32V003.
+- Every wire letter against this desk's partner: the bus's partner is a
+  CH32X035 running `twi_peer` on this part's column 3 (PB5 SCL, PB6
+  SDA), its pull-ups hung from that chip's PB3; the peer is born with
+  that stratum's I2C driver, and the scan, the tenure shapes, the
+  stretching, the speeds on the wire, the arbiter's held lines and
+  `unstick()` are re-measured there.
 - The client side against a foreign host: the peer's host half (its
   `arb` and `coll` commands) addressing this instance.
 - A START into a wire ANOTHER HOST is clocking: ARLO is measured only

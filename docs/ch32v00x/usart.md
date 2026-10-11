@@ -44,7 +44,9 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   PB1's bit 17, the F1's USART2EN, the block reads zero in every
   register (measured). USART2 exists on the CH32V005/006/007; on the
   CH32V006K8 its default column puts TX on the reset pin, so it lives
-  on columns 1..6.
+  on columns 1..6. Column 4's CTS is PB6, the I2C's column-3 SDA
+  (tables 7-11 and 7-13-1): a port on that column with the flow-control
+  pair and the I2C on its column 3 cannot share the part.
 - **The frame is a word length plus a parity choice**: M gives 8 or 9
   bits INCLUDING the parity bit when PCE is set, so seven data bits
   exist only with parity and nine only without; STOP has four codes,
@@ -426,6 +428,29 @@ out there.
   with the transmitter live. On the CH32V006 the same letter proves
   the refusal and CTLR2 untouched.
 
+- **Column 4 on a wire to a second chip** (TX PB0, RX PB1, the desk's
+  link to a CH32X035, this part running `usart_peer` on its 24 MHz
+  crystal doubled, the far chip's `test_x035_usart` the judge: 66
+  verdicts in its two-board set): every 8N1 rate from 115200 to 3
+  Mbaud echoed byte for byte, every format - 7 and 8 bits with either
+  parity, 9 bits, two, half and one-and-a-half stop bits - echoed, 4000
+  gapless frames counted and timed at 1 Mbaud, an address mark, IrDA's
+  SIR frames between two WCH codecs, breaks of 9 to 20 bits. The polled
+  receive loop serving it is 33 instructions a character with the echo
+  in the release listing, no call, four accesses to the instance
+  (STATR, DATAR, STATR for TXE, the DATAR store), the first and the last
+  frame's stamps the only calls of a run - under the 160-cycle frame at
+  3 Mbaud, where the echo held.
+- **A TX pad the block drives while it is reset or just enabled shows
+  the far receiver a LOW PULSE** (measured across that wire): with the
+  pad left on the function through the instance's reset and
+  reconfiguration, a framing-error frame followed every action; parked
+  as a GPIO output high across the reset it was gone, and a 0xE0 frame
+  at 1 Mbaud - some five microseconds low - remained, the pad handed back
+  the moment TE rose; handed back two bit times and 20 us later, none.
+  A program that reconfigures a live port on a wire parks the pad
+  first.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -439,9 +464,13 @@ Driver gaps, each with its reason:
   whose CK pad would need a wire to a counter.
 - A one-wire bus with a second node: the option is proven with a frame
   driven onto the wire from a pad and with the node's own frame not
-  heard back; a peer on the wire is what a bus letter would need.
-- USART2 on its other columns and USART1 on any but the console's:
-  each column is a wire to a peer on its pads.
+  heard back; the desk's partner, a CH32X035, hears this part's
+  `drive_rxd` on its own single wire, and this part's single wire under
+  that chip's peer is the far suite's two-board half, born with the
+  CH32X035's `usart_peer`.
+- USART2 on columns 1, 2, 5 and 6 and USART1 on any but the console's:
+  each column is a wire to a peer on its pads (column 3 is the suite's
+  instrument, column 4 the desk's link).
 - Exact error counts under the receive engine: bounded, not exact
   (above) - an exact count would need the CPU's read of DATAR, which the
   engine's rule forbids; declined.

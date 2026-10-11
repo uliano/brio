@@ -206,10 +206,13 @@ brio::Pin<'B', 12>::lock();
 
 ## Bench findings
 
-The reference suite is `test_x035_pin` (21 verdicts in `z`, letter `w`
-with its jumper PA4-PA5 in place) on a CH32X035F8U6 - WCH's evaluation
-board in its QFN20 edition, over a WCH-LinkE - beside one read over the
-debug port. What they measured:
+The reference suite is `test_x035_pin` (19 verdicts in `z` and 2 more
+in letter `w` with its jumper PB11-PB12 in place) on a CH32X035F8U6 -
+WCH's evaluation board in its QFN20 edition, over a WCH-LinkE - beside
+one read over the debug port. PA5, PA6 and PA7 are wires to the desk's
+CH32V006K8U6, whose dark console leaves its ends floating inputs: the
+letters that drive and pull them ran green across those wires. What
+they measured:
 
 - **CFGHR reads back what its copy wrote** (letter `a`): PB11 taken
   through the five nibbles of the series, the copy and the register
@@ -225,7 +228,7 @@ debug port. What they measured:
   set in one BSHR store and toggled in another, and the whole-port write
   drives what it names.
 - **The pulls** (letter `c`): PA7, free, reads 1 pulled up and 0 pulled
-  down; PB3 reads high on its pull-up, and the pull-down it has not got
+  down; PB12 reads high on its pull-up, and the pull-down it has not got
   is refused with nothing written.
 - **The high byte** (letter `d`): PC14's output data bit is set through
   BSXR and cleared through BCR; pulled up, the pad reads 0 - the board
@@ -236,9 +239,11 @@ debug port. What they measured:
   A, takes port B with code 10 and line 19 port C with code 11 in
   EXTICR2, each read back, and both go back to port A with the two
   registers at zero.
-- **Across a wire** (letter `w`), the jumper PA4-PA5 found at both
-  levels before the letter judged: PA5 follows PA4 over eight edges, and
-  PA4 driven low holds PA5 low against its pull-up.
+- **Across a wire** (letter `w`, the jumper found at both levels before
+  the letter judges): PA5 follows PA4 over eight edges, and PA4 driven
+  low holds PA5 low against its pull-up, measured on a jumper PA4-PA5;
+  the letter's jumper is PB11-PB12, PA4 and PA5 being the desk's SPI
+  wires.
 - **A port read through its shut gate answers with the last word the
   bus carried**, not with the pads: port A's gate is closed out of
   reset, and its INDR, read over the debug port while the gate was shut,
@@ -268,6 +273,8 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **Letter `w` on PB11-PB12**: the jumper is not on the board; strapped,
+  one run of the letter would measure it.
 - **What the CFGHR copy guards against**: the CH32X035F8U6's register
   reads back right (letter `a`); a die with zero in the chip-identifier
   word's bits 7:4 - another part or another lot - is what would show the

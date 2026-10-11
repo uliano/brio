@@ -91,7 +91,13 @@ reference suite is `test_x035_usart`.
 - **Single-wire half duplex** (14.5, HDSEL): TX alone, the pad "in
   output mode plus pull" - an alternate PUSH-PULL output with an
   external pull, the only alternate output this series has - with LIN,
-  the smartcard, IrDA and the clock off.
+  the smartcard, IrDA and the clock off. 14.5's "the TX and RX pins
+  connected internally on the chip" is the receive path from the TX
+  pad: it hears ANOTHER node driving that pad while the pad is an input,
+  floating or pulled up, and it does not hear the instance's own frames
+  with the pad driven (both measured, below) - so a bus of two nodes on
+  this series turns each node's pad between the function and an input,
+  and the die has no jumperless self-loop.
 - **IrDA** (14.7, IREN and IRLP): the SIR encoder and decoder, normal
   mode at the bit rate or the low-power mode on the prescaled clock
   (GPR.PSC, eight bits; 1 in normal mode, 0 a hold); LIN, STOP, the
@@ -219,11 +225,16 @@ brio::Usart<4>::send_break();
 
 ## Bench findings
 
-The reference suite is `test_x035_usart` (29 verdicts in `z`, letter `w`
-with its jumper PB0-PB1 in place) on a CH32X035F8U6 - WCH's evaluation
-board in its QFN20 edition, over a WCH-LinkE - at 48 MHz, the console on
-USART2 and the instance under test USART4 on its default column, PB0
-and PB1. What it measured:
+The reference suite is `test_x035_usart` on a CH32X035F8U6 - WCH's
+evaluation board in its QFN20 edition, over a WCH-LinkE - at 48 MHz, the
+console on USART2 and the instance under test USART4 on its default
+column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
+(its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
+doubled. `z` (23 verdicts) is the single-board set, run with the far
+board dark - on its console or with its peer still searching, both
+leaving their link pads floating inputs; `y` (66 verdicts) is the
+two-board set against that peer, every leg judged from what the far chip
+reports. What it measured:
 
 - **The divisor counts HCLK** (letter `a`): the console's BRR is 417 at
   48 MHz - 26 and 1/16 - which `actual_baud()` puts at 115107 baud, 0.08
@@ -256,32 +267,97 @@ and PB1. What it measured:
   port disabled; the flow-control pair takes RTSE and CTSE; mute mode
   takes the address-mark wake, the address 9 and RWU.
 - **A frame's length** (letter `d`): one 8N1 byte of the console timed
-  from the DATAR write to TC took 4436 HCLK cycles, against 4170 for ten
-  bit times of the divisor - 10.64 bit times.
-- **THE RATE ASKED, which neither that frame nor a loop can tell** (a
-  frame against BRR is the divisor measuring itself, and both ends of a
-  loop share it; letter `d` times a RUN polled one frame ahead of the
-  shifter, from the first store to TC on the ticker's cycle count,
-  against its wire time at HCLK over the baud asked): the console's 128
-  frames at 115200 in 1001 thousandths (BRR 417 for 416.7 is 0.8
-  slow), and USART4 on PB0 - transmitting into a pad nothing else
-  drives, no wire needed - 1024 frames in 1000 at 115200 and at 1
-  Mbaud and 1001 at 3 Mbaud, a divisor of exactly 16.
+  from the DATAR write to TC took 4400 HCLK cycles, against 4170 for ten
+  bit times of the divisor - 10.55 bit times.
+- **THE RATE ASKED, on the transmitter's own clock** (letter `d`, a RUN
+  polled one frame ahead of the shifter, from the first store to TC on
+  the ticker's cycle count, against its wire time at HCLK over the baud
+  asked): the console's 128 frames at 115200 in 1001 thousandths (BRR 417
+  for 416.7 is 0.8 slow), and USART4 on PB0 1024 frames in 1000 at
+  115200 and at 1 Mbaud and 1001 at 3 Mbaud, a divisor of exactly 16 -
+  with the receive pad PULLED UP: it is a wire to the far board's
+  floating input, and with it floating the 3 Mbaud run took 2054
+  thousandths, the receiver's invented frames taking the core.
 - **The break** (letter `e`): SBK set on USART4 at 115200 cleared itself
-  4581 HCLK cycles later, 10.99 bit times of the 417-cycle divisor.
+  4347 HCLK cycles later, 10.4 bit times of the 417-cycle divisor.
 - **The debug port's column is refused** (letter `f`): with SW_CFG at 0,
   `init()` of USART3 on its code 1 - PC18 and PC19 - answers false,
   USART3's gate is as it was and its remap field at the reset code.
-- **USART4 talking to itself** (letter `w`), the jumper found at both
-  levels before the letter judged: eight bytes - 0x00, 0xFF, 0x55, 0xAA,
-  0x01, 0x80, 0x7E and 0x81 - loop back whole through the
-  interrupt-driven transport at 115200, at 1 Mbaud and at 3 Mbaud, a
-  divisor of 16, with the frame, noise, parity and overrun counters all
-  zero; polled on the resource, an 8E1 frame (0xA5) and a 7O1 one (0x5A)
-  arrive with no error and a 9N1 frame carries its ninth bit (0x1C3); in
-  LIN mode the receiver raises LBD on the break its own transmitter
-  sends. The two transports ran on their own vectors, USART2's 39 and
-  USART4's 43.
+- **Half duplex does not hear its own frames** (letter `h`): HDSEL on
+  PB0, the pad on the function, four bytes sent and TC reached for each,
+  none raising RXNE.
+- **THE HSI AGAINST A CRYSTAL** (letter `j`): the far chip timed a
+  gapless run of 4000 frames at 1 Mbaud - a divisor of 48, so the HSI's
+  error alone - first frame to last on its crystal's clock: -2480 to -2701 ppm at the
+  factory calibration (HSICAL 0x53, the trim at 16) over two sessions'
+  runs, the oscillator wandering by tens to a few hundred ppm between
+  runs a fraction of a second apart (every later letter's reference is
+  measured back to back with what it judges). THE TRIM stepped from 7 to
+  28 and each step timed the same way: -25610 ppm at 7, -292 at 17 (the
+  trim nearest 48 MHz on this die), +25302 at 28; every step up, between
+  71 and 183 kHz, the mean 116 to 118 kHz against the manual's "about
+  110KHz" (3.4.1), and back at 16 within one step of the first reading.
+- **The rates on the wire, timed by the foreign receiver** (letter `k`):
+  at 115200, 921600, 1, 1.5, 2, 2.4 and 3 Mbaud sixteen bytes echoed
+  equal and counted clean by the far chip, and 2000 gapless frames timed
+  within 500 ppm of HSI / BRR - the 1 Mbaud reference taken just before
+  each - where a wrong divisor anywhere on that ladder is 2400 ppm off or
+  more: 115200 at -3778 ppm against -3746 (the divisor's -0.08 per cent
+  on the HSI's), 921600 at -1436 against -1276 (the divisor's +0.16), 3
+  Mbaud at -2830 against -2901.
+- **The transport across the wire** (letter `k`): eight bytes through
+  `Uart` echoed by the far chip come back equal at 115200 and 1 Mbaud;
+  64 bytes it sends at 3 Mbaud are all counted by the far chip; a gapless
+  run of 256 INTO it, taken by runs (`read_span()`/`consume()`), arrives
+  whole and in order at 1, 1.5 and 2 Mbaud. THE CEILING, measured: at
+  2.4 Mbaud the receive ring fills behind the main loop (31 bytes
+  refused, the run broken at byte 128) and at 3 Mbaud the shift register
+  overruns (ORE 15, the run broken at byte 21); a full-duplex echo at 3
+  Mbaud loses bytes too. The transport takes one vector entry a frame,
+  the hardware prologue's round trip of 100 to 104 cycles
+  ([platform.md](platform.md)) and the receive body of about 30
+  instructions in the release listing beside it, against a frame of 160
+  cycles at 3 Mbaud and 200 at 2.4 - the engines' work, not written in
+  this stratum (below).
+- **The frame matrix across the wire** (letter `l`): 8N1, 8E1, 8O1, 7E1,
+  7O1, 9N1, 8N2, 8N0.5 and 8N1.5 at 115200, eight frames each echoed
+  equal and counted clean; HALF A STOP BIT and one and a half timed as
+  frames of 19 and 21 half bits at 1 Mbaud (-2857 and -2836 ppm against
+  the 8N1 reference's figure, a frame half a bit off being 5 per cent).
+- **The receiver's errors, from a crystal sender** (letter `m`): six
+  odd-parity frames into an even receiver raise PE six times and FE
+  never; 0x00 frames from the far chip's edge engine at 9600 off by up to
+  plus and minus 5 per cent are clean, with this receiver's own -0.26
+  per cent folded in - inside 14.3's "not less than 3%" with margin - FE
+  rising from -6 per cent (every frame at -6 and -8); a fast sender's
+  0x00 frame raises no FE up to +8 per cent, its stop sample landing in
+  the idle that follows. Low pulses on the idle line at 9600 (a bit of
+  2500 ticks of 24 MHz): 6 to 1250 ticks are no start bit, 1875 is one
+  with NE, a whole bit is one. A run of eight read late: ORE with RXNE,
+  DATAR keeping the FIRST frame (0xB0) and the seven after it lost. A
+  break of 20 bit times: one frame, FE, data 0x00.
+- **The far chip's engine shapes** (letter `n`): six bit-banged 0x55
+  frames clean; one cell (data bit 5 of 0x00) stretched survives to +40
+  per cent and fails from +50 - the stop sample's half bit; a 13-bit
+  break ahead of a frame raises LBD in LIN mode and the frame after it
+  arrives.
+- **The modes on a wire** (letter `o`): muted under the address-mark
+  wake with ADD 5, 9-bit words from three groups addressed 3, 5 and 3 -
+  the receiver delivers the address frame 0x105 and its three data and
+  nothing else; muted after the first frame of three runs of four 3 ms
+  apart under the idle-line wake, it drops that run's other three and
+  wakes on the idle line for the next two (nine frames, 0 and 4..11);
+  IrDA's SIR frames at 115200, normal mode, echoed equal by the far
+  chip's codec; LIN's detection: a 13-bit break raises LBD at both
+  lengths, a 9-bit low at neither, a 10-bit low not at 11.
+- **Half duplex hears a second chip** (letter `p`): HDSEL on PB0 with the
+  pad an input - floating, and pulled up - receives the four 0x5A frames
+  the far chip drives onto that wire from its own RX pad.
+- **A pad handed to the function as TE rises shows a low pulse** (the
+  far chip's USART, measured across this wire, the same block's
+  lineage): the link's end parks its TX pad as a GPIO output high across
+  a reconfiguration and hands it back two bit times and 20 us after the
+  enable.
 
 ## Not covered yet
 
@@ -290,31 +366,23 @@ Driver gaps, each with its reason:
 - **The DMA engine slots**: the DMA chapter is not written in this
   stratum ([README.md](README.md)), so `TxEngine` and `RxEngine` take
   `NoDmaEngine` alone; the resource's `dma_transmit`/`dma_receive` and
-  the channel numbers are there for the engine that fills them.
+  the channel numbers are there for the engine that fills them. Above 2
+  Mbaud sustained reception is theirs (the transport's measured ceiling,
+  above).
 - **The synchronous, smartcard, IrDA, mute and flow-control modes as
   tasks** (the AVR's `SyncHost`, `IrdaLink` and the like): the resource's
   verbs are the whole of it, and a task is born with its first user.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **Letter `w`'s runs across the jumper**: each rate's 1024 frames timed
-  against the wire before its eight bytes loop back (letter `d` times the
-  same three rates on the transmitter with no wire); the jumper PB0-PB1
-  would run them.
-- **The run verbs**, `write_bulk()` and `read_span()`/`consume()`:
-  compiled for the seven parts and counted in the release listing, not
-  run on the board - every suite's print and the console's line drain
-  take them, so one run of `test_x035_usart` and the console would
-  measure them.
-- **Half a stop bit**: STOP = 01 is written by `stop_bits()` and
-  `configure()` and by no letter - letter `b` takes the other three
-  codes, and a fifth case there would measure it.
-- **What the modes do on a wire**: letter `c` reads every mode's bits
-  back and letter `w` measures LIN's break on the wire; the IrDA pulse,
-  the smartcard's guard time and NACK, the clock on CK and the SENSE OF
-  LBCL want a logic analyser on the pads, and mute mode's wake and the
-  flow-control pair's handshake a letter that drives them across a
-  wire, none of which this suite has.
+- **What the other modes do on a wire**: the smartcard's guard time and
+  NACK, the clock on CK and the SENSE OF LBCL want a logic analyser on
+  the pads or a peer on a CK pad this package does not bond, and the
+  flow-control pair's handshake a peer on the CTS and RTS pads (PB15 and
+  PA8, unbonded on the QFN20).
+- **IrDA's low-power mode across the wire**: letter `o` echoes the
+  normal mode; the low-power pulse wants the far chip's decoder at the
+  same prescaled width, a second leg of that letter.
 - **USART1 and USART3, and the other packages' columns**: USART1 has no
   usable column on the QFN20 and USART3's only one is the debug port's,
   so neither has carried a byte here; a board of another package would

@@ -12,6 +12,15 @@
  * PC16 and PC11 on pin 44 and PC17 and PC10 on pin 45, the shorts of
  * table 2-1's note 4, which the datasheet forbids as outputs. PA21 (pin 7)
  * carries the reset function on this package.
+ *
+ * THE LOT NOTE (datasheet V1.7, table 2-1's note 3, and the notes of
+ * 1.4.12 and 1.4.16): the I2C and the ADC's channels 3, 7, 11 and 15 -
+ * VREFINT is channel 15 - "are not applicable to products with a lot
+ * number with the penultimate bit 5 being 0". It holds for this part as
+ * for every part of the series, and nothing here states it as a
+ * constant: no register names a die's lot, and the package's marking is
+ * the only witness. A driver of the I2C or of those channels probes its
+ * block first (docs/ch32x035/README.md).
  */
 
 #pragma once
