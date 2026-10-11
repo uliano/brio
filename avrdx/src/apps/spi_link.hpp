@@ -67,9 +67,12 @@
 //     check out. A board that has never been addressed answers
 //     nothing, whatever noise decodes.
 //
-// The client also keeps a PULL-UP on its own SS pin at all times, so
-// the shared select wire never floats low while the host leaves its end
-// an input.
+// A client whose silicon allows it also keeps a PULL-UP on its own SS
+// pin at all times, so the shared select wire never floats low while
+// the host leaves its end an input - the avrdx peer does. The samc21
+// peer cannot: under PMUXEN its SS pad's pull is a pull-DOWN (its
+// header), which would select it, so it keeps none, and a host that
+// leaves its end an input holds the wire itself.
 //
 // THE ROLES INVERT: host_burst
 //
@@ -116,6 +119,18 @@
 //
 // That asymmetry is one of the things under test, so the host measures
 // the dummy instead of assuming it.
+//
+// THE TABLE IS THE AVR CLIENT'S. It is the alignment of a client that
+// HAS the three regimes - the avrdx peer (CTRLB.BUFEN and BUFWR). A peer
+// whose silicon has fewer MAPS them, and its own header says how: the
+// samc21 and stm32g0 peers are always buffered and serve
+// regime_buffer_wait with this table's exact alignment through their
+// preload, while their normal and buffer run without one, where the
+// shift register's leftover leads - so on those peers `normal` takes the
+// table's SECOND row, not its first. A host that commands normal or
+// buffer of a peer that is not the avrdx one therefore MEASURES which
+// row arrived (test_avr_spi's verify_rx); regime_buffer_wait is exact on
+// every peer.
 
 #pragma once
 
@@ -467,6 +482,15 @@ struct Ident {
     /// can do it answers with, and what it cannot it refuses.
     uint16_t version = 0;
 };
+
+/// The peer implementations Ident::version's high byte names.
+inline constexpr uint8_t peer_avrdx = 0x01;
+inline constexpr uint8_t peer_samc21 = 0x02;
+inline constexpr uint8_t peer_stm32g0 = 0x03;
+inline constexpr uint8_t peer_stm32f4 = 0x04;
+
+/// Which implementation answered: the version's high byte.
+constexpr uint8_t peer_kind(uint16_t version) { return static_cast<uint8_t>(version >> 8); }
 
 constexpr void put_ident(uint8_t* p, const Ident& d) {
     for (uint8_t i = 0; i < 8; ++i) p[i] = static_cast<uint8_t>(d.label[i]);

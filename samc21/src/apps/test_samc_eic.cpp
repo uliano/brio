@@ -80,9 +80,11 @@ using brio::print;
 // ---------------------------------------------------------------------------
 // The pads this suite uses
 //
-// PA16 and PA17 are free on the bench board (the console is PB30/PB31,
-// SWD is PA30/PA31, the crystal pads are PA14/PA15, LED PB23, button
-// PB22). PA09 is the third one and it is here for one reason: it is
+// PA16 and PA17 carry nothing of the bench board (the console is
+// PB30/PB31, SWD is PA30/PA31, the crystal pads are PA14/PA15, LED PB23,
+// button PB22); a wire from them to a far board is allowed only while
+// that board holds its end high-impedance (its dark console), since the
+// stimulus is the pad's own pull - letter b checks it. PA09 is the third one and it is here for one reason: it is
 // EXTINT9, above the "EXTINT0-7" that 26.6.7's prose claims are the only
 // event generators, while EVCTRL is sixteen bits wide and the EVSYS
 // generator table lists all sixteen.

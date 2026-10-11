@@ -136,11 +136,26 @@ using DynClock = DynamicClock<SysClock, Serial, U4Tx, Meter>;
 
 uint8_t passed = 0, failed = 0;
 
+/// A leg the peer REFUSED (usart_link.hpp: report_cfg_failed, a
+/// capability it has not got) is skipped, never judged: peer_report()
+/// raises this when it reads the refusal, every verdict of the leg after
+/// it prints SKIP and counts nothing, and the next peer_act() - or the
+/// next letter - lowers it.
+bool leg_refused = false;
+
 void verdict(const char* name, bool ok) {
+    if (leg_refused) {
+        print(serial, "  SKIP  ", name, crlf);
+        return;
+    }
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", name, crlf);
 }
 void verdict(const char* a, const char* b, bool ok) {
+    if (leg_refused) {
+        print(serial, "  SKIP  ", a, b, crlf);
+        return;
+    }
     if (ok) ++passed; else ++failed;
     print(serial, "  ", ok ? "PASS" : "FAIL", "  ", a, b, crlf);
 }
@@ -1324,6 +1339,12 @@ bool peer_report(link::Report& r, uint16_t wait_ms) {
         if (query(link::Op::report, f) && f.op == link::Op::report_data &&
             f.len == link::report_size) {
             r = link::get_report(f.data);
+            if ((r.flags & link::report_cfg_failed) != 0 && !leg_refused) {
+                leg_refused = true;
+                print(serial, "  SKIPPED, no verdict claimed: the peer REFUSED op ", hex(r.op),
+                      " (report_cfg_failed) - a configuration its silicon cannot serve, "
+                      "so nothing of this leg was measured", crlf);
+            }
             return true;
         }
         delay_us(clock, 40'000);
@@ -1337,6 +1358,7 @@ bool peer_report(link::Report& r, uint16_t wait_ms) {
 /// to take up the other end of the new configuration.
 bool peer_act(link::Op op, const link::Params& a,
               const uint8_t* extra = nullptr, uint8_t n = 0) {
+    leg_refused = false;
     uint8_t p[link::max_payload] = {};
     link::put_params(p, a);
     for (uint8_t i = 0; i < n; ++i) p[link::params_size + i] = extra[i];
@@ -1689,8 +1711,8 @@ void tv_wiring() {
     bool crossed = true;
     for (uint8_t i = 0; i < 4; ++i) {
         const int8_t src = probe_source(edges[i]);
-        print(serial, "  A.PE", i, ": ", edges[i], " edges -> ");
-        if (src >= 0) print(serial, "B.PE", static_cast<uint8_t>(src), crlf);
+        print(serial, "  here PE", i, ": ", edges[i], " edges -> ");
+        if (src >= 0) print(serial, "the peer's PE", static_cast<uint8_t>(src), crlf);
         else if (src == -1) print(serial, "nothing", crlf);
         else print(serial, "several drivers or noise", crlf);
         const int8_t want = i == 0 ? 1 : (i == 1 ? 0 : (i == 2 ? 2 : -1));
@@ -1720,17 +1742,22 @@ void tj_link() {
     if (got) {
         print(serial, "  peer label='", d.label, "' clock=", d.xtal ? "XTAL" : "OSCHF",
               " sanity=", hex(d.sanity), " fw=", hex(d.version), crlf);
-        const char* want = "brio-b";
-        bool same = true;
-        for (uint8_t i = 0; i < 7; ++i) same = same && d.label[i] == want[i];
-        verdict("the peer is brio-b", same);
+        // A SECOND CHIP, not a name: the label is the peer's id, and the
+        // half needs only that it is NOT this board - which board sits
+        // where is the manifest's, never the firmware's.
+        const std::string_view mine = board_id();
+        uint8_t n = 0;
+        while (n < 8 && d.label[n] != 0) ++n;
+        bool same = n == mine.size();
+        for (uint8_t i = 0; same && i < n; ++i) same = d.label[i] == mine[i];
+        verdict("the peer names a board, and not this one", n != 0 && !same);
         verdict("the peer runs usart_peer", d.sanity == link::ident_sanity);
         if (!d.xtal) {
             print(serial, "  NOTE: the peer board's 24 MHz crystal did not start - its rates come "
                           "from OSCHF", crlf);
         }
     } else {
-        verdict("the peer is brio-b", false);
+        verdict("the peer names a board, and not this one", false);
         verdict("the peer runs usart_peer", false);
     }
 
@@ -2921,6 +2948,7 @@ constexpr char two_board[] = "jklmnopqrstu";
 
 void run(TestFn fn) {
     passed = failed = 0;
+    leg_refused = false;
     fn();
     print(serial, "  -> ", passed, " pass, ", failed, " fail", crlf, crlf);
 }

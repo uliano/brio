@@ -14,24 +14,36 @@
 // architecture - the suite asks ident and does not care which peer
 // answered.
 //
-// The link is five wires, STRAIGHT THROUGH (same pin names both ends):
+// The link is five wires:
 //
 //   PA16 = SERCOM1/PAD[0], function C   MOSI
-//   PA17 = SERCOM1/PAD[1], function C   SCK
-//   PA18 = SERCOM1/PAD[2], function C   SS
-//   PA19 = SERCOM1/PAD[3], function C   MISO
+//   PA17 = SERCOM1/PAD[1], function C   SS
+//   PA18 = SERCOM1/PAD[2], function C   MISO
+//   PA19 = SERCOM1/PAD[3], function C   SCK
 //   plus a dedicated GND.
+//
+// Against a second SAM C21 the four run STRAIGHT THROUGH (same pin names
+// both ends); against an AVR128DB48 they meet its SPI0 ALT1 - PA16 to
+// PE0 (MOSI), PA18 to PE1 (MISO), PA19 to PE2 (SCK), PA17 to PE3 (SS).
 //
 // THE SAME FOUR WIRES CARRY BOTH ROLES, ON TWO DIFFERENT DOPO ROWS, and
 // that is one of the things this suite demonstrates rather than asserts.
-// A host puts DO (its MOSI) on PAD[0] - row 0x0; a client's DO is MISO
-// and has to reach the OTHER board's MISO input, i.e. PAD[3] - row 0x2.
-// The role does not flip a direction bit, it changes which code CTRLA
-// carries (32.8.1's table, samc21/spi.hpp's header).
+// A host puts DO (its MOSI) on PAD[0] with SCK on PAD[3] - row 0x3; a
+// client's DO is MISO and has to reach the OTHER board's MISO input,
+// i.e. PAD[2], with SCK still on PAD[3] - row 0x1. The role does not
+// flip a direction bit, it changes which code CTRLA carries (32.8.1's
+// table, samc21/spi.hpp's header).
+//
+// WHY THOSE TWO ROWS, of the four: the same four pads are also the
+// SERCOM's USART against an AVR's USART4 on the same wires (TxD PE0,
+// RxD PE1, XCK PE2), so SCK and XCK must be ONE pad, and XCK follows
+// TxD (31.8.1: TXPO 0x1 puts TxD on PAD[2] and XCK on PAD[3]). TxD on
+// PAD[2] is the MISO wire, the AVR's RxD; rows 0x1 and 0x3 are the two
+// that put SCK on PAD[3] (32.8.1).
 //
 // THE CHIP SELECT IS A GPIO. CTRLB.MSSEN exists and letter f measures
 // what it really does, but 32.6.3.5 raises hardware SS between every
-// CHARACTER, so it cannot frame a multi-byte protocol frame. PA18 is
+// CHARACTER, so it cannot frame a multi-byte protocol frame. PA17 is
 // therefore an ordinary PORT output for the whole protocol, which is
 // 32.6.3.3's "host with several clients" arrangement and the one every
 // device client in brio uses.
@@ -69,6 +81,15 @@
 //      real kernel - queued requests, replies through ReplyTo,
 //      reject-when-full, and the PrepareSleep vote idle vs busy; the
 //      requests' rates timed on the wire
+//   h  THE AVR CLIENT'S FACTS, judged here because here the AVR is the
+//      instrument: when the peer's ident names the avrdx peer (the
+//      version's high byte 0x01, spi_link.hpp's Ident), the verdicts
+//      test_avr_spi draws against an AVR CLIENT - the three buffering
+//      regimes' alignment (its l), the CLK_PER/6 ceiling (its m), the
+//      loss semantics and the write-collision boundary (its p) and the
+//      self-selected client the USART's Host SPI is served by (the
+//      client half of its r) - drawn with this board as the host, paced
+//      as that suite paces them. Any other peer: SKIPPED, no verdict.
 //
 // Letters that need the peer say so and FAIL LOUDLY rather than hanging
 // when it is absent. Nothing here wears flash.
@@ -123,29 +144,30 @@ TestBench<Serial> bench;
 
 constexpr uint8_t link_sercom = 1;
 
-/// HOST row 0x0: DO(MOSI) PAD[0], SCK PAD[1], SS PAD[2], DI(MISO) PAD[3].
+/// HOST row 0x3: DO(MOSI) PAD[0], SCK PAD[3], SS PAD[1], DI(MISO) PAD[2].
 /// The SS pad is NOT claimed - the chip select is the PORT pin below.
 constexpr SpiPads host_pads{
     .data_out = SercomPad::pad0,
-    .sck = SercomPad::pad1,
-    .ss = SercomPad::pad2,
-    .data_in = SercomPad::pad3,
+    .sck = SercomPad::pad3,
+    .ss = SercomPad::pad1,
+    .data_in = SercomPad::pad2,
     .data_out_pin = {'A', 16, PinFunction::c},
-    .sck_pin = {'A', 17, PinFunction::c},
-    .ss_pin = {'A', 18, PinFunction::c},
-    .data_in_pin = {'A', 19, PinFunction::c},
+    .sck_pin = {'A', 19, PinFunction::c},
+    .ss_pin = {'A', 17, PinFunction::c},
+    .data_in_pin = {'A', 18, PinFunction::c},
 };
 
-/// CLIENT row 0x2 on the SAME wires: DO is MISO now and must land on
-/// PAD[3], DI is MOSI on PAD[0]. Only row 0x2 puts DO there.
+/// CLIENT row 0x1 on the SAME wires: DO is MISO now and must land on
+/// PAD[2], DI is MOSI on PAD[0]. Of the two rows with SCK on PAD[3], only
+/// row 0x1 puts DO there.
 constexpr SpiPads client_pads{
-    .data_out = SercomPad::pad3,
-    .sck = SercomPad::pad1,
-    .ss = SercomPad::pad2,
+    .data_out = SercomPad::pad2,
+    .sck = SercomPad::pad3,
+    .ss = SercomPad::pad1,
     .data_in = SercomPad::pad0,
-    .data_out_pin = {'A', 19, PinFunction::c},
-    .sck_pin = {'A', 17, PinFunction::c},
-    .ss_pin = {'A', 18, PinFunction::c},
+    .data_out_pin = {'A', 18, PinFunction::c},
+    .sck_pin = {'A', 19, PinFunction::c},
+    .ss_pin = {'A', 17, PinFunction::c},
     .data_in_pin = {'A', 16, PinFunction::c},
 };
 
@@ -154,12 +176,12 @@ constexpr SpiPads client_pads{
 /// arrangement in this file where DIPO and DOPO name one pad.
 constexpr SpiPads loopback_pads{
     .data_out = SercomPad::pad0,
-    .sck = SercomPad::pad1,
-    .ss = SercomPad::pad2,
+    .sck = SercomPad::pad3,
+    .ss = SercomPad::pad1,
     .data_in = SercomPad::pad0,
     .data_out_pin = {'A', 16, PinFunction::c},
-    .sck_pin = {'A', 17, PinFunction::c},
-    .ss_pin = {'A', 18, PinFunction::c},
+    .sck_pin = {'A', 19, PinFunction::c},
+    .ss_pin = {'A', 17, PinFunction::c},
     .data_in_pin = {'A', 16, PinFunction::c},
 };
 
@@ -169,16 +191,16 @@ static_assert(MUX_PA16C_SERCOM1_PAD0 == static_cast<uint8_t>(PinFunction::c));
 static_assert(MUX_PA17C_SERCOM1_PAD1 == static_cast<uint8_t>(PinFunction::c));
 static_assert(MUX_PA18C_SERCOM1_PAD2 == static_cast<uint8_t>(PinFunction::c));
 static_assert(MUX_PA19C_SERCOM1_PAD3 == static_cast<uint8_t>(PinFunction::c));
-static_assert(spi_dopo_for(host_pads.data_out, host_pads.sck, host_pads.ss).value() == 0);
-static_assert(spi_dopo_for(client_pads.data_out, client_pads.sck, client_pads.ss).value() == 2);
+static_assert(spi_dopo_for(host_pads.data_out, host_pads.sck, host_pads.ss).value() == 3);
+static_assert(spi_dopo_for(client_pads.data_out, client_pads.sck, client_pads.ss).value() == 1);
 
 using Bus = SpiHost<link_sercom, host_pads>;
 using Loop = SpiHost<link_sercom, loopback_pads>;
 using Peer = SpiClient<link_sercom, client_pads>;
 using Raw = Spi<link_sercom>;
 
-using Cs = Pin<'A', 18>;
-using SckPin = Pin<'A', 17>;
+using Cs = Pin<'A', 17>;
+using SckPin = Pin<'A', 19>;
 
 /// The command channel's SCK, and the one place it is named. 200 kHz -
 /// a byte is 40 us, which is a whole order of magnitude more than the
@@ -242,7 +264,7 @@ void settle_ms(uint32_t ms) {
 }
 void settle() { settle_ms(spilink::settle_ms); }
 
-/// SERCOM1 as the command channel's host, PA18 as its chip select.
+/// SERCOM1 as the command channel's host, PA17 as its chip select.
 bool link_command_mode() {
     Cs::set();
     Cs::output();
@@ -412,8 +434,8 @@ bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
     if (first_n == 0) print(serial, " nothing");
     for (uint8_t i = 0; i < first_n; ++i) print(serial, " ", hex(first_seen[i]));
     print(serial, crlf,
-          "      the peer board must be running `spi_peer` (bench.py flash D "
-          "spi_peer); its console '0' forces the dark client back.",
+          "      the peer board must be running `spi_peer`; its console '0' "
+          "forces the dark client back.",
           crlf);
     (void)link_command_mode();
     return false;
@@ -469,9 +491,9 @@ bool ensure_link() {
     }
     link_quiet = false;
     print(serial,
-          "  THE PEER DID NOT ANSWER. The peer board must be running `spi_peer` "
-          "(brio flash D spi_peer); its console '0' forces the "
-          "dark client back. Check the five wires in this file's header.",
+          "  THE PEER DID NOT ANSWER. The peer board must be running `spi_peer`; "
+          "its console '0' forces the dark client back. Check the five wires "
+          "in this file's header.",
           crlf);
     return false;
 }
@@ -501,6 +523,10 @@ struct Exchange {
     uint8_t flags = 0;
     uint8_t spare = 0;   ///< spilink::spare_polled_pump forces the peer's polled loop
     uint16_t ms = 400;
+    /// One character at a time with the chip-select hold between them -
+    /// spilink::gap_us or more, the pacing a NORMAL-mode client needs to
+    /// load its next answer between characters (letter h's AVR client).
+    bool gapped = false;
 };
 
 constexpr uint8_t max_exchange = 16;
@@ -526,11 +552,14 @@ bool do_exchange(const Exchange& e) {
 
     // The host's own bit order is a CTRLA field and therefore part of
     // the configuration, not of the request - so the engine is re-inited
-    // for the legs that ask for LSb first, and put back afterwards.
-    if (e.host_lsb) {
+    // for the legs that ask for LSb first, and put back afterwards. A
+    // GAPPED leg takes the same raw path: the engine's request is one
+    // run with no pause between its characters, by design.
+    const bool raw_leg = e.host_lsb || e.gapped;
+    if (raw_leg) {
         SpiConfig c = spi_role_probe(host_pads, SpiRole::host);
         c.mode = e.host_mode;
-        c.lsb_first = true;
+        c.lsb_first = e.host_lsb;
         c.baud = e.baud;
         if (!Raw::configure(c) || !Raw::enable(true)) return false;
     }
@@ -545,7 +574,7 @@ bool do_exchange(const Exchange& e) {
     }
     settle();
     const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
-    if (e.host_lsb) {
+    if (raw_leg) {
         // The engine's own apply() would re-state CTRLA without DORD, so
         // this leg drives the transaction with CS by hand and the raw
         // polled surface - the ONE place in this suite that goes around
@@ -559,6 +588,7 @@ bool do_exchange(const Exchange& e) {
             while (!Raw::rxc_flag() && spins-- != 0u) {
             }
             xrx[i] = static_cast<uint8_t>(Raw::data());
+            if (e.gapped) link_hold();
         }
         link_hold();
         Cs::set();
@@ -574,13 +604,25 @@ struct Verify {
     uint8_t idx = 0xFF;
     uint8_t got = 0;
     uint8_t exp = 0;
+    uint8_t dummy = 0;
+    bool leads = false;    ///< buffer mode without BUFWR: a dummy comes first
 };
 
+/// What this end read back, against spi_link.hpp's alignment table: the
+/// answer stream from the first character, except in regime_buffer,
+/// where the client's shift register leads with a DUMMY and the stream
+/// is one place late. Every letter but h commands regime_buffer_wait,
+/// where every peer answers from the first character; letter h judges
+/// the table's other two rows against the one peer that keeps them, the
+/// AVR.
 Verify verify_rx(const Exchange& e) {
     Verify v{};
     const bool reversed = e.host_lsb != (e.cfg.dord != 0);
-    for (uint16_t i = 0; i < e.count && i < max_exchange; ++i) {
-        uint8_t exp = spilink::pattern_value(e.pattern, e.seed_b, i);
+    v.leads = e.cfg.regime == spilink::regime_buffer;
+    if (v.leads) v.dummy = xrx[0];
+    for (uint16_t i = v.leads ? 1u : 0u; i < e.count && i < max_exchange; ++i) {
+        uint8_t exp = spilink::pattern_value(
+            e.pattern, e.seed_b, v.leads ? static_cast<uint16_t>(i - 1u) : i);
         if (reversed) exp = spilink::bit_reverse(exp);
         if (xrx[i] != exp) {
             if (v.mism == 0) {
@@ -627,7 +669,12 @@ void dump_exchange(const Exchange& e, const Verify& v, const spilink::Report& r)
     }
     print(serial, crlf, "    want:");
     for (uint16_t i = 0; i < e.count && i < max_exchange; ++i) {
-        uint8_t exp = spilink::pattern_value(e.pattern, e.seed_b, i);
+        if (v.leads && i == 0) {
+            print(serial, " --");
+            continue;
+        }
+        uint8_t exp = spilink::pattern_value(
+            e.pattern, e.seed_b, v.leads ? static_cast<uint16_t>(i - 1u) : i);
         if (reversed) exp = spilink::bit_reverse(exp);
         print(serial, " ", hex(exp));
     }
@@ -746,9 +793,9 @@ void ta_block() {
     bench.verdict("CTRLA carries the host mode and the DOPO row the pads asked for",
                   Raw::role() == SpiRole::host &&
                       ((ca & SERCOM_SPIM_CTRLA_DOPO_Msk) >>
-                       SERCOM_SPIM_CTRLA_DOPO_Pos) == 0u &&
+                       SERCOM_SPIM_CTRLA_DOPO_Pos) == 3u &&
                       ((ca & SERCOM_SPIM_CTRLA_DIPO_Msk) >>
-                       SERCOM_SPIM_CTRLA_DIPO_Pos) == 3u);
+                       SERCOM_SPIM_CTRLA_DIPO_Pos) == 2u);
     bench.verdict("the BAUD register holds what the arithmetic computed",
                   Raw::baud_reg() == command_baud);
     bench.verdict("mode() reads the two CTRLA bits back as one SpiMode",
@@ -762,11 +809,11 @@ void ta_block() {
     print(serial, "  client CTRLA=", hex(cb), ": DOPO=",
           (cb & SERCOM_SPIM_CTRLA_DOPO_Msk) >> SERCOM_SPIM_CTRLA_DOPO_Pos,
           " DIPO=", (cb & SERCOM_SPIM_CTRLA_DIPO_Msk) >> SERCOM_SPIM_CTRLA_DIPO_Pos, crlf);
-    bench.verdict("and it is a DIFFERENT DOPO ROW (0x2 against the host's 0x0) - the "
+    bench.verdict("and it is a DIFFERENT DOPO ROW (0x1 against the host's 0x3) - the "
                   "role changes which code CTRLA carries, not a direction bit",
                   Raw::role() == SpiRole::client &&
                       ((cb & SERCOM_SPIM_CTRLA_DOPO_Msk) >>
-                       SERCOM_SPIM_CTRLA_DOPO_Pos) == 2u &&
+                       SERCOM_SPIM_CTRLA_DOPO_Pos) == 1u &&
                       ((cb & SERCOM_SPIM_CTRLA_DIPO_Msk) >>
                        SERCOM_SPIM_CTRLA_DIPO_Pos) == 0u);
 
@@ -1190,7 +1237,7 @@ void te_client() {
 
 /// A loop-back burst: DIPO on the DO pad, so what comes back is what
 /// went out - THROUGH THE PAD (32.6.3.4), not through an internal
-/// short. The chip select is not used; PA18 stays PORT's.
+/// short. The chip select is not used; PA17 stays PORT's.
 bool loopback_burst(const uint8_t* tx, uint8_t* rx, uint16_t len, uint8_t baud,
                     SpiMode mode = SpiMode::mode0) {
     Loop::Request r{
@@ -1695,6 +1742,315 @@ void tg_kernel() {
                   true);
 }
 
+// ===========================================================================
+// h - THE AVR CLIENT'S FACTS, with this board as the host
+// ===========================================================================
+//
+// test_avr_spi's two-board half draws some verdicts that are facts about
+// its PEER, an AVR128DB48 client - its buffering regimes, its CLK_PER/6
+// ceiling, its loss semantics and its write collision, its self-selected
+// client - and on a desk where that suite's only peer is a SAM C21 it
+// prints them and judges what is portable. This letter is where they are
+// judged instead, whenever THIS suite's peer is the avrdx spi_peer: the
+// same commands, the same streams and seeds, the same pacing (one
+// character at a time with the chip-select hold between them, never less
+// than spilink::gap_us, at the AVR suite's CLK_PER/32 of a 24 MHz peer),
+// this board in the host's seat.
+
+/// The AVR suite's command pace, CLK_PER/32 of a 24 MHz peer: 750 kHz,
+/// exact on this generator.
+constexpr uint8_t avr_command_baud = spi_baud_reg(SysClock::hz, 750'000UL).value();
+static_assert(spi_sck_hz(SysClock::hz, avr_command_baud) == 750'000UL);
+
+const char* const regime_name[3] = {"normal", "buffer", "buffer+BUFWR"};
+
+/// test_avr_spi p's sink burst: `count` characters as ONE request, no
+/// gap, into a client told never to drain; then its report.
+bool h_sink(uint8_t regime, uint8_t seed, uint16_t count, uint8_t flags, spilink::Report& r) {
+    spilink::Params a{};
+    a.cfg.regime = regime;
+    a.count = count;
+    a.ms = 250;
+    a.seed_a = seed;
+    a.flags = flags;
+    a.pattern = spilink::pattern_counting;
+    if (!peer_act(Op::sink_slow, a)) return false;
+    const uint16_t n = count < max_exchange ? count : max_exchange;
+    for (uint16_t i = 0; i < n; ++i) xtx[i] = static_cast<uint8_t>(seed + i);
+    settle();
+    (void)link_xfer(xtx, nullptr, n, avr_command_baud);
+    settle_ms(350);
+    return peer_report(r);
+}
+
+/// The client half of test_avr_spi r. The avrdx peer's Op::mspi client
+/// selects ITSELF - INVEN on its pulled-up SS pin, because the USART's
+/// Host SPI it is built to serve has no client select - and both ends
+/// count the same lead-in instead of a select edge. This end clocks the
+/// burst with its chip select left HIGH, the level the peer's INVEN reads
+/// as selected; the mode change happens inside the lead-in, whose end the
+/// peer marks by flushing what the wire carried and preloading its first
+/// answer.
+bool h_mspi(uint8_t mode, uint8_t dord, Exchange& shape, Verify& v, spilink::Report& r) {
+    constexpr uint16_t lead_ms = 25;
+    constexpr uint16_t count = 12;
+    const uint8_t seed_a = static_cast<uint8_t>(0x91 + mode * 4 + dord);
+    const uint8_t seed_b = static_cast<uint8_t>(0x3B + mode * 4 + dord);
+
+    spilink::Params a{};
+    a.cfg.mode = mode;
+    a.cfg.dord = dord;
+    a.cfg.regime = spilink::regime_normal;
+    a.count = count;
+    a.ms = 800;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.aux8 = lead_ms;
+    if (!peer_act(Op::mspi, a)) return false;
+
+    SpiConfig c = spi_role_probe(host_pads, SpiRole::host);
+    c.mode = static_cast<SpiMode>(mode);
+    c.lsb_first = dord != 0;
+    c.baud = avr_command_baud;
+    const bool up = Raw::configure(c) && Raw::enable(true);
+    Cs::set();
+    settle_ms(lead_ms + 10u);
+    for (uint8_t i = 0; i < max_exchange; ++i) xrx[i] = 0xEE;
+    for (uint16_t i = 0; up && i < count && i < max_exchange; ++i) {
+        Raw::data(spilink::pattern_value(a.pattern, seed_a, i));
+        uint32_t spins = 200000u;
+        while (!Raw::rxc_flag() && spins-- != 0u) {
+        }
+        xrx[i] = static_cast<uint8_t>(Raw::data());
+        link_hold();
+    }
+    settle_ms(10);                        // the peer clears its INVEN at the count bound
+    (void)link_command_mode();
+
+    shape = Exchange{};                   // only to describe the expected stream
+    shape.cfg.mode = mode;
+    shape.cfg.dord = dord;
+    shape.host_lsb = dord != 0;
+    shape.cfg.regime = spilink::regime_normal;
+    shape.count = count;
+    shape.seed_a = seed_a;
+    shape.seed_b = seed_b;
+    shape.pattern = a.pattern;
+    v = verify_rx(shape);
+    return up && peer_report(r);
+}
+
+void th_avr_client() {
+    if (!need_peer()) return;
+    spilink::Ident d{};
+    const bool got = peer_ident(d);
+    bench.verdict("ident comes back", got);
+    if (!got) return;
+    if (spilink::peer_kind(d.version) != spilink::peer_avrdx) {
+        print(serial, "  SKIPPED, no verdict claimed: the peer (fw ", hex(d.version),
+              ") is not the avrdx spi_peer, and every verdict of this letter is a fact "
+              "about an AVR128DB client",
+              crlf);
+        return;
+    }
+    print(serial, "  the peer is the avrdx spi_peer (fw ", hex(d.version), ", crystal ",
+          d.xtal ? "up" : "DOWN", "): its CLK_PER is ", d.xtal ? "24 MHz" : "its OSCHF", crlf);
+
+    // (1) THE ALIGNMENT TABLE (test_avr_spi l's AVR-client half): the
+    // three regimes, in mode 0 MSb first and in mode 3 LSb first.
+    uint8_t dummies = 0;
+    uint8_t dummy_nonzero = 0;
+    uint8_t dummy_seen = 0;
+    for (uint8_t k = 0; k < 2; ++k) {
+        const uint8_t m = k == 0 ? 0u : 3u;
+        for (uint8_t reg = 0; reg < 3; ++reg) {
+            Exchange e{};
+            e.cfg.mode = m;
+            e.cfg.dord = k;
+            e.cfg.regime = reg;
+            e.host_mode = static_cast<SpiMode>(m);
+            e.host_lsb = k != 0;
+            e.baud = avr_command_baud;
+            e.gapped = true;
+            e.count = 8;
+            e.seed_a = static_cast<uint8_t>(0x11 + m * 16 + k * 5 + reg);
+            e.seed_b = static_cast<uint8_t>(0x83 + m * 16 + k * 5 + reg);
+            Verify v{};
+            spilink::Report r{};
+            const bool ok = exchange_exact(e, v, r);
+            if (v.leads) {
+                ++dummies;
+                dummy_seen = v.dummy;
+                if (v.dummy != 0) ++dummy_nonzero;
+            }
+            if (!ok) dump_exchange(e, v, r);
+            bench.verdict(k == 0 ? "an AVR client, mode 0 MSb first, answers in spi_link's "
+                                   "alignment for "
+                                 : "an AVR client, mode 3 LSb first, answers in spi_link's "
+                                   "alignment for ",
+                          regime_name[reg], ok);
+        }
+    }
+    print(serial, "  the dummy leading buffer mode WITHOUT BUFWR: ", dummies,
+          " combinations, ", dummy_nonzero, " non-zero, the last ", hex(dummy_seen), crlf);
+    bench.verdict("and that leading dummy is the shift register a fresh init cleared",
+                  dummies == 2 && dummy_nonzero == 0);
+
+    // (2) THE CLK_PER/6 CEILING (test_avr_spi m): 4 MHz on a 24 MHz peer
+    // (the AVR errata's clarification 3.7.3). Inside it exact, above it
+    // POSITIVELY corrupted - a test that cannot see its failure signal
+    // passes vacuously.
+    static const uint32_t inside[] = {3'000'000UL, 1'500'000UL};
+    static const uint32_t above[] = {6'000'000UL, 12'000'000UL};
+    for (const uint32_t hz : inside) {
+        Exchange e{};
+        e.cfg.regime = spilink::regime_normal;
+        e.baud = Bus::baud_for(hz).value_or(command_baud);
+        e.gapped = true;
+        e.count = 12;
+        e.seed_a = 0x21;
+        e.seed_b = 0x9B;
+        Verify v{};
+        spilink::Report r{};
+        const bool ok = exchange_exact(e, v, r) && Bus::sck_hz(e.baud) == hz;
+        if (!ok) dump_exchange(e, v, r);
+        bench.verdict(hz == 3'000'000UL ? "an AVR client is exact at 3 MHz (CLK_PER/8), "
+                                          "inside its ceiling"
+                                        : "and at 1.5 MHz (CLK_PER/16)",
+                      ok);
+    }
+    for (const uint32_t hz : above) {
+        Exchange e{};
+        e.cfg.regime = spilink::regime_normal;
+        e.baud = Bus::baud_for(hz).value_or(command_baud);
+        e.gapped = true;
+        e.count = 12;
+        e.seed_a = 0x35;
+        e.seed_b = 0xC7;
+        spilink::Report r{};
+        const bool ran = do_exchange(e) && Bus::sck_hz(e.baud) == hz;
+        const bool rep = ran && peer_report(r);
+        const Verify v = verify_rx(e);
+        print(serial, "  ", hz / 1000u, " kHz, above the client's CLK_PER/6: host mism=",
+              v.mism, "/", e.count, " (first idx ", v.idx, " got ", hex(v.got), " exp ",
+              hex(v.exp), "), client count=", r.count, " mism=", r.mism, "/", e.count, crlf);
+        bench.verdict(hz == 6'000'000UL ? "an AVR client is positively corrupted at 6 MHz "
+                                          "(CLK_PER/4), above its ceiling"
+                                        : "and at 12 MHz (CLK_PER/2)",
+                      ran && rep && (v.mism > 0 || r.mism > 0));
+    }
+
+    // (3) THE LOSS SEMANTICS (test_avr_spi p): eight characters with no
+    // gap into a client that never drains.
+    spilink::Report r{};
+    bool rep = h_sink(spilink::regime_normal, 0x40, 8, 0, r);
+    print(serial, "  normal mode, 8 gapless 0x40..0x47 undrained: retained ", r.count, " = ",
+          hex(r.aux0), " ", hex(r.aux1), " ", hex(r.aux2), " ", hex(r.aux3), "; INTFLAGS ",
+          hex(r.sum), " ever, ", hex(r.got), " before the drain, ", hex(r.exp), " after", crlf);
+    bench.verdict("a normal-mode AVR client keeps exactly one of the eight", rep && r.count == 1);
+    bench.verdict("and it is the LAST: a new character overwrites the unread one",
+                  rep && r.count >= 1 && r.aux0 == 0x47);
+    rep = h_sink(spilink::regime_buffer, 0x50, 8, 0, r);
+    const bool ovf_idle_tx = rep && (r.flags & spilink::report_bufovf) != 0;
+    print(serial, "  buffer mode, 8 gapless 0x50..0x57 undrained, transmitter IDLE: retained ",
+          r.count, " = ", hex(r.aux0), " ", hex(r.aux1), " ", hex(r.aux2), " ", hex(r.aux3),
+          "; INTFLAGS ", hex(r.sum), " ever, BUFOVF=", ovf_idle_tx, crlf);
+    bench.verdict("a buffer-mode AVR client keeps three: the two-deep FIFO and the shifter",
+                  rep && r.count == 3);
+    bench.verdict("the FIFO holds the FIRST two of the burst",
+                  rep && r.count >= 2 && r.aux0 == 0x50 && r.aux1 == 0x51);
+    bench.verdict("and the shifter the LAST", rep && r.count >= 3 && r.aux2 == 0x57);
+    spilink::Report rf{};
+    const bool repf = h_sink(spilink::regime_buffer, 0x60, 8, spilink::flag_feed_tx, rf);
+    const bool ovf_fed_tx = repf && (rf.flags & spilink::report_bufovf) != 0;
+    print(serial, "  the same flood with the client's TRANSMITTER FED: retained ", rf.count,
+          ", INTFLAGS ", hex(rf.sum), " ever, BUFOVF=", ovf_fed_tx, crlf);
+    bench.verdict("BUFOVF marks the loss when the AVR client has transmit data", ovf_fed_tx);
+    bench.verdict("and stays clear when its transmitter is idle (its 28.5.5)", rep && !ovf_idle_tx);
+
+    // (4) THE WRITE-COLLISION BOUNDARY and the MISSED LOAD (test_avr_spi
+    // p): constant streams, host 0x5A and client 0xA5, so which write was
+    // obeyed is legible straight off the wire.
+    Exchange w{};
+    w.cfg.regime = spilink::regime_normal;
+    w.baud = avr_command_baud;
+    w.gapped = true;
+    w.count = 8;
+    w.pattern = spilink::pattern_fixed;
+    w.seed_a = 0x5A;
+    w.seed_b = 0xA5;
+    w.flags = spilink::flag_wrcol;
+    spilink::Report rw{};
+    const bool wran = do_exchange(w);
+    const bool wrep = wran && peer_report(rw);
+    const uint8_t gap_pos = spilink::wrcol_gap_at + 1;
+    const uint8_t hold_pos = spilink::wrcol_hold_at + 1;
+    print(serial, "  the AVR client wrote ", hex(spilink::wrcol_marker),
+          " over its answer in the GAP after byte ", spilink::wrcol_gap_at,
+          " and INSIDE the transfer after byte ", spilink::wrcol_hold_at, "; WRCOL=",
+          (rw.flags & spilink::report_wrcol) != 0, ", this end read");
+    for (uint8_t i = 0; i < w.count; ++i) print(serial, " ", hex(xrx[i]));
+    print(serial, crlf);
+    bool others_ok = wran && wrep;
+    for (uint8_t i = 0; i < w.count; ++i) {
+        if (i == gap_pos) continue;
+        others_ok = others_ok && xrx[i] == w.seed_b;
+    }
+    bench.verdict("an AVR client's write INSIDE a transfer sets WRCOL",
+                  wrep && (rw.flags & spilink::report_wrcol) != 0);
+    bench.verdict("and is ignored: the answer loaded before it goes out intact",
+                  wran && wrep && xrx[hold_pos] == w.seed_b);
+    bench.verdict("a write in the inter-character GAP is no collision: it is obeyed",
+                  wran && wrep && xrx[gap_pos] == spilink::wrcol_marker);
+    bench.verdict("nothing else in that burst is disturbed", others_ok);
+    bench.verdict("and the client received the whole burst",
+                  wrep && rw.count == w.count && rw.mism == 0);
+
+    Exchange sk = w;
+    sk.flags = spilink::flag_skip_write;
+    spilink::Report rs{};
+    const bool sran = do_exchange(sk);
+    const bool srep = sran && peer_report(rs);
+    print(serial, "  the AVR client skipped its load after byte ", spilink::skip_at,
+          "; this end read");
+    for (uint8_t i = 0; i < sk.count; ++i) print(serial, " ", hex(xrx[i]));
+    print(serial, crlf);
+    bool rest_ok = sran && srep;
+    for (uint8_t i = 0; i < sk.count; ++i) {
+        if (i == spilink::skip_at + 1) continue;
+        rest_ok = rest_ok && xrx[i] == sk.seed_b;
+    }
+    bench.verdict("an AVR client that misses its load sends back the byte it just received",
+                  sran && srep && xrx[spilink::skip_at + 1] == sk.seed_a);
+    bench.verdict("and every other character of that burst is its own answer", rest_ok);
+    bench.verdict("and it still received the whole burst",
+                  srep && rs.count == sk.count && rs.mism == 0);
+
+    // (5) THE SELF-SELECTED CLIENT (the client half of test_avr_spi r).
+    static const uint8_t mspi_cases[5][2] = {{0, 0}, {1, 0}, {2, 0}, {3, 0}, {0, 1}};
+    static const char* const mspi_name[5] = {"mode 0 MSb", "mode 1 MSb", "mode 2 MSb",
+                                             "mode 3 MSb", "mode 0 LSb"};
+    for (uint8_t k = 0; k < 5; ++k) {
+        Exchange shape{};
+        Verify v{};
+        spilink::Report rm{};
+        const bool mrep = h_mspi(mspi_cases[k][0], mspi_cases[k][1], shape, v, rm);
+        const bool ok = mrep && v.mism == 0 && rm.mism == 0 && rm.count == shape.count;
+        if (!ok) dump_exchange(shape, v, rm);
+        bench.verdict("a SELF-SELECTED AVR client (INVEN on its SS, no select edge) is exact "
+                      "both ways: ",
+                      mspi_name[k], ok);
+    }
+
+    Exchange back{};
+    Verify v{};
+    spilink::Report rb{};
+    const bool ok = exchange_exact(back, v, rb);
+    if (!ok) dump_exchange(back, v, rb);
+    bench.verdict("and the link is exact again in the suite's own regime", ok);
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -1736,8 +2092,8 @@ int main() {
           "test_samc_spi - SERCOM SPI (ch. 32) and util's bus vocabulary on its "
           "SECOND architecture",
           crlf);
-    print(serial, "  SERCOM1 function C: PA16 PAD0 (MOSI/DO), PA17 PAD1 (SCK), "
-                  "PA18 PAD2 (SS, a GPIO chip select), PA19 PAD3 (MISO/DI)",
+    print(serial, "  SERCOM1 function C: PA16 PAD0 (MOSI), PA17 PAD1 (SS, a GPIO chip "
+                  "select), PA18 PAD2 (MISO), PA19 PAD3 (SCK); host row 0x3, client row 0x1",
           crlf);
     print(serial, "  peer: the other board running spi_peer, "
                   "commanded in band over the same four wires; the crystal ruler is ",
@@ -1755,6 +2111,7 @@ int main() {
                  te_client);
     bench.letter('f', "loop-back, the SCK ladder, nine bits, BUFOVF and MSSEN", tf_wireless);
     bench.letter('g', "THE KERNEL: SpiBus over SpiHost, util unchanged", tg_kernel);
+    bench.letter('h', "the AVR client's facts (an avrdx peer only)", th_avr_client);
 
     bench.menu();
     bench.prompt();

@@ -34,6 +34,18 @@
 // own Host SPI mode against this peripheral, and a clock rebase under
 // two-board traffic.
 //
+// THE PEER IS AN AVR128DB48 OR A SAM C21, and the half asks which
+// (ident's version, its high byte: spi_link.hpp). Some of its verdicts
+// are facts about an AVR CLIENT - the alignment of its three buffering
+// regimes (l), its CLK_PER/6 ceiling (m), what it keeps undrained and
+// its write collision (p) - and against a SAM C21 those are PRINTED,
+// what is portable judged: l MEASURES which alignment arrived, m judges
+// the rates up to CLK_PER/16, p judges that the reports came and the
+// bursts were received. r is SKIPPED there: Host SPI frames no select,
+// and only the avrdx peer's client selects itself. The AVR client's
+// facts are judged in test_samc_spi h, where the AVR is the peer. k, n,
+// o, q and s are the same against either.
+//
 // Reference test of avrdx/spi.hpp (docs/avrdx/spi.md): keep it passing.
 //
 // Bench diagnostic, NOT a kernel app (sequential, blocking). Console on
@@ -41,7 +53,8 @@
 //
 // Wires: NONE of its own. Everything runs on SPI0 ALT1 (MOSI PE0, MISO
 // PE1, SCK PE2, SS PE3), which is also the board-to-board link (each
-// PEn to the same PEn on the peer, n = 0..3, straight across). In the
+// PEn to the same PEn on an AVR peer, n = 0..3, straight across; on a
+// SAM C21 peer PE0 to PA16, PE1 to PA18, PE2 to PA19, PE3 to PA17). In the
 // SINGLE-board half
 // the board answers itself: MISO and SS are driven by its own PORT while
 // the SPI reads them (and the SS pin's INVEN fakes the external driver
@@ -1601,12 +1614,26 @@ bool peer_act(spilink::Op op, const spilink::Params& a) {
     return true;
 }
 
+/// Which implementation the peer is: Ident::version's high byte
+/// (spi_link.hpp), learnt by every ensure_link() - 0 until a peer has
+/// answered ident.
+uint8_t peer_arch = 0;
+
+/// Is the peer the avrdx spi_peer? Several verdicts of this half are
+/// facts about an AVR128DB CLIENT (its buffering regimes, its CLK_PER/6
+/// ceiling, its loss semantics, its self-selected client): drawn against
+/// that peer, printed and not judged against another - whose own suite
+/// draws them where this board is the instrument (test_samc_spi h).
+bool peer_avr() { return peer_arch == spilink::peer_avrdx; }
+
 bool ensure_link() {
     link_quiet = true;
     (void)link_command_mode();
     for (uint8_t k = 0; k < 3; ++k) {
         if (command(spilink::Op::ping)) {
             link_quiet = false;
+            spilink::Ident d{};
+            peer_arch = peer_ident(d) ? spilink::peer_kind(d.version) : 0u;
             return true;
         }
     }
@@ -1685,15 +1712,12 @@ struct Verify {
     bool leads = false;    ///< buffer mode without BUFWR: a dummy comes first
 };
 
-/// What the host read back, against what the client's regime says it
-/// should be. In buffer mode WITHOUT BUFWR the client's first write went
-/// into the transmit buffer and the shift register's leftover leads, so
-/// byte 0 is a DUMMY - measured, never assumed - and the answer stream
-/// is one place late.
-Verify verify_rx(const Exchange& e) {
+/// The read-back against ONE alignment: from the first byte, or one
+/// place late behind a leading dummy.
+Verify verify_as(const Exchange& e, bool leads) {
     Verify v{};
     const bool reversed = e.host_lsb != (e.cfg.dord != 0);
-    v.leads = e.cfg.regime == spilink::regime_buffer;
+    v.leads = leads;
     if (v.leads) v.dummy = xrx[0];
     for (uint16_t i = v.leads ? 1u : 0u; i < e.count && i < max_exchange; ++i) {
         uint8_t exp = spilink::pattern_value(
@@ -1709,6 +1733,27 @@ Verify verify_rx(const Exchange& e) {
         }
     }
     return v;
+}
+
+/// What the host read back, against what the client's regime says it
+/// should be. In buffer mode WITHOUT BUFWR the client's first write went
+/// into the transmit buffer and the shift register's leftover leads, so
+/// byte 0 is a DUMMY - measured, never assumed - and the answer stream
+/// is one place late. That is spi_link.hpp's table, the AVR client's;
+/// against any other peer, normal and buffer are a MAPPING of that
+/// peer's own (the table's closing paragraph), so the alignment is
+/// MEASURED: the stream from the first byte if it matches there, else
+/// behind a dummy if it matches there, else whichever is closer - a
+/// broken exchange stays broken under both.
+Verify verify_rx(const Exchange& e) {
+    if (peer_avr() || e.cfg.regime == spilink::regime_buffer_wait) {
+        return verify_as(e, e.cfg.regime == spilink::regime_buffer);
+    }
+    const Verify first = verify_as(e, false);
+    const Verify behind = verify_as(e, true);
+    if (first.mism == 0) return first;
+    if (behind.mism == 0) return behind;
+    return behind.mism < first.mism ? behind : first;
 }
 
 /// An exchange plus its report, judged: exact in BOTH directions.
@@ -1832,6 +1877,7 @@ void tl_matrix() {
     uint8_t dummy_seen = 0;
     uint8_t dummy_n = 0;
     uint8_t dummy_nonzero = 0;
+    uint8_t led[3] = {};                  ///< per regime: combinations a dummy led
     for (uint8_t m = 0; m < 4; ++m) {
         for (uint8_t dord = 0; dord < 2; ++dord) {
             for (uint8_t reg = 0; reg < 3; ++reg) {
@@ -1850,12 +1896,25 @@ void tl_matrix() {
                 if (v.leads) {
                     dummy_seen = v.dummy;
                     ++dummy_n;
+                    ++led[reg];
                     if (v.dummy != 0) ++dummy_nonzero;
                 }
                 if (!ok) dump_exchange(e, v, r);
                 verdict(combo_name[m * 2 + dord], regime_name[reg], ok);
             }
         }
+    }
+    if (!peer_avr()) {
+        // Not an AVR client: its regimes are a mapping (spi_link.hpp's
+        // table), and what arrived is the measurement, printed - the
+        // AVR client's alignment is judged where an AVR is the peer
+        // (test_samc_spi h).
+        print(serial, "  the peer (kind ", hex(peer_arch), ") MEASURED: a dummy led ",
+              led[0], " of 8 normal, ", led[1], " of 8 buffer, ", led[2],
+              " of 8 buffer+BUFWR combinations; ", dummy_nonzero,
+              " of those dummies non-zero, the last ", hex(dummy_seen), crlf);
+        quiesce();
+        return;
     }
     print(serial, "  FINDING: in buffer mode WITHOUT BUFWR the answer stream is led by a "
                   "DUMMY byte - the shift register's leftover. Over the ", dummy_n,
@@ -1887,6 +1946,10 @@ void tm_rates() {
                                        {SpiClock::div32, "CLK_PER/32 (750 kHz)"},
                                        {SpiClock::div64, "CLK_PER/64 (375 kHz)"},
                                        {SpiClock::div128, "CLK_PER/128 (187.5 kHz)"}};
+    // CLK_PER/8 is inside an AVR client's ceiling and judged there; a
+    // client of another silicon has its own (the SAM C21's paper
+    // ceiling for a client's answers is a few MHz, docs/samc21/spi.md),
+    // so against it that rung is printed and the four below it judged.
     for (const RateCase& rc : inside) {
         Exchange e{};
         e.rate = rc.c;
@@ -1897,13 +1960,21 @@ void tm_rates() {
         spilink::Report r{};
         const bool ok = exchange_exact(e, v, r);
         if (!ok) dump_exchange(e, v, r);
+        if (rc.c == SpiClock::div8 && !peer_avr()) {
+            print(serial, "  the peer (kind ", hex(peer_arch), ") at ", rc.name, ": ",
+                  ok ? "exact both ways" : "NOT exact", ", host mism=", v.mism,
+                  " client mism=", r.mism, " count=", r.count, crlf);
+            continue;
+        }
         verdict("exact at ", rc.name, ok);
     }
 
     // The client's ceiling is CLK_PER/6 = 4 MHz on a 24 MHz peer
     // (errata clarification 3.7.3). Above it the bytes must be
     // corrupted, and this has to SEE the corruption: a test that cannot
-    // observe its own failure signal passes vacuously.
+    // observe its own failure signal passes vacuously. That is a fact
+    // about an AVR client, judged against one; another peer's figures are
+    // printed (and the AVR's ceiling judged in test_samc_spi h).
     static const RateCase above[2] = {{SpiClock::div4, "CLK_PER/4 (6 MHz)"},
                                       {SpiClock::div2, "CLK_PER/2 (12 MHz)"}};
     for (const RateCase& rc : above) {
@@ -1917,6 +1988,13 @@ void tm_rates() {
         const bool ran = do_exchange(e);
         const bool rep = ran && peer_report(r);
         v = verify_rx(e);
+        if (!peer_avr()) {
+            print(serial, "  the peer (kind ", hex(peer_arch), ") at ", rc.name, ": host mism=",
+                  v.mism, "/", e.count, " (first idx ", v.idx, " got ", hex(v.got), " exp ",
+                  hex(v.exp), "), client count=", r.count, " mism=", r.mism, "/", e.count,
+                  rep ? "" : " (no report)", crlf);
+            continue;
+        }
         print(serial, "  FINDING: ", rc.name, " is above the client's CLK_PER/6 ceiling: "
               "host mism=", v.mism, "/", e.count, " (first idx ", v.idx, " got ",
               hex(v.got), " exp ", hex(v.exp), "), client count=", r.count, " mism=",
@@ -2138,29 +2216,45 @@ void tp_loss() {
         return;
     }
 
+    // WHAT A CLIENT KEEPS is a fact about ITS silicon: the verdicts below
+    // are an AVR client's (DS40002247B 28.3.2.2, 28.5.5), drawn against
+    // the avrdx peer. Another peer's retained bytes and flags are printed
+    // and only the arrival of its reports judged - the AVR client's facts
+    // are judged where an AVR is the peer (test_samc_spi h).
+    const bool avr = peer_avr();
+    if (!avr) {
+        print(serial, "  the peer is kind ", hex(peer_arch),
+              ", not an AVR client: what it keeps is printed, not judged", crlf);
+    }
     spilink::Report r{};
     bool rep = sink_burst(spilink::regime_normal, 0x40, 8, 0, r);
+    const bool rep_normal = rep;
     print(serial, "  FINDING: normal mode, 8 gapless bytes 0x40..0x47, DATA never read: "
                   "the client retained ", r.count, " byte(s) = ", hex(r.aux0), " ",
           hex(r.aux1), " ", hex(r.aux2), " ", hex(r.aux3), "; INTFLAGS ", hex(r.sum),
           " ever raised, ", hex(r.got), " before the drain and ", hex(r.exp), " after",
           crlf);
-    verdict("a normal-mode client keeps exactly one of the eight", rep && r.count == 1);
-    verdict("and it is the LAST byte: a new one overwrites the unread one",
-            rep && r.count >= 1 && r.aux0 == 0x47);
+    if (avr) {
+        verdict("a normal-mode client keeps exactly one of the eight", rep && r.count == 1);
+        verdict("and it is the LAST byte: a new one overwrites the unread one",
+                rep && r.count >= 1 && r.aux0 == 0x47);
+    }
 
     rep = sink_burst(spilink::regime_buffer, 0x50, 8, 0, r);
+    const bool rep_buffer = rep;
     const bool ovf_idle_tx = rep && (r.flags & spilink::report_bufovf) != 0;
     print(serial, "  FINDING: buffer mode, 8 gapless bytes 0x50..0x57, DATA never read and "
                   "the transmitter IDLE: the client retained ", r.count, " byte(s) = ",
           hex(r.aux0), " ", hex(r.aux1), " ", hex(r.aux2), " ", hex(r.aux3),
           "; INTFLAGS ", hex(r.sum), " ever raised, ", hex(r.got),
           " before the drain and ", hex(r.exp), " after, BUFOVF=", ovf_idle_tx, crlf);
-    verdict("a buffer-mode client keeps three: the two-deep FIFO plus the shifter",
-            rep && r.count == 3);
-    verdict("the FIFO holds the FIRST two bytes of the burst",
-            rep && r.count >= 2 && r.aux0 == 0x50 && r.aux1 == 0x51);
-    verdict("and the shifter holds the LAST", rep && r.count >= 3 && r.aux2 == 0x57);
+    if (avr) {
+        verdict("a buffer-mode client keeps three: the two-deep FIFO plus the shifter",
+                rep && r.count == 3);
+        verdict("the FIFO holds the FIRST two bytes of the burst",
+                rep && r.count >= 2 && r.aux0 == 0x50 && r.aux1 == 0x51);
+        verdict("and the shifter holds the LAST", rep && r.count >= 3 && r.aux2 == 0x57);
+    }
 
     // 28.5.5 puts a condition on the flag: "If there is no transmit
     // data, the Buffer Overflow will not be set before the start of a
@@ -2173,8 +2267,13 @@ void tp_loss() {
           rf.count, " byte(s) = ", hex(rf.aux0), " ", hex(rf.aux1), " ", hex(rf.aux2),
           " ", hex(rf.aux3), "; INTFLAGS ", hex(rf.sum), " ever raised, ", hex(rf.got),
           " before the drain, BUFOVF=", ovf_fed_tx, crlf);
-    verdict("BUFOVF marks the loss when the client has transmit data", ovf_fed_tx);
-    verdict("and stays clear when its transmitter is idle (28.5.5)", !ovf_idle_tx);
+    if (avr) {
+        verdict("BUFOVF marks the loss when the client has transmit data", ovf_fed_tx);
+        verdict("and stays clear when its transmitter is idle (28.5.5)", !ovf_idle_tx);
+    } else {
+        verdict("the peer reported each of the three undrained bursts",
+                rep_normal && rep_buffer && repf);
+    }
 
     // The client's own write collision, and the BOUNDARY it turns on. A
     // write to DATA is a collision only while the shifter is running; in
@@ -2206,13 +2305,15 @@ void tp_loss() {
         if (i == gap_pos) continue;
         others_ok = others_ok && xrx[i] == e.seed_b;
     }
-    verdict("a client's write INSIDE a transfer sets WRCOL",
-            repw && (rw.flags & spilink::report_wrcol) != 0);
-    verdict("and is ignored: the answer loaded before it goes out intact",
-            ran && repw && xrx[hold_pos] == e.seed_b);
-    verdict("a write in the inter-byte GAP is no collision at all: it is obeyed",
-            ran && repw && xrx[gap_pos] == spilink::wrcol_marker);
-    verdict("nothing else in the burst is disturbed", others_ok);
+    if (avr) {
+        verdict("a client's write INSIDE a transfer sets WRCOL",
+                repw && (rw.flags & spilink::report_wrcol) != 0);
+        verdict("and is ignored: the answer loaded before it goes out intact",
+                ran && repw && xrx[hold_pos] == e.seed_b);
+        verdict("a write in the inter-byte GAP is no collision at all: it is obeyed",
+                ran && repw && xrx[gap_pos] == spilink::wrcol_marker);
+        verdict("nothing else in the burst is disturbed", others_ok);
+    }
     verdict("the client received the whole burst either way",
             repw && rw.count == e.count && rw.mism == 0);
 
@@ -2241,9 +2342,11 @@ void tp_loss() {
         if (i == spilink::skip_at + 1) continue;
         rest_ok = rest_ok && xrx[i] == sk.seed_b;
     }
-    verdict("a client that misses its load sends back the byte it just received",
-            echoed);
-    verdict("and every other byte of that burst is the client's own answer", rest_ok);
+    if (avr) {
+        verdict("a client that misses its load sends back the byte it just received",
+                echoed);
+        verdict("and every other byte of that burst is the client's own answer", rest_ok);
+    }
     verdict("the client still received the whole burst",
             srep && rs.count == sk.count && rs.mism == 0);
     quiesce();
@@ -2408,6 +2511,18 @@ void tr_mspi() {
         verdict("the peer answers a ping", false);
         return;
     }
+    // The capability the peer's kind says it has not got (spi_link.hpp's
+    // Ident: the high byte EXPECTS a capability): Host SPI has no client
+    // select, and only the avrdx peer's client can select itself (INVEN on
+    // its SS pin); any other answers Op::mspi with report_cfg_failed.
+    if (!peer_avr()) {
+        print(serial, "  SKIPPED, no verdict claimed: the peer (kind ", hex(peer_arch),
+              ") is not the avrdx spi_peer - the USART's Host SPI frames no select, and "
+              "only that peer's client selects itself. MspiHost needs an AVR peer; the AVR's "
+              "self-selected client is judged in test_samc_spi h", crlf);
+        quiesce();
+        return;
+    }
     static const MspiCase cases[5] = {
         {0, 0, "UCPHA=0 MSb (SPI mode 0)"},   {1, 0, "UCPHA=1 MSb (SPI mode 1)"},
         {2, 0, "inverted SCK MSb (mode 2)"},  {3, 0, "inverted SCK UCPHA=1 (mode 3)"},
@@ -2520,10 +2635,10 @@ void help() {
     print(serial, "  two boards: k bring-up | l client matrix | m rates and the client "
                   "ceiling | n mismatches | o SS mid-byte | p undrained client | "
                   "q real demotion | r Host SPI | s rebase    -> y = all of k..s", crlf);
-    print(serial, "  NO WIRES of its own: the desk's PORTE link (A.PEn - B.PEn, n = 0..3) "
-                  "is SPI0 ALT1 straight across. The peer board runs `spi_peer`, which stays DARK "
-                  "- it drives MISO only for one answer window - so z passes with the peer "
-                  "attached", crlf);
+    print(serial, "  NO WIRES of its own: PE0..PE3 (SPI0 ALT1) to the peer board's SPI - "
+                  "an AVR's PE0..PE3 straight across, or a SAM C21's PA16, PA18, PA19, PA17. "
+                  "The peer board runs `spi_peer`, which stays DARK - it drives MISO only for "
+                  "one answer window - so z passes with the peer attached", crlf);
 }
 
 } // namespace

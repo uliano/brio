@@ -284,7 +284,11 @@ and has two halves: `z` is the SINGLE-BOARD set (11 tests,
 IN BAND over the very link under test. Two more commands stand outside
 `y` because they depend on how the desk is jumpered: `v`, the wiring
 probe, and `w`, the one-wire bus (6 verdicts on the shared-line desk; it
-skips itself on the crossed pair).
+skips itself on the crossed pair). The peer names itself in its ident -
+the version's high byte names the implementation (`usart_link.hpp`), and
+`j` judges only that the label names a board other than this one; a leg
+the peer REFUSES (`report_cfg_failed`, a capability its silicon has not
+got) is printed SKIPPED and judged nothing.
 
 ### The transport's cost and its two contracts
 
@@ -726,6 +730,10 @@ Implemented and compile-checked for all eight DA/DB packages, but NOT
 bench-verified:
 
 - **`DBGCTRL.DBGRUN`**;
+- **the suite's refusal path** (a leg the peer refuses, printed SKIPPED
+  and judged nothing): the avrdx `usart_peer` refuses no configuration
+  the suite asks of it, so no run has taken the path; a peer of another
+  silicon that cannot serve a leg's configuration would;
 - **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4
   default were driven, on 48-pin silicon only. USART2 is the bench

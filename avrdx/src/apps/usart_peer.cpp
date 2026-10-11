@@ -66,7 +66,7 @@ using LinePin = Pin<'E', 0>;      // TXD pad: the bit-bang and break line
 using RxdPin = Pin<'E', 1>;       // RXD pad: DRIVE_RXD drives the DUT's TXD
 using XckPin = Pin<'E', 2>;
 
-constexpr uint16_t firmware_version = 0x0201;
+constexpr uint16_t firmware_version = 0x0102;   ///< see usart_link.hpp's Ident
 
 bool crystal_ok = false;
 /// Which wiring the desk turns out to have (usart_link.hpp Topology).
@@ -126,7 +126,11 @@ uint16_t data_mask(uint8_t bits) {
 }
 
 /// CPU cycles of one bit at a rate - the unit every bit-banged shape
-/// here is built from, never a magic number.
+/// here is built from, never a magic number. On this peer a CPU cycle IS
+/// the protocol's 24 MHz tick (usart_link.hpp, TIME IN THE PAYLOAD): the
+/// core runs the crystal's 24 MHz undivided.
+static_assert(SysClock::hz == 24'000'000UL,
+              "usart_link.hpp counts time in 24 MHz ticks: this peer's CPU cycle must be one");
 uint32_t cycles_per_bit(uint32_t rate) {
     if (rate == 0) return 2500;
     return SysClock::hz / rate;
@@ -792,8 +796,8 @@ void wire_probe() {
     probe_listen(edges);
     for (uint8_t i = 0; i < 4; ++i) {
         const int8_t src = probe_source(edges[i]);
-        print(console, "  B.PE", i, ": ", edges[i], " edges -> ");
-        if (src >= 0) print(console, "A.PE", static_cast<uint8_t>(src), crlf);
+        print(console, "  here PE", i, ": ", edges[i], " edges -> ");
+        if (src >= 0) print(console, "the DUT's PE", static_cast<uint8_t>(src), crlf);
         else if (src == -1) print(console, "nothing", crlf);
         else print(console, "several or noise", crlf);
     }

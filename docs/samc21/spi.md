@@ -6,10 +6,12 @@ shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
 `test/family_samc21/spi.cpp` + eight negatives; bench suite `test_samc_spi`
-(7 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
+(8 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
 or on a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
-format, one source file serving both architectures).
+format, one source file serving both architectures - except letter h,
+which judges the facts of an AVR CLIENT and runs only when the ident
+names the avrdx peer).
 
 ## What the silicon does
 
@@ -24,9 +26,13 @@ pack that ever separated them fails the build.
 whole (DO, SCK, SS) assignment (32.8.1); the three signals cannot be
 placed independently. And which signal is which depends on the ROLE
 (table 32-2): DO is MOSI on a host and MISO on a client, so one fixed
-four-wire harness is a host on row 0x0 and a client on row 0x2 - two
+four-wire harness is a host on one row and a client on another - two
 different DOPO codes, not one code with directions flipped. The bench
-runs both roles over the same seven wires. The header's enumerator
+runs both roles over the same four wires: a host on row 0x3 (DO PAD[0],
+SCK PAD[3]) and a client on row 0x1 (DO PAD[2], SCK PAD[3]), the two
+rows whose SCK pad is the XCK pad of a USART with TxD on PAD[2] (TXPO
+0x1, 31.8.1) - so the same wires serve this SERCOM's USART against an
+AVR's, TxD on the MISO wire and XCK on the SCK one. The header's enumerator
 naming trap: `DOPO_PAD1_Val` names CODE 0x1, which puts DO on PAD[2] -
 the same trap TXPO has.
 
@@ -266,12 +272,12 @@ A client answering a stream (the one-ahead pump):
 
 ## Bench findings
 
-- Two benches carry this driver. The seven-wire cross-architecture
-  bench: SAM SERCOM1 function C (PA16 MOSI, PA17 SCK, PA18 SS, PA19
-  MISO) against an AVR128DB48 peer's SPI0 ALT1 (PE0-PE3), both boards
-  at 5 V. And the SAM-SAM five-wire bench (both boards' PA16..PA19
-  straight through plus GND). On either desk the same wires carry a
-  board as host (DOPO row 0x0) and as client (row 0x2).
+- Two benches carry this driver. The cross-architecture bench: SAM
+  SERCOM1 function C (PA16 MOSI, PA17 SS, PA18 MISO, PA19 SCK) against
+  an AVR128DB48 peer's SPI0 ALT1 (PE0 MOSI, PE3 SS, PE1 MISO, PE2 SCK)
+  plus GND, both boards at 5 V. And the SAM-SAM bench (both boards'
+  PA16..PA19 straight through plus GND). On either desk the same wires
+  carry a board as host (DOPO row 0x3) and as client (row 0x1).
 - All four transfer modes x both bit orders byte-exact in both
   directions; a deliberate DORD mismatch is an EXACT two-way bit
   reversal at both ends.
@@ -304,6 +310,54 @@ A client answering a stream (the one-ahead pump):
   bus_rejected immediately; an idle bus votes ok on PrepareSleep, a busy
   one refuses. `util/spi_bus.hpp` and `util/bus_master.hpp` arbitrate
   this engine as written: nothing above the contract is target-specific.
+- Letter h, the AVR CLIENT'S FACTS with this board as the host: every
+  verdict `test_avr_spi` draws against an AVR client holds with a SAM
+  C21 clocking it - the three regimes' alignment (the dummy 0x00), the
+  CLK_PER/6 ceiling (exact at 3 and 1.5 MHz; at 6 MHz the client
+  received 12 of 12 wrong and 6 of its answers arrived wrong, at 12 MHz
+  every character wrong both ways), what it
+  keeps undrained (normal the last of eight, buffer the first two and
+  the last, BUFOVF only with its transmitter fed), the write-collision
+  boundary and the missed load, and its self-selected client in the
+  four modes and LSb first.
+- THIS SILICON AS THE CLIENT, measured against an AVR128DB48 host
+  (`test_avr_spi` y with the samc21 `spi_peer`, one character at a time
+  with 20 us between them, the select held for the window):
+  - THE REGIMES: with PLOADEN (the peer's regime_buffer_wait) the answer
+    stream arrives from the first character; without it (its normal and
+    buffer) a DUMMY leads, 0x00 after a fresh init, and the stream is one
+    place late - 8 of 8 combinations each, every mode and bit order.
+  - THE RATE: exact both ways from 187.5 kHz to 6 MHz; at 12 MHz the
+    client still receives every character exact while 11 of its 12
+    answers arrive wrong - the answer path's ceiling lies between 6 and
+    12 MHz (the paper's "a few MHz" above is the conservative side of it).
+  - UNDRAINED (eight characters at 750 kHz with DATA never read): the
+    two-level receive buffer keeps the FIRST TWO and the rest is lost; the
+    drain then reads one more 0x00 and INTFLAG.ERROR stands after it -
+    the overflow travelling with the data (CTRLA.IBON = 0, 32.6.2.7);
+    a fed transmitter changes nothing. The AVR's write collision and
+    missed-load echo have no counterpart: a DATA write here goes to the
+    buffer, the stream is untouched.
+  - The select raised MID-CHARACTER: the client keeps the three complete
+    characters and drops the interrupted one (the client's shift counter
+    resets at SS high, 32.6.2.6.2).
+  - A CPOL mismatch corrupts what the client receives (12 of 12), a CPHA
+    mismatch what the host reads (11 of 12); a DORD mismatch is the exact
+    two-way reversal.
+- THE SELECT PAD'S PULL IS A PULL-DOWN. Under PMUXEN, PINCFG.PULLEN on
+  the client's SS pad gives a pull-DOWN whatever OUT says - the rule
+  31.5.1 states for the USART, measured here on the SPI: with the far end
+  a high-impedance input, the line read low within a millisecond of
+  PULLEN with OUT set, and stayed high for 300 ms with no pull. A pull
+  there SELECTS the client, and against an AVR host watching its SS
+  (SSD = 0, its own pull-up on) it made a divider that read low and
+  demoted the host. So a client here keeps no pull on its select, and
+  the host's end holds the line.
+- THE ANSWER WINDOW ENDS ON TXC. In a client INTFLAG.TXC rises when SS is
+  pulled high (32.8.6) and a DATA write clears it, so a polled answer
+  window ends when the host raises the select, whatever count it
+  clocked - a host that stops at its decoder's frame (the AVR's) would
+  otherwise have its next window eaten as dummies of this one.
 
 - `bench_samc` letter e, THE HOST ABOVE THE WIRE: the host on SERCOM1
   with MISO floating (the time is the wire's), the best of 8, the instrument's figures of the same run
@@ -336,7 +390,7 @@ A client answering a stream (the one-ahead pump):
   rates where a character outlasts the handler; above them a program
   wants the polled loop. THE FIXED COST OF A REQUEST
   (`spi.req`: a polled request of 1, 3 and 16 bytes with a command byte,
-  the D/C scripted on PB23 and the select on PA18 - two real pads, four
+  the D/C scripted on PB23 and the select on PA17 - two real pads, four
   real edges - at 3 MHz): 526, 559 and 665 cycles above the wire, the
   instrument's 82 inside - the phase boundary
   is the 33 between one byte and three (the last command character read
@@ -373,6 +427,12 @@ declined as a default because a placement of some 2 KB in `.ram_text`
 is the program's call (platform.md, "A handler in SRAM"), not the driver's.
 
 Implemented but not bench-verified:
+
+- The SAM-SAM pairing on the harness's rows (0x3 host, 0x1 client), and
+  the samc21 `spi_peer`'s window end and unpulled select against a host
+  that clocks the whole answer budget (`test_samc_spi` itself): needs a
+  second SAM C21 at 5 V; the AVR128DB48 pairing on these rows is
+  measured, both ways.
 
 - The SCK at 12 and 24 MHz ON THE WIRE (BAUD 1 and 0): the polled
   loop's transmit-only turn of some 34 core cycles outlasts their

@@ -31,7 +31,8 @@
 //    regime_buffer_wait runs the preloaded one-ahead pump and delivers
 //    the exact rx[i] = P_B(i) alignment that regime promises; the other
 //    two run without preload, which here means the shifter's leftover
-//    leads - stated, exercised nowhere.
+//    leads (spi_link.hpp's table, its second row) - what a host that
+//    commands them reads is test_avr_spi l's measurement.
 //
 //  - THE PROTOCOL CARRIES OPTIONS THIS SILICON HAS NOT GOT. flag_wrcol
 //    and flag_feed_tx name conditions chapter 32 does not have and are
@@ -44,18 +45,26 @@
 // MISO (drive_output = false), the
 // answer line wakes only for one answer window after a frame that
 // CHECKED OUT, an unknown op is dropped in silence, and a bad checksum
-// is nak'ed only while ENGAGED. The select wire is held up by THIS
-// board's internal pull-up at all times - the pull survives PMUXEN
-// (28.6.3.2: the mux takes the output driver, not the pull), so it is
-// re-stated after every re-init.
+// is nak'ed only while ENGAGED. The select pad carries NO pull while
+// the SERCOM owns it: under PMUXEN, PINCFG.PULLEN on a SERCOM input
+// enables a pull-DOWN only, whatever OUT says (31.5.1 states it for the
+// USART; measured here on the SPI client's SS pad - the line read low
+// within a millisecond of PULLEN with OUT set, and held high for 300 ms
+// with no pull). A pull-down would SELECT this client whenever the host
+// leaves its end an input, so the host's end holds the line: an AVR
+// host watching its SS (SSD = 0) pulls it up itself, every other host
+// here drives its chip select.
 //
-// Link: SERCOM1 function C, straight through to the host board -
-//   PA16 = PAD[0]  MOSI (DI here: the client's DOPO row is 0x2)
-//   PA17 = PAD[1]  SCK
-//   PA18 = PAD[2]  SS (input; this board's pull-up holds it high)
-//   PA19 = PAD[3]  MISO (DO, driven only to answer)
-// The same four pads carry this board as the bus HOST for
-// Op::host_burst - DOPO row 0x0, chip select by PORT on PA18.
+// Link: SERCOM1 function C, to the host board -
+//   PA16 = PAD[0]  MOSI (DI here: the client's DOPO row is 0x1)
+//   PA17 = PAD[1]  SS (input, no pull: the host's end holds it)
+//   PA18 = PAD[2]  MISO (DO, driven only to answer)
+//   PA19 = PAD[3]  SCK
+// straight through to a second SAM C21's same pads, or to an
+// AVR128DB48's SPI0 ALT1 as PE0, PE3, PE1 and PE2 - the rows
+// test_samc_spi's header explains. The same four pads carry this board
+// as the bus HOST for Op::host_burst - DOPO row 0x3, chip select by
+// PORT on PA17.
 //
 // Console: SERCOM5 PB30/PB31 at 115200, observability only.
 //   ? help | i status and counters | 0 back to the dark client | 3 trace
@@ -107,46 +116,46 @@ constexpr Console console;
 
 constexpr uint8_t link_sercom = 1;
 
-/// This board as the CLIENT: DOPO row 0x2 (DO = MISO on PAD[3]).
+/// This board as the CLIENT: DOPO row 0x1 (DO = MISO on PAD[2]).
 constexpr SpiPads client_pads{
-    .data_out = SercomPad::pad3,
-    .sck = SercomPad::pad1,
-    .ss = SercomPad::pad2,
+    .data_out = SercomPad::pad2,
+    .sck = SercomPad::pad3,
+    .ss = SercomPad::pad1,
     .data_in = SercomPad::pad0,
-    .data_out_pin = {'A', 19, PinFunction::c},
-    .sck_pin = {'A', 17, PinFunction::c},
-    .ss_pin = {'A', 18, PinFunction::c},
+    .data_out_pin = {'A', 18, PinFunction::c},
+    .sck_pin = {'A', 19, PinFunction::c},
+    .ss_pin = {'A', 17, PinFunction::c},
     .data_in_pin = {'A', 16, PinFunction::c},
 };
 
-/// This board as the HOST (Op::host_burst only): DOPO row 0x0.
+/// This board as the HOST (Op::host_burst only): DOPO row 0x3.
 constexpr SpiPads host_pads{
     .data_out = SercomPad::pad0,
-    .sck = SercomPad::pad1,
-    .ss = SercomPad::pad2,
-    .data_in = SercomPad::pad3,
+    .sck = SercomPad::pad3,
+    .ss = SercomPad::pad1,
+    .data_in = SercomPad::pad2,
     .data_out_pin = {'A', 16, PinFunction::c},
-    .sck_pin = {'A', 17, PinFunction::c},
-    .ss_pin = {'A', 18, PinFunction::c},
-    .data_in_pin = {'A', 19, PinFunction::c},
+    .sck_pin = {'A', 19, PinFunction::c},
+    .ss_pin = {'A', 17, PinFunction::c},
+    .data_in_pin = {'A', 18, PinFunction::c},
 };
 
 static_assert(MUX_PA16C_SERCOM1_PAD0 == static_cast<uint8_t>(PinFunction::c));
 static_assert(MUX_PA17C_SERCOM1_PAD1 == static_cast<uint8_t>(PinFunction::c));
 static_assert(MUX_PA18C_SERCOM1_PAD2 == static_cast<uint8_t>(PinFunction::c));
 static_assert(MUX_PA19C_SERCOM1_PAD3 == static_cast<uint8_t>(PinFunction::c));
-static_assert(spi_dopo_for(client_pads.data_out, client_pads.sck, client_pads.ss).value() == 2);
-static_assert(spi_dopo_for(host_pads.data_out, host_pads.sck, host_pads.ss).value() == 0);
+static_assert(spi_dopo_for(client_pads.data_out, client_pads.sck, client_pads.ss).value() == 1);
+static_assert(spi_dopo_for(host_pads.data_out, host_pads.sck, host_pads.ss).value() == 3);
 
 using Client = SpiClient<link_sercom, client_pads>;
 using Raw = Spi<link_sercom>;
 
 using MosiPin = Pin<'A', 16>;
-using SckPin = Pin<'A', 17>;
-using SsPin = Pin<'A', 18>;
-using MisoPin = Pin<'A', 19>;
+using SsPin = Pin<'A', 17>;
+using MisoPin = Pin<'A', 18>;
+using SckPin = Pin<'A', 19>;
 
-constexpr uint16_t firmware_version = 0x0202;   ///< see spi_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0203;   ///< see spi_link.hpp's Ident
 
 bool crystal_ok = false;
 bool trace = false;
@@ -204,12 +213,12 @@ void wait_ms(uint32_t ms) {
 
 // ---- the client's standing configurations ---------------------------------------
 
-/// The select wire is shared; while this end is (or is becoming) a
-/// client, its own pull-up is what keeps the line from floating low and
-/// selecting it at random. The pull survives PMUXEN, so this is legal
-/// on the muxed pad - and every re-init clears PULLEN, so it is
-/// re-stated after each one.
-void hold_ss_up() { SsPin::pull(PinPull::up); }
+/// The select pad while the SERCOM owns it: NO pull. PULLEN under
+/// PMUXEN is a pull-DOWN on a SERCOM input (31.5.1, measured on this
+/// pad: see the header), and a pull-down selects this client; the
+/// host's end holds the line. Stated after every re-init, so a pull a
+/// GPIO phase left behind never survives into the muxed pad.
+void ss_unpulled() { SsPin::pull(PinPull::none); }
 
 /// DARK: mode 0, MSb first, MISO NOT driven. Everything returns here.
 bool go_dark() {
@@ -217,7 +226,7 @@ bool go_dark() {
                                          .lsb_first = false,
                                          .preload = false,
                                          .drive_output = false});
-    hold_ss_up();
+    ss_unpulled();
     decoder.reset();
     return ok;
 }
@@ -229,7 +238,7 @@ bool arm_answer() {
                                          .lsb_first = false,
                                          .preload = true,
                                          .drive_output = true});
-    hold_ss_up();
+    ss_unpulled();
     return ok;
 }
 
@@ -251,7 +260,7 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_output = true) {
                                          .lsb_first = c.dord != 0,
                                          .preload = preload,
                                          .drive_output = drive_output});
-    hold_ss_up();
+    ss_unpulled();
     return ok;
 }
 
@@ -266,8 +275,17 @@ void wait_ss_high(uint16_t ms) {
 /// Serve ONE answer window, with the one-ahead pump: buf[0] through
 /// PLOADEN into the shifter, buf[1] parked in DATA, and every received
 /// character loads the next one (a whole character early, so the
-/// three-SCK-cycle rule is already paid when its boundary comes). The
-/// host clocks spilink::answer_bytes dummies; the tail pads with zeros.
+/// three-SCK-cycle rule is already paid when its boundary comes); the
+/// tail pads with zeros.
+///
+/// THE WINDOW ENDS WHEN THE HOST CLOSES IT. A host may clock all of
+/// spilink::answer_bytes, or stop as soon as its decoder holds the frame
+/// and raise the select (the avrdx DUT does): a window still being served
+/// then would swallow the NEXT window's traffic - the data frame behind
+/// an ack, the exchange behind its command - as dummies. The edge is the
+/// hardware's: in a client, INTFLAG.TXC rises when SS is pulled high
+/// (32.8.6) and a DATA write clears it, so it is read before each load
+/// and after a character has come; the select PIN is never waited on.
 void serve(const uint8_t* buf, uint8_t n) {
     wait_ss_high(50);                     // the command window must close first
     if (!arm_answer()) {
@@ -281,8 +299,12 @@ void serve(const uint8_t* buf, uint8_t n) {
     const uint32_t t0 = Ticker::millis();
     while (seen < spilink::answer_bytes &&
            Ticker::millis() - t0 < spilink::serve_ms) {
-        if (!Client::poll()) continue;
+        if (!Client::poll()) {
+            if (seen != 0 && Raw::txc_flag()) break;   // the host closed the window
+            continue;
+        }
         ++seen;
+        if (Raw::txc_flag()) break;
         Client::write(idx < n ? buf[idx] : 0x00u);
         if (idx < n) ++idx;
     }
@@ -681,8 +703,8 @@ int main() {
     print(console, crlf, "spi_peer - SPI instrument client (SAM C21 board ", label8,
           ", xtal=", crystal_ok ? "up" : "DOWN", ", fw ", hex(firmware_version), ")",
           crlf);
-    print(console, "client SERCOM1 fn C: MOSI PA16, SCK PA17, SS PA18 (pulled up), "
-                   "MISO PA19; command mode = SPI mode 0, MSb first", crlf);
+    print(console, "client SERCOM1 fn C: MOSI PA16, SS PA17 (no pull), MISO PA18, "
+                   "SCK PA19; command mode = SPI mode 0, MSb first", crlf);
     print(console, "DARK by default: MISO is driven only for one answer window, after "
                    "a frame that checked out", crlf);
     (void)go_dark();

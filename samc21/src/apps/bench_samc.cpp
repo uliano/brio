@@ -8,10 +8,11 @@
 // node, its file header below). The console is the board's CH340 bridge on PB30 (TX)
 // / PB31 (RX) = SERCOM5 PAD[0]/PAD[1] under function D, 115200 8N1 - the
 // binding of console.cpp and test_samc_platform.cpp, with the latter's
-// TestBench frame and polled prompt loop. Letter e drives PA16 and PA17
-// (SERCOM1's MOSI and SCK), PA18 (its select) and PB23 (its D/C), and
-// leaves PA19 (MISO) floating, and letter u makes PA16 a UART's loop (its
-// TxD and its RxD): nothing is wired there and nothing should be. NO
+// TestBench frame and polled prompt loop. Letter e drives PA16 and PA19
+// (SERCOM1's MOSI and SCK), PA17 (its select) and PB23 (its D/C), and
+// leaves PA18 (MISO) floating, and letter u makes PA18 a UART's loop (its
+// TxD and its RxD): nothing may drive those four pads but this board - a
+// far board wired to them runs its dark console. NO
 // KERNEL AND NO AO: the letters are plain functions and the idle path is
 // called by hand, masked, as the kernel's loop calls it - what is measured
 // is the transports, the runtime, the DMA transmit engine and the idle
@@ -125,7 +126,7 @@
 //      runs here. wall = the second, irq = the ticks, isr = the tick
 //      handler's cycles, busy = the floor. n=0, wire=0.
 //   e  THE SPI HOST ABOVE THE WIRE (samc21/spi.hpp, docs/samc21/spi.md):
-//      SpiHost<1> on PA16 (MOSI), PA17 (SCK) and PA19 (MISO, FLOATING: the
+//      SpiHost<1> on PA16 (MOSI), PA19 (SCK) and PA18 (MISO, FLOATING: the
 //      time is the wire's, the bytes are not judged) - test_samc_spi's
 //      host pads - so what is measured is the polled loop and the byte
 //      pump, the host's two ways to move a run (it has no DMA slot,
@@ -149,15 +150,15 @@
 //                  read after every run as above;
 //        spi.req   THE FIXED COST OF A REQUEST, the price of a DCS command:
 //                  a polled request of 1, 3 and 16 bytes (cmd_len 1, len 0,
-//                  2 and 15, the D/C scripted) at 3 MHz, the select on PA18
+//                  2 and 15, the D/C scripted) at 3 MHz, the select on PA17
 //                  (SERCOM1's SS pad, which a software-select host leaves
 //                  an ordinary GPIO) and the D/C on PB23 (the board's LED):
 //                  two real pads, two real edges each. The line after prints
 //                  wall minus the wire's cycles (128 a byte at 3 MHz) - the
 //                  instrument's `interval` of letter r is inside it.
 //   u  THE UART ON A LOOP (samc21/sercom.hpp, docs/samc21/sercom.md):
-//      SERCOM1 with TxD and RxD on one pad, PAD[0] = PA16 under function
-//      C - 31.6.3.8's loop-back through the pad, nothing wired - at
+//      SERCOM1 with TxD and RxD on one pad, PAD[2] = PA18 under function
+//      C - 31.6.3.8's loop-back through the pad, nothing driving it - at
 //      115200, 1 Mbaud and 3 Mbaud (f_ref/16, the generator's top), in
 //      the Uart's two shapes: interrupt both ways, and the DMA transmit
 //      engine (samc21/dmac.hpp's DmaTxEngine, channel 0) beside the
@@ -624,17 +625,17 @@ void tt_tick() {
 // =============================================================================
 namespace ee {
 
-/// SERCOM1 as an SPI host on PA16 (MOSI), PA17 (SCK), PA19 (MISO, left
+/// SERCOM1 as an SPI host on PA16 (MOSI), PA19 (SCK), PA18 (MISO, left
 /// floating: the bytes are not judged here) - test_samc_spi's host pads.
 constexpr SpiPads spi_pads{
     .data_out = SercomPad::pad0,
-    .sck = SercomPad::pad1,
-    .ss = SercomPad::pad2,
-    .data_in = SercomPad::pad3,
+    .sck = SercomPad::pad3,
+    .ss = SercomPad::pad1,
+    .data_in = SercomPad::pad2,
     .data_out_pin = {'A', 16, PinFunction::c},
-    .sck_pin = {'A', 17, PinFunction::c},
-    .ss_pin = {'A', 18, PinFunction::c},
-    .data_in_pin = {'A', 19, PinFunction::c},
+    .sck_pin = {'A', 19, PinFunction::c},
+    .ss_pin = {'A', 17, PinFunction::c},
+    .data_in_pin = {'A', 18, PinFunction::c},
 };
 
 /// The host: the polled loop and the byte pump. It shares SERCOM1 with
@@ -694,7 +695,7 @@ BenchSample best_launch(Start start, Done finished, uint32_t& launch, bool& ok) 
 
 /// The two real pads of spi.req: the select on SERCOM1's SS pad, which a
 /// software-select host never claims, and the D/C on the board's LED.
-using CsPin = Pin<'A', 18>;
+using CsPin = Pin<'A', 17>;
 using DcPin = Pin<'B', 23>;
 
 constexpr uint8_t bauds[] = {1, 7};   // 12 MHz (f_ref/4) and 3 MHz (f_ref/16)
@@ -852,15 +853,16 @@ void te_spi_host() {
 namespace uu {
 
 /// SERCOM1 as a USART whose receiver listens on its own transmitter's pad:
-/// TxD and RxD both on PAD[0], PA16 under function C - the loop-back
-/// "through the pad" of 31.6.3.8, no wire. PA16 is letter e's MOSI, with
-/// nothing wired to it; the two transports below and letter e's SPI host
-/// share SERCOM1 and are never up at once (`live`).
+/// TxD and RxD both on PAD[2] (TXPO 0x1, RXPO 0x2), PA18 under function C
+/// - the loop-back "through the pad" of 31.6.3.8, no wire of its own.
+/// PA18 is letter e's MISO, the pad a far board's receiver meets (an
+/// input, never a driver); the two transports below and letter e's SPI
+/// host share SERCOM1 and are never up at once (`live`).
 constexpr UartPads loop_pads{
-    .tx = SercomPad::pad0,
-    .rx = SercomPad::pad0,
-    .tx_pin = {'A', 16, PinFunction::c},
-    .rx_pin = {'A', 16, PinFunction::c},
+    .tx = SercomPad::pad2,
+    .rx = SercomPad::pad2,
+    .tx_pin = {'A', 18, PinFunction::c},
+    .rx_pin = {'A', 18, PinFunction::c},
 };
 
 /// The two shapes: the plain transport (a 4096 ring, so a 4096-byte run is

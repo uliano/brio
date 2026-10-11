@@ -166,7 +166,7 @@ THE ENFORCEMENT, in three layers:
 
 What a release leaves the next owner of the channel, measured by
 `test_samc_uart` letter w with no wire (the Uart's transmit engine on
-SERCOM1's loop through the pad, PA16, at 1 Mbaud): the engine's trigger
+SERCOM1's loop through the pad, PA18, at 1 Mbaud): the engine's trigger
 standing - its last block over, the channel disabled by the block's end
 (25.6.2.6), DRE up behind it - then the transport released three ways,
 then the one channel bound again.

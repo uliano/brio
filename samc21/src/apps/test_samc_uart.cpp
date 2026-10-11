@@ -27,8 +27,9 @@
 // by brio stress - the only peer that can speak a frame format or a rate
 // the board is not using, and so the only way to reach the receiver's
 // error paths at all. The second wire needs no peer: SERCOM1 with its
-// receiver on its own transmitter's pad (PAD[0], PA16 under function C),
-// 31.6.3.8's loop-back "through the pad" - nothing is wired to PA16. z
+// receiver on its own transmitter's pad (PAD[2], PA18 under function C),
+// 31.6.3.8's loop-back "through the pad" - nothing may drive PA18 but
+// this board (a far board's receiver on it, an input, is fine). z
 // runs what the board decides alone: the baud arithmetic, the frame
 // encoding, the ring contract, the engine's facts and its claim, and on
 // the loop the wire's idle, the interrupt receiver's edge and its skip
@@ -1186,15 +1187,18 @@ void tp_burst() {
 // =============================================================================
 //
 // 31.6.3.8: RXPO and TXPO naming one pad put the receiver on the
-// transmitter's own signal, through the pad. PAD[0] of SERCOM1 is PA16
-// under function C; nothing is wired to it. Two transports over it, never
-// live at once (`loop_live`).
+// transmitter's own signal, through the pad. PAD[2] of SERCOM1 (TXPO 0x1,
+// RXPO 0x2) is PA18 under function C - of the two pads TxD can sit on
+// (31.8.1), the one whose wire, on a desk that links this SERCOM to an
+// AVR's USART4, meets that board's RxD - an input while the far board
+// runs its USART peer or its dark console, so the loop meets no second
+// driver there. Two transports over it, never live at once (`loop_live`).
 
 constexpr UartPads loop_pads{
-    .tx = SercomPad::pad0,
-    .rx = SercomPad::pad0,
-    .tx_pin = {'A', 16, PinFunction::c},
-    .rx_pin = {'A', 16, PinFunction::c},
+    .tx = SercomPad::pad2,
+    .rx = SercomPad::pad2,
+    .tx_pin = {'A', 18, PinFunction::c},
+    .rx_pin = {'A', 18, PinFunction::c},
 };
 
 using LPlain = Uart<1, loop_pads, 512, 512>;
@@ -1858,7 +1862,7 @@ void release_unreset(bool keep_enabled) {
     }
     GclkChannel::disconnect(Sc1::gclk_core_id());
     Sc1::bus_clock(false);
-    Pin<'A', 16>::release();
+    Pin<'A', 18>::release();
 }
 
 /// What a released SERCOM1 holds, read through its bus clock alone (APB

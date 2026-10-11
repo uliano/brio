@@ -24,10 +24,10 @@
 // of truth for the wire format on every architecture. Five wires, the
 // peer at 3.3 V (PC7 is not a 5 V pad):
 //
-//   PC5 (SCK)   ->  the peer's SCK   (a SAM C21: PA17)
+//   PC5 (SCK)   ->  the peer's SCK   (a SAM C21: PA19)
 //   PC6 (MOSI)  ->  the peer's MOSI  (PA16)
-//   PC7 (MISO)  <-  the peer's MISO  (PA19)
-//   PC3 (CS)    ->  the peer's SS    (PA18, its own pull-up holds it high)
+//   PC7 (MISO)  <-  the peer's MISO  (PA18)
+//   PC3 (CS)    ->  the peer's SS    (PA17; PC3 drives it, high when idle)
 //   GND         <-> GND
 //
 // Every letter PROBES the jumper first (PC6 driven both ways as a

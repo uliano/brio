@@ -63,8 +63,8 @@
  *
  * so on ONE fixed four-wire harness the two roles are two DIFFERENT
  * DOPO rows, not one row with the directions flipped. The bench proves
- * exactly that: the same four wires carry a host on row 0x0 and a
- * client on row 0x2.
+ * exactly that: the same four wires carry a host on row 0x3 and a
+ * client on row 0x1.
  *
  * Facts that shape the code (DS60001479M 32.5.x, 32.6.x, 32.8.x, and
  * errata DS80000740S, silicon rev F on the bench chip):

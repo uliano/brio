@@ -34,6 +34,20 @@
 // after the bound plus the quiet interval, and the DUT's client retries
 // its command before failing a test.
 //
+// WHAT A PEER CANNOT DO, IT REFUSES. A peer whose silicon cannot serve
+// an action's Cfg (or the action itself) still acks the frame, sets
+// `report_cfg_failed` in that action's Report, and is back in command
+// mode at once. A refusal is a capability the peer has not got, never a
+// measurement: the DUT that reads it in the report SKIPS the leg with the
+// reason and judges nothing of it (test_avr_serial's peer_report() and
+// verdict()). The version's high byte (Ident) lets a DUT EXPECT a
+// capability; the refusal is what decides it.
+//
+// TIME IN THE PAYLOAD. Every field that carries "cycles" counts TICKS OF
+// A 24 MHz CLOCK, whatever the peer's core runs at: on the avrdx peer
+// they are its CPU cycles on the crystal, on a peer whose CPU runs
+// another clock they are counts of a timer on its 24 MHz crystal.
+//
 // THE UNIFORM ACTION PAYLOAD
 //
 // Every action command carries the same 24-byte payload: a `Cfg` (what
@@ -298,9 +312,9 @@ inline constexpr uint8_t pattern_prbs = 2;       ///< an 8-bit LFSR seeded with 
 ///                               1..8 = data, 9 = stop, -1 = none), pct =
 ///                               by how much, aux16 = bit times of break
 ///                               ahead of the frames (0 = none)
-///   glitch                      count = pulses, aux16 = pulse width in CPU
-///                               cycles, ms = deadline, aux8 = gap in
-///                               microseconds
+///   glitch                      count = pulses, aux16 = pulse width in
+///                               24 MHz ticks (the header's TIME), ms =
+///                               deadline, aux8 = gap in microseconds
 ///   drive_rxd                   count = frames, value = the byte
 ///   collide                     value = the byte, aux16 = microseconds to
 ///                               wait after the trigger frame
@@ -353,11 +367,25 @@ inline constexpr uint8_t ident_size = 12;
 inline constexpr uint8_t ident_sanity = 0x5B;   ///< "this firmware is usart_peer"
 
 struct Ident {
-    char label[8] = {};      ///< the peer's USERROW board label, NUL padded
+    char label[8] = {};      ///< the peer's board label, NUL padded
     uint8_t xtal = 0;        ///< did the peer's 24 MHz crystal start?
     uint8_t sanity = 0;
+    /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
+    /// IMPLEMENTATION and is allocated here, once, for every
+    /// architecture that speaks this protocol - as spi_link.hpp
+    /// allocates its own: 0x01 the avrdx peer, 0x02 the samc21 peer. The
+    /// low byte is that peer's own revision. A DUT may use the high byte
+    /// to expect a capability, never to decide correctness: what a peer
+    /// can do it answers with, and what it cannot it refuses.
     uint16_t version = 0;
 };
+
+/// The peer implementations Ident::version's high byte names.
+inline constexpr uint8_t peer_avrdx = 0x01;
+inline constexpr uint8_t peer_samc21 = 0x02;
+
+/// Which implementation answered: the version's high byte.
+constexpr uint8_t peer_kind(uint16_t version) { return static_cast<uint8_t>(version >> 8); }
 
 constexpr void put_ident(uint8_t* p, const Ident& d) {
     for (uint8_t i = 0; i < 8; ++i) p[i] = static_cast<uint8_t>(d.label[i]);
@@ -390,7 +418,10 @@ struct Report {
     uint8_t perr = 0;
     uint8_t ovf = 0;
     uint8_t flags = 0;
-    uint16_t aux16 = 0;      ///< per-op extra (e.g. the BAUD the peer used)
+    /// Per-op extra: the BAUD register the peer used (brk, autobaud_tx),
+    /// a bit's nominal length in 24 MHz ticks (bitbang), the pulse width
+    /// it was asked for (glitch), the byte it collided with (collide).
+    uint16_t aux16 = 0;
     uint8_t op = 0;          ///< which action this report belongs to
     uint8_t ms = 0;          ///< how long it took, capped at 255
 };

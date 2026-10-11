@@ -77,8 +77,10 @@ whatever drives it.
 (31.6.3.8: RXPO and TXPO naming one pad, "the loop-back is through the
 pad, so the signal is also available externally"). `UartPads` admits
 the pair when it names one pin for both directions (`uart_pads_loop_back`);
-the suite and the bench run SERCOM1 that way on PA16, which nothing is
-wired to, at every rate the generator makes.
+the suite and the bench run SERCOM1 that way on PAD[2], PA18 (TXPO 0x1,
+RXPO 0x2), at every rate the generator makes - a pad nothing drives but
+this board: on a desk whose four SERCOM1 wires reach an AVR128DB48's
+USART4, PA18 meets that board's RxD, an input.
 
 **The receive side, item by item** - what the chapter offers for
 taking a burst, and what this driver does with each:

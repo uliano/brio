@@ -33,10 +33,10 @@
 // itself in its `ident` (fw 0x01xx = the AVR, 0x02xx = the SAM C21,
 // 0x03xx = another STM32G0), and the desk says which one is fitted -
 //
-//   SCK   PB3  AF0  ->  a SAM C21's PA17 SERCOM1 PAD[1],  or PB3  AF0
+//   SCK   PB3  AF0  ->  a SAM C21's PA19 SERCOM1 PAD[3],  or PB3  AF0
 //   MOSI  PB5  AF0  ->  a SAM C21's PA16 SERCOM1 PAD[0],  or PB5  AF0
-//   MISO  PB4  AF0  <-  a SAM C21's PA19 SERCOM1 PAD[3],  or PB4  AF0
-//   NSS   PA15 GPIO ->  a SAM C21's PA18 SERCOM1 PAD[2],  or PA15 AF0
+//   MISO  PB4  AF0  <-  a SAM C21's PA18 SERCOM1 PAD[2],  or PB4  AF0
+//   NSS   PA15 GPIO ->  a SAM C21's PA17 SERCOM1 PAD[1],  or PA15 AF0
 //
 // - an stm32g0 peer answers on the SAME PIN NAMES this board hosts on
 // (SPI's own MOSI/MISO naming carries the direction, so nothing is

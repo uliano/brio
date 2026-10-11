@@ -153,9 +153,27 @@ const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT20
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3).
 `test_avr_spi`: `z` = the single board, 184 verdicts; `y` = the same
 four pins against a second AVR128DB48 running `spi_peer` as a real
-client, 92 verdicts. The desk wires PORTE straight through (A.PEn -
-B.PEn), so MOSI, MISO, SCK and SS are one four-wire bus between the two
-boards.
+client, 92 verdicts. The desk wires PORTE straight through (each PEn to
+the peer's PEn), so MOSI, MISO, SCK and SS are one four-wire bus between
+the two boards.
+
+The peer may also be a SAM C21 running its own `spi_peer` (PE0 to PA16,
+PE1 to PA18, PE2 to PA19, PE3 to PA17), and `y` asks which: the ident's
+version, its high byte (`spi_link.hpp`). Against it the verdicts that
+are facts about an AVR CLIENT are printed, not judged - `l` MEASURES
+which alignment each regime delivers (that peer maps the regimes, the
+table in `spi_link.hpp`), `m` judges the rates up to CLK_PER/16 and
+prints the rest, `p` judges that every report came and every burst
+arrived - and `r` is SKIPPED (Host SPI frames no select; only the avrdx
+peer's client selects itself). Those AVR-client facts are judged by
+`test_samc_spi` letter h, where the AVR is the peer and the SAM the
+host. Measured: `z` 184 of 184 with that peer attached, `y` 70 of 70 -
+`l` read a dummy leading every normal and buffer combination of that
+peer and none of its buffer+BUFWR, `m` exact through CLK_PER/4 and its
+answers broken at CLK_PER/2 ([../samc21/spi.md](../samc21/spi.md) holds
+that client's facts). An AVR host that watches its SS (SSD = 0) pulls
+the line up itself, which is what holds it against that peer: its SS
+pad can carry no pull-up.
 
 **The bit rates are exact.** All seven divisions measured through the
 SPI's own SCK event into a TCB frequency meter (period between rising
