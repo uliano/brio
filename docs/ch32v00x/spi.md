@@ -343,16 +343,15 @@ the CH32V003F4P6 it is
 seven group images (letters a, b and e; c and d; f; n and o; p; q; r
 and x - the part's 15 KB and 2 KB decide the cut, design/overview.md,
 and the kernel letter against the peer is alone because its stack
-wants the room). Both instruments have been on both boards, with the
-same numbers on each. The jumper is PROBED AT EVERY LETTER, never
+wants the room). The loop has been on both boards, with the same
+numbers on each; this family has NO SPI PARTNER on the desk, so the
+peer letters fail for the peer the desk has not got (the gap list). The
+jumper is PROBED AT EVERY LETTER, never
 trusted from the boot (the desk changes hands between letters: the
 wires moved to the peer under a running image once, and a cached
 "present" sent the loop letters against the peer); the probe pulls
 MISO AGAINST the level it drives on MOSI, because a floating PC7
-echoes PC6 with no wire (measured on the CH32V003F4P6). The peer
-findings below are against a SAM C21 at 3.3 V, and a missing ground
-wire between the boards shows as an intermittent link with the peer
-nak-ing corrupted frames (measured), not as silence.
+echoes PC6 with no wire (measured on the CH32V003F4P6).
 
 - **The reset values are table 16-2's** (STATR 0x0002 with TXE up,
   CRCR 0x0007), and a control word lands as spelled.
@@ -414,30 +413,6 @@ nak-ing corrupted frames (measured), not as silence.
   posted into a four-deep queue, one rejected at once and every
   request answered exactly once; an idle bus votes for the sleep and
   a busy one against it.
-- **The peer's command channel** at HCLK/256 = 187 kHz: the ident
-  names spi_peer on another architecture, ten of ten pings answered,
-  one frame per select window.
-- **The matrix against the peer**: all four transfer modes byte-exact
-  in both directions, LSb first with both ends agreeing byte-exact
-  too, and a bit-order mismatch an EXACT two-way bit reversal; 0 of 40
-  bursts slipped over ten rounds of each mode, on either part.
-- **The BR ladder against a peer serving on DMA** holds to HCLK/4 =
-  12 MHz exact both ways and breaks at HCLK/2 = 24 MHz - where the peer still hears
-  every character exact, so the boundary is its answer reload and not
-  the wire.
-- **The kernel against the peer**: four transactions queued from one
-  dispatch in ONE select window come back in order, every one spi_ok,
-  the 32 bytes read by the peer board byte-exact.
-- **The roles invert**: this board as a CLIENT on the pads it hosts
-  with, SOFTWARE-SELECTED (the NSS pad of the default column is PC1,
-  the I2C's SDA on a desk carrying both buses), reads twelve frames
-  the foreign host clocks at 1.5 MHz byte-exact, and the host reads
-  the answer stream byte-exact from the first frame. THE SELECT EDGE
-  IS THE START EVEN WITHOUT A SELECT PAD (measured): a client enabled
-  during the peer's lead-in counted the peer's own pad reconfiguration
-  as a clock edge and read every frame one bit late (0x16 for 0x2C),
-  so the shifter is enabled only once the peer's SS reads low on PC3,
-  inside the 20 us it leaves before the first byte.
 - **The host above the wire on the CH32V003F4P6** (`bench_ch32` letters
   s and e, MISO floating, the loop idling through the platform's
   `idle()`): the engined write at the wire - 31.3 cycles a byte at
@@ -504,12 +479,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The ladder against the SAM C21 `spi_peer` as it is: that peer serves
-  on its software pump alone (docs/samc21/dmac.md), so letter p meets
-  the pump's reload boundary and not the 12 MHz above, measured against
-  a DMA serve; the verdict's floor (750 kHz) sits under it. Letter p on
-  either part against that peer would measure where it now stops.
-
 - The pump's OVR test after the DATAR read on the CH32V003F4P6: the
   code is the CH32V006's, and `spi.window`, which measures it there, is
   not in the 16 KB part's letter-e image (no room); a scratch image
@@ -523,10 +492,12 @@ Implemented but not bench-verified, each with what would measure it:
   `test_ch32_spi` letter pumps faster than HCLK/8; HCLK/2 at either
   width is inside the same window by the count. What would measure it:
   a loop letter pumping at HCLK/2 and HCLK/4, the frames judged.
-- The peer letters o, p and q on either part against `spi_peer`
-  byte-exact through the hosts as they are: the peer is off both
-  boards' desks, and it shares the pads with the jumper the loop
-  letters run on.
+- The peer letters n..r and the slip probe x, on either part: this
+  family has no SPI partner on the desk, so the command channel, the
+  matrix, the ladder, the kernel over a second chip and the roles
+  inverted (the client enabled only once the host's select reads low on
+  PC3) are built and unmeasured; a pairing with a board running
+  `spi_peer` on the five wires measures them.
 - The CH32V003's default hold-off against its Sleep: the pump's two
   frames in flight overrun when the image idles between frames (the
   finding above), and nothing in the host or the platform keeps them

@@ -510,11 +510,17 @@ Implemented, not bench-verified:
   the family fixture; what would measure them is the suite run on an
   STM32F429 or STM32F446, whose pad map for the five pads it drives is the
   one thing that has to be written first.
-- **The chapter on STM32F429 and STM32F446 silicon.** The driver compiles
-  on all twenty-three headers and the suite builds for the F446; every
-  number above is the STM32F411's. On a part whose APB1 is divided by four
-  the doubling rule and TIMPRE both do something the F411 cannot show -
-  90 MHz timers becoming 180 - and that is the first thing to measure there.
+- **The chapter on STM32F429 silicon, and the STM32F446's numbers.** The
+  driver compiles on all twenty-three headers; every number above is the
+  STM32F411's. On the Nucleo-F446RE the suite scores 67 of 68: the
+  doubling rule and TIMPRE measured on a part whose APB1 is divided by
+  four (an APB1 timer at 179 999 614 Hz with TIMPRE set, the header's
+  180 000 000), and ONE FAILURE, letter `e`'s compare at the period - PA6
+  read high 98 817 to 98 972 times of 100 000 in four runs where the
+  verdict wants more than 99 000 and the F411 read 99 441, the pad
+  carrying nothing. Its cause is not measured: what the pad's input
+  sees at 10 kHz against the sampling loop's own rate on this core
+  would split it.
 - **Centre-aligned counting and the three CMS modes**, down-counting, and
   the alignment's effect on when CCyIF is raised: written, refused on the
   instances that have no CMS, and not staged - a centre-aligned PWM's

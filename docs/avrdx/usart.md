@@ -288,7 +288,14 @@ skips itself on the crossed pair). The peer names itself in its ident -
 the version's high byte names the implementation (`usart_link.hpp`), and
 `j` judges only that the label names a board other than this one; a leg
 the peer REFUSES (`report_cfg_failed`, a capability its silicon has not
-got) is printed SKIPPED and judged nothing.
+got) is printed SKIPPED and judged nothing. The peer is DARK until
+addressed (`usart_link.hpp`, the dark discipline): while it searches for
+the wiring its transmitter is released and neither PE0 nor PE1 is
+pulled, and it naks a bad checksum only within `engage_ms` of a frame
+that checked out. Its Report carries the `span` - 24 MHz ticks from the
+first to the last character it received in `sink` and `echo`, read on
+TCB0 + TCB1 cascaded at CLK_PER, one event strobe a character - and its
+`blast` repeats with the pattern running on.
 
 ### The transport's cost and its two contracts
 
@@ -734,6 +741,12 @@ bench-verified:
   and judged nothing): the avrdx `usart_peer` refuses no configuration
   the suite asks of it, so no run has taken the path; a peer of another
   silicon that cannot serve a leg's configuration would;
+- **the peer's dark discipline, its span and its repeated blast**: the
+  avrdx `usart_peer` releases its pads while searching, naks only while
+  engaged, stamps every received character and repeats a blast, and the
+  suite reads the 16-byte Report and prints the span in letter `t` -
+  compiled for every package, the two-board half not run since: its
+  peer on this desk is a SAM C21, whose `usart_peer` is not written yet;
 - **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4
   default were driven, on 48-pin silicon only. USART2 is the bench

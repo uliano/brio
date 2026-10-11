@@ -3004,7 +3004,10 @@ void tn_sleep_story() {
 // USART1 IN SINGLE-WIRE HALF DUPLEX IS ITS OWN LOOP: the instance hears
 // every byte it sends (33.5.15), so a stream its transmit engine sends
 // comes back through its receive engine with no wire - PA9, the single
-// wire's one pad, open drain under the pull-up, nothing soldered to it.
+// wire's one pad, open drain under the pull-up. On the paired desk PA9
+// also carries the link wire to the far board's receive pad, held hi-Z
+// by that board's dark console, and the pull-up's rise into that load is
+// what bounds the loop's rate (docs/stm32g0/dma.md).
 // The receive engine runs its CIRCULAR shape over the transport's 64-byte
 // ring, and the letter judges that shape through the transport's own
 // verbs: what the channel holds, a stream across many laps, a burst that

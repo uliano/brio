@@ -43,10 +43,31 @@
 // verdict()). The version's high byte (Ident) lets a DUT EXPECT a
 // capability; the refusal is what decides it.
 //
-// TIME IN THE PAYLOAD. Every field that carries "cycles" counts TICKS OF
-// A 24 MHz CLOCK, whatever the peer's core runs at: on the avrdx peer
-// they are its CPU cycles on the crystal, on a peer whose CPU runs
-// another clock they are counts of a timer on its 24 MHz crystal.
+// TIME IN THE PAYLOAD. Every field that carries "cycles" or "ticks"
+// counts TICKS OF A 24 MHz CLOCK, whatever the peer's core runs at - the
+// glitch width, the bitbang bit, the Report's span. Each peer's own header
+// states how its time base becomes these ticks (the avrdx peer's are its
+// CPU cycles on the 24 MHz crystal, and its span two cascaded TCBs at
+// CLK_PER; a peer on another clock converts its timer's counts).
+//
+// THE DARK DISCIPLINE, every peer's obligation. The link's pads are also
+// the pads the DUT's SINGLE-board half measures - its loops, its pull
+// walks, its bit-bangers - so a peer that is not being addressed must
+// look like nothing on the wire:
+//
+//   - while it is SEARCHING (no frame has checked out, or the channel has
+//     been quiet for rediscover_ms) its transmitter is released, its TXD
+//     pad an input, and it holds NO PULL on any link pad: the far board's
+//     single-board letters walk those wires with their own pulls. A
+//     floating receiver may invent bytes; the magic, the length bound, the
+//     checksum and the quiet-line reset absorb them;
+//   - a pull-up on its receive pad, or its transmitter idling high, only
+//     once a frame has PROVEN the wiring;
+//   - a frame whose checksum fails is nak'ed only while the peer is
+//     ENGAGED - within engage_ms of the last frame that checked out or of
+//     the end of the action it commanded. A peer that has never been
+//     addressed answers nothing, whatever noise decodes, so the far
+//     board's own loop traffic on a shared wire is never answered.
 //
 // THE UNIFORM ACTION PAYLOAD
 //
@@ -77,7 +98,11 @@ inline constexpr uint32_t command_baud = 115'200;
 /// desk (the peer alternates its command-mode configuration until a
 /// frame arrives; the DUT pings in one topology, then the other), so a
 /// desk that is not wired as expected reports a topology instead of
-/// looking like a dead protocol.
+/// looking like a dead protocol. That is the two avrdx apps' arrangement
+/// (the AVR's own LBME one-wire bus); a peer whose desk fixes the
+/// crossed pair serves full duplex alone and goes onto a shared wire only
+/// inside onewire and collide - a peer that guessed "shared" there would
+/// drive the wrong wire.
 ///
 /// On a shared line the discipline is: LBME on both ends, push-pull
 /// transmitters, TXEN enabled only while transmitting, a PORT pull-up
@@ -102,6 +127,15 @@ inline constexpr uint16_t rendezvous_ms = 400;
 /// that a human moving three wires does not have to think about it.
 inline constexpr uint16_t rediscover_ms = 3000;
 
+/// How long a frame that checked out (or the end of the action it
+/// commanded) keeps the peer ENGAGED, and so willing to nak a frame that
+/// does not (the dark discipline above). Shorter than rediscover_ms, so a
+/// peer that naks always still believes its wiring; long enough for a
+/// command/answer/action round trip of the DUT's client.
+inline constexpr uint16_t engage_ms = 2000;
+static_assert(engage_ms < rediscover_ms,
+              "an engaged peer must still believe the wiring it would answer on");
+
 /// The peer reconfigures right after its ack has left the line; the DUT
 /// waits this long before doing the same, so the peer is always ready
 /// first.
@@ -122,7 +156,7 @@ enum class Op : uint8_t {
     bitbang = 0x0B,      ///< a cycle-counted frame on TXD, one cell stretched
     glitch = 0x0C,       ///< sub-bit low pulses on an idle line
     drive_rxd = 0x0D,    ///< bit-bang a frame on the peer's OWN RXD pin
-    onewire = 0x0E,      ///< join the shared line half-duplex until the bound
+    onewire = 0x0E,      ///< join the desk's shared wire half-duplex until the bound
     collide = 0x0F,      ///< transmit into the DUT's frame, on purpose
     report = 0x10,       ///< ack + Report of the last action
     standby = 0x11,      ///< let go of the line entirely for `ms`
@@ -304,6 +338,16 @@ inline constexpr uint8_t pattern_prbs = 2;       ///< an 8-bit LFSR seeded with 
 ///   send/blast                  count = frames to generate, value/pattern;
 ///                               for `send`, aux16 = extra lead-in in
 ///                               milliseconds before the first frame
+///   blast (repeated)            aux16 = repeats of the `count` frames (0
+///                               and 1 both mean once), aux8 = the gap
+///                               between two repeats in 100 us units; the
+///                               pattern RUNS ON across repeats (frame i of
+///                               repeat k is pattern frame k * count + i),
+///                               so a lost burst is a jump in the sequence;
+///                               a repeated blast also ends at the ms
+///                               deadline, checked between repeats, and
+///                               the Report counts every frame generated
+///                               (modulo 2^16)
 ///   brk                         count = bit times to hold TXD low
 ///   autobaud_tx                 value = the sync character, aux8 = payload
 ///                               frames, aux16 = break bit times
@@ -318,6 +362,11 @@ inline constexpr uint8_t pattern_prbs = 2;       ///< an 8-bit LFSR seeded with 
 ///   drive_rxd                   count = frames, value = the byte
 ///   collide                     value = the byte, aux16 = microseconds to
 ///                               wait after the trigger frame
+///   onewire/collide             the peer joins THE DESK'S SHARED WIRE on
+///                               whichever of its pads reaches it (a peer
+///                               with a pin swap puts its single wire on
+///                               the pad that meets the DUT's), open drain,
+///                               taking the wire only to reply
 struct Params {
     Cfg cfg{};
     uint16_t count = 0;
@@ -368,12 +417,16 @@ inline constexpr uint8_t ident_sanity = 0x5B;   ///< "this firmware is usart_pee
 
 struct Ident {
     char label[8] = {};      ///< the peer's board label, NUL padded
-    uint8_t xtal = 0;        ///< did the peer's 24 MHz crystal start?
+    /// 1 when the peer's TIME BASE is crystal-referenced (its own crystal
+    /// started, or its core clock was measured against one at boot), 0
+    /// when its rates come from an RC oscillator's nominal value.
+    uint8_t xtal = 0;
     uint8_t sanity = 0;
     /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
     /// IMPLEMENTATION and is allocated here, once, for every
     /// architecture that speaks this protocol - as spi_link.hpp
-    /// allocates its own: 0x01 the avrdx peer, 0x02 the samc21 peer. The
+    /// allocates its own: 0x01 the avrdx peer, 0x02 the samc21 peer, 0x03
+    /// the stm32g0 peer, 0x04 the stm32f4 peer. The
     /// low byte is that peer's own revision. A DUT may use the high byte
     /// to expect a capability, never to decide correctness: what a peer
     /// can do it answers with, and what it cannot it refuses.
@@ -383,6 +436,8 @@ struct Ident {
 /// The peer implementations Ident::version's high byte names.
 inline constexpr uint8_t peer_avrdx = 0x01;
 inline constexpr uint8_t peer_samc21 = 0x02;
+inline constexpr uint8_t peer_stm32g0 = 0x03;
+inline constexpr uint8_t peer_stm32f4 = 0x04;
 
 /// Which implementation answered: the version's high byte.
 constexpr uint8_t peer_kind(uint16_t version) { return static_cast<uint8_t>(version >> 8); }
@@ -403,7 +458,11 @@ constexpr Ident get_ident(const uint8_t* p) {
     return d;
 }
 
-inline constexpr uint8_t report_size = 12;
+/// The Report's length on the wire. A DUT and a peer built from two
+/// different generations of this header disagree on it, and the DUT's
+/// report query then fails loudly (its client accepts this length alone)
+/// - peers and DUTs are flashed from one tree.
+inline constexpr uint8_t report_size = 16;
 
 inline constexpr uint8_t report_timed_out = 0x01;   ///< the deadline ended it
 inline constexpr uint8_t report_mismatch = 0x02;    ///< a frame was not what was expected
@@ -424,6 +483,12 @@ struct Report {
     uint16_t aux16 = 0;
     uint8_t op = 0;          ///< which action this report belongs to
     uint8_t ms = 0;          ///< how long it took, capped at 255
+    /// sink and echo: 24 MHz ticks from the FIRST to the LAST character
+    /// the peer received (each stamped when the peer saw it complete), so
+    /// (count - 1) frame times of the DUT's transmitter as a FOREIGN
+    /// receiver measured them. 0 = not measured (another op, fewer than
+    /// two characters, or a peer that cannot time them).
+    uint32_t span = 0;
 };
 
 constexpr void put_report(uint8_t* p, const Report& r) {
@@ -436,6 +501,7 @@ constexpr void put_report(uint8_t* p, const Report& r) {
     put16(p + 8, r.aux16);
     p[10] = r.op;
     p[11] = r.ms;
+    put32(p + 12, r.span);
 }
 
 constexpr Report get_report(const uint8_t* p) {
@@ -449,6 +515,7 @@ constexpr Report get_report(const uint8_t* p) {
     r.aux16 = get16(p + 8);
     r.op = p[10];
     r.ms = p[11];
+    r.span = get32(p + 12);
     return r;
 }
 
@@ -458,6 +525,27 @@ constexpr uint8_t prbs_next(uint8_t v) {
     const uint8_t bit = static_cast<uint8_t>(((v >> 7) ^ (v >> 5) ^ (v >> 4) ^ (v >> 3)) & 1u);
     return static_cast<uint8_t>((v << 1) | bit);
 }
+
+/// The `pattern` generator as a running stream: next() is frame 0, 1,
+/// 2, ... of pattern_value() at a constant cost a frame, which is what a
+/// blast that has to be gapless needs (pattern_value() walks the LFSR
+/// from the seed every call).
+class Stream {
+public:
+    constexpr Stream(uint8_t pattern, uint8_t seed)
+        : pattern_(pattern), v_(pattern == pattern_prbs ? (seed ? seed : 0xACu) : seed) {}
+
+    constexpr uint8_t next() {
+        const uint8_t out = v_;
+        if (pattern_ == pattern_prbs) v_ = prbs_next(v_);
+        else if (pattern_ != pattern_fixed) v_ = static_cast<uint8_t>(v_ + 1);
+        return out;
+    }
+
+private:
+    uint8_t pattern_;
+    uint8_t v_;
+};
 
 /// The value the `pattern` generator produces for frame `i`, masked to
 /// the character size by the caller.
@@ -470,5 +558,18 @@ constexpr uint8_t pattern_value(uint8_t pattern, uint8_t seed, uint16_t i) {
     }
     return static_cast<uint8_t>(seed + i);
 }
+
+/// The stream and the indexed form are one sequence: checked here, at
+/// compile time, for every pattern over more than one LFSR period.
+constexpr bool stream_is_pattern_value() {
+    for (uint8_t pattern = 0; pattern <= pattern_prbs; ++pattern) {
+        Stream st(pattern, 0x5Du);
+        for (uint16_t i = 0; i < 300; ++i) {
+            if (st.next() != pattern_value(pattern, 0x5Du, i)) return false;
+        }
+    }
+    return true;
+}
+static_assert(stream_is_pattern_value(), "Stream must produce pattern_value's sequence");
 
 }  // namespace link

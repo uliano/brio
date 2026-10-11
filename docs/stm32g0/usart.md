@@ -402,6 +402,11 @@ receiver alone; `isr` includes the meter's 118 cycles an entry):
 | the same at 2 Mbaud | 52 | 442 | 90 |
 | the receive engine (the DMA vector, a block of the transmitter's included) | 3 | 275 | 3.2 |
 
+The 1 and 2 Mbaud rows, and the edge's latency at 1 Mbaud below, are the
+loop's with PA9 unloaded: on the paired desk the open-drain loop carries
+nothing above 460800 (the ceiling above), and the 115200 rows read the
+same there (64 entries of 386 cycles, the edge 1.06 frames).
+
 The paced drain is 23 instructions a character with no call in a
 console's vector - the ISR load and its test, the RDR load and the
 ring's push inline; the error flags are tested on the ISR word in hand
@@ -603,9 +608,13 @@ line rate, twelve kernel rates from /1 to /256. **The generator's floor
 is USARTDIV 16 in both oversamplings**: 4 Mbaud at OVER8 = 0 and 8 Mbaud
 at OVER8 = 1 from a 64 MHz kernel both give BRR 16, and 5 Mbaud / 9
 Mbaud are refused by the constexpr arithmetic. **The open-drain loop is
-byte-exact to 2 Mbaud** (16 of 16 at 115200, 230400, 460800, 921600, 1 M
-and 2 M; 0 of 16 at 4 M) and what fails above it is the rise time of the
-pad's own 40 k pull-up, not the generator.
+byte-exact to 460800 on the paired desk** (16 of 16 at 115200, 230400
+and 460800; 0 of 16 at 921600, 1 M, 2 M and 4 M), and what fails above
+it is the rise time of the pad's own 40 k pull-up into the LINK WIRE PA9
+carries to the far board's receive pad - some 15 cm of jumper and a
+second chip's input, held hi-Z by that board's dark console. With PA9
+unloaded the same loop was byte-exact to 2 Mbaud. The generator is not
+in it: every rung runs at its rate on the wire (below).
 
 ### The rate on the wire, timed
 
@@ -705,7 +714,10 @@ public verbs and one option between them.
   engine (where each error was one entry of the vector).
 - **The engine's edges**: 17 bytes told by IDLE 5799 cycles after the
   last stop bit; 200 bytes at 1 Mbaud into a 64-byte ring, read on the
-  vectors' edges alone - 7 edges, 3 laps, no overrun.
+  vectors' edges alone - 7 edges, 3 laps, no overrun - with PA9
+  unloaded: on the paired desk the 1 Mbaud stream does not survive the
+  loop (0 back, the open-drain ceiling above), and that verdict fails
+  there.
 - **`tx_idle()` on the pad**: EXTI line 9 timing PA9's start bits (eight
   frames of 0xFF at 9600, one falling edge each), `tx_idle()` turned
   true 8 cycles after the last stop bit's end on the interrupt
@@ -1087,6 +1099,13 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
+- The single-wire loop's legs above 460800 ON THE PAIRED DESK: the
+  1 Mbaud stream across a 64-byte ring (letter `p`) and `bench_stm32`
+  `u`'s receive lines at 1 and 2 Mbaud were measured with PA9 unloaded,
+  and the link wire's load now holds the open-drain loop below them
+  (above). What would measure them here: a loop whose transmitter
+  drives the pad, or the ring fed by the far board's `usart_peer` at
+  1..7.5 Mbaud (born with the serial suites' two-board half).
 - `test_stm32_serial` as the G031K8's two group images (letters a to j,
   and k to y): the suite outgrew the part's 64 KB whole, and the scores
   under "On the STM32G031K8" are the one image's; one run of each image

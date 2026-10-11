@@ -446,9 +446,13 @@ crystal):
   scale with HSIDIV still 3 - which is what the dynamic clock's write
   after every switch onto the PLL prevents (above).
 - **`delay_us` at every rung**, on the wall: 20/100/500/900 us served
-  at 20..900 (+0..4) at 64 MHz, +4..8 at 16 MHz, +32..40 at 2 MHz - the
-  poll's own cost, 32 times the 64 MHz one - never early, the
-  millisecond cap refused at every rate.
+  at 20..900 (+0..4) at 64 MHz, +4..8 at 16 MHz, +36..40 at 2 MHz from
+  100 us up - the poll's own cost, 32 times the 64 MHz one - never
+  early, the millisecond cap refused at every rate. AND AT 2 MHz A
+  20 us WAIT TAKES 136..140 us, the same as a 100 us one, in four runs:
+  a minimum of 136 us, some 270 core cycles, which the letter's bound
+  (+60 us at 2 MHz) refuses - its second verdict fails
+  (the gap list).
 
 ## On the STM32G071RB
 
@@ -550,6 +554,10 @@ Driver gaps:
   (5.2.16, [tim.md](tim.md)), is what the timer and RTC suites weigh
   the 32 kHz roots with - but nothing writes the trim; born with its
   first user.
+
+Findings left open: `delay_us`'s minimum at 2 MHz (above) - some 270
+cycles where the bound allows 160 for a 20 us wait - is not located: the listing of `delay_us` at the 2 MHz rung, its per-rate
+table's read and the ticker's composed count, would place it.
 
 Implemented, not bench-verified: `FlashAccel`'s instruction-cache
 setter and its flush (the cache is on from reset, and no suite turns it

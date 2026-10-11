@@ -7,9 +7,14 @@ the errata's USART items - ES0206 2.11.x, ES0298 2.13.x, ES0287 2.10.x:
 "idle frame is not detected if the receiver clock speed is deviated",
 "break frame is transmitted regardless of CTS", "guard time not
 respected when data are sent on TXE events", "RTS is active while RE
-or UE = 0", and their siblings - none of which shapes the transport
-(the console has no idle detection, no break, no smartcard and no
-flow control), each of which the mode's future user meets. Driver:
+or UE = 0", and their siblings. Two reach the transport: the first,
+because the receive engine's burst edge IS the line's IDLE (below) and
+the erratum has no workaround, and on the F446 ES0298 2.13.2 (PE
+cleared by a write of DR in full duplex), because the task counts
+parity errors while it may be transmitting - both in the gap list,
+measurable only from a foreign sender. The rest shape nothing in it (no
+break, no smartcard and no flow control in the transport), each of
+which the mode's future user meets. Driver:
 `stm32f4/usart.hpp` (`Usart<n>` the resource, `Uart<n, pins, rx_size,
 tx_size, TxEngine, RxEngine, opts>` the task, the vocabulary
 `UartFormat`, `UartOptions`, `UartPins`, `MuteConfig`, `LinConfig`,
@@ -438,6 +443,20 @@ Driver gaps:
 - The receive errors' COUNTS under the engine are bounded, not exact
   (above): exact counts would need the CPU's read of DR, which the
   engine's rule forbids - declined.
+
+Implemented, not bench-verified, for the transport:
+- The receive engine's burst edge under a FASTER sender: the edge is
+  IDLE, and ES0298 2.13.1 (and its ES0206/ES0287 siblings) says an idle
+  frame is not detected when the receiver's clock is deviated from the
+  sender's, with no workaround. Every leg here ran on a loop, one
+  divisor at both ends, which cannot stage it; bursts from a far board
+  running `usart_peer` a few per cent fast would measure whether the
+  edge still comes within two frames.
+- `parity_errors` in full duplex: ES0298 2.13.2 clears PE on a write of
+  DR in full duplex, so a parity error landing while the task writes
+  may go uncounted. The parity legs ran on the single-wire loop, which
+  is half duplex; odd-parity frames from a far board while this end
+  transmits would measure it.
 
 Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): mute

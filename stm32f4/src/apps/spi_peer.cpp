@@ -45,7 +45,7 @@
 //    served: ping/ident/report, exchange, sink_slow, ss_pulse,
 //    host_burst.
 //
-//  - BSY IS NOT LOOKED AT ON THIS SIDE. ES0206 2.12.5: a client's BSY
+//  - BSY IS NOT LOOKED AT ON THIS SIDE. ES0298 2.14.6: a client's BSY
 //    may stay high after a transfer, so RXNE is the witness on the
 //    receiving side and the NSS pad is the witness for the window.
 //
@@ -65,8 +65,10 @@
 //   PB14 MISO  (this end's output, driven only to answer)
 //   PB15 MOSI  (input here)
 // SPI2 is the APB1 instance, so its own clock is 45 MHz at the 180 MHz
-// this board runs - and it is the instance ES0206 2.12.4's pad-speed
-// ceiling leaves room on, where the APB2 instances at 90 MHz have none.
+// this board runs - and it is the instance ES0298 2.14.5's pad-speed
+// ceiling leaves room on (table 5: 84 MHz of APB at high or very-high,
+// 75 at medium, 25 at low - for the SCK pad of a host), where the APB2
+// instances at 90 MHz have none.
 //
 // Console: USART2 PA2/PA3 at 115200 on the ST-LINK's virtual COM port,
 // observability only.
@@ -137,30 +139,26 @@ using NssPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
 constexpr uint16_t firmware_version = 0x0400;   ///< see spi_link.hpp's Ident
 
 /// THE ANSWER LINE'S SLEW CLASS, AND IT IS A MEASUREMENT. The driver
-/// hands every pad out at very-high, which is ES0206 2.12.4 speaking
+/// hands every pad out at very-high, which is ES0298 2.14.5 speaking
 /// about the SCK pad of a HOST; on a bus of jumper wires that edge is
 /// an AGGRESSOR at the CLIENT's end, and the four classes were walked
-/// against a far board's four-mode matrix, its engined exchange and a
-/// ten-second stress:
+/// with the console's 's' against an STM32G0B1RE host's slip statistics
+/// (test_stm32_spi letter x: ten bursts of eight frames in each mode,
+/// the host's own MOSI one class below its driver's):
 ///
-///   very-high  mode 2 slips, the engined exchange comes back nine
-///              bytes of sixteen wrong, the stress loses five
-///              exchanges of twenty-three
-///   high       the engined exchange and the stress are exact, and the
-///              matrix still slips - mode 2 on one pass, mode 1 on
-///              another: the two modes that SAMPLE ON THE FALLING EDGE,
-///              where the data lines change on the rising one
-///   medium     the same, one mode of four still slipping
-///   low        all four modes exact, with the far board's own SCK and
-///              MOSI left at ITS driver's fastest class - so the
-///              aggressor is THIS end's answer line and not that end's
-///              clock
+///   very-high  12 bursts of 40 slip, in modes 0, 1 and 3
+///   high       7 of 40, every one in mode 1 or mode 2 - the two modes
+///              that SAMPLE ON THE FALLING EDGE, where the answer line
+///              changes on the rising one
+///   medium     12 of 40, modes 1 and 2 again
+///   low        0 of 40
 ///
-/// THE RATE LADDER IS UNCHANGED at every class (the far board's link
-/// exact to its bus over 64 and breaking at the bus over 32, on the
-/// answer reload either way), so the slow pad costs nothing here. This
-/// app therefore re-states the pad at LOW after every init that drives
-/// it, and the console's 's' cycles the four classes for the bench.
+/// The rate ladder does not reach the pad's class: this client's answer
+/// reload breaks first (the host's ladder exact to 500 kHz and breaking
+/// at 1 MHz with every character heard), so the slow pad costs nothing
+/// here. This app therefore re-states the pad at LOW after every init
+/// that drives it, and the console's 's' cycles the four classes for
+/// the bench.
 PinSpeed miso_speed = PinSpeed::low;
 
 const char* speed_name(PinSpeed s) {

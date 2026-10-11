@@ -728,6 +728,23 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   and does not need to be: the fix is on the pads, or on a printed
   board's short traces.
 
+**`SpiClient` is driven on SPI2 against a second board.** The peer
+instrument this stratum carries runs on the STM32F446RE and answers
+the STM32G0B1RE it is paired with on the desk ONE FRAME AHEAD over
+PB12..PB15, the host's command channel at 250 kHz of SCK: a dark
+client that drives MISO only inside an answer window, the four
+transfer modes and both bit orders byte-exact in both directions, a
+bit-order mismatch an exact two-way reversal, four arbitrated
+transactions in one select window read back exact. ES0298 2.14.6's BSY
+is never looked at on this side - RXNE is the witness. THE ANSWER
+LINE'S SLEW CLASS IS A CORRECTNESS PARAMETER, walked against the
+host's slip statistics (ten bursts a mode): 12 of 40 slip at
+`very_high`, 7 at `high` and 12 at `medium` (the falling-edge modes),
+0 at `low`, the class the app keeps. THE ANSWER RELOAD IS THE
+CEILING: one answer written at each RXNE, the host's back-to-back
+frames leave it half a bit, and the exchange is exact to 500 kHz and
+wrong from 1 MHz with every character heard (the gap list).
+
 ## Not covered yet
 
 Driver gaps:
@@ -740,23 +757,16 @@ Driver gaps:
 - TI frame format: the configuration is written and refused where the
   chapter says it must be, but nothing on this board frames its
   transactions that way. Born with its first device.
-- **`SpiClient` is driven on SPI2 against a second board.** The peer
-  instrument this stratum carries answers a far board's host ONE FRAME
-  AHEAD over PB12..PB15 at 281.25 kHz of SCK: a dark client that drives
-  MISO only inside an answer window, the four transfer modes and both
-  bit orders byte-exact in both directions, a client that never drains
-  keeping ONE frame and raising the overrun, the roles inverted with
-  this board clocking the far one as host, and a ten-second stress of
-  23 exchanges with no error at either end. ES0206 2.12.5's BSY is
-  never looked at on this side - RXNE is the witness. And THE ANSWER
-  LINE'S SLEW CLASS IS A CORRECTNESS PARAMETER: at the driver's
-  `very_high` the far board's falling-edge modes slip and an engined
-  exchange comes back nine bytes of sixteen wrong; at `low`, with the
-  far board's own pads left at its driver's fastest, everything is
-  byte-exact and the rate ladder is unchanged.
+- `SpiClient` has no run of its own: the answer one frame ahead is the
+  caller's loop, written at each RXNE, and against a host whose frames
+  follow back to back it is late from 1 MHz (the finding above). A run
+  that keeps two answers ahead - on TXE, or SPI2_TX on DMA1 stream 4
+  channel 0 (RM0390 table 28) - is born with the first client that
+  needs the rate.
 - The I2S beyond a master transmitter: no codec on the board, so
   reception, the slave modes, the full-duplex extension block on the
-  wire and the DMA-fed audio stream have no peer. The extension block's
+  wire (the F42x/F43x class's: the F446 has none, RM0390 26.1.3 "only
+  transmitter or receiver") and the DMA-fed audio stream have no peer. The extension block's
   refusals and its register surface are exercised; its data path is not.
 - The I2S clock sources other than the audio PLL's R output: the
   I2S_CKIN pad has no clock on it, and the F446's four-way selector
@@ -768,6 +778,14 @@ Driver gaps:
   chapter's.
 
 Implemented, not bench-verified (each with what would measure it):
+- The peer instrument as the bus HOST (`host_burst`, SpiHost on SPI2,
+  the select a GPIO held low for the burst): against the STM32G0B1RE's
+  client, twelve frames at 1.406 MHz, the far client gains or loses a
+  clock edge somewhere in the burst in most runs (its stream one bit
+  out of place from that frame on), with this end's SCK and MOSI at
+  `high` as at `very_high`, and at 352 kHz too. A logic analyser on the
+  far client's SCK and select during the burst would settle where the
+  edge goes.
 - The instances other than SPI5, SPI2 and SPI1 (SPI3, SPI4, SPI6 -
   compiled on every header that has them, none driven): a wire between
   two of them, or a device on one. SPI1 is driven on the STM32F411CE

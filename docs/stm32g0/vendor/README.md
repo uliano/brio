@@ -23,17 +23,18 @@ guessable from a neighbour's (verify on st.com before citing).
 | STM32G031x4/x6/x8 datasheet | **DS12992 Rev 4** | not fetched as a PDF; the TEXT was read at the bench | the STM32G031K8's: pin assignment (table 12 - the LQFP32 column is what says which pads exist), alternate-function tables 13..17, the low-power mode paragraphs of 3.7 |
 | STM32G031x4/x6/x8 device errata | **ES0487 Rev 6** (September 2023) | symlink to `.../es0487-stm32g031x4x6x8-device-errata-stmicroelectronics.pdf` | the STM32G031K8's (the Nucleo-G031K8, revision Y); READ AT THE BENCH against the letters - see "STM32G031K8: ES0487 read against the letters" below. st.com serves it to `curl` with a browser user agent where the same URL times out elsewhere |
 | Getting started with STM32G0 hardware development | AN5096 Rev 4 (December 2025) | symlink to `.../an5096-*.pdf` | decoupling, clocks, boot pins |
+| STM32 Nucleo-64 boards (MB1360) user manual | **UM2324 Rev 5** (July 2024) | symlink to `.../um2324-stm32-nucleo64-boards-mb1360-stmicroelectronics.pdf` | the Nucleo-G0B1RE's and Nucleo-G071RB's board: the Arduino and morpho connectors (table 12 for the Arduino pins; the morpho map is a FIGURE, and it differs from the MB1136's of the Nucleo-F446RE), the solder bridges, the ST-LINK's virtual COM port |
 
 Canonical URLs (redirect to the current revision):
 `https://www.st.com/resource/en/reference_manual/rm0444-stm32g0x1-advanced-armbased-32bit-mcus-stmicroelectronics.pdf`,
 `https://www.st.com/resource/en/errata_sheet/es0548-stm32g0b1xbxcxe-device-errata-stmicroelectronics.pdf`.
 
-The Nucleo-64 user manual (UM2324, MB1360 schematic) is NOT in the
-folder: the board facts this stratum states (LD4 on PA5, B1 on PC13,
-the ST-LINK virtual COM port on USART2 PA2/PA3, no HSE crystal fitted)
-were each VERIFIED AT THE BENCH before being written down, and the
-one still unverified (the LSE crystal) is said to be so in
-[../README.md](../README.md).
+The board facts this stratum states (LD4 on PA5, B1 on PC13, the
+ST-LINK virtual COM port on USART2 PA2/PA3, no HSE crystal fitted) were
+each VERIFIED AT THE BENCH before being written down; UM2324 is the
+document they are read against, and a wire placed on the board is
+placed by its Arduino label or a position verified at the bench, never
+by a morpho number taken from another Nucleo's manual.
 
 ## Device headers + SVD: vendored in the repo
 

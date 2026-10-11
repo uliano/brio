@@ -60,8 +60,10 @@
 //    exact to PCLK/2 = 32 MHz, the software pump to 16 MHz); medium
 //    costs the top rung (16 MHz) and low two (8 MHz), on both serves. So
 //    this app re-states the pad at HIGH after every init that drives it
-//    (console 's' cycles the four speeds). The DUT-side pads keep the
-//    driver's very-high: only the slave's edge lags the clock.
+//    (console 's' cycles the four speeds). A HOST's data pad is the
+//    same kind of aggressor in the other two modes (its MOSI changing
+//    on a LOW clock, measured from test_stm32_spi against the stm32f4
+//    peer, docs/stm32g0/spi.md) - a host suite slows its own.
 //
 // THE DARK LISTENER discipline: the command-mode client never drives
 // MISO (drive_output = false, which leaves the pad in analog), the

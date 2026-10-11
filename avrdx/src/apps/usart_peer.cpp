@@ -29,6 +29,20 @@
 // loop-back, so it is told to stay mute for the duration - it keeps
 // decoding, it just answers nothing but the command that ends it.
 //
+// THE DARK DISCIPLINE (usart_link.hpp): while it is searching for the
+// wiring this peer releases its transmitter and holds no pull on PE0 or
+// PE1 - the far board's single-board letters walk those wires with their
+// own pulls - and it naks a bad checksum only while ENGAGED, within
+// link::engage_ms of the last frame that checked out. A pull-up on its
+// receive pad (or on the shared wire) and an idling transmitter come only
+// once a frame has proven the wiring.
+//
+// TIME (usart_link.hpp, TIME IN THE PAYLOAD): the protocol's 24 MHz ticks
+// are this peer's CPU cycles, the core running the 24 MHz crystal
+// undivided (a static_assert below); the Report's span is read on TCB0 +
+// TCB1 cascaded at CLK_PER (avrdx/tcb.hpp's CascadedCounter), so its
+// counts are the same ticks with no conversion.
+//
 // The banner reports the USERROW board label and whether THIS board's
 // 24 MHz crystal started: the peer's clock is the reference the DUT's
 // auto-baud and error-tolerance tests are measured against, so its
@@ -42,7 +56,9 @@
 
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
+#include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/tcb.hpp"
 #include "avrdx/ticker.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
@@ -66,7 +82,20 @@ using LinePin = Pin<'E', 0>;      // TXD pad: the bit-bang and break line
 using RxdPin = Pin<'E', 1>;       // RXD pad: DRIVE_RXD drives the DUT's TXD
 using XckPin = Pin<'E', 2>;
 
-constexpr uint16_t firmware_version = 0x0102;   ///< see usart_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0103;   ///< see usart_link.hpp's Ident
+
+/// THE SPAN'S RULER: TCB0 counts CLK_PER, TCB1 counts TCB0's overflow,
+/// both capture on one software event - a coherent 32-bit count of 24 MHz
+/// ticks. TCB0 and TCB1 exist on every DA/DB package, and any channel
+/// carries a TCB's OVF and a software event. Each received character
+/// costs one event strobe (a store); the captures are read once, after
+/// the run: an Input Capture event overwrites CCMP (DS40002247B
+/// 24.3.3.1.3), so what they hold then is the LAST character's stamp.
+using SpanLo = Tcb<0>;
+using SpanHi = Tcb<1>;
+using Span = CascadedCounter<SpanLo, SpanHi>;
+using SpanCarry = EventChannel<0>;
+using SpanSnap = EventChannel<1>;
 
 bool crystal_ok = false;
 /// Which wiring the desk turns out to have (usart_link.hpp Topology).
@@ -93,6 +122,11 @@ uint32_t last_byte_ms = 0;
 uint32_t last_frame_ms = 0;   ///< when a whole command frame last decoded
 uint32_t last_flip_ms = 0;    ///< when the discovery last changed topology
 uint32_t standby_until = 0;   ///< mute until this millisecond (0 = answering)
+uint32_t engaged_until = 0;   ///< nak a bad checksum only before this millisecond
+
+/// Within link::engage_ms of the last frame that checked out, or of the
+/// end of the action it commanded (usart_link.hpp, THE DARK DISCIPLINE).
+bool engaged() { return engaged_until != 0 && Ticker::millis() < engaged_until; }
 
 void settle() {
     while (Ticker::millis() - ack_ms < static_cast<uint32_t>(link::settle_ms) + 2u) {
@@ -184,6 +218,21 @@ void line_talk() {
     Link::clear_txc();          // so line_listen waits for THIS burst
 }
 
+/// The pull-ups on the two data pads, set or cleared together with the
+/// state that allows them: none while searching (the dark discipline), the
+/// receive pad's once the crossed pair is proven, the shared wire's (PE0)
+/// once a shared line is.
+void hold_pads() {
+    volatile uint8_t& pe0 = pinctrl_of('E', 0);
+    volatile uint8_t& pe1 = pinctrl_of('E', 1);
+    const bool shared_up = proven && shared();
+    const bool rx_up = proven && !shared();
+    if (shared_up) pe0 |= PORT_PULLUPEN_bm;
+    else pe0 &= static_cast<uint8_t>(~PORT_PULLUPEN_bm);
+    if (rx_up) pe1 |= PORT_PULLUPEN_bm;
+    else pe1 &= static_cast<uint8_t>(~PORT_PULLUPEN_bm);
+}
+
 /// Turnaround the other way: let the last frame leave, hand the wire
 /// back to the pull-up and listen again. It OWNS the wait for the line
 /// to go idle - TXCIF is write-one-to-clear, so a caller that waits too
@@ -193,7 +242,7 @@ void line_listen(bool wait = true) {
     if (!tx_idle_on()) {
         Link::enable_tx(false);
         PORTE.DIRCLR = LinePin::mask;
-        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
+        hold_pads();
     }
     if (shared()) {
         Link::flush_rx();
@@ -204,21 +253,21 @@ void line_listen(bool wait = true) {
 /// Command mode: async 8N1 at link::command_baud. On the full-duplex
 /// wiring both directions are simply on; on a shared line the receiver
 /// listens to the TXD pad through LBME and the transmitter is taken up
-/// only for the duration of an answer.
+/// only for the duration of an answer. While the wiring is not proven
+/// the transmitter is off, PE0 an input and NEITHER data pad pulled
+/// (hold_pads): the peer is dark.
 bool command_mode() {
     set_inven('E', 2, false);
     const bool ok = Link::init({.route = UsartRoute::def,
                                 .baud = usart_baud_reg(SysClock::hz, link::command_baud),
                                 .tx = tx_idle_on(),
                                 .loop_back = shared()});
-    if (shared() || !proven) {
-        PORTE.DIRCLR = LinePin::mask;
-        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    } else {
-        // The idle level of an input that nobody drives is nobody's
-        // business but the pull-up's: a floating RXD invents frames.
-        pinctrl_of('E', 1) |= PORT_PULLUPEN_bm;
-    }
+    if (shared() || !proven) PORTE.DIRCLR = LinePin::mask;
+    // Once proven, the idle level of an input that nobody drives is the
+    // pull-up's: a floating RXD invents frames. Before that, the frames
+    // it invents are the decoder's to absorb - a pull here would load the
+    // far board's single-board measurements.
+    hold_pads();
     Link::flush_rx();
     Link::clear_txc();
     decoder.reset();
@@ -258,10 +307,8 @@ bool apply_cfg(const link::Cfg& c) {
     }
     if (!Link::init(u)) return false;
     set_inven('E', 2, (c.flags & link::flag_invert_xck) != 0);
-    if (shared()) {
-        PORTE.DIRCLR = LinePin::mask;
-        pinctrl_of('E', 0) |= PORT_PULLUPEN_bm;
-    }
+    if (shared()) PORTE.DIRCLR = LinePin::mask;
+    hold_pads();
     Link::flush_rx();
     return true;
 }
@@ -376,9 +423,15 @@ link::Report run_echo(const link::Params& a, bool sink) {
     // end was already listening is not traffic: a released pad dips, and
     // a dip is a start bit. The DUT holds off until after this point.
     Link::flush_rx();
+    (void)Span::captured();             // CAPT clear, so the first read() waits
+    uint32_t first = 0;
     const uint32_t t0 = Ticker::millis();
     while (r.count < a.count) {
         if (Link::rxc_flag()) {
+            // The stamp first: the character is complete NOW, and what
+            // the loop does with it is not the DUT's transmitter.
+            if (r.count == 0) first = Span::read();
+            else SpanSnap::pulse();
             const UsartFrame f = Link::receive();
             account(r, f);
             if (!sink) {
@@ -393,6 +446,7 @@ link::Report run_echo(const link::Params& a, bool sink) {
             break;
         }
     }
+    if (r.count >= 2) r.span = Span::captured() - first;
     line_listen();
     return r;
 }
@@ -407,13 +461,35 @@ link::Report run_send(const link::Params& a, bool blast) {
                                   static_cast<uint32_t>(a.aux16) * 1000u);
     const uint16_t mask = data_mask(a.cfg.bits);
     const uint32_t gap = blast ? 0u : (2u * 1'000'000u) / (a.cfg.rate ? a.cfg.rate : 1u);
+    // A blast repeats (usart_link.hpp's Params): the stream runs on across
+    // the repeats, the gap between them in 100 us units, the deadline
+    // checked between them. A send is one run. The stream costs the same
+    // every frame, so a blast stays gapless whatever the pattern.
+    const uint16_t repeats = blast && a.aux16 > 1u ? a.aux16 : 1u;
+    const uint32_t repeat_gap_us = static_cast<uint32_t>(a.aux8) * 100u;
+    link::Stream stream(a.pattern, a.value);
+    const uint32_t t0 = Ticker::millis();
     line_talk();
-    for (uint16_t i = 0; i < a.count; ++i) {
-        const uint16_t v = static_cast<uint16_t>(link::pattern_value(a.pattern, a.value, i)) & mask;
-        if (!Link::send(v, 200'000u)) break;
-        r.sum = static_cast<uint16_t>(r.sum + v);
-        ++r.count;
-        if (gap) delay_us_runtime(cycles_per_us(SysClock::hz), gap);
+    for (uint16_t k = 0; k < repeats; ++k) {
+        if (k != 0) {
+            if (a.ms != 0 && Ticker::millis() - t0 >= a.ms) {
+                r.flags |= link::report_timed_out;
+                break;
+            }
+            if (repeat_gap_us) delay_us_runtime(cycles_per_us(SysClock::hz), repeat_gap_us);
+        }
+        bool sent = true;
+        for (uint16_t i = 0; i < a.count; ++i) {
+            const uint16_t v = static_cast<uint16_t>(stream.next()) & mask;
+            if (!Link::send(v, 200'000u)) {
+                sent = false;
+                break;
+            }
+            r.sum = static_cast<uint16_t>(r.sum + v);
+            ++r.count;
+            if (gap) delay_us_runtime(cycles_per_us(SysClock::hz), gap);
+        }
+        if (!sent) break;
     }
     line_listen();
     return r;
@@ -601,6 +677,7 @@ bool trace = false;
 
 void handle(const link::Frame& f) {
     ++commands;
+    engaged_until = Ticker::millis() + link::engage_ms;
     const Op op = f.op;
     if (trace) {
         print(console, "  [cmd op=", hex(link::byte_of(op)), " len=", f.len,
@@ -711,6 +788,7 @@ void handle(const link::Frame& f) {
     r.ms = took > 255u ? 255u : static_cast<uint8_t>(took);
     r.op = link::byte_of(op);
     last_report = r;
+    engaged_until = Ticker::millis() + link::engage_ms;
     (void)command_mode();
 }
 
@@ -827,6 +905,8 @@ int main() {
     crystal_ok = SysClock::init();
     Console::init(clock, 460800);
     Ticker::init();
+    Span::init(TcbClock::div1, SpanCarry{}, SpanSnap{});
+    Span::reset();
     sei();
 
     auto board = board_id();
@@ -859,6 +939,7 @@ int main() {
                     // The manual way back: forget the topology, drop any
                     // stand-off, and start looking again from scratch.
                     proven = false;
+                    engaged_until = 0;
                     standby_until = 0;
                     one_wire_standby = false;
                     decoder.reset();
@@ -922,8 +1003,12 @@ int main() {
                     last_frame_ms = last_byte_ms;
                     break;
                 case link::Decoder::Result::bad_checksum:
-                    ack(decoder.pending_op(), decoder.frame().sum, false);
-                    ++naks;
+                    // Only while engaged: noise, or the far board's own
+                    // single-wire traffic, is never answered.
+                    if (engaged()) {
+                        ack(decoder.pending_op(), decoder.frame().sum, false);
+                        ++naks;
+                    }
                     break;
                 default: break;
             }

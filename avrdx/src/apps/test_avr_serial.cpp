@@ -1336,8 +1336,16 @@ bool peer_report(link::Report& r, uint16_t wait_ms) {
     if (wait_ms) delay_us(clock, static_cast<uint32_t>(wait_ms) * 1000u);
     for (uint8_t k = 0; k < 4; ++k) {
         link::Frame f;
-        if (query(link::Op::report, f) && f.op == link::Op::report_data &&
-            f.len == link::report_size) {
+        const bool answered = query(link::Op::report, f) && f.op == link::Op::report_data;
+        if (answered && f.len != link::report_size) {
+            // A peer of another generation of usart_link.hpp: say so
+            // instead of retrying into a silent failure.
+            print(serial, "  the peer's REPORT is ", f.len, " bytes, this DUT reads ",
+                  link::report_size, " - flash both boards from one tree (ident: fw ",
+                  "printed by letter j)", crlf);
+            return false;
+        }
+        if (answered) {
             r = link::get_report(f.data);
             if ((r.flags & link::report_cfg_failed) != 0 && !leg_refused) {
                 leg_refused = true;
@@ -2805,6 +2813,13 @@ void tt_rebase_traffic() {
     print(serial, "  peer saw count=", have ? r.count : 0, " sum=", hex(have ? r.sum : 0),
           " want=", hex(sum), " ferr=", have ? r.ferr : 0, " perr=", have ? r.perr : 0,
           " ovf=", have ? r.ovf : 0, crlf);
+    // The FOREIGN receiver's ruler (usart_link.hpp's Report::span): the
+    // stream as the peer timed it, first character to last, beside the
+    // 95 back-to-back frame times the wire would take. No verdict: the
+    // stream is paced by this end's writes across two clock switches.
+    print(serial, "  the peer's span over the stream: ", have ? r.span : 0,
+          " ticks of 24 MHz (95 gapless 8N1 frames at 115200 are ",
+          (95UL * 10UL * SysClock::hz) / 115'200UL, ")", crlf);
     verdict("every byte survived the two clock switches",
             have && r.count == 96 && r.sum == sum);
     verdict("and not one of them was corrupted",

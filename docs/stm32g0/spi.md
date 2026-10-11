@@ -26,9 +26,10 @@ at every BR code -,
 letters `n`..`r` (20 verdicts) on the link to a PEER BOARD
 running `spi_peer`, commanded in band over
 `avrdx/src/apps/spi_link.hpp`. The peer may be any of the three ports of
-that app - the AVR's, the SAM C21's or this stratum's own, which answers
-on SPI1 AF0 at the same pin names this board hosts on - and the peer's
-`ident` names which one answered (firmware 0x01xx, 0x02xx, 0x03xx). The
+that app - the AVR's, the SAM C21's, this stratum's own, which answers
+on SPI1 AF0 at the same pin names this board hosts on, or the STM32F4's,
+on the F446's SPI2 - and the peer's `ident` names which one answered
+(firmware 0x01xx, 0x02xx, 0x03xx, 0x04xx). The
 two wirings exclude each other, the suite PROBES which one is fitted
 before any letter runs, and the letters whose instrument is absent skip
 themselves with the reason printed and no verdict claimed. Family
@@ -292,8 +293,8 @@ and their inverse.
 Measured by `test_stm32_spi`. The findings down to "The dynamic clock"
 are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 89 verdicts.
 The ones under "The peer link" are a SECOND CHIP's, on the same four
-SPI1 pads: 38 verdicts, measured against a SAM C21 and against a second
-STM32G0.
+SPI1 pads: 38 verdicts, measured against an STM32F446RE and against a
+second STM32G0.
 
 **The block, and the reserve against the header.** SPI1 on line 25 and
 SPI2/SPI3 sharing line 26; the DMAMUX pairs 16/17, 18/19, 66/67; the
@@ -467,7 +468,7 @@ round, 256 frames:
 |---|---|---|---|---|
 | spi.poll (8-bit write) | 4 | 60760, 7.41 | 8554, 1.04 | 43368, 5.29 |
 | spi.poll | 16 | 83791, 2.55 | 33124, 1.01 | 58732, 1.79 |
-| spi.poll.rx (8-bit read) | 4 | 60760, 7.41 | 10127, 1.23 | 43368, 5.29 |
+| spi.poll.rx (8-bit read) | 4 | 60760, 7.41 | 9609, 1.17 | 43368, 5.29 |
 | spi.poll.rx | 16 | 83791, 2.55 | 33165, 1.01 | 58732, 1.79 |
 | spi.poll16 (16-bit write) | 4 | 68411, 4.17 | 16701, 1.01 | 45395, 2.77 |
 | spi.poll16 | 16 | 117002, 1.78 | 65844, 1.00 | 96848, 1.47 |
@@ -488,9 +489,9 @@ loop (frames in on TXE, two byte frames an access, the unread echoes'
 overrun cleared at the tail), wire-bound from PCLK/4 at both widths;
 the receive shape keeps three frames in flight frame by frame below six
 and PACKS above it (two frames an access each way, two pairs in flight,
-the odd last one by a byte with FRXTH moved for it and back), 38 cycles
+the odd last one by a byte with FRXTH moved for it and back), 37.5 cycles
 a frame against the wire's 32 at PCLK/4 - the one line of the table
-above 1.2 - and wire-bound at PCLK/16; the pump drains what RXNE holds
+above 1.1 - and wire-bound at PCLK/16; the pump drains what RXNE holds
 and refills three, so it takes an interrupt every three frames at
 PCLK/4 and at PCLK/16 alike (six for sixteen frames, 86 for 256) and
 keeps the bus busy where the handler returns within three frame times:
@@ -516,12 +517,12 @@ write-only, the select on PA15 and the D/C on PB6, at PCLK/16:
 
 | op | n | before: wall, rest | after: wall, rest |
 |---|---|---|---|
-| spi.req | 1 | 781, 653 | 428, 300 |
-| spi.req | 3 | 1382, 998 | 783, 399 |
-| spi.req | 16 | 5269, 3221 | 2482, 434 |
+| spi.req | 1 | 781, 653 | 413, 285 |
+| spi.req | 3 | 1382, 998 | 768, 384 |
+| spi.req | 16 | 5269, 3221 | 2460, 412 |
 
 "Rest" is wall minus the wire's cycles, the Stopwatch's ~62 inside it;
-the 3-byte request's 337 net cycles are: the compare of the settings
+the 3-byte request's 322 net cycles are: the compare of the settings
 and the clamp (~15 instructions), the select and the D/C edges (one
 store each, inline), the command phase (one frame in, the tail's wait
 on FTLVL and BSY, the overrun's clear and the drain - two reads), the
@@ -649,66 +650,77 @@ frame's 32 us).
 The same four SPI1 pads reach a PEER BOARD running `spi_peer` when the
 jumpers go there instead of to SPI2, and the topologies EXCLUDE each
 other: the suite probes for the self-link at boot and letters b..l skip
-themselves when it is absent. On the peer desk `z` scores **38 of 38**
-(letter `a` wireless, letter `m` wireless, letters `n`..`r` on the
-wire), against a SAM C21 and against a second STM32G0 - the latter with
-that peer's answer line at the pad speed the last finding below
-prescribes, since at the driver's very-high speed the falling-edge modes
-slip.
+themselves when it is absent. The desk pairs this board with an
+STM32F446RE running the stm32f4 `spi_peer` on its SPI2 (PB13 SCK, PB14
+MISO, PB15 MOSI, PB12 NSS at AF5, wired by function), and against it `z`
+scores **35 of 38** (letter `a` wireless, letter `m` wireless, letters
+`n`..`r` on the wire): the three that fail are one verdict of `p` (the
+peer's answer reload, below) and two of `r` (open, below). The figures
+measured with a second STM32G0 as the peer close this section.
 
-**One wire format, three architectures.** `avrdx/src/apps/spi_link.hpp`
-is compiled by three apps and this suite speaks it unchanged: the
+**One wire format, every architecture.** `avrdx/src/apps/spi_link.hpp`
+is compiled by every port of `spi_peer` and this suite speaks it
+unchanged: the
 command channel runs at PCLK/256 = 250 kHz, one frame per chip-select
-window, ten of ten, and `ident` names the peer's die serial and its
-`spi_peer` sanity byte. The protocol owns the chip select here (the
-Request carries a null `PinRef` and the letter frames the window by hand
-with 30 us of hold on each side), and `prime()` is what makes that
-legal - a mode change inside an open select window is one extra edge,
-measured on the SAM C21 as an exact one-bit slip.
+window, ten of ten, and `ident` names the peer's unique ID and its
+`spi_peer` sanity byte (firmware 0x0400). The protocol owns the chip
+select here (the Request carries a null `PinRef` and the letter frames
+the window by hand with 30 us of hold on each side), and `prime()` is
+what makes that legal - a mode change inside an open select window is
+one extra edge for the selected client.
 
 **Four modes, both bit orders, byte-exact between two different
 silicons**, and a DORD mismatch is an EXACT two-way bit reversal with
 both ends checking the other's bytes reversed - zero mismatches either
 way. The bit order is a BUS-level verb on this target
-(`SpiHost::bit_order()`, CR1.LSBFIRST) where the SAM C21 has to go round
-its own task for the same leg, and the LSb-first exchange rides that
-verb.
+(`SpiHost::bit_order()`, CR1.LSBFIRST), and the LSb-first exchange rides
+that verb.
 
-**WHERE THE LADDER STOPS IS THE PEER'S ANSWER RELOAD AND NOT THE WIRE,
-AND WITH A G0 PEER IT DOES NOT STOP AT ALL.** Against a SERCOM peer
-serving on DMA engines (its report's `serve=dma`) every BR code from
-PCLK/256 up to PCLK/8 carries eight frames byte-exact in both directions
-and PCLK/4 = 16 MHz breaks with **the peer's own count full and its
-mismatches zero** - it heard all eight characters exactly and could not
-put its answers on the shifter in time. **AGAINST A SECOND STM32G0
-SERVING ON ITS OWN DMA CHANNELS THE WHOLE REGISTER VOCABULARY IS
-EXACT** - every code down to
-PCLK/2 = 32 MHz, eight frames byte-exact both ways at each, which is the
-same ceiling the self-link's own two peripherals reach on letter `i`
-with both ends engined. The top rung is ASKED only when everything below
-it was exact (the ladder's job is to find a boundary, not to assume
-one), and this pairing has none left inside the vocabulary.
+**THE HOST'S DATA PAD IS AN AGGRESSOR ON THE CLOCK AT THE FAR END, AND
+THE RISING-EDGE MODES ARE ITS VICTIMS.** With MOSI at the very-high
+class `SpiHost::init()` gives it, letter `x` (the slip statistics,
+outside `z`) slipped **9 and 10 bursts of 40** in two runs, every one in
+mode 0 or mode 3 - the two that SAMPLE on the rising edge, the host's
+MOSI changing while SCK is LOW - and always the same way: both ends
+disagreeing from the same frame on, the rest of the stream one bit out
+of place, one clock edge too many counted by the client's shifter. At
+the command rate itself letter `p`'s first rung failed in three runs of
+four.
+With the pad ONE NOTCH DOWN, at `high`, the slip is gone - **0 of 40**
+in two runs, and 0 of 40 at `medium` and at `low` too - and the clock pad keeps its
+class, being the edge the client samples on. So the suite re-states the
+peer link's MOSI at `high` after every init (`peer_link_pads()`); the
+self-link letters and letter `s` keep the driver's very-high.
 
-**AND THE SAME LETTER PRINTS THE OTHER BOUNDARY BESIDE IT**, without
-claiming a verdict: a second climb sets `spilink::spare_polled_pump`,
-which asks the peer for its SOFTWARE serve instead of its engine. The G0
-peer's software pump - one answer written per RXNE interrupt, one frame
-ahead - is exact to **PCLK/8 = 8 MHz in every run, exact at PCLK/4 =
-16 MHz in some runs and one frame out in others, and slips at 32 MHz
-every time**: an interrupt entry per frame sits right at the edge of
-16 MHz on this core. Two boundaries of one instrument, measured in one
-letter: what a channel sustains and what an interrupt entry per frame
-sustains, a factor of two to four apart.
+**AND THE PEER'S OWN ANSWER LINE IS THE OTHER AGGRESSOR**, walked with
+the stm32f4 peer's console (its MISO class) and this end's MOSI at
+`high`, ten bursts a mode: at `very_high` 12 of 40 (modes 0, 1 and 3),
+at `high` 7 of 40 and at `medium` 12 of 40 (all in modes 1 and 2, the
+falling-edge modes), at `low` 0 of 40 - the class that peer re-states.
+
+**WHERE THE LADDER STOPS IS THE PEER'S ANSWER RELOAD AND NOT THE WIRE.**
+The F446 peer has no DMA serve (its report's `serve=pump` on every rung)
+and writes each answer on the RXNE of the frame before: PCLK/256 and
+PCLK/128 (250 and 500 kHz) carry eight frames byte-exact in both
+directions, and PCLK/64 = 1 MHz breaks with **the peer's own count full
+and its mismatches zero** - it heard all eight characters and could not
+put its answers on the shifter in time, because this host's frames
+follow back to back and an answer written at RXNE must reach the buffer
+inside half a bit. The letter's floor verdict ("exact at the command
+rate and at least four times faster", 1 MHz) therefore FAILS against
+this peer, and the signature verdict passes. The second climb, with
+`spilink::spare_polled_pump` set, prints the same boundary (500 kHz
+exact, 1 MHz slipped): this peer has one serve.
 
 **The arbiter over a SECOND CHIP.** Letter `q` runs `SpiBus`
-(= `BusMaster`) over `SpiHost` with the SAM answering: four transactions
-queued from one dispatch come back in order, all `spi_ok`, and the 24
-bytes on the wire are exactly what each request
-lent - read back and reported by the other board, not by a second
-peripheral of this one. The four share ONE select window because the
-peer's `exchange` is one burst; the rejection past the pending depth,
-both sleep votes and the per-bus timeout with `recover()` follow, and
-the next four transactions run to `spi_ok` on the same bus AO.
+(= `BusMaster`) over `SpiHost` with the F446 answering: four
+transactions queued from one dispatch come back in order, all `spi_ok`,
+and the 24 bytes on the wire are exactly what each request lent - read
+back and reported by the other board, not by a second peripheral of
+this one. The four share ONE select window because the peer's
+`exchange` is one burst; the rejection past the pending depth, both
+sleep votes and the per-bus timeout with `recover()` follow, and the
+next four transactions run to `spi_ok` on the same bus AO.
 `util/spi_bus.hpp`, `util/bus_master.hpp` and `kernel/` are realized
 here exactly as they are written.
 
@@ -724,47 +736,33 @@ engine's registers proven healthy).
 **THE ROLES INVERT ON THE PADS THIS BOARD HOSTS WITH.** Letter `r` makes
 SPI1 a `SpiClient` on the very four pins it hosts with - MISO driven,
 SCK, MOSI and NSS taken as inputs, the peer's GPIO-driven select the
-hardware NSS - while the peer becomes the bus host for a bounded burst:
-twelve frames received byte-exact, and the peer read this end's answer
-stream byte-exact FROM THE FIRST FRAME, which is what the two preloads
-before the select edge buy (35.5.8). An asymmetric bus on symmetric
-wiring needs no re-jumpering to swap roles. The burst's rate is the
-instrument's own: the command carries a DIVISION of the peer's clock,
-so the same 32 is 750 kHz from an AVR, 1.5 MHz from a SAM and **2 MHz
-from a G0**, and the peer resolves it to the BR code that produces at
-most that.
+hardware NSS - while the peer becomes the bus host for a bounded burst
+of twelve frames. The burst's rate is the instrument's own: the command
+carries a DIVISION of the peer's clock, so the same 32 is 750 kHz from
+an AVR, 1.5 MHz from a SAM, 2 MHz from a G0 and **1.406 MHz from the
+F446** (its PCLK1 of 45 MHz), and the peer resolves it to the BR code
+that produces at most that. Against the F446 host the letter is OPEN
+(the gap list).
 
-**A CLIENT'S ANSWER LINE AT VERY-HIGH PAD SPEED IS AN AGGRESSOR ON A
-JUMPER-WIRE BUS, AND THE FALLING-EDGE MODES ARE ITS VICTIMS.** With the
-G0 peer's MISO pad at the speed `SpiClient::drive_output()` gives it
-(very high), letter `o`'s four-mode matrix slipped in one burst of eight
-- 20 bursts of 160 under letter `x`, the statistics letter outside `z` -
-and always the same way: the burst byte-exact for its first frames, then
-BOTH ENDS DISAGREE FROM THE SAME FRAME ON, the rest of the stream one
-bit out of place - one clock edge too many, counted by the client's
-shifter and therefore seen in the host's read of its answers too. Every
-one of the twenty was mode 1 (CPOL 0, CPHA 1) or mode 2 (CPOL 1, CPHA 0)
-- **the two modes that SAMPLE on the falling edge**, in which the data
-lines change on the RISING edge - and modes 0 and 3 never slipped (0 of
-80). The mechanism follows from that split: the client's MISO edge lands
-its own propagation delay AFTER the clock edge, on an SCK that has just
-settled HIGH in modes 1/2, and a fast falling edge coupled into the
-clock wire beside it dips it through VIL - a spurious falling edge, one
-sampling edge too many. In modes 0/3 the same edge lands on a LOW clock
-and nothing happens. The proof is the knob: ONE NOTCH DOWN, at HIGH, the
-slip is gone - **0 bursts of 120** - and the ladders are UNMOVED (the
-DMA serve exact to PCLK/2 = 32 MHz, the software pump the same 8..16
-MHz); medium costs the top rung (16 MHz) and low two (8 MHz), on both
-serves alike, which prices the trade the desk offers. What the controls
-exclude: the peer's serve path (engines and pump slip alike), the select
-arrangement (the pad, and SSM/SSI which is worse for a reason of its
-own: a client framing on the clock alone counts the host's CPOL settling
-edge and is then one bit early from frame zero), the enable timing and
-the rate. The SAM peer does not show it on the same E-side pads: its
-pads are slower. So the stm32g0 `spi_peer` re-states its MISO pad at
-HIGH after every init that drives it, letter `o` is deterministic, and
-letter `x` stays as the instrument that measures it. The DUT's own pads
-keep the driver's very-high: only the slave's edge lags the clock.
+**WITH A SECOND STM32G0 AS THE PEER** (the G071RB or the G031K8 on the
+same four pads, its `spi_peer` on SPI1 AF0 at the same pin names), the
+ladder has no boundary inside the register vocabulary: serving on its
+own DMA channels, every code down to PCLK/2 = 32 MHz carries eight
+frames byte-exact both ways, the same ceiling the self-link's own two
+peripherals reach on letter `i` with both ends engined. Its SOFTWARE
+pump - one answer written per RXNE interrupt, one frame ahead - is exact
+to **PCLK/8 = 8 MHz in every run, exact at PCLK/4 = 16 MHz in some runs
+and one frame out in others, and slips at 32 MHz every time**: an
+interrupt entry per frame sits right at the edge of 16 MHz on this core.
+Its answer line at the very-high class `SpiClient::drive_output()` gives
+it slipped 20 bursts of 160 under letter `x`, every one in mode 1 or
+mode 2 - the falling-edge modes, the client's MISO edge landing on an
+SCK just settled HIGH and dipping it through VIL - and 0 of 120 one
+notch down at `high`, the ladders unmoved (medium costs the top rung,
+low two): that peer re-states its MISO at `high`. Its select arrangement
+was a control too - a client framing on the clock alone (SSM/SSI)
+counts the host's CPOL settling edge and is one bit early from frame
+zero.
 
 ## On the STM32G071RB
 
@@ -911,16 +909,26 @@ on every header of the pack, but no silicon has run it:
 - **The engines' levels and the reset in `release()`, on the wire.** The
   receive channel at `very_high` and the transmit one at `high`, and the
   release's reset pulse, ride the engined letters (`i`, and the peer
-  link's), which need the self-link or the peer's four wires - neither on
-  this desk; letter `a` and the rest of `z` (33 verdicts) pass with them,
+  link's with this board as the PEER), which need the self-link or a
+  host suite driving this board's `spi_peer` - the four wires to the
+  F446 are on the desk, the F446's host suite is not written; letter `a` and the rest of `z` (33 verdicts) pass with them,
   and `test_stm32_dma` letter `r` measures the release on SPI1 with no
   wire ([dma.md](dma.md)).
-- **The ladder against the SAM C21 `spi_peer` as it is.** That peer now
-  serves on its software pump alone (docs/samc21/dmac.md), so letter
-  `p`'s first climb against it meets the pump's reload boundary and
-  not the 8 MHz the figure above was measured at against a DMA serve;
-  the verdict's floor (1 MHz) sits under it. A G0 host against the SAM
-  peer would measure where it now stops.
+- **Letter `r` against the STM32F446RE host** (open): the F446's burst
+  at 1.406 MHz, twelve frames gapped by 20 us under a GPIO-held select,
+  reaches this end's client with a clock edge gained or lost somewhere
+  in it in most runs - the client's stream one bit out of place from
+  that frame on (12 of 12 received in one run of `z`, 10..12 of 12 with
+  1..11 wrong in twelve more), and the host's read of the answers wrong
+  with it. Not cured by the F446's SCK and MOSI at `high`, this end's
+  MISO at `high`, or the burst at 352 kHz. What would settle it: a logic
+  analyser on this end's PB3 and PA15 during the burst.
+- **Letter `p`'s floor against the F446 peer**: that peer's one serve
+  writes each answer on RXNE, and this host's back-to-back frames leave
+  half a bit for it, so the ladder stops at 500 kHz and the 1 MHz floor
+  verdict fails. A serve that keeps two answers ahead (the TXE edge, or
+  a DMA channel on SPI2, RM0390 table 28: DMA1 stream 4 channel 0) is
+  the peer's to grow.
 
 - **SPI3, on any board.** It exists only on the G0B1/G0C1 and its pads
   (PC10/PC11/PC12 at AF4) are not wired on this desk; the family fixture
@@ -955,15 +963,15 @@ on every header of the pack, but no silicon has run it:
   same burst with the client on its raw engines (letter i's arrangement)
   would split them.
 
-- **the packed receive at PCLK/4 runs at 38 cycles a frame against the
-  wire's 32** (x 1.23 on 256 frames): a loop turn of some 26
+- **the packed receive at PCLK/4 runs at 37.5 cycles a frame against the
+  wire's 32** (x 1.17 on 256 frames): a loop turn of some 26
   instructions with four taken branches and three APB accesses per
   pair, on a core that refetches a branch target from a flash at two
   wait states. What would move it: the pairs-only loop unrolled by two,
   or the loop placed in SRAM - the retrospective's SRAM measurement is
   the SAM's, not this family's. The write shape, which is what a
   display's pixel path runs, is on the wire's time.
-- **a 3-byte polled request costs 337 cycles above the wire** against
+- **a 3-byte polled request costs 322 cycles above the wire** against
   the round's 300: the breakdown above names the silicon's own
   latencies at the four phase ends (~50) and ~180 instructions from the
   flash. A ceiling kept as one byte instead of an optional, and the

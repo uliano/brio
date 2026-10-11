@@ -29,18 +29,22 @@
 // the NSS-pulse letter. Letters b..l are this instrument's.
 //
 // (2) THE PEER LINK: the SAME four SPI1 pads reach a SECOND BOARD
-// running `spi_peer`, and EITHER instrument is valid - the peer names
+// running `spi_peer`, and ANY of its ports is valid - the peer names
 // itself in its `ident` (fw 0x01xx = the AVR, 0x02xx = the SAM C21,
-// 0x03xx = another STM32G0), and the desk says which one is fitted -
+// 0x03xx = another STM32G0, 0x04xx = an STM32F446), and the desk says
+// which one is fitted -
 //
-//   SCK   PB3  AF0  ->  a SAM C21's PA19 SERCOM1 PAD[3],  or PB3  AF0
-//   MOSI  PB5  AF0  ->  a SAM C21's PA16 SERCOM1 PAD[0],  or PB5  AF0
-//   MISO  PB4  AF0  <-  a SAM C21's PA18 SERCOM1 PAD[2],  or PB4  AF0
-//   NSS   PA15 GPIO ->  a SAM C21's PA17 SERCOM1 PAD[1],  or PA15 AF0
+//   SCK   PB3  AF0  ->  a SAM C21's PA19 SERCOM1 PAD[3], a G0's PB3  AF0, an F446's PB13 AF5
+//   MOSI  PB5  AF0  ->  a SAM C21's PA16 SERCOM1 PAD[0], a G0's PB5  AF0, an F446's PB15 AF5
+//   MISO  PB4  AF0  <-  a SAM C21's PA18 SERCOM1 PAD[2], a G0's PB4  AF0, an F446's PB14 AF5
+//   NSS   PA15 GPIO ->  a SAM C21's PA17 SERCOM1 PAD[1], a G0's PA15 AF0, an F446's PB12 AF5
 //
-// - an stm32g0 peer answers on the SAME PIN NAMES this board hosts on
-// (SPI's own MOSI/MISO naming carries the direction, so nothing is
-// crossed), plus a dedicated GND, both boards at 3.3 V. The instrument
+// - an stm32g0 peer answers on the SAME PIN NAMES this board hosts on,
+// an stm32f4 one on its SPI2 by function (SPI's own MOSI/MISO naming
+// carries the direction, so nothing is crossed), plus a dedicated GND,
+// both boards at 3.3 V. On the peer link the host's MOSI pad goes out
+// one class below the driver's (peer_link_pads(), with the measurement
+// that asks for it). The instrument
 // is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture. Letters
@@ -613,8 +617,9 @@ bool need_self_link() {
 // and every architecture that speaks the link compiles it. The
 // instrument at the other end is `spi_peer`, in whichever of its ports
 // the wires reach: the samc21 one answers on SERCOM1 fn C, the stm32g0
-// one on SPI1 AF0 at the same pin names this board hosts on. The peer's
-// own `ident` says which (fw 0x01xx, 0x02xx, 0x03xx).
+// one on SPI1 AF0 at the same pin names this board hosts on, the stm32f4
+// one on the F446's SPI2 AF5. The peer's
+// own `ident` says which (fw 0x01xx, 0x02xx, 0x03xx, 0x04xx).
 
 using spilink::Op;
 
@@ -640,6 +645,20 @@ bool link_quiet = false;
 void link_hold() { (void)delay_us(clock, 30); }
 
 /// SPI1 as the command channel's host, PA15 as its GPIO chip select.
+/// THE PEER LINK'S DATA PAD ONE NOTCH DOWN. SpiHost::init() hands MOSI
+/// out at very-high, and on a bus of jumper wires that edge is an
+/// AGGRESSOR on the clock at the far end: against the stm32f4 peer, modes
+/// 0 and 3 - the two that SAMPLE on the rising edge, the host's MOSI
+/// changing while SCK is LOW - slipped one bit (both ends disagreeing from
+/// the same frame on) in 9 and 10 of 40 bursts of letter x, and in 0 of 40
+/// with this pad at high, medium or low (docs/stm32g0/spi.md). The clock
+/// pad keeps its class: it is the edge the client samples on. Re-stated
+/// after every init that hands the pads out for the peer letters.
+void peer_link_pads() {
+    Pin<host_pins.mosi.port, host_pins.mosi.pin>::function(host_pins.mosi.function,
+                                                           {.speed = PinSpeed::high});
+}
+
 bool link_command_mode() {
     peer_stop();
     dma_host_live = false;
@@ -647,6 +666,7 @@ bool link_command_mode() {
     sleep_probe_live = false;
     software_cs_pads();
     const bool ok = Host::init(clock);
+    peer_link_pads();
     dec.reset();
     return ok;
 }
