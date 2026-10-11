@@ -20,20 +20,25 @@
  *              ByteSink/ByteSource surface print.hpp writes to.
  *
  * SCOPE, honestly. USART mode only. The RESOURCE speaks the chapter's
- * clocking and coding space: every CTRLA.SAMPR regime (16x, 8x and 3x
+ * whole option space: every CTRLA.SAMPR regime (16x, 8x and 3x
  * arithmetic, 16x and 8x fractional, table 30-2), the sample adjustment,
  * the synchronous mode with an internal or an external XCK and either
  * polarity (31.6.2.3.1, the 8-bit BAUD of table 30-2), the IrDA coder
- * (31.6.3.3, ENC and RXPL), and the two directions switched at run time
- * (CTRLB.TXEN/RXEN, 31.8.2). The TASK above it is the console's:
- * asynchronous, internal clock, 16x arithmetic on generator 0. The
- * SERCOM's other personalities are whole chapters of their own and get
- * their own headers - SPI host/client is ch. 32 in samc21/spi.hpp, which
- * reaches the registers through Sercom<n>::spi_regs() and shares this
- * class's per-instance facts (clocks, NVIC line); I2C host/client is
- * ch. 33, in samc21/i2c.hpp. Inside USART mode, what is NOT BUILT rather
- * than half-built (handshaking, RS485, LIN, collision detection,
- * auto-baud, start-of-frame detection) is listed with its reasons in
+ * (31.6.3.3, ENC and RXPL), the four TXPO pinouts - TxD alone, RTS/CTS
+ * handshaking (31.6.3.2) and RS-485's TE with its guard time (31.6.3.6) -,
+ * the three frame families of CTRLA.FORM - the USART frame, the LIN
+ * host's header generation (31.6.3.5, LINCMD, BRKLEN, HDRDLY) and break
+ * detection with auto-baud (31.6.3.4) -, collision detection (31.6.3.7,
+ * COLDEN, its erratum's clock rule enforced), start-of-frame detection
+ * (31.6.3.9, SFDE with the interrupt it wakes on), and the two
+ * directions switched at run time (CTRLB.TXEN/RXEN, 31.8.2). The TASK
+ * above it is the console's: asynchronous, internal clock, 16x
+ * arithmetic on generator 0. The SERCOM's other personalities are whole
+ * chapters of their own and get their own headers - SPI host/client is
+ * ch. 32 in samc21/spi.hpp, which reaches the registers through
+ * Sercom<n>::spi_regs() and shares this class's per-instance facts
+ * (clocks, NVIC line); I2C host/client is ch. 33, in samc21/i2c.hpp.
+ * What the task does not carry is listed with its reasons in
  * docs/samc21/sercom.md.
  *
  * ONE INTERRUPT VECTOR, NOT TWO, whatever a two-vector transport would
@@ -109,9 +114,14 @@
  *  - erratum 1.17.14 (standby over-consumption with RUNSTDBY = 0 and the
  *    receiver disabled) is a sleep-current fact: nothing here sleeps;
  *  - erratum 1.17.19: SWRST clears DBGCTRL too (see reset());
- *  - erratum 1.17.12 (collision detection does not abort when the APB
- *    clock is slower than the core clock) and 1.17.2 (auto-baud, rev B..E)
- *    belong to features this file does not build;
+ *  - erratum 1.17.12: collision detection does not abort the transfer
+ *    when the SERCOM's APB clock is not faster than its core clock - so a
+ *    configuration with COLDEN is accepted only with the two rates stated
+ *    and the APB's the higher (SercomClocks, configure());
+ *  - erratum 1.17.2: in auto-baud mode a missing stop bit is flagged
+ *    neither as ISF nor as FERR on silicon revisions B to E of the E, G
+ *    and J parts - sercom_autobaud_checks_stop() answers it from the
+ *    die's DID.REVISION;
  *  - erratum 1.10.4 (the DMAC's, concurrent channel triggers corrupting
  *    the write-back): the Uart has ONE optional engine slot, the
  *    TRANSMIT one, filled by samc21/dmac.hpp's DmaTxEngine - the one DMA
@@ -293,6 +303,91 @@ constexpr bool uart_fractional(UartSampling s) {
     return s == UartSampling::x16_fractional || s == UartSampling::x8_fractional;
 }
 
+/**
+ * What CTRLA.TXPO puts BESIDE TxD (31.8.1's table). TxD alone is codes
+ * 0x0 and 0x1, the pad UartPads::tx names choosing between them; the two
+ * other codes both put TxD on PAD[0] and add an output on PAD[2]:
+ *  - flow_control (0x2): RTS out on PAD[2], CTS in on PAD[3] - the
+ *    receiver drives RTS high while it is disabled or its two-level
+ *    buffer is full, and a character starts only while CTS reads 0
+ *    (31.6.3.2). Asynchronous on the internal clock only;
+ *  - rs485 (0x3): TE out on PAD[2], high from a frame's start bit to the
+ *    end of its stop bit and for CTRLC.GTIME bit times more, TXC raised
+ *    only once TE has fallen (31.6.3.6); XCK stays on PAD[1]. The USART
+ *    frame formats only (FORM 0x0, 0x1).
+ */
+enum class UartPinout : uint8_t { plain, flow_control, rs485 };
+
+/**
+ * CTRLA.FORM's three frame families (31.8.1), the parity bit folded in
+ * from UartFormat (0x0/0x1 and 0x4/0x5 differ in it alone):
+ *  - usart: the plain frame;
+ *  - lin_host (0x2): the transmitter generates a LIN header - a break of
+ *    CTRLC.BRKLEN bit times, the 0x55 sync and the identifier - on
+ *    lin_command()'s strobe (31.6.3.5); no parity variant exists;
+ *  - auto_baud (0x4/0x5): the receiver takes a low of more than 11
+ *    nominal bit times as a break (INTFLAG.RXBRK), times the 0x55 sync
+ *    field after it and writes the rate it measured into BAUD and FP
+ *    (31.6.3.4); a sync that is not 0x55 raises STATUS.ISF and leaves
+ *    BAUD alone.
+ * Both LIN families are asynchronous at 16x on the FRACTIONAL generator
+ * (CTRLA.SAMPR = 0x1, 31.6.3.4 and 31.6.3.5): the measured rate is an
+ * integer part and an eighth, BAUD and FP.
+ */
+enum class UartForm : uint8_t { usart, lin_host, auto_baud };
+
+/**
+ * CTRLB.SFDE and the interrupt the start-of-frame detector wakes the
+ * device with - the three rows of 31.8.2's SFDE table that are not
+ * reserved (SFDE with neither RXS nor RXC enabled is), so configure()
+ * arms the interrupt enable each row names and the reserved row cannot
+ * be written. The NVIC line stays the caller's.
+ */
+enum class UartStartOfFrame : uint8_t { off, wake_on_rxc, wake_on_rxs, wake_on_both };
+
+/// CTRLB.LINCMD (31.8.2), a strobe in LIN host form: 0x1 sends a break
+/// when DATA is next written (the sync and identifier are then the
+/// caller's writes), 0x2 the whole header - break, sync, identifier - when
+/// DATA is written with the identifier.
+enum class LinCommand : uint8_t {
+    none = SERCOM_USART_INT_CTRLB_LINCMD_NONE_Val,
+    break_on_write = SERCOM_USART_INT_CTRLB_LINCMD_SOFTWARE_CONTROL_TRANSMIT_CMD_Val,
+    header_on_write = SERCOM_USART_INT_CTRLB_LINCMD_AUTO_TRANSMIT_CMD_Val,
+};
+
+/// CTRLC.BRKLEN's four lengths (31.8.3), in bit times.
+constexpr uint8_t lin_break_bits(uint8_t brklen) {
+    return brklen == 0u ? 13u : brklen == 1u ? 17u : brklen == 2u ? 21u : 26u;
+}
+
+/// CTRLC.HDRDLY's delay from the break's end to the sync's start bit, in
+/// bit times (31.8.3): 1, 4, 8 and 14.
+constexpr uint8_t lin_break_to_sync_bits(uint8_t hdrdly) {
+    return hdrdly == 0u ? 1u : hdrdly == 1u ? 4u : hdrdly == 2u ? 8u : 14u;
+}
+
+/**
+ * The idle bit times between the sync's stop bit and the identifier's
+ * start bit, AS THIS SILICON MAKES THEM: one less than the break-to-sync
+ * delay at every HDRDLY - 0, 3, 7 and 13 -, measured on the bench die (rev
+ * F, the header's own edges timed on its pad, test_samc_uart letter O,
+ * docs/samc21/sercom.md). 31.8.3's table gives the sync-to-identifier
+ * delay as 1, 4, 4 and 4: read as the gap, the first two rows are a bit
+ * long; read with the stop bit counted in, the last two are 4 and 10 bits
+ * short of the silicon. The function speaks the silicon.
+ */
+constexpr uint8_t lin_sync_to_id_gap_bits(uint8_t hdrdly) {
+    return static_cast<uint8_t>(lin_break_to_sync_bits(hdrdly) - 1u);
+}
+
+/**
+ * Erratum 1.17.2 (DS80000740S): in auto-baud mode a MISSING STOP BIT is
+ * flagged neither as ISF nor as FERR on silicon revisions B to E of the
+ * E, G and J parts; F and H flag it. `die_revision` is DSU DID.REVISION
+ * (samc21/dsu.hpp, 0 = rev A): true where the check is the silicon's.
+ */
+constexpr bool sercom_autobaud_checks_stop(uint8_t die_revision) { return die_revision >= 5u; }
+
 /// Everything one instance is configured with. `baud` is the BAUD
 /// REGISTER value - sercom_uart_baud_reg() computes it from a reference
 /// rate and a bit rate under the configuration's sampling, and
@@ -335,7 +430,47 @@ struct SercomUartConfig {
     bool run_standby = false;         ///< CTRLA.RUNSTDBY (see erratum 1.17.14)
     bool immediate_overflow = false;  ///< CTRLA.IBON
     bool debug_stop = false;          ///< DBGCTRL.DBGSTOP (see erratum 1.17.4)
+    /// CTRLA.TXPO beyond TxD's pad (UartPinout): RTS/CTS or RS-485's TE,
+    /// both with TxD on PAD[0].
+    UartPinout pinout = UartPinout::plain;
+    uint8_t guard_time = 0;           ///< CTRLC.GTIME, RS-485 only: 0..7 bit times of TE
+    UartForm form = UartForm::usart;  ///< CTRLA.FORM's family
+    uint8_t lin_break = 0;            ///< CTRLC.BRKLEN, LIN host only (lin_break_bits())
+    uint8_t lin_header_delay = 0;     ///< CTRLC.HDRDLY, LIN host only
+    /// CTRLB.COLDEN (31.6.3.7): each transmitted bit compared with the one
+    /// received; on a difference the transfer is aborted, TXEN cleared and
+    /// TxD tri-stated, STATUS.COLL and INTFLAG.ERROR raised. Both directions
+    /// enabled, the receiver on the transmitter's wire. Configured only with
+    /// the clocks stated (erratum 1.17.12, SercomClocks). THE AFTERMATH IS
+    /// NOT 31.6.3.7's: measured on the bench die, TXC does not rise and DRE
+    /// stays low - the frame waiting in DATA never leaves - and neither
+    /// enable_tx(true) nor COLL cleared with TXEN cycled restarts the
+    /// transmitter; disabling the instance and enabling it again
+    /// (configure(), enable()) does (test_samc_uart W,
+    /// docs/samc21/sercom.md).
+    bool collision_detect = false;
+    UartStartOfFrame start_of_frame = UartStartOfFrame::off;   ///< CTRLB.SFDE
 };
+
+/// The CTRLA.TXPO code a configuration takes (31.8.1).
+constexpr uint8_t sercom_uart_txpo(const SercomUartConfig& c) {
+    switch (c.pinout) {
+        case UartPinout::flow_control:
+            return static_cast<uint8_t>(SERCOM_USART_INT_CTRLA_TXPO_PAD2_Val);
+        case UartPinout::rs485:
+            return static_cast<uint8_t>(SERCOM_USART_INT_CTRLA_TXPO_PAD3_Val);
+        default: return uart_txpo(c.pads.tx);
+    }
+}
+
+/// The pad TXPO puts beside TxD as an OUTPUT - RTS or TE on PAD[2] - or
+/// nullopt for the plain pinout.
+constexpr std::optional<SercomPad> uart_control_pad(const SercomUartConfig& c) {
+    if (c.pinout == UartPinout::plain) {
+        return {};
+    }
+    return SercomPad::pad2;
+}
 
 /**
  * Is this a configuration the chapter offers? The pads as
@@ -350,10 +485,48 @@ struct SercomUartConfig {
  *  - the IrDA coder wants asynchronous framing at 16x with the
  *    arithmetic generator, 31.6.3.3's list ("16x sample rate
  *    (CTRLA.SAMPR[0]=0)" - read as the one code both halves of that
- *    sentence admit, 0x0), and RXPL means something under it alone.
+ *    sentence admit, 0x0), and RXPL means something under it alone;
+ *  - the flow-control and RS-485 pinouts put TxD on PAD[0] and an output
+ *    on PAD[2] (and CTS on PAD[3]), where RxD cannot be; handshaking is
+ *    asynchronous on the internal clock (31.6.3.2), RS-485 takes the
+ *    USART frame alone (31.6.3.6), and GTIME is three bits under it alone;
+ *  - the two LIN families are asynchronous at 16x on the fractional
+ *    generator (31.6.3.4, 31.6.3.5); the host's has no parity variant,
+ *    and BRKLEN and HDRDLY are two bits each under it alone;
+ *  - collision detection compares the receiver with the transmitter, so
+ *    both are enabled (31.6.3.7).
  */
 constexpr bool sercom_uart_config_valid(const SercomUartConfig& c) {
     if (!uart_pads_valid(c.pads) || c.sample_adjust > 3u) {
+        return false;
+    }
+    if (c.pinout != UartPinout::plain) {
+        if (c.pads.tx != SercomPad::pad0 || c.pads.rx == SercomPad::pad2) {
+            return false;
+        }
+        if (c.pinout == UartPinout::flow_control &&
+            (c.pads.rx == SercomPad::pad3 || c.synchronous || c.external_clock)) {
+            return false;
+        }
+        if (c.pinout == UartPinout::rs485 && c.form != UartForm::usart) {
+            return false;
+        }
+    }
+    if (c.guard_time > 7u || (c.guard_time != 0u && c.pinout != UartPinout::rs485)) {
+        return false;
+    }
+    if (c.form != UartForm::usart &&
+        (c.synchronous || c.sampling != UartSampling::x16_fractional)) {
+        return false;
+    }
+    if (c.form == UartForm::lin_host && c.format.parity != UartParity::none) {
+        return false;
+    }
+    if (c.lin_break > 3u || c.lin_header_delay > 3u ||
+        ((c.lin_break != 0u || c.lin_header_delay != 0u) && c.form != UartForm::lin_host)) {
+        return false;
+    }
+    if (c.collision_detect && !(c.rx && c.tx)) {
         return false;
     }
     if (c.synchronous) {
@@ -645,9 +818,26 @@ struct SercomStatus {
     static constexpr uint16_t cts = SERCOM_USART_INT_STATUS_CTS_Msk;
     static constexpr uint16_t sync_field_error = SERCOM_USART_INT_STATUS_ISF_Msk;
     static constexpr uint16_t collision = SERCOM_USART_INT_STATUS_COLL_Msk;
+    /// LIN host form only: no transmission ongoing and TxDATA empty.
+    static constexpr uint16_t transmitter_empty = SERCOM_USART_INT_STATUS_TXE_Msk;
     /// The three a plain 8N1 receiver can ever see.
     static constexpr uint16_t receive_errors = parity_error | frame_error | overflow;
 };
+
+/// The CTRLA.FORM code: the family, with the parity bit where the family
+/// has a parity variant.
+constexpr uint32_t sercom_uart_form(const SercomUartConfig& c) {
+    const bool parity = c.format.parity != UartParity::none;
+    switch (c.form) {
+        case UartForm::lin_host: return SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_LIN_MASTER_MODE_Val;
+        case UartForm::auto_baud:
+            return parity ? SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_AUTO_BAUD_WITH_PARITY_Val
+                          : SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_AUTO_BAUD_NO_PARITY_Val;
+        default:
+            return parity ? SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_WITH_PARITY_Val
+                          : SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_NO_PARITY_Val;
+    }
+}
 
 /// CTRLA for a USART-mode configuration - ENABLE deliberately NOT
 /// included: the whole register is written while the instance is
@@ -662,12 +852,9 @@ constexpr uint32_t sercom_uart_ctrla(const SercomUartConfig& c) {
            (c.invert_clock ? SERCOM_USART_INT_CTRLA_CPOL_Msk : 0u) |
            SERCOM_USART_INT_CTRLA_SAMPR(static_cast<uint32_t>(c.sampling)) |
            SERCOM_USART_INT_CTRLA_SAMPA(static_cast<uint32_t>(c.sample_adjust)) |
-           SERCOM_USART_INT_CTRLA_TXPO(uart_txpo(c.pads.tx)) |
+           SERCOM_USART_INT_CTRLA_TXPO(sercom_uart_txpo(c)) |
            SERCOM_USART_INT_CTRLA_RXPO(uart_rxpo(c.pads.rx)) |
-           SERCOM_USART_INT_CTRLA_FORM(
-               c.format.parity == UartParity::none
-                   ? SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_NO_PARITY_Val
-                   : SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_WITH_PARITY_Val) |
+           SERCOM_USART_INT_CTRLA_FORM(sercom_uart_form(c)) |
            (c.format.lsb_first ? SERCOM_USART_INT_CTRLA_DORD_Msk : 0u) |
            (c.run_standby ? SERCOM_USART_INT_CTRLA_RUNSTDBY_Msk : 0u) |
            (c.immediate_overflow ? SERCOM_USART_INT_CTRLA_IBON_Msk : 0u);
@@ -679,8 +866,48 @@ constexpr uint32_t sercom_uart_ctrlb(const SercomUartConfig& c) {
            (c.format.two_stop ? SERCOM_USART_INT_CTRLB_SBMODE_Msk : 0u) |
            (c.format.parity == UartParity::odd ? SERCOM_USART_INT_CTRLB_PMODE_Msk : 0u) |
            (c.irda ? SERCOM_USART_INT_CTRLB_ENC_Msk : 0u) |
+           (c.collision_detect ? SERCOM_USART_INT_CTRLB_COLDEN_Msk : 0u) |
+           (c.start_of_frame != UartStartOfFrame::off ? SERCOM_USART_INT_CTRLB_SFDE_Msk : 0u) |
            (c.tx ? SERCOM_USART_INT_CTRLB_TXEN_Msk : 0u) |
            (c.rx ? SERCOM_USART_INT_CTRLB_RXEN_Msk : 0u);
+}
+
+/// CTRLC (31.8.3): RS-485's guard time and the LIN host's break length
+/// and header delay - zero for every other configuration.
+constexpr uint32_t sercom_uart_ctrlc(const SercomUartConfig& c) {
+    return SERCOM_USART_INT_CTRLC_GTIME(static_cast<uint32_t>(c.guard_time)) |
+           SERCOM_USART_INT_CTRLC_BRKLEN(static_cast<uint32_t>(c.lin_break)) |
+           SERCOM_USART_INT_CTRLC_HDRDLY(static_cast<uint32_t>(c.lin_header_delay));
+}
+
+/// The interrupt enables the start-of-frame row arms (31.8.2's table).
+constexpr uint8_t sercom_uart_sof_armed(const SercomUartConfig& c) {
+    switch (c.start_of_frame) {
+        case UartStartOfFrame::wake_on_rxc: return static_cast<uint8_t>(SERCOM_USART_INT_INTENSET_RXC_Msk);
+        case UartStartOfFrame::wake_on_rxs: return static_cast<uint8_t>(SERCOM_USART_INT_INTENSET_RXS_Msk);
+        case UartStartOfFrame::wake_on_both:
+            return static_cast<uint8_t>(SERCOM_USART_INT_INTENSET_RXC_Msk |
+                                        SERCOM_USART_INT_INTENSET_RXS_Msk);
+        default: return 0;
+    }
+}
+
+/**
+ * The two clock rates erratum 1.17.12 is about: the SERCOM's APB clock
+ * (CLK_APBC, the main clock over MCLK.CPUDIV) and its core clock (the
+ * GCLK generator core_clock() connected). Collision detection does not
+ * abort the transfer when the APB clock is LOWER than the core clock
+ * (DS80000740S 1.17.12), and the work-around is the APB clock "always
+ * higher" - so a COLDEN configuration is valid only with the APB's the
+ * higher rate, and is configured only with both stated.
+ */
+struct SercomClocks {
+    uint32_t apb_hz = 0;
+    uint32_t core_hz = 0;
+};
+
+constexpr bool sercom_uart_clocks_valid(const SercomUartConfig& c, SercomClocks k) {
+    return !c.collision_detect || k.apb_hz > k.core_hz;
 }
 
 // ONE VIEW FOR BOTH CLOCKINGS. The device header gives the USART two
@@ -996,34 +1223,33 @@ public:
      *
      * False (and nothing programmed) when the configuration is not one
      * the chapter offers (sercom_uart_config_valid()), or when a
-     * synchronization did not complete. RXPL is written with the rest:
-     * it is enable-protected too (31.8.5). The
-     * PORT side of the pads is NOT touched here: pads are the SERCOM's,
-     * pins are PORT's and the task's.
+     * synchronization did not complete. RXPL and CTRLC are written with
+     * the rest: they are enable-protected too (31.8.3, 31.8.5). A
+     * start-of-frame row arms the interrupt enables it names (the
+     * reserved row of 31.8.2's table cannot be written); every other
+     * interrupt enable is cleared. The PORT side of the pads is NOT
+     * touched here: pads are the SERCOM's, pins are PORT's and the task's.
+     *
+     * A configuration with COLLISION DETECTION is refused here: it is
+     * configured through the overload that states the clocks (erratum
+     * 1.17.12).
      */
     static bool configure(const SercomUartConfig& cfg, uint32_t spins = 0xFFFFu) {
-        if (!sercom_uart_config_valid(cfg)) {
+        if (cfg.collision_detect) {
             return false;
         }
-        if (!enable(false, spins)) {
+        return write_config(cfg, spins);
+    }
+
+    /// The same with the two clock rates stated - the one way a COLDEN
+    /// configuration is written, and only with the APB clock the higher
+    /// (sercom_uart_clocks_valid(), erratum 1.17.12).
+    static bool configure(const SercomUartConfig& cfg, SercomClocks clocks,
+                          uint32_t spins = 0xFFFFu) {
+        if (!sercom_uart_clocks_valid(cfg, clocks)) {
             return false;
         }
-        regs().SERCOM_INTENCLR = SercomFlag::all;
-        regs().SERCOM_CTRLA = sercom_uart_ctrla(cfg);
-        regs().SERCOM_CTRLB = sercom_uart_ctrlb(cfg);
-        // Writing CTRLB again before this clears is an APB ERROR
-        // (31.8.10) - the one synchronization here that is not merely
-        // about knowing when a setting took effect.
-        if (!wait_sync(SERCOM_USART_INT_SYNCBUSY_CTRLB_Msk, spins)) {
-            return false;
-        }
-        regs().SERCOM_BAUD = cfg.baud;
-        regs().SERCOM_RXPL = cfg.rx_pulse;
-        regs().SERCOM_DBGCTRL =
-            cfg.debug_stop ? static_cast<uint8_t>(SERCOM_USART_INT_DBGCTRL_DBGSTOP_Msk) : 0u;
-        clear_status(SercomStatus::receive_errors);
-        regs().SERCOM_INTFLAG = SercomFlag::all;
-        return true;
+        return write_config(cfg, spins);
     }
 
     /// The compile-time twin: a configuration the chapter does not offer
@@ -1035,9 +1261,54 @@ public:
                       "PAD[0] or PAD[2] only, SAMPA two bits, a synchronous link with no "
                       "sampling regime, RxD off its XCK pad and (as the host) an 8-bit "
                       "BAUD, a fractional BAUD of at least 1, IrDA asynchronous at 16x "
-                      "arithmetic only and RXPL under IrDA alone (31.6.2.3, 31.6.3.3, "
-                      "31.8.1, 30.6.2.3)");
-        return configure(cfg, spins);
+                      "arithmetic only and RXPL under IrDA alone, the flow-control and "
+                      "RS-485 pinouts with TxD on PAD[0] and RxD off PAD[2] (and off "
+                      "PAD[3] beside CTS), handshaking asynchronous on the internal "
+                      "clock, RS-485 on the USART frame, GTIME under RS-485 alone, the "
+                      "LIN families asynchronous at 16x fractional, no parity for the "
+                      "LIN host and BRKLEN/HDRDLY under it alone, collision detection "
+                      "with both directions (31.6.2.3, 31.6.3.2 - 31.6.3.7, 31.8.1 - "
+                      "31.8.3, 30.6.2.3)");
+        static_assert(!cfg.collision_detect,
+                      "collision detection is configured with the clocks stated: "
+                      "configure<cfg, SercomClocks{apb_hz, core_hz}>() (erratum "
+                      "1.17.12: the APB clock must be higher than the core clock)");
+        return write_config(cfg, spins);
+    }
+
+    /// The compile-time twin of the clocked overload.
+    template <SercomUartConfig cfg, SercomClocks clocks>
+    static bool configure(uint32_t spins = 0xFFFFu) {
+        static_assert(sercom_uart_config_valid(cfg),
+                      "this USART configuration is not one the chapter offers (see "
+                      "sercom_uart_config_valid())");
+        static_assert(sercom_uart_clocks_valid(cfg, clocks),
+                      "collision detection does not abort the transfer when the SERCOM's "
+                      "APB clock is not higher than its core clock (erratum 1.17.12, "
+                      "DS80000740S): raise the APB clock or slow the core generator");
+        return write_config(cfg, spins);
+    }
+
+    /**
+     * Strobe CTRLB.LINCMD (31.8.2) on a running instance in LIN host form:
+     * the next DATA write sends a break (break_on_write) or the whole
+     * header with DATA as its identifier (header_on_write). The bits are
+     * not enable-protected and read back zero; CTRLB is write-synchronized,
+     * so the previous write is waited out first and this one after, as the
+     * direction verbs do. False on another form ("only valid in LIN Host
+     * mode"), or when a synchronization did not complete.
+     */
+    static bool lin_command(LinCommand cmd, uint32_t spins = 0xFFFFu) {
+        if ((regs().SERCOM_CTRLA & SERCOM_USART_INT_CTRLA_FORM_Msk) !=
+            SERCOM_USART_INT_CTRLA_FORM(SERCOM_USART_INT_CTRLA_FORM_USART_FRAME_LIN_MASTER_MODE_Val)) {
+            return false;
+        }
+        if (!wait_sync(SERCOM_USART_INT_SYNCBUSY_CTRLB_Msk, spins)) {
+            return false;
+        }
+        const uint32_t v = regs().SERCOM_CTRLB & ~SERCOM_USART_INT_CTRLB_LINCMD_Msk;
+        regs().SERCOM_CTRLB = v | SERCOM_USART_INT_CTRLB_LINCMD(static_cast<uint32_t>(cmd));
+        return wait_sync(SERCOM_USART_INT_SYNCBUSY_CTRLB_Msk, spins);
     }
 
     // ---- the two directions at run time (31.8.2) --------------------------
@@ -1190,6 +1461,38 @@ public:
     }
 
 private:
+    /// The whole configuration, the instance disabled first and left so.
+    static bool write_config(const SercomUartConfig& cfg, uint32_t spins) {
+        if (!sercom_uart_config_valid(cfg)) {
+            return false;
+        }
+        if (!enable(false, spins)) {
+            return false;
+        }
+        regs().SERCOM_INTENCLR = SercomFlag::all;
+        regs().SERCOM_CTRLA = sercom_uart_ctrla(cfg);
+        regs().SERCOM_CTRLB = sercom_uart_ctrlb(cfg);
+        // Writing CTRLB again before this clears is an APB ERROR
+        // (31.8.10) - the one synchronization here that is not merely
+        // about knowing when a setting took effect.
+        if (!wait_sync(SERCOM_USART_INT_SYNCBUSY_CTRLB_Msk, spins)) {
+            return false;
+        }
+        regs().SERCOM_CTRLC = sercom_uart_ctrlc(cfg);
+        regs().SERCOM_BAUD = cfg.baud;
+        regs().SERCOM_RXPL = cfg.rx_pulse;
+        regs().SERCOM_DBGCTRL =
+            cfg.debug_stop ? static_cast<uint8_t>(SERCOM_USART_INT_DBGCTRL_DBGSTOP_Msk) : 0u;
+        clear_status(SercomStatus::receive_errors | SercomStatus::sync_field_error |
+                     SercomStatus::collision | SercomStatus::transmitter_empty);
+        regs().SERCOM_INTFLAG = SercomFlag::all;
+        const uint8_t armed = sercom_uart_sof_armed(cfg);
+        if (armed != 0u) {
+            regs().SERCOM_INTENSET = armed;
+        }
+        return true;
+    }
+
     /// One CTRLB direction bit, written as the whole register: the other
     /// CTRLB bits are enable-protected, so on a running instance their
     /// share of the store is discarded (31.6.2.1) - and it carries the

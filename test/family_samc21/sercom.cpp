@@ -172,12 +172,132 @@ static_assert((sercom_uart_ctrla(frac) & SERCOM_USART_INT_CTRLA_SAMPA_Msk) ==
 static_assert((sercom_uart_ctrlb(ir) & SERCOM_USART_INT_CTRLB_ENC_Msk) != 0);
 static_assert((sercom_uart_ctrlb(frac) & SERCOM_USART_INT_CTRLB_ENC_Msk) == 0);
 
+// ---- the pinouts beside TxD (TXPO 0x2 and 0x3) -------------------------------
+// Both put TxD on PAD[0] and an output (RTS or TE) on PAD[2]; CTS is PAD[3].
+constexpr UartPads pad0_pads{
+    .tx = SercomPad::pad0,
+    .rx = SercomPad::pad0,
+    .tx_pin = {'A', 4, PinFunction::d},
+    .rx_pin = {'A', 4, PinFunction::d},
+};
+constexpr SercomUartConfig rs485{.pads = pad0_pads, .baud = 60503, .pinout = UartPinout::rs485,
+                                 .guard_time = 7};
+constexpr SercomUartConfig flow{.pads = {.tx = SercomPad::pad0, .rx = SercomPad::pad1,
+                                         .tx_pin = {'A', 4, PinFunction::d},
+                                         .rx_pin = {'A', 5, PinFunction::d}},
+                                .baud = 60503, .pinout = UartPinout::flow_control};
+static_assert(sercom_uart_config_valid(rs485) && sercom_uart_config_valid(flow));
+static_assert(sercom_uart_txpo(rs485) == 3 && sercom_uart_txpo(flow) == 2);
+static_assert(sercom_uart_txpo(sync_host) == 1 && sercom_uart_txpo({.pads = pad0_pads}) == 0);
+static_assert(uart_control_pad(rs485) == SercomPad::pad2 && !uart_control_pad(sync_host));
+static_assert((sercom_uart_ctrla(rs485) & SERCOM_USART_INT_CTRLA_TXPO_Msk) ==
+              SERCOM_USART_INT_CTRLA_TXPO(3));
+static_assert(sercom_uart_ctrlc(rs485) == SERCOM_USART_INT_CTRLC_GTIME(7));
+// TxD on PAD[2] has no such pinout; RxD cannot sit on the output pad.
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .pinout = UartPinout::rs485}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = {.tx = SercomPad::pad0, .rx = SercomPad::pad2, .tx_pin = {'A', 4, PinFunction::d},
+              .rx_pin = {'A', 6, PinFunction::d}},
+     .pinout = UartPinout::rs485}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = {.tx = SercomPad::pad0, .rx = SercomPad::pad3, .tx_pin = {'A', 4, PinFunction::d},
+              .rx_pin = {'A', 7, PinFunction::d}},
+     .pinout = UartPinout::flow_control}));
+static_assert(sercom_uart_config_valid(
+    {.pads = {.tx = SercomPad::pad0, .rx = SercomPad::pad3, .tx_pin = {'A', 4, PinFunction::d},
+              .rx_pin = {'A', 7, PinFunction::d}},
+     .pinout = UartPinout::rs485}));
+// Handshaking is asynchronous on the internal clock (31.6.3.2).
+static_assert(!sercom_uart_config_valid(
+    {.pads = flow.pads, .baud = 11, .synchronous = true, .pinout = UartPinout::flow_control}));
+static_assert(!sercom_uart_config_valid(
+    {.pads = flow.pads, .external_clock = true, .pinout = UartPinout::flow_control}));
+// GTIME: three bits, RS-485 alone.
+static_assert(!sercom_uart_config_valid({.pads = pad0_pads, .pinout = UartPinout::rs485,
+                                         .guard_time = 8}));
+static_assert(!sercom_uart_config_valid({.pads = pad0_pads, .guard_time = 1}));
+
+// ---- the LIN families (FORM 0x2, 0x4, 0x5) ----------------------------------
+constexpr uint16_t frac19200 = sercom_fractional_baud_reg(24'000'000, 19'200).value();
+static_assert(frac19200 == ((1u << 13) | 78u));   // 78.125
+constexpr SercomUartConfig lin_host{.pads = pad0_pads, .baud = frac19200,
+                                    .sampling = UartSampling::x16_fractional,
+                                    .form = UartForm::lin_host, .lin_break = 3,
+                                    .lin_header_delay = 2};
+constexpr SercomUartConfig lin_client{.pads = link_pads, .baud = frac19200,
+                                      .sampling = UartSampling::x16_fractional,
+                                      .form = UartForm::auto_baud};
+constexpr SercomUartConfig ab_parity{.pads = link_pads, .format = {.parity = UartParity::odd},
+                                     .baud = frac19200, .sampling = UartSampling::x16_fractional,
+                                     .form = UartForm::auto_baud};
+static_assert(sercom_uart_config_valid(lin_host) && sercom_uart_config_valid(lin_client) &&
+              sercom_uart_config_valid(ab_parity));
+static_assert(sercom_uart_form(lin_host) == 0x2 && sercom_uart_form(lin_client) == 0x4 &&
+              sercom_uart_form(ab_parity) == 0x5 && sercom_uart_form(frac) == 0x0 &&
+              sercom_uart_form({.pads = link_pads, .format = {.parity = UartParity::even}}) == 0x1);
+static_assert(sercom_uart_ctrlc(lin_host) ==
+              (SERCOM_USART_INT_CTRLC_BRKLEN(3) | SERCOM_USART_INT_CTRLC_HDRDLY(2)));
+static_assert(lin_break_bits(0) == 13 && lin_break_bits(1) == 17 && lin_break_bits(2) == 21 &&
+              lin_break_bits(3) == 26);
+static_assert(lin_break_to_sync_bits(0) == 1 && lin_break_to_sync_bits(3) == 14 &&
+              lin_sync_to_id_gap_bits(0) == 0 && lin_sync_to_id_gap_bits(2) == 7 &&
+              lin_sync_to_id_gap_bits(3) == 13);
+// 16x fractional, asynchronous; no parity for the host; BRKLEN/HDRDLY under it alone.
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .baud = 60503,
+                                         .form = UartForm::auto_baud}));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .baud = 400,
+                                         .sampling = UartSampling::x8_fractional,
+                                         .form = UartForm::lin_host}));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .format = {.parity = UartParity::even},
+                                         .baud = frac19200,
+                                         .sampling = UartSampling::x16_fractional,
+                                         .form = UartForm::lin_host}));
+static_assert(!sercom_uart_config_valid({.pads = link_pads, .baud = frac19200,
+                                         .sampling = UartSampling::x16_fractional,
+                                         .lin_break = 1}));
+static_assert(!sercom_uart_config_valid({.pads = pad0_pads, .baud = frac19200,
+                                         .sampling = UartSampling::x16_fractional,
+                                         .pinout = UartPinout::rs485,
+                                         .form = UartForm::auto_baud}));
+// Erratum 1.17.2: revisions B..E (1..4) do not flag a missing stop bit.
+static_assert(!sercom_autobaud_checks_stop(1) && !sercom_autobaud_checks_stop(4) &&
+              sercom_autobaud_checks_stop(5));
+
+// ---- collision detection and start-of-frame detection -----------------------
+constexpr SercomUartConfig one_wire{.pads = pad0_pads, .baud = 60503, .collision_detect = true};
+static_assert(sercom_uart_config_valid(one_wire));
+static_assert((sercom_uart_ctrlb(one_wire) & SERCOM_USART_INT_CTRLB_COLDEN_Msk) != 0);
+static_assert(!sercom_uart_config_valid({.pads = pad0_pads, .rx = false,
+                                         .collision_detect = true}));
+// Erratum 1.17.12: the APB clock higher than the core clock.
+static_assert(sercom_uart_clocks_valid(one_wire, {48'000'000, 24'000'000}));
+static_assert(!sercom_uart_clocks_valid(one_wire, {48'000'000, 48'000'000}));
+static_assert(sercom_uart_clocks_valid(frac, {24'000'000, 48'000'000}));   // no COLDEN, no rule
+constexpr SercomUartConfig sof{.pads = link_pads, .baud = 60503,
+                               .start_of_frame = UartStartOfFrame::wake_on_rxs};
+static_assert((sercom_uart_ctrlb(sof) & SERCOM_USART_INT_CTRLB_SFDE_Msk) != 0);
+static_assert(sercom_uart_sof_armed(sof) == SercomFlag::rxs);
+static_assert(sercom_uart_sof_armed({.start_of_frame = UartStartOfFrame::wake_on_both}) ==
+              (SercomFlag::rxs | SercomFlag::rxc));
+static_assert(sercom_uart_sof_armed(frac) == 0 &&
+              (sercom_uart_ctrlb(frac) & SERCOM_USART_INT_CTRLB_SFDE_Msk) == 0);
+
 void link_resource_verbs() {
     using Sc = Sercom<1>;
     (void)Sc::configure<sync_host>();
     (void)Sc::configure<sync_client>();
     (void)Sc::configure<ir>();
     (void)Sc::configure<frac>();
+    (void)Sc::configure<rs485>();
+    (void)Sc::configure<flow>();
+    (void)Sc::configure<lin_host>();
+    (void)Sc::configure<lin_client>();
+    (void)Sc::configure<sof>();
+    (void)Sc::configure<one_wire, SercomClocks{48'000'000, 24'000'000}>();
+    (void)Sc::configure(one_wire, SercomClocks{48'000'000, 24'000'000});
+    (void)Sc::configure(one_wire);   // refused at run time: no clocks stated
+    (void)Sc::lin_command(LinCommand::header_on_write);
+    (void)Sc::lin_command(LinCommand::break_on_write);
     (void)Sc::enable_tx(false);
     (void)Sc::enable_tx(true);
     (void)Sc::enable_rx(false);

@@ -555,7 +555,11 @@ the listing's count above.
   next sync field is learned.
 - **A break from outside is a frame error with data zero.** Twenty bit
   times of low from the peer arrive at a normal receiver as one frame
-  with FERR and 0x00.
+  with FERR and 0x00. A LIN header from the SAM C21's host at 19200 - a
+  break of 13, 17, 21 or 26 bit times, then 0x55 and the identifier -
+  arrives as exactly three frames, the break one 0x00 with FERR: however
+  long the low, the receiver starts no second frame inside it
+  (`test_samc_uart` O, this board the receiving peer).
 - **The receive FIFO keeps three frames, and the third is the NEWEST.**
   Eight frames flooded at full rate with nothing read leave exactly
   three readable: the two oldest and then the LAST frame on the line,
@@ -636,6 +640,12 @@ the listing's count above.
   as fast as the host clocks them: draining after the fact returns three
   frames whatever the wire did - the FIFO depth above, and the reason a
   client direction looks broken unless the reader collects live.
+- **A synchronous host's XCK runs while the instance is enabled**,
+  transmitting or not: read from the SAM C21 at the other end of PE2,
+  its pad pulled the other way, about half of 200 readings over two
+  milliseconds were high at an XCK of 100 kHz, with INVEN and without
+  (`test_samc_uart` C, this board the peer, a synchronous host idling).
+  An idle host's XCK is no level a far end can lean on.
 - **Rebase is transparent, under real traffic too.** 24 -> 12 -> 24 MHz
   with the USART among a `DynamicClock`'s users: loop-back traffic stays
   clean across every switch and the bit time holds at 8.7 us (208

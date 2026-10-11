@@ -3,14 +3,17 @@
 Documents of record: SAM C20/C21 data sheet DS60001479M - SERCOM
 common ch. 30 (the baud generators, 30.6.2.3 table 30-2), USART
 ch. 31 (clock generation and the synchronous clock 31.6.2.3, transmission
-and reception 31.6.2.5-31.6.2.6, IrDA 31.6.3.3, the loop-back 31.6.3.8,
-start-of-frame detection 31.6.3.9, sample adjustment 31.6.3.10, the DMA
-and interrupt requests 31.6.4, CTRLA to RXPL 31.8.1-31.8.5, INTFLAG and
-STATUS 31.8.8-31.8.9) - and errata DS80000740S items 1.17.15 and
-1.17.16, both encoded in code (1.17.4, 1.17.14 and 1.17.19 are named
-where their fields live, 1.17.2 and 1.17.12 where the features they
-touch are listed as not built), and 1.10.4 (the DMAC's,
-[dmac.md](dmac.md)). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
+and reception 31.6.2.5-31.6.2.6 with the operational range 31.6.2.6.4,
+hardware handshaking 31.6.3.2, IrDA 31.6.3.3, break detection and
+auto-baud 31.6.3.4, the LIN host 31.6.3.5, RS485 31.6.3.6, collision
+detection 31.6.3.7, the loop-back 31.6.3.8, start-of-frame detection
+31.6.3.9, sample adjustment 31.6.3.10, the DMA and interrupt requests
+31.6.4, CTRLA to RXPL 31.8.1-31.8.5, INTFLAG and STATUS 31.8.8-31.8.9) -
+and errata DS80000740S items 1.17.15, 1.17.16, 1.17.12 (collision
+detection's clock rule, refused at configuration) and 1.17.2 (auto-baud's
+missing stop bit, answered by the die's revision), all encoded in code
+(1.17.4, 1.17.14 and 1.17.19 are named where their fields live), and
+1.10.4 (the DMAC's, [dmac.md](dmac.md)). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
 `Uart<n, pads, rx, tx, TxEngine>` task, the one engine slot - the
 transmit one - optional). The family fixture is `test/family_samc21/sercom.cpp` plus
 its negatives under `brio check samc21`; the bench suite is
@@ -111,6 +114,49 @@ chapter describes, TxD tri-stated, is 31.6.3.7's after a collision - so
 a pad that must carry no driver is taken from the SERCOM or the instance
 disabled.
 
+**Four pinouts beside TxD** (CTRLA.TXPO, 31.8.1; `UartPinout`): codes
+0x0 and 0x1 put TxD on PAD[0] or PAD[2] with XCK beside it; 0x2 puts TxD
+on PAD[0], RTS on PAD[2] and CTS on PAD[3] - HARDWARE HANDSHAKING
+(31.6.3.2), asynchronous on the internal clock only: the receiver drives
+RTS high while it is disabled or its buffer full, and a character starts
+only while CTS reads 0 -; 0x3 puts TxD on PAD[0], XCK on PAD[1] and TE on
+PAD[2] - RS485 (31.6.3.6), the USART frame formats only: TE is high from
+a frame's start bit to the end of its stop bit and CTRLC.GTIME bit times
+more (0..7), and TXC rises only once TE has fallen. RxD cannot share the
+output pad, nor CTS's.
+
+**Three frame families** (CTRLA.FORM; `UartForm`), both LIN ones
+asynchronous at 16x on the FRACTIONAL generator (31.6.3.4, 31.6.3.5):
+the USART frame (0x0, 0x1 with parity); the LIN HOST (0x2, no parity
+code), whose transmitter makes the header on CTRLB.LINCMD's strobe - 0x1
+a break of CTRLC.BRKLEN bit times (13, 17, 21, 26) on the next DATA write,
+the sync and identifier then the caller's writes; 0x2 the whole header,
+break, the delay CTRLC.HDRDLY names, 0x55, a second delay and the
+identifier written to DATA - and STATUS.TXE once it is out; and BREAK
+DETECTION WITH AUTO-BAUD (0x4, 0x5): a low of more than 11 nominal bit
+times raises INTFLAG.RXBRK, the 0x55 sync field after it is timed and the
+measured rate written into BAUD and FP, a sync that is not 0x55 raises
+STATUS.ISF with ERROR and leaves BAUD alone. Erratum 1.17.2: on revisions
+B to E of the E, G and J parts a missing stop bit in auto-baud mode is
+flagged neither as ISF nor as FERR (`sercom_autobaud_checks_stop()` asks
+the die's DID.REVISION).
+
+**Collision detection** (CTRLB.COLDEN, 31.6.3.7) compares every bit the
+transmitter sends with what the receiver takes off the same wire - both
+directions enabled, the receiver on the transmitter's pad or wire. A bit
+that differs aborts the transfer and clears TXEN (TxD tri-stated) and
+raises STATUS.COLL with ERROR; 31.6.3.7 also has the transmit buffer
+flushed and TXC raised, which this die does not do (Bench findings).
+Erratum 1.17.12: the transfer is not aborted when the SERCOM's APB clock
+is lower than its core clock - the work-around, an APB clock always
+higher, is the rule `configure()` enforces (`SercomClocks`).
+
+**Start-of-frame detection** (CTRLB.SFDE, 31.6.3.9): a 1-to-0 transition
+on RxD raises INTFLAG.RXS, and with the internal fast oscillator as the
+core's source wakes the device from standby; 31.8.2's table names which
+interrupt wakes it (RXS, RXC or both) and reserves SFDE with neither -
+`UartStartOfFrame`'s three rows, the reserved one unwritable.
+
 **A SERCOM input pin can only pull DOWN** (31.5.1, verified
 verbatim): PULLEN still works under the peripheral function, but the
 pull-up is not available - an idle RxD line must be held high by
@@ -143,8 +189,9 @@ on a run's cost:
 - THE SYNCHRONOUS MODE: OFFERED at the resource - a bit in two reference
   clocks as the host, no oversampling at all.
 - TE (RS-485, TXPO 0x3, GTIME), RTS/CTS (TXPO 0x2), LIN's header
-  generation (LINCMD, BRKLEN, HDRDLY), collision detection (COLDEN): NOT
-  BUILT - "Not covered yet".
+  generation (LINCMD, BRKLEN, HDRDLY), collision detection (COLDEN):
+  OFFERED at the resource (`SercomUartConfig`, `lin_command()`); the task
+  carries none of them - a console has no second driver on its wire.
 
 **The receive side, item by item** - what the chapter offers for
 taking a burst, and what this driver does with each:
@@ -163,10 +210,11 @@ taking a burst, and what this driver does with each:
   counter of bit times after the last stop bit exists. The interrupt
   receiver needs neither: it has an edge on every character.
 - START-OF-FRAME DETECTION (31.6.3.9, CTRLB.SFDE, the RXS interrupt):
-  DECLINED for the edge - it says a character is beginning, not that a
-  run has ended; its use is the wake from standby, a power chapter's.
-- RXBRK: the break of the LIN and auto-baud formats (31.6.3.4-31.6.3.5),
-  which are not built.
+  OFFERED at the resource (`UartStartOfFrame`), DECLINED by the task for
+  the edge - it says a character is beginning, not that a run has ended;
+  its use is the wake from standby, a power chapter's.
+- RXBRK and the auto-baud measurement (31.6.3.4): OFFERED at the resource
+  (`UartForm::auto_baud`, the learned rate read back with `baud_reg()`).
 - THE ERRORS: STATUS's PERR, FERR and BUFOVF clear by being written
   (31.6.2.6.2, 31.8.9) - NO READ OF DATA, so a clear never takes a byte
   a channel was owed. The interrupt receiver reads STATUS before each
@@ -197,13 +245,38 @@ taking a burst, and what this driver does with each:
   (CTRLA.SAMPR's five codes), `sample_adjust` (SAMPA), `synchronous`
   (CMODE), `external_clock` (MODE 0x0), `invert_clock` (CPOL), `irda`
   (ENC) with `rx_pulse` (RXPL), the two direction enables, RUNSTDBY,
-  IBON, DBGSTOP. `sercom_uart_config_valid()` is the chapter's rules
-  between them: SAMPA two bits; a synchronous link samples nothing,
-  keeps RxD off the XCK pad (`uart_xck_pad(tx)`) and as the host has an
-  8-bit BAUD; a fractional BAUD's integer part at least 1; IrDA
-  asynchronous at 16x arithmetic, and RXPL under it alone. The
-  USART_EXT view is static_asserted to share USART_INT's layout, so one
-  view speaks for both clockings.
+  IBON, DBGSTOP, `pinout` (`UartPinout`: TXPO 0x2 and 0x3) with
+  `guard_time` (GTIME), `form` (`UartForm`: FORM's three families) with
+  `lin_break` (BRKLEN) and `lin_header_delay` (HDRDLY), `collision_detect`
+  (COLDEN), `start_of_frame` (`UartStartOfFrame`: SFDE and the interrupt
+  it wakes on). `sercom_uart_config_valid()` is the chapter's rules
+  between them: SAMPA two bits; a synchronous link samples nothing, keeps
+  RxD off the XCK pad (`uart_xck_pad(tx)`) and as the host has an 8-bit
+  BAUD; a fractional BAUD's integer part at least 1; IrDA asynchronous at
+  16x arithmetic, and RXPL under it alone; the two pinouts beside TxD with
+  TxD on PAD[0], RxD off PAD[2] (and off PAD[3] beside CTS), handshaking
+  asynchronous on the internal clock, RS485 on the USART frame, GTIME
+  three bits under RS485 alone; the LIN families asynchronous at 16x
+  fractional, no parity for the host, BRKLEN and HDRDLY two bits under it
+  alone; collision detection with both directions. The register words are
+  `sercom_uart_ctrla()`, `_ctrlb()`, `_ctrlc()` (with `sercom_uart_txpo()`,
+  `sercom_uart_form()`, `uart_control_pad()`). The USART_EXT view is
+  static_asserted to share USART_INT's layout, so one view speaks for
+  both clockings.
+- **Collision detection's clocks** - `SercomClocks{apb_hz, core_hz}` and
+  `sercom_uart_clocks_valid()`: a COLDEN configuration is written only
+  through `configure(cfg, clocks)` (or `configure<cfg, clocks>()`), and
+  only with the APB clock the higher (erratum 1.17.12); the clockless
+  `configure()` refuses it, its compile-time twin fails to compile.
+- **The LIN header's verbs** - `lin_command(LinCommand)` strobes
+  CTRLB.LINCMD on a running LIN host (write-synchronized like the
+  direction verbs; false on another form); `lin_break_bits()`,
+  `lin_break_to_sync_bits()` and `lin_sync_to_id_gap_bits()` are the
+  header's lengths in bit times, the last as this silicon makes it (Bench
+  findings); `SercomStatus::transmitter_empty` is STATUS.TXE.
+- **`sercom_autobaud_checks_stop(revision)`** - erratum 1.17.2's
+  revision matrix for the E, G and J parts, keyed by `Dsu::device_id()`'s
+  DID.REVISION.
 - **The baud arithmetic**, pure and constexpr: `sercom_baud_reg()` /
   `sercom_actual_baud()` (arithmetic, any S), `sercom_fractional_baud_reg()`
   / `sercom_fractional_actual_baud()`, `sercom_uart_baud_reg()` /
@@ -430,6 +503,44 @@ constexpr auto b = brio::sercom_closest_baud(24'000'000, 3750).value();  // frac
 (void)Link::enable_rx(true);
 // A pad that must carry no driver is TAKEN, not disabled:
 brio::Pin<'A', 18>::release();                  // TxD's pad back to PORT
+```
+
+RS485 with three bit times of guard, TxD on PAD[0] and TE on PAD[2] -
+the pinout and GTIME in the configuration, TE's pin muxed like TxD's:
+
+```cpp
+(void)Link::configure({.pads = {.tx = brio::SercomPad::pad0, .rx = brio::SercomPad::pad0,
+                                .tx_pin = {'A', 16, brio::PinFunction::c},
+                                .rx_pin = {'A', 16, brio::PinFunction::c}},
+                       .baud = b.reg, .sampling = b.sampling,
+                       .pinout = brio::UartPinout::rs485, .guard_time = 3});
+brio::Pin<'A', 18>::function(brio::PinFunction::c);   // TE
+(void)Link::enable(true);
+```
+
+A LIN header, the whole of it on one strobe, and a LIN client learning the
+rate from a foreign break and sync (both 16x fractional):
+
+```cpp
+(void)Link::configure({.pads = link_pads, .baud = frac, .sampling = brio::UartSampling::x16_fractional,
+                       .form = brio::UartForm::lin_host, .lin_break = 1, .lin_header_delay = 1});
+(void)Link::enable(true);
+(void)Link::lin_command(brio::LinCommand::header_on_write);
+Link::data(0x3C);                                    // break, 0x55, then 0x3C
+
+(void)Link::configure({.pads = link_pads, .baud = fallback, .sampling = brio::UartSampling::x16_fractional,
+                       .form = brio::UartForm::auto_baud});
+(void)Link::enable(true);
+// ... INTFLAG.RXBRK, then Link::baud_reg() holds the learned BAUD and FP
+```
+
+A one-wire bus with collision detection: the clocks stated, the APB's the
+higher (erratum 1.17.12):
+
+```cpp
+(void)Link::configure({.pads = wire_pads, .baud = b.reg, .sampling = b.sampling,
+                       .collision_detect = true},
+                      brio::SercomClocks{.apb_hz = 48'000'000, .core_hz = 24'000'000});
 ```
 
 A loop with no wire, for a test: one pin named for both directions.
@@ -714,6 +825,115 @@ bridge between the pads and the PC - as much as of the driver.
   clocked. The direction enables are synchronized in XCK's domain; a
   caller on an external clock bounds that wait short and judges
   `enabled()`.
+**THIS SERCOM AS THE DUT, ACROSS THE WIRE** (`test_samc_uart`'s second
+set, `y`: SERCOM1 on the four wires against an AVR128DB48's USART4 on its
+24 MHz crystal, this board's core on generator 2 - its own 24 MHz crystal -
+unless a figure says otherwise; the far end times characters on its
+crystal, and a pad log - a masked loop counting its own turns, calibrated
+by the signal's own bit edges - times this board's pads):
+
+- **The rate, judged by a foreign receiver** (letter K): a gapless burst
+  of 300 ms (30000 frames at most) per rung, its span on the far crystal
+  against the run's length at the rate asked, beside the error the
+  register predicts: 2400 baud +1324 to +1412 ppm (+1358 predicted), 9600
+  -1019 to -1021 (-1026), 3750 on the fractional generator 0 to +2 (0),
+  115200 arithmetic -22 to -28 (-32) and fractional +1605 to +1607
+  (+1602), 921600 -3 to -5 (-7), 1 Mbaud arithmetic +10 to +11 (+7) and
+  fractional +3 to +5 (0), 1.5 Mbaud +5 (0), 2 Mbaud at 8x arithmetic +14
+  to +15 (+7) and fractional +5 to +7 (0), 3 Mbaud at 8x +3 to +10 (0),
+  3x arithmetic at 1, 2 and 3 Mbaud +3 to +10 (0) - every rung within the
+  crystals' budget and the far stamping grain of the prediction, and every
+  rung's eight echoes back clean. The two crystals agree to some ten ppm.
+  On generator 0, OSC48M, the console's 115200 reads -6350 to -6451 ppm:
+  that oscillator is 0.64 % slow against the far crystal on this board
+  ([../boards/samc21j.md](../boards/samc21j.md)), inside table 31-3's
+  recommended 2 %. THE FEEDER MATTERS AT 3 MBAUD: DATA refilled by a
+  polled loop with interrupts enabled ran -850 to -955 ppm - one SysTick
+  entry outlasts the one frame of slack the transmit buffer gives - and
+  the same run through the transmit engine (blocks of half its 512-byte
+  ring) -2730 to -3265 ppm, about one frame lost at every block boundary
+  (the completion's entry to the next block's first beat); the judged runs
+  are fed masked.
+- **The frame matrix** (letter L) against the far USART, echoed both ways
+  at 115200: 5N1, 6O2, 7E1, 8O2, 8E2, 8N2, 9N1 and 9E1 clean, one stop bit
+  receiving two and two received by one; CTRLA.DORD = 0 receives a far
+  LSB-first byte bit-reversed and sends MSB first.
+- **Errors with known causes** (letter M): odd parity into an even
+  receiver raises PERR on every frame and the data still reads; a 20-bit
+  break arrives as one 0x00 with FERR. A gapless flood of eight read late
+  leaves three: the two oldest in the two buffer levels, the newest in the
+  shift register (0xB0, 0xB1, 0xB7) - under IBON 0 STATUS.BUFOVF appears
+  as the second read makes room (31.6.2.6.2's "after the received data is
+  read"), under IBON 1 it stands before any read.
+- **Start-of-frame detection** (letter M): with SFDE, RXS rises 9.31 to
+  9.37 bit times ahead of RXC (the start bit's edge against the stop bit's
+  vote); without it, no RXS.
+- **The operational range** (letter N), frames of zeros from the far
+  USART at 9600 off by a whole per cent: clean from -4 % to +5 %, broken
+  from -5 % (every frame FERR) and from +6 % (frames lost, the last data
+  bit voted in the stop bit) - table 31-3's 96.00 % to 105.26 % for D = 8,
+  to the per cent.
+- **The receiver's votes, measured on the pad** (letter N): a frame of
+  zeros whose cell 5 the far bit-banger stretches reads clean up to a low
+  run of 9.385 to 9.452 bits and raises FERR from 9.424 to 9.480 - the stop
+  bit decided 9.40 to 9.47 bits from the start edge; a lone low pulse is a
+  start bit from 0.40 to 0.42 of a bit under SAMPA 0 (decided at 0.38 to
+  0.41) and from 0.65 to 0.71 under SAMPA 2 (0.63 to 0.69) - four samples
+  later, to the sample of synchronization 31.6.3.10's note allows each
+  frame.
+- **Auto-baud from a foreign sender** (letter O): the far board's break,
+  0x55 and four payload frames at 9600, 57600, 115200 and 123456 baud,
+  this receiver starting from the rate itself and from half of it: BAUD
+  and FP learned as 156.250, 26.0, 13.0 and 12.125 - 8 f_ref / (16 f_baud)
+  to the eighth below - and the payload read at the learned rate. A sync of
+  0x53 raises ISF with ERROR and leaves BAUD at its fallback; a low of 10
+  bit times is no break, 12 is. On this die (revision F) a sync whose stop
+  bit is missing - the bit-banger's last data bit stretched over it -
+  raises ISF: erratum 1.17.2 does not apply.
+- **The LIN header, on its own pad** (letter O, 19200): the break 13.01 to
+  13.05, 16.99 to 17.03, 20.99 to 21.12 and 25.99 to 26.15 bits for BRKLEN
+  0 to 3; from the break's end to the sync 0.99 to 1.02, 3.98 to 4.01,
+  7.99 to 8.04 and 13.97 to 14.07 bits for HDRDLY 0 to 3, as 31.8.3 says;
+  and from the sync's stop bit to the identifier 0.00 to 0.02, 2.98 to
+  3.01, 6.99 to 7.04 and 12.97 to 13.07 bits - ONE LESS THAN THE
+  BREAK-TO-SYNC DELAY AT EVERY HDRDLY, where 31.8.3's table gives the
+  sync-to-identifier delay as 1, 4, 4 and 4 (`lin_sync_to_id_gap_bits()`
+  speaks the silicon). STATUS.TXE stands once the header is out; the far
+  plain receiver takes the break as one 0x00 with FERR, then 0x55 and the
+  identifier - the same under LINCMD 0x1, the sync and identifier written
+  by software.
+- **The synchronous roles** (letter Q): as the host at 100 kHz and 1 MHz,
+  CPOL 0 and 1, eight frames into the far client exact; as the client on
+  the far host's XCK at 100 kHz, 1 MHz, 4 MHz and 12 MHz (CLK_PER / 2 of
+  the far board), eight frames exact at each.
+- **IrDA** (letter S, 115200): both ways clean - the far receiver inverts
+  its own pin for this coder's high pulses; RXPL against the far coder's
+  3/16 pulse (39 core cycles) takes it up to RXPL 36 and refuses it from
+  38, against its fixed 60-cycle pulse up to 56 and from 58 - a pulse is a
+  0 while it lasts RXPL + 2 core cycles (31.8.5), to the cycle the
+  asynchronous edge gives. The coder cannot be read by a plain receiver,
+  nor a plain transmitter by the decoder.
+- **Hardware handshaking** (letter C): CTS held low (this end's
+  pull-down) lets a frame go, CTSIC unraised; RTS reads low while the
+  receiver has room and high once it is disabled. The far board holds no
+  level on the XCK wire - its synchronous host's XCK runs while the
+  instance is enabled - so CTS high is not judged (below).
+- **RS485** (letter R, on the shared wire): TE rises with the start bit
+  and falls GTIME bit times after the stop bit's end - 0.00, 0.99, 2.97,
+  6.98 bits for GTIME 0, 1, 3, 7 at 19200, the same on both generators,
+  7.00 at 9600, 7.09 at 57600 (a log turn is a twelfth of a bit there) -,
+  TXC rises as TE falls, and TE stays up across four gapless frames.
+- **The one-wire bus and collision detection** (letter W, on the shared
+  wire): half duplex at 19200 against the far onewire, every frame heard
+  back on this end's pad and answered, COLDEN raising nothing on the clean
+  exchange. Against the far collide at 250 kbaud (the far end pulling the
+  wire low into this board's frame of ones): COLL and ERROR rise at the
+  colliding bit and TXEN is cleared - and, unlike 31.6.3.7's steps 2 and 5,
+  TXC does not rise and DRE stays low: the frame waiting in DATA never
+  leaves, and the transmitter stays wedged - re-enabling TXEN does not
+  restart it, nor clearing COLL and ERROR and cycling TXEN; disabling the
+  instance and enabling it again (configure(), enable()) does.
+
 - **The engine's level, read back** (letter d): CHCTRLB.LVL 2 with
   CTRL.LVLEN2 alone set ([dmac.md](dmac.md)).
 - **The kick, measured and retired.** A scratch probe started 400
@@ -742,18 +962,16 @@ Driver gaps (not built):
   which 25.6.7 makes software's to suspend before standby; nothing does
   (dmac.md). Born with the first program that sleeps to standby with an
   engined Uart.
-- Within USART: RS-485/TE with its guard time, collision detection
-  (erratum 1.17.12: it does not abort when the APB clock is slower than
-  the core clock) and auto-baud with break detection (erratum 1.17.2 on
-  revisions B..E) - born with the two-board letters of `test_samc_uart`
-  against an AVR peer that would measure them; RTS/CTS handshaking (TXPO
-  0x2) and LIN's header generation - born with their first user;
-  start-of-frame/RXS wake - a power chapter's; the Uart task on any
-  generator but 0, on another sampling regime or synchronous - the task
-  is the console's, and the resource carries those configurations;
-  9-bit data uses of the task (its rings are bytes); DBGCTRL policy
-  (1.17.4: DBGSTOP does not actually halt transmission - the field is
-  exposed, the erratum named).
+- Within USART, the TASK on any generator but 0, another sampling
+  regime, synchronous, a pinout beside TxD, a LIN form, collision
+  detection or start-of-frame detection - the task is the console's, and
+  the resource carries those configurations; 9-bit data uses of the task
+  (its rings are bytes); the start-of-frame WAKE from standby - the
+  resource writes SFDE and its row, the sleep is a power chapter's; a
+  verb that restarts the transmitter after a collision - only a
+  reconfiguration does (Bench findings), born with the first one-wire
+  program; DBGCTRL policy (1.17.4: DBGSTOP does not actually halt
+  transmission - the field is exposed, the erratum named).
 - A per-package pad table (which pins reach which pads): the same
   device-table job [port.md](port.md) leaves open, born with its first
   user.
@@ -763,12 +981,16 @@ Implemented but not bench-verified:
   and with one engine, and the per-byte plateau through the bridge:
   `serial_speed`'s occupancy and throughput, whose host side - the
   checker of every byte at every rate - is not in `cli/`.
-- RXPL other than 0 (a far IrDA sender whose pulse it would filter -
-  `test_avr_serial` s sweeps the AVR's RXPL, not this one's), SAMPA's
-  voting windows (a letter of this suite receiving a far bit-banger's
-  distorted cell), the asynchronous mode on an external clock (its first
-  user), the 8x and 3x regimes across a wire (the far AVR's own rates are
-  16x or its CLK2X).
+- The asynchronous mode on an external clock (its first user).
+- CTS HIGH holding the transmitter (31.6.3.2): the desk's far board holds
+  no level on the XCK wire - its synchronous host's XCK runs - so letter C
+  judges CTS low alone; a far end that holds that wire high measures it
+  (a usart_link op that parks the far XCK at a level).
+- Erratum 1.17.2's affected revisions (B to E): `sercom_autobaud_checks_stop()`
+  says they do not flag a missing stop bit; the desk's die is revision F,
+  where letter O measures that it does.
+- Collision detection's failing clock pairing (erratum 1.17.12, an APB
+  clock not above the core clock): refused at configuration, so never run.
 - `rebase()` (no dynamic clock exists on this target to drive it);
   nine-bit frames (this transport's rings are bytes); the USART
   personality on SERCOM0, 2, 3 and 4 (SERCOM5 runs the console, SERCOM1

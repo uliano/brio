@@ -43,6 +43,14 @@
 // TCB1 cascaded at CLK_PER (avrdx/tcb.hpp's CascadedCounter), so its
 // counts are the same ticks with no conversion.
 //
+// A DUT OF ANOTHER FAMILY is met where its silicon differs (the SAM C21's
+// SERCOM on this desk): an IRCOM receive finds the far coder's pulse sense
+// on its idle line and inverts its receive pin for a coder that pulses
+// high (match_ircom_sense()); onewire answers after the command channel's
+// turnaround, since a push-pull DUT's stop bit is still on the wire when
+// RXCIF rises; and the echo/sink loop keeps a gapless 3 Mbaud burst
+// (run_echo_as()).
+//
 // The banner reports the USERROW board label and whether THIS board's
 // 24 MHz crystal started: the peer's clock is the reference the DUT's
 // auto-baud and error-tolerance tests are measured against, so its
@@ -82,7 +90,7 @@ using LinePin = Pin<'E', 0>;      // TXD pad: the bit-bang and break line
 using RxdPin = Pin<'E', 1>;       // RXD pad: DRIVE_RXD drives the DUT's TXD
 using XckPin = Pin<'E', 2>;
 
-constexpr uint16_t firmware_version = 0x0103;   ///< see usart_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0104;   ///< see usart_link.hpp's Ident
 
 /// THE SPAN'S RULER: TCB0 counts CLK_PER, TCB1 counts TCB0's overflow,
 /// both capture on one software event - a coherent 32-bit count of 24 MHz
@@ -258,6 +266,7 @@ void line_listen(bool wait = true) {
 /// (hold_pads): the peer is dark.
 bool command_mode() {
     set_inven('E', 2, false);
+    set_inven('E', 1, false);
     const bool ok = Link::init({.route = UsartRoute::def,
                                 .baud = usart_baud_reg(SysClock::hz, link::command_baud),
                                 .tx = tx_idle_on(),
@@ -420,24 +429,73 @@ void claim_line(uint8_t bm) {
 
 // ---- the actions ----------------------------------------------------------------
 
-link::Report run_echo(const link::Params& a, bool sink) {
+/// THE PULSE SENSE OF THE FAR CODER, read off the idle line. This
+/// board's IRCOM receiver takes a LOW pulse on an idle-HIGH line as a 0
+/// (DS40002247B 27.3.3.2.7: the pins carry the inverted values of the
+/// infrared pulse) - what its own coder and every coder of its family
+/// send. A coder of the opposite sense (the SAM C21's: a HIGH pulse for a
+/// 0, the line idling low, DS60001479M 31.6.3.3) is recognized by the
+/// level its line idles at once the DUT has taken up its end, and the
+/// receive pin is inverted for it (PINnCTRL.INVEN, 18.3.2.3) - the one
+/// inversion this end can supply. Toggling INVEN is an edge on the pin,
+/// so the receiver is flushed after it; command_mode() clears it. On the
+/// crossed pair alone: on a shared line the pin is this board's TXD too,
+/// and INVEN would invert what it sends.
+void match_ircom_sense() {
+    if (shared()) return;
+    for (uint16_t k = 0; k < 300u; ++k) {          // 300 us of idle line
+        if ((PORTE.IN & RxdPin::mask) != 0u) return;   // idles high: the sense matches
+        delay_us(clock, 1);
+    }
+    set_inven('E', 1, true);
+    delay_us(clock, 20);
+    Link::flush_rx();
+}
+
+/// THE HOT PATH, the sink's above all: a far transmitter's gapless burst
+/// arrives a frame every 80 CPU cycles at 3 Mbaud, and every character is
+/// stamped as it completes, so a turn that lags the wire both loses
+/// frames and moves the stamps. COUNTED IN THE RELEASE LISTING: a clean
+/// character's sink path is the RXCIF test, the stamp's event strobe, the
+/// two data-register reads, the error test, the sum and the count - some
+/// twenty-five cycles, no call (the frame read is the driver's inline
+/// receive_as<>() for the character size the Cfg names - the loop is
+/// FLATTENED, or the frame's out-of-line frame_of() is a call and a stack
+/// frame a character -, the counters are locals); an idle turn reads the
+/// millisecond clock once in 256. Before,
+/// a call to receive() and one to account() a character and a millis()
+/// call every idle turn took the loop past 120 cycles, and a 2 Mbaud
+/// burst lost one frame in five.
+template <UsartBits B>
+[[gnu::flatten]] link::Report run_echo_as(const link::Params& a, bool sink) {
     link::Report r{};
     settle();
+    if (a.cfg.apply && a.cfg.mode == link::Mode::ircom) match_ircom_sense();
     // Whatever the DUT's own reconfiguration put on the line while this
     // end was already listening is not traffic: a released pad dips, and
     // a dip is a start bit. The DUT holds off until after this point.
     Link::flush_rx();
     (void)Span::captured();             // CAPT clear, so the first read() waits
     uint32_t first = 0;
+    const uint16_t want = a.count;
+    const uint16_t bound = a.ms;
+    uint16_t n = 0, sum = 0;
+    uint8_t ferr = 0, perr = 0, ovf = 0, idle = 0;
     const uint32_t t0 = Ticker::millis();
-    while (r.count < a.count) {
+    while (n < want) {
         if (Link::rxc_flag()) {
             // The stamp first: the character is complete NOW, and what
             // the loop does with it is not the DUT's transmitter.
-            if (r.count == 0) first = Span::read();
+            if (n == 0) first = Span::read();
             else SpanSnap::pulse();
-            const UsartFrame f = Link::receive();
-            account(r, f);
+            const UsartFrame f = Link::receive_as<B>();
+            if (!f.clean()) [[unlikely]] {
+                if (f.frame_error && ferr < 255) ++ferr;
+                if (f.parity_error && perr < 255) ++perr;
+                if (f.overflow && ovf < 255) ++ovf;
+            }
+            sum = static_cast<uint16_t>(sum + f.data);
+            ++n;
             if (!sink) {
                 line_talk();
                 (void)Link::send(f.data, 200'000u);
@@ -445,14 +503,27 @@ link::Report run_echo(const link::Params& a, bool sink) {
             }
             continue;
         }
-        if (Ticker::millis() - t0 >= a.ms) {
+        if (++idle == 0u && Ticker::millis() - t0 >= bound) {
             r.flags |= link::report_timed_out;
             break;
         }
     }
-    if (r.count >= 2) r.span = Span::captured() - first;
+    r.count = n;
+    r.sum = sum;
+    r.ferr = ferr;
+    r.perr = perr;
+    r.ovf = ovf;
+    if (n >= 2) r.span = Span::captured() - first;
     line_listen();
     return r;
+}
+
+/// The loop for the character size the Cfg names: nine bits low byte
+/// first shift the FIFO on RXDATAH, every other size on RXDATAL.
+link::Report run_echo(const link::Params& a, bool sink) {
+    return a.cfg.apply && a.cfg.bits == link::bits9_low
+               ? run_echo_as<UsartBits::nine_low_first>(a, sink)
+               : run_echo_as<UsartBits::eight>(a, sink);
 }
 
 link::Report run_send(const link::Params& a, bool blast) {
@@ -630,6 +701,12 @@ link::Report run_onewire(const link::Params& a) {
         if (Link::rxc_flag()) {
             const UsartFrame f = Link::receive();
             account(r, f);
+            // RXCIF rises in the middle of the DUT's stop bit: answering at
+            // once would start this frame while that stop bit is still on
+            // the wire - a fight when the DUT's transmitter is push-pull
+            // and not open drain (the SAM C21's SERCOM has none). The
+            // command channel's guard, four bit times.
+            turnaround_guard();
             Link::enable_tx(true);                       // talk
             (void)Link::send(static_cast<uint16_t>(f.data ^ 0xFFu), 200'000u);
             (void)Link::wait_line_idle();
