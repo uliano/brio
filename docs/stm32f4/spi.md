@@ -25,12 +25,16 @@ that refuse an absent instance, one pad twice, a host with no MOSI, a
 pad on an absent port, an engine off the request map, an engine on a
 part class whose manual was not read, one engine of two, two engines
 on one stream, engines a word wide, the audio face on an instance that
-has none, on a part class that is not known, and an extension block that
-does not exist. Bench: `test_stm32f4_spi` on the STM32F429I-DISC1,
-against the gyroscope and the display controller the board carries on
-SPI5; on the Nucleo-F446RE's SPI1 with MISO floating, the engined
-request's cost (letter d of `bench_stm32f4`) and the host's own loops
-against the wire and against the vendor's (letter e).
+has none, on a part class that is not known, an extension block that
+does not exist, and a client run of 32-bit words. Bench:
+`test_stm32f4_spi` on the STM32F429I-DISC1, against the gyroscope and
+the display controller the board carries on SPI5, and on the
+Nucleo-F446RE's SPI2 against the STM32G0B1RE it is paired with on the
+desk (that board's `spi_peer`); the stm32f4 `spi_peer` on the same SPI2
+is the G0B1RE suite's client; on the Nucleo-F446RE's SPI1 with MISO
+floating, the engined request's cost (letter d of `bench_stm32f4`) and
+the host's own loops against the wire and against the vendor's (letter
+e).
 
 ## What the silicon does
 
@@ -105,8 +109,9 @@ three of them are answered as code:
 **The audio face is one bit of I2SCFGR**, and which instances have it
 is the manual's memory map and not the header - every SPI_TypeDef of
 the pack declares I2SCFGR and I2SPR, on instances the manual gives no
-I2S at all. It is SPI2 and SPI3 on the F405 class, the F42x/F43x class
-and the F446; every instance from SPI1 to SPI5 on the F411. Full duplex
+I2S at all. It is SPI2 and SPI3 on the F405 class and the F42x/F43x
+class; SPI1, SPI2 and SPI3 on the F446 (RM0390 table 165 - SPI4 has
+none); every instance from SPI1 to SPI5 on the F411. Full duplex
 is a SECOND BLOCK on the classes that have one (I2S2ext, I2S3ext -
 always slaves, on the instance's own clock and word select) and two
 whole instances paired on the F446, which has none.
@@ -228,12 +233,17 @@ taste, and `mosi_speed`, because on a bus of wires the data pad's edge
 is one too and no erratum speaks for it (the breadboard finding
 below).
 
-`SpiClient<n, pins>` - a polled surface with an ISR body: `init`,
-`enable(first)`, `disable`, `write`, `writable`, `poll`, `selected`,
-`select`, `drive_output` (the dark listener), the error verbs,
-`isr()`, `release` (the block reset before the gate, as the host's),
-and `frames_ahead` = 1, this silicon's answer to the one number a
-portable client would need.
+`SpiClient<n, pins>` - the polled RUNS and, as their degenerate case,
+the per-frame verbs, with an ISR body: `init`, `enable()` (SPE up, the
+transmit buffer left empty for a run) and `enable(first)` (SPE up with
+the first answer written), `answer(out, spins)`, `exchange(out, in,
+spins)`, `receive(in, spins)` - each returning a `Run` (`count`, and a
+`RunEnd`: `complete`, `closed`, `stalled`) over `uint8_t` or `uint16_t`
+frames, a wider element refused at compile time - `disable`, `write`,
+`writable`, `poll`, `selected`, `select`, `drive_output` (the dark
+listener), the error verbs, `isr()`, `release` (the block reset before
+the gate, as the host's), and `frames_ahead` = 1, this silicon's answer
+to the one number a portable client would need.
 
 `SpiPins` and `I2sPins` name the pads with the alternate function the
 DATASHEET gives each signal there; the device header carries no pin
@@ -314,8 +324,19 @@ k stored as if nothing happened, the loss seen a handler late inside a
 run and, on the phase's last pair, by no handler at all: a transaction
 that never completes (measured, below). The SR read after the DR read
 sees every overrun up to the read and is the flag's clear. With two in
-flight frame k + 1 is already shifting and the write is k + 2, so the bus stays
-busy through the handler. Two in flight overruns the receive buffer if
+flight the write is frame k + 2, and frame k + 1 is NOT yet shifting at
+RXNE: RXNE rises on the last sampling edge of frame k (26.3.9), half a
+bit before frame k + 1 leaves the Tx buffer at its own first bit, and a
+write in that half bit overwrites it ("the data waiting for transaction
+is overwritten") - measured on SPI2 at PCLK1/256 (half a bit = 512 core
+cycles): one frame of six never clocked, the transaction never
+completing, every arbitrated request answered `spi_timeout`. So the pump
+keeps two in flight only where the half bit is shorter than the
+handler's own entry and read (`spi_isr_entry_cycles` +
+`spi_isr_to_read_cycles` = 27 cycles), and its write waits for TXE
+anyway, a spin the rule keeps inside that entry; elsewhere one frame is
+in flight, and a write at RXNE lands inside the half bit, the bus
+continuous with one frame queued. Two in flight overruns the receive buffer if
 the read comes later than one frame time after RXNE, and the latest it
 can come is THE IMAGE'S HOLD-OFF - the longest it keeps this vector from
 running: a handler that started just before RXNE running its whole body
@@ -354,7 +375,14 @@ so 8-bit frames keep two in flight from /16 (256 cycles) and 16-bit
 frames from /8, and faster than that one frame is in flight, the bus
 idle for the handler; a hold-off of 300 makes the threshold 423 and moves
 both a code slower, /32 and /16 (pinned beside the default's in the
-header). `two_in_flight()` answers the same arithmetic for a program. The D/C boundary drains to one frame either
+header). The half bit then bounds the pump from the other side: two in
+flight at /16 and faster on APB2, at /8 and faster on APB1 (a frame
+there is four HCLK a PCLK cycle, the half bit 2^(c + 2)), so on APB2 at
+the default only /16 in 8-bit frames and /8../16 in 16-bit ones keep
+two, and on APB1 /8 alone in 8-bit frames and /4../8 in 16-bit ones;
+the polled loop, which waits for TXE before every write, keeps the
+hold-off's rule alone.
+`two_in_flight()` answers the pump's arithmetic for a program. The D/C boundary drains to one frame either
 way: the first data frame is written only after the last command frame
 came back, because a frame queued in the transmit buffer goes out the
 moment the one before it ends.
@@ -382,6 +410,66 @@ the two completion styles (the numbers are letter d's and letter e's):
 So a DCS command of one to five bytes takes the pump on an engined host
 too, and a display's pixel rows at /4 take the loop (wire-bound) while
 a bulk read-back takes the engines.
+
+## The client run
+
+A client's unit is the run: the answers to a transaction, or what it
+brings, in one polled call. What this block offers a run, each item used
+or declined:
+
+- **One transmit buffer in front of one shifter** (26.3.9) - USED, and
+  it fixes the shape. The buffer moves into the shifter at a frame's
+  first bit and TXE rises then (ES0298 2.14.6: "once the second bit
+  transaction is ongoing"), so the next answer may be written at any
+  moment from that TXE to the next frame's first bit: SEVEN BITS of
+  window. The runs write on TXE - the buffer refilled as soon as the
+  shifter takes it - where an answer written at the RXNE of the frame
+  before has half a bit.
+- **RXNE on the last sampling edge, a receive buffer one frame deep**
+  (26.3.9) - USED: `exchange()` reads each frame on its RXNE, one turn
+  of two polls, a store and a read inside the next frame.
+- **No FIFO, no frame packing** - the chapter has none: the run's beat is
+  the frame, 8 or 16 bits (DFF), its element type.
+- **No end-of-transaction flag on a slave, BSY no witness** (ES0298
+  2.14.6) - DECLINED BSY: the NSS PAD is the window. A run reads the pad
+  once every four polls of the flag, waits for it to fall before a high
+  pad means the close, and without a pad ends on its count or budget.
+- **The TXE and RXNE interrupts** - DECLINED for the runs: a run is a
+  polled loop and the ISR body stays for a program that wants an
+  interrupt client.
+- **The DMA requests** (SPI2_TX on DMA1 stream 4 and SPI2_RX on stream 3,
+  channel 0 both, RM0390 table 28) - DECLINED in the driver: SpiClient
+  has no engine slots (the gap list); a program binds the streams raw, as
+  the stm32f4 `spi_peer`'s exchange serve does, started before SPE in
+  26.3.11's order so the transmit stream's first beat is the preload.
+- **The overrun** (26.3.10) - `answer()` reads nothing, so OVR rises from
+  the second frame; its tail runs the DR-then-SR sequence. `exchange()`
+  and the start of a run clear it the same way.
+- **CRC, TI frames** - not in the runs: no peer on the desk speaks either.
+
+COST, counted in the release listing (the stm32f4 `spi_peer`'s, SPI2):
+`answer()`'s turn is the TXE poll that hits - a load, a shift, a branch -
+then the answer loaded and stored, seven instructions and two peripheral
+accesses a frame; `exchange()`'s is thirteen instructions and four
+peripheral accesses (the two flag reads that hit, the DR store and the
+DR read), no call in either loop. The vendor's own slave loop (HAL
+v1.8.5 `HAL_SPI_TransmitReceive`, 8-bit, -Os) alternates TXE and RXNE
+through its handle's fields - some forty-five instructions a frame - and
+calls `HAL_GetTick()` on every pass. The runs are always inline and the
+program places their caller: here the flash, which the ART accelerator
+serves at zero wait states.
+
+MEASURED against the STM32G0B1RE host (`test_stm32_spi` letter p, eight
+frames back to back, the peer's DMA serve and its polled run side by
+side): exact both ways at every code to PCLK/4 = 16 MHz on both serves,
+where the RXNE reload this peer ran broke at 1 MHz. The top rung, 32 MHz,
+is outside this client's specification - DS10693 table 63 gives the
+slave 22.5 MHz on SPI1..4, and its note 2 the reason, tv(SO) plus the
+host's setup inside half a clock - and there the answer path fails on
+both serves (the DMA serve still receives every frame exact, the run
+loses one); it is a figure, never a fault to fix. As the client of the
+G0's `host_burst` (letter r of this stratum's suite, twelve frames at 2
+MHz) the exchange run is exact both ways.
 
 ## How to use it
 
@@ -728,41 +816,109 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
   and does not need to be: the fix is on the pads, or on a printed
   board's short traces.
 
-**`SpiClient` is driven on SPI2 against a second board.** The peer
-instrument this stratum carries runs on the STM32F446RE and answers
-the STM32G0B1RE it is paired with on the desk ONE FRAME AHEAD over
-PB12..PB15, the host's command channel at 250 kHz of SCK: a dark
-client that drives MISO only inside an answer window, the four
-transfer modes and both bit orders byte-exact in both directions, a
-bit-order mismatch an exact two-way reversal, four arbitrated
+**`test_stm32f4_spi` on the Nucleo-F446RE**, SPI2 at PCLK1 = 45 MHz
+against the STM32G0B1RE it is paired with on the desk (the stm32g0
+`spi_peer`, firmware 0x0301, on its SPI1), scores **57 of 57** in `z`:
+
+- **The block**: four instances (SPI1 and SPI4 on APB2, SPI2 and SPI3 on
+  APB1), one vector each; the I2S face on SPI1, SPI2 and SPI3 and no
+  extension block (table 165, 26.1.3); SPI2's requests on DMA1 stream 4
+  and stream 3 channel 0 and on no DMA2 cell. The reset values are the
+  chapter's, I2SPR included: 0x0002 as 26.7.9 states, at boot and behind
+  an RCC reset pulse, where the F429's SPI5 reads 0x0000. The refusals
+  are the F429's, the even polynomial ES0298 2.14.4's.
+- **The rates, with the select high**: the eight codes 22500 down to 175
+  kHz; the polled one-frame loop costs a CONSTANT TURN after RXNE - 361
+  to 373 ns (64 to 67 core cycles: the DR read, the next write, the
+  restart, four APB1 accesses at HCLK/4) - visible where it outlasts the
+  half bit RXNE leaves (the last sampling edge, 26.3.9), at /2../16, and
+  hidden by it from /32 down, where the frame time IS eight bits.
+- **THE MODE FAULT BY A SECOND CHIP**: SSI driven low raises MODF 66 core
+  cycles after the store, SPE and MSTR cleared; then with NSS a HARDWARE
+  INPUT (SSM clear, PB12 handed to SPI2) the peer pulls the shared
+  select low from its own pad (`ss_pulse`) and MODF rises on this host,
+  SPE and MSTR cleared by the silicon - 26.3.4's multi-master demotion,
+  measured. The overrun's DR-then-SR sequence as on the F429.
+- **The peer link**: the command channel at PCLK1/256 = 175.8 kHz, ten
+  of ten; the four modes and both bit orders byte-exact both ways, a
+  DORD mismatch an exact two-way reversal.
+- **THE LADDER TO PCLK1/2 = 22.5 MHz**: eight frames byte-exact both
+  ways at every code on the polled host against the peer's DMA serve,
+  thirty-two on the ENGINED host (DMA1 streams 4 and 3, asynchronous, one
+  interrupt a transaction), and the peer's polled client run to 22.5 MHz
+  too (informational). One run in nine of the engined climb lost one to
+  three frames at both ends at 11.25 MHz alone, the rungs above and below
+  exact (see the pads, below).
+- **THE ARBITER OVER A SECOND CHIP** (letter q): four transactions
+  queued from one dispatch, ISR-pumped at the command rate, come back in
+  order, spi_ok, the 24 bytes read back exact by the peer; six into a
+  three-deep queue answer two `bus_rejected`; an idle bus votes for a
+  sleep and a busy one against it; a completion swallowed is answered
+  `spi_timeout` at the per-bus limit and `recover()` puts the engine back
+  - the next four run to spi_ok on the same bus AO.
+- **THE PUMP'S TWO-IN-FLIGHT OVERWRITE, measured and closed**: before
+  `pump_two_ahead()`, letter q's four transactions at PCLK1/256 never
+  completed - six frames written, five RXNE interrupts, the arbiter
+  answering `spi_timeout` four times - because the handler wrote frame k
+  + 2 at frame k's RXNE, half a bit (512 core cycles) before frame k + 1
+  left the Tx buffer ("The host above the wire"). With the rule, one
+  frame in flight at that rate, every transaction completes.
+- **THE ROLES INVERT** (letter r): `SpiClient::exchange()` on SPI2 as
+  the client of the peer's `host_burst`, twelve frames at 2 MHz under a
+  GPIO-held select, byte-exact both ways, the run ending complete.
+- **ES0298 2.14.5 does not reproduce on this wire**: the host's SCK pad
+  at medium (75 MHz of APB ceiling in table 5) reads the peer's stream
+  exact at 22.5 MHz; at low (25 MHz of ceiling against APB1's 45) it is
+  exact at 2.8 MHz too - the load is lighter than the table's 30 pF - and
+  at 22.5 MHz the low class fails for another reason (DS10693 table 58:
+  4 MHz of fmax at 50 pF), its errors not in the last bit.
+- **THE PADS ARE CORRECTNESS PARAMETERS ON THESE WIRES**, walked with
+  letter x (ten bursts a mode at the command rate) and letter p:
+  SCK at very-high or high is seen twice at the G0's input - x slips 15
+  bursts of 40 in every mode at high, p breaks from 351 kHz, and letter r
+  of the G0's suite (this board's `host_burst`) slips in every run at
+  very-high and in two of four at high - and is exact at medium and at
+  low; MOSI at very-high costs p a rung in three runs of three, none at
+  high. So the suite hosts at SCK medium, MOSI high. The far client's
+  MISO is the aggressor in modes 1 and 2 (the falling-edge samplers):
+  11 of 40 at very-high, 8 and 11 at high, 0 at medium and low - while
+  medium costs p's 22.5 MHz rung - which is why the stm32g0 peer answers
+  at high in modes 0 and 3 and at medium in 1 and 2 (its header); x is
+  then 0 of 40, three runs.
+
+**`SpiClient` against the STM32G0B1RE host** (the stm32f4 `spi_peer` on
+this board, firmware 0x0401, `test_stm32_spi` on the G0B1RE, 56 of 56):
+a dark client that drives MISO only inside an answer window; every
+window ONE CALL of the run - `answer()` for the protocol's answer windows,
+`exchange()` (or the DMA1 serve, its default) for an exchange - the four
+transfer modes and both bit orders byte-exact both ways, four arbitrated
 transactions in one select window read back exact. ES0298 2.14.6's BSY
-is never looked at on this side - RXNE is the witness. THE ANSWER
-LINE'S SLEW CLASS IS A CORRECTNESS PARAMETER, walked against the
-host's slip statistics (ten bursts a mode): 12 of 40 slip at
-`very_high`, 7 at `high` and 12 at `medium` (the falling-edge modes),
-0 at `low`, the class the app keeps. THE ANSWER RELOAD IS THE
-CEILING: one answer written at each RXNE, the host's back-to-back
-frames leave it half a bit, and the exchange is exact to 500 kHz and
-wrong from 1 MHz with every character heard (the gap list).
+is never looked at - the NSS pad is the window. THE ANSWER LINE'S SLEW
+CLASS IS A CORRECTNESS PARAMETER here too, walked against the host's
+slip statistics: 12 of 40 slip at `very_high`, 7 at `high` and 12 at
+`medium` (the falling-edge modes), 0 at `low`, the class the app keeps -
+and the ladder is exact to 16 MHz at low ("The client run"). AS THE BUS
+HOST (`host_burst`, twelve frames at PCLK1/32 = 1.406 MHz to the G0's
+client) the peer drives SCK at MEDIUM: at very-high the far client's
+stream went one bit out of place from a random frame in 12 runs of 12
+(an edge gained or lost; the ground moved onto the chips' own pins
+changed nothing), at high in 2 of 4, at medium in none of 14, at low in
+none of 4.
 
 ## Not covered yet
 
 Driver gaps:
-- The CRC unit beyond its verbs and the even-polynomial refusal: no
-  device on the bench speaks a CRC-checked SPI, and a CRC measured
-  against nothing is a register read-back. What would close it is a peer
-  board running `SpiClient` with the same polynomial - the AVR and the
-  SAM strata's suites do exactly that over a wire this board has not
-  got.
+- The CRC unit beyond its verbs and the even-polynomial refusal: a CRC
+  measured against nothing is a register read-back, and the peer on the
+  desk (the STM32G0B1RE's `spi_peer`) answers in a protocol with no CRC
+  field: born with a spi_link extension that names the polynomial for
+  both ends.
 - TI frame format: the configuration is written and refused where the
   chapter says it must be, but nothing on this board frames its
   transactions that way. Born with its first device.
-- `SpiClient` has no run of its own: the answer one frame ahead is the
-  caller's loop, written at each RXNE, and against a host whose frames
-  follow back to back it is late from 1 MHz (the finding above). A run
-  that keeps two answers ahead - on TXE, or SPI2_TX on DMA1 stream 4
-  channel 0 (RM0390 table 28) - is born with the first client that
-  needs the rate.
+- No DMA engine slots on `SpiClient`: a program that wants its client
+  on the streams binds them raw (the stm32f4 `spi_peer` does, "The
+  client run"); a slot pair is born with a device-shaped client.
 - The I2S beyond a master transmitter: no codec on the board, so
   reception, the slave modes, the full-duplex extension block on the
   wire (the F42x/F43x class's: the F446 has none, RM0390 26.1.3 "only
@@ -778,14 +934,10 @@ Driver gaps:
   chapter's.
 
 Implemented, not bench-verified (each with what would measure it):
-- The peer instrument as the bus HOST (`host_burst`, SpiHost on SPI2,
-  the select a GPIO held low for the burst): against the STM32G0B1RE's
-  client, twelve frames at 1.406 MHz, the far client gains or loses a
-  clock edge somewhere in the burst in most runs (its stream one bit
-  out of place from that frame on), with this end's SCK and MOSI at
-  `high` as at `very_high`, and at 352 kHz too. A logic analyser on the
-  far client's SCK and select during the burst would settle where the
-  edge goes.
+- `SpiClient::receive()`, the runs in 16-bit frames, and a run without
+  an NSS pad: compiled on every header, none driven - a peer op that
+  clocks a receive-only window, one in 16-bit frames, and a client under
+  SSM would measure them.
 - The instances other than SPI5, SPI2 and SPI1 (SPI3, SPI4, SPI6 -
   compiled on every header that has them, none driven): a wire between
   two of them, or a device on one. SPI1 is driven on the STM32F411CE
@@ -806,13 +958,9 @@ Implemented, not bench-verified (each with what would measure it):
 - The DCS link's commands and pixel rows over the transmit-only shape
   against a panel: the black pill's display (the breadboard finding)
   wants a run of its probe over this host.
-- The hardware NSS arrangements as the ENGINE's select (`claim_nss_pad`,
-  SSOE, the hardware input): the bus AO's select is a GPIO on purpose,
-  and a multi-master bus is what would exercise the input.
-- `recover()` after a wedged transaction, and the arbiter's per-bus
-  timeout with it: a lost completion has to be staged, as the other
-  strata's suites stage it, and that wants a second device to hold the
-  bus.
+- The hardware NSS output (SSOE) as the engine's select: the bus AO's
+  select is a GPIO on purpose; the hardware INPUT is measured through
+  `claim_nss_pad()` (letter d's demotion), the output is not.
 - `rebase()` and the SCK ceiling across a clock change: this family has
   no dynamic clock yet ([clock.md](clock.md)).
 - The error interrupt (ERRIE) and the transmit interrupt (TXEIE): the

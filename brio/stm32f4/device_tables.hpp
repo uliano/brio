@@ -1869,8 +1869,9 @@ constexpr bool plli2s_has_m() {
  *  - the F405 class and the F42x/F43x class: I2S2 and I2S3 alone
  *    (RM0090 28.2.2, "Both I2S (I2S2 and I2S3)"), with I2S2ext/I2S3ext;
  *  - the F411: SPI1/I2S1 through SPI5/I2S5, every instance (RM0383 2.3);
- *  - the F446: I2S2 and I2S3 (RM0390 2.3 names SPI1 and SPI4 with no I2S),
- *    and NO extension block - full duplex there is two instances paired.
+ *  - the F446: I2S1, I2S2 and I2S3 - SPI4 alone has none (RM0390 table
+ *    165, and 26.1.3's "I2S (I2S1, I2S2 and I2S3)") - and NO extension
+ *    block: full duplex there is two instances paired.
  * A class whose manual was not read answers `known` false, and
  * stm32f4/spi.hpp refuses `I2s<n>` on it rather than guess.
  */
@@ -1888,7 +1889,7 @@ constexpr SpiI2sFacts spi_i2s_facts() {
 #elif defined(STM32F411xE)
     return SpiI2sFacts{true, 0x1Fu, true};    // SPI1..SPI5
 #elif defined(STM32F446xx)
-    return SpiI2sFacts{true, 0x06u, false};   // SPI2, SPI3; no extension block
+    return SpiI2sFacts{true, 0x07u, false};   // SPI1, SPI2, SPI3; no extension block
 #else
     return SpiI2sFacts{};
 #endif

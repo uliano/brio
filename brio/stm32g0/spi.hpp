@@ -117,6 +117,7 @@
 
 #include <stdint.h>
 
+#include <bit>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -2919,11 +2920,14 @@ public:
     /// SPE up, and the FIRST TWO ANSWERS in the FIFO before the host's
     /// clock can arrive (35.5.8, and the one-ahead rule in the class
     /// comment). Call it with NSS still high.
-    static void enable(uint16_t first = 0xFFFFu, uint16_t second = 0xFFFFu) {
+    static void enable(uint16_t first, uint16_t second) {
         S::enable();
         write(first);
         write(second);
     }
+    /// SPE up with the transmit FIFO left as it is: the opening of a run
+    /// (below), which fills the FIFO itself.
+    static void enable() { S::enable(); }
 
     /// The disable procedure, through the resource (the client's own
     /// FIFO is drained by it, which is what keeps the NEXT transaction
@@ -2974,6 +2978,296 @@ public:
     static void clear_frame_error() { S::clear_frame_error(); }
     static uint32_t status() { return S::status(); }
 
+    // ---- the polled runs ---------------------------------------------------------
+    //
+    // A client's unit is the RUN: the answers to a transaction, or what it
+    // brings, served polled in one call - the per-frame verbs above being
+    // its degenerate case. What bounds a run on this block is 35.5.9's
+    // pair of 32-bit FIFOs: TXE stands while the TXFIFO is at most half
+    // full, so with frames of eight bits or fewer it holds three, and four
+    // when they are written two to an access - DATA PACKING, "used
+    // automatically when any read or write 16-bit access is performed"
+    // with a frame that fits a byte, the LOW byte leaving first. So a run
+    // over 8-bit frames moves them in PAIRS: the FIFO is filled with four
+    // answers while the select is still high (35.5.8: "the data register
+    // of the slave must already contain data to be sent before starting
+    // communication"), and from then on a half-word goes in on every TXE
+    // - which rises with two frames still queued behind the one shifting,
+    // so a write has three frames of window and a turn is paid once per
+    // TWO frames. The receive side reads pairs too, under the half
+    // threshold (FRXTH = 0, RXNE at two frames), and the odd last frame
+    // under the quarter one, moved when one frame is left (35.5.9's note);
+    // a run hands FRXTH back at the quarter, where poll() reads. A run of
+    // 9..16-bit frames moves one frame an access, two in the FIFO.
+    //
+    // THE SELECT PAD IS THE WINDOW. The block has no flag for the end of a
+    // slave transaction (ES0548 2.12.2 takes BSY away too), so a run reads
+    // the NSS pad once for every four polls of the flag: it waits for the
+    // select to FALL before it takes a high pad for the close, and a run
+    // without an NSS pad ends on its count or its budget alone.
+    //
+    // THEY ARE ALWAYS INLINE, and the program places the function that
+    // calls them (in this stratum's flash, behind its prefetch: no image
+    // here places one in SRAM). Counted in the release listing and measured
+    // against the wire in docs/stm32g0/spi.md.
+
+    /// How a run ended.
+    enum class RunEnd : uint8_t {
+        complete,   ///< every frame of the run moved (exchange, receive; answer
+                    ///< without an NSS pad, its answers all written)
+        closed,     ///< the host raised the select (the NSS pad read high)
+        stalled,    ///< the spin budget ran out first
+    };
+
+    /// What a run did: `count` frames - answers written into the TXFIFO
+    /// for answer(), frames received for exchange() and receive() - and
+    /// how it ended.
+    struct Run {
+        uint16_t count;
+        RunEnd end;
+    };
+
+    /**
+     * ANSWER a transaction with `out`, polled on TXE alone, reading
+     * nothing. Call it with SPE up (`enable()`), the TXFIFO empty and the
+     * select still HIGH: the FIFO is filled before the clock can arrive,
+     * and every later answer (a pair of them, with 8-bit frames) goes in
+     * on TXE.
+     *
+     * The run ENDS WHEN THE HOST RAISES THE SELECT, however many frames it
+     * clocked: fewer than the run, and `count` says how many answers were
+     * WRITTEN - up to four of them may still stand in the TXFIFO, which
+     * nothing but the disable procedure or a reset empties, so a program
+     * re-initialises between windows; more, and the frames past the run
+     * carry whatever the shifter is left with, 35.5.9's "no underflow" - a
+     * caller that wants a fill pads its run.
+     *
+     * NOTHING IS READ while it runs: the RXFIFO fills after four frames
+     * and OVR rises (35.5.10) - what the host sent is LOST, the price of a
+     * one-flag turn. The tail drains the RXFIFO and clears OVR, so the
+     * next run or poll starts clean.
+     *
+     * `spins` bounds the whole run, counted down once per four idle polls:
+     * a host that never selects, or never closes, ends it `stalled`.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run answer(std::span<const T> out, uint32_t spins) {
+        static_assert(run_frame<T>, "a run carries uint8_t for frames of 4..8 bits "
+                                    "(packed in pairs) or uint16_t for 9..16 (CR2.DS)");
+        const Block b;
+        const T* const first = out.data();
+        const T* const end = first + out.size();
+        const T* p = fill(b, first, end);
+        uint32_t left = static_cast<uint32_t>(end - p);   // answers still to write
+        RunEnd how = RunEnd::closed;
+        if (!await_select(spins)) {
+            how = RunEnd::stalled;
+            goto tail;
+        }
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            for (const uint8_t* const pairs_end = p + (left & ~1u); p != pairs_end; p += 2) {
+                const uint16_t pair = pair_at(p);
+                if (!await<SpiFlag::txe>(b, spins, how)) {
+                    goto tail;
+                }
+                b.put16(pair);
+            }
+            if ((left & 1u) != 0u) {
+                const uint8_t last = *p;
+                if (!await<SpiFlag::txe>(b, spins, how)) {
+                    goto tail;
+                }
+                b.put8(last);
+                ++p;
+            }
+        } else {
+            for (; left != 0u; --left, ++p) {
+                const uint16_t next = *p;
+                if (!await<SpiFlag::txe>(b, spins, how)) {
+                    goto tail;
+                }
+                b.put16(next);
+            }
+        }
+        // Every answer is written, the last few still to be clocked: the
+        // host's close is the end - and without a pad to close, the run is
+        // complete here.
+        if constexpr (has_nss_pad) {
+            while (pad_low()) {
+                if (--spins == 0u) {
+                    how = RunEnd::stalled;
+                    break;
+                }
+            }
+        } else {
+            how = RunEnd::complete;
+        }
+    tail:
+        drain_rx(b);
+        return {static_cast<uint16_t>(p - first), how};
+    }
+
+    /**
+     * EXCHANGE: answer with `out` and keep what the host sends in `in`,
+     * the run's length the shorter of the two. The answers go exactly as
+     * answer()'s - the FIFO filled with the select high, then a pair on
+     * each TXE - and each turn then reads the pair that has come in, on
+     * RXNE under the half threshold: a turn is two polls, a half-word
+     * store and a half-word read for TWO frames, and the reads trail the
+     * writes by the FIFO's four, inside the RXFIFO's own four.
+     *
+     * Ends `complete` when the last frame is in; `closed` when the host
+     * raised the select first, what arrived before it read into `in`
+     * (`count` says how far); `stalled` on the budget. The RXFIFO and a
+     * standing OVR are cleared at the start, with the select high, so
+     * `in` holds this transaction alone.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run exchange(std::span<const T> out, std::span<T> in,
+                                               uint32_t spins) {
+        static_assert(run_frame<T>, "a run carries uint8_t for frames of 4..8 bits "
+                                    "(packed in pairs) or uint16_t for 9..16 (CR2.DS)");
+        const uint32_t len = out.size() < in.size() ? out.size() : in.size();
+        if (len == 0u) {
+            return {0, RunEnd::complete};
+        }
+        const Block b;
+        drain_rx(b);
+        T* const first = in.data();
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            if (len >= 2u) {
+                b.rx_threshold(SpiRxThreshold::half);
+            }
+        }
+        const T* p = fill(b, out.data(), out.data() + len);
+        // The answers still to write. The reads trail the writes by what
+        // fill() queued, so a read in the steady state never passes the
+        // run's end.
+        uint32_t left = len - static_cast<uint32_t>(p - out.data());
+        uint32_t want = 0;
+        if (!await_select(spins)) {
+            how = RunEnd::stalled;
+            goto drain;
+        }
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            // The steady state: a pair in on each TXE, then the pair that
+            // has come back out on RXNE.
+            for (const uint8_t* const pairs_end = p + (left & ~1u); p != pairs_end;) {
+                const uint16_t pair = pair_at(p);
+                if (!await<SpiFlag::txe>(b, spins, how)) {
+                    goto drain;
+                }
+                b.put16(pair);
+                p += 2;
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                store_pair(q, b.get16());
+                q += 2;
+            }
+            if ((left & 1u) != 0u) {
+                const uint8_t last = *p;
+                if (!await<SpiFlag::txe>(b, spins, how)) {
+                    goto drain;
+                }
+                b.put8(last);
+            }
+            // The pairs still to come, nothing left to write.
+            for (want = len - static_cast<uint32_t>(q - first); want >= 2u; want -= 2u) {
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                store_pair(q, b.get16());
+                q += 2;
+            }
+            // The odd last frame: RXNE at a quarter (35.5.9's note).
+            b.rx_threshold(SpiRxThreshold::quarter);
+            if (want != 0u) {
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                *q++ = b.get8();
+            }
+        } else {
+            for (; left != 0u; --left) {
+                const uint16_t next = *p++;
+                if (!await<SpiFlag::txe>(b, spins, how)) {
+                    goto drain;
+                }
+                b.put16(next);
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                *q++ = b.get16();
+            }
+            for (want = len - static_cast<uint32_t>(q - first); want != 0u; --want) {
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                *q++ = b.get16();
+            }
+        }
+        return {static_cast<uint16_t>(q - first), RunEnd::complete};
+    drain:
+        q = drain_into(b, q, first + len);
+        return {static_cast<uint16_t>(q - first), how};
+    }
+
+    /**
+     * RECEIVE a run into `in`, polled on RXNE alone, writing nothing - what
+     * the host reads meanwhile is whatever the TXFIFO and the shifter are
+     * left with, 35.5.9's "no underflow". No write is timed here, so what
+     * binds a turn is the RXFIFO's four frames: pairs are read under the
+     * half threshold and the odd last frame under the quarter one. Ends as
+     * exchange() does; the RXFIFO is NOT flushed at the start, so what
+     * stood in it when the run began is the run's first.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run receive(std::span<T> in, uint32_t spins) {
+        static_assert(run_frame<T>, "a run carries uint8_t for frames of 4..8 bits "
+                                    "(packed in pairs) or uint16_t for 9..16 (CR2.DS)");
+        const Block b;
+        T* const first = in.data();
+        T* q = first;
+        uint32_t want = static_cast<uint32_t>(in.size());
+        RunEnd how = RunEnd::complete;
+        if ((b.sr() & SPI_SR_FRLVL) == 0u && !await_select(spins)) {
+            return {0, RunEnd::stalled};
+        }
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            if (want >= 2u) {
+                b.rx_threshold(SpiRxThreshold::half);
+            }
+            for (; want >= 2u; want -= 2u) {
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                store_pair(q, b.get16());
+                q += 2;
+            }
+            b.rx_threshold(SpiRxThreshold::quarter);
+            if (want != 0u) {
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                *q++ = b.get8();
+            }
+        } else {
+            for (; want != 0u; --want) {
+                if (!await<SpiFlag::rxne>(b, spins, how)) {
+                    goto drain;
+                }
+                *q++ = b.get16();
+            }
+        }
+        return {static_cast<uint16_t>(q - first), RunEnd::complete};
+    drain:
+        q = drain_into(b, q, first + in.size());
+        return {static_cast<uint16_t>(q - first), how};
+    }
+
     /// The ISR body: which sources are raised AND enabled, handed back
     /// for the app's glue to act on. It consumes nothing - only the app
     /// knows where a frame goes.
@@ -3017,6 +3311,157 @@ private:
         s.crc_length = c.crc_length;
         s.crc_polynomial = c.crc_polynomial;
         return s;
+    }
+
+    /// The two frame types a run may carry: the beat is the element.
+    template <typename T>
+    static constexpr bool run_frame = std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t>;
+
+    /// The block's base in a register the compiler must keep: an empty
+    /// asm takes the pointer as an operand, so every register a run
+    /// touches - SR, the byte and the half-word views of DR, CR2 - is an
+    /// offset from ONE base, where each address folded to a constant is a
+    /// literal-pool load from the flash in the turn (the listing).
+    struct Block {
+        SPI_TypeDef* r;
+        [[gnu::always_inline]] Block() : r(&S::regs()) { __asm__("" : "+l"(r)); }
+        [[gnu::always_inline]] uint32_t sr() const { return r->SR; }
+        /// DR's two access widths (35.5.9, figure 363), as the resource's
+        /// views make them: through an integer, off this base.
+        [[gnu::always_inline]] volatile uint8_t* dr8p() const {
+            return reinterpret_cast<volatile uint8_t*>(reinterpret_cast<uintptr_t>(&r->DR));
+        }
+        [[gnu::always_inline]] volatile uint16_t* dr16p() const {
+            return reinterpret_cast<volatile uint16_t*>(reinterpret_cast<uintptr_t>(&r->DR));
+        }
+        [[gnu::always_inline]] void put8(uint8_t v) const { *dr8p() = v; }
+        [[gnu::always_inline]] void put16(uint16_t v) const { *dr16p() = v; }
+        [[gnu::always_inline]] uint8_t get8() const { return *dr8p(); }
+        [[gnu::always_inline]] uint16_t get16() const { return *dr16p(); }
+        /// FRXTH under a running SPI, as Spi::rx_threshold().
+        [[gnu::always_inline]] void rx_threshold(SpiRxThreshold t) const {
+            r->CR2 = t == SpiRxThreshold::quarter ? (r->CR2 | SPI_CR2_FRXTH)
+                                                  : (r->CR2 & ~SPI_CR2_FRXTH);
+        }
+    };
+
+    /// Two answers as one packed half-word, the first in the LOW byte
+    /// (35.5.9: the low half leaves first). Two byte loads: the caller's
+    /// run need not be half-word aligned, and this core takes no
+    /// unaligned access.
+    [[gnu::always_inline]] static uint16_t pair_at(const uint8_t* p) {
+        return static_cast<uint16_t>(p[0] | (static_cast<uint16_t>(p[1]) << 8));
+    }
+    [[gnu::always_inline]] static void store_pair(uint8_t* q, uint16_t v) {
+        q[0] = static_cast<uint8_t>(v);
+        q[1] = static_cast<uint8_t>(v >> 8);
+    }
+
+    /// The opening: write answers while TXE stands - four 8-bit frames in
+    /// two packed accesses, or two wide ones - and hand back where the run
+    /// goes on from.
+    template <typename T>
+    [[gnu::always_inline]] static const T* fill(const Block& b, const T* p, const T* end) {
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            while (end - p >= 2 && (b.sr() & SPI_SR_TXE) != 0u) {
+                b.put16(pair_at(p));
+                p += 2;
+            }
+            if (end - p == 1 && (b.sr() & SPI_SR_TXE) != 0u) {
+                b.put8(*p++);
+            }
+        } else {
+            while (p != end && (b.sr() & SPI_SR_TXE) != 0u) {
+                b.put16(*p++);
+            }
+        }
+        return p;
+    }
+
+    /// Empty the RXFIFO and clear a standing OVR: the byte reads ARE the
+    /// sequence's DR read, and the SR read after them completes it
+    /// (35.5.11) - no extra DR read of an empty FIFO.
+    [[gnu::always_inline]] static void drain_rx(const Block& b) {
+        for (uint32_t left = 8u; (b.sr() & SPI_SR_FRLVL) != 0u && left != 0u; --left) {
+            (void)b.get8();
+        }
+        (void)b.sr();
+    }
+
+    /// What arrived before a close or a stall belongs to the run: the
+    /// RXFIFO read a frame at a time (the quarter threshold for 8-bit
+    /// frames, where FRXTH is left) into what is left of `in`.
+    template <typename T>
+    [[gnu::always_inline]] static T* drain_into(const Block& b, T* q, T* const q_end) {
+        if constexpr (std::is_same_v<T, uint8_t>) {
+            b.rx_threshold(SpiRxThreshold::quarter);
+            while (q != q_end && (b.sr() & SPI_SR_FRLVL) != 0u) {
+                *q++ = b.get8();
+            }
+        } else {
+            while (q != q_end && (b.sr() & SPI_SR_RXNE) != 0u) {
+                *q++ = b.get16();
+            }
+        }
+        return q;
+    }
+
+    /// The NSS pad read low, the window open. Without a pad there is no
+    /// window to wait for and the answer is yes at once.
+    [[gnu::always_inline]] static bool pad_low() {
+        if constexpr (has_nss_pad) {
+            return (NssPin::port().IDR & NssPin::mask) == 0u;
+        } else {
+            return true;
+        }
+    }
+
+    /// Wait for the host to open the window: true when the select pad
+    /// reads low, false when the budget ran out first.
+    [[gnu::always_inline]] static bool await_select(uint32_t& spins) {
+        while (!pad_low()) {
+            if (--spins == 0u) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Poll SR until `flag` (TXE or RXNE) stands: true. False when the
+    /// host raised the select (the pad read high) or the run's budget ran
+    /// out, `how` saying which. FOUR POLLS A LOOK: the pad and the budget
+    /// are asked once every four reads of SR, so the read that sees the
+    /// flag is a load, a shift and a branch from the one before it.
+    /// Each flag is tested by shifting it into the sign bit, which holds
+    /// no mask in a register (this core has eight low ones).
+    template <uint32_t flag>
+    [[gnu::always_inline]] static bool await(const Block& b, uint32_t& spins, RunEnd& how) {
+        constexpr int shift = 31 - std::countr_zero(flag);
+        const auto has = [](uint32_t f) { return static_cast<int32_t>(f << shift) < 0; };
+        for (;;) {
+            if (has(b.sr())) {
+                return true;
+            }
+            if (has(b.sr())) {
+                return true;
+            }
+            if (has(b.sr())) {
+                return true;
+            }
+            if (has(b.sr())) {
+                return true;
+            }
+            if constexpr (has_nss_pad) {
+                if (!pad_low()) {
+                    how = RunEnd::closed;
+                    return false;
+                }
+            }
+            if (--spins == 0u) {
+                how = RunEnd::stalled;
+                return false;
+            }
+        }
     }
 
     static inline SpiDataSize bits_ = SpiDataSize::bits8;

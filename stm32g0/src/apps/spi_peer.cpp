@@ -7,33 +7,38 @@
 // is the single source of truth for every board that speaks it,
 // whatever its architecture. What this silicon makes of it:
 //
-//  - THE PUMP RUNS ONE AHEAD, and here it is the FIFO that says so
-//    rather than a documented latency: a client answering on RXNE
-//    writes its next frame AFTER the frame in flight has taken whatever
-//    the TXFIFO held, so an answer written in the gap is one character
-//    late. 35.5.8 is explicit that "the data register of the slave must
-//    already contain data to be sent before starting communication with
-//    the master", so the opening is TWO preloads before the host's clock
-//    can arrive (SpiClient::enable(a, b)) and every received frame loads
-//    the next-PLUS-ONE - the same shape test_stm32_spi's own
-//    `peer_service()` runs.
+//  - EVERY WINDOW IS ONE CALL OF THE DRIVER'S RUN (SpiClient::answer,
+//    exchange - stm32g0/spi.hpp), and here it is the FIFO that shapes
+//    it: 35.5.8 wants "the data register of the slave ... [to] already
+//    contain data to be sent before starting communication with the
+//    master", so the run fills the TXFIFO with the select still high, and
+//    from then on writes on TXE, two 8-bit frames to a half-word access
+//    (35.5.9's data packing) - the answers three frames ahead of the
+//    shifter, where the RXNE reload this peer ran kept one.
 //
-//  - THE PUMP RUNS ON THE SPI1 INTERRUPT, not in a polled loop. Only the
-//    COMMAND listener is polled (a command character is 32 us at
-//    PCLK/256 and the receive FIFO is four frames deep, so the loop has
-//    slack); an answer window and the software-pump exchange arm RXNE.
-//    So on this peer `spilink::spare_polled_pump` means "the SOFTWARE
-//    reload on the RXNE interrupt" as against the DMA engines - the bit
-//    names the software path, and that is what it selects here.
+//  - THE EXCHANGE IS SERVED BY THE DMA ENGINES BY DEFAULT (below), and
+//    `spilink::spare_polled_pump` asks for the driver's polled run
+//    instead, so a suite measures both boundaries; `spare_answer_only`
+//    asks for the answer run alone (the report then counts the answers
+//    written and judges nothing). Only the COMMAND listener is a
+//    per-frame loop: a command character is tens of microseconds at the
+//    host's command rate and the receive FIFO is four frames deep.
+//
+//  - A RUN SAMPLES NOTHING INSIDE THE BURST, so the exchange's report
+//    fields are this peer's own (spi_link.hpp's Report leaves them to the
+//    peer's header): aux0 = SR after the burst, aux1 = the milliseconds
+//    from the run's start to its END (255 = nothing came), aux2 bit 0 =
+//    the select read low once after the run, bit 1 = the host closed it,
+//    bit 2 = the DMA engines served it; aux3 = 0.
 //
 //  - THE BUFFERING REGIMES COLLAPSE. There is no BUFEN/BUFWR pair in
 //    ch. 35: this client is always FIFO-buffered and the two preloads
 //    play BUFWR's role. spilink::Cfg::regime is therefore MAPPED, not
 //    translated: regime_buffer_wait (the only regime this link ever
-//    commands) runs the preloaded one-ahead pump and delivers the exact
-//    rx[i] = P_B(i) alignment that regime promises; the other two run
-//    WITHOUT the preloads, which on this silicon means the shifter's
-//    leftover leads - stated here, exercised nowhere.
+//    commands) starts the run with the select high and delivers the
+//    exact rx[i] = P_B(i) alignment that regime promises; the other two
+//    start it only once the select has fallen, which on this silicon
+//    means the shifter's leftover leads - stated here, exercised nowhere.
 //
 //  - THE PROTOCOL CARRIES OPTIONS THIS SILICON HAS NOT GOT. flag_wrcol
 //    and flag_feed_tx name conditions chapter 35 does not have and are
@@ -42,28 +47,24 @@
 //    Everything else of the repertoire is served: ping/ident/report,
 //    exchange, sink_slow, ss_pulse, host_burst.
 //
-//  - THE ANSWER LINE'S EDGE RATE IS THIS APP'S, NOT THE DRIVER'S.
-//    SpiClient hands MISO to the peripheral at VERY-HIGH speed, and on
-//    this jumper-wire bus that edge is an AGGRESSOR: with MISO at
-//    very-high the DUT's four-mode matrix slips in 20 bursts of 160 -
-//    byte-exact for its first frames, then BOTH ENDS DISAGREE FROM THE
-//    SAME FRAME ON, the rest of the stream one bit out of place - and
-//    every one of the twenty is mode 1 or mode 2, THE TWO MODES THAT
-//    SAMPLE ON THE FALLING EDGE, where the data lines change on the
-//    RISING edge: this client's MISO edge lands, its own propagation
-//    delay after the clock edge, on an SCK that has just settled HIGH,
-//    and a fast falling edge coupled into the clock wire beside it dips
-//    it through VIL - a spurious falling edge, i.e. one sampling edge
-//    too many. In modes 0 and 3 the same edge lands on a LOW clock and
-//    nothing happens (0 of 80). One notch down, at HIGH, the slip is
-//    gone - 0 of 120 - and the ladders are UNCHANGED (the DMA serve
-//    exact to PCLK/2 = 32 MHz, the software pump to 16 MHz); medium
-//    costs the top rung (16 MHz) and low two (8 MHz), on both serves. So
-//    this app re-states the pad at HIGH after every init that drives it
-//    (console 's' cycles the four speeds). A HOST's data pad is the
-//    same kind of aggressor in the other two modes (its MOSI changing
-//    on a LOW clock, measured from test_stm32_spi against the stm32f4
-//    peer, docs/stm32g0/spi.md) - a host suite slows its own.
+//  - THE ANSWER LINE'S EDGE RATE IS THIS APP'S, NOT THE DRIVER'S, AND IT
+//    DEPENDS ON THE MODE. SpiClient hands MISO to the peripheral at
+//    VERY-HIGH speed, and on this jumper-wire bus that edge is an
+//    AGGRESSOR on the clock beside it. Measured against the STM32F446RE
+//    host it is paired with (test_stm32f4_spi letter x, ten bursts a mode
+//    at the command rate, the host's SCK at medium): at very-high 11 of 40
+//    bursts slip and at high 8 and 11 of 40 - every one in mode 1 or mode
+//    2, THE TWO MODES THAT SAMPLE ON THE FALLING EDGE while the data lines
+//    change on the rising one, so this edge lands on an SCK just settled
+//    HIGH and a coupled dip through VIL is one sampling edge too many,
+//    BOTH ENDS disagreeing from the same frame on. At medium and at low 0
+//    of 40. But medium costs the ladder's top rung: letter p's 22.5 MHz,
+//    in mode 0, breaks at medium on both serves and is exact at high. So
+//    the pad goes out at HIGH in modes 0 and 3 - where the edge lands on a
+//    LOW clock and the slip never shows - and ONE NOTCH SLOWER, at medium,
+//    in modes 1 and 2 (console 's' cycles the base class). A HOST's data
+//    and clock pads are the same kind of aggressor (docs/stm32g0/spi.md;
+//    the stm32f4 suite hosts with its SCK at medium and its MOSI at high).
 //
 // THE DARK LISTENER discipline: the command-mode client never drives
 // MISO (drive_output = false, which leaves the pad in analog), the
@@ -154,14 +155,26 @@ using Raw = Spi<1>;
 using MisoPin = Pin<link_pins.miso.port, link_pins.miso.pin>;
 using NssPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
 
-constexpr uint16_t firmware_version = 0x0300;   ///< see spi_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0301;   ///< see spi_link.hpp's Ident
 
-/// THE ANSWER LINE'S EDGE RATE (see the header): HIGH, one notch
-/// below the driver's very-high, which is where the falling-edge slip
-/// stops with nothing of the ladder lost. init() rewrites the pad, so the
-/// choice is re-stated after every init that drives the output; the
-/// console's 's' cycles the four speeds for the bench.
+/// THE ANSWER LINE'S EDGE RATE (see the header): HIGH in the two modes
+/// that sample on the rising edge, and ONE NOTCH SLOWER in the two that
+/// sample on the falling one - where this edge lands on an SCK just
+/// settled high. init() rewrites the pad, so the choice is re-stated after
+/// every init that drives the output; the console's 's' cycles the base
+/// class for the bench.
 PinSpeed miso_speed = PinSpeed::high;
+/// The class the last init asked for: the base, or a notch below it in
+/// modes 1 and 2.
+PinSpeed miso_applied = PinSpeed::high;
+
+PinSpeed one_notch_slower(PinSpeed s) {
+    switch (s) {
+        case PinSpeed::very_high: return PinSpeed::high;
+        case PinSpeed::high: return PinSpeed::medium;
+        default: return PinSpeed::low;
+    }
+}
 
 const char* speed_name(PinSpeed s) {
     switch (s) {
@@ -172,9 +185,11 @@ const char* speed_name(PinSpeed s) {
     }
 }
 
-void restate_miso_speed() {
+void restate_miso_speed(uint8_t mode = 0) {
+    const bool falling_edge_sampler = mode == 1u || mode == 2u;
+    miso_applied = falling_edge_sampler ? one_notch_slower(miso_speed) : miso_speed;
     if (MisoPin::has_function()) {
-        MisoPin::function(link_pins.miso.function, {.speed = miso_speed});
+        MisoPin::function(link_pins.miso.function, {.speed = miso_applied});
     }
 }
 
@@ -220,80 +235,19 @@ void hold_us(uint32_t us) {
     }
 }
 
-// ---- the one-ahead pump, on SPI1's own interrupt --------------------------------
+// ---- the runs --------------------------------------------------------------------
 //
-// One pump serves both the answer windows and the software-pump
-// exchange: the answers are precomputed, the received frames are only
-// STORED, and every judgement happens after the burst - a reload path
-// of a few register accesses is what a burst at rate needs.
+// Every window is ONE CALL of the driver's polled run, in the flash behind
+// its prefetch (docs/stm32g0/spi.md counts the turn). The answers are
+// precomputed, the received frames only STORED, and every judgement
+// happens after the burst.
 
-constexpr uint16_t pump_cap = 64;
+using Run = Client::Run;
 
-uint16_t pump_out[pump_cap];
-volatile uint8_t pump_in[pump_cap];
-volatile uint16_t pump_out_n = 0;   ///< how many of pump_out are meaningful
-volatile uint16_t pump_tx_n = 0;
-volatile uint16_t pump_rx_n = 0;
-uint16_t pump_filler = 0x00;
-volatile uint32_t pump_err = 0;
-volatile bool pump_live = false;
-
-uint16_t pump_next_answer() {
-    const uint16_t i = pump_tx_n;
-    pump_tx_n = static_cast<uint16_t>(i + 1u);
-    return i < pump_out_n ? pump_out[i] : pump_filler;
-}
-
-void pump_service() {
-    const uint32_t f = Client::isr();
-    if (f == 0u) {
-        return;
-    }
-    if ((f & SpiFlag::rxne) != 0u) {
-        const uint16_t v = Client::poll().value_or(0);
-        if (pump_rx_n < pump_cap) {
-            pump_in[pump_rx_n] = static_cast<uint8_t>(v);
-        }
-        pump_rx_n = static_cast<uint16_t>(pump_rx_n + 1u);
-        Client::write(pump_next_answer());
-        return;
-    }
-    // An error, and only where ERRIE was deliberately armed: record it
-    // ONCE and disarm, because every one of these flags is a LEVEL and a
-    // handler that leaves one standing re-enters for ever.
-    pump_err = pump_err | (f & SpiFlag::errors);
-    Client::error_interrupt(false);
-}
-
-/// Load the answers and open the window: RXNE armed, SPE up, and the
-/// FIRST TWO ANSWERS in the FIFO before the host's clock can arrive.
-/// Call it with NSS still high.
-void pump_arm(const uint16_t* answers, uint16_t n, uint16_t filler) {
-    Nvic::disable(Raw::irq());
-    pump_tx_n = 0;
-    pump_rx_n = 0;
-    pump_err = 0;
-    pump_filler = filler;
-    pump_out_n = n < pump_cap ? n : pump_cap;
-    for (uint16_t i = 0; i < pump_out_n; ++i) {
-        pump_out[i] = answers[i];
-    }
-    pump_live = true;
-    Client::rxne_interrupt(true);
-    Nvic::enable(Raw::irq());
-    // THE TWO PRELOADS IN ORDER, and they are two statements on purpose:
-    // the evaluation order of two calls in one argument list is
-    // unspecified, and here it would decide which byte leaves first.
-    const uint16_t first = pump_next_answer();
-    const uint16_t second = pump_next_answer();
-    Client::enable(first, second);
-}
-
-void pump_stop() {
-    pump_live = false;
-    Client::rxne_interrupt(false);
-    Client::error_interrupt(false);
-}
+/// A run's spin budget for `ms` milliseconds: one spin is four polls of SR
+/// and a look at the select pad, some twenty-four core cycles at 64 MHz
+/// (the listing), so this is a bound of the right order, not a clock.
+constexpr uint32_t spins_for_ms(uint32_t ms) { return ms * (SysClock::hz / 24'000u); }
 
 // ---- the client's standing configurations ---------------------------------------
 
@@ -310,7 +264,6 @@ void hold_nss_up() { NssPin::pull(PinPull::up); }
 /// Everything returns here, and SPE goes up so the shifter runs and the
 /// command listener can poll RXNE.
 bool go_dark() {
-    pump_stop();
     // A CLIENT RECONFIGURES BETWEEN WINDOWS, NEVER INSIDE ONE. The host
     // releases the select about thirty microseconds after its last clock
     // edge, and a peer that re-inits the instant the last frame lands is
@@ -349,7 +302,6 @@ SpiMode mode_of(uint8_t m) {
 /// The answer window's configuration: MISO driven, everything else the
 /// command channel's.
 bool arm_answer() {
-    pump_stop();
     const bool ok = Client::init(clock, {.mode = SpiMode::mode0,
                                          .bits = SpiDataSize::bits8,
                                          .lsb_first = false,
@@ -368,7 +320,6 @@ bool arm_answer() {
 /// (see run_exchange): everything here frames on the NSS pad.
 bool apply_cfg(const spilink::Cfg& c, bool drive_output = true,
                SpiNss nss = SpiNss::hardware_input) {
-    pump_stop();
     wait_nss_high(50);   // see go_dark(): a client reconfigures BETWEEN windows
     const bool ok = Client::init(clock, {.mode = mode_of(c.mode),
                                          .bits = SpiDataSize::bits8,
@@ -376,7 +327,7 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_output = true,
                                          .nss = nss,
                                          .drive_output = drive_output});
     hold_nss_up();
-    restate_miso_speed();
+    restate_miso_speed(c.mode & 0x03u);
     return ok;
 }
 
@@ -388,26 +339,25 @@ void wait_nss_high(uint16_t ms) {
     }
 }
 
-/// Serve ONE answer window with the one-ahead pump: buf[0] and buf[1]
-/// into the FIFO before the select falls, and every received frame loads
-/// the next one. The host clocks spilink::answer_bytes dummies; the tail
-/// pads with zeros, which the decoder ignores.
+/// Serve ONE answer window: the frame padded with zeros to the most the
+/// host clocks (spilink::answer_bytes), handed to the answer run - the
+/// TXFIFO filled with the select still high, every later pair on TXE. The
+/// window ENDS WHEN THE HOST CLOSES IT, the run reading the select pad; a
+/// host that clocks fewer than answer_bytes and raises the select ends it
+/// as surely as one that clocks them all.
 void serve(const uint8_t* buf, uint8_t n) {
     wait_nss_high(50);                    // the command window must close first
     if (!arm_answer()) {
         (void)go_dark();
         return;
     }
-    uint16_t answers[pump_cap];
-    const uint16_t count = n < pump_cap ? n : pump_cap;
-    for (uint16_t i = 0; i < count; ++i) {
-        answers[i] = buf[i];
+    uint8_t padded[spilink::answer_bytes] = {};
+    for (uint8_t i = 0; i < n && i < spilink::answer_bytes; ++i) {
+        padded[i] = buf[i];
     }
-    pump_arm(answers, count, 0x00);
-    const uint32_t t0 = Ticker::millis();
-    while (pump_rx_n < spilink::answer_bytes &&
-           Ticker::millis() - t0 < spilink::serve_ms) {
-    }
+    Client::enable();
+    (void)Client::answer(std::span<const uint8_t>(padded, spilink::answer_bytes),
+                         spins_for_ms(spilink::serve_ms));
     ++serves;
     (void)go_dark();
 }
@@ -461,10 +411,9 @@ struct Streams {
 
 // ---- the actions ----------------------------------------------------------------
 
-constexpr uint16_t exchange_cap = pump_cap;
-uint16_t x_out[exchange_cap];
+constexpr uint16_t exchange_cap = 64;
+uint8_t x_out[exchange_cap];
 uint8_t x_in[exchange_cap];
-uint8_t x_dma_out[exchange_cap];
 
 /// The host burst's per-frame buffers, TWO bytes although the burst is
 /// 8-bit: SpiHost's frame store is width-general and writes a half-word
@@ -476,15 +425,13 @@ uint8_t burst_rx[2];
 /// The workhorse: the host sends P_A(i), this client answers P_B(i).
 ///
 /// TWO SERVES, so both boundaries stay measurable. THE DEFAULT IS THE
-/// DMA ENGINES, the arrangement that measures the self-link exact to
-/// PCLK/4 with both ends engined: the peripheral disabled, TXDMAEN and
-/// RXDMAEN set, both channels claimed and started, and SPE raised LAST
-/// so the transmit channel's own first beats ARE the preload (a request
-/// is a level this controller serves on enable). The receive block's
-/// completion
-/// is the transaction's. `spilink::spare_polled_pump` asks for the
-/// SOFTWARE pump instead - the one-ahead reload on RXNE - whose
-/// boundary is an interrupt entry per frame.
+/// DMA ENGINES: the peripheral disabled, TXDMAEN and RXDMAEN set, both
+/// channels claimed and started, and SPE raised LAST so the transmit
+/// channel's own first beats ARE the preload (a request is a level this
+/// controller serves on enable). The receive block's completion is the
+/// transaction's. `spilink::spare_polled_pump` asks for the driver's
+/// polled run instead (the exchange, or the answers alone with
+/// `spare_answer_only`).
 spilink::Report run_exchange(const spilink::Params& a) {
     spilink::Report r{};
     const bool preload = a.cfg.regime == spilink::regime_buffer_wait;
@@ -503,64 +450,62 @@ spilink::Report run_exchange(const spilink::Params& a) {
     {
         spilink::Stream out(a.pattern, a.seed_b);
         for (uint16_t i = 0; i < n; ++i) {
-            const uint8_t v = out.next();
-            x_out[i] = v;
-            x_dma_out[i] = v;
+            x_out[i] = out.next();
         }
     }
+    const bool answer_only = (a.spare & spilink::spare_answer_only) != 0;
+    const bool engines = dma_ok && preload && !answer_only &&
+                         (a.spare & spilink::spare_polled_pump) == 0u;
 
-    if (dma_ok && preload && (a.spare & spilink::spare_polled_pump) == 0u) {
-        pump_stop();
+    const uint32_t t0 = Ticker::millis();
+    Run run{};
+    if (engines) {
         (void)Client::disable();
         (void)Raw::dma_transmit(true);
         (void)Raw::dma_receive(true);
         PeerRx::arm(Raw::data_address(), Raw::dma_rx_request());
         PeerTx::arm(Raw::data_address(), Raw::dma_tx_request());
         (void)PeerRx::start(std::span<uint8_t>(x_in, n));
-        (void)PeerTx::start(std::span<const uint8_t>(x_dma_out, n));
+        (void)PeerTx::start(std::span<const uint8_t>(x_out, n));
         Raw::enable();
-
-        const uint32_t t0 = Ticker::millis();
         while (!PeerRx::full() && Ticker::millis() - t0 < a.ms) {
             (void)PeerRx::take();
         }
         (void)PeerRx::take();
-        const bool all_in = PeerRx::full();
-        const uint16_t got = PeerRx::taken();
+        run = {PeerRx::taken(), PeerRx::full() ? Client::RunEnd::complete
+                                               : Client::RunEnd::stalled};
         PeerTx::stop();
         PeerRx::stop();
-        r.aux0 = static_cast<uint8_t>(Client::status());
-        r.aux1 = all_in ? 0u : 255u;
-        r.aux2 = 0x04;                    // marks the DMA serve in the report
-        Streams s(a);
-        for (uint16_t i = 0; i < got && i < n; ++i) {
-            account(r, x_in[i], s.next_expected());
+        r.aux2 |= 0x04;                   // marks the DMA serve in the report
+    } else {
+        if (!preload) {
+            // NO PRELOAD (a regime this suite never commands): the run
+            // starts once the select has fallen, so the shifter's leftover
+            // leads, which is stated in the header.
+            while (!Client::selected() && Ticker::millis() - t0 < a.ms) {
+            }
         }
-        if (r.count < a.count) r.flags |= spilink::report_timed_out;
-        if (Client::overrun()) r.flags |= spilink::report_bufovf;
-        (void)go_dark();
-        return r;
+        Client::enable();
+        run = answer_only ? Client::answer(std::span<const uint8_t>(x_out, n), spins_for_ms(a.ms))
+                          : Client::exchange(std::span<const uint8_t>(x_out, n),
+                                             std::span<uint8_t>(x_in, n), spins_for_ms(a.ms));
     }
-
-    // The SOFTWARE pump: the two preloads, then one reload per received
-    // frame. Without the preloads (a regime this suite never commands)
-    // the shifter's leftover leads, which is stated in the header.
-    pump_arm(x_out, preload ? n : 0u, preload ? 0x00u : 0xFFu);
-    r.aux3 = static_cast<uint8_t>(Client::status());   // SR right after the preloads
-    const uint32_t t0 = Ticker::millis();
-    while (pump_rx_n < n && Ticker::millis() - t0 < a.ms) {
-    }
-    const uint16_t got = pump_rx_n < exchange_cap ? pump_rx_n : exchange_cap;
+    const uint32_t dt = Ticker::millis() - t0;
     r.aux0 = static_cast<uint8_t>(Client::status());
-    r.aux1 = got == 0u ? 255u : 0u;
+    r.aux1 = run.count == 0u ? 255u : (dt > 254u ? 254u : static_cast<uint8_t>(dt));
+    if (Client::selected()) r.aux2 |= 0x01;
+    if (run.end == Client::RunEnd::closed) r.aux2 |= 0x02;
     if (Client::overrun()) r.flags |= spilink::report_bufovf;
 
-    Streams s(a);
-    for (uint16_t i = 0; i < got; ++i) {
-        account(r, pump_in[i], s.next_expected());
+    if (answer_only) {
+        r.count = run.count;   // answers written; nothing was received
+    } else {
+        Streams s(a);
+        for (uint16_t i = 0; i < run.count && i < n; ++i) {
+            account(r, x_in[i], s.next_expected());
+        }
     }
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
-    if (Client::selected()) r.aux2 |= 0x02;
     (void)go_dark();
     return r;
 }
@@ -576,7 +521,6 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
         r.flags |= spilink::report_cfg_failed;
         return r;
     }
-    pump_stop();
     Client::enable(0x00, 0x00);          // something harmless to shift out
     uint8_t seen = 0;
     const uint32_t t0 = Ticker::millis();
@@ -609,7 +553,6 @@ spilink::Report run_sink_slow(const spilink::Params& a) {
 /// first, so nothing of this board is on the other three wires.
 spilink::Report run_ss_pulse(const spilink::Params& a) {
     spilink::Report r{};
-    pump_stop();
     Client::release();
     if (a.aux8) wait_ms(a.aux8);
     NssPin::output(false);
@@ -637,7 +580,6 @@ spilink::Report run_ss_pulse(const spilink::Params& a) {
 spilink::Report run_host_burst(const spilink::Params& a) {
     spilink::Report r{};
 
-    pump_stop();
     Client::release();
     NssPin::output(true);                 // deselected before anything moves
 
@@ -780,7 +722,8 @@ void status() {
     print(console, "  NSS pin reads ", NssPin::read() ? "high" : "LOW",
           ", selected=", Client::selected(),
           ", MISO driven=", MisoPin::has_function(),
-          ", MISO pad speed=", speed_name(miso_speed), crlf);
+          ", MISO pad speed=", speed_name(miso_speed), " (last applied ",
+          speed_name(miso_applied), ")", crlf);
     print(console, "  commands=", commands, " actions=", actions, " naks=", naks,
           " served=", serves, engaged() ? "  (ENGAGED)" : "  (dark, mute)", crlf);
     print(console, "  last report: op=", hex(last_report.op), " count=", last_report.count,
@@ -797,14 +740,12 @@ void status() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 extern "C" void BRIO_STM32G0_USART2_HANDLER() { (void)Console::isr(); }
 
-/// SPI1's line, and the one-ahead pump is the only thing on it. A stray
-/// level with no window open is DISARMED rather than looped on.
+/// SPI1's line carries nothing - every window is a polled run - but
+/// SpiClient::init() opens it at the NVIC, so a stray level is DISARMED
+/// rather than looped on.
 extern "C" void SPI1_IRQHandler() {
-    if (pump_live) {
-        pump_service();
-        return;
-    }
     Raw::rxne_interrupt(false);
+    Raw::txe_interrupt(false);
     Raw::error_interrupt(false);
 }
 
@@ -872,8 +813,8 @@ int main() {
                                  : miso_speed == PinSpeed::low    ? PinSpeed::very_high
                                                                   : PinSpeed::high;
                     print(console, "  MISO pad speed now ", speed_name(miso_speed),
-                          " (applied at the next answer window; high is the "
-                          "default, very_high slips the falling-edge samplers)",
+                          " (applied at the next answer window, a notch slower in "
+                          "modes 1 and 2; high is the default)",
                           crlf);
                 } else {
                     print(console, "? for help", crlf);

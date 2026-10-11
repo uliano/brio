@@ -1160,14 +1160,17 @@ static_assert(spi_write_ahead_code(300u, SpiDataSize::bits16, 1) ==
  *    the frame shifting.
  *  - THE PUMP runs on RXNE, the one moment a frame is provably back,
  *    and keeps ONE OR TWO frames in flight: with two, the handler for
- *    frame k finds k + 1 already shifting and writes k + 2, so the bus
- *    stays busy through the handler - and it overruns the receive buffer
- *    if the handler reads frame k later than one frame time after its
- *    RXNE (26.3.13). Two in flight is therefore chosen PER REQUEST, where
- *    a frame outlasts the latency that can delay the read
+ *    frame k writes k + 2 behind k + 1, so the bus stays busy through
+ *    the handler - and it overruns the receive buffer if the handler
+ *    reads frame k later than one frame time after its RXNE (26.3.13),
+ *    and overwrites k + 1 if it writes sooner than half a bit after it
+ *    (RXNE is the last SAMPLING edge, k + 1 leaves the buffer at its own
+ *    first bit). Two in flight is therefore chosen PER REQUEST, where a
+ *    frame outlasts the latency that can delay the read
  *    (`write_ahead_min_frame_cycles`, from the image's `hold_off_cycles`
- *    below); below that one frame in flight, the bus idle for the
- *    handler. The D/C boundary drains to one frame
+ *    below) and the half bit is shorter than the handler's own entry
+ *    (pump_two_ahead()); elsewhere one frame in flight, the bus idle for
+ *    the handler at the fast rates and continuous at the slow ones. The D/C boundary drains to one frame
  *    either way: the first data frame is written only after the last
  *    command frame came back, because a frame preloaded into the Tx
  *    buffer goes out the moment the one before it ends, before any
@@ -1445,8 +1448,9 @@ public:
     /// The rate the BR field divides: this instance's APB clock.
     static uint32_t reference_hz() { return st_.pclk_hz; }
     /// Whether the pump keeps two frames in flight at this rate and
-    /// width (the threshold above, against the rate's frame time).
-    static bool two_in_flight(SpiClock c, SpiDataSize bits) { return two_ahead(clamp(c), bits); }
+    /// width (the threshold above against the rate's frame time, and the
+    /// half bit against the handler's entry: pump_two_ahead()).
+    static bool two_in_flight(SpiClock c, SpiDataSize bits) { return pump_two_ahead(clamp(c), bits); }
     /// The overruns the pump met since init(), saturating.
     static uint16_t overruns() { return st_.overruns; }
 
@@ -1577,7 +1581,7 @@ public:
         s.engined = engined;
         s.in_cmd = r.cmd_len != 0u;
         s.pos = 0;
-        s.ahead = two_ahead(code, r.bits) ? 2u : 1u;
+        s.ahead = pump_two_ahead(code, r.bits) ? 2u : 1u;
         if (s.in_cmd) {
             // The command phase runs on the pump; isr() hands over to
             // the engines, where they serve, at its end.
@@ -1655,9 +1659,18 @@ public:
             return false;
         }
         // The data phase: the next frame out first, then the one that
-        // came back stored.
+        // came back stored. With two in flight frame k + 1 is in the Tx
+        // buffer until its own first bit, half a bit after this RXNE
+        // (pump_two_ahead()), and a store before TXE overwrites it
+        // (26.3.9): the store waits for TXE, which the rule keeps inside
+        // this handler's own entry.
         if (s.sent < s.t.len) {
-            r.DR = frame(s.t.tx, s.sent, wide);
+            const uint16_t v = frame(s.t.tx, s.sent, wide);
+            if (s.ahead == 2u) {
+                for (uint32_t spins = 64u; (r.SR & SPI_SR_TXE) == 0u && spins != 0u; --spins) {
+                }
+            }
+            r.DR = v;
             ++s.sent;
         }
         if (s.t.rx != nullptr) {
@@ -1889,6 +1902,25 @@ private:
     /// PCLK cycles, times HCLK over PCLK.
     [[gnu::always_inline]] static bool two_ahead(SpiClock c, SpiDataSize bits) {
         return spi_frame_hclk_cycles(c, bits, st_.ratio_shift) >= write_ahead_min_frame_cycles;
+    }
+
+    /// TWO IN FLIGHT ON THE PUMP has a second bound the polled loop has
+    /// not: RXNE rises on the LAST SAMPLING EDGE of frame k (26.3.9), half
+    /// a bit before frame k + 1 leaves the Tx buffer for the shifter, so a
+    /// handler that writes frame k + 2 sooner than that half bit after
+    /// RXNE overwrites k + 1 ("the data waiting for transaction is
+    /// overwritten", 26.3.9) - measured on SPI2 at PCLK1/256: one frame of
+    /// six lost, the transaction never completing. So the pump keeps two
+    /// in flight only where the half bit is shorter than the handler's own
+    /// entry and read (spi_isr_entry_cycles + spi_isr_to_read_cycles) -
+    /// /16 and faster on an APB2 at HCLK / 2, /8 and faster on APB1 at
+    /// HCLK / 4, with the frame still long enough for the hold-off - and
+    /// one elsewhere, where a write at RXNE lands inside that half bit and
+    /// the bus stays continuous with one frame queued. The polled loop
+    /// waits for TXE before every write and keeps two_ahead()'s rule.
+    [[gnu::always_inline]] static bool pump_two_ahead(SpiClock c, SpiDataSize bits) {
+        const uint32_t half_bit = 1u << (static_cast<uint8_t>(c) + st_.ratio_shift);
+        return two_ahead(c, bits) && half_bit < spi_isr_entry_cycles + spi_isr_to_read_cycles;
     }
 
     static SpiConfig boot_config() {
@@ -2378,10 +2410,13 @@ public:
 
     /// SPE up and the FIRST ANSWER in the buffer before the host's clock
     /// can arrive. Call it with NSS still high.
-    static void enable(uint16_t first = 0xFFFFu) {
+    static void enable(uint16_t first) {
         S::enable();
         write(first);
     }
+    /// SPE up with the transmit buffer left EMPTY: the opening of a run
+    /// (below), which writes its own first answer.
+    static void enable() { S::enable(); }
     static bool disable() { return S::disable(); }
 
     /// Load the next frame to shift out; on TXE, for the one-ahead rule.
@@ -2416,6 +2451,218 @@ public:
     static void clear_crc_error() { S::clear_crc_error(); }
     static bool frame_error() { return S::frame_error(); }
     static uint32_t status() { return S::status(); }
+
+    // ---- the polled runs ---------------------------------------------------------
+    //
+    // A client's unit is the RUN: the answers to a transaction, or what it
+    // brings, served polled in one call - the per-frame verbs above being
+    // its degenerate case. What bounds a run on this block is 26.3.9's one
+    // transmit buffer in front of one shifter: "the data frame is loaded
+    // from the Tx buffer into the shift register during the first bit
+    // transmission" and TXE rises then (ES0298 2.14.6: "once the second
+    // bit transaction is ongoing"), so the NEXT answer may be written at
+    // any moment from that TXE to the first bit of the next frame - SEVEN
+    // BITS of window, where an answer written at the RXNE of the frame
+    // before has half a bit. The runs therefore write on TXE: the buffer
+    // is refilled as soon as the shifter takes it, the answer for frame
+    // k + 1 waiting while frame k shifts. RXNE rises on the last sampling
+    // edge (26.3.9) and the receive buffer is ONE frame deep, so a run
+    // that reads must read each frame inside the next one.
+    //
+    // THE SELECT PAD IS THE WINDOW. The block has no flag for the end of a
+    // slave transaction (ES0298 2.14.6 makes BSY no witness either), so a
+    // run reads the NSS pad - the pad of `pins.nss`, under the hardware
+    // input arrangement - once for every four polls of the flag: it waits
+    // for the select to FALL before it takes a high pad for the close, and
+    // a run without an NSS pad (a software select) ends on its count or
+    // its budget alone. A host that opens a window shorter than the run's
+    // look at the pad is a window the run does not see.
+    //
+    // THEY ARE ALWAYS INLINE, and the program places the function that
+    // calls them: in this stratum's flash behind the ART accelerator, which
+    // serves a loop at zero wait states, so no image here moves one to
+    // SRAM. Counted in the release listing and measured against the wire
+    // in docs/stm32f4/spi.md.
+
+    /// How a run ended.
+    enum class RunEnd : uint8_t {
+        complete,   ///< every frame of the run moved (exchange, receive; answer
+                    ///< without an NSS pad, its answers all written)
+        closed,     ///< the host raised the select (the NSS pad read high)
+        stalled,    ///< the spin budget ran out first
+    };
+
+    /// What a run did: `count` frames - answers written into the buffer for
+    /// answer(), frames received for exchange() and receive() - and how it
+    /// ended.
+    struct Run {
+        uint16_t count;
+        RunEnd end;
+    };
+
+    /**
+     * ANSWER a transaction with `out`, polled on TXE alone, reading
+     * nothing. Call it with SPE up (`enable()`), the transmit buffer EMPTY
+     * and the select still HIGH: the first answer goes into the buffer at
+     * once and is on the shifter at the first bit (26.3.9), and every
+     * later one is written on the TXE that marks a frame's start, inside
+     * the seven-bit window above.
+     *
+     * The run ENDS WHEN THE HOST RAISES THE SELECT, however many frames it
+     * clocked: fewer than the run, and `count` says how many answers were
+     * written (the last of them may still sit in the buffer - the next
+     * transaction would start with it, so a program re-initialises between
+     * windows); more, and the frames past the run carry whatever the
+     * shifter is left with, the chapter's "no underflow" (26.3.9) - a
+     * caller that wants a fill pads its run.
+     *
+     * NOTHING IS READ while it runs: the one-frame receive buffer overruns
+     * from the second frame (26.3.10, OVR) - what the host sent is LOST,
+     * the price of a one-flag turn. The tail runs the overrun's own
+     * clearing sequence (a DR read, then an SR read), so the next run or
+     * poll starts clean.
+     *
+     * `spins` bounds the whole run, counted down once per four idle polls:
+     * a host that never selects, or never closes, ends it `stalled`.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run answer(std::span<const T> out, uint32_t spins) {
+        static_assert(run_frame<T>, "a frame of this block is eight bits or sixteen "
+                                    "(CR1.DFF): uint8_t or uint16_t");
+        auto& regs = S::regs();
+        const T* const first = out.data();
+        const T* const end = first + out.size();
+        const T* p = first;
+        RunEnd how = RunEnd::closed;
+        if (p != end) {
+            regs.DR = *p++;
+        }
+        if (!await_select(spins)) {
+            how = RunEnd::stalled;
+            goto tail;
+        }
+        for (; p != end; ++p) {
+            const T next = *p;
+            if (!await<SpiFlag::txe>(spins, how)) {
+                goto tail;
+            }
+            regs.DR = next;
+        }
+        // Every answer is written, the last one or two still to be
+        // clocked: the host's close is the end - and without a pad to
+        // close, the run is complete here.
+        if constexpr (has_nss_pad) {
+            while (pad_low()) {
+                if (--spins == 0u) {
+                    how = RunEnd::stalled;
+                    break;
+                }
+            }
+        } else {
+            how = RunEnd::complete;
+        }
+    tail:
+        S::flush_rx();
+        return {static_cast<uint16_t>(p - first), how};
+    }
+
+    /**
+     * EXCHANGE: answer with `out` and keep what the host sends in `in`,
+     * the run's length the shorter of the two. The answers go exactly as
+     * answer()'s - the first into the empty buffer with the select high,
+     * the rest each on its frame's TXE - and each turn then reads the
+     * frame the TXE belonged to, on its RXNE: a turn is two polls, a store
+     * and a read, and it must stay inside the next frame, the receive
+     * buffer being one frame deep.
+     *
+     * Ends `complete` when the last frame is in; `closed` when the host
+     * raised the select first, what arrived before it read into `in`
+     * (`count` says how far); `stalled` on the budget. The receive buffer
+     * and a standing OVR are cleared at the start, with the select high,
+     * so `in` holds this transaction alone.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run exchange(std::span<const T> out, std::span<T> in,
+                                               uint32_t spins) {
+        static_assert(run_frame<T>, "a frame of this block is eight bits or sixteen "
+                                    "(CR1.DFF): uint8_t or uint16_t");
+        const uint32_t len = out.size() < in.size() ? out.size() : in.size();
+        if (len == 0u) {
+            return {0, RunEnd::complete};
+        }
+        auto& regs = S::regs();
+        S::flush_rx();
+        const T* p = out.data();
+        const T* const p_end = p + len;
+        T* const first = in.data();
+        T* const q_end = first + len;
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        regs.DR = *p++;
+        if (!await_select(spins)) {
+            return {0, RunEnd::stalled};
+        }
+        // The steady state: the next answer on its frame's TXE, then that
+        // frame read on its RXNE - the answer one frame ahead of the read.
+        for (; p != p_end; ++p, ++q) {
+            const T next = *p;
+            if (!await<SpiFlag::txe>(spins, how)) {
+                goto drain;
+            }
+            regs.DR = next;
+            if (!await<SpiFlag::rxne>(spins, how)) {
+                goto drain;
+            }
+            *q = static_cast<T>(regs.DR);
+        }
+        // The last frame, nothing left to write.
+        if (!await<SpiFlag::rxne>(spins, how)) {
+            goto drain;
+        }
+        *q++ = static_cast<T>(regs.DR);
+        return {static_cast<uint16_t>(q - first), RunEnd::complete};
+    drain:
+        // A frame that completed before the close is still in the buffer:
+        // it belongs to the run.
+        if (q != q_end && (regs.SR & SpiFlag::rxne) != 0u) {
+            *q++ = static_cast<T>(regs.DR);
+        }
+        return {static_cast<uint16_t>(q - first), how};
+    }
+
+    /**
+     * RECEIVE a run into `in`, polled on RXNE alone, writing nothing - what
+     * the host reads meanwhile is whatever the buffer and the shifter are
+     * left with, the chapter's "no underflow" (26.3.9). The seven-bit
+     * window does not bind here (no write is timed); the one-frame receive
+     * buffer does: a turn must stay inside a frame. Ends as exchange()
+     * does; the receive buffer is NOT flushed at the start, so a frame
+     * standing in it when the run began is the run's first.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run receive(std::span<T> in, uint32_t spins) {
+        static_assert(run_frame<T>, "a frame of this block is eight bits or sixteen "
+                                    "(CR1.DFF): uint8_t or uint16_t");
+        auto& regs = S::regs();
+        T* const first = in.data();
+        T* const q_end = first + in.size();
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        if ((regs.SR & SpiFlag::rxne) == 0u && !await_select(spins)) {
+            return {0, RunEnd::stalled};
+        }
+        for (; q != q_end; ++q) {
+            if (!await<SpiFlag::rxne>(spins, how)) {
+                // A frame that landed beside the close is the run's.
+                if ((regs.SR & SpiFlag::rxne) != 0u) {
+                    *q++ = static_cast<T>(regs.DR);
+                }
+                break;
+            }
+            *q = static_cast<T>(regs.DR);
+        }
+        return {static_cast<uint16_t>(q - first), how};
+    }
 
     /// The ISR body: the raised-and-enabled sources, for the app's glue.
     [[gnu::always_inline]] static uint32_t isr() { return S::isr(); }
@@ -2455,6 +2702,66 @@ private:
         s.crc = c.crc;
         s.crc_polynomial = c.crc_polynomial;
         return s;
+    }
+
+    /// The two frame types a run may carry: the beat is the element.
+    template <typename T>
+    static constexpr bool run_frame = std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t>;
+
+    /// The NSS pad read low, the window open. Without a pad there is no
+    /// window to wait for and the answer is yes at once.
+    [[gnu::always_inline]] static bool pad_low() {
+        if constexpr (has_nss_pad) {
+            return (NssPin::port().IDR & NssPin::mask) == 0u;
+        } else {
+            return true;
+        }
+    }
+
+    /// Wait for the host to open the window: true when the select pad
+    /// reads low, false when the budget ran out first.
+    [[gnu::always_inline]] static bool await_select(uint32_t& spins) {
+        while (!pad_low()) {
+            if (--spins == 0u) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Poll SR until `flag` (TXE or RXNE) stands: true. False when the
+    /// host raised the select (the pad read high) or the run's budget ran
+    /// out, `how` saying which. FOUR POLLS A LOOK: the pad and the budget
+    /// are asked once every four reads of SR, so the read that sees the
+    /// flag is a load, a test and a branch from the one before it, and the
+    /// branch out of the poll is the whole path to the store.
+    template <uint32_t flag>
+    [[gnu::always_inline]] static bool await(uint32_t& spins, RunEnd& how) {
+        auto& regs = S::regs();
+        for (;;) {
+            if ((regs.SR & flag) != 0u) {
+                return true;
+            }
+            if ((regs.SR & flag) != 0u) {
+                return true;
+            }
+            if ((regs.SR & flag) != 0u) {
+                return true;
+            }
+            if ((regs.SR & flag) != 0u) {
+                return true;
+            }
+            if constexpr (has_nss_pad) {
+                if (!pad_low()) {
+                    how = RunEnd::closed;
+                    return false;
+                }
+            }
+            if (--spins == 0u) {
+                how = RunEnd::stalled;
+                return false;
+            }
+        }
     }
 
     static inline SpiDataSize bits_ = SpiDataSize::bits8;

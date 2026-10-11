@@ -86,7 +86,7 @@ static_assert(!plli2s_has_m());
 static_assert(spi_i2s_facts().known && spi_i2s_capable(1) && spi_i2s_capable(5));
 #elif defined(STM32F446xx)
 static_assert(spi_i2s_facts().known && !spi_i2s_facts().ext_blocks);
-static_assert(spi_i2s_capable(2) && spi_i2s_capable(3) && !spi_i2s_capable(1));
+static_assert(spi_i2s_capable(1) && spi_i2s_capable(2) && spi_i2s_capable(3) && !spi_i2s_capable(4));
 #elif defined(STM32F429xx) || defined(STM32F427xx) || defined(STM32F437xx) || defined(STM32F439xx) || \
       defined(STM32F405xx) || defined(STM32F415xx) || defined(STM32F407xx) || defined(STM32F417xx) || \
       defined(STM32F469xx) || defined(STM32F479xx)
@@ -384,6 +384,13 @@ using SlowServiceBus = SpiHost<1, spi1_pins, NoDmaEngine, NoDmaEngine, 300>;
 static_assert(Bus::hold_off == spi_default_hold_off_cycles && Bus::write_ahead_min_frame_cycles == 236u);
 static_assert(SlowServiceBus::hold_off == 300u && SlowServiceBus::write_ahead_min_frame_cycles == 423u);
 using Peer = SpiClient<1, spi1_pins>;
+/// A client with no NSS pad (a software select): its runs end on their
+/// count or their budget, the pad's look compiled out.
+constexpr SpiPins spi1_no_select{.sck = {'A', 5, PinFunction::af5},
+                                 .miso = {'A', 6, PinFunction::af5},
+                                 .mosi = {'A', 7, PinFunction::af5}};
+using NoSelectPeer = SpiClient<1, spi1_no_select>;
+static_assert(!NoSelectPeer::has_nss_pad);
 
 /// The engined host: the cells are the reserve's, so the engines only
 /// exist where the class's table was read. SPI1's transmit is DMA2 stream
@@ -479,6 +486,23 @@ void client_smoke() {
                                                       .drive_output = false});
     Peer::drive_output(true);
     Peer::enable(0xA5u);
+    Peer::enable();
+    // The runs at both frame widths, every verb.
+    static const uint8_t answers[4] = {1, 2, 3, 4};
+    static uint8_t got[4] = {};
+    static const uint16_t answers16[2] = {0x1234u, 0xABCDu};
+    static uint16_t got16[2] = {};
+    const Peer::Run a = Peer::answer(std::span<const uint8_t>(answers), 100000u);
+    (void)a.count;
+    (void)(a.end == Peer::RunEnd::closed);
+    (void)Peer::exchange(std::span<const uint8_t>(answers), std::span<uint8_t>(got), 100000u);
+    (void)Peer::receive(std::span<uint8_t>(got), 100000u);
+    (void)Peer::answer(std::span<const uint16_t>(answers16), 100000u);
+    (void)Peer::exchange(std::span<const uint16_t>(answers16), std::span<uint16_t>(got16), 100000u);
+    (void)Peer::receive(std::span<uint16_t>(got16), 100000u);
+    (void)NoSelectPeer::answer(std::span<const uint8_t>(answers), 100000u);
+    (void)NoSelectPeer::exchange(std::span<const uint8_t>(answers), std::span<uint8_t>(got), 100000u);
+    (void)NoSelectPeer::receive(std::span<uint8_t>(got), 100000u);
     (void)Peer::disable();
     Peer::write(0x33u);
     (void)Peer::writable();

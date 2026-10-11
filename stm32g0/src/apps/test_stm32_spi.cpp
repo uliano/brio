@@ -4091,6 +4091,9 @@ using PeerClient = SpiClient<1, host_pins>;
 uint8_t crx[64];
 uint16_t crx_n = 0;
 
+uint8_t cout_[64];
+PeerClient::Run client_run{};
+
 bool run_as_client(const spilink::Params& a) {
     crx_n = 0;
     peer_stop();
@@ -4102,27 +4105,20 @@ bool run_as_client(const spilink::Params& a) {
                                   .drive_output = true})) {
         return false;
     }
-    // ONE FRAME AHEAD, and on this silicon it is the FIFO that says so
-    // (35.5.8): the first two answers go in before the host's clock can
-    // arrive and every received frame loads the next-plus-one.
+    // THE DRIVER'S RUN (SpiClient::exchange): the TXFIFO filled with the
+    // first four answers before the host's clock can arrive (35.5.8), a
+    // packed pair on every TXE after, and each pair read back on RXNE -
+    // one call, the select pad its window.
+    const uint16_t n = a.count < sizeof crx ? a.count : sizeof crx;
     spilink::Stream out(a.pattern, a.seed_b);
-    const uint16_t b0 = out.next();
-    const uint16_t b1 = out.next();
-    uint16_t queued = 2;
-    PeerClient::enable(b0, b1);
-
-    const uint32_t t0 = Ticker::millis();
-    while (crx_n < a.count && crx_n < sizeof crx && Ticker::millis() - t0 < a.ms) {
-        const auto v = PeerClient::poll();
-        if (!v) {
-            continue;
-        }
-        crx[crx_n++] = static_cast<uint8_t>(*v);
-        if (queued < a.count) {
-            PeerClient::write(out.next());
-            ++queued;
-        }
+    for (uint16_t i = 0; i < n; ++i) {
+        cout_[i] = out.next();
     }
+    PeerClient::enable();
+    client_run = PeerClient::exchange(std::span<const uint8_t>(cout_, n),
+                                      std::span<uint8_t>(crx, n),
+                                      static_cast<uint32_t>(a.ms) * (Fast::hz / 24'000u));
+    crx_n = client_run.count;
     (void)PeerClient::disable();
     PeerClient::release();
     return true;
@@ -4182,8 +4178,12 @@ void tr_peer_client() {
         print(serial, " (first idx ", first_idx, " got ", hex(got), " exp ", hex(want),
               ")");
     }
-    print(serial, "; the peer as HOST read ", r.count, " with mism=", r.mism,
-          " flags=", hex(r.flags), crlf);
+    print(serial, "; the run ended ",
+          client_run.end == PeerClient::RunEnd::complete ? "complete"
+          : client_run.end == PeerClient::RunEnd::closed ? "closed"
+                                                         : "STALLED",
+          "; the peer as HOST read ", r.count, " with mism=", r.mism, " (first idx ", r.idx,
+          " got ", hex(r.got), " exp ", hex(r.exp), ") flags=", hex(r.flags), crlf);
     print(serial, "  read:");
     for (uint16_t i = 0; i < crx_n && i < 16u; ++i) {
         print(serial, " ", hex(crx[i]));
@@ -4194,8 +4194,8 @@ void tr_peer_client() {
                   "byte-exact",
                   ran && crx_n == a.count && mism == 0u);
     bench.verdict("...and that host read this end's answer stream byte-exact FROM "
-                  "THE FIRST FRAME, which is what the two preloads before the "
-                  "select edge buy (35.5.8)",
+                  "THE FIRST FRAME, which is what the TXFIFO filled before the "
+                  "select edge buys (35.5.8)",
                   rep && r.count == a.count && r.mism == 0u);
 
     (void)link_command_mode();

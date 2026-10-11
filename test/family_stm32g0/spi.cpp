@@ -4,6 +4,8 @@
 // are the Nucleo-G0B1RE self-link's (DS13560 tables 13, 15, 17, 18):
 // SPI1 PB3/PB4/PB5 with PA15 as NSS, SPI2 PB10/PC2/PD4 with PB12 - all
 // on ports every package of the family carries.
+#include <span>
+
 #include "stm32g0/clock.hpp"
 #include "stm32g0/dma.hpp"
 #include "stm32g0/spi.hpp"
@@ -125,6 +127,14 @@ static_assert(spi_pins_valid(SpiPins{.sck = {'B', 3}, .miso = {}, .mosi = {'B', 
 using Host = SpiHost<1, host_pins>;
 using Peer = SpiClient<2, client_pins>;
 static_assert(Peer::frames_ahead == 2);
+/// A client with no NSS pad (a software select): its runs end on their
+/// count or their budget, the pad's look compiled out.
+constexpr SpiPins client_no_select{.sck = client_pins.sck,
+                                   .miso = client_pins.miso,
+                                   .mosi = client_pins.mosi,
+                                   .nss = {}};
+using NoSelectPeer = SpiClient<2, client_no_select>;
+static_assert(!NoSelectPeer::has_nss_pad);
 using Tx = DmaTxEngine<1, 1>;
 using Rx = DmaRxEngine<1, 2>;
 using EngineHost = SpiHost<1, host_pins, Tx, Rx>;
@@ -338,6 +348,23 @@ void spi_tasks() {
 
     (void)Peer::init(clock, {.mode = SpiMode::mode0, .bits = SpiDataSize::bits8});
     Peer::enable(0xA5, 0x5A);
+    Peer::enable();
+    // The runs at both frame widths, every verb, with and without a pad.
+    static const uint8_t answers[5] = {1, 2, 3, 4, 5};
+    static uint8_t got[5] = {};
+    static const uint16_t answers16[2] = {0x1FF, 0x100};
+    static uint16_t got16[2] = {};
+    const Peer::Run a = Peer::answer(std::span<const uint8_t>(answers), 100000u);
+    (void)a.count;
+    (void)(a.end == Peer::RunEnd::closed);
+    (void)Peer::exchange(std::span<const uint8_t>(answers), std::span<uint8_t>(got), 100000u);
+    (void)Peer::receive(std::span<uint8_t>(got), 100000u);
+    (void)Peer::answer(std::span<const uint16_t>(answers16), 100000u);
+    (void)Peer::exchange(std::span<const uint16_t>(answers16), std::span<uint16_t>(got16), 100000u);
+    (void)Peer::receive(std::span<uint16_t>(got16), 100000u);
+    (void)NoSelectPeer::answer(std::span<const uint8_t>(answers), 100000u);
+    (void)NoSelectPeer::exchange(std::span<const uint8_t>(answers), std::span<uint8_t>(got), 100000u);
+    (void)NoSelectPeer::receive(std::span<uint8_t>(got), 100000u);
     Peer::write(0x33);
     (void)Peer::writable();
     (void)Peer::poll();
