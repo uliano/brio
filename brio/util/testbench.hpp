@@ -84,7 +84,9 @@ namespace brio {
  * header (`// build: groups = abg,cdf,e`), and on such a part the build
  * emits one image per group, defining BRIO_TEST_LETTERS as that group's
  * keys; every other image carries every letter (design/overview.md, "A
- * suite's image fits the family's smallest chip"). letter() registers
+ * suite's image fits the family's smallest chip"). A group names letters
+ * and digits alike - a second set's digit keys belong to the group that
+ * names them, as letters do. letter() registers
  * nothing for a key outside the selection, so a letter the image does
  * not carry is never referenced and the linker drops it with its
  * verdict prose - the SOURCE is the same in every image, and the menu
@@ -96,28 +98,67 @@ inline constexpr const char* test_letters = BRIO_TEST_LETTERS;
 inline constexpr const char* test_letters = nullptr;
 #endif
 
-/// The selection as one bit per letter 'a'..'z', every bit set when the
-/// build named none: an integer constant, so that letter()'s check on a
-/// literal key folds to a constant at every call site - a loop over the
-/// string would not have to, and a check that survives keeps the
+/// A selection string as one bit per letter 'a'..'z', every bit set for
+/// no selection (nullptr): an integer constant, so that letter()'s check
+/// on a literal key folds to a constant at every call site - a loop over
+/// the string would not have to, and a check that survives keeps the
 /// test's address alive in main.
-constexpr uint32_t test_letter_mask() {
-    if (test_letters == nullptr) {
+constexpr uint32_t letter_mask_of(const char* selection) {
+    if (selection == nullptr) {
         return 0x03FFFFFFUL;
     }
     uint32_t mask = 0;
-    for (const char* p = test_letters; *p != '\0'; ++p) {
+    for (const char* p = selection; *p != '\0'; ++p) {
         if (*p >= 'a' && *p <= 'z') {
             mask |= 1UL << (*p - 'a');
         }
     }
     return mask;
 }
+
+/// The same for the digit keys '0'..'9' - the keys a second set takes
+/// (TwoKeyTestBench) - so that a group image carries a digit letter only
+/// where its selection names it, as it carries a lower-case one.
+constexpr uint16_t digit_mask_of(const char* selection) {
+    if (selection == nullptr) {
+        return 0x03FFu;
+    }
+    uint16_t mask = 0;
+    for (const char* p = selection; *p != '\0'; ++p) {
+        if (*p >= '0' && *p <= '9') {
+            mask = static_cast<uint16_t>(mask | (1u << (*p - '0')));
+        }
+    }
+    return mask;
+}
+
+/// Whether a selection carries `key`: a letter or a digit when the
+/// selection names it (every one when there is no selection); any other
+/// key - an upper-case letter, a sign - always.
+constexpr bool selection_carries(const char* selection, char key) {
+    if (key >= '0' && key <= '9') {
+        return ((digit_mask_of(selection) >> (key - '0')) & 1u) != 0u;
+    }
+    if (key < 'a' || key > 'z') {
+        return true;
+    }
+    return ((letter_mask_of(selection) >> (key - 'a')) & 1UL) != 0u;
+}
+
+constexpr uint32_t test_letter_mask() { return letter_mask_of(test_letters); }
 inline constexpr uint32_t test_letters_carried = test_letter_mask();
+inline constexpr uint16_t test_digits_carried = digit_mask_of(test_letters);
 
 /// Whether this image carries `key`: every key when the build named no
-/// selection; a key outside 'a'..'z' is always carried.
-constexpr bool test_letter_carried(char key) {
+/// selection; a letter or a digit when the selection names it; any other
+/// key always. Read off the two masks, and ALWAYS INLINED: letter()'s
+/// check must fold to a constant at the call site, and a call the
+/// optimizer leaves standing (-Os weighs this body against its callers)
+/// keeps every letter's address alive in every group image.
+[[gnu::always_inline]] constexpr bool test_letter_carried(char key) {
+    if (key >= '0' && key <= '9') {
+        return ((test_digits_carried >> (key - '0')) & 1u) != 0u;
+    }
     if (key < 'a' || key > 'z') {
         return true;
     }

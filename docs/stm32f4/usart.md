@@ -11,8 +11,9 @@ or UE = 0", and their siblings. Two reach the transport: the first,
 because the receive engine's burst edge IS the line's IDLE (below) and
 the erratum has no workaround, and on the F446 ES0298 2.13.2 (PE
 cleared by a write of DR in full duplex), because the task counts
-parity errors while it may be transmitting - both in the gap list,
-measurable only from a foreign sender. The rest shape nothing in it (no
+parity errors while it may be transmitting - both staged from a foreign
+sender ("Against a far board": the first not reproduced, the second
+reproduced in the erratum's order and absent from the task). The rest shape nothing in it (no
 break, no smartcard and no flow control in the transport), each of
 which the mode's future user meets. Driver:
 `stm32f4/usart.hpp` (`Usart<n>` the resource, `Uart<n, pins, rx_size,
@@ -388,12 +389,17 @@ a third to a half of its frames beside three or four, the overrun count
 saturating at 255; the vector is quiet after every starved leg (the
 overrun with nothing to take, above). The table is [dma.md](dma.md)'s.
 
-**`tx_idle()` is the wire's** (letter e): its first true lands 1570 and
-1579 cycles after the last stop bit's rising edge on the pad at 115200
-(a bit is 1562) - interrupt transmitter and transmit engine - and 202 and
-203 at 1 Mbaud (a bit is 180), the edge's EXTI latency taken off: within
-the few cycles of TC rising at the stop bit's end, on both paths. Before
-this round the verb was the ring's, a frame early.
+**`tx_idle()` is the wire's** (letter e): its first true lands 1594..1603
+and 1598..1604 cycles after the last stop bit's rising edge on the pad at
+115200 (a bit is 1562) - interrupt transmitter and transmit engine - and
+202 and 218..221 at 1 Mbaud (a bit is 180), four runs alike, the edge's
+EXTI latency taken off: within a quarter bit of TC rising at the stop
+bit's end, on both paths. The latency is the MEDIAN of seven software
+triggers of the same line, 34 cycles (34..39): one trigger alone met the
+SysTick's entry or a flash line's fill now and then and read the
+interrupt transmitter bimodal run to run (215 or 338..348 cycles), and
+the console is drained first (its transmit interrupt, entered as the
+stop bit rises, once read the edge 22 cycles early).
 
 **The burst edge from the vector** (letter f, nothing polled): every
 burst of one frame told; a burst of 16 at 1 Mbaud told 1954 cycles after
@@ -441,23 +447,24 @@ The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,
 CROSSED - PA9 (AF7) to its PA10, PA10 from its PA9 - the far board
 running the stm32g0 `usart_peer` (firmware 0x0300), driven IN BAND with
 the protocol every architecture on the link compiles
-(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `4` of
+(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9` of
 `test_stm32f4_serial` run under the second all-key `t` and never under
 `z`, which runs with the far board on its dark console. The far peer's
 core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
-usart.md, "The peer"), so every rate it times is crystal against
-crystal. Score: **94 of 94**, what this USART has no word for SKIPPED
-with its reason.
+clock.md, "The core against the LSE, tracked"), so every rate it times
+is crystal against crystal - and every rate it SENDS it states (a
+`send` or `blast` Report's aux16: its divisor on its tracked core). Score:
+**118 of 118**, what this USART has no word for SKIPPED with its reason.
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
   another die, a crystal-referenced time base), a bad checksum NAKed, a
   desync recovered, a synchronous client refused and the peer at once in
   command mode again.
 - **Two crystals**: three gapless runs of 4000 frames at 1 Mbaud (90 MHz
-  / 90, exact) timed by the far chip at -14, -5 and +1 ppm - the
+  / 90, exact) timed by the far chip at -8, -7 and -6 ppm - the
   ST-LINK's 8 MHz against the far LSE, within their tolerances; the far
-  chip's own 1 Mbaud blast on this DWT +2534 ppm, its divisor (64 of its
-  64.2 MHz core) and nothing else.
+  chip's own 1 Mbaud blast on this DWT +2999 ppm against the +2989 it
+  states (64 of its 64.2 MHz core) less the clocks' -8: 2 ppm apart.
 - **The baud matrix** (`2`) on the two dividers' COMMON ladder: this
   USART divides 90 MHz by any whole k from 8 (OVER8's three-bit fraction
   counts eighths), the far one 64 MHz by a whole n (its OVER8 adds no
@@ -465,10 +472,13 @@ with its reason.
   2.56, 3.2, 4.267 and 6.4 Mbaud, this end 0.45 % above the rate and
   0.15 % from the far end. At 9600, 115200, 921600, 1, 1.5, 2 Mbaud and
   those four: 16 frames echoed by the far chip, every one equal; this
-  transmitter timed by the far receiver over 25 ms of frames within
-  200 ppm of its divisor's error and the clocks' (measured within 25 ppm
-  at every rung: 921600 -3514 against -3508 + -14, 6.4 Mbaud +4465
-  against +4464 + -14); the far blast whole on the polled receiver; and
+  transmitter timed by the far receiver over a thousand frames or 25 ms
+  (864 at 9600) within 200 ppm of its divisor's error and the clocks'
+  (measured within 25 ppm at every rung: 921600 -3504 against -3508 +
+  -8, 6.4 Mbaud +4456 against +4464 + -8); the far blast whole on the
+  polled receiver, its rate within 200 ppm of the far divisor's stated
+  one less the clocks' (measured within 30: 6.4 Mbaud +2753 against
+  +2747 + 8, 4.27 Mbaud +2913 against +2894 + 8); and
   1024 frames whole through the interrupt receiver and through the
   receive engine (DMA2 stream 2 channel 4) at every rung - OVER8's task
   above 5.625 Mbaud, the interrupt receiver keeping up at 6.4 Mbaud, 281
@@ -491,6 +501,49 @@ with its reason.
   with FE and data 0x00, and LBD SET WITH LIN MODE OFF as well as on -
   the detector runs whatever LINEN says (25.6.1's description of the bit
   ties it to no mode).
+- **ES0298 2.13.2 STAGED AND REPRODUCED** (`5`): 64 odd-parity frames
+  into this end at 8E1 while it transmits back to back. Polled in the
+  ERRATUM'S ORDER - an SR read and a DR write every turn, then the SR
+  read the receive is decided on - PE was seen on 11 and 16 of 64 in two
+  runs; in the WORKAROUND'S (one SR read, the DR read, then the write)
+  64 of 64. THROUGH THE TASK, transmitting the whole time, every one of
+  the 64 counted and none delivered: the vector's one SR read decides the
+  receive before the transmit writes DR, which is the workaround's order
+  by construction.
+- **The far engine's shapes** (`6`), the STM32G0B1RE's TIM1: where a
+  start is believed - eight low pulses a width at 115200, nothing under
+  half a bit, 5 of 8 taken at 110 ticks (8.4 sixteenths) with NE, every
+  one from 117, clean from 130 at OVER16 and 156 at OVER8; the
+  operational range of a gapped 0x00 frame - decoded from -50 to +50 per
+  mille at 9600 and 115200, broken by FE slow and by 0x80 fast, NE first
+  from +-45..50 per mille: 25.4.5's 3.41 % inside both ways; one
+  stretched cell of 0x55 at 115200 - 30 % either way decoded, 45 % not
+  for the start cell, the stop cell free.
+- **ES0298 2.13.1 STAGED, NOT REPRODUCED** (`7`): twenty bursts of
+  sixteen frames at 50000 baud from a far end 0 to 3 % FASTER, gaps of
+  200 us (one frame), 300 us and 1 ms: the polled receiver saw IDLE once
+  a burst in every leg, and THE RECEIVE ENGINE'S CONTRACT HOLDS - its
+  edges the same 39 for 20 bursts at every gap and offset (each burst's
+  first frame and its IDLE, the very first frame's merged with the
+  start), no IDLE edge missed. The erratum's case is an idle frame and
+  no more followed at once by a fast sender's start bit; a gap the far
+  peer can time in 100 us steps reaches one frame and a few
+  microseconds, and the edge held there.
+- **The ring under copies, with a real sender** (`8`): letter `g`'s
+  arrangement on USART1's receive engine (DMA2 stream 2), 4096 frames
+  back to back from the far chip at 4.27 and 6.4 Mbaud: at its default
+  level the ring loses nothing beside up to four very-high copies, word
+  or byte beats; ranked low, two copies starve nothing and THREE do -
+  3299 of 4096 lost at 4.27 Mbaud word beats, every loss an overrun the
+  ring reports, never a corrupt byte (design/dma.md's three copies on
+  this arbiter, now with a wire as the sender).
+- **Half duplex against a second board** (`9`): this end's HDSEL single
+  wire on PA9 (the far PA10) hears the far engine drive it, eight frames
+  whole at 9600, 115200 and 1 Mbaud; one open-drain wire between two
+  chips - the far G0 swapped onto its PA10 - every frame out heard back as
+  itself and answered by the far end at 9600, 115200 and 460800; and the
+  wired AND, the far end's 0x00 pulled into this end's 0xFF behind a
+  clean trigger frame.
 
 ## The peer: `usart_peer` (the instrument a far board's suite drives)
 
@@ -514,7 +567,15 @@ chapter's:
 | LIN, mute, smartcard | the DUT's subjects |
 
 The time base is the crystal: the ST-LINK's 8 MHz in bypass through the
-PLL, a DWT cycle and a TIM1 count each 2/15 of a 24 MHz tick. **The
+PLL, a DWT cycle and a TIM1 count each 2/15 of a 24 MHz tick, and a
+`send` or `blast` states the rate its divisor gives on it (the Report's
+aux16: 90 MHz over BRR, or over 8 x mantissa + fraction at OVER8). On
+the shared wire THE REPLY'S OWN ECHO LANDS AFTER TC: the HDSEL receiver
+raises RXNE for the frame it just sent a fraction of a bit after the
+transmitter's TC, so a flush at TC left it standing and the loop
+answered its own echo inside the DUT's next frame (measured: the DUT's
+frames corrupted from their fifth bit, two of every three); the peer
+now waits for that echo, two bit times at most, before it flushes. **The
 cost**: the echo's clean character is 23 instructions with no call
 (release listing) - the SR load and its tests, the DWT stamp, the DR
 load, the DR store and the count - some 35 cycles against the 281 of a
@@ -535,24 +596,16 @@ Driver gaps:
   engine's rule forbids - declined.
 
 Implemented, not bench-verified, for the transport:
-- The receive engine's burst edge under a FASTER sender: the edge is
-  IDLE, and ES0298 2.13.1 (and its ES0206/ES0287 siblings) says an idle
-  frame is not detected when the receiver's clock is deviated from the
-  sender's, with no workaround. Every leg here ran on a loop, one
-  divisor at both ends, which cannot stage it; bursts from a far board
-  running `usart_peer` a few per cent fast would measure whether the
-  edge still comes within two frames.
-- `parity_errors` in full duplex: ES0298 2.13.2 clears PE on a write of
-  DR in full duplex, so a parity error landing while the task writes
-  may go uncounted. The parity legs ran on the single-wire loop, which
-  is half duplex; odd-parity frames from a far board while this end
-  transmits would measure it.
+- ES0298 2.13.1 at a gap of LESS than a frame and a sender a few per
+  cent fast: letter `7`'s far peer times its gaps in 100 us steps,
+  which at 50000 baud stops at one frame - a peer that times the gap in
+  bit times, or a far rate chosen so 100 us is under a frame, would
+  measure the erratum's own case.
 
 Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): mute
 mode with both wakes, LIN's break as a SENDER (its detection is measured
-from the far board, above), single-wire half duplex
-against a second board, IrDA (an IR pair), the smartcard (no card on the
+from the far board, above), IrDA (an IR pair), the smartcard (no card on the
 desk), the synchronous clock (a timer capture on CK - the timer
 chapter's ruler), CTS/RTS flow control (a peer that asserts them), the
 TC/CTS/LBD interrupt enables, `set_baud` at run time (nothing changes the
@@ -563,7 +616,6 @@ OVER8 and frame-format legs on the other three boards (the loop's pad is
 surveyed on the Nucleo-F446RE alone).
 
 Implemented, not bench-verified, in the peer: the ops no letter judges
-yet - `bitbang` and `drive_rxd` beyond the break, `glitch` beyond the
-start bit's vote, `onewire`, `collide`, the repeated blast,
-`autobaud_tx`, `send_mpcm`, IrDA, and the half stop codes as a SENDER;
-the two-board letters past the core set measure them.
+yet - `autobaud_tx`, `send_mpcm`, IrDA, and the half stop codes as a
+SENDER; the design's later two-board letters (auto-baud, LIN both ways,
+IrDA, mute) measure them.

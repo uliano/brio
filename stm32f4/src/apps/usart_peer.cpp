@@ -759,6 +759,20 @@ link::Report run_set_link(const link::Params& a, uint16_t mask) {
     return r;
 }
 
+/// The rate this transmitter really runs at against `asked`, in ppm - the
+/// Report's aux16 for send and blast (usart_link.hpp): the kernel is APB2
+/// from the crystal (taken as exact), the divisor what BRR says - OVER16
+/// divides by BRR itself (sixteenths of USARTDIV), OVER8 by
+/// 8 x mantissa + fraction (25.4.4). 0 = not known, the HSE down.
+uint16_t rate_report(uint32_t asked) {
+    if (!crystal_ok) {
+        return 0;
+    }
+    const uint32_t brr = Link::brr();
+    const uint32_t div = Link::oversampling8() ? (((brr >> 4) << 3) | (brr & 0x7u)) : brr;
+    return static_cast<uint16_t>(link::rate_error_ppm(usart_hz, div, asked));
+}
+
 link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     link::Report r{};
     settle();
@@ -812,6 +826,7 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     if (count != 0u) {
         wait_tx_done();
     }
+    r.aux16 = rate_report(a.cfg.rate);
     return r;
 }
 
@@ -980,6 +995,7 @@ link::Report run_onewire(const link::Params& a) {
         return r;
     }
     const uint32_t guard = 4u * (core_hz / (a.cfg.rate ? a.cfg.rate : link::command_baud));
+    const uint32_t bit2 = guard / 2u;
     settle();
     const uint32_t t0 = Ticker::millis();
     while (r.count < a.count) {
@@ -992,7 +1008,15 @@ link::Report run_onewire(const link::Params& a) {
             wait_counts(guard);
             (void)put_frame(static_cast<uint16_t>((d ^ 0xFFu) & 0xFFu));
             wait_tx_done();
-            flush_rx();   // the reply heard by its own receiver
+            // THE REPLY'S OWN ECHO COMES AFTER TC: the receiver samples the
+            // stop bit it shares with the transmitter and raises RXNE a
+            // fraction of a bit after TC (measured: a flush at TC left the
+            // echo standing, the loop answered it inside the DUT's next
+            // frame). So the echo is waited for, bounded by two bit times,
+            // and only then flushed.
+            for (uint32_t c0 = now_counts(); (Link::status() & USART_SR_RXNE) == 0u && now_counts() - c0 < bit2;) {
+            }
+            flush_rx();
             continue;
         }
         if (Ticker::millis() - t0 >= a.ms) {

@@ -2518,18 +2518,22 @@ public:
 
     static auto rx_pending() { return m_rx.count(); }
 
-    /// Every character the line carried that the receive ring will not
-    /// deliver, since the program started, NEVER CLEARED (modulo 2^32) -
-    /// util/stream.hpp's SkippingSource, the epoch util/serial_port.hpp
-    /// compares at every run. Without an engine: the SkipRing's skips, one
-    /// at the consumer's look after a character a full ring refused or
-    /// FE/PE dropped, or an overrun - the ring discarding what it held. With
-    /// one: the ring's skips (a lap
-    /// missed, a held run refused) plus m_rx_lost - an ORE, an FE or a PE
-    /// the channel never took, a restart after a transfer error - counted
-    /// when the vector sees them, so the line torn is the one begun when
-    /// the consumer next looks, which is the one the error cut when the
-    /// consumer keeps up with its edges.
+    /// THE SKIP EPOCH: it moves whenever the line carried something the
+    /// receive ring will not deliver, since the program started, NEVER
+    /// CLEARED (modulo 2^32) - util/stream.hpp's SkippingSource, the epoch
+    /// util/serial_port.hpp compares at every run. Without an engine: the
+    /// SkipRing's skips, one at the consumer's look after a character a
+    /// full ring refused or FE/PE dropped, or an overrun - the ring
+    /// discarding what it held. With one: the ring's skips (a lap missed,
+    /// a held run refused - a character apiece) plus m_rx_lost - ONE for
+    /// each ORE, FE or PE the channel never took and each restart after a
+    /// transfer error, counted when the vector sees them, so the line torn
+    /// is the one begun when the consumer next looks, which is the one the
+    /// error cut when the consumer keeps up with its edges. An overrun
+    /// counts one however many characters it cost - the receiver cannot
+    /// tell (measured, test_stm32_serial letter 6: 60916 frames lost at
+    /// 6.4 Mbaud under a starved ring, the epoch moved 20016 times, never
+    /// fewer than the gaps).
     static uint32_t rx_skips() {
         if constexpr (has_rx_engine) {
             return m_rx.skips() + m_rx_lost;

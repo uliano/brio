@@ -814,7 +814,12 @@ in two runs, and 0 of 40 at `medium` and at `low` too - and the clock pad keeps 
 class, being the edge the client samples on. So every peer letter's
 init is handed MOSI at `high` (`peer_link_config`); the self-link
 letters and letter `s` keep the driver's very-high. x is 0 of 40, and
-letter p ten runs of ten exact at every judged rung.
+letter p ten runs of ten exact at every judged rung. The BACK-TO-BACK
+rung - letter `x`'s second half, thirty bursts of 32 frames at PCLK/4 =
+16 MHz through the polled host, whose TXFIFO runs the frames without a
+gap, the rung where the far F446 host's own MOSI class showed - measured
+**0 of 60** at `very_high`, `medium` and `high` in two runs and 1 of 60
+at `low` (the client wrong from frame 3): the link keeps `high`.
 
 **AND THE PEER'S OWN ANSWER LINE IS THE OTHER AGGRESSOR**, walked with
 the stm32f4 peer's console (its MISO class) and this end's MOSI at

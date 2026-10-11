@@ -71,6 +71,16 @@
 //   4  the receiver's errors from a foreign sender: PE, the FE onset, ORE,
 //      the start bit's vote with ONEBIT clear and set, the break with and
 //      without LIN
+//   5  ES0298 2.13.2 staged: odd parity in while this end transmits, in
+//      the erratum's order, the workaround's and through the task
+//   6  the far engine's shapes: where a start is believed, the operational
+//      range of a gapped frame, one stretched cell
+//   7  ES0298 2.13.1 staged: IDLE and the receive engine's edge from a
+//      sender up to 3 % faster, at gaps of one frame and more
+//   8  letter g's ring against copies, the far chip as the sender at the
+//      ladder's top rungs
+//   9  half duplex against a second board: drive_rxd, one open-drain wire
+//      between the chips, a collision
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -535,6 +545,7 @@ void td_errors() {
 
 // ---- e  tx_idle() is the wire's -----------------------------------------------------
 using PadLine = ExtiLine<6>;
+uint32_t last_latency = 0, last_latency_lo = 0, last_latency_hi = 0;   ///< the stamp's correction, cycles
 
 /// Four 0x55 frames (bit 7 low, so the stop bit starts with a rising
 /// edge) through `Port`; the DWT where tx_idle() first answered true,
@@ -573,11 +584,33 @@ int32_t idle_after_stop(uint8_t who, uint32_t baud, uint32_t& bit_cycles) {
     wait_ms(1);
     const uint32_t edge = pad_edge_at;
     // The edge's stamp is its handler's: the latency from a software
-    // trigger of the same line to the stamp, taken off.
-    const uint32_t t_sw = CycleCounter::now();
-    (void)PadLine::trigger();
-    wait_ms(1);
-    const uint32_t latency = pad_edge_at - t_sw;
+    // trigger of the same line to the stamp, taken off - the MEDIAN of
+    // seven triggers, since one trigger can meet the SysTick's entry or a
+    // flash line's fill and read tens of cycles long (a single sample read
+    // the transmitter's figure bimodal run to run).
+    uint32_t lat[7];
+    for (uint32_t& l : lat) {
+        const uint32_t before = pad_edge_at;
+        const uint32_t t_sw = CycleCounter::now();
+        (void)PadLine::trigger();
+        const uint32_t t_wait = CycleCounter::now();
+        while (pad_edge_at == before && CycleCounter::now() - t_wait < SysClock::hz / 1000u) {
+        }
+        l = pad_edge_at - t_sw;
+    }
+    for (uint8_t i = 1; i < 7u; ++i) {   // insertion sort of seven
+        const uint32_t v = lat[i];
+        uint8_t j = i;
+        while (j > 0u && lat[j - 1u] > v) {
+            lat[j] = lat[j - 1u];
+            --j;
+        }
+        lat[j] = v;
+    }
+    const uint32_t latency = lat[3];
+    last_latency_lo = lat[0];
+    last_latency_hi = lat[6];
+    last_latency = latency;
     (void)PadLine::arm(false);
     Nvic::disable(PadLine::irq());
     return static_cast<int32_t>(t_idle - edge + latency);
@@ -588,10 +621,12 @@ void te_tx_idle() {
     for (const uint32_t baud : rates) {
         uint32_t bit = 0;
         const int32_t d_irq = idle_after_stop<LoopIrq>(1, baud, bit);
+        const uint32_t l_irq = last_latency, l_irq_lo = last_latency_lo, l_irq_hi = last_latency_hi;
         const int32_t d_dma = idle_after_stop<LoopDma>(2, baud, bit);
         print(serial, "  ", baud, " baud, a bit ", bit, " cycles: tx_idle() true ", d_irq,
               " cycles after the stop bit's rising edge (interrupt transmitter), ", d_dma,
-              " (transmit engine)", crlf);
+              " (transmit engine); the stamp's latency a median of 7: ", l_irq, " (", l_irq_lo, "..",
+              l_irq_hi, ") and ", last_latency, " (", last_latency_lo, "..", last_latency_hi, ")", crlf);
         // Never before the stop bit's end, within a bit time after it, the
         // edge's handler latency taken off; the thread's poll is a dozen
         // cycles a turn.
@@ -892,8 +927,11 @@ constexpr UartOptions link_opts8{.over8 = true, .tx_speed = PinSpeed::very_high}
 using LinkIrq8 = Uart<1, link_pins, 2048, 64, NoDmaEngine, NoDmaEngine, link_opts8>;
 using LinkDma8 = Uart<1, link_pins, 2048, 64, NoDmaEngine, LinkRxEngine, link_opts8>;
 /// Who owns USART1's vector: 0 nobody (the resource, polled), 1 LinkIrq,
-/// 2 LinkDma, 3 LinkIrq8, 4 LinkDma8.
+/// 2 LinkDma, 3 LinkIrq8, 4 LinkDma8; letter 8's rings 5 LinkRing, 6
+/// LinkRing8, 7 LinkRingLow, 8 LinkRingLow8.
 volatile uint8_t link_owner = 0;
+
+void link_rings_down(uint8_t o);
 
 void link_task_down() {
     if (link_owner == 1u) {
@@ -904,6 +942,8 @@ void link_task_down() {
         LinkIrq8::release();
     } else if (link_owner == 4u) {
         LinkDma8::release();
+    } else if (link_owner >= 5u) {
+        link_rings_down(link_owner);
     }
     link_owner = 0;
 }
@@ -958,7 +998,10 @@ std::optional<DutSetup> dut_setup(const link::Cfg& c) {
     s.format.stop = c.stop == 2u ? UartStop::two
                   : c.stop == link::stop_half ? UartStop::half
                   : c.stop == link::stop_one_half ? UartStop::one_and_half : UartStop::one;
-    const std::optional<uint16_t> b16 = usart_brr(u1_hz, c.rate);
+    // OVER8 alone under the protocol's clk2x flag, the closer of the two
+    // otherwise.
+    const bool force8 = (c.flags & link::flag_clk2x) != 0u;
+    const std::optional<uint16_t> b16 = force8 ? std::nullopt : usart_brr(u1_hz, c.rate);
     const std::optional<uint16_t> b8 = usart_brr_over8(u1_hz, c.rate);
     auto err = [&c](uint32_t a) { return a > c.rate ? a - c.rate : c.rate - a; };
     if (b16 && (!b8 || err(usart_actual_baud(u1_hz, *b16)) <= err(usart_actual_baud_over8(u1_hz, *b8)))) {
@@ -1420,12 +1463,20 @@ void t1_link() {
         const bool acted = peer_act(link::Op::blast, a);
         const bool up = acted && dut_link(a.cfg);
         const Drain dr = up ? collect(a.ms, calib_frames) : Drain{};
+        link::Report r{};
+        const bool have = peer_report(r, 0);
         const int32_t ppm = span_ppm(dr.span, calib_rate, 20, dr.frames);
+        // The peer states its divisor's rate on its tracked core (the
+        // blast's aux16): this ruler reads that less this crystal's offset
+        // against the peer's (the three runs above).
+        const int32_t far = static_cast<int16_t>(r.aux16);
         print(serial, "  the peer's 1 Mbaud on this crystal: ", dr.frames, " frames, ");
         print_ppm(ppm);
-        print(serial, " (its divisor on its measured core, 0 ppm being exact)", crlf);
-        bench.verdict("the peer's blast arrives whole and inside a per cent of 1 Mbaud on this ruler",
-                      up && dr.frames == calib_frames && dr.fe == 0u && near(ppm, 0, 10'000));
+        print(serial, "; its divisor's own ", far, " ppm, this crystal against its ", base_ppm, crlf);
+        bench.verdict("the peer's blast arrives whole, its rate on this ruler within 200 ppm of its divisor's "
+                      "less the clocks' offset",
+                      up && have && dr.frames == calib_frames && dr.fe == 0u && all && r.aux16 != 0u &&
+                          near(ppm, far - base_ppm, 200));
     }
     link_release();
 }
@@ -1468,10 +1519,19 @@ uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
 constexpr uint32_t matrix_rates[] = {9600, 115'200, 921'600, 1'000'000, 1'500'000, 2'000'000,
                                      2'560'000, 3'200'000, 4'266'667, 6'400'000};
 
-/// Frames enough for a span of some 25 ms at `rate`: the peer's stamps
-/// jitter by its loop, a microsecond, so the reading resolves 40 ppm.
+/// Frames enough for a span of some 25 ms at `rate`, and a thousand at
+/// least: a far receiver's first or last stamp moves by some 0.4 bit from
+/// run to run (measured on both peers: +600 ppm on 64 frames at 9600,
+/// +140 on 288 at 115200, a third of the runs), so a span of N frames
+/// resolves 0.04 / N - under 40 ppm from a thousand. The window stays
+/// inside nine tenths of the trackers' rings (this end's and the far G0
+/// peer's, a second each), so the rate it is judged against is the
+/// window's own.
 uint16_t span_frames(uint32_t rate) {
-    const uint32_t n = rate / 400u;
+    uint32_t n = rate / 400u;
+    if (n < 1000u) n = 1000u;
+    const uint32_t cap = static_cast<uint32_t>((uint64_t{rate} * (1000u * 9u / 10u)) / 10'000u);
+    if (n > cap) n = cap;
     return static_cast<uint16_t>(n < 64u ? 64u : (n > 20'000u ? 20'000u : n));
 }
 
@@ -1548,14 +1608,22 @@ void t2_rates() {
             const bool up = acted && dut_link(c);
             const Drain dr = up ? collect(a.ms, n) : Drain{};
             link::Report r{};
-            (void)peer_report(r, 0);
+            const bool have = peer_report(r, 0);
             const int32_t ppm = span_ppm(dr.span, rate, 20, dr.frames);
+            // The far divisor's rate on its tracked core (the blast's
+            // aux16, 0 from a peer that cannot tell) less the clocks'
+            // offset: the far transmitter judged as tightly as this one.
+            const int32_t far = static_cast<int16_t>(r.aux16);
+            const bool known = have && r.aux16 != 0u;
             print(serial, "    the far blast on this ruler: ", dr.frames, " of ", n, ", ORE ", dr.ore, ", ");
             print_ppm(ppm);
-            print(serial, crlf);
-            judge(num(rate), " baud: the far blast arrives whole on the polled receiver, inside a per cent of "
-                             "its rate",
-                  up && dr.frames == n && dr.fe == 0u && dr.ore == 0u && near(ppm, 0, 10'000));
+            print(serial, " against the far divisor's ", far, " less the clocks' ", base, crlf);
+            judge(num(rate), known ? " baud: the far blast arrives whole on the polled receiver, its rate within "
+                                     "200 ppm of the far divisor's less the clocks' offset"
+                                   : " baud: the far blast arrives whole on the polled receiver, inside a per "
+                                     "cent of its rate (the far end does not state its own)",
+                  up && dr.frames == n && dr.fe == 0u && dr.ore == 0u &&
+                      (known ? near(ppm, far - base, 200) : near(ppm, 0, 10'000)));
         }
         for (uint8_t which = 1; which <= 2u; ++which) {
             link::Params a{};
@@ -1834,6 +1902,750 @@ void t4_errors() {
     link_release();
 }
 
+// ---------------------------------------------------------------------------
+// The core letters past the first four: what they share
+// ---------------------------------------------------------------------------
+
+/// A counting stream judged with gaps allowed: the peer's counting pattern
+/// runs on across a blast's repeats, so a byte out of sequence is either a
+/// corrupt byte (the one after it is back in sequence) or the stream k
+/// places further on - a gap of k frames, modulo the pattern's 256.
+struct CountCheck {
+    uint8_t expect = 0;
+    uint8_t held = 0;
+    bool holding = false;
+    uint32_t got = 0, gaps = 0, lost = 0, bad = 0;
+
+    void take(uint8_t b) {
+        ++got;
+        if (holding) {
+            holding = false;
+            if (b == static_cast<uint8_t>(expect + 1u)) {
+                ++bad;   // the held byte was corrupt, the stream in step behind it
+                expect = static_cast<uint8_t>(expect + 2u);
+                return;
+            }
+            const uint8_t k = static_cast<uint8_t>(held - expect);
+            ++gaps;
+            lost += k;
+            expect = static_cast<uint8_t>(held + 1u);
+        }
+        if (b == expect) {
+            expect = static_cast<uint8_t>(expect + 1u);
+            return;
+        }
+        held = b;
+        holding = true;
+    }
+    void close() {
+        if (holding) {
+            holding = false;
+            ++gaps;
+            lost += static_cast<uint8_t>(held - expect);
+        }
+    }
+};
+
+template <typename Port>
+uint32_t ring_drain(CountCheck& c) {
+    uint32_t n = 0;
+    for (;;) {
+        const std::span<const uint8_t> run = Port::read_span();
+        if (run.empty()) {
+            return n;
+        }
+        for (const uint8_t b : run) {
+            c.take(b);
+        }
+        (void)Port::consume(static_cast<uint32_t>(run.size()));
+        n += static_cast<uint32_t>(run.size());
+    }
+}
+
+/// USART1 as a SINGLE WIRE on PA9 (HDSEL, 25.4.10): the pad that meets the
+/// far board's PA10, where the far G0 swaps its own single wire - open
+/// drain on its pull-up, PA10 an input with no pull. The resource, polled.
+bool wire_up(uint32_t baud) {
+    link_task_down();
+    link::Cfg c{};
+    c.rate = baud;
+    const std::optional<DutSetup> s = dut_setup(c);
+    if (!s) {
+        return false;
+    }
+    U1Tx::input(PinPull::up);
+    U1::enable(false);
+    U1::reset();
+    if (!U1::configure(s->format, s->brr) || (s->over8 && !U1::oversampling8(true)) || !U1::half_duplex(true)) {
+        return false;
+    }
+    U1::transmitter(true);
+    U1::receiver(true);
+    U1::enable(true);
+    wait_us(2u * (1'000'000u / baud) + 20u);
+    U1Tx::function(PinFunction::af7, {.pull = PinPull::up, .open_drain = true, .speed = PinSpeed::high});
+    U1Rx::input(PinPull::none);
+    u1_flush();
+    return true;
+}
+
+/// One received word within `us`, polled; its SR errors in `err`.
+std::optional<uint16_t> wire_word(uint32_t us, uint32_t& err) {
+    const uint32_t c0 = CycleCounter::now();
+    const uint32_t n = us * (SysClock::hz / 1'000'000u);
+    while (CycleCounter::now() - c0 < n) {
+        const uint32_t st = U1::status();
+        if ((st & UsartFlag::rxne) != 0u) {
+            err = st & UsartFlag::receive_errors;
+            return U1::read_word();
+        }
+    }
+    return std::nullopt;
+}
+
+// ---------------------------------------------------------------------------
+// 5 - ES0298 2.13.2 staged: PE in full duplex while this end transmits
+// ---------------------------------------------------------------------------
+//
+// "In full-duplex mode, when the Parity Error flag is set by the receiver
+// at the end of a reception, it may be cleared while transmitting by
+// reading the USART_SR register to check the TXE or TC flags and writing
+// data to the data register" - with no workaround but the order. The far
+// chip sends 64 odd-parity frames into this end at 8E1 while it transmits
+// back to back, three ways: the polled loop in the ERRATUM'S ORDER (an SR
+// read and a DR write every turn, then the SR read for the receive); the
+// polled loop in the WORKAROUND'S (one SR read, DR read, then the write);
+// and the Uart task (one SR read in its vector decides both). A half
+// duplex loop never transmits while it receives, which is why the parity
+// legs of the loop letters could not reach it.
+
+struct PeLeg {
+    bool up = false;
+    uint16_t frames = 0, pe = 0;
+};
+
+PeLeg pe_polled(bool erratum_order) {
+    PeLeg l{};
+    link::Params a{};
+    a.cfg.rate = 115'200;
+    a.cfg.parity = 2;
+    a.count = 64;
+    a.ms = bound_ms(115'200, 128);
+    a.value = 0x5A;
+    a.pattern = link::pattern_fixed;
+    link::Cfg dc = a.cfg;
+    dc.parity = 1;
+    const bool acted = peer_act(link::Op::send, a);
+    l.up = acted && dut_link(dc);
+    USART_TypeDef& u = U1::regs();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    while (l.up && Ticker::millis() - t0 < 60u) {
+        if (erratum_order) {
+            // The transmit path's SR read and DR write land between the
+            // error and the receive path's SR read EVERY turn: written
+            // unconditionally (a write over a full DR replaces the byte
+            // queued, nothing else), since gating it on TXE would meet the
+            // window once in hundreds of frames.
+            (void)u.SR;
+            u.DR = 0x33u;
+            const uint32_t st2 = u.SR;
+            if ((st2 & UsartFlag::rxne) != 0u) {
+                if ((st2 & UsartFlag::pe) != 0u) ++l.pe;
+                (void)u.DR;
+                ++l.frames;
+                last = Ticker::millis();
+            }
+        } else {
+            const uint32_t st = u.SR;
+            if ((st & UsartFlag::rxne) != 0u) {
+                if ((st & UsartFlag::pe) != 0u) ++l.pe;
+                (void)u.DR;
+                ++l.frames;
+                last = Ticker::millis();
+            }
+            if ((st & UsartFlag::txe) != 0u) {
+                u.DR = 0x33u;
+            }
+        }
+        if (l.frames != 0u && Ticker::millis() - last > 5u) {
+            break;
+        }
+    }
+    wait_tc();
+    link::Report r{};
+    (void)peer_report(r, 0);
+    return l;
+}
+
+void t5_parity_full_duplex() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    const PeLeg wrong = pe_polled(true);
+    const PeLeg right = pe_polled(false);
+    print(serial, "  64 odd-parity frames into 8E1 while transmitting: the erratum's order counted ", wrong.pe,
+          " PE in ", wrong.frames, " frames, the workaround's ", right.pe, " in ", right.frames, crlf);
+    judge("the workaround's order (SR once, DR read, then the write) counts every parity error",
+          right.up && right.frames == 64u && right.pe == 64u);
+    judge("ES0298 2.13.2 STAGED: in the erratum's order (an SR read and a DR write between the error and the "
+          "receive's SR read) PE is lost on frames - REPRODUCED", wrong.up && wrong.frames == 64u && wrong.pe < 64u);
+
+    // The task: the far end's 64 frames while the task's own transmitter
+    // runs back to back (the ring kept full from the thread).
+    {
+        link::Params a{};
+        a.cfg.rate = 115'200;
+        a.cfg.parity = 2;
+        a.count = 64;
+        a.ms = bound_ms(115'200, 128);
+        a.value = 0x5A;
+        a.pattern = link::pattern_fixed;
+        const bool acted = peer_act(link::Op::send, a);
+        link_task_down();
+        link_owner = 1;
+        const bool up = acted && LinkIrq::init(clock, 115'200, {.bits = UartBits::eight, .parity = UartParity::even});
+        static const uint8_t fill[64] = {};
+        const uint32_t t0 = Ticker::millis();
+        while (up && Ticker::millis() - t0 < 30u) {
+            (void)LinkIrq::write_bulk(std::span<const uint8_t>(fill, sizeof fill));
+        }
+        const uint32_t pending = LinkIrq::rx_pending();
+        const uint8_t pe = LinkIrq::parity_errors();
+        link_task_down();
+        link::Report r{};
+        (void)peer_report(r, 0);
+        print(serial, "  through the task, transmitting the whole time: ", pe, " parity errors counted of 64, ",
+              pending, " bytes delivered", crlf);
+        judge("the task's one SR read a vector decides receive and transmit with: every parity error counted "
+              "while it transmits, none delivered", up && pe == 64u && pending == 0u);
+    }
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
+// 6 - the engine's shapes: where a start is believed, the operational
+//     range, one stretched cell
+// ---------------------------------------------------------------------------
+//
+// The far engine (TIM1 on the STM32G0B1RE's PA9, its core tracked against
+// its LSE) draws pulses of any width and frames at any rate with no
+// divisor's rounding. This receiver is on the crystal; its own divisor's
+// error is taken out of every rate below.
+
+struct BangLeg {
+    bool up = false;
+    Drain d{};
+    bool clean = false;     ///< every frame the value, no error flag at all
+    bool correct = false;   ///< every frame the value, no FE or PE (a noise flag allowed)
+};
+
+BangLeg bang_leg(uint32_t rate, uint32_t dut_rate, uint8_t value, uint16_t count, int8_t cell, int8_t pct) {
+    BangLeg l{};
+    link::Params a{};
+    a.cfg.rate = rate;
+    a.count = count;
+    a.value = value;
+    a.cell = cell;
+    a.pct = pct;
+    a.ms = 400;
+    link::Cfg dc{};
+    dc.rate = dut_rate;
+    const bool acted = peer_act(link::Op::bitbang, a);
+    l.up = acted && dut_link(dc);
+    l.d = l.up ? collect(static_cast<uint16_t>(20u + (16u * count * 1000u) / rate), count) : Drain{};
+    link::Report r{};
+    (void)peer_report(r, 0);
+    l.correct = l.up && l.d.frames == count && l.d.fe == 0u && l.d.pe == 0u && (l.d.first & 0xFFu) == value &&
+                (l.d.last & 0xFFu) == value && (r.flags & link::report_mismatch) == 0u;
+    l.clean = l.correct && l.d.ne == 0u;
+    return l;
+}
+
+void t6_shapes() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    // a. WHERE A START IS BELIEVED at 115200 (a bit is 208 ticks): eight
+    //    low pulses of w ticks, 255 us apart, OVER16 and OVER8.
+    static constexpr uint16_t widths[] = {6, 13, 26, 52, 78, 91, 104, 110, 117, 123, 130,
+                                          136, 143, 149, 156, 169, 182, 208};
+    uint16_t first_taken[2] = {0, 0}, first_clean[2] = {0, 0};
+    bool under_half = true, whole_clean[2] = {true, true};
+    for (uint8_t o8 = 0; o8 < 2u; ++o8) {
+        print(serial, "  ", o8 != 0u ? "OVER8 " : "OVER16", " at 115200, 8 pulses a width (ticks:frames/NE/FE):");
+        for (const uint16_t w : widths) {
+            link::Params a{};
+            a.cfg.rate = 115'200;
+            a.count = 8;
+            a.ms = 100;
+            a.aux16 = w;
+            a.aux8 = 255;
+            link::Cfg dc{};
+            dc.rate = 115'200;
+            if (o8 != 0u) {
+                dc.flags = link::flag_clk2x;
+            }
+            const bool acted = peer_act(link::Op::glitch, a);
+            bool up = acted && dut_link(dc);
+            if (up && o8 != 0u && !U1::oversampling8()) {
+                up = false;
+            }
+            const Drain d = up ? collect(20) : Drain{};
+            link::Report r{};
+            (void)peer_report(r, 0);
+            print(serial, " ", w, ":", d.frames, "/", d.ne, "/", d.fe);
+            if (up && d.frames != 0u && first_taken[o8] == 0u) first_taken[o8] = w;
+            if (up && d.frames == 8u && d.ne == 0u && d.fe == 0u && first_clean[o8] == 0u) first_clean[o8] = w;
+            if (o8 == 0u && w < 104u) under_half = under_half && up && d.frames == 0u;
+            if (w == 208u) whole_clean[o8] = whole_clean[o8] && up && d.frames == 8u && d.ne == 0u &&
+                                             d.fe == 0u && (d.last & 0xFFu) == 0xFFu;
+        }
+        print(serial, crlf);
+    }
+    print(serial, "  the narrowest pulse taken: ", first_taken[0], " ticks at OVER16 (",
+          (first_taken[0] * 16u + 104u) / 208u, " sixteenths), ", first_taken[1], " at OVER8; taken clean eight "
+          "of eight from ", first_clean[0], " and ", first_clean[1], crlf);
+    judge("a pulse under half a bit is never a start at OVER16 (25.4.5: the 3rd, 5th and 7th samples and the "
+          "8th, 9th and 10th vote)", under_half);
+    judge("a whole bit low is a clean 0xFF frame, eight of eight, in either oversampling",
+          whole_clean[0] && whole_clean[1]);
+    judge("and the narrowest start sits between 8 and 11 sixteenths of a bit at OVER16",
+          first_taken[0] >= 104u && first_taken[0] <= 143u);
+
+    // b. THE OPERATIONAL RANGE of a gapped 0x00 frame at 9600 and 115200,
+    //    against this receiver's real rate (its divisor's error out).
+    for (const uint32_t base : {9600u, 115'200u}) {
+        const int32_t real_ppm = divisor_ppm(base);
+        // Each side walked in steps of 5 per mille until a frame is wrong
+        // or flagged FE/PE; the first leg with a noise flag on the way is
+        // the vote's onset, printed beside the range.
+        int16_t lo = 0, hi = 0, ne_lo = 0, ne_hi = 0;
+        for (const int16_t sgn : {static_cast<int16_t>(1), static_cast<int16_t>(-1)}) {
+            for (int16_t p = 5; p <= 120; p += 5) {
+                const int32_t off = real_ppm + sgn * p * 1000;
+                const uint32_t rate =
+                    static_cast<uint32_t>((static_cast<int64_t>(base) * (1'000'000 + off)) / 1'000'000);
+                const BangLeg l = bang_leg(rate, base, 0x00, 4, -1, 0);
+                int16_t& ne_at = sgn > 0 ? ne_hi : ne_lo;
+                if (!l.clean && ne_at == 0) {
+                    ne_at = static_cast<int16_t>(sgn * p);
+                }
+                if (!l.correct) {
+                    print(serial, "    broken at ", sgn * p, " per mille: ", l.d.frames, " frames, FE ", l.d.fe, " NE ",
+                          l.d.ne, " PE ", l.d.pe, ", data ", hex(l.d.first), "..", hex(l.d.last), crlf);
+                    (sgn > 0 ? hi : lo) = static_cast<int16_t>(sgn * p);
+                    break;
+                }
+            }
+        }
+        const bool lo_found = lo != 0, hi_found = hi != 0;
+        print(serial, "  ", base, " baud (the divisor ", real_ppm, " ppm off): four 0x00 frames decoded from ",
+              lo + 5, " to +", hi - 5, " per mille of its rate, broken at ", lo, " and +", hi,
+              "; the noise flag from ", ne_lo, " and +", ne_hi, crlf);
+        // 25.4.5's table (OVER16, fraction != 0): 3.75 % at DIV_Fraction 0,
+        // 3.41 % otherwise - whatever the sender.
+        judge(base == 9600u ? "9600" : "115200",
+              " baud: the gapped frame decodes across 25.4.5's 3.41 % both ways, measured against this "
+              "receiver's real rate",
+              lo_found && hi_found && lo <= -35 && hi >= 35);
+    }
+
+    // c. ONE STRETCHED CELL at 115200: four 0x55 frames, the start cell,
+    //    data bit 3 or the stop cell longer or shorter by pct.
+    static constexpr int8_t pcts[] = {-60, -45, -30, -15, 15, 30, 45, 60};
+    bool thirty_ok = true, sixty_data_broken = true, stop_free = true;
+    const uint32_t rate = static_cast<uint32_t>((static_cast<int64_t>(115'200) * (1'000'000 + divisor_ppm(115'200))) /
+                                                1'000'000);
+    for (const int8_t cell : {static_cast<int8_t>(0), static_cast<int8_t>(4), static_cast<int8_t>(9)}) {
+        print(serial, "  cell ", cell, cell == 0 ? " (start)" : cell == 9 ? " (stop)" : " (data bit 3)", ":");
+        for (const int8_t pct : pcts) {
+            const BangLeg l = bang_leg(rate, 115'200, 0x55, 4, cell, pct);
+            print(serial, " ", pct, "%:", l.clean ? "ok" : "BAD");
+            if (cell != 9 && (pct == 30 || pct == -30 || pct == 15 || pct == -15)) thirty_ok = thirty_ok && l.clean;
+            if (cell == 4 && (pct == 60 || pct == -60)) sixty_data_broken = sixty_data_broken && l.up && !l.clean;
+            if (cell == 9) stop_free = stop_free && l.clean;
+        }
+        print(serial, crlf);
+    }
+    judge("a start or data cell 30 % longer or shorter is decoded: every later sample stays inside its cell",
+          thirty_ok);
+    judge("a data cell 60 % longer or shorter is not: the next sample lands in the neighbouring cell",
+          sixty_data_broken);
+    judge("and the stop cell's length is free when an idle follows it", stop_free);
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
+// 7 - ES0298 2.13.1 staged: the line's IDLE, and the receive engine's burst
+//     edge, from a FASTER sender
+// ---------------------------------------------------------------------------
+//
+// "If the USART receives an idle frame followed by a character, and the
+// clock of the transmitter device is faster than the USART receiver clock,
+// the USART receive signal falls too early when receiving the character
+// start bit, with the result that the idle frame is not detected" - no
+// workaround. And THE RECEIVE ENGINE'S BURST EDGE IS IDLE (usart.md): its
+// contract is a burst told within two frames of its last stop bit. Twenty
+// bursts of sixteen frames at 50000 baud (a frame is 200 us), gaps of one
+// frame, a frame and a half and five, the far chip 0 to 3 % faster: the
+// polled resource counts IDLE itself, the receive engine its edges.
+
+struct IdleLeg {
+    bool up = false;
+    uint32_t frames = 0, idles = 0, edges = 0;
+    CountCheck c{};
+};
+
+volatile uint32_t link_edges = 0;   ///< the link task's vectors' true answers
+
+IdleLeg idle_leg(uint32_t peer_rate, uint8_t gap_units, bool engine) {
+    IdleLeg l{};
+    link::Params a{};
+    a.cfg.rate = peer_rate;
+    a.count = 16;
+    a.aux16 = 20;
+    a.aux8 = gap_units;
+    a.ms = 1000;
+    a.pattern = link::pattern_counting;
+    const bool acted = peer_act(link::Op::blast, a);
+    if (!engine) {
+        link::Cfg dc{};
+        dc.rate = 50'000;
+        l.up = acted && dut_link(dc);
+        USART_TypeDef& u = U1::regs();
+        const uint32_t t0 = Ticker::millis();
+        uint32_t last = t0;
+        while (l.up && Ticker::millis() - t0 < 600u) {
+            const uint32_t st = u.SR;
+            if ((st & UsartFlag::rxne) != 0u) {
+                (void)u.DR;
+                ++l.frames;
+                last = Ticker::millis();
+                continue;
+            }
+            if ((st & UsartFlag::idle) != 0u) {
+                (void)u.DR;   // SR then DR: IDLE's clear (25.6.1)
+                ++l.idles;
+            }
+            if (l.frames != 0u && Ticker::millis() - last > 50u) {
+                break;
+            }
+        }
+    } else {
+        link_task_down();
+        link_owner = 2;
+        l.up = acted && LinkDma::init(clock, 50'000);
+        link_edges = 0;
+        const uint32_t t0 = Ticker::millis();
+        uint32_t last = t0;
+        while (l.up && Ticker::millis() - t0 < 600u) {
+            if (ring_drain<LinkDma>(l.c) != 0u) {
+                last = Ticker::millis();
+            }
+            if (l.c.got != 0u && Ticker::millis() - last > 50u) {
+                break;
+            }
+        }
+        (void)ring_drain<LinkDma>(l.c);
+        l.c.close();
+        l.frames = l.c.got;
+        l.edges = link_edges;
+        link_task_down();
+    }
+    link::Report r{};
+    (void)peer_report(r, 0);
+    return l;
+}
+
+void t7_idle_faster() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    static constexpr int16_t offsets[] = {0, 5, 10, 20, 30};   // per mille, the far end faster
+    static constexpr uint8_t gaps[] = {2, 3, 10};               // 100 us units: 1, 1.5 and 5 frames
+    bool whole = true, idle_long = true, edge_long = true, idle_one = true;
+    // The engine's edges a run: the first frame's turn and the line's IDLE
+    // for every burst (letter f's two a burst), the very first frame's turn
+    // merged with the receiver's start - so the reference is the count with
+    // the far end exact and the longest gap, and a missed IDLE is a leg
+    // short of it.
+    uint32_t edge_ref = 0;
+    for (uint8_t engine = 0; engine < 2u; ++engine) {
+        if (engine != 0u) {
+            edge_ref = idle_leg(50'000, 10, true).edges;
+        }
+        for (const uint8_t g : gaps) {
+            print(serial, "  ", engine != 0u ? "receive engine, edges" : "polled, IDLE flags", " per 20 bursts, gap ",
+                  g * 100u, " us, the far end +0, +5, +10, +20, +30 per mille:");
+            for (const int16_t e : offsets) {
+                const uint32_t rate =
+                    static_cast<uint32_t>((static_cast<int64_t>(50'000) * (1'000'000 + e * 1000)) / 1'000'000);
+                const IdleLeg l = idle_leg(rate, g, engine != 0u);
+                print(serial, " ", engine != 0u ? l.edges : l.idles);
+                whole = whole && l.up && l.frames == 320u && (engine == 0u || (l.c.gaps == 0u && l.c.bad == 0u));
+                if (engine != 0u) {
+                    edge_long = edge_long && edge_ref >= 20u && l.edges == edge_ref;
+                } else if (g != 2u) {
+                    idle_long = idle_long && l.idles == 20u;
+                } else {
+                    idle_one = idle_one && l.idles == 20u;
+                }
+            }
+            print(serial, crlf);
+        }
+    }
+    judge("every burst arrives whole at every offset and every gap, through both receivers", whole);
+    judge("IDLE is told once a burst after a gap of a frame and a half or more, the far end up to 3 % faster",
+          idle_long);
+    print(serial, "  the engine's reference: ", edge_ref, " edges for 20 bursts (each burst's first frame and its "
+          "IDLE)", crlf);
+    judge("THE ENGINE'S CONTRACT HOLDS: no burst's IDLE edge missed at any gap or offset, the far end up to 3 % "
+          "faster", edge_long);
+    judge("ES0298 2.13.1 staged at a gap of one frame (200 us at 50000 baud) from a sender up to 3 % fast: every "
+          "IDLE told - the erratum NOT reproduced there", idle_one);
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
+// 8 - the ring under copies, with a real sender
+// ---------------------------------------------------------------------------
+//
+// Letter g's arrangement on USART1's receive engine (DMA2 stream 2): zero,
+// two, three or four copies at very_high on DMA2's streams 0, 4, 5 and 7,
+// word or byte beats, beside the ring at its default level and ranked low
+// - the sender now the far chip, 4096 frames back to back at 4.27 and 6.4
+// Mbaud (the common ladder's top rungs), the ring holding the whole leg
+// and read at its end.
+
+constexpr uint32_t f8_frames = 4096;
+constexpr UartOptions ring_low{.tx_speed = PinSpeed::very_high, .rx_priority = DmaPriority::low};
+constexpr UartOptions ring_low8{.over8 = true, .tx_speed = PinSpeed::very_high, .rx_priority = DmaPriority::low};
+using LinkRing = Uart<1, link_pins, arb_ring, 64, NoDmaEngine, LinkRxEngine, link_opts>;
+using LinkRing8 = Uart<1, link_pins, arb_ring, 64, NoDmaEngine, LinkRxEngine, link_opts8>;
+using LinkRingLow = Uart<1, link_pins, arb_ring, 64, NoDmaEngine, LinkRxEngine, ring_low>;
+using LinkRingLow8 = Uart<1, link_pins, arb_ring, 64, NoDmaEngine, LinkRxEngine, ring_low8>;
+using LinkStream = DmaStream<2, 2>;
+
+void link_rings_down(uint8_t o) {
+    if (o == 5u) {
+        LinkRing::release();
+    } else if (o == 6u) {
+        LinkRing8::release();
+    } else if (o == 7u) {
+        LinkRingLow::release();
+    } else if (o == 8u) {
+        LinkRingLow8::release();
+    }
+}
+
+struct RingLeg {
+    bool up = false;
+    CountCheck c{};
+    uint32_t copies = 0;
+    uint8_t ore = 0, faults = 0;
+    DmaPriority level = DmaPriority::low;
+};
+
+template <typename Port>
+RingLeg ring_leg_on(uint8_t who, uint32_t rate, uint8_t copies, bool bytes) {
+    RingLeg l{};
+    link::Params a{};
+    a.cfg.rate = rate;
+    a.count = f8_frames;
+    a.ms = bound_ms(rate, f8_frames);
+    a.pattern = link::pattern_counting;
+    const bool acted = peer_act(link::Op::blast, a);
+    link_task_down();
+    link_owner = who;
+    l.up = acted && Port::init(clock, rate);
+    CopyA::arm(DmaPriority::very_high);
+    CopyB::arm(DmaPriority::very_high);
+    CopyC::arm(DmaPriority::very_high);
+    CopyD::arm(DmaPriority::very_high);
+    l.level = LinkStream::priority();
+    // The blast starts some 5 ms after the ack and lasts 4096 frame times.
+    const uint32_t c0 = CycleCounter::now();
+    const uint32_t span = SysClock::hz / 1000u * 8u + static_cast<uint32_t>((10ull * f8_frames * SysClock::hz) / rate);
+    while (l.up && CycleCounter::now() - c0 < span) {
+        if (copies >= 1u) { l.copies += keep_busy<CopyA>(0, bytes); }
+        if (copies >= 2u) { l.copies += keep_busy<CopyB>(1, bytes); }
+        if (copies >= 3u) { l.copies += keep_busy<CopyC>(2, bytes); }
+        if (copies >= 4u) { l.copies += keep_busy<CopyD>(3, bytes); }
+    }
+    while (CopyA::busy() || CopyB::busy() || CopyC::busy() || CopyD::busy()) {
+    }
+    wait_ms(2);
+    (void)ring_drain<Port>(l.c);
+    l.c.close();
+    l.ore = Port::hw_overruns();
+    l.faults = Port::dma_faults();
+    link_task_down();
+    link::Report r{};
+    (void)peer_report(r, 0);
+    return l;
+}
+
+RingLeg ring_leg(uint32_t rate, uint8_t copies, bool bytes, bool low) {
+    const bool fast = !LinkIrq::can_baud(u1_hz, rate);
+    if (low) {
+        return fast ? ring_leg_on<LinkRingLow8>(8, rate, copies, bytes) : ring_leg_on<LinkRingLow>(7, rate, copies, bytes);
+    }
+    return fast ? ring_leg_on<LinkRing8>(6, rate, copies, bytes) : ring_leg_on<LinkRing>(5, rate, copies, bytes);
+}
+
+void t8_ring_copies() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    for (uint32_t k = 0; k < 4u; ++k) {
+        for (uint32_t i = 0; i < 1024u; ++i) {
+            copy_src[k][i] = (i + k) * 2654435761u;
+        }
+    }
+    bool levels = true, default_whole = true, two_whole = true, four_starve = true, honest = true;
+    static constexpr uint32_t rates[] = {4'266'667, 6'400'000};
+    for (const uint32_t rate : rates) {
+        for (uint8_t beat = 0; beat < 2u; ++beat) {
+            for (uint8_t copies = 0; copies <= 4u; ++copies) {
+                if (copies == 1u) {
+                    continue;
+                }
+                const RingLeg lo = ring_leg(rate, copies, beat == 1u, true);
+                const RingLeg hi = ring_leg(rate, copies, beat == 1u, false);
+                print(serial, "  ", rate, beat == 1u ? " byte" : " word", ", ", copies, " copies | ring low: ",
+                      lo.c.got, " in, ", lo.c.lost, " lost in ", lo.c.gaps, " gaps, ", lo.c.bad, " bad, ORE ", lo.ore,
+                      " | default: ", hi.c.got, " in, ", hi.c.lost, " lost, ", hi.c.bad, " bad, ORE ", hi.ore, crlf);
+                levels = levels && lo.level == DmaPriority::low && hi.level == DmaPriority::very_high;
+                default_whole = default_whole && hi.up && hi.c.got == f8_frames && hi.c.gaps == 0u &&
+                                hi.c.bad == 0u && hi.faults == 0u;
+                if (copies <= 2u) {
+                    two_whole = two_whole && lo.up && lo.c.got == f8_frames && lo.c.gaps == 0u;
+                }
+                if (copies == 4u) {
+                    four_starve = four_starve && lo.c.lost > 0u;
+                }
+                honest = honest && lo.c.bad == 0u && (lo.c.lost == 0u || lo.ore != 0u);
+            }
+        }
+    }
+    judge("rx_priority reaches the silicon on USART1's ring: SxCR.PL read back low and very_high", levels);
+    judge("THE DEFAULT RING LOSES NOTHING to a real sender at 4.27 and 6.4 Mbaud beside up to four copies at "
+          "very_high, word and byte beats", default_whole);
+    judge("two copies ranked above a ring armed low starve it of nothing", two_whole);
+    judge("FOUR COPIES RANKED ABOVE A RING ARMED LOW DO STARVE IT, a real sender as the loop's thread", four_starve);
+    judge("and a starved ring loses frames to an overrun it reports, never a corrupt byte", honest);
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
+// 9 - half duplex against a second board: drive_rxd, one wire, a collision
+// ---------------------------------------------------------------------------
+//
+// This end's HDSEL single wire on PA9, the far G0's PA10 - where the far
+// end's receive pad (drive_rxd: its engine driving that wire) and its
+// SWAP + HDSEL single wire (onewire, collide) both sit.
+
+void t9_half_duplex() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    bool heard = true;
+    for (const uint32_t rate : {9600u, 115'200u, 1'000'000u}) {
+        link::Params a{};
+        a.cfg.rate = rate;
+        a.count = 8;
+        a.value = 0xA6;
+        a.ms = 300;
+        const bool acted = peer_act(link::Op::drive_rxd, a);
+        const bool up = acted && wire_up(rate);
+        const Drain d = up ? collect(static_cast<uint16_t>(30u + 8u * 16u * 1000u / rate), 8) : Drain{};
+        link::Report r{};
+        (void)peer_report(r, 0);
+        print(serial, "  drive_rxd at ", rate, ": ", d.frames, " of 8, ", hex(d.first), "..", hex(d.last), ", FE ", d.fe,
+              " NE ", d.ne, "; the engine ", (r.flags & link::report_mismatch) != 0u ? "BROKEN" : "whole", crlf);
+        heard = heard && up && d.frames == 8u && d.fe == 0u && d.ne == 0u && (d.first & 0xFFu) == 0xA6u &&
+                (d.last & 0xFFu) == 0xA6u;
+    }
+    judge("the HDSEL receiver hears a FOREIGN driver on its own pad: eight frames whole at 9600, 115200 and "
+          "1 Mbaud", heard);
+
+    bool shared = true;
+    for (const uint32_t rate : {9600u, 115'200u, 460'800u}) {
+        link::Params a{};
+        a.cfg.rate = rate;
+        a.count = 8;
+        a.ms = 400;
+        const bool acted = peer_act(link::Op::onewire, a);
+        const bool up = acted && wire_up(rate);
+        wait_for_peer_window();
+        uint8_t echoes = 0, replies = 0;
+        const uint32_t frame_us = 12'000'000u / rate + 50u;
+        for (uint8_t i = 0; up && i < 8u; ++i) {
+            const uint16_t v = static_cast<uint16_t>(0x31u + 17u * i);
+            U1::write_word(v);
+            uint32_t e1 = 0, e2 = 0;
+            const std::optional<uint16_t> echo = wire_word(4u * frame_us, e1);
+            const std::optional<uint16_t> reply = wire_word(8u * frame_us, e2);
+            if (echo && (*echo & 0xFFu) == v && e1 == 0u) ++echoes;
+            if (reply && (*reply & 0xFFu) == ((v ^ 0xFFu) & 0xFFu) && e2 == 0u) ++replies;
+            // THE TURNAROUND IS THIS END'S TOO: the reply's word is in at its
+            // stop bit's middle, and a frame started then pulls the far
+            // end's stop bit low under it (measured: the far receiver lost
+            // step and answered inside this end's next frame). Two bit
+            // times, the far end's own guard's half.
+            wait_us(2'000'000u / rate + 1u);
+        }
+        link::Report r{};
+        (void)peer_report(r, 5);
+        print(serial, "  onewire at ", rate, ": ", echoes, " own echoes and ", replies, " far replies of 8; the far end "
+              "heard ", r.count, crlf);
+        shared = shared && up && echoes == 8u && replies == 8u && r.count == 8u;
+    }
+    judge("ONE WIRE, TWO CHIPS: every frame out heard back as itself and answered by the far end, both open "
+          "drain, at 9600, 115200 and 460800", shared);
+
+    {
+        link::Params a{};
+        a.cfg.rate = 9600;
+        a.value = 0x00;
+        a.aux16 = 0;
+        a.ms = 400;
+        const bool acted = peer_act(link::Op::collide, a);
+        const bool up = acted && wire_up(9600);
+        wait_for_peer_window();
+        uint32_t e1 = 0, e2 = 0;
+        std::optional<uint16_t> trig, hit;
+        if (up) {
+            U1::write_word(0xA5u);
+            while (!U1::tx_empty()) {
+            }
+            U1::write_word(0xFFu);   // into the shifter behind the trigger: back to back
+            trig = wire_word(5000u, e1);
+            hit = wire_word(5000u, e2);
+        }
+        link::Report r{};
+        (void)peer_report(r, 5);
+        print(serial, "  collide at 9600: the trigger came back ", trig ? hex(static_cast<uint32_t>(*trig)) : hex(0u),
+              " (errors ", hex(e1), "), the 0xFF frame ", hit ? hex(static_cast<uint32_t>(*hit)) : hex(0u),
+              " (errors ", hex(e2), "); the far end heard ", r.count, crlf);
+        judge("the trigger frame is heard whole", up && trig && (*trig & 0xFFu) == 0xA5u && e1 == 0u);
+        judge("THE WIRED AND: the far frame pulled the shared wire under this end's 0xFF, which came back "
+              "changed or with an error", up && r.count >= 1u && (!hit || (*hit & 0xFFu) != 0xFFu || e2 != 0u));
+    }
+    link_release();
+}
+
 void banner() {
     print(serial, crlf, "test_stm32f4_serial - the transport on USART6's single-wire loop", crlf);
     bench.menu();
@@ -1844,21 +2656,46 @@ void banner() {
 extern "C" void USART2_IRQHandler() { (void)Serial::isr(); }
 extern "C" void USART1_IRQHandler() {
     const uint8_t o = link_owner;
+    bool edge = false;
     if (o == 1u) {
-        (void)LinkIrq::isr();
+        edge = LinkIrq::isr();
     } else if (o == 2u) {
-        (void)LinkDma::isr();
+        edge = LinkDma::isr();
     } else if (o == 3u) {
-        (void)LinkIrq8::isr();
+        edge = LinkIrq8::isr();
     } else if (o == 4u) {
-        (void)LinkDma8::isr();
+        edge = LinkDma8::isr();
+    } else if (o == 5u) {
+        edge = LinkRing::isr();
+    } else if (o == 6u) {
+        edge = LinkRing8::isr();
+    } else if (o == 7u) {
+        edge = LinkRingLow::isr();
+    } else if (o == 8u) {
+        edge = LinkRingLow8::isr();
+    }
+    if (edge) {
+        link_edges = link_edges + 1u;
     }
 }
 extern "C" void DMA2_Stream2_IRQHandler() {
-    if (link_owner == 2u) {
-        (void)LinkDma::dma_isr();
-    } else if (link_owner == 4u) {
-        (void)LinkDma8::dma_isr();
+    const uint8_t o = link_owner;
+    bool edge = false;
+    if (o == 2u) {
+        edge = LinkDma::dma_isr();
+    } else if (o == 4u) {
+        edge = LinkDma8::dma_isr();
+    } else if (o == 5u) {
+        edge = LinkRing::dma_isr();
+    } else if (o == 6u) {
+        edge = LinkRing8::dma_isr();
+    } else if (o == 7u) {
+        edge = LinkRingLow::dma_isr();
+    } else if (o == 8u) {
+        edge = LinkRingLow8::dma_isr();
+    }
+    if (edge) {
+        link_edges = link_edges + 1u;
     }
 }
 extern "C" void USART6_IRQHandler() {
@@ -1925,6 +2762,11 @@ int main() {
     bench.second_letter('2', "the baud matrix across the wire, timed by the far chip", t2_rates);
     bench.second_letter('3', "the frame matrix across the wire", t3_frames);
     bench.second_letter('4', "the receiver's errors from a foreign sender", t4_errors);
+    bench.second_letter('5', "ES0298 2.13.2 staged: PE in full duplex while transmitting", t5_parity_full_duplex);
+    bench.second_letter('6', "the engine's shapes: the start's width, the range, one stretched cell", t6_shapes);
+    bench.second_letter('7', "ES0298 2.13.1 staged: IDLE and the engine's edge from a faster sender", t7_idle_faster);
+    bench.second_letter('8', "the ring under copies, with a real sender", t8_ring_copies);
+    bench.second_letter('9', "half duplex against a second board: drive_rxd, one wire, a collision", t9_half_duplex);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

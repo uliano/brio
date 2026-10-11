@@ -1003,9 +1003,7 @@ int main() {
     (void)BootHost::init(clock);
     ili::bring_up();
     BootHost::release();
-    host_ok = Host::init(clock);
-    Host::sck_speed(PinSpeed::medium);
-    Host::mosi_speed(PinSpeed::medium);
+    host_ok = Host::init(clock, {.sck_speed = PinSpeed::medium, .mosi_speed = PinSpeed::medium});
 
     // The banner waits for a terminal, at most two seconds: the
     // experiment runs with or without one.

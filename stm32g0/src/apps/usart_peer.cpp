@@ -34,9 +34,10 @@
 //  - EVERY RATE FROM THE TRACKED KERNEL. The core runs the HSI16 through
 //    the PLL (no HSE on this board), some 0.3 % off nominal and WANDERING
 //    - a few hundred ppm over seconds, measured - so it is measured
-//    against the LSE crystal ALL THE TIME, in hardware: TIM16's TI1 is the
-//    LSE (TISEL), captured every eight periods, DMA1 channel 2 moving each
-//    capture into a ring of 1024 (250 ms). Before every action the core's
+//    against the LSE crystal ALL THE TIME, in hardware - the stratum's
+//    LseTracker: TIM16's TI1 is the LSE (TISEL), captured every eight
+//    periods, DMA1 channel 2 moving each capture into a ring of 4096
+//    (a second). Before every action the core's
 //    rate over the last 250 ms becomes every divisor, tick and edge the
 //    action computes, and a span is converted at the rate over its own
 //    window (Ident::xtal = 1). Without the crystal it falls back to the
@@ -122,6 +123,7 @@
 #include "stm32g0/clock.hpp"
 #include "stm32g0/dma.hpp"
 #include "stm32g0/flash.hpp"
+#include "stm32g0/lse_tracker.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
 #include "stm32g0/pwr.hpp"
@@ -167,7 +169,6 @@ constexpr uint8_t rx_channel = 2;   // TIM1_CH3
 using Engine = Tim<1>;
 using EdgeDma = DmaChannel<1, 1>;
 using Span = Tim<2>;
-using LseMeter = Tim<16>;
 
 // ---------------------------------------------------------------------------
 // The time base: the core measured against the LSE
@@ -186,20 +187,17 @@ int32_t core_ppm = 0;   ///< the core against nominal, as last tracked
 /// and 150 ppm between gapless runs a second apart (docs/stm32g0/usart.md,
 /// "The peer's time base") - so a measurement once at boot is not a time
 /// base, and the core is measured against the LSE ALL THE TIME, by
-/// hardware: TIM16's TI1 is the LSE (TISEL 2, RM0444 table 140), captured
-/// every eight periods (ICPSC; filtered, ICF 8 - an unfiltered capture of
-/// this line over-captures, test_stm32_rtc's finding) by a counter free at
-/// the core's rate, and DMA1 channel 2 moves each capture (TIM16_CH1's
-/// request, table 55) into a circular ring of 1024 - 250 ms of the crystal,
-/// no CPU, no interrupt. The core's rate over any stretch of the last
-/// 250 ms is then the sum of the capture intervals over it against the
-/// crystal's 8 x 32768 per interval - each interval a 16-bit difference
-/// (15700 counts, under the counter's wrap).
-using Tracker = DmaChannel<1, 2>;
-constexpr uint16_t track_n = 1024;
-volatile uint16_t track[track_n];
+/// hardware: the stratum's LseTracker (stm32g0/lse_tracker.hpp, TIM16
+/// capturing the crystal every eight periods, DMA1 channel 2 filling a
+/// ring of 4096 - a second - with no CPU), read as the core's rate over
+/// any stretch of the last second; before every action the last 250 ms.
+/// A second of the crystal: a DUT's span is up to nine tenths of one, and
+/// is converted at the rate over its own window.
+using Tracker = LseTracker<1, 2, 4096>;
 bool tracking = false;
 
+/// The crystal started (the RTC domain's, behind its write gate), then
+/// the tracker on it.
 bool tracker_up() {
     Pwr::bus_clock(true);
     Pwr::rtc_domain_unlock(true);
@@ -211,64 +209,15 @@ bool tracker_up() {
         }
     }
     Pwr::rtc_domain_unlock(false);
-    LseMeter::init();
-    if (!LseMeter::configure({.prescaler = 0, .period = 0xFFFF}) ||
-        !LseMeter::capture_channel(0, {.select = TimChannelSelect::direct,
-                                       .polarity = TimCapturePolarity::rising,
-                                       .prescaler = TimCapturePrescaler::every8,
-                                       .filter = 8}) ||
-        !LseMeter::input_select(0, RtcDomain::lse_tim16_ti1_code)) {
-        return false;
-    }
-    Dma<1>::bus_clock(true);
-    Tracker::stop();
-    Tracker::set_peripheral(LseMeter::ccr_address(0));
-    (void)DmaMux::request(Tracker::mux_channel, LseMeter::dma_compare_request(0));
-    Tracker::restart(dma_ccr_config({.direction = DmaDirection::peripheral_to_memory,
-                                     .circular = true,
-                                     .memory_increment = true,
-                                     .peripheral_width = DmaWidth::half,
-                                     .memory_width = DmaWidth::half,
-                                     .priority = DmaPriority::high}),
-                     track, track_n);
-    LseMeter::interrupts(LseMeter::compare_dma(0), true);
-    LseMeter::enable(true);
-    return true;
+    return Tracker::start(clock);
 }
 
-/// The core's rate over the last `k` capture intervals, or nothing when
-/// the ring holds no such run of captures. THE WALK RACES THE CHANNEL: a
-/// capture lands every 244 us and overwrites the OLDEST entry, so the walk
-/// is one subtraction and one add an entry, no division (a modulo a step
-/// was measured costing several captures and reading a torn ring), and
-/// stops eight entries short of the write head.
+/// The core's rate over the last `k` capture intervals, or nothing.
 std::optional<uint32_t> tracked_hz(uint16_t k) {
     if (!tracking) {
         return std::nullopt;
     }
-    if (k > track_n - 8u) {
-        k = track_n - 8u;
-    }
-    if (k == 0u) {
-        return std::nullopt;
-    }
-    // The newest COMPLETE entry is the one behind the channel's position.
-    const uint16_t pos = static_cast<uint16_t>(track_n - Tracker::count());
-    uint16_t i = pos == 0u ? static_cast<uint16_t>(track_n - 1u) : static_cast<uint16_t>(pos - 1u);
-    uint16_t newer = track[i];
-    uint32_t sum = 0;
-    for (uint16_t j = 0; j < k; ++j) {
-        i = i == 0u ? static_cast<uint16_t>(track_n - 1u) : static_cast<uint16_t>(i - 1u);
-        const uint16_t older = track[i];
-        sum += static_cast<uint16_t>(newer - older);
-        newer = older;
-    }
-    // k intervals of 8 LSE periods: k x 8 / 32768 seconds.
-    const uint64_t hz = (static_cast<uint64_t>(sum) * 4096u + k / 2u) / k;
-    if (hz < 60'000'000u || hz > 68'000'000u) {
-        return std::nullopt;   // not a ring of captures yet, or not this crystal
-    }
-    return static_cast<uint32_t>(hz);
+    return Tracker::hz(k);
 }
 
 /// The rate over the last 250 ms, into core_hz: before every action, so
@@ -277,7 +226,7 @@ void track_now() {
     if (time_base != 1u) {
         return;
     }
-    const std::optional<uint32_t> hz = tracked_hz(track_n - 8u);
+    const std::optional<uint32_t> hz = tracked_hz(1024u);
     if (hz) {
         core_hz = *hz;
         core_ppm = static_cast<int32_t>((static_cast<int64_t>(core_hz) - static_cast<int64_t>(SysClock::hz)) *
@@ -300,10 +249,8 @@ uint32_t counts_of(uint32_t ticks) {
 /// core's rate over that very stretch (the tracker's intervals covering
 /// it, sixteen at least): the HSI's wander outside the span is not in it.
 uint32_t span_ticks(uint32_t counts) {
-    if (time_base == 1u) {
-        uint32_t k = counts / 15'600u + 2u;
-        k = k < 16u ? 16u : (k > track_n - 8u ? track_n - 8u : k);
-        const std::optional<uint32_t> hz = tracked_hz(static_cast<uint16_t>(k));
+    if (time_base == 1u && tracking) {
+        const std::optional<uint32_t> hz = Tracker::hz_over(counts);
         if (hz) {
             return static_cast<uint32_t>((static_cast<uint64_t>(counts) * 24'000'000ull + *hz / 2u) / *hz);
         }
@@ -980,6 +927,29 @@ link::Report run_set_link(const link::Params& a, uint16_t mask) {
     return r;
 }
 
+/// The rate this transmitter really runs at against `asked`, in ppm - the
+/// Report's aux16 for send and blast (usart_link.hpp): the kernel is the
+/// tracked core (or the adopted one), the divisor what BRR says - OVER16
+/// divides by USARTDIV = BRR, OVER8 by USARTDIV / 2 with USARTDIV[3:0] =
+/// BRR[2:0] << 1 (33.5.7: the last bit dropped). 0 = not known, on the
+/// nominal oscillator.
+/// `took` is the run's length in core counts: the kernel's rate is taken
+/// over that very window from the tracker (the HSI moves between the
+/// action's start and its end), the adopted or nominal one otherwise.
+uint16_t rate_report(uint32_t asked, uint32_t took) {
+    if (time_base == 0u) {
+        return 0;
+    }
+    uint32_t hz = core_hz;
+    if (time_base == 1u && tracking) {
+        hz = Tracker::hz_over(took).value_or(core_hz);
+    }
+    const uint32_t brr = Link::brr();
+    const bool over8 = Link::oversampling();
+    const uint32_t div = over8 ? ((brr & 0xFFF0u) | ((brr & 0x7u) << 1)) : brr;
+    return static_cast<uint16_t>(link::rate_error_ppm(static_cast<uint64_t>(hz) * (over8 ? 2u : 1u), div, asked));
+}
+
 /// `send` leaves two bit times of idle after each frame ON THE WIRE (it
 /// waits for TC, the FIFO would otherwise close the gap); `blast` none, the
 /// transmit FIFO kept topped up. A blast's repeats run the pattern on.
@@ -996,6 +966,7 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     USART_TypeDef& u = Link::regs();
     const uint16_t n = a.count;
     const uint32_t t0 = Ticker::millis();
+    const uint32_t c0 = now_counts();
     uint16_t count = 0, sum = 0;
     for (uint16_t k = 0; k < repeats; ++k) {
         if (k != 0u) {
@@ -1036,6 +1007,7 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     if (count != 0u) {
         wait_tx_done();
     }
+    r.aux16 = rate_report(a.cfg.rate, now_counts() - c0);
     return r;
 }
 
@@ -1219,6 +1191,7 @@ link::Report run_onewire(const link::Params& a) {
         return r;
     }
     const uint32_t guard = 4u * (core_hz / (a.cfg.rate ? a.cfg.rate : link::command_baud));
+    const uint32_t bit2 = guard / 2u;
     settle();
     const uint32_t t0 = Ticker::millis();
     while (r.count < a.count) {
@@ -1236,7 +1209,12 @@ link::Report run_onewire(const link::Params& a) {
             wait_counts(guard);
             (void)put_frame(static_cast<uint16_t>((d ^ 0xFFu) & 0xFFu));
             wait_tx_done();
-            flush_rx();   // the reply heard by its own receiver
+            // The reply's own echo may land after TC (the stm32f4 peer
+            // measured it a fraction of a bit late): waited for, two bit
+            // times at most, and only then flushed.
+            for (uint32_t c0 = now_counts(); (Link::status() & UsartFlag::rxfne) == 0u && now_counts() - c0 < bit2;) {
+            }
+            flush_rx();
             continue;
         }
         if (Ticker::millis() - t0 >= a.ms) {
@@ -1501,7 +1479,7 @@ void measure() {
         tracking = tracker_up();
         wait_ms(300);   // the ring filled once
     }
-    time_base = tracking && tracked_hz(track_n - 8u).has_value() ? 1u : 0u;
+    time_base = tracking && tracked_hz(Tracker::most).has_value() ? 1u : 0u;
     if (time_base == 1u) {
         track_now();
     } else {
@@ -1577,7 +1555,7 @@ int main() {
                     print_ppm(core_ppm);
                     print(console, ")", crlf);
                 } else if (c == 't') {
-                    print(console, "  the core against the LSE over 250 ms: ", tracked_hz(track_n - 8u).value_or(0),
+                    print(console, "  the core against the LSE over 250 ms: ", tracked_hz(1024u).value_or(0),
                           " Hz, 16 ms: ", tracked_hz(64).value_or(0), ", 4 ms: ", tracked_hz(16).value_or(0),
                           "; in use ", core_hz, crlf);
                 } else if (c == '3') {

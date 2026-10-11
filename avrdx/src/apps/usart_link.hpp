@@ -521,7 +521,13 @@ struct Report {
     /// it was asked for (glitch), the byte it collided with (collide);
     /// calibrate: the DUT's character rate against the peer's clock in
     /// parts per million as an int16 (calibrate_ppm()), positive when the
-    /// DUT runs fast, saturated at the int16 range.
+    /// DUT runs fast, saturated at the int16 range; send and blast: the
+    /// rate the PEER's transmitter really ran at against the cfg.rate it
+    /// was asked for, in ppm as an int16 (rate_error_ppm()), positive when
+    /// the peer runs fast - from its divisor and its time base (crystal,
+    /// tracked or adopted). 0 = not known (a peer that cannot tell, or an
+    /// older one), so a DUT judges such a blast at its own loose bound; a
+    /// peer exact to the ppm reports 0 too and is judged the same way.
     uint16_t aux16 = 0;
     uint8_t op = 0;          ///< which action this report belongs to
     uint8_t ms = 0;          ///< how long it took, capped at 255
@@ -553,6 +559,19 @@ constexpr int16_t calibrate_ppm(uint32_t nominal, uint32_t measured) {
 }
 static_assert(nominal_span(115'200, 20, 101) == 208'333u, "100 8N1 frames at 115200: 8.68 ms");
 static_assert(calibrate_ppm(1'000'000, 990'000) == 10'101, "a span 1 % short is a DUT 1.01 % fast");
+
+/// send and blast's Report::aux16: a transmitter whose real rate is
+/// `num / den` baud, against the `asked` rate, in ppm (positive = fast),
+/// saturated to int16. The peer states its rate as a fraction because it
+/// is one: its kernel clock over its divisor (in the divisor's own units).
+constexpr int16_t rate_error_ppm(uint64_t num, uint64_t den, uint32_t asked) {
+    if (den == 0u || asked == 0u) return 0;
+    const int64_t base = static_cast<int64_t>(asked) * static_cast<int64_t>(den);
+    const int64_t ppm = (static_cast<int64_t>(num) - base) * 1'000'000 / base;
+    return static_cast<int16_t>(ppm > 32767 ? 32767 : (ppm < -32768 ? -32768 : ppm));
+}
+static_assert(rate_error_ppm(90'000'000u, 16u * 781u, 7'200u) == 320, "90 MHz / (16 x 781) vs 7200 baud");
+static_assert(rate_error_ppm(64'000'000u, 10u, 6'400'000u) == 0, "an exact divisor is 0 ppm");
 
 constexpr void put_report(uint8_t* p, const Report& r) {
     put16(p, r.count);

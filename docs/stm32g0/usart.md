@@ -16,8 +16,8 @@ bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp`. The LPUARTs are
 [lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
 suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless;
-three more outside `z` through `brio stress`; four under the second
-all-key `t`, 97 verdicts, against the desk's STM32F446RE running
+four more outside `z` through `brio stress`; nine under the second
+all-key `t`, 117 verdicts, against the desk's STM32F446RE running
 `usart_peer` - "Against a far board" below). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
 fixture `test/family_stm32g0/usart.cpp` plus SIXTEEN negatives under
@@ -1020,15 +1020,17 @@ to its PA10, PA10 from its PA9 - the far board running the stm32f4
 `usart_peer` (firmware 0x0400), driven IN BAND with the protocol every
 architecture on the link compiles (`avrdx/src/apps/usart_link.hpp`): an
 ack before every action, a bounded action, the peer back in command
-mode by itself. Letters `1` to `4` run under the second all-key `t` and
+mode by itself. Letters `1` to `9` run under the second all-key `t` and
 never under `z`, which runs with the far board on its dark console. The
 far peer's time base is its crystal (the ST-LINK's 8 MHz in bypass), so
 what it times is THIS core's HSI16 - and this board times the same HSI
-against its own LSE over the very window of each run: TIM16 captures the
-LSE every eight periods (TISEL 2, table 140) and DMA1 channel 4 moves
-each capture into a ring of 1024 for the length of the set, so every
-rate verdict is the divisor's on the wire with the oscillator's walk
-taken out. Score: **97 of 97**, the refusals SKIPPED with their reason.
+against its own LSE over the very window of each run, the stratum's
+`LseTracker` ([clock.md](clock.md), "The core against the LSE, tracked")
+on DMA1 channel 4 with a ring of 4096, a second of the crystal, for the
+length of the set: every rate verdict is the divisor's on the wire with
+the oscillator's walk taken out. Score: **117 of 117**, the refusals
+SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
+`7`'s control through the bridge (below).
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind
   0x04, another die's unique ID, a crystal time base), a bad checksum
@@ -1044,22 +1046,33 @@ taken out. Score: **97 of 97**, the refusals SKIPPED with their reason.
   a tenth of a second apart (a 1 Mbaud reference taken beside a run left
   the 9600 rung 500..700 ppm away three times in ten, which is why the
   verdict reads the run's own window). The far crystal's 1 Mbaud blast
-  reads -3097 ppm on this ruler, the HSI's error seen from the other
-  side.
+  reads -2950 ppm on this ruler against the far divisor's 0 (90 MHz / 90)
+  less the HSI's +2949 over its window: 1 ppm apart. A far `send` or
+  `blast` STATES ITS OWN RATE (the Report's aux16, the far divisor on its
+  crystal, usart_link.hpp), so the far transmitter is judged as tightly
+  as this one; 0 means a peer that cannot tell, and a divisor exact to
+  the ppm reads 0 too - judged at the loose per cent.
 - **The baud matrix** (`2`), on the two dividers' COMMON ladder: this
   USART makes 64 MHz / n (OVER8 adds no resolution, above), the far one
   90 MHz / k, and the two meet where k / n = 7 / 5 - above 2 Mbaud at
   2.56, 3.2, 4.267 and 6.4 Mbaud, 0.15 % apart. At 9600, 115200, 921600,
   1, 1.5, 2 Mbaud and those four: 16 frames echoed by the far chip, every
-  one equal; this transmitter timed by the far receiver over 25 ms of
-  frames within 100 ppm of the divisor's error plus the HSI's over the
-  run (measured within 40 ppm at every rung: 9600 +2686 against +2720,
-  921600 +9364 against +9324 - BRR 69 for 69.4 - and 6.4 Mbaud +2824
-  against +2816); the far blast whole on the polled receiver (16000 of
-  16000 at 6.4 Mbaud, a hundred cycles a frame, on a lean loop: the ISR
-  load, the stamp, the RDR load and the count); and 1024 frames whole
-  through the interrupt receiver and through the receive engine (DMA1
-  channel 3) at every rung, OVER8's task above 4 Mbaud.
+  one equal; this transmitter timed by the far receiver over a thousand
+  frames or 25 ms (864 frames at 9600, nine tenths of the trackers'
+  second) within 100 ppm of the divisor's error plus the HSI's over the
+  run - measured within 60 ppm at every rung: 9600 +3044 against +3033,
+  921600 +9472 against +9434 (BRR 69 for 69.4), 6.4 Mbaud +3151 against
+  +3140. THE FAR RECEIVER'S FIRST OR LAST STAMP MOVES BY ABOUT 0.4 BIT
+  from run to run - with the 64 frames of 25 ms at 9600 it read +600 ppm
+  off in a third of the runs, with 288 at 115200 +140 - which is why the
+  span is a thousand frames (0.04 / N: under 40 ppm); the cause is not
+  located. The far blast whole on the polled receiver (16000 of 16000 at
+  6.4 Mbaud, a hundred cycles a frame, on a lean loop: the ISR load, the
+  stamp, the RDR load and the count), its rate within 40 ppm of the far
+  divisor's stated one less this HSI's (6.4 Mbaud: +1174 against
+  +4464 - 3264); and 1024 frames whole through the interrupt receiver and
+  through the receive engine (DMA1 channel 3) at every rung, OVER8's task
+  above 4 Mbaud.
 - **The frame matrix** (`3`) at 115200: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
   8N2, 8N0.5 and 8N1.5 echoed by the far chip; 7N1 and 6E1 SKIPPED (the
   far USART refuses them: M counts its parity bit and has no seven-bit
@@ -1084,6 +1097,67 @@ taken out. Score: **97 of 97**, the refusals SKIPPED with their reason.
   after the RDR read, six with it before (above); and through the task,
   odd parity counted six of six and nothing delivered, a break one frame
   error and nothing delivered.
+- **The far engine's shapes** (`5`), the STM32F446RE's TIM1 drawing what
+  no clean UART can, every rate against this receiver's REAL one (its
+  divisor's error and the HSI's out): WHERE A START IS BELIEVED, eight
+  low pulses a width at 115200 (a sixteenth is 13 ticks) - nothing under
+  half a bit in either oversampling, 3 of 8 taken at 110 ticks (8.4
+  sixteenths) with NE, every one from 117, clean eight of eight from 130
+  at OVER16 (10 sixteenths: 33.5.6's samples 8, 9 and 10) and from 156
+  at OVER8, whose NE band is wider; THE OPERATIONAL RANGE of a gapped
+  0x00 frame, free of any divisor's rounding: decoded from -50 to +45
+  per mille at 9600 and -50 to +55 at 115200, broken by FE on the slow
+  side and by 0x80 on the fast one (bit 7's sample in the stop bit), the
+  majority vote's NE rising first, from +-30..50 per mille - table 189's
+  3.33 % inside both ways; ONE STRETCHED CELL of 0x55 at 115200 - the
+  start or a data cell 30 % longer or shorter decoded, 45 % not, the stop
+  cell's length free with an idle behind it. ES0548 2.11.1 above 2400 is
+  NOT staged: it wants a glitch inside a stop bit, which no op of the
+  protocol draws (letter `f` stages it with the pull-banger).
+- **The receive ring beyond the bridge** (`6`): the receive engine ranked
+  LOW beside test_stm32_dma q's pair (two copies alternating on DMA1's
+  channels 1 and 2, every 5 ms), a counting stream from the far chip
+  with no gap for 2.5 s at 1, 2, 3.2 and 6.4 Mbaud. With no pair nothing
+  is lost at any rung; a 512 B pair at 1 Mbaud loses nothing (the kick
+  cures its 4-character starvations); past the FIFO's nine characters
+  frames go - 5746 at 1 Mbaud with 2 KB pairs, 60783 at 6.4 Mbaud - in
+  500-odd gaps, NOT ONE BYTE CORRUPT OR TAKEN TWICE and never more gaps
+  than `rx_skips()` moved, the receiver delivering to the end of every
+  leg: THE KICK RACING A CHARACTER LOSES NOTHING IT DOES NOT REPORT, to
+  6.4 Mbaud. `rx_skips()` is an EPOCH under an overrun, not a count:
+  one ORE costs many characters and moves it once (15881 lost against
+  13354 at 2 Mbaud, 60783 against 20011 at 6.4). At the default level
+  the ring outranks the pair at every rung, no kick.
+- **Finding 4 over the wire** (`7`): the DMA study saw a whole message
+  vanish now and then from a host-fed stream with no counter moving.
+  From the far chip instead, bursts of 200 frames at 921600 a millisecond
+  apart, the default ring, five minutes: **18 878 000 frames in 94 390
+  bursts, not one gap**, the far end's counts agreeing. Letter `x` is the
+  control through the ST-LINK's bridge - the console moved to 921600 on
+  a receive engine for five minutes of the host's xorshift: in the same
+  session 18 303 000 bytes in 200-byte bursts with a millisecond between
+  them and 22 286 080 back to back (brio stress's sink), not one gap
+  either. Neither path loses a burst today (at the study's rate, one in
+  some 28000 messages, five minutes of either would have shown three):
+  the device is ruled out at the study's rate, and the bridge did not
+  reproduce it this session.
+- **The pad and the shared wire** (`8`): the HDSEL receiver on PA9
+  hears the far engine drive that wire from ITS receive pad, eight
+  frames whole at 9600, 115200 and 1 Mbaud; ONE OPEN-DRAIN WIRE BETWEEN
+  TWO CHIPS, this end swapped onto PA10 and the far HDSEL on its PA9:
+  eight frames out, each heard back as itself and answered by the far
+  end's complement, at 9600, 115200 and 460800 (the far peer waits for
+  its reply's own echo before it flushes: on the F446 that echo's RXNE
+  lands after TC, and a flush at TC answered the echo inside this end's
+  next frame - measured, then fixed in the peer); and THE WIRED AND: the
+  far end pulls 0x00 into this end's 0xFF behind a trigger frame, which
+  comes back whole while the 0xFF reads 0x00.
+- **IDLE from a faster sender** (`9`): twenty bursts of sixteen frames at
+  50000 baud, the far end 0 to 3 % faster than this receiver's real
+  rate, gaps of one frame, one and a half and five: IDLE once a burst at
+  every gap and offset, the receiver time-out (RTOR 12 bits) once a burst
+  from a frame and a half - the control for the F446's ES0298 2.13.1,
+  and ES0548 lists no such item.
 
 ## On the STM32G071RB
 
@@ -1212,15 +1286,15 @@ through the PLL, 0.26..0.33 % fast on this die and wandering hundreds of
 ppm over seconds - measured once at boot it read +3326 ppm and a minute
 later +2950..+3093, and three calibrate runs a second apart then read
 +164, +8 and +76 ppm against the far crystal. So the peer measures its
-core against the LSE ALL THE TIME, in hardware - TIM16 capturing the LSE
-every eight periods, DMA1 channel 2 moving each capture into a ring of
-1024 (250 ms) - takes the rate over the last 250 ms into every divisor
-and edge before each action, and converts a span at the rate over the
-span's own window. Then: -5, -9, -7 ppm against the far crystal (and -14,
--5, +1 in a later run). The ring is WALKED AGAINST THE CHANNEL - one
-subtraction an entry, stopping eight short of the write head: a walk
-with a modulo a step (a library division on this core) took several
-capture periods and read a torn ring, 450..950 ppm out.
+core against the LSE ALL THE TIME, in hardware - the stratum's
+`LseTracker` ([clock.md](clock.md)) on DMA1 channel 2, a ring of 4096
+captures, a second of the crystal - takes the rate over the last 250 ms
+into every divisor and edge before each action, converts a span at the
+rate over the span's own window, and states a `send` or `blast`'s rate
+(the Report's aux16) at the rate over the run's own window. Then: -4..-14
+ppm against the far crystal. A `onewire` reply's own echo is waited for,
+two bit times at most, before it is flushed (the far F446 peer measured
+that echo landing after TC).
 
 **The cost.** The echo's clean character is some thirty instructions with no
 call (release listing): the ISR load and its test, the TIM2 stamp, the
@@ -1238,6 +1312,10 @@ restarts).
 ## Not covered yet
 
 Declined with a reason (every field of chapter 33 is implemented):
+- **ES0548 2.11.1 above 2400 baud.** Letter `f`'s pull-banger stages it
+  at 2400; the far engine could draw it at any rate, but no op of the
+  link protocol puts a pulse INSIDE a frame's stop bit (`glitch` plays
+  on an idle line, `bitbang` stretches a whole cell) - born with that op.
 - **The synchronous DATA path.** The master's CK, its polarity, its
   phase and LBCL are all measured on the pad; a synchronous LINK needs
   a second node on CK, TX and RX, and the wires this desk carries
@@ -1255,30 +1333,23 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
-- `test_stm32_serial` as the G031K8's three group images (letters a to
-  j, k to y, and the two-board set): the suite outgrew the part's 64 KB
-  whole, and the scores under "On the STM32G031K8" are the one image's;
-  one run of each image on that board measures them, the rate on the
-  wire among them (no board is paired with it on the desk).
-- The two-board letters past the core set - the engine's shapes, the
-  ring beyond the bridge, the shared wire against a second chip, IDLE
-  under a faster sender: their peer ops (`bitbang`, `glitch` beyond the
-  start bit's vote, `drive_rxd`, `onewire`, `collide`, the repeated
-  blast) are served by both STM32 peers and measured by no letter yet.
+- `test_stm32_serial` as the G031K8's four group images (letters a to
+  j, k to q, the host letters v, w, x and y, and the two-board set) and
+  the G071RB's two (the single-board letters, the two-board set): the
+  suite outgrew those parts whole, and the scores under "On the
+  STM32G031K8" and "On the STM32G071RB" are the one image's; one run of
+  each image on those boards measures them, the rate on the wire among
+  them (no board is paired with either on the desk).
 - The peer's IrDA (its inversions a reading of 33.5.18 to confirm),
   `autobaud_tx`, `send_mpcm` and the 0.5 / 1.5 stop codes as a SENDER:
-  served, judged by no letter yet.
+  served, judged by no letter yet - the design's later letters
+  (auto-baud, LIN both ways, IrDA, mute) measure them.
 - `usart_peer` on the STM32G071RB: built, never run (not on the desk).
 - The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
   built for it and has not run there (the board is not on the desk); one
   run of the suite measures it. The ring under an `LpUart`, its kick
   included, is the same task's and compile-only, as the LPUART's engine
   slots are ([lpuart.md](lpuart.md)).
-- The kick racing a character that lands on the very toggle at rates
-  above 921600: the far board's blast now reaches this receiver at
-  6.4 Mbaud (letter `2`, the receive engine whole), and a letter that
-  streams it for seconds against the ring's copies would measure the
-  kick itself.
 - `Rs485` as a TASK (the driver-enable timings are measured through the
   resource on the DE pad; the task's own `init()` path is compile-only).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured

@@ -9,12 +9,18 @@ task and `DynamicClock<Rates<...>, Users...>`), `stm32g0/flash.hpp`
 (`FlashWaitStates`, `FlashAccel`), and `stm32g0/pwr.hpp` for what this
 chapter borrows from chapter 4 - `Pwr::range()`, because the latency
 table is indexed by the voltage range, and the range and low-power-run
-setters a rate's own `apply()` sequences. ONE CHAPTER, ONE OWNER: chapter
+setters a rate's own `apply()` sequences - and `stm32g0/lse_tracker.hpp`
+(`LseTracker<dma, channel, entries>`), 5.2's frequency measurement with
+TIM16 turned into a running one ("The core against the LSE, tracked"
+below). ONE CHAPTER, ONE OWNER: chapter
 4 lives in [pwr.md](pwr.md) and RCC_BDCR - LSE, RTCSEL, RTCEN, BDRST -
 lives in [rtc.md](rtc.md), because that register is unreachable without
 the RTC domain's own write gate and its choices are one-way. The family
 fixture is `test/family_stm32g0/clock.cpp` plus eight negatives under
-`brio check stm32g0`; the bench suite is `test_stm32_clock`.
+`brio check stm32g0`, and `test/family_stm32g0/lse_tracker.cpp` with one
+(a timer clock under 8 MHz); the bench suite is `test_stm32_clock`, and
+the tracker's measurements are `test_stm32_serial`'s two-board letters and
+`usart_peer`'s ([usart.md](usart.md)).
 
 ## What the silicon does
 
@@ -519,6 +525,68 @@ ticks were the LSI moving with the voltage regime and the remaining two
 per 500 are the core's own (HSI16 under the low-power regulator), inside
 the band the letter judges in.
 
+## The core against the LSE, tracked (`LseTracker`)
+
+**WHY.** On these boards the core is the HSI16 through the PLL (a
+Nucleo-64's HSE is not fitted), and the HSI16 does not just sit off
+nominal by its factory trim - IT WANDERS: measured against a far board's
+crystal and this board's LSE over the same windows, +2600..+3300 ppm off
+64 MHz, some 400 ppm between a second after boot and a minute later,
+150 ppm between gapless runs a second apart, and +-150..300 ppm between
+4 ms windows around the 250 ms mean ([usart.md](usart.md), "Against a
+far board"). A rate measured once is no time base a minute later.
+
+**WHAT THE CHAPTER OFFERS, USED OR DECLINED.** 5.2 draws the frequency
+measurement with a timer's capture on an internal clock (figures 12 to
+14):
+
+| the offer | in `LseTracker` |
+|---|---|
+| TIM16's TI1 = LSE (TIM16_TISEL code 2, `RtcDomain::lse_tim16_ti1_code`) | USED: the crystal itself, whatever RTCSEL says |
+| TIM14's TI1 = RTCCLK | DECLINED: the LSE only while RTCSEL says so, and RTCSEL is one-way ([rtc.md](rtc.md)) |
+| TIM17 (HSI48 / 256, HSE / 32, MCO) | DECLINED: no LSE input |
+| the capture prescaler ICPSC | USED at /8, its largest: 4096 captures a second instead of 32768, a 16-bit interval of 8 x TIMPCLK / 32768 counts (15625 at 64 MHz) under the counter's wrap |
+| the input filter ICF | USED at 8 (six samples at fDTS / 8): an unfiltered capture of an internal clock line over-captures ([rtc.md](rtc.md)); refused at compile time under an 8 MHz timer clock, where the six samples outlast half an LSE period |
+| the capture's DMA request (TIM16_CH1, DMAMUX table 55) | USED: a channel the program names copies every capture, CIRCULAR, into a ring of `entries` half-words - no CPU and no interrupt per capture, ever |
+| an interrupt per capture | DECLINED: 4096 entries a second for what one request does |
+
+The channel arms at `very_high` (design/dma.md's rule: a capture
+register the channel does not empty in time is overwritten by the next,
+CC1OF - it overruns like a receive ring), one request every 244 us.
+
+**THE READ IS A WALK, AND IT RACES THE CHANNEL.** `hz(k)` walks back
+from the channel's write position over k capture intervals, one 16-bit
+subtraction and one add an entry, no division inside the loop, stopping
+eight entries short of the head; the result is the timer clock over the
+k x 244 us that ended when the walk began, believed only within five
+per cent of the nominal clock `start()` was given. `hz_over(counts)` is
+the rate over a stretch of timer counts that ended NOW (the intervals
+covering it and two more, sixteen at least), `ppm_over(counts)` the same
+against nominal. A walk with a modulo a step (a library division on this
+core) was measured costing several capture periods and reading a torn
+ring, 450..950 ppm out. The walk is thirteen Thumb instructions an entry
+in the release listing (the 16-bit load, the subtraction, the add, the
+wrap test, the count), the one 64-bit division after the loop, the
+belief window computed once at `start()`: a walk of a whole 4096 ring
+is some 1.3 ms at 64 MHz, of the 250 ms an action's divisors are taken
+over a third of that.
+`filled()` says how many intervals a walk can use: the captures so far
+on the first lap, the whole ring less the guard once the channel's
+completion flag has risen (nothing else clears it). `start()` refuses
+until `RtcDomain::lse_ready()` - the crystal is the RTC domain's, behind
+its own write gate - and owns Tim<16> and the channel until `stop()`.
+
+**MEASURED** (the two users: `usart_peer` on DMA1 channel 2, ring 4096;
+`test_stm32_serial`'s two-board set on DMA1 channel 4, ring 4096 - 256
+on the STM32G031K8): this board's LSE and a far board's crystal (the
+STM32F446RE's, through the ST-LINK's 8 MHz) time the same HSI16 window
+within 16 ppm - three 40 ms windows read +3063/+2980/+2926 ppm by the far
+crystal and +3048/+2970/+2908 by the tracker - and a far 1 Mbaud blast
+on this board's ruler reads -2831 ppm against the tracker's +2832 over
+its window: 1 ppm apart. A peer whose every divisor and edge comes from
+the tracked rate reads -5..-14 ppm against the far crystal, where one
+boot measurement read +164, +8 and +76 a second apart.
+
 ## Not covered yet
 
 Driver gaps:
@@ -550,9 +618,11 @@ Driver gaps:
   no wait state, where 3.3.5 gives it nothing to buy, the default is a
   current cost unmeasured.
 - HSI16 trimming (RCC_ICSCR.HSITRIM). The scale to trim against is
-  there - TIM16's capture of LSI or LSE through TISEL, no pad anywhere
-  (5.2.16, [tim.md](tim.md)), is what the timer and RTC suites weigh
-  the 32 kHz roots with - but nothing writes the trim; born with its
+  there - `LseTracker` above, and TIM16's capture of LSI or LSE through
+  TISEL, no pad anywhere (5.2.16, [tim.md](tim.md)), with which the timer
+  and RTC suites weigh the 32 kHz roots - but nothing writes the trim;
+  born with its first user. A util concept for the tracker (an RC core
+  and a 32 kHz crystal on another family) waits for that family's
   first user.
 
 Findings left open: `delay_us`'s minimum at 2 MHz (above) - some 270

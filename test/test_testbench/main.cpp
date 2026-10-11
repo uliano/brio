@@ -460,3 +460,31 @@ TEST_CASE("registration refuses the second all-key in either case and a key "
     CHECK(upper.second_letter('j', "peer j", t2j));
     CHECK(!upper.letter('Y', "the key itself", t2a));
 }
+
+// ---- the group selection ----------------------------------------------------
+// A split part's build names one group's keys; the selection must carry a
+// key the group names and drop one it does not - a digit key (a second
+// set's) as well as a letter, or a two-board set rides in every group image.
+
+TEST_CASE("a selection carries the letters and the digits it names, and no others") {
+    constexpr const char* g1 = "abcdefghij";
+    constexpr const char* g3 = "123456789";
+    static_assert(brio::selection_carries(g1, 'a') && brio::selection_carries(g1, 'j'));
+    static_assert(!brio::selection_carries(g1, 'k'));
+    static_assert(!brio::selection_carries(g1, '1'), "a letter group does not carry a digit key");
+    static_assert(brio::selection_carries(g3, '1') && brio::selection_carries(g3, '9'));
+    static_assert(!brio::selection_carries(g3, '0'));
+    static_assert(!brio::selection_carries(g3, 'a'), "a digit group does not carry a letter key");
+    CHECK(brio::selection_carries("ab12", '2'));
+    CHECK(!brio::selection_carries("ab12", '3'));
+}
+
+TEST_CASE("no selection carries every key, and a key that is neither letter nor digit is always carried") {
+    static_assert(brio::selection_carries(nullptr, 'z') && brio::selection_carries(nullptr, '0') &&
+                  brio::selection_carries(nullptr, '9'));
+    static_assert(brio::letter_mask_of(nullptr) == 0x03FFFFFFUL && brio::digit_mask_of(nullptr) == 0x03FFu);
+    static_assert(brio::selection_carries("abc", 'T') && brio::selection_carries("123", '#'));
+    // This test binary names no selection: the image carries everything.
+    CHECK(brio::test_letter_carried('a'));
+    CHECK(brio::test_letter_carried('7'));
+}

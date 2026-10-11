@@ -1945,8 +1945,7 @@ int main() {
         (void)display_ready();
     }
 
-    (void)Host::init(clock);
-    Host::sck_speed(PinSpeed::very_high);
+    (void)Host::init(clock);   // both pads at very_high, the Config's default
     boot.panel_bytes = panel_init();
     boot.panel_up = boot.panel_bytes != 0u;
 

@@ -655,8 +655,10 @@ void link_hold() { (void)delay_us(clock, 30); }
 /// on) in 9 and 10 of 40 bursts of letter x, and in 0 of 40 with this pad
 /// at high, medium or low (docs/stm32g0/spi.md). The clock pad keeps its
 /// class: it is the edge the client samples on. The Config every peer
-/// letter's init() is handed.
-constexpr Host::Config peer_link_config{.mosi_speed = PinSpeed::high};
+/// letter's init() is handed; letter x moves the MOSI class for its
+/// back-to-back rung and puts it back.
+PinSpeed peer_mosi_speed = PinSpeed::high;
+Host::Config peer_link_config() { return {.mosi_speed = peer_mosi_speed}; }
 
 bool link_command_mode() {
     peer_stop();
@@ -664,7 +666,7 @@ bool link_command_mode() {
     bus_ao_live = false;
     sleep_probe_live = false;
     software_cs_pads();
-    const bool ok = Host::init(clock, peer_link_config);
+    const bool ok = Host::init(clock, peer_link_config());
     dec.reset();
     return ok;
 }
@@ -4243,6 +4245,7 @@ void tr_peer_client() {
 // (spi.md), not a claim about it.
 
 constexpr uint8_t slip_rounds = 10;
+constexpr uint8_t b2b_rounds = 30;
 
 void tx_peer_slips() {
     if (!need_peer()) {
@@ -4272,6 +4275,34 @@ void tx_peer_slips() {
         total = static_cast<uint8_t>(total + slips);
     }
     print(serial, "  ", total, " of ", 4u * slip_rounds, " bursts slipped", crlf);
+
+    // THE BACK-TO-BACK RUNG: the polled host at PCLK/4, whose TXFIFO keeps
+    // the frames running without a gap - the rung where the far F446
+    // host's MOSI class showed - thirty bursts of thirty-two frames at each
+    // MOSI class in turn, the peer link's own class last.
+    static constexpr PinSpeed classes[] = {PinSpeed::very_high, PinSpeed::medium, PinSpeed::low, PinSpeed::high};
+    static constexpr const char* names[] = {"very_high", "medium", "low", "high"};
+    const PinSpeed keep = peer_mosi_speed;
+    for (uint8_t c = 0; c < 4u; ++c) {
+        peer_mosi_speed = classes[c];
+        uint8_t b2b = 0;
+        print(serial, "  MOSI at ", names[c], ", PCLK/4, ", b2b_rounds, " bursts of 32 frames:");
+        for (uint8_t k = 0; k < b2b_rounds; ++k) {
+            Exchange e{};
+            e.rate = SpiClock::div4;
+            e.count = 32;
+            e.seed_a = static_cast<uint8_t>(0x43u + 5u * k);
+            e.seed_b = static_cast<uint8_t>(0x29u + 3u * k);
+            Verify v{};
+            spilink::Report r{};
+            if (!exchange_exact(e, v, r)) {
+                ++b2b;
+                print(serial, " [", v.idx, "/", r.idx, r.count != e.count ? "!" : "", "]");
+            }
+        }
+        print(serial, "  -> ", b2b, " of ", b2b_rounds, crlf);
+    }
+    peer_mosi_speed = keep;
     (void)link_command_mode();
     print(serial, "  the command channel afterwards: ",
           command(Op::ping) ? "answers" : "DEAD", crlf);
