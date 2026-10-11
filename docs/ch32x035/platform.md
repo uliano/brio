@@ -125,18 +125,25 @@ latch the wake left, so the caller's loop turns once per interrupt;
 `ticks_per_second` the timebase's rate, `atomic_width` 4, and the
 breadcrumb a `PanicRecord` in `.noinit`, which the crt neither loads nor
 zeroes. In the release listing the Sleep path is a leaf of fourteen
-instructions, the consume three of them (an `ori`, the store and the
-second `wfi`). With SLEEPDEEP found set - which no verb of this stratum
+instructions behind the DMA guard below, the consume three of them (an
+`ori`, the store and the second `wfi`). With SLEEPDEEP found set - which no verb of this stratum
 does - the path is `idle_deep()`, out of line: the timebase paused and
 its pending bit cleared first, as the sibling strata's hooks do,
 because a tick that is merely pending would end the sleep before it
 began, then the same store, unmask and `wfi`, and no consume, a second
 `wfi` with SLEEPDEEP armed being a second entry into that mode. There
 is no
-`idle_until()` (the timebase stops with the core) and no count of bus
-masters: on the CH32V203 and the CH32V303 no master but the core gets a
-bus cycle in a sleep, which is why that stratum's idle path counts them,
-and here no driver starts one.
+`idle_until()` (the timebase stops with the core). AND NO SLEEP OVER A
+WORKING DMA CHANNEL: in the Sleep the controller moves nothing (measured,
+[dma.md](dma.md)), so `idle()` first asks `Dma::any_working()` - a
+channel enabled and circular or with items left - and while one is, it
+unmasks and returns at once. The registers are the answer, read in the
+idle path alone: with the controller's gate closed four instructions (the
+gate's load and a branch), with it open six a channel that is not
+working; the CH32V203 and the CH32V303 keep a count their drivers update
+instead, because their USB controllers are bus masters too, which here
+have no driver. A receive ring is always working: a program with one
+holds itself awake.
 
 The interrupt verbs are [pfic.hpp](../../brio/ch32x035/pfic.hpp)'s:
 `enable_interrupts`, `disable_interrupts`, `interrupts_enabled`, and
@@ -265,13 +272,14 @@ the consume was measured before and after. What it measured:
   `idle()` that the latch returns at once costs 23 cycles, two counter
   reads included (24). At 48 MHz, two wait states in the fetch, the same
   walk loses none and none is late in the four cases; the edge reaches
-  the handler in 43 cycles and the loop in 167, and an `idle()` the latch
-  returns at once costs 76.
+  the handler in 43 cycles and the loop in 167 to 170, and an `idle()` the
+  latch returns at once costs 76 to 84 - the higher figures the image
+  whose idle path asks the DMA controller's gate first.
 - **One turn per wake** (letter `k`). A Tenuto pack of three quiet AOs,
   two holding a periodic time event that does not fire in the window,
   turned as `Tenuto::run()` turns it over 100 ticks with the tick the
-  only interrupt: 101 kernel turns, in two runs at 8 MHz and one at 48
-  (a quiet turn 372 cycles there, 126 at 8 MHz). Without the consume
+  only interrupt: 101 kernel turns, in two runs at 8 MHz and two at 48
+  (a quiet turn 372 to 388 cycles there, 126 at 8 MHz). Without the consume
   the same pack turned 200 times, in two runs: the waking edge left
   latched ended every second `idle()` at once. That wasted turn costs
   126 cycles, two counter reads included; the consume costs three

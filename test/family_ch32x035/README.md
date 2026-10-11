@@ -34,6 +34,11 @@ names only the parts where its refusal holds.
 the reference manual gives, and the part table's facts consistent with
 each other - among them the model table's GPIO count, which the bonded
 pads reproduce exactly once a shorted pair is counted as one pin.
-`util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
+`dma.cpp` holds the DMA controller's map against table 9-2 and the
+request table against figure 9-1 on every part, and the serial transport
+on its two engines wherever the part offers the instance; the negatives
+refuse an engine on another instance's channel, a ninth channel, a beat
+wider than the binding's, and a request whose peripheral the part has
+not got. `util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
 each service over this target's platform, which is the compiler's verdict
 on the whole framework for this core.

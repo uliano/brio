@@ -4,8 +4,8 @@ The serial ports of the CH32X035 series, in the two strata every brio
 serial driver has ([../design/serial.md](../design/serial.md)):
 `Usart<n>`, the RESOURCE - which instance, its gate, its vector, its DMA
 channels and chapter 14 as verbs - and `Uart<n, P, ...>`, the TASK - the
-interrupt-driven byte transport every console runs on, with the sibling
-strata's surface and template parameters.
+interrupt-driven byte transport every console runs on, with a DMA engine
+in either slot, and the sibling strata's surface and template parameters.
 
 Documents of record: the CH32X035 reference manual V1.8 (14.1 for what
 the block has, 14.3 for the divisor, 14.4 to 14.7 for the synchronous,
@@ -16,9 +16,11 @@ the gates, table 7-1 for the vectors) and the CH32X035/X033 datasheet
 V1.7 (the model table's count of serial ports per part, table 2-1 for
 the pads each package bonds). The header is
 [brio/ch32x035/usart.hpp](../../brio/ch32x035/usart.hpp), with the
-columns in [afio.hpp](../../brio/ch32x035/afio.hpp) and the request
-channels in [dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp); the
-reference suite is `test_x035_usart`.
+columns in [afio.hpp](../../brio/ch32x035/afio.hpp), the request
+channels in [dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp) and the
+engines in [dma.hpp](../../brio/ch32x035/dma.hpp) ([dma.md](dma.md)); the
+reference suite is `test_x035_usart`, and `test_x035_dma` runs its own
+console on the engines.
 
 ## What the silicon does
 
@@ -115,7 +117,13 @@ reference suite is `test_x035_usart`.
   interrupt.
 - **DMA** (14.8, 9.2.3): DMAT and DMAR, each direction on a channel of
   its own - USART1 on channels 4 (TX) and 5 (RX), USART2 on 7 and 6,
-  USART3 on 2 and 3, USART4 on 1 and 8.
+  USART3 on 2 and 3, USART4 on 1 and 8. UNDER A RECEIVE CHANNEL THE CPU
+  NEVER READS DATAR, and the error flags' clear is the silicon's (measured,
+  below): a STATR read ARMS the clear 14.10.1 prescribes, and the next
+  DATAR read - the CHANNEL'S - performs it; a flag with no status read
+  since the last DATAR read stands. The transport's receive vector is
+  built on that ([../../brio/ch32x035/usart.hpp](../../brio/ch32x035/usart.hpp)'s
+  header).
 
 ## Types and verbs
 
@@ -156,32 +164,50 @@ undefined answers false and writes nothing:
 
 `Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>`,
 the transport - the CH32V203's parameter list, `UartOptions` its last
-parameter (`half_duplex`, `rts`, `cts`). It refuses at compile time an
-instance the part does not offer, a nine-bit or an invalid format (the
-rings carry bytes; nine bits are the resource's `read_word`), a column
-that is not a transport's on this part, an RTS or CTS pad the column's
-package does not give, and an engine other than `NoDmaEngine`.
+parameter (`half_duplex`, `rts`, `cts`, `rx_priority`). It refuses at
+compile time an instance the part does not offer, a nine-bit or an
+invalid format (the rings carry bytes; nine bits are the resource's
+`read_word`), a column that is not a transport's on this part, an RTS or
+CTS pad the column's package does not give, an engine on any channel but
+the instance's own (the request table's, [dma.md](dma.md)), two engines
+on one channel, a receive ring under an engine that is not a power of
+two, and `rx_priority` on a port with no receive engine.
 `init(clock, baud)` answers false when the divisor comes out below 16,
 and when the column puts TX or RX on the debug port's pads while the
 probe's port is alive; otherwise it opens the gate, writes the column
 if it is not the reset one, hands TX to the peripheral before the enable
 and leaves RX a floating input, configures the frame and the divisor,
-and arms RXNE and the vector. Then: `isr()` (the vector's whole body,
-true on the edge from an empty receive ring), `write_byte` and
-`write_bulk` (a run: as many as fit, its first byte pushed and TXEIE
-armed before the rest is copied, armed again behind it), `read_byte` and
-`read_span`/`consume` (the receive run in place), `tx_idle()`,
-`rx_pending()`, `rx_skips()` (the gaps in the stream the receive ring
-hands out, never cleared - util/serial_port.hpp's epoch: the SkipRing's
-skips, one at the consumer's look after `isr()` dropped a flagged byte
-or a full ring refused one); the counters
-`rx_overruns`, `hw_overruns`, `frame_errors`, `noise_errors`,
-`parity_errors` (saturating) and `clear_errors()`; `baud()`,
-`actual_baud(hclk)`, `divisor_for`, `min_hz_for`, `can_baud`;
-`rebase(hz)` - the port as a `ClockUser`, draining what it holds at the
-old rate before writing the new divisor - `set_baud(hz, baud)` for the
-link's own rate, and `release()`. `dma_isr()`, `harvest()` and
-`dma_faults()` are there for the surface and answer false and zero.
+writes CTLR3 only where an option or an engine has something for it -
+DMAT, DMAR with EIE -, binds the engines (the receive ring at
+`rx_priority`, very_high by default, the transmit at high), and arms
+the vector: RXNE without a receive engine, the idle line and the errors
+with one. Then: `isr()` (the vector's whole body, true on the edge from
+an empty receive ring), `dma_isr()` (the engines' channels' body: a
+transmit block's completion releases its bytes and starts the next run, a
+receive lap is counted, the ring's half and full marks are the edge, a
+transfer error stops the channel for the consumer's next look to
+restart), `harvest()` (the same edge asked from the consumer's side),
+`dma_faults()`, `write_byte` and `write_bulk` (a run: as many as fit -
+without a transmit engine its first byte pushed and TXEIE armed before
+the rest is copied, armed again behind it; with one the run copied whole
+and the engine nudged, the block claimed under the mask and launched
+outside it), `read_byte` and `read_span`/`consume` (the receive run in
+place - under a receive engine the channel's own ring, `consume()`
+answering whether the run was intact), `tx_idle()` (no block in flight,
+the ring empty, TC up - each block clears TC as it starts), `rx_pending()`,
+`rx_skips()` (the gaps in the stream the receive ring hands out, never
+cleared - util/serial_port.hpp's epoch: without an engine the SkipRing's
+skips, with one the view's skips and the overruns and restarts the vector
+and the look count); the counters `rx_overruns` (a full ring, or a lap of
+the channel's ring written over unread bytes), `hw_overruns`,
+`frame_errors`, `noise_errors`, `parity_errors` (saturating) and
+`clear_errors()`; `baud()`, `actual_baud(hclk)`, `divisor_for`,
+`min_hz_for`, `can_baud`; `rebase(hz)` - the port as a `ClockUser`,
+draining what it holds at the old rate before writing the new divisor -
+`set_baud(hz, baud)` for the link's own rate, and `release()`, which
+stops the engines, clears UE and pulses the block's RESET LINE BEFORE IT
+CLOSES THE GATE: a raised request outlives every other release on this
+die ([dma.md](dma.md), "A released requester").
 
 ## How to use it
 
@@ -208,6 +234,30 @@ Another column and another frame - USART4 on PB0/PB1, even parity:
 using Link = brio::Uart<4, P, 64, 64, brio::UartFormat{brio::UartBits::eight, brio::UartParity::even}>;
 ```
 
+USART4 on its two DMA engines - it transmits on channel 1 and receives on
+8 (entry 44 of the vector table) - with a receive ring of 512, a power of
+two, written by the channel lap after lap:
+
+```cpp
+using Link = brio::Uart<4, P, 512, 256, brio::UartFormat{}, brio::DmaTxEngine<1>, brio::DmaRxEngine<8>>;
+
+extern "C" BRIO_CH32_INTERRUPT void usart4_handler() {
+    if (Link::isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() {
+    if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { (void)Link::dma_isr(); }
+```
+
+A program that ranks a copy of its own above the ring says so - and loses
+the ring's frames to it, which the rule exists to prevent:
+
+```cpp
+using Low = brio::Uart<4, P, 512, 256, brio::UartFormat{}, brio::DmaTxEngine<1>, brio::DmaRxEngine<8>, 0,
+                       brio::UartOptions{.rx_priority = brio::DmaPriority::low}>;
+```
+
 A column that is not the reset one, and the flow-control pair (on a
 package that bonds both pads):
 
@@ -232,7 +282,7 @@ column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
 (its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
 doubled. `z` (23 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
-leaving their link pads floating inputs; `y` (66 verdicts) is the
+leaving their link pads floating inputs; `y` (80 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
 reports. What it measured:
 
@@ -305,20 +355,65 @@ reports. What it measured:
   more: 115200 at -3778 ppm against -3746 (the divisor's -0.08 per cent
   on the HSI's), 921600 at -1436 against -1276 (the divisor's +0.16), 3
   Mbaud at -2830 against -2901.
-- **The transport across the wire** (letter `k`): eight bytes through
-  `Uart` echoed by the far chip come back equal at 115200 and 1 Mbaud;
-  64 bytes it sends at 3 Mbaud are all counted by the far chip; a gapless
-  run of 256 INTO it, taken by runs (`read_span()`/`consume()`), arrives
-  whole and in order at 1, 1.5 and 2 Mbaud. THE CEILING, measured: at
-  2.4 Mbaud the receive ring fills behind the main loop (31 bytes
-  refused, the run broken at byte 128) and at 3 Mbaud the shift register
-  overruns (ORE 15, the run broken at byte 21); a full-duplex echo at 3
-  Mbaud loses bytes too. The transport takes one vector entry a frame,
-  the hardware prologue's round trip of 100 to 104 cycles
-  ([platform.md](platform.md)) and the receive body of about 30
-  instructions in the release listing beside it, against a frame of 160
-  cycles at 3 Mbaud and 200 at 2.4 - the engines' work, not written in
-  this stratum (below).
+- **The transport across the wire, on interrupts** (letter `k`): eight
+  bytes through `Uart` echoed by the far chip come back equal at 115200
+  and 1 Mbaud; 64 bytes it sends at 3 Mbaud are all counted by the far
+  chip; a gapless run of 256 INTO it, taken by runs
+  (`read_span()`/`consume()`), arrives whole and in order at 1, 1.5 and 2
+  Mbaud. THE INTERRUPT TRANSPORT'S CEILING, measured: at 2.4 Mbaud the
+  receive ring fills behind the main loop (the run broken at byte 16 to
+  128 from run to run, 31 to 82 bytes refused) and at 3 Mbaud the shift
+  register overruns (ORE 7 to 40, the run broken within its first 21
+  bytes); a full-duplex echo at 3 Mbaud loses bytes in some runs. The
+  transport takes one vector entry a frame, the hardware prologue's round
+  trip of 100 to 104 cycles ([platform.md](platform.md)) and the receive
+  body of about 30 instructions in the release listing beside it, against
+  a frame of 160 cycles at 3 Mbaud and 200 at 2.4.
+- **THE SAME SWEEP ON THE ENGINES** (letter `k`, USART4 transmitting on
+  channel 1 and receiving on 8, the ring 512 bytes): 8192 gapless frames
+  from the far chip at 1, 1.5, 2, 2.4 and 3 Mbaud, every byte judged in
+  sequence - each run whole and in order, no overrun, no lap lost, no skip,
+  no channel given up, and TWO USART interrupts a burst and the ring's two
+  marks a lap (32 for 8192) where the interrupt transport took one a
+  frame. 3 Mbaud, a divisor of 16 on both chips at 48 MHz, is the wire's
+  ceiling here: THE ENGINED RECEIVE RUNS AT THE WIRE'S, a factor of one
+  and a half over the interrupt transport's 2 Mbaud. A full-duplex echo
+  of 256 bytes at 3 Mbaud on both engines came back whole, no ORE.
+- **The error flags' clear under the receive channel** (letter `q`): the
+  far chip's 8N2 frames 0x03 and 0x04 into a receiver set for 8E1 - its
+  first stop bit read as the parity bit, so 0x03 is a parity error and
+  0x04 clean - taken by channel 8 from DATAR, both bytes landing: PE stands
+  in STATR after the first frame although the channel read DATAR; with
+  STATR read between the two, PE is down after the clean second frame -
+  the status read armed the clear and the channel's read performed it;
+  with no status read between, PE is still up after the second. The
+  CH32V006's and the CH32V203's answer, which the transport's receive
+  vector is built on.
+- **The priority rule on this controller** (letter `r`): 8192 frames at 3
+  Mbaud into the ring at very_high on channel 8 while 2 KB copies ran back
+  to back on channel 5 - a LOWER number - at the copy engine's low: every
+  byte in order, nothing lost, 395 to 409 copies beside it. THE CONTROL,
+  the ring told `rx_priority = low` - a tie, the copy's lower number
+  winning it, a block of 512 words some 3 000 cycles against DATAR's one
+  frame of 160: the run broke at its second byte, an overrun counted and
+  the stream skipped.
+- **The transmit engine's blast, timed by the far chip** (letter `s`):
+  4096 frames through the ring of 256 - 48 blocks, each started from the
+  last one's completion - against the polled blast taken back to back.
+  Gapless at 1 and 1.5 Mbaud (within 360 ppm, the HSI's wander between two
+  runs). Above, each block boundary idles the line: 40 to 59 cycles a block
+  at 2 Mbaud, 79 to 101 at 2.4 and 138 to 167 at 3 - the span 0.2 to 0.3,
+  0.5 to 0.6 and 1.0 to 1.2 per cent over the polled blast's. THE REASON IS
+  THE RESTART'S COST: the completion's body - the ring's consume, the
+  claim, the next run, TC cleared and the five stores - measured at 370 to
+  377 cycles between its first and last statement (400 at most), about 90
+  instructions fetched from the flash behind two wait states, with the
+  vector's own entry and exit beside it. The idles at the three rates fit
+  a window of about a frame and a half between the block's last item
+  landing and the line running dry, so the line idles where the restart
+  outlasts that: never at 1.5 Mbaud (a frame of 320 cycles), a little at 2.
+  A program's runs set the blocks: the fewer and longer, the fewer
+  boundaries.
 - **The frame matrix across the wire** (letter `l`): 8N1, 8E1, 8O1, 7E1,
   7O1, 9N1, 8N2, 8N0.5 and 8N1.5 at 115200, eight frames each echoed
   equal and counted clean; HALF A STOP BIT and one and a half timed as
@@ -363,12 +458,11 @@ reports. What it measured:
 
 Driver gaps, each with its reason:
 
-- **The DMA engine slots**: the DMA chapter is not written in this
-  stratum ([README.md](README.md)), so `TxEngine` and `RxEngine` take
-  `NoDmaEngine` alone; the resource's `dma_transmit`/`dma_receive` and
-  the channel numbers are there for the engine that fills them. Above 2
-  Mbaud sustained reception is theirs (the transport's measured ceiling,
-  above).
+- **The transmit engine's restart below a frame at 3 Mbaud**: the
+  completion's body is 370 to 377 cycles of code fetched from the flash
+  (letter `s`); placed in SRAM, or with fewer calls on the path, it would
+  close the block boundary's idle above 1.5 Mbaud - the linker script and
+  the hot path's placement are the change ([dma.md](dma.md)).
 - **The synchronous, smartcard, IrDA, mute and flow-control modes as
   tasks** (the AVR's `SyncHost`, `IrdaLink` and the like): the resource's
   verbs are the whole of it, and a task is born with its first user.
@@ -383,6 +477,17 @@ Implemented but not bench-verified, each with what would measure it:
 - **IrDA's low-power mode across the wire**: letter `o` echoes the
   normal mode; the low-power pulse wants the far chip's decoder at the
   same prescaled width, a second leg of that letter.
+- **The receive vector's guards**: the overrun with nothing to take
+  (`rx_overrun_probe`) and the channel given up after 255 unmoved entries
+  are written after the CH32V006's measurements and staged by no letter
+  here - the control of letter `r` broke on an overrun the wait for the end
+  counted, and gave nothing up; a copy armed ABOVE the ring for longer than
+  a message's tail, and a channel frozen by a request another block holds,
+  would stage them.
+- **The idle line's subtleties under the channel's clear** (one frame
+  after an idle that was read raising no IDLE of its own, which the
+  CH32V006 measured): letter `q` proves the clear on PE; the IDLE half
+  wants a frame-by-frame leg of it.
 - **USART1 and USART3, and the other packages' columns**: USART1 has no
   usable column on the QFN20 and USART3's only one is the debug port's,
   so neither has carried a byte here; a board of another package would

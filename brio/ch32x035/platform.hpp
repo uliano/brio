@@ -22,14 +22,23 @@
  *
  * WHAT IS NOT HERE, and is deliberate rather than forgotten: no
  * idle_until() - this platform is not tickless, its timebase is the core
- * counter and stops with the core - and no count of bus masters. On the
- * CH32V203 and the CH32V303 no master but the core gets a bus cycle in a
- * sleep of any depth, so that stratum's idle path reads a count of
- * working DMA channels and USB controllers and sleeps only at zero
- * (brio/ch32vx03/bus_activity.hpp). Whether this part does the same is a
- * measurement, and until a driver of this stratum starts a bus master
- * (the DMA, the USB controllers) there is nothing for such a count to
- * hold.
+ * counter and stops with the core.
+ *
+ * NO SLEEP OVER A WORKING DMA CHANNEL. In the Sleep of RM 2.3.2 the DMA
+ * controller moves nothing - measured on the CH32X035F8U6
+ * (docs/ch32x035/dma.md): a 4096-item copy started before a sleep had
+ * moved 68 items when the tick woke the core 19 000 cycles later, and a
+ * block paced by a USART's transmitter ran at a fiftieth of its pace -
+ * the CH32V203's and the CH32V303's answer (brio/ch32vx03/bus_activity.hpp).
+ * So idle() asks the controller first, `Dma::any_working()` - a channel
+ * enabled and circular or with items left - and returns at once, unmasked,
+ * while one is: a program with an engine at work, a receive ring above
+ * all, holds itself awake without having to know that it does. The
+ * silicon's own registers are the answer, read in the idle path alone:
+ * one load with the controller's gate closed, two a channel with it open;
+ * a count kept by the engines would cost their hot paths a guarded
+ * increment for an answer the registers already hold. The USB
+ * controllers, the other bus masters of the series, have no driver here.
  */
 
 #pragma once
@@ -37,6 +46,7 @@
 #include <stdint.h>
 
 #include "ch32x035/device.hpp"
+#include "ch32x035/dma.hpp"
 #include "ch32x035/pfic.hpp"
 #include "ch32x035/ticker.hpp"
 #include "kernel/platform.hpp"
@@ -123,6 +133,11 @@ struct Ch32x035Platform {
      * and the path is then idle_deep(), out of line.
      */
     static void idle() {
+        if (Dma::any_working()) {
+            // A channel at work: no sleep of any depth (the file header).
+            enable_interrupts();
+            return;
+        }
         const uint32_t sctlr = pfic_sctlr();
         if ((sctlr & sctlr_sleepdeep) != 0u) {
             idle_deep(sctlr);

@@ -53,7 +53,11 @@
 //      timed the same way, the trim back at its centre after
 //   k  (y) the rates across the wire: 115200 to 3 Mbaud, echoed byte by
 //      byte, then timed by the FOREIGN receiver against HSI / BRR; the
-//      transport's bytes at 115200, 1 and 3 Mbaud
+//      transport's bytes at 115200, 1 and 3 Mbaud; the interrupt
+//      transport's sustained receive swept to its ceiling, and the SAME
+//      SWEEP ON THE DMA ENGINES (USART4 transmits on channel 1, receives on
+//      8): 8192 frames at each rate to 3 Mbaud, every byte judged in
+//      sequence, the vectors counted; full duplex at 3 Mbaud on both
 //   l  (y) the frame matrix across the wire: 8N1, 8E1, 8O1, 7E1, 7O1, 9N1,
 //      8N2, and half and one-and-a-half stop bits - each echoed, and the
 //      two odd stops timed as frames of 9.5 and 10.5 bits
@@ -67,6 +71,15 @@
 //      at both lengths
 //   p  (y) half duplex on PB0 hearing a frame the peer drives onto that
 //      wire from its RX pad (drive_rxd)
+//   q  (y) the error flags' clear under a receive channel: a parity error
+//      from the far chip stands in STATR though the channel read DATAR; a
+//      STATR read arms the clear and the channel's next read performs it
+//   r  (y) the priority rule: 8192 frames at 3 Mbaud into the engined ring
+//      at very_high while 2 KB copies run back to back on a lower channel
+//      at low - and the control, the ring told to rank low
+//   s  (y) the transmit engine's blast: 4096 frames through the ring of
+//      256, timed by the far chip against the polled blast, each rate to
+//      3 Mbaud, the completion's body timed
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter and
@@ -81,6 +94,7 @@
 #include "ch32x035/afio.hpp"
 #include "ch32x035/clock.hpp"
 #include "ch32x035/delay.hpp"
+#include "ch32x035/dma.hpp"
 #include "ch32x035/pfic.hpp"
 #include "ch32x035/pin.hpp"
 #include "ch32x035/platform.hpp"
@@ -104,6 +118,23 @@ using Serial = Uart<2, P>;
 constexpr Serial serial;
 
 using Loop = Uart<4, P>;                 // PB0 TX, PB1 RX
+// The same instance on both DMA engines: USART4 transmits on channel 1 and
+// receives on channel 8 (ch32x035/dma_engine.hpp's table), the receive
+// ring at very_high (the transport's default) - and the control of letter
+// r, the ring told to rank LOW.
+using Engined = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>>;
+using EnginedLow = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>, 0,
+                        UartOptions{.rx_priority = DmaPriority::low}>;
+/// Which transport owns USART4 and its two channels: the vectors serve it.
+enum class U4Owner : uint8_t { irq, engined, engined_low };
+volatile U4Owner u4_owner = U4Owner::irq;
+volatile uint32_t u4_entries = 0;
+volatile uint32_t dma_entries = 0;
+volatile uint32_t dma_body_sum = 0;   ///< cycles inside Engined::dma_isr(), summed
+volatile uint32_t dma_body_max = 0;
+/// Letter r's load: memory-to-memory blocks on channel 5 - a LOWER number
+/// than the ring's 8 - at the copy engine's default level, polled.
+using CopyLoad = DmaCopyEngine<5>;
 using Tx4 = Pin<'B', 0>;
 using Rx4 = Pin<'B', 1>;
 using U4 = Usart<4>;
@@ -710,6 +741,7 @@ struct Calib {
     bool ok = false;
     int16_t ppm = 0;
     uint32_t span = 0;
+    uint32_t blocks = 0;   ///< the transmit engine's blocks (engined_calibrate)
 };
 
 Calib calibrate(const link::Cfg& c, uint16_t n) {
@@ -924,6 +956,162 @@ void tj_link() {
 }
 
 // ---------------------------------------------------------------------------
+// The engined transport across the wire (letters k and r)
+// ---------------------------------------------------------------------------
+/// What a gapless run into a transport left: the bytes in order before the
+/// first wrong one, and the transport's and the vectors' counts.
+struct Stream {
+    bool up = false;
+    uint16_t got = 0;
+    uint8_t wrong = 0;
+    uint16_t ore = 0;
+    uint16_t overruns = 0;
+    uint16_t faults = 0;
+    uint16_t fe = 0;
+    uint16_t torn = 0;     ///< consume() answering that a held run was written over
+    uint32_t skips = 0;
+    uint32_t u4 = 0;       ///< USART4 vector entries
+    uint32_t dma = 0;      ///< channel 1 and 8 vector entries
+    uint32_t copies = 0;   ///< letter r's blocks
+
+    bool clean(uint16_t n) const {
+        return up && got == n && ore == 0u && overruns == 0u && faults == 0u && torn == 0u && skips == 0u;
+    }
+};
+
+/// The far chip blasts `n` counting frames at `rate` into transport `L`; the
+/// consumer takes RUNS (read_span, consume) and judges every byte in
+/// sequence. With `load`, memory-to-memory blocks of 2 KB run back to back
+/// on CopyLoad all the while.
+alignas(4) uint32_t load_a[512];
+alignas(4) uint32_t load_b[512];
+
+template <typename L, bool load>
+Stream engined_stream(uint32_t rate, uint16_t n) {
+    Stream st{};
+    link::Cfg c{};
+    c.rate = rate;
+    link::Params a{};
+    a.cfg = c;
+    a.count = n;
+    a.ms = bound_ms(rate, 2u * n);
+    a.value = 0x30;
+    a.pattern = link::pattern_counting;
+    const bool acted = peer_act(link::Op::blast, a);
+    u4_owner = L::options.rx_priority == DmaPriority::very_high ? U4Owner::engined : U4Owner::engined_low;
+    st.up = acted && L::init(clock, rate);
+    (void)Rx4::input(PinPull::up);
+    L::clear_errors();
+    const uint32_t skips0 = L::rx_skips();
+    u4_entries = 0;
+    dma_entries = 0;
+    if constexpr (load) {
+        CopyLoad::arm(DmaPriority::low, false);
+    }
+    bool broken = false;
+    const uint32_t ms = static_cast<uint32_t>(10ull * n * 1000u / rate) * 2u + 60u;
+    const uint32_t t1 = Ticker::ticks();
+    while (st.got < n && !broken && Ticker::ticks() - t1 < ms) {
+        if constexpr (load) {
+            if (!CopyLoad::busy()) {
+                (void)CopyLoad::copy(load_b, load_a, 512u);
+                ++st.copies;
+            }
+        }
+        const std::span<const uint8_t> run = L::read_span();
+        uint32_t k = 0;
+        for (const uint8_t b : run) {
+            if (b != static_cast<uint8_t>(0x30u + st.got)) {
+                st.wrong = b;
+                broken = true;
+                break;
+            }
+            ++st.got;
+            ++k;
+        }
+        if (!L::consume(k)) {
+            ++st.torn;
+        }
+    }
+    if constexpr (load) {
+        while (CopyLoad::busy()) {
+        }
+    }
+    st.ore = L::hw_overruns();
+    st.overruns = L::rx_overruns();
+    st.faults = L::dma_faults();
+    st.fe = L::frame_errors();
+    st.skips = L::rx_skips() - skips0;
+    st.u4 = u4_entries;
+    st.dma = dma_entries;
+    L::release();
+    u4_owner = U4Owner::irq;
+    link::Report r{};
+    (void)peer_report(r, 5);
+    print(serial, "  ", n, " frames at ", rate, " into the engined ring", load ? " beside the copies" : "", ": ", st.got,
+          " in order");
+    if (st.got != n) {
+        print(serial, " (then ", hex(st.wrong), ")");
+    }
+    print(serial, ", ORE ", st.ore, ", laps lost ", st.overruns, ", torn ", st.torn, ", skips ", st.skips,
+          ", given up ", st.faults, "; vectors: USART4 ", st.u4, ", DMA ", st.dma);
+    if constexpr (load) {
+        print(serial, "; ", st.copies, " copies of 2 KB");
+    }
+    print(serial, crlf);
+    return st;
+}
+
+/// One calibrate leg with the DUT's frames from the TRANSMIT ENGINE: `n`
+/// bytes poured through write_bulk() into the ring of 256, the engine
+/// draining it block by block.
+Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
+    Calib k{};
+    link::Params a{};
+    a.cfg = c;
+    a.count = n;
+    a.ms = bound_ms(c.rate, n);
+    if (!peer_act(link::Op::calibrate, a)) {
+        return k;
+    }
+    u4_owner = U4Owner::engined;
+    const bool up = Engined::init(clock, c.rate);
+    (void)Rx4::input(PinPull::up);
+    wait_for_peer_window();
+    uint8_t chunk[64];
+    for (uint8_t i = 0; i < 64u; ++i) {
+        chunk[i] = static_cast<uint8_t>(0x55u + i);
+    }
+    uint32_t queued = 0;
+    dma_entries = 0;
+    dma_body_sum = 0;
+    dma_body_max = 0;
+    const uint32_t t0 = Ticker::ticks();
+    while (up && queued < n && Ticker::ticks() - t0 < 200u) {
+        const uint32_t want = n - queued < 64u ? n - queued : 64u;
+        queued += Engined::write_bulk(std::span<const uint8_t>(chunk, want));
+    }
+    while (!Engined::tx_idle() && Ticker::ticks() - t0 < 300u) {
+    }
+    const uint16_t faults = Engined::dma_faults();
+    k.blocks = dma_entries;
+    Engined::release();
+    u4_owner = U4Owner::irq;
+    link::Report r{};
+    if (!peer_report(r, 5) || leg_refused) {
+        return k;
+    }
+    k.ok = up && faults == 0u && r.count == n && r.span != 0u && r.ferr == 0u && r.ovf == 0u;
+    if (!k.ok) {
+        print(serial, "    engined calibrate at ", c.rate, ": the peer counted ", r.count, " of ", n, ", ferr ", r.ferr,
+              " ovf ", r.ovf, " span ", r.span, ", faults ", faults, crlf);
+    }
+    k.ppm = static_cast<int16_t>(r.aux16);
+    k.span = r.span;
+    return k;
+}
+
+// ---------------------------------------------------------------------------
 // k - the rates across the wire
 // ---------------------------------------------------------------------------
 uint16_t echo_mismatches(uint16_t n, uint16_t mask) {
@@ -1124,6 +1312,75 @@ void tk_rates() {
         }
     }
     print(serial, "  the transport's sustained receive: clean up to ", ceiling, " baud", crlf);
+
+    // ---- THE SAME LETTER ON THE ENGINES ------------------------------------
+    // Sustained runs of 8192 frames into the engined transport, every byte
+    // judged in sequence, at every rate the interrupt transport was swept
+    // at - 3 Mbaud is a divisor of 16 at 48 MHz on both chips, the wire's
+    // ceiling here.
+    uint32_t engine_ceiling = 0;
+    bool engine_clean = true;
+    for (const uint32_t rate : sweep) {
+        const Stream st = engined_stream<Engined, false>(rate, 8192);
+        engine_clean = engine_clean && st.clean(8192);
+        if (engine_clean) {
+            engine_ceiling = rate;
+        }
+        if (rate == 3'000'000u) {
+            judge("3000000 baud: a gapless run of 8192 into the transport ON ITS ENGINES, every byte in order, "
+                  "no skip, no overrun",
+                  st.clean(8192));
+            judge("  and two USART interrupts a burst, the ring's two marks a lap: no interrupt a byte",
+                  st.up && st.u4 <= 8u && st.dma <= 2u * (8192u / 512u) + 4u);
+        }
+    }
+    print(serial, "  the engined transport's sustained receive: clean up to ", engine_ceiling, " baud", crlf);
+
+    // Full duplex at 3 Mbaud through both engines: the far chip echoes 256
+    // bytes the transmit engine sends, back into the receive ring.
+    {
+        link::Cfg c{};
+        c.rate = 3'000'000;
+        link::Params a{};
+        a.cfg = c;
+        a.count = 256;
+        a.ms = bound_ms(c.rate, 512);
+        const bool acted = peer_act(link::Op::echo, a);
+        u4_owner = U4Owner::engined;
+        const bool up = acted && Engined::init(clock, c.rate);
+        (void)Rx4::input(PinPull::up);
+        wait_for_peer_window();
+        Engined::clear_errors();
+        uint8_t out[256];
+        for (uint16_t i = 0; i < 256u; ++i) {
+            out[i] = static_cast<uint8_t>(0x5Au + i * 37u);
+        }
+        uint32_t queued = 0;
+        uint16_t got = 0;
+        uint16_t same = 0;
+        const uint32_t t0 = Ticker::ticks();
+        while (got < 256u && Ticker::ticks() - t0 < 50u) {
+            if (queued < 256u) {
+                queued += Engined::write_bulk(std::span<const uint8_t>(out + queued, 256u - queued));
+            }
+            const std::span<const uint8_t> run = Engined::read_span();
+            for (const uint8_t b : run) {
+                same = static_cast<uint16_t>(same + (b == out[got] ? 1u : 0u));
+                ++got;
+            }
+            (void)Engined::consume(static_cast<uint32_t>(run.size()));
+        }
+        const uint16_t ore = Engined::hw_overruns();
+        Engined::release();
+        u4_owner = U4Owner::irq;
+        link::Report r{};
+        (void)peer_report(r, 5);
+        print(serial, "  full duplex at 3 Mbaud on the engines: ", same, " of 256 back equal, ORE ", ore,
+              "; the far chip received ", r.count, crlf);
+        judge("3000000 baud: full duplex on both engines, 256 bytes sent and every one echoed back equal",
+              up && same == 256u && ore == 0u);
+    }
+
     (void)link_command_mode();
 }
 
@@ -1559,6 +1816,176 @@ void tp_half_duplex_wire() {
 
 
 
+// ---------------------------------------------------------------------------
+// q - the error flags' clear under a receive channel
+// ---------------------------------------------------------------------------
+/// The far chip's two 8N2 frames 0x03 and 0x04 into a receiver set for 8E1:
+/// the peer's first stop bit lands where the receiver samples parity, so a byte
+/// with an even count of ones (0x03) is a parity error and one with an odd
+/// count (0x04) is clean. Channel 8 takes both from DATAR; `status_between`
+/// reads STATR once the first is taken. Answers STATR's PE after the first
+/// (when asked) and after the second, and whether both bytes landed.
+struct ClearCase {
+    bool ran = false;
+    bool pe_after_first = false;
+    bool pe_after_second = false;
+    bool data_ok = false;
+};
+
+ClearCase clear_case(bool status_between) {
+    ClearCase cc{};
+    using Rx8 = DmaRxEngine<8>;
+    link::Cfg c{};
+    c.rate = 115200;
+    // Two stop bits from the peer: the first is the receiver's parity bit,
+    // the second its stop bit - the peer's frames follow each other with
+    // no idle between (its gap is counted from TXE, a frame early), and
+    // with one stop bit the next start would land in the receiver's stop.
+    c.stop = 2;
+    link::Params a{};
+    a.cfg = c;
+    a.count = 2;
+    a.value = 0x03;
+    a.pattern = link::pattern_counting;
+    a.ms = 200;
+    if (!peer_act(link::Op::send, a)) {
+        return cc;
+    }
+    if (!u4_open(UartFormat{UartBits::eight, UartParity::even, UartStop::one}, c.rate)) {
+        return cc;
+    }
+    (void)Rx4::input(PinPull::up);
+    u4_flush();
+    static uint8_t got[2];
+    got[0] = 0;
+    got[1] = 0;
+    Rx8::arm(&U4::regs().DATAR, 0u);
+    (void)Rx8::start(std::span<uint8_t>(got, 2));
+    U4::dma_receive(true);
+    const uint32_t t0 = Ticker::ticks();
+    while (Rx8::remaining() > 1u && Ticker::ticks() - t0 < 100u) {
+    }
+    if (status_between) {
+        cc.pe_after_first = (U4::status() & usart_pe) != 0u;
+    }
+    while (Rx8::remaining() > 0u && Ticker::ticks() - t0 < 100u) {
+    }
+    (void)delay_us(clock, 50);
+    cc.pe_after_second = (U4::status() & usart_pe) != 0u;
+    __asm__ volatile("" ::: "memory");   // the channel wrote got[] behind the compiler's back
+    cc.data_ok = Rx8::remaining() == 0u && got[0] == 0x03u && got[1] == 0x04u;
+    if (!cc.data_ok) {
+        print(serial, "    the channel's two bytes: ", hex(got[0]), " ", hex(got[1]), ", CNTR ", Rx8::remaining(), crlf);
+    }
+    cc.ran = true;
+    U4::dma_receive(false);
+    Rx8::stop();
+    U4::reset();
+    U4::bus_clock(false);
+    link::Report r{};
+    (void)peer_report(r, 5);
+    return cc;
+}
+
+void tq_clear_under_dma() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        return;
+    }
+    const ClearCase asked = clear_case(true);
+    const ClearCase unasked = clear_case(false);
+    print(serial, "  status read between: PE after the first ", asked.pe_after_first, ", after the second ",
+          asked.pe_after_second, "; no status read between: PE after the second ", unasked.pe_after_second,
+          "; data ", asked.data_ok, unasked.data_ok, crlf);
+    judge("the channel took both frames, 0x03 and 0x04, each time", asked.ran && unasked.ran && asked.data_ok &&
+                                                                         unasked.data_ok);
+    judge("the parity error stands in STATR after its frame, though the channel read DATAR",
+          asked.pe_after_first);
+    judge("a STATR read ARMS the clear and the CHANNEL'S next DATAR read performs it: PE down after the clean "
+          "second frame",
+          !asked.pe_after_second);
+    judge("with no status read since, the channel's read clears nothing: PE still up after the second frame",
+          unasked.pe_after_second);
+    (void)link_command_mode();
+}
+
+// ---------------------------------------------------------------------------
+// r - the priority rule under load
+// ---------------------------------------------------------------------------
+void tr_priority_load() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        return;
+    }
+    for (uint16_t i = 0; i < 512u; ++i) {
+        load_a[i] = i * 0x01010101u;
+    }
+    // THE RULE: the ring at very_high on channel 8, the copies at low on
+    // channel 5 - a lower number, which would win a tie.
+    const Stream high = engined_stream<Engined, true>(3'000'000, 8192);
+    // THE CONTROL: the ring told to rank low - the tie, the copy's lower
+    // number winning it. A block of 512 words is some 3 000 cycles, nineteen
+    // frames at 3 Mbaud, against DATAR's one.
+    const Stream low = engined_stream<EnginedLow, true>(3'000'000, 8192);
+    judge("the ring at very_high beside back-to-back copies on a lower channel: 8192 frames at 3 Mbaud, every "
+          "byte in order, nothing lost",
+          high.clean(8192) && high.copies > 10u);
+    judge("THE CONTROL, the ring ranked low: the copies starve it - the run broken or bytes lost",
+          low.up && (low.got != 8192u || low.ore != 0u || low.skips != 0u || low.faults != 0u));
+    (void)link_command_mode();
+}
+
+// ---------------------------------------------------------------------------
+// s - the transmit engine's blast
+// ---------------------------------------------------------------------------
+void ts_tx_engine() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        return;
+    }
+    // 4096 frames through the ring of 256, the engine draining it block by
+    // block - each block started from the last one's completion - timed by
+    // the far receiver against the polled blast taken back to back (a frame
+    // ahead of the shifter, gapless by construction).
+    static constexpr uint32_t rates[] = {1'000'000, 1'500'000, 2'000'000, 2'400'000, 3'000'000};
+    for (const uint32_t rate : rates) {
+        link::Cfg c{};
+        c.rate = rate;
+        const Calib ref = calibrate(c, 4096);
+        const Calib eng = engined_calibrate(c, 4096);
+        // The span difference in this chip's cycles: the peer counts ticks
+        // of 24 MHz, two HCLK cycles of a 48 MHz clock.
+        const int32_t gap_ticks = static_cast<int32_t>(eng.span) - static_cast<int32_t>(ref.span);
+        const int32_t per_block = eng.blocks != 0u ? 2 * gap_ticks / static_cast<int32_t>(eng.blocks) : 0;
+        print(serial, "  ", rate, ": the transmit engine's 4096 frames in ", eng.blocks, " blocks span ", eng.span,
+              " ticks against the polled blast's ", ref.span, " (");
+        print_ppm(eng.ppm - ref.ppm);
+        print(serial, "), ", per_block < 0 ? "-" : "", static_cast<uint32_t>(per_block < 0 ? -per_block : per_block),
+              " cycles a block, a frame being ", 10u * usart_divisor(SysClock::hz, rate), "; the completion's body ",
+              eng.blocks != 0u ? dma_body_sum / eng.blocks : 0u, " cycles (", dma_body_max, " at most)", crlf);
+        const uint32_t frame = 10u * usart_divisor(SysClock::hz, rate);
+        const uint32_t body = eng.blocks != 0u ? dma_body_sum / eng.blocks : 0u;
+        if (rate <= 1'500'000u) {
+            // The completion's whole round trip - the vector's entry and
+            // exit (100 to 104 cycles, docs/ch32x035/platform.md) and this
+            // body - inside what the shifter still holds when the block's
+            // last item lands (measured: no idle up to 1.5 Mbaud, a frame of
+            // 320 cycles): the next block is in before it runs dry.
+            judge(num(rate), " baud: the transmit engine's blast is gapless - 4096 frames within 500 ppm of the "
+                  "polled blast's span",
+                  ref.ok && eng.ok && near(eng.ppm, ref.ppm, 500));
+        } else {
+            // Above it, each block boundary idles the line for what the
+            // restart takes beyond the frame the shifter still holds - and
+            // for no more.
+            judge(num(rate), " baud: every frame through the engine, the line idle at a block boundary for no "
+                  "more than the completion's restart less one frame",
+                  ref.ok && eng.ok && per_block >= 0 && static_cast<uint32_t>(per_block) <= body + 104u - frame);
+        }
+    }
+    (void)link_command_mode();
+}
+
 /// The supply as the voltage detector read it at boot (main()).
 bool supply_ok = true;
 
@@ -1576,7 +2003,36 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 
 extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart4_handler() { (void)Loop::isr(); }
+extern "C" BRIO_CH32_INTERRUPT void usart4_handler() {
+    u4_entries = u4_entries + 1u;
+    switch (u4_owner) {
+        case U4Owner::engined: (void)Engined::isr(); break;
+        case U4Owner::engined_low: (void)EnginedLow::isr(); break;
+        default: (void)Loop::isr(); break;
+    }
+}
+
+/// USART4's two channels, 1 (transmit) and 8 (receive): the engined
+/// transport's dma_isr() serves both from one INTFR read.
+[[gnu::always_inline]] inline void usart4_dma() {
+    dma_entries = dma_entries + 1u;
+    if (u4_owner == U4Owner::engined) {
+        // The body timed on the STK's own counter (one load each side):
+        // what a block boundary costs between the entry and the mret.
+        const uint32_t t0 = brio::stk()->CNTL;
+        (void)Engined::dma_isr();
+        const uint32_t t1 = brio::stk()->CNTL;
+        const uint32_t d = t1 >= t0 ? t1 - t0 : t1 + brio::stk()->CMPLR + 1u - t0;
+        dma_body_sum = dma_body_sum + d;
+        if (d > dma_body_max) {
+            dma_body_max = d;
+        }
+    } else if (u4_owner == U4Owner::engined_low) {
+        (void)EnginedLow::dma_isr();
+    }
+}
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { usart4_dma(); }
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { usart4_dma(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -1603,6 +2059,9 @@ int main() {
     bench.second_letter('n', "the peer's engine shapes", tn_shapes);
     bench.second_letter('o', "mute, IrDA and LIN on a wire", to_modes);
     bench.second_letter('p', "half duplex hearing a second chip", tp_half_duplex_wire);
+    bench.second_letter('q', "the error flags' clear under a receive channel", tq_clear_under_dma);
+    bench.second_letter('r', "the priority rule: the engined ring beside copies, at 3 Mbaud", tr_priority_load);
+    bench.second_letter('s', "the transmit engine's blast, timed by the far chip", ts_tx_engine);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "HSI48" : "FAILED", " tick=",

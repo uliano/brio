@@ -41,17 +41,18 @@ One document per peripheral driver is the shape
 | Driver | State |
 |--------|-------|
 | [device.hpp](../../brio/ch32x035/device.hpp) + [parts/](../../brio/ch32x035/parts/) | the register map and the part table: the seven parts, each with its memories, its package, the pads it bonds and the pads it SHORTS together inside (the datasheet's notes 4 to 7), the USARTs it offers beside the model table's count, and what else it carries; RCC, GPIO, AFIO, the USART and the core's STK and PFIC mapped for the drivers, the EXTI and PWR mapped for the reader, the flash interface's option bytes and the electronic signature decoded READ-ONLY; the interrupt numbers are the vector table's word indices |
-| [platform.md](platform.md) | Platform: `Ch32x035Platform` (the `csrrci` critical section, the WFE-shaped `idle()`, `ebreak`, the `.noinit` breadcrumb, the stack ledger), `Pfic` and `BRIO_CH32_INTERRUPT` with `no_icf`, the 64-bit STK `Ticker`, `delay_us`, and what the crt writes into the core - measured on the CH32X035F8U6 by `test_x035_platform` (51 verdicts): the WFE idle entered unmasked and the latch its wake leaves consumed - no edge position of 600 losing the wake or serving it a tick late, one kernel turn per tick where the unconsumed latch gave two (at 48 MHz and at 8 MHz), the STK's compare and its CNT arithmetic within 30 ppm of the interrupt count over 200 reloads, `delay_us` 112 to 124 cycles late and never early, an interrupt round trip of 100 to 104 cycles at 48 MHz with the hardware prologue, corecfgr's 0x1F making a timed loop 7.3 per cent SLOWER, INTSYSCR and mtvec as the crt wrote them and an MPP no MRET changes, and the reset flags, the signature and the chip-identifier word read at boot |
+| [platform.md](platform.md) | Platform: `Ch32x035Platform` (the `csrrci` critical section, the WFE-shaped `idle()` that does not sleep over a working DMA channel, `ebreak`, the `.noinit` breadcrumb, the stack ledger), `Pfic` and `BRIO_CH32_INTERRUPT` with `no_icf`, the 64-bit STK `Ticker`, `delay_us`, and what the crt writes into the core - measured on the CH32X035F8U6 by `test_x035_platform` (51 verdicts): the WFE idle entered unmasked and the latch its wake leaves consumed - no edge position of 600 losing the wake or serving it a tick late, one kernel turn per tick where the unconsumed latch gave two (at 48 MHz and at 8 MHz), the STK's compare and its CNT arithmetic within 30 ppm of the interrupt count over 200 reloads, `delay_us` 112 to 124 cycles late and never early, an interrupt round trip of 100 to 104 cycles at 48 MHz with the hardware prologue, corecfgr's 0x1F making a timed loop 7.3 per cent SLOWER, INTSYSCR and mtvec as the crt wrote them and an MPP no MRET changes, and the reset flags, the signature and the chip-identifier word read at boot |
 | [clock.md](clock.md) | RCC: ONE root (the 48 MHz HSI) and ONE divider (HPRE, /6 out of reset), the user trim, the flash's wait states sequenced around every change, the clock output on PB9 where the package bonds it, the gates, the resets and the reset flags; `Clock<internal, hz>` and `DynamicClock<Boot, Users...>` - measured on the CH32X035F8U6 by `test_x035_clock` (21 verdicts): the whole HPRE ladder from 48 MHz down to 3 MHz and back with the tick, a busy-wait and the console exact at every rung and nothing of the tree written but HPRE and the wait states, the trim a step each way and, against the desk's CH32V006K8U6 crystal, the HSI at -0.25 per cent and the trim's step at 116 to 118 kHz on average from 7 to 28, RCC_AHBPCENR's reset value, fifteen gates opened and closed; RMVF a LEVEL, and the power controller's reset line refused after a pulse on it cut the part off its debug port |
 | [pwr.md](pwr.md) | PWR: the programmable voltage detector alone - PLS's four thresholds and PVD0, no enable bit - the check every image that drives a link pad makes at boot (3.0 V), reading "not low" on the CH32X035F8U6's 3.3 V rail |
 | [pin.md](pin.md) | GPIO and AFIO: the F1's nibble with NO speed and NO open-drain output, 24 pins a port over THREE configuration registers, CFGHR written whole from a RAM copy as WCH's library does it, BSHR and BSXR for the two halves of a port, the pull in the output register and a pull-down on PA0..PA15, PC16 and PC17 alone, the bonding and the shorted pads refused at compile time, the one-way lock; the remap fields of AFIO_PCFR1 with the USARTs' columns as data, the debug port's field read and written only by a verb nobody reaches by accident, the EXTI port multiplexer - measured on the CH32X035F8U6 by `test_x035_pin` (19 verdicts in `z`, two more on its jumper): every nibble in each of the three registers, CFGHR reading back what its copy wrote on a die the vendor's caution is not for, the levels, BSXR on PC14, the pulls, a remap field, the debug port's field and the EXTI multiplexer's three codes, and the levels across a jumper; a port read through its shut gate answering with the last word the bus carried |
-| [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface, its engine slots taking the empty tag alone - measured on the CH32X035F8U6 by `test_x035_usart` (23 verdicts single-board, 66 against the desk's CH32V006K8U6 on its crystal across USART4's PB0/PB1): the divisor in HCLK, every frame and mode register by register, a frame's length and the break's timed, the debug port's column refused, half duplex deaf to its own frames and hearing a second chip's; across the wire every rate from 115200 to 3 Mbaud echoed and timed by the far receiver within 500 ppm of HSI / BRR, nine frame formats with half and one-and-a-half stop bits, PE, FE onset, glitches, ORE and the break from a crystal sender, mute woken both ways, IrDA, LIN's two detection lengths, and the transport's sustained receive clean to 2 Mbaud, its ceiling measured above it |
+| [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface and a DMA engine in either slot, checked against the request table, the receive ring at `rx_priority`, the block reset in `release()` - measured on the CH32X035F8U6 by `test_x035_usart` (23 verdicts single-board, 80 against the desk's CH32V006K8U6 on its crystal across USART4's PB0/PB1): the divisor in HCLK, every frame and mode register by register, a frame's length and the break's timed, the debug port's column refused, half duplex deaf to its own frames and hearing a second chip's; across the wire every rate from 115200 to 3 Mbaud echoed and timed by the far receiver within 500 ppm of HSI / BRR, nine frame formats with half and one-and-a-half stop bits, PE, FE onset, glitches, ORE and the break from a crystal sender, mute woken both ways, IrDA, LIN's two detection lengths; the interrupt transport's sustained receive clean to 2 Mbaud and ON ITS ENGINES 8192 frames clean at every rate to 3 Mbaud, the wire's ceiling, two interrupts a burst and two a lap; the error flags' clear performed by the channel's read, the ring at very_high kept beside copies on a lower channel that starve it ranked low, and the transmit engine gapless to 1.5 Mbaud, its block boundary's idle above that explained by the restart's 372 cycles |
+| [dma.md](dma.md) | The DMA controller: eight channels where the channel is the request, the request table per part as the transports' check, the engines in two moments (five stores a block, six for the copy) - `DmaTxEngine`, `DmaRxEngine` with its circular ring, `DmaCopyEngine` - the levels by the rule - measured on the CH32X035F8U6 by `test_x035_dma` (52 verdicts, its own console on two engines): three widths at six cycles an item, EN standing after a block and a PADDR stored under it dropped, the eight vectors (the eighth at 44), no hole raising TEIF, circular laps paced by a USART, the arbiter strict, a raised request HELD until the block's reset, THE CONTROLLER IDLE IN SLEEP, and the benchmark row |
 | [vendor/README.md](vendor/README.md) | The documents of record with their revisions - the reference manual V1.8, the datasheet V1.7, the QingKe V4 manual, the probe's manual, and the EVT package as the vendor's only voice on quirks; the no-errata statement; where the documents disagree, and which of those items the CH32X035F8U6 has answered |
 
 [afio.hpp](../../brio/ch32x035/afio.hpp) and
 [dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp) have no document
 of their own: the first is [pin.md](pin.md)'s second half, the second
-the empty engine slot and the request channels [usart.md](usart.md)
+the request table and the engine slot's vocabulary [dma.md](dma.md)
 names.
 
 ## Toolchain
@@ -115,8 +116,8 @@ that speaks the probe's SDI transport. Its `wch-riscv.cfg` selects the
 and a flash bank at address 0 whose size is 0 - found by probing the
 chip - and its binary carries a `ch32x` flash driver and the names
 CH32X033, CH32X034 and CH32X035. It programs and verifies the
-CH32X035F8U6 through a WCH-LinkE: every image the four suites ran from
-was written that way.
+CH32X035F8U6 through a WCH-LinkE: every image the suites ran from was
+written that way.
 
 The upload target and `brio flash` both write the image with
 `program ... verify` and start it with `reset halt` followed by
@@ -222,9 +223,9 @@ next section, and what is still owed the list at the end of this page.
 
 ## What the silicon taught the stratum
 
-What the CH32X035F8U6 answered on WCH's evaluation board - the four
-suites' `z`, each green whole, and a read over the debug port; the
-numbers are each document's bench findings.
+What the CH32X035F8U6 answered on WCH's evaluation board - the suites'
+`z` and the USART suite's `y`, each green whole, and a read over the
+debug port; the numbers are each document's bench findings.
 
 - **RMVF is a level, not a pulse.** Written 1 it reads back 1 -
   RCC_RSTSCKR read 0x01000000 once the flags had cleared - where the
@@ -278,6 +279,22 @@ numbers are each document's bench findings.
   the latch left set, as the CH32V203's V4B did - the form the sibling
   strata use because the CH32V00x's WFI does not wake for an interrupt
   its core cannot take ([platform.md](platform.md)).
+- **In the Sleep the DMA controller moves nothing.** RM 2.3.2 keeps the
+  peripherals running in it, and USART3's transmitter kept asking: a copy
+  started before a sleep stood still until the core woke, and a block
+  paced at 1 Mbaud ran at a fiftieth of its pace - the CH32V203's and the
+  CH32V303's answer. The platform's `idle()` does not sleep while a
+  channel works, so a program with an engine at work - a receive ring
+  above all - holds itself awake ([dma.md](dma.md),
+  [platform.md](platform.md)).
+- **A raised DMA request is held** until the channel takes it or the
+  block's reset line is pulsed - its DMA enable, its enable and a closed
+  gate notwithstanding - and the next owner of the channel takes one
+  stray item: the release contract's case, which the `Uart`'s `release()`
+  answers ([dma.md](dma.md)).
+- **A PADDR stored with EN standing is dropped**, and EN stands after
+  every completed block: the copy engine stores its source after the
+  restart's disable ([dma.md](dma.md)).
 - **Where the suites reached it, the documents' word held**: the USB
   blocks' gates open out of reset (RCC_AHBPCENR 0x00021004), the three
   configuration registers and BSXR, the EXTI multiplexer's 00, 10 and
@@ -301,10 +318,6 @@ Driver gaps, each with its reason:
   1024 is the only wake a Stop or a Standby has, and a sleep site is
   born with it as its wake; until then `idle()` is the plain Sleep and
   nothing in the stratum sets SLEEPDEEP.
-- **The DMA (RM ch. 9)**: born with its first user. The USART's engine
-  slots take `NoDmaEngine` alone, and the channel each USART direction
-  requests on is stated beside it
-  ([dma_engine.hpp](../../brio/ch32x035/dma_engine.hpp)).
 - **The external interrupts (RM 7.4)**: the six EXTI registers are
   mapped and AFIO's port multiplexer has its verbs ([pin.md](pin.md));
   an `ExtInt` is born with its first user.
@@ -351,7 +364,7 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **What the four suites have not measured**, each in its document's
+- **What the suites have not measured**, each in its document's
   list with what would measure it: what the hardware prologue buys (the
   platform suite's letter `e` in an image built without it), the clock
   output's waveform (a package that bonds PB9, and a counter), the reset
