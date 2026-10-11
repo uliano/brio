@@ -261,6 +261,44 @@ saw the void write's address in fifteen and missed it once, which ended
 on that address's own NACK. The price of the order is the refusal's:
 one void write on the wire; an acknowledged tenure pays nothing for it.
 
+### This part as the desk's instrument: `twi_peer`
+
+`twi_peer` (ch32v00x/src/apps/twi_peer.cpp) is the CH32V006's peer on
+the twi_link protocol, kind 0x06, on I2C1's column 3 - SCL PB5, SDA PB6,
+the desk's I2C wires to the CH32X035, whose PB3 holds the pull-ups. Its
+target is POLLED: `I2cClient::init()` raises the three enables and the
+two PFIC lines, and the program takes them down again behind it; its
+host action is the instance's role switch. Against the CH32X035's
+`test_x035_i2c` - every one of its 81 verdicts, twice - it answered 372
+commands with no nak and no vector entered while it was polled, and
+showed the habits of this block as a target, each measured from the far
+end:
+
+- **A target transmitter is asked for one byte more than the controller
+  takes**: at the closing NACK of a read a byte stands in DATAR, never
+  clocked out; the peer drops it with a PE cycle (ACK raised again after)
+  and its tally gives it back - 623 such drops over the runs, and no byte
+  of a later read out of its place.
+- **The stretch is one byte late**: a 2 ms hold before every byte of an
+  8-byte write lengthened the far host's tenure by seven holds, the
+  address's and the first six bytes', the last two falling after the
+  tenure - the block acknowledges the byte in its shifter and holds SCL
+  only after it.
+- **The refusal is a bit set in advance, and it stays**: with the
+  acknowledge cleared for a refused byte, the far host's next probe of
+  the same address inside the action's window was refused too
+  (`i2c_nack_addr`); the action's deadline and the command-mode re-init
+  behind it put ACK back.
+- **Deaf is a re-init** at `deaf_addr`: the far host's write and probe
+  answered `i2c_nack_addr`.
+- **The host action watches the pads**: its start() run on the STOP that
+  closes the far host's hand-made window, the wired-AND decided both ways
+  (0x2C over 0x6B, 0x11 over 0x2C), each end reporting the loss it saw;
+  and addressing the far board's client, it wrote six bytes byte-exact.
+- **The stuck line** is taken after forty microseconds of quiet wire and
+  let go after the falling edges asked: the far host's `unstick()` counted
+  four.
+
 ### The host's cost (bench_ch32_i2c, letter i)
 
 The benchmark's I2C letter has an image of its own, `bench_ch32_i2c`:
@@ -350,13 +388,16 @@ Implemented but not bench-verified, each with what would measure it:
   and the arbiter are the same code on the same registers, and the
   wire letters around it run green on the CH32V003.
 - Every wire letter against this desk's partner: the bus's partner is a
-  CH32X035 running `twi_peer` on this part's column 3 (PB5 SCL, PB6
-  SDA), its pull-ups hung from that chip's PB3; the peer is born with
-  that stratum's I2C driver, and the scan, the tenure shapes, the
-  stretching, the speeds on the wire, the arbiter's held lines and
-  `unstick()` are re-measured there.
-- The client side against a foreign host: the peer's host half (its
-  `arb` and `coll` commands) addressing this instance.
+  CH32X035 on this part's column 3 (PB5 SCL, PB6 SDA), its pull-ups hung
+  from that chip's PB3, and its I2C driver is written
+  ([../ch32x035/i2c.md](../ch32x035/i2c.md)); a `twi_peer` of that
+  stratum, with `test_ch32_i2c` pointed at column 3, is what re-measures
+  the scan, the tenure shapes, the stretching, the speeds on the wire,
+  the arbiter's held lines and `unstick()` there.
+- The client's ISR bodies against a foreign host: the client's polled
+  surface serves a foreign host in `twi_peer` (above); `service()` and
+  `error_service()` bound to the two vectors are what an image serving
+  the client from its vectors would measure.
 - A START into a wire ANOTHER HOST is clocking: ARLO is measured only
   against a held SDA; what the START puts on a live wire wants the
   peer's `arb` race and a scope.

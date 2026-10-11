@@ -46,6 +46,7 @@ One document per peripheral driver is the shape
 | [pwr.md](pwr.md) | PWR: the programmable voltage detector alone - PLS's four thresholds and PVD0, no enable bit - the check every image that drives a link pad makes at boot (3.0 V), reading "not low" on the CH32X035F8U6's 3.3 V rail |
 | [pin.md](pin.md) | GPIO and AFIO: the F1's nibble with NO speed and NO open-drain output, 24 pins a port over THREE configuration registers, CFGHR written whole from a RAM copy as WCH's library does it, BSHR and BSXR for the two halves of a port, the pull in the output register and a pull-down on PA0..PA15, PC16 and PC17 alone, the bonding and the shorted pads refused at compile time, the one-way lock; the remap fields of AFIO_PCFR1 with the USARTs' columns as data, the debug port's field read and written only by a verb nobody reaches by accident, the EXTI port multiplexer - measured on the CH32X035F8U6 by `test_x035_pin` (19 verdicts in `z`, two more on its jumper): every nibble in each of the three registers, CFGHR reading back what its copy wrote on a die the vendor's caution is not for, the levels, BSXR on PC14, the pulls, a remap field, the debug port's field and the EXTI multiplexer's three codes, and the levels across a jumper; a port read through its shut gate answering with the last word the bus carried |
 | [usart.md](usart.md) | The four USARTs: every one a full USART counting its divisor in HCLK, and which of them a part offers read off its pins (the QFN20 offers USART2, USART3 and USART4, and no USART1); the frame, mute, LIN, half duplex, IrDA, the smartcard, the synchronous clock and the flow-control pair as the resource's verbs, the chapter's exclusions refused; the `Uart` transport with the sibling strata's surface and a DMA engine in either slot, checked against the request table, the receive ring at `rx_priority`, the block reset in `release()` - measured on the CH32X035F8U6 by `test_x035_usart` (23 verdicts single-board, 80 against the desk's CH32V006K8U6 on its crystal across USART4's PB0/PB1): the divisor in HCLK, every frame and mode register by register, a frame's length and the break's timed, the debug port's column refused, half duplex deaf to its own frames and hearing a second chip's; across the wire every rate from 115200 to 3 Mbaud echoed and timed by the far receiver within 500 ppm of HSI / BRR, nine frame formats with half and one-and-a-half stop bits, PE, FE onset, glitches, ORE and the break from a crystal sender, mute woken both ways, IrDA, LIN's two detection lengths; the interrupt transport's sustained receive clean to 2 Mbaud and ON ITS ENGINES 8192 frames clean at every rate to 3 Mbaud, the wire's ceiling, two interrupts a burst and two a lap; the error flags' clear performed by the channel's read, the ring at very_high kept beside copies on a lower channel that starve it ranked low, and the transmit engine gapless to 1.5 Mbaud, its block boundary's idle above that explained by the restart's 372 cycles |
+| [i2c.md](i2c.md) | I2C1: the F1's event machine on two vectors with no rise-time register, FREQ's 4..60 MHz window under a 48 MHz HCLK, six columns and which of them each package can use, the lot note asked of the block itself (`present()`), the host engine with the sibling strata's Request, the first two bytes in the ADDR entry, the repeated START on the last byte's TxE, engines on channels 6 and 7, the client polled or on its vectors - measured on the CH32X035F8U6 by `test_x035_i2c` (81 verdicts against the desk's CH32V006K8U6 running `twi_peer`, the bus pulled up from PB3): the block PRESENT, the scan, the shapes and the four receive procedures, the vocabulary, the rate asked at 100 and 400 kHz on the pump and on the engines, the kernel with a held SDA and a held clock, arbitration both ways and this board as a foreign host's client, the stuck bus, the repeated START against a polled CH32 target, the USB pads' pulls absent under the alternate function, and the cost - 184 cycles an entry a byte on the pump, three event entries and no DMA interrupt for an engined write of any length |
 | [dma.md](dma.md) | The DMA controller: eight channels where the channel is the request, the request table per part as the transports' check, the engines in two moments (five stores a block, six for the copy) - `DmaTxEngine`, `DmaRxEngine` with its circular ring, `DmaCopyEngine` - the levels by the rule - measured on the CH32X035F8U6 by `test_x035_dma` (52 verdicts, its own console on two engines): three widths at six cycles an item, EN standing after a block and a PADDR stored under it dropped, the eight vectors (the eighth at 44), no hole raising TEIF, circular laps paced by a USART, the arbiter strict, a raised request HELD until the block's reset, THE CONTROLLER IDLE IN SLEEP, and the benchmark row |
 | [vendor/README.md](vendor/README.md) | The documents of record with their revisions - the reference manual V1.8, the datasheet V1.7, the QingKe V4 manual, the probe's manual, and the EVT package as the vendor's only voice on quirks; the no-errata statement; where the documents disagree, and which of those items the CH32X035F8U6 has answered |
 
@@ -216,7 +217,10 @@ next section, and what is still owed the list at the end of this page.
   and 1.4.16) - "the channel 3, channel 7, channel 11, channel 15 and
   I2C functions ... are not applicable to products with a lot number
   with the penultimate bit 5 being 0". Every part of the series, and no
-  register to ask (the I2C gap below).
+  register names a lot: the I2C driver asks its block
+  (`I2c<1>::present()`, and both `init()`s refuse a block that does not
+  hold its timing, [i2c.md](i2c.md)); the ADC's four channels wait for
+  that driver.
 - **The EXTI's port codes are not the sibling families' order**:
   AFIO_EXTICR's two bits a line are 00 port A, 10 port B and 11 port C,
   with 01 reserved (8.3.2.2).
@@ -295,6 +299,22 @@ debug port; the numbers are each document's bench findings.
 - **A PADDR stored with EN standing is dropped**, and EN stands after
   every completed block: the copy engine stores its source after the
   restart's disable ([dma.md](dma.md)).
+- **The bench die has its I2C.** The lot note's question, put to the
+  block over the debug port before any code and again by the I2C suite:
+  FREQ, CKCFGR and OADDR1 hold what they are given and a START on the
+  idle bus raises SB - whatever the unreadable marking says, this lot is
+  not the one note 3 withdraws the I2C from ([i2c.md](i2c.md)).
+- **The USB pads' pull-ups do not reach the alternate function.**
+  AFIO_CTLR's 10 kOhm and 1.5 kOhm modes pull PC16 and PC17 up as pulled
+  inputs and do nothing under I2C1's open-drain alternate function: an
+  I2C on those pads wants resistors of its own, and on the evaluation
+  board they cannot go to the supply - PC17 high at power-up is the
+  loader's boot condition ([i2c.md](i2c.md)).
+- **A port's output register behind a shut gate drops a store.** The
+  same gate that makes a read meaningless swallows a write: a pad set
+  high before its port's first configuration came up driving low, and
+  `Pin::output(level)` and `Pin::input(pull)` open the gate before the
+  output-data store ([pin.md](pin.md)).
 - **Where the suites reached it, the documents' word held**: the USB
   blocks' gates open out of reset (RCC_AHBPCENR 0x00021004), the three
   configuration registers and BSXR, the EXTI multiplexer's 00, 10 and
@@ -325,15 +345,9 @@ Driver gaps, each with its reason:
   and TIM3 (RM ch. 12, 13), the amplifiers and comparators (RM
   ch. 17)**: born with their first user. The timers' remap fields are
   named in `afio.hpp`; their columns come with the driver.
-- **I2C and SPI (RM ch. 15, 16)**: the desk's partner, a CH32V006K8U6,
-  is wired to both (SPI1 on PA4..PA7, I2C1 on PC16/PC17 with its pull-ups
-  hung from PB3), and each driver is born with its suite against that
-  partner's peer. THE I2C MAY NOT BE THERE: the datasheet's table 2-1
-  note 3 withdraws it - and the ADC's channels 3, 7, 11 and 15, VREFINT
-  among them - from every lot whose lot number has 0 in its penultimate
-  fifth digit; no register names a die's lot and the bench part's
-  marking is unreadable, so the I2C driver's first verdict probes the
-  block (the part table's comments carry the note).
+- **SPI (RM ch. 16)**: the desk's partner, a CH32V006K8U6, is wired to
+  it (SPI1 on PA4..PA7), and the driver is born with its suite against
+  that partner's peer.
 - **The USB host/device controller (RM ch. 18)**: the CH32V303's block,
   which [brio/ch32vx03/usbfs.hpp](../../brio/ch32vx03/usbfs.hpp) drives
   in device mode; a second family carrying it is the moment an IP

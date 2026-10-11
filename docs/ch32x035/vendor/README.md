@@ -93,6 +93,27 @@ unmeasured.
 - **The serial ports of the CH32X035F7P6, datasheet against itself**:
   the model table counts three; the pins reach two once note 4 forbids
   PC16 and PC17 as outputs ([../usart.md](../usart.md)).
+- **The SMBus, datasheet against manual**: the datasheet's overview says
+  "1xI2C interface: Support SMBus/PMBus", and RM ch. 15 half agrees -
+  CTLR1's STOP bit "set by hardware when a timeout error is detected",
+  ITERREN's sources listing TIMEOUT and SMBAlert, ENARP at CTLR1's bit 4 -
+  while the register description has no SMBUS or SMBTYPE bit (CTLR1 3:1
+  reserved) and no TIMEOUT or SMBALERT flag (STAR1 15:13 reserved).
+  Measured on the CH32X035F8U6: CTLR1's bits 1 and 3 read zero when
+  written, ENARP holds its bit ([../i2c.md](../i2c.md)). The driver
+  declines the SMBus mode.
+- **STOPF's condition, manual against the bench**: RM 15.9.6 sets STOPF
+  "when a Stop condition is detected on the bus by the slave after an
+  acknowledge (If ACK=1)"; the CH32X035F8U6 raised it for a START and a
+  STOP made by hand with no address byte at all, ACK clear and ACK set
+  ([../i2c.md](../i2c.md)) - as the CH32V006's copy of the block does.
+- **The I2C chapter's figure numbers**: RM 15.2 and 15.3 send the reader
+  to "Figure 13-1" and "Figure 13-3" for figures 15-1 and 15-2, the
+  numbering of the chapter in another manual of the family.
+- **The weak pull of the USB pads, a unit**: AFIO_CTLR's UDP_PUE and
+  UDM_PUE code 01 is a "pull-up of approx. 35us" (8.3.2.4), a time where
+  a current or a resistance belongs; the code is the reset value and
+  nothing here relies on its strength.
 - **The startup file, a habit rather than a disagreement**: WCH's writes
   INTSYSCR = 3 (the hardware stack and nesting) and enters main() in
   user mode through an mret with mstatus 0x88; its core header's

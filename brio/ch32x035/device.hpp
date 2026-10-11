@@ -26,10 +26,11 @@
  * option bytes and the electronic signature, decoded READ-ONLY (no verb
  * of this stratum programs, erases or unlocks anything). The DMA
  * controller's registers are its own header's (ch32x035/dma.hpp), which
- * a program without an engine never includes. A block this stratum has no
- * driver for (ADC, the timers, I2C, SPI, USBFS, USBPD, PIOC, OPA, AWU, the
- * watchdogs) is not mapped at all; the gap list of
- * docs/ch32x035/README.md names each with its reason.
+ * a program without an engine never includes, and so are the I2C's
+ * (ch32x035/i2c.hpp). A block this stratum has no driver for (ADC, the
+ * timers, SPI, USBFS, USBPD, PIOC, OPA, AWU, the watchdogs) is not mapped
+ * at all; the gap list of docs/ch32x035/README.md names each with its
+ * reason.
  *
  * Register STRUCTS mirror the chapter's own field names and order, so a
  * reader can hold the manual beside the code. They are the only place in

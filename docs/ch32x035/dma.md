@@ -3,7 +3,7 @@
 The DMA controller of RM ch. 9 - eight channels, each the OR of a fixed
 handful of peripheral requests, an arbiter over four software priorities,
 three flags a channel - the engines the transports name in their slots
-(the USART's today), and the copy engine. Documents of record: the
+(the USART's and the I2C host's), and the copy engine. Documents of record: the
 CH32X035 reference manual V1.8 (9.1 for what the controller has, 9.2.1 for
 the arbitration, a channel's three steps and its three outcomes, 9.2.2 for
 the widths, 9.2.3's figure 9-1 and the table under it for the request map,
@@ -89,7 +89,7 @@ engines do with each:
 | the half-transfer flag | the receive ring's | the ring's half mark: the edge twice a lap of a stream with no silence; no other engine acts on a midpoint |
 | the completion interrupt | per binding | `arm()` names the flags whose interrupt the binding wants |
 | one flag register for eight channels | yes | a transport serving two channels in one handler body reads INTFR ONCE |
-| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high; strict - the level, then the lower number (9.2.1, measured) |
+| the priorities | yes | an argument of `arm()`, and THE LEVEL IS THE PERIPHERAL'S ([../design/dma.md](../design/dma.md)): by default the receive engine at very_high, the transmit engine at high, the copy at low; the USART's ring at very_high (`UartOptions::rx_priority` the knob) and its transmit at high; the I2C host's two at high (it stretches SCL behind a starved channel and loses nothing, [i2c.md](i2c.md)); strict - the level, then the lower number (9.2.1, measured) |
 | the software trigger | yes | MEM2MEM is the only one: there is no trigger register beside it |
 | the gate | yes | opened once, by `arm()` |
 | the transfer error | yes | armed on every engine; it clears EN by itself (9.2.1) and an engine's `abandon()` halts the channel and counts the fault |
@@ -308,8 +308,8 @@ into a RAM cell, request-paced - and its count read 300 us later:
 A raised request outlives every release short of the reset line, and the
 next owner of the channel takes one stray item at its first enable - the
 CH32V203's answer. So the `Uart`'s `release()` pulses the block's reset
-before it closes the gate ([usart.md](usart.md)), and the suite's own
-pacer does the same.
+before it closes the gate ([usart.md](usart.md)), the I2C host's and
+client's do the same ([i2c.md](i2c.md)), and the suite's own pacer too.
 
 ## Not covered yet
 
@@ -319,10 +319,10 @@ Driver gaps, each with its reason:
   (util/block_stream.hpp's two concepts over a circular channel and a pair
   of halves): born with their first block user on this series, the ADC,
   which has no driver in this stratum.
-- The SPI's and the I2C's engine slots and the timers' requests: born with
-  those drivers, each against its row of the request table (the SPI on 2
-  and 3, the I2C on 6 and 7 - USART2's channels, so a program with an
-  engined console and an engined I2C chooses).
+- The SPI's engine slots and the timers' requests: born with those
+  drivers, each against its row of the request table (the SPI on 2 and
+  3). The I2C's are on 6 and 7 ([i2c.md](i2c.md)) - USART2's channels, so
+  a program with an engined USART2 and an engined I2C chooses.
 - Half-transfer as a verb of the transfer engines: the flag and its enable
   are the channel's (`DmaFlag::half`, `arm()`), and the receive ring takes
   it on request; no other engine acts on it until a stream needs the

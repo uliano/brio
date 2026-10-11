@@ -10,18 +10,19 @@
  * chapter's descriptions: a USART's five signals move together, TIM2's
  * nine do. The FIELDS of every peripheral are named here (Remap), so the
  * register is decoded whole; the COLUMNS - which pad each code puts each
- * signal on - are stated as constexpr data for the USARTs, the one block
- * with a driver in this stratum, and arrive with their drivers for SPI1,
- * I2C1, TIM1..TIM3 and the PIOC. A driver names a code and gets its pads
- * from the same source that programs the register - the sibling strata's
- * arrangement.
+ * signal on - are stated as constexpr data for the USARTs and for I2C1,
+ * the blocks with a driver in this stratum, and arrive with their drivers
+ * for SPI1, TIM1..TIM3 and the PIOC. A driver names a code and gets its
+ * pads from the same source that programs the register - the sibling
+ * strata's arrangement.
  *
  * A COLUMN'S CODES ARE THE FIELD'S. USART2's field is three bits and its
  * four upper codes (1xx) are one column; USART4's are two columns, 1x0
- * and 1x1 (8.3.2.1). Every code of every field is a column the manual
- * describes, so a code is refused only when it does not fit its field -
- * or, for a USART, when not one pad of the column is bonded by this
- * package, which is a disconnection and not a remap.
+ * and 1x1 (8.3.2.1), and so are I2C1's. Every code of every field is a
+ * column the manual describes, so a code is refused only when it does
+ * not fit its field - or, for a USART or I2C1, when not one pad of the
+ * column is bonded by this package, which is a disconnection and not a
+ * remap.
  *
  * THE DEBUG PORT IS NOT A REMAP. SW_CFG (PCFR1 26:24) hands PC18 and PC19
  * back to GPIO, and a program that does that has lost its probe until the
@@ -38,8 +39,12 @@
  * stratum.
  *
  * AFIO_CTLR (8.3.2.4) - the USB and USB PD pads' pull-ups, source
- * voltages and comparators, and four pads' input filters - is read here
- * and written by nothing: it belongs to the USB chapters.
+ * voltages and comparators, and four pads' input filters - is read here,
+ * and one field pair of it is written: the pull-up MODES of PC16 and PC17
+ * (UDM_PUE, UDP_PUE), a strength the GPIO configuration then enables or
+ * not (8.3.2.4: "only pull-up mode is set here"), which is a pad's
+ * business before it is the USB's. The rest belongs to the USB chapters
+ * and nothing writes it.
  *
  * The AFIO's clock gate is closed out of reset and every verb opens it,
  * the way pin.hpp's opens a port's.
@@ -154,8 +159,39 @@ constexpr UsartPadSet afio_usart_pads(uint8_t n, uint8_t code) {
     return {};
 }
 
+// =============================================================================
+// I2C1's columns (8.3.2.1; the datasheet's table 2-1 names the same pads
+// with I2C_ in the remap column)
+// =============================================================================
+
+/// I2C1's two lines.
+struct I2cPadSet {
+    Pad scl, sda;
+
+    constexpr bool any_bonded() const { return pad_bonded(scl) || pad_bonded(sda); }
+};
+
+/// The column a code of I2C1_RM[2:0] selects: 000 PA10/PA11, 001
+/// PA13/PA14, 010 PC16/PC17, 011 PC19/PC18 (SCL on PC19), 1x0 PC17/PC16
+/// (the USB pads swapped) and 1x1 PC18/PC19 - six columns in eight codes,
+/// SCL named first. A code outside the field is an empty column.
+constexpr I2cPadSet afio_i2c1_pads(uint8_t code) {
+    switch (code) {
+        case 0: return {{'A', 10}, {'A', 11}};
+        case 1: return {{'A', 13}, {'A', 14}};
+        case 2: return {{'C', 16}, {'C', 17}};
+        case 3: return {{'C', 19}, {'C', 18}};
+        case 4: case 6: return {{'C', 17}, {'C', 16}};
+        case 5: case 7: return {{'C', 18}, {'C', 19}};
+        default: return {};
+    }
+}
+
+/// The field's eight codes.
+inline constexpr uint8_t afio_i2c1_codes = 8;
+
 /// Whether a code is one of this field's on this part: it fits the field,
-/// and - for a USART - at least one pad of its column is bonded.
+/// and - for a USART or I2C1 - at least one pad of its column is bonded.
 constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
     const AfioField f = afio_field_of(r);
     if (code >= (1u << f.width)) {
@@ -166,9 +202,16 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
         case Remap::usart2: return afio_usart_pads(2, code).any_bonded();
         case Remap::usart3: return afio_usart_pads(3, code).any_bonded();
         case Remap::usart4: return afio_usart_pads(4, code).any_bonded();
+        case Remap::i2c1:   return afio_i2c1_pads(code).any_bonded();
         default: return true;
     }
 }
+
+/// UDP_PUE / UDM_PUE (8.3.2.4): the pull-up a pulled input of PC17 /
+/// PC16 takes - none, the weak one "for GPIO applications" (the table
+/// gives it as "approx. 35", in microseconds as printed), 10 kOhm, or
+/// 1.5 kOhm.
+enum class UsbPadPull : uint8_t { none = 0, weak = 1, r10k = 2, r1k5 = 3 };
 
 // =============================================================================
 // The block
@@ -275,12 +318,32 @@ struct Afio {
                code == afio_exti_port_c ? 'C' : '\0';
     }
 
-    // ---- AFIO_CTLR, read only ----------------------------------------------
+    // ---- AFIO_CTLR ---------------------------------------------------------
 
     /// The USB and USB PD pads' control register as it stands (8.3.2.4).
     static uint32_t control() {
         clock_on();
         return regs().CTLR;
+    }
+
+    /// USB_IOEN: are PC16 and PC17 the USB transceiver's (8.3.2.4)? Out of
+    /// reset they are GPIO, and nothing in this stratum sets the bit; a
+    /// driver that puts another signal on those pads asks.
+    static bool usb_pads_taken() { return (control() & afio_ctlr_usb_ioen) != 0u; }
+
+    /**
+     * The pull-up MODES of PC17 (UDP_PUE) and PC16 (UDM_PUE), the two
+     * fields of AFIO_CTLR this stratum writes - every other bit kept. A
+     * mode is a STRENGTH and not an enable: "pull-up enable or pull-down
+     * enable is controlled by the configuration in the GPIO configuration
+     * register" (8.3.2.4), so a pad pulls only where its nibble asks for
+     * a pulled input, at the strength chosen here. Reset: the weak mode
+     * on both.
+     */
+    static void usb_pad_pull_ups(UsbPadPull udp, UsbPadPull udm) {
+        clock_on();
+        regs().CTLR = (regs().CTLR & ~(afio_ctlr_udp_pue_mask | afio_ctlr_udm_pue_mask)) |
+                      (static_cast<uint32_t>(udp) << 2) | static_cast<uint32_t>(udm);
     }
 
 private:

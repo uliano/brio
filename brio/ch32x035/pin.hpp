@@ -438,8 +438,11 @@ struct Pin {
     }
 
     /// Drive the level BEFORE the pin becomes an output, so the pad never
-    /// shows the other one for the width of two stores.
+    /// shows the other one for the width of two stores. The port's gate is
+    /// opened FIRST: a set or clear through a shut gate lands nowhere
+    /// (pin.md), and the pad would come up driving the other level.
     static void output(bool level) {
+        P::clock_on();
         if (level) { set(); } else { clear(); }
         output();
     }
@@ -458,6 +461,7 @@ struct Pin {
         if (pull == PinPull::down && !has_pull_down) {
             return false;
         }
+        P::clock_on();   // the direction bit must land: a shut gate drops the store
         if (pull == PinPull::up) { set(); } else { clear(); }
         P::configure(N, pin_nibble_pulled);
         return true;

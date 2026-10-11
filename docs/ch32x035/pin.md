@@ -93,11 +93,15 @@ suite is `test_x035_pin`.
   | USART4 | 4, 6 | PB13 | PC19 | PA8 | PA5 | PA6 |
   | USART4 | 5, 7 | PC17 | PC16 | PB2 | PB15 | PA8 |
 
+  and I2C1's six, in its field's eight codes (SCL first): 000 PA10/PA11,
+  001 PA13/PA14, 010 PC16/PC17, 011 PC19/PC18, 1x0 PC17/PC16 and 1x1
+  PC18/PC19 ([i2c.md](i2c.md)).
+
 - **The debug port's pads are PC18 (SWDIO) and PC19 (SWCLK)**, the
   debug port's from reset; SW_CFG (PCFR1 bits 26:24) gives them back to
   GPIO at 100, every code 0xx leaves them the probe's, and the rest are
-  "invalid". USART3's column 1 and USART4's columns 4 and 6 put a signal
-  on them, and so does the PIOC's default mapping.
+  "invalid". USART3's column 1, USART4's columns 4 and 6 and I2C1's 011
+  and 1x1 put a signal on them, and so does the PIOC's default mapping.
 - **The EXTI multiplexer** (8.3.2.2, 8.3.2.3): two bits a line in
   AFIO_EXTICR1 (lines 0..15) and AFIO_EXTICR2 (16..23) say which port's
   pin of the same number feeds the line - 00 port A, 10 port B, 11 port
@@ -106,7 +110,10 @@ suite is `test_x035_pin`.
 - **AFIO_CTLR** (8.3.2.4) is the USB and USB PD pads' register - their
   pull-up modes, the PHYs' 3.3 V selection, the BC protocol's sources
   and comparators - with four pads' 10 us input filters (PA3, PA4, PB5,
-  PB6).
+  PB6). The two USB pads' pull-up MODES are a strength and not an
+  enable - "only pull-up mode is set here", the pad's configuration
+  deciding - and the measured answer is that a pulled input takes them
+  and the I2C's alternate function does not ([i2c.md](i2c.md)).
 - **AFIO's clock gate is closed out of reset** (RCC_APB2PCENR bit 0,
   3.4.6), and every `Afio` verb opens it before it touches a register. A
   read through a shut gate is not the register's: through a port's, it
@@ -164,10 +171,13 @@ for SW_CFG as it stands, and `disable_debug_port_until_reset()`, the one
 verb that writes it, spelled long on purpose; `exti_source(line, port)`
 (false for a line past 23, a letter with no port or a port this package
 bonds nothing of) and `exti_source(line)` reading the letter back;
-`control()`, AFIO_CTLR read. `Remap` names the ten fields,
-`afio_field_of` places them, and the USARTs' columns are data -
-`afio_usart_pads(n, code)` returns a `UsartPadSet` - read by the same
-code that programs the register ([usart.md](usart.md)).
+`control()`, AFIO_CTLR read, `usb_pads_taken()` its USB_IOEN, and
+`usb_pad_pull_ups(udp, udm)` its one written field pair (`UsbPadPull`:
+none, weak, 10 kOhm, 1.5 kOhm). `Remap` names the ten fields,
+`afio_field_of` places them, and the USARTs' and I2C1's columns are data
+- `afio_usart_pads(n, code)` returns a `UsartPadSet`,
+`afio_i2c1_pads(code)` an `I2cPadSet` - read by the same code that
+programs the register ([usart.md](usart.md), [i2c.md](i2c.md)).
 
 ## How to use it
 
@@ -250,23 +260,31 @@ they measured:
   returned the last word the bus had moved. A pad is read after its port
   is configured - every configuring verb of `Pin` and `Port` opens the
   gate, and `read()` and `in()` do not.
+- **And a store into its output register lands nowhere**: PB3 set high
+  and then made an output, its port B never configured before, drove the
+  bus behind its 1.5 kOhm resistors LOW - the bit set through the shut
+  gate was not there when the configuration opened it - and high once the
+  verb opened the gate first (measured, the I2C suite's pull-up rail).
+  `output(level)` and `input(pull)`, whose output-data store precedes
+  the configuration on purpose, open the gate first.
 
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
-- **The remap columns of SPI1, I2C1, TIM1, TIM2, TIM3 and the PIOC**:
+- **The remap columns of SPI1, TIM1, TIM2, TIM3 and the PIOC**:
   their fields are named and written, their columns come with their
-  drivers (born with their first user) - the USARTs' are data because
-  the USART has a driver.
+  drivers (born with their first user) - the USARTs' and I2C1's are data
+  because those blocks have drivers.
 - **The external interrupts themselves** (RM 7.4): the multiplexer is
   here, the EXTI's six registers are mapped in device.hpp, and an
   `ExtInt<Pin>` is born with its first user.
-- **AFIO_CTLR's writes** - the USB pads' pull-up modes, the PHYs' supply
-  selection, the BC protocol, the four input filters: the USB and USB
-  PD chapters', and the filters' first user.
-- **The pull-up strengths PC14..PC17 have** beyond the plain one: set
-  in the USB PD and USB blocks' registers, their chapters'.
+- **AFIO_CTLR's other writes** - USB_IOEN, the PHYs' supply selection,
+  the BC protocol, the four input filters: the USB and USB PD chapters',
+  and the filters' first user.
+- **The pull-up strengths PC14 and PC15 have** beyond the plain one: set
+  in the USB PD block's registers, its chapter's (PC16's and PC17's are
+  `usb_pad_pull_ups()`).
 - **Giving the debug pads back and taking them again at run time**:
   `disable_debug_port_until_reset()` is the whole of it - there is no
   way back but a reset, which is why no suite calls it.

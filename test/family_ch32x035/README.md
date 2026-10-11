@@ -39,6 +39,13 @@ request table against figure 9-1 on every part, and the serial transport
 on its two engines wherever the part offers the instance; the negatives
 refuse an engine on another instance's channel, a ninth channel, a beat
 wider than the binding's, and a request whose peripheral the part has
-not got. `util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
+not got. `i2c.cpp` holds the I2C's map against table 15-1 (no rise-time
+register past CKCFGR), I2C1's six columns against what each package bonds
+alone, the host on the part's default column in both engine arrangements
+under the arbiter and the client polled and on its vectors; the
+negatives refuse an engine on USART2's channels, one engine of two, a
+wide beat, a second instance, PA10/PA11 where they are not bonded, the
+USB pads where they share their pins, and pads named out of their
+column's order. `util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
 each service over this target's platform, which is the compiler's verdict
 on the whole framework for this core.
