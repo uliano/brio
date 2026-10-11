@@ -133,12 +133,15 @@ constexpr bool pad_has_pull_down(Pad pad) {
 /// request carries for its chip select, so the bus AO can drive a pin it
 /// does not know the type of. The stores are BSHR/BSXR/BCR, atomic against
 /// a handler on another pin of the same port. A null PinRef (the default)
-/// drives nothing. Build one with Pin<...>::ref().
+/// drives nothing. Build one with Pin<...>::ref(). The level verbs are
+/// ALWAYS INLINE: a request's select and D/C edges sit on its fixed cost,
+/// and an out-of-line call there is a jump and a return fetched from a
+/// flash with two wait states (docs/ch32x035/spi.md).
 struct PinRef {
     GpioRegs* port = nullptr;
     uint32_t mask = 0;
 
-    void set() const {
+    [[gnu::always_inline]] void set() const {
         if (port != nullptr) {
             if ((mask & 0xFFFFu) != 0u) {
                 port->BSHR = mask & 0xFFFFu;
@@ -147,12 +150,12 @@ struct PinRef {
             }
         }
     }
-    void clear() const {
+    [[gnu::always_inline]] void clear() const {
         if (port != nullptr) {
             port->BCR = mask & 0x00FFFFFFu;
         }
     }
-    void write(bool level) const {
+    [[gnu::always_inline]] void write(bool level) const {
         if (level) {
             set();
         } else {

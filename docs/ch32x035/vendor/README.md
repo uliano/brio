@@ -110,6 +110,31 @@ unmeasured.
 - **The I2C chapter's figure numbers**: RM 15.2 and 15.3 send the reader
   to "Figure 13-1" and "Figure 13-3" for figures 15-1 and 15-2, the
   numbering of the chapter in another manual of the family.
+- **The SPI's mode numbering, manual against itself**: table 16-1 prints
+  CPOL 0/1/1/1 and CPHA 0/0/0/1 for modes 0..3 - no numbering gives that
+  table - and figures 16-2..16-9 number the modes CPHA first (mode 1 =
+  CPHA 0, CPOL 1). The driver speaks neither and names the bits; both
+  hosts' waveforms on the desk are the Motorola standard's in all four
+  modes (measured, [../spi.md](../spi.md)).
+- **HSRXEN's rate, manual against itself**: 16.3.8 makes the bit "only
+  valid when the clock is divided by 2", 16.3.1's note on BR says that
+  with it set "the SCK frequency is FHCLK/(BR+2)". Measured on the
+  CH32X035F8U6: 16.3.1 is right at every code - a second ladder /2..9 -
+  and 16.3.8's "not readable" too (HSCR reads zero) ([../spi.md](../spi.md)).
+- **The SPI client's restrictions, manual against the bench**: 16.2.3
+  says a transmitting client needs "CPOL ... set and configured as mode 2
+  or mode 3"; this die answers exact in all four modes MSb first. 16.3.1
+  says "LSB is only supported by SPI as host"; LSb first its MISO never
+  moves, in every mode, though it receives LSb first exact
+  ([../spi.md](../spi.md)).
+- **SSOE, manual against the F1 habit**: 16.2.1 says the NSS pad "will be
+  actively pulled low when the SPI host sends output outward" - measured:
+  from the first frame, not at SPE, and high again only at the next
+  disable ([../spi.md](../spi.md)).
+- **The SPI's enable protection, manual against the bench**: 16.3.1 makes
+  DFF and CRCEN writable "only when SPE is 0" and MSTR, CPOL, CPHA and
+  LSBFIRST unchangeable "during communication"; all eight fields tried
+  take a write with SPE set ([../spi.md](../spi.md)).
 - **The weak pull of the USB pads, a unit**: AFIO_CTLR's UDP_PUE and
   UDM_PUE code 01 is a "pull-up of approx. 35us" (8.3.2.4), a time where
   a current or a resistance belongs; the code is the reset value and

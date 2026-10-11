@@ -58,6 +58,14 @@ the pads).
   both described as "16-bit" (0 is 8-bit), and 16.2.1 describes CPHA
   with the same words for both values (table 16-1 and the figures
   settle it).
+- **The client is restricted, and not as 16.2.3 says.** "If you need to
+  send in slave mode, you need to set CPOL to mode 2 or mode 3" - and
+  measured against a foreign host (the CH32X035's, below), this client is
+  served in modes 0 and 3 BOTH WAYS and in modes 1 and 2 NEITHER way:
+  what it hears there is every byte one bit early (0x14 read 0x28), as a
+  client that samples on the rising edge in every mode would, and its
+  MISO a fixed pattern whatever it was given. The host's own waveforms
+  are the standard's in all four modes (measured by the far chip).
 
 ## Types and verbs
 
@@ -456,6 +464,47 @@ echoes PC6 with no wire (measured on the CH32V003F4P6).
   at HCLK/4 and against 258.9 at HCLK/16; at HCLK/64 the pump is still
   at the wire.
 
+### This part as the desk's instrument: `spi_peer`
+
+`spi_peer` makes the CH32V006K8U6 the desk's SPI client for the
+CH32X035's suite (`test_x035_spi`, its document
+[../ch32x035/spi.md](../ch32x035/spi.md)): spi_link's command channel in
+band over SPI1's column 0 with the HARDWARE select on PC1 (pulled up),
+the dark listener, the exchange served on the DMA engines (channels 2 and
+3, polled through the receive count, no interrupt) or on a polled run over
+the client's per-frame verbs, `sink_slow`, `ss_pulse` on PC1 as a GPIO,
+`host_burst` with PC1 the host's GPIO select; `mspi` refused (no USART of
+this part reaches the wires). This die's 24 MHz crystal runs it (the PLL
+at 48 MHz), and its supply is read from VREFINT at boot. What the far
+chip measured of this client, on the four wires:
+
+- **The hardware select frames it**: a client on PC1's NSS input took
+  every exchange the far host clocked in modes 0 and 3, both bit orders,
+  on both serves - eight frames exact both ways each time - and the far
+  host's MODF letter took its select low four times on command.
+- **Modes 1 and 2 are served neither way**: eight runs in each, every one
+  wrong both ways - the first byte heard 0x28 for 0x14 (mode 1) and 0x2A
+  for 0x15 (mode 2), one bit early, and the far chip's sampling of MISO
+  in those modes a fixed 0x6D 0xB6 0xDB whatever the stream; the far
+  host's MOSI the standard's in both (its waveform letter).
+- **THE ANSWER WINDOWS ARE MODE 3.** In mode 0, an answer window served
+  by the polled run right after a command came back exact, and the one
+  served right after another answer window - ident's and report's data -
+  came back one bit early, every byte (t << 1) | the next byte's MSB, the
+  first bit racing; a DMA-served answer in mode 0 was exact. In mode 3
+  every window was exact, so the peer serves ack, nak, ident and report in
+  mode 3 and the far host finds that at its rendezvous; what in this
+  block's state carries from one mode-0 window to the next is not
+  isolated (a logic analyser on SCK and MISO across two windows would).
+- **The rate ladder**: the DMA serve exact at every code to the far
+  host's /2 = 24 MHz, behind its polled loop and its engines; the polled
+  run exact to 6 MHz behind a host with one frame in flight and to 3 MHz
+  behind back-to-back frames - the run's own ceiling, its per-frame verbs
+  fetched from the flash.
+- **As a host** (`host_burst`, one polled frame a request, 20 us apart):
+  its SCK and MOSI the standard's in all four modes and its frames exact
+  at the far client, MSb and LSb first.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -472,10 +521,10 @@ Driver gaps, each with its reason:
   has SSOE and the multi-host input for a program that wants them.
 - The CRC as part of a Request: the resource's verbs exist, born into a
   tenure shape with a device that checks one.
-- The client on its hardware NSS input against a foreign host: the
-  default column's NSS pad is the I2C's SDA on the desk, so the peer
-  letters select the client in software; the remap column (NSS on
-  PC0) would free it, on a desk without the LED there.
+- The client in modes 1 and 2: measured served neither way on the
+  CH32V006K8U6 (bench findings), and nothing in `SpiClient` refuses them
+  yet: the CH32V003F4P6 shares the driver and has not answered on its own
+  die, and a refusal stated for a part nobody measured would be a guess.
 
 Implemented but not bench-verified, each with what would measure it:
 

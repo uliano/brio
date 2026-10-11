@@ -10,9 +10,9 @@
  * chapter's descriptions: a USART's five signals move together, TIM2's
  * nine do. The FIELDS of every peripheral are named here (Remap), so the
  * register is decoded whole; the COLUMNS - which pad each code puts each
- * signal on - are stated as constexpr data for the USARTs and for I2C1,
+ * signal on - are stated as constexpr data for the USARTs, I2C1 and SPI1,
  * the blocks with a driver in this stratum, and arrive with their drivers
- * for SPI1, TIM1..TIM3 and the PIOC. A driver names a code and gets its
+ * for TIM1..TIM3 and the PIOC. A driver names a code and gets its
  * pads from the same source that programs the register - the sibling
  * strata's arrangement.
  *
@@ -20,9 +20,9 @@
  * four upper codes (1xx) are one column; USART4's are two columns, 1x0
  * and 1x1 (8.3.2.1), and so are I2C1's. Every code of every field is a
  * column the manual describes, so a code is refused only when it does
- * not fit its field - or, for a USART or I2C1, when not one pad of the
- * column is bonded by this package, which is a disconnection and not a
- * remap.
+ * not fit its field - or, for a USART, I2C1 or SPI1, when not one pad of
+ * the column is bonded by this package, which is a disconnection and not
+ * a remap.
  *
  * THE DEBUG PORT IS NOT A REMAP. SW_CFG (PCFR1 26:24) hands PC18 and PC19
  * back to GPIO, and a program that does that has lost its probe until the
@@ -190,8 +190,39 @@ constexpr I2cPadSet afio_i2c1_pads(uint8_t code) {
 /// The field's eight codes.
 inline constexpr uint8_t afio_i2c1_codes = 8;
 
+// =============================================================================
+// SPI1's columns (8.3.2.1, SPI1_RM[1:0])
+// =============================================================================
+
+/// SPI1's four signals.
+struct SpiPadSet {
+    Pad nss, sck, miso, mosi;
+
+    constexpr bool any_bonded() const {
+        return pad_bonded(nss) || pad_bonded(sck) || pad_bonded(miso) || pad_bonded(mosi);
+    }
+};
+
+/// The column a code of SPI1_RM[1:0] selects, in the manual's order NSS,
+/// CK, MISO, MOSI: 00 PA4/PA5/PA6/PA7, 01 PB21/PB15/PA8/PA9, 10
+/// PA12/PA11/PA9/PA10, 11 PC4/PC5/PC6/PC7. A code outside the field is
+/// an empty column.
+constexpr SpiPadSet afio_spi1_pads(uint8_t code) {
+    switch (code) {
+        case 0: return {{'A', 4},  {'A', 5},  {'A', 6}, {'A', 7}};
+        case 1: return {{'B', 21}, {'B', 15}, {'A', 8}, {'A', 9}};
+        case 2: return {{'A', 12}, {'A', 11}, {'A', 9}, {'A', 10}};
+        case 3: return {{'C', 4},  {'C', 5},  {'C', 6}, {'C', 7}};
+        default: return {};
+    }
+}
+
+/// The field's four codes.
+inline constexpr uint8_t afio_spi1_codes = 4;
+
 /// Whether a code is one of this field's on this part: it fits the field,
-/// and - for a USART or I2C1 - at least one pad of its column is bonded.
+/// and - for a USART, I2C1 or SPI1 - at least one pad of its column is
+/// bonded.
 constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
     const AfioField f = afio_field_of(r);
     if (code >= (1u << f.width)) {
@@ -203,6 +234,7 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
         case Remap::usart3: return afio_usart_pads(3, code).any_bonded();
         case Remap::usart4: return afio_usart_pads(4, code).any_bonded();
         case Remap::i2c1:   return afio_i2c1_pads(code).any_bonded();
+        case Remap::spi1:   return afio_spi1_pads(code).any_bonded();
         default: return true;
     }
 }
