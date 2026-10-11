@@ -7,22 +7,25 @@
 // is the single source of truth for every board that speaks it,
 // whatever its architecture. What this silicon makes of it:
 //
-//  - THE PUMP RUNS ONE AHEAD. A byte written to DATA reaches the
-//    shifter three SCK cycles later, and those cycles elapse only while
-//    SCK runs (32.6.2.6.2), so an answer written in the host's
-//    inter-byte gap arrives one character late. Instead: the FIRST
-//    answer goes in through CTRLB.PLOADEN while SS is still high, the
-//    SECOND parks in DATA at once, and every received character loads
-//    the next-PLUS-ONE. Both serve() and run_exchange() are that pump.
+//  - THE RUN IS ONE AHEAD, ON THE BOUNDARY. A byte written to DATA
+//    reaches the shifter three SCK cycles later, and those cycles elapse
+//    only while SCK runs (32.6.2.6.2), so an answer written in the
+//    host's inter-byte gap arrives one character late. Instead: the
+//    FIRST answer goes in through CTRLB.PLOADEN while SS is still high,
+//    the SECOND parks in DATA at once, and every character boundary
+//    (DRE) loads the next - inside the first five SCK cycles of the
+//    character in flight. That is the driver's polled run
+//    (SpiClient::answer and ::exchange), placed in SRAM here; serve()
+//    and run_exchange() are each one call of it.
 //
-//  - THE PUMP IS THE ONLY SERVE. Every exchange runs on this software
-//    pump, its reload boundary the polled loop's: this stratum drives the
-//    DMAC for one user alone, the Uart's transmitter, because erratum
-//    1.10.4 (DS80000740S) corrupts the live write-back descriptor under
+//  - THE POLLED RUN IS THE ONLY SERVE. This stratum drives the DMAC for
+//    one user alone, the Uart's transmitter, because erratum 1.10.4
+//    (DS80000740S) corrupts the live write-back descriptor under
 //    concurrent channel triggers (docs/samc21/dmac.md). So
-//    spilink::spare_polled_pump is accepted and changes nothing, and the
-//    report's aux2 carries the select telemetry alone (bit 0x04, the
-//    engined serve, is never set here).
+//    spilink::spare_polled_pump is accepted and changes nothing (bit
+//    0x04 of aux2, the engined serve, is never set here);
+//    spilink::spare_answer_only serves an exchange's answers on the
+//    answer run, which reads nothing.
 //
 //  - THE BUFFERING REGIMES COLLAPSE. This client is always buffered two
 //    deep and has no knob for anything else; PLOADEN plays for the
@@ -78,6 +81,8 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <span>
 
 #include "samc21/clock.hpp"
 #include "samc21/nvic.hpp"
@@ -155,7 +160,7 @@ using SsPin = Pin<'A', 17>;
 using MisoPin = Pin<'A', 18>;
 using SckPin = Pin<'A', 19>;
 
-constexpr uint16_t firmware_version = 0x0203;   ///< see spi_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0204;   ///< see spi_link.hpp's Ident
 
 bool crystal_ok = false;
 bool trace = false;
@@ -272,42 +277,55 @@ void wait_ss_high(uint16_t ms) {
     }
 }
 
-/// Serve ONE answer window, with the one-ahead pump: buf[0] through
-/// PLOADEN into the shifter, buf[1] parked in DATA, and every received
-/// character loads the next one (a whole character early, so the
-/// three-SCK-cycle rule is already paid when its boundary comes); the
-/// tail pads with zeros.
+// ---- the runs, in SRAM -----------------------------------------------------------
+//
+// Every window this peer serves is ONE CALL of the driver's polled run
+// (SpiClient::answer / exchange): the answers written on DRE inside the
+// first five SCK cycles of each character (32.6.2.6.2's three-cycle rule,
+// samc21/spi.hpp), nothing judged or sampled inside the burst. The two
+// wrappers are placed in .ram_text, the runs inlined into them, so a turn
+// runs from SRAM and not from the flash behind its two wait states
+// (docs/samc21/platform.md, "A handler in SRAM"; the boundary each
+// placement reaches is docs/samc21/spi.md's).
+
+using Run = Client::Run;
+
+/// A run's spin budget for `ms` milliseconds: one spin is an idle poll of
+/// some eight core cycles at 48 MHz (the listing), so this is a bound of
+/// the right order, not a clock.
+constexpr uint32_t spins_for_ms(uint32_t ms) { return ms * (48'000u / 8u); }
+
+[[gnu::noinline, gnu::section(".ram_text")]] Run answer_run(const uint8_t* out, uint16_t n,
+                                                            uint32_t spins) {
+    return Client::answer(std::span<const uint8_t>(out, n), spins);
+}
+
+[[gnu::noinline, gnu::section(".ram_text")]] Run exchange_run(const uint8_t* out, uint8_t* in,
+                                                              uint16_t n, uint32_t spins) {
+    return Client::exchange(std::span<const uint8_t>(out, n), std::span<uint8_t>(in, n), spins);
+}
+
+/// Serve ONE answer window: the frame padded with zeros to the most the
+/// host clocks (spilink::answer_bytes), handed to the answer run - buf[0]
+/// through PLOADEN into the shifter, buf[1] parked in DATA, every later
+/// answer on its boundary.
 ///
 /// THE WINDOW ENDS WHEN THE HOST CLOSES IT. A host may clock all of
 /// spilink::answer_bytes, or stop as soon as its decoder holds the frame
 /// and raise the select (the avrdx DUT does): a window still being served
 /// then would swallow the NEXT window's traffic - the data frame behind
-/// an ack, the exchange behind its command - as dummies. The edge is the
-/// hardware's: in a client, INTFLAG.TXC rises when SS is pulled high
-/// (32.8.6) and a DATA write clears it, so it is read before each load
-/// and after a character has come; the select PIN is never waited on.
+/// an ack, the exchange behind its command - as dummies. The run ends on
+/// the client's TXC, set when SS is pulled high (32.8.6); the select PIN
+/// is never waited on.
 void serve(const uint8_t* buf, uint8_t n) {
     wait_ss_high(50);                     // the command window must close first
     if (!arm_answer()) {
         (void)go_dark();
         return;
     }
-    Client::write(buf[0]);                // PLOADEN: straight into the shifter
-    Client::write(n > 1 ? buf[1] : 0x00u);   // parked in DATA
-    uint8_t idx = 2;
-    uint16_t seen = 0;
-    const uint32_t t0 = Ticker::millis();
-    while (seen < spilink::answer_bytes &&
-           Ticker::millis() - t0 < spilink::serve_ms) {
-        if (!Client::poll()) {
-            if (seen != 0 && Raw::txc_flag()) break;   // the host closed the window
-            continue;
-        }
-        ++seen;
-        if (Raw::txc_flag()) break;
-        Client::write(idx < n ? buf[idx] : 0x00u);
-        if (idx < n) ++idx;
-    }
+    uint8_t padded[spilink::answer_bytes] = {};
+    for (uint8_t i = 0; i < n && i < spilink::answer_bytes; ++i) padded[i] = buf[i];
+    (void)answer_run(padded, spilink::answer_bytes, spins_for_ms(spilink::serve_ms));
     ++serves;
     (void)go_dark();
 }
@@ -362,25 +380,27 @@ struct Streams {
 // ---- the actions ----------------------------------------------------------------
 
 /// The workhorse: the host sends P_A(i), this client answers P_B(i) -
-/// through the one-ahead pump when the regime asks for the exact
-/// alignment (see the header). The RXC poll IS the wait for the burst
-/// (the run_exchange lesson: the select read is telemetry, never a
-/// gate), and the deadline is the only other exit.
+/// one call of the driver's exchange run (the header: preloaded and one
+/// ahead under regime_buffer_wait, the leftover leading otherwise), or,
+/// when the command sets spilink::spare_answer_only, of its answer run,
+/// which reads nothing: the host judges its read-back alone and this
+/// report counts the answers loaded.
 ///
-/// THE HOT LOOP CARRIES NOTHING BUT BYTES. A loop that steps the two
-/// LFSRs, compares and tallies INSIDE itself slips from byte 2 on at
-/// back-to-back characters above 1 MHz - the two preloads exact, then
-/// the reload missing the three-SCK-cycle window every time. So the
-/// answer stream is PRECOMPUTED, the received bytes only STORED, and
-/// every judgement happens after the burst. What that buys is a reload path of a few
-/// register accesses; what it costs is the burst cap below.
+/// THE BURST CARRIES NOTHING BUT BYTES. A loop that steps the two LFSRs,
+/// compares and tallies INSIDE itself slips from byte 2 on at
+/// back-to-back characters above 1 MHz - the two preloads exact, then the
+/// reload missing the three-SCK-cycle window every time. So the answer
+/// stream is PRECOMPUTED, the received bytes only STORED, and every
+/// judgement happens after the burst - and the select is not sampled
+/// inside it either: aux1 is the milliseconds from the window's opening
+/// to the run's END, aux2 the select read once after it (bit 0) and how
+/// the run ended (bit 1: the host closed it), spi_link.hpp's Report.
 constexpr uint16_t exchange_cap = 64;
 uint8_t x_out[exchange_cap];
 uint8_t x_in[exchange_cap];
 
 spilink::Report run_exchange(const spilink::Params& a) {
     spilink::Report r{};
-    const bool preload = a.cfg.regime == spilink::regime_buffer_wait;
     const uint16_t n = a.count < exchange_cap ? a.count : exchange_cap;
     if (!apply_cfg(a.cfg)) {
         r.flags |= spilink::report_cfg_failed;
@@ -390,45 +410,28 @@ spilink::Report run_exchange(const spilink::Params& a) {
         spilink::Stream out(a.pattern, a.seed_b);
         for (uint16_t i = 0; i < n; ++i) x_out[i] = out.next();
     }
-
-    uint16_t queued = 0;
-    Client::write(x_out[queued++]);       // b0: the shifter (PLOADEN) or DATA
-    if (preload && n > 1) {
-        Client::write(x_out[queued++]);   // b1: parked in DATA
-    }
-    r.aux3 = Client::flags();             // INTFLAG right after the preloads
+    const bool answer_only = (a.spare & spilink::spare_answer_only) != 0;
 
     const uint32_t t0 = Ticker::millis();
-    uint16_t got = 0;
-    bool sel_at_first = false;
-    bool any_selected = false;
-    while (got < n && Ticker::millis() - t0 < a.ms) {
-        const auto v = Client::poll();
-        if (!v) continue;
-        x_in[got++] = static_cast<uint8_t>(*v);
-        if (queued < n) Client::write(x_out[queued++]);
-        // Telemetry AFTER the reload: the select pin sampled per
-        // received byte, never in the reload path.
-        const bool sel_now = Client::selected();
-        any_selected = any_selected || sel_now;
-        if (got == 1) {
-            sel_at_first = sel_now;
-            const uint32_t dt = Ticker::millis() - t0;
-            r.aux1 = dt > 254u ? 254u : static_cast<uint8_t>(dt);
-        }
-    }
-    if (got == 0) r.aux1 = 255;
+    const Run run = answer_only ? answer_run(x_out, n, spins_for_ms(a.ms))
+                                : exchange_run(x_out, x_in, n, spins_for_ms(a.ms));
+    const uint32_t dt = Ticker::millis() - t0;
+    r.aux1 = run.count == 0 ? 255u : (dt > 254u ? 254u : static_cast<uint8_t>(dt));
+    if (Client::selected()) r.aux2 |= 0x01;
+    if (run.end == Client::RunEnd::closed) r.aux2 |= 0x02;
     r.aux0 = Client::flags();
     if (Client::overflow()) r.flags |= spilink::report_bufovf;
 
-    // The judgement, after the wire has gone quiet.
-    Streams s(a);
-    for (uint16_t i = 0; i < got; ++i) {
-        account(r, x_in[i], s.next_expected());
+    if (answer_only) {
+        r.count = run.count;   // answers loaded; nothing was received
+    } else {
+        // The judgement, after the wire has gone quiet.
+        Streams s(a);
+        for (uint16_t i = 0; i < run.count; ++i) {
+            account(r, x_in[i], s.next_expected());
+        }
     }
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
-    if (sel_at_first) r.aux2 |= 0x01;
-    if (any_selected) r.aux2 |= 0x02;
     return r;
 }
 

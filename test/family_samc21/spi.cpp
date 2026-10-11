@@ -384,6 +384,20 @@ void client_verbs() {
     Peer::enable_rxc_interrupt(true);
     Peer::enable_txc_interrupt(false);
     Peer::enable_ssl_interrupt(false);
+
+    // The polled runs, both character widths: the beat is the element.
+    static const uint8_t answers[4] = {1, 2, 3, 4};
+    static uint8_t got[4] = {};
+    static const uint16_t answers9[2] = {0x1FF, 0x100};
+    static uint16_t got9[2] = {};
+    const Peer::Run a = Peer::answer(std::span<const uint8_t>(answers), 100000u);
+    (void)(a.end == Peer::RunEnd::closed);
+    (void)a.count;
+    (void)Peer::exchange(std::span<const uint8_t>(answers), std::span<uint8_t>(got), 100000u);
+    (void)Peer::receive(std::span<uint8_t>(got), 100000u);
+    (void)Peer::answer(std::span<const uint16_t>(answers9), 100000u);
+    (void)Peer::exchange(std::span<const uint16_t>(answers9), std::span<uint16_t>(got9), 100000u);
+    (void)Peer::receive(std::span<uint16_t>(got9), 100000u);
     Peer::release();
 }
 

@@ -167,11 +167,17 @@ prints the rest, `p` judges that every report came and every burst
 arrived - and `r` is SKIPPED (Host SPI frames no select; only the avrdx
 peer's client selects itself). Those AVR-client facts are judged by
 `test_samc_spi` letter h, where the AVR is the peer and the SAM the
-host. Measured: `z` 184 of 184 with that peer attached, `y` 70 of 70 -
-`l` read a dummy leading every normal and buffer combination of that
-peer and none of its buffer+BUFWR, `m` exact through CLK_PER/4 and its
-answers broken at CLK_PER/2 ([../samc21/spi.md](../samc21/spi.md) holds
-that client's facts). An AVR host that watches its SS (SSD = 0) pulls
+host. Letter `u` takes the client's answers BACK TO BACK - each exchange
+one polled request of this engine, beside a gapped control - from 1.5
+to 12 MHz, the rungs between the crystal's divisions run with this
+board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
+peer to 8 MHz and prints every other peer's ladder. Measured: `z` 184 of
+184 with that peer attached, `y` 90 of 90 - `l` read a dummy leading
+every normal and buffer combination of that peer and none of its
+buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
+CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12
+gapped and back to back alike ([../samc21/spi.md](../samc21/spi.md)
+holds that client's facts). An AVR host that watches its SS (SSD = 0) pulls
 the line up itself, which is what holds it against that peer: its SS
 pad can carry no pull-up.
 
@@ -585,6 +591,12 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Implemented but not bench-verified:**
 
+- `test_avr_spi` letter `u` against the avrdx peer: run only against a
+  SAM C21 peer, where it is judged; against a second AVR128DB48 it
+  prints that peer's ladder and judges its closing exchange, and a run
+  there would give the avrdx peer's back-to-back boundary from an AVR
+  host, beside the one a SAM C21 host measures
+  ([../samc21/spi.md](../samc21/spi.md));
 - the engine's bytes against a real client: `test_avr_spi`'s letters
   `l` and `m` and a panel's memory read back would judge them, both on
   the wire to a second device (a peer board);

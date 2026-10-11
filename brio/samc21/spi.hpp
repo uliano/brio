@@ -122,6 +122,7 @@
 
 #include <stdint.h>
 
+#include <bit>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -1647,7 +1648,10 @@ private:
  * question.
  *
  * The surface is polled plus ISR bodies, deliberately thin: a client is
- * a protocol, and which protocol is the application's. ISR wiring is the
+ * a protocol, and which protocol is the application's. Its unit is the
+ * RUN - answer(), exchange(), receive() serve a transaction's characters
+ * in one call, polled, one ahead on the boundary - and the per-character
+ * verbs are the degenerate case. ISR wiring is the
  * app's as always:
  *   extern "C" void SERCOM1_Handler() { Peer::isr(); }
  */
@@ -1815,6 +1819,219 @@ public:
 
     static uint8_t flags() { return S::flags(); }
 
+    // ---- the polled runs ---------------------------------------------------------
+    //
+    // A client's unit is the RUN: the answers to a transaction, or what
+    // it brings, served polled in one call - the per-character verbs
+    // above being its degenerate case. What bounds a run here is
+    // 32.6.2.6.2: a character written to DATA reaches the shifter only
+    // if it was written "with at least three SCK clock cycles left in
+    // the current character", and DRE rises when the character before it
+    // has moved to the shifter - three CLK_SERCOM_APB cycles after the
+    // character boundary. So the NEXT answer must land within the first
+    // five SCK cycles of the character in flight, less those three
+    // cycles: 17 core cycles at 12 MHz on a 48 MHz core, 37 at 6, 77 at
+    // 3. The loops are written to that window: the flag is polled four
+    // times for each look at the select and the budget, the path from
+    // the read that sees it to the store is a branch (answer() holds the
+    // next answer in a register before the poll; exchange()'s turn,
+    // short of registers, loads it after - two cycles), and nothing in
+    // a loop is a call. Counted in the release listing and measured
+    // against the wire in docs/samc21/spi.md.
+    //
+    // THEY ARE ALWAYS INLINE so a program may place the function that
+    // calls them in SRAM (`.ram_text`, docs/samc21/platform.md), where a
+    // turn costs less than from the flash behind two wait states
+    // (docs/samc21/spi.md measures both against the window above).
+    // Placement is the program's call, as for a handler.
+
+    /// How a run ended.
+    enum class RunEnd : uint8_t {
+        complete,   ///< every character of the run moved (exchange, receive)
+        closed,     ///< the host raised the select: INTFLAG.TXC (32.8.6)
+        stalled,    ///< the spin budget ran out with neither flag raised
+    };
+
+    /// What a run did: `count` characters - answers loaded into DATA for
+    /// answer(), characters received for exchange() and receive() - and
+    /// how it ended.
+    struct Run {
+        uint16_t count;
+        RunEnd end;
+    };
+
+    /**
+     * ANSWER a transaction with `out`, polled on DRE alone, reading
+     * nothing. Call it with the select still HIGH: with
+     * Config::preload the first write goes straight into the shifter
+     * (32.6.3.2) and the second parks in DATA at once, so the run is on
+     * the wire from the first character and one ahead from then on (the
+     * class comment); without it the shifter's leftover leads, as the
+     * chapter says. Every later answer is written on the DRE that marks
+     * a character boundary, inside the five-cycle window above.
+     *
+     * The run ENDS WHEN THE HOST RAISES THE SELECT (TXC: set at SS high,
+     * 32.8.6 - cleared on entry, so a former transaction's close does not
+     * end this one), however many characters it clocked: fewer than the
+     * run, and `count` says how many answers were loaded; more, and the
+     * extra characters carry "the previously received character"
+     * (32.6.2.6.2) - a caller that wants a fill pads its run. The run
+     * keeps DATA full one character ahead, so a host that stops early
+     * raises the select with DRE down and the poll reads TXC alone; a
+     * select raised while DATA is FREE - TXC standing beside DRE when the
+     * poll reads them, or rising between that read and the store - is
+     * cleared by the store (32.8.6), and the run then ends `stalled`.
+     *
+     * NOTHING IS READ while it runs: the two-level receive buffer fills
+     * after two characters and STATUS.BUFOVF rises (32.6.2.7) - what the
+     * host sent is LOST, the price of a one-flag turn. The tail drains
+     * the receiver and clears BUFOVF and ERROR, so the next run or poll
+     * starts clean.
+     *
+     * `spins` bounds the whole run, counted down once per idle poll: a
+     * host that never selects, or never closes, ends it `stalled`.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run answer(std::span<const T> out, uint32_t spins) {
+        static_assert(run_char<T>, "a client's character is eight bits or nine "
+                                   "(CTRLB.CHSIZE): uint8_t or uint16_t");
+        auto& regs = S::regs();
+        const T* const first = out.data();
+        const T* const end = first + out.size();
+        const T* p = first;
+        RunEnd how = RunEnd::closed;
+        S::clear_flags(SpiFlag::txc);
+        for (; p != end; ++p) {
+            T next = *p;
+            in_register(next);
+            if (!await<SpiFlag::dre>(spins, how)) {
+                goto tail;
+            }
+            regs.SERCOM_DATA = next;
+        }
+        // Every answer is loaded, the last two still to be clocked: the
+        // host's close is the end.
+        while ((regs.SERCOM_INTFLAG & SpiFlag::txc) == 0u) {
+            if (--spins == 0u) {
+                how = RunEnd::stalled;
+                break;
+            }
+        }
+    tail:
+        const Run r{static_cast<uint16_t>(p - first), how};
+        S::flush_rx();
+        return r;
+    }
+
+    /**
+     * EXCHANGE: answer with `out` and keep what the host sends in `in`,
+     * the run's length the shorter of the two. The answers go exactly as
+     * answer()'s - on DRE, inside the window, the first with the select
+     * high - and each turn then reads the character that completed at
+     * the same boundary (RXC stands by then: a character is transferred
+     * "within the same clock cycle its last data bit is received",
+     * 32.6.2.6.2), two behind the write, the receive buffer's depth. So a
+     * turn has two polls and a read where answer()'s has one poll; it
+     * must stay under a character (32 core cycles at 12 MHz) as well as
+     * land its write inside the window.
+     *
+     * Ends `complete` when the last character is in; `closed` when the
+     * host raised the select first, what it had sent read out of the
+     * buffer into `in` (`count` says how far); `stalled` on the budget.
+     * The receiver is flushed at the start, with the select high, so
+     * `in` holds this transaction alone; the first write clears a former
+     * transaction's TXC (32.8.6).
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run exchange(std::span<const T> out, std::span<T> in,
+                                               uint32_t spins) {
+        static_assert(run_char<T>, "a client's character is eight bits or nine "
+                                   "(CTRLB.CHSIZE): uint8_t or uint16_t");
+        const uint32_t len = out.size() < in.size() ? out.size() : in.size();
+        if (len == 0u) {
+            return {0, RunEnd::complete};
+        }
+        S::flush_rx();
+        auto& regs = S::regs();
+        const T* p = out.data();
+        const T* const p_end = p + len;
+        T* const first = in.data();
+        T* const q_end = first + len;
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        regs.SERCOM_DATA = *p++;
+        // The second answer: parked in DATA at once under preload, at the
+        // first boundary without it.
+        if (p != p_end) {
+            T next = *p;
+            in_register(next);
+            if (!await<SpiFlag::dre>(spins, how)) {
+                goto drain;
+            }
+            regs.SERCOM_DATA = next;
+            ++p;
+        }
+        // The steady state: an answer on each boundary, then the character
+        // two behind it read - two pointers and the end in the loop, the
+        // rest of the run's state outside it, so the turn fits the core's
+        // eight low registers.
+        for (; p != p_end; ++p, ++q) {
+            const T next = *p;
+            if (!await<SpiFlag::dre>(spins, how)) {
+                goto drain;
+            }
+            regs.SERCOM_DATA = next;
+            if (!await<SpiFlag::rxc>(spins, how)) {
+                goto drain;
+            }
+            *q = static_cast<T>(regs.SERCOM_DATA);
+        }
+        // The last two characters, nothing left to write.
+        for (; q != q_end; ++q) {
+            if (!await<SpiFlag::rxc>(spins, how)) {
+                goto drain;
+            }
+            *q = static_cast<T>(regs.SERCOM_DATA);
+        }
+        return {static_cast<uint16_t>(q - first), RunEnd::complete};
+    drain:
+        // What arrived before the close or the stall is still in the
+        // buffer: it belongs to the run.
+        while (q != q_end && S::rxc_flag()) {
+            *q++ = static_cast<T>(regs.SERCOM_DATA);
+        }
+        return {static_cast<uint16_t>(q - first), how};
+    }
+
+    /**
+     * RECEIVE a run into `in`, polled on RXC alone, writing nothing - the
+     * shifter then sends the previously received character back
+     * (32.6.2.6.2), so a host reading during a receive-only run reads an
+     * echo one character late. The three-SCK-cycle window does not bind
+     * here (no write is timed); the receive buffer does: a turn must
+     * average under a character, and a stall longer than two lets the
+     * third overflow (BUFOVF, 32.6.2.7). Ends as exchange() does; the
+     * receiver is NOT flushed at the start, so what stood in it when the
+     * run began is the run's first character.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run receive(std::span<T> in, uint32_t spins) {
+        static_assert(run_char<T>, "a client's character is eight bits or nine "
+                                   "(CTRLB.CHSIZE): uint8_t or uint16_t");
+        auto& regs = S::regs();
+        T* const first = in.data();
+        T* const q_end = first + in.size();
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        for (; q != q_end; ++q) {
+            if (!await<SpiFlag::rxc>(spins, how)) {
+                break;
+            }
+            *q = static_cast<T>(regs.SERCOM_DATA);
+        }
+        return {static_cast<uint16_t>(q - first), how};
+    }
+
     // ---- the ISR bodies --------------------------------------------------------
 
     /// The instance's ONE interrupt body - call from
@@ -1845,6 +2062,63 @@ public:
     }
 
 private:
+    /// The two character types a run may carry: the beat is the element.
+    template <typename T>
+    static constexpr bool run_char = std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t>;
+
+    /// Hold `v` in a register from here on: the next answer is loaded
+    /// BEFORE the poll, so the path from the flag to the store carries no
+    /// load of it (the compiler sinks the load past the poll otherwise -
+    /// two cycles of the five-SCK-cycle window, read in the listing).
+    template <typename T>
+    [[gnu::always_inline]] static void in_register(T& v) {
+        __asm__ volatile("" : "+r"(v));
+    }
+
+    /// Poll INTFLAG until `flag` (DRE or RXC) stands: true. False when
+    /// the host raised the select first (TXC) or the run's budget ran
+    /// out, `how` saying which. FOUR POLLS A COUNT: the select and the
+    /// budget are asked once every four reads, so the read that sees the
+    /// flag follows the one before it by a load, a shift and a branch,
+    /// and the branch out of the poll is the whole path to the store.
+    /// Each flag is tested by shifting it into the sign bit, not against
+    /// a mask: a mask held in a register for the whole run pushed the
+    /// loaded answer out to the stack on this core's eight low registers,
+    /// and a reload from there between the flag and the store (the
+    /// listing).
+    template <uint8_t flag>
+    [[gnu::always_inline]] static bool await(uint32_t& spins, RunEnd& how) {
+        constexpr int shift = 31 - std::countr_zero(flag);
+        constexpr int txc_shift = 31 - std::countr_zero(SpiFlag::txc);
+        auto& regs = S::regs();
+        const auto has = [](uint32_t f, int sh) {
+            return static_cast<int32_t>(f << sh) < 0;
+        };
+        for (;;) {
+            if (has(regs.SERCOM_INTFLAG, shift)) {
+                return true;
+            }
+            if (has(regs.SERCOM_INTFLAG, shift)) {
+                return true;
+            }
+            if (has(regs.SERCOM_INTFLAG, shift)) {
+                return true;
+            }
+            const uint32_t f = regs.SERCOM_INTFLAG;
+            if (has(f, shift)) {
+                return true;
+            }
+            if (has(f, txc_shift)) {
+                how = RunEnd::closed;
+                return false;
+            }
+            if (--spins == 0u) {
+                how = RunEnd::stalled;
+                return false;
+            }
+        }
+    }
+
     static SpiConfig config_of(const Config& c) {
         SpiConfig s{};
         s.pads = pads;

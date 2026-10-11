@@ -5,7 +5,7 @@ shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 `samc21/spi.hpp` over `Sercom<n>`'s instance facts ([sercom.md](sercom.md)
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
-`test/family_samc21/spi.cpp` + eight negatives; bench suite `test_samc_spi`
+`test/family_samc21/spi.cpp` + nine negatives; bench suite `test_samc_spi`
 (8 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
 or on a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
@@ -81,9 +81,16 @@ Measured: the host reads the preloaded first answer exactly, then the
 whole stream slips by one (11 of 12 mismatched). The working client pump
 is ONE AHEAD: preload b0 (CTRLB.PLOADEN puts a write made while SS is
 high straight into the shifter, 32.6.3.2), park b1 in DATA at once, and
-on every received character write the next-plus-one. So driven, the peer
+on every character boundary write the next-plus-one. So driven, the peer
 read this client's 12-character answer stream byte-exact from the first
-character.
+character. AND THE BOUNDARY IS A WINDOW, NOT A GAP: DRE rises when the
+character before has moved to the shifter, three CLK_SERCOM_APB cycles
+after the boundary (32.6.2.6.2's last sentence), and the next answer must
+be in DATA with three SCK cycles of the current character left - so it
+must land within the first five SCK cycles of every character, 17 core
+cycles at 12 MHz on a 48 MHz core, 37 at 6, 77 at 3. A back-to-back
+host leaves no gap to hide a late turn in: that window is what a polled
+client run is written to (below).
 
 **A mode change is a CPOL flip on the wire.** Reprogramming a host from
 mode 0/1 to mode 2/3 moves SCK's idle level, and that transition is one
@@ -139,12 +146,13 @@ phase, back to back: facts of the silicon, not paths of this driver.)
 A CLIENT's response
 path carries tSOSS (~41 ns) plus the far end's setup plus TWO APB
 PERIODS (41.7 ns at 48 MHz), which lands the paper ceiling for client
-transmission at a few MHz; the client's software one-ahead pump binds
-first, at 2..3 MHz (bench findings). Design guidance, then: writes to a
-device up to 24 MHz, reads from a real device at 6..8 MHz by the paper
-(12 MHz is what this die did), a SAM client's responses a few MHz - and
-a fast SPI client is an FPGA's job, the two bus cycles in every
-answer being construction, not tuning.
+transmission at a few MHz; measured against an AVR128DB48 host it lies
+between 8 and 10 MHz, and the client's polled runs reach it back to back
+(bench findings). Design guidance, then: writes to a device up to 24
+MHz, reads from a real device at 6..8 MHz by the paper (12 MHz is what
+this die did), a SAM client's responses up to 8 MHz on this bench - and a
+faster SPI client is an FPGA's job, the two bus cycles in every answer
+being construction, not tuning.
 
 **There is no event surface.** 32.5.6 and 32.6.4.3 are both "Not
 applicable" - this peripheral publishes nothing into `evsys.hpp`'s
@@ -241,11 +249,21 @@ item a reader would apply without checking the row.
 - **`SpiClient<n, pads>`** - the polled surface plus ISR bodies:
   preload, SSDE, address recognition (FORM = 0x2 with AMODE/ADDR),
   `drive_output()` for a dark listener on a shared harness,
-  `selected()` as a live pad read (there is no status bit for SS), and
+  `selected()` as a live pad read (there is no status bit for SS),
   `frames_ahead` (TWO: how many answers a pump must keep queued ahead
   of the host's clock, the three-SCK-cycle rule's own number - the one
   integer that differs between this family's client pump and the
-  other strata's).
+  other strata's), and THE POLLED RUNS - the client's unit, a
+  transaction served in one call, the per-character verbs its
+  degenerate case: `answer(out, spins)` loads a run of answers on DRE
+  alone and reads nothing, `exchange(out, in, spins)` answers and keeps
+  what the host sent, `receive(in, spins)` keeps it and writes nothing;
+  each returns a `Run` (the count and how it ended: `complete`, `closed`
+  - the host raised the select, TXC - or `stalled` on the spin budget).
+  Their element is the character, `uint8_t` or `uint16_t` for nine bits
+  (anything wider refused at compile time). They are always inline, so a
+  program places the function that calls them in `.ram_text` - its call,
+  as for a handler.
 
 ## How to use
 
@@ -263,12 +281,19 @@ target:
     // baud = *SpiHw::baud_for(6'000'000), mode), post it to SpiBus, and
     // consume the SpiDone reply.
 
-A client answering a stream (the one-ahead pump):
+A client answering a transaction - its answers ready, the select still
+high:
 
     Peer::init(clock, {.preload = true});
-    Peer::write(b0);            // into the shifter, while SS is high
-    Peer::write(b1);            // parked in DATA
-    // per received character (poll() or the RXC body): write b(k+2).
+    const auto r = Peer::answer(std::span<const uint8_t>(frame), spins);
+    // r.end == Peer::RunEnd::closed: the host raised the select after
+    // clocking r.count answers or more; what it sent is not kept.
+
+The same with what the host sends kept, the run's length the shorter of
+the two spans:
+
+    const auto r = Peer::exchange(std::span<const uint8_t>(out),
+                                  std::span<uint8_t>(in), spins);
 
 ## Bench findings
 
@@ -298,13 +323,46 @@ A client answering a stream (the one-ahead pump):
   cycles) is shorter than the polled loop's turn, so the instrument
   does not time them (below).
 - Back-to-back characters (no inter-byte gap - one engine request)
-  bind at the PEER'S ANSWER RELOAD, and the ladder has two measured
-  boundaries. The AVR peer's polled loop: exact to 500 kHz
-  always, 1 MHz a coin toss (its 5..9 us polled turnaround against a
-  10 us character), well below its CLK_PER/6 electrical ceiling. The
-  SAM peer's polled loop (precomputed stream, one-ahead reload): exact
-  to 2..3 MHz - and at the first failing rung the peer still hears
-  every byte exact, so the boundary is the reload, not the wire.
+  bind at the PEER'S ANSWER RELOAD. The AVR peer's polled loop: exact to
+  500 kHz always, 1 MHz a coin toss (its 5..9 us polled turnaround
+  against a 10 us character), well below its CLK_PER/6 electrical
+  ceiling.
+- THIS CLIENT BACK TO BACK REACHES THE WIRE (`test_avr_spi` letter u:
+  an AVR128DB48 host, sixteen characters in one polled request of its
+  engine - its own pace 2 CLK_PER between characters at CLK_PER/4 and
+  about 7 at CLK_PER/2 - at 1.5, 3, 4, 5, 6, 8, 10 and 12 MHz, the
+  rungs between the crystal's divisions taken from the host's internal
+  oscillator at 16 and 20 MHz; at each, a GAPPED control - one character
+  at a time, 20 us between them - then the exchange run, then the answer
+  run). With the peer's windows on `exchange()` and `answer()` placed in
+  SRAM, both runs are exact back to back at every rung to 8 MHz, in each
+  of four ladders and in three of four more - the fourth missed once in
+  the exchange run at 6 MHz (below). At 10 and 12 MHz every answer arrives wrong - and so
+  does every answer of the gapped control, while the client receives
+  every character exact: THE ANSWER'S PATH ON THE WIRE breaks there
+  (tSOSS and the two APB periods above, against a half SCK period of 50
+  ns at 10 MHz), not the reload. The loop the runs replaced - a call of
+  `poll()` per turn returning its optional through the stack, the
+  millisecond deadline read every turn and the select sampled every
+  character, from the flash - was NOT exact back to back at 1.5 MHz (2
+  to 5 answers of 16 late, the previously received character in their
+  place, 32.6.2.6.2's signature) and from 3 MHz on lost 14 of 16, its
+  own receiver overflowing (BUFOVF): a turn of some forty instructions
+  and a call, from the flash, against a five-SCK-cycle window. THE COST, counted in the
+  release listing: the answer run polls INTFLAG four times a count of
+  its budget, each poll a load, a shift into the sign bit and a branch;
+  from the read that sees DRE to the store in DATA is that load, a
+  taken branch and the store - 7 instruction cycles beside the two
+  peripheral accesses, 11 at worst with one poll more, against the
+  window's 17 at 12 MHz; nothing in the loop is a call. The exchange run
+  adds the RXC poll and the DATA read and store: 23 instruction cycles a
+  turn beside four peripheral accesses, against a character of 32 at 12
+  MHz. PLACEMENT, measured on the same ladder: at the host's 12 MHz pace
+  (45.6 core cycles a character) the exchange run from SRAM received
+  every character exact in four ladders; from the flash behind its two
+  wait states 9, 0 and 1 of 16 wrong in three - at the edge, so the peer
+  places its runs in `.ram_text`. Below 12 MHz both placements are
+  exact.
 - The kernel letter: four requests queued in one dispatch come back
   through their own ReplyTo in order; an over-full arbiter answers
   bus_rejected immediately; an idle bus votes ok on PrepareSleep, a busy
@@ -327,10 +385,13 @@ A client answering a stream (the one-ahead pump):
     stream arrives from the first character; without it (its normal and
     buffer) a DUMMY leads, 0x00 after a fresh init, and the stream is one
     place late - 8 of 8 combinations each, every mode and bit order.
-  - THE RATE: exact both ways from 187.5 kHz to 6 MHz; at 12 MHz the
-    client still receives every character exact while 11 of its 12
-    answers arrive wrong - the answer path's ceiling lies between 6 and
-    12 MHz (the paper's "a few MHz" above is the conservative side of it).
+  - THE RATE: exact both ways from 187.5 kHz to 8 MHz; at 10 and 12 MHz
+    the client still receives every character exact while its answers
+    arrive wrong (16 of 16 in letter u, 11 of 12 in letter m, whose first
+    answer - preloaded, its first bit on the pad since the select fell -
+    survives) - the answer path's ceiling lies between 8 and 10 MHz on
+    this bench (the paper's "a few MHz" above is the conservative side of
+    it).
   - UNDRAINED (eight characters at 750 kHz with DATA never read): the
     two-level receive buffer keeps the FIRST TWO and the rest is lost; the
     drain then reads one more 0x00 and INTFLAG.ERROR stands after it -
@@ -428,6 +489,14 @@ is the program's call (platform.md, "A handler in SRAM"), not the driver's.
 
 Implemented but not bench-verified:
 
+- THE RUN UNDER AN INTERRUPT: `answer()` and `exchange()` poll with
+  interrupts enabled, so a handler that lands inside a back-to-back run
+  and outlasts the five-SCK-cycle window delays one reload and loses
+  that character. One exchange run in eight ladders missed at 6 MHz
+  (`test_avr_spi` letter u) and three repeats were exact - the cause
+  is suspected, not staged; a letter that times a handler into the
+  run would measure it. Masking around a run is the program's call.
+
 - The SAM-SAM pairing on the harness's rows (0x3 host, 0x1 client), and
   the samc21 `spi_peer`'s window end and unpulled select against a host
   that clocks the whole answer budget (`test_samc_spi` itself): needs a
@@ -457,6 +526,16 @@ Implemented but not bench-verified:
   compile-checked, matching is not bench-verified), 9-bit characters
   through a real two-board transfer (loop-back only), IBON = 0's
   travelling overflow flavour.
+- The client's `receive()` run, and every run on nine-bit characters:
+  compile-checked on all three packages; the peer's windows use
+  `answer()` and `exchange()` on eight bits. A peer op that serves a
+  receive-only window, and one on CHSIZE = 9, would measure them.
+- A client run's two rare ends: `stalled` (no letter withholds the
+  host's clock under a run - a command whose host never clocks would)
+  and the select raised in the instructions between the poll's read and
+  the store it decides, which the store's own clear of TXC turns into
+  `stalled` (the method's statement; staging it wants a host that raises
+  its select within a few core cycles of a character boundary).
 - Erratum 1.17.3's dummy-first-character (needs a host that RAISES SS
   mid-transmission on purpose; the peer holds it low, correctly).
 - The timed-bus path on this wire: `SpiBus`'s per-bus timeout and

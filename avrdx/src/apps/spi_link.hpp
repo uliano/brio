@@ -385,6 +385,15 @@ inline constexpr uint8_t skip_at = 3;
 /// is exactly what the bit names.
 inline constexpr uint8_t spare_polled_pump = 0x01;
 
+/// `Params::spare` bit 1: serve this exchange's answers with a
+/// TRANSMIT-ONLY run - the client loads its answer stream and reads
+/// nothing, so its report counts the answers loaded and judges nothing,
+/// and the host judges its read-back alone. A suite asks it to measure
+/// where a client's answer path alone stops, beside the full exchange.
+/// An instrument without such a run ignores the bit and serves the
+/// whole exchange, which the host's read-back judges the same way.
+inline constexpr uint8_t spare_answer_only = 0x02;
+
 /// The two sides of the write-collision boundary, and the byte the
 /// client writes over its own answer at each of them.
 inline constexpr uint8_t wrcol_gap_at = 1;
@@ -524,7 +533,11 @@ inline constexpr uint8_t report_bufovf = 0x10;      ///< BUFOVF was seen (buffer
 ///              none came), aux2 = select-pin telemetry (bit0: the
 ///              select read low at that first byte; bit1: it read low
 ///              at least once in the window), aux3 = INTFLAGS right
-///              after the preloads
+///              after the preloads. A peer whose burst is ONE call of a
+///              driver's run samples nothing inside it, and says so in
+///              its own header: the samc21 peer's aux1 is the ms to the
+///              run's END, its aux2 bit0 the select read once after it
+///              and bit1 "the host closed the run", its aux3 zero
 ///   mspi       aux0 = INTFLAGS at the end of the burst
 ///   sink_slow  count = bytes still RETAINED when the burst was over,
 ///              sum = the OR of every INTFLAGS sampled DURING it (a flag

@@ -23,7 +23,7 @@
 // again, j under the 400 kHz ceiling. The divisions letters c, e, f, g, h
 // and t set are b's, on the same generator.
 //
-// TWO BOARDS (k..s, `y`): the same four pins with a second board
+// TWO BOARDS (k..s and u, `y`): the same four pins with a second board
 // running `spi_peer` as a real client, driven IN BAND over the bus
 // under test
 // (src/apps/spi_link.hpp) - the client matrix (four transfer modes, both
@@ -31,8 +31,12 @@
 // client's CLK_PER/6 ceiling and above it, deliberate CPOL/CPHA/DORD
 // mismatches, the select wire raised mid-byte, a client that never
 // drains, a REAL host demotion driven by the other board, the USART's
-// own Host SPI mode against this peripheral, and a clock rebase under
-// two-board traffic.
+// own Host SPI mode against this peripheral, a clock rebase under
+// two-board traffic, and (u) the client's answers BACK TO BACK - one
+// engine request per exchange, beside a gapped control, from 1.5 to
+// 12 MHz with this board's own source switched to 16 and 20 MHz for the
+// rungs between the crystal's divisions; judged against a SAM C21 peer
+// to 8 MHz (its document's boundary) and printed otherwise.
 //
 // THE PEER IS AN AVR128DB48 OR A SAM C21, and the half asks which
 // (ident's version, its high byte: spi_link.hpp). Some of its verdicts
@@ -2593,6 +2597,180 @@ void ts_rebase() {
     quiesce();
 }
 
+// ---- u: back to back - where the client's answer reload stops ---------------------
+
+/// One rung of the ladder: the CLK_PER this end runs at and the division.
+/// The divisions of the crystal's 24 MHz give 1.5, 3, 6 and 12 MHz; the
+/// internal oscillator at 16 and 20 MHz adds 4, 5, 8 and 10 between them
+/// (no main prescaler reaches those from 24 MHz, so the rung changes the
+/// SOURCE, and the console with it).
+struct B2bRung {
+    uint32_t clk_hz;
+    SpiClock c;
+    const char* name;
+};
+
+using Osc16 = Clock<ClockSource::internal, 16'000'000>;
+using Osc20 = Clock<ClockSource::internal, 20'000'000>;
+
+/// CLK_PER for a rung, the console re-initialized at the new rate. The
+/// waits this half spends (gap(), settle()) are timed off the constexpr
+/// 24 MHz clock, so on a slower source they are longer, never shorter.
+bool rung_clock(uint32_t hz) {
+    while (!Serial::tx_idle()) {
+    }
+    bool ok = false;
+    if (hz == 16'000'000u) {
+        ok = Osc16::init();
+        Serial::init(Osc16{}, 460800);
+    } else if (hz == 20'000'000u) {
+        ok = Osc20::init();
+        Serial::init(Osc20{}, 460800);
+    } else {
+        ok = SysClock::init();
+        Serial::init(clock, 460800);
+    }
+    return ok;
+}
+
+uint8_t b2b_tx[max_exchange];
+
+/// The exchange with its data phase ONE polled engine request: no gap
+/// between characters but the engine's own (docs/avrdx/spi.md: the
+/// block's two CLK_PER cycles, about a third of the wire more at
+/// CLK_PER/2, counted). `answer_only` asks the peer to serve the answers
+/// with a transmit-only run (spilink::spare_answer_only). The select is
+/// framed by hand around the request, with the inter-byte gap on both
+/// sides, as do_exchange() frames it. `ticks` is the request's time on
+/// the ruler, in CLK_PER cycles.
+bool b2b_exchange(const Exchange& e, bool answer_only, uint32_t& ticks) {
+    spilink::Params a{};
+    a.cfg = e.cfg;
+    a.count = e.count;
+    a.ms = e.ms;
+    a.seed_a = e.seed_a;
+    a.seed_b = e.seed_b;
+    a.pattern = e.pattern;
+    a.spare = answer_only ? spilink::spare_answer_only : 0u;
+    ticks = 0;
+    if (!peer_act(spilink::Op::exchange, a)) return false;
+    if (!Host::init(clock)) return false;   // no ceiling and no cs setup: the rate is the division
+    Ss::set();
+    Ss::output();
+    settle();
+    const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
+    spilink::Stream out(e.pattern, e.seed_a);
+    for (uint16_t i = 0; i < max_exchange; ++i) {
+        xrx[i] = 0xEE;
+        b2b_tx[i] = i < n ? out.next() : 0xFF;
+    }
+    quiet();
+    Ruler::init(TcbClock::div1, ChCarry{}, ChSnap{});
+    Ruler::reset();
+    cs_assert();
+    gap();
+    const uint32_t t0 = Ruler::read();
+    const bool ok = Host::start({{}, {}, {}, 0,
+                                 lend<Lease::reply>(static_cast<const uint8_t*>(b2b_tx)),
+                                 lend<Lease::reply>(xrx), n, {}, e.rate, e.host_mode, true, 0});
+    ticks = Ruler::read() - t0;
+    gap();
+    cs_release();
+    RulerLo::disable();
+    RulerHi::disable();
+    ChCarry::off();
+    ChSnap::off();
+    Host::release();
+    (void)link_command_mode();
+    return ok;
+}
+
+void tu_back_to_back() {
+    print(serial, "u back to back: the client's answer reload against the wire - a gapped "
+                  "exchange, then the same one gapless, full duplex and answer-only, at "
+                  "every rung", crlf);
+    quiesce();
+    if (!ensure_link()) {
+        verdict("the peer answers a ping", false);
+        return;
+    }
+    static const B2bRung rungs[] = {
+        {24'000'000u, SpiClock::div16, "1.5 MHz"}, {24'000'000u, SpiClock::div8, "3 MHz"},
+        {16'000'000u, SpiClock::div4, "4 MHz"},    {20'000'000u, SpiClock::div4, "5 MHz"},
+        {24'000'000u, SpiClock::div4, "6 MHz"},    {16'000'000u, SpiClock::div2, "8 MHz"},
+        {20'000'000u, SpiClock::div2, "10 MHz"},   {24'000'000u, SpiClock::div2, "12 MHz"},
+    };
+    // The verdicts are the SAM C21 peer's (docs/samc21/spi.md): its runs
+    // exact back to back up to 8 MHz, where the gapped control is exact
+    // too; above it the gapped control breaks the same way - the
+    // answer's path on the wire, not the reload - so those rungs are
+    // printed. Any other peer's ladder is printed whole: its boundary is
+    // its own document's.
+    const bool samc = peer_arch == spilink::peer_samc21;
+    uint8_t k = 0;
+    for (const B2bRung& g : rungs) {
+        ++k;
+        if (!rung_clock(g.clk_hz)) {
+            verdict("the clock switch", false);
+            break;
+        }
+        const uint32_t div = spi_division(g.c);
+        const uint32_t sck = g.clk_hz / div;
+        Exchange e{};
+        e.rate = g.c;
+        e.count = max_exchange;
+        e.cfg.regime = spilink::regime_buffer_wait;   // exact on every peer
+        e.seed_a = static_cast<uint8_t>(0x31 + k);
+        e.seed_b = static_cast<uint8_t>(0xA3 + 7u * k);
+
+        Verify gv{};
+        spilink::Report gr{};
+        const bool gapped = exchange_exact(e, gv, gr);
+
+        uint32_t t_full = 0;
+        const bool ran_full = b2b_exchange(e, false, t_full);
+        spilink::Report fr{};
+        const bool rep_full = ran_full && peer_report(fr);
+        const Verify fv = verify_rx(e);
+        const bool full = ran_full && rep_full && fv.mism == 0 && fr.mism == 0 &&
+                          fr.count == e.count;
+        if (!full) dump_exchange(e, fv, fr);
+
+        uint32_t t_ans = 0;
+        const bool ran_ans = b2b_exchange(e, true, t_ans);
+        spilink::Report ar{};
+        const bool rep_ans = ran_ans && peer_report(ar);
+        const Verify av = verify_rx(e);
+        const bool ans = ran_ans && av.mism == 0;
+        if (!ans) dump_exchange(e, av, ar);
+
+        print(serial, "  ", sck / 1000u, " kHz (", g.clk_hz / 1'000'000u, " MHz / ", div,
+              "): gapped ", gapped ? "exact" : "BROKEN", " (host mism ", gv.mism,
+              ", client ", gr.mism, ") | b2b full ", full ? "exact" : "BROKEN", " (host ",
+              fv.mism, ", client ", fr.mism, "/", fr.count, ") | b2b answers ",
+              ans ? "exact" : "BROKEN", " (host ", av.mism, ", loaded ", ar.count,
+              rep_ans ? "" : ", no report", ")", crlf);
+        print(serial, "      a request of ", e.count, " back to back: ", t_full, " and ",
+              t_ans, " CLK_PER, the wire's ", 8u * div * e.count, crlf);
+        if (samc && sck <= 8'000'000u) {
+            verdict("gapped exchange exact at ", g.name, gapped);
+            verdict("back to back, the exchange run exact at ", g.name, full);
+            verdict("back to back, the answer run exact at ", g.name, ans);
+        }
+    }
+    verdict("back on the 24 MHz crystal", rung_clock(24'000'000u));
+    Exchange back{};
+    back.count = 12;
+    back.seed_a = 0x4D;
+    back.seed_b = 0xE1;
+    Verify v{};
+    spilink::Report r{};
+    const bool ok = exchange_exact(back, v, r);
+    if (!ok) dump_exchange(back, v, r);
+    verdict("CLK_PER/32 is exact after the ladder", ok);
+    quiesce();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -2603,10 +2781,10 @@ constexpr Test tests[] = {
     {'i', ti_rebase}, {'j', tj_engine}, {'t', tt_untaken},
     {'k', tk_bringup}, {'l', tl_matrix}, {'m', tm_rates}, {'n', tn_mismatch},
     {'o', to_ss_midbyte}, {'p', tp_loss}, {'q', tq_demotion}, {'r', tr_mspi},
-    {'s', ts_rebase},
+    {'s', ts_rebase}, {'u', tu_back_to_back},
 };
 constexpr char single_board[] = "abcdefghijt";
-constexpr char two_board[] = "klmnopqrs";
+constexpr char two_board[] = "klmnopqrsu";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -2634,7 +2812,7 @@ void help() {
           crlf);
     print(serial, "  two boards: k bring-up | l client matrix | m rates and the client "
                   "ceiling | n mismatches | o SS mid-byte | p undrained client | "
-                  "q real demotion | r Host SPI | s rebase    -> y = all of k..s", crlf);
+                  "q real demotion | r Host SPI | s rebase | u back to back    -> y = k..s and u", crlf);
     print(serial, "  NO WIRES of its own: PE0..PE3 (SPI0 ALT1) to the peer board's SPI - "
                   "an AVR's PE0..PE3 straight across, or a SAM C21's PA16, PA18, PA19, PA17. "
                   "The peer board runs `spi_peer`, which stays DARK - it drives MISO only for "
