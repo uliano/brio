@@ -161,6 +161,7 @@ enum class Op : uint8_t {
     report = 0x10,       ///< ack + Report of the last action
     standby = 0x11,      ///< let go of the line entirely for `ms`
     calibrate = 0x12,    ///< time the DUT's gapless frames against the peer's clock
+    hold_pad = 0x13,     ///< drive one named link pad at a level, the USART let go
 
     ack = 0x40,
     nak = 0x41,
@@ -348,6 +349,13 @@ inline constexpr uint8_t pattern_counting = 0;   ///< value, value+1, value+2, .
 inline constexpr uint8_t pattern_fixed = 1;      ///< value every time
 inline constexpr uint8_t pattern_prbs = 2;       ///< an 8-bit LFSR seeded with value
 
+/// `Params::value` for `hold_pad`: which pad of the peer's link, by the
+/// role the pad plays in the link (its TXD, its RXD, its XCK), whatever
+/// pin carries it on that peer.
+inline constexpr uint8_t pad_txd = 0;
+inline constexpr uint8_t pad_rxd = 1;
+inline constexpr uint8_t pad_xck = 2;
+
 /// Every action command carries exactly this. What an op does not use
 /// stays zero; the meaning of the shared fields per op:
 ///
@@ -399,6 +407,20 @@ inline constexpr uint8_t pattern_prbs = 2;       ///< an 8-bit LFSR seeded with 
 ///                               from then on - and reports xtal = 2; a
 ///                               crystal peer adopts nothing and reports
 ///                               the DUT's error
+///   hold_pad                    value = the pad, by its LINK ROLE (pad_txd,
+///                               pad_rxd, pad_xck), aux8 = the level (0 low,
+///                               anything else high), ms = how long. The
+///                               peer lets its USART go, drives that pad
+///                               push-pull at the level for ms, gives it
+///                               back undriven, and returns to command
+///                               mode (the dark discipline's pulls): a
+///                               far LEVEL on a wire whose USART function
+///                               would not hold one (a synchronous host's
+///                               XCK runs while its instance is enabled). Report::count = 1
+///                               once held, aux16 = the pad's own readback
+///                               at the end of the hold (1 high, 0 low) -
+///                               a wire held the other way by the DUT shows
+///                               there. A peer without that pad refuses it.
 struct Params {
     Cfg cfg{};
     uint16_t count = 0;
@@ -518,7 +540,8 @@ struct Report {
     uint8_t flags = 0;
     /// Per-op extra: the BAUD register the peer used (brk, autobaud_tx),
     /// a bit's nominal length in 24 MHz ticks (bitbang), the pulse width
-    /// it was asked for (glitch), the byte it collided with (collide);
+    /// it was asked for (glitch), the byte it collided with (collide),
+    /// the held pad's readback at the end of the hold (hold_pad);
     /// calibrate: the DUT's character rate against the peer's clock in
     /// parts per million as an int16 (calibrate_ppm()), positive when the
     /// DUT runs fast, saturated at the int16 range; send and blast: the

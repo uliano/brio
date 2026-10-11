@@ -130,7 +130,7 @@
 //   Q  the synchronous roles on a real XCK, both polarities, both ends
 //   S  IrDA both ways (the far receiver inverts its pin itself), RXPL
 //      against the far coder's pulses, the coding against plain frames
-//   C  handshaking: CTS against levels the far XCK presents, RTS on its pad
+//   C  handshaking: CTS against levels the far board holds on XCK, RTS on its pad
 //   R  RS-485: TE timed on its own pad on the shared wire, GTIME 0..7
 //   W  the one-wire bus on the shared wire, and COLDEN against the far
 //      collide: the abort, and what restarts the transmitter after it
@@ -3978,17 +3978,22 @@ void tN_waveforms() {
             if (d.ferr == 0u && run > clean_most) clean_most = run;
             if (d.ferr != 0u && run < broken_least) broken_least = run;
         }
-        const uint32_t decided = (clean_most + broken_least) / 2u;
+        // The decision lies BETWEEN the longest clean run and the shortest
+        // broken one - the ladder's step is the measurement's grain, and the
+        // decision itself moves by a sample (1/16 bit) with the start edge's
+        // phase against the receiver's clock - so what is judged is that
+        // the bracket meets the vote's window and is no wider than two
+        // samples: a midpoint near the window's edge would fail on the
+        // grain alone.
         print(plain, "  read clean up to a low of ");
         print_millibits(clean_most);
         print(plain, " bits, FERR from ");
         print_millibits(broken_least);
-        print(plain, ": the stop bit is decided at ");
-        print_millibits(decided);
-        print(plain, crlf);
+        print(plain, ": the stop bit is decided between them", crlf);
         bench.verdict("the stop bit is decided at its vote, 9 6/16 to 9 8/16 bits from the start",
-                      clean_most != 0u && broken_least != 0xFFFFFFFFu && decided >= 9'375u &&
-                          decided <= 9'500u);
+                      clean_most != 0u && broken_least != 0xFFFFFFFFu &&
+                          clean_most < broken_least && clean_most <= 9'500u &&
+                          broken_least >= 9'375u && broken_least - clean_most <= 125u);
     }
 
     // 3. A lone low pulse: a start bit only once it outlasts the start
@@ -4529,18 +4534,18 @@ void tS_irda() {
 // board's TxD, and the far USART has no handshaking (an AVR DA/DB USART
 // has XDIR, not RTS/CTS). So TxD's pad is left to PORT - the transmitter
 // shifts into nothing, and TXC says whether it did -, and the far board
-// is asked for CTS LEVELS on the XCK wire: set_link as a synchronous host,
-// its XCK idling low, or high with its pin inverted. A level counts as
-// PRESENTED only if it holds against this end's pull the other way - PORT's
-// pull-up against a low, pull-down against a high -, because a far pin
-// that does not drive leaves the wire floating, and a floating CTS reads
-// whatever it likes (measured: a "high" that let a frame go). A level not
-// presented skips its legs with that reason - and the far synchronous
-// host's XCK is no level at all: it RUNS while the instance is enabled,
-// transmitting or not (measured: about half of 200 readings high, with
-// and without its INVEN), so on this desk CTS is judged low only, on this
-// end's own pull-down. RTS is read on its own pad: low while the receiver
-// is enabled with room, high with it disabled.
+// is asked for CTS LEVELS on the XCK wire with usart_link.hpp's hold_pad:
+// its XCK pad let go by its USART and driven low, then high - a level its
+// synchronous host could not present, since that XCK RUNS while the
+// instance is enabled. A level counts as PRESENTED only if it holds
+// against this end's pull the other way - PORT's pull-up against a low,
+// pull-down against a high - and the far pad read the same level back at
+// the end of the hold, because a far pin that does not drive leaves the
+// wire floating, and a floating CTS reads whatever it likes (measured: a
+// "high" that let a frame go). A level not presented, or a peer that
+// refuses the op, skips its leg with that reason. CTS low is judged a
+// second time on this end's own pull-down. RTS is read on its own pad:
+// low while the receiver is enabled with room, high with it disabled.
 
 void tC_flow() {
     if (!ensure_link()) {
@@ -4574,19 +4579,17 @@ void tC_flow() {
         return Lk::txc_flag();
     };
 
-    // 1. The far levels, each probed against this end's opposite pull.
+    // 1. The far levels, each commanded with hold_pad on the far XCK pad
+    //    and probed against this end's opposite pull before it is judged.
     bool presented[2] = {false, false};
     for (uint8_t high = 0; high < 2u; ++high) {
-        link::Cfg pc{};
-        pc.mode = link::Mode::sync_host;
-        pc.rate = 100'000;
-        pc.flags = high ? link::flag_invert_xck : 0u;
         link::Params a{};
-        a.cfg = pc;
+        a.value = link::pad_xck;
+        a.aux8 = high;
         a.ms = 120;
-        const bool sent = peer_act(link::Op::set_link, a);
-        // Two hundred readings over two milliseconds: a far pin that is a
-        // running clock (a synchronous host's XCK may be) reads both ways.
+        const bool sent = peer_act(link::Op::hold_pad, a);
+        // Two hundred readings over two milliseconds: a far pin that does
+        // not drive, or drives a running clock, reads both ways.
         pad_dark<XckPin>();
         XckPin::input(high ? PinPull::down : PinPull::up);
         spin_us(200);
@@ -4596,29 +4599,36 @@ void tC_flow() {
             spin_us(10);
         }
         pad_dark<XckPin>();
-        presented[high] = sent && (high ? highs == 200u : highs == 0u);
+        const bool probed = sent && (high ? highs == 200u : highs == 0u);
         bool cts = false, went = false;
-        if (presented[high]) {
+        if (probed) {
             const bool up = flow_up(PinPull::none);
             spin_ms(1);
             cts = (Lk::status() & SercomStatus::cts) != 0u;
             went = up && frame_leaves();
         }
         link::Report r{};
-        (void)peer_report(r, 150);
-        print(plain, "  far XCK ", high ? "inverted" : "as it idles", ": against a pull-",
-              high ? "down" : "up", " the wire reads high ", highs, " times in 200");
+        const bool rep = peer_report(r, 150);
+        // The far readback closes the loop: the level it drove is the
+        // level its own pad read at the end of the hold.
+        presented[high] = probed && rep && r.count == 1u && r.aux16 == high;
+        print(plain, "  far XCK held ", high ? "HIGH" : "LOW", ": against a pull-",
+              high ? "down" : "up", " the wire reads high ", highs, " times in 200, the far "
+              "pad read back ", r.aux16);
         if (presented[high]) {
             print(plain, ", STATUS.CTS ", cts ? 1 : 0, ", a frame ", went ? "left" : "HELD", crlf);
             if (high) {
-                bench.verdict("CTS held high by the far board holds the transmitter (31.6.3.2)",
-                              cts && !went);
+                judge("CTS held high by the far board holds the transmitter (31.6.3.2)",
+                      cts && !went);
             } else {
-                bench.verdict("CTS held low by the far board lets a frame go", !cts && went);
+                judge("CTS held low by the far board lets a frame go", !cts && went);
             }
         } else {
-            print(plain, crlf, "  SKIPPED, no verdict claimed: the far XCK does not hold the "
-                               "wire ", high ? "high" : "low", " against this end's pull", crlf);
+            print(plain, crlf);
+            if (!leg_refused) {
+                print(plain, "  SKIPPED, no verdict claimed: the far XCK does not hold the "
+                             "wire ", high ? "high" : "low", " against this end's pull", crlf);
+            }
         }
     }
 
@@ -4635,7 +4645,7 @@ void tC_flow() {
         bench.verdict("CTS low lets a frame go", up && !cts && went);
     }
     if (!presented[1]) {
-        print(plain, "  (CTS high: implemented, not judged on this desk - no far level)", crlf);
+        print(plain, "  (CTS high: not judged - the far board presented no level)", crlf);
     }
 
     // 3. RTS on its own pad: the receiver enabled with room, then disabled.

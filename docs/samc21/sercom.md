@@ -875,9 +875,11 @@ by the signal's own bit edges - times this board's pads):
   to the per cent.
 - **The receiver's votes, measured on the pad** (letter N): a frame of
   zeros whose cell 5 the far bit-banger stretches reads clean up to a low
-  run of 9.385 to 9.452 bits and raises FERR from 9.424 to 9.480 - the stop
-  bit decided 9.40 to 9.47 bits from the start edge; a lone low pulse is a
-  start bit from 0.40 to 0.42 of a bit under SAMPA 0 (decided at 0.38 to
+  run of 9.318 to 9.452 bits and raises FERR from 9.385 to 9.480 - the stop
+  bit decided between 9.32 and 9.48 bits from the start edge, the bracket
+  of one run never wider than two samples (the ladder's step and the
+  sample the decision moves by with the start edge's phase); a lone low
+  pulse is a start bit from 0.40 to 0.42 of a bit under SAMPA 0 (decided at 0.38 to
   0.41) and from 0.65 to 0.71 under SAMPA 2 (0.63 to 0.69) - four samples
   later, to the sample of synchronization 31.6.3.10's note allows each
   frame.
@@ -913,11 +915,14 @@ by the signal's own bit edges - times this board's pads):
   0 while it lasts RXPL + 2 core cycles (31.8.5), to the cycle the
   asynchronous edge gives. The coder cannot be read by a plain receiver,
   nor a plain transmitter by the decoder.
-- **Hardware handshaking** (letter C): CTS held low (this end's
-  pull-down) lets a frame go, CTSIC unraised; RTS reads low while the
-  receiver has room and high once it is disabled. The far board holds no
-  level on the XCK wire - its synchronous host's XCK runs while the
-  instance is enabled - so CTS high is not judged (below).
+- **Hardware handshaking** (letter C): the far board holds its XCK pad at
+  a level (usart_link.hpp's hold_pad - its synchronous host's XCK would
+  run while the instance is enabled), the level confirmed against this
+  end's opposite pull (200 of 200 readings) and by the far pad's own
+  readback: CTS held HIGH holds the frame (STATUS.CTS 1, no TXC within a
+  millisecond), CTS held low lets it go; CTS low on this end's own pull-down
+  lets a frame go too, CTSIC unraised; RTS reads low while the receiver
+  has room and high once it is disabled.
 - **RS485** (letter R, on the shared wire): TE rises with the start bit
   and falls GTIME bit times after the stop bit's end - 0.00, 0.99, 2.97,
   6.98 bits for GTIME 0, 1, 3, 7 at 19200, the same on both generators,
@@ -982,10 +987,6 @@ Implemented but not bench-verified:
   `serial_speed`'s occupancy and throughput, whose host side - the
   checker of every byte at every rate - is not in `cli/`.
 - The asynchronous mode on an external clock (its first user).
-- CTS HIGH holding the transmitter (31.6.3.2): the desk's far board holds
-  no level on the XCK wire - its synchronous host's XCK runs - so letter C
-  judges CTS low alone; a far end that holds that wire high measures it
-  (a usart_link op that parks the far XCK at a level).
 - Erratum 1.17.2's affected revisions (B to E): `sercom_autobaud_checks_stop()`
   says they do not flag a missing stop bit; the desk's die is revision F,
   where letter O measures that it does.

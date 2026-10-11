@@ -48,8 +48,9 @@
 // on its idle line and inverts its receive pin for a coder that pulses
 // high (match_ircom_sense()); onewire answers after the command channel's
 // turnaround, since a push-pull DUT's stop bit is still on the wire when
-// RXCIF rises; and the echo/sink loop keeps a gapless 3 Mbaud burst
-// (run_echo_as()).
+// RXCIF rises; the echo/sink loop keeps a gapless 3 Mbaud burst
+// (run_echo_as()); and hold_pad presents a LEVEL on a link pad, the
+// SERCOM's CTS input being this end's XCK wire (run_hold_pad()).
 //
 // The banner reports the USERROW board label and whether THIS board's
 // 24 MHz crystal started: the peer's clock is the reference the DUT's
@@ -90,7 +91,7 @@ using LinePin = Pin<'E', 0>;      // TXD pad: the bit-bang and break line
 using RxdPin = Pin<'E', 1>;       // RXD pad: DRIVE_RXD drives the DUT's TXD
 using XckPin = Pin<'E', 2>;
 
-constexpr uint16_t firmware_version = 0x0104;   ///< see usart_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0105;   ///< see usart_link.hpp's Ident
 
 /// THE SPAN'S RULER: TCB0 counts CLK_PER, TCB1 counts TCB0's overflow,
 /// both capture on one software event - a coherent 32-bit count of 24 MHz
@@ -680,6 +681,35 @@ link::Report run_glitch(const link::Params& a, uint8_t bm) {
     return r;
 }
 
+/// A LEVEL on one link pad: the USART let go, the pad driven push-pull
+/// at the commanded level for `ms`, read back at the end (the DUT holding
+/// the wire the other way shows there), then handed back undriven with
+/// OUT cleared - command mode then sets the pulls the dark discipline
+/// allows (hold_pads()). The far board's CTS is its XCK wire, and a
+/// synchronous host's XCK runs while the instance is enabled
+/// (docs/avrdx/usart.md): this is the one level the desk can present on it.
+link::Report run_hold_pad(const link::Params& a) {
+    link::Report r{};
+    uint8_t bm = 0;
+    switch (a.value) {
+        case link::pad_txd: bm = LinePin::mask; break;
+        case link::pad_rxd: bm = RxdPin::mask; break;
+        case link::pad_xck: bm = XckPin::mask; break;
+        default: r.flags |= link::report_cfg_failed; return r;
+    }
+    Link::release();
+    if (a.aux8 != 0) PORTE.OUTSET = bm; else PORTE.OUTCLR = bm;
+    PORTE.DIRSET = bm;
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < a.ms) {
+    }
+    r.aux16 = (PORTE.IN & bm) != 0 ? 1u : 0u;
+    PORTE.DIRCLR = bm;
+    PORTE.OUTCLR = bm;
+    r.count = 1;
+    return r;
+}
+
 /// Half duplex on the shared line: the peer joins with LBME + ODME and
 /// answers every byte it hears, taking the line only to reply. Needs
 /// the PE0-PE0 jumper, not the crossed pair.
@@ -826,7 +856,7 @@ void handle(const link::Frame& f) {
     // change now. The DUT waits link::settle_ms before doing the same,
     // so the peer is always ready first.
     const bool bitbanged = op == Op::bitbang || op == Op::glitch || op == Op::drive_rxd;
-    const bool own_config = op == Op::onewire || op == Op::collide;
+    const bool own_config = op == Op::onewire || op == Op::collide || op == Op::hold_pad;
     bool ok = true;
     if (!bitbanged && !own_config) ok = apply_cfg(a.cfg);
 
@@ -860,6 +890,7 @@ void handle(const link::Frame& f) {
                 break;
             case Op::onewire: r = run_onewire(a); break;
             case Op::collide: r = run_collide(a); break;
+            case Op::hold_pad: r = run_hold_pad(a); break;
             default: r.flags |= link::report_cfg_failed; break;
         }
         r.flags |= link::report_ran;
