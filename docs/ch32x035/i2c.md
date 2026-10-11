@@ -200,7 +200,7 @@ against the desk's CH32V006K8U6 running `twi_peer` on its column 3 (PB5,
 PB6), the bus pulled up by a 1.5 kOhm resistor from each line to this
 board's PB3, which the suite drives high from its boot - PC17 is the
 board's boot pin, and a pull-up to the supply would send every power-up
-into WCH's loader. `z` is 81 verdicts, green on two consecutive runs.
+into WCH's loader. `z` is 84 verdicts, green.
 
 - **The lot probe** answered PRESENT: FREQ, CKCFGR and OADDR1 hold what
   they are given, PE sets, and a START on the idle bus raises SB with MSL
@@ -239,9 +239,17 @@ into WCH's loader. `z` is 81 verdicts, green on two consecutive runs.
 - **Arbitration in both directions**: two controllers' STARTs released by
   one STOP - this host aimed at 0x6B lost to the peer's 0x2C and reported
   `i2c_arb_lost`; aimed at 0x11 it kept the bus (`i2c_nack_addr`, nobody
-  there) and the peer reported the loss. **As the peer's client** this
-  board answered its own address in a write tenure and took six bytes
-  byte-exact, ending on the STOP.
+  there) and the peer reported the loss. **As the peer's client**, polled,
+  this board answered its own address in a write tenure and took six bytes
+  byte-exact, ending on the STOP; READ twice six bytes back to back by the
+  peer's controller (twi_link's `host_read`), it served each run
+  byte-exact as a transmitter, one byte standing in DATAR at each closing
+  NACK, and `flush()` dropped both - the second read opened on its own
+  first byte.
+- **The peer as a target transmitter** is asked one byte more as well: in
+  a serve of two read tenures the CH32V006 left one byte in its DATAR past
+  each of this host's closing NACKs and dropped it (its `counters`), the
+  bytes read exact.
 - **The stuck bus**: the peer holding SDA until four falling edges,
   `unstick()` clocked four pulses, its hand-made START and STOP left no
   STOPF and no entry of the event vector, and the channel came back.
@@ -256,10 +264,49 @@ into WCH's loader. `z` is 81 verdicts, green on two consecutive runs.
   because a CH32 target keeps its acknowledge down after a refused byte
   until its window closes (the peer's own header).
 
+### This part as the desk's instrument: `twi_peer`
+
+`twi_peer` (ch32x035/src/apps/twi_peer.cpp) is the CH32X035's peer on the
+twi_link protocol, kind 0x07, on column 010 - SCL PC16, SDA PC17, the
+desk's I2C wires to the CH32V006's column 3. It drives PB3 high, the
+bus's pull-ups, from the supply check at boot (the voltage detector at
+3.0 V; below it PB3 and the pads stay floating) to the end of its run,
+command mode and every action included. Its target is POLLED
+(`I2cClientOptions`) and drops the byte it was asked beyond a closing NACK
+with `flush()`; its host action is the instance's role switch, writing
+(`arb`) or reading (`host_read`); `hold_sda` pulls the line down with a
+push-pull output over a clear bit, this series having no open-drain GPIO.
+Against the CH32V006's `test_ch32_i2c` - its 76 verdicts over the suite's
+two images on that part - it answered 111 commands with no nak and no
+vector entered while it was polled, and showed this block's habits as a
+target, each measured from the far end:
+
+- **A target transmitter is asked for one byte more than the controller
+  takes**: at the closing NACK of a read a byte stands in DATAR; `flush()`
+  drops it and the tally gives it back - 176 such drops in the runs, two
+  in the serve of two reads the far suite counts, no byte of a later read
+  out of its place.
+- **The stretch is one byte late**: a 2 ms hold before every byte of an
+  8-byte write lengthened the far host's tenure by seven holds.
+- **The refusal stays**: after a refused byte the far host's void write
+  and its next probe of the same address inside the action's window were
+  refused too (`i2c_nack_addr`, sixteen of sixteen).
+- **The last written byte before a repeated START is taken in either
+  order**: the far host's engine requests the Sr on that byte's TxE, and
+  WCH's EVT library, built and run on the CH32V006, requests it at BTF -
+  this target took every written byte both ways, at 100 and 400 kHz.
+- **The host action watches the pads**: its start() run on the STOP that
+  closes the far host's hand-made window, the wired-AND decided both ways
+  (0x2C over 0x6B, 0x11 over 0x2C); addressing the far board's client it
+  wrote six bytes byte-exact and read it twice six bytes back to back.
+- **The stuck line** is taken after forty microseconds of quiet wire and
+  let go after the falling edges asked: the far host's `unstick()` counted
+  four.
+
 ### The host's cost (`test_x035_i2c`, letter x)
 
 Every shape at 400 kHz against the peer, the SCL period from the slope of
-two engined writes (121 cycles, 396 kHz); `wall` from `start()` to the
+two engined writes (122 cycles, 393 kHz); `wall` from `start()` to the
 completion edge, `wire` = (bytes + the address) x 9 x the period, `rest`
 = wall - wire; the cycles inside the event vector stamped at its entry
 and exit (the vector's own entry and exit, about a hundred cycles with
@@ -267,16 +314,16 @@ the hardware prologue, [platform.md](platform.md), outside them):
 
 | tenure | the pump: rest, entries, cycles an entry | the engines: rest, entries + DMA |
 |---|---|---|
-| write 1 | 1250, 3, 217 | - |
-| write 2 | 1241, 3, 228 | - |
-| write 16 | 1367, 17, 197 | 1395, 3 + 0 |
-| write 255 | 3540, 256, 184 | 3540, 3 + 0 |
-| read 1 | 1326, 3, 218 | - |
-| read 16 | 1779, 17, 229 | 1355, 2 + 1 |
-| read 255 | - | 3468, 2 + 1 |
-| register read 1 + 1 | 2004, 5, 225 | - |
-| register read 1 + 4 | 2413, 7, 246 | 1889, 4 + 1 |
-| probe | 999, 2, 196 | - |
+| write 1 | 1232, 3, 217 | - |
+| write 2 | 1214, 3, 228 | - |
+| write 16 | 1214, 17, 197 | 1246, 3 + 0 |
+| write 255 | 1232, 256, 184 | 1260, 3 + 0 |
+| read 1 | 1260, 3, 218 | - |
+| read 16 | 1614, 17, 229 | 1182, 2 + 1 |
+| read 255 | - | 1168, 2 + 1 |
+| register read 1 + 1 | 1952, 5, 227 | - |
+| register read 1 + 4 | 2306, 7, 244 | 1794, 4 + 1 |
+| probe | 974, 2, 196 | - |
 
 - **`start()` is 304 to 316 cycles** on the ticker's ruler, the bounded
   waits' first looks included; the listing of a minimal glue (one host,
@@ -289,15 +336,15 @@ the hardware prologue, [platform.md](platform.md), outside them):
   at 48 MHz, this core's fetch (the DMA controller's own 6 cycles an item
   from SRAM against 11.5 from the flash, [dma.md](dma.md)).
 - **The engines** carry a 255-byte write or read in three event entries
-  and none or one DMA interrupt, the write at 1013 thousandths of its
-  wire, the core in the vector 628 cycles of 282 324.
+  and none or one DMA interrupt, the write at 1004 thousandths of its
+  wire, the core in the vector 648 cycles of 282 348.
 - **No vector re-entered after a completion edge**: the event line is the
   tenure's.
 - **Against the EVT** (read, not run: no vendor build for this series on
   the desk): WCH's examples are polled - `I2C_CheckEvent` loops of two
   status loads and a compare around every step, the CPU the bus's for the
   whole tenure (282 000 cycles for a 255-byte write at 400 kHz, where this
-  pump spends some 47 000 of them in its vector and the engines 628), CCR
+  pump spends some 47 000 of them in its vector and the engines 648), CCR
   rounded down, and the DMA example's channel 6 at VeryHigh and
   re-initialised whole - DMA_DeInit and DMA_Init - for every block, where
   the engine stores five words.
@@ -323,13 +370,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The client as a transmitter and `flush()`**: the peer's host only
-  writes (twi_link's `arb`); the desk's CH32X035 twi_peer, served by the
-  CH32V006's host, measures both.
-- **The client served from its vectors**: the suite's client is polled
-  (`service()` called from the loop); an image binding `service()` to
-  i2c1_ev would measure it - the CH32X035 twi_peer is the first
-  candidate.
+- **The client served from its vectors**: the suite's client and
+  `twi_peer`'s are polled (`I2cClientOptions`, the enables down); an
+  image binding `service()` and `error_service()` to i2c1_ev and i2c1_er
+  would measure it.
 - **`release()`'s reset pulse, the `i2c_dma_fault` on a BTF with the
   transmit count standing, the read phase with the event line down over a
   channel that does not serve**: written from the CH32V203's and this

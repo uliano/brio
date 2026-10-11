@@ -107,10 +107,15 @@ enum class Op : uint8_t {
     hold_sda = 0x13,    ///< a stuck client: SDA held low from PORT, released by SCL
     quiet = 0x14,       ///< the TWI released entirely: the peer off the wire
 
+    // THE EXTENDED REPERTOIRE (below): ops a peer may not know.
+    counters = 0x04,    ///< ack + Counters: what the last action's report has no field for
+    host_read = 0x15,   ///< the host half READS from the DUT's client (arb's rendezvous)
+
     ack = 0x40,
     nak = 0x41,
     ident_data = 0x42,
     report_data = 0x43,
+    counters_data = 0x44,
 };
 
 constexpr uint8_t byte_of(Op op) { return static_cast<uint8_t>(op); }
@@ -141,6 +146,24 @@ constexpr bool is_action(Op op) {
         default: return false;
     }
 }
+
+/// THE EXTENDED REPERTOIRE. `is_command` and `is_action` name the base
+/// set every peer serves; the ops below were added after it, and a peer
+/// built before them answers them with a nak - the refusal the version
+/// comment asks for, and nothing of that peer changes. A peer that serves
+/// them asks the two predicates here instead of the base pair.
+///
+///   counters   a query: the Counters frame of the last action
+///   host_read  the `arb` rendezvous (the DUT's window by hand, this
+///              peer's start() on the STOP that closes it), its host
+///              READING `count` bytes from `target` - the DUT's own
+///              client as a TRANSMITTER; the Report's count, sum and
+///              first are the bytes read, mstatus the host's status
+constexpr bool is_extended_command(Op op) {
+    return is_command(op) || op == Op::counters || op == Op::host_read;
+}
+
+constexpr bool is_extended_action(Op op) { return is_action(op) || op == Op::host_read; }
 
 /// The 8-bit sum of the whole frame, XORed so that a run of zeros does
 /// not check out.
@@ -271,6 +294,12 @@ inline constexpr uint8_t pattern_fixed = 1;      ///< seed every time
 ///              how many SCL falling edges release it (0 = only the
 ///              deadline does), ms = deadline
 ///   quiet      ms = how long the peer stays off the wire entirely
+///   host_read  target = the address its HOST reads from, count = bytes
+///              each read takes, aux8 = reads back to back (0 = one, four
+///              at most), ms = deadline, aux16 = as arb's (the extended
+///              repertoire); the Report's count and sum are over every
+///              byte read, first the first read's first byte, aux0 the
+///              last read's, addr_hits the reads completed
 struct Params {
     uint16_t count = 0;
     uint16_t ms = 200;
@@ -441,5 +470,39 @@ constexpr Report get_report(const uint8_t* p) {
     r.ms = p[15];
     return r;
 }
+
+/// What a Report has no field for, asked with `counters` after it (the
+/// extended repertoire). `drops` is the habit of a target transmitter
+/// that is asked for one byte more than the controller takes: the bytes
+/// the peer threw away at the closing NACKs of the last action, and
+/// `drops_total` the same since its boot; `stray` counts what reached a
+/// vector the peer did not arm, since its boot; `commands` the frames it
+/// has answered, since its boot.
+struct Counters {
+    uint16_t drops = 0;
+    uint16_t drops_total = 0;
+    uint16_t stray = 0;
+    uint16_t commands = 0;
+};
+
+inline constexpr uint8_t counters_size = 8;
+
+constexpr void put_counters(uint8_t* p, const Counters& c) {
+    put16(p, c.drops);
+    put16(p + 2, c.drops_total);
+    put16(p + 4, c.stray);
+    put16(p + 6, c.commands);
+}
+
+constexpr Counters get_counters(const uint8_t* p) {
+    Counters c{};
+    c.drops = get16(p);
+    c.drops_total = get16(p + 2);
+    c.stray = get16(p + 4);
+    c.commands = get16(p + 6);
+    return c;
+}
+
+static_assert(counters_size + 4u <= response_bytes, "a Counters frame fits one response read");
 
 }  // namespace twilink

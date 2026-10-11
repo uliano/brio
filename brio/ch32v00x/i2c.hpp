@@ -20,7 +20,9 @@
  *    error).
  *  - `I2cClient<n, pins>` is the target side: a polled surface and two
  *    ISR bodies, deliberately thin, because a client is a protocol and
- *    which protocol is the application's.
+ *    which protocol is the application's; polled or on its vectors
+ *    (`I2cClientOptions`), with `flush()` for the byte a target
+ *    transmitter is asked beyond the host's closing NACK.
  *
  * THE MACHINE THIS CHAPTER PRESCRIBES is a set of software sequences,
  * each stretching SCL low until it completes (15.3's notes): EV5 (SB
@@ -1282,6 +1284,17 @@ enum class I2cClientEvent : uint8_t {
     error,           ///< BERR, ARLO or OVR
 };
 
+/// What a client is beyond its addresses. `no_stretch` gives up the clock
+/// stretch (NOSTRETCH, 15.10.1), and with it the guarantee against OVR.
+/// `interrupts` false leaves the three enables and the two PFIC lines
+/// down for a POLLED client, which is what an instrument that must spend
+/// a commanded hold inside a tenure needs: the flags then belong to the
+/// loop alone.
+struct I2cClientOptions {
+    bool no_stretch = false;
+    bool interrupts = true;
+};
+
 /**
  * I2cClient<n, pins>
  *
@@ -1314,10 +1327,10 @@ public:
 
     /// Bring the instance up as a bus target. FREQ must still state the
     /// bus clock (the peripheral's own timing needs it even as a
-    /// target), so the same 8 MHz floor applies. `no_stretch` gives up
-    /// the clock stretch, and with it the guarantee against OVR.
+    /// target), so the same 8 MHz floor applies. The enables are raised
+    /// only for a client on its vectors (`I2cClientOptions`).
     template <typename Clock>
-    static bool init(Clock clock, const I2cAddressConfig& addr, bool no_stretch = false) {
+    static bool init(Clock clock, const I2cAddressConfig& addr, const I2cClientOptions& opts = {}) {
         Pfic::disable(S::event_irq());
         Pfic::disable(S::error_irq());
         S::bus_clock(true);
@@ -1331,16 +1344,18 @@ public:
         if (!S::addresses(addr)) {
             return false;
         }
-        S::no_stretch(no_stretch);
+        S::no_stretch(opts.no_stretch);
         S::enable();
         S::ack(true);   // answer the own address
         SclPin::function(PinDrive::open_drain);
         SdaPin::function(PinDrive::open_drain);
-        S::event_interrupt(true);
-        S::buffer_interrupt(true);
-        S::error_interrupt(true);
-        Pfic::enable(S::event_irq());
-        Pfic::enable(S::error_irq());
+        if (opts.interrupts) {
+            S::event_interrupt(true);
+            S::buffer_interrupt(true);
+            S::error_interrupt(true);
+            Pfic::enable(S::event_irq());
+            Pfic::enable(S::error_irq());
+        }
         return true;
     }
 
@@ -1373,6 +1388,33 @@ public:
     static bool overrun() { return S::flag(i2c_ovr); }
     static void clear_overrun() { S::clear_errors(i2c_ovr); }
     static uint16_t flags() { return S::status1(); }
+
+    /**
+     * THROW AWAY A BYTE THE HOST NEVER TOOK. A target transmitter is
+     * asked for one byte more than the controller takes: DATAR empties
+     * into the shifter and TxE rises again, so the byte standing in DATAR
+     * when the closing NACK arrives is never clocked out and would be the
+     * FIRST byte of the next read tenure. The chapter has no verb that
+     * discards it; a PE cycle does - with PE clear the hardware clears
+     * TxE, RxNE, BTF, ADDR, STOPF and the error flags (15.10.6) and ACK
+     * (15.10.1), while CTLR2, OADDR1, OADDR2 and CKCFGR keep what they
+     * hold - so the addresses and the timing survive and only the loaded
+     * byte is lost. ACK goes back up here.
+     *
+     * True when there was a byte to drop; false when DATAR was already
+     * empty (TxE standing). Asked at the moment after the host's closing
+     * NACK, where the question is real: TxE is a transmitter's flag, and
+     * a client nobody is reading says nothing about DATAR through it.
+     */
+    static bool flush() {
+        if (S::flag(i2c_txe)) {
+            return false;
+        }
+        S::disable();
+        S::enable();
+        S::ack(true);
+        return true;
+    }
 
     // ---- the ISR bodies -----------------------------------------------------
 

@@ -87,7 +87,9 @@ void all_hosts() {
 
 void client_verbs() {
     constexpr Slow clock;
-    (void)Client::init(clock, {.own = 0x48, .second = 0x49}, false);
+    (void)Client::init(clock, {.own = 0x48, .second = 0x49});
+    (void)Client::init(clock, {.own = 0x48}, {.no_stretch = true, .interrupts = false});
+    (void)Client::flush();
     (void)Client::addressed();
     (void)Client::answer_address();
     (void)Client::second_address_matched();

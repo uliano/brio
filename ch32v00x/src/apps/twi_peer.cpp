@@ -18,11 +18,11 @@
 //    back. During a host action this board's target is simply absent,
 //    which the choreography already tolerates (the DUT waits out the
 //    action's deadline either way).
-//  - THE TARGET IS POLLED. The CH32V006's `I2cClient::init()` raises the
-//    three interrupt enables and the two PFIC lines; this program takes
-//    them down again at once (`poll_only()`), so every flag below belongs
-//    to the loop, and a commanded hold is a wait the loop spends where it
-//    stands. The two vectors stay bound and DISARM whatever reaches them.
+//  - THE TARGET IS POLLED. `I2cClientOptions::interrupts` false leaves the
+//    three interrupt enables and the two PFIC lines down, so every flag
+//    below belongs to the loop, and a commanded hold is a wait the loop
+//    spends where it stands. The two vectors stay bound and DISARM
+//    whatever reaches them.
 //  - THE TARGET STRETCHES BY CONSTRUCTION, ONE BYTE LATE. ADDR holds SCL
 //    until the STAR1-then-STAR2 read, and a receiver holds it at BTF (RM
 //    15.4) - one byte deeper than it sounds: this block takes the NEXT
@@ -40,7 +40,9 @@
 //    before the DUT's STOP: SDA is taken after forty microseconds of
 //    quiet wire, a START condition the DUT sees like any other, and the
 //    DUT's next tenure meets the held line.
-//  - A START IS NOT ARMED INSIDE THE DUT'S WINDOW. `arb` watches the pads
+//  - A START IS NOT ARMED INSIDE THE DUT'S WINDOW. `arb` and `host_read`
+//    (the extended repertoire: this host READING the DUT's client) watch
+//    the pads
 //    instead and runs the engine's start() the instant SDA rises under a
 //    high SCL - the STOP that closes the DUT's window - so the DUT's
 //    START, set just before its STOP, and this one leave together and the
@@ -60,10 +62,10 @@
 //  - A TARGET TRANSMITTER IS ASKED FOR ONE BYTE MORE THAN THE CONTROLLER
 //    TAKES: DATAR empties into the shifter and TxE rises again, so the byte
 //    standing in DATAR when the closing NACK arrives never reaches the
-//    wire. `flush()` below throws it away - a PE cycle, which spares the
-//    addresses and the timing (15.10.1's PE clears the state, not the
-//    configuration) - and the tally gives it back; the console counts the
-//    drops as `dropped=`. The give pump is GATED ON A READ TENURE, so
+//    wire. `I2cClient::flush()` throws it away - the PE cycle that spares
+//    the addresses and the timing - and the tally gives it back; the
+//    console counts the drops as `dropped=`, and the `counters` query
+//    hands them to the DUT. The give pump is GATED ON A READ TENURE, so
 //    nothing is written into DATAR while no controller is reading.
 //  - flag_stop_interrupt maps to nothing: STOPF is a polled flag here and
 //    the Stop count is kept whenever the action loop sees it.
@@ -142,7 +144,7 @@ using SclPin = Pin<'B', 5>;
 using SdaPin = Pin<'B', 6>;
 
 constexpr uint16_t firmware_version =
-    static_cast<uint16_t>((twilink::peer_ch32v00x << 8) | 0x01u);   ///< twi_link.hpp's Ident
+    static_cast<uint16_t>((twilink::peer_ch32v00x << 8) | 0x02u);   ///< twi_link.hpp's Ident
 
 static_assert(device::part_name[0] == 'C' && device::part_name[1] == 'H' &&
                   device::part_name[2] == '3' && device::part_name[3] == '2',
@@ -157,6 +159,8 @@ twilink::Decoder decoder;
 twilink::Report last_report;
 
 uint32_t commands = 0, actions = 0, naks = 0, answers = 0, flushes = 0;
+/// The drops of the last action (the `counters` query).
+uint16_t last_drops = 0;
 
 uint8_t resp_[twilink::response_bytes];
 uint8_t resp_len_ = 0;
@@ -245,20 +249,12 @@ bool wait_wire_quiet(uint32_t t0, uint32_t ms, uint16_t quiet_us) {
 
 // ---- the two standing configurations ----------------------------------------------
 
-/// The target polled (the header): the three enables and the two lines
-/// down again behind the client's init().
-void poll_only() {
-    Pfic::disable(Raw::event_irq());
-    Pfic::disable(Raw::error_irq());
-    Raw::interrupts(0, i2c_itevten | i2c_itbufen | i2c_iterren);
-}
-
-/// Bring the target up at one exact address, POLLED.
+/// Bring the target up at one exact address, POLLED (the header).
 bool bring_up_client(uint8_t addr, bool general_call) {
     host_live = false;
     own_addr_ = addr;
-    const bool ok = Client::init(clock, {.own = addr, .general_call = general_call}, false);
-    poll_only();
+    const bool ok = Client::init(clock, {.own = addr, .general_call = general_call},
+                                 {.no_stretch = false, .interrupts = false});
     serving_ = false;
     return ok;
 }
@@ -286,25 +282,13 @@ bool apply_client(const twilink::Params& a) {
 /// ADDR that rose since the last read of STAR1, 15.10.6).
 uint8_t matched_address() { return Client::general_call_matched() ? 0x00u : own_addr_; }
 
-/// THROW AWAY THE BYTE THE HOST NEVER TOOK (the header): a PE cycle with
-/// ACK back up, asked at the closing NACK. True when DATAR held one.
-bool flush() {
-    if (Raw::flag(i2c_txe)) {
-        return false;
-    }
-    Raw::disable();
-    Raw::enable();
-    Raw::ack(true);
-    return true;
-}
-
 /// The closing NACK of a read tenure: the flag cleared, the give pump
 /// stopped, and the byte the shifter asked for beyond it dropped (the
 /// header). True when there was one to drop.
 bool close_read() {
     Client::clear_nack();
     serving_ = false;
-    const bool dropped = flush();
+    const bool dropped = Client::flush();
     if (dropped) {
         ++flushes;
     }
@@ -327,7 +311,7 @@ void service_command() {
         const uint8_t v = Client::take();
         switch (decoder.feed(v)) {
             case twilink::Decoder::Result::frame:
-                if (twilink::is_command(decoder.frame().op)) {
+                if (twilink::is_extended_command(decoder.frame().op)) {
                     prepare(decoder.frame());
                 } else {
                     prepare_nak(decoder.frame().op, decoder.frame().sum);
@@ -411,7 +395,7 @@ void prepare(const twilink::Frame& f) {
     if (trace) {
         print(console, "  [cmd op=", hex(twilink::byte_of(f.op)), " len=", f.len, "]", crlf);
     }
-    if (twilink::is_action(f.op) && f.len < twilink::params_size) {
+    if (twilink::is_extended_action(f.op) && f.len < twilink::params_size) {
         prepare_nak(f.op, f.sum);
         return;
     }
@@ -419,7 +403,7 @@ void prepare(const twilink::Frame& f) {
     set_response(Op::ack, p, 2);
     pending_ = f.op;
     has_pending_ = true;
-    if (twilink::is_action(f.op)) {
+    if (twilink::is_extended_action(f.op)) {
         pending_params_ = twilink::get_params(f.data);
     }
 }
@@ -547,8 +531,10 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
 /// THE HOST ACTION, a ROLE SWITCH (the header). The rendezvous is the
 /// DUT's window - SDA pulled low by hand under a high SCL, a START
 /// condition every controller on the wire sees - and the STOP that closes
-/// it; this end's start() runs on that STOP.
-twilink::Report run_arb(const twilink::Params& a) {
+/// it; this end's start() runs on that STOP. `arb` writes the pattern to
+/// `target`; `host_read` reads `count` bytes from it, `aux8` times back to
+/// back, and the report carries the bytes read (twi_link.hpp).
+twilink::Report run_host(const twilink::Params& a, bool read) {
     twilink::Report r{};
     host_live = true;
     if (!Host::init(clock)) {
@@ -593,27 +579,48 @@ twilink::Report run_arb(const twilink::Params& a) {
         return r;
     }
 
-    host_done = false;
     r.flags |= twilink::report_host_ran;
-    const bool sync_done = Host::start({.addr = a.target,
-                                        .tx = lend<Lease::reply>(
-                                            static_cast<const uint8_t*>(burst)),
-                                        .tx_len = n,
-                                        .rx = {},
-                                        .rx_len = 0,
-                                        .reply = {},
-                                        .speed = I2cSpeed::standard_100k});
-    if (sync_done) {
-        host_status = Host::status();
-        host_done = true;
-    } else {
-        while (!host_done && Ticker::millis() - t0 < a.ms) {
+    // ONE TENURE, waited out on the vectors' completion within the deadline.
+    const auto tenure = [&]() -> bool {
+        host_done = false;
+        const bool sync_done =
+            read ? Host::start({.addr = a.target,
+                                .tx = {},
+                                .tx_len = 0,
+                                .rx = lend<Lease::reply>(static_cast<uint8_t*>(burst)),
+                                .rx_len = n,
+                                .reply = {},
+                                .speed = I2cSpeed::standard_100k})
+                 : Host::start({.addr = a.target,
+                                .tx = lend<Lease::reply>(static_cast<const uint8_t*>(burst)),
+                                .tx_len = n,
+                                .rx = {},
+                                .rx_len = 0,
+                                .reply = {},
+                                .speed = I2cSpeed::standard_100k});
+        if (sync_done) {
+            host_status = Host::status();
+            host_done = true;
+        } else {
+            while (!host_done && Ticker::millis() - t0 < a.ms) {
+            }
         }
-    }
-    if (!host_done) {
-        r.flags |= twilink::report_timed_out;
-        (void)Host::recover();
-    } else {
+        return host_done;
+    };
+    // host_read's `aux8` reads, back to back (twi_link.hpp); arb writes once.
+    const uint8_t tenures = read ? (a.aux8 == 0u ? uint8_t{1} : (a.aux8 > 4u ? uint8_t{4} : a.aux8))
+                                 : uint8_t{1};
+    for (uint8_t k = 0; k < tenures; ++k) {
+        if (read) {
+            for (uint8_t i = 0; i < n; ++i) {
+                burst[i] = 0xEE;
+            }
+        }
+        if (!tenure()) {
+            r.flags |= twilink::report_timed_out;
+            (void)Host::recover();
+            break;
+        }
         r.mstatus = host_status;
         if (host_status == i2c_ok) {
             r.flags |= twilink::report_host_ok;
@@ -625,6 +632,18 @@ twilink::Report run_arb(const twilink::Params& a) {
             r.flags |= twilink::report_buserr;
         }
         r.aux1 = n;
+        if (!read || host_status != i2c_ok) {
+            break;
+        }
+        ++r.addr_hits;
+        r.count = static_cast<uint16_t>(r.count + n);
+        if (k == 0u) {
+            r.first = burst[0];
+        }
+        r.aux0 = burst[0];
+        for (uint8_t i = 0; i < n; ++i) {
+            r.sum = static_cast<uint16_t>(r.sum + burst[i]);
+        }
     }
     host_live = false;
     (void)go_command();
@@ -717,20 +736,34 @@ void run_pending() {
         set_response(Op::report_data, p, twilink::report_size);
         return;
     }
+    if (op == Op::counters) {
+        twilink::Counters k{};
+        k.drops = last_drops;
+        k.drops_total = static_cast<uint16_t>(flushes);
+        k.stray = static_cast<uint16_t>(stray_vectors);
+        k.commands = static_cast<uint16_t>(commands);
+        uint8_t p[twilink::counters_size];
+        twilink::put_counters(p, k);
+        set_response(Op::counters_data, p, twilink::counters_size);
+        return;
+    }
 
     ++actions;
     const twilink::Params a = pending_params_;
     const uint32_t started = Ticker::millis();
+    const uint32_t flushes0 = flushes;
     twilink::Report r{};
     switch (op) {
         case Op::serve: r = run_serve(a, false); break;
         case Op::coll: r = run_serve(a, true); break;
-        case Op::arb: r = run_arb(a); break;
+        case Op::arb: r = run_host(a, false); break;
+        case Op::host_read: r = run_host(a, true); break;
         case Op::hold_sda: r = run_hold_sda(a); break;
         case Op::quiet: r = run_quiet(a); break;
         default: break;
     }
     r.flags |= twilink::report_ran;
+    last_drops = static_cast<uint16_t>(flushes - flushes0);
     const uint32_t took = Ticker::millis() - started;
     r.ms = took > 255u ? uint8_t{255} : static_cast<uint8_t>(took);
     r.op = twilink::byte_of(op);

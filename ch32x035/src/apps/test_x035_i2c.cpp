@@ -64,7 +64,9 @@
 //   i  THE REFUSAL, wireless: a speed the clock cannot make is answered
 //      i2c_rejected inside start() and delivered through the arbiter
 //   j  ARBITRATION in both directions, and THIS BOARD AS THE CLIENT of the
-//      peer's own controller - its stretch one byte late, measured
+//      peer's own controller - written to, its stretch one byte late
+//      measured, and read from, the byte a transmitter is asked beyond the
+//      closing NACK dropped by flush()
 //   k  THE STUCK BUS: the peer holding SDA, unstick() counting the clocks
 //   q  THE SIBLINGS' QUIRKS RE-MEASURED on this die: a START into a held
 //      SDA, raw; how long the host's own STOP stands in CTLR1; a CTLR1
@@ -439,6 +441,20 @@ bool peer_report(twilink::Report& r) {
     return false;
 }
 
+/// The extended repertoire's `counters` (twi_link.hpp): what the last
+/// action's report has no field for. False from a peer that naks it.
+bool peer_counters(twilink::Counters& c) {
+    for (uint8_t k = 0; k < 2; ++k) {
+        twilink::Frame f;
+        if (query(Op::counters, f) && f.op == Op::counters_data && f.len == twilink::counters_size) {
+            c = twilink::get_counters(f.data);
+            return true;
+        }
+        settle_ms(60);
+    }
+    return false;
+}
+
 bool peer_act(Op op, const twilink::Params& a) {
     uint8_t p[twilink::params_size];
     twilink::put_params(p, a);
@@ -787,8 +803,12 @@ void td_shapes() {
     settle_ms(300);
     twilink::Report r{};
     const bool rep = peer_report(r);
+    twilink::Counters k{};
+    const bool kc = peer_counters(k);
     print(serial, "  write=", ws, " read=", rs, " mism=", rmism, " combined=", cs, "; peer: count=",
-          r.count, " addr_hits=", r.addr_hits, " first=", hex(r.first), " sum=", hex(r.sum), crlf);
+          r.count, " addr_hits=", r.addr_hits, " first=", hex(r.first), " sum=", hex(r.sum),
+          "; the peer's target dropped ", k.drops, " byte(s) at the closing NACKs of the action (",
+          kc ? "counters answered" : "NO counters", ")", crlf);
     bench.verdict("a write tenure, a read tenure and the combined write-then-read all complete "
                   "i2c_ok against a SECOND CHIP",
                   ws == i2c_ok && rs == i2c_ok && cs == i2c_ok);
@@ -799,6 +819,14 @@ void td_shapes() {
     bench.verdict("and the COMBINED tenure hit the client's address machinery TWICE - the repeated "
                   "START, counted from the far end",
                   rep && r.addr_hits == 4u);
+    if (kc) {
+        bench.verdict("THE TARGET ASKED ONE BYTE MORE: each of the two read tenures left one byte in the "
+                      "peer's DATAR past this host's closing NACK, and the peer's flush() dropped it (its "
+                      "counters) - the bytes read above are exact all the same",
+                      k.drops == 2u && rmism == 0u);
+    } else {
+        print(serial, "  (the peer does not serve the counters query: the drops are not judged)", crlf);
+    }
 
     bool counts_ok = true;
     for (uint8_t n = 1; n <= 4u; ++n) {
@@ -1562,8 +1590,100 @@ void tj_arbitration() {
                   late_seen && (late_s1 & (i2c_rxne | i2c_btf)) == (i2c_rxne | i2c_btf));
     Client::release();
     settle_ms(300);
+
+    // ---- THIS BOARD AS THE CLIENT, READ FROM: the transmitter ----
+    // Two reads of six bytes back to back (the extended repertoire's
+    // host_read); each read tenure serves its own run (0xC0.., then
+    // 0xE0..), so a byte left in DATAR past the first read's closing NACK
+    // would open the second read in place of 0xE0.
     host_ready();
-    bench.verdict("the command channel is back after the role swap", command(Op::ping));
+    twilink::Params rd{};
+    rd.ms = 900;
+    rd.addr = twilink::dut_addr;
+    rd.target = twilink::dut_addr;
+    rd.count = 6;
+    rd.aux16 = 400;
+    rd.aux8 = 2;
+    if (!peer_act(Op::host_read, rd)) {
+        bench.verdict("the peer accepted the host_read command (the extended repertoire)", false);
+        host_ready();
+        return;
+    }
+    Host::release();
+    const bool up2 = Client::init(clock, {.own = twilink::dut_addr}, {.no_stretch = false, .interrupts = false});
+    hold_bus_busy(400);
+    uint8_t read_tenures = 0;
+    uint8_t gave = 0;
+    uint8_t nacks = 0;
+    uint8_t drops = 0;
+    bool serving = false;
+    uint8_t seed = 0;
+    uint8_t i_tx = 0;
+    uint16_t given_sum = 0;
+    const uint32_t t1 = Ticker::millis();
+    // ONE STAR1 SNAPSHOT A PASS, every decision taken on it: the closing
+    // NACK is a LEVEL that may rise between two separate reads of the
+    // register, and a pass that cleared the error flags on a second read
+    // would swallow it uncounted.
+    while (Ticker::millis() - t1 < 1000u) {
+        const uint16_t s1 = H::status1();
+        if ((s1 & i2c_addr) != 0u) {
+            serving = Client::answer_address();
+            if (serving) {
+                seed = static_cast<uint8_t>(0xC0u + 0x20u * read_tenures);
+                ++read_tenures;
+                i_tx = 0;
+            }
+        } else if ((s1 & i2c_af) != 0u) {
+            // THE CLOSING NACK: the byte the shifter asked for beyond it is
+            // thrown away here, before the next tenure can see it.
+            H::clear_errors(static_cast<uint16_t>(s1 & i2c_errors));
+            serving = false;
+            ++nacks;
+            if (Client::flush()) {
+                ++drops;
+                given_sum = static_cast<uint16_t>(given_sum - static_cast<uint8_t>(seed + i_tx - 1u));
+            }
+        } else if (serving && (s1 & i2c_txe) != 0u) {
+            const uint8_t v = static_cast<uint8_t>(seed + i_tx);
+            Client::give(v);
+            given_sum = static_cast<uint16_t>(given_sum + v);
+            ++i_tx;
+            ++gave;
+        } else if ((s1 & i2c_stopf) != 0u) {
+            Client::clear_stop();
+            if (nacks >= 2u) {
+                break;
+            }
+        } else if ((s1 & i2c_errors) != 0u) {
+            H::clear_errors(static_cast<uint16_t>(s1 & i2c_errors));
+        }
+    }
+    Client::release();
+    settle_ms(300);
+    host_ready();
+    twilink::Report rr{};
+    const bool rrep = peer_report(rr);
+    uint16_t want_sum = 0;
+    for (uint8_t k = 0; k < 2u; ++k) {
+        for (uint8_t i = 0; i < 6u; ++i) {
+            want_sum = static_cast<uint16_t>(want_sum + static_cast<uint8_t>(0xC0u + 0x20u * k + i));
+        }
+    }
+    print(serial, "  as a CLIENT, read from: init=", up2 ? 1 : 0, " read tenures=", read_tenures,
+          " bytes given=", gave, " closing NACKs=", nacks, " dropped by flush()=", drops, "; the peer read ",
+          rr.count, " bytes in ", rr.addr_hits, " reads, status ", rr.mstatus, ", sum ", hex(rr.sum), " (",
+          hex(want_sum), "), first ", hex(rr.first), " (0xC0), the second read's first ", hex(rr.aux0),
+          " (0xE0); this side's sum of what left, the drops given back, ", hex(given_sum), crlf);
+    bench.verdict("the client served a REAL controller's two reads as a transmitter, every byte the peer "
+                  "took its own run (count, sum and both first bytes), and what this side counts as sent - "
+                  "the drops given back - is what the peer read",
+                  up2 && rrep && rr.mstatus == i2c_ok && rr.count == 12u && rr.addr_hits == 2u &&
+                      rr.sum == want_sum && rr.first == 0xC0u && rr.aux0 == 0xE0u && given_sum == want_sum);
+    bench.verdict("THE TRANSMITTER ASKED ONE BYTE MORE: at each closing NACK one byte stood in DATAR, and "
+                  "flush() dropped it - the second read opened on its own first byte",
+                  read_tenures == 2u && nacks == 2u && drops == 2u && rr.aux0 == 0xE0u);
+    bench.verdict("the command channel is back after the role swaps", command(Op::ping));
     // The collision case (twi_link's `coll`, two clients on ONE address
     // with a third party reading) has no third party on this desk: the
     // document's gap list says so.
