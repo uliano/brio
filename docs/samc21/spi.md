@@ -324,9 +324,14 @@ the two spans:
   does not time them (below).
 - Back-to-back characters (no inter-byte gap - one engine request)
   bind at the PEER'S ANSWER RELOAD. The AVR peer's polled loop: exact to
-  500 kHz always, 1 MHz a coin toss (its 5..9 us polled turnaround
-  against a 10 us character), well below its CLK_PER/6 electrical
-  ceiling.
+  500 kHz in every ladder, never at 1 MHz (410 ladders, its answers six
+  of eight wrong while it receives every character exact), well below
+  its CLK_PER/6 electrical ceiling. From 1 MHz up its RXCIF-paced
+  receive also meets the read the AVR silicon does not take
+  ([../avrdx/spi.md](../avrdx/spi.md)): 35 of 2960 windows from 1 to
+  24 MHz stopped short with every character they read exact, none of
+  740 at 200 and 500 kHz. Letter d runs such a window at the rung it
+  judges once more.
 - THIS CLIENT BACK TO BACK REACHES THE WIRE (`test_avr_spi` letter u:
   an AVR128DB48 host, sixteen characters in one polled request of its
   engine - its own pace 2 CLK_PER between characters at CLK_PER/4 and
@@ -547,19 +552,3 @@ Implemented but not bench-verified:
 
 Stated, not enforced: `SercomPadPin`'s pin-reaches-pad claim is the
 caller's (sercom.md's open device-table question, unchanged here).
-
-Open, and outside this driver: THE PEER'S SELECT-WAIT WEDGE,
-neutralized but not explained. A peer that opens its exchange window by
-spinning on the select READ can enter a persistent state - until its
-board is reset, about once in five `z` runs - where that read never
-fires while its SPI HARDWARE demonstrably shifts: the host reads the
-preloads and then the echo, the software window reads nothing. On the
-wire the select is real (driven low over SWD, and the wedged peer's own
-status reads it LOW), so the wedge lives between the pad and that wait.
-The exchange loop therefore polls RXC directly - a byte can only arrive
-while selected, and apply_cfg has just cleared the buffers - and
-samples the select purely as TELEMETRY the Report carries
-(aux1..aux3), which removes the symptom without explaining it. What
-the state is remains unhunted, a question on the AVR side of the link
-(the peer plus its pin read path) with the telemetry in place to catch
-it in the act.

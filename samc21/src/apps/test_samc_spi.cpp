@@ -649,14 +649,12 @@ void dump_exchange(const Exchange& e, const Verify& v, const spilink::Report& r)
           " (first idx ", r.idx, " got ", hex(r.got), " exp ", hex(r.exp),
           ") flags=", hex(r.flags), crlf);
     if (r.count == 0 && (r.flags & spilink::report_timed_out) != 0) {
-        // The signature the RARE PEER WEDGE used to leave (spi.md "Not
-        // covered yet"): commands decode, the hardware serves the
-        // preloads and echoes, the window burns whole reading nothing.
-        // The peer's exchange loop no longer depends on its select READ
-        // (it polls RXC directly and samples the select only as the
-        // telemetry printed here), so if this fires the aux bytes are
-        // the forensics - and a peer left in a stale state is healed by
-        // resetting it.
+        // Commands decode, the hardware serves the preloads and echoes,
+        // the window burns whole reading nothing. On the avrdx peer that
+        // is an AVR client whose receive FIFO was left full under a
+        // lowered RXCIF (docs/avrdx/spi.md, the read that is not taken):
+        // its client init now empties the FIFO, so the state ends with
+        // the window that met it. The aux bytes are the forensics.
         print(serial, "    the peer's exchange window read NOTHING (count=0, timed "
                       "out) while the command channel works - peer telemetry: "
                       "first-byte ms=", r.aux1, " select bits=", hex(r.aux2),
@@ -1078,12 +1076,33 @@ void td_rates() {
         e.spare = spilink::spare_polled_pump;
         Verify v{};
         spilink::Report r{};
-        const bool ok = exchange_exact(e, v, r);
+        bool ok = exchange_exact(e, v, r);
         const uint32_t real = spi_sck_hz(SysClock::hz, *b);
+        // A RECEIVE THAT WENT DEAF MID-WINDOW is the peer's fault, not the
+        // wire's: fewer characters counted than were clocked and not one
+        // of them wrong. On the avrdx peer it is the AVR client's read
+        // that is not taken (docs/avrdx/spi.md): a read emptying the FIFO
+        // in the cycle the next character enters leaves the FIFO full
+        // under a lowered RXCIF and the RXCIF-paced loop hears nothing
+        // more, which a loop no faster than the wire meets at the very
+        // rung where the climb breaks. The rung is run ONCE more - the
+        // client's init empties the FIFO, so the next window starts clean -
+        // and the second window is the one judged.
+        if (!ok && first_bad == 0 && r.count < e.count && r.mism == 0) {
+            print(serial, "  SCK ", real / 1000u, " kHz: the peer's receive went deaf after ",
+                  r.count, " of ", e.count, " characters, none wrong - the rung once more",
+                  crlf);
+            ok = exchange_exact(e, v, r);
+        }
         print(serial, "  SCK ", real / 1000u, " kHz (BAUD ", *b, "): ",
               ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
               " client mism=", r.mism, " client count=", r.count,
-              " serve=", (r.aux2 & 0x04) != 0 ? "dma" : "pump", crlf);
+              " serve=", (r.aux2 & 0x04) != 0 ? "dma" : "pump");
+        if (r.mism != 0) {
+            print(serial, " (client first idx ", r.idx, " got ", hex(r.got), " exp ",
+                  hex(r.exp), ")");
+        }
+        print(serial, crlf);
         if (ok && first_bad == 0) {
             last_good = real;
         } else if (!ok && first_bad == 0) {

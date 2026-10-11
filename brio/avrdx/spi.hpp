@@ -590,6 +590,27 @@ public:
     static void clear_ss_flag() { regs().INTFLAGS = SPI_SSIF_bm; }
     static void clear_overflow() { regs().INTFLAGS = SPI_BUFOVF_bm; }
 
+    /// The receive FIFO emptied, in buffer mode with nothing shifting:
+    /// one DATA read whatever RXCIF says - the read that takes a byte the
+    /// flag no longer shows and brings the flag back -, then a read per
+    /// entry the flag shows (the FIFO's two and the shifter's one at
+    /// most), BUFOVF cleared. A read of an empty FIFO returns the last
+    /// byte read and changes nothing after it (docs/avrdx/spi.md). init()
+    /// does NOT do this: its store of one to RXCIF drops the flag and
+    /// leaves the bytes, so a FIFO a former user left non-empty starts
+    /// the next buffer-mode user with the flag down over it - and an
+    /// RXCIF-paced reader is deaf from then on, every arrival queueing
+    /// behind bytes no flag announces. SpiHost's init() and recover()
+    /// call it, and SpiClient::init() in buffer mode.
+    static void flush_receive() {
+        auto& s = regs();
+        (void)s.DATA;
+        for (uint8_t i = 0; i < 3u && (s.INTFLAGS & SPI_RXCIF_bm) != 0; ++i) {
+            (void)s.DATA;
+        }
+        s.INTFLAGS = SPI_BUFOVF_bm;
+    }
+
     // ---- interrupts (28.5.3) ---------------------------------------------
 
     /// IE: the one enable of the normal layout (fires on IF).
@@ -1372,20 +1393,9 @@ private:
         }
     }
 
-    /// The receive FIFO emptied with the transmitter idle: one DATA read
-    /// whatever RXCIF says - the read that takes a byte the flag no longer
-    /// shows and brings the flag back -, then a read per entry the flag
-    /// shows (the FIFO's two and the shifter's one at most), BUFOVF
-    /// cleared. A read of an empty FIFO returns the last byte read and
-    /// changes nothing after it (docs/avrdx/spi.md).
-    static void flush() {
-        auto& s = S::regs();
-        (void)s.DATA;
-        for (uint8_t i = 0; i < 3u && (s.INTFLAGS & SPI_RXCIF_bm) != 0; ++i) {
-            (void)s.DATA;
-        }
-        s.INTFLAGS = SPI_BUFOVF_bm;
-    }
+    /// The receive FIFO emptied with the transmitter idle (the
+    /// resource's flush_receive()).
+    static void flush() { S::flush_receive(); }
 
     /// The pump's launch: the tenure's fields copied out of the lent
     /// request (the pins; the data phase's spans and length, kept aside
@@ -1528,18 +1538,26 @@ public:
     };
 
     /// Configure the instance as a client. False (nothing programmed)
-    /// when this package cannot bond the route's pins.
+    /// when this package cannot bond the route's pins. Called with the
+    /// client deselected: in buffer mode the receive FIFO is emptied
+    /// (the resource's flush_receive()), because the resource's init()
+    /// leaves what a former user left there under a lowered RXCIF and a
+    /// client that waits for RXCIF would never hear another byte.
     static bool init(Options o = {}) {
         if constexpr (!available) {
             (void)o;
             return false;
         } else {
-            return S::init({.route = route, .role = SpiRole::client, .mode = o.mode,
-                            .lsb_first = o.lsb_first,
-                            .client_select_disable = true,   // SSD is a host bit; keep it out of the way
-                            .buffer_mode = o.buffer_mode,
-                            .buffer_wait = o.buffer_wait,
-                            .drive_miso = o.drive_miso});
+            if (!S::init({.route = route, .role = SpiRole::client, .mode = o.mode,
+                          .lsb_first = o.lsb_first,
+                          .client_select_disable = true,   // SSD is a host bit; keep it out of the way
+                          .buffer_mode = o.buffer_mode,
+                          .buffer_wait = o.buffer_wait,
+                          .drive_miso = o.drive_miso})) {
+                return false;
+            }
+            if (o.buffer_mode) S::flush_receive();
+            return true;
         }
     }
 

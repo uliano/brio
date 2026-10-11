@@ -96,9 +96,9 @@ RUNSTDBY control of its own.
 | `spi_clock_for(clk_per, max_sck)` | the chooser: the fastest division that does not exceed a device's limit |
 | `spi_max_host_sck_hz`, `spi_max_client_sck_hz` | the two ceilings of the timing tables |
 | `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
-| `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
+| `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, `flush_receive()` (the receive FIFO emptied whatever RXCIF says), the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
 | `SpiHost<n, route>` | the transfer ENGINE, the instance in BUFFER MODE: `Request` descriptors (21 bytes, no padding: two `PinRef`s, three pointers, the lengths, the reply, four settings - the field names every stratum shares), `start()` (a polled request completes inside it reading the lent request and copying nothing; the pump copies its tenure's fields at launch), `isr()` (the pump on RXCIE and TXCIE: the received bytes read by count, two in flight, one interrupt a byte when the handler is on time and one for two when it is late), `status()` (always `spi_ok` here - no DMA path, no fault of its own; the verb keeps the app glue spelled as on every stratum), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp): the pump's interrupt silenced, a demoted host re-armed, the bytes still in flight waited for (bounded), the FIFO read out whatever RXCIF says, the select window closed |
-| `SpiClient<n, route>` | the client side: `selected()`, `preload()`, `exchange()`, the buffer-mode readbacks, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
+| `SpiClient<n, route>` | the client side: `init()` (in buffer mode the receive FIFO emptied, the resource's `flush_receive()`), `selected()`, `preload()`, `exchange()`, the buffer-mode readbacks, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
 
 Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
 `cs_setup_us` timing base and re-picks the division that honours its
@@ -333,6 +333,30 @@ or left behind shows as a wrong level in the next one: 3600 pumped
 requests at CLK_PER/16 met the cycle eight times and all completed with
 every byte the level MISO held and the receiver empty after, and 3600
 polled requests under the same handler likewise.
+
+**A CLIENT meets that read too, and its init empties the FIFO.** A
+client paces its reads by RXCIF (`SpiClient::poll()`), and a loop
+no faster than the host's clock makes the read that is not taken: in
+the window that meets it the FIFO stays full under a lowered RXCIF and
+the loop hears nothing more - the window stops short, every byte it
+did read exact. Measured with this board as the CLIENT (`spi_peer`'s
+exchange loop, eight characters back to back) and a SAM C21 host
+clocking it (`test_samc_spi` letter d, 200 kHz to 24 MHz): in 370
+ladders, 35 of the 2960 windows from 1 to 24 MHz stopped short - at
+every rung from 1 to 12 MHz, eight of them at 1 MHz, inside the
+client's ceiling - and none of the 740 at 200 and 500 kHz, where the
+loop is faster than the wire. The state survives everything but
+a read: the resource's `init()` stores one to RXCIF and leaves the
+bytes, a switch to normal mode and back leaves them, and the console's
+re-init of the dark client left them - every buffer-mode window after
+the one that met it read nothing (five `z` runs in a row, until the
+board was reset). `SpiClient::init()` therefore empties the FIFO in
+buffer mode (`flush_receive()`, the sequence the engine's `init()`
+uses): with it every window after one that stopped short was clean,
+and 366 of the 370 `z` runs passed whole - three of the other four met
+it at the 1 MHz rung letter d judges (which now runs a window that
+stopped short once more, and met it twice in a row once in five), the
+fourth read one wrong character there, its cause not caught.
 
 ### The engine's cost
 
@@ -576,6 +600,13 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Driver gaps** (what the code does not do):
 
+- the client's buffer-mode receive is paced by RXCIF (`poll()`,
+  `wait()`, `exchange()`): a loop no faster than the host's clock can
+  make the read that is not taken and lose the rest of its window
+  (Bench findings). A receive by COUNT, as the engine's, wants the
+  client's transmitter flags measured as a count of the host's
+  transfers first - not done; the instrument meets it at the rungs
+  where its loop meets the wire;
 - no client-side ISR-driven service: `SpiClient` is a polled surface plus
   the resource's ISR bodies, and the AO that would sit on it (the mirror
   of `BusMaster` for a client) is not written - it will be born with its
@@ -606,12 +637,11 @@ client selects itself with INVEN on its own pulled-up SS pin.
   (about 1.2 times the wire), late at CLK_PER/4 (about three times) and
   wire-bound from CLK_PER/32 are counted, and a line at each, the pump's
   in a vector with no meter, would measure them;
-- the receive FIFO emptied by `init()` and `recover()` (`flush()`): the
-  sequence it reads with - one read whatever RXCIF says, then a read per
-  entry the flag shows - is the one test `t` judges on a FIFO left with
-  the flag down, but neither verb has been called on such a FIFO, and
-  `recover()`'s bounded wait for the bytes still in flight has never
-  waited (the wedge above);
+- the receive FIFO emptied by the engine's `init()` and `recover()`:
+  `flush_receive()` has emptied a FIFO left full under a lowered RXCIF
+  through `SpiClient::init()` (Bench findings), never through the two
+  host verbs, and `recover()`'s bounded wait for the bytes still in
+  flight has never waited (the wedge above);
 - an SPI interrupt as the wake from Idle (28.3.5's feature): the sleep
   story is [platform.md](platform.md)'s and no letter of either suite
   sleeps with a transfer pending;

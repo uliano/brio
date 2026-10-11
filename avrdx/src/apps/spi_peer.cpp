@@ -286,23 +286,21 @@ spilink::Report run_exchange(const spilink::Params& a) {
     if (bufwr) Raw::write(s.out.next());
     r.aux3 = Raw::flags();   // INTFLAGS right after the preloads
 
-    // NO WAIT-FOR-SELECT. A spin on Client::selected() before counting
-    // is where a RARE WEDGE lives: a state (roughly one burst in five,
-    // and persistent until this board resets) in which the select READ
-    // never fires while the SPI hardware demonstrably shifts - the host
-    // reads the preloads above and then the echo, this loop reads
-    // nothing and burns its whole window. That wait adds nothing the
-    // poll cannot give: apply_cfg() has just re-initialized the client,
-    // so the buffers hold no stale bytes, and a byte can only ARRIVE
-    // while the host holds the select low - polling RXC is therefore
-    // the same "wait for the burst" with one less mechanism in the
-    // loop.
+    // NO WAIT-FOR-SELECT: a byte can only ARRIVE while the host holds
+    // the select low, so polling RXC is the wait. apply_cfg() has just
+    // re-initialized the client, and in buffer mode its init empties the
+    // receive FIFO (avrdx/spi.hpp's flush_receive()), so no stale byte
+    // leads.
     // selected() is still SAMPLED, as telemetry: aux1 carries the
     // milliseconds to the first received byte (255 = none came), aux2
     // bit0 whether the select read true at that byte, bit1 whether it
-    // read true at any point of the window - so if the wedge's cause
-    // ever surfaces again, the report itself says what the select pin
-    // was doing.
+    // read true at any point of the window. A window that heard nothing
+    // or stopped short with the select seen is this loop meeting the
+    // read the silicon does not take (docs/avrdx/spi.md): a read that
+    // empties the FIFO in the cycle the next byte enters leaves the FIFO
+    // full under a lowered RXCIF, and an RXCIF-paced loop hears nothing
+    // more in that window. A loop no faster than the host's clock
+    // meets it; the next window starts clean.
     const uint32_t t0 = Ticker::millis();
     bool any_selected = false;
     r.aux1 = 255;
