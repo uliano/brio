@@ -109,6 +109,11 @@ void all_hosts() {
 void client_verbs() {
     constexpr SysClock clock;
     (void)Client::init(clock, {.mode = SpiMode::mode1, .nss = SpiNss::hardware_input, .drive_output = false});
+    (void)Client::init<Client::Config{.mode = SpiMode::mode3}>(clock);
+    // The CH32V006's client is served in modes 0 and 3 alone (measured);
+    // the CH32V003 refuses nothing yet.
+    static_assert(Client::config_served({.mode = SpiMode::mode0}) && Client::config_served({.mode = SpiMode::mode3}));
+    static_assert(Client::config_served({.mode = SpiMode::mode2}) == (device::part == Ch32Part::v003));
     Client::drive_output(true);
     Client::enable(0xA5);
     Client::write(0x5A);

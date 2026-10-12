@@ -15,7 +15,8 @@ examples) as the vendor's shape. Driver:
 [brio/ch32x035/spi.hpp](../../brio/ch32x035/spi.hpp), the columns in
 [brio/ch32x035/afio.hpp](../../brio/ch32x035/afio.hpp); reference suite
 `test_x035_spi` against the desk's CH32V006K8U6 running its `spi_peer`
-([../ch32v00x/spi.md](../ch32v00x/spi.md)).
+([../ch32v00x/spi.md](../ch32v00x/spi.md)); this chip's own `spi_peer`
+is that board's suite's instrument (below).
 
 ## What the silicon does
 
@@ -80,6 +81,15 @@ examples) as the vendor's shape. Driver:
   both bit orders, ANSWERS exact in all four modes MSb first - the first
   restriction does not hold here - and LSb first its MISO never moves, in
   every mode: the second holds, for what a client sends (letters r and w).
+  16-bit frames and the CRC as a client, both ways, measured under the
+  CH32V006's host (`spi_peer`, below).
+- **AS A CLIENT, ITS RATE DEPENDS ON ITS OWN MISO PAD** (measured, cause
+  not isolated): under the CH32V006's host every pattern is exact both
+  ways to 6 MHz; at 12 and 24 MHz the client loses SCK edges whenever PA6
+  stands high - answering 0xFF it heard none of sixteen frames, answering
+  0x00 all sixteen at both rates, and listening with PA6 held high as a
+  GPIO none at 12 MHz where held low it heard all at 24. Table 3-19's
+  24 MHz for a client is reached with that pad low.
 - **The pads are a column** (8.3.2.1, SPI1_RM[1:0]): 00 PA4/PA5/PA6/PA7
   (NSS, SCK, MISO, MOSI), 01 PB21/PB15/PA8/PA9, 10 PA12/PA11/PA9/PA10, 11
   PC4/PC5/PC6/PC7. The QFN20 bonds the first column alone; the CH32X033F8P6
@@ -254,6 +264,46 @@ twice.
   aligned to 32 bytes: aligned, a pad function shifting the image moves
   them by less than one per cent.
 
+### This part as the desk's instrument: `spi_peer`
+
+`spi_peer` makes the CH32X035F8U6 the desk's SPI client for the
+CH32V006's suite (`test_ch32_spi`, [../ch32v00x/spi.md](../ch32v00x/spi.md)):
+spi_link's command channel in band over SPI1's column 0 with the HARDWARE
+select on PA4 (pulled up), the dark listener, its answer windows in mode
+0, the exchange served on the DMA engines (channels 2 and 3, polled with
+no interrupt, the window read off the NSS pad) or on the client's runs,
+the EXTENDED EXCHANGE whole - 16-bit frames (the engines in half-word
+beats, the runs over `uint16_t`), the CRC on a polled run (CRCNEXT set
+the instant the last answer is in the buffer, the host's CRC frame taken
+as one more frame), a receive-only run with MISO undriven -, `sink_slow`,
+`ss_pulse` on PA4 as a GPIO, `host_burst` with PA4 the host's GPIO select
+(16-bit frames too); an answering exchange LSb first refused, as
+`SpiClient` refuses it, and `mspi` refused (no USART of this package
+reaches the wires). The voltage detector at 3.0 V gates the link pads at
+boot; PB3 is never touched. What the far chip measured of this client:
+
+- **The hardware select frames it**: every exchange the CH32V006 host
+  clocked, in all four modes MSb first, on both serves, exact both ways;
+  LSb first the client hears exact as a listener and the far host's LSb
+  against its MSb is an exact two-way reversal. The far host's MODF
+  letter took its select low four times on command.
+- **16-bit frames and the CRC**: sixteen 16-bit frames through the far
+  host's pump in every mode and 32 on its engines exact both ways; CRC-8
+  (0x07) and CRC-16 (0x8005) over eight frames - this client's TXCRCR
+  frame the bitwise CRC of its stream, its check of the host's CRC frame
+  clear - and on two polynomials its CRCERR set.
+- **The rate**: the DMA serve exact both ways at every code to 6 MHz
+  behind the far host's polled loop and its engines, and the receive
+  engine alone, MISO undriven, to 12 MHz - the client's MISO pad decides
+  above that (What the silicon does). The client's polled run - each
+  answer reloaded on the TXE of the frame before it by code fetched from
+  the flash - to 3 MHz behind a host with gaps between frames and to 1.5
+  MHz behind frames back to back (3 MHz failing in one run of four).
+- **As a host** (`host_burst`, one polled frame a request, 20 us apart, 1.5
+  MHz): the CH32V006's client on its hardware NSS read twelve frames exact
+  in modes 0 and 3, MSb and LSb first, and eight 16-bit frames in mode 3,
+  and this host read its answers exact.
+
 ### The host above the wire
 
 What a transaction costs beyond its frames' time, measured by letter b at
@@ -332,9 +382,11 @@ Implemented but not bench-verified, each with what would measure it:
   request; its MOSI in both modes is the standard's (letter w). A client
   that answers in modes 1 and 2 at a frame per select - this chip as the
   peer of a third host - would read it.
-- **The client's runs under back-to-back frames**: the peer's `host_burst`
-  clocks one frame a request, 20 us apart; a host clocking a run back to
-  back would measure the one-frame-ahead window.
+- **The client at 12 and 24 MHz with its MISO driven high** (table 3-19's
+  24 MHz): lost edges the client's own PA6 level decides, measured and not
+  explained; a scope on PA5 at this pad with PA6 high and low at 12 MHz,
+  and the two boards on one rail, would say whether it is the die, the
+  two rails or the wiring.
 - **The client's vectors**: the suite's clients are polled runs and DMA;
   an image binding `isr()` to spi1 would measure them.
 - **`spi_stalled`, `spi_dma_fault` and `recover()`**: no run raised them;

@@ -42,6 +42,15 @@
 // follow their ack with a second data frame served in a third window
 // by the same mechanics.
 //
+// THE ALTERNATE ANSWER MODE. A peer whose client cannot answer in mode
+// 0 serves ack, nak, ident and report in MODE 3 (CPOL = 1, CPHA = 1),
+// its command windows staying mode 0, where a client only receives; a
+// host tries mode 0 and then mode 3 at its rendezvous, and keeps the
+// one that answered. No byte of the wire format changes: what moves is
+// the clock's polarity and phase in the answer windows alone. The
+// ch32v00x peer is such a peer (its header says what the CH32V006's
+// client does in mode 0).
+//
 // THE DARK LISTENER
 //
 // The four wires this protocol runs on are also the pins the DUT's
@@ -394,6 +403,45 @@ inline constexpr uint8_t spare_polled_pump = 0x01;
 /// whole exchange, which the host's read-back judges the same way.
 inline constexpr uint8_t spare_answer_only = 0x02;
 
+// THE EXTENDED EXCHANGE: three more `spare` bits of an exchange, for a
+// host whose own 16-bit frames, CRC unit and receive-only path need a
+// FOREIGN WITNESS. A peer that knows all three raises `report_extended`
+// in the exchange's report, having served whichever the command carried
+// as asked; an instrument that does not know them ignores them like any
+// other spare bit, serves a plain 8-bit exchange and never raises the
+// flag - so a host that asked for any of them judges the report only
+// when the flag stands, and otherwise says the peer has not got them.
+
+/// `Params::spare` bit 2: 16-BIT FRAMES. Both streams are the usual byte
+/// streams taken two bytes a frame, LOW BYTE FIRST - frame i is P(2i) |
+/// P(2i + 1) << 8, which is also how a byte buffer holds 16-bit frames
+/// on every stratum. `count` counts FRAMES; the report's count is the
+/// frames received, and its sum, mism, idx, got and exp run over those
+/// frames' BYTES in that order (mism counts bytes). Under
+/// `flag_expect_reversed` what arrives is the 16-bit reverse of each
+/// frame (`wide_byte` below names every byte of it).
+inline constexpr uint8_t spare_wide = 0x04;
+
+/// `Params::spare` bit 3: THE CRC. Both ends run their CRC units with the
+/// polynomial in `aux16` (of the frame's width; zero is refused,
+/// report_cfg_failed): the host clocks `count` data frames and then its
+/// CRC frame, the client answers `count` frames and then ITS CRC frame,
+/// and the client CHECKS the host's - `report_crcerr` when the frame
+/// that came did not match what it computed over the `count` before it.
+/// The CRC frame is not counted. Each end's CRC is the bitwise one over
+/// the frames it sent, MSb first and unreflected, from zero.
+inline constexpr uint8_t spare_crc = 0x08;
+
+/// `Params::spare` bit 4: a RECEIVE-ONLY run, the mirror of
+/// spare_answer_only - the client takes `count` frames and loads nothing,
+/// its MISO left DARK (not driven) for the window, and its report judges
+/// what arrived; what the host reads back is not the client's and is not
+/// judged. A host asks it to have its own transmit path witnessed by a
+/// client that only listens. It carries spare_wide; spare_crc is an
+/// exchange's (a client that sends nothing has no CRC frame to send) and
+/// is refused beside it (report_cfg_failed).
+inline constexpr uint8_t spare_receive_only = 0x10;
+
 /// The two sides of the write-collision boundary, and the byte the
 /// client writes over its own answer at each of them.
 inline constexpr uint8_t wrcol_gap_at = 1;
@@ -405,7 +453,9 @@ inline constexpr uint8_t wrcol_marker = 0x3C;
 ///
 ///   exchange   count = bytes, ms = deadline, seed_a/seed_b/pattern =
 ///              the two streams, cfg = the client's configuration,
-///              flags as above
+///              flags as above; with spare_wide count = frames, with
+///              spare_crc aux16 = the CRC polynomial (the extended
+///              exchange, above)
 ///   sink_slow  count = bytes the host will send with NO gap, ms =
 ///              deadline, cfg = the regime whose loss is being measured
 ///   ss_pulse   aux8 = milliseconds to wait after the ack window before
@@ -528,6 +578,11 @@ inline constexpr uint8_t report_timed_out = 0x02;   ///< the deadline ended it
 inline constexpr uint8_t report_cfg_failed = 0x04;  ///< the Cfg was refused by the driver
 inline constexpr uint8_t report_wrcol = 0x08;       ///< WRCOL was seen (normal mode)
 inline constexpr uint8_t report_bufovf = 0x10;      ///< BUFOVF was seen (buffer mode)
+/// The peer knows the extended exchange (spare_wide, spare_crc,
+/// spare_receive_only) and served the command as it asked.
+inline constexpr uint8_t report_extended = 0x20;
+/// spare_crc: the host's CRC frame did not match what the client computed.
+inline constexpr uint8_t report_crcerr = 0x40;
 
 /// What the client saw while it was not in command mode. The four `aux`
 /// bytes are per-op raw evidence:
@@ -654,6 +709,20 @@ constexpr uint8_t bit_reverse(uint8_t v) {
         r = static_cast<uint8_t>((r << 1) | ((v >> i) & 1u));
     }
     return r;
+}
+
+/// Byte `i` of a stream as an end of the extended exchange sees it in
+/// memory: with `wide` the frames are 16 bits, low byte first, and
+/// `reversed` turns each FRAME end for end - its two bytes swap places,
+/// each bit-reversed; without it the byte's own reverse.
+constexpr uint8_t wide_byte(uint8_t pattern, uint8_t seed, uint16_t i, bool wide, bool reversed) {
+    if (!reversed) {
+        return pattern_value(pattern, seed, i);
+    }
+    if (!wide) {
+        return bit_reverse(pattern_value(pattern, seed, i));
+    }
+    return bit_reverse(pattern_value(pattern, seed, static_cast<uint16_t>(i ^ 1u)));
 }
 
 }  // namespace spilink

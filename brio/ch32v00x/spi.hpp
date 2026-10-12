@@ -986,6 +986,12 @@ public:
                     r.dc.set();
                     if (ok) {
                         keep(r);
+                        // The beat is this request's frame: launch_dma()
+                        // reads the step, which the asynchronous path
+                        // below sets too - a polled 16-bit request after
+                        // an 8-bit asynchronous one launched byte beats
+                        // before it was set here (test_ch32_spi letter d).
+                        step_ = spi_frame_is_halfword(r.bits) ? 2u : 1u;
                         launch_dma();
                         spin_dma();
                     }
@@ -1619,10 +1625,14 @@ private:
     static inline volatile bool dma_active_ = false;
     /// The dummy frame of the polled loops (0xFF or 0xFFFF, read at a
     /// stride of zero), and the discard cell and the dummy cell of the
-    /// engines, half-words so that either beat reads or writes them.
+    /// engines, half-words so that either beat reads or writes them. The
+    /// engines' cells are in SRAM: the transmit channel reads its cell
+    /// every frame, and from the flash, behind two wait states at 48 MHz
+    /// (RM V1.5 18.3.1), that read cost it 1031 thousandths of the wire
+    /// at HCLK/2 (measured, test_ch32_spi letter g) where SRAM gives 1000.
     static constexpr uint8_t dummy_bytes_[2] = {0xFFu, 0xFFu};
     static inline uint16_t rx_sink_ = 0;
-    static constexpr uint16_t tx_dummy_ = 0xFFFFu;
+    static inline uint16_t tx_dummy_ = 0xFFFFu;
     static inline SpiConfig applied_{};
     static inline uint16_t ctlr1_ = 0;     ///< CTLR1 as it stands, SPE included
     static inline uint32_t request_key_ = 0;   ///< the last request's clock, mode and width as one word
@@ -1636,6 +1646,25 @@ private:
 // =============================================================================
 // The client task
 // =============================================================================
+
+/**
+ * The modes this part's CLIENT is served in. 16.2.3: "if you need to
+ * send in slave mode, you need to set CPOL to mode 2 or mode 3" - and
+ * measured against a foreign host whose waveforms are the standard's in
+ * all four modes (docs/ch32v00x/spi.md), the CH32V006K8U6's client is
+ * served in modes 0 and 3 BOTH WAYS and in modes 1 and 2 NEITHER way:
+ * what it hears there is every frame one bit early, what it sends a
+ * fixed pattern. So a CH32V006 client is refused in modes 1 and 2,
+ * listening or answering. The CH32V003F4P6 shares the block and has not
+ * answered on its own die: it refuses nothing here (its gap list).
+ */
+constexpr bool spi_client_mode_served(SpiMode m) {
+    if constexpr (device::part == Ch32Part::v006) {
+        return m == SpiMode::mode0 || m == SpiMode::mode3;
+    } else {
+        return true;
+    }
+}
 
 /**
  * SpiClient<n, pins>
@@ -1697,12 +1726,20 @@ public:
         bool drive_output = true;
     };
 
+    /// Is this configuration one the client is served in on this part
+    /// (spi_client_mode_served)?
+    static constexpr bool config_served(const Config& c) { return spi_client_mode_served(c.mode); }
+
     /// Bring the instance up as a client. The bus clock is required
     /// even though the shifter runs on the host's SCK. False when the
-    /// configuration is refused.
+    /// configuration is refused - by the chapter, or by what this part
+    /// measured as a client (config_served).
     template <typename Clock>
     static bool init(Clock clock, const Config& cfg = {}) {
         (void)clock;
+        if (!config_served(cfg)) {
+            return false;
+        }
         Pfic::disable(S::irq());
         S::bus_clock(true);
         S::reset();
@@ -1720,6 +1757,17 @@ public:
         S::flush_rx();
         Pfic::enable(S::irq());
         return true;
+    }
+
+    /// The same with the configuration known at compile time: a mode
+    /// this part's client is not served in does not compile.
+    template <Config cfg, typename Clock>
+    static bool init(Clock clock) {
+        static_assert(config_served(cfg),
+                      "brio SpiClient: the CH32V006's client is served in modes 0 and 3 alone - in modes 1 "
+                      "and 2 it hears every frame one bit early and sends a fixed pattern (measured, "
+                      "spi_client_mode_served)");
+        return init(clock, cfg);
     }
 
     /// Hand the answer line to the peripheral, or take it back (a
@@ -1850,6 +1898,11 @@ static_assert(spi_write_ahead_safe(SpiClock::div256, SpiDataSize::bits8, spi_def
 // a sum of 652, from /128 on 8-bit frames and from /64 on 16-bit ones.
 static_assert(spi_write_ahead_from(SpiDataSize::bits8, 600u) == SpiClock::div128);
 static_assert(spi_write_ahead_from(SpiDataSize::bits16, 600u) == SpiClock::div64);
+
+// The client's modes: the CH32V006 refuses modes 1 and 2 (measured), the
+// CH32V003 nothing yet (unmeasured).
+static_assert(spi_client_mode_served(SpiMode::mode0) && spi_client_mode_served(SpiMode::mode3));
+static_assert(spi_client_mode_served(SpiMode::mode1) == (device::part != Ch32Part::v006));
 
 // Table 16-1.
 static_assert(!spi_mode_cpol(SpiMode::mode1) && spi_mode_cpha(SpiMode::mode1));

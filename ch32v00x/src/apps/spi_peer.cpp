@@ -66,8 +66,14 @@
 //    there, this client is served in modes 0 and 3 both ways and in NEITHER
 //    direction in modes 1 and 2 (its MISO a fixed pattern, what it hears
 //    wrong), the far host's waveforms the standard's in all four. The peer
-//    serves modes 1 and 2 all the same, so a DUT measures them; its
-//    report says what arrived.
+//    serves modes 1 and 2 all the same, so a DUT measures them - its
+//    driver's SpiClient refuses them (spi_client_mode_served), so there it
+//    configures the block BY HAND, the resource's verbs on the same pads;
+//    its report says what arrived.
+//  - THE EXTENDED EXCHANGE (spi_link's spare_wide, spare_crc,
+//    spare_receive_only) is not served: this peer runs 8-bit frames
+//    whatever the command asks and never raises report_extended, which is
+//    how a host knows (the CH32X035 peer serves it).
 //
 // THE DARK LISTENER discipline: the command-mode client never drives MISO
 // (drive_output = false, the pad a floating input), the answer line wakes
@@ -142,11 +148,13 @@ static_assert(link_pins.sck == Pad{'C', 5} && link_pins.mosi == Pad{'C', 6} && l
 using Client = SpiClient<1, link_pins>;
 using Host = SpiHost<1, link_pins>;
 using Raw = Spi<1>;
+using SckPin = Pin<'C', 5>;
+using MosiPin = Pin<'C', 6>;
 using MisoPin = Pin<'C', 7>;
 using NssPin = Pin<'C', 1>;
 
 constexpr uint16_t firmware_version =
-    static_cast<uint16_t>((spilink::peer_ch32v00x << 8) | 0x01u);   ///< spi_link.hpp's Ident
+    static_cast<uint16_t>((spilink::peer_ch32v00x << 8) | 0x02u);   ///< spi_link.hpp's Ident
 
 static_assert(device::part_name[0] == 'C' && device::part_name[1] == 'H' &&
                   device::part_name[2] == '3' && device::part_name[3] == '2',
@@ -232,14 +240,36 @@ SpiMode mode_of(uint8_t m) {
     }
 }
 
+/// A client in a mode SpiClient refuses on this part (modes 1 and 2,
+/// spi_client_mode_served), configured BY HAND for a DUT to measure: what
+/// Client::init() does, through the resource - the gate, the reset, the
+/// column, the configuration, the inputs, MISO handed over last.
+bool client_by_hand(const Client::Config& c) {
+    Pfic::disable(Raw::irq());
+    Raw::bus_clock(true);
+    Raw::reset();
+    Afio::remap_spi1(link_pins.remap);
+    if (!Raw::configure({.role = SpiRole::client, .mode = c.mode, .bits = c.bits, .lsb_first = c.lsb_first,
+                         .nss = SpiNss::hardware_input})) {
+        return false;
+    }
+    SckPin::input();
+    MosiPin::input();
+    NssPin::input(PinPull::up);
+    MisoPin::function();
+    Raw::flush_rx();
+    return true;
+}
+
 /// What a command asked this client to become, MISO driven.
 bool apply_cfg(const spilink::Cfg& c) {
     wait_nss_high(50);
-    const bool ok = Client::init(clock, {.mode = mode_of(c.mode),
-                                         .bits = SpiDataSize::bits8,
-                                         .lsb_first = c.dord != 0,
-                                         .nss = SpiNss::hardware_input,
-                                         .drive_output = true});
+    const Client::Config cc{.mode = mode_of(c.mode),
+                            .bits = SpiDataSize::bits8,
+                            .lsb_first = c.dord != 0,
+                            .nss = SpiNss::hardware_input,
+                            .drive_output = true};
+    const bool ok = Client::config_served(cc) ? Client::init(clock, cc) : client_by_hand(cc);
     Pfic::disable(Raw::irq());
     return ok;
 }

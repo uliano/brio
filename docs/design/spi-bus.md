@@ -31,8 +31,8 @@ the engine verbs `init`, `start`, `isr`, `rebase`, `recover`, `release`,
 engine is measured against a real client on the wire - transactions
 queued from one dispatch, a rejection when the queue is full, both
 sleep votes, and the per-bus timeout with `recover()` - on the three
-platforms marked supported; the CH32V00x's wire letters wait for their
-jumper ([the target's document map](../ch32v00x/README.md)).
+platforms marked supported; the CH32V00x's against the CH32X035's
+client, the desk's pair ([the target's document map](../ch32v00x/README.md)).
 
 | stratum | realization | beyond the contract |
 |---|---|---|
