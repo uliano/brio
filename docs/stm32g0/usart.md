@@ -16,8 +16,8 @@ bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp`. The LPUARTs are
 [lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
 suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless;
-four more outside `z` through `brio stress`; nine under the second
-all-key `t`, 117 verdicts, against the desk's STM32F446RE running
+four more outside `z` through `brio stress`; eleven under the second
+all-key `t`, 146 verdicts, against the desk's STM32F446RE running
 `usart_peer` - "Against a far board" below). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
 fixture `test/family_stm32g0/usart.cpp` plus SIXTEEN negatives under
@@ -1020,15 +1020,16 @@ to its PA10, PA10 from its PA9 - the far board running the stm32f4
 `usart_peer` (firmware 0x0400), driven IN BAND with the protocol every
 architecture on the link compiles (`avrdx/src/apps/usart_link.hpp`): an
 ack before every action, a bounded action, the peer back in command
-mode by itself. Letters `1` to `9` run under the second all-key `t` and
-never under `z`, which runs with the far board on its dark console. The
+mode by itself. Letters `1` to `9`, `0` and `r` run under the second
+all-key `t` and never under `z`, which runs with the far board on its
+dark console. The
 far peer's time base is its crystal (the ST-LINK's 8 MHz in bypass), so
 what it times is THIS core's HSI16 - and this board times the same HSI
 against its own LSE over the very window of each run, the stratum's
 `LseTracker` ([clock.md](clock.md), "The core against the LSE, tracked")
 on DMA1 channel 4 with a ring of 4096, a second of the crystal, for the
 length of the set: every rate verdict is the divisor's on the wire with
-the oscillator's walk taken out. Score: **117 of 117**, the refusals
+the oscillator's walk taken out. Score: **146 of 146**, the refusals
 SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
 `7`'s control through the bridge (below).
 
@@ -1158,6 +1159,75 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   every gap and offset, the receiver time-out (RTOR 12 bits) once a burst
   from a frame and a half - the control for the F446's ES0298 2.13.1,
   and ES0548 lists no such item.
+- **Auto-baud from a foreign crystal** (`0`): the far chip SENDS four
+  frames of each mode's pattern at 9600, 57600, 230400 and 123456 baud
+  into this receiver told 19200, and the learnt divisor is judged in
+  kernel cycles a bit against the far rate it states and this HSI's
+  error over the leg: ALL FOUR MODES at every rate within one cycle
+  (6685 for 6684.5, 1115 for 1114.5, 279 for 279, 520 for 520), the
+  measured frame itself read whole and the frames after it decoded.
+  ABRE: mode 3 handed a 0x00, AND mode 2 handed a 0x55 - its second
+  measurement disagrees with its first - each with FE on the measured
+  frame and the divisor left as it was. THE RANGE as 33.5.9 states it:
+  3.2 Mbaud (20 cycles a bit) learnt at OVER16, 6.4 Mbaud (10) refused
+  with ABRE at OVER16 and learnt at OVER8.
+- **LIN from a foreign crystal** (`0`): the far engine's breaks at
+  19200, of 9, 10, 11 and 13 bits with LBDL = 0 and of 10, 11 and 13
+  with LBDL = 1, raise LBDF from ten and from eleven, never one bit
+  short; with LIN mode
+  off a 13- or a 20-bit break raises none (33.5.13's "without taking
+  into account the break detection" - where the F446 sets LBD anyway,
+  docs/stm32f4/usart.md). THIS END'S BREAK timed by the far receiver,
+  from the break to a 0x55 written as SBKF falls: 14.97..15.04 bit
+  times in LIN mode (thirteen and the two stop bits 33.5.13 inserts) and
+  11.97..12.03 without (a frame's ten and the two of 33.5.4), over five
+  runs. A LIN HEADER TAKEN AS A SLAVE TAKES IT: a master 10 % off the
+  nominal 19200 either way (21120, 17280 - past any receiver's
+  tolerance), its 13-bit break, a 0x55 sync and four payload frames: the
+  break raises LBDF at the slave's nominal rate, the detector armed on
+  LBDF learns the sync within one cycle a bit (3038 for 3039, 3715 for
+  3714) and the payload decodes. ARMED BEFORE THE BREAK IT CANNOT: the
+  break is then its first character, LBDF never rises and it ends in
+  ABRE - which is why `AutoBaud`'s header says to arm it on the break.
+- **RS-485** (`r`): the driver enable through the TASK - `Rs485` with
+  DEAT 16 and DEDT 8 at OVER16, and a `UartTask` with the DE active low
+  and DEAT 31, DEDT 31 at OVER8 - on PB3 (USART1_RTS_DE_CK, AF4), the
+  desk's SPI SCK wire, the far board's PB13 an input under it: five
+  bursts of eight frames each, every frame received whole by the far
+  chip (40 of 40, the sum right) while DE framed each burst once; DE
+  timed on this end's own pads in SAMPLE times (USARTDIV / 16 kernel
+  cycles at either oversampling, on TIM2 - the kernel's own HSI, its
+  error cancels): 16.48..16.51 before the start bit and 7.88 after the
+  last stop bit for 16 / 8, 30.97..31.26 and 30.94..31.23 for 31 / 31
+  (medians of five, over three runs), within a sample and
+  the sampling loop's period (36 cycles; a sample is 34 at 115200 OVER16
+  and 69 at OVER8).
+- **IrDA SIR between two ST ENDECs on a bare wire** (`r`): the polarity
+  33.5.18 states in one sentence is READ ON THE PAD - the encoder idles
+  LOW with a HIGH pulse a zero, and with TXINV set it idles HIGH with a
+  LOW pulse: TXINV and RXINV act on the SIR side of the ENDEC, so this
+  end alone supplies the one inversion each direction needs. With both,
+  the far F446's decoder takes 32 frames of 32 at 9600 and 115200,
+  normal pulses (2.9 sixteenths at 9600) and low-power ones (PSC 35:
+  three periods of 1.83 MHz, 100 of 105 cycles on the pad); and this
+  decoder takes the far encoder's 32 of 32 at both rates, its normal
+  and its low-power pulses alike. Without them the far decoder takes
+  some twenty frames, nearly all with FE, and this one none. ONE
+  INVERSION ALONE IS NOT
+  ENOUGH: with RXINV and no TXINV this end's encoder idles low into the
+  far decoder, a standing pulse its receiver chews - and an ENDEC is
+  half duplex, so the far transmitter's frames after the first came out
+  undecodable (one of 32). The far sender's first frame waits 20 ms past
+  the settle, the turnaround the F446's suite measured the other way
+  round (its first start pulse missed one leg in a few without it,
+  docs/stm32f4/usart.md). The far chip refuses SIR above 115200, its
+  chapter's ceiling (RM0390 25.4.12). On this end's pad the 3/16 pulse
+  at 115200
+  reads 93..100 cycles for 104 and the low-power one 100..101 for 105,
+  where the F446's pad reads its 294 exactly: `IrdaLink` leaves the TX
+  pad at its reset (low) speed, and driven at very high speed (a scratch
+  build) both read 101 - the slope is most of the gap, the last four
+  cycles not located.
 
 ## On the STM32G071RB
 
@@ -1274,7 +1344,7 @@ protocol's; the engine is this chapter's, item by item:
 | the kernel-clock multiplexer | PCLK; HSI16 DECLINED - a lower ceiling and the same oscillator |
 | TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF2) | USED: THE WAVEFORM ENGINE - the pad re-muxed to the timer with the channel forced high (no edge), toggle mode with CCR preload off, the first compare by the CPU and every later one by DMA1 channel 1 on the channel's own request from a table of ABSOLUTE compares; the prescaler per action so the longest interval fits half the counter; the CPU sampling the pad meanwhile and counting its transitions, and the run timed whole, so a compare written too late (an edge a wrap later) is caught |
 | SWAP + HDSEL | USED for the shared wire: the single wire on PA10, the far TX's, open drain on its pull-up, the reply's own echo flushed |
-| TXINV / RXINV | USED for IrDA alone: two ST SIR ENDECs face each other with opposite polarities (33.5.18) - a reading the first IrDA leg confirms |
+| TXINV / RXINV | USED for IrDA alone, both at once: two ST SIR ENDECs face each other with opposite polarities (33.5.18), and both bits act on the SIR side of the ENDEC (measured, letter `r`); one alone leaves the encoder idling low into the far decoder, which its half-duplex ENDEC chews |
 | the 0.5 / 1.5 stop codes | served (33.5.5 recommends them for smartcard mode and forbids them nowhere) |
 | seven-, eight- and nine-bit words | 6+P, 7, 7+P, 8, 8+P and 9 served; 5 and 6 data bits without parity and 9 with REFUSED |
 | synchronous master and slave | REFUSED: USART1's CK pads carry another wire on this desk, and the far clock reaches PB3 only through a strap the desk has not got |
@@ -1340,18 +1410,16 @@ Implemented, not bench-verified:
   STM32G031K8" and "On the STM32G071RB" are the one image's; one run of
   each image on those boards measures them, the rate on the wire among
   them (no board is paired with either on the desk).
-- The peer's IrDA (its inversions a reading of 33.5.18 to confirm),
-  `autobaud_tx`, `send_mpcm` and the 0.5 / 1.5 stop codes as a SENDER:
-  served, judged by no letter yet - the design's later letters
-  (auto-baud, LIN both ways, IrDA, mute) measure them.
+- The peer's `autobaud_tx`, `send_mpcm` and the 0.5 / 1.5 stop codes as
+  a SENDER: served, judged by no letter yet - the far F446 has no
+  auto-baud detector to feed, and mute is a later letter (its IrDA, both
+  ways, and its `brk` are the far suite's letters `r`, `0` and `4`).
 - `usart_peer` on the STM32G071RB: built, never run (not on the desk).
 - The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
   built for it and has not run there (the board is not on the desk); one
   run of the suite measures it. The ring under an `LpUart`, its kick
   included, is the same task's and compile-only, as the LPUART's engine
   slots are ([lpuart.md](lpuart.md)).
-- `Rs485` as a TASK (the driver-enable timings are measured through the
-  resource on the DE pad; the task's own `init()` path is compile-only).
 - The wake from Stop on any instance but USART2, and on Stop 1 (measured
   on an LPUART, docs/stm32g0/lpuart.md).
 - The FIFO default on the STM32G031K8, and with it the paced receiver

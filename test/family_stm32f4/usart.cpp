@@ -153,6 +153,9 @@ void resource_verbs() {
     (void)U::half_duplex(true);
     (void)U::half_duplex();
     (void)U::irda(IrdaConfig{true, 4});
+    static_assert(irda_valid(IrdaConfig{true, 4}) && irda_valid(IrdaConfig{false, 1}) &&
+                  !irda_valid(IrdaConfig{false, 4}) && !irda_valid(IrdaConfig{true, 0}),
+                  "normal mode takes PSC = 1 alone, low-power any non-zero PSC");
     U::irda_off();
     (void)U::irda_enabled();
     (void)U::smartcard(SmartcardConfig{true, 16, 5});

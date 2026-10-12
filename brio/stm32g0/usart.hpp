@@ -3116,6 +3116,14 @@ struct IrdaLink {
  * frame and claims no pad, because the whole point is to run it on a
  * receiver that is already up. The caller arms it, feeds the line a
  * character of the right shape, and asks.
+ *
+ * UNDER LIN IT IS ARMED ON THE BREAK, NOT BEFORE IT. Armed first, the
+ * break IS its first character: its start bit is all thirteen zero
+ * bits, LBDF never rises and the detector ends in ABRE (measured from a
+ * foreign master, docs/stm32g0/usart.md). A LIN
+ * slave therefore keeps its nominal rate, takes LBDF, and arms inside
+ * the delimiter - UE cleared, arm(), UE set - so the sync field is what
+ * the detector measures.
  */
 template <uint8_t n>
 struct AutoBaud {

@@ -68,8 +68,13 @@
 //    with PSC = txpl / 3 kernel periods (a pulse of three PSC periods).
 //    TXINV and RXINV are set, because two ST SIR ENDECs face each other
 //    with opposite polarities ("the transmit encoder output has the
-//    opposite polarity to the decoder input", 33.5.18) - a reading the
-//    first IrDA leg confirms or refutes.
+//    opposite polarity to the decoder input", 33.5.18) and both act on
+//    the SIR side of the ENDEC - measured: TXINV turns the encoder's
+//    high pulses on a low idle into low pulses on a high idle, RXINV lets
+//    the decoder take the far encoder's frames (test_stm32_serial letter
+//    r). BOTH, never one: an ENDEC is half duplex, and an encoder idling
+//    low into the far decoder is a standing pulse its receiver chews,
+//    which keeps the far transmitter from encoding.
 //  - THE WAVEFORM ENGINE for brk, autobaud_tx's break, bitbang, glitch,
 //    drive_rxd and collide: TIM1, whose CH2 is on PA9 and CH3 on PA10 (AF2,
 //    DS13560 table 13) - the link's own pads. The pad is re-muxed from

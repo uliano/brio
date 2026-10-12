@@ -130,7 +130,8 @@ TX and RX inside the chip and leaves the RX pad alone.
   (refused under an address-mark wake while RXNE stands), `unmute`,
   `muted`; `lin(LinConfig)`/`lin_off`/`lin_enabled`, `send_break`,
   `break_pending`; `half_duplex(on)`/`half_duplex()`;
-  `irda(IrdaConfig)`/`irda_off`/`irda_enabled`;
+  `irda(IrdaConfig)` (normal mode at PSC 1 alone, `irda_valid` - GTPR's
+  25.6.7)/`irda_off`/`irda_enabled`;
   `smartcard(SmartcardConfig)`/`smartcard_off`/`smartcard_enabled` (a
   FULL instance's, false elsewhere); `synchronous(UsartSyncConfig)`
   (TE and RE clear, a FULL instance's)/`synchronous_off`/
@@ -447,14 +448,14 @@ The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,
 CROSSED - PA9 (AF7) to its PA10, PA10 from its PA9 - the far board
 running the stm32g0 `usart_peer` (firmware 0x0300), driven IN BAND with
 the protocol every architecture on the link compiles
-(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9` of
+(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9`, `0` and `r` of
 `test_stm32f4_serial` run under the second all-key `t` and never under
 `z`, which runs with the far board on its dark console. The far peer's
 core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
 clock.md, "The core against the LSE, tracked"), so every rate it times
 is crystal against crystal - and every rate it SENDS it states (a
 `send` or `blast` Report's aux16: its divisor on its tracked core). Score:
-**118 of 118**, what this USART has no word for SKIPPED with its reason.
+**130 of 130**, what this USART has no word for SKIPPED with its reason.
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
   another die, a crystal-referenced time base), a bad checksum NAKed, a
@@ -544,6 +545,36 @@ is crystal against crystal - and every rate it SENDS it states (a
   itself and answered by the far end at 9600, 115200 and 460800; and the
   wired AND, the far end's 0x00 pulled into this end's 0xFF behind a
   clean trigger frame.
+- **LIN both ways** (`0`): the far engine's breaks at 19200 - 9, 10, 11
+  and 13 bits with LBDL = 0, 10, 11 and 13 with LBDL = 1 - raise LBD
+  from ten and from eleven, never one bit short; and WITH LIN MODE OFF
+  the same breaks raise LBD from ten bits on (9: none, 10, 11, 13 and
+  20: set, each also a 0x00 frame with FE) - letter `4`'s finding
+  staged: 25.4.8 says that with LINEN = 0 the receiver works "without
+  taking into account the break detection", and this detector runs
+  whatever LINEN says, at LBDL's length. THIS END'S BREAK timed by the
+  far receiver, from the break to a 0x55 written as SBK clears:
+  13.99..14.00 bit times in LIN mode (thirteen and the one high bit of
+  25.4.8) and 10.99..11.06 without (a frame's ten and the bit of 25.4.2),
+  over four runs.
+- **IrDA SIR against the far ST ENDEC** (`r`), the far G0's TXINV and
+  RXINV supplying the one inversion each direction needs (that chip's
+  letter `r` reads them on the pad): THIS ENCODER idles LOW with a HIGH
+  pulse a zero, 3516 cycles at 9600 and 294 at 115200 (3/16 exactly);
+  low power at PSC 49 (1.84 MHz) a pulse of 294 cycles at either rate,
+  three periods; the far decoder takes 32 frames of 32 in all four legs.
+  THIS DECODER takes the far encoder's 32 of 32 - normal pulses at 9600
+  and 115200, low-power ones (1.69 us) at 115200 and at 9600, where the
+  pulse is a sixtieth of a bit, in normal mode and in low-power mode
+  alike. The turnaround: the far sender's first frame waits 20 ms past
+  the settle; without the wait the first start pulse was missed one leg
+  in a few (the first byte read one bit late) - the reading is the far
+  half-duplex ENDEC, its receiver still taking this end's UART idle,
+  behind its RXINV, for a standing pulse. `irda()` refuses normal mode
+  with any prescaler but 1 (25.6.7), and the far chip refuses SIR above
+  115200, its chapter's ceiling. This USART has no driver enable (25.3,
+  table 148): the pair's RS-485 letter is the far G0's, this board's
+  PB13 left an input under its DE.
 
 ## The peer: `usart_peer` (the instrument a far board's suite drives)
 
@@ -563,7 +594,7 @@ chapter's:
 | the four stop codes | served on this FULL instance (25.4.3 recommends the halves for smartcard mode and forbids them nowhere else) |
 | eight- and nine-bit words | 7+P, 8, 8+P and 9 served; 5, 6 and 7 data bits without parity, 6+P and 9+P REFUSED |
 | synchronous master | REFUSED: no slave on this USART (25.4.9) and the CK pad, PA8, reaches the far board only through a strap the desk has not got |
-| IrDA SIR | IREN to 115200, PSC from the requested filter, the low-power pulse from the requested width; no line inversion on this USART |
+| IrDA SIR | IREN to 115200; normal mode at PSC = 1, the one value 25.6.7 allows there, so a receive filter is REFUSED in it; the low-power pulse from the requested width; no line inversion on this USART - the far G0 supplies both |
 | LIN, mute, smartcard | the DUT's subjects |
 
 The time base is the crystal: the ST-LINK's 8 MHz in bypass through the
@@ -604,8 +635,7 @@ Implemented, not bench-verified, for the transport:
 
 Implemented, not bench-verified (every mode of the resource beyond the
 transport - each waits for the wire or the peer that measures it): mute
-mode with both wakes, LIN's break as a SENDER (its detection is measured
-from the far board, above), IrDA (an IR pair), the smartcard (no card on the
+mode with both wakes, the smartcard (no card on the
 desk), the synchronous clock (a timer capture on CK - the timer
 chapter's ruler), CTS/RTS flow control (a peer that asserts them), the
 TC/CTS/LBD interrupt enables, `set_baud` at run time (nothing changes the
@@ -616,6 +646,6 @@ OVER8 and frame-format legs on the other three boards (the loop's pad is
 surveyed on the Nucleo-F446RE alone).
 
 Implemented, not bench-verified, in the peer: the ops no letter judges
-yet - `autobaud_tx`, `send_mpcm`, IrDA, and the half stop codes as a
-SENDER; the design's later two-board letters (auto-baud, LIN both ways,
-IrDA, mute) measure them.
+yet - `send_mpcm` and the half stop codes as a SENDER; the design's
+later mute letter measures the first (its `autobaud_tx`, `brk` and
+IrDA are the far G0 suite's letters `0` and `r`).

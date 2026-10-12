@@ -47,11 +47,13 @@
 //    design, D2). flag_mpcm is refused: the multiprocessor wake is a
 //    receiver's, the DUT's to test.
 //  - IrDA SIR (25.4.12): IREN, the rate capped at 115200 as the chapter
-//    caps it, GTPR.PSC from rxpl (pulses under two PSC periods rejected);
-//    txpl != 0 asks for the low-power encoder, IRLP with PSC = txpl / 3
-//    APB2 periods. No line inversion on this USART: a far ST SIR ENDEC
-//    supplies the one each way two of them need (25.4.12: "the transmit
-//    encoder output has the opposite polarity to the decoder input").
+//    caps it; normal mode at GTPR.PSC = 1, the one value 25.6.7 allows
+//    there, so a receive filter (rxpl) is REFUSED in it; txpl != 0 asks
+//    for the low-power encoder, IRLP with PSC = txpl / 3 APB2 periods
+//    (its receiver then rejects pulses under two of them). No line
+//    inversion on this USART: a far ST SIR ENDEC supplies the one each
+//    way two of them need (25.4.12: "the transmit encoder output has the
+//    opposite polarity to the decoder input").
 //  - THE WAVEFORM ENGINE for brk, autobaud_tx's break, bitbang, glitch,
 //    drive_rxd and collide: TIM1 (180 MHz, the APB2 timer clock), whose
 //    CH2 is on PA9 and CH3 on PA10 (AF1, DS10693 table 11) - the link's
@@ -69,6 +71,10 @@
 //  - HDSEL for onewire and collide (25.4.10): the single wire on PA9, the
 //    far board's RX wire (the G0's SWAP puts its single wire there), open
 //    drain on the pad's pull-up for the length of the action.
+//  - NO DRIVER ENABLE on this USART (25.3, table 148: no such row), and
+//    PB13 - the desk's SPI SCK wire, which carries the far G0's
+//    USART1_RTS_DE_CK - is never touched: an input as reset leaves it,
+//    so the far board's RS-485 letters drive it alone.
 //  - THE REPORT'S SPAN on the DWT's cycle counter (180 MHz), read once a
 //    character as the loop sees it complete.
 //
@@ -291,9 +297,10 @@ std::optional<LinkSetup> setup_of(const link::Cfg& c) {
             const uint32_t psc = (static_cast<uint32_t>(c.txpl) * 15u / 4u + 1u) / 3u;
             ic.low_power = true;
             ic.prescaler = static_cast<uint8_t>(psc == 0u ? 1u : (psc > 255u ? 255u : psc));
-        } else {
-            const uint32_t psc = (static_cast<uint32_t>(c.rxpl) * 15u / 4u) / 2u;
-            ic.prescaler = static_cast<uint8_t>(psc == 0u ? 1u : (psc > 255u ? 255u : psc));
+        } else if (c.rxpl != 0u) {
+            // 25.6.7: "In normal IrDA mode: PSC must be set to 00000001" -
+            // this ENDEC's normal-mode receiver has no filter to program.
+            return std::nullopt;
         }
         s->irda_cfg = ic;
     }

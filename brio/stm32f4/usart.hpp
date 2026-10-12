@@ -287,7 +287,11 @@ struct LinConfig {
 
 /// IrDA (30.3.11): the SIR encoder on TX and decoder on RX, normal mode
 /// at the bit rate (a 3/16 pulse) or low-power mode on the prescaled
-/// clock (GTPR.PSC, 8 bits). A prescaler of 0 is Reserved and refused.
+/// clock (GTPR.PSC, 8 bits). A prescaler of 0 is Reserved and refused,
+/// and so is NORMAL mode with any prescaler but 1: GTPR's description
+/// (RM0090 30.6.7, RM0390 25.6.7) says "In normal IrDA mode: PSC must be
+/// set to 00000001" - this ENDEC's normal-mode receiver has no glitch
+/// filter to program, unlike a part whose PSC filters in both modes.
 struct IrdaConfig {
     bool low_power = false;
     uint8_t prescaler = 1;
@@ -312,7 +316,9 @@ struct SmartcardConfig {
     uint8_t clock_prescaler = 1;   ///< 1..31: fCK / (2 x value) on CK
 };
 
-constexpr bool irda_valid(const IrdaConfig& c) { return c.prescaler != 0u; }
+constexpr bool irda_valid(const IrdaConfig& c) {
+    return c.prescaler != 0u && (c.low_power || c.prescaler == 1u);
+}
 constexpr bool smartcard_valid(const SmartcardConfig& c) {
     return c.clock_prescaler >= 1u && c.clock_prescaler <= 31u;
 }
@@ -533,8 +539,9 @@ struct Usart {
     static bool half_duplex() { return (regs().CR3 & USART_CR3_HDSEL) != 0u; }
 
     /// IrDA (30.3.11): refused while LIN, half duplex or smartcard is on,
-    /// with stop bits other than one, or with a prescaler of zero. PSC is
-    /// GTPR's low byte.
+    /// with stop bits other than one, or with a prescaler irda_valid()
+    /// refuses (zero, or other than 1 in normal mode). PSC is GTPR's low
+    /// byte.
     static bool irda(const IrdaConfig& c) {
         if (!irda_valid(c)) {
             return false;
