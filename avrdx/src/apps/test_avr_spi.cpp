@@ -822,8 +822,21 @@ void tg_demotion() {
     Ss::output();
     delay_us(clock, 20);
     const bool demoted_by_output = S0::demoted();
-    Ss::input();
+    // Back to the input init() made of it - pulled up - with no low on
+    // the way: the pad driven high first, the pull-up on, then released
+    // (a pad released from a driven low rises through the pull-up's RC,
+    // a low the watching host would see). A bare Ss::input() CLEARS the
+    // pull-up init() set and leaves the select wire floating from the
+    // low it was just driven to - a wire nobody holds: with the far
+    // board inert it still read low when the mid-byte demotion below
+    // cleared INVEN in 25 of 150 runs, and for 3.8 to 9.3 ms more, so
+    // the recovery there failed.
+    Ss::set();
+    Ss::pull(PinPull::up);
+    Ss::input(PinPull::up);
     delay_us(clock, 20);
+    verdict("SS back to a pulled-up input leaves the host a host",
+            S0::is_host() && !S0::demoted());
     print(serial, "  FINDING: SS driven LOW as an OUTPUT demotes the host: ",
           demoted_by_output, " (table 28-2: an output SS keeps the host activated)",
           crlf);

@@ -160,7 +160,7 @@ const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT20
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3).
-`test_avr_spi`: `z` = the single board, 186 verdicts; `y` = the same
+`test_avr_spi`: `z` = the single board, 187 verdicts; `y` = the same
 four pins against a second AVR128DB48 running `spi_peer` as a real
 client, 92 verdicts. The desk wires PORTE straight through (each PEn to
 the peer's PEn), so MOSI, MISO, SCK and SS are one four-wire bus between
@@ -180,8 +180,8 @@ host, and the client's runs back to back by its letter i. Letter `u` takes the c
 one polled request of this engine, beside a gapped control - from 1.5
 to 12 MHz, the rungs between the crystal's divisions run with this
 board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
-peer to 8 MHz and prints every other peer's ladder. Measured: `z` 186 of
-186 with that peer attached, `y` 91 of 91 - `l` read a dummy leading
+peer to 8 MHz and prints every other peer's ladder. Measured: `z` 187 of
+187 with that peer attached, `y` 91 of 91 - `l` read a dummy leading
 every normal and buffer combination of that peer and none of its
 buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
 CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12
@@ -290,6 +290,17 @@ INVEN: the pad stays an input held high by its pull-up while the
 peripheral reads a low. After a demotion the instance has been a client,
 and a client owns the MISO pad - a recovery therefore has to re-establish
 the pin roles (an ENABLE cycle), not just write MASTER back.
+
+**A watched SS must stay held.** The pull-up `init()` puts on a watched
+SS pad is the only thing holding the line high, and `Pin::input()`
+without a pull CLEARS it. An application that borrows the pad - drives
+it, then hands it back - gives it back as `input(PinPull::up)`, and
+from a driven low it drives the pad high first, or the release itself
+is a low the host sees. Handed back bare after a driven low, the line
+floated: with the far board inert it still read low when the test
+cleared INVEN in 25 of 150 runs, and for 3.8 to 9.3 ms more, and a
+`restore_host()` in that window left MASTER clear, as the level rule
+says it must. Test `g`.
 
 **The interrupt.** One vector, one interrupt per byte in normal mode,
 with the body's INTFLAGS-then-DATA read clearing IF. In buffer mode the
