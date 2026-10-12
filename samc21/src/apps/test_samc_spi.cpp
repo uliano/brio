@@ -650,15 +650,13 @@ void dump_exchange(const Exchange& e, const Verify& v, const spilink::Report& r)
           ") flags=", hex(r.flags), crlf);
     if (r.count == 0 && (r.flags & spilink::report_timed_out) != 0) {
         // Commands decode, the hardware serves the preloads and echoes,
-        // the window burns whole reading nothing. On the avrdx peer that
-        // is an AVR client whose receive FIFO was left full under a
-        // lowered RXCIF (docs/avrdx/spi.md, the read that is not taken):
-        // its client init now empties the FIFO, so the state ends with
-        // the window that met it. The aux bytes are the forensics.
+        // the window burns whole reading nothing: the peer's receive went
+        // deaf for the window. The aux bytes are the forensics (each
+        // peer's header says what they carry).
         print(serial, "    the peer's exchange window read NOTHING (count=0, timed "
                       "out) while the command channel works - peer telemetry: "
-                      "first-byte ms=", r.aux1, " select bits=", hex(r.aux2),
-              " preload INTFLAGS=", hex(r.aux3), crlf);
+                      "aux0=", hex(r.aux0), " aux1=", r.aux1, " aux2=", hex(r.aux2),
+              " aux3=", hex(r.aux3), crlf);
     }
     const bool reversed = e.host_lsb != (e.cfg.dord != 0);
     print(serial, "    read:");
@@ -1049,10 +1047,13 @@ void td_rates() {
     // climb finds is the PEER'S RELOAD BOUNDARY: its client must land
     // the next-plus-one answer at least three SCK cycles before a
     // character boundary (32.6.2.6.2), and a polled loop's turnaround
-    // sets where that stops holding, and it differs from peer to peer:
-    // a precomputed pump holds to 2 MHz, a plain polled loop to
-    // 500 kHz with 1 MHz a coin toss. WHERE it lands is the print; the
-    // verdict claims only the floor every peer clears.
+    // sets where that stops holding, and it differs from peer to peer -
+    // and so does the silicon under it: an AVR128DB48 client's runs hold
+    // to 2 MHz, where its buffer's copy into the shifter stops meeting
+    // the host's first edge (its errata clarification 3.5.2; letter i).
+    // WHERE it lands is the print, with the first two rungs that are not
+    // exact dumped whole; the verdict claims only the floor every peer
+    // clears.
     static const uint32_t rates[] = {200'000UL, 500'000UL, 1'000'000UL, 2'000'000UL,
                                      3'000'000UL, 4'000'000UL, 6'000'000UL,
                                      8'000'000UL, 12'000'000UL, 24'000'000UL};
@@ -1063,6 +1064,7 @@ void td_rates() {
     // pump.
     uint32_t last_good = 0;
     uint32_t first_bad = 0;
+    uint8_t dumped = 0;
     spilink::Report bad_r{};
     print(serial, "  -- both ends on polled pumps --", crlf);
     for (uint8_t i = 0; i < sizeof(rates) / sizeof(rates[0]); ++i) {
@@ -1076,24 +1078,8 @@ void td_rates() {
         e.spare = spilink::spare_polled_pump;
         Verify v{};
         spilink::Report r{};
-        bool ok = exchange_exact(e, v, r);
+        const bool ok = exchange_exact(e, v, r);
         const uint32_t real = spi_sck_hz(SysClock::hz, *b);
-        // A RECEIVE THAT WENT DEAF MID-WINDOW is the peer's fault, not the
-        // wire's: fewer characters counted than were clocked and not one
-        // of them wrong. On the avrdx peer it is the AVR client's read
-        // that is not taken (docs/avrdx/spi.md): a read emptying the FIFO
-        // in the cycle the next character enters leaves the FIFO full
-        // under a lowered RXCIF and the RXCIF-paced loop hears nothing
-        // more, which a loop no faster than the wire meets at the very
-        // rung where the climb breaks. The rung is run ONCE more - the
-        // client's init empties the FIFO, so the next window starts clean -
-        // and the second window is the one judged.
-        if (!ok && first_bad == 0 && r.count < e.count && r.mism == 0) {
-            print(serial, "  SCK ", real / 1000u, " kHz: the peer's receive went deaf after ",
-                  r.count, " of ", e.count, " characters, none wrong - the rung once more",
-                  crlf);
-            ok = exchange_exact(e, v, r);
-        }
         print(serial, "  SCK ", real / 1000u, " kHz (BAUD ", *b, "): ",
               ok ? "exact both ways" : "NOT exact", "  host mism=", v.mism,
               " client mism=", r.mism, " client count=", r.count,
@@ -1103,6 +1089,10 @@ void td_rates() {
                   hex(r.exp), ")");
         }
         print(serial, crlf);
+        if (!ok && dumped < 2) {
+            ++dumped;
+            dump_exchange(e, v, r);
+        }
         if (ok && first_bad == 0) {
             last_good = real;
         } else if (!ok && first_bad == 0) {
@@ -2070,6 +2060,173 @@ void th_avr_client() {
     bench.verdict("and the link is exact again in the suite's own regime", ok);
 }
 
+// ===========================================================================
+// i - the AVR client's runs, back to back
+// ===========================================================================
+//
+// The avrdx peer serves an exchange with ONE CALL of its driver's runs
+// (avrdx/spi.hpp, SpiClient: read by count, never by RXCIF), so a window
+// can be as long as the run: 256 characters as ONE polled request of this
+// engine, nothing between them but the engine's own gap. Three runs - the
+// exchange, the answer run (spilink::spare_answer_only) and the receive
+// run (spilink::spare_receive_only, which that peer serves as an
+// eight-bit window and raises no report_extended for: the verdict asks
+// only what it received) - at the rungs inside the client's CLK_PER/6
+// (4 MHz on its 24 MHz crystal).
+
+constexpr uint16_t long_window = 256;
+uint8_t ltx[long_window];
+uint8_t lrx[long_window];
+
+struct LongWindow {
+    spilink::Report r{};
+    uint16_t host_mism = 0;    ///< the answers this end read back, against P_B
+    uint16_t first_bit = 0;    ///< of them, wrong in the first bit alone and carrying
+                               ///< the MSB of the character the client had just received
+    uint16_t first = 0xFFFF;   ///< the first wrong one
+    bool ran = false;
+};
+
+/// One window of `long_window` characters back to back at `baud`: the
+/// command, the request, the report, and this end's read-back judged.
+LongWindow long_exchange(uint8_t baud, uint8_t spare, uint8_t seed_a, uint8_t seed_b) {
+    LongWindow w{};
+    spilink::Params a{};
+    a.cfg.regime = spilink::regime_buffer_wait;
+    a.count = long_window;
+    a.ms = 400;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.spare = spare;
+    if (!peer_act(Op::exchange, a)) return w;
+    spilink::Stream out(a.pattern, seed_a);
+    for (uint16_t i = 0; i < long_window; ++i) {
+        ltx[i] = out.next();
+        lrx[i] = 0xEE;
+    }
+    (void)link_xfer(ltx, lrx, long_window, baud);
+    (void)link_command_mode();
+    spilink::Stream want(a.pattern, seed_b);
+    for (uint16_t i = 0; i < long_window; ++i) {
+        const uint8_t exp = want.next();
+        if (lrx[i] == exp) continue;
+        if (w.host_mism == 0) w.first = i;
+        ++w.host_mism;
+        if (i != 0 && (lrx[i] ^ exp) == 0x80u && (lrx[i] & 0x80u) == (ltx[i - 1] & 0x80u)) {
+            ++w.first_bit;
+        }
+    }
+    w.ran = peer_report(w.r);
+    return w;
+}
+
+void ti_avr_runs() {
+    if (!need_peer()) return;
+    spilink::Ident d{};
+    const bool got = peer_ident(d);
+    bench.verdict("ident comes back", got);
+    if (!got) return;
+    if (spilink::peer_kind(d.version) != spilink::peer_avrdx || (d.version & 0xFFu) < 0x01u) {
+        print(serial, "  SKIPPED, no verdict claimed: the peer (fw ", hex(d.version),
+              ") is not the avrdx spi_peer with the client's runs (0x0101 and up)", crlf);
+        return;
+    }
+    struct Rung {
+        uint32_t hz;
+        bool answers;   ///< the answers judged back to back (clarification 3.5.2 above)
+        bool received;  ///< what the client received judged
+    };
+    static const Rung rungs[] = {{500'000UL, true, true},   {1'000'000UL, true, true},
+                                 {2'000'000UL, true, true}, {3'000'000UL, false, true},
+                                 {4'000'000UL, false, false}};
+    constexpr uint8_t reps = 6;
+    uint16_t short_windows = 0;
+    uint16_t late_windows = 0;
+    uint16_t windows = 0;
+    uint8_t k = 0;
+    for (const Rung& g : rungs) {
+        const auto b = Bus::baud_for(g.hz);
+        if (!b || Bus::sck_hz(*b) != g.hz) {
+            bench.verdict("the rung's divisor is exact", false);
+            continue;
+        }
+        uint16_t x_ok = 0;
+        uint16_t rx_ok = 0;
+        uint16_t first_bit_only = 0;
+        uint16_t host_bad = 0;
+        uint16_t host_first = 0xFFFF;
+        for (uint8_t rep = 0; rep < reps; ++rep) {
+            ++k;
+            const LongWindow w = long_exchange(*b, 0, static_cast<uint8_t>(0x15 + 3u * k),
+                                               static_cast<uint8_t>(0xB1 + 5u * k));
+            const bool heard = w.ran && w.r.count == long_window && w.r.mism == 0;
+            if (g.received && w.ran && w.r.count < long_window) ++short_windows;
+            if (g.received && w.ran && w.r.aux3 == 3u) ++late_windows;
+            if (g.received) ++windows;
+            if (heard) ++rx_ok;
+            if (heard && w.host_mism == 0) ++x_ok;
+            if (w.host_mism != 0) {
+                ++host_bad;
+                if (host_first == 0xFFFF) host_first = w.first;
+                if (w.host_mism == w.first_bit) ++first_bit_only;
+            }
+            if ((g.received && !heard) || (g.answers && w.host_mism != 0)) {
+                print(serial, "    window ", rep, ": client count=", w.r.count, " mism=", w.r.mism,
+                      " (first idx ", w.r.idx, " got ", hex(w.r.got), " exp ", hex(w.r.exp),
+                      ") end=", w.r.aux3, " flags=", hex(w.r.flags), "; host mism=", w.host_mism,
+                      " (first at ", w.first, ")", crlf);
+            }
+        }
+        // Seeds whose streams differ in the first bit of about half the
+        // characters from the character before (a stream that were the
+        // host's one character late would hide the first-bit fault below).
+        const LongWindow ans = long_exchange(*b, spilink::spare_answer_only, 0x5C, 0x93);
+        const LongWindow rcv = long_exchange(*b, spilink::spare_receive_only, 0x6D, 0x00);
+        if (g.received) windows = static_cast<uint16_t>(windows + 2u);
+        const bool ans_ok = ans.ran && ans.host_mism == 0 && ans.r.count == long_window;
+        const bool rcv_ok = rcv.ran && rcv.r.count == long_window && rcv.r.mism == 0;
+        print(serial, "  ", g.hz / 1000u, " kHz, ", long_window, " back to back: exchange exact ",
+              x_ok, " of ", reps, ", received exact ", rx_ok, " of ", reps, ", read back wrong in ",
+              host_bad, " (first at ", host_first, "; wrong in the first bit alone, the MSB just "
+              "received: ", first_bit_only, ") | answer run: read back mism ", ans.host_mism,
+              ", loaded ", ans.r.count, " | receive run: count ", rcv.r.count, " mism ",
+              rcv.r.mism, crlf);
+        if (g.answers) {
+            bench.verdict(g.hz == 500'000UL   ? "the AVR client's exchange run is exact both ways, "
+                                                "256 back to back, at 500 kHz"
+                          : g.hz == 1'000'000UL ? "and at 1 MHz"
+                                                : "and at 2 MHz",
+                          x_ok == reps);
+            bench.verdict(g.hz == 500'000UL   ? "its answer run is exact at 500 kHz"
+                          : g.hz == 1'000'000UL ? "and at 1 MHz"
+                                                : "and at 2 MHz",
+                          ans_ok);
+        }
+        if (g.received) {
+            bench.verdict(g.hz == 3'000'000UL ? "at 3 MHz the AVR client still RECEIVES every "
+                                                "character of every window"
+                                              : "its receive run hears every character",
+                          g.hz == 3'000'000UL ? rx_ok == reps : rcv_ok);
+        }
+        if (g.hz == 3'000'000UL) {
+            bench.verdict("and its answers break back to back on their FIRST BIT alone, which "
+                          "carries the MSB of the character just received - the buffer's copy "
+                          "into the shifter later than the host's first edge (DB clarification "
+                          "3.5.2) - in the exchange run",
+                          host_bad != 0 && first_bit_only == host_bad);
+            bench.verdict("and in the answer run, which reads nothing",
+                          ans.ran && ans.host_mism != 0 && ans.first_bit == ans.host_mism);
+        }
+    }
+    print(serial, "  ", windows, " windows inside the client's ceiling: ", short_windows,
+          " short of the count the host clocked, ", late_windows, " ended late", crlf);
+    bench.verdict("no window inside the client's ceiling stopped short of the host's count",
+                  short_windows == 0);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the runs", command(Op::ping));
+}
+
 }   // namespace
 
 // ---------------------------------------------------------------------------
@@ -2131,6 +2288,7 @@ int main() {
     bench.letter('f', "loop-back, the SCK ladder, nine bits, BUFOVF and MSSEN", tf_wireless);
     bench.letter('g', "THE KERNEL: SpiBus over SpiHost, util unchanged", tg_kernel);
     bench.letter('h', "the AVR client's facts (an avrdx peer only)", th_avr_client);
+    bench.letter('i', "the AVR client's runs back to back (an avrdx peer only)", ti_avr_runs);
 
     bench.menu();
     bench.prompt();

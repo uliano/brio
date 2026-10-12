@@ -6,12 +6,12 @@ shared SERCOM ch. 30) and errata DS80000740S 1.17.x. Driver:
 owns the address ladder, the clocks and the NVIC line - one table,
 shared by every personality). Family fixture
 `test/family_samc21/spi.cpp` + nine negatives; bench suite `test_samc_spi`
-(8 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
+(9 letters, two-board: the peer board runs `spi_peer` on an AVR128DB48
 or on a second SAM C21, the suite asks ident and does not care -
 commanded in band over the bus under test with the `spi_link.hpp` wire
-format, one source file serving both architectures - except letter h,
-which judges the facts of an AVR CLIENT and runs only when the ident
-names the avrdx peer).
+format, one source file serving both architectures - except letters h
+and i, which judge the facts of an AVR CLIENT and run only when the
+ident names the avrdx peer).
 
 ## What the silicon does
 
@@ -323,15 +323,15 @@ the two spans:
   cycles) is shorter than the polled loop's turn, so the instrument
   does not time them (below).
 - Back-to-back characters (no inter-byte gap - one engine request)
-  bind at the PEER'S ANSWER RELOAD. The AVR peer's polled loop: exact to
-  500 kHz in every ladder, never at 1 MHz (410 ladders, its answers six
-  of eight wrong while it receives every character exact), well below
-  its CLK_PER/6 electrical ceiling. From 1 MHz up its RXCIF-paced
-  receive also meets the read the AVR silicon does not take
-  ([../avrdx/spi.md](../avrdx/spi.md)): 35 of 2960 windows from 1 to
-  24 MHz stopped short with every character they read exact, none of
-  740 at 200 and 500 kHz. Letter d runs such a window at the rung it
-  judges once more.
+  bind at the PEER: its answer reload, or its silicon under it. The AVR
+  peer serves each window with one call of its driver's runs
+  ([../avrdx/spi.md](../avrdx/spi.md), the client's runs): exact both
+  ways to 2 MHz in every ladder of letter d (210), and at 3 MHz every
+  answer that is wrong is wrong in its first bit alone while the client
+  receives every character exact - the AVR's clarification 3.5.2, its
+  buffer's copy into the shifter later than this host's first edge. No
+  window stopped short: the ladder's 1260 from 200 kHz to 4 MHz, and
+  letter i's 6720 of 256 characters inside the client's ceiling.
 - THIS CLIENT BACK TO BACK REACHES THE WIRE (`test_avr_spi` letter u:
   an AVR128DB48 host, sixteen characters in one polled request of its
   engine - its own pace 2 CLK_PER between characters at CLK_PER/4 and
@@ -383,6 +383,15 @@ the two spans:
   the last, BUFOVF only with its transmitter fed), the write-collision
   boundary and the missed load, and its self-selected client in the
   four modes and LSb first.
+- Letter i, the AVR client's RUNS back to back: 256 characters as one
+  polled request of this engine at 500 kHz, 1, 2, 3 and 4 MHz - six
+  exchange windows a rung, an answer-only and a receive-only one. Exact
+  both ways through 2 MHz; at 3 MHz the client receives every character
+  of every window and its answers - the exchange's and the answer run's,
+  which reads nothing - arrive wrong in the first bit alone, the MSB of
+  the character just received. This host's "4 MHz" runs 0.6 % fast
+  (OSC48M, letter f's 1006 thousandths), above the AVR's CLK_PER/6 on its
+  24 MHz crystal, and there the client mis-samples MOSI.
 - THIS SILICON AS THE CLIENT, measured against an AVR128DB48 host
   (`test_avr_spi` y with the samc21 `spi_peer`, one character at a time
   with 20 us between them, the select held for the window):

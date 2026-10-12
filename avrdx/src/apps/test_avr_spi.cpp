@@ -10,8 +10,9 @@
 // the host demotion an SS pin can force, the two ISR bodies, the clock
 // rebase with an SCK ceiling, the transfer engine (SpiHost) with both
 // its completion styles, and the read the silicon does not take - its
-// own sweep, then the engine through it under a handler that holds the
-// core at every phase (TCB2).
+// own sweep and the sweep of the repair read a cure by RXCIF would make,
+// then the engine through it under a handler that holds the core at every
+// phase (TCB2).
 //
 // THE RATE ON THE WIRE, which a board answering itself cannot tell by
 // its data: a frame inside a polled block of the engine timed on the
@@ -1141,7 +1142,11 @@ void tj_engine() {
 // every phase of the next arrival. The glue counts the entries that find
 // TXCIF up and RXCIF down - the one signature of that read. Every request
 // alternates the MISO level, so a byte read twice or left behind shows as
-// a wrong level in the next one.
+// a wrong level in the next one. Beside the sweep of the read itself, the
+// sweep of the REPAIR READ a cure by RXCIF would make - after a read, RXCIF
+// down means read once more and drop it - against the same arrival: the
+// phase where that read takes the arriving byte is why the client's runs
+// read by count.
 
 using T2 = Tcb<2>;
 volatile uint8_t hold_turns = 0;          ///< the TCB2 handler's length, 3-cycle turns
@@ -1205,6 +1210,64 @@ void untaken_sweep(uint8_t span, Untaken& u) {
                 u.nops = nops;
             }
             ++u.repeated;
+        } else {
+            ++u.other;
+        }
+    }
+}
+
+struct Repair {
+    uint16_t kept = 0;        ///< the arrival read once, after the sequence
+    uint16_t lost = 0;        ///< nothing left: the repair read took the arrival
+    uint16_t doubled = 0;     ///< the first byte left behind as well
+    uint16_t other = 0;
+    uint16_t repaired = 0;    ///< samples whose flag test made the repair read
+    uint16_t repair_new = 0;  ///< of those, the repair read returned the arrival
+    uint8_t cnt = 0;          ///< the first phase that lost
+    uint8_t nops = 0;
+};
+
+/// THE REPAIR READ against an arrival: one byte held, the next on its
+/// way, and at each phase of its arrival the sequence a cure by RXCIF
+/// would run - a read, the flag tested, and when RXCIF is down one more
+/// read whose byte is dropped. Kept is right whatever the phase; lost is
+/// the arrival taken by the repair read and dropped with it.
+template <uint8_t nops>
+void repair_sweep(uint8_t span, Repair& u) {
+    for (uint8_t cnt = 1; cnt < span; ++cnt) {
+        cli();
+        raw_drain();
+        miso_level(false);
+        raw_one(0xFF);                      // A = 0x00 waits in the FIFO
+        miso_level(true);
+        S0::clear_txc();
+        S0::write(0xFF);                    // B = 0xFF on its way
+        spin3<nops>(cnt);
+        const uint8_t v = S0::read();       // the read
+        const uint8_t f = S0::flags();      // the flag test
+        uint8_t r = 0x55;
+        const bool rep = (f & SPI_RXCIF_bm) == 0;
+        if (rep) r = S0::read();            // the repair read, dropped
+        while (!S0::txc_flag()) {
+        }
+        uint8_t left[3] = {0x55, 0x55, 0x55};
+        uint8_t n = 0;
+        while (S0::rxc_flag() && n < 3) left[n++] = S0::read();
+        sei();
+        if (rep) {
+            ++u.repaired;
+            if (r == 0xFF) ++u.repair_new;
+        }
+        if (v == 0x00 && n == 1 && left[0] == 0xFF) {
+            ++u.kept;
+        } else if (v == 0x00 && n == 0) {
+            if (u.lost == 0) {
+                u.cnt = cnt;
+                u.nops = nops;
+            }
+            ++u.lost;
+        } else if (n >= 2 || (n == 1 && left[0] == 0x00)) {
+            ++u.doubled;
         } else {
             ++u.other;
         }
@@ -1321,6 +1384,21 @@ void tt_untaken() {
               " nops), other ", u.other, crlf);
         verdict("the read in the arrival's cycle returns its byte again and drops RXCIF, at one phase",
                 u.repeated == 1 && u.other == 0);
+        Repair p;
+        repair_sweep<0>(span, p);
+        repair_sweep<1>(span, p);
+        repair_sweep<2>(span, p);
+        print(serial, "  CLK_PER/", spi_division(c), ": the repair read (RXCIF down after a read: "
+                      "read once more, drop it) at each of ",
+              p.kept + p.lost + p.doubled + p.other, " phases of the next arrival - kept ", p.kept,
+              ", LOST ", p.lost, " (first at spin ", p.cnt, " + ", p.nops, " nops), doubled ",
+              p.doubled, ", other ", p.other, "; repair reads ", p.repaired, ", of them returning the arrival ",
+              p.repair_new, crlf);
+        // The finding the client's runs are built on (avrdx/spi.hpp): a cure
+        // by RXCIF is no cure - an arrival between the flag test and the
+        // second read is taken by that read and dropped with it.
+        verdict("the repair read takes an arrival and drops it, at a phase: RXCIF cannot pace a cure",
+                p.lost != 0 && p.lost == p.repair_new && p.doubled == 0 && p.other == 0);
     }
 
     // What the engine's reads rest on, at every phase too.

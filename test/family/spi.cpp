@@ -198,6 +198,17 @@ void use_tasks() {
     (void)Client1::write_collision();
     Client1::enable_rxc_interrupt(true);
     (void)Client1::take_normal().complete();
+    // The runs: eight-bit characters, both layouts behind one surface.
+    static uint8_t tx_run[8];
+    static uint8_t rx_run[8];
+    const auto a = Client1::answer(std::span<const uint8_t>(tx_run), 1000u);
+    const auto x = Client1::exchange(std::span<const uint8_t>(tx_run), std::span<uint8_t>(rx_run),
+                                     1000u);
+    const auto v = Client1::receive(std::span<uint8_t>(rx_run), 1000u, 0x00);
+    (void)(a.count + x.count + v.count);
+    (void)(a.end == Client1::RunEnd::closed || x.end == Client1::RunEnd::late ||
+           v.end == Client1::RunEnd::complete || v.end == Client1::RunEnd::stalled);
+    (void)Client1::flags();
     (void)Client1::take_buffer();
     Client1::rebase(24'000'000u);
     (void)Client1::max_sck_hz();

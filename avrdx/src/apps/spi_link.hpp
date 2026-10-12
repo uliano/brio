@@ -411,6 +411,11 @@ inline constexpr uint8_t spare_answer_only = 0x02;
 // other spare bit, serves a plain 8-bit exchange and never raises the
 // flag - so a host that asked for any of them judges the report only
 // when the flag stands, and otherwise says the peer has not got them.
+// A peer may know `spare_receive_only` ALONE (an instrument with no
+// 16-bit frames and no CRC unit): it serves a receive-only window as
+// asked, refuses (report_cfg_failed) a command that carries wide or crc
+// beside it, and never raises the flag - a host judges such a window by
+// what it received, which is valid either way.
 
 /// `Params::spare` bit 2: 16-BIT FRAMES. Both streams are the usual byte
 /// streams taken two bytes a frame, LOW BYTE FIRST - frame i is P(2i) |

@@ -24,8 +24,12 @@
  *                         READ BY COUNT, CS and DC owned by the engine.
  *                         Driven by util/spi_bus.hpp (arbitration and
  *                         replies).
- *    SpiClient<n, route>  the client side: selected(), preload/exchange,
- *                         the buffer-mode variants, the ISR bodies.
+ *    SpiClient<n, route>  the client side: the RUNS answer(), exchange()
+ *                         and receive() - a transaction in one polled
+ *                         call, in buffer mode read by the count the
+ *                         client's transmitter flags keep of the host's
+ *                         transfers -, the per-byte verbs, the ISR
+ *                         bodies.
  *  A task owns its instance; two tasks on one Spi<n> is the app's bug.
  *
  * Facts that shape the code (28.3, 28.5, errata DS80000915F 2.11.1 +
@@ -89,13 +93,16 @@
  *    therefore a hint and never a count: SpiHost reads what the
  *    transmitter's flags prove has arrived, never empties the FIFO by a
  *    polled read while a byte shifts, and in the pump, which may, drops
- *    the repeated byte where the flags show the read was not taken.
+ *    the repeated byte where the flags show the read was not taken;
+ *    SpiClient's runs count the host's transfers on the client's DREIF
+ *    and read the byte before the newest, for the same reason.
  */
 
 #pragma once
 
 #include <stdint.h>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <avr/io.h>
 
@@ -1507,6 +1514,22 @@ private:
  *
  * The SS pin is the frame boundary: driven high, the state machine is
  * RESET and a partial byte is lost (28.3.2.2.3). selected() reads it.
+ *
+ * Its unit is the RUN - answer(), exchange(), receive() serve a
+ * transaction's bytes in one polled call - and the per-byte verbs are the
+ * degenerate case. In buffer mode the runs READ BY COUNT and never by
+ * RXCIF: the client's transmitter flags count the host's transfers
+ * (28.3.2.2.2: DREIF rises after each transfer that moves the transmit
+ * buffer into the shifter, RXCIF one cycle after it, TXCIF one cycle
+ * after RXCIF once shifter and buffer are both empty), so a run that
+ * refills the buffer on every DREIF knows how many bytes have arrived,
+ * and reads the older of the two newest - the FIFO is never emptied while
+ * a byte may enter it, the read the silicon does not take (this file's
+ * header) is never made, and the read follows the flag by the test of
+ * the late flags, past RXCIF's one cycle. The cure by RXCIF - a read,
+ * the flag tested, one more read when it is down - is no cure: an
+ * arrival between the test and the second read is taken by it and
+ * dropped (test_avr_spi letter t, docs/avrdx/spi.md).
  */
 template <uint8_t n, SpiRoute route = SpiRoute::def>
 class SpiClient {
@@ -1604,6 +1627,130 @@ public:
     static bool transfer_complete() { return S::txc_flag(); }
     static bool overflow() { return S::overflow_flag(); }
     static bool write_collision() { return S::write_collision(); }
+    /// INTFLAGS as it reads, in the layout the instance runs.
+    static uint8_t flags() { return S::flags(); }
+
+    // ---- the polled runs -----------------------------------------------------
+    //
+    // A client's unit is the RUN: the answers to a transaction, or what it
+    // brings, served polled in one call. What bounds a run on this block
+    // is one level of slack on each side (28.3.2.2.2): an answer written on
+    // the DREIF that marks transfer t's end goes out in transfer t + 2, and
+    // the FIFO, holding the newest byte and the one before it, has room for
+    // the byte of transfer t + 1 only once the older is read. So a TURN -
+    // the flag seen, the older byte read, the next answer written - has
+    // the whole of transfer t + 1 to land in, eight SCK periods. A turn
+    // later than that finds the transmitter run dry, and the transfer that
+    // dried it raised no DREIF, so the count is no longer the host's.
+    // TXCIF says so - cleared behind the preload, it can rise before the
+    // run's last transfer only that way -, BUFOVF beside it, and the run
+    // ends `late` on them rather than read by a count it no longer has.
+    // The cost of each turn is counted in the release listing and measured
+    // against the wire in docs/avrdx/spi.md.
+    //
+    // A run is called with the select HIGH and the transmitter empty (a
+    // fresh init(), or a former run that ended complete): the preload goes
+    // into the shifter (BUFWR) or the buffer before the host can clock.
+    // The select pad is the window: a run waits for it to fall (or for the
+    // first transfer's flag) before it takes a high pad for the close.
+
+    /// How a run ended.
+    enum class RunEnd : uint8_t {
+        complete,   ///< every byte of the run moved (exchange, receive)
+        closed,     ///< the host raised the select
+        stalled,    ///< the spin budget ran out first (or the transmitter was not empty)
+        late,       ///< a turn missed its transfer: the transmitter ran dry (TXCIF)
+    };
+
+    /// What a run did: `count` bytes - answers loaded for answer(), bytes
+    /// received in order for exchange() and receive() - and how it ended.
+    struct Run {
+        uint16_t count;
+        RunEnd end;
+    };
+
+    /**
+     * ANSWER a transaction with `out`, polled on DREIF alone, reading
+     * nothing. In buffer mode the first answer is written with the select
+     * still high - into the shifter under BUFWR, the buffer's second
+     * beside it; without BUFWR into the buffer, and the shifter's leftover
+     * leads (28.3.2.2.2's dummy) - and every later one on the DREIF that
+     * marks a transfer's end. In normal mode the first is loaded with the
+     * select high and every later one on IF, in the host's inter-byte gap
+     * (28.3.2.2.1: a write during a transfer is ignored and raises WRCOL,
+     * which ends the run `late`).
+     *
+     * The run ENDS WHEN THE HOST RAISES THE SELECT, however many bytes it
+     * clocked: fewer than the run, and `count` says how many answers were
+     * loaded; more, and the bytes past the run carry what the shifter is
+     * left with. NOTHING IS READ while it runs, so the FIFO fills and what
+     * the host sent is lost; the tail empties the FIFO (flush_receive) so
+     * the next run starts clean.
+     *
+     * `spins` bounds the whole run: one count per four idle polls, charged 256 at a time.
+     */
+    template <typename T>
+    static Run answer(std::span<const T> out, uint32_t spins) {
+        static_assert(run_byte<T>, "the AVR DA/DB SPI moves eight-bit characters (28.3): a "
+                                   "run carries uint8_t");
+        static_assert(available, "a client run needs the route's SCK, MOSI and SS pins, "
+                                 "bonded on this package");
+        const uint16_t len = static_cast<uint16_t>(out.size());
+        if (len == 0) return {0, RunEnd::complete};
+        return S::buffer_mode() ? answer_buffered(out.data(), len, spins)
+                                : answer_normal(out.data(), len, spins);
+    }
+
+    /**
+     * EXCHANGE: answer with `out` and keep what the host sends in `in`,
+     * the run's length the shorter of the two. The answers go as
+     * answer()'s; in buffer mode each turn then reads the byte BEFORE the
+     * one that just arrived (the count above), and the last two are read
+     * once the last transfer is in - TXCIF under BUFWR, the last DREIF
+     * without. In normal mode a turn reads the byte IF announced, after
+     * the answer's write.
+     *
+     * Ends `complete` when the last byte is in; `closed` when the host
+     * raised the select first, what arrived before it read into `in`
+     * (`count` says how far); `stalled` on the budget; `late` as above,
+     * the bytes received in order before it read out. The receive FIFO
+     * is emptied at the start, with the select high, so `in` holds this
+     * transaction alone.
+     */
+    template <typename T>
+    static Run exchange(std::span<const T> out, std::span<T> in, uint32_t spins) {
+        static_assert(run_byte<T>, "the AVR DA/DB SPI moves eight-bit characters (28.3): a "
+                                   "run carries uint8_t");
+        static_assert(available, "a client run needs the route's SCK, MOSI and SS pins, "
+                                 "bonded on this package");
+        const uint16_t len = static_cast<uint16_t>(out.size() < in.size() ? out.size()
+                                                                         : in.size());
+        if (len == 0) return {0, RunEnd::complete};
+        return S::buffer_mode() ? serve_buffered<true>(out.data(), 0, in.data(), len, spins)
+                                : serve_normal<true>(out.data(), in.data(), len, spins);
+    }
+
+    /**
+     * RECEIVE a run into `in`. In buffer mode the run still WRITES, the
+     * byte `fill` on every turn: the transmitter's flags are this block's
+     * only count of the host's transfers, and a buffer left empty raises
+     * no DREIF. What the host reads meanwhile is the fill (after the
+     * shifter's leftover without BUFWR). In normal mode nothing is
+     * written and the shifter sends back what it last received
+     * (docs/avrdx/spi.md). Ends as exchange() does; the receive FIFO is
+     * emptied at the start, with the select high.
+     */
+    template <typename T>
+    static Run receive(std::span<T> in, uint32_t spins, uint8_t fill = 0xFF) {
+        static_assert(run_byte<T>, "the AVR DA/DB SPI moves eight-bit characters (28.3): a "
+                                   "run carries uint8_t");
+        static_assert(available, "a client run needs the route's SCK, MOSI and SS pins, "
+                                 "bonded on this package");
+        const uint16_t len = static_cast<uint16_t>(in.size());
+        if (len == 0) return {0, RunEnd::complete};
+        return S::buffer_mode() ? serve_buffered<false>(nullptr, fill, in.data(), len, spins)
+                                : serve_normal<false>(nullptr, in.data(), len, spins);
+    }
 
     static void enable_interrupt(bool on) { S::enable_interrupt(on); }
     static void enable_rxc_interrupt(bool on) { S::enable_rxc_interrupt(on); }
@@ -1629,6 +1776,327 @@ public:
     static void release() { S::release(); }
 
 private:
+    /// The one character type a run may carry: the beat is the element.
+    template <typename T>
+    static constexpr bool run_byte = std::is_same_v<T, uint8_t>;
+
+    /// The select pad, read through its VPORT (an IN or an SBIC).
+    [[gnu::always_inline]] static bool ss_high() {
+        constexpr SpiPin sl = spi_pin(n, route, SpiSignal::ss);
+        using Ss = Pin<sl.port, sl.pin>;
+        return (Ss::vport().IN & Ss::mask) != 0;
+    }
+
+    /// Poll INTFLAGS until `flag` stands, and hand back the flags as that
+    /// read found them. Zero when the host raised the select first (`how`
+    /// closed) or the budget ran out (stalled). FOUR POLLS A COUNT: the
+    /// select is asked once every four reads, so the read that sees the
+    /// flag follows the one before it by a load and a skip; the budget is
+    /// counted on an eight-bit counter and charged to `spins` 256 counts
+    /// at a time, so the idle path between two groups of polls is an SBIC,
+    /// a DEC and a branch and the 32-bit budget is touched once in 256.
+    template <uint8_t flag>
+    [[gnu::always_inline]] static uint8_t await(uint32_t& spins, RunEnd& how) {
+        auto& s = S::regs();
+        uint8_t c = 0;
+        for (;;) {
+            uint8_t f = s.INTFLAGS;
+            if ((f & flag) != 0) return f;
+            f = s.INTFLAGS;
+            if ((f & flag) != 0) return f;
+            f = s.INTFLAGS;
+            if ((f & flag) != 0) return f;
+            f = s.INTFLAGS;
+            if ((f & flag) != 0) return f;
+            if (ss_high()) {
+                how = RunEnd::closed;
+                return 0;
+            }
+            if (--c == 0) {
+                if (spins <= 256u) {
+                    spins = 0;
+                    how = RunEnd::stalled;
+                    return 0;
+                }
+                spins -= 256u;
+            }
+        }
+    }
+
+    /// The window opens: the select pad low, or a byte in (`mask`, a flag
+    /// a transfer raises), whichever is seen first. False on the budget.
+    static bool await_select(uint8_t mask, uint32_t& spins) {
+        for (;;) {
+            if (!ss_high()) return true;
+            if ((S::regs().INTFLAGS & mask) != 0) return true;
+            if (--spins == 0) return false;
+        }
+    }
+
+    /// The buffer-mode preload, with the select high: the first answer,
+    /// and under BUFWR - whose first write is copied into the shifter the
+    /// cycle after it (28.3.2.2.2) - the second into the buffer. Returns
+    /// how many were written (0: the budget ran out).
+    template <bool has_out>
+    [[gnu::always_inline]] static uint8_t preload_buffered(const uint8_t* out, uint8_t fill,
+                                                           uint16_t len, bool bufwr,
+                                                           uint32_t& spins) {
+        auto& s = S::regs();
+        s.DATA = has_out ? out[0] : fill;
+        if (!bufwr || len < 2) return 1;
+        while ((s.INTFLAGS & SPI_DREIF_bm) == 0) {
+            if (--spins == 0) return 0;
+        }
+        s.DATA = has_out ? out[1] : fill;
+        return 2;
+    }
+
+    /// The flags of a turn that came too late (the class's runs): TXCIF,
+    /// the transmitter run dry, or BUFOVF, a byte lost behind a full FIFO.
+    static constexpr uint8_t late_flags = SPI_TXCIF_bm | SPI_BUFOVF_bm;
+
+    /// The steady turns of serve_buffered(), out of line so that its frame
+    /// holds the loop's state alone and every value of a turn stays in a
+    /// register: the next answer loaded before the poll, the flag seen, the
+    /// late flags tested, the byte before the newest read and stored, the
+    /// answer stored. Returns where the reads end; `how` is left complete
+    /// when all `k` turns ran, and says why otherwise (late: the turn that
+    /// saw the flags read nothing and wrote nothing).
+    template <bool has_out>
+    [[gnu::noinline]] static uint8_t* steady_turns(const uint8_t* p, uint8_t fill, uint8_t* q,
+                                                   uint16_t k, uint32_t& spins, RunEnd& how) {
+        auto& s = S::regs();
+        do {
+            const uint8_t next = has_out ? *p++ : fill;
+            const uint8_t f = await<SPI_DREIF_bm>(spins, how);
+            if (f == 0) break;
+            if ((f & late_flags) != 0) {
+                how = RunEnd::late;
+                break;
+            }
+            *q++ = s.DATA;
+            s.DATA = next;
+        } while (--k != 0);
+        return q;
+    }
+
+    /// exchange() and receive() in BUFFER MODE, read by count.
+    ///
+    /// Event t is the end of transfer t. It raises DREIF while the buffer
+    /// holds an answer - for every t < len without BUFWR, for t < len - 1
+    /// under it - and TXCIF for the last one under BUFWR, the shifter's
+    /// byte being the run's last. Event 0 writes the next answer; every
+    /// later one READS byte t - 1, the older of the two newest, AND THEN
+    /// writes the next answer, and the event after the last write reads
+    /// under BUFWR; the last two bytes are read once the last event is in.
+    ///
+    /// THE READ COMES FIRST. A turn's two deadlines are the end of the next
+    /// transfer: the answer must be in the buffer by then (or the
+    /// transmitter runs dry and TXCIF rises), and the byte before the newest
+    /// must be out of the FIFO, which is full until it is (or the arriving
+    /// byte, held in the shifter, is lost when the transfer after starts -
+    /// silently: BUFOVF is not always raised for it). A turn that read
+    /// after writing would meet the transmitter's deadline and miss the
+    /// receiver's in a band of lateness a few cycles wide, and lose a byte
+    /// that no flag reports; reading first, a turn that misses the
+    /// receiver's deadline has missed the transmitter's too, and the next
+    /// event shows TXCIF (or BUFOVF). The run then ends `late` on the bytes
+    /// read before that event: an in-order stream with no gap
+    /// (docs/avrdx/spi.md, the client's sweep). The read is the flag's
+    /// load and a test after it - past RXCIF's one cycle (28.3.2.2.2) -,
+    /// and the FIFO is never emptied while a byte may enter it.
+    template <bool has_out>
+    static Run serve_buffered(const uint8_t* out, uint8_t fill, uint8_t* in, uint16_t len,
+                              uint32_t spins) {
+        auto& s = S::regs();
+        S::flush_receive();
+        if ((s.INTFLAGS & SPI_DREIF_bm) == 0) return {0, RunEnd::stalled};
+        const bool bufwr = S::buffer_wait();
+        const uint8_t pre = preload_buffered<has_out>(out, fill, len, bufwr, spins);
+        if (pre == 0) return {0, RunEnd::stalled};
+        // Shifter (and buffer) loaded: no empty moment can raise TXCIF
+        // until the transmitter runs dry - the run's last transfer, or a
+        // late turn.
+        s.INTFLAGS = SPI_TXCIF_bm;
+        if (!await_select(SPI_RXCIF_bm, spins)) return {0, RunEnd::stalled};
+        const uint8_t* p = has_out ? out + pre : nullptr;
+        uint8_t* q = in;
+        uint8_t* known = in;
+        RunEnd how = RunEnd::complete;
+        uint16_t writes = static_cast<uint16_t>(len - pre);   // answers still to write
+        const uint16_t dreifs = bufwr ? static_cast<uint16_t>(len - 1u) : len;
+        uint8_t mask = SPI_DREIF_bm;
+        uint8_t f = 0;
+        if (dreifs != 0) {
+            // Event 0: the next answer, nothing to read yet.
+            f = await<SPI_DREIF_bm>(spins, how);
+            if (f == 0) goto cut;
+            if ((f & late_flags) != 0) goto late;
+            known = in + 1;
+            if (writes != 0) {
+                s.DATA = has_out ? *p++ : fill;
+                --writes;
+            }
+            // The steady state: the byte before the newest read, an answer
+            // written - one event, one load, one store.
+            const uint16_t steady = writes;
+            if (steady != 0) {
+                q = steady_turns<has_out>(p, fill, q, steady, spins, how);
+                known = q + 1;
+                if (how == RunEnd::late) {
+                    known = q;
+                    goto tail;
+                }
+                if (how != RunEnd::complete) goto cut;
+            }
+            // The event after the last write, when there is one: under
+            // BUFWR it is not the run's last and reads; without BUFWR it
+            // is, and the tail reads.
+            if (dreifs != static_cast<uint16_t>(steady + 1u)) {
+                f = await<SPI_DREIF_bm>(spins, how);
+                if (f == 0) goto cut;
+                if ((f & late_flags) != 0) {
+                    known = q;
+                    goto late;
+                }
+                known = q + 2;
+                if (bufwr) {
+                    *q++ = s.DATA;
+                }
+            }
+        }
+        if (bufwr) {
+            mask = SPI_TXCIF_bm;
+            f = await<SPI_TXCIF_bm>(spins, how);
+            if (f == 0) goto cut;
+        }
+        known = in + len;
+        goto tail;
+    cut:
+        // After the close nothing moves: a flag that rose before it is a
+        // transfer that ended inside the window.
+        if (how == RunEnd::closed && (s.INTFLAGS & mask) != 0 && known < in + len) ++known;
+        goto tail;
+    late:
+        how = RunEnd::late;
+    tail:
+        // What the count says has arrived, in order. The last read may meet
+        // a byte the host clocks past the run: it returns its own byte all
+        // the same, and the next run's flush takes what it leaves.
+        while (q < known) *q++ = s.DATA;
+        const uint16_t got = static_cast<uint16_t>(q - in);
+        if (how == RunEnd::closed && got == len) how = RunEnd::complete;
+        return {got, how};
+    }
+
+    /// exchange() and receive() in NORMAL MODE: one byte in flight, IF a
+    /// transfer (28.3.2.2.1). The answer is written first, in the host's
+    /// gap, then the byte read; the INTFLAGS read that saw IF and the DATA
+    /// access clear it (28.5.4). A write that met the next transfer was
+    /// ignored and raised WRCOL: `late`.
+    template <bool has_out>
+    static Run serve_normal(const uint8_t* out, uint8_t* in, uint16_t len, uint32_t spins) {
+        auto& s = S::regs();
+        (void)s.INTFLAGS;
+        (void)s.DATA;                      // IF and WRCOL cleared, the receiver read out
+        uint16_t w = 0;
+        if constexpr (has_out) {
+            s.DATA = out[0];               // the select high: the shifter
+            w = 1;
+        }
+        uint16_t r = 0;
+        RunEnd how = RunEnd::complete;
+        if (!await_select(SPI_IF_bm, spins)) return {0, RunEnd::stalled};
+        for (;;) {
+            if (await<SPI_IF_bm>(spins, how) == 0) {
+                if (how == RunEnd::closed && (s.INTFLAGS & SPI_IF_bm) != 0) in[r++] = s.DATA;
+                break;
+            }
+            if constexpr (has_out) {
+                if (w < len) {
+                    s.DATA = out[w];
+                    ++w;
+                    if ((s.INTFLAGS & SPI_WRCOL_bm) != 0) how = RunEnd::late;
+                }
+            }
+            in[r++] = s.DATA;
+            if (r == len || how == RunEnd::late) break;
+        }
+        if (how == RunEnd::closed && r == len) how = RunEnd::complete;
+        return {r, how};
+    }
+
+    /// answer() in BUFFER MODE: the preload, then an answer on each DREIF;
+    /// TXCIF before the last is loaded is a turn that missed its transfer.
+    static Run answer_buffered(const uint8_t* out, uint16_t len, uint32_t spins) {
+        auto& s = S::regs();
+        if ((s.INTFLAGS & SPI_DREIF_bm) == 0) return {0, RunEnd::stalled};
+        uint16_t w = preload_buffered<true>(out, 0, len, S::buffer_wait(), spins);
+        RunEnd how = RunEnd::closed;
+        if (w == 0) {
+            how = RunEnd::stalled;
+        } else {
+            s.INTFLAGS = SPI_TXCIF_bm;
+            if (!await_select(SPI_RXCIF_bm, spins)) {
+                how = RunEnd::stalled;
+            } else {
+                for (; w < len; ++w) {
+                    const uint8_t f = await<SPI_DREIF_bm>(spins, how);
+                    if (f == 0) break;
+                    if ((f & SPI_TXCIF_bm) != 0) {
+                        how = RunEnd::late;
+                        break;
+                    }
+                    s.DATA = out[w];
+                }
+                if (w == len) {
+                    while (!ss_high()) {   // every answer loaded: the host's close ends it
+                        if (--spins == 0) {
+                            how = RunEnd::stalled;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        S::flush_receive();
+        return {w, how};
+    }
+
+    /// answer() in NORMAL MODE: the first loaded with the select high, the
+    /// rest on IF, each in the host's gap; WRCOL behind a write is `late`.
+    static Run answer_normal(const uint8_t* out, uint16_t len, uint32_t spins) {
+        auto& s = S::regs();
+        (void)s.INTFLAGS;
+        (void)s.DATA;
+        s.DATA = out[0];
+        uint16_t w = 1;
+        RunEnd how = RunEnd::closed;
+        if (!await_select(SPI_IF_bm, spins)) {
+            how = RunEnd::stalled;
+        } else {
+            for (; w < len; ++w) {
+                if (await<SPI_IF_bm>(spins, how) == 0) break;
+                s.DATA = out[w];
+                if ((s.INTFLAGS & SPI_WRCOL_bm) != 0) {
+                    how = RunEnd::late;   // ignored: not loaded
+                    break;
+                }
+            }
+            if (w == len && how == RunEnd::closed) {
+                while (!ss_high()) {
+                    if (--spins == 0) {
+                        how = RunEnd::stalled;
+                        break;
+                    }
+                }
+            }
+        }
+        (void)s.INTFLAGS;
+        (void)s.DATA;                      // IF and WRCOL cleared for the next run
+        return {w, how};
+    }
+
     static inline uint32_t clk_per_hz_ = 0;
 };
 

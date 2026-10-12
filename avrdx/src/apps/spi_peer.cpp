@@ -50,6 +50,7 @@
 
 #include <avr/interrupt.h>
 #include <stdint.h>
+#include <span>
 
 #include "avrdx/clock.hpp"
 #include "avrdx/delay.hpp"
@@ -84,7 +85,7 @@ using Raw = Client::Resource;
 using SckPin = Pin<'E', 2>;
 using SsPin = Pin<'E', 3>;
 
-constexpr uint16_t firmware_version = 0x0100;
+constexpr uint16_t firmware_version = 0x0101;
 
 bool crystal_ok = false;
 bool trace = false;
@@ -159,6 +160,13 @@ bool apply_cfg(const spilink::Cfg& c, bool drive_miso = true) {
     return ok;
 }
 
+/// The run's budget for a millisecond: a count is four polls of INTFLAGS,
+/// an SBIC of the select pad and an eight-bit decrement, 24 cycles of the
+/// release listing, so 800 counts a millisecond at 24 MHz keep the budget
+/// inside the deadline the command names.
+constexpr uint32_t spins_per_ms = 800;
+uint32_t spins_for_ms(uint16_t ms) { return (ms ? ms : 1u) * spins_per_ms; }
+
 // ---- answering ------------------------------------------------------------------
 
 void wait_ss_high(uint16_t ms) {
@@ -168,29 +176,19 @@ void wait_ss_high(uint16_t ms) {
 }
 
 /// Serve ONE answer window: MISO is driven for exactly as long as the
-/// host keeps the select wire low, and never a moment longer. The
-/// window the host opens is longer than the frame (it clocks dummies
-/// until its own decoder is satisfied), so the tail is padded with
-/// zeros.
+/// host keeps the select wire low, and never a moment longer. The window
+/// the host opens is longer than the frame (it clocks dummies until its
+/// own decoder is satisfied), so the run is the frame padded with zeros
+/// to the host's whole budget - one call of the driver's answer run.
 void serve(const uint8_t* buf, uint8_t n) {
     wait_ss_high(50);                     // the command window must be closed first
     if (!arm_answer()) {
         (void)go_dark();
         return;
     }
-    Raw::write(buf[0]);                   // BUFWR: straight into the shift register
-    uint8_t idx = 1;
-    if (n > 1 && Raw::dre_flag()) {
-        Raw::write(buf[1]);               // and this one into the transmit buffer
-        idx = 2;
-    }
-    const uint32_t t0 = Ticker::millis();
-    while (!Client::selected() && Ticker::millis() - t0 < spilink::serve_ms) {
-    }
-    while (Client::selected() && Ticker::millis() - t0 < spilink::serve_ms) {
-        if (Raw::dre_flag()) Raw::write(idx < n ? buf[idx++] : 0x00u);
-        if (Raw::rxc_flag()) (void)Raw::read();
-    }
+    static uint8_t window[spilink::answer_bytes];
+    for (uint8_t i = 0; i < spilink::answer_bytes; ++i) window[i] = i < n ? buf[i] : 0x00u;
+    (void)Client::answer(std::span<const uint8_t>(window), spins_for_ms(spilink::serve_ms));
     ++serves;
     (void)go_dark();
 }
@@ -265,12 +263,11 @@ bool wait_transfer_start(bool idle_level) {
 
 // ---- the actions ------------------------------------------------------------------
 
-/// The workhorse. The host sends P_A(i) and this client answers P_B(i),
-/// both generated from the seeds in the command. What the host READS
-/// back depends on the buffering regime, and that asymmetry is one of
-/// the things under test - so this end simply emits P_B in order, one
-/// write per byte received, and lets the host measure the alignment.
-spilink::Report run_exchange(const spilink::Params& a) {
+/// The byte-level experiments of an exchange (flag_wrcol, flag_skip_write):
+/// a write placed on a chosen side of a byte boundary, or a load left out,
+/// one byte at a time - what a run, which serves the stream as a whole,
+/// exists not to do. Normal mode, gapped hosts (spi_link.hpp).
+spilink::Report run_exchange_bytewise(const spilink::Params& a) {
     spilink::Report r{};
     const bool buffered = a.cfg.regime != spilink::regime_normal;
     const bool bufwr = a.cfg.regime == spilink::regime_buffer_wait;
@@ -279,43 +276,20 @@ spilink::Report run_exchange(const spilink::Params& a) {
         return r;
     }
     Streams s(a);
-    // BUFWR loads the shift register directly, so two levels can be
-    // filled before the window opens; without it the single write goes
-    // into the transmit buffer and the shifter's leftover leads.
     Raw::write(s.out.next());
     if (bufwr) Raw::write(s.out.next());
     r.aux3 = Raw::flags();   // INTFLAGS right after the preloads
-
-    // NO WAIT-FOR-SELECT: a byte can only ARRIVE while the host holds
-    // the select low, so polling RXC is the wait. apply_cfg() has just
-    // re-initialized the client, and in buffer mode its init empties the
-    // receive FIFO (avrdx/spi.hpp's flush_receive()), so no stale byte
-    // leads.
-    // selected() is still SAMPLED, as telemetry: aux1 carries the
-    // milliseconds to the first received byte (255 = none came), aux2
-    // bit0 whether the select read true at that byte, bit1 whether it
-    // read true at any point of the window. A window that heard nothing
-    // or stopped short with the select seen is this loop meeting the
-    // read the silicon does not take (docs/avrdx/spi.md): a read that
-    // empties the FIFO in the cycle the next byte enters leaves the FIFO
-    // full under a lowered RXCIF, and an RXCIF-paced loop hears nothing
-    // more in that window. A loop no faster than the host's clock
-    // meets it; the next window starts clean.
     const uint32_t t0 = Ticker::millis();
-    bool any_selected = false;
     r.aux1 = 255;
     const bool cpol_idle = spi_cpol(mode_of(a.cfg.mode));
     const bool collide = !buffered && (a.flags & spilink::flag_wrcol) != 0;
     bool skipped = false;
     while (r.count < a.count && Ticker::millis() - t0 < a.ms) {
-        const bool sel_now = Client::selected();
-        any_selected = any_selected || sel_now;
         const auto v = Raw::poll();
         if (!v) continue;
         if (r.aux1 == 255) {
             const uint32_t dt = Ticker::millis() - t0;
             r.aux1 = dt > 254u ? 254u : static_cast<uint8_t>(dt);
-            if (sel_now) r.aux2 |= 0x01;
         }
         const uint16_t i = r.count;             // the byte just received
         const uint8_t want = s.next_expected();
@@ -356,9 +330,89 @@ spilink::Report run_exchange(const spilink::Params& a) {
     }
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
     r.aux0 = Raw::flags();
-    if (any_selected) r.aux2 |= 0x02;
     if (!buffered && Raw::write_collision()) r.flags |= spilink::report_wrcol;
     if (buffered && Raw::overflow_flag()) r.flags |= spilink::report_bufovf;
+    return r;
+}
+
+
+/// The longest exchange this peer serves in one window.
+constexpr uint16_t exchange_cap = 512;
+uint8_t x_out[exchange_cap];
+uint8_t x_in[exchange_cap];
+
+/// The run's end as Report::aux3 carries it.
+uint8_t end_code(Client::RunEnd e) { return static_cast<uint8_t>(e); }
+
+/// The workhorse: the host sends P_A(i) and this client answers P_B(i),
+/// both generated from the seeds in the command. ONE CALL OF A RUN of the
+/// driver (avrdx/spi.hpp: read by count, never by RXCIF): the exchange;
+/// with spilink::spare_answer_only the answer run, which reads nothing,
+/// so the host judges its read-back alone and this report counts the
+/// answers loaded; with spilink::spare_receive_only the receive run, MISO
+/// left dark, this report judging what arrived (an eight-bit window: this
+/// peer has no 16-bit frames and no CRC unit, refuses either beside it,
+/// and raises no report_extended). What the host READS back depends on
+/// the regime (spi_link.hpp's table), and the runs keep it: the first
+/// answer goes into the shifter under BUFWR and normal mode, into the
+/// buffer behind the leftover without BUFWR.
+///
+/// THE WINDOW CARRIES NOTHING BUT BYTES: the answer stream is precomputed,
+/// the received bytes stored, every judgement made after the run - and
+/// the run is served with interrupts MASKED. A turn has one transfer of
+/// slack (avrdx/spi.hpp, the runs), 64 cycles at 3 MHz, and the tick's
+/// handler alone is longer than what is left of it: unmasked, the run
+/// ends `late` wherever the tick lands. The instrument's choice, for the
+/// bounded window of one action; the tick it skips is the console's
+/// clock, nothing of the wire's.
+///
+/// The Report's telemetry: aux0 INTFLAGS after the run, aux1 its
+/// milliseconds (255 when nothing came), aux2 bit 0 the select read low
+/// after it and bit 1 the host's close ending it, aux3 how it ended
+/// (Client::RunEnd: 0 complete, 1 closed, 2 stalled, 3 late).
+spilink::Report run_exchange(const spilink::Params& a) {
+    if ((a.flags & (spilink::flag_wrcol | spilink::flag_skip_write)) != 0) {
+        return run_exchange_bytewise(a);
+    }
+    spilink::Report r{};
+    const bool answer_only = (a.spare & spilink::spare_answer_only) != 0;
+    const bool receive_only = (a.spare & spilink::spare_receive_only) != 0;
+    if (a.count > exchange_cap ||
+        (receive_only && (a.spare & (spilink::spare_wide | spilink::spare_crc)) != 0) ||
+        !apply_cfg(a.cfg, !receive_only)) {
+        r.flags |= spilink::report_cfg_failed;
+        return r;
+    }
+    const uint16_t n = a.count;
+    {
+        spilink::Stream out(a.pattern, a.seed_b);
+        for (uint16_t i = 0; i < n; ++i) x_out[i] = out.next();
+    }
+    const std::span<const uint8_t> outs(x_out, n);
+    const std::span<uint8_t> ins(x_in, n);
+    const uint32_t spins = spins_for_ms(a.ms);
+    const uint32_t t0 = Ticker::millis();
+    cli();
+    const Client::Run run = answer_only    ? Client::answer(outs, spins)
+                            : receive_only ? Client::receive(ins, spins)
+                                           : Client::exchange(outs, ins, spins);
+    sei();
+    const uint32_t dt = Ticker::millis() - t0;
+    r.aux0 = Raw::flags();
+    r.aux1 = run.count == 0 ? 255u : (dt > 254u ? 254u : static_cast<uint8_t>(dt));
+    if (Client::selected()) r.aux2 |= 0x01;
+    if (run.end == Client::RunEnd::closed) r.aux2 |= 0x02;
+    r.aux3 = end_code(run.end);
+    if (a.cfg.regime != spilink::regime_normal && Raw::overflow_flag()) {
+        r.flags |= spilink::report_bufovf;
+    }
+    if (answer_only) {
+        r.count = run.count;   // answers loaded; nothing was received
+    } else {
+        Streams s(a);
+        for (uint16_t i = 0; i < run.count; ++i) account(r, x_in[i], s.next_expected());
+    }
+    if (r.count < a.count) r.flags |= spilink::report_timed_out;
     return r;
 }
 
@@ -534,19 +588,26 @@ spilink::Report run_mspi(const spilink::Params& a) {
     while (Ticker::millis() - t0 < lead) {
     }
     // Whatever the host's hand-over of PE0/PE2 put on the wire is not
-    // traffic: drop it, then preload the first real answer.
-    while (Raw::poll()) {
+    // traffic: the run's start drops it (the receive buffer read out) and
+    // loads the first real answer.
+    if (a.count > exchange_cap) {
+        r.flags |= spilink::report_cfg_failed;
+        SsPin::invert(false);
+        return r;
     }
+    {
+        spilink::Stream out(a.pattern, a.seed_b);
+        for (uint16_t i = 0; i < a.count; ++i) x_out[i] = out.next();
+    }
+    const uint16_t left = a.ms > lead ? static_cast<uint16_t>(a.ms - lead) : 1u;
+    const Client::Run run = Client::exchange(std::span<const uint8_t>(x_out, a.count),
+                                             std::span<uint8_t>(x_in, a.count),
+                                             spins_for_ms(left));
     Streams s(a);
-    Raw::write(s.out.next());
-    while (r.count < a.count && Ticker::millis() - t0 < a.ms) {
-        const auto v = Raw::poll();
-        if (!v) continue;
-        account(r, *v, s.next_expected());
-        Raw::write(s.out.next());
-    }
+    for (uint16_t i = 0; i < run.count; ++i) account(r, x_in[i], s.next_expected());
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
     r.aux0 = Raw::flags();
+    r.aux3 = end_code(run.end);
     SsPin::invert(false);                 // deselect: never outlive the action
     return r;
 }

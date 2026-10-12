@@ -98,7 +98,7 @@ RUNSTDBY control of its own.
 | `SpiConfig`, `spi_config_valid<n>` | the whole configuration, and what this package and the errata allow |
 | `Spi<n>` | the RESOURCE: `init<cfg>()`/`init(cfg)`/`release()`, enable, role and demotion, rate, mode, SSD, buffer mode, DATA, both flag sets with their clear verbs, `flush_receive()` (the receive FIFO emptied whatever RXCIF says), the interrupt enables, `take_normal()`/`take_buffer()` ISR bodies, `routed()` |
 | `SpiHost<n, route>` | the transfer ENGINE, the instance in BUFFER MODE: `Request` descriptors (21 bytes, no padding: two `PinRef`s, three pointers, the lengths, the reply, four settings - the field names every stratum shares), `start()` (a polled request completes inside it reading the lent request and copying nothing; the pump copies its tenure's fields at launch), `isr()` (the pump on RXCIE and TXCIE: the received bytes read by count, two in flight, one interrupt a byte when the handler is on time and one for two when it is late), `status()` (always `spi_ok` here - no DMA path, no fault of its own; the verb keeps the app glue spelled as on every stratum), an optional SCK ceiling with `clock_for(max_sck_hz)` as the chooser at the engine's own clock, `prime(mode, clock)` for a caller framing the select by hand (a CPOL change moves the SCK pad to its new idle level, one edge a selected client counts), `rebase()`, and `recover()` - the verb a timed `SpiBus` calls on a transaction that never answered (util/bus_master.hpp): the pump's interrupt silenced, a demoted host re-armed, the bytes still in flight waited for (bounded), the FIFO read out whatever RXCIF says, the select window closed |
-| `SpiClient<n, route>` | the client side: `init()` (in buffer mode the receive FIFO emptied, the resource's `flush_receive()`), `selected()`, `preload()`, `exchange()`, the buffer-mode readbacks, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
+| `SpiClient<n, route>` | the client side: `init()` (in buffer mode the receive FIFO emptied, the resource's `flush_receive()`), `selected()`, THE RUNS `answer()`, `exchange()` and `receive()` - a transaction's bytes in one polled call, eight-bit characters (a run of `uint16_t` does not compile, nor one on a client the package cannot bond), in buffer mode READ BY COUNT and the read before the write (The client's runs, below), each returning `Run{count, end}` with `RunEnd` `complete`, `closed`, `stalled` and this family's fourth, `late` (a turn that missed its transfer: TXCIF or BUFOVF) -, the per-byte verbs `preload()`, `poll()`, `wait()` and `exchange(byte)` (paced by RXCIF: one byte at a time for a host that leaves a gap), the buffer-mode readbacks and `flags()`, the ISR bodies, `max_sck_hz()`, and `frames_ahead` (ONE: how many answers a pump must keep queued ahead of the host's clock - the one integer that differs between this family's client pump and the other strata's) |
 
 Both tasks are `ClockUser`s. The engine's `rebase` recomputes the
 `cs_setup_us` timing base and re-picks the division that honours its
@@ -133,11 +133,20 @@ S::init<brio::SpiConfig{.route = brio::SpiRoute::alt1,
 const auto in = S::transfer(0x9F);              // one polled byte
 ```
 
-**A client** - the answer prepared before the host clocks it out:
+**A client** - a transaction served as one run, called with the select
+still high so that the first answers are in place before the host clocks:
 
 ```cpp
 using C = brio::SpiClient<1>;
 C::init({.mode = brio::SpiMode::mode0, .buffer_mode = true, .buffer_wait = true});
+const auto r = C::exchange(std::span<const uint8_t>(answers),
+                           std::span<uint8_t>(received), spins);
+if (r.end == C::RunEnd::complete) { /* received[0 .. r.count) is the host's */ }
+```
+
+**One byte of a gapped host** - the degenerate case:
+
+```cpp
 if (C::selected()) { const auto cmd = C::exchange(status_byte); }
 ```
 
@@ -151,7 +160,7 @@ const auto c = brio::spi_clock_for(brio::clock_hz(clock), 2'500'000u);  // XPT20
 ## Bench findings
 
 Measured on rev. A5 at 5 V, CLK_PER 24 MHz, SPI0 on ALT1 (PE0-PE3).
-`test_avr_spi`: `z` = the single board, 184 verdicts; `y` = the same
+`test_avr_spi`: `z` = the single board, 186 verdicts; `y` = the same
 four pins against a second AVR128DB48 running `spi_peer` as a real
 client, 92 verdicts. The desk wires PORTE straight through (each PEn to
 the peer's PEn), so MOSI, MISO, SCK and SS are one four-wire bus between
@@ -167,12 +176,12 @@ table in `spi_link.hpp`), `m` judges the rates up to CLK_PER/8
 arrived - and `r` is SKIPPED (Host SPI frames no select; only the avrdx
 peer's client selects itself). Those AVR-client facts are judged by
 `test_samc_spi` letter h, where the AVR is the peer and the SAM the
-host. Letter `u` takes the client's answers BACK TO BACK - each exchange
+host, and the client's runs back to back by its letter i. Letter `u` takes the client's answers BACK TO BACK - each exchange
 one polled request of this engine, beside a gapped control - from 1.5
 to 12 MHz, the rungs between the crystal's divisions run with this
 board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
-peer to 8 MHz and prints every other peer's ladder. Measured: `z` 184 of
-184 with that peer attached, `y` 91 of 91 - `l` read a dummy leading
+peer to 8 MHz and prints every other peer's ladder. Measured: `z` 186 of
+186 with that peer attached, `y` 91 of 91 - `l` read a dummy leading
 every normal and buffer combination of that peer and none of its
 buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
 CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12
@@ -335,28 +344,82 @@ every byte the level MISO held and the receiver empty after, and 3600
 polled requests under the same handler likewise.
 
 **A CLIENT meets that read too, and its init empties the FIFO.** A
-client paces its reads by RXCIF (`SpiClient::poll()`), and a loop
-no faster than the host's clock makes the read that is not taken: in
+client that paces its reads by RXCIF (`poll()`, the per-byte verbs) and
+is no faster than the host's clock makes the read that is not taken: in
 the window that meets it the FIFO stays full under a lowered RXCIF and
-the loop hears nothing more - the window stops short, every byte it
-did read exact. Measured with this board as the CLIENT (`spi_peer`'s
-exchange loop, eight characters back to back) and a SAM C21 host
-clocking it (`test_samc_spi` letter d, 200 kHz to 24 MHz): in 370
-ladders, 35 of the 2960 windows from 1 to 24 MHz stopped short - at
-every rung from 1 to 12 MHz, eight of them at 1 MHz, inside the
-client's ceiling - and none of the 740 at 200 and 500 kHz, where the
-loop is faster than the wire. The state survives everything but
-a read: the resource's `init()` stores one to RXCIF and leaves the
-bytes, a switch to normal mode and back leaves them, and the console's
-re-init of the dark client left them - every buffer-mode window after
-the one that met it read nothing (five `z` runs in a row, until the
-board was reset). `SpiClient::init()` therefore empties the FIFO in
-buffer mode (`flush_receive()`, the sequence the engine's `init()`
-uses): with it every window after one that stopped short was clean,
-and 366 of the 370 `z` runs passed whole - three of the other four met
-it at the 1 MHz rung letter d judges (which now runs a window that
-stopped short once more, and met it twice in a row once in five), the
-fourth read one wrong character there, its cause not caught.
+the loop hears nothing more - the window stops short, every byte it did
+read exact. Measured with this board as the client of a SAM C21 host
+clocking eight characters back to back (`test_samc_spi` letter d, 200
+kHz to 24 MHz), through such a loop: 35 of 2960 windows from 1 to 24 MHz
+in 370 ladders stopped short, none of the 740 at 200 and 500 kHz, where
+the loop is faster than the wire. The state survives everything but a
+read: the resource's `init()` stores one to RXCIF and leaves the bytes, a
+switch to normal mode and back leaves them - every buffer-mode window
+after the one that met it read nothing, until the board was reset.
+`SpiClient::init()` therefore empties the FIFO in buffer mode
+(`flush_receive()`, the sequence the engine's `init()` uses).
+
+**The repair read is no cure.** The obvious cure by RXCIF - after a read,
+a flag found down means one more read, its byte dropped - meets an
+arrival of its own: one that enters between the flag test and the second
+read is taken by that read and dropped with it. With one byte held and
+the next arriving, the read, the test and the repair read placed at
+every phase of the arrival: 6 phases of 117 at CLK_PER/4 and 6 of 357 at
+CLK_PER/16 lost the arriving byte, every loss a repair read that returned
+it (test `t`). And as a client: the repair read of every second byte of
+256 back to back at 1 MHz placed 0 to 191 cycles behind its read, one
+placement a window - 15 of 192 windows lost bytes, every one with the
+repair read 130 to 150 cycles behind, where it meets the next arrival,
+and none at another placement.
+
+**The client's transmitter flags count the host's transfers.** In
+buffer mode DREIF rises after each transfer that moves the transmit
+buffer into the shifter, RXCIF one cycle after it, and TXCIF one cycle
+after RXCIF once shifter and buffer are both empty (28.3.2.2.2); DREIF
+falls only on a write. So a client that refills the buffer on every DREIF
+counts the host's transfers on it, and the runs read by that count: on
+each one the byte BEFORE the newest, so the FIFO is never emptied while
+a byte may enter it. Measured as the client of a SAM C21 host, 256
+characters back to back, the turn's read placed 0 to 191 cycles behind
+the flag (one placement a window, four ladders): every window whose turns
+met their transfer received every character exact - 580 at 1 MHz, 184 at
+2 MHz and 64 at 3 MHz - at every placement.
+
+**A turn has one transfer to land in, and the read goes first.** An
+answer written on transfer t's DREIF is sent in transfer t + 2, so it
+must be in the buffer before transfer t + 1 ends, or the transmitter
+runs dry and TXCIF rises. The receiver's
+deadline is the same transfer: the FIFO holds the newest byte and the one
+before it, and the byte that arrives next waits in the shifter until a
+read frees a place - when the transfer after it starts, it is gone, and
+BUFOVF is not always raised for it. Measured with the turn's write on
+time and its read delayed past that end: of the 188 windows at 1 MHz
+whose turns came late, 166 lost a byte silently, the stream short by one
+from there on with neither TXCIF nor BUFOVF up at the loss. With the
+read FIRST, a turn that misses the receiver's deadline has missed the
+transmitter's too, and the next DREIF shows TXCIF or BUFOVF: every one of
+the 580 late windows at 1, 2 and 3 MHz (the turn's write delayed past its
+transfer) ended `late` with every character it delivered exact.
+
+**Back to back, an AVR client's answers stop at 2 MHz: clarification
+3.5.2, measured.** At 3 MHz the FIRST bit of every answer of a run is the
+MSB of the character the client has just received - the shifter's
+content before the buffer's copy reaches it - so a character arrives
+wrong wherever the two bits differ, and only there: in the exchange run
+and in the answer run, which reads nothing, and wherever the turn places
+its write (0 to 33 cycles after DREIF, every window). At 2 MHz and below
+both runs are exact both ways in every window. The receiver holds to
+3 MHz: every character of every window exact. The ladder's "4 MHz" from a
+SAM C21 is 0.6 % fast (its OSC48M, that suite's letter f), above
+CLK_PER/6, and there the client mis-samples MOSI - 17 and 18 characters
+of 256 wrong. Measured with `test_samc_spi` letters d and i.
+
+**And no window stops short.** `test_samc_spi` z, 210 runs against the
+runs: every verdict of every run passed; all 1260 of letter d's windows
+from 200 kHz to 4 MHz were full, where the RXCIF-paced loop above
+stopped 35 of 2960 short from 1 MHz up; and none of letter i's 6720
+windows of 256 characters inside the client's ceiling stopped short or
+ended `late`.
 
 ### The engine's cost
 
@@ -487,6 +550,50 @@ client's ceiling (test `l`, `m`). A MISO held LOW is immune and a
 constant MOSI is immune, so every byte-level check in the single-board
 half either holds MISO low or sends a constant byte.
 
+### The client's runs
+
+`SpiClient`'s `answer()`, `exchange()` and `receive()` are written from
+28.3.2.2 and from the findings above, COUNTED in the release listing of
+`spi_peer` (`-Os`, the AVR128DB48, CLK_PER 24 MHz) and measured with this
+board as the client of a SAM C21 host clocking 256 characters back to
+back (`test_samc_spi` letter i). What the silicon offers a client and how
+each item is used:
+
+| the silicon's offer (section) | used? | how, and what it buys |
+|---|---|---|
+| buffer mode's transmit buffer: an answer written on a transfer's DREIF goes out in the transfer after the next (28.3.2.2.2) | YES | a turn has the whole of the next transfer to land its answer in; normal mode's write lands in the host's gap or not at all |
+| BUFWR: the first write goes straight into the shifter while the select is high | as configured | the run preloads two answers under it and the window opens with the first; without it one, behind the shifter's leftover (spi_link.hpp's alignment table, kept) |
+| DREIF, rising after each transfer that moves the buffer into the shifter, falling only on a write | YES | THE COUNT of the host's transfers, while the run refills the buffer on every one; `receive()` writes its fill for that reason |
+| TXCIF, both shifter and buffer empty | YES | cleared behind the preload: the last transfer under BUFWR, and before it the transmitter run dry - a `late` turn |
+| BUFOVF | YES | the receiver's late signal beside TXCIF - not alone: it was not raised for every byte lost behind a full FIFO (above) |
+| RXCIF | no, as a count | the read that empties the FIFO as a byte enters is not taken, and the repair read takes an arrival (above); RXCIF opens the window only (a byte in, or the select pad low) |
+| the two-entry receive FIFO, read at least every second transfer | YES | the older of the two newest read on every count: the FIFO never emptied while a byte may enter; the receiver keeps one transfer of slack, the transmitter's |
+| IF and WRCOL, the normal layout (28.5.4) | YES | the normal-mode runs: IF a transfer, the answer written first in the host's gap, WRCOL behind it ends the run `late` |
+| the select pad | YES | the window: a VPORT read (SBIC), once per four polls |
+| RXCIE, TXCIE, DREIE | no | the runs are polled: a turn is 28 cycles, an interrupt's entry and exit alone some 55 (The engine's cost); the ISR bodies stay for a program's own pump |
+| SSIF | no | host mode only (28.3.2.1.3) |
+
+**The turn.** Buffer mode, the exchange's steady state (`steady_turns()`,
+out of line so that its frame holds the loop's state alone): from the
+load of INTFLAGS that sees DREIF to the next poll's, 28 cycles - the
+late flags tested (ANDI and a branch), the byte before the newest read
+11 cycles after the flag's load and stored, the answer, loaded before
+the poll, stored at 17, the count's decrement and the branch back -,
+nothing in it a call. The receive run's turn is the same with its fill in
+a register; the answer run's is 23, its store 13 cycles after the flag.
+An idle poll is a load and a skip, five cycles, and every fourth an SBIC
+of the select pad and an eight-bit decrement of the budget, which charges
+the 32-bit `spins` once in 256. Normal mode's turn is about 30 cycles,
+its answer stored 10 cycles after IF.
+
+**Against the wire**: a character is 48 cycles at CLK_PER/6, the client's
+ceiling (clarification 3.7.3), 64 at 3 MHz and 96 at 2 MHz, so the turn
+keeps up at every rate the client can follow. What binds back to back is
+the silicon's copy (clarification 3.5.2, above): both directions exact to
+2 MHz, the receiver to 3 MHz. The loop the runs replaced (a byte at a
+time on RXCIF, the deadline and the streams stepped in the loop) was
+exact back to back to 500 kHz and never at 1 MHz.
+
 ### Two boards, one four-wire bus
 
 **Every combination of the client's configuration is exact, both
@@ -600,13 +707,12 @@ client selects itself with INVEN on its own pulled-up SS pin.
 
 **Driver gaps** (what the code does not do):
 
-- the client's buffer-mode receive is paced by RXCIF (`poll()`,
-  `wait()`, `exchange()`): a loop no faster than the host's clock can
-  make the read that is not taken and lose the rest of its window
-  (Bench findings). A receive by COUNT, as the engine's, wants the
-  client's transmitter flags measured as a count of the host's
-  transfers first - not done; the instrument meets it at the rungs
-  where its loop meets the wire;
+- the per-byte client verbs (`poll()`, `wait()`, `exchange(byte)`) are
+  paced by RXCIF: a caller that reads a back-to-back stream through them
+  byte by byte can make the read that is not taken (Bench findings).
+  Declined: a verb of one byte has no count to read by - the runs are the
+  verbs for a stream, these the degenerate case for a host that leaves a
+  gap;
 - no client-side ISR-driven service: `SpiClient` is a polled surface plus
   the resource's ISR bodies, and the AO that would sit on it (the mirror
   of `BusMaster` for a client) is not written - it will be born with its
@@ -637,6 +743,19 @@ client selects itself with INVEN on its own pulled-up SS pin.
   (about 1.2 times the wire), late at CLK_PER/4 (about three times) and
   wire-bound from CLK_PER/32 are counted, and a line at each, the pump's
   in a vector with no meter, would measure them;
+- the client runs' `late` end in the driver's own code: the measurement
+  that grounds it ran a copy of the turn with its write delayed past its
+  transfer, and the peer masks interrupts for its windows, so no run of
+  the driver has come late; a letter that holds the core inside a run (a
+  timer's handler fired into it, as test `t` holds the engine) would;
+- the client runs' `closed` and `stalled` ends in buffer mode: every
+  window the bench clocks runs to its count, the answer windows excepted
+  (they end `closed`, as every one does); a host that closes a window
+  early, or never clocks it, would;
+- the normal-mode `answer()` and `receive()`, and the runs without BUFWR
+  back to back: the bench's normal-mode and BUFWR-less windows are
+  gapped exchanges (`test_samc_spi` letter h); a normal-mode answer-only
+  or receive-only window, and a BUFWR-less one in letter i, would;
 - the receive FIFO emptied by the engine's `init()` and `recover()`:
   `flush_receive()` has emptied a FIFO left full under a lowered RXCIF
   through `SpiClient::init()` (Bench findings), never through the two
