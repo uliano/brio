@@ -282,7 +282,7 @@ column, PB0 and PB1, which are the desk's link: crossed to a CH32V006K8U6
 (its USART2 on column 4) running `usart_peer` on its 24 MHz crystal
 doubled. `z` (23 verdicts) is the single-board set, run with the far
 board dark - on its console or with its peer still searching, both
-leaving their link pads floating inputs; `y` (80 verdicts) is the
+leaving their link pads floating inputs; `y` (83 verdicts) is the
 two-board set against that peer, every leg judged from what the far chip
 reports. What it measured:
 
@@ -338,8 +338,8 @@ reports. What it measured:
   none raising RXNE.
 - **THE HSI AGAINST A CRYSTAL** (letter `j`): the far chip timed a
   gapless run of 4000 frames at 1 Mbaud - a divisor of 48, so the HSI's
-  error alone - first frame to last on its crystal's clock: -2480 to -2701 ppm at the
-  factory calibration (HSICAL 0x53, the trim at 16) over two sessions'
+  error alone - first frame to last on its crystal's clock: -2480 to -2706 ppm at the
+  factory calibration (HSICAL 0x53, the trim at 16) over three sessions'
   runs, the oscillator wandering by tens to a few hundred ppm between
   runs a fraction of a second apart (every later letter's reference is
   measured back to back with what it judges). THE TRIM stepped from 7 to
@@ -347,6 +347,9 @@ reports. What it measured:
   trim nearest 48 MHz on this die), +25302 at 28; every step up, between
   71 and 183 kHz, the mean 116 to 118 kHz against the manual's "about
   110KHz" (3.4.1), and back at 16 within one step of the first reading.
+  The same letter's rendezvous holds the peer's stand-off: a standby of
+  300 ms acked while the line is still the peer's, a ping inside it
+  unanswered, and the first ping answered 304 ms after the ack.
 - **The rates on the wire, timed by the foreign receiver** (letter `k`):
   at 115200, 921600, 1, 1.5, 2, 2.4 and 3 Mbaud sixteen bytes echoed
   equal and counted clean by the far chip, and 2000 gapless frames timed

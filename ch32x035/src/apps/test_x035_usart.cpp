@@ -47,7 +47,8 @@
 //      own frames (14.5's "the TX and RX pins connected internally" is the
 //      receive path letter p proves with a second chip), measured
 //   j  (y) the rendezvous - ping, IDENT (a CH32V006 peer on a crystal), a
-//      bad checksum, a desync - and THE HSI AGAINST THE CRYSTAL: the
+//      bad checksum, a desync, the refusals, a stand-off acked and timed
+//      by the peer's silence - and THE HSI AGAINST THE CRYSTAL: the
 //      peer's span of a gapless run at 1 Mbaud (a divisor of 48, exact),
 //      three times; then HSITRIM stepped a step at a time and each step
 //      timed the same way, the trim back at its centre after
@@ -872,6 +873,35 @@ void tj_link() {
     leg_refused = false;
     bench.verdict("the peer refuses onewire and a synchronous client, and answers at once after", refused_both &&
                                                                                                   command(link::Op::ping));
+
+    // THE STAND-OFF (usart_link.hpp's standby): acked while the line is
+    // still the peer's, then deaf and mute for the time asked, its link
+    // pads floating - and back by itself when it runs out, which this end
+    // finds by pinging every few milliseconds (one ping and its ack are
+    // under a millisecond at 115200, the wait for the ack 8 ms).
+    constexpr uint16_t standoff_ms = 300;
+    link::Params so{};
+    so.ms = standoff_ms;
+    uint8_t sp[link::params_size] = {};
+    link::put_params(sp, so);
+    const bool standby_acked = command(link::Op::standby, sp, link::params_size);
+    const uint32_t standby_at = Ticker::millis();
+    bench.verdict("a standby is acked before the peer lets go of the line", standby_acked);
+    wait_ms(20);
+    const bool mute = !command_once(link::Op::ping, no_payload, 0, 40);
+    bench.verdict("inside the stand-off a ping goes unanswered", mute);
+    uint32_t back_after = 0;
+    while (Ticker::millis() - standby_at < 2u * standoff_ms) {
+        if (command_once(link::Op::ping, no_payload, 0, 8)) {
+            back_after = Ticker::millis() - standby_at;
+            break;
+        }
+    }
+    print(serial, "  the stand-off of ", standoff_ms, " ms: the peer answers again ", back_after,
+          " ms after its ack (0 = never)", crlf);
+    bench.verdict("the peer answers again when the stand-off runs out, and not before",
+                  standby_acked && back_after >= standoff_ms && back_after <= standoff_ms + 20u);
+    (void)link_command_mode();
 
     // THE HSI, three times at its factory calibration.
     link::Cfg c{};

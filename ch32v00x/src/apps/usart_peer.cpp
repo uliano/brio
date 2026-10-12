@@ -126,7 +126,7 @@ static_assert(afio_tim1_pads(tim1_column).ch2 == TxPin::pad && afio_tim1_pads(ti
 using TxEdges = DmaTxEngine<3, uint32_t>;   ///< table 8-2: TIM1 CH2's request
 using RxEdges = DmaTxEngine<6, uint32_t>;   ///< table 8-2: TIM1 CH3's request
 
-constexpr uint16_t firmware_version = static_cast<uint16_t>((link::peer_ch32v00x << 8) | 0x01u);
+constexpr uint16_t firmware_version = static_cast<uint16_t>((link::peer_ch32v00x << 8) | 0x02u);
 
 bool crystal_ok = false;
 bool supply_ok = false;
@@ -541,13 +541,18 @@ link::Report run_receive(const link::Params& a, bool echo) {
     while (r.count < count) {
         const uint16_t st = L::status();
         if ((st & usart_rxne) != 0u) {
+            // DATAR first, the stamp after: a frame that completes between
+            // the status read and the data read is LOST, its overrun
+            // cleared unseen by that very pair (14.8.1's clear sequence),
+            // and a stamp between them is two calls long. Each stamp is a
+            // fixed data read late, which the span cancels.
+            const uint16_t d = L::read_word();
             if (r.count == 0u) {
                 first = Ticker::cycles();
                 last_first_ms = Ticker::millis() - ack_ms;
             } else if (r.count + 1u == count) {
                 last = Ticker::cycles();
             }
-            const uint16_t d = L::read_word();
             account(r, st, d, mask);
             if (echo) {
                 while (!L::tx_empty()) {
@@ -794,9 +799,13 @@ void handle(const link::Frame& f) {
         print(console, "  [cmd op=", hex(link::byte_of(op)), " len=", f.len, "]", crlf);
     }
     if (op == Op::standby) {
+        // The ack first, while the line is still this end's; the stand-off
+        // after it: answer() holds the pads as the state allows, and a
+        // stand-off already running would float the TX pad under its own
+        // ack, which the DUT would never hear.
         const uint16_t ms = f.len >= link::params_size ? link::get_params(f.data).ms : 0u;
-        standby_until = ms != 0u ? Ticker::millis() + ms : 0u;
         ack(op, f.sum, true);
+        standby_until = ms != 0u ? Ticker::millis() + ms : 0u;
         hold_pads();   // a stand-off lets go of the line: dark
         return;
     }

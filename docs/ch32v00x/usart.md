@@ -84,13 +84,25 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   released, floating, pulled or handed to the function). The
   single-wire loop-back the F1 offers and the STM32G0 stratum uses as
   its suite's instrument is not on this silicon.
-- **The receiver samples three times near the middle of the bit**, at
-  about 13, 15 and 17 thirty-seconds (measured by walking a glitch
-  along a banged bit): a glitch over one sample raises NE and the
-  majority keeps the bit, over two it flips the bit AND raises NE,
-  over all three it flips it in silence. A frame 3 per cent off the
-  rate is taken clean, 6 per cent off raises FE or NE (14.3's floor of
-  3 per cent holds).
+- **The receiver samples three times near the middle of the bit**, a
+  sixteenth of a bit apart, and the three move together from frame to
+  frame by a sixteenth: the start edge is found on a tick of the 16x
+  clock, which runs free of the line. Measured by walking glitches of
+  chosen widths along bit 2 of a banged frame at 2400 baud, a few
+  thousand frames on the HSI's PLL and on the crystal alike: the first
+  sample between 46 and 56 128ths of the bit (the spread a sixteenth
+  plus the banger's own edges, a spin of the cycle count late), the
+  others 8 and 16 128ths after it. A glitch over one sample raises NE
+  and the majority keeps the bit, over two it flips the bit AND raises
+  NE, over all three it flips it in silence - so how many a glitch
+  covers is a matter of chance unless it is all three or none: twelve
+  128ths from the 53rd raised NE in every frame, the bit flipped in 44 to
+  99 per cent of a run of 300 as the phase fell; the 40th to the 84th
+  flipped it with no NE in every frame. A glitch exactly two sixteenths wide covers two samples at any
+  phase in principle, but the edges' few tens of cycles of play against
+  the 1250 of a sixteenth left one sample or three in a few frames in a
+  hundred. A frame 3 per cent off the rate is taken clean, 6 per cent
+  off raises FE or NE (14.3's floor of 3 per cent holds).
 - **The break** SBK sends is ten bits of low, thirteen in LIN mode
   (measured on the capture: 50000 and 65000 cycles at 9600); the
   detector raises LBD, and its interrupt once, on ten low bits under
@@ -324,7 +336,7 @@ U::mute();                                        // asleep until a 9-bit frame 
 
 ## Bench findings
 
-The reference suite is `test_ch32_serial` (55 verdicts in `z`, five
+The reference suite is `test_ch32_serial` (56 verdicts in `z`, five
 of its letters on the jumper PD2 to PD4 that lends TIM2's channel 1 as
 the ruler, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
@@ -436,17 +448,21 @@ out there.
 
 - **Column 4 on a wire to a second chip** (TX PB0, RX PB1, the desk's
   link to a CH32X035, this part running `usart_peer` on its 24 MHz
-  crystal doubled, the far chip's `test_x035_usart` the judge: 66
+  crystal doubled, the far chip's `test_x035_usart` the judge: 83
   verdicts in its two-board set): every 8N1 rate from 115200 to 3
   Mbaud echoed byte for byte, every format - 7 and 8 bits with either
   parity, 9 bits, two, half and one-and-a-half stop bits - echoed, 4000
   gapless frames counted and timed at 1 Mbaud, an address mark, IrDA's
-  SIR frames between two WCH codecs, breaks of 9 to 20 bits. The polled
-  receive loop serving it is 33 instructions a character with the echo
-  in the release listing, no call, four accesses to the instance
-  (STATR, DATAR, STATR for TXE, the DATAR store), the first and the last
-  frame's stamps the only calls of a run - under the 160-cycle frame at
-  3 Mbaud, where the echo held.
+  SIR frames between two WCH codecs, breaks of 9 to 20 bits, a
+  stand-off acked and kept (deaf to a ping inside it, answering again
+  304 ms after the ack of a 300 ms one). The polled receive loop
+  serving it is 34 instructions a character with the echo in the
+  release listing, no call, four accesses to the instance (STATR,
+  DATAR, STATR for TXE, the DATAR store), DATAR read six instructions
+  after the status load and the first and the last frame's stamps -
+  the only calls of a run - after it, so no frame can complete between
+  the two reads of the clear sequence while a stamp is taken; under the
+  160-cycle frame at 3 Mbaud, where the echo held.
 - **Column 4 as the DUT, against a second chip** (the two-board key `w`,
   59 verdicts, the far chip a CH32X035 on its RC oscillator running
   `usart_peer`): the peer calibrated by this crystal first - its HSI found

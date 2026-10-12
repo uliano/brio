@@ -438,8 +438,11 @@ void line(bool high) {
 /// bit, `bits` data bits LSB first, an optional parity bit (given, so
 /// a wrong one can be sent), then `stop_bits` of stop - which is a
 /// high line for that long, or a LOW one when `bad_stop` asks for a
-/// framing error. `glitch_bit`, when not 0xFF, names the data bit in
-/// whose middle the line is flipped for a quarter of a bit time.
+/// framing error. `glitch_bit`, when not 0xFF, names the data bit whose
+/// line is flipped over a part of it: twelve 128ths from the 53rd, or -
+/// with `glitch_all` or'ed in - the 40th to the 84th (letter d says why
+/// those two).
+constexpr uint8_t glitch_all = 0x80;
 struct Frame {
     uint16_t data = 0;
     uint8_t bits = 8;
@@ -461,14 +464,11 @@ void bang_frame(const Frame& fr) {
         spin_until(t0 + n * bit);
         const bool level = ((fr.data >> i) & 1u) != 0u;
         line(level);
-        if (fr.glitch_bit == i) {
-            // Over TWO of the three centre samples (measured at about 13,
-            // 15 and 17 thirty-seconds of the bit): the majority flips the
-            // bit AND the disagreement raises NE. Over one sample NE rises
-            // and the bit holds; over all three it flips in silence.
-            spin_until(t0 + n * bit + (bit * 14u) / 32u);
+        if ((fr.glitch_bit & ~glitch_all) == i) {
+            const bool all = (fr.glitch_bit & glitch_all) != 0u;
+            spin_until(t0 + n * bit + (bit * (all ? 40u : 53u)) / 128u);
             line(!level);
-            spin_until(t0 + n * bit + (bit * 18u) / 32u);
+            spin_until(t0 + n * bit + (bit * (all ? 84u : 65u)) / 128u);
             line(level);
         }
         ++n;
@@ -964,16 +964,35 @@ void td_banged() {
           (framed.status & usart_fe) != 0u, crlf);
     bench.verdict("a low stop bit raises FE", framed.came && (framed.status & usart_fe) != 0u);
 
-    // A glitch in the middle of a data bit: noise.
-    all_off();
-    (void)resource_up({}, 2400);
-    bang_idle(2400, 4);
-    bang_frame({.data = 0x0F, .glitch_bit = 2});
-    const Received noisy = receive_one();
-    print(serial, "  a glitch over two centre samples of bit 2: came ", noisy.came, " word ", hex(noisy.word), " NE ",
-          (noisy.status & usart_ne) != 0u, " FE ", (noisy.status & usart_fe) != 0u, crlf);
-    bench.verdict("a glitch over two of the three centre samples flips the bit and raises NE",
-                  noisy.came && (noisy.status & usart_ne) != 0u && noisy.word == 0x0Bu);
+    // A glitch inside a data bit: noise. The receiver takes three samples
+    // a sixteenth of a bit apart, and the three move together by up to a
+    // sixteenth from frame to frame - the start edge is found on a tick of
+    // its 16x clock, which runs free of the line - and the banger's edges
+    // land a spin of the cycle count late, some tens of cycles (measured:
+    // the first sample between 46 and 56 128ths of the bit). So how many
+    // samples a glitch covers is a matter of chance unless it is none or
+    // all: one wider than a sixteenth and narrower than two (twelve
+    // 128ths, from the 53rd) covers one or two whatever the phase - they
+    // disagree, NE, and the bit is the majority's - and one over the three's
+    // whole span (40th to 84th) flips the bit with no NE. The console is
+    // drained first: its vector entered under a banged edge moves it.
+    while (!Serial::tx_idle()) {
+    }
+    Received noisy[2];
+    for (uint8_t k = 0; k < 2u; ++k) {
+        all_off();
+        (void)resource_up({}, 2400);
+        bang_idle(2400, 4);
+        bang_frame({.data = 0x0F, .glitch_bit = static_cast<uint8_t>(k == 0u ? 2u : 2u | glitch_all)});
+        noisy[k] = receive_one();
+    }
+    print(serial, "  noise on bit 2 of 0x0F, one or two samples: ", hex(noisy[0].word), " STATR ", hex(noisy[0].status),
+          "; all three: ", hex(noisy[1].word), " STATR ", hex(noisy[1].status), crlf);
+    bench.verdict("a glitch over one or two of the three samples raises NE, the bit the majority's",
+                  noisy[0].came && (noisy[0].status & (usart_ne | usart_fe)) == usart_ne &&
+                      (noisy[0].word == 0x0Fu || noisy[0].word == 0x0Bu));
+    bench.verdict("a glitch over all three flips the bit with no NE",
+                  noisy[1].came && (noisy[1].status & (usart_ne | usart_fe)) == 0u && noisy[1].word == 0x0Bu);
 
     // The tolerance: frames at rates off by +3%, +6% and -6% (14.3: not
     // less than 3% for the module's own share).
