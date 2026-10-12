@@ -76,7 +76,9 @@
 //   6  the far engine's shapes: where a start is believed, the operational
 //      range of a gapped frame, one stretched cell
 //   7  ES0298 2.13.1 staged: IDLE and the receive engine's edge from a
-//      sender up to 3 % faster, at gaps of one frame and more
+//      sender up to 3 % faster, at gaps of one frame and more; and the
+//      erratum's own case drawn by the far engine (the stage op) - an
+//      idle of 9.5 to 11 of the SENDER's bits, the sender 0 to 3 % fast
 //   8  letter g's ring against copies, the far chip as the sender at the
 //      ladder's top rungs
 //   9  half duplex against a second board: drive_rxd, one open-drain wire
@@ -89,6 +91,11 @@
 //      the one inversion each way needs), the 3/16 and the low-power
 //      pulse on the pad, normal-mode PSC = 1 refused otherwise, the far
 //      chip's 115200 ceiling; RS-485 refused (this USART has no DE)
+//   s  mute mode from a foreign sender: the idle-line wake (RWU after a
+//      burst's first frame, and before any frame), the address-mark wake
+//      on the far send_mpcm with this USART's 4-bit address on 8- and
+//      9-bit words, and ES0298 2.13.3 staged with its controls - after
+//      a software mute and after the hardware's own
 //
 // build: boards = f446re
 // build: monitor_speed = 115200
@@ -1484,8 +1491,8 @@ void t1_link() {
         print(serial, "; its divisor's own ", far, " ppm, this crystal against its ", base_ppm, crlf);
         bench.verdict("the peer's blast arrives whole, its rate on this ruler within 200 ppm of its divisor's "
                       "less the clocks' offset",
-                      up && have && dr.frames == calib_frames && dr.fe == 0u && all && r.aux16 != 0u &&
-                          near(ppm, far - base_ppm, 200));
+                      up && have && dr.frames == calib_frames && dr.fe == 0u && all &&
+                          (r.flags & link::report_rate_stated) != 0u && near(ppm, far - base_ppm, 200));
     }
     link_release();
 }
@@ -1620,10 +1627,11 @@ void t2_rates() {
             const bool have = peer_report(r, 0);
             const int32_t ppm = span_ppm(dr.span, rate, 20, dr.frames);
             // The far divisor's rate on its tracked core (the blast's
-            // aux16, 0 from a peer that cannot tell) less the clocks'
-            // offset: the far transmitter judged as tightly as this one.
+            // aux16 with report_rate_stated - 0 then exact; the flag clear
+            // from a peer that cannot tell) less the clocks' offset: the
+            // far transmitter judged as tightly as this one.
             const int32_t far = static_cast<int16_t>(r.aux16);
-            const bool known = have && r.aux16 != 0u;
+            const bool known = have && (r.flags & link::report_rate_stated) != 0u;
             print(serial, "    the far blast on this ruler: ", dr.frames, " of ", n, ", ORE ", dr.ore, ", ");
             print_ppm(ppm);
             print(serial, " against the far divisor's ", far, " less the clocks' ", base, crlf);
@@ -2371,6 +2379,44 @@ IdleLeg idle_leg(uint32_t peer_rate, uint8_t gap_units, bool engine) {
     return l;
 }
 
+/// One train the far engine DRAWS (usart_link.hpp's stage): frames of one
+/// fixed value, gaps in sixteenths of the SENDER's bit - read polled, the
+/// IDLE flags counted from the first frame on (SR then DR clears both).
+struct StageLeg {
+    bool up = false;
+    bool drawn = false;   ///< the far engine played the train whole
+    uint16_t frames = 0, wrong = 0, idles = 0;
+};
+
+StageLeg stage_leg(const link::Params& a, const link::Cfg& dc) {
+    StageLeg l{};
+    const bool acted = peer_act(link::Op::stage, a);
+    l.up = acted && dut_link(dc);
+    USART_TypeDef& u = U1::regs();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    while (l.up && Ticker::millis() - t0 < 400u) {
+        const uint32_t st = u.SR;
+        if ((st & UsartFlag::rxne) != 0u) {
+            if ((static_cast<uint16_t>(u.DR) & 0xFFu) != a.value) ++l.wrong;
+            ++l.frames;
+            last = Ticker::millis();
+            continue;
+        }
+        if ((st & UsartFlag::idle) != 0u) {
+            (void)u.DR;   // SR then DR: IDLE's clear (25.6.1)
+            if (l.frames != 0u) ++l.idles;
+        }
+        if (l.frames != 0u && Ticker::millis() - last > 30u) {
+            break;
+        }
+    }
+    link::Report r{};
+    l.drawn = peer_report(r, 0) && (r.flags & link::report_ran) != 0u && (r.flags & link::report_mismatch) == 0u &&
+              r.count == a.count;
+    return l;
+}
+
 void t7_idle_faster() {
     if (!ensure_link()) {
         bench.verdict("the peer is reachable", false);
@@ -2419,6 +2465,52 @@ void t7_idle_faster() {
           "faster", edge_long);
     judge("ES0298 2.13.1 staged at a gap of one frame (200 us at 50000 baud) from a sender up to 3 % fast: every "
           "IDLE told - the erratum NOT reproduced there", idle_one);
+
+    // THE ERRATUM'S OWN CASE, gaps stated in the SENDER's bit times (the
+    // stage op): sixteen 0xF0 frames at 50000 baud from a far end 0, 1 and
+    // 3 % faster, an idle of 9.5 to 11 of ITS bits after each - "an idle
+    // frame followed by a character" is ten. Fifteen gaps a train and its
+    // end: sixteen IDLE where every gap is told, printed with the gap in
+    // THIS receiver's sixteenths (this crystal's divisor is exact here).
+    static constexpr uint16_t idle16[] = {152, 156, 160, 164, 168, 176};
+    static constexpr int16_t fast[] = {0, 10, 30};
+    bool trains_whole = true, eleven_told = true;
+    uint16_t own_case = 0xFFFFu, past_case = 0xFFFFu, exact_long = 0, exact_short = 0xFFFFu;
+    for (const int16_t e : fast) {
+        print(serial, "  the far end +", e, " per mille, gap (sender sixteenths = this receiver's): IDLE of 16:");
+        for (const uint16_t g : idle16) {
+            link::Params a{};
+            a.cfg.rate = static_cast<uint32_t>((static_cast<int64_t>(50'000) * (1'000 + e)) / 1'000);
+            a.count = 16;
+            a.value = 0xF0;
+            a.pattern = link::pattern_fixed;
+            a.aux16 = g;
+            link::Cfg dc{};
+            dc.rate = 50'000;
+            const StageLeg l = stage_leg(a, dc);
+            const uint32_t here = (static_cast<uint32_t>(g) * 1000u + (1000u + static_cast<uint32_t>(e)) / 2u) /
+                                  (1000u + static_cast<uint32_t>(e));
+            print(serial, " ", g, "=", here, ":", l.idles);
+            trains_whole = trains_whole && l.up && l.drawn && l.frames == 16u && l.wrong == 0u;
+            if (g == 176u) eleven_told = eleven_told && l.idles == 16u;
+            if (g == 160u && e == 30) own_case = l.idles;
+            if (g == 168u && e == 30) past_case = l.idles;
+            if (g == 164u && e == 0) exact_long = l.idles;
+            if (g == 156u && e == 0) exact_short = l.idles;
+        }
+        print(serial, crlf);
+    }
+    judge("every drawn train arrives whole, sixteen frames of sixteen", trains_whole);
+    judge("an idle of eleven sender bits is told by IDLE after every frame, the far end up to 3 % faster",
+          eleven_told);
+    judge("from an exact sender the idle frame is ten bits: told after every frame at 10.25, after none at "
+          "9.75", exact_long == 16u && exact_short == 1u);
+    // The receiver times its idle frame from the stop bit AS IT SAMPLED
+    // it, which a faster sender's frame ends ahead of by the sender's
+    // error over the frame - the far G0's letter 9 reads the same table.
+    judge("ES0298 2.13.1 REPRODUCES in its own case: one idle frame and then a character from a sender 3 % "
+          "fast, and the idle frame is not told - nor at 10.5 sender bits, 10.2 of this receiver's, past the "
+          "exact sender's threshold", own_case == 1u && past_case == 1u);
     link_release();
 }
 
@@ -3059,6 +3151,230 @@ void tr_irda() {
     link_release();
 }
 
+// ---------------------------------------------------------------------------
+// s - mute mode and the multiprocessor wake from a foreign sender, and
+//     ES0298 2.13.3
+// ---------------------------------------------------------------------------
+//
+// 25.4.6 across the wire, the far G0 the sender: the IDLE-LINE wake (RWU
+// set after a burst's first frame, the rest of the burst dropped, the idle
+// frame the wake - and RWU set before ANY frame, which 25.6.4's RWU note
+// says leaves the idle-line wake unable to work); the ADDRESS-MARK wake on
+// the far `send_mpcm` - four groups of an address and its data - with this
+// USART's one address width, FOUR bits, on an 8-bit word (the mark bit 7)
+// and a 9-bit one (the mark bit 8), the same groups the far G0's letter `s`
+// reads in its four- and seven-bit modes; and ES0298 2.13.3: "the USART
+// receiver recognizes a valid address with a parity error, it exits from
+// Mute mode without setting the Parity Error flag" - no workaround - with
+// the controls that show the parity error is real.
+
+struct MuteLeg {
+    bool up = false;
+    bool rwu_set = false;          ///< RWU read right after mute()
+    uint8_t n = 0;
+    uint16_t v[24] = {};
+    uint32_t pe = 0;               ///< frame i carried PE: bit i
+    uint16_t idles_muted = 0;
+};
+
+/// What a muted receiver lets through. `mute_after` frames are taken before
+/// RWU is set; 0 sets it before the stream, 0xFF never.
+MuteLeg mute_collect(uint8_t mute_after, uint16_t mask) {
+    MuteLeg l{};
+    USART_TypeDef& u = U1::regs();
+    if (mute_after == 0u) {
+        l.rwu_set = U1::mute() && U1::muted();
+    }
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    uint8_t taken = 0;
+    while (Ticker::millis() - t0 < 400u) {
+        const uint32_t st = u.SR;
+        if ((st & UsartFlag::rxne) != 0u) {
+            const uint16_t w = static_cast<uint16_t>(u.DR & mask);   // SR then DR: this frame's flags
+            if (l.n < 24u) {
+                if ((st & UsartFlag::pe) != 0u) l.pe |= 1UL << l.n;
+                l.v[l.n++] = w;
+            }
+            if (++taken == mute_after) {
+                l.rwu_set = U1::mute() && U1::muted();
+            }
+            last = Ticker::millis();
+            continue;
+        }
+        if ((st & UsartFlag::idle) != 0u) {
+            (void)u.DR;
+            if (U1::muted()) ++l.idles_muted;
+        }
+        if (taken != 0u && Ticker::millis() - last > 40u) {
+            break;
+        }
+    }
+    return l;
+}
+
+bool seq_is(const MuteLeg& l, std::initializer_list<uint16_t> want) {
+    if (l.n != want.size()) {
+        return false;
+    }
+    uint8_t i = 0;
+    for (const uint16_t w : want) {
+        if (l.v[i++] != w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void print_seq(const MuteLeg& l) {
+    for (uint8_t i = 0; i < l.n; ++i) {
+        print(serial, " ", hex(l.v[i]), (l.pe >> i) & 1u ? "(PE)" : "");
+    }
+    print(serial, crlf);
+}
+
+/// The far send_mpcm's four groups (address, data frames), its data
+/// counting up from 0x10, into this end at `here` in mute mode `m`, RWU
+/// set before the stream unless `mute_first` is false.
+MuteLeg mpcm_leg(const link::Cfg& far, const link::Cfg& here, const MuteConfig& m, const uint8_t (&groups)[8],
+                 uint16_t mask, bool mute_first = true) {
+    link::Params a{};
+    a.cfg = far;
+    a.groups = 4;
+    a.value = 0x10;
+    a.ms = 200;
+    const bool acted = peer_act(link::Op::send_mpcm, a, groups, 8);
+    MuteLeg l{};
+    const bool up = acted && dut_link(here) && U1::mute_mode(m);
+    if (up) {
+        l = mute_collect(mute_first ? 0u : 0xFFu, mask);
+    }
+    l.up = up;
+    U1::unmute();
+    (void)U1::mute_mode({});
+    link::Report r{};
+    (void)peer_report(r, 0);
+    return l;
+}
+
+void ts_mute() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    link::Cfg c{};
+    c.rate = 115'200;
+    // a. THE IDLE-LINE WAKE: three bursts of eight counting frames a
+    //    millisecond apart, RWU set after the first frame - and the same
+    //    with RWU set before any frame.
+    for (uint8_t after = 1; after <= 2u; ++after) {
+        link::Params a{};
+        a.cfg = c;
+        a.count = 8;
+        a.aux16 = 3;
+        a.aux8 = 10;
+        a.ms = 200;
+        a.pattern = link::pattern_counting;
+        const bool acted = peer_act(link::Op::blast, a);
+        const bool up = acted && dut_link(c) && U1::mute_mode({.wake = MuteWake::idle_line});
+        const MuteLeg l = up ? mute_collect(after == 1u ? 1u : 0u, 0xFFu) : MuteLeg{};
+        const bool rwu_end = U1::muted();
+        U1::unmute();
+        link::Report r{};
+        (void)peer_report(r, 0);
+        if (after == 1u) {
+            print(serial, "  idle-line wake, RWU set after the first frame (", l.rwu_set ? "set" : "REFUSED",
+                  ", IDLE flags while muted ", l.idles_muted, ", RWU at the end ", rwu_end ? "SET" : "clear", "):");
+            print_seq(l);
+            bool tail = l.n == 17u;
+            for (uint8_t i = 0; tail && i < 16u; ++i) {
+                tail = l.v[1u + i] == 8u + i;
+            }
+            judge("the idle-line wake: RWU drops the rest of the burst, the idle frame wakes the receiver - both "
+                  "later bursts whole and no IDLE flag for the wake",
+                  up && l.rwu_set && l.v[0] == 0u && tail && l.idles_muted == 0u);
+        } else {
+            print(serial, "  idle-line wake, RWU set BEFORE any frame (", l.rwu_set ? "set" : "REFUSED",
+                  ", RWU at the end ", rwu_end ? "SET" : "clear", "): ", l.n, " frames:");
+            print_seq(l);
+            // 25.6.4's RWU note: an idle-line wake wants a byte received
+            // before RWU is set - on an idle line the bit does not hold.
+            judge("RWU written before any frame does not hold (25.6.4's note): the receiver stays awake and "
+                  "takes all three bursts",
+                  up && !l.rwu_set && l.n == 24u && l.v[0] == 0u && l.v[23] == 23u);
+        }
+    }
+    // b. THE ADDRESS MARK on an 8-bit word, a 4-bit address 5: groups
+    //    (0x83, 2) (0x85, 3) (0x86, 2) (0x95, 2) - 0x85 and 0x95 both
+    //    match four bits (the far G0's seven-bit mode tells them apart).
+    {
+        static constexpr uint8_t groups[8] = {0x83, 2, 0x85, 3, 0x86, 2, 0x95, 2};
+        const MuteLeg l = mpcm_leg(c, c, {.wake = MuteWake::address_mark, .address = 0x5}, groups, 0xFFu);
+        print(serial, "  8-bit words, address 5:");
+        print_seq(l);
+        judge("a 4-bit address on an 8-bit word: 0x85 and 0x95 wake the receiver with their data, 0x83 and 0x86 "
+              "mute it",
+              l.up && l.rwu_set && seq_is(l, {0x85, 0x12, 0x13, 0x14, 0x95, 0x17, 0x18}));
+    }
+    // c. A 9-BIT WORD, the mark in bit 8: groups 0x05, 0x85, 0x45, 0x0A -
+    //    the first three match four bits.
+    {
+        link::Cfg c9 = c;
+        c9.bits = link::bits9_low;
+        static constexpr uint8_t groups[8] = {0x05, 2, 0x85, 3, 0x45, 2, 0x0A, 2};
+        const MuteLeg l = mpcm_leg(c9, c9, {.wake = MuteWake::address_mark, .address = 0x5}, groups, 0x1FFu);
+        print(serial, "  9-bit words, address 5:");
+        print_seq(l);
+        judge("a 9-bit word's mark is bit 8, and the 4-bit address takes every group whose low nibble is 5",
+              l.up && seq_is(l, {0x105, 0x10, 0x11, 0x185, 0x12, 0x13, 0x14, 0x145, 0x15, 0x16}));
+    }
+    // d. ES0298 2.13.3: this end 8E1 (the mark bit 7, before the parity),
+    //    the far end 8O1 - every frame a parity error - at address 5. Muted
+    //    by SOFTWARE (RWU written) before groups (0x83, 1) (0x85, 2) (0x86,
+    //    1) (0x95, 1); muted by the HARDWARE (a non-matching address sets
+    //    RWU) in groups (0x86, 1) (0x85, 1) (0x83, 1) (0x95, 1), the
+    //    receiver awake at the start. The controls: the same frames with no
+    //    mute mode (PE on every one), and the address mark armed with the
+    //    receiver awake when a matching address comes.
+    {
+        link::Cfg ce = c;
+        ce.parity = 1;
+        link::Cfg co = c;
+        co.parity = 2;
+        static constexpr uint8_t groups[8] = {0x83, 1, 0x85, 2, 0x86, 1, 0x95, 1};
+        const MuteLeg soft = mpcm_leg(co, ce, {.wake = MuteWake::address_mark, .address = 0x5}, groups, 0xFFu);
+        static constexpr uint8_t hw_groups[8] = {0x86, 1, 0x85, 1, 0x83, 1, 0x95, 1};
+        const MuteLeg hard =
+            mpcm_leg(co, ce, {.wake = MuteWake::address_mark, .address = 0x5}, hw_groups, 0xFFu, false);
+        static constexpr uint8_t awake_groups[8] = {0x85, 2, 0x86, 1, 0x95, 1, 0x83, 1};
+        const MuteLeg awake =
+            mpcm_leg(co, ce, {.wake = MuteWake::address_mark, .address = 0x5}, awake_groups, 0xFFu, false);
+        const MuteLeg plain = mpcm_leg(co, ce, {.wake = MuteWake::idle_line}, groups, 0xFFu, false);
+        print(serial, "  8E1 here, 8O1 there, address 5, muted by software first:");
+        print_seq(soft);
+        print(serial, "  the same, awake at the start, muted by 0x86 and by 0x83:");
+        print_seq(hard);
+        print(serial, "  the same, the address mark armed and the receiver awake for 0x85:");
+        print_seq(awake);
+        print(serial, "  the same with no mute at all:");
+        print_seq(plain);
+        judge("the control: with no mute mode every one of the far frames carries PE",
+              plain.up && plain.n == 9u && plain.pe == 0x1FFu);
+        judge("ES0298 2.13.3 REPRODUCES after a SOFTWARE mute: the first matching address with a parity error "
+              "wakes the receiver with NO PE, its data and the next address (0x95, after the hardware's mute) "
+              "with PE",
+              soft.up && seq_is(soft, {0x85, 0x11, 0x12, 0x95, 0x14}) && soft.pe == 0x1Eu);
+        judge("and NOT after the hardware's own mute: a non-matching address mutes the receiver, and the "
+              "matching one after it wakes it WITH PE - every address of the leg flagged",
+              hard.up && seq_is(hard, {0x85, 0x11, 0x95, 0x13}) && hard.pe == 0xFu);
+        judge("awake under the address mark the matching address is checked as any frame: 0x85 with PE",
+              awake.up && awake.n != 0u && awake.v[0] == 0x85u && (awake.pe & 1u) != 0u);
+    }
+    link_release();
+}
+
+
 void banner() {
     print(serial, crlf, "test_stm32f4_serial - the transport on USART6's single-wire loop", crlf);
     bench.menu();
@@ -3182,6 +3498,7 @@ int main() {
     bench.second_letter('9', "half duplex against a second board: drive_rxd, one wire, a collision", t9_half_duplex);
     bench.second_letter('0', "LIN both ways: the break at LBDL's two lengths, with LIN off, sent and timed", t0_lin);
     bench.second_letter('r', "IrDA SIR both ways against the far ST ENDEC; RS-485 refused (no DE)", tr_irda);
+    bench.second_letter('s', "mute and the multiprocessor wake from a foreign sender; ES0298 2.13.3", ts_mute);
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL" : "FAILED", " tick=",

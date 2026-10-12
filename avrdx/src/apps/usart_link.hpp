@@ -162,6 +162,7 @@ enum class Op : uint8_t {
     standby = 0x11,      ///< let go of the line entirely for `ms`
     calibrate = 0x12,    ///< time the DUT's gapless frames against the peer's clock
     hold_pad = 0x13,     ///< drive one named link pad at a level, the USART let go
+    stage = 0x14,        ///< a drawn frame train: a pulse inside each frame, gaps in bit times
 
     ack = 0x40,
     nak = 0x41,
@@ -421,6 +422,32 @@ inline constexpr uint8_t pad_xck = 2;
 ///                               at the end of the hold (1 high, 0 low) -
 ///                               a wire held the other way by the DUT shows
 ///                               there. A peer without that pad refuses it.
+///   stage                       a FRAME TRAIN DRAWN WHOLE by the peer's
+///                               waveform engine at cfg.rate - the shapes a
+///                               clean UART cannot make and the errata name:
+///                               count = frames, value/pattern = their data
+///                               (pattern_value's sequence; a ninth data bit
+///                               is 0), the frame from cfg.bits (5..8, or a
+///                               nine), cfg.parity and cfg.stop (1 or 2);
+///                               cell = the cell a PULSE sits in, in every
+///                               frame (0 = the start bit, 1..bits = the
+///                               data, then the parity bit where there is
+///                               one, then the stop bits; -1 = no pulse),
+///                               pct = where the pulse starts inside that
+///                               cell, in per cent of a bit (0..99), aux8 =
+///                               its width in per cent of a bit (0 = no
+///                               pulse): the line driven to the level
+///                               OPPOSITE the cell's for that long, whatever
+///                               it crosses; aux16 = the idle between two
+///                               frames in SIXTEENTHS of a bit at cfg.rate
+///                               (0 = back to back). The frames' rate is
+///                               the peer's time base, not a divisor's: a
+///                               rate a per cent off a receiver's is that
+///                               per cent. Report::count and sum = the
+///                               frames drawn, aux16 = a bit's length in
+///                               24 MHz ticks (bitbang's). A peer whose
+///                               engine cannot draw the pulse that narrow,
+///                               or the train in its edge table, refuses.
 struct Params {
     Cfg cfg{};
     uint16_t count = 0;
@@ -529,6 +556,10 @@ inline constexpr uint8_t report_timed_out = 0x01;   ///< the deadline ended it
 inline constexpr uint8_t report_mismatch = 0x02;    ///< a frame was not what was expected
 inline constexpr uint8_t report_cfg_failed = 0x04;  ///< the Cfg was refused by the driver
 inline constexpr uint8_t report_ran = 0x08;         ///< the action really ran
+/// send and blast: aux16 CARRIES the peer's rate - 0 then means exact to
+/// the ppm. Clear (a peer that cannot tell, or an older one), aux16 = 0
+/// means not known.
+inline constexpr uint8_t report_rate_stated = 0x10;
 
 /// What the peer saw while it was not in command mode.
 struct Report {
@@ -548,9 +579,10 @@ struct Report {
     /// rate the PEER's transmitter really ran at against the cfg.rate it
     /// was asked for, in ppm as an int16 (rate_error_ppm()), positive when
     /// the peer runs fast - from its divisor and its time base (crystal,
-    /// tracked or adopted). 0 = not known (a peer that cannot tell, or an
-    /// older one), so a DUT judges such a blast at its own loose bound; a
-    /// peer exact to the ppm reports 0 too and is judged the same way.
+    /// tracked or adopted), with report_rate_stated set in `flags`; a
+    /// peer that cannot tell (or an older one) leaves the flag clear and
+    /// aux16 0, and a DUT judges such a blast at its own loose bound;
+    /// stage: a bit's length in 24 MHz ticks.
     uint16_t aux16 = 0;
     uint8_t op = 0;          ///< which action this report belongs to
     uint8_t ms = 0;          ///< how long it took, capped at 255
@@ -623,6 +655,45 @@ constexpr Report get_report(const uint8_t* p) {
     r.span = get32(p + 12);
     return r;
 }
+
+/// stage's longest frame in cells: a start, nine data bits, a parity bit
+/// and two stop bits.
+inline constexpr uint8_t stage_cells_most = 13;
+
+/// stage's cell numbering: the first stop cell of a frame of `bits` data
+/// bits (bits9_low and bits9_high count nine), with a parity cell or not -
+/// where a pulse inside the stop bit goes.
+constexpr int8_t stage_stop_cell(uint8_t bits, uint8_t parity) {
+    return static_cast<int8_t>(1u + (bits >= bits9_low ? 9u : bits) + (parity != 0u ? 1u : 0u));
+}
+static_assert(stage_stop_cell(8, 0) == 9 && stage_stop_cell(8, 1) == 10 && stage_stop_cell(bits9_low, 0) == 10,
+              "8N1's stop is the tenth cell");
+
+/// stage's frame, cell by cell: whether cell `k` of a frame carrying `v`
+/// in `data` bits (5..9) with `parity` (0 none, 1 even, 2 odd) is HIGH -
+/// the start bit low, the data LSB first, the parity bit, the stop bits
+/// (any `k` past the parity) high.
+constexpr bool stage_cell_high(uint16_t v, uint8_t data, uint8_t parity, uint8_t k) {
+    if (k == 0u) {
+        return false;
+    }
+    if (k <= data) {
+        return ((v >> (k - 1u)) & 1u) != 0u;
+    }
+    if (k == data + 1u && parity != 0u) {
+        uint8_t ones = 0;
+        for (uint8_t i = 0; i < data; ++i) {
+            ones = static_cast<uint8_t>(ones + ((v >> i) & 1u));
+        }
+        return ((ones & 1u) != 0u) != (parity == 2u);   // even: the bit makes the count even
+    }
+    return true;
+}
+static_assert(!stage_cell_high(0x55, 8, 0, 0) && stage_cell_high(0x55, 8, 0, 1) && !stage_cell_high(0x55, 8, 0, 2) &&
+                  stage_cell_high(0x55, 8, 0, 9),
+              "0x55 8N1: start low, LSB first, stop high");
+static_assert(!stage_cell_high(0x03, 8, 1, 9) && stage_cell_high(0x03, 8, 2, 9) && stage_cell_high(0x07, 8, 1, 9),
+              "the parity cell: even makes the ones even, odd makes them odd");
 
 /// The next value of the shared 8-bit LFSR (x^8 + x^6 + x^5 + x^4 + 1),
 /// so both boards generate the same "random-ish" stream from one seed.

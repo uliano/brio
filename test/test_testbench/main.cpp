@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <regex>
 #include <string>
+#include <type_traits>
 
 #include "util/testbench.hpp"
 
@@ -459,6 +460,64 @@ TEST_CASE("registration refuses the second all-key in either case and a key "
     CHECK(upper.letter('y', "an ordinary y", t2a));
     CHECK(upper.second_letter('j', "peer j", t2j));
     CHECK(!upper.letter('Y', "the key itself", t2a));
+}
+
+// ---- a second set past 32 letters ---------------------------------------------
+// The mask is a bit per registered letter: 32 bits while the table fits
+// them, 64 beyond - so a full bench's second set still reaches its last
+// letters, and a bench of 32 or fewer pays nothing for the possibility.
+
+namespace {
+
+using Wide = brio::TwoKeyTestBench<Capture, 'y', 40>;
+Wide* active_wide = nullptr;
+
+void tw_first() {
+    order.push_back('f');
+    active_wide->verdict("first-set letter", true);
+}
+void tw_second() {
+    order.push_back('s');
+    active_wide->verdict("second-set letter", true);
+}
+
+} // namespace
+
+TEST_CASE("a second set past 32 registered letters runs its late letters under its key") {
+    static_assert(std::is_same_v<brio::TwoKeyTestBench<Capture, 'y', 32>::SecondMask, uint32_t>);
+    static_assert(std::is_same_v<brio::TwoKeyTestBench<Capture, 'y', 33>::SecondMask, uint64_t>);
+    static_assert(std::is_same_v<Wide::SecondMask, uint64_t>);
+    // The first 34 keys go to the first set (lower-case letters but the
+    // two all-keys, then upper case), the next six to the second: the
+    // second set's letters sit at table positions 34..39, past a 32-bit
+    // mask.
+    constexpr const char keys[] = "abcdefghijklmnopqrstuvwxABCDEFGHIJKLMNOPQRSTUVWX";
+    Capture::clear();
+    order.clear();
+    Wide b;
+    active_wide = &b;
+    uint8_t i = 0;
+    for (; i < 34; ++i) {
+        REQUIRE(b.letter(keys[i], "first", tw_first));
+    }
+    for (; i < 40; ++i) {
+        REQUIRE(b.second_letter(keys[i], "second", tw_second));
+    }
+    CHECK(!b.second_letter('Y', "the table is full", tw_second));
+    CHECK(b.letter_count() == 40);
+
+    const auto t2 = b.handle('y');
+    REQUIRE(t2.has_value());
+    CHECK(order == "ssssss");
+    CHECK(t2->pass == 6);
+    CHECK(find_marked(Capture::text, "ALL:") == "ALL: 6 pass, 0 fail\r");
+
+    Capture::clear();
+    order.clear();
+    const auto t1 = b.handle('z');
+    REQUIRE(t1.has_value());
+    CHECK(order == std::string(34, 'f'));
+    CHECK(t1->pass == 34);
 }
 
 // ---- the group selection ----------------------------------------------------

@@ -1092,8 +1092,10 @@ struct Usart {
     /// the hard way on this stratum's own bench, by halt-and-dump.
     ///
     /// ES0548 2.2.4 applies here and nowhere this driver can help: with
-    /// HSIDIV != 0 the wake does not happen at all (measured), and
-    /// RCC_CR.HSIKERON does not rescue it.
+    /// HSIDIV != 0 the wake does not happen at all on an HSI16 kernel
+    /// (measured, from the host and from a far chip), and RCC_CR.HSIKERON
+    /// does not rescue it - a kernel on the LSE does (measured: woken on
+    /// a divided HSI, every frame whole).
     static bool wake_from_stop(UsartWakeSource s) {
         if (enabled() || exti_line == 0xFF) {
             return false;

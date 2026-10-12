@@ -8,9 +8,9 @@ board asks for it one line at a time.
 
 THE PROTOCOL, printed by the board and parsed here:
 
-    HOST <op> <mode> <baud> <format> <window_ms> <count>
+    HOST <op> <mode> <baud> <format> <window_ms> <count> [<gap_us>]
 
-      op       echo | sink | source | burst | poke
+      op       echo | sink | source | burst | poke | sink_bursts
       mode     0 irqTX+irqRX, 1 dmaTX+irqRX, 3 dmaTX+dmaRX - the board's
                transport shape, carried into the leg's result and not acted
                on (test_samc_uart announces 0 and 1, test_stm32_serial 0,
@@ -18,13 +18,24 @@ THE PROTOCOL, printed by the board and parsed here:
       baud     the rate the board is about to switch to
       format   e.g. 8N1, 8E1, 7O2 - bits, parity, stop bits
       window   how long the board's window lasts, in milliseconds
-      count    bytes the board will emit (source only)
+      count    bytes the board will emit (source); bytes a burst
+               (sink_bursts)
+      gap_us   the idle between two bursts in microseconds (sink_bursts
+               only; a millisecond when absent)
 
 On seeing that line this script waits out the board's own settle, moves
 its port to the announced rate and frame, runs the op for LESS than the
 window - the wire must be quiet before the board speaks again, or its
 report is read as payload - then goes back to 115200 8N1 and keeps reading
 the console.
+
+`sink_bursts` is the shape of the DMA study's lost message
+(test_stm32_serial's letter x): the same stream as `sink`, cut into
+bursts of `count` bytes with `gap_us` of idle between them - each burst
+scheduled at its own instant (its wire time at the announced frame plus
+the gap, from the pump's start), so a late write does not stretch every
+later one. The board verifies the stream run on across bursts, a lost
+burst a jump.
 
 `poke` is the STM32G0 suite's addition and the one op whose TIMING is the
 point: the script waits out HALF the window, sends `count` bytes at the
@@ -70,6 +81,7 @@ ST-LINK's own virtual COM port and is therefore addressed by-id:
 
     brio flash <board> test_stm32_serial
     brio stress --letters ywv --board <board>
+    brio stress --letters x --board <board>     # ten minutes: back to back, then bursts
 
 and test_stm32_dma's letter u, whose ladder stops at that bridge's own
 ceiling - with letter w, and only with --beyond-vcp, for the rungs above:
@@ -165,7 +177,7 @@ class Board:
         self.ser.stopbits = STOP[fmt[2]]
 
     # ---- the ops ----------------------------------------------------------
-    def run_op(self, op, mode, baud, fmt, window_ms, count, t_host=None):
+    def run_op(self, op, mode, baud, fmt, window_ms, count, t_host=None, gap_us=1000):
         self.buf = b""
         self.ser.reset_input_buffer()
         self.reconfigure(baud, fmt)
@@ -230,6 +242,28 @@ class Board:
                     got += self.ser.read(n)
                 else:
                     time.sleep(0.005)
+        elif op == "sink_bursts":
+            # A burst every period: its wire time at this frame plus the
+            # gap, each one due at its own instant from the pump's start.
+            payload = lfsr_stream(int(baud / 10 * pump_s * 1.1) + 256, mask)
+            burst = max(1, count)
+            frame_bits = 1 + int(fmt[0]) + (0 if fmt[1] == "N" else 1) + int(fmt[2])
+            period = burst * frame_bits / float(baud) + gap_us / 1e6
+            t0 = time.time()
+            k = 0
+            while (time.time() - t0 < pump_s and sent + burst <= len(payload)
+                   and time.time() < deadline):
+                due = t0 + k * period
+                now = time.time()
+                if now < due:
+                    time.sleep(due - now)
+                self.ser.write(payload[sent:sent + burst])
+                sent += burst
+                k += 1
+                n = self.ser.in_waiting
+                if n:
+                    got += self.ser.read(n)
+            self.ser.flush()
         elif op in ("echo", "sink", "burst"):
             payload = lfsr_stream(int(baud / 10 * pump_s * 1.1) + 256, mask)
             chunk = max(64, baud // 2000)
@@ -272,6 +306,8 @@ class Board:
         result = {"op": op, "mode": mode, "baud": baud, "format": fmt,
                   "host_sent": sent, "host_got": len(got), "first_bad": None,
                   "declined": declined}
+        if op == "sink_bursts":
+            result["bursts"] = sent // max(1, count)
         if declined:
             pass
         elif op == "poke":
@@ -289,7 +325,7 @@ class Board:
                 if got[i] != expect[i]:
                     result["first_bad"] = i
                     break
-        else:  # sink: the board verifies, the host only pumps
+        else:  # sink and sink_bursts: the board verifies, the host only pumps
             result["host_got"] = None
         return result
 
@@ -318,10 +354,11 @@ class Board:
                 if len(parts) >= 7:
                     t_host = time.time()
                     window_ms = int(parts[5])
+                    gap_us = int(parts[7]) if len(parts) >= 8 else 1000
                     self.legs.append(self.run_op(parts[1], int(parts[2]),
                                                  int(parts[3]), parts[4],
                                                  window_ms, int(parts[6]),
-                                                 t_host))
+                                                 t_host, gap_us))
                     end += window_ms / 1000.0 + 2.0
                 continue
             if text.startswith("-> ") and "pass" in text:

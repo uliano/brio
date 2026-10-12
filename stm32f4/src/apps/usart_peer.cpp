@@ -132,7 +132,7 @@ constexpr UartPins console_pins{.tx = {'A', 2, PinFunction::af7}, .rx = {'A', 3,
 using Console = Uart<2, console_pins>;
 constexpr Console console;
 
-constexpr uint16_t firmware_version = 0x0400;   ///< see usart_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0401;   ///< see usart_link.hpp's Ident
 
 // ---------------------------------------------------------------------------
 // The link's pads and instances
@@ -770,10 +770,11 @@ link::Report run_set_link(const link::Params& a, uint16_t mask) {
 /// Report's aux16 for send and blast (usart_link.hpp): the kernel is APB2
 /// from the crystal (taken as exact), the divisor what BRR says - OVER16
 /// divides by BRR itself (sixteenths of USARTDIV), OVER8 by
-/// 8 x mantissa + fraction (25.4.4). 0 = not known, the HSE down.
-uint16_t rate_report(uint32_t asked) {
+/// 8 x mantissa + fraction (25.4.4). Nothing with the HSE down: the
+/// Report then leaves report_rate_stated clear.
+std::optional<uint16_t> rate_report(uint32_t asked) {
     if (!crystal_ok) {
-        return 0;
+        return std::nullopt;
     }
     const uint32_t brr = Link::brr();
     const uint32_t div = Link::oversampling8() ? (((brr >> 4) << 3) | (brr & 0x7u)) : brr;
@@ -833,7 +834,10 @@ link::Report run_send(const link::Params& a, uint16_t mask, bool blast) {
     if (count != 0u) {
         wait_tx_done();
     }
-    r.aux16 = rate_report(a.cfg.rate);
+    if (const std::optional<uint16_t> stated = rate_report(a.cfg.rate)) {
+        r.aux16 = *stated;
+        r.flags |= link::report_rate_stated;
+    }
     return r;
 }
 
@@ -972,6 +976,97 @@ link::Report run_glitch(const link::Params& a) {
     tx_live();
     r.count = a.count;
     r.aux16 = a.aux16;
+    return r;
+}
+
+/// stage (usart_link.hpp): a frame train drawn whole by the engine on PA9
+/// (TIM1_CH2) - every cell of every frame from usart_link's own cell
+/// table, the PULSE inside each frame (the line driven to the level
+/// opposite its cell's for aux8 per cent of a bit, from pct per cent into
+/// cell `cell`), the idle between frames in sixteenths of a bit - in the
+/// crystal's core counts, so the rate is the crystal's and not a
+/// divisor's. Each frame is a run of boundaries in time order (its cell
+/// starts, the pulse's two ends, the next slot's start), the level at
+/// each one read off the frame: the edge list holds only real changes
+/// (edge_level drops the rest). Refused where the engine cannot draw it:
+/// a pulse narrower than the floor, or more edges than the table holds.
+link::Report run_stage(const link::Params& a) {
+    link::Report r{};
+    const uint8_t data = a.cfg.bits >= link::bits9_low ? 9u : a.cfg.bits;
+    const uint8_t parity = a.cfg.parity;
+    if (data < 5u || data > 9u || parity > 2u || (a.cfg.stop != 1u && a.cfg.stop != 2u)) {
+        r.flags |= link::report_cfg_failed;
+        return r;
+    }
+    const uint8_t cells = static_cast<uint8_t>(1u + data + (parity != 0u ? 1u : 0u) + a.cfg.stop);
+    const uint32_t q = bit_q4(a.cfg.rate);
+    const uint32_t gap = static_cast<uint32_t>((static_cast<uint64_t>(q) * a.aux16) / 16u);
+    const uint32_t slot = q * cells + gap;
+    const bool pulse = a.cell >= 0 && a.cell < static_cast<int8_t>(cells) && a.aux8 != 0u && a.pct >= 0 &&
+                       a.pct < 100;
+    const uint32_t p0 = pulse ? q * static_cast<uint8_t>(a.cell) +
+                                    static_cast<uint32_t>((static_cast<uint64_t>(q) * static_cast<uint8_t>(a.pct)) / 100u)
+                              : 0u;
+    const uint32_t p1 = pulse ? p0 + static_cast<uint32_t>((static_cast<uint64_t>(q) * a.aux8) / 100u) : 0u;
+    if (!bits_fit(slot, a.count + 1u) ||
+        (pulse && (q4_counts(p1 - p0) < engine_floor_counts || p1 > slot))) {
+        r.flags |= link::report_cfg_failed;
+        return r;
+    }
+    edges_clear();
+    link::Stream st(a.pattern, a.value);
+    uint32_t at = 0;
+    for (uint16_t i = 0; i < a.count; ++i) {
+        const uint16_t v = static_cast<uint16_t>(st.next() & data_mask(data));
+        // The boundaries in time order: the cell starts (the last one the
+        // idle's), the pulse's two ends merged in where they fall.
+        uint32_t when[link::stage_cells_most + 3];
+        uint8_t n = 0;
+        for (uint8_t k = 0; k <= cells; ++k) {
+            when[n++] = q * k;
+        }
+        if (pulse) {
+            for (const uint32_t t : {p0, p1}) {
+                uint8_t j = n++;
+                while (j != 0u && when[j - 1u] > t) {
+                    when[j] = when[j - 1u];
+                    --j;
+                }
+                when[j] = t;
+            }
+        }
+        // The pulse's level is the opposite of ITS cell's in THIS frame.
+        const bool pulse_level =
+            pulse && !link::stage_cell_high(v, data, parity, static_cast<uint8_t>(a.cell));
+        for (uint8_t j = 0; j < n; ++j) {
+            const uint32_t t = when[j];
+            const bool level = (pulse && t >= p0 && t < p1) ? pulse_level
+                               : t >= q * cells           ? true
+                                                          : link::stage_cell_high(v, data, parity,
+                                                                                  static_cast<uint8_t>(t / q));
+            edge_level(q4_counts(at + t), level);
+        }
+        at += slot;
+        r.sum = static_cast<uint16_t>(r.sum + v);
+        ++r.count;
+    }
+    if (edge_overflow) {
+        r.flags |= link::report_cfg_failed;
+        return r;
+    }
+    for (uint16_t i = 1; i < edge_n; ++i) {
+        if (edges[i] - edges[i - 1] < engine_floor_counts) {
+            r.flags |= link::report_cfg_failed;   // two edges closer than the engine follows
+            return r;
+        }
+    }
+    settle();
+    pad_to_timer<TxPad>();
+    if (!play<TxPad>(tx_channel, q4_counts(2u * q))) {
+        r.flags |= link::report_mismatch;
+    }
+    tx_live();
+    r.aux16 = static_cast<uint16_t>(ticks_of(q4_counts(q)) > 0xFFFFu ? 0xFFFFu : ticks_of(q4_counts(q)));
     return r;
 }
 
@@ -1137,9 +1232,9 @@ void handle(const link::Frame& f) {
     const uint32_t started = Ticker::millis();
 
     const bool own_config = op == Op::bitbang || op == Op::glitch || op == Op::drive_rxd ||
-                            op == Op::onewire || op == Op::collide;
+                            op == Op::onewire || op == Op::collide || op == Op::stage;
     const bool engined = op == Op::bitbang || op == Op::glitch || op == Op::drive_rxd ||
-                         op == Op::brk || op == Op::autobaud_tx || op == Op::collide;
+                         op == Op::brk || op == Op::autobaud_tx || op == Op::collide || op == Op::stage;
     uint16_t mask = data_mask(a.cfg.bits);
     bool ok = !engined || engine_ok;
     if (ok && !own_config) ok = apply_cfg(a.cfg, mask);
@@ -1162,6 +1257,7 @@ void handle(const link::Frame& f) {
             case Op::onewire: r = run_onewire(a); break;
             case Op::collide: r = run_collide(a); break;
             case Op::calibrate: r = run_calibrate(a, mask); break;
+            case Op::stage: r = run_stage(a); break;
             default: r.flags |= link::report_cfg_failed; break;
         }
         if ((r.flags & link::report_cfg_failed) == 0u) r.flags |= link::report_ran;

@@ -137,7 +137,8 @@
 //   v  the console moved to LPUART1 on its own pads (uart_stress)
 //   x  finding 4 through the ST-LINK's bridge: the console moved to
 //      921600 on a receive engine for five minutes of the host's stream
-//      (brio stress), letter 7's control
+//      back to back and five in letter 7's bursts (brio stress), letter
+//      7's control
 // THE TWO-BOARD SET, under the second all-key t (z never runs it): USART1
 // crossed to the desk's STM32F446RE running its usart_peer (PA9 to its
 // PA10, PA10 from its PA9), driven in band with usart_link.hpp - every
@@ -154,14 +155,19 @@
 //      LIN, the FIFO's per-entry flags drained late, the task's counters
 //   5  the far engine's shapes: where a start is believed (eight pulses a
 //      width, both oversamplings), the operational range of a gapped frame
-//      free of any divisor's rounding, one stretched cell
+//      free of any divisor's rounding, one stretched cell; ES0548 2.11.1
+//      above 2400 drawn by the far engine (the stage op) - a quarter-bit
+//      glitch inside the stop bit at 9600, 115200 and 1 Mbaud, with its
+//      first-half control
 //   6  the receive ring ranked low beside two copies, a foreign stream to
 //      6.4 Mbaud: the FIFO's kick under it, every gap counted
 //   7  finding 4 over the wire: five minutes of 200-frame bursts at 921600
 //      from the far chip, the default ring - bridge or device
 //   8  the pad and the shared wire: the HDSEL receiver hearing the far
 //      driver, one open-drain wire between the two chips, a collision
-//   9  IDLE and the receiver time-out from a sender up to 3 % faster
+//   9  IDLE and the receiver time-out from a sender up to 3 % faster; the
+//      idle frame itself drawn by the far engine, 9.5 to 11 of the
+//      sender's bits - the control for the F446's ES0298 2.13.1
 //   0  auto-baud and LIN from a foreign crystal: the four patterns at
 //      four rates no divisor was told, ABRE, the detector's range at both
 //      oversamplings; LIN's break detected at LBDL's two lengths and not
@@ -173,18 +179,25 @@
 //      SIR both ways against the far ST ENDEC, TXINV and RXINV the one
 //      inversion each direction needs, normal and low-power pulses, the
 //      far chip's 115200 ceiling
+//   s  mute mode from a foreign sender: MMRQ on an idle line, the
+//      idle-line wake, the address-mark wake on the far send_mpcm in both
+//      address widths on 8- and 9-bit words, the parity of a woken address
+//   u  THE WAKE FROM STOP by the far chip's frames on USART1 (HSI16 or the
+//      LSE as its kernel, Stop 0 and 1, the three sources), the address
+//      that does not match, and ES0548 2.2.4 on a divided HSI
 //
-// THE G031K8 does not hold the suite whole: it builds four images,
+// THE G031K8 does not hold the suite whole: it builds five images,
 // letters a to j - the instances, the generator, the kernel clocks, the
 // FIFOs and the modes - in one, k to q in the second, the host letters v,
-// w, x and y in the third and the two-board set in the fourth; the G071RB
+// w, x and y in the third and the two-board set in the fourth and the
+// fifth; the G071RB
 // (128 KB) builds two, the single-board letters and the two-board set (the
 // groups lines below; design/overview.md, "A suite's image fits the
 // family's smallest chip"); the G0B1RE builds one.
 //
 // build: boards = g0b1re,g071rb,g031k8
-// build: groups = abcdefghij,klmnopq,vwxy,1234567890r
-// build: groups.g071rb = abcdefghijklmnopqvwxy,1234567890r
+// build: groups = abcdefghij,klmnopq,vwxy,12345678,90rsu
+// build: groups.g071rb = abcdefghijklmnopqvwxy,1234567890rsu
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -233,11 +246,11 @@ constexpr UartPins console_pins{
 using Serial = Uart<2, console_pins>;
 constexpr Serial serial;
 
-/// The second all-key is 't' (two boards): 'y' is a letter here. 32 places,
-/// the most a second set's mask holds: this image's twenty-one, and the
-/// two-board set's eleven - the digits and 'r', the one free letter the
-/// set takes.
-TwoKeyTestBench<Serial, 't', 32> bench;
+/// The second all-key is 't' (two boards): 'y' is a letter here. 34 places
+/// in the whole suite - the single-board twenty-one, and the two-board
+/// set's thirteen: the digits, 'r', 's' and 'u' - and in a group image its
+/// own selection's count.
+TwoKeyTestBench<Serial, 't', test_letters == nullptr ? 34 : test_letters_default_max()> bench;
 
 // ---------------------------------------------------------------------------
 // The pads, and the instances that own them
@@ -4268,9 +4281,14 @@ uint32_t host_window_ms = 0;
 
 /// Announce a leg, let the announcement leave the wire, and settle.
 void host_announce(const char* op, uint8_t mode, uint32_t baud, const char* fmt,
-                   uint32_t window_ms, uint32_t count) {
-    print(serial, "HOST ", op, " ", mode, " ", baud, " ", fmt, " ", window_ms,
-          " ", count, crlf);
+                   uint32_t window_ms, uint32_t count, uint32_t gap_us = 0) {
+    if (gap_us != 0u) {
+        print(serial, "HOST ", op, " ", mode, " ", baud, " ", fmt, " ", window_ms,
+              " ", count, " ", gap_us, crlf);
+    } else {
+        print(serial, "HOST ", op, " ", mode, " ", baud, " ", fmt, " ", window_ms,
+              " ", count, crlf);
+    }
     console_drain();
     host_window_t0 = now();
     host_window_ms = window_ms;
@@ -6045,16 +6063,18 @@ void t1_link() {
         const bool have = peer_report(r, 0);
         const int32_t ppm = span_ppm(dr.span, calib_rate, 20, dr.frames);
         // The far end says what its divisor gives on its crystal (the
-        // Report's aux16 for a blast): this ruler reads that, less this
-        // HSI's error over the very window (this board's LSE).
+        // Report's aux16 for a blast, report_rate_stated beside it - 0
+        // then means exact): this ruler reads that, less this HSI's error
+        // over the very window (this board's LSE).
         const int32_t far = static_cast<int16_t>(r.aux16);
+        const bool stated = (r.flags & link::report_rate_stated) != 0u;
         print(serial, "  the far crystal's 1 Mbaud on this HSI: ", dr.frames, " frames, ");
         print_ppm(ppm);
         print(serial, "; the far divisor's own ", far, " ppm, this HSI's ", hsi.value_or(0), " over the window",
               crlf);
         bench.verdict("the far blast arrives whole, and this ruler reads its rate within 100 ppm of the far "
                       "divisor's less the HSI's",
-                      up && have && dr.frames == calib_frames && dr.fe == 0u && hsi.has_value() &&
+                      up && have && stated && dr.frames == calib_frames && dr.fe == 0u && hsi.has_value() &&
                           near(ppm, far - *hsi, 100));
     }
     link_release();
@@ -6191,11 +6211,12 @@ void t2_rates() {
             link::Report r{};
             const bool have = peer_report(r, 0);
             const int32_t ppm = span_ppm(dr.span, rate, 20, dr.frames);
-            // The far divisor's rate on its crystal (the blast's aux16, 0
-            // from a peer that cannot tell) less this HSI's error over the
-            // window: the far transmitter judged as tightly as this one.
+            // The far divisor's rate on its crystal (the blast's aux16 with
+            // report_rate_stated - 0 then exact; the flag clear from a peer
+            // that cannot tell) less this HSI's error over the window: the
+            // far transmitter judged as tightly as this one.
             const int32_t far = static_cast<int16_t>(r.aux16);
-            const bool known = have && r.aux16 != 0u && hsi.has_value();
+            const bool known = have && (r.flags & link::report_rate_stated) != 0u && hsi.has_value();
             print(serial, "    the far blast on this ruler: ", dr.frames, " of ", n, ", ORE ", dr.ore, ", ");
             print_ppm(ppm);
             print(serial, " against the far divisor's ", far, " less the HSI's ", hsi.value_or(0), crlf);
@@ -6703,6 +6724,72 @@ BangLeg bang_leg(uint32_t rate, uint32_t dut_rate, uint8_t value, uint16_t count
     return l;
 }
 
+/// One train the far engine DRAWS (usart_link.hpp's stage): frames of one
+/// fixed value, a pulse inside each, gaps in sixteenths of a bit - read on
+/// this receiver polled, every frame's value and flags its own, the IDLE
+/// flags counted from the first frame on.
+struct StageLeg {
+    bool up = false;
+    bool drawn = false;       ///< the far engine played the train whole
+    uint16_t frames = 0;
+    uint16_t wrong = 0;       ///< frames whose value is not the train's
+    uint16_t silent = 0;      ///< ... with no error flag on them
+    uint8_t fe = 0, pe = 0, ne = 0;
+    uint16_t idles = 0;
+    uint16_t seen = 0xFFFFu;  ///< the first wrong value
+};
+
+StageLeg stage_leg(const link::Params& a, const link::Cfg& dc) {
+    StageLeg l{};
+    const bool acted = peer_act(link::Op::stage, a);
+    l.up = acted && dut_link(dc);
+    const uint16_t mask = dc.bits >= link::bits9_low ? 0x1FFu : static_cast<uint16_t>((1u << dc.bits) - 1u);
+    const uint16_t want = static_cast<uint16_t>(a.value & mask);
+    USART_TypeDef& u = U1::regs();
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    while (l.up && Ticker::millis() - t0 < 400u) {
+        const uint32_t st = u.ISR;
+        if ((st & UsartFlag::rxne) != 0u) {
+            const bool flagged = (st & (UsartFlag::fe | UsartFlag::pe | UsartFlag::ne)) != 0u;
+            if ((st & UsartFlag::receive_errors) != 0u) {
+                u.ICR = st & UsartClear::receive_errors;   // before the pop: the next entry's are its own
+                if ((st & UsartFlag::fe) != 0u && l.fe < 255u) ++l.fe;
+                if ((st & UsartFlag::pe) != 0u && l.pe < 255u) ++l.pe;
+                if ((st & UsartFlag::ne) != 0u && l.ne < 255u) ++l.ne;
+            }
+            const uint16_t w = static_cast<uint16_t>(u.RDR & mask);
+            if (w != want) {
+                ++l.wrong;
+                if (!flagged) ++l.silent;
+                if (l.seen == 0xFFFFu) l.seen = w;
+            }
+            ++l.frames;
+            last = Ticker::millis();
+            continue;
+        }
+        if ((st & UsartFlag::idle) != 0u) {
+            u.ICR = UsartClear::idle;
+            if (l.frames != 0u) ++l.idles;
+        }
+        if (l.frames != 0u && Ticker::millis() - last > 30u) {
+            break;
+        }
+    }
+    link::Report r{};
+    l.drawn = peer_report(r, 0) && (r.flags & link::report_ran) != 0u && (r.flags & link::report_mismatch) == 0u &&
+              r.count == a.count;
+    return l;
+}
+
+/// The far rate that IS this receiver's real one at `base` - its divisor's
+/// error and the HSI's over the last tenth of a second - moved by `permille`.
+uint32_t real_rate(uint32_t base, int32_t permille) {
+    const std::optional<int32_t> hsi = hsi_over(SysClock::hz / 10u);
+    const int32_t real = divisor_ppm(base) + hsi.value_or(0);
+    return static_cast<uint32_t>((static_cast<int64_t>(base) * (1'000'000 + real + permille * 1000)) / 1'000'000);
+}
+
 void t5_shapes() {
     if (!ensure_link()) {
         bench.verdict("the peer is reachable", false);
@@ -6830,12 +6917,105 @@ void t5_shapes() {
           sixty_data_broken);
     judge("and the stop cell's length is free when an idle follows it (its sample is high either way)",
           stop_free);
-    // d. ES0548 2.11.1 needs a pulse INSIDE a frame's stop bit, which no op
-    //    of the protocol draws (glitch plays on an idle line, bitbang
-    //    stretches a cell): letter f stages it with the pull-banger at
-    //    2400, and above that it waits for such an op.
-    print(serial, "  ES0548 2.11.1 at 115200 and 1 Mbaud: not staged - the protocol has no op that puts a glitch "
-          "inside a stop bit (letter f stages it at 2400)", crlf);
+    // d. ES0548 2.11.1 ACROSS THE RATES, staged by the far engine (the
+    //    stage op): eight 0x96 frames, four bits of idle after each, a
+    //    glitch to zero walked across the stop bit at the receiver's real
+    //    rate - 2400, 9600, 115200 and 1 Mbaud at OVER16, 115200 at OVER8,
+    //    8N2 at 115200 in either stop bit. The glitch is an EIGHTH of a bit
+    //    (a quarter at 1 Mbaud, where an eighth is under the far engine's
+    //    floor of 0.19 us; a tenth at OVER8, whose last sample leaves an
+    //    eighth of the bit), and the verdict's sits in the SECOND half past
+    //    the majority's last sample with the start's detection latency
+    //    added: from 75 % at OVER16 (the samples at 8, 9 and 10 sixteenths
+    //    reach 69 % at 9600, measured by the noise flag), from 88 % at OVER8
+    //    (4, 5 and 6 eighths, and one more) - a glitch over a sample is a
+    //    noise flag, not the erratum. "Data corrupted" with no flag is the
+    //    erratum; the control, the same glitch from 6 %, decodes eight of
+    //    eight.
+    struct Glitch1111 { uint32_t base; bool over8; uint8_t stop; int8_t cell; uint8_t width; const char* name; };
+    static constexpr Glitch1111 g1111[] = {
+        {2400, false, 1, 9, 12, "2400 8N1"},
+        {9600, false, 1, 9, 12, "9600 8N1"},
+        {115'200, false, 1, 9, 12, "115200 8N1"},
+        {1'000'000, false, 1, 9, 25, "1 Mbaud 8N1"},
+        {115'200, true, 1, 9, 10, "115200 8N1 OVER8"},
+        {115'200, false, 2, 9, 12, "115200 8N2, the first stop bit"},
+        {115'200, false, 2, 10, 12, "115200 8N2, the second stop bit"},
+    };
+    static constexpr int8_t walk[] = {6, 25, 50, 56, 62, 69, 75, 81, 88};
+    bool control_clean = true;
+    uint8_t second_stop_wrong = 0;
+    for (const Glitch1111& g : g1111) {
+        link::Params a{};
+        a.cfg.rate = real_rate(g.base, 0);
+        a.cfg.stop = g.stop;
+        a.count = 8;
+        a.value = 0x96;
+        a.pattern = link::pattern_fixed;
+        a.cell = g.cell;
+        a.aux16 = 64;   // four bits of idle
+        link::Cfg dc{};
+        dc.rate = g.base;
+        dc.stop = g.stop;
+        if (g.over8) {
+            dc.flags = link::flag_clk2x;
+        }
+        const int8_t verdict_at = g.over8 ? 88 : 75;
+        print(serial, "  2.11.1 at ", g.name, ", a glitch of ", g.width, " % from (per cent: wrong/no flag/NE):");
+        StageLeg at{};
+        for (const int8_t pct : walk) {
+            a.pct = pct;
+            a.aux8 = static_cast<uint8_t>(pct + g.width > 100 ? 100 - pct : g.width);
+            const StageLeg l = stage_leg(a, dc);
+            if (l.up && l.drawn) {
+                print(serial, " ", pct, ":", l.wrong, "/", l.silent, "/", l.ne);
+            } else {
+                print(serial, " ", pct, ":-");
+            }
+            feed();
+            if (pct == 6) {
+                control_clean = control_clean && l.up && l.drawn && l.frames == 8u && l.wrong == 0u &&
+                                l.fe == 0u && l.ne == 0u;
+            }
+            if (pct == verdict_at) at = l;
+            if (g.cell == 10 && l.wrong != 0u) ++second_stop_wrong;
+        }
+        print(serial, crlf);
+        if (g.cell == 10) {
+            continue;
+        }
+        if (at.seen != 0xFFFFu) {
+            print(serial, "    0x96 read as ", hex(at.seen), crlf);
+        }
+        judge("ES0548 2.11.1 REPRODUCES at ", g.name, at.up && at.drawn && at.silent != 0u);
+    }
+    judge("and the control - the same glitch from 6 % of the stop bit - decodes eight of eight, clean, at every "
+          "rate", control_clean);
+    judge("with two stop bits it is the FIRST one's second half that reaches the byte: a glitch anywhere in the "
+          "second stop bit spoils nothing", second_stop_wrong == 0u);
+    // THE WIDTH: the same place (72 %, past every sample) and four widths,
+    // at the slow rates and one fast one.
+    for (const uint32_t base : {2400u, 9600u, 19'200u, 115'200u}) {
+        print(serial, "  2.11.1 at ", base, ", the glitch from 72 % (width per cent: wrong of 8):");
+        for (const uint8_t wd : {static_cast<uint8_t>(6), static_cast<uint8_t>(12), static_cast<uint8_t>(19),
+                                 static_cast<uint8_t>(25)}) {
+            link::Params a{};
+            a.cfg.rate = real_rate(base, 0);
+            a.count = 8;
+            a.value = 0x96;
+            a.pattern = link::pattern_fixed;
+            a.cell = 9;
+            a.pct = 72;
+            a.aux8 = wd;
+            a.aux16 = 64;
+            link::Cfg dc{};
+            dc.rate = base;
+            const StageLeg l = stage_leg(a, dc);
+            print(serial, " ", wd, ":", l.up && l.drawn ? l.wrong : 99u);
+            feed();
+        }
+        print(serial, crlf);
+    }
     link_release();
 }
 
@@ -7305,6 +7485,55 @@ void t9_idle() {
     judge("every burst arrives whole at every offset and every gap", whole);
     judge("a gap of a frame and a half or more is told by IDLE and by the time-out once a burst, the far end up "
           "to 3 % faster", told_long);
+
+    // THE IDLE FRAME ITSELF, gaps stated in the SENDER's bit times (the
+    // stage op): sixteen 0xF0 frames at 50000 baud, the far end 0, 1 and 3
+    // % faster than this receiver's real rate, an idle of 9.5 to 11 of its
+    // bits after each - ES0298 2.13.1's own case (an idle frame and then a
+    // character, from a faster sender) on the receiver whose sheet lists no
+    // such item. Fifteen gaps a train and its end: sixteen IDLE where every
+    // gap is told, printed with the gap in THIS receiver's sixteenths.
+    static constexpr uint16_t idle16[] = {152, 156, 160, 164, 168, 176};
+    static constexpr int16_t fast[] = {0, 10, 30};
+    bool trains_whole = true, eleven_told = true;
+    uint16_t exact_long = 0, exact_short = 0xFFFFu, fast_ten = 0xFFFFu, fast_more = 0xFFFFu;
+    for (const int16_t e : fast) {
+        print(serial, "  the far end +", e, " per mille, gap (sender sixteenths = this receiver's): IDLE of 16:");
+        for (const uint16_t g : idle16) {
+            link::Params a{};
+            a.cfg.rate = real_rate(50'000, e);
+            a.count = 16;
+            a.value = 0xF0;
+            a.pattern = link::pattern_fixed;
+            a.aux16 = g;
+            link::Cfg dc{};
+            dc.rate = 50'000;
+            const StageLeg l = stage_leg(a, dc);
+            const uint32_t here = (static_cast<uint32_t>(g) * 1000u + (1000u + static_cast<uint32_t>(e)) / 2u) /
+                                  (1000u + static_cast<uint32_t>(e));
+            print(serial, " ", g, "=", here, ":", l.idles);
+            trains_whole = trains_whole && l.up && l.drawn && l.frames == 16u && l.wrong == 0u;
+            if (g == 176u) eleven_told = eleven_told && l.idles == 16u;
+            if (e == 0 && g == 164u) exact_long = l.idles;
+            if (e == 0 && g == 156u) exact_short = l.idles;
+            if (e == 30 && g == 160u) fast_ten = l.idles;
+            if (e == 30 && g == 168u) fast_more = l.idles;
+        }
+        print(serial, crlf);
+    }
+    judge("every drawn train arrives whole, sixteen frames of sixteen", trains_whole);
+    judge("an idle of eleven sender bits is told by IDLE after every frame, the far end up to 3 % faster",
+          eleven_told);
+    judge("from an exact sender the idle frame is ten bits: told after every frame at 10.25, after none at "
+          "9.75", exact_long == 16u && exact_short == 1u);
+    // The receiver times its idle frame from the stop bit AS IT SAMPLED
+    // it, which a faster sender's frame ends ahead of by the sender's
+    // error over the frame: one sender idle frame is then short of ten of
+    // this receiver's bits by that much more.
+    judge("ES0298 2.13.1's own case on THIS receiver: one idle frame and then a character from a sender 3 % "
+          "fast, and the idle frame is not told - nor at 10.5 sender bits, 10.2 of this receiver's, past the "
+          "exact sender's threshold: the same geometry, though ES0548 lists no such item",
+          fast_ten == 1u && fast_more == 1u);
     link_release();
 }
 
@@ -8106,15 +8335,466 @@ void tr_rs485_irda() {
 }
 
 // ---------------------------------------------------------------------------
+// s - mute mode and the multiprocessor wake from a foreign sender
+// ---------------------------------------------------------------------------
+//
+// 33.5.10 across the wire, the far chip the sender: the IDLE-LINE wake
+// (MMRQ written after a burst's first frame, the rest of that burst
+// dropped, the idle frame between bursts the wake - and no IDLE flag for
+// it); the ADDRESS-MARK wake on the far `send_mpcm` - four groups of an
+// address frame and its data - in both of this USART's address widths:
+// four bits (ADDM7 clear) or seven (set) on the MSB mark of an 8-bit word,
+// and in a 9-bit word the mark in bit 8 and, with ADDM7, the 8-bit address
+// 33.5.10's note gives it; and the parity of a woken address (the F446's
+// ES0298 2.13.3 is that the F4 sets no PE for it: here the same frames).
+
+struct MuteLeg {
+    bool up = false;
+    bool rwu_requested = false;   ///< ISR.RWU read right after MMRQ
+    uint8_t n = 0;
+    uint16_t v[24] = {};
+    uint32_t pe = 0;              ///< frame i carried PE: bit i
+    uint32_t fe = 0;
+    uint16_t idles_muted = 0;     ///< IDLE flags while RWU stood
+};
+
+/// What a muted receiver lets through. `mute_after` frames are taken before
+/// MMRQ is written; 0 writes it before the stream.
+MuteLeg mute_collect(uint8_t mute_after, uint16_t mask) {
+    MuteLeg l{};
+    USART_TypeDef& u = U1::regs();
+    if (mute_after == 0u) {
+        U1::request(UsartRequest::mute);
+        l.rwu_requested = U1::muted();
+    }
+    const uint32_t t0 = Ticker::millis();
+    uint32_t last = t0;
+    uint8_t taken = 0;
+    while (Ticker::millis() - t0 < 400u) {
+        const uint32_t st = u.ISR;
+        if ((st & UsartFlag::rxne) != 0u) {
+            if ((st & UsartFlag::receive_errors) != 0u) {
+                u.ICR = st & UsartClear::receive_errors;   // before the pop
+            }
+            const uint16_t w = static_cast<uint16_t>(u.RDR & mask);
+            if (l.n < 24u) {
+                if ((st & UsartFlag::pe) != 0u) l.pe |= 1UL << l.n;
+                if ((st & UsartFlag::fe) != 0u) l.fe |= 1UL << l.n;
+                l.v[l.n++] = w;
+            }
+            if (++taken == mute_after) {
+                U1::request(UsartRequest::mute);
+                l.rwu_requested = U1::muted();
+            }
+            last = Ticker::millis();
+            continue;
+        }
+        if ((st & UsartFlag::idle) != 0u) {
+            u.ICR = UsartClear::idle;
+            if ((st & UsartFlag::rwu) != 0u) ++l.idles_muted;
+        }
+        if (taken != 0u && Ticker::millis() - last > 40u) {
+            break;
+        }
+    }
+    return l;
+}
+
+bool seq_is(const MuteLeg& l, std::initializer_list<uint16_t> want) {
+    if (l.n != want.size()) {
+        return false;
+    }
+    uint8_t i = 0;
+    for (const uint16_t w : want) {
+        if (l.v[i++] != w) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void print_seq(const MuteLeg& l) {
+    for (uint8_t i = 0; i < l.n; ++i) {
+        print(serial, " ", hex(l.v[i]), (l.pe >> i) & 1u ? "(PE)" : "");
+    }
+    print(serial, crlf);
+}
+
+/// This end's link in mute mode `m` on the Cfg `c` (MME is UE-protected).
+bool mute_link(const link::Cfg& c, const MuteConfig& m) {
+    if (!dut_link(c)) {
+        return false;
+    }
+    U1::enable(false);
+    const bool ok = U1::mute_mode(m);
+    U1::enable(true);
+    wait_us(2u * (1'000'000u / c.rate) + 20u);
+    u1_flush();
+    return ok;
+}
+
+/// The far send_mpcm's four groups, after the uniform payload: (address,
+/// data frames) - its data counting up from Params::value.
+MuteLeg mpcm_leg(const link::Cfg& c, const MuteConfig& m, const uint8_t (&groups)[8], uint16_t mask) {
+    link::Params a{};
+    a.cfg = c;
+    a.groups = 4;
+    a.value = 0x10;
+    a.ms = 200;
+    const bool acted = peer_act(link::Op::send_mpcm, a, groups, 8);
+    MuteLeg l{};
+    const bool up = acted && mute_link(c, m);
+    if (up) {
+        l = mute_collect(0, mask);
+    }
+    l.up = up;
+    U1::enable(false);
+    (void)U1::mute_mode_off();
+    U1::enable(true);
+    link::Report r{};
+    (void)peer_report(r, 0);
+    return l;
+}
+
+void ts_mute() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    // a. MMRQ ON AN IDLE LINE: 33.5.10's note - written once an idle frame
+    //    has elapsed, mute mode is not entered. Nothing on the wire.
+    link::Cfg c{};
+    c.rate = 115'200;
+    {
+        const bool up = mute_link(c, {.wake = MuteWake::idle_line});
+        wait_ms(2);   // some twenty idle frames
+        U1::request(UsartRequest::mute);
+        const bool rwu = U1::muted();
+        print(serial, "  MMRQ written on a line idle for 2 ms: RWU ", rwu ? "SET" : "clear", crlf);
+        judge("MMRQ after an elapsed idle frame does not enter mute mode, as 33.5.10's note says", up && !rwu);
+    }
+    // b. THE IDLE-LINE WAKE: three bursts of eight counting frames a
+    //    millisecond apart (twelve idle frames), MMRQ written after the
+    //    first frame: the rest of the first burst dropped, the second and
+    //    the third whole.
+    {
+        link::Params a{};
+        a.cfg = c;
+        a.count = 8;
+        a.aux16 = 3;
+        a.aux8 = 10;
+        a.ms = 200;
+        a.pattern = link::pattern_counting;
+        const bool acted = peer_act(link::Op::blast, a);
+        const bool up = acted && mute_link(c, {.wake = MuteWake::idle_line});
+        const MuteLeg l = up ? mute_collect(1, 0xFFu) : MuteLeg{};
+        const bool rwu_end = U1::muted();
+        link::Report r{};
+        (void)peer_report(r, 0);
+        print(serial, "  idle-line wake, MMRQ after the first frame (RWU ", l.rwu_requested ? "set" : "CLEAR",
+              ", IDLE flags while muted ", l.idles_muted, ", RWU at the end ", rwu_end ? "SET" : "clear", "):");
+        print_seq(l);
+        // 33.5.10's FIFO note: a frame in its last bit when MMRQ lands may
+        // still be received - 0x01 is allowed beside 0x00.
+        bool tail = l.n >= 17u;
+        for (uint8_t i = 0; tail && i < 16u; ++i) {
+            tail = l.v[l.n - 16u + i] == 8u + i;
+        }
+        judge("the idle-line wake: MMRQ drops the rest of the burst, the idle frame wakes the receiver - both "
+              "later bursts whole and no IDLE flag for the wake",
+              up && l.rwu_requested && l.v[0] == 0u && (l.n == 17u || (l.n == 18u && l.v[1] == 1u)) && tail &&
+                  l.idles_muted == 0u);
+    }
+    // c. THE ADDRESS MARK on an 8-bit word: groups (0x83, 2) (0x85, 3)
+    //    (0x86, 2) (0x95, 2), the data 0x10 up. Four bits at ADD 5 take 0x85
+    //    and 0x95 with their data; seven bits at ADD 0x05 take 0x85 alone,
+    //    at ADD 0x15 0x95 alone.
+    {
+        static constexpr uint8_t groups[8] = {0x83, 2, 0x85, 3, 0x86, 2, 0x95, 2};
+        const MuteLeg l4 = mpcm_leg(c, {.wake = MuteWake::address_mark, .address_7bit = false, .address = 0x5},
+                                    groups, 0xFFu);
+        print(serial, "  8-bit words, a 4-bit address 5:");
+        print_seq(l4);
+        judge("a 4-bit address on an 8-bit word: 0x85 and 0x95 wake the receiver with their data, 0x83 and 0x86 "
+              "mute it",
+              l4.up && l4.rwu_requested && seq_is(l4, {0x85, 0x12, 0x13, 0x14, 0x95, 0x17, 0x18}));
+        const MuteLeg l7 = mpcm_leg(c, {.wake = MuteWake::address_mark, .address_7bit = true, .address = 0x05},
+                                    groups, 0xFFu);
+        const MuteLeg l7b = mpcm_leg(c, {.wake = MuteWake::address_mark, .address_7bit = true, .address = 0x15},
+                                     groups, 0xFFu);
+        print(serial, "  8-bit words, a 7-bit address 0x05:");
+        print_seq(l7);
+        print(serial, "  8-bit words, a 7-bit address 0x15:");
+        print_seq(l7b);
+        judge("a 7-bit address on an 8-bit word compares all seven bits: 0x05 takes 0x85 alone, 0x15 takes "
+              "0x95 alone",
+              l7.up && l7b.up && seq_is(l7, {0x85, 0x12, 0x13, 0x14}) && seq_is(l7b, {0x95, 0x17, 0x18}));
+    }
+    // d. A 9-BIT WORD, the mark in bit 8: groups 0x05, 0x85, 0x45, 0x0A
+    //    (the far end sets bit 8). Four bits at ADD 5 take the first three;
+    //    with ADDM7 the address is EIGHT bits (33.5.10's note), so 0x85 and
+    //    0x05 are told apart.
+    {
+        link::Cfg c9 = c;
+        c9.bits = link::bits9_low;
+        static constexpr uint8_t groups[8] = {0x05, 2, 0x85, 3, 0x45, 2, 0x0A, 2};
+        const MuteLeg l4 = mpcm_leg(c9, {.wake = MuteWake::address_mark, .address_7bit = false, .address = 0x5},
+                                    groups, 0x1FFu);
+        const MuteLeg l8 = mpcm_leg(c9, {.wake = MuteWake::address_mark, .address_7bit = true, .address = 0x85},
+                                    groups, 0x1FFu);
+        const MuteLeg l8b = mpcm_leg(c9, {.wake = MuteWake::address_mark, .address_7bit = true, .address = 0x05},
+                                     groups, 0x1FFu);
+        print(serial, "  9-bit words, a 4-bit address 5:");
+        print_seq(l4);
+        print(serial, "  9-bit words, ADDM7 and ADD 0x85:");
+        print_seq(l8);
+        print(serial, "  9-bit words, ADDM7 and ADD 0x05:");
+        print_seq(l8b);
+        judge("a 9-bit word's mark is bit 8, and a 4-bit address takes every group whose low nibble is 5",
+              l4.up && seq_is(l4, {0x105, 0x10, 0x11, 0x185, 0x12, 0x13, 0x14, 0x145, 0x15, 0x16}));
+        judge("with ADDM7 a 9-bit word's address is EIGHT bits: 0x85 and 0x05 each take their own group alone",
+              l8.up && l8b.up && seq_is(l8, {0x185, 0x12, 0x13, 0x14}) && seq_is(l8b, {0x105, 0x10, 0x11}));
+    }
+    // e. THE PARITY OF A WOKEN ADDRESS: this end 8E1 (the mark the bit
+    //    before the parity), the far end 8O1 - every frame a parity error -
+    //    groups (0x83, 1) (0x85, 2) (0x86, 1) (0x95, 1) at a 4-bit address 5.
+    {
+        link::Cfg ce = c;
+        ce.parity = 1;
+        link::Cfg co = c;
+        co.parity = 2;
+        static constexpr uint8_t groups[8] = {0x83, 1, 0x85, 2, 0x86, 1, 0x95, 1};
+        link::Params a{};
+        a.cfg = co;
+        a.groups = 4;
+        a.value = 0x10;
+        a.ms = 200;
+        const bool acted = peer_act(link::Op::send_mpcm, a, groups, 8);
+        const bool up = acted && mute_link(ce, {.wake = MuteWake::address_mark, .address_7bit = false, .address = 0x5});
+        const MuteLeg l = up ? mute_collect(0, 0xFFu) : MuteLeg{};
+        U1::enable(false);
+        (void)U1::mute_mode_off();
+        U1::enable(true);
+        link::Report r{};
+        (void)peer_report(r, 0);
+        print(serial, "  8E1 here, 8O1 there, a 4-bit address 5:");
+        print_seq(l);
+        judge("a wrong-parity stream woken by its address: the address and its data taken, every data frame "
+              "with PE",
+              up && seq_is(l, {0x85, 0x11, 0x12, 0x95, 0x14}) && (l.pe & 0x6u) == 0x6u && (l.pe & 0x10u) != 0u);
+        judge("and the woken address carries its PE too - where the F446 sets none (ES0298 2.13.3)",
+              up && (l.pe & 0x9u) == 0x9u);
+    }
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
+// u - the wake from Stop by a FOREIGN sender, and ES0548 2.2.4
+// ---------------------------------------------------------------------------
+//
+// Letter w's wake with the far chip instead of the host: USART1 - the link,
+// a FULL instance on every part of the family, its wake on EXTI line 25
+// (RM0444 table 65) - kernel-clocked by HSI16 or the LSE, the two that run
+// through a Stop, armed on one of 33.5.21's three sources; the far `send`
+// waits 600 ms after its ack and sends four frames, and the RTC's wake-up
+// timer (two seconds) is the backstop that tells "the USART woke it" from
+// "nothing did". ES0548 2.2.4 then on the same wire: HSIDIV = /4, the
+// wake does not come - and with the kernel on the LSE, which needs no clock
+// request, whether it does.
+
+volatile uint8_t link_wake_armed = 0;
+volatile uint32_t link_wakes = 0;
+
+struct WakeLeg {
+    bool armed = false;    ///< REACK came, the wake armed
+    uint32_t slept = 0;    ///< ms on the RTC
+    uint32_t wuf = 0;
+    bool by_rtc = false;
+    uint8_t n = 0;
+    uint8_t first = 0;
+};
+
+/// One Stop: the far `send` commanded first (four frames from `value`
+/// counting, 600 ms after its ack), this end's USART1 on `kernel` at `rate`
+/// armed on `src` (an address match under mute mode at address 5), then
+/// the Stop with the RTC as the backstop, then what survived it.
+template <bool fitted = board_lse_fitted && (usart_exti_line(1) != 0xFF)>
+WakeLeg wake_leg(uint32_t rate, UsartClock kernel, UsartWakeSource src, uint8_t value, PwrMode mode,
+                 uint8_t hsidiv) {
+    WakeLeg w{};
+    if constexpr (fitted) {
+        link::Params a{};
+        a.cfg.rate = rate;
+        a.count = 4;
+        a.value = value;
+        a.pattern = link::pattern_counting;
+        a.aux16 = 600;
+        a.ms = 3000;
+        if (!peer_act(link::Op::send, a)) {
+            return w;
+        }
+        const uint32_t ker_hz = kernel == UsartClock::lse ? 32'768u : 16'000'000u;
+        const std::optional<uint16_t> brr = usart_brr(ker_hz, rate);
+        link_task_down();
+        Nvic::disable(U1::irq());
+        U1::enable(false);
+        U1::reset();
+        bool ok = brr.has_value() && U1::kernel_clock(kernel) && U1::configure(UartFormat{}, *brr) &&
+                  U1::fifo(true);
+        if (ok && src == UsartWakeSource::address_match) {
+            ok = U1::mute_mode({.wake = MuteWake::address_mark, .address_7bit = false, .address = 0x5});
+        }
+        ok = ok && U1::wake_from_stop(src) && U1::wake_line(true);
+        U1::enable(true);
+        U1Tx::function(PinFunction::af1, {.speed = PinSpeed::very_high});
+        U1Rx::function(PinFunction::af1, {.pull = PinPull::up});
+        uint32_t spins = 200000;
+        while ((U1::status() & UsartFlag::reack) == 0u && spins-- != 0u) {
+        }
+        ok = ok && (U1::status() & UsartFlag::reack) != 0u;
+        if (ok && src == UsartWakeSource::address_match) {
+            U1::request(UsartRequest::mute);
+        }
+        U1::clear_flags(UsartClear::all);
+        u1_flush();
+        w.armed = ok;
+        if (!ok) {
+            return w;
+        }
+        // The console's last line out first: a Stop stops PCLK, and a
+        // transmitter frozen mid-character garbles what the host reads.
+        for (uint32_t spins = 2'000'000u; !Serial::tx_idle() && spins != 0u; --spins) {
+        }
+        link_wakes = 0;
+        link_wake_armed = 1;
+        Nvic::enable(U1::irq());
+        if (hsidiv != 0u) {
+            Rcc::sysclk_select(SysclkSource::hsisys);
+            (void)Rcc::sysclk_wait(SysclkSource::hsisys);
+            Rcc::hsi_div(hsidiv);
+            Rcc::pll_enable(false);
+        }
+        (void)Rtc::set_wakeup(RtcWakeupClock::ck_spre, 1, true);
+        Rtc::clear_flags(RtcFlag::wakeup);
+        feed();
+        rtc_backstops = 0;
+        const uint32_t w0 = rtc_wall();
+        Ticker::pause();
+        Pwr::enter(mode);
+        Ticker::resume();
+        if (hsidiv != 0u) {
+            Rcc::hsi_div(0);
+        }
+        (void)SysClock::init();
+        w.slept = rtc_ms(rtc_delta(w0, rtc_wall()));
+        w.wuf = link_wakes;
+        w.by_rtc = rtc_backstops != 0u;
+        Rtc::clear_wakeup();
+        feed();
+        uint8_t got[8];
+        const uint32_t t0 = Ticker::millis();
+        while (Ticker::millis() - t0 < 200u && w.n < sizeof got) {
+            const uint32_t st = U1::status();
+            if ((st & UsartFlag::rxne) != 0u) {
+                U1::clear_flags(st & UsartClear::receive_errors);
+                got[w.n++] = U1::read_data();
+            }
+        }
+        w.first = w.n != 0u ? got[0] : 0u;
+        U1::enable(false);
+        (void)U1::wake_from_stop(UsartWakeSource::none);
+        (void)U1::wake_line(false);
+        (void)U1::mute_mode_off();
+        U1::enable(true);
+        Nvic::disable(U1::irq());
+        link_wake_armed = 0;
+        link::Report r{};
+        (void)peer_report(r, 0);
+    }
+    return w;
+}
+
+void print_wake(const char* name, const WakeLeg& w) {
+    print(serial, "  ", name, ": the Stop lasted ", w.slept, " ms, WUF seen ", w.wuf, " time(s), the RTC backstop ",
+          w.by_rtc ? "fired" : "did not fire", ", ", w.n, " byte(s) after it, first ", hex(w.first), crlf);
+}
+
+template <bool stageable = board_lse_fitted && (usart_exti_line(1) != 0xFF)>
+void tu_stop_wake() {
+    if constexpr (!stageable) {
+        print(serial, "  SKIPPED, no verdict claimed: USART1's wake from Stop needs its EXTI line and the RTC "
+                      "on the crystal as the backstop", crlf);
+        return;
+    } else {
+        if (!(RtcDomain::selected() == RtcClockSource::lse && RtcDomain::lse_ready())) {
+            bench.verdict("the wake letter needs the RTC wall clock on the crystal", false);
+            return;
+        }
+        if (!ensure_link()) {
+            bench.verdict("the peer is reachable", false);
+            link_release();
+            return;
+        }
+        // The tracker (TIM16, DMA) is a PCLK consumer: down for the Stops.
+        tracker_down();
+        struct Case { uint32_t rate; UsartClock k; UsartWakeSource src; uint8_t value; PwrMode mode; const char* name; };
+        static const Case cases[] = {
+            {9600, UsartClock::hsi16, UsartWakeSource::start_bit, 0xA5, PwrMode::stop0, "start bit at 9600, HSI16, Stop 0"},
+            {9600, UsartClock::hsi16, UsartWakeSource::receive_ready, 0xA5, PwrMode::stop0, "RXNE at 9600, HSI16, Stop 0"},
+            {115'200, UsartClock::hsi16, UsartWakeSource::start_bit, 0xA5, PwrMode::stop0,
+             "start bit at 115200, HSI16, Stop 0"},
+            {9600, UsartClock::hsi16, UsartWakeSource::address_match, 0x85, PwrMode::stop0,
+             "address 0x85 at 9600, HSI16, Stop 0"},
+            {9600, UsartClock::hsi16, UsartWakeSource::start_bit, 0xA5, PwrMode::stop1, "start bit at 9600, HSI16, Stop 1"},
+            {2048, UsartClock::lse, UsartWakeSource::start_bit, 0xA5, PwrMode::stop0, "start bit at 2048, the LSE, Stop 0"},
+        };
+        uint8_t woke = 0, whole = 0;
+        for (const Case& c : cases) {
+            const WakeLeg w = wake_leg(c.rate, c.k, c.src, c.value, c.mode, 0);
+            print_wake(c.name, w);
+            if (w.armed && w.wuf != 0u && !w.by_rtc) ++woke;
+            const bool all = c.src == UsartWakeSource::address_match ? (w.n == 1u && w.first == 0x85u)
+                                                                    : (w.n == 4u && w.first == c.value);
+            if (all) ++whole;
+        }
+        judge("a foreign sender's frame wakes this part out of Stop on every source, kernel and Stop mode - the "
+              "RTC backstop never firing", woke == sizeof cases / sizeof cases[0]);
+        judge("and what woke it survives: the four frames whole on a start bit or RXNE (HSI16 and LSE alike), "
+              "the matching address alone under mute", whole == sizeof cases / sizeof cases[0]);
+        // The control of the address: four addresses none of which is 5.
+        const WakeLeg miss =
+            wake_leg(9600, UsartClock::hsi16, UsartWakeSource::address_match, 0x86, PwrMode::stop0, 0);
+        print_wake("addresses 0x86..0x89 at 9600 (none is 5)", miss);
+        judge("addresses that do not match never wake it: the RTC backstop ends the Stop",
+              miss.armed && miss.wuf == 0u && miss.by_rtc);
+        // ES0548 2.2.4: HSIDIV = /4 (HSISYS = HSI16 / 4).
+        const WakeLeg div = wake_leg(9600, UsartClock::hsi16, UsartWakeSource::start_bit, 0xA5, PwrMode::stop0, 2);
+        print_wake("ES0548 2.2.4, HSIDIV = /4, start bit at 9600 on HSI16", div);
+        judge("ES0548 2.2.4 REPRODUCES with a foreign sender: on a divided HSI the USART's wake never comes and "
+              "the RTC ends the Stop", div.armed && div.wuf == 0u && div.by_rtc);
+        const WakeLeg div_lse = wake_leg(2048, UsartClock::lse, UsartWakeSource::start_bit, 0xA5, PwrMode::stop0, 2);
+        print_wake("ES0548 2.2.4, HSIDIV = /4, start bit at 2048 on the LSE", div_lse);
+        print(serial, "  the LSE kernel on a divided HSI ",
+              div_lse.wuf != 0u && !div_lse.by_rtc ? "WAKES the part - 2.2.4 is the HSI16 kernel's"
+                                                   : "does NOT wake it either - 2.2.4 reaches the LSE kernel too",
+              crlf);
+        judge("THE WAY ROUND 2.2.4: on the same divided HSI a USART on the LSE kernel wakes the part, the four "
+              "frames whole", div_lse.armed && div_lse.wuf != 0u && !div_lse.by_rtc && div_lse.n == 4u);
+        link_release();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // x - finding 4 through the BRIDGE: the same stream from the host (brio
 //     stress), OUTSIDE z and t
 // ---------------------------------------------------------------------------
 //
 // The console itself moved to 921600 on a receive engine (the study's own
 // receiver: USART2, the default ring), five minutes of the host's xorshift
-// judged with gaps located (brio stress's sink pumps it back to back; a
-// pump that bursts 200 bytes with a millisecond between them is letter 7's
-// shape on the bridge).
+// judged with gaps located, twice: brio stress's `sink` back to back, then
+// its `sink_bursts` - 200 bytes with a millisecond between them, letter 7's
+// shape on the bridge.
 
 constexpr uint32_t bridge_ring = SRAM_SIZE_MAX >= 0x4000UL ? 512u : 128u;
 using BridgeRx = DmaRxEngine<1, 3>;
@@ -8184,28 +8864,36 @@ struct XorCheck {
     }
 };
 
-void tx_bridge() {
-    print(serial, "  this letter needs the host: brio stress --board <this board> --letters x", crlf,
-          "  the console moves to 921600 on a receive engine for five minutes", crlf);
+/// One five-minute leg: the console on the receive engine at 921600, the
+/// host's stream in the shape `op` names (brio stress's `sink`, back to
+/// back, or `sink_bursts`, `burst` bytes with `gap_us` between them).
+struct BridgeLeg {
+    bool up = false;
+    XorCheck c{};
+    uint32_t skips = 0;
+    uint8_t ore = 0, fe = 0;
+};
+
+BridgeLeg bridge_leg(const char* op, uint32_t burst, uint32_t gap_us) {
+    BridgeLeg l{};
     constexpr uint32_t window_ms = 300'000;
-    host_announce("sink", 3, 921'600, "8N1", window_ms, 0);
+    host_announce(op, 3, 921'600, "8N1", window_ms, burst, gap_us);
     const uint32_t t_announce = Ticker::millis();
     Serial::release();
     bridge_live = true;
-    const bool up = BridgeSerial::init(clock, 921'600);
-    XorCheck c{};
+    l.up = BridgeSerial::init(clock, 921'600);
     uint8_t chunk[64];
     const uint32_t t0 = Ticker::millis();
-    while (up && Ticker::millis() - t0 < window_ms - 200u - window_ms / 50u) {
+    while (l.up && Ticker::millis() - t0 < window_ms - 200u - window_ms / 50u) {
         const uint32_t n = BridgeSerial::read_bulk(chunk);
         for (uint32_t i = 0; i < n; ++i) {
-            c.take(chunk[i]);
+            l.c.take(chunk[i]);
         }
         feed();
     }
-    const uint32_t skips = BridgeSerial::rx_skips();
-    const uint8_t ore = BridgeSerial::hw_overruns();
-    const uint8_t fe = BridgeSerial::frame_errors();
+    l.skips = BridgeSerial::rx_skips();
+    l.ore = BridgeSerial::hw_overruns();
+    l.fe = BridgeSerial::frame_errors();
     BridgeSerial::release();
     bridge_live = false;
     (void)Serial::init(clock, 115200);
@@ -8221,17 +8909,36 @@ void tx_bridge() {
     while (Serial::read_bulk(junk) != 0u) {
     }
     Serial::clear_errors();
-    print(serial, "  five minutes from the host through the bridge at 921600: ", c.got, " bytes, ", c.gaps, " gaps (",
-          c.lost, " bytes), ", c.bad, " corrupt, ", c.unplaced, " unplaced; skips ", skips, ", ORE ", ore, ", FE ", fe,
-          crlf);
-    if (c.got == 0u) {
-        print(serial, "  SKIP  the host pumped nothing: run this letter from brio stress", crlf);
-        return;
+    return l;
+}
+
+void tx_bridge() {
+    print(serial, "  this letter needs the host: brio stress --board <this board> --letters x", crlf,
+          "  the console moves to 921600 on a receive engine for five minutes back to back, then five in "
+          "200-byte bursts a millisecond apart", crlf);
+    for (uint8_t shape = 0; shape < 2u; ++shape) {
+        const BridgeLeg l = shape == 0u ? bridge_leg("sink", 0, 0) : bridge_leg("sink_bursts", 200, 1000);
+        const char* name = shape == 0u ? "back to back" : "in 200-byte bursts a millisecond apart";
+        print(serial, "  five minutes from the host through the bridge at 921600, ", name, ": ", l.c.got, " bytes, ",
+              l.c.gaps, " gaps (", l.c.lost, " bytes), ", l.c.bad, " corrupt, ", l.c.unplaced, " unplaced; skips ",
+              l.skips, ", ORE ", l.ore, ", FE ", l.fe, crlf);
+        if (l.c.got == 0u) {
+            print(serial, "  SKIP  the host pumped nothing: run this letter from brio stress", crlf);
+            continue;
+        }
+        // Bursts of 200 bytes with a millisecond between them carry 200
+        // of every 317 byte times.
+        bench.verdict(shape == 0u ? "the host's stream arrived back to back for the window (a third of the "
+                                    "bridge's capacity at least)"
+                                  : "the host's bursts arrived for the window (a fifth of the bridge's capacity "
+                                    "at least)",
+                      l.up && l.c.got >= (shape == 0u ? 921'600u / 10u * 100u : 921'600u / 10u * 60u));
+        bench.verdict(shape == 0u ? "FINDING 4 THROUGH THE BRIDGE, back to back: no byte of the host's stream "
+                                    "vanished or arrived corrupt"
+                                  : "FINDING 4 THROUGH THE BRIDGE, in the study's bursts: no burst vanished, no "
+                                    "byte arrived corrupt",
+                      l.up && l.c.gaps == 0u && l.c.bad == 0u && l.c.unplaced == 0u);
     }
-    bench.verdict("the host's stream arrived through the bridge for the window (a third of its capacity at least)",
-                  up && c.got >= 921'600u / 10u * 100u);
-    bench.verdict("FINDING 4 THROUGH THE BRIDGE: no byte of the host's stream vanished or arrived corrupt",
-                  up && c.gaps == 0u && c.bad == 0u && c.unplaced == 0u);
 }
 
 void banner() {
@@ -8317,6 +9024,22 @@ bool usart1_rs485(uint8_t m) {
         }
     }
     (void)m;
+    return false;
+}
+
+/// Letter u's wake: WUF cleared and counted while the letter has it armed
+/// (the vector clears every level it sees, letter w's rule).
+template <bool on = test_letter_carried('u')>
+bool usart1_wake() {
+    if constexpr (on) {
+        if (link_wake_armed != 0u) {
+            if ((brio::Usart<1>::status() & brio::UsartFlag::wuf) != 0u) {
+                brio::Usart<1>::clear_flags(brio::UsartClear::wuf);
+                link_wakes = link_wakes + 1u;
+            }
+            return true;
+        }
+    }
     return false;
 }
 
@@ -8440,6 +9163,9 @@ extern "C" void BRIO_STM32G0_USART2_HANDLER() {
 /// seconds later. The symptom looks like a fault and is not one: a
 /// HardFault breadcrumb stays EMPTY through it.
 extern "C" void USART1_IRQHandler() {
+    if (usart1_wake()) {
+        return;
+    }
     loop_irqs = loop_irqs + 1u;
     const uint8_t m = loop_mode;
     if (usart1_fifo_loop(m)) {
@@ -8642,6 +9368,8 @@ int main() {
     bench.second_letter('0', "auto-baud and LIN from a foreign crystal: four patterns, the range, both breaks",
                         t0_autobaud_lin);
     bench.second_letter('r', "RS-485's driver enable and IrDA SIR across the wire, both ways", tr_rs485_irda);
+    bench.second_letter('s', "mute mode and the multiprocessor wake from a foreign sender", ts_mute);
+    bench.second_letter('u', "the wake from Stop by the far chip, and ES0548 2.2.4 on the wire", tu_stop_wake);
     bench.letter('x', "HOST: finding 4 through the bridge, the console at 921600 for five minutes", tx_bridge,
                  false);
 

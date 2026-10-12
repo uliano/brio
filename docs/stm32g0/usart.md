@@ -8,16 +8,17 @@ auto-baud 33.5.9, mute mode 33.5.10, the character match 33.5.11, LIN
 33.5.20, low-power 33.5.21, the registers 33.8), RCC 5.4.21 (the CCIPR
 multiplexers) and 5.4.1 (HSIKERON), the EXTI's table 65 (lines 24, 25,
 26), the DMAMUX's table 55. Errata ES0548 Rev 3: 2.11.1 STAGED AND
-REPRODUCED, 2.11.2 applied, 2.2.4 STAGED AND REPRODUCED on a USART wake
-(see "Bench findings"). Driver: `stm32g0/usart.hpp` (`Usart<n>` resource
+REPRODUCED from 2400 baud to 1 Mbaud, 2.11.2 applied, 2.2.4 STAGED AND
+REPRODUCED on a USART wake from the host and from a far chip (see "Bench
+findings"). Driver: `stm32g0/usart.hpp` (`Usart<n>` resource
 + `UartTask` and its names `Uart<n, pins, ...>`, `Rs485`, plus
 `SyncHost`, `IrdaLink`, `AutoBaud`, `Smartcard`); the instance, vector,
 bus-clock, capability and EXTI facts come from
 `stm32g0/device_tables.hpp`. The LPUARTs are
 [lpuart.md](lpuart.md) - the SAME task over a different resource. Bench
 suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless;
-four more outside `z` through `brio stress`; eleven under the second
-all-key `t`, 146 verdicts, against the desk's STM32F446RE running
+four more outside `z` through `brio stress`; thirteen under the second
+all-key `t`, 171 verdicts, against the desk's STM32F446RE running
 `usart_peer` - "Against a far board" below). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
 fixture `test/family_stm32g0/usart.cpp` plus SIXTEEN negatives under
@@ -925,7 +926,8 @@ RTC's wake-up timer as the backstop:
   set - HSI16 kept running for its kernel-clock consumer, so no request
   is needed - still did not wake: WUF 0, the backstop firing. So 2.2.4
   reaches further than the request path. Recorded as measured, not
-  explained.
+  explained. A USART on the LSE kernel, on the same divided HSI, IS
+  woken (letter `u`, "Against a far board"): 2.2.4 is the HSI16 kernel's.
 
 ### The receive FIFO under a starved channel (`test_stm32_dma` letters `p` and `q`)
 
@@ -1017,11 +1019,11 @@ exists only past the point where the FIFO off already loses every frame.
 
 The desk pairs this board's USART1 with the STM32F446RE's, CROSSED - PA9
 to its PA10, PA10 from its PA9 - the far board running the stm32f4
-`usart_peer` (firmware 0x0400), driven IN BAND with the protocol every
+`usart_peer` (firmware 0x0401), driven IN BAND with the protocol every
 architecture on the link compiles (`avrdx/src/apps/usart_link.hpp`): an
 ack before every action, a bounded action, the peer back in command
-mode by itself. Letters `1` to `9`, `0` and `r` run under the second
-all-key `t` and never under `z`, which runs with the far board on its
+mode by itself. Letters `1` to `9`, `0`, `r`, `s` and `u` run under the
+second all-key `t` and never under `z`, which runs with the far board on its
 dark console. The
 far peer's time base is its crystal (the ST-LINK's 8 MHz in bypass), so
 what it times is THIS core's HSI16 - and this board times the same HSI
@@ -1029,7 +1031,7 @@ against its own LSE over the very window of each run, the stratum's
 `LseTracker` ([clock.md](clock.md), "The core against the LSE, tracked")
 on DMA1 channel 4 with a ring of 4096, a second of the crystal, for the
 length of the set: every rate verdict is the divisor's on the wire with
-the oscillator's walk taken out. Score: **146 of 146**, the refusals
+the oscillator's walk taken out. Score: **171 of 171**, the refusals
 SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
 `7`'s control through the bridge (below).
 
@@ -1049,10 +1051,13 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   verdict reads the run's own window). The far crystal's 1 Mbaud blast
   reads -2950 ppm on this ruler against the far divisor's 0 (90 MHz / 90)
   less the HSI's +2949 over its window: 1 ppm apart. A far `send` or
-  `blast` STATES ITS OWN RATE (the Report's aux16, the far divisor on its
-  crystal, usart_link.hpp), so the far transmitter is judged as tightly
-  as this one; 0 means a peer that cannot tell, and a divisor exact to
-  the ppm reads 0 too - judged at the loose per cent.
+  `blast` STATES ITS OWN RATE (the Report's aux16 with
+  `report_rate_stated` beside it, the far divisor on its crystal,
+  usart_link.hpp), so the far transmitter is judged as tightly as this
+  one - the far divisor's EXACT rungs (9600, 1, 1.5 and 2 Mbaud: 90 MHz
+  over a whole number of sixteenths) at 100 ppm with the rest; a peer
+  that cannot tell leaves the flag clear and is judged at the loose per
+  cent.
 - **The baud matrix** (`2`), on the two dividers' COMMON ladder: this
   USART makes 64 MHz / n (OVER8 adds no resolution, above), the far one
   90 MHz / k, and the two meet where k / n = 7 / 5 - above 2 Mbaud at
@@ -1112,9 +1117,24 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   majority vote's NE rising first, from +-30..50 per mille - table 189's
   3.33 % inside both ways; ONE STRETCHED CELL of 0x55 at 115200 - the
   start or a data cell 30 % longer or shorter decoded, 45 % not, the stop
-  cell's length free with an idle behind it. ES0548 2.11.1 above 2400 is
-  NOT staged: it wants a glitch inside a stop bit, which no op of the
-  protocol draws (letter `f` stages it with the pull-banger).
+  cell's length free with an idle behind it. **ES0548 2.11.1 REPRODUCES
+  AT EVERY RATE**, the far engine drawing a glitch to zero INSIDE the
+  stop bit of eight 0x96 frames (the protocol's `stage` op): an eighth of
+  a bit from 75 % of the stop bit corrupts 7 or 8 frames of 8 at 2400,
+  9600 and 115200, a quarter at 1 Mbaud (an eighth is under the far
+  engine's floor there), a tenth from 88 % at OVER8 - every one 0x96 read
+  as 0xCB, the data one bit late with the stop bit's 1 shifted into bit
+  7, and NO flag at all; the same glitch from 6 % (the first half)
+  decodes 8 of 8 clean everywhere. Walked across the stop bit, a glitch
+  over the majority's samples is a noise flag and no corruption, past
+  them it is the erratum - from 62 % at 115200 and 1 Mbaud, from 75 % at
+  2400 and 9600, where the start's detection puts the samples later in
+  the bit. With 8N2 it is the FIRST stop bit's second half: a glitch
+  anywhere in the second spoils nothing. AND THE WIDTH IS NOT THE
+  ERRATUM'S "shorter than the half-bit" at the slow rates: from 72 %, a
+  quarter bit corrupts every frame at 19200 and 115200 and none at 2400
+  and 9600, where an eighth corrupts every one - recorded as measured,
+  not explained.
 - **The receive ring beyond the bridge** (`6`): the receive engine ranked
   LOW beside test_stm32_dma q's pair (two copies alternating on DMA1's
   channels 1 and 2, every 5 ms), a counting stream from the far chip
@@ -1135,13 +1155,15 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   apart, the default ring, five minutes: **18 878 000 frames in 94 390
   bursts, not one gap**, the far end's counts agreeing. Letter `x` is the
   control through the ST-LINK's bridge - the console moved to 921600 on
-  a receive engine for five minutes of the host's xorshift: in the same
-  session 18 303 000 bytes in 200-byte bursts with a millisecond between
-  them and 22 286 080 back to back (brio stress's sink), not one gap
-  either. Neither path loses a burst today (at the study's rate, one in
-  some 28000 messages, five minutes of either would have shown three):
-  the device is ruled out at the study's rate, and the bridge did not
-  reproduce it this session.
+  a receive engine for five minutes of the host's xorshift back to back
+  (brio stress's `sink`) and five in the study's shape, 200-byte bursts a
+  millisecond apart (its `sink_bursts`, the shape the board announces):
+  22 431 456 bytes back to back and 17 908 815 in bursts in one session,
+  not one gap, not one corrupt byte, no skip, ORE or FE either. Neither
+  path loses a burst today (at the study's rate, one in some 28000
+  messages, five minutes of either would have shown three): the device
+  is ruled out at the study's rate, and the bridge did not reproduce it
+  in two sessions.
 - **The pad and the shared wire** (`8`): the HDSEL receiver on PA9
   hears the far engine drive that wire from ITS receive pad, eight
   frames whole at 9600, 115200 and 1 Mbaud; ONE OPEN-DRAIN WIRE BETWEEN
@@ -1158,7 +1180,17 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   rate, gaps of one frame, one and a half and five: IDLE once a burst at
   every gap and offset, the receiver time-out (RTOR 12 bits) once a burst
   from a frame and a half - the control for the F446's ES0298 2.13.1,
-  and ES0548 lists no such item.
+  and ES0548 lists no such item. THE IDLE FRAME ITSELF, drawn by the far
+  engine with the gap stated in ITS bit times (the `stage` op): sixteen
+  frames, an idle of 9.5 to 11 sender bits after each. From an exact
+  sender IDLE follows every frame from ten bits and none at 9.75; from a
+  sender 1 % fast from 10.25 of its bits, 3 % fast from 11 - so ONE IDLE
+  FRAME AND THEN A CHARACTER FROM A FASTER SENDER IS NOT TOLD HERE
+  EITHER, which is ES0298 2.13.1's own case: the receiver counts its
+  idle frame from the stop bit as IT sampled it, and a faster sender's
+  frame ends ahead of that by its error over the frame (ten bits of 3 %
+  are 0.3 bit). The far F446 reads the same table, entry for entry
+  (docs/stm32f4/usart.md).
 - **Auto-baud from a foreign crystal** (`0`): the far chip SENDS four
   frames of each mode's pattern at 9600, 57600, 230400 and 123456 baud
   into this receiver told 19200, and the learnt divisor is judged in
@@ -1228,6 +1260,37 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   pad at its reset (low) speed, and driven at very high speed (a scratch
   build) both read 101 - the slope is most of the gap, the last four
   cycles not located.
+
+- **Mute mode from a foreign sender** (`s`): MMRQ written on a line idle
+  for 2 ms does not mute (33.5.10's note: once an idle frame has
+  elapsed); THE IDLE-LINE WAKE - MMRQ after a burst's first frame drops
+  the rest of it, the idle frame between bursts wakes the receiver with
+  no IDLE flag, the next two bursts whole (17 frames of 24, in order);
+  THE ADDRESS MARK on the far `send_mpcm` (four groups of an address and
+  its data): on an 8-bit word the mark is bit 7, a four-bit address 5
+  takes 0x85 and 0x95, a seven-bit 0x05 takes 0x85 alone and 0x15 0x95
+  alone; on a 9-bit word the mark is bit 8, four bits take 0x05, 0x85 and
+  0x45, and with ADDM7 the address is EIGHT bits (33.5.10's note) - 0x85
+  and 0x05 each their own group. A wrong-parity stream (8O1 into 8E1)
+  woken by its address: every frame taken carries PE, THE WOKEN ADDRESS
+  INCLUDED - where the far F446 sets none after a software mute (its
+  ES0298 2.13.3).
+- **The wake from Stop by the far chip** (`u`): USART1 - the link, FULL on
+  every part of the family, its wake on EXTI line 25 - on HSI16 or the
+  LSE as its kernel, the far `send` four frames 600 ms after its ack, the
+  RTC's wake-up timer the backstop: woken out of Stop 0 on a start bit
+  at 9600 and 115200, on RXNE, on address 0x85 under mute, out of Stop
+  1, and on the LSE at 2048 baud (32768 / 16, exact) - the Stop lasting
+  595..602 ms, WUF once, the backstop never; the four frames survive
+  every start-bit and RXNE wake, the matching address alone the mute's.
+  Four addresses that are not 5 never wake it (the backstop at 1.4 s).
+  ES0548 2.2.4 FROM A FOREIGN SENDER: HSIDIV = /4 and the same start-bit
+  wake on HSI16 never comes, the RTC ending the Stop at 1.8 s - AND ON
+  THE LSE IT DOES: the same divided HSI, the USART kernel-clocked by the
+  crystal, woken at 601 ms with all four frames. With HSIKERON keeping
+  HSI16 running the HSI16 kernel was not rescued (letter `w`), so 2.2.4
+  is not the clock request alone: it is the HSI16 kernel's on a divided
+  HSI, and a USART on the LSE is the way round it.
 
 ## On the STM32G071RB
 
@@ -1330,7 +1393,7 @@ which is the letter's 2/2 as on the Nucleo-64s.
 ## The peer: `usart_peer` (the instrument a far board's suite drives)
 
 This stratum's port of the protocol's instrument
-(`stm32g0/src/apps/usart_peer.cpp`, firmware 0x0300, built for the
+(`stm32g0/src/apps/usart_peer.cpp`, firmware 0x0301, built for the
 G0B1RE and the G071RB): one polled loop on USART1's PA9/PA10, dark until
 a frame checks out (PA9 an input, no pull on either pad; a NAK only
 while engaged), a bounded action after every ack. The surface is the
@@ -1342,7 +1405,7 @@ protocol's; the engine is this chapter's, item by item:
 | transmit and receive DMA | DECLINED: the FIFO is eight frames of slack under a loop of a fraction of a frame (below) |
 | OVER8 | USED where it is closer to the rate, and alone under the protocol's clk2x flag - for range: it adds no resolution (above) |
 | the kernel-clock multiplexer | PCLK; HSI16 DECLINED - a lower ceiling and the same oscillator |
-| TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF2) | USED: THE WAVEFORM ENGINE - the pad re-muxed to the timer with the channel forced high (no edge), toggle mode with CCR preload off, the first compare by the CPU and every later one by DMA1 channel 1 on the channel's own request from a table of ABSOLUTE compares; the prescaler per action so the longest interval fits half the counter; the CPU sampling the pad meanwhile and counting its transitions, and the run timed whole, so a compare written too late (an edge a wrap later) is caught |
+| TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF2) | USED: THE WAVEFORM ENGINE - the pad re-muxed to the timer with the channel forced high (no edge), toggle mode with CCR preload off, the first compare by the CPU and every later one by DMA1 channel 1 on the channel's own request from a table of ABSOLUTE compares; the prescaler per action so the longest interval fits half the counter; the CPU sampling the pad meanwhile and counting its transitions, and the run timed whole, so a compare written too late (an edge a wrap later) is caught. The `stage` op is its widest user: a train of frames drawn cell by cell from usart_link.hpp's cell table, a pulse inside each and the gaps in sixteenths of a bit, refused where a pulse is under the floor or the train past the 512-edge table |
 | SWAP + HDSEL | USED for the shared wire: the single wire on PA10, the far TX's, open drain on its pull-up, the reply's own echo flushed |
 | TXINV / RXINV | USED for IrDA alone, both at once: two ST SIR ENDECs face each other with opposite polarities (33.5.18), and both bits act on the SIR side of the ENDEC (measured, letter `r`); one alone leaves the encoder idling low into the far decoder, which its half-duplex ENDEC chews |
 | the 0.5 / 1.5 stop codes | served (33.5.5 recommends them for smartcard mode and forbids them nowhere) |
@@ -1361,7 +1424,8 @@ core against the LSE ALL THE TIME, in hardware - the stratum's
 captures, a second of the crystal - takes the rate over the last 250 ms
 into every divisor and edge before each action, converts a span at the
 rate over the span's own window, and states a `send` or `blast`'s rate
-(the Report's aux16) at the rate over the run's own window. Then: -4..-14
+(the Report's aux16, `report_rate_stated` set) at the rate over the
+run's own window. Then: -4..-14
 ppm against the far crystal. A `onewire` reply's own echo is waited for,
 two bit times at most, before it is flushed (the far F446 peer measured
 that echo landing after TC).
@@ -1382,10 +1446,6 @@ restarts).
 ## Not covered yet
 
 Declined with a reason (every field of chapter 33 is implemented):
-- **ES0548 2.11.1 above 2400 baud.** Letter `f`'s pull-banger stages it
-  at 2400; the far engine could draw it at any rate, but no op of the
-  link protocol puts a pulse INSIDE a frame's stop bit (`glitch` plays
-  on an idle line, `bitbang` stretches a whole cell) - born with that op.
 - **The synchronous DATA path.** The master's CK, its polarity, its
   phase and LBCL are all measured on the pad; a synchronous LINK needs
   a second node on CK, TX and RX, and the wires this desk carries
@@ -1403,25 +1463,26 @@ Declined with a reason (every field of chapter 33 is implemented):
   brio's business yet.
 
 Implemented, not bench-verified:
-- `test_stm32_serial` as the G031K8's four group images (letters a to
-  j, k to q, the host letters v, w, x and y, and the two-board set) and
-  the G071RB's two (the single-board letters, the two-board set): the
+- `test_stm32_serial` as the G031K8's five group images (letters a to
+  j, k to q, the host letters v, w, x and y, the two-board set's 1 to 8,
+  and its 9, 0, r, s and u) and the G071RB's two (the single-board
+  letters, the two-board set): the
   suite outgrew those parts whole, and the scores under "On the
   STM32G031K8" and "On the STM32G071RB" are the one image's; one run of
   each image on those boards measures them, the rate on the wire among
   them (no board is paired with either on the desk).
-- The peer's `autobaud_tx`, `send_mpcm` and the 0.5 / 1.5 stop codes as
-  a SENDER: served, judged by no letter yet - the far F446 has no
-  auto-baud detector to feed, and mute is a later letter (its IrDA, both
-  ways, and its `brk` are the far suite's letters `r`, `0` and `4`).
+- The peer's `autobaud_tx` and the 0.5 / 1.5 stop codes as a SENDER:
+  served, judged by no letter - the far F446 has no auto-baud detector
+  to feed (its `send_mpcm`, its `stage`, its IrDA both ways and its
+  `brk` are the far suite's letters `s`, `7`, `r`, `0` and `4`).
 - `usart_peer` on the STM32G071RB: built, never run (not on the desk).
 - The receive ring on the STM32G031K8: `test_stm32_dma`'s letter `o` is
   built for it and has not run there (the board is not on the desk); one
   run of the suite measures it. The ring under an `LpUart`, its kick
   included, is the same task's and compile-only, as the LPUART's engine
   slots are ([lpuart.md](lpuart.md)).
-- The wake from Stop on any instance but USART2, and on Stop 1 (measured
-  on an LPUART, docs/stm32g0/lpuart.md).
+- The wake from Stop on any instance but USART1 and USART2 (and the
+  LPUARTs, docs/stm32g0/lpuart.md).
 - The FIFO default on the STM32G031K8, and with it the paced receiver
   (RXFT, the time-out or IDLE for the tail) and letters `p` and `q`: the
   score under "On the STM32G031K8" is the one-register console's, and

@@ -12,10 +12,14 @@ because the receive engine's burst edge IS the line's IDLE (below) and
 the erratum has no workaround, and on the F446 ES0298 2.13.2 (PE
 cleared by a write of DR in full duplex), because the task counts
 parity errors while it may be transmitting - both staged from a foreign
-sender ("Against a far board": the first not reproduced, the second
-reproduced in the erratum's order and absent from the task). The rest shape nothing in it (no
-break, no smartcard and no flow control in the transport), each of
-which the mode's future user meets. Driver:
+sender ("Against a far board": the first reproduced in its own case,
+one idle frame from a faster sender, and read entry for entry the same
+on the far STM32G0, whose sheet lists no such item; the second
+reproduced in the erratum's order and absent from the task). ES0298
+2.13.3 (no PE for an address with a parity error that ends mute mode)
+is staged too, and reproduces after a SOFTWARE mute alone. The rest
+shape nothing in it (no break, no smartcard and no flow control in the
+transport), each of which the mode's future user meets. Driver:
 `stm32f4/usart.hpp` (`Usart<n>` the resource, `Uart<n, pins, rx_size,
 tx_size, TxEngine, RxEngine, opts>` the task, the vocabulary
 `UartFormat`, `UartOptions`, `UartPins`, `MuteConfig`, `LinConfig`,
@@ -446,16 +450,16 @@ fifth, named: the price of never reading DR.
 
 The desk pairs the Nucleo-F446RE's USART1 with the STM32G0B1RE's,
 CROSSED - PA9 (AF7) to its PA10, PA10 from its PA9 - the far board
-running the stm32g0 `usart_peer` (firmware 0x0300), driven IN BAND with
+running the stm32g0 `usart_peer` (firmware 0x0301), driven IN BAND with
 the protocol every architecture on the link compiles
-(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9`, `0` and `r` of
+(`avrdx/src/apps/usart_link.hpp`). Letters `1` to `9`, `0`, `r` and `s` of
 `test_stm32f4_serial` run under the second all-key `t` and never under
 `z`, which runs with the far board on its dark console. The far peer's
 core is an HSI16 it TRACKS against its LSE crystal (docs/stm32g0/
 clock.md, "The core against the LSE, tracked"), so every rate it times
 is crystal against crystal - and every rate it SENDS it states (a
 `send` or `blast` Report's aux16: its divisor on its tracked core). Score:
-**130 of 130**, what this USART has no word for SKIPPED with its reason.
+**142 of 142**, what this USART has no word for SKIPPED with its reason.
 
 - **The rendezvous and the refusal path** (`1`): ping, IDENT (kind 0x03,
   another die, a crystal-referenced time base), a bad checksum NAKed, a
@@ -529,7 +533,21 @@ is crystal against crystal - and every rate it SENDS it states (a
   start), no IDLE edge missed. The erratum's case is an idle frame and
   no more followed at once by a fast sender's start bit; a gap the far
   peer can time in 100 us steps reaches one frame and a few
-  microseconds, and the edge held there.
+  microseconds, and the edge held there. THE ERRATUM'S OWN CASE, drawn by
+  the far engine with the gap stated in ITS bit times (the `stage` op):
+  sixteen frames, an idle of 9.5 to 11 sender bits after each, the
+  sender exact, 1 % and 3 % fast. From the exact sender IDLE follows
+  every frame from ten bits and none at 9.75; from 1 % fast from 10.25
+  of its bits, from 3 % fast from 11 - ONE IDLE FRAME AND THEN A
+  CHARACTER FROM A SENDER 3 % FAST IS NOT TOLD, nor ten and a half of its
+  bits (10.2 of this receiver's, past the exact sender's threshold):
+  2.13.1 REPRODUCES. And the far STM32G0's letter `9` reads THE SAME
+  TABLE, entry for entry, where ES0548 lists nothing: the receiver
+  counts its idle frame from the stop bit as IT sampled it, which a
+  faster sender's frame ends ahead of by the error over the frame -
+  every USART's geometry, the F446's sheet the one that names it. The
+  receive engine's contract (a burst told within two frames) is the
+  one-frame gap above, which holds.
 - **The ring under copies, with a real sender** (`8`): letter `g`'s
   arrangement on USART1's receive engine (DMA2 stream 2), 4096 frames
   back to back from the far chip at 4.27 and 6.4 Mbaud: at its default
@@ -576,10 +594,31 @@ is crystal against crystal - and every rate it SENDS it states (a
   table 148): the pair's RS-485 letter is the far G0's, this board's
   PB13 left an input under its DE.
 
+- **Mute mode from a foreign sender, and ES0298 2.13.3** (`s`): THE
+  IDLE-LINE WAKE - RWU set after a burst's first frame drops the rest of
+  it, the idle frame wakes the receiver with no IDLE flag, the next two
+  bursts whole; RWU written BEFORE any frame does not hold (25.6.4's
+  note: on an idle line the bit reads back clear) and all three bursts
+  arrive. THE ADDRESS MARK on the far `send_mpcm`, this USART's one width
+  of FOUR bits: on an 8-bit word (the mark bit 7) address 5 takes 0x85
+  and 0x95 - which the far G0's seven-bit mode tells apart - and on a
+  9-bit word (the mark bit 8) every group whose low nibble is 5. ES0298
+  2.13.3 STAGED - 8O1 frames into this 8E1 receiver, every one a parity
+  error, the control with no mute mode flagging all nine: muted by
+  SOFTWARE (RWU written), the first matching address wakes the receiver
+  with NO PE, its data and the next address with PE - REPRODUCED; muted
+  by the HARDWARE (a non-matching address set RWU), the matching
+  address after it wakes the receiver WITH PE, every address of the leg
+  flagged, three runs alike; awake under the address mark, the matching
+  address is checked as any frame. So the erratum - and 25.4.7's own
+  note, "the receiver does not check the parity of the address data" -
+  is the first address after a software mute; the far G0 flags it in
+  every case.
+
 ## The peer: `usart_peer` (the instrument a far board's suite drives)
 
 This stratum's port of the protocol's instrument
-(`stm32f4/src/apps/usart_peer.cpp`, firmware 0x0400, the F446RE): one
+(`stm32f4/src/apps/usart_peer.cpp`, firmware 0x0401, the F446RE): one
 polled loop on USART1's PA9/PA10 (APB2, 90 MHz), dark until a frame
 checks out, a bounded action after every ack. The engine is this
 chapter's:
@@ -589,7 +628,7 @@ chapter's:
 | one data register and the shifter | the echo and the sink polled a character at a time: SR read once a turn, then DR, THEN the echo's DR write - ES0298 2.13.2's own order (a DR write between the SR and the DR read clears PE in full duplex) |
 | transmit and receive DMA | DECLINED: the polled loop costs a fraction of a frame (below), and a blast is a TXE poll and a store, gapless at 6.4 Mbaud |
 | OVER8 | USED where it is closer to the rate (eighths: 90 MHz / k, k >= 8), and alone under the protocol's clk2x flag; 11.25 Mbaud is the ceiling |
-| TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF1) | USED: THE WAVEFORM ENGINE - the stm32g0 peer's shape on this chip's parts: TIM1 at 180 MHz (APB2's timer clock), DMA2 stream 6 channel 0 (TIM1_CH1/2/3 share it, table 29, one CCxDE at a time), direct mode on half-words, the absolute compares, the pad sampled and the run timed whole |
+| TIM1_CH2 / TIM1_CH3 on PA9 / PA10 (AF1) | USED: THE WAVEFORM ENGINE - the stm32g0 peer's shape on this chip's parts: TIM1 at 180 MHz (APB2's timer clock), DMA2 stream 6 channel 0 (TIM1_CH1/2/3 share it, table 29, one CCxDE at a time), direct mode on half-words, the absolute compares, the pad sampled and the run timed whole; the `stage` op its widest user - a train of frames drawn cell by cell, a pulse inside each, the gaps in sixteenths of a bit |
 | HDSEL | USED for the shared wire: the single wire on PA9 (the far G0 swaps its own onto the same wire), open drain on its pull-up |
 | the four stop codes | served on this FULL instance (25.4.3 recommends the halves for smartcard mode and forbids them nowhere else) |
 | eight- and nine-bit words | 7+P, 8, 8+P and 9 served; 5, 6 and 7 data bits without parity, 6+P and 9+P REFUSED |
@@ -600,7 +639,8 @@ chapter's:
 The time base is the crystal: the ST-LINK's 8 MHz in bypass through the
 PLL, a DWT cycle and a TIM1 count each 2/15 of a 24 MHz tick, and a
 `send` or `blast` states the rate its divisor gives on it (the Report's
-aux16: 90 MHz over BRR, or over 8 x mantissa + fraction at OVER8). On
+aux16 with `report_rate_stated`: 90 MHz over BRR, or over 8 x mantissa
++ fraction at OVER8, 0 where that is exact). On
 the shared wire THE REPLY'S OWN ECHO LANDS AFTER TC: the HDSEL receiver
 raises RXNE for the frame it just sent a fraction of a bit after the
 transmitter's TC, so a flush at TC left it standing and the loop
@@ -626,16 +666,9 @@ Driver gaps:
   (above): exact counts would need the CPU's read of DR, which the
   engine's rule forbids - declined.
 
-Implemented, not bench-verified, for the transport:
-- ES0298 2.13.1 at a gap of LESS than a frame and a sender a few per
-  cent fast: letter `7`'s far peer times its gaps in 100 us steps,
-  which at 50000 baud stops at one frame - a peer that times the gap in
-  bit times, or a far rate chosen so 100 us is under a frame, would
-  measure the erratum's own case.
-
 Implemented, not bench-verified (every mode of the resource beyond the
-transport - each waits for the wire or the peer that measures it): mute
-mode with both wakes, the smartcard (no card on the
+transport - each waits for the wire or the peer that measures it): the
+smartcard (no card on the
 desk), the synchronous clock (a timer capture on CK - the timer
 chapter's ruler), CTS/RTS flow control (a peer that asserts them), the
 TC/CTS/LBD interrupt enables, `set_baud` at run time (nothing changes the
@@ -645,7 +678,7 @@ USART2 and USART6 driven on the F446 and the consoles' USART1 and USART3
 OVER8 and frame-format legs on the other three boards (the loop's pad is
 surveyed on the Nucleo-F446RE alone).
 
-Implemented, not bench-verified, in the peer: the ops no letter judges
-yet - `send_mpcm` and the half stop codes as a SENDER; the design's
-later mute letter measures the first (its `autobaud_tx`, `brk` and
-IrDA are the far G0 suite's letters `0` and `r`).
+Implemented, not bench-verified, in the peer: the half stop codes as a
+SENDER, which no letter judges (its `send_mpcm`, `stage`, `autobaud_tx`,
+`brk` and IrDA are the far G0 suite's letters `s`, `5` and `9`, `0` and
+`r`).

@@ -64,7 +64,10 @@
  * them alone in registration order and closes with an ALL: line of its
  * own, each is also run by name. An image whose bench names no second
  * key compiles none of it: the set's mask is an empty member and every
- * branch that reads it is `if constexpr`.
+ * branch that reads it is `if constexpr`. The mask is one bit per
+ * registered letter, as wide as the table needs: 32 bits up to 32
+ * letters, 64 up to 64 (the keys a group can gate - 'a'..'z' and
+ * '0'..'9' - are 36, and upper-case keys add to them).
  */
 
 #pragma once
@@ -191,10 +194,15 @@ template <ByteSink Sink, uint8_t max_letters = test_letters_default_max(),
           char second_all_key = '\0'>
 class TestBench {
     static constexpr bool has_second_set = second_all_key != '\0';
-    static_assert(!has_second_set || max_letters <= 32,
-                  "the second set is a mask over at most 32 registered letters");
+    static_assert(!has_second_set || max_letters <= 64,
+                  "the second set is a mask over at most 64 registered letters");
 
 public:
+    /// The second set's mask: a bit per registered letter, the narrower
+    /// word wherever the table fits it (a bench of 32 letters or fewer
+    /// pays no 64-bit shift on a 32-bit core, nor on an AVR).
+    using SecondMask = std::conditional_t<(max_letters <= 32), uint32_t, uint64_t>;
+
     /// A test is a plain function: it prints what it measured and calls
     /// verdict() for each thing that had to be true.
     using TestFn = void (*)();
@@ -245,7 +253,7 @@ public:
         if (!register_letter(key, title, fn, false)) {
             return false;
         }
-        second_ |= 1UL << at;
+        second_ = static_cast<SecondMask>(second_ | (SecondMask{1} << at));
         return true;
     }
 
@@ -391,7 +399,7 @@ private:
     /// in a bench without one.
     bool in_second_set(uint8_t i) const {
         if constexpr (has_second_set) {
-            return ((second_ >> i) & 1UL) != 0u;
+            return ((second_ >> i) & 1u) != 0u;
         } else {
             (void)i;
             return false;
@@ -444,7 +452,7 @@ private:
     uint16_t failed_ = 0;
     char all_key_ = 'z';
     /// The second set as one bit per registered letter.
-    [[no_unique_address]] std::conditional_t<has_second_set, uint32_t, detail::NoSecondSet> second_{};
+    [[no_unique_address]] std::conditional_t<has_second_set, SecondMask, detail::NoSecondSet> second_{};
 };
 
 /// A bench with a second set: `second_all_key` runs the letters
