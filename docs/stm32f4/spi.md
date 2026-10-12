@@ -453,7 +453,17 @@ or declined:
 - **The overrun** (26.3.10) - `answer()` reads nothing, so OVR rises from
   the second frame; its tail runs the DR-then-SR sequence. `exchange()`
   and the start of a run clear it the same way.
-- **CRC, TI frames** - not in the runs: no peer on the desk speaks either.
+- **The CRC unit** (26.4.2) - NOT in the runs: a run has no CRC phase
+  (the gap list). The stm32f4 `spi_peer` serves spi_link's CRC beside
+  them two ways, both measured from the G0B1RE (below): on its streams
+  with the chapter's own "CRC transfer managed by DMA" - both streams
+  counting the data frames, the block appending its CRC after the
+  transmit stream's last and checking the host's, CRCNEXT never written,
+  the received CRC frame then read from DR, where it "is always loaded"
+  - and with a run of its own over the resource in the runs' shape,
+  CRCNEXT written "as soon as the last data is written" (26.7.1), so the
+  bit lands while the frame before the last is still shifting.
+- **TI frames** - not in the runs: no peer on the desk speaks them.
 
 COST, counted in the release listing (the stm32f4 `spi_peer`'s, SPI2):
 `answer()`'s turn is the TXE poll that hits - a load, a shift, a branch -
@@ -477,7 +487,12 @@ host's setup inside half a clock - and there the answer path fails on
 both serves (the DMA serve still receives every frame exact, the run
 loses one); it is a figure, never a fault to fix. As the client of the
 G0's `host_burst` (letter r of this stratum's suite, twelve frames at 2
-MHz) the exchange run is exact both ways.
+MHz) the exchange run is exact both ways. The same host's extended
+letters judge the rest of the surface at every code to 16 MHz:
+`exchange()` over `uint16_t` frames (letter `u`), and `receive()` with
+the answer line dark at 7 and 33 frames in both widths (letter `v`) -
+which holds at 32 MHz too, printed: a client that only listens is not
+bound by its answer path.
 
 ## The pads
 
@@ -892,7 +907,7 @@ display controller (chip select PC2, D/CX PD13) on the same three pads.
 
 **`test_stm32f4_spi` on the Nucleo-F446RE**, SPI2 at PCLK1 = 45 MHz
 against the STM32G0B1RE it is paired with on the desk (the stm32g0
-`spi_peer`, firmware 0x0301, on its SPI1), scores **57 of 57** in `z`:
+`spi_peer`, firmware 0x0302, on its SPI1), scores **76 of 76** in `z`:
 
 - **The block**: four instances (SPI1 and SPI4 on APB2, SPI2 and SPI3 on
   APB1), one vector each; the I2S face on SPI1, SPI2 and SPI3 and no
@@ -972,8 +987,70 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   at high in modes 0 and 3 and at medium in 1 and 2 (its header); x is
   then 0 of 40, three runs.
 
+- **16-BIT FRAMES ON ALL THREE OF THE HOST'S ENGINES** (letter `u`,
+  spi_link's `spare_wide`): thirty-two 16-bit frames a window, the G0
+  serving them in half-word beats, byte-exact both ways at every code to
+  PCLK1/2 = 22.5 MHz from the polled loop, the RXNE pump and the
+  half-word streams - a frame on the streams one half-word beat, the
+  beat the frame - and the G0's own 16-bit client run likewise. Timed
+  from two windows of 16 and 48 frames at the same rung (the
+  transaction's fixed cost cancels), a frame inside the window takes
+  999..1001 permille of its sixteen SCK periods on the streams at
+  PCLK1/8, /4 and /2, and 999..1000 on the polled loop at /8 and /4,
+  where it keeps two frames in flight ("The host above the wire"); at /2,
+  one in flight, the loop's frame is 1531 permille and the pump's 2031.
+  The 22.5 MHz rung needed the G0's answer line at very-high (its
+  header): at high, 16 and 20 of 20 16-bit windows read wrong in bit 2
+  (and bit 15 on the streams) while every 8-bit one held.
+- **THE TRANSMIT-ONLY SHAPES, WITNESSED** (letter `v`,
+  `spare_receive_only`): 33 frames, 8- and 16-bit, through the polled
+  transmit-only loop, the pump's write shape and the streams' (the
+  receive side discarded), every one heard exact by the G0 listening
+  with its answer line dark - its receive channel, then its `receive()`
+  run at 7 and 33 frames - at every code to 22.5 MHz; odd counts both
+  ways, 7 and 33 byte frames, against both of the G0's serves.
+- **THE CRC AGAINST A FOREIGN UNIT** (letter `w`, `spare_crc`), this
+  end's unit by hand on the resource (`SpiHost`'s Request has no CRC
+  phase), sixteen data frames, CRC-8 0x07 and CRC-16 0x1021: at every
+  code to PCLK1/4 TXCRCR is the bitwise arithmetic of what went and
+  RXCRCR of what came, the CRC frame read is the arithmetic of the G0's
+  stream, CRCERR at neither end - against the G0's channels managing the
+  CRC by themselves (RM0444 35.5.14) and against its CRC run alike. THE
+  CHECK IS A REAL ONE: this end's unit off and the CRC frame sent as
+  data, its last bit flipped, the G0 reports CRCERR (`report_crcerr`)
+  in both widths, on both serves, at PCLK1/256 and PCLK1/4 and on its
+  channels at PCLK1/2, every data frame exact.
+- **ES0298 2.14.5's CRC SIGNATURE AT PCLK1/2, at every SCK class**: at
+  22.5 MHz the far side holds - TXCRCR the arithmetic, the G0's check
+  clean, every data frame exact both ways - but THIS END'S RECEIVE CRC
+  does not: RXCRCR misses the arithmetic in 10 of 10 windows with the SCK
+  pad at medium and at high and in 8 or 9 of 10 at very-high, both
+  widths (letter `t`), and with the last data frame queued behind the
+  one before, the 8-bit CRC frame itself is read wrong (0x04 for 0x4B)
+  where the same frame sent as data reads right. The erratum's own words
+  - "the CRCERR flag can be unduly asserted ... if any data under
+  checksum, and/or just the CRC pattern is wrongly captured" - with two
+  differences measured: the data frames are captured right, and the code
+  matters (PCLK1/4 and slower are clean) where the erratum says the
+  communication speed has no impact. Letter `w` judges the far side at
+  /2 and prints this end's.
+- **THE CRCNEXT WINDOW** (letter `t`, outside `z`): one frame in flight,
+  the CRCNEXT store walked away from the last data store, the same
+  hazard as the STM32G0's (docs/stm32g0/spi.md): a store landing from 33
+  to some 60 core cycles before the last data frame's RXNE (as a poll
+  first sees it), a window under half a bit wide that widens with the
+  bit, corrupts both calculators and the far check; a store before it is
+  clean - and one after the frame
+  has ended leaves this end's accumulators right while the far check
+  FAILS (unlike the G0, where that side is clean). RM0390's rule
+  ("before the end of the last data frame transaction") does not exclude
+  it and ES0298 lists nothing. So the host queues the last data frame
+  behind the one before it - the second-to-last into the idle shifter,
+  the last on its TXE, CRCNEXT the store after - and the bit lands a
+  frame before the window at every code.
+
 **`SpiClient` against the STM32G0B1RE host** (the stm32f4 `spi_peer` on
-this board, firmware 0x0401, `test_stm32_spi` on the G0B1RE, 56 of 56):
+this board, firmware 0x0402, `test_stm32_spi` on the G0B1RE, 74 of 74):
 a dark client that drives MISO only inside an answer window; every
 window ONE CALL of the run - `answer()` for the protocol's answer windows,
 `exchange()` (or the DMA1 serve, its default) for an exchange - the four
@@ -990,15 +1067,30 @@ stream went one bit out of place from a random frame in 12 runs of 12
 (an edge gained or lost; the ground moved onto the chips' own pins
 changed nothing), at high in 2 of 4, at medium in none of 14, at low in
 none of 4.
+THE EXTENDED EXCHANGE FROM THAT SIDE (its letters `u`, `v`, `w`, every
+code to 16 MHz judged, 32 MHz printed): the peer's streams in half-word
+beats and its 16-bit `exchange()` run exact both ways, the answers at 32
+MHz all wrong while every frame is heard (the 8-bit signature); its
+receive stream (33 frames) and its `receive()` run (7 and 33) hearing
+every frame of the G0's transmit-only shapes in both widths, to 32 MHz;
+the CRC
+through 26.4.2's "CRC transfer managed by DMA" (both streams counting
+the data frames, the CRC frame read from DR) and through the peer's CRC
+run both clean in both widths - and THIS UNIT CATCHES A CORRUPTED WORD:
+the G0's CRC frame sent as data with its last bit flipped raises CRCERR
+here (`report_crcerr`) on both serves, both widths, at PCLK/256 and
+PCLK/4, every data frame exact.
 
 ## Not covered yet
 
 Driver gaps:
-- The CRC unit beyond its verbs and the even-polynomial refusal: a CRC
-  measured against nothing is a register read-back, and the peer on the
-  desk (the STM32G0B1RE's `spi_peer`) answers in a protocol with no CRC
-  field: born with a spi_link extension that names the polynomial for
-  both ends.
+- No CRC phase in `SpiHost`'s Request or in `SpiClient`'s runs: the unit
+  is the resource's (`crc_polynomial`, `crc_enable`, `crc_next`, the two
+  accumulators, CRCERR), measured on the wire by hand from both ends
+  (letters `w` and `t`, the stm32f4 `spi_peer`); a CRC phase in the tasks
+  - the last data frame queued behind the one before and CRCNEXT after
+  it, or the streams' own "CRC transfer managed by DMA" - is born with
+  the first device that checksums its frames.
 - TI frame format: the configuration is written and refused where the
   chapter says it must be, but nothing on this board frames its
   transactions that way. Born with its first device.
@@ -1020,10 +1112,9 @@ Driver gaps:
   chapter's.
 
 Implemented, not bench-verified (each with what would measure it):
-- `SpiClient::receive()`, the runs in 16-bit frames, and a run without
-  an NSS pad: compiled on every header, none driven - a peer op that
-  clocks a receive-only window, one in 16-bit frames, and a client under
-  SSM would measure them.
+- A run without an NSS pad (a client under SSM): compiled on every
+  header, never driven - every peer op frames on the pad; a peer
+  configuration under SSM would measure it.
 - The instances other than SPI5, SPI2 and SPI1 (SPI3, SPI4, SPI6 -
   compiled on every header that has them, none driven): a wire between
   two of them, or a device on one. SPI1 is driven on the STM32F411CE

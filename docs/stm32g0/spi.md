@@ -23,9 +23,11 @@ self-link, letter `s` (18 verdicts) on no wire at all - the host's two
 loops in every shape, judged by what the block holds after each, the
 receive shapes under a stretched tick handler, and the rate on the wire
 at every BR code -,
-letters `n`..`r` (20 verdicts) on the link to a PEER BOARD
-running `spi_peer`, commanded in band over
-`avrdx/src/apps/spi_link.hpp`. The peer may be any of the three ports of
+letters `n`..`r` (20 verdicts) and `u`..`w` (18) on the link to a PEER
+BOARD running `spi_peer`, commanded in band over
+`avrdx/src/apps/spi_link.hpp` - `u`..`w` through its EXTENDED EXCHANGE
+(16-bit frames, a client that only listens, both ends' CRC units), with
+`t` and `x` beside them outside `z`. The peer may be any of the three ports of
 that app - the AVR's, the SAM C21's, this stratum's own, which answers
 on SPI1 AF0 at the same pin names this board hosts on, or the STM32F4's,
 on the F446's SPI2 - and the peer's `ident` names which one answered
@@ -239,7 +241,17 @@ or declined:
 - **The overrun** (35.5.10) - `answer()` reads nothing, so OVR rises
   after four frames; its tail drains the RXFIFO, whose last read is the
   sequence's DR read, and reads SR (35.5.11) - no read of an empty FIFO.
-- **CRC, TI frames, NSS pulse** - not in the runs.
+- **The CRC unit** (35.5.14) - NOT in the runs: a run has no CRC phase
+  (the gap list). The stm32g0 `spi_peer` serves spi_link's CRC beside
+  them two ways, both measured from the F446 (below): on its DMA
+  channels with the chapter's own "CRC transfer managed by DMA" - the
+  transmit channel counting the data frames alone, the receive channel
+  the host's CRC frame too, CRCNEXT never written - and with a run of
+  its own over the resource, CRCNEXT the store after its last answer
+  ("as soon as the last data is written", 35.9.1) and a frame read an
+  access, the reception buffer being "a single 16-bit buffer used to
+  receive only one data frame at a time" in CRC mode (35.5.14).
+- **TI frames, NSS pulse** - not in the runs.
 
 COST, counted in the release listing: the block's base held in a
 register by an empty asm, so SR, both views of DR and CR2 are offsets
@@ -260,7 +272,13 @@ MEASURED by `test_stm32f4_spi` on the STM32F446RE it is paired with
 to the F446's PCLK1/2 = 22.5 MHz - the host's own ceiling, the wire's
 fastest on this desk, and inside this client's 32 MHz (DS13560 table 76,
 2.7..3.6 V). As the client of the F446's `host_burst` (letter r below,
-twelve frames at 1.406 MHz) the exchange run is exact both ways.
+twelve frames at 1.406 MHz) the exchange run is exact both ways. The
+same suite's extended letters judge the rest of the surface at every
+code to 22.5 MHz: `exchange()` over `uint16_t` frames, 32 a window
+(letter `u`); `receive()` with the answer line dark at 7 and 33 frames
+in both widths - the pairs under the half threshold and the odd last
+frame under the quarter one - and `exchange()` at 7 and 33 byte frames,
+the odd last frame read under the moved threshold (letter `v`).
 
 ## The pads
 
@@ -307,9 +325,9 @@ which class is the BUS's: a fast edge on SCK is seen twice at a far
 client, a fast edge on MOSI or MISO couples into the clock beside it, and
 either puts the far client's stream one bit out of place from that frame
 on. On the desk's jumper wires to the STM32F446RE this host runs MOSI at
-`high`, and this board's `spi_peer` answers at `high` in modes 0 and 3
-and at `medium` in 1 and 2 ("The peer link"); the self-link's short
-wires keep the default.
+`high`, and this board's `spi_peer` answers at `very_high` in modes 0
+and 3 and at `medium` in 1 and 2 ("The peer link"); the self-link's
+short wires keep the default.
 
 ## How to use it
 
@@ -416,8 +434,8 @@ and their inverse.
 Measured by `test_stm32_spi`. The findings down to "The dynamic clock"
 are the SELF-LINK's (SPI1 host to SPI2 client, four wires): 89 verdicts.
 The ones under "The peer link" are a SECOND CHIP's, on the same four
-SPI1 pads: 38 verdicts, measured against an STM32F446RE and against a
-second STM32G0.
+SPI1 pads: 38 verdicts, measured against the STM32F446RE paired with
+this board - and this board's `spi_peer` measured from that one.
 
 **The block, and the reserve against the header.** SPI1 on line 25 and
 SPI2/SPI3 sharing line 26; the DMAMUX pairs 16/17, 18/19, 66/67; the
@@ -776,8 +794,8 @@ other: the suite probes for the self-link at boot and letters b..l skip
 themselves when it is absent. The desk pairs this board with an
 STM32F446RE running the stm32f4 `spi_peer` on its SPI2 (PB13 SCK, PB14
 MISO, PB15 MOSI, PB12 NSS at AF5, wired by function), and against it `z`
-scores **56 of 56** (letters `a` and `m` and `s` wireless, letters
-`n`..`r` on the wire). The same board measures this one's `spi_peer`
+scores **74 of 74** (letters `a` and `m` and `s` wireless, letters
+`n`..`r` and `u`..`w` on the wire). The same board measures this one's `spi_peer`
 from its own SPI2 suite (`test_stm32f4_spi`, docs/stm32f4/spi.md), and
 those figures close this section.
 
@@ -786,7 +804,7 @@ is compiled by every port of `spi_peer` and this suite speaks it
 unchanged: the
 command channel runs at PCLK/256 = 250 kHz, one frame per chip-select
 window, ten of ten, and `ident` names the peer's unique ID and its
-`spi_peer` sanity byte (firmware 0x0401). The protocol owns the chip
+`spi_peer` sanity byte (firmware 0x0402). The protocol owns the chip
 select here (the Request carries a null `PinRef` and the letter frames
 the window by hand with 30 us of hold on each side), and `prime()` is
 what makes that legal - a mode change inside an open select window is
@@ -884,6 +902,61 @@ own pins changing nothing), at high in 2 runs of 4, and at medium in 0
 of 14 (0 of 6 on the per-frame loop), at low in 0 of 4. The F446 peer
 now hosts at medium.
 
+**16-BIT FRAMES ON ALL THREE OF THIS HOST'S ENGINES, AT THE WIRE'S TIME**
+(letter `u`, spi_link's `spare_wide`): thirty-two 16-bit frames a window,
+the F446 serving them in half-word beats, byte-exact both ways at every
+judged code to 16 MHz from the polled loop, the RXNE pump and the
+half-word engines - a frame on the engines a half-word beat, the beat
+the frame. Timed from two windows of 16 and 48 frames at the same rung
+(the transaction's fixed cost cancels), a frame inside the window takes
+998..1000 permille of its sixteen SCK periods on the polled loop and
+996..999 on the engines, at PCLK/16 and at PCLK/4; the pump's takes
+1148 and 2789, its bus waiting for the handler ("The host above the
+wire"). The F446's own 16-bit client run is exact at every judged code.
+At 32 MHz, above that client's ceiling, the answers are read wrong in
+every frame while the client hears them all - the 8-bit signature.
+
+**THE TRANSMIT-ONLY SHAPES, WITNESSED** (letter `v`, `spare_receive_only`):
+33 frames, 8- and 16-bit, through the polled transmit-only loop, the
+pump's write shape and the engines' held sink, every one heard exact by
+the F446 listening with its answer line dark (its receive DMA, then its
+`receive()` run at 7 and 33 frames), at every judged code - and at 32
+MHz too, printed: a client that only listens holds above the ceiling
+its answers break at. Odd counts both ways, 7 and 33 byte frames, exact
+against both of the peer's serves.
+
+**THE CRC AGAINST A FOREIGN UNIT** (letter `w`, `spare_crc`), this end's
+unit driven by hand on the resource (`SpiHost`'s Request has no CRC
+phase), sixteen data frames a window, CRC-8 0x07 on 8-bit frames and
+CRC-16 0x1021 on 16-bit ones: at every judged code this end's TXCRCR is
+the bitwise arithmetic of what it sent and its RXCRCR of what came, the
+CRC frame it reads is the arithmetic of the F446's stream, CRCERR stands
+at neither end, against the F446's streams managing the CRC by
+themselves (RM0390 26.4.2) and against its CRC run alike. THE CHECK IS A
+REAL ONE: this end's unit off and the CRC frame sent as DATA with its
+last bit flipped, the F446 reports CRCERR (`report_crcerr`) in both
+widths, on both serves, at PCLK/256 and PCLK/4, every data frame still
+exact and its own CRC frame still the arithmetic.
+
+**THE CRCNEXT WINDOW** (letter `t`, outside `z`): with one frame in
+flight - each written into an idle shifter - a CRCNEXT store landing
+16 to 26 core cycles before the last data frame's RXNE (as a poll of
+about ten cycles a turn first sees it) corrupts BOTH calculators: the transmit one shifts once more,
+so the CRC frame sent is the right CRC moved up a bit (0xD3 went out as
+0xA6), and the receive one is not frozen, the CRC frame summed into it
+(RXCRCR 0x00); CRCERR stands at both ends, every data frame exact. A
+store before the window, or after the frame has ended, is clean. The
+window is in CORE CYCLES, not in bits - the same 16 to 26 before RXNE
+for 8- and 16-bit frames from PCLK/4 to PCLK/16 - and 6 to 12 cycles
+wide; RM0444 35.5.14's rule ("set before the end of the last data frame
+transaction") does not exclude it and ES0548 lists nothing. The first
+version of letter `w`, one frame in flight with CRCNEXT the store after
+the last data store, hit it at PCLK/4 in 8-bit frames on every serve.
+So the host writes the last TWO data frames as one burst into the
+TXFIFO and CRCNEXT right after them: the bit lands while the
+second-to-last frame is still in the shifter, a whole frame and more
+before the window, and letter `w` holds at every code.
+
 **THE G0 `spi_peer` MEASURED FROM THE F446** (`test_stm32f4_spi`, SPI2
 at PCLK1 = 45 MHz hosting, its SCK and its MOSI at medium): the
 exchange on the peer's DMA serve byte-exact both ways at every code to
@@ -894,9 +967,35 @@ slip instrument (that suite's letter x, ten bursts a mode at the command
 rate) walking the peer's MISO class: 11 of 40 at very-high, 8 and 11 of
 40 at high, every one in mode 1 or 2 with both ends wrong from the same
 frame - the edge landing on an SCK just settled high - and 0 of 40 at
-medium and at low; but medium costs letter p's 22.5 MHz rung, in mode 0.
-So the peer drives MISO at high in modes 0 and 3 and one notch slower,
-medium, in modes 1 and 2 (its header), and x is 0 of 40.
+medium and at low. AND THE TOP RUNG ASKS FOR THE FAST EDGE in the
+rising-edge modes: at 22.5 MHz in mode 0 (twenty windows of 32 frames
+on that board's polled host and on its streams, a diagnostic run once
+per class; letter `u`'s top rung judges the class chosen) the answer
+line at very-high is exact in 8-bit and 16-bit frames alike; at high
+every 8-bit window holds and 16 and 20 of 20 16-bit ones read wrong,
+always in bit 2 of the frame and, on the streams, bit 15 - the data
+valid time against the far host's setup - while the peer hears
+everything; at medium every window is wrong in both widths, at low every
+bit. So the peer drives MISO at very-high in modes 0 and 3 and at medium
+in modes 1 and 2 (its header), and that suite's x is 0 of 40 and its
+back-to-back rung 0 of 30.
+
+THE EXTENDED EXCHANGE FROM THAT SIDE (its letters `u`, `v`, `w`, every
+code to 22.5 MHz judged): the peer's DMA serve in half-word beats and
+its 16-bit run exact both ways; its `receive()` run and its receive
+channel hearing every frame of the F446's transmit-only shapes at 7 and
+33 frames in both widths, the odd last frame under the quarter
+threshold; the CRC through 35.5.14's "CRC transfer managed by DMA" (the
+transmit channel counting the data frames, the receive channel the
+host's CRC frame too, no CRCNEXT written) and through the peer's CRC run
+(CRCNEXT after its last FIFO store, a frame an access) both clean in
+both widths - and THIS UNIT CATCHES A CORRUPTED WORD: the F446's CRC
+frame sent as data with its last bit flipped raises CRCERR here
+(`report_crcerr`) on both serves, both widths, at PCLK1/256 and PCLK1/4
+and on the engines at PCLK1/2, every data frame exact. The peer's CRC
+run reads a frame an access: at 22.5 MHz it is printed, not judged - its
+8-bit frames are 22.7 core cycles each, and it heard all sixteen in three
+runs of four.
 
 ## On the STM32G071RB
 
@@ -962,6 +1061,13 @@ must reach the registers itself:
 - **no DMA engine slots on `SpiClient`.** Left for a device-shaped
   user; the bench drives the client's channels raw, which is what a
   peer does anyway.
+- **no CRC phase in `SpiHost`'s Request or in `SpiClient`'s runs.** The
+  unit is the resource's (`crc`, `crc_polynomial`, `crc_next`, the two
+  accumulators, CRCERR), measured on the wire by hand from both ends
+  (letters `w` and `t`, the stm32g0 `spi_peer`); a CRC phase in the
+  tasks - the last two frames in one burst and CRCNEXT after them, or
+  the engines' own "CRC transfer managed by DMA" - is born with the first
+  device that checksums its frames.
 - **no check that a pad can take the class asked.** RM0444 7.5.3's
   FT_c pads take very low and low alone, and which pad is one is the
   data sheet's pin table, which no header of the pack carries (on the
@@ -995,34 +1101,18 @@ must reach the registers itself:
 **Implemented but not bench-verified** - the code is there and compiles
 on every header of the pack, but no silicon has run it:
 
-- **the two polled shapes and the pump's write-ahead, judged on the
-  wire.** The transmit-only loop's tail (the D/C or the select moved on
-  FTLVL then BSY), the packed receive (two frames an access, the odd
-  last one under a moved threshold) and the pump's three frames in
-  flight are judged by the FIFO levels, OVR and the count of
-  completions with nothing on MISO (`test_stm32_spi` letter `s`,
-  `bench_stm32` letter `e`); that every byte lands where it belongs is
-  the self-link's question - letters `b`, `c` (every frame size, which
-  is the packed path's sub-byte frames) and `d` - and that link is not
-  on this desk.
-- **16-bit frames on the DMA engines, judged on the wire.** Letter `i`
-  carries the leg - sixteen half-word frames out and back on the
-  half-word engines with one completion, and the same request from an
-  odd address on the frame pump - and it needs the self-link, which is
-  not on this desk; `bench_stm32`'s letter `d` times the path with MISO
-  floating (the table above) and judges no data.
-- **`SpiHost`'s engined data phase and the reset in `release()`, on the
-  wire.** They ride letter `i`, a self-link letter, and the self-link is
-  not on this desk; `test_stm32_dma` letter `r` measures the release on
-  SPI1 with no wire ([dma.md](dma.md)). The same channel levels (receive
-  at `very_high`, transmit at `high`) on the raw engines of the
-  `spi_peer`'s exchange serve are measured on the wire from the F446,
-  exact to 22.5 MHz (above).
-- **`SpiClient::receive()`, the runs in 9..16-bit frames, a run without
-  an NSS pad, and the odd last frame of an exchange under the moved
-  threshold**: compiled on every header, none driven - every exchange on
-  this desk is eight or twelve frames. A peer op with an odd count, a
-  wide-frame window and a client under SSM would measure them.
+- **the transmit-only loop's tail against a select or a D/C the TASK
+  moves** (FTLVL then BSY before the edge): the peer letters frame their
+  windows by hand with 30 us of hold on each side, so the tail's timing
+  is never pressed - the loop, the packed receive with its odd last
+  frame and the pump's write-ahead are judged on the wire by the F446
+  (letters `u` and `v`), and by the FIFO levels, OVR and the count of
+  completions with nothing on MISO (letter `s`, `bench_stm32` letter
+  `e`). A device on the wire with a D/C line, or the self-link's letters
+  `b`..`d`, would measure it.
+- **a run without an NSS pad** (a client under SSM): compiled on every
+  header, never driven - every peer op frames on the pad. A peer
+  configuration under SSM would measure it.
 - **The peer letters on the STM32G071RB and the STM32G031K8**: no board
   is paired with either on the desk; a partner running `spi_peer` would
   run them.
@@ -1051,6 +1141,16 @@ on every header of the pack, but no silicon has run it:
   (above). All of them are measured on the STM32G0B1RE.
 
 **Findings left open, with what would settle them:**
+
+- **the CRCNEXT window's cause** (letter `t`): a store 16 to 26 core
+  cycles before the last data frame's RXNE corrupts both calculators,
+  in core cycles at every rate measured, where RM0444 asks only that the
+  bit be set before the frame's end. The vendor's own polled loop
+  (HAL v1.4.7 `HAL_SPI_TransmitReceive`, one frame in flight, CRCNEXT the
+  store after the last) would land wherever its instruction timing puts
+  it; run on this board, at the rates the walk names, it would say
+  whether the vendor's procedure meets the window too - and ST whether
+  the window is the silicon's.
 
 - **the burst ladder's 320-cycle floor** (letter d) is not the host
   loop's own - the transmit-only loop holds PCLK/2's clock continuous
@@ -1092,10 +1192,6 @@ on every header of the pack, but no silicon has run it:
 - **ES0548 2.12.2** is a sporadic coincidence of two clocks and 32
   rounds cannot disprove it; the honest witness it names is measured
   instead.
-- **CRCERR by a corrupted word**: two peripherals joined by six
-  centimetres of wire carry exactly what is put on them, so the
-  receiver's EXPECTATION is what the letter corrupts (a different
-  polynomial), said plainly rather than dressed up.
 - **the I2S master clock's own frequency**: MCK is 256 x Fs (about 12
   MHz here) and no free pad on this desk carries a counter for it. Its
   effect on the sampling rate is measured instead, which is the same

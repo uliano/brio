@@ -488,7 +488,14 @@ here beside the rest of the Stop story.
   names: a USART makes a clock request and the RTC makes none. **And
   HSIKERON does not rescue it**: the same leg with HSI16 kept running
   still did not wake, so 2.2.4 reaches further than the request path.
-  Recorded as measured, not explained.
+  Recorded as measured, not explained. **THE WAY ROUND IT IS THE
+  KERNEL**: the same divided HSI with the USART kernel-clocked by the
+  LSE wakes on the start bit and keeps every frame - measured with the
+  far chip as the sender on USART1 (`test_stm32_serial` letter `u`,
+  [usart.md](usart.md)), the HSI16 kernel failing the same leg. A
+  program that divides HSISYS and wants a USART wake puts that USART on
+  the LSE; `Usart::wake_from_stop()`'s comment says the same where the
+  wake is armed.
 - **WUF IS A LEVEL LIKE ORE**, and a handler that leaves it standing
   with WUFIE set re-enters until the watchdog reboots the board. The
   signature under halt-and-dump is IPSR 44, ISR bit 20 standing and the
@@ -607,10 +614,13 @@ once-a-lap wake that consequence 1 predicts (a standing compare firing
 64 seconds after a deadline-less round) is argued from the registers
 and has not been sat out on the bench.
 
-The serial wake's own gaps: only USART2 has been used as a wake source
-(the EXTI lines of USART1 and USART3 are published and never armed), and
-only Stop 0 for a USART and Stop 1 for an LPUART - neither has been
-crossed with the other.
+The serial wake's own gaps: USART3's EXTI line is published and never
+armed (USART2 woken from Stop 0 by a host's byte, USART1 from Stop 0 and
+Stop 1 by the far chip - [usart.md](usart.md)); an LPUART has
+been woken from Stop 1 alone; and nothing REFUSES a USART wake on an
+HSI16 kernel under a divided HSI - `Pwr::stop_hsidiv_hazard()` answers
+the question at run time, and a compile-time refusal is born with the
+first `Clock` that divides HSISYS (none does today).
 
 Not stageable on this desk, and said so rather than left silent: the PVD
 crossing and the wake-up PINS (both want a supply or a wire this bench

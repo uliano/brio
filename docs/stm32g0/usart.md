@@ -19,7 +19,8 @@ bus-clock, capability and EXTI facts come from
 suite: `test_stm32_serial` (17 letters in `z`, 120 verdicts, wireless;
 four more outside `z` through `brio stress`; thirteen under the second
 all-key `t`, 171 verdicts, against the desk's STM32F446RE running
-`usart_peer` - "Against a far board" below). The instrument for a far
+`usart_peer` - "Against a far board" below - and letter `W` beside
+them, outside both all-keys). The instrument for a far
 board's suite is this stratum's `usart_peer` ("The peer" below). Family
 fixture `test/family_stm32g0/usart.cpp` plus SIXTEEN negatives under
 `brio check stm32g0` (an instance nowhere, an instance off a part on
@@ -1024,7 +1025,8 @@ architecture on the link compiles (`avrdx/src/apps/usart_link.hpp`): an
 ack before every action, a bounded action, the peer back in command
 mode by itself. Letters `1` to `9`, `0`, `r`, `s` and `u` run under the
 second all-key `t` and never under `z`, which runs with the far board on its
-dark console. The
+dark console; letter `W`, the far engine's map of ES0548 2.11.1, runs under
+neither (it takes some ten minutes). The
 far peer's time base is its crystal (the ST-LINK's 8 MHz in bypass), so
 what it times is THIS core's HSI16 - and this board times the same HSI
 against its own LSE over the very window of each run, the stratum's
@@ -1131,10 +1133,24 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   2400 and 9600, where the start's detection puts the samples later in
   the bit. With 8N2 it is the FIRST stop bit's second half: a glitch
   anywhere in the second spoils nothing. AND THE WIDTH IS NOT THE
-  ERRATUM'S "shorter than the half-bit" at the slow rates: from 72 %, a
-  quarter bit corrupts every frame at 19200 and 115200 and none at 2400
-  and 9600, where an eighth corrupts every one - recorded as measured,
-  not explained.
+  ERRATUM'S "shorter than the half-bit": letter `W` (outside both
+  all-keys, some ten minutes) draws the glitch's width, 3 to 44 % of the
+  bit, against its start, 50 to 95 % of the stop bit, at 4800, 9600,
+  14400 and 19200, eight frames a cell, twice. At 4800, 14400 and 19200
+  the map has one shape, both runs alike: a glitch reaching the
+  majority's samples (from 50 to 56 %) is a noise flag on every frame and
+  no corruption; 59 % is the border, the two mixed; from 62 % on, past
+  the samples, every width from 6 to 25 % corrupts eight frames of eight
+  with no flag (four to seven in a few 6 % cells), to the stop bit's end; a
+  glitch of 31 or 38 % starting at 62 or 65 % - one that lasts past
+  where a narrow one would already have done its damage - corrupts AT
+  MOST ONE frame of eight (at 68 %, at most two, but for one 4800 cell
+  that took all eight); and a 3 % glitch, half a sixteenth of the
+  receiver's sampling, corrupts some cells and not others, different
+  cells in the two runs - the sampling clock catching it or not. At 9600
+  there is no such shape: the noise flag reaches 65..71 %, the corruption
+  region past it is broken by clean cells, and the two runs disagree
+  cell by cell (the open finding below).
 - **The receive ring beyond the bridge** (`6`): the receive engine ranked
   LOW beside test_stm32_dma q's pair (two copies alternating on DMA1's
   channels 1 and 2, every 5 ms), a counting stream from the far chip
@@ -1506,6 +1522,14 @@ Implemented, not bench-verified:
   byte-exact on its loop at 64, 16 and 2 MHz, [clock.md](clock.md);
   `init` reads the rate through `clock_hz(clock)`, a constant for a
   static clock.)
+
+Findings left open, with what would settle them:
+- **ES0548 2.11.1 at 9600 baud** (letter `W`): where 4800, 14400 and 19200
+  share one map, 9600's noise region sits a sixteenth or two later and
+  its corruption region is broken by clean cells that move between runs.
+  A logic analyser on the link would say first whether the far engine
+  draws each glitch where its `stage` op is told at that rate; only a
+  drawing found exact leaves the receiver itself to explain.
 
 The DMA half is bench-verified in `test_stm32_dma`, whose own console
 carries both engines - so every verdict line of that suite left the chip

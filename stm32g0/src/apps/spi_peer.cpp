@@ -24,12 +24,37 @@
 //    per-frame loop: a command character is tens of microseconds at the
 //    host's command rate and the receive FIFO is four frames deep.
 //
+//  - THE EXTENDED EXCHANGE IS SERVED WHOLE (spi_link.hpp), and every
+//    exchange's report raises report_extended:
+//    `spare_wide` - 16-bit frames: CR2.DS at sixteen bits, the engines
+//    in half-word beats (one element type, uint16_t, serves both widths:
+//    the span's element is the beat), the runs over uint16_t;
+//    `spare_crc` - the CRC unit armed with the command's polynomial and
+//    CRCL at the frame's width (35.5.14). On the ENGINES the chapter's
+//    own "CRC transfer managed by DMA" does the whole of it: the transmit
+//    channel counts the data frames alone and the block appends its
+//    TXCRC after the last of them, CRCNEXT never written; the receive
+//    channel counts the data frames AND the host's CRC frame ("the
+//    counter of the reception DMA channel can be set to the number of
+//    data frames to receive including the CRC"), and the block compares
+//    that frame with its RXCRC by itself. On the POLLED serve
+//    (`spare_polled_pump`) a CRC run of this app's, over the resource:
+//    the TXFIFO filled with the select high, CRCNEXT written "as soon as
+//    the last data is written in the SPIx_DR register" (35.9.1), one
+//    frame received a turn under the frame's own threshold, the host's
+//    CRC frame the last one taken. Either way CRCERR is read once the
+//    select has risen;
+//    `spare_receive_only` - MISO NOT DRIVEN for the window (the pad left
+//    in analog): the receive channel alone, or the driver's receive()
+//    run on the polled serve.
+//
 //  - A RUN SAMPLES NOTHING INSIDE THE BURST, so the exchange's report
 //    fields are this peer's own (spi_link.hpp's Report leaves them to the
-//    peer's header): aux0 = SR after the burst, aux1 = the milliseconds
-//    from the run's start to its END (255 = nothing came), aux2 bit 0 =
-//    the select read low once after the run, bit 1 = the host closed it,
-//    bit 2 = the DMA engines served it; aux3 = 0.
+//    peer's header): aux0 = SR after the burst (CRCERR bit 4, OVR bit 6),
+//    aux1 = the milliseconds from the run's start to its END (255 =
+//    nothing came), aux2 bit 0 = the select read low once after the run,
+//    bit 1 = the host closed it, bit 2 = the DMA engines served it; aux3
+//    = RXCRCR's low byte under spare_crc, else 0.
 //
 //  - THE BUFFERING REGIMES COLLAPSE. There is no BUFEN/BUFWR pair in
 //    ch. 35: this client is always FIFO-buffered and the two preloads
@@ -45,7 +70,8 @@
 //    ignored; Op::mspi asks for a USART in host-SPI mode and is answered
 //    report_cfg_failed - this stratum's USART has no such mode.
 //    Everything else of the repertoire is served: ping/ident/report,
-//    exchange, sink_slow, ss_pulse, host_burst.
+//    exchange (extended too), sink_slow, ss_pulse, host_burst (8-bit
+//    frames: the extended bits are an exchange's).
 //
 //  - THE ANSWER LINE'S EDGE RATE IS THIS APP'S, NOT THE DRIVER'S, AND IT
 //    DEPENDS ON THE MODE. SpiClient's default class for MISO is
@@ -59,13 +85,19 @@
 //    change on the rising one, so this edge lands on an SCK just settled
 //    HIGH and a coupled dip through VIL is one sampling edge too many,
 //    BOTH ENDS disagreeing from the same frame on. At medium and at low 0
-//    of 40. But medium costs the ladder's top rung: letter p's 22.5 MHz,
-//    in mode 0, breaks at medium on both serves and is exact at high. So
-//    the pad goes out at HIGH in modes 0 and 3 - where the edge lands on a
-//    LOW clock and the slip never shows - and ONE NOTCH SLOWER, at medium,
-//    in modes 1 and 2 (console 's' cycles the base class). A HOST's data
-//    and clock pads are the same kind of aggressor (docs/stm32g0/spi.md;
-//    the stm32f4 suite hosts with its SCK and its MOSI at medium).
+//    of 40. But the ladder's top rung asks the OTHER way, for the fast
+//    edge: at 22.5 MHz in mode 0 (twenty windows of 32 frames from the
+//    F446's polled host and from its streams, a diagnostic run once per
+//    class; that suite's letter u judges the rung) the answer line at
+//    very-high is exact in 8-bit and 16-bit frames alike, at high 16 and
+//    20 of 20 16-bit windows read wrong (bits 2 and 15 of the frame, the
+//    data valid time against the far host's setup) while 8-bit ones hold,
+//    at medium every window is wrong in both widths. So the pad goes out at
+//    VERY-HIGH in modes 0 and 3 - where the edge lands on a LOW clock and
+//    the slip never shows - and at MEDIUM in modes 1 and 2 (console 's'
+//    cycles the first class, 'f' the second). A HOST's data and clock pads
+//    are the same kind of aggressor (docs/stm32g0/spi.md; the stm32f4
+//    suite hosts with its SCK and its MOSI at medium).
 //
 // THE DARK LISTENER discipline: the command-mode client never drives
 // MISO (drive_output = false, which leaves the pad in analog), the
@@ -91,7 +123,8 @@
 //
 // Console: USART2 PA2/PA3 at 115200 on the ST-LINK's virtual COM port,
 // observability only.
-//   ? help | i status and counters | 0 back to the dark client | 3 trace
+//   ? help | i status and counters | 0 back to the dark client | 3 trace |
+//   s / f cycle the answer line's class in modes 0 and 3 / 1 and 2
 //
 // The ident label is the 96-bit unique device ID's first word in hex
 // (RM0444 41.1 through brio::DeviceUid) - this family's identity is
@@ -103,6 +136,9 @@
 // build: monitor_speed = 115200
 
 #include <stdint.h>
+
+#include <span>
+#include <type_traits>
 
 #include "stm32g0/clock.hpp"
 #include "stm32g0/delay.hpp"
@@ -156,24 +192,24 @@ using Raw = Spi<1>;
 using MisoPin = Pin<link_pins.miso.port, link_pins.miso.pin>;
 using NssPin = Pin<link_pins.nss.port, link_pins.nss.pin>;
 
-constexpr uint16_t firmware_version = 0x0301;   ///< see spi_link.hpp's Ident
+constexpr uint16_t firmware_version = 0x0302;   ///< see spi_link.hpp's Ident
 
-/// THE ANSWER LINE'S EDGE RATE (see the header): HIGH in the two modes
-/// that sample on the rising edge, and ONE NOTCH SLOWER in the two that
-/// sample on the falling one - where this edge lands on an SCK just
-/// settled high. Every init that drives the output names it in the
-/// client's Config (miso_class()); the console's 's' cycles the base class
-/// for the bench.
-PinSpeed miso_speed = PinSpeed::high;
-/// The class the last init asked for: the base, or a notch below it in
-/// modes 1 and 2.
-PinSpeed miso_applied = PinSpeed::high;
+/// THE ANSWER LINE'S EDGE RATE (see the header): VERY-HIGH in the two
+/// modes that sample on the rising edge, MEDIUM in the two that sample on
+/// the falling one - where this edge lands on an SCK just settled high.
+/// Every init that drives the output names it in the client's Config
+/// (miso_class()); the console's 's' and 'f' cycle the two for the bench.
+PinSpeed miso_rising = PinSpeed::very_high;
+PinSpeed miso_falling = PinSpeed::medium;
+/// The class the last init asked for.
+PinSpeed miso_applied = PinSpeed::very_high;
 
-PinSpeed one_notch_slower(PinSpeed s) {
+PinSpeed next_class(PinSpeed s) {
     switch (s) {
         case PinSpeed::very_high: return PinSpeed::high;
         case PinSpeed::high: return PinSpeed::medium;
-        default: return PinSpeed::low;
+        case PinSpeed::medium: return PinSpeed::low;
+        default: return PinSpeed::very_high;
     }
 }
 
@@ -189,16 +225,18 @@ const char* speed_name(PinSpeed s) {
 /// The answer line's class for a window in this SPI mode (0..3).
 PinSpeed miso_class(uint8_t mode) {
     const bool falling_edge_sampler = mode == 1u || mode == 2u;
-    miso_applied = falling_edge_sampler ? one_notch_slower(miso_speed) : miso_speed;
+    miso_applied = falling_edge_sampler ? miso_falling : miso_rising;
     return miso_applied;
 }
 
 /// The exchange's DMA engines, on DMA1 channels 1 and 2 - the two
-/// vectors this app binds. Armed at the start of every engined exchange
-/// (the SPI re-inits under them freely: a claim binds a DATA address and
-/// a DMAMUX request, not a configuration).
-using PeerTx = DmaTxEngine<1, 1>;
-using PeerRx = DmaRxEngine<1, 2>;
+/// vectors this app binds. Armed ONCE, in main(): the binding is SPI1's
+/// DR and its two DMAMUX requests, nothing an SPI re-init touches. Their
+/// element is uint16_t, the widest frame they serve: a run of uint8_t
+/// moves a byte a beat and a run of uint16_t a half-word (35.5.9's two
+/// access widths), the span's element choosing.
+using PeerTx = DmaTxEngine<1, 1, uint16_t>;
+using PeerRx = DmaRxEngine<1, 2, uint16_t>;
 bool dma_ok = false;
 
 bool trace = false;
@@ -316,15 +354,25 @@ bool arm_answer() {
 /// regime_buffer_wait has an exact counterpart on this silicon, and it
 /// is the one the G0 suite commands.
 ///
-/// `nss` is a parameter because the alternative was TRIED AND MEASURED
-/// (see run_exchange): everything here frames on the NSS pad.
-bool apply_cfg(const spilink::Cfg& c, bool drive_output = true,
-               SpiNss nss = SpiNss::hardware_input) {
+/// Everything here frames on the NSS pad: the alternative was TRIED AND
+/// MEASURED (see run_exchange).
+///
+/// The extended exchange's three: `wide` sets 16-bit frames; `crc` arms
+/// the CRC unit on `poly` with CRCL at the frame's width (spi_link.hpp: a
+/// CRC of the frame's width) - an even polynomial, zero included, is
+/// refused by the driver (35.5.14's note), which the report says as
+/// report_cfg_failed.
+bool apply_cfg(const spilink::Cfg& c, bool drive_output = true, bool wide = false,
+               bool crc = false, uint16_t poly = 0x0007u) {
     wait_nss_high(50);   // see go_dark(): a client reconfigures BETWEEN windows
     const bool ok = Client::init(clock, {.mode = mode_of(c.mode),
-                                         .bits = SpiDataSize::bits8,
+                                         .bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8,
                                          .lsb_first = c.dord != 0,
-                                         .nss = nss,
+                                         .nss = SpiNss::hardware_input,
+                                         .crc = crc,
+                                         .crc_length = wide ? SpiCrcLength::crc16
+                                                            : SpiCrcLength::crc8,
+                                         .crc_polynomial = poly,
                                          .drive_output = drive_output,
                                          .miso_speed = miso_class(c.mode & 0x03u)});
     hold_nss_up();
@@ -393,27 +441,17 @@ void account(spilink::Report& r, uint8_t got, uint8_t expected) {
     ++r.count;
 }
 
-struct Streams {
-    spilink::Stream in{};
-    spilink::Stream out{};
-    bool reversed = false;
-
-    explicit Streams(const spilink::Params& a)
-        : in(a.pattern, a.seed_a),
-          out(a.pattern, a.seed_b),
-          reversed((a.flags & spilink::flag_expect_reversed) != 0) {}
-
-    uint8_t next_expected() {
-        const uint8_t v = in.next();
-        return reversed ? spilink::bit_reverse(v) : v;
-    }
-};
-
 // ---- the actions ----------------------------------------------------------------
 
-constexpr uint16_t exchange_cap = 64;
-uint8_t x_out[exchange_cap];
-uint8_t x_in[exchange_cap];
+/// Frames an exchange carries at most; the buffers are half-words so that a
+/// 16-bit run and its engines take them whole, and an 8-bit one reads the
+/// same storage as bytes. One more frame in for the host's CRC.
+constexpr uint16_t exchange_cap = 256;
+alignas(4) uint16_t x_out[exchange_cap];
+alignas(4) uint16_t x_in[exchange_cap + 1u];
+
+uint8_t* out_bytes() { return reinterpret_cast<uint8_t*>(x_out); }
+uint8_t* in_bytes() { return reinterpret_cast<uint8_t*>(x_in); }
 
 /// The host burst's per-frame buffers, TWO bytes although the burst is
 /// 8-bit: SpiHost's frame store is width-general and writes a half-word
@@ -422,18 +460,171 @@ uint8_t x_in[exchange_cap];
 uint8_t burst_tx[2];
 uint8_t burst_rx[2];
 
+/// Judge `frames` received frames against the host's stream - their BYTES,
+/// in memory order, spi_link.hpp's extended accounting (count the frames;
+/// sum, mism, idx, got and exp over the bytes).
+void judge(spilink::Report& r, const spilink::Params& a, uint16_t frames, bool wide) {
+    const bool reversed = (a.flags & spilink::flag_expect_reversed) != 0;
+    const uint8_t* const got = in_bytes();
+    const uint16_t bytes = static_cast<uint16_t>(wide ? frames * 2u : frames);
+    for (uint16_t i = 0; i < bytes; ++i) {
+        const uint8_t want = spilink::wide_byte(a.pattern, a.seed_a, i, wide, reversed);
+        if (got[i] != want) {
+            if (r.mism == 0) {
+                r.idx = static_cast<uint8_t>(i < 255u ? i : 255u);
+                r.got = got[i];
+                r.exp = want;
+            }
+            ++r.mism;
+        }
+        r.sum = static_cast<uint16_t>(r.sum + got[i]);
+    }
+    r.count = frames;
+}
+
+/// DR at a frame's own access width (35.5.9, figure 363): a byte for an
+/// 8-bit frame, a half-word for a 16-bit one.
+template <typename T>
+[[gnu::always_inline]] inline void put_frame(T v) {
+    if constexpr (std::is_same_v<T, uint8_t>) {
+        Raw::data_byte(v);
+    } else {
+        Raw::data_halfword(v);
+    }
+}
+template <typename T>
+[[gnu::always_inline]] inline T get_frame() {
+    if constexpr (std::is_same_v<T, uint8_t>) {
+        return Raw::data_byte();
+    } else {
+        return Raw::data_halfword();
+    }
+}
+
+/// THE CRC RUN, over the resource - the driver's runs carry no CRC phase
+/// (docs/stm32g0/spi.md's gap list). 35.5.14 "CRC transfer managed by
+/// CPU": the answers into the TXFIFO while TXE admits them (three byte
+/// frames or two half-words, the select still high, 35.5.8), CRCNEXT "as
+/// soon as the last data is written in the SPIx_DR register" (35.9.1),
+/// and then the frames received one a turn - RXNE at the frame's own
+/// threshold, which configure() set - the host's CRC frame the last. A
+/// turn polls SR once and serves both flags, so a frame never waits for
+/// the other direction. `in` holds n + 1 frames.
+template <typename T>
+Run crc_run(const T* out, T* in, uint16_t n, uint32_t spins) {
+    const SPI_TypeDef& regs = Raw::regs();
+    uint16_t w = 0;
+    uint16_t r = 0;
+    const uint16_t want = static_cast<uint16_t>(n + 1u);
+    while (w < n && (regs.SR & SPI_SR_TXE) != 0u) {
+        put_frame<T>(out[w++]);
+    }
+    if (w == n) {
+        Raw::crc_next();
+    }
+    while (!Client::selected()) {
+        if (--spins == 0u) {
+            return {0, Client::RunEnd::stalled};
+        }
+    }
+    Client::RunEnd how = Client::RunEnd::complete;
+    uint8_t look = 0;
+    while (r < want) {
+        const uint32_t sr = regs.SR;
+        if (w < n && (sr & SPI_SR_TXE) != 0u) {
+            put_frame<T>(out[w++]);
+            if (w == n) {
+                Raw::crc_next();
+            }
+        }
+        if ((sr & SPI_SR_RXNE) != 0u) {
+            in[r++] = get_frame<T>();
+            continue;
+        }
+        if (++look == 4u) {
+            look = 0;
+            if (!Client::selected()) {
+                how = Client::RunEnd::closed;
+                break;
+            }
+            if (--spins == 0u) {
+                how = Client::RunEnd::stalled;
+                break;
+            }
+        }
+    }
+    // A frame that landed beside the close is the run's.
+    while (r < want && (regs.SR & SPI_SR_RXNE) != 0u) {
+        in[r++] = get_frame<T>();
+    }
+    return {r, how};
+}
+
+/// THE DMA SERVE, in 35.5.x's order ("Communication using DMA"): RXDMAEN,
+/// the channels, TXDMAEN, SPE last - so the transmit channel's first
+/// beats fill the TXFIFO before the select falls (a request is a level
+/// this controller serves on enable): the preload. A receive-only serve
+/// leaves the transmit side out entirely. Under `crc` the chapter's own
+/// "CRC transfer managed by DMA": the transmit channel counts the data
+/// frames alone and the block appends its CRC after the last of them; the
+/// receive channel counts the host's CRC frame too, so the window's last
+/// frame lands in `x_in[n]`. The receive channel's count is the
+/// transaction's progress.
+template <typename T>
+Run dma_serve(uint16_t n, bool transmit, bool crc, uint32_t ms) {
+    const uint16_t in_n = static_cast<uint16_t>(crc ? n + 1u : n);
+    (void)Client::disable();
+    (void)Raw::dma_receive(true);
+    (void)PeerRx::start(std::span<T>(reinterpret_cast<T*>(x_in), in_n));
+    if (transmit) {
+        (void)PeerTx::start(std::span<const T>(reinterpret_cast<const T*>(x_out), n));
+        (void)Raw::dma_transmit(true);
+    }
+    Raw::enable();
+    const uint32_t t0 = Ticker::millis();
+    while (!PeerRx::full() && Ticker::millis() - t0 < ms) {
+        (void)PeerRx::take();
+    }
+    (void)PeerRx::take();
+    const bool all_in = PeerRx::full();
+    const uint16_t got = PeerRx::taken();
+    PeerTx::stop();
+    PeerRx::stop();
+    return {got, all_in ? Client::RunEnd::complete : Client::RunEnd::stalled};
+}
+
+/// The polled serves, one run each, at the frame's width.
+template <typename T>
+Run polled_serve(uint16_t n, bool answer_only, bool receive_only, bool crc, uint32_t spins) {
+    const T* const out = reinterpret_cast<const T*>(x_out);
+    T* const in = reinterpret_cast<T*>(x_in);
+    Client::enable();
+    if (crc) {
+        return crc_run<T>(out, in, n, spins);
+    }
+    if (receive_only) {
+        return Client::receive(std::span<T>(in, n), spins);
+    }
+    if (answer_only) {
+        return Client::answer(std::span<const T>(out, n), spins);
+    }
+    return Client::exchange(std::span<const T>(out, n), std::span<T>(in, n), spins);
+}
+
 /// The workhorse: the host sends P_A(i), this client answers P_B(i).
 ///
 /// TWO SERVES, so both boundaries stay measurable. THE DEFAULT IS THE
-/// DMA ENGINES: the peripheral disabled, TXDMAEN and RXDMAEN set, both
-/// channels claimed and started, and SPE raised LAST so the transmit
-/// channel's own first beats ARE the preload (a request is a level this
-/// controller serves on enable). The receive block's completion is the
-/// transaction's. `spilink::spare_polled_pump` asks for the driver's
-/// polled run instead (the exchange, or the answers alone with
-/// `spare_answer_only`).
+/// DMA ENGINES; `spilink::spare_polled_pump` asks for the driver's polled
+/// run instead (the exchange, the answers alone with `spare_answer_only`,
+/// the frames in alone with `spare_receive_only`, or this app's CRC run
+/// with `spare_crc`). The extended exchange's bits as the header says.
 spilink::Report run_exchange(const spilink::Params& a) {
     spilink::Report r{};
+    r.flags |= spilink::report_extended;
+    const bool wide = (a.spare & spilink::spare_wide) != 0;
+    const bool crc = (a.spare & spilink::spare_crc) != 0;
+    const bool receive_only = (a.spare & spilink::spare_receive_only) != 0;
+    const bool answer_only = !receive_only && (a.spare & spilink::spare_answer_only) != 0;
     const bool preload = a.cfg.regime == spilink::regime_buffer_wait;
     const uint16_t n = a.count < exchange_cap ? a.count : exchange_cap;
     // THE NSS PAD FRAMES THE BURST, and the alternative was MEASURED and
@@ -443,67 +634,67 @@ spilink::Report run_exchange(const spilink::Params& a) {
     // and every frame is then one bit early, five runs of five. A client
     // that frames on the pad ignores it, which is what the pad is for.
     // What the pad does NOT cure is the falling-edge slip in the header.
-    if (!apply_cfg(a.cfg)) {
+    // A receive-only client that sends nothing has no CRC frame to send:
+    // refused beside spare_crc (spi_link.hpp).
+    if (n == 0u || (crc && receive_only) ||
+        !apply_cfg(a.cfg, !receive_only, wide, crc, a.aux16)) {
         r.flags |= spilink::report_cfg_failed;
+        (void)go_dark();
         return r;
     }
     {
         spilink::Stream out(a.pattern, a.seed_b);
-        for (uint16_t i = 0; i < n; ++i) {
-            x_out[i] = out.next();
+        uint8_t* const o = out_bytes();
+        const uint16_t bytes = static_cast<uint16_t>(wide ? 2u * n : n);
+        for (uint16_t i = 0; i < bytes; ++i) {
+            o[i] = out.next();
+        }
+        uint8_t* const in = in_bytes();
+        for (uint16_t i = 0; i < sizeof x_in; ++i) {
+            in[i] = 0;
         }
     }
-    const bool answer_only = (a.spare & spilink::spare_answer_only) != 0;
-    const bool engines = dma_ok && preload && !answer_only &&
+    const bool engines = dma_ok && (preload || receive_only) && !answer_only &&
                          (a.spare & spilink::spare_polled_pump) == 0u;
 
     const uint32_t t0 = Ticker::millis();
     Run run{};
     if (engines) {
-        (void)Client::disable();
-        (void)Raw::dma_transmit(true);
-        (void)Raw::dma_receive(true);
-        PeerRx::arm(Raw::data_address(), Raw::dma_rx_request());
-        PeerTx::arm(Raw::data_address(), Raw::dma_tx_request());
-        (void)PeerRx::start(std::span<uint8_t>(x_in, n));
-        (void)PeerTx::start(std::span<const uint8_t>(x_out, n));
-        Raw::enable();
-        while (!PeerRx::full() && Ticker::millis() - t0 < a.ms) {
-            (void)PeerRx::take();
-        }
-        (void)PeerRx::take();
-        run = {PeerRx::taken(), PeerRx::full() ? Client::RunEnd::complete
-                                               : Client::RunEnd::stalled};
-        PeerTx::stop();
-        PeerRx::stop();
+        run = wide ? dma_serve<uint16_t>(n, !receive_only, crc, a.ms)
+                   : dma_serve<uint8_t>(n, !receive_only, crc, a.ms);
         r.aux2 |= 0x04;                   // marks the DMA serve in the report
     } else {
-        if (!preload) {
+        if (!preload && !receive_only) {
             // NO PRELOAD (a regime this suite never commands): the run
             // starts once the select has fallen, so the shifter's leftover
             // leads, which is stated in the header.
             while (!Client::selected() && Ticker::millis() - t0 < a.ms) {
             }
         }
-        Client::enable();
-        run = answer_only ? Client::answer(std::span<const uint8_t>(x_out, n), spins_for_ms(a.ms))
-                          : Client::exchange(std::span<const uint8_t>(x_out, n),
-                                             std::span<uint8_t>(x_in, n), spins_for_ms(a.ms));
+        const uint32_t spins = spins_for_ms(a.ms);
+        run = wide ? polled_serve<uint16_t>(n, answer_only, receive_only, crc, spins)
+                   : polled_serve<uint8_t>(n, answer_only, receive_only, crc, spins);
     }
     const uint32_t dt = Ticker::millis() - t0;
-    r.aux0 = static_cast<uint8_t>(Client::status());
+    // The select's close, THEN the status: CRCERR is decided on the host's
+    // CRC frame, the last of the window.
+    wait_nss_high(20);
+    const uint32_t sr = Client::status();
+    r.aux0 = static_cast<uint8_t>(sr);
     r.aux1 = run.count == 0u ? 255u : (dt > 254u ? 254u : static_cast<uint8_t>(dt));
     if (Client::selected()) r.aux2 |= 0x01;
     if (run.end == Client::RunEnd::closed) r.aux2 |= 0x02;
-    if (Client::overrun()) r.flags |= spilink::report_bufovf;
+    if ((sr & SpiFlag::overrun) != 0u) r.flags |= spilink::report_bufovf;
+    if (crc) {
+        r.aux3 = static_cast<uint8_t>(Raw::rx_crc());
+        if ((sr & SpiFlag::crc_error) != 0u) r.flags |= spilink::report_crcerr;
+    }
 
     if (answer_only) {
         r.count = run.count;   // answers written; nothing was received
     } else {
-        Streams s(a);
-        for (uint16_t i = 0; i < run.count && i < n; ++i) {
-            account(r, x_in[i], s.next_expected());
-        }
+        // The CRC frame is not counted: `count` data frames, then the host's.
+        judge(r, a, run.count > n ? n : run.count, wide);
     }
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
     (void)go_dark();
@@ -711,7 +902,7 @@ void handle(const spilink::Frame& f) {
 
 void help() {
     print(console, "spi_peer: ? help | i status | 0 back to the dark client | 3 trace | "
-                   "s cycle the MISO pad speed",
+                   "s / f cycle the MISO pad speed in modes 0/3 / 1/2",
           crlf);
 }
 
@@ -722,8 +913,9 @@ void status() {
     print(console, "  NSS pin reads ", NssPin::read() ? "high" : "LOW",
           ", selected=", Client::selected(),
           ", MISO driven=", MisoPin::has_function(),
-          ", MISO pad speed=", speed_name(miso_speed), " (last applied ",
-          speed_name(miso_applied), ")", crlf);
+          ", MISO pad speed=", speed_name(miso_rising), " in modes 0/3, ",
+          speed_name(miso_falling), " in modes 1/2 (last applied ", speed_name(miso_applied), ")",
+          crlf);
     print(console, "  commands=", commands, " actions=", actions, " naks=", naks,
           " served=", serves, engaged() ? "  (ENGAGED)" : "  (dark, mute)", crlf);
     print(console, "  last report: op=", hex(last_report.op), " count=", last_report.count,
@@ -769,7 +961,11 @@ int main() {
         label8[i] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + nib - 10);
     }
 
+    // The exchange's engines, bound once: SPI1's DR and its two DMAMUX
+    // requests, nothing an SPI re-init touches.
     brio::Dma<1>::bus_clock(true);
+    PeerTx::arm(Raw::data_address(), Raw::dma_tx_request());
+    PeerRx::arm(Raw::data_address(), Raw::dma_rx_request());
     dma_ok = true;
 
     // The select pad readable (and held up) before the first go_dark():
@@ -780,8 +976,9 @@ int main() {
     print(console, crlf, "spi_peer - SPI instrument client (STM32G0 board ", label8,
           ", xtal=none (no HSE fitted; the HSE root is unbuilt), fw ",
           hex(firmware_version), ")", crlf);
-    print(console, "client SPI1 AF0: SCK PB3, MISO PB4 (pad speed ",
-          speed_name(miso_speed), "), MOSI PB5, NSS PA15 (pulled up); command mode "
+    print(console, "client SPI1 AF0: SCK PB3, MISO PB4 (pad speed ", speed_name(miso_rising),
+          " in modes 0/3, ", speed_name(miso_falling),
+          " in 1/2), MOSI PB5, NSS PA15 (pulled up); command mode "
           "= SPI mode 0, MSb first", crlf);
     print(console, "DARK by default: MISO is driven only for one answer window, after "
                    "a frame that checked out", crlf);
@@ -808,14 +1005,14 @@ int main() {
                     trace = !trace;
                     print(console, trace ? "  trace on" : "  trace off", crlf);
                 } else if (c == 's') {
-                    miso_speed = miso_speed == PinSpeed::high     ? PinSpeed::medium
-                                 : miso_speed == PinSpeed::medium ? PinSpeed::low
-                                 : miso_speed == PinSpeed::low    ? PinSpeed::very_high
-                                                                  : PinSpeed::high;
-                    print(console, "  MISO pad speed now ", speed_name(miso_speed),
-                          " (applied at the next answer window, a notch slower in "
-                          "modes 1 and 2; high is the default)",
+                    miso_rising = next_class(miso_rising);
+                    print(console, "  MISO pad speed in modes 0/3 now ", speed_name(miso_rising),
+                          " (applied at the next answer window; very_high is the default)",
                           crlf);
+                } else if (c == 'f') {
+                    miso_falling = next_class(miso_falling);
+                    print(console, "  MISO pad speed in modes 1/2 now ", speed_name(miso_falling),
+                          " (applied at the next exchange; medium is the default)", crlf);
                 } else {
                     print(console, "? for help", crlf);
                 }

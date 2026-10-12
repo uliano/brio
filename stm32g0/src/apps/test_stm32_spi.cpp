@@ -48,7 +48,7 @@
 // is commanded IN BAND over the bus under test, over
 // avrdx/src/apps/spi_link.hpp included by relative path - one source of
 // truth for the wire format, whatever the peer's architecture. Letters
-// n..r are this instrument's.
+// n..r and t..x are this instrument's.
 //
 // THE TWO CANNOT BE ON THE DESK AT ONCE (the four jumpers go to one end
 // or the other), so main() PROBES the self-link before any letter runs -
@@ -132,6 +132,21 @@
 //      sleep votes and the per-bus timeout with recover()
 //   r  THE ROLES INVERT: this board as the CLIENT on the pads it hosts
 //      with, the peer clocking a bounded burst as the bus host
+//   u  16-BIT FRAMES against the peer (spi_link's extended exchange,
+//      spare_wide): the polled loop, the RXNE pump and the half-word
+//      engines at every BR code, the wire's time from two window lengths,
+//      and the peer's own 16-bit client run
+//   v  RECEIVE-ONLY and ODD COUNTS (spare_receive_only): this host's
+//      transmit-only shapes witnessed by a client whose answer line is
+//      dark, the peer's receive() run at 7 and 33 frames in both widths,
+//      and odd-count exchanges both ways
+//   w  THE CRC against the peer's unit (spare_crc): both widths, both of
+//      the peer's serves, every BR code, this end's unit on the resource
+//      with the last two data frames written as one burst and CRCNEXT
+//      after them; a wrong CRC frame caught as report_crcerr
+//   t  (OUTSIDE z) THE CRCNEXT WINDOW: the store walked away from the
+//      last data store one loop turn at a time, one frame in flight -
+//      the instrument behind w's burst (spi.md)
 //   x  (OUTSIDE z) slip statistics against the peer: each mode ten times,
 //      the bursts that were not byte-exact and where each broke - the
 //      instrument that found the peer's MISO edge rate (spi.md)
@@ -269,7 +284,7 @@ constexpr uint8_t r_mid = 1;
 constexpr uint8_t r_slow = 2;
 
 Serial serial;
-TestBench<Serial, 20> bench;
+TestBench<Serial, 24> bench;
 
 using CsPin = Pin<'A', 15>;          ///< the host's chip select, a GPIO
 using ClientNssPin = Pin<'B', 12>;   ///< the client's NSS - and letter e's witness
@@ -4308,6 +4323,735 @@ void tx_peer_slips() {
           command(Op::ping) ? "answers" : "DEAD", crlf);
 }
 
+// =============================================================================
+// u, v, w - THE EXTENDED EXCHANGE against the peer
+// =============================================================================
+//
+// spi_link.hpp's three extended bits give this host's own 16-bit frames,
+// its transmit-only shapes and its CRC unit a FOREIGN WITNESS: the peer
+// answers or listens in 16-bit frames (`spare_wide`), listens with its
+// answer line dark (`spare_receive_only`), or runs its CRC unit beside
+// this one and checks the CRC frame this end sends (`spare_crc`). A peer
+// that serves them raises `report_extended`; one that does not ignores
+// the bits, and every verdict here asks for the flag first. Every letter
+// climbs the BR codes from the command rate up: a rung above the peer's
+// documented client ceiling (the kind its ident names, letter p's
+// table) is printed and not judged.
+
+namespace ext {
+
+/// Which of this host's three engines clocks the window: the polled loop,
+/// the RXNE pump (an asynchronous request on the engineless host), or the
+/// DMA engines (the engined host of letter i, its half-word channels).
+enum class Path : uint8_t { polled, pump, engines };
+
+const char* path_name(Path p) {
+    switch (p) {
+        case Path::polled: return "polled loop";
+        case Path::pump: return "RXNE pump";
+        default: return "DMA engines";
+    }
+}
+
+constexpr uint16_t cap = 64;   ///< frames this letter set clocks at most
+alignas(4) uint8_t tx[2u * cap + 4u];
+alignas(4) uint8_t rx[2u * cap + 4u];
+
+struct Ext {
+    Path path = Path::polled;
+    SpiClock rate = link_clock;
+    uint16_t count = 32;
+    bool wide = false;
+    bool receive_only = false;
+    uint8_t spare = 0;   ///< spare_polled_pump, on top of the extended bits
+    uint8_t seed_a = 0x4D;
+    uint8_t seed_b = 0xB2;
+};
+
+struct Outcome {
+    bool accepted = false;    ///< the peer took the command
+    bool clocked = false;     ///< this host's transaction completed
+    bool reported = false;
+    spilink::Report r{};
+    uint16_t mism = 0;        ///< this end's read-back, bytes wrong
+    uint16_t idx = 0xFFFF;
+    uint8_t got = 0, exp = 0;
+    uint32_t cycles = 0;      ///< start() to completion, core cycles
+};
+
+/// Whether the peer served the extended exchange and heard every frame.
+bool peer_heard(const Ext& e, const Outcome& o) {
+    return o.accepted && o.reported && (o.r.flags & spilink::report_extended) != 0u &&
+           o.r.count == e.count && o.r.mism == 0u;
+}
+
+/// The whole window both ways, judged at both ends.
+bool exact(const Ext& e, const Outcome& o) {
+    return peer_heard(e, o) && o.clocked && (e.receive_only || o.mism == 0u);
+}
+
+/// Command one extended exchange and clock it on `e.path`.
+Outcome run(const Ext& e) {
+    Outcome o{};
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = e.count;
+    a.ms = 400;
+    a.seed_a = e.seed_a;
+    a.seed_b = e.seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.spare = static_cast<uint8_t>(e.spare | (e.wide ? spilink::spare_wide : 0u) |
+                                   (e.receive_only ? spilink::spare_receive_only : 0u));
+    o.accepted = peer_act(Op::exchange, a);
+    if (!o.accepted) {
+        return o;
+    }
+    const uint16_t n = e.count < cap ? e.count : cap;
+    const uint16_t bytes = static_cast<uint16_t>(e.wide ? 2u * n : n);
+    {
+        spilink::Stream out(a.pattern, a.seed_a);
+        for (uint16_t i = 0; i < sizeof tx; ++i) {
+            tx[i] = i < bytes ? out.next() : 0u;
+            rx[i] = 0xEE;
+        }
+    }
+    settle();
+    const SpiDataSize bits = e.wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    uint8_t* const in = e.receive_only ? nullptr : rx;
+    host_done = false;
+    if (e.path == Path::engines) {
+        Dma<1>::bus_clock(true);
+        dma_host_live = true;
+        (void)DmaHost::init(clock, {.mosi_speed = peer_mosi_speed});
+        DmaHost::prime(SpiMode::mode0, e.rate);
+        CsPin::clear();
+        link_hold();
+        DmaHost::Request r{};
+        r.cs = {};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
+        r.rx = lend<Lease::reply>(in);
+        r.len = n;
+        r.clock = e.rate;
+        r.mode = SpiMode::mode0;
+        r.bits = bits;
+        r.polled = false;
+        const uint32_t t0 = cycles_now();
+        bool done = DmaHost::start(r);
+        const uint32_t m0 = Ticker::millis();
+        while (!done && !host_done && Ticker::millis() - m0 < 200u) {
+        }
+        o.cycles = cycles_now() - t0;
+        o.clocked = done || host_done;
+        link_hold();
+        CsPin::set();
+        DmaHost::release();
+        dma_host_live = false;
+    } else {
+        Host::prime(SpiMode::mode0, e.rate);
+        CsPin::clear();
+        link_hold();
+        Host::Request r{};
+        r.cs = {};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx));
+        r.rx = lend<Lease::reply>(in);
+        r.len = n;
+        r.clock = e.rate;
+        r.mode = SpiMode::mode0;
+        r.bits = bits;
+        r.polled = e.path == Path::polled;
+        const uint32_t t0 = cycles_now();
+        bool done = Host::start(r);
+        const uint32_t m0 = Ticker::millis();
+        while (!done && !host_done && Ticker::millis() - m0 < 200u) {
+        }
+        o.cycles = cycles_now() - t0;
+        o.clocked = done || host_done;
+        link_hold();
+        CsPin::set();
+    }
+    (void)link_command_mode();
+    o.reported = peer_report(o.r);
+    if (!e.receive_only) {
+        for (uint16_t i = 0; i < bytes; ++i) {
+            const uint8_t want = spilink::wide_byte(a.pattern, a.seed_b, i, e.wide, false);
+            if (rx[i] != want) {
+                if (o.mism == 0u) {
+                    o.idx = i;
+                    o.got = rx[i];
+                    o.exp = want;
+                }
+                ++o.mism;
+            }
+        }
+    }
+    return o;
+}
+
+void print_outcome(const Ext& e, const Outcome& o, bool above) {
+    print(serial, above ? "    [informational, above the peer's ceiling] " : "    ",
+          path_name(e.path), " PCLK/", spi_division(e.rate), " = ", Host::sck_hz(e.rate) / 1000u,
+          " kHz, ", e.count, e.wide ? " 16-bit" : " 8-bit", " frames: ",
+          exact(e, o) ? "exact" : "NOT exact");
+    if (!e.receive_only) {
+        print(serial, "  host mism=", o.mism);
+        if (o.mism != 0u) {
+            print(serial, " (byte ", o.idx, " got ", hex(o.got), " exp ", hex(o.exp), ")");
+        }
+    }
+    print(serial, "  peer count=", o.r.count, " mism=", o.r.mism);
+    if (o.r.mism != 0u) {
+        print(serial, " (byte ", o.r.idx, " got ", hex(o.r.got), " exp ", hex(o.r.exp), ")");
+    }
+    print(serial, " flags=", hex(o.r.flags), " serve=", (o.r.aux2 & 0x04u) != 0u ? "dma" : "run",
+          o.clocked ? "" : " HOST NEVER COMPLETED", crlf);
+}
+
+/// The peer's documented client ceiling, from its ident (letter p's).
+uint32_t ceiling = 0;
+
+void learn_ceiling() {
+    spilink::Ident id{};
+    ceiling = peer_ident(id) ? peer_client_ceiling_hz(spilink::peer_kind(id.version)) : 0u;
+    if (ceiling != 0u) {
+        print(serial, "  the peer (fw ", hex(id.version), ") is specified as a client to ",
+              ceiling / 1000u, " kHz: a rung above it is printed, not judged", crlf);
+    }
+}
+
+bool above_ceiling(SpiClock c) { return ceiling != 0u && Host::sck_hz(c) > ceiling; }
+
+constexpr SpiClock rungs[] = {SpiClock::div256, SpiClock::div128, SpiClock::div64,
+                              SpiClock::div32,  SpiClock::div16,  SpiClock::div8,
+                              SpiClock::div4,   SpiClock::div2};
+
+/// Climb every BR code with `e` and say whether every JUDGED rung was
+/// exact; `judged` counts them.
+bool climb(Ext e, uint8_t& judged) {
+    bool all = true;
+    judged = 0;
+    uint8_t k = 0;
+    for (const SpiClock c : rungs) {
+        e.rate = c;
+        e.seed_a = static_cast<uint8_t>(0x4Du + 9u * k);
+        e.seed_b = static_cast<uint8_t>(0xB2u + 5u * k);
+        ++k;
+        const Outcome o = run(e);
+        const bool above = above_ceiling(c);
+        print_outcome(e, o, above);
+        if (!above) {
+            ++judged;
+            all = all && exact(e, o);
+        }
+    }
+    return all && judged != 0u;
+}
+
+/// THE WIRE'S TIME, from the difference of two windows of 16 and 48
+/// frames at the same rung - the transaction's fixed cost cancels - in
+/// permille of the frame's SCK periods (PCLK = HCLK here, so a bit is
+/// `division` core cycles). Zero when either window was not exact.
+uint32_t frame_permille(Ext e) {
+    Ext shorter = e;
+    shorter.count = 16;
+    Ext longer = e;
+    longer.count = 48;
+    longer.seed_a = static_cast<uint8_t>(e.seed_a + 3u);
+    const Outcome a = run(shorter);
+    const Outcome b = run(longer);
+    if (!exact(shorter, a) || !exact(longer, b) || b.cycles <= a.cycles) {
+        return 0u;
+    }
+    const uint32_t per_frame_x1000 = (b.cycles - a.cycles) * 1000u / 32u;
+    const uint32_t wire = (e.wide ? 16u : 8u) * spi_division(e.rate);
+    return per_frame_x1000 / wire;
+}
+
+}  // namespace ext
+
+void tu_wide() {
+    if (!need_peer()) {
+        return;
+    }
+    ext::learn_ceiling();
+    print(serial, "  16-bit frames (CR2.DS = 1111, a half-word access a frame), 32 a window, "
+                  "against the peer's DMA serve in 16-bit beats:", crlf);
+    bool path_ok[3] = {};
+    for (uint8_t p = 0; p < 3u; ++p) {
+        ext::Ext e{};
+        e.path = static_cast<ext::Path>(p);
+        e.wide = true;
+        uint8_t judged = 0;
+        path_ok[p] = ext::climb(e, judged);
+        print(serial, "  -> ", ext::path_name(e.path), ": ", path_ok[p] ? "exact" : "NOT exact",
+              " at every judged rung (", judged, ")", crlf);
+    }
+    bench.verdict("16-BIT FRAMES ON THE POLLED LOOP: thirty-two frames byte-exact both ways at "
+                  "every judged code, the peer serving them in 16-bit beats (report_extended)",
+                  path_ok[0]);
+    bench.verdict("...on the RXNE PUMP, one frame an access, likewise", path_ok[1]);
+    bench.verdict("...and on the DMA ENGINES, a half-word beat a frame (the beat is the frame), "
+                  "likewise",
+                  path_ok[2]);
+
+    // THE WIRE'S TIME: the frame period on the engines and the polled
+    // loop, against the frame's sixteen SCK periods, at PCLK/16 and PCLK/4.
+    static constexpr SpiClock timed[] = {SpiClock::div16, SpiClock::div4};
+    bool engines_wire = true;
+    bool polled_wire = true;
+    for (const SpiClock c : timed) {
+        for (uint8_t p = 0; p < 3u; ++p) {
+            ext::Ext e{};
+            e.path = static_cast<ext::Path>(p);
+            e.wide = true;
+            e.rate = c;
+            const uint32_t pm = ext::frame_permille(e);
+            print(serial, "  ", ext::path_name(e.path), " at PCLK/", spi_division(c),
+                  ": a 16-bit frame takes ", pm, " permille of its 16 SCK periods",
+                  e.path == ext::Path::pump ? " (printed: the pump's bus waits for its handler)" : "",
+                  crlf);
+            if (e.path == ext::Path::engines) {
+                engines_wire = engines_wire && wire_ok(pm);
+            } else if (e.path == ext::Path::polled) {
+                polled_wire = polled_wire && wire_ok(pm);
+            }
+        }
+    }
+    bench.verdict("THE ENGINES' 16-BIT FRAMES RUN AT THE WIRE'S TIME: a frame inside the "
+                  "window is its sixteen SCK periods, -1 % to +3 %, at PCLK/16 and PCLK/4",
+                  engines_wire);
+    bench.verdict("...and so do the polled loop's, its two half-words in flight", polled_wire);
+
+    // The peer's own 16-bit RUN (spare_polled_pump): the other end's
+    // SpiClient::exchange in uint16_t frames, judged at the same rungs.
+    ext::Ext run{};
+    run.wide = true;
+    run.spare = spilink::spare_polled_pump;
+    uint8_t judged = 0;
+    const bool run_ok = ext::climb(run, judged);
+    bench.verdict("the PEER'S CLIENT RUN in 16-bit frames (its exchange() over uint16_t) is "
+                  "exact both ways at every judged code",
+                  run_ok);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the 16-bit climbs", command(Op::ping));
+}
+
+void tv_receive_only() {
+    if (!need_peer()) {
+        return;
+    }
+    ext::learn_ceiling();
+    // THE HOST'S TRANSMIT-ONLY SHAPES, WITNESSED: `rx` null is the loop that
+    // reads nothing back (frames in on TXE, the unread echoes' overrun
+    // cleared at the tail), the pump's write shape and the engines' held
+    // sink - and the peer listens with its answer line DARK, so what it
+    // judges is this end's transmit path alone. An ODD count: thirty-three.
+    print(serial, "  transmit-only windows of 33 frames, the peer listening with MISO dark "
+                  "(its receive DMA):", crlf);
+    bool shapes[3][2] = {};
+    for (uint8_t p = 0; p < 3u; ++p) {
+        for (uint8_t w = 0; w < 2u; ++w) {
+            ext::Ext e{};
+            e.path = static_cast<ext::Path>(p);
+            e.wide = w != 0u;
+            e.receive_only = true;
+            e.count = 33;
+            uint8_t judged = 0;
+            shapes[p][w] = ext::climb(e, judged);
+        }
+    }
+    bench.verdict("THE POLLED TRANSMIT-ONLY LOOP, witnessed by a listening client: 33 frames, "
+                  "8-bit and 16-bit, every one heard exact at every judged code",
+                  shapes[0][0] && shapes[0][1]);
+    bench.verdict("...the pump's write shape likewise", shapes[1][0] && shapes[1][1]);
+    bench.verdict("...and the engines' write shape (the receive side drained into a held "
+                  "sink) likewise",
+                  shapes[2][0] && shapes[2][1]);
+
+    // THE PEER'S receive() RUN (spare_polled_pump with the dark line), at
+    // an odd count either side of its pairs and in both widths.
+    print(serial, "  the peer's receive() run, 7 and 33 frames, from the polled loop:", crlf);
+    bool receive_ok = true;
+    static constexpr uint16_t counts[] = {7, 33};
+    for (const uint16_t n : counts) {
+        for (uint8_t w = 0; w < 2u; ++w) {
+            ext::Ext e{};
+            e.wide = w != 0u;
+            e.receive_only = true;
+            e.count = n;
+            e.spare = spilink::spare_polled_pump;
+            uint8_t judged = 0;
+            receive_ok = ext::climb(e, judged) && receive_ok;
+        }
+    }
+    bench.verdict("the PEER'S receive() RUN hears 7 and 33 frames exact, 8-bit and 16-bit, at "
+                  "every judged code",
+                  receive_ok);
+
+    // ODD-COUNT EXCHANGES both ways, both serves.
+    print(serial, "  exchanges of 7 and 33 8-bit frames, both ways:", crlf);
+    bool odd_ok = true;
+    for (const uint16_t n : counts) {
+        for (uint8_t s = 0; s < 2u; ++s) {
+            ext::Ext e{};
+            e.count = n;
+            e.spare = s != 0u ? spilink::spare_polled_pump : 0u;
+            uint8_t judged = 0;
+            odd_ok = ext::climb(e, judged) && odd_ok;
+        }
+    }
+    bench.verdict("ODD COUNTS both ways: 7 and 33 frames exact at every judged code, against "
+                  "the peer's DMA serve and its client run",
+                  odd_ok);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the receive-only climbs", command(Op::ping));
+}
+
+// ---- w: the CRC ------------------------------------------------------------------
+
+namespace ext {
+
+/// The bitwise CRC spi_link.hpp names: of the frame's width, MSb first,
+/// unreflected, from zero, over `frames` frames of a byte stream (a 16-bit
+/// frame is two bytes, low first).
+uint16_t crc_of(uint16_t poly, bool wide, const uint8_t* bytes, uint16_t frames) {
+    const uint8_t width = wide ? 16u : 8u;
+    const uint32_t top = 1u << (width - 1u);
+    const uint32_t mask = (1u << width) - 1u;
+    uint32_t crc = 0;
+    for (uint16_t k = 0; k < frames; ++k) {
+        const uint16_t f = wide ? static_cast<uint16_t>(bytes[2u * k] | (bytes[2u * k + 1u] << 8))
+                                : bytes[k];
+        for (uint8_t b = width; b-- > 0;) {
+            const bool in = ((f >> b) & 1u) != 0u;
+            const bool out = (crc & top) != 0u;
+            crc = (crc << 1) & mask;
+            if (in != out) {
+                crc ^= poly;
+            }
+        }
+    }
+    return static_cast<uint16_t>(crc);
+}
+
+struct Crc {
+    Outcome o{};
+    uint16_t frame = 0;          ///< the frame read where the peer's CRC belongs
+    uint16_t tx_crc = 0, rx_crc = 0;
+    uint16_t tx_ref = 0, rx_ref = 0, peer_ref = 0;
+    bool host_crcerr = false;
+    bool frames_ok = false;      ///< every frame's RXNE came inside its budget
+};
+
+/// Letter t's three stamps, SysTick's down-count at HCLK: before the last
+/// data store, after the CRCNEXT store, and when that frame's RXNE is
+/// first seen.
+uint32_t walk_store = 0, walk_next = 0, walk_rxne = 0;
+
+uint32_t walk_since(uint32_t from, uint32_t to) {
+    const uint32_t period = SysTick->LOAD + 1u;
+    return (from + period - to) % period;
+}
+
+[[gnu::always_inline]] inline void spin_loops(uint32_t n) {
+    if (n != 0u) {
+        __asm__ volatile("1: sub %0, #1\n\tbne 1b" : "+l"(n) : : "cc");
+    }
+}
+
+/// One CRC exchange, this end BY HAND on the resource - SpiHost's Request
+/// has no CRC phase: `count` data frames, CRCNEXT right after the last is
+/// written (35.9.1), then the frame the hardware puts on the wire by
+/// itself - the frames kept ahead in the TXFIFO and the last two written
+/// as one burst (below), or, with `one_in_flight`, each into an idle
+/// shifter and CRCNEXT `next_delay` loop turns after the last (letter t).
+/// `corrupt` leaves this end's unit OFF and sends the CRC frame as one
+/// more DATA frame, its last bit flipped: a wrong CRC on a real wire, for
+/// the peer to catch.
+Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt,
+            uint8_t seed_a, uint8_t seed_b, bool one_in_flight = false,
+            uint32_t next_delay = 0) {
+    Crc c{};
+    constexpr uint16_t n = 16;
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = n;
+    a.ms = 400;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.spare = static_cast<uint8_t>(spare | spilink::spare_crc | (wide ? spilink::spare_wide : 0u));
+    a.aux16 = poly;
+    c.o.accepted = peer_act(Op::exchange, a);
+    if (!c.o.accepted) {
+        return c;
+    }
+    const uint8_t w = wide ? 2u : 1u;
+    {
+        spilink::Stream out(a.pattern, a.seed_a);
+        for (uint16_t i = 0; i < n * w; ++i) {
+            tx[i] = out.next();
+            rx[i] = 0xEE;
+        }
+    }
+    c.tx_ref = crc_of(poly, wide, tx, n);
+    settle();
+    const SpiDataSize bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    (void)S1::disable();
+    c.o.clocked = S1::configure({.role = SpiRole::host,
+                                 .mode = SpiMode::mode0,
+                                 .clock = rate,
+                                 .bits = bits,
+                                 .crc = !corrupt,
+                                 .crc_length = wide ? SpiCrcLength::crc16 : SpiCrcLength::crc8,
+                                 .crc_polynomial = poly});
+    S1::enable();
+    S1::flush_rx();
+    CsPin::clear();
+    link_hold();
+    bool frames = true;
+    auto frame_at = [&](uint16_t i) -> uint16_t {
+        if (i == n) {   // the corrupted CRC frame, sent as data
+            return static_cast<uint16_t>(c.tx_ref ^ 0x0001u);
+        }
+        return wide ? static_cast<uint16_t>(tx[2u * i] | (tx[2u * i + 1u] << 8)) : tx[i];
+    };
+    auto keep = [&](uint16_t i, uint16_t got) {
+        if (i == n) {
+            c.frame = got;
+            return;
+        }
+        rx[w * i] = static_cast<uint8_t>(got);
+        if (wide) {
+            rx[2u * i + 1u] = static_cast<uint8_t>(got >> 8);
+        }
+    };
+    const uint16_t written = static_cast<uint16_t>(corrupt ? n + 1u : n);
+    if (one_in_flight) {
+        // THE WALK'S SHAPE (letter t): a frame written into an idle shifter
+        // and read back before the next, CRCNEXT `next_delay` loop turns
+        // after the last data store.
+        for (uint16_t i = 0; i <= n; ++i) {
+            const bool last = i == n - 1u && !corrupt;
+            if (i < written) {
+                const uint16_t v = frame_at(i);
+                if (last) {
+                    walk_store = SysTick->VAL;
+                    S1::data(bits, v);
+                    spin_loops(next_delay);
+                    S1::crc_next();
+                    walk_next = SysTick->VAL;
+                } else {
+                    S1::data(bits, v);
+                }
+            }
+            uint32_t spins = 400'000u;
+            while (!S1::rxne() && spins-- != 0u) {
+            }
+            if (last) {
+                walk_rxne = SysTick->VAL;
+            }
+            frames = frames && spins != 0u;
+            keep(i, S1::data(bits));
+        }
+    } else {
+        // THE WRITE-AHEAD SHAPE: frames into the TXFIFO while TXE admits
+        // them, so the last data store - and the CRCNEXT right after it -
+        // happens with the frames before it still queued: the bit must
+        // land about two SCK periods before the last data frame ENDS
+        // (letter t's walk), which a store into an idle shifter cannot
+        // promise at the fast codes. In flight never exceeds the TXFIFO and
+        // the shifter, inside the RXFIFO's four frames.
+        // In flight - written and not read back - stays inside the RXFIFO
+        // (four byte frames, two half-words: 35.5.9), and the LAST TWO
+        // data frames go in as one burst, CRCNEXT the store after: the
+        // shifter then still holds the second-to-last frame when the bit
+        // lands, whatever this loop's own pace.
+        const uint16_t depth = wide ? 2u : 3u;
+        uint16_t wr = 0;
+        uint16_t rd = 0;
+        uint32_t spins = 400'000u;
+        while (rd <= n && spins-- != 0u) {
+            const uint32_t sr = S1::status();
+            if (wr < written && (sr & SPI_SR_TXE) != 0u) {
+                if (!corrupt && wr + 2u == n) {
+                    if (wr - rd + 2u <= depth) {
+                        S1::data(bits, frame_at(wr));
+                        S1::data(bits, frame_at(static_cast<uint16_t>(wr + 1u)));
+                        S1::crc_next();
+                        wr = static_cast<uint16_t>(wr + 2u);
+                    }
+                } else if (wr - rd < depth) {
+                    S1::data(bits, frame_at(wr));
+                    ++wr;
+                }
+            }
+            if ((sr & SPI_SR_RXNE) != 0u) {
+                keep(rd, S1::data(bits));
+                ++rd;
+            }
+        }
+        frames = rd == n + 1u;
+    }
+    link_hold();
+    CsPin::set();
+    c.frames_ok = frames;
+    c.tx_crc = S1::tx_crc();
+    c.rx_crc = S1::rx_crc();
+    c.host_crcerr = S1::crc_error();
+    c.rx_ref = crc_of(poly, wide, rx, n);
+    {
+        uint8_t want[2u * n];
+        for (uint16_t i = 0; i < n * w; ++i) {
+            want[i] = spilink::pattern_value(a.pattern, a.seed_b, i);
+            if (rx[i] != want[i]) {
+                if (c.o.mism == 0u) {
+                    c.o.idx = i;
+                    c.o.got = rx[i];
+                    c.o.exp = want[i];
+                }
+                ++c.o.mism;
+            }
+        }
+        c.peer_ref = crc_of(poly, wide, want, n);
+    }
+    (void)link_command_mode();
+    c.o.reported = peer_report(c.o.r);
+    return c;
+}
+
+/// A matched CRC exchange, judged whole: the frames both ways, this end's
+/// two accumulators against the arithmetic, the CRC frame it read against
+/// the peer's stream's, and neither end's CRCERR.
+bool crc_agrees(const Crc& c, bool wide) {
+    const uint16_t mask = wide ? 0xFFFFu : 0x00FFu;
+    return c.o.accepted && c.o.clocked && c.o.reported && c.frames_ok && c.o.mism == 0u &&
+           (c.o.r.flags & spilink::report_extended) != 0u && c.o.r.count == 16u &&
+           c.o.r.mism == 0u && (c.o.r.flags & spilink::report_crcerr) == 0u &&
+           c.tx_crc == c.tx_ref && c.rx_crc == c.rx_ref && (c.frame & mask) == c.peer_ref &&
+           !c.host_crcerr && c.o.r.aux3 == static_cast<uint8_t>(c.tx_ref);
+}
+
+void print_crc(const char* label, SpiClock rate, bool above, const Crc& c) {
+    print(serial, above ? "    [informational, above the peer's ceiling] " : "    ", label,
+          " PCLK/", spi_division(rate), ": TXCRCR ", hex(c.tx_crc), " (bitwise ", hex(c.tx_ref),
+          "), RXCRCR ", hex(c.rx_crc), " (bitwise over what came ", hex(c.rx_ref),
+          "), the CRC frame ", hex(c.frame), " (the peer's, bitwise ", hex(c.peer_ref),
+          "), CRCERR here ", c.host_crcerr ? "SET" : "clear", "; host mism ", c.o.mism,
+          "; the peer heard ", c.o.r.count, " mism ", c.o.r.mism, " flags ", hex(c.o.r.flags),
+          " RXCRCR low ", hex(c.o.r.aux3), " serve=", (c.o.r.aux2 & 0x04u) != 0u ? "dma" : "run",
+          crlf);
+}
+
+}  // namespace ext
+
+// t - THE CRCNEXT WINDOW (OUTSIDE z): the instrument behind letter w's
+// write-ahead. One frame in flight, the CRCNEXT store walked a loop turn
+// at a time away from the last data store; each point printed as
+// next/rxne:TRP - the core cycles (SysTick) from before the last data
+// store to after the CRCNEXT store, and to that frame's RXNE first seen;
+// T this end's TXCRCR the arithmetic, R its RXCRCR, P the peer's check
+// clean (lower case: not). No verdict.
+void tt_crcnext_walk() {
+    if (!need_peer()) {
+        return;
+    }
+    const uint32_t t0 = cycles_now();
+    ext::spin_loops(10000u);
+    print(serial, "  a loop turn is ", (cycles_now() - t0) / 10000u, " core cycles", crlf);
+    static constexpr SpiClock rates[] = {SpiClock::div2, SpiClock::div4, SpiClock::div8, SpiClock::div16};
+    for (uint8_t w = 0; w < 2u; ++w) {
+        for (const SpiClock c : rates) {
+            const uint32_t frame = (w ? 16u : 8u) * spi_division(c);
+            print(serial, "  ", w ? "16" : "8", "-bit PCLK/", spi_division(c), " (frame ", frame, " cycles):");
+            for (uint32_t d = 0; d <= frame / 3u + 6u; ++d) {
+                const ext::Crc r = ext::run_crc(w != 0u, w ? 0x1021u : 0x0007u, c, 0, false,
+                                                static_cast<uint8_t>(0x5Bu + d), 0xB9, true, d);
+                const bool tx_ok = r.tx_crc == r.tx_ref;
+                const bool rx_ok = r.rx_crc == r.rx_ref;
+                const bool peer_ok = (r.o.r.flags & spilink::report_crcerr) == 0u;
+                print(serial, " ", ext::walk_since(ext::walk_store, ext::walk_next), "/",
+                      ext::walk_since(ext::walk_store, ext::walk_rxne), ":", tx_ok ? "T" : "t",
+                      rx_ok ? "R" : "r", peer_ok ? "P" : "p");
+            }
+            print(serial, crlf);
+        }
+    }
+    (void)link_command_mode();
+}
+
+void tw_crc() {
+    if (!need_peer()) {
+        return;
+    }
+    ext::learn_ceiling();
+    // Both widths, both serves - the peer's engines (35.5.14's "CRC
+    // transfer managed by DMA" on the G0, 26.4.2's on the F4) and its CRC
+    // run over the resource - at every BR code, this end's unit by hand.
+    struct Leg {
+        bool wide;
+        uint16_t poly;
+        uint8_t spare;
+        const char* name;
+    };
+    static const Leg legs[] = {
+        {false, 0x0007u, 0, "CRC-8 0x07, the peer's DMA serve,"},
+        {true, 0x1021u, 0, "CRC-16 0x1021, the peer's DMA serve,"},
+        {false, 0x0007u, spilink::spare_polled_pump, "CRC-8 0x07, the peer's CRC run,"},
+        {true, 0x1021u, spilink::spare_polled_pump, "CRC-16 0x1021, the peer's CRC run,"},
+    };
+    bool leg_ok[4] = {};
+    for (uint8_t l = 0; l < 4u; ++l) {
+        bool all = true;
+        uint8_t k = 0;
+        for (const SpiClock c : ext::rungs) {
+            const ext::Crc r = ext::run_crc(legs[l].wide, legs[l].poly, c, legs[l].spare, false,
+                                            static_cast<uint8_t>(0x31u + 7u * k),
+                                            static_cast<uint8_t>(0xA7u + 3u * k));
+            ++k;
+            const bool above = ext::above_ceiling(c);
+            ext::print_crc(legs[l].name, c, above, r);
+            if (!above) {
+                all = all && ext::crc_agrees(r, legs[l].wide);
+            }
+        }
+        leg_ok[l] = all;
+    }
+    bench.verdict("THE CRC UNIT AGAINST A FOREIGN ONE, 8-bit: at every judged code this end's "
+                  "TXCRCR and RXCRCR are the bitwise arithmetic, the CRC frame it reads is the "
+                  "peer's stream's CRC, and NEITHER END raises CRCERR (the peer's engines "
+                  "managing its CRC by themselves)",
+                  leg_ok[0]);
+    bench.verdict("...and with 16-bit frames and a 16-bit CRC likewise", leg_ok[1]);
+    bench.verdict("...and against the peer's CRC run (CRCNEXT after its last answer), both "
+                  "widths",
+                  leg_ok[2] && leg_ok[3]);
+
+    // A WRONG CRC ON A REAL WIRE: this end's unit off, the CRC frame sent as
+    // data with its last bit flipped. The peer must flag it; its own CRC
+    // frame must still be the arithmetic of its stream.
+    bool caught = true;
+    static constexpr SpiClock fast_judged[] = {SpiClock::div256, SpiClock::div4};
+    for (uint8_t l = 0; l < 4u; ++l) {
+        for (const SpiClock c : fast_judged) {
+            const ext::Crc r = ext::run_crc(legs[l].wide, legs[l].poly, c, legs[l].spare, true,
+                                            0x5E, 0x3B);
+            print(serial, "  CORRUPTED, ");
+            ext::print_crc(legs[l].name, c, false, r);
+            const uint16_t mask = legs[l].wide ? 0xFFFFu : 0x00FFu;
+            caught = caught && r.o.accepted && r.o.reported && r.frames_ok &&
+                     (r.o.r.flags & spilink::report_crcerr) != 0u && r.o.r.count == 16u &&
+                     r.o.r.mism == 0u && r.o.mism == 0u && (r.frame & mask) == r.peer_ref;
+        }
+    }
+    bench.verdict("A WRONG CRC FRAME IS CAUGHT BY THE FOREIGN UNIT: one flipped bit in the "
+                  "frame where the CRC belongs and the peer reports CRCERR (report_crcerr), "
+                  "every data frame still exact, its own CRC frame still the arithmetic - both "
+                  "widths, both serves, at the command rate and at PCLK/4",
+                  caught);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the CRC", command(Op::ping));
+}
+
 // ---------------------------------------------------------------------------
 // The menu
 // ---------------------------------------------------------------------------
@@ -4464,6 +5208,13 @@ int main() {
                  tq_peer_kernel);
     bench.letter('r', "THE ROLES INVERT: this board as the client, the peer as "
                       "the host", tr_peer_client);
+    bench.letter('u', "16-BIT FRAMES against the peer: the loop, the pump, the engines, "
+                      "the wire's time", tu_wide);
+    bench.letter('v', "RECEIVE-ONLY and ODD COUNTS against the peer: the transmit-only "
+                      "shapes witnessed", tv_receive_only);
+    bench.letter('w', "THE CRC against the peer's unit, and a wrong CRC caught", tw_crc);
+    bench.letter('t', "THE CRCNEXT WINDOW against the peer: the walk, no verdict",
+                 tt_crcnext_walk, false);
     bench.letter('x', "SLIP STATISTICS against the peer: each mode ten times, no "
                       "verdict", tx_peer_slips, false);
 

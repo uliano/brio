@@ -185,6 +185,10 @@
 //   u  THE WAKE FROM STOP by the far chip's frames on USART1 (HSI16 or the
 //      LSE as its kernel, Stop 0 and 1, the three sources), the address
 //      that does not match, and ES0548 2.2.4 on a divided HSI
+// and beside the set, under neither all-key (some ten minutes):
+//   W  ES0548 2.11.1's MAP: the glitch's width against its position in the
+//      stop bit at 4800, 9600, 14400 and 19200 baud, no verdict - carried
+//      wherever letter 5 is
 //
 // THE G031K8 does not hold the suite whole: it builds five images,
 // letters a to j - the instances, the generator, the kernel clocks, the
@@ -250,7 +254,10 @@ constexpr Serial serial;
 /// in the whole suite - the single-board twenty-one, and the two-board
 /// set's thirteen: the digits, 'r', 's' and 'u' - and in a group image its
 /// own selection's count.
-TwoKeyTestBench<Serial, 't', test_letters == nullptr ? 34 : test_letters_default_max()> bench;
+TwoKeyTestBench<Serial, 't',
+                test_letters == nullptr ? 35
+                                        : test_letters_default_max() + (test_letter_carried('5') ? 1 : 0)>
+    bench;
 
 // ---------------------------------------------------------------------------
 // The pads, and the instances that own them
@@ -7020,6 +7027,66 @@ void t5_shapes() {
 }
 
 // ---------------------------------------------------------------------------
+// W - ES0548 2.11.1's MAP (outside both all-keys: some ten minutes)
+// ---------------------------------------------------------------------------
+//
+// Letter 5's walks found the erratum's "shorter than the half-bit" not to
+// be the condition at the slow rates; this letter draws the condition
+// whole - the glitch's WIDTH against its POSITION in the stop bit of
+// eight 0x96 frames, at 4800, 9600, 14400 and 19200 baud (OVER16, the far
+// engine's stage op, every rate the receiver's real one). A cell prints
+// the frames read WRONG of eight and the frames carrying NE, as two
+// digits; a dash where the glitch would leave the stop bit. No verdict.
+
+void tW_glitch_map() {
+    if (!ensure_link()) {
+        bench.verdict("the peer is reachable", false);
+        link_release();
+        return;
+    }
+    static constexpr uint32_t rates[] = {4800, 9600, 14'400, 19'200};
+    static constexpr uint8_t widths[] = {3, 6, 9, 12, 16, 19, 22, 25, 31, 38, 44};
+    static constexpr int8_t positions[] = {50, 53, 56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92, 95};
+    for (const uint32_t base : rates) {
+        print(serial, "  2.11.1 at ", base, " 8N1: width % down, position % across (wrong of 8, NE of 8)", crlf,
+              "       ");
+        for (const int8_t pct : positions) {
+            print(serial, "  ", pct, " ");
+        }
+        print(serial, crlf);
+        for (const uint8_t wd : widths) {
+            print(serial, "    ", wd < 10u ? " " : "", wd, ": ");
+            for (const int8_t pct : positions) {
+                if (pct + wd > 100) {
+                    print(serial, "  -- ");
+                    continue;
+                }
+                link::Params a{};
+                a.cfg.rate = real_rate(base, 0);
+                a.count = 8;
+                a.value = 0x96;
+                a.pattern = link::pattern_fixed;
+                a.cell = 9;
+                a.pct = pct;
+                a.aux8 = wd;
+                a.aux16 = 64;   // four bits of idle
+                link::Cfg dc{};
+                dc.rate = base;
+                const StageLeg l = stage_leg(a, dc);
+                feed();
+                if (l.up && l.drawn && l.frames == 8u) {
+                    print(serial, "  ", l.wrong, l.ne < 9u ? l.ne : 9u, " ");
+                } else {
+                    print(serial, "  ?? ");
+                }
+            }
+            print(serial, crlf);
+        }
+    }
+    link_release();
+}
+
+// ---------------------------------------------------------------------------
 // 6 - the receive ring beyond the bridge: the FIFO's kick under a foreign
 //     sender at the ladder's top rungs
 // ---------------------------------------------------------------------------
@@ -9372,6 +9439,13 @@ int main() {
     bench.second_letter('u', "the wake from Stop by the far chip, and ES0548 2.2.4 on the wire", tu_stop_wake);
     bench.letter('x', "HOST: finding 4 through the bridge, the console at 921600 for five minutes", tx_bridge,
                  false);
+    // Upper case: carried by every group image, so registered only where
+    // letter 5's stage legs are.
+    if constexpr (test_letter_carried('5')) {
+        bench.letter('W', "ES0548 2.11.1's map: the glitch's width against its position, 4800..19200 baud, "
+                          "no verdict",
+                     tW_glitch_map, false);
+    }
 
     const std::optional<brio::PanicRecord> crumb =
         brio::take_panic_record<brio::Stm32g0Platform<>>();
