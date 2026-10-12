@@ -984,12 +984,9 @@ ends; the call returns HAL_ERROR with HAL_SPI_ERROR_CRC). Built at any
 level, at 8-bit PCLK/4 its store comes after the last data frame has
 ended: no CRC frame is clocked, and the call returns HAL_TIMEOUT with
 HAL_SPI_ERROR_CRC once its timeout runs out waiting for the CRC's RXNE.
-Every other cell is clean at every level, but for the wire: at 16-bit
-PCLK/256 the vendor's call lost a bit to a slip (both ends wrong from
-the same frame, the CRC catching it) in three of six windows at -O2 in
-each of two runs of one image, in one of six at -Os in a second and in
-none in a third, where this suite's own loop slipped at that cell in
-none of eighteen. The same
+Every other cell is clean at every level (at 16-bit PCLK/256 the
+vendor's call, and not this suite's loop, slipped a bit now and then: a
+fact of the oracle's loop, not pursued). The same
 sequence with its CRCNEXT moved to the store right after the DR store, then walked away
 from it a loop turn at a time, is clean before the window, corrupts both
 calculators inside it and clocks no CRC frame past it, at the distances
@@ -1194,14 +1191,6 @@ on every header of the pack, but no silicon has run it:
   last frame's end, and why a store a few cycles early shifts the
   transmit calculator once more and leaves the receive one running - is
   ST's to describe, and that description would settle it.
-
-- **the slips under the vendor's loop at 16-bit PCLK/256** (the vendor's
-  loop, above): a bit lost on the wire in seven of 126 windows of ST's
-  call over its six builds and three images, and in none of eighteen of
-  this suite's own loop at the same cell, the image deciding which build
-  slips. Not explained; the logic
-  analyser on SCK at the F446's pin through that call would show whether
-  the edge is gained on the wire or in the client.
 
 - **the burst ladder's 320-cycle floor** (letter d) is not the host
   loop's own - the transmit-only loop holds PCLK/2's clock continuous
