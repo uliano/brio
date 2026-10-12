@@ -90,7 +90,15 @@ consumer within two frame times of a burst's last stop bit - but on the
 PL011, whose fixed time-out of 32 bit periods tells a burst's tail 3.2
 frames after it; and a stream
 with no silence is never held back - on a circular engine the half and
-full marks deliver the edge before the producer laps the ring.
+full marks deliver the edge before the producer laps the ring. The idle
+flag is no ruler of the gap that raises it: the receiver counts its idle
+frame from the stop bit AS IT SAMPLED IT, so its threshold moves with
+the sender's rate error - ten bit times from an exact sender, 10.25 at
++1 %, 11 at +3 %, measured alike on the STM32G0 and the STM32F4
+([../stm32g0/usart.md](../stm32g0/usart.md),
+[../stm32f4/usart.md](../stm32f4/usart.md)) - so a protocol that marks
+the boundary between bursts with silence leaves more than one of the
+receiver's idle frames between them.
 `harvest()` stays a public verb on an engined transport - the receive
 errors read and counted, a stream a transfer error stopped bound again -
 and the vectors call it; it is idempotent, so an owner that still calls
