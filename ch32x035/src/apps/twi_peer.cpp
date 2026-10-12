@@ -26,6 +26,10 @@
 //    bounded moment and back. During a host action this board's target is
 //    simply absent, which the choreography already tolerates (the DUT
 //    waits out the action's deadline either way).
+//  - THE HOST KEEPS THE DEFAULT PLACEMENT, its event pump in the flash
+//    (util/placement.hpp): its tenures are the `arb` and `host_read`
+//    actions' few bytes, the wire stretched while an entry runs, and SRAM
+//    would buy core share this peer has no use for.
 //  - THE TARGET IS POLLED. `I2cClientOptions::interrupts` false leaves the
 //    three interrupt enables and the two PFIC lines down, so every flag
 //    below belongs to the loop, and a commanded hold is a wait the loop

@@ -137,12 +137,14 @@ What the chapter gives a controller's transfer, and what the engine takes:
   part's first column off the debug port - PC16/PC17 on the CH32X035F8,
   PA10/PA11 on the CH32X035R8, C8 and the CH32X033F8, the debug port's
   pair on the F7 and the two 28-pin parts, which have no other.
-- `I2cHost<1, pins, TxEngine, RxEngine>` is the engine `I2cBus` (=
+- `I2cHost<1, pins, TxEngine, RxEngine, Placement>` is the engine `I2cBus` (=
   `BusMaster`) drives, its `Request` the other strata's verbatim. `init()`
   is false for an HCLK under 4 MHz, a column on the debug port's pads
   while the probe owns them, a column on PC16/PC17 while AFIO_CTLR's
   USB_IOEN gives them to the USB transceiver, and a block that does not
-  hold its timing. `isr()` is the event vector's body, phase by phase;
+  hold its timing. `isr()` is the event vector's body, phase by phase,
+run through the host's `Placement` (util/placement.hpp's `InFlash`, the
+default, or `InRam`);
   `error_isr()` the error vector's (a NACK is `i2c_nack_addr` or
   `i2c_nack_data` by the phase it landed in, ARLO `i2c_arb_lost`, the
   rest `i2c_bus_error`); `dma_isr()` both channels', INTFR read once. A
@@ -191,7 +193,16 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
 ```
 
 On the engines, `I2cHost<1, i2c1_default_pins, DmaTxEngine<6>,
-DmaRxEngine<7>>` and both channels' vectors calling `dma_isr()`.
+DmaRxEngine<7>>` and both channels' vectors calling `dma_isr()`. The
+event pump in SRAM is either the host's `InRam`, its last parameter, or
+the vector placed by the program with the host as it is - the faster of
+the two (Bench findings, "The host's cost"):
+
+```cpp
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
+    if (Bus::isr()) { brio::post<I2c>(brio::TransferDone{Bus::status()}); }
+}
+```
 
 ## Bench findings
 
@@ -310,48 +321,59 @@ two engined writes (122 cycles, 393 kHz); `wall` from `start()` to the
 completion edge, `wire` = (bytes + the address) x 9 x the period, `rest`
 = wall - wire; the cycles inside the event vector stamped at its entry
 and exit (the vector's own entry and exit, about a hundred cycles with
-the hardware prologue, [platform.md](platform.md), outside them):
+the hardware prologue, [platform.md](platform.md), outside them; inside
+them the suite's storm budget and its switch over three hosts). The
+pump in BOTH PLACEMENTS: the default, its body inline in the vector in
+the flash, and a twin host with its event pump in SRAM (`InRam`) behind
+the same vector:
 
-| tenure | the pump: rest, entries, cycles an entry | the engines: rest, entries + DMA |
-|---|---|---|
-| write 1 | 1232, 3, 217 | - |
-| write 2 | 1214, 3, 228 | - |
-| write 16 | 1214, 17, 197 | 1246, 3 + 0 |
-| write 255 | 1232, 256, 184 | 1260, 3 + 0 |
-| read 1 | 1260, 3, 218 | - |
-| read 16 | 1614, 17, 229 | 1182, 2 + 1 |
-| read 255 | - | 1168, 2 + 1 |
-| register read 1 + 1 | 1952, 5, 227 | - |
-| register read 1 + 4 | 2306, 7, 244 | 1794, 4 + 1 |
-| probe | 974, 2, 196 | - |
+| tenure | the pump from the flash: rest, entries, cycles an entry | from SRAM: rest, cycles an entry | the engines: rest, entries + DMA |
+|---|---|---|---|
+| write 1 | 1312, 3, 239 | 1052, 158 | - |
+| write 2 | 1282, 3, 251 | - | - |
+| write 16 | 1294, 17, 218 | 1010, 146 | 1218, 3 + 0 |
+| write 255 | 1276, 256, 205 | 1035, 140 | 1232, 3 + 0 |
+| read 1 | 1312, 3, 242 | 1169, 162 | - |
+| read 2 | 1398, 3, 261 | 1175, 165 | - |
+| read 16 | 1710, 17, 253 | 1272, 157 | 1182, 2 + 1 |
+| read 255 | - | - | 1176, 2 + 1 |
+| register read 1 + 1 | 2124, 5, 249 | - | - |
+| register read 1 + 4 | 2458, 7, 271 | 1947, 166 | 1790, 4 + 1 |
+| probe | 1002, 2, 211 | 865, 146 | - |
 
-- **`start()` is 304 to 316 cycles** on the ticker's ruler, the bounded
+- **`start()` is 304 to 324 cycles** on the ticker's ruler, the bounded
   waits' first looks included; the listing of a minimal glue (one host,
   `-Os`) has it at 173 instructions, two calls into `delay_us` that run
   only when a wait is not met at once.
-- **The pump's entry is 184 to 193 cycles a byte** of a 1089-cycle byte
-  at 400 kHz - a sixth of the core - for 341 instructions in the whole
-  event handler, no call, the tenure's fields one base address: a byte's
-  path is a few dozen instructions from the flash behind two wait states
-  at 48 MHz, this core's fetch (the DMA controller's own 6 cycles an item
-  from SRAM against 11.5 from the flash, [dma.md](dma.md)). The longest
-  entry over every shape is 321 cycles, the suite's stamps included -
-  the family's longest handler with the drivers' own placement, which the
-  SPI host's default hold-off is drawn from ([spi.md](spi.md)).
-- **THE PROGRAM PLACES THE EVENT VECTOR, AND ONLY IF IT WANTS THE CORE**:
-  the event body is inline and calls nothing, so a vector placed in SRAM
-  (`.ram_text`, [platform.md](platform.md), "A handler in SRAM") carries
-  the whole path. Measured in a variant of the suite with its event vector
-  placed: 75 cycles an entry over the 255-byte write against 193, 89 over
-  the 16-byte read against 234 - a fifteenth of the core at 400 kHz
-  instead of a sixth - with every shape still `i2c_ok` and the wire's own
-  time unchanged, since SCL stretches behind a late entry and the rate is
-  the bus's. The vector of one engined host takes 1164 bytes of SRAM (the
-  family fixture's), which is why the driver does not place it for every
-  image: the placement buys core time, not the wire.
+- **The pump's entry is 205 cycles a byte from the flash** of a
+  1089-cycle byte at 400 kHz - a fifth of the core - for some 340
+  instructions in the whole event body, a leaf, the tenure's fields one
+  base address: a byte's path is a few dozen instructions from the flash
+  behind two wait states at 48 MHz, this core's fetch (the DMA
+  controller's own 6 cycles an item from SRAM against 11.5 from the
+  flash, [dma.md](dma.md)). The longest entry over every shape is 333
+  cycles, the suite's stamps and owner switch included - the family's
+  longest handler with every driver in the flash, which the SPI host's
+  default hold-off is drawn from ([spi.md](spi.md)).
+- **THE PUMP IN SRAM, TWO WAYS, AND ONLY IF THE PROGRAM WANTS THE CORE**:
+  the host's `InRam` places the event body (`.fast_text.brio`, 968 bytes
+  for a plain host, flattened, a leaf): 140 cycles an entry over the
+  255-byte write and 157 over the 16-byte read, the longest 195, behind
+  the suite's vector in the flash. A program that places the VECTOR
+  (`.fast_text`, [platform.md](platform.md), "A handler in SRAM") carries
+  the default host's inline body with it: measured in a variant of the
+  suite, 79 and 94 cycles - a fourteenth of the core at 400 kHz - and an
+  `InRam` host behind that placed vector the same 79 and 95, the call
+  between them costing nothing measurable. So on this path the vector's
+  placement is the faster and the cleaner, one attribute where the
+  program binds the vector, and the host's `InRam` is for a program that
+  keeps its vector in the flash. Either way every shape stays `i2c_ok`
+  with the same entries and the wire's own time does not move, since SCL
+  stretches behind a late entry and the rate is the bus's: the placement
+  buys core time, not the wire.
 - **The engines** carry a 255-byte write or read in three event entries
   and none or one DMA interrupt, the write at 1004 thousandths of its
-  wire, the core in the vector 648 cycles of 282 348.
+  wire, the core in the vector 627 cycles of 282 320.
 - **No vector re-entered after a completion edge**: the event line is the
   tenure's.
 - **Against the EVT** (read, not run: no vendor build for this series on

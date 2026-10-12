@@ -57,6 +57,9 @@ using Client = I2cClient<1>;
 // The debug port's column, on every part: compiled, refused at run time
 // while the probe owns the pads.
 using DebugHost = I2cHost<1, i2c1_pins_for(5)>;
+// Both placements (util/placement.hpp): an engined host whose event pump
+// runs from SRAM.
+using RamHostDma = I2cHost<1, i2c1_default_pins, DmaTxEngine<6>, DmaRxEngine<7>, InRam>;
 
 static_assert(!Host::has_engines && HostDma::has_engines);
 static_assert(std::is_trivially_copyable_v<Host::Request>);
@@ -124,6 +127,7 @@ void all_hosts() {
     host_verbs<Host>(buf);
     host_verbs<HostDma>(buf);
     host_verbs<DebugHost>(buf);
+    host_verbs<RamHostDma>(buf);
 }
 
 void client_verbs() {
@@ -161,11 +165,14 @@ void arbiters() {
 }
 
 // The app's glue: the two vectors and the two channels, bound both ways
-// the hardware prologue can be built.
-extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
+// the hardware prologue can be built - the event vector placed in SRAM by
+// the program (`.fast_text`) beside the InRam host's trampoline
+// (`.fast_text.brio`) in this unit.
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
     if (HostDma::isr()) {
         post<TimedBus>(TransferDone{HostDma::status()});
     }
+    (void)RamHostDma::isr();
 }
 extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
     if (HostDma::error_isr()) {

@@ -4,7 +4,8 @@ The kernel's Platform concept realized on the QingKe V4C of the
 CH32X035 series: the critical section, the idle hook, the STK timebase,
 the microsecond busy-wait, the one spelling of an interrupt handler,
 what the crt writes into the core before main(), and where code runs -
-the flash, or SRAM for a path a driver or a program places there. The failing half
+the flash, or SRAM for a path a program places there, a driver's or its
+own. The failing half
 the sibling strata carry beside it - which reset happened as a type of
 its own, the record a crash leaves, the watchdogs - is not written here
 (the list at the end); the reset flags themselves are RCC's and live in
@@ -347,72 +348,103 @@ vector directly, and a call between SRAM and the flash is an `auipc` and
 a `jalr`, which reach 2 GB either side of the caller: no veneer either
 way.
 
-**The option and its spelling.** The seven linker scripts place the
-input sections `.ram_text` and `.ram_text.*` first in `.data`
-([../../ch32x035/ld/ch32x035f8.ld](../../ch32x035/ld/ch32x035f8.ld)), so
-the crt's copy of `.data` moves them into SRAM before `main()`; an image
-that places nothing there gets zero bytes from the line (every image
-that places nothing is byte-identical across it, measured), and the
-project links with `--no-warn-rwx-segments`, code copied there being a
-writable, executable segment. A program places a vector it binds with
-one attribute:
+**The option and its spelling: opt-in, per driver.** The seven linker
+scripts place the input sections `.fast_text` and `.fast_text.*` first
+in `.data` ([../../ch32x035/ld/ch32x035f8.ld](../../ch32x035/ld/ch32x035f8.ld)),
+so the crt's copy of `.data` moves them into SRAM before `main()`, and
+the platform says so (`Ch32x035Platform::places_fast_text`). A driver of
+this stratum takes a placement, util/placement.hpp's `InFlash` (the
+default) or `InRam`, as its last template parameter - `SpiHost`,
+`I2cHost`, and `Uart` after its options:
 
 ```cpp
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void usart4_handler() { (void)Link::isr(); }
+using Link = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>, 0, UartOptions{}, InRam>;
 ```
 
-THE NAME IS TWO NAMES. A function defined in a header - every body brio
-places, and a program's own inline or template function - names
-`.ram_text.brio` and carries `noinline` and `noclone`; a program's plain
-function names `.ram_text`. GCC emits a header's function in a COMDAT
-group and refuses one section name for a grouped function and a plain
-one in the same translation unit ("section type conflict", WCH's gcc
-15.2); and a local clone of a grouped function - IPA-SRA's - leaves the
-group and meets the same refusal among the grouped ones, which
-`noclone` prevents (measured: without it the refusal goes away with
-`-fno-ipa-sra` and not with `-fno-ipa-cp`). The family fixtures compile a
-placed vector beside the drivers' placed bodies in one unit
-(`test/family_ch32x035/spi.cpp`, `dma.cpp`).
+Each driver writes its hot body once and runs it through
+`Hot<Placement>::run` ([../../brio/util/placement.hpp](../../brio/util/placement.hpp)):
+under `InFlash` the body is inline where it is called, the vector that
+binds it, as if there were no trampoline; under `InRam` each path is ONE
+out-of-line instance in `.fast_text.brio`, flattened, a call from the
+vector. Only the instances an image names exist: an image that opts into
+nothing has no byte of code in SRAM. Compared with the same images built
+with every hot body written inline and no trampoline at all: the
+console, `usart_peer` and the clock, pin, platform and timer suites are
+byte-identical; `spi_peer` differs in one immediate, the default
+hold-off; `twi_peer` and `test_x035_dma` by what `InFlash`'s flattening
+inlines into the vector - the I2C's STOPF clear, the USART's consume and
+block start, whose completion takes 271 cycles from the flash flattened
+against 371 with three calls. A third tag, or `InRam` on a platform that
+does not place `.fast_text`, does not compile
+(`test/family_ch32x035/neg/`).
 
-**THE PLACEMENT RULE.** THE DRIVER places a path that runs once per
-unit of work, whose cost is part of what the driver states about
-itself, and which a program could not place by placing its vector -
-because it is not inline in the vector, or because the driver's own
-thresholds are drawn from it: the SPI host's pump entry and its two
-polled loops ([spi.md](spi.md)), the USART's transmit-engine completion
-([usart.md](usart.md)). THE PROGRAM places the vector it binds where the
-driver's body is inline in it whole and the gain is the program's to
-want: the per-byte interrupt transport of a USART, the I2C host's event
-pump ([i2c.md](i2c.md)), the console, the tick. What runs once a
-transaction (the SPI host's `start()`) stays in the flash, declined
-with its measured gain ([spi.md](spi.md)).
+A program places a function of its own - the vector it binds, above all
+- with one attribute, `.fast_text`:
+
+```cpp
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart4_handler() { (void)Link::isr(); }
+```
+
+THE NAME IS TWO NAMES. A function defined in a header is emitted in a
+COMDAT group, and GCC refuses one section name for a grouped function
+and a plain one in the same translation unit ("section type conflict",
+WCH's gcc 15.2); a local clone of a grouped function - IPA-SRA's - leaves
+the group and meets the same refusal among the grouped ones (measured:
+the refusal goes away with `-fno-ipa-sra`, not with `-fno-ipa-cp`). So
+the trampoline's instances name `.fast_text.brio` and are never cloned,
+and a program's plain function names `.fast_text`; a program's own
+inline or template function goes through `Hot<InRam>::run` rather than
+an attribute. The family fixtures compile a placed vector beside the
+`InRam` instances in one unit (`test/family_ch32x035/spi.cpp`,
+`dma.cpp`, `i2c.cpp`). `.ram_text`, which the scripts keep beside it,
+is the name of code that MUST run from SRAM for correctness - nothing of
+this stratum's.
+
+**Which placement buys what.** A driver's `InRam` moves what only the
+driver can: its private paths (the SPI host's polled loops) and the
+bodies it calls out of the vector, with the vector left in the flash. A
+program that places the VECTOR moves everything inline in it - every
+`InFlash` body it binds - with no call at all. On a path whose body is
+inline in the vector whole (the I2C event pump, a USART's per-byte
+transport), placing the vector is the faster of the two, and placing
+both buys nothing more: an `InRam` body called from a vector in SRAM
+measured the same as the vector alone (79 and 95 cycles against 79 and
+94, below), its bytes spent twice. On a path the driver calls out of
+line or keeps private, `InRam` is the only way.
 
 **What it buys, measured** at 48 MHz on the CH32X035F8U6, each pair one
 suite with the path in the flash and in SRAM, nothing else moved:
 
 | path | placed by | from the flash | from SRAM | SRAM bytes |
 |---|---|---|---|---|
-| the SPI pump, a frame at /2, behind a vector of one call and one store | the driver | 168.5 cycles | 109.8 (84.0 with the vector placed and the body inlined into it) | 298, 324 with engines |
-| the SPI transmit-only loop, a frame at /2 (the wire 16) | the driver | 20.8 | 16.7 | 910 a host type, both loops |
-| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 50.5, 50.4 | 30.5, 49.4 | (above) |
-| the USART transmit engine's completion, its body | the driver | 370 to 377, the line idle at a block boundary above 1.5 Mbaud | 161 to 162, gapless to 3 Mbaud | 204 to 216 |
-| a USART's interrupt transport, a gapless run in | the program | whole to 2 Mbaud | whole to 3 Mbaud | its vector |
+| the SPI pump, a frame at /2, behind the suite's vector (stamps, owner switch) | the driver (`InRam`) | 268.6 cycles | 225.1 | 302, 332 with engines |
+| the SPI transmit-only loop, a frame at /2 (the wire 16) | the driver | 28.0 (20.0 in another build) | 16.0 | 798 a host type, both loops |
+| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 51.9, 52.0 (76.0 at /4 in another build) | 28.9, 46.9 | (above) |
+| the USART transmit engine's completion, its body | the driver | 271 to 273 (293 at most), the line idle at a block boundary above 1.5 Mbaud | 173 to 175 (191 at most), gapless to 3 Mbaud | 204 |
+| a USART's interrupt transport, a gapless run of 256 in | the driver, or the program's vector | whole to 2 Mbaud | to 2.4 Mbaud behind a vector in the flash; to 3 Mbaud with the vector placed | 488 an engined port's `isr()`; the suite's vector 1324 |
+| the I2C event pump's entry, a 255-byte write and a 16-byte read | the driver, or the program's vector | 205, 253 (333 at most) | 140, 157 behind a vector in the flash (195 at most); 79, 94 with the vector placed | 968 for one plain host |
 | the console's handler body (115200, `test_x035_spi`) | the program | 145 | 66 | 404 |
 | the tick's handler body | the program | 65 | 29 | 100 |
-| the I2C event pump's entry, a 255-byte write and a 16-byte read | the program | 193, 234 | 75, 89 | 1164 for one engined host |
 
 The handler bodies are stamped on the STK between their first and last
 statement; the hardware prologue's entry and exit, 100 to 104 cycles a
-round trip with the vector in the flash (above), are outside them.
+round trip with the vector in the flash (above), are outside them. A
+loop's cost from the flash moves with where the loop sits - the two
+builds in the table, nothing changed but the code around them - and
+from SRAM it does not.
 
 **What it costs.** The bytes in the last column, of the part's 20 KB -
 the load image stays in the flash beside them. A placed function exists
 only from the crt's copy on, and the crt enters `main()` with interrupts
 masked, so no vector reaches SRAM the copy has not written. A driver's
-placed body is a CALL from a vector in the flash: under the hardware
-prologue (the default) the call saves no register; in an image built
-without it the vector saves the caller-saved registers in software
-around the call.
+`InRam` body is a CALL from a vector in the flash: under the hardware
+prologue (the default) the call saves no register, and the vector passes
+the closure's address, one instruction; in an image built without it
+the vector saves the caller-saved registers in software around the
+call. THE HOLD-OFF the SPI host draws its write-ahead from is a fact of
+the image: its default is the one safe with every driver in the flash,
+and a program that places its handlers states its own
+([spi.md](spi.md)).
 
 ## Not covered yet
 
@@ -440,10 +472,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- **The drivers' placed bodies without the hardware prologue**: a vector
-  that calls one saves the caller-saved registers in software in an image
-  built with `CH32X035_HPE=OFF`; test_x035_spi's letter `b` in such an
-  image would price the call.
+- **The drivers' `InRam` bodies without the hardware prologue**: a
+  vector that calls one saves the caller-saved registers in software in
+  an image built with `CH32X035_HPE=OFF`; test_x035_spi's letter `b` in
+  such an image would price the call.
 - **What the hardware prologue buys on this core**: letter `e` has run
   in the image built with it (above); the same letter in an image built
   with `CH32X035_HPE=OFF` is the other half of the difference, and

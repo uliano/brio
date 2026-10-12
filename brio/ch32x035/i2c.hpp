@@ -12,7 +12,7 @@
  *  - `I2c<n>` is the RESOURCE: the register block, its gate and reset,
  *    the column, the clock arithmetic, the flags and the sequences that
  *    clear them, the control bits as verbs. It decides nothing.
- *  - `I2cHost<n, pins, TxEngine, RxEngine>` is the ENGINE util/
+ *  - `I2cHost<n, pins, TxEngine, RxEngine, Placement>` is the ENGINE util/
  *    i2c_bus.hpp's I2cBus drives: the Request is the other strata's
  *    VERBATIM - {addr, tx span, rx span, reply, speed}, one bus tenure
  *    that is a write, a read, a write-then-read with a repeated START, or
@@ -159,6 +159,15 @@
  * (15:13 reserved): the SMBus mode is declined, and ENARP is a verb of the
  * resource with no engine behind it (docs/ch32x035/vendor/README.md).
  *
+ * THE EVENT PUMP IS ONE FUNCTION OF ITS PLACEMENT, the host's last
+ * template parameter (util/placement.hpp): its vector calls the
+ * placement's trampoline, the entry's whole path flattened into it - in
+ * the flash by default, in SRAM under InRam, where an entry takes a
+ * fraction of what it takes behind the flash's two wait states at 48 MHz
+ * (RM 20.3.1). The wire does not move either way (SCL stretches while an
+ * entry runs); the core's share of a tenure does, and so does the longest
+ * handler the image's other hosts wait behind (docs/ch32x035/i2c.md).
+ *
  * NOT COVERED YET: 10-bit addressing on the HOST side (the resource has
  * the mode and the client matches such an address; EVT9 has no user -
  * i2c_bus.hpp's Request carries a 7-bit address on every stratum); PEC as
@@ -183,8 +192,10 @@
 #include "ch32x035/pin.hpp"
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
+#include "ch32x035/platform.hpp"
 #include "util/clock.hpp"
 #include "util/i2c_bus.hpp"
+#include "util/placement.hpp"
 
 namespace brio {
 
@@ -672,9 +683,12 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * neither (the file header says what each carries).
  */
 template <uint8_t n, I2cPins pins = i2c1_default_pins, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine>
+          typename RxEngine = NoDmaEngine, typename Placement = InFlash>
 class I2cHost {
     using S = I2c<n>;
+
+    static_assert(HotPlacement<Placement, Ch32x035Platform<>>,
+                  "brio I2cHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
 
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
@@ -911,8 +925,16 @@ public:
 
     /// The EVENT vector's body - call from i2c1_ev's handler. Returns true
     /// when the tenure just completed: the edge the app's glue posts
-    /// TransferDone on.
+    /// TransferDone on. The vector calls the placement's trampoline (the
+    /// file header).
     [[gnu::always_inline]] static bool isr() {
+        return Hot<Placement>::run([] { return event_entry(); });
+    }
+
+private:
+    /// The event entry's path, written once: isr() runs it through the
+    /// host's placement.
+    [[gnu::always_inline]] static bool event_entry() {
         const uint16_t s1 = S::status1();
         // STOPF is the CLIENT half's flag - a STOP seen after a START this
         // host did not issue: another master's, or the one unstick() makes
@@ -1012,6 +1034,7 @@ public:
         return false;
     }
 
+public:
     /// The ERROR vector's body - call from i2c1_er's handler. Every error
     /// ends the tenure with its i2c_bus.hpp code; a NACK is on the address
     /// or on a byte by the phase it landed in. True when the tenure just

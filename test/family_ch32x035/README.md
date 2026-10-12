@@ -51,6 +51,13 @@ against table 12-3, their requests against figure 9-1 and both timers'
 columns against what each package bonds, every verb of the subset on both
 instances, a pad formed only where the package drives it alone; the
 negatives refuse TIM3, a DynamicClock, a pad the package does not bond
-and a signal the column has not got. `util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
-each service over this target's platform, which is the compiler's verdict
+and a signal the column has not got. `spi.cpp`, `dma.cpp` and `i2c.cpp`
+also form each host and the engined transport in BOTH PLACEMENTS
+(util/placement.hpp's `InFlash` and `InRam`), a vector the program
+places in `.fast_text` in the same unit as the `InRam` instances in
+`.fast_text.brio`; the negatives refuse a placement that is neither tag
+on the SPI and I2C hosts, `InRam` on a platform that does not place
+`.fast_text` (the transport's), and a third tag on the trampoline
+itself. `util_all.cpp` includes EVERY kernel, util and gfx header and
+instantiates each service over this target's platform, which is the compiler's verdict
 on the whole framework for this core.

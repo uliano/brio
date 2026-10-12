@@ -99,6 +99,11 @@
 // pad): the voltage detector at PLS 10, 3.0 V (pwr.hpp); below it the peer
 // stays dark and says so on its console, its link never opened.
 //
+// NOTHING PLACED IN SRAM (util/placement.hpp): the link is the raw
+// resource this program drives polled, its loops this file's own and
+// measured from the flash at every rate the suites ask, and the console is
+// the default Uart.
+//
 // build: boards = x035f8
 // build: monitor_speed = 115200
 

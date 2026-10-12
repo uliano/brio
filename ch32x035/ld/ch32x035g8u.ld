@@ -60,13 +60,19 @@ SECTIONS
     {
         . = ALIGN(4);
         __data_start = .;
-        /* CODE THAT RUNS FROM SRAM: `.ram_text`, an input section a
-           function names for itself, placed first in .data so that the
+        /* CODE THAT RUNS FROM SRAM, placed first in .data so that the
            crt's copy of .data moves it into SRAM before main() and an
-           image that places nothing there gets zero bytes from this line.
-           What it buys is the fetch: the code flash runs behind two wait
-           states at 48 MHz (RM 20.3.1), the SRAM answers without them
-           (docs/ch32x035/platform.md, "A handler in SRAM"). */
+           image that places nothing there gets zero bytes from these
+           lines. `.fast_text` is code that MAY run from SRAM, for speed -
+           what a program opts into, util/placement.hpp's Hot<InRam> and
+           a program's own placed function; what it buys is the fetch:
+           the code flash runs behind two wait states at 48 MHz (RM
+           20.3.1), the SRAM answers without them
+           (docs/ch32x035/platform.md, "A handler in SRAM").
+           `.ram_text` is code that MUST, for correctness - nothing of
+           this stratum today, the name kept for what the family's own
+           pieces may need. */
+        *(.fast_text .fast_text.*)
         *(.ram_text .ram_text.*)
         . = ALIGN(4);
         *(.data .data.*)

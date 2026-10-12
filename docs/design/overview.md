@@ -592,8 +592,16 @@ to being a leaf by the same check)
 ([../ch32vx03/platform.md](../ch32vx03/platform.md)). A family
 whose linker script carries a `.ram_text` section may place a binding
 in SRAM: the SAM C21's page says what it buys
-([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM"),
-and the CH32X035's where a driver places its own per-frame body there
-instead, under a second section name a header's function needs
-([../ch32x035/platform.md](../ch32x035/platform.md), "A handler in
-SRAM").
+([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM").
+A DRIVER'S HOT PATH IN SRAM IS THE PROGRAM'S CHOICE, PER DRIVER
+([../../brio/util/placement.hpp](../../brio/util/placement.hpp)): the
+driver takes a placement tag, `InFlash` by default - its body inline
+where it was, not a byte of SRAM spent - or `InRam`, each hot path one
+flattened instance in `.fast_text.brio`, and the costs it states follow
+the tag. `.fast_text` is code that MAY run from SRAM, for speed, and a
+program names it on a function of its own; `.ram_text` keeps the name
+of code that MUST, for correctness (the RP2040's flash engine). A family
+whose linker scripts collect `.fast_text` says so on its platform type,
+and `InRam` anywhere else does not compile. The CH32X035 is the family
+it was born on ([../ch32x035/platform.md](../ch32x035/platform.md), "A
+handler in SRAM").

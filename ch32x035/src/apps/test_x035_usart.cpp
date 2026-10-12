@@ -81,8 +81,10 @@
 //      at low - and the control, the ring told to rank low
 //   s  (y) the transmit engine's blast: 4096 frames through the ring of
 //      256, timed by the far chip against the polled blast, each rate to
-//      3 Mbaud, the completion's body timed - the restart the driver runs
-//      from SRAM, gapless at every rate
+//      3 Mbaud, the completion's body timed - IN BOTH PLACEMENTS: the
+//      suite's port with its restart in SRAM, gapless at every rate, and
+//      its flash twin, gapless to 1.5 Mbaud and idle above it for no more
+//      than the restart outlasts the frame the shifter holds
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter and
@@ -104,6 +106,7 @@
 #include "ch32x035/pwr.hpp"
 #include "ch32x035/ticker.hpp"
 #include "ch32x035/usart.hpp"
+#include "util/placement.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
@@ -125,11 +128,17 @@ using Loop = Uart<4, P>;                 // PB0 TX, PB1 RX
 // receives on channel 8 (ch32x035/dma_engine.hpp's table), the receive
 // ring at very_high (the transport's default) - and the control of letter
 // r, the ring told to rank LOW.
-using Engined = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>>;
+// THE SUITE OPTS INTO SRAM for the engined port (util/placement.hpp's
+// InRam): letter s judges its block restart gapless at 3 Mbaud. Its FLASH
+// TWIN, the default a program gets, is letter s's other leg; the control
+// of letter r keeps the default too (its subject is the receive ring's
+// rank, not the restart).
+using Engined = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>, 0, UartOptions{}, InRam>;
+using EnginedFlash = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>>;
 using EnginedLow = Uart<4, P, 512, 256, UartFormat{}, DmaTxEngine<1>, DmaRxEngine<8>, 0,
                         UartOptions{.rx_priority = DmaPriority::low}>;
 /// Which transport owns USART4 and its two channels: the vectors serve it.
-enum class U4Owner : uint8_t { irq, engined, engined_low };
+enum class U4Owner : uint8_t { irq, engined, engined_flash, engined_low };
 volatile U4Owner u4_owner = U4Owner::irq;
 volatile uint32_t u4_entries = 0;
 volatile uint32_t dma_entries = 0;
@@ -1097,6 +1106,7 @@ Stream engined_stream(uint32_t rate, uint16_t n) {
 /// One calibrate leg with the DUT's frames from the TRANSMIT ENGINE: `n`
 /// bytes poured through write_bulk() into the ring of 256, the engine
 /// draining it block by block.
+template <typename E = Engined>
 Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
     Calib k{};
     link::Params a{};
@@ -1106,8 +1116,8 @@ Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
     if (!peer_act(link::Op::calibrate, a)) {
         return k;
     }
-    u4_owner = U4Owner::engined;
-    const bool up = Engined::init(clock, c.rate);
+    u4_owner = std::is_same_v<E, Engined> ? U4Owner::engined : U4Owner::engined_flash;
+    const bool up = E::init(clock, c.rate);
     (void)Rx4::input(PinPull::up);
     wait_for_peer_window();
     uint8_t chunk[64];
@@ -1121,13 +1131,13 @@ Calib engined_calibrate(const link::Cfg& c, uint16_t n) {
     const uint32_t t0 = Ticker::ticks();
     while (up && queued < n && Ticker::ticks() - t0 < 200u) {
         const uint32_t want = n - queued < 64u ? n - queued : 64u;
-        queued += Engined::write_bulk(std::span<const uint8_t>(chunk, want));
+        queued += E::write_bulk(std::span<const uint8_t>(chunk, want));
     }
-    while (!Engined::tx_idle() && Ticker::ticks() - t0 < 300u) {
+    while (!E::tx_idle() && Ticker::ticks() - t0 < 300u) {
     }
-    const uint16_t faults = Engined::dma_faults();
+    const uint16_t faults = E::dma_faults();
     k.blocks = dma_entries;
-    Engined::release();
+    E::release();
     u4_owner = U4Owner::irq;
     link::Report r{};
     if (!peer_report(r, 5) || leg_refused) {
@@ -1986,25 +1996,52 @@ void ts_tx_engine() {
         link::Cfg c{};
         c.rate = rate;
         const Calib ref = calibrate(c, 4096);
-        const Calib eng = engined_calibrate(c, 4096);
-        // The span difference in this chip's cycles: the peer counts ticks
-        // of 24 MHz, two HCLK cycles of a 48 MHz clock.
-        const int32_t gap_ticks = static_cast<int32_t>(eng.span) - static_cast<int32_t>(ref.span);
-        const int32_t per_block = eng.blocks != 0u ? 2 * gap_ticks / static_cast<int32_t>(eng.blocks) : 0;
-        print(serial, "  ", rate, ": the transmit engine's 4096 frames in ", eng.blocks, " blocks span ", eng.span,
-              " ticks against the polled blast's ", ref.span, " (");
-        print_ppm(eng.ppm - ref.ppm);
-        print(serial, "), ", per_block < 0 ? "-" : "", static_cast<uint32_t>(per_block < 0 ? -per_block : per_block),
-              " cycles a block, a frame being ", 10u * usart_divisor(SysClock::hz, rate), "; the completion's body ",
-              eng.blocks != 0u ? dma_body_sum / eng.blocks : 0u, " cycles (", dma_body_max, " at most)", crlf);
+        const uint32_t frame = 10u * usart_divisor(SysClock::hz, rate);
+        // The same blast twice: the port whose restart runs from SRAM, then
+        // its flash twin, each block boundary's idle the span difference
+        // in this chip's cycles - the peer counts ticks of 24 MHz, two
+        // HCLK cycles of a 48 MHz clock.
+        struct Leg {
+            Calib eng;
+            int32_t per_block;
+            uint32_t body;
+            uint32_t body_max;
+        };
+        auto leg = [&](const char* where, Calib eng) {
+            const int32_t gap_ticks = static_cast<int32_t>(eng.span) - static_cast<int32_t>(ref.span);
+            Leg l{eng, eng.blocks != 0u ? 2 * gap_ticks / static_cast<int32_t>(eng.blocks) : 0,
+                  eng.blocks != 0u ? dma_body_sum / eng.blocks : 0u, dma_body_max};
+            print(serial, "  ", rate, " ", where, ": the transmit engine's 4096 frames in ", eng.blocks,
+                  " blocks span ", eng.span, " ticks against the polled blast's ", ref.span, " (");
+            print_ppm(eng.ppm - ref.ppm);
+            print(serial, "), ", l.per_block < 0 ? "-" : "",
+                  static_cast<uint32_t>(l.per_block < 0 ? -l.per_block : l.per_block), " cycles a block, a frame being ",
+                  frame, "; the completion's body ", l.body, " cycles (", l.body_max, " at most)", crlf);
+            return l;
+        };
+        const Leg ram = leg("SRAM ", engined_calibrate<Engined>(c, 4096));
+        const Leg flash = leg("flash", engined_calibrate<EnginedFlash>(c, 4096));
         // The completion's whole round trip - the vector's entry and exit
-        // and the restart's body, which the driver runs from SRAM - inside
-        // what the shifter still holds when the block's last item lands,
-        // a frame and a half (240 cycles at 3 Mbaud): the next block is in
-        // before the line runs dry, at every rate.
-        judge(num(rate), " baud: the transmit engine's blast is gapless - 4096 frames within 500 ppm of the "
-              "polled blast's span",
-              ref.ok && eng.ok && near(eng.ppm, ref.ppm, 500));
+        // and the restart's body - inside what the shifter still holds when
+        // the block's last item lands, a frame and a half (240 cycles at 3
+        // Mbaud): from SRAM the next block is in before the line runs dry,
+        // at every rate.
+        judge(num(rate), " baud, the restart in SRAM: the transmit engine's blast is gapless - 4096 frames "
+              "within 500 ppm of the polled blast's span",
+              ref.ok && ram.eng.ok && near(ram.eng.ppm, ref.ppm, 500));
+        if (rate <= 1'500'000u) {
+            judge(num(rate), " baud, the restart in the flash: gapless too", ref.ok && flash.eng.ok &&
+                  near(flash.eng.ppm, ref.ppm, 500));
+        } else {
+            // Above it, from the flash, each block boundary idles the line
+            // for what the restart takes beyond the frame the shifter still
+            // holds - the vector's entry and exit 104 cycles at most
+            // (docs/ch32x035/platform.md) - and for no more.
+            judge(num(rate), " baud, the restart in the flash: every frame through, the line idle at a block "
+                  "boundary for no more than the restart less one frame",
+                  ref.ok && flash.eng.ok && flash.per_block >= 0 &&
+                      static_cast<uint32_t>(flash.per_block) <= flash.body + 104u - frame);
+        }
     }
     (void)link_command_mode();
 }
@@ -2026,35 +2063,47 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 
 extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
 
-/// USART4's vector IN SRAM, placed by this program (`.ram_text`, the
-/// linker script's): the interrupt transport's isr() is inline and calls
-/// nothing, so the whole per-frame path moves with the binding - what
-/// letter k's 3 Mbaud receive stands on (docs/ch32x035/usart.md).
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void usart4_handler() {
+/// USART4's vector IN SRAM, placed by this program (`.fast_text`, a plain
+/// function's name for it, util/placement.hpp): the interrupt transport's
+/// isr() is inline and calls nothing, so the whole per-frame path moves
+/// with the binding - what letter k's 3 Mbaud receive stands on
+/// (docs/ch32x035/usart.md).
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart4_handler() {
     u4_entries = u4_entries + 1u;
     switch (u4_owner) {
         case U4Owner::engined: (void)Engined::isr(); break;
+        case U4Owner::engined_flash: (void)EnginedFlash::isr(); break;
         case U4Owner::engined_low: (void)EnginedLow::isr(); break;
         default: (void)Loop::isr(); break;
     }
 }
 
+/// One engined port's DMA body, timed on the STK's own counter (one load
+/// each side): what a block boundary costs between the entry and the mret.
+template <typename E>
+[[gnu::always_inline]] inline void timed_dma() {
+    const uint32_t t0 = brio::stk()->CNTL;
+    (void)E::dma_isr();
+    const uint32_t t1 = brio::stk()->CNTL;
+    const uint32_t d = t1 >= t0 ? t1 - t0 : t1 + brio::stk()->CMPLR + 1u - t0;
+    dma_body_sum = dma_body_sum + d;
+    if (d > dma_body_max) {
+        dma_body_max = d;
+    }
+}
+
 /// USART4's two channels, 1 (transmit) and 8 (receive): the engined
-/// transport's dma_isr() serves both from one INTFR read.
+/// transport's dma_isr() serves both from one INTFR read. The owner read
+/// once, the port in SRAM tested first: its path is the one letter s
+/// judges at 3 Mbaud.
 [[gnu::always_inline]] inline void usart4_dma() {
     dma_entries = dma_entries + 1u;
-    if (u4_owner == U4Owner::engined) {
-        // The body timed on the STK's own counter (one load each side):
-        // what a block boundary costs between the entry and the mret.
-        const uint32_t t0 = brio::stk()->CNTL;
-        (void)Engined::dma_isr();
-        const uint32_t t1 = brio::stk()->CNTL;
-        const uint32_t d = t1 >= t0 ? t1 - t0 : t1 + brio::stk()->CMPLR + 1u - t0;
-        dma_body_sum = dma_body_sum + d;
-        if (d > dma_body_max) {
-            dma_body_max = d;
-        }
-    } else if (u4_owner == U4Owner::engined_low) {
+    const U4Owner o = u4_owner;
+    if (o == U4Owner::engined) {
+        timed_dma<Engined>();
+    } else if (o == U4Owner::engined_flash) {
+        timed_dma<EnginedFlash>();
+    } else if (o == U4Owner::engined_low) {
         (void)EnginedLow::dma_isr();
     }
 }

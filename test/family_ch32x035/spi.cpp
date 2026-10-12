@@ -165,7 +165,16 @@ struct Hosts<pins, true> {
     using Host = SpiHost<1, pins>;
     using Host8 = SpiHost<1, pins, DmaTxEngine<3>, DmaRxEngine<2>>;
     using Host16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600>;
+    // Both placements (util/placement.hpp): the default above, and a plain
+    // and an engined host whose per-frame paths run from SRAM.
+    using RamHost = SpiHost<1, pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
+    using RamHost16 = SpiHost<1, pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600, InRam>;
     static_assert(!Host::has_engines && Host8::has_engines && Host16::has_engines);
+    static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
+    // The costs follow the placement, and so do the thresholds drawn from
+    // them; the hold-off and the write-ahead do not.
+    static_assert(RamHost::pump_frame_cycles < Host::pump_frame_cycles &&
+                  RamHost::write_ahead_from(SpiDataSize::bits8) == Host::write_ahead_from(SpiDataSize::bits8));
     static_assert(std::is_trivially_copyable_v<typename Host::Request> && sizeof(typename Host::Request) == 40u);
     static_assert(Host::write_ahead_from(SpiDataSize::bits8) ==
                   spi_write_ahead_from(SpiDataSize::bits8, spi_default_hold_off_cycles));
@@ -180,6 +189,8 @@ struct Hosts<pins, true> {
         host_verbs<Host>(buf);
         host_verbs<Host8>(buf);
         host_verbs<Host16>(buf);
+        host_verbs<RamHost>(buf);
+        host_verbs<RamHost16>(buf);
         Loop::init_all();
         Loop::step();
         TimedLoop::init_all();
@@ -191,11 +202,14 @@ struct Hosts<pins, true> {
         if (Host::isr()) {
             post<PlainBus>(TransferDone{Host::status()});
         }
+        (void)RamHost::isr();
+        (void)RamHost16::isr();
     }
     static void dma_irq() {
         if (Host16::dma_isr()) {
             post<TimedBus>(TransferDone{Host16::status()});
         }
+        (void)RamHost16::dma_isr();
     }
 };
 
@@ -209,10 +223,11 @@ void everything() {
 
 // The app's glue: the SPI vector and the two channels, bound both ways the
 // hardware prologue can be built. The SPI vector is placed in SRAM as a
-// program places one (`.ram_text`), in the translation unit that also
-// emits the driver's own placed bodies (`.ram_text.brio`): the two names
-// are what lets GCC take both kinds in one unit
-// (docs/ch32x035/platform.md, "A handler in SRAM").
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void spi1_handler() { AllHosts::spi_irq(); }
+// program places one of its own plain functions (`.fast_text`), in the
+// translation unit that also emits the InRam hosts' trampolines
+// (`.fast_text.brio`): the two names are what lets GCC take both kinds in
+// one unit (util/placement.hpp, docs/ch32x035/platform.md, "A handler in
+// SRAM").
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void spi1_handler() { AllHosts::spi_irq(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { AllHosts::dma_irq(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { AllHosts::dma_irq(); }

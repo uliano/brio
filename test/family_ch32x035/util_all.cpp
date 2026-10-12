@@ -53,6 +53,7 @@
 #include "util/nv_record.hpp"
 #include "util/nv_writer.hpp"
 #include "util/persistent_panic.hpp"
+#include "util/placement.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
@@ -82,6 +83,8 @@ using SysClock = Clock<ClockSource::internal, 48'000'000>;
 using Serial = Uart<2, P>;
 
 static_assert(Platform<P>);
+// This family places .fast_text: both placements are its drivers'.
+static_assert(HotPlacement<InFlash, P> && HotPlacement<InRam, P>);
 
 // ---- storage: an NvStore with a ready interrupt, a FlashMedia ---------------
 struct FakeStore {

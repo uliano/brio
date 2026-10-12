@@ -162,9 +162,13 @@ undefined answers false and writes nothing:
 | interrupts | `rxne_interrupt`, `txe_interrupt`, `tc_interrupt`, `idle_interrupt`, `parity_interrupt`, `break_interrupt`, `cts_interrupt`, `error_interrupt`, and `interrupts(mask, on)` for CTLR1's |
 | flags and data | `status()`, `flag(mask)`, `clear_flags(mask)` (the write-zero ones), `clear_by_read()`, `tx_empty()`, `tx_complete()`, `rx_ready()`, `read_word()`, `write_word(w)` (nine bits), `read_data()`, `write_data(b)`, `take_errors()` |
 
-`Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts>`,
-the transport - the CH32V203's parameter list, `UartOptions` its last
-parameter (`half_duplex`, `rts`, `cts`, `rx_priority`). It refuses at
+`Uart<n, P, rx_size, tx_size, format, TxEngine, RxEngine, remap, opts,
+Placement>`, the transport - the CH32V203's parameter list, then
+`UartOptions` (`half_duplex`, `rts`, `cts`, `rx_priority`), then where
+the port's hot paths run from, util/placement.hpp's `InFlash` (the
+default) or `InRam` - the per-byte `isr()` and the transmit engine's
+block restart; `InRam` is refused on a platform that does not place
+`.fast_text`. It refuses at
 compile time an instance the part does not offer, a nine-bit or an
 invalid format (the rings carry bytes; nine bits are the resource's
 `read_word`), a column that is not a transport's on this part, an RTS or
@@ -248,6 +252,14 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() {
     if (Link::dma_isr()) { brio::post<LinkLines>(brio::RxActivity{}); }
 }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel1_handler() { (void)Link::dma_isr(); }
+```
+
+The block restart in SRAM, gapless to 3 Mbaud (Bench findings, letter
+`s`), is the port's placement:
+
+```cpp
+using Link = brio::Uart<4, P, 512, 256, brio::UartFormat{}, brio::DmaTxEngine<1>, brio::DmaRxEngine<8>, 0,
+                        brio::UartOptions{}, brio::InRam>;
 ```
 
 A program that ranks a copy of its own above the ring says so - and loses
@@ -365,18 +377,22 @@ reports. What it measured:
   (`read_span()`/`consume()`), arrives whole and in order at 1, 1.5, 2,
   2.4 and 3 Mbaud, and the eight-byte echo at 3 Mbaud comes back whole -
   WITH THE VECTOR IN SRAM, which the suite's program places
-  ([platform.md](platform.md), "A handler in SRAM"). THE INTERRUPT
-  TRANSPORT'S CEILING IS THE PLACEMENT'S: with the same vector in the
-  flash, the run arrived whole to 2 Mbaud, at 2.4 Mbaud the receive ring
-  filled behind the main loop (the run broken at byte 16 to 128 from run
-  to run, 31 to 154 bytes refused) and at 3 Mbaud the shift register
-  overran (the run broken within its first 21 bytes), and the echo at 3
-  Mbaud came back two bytes of eight. The transport takes one vector
+  (`.fast_text`, [platform.md](platform.md), "A handler in SRAM"), the
+  port in its default placement, its body inline in that vector. THE
+  INTERRUPT TRANSPORT'S CEILING IS THE PLACEMENT'S: with the same vector
+  in the flash, the run arrived whole to 2 Mbaud, at 2.4 Mbaud it broke
+  within its first 16 to 128 bytes (the receive ring full behind the
+  main loop, or an overrun) and at 3 Mbaud within its first 21, and the
+  echo at 3 Mbaud came back two to eight bytes of eight from run to run;
+  with the port's body placed (`InRam`, 488 bytes for the suite's
+  engined port) and the vector in the flash, whole to 2.4 Mbaud, and at
+  3 Mbaud 32 bytes before an overrun. The transport takes one vector
   entry a frame - the hardware prologue's round trip and a receive body
-  of about 30 instructions, all of it inline in the vector, no call -
-  against a frame of 160 cycles at 3 Mbaud and 200 at 2.4: from the flash
-  the entries leave the main loop too little of the frame, from SRAM they
-  leave it enough. The console's handler, the same body, measures 145
+  of about 30 instructions, no call when inline - against a frame of 160
+  cycles at 3 Mbaud and 200 at 2.4: from the flash the entries leave the
+  main loop too little of the frame, from SRAM they leave it enough, and
+  the vector's own path in the flash costs the placed body the last
+  step. The console's handler, the same body, measures 145
   cycles from the flash and 66 from SRAM (stamped in test_x035_spi), its
   vector 404 bytes there.
 - **THE SAME SWEEP ON THE ENGINES** (letter `k`, USART4 transmitting on
@@ -387,7 +403,7 @@ reports. What it measured:
   marks a lap (32 for 8192) where the interrupt transport took one a
   frame. 3 Mbaud, a divisor of 16 on both chips at 48 MHz, is the wire's
   ceiling here: THE ENGINED RECEIVE RUNS AT THE WIRE'S, a factor of one
-  and a half over the interrupt transport's 2 Mbaud. A full-duplex echo
+  and a half over the interrupt transport's 2 Mbaud from the flash. A full-duplex echo
   of 256 bytes at 3 Mbaud on both engines came back whole, no ORE. The
   engined receive's vectors run a few times a lap, so their placement
   does not bear on this.
@@ -411,20 +427,25 @@ reports. What it measured:
   the stream skipped.
 - **The transmit engine's blast, timed by the far chip** (letter `s`):
   4096 frames through the ring of 256 - 48 blocks, each started from the
-  last one's completion - against the polled blast taken back to back.
-  GAPLESS AT EVERY RATE TO 3 MBAUD: the span within 130 ppm of the polled
-  blast's at 1, 1.5, 2, 2.4 and 3 Mbaud (the HSI's wander between two
-  runs), -2 to 3 cycles a block. The restart - the ring's consume, the
-  claim, the next run, TC cleared and the five stores - runs from SRAM,
-  the driver's placement (`.ram_text.brio`, flattened so that no call is
-  left on it, 204 to 216 bytes a transport): 161 to 162 cycles of body
-  between its first and last statement (179 at most), inside the frame
-  and a half the shifter still holds when the block's last item lands
-  (240 cycles at 3 Mbaud). From the flash the same body took 370 to 377
-  cycles, about 90 instructions behind two wait states and three calls,
-  and each block boundary idled the line above 1.5 Mbaud: 40 to 59 cycles
-  a block at 2 Mbaud, 79 to 101 at 2.4 and 138 to 167 at 3, the span 0.2
-  to 1.2 per cent over the polled blast's.
+  last one's completion - against the polled blast taken back to back,
+  in BOTH PLACEMENTS of the port. The restart - the ring's consume, the
+  claim, the next run, TC cleared and the five stores - is flattened, no
+  call left on it, in either. UNDER `InRam` GAPLESS AT EVERY RATE TO 3
+  MBAUD: the span within 500 ppm of the polled blast's at 1, 1.5, 2, 2.4
+  and 3 Mbaud (the HSI's wander between two runs; -495 once at 3 Mbaud,
+  the instrument's margin), -1 to 6 cycles a block; 170 to 175 cycles of
+  body between its first and last statement (191 at most), inside the
+  frame and a half the shifter still holds when the block's last item
+  lands (240 cycles at 3 Mbaud), 204 bytes of SRAM a port
+  (`.fast_text.brio`). FROM THE FLASH (`InFlash`, the default) the same
+  body takes 271 to 273 cycles (293 at most): gapless to 1.5 Mbaud, and
+  above it each block boundary idles the line for what the restart
+  outlasts that window - 4 to 33 cycles a block at 2 Mbaud, 37 to 62 at
+  2.4 and 83 to 119 at 3, the span 0.04 to 0.86 per cent over the polled
+  blast's - and for no more (the suite's verdict). The vector's own path
+  in the flash counts too: in a suite vector that tested the port's
+  owner twice before the body, the `InRam` body took 188 cycles and the
+  line idled 21 cycles a block at 3 Mbaud.
 - **The frame matrix across the wire** (letter `l`): 8N1, 8E1, 8O1, 7E1,
   7O1, 9N1, 8N2, 8N0.5 and 8N1.5 at 115200, eight frames each echoed
   equal and counted clean; HALF A STOP BIT and one and a half timed as

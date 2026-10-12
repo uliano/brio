@@ -180,6 +180,14 @@ struct Ch32x035Platform {
     /// which is what lets util/ring.hpp take its lock-free path.
     static constexpr unsigned atomic_width = 4;
 
+    /// This family places `.fast_text` in SRAM: the seven linker scripts
+    /// collect it first in .data, which the crt copies before main(), and
+    /// the vector table holds absolute addresses, so code there is entered
+    /// and called without a veneer (docs/ch32x035/platform.md, "A handler
+    /// in SRAM"). A driver of this stratum may therefore be given
+    /// util/placement.hpp's InRam.
+    static constexpr bool places_fast_text = true;
+
     /**
      * Panic breadcrumb in .noinit: the linker script places the section
      * and the crt neither loads nor zeroes it, so a record written just

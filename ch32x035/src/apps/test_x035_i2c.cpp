@@ -34,11 +34,13 @@
 //
 // THE HOST RUNS ON ITS TWO VECTORS (events on i2c1_ev, errors on i2c1_er);
 // a letter that wants a tenure waited out spins on a flag the handler
-// sets. Two I2cHost instantiations share the one instance - the plain one
-// and the one on DMA channels 6 and 7 - and a flag says which owns the
-// vectors, since two tasks over one peripheral share its registers and
-// not their statics. The event vector's body is timed on the STK at every
-// entry (letter x reads the sums).
+// sets. Three I2cHost instantiations share the one instance - the plain
+// one and the one on DMA channels 6 and 7, both in the default placement,
+// and letter x's plain one with its event pump in SRAM (util/placement.hpp's
+// InRam) - and a flag says which owns the vectors, since tasks over one
+// peripheral share its registers and not their statics. The event
+// vector's body is timed on the STK at every entry (letter x reads the
+// sums).
 //
 // What is exercised, letter by letter:
 //   a  THE BLOCK: the lot probe first (present(), FREQ, CKCFGR and OADDR1
@@ -76,7 +78,8 @@
 //      pump and engines - then the last byte refused
 //   x  THE COST: every tenure shape on the pump and on the engines at 400
 //      kHz, its wall time against the wire's, its vector entries and the
-//      cycles inside them, start()'s own
+//      cycles inside them, start()'s own; the pump's shapes again with its
+//      entry in SRAM, the two placements side by side
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail leaves PB3 floating, refuses
@@ -109,6 +112,7 @@
 #include "kernel/time.hpp"
 #include "kernel/time_event.hpp"
 #include "util/i2c_bus.hpp"
+#include "util/placement.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
@@ -130,6 +134,8 @@ constexpr Serial serial;
 using H = I2c<1>;
 using Host = I2cHost<1>;
 using DmaHost = I2cHost<1, i2c1_default_pins, DmaTxEngine<6>, DmaRxEngine<7>>;
+/// Letter x's twin of Host, its event pump placed in SRAM.
+using RamHost = I2cHost<1, i2c1_default_pins, NoDmaEngine, NoDmaEngine, InRam>;
 using Client = I2cClient<1>;
 using SclPin = Pin<'C', 16>;
 using SdaPin = Pin<'C', 17>;
@@ -144,7 +150,7 @@ TestBench<Serial> bench;
 constexpr uint8_t nobody_addr = 0x23;
 
 /// Which task owns the instance's vectors.
-enum class Owner : uint8_t { host, dma_host, bus_ao };
+enum class Owner : uint8_t { host, dma_host, ram_host, bus_ao };
 volatile Owner owner = Owner::host;
 
 volatile bool host_done = false;
@@ -2178,6 +2184,52 @@ void tx_cost() {
           e255.body, " cycles of ", e255.wall, crlf);
     print(serial, "  the longest event entry of every shape above: ", longest_entry, " cycles, stamps included",
           crlf);
+    const uint32_t longest_flash = longest_entry;
+    // THE SAME PUMP IN SRAM: the plain host's twin, its event entry placed
+    // (util/placement.hpp's InRam), every pump shape again.
+    Host::release();
+    owner = Owner::ram_host;
+    (void)RamHost::init(clock);
+    longest_entry = 0;
+    (void)cost_of<RamHost>(1, 0);
+    const Cost m1 = cost_of<RamHost>(1, 0);
+    const Cost m16 = cost_of<RamHost>(16, 0);
+    const Cost m255 = cost_of<RamHost>(255, 0);
+    const Cost mr1 = cost_of<RamHost>(0, 1);
+    const Cost mr2 = cost_of<RamHost>(0, 2);
+    const Cost mr16 = cost_of<RamHost>(0, 16);
+    const Cost mreg4 = cost_of<RamHost>(1, 4);
+    const Cost mprobe = cost_of<RamHost>(0, 0);
+    RamHost::release();
+    host_ready();
+    print(serial, "  the pump with its entry in SRAM:", crlf);
+    print_cost("write 1      ", m1, wire(2));
+    print_cost("write 16     ", m16, wire(17));
+    print_cost("write 255    ", m255, wire(256));
+    print_cost("read 1       ", mr1, wire(2));
+    print_cost("read 2       ", mr2, wire(3));
+    print_cost("read 16      ", mr16, wire(17));
+    print_cost("reg 1 + 4    ", mreg4, wire(7));
+    print_cost("probe        ", mprobe, wire(1));
+    const uint32_t ram_body = m255.entries != 0u ? m255.body / m255.entries : 0u;
+    const uint32_t ram_read = mr16.entries != 0u ? mr16.body / mr16.entries : 0u;
+    print(serial, "  the pump's entry a byte, flash | SRAM: ", pump_body, " | ", ram_body,
+          " cycles over the 255-byte write, ", r16.entries != 0u ? r16.body / r16.entries : 0u, " | ", ram_read,
+          " over the 16-byte read; the longest entry ", longest_flash, " | ", longest_entry, crlf);
+    const bool ram_ok = m1.status == i2c_ok && m16.status == i2c_ok && m255.status == i2c_ok &&
+                        mr1.status == i2c_ok && mr2.status == i2c_ok && mr16.status == i2c_ok &&
+                        mreg4.status == i2c_ok && mprobe.status == i2c_ok;
+    bench.verdict("the pump in SRAM: every shape i2c_ok, the same entries as from the flash",
+                  ram_ok && m16.entries == w16.entries && m255.entries == w255.entries &&
+                      mr16.entries == r16.entries);
+    // From SRAM behind this suite's vector, which stays in the flash: the
+    // vector's own path (the storm budget, the owner, the stamps) is the
+    // flash's, the trampoline's body SRAM's.
+    bench.verdict("and its entry a quarter shorter than the flash's at least, over the 255-byte write and the "
+                  "16-byte read",
+                  ram_body != 0u && 4u * ram_body < 3u * pump_body && ram_read != 0u &&
+                      4u * ram_read < 3u * (r16.entries != 0u ? r16.body / r16.entries : 0u));
+    longest_entry = longest_flash;
     print(serial, "  unwedges so far (15.9.1's stuck BUSY taken out by start()): plain ", Host::unwedges(),
           ", engined ", DmaHost::unwedges(), crlf);
     const bool all_ok = w1.status == i2c_ok && w2.status == i2c_ok && w16.status == i2c_ok &&
@@ -2232,6 +2284,10 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_ev_handler() {
         if (DmaHost::isr()) {
             host_done = true;
         }
+    } else if (owner == Owner::ram_host) {
+        if (RamHost::isr()) {
+            host_done = true;
+        }
     } else if (owner == Owner::bus_ao) {
         if (Host::isr()) {
             brio::post<kl::I2cArb>(brio::TransferDone{Host::status()});
@@ -2251,6 +2307,10 @@ extern "C" BRIO_CH32_INTERRUPT void i2c1_er_handler() {
     error_isr_entries = error_isr_entries + 1u;
     if (owner == Owner::dma_host) {
         if (DmaHost::error_isr()) {
+            host_done = true;
+        }
+    } else if (owner == Owner::ram_host) {
+        if (RamHost::error_isr()) {
             host_done = true;
         }
     } else if (owner == Owner::bus_ao) {

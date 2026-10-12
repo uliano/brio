@@ -103,18 +103,22 @@
  * (UartOptions::rx_priority, the one knob) and the transmit engine at
  * high, the rule of docs/design/dma.md.
  *
- * THE TRANSMIT ENGINE'S BLOCK BOUNDARY RUNS FROM SRAM. A block's
- * completion releases its bytes and starts the next run while the shifter
- * still holds about a frame and a half; from the flash, behind its two
- * wait states, that restart took 371 cycles of body - longer than the
- * window above 1.5 Mbaud, so the line idled at every boundary. This driver
- * places the restart in SRAM (`.ram_text.brio`, flattened: the ring's
- * consume and read_span and the engine's launch inlined into it, no call
- * left on the path), and the body measures 162 cycles: gapless to 3 Mbaud
- * (docs/ch32x035/usart.md, letter s). The per-byte interrupt transport's
- * isr() is always inline and calls nothing, so the program places it with
- * the vector it binds when it runs that transport fast
- * (docs/ch32x035/platform.md, "A handler in SRAM").
+ * WHERE THE HOT PATHS RUN FROM: the port's placement, its last template
+ * parameter (util/placement.hpp) - inline in the vector that binds them by
+ * default, one instance each in SRAM under InRam. Two paths take it:
+ *  - THE TRANSMIT ENGINE'S BLOCK BOUNDARY. A block's completion releases
+ *    its bytes and starts the next run while the shifter still holds about
+ *    a frame and a half. The restart is flattened - the ring's consume and
+ *    read_span and the engine's launch inlined, no call left on the path -
+ *    and from the flash, behind the two wait states, it outlasts that
+ *    window above 1.5 Mbaud and the line idles at every boundary; under
+ *    InRam it is gapless to 3 Mbaud (docs/ch32x035/usart.md, letter s).
+ *  - THE PER-BYTE INTERRUPT TRANSPORT'S isr(), which calls nothing: under
+ *    InRam, behind a vector in the flash, it takes a gapless run in to
+ *    2.4 Mbaud where the flash takes 2; a program that places the VECTOR
+ *    itself (`.fast_text`) runs the inline body from SRAM with it, no call
+ *    at all, and takes 3 Mbaud (docs/ch32x035/platform.md, "A handler in
+ *    SRAM").
  *
  * WHY THE RING AND NOT THE VENDOR'S SHAPE. WCH's USART_Idle_Recv example
  * receives into two halves it swaps from the IDLE vector and the channel's
@@ -178,6 +182,7 @@
 #include "ch32x035/pfic.hpp"
 #include "ch32x035/pin.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
 
@@ -766,11 +771,16 @@ struct UartRxRing<true, Owner, size, Engine, P> {
  *
  * `P` is the platform, which the rings need to know whether an index can
  * be shared with a handler bare (atomic_width) or wants a guard.
+ * `Placement` is where the transmit engine's block restart runs from
+ * (util/placement.hpp; the file header): InFlash, the default, or InRam.
  */
 template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64,
           UartFormat format = {}, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine, uint8_t remap = 0, UartOptions opts = {}>
+          typename RxEngine = NoDmaEngine, uint8_t remap = 0, UartOptions opts = {}, typename Placement = InFlash>
 struct Uart {
+    static_assert(HotPlacement<Placement, P>,
+                  "brio Uart: the placement is util/placement.hpp's InFlash (the default) or InRam, and "
+                  "InRam only on a platform whose linker scripts place .fast_text");
     static_assert(instance >= 1u && instance <= 4u,
                   "brio Uart: this series has USART1..USART4");
     static_assert(device::has_usart(instance),
@@ -1024,8 +1034,17 @@ struct Uart {
      * util/serial_port.hpp posts on.
      */
     // always_inline: one call site (the app's vector binding), so the
-    // compiler saves only the registers this body uses.
+    // compiler saves only the registers this body uses. Through the port's
+    // placement (the file header): inline in the vector by default, one
+    // instance in SRAM under InRam.
     [[gnu::always_inline]] static bool isr() {
+        return Hot<Placement>::run([] { return isr_entry(); });
+    }
+
+private:
+    /// The interrupt body's path, written once: isr() runs it through the
+    /// port's placement.
+    [[gnu::always_inline]] static bool isr_entry() {
         bool rx_edge = false;
         bool waited = false;
         // With a receive engine the handler never reads DATAR, and the wait
@@ -1085,6 +1104,7 @@ struct Uart {
         return rx_edge;
     }
 
+public:
     // ---- byte transport (ByteSink / ByteSource) ---------------------------
 
     /// Queue one byte; false when the TX ring is full (print() spins).
@@ -1402,11 +1422,13 @@ private:
     }
 
     /// The transmit block's completion: its bytes released from the ring,
-    /// the next run started - in SRAM and flattened (the file header). The
-    /// section's name and noclone: brio/ch32x035/spi.hpp's pump_entry().
-    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]] static void tx_block_done() {
-        m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-        pump_tx();
+    /// the next run started - one flattened function of the port's
+    /// placement (the file header).
+    [[gnu::always_inline]] static void tx_block_done() {
+        Hot<Placement>::run([] {
+            m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+            pump_tx();
+        });
     }
 
     /// The transmit ring out to the wire, bounded: what rebase() and

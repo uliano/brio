@@ -44,10 +44,11 @@
 //      its SCK periods at every BR code, 8 and 16 bits; THE HIGH-SPEED
 //      READ's rate at every code (16.3.1's FHCLK/(BR+2) against 16.3.8's
 //      "/2 only"); and THE HOST'S COSTS - the engines' fixed cost, the
-//      pump's frame, the polled loops' frames (the driver runs the pump's
-//      entry and both loops from SRAM) - with the hold-off this
-//      image's handlers measure, and the pump with two frames in flight
-//      under the console's interrupts
+//      pump's frame, the polled loops' frames - IN BOTH PLACEMENTS, the
+//      suite's hosts in SRAM and their flash twins, each judged against
+//      the constants the driver states for its placement, with the
+//      hold-off this image's handlers measure, and the pump with two
+//      frames in flight under the console's interrupts
 //   c  the refusals: the chapter's, the high-speed read off /2 at run
 //      time, a ceiling under HCLK/256, and the client configurations this
 //      die does not serve
@@ -103,6 +104,7 @@
 #include "kernel/post.hpp"
 #include "kernel/tenuto.hpp"
 #include "kernel/time.hpp"
+#include "util/placement.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
@@ -122,8 +124,15 @@ using Serial = Uart<2, P>;
 constexpr Serial serial;
 
 using S = Spi<1>;
-using Host = SpiHost<1>;
-using DmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
+// THE SUITE OPTS INTO SRAM for its two hosts (util/placement.hpp's InRam):
+// its loop verdicts are the wire's. Their FLASH TWINS - the default a
+// program gets, the same instance and engines - are letter b's other
+// column, so that every cost the driver states is measured both ways.
+using Host = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
+using DmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>,
+                        spi_default_hold_off_cycles, InRam>;
+using FlashHost = SpiHost<1>;
+using FlashDmaHost = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>>;
 using Client = SpiClient<1>;
 using CsPin = Pin<'A', 4>;
 using SckPin = Pin<'A', 5>;
@@ -133,7 +142,7 @@ using MosiPin = Pin<'A', 7>;
 TwoKeyTestBench<Serial, 'y'> bench;
 
 /// Which task owns SPI1 and its two channels: the vectors serve it.
-enum class Owner : uint8_t { host, dma_host, bus_ao, none };
+enum class Owner : uint8_t { host, dma_host, flash_host, flash_dma_host, bus_ao, none };
 volatile Owner owner = Owner::host;
 volatile bool host_done = false;
 volatile uint32_t spi_isr_entries = 0;
@@ -188,22 +197,40 @@ bool same(const uint8_t* a, const uint8_t* b, uint16_t n) {
     return true;
 }
 
+/// The owner the vectors serve for a host type.
+template <typename H>
+constexpr Owner owner_of() {
+    if constexpr (std::is_same_v<H, Host>) {
+        return Owner::host;
+    } else if constexpr (std::is_same_v<H, DmaHost>) {
+        return Owner::dma_host;
+    } else if constexpr (std::is_same_v<H, FlashHost>) {
+        return Owner::flash_host;
+    } else {
+        static_assert(std::is_same_v<H, FlashDmaHost>);
+        return Owner::flash_dma_host;
+    }
+}
+
 /// The plain host, PA4 its GPIO select held high.
+template <typename H = Host>
 void host_ready() {
-    owner = Owner::host;
-    (void)Host::init(clock);
+    owner = owner_of<H>();
+    (void)H::init(clock);
     CsPin::output(true);
 }
 
+template <typename H = DmaHost>
 void dma_ready(bool high_speed = false) {
-    owner = Owner::dma_host;
-    (void)DmaHost::init(clock, {.high_speed_read = high_speed});
+    owner = owner_of<H>();
+    (void)H::init(clock, {.high_speed_read = high_speed});
     CsPin::output(true);
 }
 
+template <typename H = Host>
 uint8_t host_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx, uint16_t len,
                   SpiMode mode, SpiClock rate, SpiDataSize bits, bool polled) {
-    Host::Request r{};
+    typename H::Request r{};
     r.cs = cs;
     r.cmd = lend<Lease::reply>(cmd);
     r.cmd_len = cmd_len;
@@ -216,23 +243,24 @@ uint8_t host_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t*
     r.polled = polled;
     host_done = false;
     spi_isr_entries = 0;
-    if (Host::start(r)) {
-        return Host::status();
+    if (H::start(r)) {
+        return H::status();
     }
     for (uint32_t i = 0; i < 8'000'000UL && !host_done; ++i) {
     }
     if (!host_done) {
         print(serial, "    STALL: STATR=", hex(S::status()), " CTLR1=", hex(S::regs().CTLR1), " CTLR2=",
               hex(S::regs().CTLR2), " isr entries ", spi_isr_entries, crlf);
-        (void)Host::recover();
+        (void)H::recover();
         return no_answer;
     }
-    return Host::status();
+    return H::status();
 }
 
+template <typename H = DmaHost>
 uint8_t dma_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx, uint16_t len,
                  SpiClock rate, SpiDataSize bits, bool polled, SpiMode mode = SpiMode::mode0) {
-    DmaHost::Request r{};
+    typename H::Request r{};
     r.cs = cs;
     r.cmd = lend<Lease::reply>(cmd);
     r.cmd_len = cmd_len;
@@ -244,18 +272,18 @@ uint8_t dma_xfer(PinRef cs, const uint8_t* cmd, uint8_t cmd_len, const uint8_t* 
     r.bits = bits;
     r.polled = polled;
     host_done = false;
-    if (DmaHost::start(r)) {
-        return DmaHost::status();
+    if (H::start(r)) {
+        return H::status();
     }
     for (uint32_t i = 0; i < 8'000'000UL && !host_done; ++i) {
     }
     if (!host_done) {
         print(serial, "    STALL (dma): STATR=", hex(S::status()), " ch2 flags=", hex(DmaChannel<2>::flags()),
               " ch3 flags=", hex(DmaChannel<3>::flags()), crlf);
-        (void)DmaHost::recover();
+        (void)H::recover();
         return no_answer;
     }
-    return DmaHost::status();
+    return H::status();
 }
 
 /// The SCK divisor a BR code ASKS for, HCLK / 2^(BR + 1) (16.3.1).
@@ -265,13 +293,14 @@ uint32_t asked_divisor(SpiClock rate) { return 2u << static_cast<uint8_t>(rate);
 /// `big_n`- and a `small_n`-frame block, in HCLK cycles x 1000 per frame:
 /// the transaction's fixed cost cancels. The best of three of each; the
 /// select is the GPIO PA4, held HIGH (the request names no select).
+template <typename H = DmaHost>
 uint32_t frame_x1000(SpiClock rate, SpiMode mode, SpiDataSize bits, uint16_t big_n, uint16_t small_n,
                      uint32_t* fixed = nullptr) {
     auto best = [&](uint16_t n) {
         uint32_t least = 0xFFFFFFFFu;
         for (uint8_t k = 0; k < 3u; ++k) {
             const uint32_t t0 = cycles_now();
-            (void)dma_xfer({}, nullptr, 0, tx_buf, rx_buf, n, rate, bits, false, mode);
+            (void)dma_xfer<H>({}, nullptr, 0, tx_buf, rx_buf, n, rate, bits, false, mode);
             const uint32_t took = cycles_now() - t0;
             least = took < least ? took : least;
         }
@@ -880,9 +909,9 @@ void ta_block() {
 // ===========================================================================
 
 /// THE INSTRUCTION FETCH, measured: the transmit-only loop's own shape over
-/// the resource, once in the flash and once in SRAM (`.ram_text`, which the
-/// linker script carries in .data and the crt copies with it), 256 and 32
-/// frames at the same rate.
+/// the resource, once in the flash and once in SRAM (`.fast_text`, a plain
+/// function's name for it, which the linker script carries in .data and the
+/// crt copies with it), 256 and 32 frames at the same rate.
 template <int where>
 [[gnu::noinline]] void tx_loop_copy(const uint8_t* p, uint32_t n) {
     SpiRegs& r = S::regs();
@@ -898,7 +927,7 @@ template <int where>
     (void)r.DATAR;
     (void)r.STATR;
 }
-[[gnu::section(".ram_text"), gnu::noinline]] void tx_loop_sram(const uint8_t* p, uint32_t n) {
+[[gnu::section(".fast_text"), gnu::noinline]] void tx_loop_sram(const uint8_t* p, uint32_t n) {
     SpiRegs& r = S::regs();
     do {
         while ((r.STATR & spi_txe) == 0u) {
@@ -930,6 +959,106 @@ uint32_t loop_frame_x10(F loop, SpiClock rate) {
     return (best(256) - best(32)) * 10u / 224u;
 }
 
+void print_x10(uint32_t v) { print(serial, v / 10u, ".", v % 10u); }
+
+/// THE HOST'S COSTS for one placement (a plain host and an engined one of
+/// it): the engines' fixed cost at /4, the pump's frame at /2 and /16 and
+/// its fixed cost, the polled loops' frames at /2, /4, /16, /8 and /64 and
+/// the receive loop's fixed cost at /4, a zero-length and a 3-frame polled
+/// request - frames x10.
+struct PathCosts {
+    uint32_t engine_fixed;
+    uint32_t pump_div2, pump_div16, pump_fixed;
+    uint32_t rd[5], wr[5], rd_fixed;
+    uint32_t empty, three;
+};
+
+template <typename H, typename D>
+PathCosts measure_costs() {
+    PathCosts c{};
+    dma_ready<D>();
+    (void)frame_x1000<D>(SpiClock::div4, SpiMode::mode0, SpiDataSize::bits8, 256, 32, &c.engine_fixed);
+    D::release();
+    // The pump's frame: a pumped receive of 256 and of 32 frames at /2,
+    // where the handler bounds the bus - the difference over 224.
+    host_ready<H>();
+    auto pump_time = [](uint16_t n, SpiClock rate) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t t0 = cycles_now();
+            (void)host_xfer<H>({}, nullptr, 0, tx_buf, rx_buf, n, SpiMode::mode0, rate, SpiDataSize::bits8, false);
+            const uint32_t took = cycles_now() - t0;
+            least = took < least ? took : least;
+        }
+        return least;
+    };
+    const uint32_t pump32_div2 = pump_time(32, SpiClock::div2);
+    c.pump_div2 = (pump_time(256, SpiClock::div2) - pump32_div2) * 10u / 224u;
+    c.pump_fixed = pump32_div2 - 32u * c.pump_div2 / 10u;
+    c.pump_div16 = (pump_time(256, SpiClock::div16) - pump_time(32, SpiClock::div16)) * 10u / 224u;
+    // The polled loops: the receive loop and the transmit-only loop, 256
+    // frames each against 32.
+    auto polled_time = [](uint16_t n, SpiClock rate, bool read) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const uint32_t t0 = cycles_now();
+            (void)host_xfer<H>({}, nullptr, 0, tx_buf, read ? rx_buf : nullptr, n, SpiMode::mode0, rate,
+                               SpiDataSize::bits8, true);
+            const uint32_t took = cycles_now() - t0;
+            least = took < least ? took : least;
+        }
+        return least;
+    };
+    const SpiClock rates[5] = {SpiClock::div2, SpiClock::div4, SpiClock::div16, SpiClock::div8, SpiClock::div64};
+    for (uint8_t i = 0; i < 5u; ++i) {
+        const uint32_t rd32 = polled_time(32, rates[i], true);
+        c.rd[i] = (polled_time(256, rates[i], true) - rd32) * 10u / 224u;
+        c.wr[i] = (polled_time(256, rates[i], false) - polled_time(32, rates[i], false)) * 10u / 224u;
+        if (i == 1u) {
+            c.rd_fixed = rd32 - 32u * c.rd[i] / 10u;
+        }
+    }
+    // THE INSTRUMENT AND A SMALL REQUEST: a zero-length request through the
+    // same wrapper (start() answers at once - the wrapper and the stopwatch
+    // alone), and a 3-frame polled request (a command and two data frames,
+    // D/C unscripted, the rate unchanged) at /16 against its wire's 384.
+    auto small_time = [](uint16_t len, uint8_t cmd_len) {
+        uint32_t least = 0xFFFFFFFFu;
+        for (uint8_t k = 0; k < 5u; ++k) {
+            const uint32_t t0 = cycles_now();
+            (void)host_xfer<H>({}, cmd_buf, cmd_len, tx_buf, rx_buf, len, SpiMode::mode0, SpiClock::div16,
+                               SpiDataSize::bits8, true);
+            const uint32_t took = cycles_now() - t0;
+            least = took < least ? took : least;
+        }
+        return least;
+    };
+    (void)small_time(1, 0);   // the rate and mode in force: the compare's unchanged path from here on
+    c.empty = small_time(0, 0);
+    c.three = small_time(2, 1);
+    H::release();
+    return c;
+}
+
+/// `got` within `pct` percent of `want`.
+bool within(uint32_t got, uint32_t want, uint32_t pct) {
+    const uint32_t tol = want * pct / 100u;
+    return got + tol >= want && got <= want + tol;
+}
+
+/// The costs measured against the constants the host states for its
+/// placement: the pump's frame within 10 % and the dead bus within 2
+/// cycles - the placement's own - and the fixed costs, which carry the
+/// wrapper's layout (the host's comment), within 30 %.
+template <typename H>
+bool costs_match(const PathCosts& c) {
+    const uint32_t gap = c.rd[1] > 320u ? (c.rd[1] - 320u + 5u) / 10u : 0u;
+    return within(c.engine_fixed, H::engine_fixed_cycles, 30u) &&
+           within(c.pump_div2 / 10u, H::pump_frame_cycles, 10u) &&
+           within(c.pump_fixed, H::pump_fixed_cycles, 30u) && within(c.rd_fixed, H::polled_fixed_cycles, 30u) &&
+           gap + 2u >= H::polled_gap_cycles && gap <= H::polled_gap_cycles + 2u;
+}
+
 void tb_ladder() {
     dma_ready();
     fill_pattern(tx_buf, 512, 0x3C);
@@ -939,15 +1068,10 @@ void tb_ladder() {
     print(serial, "  a frame inside an engined block, in thousandths of its SCK periods at the rate asked "
                   "(8 bits):",
           crlf, "   ");
-    uint32_t fixed_div4 = 0;
     for (uint8_t code = 0; code < 8u; ++code) {
         const SpiClock rate = static_cast<SpiClock>(code);
-        uint32_t fixed = 0;
-        const uint32_t f = frame_x1000(rate, SpiMode::mode0, SpiDataSize::bits8, 256, 32, &fixed);
+        const uint32_t f = frame_x1000(rate, SpiMode::mode0, SpiDataSize::bits8, 256, 32);
         const uint32_t pm = permille_of(f, 8, asked_divisor(rate));
-        if (code == 1u) {
-            fixed_div4 = fixed;
-        }
         print(serial, " /", asked_divisor(rate), " ", pm);
         if (wire_ok(pm)) {
             ++exact;
@@ -1002,66 +1126,83 @@ void tb_ladder() {
                       return f >= 15'840u && f <= 16'480u;
                   }());
 
-    // THE HOST'S COSTS. The engines' fixed cost a transaction: a 32-frame
-    // block's time less 32 of its frames at /4 (the line above).
-    print(serial, "  the engines' fixed cost at /4 (the 32-frame block less 32 frames): ", fixed_div4,
-          " cycles, the instrument inside it", crlf);
-
-    // The pump's frame: a pumped receive of 256 and of 32 frames at /2,
-    // where the handler bounds the bus - the difference over 224.
-    host_ready();
-    auto pump_time = [](uint16_t n, SpiClock rate) {
-        uint32_t least = 0xFFFFFFFFu;
-        for (uint8_t k = 0; k < 3u; ++k) {
-            const uint32_t t0 = cycles_now();
-            (void)host_xfer({}, nullptr, 0, tx_buf, rx_buf, n, SpiMode::mode0, rate, SpiDataSize::bits8, false);
-            const uint32_t took = cycles_now() - t0;
-            least = took < least ? took : least;
-        }
-        return least;
-    };
-    const uint32_t pump32_div2 = pump_time(32, SpiClock::div2);
-    const uint32_t pump_div2 = (pump_time(256, SpiClock::div2) - pump32_div2) * 10u / 224u;
-    const uint32_t pump_fixed = pump32_div2 - 32u * pump_div2 / 10u;
-    const uint32_t pump_div16 = (pump_time(256, SpiClock::div16) - pump_time(32, SpiClock::div16)) * 10u / 224u;
-    print(serial, "  the pump: a frame at /2 ", pump_div2 / 10u, ".", pump_div2 % 10u, " cycles (the wire 16), at /16 ",
-          pump_div16 / 10u, ".", pump_div16 % 10u, " (the wire 128); its fixed cost a transaction ", pump_fixed,
-          " (the 32-frame line less 32 frames, the instrument inside it); handler body max ", spi_body_max, crlf);
-
-    // The polled loops: the receive loop and the transmit-only loop, 256
-    // frames each at /2, /4 and /16.
-    auto polled_time = [](uint16_t n, SpiClock rate, bool read) {
-        uint32_t least = 0xFFFFFFFFu;
-        for (uint8_t k = 0; k < 3u; ++k) {
-            const uint32_t t0 = cycles_now();
-            (void)host_xfer({}, nullptr, 0, tx_buf, read ? rx_buf : nullptr, n, SpiMode::mode0, rate,
-                            SpiDataSize::bits8, true);
-            const uint32_t took = cycles_now() - t0;
-            least = took < least ? took : least;
-        }
-        return least;
-    };
-    uint32_t rd[5], wr[5], rd_fixed = 0;
-    const SpiClock rates[5] = {SpiClock::div2, SpiClock::div4, SpiClock::div16, SpiClock::div8, SpiClock::div64};
-    for (uint8_t i = 0; i < 5u; ++i) {
-        const uint32_t rd32 = polled_time(32, rates[i], true);
-        rd[i] = (polled_time(256, rates[i], true) - rd32) * 10u / 224u;
-        wr[i] = (polled_time(256, rates[i], false) - polled_time(32, rates[i], false)) * 10u / 224u;
-        if (i == 1u) {
-            rd_fixed = rd32 - 32u * rd[i] / 10u;
-        }
-    }
-    print(serial, "  the polled receive loop a frame: /2 ", rd[0] / 10u, ".", rd[0] % 10u, ", /4 ", rd[1] / 10u, ".",
-          rd[1] % 10u, ", /16 ", rd[2] / 10u, ".", rd[2] % 10u, " cycles (the wire 16, 32, 128); /64, two in flight, ",
-          rd[4] / 10u, ".", rd[4] % 10u, " (the wire 512)", crlf);
-    bench.verdict("the receive loop keeps two frames in flight from /64 and runs there at the wire (3 %)",
-                  rd[4] <= 5274u);
-    print(serial, "  the transmit-only loop a frame: /2 ", wr[0] / 10u, ".", wr[0] % 10u, ", /4 ", wr[1] / 10u, ".",
-          wr[1] % 10u, ", /8 ", wr[3] / 10u, ".", wr[3] % 10u, ", /16 ", wr[2] / 10u, ".", wr[2] % 10u,
-          "; the receive loop's fixed cost at /4 ", rd_fixed, crlf);
-    bench.verdict("THE TRANSMIT-ONLY LOOP, run from SRAM, is within 5 % of the wire at /2 and /4 and at the wire "
+    // THE HOST'S COSTS, both placements: the suite's hosts in SRAM, then
+    // their flash twins - the same measurement, the constants each states.
+    const PathCosts ram = measure_costs<Host, DmaHost>();
+    const PathCosts flash = measure_costs<FlashHost, FlashDmaHost>();
+    print(serial, "  THE HOST'S COSTS, SRAM | flash (cycles; x.y a frame):", crlf);
+    print(serial, "    the engines' fixed cost at /4 (the 32-frame block less 32 frames): ", ram.engine_fixed, " | ",
+          flash.engine_fixed, " (constants ", Host::engine_fixed_cycles, " | ", FlashHost::engine_fixed_cycles, ")",
+          crlf);
+    print(serial, "    the pump a frame at /2 (the wire 16): ");
+    print_x10(ram.pump_div2);
+    print(serial, " | ");
+    print_x10(flash.pump_div2);
+    print(serial, "; at /16 (the wire 128): ");
+    print_x10(ram.pump_div16);
+    print(serial, " | ");
+    print_x10(flash.pump_div16);
+    print(serial, " (constants ", Host::pump_frame_cycles, " | ", FlashHost::pump_frame_cycles, ")", crlf);
+    print(serial, "    the pump's fixed cost (the 32-frame line less 32 frames): ", ram.pump_fixed, " | ",
+          flash.pump_fixed, " (constants ", Host::pump_fixed_cycles, " | ", FlashHost::pump_fixed_cycles, ")",
+          crlf);
+    print(serial, "    the receive loop a frame /2 /4 /16 (the wire 16, 32, 128): ");
+    print_x10(ram.rd[0]);
+    print(serial, " ");
+    print_x10(ram.rd[1]);
+    print(serial, " ");
+    print_x10(ram.rd[2]);
+    print(serial, " | ");
+    print_x10(flash.rd[0]);
+    print(serial, " ");
+    print_x10(flash.rd[1]);
+    print(serial, " ");
+    print_x10(flash.rd[2]);
+    print(serial, "; /64, two in flight (the wire 512): ");
+    print_x10(ram.rd[4]);
+    print(serial, " | ");
+    print_x10(flash.rd[4]);
+    print(serial, crlf, "    its fixed cost at /4: ", ram.rd_fixed, " | ", flash.rd_fixed, " (constants ",
+          Host::polled_fixed_cycles, " | ", FlashHost::polled_fixed_cycles, "), its dead bus a frame at /4 ");
+    print_x10(ram.rd[1] > 320u ? ram.rd[1] - 320u : 0u);
+    print(serial, " | ");
+    print_x10(flash.rd[1] > 320u ? flash.rd[1] - 320u : 0u);
+    print(serial, " (constants ", Host::polled_gap_cycles, " | ", FlashHost::polled_gap_cycles, ")", crlf);
+    print(serial, "    the transmit-only loop a frame /2 /4 /8 /16: ");
+    print_x10(ram.wr[0]);
+    print(serial, " ");
+    print_x10(ram.wr[1]);
+    print(serial, " ");
+    print_x10(ram.wr[3]);
+    print(serial, " ");
+    print_x10(ram.wr[2]);
+    print(serial, " | ");
+    print_x10(flash.wr[0]);
+    print(serial, " ");
+    print_x10(flash.wr[1]);
+    print(serial, " ");
+    print_x10(flash.wr[3]);
+    print(serial, " ");
+    print_x10(flash.wr[2]);
+    print(serial, crlf, "    a zero-length request through the suite's wrapper: ", ram.empty, " | ", flash.empty,
+          "; a 3-frame polled request at /16: ", ram.three, " | ", flash.three,
+          " (the wire's 384 and the wrapper inside it)", crlf);
+    bench.verdict("the receive loop keeps two frames in flight from /64 and runs there at the wire (3 %), "
+                  "in both placements",
+                  ram.rd[4] <= 5274u && flash.rd[4] <= 5274u);
+    bench.verdict("THE TRANSMIT-ONLY LOOP IN SRAM is within 5 % of the wire at /2 and /4 and at the wire "
                   "(3 %) from /8",
-                  wr[0] <= 168u && wr[1] <= 336u && wr[3] <= 659u && wr[2] <= 1319u);
+                  ram.wr[0] <= 168u && ram.wr[1] <= 336u && ram.wr[3] <= 659u && ram.wr[2] <= 1319u);
+    // From the flash at /2 the loop's turn fetched behind the wait states
+    // is the bound, and where the loop sits decides it (20.0 and 28.0
+    // cycles a frame measured in two builds): printed, not judged.
+    bench.verdict("and from the flash within 5 % of the wire at /4 and at the wire from /8",
+                  flash.wr[1] <= 336u && flash.wr[3] <= 659u && flash.wr[2] <= 1319u);
+    bench.verdict("SRAM shortens the pump's frame and the receive loop's at /2",
+                  ram.pump_div2 < flash.pump_div2 && ram.rd[0] < flash.rd[0]);
+    bench.verdict("THE CONSTANTS FOLLOW THE PLACEMENT: the pump's frame within 10 % of the one its host "
+                  "states, the dead bus within 2 cycles, each fixed cost within 30 %",
+                  costs_match<Host>(ram) && costs_match<FlashHost>(flash));
     host_ready();
     const uint32_t flash2 = loop_frame_x10(tx_loop_copy<0>, SpiClock::div2);
     const uint32_t sram2 = loop_frame_x10(tx_loop_sram, SpiClock::div2);
@@ -1070,28 +1211,6 @@ void tb_ladder() {
     print(serial, "  THE FETCH: the bare transmit loop a frame, from the flash /2 ", flash2 / 10u, ".", flash2 % 10u,
           " /4 ", flash4 / 10u, ".", flash4 % 10u, "; from SRAM /2 ", sram2 / 10u, ".", sram2 % 10u, " /4 ",
           sram4 / 10u, ".", sram4 % 10u, " cycles", crlf);
-
-    // THE INSTRUMENT AND A SMALL REQUEST: a zero-length request through the
-    // same wrapper (start() answers at once - the wrapper and the stopwatch
-    // alone), and a 3-frame polled request (a command and two data frames,
-    // D/C unscripted, the rate unchanged) at /16 against its wire's 384.
-    auto small_time = [](uint16_t len, uint8_t cmd_len) {
-        uint32_t least = 0xFFFFFFFFu;
-        for (uint8_t k = 0; k < 5u; ++k) {
-            const uint32_t t0 = cycles_now();
-            (void)host_xfer({}, cmd_buf, cmd_len, tx_buf, rx_buf, len, SpiMode::mode0, SpiClock::div16,
-                            SpiDataSize::bits8, true);
-            const uint32_t took = cycles_now() - t0;
-            least = took < least ? took : least;
-        }
-        return least;
-    };
-    (void)small_time(1, 0);   // the rate and mode in force: the compare's unchanged path from here on
-    const uint32_t empty = small_time(0, 0);
-    const uint32_t three = small_time(2, 1);
-    print(serial, "  a zero-length request through the suite's wrapper: ", empty, " cycles; a 3-frame polled request "
-                  "at /16: ",
-          three, " cycles, the wire's 384 and the wrapper inside it", crlf);
 
     // THE HOLD-OFF THIS IMAGE MEASURES: the longest body of the console's
     // and the tick's handlers so far, stamped on the STK.
@@ -2440,6 +2559,16 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
                 host_done = true;
             }
             break;
+        case Owner::flash_dma_host:
+            if (FlashDmaHost::isr()) {
+                host_done = true;
+            }
+            break;
+        case Owner::flash_host:
+            if (FlashHost::isr()) {
+                host_done = true;
+            }
+            break;
         case Owner::bus_ao:
             if (Host::isr()) {
                 brio::post<kl::SpiArb>(brio::TransferDone{Host::status()});
@@ -2465,6 +2594,8 @@ extern "C" BRIO_CH32_INTERRUPT void spi1_handler() {
 [[gnu::always_inline]] inline void spi_dma() {
     dma_isr_entries = dma_isr_entries + 1u;
     if (owner == Owner::dma_host && DmaHost::dma_isr()) {
+        host_done = true;
+    } else if (owner == Owner::flash_dma_host && FlashDmaHost::dma_isr()) {
         host_done = true;
     }
 }

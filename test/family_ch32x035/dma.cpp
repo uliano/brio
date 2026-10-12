@@ -175,6 +175,8 @@ static_assert(Console::has_tx_engine && Console::has_rx_engine);
 using TxOnly = Uart<2, P, 64, 64, UartFormat{}, DmaTxEngine<7>>;
 using RxOnly = Uart<2, P, 128, 64, UartFormat{}, NoDmaEngine, DmaRxEngine<6>, 0,
                     UartOptions{.rx_priority = DmaPriority::low}>;
+// The transmit engine's block restart in SRAM (util/placement.hpp's InRam).
+using RamConsole = Uart<2, P, 64, 128, UartFormat{}, DmaTxEngine<7>, DmaRxEngine<6>, 0, UartOptions{}, InRam>;
 
 template <typename S>
 void transport_verbs() {
@@ -218,6 +220,7 @@ void everything() {
     transport_verbs<Console>();
     transport_verbs<TxOnly>();
     transport_verbs<RxOnly>();
+    transport_verbs<RamConsole>();
     default_column_engines<4>();
     default_column_engines<1>();
     (void)Dma::any_working();
@@ -225,10 +228,13 @@ void everything() {
 }
 
 // Vector bindings, as an app writes them - the console's placed in SRAM as
-// a program places one (`.ram_text`), beside the transport's own placed
-// completion (`.ram_text.brio`) in this unit.
-extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void usart2_handler() { (void)Console::isr(); }
-extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Console::dma_isr(); }
+// a program places one of its own plain functions (`.fast_text`), beside
+// the InRam port's placed completion (`.fast_text.brio`) in this unit.
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart2_handler() { (void)Console::isr(); }
+extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() {
+    (void)Console::dma_isr();
+    (void)RamConsole::dma_isr();
+}
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Console::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { (void)Copy8::isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel5_handler() { (void)Copy::isr(); }

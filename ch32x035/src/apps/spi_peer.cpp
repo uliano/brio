@@ -77,7 +77,10 @@
 // same pads, PA4 a GPIO chip select this end drives low for the whole burst
 // (one frame a request, spi_link's gap_us apart), and ss_pulse drives PA4
 // low from GPIO for its microseconds, the SPI released first: the far
-// host's MODF from a second chip.
+// host's MODF from a second chip. THAT HOST KEEPS THE DEFAULT PLACEMENT,
+// its loops in the flash (util/placement.hpp): one polled frame a request,
+// the gap between requests the protocol's, so the loop's frame is never
+// the bound - and the client's runs place nothing.
 //
 // THE SUPPLY at boot (the desk's rule for an image that drives a link pad):
 // the voltage detector at PLS 10, 3.0 V (pwr.hpp); below it the peer stays

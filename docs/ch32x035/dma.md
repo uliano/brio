@@ -163,7 +163,7 @@ each half into a ring of their own:
 |---|---|---|---|
 | the USART's block start (`pump_tx`, a run in the ring) | 58 over three bodies (`pump_tx`, the ring's `read_span`, the engine's `launch`) | 5 stores, no load (and one USART store: TC written 0) | - |
 | the USART's mask around it | 6 between the `csrrci` and the `csrsi`: the claim, a byte in RAM | none | - |
-| the USART's completion vector (a block done, the next started) | the ring's `consume` and the block start flattened into one body in SRAM, no call (`tx_block_done`, 204 to 216 bytes); 161 to 162 cycles measured between the body's first and last statement at 48 MHz, 370 to 377 from the flash with three calls | one INTFR load, the INTFCR store | one a block |
+| the USART's completion vector (a block done, the next started) | the ring's `consume` and the block start flattened into one body, no call (`tx_block_done`): inline in the vector by default, 271 to 273 cycles from the flash measured between the body's first and last statement at 48 MHz; under the port's `InRam`, one instance of 204 bytes in SRAM, 170 to 175 cycles ([usart.md](usart.md), letter `s`) | one INTFR load, the INTFCR store | one a block |
 | the USART's receive ring | none a byte: the vector's two states and the ring's two marks | none a byte | two a burst, two a lap |
 | a memory-to-memory block (`DmaCopyEngine::copy()`) | the six stores and the busy flag | 6 stores | one a block, or none polled |
 
