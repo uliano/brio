@@ -362,16 +362,23 @@ reports. What it measured:
   bytes through `Uart` echoed by the far chip come back equal at 115200
   and 1 Mbaud; 64 bytes it sends at 3 Mbaud are all counted by the far
   chip; a gapless run of 256 INTO it, taken by runs
-  (`read_span()`/`consume()`), arrives whole and in order at 1, 1.5 and 2
-  Mbaud. THE INTERRUPT TRANSPORT'S CEILING, measured: at 2.4 Mbaud the
-  receive ring fills behind the main loop (the run broken at byte 16 to
-  128 from run to run, 31 to 82 bytes refused) and at 3 Mbaud the shift
-  register overruns (ORE 7 to 40, the run broken within its first 21
-  bytes); a full-duplex echo at 3 Mbaud loses bytes in some runs. The
-  transport takes one vector entry a frame, the hardware prologue's round
-  trip of 100 to 104 cycles ([platform.md](platform.md)) and the receive
-  body of about 30 instructions in the release listing beside it, against
-  a frame of 160 cycles at 3 Mbaud and 200 at 2.4.
+  (`read_span()`/`consume()`), arrives whole and in order at 1, 1.5, 2,
+  2.4 and 3 Mbaud, and the eight-byte echo at 3 Mbaud comes back whole -
+  WITH THE VECTOR IN SRAM, which the suite's program places
+  ([platform.md](platform.md), "A handler in SRAM"). THE INTERRUPT
+  TRANSPORT'S CEILING IS THE PLACEMENT'S: with the same vector in the
+  flash, the run arrived whole to 2 Mbaud, at 2.4 Mbaud the receive ring
+  filled behind the main loop (the run broken at byte 16 to 128 from run
+  to run, 31 to 154 bytes refused) and at 3 Mbaud the shift register
+  overran (the run broken within its first 21 bytes), and the echo at 3
+  Mbaud came back two bytes of eight. The transport takes one vector
+  entry a frame - the hardware prologue's round trip and a receive body
+  of about 30 instructions, all of it inline in the vector, no call -
+  against a frame of 160 cycles at 3 Mbaud and 200 at 2.4: from the flash
+  the entries leave the main loop too little of the frame, from SRAM they
+  leave it enough. The console's handler, the same body, measures 145
+  cycles from the flash and 66 from SRAM (stamped in test_x035_spi), its
+  vector 404 bytes there.
 - **THE SAME SWEEP ON THE ENGINES** (letter `k`, USART4 transmitting on
   channel 1 and receiving on 8, the ring 512 bytes): 8192 gapless frames
   from the far chip at 1, 1.5, 2, 2.4 and 3 Mbaud, every byte judged in
@@ -381,7 +388,9 @@ reports. What it measured:
   frame. 3 Mbaud, a divisor of 16 on both chips at 48 MHz, is the wire's
   ceiling here: THE ENGINED RECEIVE RUNS AT THE WIRE'S, a factor of one
   and a half over the interrupt transport's 2 Mbaud. A full-duplex echo
-  of 256 bytes at 3 Mbaud on both engines came back whole, no ORE.
+  of 256 bytes at 3 Mbaud on both engines came back whole, no ORE. The
+  engined receive's vectors run a few times a lap, so their placement
+  does not bear on this.
 - **The error flags' clear under the receive channel** (letter `q`): the
   far chip's 8N2 frames 0x03 and 0x04 into a receiver set for 8E1 - its
   first stop bit read as the parity bit, so 0x03 is a parity error and
@@ -403,20 +412,19 @@ reports. What it measured:
 - **The transmit engine's blast, timed by the far chip** (letter `s`):
   4096 frames through the ring of 256 - 48 blocks, each started from the
   last one's completion - against the polled blast taken back to back.
-  Gapless at 1 and 1.5 Mbaud (within 360 ppm, the HSI's wander between two
-  runs). Above, each block boundary idles the line: 40 to 59 cycles a block
-  at 2 Mbaud, 79 to 101 at 2.4 and 138 to 167 at 3 - the span 0.2 to 0.3,
-  0.5 to 0.6 and 1.0 to 1.2 per cent over the polled blast's. THE REASON IS
-  THE RESTART'S COST: the completion's body - the ring's consume, the
-  claim, the next run, TC cleared and the five stores - measured at 370 to
-  377 cycles between its first and last statement (400 at most), about 90
-  instructions fetched from the flash behind two wait states, with the
-  vector's own entry and exit beside it. The idles at the three rates fit
-  a window of about a frame and a half between the block's last item
-  landing and the line running dry, so the line idles where the restart
-  outlasts that: never at 1.5 Mbaud (a frame of 320 cycles), a little at 2.
-  A program's runs set the blocks: the fewer and longer, the fewer
-  boundaries.
+  GAPLESS AT EVERY RATE TO 3 MBAUD: the span within 130 ppm of the polled
+  blast's at 1, 1.5, 2, 2.4 and 3 Mbaud (the HSI's wander between two
+  runs), -2 to 3 cycles a block. The restart - the ring's consume, the
+  claim, the next run, TC cleared and the five stores - runs from SRAM,
+  the driver's placement (`.ram_text.brio`, flattened so that no call is
+  left on it, 204 to 216 bytes a transport): 161 to 162 cycles of body
+  between its first and last statement (179 at most), inside the frame
+  and a half the shifter still holds when the block's last item lands
+  (240 cycles at 3 Mbaud). From the flash the same body took 370 to 377
+  cycles, about 90 instructions behind two wait states and three calls,
+  and each block boundary idled the line above 1.5 Mbaud: 40 to 59 cycles
+  a block at 2 Mbaud, 79 to 101 at 2.4 and 138 to 167 at 3, the span 0.2
+  to 1.2 per cent over the polled blast's.
 - **The frame matrix across the wire** (letter `l`): 8N1, 8E1, 8O1, 7E1,
   7O1, 9N1, 8N2, 8N0.5 and 8N1.5 at 115200, eight frames each echoed
   equal and counted clean; HALF A STOP BIT and one and a half timed as
@@ -500,11 +508,6 @@ reports. What it measured:
 
 Driver gaps, each with its reason:
 
-- **The transmit engine's restart below a frame at 3 Mbaud**: the
-  completion's body is 370 to 377 cycles of code fetched from the flash
-  (letter `s`); placed in SRAM, or with fewer calls on the path, it would
-  close the block boundary's idle above 1.5 Mbaud - the linker script and
-  the hot path's placement are the change ([dma.md](dma.md)).
 - **The synchronous, smartcard, IrDA, mute and flow-control modes as
   tasks** (the AVR's `SyncHost`, `IrdaLink` and the like): the resource's
   verbs are the whole of it, and a task is born with its first user.

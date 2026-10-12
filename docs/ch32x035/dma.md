@@ -163,7 +163,7 @@ each half into a ring of their own:
 |---|---|---|---|
 | the USART's block start (`pump_tx`, a run in the ring) | 58 over three bodies (`pump_tx`, the ring's `read_span`, the engine's `launch`) | 5 stores, no load (and one USART store: TC written 0) | - |
 | the USART's mask around it | 6 between the `csrrci` and the `csrsi`: the claim, a byte in RAM | none | - |
-| the USART's completion vector (a block done, the next started) | about 90, the ring's `consume` and the block start inside; 372 cycles measured between the body's first and last statement at 48 MHz | one INTFR load, the INTFCR store | one a block |
+| the USART's completion vector (a block done, the next started) | the ring's `consume` and the block start flattened into one body in SRAM, no call (`tx_block_done`, 204 to 216 bytes); 161 to 162 cycles measured between the body's first and last statement at 48 MHz, 370 to 377 from the flash with three calls | one INTFR load, the INTFCR store | one a block |
 | the USART's receive ring | none a byte: the vector's two states and the ring's two marks | none a byte | two a burst, two a lap |
 | a memory-to-memory block (`DmaCopyEngine::copy()`) | the six stores and the busy flag | 6 stores | one a block, or none polled |
 
@@ -322,19 +322,10 @@ Driver gaps, each with its reason:
   (util/block_stream.hpp's two concepts over a circular channel and a pair
   of halves): born with their first block user on this series, the ADC,
   which has no driver in this stratum.
-- The SPI's engine slots and the timers' requests: born with those
-  drivers, each against its row of the request table (the SPI on 2 and
-  3). The I2C's are on 6 and 7 ([i2c.md](i2c.md)) - USART2's channels, so
-  a program with an engined USART2 and an engined I2C chooses.
 - Half-transfer as a verb of the transfer engines: the flag and its enable
   are the channel's (`DmaFlag::half`, `arm()`), and the receive ring takes
   it on request; no other engine acts on it until a stream needs the
   midpoint.
-- The completion's restart from SRAM: the transmit engine's restart costs
-  372 cycles of body at 48 MHz, about 90 instructions fetched from the
-  flash behind two wait states ([usart.md](usart.md)); a body placed in
-  SRAM would take most of that off, the linker script and the hot path's
-  placement being the change.
 
 Implemented but not bench-verified, each with what would measure it:
 

@@ -44,7 +44,8 @@
 //      its SCK periods at every BR code, 8 and 16 bits; THE HIGH-SPEED
 //      READ's rate at every code (16.3.1's FHCLK/(BR+2) against 16.3.8's
 //      "/2 only"); and THE HOST'S COSTS - the engines' fixed cost, the
-//      pump's frame, the polled loops' frames - with the hold-off this
+//      pump's frame, the polled loops' frames (the driver runs the pump's
+//      entry and both loops from SRAM) - with the hold-off this
 //      image's handlers measure, and the pump with two frames in flight
 //      under the console's interrupts
 //   c  the refusals: the chapter's, the high-speed read off /2 at run
@@ -867,8 +868,9 @@ void ta_block() {
 // ===========================================================================
 
 /// THE INSTRUCTION FETCH, measured: the transmit-only loop's own shape over
-/// the resource, once in the flash and once in SRAM (a section the crt
-/// copies with .data), 256 and 32 frames at the same rate.
+/// the resource, once in the flash and once in SRAM (`.ram_text`, which the
+/// linker script carries in .data and the crt copies with it), 256 and 32
+/// frames at the same rate.
 template <int where>
 [[gnu::noinline]] void tx_loop_copy(const uint8_t* p, uint32_t n) {
     SpiRegs& r = S::regs();
@@ -884,7 +886,7 @@ template <int where>
     (void)r.DATAR;
     (void)r.STATR;
 }
-[[gnu::section(".data.x035_ram_tx_loop"), gnu::noinline]] void tx_loop_sram(const uint8_t* p, uint32_t n) {
+[[gnu::section(".ram_text"), gnu::noinline]] void tx_loop_sram(const uint8_t* p, uint32_t n) {
     SpiRegs& r = S::regs();
     do {
         while ((r.STATR & spi_txe) == 0u) {
@@ -1045,9 +1047,9 @@ void tb_ladder() {
     print(serial, "  the transmit-only loop a frame: /2 ", wr[0] / 10u, ".", wr[0] % 10u, ", /4 ", wr[1] / 10u, ".",
           wr[1] % 10u, ", /8 ", wr[3] / 10u, ".", wr[3] % 10u, ", /16 ", wr[2] / 10u, ".", wr[2] % 10u,
           "; the receive loop's fixed cost at /4 ", rd_fixed, crlf);
-    bench.verdict("THE TRANSMIT-ONLY LOOP is within 5 % of the wire at /4 and at the wire (3 %) from /8; at /2 its "
-                  "turn fetched from the flash is the bound, under 26 cycles a frame",
-                  wr[1] <= 336u && wr[3] <= 659u && wr[2] <= 1319u && wr[0] <= 260u);
+    bench.verdict("THE TRANSMIT-ONLY LOOP, run from SRAM, is within 5 % of the wire at /2 and /4 and at the wire "
+                  "(3 %) from /8",
+                  wr[0] <= 168u && wr[1] <= 336u && wr[3] <= 659u && wr[2] <= 1319u);
     host_ready();
     const uint32_t flash2 = loop_frame_x10(tx_loop_copy<0>, SpiClock::div2);
     const uint32_t sram2 = loop_frame_x10(tx_loop_sram, SpiClock::div2);

@@ -103,6 +103,19 @@
  * (UartOptions::rx_priority, the one knob) and the transmit engine at
  * high, the rule of docs/design/dma.md.
  *
+ * THE TRANSMIT ENGINE'S BLOCK BOUNDARY RUNS FROM SRAM. A block's
+ * completion releases its bytes and starts the next run while the shifter
+ * still holds about a frame and a half; from the flash, behind its two
+ * wait states, that restart took 371 cycles of body - longer than the
+ * window above 1.5 Mbaud, so the line idled at every boundary. This driver
+ * places the restart in SRAM (`.ram_text.brio`, flattened: the ring's
+ * consume and read_span and the engine's launch inlined into it, no call
+ * left on the path), and the body measures 162 cycles: gapless to 3 Mbaud
+ * (docs/ch32x035/usart.md, letter s). The per-byte interrupt transport's
+ * isr() is always inline and calls nothing, so the program places it with
+ * the vector it binds when it runs that transport fast
+ * (docs/ch32x035/platform.md, "A handler in SRAM").
+ *
  * WHY THE RING AND NOT THE VENDOR'S SHAPE. WCH's USART_Idle_Recv example
  * receives into two halves it swaps from the IDLE vector and the channel's
  * completion - the channel disabled, its count and address rewritten,
@@ -953,8 +966,7 @@ struct Uart {
                 (void)TxEngine::abandon();
                 m_dma_faults = static_cast<uint16_t>(m_dma_faults + 1u);
             } else if ((f & TxEngine::flag_complete) != 0u) {
-                m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-                pump_tx();
+                tx_block_done();
             }
         }
         if constexpr (has_rx_engine) {
@@ -1387,6 +1399,14 @@ private:
             Resource::clear_flags(usart_tc);   // TC from the frame before this block, written 0
             (void)TxEngine::launch(run);
         }
+    }
+
+    /// The transmit block's completion: its bytes released from the ring,
+    /// the next run started - in SRAM and flattened (the file header). The
+    /// section's name and noclone: brio/ch32x035/spi.hpp's pump_entry().
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]] static void tx_block_done() {
+        m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+        pump_tx();
     }
 
     /// The transmit ring out to the wire, bounded: what rebase() and

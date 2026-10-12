@@ -2062,6 +2062,7 @@ struct Cost {
     uint32_t start;     ///< cycles inside start()
     uint32_t entries;   ///< event vector entries
     uint32_t body;      ///< cycles inside the event vector, summed
+    uint32_t longest;   ///< the longest event vector entry, in cycles
     uint32_t dma;       ///< DMA vector entries
     uint32_t after;     ///< event vector entries in the millisecond after the edge
 };
@@ -2091,17 +2092,26 @@ Cost cost_of(uint8_t tx_len, uint8_t rx_len) {
     c.status = host_done || sync ? Hst::status() : no_answer;
     c.entries = host_isr_entries;
     c.body = ev_cycles;
+    c.longest = ev_max;
     c.dma = dma6_entries + dma7_entries;
     (void)delay_us(clock, 1000);
     c.after = host_isr_entries - c.entries;
     return c;
 }
 
+/// The longest event vector entry over the shapes letter x printed: the
+/// figure the CH32X035 SPI host's default hold-off is drawn from
+/// (brio/ch32x035/spi.hpp, spi_default_hold_off_cycles).
+uint32_t longest_entry = 0;
+
 void print_cost(const char* name, const Cost& c, uint32_t wire) {
     const uint32_t rest = c.wall > wire ? c.wall - wire : 0u;
     print(serial, "    ", name, ": status ", c.status, ", wall ", c.wall, " = wire ", wire, " + rest ", rest,
           "; start() ", c.start, "; event entries ", c.entries, " (", c.entries != 0u ? c.body / c.entries : 0u,
-          " cycles each), DMA ", c.dma, ", after the edge ", c.after, crlf);
+          " cycles each, ", c.longest, " at most), DMA ", c.dma, ", after the edge ", c.after, crlf);
+    if (c.longest > longest_entry) {
+        longest_entry = c.longest;
+    }
 }
 
 void tx_cost() {
@@ -2115,6 +2125,7 @@ void tx_cost() {
     for (uint16_t i = 0; i < 255u; ++i) {
         tx_buf[i] = static_cast<uint8_t>(i);
     }
+    longest_entry = 0;
     host_ready();
     // The wire's own time at the SCL period in force: the slope of two
     // writes on the engines, 255 and 16 bytes, 239 x 9 SCL periods apart.
@@ -2165,6 +2176,8 @@ void tx_cost() {
           r16.entries != 0u ? r16.body / r16.entries : 0u, " over the 16-byte read; the engined 255-byte "
           "write at ", e255.wall * 1000u / wire(256), " thousandths of its wire, the core in the vector ",
           e255.body, " cycles of ", e255.wall, crlf);
+    print(serial, "  the longest event entry of every shape above: ", longest_entry, " cycles, stamps included",
+          crlf);
     print(serial, "  unwedges so far (15.9.1's stuck BUSY taken out by start()): plain ", Host::unwedges(),
           ", engined ", DmaHost::unwedges(), crlf);
     const bool all_ok = w1.status == i2c_ok && w2.status == i2c_ok && w16.status == i2c_ok &&

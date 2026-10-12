@@ -329,12 +329,26 @@ the hardware prologue, [platform.md](platform.md), outside them):
   waits' first looks included; the listing of a minimal glue (one host,
   `-Os`) has it at 173 instructions, two calls into `delay_us` that run
   only when a wait is not met at once.
-- **The pump's entry is about 184 cycles a byte** of a 1089-cycle byte
+- **The pump's entry is 184 to 193 cycles a byte** of a 1089-cycle byte
   at 400 kHz - a sixth of the core - for 341 instructions in the whole
   event handler, no call, the tenure's fields one base address: a byte's
   path is a few dozen instructions from the flash behind two wait states
   at 48 MHz, this core's fetch (the DMA controller's own 6 cycles an item
-  from SRAM against 11.5 from the flash, [dma.md](dma.md)).
+  from SRAM against 11.5 from the flash, [dma.md](dma.md)). The longest
+  entry over every shape is 321 cycles, the suite's stamps included -
+  the family's longest handler with the drivers' own placement, which the
+  SPI host's default hold-off is drawn from ([spi.md](spi.md)).
+- **THE PROGRAM PLACES THE EVENT VECTOR, AND ONLY IF IT WANTS THE CORE**:
+  the event body is inline and calls nothing, so a vector placed in SRAM
+  (`.ram_text`, [platform.md](platform.md), "A handler in SRAM") carries
+  the whole path. Measured in a variant of the suite with its event vector
+  placed: 75 cycles an entry over the 255-byte write against 193, 89 over
+  the 16-byte read against 234 - a fifteenth of the core at 400 kHz
+  instead of a sixth - with every shape still `i2c_ok` and the wire's own
+  time unchanged, since SCL stretches behind a late entry and the rate is
+  the bus's. The vector of one engined host takes 1164 bytes of SRAM (the
+  family fixture's), which is why the driver does not place it for every
+  image: the placement buys core time, not the wire.
 - **The engines** carry a 255-byte write or read in three event entries
   and none or one DMA interrupt, the write at 1004 thousandths of its
   wire, the core in the vector 648 cycles of 282 348.

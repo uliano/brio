@@ -87,10 +87,15 @@
  *  - THE INSTRUCTION FETCH: the code runs from a flash with two wait
  *    states at 48 MHz behind a prefetch (RM 1.2, 20.3.1), measured at three
  *    to four cycles an instruction in these loops, a taken branch the
- *    dearest, and SRAM (no wait state) as the faster place: the pump's
- *    handler ran twice as fast from it. Declined for now - the stratum
- *    places nothing in SRAM - and the cost stated beside the wire's
- *    (docs/ch32x035/spi.md).
+ *    dearest, and SRAM as the faster place. USED for the paths that run
+ *    once a FRAME: the pump's entry and the two polled loops are placed in
+ *    `.ram_text.brio` (ld/'s .ram_text, copied with .data by the crt), so
+ *    every image runs them from SRAM - the transmit-only loop at the wire
+ *    at /2, the pump's frame a third shorter behind a vector in the flash
+ *    - and their cost no longer moves with where the code around them
+ *    sits. The paths that run once a TRANSACTION (start(), the phase
+ *    openings, the engines' launch) stay in the flash: declined, measured
+ *    (docs/ch32x035/spi.md, "The host above the wire").
  *  - Interrupts: TXE, RXNE and the three errors under ERRIE on ONE vector
  *    (table 7-1, entry 33). The pump arms RXNE alone.
  *
@@ -660,14 +665,19 @@ constexpr uint32_t spi_frame_cycles(SpiClock c, SpiDataSize bits) {
  * handlers.
  */
 /// The default of SpiHost's `hold_off_cycles`: the longest handler this
-/// family's images measure - the USART's engined completion, 372 cycles of
-/// body (docs/ch32x035/usart.md) and the 36 of its exit - rounded up. The
-/// console's handler measures 151, the tick's 67, this host's own pump 302
-/// (test_x035_spi letter b, stamps included).
-inline constexpr uint32_t spi_default_hold_off_cycles = 420;
+/// family's images measure with the drivers' own placement and the vector
+/// in the flash - the I2C host's event pump, 321 cycles of body at most
+/// (test_x035_i2c letter x, docs/ch32x035/i2c.md) - and the 36 of its
+/// exit, rounded up. The USART's engined completion measures 179 at most
+/// from SRAM (docs/ch32x035/usart.md), the console's handler 151, the
+/// tick's 67, this host's own pump 217 (test_x035_spi letters a and b, stamps
+/// included). The write-ahead codes are the same for any hold-off from 199
+/// to 454 cycles (the static_asserts at the end of this file).
+inline constexpr uint32_t spi_default_hold_off_cycles = 360;
 /// The hardware prologue's entry (37 cycles, measured) and the handler's
-/// path from its vector to the DATAR read, five instructions fetched from
-/// a flash with two wait states (about 20 cycles).
+/// path from its vector to the DATAR read: the vector's call, fetched from
+/// the flash, and the pump's first four instructions in SRAM (about 20
+/// cycles).
 inline constexpr uint32_t spi_pump_read_cycles = 37u + 20u;
 
 /// The frame, in HCLK cycles, a read can come after RXNE at the latest
@@ -863,24 +873,22 @@ public:
     /// session (test_x035_spi letter b, docs/ch32x035/spi.md): a
     /// transaction's fixed cost from the request to its completion - the
     /// suite's request and wait inside each, the same wrapper on every line
-    /// - and its cost a frame. The engines: about 1180 cycles fixed at /4,
-    /// the wire a frame. The pump: about 1290 fixed and about 266 a frame at
-    /// every rate to /16 - the handler, fetched from the flash, bounds it.
-    /// The receive loop: about 723 fixed and 18 cycles of dead bus a frame
-    /// at /4 (50.3 against the wire's 32), the loop aligned (below) so that
-    /// the figure does not move with the code around it.
-    static constexpr uint32_t engine_fixed_cycles = 1180;
-    static constexpr uint32_t pump_fixed_cycles = 1290;
-    static constexpr uint32_t pump_frame_cycles = 266;
-    static constexpr uint32_t polled_fixed_cycles = 723;
-    static constexpr uint32_t polled_gap_cycles = 18;
-    /// The engines cost about what the pump costs to start and finish (the
-    /// pump's fixed cost moved between 1116 and 1406 from run to run and
-    /// build to build, its handler's placement unaligned) and a wire's
-    /// frame where the pump
-    /// costs 266: with engines bound EVERY data phase rides them, from one
-    /// frame on - the first count at which the engines' line is under the
-    /// pump's, against the wire's 32 cycles a frame at /4.
+    /// - and its cost a frame, the per-frame paths in SRAM and the suite's
+    /// vector in the flash. The engines: about 1140 cycles fixed at /4, the
+    /// wire a frame. The pump: about 1170 fixed (1067 to 1285 from run to
+    /// run) and about 207 a frame at every rate to /16 - the handler bounds
+    /// it. The receive loop: about 660 fixed and 17 cycles of dead bus a
+    /// frame at /4 (49.4 against the wire's 32).
+    static constexpr uint32_t engine_fixed_cycles = 1140;
+    static constexpr uint32_t pump_fixed_cycles = 1170;
+    static constexpr uint32_t pump_frame_cycles = 207;
+    static constexpr uint32_t polled_fixed_cycles = 660;
+    static constexpr uint32_t polled_gap_cycles = 17;
+    /// The engines cost about what the pump costs to start and finish and a
+    /// wire's frame where the pump costs 207: with engines bound EVERY data
+    /// phase rides them, from one frame on - the first count at which the
+    /// engines' line is under the pump's, against the wire's 32 cycles a
+    /// frame at /4.
     static constexpr uint32_t reference_frame_cycles = 32;
     static constexpr uint16_t dma_min_frames =
         engine_fixed_cycles <= pump_fixed_cycles
@@ -890,10 +898,11 @@ public:
                                     1u);
     /// A polled request with an in buffer rides the engines once the
     /// receive loop's dead bus would cost more than their extra fixed cost.
-    /// The transmit-only loop never does: it runs at the wire from /4.
+    /// The transmit-only loop never does: it runs within 5 % of the wire
+    /// from /2.
     static constexpr uint16_t dma_min_frames_polled = static_cast<uint16_t>(
         (engine_fixed_cycles - polled_fixed_cycles + polled_gap_cycles - 1u) / polled_gap_cycles);
-    static_assert(dma_min_frames == 1u && dma_min_frames_polled == 26u,
+    static_assert(dma_min_frames == 1u && dma_min_frames_polled == 29u,
                   "the two thresholds the measured costs give (docs/ch32x035/spi.md)");
 
     // ---- lifecycle ----------------------------------------------------------
@@ -1109,60 +1118,16 @@ public:
     /// ever armed by this engine, and reading DATAR is both the capture and
     /// the acknowledgement. True when the transaction just completed (CS
     /// released): the edge the app's glue posts TransferDone on.
-    [[gnu::always_inline]] static bool isr() {
-        if ((S::regs().STATR & spi_rxne) == 0u) {
-            return false;
-        }
-        const uint16_t in = S::regs().DATAR;
-        // OVR AFTER DATAR: with two frames in flight the one behind frame k
-        // may complete at any moment before the read; a status copy taken
-        // before it would miss the OVR that completion raises, and the
-        // phase would wait for a frame that never comes back. DATAR then
-        // STATR is also 16.2.7's clear.
-        const bool lost = (S::regs().STATR & spi_ovr) != 0u;
-        if (lost) {
-            status_ = spi_overrun;
-        }
-        if (left_ != 0u) {
-            S::regs().DATAR = next_;
-            --left_;
-        }
-        if (in_ != nullptr) {
-            store_in(in);
-        }
-        if (lost && to_read_ > 1u) {
-            // The frame after this one ended while this one stood unread:
-            // its slot is skipped and counted as read, so the phase ends.
-            --to_read_;
-            if (in_ != nullptr) {
-                in_ += step_;
-            }
-        }
-        if (left_ != 0u) {
-            next_ = next_out();
-        }
-        if (--to_read_ != 0u) {
-            return false;
-        }
-        // The phase ended: its last frame is back and read.
-        if (in_cmd_) {
-            in_cmd_ = false;
-            tenure_.dc.set();
-            if (tenure_.len == 0u) {
-                return finish_pump();
-            }
-            if constexpr (has_engines) {
-                if (dma_tenure_) {
-                    S::rxne_interrupt(false);
-                    launch_dma();
-                    return false;
-                }
-            }
-            begin_phase(tenure_.tx, tenure_.rx, tenure_.len);
-            return false;
-        }
-        return finish_pump();
-    }
+    ///
+    /// THE PUMP RUNS FROM SRAM, placed by this driver: the vector calls
+    /// pump_entry() in `.ram_text.brio`, so an image whose vector stays in
+    /// the flash still fetches the frame's path without wait states -
+    /// measured behind a vector of one call and one store, 168.5 cycles a
+    /// frame at /2 with the whole path in the flash, 109.8 with the entry
+    /// in SRAM, 84.0 with the vector itself placed and the body inlined
+    /// into it (docs/ch32x035/spi.md). Under the hardware prologue (the
+    /// CH32X035_HPE default) the call costs the vector no register save.
+    [[gnu::always_inline]] static bool isr() { return pump_entry(); }
 
     /// The DMA channels' interrupt body - call from BOTH channels' vectors
     /// (one vector a channel here). The receive channel's completion ends
@@ -1350,15 +1315,18 @@ private:
     /// OVR with the DATAR-then-STATR read. Specialized on the out buffer's
     /// presence, so the stride is a constant and the dummy an immediate:
     /// the loop is one poll (a load, a test, a branch not taken), the
-    /// frame's load, the store, the step and ONE taken branch - this core
-    /// fetches from a flash with two wait states, and every taken branch is
-    /// a fetch it waits for. BOTH POLLED LOOPS ARE ALIGNED TO 32 BYTES: from
-    /// the flash a loop's cost a frame moved by up to a third between two
-    /// builds whose code merely sat elsewhere, and aligned it does not
-    /// (measured, docs/ch32x035/spi.md, "The host above the wire").
-    /// `count` >= 1.
+    /// frame's load, the store, the step and ONE taken branch. BOTH POLLED
+    /// LOOPS RUN FROM SRAM (`.ram_text.brio`, the pump's entry says why
+    /// that name): from the flash and its two wait states every taken
+    /// branch is a fetch the core waits for, this loop took 20.8 cycles a
+    /// frame at /2 against the wire's 16, and a loop's cost moved by up to
+    /// a third between two builds whose code merely sat elsewhere, 32-byte
+    /// alignment included; from SRAM it runs at the wire (measured,
+    /// docs/ch32x035/spi.md, "The host above the wire"). `count` >= 1.
     template <typename T, bool dummy>
-    [[gnu::aligned(32)]] static bool poll_write(const uint8_t* p, uint16_t count, uint32_t& budget) {
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone]] static bool poll_write(const uint8_t* p,
+                                                                                          uint16_t count,
+                                                                                          uint32_t& budget) {
         SpiRegs& regs = S::regs();
         uint32_t spins = budget;
         // The loop's own count is the pointer against its end where there
@@ -1412,8 +1380,8 @@ private:
     /// `two`, frame 1 follows frame 0 into the buffer on TXE and every read
     /// of frame k is followed by the write of frame k + 2. `count` >= 1.
     template <typename T, bool dummy>
-    [[gnu::aligned(32)]] static bool poll_duplex(const uint8_t* p, uint8_t* in, uint16_t count, uint32_t& budget,
-                                                 bool two) {
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone]] static bool poll_duplex(
+        const uint8_t* p, uint8_t* in, uint16_t count, uint32_t& budget, bool two) {
         constexpr uint32_t step = dummy ? 0u : sizeof(T);
         SpiRegs& regs = S::regs();
         uint32_t spins = budget;
@@ -1477,6 +1445,68 @@ private:
     }
 
     // ---- the pump -----------------------------------------------------------
+
+    /// `.ram_text.brio` and not `.ram_text`: a function defined in a
+    /// header is emitted in a COMDAT group, and GCC refuses one section
+    /// name for a grouped function and a program's plain one in the same
+    /// translation unit ("section type conflict"); noclone, because a
+    /// local clone - IPA-SRA's, measured: the refusal goes with
+    /// -fno-ipa-sra - leaves the group and meets the same refusal among
+    /// the grouped ones (docs/ch32x035/platform.md, "A handler in SRAM").
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone]] static bool pump_entry() {
+        if ((S::regs().STATR & spi_rxne) == 0u) {
+            return false;
+        }
+        const uint16_t in = S::regs().DATAR;
+        // OVR AFTER DATAR: with two frames in flight the one behind frame k
+        // may complete at any moment before the read; a status copy taken
+        // before it would miss the OVR that completion raises, and the
+        // phase would wait for a frame that never comes back. DATAR then
+        // STATR is also 16.2.7's clear.
+        const bool lost = (S::regs().STATR & spi_ovr) != 0u;
+        if (lost) {
+            status_ = spi_overrun;
+        }
+        if (left_ != 0u) {
+            S::regs().DATAR = next_;
+            --left_;
+        }
+        if (in_ != nullptr) {
+            store_in(in);
+        }
+        if (lost && to_read_ > 1u) {
+            // The frame after this one ended while this one stood unread:
+            // its slot is skipped and counted as read, so the phase ends.
+            --to_read_;
+            if (in_ != nullptr) {
+                in_ += step_;
+            }
+        }
+        if (left_ != 0u) {
+            next_ = next_out();
+        }
+        if (--to_read_ != 0u) {
+            return false;
+        }
+        // The phase ended: its last frame is back and read.
+        if (in_cmd_) {
+            in_cmd_ = false;
+            tenure_.dc.set();
+            if (tenure_.len == 0u) {
+                return finish_pump();
+            }
+            if constexpr (has_engines) {
+                if (dma_tenure_) {
+                    S::rxne_interrupt(false);
+                    launch_dma();
+                    return false;
+                }
+            }
+            begin_phase(tenure_.tx, tenure_.rx, tenure_.len);
+            return false;
+        }
+        return finish_pump();
+    }
 
     /// The next frame to go out in this phase, or the dummy when the phase
     /// has no out buffer. Called at a handler's TAIL and at a phase's
@@ -2194,11 +2224,16 @@ static_assert(!spi_rate_for(0, 1'000'000UL).has_value());
 
 static_assert(spi_frame_cycles(SpiClock::div2, SpiDataSize::bits8) == 16u);
 static_assert(spi_frame_cycles(SpiClock::div256, SpiDataSize::bits16) == 4096u);
-// The write-ahead threshold under the default hold-off (420 + 57 = 477
+// The write-ahead threshold under the default hold-off (360 + 57 = 417
 // cycles): two frames in flight from /64 on 8-bit frames and from /32 on
-// 16-bit ones; a hold-off of 600 moves both one code slower.
+// 16-bit ones - the same codes for any hold-off from 199 to 454 cycles; a
+// hold-off of 198 moves both one code faster, one of 600 one code slower.
 static_assert(spi_write_ahead_from(SpiDataSize::bits8, spi_default_hold_off_cycles) == SpiClock::div64);
 static_assert(spi_write_ahead_from(SpiDataSize::bits16, spi_default_hold_off_cycles) == SpiClock::div32);
+static_assert(spi_write_ahead_from(SpiDataSize::bits8, 199u) == SpiClock::div64);
+static_assert(spi_write_ahead_from(SpiDataSize::bits8, 454u) == SpiClock::div64);
+static_assert(spi_write_ahead_from(SpiDataSize::bits8, 198u) == SpiClock::div32);
+static_assert(spi_write_ahead_from(SpiDataSize::bits16, 198u) == SpiClock::div16);
 static_assert(spi_write_ahead_from(SpiDataSize::bits8, 600u) == SpiClock::div128);
 static_assert(spi_write_ahead_from(SpiDataSize::bits16, 600u) == SpiClock::div64);
 

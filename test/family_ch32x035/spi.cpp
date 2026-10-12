@@ -208,7 +208,11 @@ void everything() {
 }
 
 // The app's glue: the SPI vector and the two channels, bound both ways the
-// hardware prologue can be built.
-extern "C" BRIO_CH32_INTERRUPT void spi1_handler() { AllHosts::spi_irq(); }
+// hardware prologue can be built. The SPI vector is placed in SRAM as a
+// program places one (`.ram_text`), in the translation unit that also
+// emits the driver's own placed bodies (`.ram_text.brio`): the two names
+// are what lets GCC take both kinds in one unit
+// (docs/ch32x035/platform.md, "A handler in SRAM").
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void spi1_handler() { AllHosts::spi_irq(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel2_handler() { AllHosts::dma_irq(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel3_handler() { AllHosts::dma_irq(); }

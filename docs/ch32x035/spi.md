@@ -118,7 +118,7 @@ is that board's suite's instrument (below).
 | CRC (16.2.5) | the resource's verbs | measured both calculators; a tenure shape with a CRC is born with a device that checks one |
 | BIDIMODE/BIDIOE, RXONLY (16.2.4) | the resource's configuration | a receive-only host clocks for as long as SPE stands, which no Request bounds; the client's dark listener is an undriven pad |
 | TXE, RXNE and the errors on one vector (16.2.8, table 7-1 entry 33) | RXNE alone | the pump's edge is the frame that came back, the witness that the bus is idle for the next |
-| SRAM execution (the instruction fetch) | declined for now | the pump's handler runs twice as fast from SRAM (measured); the stratum places nothing there - a decision for the user (the report) |
+| SRAM execution (the instruction fetch) | yes, for the paths that run once a frame | the pump's entry and both polled loops run from `.ram_text.brio` in every image: the transmit-only loop at the wire at /2, the pump's frame a third shorter behind a vector in the flash, and their cost independent of the layout; the paths that run once a transaction stay in the flash (measured, below) |
 
 ## Types and verbs
 
@@ -149,7 +149,7 @@ is that board's suite's instrument (below).
   `spi_stalled`), `recover()`, `release()` - the block's reset pulse
   before its gate ([../design/dma.md](../design/dma.md)'s release
   contract) -, `claim_nss_pad<arrangement>()`. `hold_off_cycles` is the
-  IMAGE's longest window the host's vector waits behind, 420 by default,
+  IMAGE's longest window the host's vector waits behind, 360 by default,
   zero refused. The engine slots are `DmaTxEngine<3, Elem>` and
   `DmaRxEngine<2, Elem>`, both or neither, on those two channels alone,
   the receive at very_high and the transmit at high (armed for its errors
@@ -255,14 +255,25 @@ twice.
   demotes a host whose NSS is a hardware input 24 ms after the enable,
   MSTR and SPE cleared, four of four; STATR 0x22 before the clearing
   sequence, 0x02 after it, once the pad has been high a millisecond.
-- **The fetch** (letter b): the same transmit loop takes 20.7 cycles a
-  frame at /2 from the flash and 16.8 - the wire - from SRAM; the pump's
-  handler measured 126.5 cycles a frame from SRAM against 253 from the
-  flash in one experiment build. And a loop's cost moved by up to a third
-  between two builds whose code merely sat elsewhere (the receive loop at
-  /4: 55, 83, 70 cycles a frame), which is why both polled loops are
-  aligned to 32 bytes: aligned, a pad function shifting the image moves
-  them by less than one per cent.
+- **The fetch** (letter b): the same bare transmit loop takes 20.8 cycles
+  a frame at /2 from the flash and 16.7 - the wire - from SRAM. From the
+  flash a loop's cost also moved with where the code around it sat: the
+  receive loop at /4 took 55, 83 and 70 cycles a frame in three builds,
+  and aligned to 32 bytes it still took 50.4 in one image and 70.9 in
+  another. So the driver places what runs once a frame in SRAM - the
+  pump's entry and both polled loops, in `.ram_text.brio`
+  ([platform.md](platform.md), "A handler in SRAM") - and the table below
+  is that placement, the suite's own vector in the flash.
+- **The pump's placement, measured four ways** (letter b at /2, where the
+  handler bounds the bus, a vector of one call and one store beside the
+  suite's own): the whole path in the flash 168.5 cycles a frame (the
+  suite's vector, with its stamps and its owner switch, 268.9); the
+  driver's entry in SRAM behind a vector in the flash 109.8 (the suite's
+  207); the vector itself in SRAM with the body inlined into it, the
+  driver placing nothing, 84.0 (the suite's 119.4); both placed 127.9 in
+  the suite's vector - the call between the two costing about 8 cycles.
+  The driver places the entry because then no image runs the pump from
+  the flash; a program that places its vector as well gains the rest.
 
 ### This part as the desk's instrument: `spi_peer`
 
@@ -314,37 +325,46 @@ cycles for a zero-length request through it):
 
 | path | a frame | fixed | the wire a frame |
 |---|---|---|---|
-| the engines | the wire (998 to 1012 thousandths) | 1176 | 16 at /2, 32 at /4 |
-| the pump | 267 at /2, 268 at /16 - the handler bounds it | 1165 (1116 to 1406 across runs and builds) | - |
-| the receive loop, one in flight | 50.1 at /2, 50.3 at /4, 153.2 at /16 | 727 at /4 | 16, 32, 128 |
+| the engines | the wire (998 to 1024 thousandths) | 1140 (1136 to 1148) | 16 at /2, 32 at /4 |
+| the pump, its entry in SRAM | 207 at /2, 247 at /16 - the handler bounds it | 1170 (1067 to 1285 across runs) | - |
+| the receive loop, one in flight, in SRAM | 30.5 at /2, 49.4 at /4, 143.8 at /16 | 660 at /4 (659 to 780) | 16, 32, 128 |
 | the receive loop, two in flight | 512.0 at /64 | - | 512 |
-| the transmit-only loop | 20.8 at /2, 33.4 at /4, 64.0 at /8, 127.9 at /16 | - | 16, 32, 64, 128 |
-| a 3-frame polled request (a command and two data frames) | 1308 in all at /16 | - | 384 |
+| the transmit-only loop, in SRAM | 16.7 at /2, 33.2 at /4, 64.0 at /8, 128.0 at /16 | - | 16, 32, 64, 128 |
+| a 3-frame polled request (a command and two data frames) | 1240 in all at /16 | - | 384 |
+
+From the flash, the same suite measured the pump at 268.9 a frame (fixed
+1064), the receive loop at 50.5, 50.4 and 153.3, the transmit-only loop
+at 20.8, 33.3, 64.0 and 128.1 and the 3-frame request at 1296.
 
 - **The transmit-only loop** is seven instructions a frame with one taken
   branch, specialized on whether the out buffer exists (the dummy an
-  immediate): at the wire from /8, 4 per cent over at /4, 20.8 cycles at
-  /2 - its turn fetched from the flash; the same loop from SRAM is at the
-  wire at /2.
+  immediate): from SRAM within 5 per cent of the wire at /2 and /4 and at
+  the wire from /8.
 - **The receive loop** keeps one frame in flight below the threshold:
-  some 18 cycles of dead bus a frame at /4 (the poll's last turn, the
-  read, the write), 34 at /2; two in flight from /64, at the wire there.
+  some 17 cycles of dead bus a frame at /4 (the poll's last turn, the
+  read, the write), 14 at /2; two in flight from /64, at the wire there.
 - **The pump**: one interrupt a frame (no FIFO), the DATAR read the first
   access after the RXNE test, the OVR test a STATR load after it, the
   frame prepared by the previous handler written next, about 45
-  instructions a frame - 267 cycles with the hardware prologue's entry and
-  exit, the code fetched from the flash.
+  instructions a frame in SRAM - 207 cycles in the suite with the hardware
+  prologue's entry and exit and its vector's own work in the flash.
+- **What the placement costs in SRAM** (the map): the pump's entry 298
+  bytes (324 with engines bound), the polled loops 910 bytes a host type -
+  eight instantiations, the two widths with and without an out buffer, of
+  72 to 174 bytes each.
 - **The thresholds those costs give**: the engines' fixed cost is the
-  pump's to within its run-to-run swing and their frame the wire's,
-  so with engines bound every data phase rides them (`dma_min_frames` =
-  1); a polled request with an in buffer rides them from 26 frames on
+  pump's to within its run-to-run swing and their frame the wire's, so
+  with engines bound every data phase rides them (`dma_min_frames` = 1);
+  a polled request with an in buffer rides them from 29 frames on
   (`dma_min_frames_polled`).
 - **The hold-off**: this image's handlers measure 145 cycles (the
-  console), 65 (the tick) and 293 (this pump, stamps included); the
-  family's longest measured body is the USART's engined completion, 372
-  cycles ([usart.md](usart.md)), so the default is 420 - and the pump
-  with two frames in flight from /64 ran 256 frames at the wire with a
-  console line draining beside it, `spi_ok`.
+  console), 65 (the tick) and 217 (this pump, stamps included); the
+  family's longest measured body, with the drivers' own placement and the
+  vectors in the flash, is the I2C host's event pump, 321 cycles
+  ([i2c.md](i2c.md)), so the default is 360 - which gives the codes 420
+  gave, two in flight from /64 on 8-bit frames and /32 on 16-bit ones -
+  and the pump with two frames in flight from /64 ran 256 frames at the
+  wire with a console line draining beside it, `spi_ok`.
 - **The select and D/C edges are inline**: `PinRef`'s level verbs are
   always inline (pin.hpp), where an out-of-line call there had put four
   calls on every transaction's path.
@@ -365,9 +385,12 @@ Driver gaps, each with its reason:
 - HSRXEN's second ladder, HCLK/(BR+2), as rates a Request can ask: 16.3.8
   restricts the mode to /2, the driver keeps the powers of two; measured
   exact at /3, /5 and /6 against one client - a decision for the user.
-- The polled loops and the pump's handler in SRAM: the stratum places no
-  code there; the pump would halve its cost a frame (measured) - a
-  decision for the user.
+- `start()`, the phase openings and the engines' launch in SRAM: declined.
+  Measured in a variant that placed them beside the per-frame paths: a
+  3-frame polled request 1240 -> 1008 cycles, the receive loop's fixed
+  cost 660 -> 484, the engines' 1140 -> 1022, for some 1.4 KB more SRAM a
+  host with engines (`start()` alone 726 bytes) - a cost a transaction,
+  where the placed paths' is a cost a frame; a decision for the user.
 - The simplex modes and the hardware select as the engine's: no user; the
   resource has the bits.
 - The CRC as part of a Request: born with a device that checks one.

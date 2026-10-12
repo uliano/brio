@@ -224,8 +224,10 @@ void everything() {
     (void)Dma::is_open();
 }
 
-// Vector bindings, as an app writes them.
-extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Console::isr(); }
+// Vector bindings, as an app writes them - the console's placed in SRAM as
+// a program places one (`.ram_text`), beside the transport's own placed
+// completion (`.ram_text.brio`) in this unit.
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void usart2_handler() { (void)Console::isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Console::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() { (void)Console::dma_isr(); }
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel8_handler() { (void)Copy8::isr(); }

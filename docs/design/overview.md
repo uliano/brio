@@ -592,4 +592,8 @@ to being a leaf by the same check)
 ([../ch32vx03/platform.md](../ch32vx03/platform.md)). A family
 whose linker script carries a `.ram_text` section may place a binding
 in SRAM: the SAM C21's page says what it buys
-([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM").
+([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM"),
+and the CH32X035's where a driver places its own per-frame body there
+instead, under a second section name a header's function needs
+([../ch32x035/platform.md](../ch32x035/platform.md), "A handler in
+SRAM").

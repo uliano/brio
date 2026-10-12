@@ -177,6 +177,7 @@ function(ch32x035_add_app name)
         -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${CH32X035_MCU}.ld
         -Wl,--gc-sections
+        -Wl,--no-warn-rwx-segments   # .data carries .ram_text, the code placed in SRAM: code copied there is a writable, executable segment (ld/)
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${CH32X035_NVHEAP_BUILD_ID}
     )

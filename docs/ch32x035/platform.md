@@ -3,7 +3,8 @@
 The kernel's Platform concept realized on the QingKe V4C of the
 CH32X035 series: the critical section, the idle hook, the STK timebase,
 the microsecond busy-wait, the one spelling of an interrupt handler,
-and what the crt writes into the core before main(). The failing half
+what the crt writes into the core before main(), and where code runs -
+the flash, or SRAM for a path a driver or a program places there. The failing half
 the sibling strata carry beside it - which reset happened as a type of
 its own, the record a crash leaves, the watchdogs - is not written here
 (the list at the end); the reset flags themselves are RCC's and live in
@@ -13,7 +14,8 @@ Documents of record: the CH32X035 reference manual V1.8 (3.2 for the
 reset sources, 7.1 and table 7-1 for the PFIC and the vector table,
 7.5.2 for the PFIC's registers with 7.5.2.38 for PFIC_SCTLR, 7.5.3 for
 INTSYSCR and mtvec, 7.5.5 for the STK, 13.4 for TIM3, the suite's rescue
-timer, ch. 19 for the electronic signature) and the QingKe V4 microprocessor manual V1.1 (table 1-1 for
+timer, ch. 19 for the electronic signature, 20.3.1 for the flash's wait
+states) and the QingKe V4 microprocessor manual V1.1 (table 1-1 for
 the V4C, 2.2 for what a trap does to mstatus and 8.2 for what an MRET
 leaves in it, 3.4 for the hardware prologue, 6 for the sleep modes and
 what ends them, 8.3 for corecfgr).
@@ -333,6 +335,85 @@ the consume was measured before and after. What it measured:
   and the pin suite's, and 19416 after the USART suite's, of the part's
   20 KB.
 
+## A handler in SRAM
+
+**What the silicon does.** At 48 MHz the code flash answers behind two
+wait states (RM 20.3.1), and a taken branch is a fetch the core waits
+for: from it the SPI's bare transmit loop takes 20.8 cycles a frame at
+/2, and the same loop from SRAM 16.7 - the wire's 16 (measured,
+[spi.md](spi.md)). The vector table holds ABSOLUTE addresses (mtvec's
+MODE1, RM 7.5.3.2), so a handler placed in SRAM is entered from its
+vector directly, and a call between SRAM and the flash is an `auipc` and
+a `jalr`, which reach 2 GB either side of the caller: no veneer either
+way.
+
+**The option and its spelling.** The seven linker scripts place the
+input sections `.ram_text` and `.ram_text.*` first in `.data`
+([../../ch32x035/ld/ch32x035f8.ld](../../ch32x035/ld/ch32x035f8.ld)), so
+the crt's copy of `.data` moves them into SRAM before `main()`; an image
+that places nothing there gets zero bytes from the line (every image
+that places nothing is byte-identical across it, measured), and the
+project links with `--no-warn-rwx-segments`, code copied there being a
+writable, executable segment. A program places a vector it binds with
+one attribute:
+
+```cpp
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void usart4_handler() { (void)Link::isr(); }
+```
+
+THE NAME IS TWO NAMES. A function defined in a header - every body brio
+places, and a program's own inline or template function - names
+`.ram_text.brio` and carries `noinline` and `noclone`; a program's plain
+function names `.ram_text`. GCC emits a header's function in a COMDAT
+group and refuses one section name for a grouped function and a plain
+one in the same translation unit ("section type conflict", WCH's gcc
+15.2); and a local clone of a grouped function - IPA-SRA's - leaves the
+group and meets the same refusal among the grouped ones, which
+`noclone` prevents (measured: without it the refusal goes away with
+`-fno-ipa-sra` and not with `-fno-ipa-cp`). The family fixtures compile a
+placed vector beside the drivers' placed bodies in one unit
+(`test/family_ch32x035/spi.cpp`, `dma.cpp`).
+
+**THE PLACEMENT RULE.** THE DRIVER places a path that runs once per
+unit of work, whose cost is part of what the driver states about
+itself, and which a program could not place by placing its vector -
+because it is not inline in the vector, or because the driver's own
+thresholds are drawn from it: the SPI host's pump entry and its two
+polled loops ([spi.md](spi.md)), the USART's transmit-engine completion
+([usart.md](usart.md)). THE PROGRAM places the vector it binds where the
+driver's body is inline in it whole and the gain is the program's to
+want: the per-byte interrupt transport of a USART, the I2C host's event
+pump ([i2c.md](i2c.md)), the console, the tick. What runs once a
+transaction (the SPI host's `start()`) stays in the flash, declined
+with its measured gain ([spi.md](spi.md)).
+
+**What it buys, measured** at 48 MHz on the CH32X035F8U6, each pair one
+suite with the path in the flash and in SRAM, nothing else moved:
+
+| path | placed by | from the flash | from SRAM | SRAM bytes |
+|---|---|---|---|---|
+| the SPI pump, a frame at /2, behind a vector of one call and one store | the driver | 168.5 cycles | 109.8 (84.0 with the vector placed and the body inlined into it) | 298, 324 with engines |
+| the SPI transmit-only loop, a frame at /2 (the wire 16) | the driver | 20.8 | 16.7 | 910 a host type, both loops |
+| the SPI receive loop, a frame at /2 and /4 (the wire 16, 32) | the driver | 50.5, 50.4 | 30.5, 49.4 | (above) |
+| the USART transmit engine's completion, its body | the driver | 370 to 377, the line idle at a block boundary above 1.5 Mbaud | 161 to 162, gapless to 3 Mbaud | 204 to 216 |
+| a USART's interrupt transport, a gapless run in | the program | whole to 2 Mbaud | whole to 3 Mbaud | its vector |
+| the console's handler body (115200, `test_x035_spi`) | the program | 145 | 66 | 404 |
+| the tick's handler body | the program | 65 | 29 | 100 |
+| the I2C event pump's entry, a 255-byte write and a 16-byte read | the program | 193, 234 | 75, 89 | 1164 for one engined host |
+
+The handler bodies are stamped on the STK between their first and last
+statement; the hardware prologue's entry and exit, 100 to 104 cycles a
+round trip with the vector in the flash (above), are outside them.
+
+**What it costs.** The bytes in the last column, of the part's 20 KB -
+the load image stays in the flash beside them. A placed function exists
+only from the crt's copy on, and the crt enters `main()` with interrupts
+masked, so no vector reaches SRAM the copy has not written. A driver's
+placed body is a CALL from a vector in the flash: under the hardware
+prologue (the default) the call saves no register; in an image built
+without it the vector saves the caller-saved registers in software
+around the call.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -359,6 +440,10 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
+- **The drivers' placed bodies without the hardware prologue**: a vector
+  that calls one saves the caller-saved registers in software in an image
+  built with `CH32X035_HPE=OFF`; test_x035_spi's letter `b` in such an
+  image would price the call.
 - **What the hardware prologue buys on this core**: letter `e` has run
   in the image built with it (above); the same letter in an image built
   with `CH32X035_HPE=OFF` is the other half of the difference, and

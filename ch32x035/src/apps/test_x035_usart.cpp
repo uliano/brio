@@ -55,7 +55,8 @@
 //   k  (y) the rates across the wire: 115200 to 3 Mbaud, echoed byte by
 //      byte, then timed by the FOREIGN receiver against HSI / BRR; the
 //      transport's bytes at 115200, 1 and 3 Mbaud; the interrupt
-//      transport's sustained receive swept to its ceiling, and the SAME
+//      transport's sustained receive swept to its ceiling - its vector
+//      placed in SRAM by this program, the binding below - and the SAME
 //      SWEEP ON THE DMA ENGINES (USART4 transmits on channel 1, receives on
 //      8): 8192 frames at each rate to 3 Mbaud, every byte judged in
 //      sequence, the vectors counted; full duplex at 3 Mbaud on both
@@ -80,7 +81,8 @@
 //      at low - and the control, the ring told to rank low
 //   s  (y) the transmit engine's blast: 4096 frames through the ring of
 //      256, timed by the far chip against the polled blast, each rate to
-//      3 Mbaud, the completion's body timed
+//      3 Mbaud, the completion's body timed - the restart the driver runs
+//      from SRAM, gapless at every rate
 //
 // THE SUPPLY at boot: the voltage detector at 3.0 V (pwr.hpp); an image
 // that drives a link pad from a sagging rail refuses every letter and
@@ -1336,8 +1338,10 @@ void tk_rates() {
         if (clean_so_far) {
             ceiling = rate;
         }
-        if (rate == 2'000'000u) {
-            judge("2000000 baud: a gapless run of 256 from the far chip, every byte received in order",
+        if (rate == 2'000'000u || rate == 3'000'000u) {
+            // 3 Mbaud with the vector in SRAM (the binding at the end of
+            // this file): one entry a frame inside the frame's 160 cycles.
+            judge(num(rate), " baud: a gapless run of 256 from the far chip, every byte received in order",
                   up && got == 256u);
         }
     }
@@ -1993,25 +1997,14 @@ void ts_tx_engine() {
         print(serial, "), ", per_block < 0 ? "-" : "", static_cast<uint32_t>(per_block < 0 ? -per_block : per_block),
               " cycles a block, a frame being ", 10u * usart_divisor(SysClock::hz, rate), "; the completion's body ",
               eng.blocks != 0u ? dma_body_sum / eng.blocks : 0u, " cycles (", dma_body_max, " at most)", crlf);
-        const uint32_t frame = 10u * usart_divisor(SysClock::hz, rate);
-        const uint32_t body = eng.blocks != 0u ? dma_body_sum / eng.blocks : 0u;
-        if (rate <= 1'500'000u) {
-            // The completion's whole round trip - the vector's entry and
-            // exit (100 to 104 cycles, docs/ch32x035/platform.md) and this
-            // body - inside what the shifter still holds when the block's
-            // last item lands (measured: no idle up to 1.5 Mbaud, a frame of
-            // 320 cycles): the next block is in before it runs dry.
-            judge(num(rate), " baud: the transmit engine's blast is gapless - 4096 frames within 500 ppm of the "
-                  "polled blast's span",
-                  ref.ok && eng.ok && near(eng.ppm, ref.ppm, 500));
-        } else {
-            // Above it, each block boundary idles the line for what the
-            // restart takes beyond the frame the shifter still holds - and
-            // for no more.
-            judge(num(rate), " baud: every frame through the engine, the line idle at a block boundary for no "
-                  "more than the completion's restart less one frame",
-                  ref.ok && eng.ok && per_block >= 0 && static_cast<uint32_t>(per_block) <= body + 104u - frame);
-        }
+        // The completion's whole round trip - the vector's entry and exit
+        // and the restart's body, which the driver runs from SRAM - inside
+        // what the shifter still holds when the block's last item lands,
+        // a frame and a half (240 cycles at 3 Mbaud): the next block is in
+        // before the line runs dry, at every rate.
+        judge(num(rate), " baud: the transmit engine's blast is gapless - 4096 frames within 500 ppm of the "
+              "polled blast's span",
+              ref.ok && eng.ok && near(eng.ppm, ref.ppm, 500));
     }
     (void)link_command_mode();
 }
@@ -2033,7 +2026,11 @@ extern "C" BRIO_CH32_INTERRUPT void systick_handler() { brio::Ticker::tick(); }
 
 extern "C" BRIO_CH32_INTERRUPT void usart2_handler() { (void)Serial::isr(); }
 
-extern "C" BRIO_CH32_INTERRUPT void usart4_handler() {
+/// USART4's vector IN SRAM, placed by this program (`.ram_text`, the
+/// linker script's): the interrupt transport's isr() is inline and calls
+/// nothing, so the whole per-frame path moves with the binding - what
+/// letter k's 3 Mbaud receive stands on (docs/ch32x035/usart.md).
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void usart4_handler() {
     u4_entries = u4_entries + 1u;
     switch (u4_owner) {
         case U4Owner::engined: (void)Engined::isr(); break;
