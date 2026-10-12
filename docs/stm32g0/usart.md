@@ -1043,11 +1043,14 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   client, a seven-bit word - acked, reported `report_cfg_failed`, the
   peer at once in command mode again.
 - **THIS HSI16 against two crystals at once**: three gapless runs of
-  4000 frames at 1 Mbaud (64 MHz / 64 here, 90 MHz / 90 there) timed by
-  the far crystal at +2625, +2713 and +2618 ppm, and the same three
-  windows timed by this board's LSE at +2617, +2697 and +2620 - two
-  crystals agreeing within 16 ppm over the same 40 ms, the HSI 0.26 %
-  fast at its factory trim and WANDERING: a few hundred ppm between runs
+  40000 frames at 1 Mbaud (64 MHz / 64 here, 90 MHz / 90 there; 4000 on
+  the 8 KB part) timed by the far crystal at +2830, +2956 and +2946 ppm,
+  and the same three windows timed by this board's LSE at +2823, +2947
+  and +2939 - the far crystal against this LSE +7, +9, +7, judged to agree
+  across the three within 7 ppm (a bound DERIVED below, "The
+  rendezvous's bound"; 48 over the 8 KB part's 40 ms) and measured +6..+10
+  over 20 runs, never more than 4 apart in one; the HSI 0.28 % fast at
+  its factory trim and WANDERING: a few hundred ppm between runs
   a tenth of a second apart (a 1 Mbaud reference taken beside a run left
   the 9600 rung 500..700 ppm away three times in ten, which is why the
   verdict reads the run's own window). The far crystal's 1 Mbaud blast
@@ -1216,9 +1219,16 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   measured frame itself read whole and the frames after it decoded.
   ABRE: mode 3 handed a 0x00, AND mode 2 handed a 0x55 - its second
   measurement disagrees with its first - each with FE on the measured
-  frame and the divisor left as it was. THE RANGE as 33.5.9 states it:
-  3.2 Mbaud (20 cycles a bit) learnt at OVER16, 6.4 Mbaud (10) refused
-  with ABRE at OVER16 and learnt at OVER8.
+  frame and the divisor left as it was. THE RANGE as 33.5.9 states it,
+  at OVER16: 3.2 Mbaud (20 cycles a bit) learnt, 6.4 Mbaud (10) refused
+  with ABRE. AT OVER8 NO LEG IS JUDGED: the common ladder's one rung
+  inside OVER8's range and outside OVER16's is 6.4 Mbaud, where a bit is
+  ten kernel cycles and the detector counts it to the cycle - its own
+  quantization a tenth of the bit - so mode 3's transition check
+  disagrees with itself now and then: 6.4 Mbaud at OVER8 is learnt
+  sometimes and raises ABRE about one run in five. Auto-baud at a tenth
+  of the clock is beyond what a leg can claim; the range 33.5.9 states
+  is unchanged by it.
 - **LIN from a foreign crystal** (`0`): the far engine's breaks at
   19200, of 9, 10, 11 and 13 bits with LBDL = 0 and of 10, 11 and 13
   with LBDL = 1, raise LBDF from ten and from eleven, never one bit
@@ -1307,6 +1317,31 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   HSI16 running the HSI16 kernel was not rescued (letter `w`), so 2.2.4
   is not the clock request alone: it is the HSI16 kernel's on a divided
   HSI, and a USART on the LSE is the way round it.
+
+### The rendezvous's bound
+
+Letter `1` times this HSI16 over each run twice, by the far crystal (the
+far figure) and by this board's LSE through the tracker (`hsi_over`): the
+difference is the two crystals' offset - the same in the three runs,
+two crystals moving apart by well under a ppm in the second they take
+(docs/stm32f4/usart.md, "The rendezvous's bound", where every stamp of
+115 windows was fitted) - plus the two measurements' errors, each a TIME
+at an end of the run whatever its length:
+
+| the term, per run | its time | from |
+|---|---|---|
+| the far stamps: the F446 sees a frame at the next turn of a poll of some 22 cycles at 180 MHz, behind its receiver's 1/16-bit start sampling (62.5 ns at 1 Mbaud) | +-0.19 us | the far peer's release listing |
+| one SysTick handler there on a stamp | +-0.25 us | some 45 cycles: the M4's entry and return and the handler |
+| this end's tracker: exact for its window's mean, the window starting 0.5 to 0.8 ms ahead of the run and stopping up to an interval short of it, the HSI16 wandering hundreds of ppm over such slivers; with the captures' 8-cycle grain | +-0.47 us | measured on the far STM32G0 peer, the same tracker over 90 windows of 40 ms ([clock.md](clock.md), "The core against the LSE, tracked") |
+
+Two runs' differences part by at most twice the sum, 1.82 us, and two
+whole-ppm figures in each add two: over 0.4 s that is **7 ppm**, the
+verdict's bound, computed in the suite from those three times
+(`agree_ppm`); over the 40 ms the 8 KB part's 62 ms ring allows, 48.
+The offset itself is judged within 150 ppm, the tens of ppm two
+crystals' tolerances allow (UM2324 6.7.1 names a 20 ppm part for the
+LSE; the ST-LINK's 8 MHz has none stated) against the 0.3 % an
+uncorrected HSI16 would put there.
 
 ## On the STM32G071RB
 

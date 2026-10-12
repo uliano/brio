@@ -1052,7 +1052,9 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   one more frame only when this end gives up waiting (its run time is
   this end's wait), sums it into its RXCRCR and reports CRCERR; letter
   `t`'s T and R stay true there because no CRC phase ran (the frame its
-  walk reads is not the peer's CRC). That region is the one RM0390
+  walk reads is not the peer's CRC), its F/f column saying whether the
+  CRC frame came at all - and at 8-bit PCLK1/2 no RXNE comes for it at
+  nearly any point of the walk. That region is the one RM0390
   26.4.2's rule ("The CRCNEXT bit must be set before the end of the last
   data frame transaction") excludes; the window before the end is what it
   does not, and ES0298 lists nothing. So the host queues the last data

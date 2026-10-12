@@ -4845,7 +4845,7 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
                 }
             }
             uint32_t spins = 400'000u;
-            while (!S1::rxne() && spins-- != 0u) {
+            while (!S1::rxne() && --spins != 0u) {   // a time-out leaves 0, never a wrap
             }
             if (last) {
                 walk_rxne = SysTick->VAL;
@@ -4950,7 +4950,9 @@ void print_crc(const char* label, SpiClock rate, bool above, const Crc& c) {
 // next/rxne:TRP - the core cycles (SysTick) from before the last data
 // store to after the CRCNEXT store, and to that frame's RXNE first seen;
 // T this end's TXCRCR the arithmetic, R its RXCRCR, P the peer's check
-// clean (lower case: not). No verdict.
+// clean, F every frame read back, the CRC frame among them (lower case:
+// not - f where the store came past the last frame's end and no CRC frame
+// was clocked). No verdict.
 void tt_crcnext_walk() {
     if (!need_peer()) {
         return;
@@ -4971,7 +4973,7 @@ void tt_crcnext_walk() {
                 const bool peer_ok = (r.o.r.flags & spilink::report_crcerr) == 0u;
                 print(serial, " ", ext::walk_since(ext::walk_store, ext::walk_next), "/",
                       ext::walk_since(ext::walk_store, ext::walk_rxne), ":", tx_ok ? "T" : "t",
-                      rx_ok ? "R" : "r", peer_ok ? "P" : "p");
+                      rx_ok ? "R" : "r", peer_ok ? "P" : "p", r.frames_ok ? "F" : "f");
             }
             print(serial, crlf);
         }

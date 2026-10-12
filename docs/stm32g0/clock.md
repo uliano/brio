@@ -576,16 +576,36 @@ completion flag has risen (nothing else clears it). `start()` refuses
 until `RtcDomain::lse_ready()` - the crystal is the RTC domain's, behind
 its own write gate - and owns Tim<16> and the channel until `stop()`.
 
+**ITS ERROR, MEASURED.** Every capture difference is a multiple of 8
+counts: the filter samples at fDTS / 8, so a capture lands on an 8-count
+grid, a reading's grain at each end of its window. `hz_over(counts)` is
+exact for its window's mean, and the window is whole intervals: it
+starts 0.5 to 0.8 ms ahead of the stretch (the two intervals more, and
+the interval in progress) and stops up to an interval short of it, and
+the HSI16 wanders hundreds of ppm over such slivers - the 4 ms pieces of
+one 40 ms window span 128 to 480 ppm. So a stretch converted at its
+`hz_over` carries a fixed TIME of error whatever its length, measured
+within 0.47 us over 90 stretches of 40 ms (every frame of each stamped
+and fitted against the ring, a scratch build of `usart_peer`): -11.6 to
++8.0 ppm at 40 ms, and at 0.4 s the same 0.47 us is 1.2 ppm (25
+stretches there left -1.0..+1.8 ppm once the stamps were taken out, the
+report's whole-ppm truncation in it). The two-board letters'
+agreement bounds are derived from that time ([usart.md](usart.md) and
+docs/stm32f4/usart.md, "The rendezvous's bound").
+
 **MEASURED** (the two users: `usart_peer` on DMA1 channel 2, ring 4096;
 `test_stm32_serial`'s two-board set on DMA1 channel 4, ring 4096 - 256
 on the STM32G031K8): this board's LSE and a far board's crystal (the
 STM32F446RE's, through the ST-LINK's 8 MHz) time the same HSI16 window
-within 16 ppm - three 40 ms windows read +3063/+2980/+2926 ppm by the far
-crystal and +3048/+2970/+2908 by the tracker - and a far 1 Mbaud blast
-on this board's ruler reads -2831 ppm against the tracker's +2832 over
-its window: 1 ppm apart. A peer whose every divisor and edge comes from
-the tracked rate reads -5..-14 ppm against the far crystal, where one
-boot measurement read +164, +8 and +76 a second apart.
+alike to the two crystals' offset - three 0.4 s windows read +2830/+2956/
++2946 ppm by the far crystal and +2823/+2947/+2939 by the tracker, the
+offset +6..+10 over 20 runs - and a far 1 Mbaud blast on this board's
+ruler reads -2831 ppm against the tracker's +2832 over its window: 1 ppm
+apart. A peer whose every divisor and edge comes from the tracked rate
+reads -6..-9 ppm against the far crystal in 75 windows of 0.4 s (-16..+1
+in 90 of 40 ms, the tracker's and the stamps' fixed time spread over a
+tenth of the span), where one boot measurement read +164, +8 and +76 a
+second apart.
 
 ## Not covered yet
 
@@ -624,6 +644,12 @@ Driver gaps:
   born with its first user. A util concept for the tracker (an RC core
   and a 32 kHz crystal on another family) waits for that family's
   first user.
+- A stretch's ends interpolated inside their capture intervals, in
+  place of `hz_over`'s whole intervals: replayed over the 90 recorded
+  40 ms stretches it took the error's spread from 3.6 to 2.5 ppm - the
+  end still extrapolated across the interval in progress - where the
+  0.4 s runs that need the precision already have it; born with a user
+  whose stretches are short and must be exact.
 
 Findings left open: `delay_us`'s minimum at 2 MHz (above) - some 270
 cycles where the bound allows 160 for a 20 us wait - is not located: the listing of `delay_us` at the 2 MHz rung, its per-rate

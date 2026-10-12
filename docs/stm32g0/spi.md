@@ -950,7 +950,10 @@ NEVER ACTED ON: no CRC frame is clocked at all - CRCNEXT stays set, TXE
 stays low, the far client waits out the select for a frame that never
 comes and reports nothing wrong - and letter `t`'s T, R and P stay true
 there only because nothing was exchanged (the frame its walk reads in
-that region is not the peer's CRC). That region is the one RM0444
+that region is not the peer's CRC); its F/f column says whether the CRC
+frame came at all - f past the frame's end at every code, and at 8-bit
+PCLK/2 (a 16-cycle frame) at every point of the walk, one frame in
+flight never sending a CRC there. That region is the one RM0444
 35.5.14's rule ("The CRCNEXT bit must be set before the end of the last
 data frame transaction") excludes; the window before the end is what it
 does not, and ES0548 lists nothing. The window is in CORE CYCLES, not

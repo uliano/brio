@@ -2010,7 +2010,9 @@ struct Crc {
     uint16_t tx_crc = 0, rx_crc = 0;
     uint16_t tx_ref = 0, rx_ref = 0, peer_ref = 0;
     bool host_crcerr = false;
-    bool frames_ok = false;      ///< every frame's RXNE came inside its budget
+    bool frames_ok = false;      ///< every data frame's RXNE came inside its budget
+    /// The CRC frame's RXNE came inside its budget (true where none was due).
+    bool crc_came = false;
 };
 
 /// Letter t's three stamps, SysTick's down-count at HCLK: before the last
@@ -2079,11 +2081,13 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
     CsPin::clear();
     link_hold();
     bool frames = true;
-    auto frame_back = [&]() -> uint16_t {
+    bool crc_came = true;
+    auto frame_back = [&](bool crc_frame) -> uint16_t {
         uint32_t spins = 400'000u;
-        while (!S::rx_ready() && spins-- != 0u) {
+        while (!S::rx_ready() && --spins != 0u) {   // a time-out leaves 0, never a wrap
         }
-        frames = frames && spins != 0u;
+        bool& came = crc_frame ? crc_came : frames;
+        came = came && spins != 0u;
         return S::data(bits);
     };
     auto frame_at = [&](uint16_t i) -> uint16_t {
@@ -2117,14 +2121,14 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
                     S::crc_next();
                     walk_next = SysTick->VAL;
                     uint32_t spins = 400'000u;
-                    while (!S::rx_ready() && spins-- != 0u) {
+                    while (!S::rx_ready() && --spins != 0u) {
                     }
                     walk_rxne = SysTick->VAL;
                 } else {
                     S::data(frame_at(i));
                 }
             }
-            keep(i, frame_back());
+            keep(i, frame_back(i == n && !corrupt));
         }
     } else {
         // THE LAST DATA FRAME QUEUED BEHIND ITS PREDECESSOR: frames one in
@@ -2136,7 +2140,7 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
         // calculators.
         for (uint16_t i = 0; i + 2u < n; ++i) {
             S::data(frame_at(i));
-            keep(i, frame_back());
+            keep(i, frame_back(false));
         }
         S::data(frame_at(static_cast<uint16_t>(n - 2u)));
         uint32_t spins = 400'000u;
@@ -2144,13 +2148,14 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
         }
         S::data(frame_at(static_cast<uint16_t>(n - 1u)));
         S::crc_next();
-        keep(static_cast<uint16_t>(n - 2u), frame_back());
-        keep(static_cast<uint16_t>(n - 1u), frame_back());
-        keep(n, frame_back());
+        keep(static_cast<uint16_t>(n - 2u), frame_back(false));
+        keep(static_cast<uint16_t>(n - 1u), frame_back(false));
+        keep(n, frame_back(true));
     }
     link_hold();
     CsPin::set();
     c.frames_ok = frames;
+    c.crc_came = crc_came;
     c.tx_crc = S::tx_crc();
     c.rx_crc = S::rx_crc();
     c.host_crcerr = S::crc_error();
@@ -2180,7 +2185,7 @@ Crc run_crc(bool wide, uint16_t poly, SpiClock rate, uint8_t spare, bool corrupt
 /// the peer's stream's, and neither end's CRCERR.
 bool crc_agrees(const Crc& c, bool wide) {
     const uint16_t mask = wide ? 0xFFFFu : 0x00FFu;
-    return c.o.accepted && c.o.clocked && c.o.reported && c.frames_ok && c.o.mism == 0u &&
+    return c.o.accepted && c.o.clocked && c.o.reported && c.frames_ok && c.crc_came && c.o.mism == 0u &&
            (c.o.r.flags & spilink::report_extended) != 0u && c.o.r.count == 16u &&
            c.o.r.mism == 0u && (c.o.r.flags & spilink::report_crcerr) == 0u &&
            c.tx_crc == c.tx_ref && c.rx_crc == c.rx_ref && (c.frame & mask) == c.peer_ref &&
@@ -2219,7 +2224,9 @@ void print_crc(const char* label, SpiClock rate, const Crc& c) {
 // one frame in flight, each point printed as next/rxne:TRP - the core
 // cycles (SysTick) from before the last data store to after the CRCNEXT
 // store, and to that frame's RXNE first seen; T this end's TXCRCR the
-// arithmetic, R its RXCRCR, P the peer's check clean (lower case: not).
+// arithmetic, R its RXCRCR, P the peer's check clean, F every frame read
+// back, the CRC frame among them (lower case: not - f where the store came
+// past the last frame's end and no CRC frame was clocked).
 
 void tt_crc_window() {
     if (!need_peer()) {
@@ -2258,7 +2265,8 @@ void tt_crc_window() {
                 print(serial, " ", ext::walk_since(ext::walk_store, ext::walk_next), "/",
                       ext::walk_since(ext::walk_store, ext::walk_rxne), ":",
                       r.tx_crc == r.tx_ref ? "T" : "t", r.rx_crc == r.rx_ref ? "R" : "r",
-                      (r.o.r.flags & spilink::report_crcerr) == 0u ? "P" : "p");
+                      (r.o.r.flags & spilink::report_crcerr) == 0u ? "P" : "p",
+                      r.frames_ok && r.crc_came ? "F" : "f");
             }
             print(serial, crlf);
         }
@@ -2303,7 +2311,7 @@ void tw_crc() {
                 const uint16_t mask = legs[l].wide ? 0xFFFFu : 0x00FFu;
                 top_far = top_far && ext::crc_far_agrees(r);
                 top_rx_wrong = static_cast<uint8_t>(
-                    top_rx_wrong + (r.rx_crc != r.rx_ref || (r.frame & mask) != r.peer_ref ? 1u : 0u));
+                    top_rx_wrong + (r.rx_crc != r.rx_ref || !r.crc_came || (r.frame & mask) != r.peer_ref ? 1u : 0u));
             }
         }
         leg_ok[l] = all;
@@ -2317,7 +2325,7 @@ void tw_crc() {
     bench.verdict("...and against the peer's CRC run (CRCNEXT after its last answer), both "
                   "widths",
                   leg_ok[2] && leg_ok[3]);
-    print(serial, "  at PCLK1/2 this end's receive CRC (RXCRCR, or the CRC frame read) missed in ",
+    print(serial, "  at PCLK1/2 this end's receive CRC (RXCRCR, or the CRC frame read or come) missed in ",
           top_rx_wrong, " of 2 windows - ES0298 2.14.5's CRC signature, letter t", crlf);
     bench.verdict("AT PCLK1/2 = 22.5 MHz THE FAR SIDE HOLDS: this end's TXCRCR is the "
                   "arithmetic, the peer's DMA serve checks the CRC frame clean, and every data "

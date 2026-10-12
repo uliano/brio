@@ -465,11 +465,13 @@ is crystal against crystal - and every rate it SENDS it states (a
   another die, a crystal-referenced time base), a bad checksum NAKed, a
   desync recovered, a synchronous client refused and the peer at once in
   command mode again.
-- **Two crystals**: three gapless runs of 4000 frames at 1 Mbaud (90 MHz
-  / 90, exact) timed by the far chip at -8, -7 and -6 ppm - the
-  ST-LINK's 8 MHz against the far LSE, within their tolerances; the far
-  chip's own 1 Mbaud blast on this DWT +2999 ppm against the +2989 it
-  states (64 of its 64.2 MHz core) less the clocks' -8: 2 ppm apart.
+- **Two crystals**: three gapless runs of 40000 frames at 1 Mbaud (90
+  MHz / 90, exact) timed by the far chip, judged to agree within 10 ppm
+  - a bound DERIVED below, "The rendezvous's bound" - and measured
+  within 2: 75 figures over 25 runs between -9 and -6 ppm, the ST-LINK's
+  8 MHz against the far LSE, within their tolerances; the far chip's own
+  1 Mbaud blast on this DWT +2999 ppm against the +2989 it states (64 of
+  its 64.2 MHz core) less the clocks' -8: 2 ppm apart.
 - **The baud matrix** (`2`) on the two dividers' COMMON ladder: this
   USART divides 90 MHz by any whole k from 8 (OVER8's three-bit fraction
   counts eighths), the far one 64 MHz by a whole n (its OVER8 adds no
@@ -614,6 +616,37 @@ is crystal against crystal - and every rate it SENDS it states (a
   note, "the receiver does not check the parity of the address data" -
   is the first address after a software mute; the far G0 flags it in
   every case.
+
+### The rendezvous's bound
+
+Letter `1`'s three runs are this crystal against the far chip's tracked
+core three times over, and two crystals move apart by well under a ppm
+in the second the runs take: fitted through EVERY stamp of a run
+against the far tracker's captures, the ratio read -7.68..-8.13 ppm over
+25 runs of 40000 frames and -6.95..-8.85 over 90 runs of 4000, the
+fit's own noise in both. So two figures differ by the far measurement's
+error alone, and that error is a TIME at each end of the far span,
+whatever the span's length - counted and measured with a scratch build
+of the far peer that kept every stamp and the tracker's ring behind it:
+
+| the term, per figure | its time | from |
+|---|---|---|
+| the far stamps: each frame seen at the next turn of a 20-cycle poll, behind the receiver's 1/16-bit start sampling (4 cycles at 1 Mbaud) and up to 5 cycles of DMA on the bus | +-0.45 us (29 cycles of 64.2 MHz) | measured: the stamps' differences on a 20-cycle grid with 3- and 5-cycle extras, the two ends' delays within 26 cycles of each other over 115 windows |
+| the far tracker's conversion: exact for its window's mean, the window starting 0.5 to 0.8 ms ahead of the span and stopping up to an interval short of it, the HSI16 wandering hundreds of ppm over such slivers; with the captures' 8-cycle grain | +-0.47 us | measured: -11.6..+8.0 ppm at 40 ms over 90 windows ([../stm32g0/clock.md](../stm32g0/clock.md), "The core against the LSE, tracked") |
+| one SysTick handler on a stamp | +-0.86 us | some 55 cycles: the M0+'s entry, the handler's twelve instructions, the return; never seen in 165 windows (one stamp in some six hundred would be) |
+
+Two figures part by at most twice the sum, 3.56 us, and the report's
+whole ppm adds one: over 0.4 s that is **10 ppm**, the verdict's bound,
+computed from those three times in the suite (`agree_ppm`). Over the 40
+ms of a 4000-frame run the same 3.56 us would be 89 ppm, and measured
+90 figures of 4000 frames spread -16..+1 (one run of three in the desk's
+history at -5/-4/+21): no bound at that length tells two crystals from
+an uncorrected RC, whose HSI16 moves between two runs a median 74 ppm
+(18 % of 60 pairs under 30, measured over the same windows). At 0.4 s
+the HSI moved a median 62 ppm between runs and 8 % of 50 pairs under 10
+- a peer that stopped tracking would pass the 10 ppm bound on both
+pairs of a run about one time in a hundred and fifty. The three runs
+cost 1.2 s.
 
 ## The peer: `usart_peer` (the instrument a far board's suite drives)
 

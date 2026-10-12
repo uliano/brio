@@ -1364,6 +1364,30 @@ int32_t span_ppm(uint32_t span_cycles, uint32_t rate, uint16_t half_bits, uint16
 
 constexpr uint32_t calib_rate = 1'000'000;   ///< exact on both ends' divisors here: the clocks alone
 constexpr uint16_t calib_frames = 4000;      ///< 40 ms, a million ticks of span
+constexpr uint16_t agree_frames = 40'000;    ///< letter 1's three runs: 0.4 s each
+
+/// THE BOUND LETTER 1'S THREE RUNS AGREE WITHIN, DERIVED (docs/stm32f4/usart.md,
+/// "The rendezvous's bound"). This crystal and the peer's LSE move apart by
+/// well under a ppm over the second the runs take, so two figures differ by
+/// the peer's measurement error alone - a TIME at each end of its span,
+/// whatever the span's length, in nanoseconds:
+///  - its two stamps: each frame seen at the next turn of a 20-cycle poll,
+///    behind its receiver's 1/16-bit start sampling (4 cycles at 1 Mbaud)
+///    and up to 5 cycles of DMA on the bus - 29 cycles of its 64.2 MHz;
+///  - the tracker's conversion (stm32g0/lse_tracker.hpp): exact for its
+///    window's mean, which starts 0.5 to 0.8 ms ahead of the span and stops
+///    up to an interval short of it, and the HSI16 wanders hundreds of ppm
+///    over such slivers; with the captures' 8-cycle grain, within 0.47 us
+///    measured over 90 windows;
+///  - one SysTick handler on a stamp: some 55 cycles of the M0+'s entry,
+///    the twelve instructions and the return.
+/// Either figure is off by at most their sum; two figures by twice that,
+/// and the report's whole ppm adds one.
+constexpr uint32_t agree_stamp_ns = 450, agree_tracker_ns = 470, agree_isr_ns = 860;
+constexpr uint32_t agree_span_us = (agree_frames - 1u) * 10u;   // 8N1 at 1 Mbaud
+constexpr int32_t agree_ppm = static_cast<int32_t>(
+    (2u * (agree_stamp_ns + agree_tracker_ns + agree_isr_ns) * 1000u + agree_span_us - 1u) / agree_span_us + 1u);
+static_assert(agree_ppm == 10, "letter 1's verdict states the derived bound: move its text with it");
 int32_t base_ppm = 0;                        ///< letter 1's figure: this crystal against the peer's
 bool base_known = false;
 
@@ -1447,16 +1471,21 @@ void t1_link() {
     Calib k[3];
     bool all = true;
     for (Calib& x : k) {
-        x = calibrate(c, calib_frames);
+        x = calibrate(c, agree_frames);
         all = all && x.ok;
     }
     print(serial, "  this crystal against the peer's LSE-measured core: ");
     print_ppm(k[0].ppm);
     print(serial, ", then ", k[1].ppm, " and ", k[2].ppm, " ppm; span ", k[0].span, " ticks for ",
-          calib_frames - 1u, " frames", crlf);
-    bench.verdict("the peer timed three gapless runs of 4000 frames at 1 Mbaud", all);
-    bench.verdict("the three agree within 20 ppm: two crystals, no RC in the loop",
-                  all && near(k[0].ppm, k[1].ppm, 20) && near(k[1].ppm, k[2].ppm, 20));
+          agree_frames - 1u, " frames", crlf);
+    bench.verdict("the peer timed three gapless runs of 40000 frames at 1 Mbaud", all);
+    // 3.56 us over 0.4 s is 9 ppm, and the whole ppm: 10. The same 3.56 us
+    // over the 40 ms of a 4000-frame run would be 89 ppm, more than the
+    // peer's uncorrected HSI16 moves between two runs (median 74 ppm,
+    // measured) - hence 40000 frames, 1.2 s for the three.
+    bench.verdict("the three agree within 10 ppm (the bound derived above): two crystals, no RC in the loop",
+                  all && near(k[0].ppm, k[1].ppm, agree_ppm) && near(k[1].ppm, k[2].ppm, agree_ppm) &&
+                      near(k[0].ppm, k[2].ppm, agree_ppm));
     // D4's check: the peer's calibration holds when two crystals meet
     // within their tolerances - the ST-LINK's 8 MHz and the LSE, each
     // tens of ppm - where the G0's uncorrected HSI would read ~0.2 %.
