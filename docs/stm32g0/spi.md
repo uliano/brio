@@ -945,17 +945,59 @@ about ten cycles a turn first sees it) corrupts BOTH calculators: the transmit o
 so the CRC frame sent is the right CRC moved up a bit (0xD3 went out as
 0xA6), and the receive one is not frozen, the CRC frame summed into it
 (RXCRCR 0x00); CRCERR stands at both ends, every data frame exact. A
-store before the window, or after the frame has ended, is clean. The
-window is in CORE CYCLES, not in bits - the same 16 to 26 before RXNE
-for 8- and 16-bit frames from PCLK/4 to PCLK/16 - and 6 to 12 cycles
-wide; RM0444 35.5.14's rule ("set before the end of the last data frame
-transaction") does not exclude it and ES0548 lists nothing. The first
-version of letter `w`, one frame in flight with CRCNEXT the store after
-the last data store, hit it at PCLK/4 in 8-bit frames on every serve.
-So the host writes the last TWO data frames as one burst into the
-TXFIFO and CRCNEXT right after them: the bit lands while the
-second-to-last frame is still in the shifter, a whole frame and more
-before the window, and letter `w` holds at every code.
+store before the window is clean. A STORE AFTER THE FRAME HAS ENDED IS
+NEVER ACTED ON: no CRC frame is clocked at all - CRCNEXT stays set, TXE
+stays low, the far client waits out the select for a frame that never
+comes and reports nothing wrong - and letter `t`'s T, R and P stay true
+there only because nothing was exchanged (the frame its walk reads in
+that region is not the peer's CRC). That region is the one RM0444
+35.5.14's rule ("The CRCNEXT bit must be set before the end of the last
+data frame transaction") excludes; the window before the end is what it
+does not, and ES0548 lists nothing. The window is in CORE CYCLES, not
+in bits - the same 16 to 26 before RXNE for 8- and 16-bit frames from
+PCLK/4 to PCLK/16 - and 6 to 12 cycles wide, and where a store lands
+against it moves with the code's placement: the same one-in-flight
+procedure, CRCNEXT the store after the last data store, sat inside it at
+8-bit PCLK/4 in every window of one image and just before it in another
+whose code differs only elsewhere. At 8-bit PCLK/2, a frame of 16 core
+cycles, one frame in flight cannot set the bit in time at all. So the
+host writes the last TWO data frames as one burst into the TXFIFO and
+CRCNEXT right after them: the bit lands while the second-to-last frame
+is still in the shifter, a whole frame and more before the window, and
+letter `w` holds at every code.
+
+**THE VENDOR'S LOOP MEETS THE SAME WINDOW, AND THE REGION PAST IT.** ST's
+HAL v1.4.7 `HAL_SPI_Init` and `HAL_SPI_TransmitReceive` with its CRC,
+compiled from the pinned archive at every optimisation level (-O0, -O1,
+-O2, -O3, -Os, -Og) into a scratch program with brio's crt, clock and
+console around it, hosting on SPI1 against the F446's client: sixteen
+data frames a window, six windows a cell, every code from PCLK/256 to
+PCLK/4 in both widths. Its loop keeps one frame in flight and sets
+CRCNEXT by a read-modify-write of CR1 after the last DR store and the
+handle's bookkeeping - some twenty instructions between the two stores
+at -Os, about 37 core cycles by the listing, and about 60 at -O0. Built
+at -O0 its store lands in the window at 8-bit PCLK/8 in every window,
+and at 16-bit PCLK/4 in the images whose placement puts it a few cycles
+later, with this suite's signature to the byte for the same streams
+(TXCRCR 0x0D where the arithmetic is 0xDA, RXCRCR 0x00, CRCERR at both
+ends; the call returns HAL_ERROR with HAL_SPI_ERROR_CRC). Built at any
+level, at 8-bit PCLK/4 its store comes after the last data frame has
+ended: no CRC frame is clocked, and the call returns HAL_TIMEOUT with
+HAL_SPI_ERROR_CRC once its timeout runs out waiting for the CRC's RXNE.
+Every other cell is clean at every level, but for the wire: at 16-bit
+PCLK/256 the vendor's call lost a bit to a slip (both ends wrong from
+the same frame, the CRC catching it) in three of six windows at -O2 in
+each of two runs of one image, in one of six at -Os in a second and in
+none in a third, where this suite's own loop slipped at that cell in
+none of eighteen. The same
+sequence with its CRCNEXT moved to the store right after the DR store, then walked away
+from it a loop turn at a time, is clean before the window, corrupts both
+calculators inside it and clocks no CRC frame past it, at the distances
+from the DR store this suite's walk finds - so nothing else in the
+vendor's sequence (CRCEN cleared and set before SPE, SPE set inside the
+call, FRXTH, the TXE test, the tick read every turn) bears on it. The
+store's distance from the last frame's end decides, and the window is the
+silicon's.
 
 **THE G0 `spi_peer` MEASURED FROM THE F446** (`test_stm32f4_spi`, SPI2
 at PCLK1 = 45 MHz hosting, its SCK and its MOSI at medium): the
@@ -1145,12 +1187,21 @@ on every header of the pack, but no silicon has run it:
 - **the CRCNEXT window's cause** (letter `t`): a store 16 to 26 core
   cycles before the last data frame's RXNE corrupts both calculators,
   in core cycles at every rate measured, where RM0444 asks only that the
-  bit be set before the frame's end. The vendor's own polled loop
-  (HAL v1.4.7 `HAL_SPI_TransmitReceive`, one frame in flight, CRCNEXT the
-  store after the last) would land wherever its instruction timing puts
-  it; run on this board, at the rates the walk names, it would say
-  whether the vendor's procedure meets the window too - and ST whether
-  the window is the silicon's.
+  bit be set before the frame's end. The vendor's own polled loop meets
+  it on this board, with this suite's signature (the vendor's loop,
+  above), so the window is the silicon's and no sequence of ours makes
+  it; what the block does there - when it samples CRCNEXT against the
+  last frame's end, and why a store a few cycles early shifts the
+  transmit calculator once more and leaves the receive one running - is
+  ST's to describe, and that description would settle it.
+
+- **the slips under the vendor's loop at 16-bit PCLK/256** (the vendor's
+  loop, above): a bit lost on the wire in seven of 126 windows of ST's
+  call over its six builds and three images, and in none of eighteen of
+  this suite's own loop at the same cell, the image deciding which build
+  slips. Not explained; the logic
+  analyser on SCK at the F446's pin through that call would show whether
+  the edge is gained on the wire or in the client.
 
 - **the burst ladder's 320-cycle floor** (letter d) is not the host
   loop's own - the transmit-only loop holds PCLK/2's clock continuous

@@ -1033,21 +1033,53 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   differences measured: the data frames are captured right, and the code
   matters (PCLK1/4 and slower are clean) where the erratum says the
   communication speed has no impact. Letter `w` judges the far side at
-  /2 and prints this end's.
+  /2 and prints this end's. THE VENDOR'S OWN LOOP READS IT THE SAME WAY
+  (ST's HAL v1.8.5 `HAL_SPI_TransmitReceive` with its CRC, below): at
+  PCLK1/2 in both widths, at every optimisation level, the call returns
+  HAL_ERROR with HAL_SPI_ERROR_CRC in every window - RXCRCR off the
+  arithmetic, TXCRCR on it, the G0's check clean, every data frame exact
+  - and from PCLK1/4 to PCLK1/256 every level is clean.
 - **THE CRCNEXT WINDOW** (letter `t`, outside `z`): one frame in flight,
   the CRCNEXT store walked away from the last data store, the same
   hazard as the STM32G0's (docs/stm32g0/spi.md): a store landing from 33
   to some 60 core cycles before the last data frame's RXNE (as a poll
   first sees it), a window under half a bit wide that widens with the
-  bit, corrupts both calculators and the far check; a store before it is
-  clean - and one after the frame
-  has ended leaves this end's accumulators right while the far check
-  FAILS (unlike the G0, where that side is clean). RM0390's rule
-  ("before the end of the last data frame transaction") does not exclude
-  it and ES0298 lists nothing. So the host queues the last data frame
-  behind the one before it - the second-to-last into the idle shifter,
-  the last on its TXE, CRCNEXT the store after - and the bit lands a
-  frame before the window at every code.
+  bit, corrupts both calculators and the far check (TXCRCR 0x0D where the
+  arithmetic is 0xDA, RXCRCR 0x00, the STM32G0's signature to the byte);
+  a store before it is clean. A STORE AFTER THE FRAME HAS ENDED IS NOT
+  ACTED ON IN ITS SLOT: CRCNEXT stays set, no RXNE comes for a CRC frame,
+  this end's accumulators keep the data's CRC - and the G0 client takes
+  one more frame only when this end gives up waiting (its run time is
+  this end's wait), sums it into its RXCRCR and reports CRCERR; letter
+  `t`'s T and R stay true there because no CRC phase ran (the frame its
+  walk reads is not the peer's CRC). That region is the one RM0390
+  26.4.2's rule ("The CRCNEXT bit must be set before the end of the last
+  data frame transaction") excludes; the window before the end is what it
+  does not, and ES0298 lists nothing. So the host queues the last data
+  frame behind the one before it - the second-to-last into the idle
+  shifter, the last on its TXE, CRCNEXT the store after - and the bit
+  lands a frame before the window at every code.
+- **The vendor's loop on the CRC.** ST's HAL v1.8.5 `HAL_SPI_Init` and
+  `HAL_SPI_TransmitReceive` with its CRC, compiled from the pinned
+  archive at every optimisation level (-O0, -O1, -O2, -O3, -Os, -Og) into
+  a scratch program with brio's crt, clock and console around it,
+  hosting on SPI2 against the G0's client: sixteen data frames a window,
+  six windows a cell, every code PCLK1/2 to PCLK1/256 in both widths. Its
+  loop keeps one frame in flight and sets CRCNEXT by a read-modify-write
+  of CR1 after the last DR store and the handle's bookkeeping, which at
+  this core's speed lands before the window from PCLK1/4 down: every
+  level is clean there. At PCLK1/2 every level reads 2.14.5's signature
+  (above), and the -O0 build, in 8-bit frames, gets no RXNE for a CRC
+  frame the G0 receives and rejects as promptly as in a clean window: the
+  call returns HAL_TIMEOUT with HAL_SPI_ERROR_CRC and CRCERR stands at
+  both ends. No unmodified build lands in the window on this board;
+  the same sequence with its CRCNEXT moved to the store right after the
+  DR store, then walked away from it a loop turn at a time, is clean
+  before the window, corrupts both calculators inside it (HAL_ERROR,
+  HAL_SPI_ERROR_CRC) and times out past it, at the distances this
+  suite's walk finds - so the window is the silicon's, reproduced inside
+  the vendor's own sequence, and nothing else in that sequence bears on
+  it.
 
 **`SpiClient` against the STM32G0B1RE host** (the stm32f4 `spi_peer` on
 this board, firmware 0x0402, `test_stm32_spi` on the G0B1RE, 74 of 74):
