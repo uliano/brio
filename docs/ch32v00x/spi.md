@@ -126,13 +126,21 @@ the pads).
   `dma_min_frames_polled`, the next section). Frames in a byte buffer:
   one byte per 8-bit frame, two bytes low-first per 16-bit frame - one
   half-word in memory, which is what a 16-bit beat moves.
-- `SpiClient<1, pins>`: the target side, thin - `init(clock, Config)`
+- `SpiClient<1, pins>`: the target side - `init(clock, Config)`
   refusing a mode this part's client is not served in (`config_served()`,
   `spi_client_mode_served()`: modes 1 and 2 on the CH32V006) and
-  `init<cfg>(clock)`, where such a mode does not compile, `enable(first)`
-  with the first answer loaded before the host's clock, `write()` on TXE
-  (ONE frame ahead: no FIFO), `poll()`, `selected()` read off the NSS pad,
-  `drive_output()` for a dark listener, `isr()`.
+  `init<cfg>(clock)`, where such a mode does not compile; the per-frame
+  verbs - `enable(first)` with the first answer loaded before the host's
+  clock, `enable()` with the buffer empty, `write()` on TXE (ONE frame
+  ahead: no FIFO), `poll()`, `selected()` read off the NSS pad,
+  `drive_output()` for a dark listener, `isr()` -; and THE RUNS a
+  transaction is served by, its unit (the next section but one):
+  `answer(out, spins)`, `exchange(out, in, spins)`, `receive(in, spins)`
+  over `uint8_t` or `uint16_t` frames, each returning a `Run` - the
+  frames moved and how it ended, `complete`, `closed` (the host raised
+  the select) or `stalled` (the spin budget). A run over a wider element,
+  and an answering run on a client whose pins name no MISO pad, do not
+  compile (`test/family_ch32v00x/neg/spi_client_*.cpp`).
 
 [brio/ch32v00x/pin.hpp](../../brio/ch32v00x/pin.hpp)'s `PinRef` (the
 runtime pin the request carries) and `Pad` (the compile-time pad name
@@ -310,6 +318,91 @@ statement - lies on the bus's dead time (letter r).
   brio's transmit-only loop is at the wire and its receive loop at
   1.69.
 
+## The client's runs
+
+A client's unit is the run: the answers to a transaction, or what it
+brings, served polled in one call. What each costs is counted in the
+release listing of `spi_peer`, which inlines all three at both widths
+(WCH gcc 15.2, `-Os`, the `xw` ISA), and measured from the far side by
+`test_x035_spi`'s letter k: the CH32X035 clocks 32 frames of 8 or 16 bits
+under its polled loop - a gap after every frame, the control - and back
+to back under its engines, every rung from /64 to /2, and judges each end.
+
+| offer (section) | taken? | why |
+|---|---|---|
+| TXE, the buffer moved into the shifter at a frame's first sampling edge (16.2.3) | yes | answer k + 1 is written on frame k's TXE: one frame of window, one answer ahead (no FIFO, figure 16-1) |
+| RXNE and the one-deep receive buffer (16.2.3, 16.2.7) | yes, read in the middle of a frame | the exchange reads frame k - 1 on its standing RXNE right after frame k's answer is written: a DATAR read at a frame's end lost the next answer, and TXE alone does not say RXNE (both measured, below) |
+| the NSS pad (16.2.1) | yes, the window | the chapter has no flag for a client's window end: the pad is read once for every four polls of a flag |
+| DMA requests on channels 2 and 3 (table 8-2) | not in a run | a DMA serve is the program's composition of the engines over the resource - its binding, its channels and the latched-request rule (What the silicon does) are the program's - and `spi_peer`'s default serve, at the wire to 24 MHz; a run is the polled serve, with nothing to arm |
+| RXNE and TXE interrupts (16.2.8) | not in a run | an interrupt a frame pays the hardware prologue and epilogue, 54 cycles, before a body, against frames of 64 cycles at 6 MHz; `isr()` stands for a program that wants them |
+| SRAM execution | the program's | the runs are always inline and the stratum places nothing in SRAM (8 KB); ld/ch32v006k8.ld carries no `.ram_text`, so from the flash, behind two wait states at 48 MHz (RM 18.3.1), the fetch is a run's ceiling (measured, below) |
+
+THE COST, in the steady state with each flag found at its first poll,
+no call anywhere in a run:
+
+- the EXCHANGE, 13 instructions a frame: the next answer's load, the TXE
+  poll's load, test and branch, the DATAR store, the RXNE test's load,
+  test and branch (one poll: the flag stands by then), the DATAR
+  load, two pointer steps, the frame's store and the loop's branch -
+  three taken branches, four peripheral accesses (STATR twice, DATAR
+  twice) and two SRAM ones;
+- the ANSWER run, 7: the load, the poll's three, the store, the step,
+  the branch - two taken, two peripheral accesses;
+- the RECEIVE run, 7: the poll's three, the DATAR load, the step, the
+  store, the branch - two taken, two peripheral accesses.
+
+A poll that misses is three instructions more, and every fourth a look
+at the pad (one load of the port's input register) and the budget's
+step. The answer is loaded before the TXE poll, so the store follows the
+load that sees the flag with nothing between them.
+
+THE CEILINGS, every rung up to the one named exact and the next one not,
+in three runs of the letter on the final images (the tick held, below):
+
+| run | 8-bit, gapped | 8-bit, back to back | 16-bit, gapped | 16-bit, back to back |
+|---|---|---|---|---|
+| exchange | 6 MHz | 6 MHz | 12 MHz | 12 MHz |
+| answer | 24 MHz | 12 MHz | 24 MHz | 24 MHz |
+| receive | 24 MHz | 12 MHz | 24 MHz | 24 MHz |
+
+In cycles: the exchange holds a frame of 64 cycles and not one of 32,
+the answer and receive runs one of 32 and not one of 16 (the gapped
+host's gap after each frame carrying them to 24 MHz in 8-bit frames).
+Thirteen instructions in 33 to 64 cycles is 2.5 to 5 cycles an
+instruction, the three taken branches refetching from the flash behind
+its wait states. The receive run is at the edge of its window there: its
+12 MHz back-to-back rung lost one frame in two runs of nine across the
+session and its 24 MHz gapped one in one. The wire is not what stops
+them: from SRAM the same receive run hears 24 MHz back to back (below).
+
+- **A DATAR READ AT A FRAME'S END LOSES THE NEXT ANSWER.** With frame k
+  read on its own RXNE - at the frame's end, a bit before answer k + 1
+  moves into the shifter - back to back at 12 MHz in 16-bit frames the
+  far host read 56 to 58 of 64 bytes wrong in five runs of five, the
+  answer before repeated, while this client heard all 32 frames; with
+  frame k - 1 read after the TXE of frame k, the same rung exact in
+  every run with the tick held (six). The mechanism inside the block is
+  not isolated (a logic analyser on SCK and MISO would show which edge
+  the transfer takes).
+- **TXE DOES NOT SAY RXNE.** Reading frame k - 1 on the TXE of frame k
+  with no RXNE test - one poll a frame - under the gapped host at 12 MHz
+  in 8-bit frames, 9 and 10 of the 32 frames read were wrong in two runs
+  while every answer was right: the exchange tests RXNE before its read,
+  one poll when the flag stands, as it does by then.
+- **THE TICK COSTS A FRAME back to back at 6 MHz in 8-bit frames**: its
+  handler, a dozen instructions behind the hardware prologue and epilogue
+  (about 85 cycles), outlasts a frame of 64. With the tick live two
+  letter runs of eight lost one frame at that rung, in the exchange once
+  and in a receive run once; `spi_peer` holds its tick for a polled serve,
+  and no run since lost one. A program's runs back to back are exact
+  while no handler of its image outlasts a frame - the image's hold-off,
+  as for the host's pump.
+- **PLACEMENT**: the same runs from SRAM (a measurement image with the
+  peer's serve in `.data`, about 1.1 KB a frame width for the three runs
+  inlined) - the exchange exact to 12 MHz in 8-bit frames under both
+  hosts, the receive run to 24 MHz back to back, every 16-bit run to 24
+  MHz: one rung, a factor of two, over the flash for the exchange.
+
 ## How to use it
 
 ```cpp
@@ -340,6 +433,15 @@ DmaRxEngine<2, uint16_t>>`, and `dma1_channel2_handler` /
 `dma1_channel3_handler` both calling `Bus::dma_isr()` the same way (the
 receive channel's is the one that fires; the transmit channel's only on
 a transfer error).
+
+A client answering a transaction in one call, on PC1's hardware select:
+
+```cpp
+using C = brio::SpiClient<1>;
+C::init<C::Config{.mode = brio::SpiMode::mode3}>(clock);
+const auto run = C::exchange(std::span<const uint8_t>(answers), std::span<uint8_t>(heard), spins);
+if (run.end != C::RunEnd::complete) { /* run.count frames came */ }
+```
 
 ## Bench findings
 
@@ -499,14 +601,16 @@ CH32X035's suite (`test_x035_spi`, its document
 [../ch32x035/spi.md](../ch32x035/spi.md)): spi_link's command channel in
 band over SPI1's column 0 with the HARDWARE select on PC1 (pulled up),
 the dark listener, the exchange served on the DMA engines (channels 2 and
-3, polled through the receive count, no interrupt) or on a polled run over
-the client's per-frame verbs, `sink_slow`, `ss_pulse` on PC1 as a GPIO,
+3, polled through the receive count, no interrupt) or on the client's
+runs (its tick held for the run), `sink_slow`, `ss_pulse` on PC1 as a GPIO,
 `host_burst` with PC1 the host's GPIO select; `mspi` refused (no USART of
 this part reaches the wires). Modes 1 and 2, which `SpiClient` refuses on
 this part, it serves all the same - the block configured by hand, the
-resource's verbs on the same pads - so a far suite measures them; the
-extended exchange (spi_link's 16-bit frames, CRC and receive-only run) it
-does not serve, and never raises `report_extended`. This die's 24 MHz
+resource's verbs on the same pads - so a far suite measures them; of the
+extended exchange it serves the 16-bit frames (the engines in half-word
+beats, the runs over `uint16_t`) and the receive-only run (MISO dark) and
+refuses the CRC (`report_cfg_failed`, no host on the desk asking it),
+raising `report_extended` on every exchange. This die's 24 MHz
 crystal runs it (the PLL at 48 MHz), and its supply is read from VREFINT
 at boot (3275 mV on the desk). What the far chip measured of this client,
 on the four wires:
@@ -532,9 +636,8 @@ on the four wires:
   isolated (a logic analyser on SCK and MISO across two windows would).
 - **The rate ladder**: the DMA serve exact at every code to the far
   host's /2 = 24 MHz, behind its polled loop and its engines; the polled
-  run exact to 6 MHz behind a host with one frame in flight and to 3 MHz
-  behind back-to-back frames - the run's own ceiling, its per-frame verbs
-  fetched from the flash.
+  serve - the client's exchange run - exact to 6 MHz behind both, the
+  run's own ceiling from the flash (The client's runs, above).
 - **As a host** (`host_burst`, one polled frame a request, 20 us apart):
   its SCK and MOSI the standard's in all four modes and its frames exact
   at the far client, MSb and LSb first.
@@ -550,16 +653,24 @@ Driver gaps, each with its reason:
   has SSOE and the multi-host input for a program that wants them.
 - The CRC as part of a Request: the resource's verbs exist, born into a
   tenure shape with a device that checks one.
-- The client's RUNS (a transaction's answers, an exchange, a receive in
-  one call, as the CH32X035's `SpiClient` has them): this client has the
-  per-frame verbs alone, and its one user - `spi_peer` - builds its runs
-  over them; born with a second user.
+- A run's caller in SRAM: ld/ch32v006k8.ld carries no `.ram_text` (the
+  stratum places nothing in SRAM, 8 KB of it), so a program that wants
+  the exchange's rung over the flash's (The client's runs) has no section
+  to place its caller in - a decision for the ld, a rung for about 1.1 KB
+  a frame width.
 - The CH32V003F4P6's client in modes 1 and 2: `SpiClient` refuses them on
   the CH32V006 alone, where they were measured served neither way; the
   CH32V003 shares the block and has not answered on its own die, and a
   refusal stated for a part nobody measured would be a guess.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The client's runs on the CH32V003F4P6: they compile there (`brio check
+  ch32v00x`); a CH32V003 wired to the CH32X035 as the CH32V006 is, under
+  letter k, would measure them.
+- A run on a client with no NSS pad (it ends on its count or its budget
+  alone): it compiles; a client whose pins name no select, under a host
+  framing its own, would run it.
 
 - The suite on the CH32V003F4P6: its fifteen group images link and fit
   (`brio fit`); the part is off the desk, and a CH32V003 wired to the

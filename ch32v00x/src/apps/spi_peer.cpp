@@ -18,9 +18,16 @@
 //    TXE rises as a frame enters the shifter (16.2.3), so an answer is
 //    written on the TXE of the frame before it - most of a frame of
 //    window - and a client that falls behind does not stall the bus: the
-//    host reads whatever the shifter held. Every polled window is ONE RUN
-//    over the driver's per-frame verbs (writable, write, poll, selected),
-//    each one register access inline.
+//    host reads whatever the shifter held. Every polled window is ONE of
+//    the driver's RUNS (SpiClient::answer, exchange, receive), each one
+//    call inlined here, running from the flash (docs/ch32v00x/spi.md: its
+//    fetch is what bounds them).
+//  - THE TICK IS HELD FOR A POLLED SERVE: back to back at 6 MHz an 8-bit
+//    frame is 64 cycles, and the tick's handler with the hardware prologue
+//    and epilogue outlasts it - a tick that lands inside a run costs that
+//    run a frame (measured). Ticker::pause() before the run and resume()
+//    after: the tick's edge waits in CNTIF and is served at the run's end,
+//    the milliseconds the run waited for its select lost to millis().
 //  - THE EXCHANGE IS SERVED BY THE DMA ENGINES BY DEFAULT, SPI1's receive
 //    on channel 2 and its transmit on channel 3 (table 8-2), polled
 //    through the receive channel's count with no interrupt; the transmit
@@ -33,10 +40,18 @@
 //    polled run instead, `spilink::spare_answer_only` for the answer run
 //    alone (the report then counts the answers written and judges
 //    nothing).
+//  - THE EXTENDED EXCHANGE (spi_link.hpp): `spare_wide` 16-bit frames -
+//    DFF, the engines in half-word beats, the runs over uint16_t -, and
+//    `spare_receive_only` on the receive engine alone (the polled
+//    `receive()` run with spare_polled_pump), MISO not driven. `spare_crc`
+//    is REFUSED (report_cfg_failed): no host on the desk asks this peer
+//    for a CRC frame, and a CRC serve is born with the first that does.
+//    Every exchange report raises report_extended.
 //  - A RUN SAMPLES NOTHING INSIDE THE BURST, so the exchange's report
 //    fields are this peer's own (spi_link.hpp leaves them to the peer's
 //    header): aux0 = STATR after the burst, aux1 = the milliseconds from
-//    the run's start to its END (255 = nothing came), aux2 bit 0 = the
+//    the run's start to its END (255 = nothing came; 0 or near it for a
+//    polled serve, whose tick is held), aux2 bit 0 = the
 //    select read low once after the run, bit 1 = the host closed it, bit 2
 //    = the DMA engines served it; aux3 = 0.
 //  - THE BUFFERING REGIMES COLLAPSE, as on every F1-lineage peer: this
@@ -70,10 +85,6 @@
 //    driver's SpiClient refuses them (spi_client_mode_served), so there it
 //    configures the block BY HAND, the resource's verbs on the same pads;
 //    its report says what arrived.
-//  - THE EXTENDED EXCHANGE (spi_link's spare_wide, spare_crc,
-//    spare_receive_only) is not served: this peer runs 8-bit frames
-//    whatever the command asks and never raises report_extended, which is
-//    how a host knows (the CH32X035 peer serves it).
 //
 // THE DARK LISTENER discipline: the command-mode client never drives MISO
 // (drive_output = false, the pad a floating input), the answer line wakes
@@ -154,7 +165,7 @@ using MisoPin = Pin<'C', 7>;
 using NssPin = Pin<'C', 1>;
 
 constexpr uint16_t firmware_version =
-    static_cast<uint16_t>((spilink::peer_ch32v00x << 8) | 0x02u);   ///< spi_link.hpp's Ident
+    static_cast<uint16_t>((spilink::peer_ch32v00x << 8) | 0x03u);   ///< spi_link.hpp's Ident
 
 static_assert(device::part_name[0] == 'C' && device::part_name[1] == 'H' &&
                   device::part_name[2] == '3' && device::part_name[3] == '2',
@@ -167,10 +178,11 @@ static_assert(device::part_name[0] == 'C' && device::part_name[1] == 'H' &&
 /// client is served in.
 constexpr uint8_t answer_window_mode = 3;
 
-/// The exchange's engines, bound once with NO interrupt: the serve polls
-/// the receive channel's count.
-using PeerTx = DmaTxEngine<3>;
-using PeerRx = DmaRxEngine<2>;
+/// The exchange's engines at DATAR's width, bound once with NO interrupt:
+/// the serve polls the receive channel's count. 8-bit frames go in byte
+/// beats, 16-bit ones in half-word beats.
+using PeerTx = DmaTxEngine<3, uint16_t>;
+using PeerRx = DmaRxEngine<2, uint16_t>;
 
 bool crystal_ok = false;
 bool supply_ok = false;
@@ -256,142 +268,37 @@ bool client_by_hand(const Client::Config& c) {
     SckPin::input();
     MosiPin::input();
     NssPin::input(PinPull::up);
-    MisoPin::function();
+    if (c.drive_output) {
+        MisoPin::function();
+    } else {
+        MisoPin::release();
+    }
     Raw::flush_rx();
     return true;
 }
 
-/// What a command asked this client to become, MISO driven.
-bool apply_cfg(const spilink::Cfg& c) {
+/// What a command asked this client to become: 16-bit frames with `wide`,
+/// MISO driven unless the serve only listens.
+bool apply_cfg(const spilink::Cfg& c, bool wide = false, bool drive = true) {
     wait_nss_high(50);
     const Client::Config cc{.mode = mode_of(c.mode),
-                            .bits = SpiDataSize::bits8,
+                            .bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8,
                             .lsb_first = c.dord != 0,
                             .nss = SpiNss::hardware_input,
-                            .drive_output = true};
+                            .drive_output = drive};
     const bool ok = Client::config_served(cc) ? Client::init(clock, cc) : client_by_hand(cc);
     Pfic::disable(Raw::irq());
     return ok;
 }
 
 // ---- the runs ----------------------------------------------------------------
-//
-// Over the driver's per-frame verbs, each one register access inline: the
-// answer for frame k + 1 written on frame k's TXE, a received frame read on
-// its RXNE, the NSS pad read once for every four polls. The answers are
-// precomputed, the received frames only stored, every judgement after.
 
-enum class RunEnd : uint8_t { complete, closed, stalled };
-struct Run {
-    uint16_t count;
-    RunEnd end;
-};
+using Run = Client::Run;
+using RunEnd = Client::RunEnd;
 
 /// A run's spin budget: a spin is four polls and a look at the pad, some
 /// thirty cycles of this core - a bound of the right order, not a clock.
 constexpr uint32_t spins_for_ms(uint32_t ms) { return ms * (SysClock::hz / 30'000u); }
-
-[[gnu::always_inline]] inline bool await_select(uint32_t& spins) {
-    while (!Client::selected()) {
-        if (--spins == 0u) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// Four polls a look: true when the flag stands, false on the close or the
-/// budget (`how` says which).
-template <bool tx>
-[[gnu::always_inline]] inline bool await(uint32_t& spins, RunEnd& how) {
-    for (;;) {
-        for (uint8_t k = 0; k < 4u; ++k) {
-            if (tx ? Raw::txe() : Raw::rxne()) {
-                return true;
-            }
-        }
-        if (!Client::selected()) {
-            how = RunEnd::closed;
-            return false;
-        }
-        if (--spins == 0u) {
-            how = RunEnd::stalled;
-            return false;
-        }
-    }
-}
-
-/// THE ANSWER RUN: `out` on TXE alone, nothing read (the receive buffer
-/// overruns from the second frame, cleared at the tail). The first answer
-/// goes into the empty buffer at once, with the select high; the run ends
-/// when the host raises it.
-Run answer_run(const uint8_t* out, uint16_t n, uint32_t spins) {
-    uint16_t i = 0;
-    RunEnd how = RunEnd::closed;
-    if (n != 0u) {
-        Raw::data8(out[i++]);
-    }
-    Raw::enable();   // SPE after the preload, the DMA serve's order
-    if (!await_select(spins)) {
-        Raw::flush_rx();
-        return {i, RunEnd::stalled};
-    }
-    for (; i < n; ++i) {
-        const uint8_t next = out[i];
-        if (!await<true>(spins, how)) {
-            Raw::flush_rx();
-            return {i, how};
-        }
-        Raw::data8(next);
-    }
-    while (Client::selected()) {
-        if (--spins == 0u) {
-            how = RunEnd::stalled;
-            break;
-        }
-    }
-    Raw::flush_rx();
-    return {i, how};
-}
-
-/// THE EXCHANGE RUN: answers as answer_run()'s, and each turn reads the
-/// frame the TXE belonged to on its RXNE - inside the next frame, the
-/// receive buffer being one frame deep.
-Run exchange_run(const uint8_t* out, uint8_t* in, uint16_t n, uint32_t spins) {
-    if (n == 0u) {
-        return {0, RunEnd::complete};
-    }
-    Raw::flush_rx();
-    uint16_t w = 0;
-    uint16_t r = 0;
-    RunEnd how = RunEnd::complete;
-    Raw::data8(out[w++]);
-    Raw::enable();   // SPE after the preload, the DMA serve's order
-    if (!await_select(spins)) {
-        return {0, RunEnd::stalled};
-    }
-    for (; w < n; ++w, ++r) {
-        const uint8_t next = out[w];
-        if (!await<true>(spins, how)) {
-            goto drain;
-        }
-        Raw::data8(next);
-        if (!await<false>(spins, how)) {
-            goto drain;
-        }
-        in[r] = Raw::data8();
-    }
-    if (!await<false>(spins, how)) {
-        goto drain;
-    }
-    in[r++] = Raw::data8();
-    return {r, RunEnd::complete};
-drain:
-    if (r < n && Raw::rxne()) {
-        in[r++] = Raw::data8();
-    }
-    return {r, how};
-}
 
 // ---- answering -------------------------------------------------------------
 
@@ -408,7 +315,7 @@ void serve(const uint8_t* buf, uint8_t n) {
     for (uint8_t i = 0; i < n && i < spilink::answer_bytes; ++i) {
         padded[i] = buf[i];
     }
-    (void)answer_run(padded, spilink::answer_bytes, spins_for_ms(spilink::serve_ms));
+    (void)Client::answer(std::span<const uint8_t>(padded, spilink::answer_bytes), spins_for_ms(spilink::serve_ms));
     ++serves;
     (void)go_dark();
 }
@@ -446,24 +353,55 @@ void account(spilink::Report& r, uint8_t got, uint8_t expected) {
 
 // ---- the actions -----------------------------------------------------------
 
+/// Frames an exchange carries at most; the buffers are half-words so that a
+/// 16-bit run and its engines take them whole, and an 8-bit one reads the
+/// same storage as bytes.
 constexpr uint16_t exchange_cap = 64;
-uint8_t x_out[exchange_cap];
-uint8_t x_in[exchange_cap];
+alignas(4) uint16_t x_out[exchange_cap];
+alignas(4) uint16_t x_in[exchange_cap];
+
+uint8_t* out_bytes() { return reinterpret_cast<uint8_t*>(x_out); }
+uint8_t* in_bytes() { return reinterpret_cast<uint8_t*>(x_in); }
 
 /// The host burst's frame buffers, TWO bytes although the burst is 8-bit:
 /// SpiHost's frame store is width-general.
 uint8_t burst_tx[2];
 uint8_t burst_rx[2];
 
+/// Judge `frames` received frames' bytes against the host's stream: count
+/// the frames, sum, mism, idx, got and exp over the bytes (spi_link's
+/// extended exchange; an 8-bit frame is one byte).
+void judge(spilink::Report& r, const spilink::Params& a, uint16_t frames, bool wide, const uint8_t* got) {
+    const bool reversed = (a.flags & spilink::flag_expect_reversed) != 0;
+    const uint16_t bytes = static_cast<uint16_t>(wide ? frames * 2u : frames);
+    for (uint16_t i = 0; i < bytes; ++i) {
+        const uint8_t want = spilink::wide_byte(a.pattern, a.seed_a, i, wide, reversed);
+        if (got[i] != want) {
+            if (r.mism == 0) {
+                r.idx = static_cast<uint8_t>(i < 255u ? i : 255u);
+                r.got = got[i];
+                r.exp = want;
+            }
+            ++r.mism;
+        }
+        r.sum = static_cast<uint16_t>(r.sum + got[i]);
+    }
+    r.count = frames;
+}
+
 /// The DMA serve: the receive channel and RXDMAEN, the transmit channel
 /// and TXDMAEN - its first beat the standing TXE of an idle buffer, the
-/// preload - then SPE. The receive channel's count is the progress; the
-/// requests come down with the channels.
-Run dma_exchange(uint16_t n, uint32_t ms) {
-    (void)PeerRx::start(std::span<uint8_t>(x_in, n));
+/// preload - then SPE. A receive-only serve leaves the transmit side alone.
+/// The receive channel's count is the progress; the requests come down
+/// with the channels.
+template <typename T>
+Run dma_serve(uint16_t n, bool transmit, uint32_t ms) {
+    (void)PeerRx::start(std::span<T>(reinterpret_cast<T*>(x_in), n));
     Raw::dma_requests(false, true);
-    (void)PeerTx::start(std::span<const uint8_t>(x_out, n));
-    Raw::dma_requests(true, true);
+    if (transmit) {
+        (void)PeerTx::start(std::span<const T>(reinterpret_cast<const T*>(x_out), n));
+        Raw::dma_requests(true, true);
+    }
     Raw::enable();
     const uint32_t t0 = Ticker::millis();
     while (!PeerRx::full() && Ticker::millis() - t0 < ms) {
@@ -478,33 +416,59 @@ Run dma_exchange(uint16_t n, uint32_t ms) {
     return {got, all_in ? RunEnd::complete : RunEnd::stalled};
 }
 
+/// The polled serves, one of the driver's runs each, at the frame's width.
+/// Each run raises SPE itself, after its first answer is in the buffer.
+template <typename T>
+Run polled_serve(uint16_t n, bool answer_only, bool receive_only, uint32_t spins) {
+    T* const out = reinterpret_cast<T*>(x_out);
+    T* const in = reinterpret_cast<T*>(x_in);
+    if (receive_only) {
+        return Client::receive(std::span<T>(in, n), spins);
+    }
+    if (answer_only) {
+        return Client::answer(std::span<const T>(out, n), spins);
+    }
+    return Client::exchange(std::span<const T>(out, n), std::span<T>(in, n), spins);
+}
+
 /// The workhorse: the host sends P_A(i), this client answers P_B(i) - on
 /// the DMA engines by default, the polled run with `spare_polled_pump`, the
-/// answers alone with `spare_answer_only`.
+/// answers alone with `spare_answer_only`, the frames in alone with
+/// `spare_receive_only`; 16-bit frames with `spare_wide`.
 spilink::Report run_exchange(const spilink::Params& a) {
     spilink::Report r{};
+    r.flags |= spilink::report_extended;
+    const bool wide = (a.spare & spilink::spare_wide) != 0;
+    const bool crc = (a.spare & spilink::spare_crc) != 0;
+    const bool receive_only = (a.spare & spilink::spare_receive_only) != 0;
+    const bool answer_only = !receive_only && (a.spare & spilink::spare_answer_only) != 0;
     const bool preload = a.cfg.regime == spilink::regime_buffer_wait;
     const uint16_t n = a.count < exchange_cap ? a.count : exchange_cap;
-    if (!apply_cfg(a.cfg)) {
+    if (n == 0u || crc || !apply_cfg(a.cfg, wide, !receive_only)) {
         r.flags |= spilink::report_cfg_failed;
+        (void)go_dark();
         return r;
     }
     {
         spilink::Stream out(a.pattern, a.seed_b);
-        for (uint16_t i = 0; i < n; ++i) {
-            x_out[i] = out.next();
+        uint8_t* const o = out_bytes();
+        for (uint16_t i = 0; i < static_cast<uint16_t>(wide ? 2u * n : n); ++i) {
+            o[i] = out.next();
+        }
+        uint8_t* const in = in_bytes();
+        for (uint16_t i = 0; i < sizeof x_in; ++i) {
+            in[i] = 0;
         }
     }
-    const bool answer_only = (a.spare & spilink::spare_answer_only) != 0;
-    const bool engines = preload && !answer_only && (a.spare & spilink::spare_polled_pump) == 0;
+    const bool engines = (preload || receive_only) && !answer_only && (a.spare & spilink::spare_polled_pump) == 0;
 
     const uint32_t t0 = Ticker::millis();
     Run run{};
     if (engines) {
-        run = dma_exchange(n, a.ms);
+        run = wide ? dma_serve<uint16_t>(n, !receive_only, a.ms) : dma_serve<uint8_t>(n, !receive_only, a.ms);
         r.aux2 |= 0x04;
     } else {
-        if (!preload) {
+        if (!preload && !receive_only) {
             // NO PRELOAD: the run starts once the select has fallen, so the
             // first frame the host clocks out is the shifter's leftover and
             // this end's stream follows ONE PLACE LATE - regime_normal on a
@@ -513,8 +477,13 @@ spilink::Report run_exchange(const spilink::Params& a) {
             while (!Client::selected() && Ticker::millis() - w0 < a.ms) {
             }
         }
-        run = answer_only ? answer_run(x_out, n, spins_for_ms(a.ms))
-                          : exchange_run(x_out, x_in, n, spins_for_ms(a.ms));
+        const uint32_t spins = spins_for_ms(a.ms);
+        // THE TICK IS HELD for the run (the header): its edge waits in
+        // CNTIF and is served when the run ends.
+        Ticker::pause();
+        run = wide ? polled_serve<uint16_t>(n, answer_only, receive_only, spins)
+                   : polled_serve<uint8_t>(n, answer_only, receive_only, spins);
+        Ticker::resume();
     }
     const uint32_t dt = Ticker::millis() - t0;
     r.aux0 = static_cast<uint8_t>(Raw::status());
@@ -526,12 +495,7 @@ spilink::Report run_exchange(const spilink::Params& a) {
     if (answer_only) {
         r.count = run.count;   // answers written; nothing was received
     } else {
-        spilink::Stream in(a.pattern, a.seed_a);
-        const bool reversed = (a.flags & spilink::flag_expect_reversed) != 0;
-        for (uint16_t i = 0; i < run.count; ++i) {
-            const uint8_t v = in.next();
-            account(r, x_in[i], reversed ? spilink::bit_reverse(v) : v);
-        }
+        judge(r, a, run.count, wide, in_bytes());
     }
     if (r.count < a.count) r.flags |= spilink::report_timed_out;
     (void)go_dark();

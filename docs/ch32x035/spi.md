@@ -209,9 +209,8 @@ The reference suite is `test_x035_spi` on the CH32X035F8U6 at 48 MHz, its
 SPI1 on PA4..PA7 wired straight to the CH32V006K8U6's column 0 (PC1, PC5,
 PC6, PC7). `z` - the block, the ladder and the costs, the refusals - runs
 with the far board dark: 24 verdicts. `y` against the CH32V006 running
-`spi_peer` on its crystal, commanded in band through spi_link: 32
-verdicts. Each was green whole on the final images, `z` twice and `y`
-twice.
+`spi_peer` on its crystal, commanded in band through spi_link: 36
+verdicts. Each was green whole on the final images.
 
 - **The reset values are table 16-2's** (STATR 0x0002, CRCR 0x0007, the
   rest zero), a control word lands as spelled, and eight of eight CTLR1
@@ -240,9 +239,19 @@ twice.
 - **The ladder against the peer** (letter p): the polled host and the
   engines exact at every code to /2 = 24 MHz against the peer's DMA
   serve, /2 with the high-speed read and without; the peer's polled run is
-  its own ceiling, exact to /8 behind the polled host and to /16 behind
-  the engines' back-to-back frames. HSRXEN's /3, /5 and /6 (16, 9.6 and 8
+  its own ceiling, exact to /8 behind both the polled host and the
+  engines' back-to-back frames. HSRXEN's /3, /5 and /6 (16, 9.6 and 8
   MHz) exact on the engines.
+- **The CH32V006 client's runs** (letter k: its driver's answer, exchange
+  and receive runs, 32 frames of 8 and of 16 bits, under this end's
+  polled loop - a gap after every frame - and back to back under the
+  engines): every run exact to 6 MHz under both hosts at both widths, and above
+  that the runs' own ceilings from that chip's flash - the exchange to 12
+  MHz in 16-bit frames, the answer and receive runs to 12 MHz back to back
+  and 24 MHz gapped in 8-bit frames and to 24 MHz in 16-bit ones; the
+  cost and the cause of each in [../ch32v00x/spi.md](../ch32v00x/spi.md),
+  "The client's runs". This direction has no 6 MHz ceiling of the wire:
+  the far client's receive run, from SRAM, hears 24 MHz back to back.
 - **The kernel over a second chip** (letter q): four transactions queued
   in one dispatch, one polled among three pumped, in one select window -
   four `spi_ok`, every byte read back by the far chip.
@@ -410,6 +419,11 @@ Implemented but not bench-verified, each with what would measure it:
   explained; a scope on PA5 at this pad with PA6 high and low at 12 MHz,
   and the two boards on one rail, would say whether it is the die, the
   two rails or the wiring.
+- **Letter w's own mode 2 once read SCK low at its first sample** (one
+  run of four: fifteen edges, the frame undecoded; the three after it
+  read SCK high and sixteen edges): the prime before the frame, or the
+  sampler's start, not isolated; the letter run again under a probe on
+  PA5 would say which.
 - **The client's vectors**: the suite's clients are polled runs and DMA;
   an image binding `isr()` to spi1 would measure them.
 - **`spi_stalled`, `spi_dma_fault` and `recover()`**: no run raised them;

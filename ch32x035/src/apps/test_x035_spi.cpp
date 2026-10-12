@@ -27,7 +27,7 @@
 //    held HIGH through every one of them, and what goes out on SCK and
 //    MOSI reaches a deselected client or a floating pad. MISO is read
 //    floating and never judged.
-//  - `y`, THE TWO-BOARD LETTERS (n, o, p, q, r, m, w), against the
+//  - `y`, THE TWO-BOARD LETTERS (n, o, p, k, q, r, m, w), against the
 //    CH32V006 running spi_peer on its 24 MHz crystal, commanded IN BAND
 //    over the bus under test through avrdx/src/apps/spi_link.hpp - FAILING
 //    loudly when nobody answers. That peer serves its answer windows in
@@ -61,6 +61,10 @@
 //   p  (y) THE LADDER against the peer, /256 to /2 on the polled host and
 //      on the engines, both of the peer's serves, /2 = 24 MHz with and
 //      without the high-speed read, and the high-speed read's own ladder
+//   k  (y) THE CLIENT'S RUNS: the peer's answer, exchange and receive runs
+//      (its driver's SpiClient runs), 8- and 16-bit frames, under the
+//      polled host - a gap after every frame, the control - and back to
+//      back under the engines, /64 to /2, judged to the pair's 6 MHz
 //   q  (y) THE KERNEL: SpiBus over SpiHost, four transactions queued in
 //      one select window, read back by the second chip
 //   r  (y) THE ROLES INVERT: this chip as the CLIENT under the peer's
@@ -332,11 +336,11 @@ bool link_command_mode() {
 /// deselect. THE MODE IS PRIMED BEFORE THE SELECT FALLS - a CPOL flip in
 /// an open window is an edge the selected client counts.
 bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = link_clock,
-               SpiMode mode = SpiMode::mode0) {
+               SpiMode mode = SpiMode::mode0, SpiDataSize bits = SpiDataSize::bits8) {
     if (n == 0) {
         return true;
     }
-    Host::prime(mode, rate);
+    Host::prime(mode, rate, bits);
     CsPin::clear();
     link_hold();
     Host::Request r{};
@@ -348,7 +352,7 @@ bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = link_
     r.len = n;
     r.clock = rate;
     r.mode = mode;
-    r.bits = SpiDataSize::bits8;
+    r.bits = bits;
     r.polled = true;
     const bool done = Host::start(r);
     link_hold();
@@ -522,15 +526,23 @@ struct Exchange {
     uint8_t pattern = spilink::pattern_prbs;
     uint8_t flags = 0;
     uint8_t spare = 0;   ///< spilink::spare_polled_pump forces the peer's polled run
+    bool wide = false;   ///< 16-bit frames (spilink::spare_wide), `count` frames
     uint16_t ms = 400;
     bool engines = false;      ///< this end clocks the data on its DMA engines
     bool high_speed = false;   ///< the high-speed read asked (at /2)
     bool raw_hsrxen = false;   ///< HSRXEN set by hand at whatever code `rate` is
 };
 
-constexpr uint8_t max_exchange = 64;
-uint8_t xtx[max_exchange];
-uint8_t xrx[max_exchange];
+/// The most BYTES an exchange carries (64 frames of 8 bits, 64 of 16).
+constexpr uint8_t max_exchange = 128;
+alignas(4) uint8_t xtx[max_exchange];
+alignas(4) uint8_t xrx[max_exchange];
+
+/// The bytes an exchange's frames take.
+uint16_t exchange_bytes(const Exchange& e) {
+    const uint16_t b = static_cast<uint16_t>(e.wide ? 2u * e.count : e.count);
+    return b < max_exchange ? b : max_exchange;
+}
 
 bool do_exchange(const Exchange& e) {
     spilink::Params a{};
@@ -541,7 +553,7 @@ bool do_exchange(const Exchange& e) {
     a.seed_b = e.seed_b;
     a.pattern = e.pattern;
     a.flags = e.flags;
-    a.spare = e.spare;
+    a.spare = static_cast<uint8_t>(e.spare | (e.wide ? spilink::spare_wide : 0u));
     if (e.host_lsb != (e.cfg.dord != 0)) {
         a.flags |= spilink::flag_expect_reversed;
     }
@@ -553,8 +565,10 @@ bool do_exchange(const Exchange& e) {
         xtx[i] = 0;
         xrx[i] = 0xEE;
     }
-    const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
-    for (uint16_t i = 0; i < n; ++i) {
+    const uint16_t bytes = exchange_bytes(e);
+    const uint16_t n = static_cast<uint16_t>(e.wide ? bytes / 2u : bytes);   // frames
+    const SpiDataSize bits = e.wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    for (uint16_t i = 0; i < bytes; ++i) {
         xtx[i] = out.next();
     }
     settle();
@@ -570,7 +584,7 @@ bool do_exchange(const Exchange& e) {
         (void)delay_us(clock, 20);
         CsPin::clear();
         link_hold();
-        (void)dma_xfer({}, nullptr, 0, xtx, xrx, n, e.rate, SpiDataSize::bits8, false, e.host_mode);
+        (void)dma_xfer({}, nullptr, 0, xtx, xrx, n, e.rate, bits, false, e.host_mode);
         link_hold();
         CsPin::set();
         S::high_speed_read_raw(false);
@@ -578,7 +592,7 @@ bool do_exchange(const Exchange& e) {
         if (e.host_lsb) {
             (void)Host::bit_order(true);
         }
-        (void)link_xfer(xtx, xrx, n, e.rate, e.host_mode);
+        (void)link_xfer(xtx, xrx, n, e.rate, e.host_mode, bits);
     }
     (void)link_command_mode();
     return true;
@@ -594,11 +608,9 @@ struct Verify {
 Verify verify_rx(const Exchange& e) {
     Verify v{};
     const bool reversed = e.host_lsb != (e.cfg.dord != 0);
-    for (uint16_t i = 0; i < e.count && i < max_exchange; ++i) {
-        uint8_t exp = spilink::pattern_value(e.pattern, e.seed_b, i);
-        if (reversed) {
-            exp = spilink::bit_reverse(exp);
-        }
+    const uint16_t bytes = exchange_bytes(e);
+    for (uint16_t i = 0; i < bytes; ++i) {
+        const uint8_t exp = spilink::wide_byte(e.pattern, e.seed_b, i, e.wide, reversed);
         if (xrx[i] != exp) {
             if (v.mism == 0) {
                 v.idx = static_cast<uint8_t>(i);
@@ -1440,14 +1452,124 @@ void tp_peer_rates() {
     print(serial, crlf);
     // The verdicts: both host paths to the top of the ladder against the
     // peer's DMA serve; the peer's polled run is ITS ceiling (the
-    // CH32V006's run over its driver's per-frame verbs), judged to /16.
-    const auto held_to_div16 = [](uint8_t broke) { return broke == 8u || broke < 3u; };
+    // CH32V006's exchange run from its flash, letter k), judged to /8.
+    const auto held_to_div8 = [](uint8_t broke) { return broke == 8u || broke < 2u; };
     bench.verdict("BOTH HOST PATHS, the polled loop and the engines, are exact against the peer's DMA serve at every "
                   "code to /2 = 24 MHz (table 3-19's ceiling for both roles)",
                   exact_to[0] == 8u && exact_to[1] == 8u);
-    bench.verdict("and against the peer's polled run to /16 = 3 MHz, the run's own ceiling printed above",
-                  held_to_div16(exact_to[2]) && held_to_div16(exact_to[3]));
+    bench.verdict("and against the peer's polled run to /8 = 6 MHz, the run's own ceiling printed above",
+                  held_to_div8(exact_to[2]) && held_to_div8(exact_to[3]));
     bench.verdict("/2 = 24 MHz with the high-speed read on is exact too", hs_ok);
+    (void)link_command_mode();
+    bench.verdict("the command channel survives the climb", command(Op::ping));
+}
+
+// ===========================================================================
+// k - THE CLIENT'S RUNS: the CH32V006's polled runs, both widths, both hosts
+// ===========================================================================
+
+/// The SCK of a BR code at this end's 48 MHz, in kHz.
+uint32_t sck_khz(SpiClock rate) { return 48'000u / asked_divisor(rate); }
+
+void tk_peer_runs() {
+    if (!need_peer()) {
+        return;
+    }
+    // The far client's three runs (its driver's SpiClient::answer, exchange
+    // and receive, asked by spare_polled_pump), 32 frames of 8 bits and of
+    // 16, under this end's two hosts: the POLLED loop, one frame in flight
+    // and a gap after every frame - the control - and the ENGINES, frames
+    // BACK TO BACK, the run's own window. Every rung from /64 to /2 printed;
+    // the verdicts within the pair's 6 MHz ceiling (/8), the rungs above it
+    // printed alone. An exchange is judged both ways, an answer run by what
+    // this end read (the client counts the answers it wrote), a receive run
+    // by the client's report (its MISO dark).
+    struct Kind {
+        const char* name;
+        uint8_t spare;
+        bool host_judges;
+        bool client_judges;
+    };
+    const Kind kinds[3] = {
+        {"exchange", spilink::spare_polled_pump, true, true},
+        {"answer  ", static_cast<uint8_t>(spilink::spare_polled_pump | spilink::spare_answer_only), true, false},
+        {"receive ", static_cast<uint8_t>(spilink::spare_polled_pump | spilink::spare_receive_only), false, true},
+    };
+    constexpr uint8_t slowest = static_cast<uint8_t>(SpiClock::div64);
+    constexpr uint8_t judged_to = static_cast<uint8_t>(SpiClock::div8);   // 6 MHz, the pair's ceiling
+    // exact_to[kind][wide][back_to_back]: the fastest code at which that run
+    // and every slower rung were exact (slowest + 1 = not even /64).
+    uint8_t exact_to[3][2][2] = {};
+    bool extended = true;
+    for (uint8_t w = 0; w < 2u; ++w) {
+        for (uint8_t b = 0; b < 2u; ++b) {
+            for (uint8_t k = 0; k < 3u; ++k) {
+                print(serial, "  ", kinds[k].name, w != 0u ? " 16-bit" : "  8-bit",
+                      b != 0u ? " back to back:" : " gapped      :");
+                uint8_t fastest = slowest + 1u;
+                bool broken = false;
+                for (uint8_t code = slowest + 1u; code-- > 0;) {
+                    Exchange e{};
+                    e.rate = static_cast<SpiClock>(code);
+                    e.count = 32;
+                    e.wide = w != 0u;
+                    e.engines = b != 0u;
+                    e.spare = kinds[k].spare;
+                    e.seed_a = static_cast<uint8_t>(0x31u + code + 8u * k + 32u * w);
+                    e.seed_b = static_cast<uint8_t>(0xA4u + code + 8u * k + 32u * w);
+                    const bool ran = do_exchange(e);
+                    spilink::Report r{};
+                    const bool rep = ran && peer_report(r);
+                    const Verify v = verify_rx(e);
+                    if (e.wide && rep && (r.flags & spilink::report_extended) == 0u) {
+                        extended = false;
+                    }
+                    const bool host_ok = !kinds[k].host_judges || v.mism == 0u;
+                    const bool client_ok = !kinds[k].client_judges || r.mism == 0u;
+                    const bool ok = rep && host_ok && client_ok && r.count == e.count;
+                    print(serial, " /", asked_divisor(e.rate), ok ? " ok" : " BAD");
+                    if (!ok) {
+                        // The mismatches each end counted, and each end's
+                        // first wrong byte: its index, what came, what was due.
+                        print(serial, "(h", v.mism, " c", r.mism, "/", r.count);
+                        if (v.mism != 0u) {
+                            print(serial, " h@", v.idx, " ", hex(v.got), "/", hex(v.exp));
+                        }
+                        if (r.mism != 0u) {
+                            print(serial, " c@", r.idx, " ", hex(r.got), "/", hex(r.exp));
+                        }
+                        print(serial, ")");
+                        broken = true;
+                    } else if (!broken) {
+                        fastest = code;
+                    }
+                }
+                exact_to[k][w][b] = fastest;
+                print(serial, crlf, "      -> exact to ");
+                if (fastest > slowest) {
+                    print(serial, "nothing", crlf);
+                } else {
+                    print(serial, "/", asked_divisor(static_cast<SpiClock>(fastest)), " = ",
+                          sck_khz(static_cast<SpiClock>(fastest)), " kHz, a frame ",
+                          asked_divisor(static_cast<SpiClock>(fastest)) * (w != 0u ? 16u : 8u),
+                          " cycles of this end's 48 MHz on the wire", crlf);
+                }
+            }
+        }
+    }
+    const auto held = [&](uint8_t k, uint8_t w, uint8_t b) { return exact_to[k][w][b] <= judged_to; };
+    bench.verdict("the peer serves 16-bit frames (spare_wide, report_extended)", extended);
+    bool gapped = true, back = true;
+    for (uint8_t k = 0; k < 3u; ++k) {
+        for (uint8_t w = 0; w < 2u; ++w) {
+            gapped = gapped && held(k, w, 0);
+            back = back && held(k, w, 1);
+        }
+    }
+    bench.verdict("THE CLIENT'S RUNS under the gapped host: answer, exchange and receive exact at every rung to "
+                  "/8 = 6 MHz, 8- and 16-bit frames",
+                  gapped);
+    bench.verdict("and BACK TO BACK under the engines, the run's own window, the same", back);
     (void)link_command_mode();
     bench.verdict("the command channel survives the climb", command(Op::ping));
 }
@@ -2372,6 +2494,9 @@ int main() {
     bench.second_letter('o', "the matrix: four modes, both orders, a mismatch, the receive CRC", to_peer_matrix);
     bench.second_letter('p', "THE LADDER against the peer, both host paths, both serves, /2 with the high-speed read",
                         tp_peer_rates);
+    bench.second_letter('k', "THE CLIENT'S RUNS: the peer's answer, exchange and receive, both widths, gapped and "
+                             "back to back",
+                        tk_peer_runs);
     bench.second_letter('q', "THE KERNEL against the peer: four transactions in one select window", tq_peer_kernel);
     bench.second_letter('r', "THE ROLES INVERT: this chip as the client in every mode and order", tr_peer_client);
     bench.second_letter('m', "MODF from a second chip, and ODEN's NSS on its pull-up", tm_peer_modf);

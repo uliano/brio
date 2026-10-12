@@ -128,6 +128,24 @@ void client_verbs() {
     Client::rxne_interrupt(true); Client::txe_interrupt(true); Client::error_interrupt(true);
     (void)Client::bits();
     static_assert(Client::frames_ahead == 1);
+    // The runs, both frame widths.
+    static uint8_t out8[8], in8[8];
+    static uint16_t out16[8], in16[8];
+    Client::enable();
+    const Client::Run a = Client::answer(std::span<const uint8_t>(out8), 1000u);
+    const Client::Run x = Client::exchange(std::span<const uint8_t>(out8), std::span<uint8_t>(in8), 1000u);
+    const Client::Run r = Client::receive(std::span<uint8_t>(in8), 1000u);
+    (void)Client::answer(std::span<const uint16_t>(out16), 1000u);
+    (void)Client::exchange(std::span<const uint16_t>(out16), std::span<uint16_t>(in16), 1000u);
+    (void)Client::receive(std::span<uint16_t>(in16), 1000u);
+    (void)(a.count + x.count + r.count);
+    static_assert(std::is_same_v<decltype(a.end), Client::RunEnd>);
+    // A client with no NSS pad runs on its count and budget alone; one
+    // with no MISO pad still receives.
+    using Selectless = SpiClient<1, SpiPins{.sck = {'C', 5}, .mosi = {'C', 6}, .miso = {'C', 7}}>;
+    (void)Selectless::exchange(std::span<const uint8_t>(out8), std::span<uint8_t>(in8), 1000u);
+    using Listener = SpiClient<1, SpiPins{.sck = {'C', 5}, .mosi = {'C', 6}, .nss = {'C', 1}}>;
+    (void)Listener::receive(std::span<uint16_t>(in16), 1000u);
     (void)Client::disable();
     Client::release();
 }
