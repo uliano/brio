@@ -328,7 +328,13 @@ The reference suite is `test_ch32_serial` (55 verdicts in `z`, five
 of its letters on the jumper PD2 to PD4 that lends TIM2's channel 1 as
 the ruler, one host-assisted letter outside `z` driven by `brio
 stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
-instrument and the console untouched on USART1. Every fact above with
+instrument and the console untouched on USART1; and its TWO-BOARD KEY
+`w` (letters 1 to 8, 59 verdicts) on column 4 against the CH32X035's
+`usart_peer`. The whole suite does not fit the CH32V006K8's 40 KB, so on
+that part it is two images (the build's group axis): `-1` the
+single-board letters on the HSI's PLL, `-2` the two-board key on the
+module's 24 MHz crystal doubled - the reference it calibrates the far
+chip by. Every fact above with
 a number is its measurement; the shape of the instrument is the
 suite's header comment - the RX pad as a bit-banged transmitter paced
 on the STK, the capture on the jumper as the ruler, no loop-back. On
@@ -441,6 +447,46 @@ out there.
   (STATR, DATAR, STATR for TXE, the DATAR store), the first and the last
   frame's stamps the only calls of a run - under the 160-cycle frame at
   3 Mbaud, where the echo held.
+- **Column 4 as the DUT, against a second chip** (the two-board key `w`,
+  59 verdicts, the far chip a CH32X035 on its RC oscillator running
+  `usart_peer`): the peer calibrated by this crystal first - its HSI found
+  at -2718 to -3154 ppm at its trim's centre over two sessions, moved one
+  step and ADOPTED, every run after that reading this crystal within 250
+  ppm of the rate it kept - then every 8N1 rate from 9600 to 3 Mbaud
+  echoed byte for byte and a gapless run at each timed by the far
+  receiver, against a 1 Mbaud run back to back: within 200 ppm of HCLK
+  over BRR at every rate (BRR 417 at 115200 read -945 to -997 ppm
+  against the divisor's -799, BRR 52 at 921600 +1533 to +1698 against
+  +1602); nine formats echoed, the half and the one-and-a-half stop
+  timed as frames of 19 and 21 half bits (within 320 ppm); odd parity into even raising PE six times in six; 0x00
+  frames from the calibrated peer's edge engine clean from -4 to +5 per
+  cent off - 14.3's 3 per cent and then some - breaking from -5 per cent
+  as FE, and on the fast side flagged NE at +6 per cent and received
+  wrong (0x80) at +8, never FE: a fast sender's stop bit lands in the idle
+  after it; low pulses on the idle line: 6 to 1250
+  ticks of 24 MHz no start bit, 1875 one with NE, a whole bit one with
+  FE; ORE on a run read late, DATAR keeping the first frame; LIN's break
+  detection at both lengths from the far engine; one stretched bit cell
+  breaking the frame from +50 per cent whether the far engine stretches
+  it or this end's pull-banger on the same wire does; the receive engine
+  on channel 7 under the far chip's blast - 100000, 200000 and 300000
+  frames at 1, 2 and 3 Mbaud, about a second each, every byte in
+  sequence, no overrun, no fault; both mute wakes; IrDA's SIR frames
+  between two WCH codecs.
+- **A ONE-WIRE BUS WITH A SECOND NODE** (letter 7): HDSEL on PB0, the pad
+  an alternate-function open drain with its transmitter off, hears the
+  four 0x5A frames the far chip drives onto that wire from its own RX
+  pad, at 9600 and at 115200; and the wire is a real wired AND - this
+  end's 0xF0 sent with the far chip pulling 0x3C into it as an emulated
+  open drain, the far receiver reads 0x30 off the wire.
+- **The crystal's pads are column 3's RTS**: on the CH32V006K8U6 module
+  the 24 MHz crystal sits on PA1 and PA2, and PA1 is USART2's RTS on
+  column 3. Letter h drove it with the crystal running HCLK: the
+  oscillator stopped, the core froze mid-print and the debug port
+  answered "failed to connect" until the supply was cycled. The
+  single-board image runs on the HSI's PLL and letter h refuses to run
+  on the crystal; a program that wants the crystal gives up column 3's
+  flow control.
 - **A TX pad the block drives while it is reset or just enabled shows
   the far receiver a LOW PULSE** (measured across that wire): with the
   pad left on the function through the instance's reset and
@@ -462,12 +508,6 @@ Driver gaps, each with its reason:
   (measured, above), but what it decodes wants a synchronous peer
   answering on RX; and the mode on a column other than the console's,
   whose CK pad would need a wire to a counter.
-- A one-wire bus with a second node: the option is proven with a frame
-  driven onto the wire from a pad and with the node's own frame not
-  heard back; the desk's partner, a CH32X035, hears this part's
-  `drive_rxd` on its own single wire, and this part's single wire under
-  that chip's peer is the far suite's two-board half, born with the
-  CH32X035's `usart_peer`.
 - USART2 on columns 1, 2, 5 and 6 and USART1 on any but the console's:
   each column is a wire to a peer on its pads (column 3 is the suite's
   instrument, column 4 the desk's link).

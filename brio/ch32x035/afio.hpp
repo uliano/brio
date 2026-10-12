@@ -10,9 +10,10 @@
  * chapter's descriptions: a USART's five signals move together, TIM2's
  * nine do. The FIELDS of every peripheral are named here (Remap), so the
  * register is decoded whole; the COLUMNS - which pad each code puts each
- * signal on - are stated as constexpr data for the USARTs, I2C1 and SPI1,
- * the blocks with a driver in this stratum, and arrive with their drivers
- * for TIM1..TIM3 and the PIOC. A driver names a code and gets its
+ * signal on - are stated as constexpr data for the USARTs, I2C1, SPI1 and
+ * the two advanced-control timers, the blocks with a driver in this
+ * stratum, and arrive with their drivers for TIM3 and the PIOC. A driver
+ * names a code and gets its
  * pads from the same source that programs the register - the sibling
  * strata's arrangement.
  *
@@ -20,9 +21,9 @@
  * four upper codes (1xx) are one column; USART4's are two columns, 1x0
  * and 1x1 (8.3.2.1), and so are I2C1's. Every code of every field is a
  * column the manual describes, so a code is refused only when it does
- * not fit its field - or, for a USART, I2C1 or SPI1, when not one pad of
- * the column is bonded by this package, which is a disconnection and not
- * a remap.
+ * not fit its field - or, for a USART, I2C1, SPI1, TIM1 or TIM2, when not
+ * one pad of the column is bonded by this package, which is a
+ * disconnection and not a remap.
  *
  * THE DEBUG PORT IS NOT A REMAP. SW_CFG (PCFR1 26:24) hands PC18 and PC19
  * back to GPIO, and a program that does that has lost its probe until the
@@ -220,9 +221,64 @@ constexpr SpiPadSet afio_spi1_pads(uint8_t code) {
 /// The field's four codes.
 inline constexpr uint8_t afio_spi1_codes = 4;
 
+// =============================================================================
+// The advanced-control timers' columns (8.3.2.1, TIM1_RM[2:0] and
+// TIM2_RM[2:0]; the datasheet's table 2-1 names the same pads as T1C2N_
+// and the like, the underscore for a remapped column)
+// =============================================================================
+
+/// One advanced-control timer's nine signals in the manual's order: the
+/// four channels, the external trigger, the brake input and the three
+/// complementary outputs. A signal a column does not carry is invalid.
+struct TimPadSet {
+    Pad ch1, ch2, ch3, ch4, etr, bkin, ch1n, ch2n, ch3n;
+
+    constexpr bool operator==(const TimPadSet&) const = default;
+    constexpr bool any_bonded() const {
+        return pad_bonded(ch1) || pad_bonded(ch2) || pad_bonded(ch3) || pad_bonded(ch4) ||
+               pad_bonded(etr) || pad_bonded(bkin) || pad_bonded(ch1n) || pad_bonded(ch2n) ||
+               pad_bonded(ch3n);
+    }
+};
+
+/// The column a code of TIM1_RM[2:0] selects. Codes 1xx are one column
+/// that carries CH3 (PC14) and ETR (PC15) alone - "CH1/CH2/CH4/BKIN/C1N/
+/// C2N/C3N cannot use" - and 010 and 011 put ETR on PC18, the debug
+/// port's SWDIO.
+constexpr TimPadSet afio_tim1_pads(uint8_t code) {
+    switch (code) {
+        case 0: return {{'B', 9}, {'B', 10}, {'B', 11}, {'C', 16}, {'C', 17}, {'B', 5}, {'B', 6}, {'B', 7}, {'B', 8}};
+        case 1: return {{'B', 9}, {'B', 10}, {'B', 11}, {'C', 16}, {'C', 17}, {'A', 6}, {'A', 7}, {'B', 0}, {'B', 1}};
+        case 2: return {{'B', 9}, {'B', 10}, {'B', 11}, {'B', 12}, {'C', 18}, {'B', 5}, {'B', 6}, {'B', 7}, {'B', 8}};
+        case 3: return {{'C', 0}, {'C', 1},  {'C', 2},  {'C', 3},  {'C', 18}, {'C', 4}, {'C', 5}, {'C', 6}, {'C', 7}};
+        case 4: case 5: case 6: case 7:
+                return {{},       {},        {'C', 14}, {},        {'C', 15}, {},       {},       {},       {}};
+        default: return {};
+    }
+}
+
+/// The column a code of TIM2_RM[2:0] selects. Codes 101 and 11x put CH1
+/// on PC19 and 101 its C1N on PC18 - the debug port's two pads.
+constexpr TimPadSet afio_tim2_pads(uint8_t code) {
+    switch (code) {
+        case 0: return {{'A', 0},  {'A', 1},  {'A', 2},  {'A', 3},  {'A', 19}, {'A', 20}, {'A', 21}, {'A', 22}, {'A', 23}};
+        case 1: return {{'B', 21}, {'B', 15}, {'A', 2},  {'A', 3},  {'A', 18}, {'A', 9},  {'A', 12}, {'A', 13}, {'A', 14}};
+        case 2: return {{'A', 0},  {'A', 1},  {'B', 3},  {'B', 4},  {'A', 19}, {'A', 20}, {'C', 3},  {'A', 22}, {'A', 23}};
+        case 3: return {{'B', 21}, {'B', 15}, {'B', 3},  {'B', 4},  {'A', 18}, {'A', 9},  {'A', 12}, {'A', 13}, {'A', 14}};
+        case 4: return {{'B', 16}, {'B', 17}, {'B', 18}, {'B', 19}, {'C', 4},  {'C', 0},  {'C', 1},  {'C', 2},  {'C', 3}};
+        case 5: return {{'C', 19}, {'A', 12}, {'A', 13}, {'C', 0},  {'A', 2},  {'B', 4},  {'C', 18}, {'B', 12}, {'B', 3}};
+        case 6: case 7:
+                return {{'C', 19}, {'C', 14}, {'C', 15}, {'C', 0},  {'A', 2},  {'B', 4},  {'B', 11}, {'B', 12}, {'B', 3}};
+        default: return {};
+    }
+}
+
+/// Each field's eight codes.
+inline constexpr uint8_t afio_tim_codes = 8;
+
 /// Whether a code is one of this field's on this part: it fits the field,
-/// and - for a USART, I2C1 or SPI1 - at least one pad of its column is
-/// bonded.
+/// and - for a USART, I2C1, SPI1, TIM1 or TIM2 - at least one pad of its
+/// column is bonded.
 constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
     const AfioField f = afio_field_of(r);
     if (code >= (1u << f.width)) {
@@ -235,9 +291,34 @@ constexpr bool afio_remap_has_code(Remap r, uint8_t code) {
         case Remap::usart4: return afio_usart_pads(4, code).any_bonded();
         case Remap::i2c1:   return afio_i2c1_pads(code).any_bonded();
         case Remap::spi1:   return afio_spi1_pads(code).any_bonded();
+        case Remap::tim1:   return afio_tim1_pads(code).any_bonded();
+        case Remap::tim2:   return afio_tim2_pads(code).any_bonded();
         default: return true;
     }
 }
+
+/// The codes of a field that are columns of THIS package, one bit a code
+/// (every field is three bits or fewer), for the run-time refusal: a load
+/// and a shift where a walk over the column's pads would be code in every
+/// image that remaps.
+constexpr uint8_t afio_codes_of(Remap r) {
+    uint8_t m = 0;
+    for (uint8_t c = 0; c < 8u; ++c) {
+        if (afio_remap_has_code(r, c)) {
+            m = static_cast<uint8_t>(m | (1u << c));
+        }
+    }
+    return m;
+}
+
+/// afio_codes_of() for every field, in Remap's order, computed here once.
+inline constexpr uint8_t afio_codes[] = {
+    afio_codes_of(Remap::spi1),   afio_codes_of(Remap::i2c1),   afio_codes_of(Remap::usart1),
+    afio_codes_of(Remap::usart2), afio_codes_of(Remap::usart3), afio_codes_of(Remap::usart4),
+    afio_codes_of(Remap::tim1),   afio_codes_of(Remap::tim2),   afio_codes_of(Remap::tim3),
+    afio_codes_of(Remap::pioc),
+};
+static_assert(sizeof(afio_codes) == static_cast<uint8_t>(Remap::pioc) + 1u, "one mask a field, in Remap's order");
 
 /// UDP_PUE / UDM_PUE (8.3.2.4): the pull-up a pulled input of PC17 /
 /// PC16 takes - none, the weak one "for GPIO applications" (the table
@@ -267,9 +348,9 @@ struct Afio {
     // ---- the remaps --------------------------------------------------------
 
     /// Select a column. False - and NOTHING WRITTEN - when this part has no
-    /// such column (afio_remap_has_code).
+    /// such column (afio_remap_has_code, read from its table afio_codes).
     static bool remap(Remap r, uint8_t code) {
-        if (!afio_remap_has_code(r, code)) {
+        if (code >= 8u || ((afio_codes[static_cast<uint8_t>(r)] >> code) & 1u) == 0u) {
             return false;
         }
         write_field(afio_field_of(r), code);

@@ -234,6 +234,18 @@ letter `a`. What they measured:
   to 183 kHz, the mean 116 to 118 kHz
   against the manual's "about 110KHz" (3.4.1): -25610 ppm at 7, -292 at
   17 - the trim nearest 48 MHz on this die - and +25302 at 28.
+- **The HSI calibrated by a crystal, as an instrument does it**
+  (`usart_peer` under `test_ch32_serial`'s letter `1`, this die timing
+  the same far crystal): the CH32V006K8U6 sends a
+  gapless run at 1 Mbaud, this part counts the HCLK cycles between the
+  first and the last frame and so measures its own rate - 47.849 to
+  47.870 MHz at the trim's centre (-3154 to -2718 ppm over the sessions),
+  47.972 to 47.996 MHz at 17 - moves HSITRIM to the step nearest 48 MHz
+  and keeps the measured rate for its arithmetic. Each run after that
+  reads the crystal within 250 ppm of the rate kept (+202, -62, +77 in one
+  session, +37, +248, +158 in another):
+  the oscillator's wander bounds what a calibration is worth, and a
+  program that needs better calibrates again before it needs it.
 - **The clock output's multiplexer** (letter `e`): the source field takes
   SYSCLK, the HSI and nothing, and reads each back; `Mco::init()`
   answers false on this package, which does not bond PB9, and `off()`
@@ -282,9 +294,12 @@ Driver gaps, each with its reason:
 - **Closing the USB blocks' gates at boot**: RCC_AHBPCENR has them open
   out of reset and nothing here closes them - born with the USB chapters,
   or with a current measurement that says what closing them saves.
-- **A trim loop** that steers HSITRIM against an outside reference (a
-  host-timed bracket, the USB's start of frame): born with its first
-  user.
+- **A trim loop as a driver task** that steers HSITRIM against an
+  outside reference (a crystal across a link, a host-timed bracket, the
+  USB's start of frame): `usart_peer` steers it against its DUT's crystal
+  with `hsi_trim()` and its own arithmetic (the bench findings); a task of
+  this stratum is born with a program that keeps its clock calibrated
+  while it runs.
 - **A reset pulse on the power controller's line**: `reset()` refuses
   it - declined because the one pulse given cut the part off its debug
   port until its supply was cycled (the bench findings). What that pulse

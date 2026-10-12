@@ -46,6 +46,11 @@ under the arbiter and the client polled and on its vectors; the
 negatives refuse an engine on USART2's channels, one engine of two, a
 wide beat, a second instance, PA10/PA11 where they are not bonded, the
 USB pads where they share their pins, and pads named out of their
-column's order. `util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
+column's order. `tim.cpp` holds the two advanced-control timers' map
+against table 12-3, their requests against figure 9-1 and both timers'
+columns against what each package bonds, every verb of the subset on both
+instances, a pad formed only where the package drives it alone; the
+negatives refuse TIM3, a DynamicClock, a pad the package does not bond
+and a signal the column has not got. `util_all.cpp` includes EVERY kernel, util and gfx header and instantiates
 each service over this target's platform, which is the compiler's verdict
 on the whole framework for this core.

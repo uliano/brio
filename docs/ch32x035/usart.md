@@ -453,6 +453,45 @@ reports. What it measured:
   lineage): the link's end parks its TX pad as a GPIO output high across
   a reconfiguration and hands it back two bit times and 20 us after the
   enable.
+- **A frame that completes between the status read and the data read is
+  LOST, its overrun cleared unseen**: the F1 clear sequence - STATR read,
+  then DATAR - clears ORE whether it rose before the status read or after
+  it. Measured at 3 Mbaud by `usart_peer`'s receive loop with its first
+  frame's time stamp (a few dozen cycles) taken between the two reads:
+  two gapless runs in five lost a frame and reported no overrun; with
+  DATAR read first and the stamp after, none since. A polled receiver
+  reads DATAR the moment STATR says RXNE.
+
+### This part as the desk's USART instrument
+
+`usart_peer` runs USART4 on PB0/PB1 for the CH32V006's suite
+(`test_ch32_serial`'s two-board key), the far chip on its 24 MHz crystal
+- the protocol's peer with what this die offers:
+
+- **Calibrated by its DUT**: the HSI is the only root, so the peer
+  starts as an RC peer and ADOPTS the DUT's crystal through calibrate - a
+  gapless run at 1 Mbaud, timed first frame to last on the STK - moving
+  HSITRIM to the step nearest 48 MHz and keeping the rate it measures
+  there for every divisor, every tick a report carries and every edge its
+  engine places ([clock.md](clock.md) has the figures). Its blasts then
+  state their rate: 48 MHz over 52 at 921600 read +1091 to +1556 ppm,
+  the divisor's +1602 and the adopted residual.
+- **Its echo** is 28 instructions a character with no call - a status
+  load, a data load, the tally, the store into DATAR on TXE - fetched from
+  the flash; the receive loop holds 3 Mbaud gapless (a gapless run timed
+  by it within 200 ppm of the CH32V006's divisor at every rate from 9600
+  to 3 Mbaud, against a 1 Mbaud run back to back).
+- **Its waveforms** are TIM1's complementary outputs C2N and C3N on PB0
+  and PB1 under remap 001, edge lists streamed by DMA on CH2's and CH3's
+  requests ([tim.md](tim.md)), one pulse for a glitch, USART4 moved to its
+  column 1 (pads left inputs) while the timer owns PB0: six banged 0x55
+  frames clean at 9600, one stretched cell breaking the frame from +50
+  per cent - where the CH32V006's own pull-banger on the same wire breaks
+  it too - a 13-bit break ahead of a frame, glitches 6 to 2500 ticks
+  wide, frames at 9600 off by -8 to +8 per cent.
+- **The wired AND**: its collide pulls 0x3C into the CH32V006's 0xF0 as
+  an emulated open drain on its RX pad, the far pad an open drain too,
+  and its own receiver reads 0x30 off the wire.
 
 ## Not covered yet
 

@@ -35,6 +35,20 @@ static_assert(!afio_remap_has_code(Remap::pioc, 2));
 static_assert(afio_remap_has_code(Remap::usart2, 0));
 static_assert(afio_remap_has_code(Remap::tim2, 7));
 
+// The run-time refusal's table is afio_remap_has_code() itself, every
+// field and every code, on this part.
+constexpr bool codes_table_exact() {
+    for (uint8_t r = 0; r <= static_cast<uint8_t>(Remap::pioc); ++r) {
+        for (uint8_t c = 0; c < 8u; ++c) {
+            if ((((afio_codes[r] >> c) & 1u) != 0u) != afio_remap_has_code(static_cast<Remap>(r), c)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+static_assert(codes_table_exact());
+
 void afio_verbs() {
     Afio::clock_on();
     (void)Afio::remap(Remap::usart2, 0);

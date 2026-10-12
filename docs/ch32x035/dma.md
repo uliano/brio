@@ -27,7 +27,10 @@ reference suite `test_x035_dma`, the transport's engines across a wire in
   channel 3; 7 USART2's transmit, the I2C's receive and TIM2's channels 2
   and 4; 8 USART4's receive and TIM2's trigger and commutation. TIM3
   raises no request. The table is `dma_engine.hpp`'s, per part: a USART
-  the part does not offer has no channel there. The USB host/device
+  the part does not offer has no channel there. Every TIM1 and TIM2 row
+  is measured - each compare and update moving one item on its channel,
+  and an edge list on channel 3 taking a value every 10 HCLK cycles
+  ([tim.md](tim.md)). The USB host/device
   controller and the USB PD controller carry DMA engines of their own
   (9.1) and touch none of the eight.
 - **A channel is the STM32F1's**: CFGR (direction, circular,

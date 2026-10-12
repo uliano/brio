@@ -164,8 +164,9 @@ table - the vocabulary a driver's pin tables are written in.
 
 `Afio` (afio.hpp), monostate, every verb opening the block's gate:
 `remap(Remap, code)` - false and NOTHING WRITTEN for a code the field
-has not got or, for a USART, a column not one of whose pads this
-package bonds - and `remap<R, Code>()` refusing the same at compile
+has not got or, for a USART, I2C1, SPI1, TIM1 or TIM2, a column not one
+of whose pads this package bonds (a mask a field, `afio_codes`, computed
+at compile time) - and `remap<R, Code>()` refusing the same at compile
 time; `remap_code(Remap)`; `debug_config()` and `debug_port_enabled()`
 for SW_CFG as it stands, and `disable_debug_port_until_reset()`, the one
 verb that writes it, spelled long on purpose; `exti_source(line, port)`
@@ -174,10 +175,13 @@ bonds nothing of) and `exti_source(line)` reading the letter back;
 `control()`, AFIO_CTLR read, `usb_pads_taken()` its USB_IOEN, and
 `usb_pad_pull_ups(udp, udm)` its one written field pair (`UsbPadPull`:
 none, weak, 10 kOhm, 1.5 kOhm). `Remap` names the ten fields,
-`afio_field_of` places them, and the USARTs' and I2C1's columns are data
-- `afio_usart_pads(n, code)` returns a `UsartPadSet`,
-`afio_i2c1_pads(code)` an `I2cPadSet` - read by the same code that
-programs the register ([usart.md](usart.md), [i2c.md](i2c.md)).
+`afio_field_of` places them, and the columns of the USARTs, I2C1, SPI1
+and the two advanced timers are data - `afio_usart_pads(n, code)`
+returns a `UsartPadSet`, `afio_i2c1_pads(code)` an `I2cPadSet`,
+`afio_spi1_pads(code)` a `SpiPadSet`, `afio_tim1_pads(code)` and
+`afio_tim2_pads(code)` a `TimPadSet` - read by the same code that
+programs the register ([usart.md](usart.md), [i2c.md](i2c.md),
+[spi.md](spi.md), [tim.md](tim.md)).
 
 ## How to use it
 
@@ -205,7 +209,7 @@ A peripheral's column, where the program wants the pads another code
 gives:
 
 ```cpp
-brio::Afio::remap<brio::Remap::tim3, 1>();   // TIM3's channels on PB4/PB5 - a compile error on the QFN20
+brio::Afio::remap<brio::Remap::tim1, 1>();   // TIM1's C2N and C3N on PB0/PB1
 ```
 
 A configuration frozen for good (until the next reset):
@@ -272,10 +276,9 @@ they measured:
 
 Driver gaps, each with its reason:
 
-- **The remap columns of SPI1, TIM1, TIM2, TIM3 and the PIOC**:
-  their fields are named and written, their columns come with their
-  drivers (born with their first user) - the USARTs' and I2C1's are data
-  because those blocks have drivers.
+- **The remap columns of TIM3 and the PIOC**: their fields are named and
+  written, their columns come with their drivers (born with their first
+  user) - the other blocks' are data because those blocks have drivers.
 - **The external interrupts themselves** (RM 7.4): the multiplexer is
   here, the EXTI's six registers are mapped in device.hpp, and an
   `ExtInt<Pin>` is born with its first user.
