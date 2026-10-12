@@ -3030,7 +3030,26 @@ struct SyncHost {
  * IrDA_OUT is the TX pad and IrDA_IN the RX pad - because the ENDEC sits
  * between the USART and the transceiver, not between the USART and the
  * pin.
+ *
+ * THE LINE INVERSIONS ARE init()'S, and so is the moment the TX pad joins
+ * the block. "The transmit encoder output has the opposite polarity to
+ * the decoder input" (33.5.18), so two ST ENDECs facing each other need
+ * one inversion each way, and TXINV/RXINV act on the SIR side (measured,
+ * docs/stm32g0/usart.md); both are UE-protected, so they go in before the
+ * enable. And a TX pad that sits on the block while it is reset and
+ * configured puts a low on the line that a far decoder of an inverted
+ * link takes as a start - an 0xFF frame, measured on the far F446 in
+ * every leg, with the inversions written before the enable or after it
+ * alike, and in none once the pad waited. So the pad is held at the
+ * line's idle by a pull (high inverted, low not: "the SIR output is in
+ * low state when Idle") and handed over once TEACK says the transmitter
+ * is up.
  */
+struct IrdaInversion {
+    bool tx = false;   ///< CR2.TXINV: the encoder's output idles high, a zero a low pulse
+    bool rx = false;   ///< CR2.RXINV: the decoder reads a high pulse as a zero
+};
+
 template <uint8_t n, UartPins pins>
 struct IrdaLink {
     using S = Usart<n>;
@@ -3040,16 +3059,21 @@ struct IrdaLink {
 
     IrdaLink() = delete;
     using Resource = S;
+    using TxPin = Pin<pins.tx.port, pins.tx.pin>;
 
+    /// Up at `baud` as `cfg` says, the line inverted as `inv` says. False
+    /// when the rate has no divisor or the resource refuses a write; the
+    /// TX pad is then left held at its idle, not on the block.
     template <typename Clock>
     static bool init(Clock clock, uint32_t baud, const IrdaConfig& cfg,
-                     UartParity parity = UartParity::none) {
+                     UartParity parity = UartParity::none, IrdaInversion inv = {}) {
         static_assert(clock_follows<Clock, IrdaLink>(),
                       "brio IrdaLink: no rebase() - a dynamic clock is refused");
         const std::optional<uint16_t> reg = usart_brr(clock_hz(clock), baud);
         if (!reg) {
             return false;
         }
+        TxPin::input(inv.tx ? PinPull::up : PinPull::down);
         S::bus_clock(true);
         S::reset();
         (void)S::kernel_clock(UsartClock::pclk);
@@ -3061,10 +3085,18 @@ struct IrdaLink {
         if (!S::irda(cfg)) {
             return false;
         }
-        Pin<pins.tx.port, pins.tx.pin>::function(pins.tx.function);
+        if ((inv.tx || inv.rx) && !S::invert(inv.tx, inv.rx, false)) {
+            return false;
+        }
         Pin<pins.rx.port, pins.rx.pin>::function(pins.rx.function,
                                                  {.pull = PinPull::up});
         S::enable(true);
+        // TEACK: "set ... when the Transmit Enable value is taken into
+        // account" (33.8.9); the bound only keeps a block that never
+        // answers from hanging the call.
+        for (uint32_t k = 100'000u; (S::status() & UsartFlag::teack) == 0u && k != 0u; --k) {
+        }
+        TxPin::function(pins.tx.function);
         return true;
     }
 

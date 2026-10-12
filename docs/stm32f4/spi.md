@@ -990,9 +990,10 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
 - **16-BIT FRAMES ON ALL THREE OF THE HOST'S ENGINES** (letter `u`,
   spi_link's `spare_wide`): thirty-two 16-bit frames a window, the G0
   serving them in half-word beats, byte-exact both ways at every code to
-  PCLK1/2 = 22.5 MHz from the polled loop, the RXNE pump and the
-  half-word streams - a frame on the streams one half-word beat, the
-  beat the frame - and the G0's own 16-bit client run likewise. Timed
+  PCLK1/2 = 22.5 MHz from the polled loop and the RXNE pump, and to
+  PCLK1/4 from the half-word streams - a frame on the streams one
+  half-word beat, the beat the frame - with every frame heard by the G0
+  at /2; and the G0's own 16-bit client run exact to /2. Timed
   from two windows of 16 and 48 frames at the same rung (the
   transaction's fixed cost cancels), a frame inside the window takes
   999..1001 permille of its sixteen SCK periods on the streams at
@@ -1002,6 +1003,23 @@ against the STM32G0B1RE it is paired with on the desk (the stm32g0
   The 22.5 MHz rung needed the G0's answer line at very-high (its
   header): at high, 16 and 20 of 20 16-bit windows read wrong in bit 2
   (and bit 15 on the streams) while every 8-bit one held.
+  AT VERY-HIGH THE STREAMS' 16-BIT READ-BACK AT /2 IS PAST THE ANSWER
+  LINE'S BUDGET: where the frames run back to back, the G0's MSB of a
+  frame must cross the wire inside one SCK low phase after the last
+  sampling edge of the frame before - this end's tw(SCKL) at least
+  TPCLK - 1.5 = 20.7 ns (DS10693 table 63), against the G0B1's tv(SO) up
+  to 14 ns (DS13560 table 76), this end's tsu(MI) of 4 ns, the SCK pad's
+  edge at medium and the wire both ways. Measured over 150 windows of 48
+  frames: 10 of 7200 frames wrong, every one in bit 15 alone and every
+  one the previous frame's last bit (the MSB late, read as 0 where a 1
+  rose), at random frame positions; none of 9600 8-bit frames at the
+  same rung, none at /4, none on the polled loop (whose frames are not
+  back to back) - and none of 7200 with the SCK pad at high, the round
+  trip shortened by the faster edge, which the slips above keep off this
+  wire. So the streams' 16-bit read-back is judged to PCLK1/4 and printed
+  at /2, and the window timing at /2 asks for every frame clocked and
+  heard by the G0 (the time does not depend on what the answer line
+  carried).
 - **THE TRANSMIT-ONLY SHAPES, WITNESSED** (letter `v`,
   `spare_receive_only`): 33 frames, 8- and 16-bit, through the polled
   transmit-only loop, the pump's write shape and the streams' (the

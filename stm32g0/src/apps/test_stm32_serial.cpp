@@ -7674,6 +7674,38 @@ uint32_t far_bit_x2(uint32_t rate, int32_t hsi_ppm, int16_t far_ppm) {
     return static_cast<uint32_t>((num + den / 2) / den);
 }
 
+/// THE TOLERANCE OF A LEARNT DIVISOR, DERIVED. The truth (far_bit_x2) is
+/// the far bit in this kernel's cycles over the WHOLE leg - the tracker's
+/// window, 7 to 13 ms of the HSI16 - while the detector counts the HSI over
+/// the one span it measures: a bit in mode 0 (the start bit), two in mode
+/// 1, eight in modes 2 and 3 (33.5.9). Three terms, in cycles a bit:
+///  - two cycles: the synchronizer on the span's two edges and the count's
+///    truncation;
+///  - THE HSI'S WANDER between one span and the leg's window, MEASURED: the
+///    far chip blasting 0x55 (an edge every bit of its crystal), TIM1
+///    capturing every edge on PA10 at 64 MHz, four records of 17000 edges
+///    at each of the four rates, every span against every window of 4 to
+///    16 ms placed around it. At 9600: 868 ppm the worst at one bit (sd
+///    165), 862 at two, 603 at eight, so one bit's figure covers every
+///    mode. Taken against the far edges themselves, it holds their own
+///    placement (the fractional divider, RM0390 25.4.4) and the capture's
+///    count of quantization; in counts the worst one-bit span is 5.8 of
+///    6686 at 9600, 1.7 of 1115 at 57600, 1.3 of 520 at 123456 and 1.2 of
+///    279 at 230400 - each under one count plus 868 ppm of its bit;
+///  - the tracker's grain: 8 counts at each end of a window of at least
+///    16 intervals of 15625 (lse_tracker.hpp), 32 ppm.
+/// At 9600 that is 2 + 6.0 cycles of 6687; at 230400, 2 + 0.25 of 279.
+constexpr uint32_t abr_wander_ppm = 868;
+constexpr uint32_t abr_grain_ppm = (8u * 1'000'000u) / (16u * (u1_hz / 4096u));
+static_assert(abr_grain_ppm == 32u, "8 counts over sixteen 244-us intervals at 64 MHz");
+constexpr uint32_t abr_ppm = abr_wander_ppm + abr_grain_ppm;
+
+/// The tolerance in bit_x2_of()'s unit (twice the cycles a bit), rounded up.
+constexpr uint32_t abr_tolerance_x2(uint32_t want_x2) {
+    return 4u + static_cast<uint32_t>((static_cast<uint64_t>(want_x2) * abr_ppm + 999'999u) / 1'000'000u);
+}
+static_assert(abr_tolerance_x2(13'374) == 17u, "9600: 2 cycles and 900 ppm of 6687, x2, rounded up");
+
 /// One auto-baud leg: the far chip SENDS `n` frames of `pattern` at `rate`
 /// (two bit times of idle between them) into this receiver told 19200 and
 /// armed in mode `m`; the first frame is the one the detector measures.
@@ -7688,11 +7720,10 @@ struct AbrLeg {
     bool rest_ok = false;    ///< every later frame the pattern, no FE or PE
     bool abrf() const { return (isr & UsartFlag::abrf) != 0u; }
     bool abre() const { return (isr & UsartFlag::abre) != 0u; }
-    /// Within two kernel cycles a bit of the truth: one for the edges'
-    /// synchronizer, one for the count's truncation.
+    /// Within the derived tolerance of the truth (abr_tolerance_x2).
     bool learnt() const {
         const uint32_t d = got_x2 > want_x2 ? got_x2 - want_x2 : want_x2 - got_x2;
-        return abrf() && !abre() && d <= 4u;
+        return abrf() && !abre() && d <= abr_tolerance_x2(want_x2);
     }
 };
 
@@ -7744,9 +7775,11 @@ AbrLeg abr_leg(AutoBaudMode m, uint8_t pattern, uint32_t rate, bool over8, uint1
 }
 
 void print_abr(const AbrLeg& l) {
+    const uint32_t tol = abr_tolerance_x2(l.want_x2);
     print(serial, " ", l.abrf() ? "ABRF" : "-", l.abre() ? "+ABRE" : "", " ", l.got_x2 / 2u,
           (l.got_x2 & 1u) != 0u ? ".5" : "", "/", l.want_x2 / 2u, (l.want_x2 & 1u) != 0u ? ".5" : "",
-          " ", l.frames, "f", l.first_ok ? "" : "(1st bad)", l.rest_ok ? "" : "(REST BAD)");
+          "+-", tol / 2u, (tol & 1u) != 0u ? ".5" : "", " ", l.frames, "f", l.first_ok ? "" : "(1st bad)",
+          l.rest_ok ? "" : "(REST BAD)");
 }
 
 /// One break of `bits` bit times from the far engine at `rate` into this
@@ -7839,7 +7872,8 @@ void t0_autobaud_lin() {
         {AutoBaudMode::frame_55, 0x55, "mode 3 (a 0x55) "},
     };
     static constexpr uint32_t rates[] = {9'600, 57'600, 230'400, 123'456};
-    print(serial, "  learnt/truth in kernel cycles a bit, per rate 9600, 57600, 230400, 123456:", crlf);
+    print(serial, "  learnt/truth+-tolerance in kernel cycles a bit (two cycles and ", abr_ppm,
+          " ppm of the bit, derived above), per rate 9600, 57600, 230400, 123456:", crlf);
     for (const Mode& md : modes) {
         bool all = true, firsts = true;
         print(serial, "  ", md.name, ":");
@@ -7851,8 +7885,8 @@ void t0_autobaud_lin() {
         }
         print(serial, crlf, "    the measured frame itself read as its pattern at every rate: ",
               firsts ? "yes" : "NO", crlf);
-        judge(md.name, "learns every foreign rate within two kernel cycles a bit of the far crystal's, and the "
-                       "frames after it decode", all);
+        judge(md.name, "learns every foreign rate within the derived tolerance of the far crystal's bit, and "
+                       "the frames after it decode", all);
     }
     // b. THE ERROR FLAG: mode 3 handed a 0x00, whose single falling edge
     //    gives the transition check nothing to agree with (33.5.9); and
@@ -7990,17 +8024,20 @@ void t0_autobaud_lin() {
         const uint32_t got = bit_x2_of(brr, false);
         const uint32_t want = far_bit_x2(rate, hsi.value_or(0), 0);
         const uint32_t dd = got > want ? got - want : want - got;
+        const uint32_t tol = abr_tolerance_x2(want);
         print(serial, "  a LIN header from a master at ", rate, " into a slave at 19200, the detector armed ",
               before ? "BEFORE the break" : "on LBDF", ": LBDF ", lbdf ? "seen" : "NOT seen", ", then ",
               (st & UsartFlag::abrf) != 0u ? "ABRF" : "-", (st & UsartFlag::abre) != 0u ? " ABRE" : "", ", ",
-              got / 2u, " cycles a bit where the far bit is ", want / 2u, "; ", d.frames, " frames ", hex(d.first),
+              got / 2u, " cycles a bit where the far bit is ", want / 2u, " +-", tol / 2u, "; ", d.frames,
+              " frames ", hex(d.first),
               " .. ", hex(d.last), " fe ", d.fe, crlf);
         if (before) {
             continue;
         }
         judge("the master's break raises LBDF at the slave's nominal rate, at ", num(master), up && lbdf && armed);
-        judge("the sync is learnt within two cycles a bit and the payload decodes at its rate, at ", num(master),
-              (st & UsartFlag::abrf) != 0u && (st & UsartFlag::abre) == 0u && dd <= 4u && d.frames == 5u &&
+        judge("the sync is learnt within the derived tolerance and the payload decodes at its rate, at ",
+              num(master),
+              (st & UsartFlag::abrf) != 0u && (st & UsartFlag::abre) == 0u && dd <= tol && d.frames == 5u &&
                   d.first == 0x55u && d.last == 0xA3u && d.fe == 0u);
     }
     link_release();
@@ -8184,20 +8221,19 @@ void rs485_leg(const char* name, uint8_t mode, uint8_t deat, uint8_t dedt, bool 
 
 using IrLink = IrdaLink<1, u1_pins>;
 
-/// The link as IrDA SIR at `rate`: IrdaLink's own init, then the line
-/// inversions (CR2 is UE-protected: the instance disabled for the write).
+/// The link as IrDA SIR at `rate`, the line inversions IrdaLink's own -
+/// written before the enable, the TX pad held at the line's idle until the
+/// transmitter is up. THE FAR DECODER HEARS NOTHING OF IT: taking the link
+/// up with the pad on the block through its reset, the far F446 decoded a
+/// 0xFF from the low it put on the line in every inverted leg - at 9600 a
+/// frame that ends 4.04 ms after the far chip's ack, where its flush lands
+/// 4 to 5 ms after it by its millisecond's phase, so now and then the 0xFF
+/// was counted first and the 32nd frame left out (sum 0x8A0 for 0x7F0).
 bool ir_up(uint32_t rate, const IrdaConfig& cfg, bool txinv, bool rxinv) {
     link_task_down();
     Nvic::disable(U1::irq());
-    if (!IrLink::init(clock, rate, cfg)) {
+    if (!IrLink::init(clock, rate, cfg, UartParity::none, IrdaInversion{.tx = txinv, .rx = rxinv})) {
         return false;
-    }
-    if (txinv || rxinv) {
-        U1::enable(false);
-        if (!U1::invert(txinv, rxinv, false)) {
-            return false;
-        }
-        U1::enable(true);
     }
     U1::clear_flags(UsartClear::all);
     return true;
@@ -8304,13 +8340,12 @@ IrRx ir_rx_leg(uint32_t rate, uint8_t txpl, bool txinv, bool rxinv) {
     a.count = 32;
     a.value = 0x60;
     // THE TURNAROUND: an ST ENDEC does not encode while its receiver is
-    // busy (33.5.18, RM0390 25.4.12: half duplex), and ir_up() puts an
-    // instant of UNINVERTED idle - a pulse to the far decoder - on the
-    // wire (IrdaLink enables before the inversions are written). So the
-    // far sender's first frame waits 20 ms (send's lead-in) past the
-    // settle, long after the far receiver is quiet again: the far suite
-    // measured the same window the other way round (test_stm32f4_serial
-    // letter r, the first start pulse missed one leg in a few).
+    // busy (33.5.18, RM0390 25.4.12: half duplex), and in the control
+    // legs this end's encoder, uninverted, idles low into the far decoder
+    // - a standing pulse. So the far sender's first frame waits 20 ms
+    // (send's lead-in) past the settle: the far suite measured the window
+    // the other way round (test_stm32f4_serial letter r, the first start
+    // pulse missed one leg in a few).
     a.aux16 = 20;
     a.ms = static_cast<uint16_t>(bound_ms(rate, 64) + 20u);
     const bool acted = peer_act(link::Op::send, a);

@@ -1214,9 +1214,20 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   frames of each mode's pattern at 9600, 57600, 230400 and 123456 baud
   into this receiver told 19200, and the learnt divisor is judged in
   kernel cycles a bit against the far rate it states and this HSI's
-  error over the leg: ALL FOUR MODES at every rate within one cycle
-  (6685 for 6684.5, 1115 for 1114.5, 279 for 279, 520 for 520), the
-  measured frame itself read whole and the frames after it decoded.
+  error over the leg, within a DERIVED tolerance: two cycles (the
+  synchronizer, the truncation) and 900 ppm of the bit - the HSI16's
+  WANDER between the one span the detector times and the leg's 7 to 13
+  ms window, measured by TIM1 capturing every edge of a far 0x55 blast
+  on PA10 (four records of 17000 edges a rate, every span against every
+  window of 4 to 16 ms around it: 868 ppm the worst at one bit at 9600,
+  sd 165, 603 at eight bits; in counts 5.8 of 6686 at 9600 and 1.2 of
+  279 at 230400, each under one count plus 868 ppm of the bit) plus the
+  tracker's grain (32 ppm), rounded up to the half cycle the divisor is
+  read in. At 9600 that is 8.5 cycles of 6687, where a
+  mode-0 leg measured up to 3 off the leg's mean; at 230400, 2.5 of
+  279. ALL FOUR MODES learn every rate inside it (22 runs of each leg:
+  at most 2 cycles off at 9600, 1 above), the measured frame itself read
+  whole and the frames after it decoded.
   ABRE: mode 3 handed a 0x00, AND mode 2 handed a 0x55 - its second
   measurement disagrees with its first - each with FE on the measured
   frame and the divisor left as it was. THE RANGE as 33.5.9 states it,
@@ -1244,7 +1255,8 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   tolerance), its 13-bit break, a 0x55 sync and four payload frames: the
   break raises LBDF at the slave's nominal rate, the detector armed on
   LBDF learns the sync within one cycle a bit (3038 for 3039, 3715 for
-  3714) and the payload decodes. ARMED BEFORE THE BREAK IT CANNOT: the
+  3714; judged within the same derived tolerance) and the payload
+  decodes. ARMED BEFORE THE BREAK IT CANNOT: the
   break is then its first character, LBDF never rises and it ends in
   ABRE - which is why `AutoBaud`'s header says to arm it on the break.
 - **RS-485** (`r`): the driver enable through the TASK - `Rs485` with
@@ -1278,7 +1290,16 @@ SKIPPED with their reason; letter `x`, outside `z` and `t`, is letter
   undecodable (one of 32). The far sender's first frame waits 20 ms past
   the settle, the turnaround the F446's suite measured the other way
   round (its first start pulse missed one leg in a few without it,
-  docs/stm32f4/usart.md). The far chip refuses SIR above 115200, its
+  docs/stm32f4/usart.md). THE LINK COMES UP WITHOUT A PULSE ONLY IF THE
+  TX PAD WAITS: with the pad on the block through its reset and
+  configuration, the far decoder took a 0xFF from the low that put on the
+  line in every inverted leg (8 of 8, the inversions written before the
+  first enable or after it alike) - at 9600 a frame ending 4.04 ms after
+  the far chip's ack, against a flush 4 to 5 ms after it by its
+  millisecond's phase, so now and then counted first, the 32nd frame left
+  out (sum 0x8A0 for 0x7F0); held at the line's idle by a pull until
+  TEACK, 0 of 8. `IrdaLink::init` takes the inversions (`IrdaInversion`)
+  and holds the pad so. The far chip refuses SIR above 115200, its
   chapter's ceiling (RM0390 25.4.12). On this end's pad the 3/16 pulse
   at 115200
   reads 93..100 cycles for 104 and the low-power one 100..101 for 105,

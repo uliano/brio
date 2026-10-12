@@ -93,7 +93,8 @@
 //   u  16-BIT FRAMES against the peer (spi_link's extended exchange,
 //      spare_wide): the polled loop, the RXNE pump and the half-word
 //      streams at every BR code, the wire's time from two window lengths,
-//      and the peer's own 16-bit client run
+//      and the peer's own 16-bit client run; the streams' read-back judged
+//      to PCLK1/4 and printed at /2, past the answer line's budget
 //   v  RECEIVE-ONLY and ODD COUNTS (spare_receive_only): this host's
 //      transmit-only shapes witnessed by a client whose answer line is
 //      dark, the peer's receive() run at 7 and 33 frames in both widths,
@@ -1798,7 +1799,32 @@ constexpr SpiClock rungs[] = {SpiClock::div256, SpiClock::div128, SpiClock::div6
                               SpiClock::div32,  SpiClock::div16,  SpiClock::div8,
                               SpiClock::div4,   SpiClock::div2};
 
-/// Climb every BR code with `e` and say whether every rung was exact.
+/// THE ANSWER LINE'S BUDGET AT PCLK1/2, AND IT IS MEASURED. Where this
+/// end's frames run back to back in 16 bits (the streams), the peer's MSB
+/// of a frame comes after the last sampling edge of the one before, and at
+/// 22.5 MHz the round trip it must make inside one SCK low phase does not
+/// fit the data sheets: this end's tw(SCKL) is TPCLK - 1.5 = 20.7 ns
+/// (DS10693 table 63), the G0B1's tv(SO) up to 14 ns (DS13560 table 76)
+/// and this end's tsu(MI) 4 ns - 18.7 of the 20.7 before the SCK pad at
+/// medium (the class the slips set, peer_sck_speed above) and the wire
+/// both ways. Measured: 10 of 7200 frames wrong in 150 windows of 48, every
+/// one in bit 15 alone and every one the previous frame's last bit (the
+/// MSB late), at random frame positions; none of 9600 8-bit frames at the
+/// same rung, none of 2880 at PCLK1/4, none on the polled loop (whose
+/// frames are not back to back), and none of 7200 with the SCK pad at high
+/// - the round trip shortened by the faster edge. So the streams' 16-bit
+/// read-back is judged to PCLK1/4 and PRINTED at PCLK1/2.
+constexpr SpiClock wide_stream_readback_top = SpiClock::div4;
+
+/// Whether this end's read-back is judged at `c` on `e`'s path and width.
+bool readback_judged(const Ext& e, SpiClock c) {
+    return !(e.path == Path::engines && e.wide && !e.receive_only &&
+             static_cast<uint8_t>(c) < static_cast<uint8_t>(wide_stream_readback_top));
+}
+
+/// Climb every BR code with `e` and say whether every rung was exact - on
+/// a rung past the answer line's budget, every frame clocked and heard by
+/// the peer, this end's read-back printed.
 bool climb(Ext e) {
     bool all = true;
     uint8_t k = 0;
@@ -1809,7 +1835,12 @@ bool climb(Ext e) {
         ++k;
         const Outcome o = run(e);
         print_outcome(e, o);
-        all = all && exact(e, o);
+        const bool judged = readback_judged(e, c);
+        if (!judged) {
+            print(serial, "      (this end's read-back printed at this rung, not judged: the answer "
+                          "line's budget)", crlf);
+        }
+        all = all && (judged ? exact(e, o) : peer_heard(e, o) && o.clocked);
     }
     return all;
 }
@@ -1817,7 +1848,9 @@ bool climb(Ext e) {
 /// THE WIRE'S TIME, from the difference of two windows of 16 and 48
 /// frames at the same rung - the transaction's fixed cost cancels - in
 /// permille of the frame's SCK periods (a bit is division x HCLK/PCLK1 =
-/// 4 x division core cycles). Zero when either window was not exact.
+/// 4 x division core cycles). The time asks that every frame was clocked
+/// and heard by the peer, and the read-back where readback_judged() says;
+/// zero otherwise, the window that failed named first.
 uint32_t frame_permille(Ext e) {
     Ext shorter = e;
     shorter.count = 16;
@@ -1826,7 +1859,17 @@ uint32_t frame_permille(Ext e) {
     longer.seed_a = static_cast<uint8_t>(e.seed_a + 3u);
     const Outcome a = run(shorter);
     const Outcome b = run(longer);
-    if (!exact(shorter, a) || !exact(longer, b) || b.cycles <= a.cycles) {
+    const bool judged = readback_judged(e, e.rate);
+    auto timed = [judged](const Ext& x, const Outcome& o) {
+        return judged ? exact(x, o) : peer_heard(x, o) && o.clocked;
+    };
+    if (!exact(shorter, a)) {
+        print_outcome(shorter, a);
+    }
+    if (!exact(longer, b)) {
+        print_outcome(longer, b);
+    }
+    if (!timed(shorter, a) || !timed(longer, b) || b.cycles <= a.cycles) {
         return 0u;
     }
     const uint32_t per_frame_x1000 = (b.cycles - a.cycles) * 1000u / 32u;
@@ -1859,7 +1902,7 @@ void tu_wide() {
                   path_ok[0]);
     bench.verdict("...on the RXNE PUMP likewise", path_ok[1]);
     bench.verdict("...and on the DMA1 STREAMS, a half-word beat a frame (the beat is the "
-                  "frame), likewise",
+                  "frame), likewise - this end's read-back to PCLK1/4, every frame heard at /2",
                   path_ok[2]);
 
     // THE WIRE'S TIME: the engines at every rate, the polled loop where it

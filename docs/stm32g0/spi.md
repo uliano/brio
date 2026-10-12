@@ -1024,7 +1024,10 @@ back-to-back rung 0 of 30.
 
 THE EXTENDED EXCHANGE FROM THAT SIDE (its letters `u`, `v`, `w`, every
 code to 22.5 MHz judged): the peer's DMA serve in half-word beats and
-its 16-bit run exact both ways; its `receive()` run and its receive
+its 16-bit run exact both ways - but for that host's streams at 22.5 MHz,
+where back-to-back 16-bit frames put this end's MSB past the answer
+line's budget (10 of 7200 frames read with bit 15 late, none of 9600
+8-bit ones; docs/stm32f4/spi.md, letter `u`), judged there to 11.25 MHz; its `receive()` run and its receive
 channel hearing every frame of the F446's transmit-only shapes at 7 and
 33 frames in both widths, the odd last frame under the quarter
 threshold; the CRC through 35.5.14's "CRC transfer managed by DMA" (the

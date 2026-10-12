@@ -309,6 +309,7 @@ void usart_tail_verbs() {
     Sync::release();
 
     (void)Irda::init(clock, 9600, {.low_power = false, .prescaler = 1});
+    (void)Irda::init(clock, 9600, {}, UartParity::none, {.tx = true, .rx = true});
     (void)Irda::send(0x00);
     (void)Irda::drain();
     uint32_t flags = 0;
