@@ -198,7 +198,10 @@ both, in practice:
   LINKS every app on every preset of the family (`brio fit` the census
   of each image's flash and RAM, under 5 % left regrouped); (3) negative
   tests: what must be refused must FAIL to compile; (4) the
-  `test_<target>_<subject>` suite on the bench; (5) `brio prose`
+  `test_<target>_<subject>` suite on the bench - and what a PEER can
+  judge is judged by the desk partner's peer: a loop on one board proves
+  only that the chip agrees with itself (rates, polarities, the order a
+  pad is handed over, a FIFO's state across windows); (5) `brio prose`
   clean over the files touched, and `brio gate` for every change that
   claims to move no image (a comments-only edit, a rename, a move) - a comment or a document is a reference
   for the code as it is, and a claim about another part of the tree is
@@ -210,6 +213,17 @@ both, in practice:
   the document beside the wire's or the bus's figure, a rate far from
   that figure explained or listed as a gap. The bench chip alone
   masks half the family (SWEVENTB, TCA1, PORTB proved it).
+- **Definition of done for a test letter**: (1) every verdict's bound is
+  DERIVED, its arithmetic written beside it (the instrument's
+  resolution, the clocks' error and wander, the quantization) - a bound
+  chosen by eye is an intermittent waiting to happen; (2) a new letter,
+  or one whose verdict changes, runs MANY times (ten to twenty) before
+  it is called green, and a letter judging a rare event states the rate
+  it observed; (3) test code is held to the driver's standard: waits,
+  time-outs and pad hand-overs go through shared, reviewed helpers, not
+  loops written anew in each suite (a counter that wraps on a time-out,
+  a pad given back without its pull, a selection helper that stops
+  inlining - each made a verdict lie).
 - **Package variability pattern** (full rule: overview.md "Target
   strata"; model code: tcb.hpp/pin.hpp/evsys.hpp): device header =
   authority. Missing instance -> `#if defined(TCB4)` tiers. Missing
