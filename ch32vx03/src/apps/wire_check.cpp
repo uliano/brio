@@ -16,15 +16,18 @@
 // pad shorted to ground 0 then 0 - and an external pull-up on the wire
 // (the I2C pair) changes none of that, because a driven low wins.
 //
-// The pads are this bench's. On the CH32V203 board: the four SPI2 lines,
-// the two I2C1 lines, USART3's pair, the KEY pad the peer drives to wake
-// this board, the crossed USART2/UART4 pair on the board itself, and the
-// five pads the optional straps use. On the CH32V303 board, every wire
-// ends on the board itself: SPI2 against SPI3 (four lines), the crossed
-// USART2/UART4 pair on UART4's default PC10/PC11, TIM3's channel 1 into
-// PA1, TIM8's channel 1 into PB8, and I2C1 against I2C2 - twenty pads.
-// The console's own two (PA9/PA10), the debug port, the USB pads, the
-// LED, the KEY and the two crystals are not here and are never touched.
+// The pads are this bench's. The two boards are a pair: the CH32V203's
+// SPI2 (PB12..PB15) meets the CH32V303's SPI3 on its second column
+// (PA4, PC10, PC11, PC12), I2C1 meets I2C1 (PB6/PB7), and the CH32V203's
+// USART3 (PB10/PB11) crosses the CH32V303's UART4 on its second column
+// (PB0/PB1). Beside the pair, on the CH32V203 board: the crossed
+// USART2/UART4 pair on the board itself and the five pads the optional
+// straps use; on the CH32V303 board: SPI2 against SPI3's first column
+// (four lines), TIM3's channel 1 into PA1, TIM8's channel 1 into PB8 -
+// and the pads of the links the pair retired (PA2/PA3, PB10/PB11), kept
+// in the list so that their absence is measured too. On the CH32V303 the
+// console's own two (PA9/PA10), the debug port, the USB pads, the LED,
+// the KEY and the two crystals are not here and are never touched.
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: monitor_speed = 115200
@@ -66,11 +69,12 @@ constexpr Pad pad(const char* name)
 
 #if defined(CH32V303VC)
 constexpr Pad pads[] = {
-    pad<'A', 1>("PA1"), pad<'A', 2>("PA2"), pad<'A', 3>("PA3"), pad<'A', 6>("PA6"),
-    pad<'A', 15>("PA15"), pad<'B', 3>("PB3"), pad<'B', 4>("PB4"), pad<'B', 5>("PB5"),
-    pad<'B', 6>("PB6"), pad<'B', 7>("PB7"), pad<'B', 8>("PB8"), pad<'B', 10>("PB10"),
-    pad<'B', 11>("PB11"), pad<'B', 12>("PB12"), pad<'B', 13>("PB13"), pad<'B', 14>("PB14"),
-    pad<'B', 15>("PB15"), pad<'C', 6>("PC6"), pad<'C', 10>("PC10"), pad<'C', 11>("PC11"),
+    pad<'A', 1>("PA1"), pad<'A', 2>("PA2"), pad<'A', 3>("PA3"), pad<'A', 4>("PA4"),
+    pad<'A', 6>("PA6"), pad<'A', 15>("PA15"), pad<'B', 0>("PB0"), pad<'B', 1>("PB1"),
+    pad<'B', 3>("PB3"), pad<'B', 4>("PB4"), pad<'B', 5>("PB5"), pad<'B', 6>("PB6"),
+    pad<'B', 7>("PB7"), pad<'B', 8>("PB8"), pad<'B', 10>("PB10"), pad<'B', 11>("PB11"),
+    pad<'B', 12>("PB12"), pad<'B', 13>("PB13"), pad<'B', 14>("PB14"), pad<'B', 15>("PB15"),
+    pad<'C', 6>("PC6"), pad<'C', 10>("PC10"), pad<'C', 11>("PC11"), pad<'C', 12>("PC12"),
 };
 #else
 constexpr Pad pads[] = {
