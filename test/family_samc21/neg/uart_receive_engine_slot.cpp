@@ -2,8 +2,9 @@
 // The Uart has ONE engine slot, the transmit one: this stratum drives the
 // DMAC for one user on one channel (samc21/dmac.hpp, erratum 1.10.4 - the
 // Uart's own transmit and receive pair was measured writing the SERCOM's
-// registers). A receive engine is a template argument the class does not
-// take, so naming one fails to compile.
+// registers). The argument after the transmit engine is the placement
+// (util/placement.hpp), so a receive engine named there is refused as a
+// placement: there is no receive slot to take it.
 #include "samc21/dmac.hpp"
 #include "samc21/sercom.hpp"
 using namespace brio;

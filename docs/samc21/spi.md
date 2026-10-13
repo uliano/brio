@@ -194,7 +194,7 @@ item a reader would apply without checking the row.
   can). Role legality is checked IN THE ROLE (`spi_role_probe`), because
   the same harness is legal as a host and illegal as a client on the
   same row.
-- **`SpiHost<n, pads, generator>`** - the engine
+- **`SpiHost<n, pads, generator, Placement>`** - the engine
   `util/spi_bus.hpp` (= `BusMaster`) drives: the shared Request shape
   (cs/dc `PinRef`s, two-phase cmd + full-duplex data, `Borrowed<...,
   Lease::reply>` spans, `ReplyTo<SpiDone>`, per-request BAUD value and
@@ -262,8 +262,19 @@ item a reader would apply without checking the row.
   - the host raised the select, TXC - or `stalled` on the spin budget).
   Their element is the character, `uint8_t` or `uint16_t` for nine bits
   (anything wider refused at compile time). They are always inline, so a
-  program places the function that calls them in `.ram_text` - its call,
+  program places the function that calls them in `.fast_text` - its call,
   as for a handler.
+- **The host's placement** - util/placement.hpp's `InFlash` (the default)
+  or `InRam`, the host's last parameter: two paths, each ONE function of
+  it - the polled transaction (both phases, the D/C flip, whichever loop
+  the spans pick), which start() calls once a request, and the pump's
+  entry, which the vector calls. Under `InRam` each is one flattened
+  instance in `.fast_text.brio`, a call through the linker's long-branch
+  veneer from the flash ([platform.md](platform.md), "A handler in
+  SRAM"); a third tag does not compile. The polled transaction is the
+  driver's alone to place; the pump's entry the program can place better
+  by placing its vector, and both together cost the pump a call (the
+  cost below).
 
 ## How to use
 
@@ -280,6 +291,14 @@ target:
     // from an AO: fill a Request (cs, buffers as lend<Lease::reply>(...),
     // baud = *SpiHw::baud_for(6'000'000), mode), post it to SpiBus, and
     // consume the SpiDone reply.
+
+A display's polled pixel stream with its loops in SRAM, and the pump's
+vector placed by the program (the entry inline in it, with no call):
+
+    using SpiHw = brio::SpiHost<1, my_pads, 0, brio::InRam>;
+    extern "C" [[gnu::section(".fast_text")]] void SERCOM1_Handler() {
+        if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{brio::spi_ok}); }
+    }
 
 A client answering a transaction - its answers ready, the select still
 high:
@@ -366,7 +385,7 @@ the two spans:
   (45.6 core cycles a character) the exchange run from SRAM received
   every character exact in four ladders; from the flash behind its two
   wait states 9, 0 and 1 of 16 wrong in three - at the edge, so the peer
-  places its runs in `.ram_text`. Below 12 MHz both placements are
+  places its runs in `.fast_text`. Below 12 MHz both placements are
   exact.
 - The kernel letter: four requests queued in one dispatch come back
   through their own ReplyTo in order; an over-full arbiter answers
@@ -451,11 +470,12 @@ the two spans:
   TWO-FLAG POLL AROUND INSIDE A 32-CYCLE CHARACTER, whatever the driver:
   the write shape beats the bare loop because it polls ONE flag; what
   separates brio's receive loop from the bare one is the flash (the
-  same loops placed in SRAM read 1.05 and 1.21), not the budget - a
-  register count-down against a stack slot moved nothing.
+  same loops under `InRam` read 1.05 and 1.21: 33.6 and 38.9 cycles a
+  character against 33.7 and 42.4), not the budget - a register
+  count-down against a stack slot moved nothing.
   STATUS.BUFOVF after every polled run: never. The pump (`spi.pump`, tx and rx): one interrupt a character,
-  226 cycles of `isr` an interrupt with the stamp pair inside (170 the
-  handler's body), BUFOVF never - and HANDLER-BOUND at both rates, 377
+  252 cycles of `isr` an interrupt with the stamp pair inside (196 the
+  handler's body), BUFOVF never - and HANDLER-BOUND at both rates, 391
   cycles of CPU a character whatever the clock: with two in flight the
   handler's exit finds the next character already back and re-enters at
   once, so a pumped transaction at a rate where a character is shorter
@@ -463,19 +483,26 @@ the two spans:
   thread starved until it ends (`launch` reads the whole transaction at
   12 MHz: start() got the core back when it was over). The pump is for
   rates where a character outlasts the handler; above them a program
-  wants the polled loop. THE FIXED COST OF A REQUEST
+  wants the polled loop. WHERE THE PUMP RUNS FROM (an entry, a character
+  of CPU, at 12 MHz): 252 and 391 from the flash; 223 and 356 with the
+  host `InRam` behind its vector in the flash (242 and 386 in that
+  build's flash image: the same source moves some ten cycles with where
+  it sits); 162 and 261 with the vector placed in `.fast_text` and the
+  host `InFlash`, the entry inline in it; 180 and 270 with both - the
+  entry a call where it was inline. THE FIXED COST OF A REQUEST
   (`spi.req`: a polled request of 1, 3 and 16 bytes with a command byte,
   the D/C scripted on PB23 and the select on PA17 - two real pads, four
-  real edges - at 3 MHz): 526, 559 and 665 cycles above the wire, the
+  real edges - at 3 MHz): 523, 558 and 647 cycles above the wire, the
   instrument's 82 inside - the phase boundary
-  is the 33 between one byte and three (the last command character read
-  back, the D/C, the first data character's own start), and the 106
+  is the 35 between one byte and three (the last command character read
+  back, the D/C, the first data character's own start), and the 89
   from three to sixteen is the transmit-only phase's tail (TXC awaited,
   the receiver drained: a phase longer than the receive buffer pays it,
   one of two characters is read back instead and does not). What it is
   made of, counted in the
-  listing and measured with the polled path placed in SRAM (38 cycles
-  less, so the flash is not the bulk of it): the bench's own request
+  listing and measured with the polled transaction `InRam` (4, 7 and
+  23 cycles less, the call through the veneer included, so the flash is
+  not the bulk of it): the bench's own request
   built on the stack and the interval, the ~35 instructions of start()
   with the one-word compare, the four pin edges inline through
   `PinRef::set/clear` (pin.hpp forces the two verbs inline: each edge
@@ -497,9 +524,12 @@ Driver gaps, continued: **the pin edges through the IOBUS alias** -
 request); the single-cycle IOBUS alias (10.1.4) is pin.hpp's and would
 take some 12 cycles more off a request's fixed cost, not the hundreds
 between it and 300: declined here because the rest of that cost is the
-request's shape and the SERCOM's own latencies, stated above. **The polled loop in SRAM** - a tenth at 12 MHz, measured;
-declined as a default because a placement of some 2 KB in `.ram_text`
-is the program's call (platform.md, "A handler in SRAM"), not the driver's.
+request's shape and the SERCOM's own latencies, stated above. **One
+placement for two paths** - the host's tag moves the polled transaction
+and the pump's entry together, so a program that places the pump's
+vector and wants the polled loops in SRAM pays the pump a call where it
+had none (270 cycles a character against 261, measured above); born
+with the first program that wants the two apart.
 
 Implemented but not bench-verified:
 

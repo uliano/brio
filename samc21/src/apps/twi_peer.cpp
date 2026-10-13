@@ -40,6 +40,12 @@
 // read); ident.xtal reports whether the board's 24 MHz crystal
 // started (probed once at boot).
 //
+// Placement (docs/samc21/platform.md, "A handler in SRAM"): nothing in
+// SRAM. The client is polled and stretches SCL by its own turnaround, so
+// the wire waits for it whatever the fetch; the host's event entry
+// (I2cHost takes no placement) stays inline in a vector in the flash,
+// the shape the DUT's host is measured against.
+//
 // build: boards = c21j
 // build: monitor_speed = 115200
 

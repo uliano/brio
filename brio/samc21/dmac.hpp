@@ -353,9 +353,11 @@ public:
      * can read the flags that make it a fact - or a bus error did (TERR,
      * the channel disabled by the silicon). What is lost is an unknown
      * tail of the block; every abandonment is counted in faults().
-     * True when a block was abandoned.
+     * True when a block was abandoned. OUT OF LINE AND COLD: the rare
+     * path, so an owner's completion flattened into its vector, or placed
+     * in SRAM (samc21/sercom.hpp's dma_isr()), carries none of it.
      */
-    static bool abandon() {
+    [[gnu::noinline, gnu::cold]] static bool abandon() {
         if (!busy_) {
             return false;
         }

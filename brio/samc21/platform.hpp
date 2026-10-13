@@ -111,6 +111,15 @@ struct SamPlatform {
     /// which is what lets util/ring.hpp take its lock-free path here.
     static constexpr unsigned atomic_width = 4;
 
+    /// This family places `.fast_text` in SRAM: samc21/ld/samc21j18a.ld
+    /// collects it first in .data, which the crt copies before main(), and
+    /// the vector table holds absolute addresses, so a vector placed there
+    /// is entered directly; a CALL between the flash and SRAM is out of a
+    /// BL's 16 MB and goes through the linker's long-branch veneer
+    /// (docs/samc21/platform.md, "A handler in SRAM"). A driver of this
+    /// stratum may therefore be given util/placement.hpp's InRam.
+    static constexpr bool places_fast_text = true;
+
     /// Panic breadcrumb in .noinit: the linker script marks the section
     /// NOLOAD and startup neither loads nor zeroes it, so the record
     /// survives a warm reset and can be reported at the next boot. SRAM

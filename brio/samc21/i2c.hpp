@@ -908,6 +908,15 @@ public:
  * arbitration is lost the silicon has already released the bus and a
  * Stop is NOT ours to send (33.6.2.4.2 case 1).
  *
+ * NO PLACEMENT PARAMETER (util/placement.hpp): the event entry is inline
+ * in the vector that binds it, and a program that wants it out of the
+ * flash's two wait states (DS60001479M table 45-41) places that VECTOR in
+ * `.fast_text` - the entry then runs from SRAM whole, with no call, a
+ * third shorter. The entry as an InRam instance was measured and
+ * declined: called from a vector in the flash through the linker's
+ * long-branch veneer, with a frame of its own, it took a written byte a
+ * few cycles off and put a few on a read one (docs/samc21/i2c.md).
+ *
  * ISR wiring (one vector per SERCOM, app glue as always):
  *   extern "C" void SERCOM3_Handler() {
  *       if (I2cHw::isr()) { brio::post<I2c>(brio::TransferDone{I2cHw::status()}); }

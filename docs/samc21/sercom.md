@@ -14,8 +14,8 @@ detection's clock rule, refused at configuration) and 1.17.2 (auto-baud's
 missing stop bit, answered by the die's revision), all encoded in code
 (1.17.4, 1.17.14 and 1.17.19 are named where their fields live), and
 1.10.4 (the DMAC's, [dmac.md](dmac.md)). Driver: `samc21/sercom.hpp` (`Sercom<n>` resource +
-`Uart<n, pads, rx, tx, TxEngine>` task, the one engine slot - the
-transmit one - optional). The family fixture is `test/family_samc21/sercom.cpp` plus
+`Uart<n, pads, rx, tx, TxEngine, Placement>` task, the one engine slot - the
+transmit one - optional, and where its completion runs from). The family fixture is `test/family_samc21/sercom.cpp` plus
 its negatives under `brio check samc21`; the bench suite is
 `test_samc_uart`, driven from the host by `brio stress`.
 
@@ -294,7 +294,7 @@ taking a burst, and what this driver does with each:
   the device header's own `MUX_...` constants.
 - **`UartFormat`** - bits (5..9), parity (one enum, because FORM and
   PMODE must agree), stop bits, and the LSB-first default above.
-- **`Uart<n, pads, rx_size, tx_size, TxEngine>`** - the
+- **`Uart<n, pads, rx_size, tx_size, TxEngine, Placement>`** - the
   task: two SPSC rings (lock-free at any size here - `atomic_width` 4
   - so 64/256 are console-class defaults, not a ceiling),
   `init(clock, baud, format)` speaking hertz off the clock tag,
@@ -302,8 +302,8 @@ taking a burst, and what this driver does with each:
   (true on the RX ring's empty-to-non-empty transition - the kernel
   wakeup), taking every level of the receive buffer an entry and
   calling nothing on a clean character's path (the body, the ring's
-  verbs and the register accesses all inline, so a handler placed in
-  `.ram_text` runs that path from SRAM whole, [platform.md](platform.md);
+  verbs and the register accesses all inline, so a vector placed in
+  `.fast_text` runs that path from SRAM whole, [platform.md](platform.md);
   a receive error and a full ring, the rare paths, are calls out of
   line, which keep the clean path's registers: inline, the gap marks
   spilled the character to the stack), try-semantics `write_byte`
@@ -471,6 +471,17 @@ extern "C" void SERCOM5_Handler() {     // the receiver
     if (Serial::isr()) { brio::post<SerialLines>(brio::RxActivity{}); }
 }
 extern "C" void DMAC_Handler() { Serial::dma_isr(); }   // the transmit blocks
+```
+
+The completion in SRAM, for a program that keeps the DMAC's vector in
+the flash - util/placement.hpp's `InRam` after the engine, the
+completion and the next block's launch one instance in `.fast_text.brio`
+(a program that places the vector itself in `.fast_text` leaves this at
+`InFlash`, the default: the body inline in a placed vector is faster
+than the call, [platform.md](platform.md)):
+
+```cpp
+using Serial = brio::Uart<5, console_pads, 64, 256, brio::DmaTxEngine, brio::InRam>;
 ```
 
 A synchronous host on a crystal generator - the resource, configured once,
@@ -725,16 +736,25 @@ bridge between the pads and the PC - as much as of the driver.
   forty HELP lines back to back - each reply eight times its command,
   printed blocking from the thread that drains the ring - filled the
   ring, 111 characters dropped and counted in `rx_overruns`, 18 replies.
-- **The console's print** enters 139 cycles a byte between the bench's
+- **The console's print** enters 149 cycles a byte between the bench's
   stamps (`bench_samc` letter p, 4096 bytes at 115200: 4097 SERCOM5
   entries), its transmit and receive paths inline in the vector.
-- **The vector in SRAM** (`bench_samc_ram`, the handlers in `.ram_text`,
+- **The vector in SRAM** (`bench_samc_ram`, the vectors in `.fast_text`,
   [platform.md](platform.md)): with no call left on a clean
   character's path, either direction, the whole entry runs from SRAM, a
-  third off every figure - the print 95 cycles an entry, the loop's
-  transmitter 123 and its receiver 133 a character, and at 3 Mbaud the
-  transmitter x 1.40 where it is 2.05 from the flash, the receiver 0.62
-  entries a character with no overrun.
+  third off every figure - the print 100 cycles an entry against 149,
+  the loop's transmitter 124 against 189 and its receiver 135 against
+  203 a character, the transmit completion 145 against 220, and at 3
+  Mbaud the transmitter x 1.32 where it is 2.03 from the flash, the
+  receiver 0.65 entries a character with no overrun.
+- **The driver's placement, behind a vector in the flash** (a variant
+  of `bench_samc` with the engined port `InRam`, its own flash build
+  beside it): the transmit completion 197 cycles against 220 - the
+  launch is long enough to pay for the call through the long-branch
+  veneer and its frame. The per-byte `isr()` as an instance measured
+  181 against 185 a transmitted byte and 207 against 202 a received one
+  - the veneer and the frame eat what the fetch saves - so it takes no
+  placement: the program places the vector.
 - **Erratum 1.10.4 can turn the transmit channel into a writer of the
   SERCOM's own registers** - the measurement that leaves the Uart with
   no receive slot ([dmac.md](dmac.md)). A both-engines echo that

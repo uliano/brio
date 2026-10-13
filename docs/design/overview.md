@@ -590,7 +590,7 @@ a floating-point instruction it reaches; a leaf, which saves nothing
 under the attribute, keeps the attributed handler (the leaf form, held
 to being a leaf by the same check)
 ([../ch32vx03/platform.md](../ch32vx03/platform.md)). A family
-whose linker script carries a `.ram_text` section may place a binding
+whose linker script carries a `.fast_text` section may place a binding
 in SRAM: the SAM C21's page says what it buys
 ([../samc21/platform.md](../samc21/platform.md), "A handler in SRAM").
 A DRIVER'S HOT PATH IN SRAM IS THE PROGRAM'S CHOICE, PER DRIVER
@@ -604,4 +604,9 @@ of code that MUST, for correctness (the RP2040's flash engine). A family
 whose linker scripts collect `.fast_text` says so on its platform type,
 and `InRam` anywhere else does not compile. The CH32X035 is the family
 it was born on ([../ch32x035/platform.md](../ch32x035/platform.md), "A
-handler in SRAM").
+handler in SRAM"); on the SAM C21 the Cortex-M0+'s long-branch veneer
+from the flash into SRAM makes a program-placed vector the cleaner way
+on most paths ([../samc21/platform.md](../samc21/platform.md)); the
+STM32G0 is measured to gain and the STM32F4 to lose
+([../stm32g0/platform.md](../stm32g0/platform.md),
+[../stm32f4/platform.md](../stm32f4/platform.md)).

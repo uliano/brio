@@ -354,6 +354,39 @@ void host_verbs() {
     Host::release();
 }
 
+// ---- the placement (util/placement.hpp) -----------------------------------------
+// The host's last parameter: InFlash by default (Host above), InRam here -
+// the pump's entry and the polled transaction each ONE instance in
+// `.fast_text.brio`. A program's own placed function names `.fast_text`
+// in the SAME translation unit as those COMDAT instances (the section-
+// type trap util/placement.hpp states): this TU is the proof it compiles.
+// An unknown tag is refused (neg/spi_host_placement_unknown.cpp).
+static_assert(platform_places_fast_text<SamPlatform>);
+static_assert(HotPlacement<InRam, SamPlatform> && HotPlacement<InFlash, SamPlatform>);
+using RamHost = SpiHost<0, host_pads, 0, InRam>;
+// The placement moves code, never the Request a device client fills.
+static_assert(sizeof(RamHost::Request) == sizeof(Host::Request));
+
+extern "C" [[gnu::section(".fast_text")]] void fixture_placed_vector() {
+    (void)RamHost::isr();
+    (void)Host::isr();
+}
+
+void ram_host_verbs() {
+    constexpr SysClock clock;
+    (void)RamHost::init(clock);
+    static uint8_t out[4] = {1, 2, 3, 4};
+    RamHost::Request r{};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.len = 4;
+    r.polled = true;
+    (void)RamHost::start(r);   // the polled transaction, in SRAM
+    r.polled = false;
+    (void)RamHost::start(r);   // the pump, its entry in SRAM
+    fixture_placed_vector();
+    RamHost::release();
+}
+
 void client_verbs() {
     constexpr SysClock clock;
     (void)Peer::init(clock);

@@ -96,6 +96,11 @@
 // started - without it generator 2 falls back to OSC48M / 2 and every
 // rate on this link is half a per cent off.
 //
+// Placement (docs/samc21/platform.md, "A handler in SRAM"): nothing in
+// SRAM. The link's transport is the raw resource polled by its own
+// loops and the waveform engine, not a Uart's interrupt path, and the
+// console is observability only.
+//
 // build: boards = c21j
 // build: monitor_speed = 115200
 

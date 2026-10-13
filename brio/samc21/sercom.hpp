@@ -12,7 +12,7 @@
  *              the flag verbs, and the ONE combined interrupt question
  *              this core's single vector has to ask.
  *
- *  Uart<n, pads, rx_size, tx_size>
+ *  Uart<n, pads, rx_size, tx_size, TxEngine, Placement>
  *              the TASK - the interrupt-driven full-duplex byte
  *              transport every console sits on: two SPSC rings
  *              (util/ring.hpp, lock-free here: atomic_width is 4),
@@ -127,12 +127,30 @@
  *    TRANSMIT one, filled by samc21/dmac.hpp's DmaTxEngine - the one DMA
  *    user this stratum admits, on one channel, claimed by one owner at a
  *    time. The receiver is the interrupt receiver, always.
+ *
+ * WHERE THE HOT PATHS RUN FROM. The flash runs behind two wait states at
+ * 48 MHz (DS60001479M table 45-41), and both interrupt bodies are inline
+ * in the vector that binds them, so a program that places that VECTOR in
+ * `.fast_text` runs them from SRAM whole, with no call (docs/samc21/
+ * platform.md, "A handler in SRAM"). The Uart's placement, its last
+ * template parameter (util/placement.hpp), moves ONE path for a program
+ * that keeps the vector in the flash: dma_isr(), the transmit engine's
+ * completion with the next block's launch, one flattened instance in
+ * SRAM under InRam (`.fast_text.brio`, copied with .data) - a call
+ * through the linker's long-branch veneer that still comes out a tenth
+ * shorter than the body inline in the flash. The per-byte isr() takes no
+ * placement: as an InRam instance behind a flash vector the veneer and
+ * the call's own frame ate what the fetch saved, a transmitted byte a
+ * few cycles shorter and a received one a few longer (docs/samc21/
+ * sercom.md). InRam on a Uart with no engine places nothing and is
+ * refused.
  */
 
 #pragma once
 
 #include <stdint.h>
 
+#include <concepts>
 #include <cstddef>
 #include <cstring>
 #include <span>
@@ -145,6 +163,7 @@
 #include "samc21/pin.hpp"
 #include "samc21/platform.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
 
@@ -1512,13 +1531,16 @@ private:
 // =============================================================================
 
 /*
- * Uart<n, pads, rx_size, tx_size>
+ * Uart<n, pads, rx_size, tx_size, TxEngine, Placement>
  *
  * The interrupt-driven full-duplex byte transport: 8N1 by default, SPSC
  * rings on both sides, ByteSink + ByteSource. It carries the Uart surface
  * every target's console sits on, with ONE combined isr() rather than a
  * per-condition pair, because this core gives the peripheral one vector
- * (see the file header).
+ * (see the file header). `TxEngine` is the transmit direction's optional
+ * DMA engine (NoDmaEngine below); `Placement` is where the engine's
+ * completion runs from (util/placement.hpp; the file header): InFlash,
+ * the default, or InRam, which an engined port alone may name.
  *
  *  - all state is `static inline` (one set per instantiation, in .bss,
  *    no constructor before main): hardware is touched ONLY by the
@@ -1602,9 +1624,16 @@ struct NoDmaEngine {
 };
 
 template <uint8_t n, UartPads pads, uint32_t rx_size = 64, uint32_t tx_size = 256,
-          typename TxEngine = NoDmaEngine>
+          typename TxEngine = NoDmaEngine, typename Placement = InFlash>
 class Uart {
     using S = Sercom<n>;
+
+    static_assert(HotPlacement<Placement, SamPlatform>,
+                  "brio Uart: the placement is util/placement.hpp's InFlash (the default) or InRam");
+    static_assert(std::same_as<Placement, InFlash> || TxEngine::present,
+                  "brio Uart: InRam places the transmit engine's completion, and this port has no "
+                  "engine - the per-byte isr() moves to SRAM with the vector the program places "
+                  "in .fast_text (the file header)");
 
     static_assert(uart_pads_valid(pads),
                   "these SERCOM pads cannot carry an asynchronous link: TxD exists "
@@ -1877,8 +1906,8 @@ public:
     /// faster than an entry and its exit - the shape that decides whether
     /// the receiver keeps up at the generator's top rate (sercom.md).
     /// A CLEAN CHARACTER'S PATH IS CALL-FREE: the body, the ring's verbs
-    /// and the register accesses are all inline, so a handler placed in
-    /// SRAM (.ram_text, docs/samc21/platform.md) runs it from SRAM
+    /// and the register accesses are all inline, so a vector the program
+    /// places in `.fast_text` (docs/samc21/platform.md) runs it from SRAM
     /// entirely; a receive error and a full ring are calls out of line
     /// (receive_hit(), receive_full()).
     // always_inline: a single call site (the vector binding in the app),
@@ -1908,20 +1937,23 @@ public:
     /// contiguous run is started. A transfer error (a bus error: the
     /// silicon disabled the channel, 25.6.2.8) is a block lost - abandoned,
     /// counted in dma_faults() - and the next run started. Nothing, and
-    /// free, without the engine.
+    /// free, without the engine. The completion and the launch are one
+    /// flattened path of the port's placement (the file header).
     [[gnu::always_inline]] static void dma_isr() {
         if constexpr (has_tx_engine) {
-            while (const uint8_t flags = TxEngine::take_interrupt()) {
-                if ((flags & TxEngine::flag_error) != 0u) {
-                    if (TxEngine::abandon()) {
-                        m_dma_faults = m_dma_faults + 1;
+            Hot<Placement>::run([] {
+                while (const uint8_t flags = TxEngine::take_interrupt()) {
+                    if ((flags & TxEngine::flag_error) != 0u) {
+                        if (TxEngine::abandon()) {
+                            m_dma_faults = m_dma_faults + 1;
+                        }
+                    } else if ((flags & TxEngine::flag_complete) != 0u) {
+                        m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
+                            TxEngine::complete()));
                     }
-                } else if ((flags & TxEngine::flag_complete) != 0u) {
-                    m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(
-                        TxEngine::complete()));
+                    pump_tx();
                 }
-                pump_tx();
-            }
+            });
         }
     }
 

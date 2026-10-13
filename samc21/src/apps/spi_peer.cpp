@@ -77,6 +77,12 @@
 // reports whether the board's 24 MHz crystal started (probed once at
 // boot: it is the ruler every rate on this link is measured against).
 //
+// Placement (docs/samc21/platform.md, "A handler in SRAM"): the two run
+// wrappers in `.fast_text`, measured - from the flash the exchange run
+// missed characters at the AVR host's 12 MHz pace (docs/samc21/spi.md);
+// the vectors stay in the flash (the console and the tick, neither on a
+// run's path).
+//
 // build: boards = c21j
 // build: monitor_speed = 115200
 
@@ -283,7 +289,7 @@ void wait_ss_high(uint16_t ms) {
 // (SpiClient::answer / exchange): the answers written on DRE inside the
 // first five SCK cycles of each character (32.6.2.6.2's three-cycle rule,
 // samc21/spi.hpp), nothing judged or sampled inside the burst. The two
-// wrappers are placed in .ram_text, the runs inlined into them, so a turn
+// wrappers are placed in .fast_text, the runs inlined into them, so a turn
 // runs from SRAM and not from the flash behind its two wait states
 // (docs/samc21/platform.md, "A handler in SRAM"; the boundary each
 // placement reaches is docs/samc21/spi.md's).
@@ -295,13 +301,13 @@ using Run = Client::Run;
 /// the right order, not a clock.
 constexpr uint32_t spins_for_ms(uint32_t ms) { return ms * (48'000u / 8u); }
 
-[[gnu::noinline, gnu::section(".ram_text")]] Run answer_run(const uint8_t* out, uint16_t n,
-                                                            uint32_t spins) {
+[[gnu::noinline, gnu::section(".fast_text")]] Run answer_run(const uint8_t* out, uint16_t n,
+                                                             uint32_t spins) {
     return Client::answer(std::span<const uint8_t>(out, n), spins);
 }
 
-[[gnu::noinline, gnu::section(".ram_text")]] Run exchange_run(const uint8_t* out, uint8_t* in,
-                                                              uint16_t n, uint32_t spins) {
+[[gnu::noinline, gnu::section(".fast_text")]] Run exchange_run(const uint8_t* out, uint8_t* in,
+                                                               uint16_t n, uint32_t spins) {
     return Client::exchange(std::span<const uint8_t>(out, n), std::span<uint8_t>(in, n), spins);
 }
 

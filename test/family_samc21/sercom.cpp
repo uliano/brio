@@ -470,6 +470,31 @@ void engined_uart_verbs() {
     (void)Serial::dma_faults();      // engineless: 0, and free
 }
 
+// ---- the placement (util/placement.hpp) -----------------------------------------
+// The engined port's last parameter: InRam places the transmit engine's
+// completion (dma_isr()) as ONE instance in `.fast_text.brio`; the per-byte
+// isr() stays inline in the vector, which the program places itself - a
+// `.fast_text` function in the same TU as the COMDAT instance (the
+// section-type trap util/placement.hpp states). An unknown tag, and InRam
+// on a port with no engine, are refused (neg/uart_placement_unknown.cpp,
+// neg/uart_in_ram_without_engine.cpp).
+using RamEngined = Uart<0, pads, 64, 256, DmaTxEngine, InRam>;
+static_assert(RamEngined::has_tx_engine);
+
+extern "C" [[gnu::section(".fast_text")]] void fixture_placed_sercom_vector() {
+    (void)RamEngined::isr();
+    (void)Serial::isr();
+}
+
+void ram_engined_uart_verbs() {
+    constexpr SysClock clock;
+    (void)RamEngined::init(clock, 9600);
+    RamEngined::dma_isr();           // the completion, in SRAM
+    (void)RamEngined::write_byte('x');
+    fixture_placed_sercom_vector();
+    RamEngined::release();
+}
+
 // ---- the ring's bulk API, which the TX engine drains through ----------------
 // Added for the engines and used by them: the contiguous run each side
 // owns, so a whole block goes out in one transfer instead of one byte

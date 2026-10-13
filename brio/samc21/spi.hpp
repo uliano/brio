@@ -11,7 +11,7 @@
  *              the ONE combined interrupt question this core's single
  *              vector has to ask.
  *
- *  SpiHost<n, pads>
+ *  SpiHost<n, pads, generator, Placement>
  *              the TASK util/spi_bus.hpp (= util/bus_master.hpp) drives:
  *              the transfer ENGINE. A Request is a two-phase transaction
  *              in one chip-select window, the buffers travel with it as
@@ -133,10 +133,12 @@
 #include "samc21/delay.hpp"
 #include "samc21/nvic.hpp"
 #include "samc21/pin.hpp"
+#include "samc21/platform.hpp"
 #include "samc21/sercom.hpp"
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/spi_bus.hpp"
 
 namespace brio {
@@ -981,14 +983,35 @@ public:
  * status() is therefore spi_ok, or spi_stalled when a polled request's
  * bounded spin ran out.
  *
+ * WHERE THE HOT PATHS RUN FROM: the host's placement, its last template
+ * parameter (util/placement.hpp). Two paths take it, each ONE function of
+ * it: the pump's entry (isr()), and the polled transaction - its command
+ * phase, the D/C flip and its data phase in whichever of the loops below
+ * the spans pick - which start() calls once a request. Under InFlash, the
+ * default, they are what they would be without the placement: the entry
+ * inline in the vector that binds it, the transaction in the flash; under
+ * InRam each is one instance in SRAM (`.fast_text.brio`), a call through
+ * the linker's long-branch veneer from the flash. The flash runs behind
+ * two wait states at 48 MHz (DS60001479M table 45-41), and the receive
+ * loop fetched from it holds a character longer than the wire's at the
+ * top rate. The polled transaction is the driver's alone to place; the
+ * pump's entry is also the program's, which places the VECTOR in
+ * `.fast_text` and runs the inline InFlash entry from SRAM with no call -
+ * faster than the InRam entry behind a flash vector, and than both
+ * together (a call where there was none). The measured figures, every
+ * placement, are docs/samc21/spi.md's.
+ *
  * ISR wiring (app glue, as usual - one vector for the whole SERCOM):
  *   extern "C" void SERCOM1_Handler() {
  *       if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
  *   }
  */
-template <uint8_t n, SpiPads pads, uint8_t generator = 0>
+template <uint8_t n, SpiPads pads, uint8_t generator = 0, typename Placement = InFlash>
 class SpiHost {
     using S = Spi<n>;
+
+    static_assert(HotPlacement<Placement, SamPlatform>,
+                  "brio SpiHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
 
     static_assert(spi_pads_valid(pads),
                   "these SERCOM pads cannot carry an SPI host: CTRLA.DOPO fixes the "
@@ -1264,7 +1287,20 @@ public:
     ///
     /// Returns true when the transaction just completed (CS released):
     /// the edge on which the app's glue posts TransferDone to the bus AO.
+    /// Through the host's placement (the class comment).
     [[gnu::always_inline]] static bool isr() {
+        return Hot<Placement>::run([] { return pump_entry(); });
+    }
+
+    /// The engine's completion status, read by the app glue for the
+    /// TransferDone payload: spi_ok, or spi_stalled when a polled request's
+    /// bounded spin ran out.
+    static uint8_t status() { return status_; }
+
+private:
+    /// The pump's entry, written once: isr() runs it through the host's
+    /// placement.
+    [[gnu::always_inline]] static bool pump_entry() {
         const uint8_t pending = S::pending();
         if ((pending & SpiFlag::rxc) == 0u) {
             return false;
@@ -1308,11 +1344,7 @@ public:
         return false;
     }
 
-    /// The engine's completion status, read by the app glue for the
-    /// TransferDone payload: spi_ok, or spi_stalled when a polled request's
-    /// bounded spin ran out.
-    static uint8_t status() { return status_; }
-
+public:
     /// Put the ENGINE back where start() is legal: the peripheral reset
     /// and reconfigured to the applied state, the select window closed. Clocks, pads and the ceiling arithmetic are untouched (a
     /// SERCOM software reset reaches none of them), so no Clock is
@@ -1524,8 +1556,14 @@ private:
     /// receiver flushed and the status spi_stalled (util/spi_bus.hpp):
     /// the SERCOM clocked nothing back in a budget many times the
     /// transaction's own length, so its clock is not running - the
-    /// arbiter's recover() is the way back.
+    /// arbiter's recover() is the way back. One function of the host's
+    /// placement (the class comment), called once a request.
     static void polled_transaction(const Request& r, uint16_t total) {
+        Hot<Placement>::run([&r, total] { polled_body(r, total); });
+    }
+
+    /// The polled transaction's path, written once.
+    [[gnu::always_inline]] static void polled_body(const Request& r, uint16_t total) {
         uint32_t budget = spin_budget(total);
         bool whole = run_phase<true, false>(r.cmd.get(), nullptr, r.cmd_len, budget);
         r.dc.set();   // data phase (a no-op when len == 0)
@@ -1840,10 +1878,11 @@ public:
     // against the wire in docs/samc21/spi.md.
     //
     // THEY ARE ALWAYS INLINE so a program may place the function that
-    // calls them in SRAM (`.ram_text`, docs/samc21/platform.md), where a
+    // calls them in SRAM (`.fast_text`, docs/samc21/platform.md), where a
     // turn costs less than from the flash behind two wait states
     // (docs/samc21/spi.md measures both against the window above).
-    // Placement is the program's call, as for a handler.
+    // Placement is the program's call, as for a handler: a run is inline
+    // in its caller, and the caller is the program's.
 
     /// How a run ended.
     enum class RunEnd : uint8_t {

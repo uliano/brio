@@ -234,12 +234,12 @@ What the rows say, and the two platform columns:
   bank - which the link imposes. The family's clock task turns it on at
   init ([../stm32g0/clock.md](../stm32g0/clock.md)); the row above is
   that default, and the app's letter `f` keeps printing both columns.
-- SAM C21, code in SRAM: the handlers placed in `.ram_text` (the
+- SAM C21, code in SRAM: the handlers placed in `.fast_text` (the
   linker's input section inside `.data`, zero bytes when unused) run
   the transport a third faster than from the flash behind two wait
-  states - the print's interrupt 153 cycles to 100, the loop's
-  transmitter 197 to 198 a byte to 128, its receiver 223 a character to
-  139 - and the tick's by 30 per cent. The placement pays because the
+  states - the print's interrupt 149 cycles to 100, the loop's
+  transmitter 189 a byte to 124, its receiver 203 a character to 135 -
+  and the tick's 40 to 28. The placement pays because the
   per-byte path has no call in it (overview.md's three rules for a hot
   path): a placed handler that calls back into the flash goes through a
   veneer.

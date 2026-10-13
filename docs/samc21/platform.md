@@ -643,62 +643,138 @@ states (DS60001479M table 45-41, one wait state reaching only 38 MHz),
 with NVMCTRL's cache in front of it - direct-mapped, 8 lines of 64
 bits, 64 bytes in all (27.6.7), in its reset read mode NO_MISS_PENALTY
 (27.8.2). The SRAM is single-cycle at full speed (9.1). A handler gains
-little from a cache this size: 64 bytes hold less than either handler
+little from a cache this size: 64 bytes hold less than any handler
 measured below, and the thread's code runs between two entries, so
 every entry fetches its lines again at the flash's price - a line of
 four Thumb instructions for two wait states, about one and a half times
-the cycles the same straight-line code takes from SRAM.
+the cycles the same straight-line code takes from SRAM. SRAM sits 512 MB
+above the flash and a Thumb `bl` reaches 16 MB, so A CALL BETWEEN THE
+TWO MEMORIES GOES THROUGH A VENEER the linker puts beside the caller:
+`push {r0}; ldr r0, [pc, #8]; mov ip, r0; pop {r0}; bx ip`, a pad and
+the address - 16 bytes, nine instruction cycles at zero wait states
+(the Cortex-M0+ TRM, ARM DDI 0484C 3.3 table 3-1), fetched from the
+caller's memory. The vector table holds absolute addresses, so a vector
+placed in SRAM is entered with no veneer at all.
 
-**The option and its spelling.** `samc21/ld/samc21j18a.ld` places the
-input section `.ram_text` first in `.data`, so `Reset_Handler`'s copy
-of `.data` moves it to SRAM with the initialized data before `main`;
-an image that places nothing there gets zero bytes from it. An app
-places the handler it binds there with one attribute:
+**The option and its spelling: opt-in, per path.**
+`samc21/ld/samc21j18a.ld` collects the input sections `.fast_text` and
+`.fast_text.*` first in `.data`, so `Reset_Handler`'s copy of `.data`
+moves them to SRAM with the initialized data before `main`, and the
+platform says so (`SamPlatform::places_fast_text`). `.fast_text` is
+code that MAY run from SRAM, for speed; `.ram_text`, which the script
+keeps beside it, is code that MUST, for correctness - nothing of this
+stratum's. An image that places nothing gets zero bytes from either.
+There are two ways to place a path, and each path has the one that
+reaches it:
 
-```cpp
-extern "C" [[gnu::section(".ram_text")]] void SERCOM5_Handler() { (void)Serial::isr(); }
-extern "C" [[gnu::section(".ram_text")]] void SysTick_Handler() { brio::Ticker::tick(); }
-```
+- THE PROGRAM PLACES THE VECTOR IT BINDS, with one attribute:
 
-The vector table holds the handler's absolute address, so the entry
-needs nothing more. What the handler INLINES moves with it - the
-driver's `[[gnu::always_inline]]` body and whatever the compiler folds
-into that; what it CALLS stays in flash, reached through a long-branch
-veneer the linker adds beside the handler (`.ram_text.__stub`, 16
-bytes), because SRAM sits 512 MB above the flash and a `bl` reaches
-16 MB.
+  ```cpp
+  extern "C" [[gnu::section(".fast_text")]] void SERCOM5_Handler() { (void)Serial::isr(); }
+  extern "C" [[gnu::section(".fast_text")]] void SysTick_Handler() { brio::Ticker::tick(); }
+  ```
 
-**What it buys, measured** by the benchmark's letters p and t
-([../design/benchmark.md](../design/benchmark.md)) with the console's
-and the tick's handlers bound in flash and in `.ram_text`, nothing else
-moving between the two images:
+  What the vector inlines moves with it - the driver's
+  `[[gnu::always_inline]]` body, whole where the body calls nothing on
+  its common path (the USART's per-byte transport, the SPI pump, the
+  transmit engine's completion, the I2C entry's read byte); what it
+  calls stays in the flash, through a veneer in SRAM beside it - the
+  rare paths (a receive error, a full ring, an abandoned block, a
+  tenure's end) and the I2C written byte's SYSOP wait, measured no
+  faster inlined ([i2c.md](i2c.md)).
+- A DRIVER IS GIVEN util/placement.hpp's `InRam`, for a path the vector
+  does not reach or a program that keeps the vector in the flash:
+  `SpiHost` (its last template parameter: the polled transaction and the
+  pump's entry) and an engined `Uart` (after the engine: the transmit
+  completion). Each path is ONE flattened instance in `.fast_text.brio`,
+  a call from the flash through a veneer in the flash; `InFlash`, the
+  default, leaves the path where it would be without the trampoline -
+  inline in its vector, or in the flash - and an image that names no
+  `InRam` has no instance at all:
 
-- The console's handler AS THE TRANSPORT IS: 168 -> 143 cycles an
-  interrupt, 15 per cent, the meter's stamps included; the driver's
-  body alone, net of the stamps, 111 -> 105, 6 per cent. `Uart::feed()`,
-  the per-byte transmit body `isr()` calls, is not inlined at `-Os`, so
-  the placed handler calls back into the flash through the veneer for
-  the work it exists to do.
-- WITH THE WHOLE PATH INLINE - the per-byte body folded into the
-  handler, measured in a variant of both images: 150 -> 98 cycles an
-  interrupt, 35 per cent, the body alone 94 -> 60, 36 per cent - the
-  one and a half the line arithmetic above predicts.
-- The tick's handler, inline whatever the shape: 40 -> 27 cycles a
-  tick, 33 per cent; an idle second's busy cycles 255 408 -> 242 387,
-  5 per cent, the rest of an idle turn being thread code in the flash
-  in both images.
+  ```cpp
+  using Display = brio::SpiHost<1, display_pads, 0, brio::InRam>;
+  ```
 
-The print stays wire-bound either way (x = 1.00): the placement buys
-CPU, not time - at 115200 the console's interrupts take 4.0 per cent of
-the core from flash and 2.4 from SRAM with the path inline.
+  The USART's per-byte `isr()` and the I2C host's event entry take no
+  placement: as instances behind a vector in the flash the veneer and
+  the call's own frame ate what the fetch saved (the table). A third tag,
+  and `InRam` on a Uart with no engine, do not compile
+  (`test/family_samc21/neg/`).
 
-**What it costs.** The handler's size in SRAM - its load image stays in
-the flash - plus a veneer per function it calls; the benchmark's two
-handlers, meters included, take 120 bytes (SysTick) and 328 (SERCOM5).
-No code: the crt's copy of `.data` already moves the section, a word a
-turn of its loop. And a placed handler exists only from that copy on -
-a vector taken earlier, a fault inside the crt itself, would enter SRAM
-the copy has not written yet.
+THE NAME IS TWO NAMES: the trampoline's instances are COMDAT functions
+in `.fast_text.brio`, and a program's plain function names `.fast_text`
+- one section name for both in one translation unit is GCC's "section
+type conflict" (util/placement.hpp). The family fixtures compile a
+placed function beside the `InRam` instances in one unit
+(`test/family_samc21/spi.cpp`, `sercom.cpp`).
+
+**What it buys, measured** by `bench_samc` (every path in the flash),
+`bench_samc_ram` (every vector in `.fast_text`, the SPI host `InRam`)
+and a variant of the first with the drivers' paths as `InRam` instances
+behind vectors in the flash (the rows marked "not offered" as instances
+of the same trampoline, and their flash figure in that variant's own
+build beside them) - the cycles an entry between
+the bench's stamps, which charge 56 cycles from the flash and 38 from
+SRAM (letter r), at 48 MHz:
+
+| path | flash | InRam, the vector in the flash | the vector placed | SRAM |
+|---|---|---|---|---|
+| the console's per-byte transmit (letter p, 4096 bytes at 115200) | 149 | not offered (149 against 153 in the variant's build) | 100 | the vector 348 B |
+| the tick's handler (letter t) | 40 | - | 28 | the vector 120 B |
+| the USART's per-byte transmit (letter u, 4096 bytes) | 189; x 2.03 at 3 Mbaud | not offered (181 against 185 in the variant's build) | 124; x 1.32 | - |
+| the USART's per-byte receive (letter u, 256 bytes at 115200) | 203 | not offered (207 against 202) | 135 | - |
+| the transmit engine's completion (letter u, a block) | 220 | 197 | 145 | the instance 228 B, the vector 400 B |
+| the SPI pump at 12 MHz (letter e, 256 frames): an entry, a frame | 252, 391 | 223, 356 | 162, 261 with the host `InFlash`; 180, 270 with it `InRam` | the instance 232 B |
+| the SPI polled receive loop at 12 MHz, a frame (the wire 32) | 42.4 | 38.9 | the driver's alone | the transaction 696 B |
+| the SPI polled write loop at 12 MHz, a frame | 33.7 | 33.6 | the driver's alone | (above) |
+| a polled request of 1, 3 and 16 bytes at 3 MHz (wall) | 651, 942, 2695 | 643, 931, 2668 | the driver's alone | (above) |
+| the I2C event entry at 100 kHz: a written byte, a read one (letter i) | 187, 159 | not offered (183 against 195, 167 against 161) | 120, 103 | - |
+
+What the rows say:
+
+- PLACING THE VECTOR IS THE BIG MOVE, a third off every entry: the
+  whole entry, prologue and stamps included, runs from SRAM, with no
+  call. At 3 Mbaud the interrupt transmitter holds the wire at x 1.32
+  where the flash's is 2.03.
+- AN InRam BODY BEHIND A VECTOR IN THE FLASH BUYS A TENTH AT MOST: the
+  vector's own code still runs from the flash, and the body is a call
+  through the veneer with a frame of its own. Where the body is long
+  (the completion's launch, the pump's write-ahead) it comes out ahead;
+  where it is short (a byte in or out) it comes out a few cycles either
+  way, which is why those two take no placement.
+- BOTH TOGETHER ARE SLOWER THAN THE VECTOR ALONE: an `InRam` body called
+  from a placed vector is a call where the inline body had none - the
+  pump 270 cycles a frame against 261, and measured on every path (the
+  completion 160 against 145, the I2C entry 142 and 126 against 123 and
+  104, the USART 134 and 166 against 123 and 133). A program that places
+  a vector leaves its drivers at `InFlash`, and names `InRam` only for
+  what the vector cannot reach - the SPI host's polled transaction.
+- THE VENEER'S OWN COST, measured against a build whose `InRam`
+  instance is called by address (`ldr`, `blx`: GCC's ARM `long_call`):
+  8 to 10 cycles a call on the USART, the completion and the I2C entry,
+  18 on the SPI pump's entry - the nine cycles of its instructions and
+  their fetch from the flash.
+- The prints stay wire-bound either way (x = 1.00): the placement buys
+  CPU, not time - at 115200 the console's interrupts take 3.7 per cent
+  of the core from the flash and 2.5 from SRAM, stamps included; an
+  idle second's busy cycles 252 403 against 242 387 with the tick's
+  vector placed.
+
+A path's cost from the flash moves with where it sits: the same source
+measured 242 and 252 cycles an SPI pump entry in two builds that
+differed in other functions; the same vectors placed in SRAM moved by
+two cycles at most between two builds.
+
+**What it costs.** The bytes in the last column, of the part's 32 KB -
+the load image stays in the flash beside them - plus 16 bytes of veneer
+for every function a placed path calls in the other memory (nine in
+`bench_samc_ram`, 144 bytes in SRAM). No code: the crt's copy of `.data`
+already moves the section, a word a turn of its loop. A placed function
+exists only from that copy on - a vector taken earlier, a fault inside
+the crt itself, would enter SRAM the copy has not written yet. A
+default image (`InFlash` everywhere, no vector placed) has no byte of
+code in SRAM.
 
 ## Not covered yet
 
@@ -709,6 +785,12 @@ Driver gaps (not built):
 - **SLEEPONEXIT**, the ARM feature 19.6.3.3.1 mentions (re-enter the
   armed mode when the CPU leaves the lowest-priority ISR). It would be
   a different shape of idle path and no AO wants it yet.
+- **The veneer on an `InRam` call.** A driver's instance is reached from
+  the flash through the linker's long-branch veneer, 8 to 18 cycles a
+  call more than a call by address (`ldr`, `blx` - GCC's ARM
+  `long_call` on the instance, measured above). Not taken: the
+  trampoline is util/placement.hpp's, shared by every family, and names
+  no attribute of one architecture.
 - **The MPU**: nothing here needs memory protection; born with its
   first user. (The MTB trace is built - [mtb.md](mtb.md) - and DIVAS
   as the toolchain's division is ruled out, [divas.md](divas.md).)
@@ -721,13 +803,6 @@ Driver gaps (not built):
   on a console whose Uart names `DmaTxEngine`.
 
 Implemented but not bench-verified:
-- **A handler in SRAM at its full gain.** The 35 per cent above was
-  measured with the console's per-byte path flattened into its
-  handler, a variant and not the driver: as `samc21/sercom.hpp` stands,
-  `Uart::feed()` is a call out of the always-inline `isr()` and holds
-  the placed handler to 15 per cent (6 for the body). Measured by the
-  benchmark's letters p and t, the handlers in flash and in SRAM, once
-  that body is inline (design/overview.md's first rule for a hot path).
 - NVIC priorities other than the reset default (every line runs at 0
   today, so handler-vs-handler preemption is unexercised).
 - **Erratum 1.8.13's hazard itself.** Letter w walks a TC line across

@@ -25,19 +25,23 @@
 //
 // WHERE THE VECTORS RUN. SERCOM5_Handler and SysTick_Handler (and letter
 // e's and u's SERCOM1_Handler, letter u's DMAC_Handler and letter i's
-// SERCOM3_Handler) are bound through BENCH_PLACEMENT. It is empty in this
-// file, so the handlers - and the ISR bodies they inline - execute from
-// flash. bench_samc_ram.cpp
-// is this same file with BENCH_RAM_TEXT defined, which binds both
-// handlers through this family's documented option of the binding
-// pattern: [[gnu::section(".ram_text")]] on the handler the app binds,
-// the input section samc21/ld/samc21j18a.ld puts first in .data and the
-// crt copies to SRAM (single-cycle at full speed, 9.1) - what the option
-// is and what it buys are docs/samc21/platform.md's, "A handler in
-// SRAM". Letter r's `stamp` loop carries the same placement, so in each
-// image it is the cost of a stamp pair where the vectors' stamps run.
-// Letters p and t of the two images are the comparison; nothing else
-// moves between them.
+// SERCOM3_Handler) are bound through BENCH_PLACEMENT, and the SPI host and
+// letter u's transmit engine take their placement from HotSpi and
+// HotEngine (util/placement.hpp). In this file all of it is the flash:
+// the vectors, the ISR bodies they inline, the SPI host's polled
+// transaction. bench_samc_ram.cpp is this same file with the vectors in
+// `.fast_text` (BENCH_VECTORS_IN_SRAM: the input section samc21/ld/
+// samc21j18a.ld puts first in .data and the crt copies to SRAM,
+// single-cycle at full speed, 9.1) and the SPI host InRam
+// (BENCH_SPI_IN_RAM: its polled transaction and its pump's entry each one
+// instance in SRAM) - this family's two ways to place a path, each where
+// it reaches (docs/samc21/platform.md, "A handler in SRAM").
+// BENCH_HOT_IN_RAM, which no committed image defines, gives the transmit
+// engine InRam too, the vectors left in the flash: the document's InRam
+// column for the two drivers that take a placement. Letter r's `stamp` loop carries
+// the vectors' placement, so in each image it is the cost of a stamp pair
+// where the vectors' stamps run. Every letter of the two images is the
+// comparison.
 //
 // THE RULER is `Ruler`: the kernel ticker read as cycles (cortexm/
 // ticker.hpp's BasicTicker::cycles() - SysTick's position in its 1 ms
@@ -295,14 +299,32 @@
 // here; in bench_samc_ram.cpp, SRAM through the attribute this family's
 // binding pattern documents (docs/samc21/platform.md, "A handler in
 // SRAM"), spelled as an app spells it on the handler it binds.
-#if defined(BENCH_RAM_TEXT)
-#define BENCH_PLACEMENT [[gnu::section(".ram_text")]]
-constexpr const char* bench_image = "bench_samc_ram";
-constexpr const char* vectors_in = "SRAM (.ram_text)";
+#if !defined(BENCH_IMAGE)
+#define BENCH_IMAGE "bench_samc"
+#endif
+constexpr const char* bench_image = BENCH_IMAGE;
+#if defined(BENCH_VECTORS_IN_SRAM)
+#define BENCH_PLACEMENT [[gnu::section(".fast_text")]]
+constexpr const char* vectors_in = "SRAM (.fast_text)";
 #else
 #define BENCH_PLACEMENT
-constexpr const char* bench_image = "bench_samc";
 constexpr const char* vectors_in = "flash";
+#endif
+// The drivers' placements (util/placement.hpp): the SPI host's (its pump's
+// entry and its polled transaction) and letter u's transmit engine's (its
+// completion). BENCH_SPI_IN_RAM places the first, BENCH_HOT_IN_RAM both.
+#if defined(BENCH_HOT_IN_RAM)
+using HotSpi = brio::InRam;
+using HotEngine = brio::InRam;
+constexpr const char* hot_in = "SRAM (InRam: the SPI host, the transmit engine)";
+#elif defined(BENCH_SPI_IN_RAM)
+using HotSpi = brio::InRam;
+using HotEngine = brio::InFlash;
+constexpr const char* hot_in = "SRAM for the SPI host (InRam), flash for the transmit engine";
+#else
+using HotSpi = brio::InFlash;
+using HotEngine = brio::InFlash;
+constexpr const char* hot_in = "flash (InFlash)";
 #endif
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
@@ -641,7 +663,7 @@ constexpr SpiPads spi_pads{
 /// The host: the polled loop and the byte pump. It shares SERCOM1 with
 /// letter u's loop and the two are never up at once; `live` routes
 /// SERCOM1_Handler to this one.
-using SpiPoll = SpiHost<1, spi_pads>;
+using SpiPoll = SpiHost<1, spi_pads, 0, HotSpi>;
 volatile bool live = false;
 volatile bool done = false;
 
@@ -870,7 +892,7 @@ constexpr UartPads loop_pads{
 /// the interrupt receiver - the Uart's one engine slot (samc21/sercom.hpp),
 /// claimed at init() and given back at release().
 using LoopIrq = Uart<1, loop_pads, 512, 4096>;
-using LoopTxE = Uart<1, loop_pads, 512, 2048, DmaTxEngine>;
+using LoopTxE = Uart<1, loop_pads, 512, 2048, DmaTxEngine, HotEngine>;
 
 enum class Live : uint8_t { none, irq, txe };
 volatile Live live = Live::none;
@@ -1527,7 +1549,7 @@ void ti_i2c() {
 void banner() {
     print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console SERCOM5 ", console_baud, " 8N1 (BAUD gives ",
-          Serial::actual_baud(SysClock::hz), "), ruler SysTick cycles, vectors in ", vectors_in,
+          Serial::actual_baud(SysClock::hz), "), ruler SysTick cycles, vectors in ", vectors_in, ", hot paths in ", hot_in,
           crlf);
     bench.menu();
 }

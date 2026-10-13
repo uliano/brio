@@ -698,7 +698,7 @@ uint16_t scl_at[scl_cap];
 /// completion edge or the cap. The edge's own path is one load of the
 /// count and one store - the interval arithmetic waits for the end -
 /// because at Fm+ a path longer than a period missed every other rise.
-[[gnu::section(".ram_text"), gnu::noinline]] uint16_t sample_scl() {
+[[gnu::section(".fast_text"), gnu::noinline]] uint16_t sample_scl() {
     // PORT through the IOBUS, the core's single-cycle port (28.6.5): over
     // the APB bridge a read waits for the bridge and two PORT clocks of
     // on-demand synchronization (28.6.2.2). The IOBUS cannot wait for the

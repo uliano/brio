@@ -58,18 +58,27 @@ SECTIONS
 
     /* Initialized data: load image in flash, run address in RAM.
      *
-     * CODE THAT RUNS FROM SRAM lives in `.ram_text`, an input section
-     * placed first inside .data: Reset_Handler's copy of .data
-     * (startup_samc21.cpp) moves it into SRAM with the initialized data
-     * before main, so it needs no loop of its own, and an image that
-     * places nothing there gets zero bytes from this line. What it buys
-     * is the fetch: the flash runs behind 2 wait states at 48 MHz
-     * (DS60001479M table 45-41) and a 64-byte cache (27.6.7), where the
-     * SRAM is single-cycle at full speed (9.1). */
+     * CODE THAT RUNS FROM SRAM, placed first inside .data:
+     * Reset_Handler's copy of .data (startup_samc21.cpp) moves it into
+     * SRAM with the initialized data before main, so it needs no loop of
+     * its own, and an image that places nothing there gets zero bytes
+     * from these lines. `.fast_text` is code that MAY run from SRAM, for
+     * speed - what a program opts into, util/placement.hpp's Hot<InRam>
+     * and a program's own placed function; what it buys is the fetch:
+     * the flash runs behind 2 wait states at 48 MHz (DS60001479M table
+     * 45-41) and a 64-byte cache (27.6.7), where the SRAM is single-cycle
+     * at full speed (9.1) - docs/samc21/platform.md, "A handler in SRAM".
+     * `.ram_text` is code that MUST, for correctness - nothing of this
+     * stratum today, the name kept for what the family's own pieces may
+     * need. A call between the two memories is out of a BL's reach and
+     * the linker puts a long-branch veneer beside the caller (its input
+     * section's name and `.__stub`), in whichever memory the caller
+     * runs from. */
     .data :
     {
         . = ALIGN(4);
         __data_start = .;
+        *(.fast_text .fast_text.*)
         *(.ram_text .ram_text.*)
         . = ALIGN(4);
         *(.data .data.*)

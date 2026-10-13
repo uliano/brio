@@ -252,7 +252,12 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   the init() tail re-run from the cached configuration: what a timed I2cBus calls on a tenure that never answered,
   and the ONLY way out of a parked START on this silicon (the release
   does not fire it - letter g). recover() fixes the PERIPHERAL;
-  unstick() fixes the wire; neither replaces the other.
+  unstick() fixes the wire; neither replaces the other. NO PLACEMENT
+  PARAMETER: the event entry is inline in the vector that binds it, and
+  a program that wants it in SRAM places that vector in `.fast_text`
+  ([platform.md](platform.md), "A handler in SRAM"); the entry as a
+  util/placement.hpp `InRam` instance behind a vector in the flash was
+  measured and declined (below).
 - **`I2cClient<n, pads, generator>`** - the polled surface plus the ISR
   body (the SpiClient position: a client is a protocol and the
   protocol is the application's), with the erratum discipline built
@@ -315,7 +320,8 @@ What the rows say:
 - THE PUMP'S BYTE: 208 cycles an entry for a written byte against the
   naive shape's 275 (isr over entries, stamps included), 172 for a read
   byte against 299: one STATUS snapshot where the naive shape has three
-  loads, the SYSOP wait inline, and on a read the DATA load alone -
+  loads, the SYSOP wait (a call to the resource's bounded wait), and on
+  a read the DATA load alone -
   smart mode - where a command and a SYSOP wait follow it. The bus feels
   it: a 255-byte read at 400 kHz takes 374672 cycles naive and 336537
   pumped, at the peer's own pace.
@@ -324,10 +330,17 @@ What the rows say:
   tenures - the START through `start()` (some 200 cycles), two interrupt
   entries and exits behind two flash wait states, and the completion
   edge - where the loop spends the whole tenure busy.
-- IN SRAM (`bench_samc_ram`): the pump's entry costs 118 cycles for a
-  written byte and 102 for a read one, against 208 and 172 from flash
-  behind two wait states; at Fm+ a 255-byte write's wall drops from
-  194073 to 193484, a 1-byte write's from 2062 to 1818.
+- IN SRAM (`bench_samc_ram`, the vector in `.fast_text`, letter i at
+  100 kHz): the pump's entry costs 120 cycles for a written byte and
+  103 for a read one, against 187 and 159 from the flash behind two wait
+  states; at Fm+ a 255-byte write's wall drops from 231912 to 194081
+  cycles. The written byte's SYSOP wait stays a call, through a veneer
+  back into the flash: a variant with it inlined in the placed vector
+  measured 123, no faster. The entry as an `InRam` instance behind a
+  vector in the flash (a variant, its own flash build beside it):
+  183 against 195 a written byte and 167 against 161 a read one - the
+  veneer and the call's frame eat what the fetch saves - so the host
+  takes no placement.
 
 ## Bench findings (beyond the headline)
 
