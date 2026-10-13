@@ -278,8 +278,11 @@ inline constexpr uint8_t pattern_fixed = 1;      ///< seed every time
 /// Every action command carries exactly this. What an op does not use
 /// stays zero; the meaning of the shared fields per op:
 ///
-///   serve      count = data bytes after which the action may end early,
-///              ms = deadline, addr = the client address to take,
+///   serve      count = data bytes after which the action may end early
+///              (the ch32vx03 peer ends a counted serve on the STOP of
+///              the read that collects the command's ack: a DUT whose
+///              tenures must all be served arms it with count 0, the
+///              deadline alone), ms = deadline, addr = the client address to take,
 ///              seed/pattern = what it answers a read with, hold_us =
 ///              the CLOCK STRETCH it adds to every data byte, nack_at =
 ///              which received byte it NACKs, flags as above
@@ -361,8 +364,8 @@ inline constexpr uint8_t ident_size = 12;
 inline constexpr uint8_t ident_sanity = 0x7B;   ///< "this firmware is twi_peer"
 
 struct Ident {
-    char label[8] = {};      ///< the peer's USERROW board label, NUL padded
-    uint8_t xtal = 0;        ///< did the peer's 24 MHz crystal start?
+    char label[8] = {};      ///< the peer's label, NUL padded: the AVR's USERROW board label, the part on a peer with no such row
+    uint8_t xtal = 0;        ///< does the peer run from its crystal? (the AVR's 24 MHz, each other peer its board's own)
     uint8_t sanity = 0;
     /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
     /// IMPLEMENTATION and is allocated here, once, for every

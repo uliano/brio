@@ -139,7 +139,11 @@
 // table's SECOND row, not its first. A host that commands normal or
 // buffer of a peer that is not the avrdx one therefore MEASURES which
 // row arrived (test_avr_spi's verify_rx); regime_buffer_wait is exact on
-// every peer.
+// every peer. The ch32vx03 peer's normal and buffer give NEITHER row:
+// its late first answer loads mid-frame and the client restarts its
+// frame there - the first frame the leftover bit over the answer's top
+// seven, every later one a bit behind both ways
+// (ch32vx03/src/apps/spi_peer.cpp).
 
 #pragma once
 
@@ -539,14 +543,14 @@ inline constexpr uint8_t ident_size = 12;
 inline constexpr uint8_t ident_sanity = 0x5C;   ///< "this firmware is spi_peer"
 
 struct Ident {
-    char label[8] = {};      ///< the peer's USERROW board label, NUL padded
-    uint8_t xtal = 0;        ///< did the peer's 24 MHz crystal start?
+    char label[8] = {};      ///< the peer's label, NUL padded: the AVR's USERROW board label, the part on a peer with no such row
+    uint8_t xtal = 0;        ///< does the peer run from its crystal? (the AVR's 24 MHz, each other peer its board's own)
     uint8_t sanity = 0;
     /// The peer's firmware version. THE HIGH BYTE NAMES THE PEER
     /// IMPLEMENTATION and is allocated here, once, for every
     /// architecture that speaks this protocol: 0x01 the avrdx peer,
     /// 0x02 the samc21 peer, 0x03 the stm32g0 peer, 0x04 the stm32f4
-    /// peer, 0x05 the ch32vx03 peer (twi_link.hpp's, reserved here),
+    /// peer, 0x05 the ch32vx03 peer,
     /// 0x06 the ch32v00x peer, 0x07 the ch32x035 peer, 0x08 the rp2040
     /// peer, 0x09 the rp2350 peer (one kind for both of its
     /// architectures, the label naming the half). The low byte is
@@ -561,7 +565,7 @@ inline constexpr uint8_t peer_avrdx = 0x01;
 inline constexpr uint8_t peer_samc21 = 0x02;
 inline constexpr uint8_t peer_stm32g0 = 0x03;
 inline constexpr uint8_t peer_stm32f4 = 0x04;
-inline constexpr uint8_t peer_ch32vx03 = 0x05;   ///< reserved: twi_link.hpp's peer
+inline constexpr uint8_t peer_ch32vx03 = 0x05;
 inline constexpr uint8_t peer_ch32v00x = 0x06;
 inline constexpr uint8_t peer_ch32x035 = 0x07;
 inline constexpr uint8_t peer_rp2040 = 0x08;
