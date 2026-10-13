@@ -536,6 +536,20 @@ the HAL's TIMINGR words solved against the manual's budgets:
   cycles a byte, 403 for its STOPF entry against 242), it reads a
   one-byte read through an RXNE entry, and its register read takes four
   interrupts to this engine's two.
+- **The pump takes no placement** ([platform.md](platform.md), "Code in
+  SRAM"): its entry through util/placement.hpp's trampoline - built and
+  measured in a scratch build, the same letter, a 255-byte tenure at
+  100 kHz - took a written byte 167 cycles as an `InRam` instance behind
+  the vector in the flash against 161 flattened inline in it, and a read
+  one 176 against 178: the veneer and the instance's own frame eat what
+  the fetch saves on a body this short, so `I2cHost` has no placement
+  parameter and an `InRam` given to it does not compile. The engined
+  tenure's STOPF entry, once a tenure, came out 39 cycles shorter from
+  SRAM. A program that wants the pump out of the flash places its
+  VECTOR in `.fast_text`, where the inline pump runs whole with no call:
+  124 cycles a written byte and 137 a read one against 169 and 176 from
+  the flash (`bench_stm32` with its vectors in `.fast_text`, a scratch
+  build).
 - **The rungs are measured as the slope**: 98.0 kHz, 369.9 kHz and
   827.1 kHz on the desk's wire under the ceiling default; the HAL's
   column was taken at the words solved against the manual's 1000 / 750

@@ -56,6 +56,12 @@
 // observability only.
 //   ? help | i status and counters | 0 back to command mode | 3 trace
 //
+// Placement (docs/stm32g0/platform.md, "Code in SRAM"): nothing in SRAM,
+// the console InFlash. The client is polled and stretches SCL by its own
+// turnaround, so the wire waits for it whatever the fetch; the host takes
+// no placement on this family (stm32g0/i2c.hpp) and stays inline in a
+// vector in the flash, the shape the DUT's host is measured against.
+//
 // The ident label is the 96-bit unique device ID's first word in hex
 // (RM0444 41.1 through brio::DeviceUid); ident.xtal is
 // ALWAYS 0, because a Nucleo-64 fits no HSE crystal and

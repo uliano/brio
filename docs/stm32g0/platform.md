@@ -116,7 +116,9 @@ BKPT with no debugger escalates to the crt's distinct
   (= `InterruptGuard`), `idle()` (DSB, WFI, unmask),
   `interrupts_enabled()`, `break_here()` (BKPT), `now()`/
   `ticks_per_second` (the timebase's), `atomic_width` 4,
-  `panic_record()` in `.noinit` - and, on a `Tickless` timebase only,
+  `places_fast_text` (the three linker scripts collect `.fast_text`, so
+  a driver may be given util/placement.hpp's `InRam` - "Code in SRAM"
+  below), `panic_record()` in `.noinit` - and, on a `Tickless` timebase only,
   `idle_until(std::optional<uint32_t> deadline)`: the kernel's optional
   hook, entered masked with the absolute tick of the nearest armed time
   event; a due deadline or a wake the timebase could not place this turn
@@ -397,66 +399,140 @@ core sits in WFI (the PC read over SWD is the instruction after the WFI,
 inside the kernel's idle path), which is the state README.md's HLA read
 caveat is about.
 
-**Code in SRAM, measured: it pays here.** At 64 MHz the flash answers
-at two wait states (RM0444 3.3.4) behind the prefetch and the
+## Code in SRAM
+
+**What the silicon does.** At 64 MHz the flash answers at two wait
+states (RM0444 3.3.4, table 13) behind the prefetch and the
 instruction cache (3.3.5), both on as [clock.md](clock.md) sets them;
-the SRAM answers at none and the Cortex-M0+ fetches both over its one
-bus (RM0444 2.1, 2.3). Whether a hot path runs faster from SRAM - the question
-[../../brio/util/placement.hpp](../../brio/util/placement.hpp) asks of
-a family - was measured on the STM32G0B1RE with `bench_stm32`'s
-letters `e`, `u`, `i` and `p` in builds whose linker script collected
-`.fast_text` into `.data`, each path three ways: in the flash as the
-stratum builds it; its VECTOR placed (`.fast_text` on the program's
-handler, every body inline in it moved with it); and the driver's body
-alone as a `Hot<InRam>` instance called from a vector left in the
-flash. The flash column was run again with FLASH_ACR's PRFTEN and ICEN
-clear, to show what the two hide. HCLK cycles, a handler's figure per
-entry with the meter's stamps inside it (an empty pair is 42 in the
-flash, [clock.md](clock.md)):
+the SRAM answers at none (2.3), and the Cortex-M0+ fetches both over
+its one bus (2.1). The prefetch and the cache hide a fifth of the
+flash's cost on a driver's hot body and no more: the SPI pump's entry,
+inline and unflattened in its vector, measured 416 cycles with both on
+and 507 with both off, and 305 from SRAM with either. SRAM sits 512 MB
+above the flash and a Thumb `bl` reaches 16 MB, so A CALL BETWEEN THE
+TWO MEMORIES GOES THROUGH A VENEER the linker puts beside the caller:
+`push {r0}; ldr r0, [pc, #8]; mov ip, r0; pop {r0}; bx ip`, a pad and
+the address - 16 bytes, nine cycles beyond the `bl`'s three by the
+core's table (the RP2040 datasheet's 2.4.3.3, table 81, the copy of the
+Cortex-M0+'s figures this desk has), fetched from the caller's memory.
+The vector table holds absolute addresses, so a vector placed in SRAM
+is entered with no veneer at all.
 
-| path | flash | flash, prefetch and cache off | SRAM, vector placed | SRAM, body `InRam` behind a flash vector | SRAM bytes |
-|---|---|---|---|---|---|
-| SPI frame pump, an entry (three 8-bit frames; PCLK/2 and /4 alike, the handler is the bound) | 416 | 507 | 305 | 346 | 624 the body, 1820 an engined host's |
-| the same, 16-bit frames | 346 | 439 | 263 | 307 | (the same) |
-| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 10088 | 12974 | - | 6184 | 1644 a host's polled loops, both widths |
-| the same at PCLK/4 (the wire 8192) | 10127 | 12974 | - | 8530 | |
-| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 13316 | 16967 | - | 10023 | |
-| SPI transmit-only loop, 256 8-bit frames at PCLK/2 / PCLK/4 | 4971 / 8554 | 6089 / 8666 | - | 4462 / 8558 | |
-| USART transmit engine's completion, a block at 2 Mbaud | 318 | 384 | 317 | 210 | 320 |
-| USART transmitter's FIFO refill, eight bytes an entry at 2 Mbaud | 370 | 476 | 342 | 320 | 272..332 |
-| USART per-byte receive, 115200 | 362 | 434 | 289 | 321 | 404 |
-| the console's interrupt, a print of 4096 bytes | 319 | 421 | 312 | 275 | 436 |
-| I2C event pump, a byte of a 255-byte write / read | 169 / 176 | - | 124 / 137 | - | 1060 the suite's vector |
+**The option and its spelling: opt-in, per driver.** The three linker
+scripts (`stm32g0/ld/`) collect the input sections `.fast_text` and
+`.fast_text.*`, then `.ram_text`, first in `.data`, so the crt's copy of
+`.data` moves them to SRAM before `main`, and the platform says so
+(`Stm32g0Platform::places_fast_text`) - on every part, the STM32G031's
+8 KB included: the placement is the program's, its cost the program's
+to weigh, and a link that does not fit is refused by the script's ram
+region. `.fast_text` is code that MAY run from SRAM, for speed;
+`.ram_text` is code that MUST, for correctness - nothing of this
+stratum's. An image that places nothing gets zero bytes from either.
+Two drivers take util/placement.hpp's tag as their last template
+parameter, `InFlash` by default:
 
-The prefetch and the cache hide a fifth of the flash's cost on these
-bodies and no more; from SRAM nothing moves with them (the pump 305
-with both off). A vector placed moves only what is inline in it: the
-transmit engine's completion calls `UartTask::pump_tx()` out of line,
-which stays in the flash, so placing the vector buys nothing there
-(317) while the `InRam` body, flattened, takes it whole (210). The
-other way round a body behind a flash vector pays the call: SRAM lies
-out of a BL's 16 MB reach, so GNU ld puts a 16-byte stub in the path -
-`push {r0}; ldr r0, [pc, #8]; mov ip, r0; pop {r0}; bx ip` and the
-target's address, nine cycles beyond the BL's three by the core's
-table (the RP2040 datasheet's 2.4.3.3, table 81, the copy of the
-Cortex-M0+'s figures `bench_stm32` cites) and fetched from the flash -
-and a placed body that calls back into the flash pays one per such
-call (twenty stubs in the vector-placed image). Measured with the rest
-of the call - the stub, the instance's frame, the vector's own code
-still in the flash - the pump's body behind the flash vector is 41
-cycles an entry above the vector placed. Where the loop is the wire's
-already (the transmit-only loop at PCLK/4, the 16-bit loops at /4)
-SRAM changes nothing.
+- `SpiHost` - the pump's entry (`isr()`) and the polled transaction,
+  each ONE flattened instance under `InRam` ([spi.md](spi.md));
+- `UartTask` (`Uart`, `LpUart`, `Rs485`) - `isr()` and `dma_isr()`, each
+  one instance ([usart.md](usart.md)).
 
-So the placement pays on this family: a quarter off the SPI pump's
-entry, a third off the USART's block completion, two fifths off the
-receive loop at PCLK/2, for bodies of 300 to 1600 bytes against the
-G0B1's 144 KB, the G071's 36 and the G031's 8. RECOMMENDATION: offer
-util/placement.hpp's opt-in on this stratum - the SPI host's pump and
-polled loops, the USART's `isr()` and transmit completion, the I2C
-host's event pump - as the CH32X035 does
-([../ch32x035/platform.md](../ch32x035/platform.md), "A handler in
-SRAM").
+```cpp
+using Display = brio::SpiHost<1, display_pins, brio::NoDmaEngine, brio::NoDmaEngine, brio::InRam>;
+using Serial = brio::Uart<2, console_pins, 64, 256, brio::NoDmaEngine, brio::NoDmaEngine,
+                          brio::UartOptions{}, brio::InRam>;
+```
+
+Under `InFlash` each body is what it would be without the trampoline,
+inline in its vector or in `start()`; both placements FLATTEN it, so
+what it calls on its common path is inline in it - the transmit
+engine's completion carries the next block's launch (`pump_tx()`) - and
+what it calls once a burst or on an error stays out of line in the
+flash (the SPI's `launch_dma()` and `spin_dma()`, the USART's
+`harvest()`, the engines' `abandon()`). The I2C host takes no placement:
+measured, its event pump as an instance behind a vector in the flash
+came out no shorter ([i2c.md](i2c.md)). A third tag, and a placement on
+the I2C host, do not compile (`test/family_stm32g0/neg/`). THE NAME IS
+TWO NAMES: the trampoline's instances are COMDAT functions in
+`.fast_text.brio`, and a program's own placed function names
+`.fast_text` - one name for both in one translation unit is GCC's
+"section type conflict" (util/placement.hpp); the family fixtures
+compile a placed function beside the `InRam` instances in one unit
+(`test/family_stm32g0/spi.cpp`, `usart.cpp`).
+
+A program may also place a VECTOR it binds, with
+`[[gnu::section(".fast_text")]]` on the handler: what the vector inlines
+moves with it and runs with no call, and an `InRam` body called from a
+placed vector is a call where the inline one had none.
+
+**What it buys, measured** by `bench_stm32` (every driver `InFlash`) and
+`bench_stm32_ram` (the same source, every driver that takes a placement
+`InRam`, the vectors in the flash in both) on the STM32G0B1RE at 64 MHz -
+HCLK cycles, a handler's figure per entry with the meter's stamps inside
+it (an empty pair is 42 in the flash, [clock.md](clock.md)), a loop's the
+wall of 256 frames:
+
+| path | flash | SRAM (`InRam`, the vector in the flash) | SRAM bytes |
+|---|---|---|---|
+| SPI pump, an entry (three 8-bit frames; PCLK/2 and /4 alike, the handler is the bound) | 397 | 347 | 624 an engineless host's, 684 an engined one's |
+| the same, 16-bit frames (two an entry) | 356 | 308 | |
+| SPI pump, the thread's busy a frame at PCLK/16 (256 frames read back: `pump_cycles_per_frame`) | 138 | 122 | |
+| SPI pump, 256 8-bit frames at PCLK/2, wall (the wire 4096) | 43824 | 39125 | |
+| SPI receive loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 6470 | 6189 | 1644 a host's polled transaction, both widths (1612 engined) |
+| the same at PCLK/4 (the wire 8192) | 8609 | 8535 | |
+| SPI receive loop, 256 16-bit frames at PCLK/2 (the wire 8192) | 10536 | 10028 | |
+| SPI transmit-only loop, 256 8-bit frames at PCLK/2 (the wire 4096) | 4687 | 4467 | |
+| a polled request of 1, 3 and 16 bytes at PCLK/16 (wall) | 444, 797, 2504 | 429, 765, 2476 | |
+| USART transmit engine's completion, a block at 2 Mbaud | 232 | 212 | 264 (340 with a receive engine) |
+| USART transmitter's FIFO refill, eight bytes an entry at 115200 | 323 | 318 | 404 an engineless port's `isr()` |
+| USART receive, four bytes an entry at 115200 | 355 | 316 | 332 the `isr()` of a port whose transmitter is on its engine |
+| the same at 2 Mbaud: entries for 256 bytes, cycles an entry | 51, 408 | 64, 316 | |
+| the console's interrupt, a print of 4096 bytes | 295 | 275 | 436 |
+| USART receive engine: the line's IDLE / the ring's marks | 206 / 226 | 225 / 226 | 84 / 340 |
+
+What the rows say:
+
+- THE PUMP PAYS MOST: an eighth off every entry, 4700 cycles off 256
+  frames at PCLK/2. The polled transaction is a function of its own in
+  either memory (spi.md says why), and from SRAM its receive loop is a
+  twentieth shorter at PCLK/2 (x 1.58 of the wire to 1.51), its 16-bit
+  loop likewise, a polled request 15 to 32 cycles. Where a loop is the
+  wire's already (everything at PCLK/4 and below) SRAM changes nothing.
+- THE USART'S BODIES PAY LESS, because both placements flatten them:
+  the completion's launch is inline in the flash too, so SRAM takes a
+  tenth off it; the receiver a ninth (at 2 Mbaud the flash's slower
+  entry takes five bytes an entry where SRAM's takes four); the
+  transmitter's refill a sixtieth at 115200.
+- THE ONE ROW SRAM LOSES is the receive engine's IDLE entry, whose work
+  is `harvest()` out of line: from SRAM that is a veneer back into the
+  flash, once a burst.
+- The SPI engines' transaction takes no placement: letter d reads
+  1093..1115 cycles above the wire in the flash image and 1069..1083 in
+  the SRAM one, the difference the bench's DMA vector, which binds
+  letter u's ports beside the SPI host's completion - its entry 267
+  cycles where their bodies are inline, 246 where they are calls into
+  SRAM ([spi.md](spi.md)).
+- A path's cost from the flash moves with where it sits: two builds of
+  `bench_stm32` that differed in the SPI host alone measured the USART
+  receiver's entry at 372 and 355 cycles and the refill at 320 and 323;
+  the same bodies from SRAM moved by two cycles at most.
+
+**What it costs.** The bytes in the last column - of the G0B1's 144 KB,
+the G071's 36 and the G031's 8, the load image staying in the flash
+beside them - plus 16 bytes of flash for every function the flash calls
+in SRAM (twelve in `bench_stm32_ram`) and 16 of SRAM for every function
+an instance calls back in the flash (five there: `launch_dma()`,
+`spin_dma()`, `harvest()` and two `abandon()`). No code: the crt's copy
+of `.data` already moves the section, a word a turn of its loop. A
+placed function exists only from that copy on - a vector taken earlier
+would enter SRAM the copy has not written yet. A default image has no
+byte of code in SRAM. The whole of `bench_stm32_ram` is 7040 bytes of
+SRAM above `bench_stm32`'s. On the STM32G031K8, where it counts, a
+console's `isr()` is 324 bytes (its USART2 is a BASIC instance, no FIFO)
+and every image of the stratum's suites with every eligible driver
+`InRam` grows by 324 to 2840 bytes: `test_stm32_serial`'s fourth image
+3396 to 6236 of 8192, `spi_peer` 1552 to 3520, and `test_stm32_spi`
+past the part by 496 bytes and `bench_stm32`'s first two images by 3604
+and 4532 - which is why `bench_stm32_ram` is not built there.
 
 ## On the STM32G071RB
 
@@ -518,12 +594,18 @@ Driver gaps (this chapter's option space the stratum does not touch):
   priority scheme is the preemptive kernel's question
   ([design/kernel.md](../design/kernel.md)).
 - A per-package pin-bonding table - [port.md](port.md) says why not.
-- Hot code in SRAM (util/placement.hpp's `InRam`): `Stm32g0Platform`
-  does not say `places_fast_text` and the linker scripts do not collect
-  `.fast_text`, so the tag is refused here; measured to pay (Bench
-  findings, "Code in SRAM"), born when the drivers take a placement.
+- The veneer between the flash and SRAM: every `InRam` call from the
+  flash pays the linker's long-branch stub; GCC's ARM `long_call` on
+  util/placement.hpp's `Hot<InRam>` would call the instance by address
+  instead (measured on the SAM C21: 8 to 18 cycles a call). That header
+  is every family's, so the choice is made there, not here.
 
-Implemented, not bench-verified: letters `w` and `k` on the
+Implemented, not bench-verified: a VECTOR the program places in
+`.fast_text` over the flattened bodies ("Code in SRAM" gives the pump's
+entry inline and unflattened, 305 cycles) - a `bench_stm32` built with
+its vectors in `.fast_text` would measure it;
+`bench_stm32_ram` on the STM32G071RB (the same image, run there, is the
+measurement); letters `w` and `k` on the
 STM32G071RB and the STM32G031K8 (the same image, run there, is the
 measurement); the idle path of `idle_until()` on the tickless
 timebase, whose arming adds instructions between the masked check and

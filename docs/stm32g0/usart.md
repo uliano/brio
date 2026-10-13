@@ -226,7 +226,9 @@ a compile-time refusal in the task.
   and a stated `rx_threshold` is refused; `rx_timeout` is RTOR.RTO in
   bit times, 10 by default.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine = NoDmaEngine,
-  RxEngine = NoDmaEngine, opts = {}>` - `init(clock, baud, format)`,
+  RxEngine = NoDmaEngine, opts = {}, Placement = InFlash>` - where the
+  two interrupt bodies run from (util/placement.hpp; "Where the hot
+  paths run from" below), and `init(clock, baud, format)`,
   `isr()`, `dma_isr()`, `harvest()`, `write_byte`/`write_bulk`,
   `read_byte`/`read_bulk`, `read_span`/`consume` (the receive run in
   place; with a receive engine `consume()` answers whether the run was
@@ -253,8 +255,8 @@ a compile-time refusal in the task.
   them. The public surface is
   IDENTICAL to avrdx's and samc21's, which is what lets
   `util/serial_port.hpp` and `print()` compile here untouched.
-- `Rs485<n, pins, de_pin, assertion, deassertion, ...>` - the same task
-  with the driver enable filled in. **`OneWire` is NOT a task here**:
+- `Rs485<n, pins, de_pin, assertion, deassertion, ..., Placement>` - the
+  same task with the driver enable filled in. **`OneWire` is NOT a task here**:
   33.5.15 is a bit, so single-wire is `Uart` with
   `uart_half_duplex()`, where the AVR stratum spells a task.
 - `SyncHost<n, pins, ck>`, `IrdaLink<n, pins>`, `AutoBaud<n>`,
@@ -292,7 +294,14 @@ brio::print(serial, "hello", brio::crlf);
 USART2 is a FULL instance on the G071 and G0B1 classes, so this console
 runs in FIFO mode: a print costs one interrupt per eight characters.
 On the G031 class USART2 is BASIC and the same line builds the
-one-register transport (`Serial::fifo_mode` says which).
+one-register transport (`Serial::fifo_mode` says which). The same
+console with its interrupt body in SRAM, the vector left where it is -
+436 bytes of SRAM, a fourteenth off every entry:
+
+```cpp
+using Serial = brio::Uart<2, console_pins, 64, 256, brio::NoDmaEngine, brio::NoDmaEngine,
+                          brio::UartOptions{}, brio::InRam>;
+```
 
 A one-wire link on a single pad, a port that keeps its rate through a
 clock change, and one that keeps the FIFO OFF - one character per
@@ -356,7 +365,8 @@ image over `.fifo = false`. Measured on the Nucleo-G0B1RE at 115200 (`bench_stm3
 |---|---|---|---|
 | `.fifo = false`, TXE | 4098 | 109 | 109 |
 | FIFO, `tx_threshold = none`, TXFNF | 4096 | 183 | 183 |
-| the default, FIFO, TXFT at empty | 515 | 331 | 41.6 |
+| the default, FIFO, TXFT at empty | 515 | 295 | 37.1 |
+| the same, the task `InRam` | 515 | 275 | 34.5 |
 
 (stamps included: the bench meter's own 42 cycles an entry.) TXFNF
 pacing is the trap the middle row shows: under a long print the FIFO
@@ -1363,6 +1373,38 @@ The offset itself is judged within 150 ppm, the tens of ppm two
 crystals' tolerances allow (UM2324 6.7.1 names a 20 ppm part for the
 LSE; the ST-LINK's 8 MHz has none stated) against the 0.3 % an
 uncorrected HSI16 would put there.
+
+### Where the hot paths run from
+
+The task's placement (util/placement.hpp, [platform.md](platform.md)'s
+"Code in SRAM") moves both interrupt bodies, `isr()` and `dma_isr()`,
+each one flattened instance in SRAM under `InRam`; under `InFlash`, the
+default, each is inline in its vector. Both placements flatten the body:
+the transmit engine's completion carries the next block's launch
+(`pump_tx()`) inline, never a call, while `harvest()` and the engines'
+`abandon()` stay out of line in the flash - once a burst and the error
+path. Measured by `bench_stm32` (`InFlash`) and `bench_stm32_ram`
+(`InRam`, the vectors in the flash in both) on the Nucleo-G0B1RE, the
+cycles an entry with the meter's stamps inside:
+
+| path | flash | SRAM | SRAM bytes |
+|---|---|---|---|
+| the transmit engine's completion, a block of 4096 at 2 Mbaud / 1 Mbaud / 115200 | 232 / 230 / 246 | 212 / 209 / 223 | 264, 340 with a receive engine |
+| the transmitter's FIFO refill, eight bytes an entry, at 115200 / 2 Mbaud | 323 / 337 | 318 / 318 | 404 an engineless port's `isr()` |
+| the receiver, four bytes an entry at 115200 | 355 | 316 | 332 |
+| the receiver at 2 Mbaud, 256 bytes: entries, cycles an entry | 51, 408 | 64, 316 | |
+| the console's interrupt, a print of 4096 bytes (letter `p`) | 295 | 275 | 436 |
+| the receive engine: the line's IDLE / the ring's marks | 206 / 226 | 225 / 226 | 84 / 340 |
+
+Every line of 256 and 4096 bytes stays wire-bound either way (`x` 1.00
+to 1.05 to 2 Mbaud, the same under both): the placement buys the core's
+time, not the wire's. The receiver and
+the completion pay a ninth and a tenth; the refill, a store loop
+whose turns wait on TXFNF, pays least; and the receive engine's IDLE
+entry pays a veneer back into the flash for `harvest()` and comes out
+longer from SRAM - a program on a receive engine gains from `InRam` in
+the completion and the marks alone. `LpUart` takes the same parameter
+([lpuart.md](lpuart.md)).
 
 ## On the STM32G071RB
 

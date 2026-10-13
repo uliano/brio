@@ -148,7 +148,7 @@ legal arrangements nameable), `SpiDirection`, `SpiFrameFormat`,
 `spi_rate_for(pclk_hz, max_sck_hz)` picks the fastest code at or below a
 ceiling and REFUSES one the prescaler cannot reach.
 
-`SpiHost<n, pins, TxEngine, RxEngine>` - the transfer engine
+`SpiHost<n, pins, TxEngine, RxEngine, Placement>` - the transfer engine
 `util/spi_bus.hpp` drives. Its `Request` carries the other targets'
 fields by name (cs and dc `PinRef`s, `cs_setup_us`, a command phase and
 a full-duplex data phase with `Borrowed<..., Lease::reply>` loans,
@@ -177,9 +177,13 @@ flight), `packed_min_frames` (6, the byte phase from which the polled
 receive packs two frames an access), and `dma_min_frames` (8, the data
 phase from which an engined host hands the data to its engines - the
 quotient of `dma_fixed_cycles`, what an engined transaction costs above
-the wire, 1060 by letter d, and `pump_cycles_per_frame`, the pump's busy
-per frame, 137 by letter e; a shorter data phase takes the pump even
-with engines bound).
+the wire, 1093 by letter d, and `pump_cycles_per_frame`, the pump's busy
+per frame, 138 by letter e; a shorter data phase takes the pump even
+with engines bound). `Placement` is util/placement.hpp's tag, `InFlash`
+by default: under `InRam` the pump's entry and the polled transaction
+each run as one instance in SRAM, `placed_in_ram` says so, and the
+pump's cost follows it - 122 cycles a frame, `dma_min_frames` 9 ("The
+host's placement" below).
 
 `LEN IS A FRAME COUNT.` With the default 8-bit frames a frame is a byte
 and `len` is a byte count. With `bits` above eight a frame occupies TWO
@@ -394,6 +398,18 @@ extern "C" void DMA1_Channel1_IRQHandler()   { if (Bus::dma_isr()) { /* post */ 
 extern "C" void DMA1_Channel2_3_IRQHandler() { if (Bus::dma_isr()) { /* post */ } }
 ```
 
+**The host's hot paths in SRAM.** The placement is the last template
+argument; the vectors stay as they are:
+
+```cpp
+using Display = brio::SpiHost<1, bus_pins, brio::NoDmaEngine, brio::NoDmaEngine, brio::InRam>;
+```
+
+The pump's entry runs from SRAM behind SPI1's vector and every polled
+request calls its transaction there - 624 bytes and 1644 of SRAM, an
+eighth off the pump's entry and a twentieth off the receive loop at
+PCLK/2 ("The host's placement" below).
+
 **A client that answers.** Load the first two answers before the host's
 clock can arrive and write the next-plus-one on every received frame -
 the pump runs ONE AHEAD:
@@ -578,24 +594,29 @@ grammar, n in bytes, the wire SCK/8 bytes a second):
 
 | op | n | PCLK/ | wall | busy | irq | isr | wire cycles | rest |
 |---|---|---|---|---|---|---|---|---|
-| spi.dma (8-bit) | 16 | 2 | 1316 | 1015 | 1 | 234 | 256 | 1060 |
-| spi.dma (8-bit) | 256 | 2 | 5156 | 1015 | 1 | 234 | 4096 | 1060 |
-| spi.dma (8-bit) | 16 | 8 | 2081 | 1016 | 1 | 234 | 1024 | 1057 |
-| spi.dma (8-bit) | 256 | 8 | 17441 | 1016 | 1 | 234 | 16384 | 1057 |
-| spi.dma.w16 | 32 | 2 | 1576 | 1019 | 1 | 234 | 512 | 1064 |
-| spi.dma.w16 | 512 | 2 | 9256 | 1019 | 1 | 234 | 8192 | 1064 |
-| spi.dma.w16 | 32 | 8 | 3109 | 1018 | 1 | 234 | 2048 | 1061 |
-| spi.dma.w16 | 512 | 8 | 33829 | 1018 | 1 | 234 | 32768 | 1061 |
+| spi.dma (8-bit) | 16 | 2 | 1352 | 1028 | 1 | 267 | 256 | 1096 |
+| spi.dma (8-bit) | 256 | 2 | 5192 | 1028 | 1 | 267 | 4096 | 1096 |
+| spi.dma (8-bit) | 16 | 8 | 2117 | 1028 | 1 | 267 | 1024 | 1093 |
+| spi.dma (8-bit) | 256 | 8 | 17477 | 1028 | 1 | 267 | 16384 | 1093 |
+| spi.dma.w16 | 32 | 2 | 1627 | 1047 | 1 | 267 | 512 | 1115 |
+| spi.dma.w16 | 512 | 2 | 9307 | 1047 | 1 | 267 | 8192 | 1115 |
+| spi.dma.w16 | 32 | 8 | 3160 | 1046 | 1 | 267 | 2048 | 1112 |
+| spi.dma.w16 | 512 | 8 | 33880 | 1046 | 1 | 267 | 32768 | 1112 |
 
 Every frame beyond the first costs exactly the wire's time - 16.0 HCLK
 cycles a byte at PCLK/2, 64.0 at PCLK/8, either width - so the engines
 keep the FIFO fed at the top rate and the per-byte time is the wire's.
-What a transaction adds is a constant some 1060 cycles: `start()`
-itself (471 measured alone, a ruler read of ~62 in it: the compare of
+What a transaction adds is a constant some 1100 cycles: `start()`
+itself (452 measured alone, a ruler read of ~62 in it: the compare of
 the settings, the select, the engines' five stores each), ONE completion
-interrupt whose handler is 234 cycles with the meter's stamps, and the
+interrupt whose handler is 267 cycles with the meter's stamps, and the
 idle path's wake with the bench's own idle-window reads. That constant
-is `dma_fixed_cycles`, the numerator of `dma_min_frames`.
+- the 8-bit line at PCLK/8, 1093 - is `dma_fixed_cycles`, the numerator
+of `dma_min_frames`. The completion's vector is the bench's DMA vector,
+which also binds letter u's ports: in `bench_stm32_ram`, whose ports'
+bodies are calls into SRAM, the same vector's entry is 246 cycles and
+the transaction 1069..1083 above the wire - none of the engines' path
+is placed, so the constant is one for both placements.
 
 **The host above the wire** (`bench_stm32` letter `e`: the engineless
 `SpiHost<1>` on the same pads, MISO floating, each op the best of 8 runs
@@ -603,24 +624,28 @@ of `start()` alone with the Request built outside the clock; the write
 shape reads nothing back, the `.rx` one reads every frame into a
 buffer; the levels and OVR read after every run were zero and clear on
 every line). The polled loops and the pump, before and after this
-round, 256 frames:
+round, 256 frames, both placements of today's host:
 
-| op | PCLK/ | before: wall, x | after: wall, x | the vendor's loop on the same board |
-|---|---|---|---|---|
-| spi.poll (8-bit write) | 4 | 60760, 7.41 | 8554, 1.04 | 43368, 5.29 |
-| spi.poll | 16 | 83791, 2.55 | 33124, 1.01 | 58732, 1.79 |
-| spi.poll.rx (8-bit read) | 4 | 60760, 7.41 | 9609, 1.17 | 43368, 5.29 |
-| spi.poll.rx | 16 | 83791, 2.55 | 33165, 1.01 | 58732, 1.79 |
-| spi.poll16 (16-bit write) | 4 | 68411, 4.17 | 16701, 1.01 | 45395, 2.77 |
-| spi.poll16 | 16 | 117002, 1.78 | 65844, 1.00 | 96848, 1.47 |
-| spi.poll16.rx | 4 | 68411, 4.17 | 16701, 1.01 | 45395, 2.77 |
-| spi.poll16.rx | 16 | 117002, 1.78 | 65832, 1.00 | 96848, 1.47 |
-| spi.pump (8-bit, interrupts per frame; busy per frame) | 4 | 13.32 (1.00; 318) | 5.31 (0.34; 170) | - |
-| spi.pump | 16 | 3.74 (1.00; 636) | 1.34 (0.34; 134) | - |
-| spi.pump.rx | 4 | 13.32 (1.00; 318) | 5.40 (0.34; 173) | - |
-| spi.pump.rx | 16 | 3.74 (1.00; 636) | 1.36 (0.34; 137) | - |
-| spi.pump16 | 4 | 6.61 (1.00; 315) | 3.58 (0.50; 229) | - |
-| spi.pump16 | 16 | 2.45 (1.00; 464) | 1.30 (0.50; 249) | - |
+| op | PCLK/ | before: wall, x | today, `InFlash`: wall, x | today, `InRam`: wall, x | the vendor's loop on the same board |
+|---|---|---|---|---|---|
+| spi.poll (8-bit write) | 2 | - | 4687, 1.14 | 4467, 1.09 | - |
+| spi.poll | 4 | 60760, 7.41 | 8558, 1.04 | 8563, 1.04 | 43368, 5.29 |
+| spi.poll | 16 | 83791, 2.55 | 33136, 1.01 | 33121, 1.01 | 58732, 1.79 |
+| spi.poll.rx (8-bit read) | 2 | - | 6470, 1.57 | 6189, 1.51 | - |
+| spi.poll.rx | 4 | 60760, 7.41 | 8609, 1.05 | 8535, 1.04 | 43368, 5.29 |
+| spi.poll.rx | 16 | 83791, 2.55 | 33113, 1.01 | 33099, 1.01 | 58732, 1.79 |
+| spi.poll16 (16-bit write) | 2 | - | 8524, 1.04 | 8514, 1.03 | - |
+| spi.poll16 | 4 | 68411, 4.17 | 16706, 1.01 | 16712, 1.02 | 45395, 2.77 |
+| spi.poll16 | 16 | 117002, 1.78 | 65852, 1.00 | 65856, 1.00 | 96848, 1.47 |
+| spi.poll16.rx | 2 | - | 10536, 1.28 | 10028, 1.22 | - |
+| spi.poll16.rx | 4 | 68411, 4.17 | 16691, 1.01 | 16697, 1.01 | 45395, 2.77 |
+| spi.poll16.rx | 16 | 117002, 1.78 | 65848, 1.00 | 65840, 1.00 | 96848, 1.47 |
+| spi.pump (8-bit, interrupts per frame; busy per frame) | 4 | 13.32 (1.00; 318) | 5.34 (0.34; 171) | 4.77 (0.34; 153) | - |
+| spi.pump | 16 | 3.74 (1.00; 636) | 1.35 (0.34; 135) | 1.21 (0.34; 119) | - |
+| spi.pump.rx | 4 | 13.32 (1.00; 318) | 5.44 (0.34; 174) | 4.86 (0.34; 156) | - |
+| spi.pump.rx | 16 | 3.74 (1.00; 636) | 1.37 (0.34; 138) | 1.24 (0.34; 122) | - |
+| spi.pump16 | 4 | 6.61 (1.00; 315) | 3.65 (0.50; 234) | 3.23 (0.50; 207) | - |
+| spi.pump16 | 16 | 2.45 (1.00; 464) | 1.29 (0.67; 285) | 1.22 (0.50; 234) | - |
 
 Before, the polled loop wrote a frame, spun on RXNE and read it back
 through two out-of-line verbs - 237 cycles a frame whatever the rate -
@@ -630,17 +655,20 @@ loop (frames in on TXE, two byte frames an access, the unread echoes'
 overrun cleared at the tail), wire-bound from PCLK/4 at both widths;
 the receive shape keeps three frames in flight frame by frame below six
 and PACKS above it (two frames an access each way, two pairs in flight,
-the odd last one by a byte with FRXTH moved for it and back), 37.5 cycles
-a frame against the wire's 32 at PCLK/4 - the one line of the table
-above 1.1 - and wire-bound at PCLK/16; the pump drains what RXNE holds
+the odd last one by a byte with FRXTH moved for it and back), 33.6
+cycles a frame against the wire's 32 at PCLK/4 and wire-bound at
+PCLK/16 - at PCLK/2 25.3 against 16, the one rate the core's loop does
+not keep up with, at either placement; the pump drains what RXNE holds
 and refills three, so it takes an interrupt every three frames at
 PCLK/4 and at PCLK/16 alike (six for sixteen frames, 86 for 256) and
 keeps the bus busy where the handler returns within three frame times:
 at PCLK/16 that is 384 cycles against the bench's stamped handler of
-372..402 (x 1.34), at PCLK/4 96 cycles against a handler no vector can
+397..406 (x 1.35), at PCLK/4 96 cycles against a handler no vector can
 run in (x 5.3, the bus idle between refills - the engines' rate, not
-the pump's). The pump's busy per frame at PCLK/16, 137 cycles with the
-stamps inside, is `pump_cycles_per_frame`.
+the pump's). The 16-bit pump keeps two frames in flight, 512 cycles at
+PCLK/16, and its flash handler of 329 cycles takes one frame an entry
+as often as two there (0.67 interrupts a frame; from SRAM 0.50). The pump's busy per frame at PCLK/16, 138 cycles with the
+stamps inside (122 under `InRam`), is `pump_cycles_per_frame`.
 
 The vendor's loop is ST's HAL v1.4.7 `HAL_SPI_TransmitReceive`,
 compiled from the pinned archive into a scratch program with brio's
@@ -656,14 +684,14 @@ PCLK/16 where both are the wire's.
 letter: a polled command of one byte and 0, 2 and 15 bytes of data,
 write-only, the select on PA15 and the D/C on PB6, at PCLK/16:
 
-| op | n | before: wall, rest | after: wall, rest |
-|---|---|---|---|
-| spi.req | 1 | 781, 653 | 413, 285 |
-| spi.req | 3 | 1382, 998 | 768, 384 |
-| spi.req | 16 | 5269, 3221 | 2460, 412 |
+| op | n | before: wall, rest | today, `InFlash`: wall, rest | today, `InRam`: wall, rest |
+|---|---|---|---|---|
+| spi.req | 1 | 781, 653 | 444, 316 | 429, 301 |
+| spi.req | 3 | 1382, 998 | 797, 413 | 765, 381 |
+| spi.req | 16 | 5269, 3221 | 2504, 456 | 2476, 428 |
 
 "Rest" is wall minus the wire's cycles, the Stopwatch's ~62 inside it;
-the 3-byte request's 322 net cycles are: the compare of the settings
+the 3-byte request's 351 net cycles (319 under `InRam`) are: the compare of the settings
 and the clamp (~15 instructions), the select and the D/C edges (one
 store each, inline), the command phase (one frame in, the tail's wait
 on FTLVL and BSY, the overrun's clear and the drain - two reads), the
@@ -671,12 +699,35 @@ D/C flip, the data phase (one half-word access for the pair, the same
 tail), the select raised, and the silicon's own latencies at each
 phase's two ends (the first edge after the write, BSY after the last) -
 some 180 instructions and 14 APB accesses from a flash at two wait
-states, and nothing called. What the round took out: the 48-byte copy
+states, and one call - into the transaction's own function, where the
+placement's flatten puts every loop (polled_transaction() in the
+header): the same transaction unflattened and inline in `start()`,
+measured in a scratch build, took 413, 768 and 2460 cycles - some 32
+less a request - and 9576 for the 256-frame receive at PCLK/2, where
+the flattened function takes 6470. What the round took out: the 48-byte copy
 of the request (12 word moves), `flush_rx()` (18 instructions and a
 call; the loops read back what they wrote, so nothing is stale - the
 abnormal exits drain), the RXNE interrupt's disarm under a guard (never
 armed outside an asynchronous tenure), two `PinRef` calls, and per
 frame two out-of-line `data()` calls and a bounded spin of its own.
+
+**The host's placement** ([platform.md](platform.md), "Code in SRAM"):
+`SpiHost<..., InRam>` runs the pump's entry and the polled transaction
+each as ONE flattened instance in SRAM - 624 and 1644 bytes on the
+engineless host (both widths, every shape), 684 and 1612 on an engined
+one - behind the vector and the `start()` that stay in the flash, each
+a call through the linker's long-branch veneer. The engines' path takes
+no placement (once a transaction), nor does `SpiClient` (its runs are
+inline in their caller, which the program places). Measured by
+`bench_stm32` and `bench_stm32_ram` (the tables above): the pump's
+entry 397 cycles against 347 for three byte frames and 356 against 308
+for two half-words, so the pump's 256 frames at PCLK/2 take 39125
+cycles against 43824 and its busy a frame at PCLK/16 is 122 against
+138; the polled loops a twentieth at PCLK/2 (the receive 6470 against
+6189, 16-bit 10536 against 10028) and nothing at PCLK/4 and below,
+where the wire is the bound; a polled request 15 to 32 cycles. The
+pump's cost per frame follows the tag, and the crossover to the
+engines with it: `dma_min_frames` 8 under `InFlash`, 9 under `InRam`.
 
 **Three facts the letter found.** (1) ARM RXNE AFTER THE PRIME, not
 before: with the interrupt armed first and three frames written after
@@ -1146,6 +1197,12 @@ must reach the registers itself:
 **Implemented but not bench-verified** - the code is there and compiles
 on every header of the pack, but no silicon has run it:
 
+- **an engined host's polled transaction under `InRam`** (1612 bytes):
+  `bench_stm32_ram` places the engined host, and its letter d runs the
+  engines alone; a polled request below `dma_min_frames` on that host is
+  what would measure it, the engineless host's figures above being the
+  same loops.
+
 - **the transmit-only loop's tail against a select or a D/C the TASK
   moves** (FTLVL then BSY before the edge): the peer letters frame their
   windows by hand with 30 us of hold on each side, so the tail's timing
@@ -1206,20 +1263,20 @@ on every header of the pack, but no silicon has run it:
   same burst with the client on its raw engines (letter i's arrangement)
   would split them.
 
-- **the packed receive at PCLK/4 runs at 37.5 cycles a frame against the
-  wire's 32** (x 1.17 on 256 frames): a loop turn of some 26
-  instructions with four taken branches and three APB accesses per
-  pair, on a core that refetches a branch target from a flash at two
-  wait states. What would move it: the pairs-only loop unrolled by two,
-  or the loop placed in SRAM - the retrospective's SRAM measurement is
-  the SAM's, not this family's. The write shape, which is what a
-  display's pixel path runs, is on the wire's time.
-- **a 3-byte polled request costs 322 cycles above the wire** against
-  the round's 300: the breakdown above names the silicon's own
-  latencies at the four phase ends (~50) and ~180 instructions from the
-  flash. A ceiling kept as one byte instead of an optional, and the
-  budget's arithmetic hoisted, are the next ten cycles; the rest is the
-  shape of two phases around a D/C pin.
+- **the packed receive at PCLK/2 runs at 25.3 cycles a frame against the
+  wire's 16** (x 1.58 on 256 frames; 24.2 and x 1.51 from SRAM, so the
+  fetch is not what holds it): a loop turn of some 26 instructions with
+  four taken branches and three APB accesses per pair. What would move
+  it: the pairs-only loop unrolled by two. At PCLK/4 it is the wire's
+  within a twentieth. The write shape, which is what a display's pixel
+  path runs, is on the wire's time.
+- **a 3-byte polled request costs 351 cycles above the wire** (319 from
+  SRAM): the breakdown above names the silicon's own latencies at the
+  four phase ends (~50), ~180 instructions from the flash and the 32
+  cycles the flattened transaction costs a short request. A ceiling
+  kept as one byte instead of an optional, and the budget's arithmetic
+  hoisted, are the next ten cycles; the rest is the shape of two phases
+  around a D/C pin.
 - **the pump's continuity above PCLK/16** is the handler's, not the
   pump's: three frames in flight are 96 cycles at PCLK/4 and no vector
   of this core refills inside them, so the bus idles between refills;

@@ -1117,9 +1117,12 @@ public:
      * can read the flags that make "dead" a fact rather than a timeout.
      * What is lost is the untransmitted tail, and it is counted rather
      * than papered over. The binding (request, CPAR, the kept word)
-     * stands: the next start() needs nothing re-armed.
+     * stands: the next start() needs nothing re-armed. COLD AND OUT OF
+     * LINE: the error path, never flattened into the vector of a driver
+     * that runs its body through a placement (util/placement.hpp) - nor,
+     * under InRam, into SRAM.
      */
-    static bool abandon() {
+    [[gnu::noinline, gnu::cold]] static bool abandon() {
         if (!busy_) {
             return false;
         }
@@ -1404,8 +1407,9 @@ public:
     }
 
     /// Give up the block or ring in flight - counted - and leave the
-    /// channel stopped with its binding standing.
-    static bool abandon() {
+    /// channel stopped with its binding standing. Cold and out of line,
+    /// DmaTxEngine::abandon()'s reason.
+    [[gnu::noinline, gnu::cold]] static bool abandon() {
         ++faults_;
         Channel::stop();
         capacity_ = 0;

@@ -1870,6 +1870,15 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * PrepareSleep voter is the pattern; no engine can enforce it from below,
  * so it is stated and not pretended.
  *
+ * NO PLACEMENT PARAMETER (util/placement.hpp): the event pump is inline
+ * in the vector that binds it, and a program that wants it out of the
+ * flash's two wait states (RM0444 3.3.4) places that VECTOR in
+ * `.fast_text` - the pump then runs from SRAM whole, with no call. The
+ * pump as an InRam instance was measured and declined: called from a
+ * vector in the flash through the linker's long-branch veneer, with a
+ * frame of its own, it took a read byte two cycles off and put six on a
+ * written one (docs/stm32g0/i2c.md).
+ *
  * ISR wiring (app glue, as usual):
  *   extern "C" void I2C1_IRQHandler() {
  *       if (I2cHw::isr()) { brio::post<I2cBusAo>(brio::TransferDone{I2cHw::status()}); }

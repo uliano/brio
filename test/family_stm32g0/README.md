@@ -39,5 +39,14 @@ the same file proves the derivation on all twelve headers. A wrong line
 would be a silent Default_Handler spin; a header whose naming did not
 follow the rule fails to compile instead.
 
+THE PLACEMENT (util/placement.hpp) is compiled where the drivers take
+it: `spi.cpp`, `usart.cpp`, `lpuart.cpp` and `dma.cpp` instantiate the
+SPI host and the USART task under `InRam`, both engine shapes, and
+`spi.cpp` and `usart.cpp` do it beside a program's own `.fast_text`
+function in the same unit - the section-type conflict
+util/placement.hpp names would fail it there - and `neg/`
+refuses an unknown tag on `SpiHost` and `Uart` and any placement on
+`I2cHost`, which takes none.
+
 Neither `test/CMakeLists.txt` nor `stm32g0/CMakeLists.txt` sees this
 directory: the script alone builds these files.

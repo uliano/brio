@@ -126,6 +126,13 @@
 //   ? help | i status and counters | 0 back to the dark client | 3 trace |
 //   s / f cycle the answer line's class in modes 0 and 3 / 1 and 2
 //
+// Placement (docs/stm32g0/platform.md, "Code in SRAM"): nothing in SRAM,
+// the SpiHost of Op::host_burst left InFlash. The client's runs are
+// polled and inline in their caller, paced by the far host's SCK and kept
+// ahead by the FIFO, so the wire waits for nothing the fetch could
+// shorten; the host's burst is the shape the DUT's own host is measured
+// against, and the G031K8's 8 KB keeps the RAM for the runs' buffers.
+//
 // The ident label is the 96-bit unique device ID's first word in hex
 // (RM0444 41.1 through brio::DeviceUid) - this family's identity is
 // factory-programmed and there is no USERROW to label; ident.xtal is

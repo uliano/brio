@@ -98,8 +98,9 @@ SECOND register group, which only the G0B1 class has and which
   there is no ONEBIT bit and no noise flag to lose), and `has_lin()`,
   `has_irda()`, `has_smartcard()`, `has_autobaud()` are constant false.
 - `LpUart<n, pins, rx_size = 64, tx_size = 256, TxEngine, RxEngine,
-  opts>` - every verb, every default and every option of `Uart`
-  (docs/stm32g0/usart.md), because it is the same task - with one
+  opts, Placement>` - every verb, every default and every option of
+  `Uart` (docs/stm32g0/usart.md), the placement of its interrupt bodies
+  included, because it is the same task - with one
   resolution of its own: the paced receiver's tail is IDLE, this
   peripheral having no receiver time-out (usart.md, "The receive
   side"), measured with the whole console moved here (letter `v`).

@@ -163,6 +163,18 @@ struct Stm32g0Platform {
     /// which is what lets util/ring.hpp take its lock-free path here.
     static constexpr unsigned atomic_width = 4;
 
+    /// This family places `.fast_text` in SRAM: the three linker scripts
+    /// (stm32g0/ld/) collect it first in .data, which the crt copies
+    /// before main(), and the vector table holds absolute addresses, so a
+    /// vector placed there is entered directly; a CALL between the flash
+    /// and SRAM is out of a BL's 16 MB and goes through the linker's
+    /// long-branch veneer (docs/stm32g0/platform.md, "Code in SRAM"). A
+    /// driver of this stratum may therefore be given util/placement.hpp's
+    /// InRam - on every part, the STM32G031's 8 KB included: the placement
+    /// is the program's opt-in and its cost the program's to weigh, and a
+    /// link that does not fit is refused by the script's ram region.
+    static constexpr bool places_fast_text = true;
+
     /// Panic breadcrumb in .noinit: the linker script marks the section
     /// NOLOAD and the crt neither loads nor zeroes it, so the record
     /// survives a warm reset and can be reported at the next boot.

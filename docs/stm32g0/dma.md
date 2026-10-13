@@ -104,7 +104,10 @@ handed in at `arm()`:
   after lap with its count register as the ring's producer index (below,
   "The circular receive"). They are the OPTIONAL slots `Uart`'s,
   `SpiHost`'s and `I2cHost`'s templates take - the bus hosts run the
-  one-shot receive, the `Uart` the ring.
+  one-shot receive, the `Uart` the ring. Their `abandon()` is cold and
+  out of line, so a driver that flattens its interrupt body into its
+  vector or into SRAM ([platform.md](platform.md), "Code in SRAM")
+  leaves the error path in the flash.
 - `DmaLoopEngine<n, ch, Elem>` - `util/block_stream.hpp`'s
   **BlockPlayer**: one caller-owned table played into a peripheral for
   ever, on a CIRCULAR channel.

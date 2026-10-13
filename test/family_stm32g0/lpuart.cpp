@@ -111,6 +111,8 @@ using Lp = LpUart<1, lp1>;
 using LpLse = LpUart<1, lp1, 64, 64, NoDmaEngine, NoDmaEngine, lse_opts>;
 using LpFifo = LpUart<1, lp1, 64, 64, NoDmaEngine, NoDmaEngine, hsi_fifo>;
 using LpWake = LpUart<1, lp1, 64, 64, NoDmaEngine, NoDmaEngine, wake_opts>;
+/// The task's placement rides the LPUART alias too (util/placement.hpp).
+using LpRam = LpUart<1, lp1, 64, 64, NoDmaEngine, NoDmaEngine, UartOptions{}, InRam>;
 static_assert(LpLse::kernel_hz<SysClock>() == 32768);
 static_assert(LpFifo::kernel_hz<SysClock>() == 16'000'000);
 static_assert(LpLse::min_hz_for(9600) == 28800);
@@ -123,6 +125,8 @@ void lpuart_verbs() {
     (void)LpWake::init(clock, 9600);
     (void)Lp::isr();
     (void)LpFifo::isr();
+    (void)LpRam::init(clock, 115200);
+    (void)LpRam::isr();
     (void)LpWake::wakes();
     static_assert(BulkSink<Lp> && SpanSource<Lp>);
     (void)Lp::write_byte(0x55);

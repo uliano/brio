@@ -31,6 +31,17 @@
 // release build's: the debug preset's -fno-inline switches it off and the
 // vectors there call cycles().)
 //
+// WHERE THE DRIVERS' HOT PATHS RUN FROM (util/placement.hpp): every
+// driver this image binds that takes one - the console, the SPI hosts and
+// letter u's four ports; the I2C host takes none (stm32g0/i2c.hpp) -
+// takes its placement from HotPlace.
+// In this file it is InFlash, every body inline in its vector in the
+// flash; bench_stm32_ram.cpp is this file with BENCH_HOT_IN_RAM defined,
+// HotPlace InRam - each body one instance in SRAM behind the SAME vectors,
+// left in the flash - so the two images, letter by letter, are the
+// placement's measurement on this family (docs/stm32g0/platform.md,
+// "Code in SRAM"). The banner says which image runs.
+//
 // THE PLATFORM the idle path runs on is brio::BenchIdle<Stm32g0Platform<>,
 // Ruler> (`Idle`): every idle turn is a masked call of Idle::idle(),
 // which stamps the window around the platform's DSB + WFI + unmask.
@@ -145,7 +156,7 @@
 //      echoes raise; a frame lost to an overrun never completes the pump,
 //      which the 20 ms budget and recover() would then report):
 //        spi.poll    16 and 256 frames of 8 bits (`spi.poll`) and of 16
-//                    (`spi.poll16`) at PCLK/4 and PCLK/16, POLLED - the
+//                    (`spi.poll16`) at PCLK/2, PCLK/4 and PCLK/16, POLLED - the
 //                    whole transaction inside start(): wall against the
 //                    wire - in the WRITE shape (rx null: the transmit-only
 //                    loop, nothing read back) and, as `.rx`, in the receive
@@ -316,13 +327,28 @@ namespace {
 
 using namespace brio;
 
+// The image's name and where the drivers' hot paths run from (the file
+// header): this file is bench_stm32, the flash; bench_stm32_ram.cpp
+// defines both and includes it.
+#if !defined(BENCH_IMAGE)
+#define BENCH_IMAGE "bench_stm32"
+#endif
+constexpr const char* bench_image = BENCH_IMAGE;
+#if defined(BENCH_HOT_IN_RAM)
+using HotPlace = InRam;
+constexpr const char* hot_in = "SRAM (InRam: the console, the SPI hosts, the loop's ports)";
+#else
+using HotPlace = InFlash;
+constexpr const char* hot_in = "flash (InFlash)";
+#endif
+
 // The console pads: USART2_TX on PA2, USART2_RX on PA3, both AF1
 // (DS13560 table 13), which is the ST-LINK's virtual COM port.
 constexpr UartPins console_pins{
     .tx = {'A', 2, PinFunction::af1},
     .rx = {'A', 3, PinFunction::af1},
 };
-using Serial = Uart<2, console_pins>;  // rings 64/256 (defaults)
+using Serial = Uart<2, console_pins, 64, 256, NoDmaEngine, NoDmaEngine, UartOptions{}, HotPlace>;
 constexpr Serial serial;
 
 constexpr uint32_t console_baud = 115200;
@@ -744,7 +770,7 @@ constexpr SpiPins spi_pins{
     .mosi = {'B', 5, PinFunction::af0},
     .nss = {},
 };
-using SpiHw = SpiHost<1, spi_pins, SpiTx, SpiRx>;
+using SpiHw = SpiHost<1, spi_pins, SpiTx, SpiRx, HotPlace>;
 volatile bool spi_done = false;
 volatile bool spi_live = false;   // read by the vectors: a plain store would be dead to the compiler
 alignas(4) uint8_t spi_tx[512];
@@ -1007,7 +1033,7 @@ void td_dma() {
 /// The ENGINELESS host on letter d's pads: its polled loop and its frame
 /// pump are what an engined host hands the command phase to, and what a
 /// host with no engines runs for everything.
-using SpiSw = SpiHost<1, spi_pins>;
+using SpiSw = SpiHost<1, spi_pins, NoDmaEngine, NoDmaEngine, HotPlace>;
 volatile bool sw_live = false;   // the SPI1 vector's switch, as spi_live is
 /// The select and the D/C of `spi.req`, two spare pads nothing is wired
 /// to: PA15 (the SPI suite's own chip select on this board) and PB6.
@@ -1129,8 +1155,8 @@ void te_host() {
     sw_live = true;
     // The polled loop and the pump in both shapes - the WRITE (rx null:
     // nothing read back) and the receive (`.rx`: the frames read back
-    // into a buffer) - 16 and 256 frames, both widths, at PCLK/4 and
-    // PCLK/16, the select on PA15 and no D/C.
+    // into a buffer) - 16 and 256 frames, both widths, at PCLK/2, PCLK/4
+    // and PCLK/16, the select on PA15 and no D/C.
     struct Op {
         const char* name;
         bool wide;
@@ -1145,8 +1171,10 @@ void te_host() {
     };
     for (const Op& op : ops) {
         const SpiDataSize bits = op.wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
-        for (const uint16_t div : {uint16_t{4}, uint16_t{16}}) {
-            const SpiClock rate = div == 4u ? SpiClock::div4 : SpiClock::div16;
+        for (const uint16_t div : {uint16_t{2}, uint16_t{4}, uint16_t{16}}) {
+            const SpiClock rate = div == 2u   ? SpiClock::div2
+                                  : div == 4u ? SpiClock::div4
+                                              : SpiClock::div16;
             for (const uint16_t frames : {uint16_t{16}, uint16_t{256}}) {
                 run_host<SpiSw>(op.name, bits, rate, div, op.polled, frames, 0, ReqCs::ref(), {},
                                 op.read_back);
@@ -1196,10 +1224,11 @@ constexpr uint32_t loop_long = loop_big ? 256u : 64u;
 
 using LoopTx = DmaTxEngine<1, 2>;
 using LoopRx = DmaRxEngine<1, 3>;
-using TxPlain = Uart<1, loop_pins, 16, loop_tx_ring>;
-using TxEngined = Uart<1, loop_pins, 16, loop_tx_ring, LoopTx>;
-using RxPlain = Uart<1, loop_pins, loop_rx_ring, loop_tx_ring, LoopTx, NoDmaEngine, single_wire>;
-using RxEngined = Uart<1, loop_pins, loop_rx_ring, loop_tx_ring, LoopTx, LoopRx, single_wire>;
+using TxPlain = Uart<1, loop_pins, 16, loop_tx_ring, NoDmaEngine, NoDmaEngine, UartOptions{}, HotPlace>;
+using TxEngined = Uart<1, loop_pins, 16, loop_tx_ring, LoopTx, NoDmaEngine, UartOptions{}, HotPlace>;
+using RxPlain =
+    Uart<1, loop_pins, loop_rx_ring, loop_tx_ring, LoopTx, NoDmaEngine, single_wire, HotPlace>;
+using RxEngined = Uart<1, loop_pins, loop_rx_ring, loop_tx_ring, LoopTx, LoopRx, single_wire, HotPlace>;
 
 enum class LoopMode : uint8_t { none, tx_plain, tx_engined, rx_plain, rx_engined };
 volatile LoopMode loop_mode = LoopMode::none;   // read by the vectors
@@ -1841,9 +1870,10 @@ void ti_i2c() {
 }
 
 void banner() {
-    print(serial, crlf, "bench_stm32 - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
+    print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
           " Hz, console USART2 ", console_baud, " 8N1 (", Serial::actual_baud(SysClock::pclk_hz),
           " baud), ruler SysTick cycles", crlf);
+    print(serial, "  the drivers' hot paths run from ", hot_in, crlf);
     print_acr();   // the condition the plain letters run under
     bench.menu();
 }

@@ -140,6 +140,7 @@ function(stm32_add_app name)
         -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${STM32G0_MCU}.ld
         -Wl,--gc-sections
+        -Wl,--no-warn-rwx-segments   # .data carries .fast_text, the code a program places in SRAM: code copied there is a writable, executable segment (ld/)
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${STM32G0_NVHEAP_BUILD_ID}
     )

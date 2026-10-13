@@ -607,6 +607,7 @@ it was born on ([../ch32x035/platform.md](../ch32x035/platform.md), "A
 handler in SRAM"); on the SAM C21 the Cortex-M0+'s long-branch veneer
 from the flash into SRAM makes a program-placed vector the cleaner way
 on most paths ([../samc21/platform.md](../samc21/platform.md)); the
-STM32G0 is measured to gain and the STM32F4 to lose
+STM32G0 places it too, its SPI host and USART task gaining behind a
+vector left in the flash, and the STM32F4 is measured to lose
 ([../stm32g0/platform.md](../stm32g0/platform.md),
 [../stm32f4/platform.md](../stm32f4/platform.md)).

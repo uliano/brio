@@ -84,10 +84,30 @@ SECTIONS
         *(.ARM.exidx* .gnu.linkonce.armexidx.*)
     } > rom
 
+    /* Initialized data: load image in flash, run address in RAM.
+     *
+     * CODE THAT RUNS FROM SRAM, placed first inside .data: the crt's copy
+     * of .data moves it into SRAM with the initialized data before main,
+     * so it needs no loop of its own, and an image that places nothing
+     * there gets zero bytes from these lines. `.fast_text` is code that
+     * MAY run from SRAM, for speed - what a program opts into,
+     * util/placement.hpp's Hot<InRam> and a program's own placed
+     * function; what it buys is the fetch: at 64 MHz the flash answers at
+     * two wait states behind the prefetch and the instruction cache
+     * (RM0444 3.3.4, 3.3.5), the SRAM at none (2.3) -
+     * docs/stm32g0/platform.md, "Code in SRAM". `.ram_text` is code that
+     * MUST, for correctness - nothing of this stratum today, the name kept
+     * for what the family's own pieces may need. A call between the two
+     * memories is out of a BL's reach and the linker puts a long-branch
+     * veneer beside the caller (its input section's name and `.__stub`),
+     * in whichever memory the caller runs from. */
     .data :
     {
         . = ALIGN(4);
         __data_start = .;
+        *(.fast_text .fast_text.*)
+        *(.ram_text .ram_text.*)
+        . = ALIGN(4);
         *(.data .data.*)
         . = ALIGN(4);
         __data_end = .;

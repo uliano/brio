@@ -50,10 +50,16 @@ SECTIONS
         *(.ARM.exidx* .gnu.linkonce.armexidx.*)
     } > rom
 
+    /* Code that MAY run from SRAM (`.fast_text`, util/placement.hpp) and
+     * code that MUST (`.ram_text`), first in .data as ld/stm32g0b1re.ld
+     * says why. */
     .data :
     {
         . = ALIGN(4);
         __data_start = .;
+        *(.fast_text .fast_text.*)
+        *(.ram_text .ram_text.*)
+        . = ALIGN(4);
         *(.data .data.*)
         . = ALIGN(4);
         __data_end = .;

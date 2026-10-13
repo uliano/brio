@@ -115,6 +115,10 @@
 //   self-test on PA9 (the far board dark or listening) | c the core's rate
 //   now, into use | t the tracker's rate over three windows
 //
+// Placement (docs/stm32g0/platform.md, "Code in SRAM"): nothing in SRAM,
+// the console InFlash. The link is USART1 polled by the peer's own loop,
+// not a Uart's interrupt path, and the console is observability only.
+//
 // The ident label is the 96-bit unique ID's first word in hex (RM0444
 // 41.1; this family has no user label).
 //

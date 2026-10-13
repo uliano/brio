@@ -333,3 +333,28 @@ void usart_tail_verbs() {
     (void)Card::end_of_block();
     Card::release();
 }
+
+// ---- the placement (util/placement.hpp) -----------------------------------------
+// The task's last parameter: InFlash by default (Console above), InRam
+// here - isr() one instance in `.fast_text.brio`, and the RS-485 alias
+// carries it too. A program's own `.fast_text` function sits in the same
+// TU as the COMDAT instances (the section-type trap util/placement.hpp
+// states). An unknown tag is refused (neg/uart_placement_unknown.cpp).
+using RamConsole = Uart<2, u2, 64, 256, NoDmaEngine, NoDmaEngine, UartOptions{}, InRam>;
+using RamRs485 = Rs485<1, u1, de_pad, 8, 8, 64, 64, UartOptions{}, InRam>;
+
+extern "C" [[gnu::section(".fast_text")]] void fixture_placed_uart_vector() {
+    (void)RamConsole::isr();
+    (void)Console::isr();
+}
+
+void ram_uart_verbs() {
+    constexpr SysClock clock;
+    (void)RamConsole::init(clock, 115200);
+    (void)RamConsole::write_byte(0x55);
+    fixture_placed_uart_vector();
+    RamConsole::release();
+    (void)RamRs485::init(clock, 115200);
+    (void)RamRs485::isr();
+    RamRs485::release();
+}

@@ -349,6 +349,10 @@ using RankedUart = Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<
                         UartOptions{.rx_priority = DmaPriority::low}>;
 using NoFifoUart = Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<1, 5>,
                         UartOptions{.fifo = false}>;
+/// Both bodies in SRAM (util/placement.hpp): the completion with the next
+/// block's launch flattened into it, the receive marks, and isr().
+using RamEngineUart =
+    Uart<2, engine_pins, 64, 256, DmaTxEngine<1, 4>, DmaRxEngine<1, 5>, UartOptions{}, InRam>;
 static_assert(RankedUart::options.rx_priority == DmaPriority::low &&
               EngineUart::options.rx_priority == DmaPriority::very_high);
 static_assert(EngineUart::rx_kick == EngineUart::fifo_mode && !NoFifoUart::rx_kick);
@@ -381,6 +385,11 @@ void engined_transport() {
     (void)NoFifoUart::init(clock, 115200);
     (void)NoFifoUart::isr();
     (void)NoFifoUart::rx_kicks();
+    (void)RamEngineUart::init(clock, 115200);
+    (void)RamEngineUart::write_bulk(std::span<const uint8_t>(bytes, 4));
+    (void)RamEngineUart::isr();
+    (void)RamEngineUart::dma_isr();
+    RamEngineUart::release();
     Usart<2>::rx_request_restart();
     Usart<2>::dma_receive(true);
     Usart<2>::dma_transmit(false);

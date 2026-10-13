@@ -97,6 +97,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <concepts>
 #include <cstring>
 #include <optional>
 #include <span>
@@ -111,6 +112,7 @@
 #include "stm32g0/pin.hpp"
 #include "stm32g0/platform.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
 
@@ -1601,12 +1603,36 @@ struct UartRxRing<true, Owner, size, Engine> {
  * shift register hold; without the FIFO (`.fifo = false`) the same
  * starvation above one character loses frames. A healthy stream never
  * kicks; rx_kicks() counts the kicks.
+ *
+ * WHERE THE HOT PATHS RUN FROM: the task's placement, its last template
+ * parameter (util/placement.hpp). Both interrupt bodies take it, each ONE
+ * function of it: isr() - the receiver, the transmitter's FIFO refill or
+ * per-byte TXE, the errors - and dma_isr(), the transmit engine's
+ * completion with the next block's launch and the receive engine's marks.
+ * Under InFlash, the default, each is inline in the vector that binds it,
+ * as without the placement; under InRam each is one flattened instance in
+ * SRAM (`.fast_text.brio`), called through the linker's long-branch
+ * veneer from the flash. At 64 MHz the flash answers at two wait states
+ * behind the prefetch and the cache (RM0444 3.3.4, 3.3.5) and the SRAM at
+ * none (2.3), and on this family both bodies come out shorter from SRAM
+ * even behind a vector left in the flash, the veneer and the call's frame
+ * counted: the receiver's entry by a ninth, the transmit engine's
+ * completion by a tenth, the transmitter's refill by a sixtieth to a
+ * sixteenth (docs/stm32g0/usart.md has every figure, both placements).
+ * Both placements flatten the body, pump_tx() included - the next
+ * block's launch inline in the completion, never a call - and keep
+ * harvest() and the engines' abandon() out of line: once a burst and
+ * the error path, not once a byte.
  */
 template <typename Res, UartPins pins, uint32_t rx_size = 64,
           uint32_t tx_size = 256, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine, UartOptions opts = UartOptions{}>
+          typename RxEngine = NoDmaEngine, UartOptions opts = UartOptions{},
+          typename Placement = InFlash>
 class UartTask {
     using S = Res;
+
+    static_assert(HotPlacement<Placement, Stm32g0Platform<>>,
+                  "brio Uart: the placement is util/placement.hpp's InFlash (the default) or InRam");
 
     /// The divisor type this peripheral's baud generator speaks: sixteen
     /// bits for a USART (33.5.7), twenty for an LPUART (34.4.7). Named
@@ -2016,8 +2042,16 @@ public:
     /// Returns harvest()'s edge: true when the receive ring holds bytes
     /// the consumer has not been told of - the same answer isr() gives,
     /// so the same kernel glue posts RxActivity on it. False on a vector
-    /// entered for the transmit channel alone.
+    /// entered for the transmit channel alone. Through the task's
+    /// placement (the class comment).
     [[gnu::always_inline]] static bool dma_isr() {
+        return Hot<Placement>::run([] { return dma_entry(); });
+    }
+
+private:
+    /// The channels' body, written once: dma_isr() runs it through the
+    /// task's placement.
+    [[gnu::always_inline]] static bool dma_entry() {
         bool edge = false;
         if constexpr (has_tx_engine) {
             const uint8_t f = TxEngine::service();
@@ -2045,6 +2079,7 @@ public:
         return edge;
     }
 
+public:
     /// The receive engine's housekeeping and its edge, the body both of
     /// this transport's vectors run on a receive event: isr() on the
     /// line's IDLE and on a receive error, dma_isr() on the ring's half
@@ -2071,7 +2106,11 @@ public:
     /// a run across it releases into the restarted ring. A transfer error
     /// is a bus error on an address the binding fixed (10.4.7), never a
     /// receive condition, and dma_faults() reports the lap it cost.
-    static bool harvest() {
+    ///
+    /// OUT OF LINE: once a burst or half a lap, not once a byte, and from
+    /// both vectors, so the placement's flatten copies it into neither -
+    /// nor, under InRam, into SRAM (the class comment).
+    [[gnu::noinline]] static bool harvest() {
         if constexpr (!has_rx_engine) {
             return false;
         } else {
@@ -2216,7 +2255,15 @@ public:
     /// the ring by draining it, so no wakeup is ever lost. With a receive
     /// engine no received byte passes through here: the entry is the
     /// line's IDLE or a receive error, and the edge is harvest()'s.
+    /// Through the task's placement (the class comment).
     [[gnu::always_inline]] static bool isr() {
+        return Hot<Placement>::run([] { return isr_entry(); });
+    }
+
+private:
+    /// The instance's body, written once: isr() runs it through the
+    /// task's placement.
+    [[gnu::always_inline]] static bool isr_entry() {
         USART_TypeDef& r = S::regs();
         const uint32_t st = r.ISR;
         bool edge = false;
@@ -2349,6 +2396,7 @@ public:
         return edge;
     }
 
+public:
     /**
      * Queue one byte; false when the ring is full (print() retries).
      *
@@ -2912,17 +2960,17 @@ private:
 /// The task over a USART instance: the name every application knows.
 template <uint8_t n, UartPins pins, uint32_t rx_size = 64, uint32_t tx_size = 256,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
-          UartOptions opts = UartOptions{}>
-using Uart = UartTask<Usart<n>, pins, rx_size, tx_size, TxEngine, RxEngine, opts>;
+          UartOptions opts = UartOptions{}, typename Placement = InFlash>
+using Uart = UartTask<Usart<n>, pins, rx_size, tx_size, TxEngine, RxEngine, opts, Placement>;
 
 /// RS-485: a Uart with the driver enable of 33.5.20 on the RTS pad. The
 /// DE timings are SAMPLE times (1/16 of a bit at OVER8 = 0), which is
 /// the one thing about this feature that is easy to get wrong.
 template <uint8_t n, UartPins pins, PinSel de_pin, uint8_t assertion = 0,
           uint8_t deassertion = 0, uint32_t rx_size = 64, uint32_t tx_size = 256,
-          UartOptions base = UartOptions{}>
+          UartOptions base = UartOptions{}, typename Placement = InFlash>
 using Rs485 = UartTask<Usart<n>, pins, rx_size, tx_size, NoDmaEngine, NoDmaEngine,
-                       uart_with_driver_enable(base, de_pin, assertion, deassertion)>;
+                       uart_with_driver_enable(base, de_pin, assertion, deassertion), Placement>;
 
 // ---- the chapter's other personalities -----------------------------------------
 //

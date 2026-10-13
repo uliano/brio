@@ -532,8 +532,8 @@ struct Lpuart {
 /// engine slot is the same; what changes is what the resource answers.
 template <uint8_t n, UartPins pins, uint32_t rx_size = 64, uint32_t tx_size = 256,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
-          UartOptions opts = UartOptions{}>
-using LpUart = UartTask<Lpuart<n>, pins, rx_size, tx_size, TxEngine, RxEngine, opts>;
+          UartOptions opts = UartOptions{}, typename Placement = InFlash>
+using LpUart = UartTask<Lpuart<n>, pins, rx_size, tx_size, TxEngine, RxEngine, opts, Placement>;
 
 #endif // LPUART1_BASE
 

@@ -15,7 +15,8 @@
  *   SpiHost<...>  the TASK util/spi_bus.hpp drives: the transfer engine
  *                 with the Request shape and the public surface every
  *                 target's SpiHost carries (docs/design/spi-bus.md), so
- *                 a device client compiles here untouched;
+ *                 a device client compiles here untouched, and the
+ *                 placement of its two hot paths (util/placement.hpp);
  *   SpiClient<..> the other end of the wire: the hardware NSS input, the
  *                 preload and the one-ahead pump, a polled surface and
  *                 an ISR body. A client is a PROTOCOL and the protocol
@@ -118,6 +119,7 @@
 #include <stdint.h>
 
 #include <bit>
+#include <concepts>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -130,9 +132,11 @@
 #include "stm32g0/dma_engine.hpp"
 #include "stm32g0/nvic.hpp"
 #include "stm32g0/pin.hpp"
+#include "stm32g0/platform.hpp"
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/spi_bus.hpp"
 
 namespace brio {
@@ -1690,6 +1694,26 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  * empty) and util/bus_master.hpp's PrepareSleep voter is the pattern; no
  * engine can enforce it from below, so it is stated and not pretended.
  *
+ * WHERE THE HOT PATHS RUN FROM: the host's placement, its last template
+ * parameter (util/placement.hpp). Two paths take it, each ONE function of
+ * it: the pump's entry (isr()), and the polled transaction - the command
+ * phase, the D/C flip and the data phase in whichever of the loops below
+ * the request picks, both widths - which start() calls once a request.
+ * Under InFlash, the default, the entry is what it would be without the
+ * placement, inline in the vector that binds it, and the transaction a
+ * function of its own in the flash (polled_transaction() says why); under
+ * InRam each is one instance in SRAM (`.fast_text.brio`), called through
+ * the linker's long-branch veneer from the flash. At 64 MHz the flash answers at two wait states
+ * behind the prefetch and the cache (RM0444 3.3.4, 3.3.5), which hide a
+ * fifth of what that costs these bodies, and the SRAM at none (2.3): the
+ * pump's entry is an eighth shorter from SRAM behind a vector left in the
+ * flash, the veneer and the call's frame counted, the receive loop at
+ * PCLK/2 a twentieth and a short request some 15 to 30 cycles
+ * (docs/stm32g0/spi.md has every figure, both placements). The pump's cost per frame follows the placement, and the
+ * crossover to the engines with it (dma_min_frames). The engines'
+ * completion (dma_isr()) takes no placement: one entry a transaction,
+ * inline in its vector, which a program may place in `.fast_text`.
+ *
  * ISR wiring (app glue, as usual):
  *   extern "C" void SPI1_IRQHandler() {
  *       if (SpiHw::isr()) { brio::post<SpiBus>(brio::TransferDone{SpiHw::status()}); }
@@ -1700,9 +1724,12 @@ inline constexpr uint8_t spi_dma_fault = bus_engine_status;
  *   }
  */
 template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine>
+          typename RxEngine = NoDmaEngine, typename Placement = InFlash>
 class SpiHost {
     using S = Spi<n>;
+
+    static_assert(HotPlacement<Placement, Stm32g0Platform<>>,
+                  "brio SpiHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
 
     static_assert(sizeof(TxEngine) > 0 && sizeof(RxEngine) > 0,
                   "the engine slots must name a complete type: a DmaTxEngine / "
@@ -1751,17 +1778,26 @@ public:
     /// two-byte phase packed cost 35 cycles more than unpacked).
     static constexpr uint8_t packed_min_frames = 6;
 
+    /// Whether the pump's entry and the polled transaction run from SRAM
+    /// (the class comment).
+    static constexpr bool placed_in_ram = std::same_as<Placement, InRam>;
+
     /// The data phase from which the engines are cheaper than the pump,
-    /// in FRAMES, and its two measured inputs (`bench_stm32` letters d
-    /// and e on the STM32G0B1RE, docs/stm32g0/spi.md): what a transaction
-    /// costs above the wire on the engines, whatever its length, and what
-    /// the pump costs per frame. A shorter data phase takes the pump even
-    /// on an engined host.
-    static constexpr uint16_t dma_fixed_cycles = 1060;
-    static constexpr uint16_t pump_cycles_per_frame = 137;
+    /// in FRAMES, and its two measured inputs (`bench_stm32` and
+    /// `bench_stm32_ram` letters d and e on the STM32G0B1RE,
+    /// docs/stm32g0/spi.md): what a transaction costs above the wire on
+    /// the engines, whatever its length - none of its path placed, so one
+    /// figure for both, `bench_stm32`'s (`bench_stm32_ram` reads 24 cycles
+    /// less, the bench's shared DMA vector shorter there) - and what the
+    /// pump costs per frame, which follows the placement. A shorter data
+    /// phase takes the pump even on an engined host.
+    static constexpr uint16_t dma_fixed_cycles = 1093;
+    static constexpr uint16_t pump_cycles_per_frame = placed_in_ram ? 122 : 138;
     static constexpr uint16_t dma_min_frames =
         static_cast<uint16_t>((dma_fixed_cycles + pump_cycles_per_frame - 1u) /
                               pump_cycles_per_frame);
+    static_assert(dma_min_frames == (placed_in_ram ? 9u : 8u),
+                  "brio SpiHost: the crossover moved - docs/stm32g0/spi.md states it");
 
     struct Request {
         PinRef cs;   ///< asserted low around the transaction
@@ -2054,12 +2090,7 @@ public:
         // and the arbiter serializes the two, so nothing is silenced
         // here; what blocks is this dispatch, and global interrupts stay
         // enabled under it.
-        bool ok;
-        if (spi_frame_is_halfword(r.bits)) {
-            ok = run_polled<true>(r);
-        } else {
-            ok = run_polled<false>(r);
-        }
+        const bool ok = polled_transaction(r);
         r.cs.set();   // release: transaction done
         if (!ok) {
             status_ = spi_stalled;
@@ -2076,14 +2107,9 @@ public:
     ///
     /// Returns true when the transaction just completed (CS released):
     /// the edge on which the app's glue posts TransferDone to the bus AO.
+    /// Through the host's placement (the class comment).
     [[gnu::always_inline]] static bool isr() {
-        if ((S::isr() & SpiFlag::rxne) == 0u) {
-            return false;
-        }
-        if (spi_frame_is_halfword(req_.bits)) {
-            return serve<true>();
-        }
-        return serve<false>();
+        return Hot<Placement>::run([] { return pump_entry(); });
     }
 
     /// The DMA channels' interrupt body - call from whichever
@@ -2523,7 +2549,41 @@ private:
         return ok;
     }
 
+    /// The polled transaction, ONE function of the host's placement (the
+    /// class comment) called once a request, both widths and every shape
+    /// in it: under InRam the instance in SRAM, under InFlash a function
+    /// of its own in the flash, flattened the same way. OUT OF LINE UNDER
+    /// BOTH: inline in start() the flattened loops share start()'s
+    /// registers and spill them - the receive loop measured 7752 cycles at
+    /// PCLK/2 there and 6470 in a function of its own (256 frames, the
+    /// wire 4096), the call costing a request nothing measurable.
+    [[gnu::always_inline]] static bool polled_transaction(const Request& r) {
+        if constexpr (placed_in_ram) {
+            return Hot<InRam>::run([&r] { return polled_body(r); });
+        } else {
+            return polled_in_flash(r);
+        }
+    }
+    [[gnu::noinline]] static bool polled_in_flash(const Request& r) {
+        return Hot<InFlash>::run([&r] { return polled_body(r); });
+    }
+    [[gnu::always_inline]] static bool polled_body(const Request& r) {
+        return spi_frame_is_halfword(r.bits) ? run_polled<true>(r) : run_polled<false>(r);
+    }
+
     // ---- the pump under the interrupt ---------------------------------------
+
+    /// The pump's entry, written once: isr() runs it through the host's
+    /// placement.
+    [[gnu::always_inline]] static bool pump_entry() {
+        if ((S::isr() & SpiFlag::rxne) == 0u) {
+            return false;
+        }
+        if (spi_frame_is_halfword(req_.bits)) {
+            return serve<true>();
+        }
+        return serve<false>();
+    }
 
     /// The first AHEAD frames of the phase in force, from the tenure's
     /// copy. The data phase's source is the request's tx or the dummy.
@@ -2649,8 +2709,11 @@ private:
     /// DmaTxEngine::start() with the frame's own beat - five stores each.
     /// The buffers of a wide request hold each frame low byte first, the
     /// CPU's own order, so a half-word beat reads and writes them as the
-    /// frame pump's load_frame()/store_frame() do.
-    static void launch_dma(const Request& r) {
+    /// frame pump's load_frame()/store_frame() do. OUT OF LINE: once a
+    /// transaction, from the pump's entry and the polled transaction
+    /// both, so the placement's flatten does not copy it into either -
+    /// nor, under InRam, into SRAM.
+    [[gnu::noinline]] static void launch_dma(const Request& r) {
         dma_done_ = false;
         dma_polled_ = r.polled;
         dma_active_ = true;
@@ -2714,7 +2777,8 @@ private:
     /// every wait here (the slowest frame is 256 x 16 PCLK cycles, and
     /// the budget scales with the length). A block that did not complete
     /// leaves its frames where they are: the FIFO is drained with it.
-    static void spin_dma(uint16_t frames) {
+    /// Out of line for launch_dma()'s reason.
+    [[gnu::noinline]] static void spin_dma(uint16_t frames) {
         uint32_t spins = 200'000u + 6'000u * static_cast<uint32_t>(frames);
         while (!dma_done_ && spins-- != 0u) {
         }

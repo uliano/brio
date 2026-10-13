@@ -401,3 +401,53 @@ void spi_tasks() {
 // ---- the vector name the reserve derives -------------------------------------
 
 extern "C" void BRIO_STM32G0_SPI2_HANDLER();
+
+// ---- the placement (util/placement.hpp) -----------------------------------------
+// The host's last parameter: InFlash by default (Host above), InRam here -
+// the pump's entry and the polled transaction each ONE instance in
+// `.fast_text.brio`, on both shapes of host. A program's own placed
+// function names `.fast_text` in the SAME translation unit as those COMDAT
+// instances (the section-type trap util/placement.hpp states): this TU is
+// the proof it compiles. The pump's cost follows the tag, and the
+// crossover with it. An unknown tag is refused
+// (neg/spi_host_placement_unknown.cpp).
+static_assert(platform_places_fast_text<Stm32g0Platform<>>);
+static_assert(HotPlacement<InRam, Stm32g0Platform<>> && HotPlacement<InFlash, Stm32g0Platform<>>);
+using RamHost = SpiHost<1, host_pins, NoDmaEngine, NoDmaEngine, InRam>;
+using RamEngineHost = SpiHost<1, host_pins, Tx, Rx, InRam>;
+static_assert(RamHost::placed_in_ram && !Host::placed_in_ram);
+static_assert(RamHost::pump_cycles_per_frame < Host::pump_cycles_per_frame);
+static_assert(RamEngineHost::dma_min_frames == 9u && EngineHost::dma_min_frames == 8u);
+// The placement moves code, never the Request a device client fills.
+static_assert(sizeof(RamHost::Request) == sizeof(Host::Request));
+
+extern "C" [[gnu::section(".fast_text")]] void fixture_placed_spi_vector() {
+    (void)RamHost::isr();
+    (void)Host::isr();
+}
+
+void ram_host_verbs() {
+    constexpr SysClock clock;
+    static const uint8_t out[4] = {1, 2, 3, 4};
+    static uint8_t in[4] = {};
+    (void)RamHost::init(clock);
+    RamHost::Request r{};
+    r.tx = lend<Lease::reply>(out);
+    r.rx = lend<Lease::reply>(in);
+    r.len = 4;
+    r.polled = true;
+    (void)RamHost::start(r);   // the polled transaction, in SRAM
+    r.polled = false;
+    (void)RamHost::start(r);   // the pump, its entry in SRAM
+    fixture_placed_spi_vector();
+    RamHost::release();
+    (void)RamEngineHost::init(clock);
+    RamEngineHost::Request e{};
+    e.tx = lend<Lease::reply>(out);
+    e.len = 4;
+    e.polled = true;
+    (void)RamEngineHost::start(e);
+    (void)RamEngineHost::isr();
+    (void)RamEngineHost::dma_isr();
+    RamEngineHost::release();
+}
