@@ -310,6 +310,26 @@ every controller the part has, for a caller that wants the silicon's own
 answer. The alternative the same measurements opened is to slow down
 instead: the chip carries data with HCLK as low as 24 MHz.
 
+### Awake, a core reading a peripheral back to back starves them too
+
+The same arbitration bites with the core running. A core that spins on
+a GPIO input register - a load every few cycles through the peripheral
+bus - keeps a channel waiting for that bus: measured on the
+CH32V303VCT6, SPI3 as a client on DMA2's channels 1 and 2, the
+receive channel lost frames (OVR, 14 to 31 of 64 frames landed) behind a
+host clocking 8-bit frames at 18 MHz, 71 to 155 core cycles a frame,
+while the core polled the select pad in a tight loop; the
+same serve with the core spinning on an SRAM word and reading the pad
+once every 256 turns - or with 64 empty instructions between pad reads -
+kept every frame, and so did the core polling the SRAM word alone. So a
+program that waits on a DMA block waits on SRAM (a completion flag, a
+count it reads rarely) or on the core's own instructions, and reads a
+peripheral register only now and then; the SPI host's polled engined
+path waits on its completion flag in SRAM, and the spi_peer's serve
+reads its select pad once every 256 turns ([spi.md](spi.md)). The
+CH32V203C8T6's DMA1 under the same loop was not measured apart: its
+peer serve carried the change before its ladder ran.
+
 ## Types and verbs
 
 ### The request table

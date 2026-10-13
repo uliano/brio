@@ -12,12 +12,14 @@
 // started; without it the HSI's PLL runs the same 96 MHz nominal and the
 // ident says 0.
 //
-// WHY 96 MHz. It is the one rate every peer of the stratum can share:
-// I2C's FREQ cannot state a PB1 above 60 MHz (RM 19.12.2), so a peer
-// with an I2C keeps HCLK at or below 120 MHz, and 96 MHz puts PB1 at 48
-// (CCR exact at both speeds) and the timers of both buses at 96 MHz -
-// FOUR TIMES the 24 MHz tick usart_link.hpp counts time in, so a timer at
-// prescaler 3 counts protocol ticks exactly (the static_asserts below).
+// WHY 96 MHz. I2C's FREQ cannot state a PB1 above 60 MHz (RM 19.12.2),
+// so a peer with an I2C keeps HCLK at or below 120 MHz, and 96 MHz puts
+// PB1 at 48 (CCR exact at both speeds) and the timers of both buses at 96
+// MHz - FOUR TIMES the 24 MHz tick usart_link.hpp counts time in, so a
+// timer at prescaler 3 counts protocol ticks exactly (the static_asserts
+// below). The SPI peer, which has no I2C, runs the same crystal at 144
+// MHz instead (its own time base below: a client's bus at twice the
+// fastest host's SCK).
 //
 // THE LABEL is the part number after its CH32 prefix ("V203C8",
 // "V303VC"), NUL padded to eight characters: with two parts of this
@@ -60,6 +62,28 @@ static_assert(PeerClock::timclk1_hz == PeerClock::timclk2_hz,
 inline bool start_clock(bool& crystal) {
     crystal = PeerClock::init();
     return crystal || HsiClock::init();
+}
+
+/// THE SPI PEER'S TIME BASE: the same crystal x18 to 144 MHz, the
+/// stratum's ceiling, with the HSI's PLL the fallback at the same rate. A
+/// client's shifter runs on its host's SCK, but its block needs a bus at
+/// least twice that SCK (the CH32V203 datasheet's table 4-25 and the
+/// CH32V303's table 4-27 give a client 36 MHz on a PB1 instance), and the
+/// fastest host on this desk is a PB1 instance at /2 of 72 MHz - so the
+/// peer's PB1 must run at 72 MHz too, which is HCLK 144 (PB1 capped at 72,
+/// docs/ch32vx03/clock.md). The SPI peer has no I2C, so 19.12.2's ceiling
+/// does not bind it.
+using SpiPeerClock = brio::Clock<brio::ClockSource::pll, 144'000'000, 8'000'000>;
+using SpiHsiClock = brio::Clock<brio::ClockSource::pll, 144'000'000>;
+static_assert(SpiPeerClock::hz == SpiHsiClock::hz && SpiPeerClock::pclk1_hz == SpiHsiClock::pclk1_hz &&
+                  SpiPeerClock::pclk2_hz == SpiHsiClock::pclk2_hz,
+              "the fallback must run every divisor at the same rate");
+static_assert(SpiPeerClock::pclk1_hz == 72'000'000u,
+              "a client follows a host at /2 of 72 MHz only on a 72 MHz bus of its own");
+
+inline bool start_spi_clock(bool& crystal) {
+    crystal = SpiPeerClock::init();
+    return crystal || SpiHsiClock::init();
 }
 
 /// The part number after its CH32 prefix, NUL padded (the header).

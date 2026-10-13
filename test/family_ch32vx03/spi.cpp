@@ -340,6 +340,23 @@ void clients()
     (void)Client1::disable();
     Client1::release();
 
+    // The runs, both frame widths: answer, exchange, receive.
+    static uint8_t out8[4] = {1, 2, 3, 4};
+    static uint8_t in8[4] = {};
+    static uint16_t out16[4] = {1, 2, 3, 4};
+    static uint16_t in16[4] = {};
+    (void)Client1::init(clock);
+    Client1::enable();
+    const Client1::Run a = Client1::answer(std::span<const uint8_t>(out8), 1000u);
+    const Client1::Run x = Client1::exchange(std::span<const uint8_t>(out8), std::span<uint8_t>(in8), 1000u);
+    const Client1::Run r = Client1::receive(std::span<uint8_t>(in8), 1000u);
+    const Client1::Run w = Client1::exchange(std::span<const uint16_t>(out16), std::span<uint16_t>(in16), 1000u);
+    (void)Client1::answer(std::span<const uint16_t>(out16), 1000u);
+    (void)Client1::receive(std::span<uint16_t>(in16), 1000u);
+    (void)(a.count + x.count + r.count + w.count);
+    (void)(a.end == Client1::RunEnd::closed);
+    Client1::release();
+
     (void)Client2::init(clock);
     Client2::release();
 }

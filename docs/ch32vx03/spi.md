@@ -20,8 +20,10 @@ Three device classes read the chapter: CH32V20x_D6 for every CH32V203 up
 to the CH32V203C8, CH32V20x_D8 for the CH32V203RB and CH32V30x_D8 for
 the four CH32V303. Driver:
 [brio/ch32vx03/spi.hpp](../../brio/ch32vx03/spi.hpp). Reference suites:
-`test_vx03_spi`, which talks to a peer board running `spi_peer` on the
-CH32V203 and to its own third instance on the CH32V303, and
+`test_vx03_spi`, whose second set runs against the desk partner - the
+CH32V203C8T6's SPI2 wired to the CH32V303VCT6's SPI3 on its second
+column, the far board running `spi_peer` - and whose single-board set
+uses the CH32V203's SPI1 strap and the CH32V303's SPI2-SPI3 jumpers, and
 `test_vx03_i2s` for the audio face.
 
 ## What the silicon does
@@ -482,14 +484,32 @@ nothing for a timer-paced block on channels 2 and 3 ([dma.md](dma.md),
 ### The client
 
 `SpiClient<n, pins>`: `init(clock, Config)`, `enable(first)` (SPE up
-with the first answer already in the buffer), `write` / `writable` /
-`poll`, `selected()` (a live read of the NSS pad, since the peripheral
-publishes no select status), `select()` for a client under software
-management, `drive_output()` and `output_driven()` - THE DARK LISTENER,
-the answer line handed to the peripheral only for the window it answers
-in - `pad_speed()` for that one pad, the error verbs, `isr()`,
-`release()`, and `frames_ahead` = 1, this silicon's answer to the one
-number a portable client would need.
+with the first answer already in the buffer) and `enable()` (SPE up, the
+buffer empty, for a run), `write` / `writable` / `poll`, `selected()` (a
+live read of the NSS pad, since the peripheral publishes no select
+status), `select()` for a client under software management,
+`drive_output()` and `output_driven()` - THE DARK LISTENER, the answer
+line handed to the peripheral only for the window it answers in -
+`pad_speed()` for that one pad, the error verbs, `isr()`, `release()`,
+and `frames_ahead` = 1, this silicon's answer to the one number a
+portable client would need.
+
+THE RUNS are a client's unit, its per-frame verbs the degenerate case:
+`answer(out, spins)` (the answers on TXE alone, nothing read),
+`exchange(out, in, spins)` (each frame answered one ahead and read on its
+RXNE inside the next frame's time) and `receive(in, spins)` (RXNE alone,
+nothing written), over `uint8_t` or `uint16_t` frames - anything else is
+refused at compile time, DFF having two widths - each returning a `Run`
+(the frames moved and a `RunEnd`: complete, closed by the host, or
+stalled on the spin budget). They are always inline, so the frame width
+and the buffers are constants of the caller's loop. THE SELECT PAD IS THE
+WINDOW: a run waits for it to fall, polls its flag four times a look
+and reads the pad once a look, and takes the host's close only from TWO
+LOOKS IN A ROW reading it high (a transient on a board-to-board select
+wire is not a close - the findings below). Per frame, the 8-bit exchange
+in the release listing is fifteen instructions with four APB accesses
+(the two STATR polls, the DATAR store and load) and three taken branches,
+on both parts; the 16-bit one the same with half-word memory accesses.
 
 ## How to use it
 
@@ -550,13 +570,16 @@ constexpr auto rate = brio::SpiRateOf<SysClock::pclk1_hz, 4'000'000>::clock;
 brio::Spi<2>::configure_high_speed_read<brio::SpiConfig{.clock = brio::SpiClock::div2}>();
 ```
 
-The client, answering one frame ahead and dark between windows:
+The client, answering one frame ahead in a run and dark between windows:
 
 ```cpp
 using Peer = brio::SpiClient<2>;
 Peer::init(clock, {.nss = brio::SpiNss::hardware_input, .drive_output = true});
-Peer::enable(first_answer);              // before the host's first clock
-while (const auto got = Peer::poll()) { Peer::write(next_answer(*got)); }
+Peer::pad_speed(brio::PinSpeed::slow);   // the answer edge on a jumper-wire bus
+Peer::enable();                          // the buffer empty, the select still high
+const auto run = Peer::exchange(std::span<const uint8_t>(answers),
+                                std::span<uint8_t>(heard), spins);
+if (run.end == Peer::RunEnd::closed) { /* the host closed after run.count frames */ }
 Peer::drive_output(false);               // the answer line back to the bus
 ```
 
@@ -581,12 +604,11 @@ Out::enable();                           // then feed Out::data() on TXE, left c
 
 ## Bench findings
 
-`test_vx03_spi` on the CH32V203C8T6 at 144 MHz of HCLK (PB2 = 144 MHz,
-PB1 = 72 MHz), with two instruments: a strap from PA7 to PA6 that makes
-SPI1's own MOSI its MISO, and a peer board on SPI2's four wires running
-`spi_peer` (44 verdicts in `z` with the strap and no peer, the peer's
-letter declining by name). The CH32V303VCT6's findings follow in a
-section of their own.
+`test_vx03_spi`'s single-board set on the CH32V203C8T6 at 144 MHz of
+HCLK (PB2 = 144 MHz, PB1 = 72 MHz), with a strap from PA7 to PA6 that
+makes SPI1's own MOSI its MISO. The CH32V303VCT6's single-board findings
+follow in a section of their own, and the pair's - each part against the
+other's `spi_peer` - in the one after it.
 
 - **The clock is right on the pad that carries it.** SPI1 on its second
   column puts SCK on PB3, which is TIM2's channel 2 under that timer's
@@ -762,13 +784,9 @@ section of their own.
 - **THE STRAP IS CLEAN TO 36 MHz AND BREAKS AT 72.** Every BR code from
   /4 down carried 256 bytes byte-exact; /2 did not. Four kilobytes at
   /4 (36 MHz of SCK), sent as sixteen chunks, came back byte-exact.
-- **Every mode, both widths and both bit orders round-trip** on the
-  strap, and the pump takes exactly one interrupt per frame.
-- **The hardware CRC is the arithmetic.** Over six frames with the reset
-  polynomial the transmit CRC register held what a bitwise loop over the
-  same polynomial computes, the receive register held the same number,
-  the CRC frame the loop read back was its low byte, and CRCERR stood
-  down.
+- **The pump takes exactly one interrupt per frame** on the strap, 32
+  frames byte-exact; the four modes, both widths, both bit orders and the
+  CRC are judged by a foreign client (the pair's section).
 - **A host clocks itself.** With MOSI released and MISO held by the
   port, every frame comes back all ones or all zeros with the level, at
   both widths, both bit orders and all four modes - the wireless proof
@@ -803,57 +821,15 @@ section of their own.
 - **The overrun is a level with a sequence**: frames arriving on a full
   buffer raise OVR, and only a DATAR read followed by a STATR read
   clears it.
-- **Between two chips**, over SPI2's four wires: all four transfer modes
-  and both bit orders carry a burst byte-exact in both directions; a
-  bit-order mismatch is an exact two-way bit reversal; the command
-  channel answered ten pings of ten at 281.25 kHz. Sixteen bytes through
-  SPI2's DMA ENGINES (channels 5 and 4) came back byte-exact at both
-  ends, and a TEN-SECOND STRESS ran 23 exchanges of sixteen frames with
-  every one exact at both ends.
-- **THE PEER LINK IS EXACT TO 1.125 MHz AND BREAKS AT 2.25 MHz**, and
-  the break is the far end's ANSWER RELOAD and not the wire: at every
-  rate above the boundary the client still received all eight characters
-  with no mismatch of its own while what this end read back was wrong.
-- **THE ANSWER LINE'S SLEW CLASS IS A CORRECTNESS PARAMETER.** With the
-  far board's MISO pad at its driver's fastest class the four-mode
-  matrix slips - mode 2 on one pass, mode 1 on another, the two that
-  sample on the falling edge - the engined exchange comes back nine
-  bytes of sixteen wrong and the stress loses five exchanges of
-  twenty-three. Walking THIS end's own SCK and MOSI down the three
-  classes this port has cures none of it; walking the far end's MISO
-  down to its slowest cures all of it, with this end's pads left at the
-  driver's fastest. So the aggressor is the CLIENT's answer edge, and
-  the rate ladder above is unchanged at every class - the slow pad costs
-  nothing on this bus.
-- **The select is a real wire**: the peer pulling it low from its own
-  port is seen at this end, which is what frames a client's transaction.
-- **The dummy byte is measured and not assumed.** Told not to preload,
-  the client sends the shifter's leftover in the first frame and its own
-  stream one place late from there - which is the one-ahead rule seen
-  from the other end.
-- **A client that never drains keeps one frame**, not a FIFO's worth,
-  and raises the overrun.
-- **The roles invert.** With the peer as the bus host, this chip's
-  `SpiClient` answered one frame ahead under a select the peer framed,
-  and both ends agreed byte for byte; the answer line was released again
-  afterwards.
-
 ### On the CH32V303VCT6
 
-`test_vx03_spi` (32 verdicts in `z`) and `test_vx03_i2s` (15) on WCH's
-evaluation board at the same 144 MHz, over four jumper wires between
-SPI2's column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
-PB15-PB5, each looked for before a letter uses it - which carry I2S2 to
-I2S3 as well; there is no strap on SPI1's own pads and no peer board, so
-the letters that want either decline by name.
+`test_vx03_spi`'s single-board set and `test_vx03_i2s` (15 verdicts) on
+WCH's evaluation board at the same 144 MHz, over four jumper wires
+between SPI2's column and SPI3's default one - PB12-PA15, PB13-PB3,
+PB14-PB4, PB15-PB5, each looked for before a letter uses it - which carry
+I2S2 to I2S3 as well; there is no strap on SPI1's own pads, so letter c
+declines by name.
 
-- **SPI3 in both roles, against SPI2**: as the client of SPI2's host
-  engine, served one frame ahead from its own vector, and as the host
-  over SPI2's client, all four modes and both bit orders in 8-bit frames
-  and a run of 16-bit ones - thirty-two frames exact both ways in every
-  combination. The host side is the engine's polled request at /64, a
-  frame of 1024 core cycles, so it is the RECEIVE LOOP WITH TWO FRAMES IN
-  FLIGHT whose bytes these two letters judge, on SPI2 and on SPI3.
 - **The high-speed read** (above): at SPI2's /2, 36 MHz, 254 bytes of
   256 wrong without HSRXEN, 253 of them one bit late, none with it, in
   8282 core cycles for the block against the wire's 8192. SPI1's /2 is
@@ -883,12 +859,9 @@ the letters that want either decline by name.
   and /16 and at /2 with HSRXEN, and one bit late at /2 without it, in
   both widths.
 - **THE LINKS RUN AT THE RATE ASKED**: SPI2 and SPI3 both divide PB1, so
-  the link between them cannot tell a wrong bus; letters f to i time the
+  the link between them cannot tell a wrong bus; letters h and i time the
   host's run on the core's counter in thousandths of the wire at PB1 over
-  the division. The polled host at /64, 32 frames: 1011 in 8-bit frames
-  and 1005 in 16-bit ones with SPI2 the host, 1009 and 1004 with SPI3 -
-  the polled request's fixed cost, about 300 cycles, inside a run of
-  32768 and 65536; letter h's blocks of 256 frames 1005 at /4 and 1011
+  the division: letter h's blocks of 256 frames 1005 at /4 and 1011
   at /2 with HSRXEN; letter i's rows 1011 at /2 in both widths, 1005 at
   /4, 1002 at /8 and 1001 at /16 - the 80 to 90 cycles between the enable
   and the receive channel's completion inside every block, the wire's
@@ -909,16 +882,147 @@ the letters that want either decline by name.
 - **SPI1's I2SMOD reads back zero** on this part, whose datasheet gives
   the face to SPI2 and SPI3 alone.
 
+### The pair: the CH32V203C8T6 and the CH32V303VCT6
+
+`test_vx03_spi`'s second set (`y`, letters d, j, k, l, m) on each board
+against the other's `spi_peer`, both at 144 MHz on their crystals: the
+CH32V203C8T6's SPI2 (PB12..PB15) wired to the CH32V303VCT6's SPI3 on its
+second column (PA4, PC10, PC11, PC12), both selects hardware NSS pads,
+two grounds between the boards ([../boards/weact-ch32v203c8.md](../boards/weact-ch32v203c8.md),
+[../boards/ch32v303-evt.md](../boards/ch32v303-evt.md)). The bounds are
+derived in the suite from the two datasheets' SPI tables (the CH32V203's
+4-25, the CH32V303's 4-27) and the peer's loops: the far client's hearing
+judged from /4 down (a half period holds the 20 ns SCK edge the tables
+allow into 30 pF), this end's read-back from /8 down (the client's MISO
+valid 25 ns after its edge and the host's 5 ns of setup inside the half
+period), the far POLLED run from /16 for 8-bit frames and /8 for 16-bit
+ones (two of its turns inside a frame). Ten runs of `y` each way, every
+verdict green in all twenty (32 a run).
+
+- **THE LADDER, both ways, every host shape**: the polled request, the
+  pump and the engines against the far client's DMA serve, and the polled
+  request against its polled run, 64 frames a row - exact both ways at
+  every code from /256 to /4 = 18 MHz, in both directions, the far run
+  included at /4 (above its judged bound); at /2 = 36 MHz NOT EXACT
+  either way, the far client mishearing half the frames and this end's
+  read-back wrong, with HSRXEN and without it - the datasheets' 20 ns SCK
+  edge inside a 13.9 ns half period, so the pair's ceiling is /4. THE
+  COST OF EACH HOST SHAPE beside the wire's (cycles a frame, 8-bit, the
+  wire 8 x division x 2): the polled request 4099 at /256 (the wire's
+  4096), 259 at /16 (256), 153 to 159 at /8 (128, one frame in flight
+  below the write-ahead threshold), 87 to 97 at /4 (64); the pump 213 to
+  217 at /8 and 151 to 153 at /4; the engines 134 to 135 at /8 and 70 to
+  71 at /4 - at the wire from /16 down on every shape.
+- **The extended exchange against a foreign unit**: 16-bit frames exact
+  both ways on every shape and both far serves (report_extended); the CRC
+  at both widths - CRC-8 (0x07) TCRCR 0x62 and RCRCR 0x5B, CRC-16
+  (0x8005) 0x5FB6 and 0x2B13, each what a bitwise loop computes over what
+  went and what came, the CRC frame read the far unit's own, CRCERR down
+  at both ends, and a polynomial mismatch (0x07 here, 0x31 there) raising
+  CRCERR at BOTH ends; and this end's WRITE shape - two frames in flight,
+  no in buffer - heard exact by a far client that only listens, polled
+  and engined, both widths, to /2: the transmit path holds at 36 MHz
+  where the answer path does not.
+- **THE ROLES INVERT**: each chip's `SpiClient::exchange()` run under the
+  far chip's host_burst answers one frame ahead, both ends agreeing frame
+  for frame, in 8- and 16-bit frames, and hands its MISO back; the
+  CH32V303VCT6's client in all four modes and both bit orders.
+- **A CLIENT'S ANSWER EDGE REACHES ITS OWN INPUTS ON THESE WIRES.** With
+  its MISO at the fast class every client on the pair broke every burst,
+  at the medium class most of them, at the slow class none (letter l,
+  twenty runs: 0 of 3 bursts at the fast class on both ends, 0 of 3 at
+  the medium one on the CH32V203C8T6 and 0 to 2 on the CH32V303VCT6, 3 of
+  3 at the slow one on both; the spi_peer's answer windows
+  broke at 281 kHz at the fast class and the ladder at 4.5 and 9 MHz at
+  the medium one) - so both the peer and the suite's client answer at the
+  slowest class, which costs nothing to /4 (the ladder above). And on the
+  CH32V203C8T6's board even the slow class is not enough in MODES 1 AND
+  2 BELOW /8: there that client loses two to four frames of 32 in nearly
+  every exchange (letter x: 3 or 4 of 4 bad in every cell at /256 and
+  /64, none at /8), with its MISO driven - and none with it DARK, in
+  every mode and at every rate (letter x's listening column, 0 of 4 in
+  every cell). Those are the two modes whose answer changes while SCK is
+  high and that sample on the falling edge, so the measured shape is the
+  answer's falling edge pulling the high clock across the threshold; the
+  CH32V303VCT6's client shows none of it. Modes 0 and 3 on that end slip
+  rarely (one exchange in some 120 of letter x's, none in the twenty runs
+  of `y`); the cause is not isolated (a look at
+  PB13 against PB14 on that board would). So the suite judges modes 1
+  and 2 of the CH32V203C8T6's client LISTENING, and its answering ones
+  in modes 0 and 3.
+- **THE SELECT WIRE CARRIES THE OTHERS' TRANSIENTS.** On the CH32V203C8T6
+  as a client its NSS pad read high for an instant inside a window: a
+  polled run that took one high read for the host's close ended after 3
+  to 17 frames of 32 (and once a DMA serve after 10), while the SPI
+  block's own NSS input never saw it (the serves it fed were exact). The
+  client's runs therefore close only on two looks in a row reading the
+  pad high, which ended it: no early close in the runs since.
+- **A LATE FIRST ANSWER GOES INTO THE SHIFTER AT ONCE, AND THE CLIENT
+  RESTARTS ITS FRAME THERE** (letter d's dummy, both parts as the far
+  client, the same frames from each): an answer written inside the
+  host's first frame comes out at the next bit - the first frame reads
+  the shifter's leftover bit over the answer's top seven (0x36 for
+  0x6D) - and from there the client is ONE BIT behind the host both ways:
+  every later answer one bit late (the frame before's last bit on top)
+  and the window's last frame never completes (15 heard of 16, each
+  wrong). It is not spi_link.hpp's "leftover, then one place late": a
+  client too slow for its first answer corrupts the whole window on this
+  silicon, which is why the preload (`enable(first)`, or a run started
+  with the select high) is the rule.
+- **MODF FROM A SECOND CHIP**: a host of the pair with its NSS pad the
+  multi-host input, the far chip's ss_pulse pulling the shared select low
+  - MODF set within the pulse (CTLR1 0x28 after it: MSTR and SPE gone,
+  STATR 0x22), one entry of the instance's vector under ERRIE carrying
+  the mode-fault bit, 20.2.7's sequence leaving it standing (the finding
+  above, now from a real second host) and the RCC reset pulse clearing
+  it.
+- **SSOE'S SELECT FALLS WITH THE FIRST FRAME, NOT WITH SPE**: a host with
+  SSOE set keeps its NSS pad high under SPE until the first frame is
+  written, drives it low from then to the disable, and the far client it
+  frames carries sixteen frames exact both ways.
+- **THE HOST'S PADS TOO**: the four modes and both bit orders against
+  the CH32V303VCT6's client, walked at the three slew classes of the
+  CH32V203C8T6 host's SCK and MOSI - one slip in eight exchanges (always
+  mode 1, LSb first) in 3 of 10 runs at the fast class and 2 of 10 at the
+  medium one, none in 10 at the slow one, which costs nothing to /4 (the
+  ladder runs at it) - so the suite's pair host runs at the slow class.
+- **The rest, against a foreign client**: a bit-order mismatch an exact two-way reversal; a client that
+  never drains keeps ONE frame and raises OVR; the select a real wire; a
+  ten-second stress at 4.5 MHz, polled and engined in turn, 23 exchanges
+  of 32 frames exact at both ends.
+
+### This part as the desk's instrument: spi_peer
+
+`ch32vx03/src/apps/spi_peer.cpp`, kind 0x05 of spi_link.hpp, ONE for the
+stratum over `PeerLink<instance, column>`: SPI2 where the part has no
+SPI3, SPI3 on its second column where it has. Its whole repertoire but
+mspi (no USART of these parts reaches the link): the dark listener on
+the hardware NSS pad, the exchange on the DMA engines by default and on
+the client's polled runs with `spare_polled_pump`, the answer run alone,
+THE EXTENDED EXCHANGE whole (16-bit frames, the CRC with CRCNEXT the
+store after the last answer's, receive-only with MISO dark), sink_slow,
+ss_pulse and host_burst with its own NSS pad a GPIO select, the clock on
+the 8 MHz crystal at 144 MHz so that its PB1 instance takes a host's /2.
+What the silicon taught it: THE CORE LEAVES THE BUS TO THE ENGINES
+inside a DMA serve - a core polling the select pad back to back starved
+the receive channel on the CH32V303VCT6 (14 to 31 frames of 64 landed at
+18 MHz), polling it once every 256 turns of an SRAM loop kept every
+frame ([dma.md](dma.md)); its answer line at the slowest slew class; the
+close on two reads. The answer path never runs from a vector, so the
+CH32V303's float tax does not reach it. Its polled run, in the release
+listing, is the client's fifteen instructions a frame; its measured
+ceiling behind the polled host is /4 on both parts (the ladder).
+
 ## Not covered yet
 
 Driver gaps:
 
 - **The hardware NSS arrangements as the ENGINE's select** (SSOE's
-  output and the multi-host input). The bus AO's select is a GPIO on
-  purpose - a hardware input's low level takes the host's role away, and
-  the measurement above shows exactly that - so what is left unproven is
-  a MULTI-HOST bus, which wants a second host and an arbitration to
-  observe.
+  output and the multi-host input): declined. The bus AO's select is a
+  GPIO the Request carries; SSOE's pad falls only with the first frame
+  and rises only at the disable, so it frames a whole enable rather than
+  a transaction, and the multi-host input takes the host's role away
+  (both measured against the far chip, the pair's section).
 - **`Spi<2>` as a CLIENT under software management** (SSM with SSI
   driven low by the program instead of by the wire): the peer's select
   is a real wire here, so the software-selected client has no user.
@@ -950,25 +1054,10 @@ Implemented but not bench-verified, each with what would measure it:
   block's clock under a transaction. A request started with the
   instance's APB gate closed (`Rcc` with SPI1's enable down) would
   measure it: the wall of the budget, the code in the reply.
-- **The receive shapes' DATA, one frame in flight and on the pump**:
-  letter e's receive lines land frames in a buffer with MISO floating,
-  so the loop's and the pump's accounting is judged (no overrun, every
-  frame counted) and the bytes are not; the loop with two frames in
-  flight is judged byte for byte on the CH32V303VCT6 (letters f and g,
-  above). The strap from PA7 to PA6 (letter c of `test_vx03_spi`, which
-  runs the arbiter over the polled and pumped receives) would judge the
-  other two.
 - **The write-ahead threshold on SPI2 and SPI3**: computed per bus share
   by the same arithmetic (one code lower than SPI1's above 72 MHz of
   HCLK) and reported by `write_ahead_from()`; letter e runs on SPI1, and
   the oracle on a PB1 instance would measure it.
-- **The RECEIVED half of the engined data phase on the CH32V303VCT6,
-  16-bit frames included**: the transmitted half is judged by the CRC
-  unit above, and what the receive engine lands in memory is judged by
-  nothing on a desk with no strap and no peer - the strap from PA7 to PA6
-  (letter c of `test_vx03_spi`, which judges it byte for byte, both
-  widths, on the CH32V203C8T6) or the peer board on SPI2 (letter d) would.
-
 - **The high-speed read at 72 MHz of SCK**, SPI1's /2 - the rate the
   mode is for - and **HSRXEN2**: on the CH32V303 board the only far end
   at that rate is SPI2 as a client on a 72 MHz bus, which does not keep
@@ -978,11 +1067,9 @@ Implemented but not bench-verified, each with what would measure it:
 - **SPI1's clock counted at /2 on a CH32V303**: PB3 carries the jumper
   to PB13 on the evaluation board; the pad free of it would say whether
   the count at half the timer's clock is the silicon's or the wire's.
-- **SPI3's second column (PA4/PC10/PC11/PC12), and I2S3's on it**: the
-  code is written by `remap()` and refused where the package bonds none
-  of its pads, and no suite drives it yet: on the bench pair that column
-  is the CH32V303VCT6's link to the CH32V203C8T6's SPI2, and a peer on
-  the far board is what would measure it.
+- **I2S3 on SPI3's second column**: the code is the SPI face's, measured
+  as the pair's link; the audio face on it wants a far I2S end, and no
+  chip on this desk is one.
 - **SPI1's hardware NSS input and output on its own pad.** No letter
   arranges SPI1's select in hardware: on the CH32V203C8T6's board PA4 is
   a free pad, on the CH32V303VCT6's it is the pair's SPI select wire. A
@@ -994,6 +1081,15 @@ Implemented but not bench-verified, each with what would measure it:
 - **`rebase()` and the SCK ceiling across a clock change**: the fan-out
   is written and compiled, and no suite drives this chapter under a
   `DynamicClock` yet.
+- **The CH32V203C8T6's client in modes 1 and 2 ANSWERING below /8, and
+  the rare slip in modes 0 and 3** on the desk's board (the pair's
+  section): heard exact listening, its answers' own edge the measured
+  shape; a logic analyser on PB13 against PB14 of that board, or the
+  same part on another board, would say whether it is the board's or the
+  part's.
+- **The pair above /4**: /2 = 36 MHz fails both ways on the desk's wires,
+  inside the datasheets' 20 ns SCK edge; a shorter, terminated link
+  would measure the parts at their 36 MHz.
 - **The transmit interrupt (TXEIE) on a host**: the host engine arms
   RXNE alone, and a transmit-only stream with no reader would be its
   first user; on a client, answers written from TXE one frame ahead are

@@ -1,10 +1,11 @@
 // test_vx03_spi - the reference bench suite for the SPI chapter of the
 // CH32V203 and the CH32V303: ch32vx03/spi.hpp over RM ch. 20, every
 // instance, both roles, the DMA engines, the hardware CRC and util/
-// spi_bus.hpp's arbiter with not one line changed. Letters a..e are both
-// series'; letters f..i are the CH32V303's third instance against its
-// second, registered on the part that has SPI3 and compiled out of every
-// other image. The I2S face is test_vx03_i2s's.
+// spi_bus.hpp's arbiter with not one line changed. Letters a, b, c and e
+// are both series' single-board letters; h and i are the CH32V303's third
+// instance against its second, registered on the part that has SPI3 and
+// compiled out of every other image; d, j, k, l and m are THE PAIR's,
+// against the desk partner. The I2S face is test_vx03_i2s's.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -12,44 +13,46 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// WHAT IT MEASURES WITH. Two instruments, and both are on the desk at
-// once because they are on DIFFERENT INSTANCES:
+// THE SUITE HAS TWO SETS (util/testbench.hpp's second set):
 //
-//  - SPI1's own LOOPBACK. The board carries a strap from PA7 (MOSI) to
-//    PA6 (MISO) through PA8, so the host's own frames come back. PA8 is
-//    the third pad of that node and this suite NEVER drives it: it is
-//    left a floating input for the whole run, and a letter that wanted
-//    it would be fighting the wire. The strap is probed at every letter
-//    that needs it (a plain output on PA7 read on PA6 against the
-//    opposite pull), never cached: a wire can leave the desk between
-//    two letters.
-//    SPI1 runs SOFTWARE SELECT ONLY here: its NSS pad PA4 is left an
-//    input (on the CH32V303 board it is the pair's SPI select wire, to
-//    the CH32V203's PB12), and the three NSS arrangements are exercised
-//    on SPI2 instead, where the select is a real wire.
+//  - `z`, THE SINGLE-BOARD LETTERS (a, b, c, e, and h, i on the CH32V303),
+//    runnable with the far board dark - on its console, or on its
+//    spi_peer, whose dark listener drives nothing and is selected by
+//    nothing: the pair's select is never driven low by them.
+//  - `y`, THE PAIR'S LETTERS (d, j, k, l, m), against the far board
+//    running `spi_peer`, commanded IN BAND over the bus under test through
+//    avrdx/src/apps/spi_link.hpp, included by relative path: one source of
+//    truth for the wire format on every architecture. They FAIL loudly
+//    when nobody answers. `x`, by name, is the slip statistics behind
+//    letter d's matrix (no verdict).
 //
-//  - SPI2 against a PEER BOARD running `spi_peer` (the peer's ident
-//    says which), commanded IN BAND over the bus under
-//    test through avrdx/src/apps/spi_link.hpp, included by relative
-//    path: one source of truth for the wire format on every
-//    architecture. Five wires, both boards at 3.3 V:
+// WHAT IT MEASURES WITH:
 //
-//      PB12 (NSS)   <->  the peer's NSS   (its pull-up holds it high)
-//      PB13 (SCK)   ->   the peer's SCK
-//      PB14 (MISO)  <-   the peer's MISO
-//      PB15 (MOSI)  ->   the peer's MOSI
-//      GND          <->  GND
-//
-//    Every peer letter asks for a ping first and SKIPS (with no verdict
-//    claimed) when three command retries fail: the two boards are not
-//    always in step, and a suite that hangs on an absent instrument is
-//    worse than one that says so.
+//  - SPI1's own LOOPBACK on the CH32V203C8T6's board: a strap from PA7
+//    (MOSI) to PA6 (MISO) through PA8, so the host's own frames come back.
+//    PA8 is the third pad of that node and this suite NEVER drives it: it
+//    is left a floating input for the whole run. The strap is probed at
+//    every letter that needs it (a plain output on PA7 read on PA6 against
+//    the opposite pull), never cached. SPI1 runs SOFTWARE SELECT ONLY: its
+//    NSS pad PA4 is left an input (on the CH32V303 board it is the pair's
+//    select wire).
+//  - THE PAIR: the CH32V203C8T6's SPI2 (NSS PB12, SCK PB13, MISO PB14,
+//    MOSI PB15) wired to the CH32V303VCT6's SPI3 on its SECOND column (NSS
+//    PA4, SCK PC10, MISO PC11, MOSI PC12), both selects hardware NSS pads,
+//    two grounds between the boards (docs/boards/). Each board's suite
+//    links on its own end; the far board runs `spi_peer`.
+//  - On the CH32V303VCT6's evaluation board, four jumpers between SPI2's
+//    column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
+//    PB15-PB5, each looked for before it is used - for letters h and i.
 //
 // THE PADS. PA4..PA8 and PA15/PB3/PB4/PB5 (SPI1's two columns), PB12..
-// PB15 (SPI2). NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the
-// debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
-// crystals), PA0 (the KEY), PB6/PB7 and PB10/PB11 (other phases' wires)
-// - and PB2, the LED, left undriven, as in every suite of this target.
+// PB15 (SPI2), PA4/PC10/PC11/PC12 (SPI3's second column, the CH32V303's
+// pair link; R6: SPI3's two columns are one AFIO field, so every pair
+// letter there starts with column 0's pads floating). NEVER TOUCHED:
+// PA9/PA10 (the console), PA13/PA14 (the debug port), PA11/PA12 (the USB
+// pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the KEY), PB6/PB7 and
+// PB10/PB11 (the pair's other wires) - and PB2, the LED, left undriven, as
+// in every suite of this target.
 //
 // What is exercised, letter by letter:
 //   a  THE RATES: every BR code on both instances read back, with the
@@ -68,16 +71,14 @@
 //   b  THE HOST WITH ITS MISO HELD BY ITS OWN PORT, no wire: frames of
 //      all ones and all zeros read back, both widths, both bit orders,
 //      the four modes read back out of CTLR1
-//   c  THE LOOPBACK on SPI1: round trips at every mode, both widths,
-//      both orders, the hardware CRC against a bitwise reference, the
-//      ladder none faster than its wire, 4 KB at the fastest code that
-//      passes clean, both DMA engines - 16-bit
-//      frames on them as half-words over aligned buffers, on the pump one
-//      byte off - and SpiBus (= BusMaster) over the whole of it
-//   d  THE PEER on SPI2: ping/ident/report, the four modes and both
-//      orders exchanged, the dummy byte MEASURED, sink_slow, ss_pulse,
-//      host_burst with THIS board as the client, the engines under an
-//      exchange, and a ten-second stress with the counters at both ends
+//   c  THE LOOPBACK on SPI1 (the CH32V203C8T6's strap): what no peer on
+//      this desk can judge - the pump's interrupt a frame, a command phase
+//      and a read with no out buffer, the ladder above the pair's ceiling
+//      to the strap's 36 MHz, 4 KB at the fastest code that passes clean,
+//      both DMA engines with 16-bit frames on them as half-words over
+//      aligned buffers and on the pump one byte off, and SpiBus (=
+//      BusMaster) over the whole of it. The four modes, both orders and the
+//      CRC are the pair's (d, k), judged by a foreign client
 //   e  THE FLAGS AND THE VECTORS: every flag with the sequence that
 //      clears it, the bidirectional line mode on one pad, the
 //      receive-only host and how it is stopped, the I2S register where
@@ -85,13 +86,6 @@
 // and on the CH32V303RC and VC alone, over four wires between SPI2's
 // column and SPI3's default one - PB12-PA15, PB13-PB3, PB14-PB4,
 // PB15-PB5, each looked for before it is used:
-//   f  SPI3 AS THE CLIENT OF SPI2: the host engine polled, the client
-//      served one frame ahead from its own vector, all four modes and
-//      both bit orders in 8-bit frames and a 16-bit run, both directions
-//      compared byte for byte, and the host's runs timed against the wire
-//      at the rate asked
-//   g  SPI3 AS THE HOST OVER SPI2'S CLIENT: the same matrix with the
-//      roles swapped, timed the same way
 //   h  THE HIGH-SPEED READ: a 256-byte block each way through the four
 //      DMA channels (SPI2's on DMA1, SPI3's on DMA2) at BR /4 as the
 //      baseline, then at /2 without HSRXEN and with it - each side's wrong
@@ -112,9 +106,35 @@
 //      frames compared - a measurement, the transfer granularity being a
 //      question the library has not settled - and every row's blocks
 //      judged against the wire at the rate asked
+// and the pair's, `y`, on the instance each part links (SPI2 on the
+// CH32V203C8, SPI3's second column on the CH32V303VC), each bound derived
+// in the section's comment from the two datasheets' SPI tables and the
+// peer's loops:
+//   d  THE PEER: ping, ident (kind 0x05, the far part's label, its
+//      crystal), ten pings; the four modes and both bit orders against the
+//      far client at each slew class of this end's pads; a bit-order
+//      mismatch as an exact two-way reversal; the dummy MEASURED (a late
+//      first answer); sink_slow; ss_pulse; a ten-second stress
+//   j  THE LADDER: /256 to /2 on the polled host, the pump and the engines
+//      against the far DMA serve, and the polled host against the far
+//      POLLED run, every row's cycles beside the wire's; /2 with HSRXEN
+//   k  THE EXTENDED EXCHANGE: 16-bit frames on every shape and both far
+//      serves, the CRC at both widths against a foreign unit and a
+//      polynomial mismatch caught at both ends, and this end's WRITE shape
+//      witnessed by a far client that only listens
+//   l  THE ROLES INVERT: this chip's SpiClient runs under the far host's
+//      host_burst - its MISO's slew class walked, the four modes and both
+//      orders, 16-bit frames, and the answer line handed back after
+//   m  THE HARDWARE SELECT: MODF raised on this host's NSS input by the
+//      far chip's ss_pulse, the demotion and its vector, the reset pulse
+//      that clears it; and SSOE framing the far client
+//   x  (by name) THE SLIP STATISTICS: each mode four times at /256, /64
+//      and /8, on both far serves, behind the polled host and the pump,
+//      and with the far client listening only - no verdict
 //
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abe,cd
+// build: groups = abe,c
+// build: groups.v203c8 = abce,djklmx
 // build: monitor_speed = 115200
 
 #include <stdint.h>
@@ -152,20 +172,20 @@ constexpr SysClock clock;
 using Serial = Uart<1, P, 64, 128>;
 constexpr Serial serial;
 
-TestBench<Serial> bench;
+TwoKeyTestBench<Serial, 'y'> bench;
 
 // ---------------------------------------------------------------------------
 // The two instances, their pads and their engines
 // ---------------------------------------------------------------------------
 
-/// The instance the PEER is on. SPI2 where the part has it; SPI1
-/// otherwise, so the suite still LINKS on a part of the 32 KB tier that
-/// carries one SPI - letter d then says so and claims no verdict.
-constexpr uint8_t peer_spi = device::spi_count >= 2u ? 2u : 1u;
+/// The SECOND instance, letters a and b's: SPI2 where the part has it;
+/// SPI1 otherwise, so the suite still LINKS on a part of the 32 KB tier
+/// that carries one SPI.
+constexpr uint8_t second_spi = device::spi_count >= 2u ? 2u : 1u;
 constexpr bool has_two_spi = device::spi_count >= 2u;
 
 using S1 = Spi<1>;
-using S2 = Spi<peer_spi>;
+using S2 = Spi<second_spi>;
 
 /// SPI1's default column, the loopback's: NSS PA4, SCK PA5, MISO PA6,
 /// MOSI PA7.
@@ -174,18 +194,16 @@ constexpr SpiPins loop_pins = spi_pins_for(1, 0);
 /// MOSI PB5 - PB3 is where TIM2's channel 2 lands under TIM2's partial
 /// remap, so the clock can be counted on the very pad that carries it.
 constexpr SpiPins moved_pins = spi_pins_for(1, 1);
-/// SPI2's one column, the peer's: NSS PB12, SCK PB13, MISO PB14, MOSI
-/// PB15.
-constexpr SpiPins peer_pins = spi_pins_for(peer_spi, 0);
+/// SPI2's one column: NSS PB12, SCK PB13, MISO PB14, MOSI PB15.
+constexpr SpiPins second_pins = spi_pins_for(second_spi, 0);
 
 using Host1 = SpiHost<1, loop_pins>;
 using Dma1 = SpiHost<1, loop_pins, DmaTxEngine<1, S1::dma_tx_channel>,
                      DmaRxEngine<1, S1::dma_rx_channel>>;
 using Moved = SpiHost<1, moved_pins>;
-using PeerHost = SpiHost<peer_spi, peer_pins>;
-using PeerDma = SpiHost<peer_spi, peer_pins, DmaTxEngine<1, S2::dma_tx_channel>,
+using Spi2Host = SpiHost<second_spi, second_pins>;
+using Spi2Dma = SpiHost<second_spi, second_pins, DmaTxEngine<1, S2::dma_tx_channel>,
                         DmaRxEngine<1, S2::dma_rx_channel>>;
-using PeerClient = SpiClient<peer_spi, peer_pins>;
 
 using SckPad = Pin<loop_pins.sck.port, loop_pins.sck.pin>;
 using MisoPad = Pin<loop_pins.miso.port, loop_pins.miso.pin>;
@@ -194,8 +212,35 @@ using NssPad = Pin<loop_pins.nss.port, loop_pins.nss.pin>;
 /// The third pad of the strapped node. Named ONLY so the suite can put
 /// it back to a floating input and prove it is one; never driven.
 using ThirdPad = Pin<'A', 8>;
-using PeerNssPad = Pin<peer_pins.nss.port, peer_pins.nss.pin>;
-using PeerMisoPad = Pin<peer_pins.miso.port, peer_pins.miso.pin>;
+
+/// THE PAIR'S LINK, the second set's instance: SPI2's one column on the
+/// CH32V203C8 and RB, SPI3's SECOND column (NSS PA4, SCK PC10, MISO PC11,
+/// MOSI PC12) on the CH32V303RC and VC - the desk pair's four wires
+/// (docs/boards/), both selects hardware NSS pads. A part with SPI1 alone
+/// links nothing and registers none of the letters; the names below are
+/// formed on SPI1 there so that every part compiles them.
+constexpr uint8_t pair_spi = spi_present(3) ? 3u : (has_two_spi ? 2u : 0u);
+constexpr bool has_pair = pair_spi != 0u;
+constexpr uint8_t pair_n = has_pair ? pair_spi : 1u;
+constexpr uint8_t pair_code = pair_spi == 3u ? 1u : 0u;
+constexpr SpiPins pair_pins = spi_pins_for(pair_n, pair_code);
+using PairS = Spi<pair_n>;
+using PairTx = DmaTxEngine<PairS::dma_tx_slot.controller, PairS::dma_tx_slot.channel, uint16_t>;
+using PairRx = DmaRxEngine<PairS::dma_rx_slot.controller, PairS::dma_rx_slot.channel, uint16_t>;
+using PairHost = SpiHost<pair_n, pair_pins>;
+using PairDma = SpiHost<pair_n, pair_pins, PairTx, PairRx>;
+using PairClient = SpiClient<pair_n, pair_pins>;
+using PairNss = Pin<pair_pins.nss.port, pair_pins.nss.pin>;
+using PairSck = Pin<pair_pins.sck.port, pair_pins.sck.pin>;
+using PairMiso = Pin<pair_pins.miso.port, pair_pins.miso.pin>;
+using PairMosi = Pin<pair_pins.mosi.port, pair_pins.mosi.pin>;
+/// The slew class of the pair host's SCK and MOSI: the slowest, 2 MHz.
+/// Letter d's walk is the measurement behind it - the CH32V203C8T6's host
+/// put a slip into the far CH32V303's client in mode 1, LSb first, at the
+/// fast class and at the medium one (one exchange in eight, in some runs),
+/// none at the slow class - and letter j's ladder holds at it to /4 =
+/// 18 MHz.
+constexpr PinSpeed pair_host_class = PinSpeed::slow;
 
 /// A transaction that never answered: the suite's own word.
 constexpr uint8_t no_answer = 200;
@@ -311,7 +356,6 @@ volatile uint32_t spi1_isr_entries = 0;
 volatile uint32_t spi1_dma_entries = 0;   ///< SPI1's two channel vectors, together
 volatile bool dma_host_live = false;
 volatile bool bus_ao_live = false;
-volatile bool peer_client_live = false;
 
 void host_ready() {
     dma_host_live = false;
@@ -588,18 +632,18 @@ void ta_rates() {
 
     // ---- the effective bit rate of a saturated block, per instance ----
     if constexpr (has_two_spi) {
-        (void)PeerHost::init(clock);
+        (void)Spi2Host::init(clock);
         fill_pattern(tx_buf, chunk, 0x11);
         for (uint8_t code = 2; code < 8u; code += 2u) {
             const SpiClock rate = static_cast<SpiClock>(code);
             console_drain();
             const uint32_t t0 = cycles_now();
-            PeerHost::Request r{};
+            Spi2Host::Request r{};
             r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
             r.len = chunk;
             r.clock = rate;
             r.polled = true;
-            (void)PeerHost::start(r);
+            (void)Spi2Host::start(r);
             const uint32_t cycles = cycles_now() - t0;
             const uint32_t bits = 8UL * chunk;
             const uint32_t measured = cycles == 0u ? 0u
@@ -608,13 +652,13 @@ void ta_rates() {
                                                           SysClock::hz) /
                                                          cycles);
             print(serial, "  SPI2 /", spi_division(rate), ": nominal ",
-                  PeerHost::sck_hz(rate) / 1000u, " kHz, ", chunk,
+                  Spi2Host::sck_hz(rate) / 1000u, " kHz, ", chunk,
                   " bytes polled measured ", measured / 1000u, " kbit/s", crlf);
         }
         bench.verdict("SPI2's polled bursts run at its OWN bus's divisions - the effective bit "
                       "rate follows PB1 and not the system clock",
-                      PeerHost::reference_hz() == SysClock::pclk1_hz);
-        PeerHost::release();
+                      Spi2Host::reference_hz() == SysClock::pclk1_hz);
+        Spi2Host::release();
     } else {
         print(serial, "  this part has one SPI: no second instance to time", crlf);
     }
@@ -642,12 +686,12 @@ void ta_rates() {
     bool engines_on_time = wire_ok(s1_d4) && wire_ok(s1_d16) && wire_ok(s1_d64) &&
                            wire_ok(s1_w4);
     if constexpr (has_two_spi) {
-        (void)PeerDma::init(clock);
-        const uint32_t s2_d2 = frame_permille<PeerDma>(SysClock::pclk1_hz, SpiClock::div2,
+        (void)Spi2Dma::init(clock);
+        const uint32_t s2_d2 = frame_permille<Spi2Dma>(SysClock::pclk1_hz, SpiClock::div2,
                                                        SpiDataSize::bits8);
-        const uint32_t s2_d16 = frame_permille<PeerDma>(SysClock::pclk1_hz, SpiClock::div16,
+        const uint32_t s2_d16 = frame_permille<Spi2Dma>(SysClock::pclk1_hz, SpiClock::div16,
                                                         SpiDataSize::bits8);
-        PeerDma::release();
+        Spi2Dma::release();
         print(serial, "  SPI2 /2 ", s2_d2, ", /16 ", s2_d16, crlf);
         engines_on_time = engines_on_time && wire_ok(s2_d2) && wire_ok(s2_d16);
     }
@@ -741,26 +785,8 @@ void tb_held() {
 }
 
 // ===========================================================================
-// c - the loopback: the pump, the widths, the CRC, the engines, the kernel
+// c - the loopback: the pump, the ladder above the pair, the engines, the kernel
 // ===========================================================================
-
-/// The chapter's CRC, bitwise: MSB first, no reflection, init 0.
-uint16_t crc_reference(uint16_t poly, uint8_t width, const uint8_t* data, uint16_t n) {
-    uint32_t crc = 0;
-    const uint32_t top = 1UL << (width - 1u);
-    const uint32_t mask = (1UL << width) - 1UL;
-    for (uint16_t k = 0; k < n; ++k) {
-        for (uint8_t b = 8; b-- > 0;) {
-            const bool in = ((data[k] >> b) & 1u) != 0u;
-            const bool out = (crc & top) != 0u;
-            crc = (crc << 1) & mask;
-            if (in != out) {
-                crc ^= poly;
-            }
-        }
-    }
-    return static_cast<uint16_t>(crc);
-}
 
 namespace kl {
 
@@ -848,38 +874,17 @@ void tc_loop() {
     }
     host_ready();
 
-    // ---- the pump: the four modes, both widths, both orders ----
-    uint8_t exact = 0;
-    constexpr uint8_t trials = 10;
-    for (uint8_t k = 0; k < trials; ++k) {
-        const SpiMode mode = static_cast<SpiMode>(k & 3u);
-        const SpiDataSize bits = (k >= 4u && k < 8u) ? SpiDataSize::bits16 : SpiDataSize::bits8;
-        const bool lsb = k >= 8u;
-        const uint16_t frames = spi_frame_is_halfword(bits) ? 16u : 32u;
-        const uint16_t bytes = spi_frame_is_halfword(bits) ? 32u : 32u;
-        fill_pattern(tx_buf, bytes, static_cast<uint8_t>(0x20u + k));
-        for (uint16_t i = 0; i < bytes; ++i) {
-            rx_buf[i] = 0xEE;
-        }
-        (void)Host1::bit_order(lsb);
-        const uint8_t st =
-            host_xfer(nullptr, 0, tx_buf, rx_buf, frames, mode, SpiClock::div16, bits, false);
-        if (st == spi_ok && same(tx_buf, rx_buf, bytes)) {
-            ++exact;
-        } else {
-            print(serial, "    mode ", static_cast<uint8_t>(mode), " ", spi_data_bits(bits),
-                  " bits ", lsb ? "LSb" : "MSb", ": status ", st, crlf);
-        }
+    // ---- the pump: one interrupt a frame ----
+    // The four modes, both widths and both bit orders are the pair's (d, l),
+    // judged by a foreign client; here the pump's own count.
+    fill_pattern(tx_buf, 32, 0x20);
+    for (uint16_t i = 0; i < 32; ++i) {
+        rx_buf[i] = 0xEE;
     }
-    (void)Host1::bit_order(false);
-    print(serial, "  ", exact, " of ", trials,
-          " loopback runs byte-exact through the ISR pump (four modes, both widths, both orders)",
-          crlf);
-    bench.verdict("THE LOOPBACK ON THE PUMP: every mode, both frame widths and both bit orders "
-                  "come back byte-exact",
-                  exact == trials);
-    bench.verdict("the pump runs on RXNE: one interrupt per frame and no more",
-                  spi1_isr_entries == 32u);
+    const uint8_t ps0 = host_xfer(nullptr, 0, tx_buf, rx_buf, 32, SpiMode::mode0, SpiClock::div16,
+                                  SpiDataSize::bits8, false);
+    bench.verdict("THE LOOPBACK ON THE PUMP: 32 frames come back byte-exact", ps0 == spi_ok && same(tx_buf, rx_buf, 32));
+    bench.verdict("the pump runs on RXNE: one interrupt per frame and no more", spi1_isr_entries == 32u);
 
     // ---- a command phase and a read with no out buffer ----
     cmd_buf[0] = 0x9F;
@@ -971,62 +976,6 @@ void tc_loop() {
     }
     bench.verdict("FOUR KILOBYTES at the fastest code the strap carries, byte-exact",
                   top.has_value() && bad_chunks == 0u);
-
-    // ---- the hardware CRC against a bitwise reference ----
-    Pfic::disable(S1::irq);
-    Host1::release();
-    S1::bus_clock(true);
-    S1::reset();
-    (void)S1::configure({.role = SpiRole::host,
-                         .mode = SpiMode::mode0,
-                         .clock = SpiClock::div64,
-                         .bits = SpiDataSize::bits8,
-                         .crc = true,
-                         .crc_polynomial = 0x0007u});
-    SckPad::function();
-    MosiPad::function();
-    MisoPad::input();
-    S1::enable();
-    S1::flush_rx();
-
-    constexpr uint16_t cn = 6;
-    uint8_t data[cn];
-    uint8_t got[cn];
-    for (uint16_t i = 0; i < cn; ++i) {
-        data[i] = static_cast<uint8_t>(0x31u + i * 7u);
-    }
-    for (uint16_t i = 0; i < cn; ++i) {
-        S1::data8(data[i]);
-        if (i == cn - 1u) {
-            S1::crc_next();
-        }
-        uint32_t spins = 400'000u;
-        while (!S1::rxne() && spins-- != 0u) {
-        }
-        got[i] = S1::data8();
-    }
-    uint32_t spins = 400'000u;
-    while (!S1::rxne() && spins-- != 0u) {
-    }
-    const uint8_t crc_frame = S1::data8();
-    spins = 400'000u;
-    while (S1::busy() && spins-- != 0u) {
-    }
-    const uint16_t tx_crc = S1::tx_crc();
-    const uint16_t rx_crc = S1::rx_crc();
-    const bool err = S1::crc_error();
-    const uint16_t ref = crc_reference(0x0007u, 8, data, cn);
-    print(serial, "  CRC8 over six frames: TXCRCR ", hex(tx_crc), " (software ", hex(ref),
-          "), RXCRCR ", hex(rx_crc), ", the CRC frame read back ", hex(crc_frame), ", CRCERR ",
-          err ? "SET" : "clear", crlf);
-    bench.verdict("the six data frames came back exact through the loop", same(data, got, cn));
-    bench.verdict("THE HARDWARE CRC IS THE ARITHMETIC: TXCRCR is what a bitwise loop over the "
-                  "same polynomial computes",
-                  tx_crc == ref);
-    bench.verdict("the receiver's RXCRCR over the looped-back frames is that same number, the "
-                  "CRC frame it read is its low byte, and CRCERR stands down",
-                  rx_crc == ref && crc_frame == static_cast<uint8_t>(ref) && !err);
-    (void)S1::disable();
 
     // ---- the DMA engines ----
     dma_host_live = true;
@@ -1150,765 +1099,6 @@ void tc_loop() {
           kl::Probe::last_vote ? "yes" : "no", crlf);
     bench.verdict("a BUSY bus votes against it", kl::Probe::votes == 1u && !kl::Probe::last_vote);
     bus_ao_live = false;
-    host_ready();
-}
-
-// ===========================================================================
-// d - the peer on SPI2
-// ===========================================================================
-
-using spilink::Op;
-
-/// The command channel's SCK. PB1 runs at 72 MHz here, so /256 is
-/// 281.25 kHz and a character is 28 us - an order of magnitude more than
-/// the peer's polled command listener needs to turn one around.
-SpiClock link_clock = SpiClock::div256;
-
-uint8_t frame_buf[spilink::max_payload + 8];
-uint8_t answer_buf[spilink::answer_bytes];
-uint8_t raw_seen[16];
-uint8_t raw_n = 0;
-spilink::Decoder dec;
-bool link_quiet = false;
-
-/// The hold around each select window: the engine releases the select
-/// about a microsecond after the last edge, and a client whose
-/// transaction the select edge frames loses a character it has not
-/// fetched yet - so the protocol owns the chip select for these windows
-/// (the Request carries a null PinRef) and pays 30 us on each side.
-void link_hold() { (void)delay_us(clock, 30); }
-
-bool link_command_mode() {
-    peer_client_live = false;
-    const bool ok = PeerHost::init(clock);
-    PeerNssPad::output(true);
-    dec.reset();
-    return ok;
-}
-
-/// One protocol window: prime, select, hold, the transaction, hold,
-/// deselect. THE MODE IS PRIMED BEFORE THE SELECT FALLS - a CPOL flip
-/// inside an open window is one extra edge and the selected client
-/// counts it into the frame.
-bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = SpiClock::div256,
-               SpiMode mode = SpiMode::mode0) {
-    if (n == 0) {
-        return true;
-    }
-    PeerHost::prime(mode, rate);
-    PeerNssPad::clear();
-    link_hold();
-    PeerHost::Request r{};
-    r.cs = {};
-    r.tx = lend<Lease::reply>(tx);
-    r.rx = lend<Lease::reply>(rx);
-    r.len = n;
-    r.clock = rate;
-    r.mode = mode;
-    r.bits = SpiDataSize::bits8;
-    r.polled = true;
-    const bool done = PeerHost::start(r);
-    link_hold();
-    PeerNssPad::set();
-    return done;
-}
-
-void send_frame(Op op, const uint8_t* p, uint8_t len) {
-    uint8_t n = 0;
-    spilink::write_frame(
-        [&](uint8_t b) {
-            if (n < sizeof frame_buf) {
-                frame_buf[n++] = b;
-            }
-        },
-        op, p, len);
-    (void)link_xfer(frame_buf, nullptr, n, link_clock);
-}
-
-/// One answer window: `answer_bytes` dummies in a single transaction (a
-/// null out buffer: the engine's own 0xFF, which is no frame's magic),
-/// then the decoder walks what came back.
-bool recv_frame(spilink::Frame& out) {
-    dec.reset();
-    raw_n = 0;
-    for (uint16_t i = 0; i < spilink::answer_bytes; ++i) {
-        answer_buf[i] = 0xEE;
-    }
-    (void)link_xfer(nullptr, answer_buf, spilink::answer_bytes, link_clock);
-    for (uint16_t i = 0; i < spilink::answer_bytes; ++i) {
-        if (raw_n < 16) {
-            raw_seen[raw_n++] = answer_buf[i];
-        }
-        if (dec.feed(answer_buf[i]) == spilink::Decoder::Result::frame) {
-            out = dec.frame();
-            return true;
-        }
-    }
-    return false;
-}
-
-void settle() { settle_ms(spilink::settle_ms); }
-
-bool command_once(Op op, const uint8_t* p, uint8_t len) {
-    send_frame(op, p, len);
-    settle();
-    spilink::Frame f;
-    if (!recv_frame(f)) {
-        return false;
-    }
-    return f.op == Op::ack && f.len == 2 && f.data[0] == spilink::byte_of(op);
-}
-
-const uint8_t no_payload[1] = {0};
-
-/// Three attempts, each separated by longer than the peer's own answer
-/// window bound, so a peer that was serving into nothing is certainly
-/// dark again before the retry - the protocol's own recovery guarantee.
-bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
-    uint8_t first_n = 0;
-    uint8_t first_seen[16];
-    for (uint8_t k = 0; k < 3; ++k) {
-        if (command_once(op, p, len)) {
-            return true;
-        }
-        if (k == 0) {
-            first_n = raw_n;
-            for (uint8_t i = 0; i < raw_n; ++i) {
-                first_seen[i] = raw_seen[i];
-            }
-        }
-        (void)link_command_mode();
-        settle_ms(400);
-    }
-    if (link_quiet) {
-        return false;
-    }
-    print(serial, "    LINK FAILURE op ", hex(spilink::byte_of(op)),
-          ": the first answer window carried");
-    if (first_n == 0) {
-        print(serial, " nothing");
-    }
-    for (uint8_t i = 0; i < first_n; ++i) {
-        print(serial, " ", hex(first_seen[i]));
-    }
-    print(serial, crlf,
-          "      the peer board must be running `spi_peer`; its console '0' forces the dark "
-          "client back.",
-          crlf);
-    (void)link_command_mode();
-    return false;
-}
-
-bool query(Op op, spilink::Frame& data) {
-    if (!command(op)) {
-        return false;
-    }
-    settle();
-    return recv_frame(data);
-}
-
-bool peer_ident(spilink::Ident& d) {
-    spilink::Frame f;
-    if (!query(Op::ident, f) || f.op != Op::ident_data || f.len != spilink::ident_size) {
-        return false;
-    }
-    d = spilink::get_ident(f.data);
-    return true;
-}
-
-bool peer_report(spilink::Report& r) {
-    (void)link_command_mode();
-    for (uint8_t k = 0; k < 4; ++k) {
-        spilink::Frame f;
-        if (query(Op::report, f) && f.op == Op::report_data && f.len == spilink::report_size) {
-            r = spilink::get_report(f.data);
-            return true;
-        }
-        settle_ms(60);
-    }
-    return false;
-}
-
-bool peer_act(Op op, const spilink::Params& a) {
-    uint8_t p[spilink::params_size];
-    spilink::put_params(p, a);
-    if (!command(op, p, spilink::params_size)) {
-        return false;
-    }
-    settle();
-    return true;
-}
-
-/// Is the peer there at all? Every letter that needs it asks first, so
-/// an absent peer is a NAMED skip and never a hang.
-bool ensure_link() {
-    link_quiet = true;
-    (void)link_command_mode();
-    for (uint8_t k = 0; k < 3; ++k) {
-        if (command(Op::ping)) {
-            link_quiet = false;
-            return true;
-        }
-    }
-    link_quiet = false;
-    return false;
-}
-
-bool need_peer() {
-    if constexpr (!has_two_spi) {
-        print(serial, "  SKIPPED, no verdict claimed: this part carries one SPI, and the peer "
-                      "is on the second instance's four wires",
-              crlf);
-        return false;
-    } else {
-        if (ensure_link()) {
-            return true;
-        }
-        print(serial, "  SKIPPED, no verdict claimed: THE PEER DID NOT ANSWER three command "
-                      "retries. The peer board must be running `spi_peer`; its console '0' "
-                      "forces the dark client back. Check the five wires in this file's header.",
-              crlf);
-        return false;
-    }
-}
-
-// ---- one exchange, commanded and then clocked ------------------------------
-
-struct Exchange {
-    spilink::Cfg cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
-    SpiMode host_mode = SpiMode::mode0;
-    bool host_lsb = false;
-    SpiClock rate = SpiClock::div256;
-    uint16_t count = 8;
-    uint8_t seed_a = 0x13;
-    uint8_t seed_b = 0x57;
-    uint8_t pattern = spilink::pattern_prbs;
-    uint8_t flags = 0;
-    uint8_t spare = 0;
-    uint16_t ms = 400;
-};
-
-constexpr uint8_t max_exchange = 32;
-uint8_t xtx[max_exchange];
-uint8_t xrx[max_exchange];
-
-bool do_exchange(const Exchange& e) {
-    spilink::Params a{};
-    a.cfg = e.cfg;
-    a.count = e.count;
-    a.ms = e.ms;
-    a.seed_a = e.seed_a;
-    a.seed_b = e.seed_b;
-    a.pattern = e.pattern;
-    a.flags = e.flags;
-    a.spare = e.spare;
-    // A bit-order mismatch is not a shrug: told about it, each end checks
-    // the EXACT bit-reverse of what the other sent.
-    if (e.host_lsb != (e.cfg.dord != 0)) {
-        a.flags |= spilink::flag_expect_reversed;
-    }
-    if (!peer_act(Op::exchange, a)) {
-        return false;
-    }
-    spilink::Stream out(e.pattern, e.seed_a);
-    for (uint8_t i = 0; i < max_exchange; ++i) {
-        xtx[i] = 0;
-        xrx[i] = 0xEE;
-    }
-    const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
-    for (uint16_t i = 0; i < n; ++i) {
-        xtx[i] = out.next();
-    }
-    settle();
-    if (e.host_lsb) {
-        (void)PeerHost::bit_order(true);
-    }
-    (void)link_xfer(xtx, xrx, n, e.rate, e.host_mode);
-    (void)link_command_mode();
-    return true;
-}
-
-struct Verify {
-    uint16_t mism = 0;
-    uint8_t idx = 0xFF;
-    uint8_t got = 0;
-    uint8_t exp = 0;
-};
-
-Verify verify_rx(const Exchange& e) {
-    Verify v{};
-    const bool reversed = e.host_lsb != (e.cfg.dord != 0);
-    for (uint16_t i = 0; i < e.count && i < max_exchange; ++i) {
-        uint8_t exp = spilink::pattern_value(e.pattern, e.seed_b, i);
-        if (reversed) {
-            exp = spilink::bit_reverse(exp);
-        }
-        if (xrx[i] != exp) {
-            if (v.mism == 0) {
-                v.idx = static_cast<uint8_t>(i);
-                v.got = xrx[i];
-                v.exp = exp;
-            }
-            ++v.mism;
-        }
-    }
-    return v;
-}
-
-bool exchange_exact(const Exchange& e, Verify& v, spilink::Report& r) {
-    const bool ran = do_exchange(e);
-    const bool rep = ran && peer_report(r);
-    v = verify_rx(e);
-    return ran && rep && v.mism == 0 && r.mism == 0 && r.count == e.count;
-}
-
-void dump_exchange(const Exchange& e, const Verify& v, const spilink::Report& r) {
-    print(serial, "    host mism=", v.mism, " (first idx ", v.idx, " got ", hex(v.got), " exp ",
-          hex(v.exp), "), client count=", r.count, " mism=", r.mism, " (first idx ", r.idx,
-          " got ", hex(r.got), " exp ", hex(r.exp), ") flags=", hex(r.flags), crlf);
-    const bool reversed = e.host_lsb != (e.cfg.dord != 0);
-    print(serial, "    read:");
-    for (uint16_t i = 0; i < e.count && i < max_exchange; ++i) {
-        print(serial, " ", hex(xrx[i]));
-    }
-    print(serial, crlf, "    want:");
-    for (uint16_t i = 0; i < e.count && i < max_exchange; ++i) {
-        uint8_t exp = spilink::pattern_value(e.pattern, e.seed_b, i);
-        if (reversed) {
-            exp = spilink::bit_reverse(exp);
-        }
-        print(serial, " ", hex(exp));
-    }
-    print(serial, crlf);
-}
-
-// ---- this board as the CLIENT, the peer as the host ------------------------
-
-uint8_t crx[64];
-uint16_t crx_n = 0;
-
-bool run_as_client(const spilink::Params& a) {
-    crx_n = 0;
-    peer_client_live = true;
-    Pfic::disable(S2::irq);
-    PeerNssPad::input(PinPull::up);
-    if (!PeerClient::init(clock, {.mode = SpiMode::mode0,
-                                  .bits = SpiDataSize::bits8,
-                                  .lsb_first = false,
-                                  .nss = SpiNss::hardware_input,
-                                  .drive_output = true})) {
-        peer_client_live = false;
-        return false;
-    }
-    Pfic::disable(S2::irq);   // polled here: the vector stays with the host's pump
-    // The select FRAMES the transaction: the peer drives PB12 low for the
-    // whole burst, and this end preloads its first answer before it
-    // falls.
-    spilink::Stream out(a.pattern, a.seed_b);
-    PeerClient::enable(out.next());
-    const uint32_t t0 = Ticker::millis();
-    while (!PeerClient::selected() && Ticker::millis() - t0 < a.ms + 200u) {
-    }
-    if (!PeerClient::selected()) {
-        (void)PeerClient::disable();
-        peer_client_live = false;
-        return false;
-    }
-    const uint32_t started = Ticker::millis();
-    while (crx_n < a.count && Ticker::millis() - started < a.ms) {
-        const auto v = PeerClient::poll();
-        if (!v) {
-            continue;
-        }
-        if (crx_n < sizeof crx) {
-            crx[crx_n] = static_cast<uint8_t>(*v);
-        }
-        ++crx_n;
-        PeerClient::write(out.next());   // ONE AHEAD: one buffer, no FIFO
-    }
-    const bool dark_ok = !PeerMisoPad::read_out() || true;
-    (void)dark_ok;
-    (void)PeerClient::disable();
-    PeerClient::drive_output(false);
-    peer_client_live = false;
-    return true;
-}
-
-void td_peer() {
-    if (!need_peer()) {
-        return;
-    }
-    bench.verdict("the peer answers a ping over the four wires of SPI2", true);
-
-    spilink::Ident d{};
-    const bool got = peer_ident(d);
-    if (got) {
-        print(serial, "  peer: label '");
-        for (uint8_t i = 0; i < 8 && d.label[i]; ++i) {
-            print(serial, d.label[i]);
-        }
-        print(serial, "' xtal=", d.xtal, " sanity=", hex(d.sanity), " fw=", hex(d.version), crlf);
-    }
-    bench.verdict("ident comes back and it IS spi_peer (the sanity byte), from a SECOND BOARD of "
-                  "another architecture speaking the same wire format",
-                  got && d.sanity == spilink::ident_sanity);
-
-    uint8_t pings = 0;
-    for (uint8_t i = 0; i < 10; ++i) {
-        if (command(Op::ping)) {
-            ++pings;
-        }
-    }
-    print(serial, "  ", pings, " of 10 pings answered at ", PeerHost::sck_hz(link_clock) / 1000u,
-          " kHz SCK, one frame per chip-select window", crlf);
-    bench.verdict("the command channel is steady over ten frames", pings == 10u);
-
-    // ---- the four modes and both bit orders, and THE PADS' SLEW ----
-    //
-    // The four-mode matrix is run at each of this port's three pad slew
-    // classes, from the driver's default down. A data line's edge
-    // coupled into the clock is one sampling edge too many, and the
-    // modes that sample on the FALLING edge - where the data changes on
-    // the rising one - are where it shows: the matrix is therefore a
-    // measurement of the PAD as much as of the block, and what it prints
-    // is the ladder and not just a verdict.
-    constexpr PinSpeed speeds[] = {PinSpeed::fast, PinSpeed::medium, PinSpeed::slow};
-    const char* speed_names[] = {"fast (50 MHz, the driver's own)", "medium (10 MHz)",
-                                 "slow (2 MHz)"};
-    uint8_t best_good = 0;
-    uint8_t clean_at = 3;
-    for (uint8_t si = 0; si < 3u; ++si) {
-        PeerHost::pad_speed(speeds[si]);
-        (void)link_command_mode();
-        uint8_t good = 0;
-        uint8_t worst_mode = 0xFF;
-        Exchange worst{};
-        Verify worst_v{};
-        spilink::Report worst_r{};
-        for (uint8_t m = 0; m < 4; ++m) {
-            Exchange e{};
-            e.cfg.mode = m;
-            e.host_mode = static_cast<SpiMode>(m);
-            e.seed_a = static_cast<uint8_t>(0x13u + m);
-            e.seed_b = static_cast<uint8_t>(0x57u + m);
-            Verify v{};
-            spilink::Report r{};
-            if (exchange_exact(e, v, r)) {
-                ++good;
-            } else if (worst_mode == 0xFFu) {
-                worst_mode = m;
-                worst = e;
-                worst_v = v;
-                worst_r = r;
-            }
-        }
-        print(serial, "  SCK and MOSI at ", speed_names[si], ": ", good,
-              " of 4 transfer modes byte-exact both ways", crlf);
-        if (worst_mode != 0xFFu) {
-            print(serial, "    mode ", worst_mode, ":", crlf);
-            dump_exchange(worst, worst_v, worst_r);
-        }
-        if (good > best_good) {
-            best_good = good;
-        }
-        if (good == 4u && clean_at == 3u) {
-            clean_at = si;
-            break;
-        }
-    }
-    PeerHost::pad_speed(clean_at < 3u ? speeds[clean_at] : PinSpeed::slow);
-    (void)link_command_mode();
-    print(serial, "  the matrix is clean from ",
-          clean_at < 3u ? speed_names[clean_at] : "no slew class this port has", " downwards",
-          crlf);
-    bench.verdict("ALL FOUR TRANSFER MODES carry a burst byte-exact in both directions between "
-                  "TWO SEPARATE CHIPS - at a pad slew class this letter FINDS rather than "
-                  "assumes, because a data line's edge coupled into the clock is one sampling "
-                  "edge too many",
-                  best_good == 4u);
-
-    Exchange lsb{};
-    lsb.cfg.dord = 1;
-    lsb.host_lsb = true;
-    Verify v{};
-    spilink::Report r{};
-    const bool lsb_ok = exchange_exact(lsb, v, r);
-    if (!lsb_ok) {
-        dump_exchange(lsb, v, r);
-    }
-    bench.verdict("LSb first, both ends agreeing, is byte-exact too - the bit order a BUS-level "
-                  "verb (CTLR1.LSBFIRST) and not a Request field",
-                  lsb_ok);
-
-    Exchange mism{};
-    mism.cfg.dord = 1;      // the client LSb first
-    mism.host_lsb = false;  // this end MSb first
-    Verify v2{};
-    spilink::Report r2{};
-    const bool ran = do_exchange(mism);
-    const bool rep = ran && peer_report(r2);
-    v2 = verify_rx(mism);
-    print(serial, "  DORD mismatch: host mism=", v2.mism, " client mism=", r2.mism, " count=",
-          r2.count, " (both checking the exact bit-reverse)", crlf);
-    bench.verdict("a bit-order mismatch is an EXACT TWO-WAY BIT REVERSAL - each end reads the "
-                  "other's bytes with their bits in the opposite order",
-                  ran && rep && v2.mism == 0u && r2.mism == 0u && r2.count == mism.count);
-
-    // ---- THE DUMMY BYTE, measured and not assumed ----
-    Exchange nopre{};
-    nopre.cfg.regime = spilink::regime_normal;   // the peer does NOT preload
-    nopre.seed_a = 0x2B;
-    nopre.seed_b = 0x6D;
-    Verify v3{};
-    spilink::Report r3{};
-    (void)do_exchange(nopre);
-    (void)peer_report(r3);
-    v3 = verify_rx(nopre);
-    const uint8_t first_read = xrx[0];
-    const uint8_t want_first = spilink::pattern_value(nopre.pattern, nopre.seed_b, 0);
-    uint16_t shifted = 0;
-    for (uint16_t i = 1; i < nopre.count && i < max_exchange; ++i) {
-        if (xrx[i] != spilink::pattern_value(nopre.pattern, nopre.seed_b, i - 1u)) {
-            ++shifted;
-        }
-    }
-    print(serial, "  with NO preload the first frame read back is ", hex(first_read),
-          " (the preloaded stream would start ", hex(want_first), "); the rest is ",
-          shifted == 0u ? "the client's stream ONE PLACE LATE" : "neither aligned nor shifted",
-          ", and the aligned read had ", v3.mism, " frame(s) out of place", crlf);
-    bench.verdict("THE DUMMY IS MEASURED AND NOT ASSUMED: a client that has not preloaded sends "
-                  "the shifter's leftover in the first frame and its own stream one place late "
-                  "from there - the one-ahead rule seen from the other end",
-                  shifted == 0u && v3.mism != 0u && first_read != want_first);
-
-    // ---- the ladder against the peer ----
-    uint32_t last_good = 0;
-    uint32_t first_bad = 0;
-    spilink::Report bad_r{};
-    for (uint8_t code = 8; code-- > 0;) {
-        const SpiClock c = static_cast<SpiClock>(code);
-        if (c == SpiClock::div2 && first_bad != 0u) {
-            break;
-        }
-        Exchange e{};
-        e.rate = c;
-        e.count = 8;
-        e.seed_a = 0x21;
-        e.seed_b = 0x84;
-        Verify lv{};
-        spilink::Report lr{};
-        const bool ok = exchange_exact(e, lv, lr);
-        const uint32_t real = PeerHost::sck_hz(c);
-        print(serial, "  SCK PB1/", spi_division(c), " = ", real / 1000u, " kHz: ",
-              ok ? "exact both ways" : "NOT exact", "  host mism=", lv.mism, " client mism=",
-              lr.mism, " client count=", lr.count, crlf);
-        if (ok && first_bad == 0u) {
-            last_good = real;
-        } else if (!ok && first_bad == 0u) {
-            first_bad = real;
-            bad_r = lr;
-        }
-    }
-    print(serial, "  the link to the peer held to ", last_good / 1000u, " kHz");
-    if (first_bad != 0u) {
-        print(serial, " and broke at ", first_bad / 1000u, " kHz");
-    }
-    print(serial, crlf);
-    bench.verdict("the link is exact at the command rate and at least four times faster",
-                  last_good >= 1'100'000UL);
-    bench.verdict("wherever the climb breaks, the peer still hears every character exact there - "
-                  "the boundary is its ANSWER RELOAD and not the wire",
-                  first_bad == 0u || (bad_r.count == 8u && bad_r.mism == 0u));
-
-    // ---- sink_slow: what a client that never drains does to the host ----
-    {
-        spilink::Params a{};
-        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_normal};
-        a.count = 32;
-        a.ms = 120;
-        if (peer_act(Op::sink_slow, a)) {
-            settle_ms(10);
-            fill_pattern(xtx, max_exchange, 0x91);
-            for (uint8_t i = 0; i < max_exchange; ++i) {
-                xrx[i] = 0xEE;
-            }
-            (void)link_xfer(xtx, xrx, 16, link_clock);
-            (void)link_command_mode();
-            spilink::Report sr{};
-            const bool rp = peer_report(sr);
-            print(serial, "  sink_slow: the client retained ", sr.count,
-                  " frame(s), its status during the flood was ", hex(sr.sum), ", after the drain ",
-                  hex(sr.exp), "; the host read back ", hex(xrx[0]), " ", hex(xrx[1]), " ",
-                  hex(xrx[2]), crlf);
-            bench.verdict("A CLIENT THAT NEVER DRAINS keeps ONE frame and raises the overrun - "
-                          "there is no FIFO behind it (figure 20-1)",
-                          rp && sr.count <= 1u &&
-                              (sr.flags & spilink::report_bufovf) != 0u);
-        } else {
-            bench.verdict("the peer accepted sink_slow", false);
-        }
-    }
-
-    // ---- ss_pulse: the select seen from the client's end ----
-    {
-        spilink::Params a{};
-        a.aux8 = 60;      // the lead-in, long enough for this end to let go
-        a.aux16 = 4000;   // microseconds the peer holds the wire down
-        // THE COMMAND GOES OUT FIRST, and only then does this end let the
-        // wire go: the command travels over the bus the host owns, so a
-        // release before it would have nothing to send it with.
-        if (peer_act(Op::ss_pulse, a)) {
-            PeerHost::release();
-            PeerNssPad::input(PinPull::up);
-            bool saw_low = false;
-            const uint32_t t0 = Ticker::millis();
-            while (Ticker::millis() - t0 < 300u) {
-                if (!PeerNssPad::read()) {
-                    saw_low = true;
-                    break;
-                }
-            }
-            print(serial, "  ss_pulse: the shared select ", saw_low ? "went LOW" : "stayed high",
-                  " while the peer drove it", crlf);
-            bench.verdict("THE SELECT IS A REAL WIRE: the peer pulling it low is seen at this "
-                          "end, which is what frames a client's transaction",
-                          saw_low);
-        } else {
-            bench.verdict("the peer accepted ss_pulse", false);
-        }
-        (void)link_command_mode();
-    }
-
-    // ---- host_burst: THE ROLES INVERT, this board the client ----
-    {
-        spilink::Params a{};
-        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
-        a.count = 16;
-        a.ms = 400;
-        a.seed_a = 0x3B;
-        a.seed_b = 0x6D;
-        a.pattern = spilink::pattern_prbs;
-        a.aux8 = 40;    // the lead-in: this end becomes a client inside it
-        a.aux16 = 64;   // the instrument's SCK division of its own clock
-        if (!peer_act(Op::host_burst, a)) {
-            bench.verdict("the peer accepted host_burst", false);
-        } else {
-            const bool ran = run_as_client(a);
-            spilink::Report hr{};
-            (void)link_command_mode();
-            const bool rp = peer_report(hr);
-            uint16_t mism = 0;
-            {
-                spilink::Stream want(a.pattern, a.seed_a);
-                for (uint16_t i = 0; i < crx_n && i < a.count; ++i) {
-                    if (crx[i] != want.next()) {
-                        ++mism;
-                    }
-                }
-            }
-            print(serial, "  host_burst: this board read ", crx_n, " of ", a.count,
-                  " frames with ", mism, " wrong; the peer read ", hr.count, " with ", hr.mism,
-                  " wrong (flags ", hex(hr.flags), ")", crlf);
-            bench.verdict("THE ROLES INVERT: this board's SpiClient answers ONE FRAME AHEAD "
-                          "under a host on another chip, and both ends agree byte for byte",
-                          ran && rp && crx_n >= a.count && mism == 0u && hr.count == a.count &&
-                              hr.mism == 0u);
-            bench.verdict("... and the client's MISO is released again afterwards - the dark "
-                          "listener leaves the answer line to the bus",
-                          !PeerClient::output_driven());
-        }
-    }
-
-    // ---- the engines under an exchange ----
-    {
-        Dma<1>::open();
-        spilink::Params a{};
-        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
-        a.count = 16;
-        a.ms = 400;
-        a.seed_a = 0x44;
-        a.seed_b = 0x99;
-        a.pattern = spilink::pattern_prbs;
-        if (!peer_act(Op::exchange, a)) {
-            bench.verdict("the peer accepted the engined exchange", false);
-        } else {
-            spilink::Stream out(a.pattern, a.seed_a);
-            for (uint8_t i = 0; i < max_exchange; ++i) {
-                xtx[i] = 0;
-                xrx[i] = 0xEE;
-            }
-            for (uint16_t i = 0; i < a.count; ++i) {
-                xtx[i] = out.next();
-            }
-            settle();
-            peer_client_live = false;
-            dma_host_live = true;
-            (void)PeerDma::init(clock);
-            PeerNssPad::output(true);
-            PeerDma::prime(SpiMode::mode0, link_clock);
-            PeerNssPad::clear();
-            link_hold();
-            PeerDma::Request r{};
-            r.cs = {};
-            r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
-            r.rx = lend<Lease::reply>(xrx);
-            r.len = a.count;
-            r.clock = link_clock;
-            r.mode = SpiMode::mode0;
-            r.polled = true;
-            const bool done = PeerDma::start(r);
-            link_hold();
-            PeerNssPad::set();
-            dma_host_live = false;
-            PeerDma::release();
-            uint16_t mism = 0;
-            {
-                spilink::Stream want(a.pattern, a.seed_b);
-                for (uint16_t i = 0; i < a.count; ++i) {
-                    if (xrx[i] != want.next()) {
-                        ++mism;
-                    }
-                }
-            }
-            spilink::Report er{};
-            (void)link_command_mode();
-            const bool rp = peer_report(er);
-            print(serial, "  the engines on channels ", S2::dma_tx_channel, " and ",
-                  S2::dma_rx_channel, ": status ", PeerDma::status(), ", host mism=", mism,
-                  ", the peer read ", er.count, " with ", er.mism, " wrong", crlf);
-            bench.verdict("SPI2's DMA ENGINES carry an exchange to a second chip, byte-exact at "
-                          "both ends",
-                          done && mism == 0u && rp && er.count == a.count && er.mism == 0u);
-        }
-    }
-
-    // ---- ten seconds of traffic, counted at both ends ----
-    {
-        uint32_t rounds = 0, bad = 0, frames = 0;
-        const uint32_t t0 = Ticker::millis();
-        while (Ticker::millis() - t0 < 10'000u) {
-            Exchange e{};
-            e.count = 16;
-            e.rate = SpiClock::div64;
-            e.seed_a = static_cast<uint8_t>(0x11u + rounds);
-            e.seed_b = static_cast<uint8_t>(0x77u + rounds);
-            Verify sv{};
-            spilink::Report sr{};
-            if (!exchange_exact(e, sv, sr)) {
-                ++bad;
-            }
-            frames += e.count;
-            ++rounds;
-        }
-        print(serial, "  ten seconds: ", rounds, " exchanges, ", frames, " frames, ", bad,
-              " not exact at one end or the other", crlf);
-        bench.verdict("A TEN-SECOND STRESS between two chips: every exchange exact at both ends",
-                      rounds > 0u && bad == 0u);
-    }
-
-    (void)link_command_mode();
-    bench.verdict("the command channel is back after all of that", command(Op::ping));
-    PeerHost::release();
     host_ready();
 }
 
@@ -2218,24 +1408,8 @@ struct Link {
     using Sck3 = Pin<three.sck.port, three.sck.pin>;
     using Miso3 = Pin<three.miso.port, three.miso.pin>;
     using Mosi3 = Pin<three.mosi.port, three.mosi.pin>;
-    using Host2 = SpiHost<2, two>;
-    using Host3 = SpiHost<3, three>;
-    using Client2 = SpiClient<2, two>;
-    using Client3 = SpiClient<3, three>;
-
-    /// What the client being served from its own vector answers and
-    /// collects: one frame ahead on TXE, one taken on RXNE.
-    static inline volatile bool serve2 = false;
-    static inline volatile bool serve3 = false;
-    static inline const uint16_t* answers = nullptr;
-    static inline uint16_t* got = nullptr;
-    static inline volatile uint16_t len = 0;
-    static inline volatile uint16_t tx_i = 0;
-    static inline volatile uint16_t rx_i = 0;
 
     static void all_released() {
-        serve2 = false;
-        serve3 = false;
         Pfic::disable(S2::irq);
         Pfic::disable(S3::irq);
         S2::bus_clock(true);
@@ -2268,247 +1442,6 @@ struct Link {
         return sel && sck && miso && mosi;
     }
 };
-
-/// The client's vector body while a letter serves it: the next answer
-/// written on TXE - one frame ahead - and the frame read on RXNE.
-template <bool on, typename Client>
-void serve_client() {
-    using L = Link<on>;
-    const uint32_t up = Client::isr();
-    if ((up & SpiFlag::txe) != 0u) {
-        if (L::tx_i < L::len) {
-            Client::write(L::answers[L::tx_i]);
-            L::tx_i = static_cast<uint16_t>(L::tx_i + 1u);
-        } else {
-            Client::txe_interrupt(false);
-        }
-    }
-    if ((up & SpiFlag::rxne) != 0u) {
-        if (const auto v = Client::poll()) {
-            if (L::rx_i < L::len) {
-                L::got[L::rx_i] = *v;
-                L::rx_i = static_cast<uint16_t>(L::rx_i + 1u);
-            }
-        }
-    }
-}
-
-/// SPI2's and SPI3's vectors while a letter serves a client there; false,
-/// and nothing done, on a part without SPI3 and otherwise.
-template <bool on = has_spi3>
-bool served_on_spi2() {
-    if constexpr (on) {
-        if (Link<on>::serve2) {
-            serve_client<on, typename Link<on>::Client2>();
-            return true;
-        }
-    }
-    return false;
-}
-
-template <bool on = has_spi3>
-void served_on_spi3() {
-    if constexpr (on) {
-        if (Link<on>::serve3) {
-            serve_client<on, typename Link<on>::Client3>();
-        }
-    }
-}
-
-constexpr uint16_t link_frames = 32;
-uint16_t link_answers[link_frames];
-uint16_t link_got[link_frames];
-uint8_t link_out[2u * link_frames];
-uint8_t link_in[2u * link_frames];
-
-/// One polled transaction of `n` frames from `Host` into `Client`, the
-/// client served from its own vector; the counts of frames each end got
-/// wrong, or 0xFFFF for a transaction that never finished.
-struct LinkResult {
-    uint16_t host_wrong;
-    uint16_t client_wrong;
-    uint32_t cycles;   ///< the host's polled request, start() to its return
-};
-
-template <bool on, typename Host, typename Client, typename Sel>
-LinkResult link_run(bool client_is_two, SpiMode mode, bool lsb, SpiDataSize bits, uint16_t n) {
-    using L = Link<on>;
-    const bool wide = bits == SpiDataSize::bits16;
-    const uint16_t mask = wide ? 0xFFFFu : 0x00FFu;
-    for (uint16_t i = 0; i < n; ++i) {
-        link_answers[i] = static_cast<uint16_t>((0xA5C3u ^ (i * 0x1111u)) & mask);
-        const uint16_t out = static_cast<uint16_t>((0x3C5Au + i * 0x0707u) & mask);
-        if (wide) {
-            link_out[2u * i] = static_cast<uint8_t>(out);
-            link_out[2u * i + 1u] = static_cast<uint8_t>(out >> 8);
-        } else {
-            link_out[i] = static_cast<uint8_t>(out);
-        }
-        link_got[i] = 0;
-    }
-    // The client first, its first answer loaded before the select falls.
-    L::answers = link_answers;
-    L::got = link_got;
-    L::len = n;
-    L::tx_i = 1;
-    L::rx_i = 0;
-    if (!Client::init(clock, {.mode = mode, .bits = bits, .lsb_first = lsb,
-                              .nss = SpiNss::hardware_input, .drive_output = true})) {
-        return {0xFFFFu, 0xFFFFu, 0};
-    }
-    if (client_is_two) {
-        L::serve2 = true;
-    } else {
-        L::serve3 = true;
-    }
-    Client::enable(link_answers[0]);
-    Client::rxne_interrupt(true);
-    Client::txe_interrupt(true);
-
-    // The host, polled: interrupts stay on, so the client's vector runs
-    // between its frames.
-    Sel::output(true);
-    (void)Host::init(clock);
-    (void)Host::bit_order(lsb);
-    typename Host::Request r{};
-    r.cs = Sel::ref();
-    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(link_out));
-    r.rx = lend<Lease::reply>(static_cast<uint8_t*>(link_in));
-    r.len = n;
-    r.clock = SpiClock::div64;
-    r.mode = mode;
-    r.bits = bits;
-    r.polled = true;
-    const uint32_t t0 = cycles_now();
-    const bool done = Host::start(r);
-    const uint32_t took = cycles_now() - t0;
-    (void)delay_us(clock, 50);
-
-    LinkResult res{0, 0, took};
-    for (uint16_t i = 0; i < n; ++i) {
-        const uint16_t in = wide ? static_cast<uint16_t>(link_in[2u * i] |
-                                                         (link_in[2u * i + 1u] << 8))
-                                 : link_in[i];
-        const uint16_t sent = wide ? static_cast<uint16_t>(link_out[2u * i] |
-                                                           (link_out[2u * i + 1u] << 8))
-                                   : link_out[i];
-        if (in != link_answers[i]) {
-            ++res.host_wrong;
-        }
-        if (i >= L::rx_i || link_got[i] != sent) {
-            ++res.client_wrong;
-        }
-    }
-    if (!done) {
-        res = {0xFFFFu, 0xFFFFu, 0};
-    }
-    L::serve2 = false;
-    L::serve3 = false;
-    Client::rxne_interrupt(false);
-    Client::txe_interrupt(false);
-    (void)Client::disable();
-    Client::release();
-    Host::release();
-    Sel::release();
-    return res;
-}
-
-/// The mode-and-order matrix of one arrangement, and a 16-bit run in
-/// mode 0 - the count of clean runs out of nine. `on_time` says whether
-/// the first 8-bit run and the 16-bit one took their wire at the rate
-/// asked: 32 frames at PB1 over 64, the host's polled loop keeping two in
-/// flight, its request's fixed cost inside the reading.
-template <bool on, typename Host, typename Client, typename Sel>
-uint8_t link_matrix(bool client_is_two, bool& on_time) {
-    uint8_t clean = 0;
-    uint32_t first_pm = 0;
-    const SpiMode modes[4] = {SpiMode::mode0, SpiMode::mode1, SpiMode::mode2, SpiMode::mode3};
-    for (SpiMode m : modes) {
-        for (uint8_t order = 0; order < 2u; ++order) {
-            const LinkResult r =
-                link_run<on, Host, Client, Sel>(client_is_two, m, order != 0u, SpiDataSize::bits8,
-                                               link_frames);
-            print(serial, "    mode ", static_cast<uint8_t>(m), order != 0u ? " LSB" : " MSB",
-                  " first: the host read ", r.host_wrong, " frames wrong, the client ",
-                  r.client_wrong, crlf);
-            if (m == SpiMode::mode0 && order == 0u) {
-                first_pm = block_permille(r.cycles, link_frames, 8, 64);
-            }
-            if (r.host_wrong == 0u && r.client_wrong == 0u) {
-                ++clean;
-            }
-        }
-    }
-    const LinkResult w = link_run<on, Host, Client, Sel>(client_is_two, SpiMode::mode0, false,
-                                                         SpiDataSize::bits16, link_frames);
-    const uint32_t wide_pm = block_permille(w.cycles, link_frames, 16, 64);
-    print(serial, "    16-bit frames in mode 0: the host read ", w.host_wrong,
-          " wrong, the client ", w.client_wrong, crlf);
-    print(serial, "    in thousandths of the wire at /64: 8-bit mode 0 ", first_pm, ", 16-bit ",
-          wide_pm, crlf);
-    on_time = wire_ok(first_pm) && wire_ok(wide_pm);
-    if (w.host_wrong == 0u && w.client_wrong == 0u) {
-        ++clean;
-    }
-    return clean;
-}
-
-// ---------------------------------------------------------------------------
-// f - SPI3 as the client of SPI2
-// ---------------------------------------------------------------------------
-
-template <bool on = has_spi3>
-void tf_spi3_client() {
-    if constexpr (on) {
-        using L = Link<on>;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the link between SPI2 and SPI3 declines without its four wires, and "
-                          "says so",
-                          true);
-            return;
-        }
-        bool on_time = false;
-        const uint8_t clean = link_matrix<on, typename L::Host2, typename L::Client3,
-                                          typename L::Sel2>(false, on_time);
-        bench.verdict("SPI2's host engine and SPI3's client served one frame ahead from its own "
-                      "vector exchange 32 frames exactly in all four modes, both bit orders, and "
-                      "in 16-bit frames",
-                      clean == 9u);
-        bench.verdict("and SPI2's host runs at the rate asked: 32 frames at PB1 over 64 in their "
-                      "wire time, 8-bit and 16-bit, -1 % to +3 % on the core's counter",
-                      on_time);
-        L::all_released();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// g - SPI3 as the host over SPI2's client
-// ---------------------------------------------------------------------------
-
-template <bool on = has_spi3>
-void tg_spi3_host() {
-    if constexpr (on) {
-        using L = Link<on>;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the link between SPI3 and SPI2 declines without its four wires, and "
-                          "says so",
-                          true);
-            return;
-        }
-        bool on_time = false;
-        const uint8_t clean = link_matrix<on, typename L::Host3, typename L::Client2,
-                                          typename L::Sel3>(true, on_time);
-        bench.verdict("with the roles swapped - SPI3's host engine over SPI2's client - the same "
-                      "matrix is exact both ways",
-                      clean == 9u);
-        bench.verdict("and SPI3's host runs at the rate asked: 32 frames at PB1 over 64 in their "
-                      "wire time, 8-bit and 16-bit, -1 % to +3 % on the core's counter",
-                      on_time);
-        L::all_released();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // h and i - blocks through the four channels
@@ -2962,11 +1895,1517 @@ void ti_wide_frames() {
 template <bool on = has_spi3>
 void register_spi3_letters() {
     if constexpr (on) {
-        bench.letter('f', "SPI3 as the client of SPI2, over four wires", tf_spi3_client<>);
-        bench.letter('g', "SPI3 as the host over SPI2's client", tg_spi3_host<>);
         bench.letter('h', "the high-speed read: /2 with and without HSRXEN, /4 as the baseline",
                      th_high_speed_read<>);
         bench.letter('i', "16-bit frames through the four DMA channels", ti_wide_frames<>);
+    }
+}
+
+// ===========================================================================
+// The pair: d, j, k, l, m - the second set, against the far board's spi_peer
+// ===========================================================================
+//
+// THE OTHER END IS THE DESK PARTNER running `spi_peer` (the CH32V303 for a
+// CH32V203 DUT, the CH32V203 for a CH32V303 DUT), commanded IN BAND over
+// the bus under test through avrdx/src/apps/spi_link.hpp. Every letter here
+// FAILS loudly when the peer does not answer: it is in the second set, which
+// `z` never runs.
+//
+// THE BOUNDS, derived from the two datasheets' SPI tables (the CH32V203's
+// table 4-25, the CH32V303's table 4-27) and the two ends' loops:
+//  - THE CLIENT HEARS from /4 down: the host's MOSI is valid 5 ns after its
+//    edge (tV(MO)) and the client wants 5 ns of setup (tSU(SI)), 10 ns
+//    inside the 13.9 ns half period even of /2 = 36 MHz, the client's own
+//    ceiling in both tables - but the same tables let SCK rise and fall in
+//    20 ns into 30 pF (tr(SCK), tf(SCK)), so a half period holds a whole
+//    edge from 25 MHz down: /4 = 18 MHz is judged, /2 printed. The far
+//    client's report is judged there wherever its serve keeps up (below).
+//  - THE HOST READS BACK where the half period holds the client's answer:
+//    the client's MISO is valid 25 ns after its edge (tV(SO)) and the host
+//    wants 5 ns (tSU(MI)), 30 ns - inside the 55.6 ns half period of /8 =
+//    9 MHz, outside the 27.8 ns of /4 = 18 MHz and the 13.9 ns of /2. So
+//    this end's read-back is judged from /8 down; /4, /2 and /2 with
+//    HSRXEN (20.4.10's late sampling, whose delay the chapter does not
+//    state) are printed.
+//  - THE FAR CLIENT'S SERVES: its DMA engines take a beat in some six
+//    cycles (docs/ch32vx03/dma.md), two a frame, against the 64 core cycles
+//    of an 8-bit frame at /4 - every judged code, its core leaving the bus
+//    to them inside the window (spi_peer's header); its POLLED RUN is fifteen
+//    instructions a frame with four APB accesses in the release listing
+//    (docs/ch32vx03/spi.md), at most 46 cycles counted at two cycles an
+//    instruction and six an access, plus the close's second read when the
+//    select glitches (64 empty turns and a pad load, about 70 cycles), and a
+//    frame must hold two such turns (a look that misses its flag is a whole
+//    turn late): 232 cycles - an 8-bit frame from /16 (256), a 16-bit one
+//    from /8 (256). Above that the run's rung is printed.
+
+using spilink::Op;
+
+/// The command channel's SCK: /256 of PB1 = 281.25 kHz, a character every
+/// 28 us - an order of magnitude more than the peer's polled command
+/// listener needs to turn one around.
+constexpr SpiClock link_clock = SpiClock::div256;
+
+uint8_t frame_buf[spilink::max_payload + 8];
+uint8_t answer_buf[spilink::answer_bytes];
+uint8_t raw_seen[16];
+uint8_t raw_n = 0;
+spilink::Decoder dec;
+bool link_quiet = false;
+
+/// The far end is the CH32V203C8T6 (its label "V203C8"): letter d reads
+/// it once from the ident.
+bool far_is_v203 = pair_spi == 3u;
+volatile bool pair_pump_live = false;
+volatile bool pair_dma_live = false;
+volatile bool pair_err_live = false;
+volatile uint32_t pair_err_entries = 0;
+volatile uint32_t pair_err_flags = 0;
+
+/// The hold around each select window: the engine releases the select
+/// about a microsecond after the last edge, and a client whose
+/// transaction the select edge frames loses a character it has not
+/// fetched yet - so the protocol owns the chip select for these windows
+/// (the Request carries a null PinRef) and pays 30 us on each side.
+void link_hold() { (void)delay_us(clock, 30); }
+
+/// R6, ONE COLUMN PER INSTANCE AT A TIME: on the CH32V303 the pair's SPI3
+/// column 1 shares its remap field with column 0, whose pads carry the
+/// evaluation board's jumpers to SPI2 - and are SPI1's second column too.
+/// Every pair letter starts with both instances reset and those pads
+/// floating; the host's init() then writes code 1.
+template <bool on = (pair_spi == 3u)>
+void pair_pads_alone() {
+    if constexpr (on) {
+        Link<on>::all_released();
+    }
+}
+
+bool link_command_mode() {
+    pair_pump_live = false;
+    pair_dma_live = false;
+    const bool ok = PairHost::init(clock);
+    PairNss::output(true);
+    dec.reset();
+    return ok;
+}
+
+/// One protocol window: prime, select, hold, the transaction, hold,
+/// deselect. THE MODE IS PRIMED BEFORE THE SELECT FALLS - a CPOL flip
+/// inside an open window is one extra edge and the selected client
+/// counts it into the frame.
+bool link_xfer(const uint8_t* tx, uint8_t* rx, uint16_t n, SpiClock rate = link_clock,
+               SpiMode mode = SpiMode::mode0) {
+    if (n == 0) {
+        return true;
+    }
+    PairHost::prime(mode, rate);
+    PairNss::clear();
+    link_hold();
+    PairHost::Request r{};
+    r.cs = {};
+    r.tx = lend<Lease::reply>(tx);
+    r.rx = lend<Lease::reply>(rx);
+    r.len = n;
+    r.clock = rate;
+    r.mode = mode;
+    r.bits = SpiDataSize::bits8;
+    r.polled = true;
+    const bool done = PairHost::start(r);
+    link_hold();
+    PairNss::set();
+    return done;
+}
+
+void send_frame(Op op, const uint8_t* p, uint8_t len) {
+    uint8_t n = 0;
+    spilink::write_frame(
+        [&](uint8_t b) {
+            if (n < sizeof frame_buf) {
+                frame_buf[n++] = b;
+            }
+        },
+        op, p, len);
+    (void)link_xfer(frame_buf, nullptr, n);
+}
+
+/// One answer window: `answer_bytes` dummies in a single transaction (a
+/// null out buffer: the engine's own 0xFF, which is no frame's magic),
+/// then the decoder walks what came back.
+bool recv_frame(spilink::Frame& out) {
+    dec.reset();
+    raw_n = 0;
+    for (uint16_t i = 0; i < spilink::answer_bytes; ++i) {
+        answer_buf[i] = 0xEE;
+    }
+    (void)link_xfer(nullptr, answer_buf, spilink::answer_bytes);
+    for (uint16_t i = 0; i < spilink::answer_bytes; ++i) {
+        if (raw_n < 16) {
+            raw_seen[raw_n++] = answer_buf[i];
+        }
+        if (dec.feed(answer_buf[i]) == spilink::Decoder::Result::frame) {
+            out = dec.frame();
+            return true;
+        }
+    }
+    return false;
+}
+
+void settle() { settle_ms(spilink::settle_ms); }
+
+bool command_once(Op op, const uint8_t* p, uint8_t len) {
+    send_frame(op, p, len);
+    settle();
+    spilink::Frame f;
+    if (!recv_frame(f)) {
+        return false;
+    }
+    return f.op == Op::ack && f.len == 2 && f.data[0] == spilink::byte_of(op);
+}
+
+const uint8_t no_payload[1] = {0};
+
+/// Three attempts, each separated by longer than the peer's own answer
+/// window bound, so a peer that was serving into nothing is certainly
+/// dark again before the retry - the protocol's own recovery guarantee.
+bool command(Op op, const uint8_t* p = no_payload, uint8_t len = 0) {
+    uint8_t first_n = 0;
+    uint8_t first_seen[16];
+    for (uint8_t k = 0; k < 3; ++k) {
+        if (command_once(op, p, len)) {
+            return true;
+        }
+        if (k == 0) {
+            first_n = raw_n;
+            for (uint8_t i = 0; i < raw_n; ++i) {
+                first_seen[i] = raw_seen[i];
+            }
+        }
+        (void)link_command_mode();
+        settle_ms(400);
+    }
+    if (link_quiet) {
+        return false;
+    }
+    print(serial, "    LINK FAILURE op ", hex(spilink::byte_of(op)), ": the first answer window carried");
+    if (first_n == 0) {
+        print(serial, " nothing");
+    }
+    for (uint8_t i = 0; i < first_n; ++i) {
+        print(serial, " ", hex(first_seen[i]));
+    }
+    print(serial, crlf,
+          "      the far board must be running `spi_peer`; its console '0' forces the dark client back.", crlf);
+    (void)link_command_mode();
+    return false;
+}
+
+bool query(Op op, spilink::Frame& data) {
+    if (!command(op)) {
+        return false;
+    }
+    settle();
+    return recv_frame(data);
+}
+
+bool peer_ident(spilink::Ident& d) {
+    spilink::Frame f;
+    if (!query(Op::ident, f) || f.op != Op::ident_data || f.len != spilink::ident_size) {
+        return false;
+    }
+    d = spilink::get_ident(f.data);
+    return true;
+}
+
+bool peer_report(spilink::Report& r) {
+    (void)link_command_mode();
+    for (uint8_t k = 0; k < 4; ++k) {
+        spilink::Frame f;
+        if (query(Op::report, f) && f.op == Op::report_data && f.len == spilink::report_size) {
+            r = spilink::get_report(f.data);
+            return true;
+        }
+        settle_ms(60);
+    }
+    return false;
+}
+
+bool peer_act(Op op, const spilink::Params& a) {
+    uint8_t p[spilink::params_size];
+    spilink::put_params(p, a);
+    if (!command(op, p, spilink::params_size)) {
+        return false;
+    }
+    settle();
+    return true;
+}
+
+/// Every pair letter asks first; a peer that does not answer is a FAILED
+/// verdict - this is the second set, which needs the far board.
+bool need_peer() {
+    pair_pads_alone();
+    PairHost::pad_speed(pair_host_class);
+    PairDma::pad_speed(pair_host_class);
+    link_quiet = true;
+    (void)link_command_mode();
+    for (uint8_t k = 0; k < 3; ++k) {
+        if (command(Op::ping)) {
+            link_quiet = false;
+            return true;
+        }
+    }
+    link_quiet = false;
+    bench.verdict("THE PEER answers a ping on the pair's four wires (the far board running spi_peer; its "
+                  "console '0' forces the dark client back)",
+                  false);
+    PairHost::release();
+    PairNss::release();
+    return false;
+}
+
+/// Every pair letter ends with its pads floating and its instance off.
+void pair_done() {
+    pair_pump_live = false;
+    pair_dma_live = false;
+    PairHost::release();
+    PairNss::release();
+    pair_pads_alone();
+}
+
+// ---- one exchange, commanded and then clocked ------------------------------
+
+/// How this end clocks the exchange: the polled request, the ISR pump, or
+/// the DMA engines (a polled request whose data phase rides them).
+enum class Shape : uint8_t { polled, pump, engines };
+
+const char* shape_name(Shape s) {
+    return s == Shape::polled ? "polled" : (s == Shape::pump ? "pump" : "engines");
+}
+
+struct Exchange {
+    spilink::Cfg cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    SpiMode host_mode = SpiMode::mode0;
+    bool host_lsb = false;
+    SpiClock rate = SpiClock::div64;
+    uint16_t count = 32;   ///< frames
+    uint8_t seed_a = 0x13;
+    uint8_t seed_b = 0x57;
+    uint8_t pattern = spilink::pattern_prbs;
+    uint8_t flags = 0;
+    uint8_t spare = 0;
+    uint16_t ms = 400;
+    Shape shape = Shape::polled;
+    bool read = true;        ///< this end reads back (an in buffer)
+    bool high_speed = false; ///< HSRXEN under /2
+};
+
+struct Outcome {
+    bool ran = false;        ///< the peer acked the action and the transaction finished
+    bool reported = false;
+    uint8_t status = 0;
+    uint32_t cycles = 0;     ///< start() to the transaction's end, core cycles
+    uint16_t mism = 0;       ///< this end's read-back, bytes wrong
+    uint8_t idx = 0xFF;
+    uint8_t got = 0;
+    uint8_t exp = 0;
+    spilink::Report r{};
+};
+
+constexpr uint16_t max_exchange = 64;   ///< frames; twice the bytes for 16-bit ones
+alignas(4) uint8_t xtx[2u * max_exchange];
+alignas(4) uint8_t xrx[2u * max_exchange];
+
+bool wide_of(const Exchange& e) { return (e.spare & spilink::spare_wide) != 0u; }
+
+/// The transaction itself on the shape asked, the select framed by this
+/// end, the time from start() to its end on the core's counter.
+uint8_t clock_out(const Exchange& e, uint16_t n, uint32_t& cycles) {
+    const SpiDataSize bits = wide_of(e) ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    uint8_t st = no_answer;
+    if (e.shape == Shape::engines) {
+        pair_dma_live = true;
+        (void)PairDma::init(clock);
+        PairNss::output(true);
+        (void)PairDma::bit_order(e.host_lsb);
+        PairDma::prime(e.host_mode, e.rate, bits);
+        if (e.high_speed) {
+            (void)PairS::high_speed_read(true);
+        }
+        PairNss::clear();
+        link_hold();
+        PairDma::Request r{};
+        r.cs = {};
+        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
+        r.rx = lend<Lease::reply>(e.read ? xrx : nullptr);
+        r.len = n;
+        r.clock = e.rate;
+        r.mode = e.host_mode;
+        r.bits = bits;
+        r.polled = true;
+        host_done = false;
+        const uint32_t t0 = cycles_now();
+        (void)PairDma::start(r);
+        cycles = cycles_now() - t0;
+        st = PairDma::status();
+        link_hold();
+        PairNss::set();
+        (void)PairS::high_speed_read(false);
+        PairDma::release();
+        pair_dma_live = false;
+        return st;
+    }
+    (void)PairHost::bit_order(e.host_lsb);
+    PairHost::prime(e.host_mode, e.rate, bits);
+    if (e.high_speed) {
+        (void)PairS::high_speed_read(true);
+    }
+    PairNss::clear();
+    link_hold();
+    PairHost::Request r{};
+    r.cs = {};
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(xtx));
+    r.rx = lend<Lease::reply>(e.read ? xrx : nullptr);
+    r.len = n;
+    r.clock = e.rate;
+    r.mode = e.host_mode;
+    r.bits = bits;
+    r.polled = e.shape == Shape::polled;
+    host_done = false;
+    pair_pump_live = e.shape == Shape::pump;
+    const uint32_t t0 = cycles_now();
+    if (PairHost::start(r)) {
+        cycles = cycles_now() - t0;
+        st = PairHost::status();
+    } else {
+        for (uint32_t i = 0; i < 4'000'000UL && !host_done; ++i) {
+        }
+        cycles = cycles_now() - t0;
+        st = host_done ? PairHost::status() : no_answer;
+        if (!host_done) {
+            (void)PairHost::recover();
+        }
+    }
+    pair_pump_live = false;
+    link_hold();
+    PairNss::set();
+    (void)PairS::high_speed_read(false);
+    (void)PairHost::bit_order(false);
+    return st;
+}
+
+/// Command the exchange, clock it, read the peer's report, judge this end's
+/// read-back against the far stream in spi_link.hpp's first row (a
+/// preloaded client: rx[i] = P_B(i)).
+Outcome run_exchange(const Exchange& e) {
+    Outcome o{};
+    const bool wide = wide_of(e);
+    spilink::Params a{};
+    a.cfg = e.cfg;
+    a.count = e.count;
+    a.ms = e.ms;
+    a.seed_a = e.seed_a;
+    a.seed_b = e.seed_b;
+    a.pattern = e.pattern;
+    a.flags = e.flags;
+    a.spare = e.spare;
+    // A bit-order mismatch is not a shrug: told about it, each end checks
+    // the EXACT bit-reverse of what the other sent.
+    if (e.host_lsb != (e.cfg.dord != 0)) {
+        a.flags |= spilink::flag_expect_reversed;
+    }
+    if (!peer_act(Op::exchange, a)) {
+        return o;
+    }
+    const uint16_t n = e.count < max_exchange ? e.count : max_exchange;
+    const uint16_t bytes = static_cast<uint16_t>(wide ? 2u * n : n);
+    {
+        spilink::Stream out(e.pattern, e.seed_a);
+        for (uint16_t i = 0; i < sizeof xtx; ++i) {
+            xtx[i] = 0;
+            xrx[i] = 0xEE;
+        }
+        for (uint16_t i = 0; i < bytes; ++i) {
+            xtx[i] = out.next();
+        }
+    }
+    settle();
+    o.status = clock_out(e, n, o.cycles);
+    o.ran = o.status == spi_ok;
+    (void)link_command_mode();
+    o.reported = peer_report(o.r);
+    const bool reversed = e.host_lsb != (e.cfg.dord != 0);
+    if (e.read) {
+        for (uint16_t i = 0; i < bytes; ++i) {
+            const uint8_t want = spilink::wide_byte(e.pattern, e.seed_b, i, wide, reversed);
+            if (xrx[i] != want) {
+                if (o.mism == 0u) {
+                    o.idx = static_cast<uint8_t>(i);
+                    o.got = xrx[i];
+                    o.exp = want;
+                }
+                ++o.mism;
+            }
+        }
+    }
+    return o;
+}
+
+/// The far client heard every frame exact.
+bool heard(const Exchange& e, const Outcome& o) {
+    return o.ran && o.reported && o.r.count == e.count && o.r.mism == 0u &&
+           (o.r.flags & spilink::report_ran) != 0u;
+}
+/// ... and this end read the far stream back exact.
+bool exact(const Exchange& e, const Outcome& o) { return heard(e, o) && (!e.read || o.mism == 0u); }
+
+void dump(const Outcome& o) {
+    print(serial, "      read:");
+    for (uint8_t i = 0; i < 16u; ++i) {
+        print(serial, " ", hex(xrx[i]));
+    }
+    print(serial, crlf, "      sent:");
+    for (uint8_t i = 0; i < 16u; ++i) {
+        print(serial, " ", hex(xtx[i]));
+    }
+    print(serial, crlf);
+    print(serial, "      status ", o.status, ", here mism=", o.mism, " (first idx ", o.idx, " got ", hex(o.got),
+          " exp ", hex(o.exp), "), the far client count=", o.r.count, " mism=", o.r.mism, " (idx ", o.r.idx,
+          " got ", hex(o.r.got), " exp ", hex(o.r.exp), ") flags=", hex(o.r.flags), " aux=", hex(o.r.aux0), " ",
+          o.r.aux1, " ", hex(o.r.aux2), crlf);
+}
+
+/// The wire's time for `frames` frames of `bits` at the code, in core
+/// cycles: PB1's share of HCLK is two at 144 MHz.
+uint32_t wire_cycles(SpiClock rate, uint16_t frames, uint8_t bits) {
+    return static_cast<uint32_t>(static_cast<uint64_t>(frames) * bits * spi_division(rate) * SysClock::hz /
+                                 SysClock::pclk1_hz);
+}
+
+/// Where the far client's hearing is judged (the section's bounds): from /4.
+bool heard_judged(SpiClock rate) { return static_cast<uint8_t>(rate) >= static_cast<uint8_t>(SpiClock::div4); }
+/// Where the host's read-back is judged (the section's bounds): from /8.
+bool read_judged(SpiClock rate) { return static_cast<uint8_t>(rate) >= static_cast<uint8_t>(SpiClock::div8); }
+/// Where the far client's POLLED run is judged: an 8-bit frame from /16, a
+/// 16-bit one from /8.
+bool run_judged(SpiClock rate, bool wide) {
+    return static_cast<uint8_t>(rate) >= static_cast<uint8_t>(wide ? SpiClock::div8 : SpiClock::div16);
+}
+
+// ===========================================================================
+// d - the peer: the command channel, the matrix, the dummy, the loss, the select
+// ===========================================================================
+
+void td_peer() {
+    if (!need_peer()) {
+        return;
+    }
+    bench.verdict("the peer answers a ping over the pair's four wires", true);
+
+    spilink::Ident d{};
+    const bool got = peer_ident(d);
+    char label[9] = {};
+    for (uint8_t i = 0; i < 8; ++i) {
+        label[i] = d.label[i];
+    }
+    if (got) {
+        print(serial, "  peer: label '", label, "' xtal=", d.xtal, " sanity=", hex(d.sanity), " fw=", hex(d.version),
+              crlf);
+    }
+    far_is_v203 = got && d.label[0] == 'V' && d.label[1] == '2';
+    bench.verdict("ident comes back and it IS spi_peer of this stratum (the sanity byte, kind 0x05), on its "
+                  "crystal - the far part of the desk pair",
+                  got && d.sanity == spilink::ident_sanity && spilink::peer_kind(d.version) == spilink::peer_ch32vx03 &&
+                      d.xtal == 1u && d.label[0] == 'V');
+
+    uint8_t pings = 0;
+    for (uint8_t i = 0; i < 10; ++i) {
+        if (command(Op::ping)) {
+            ++pings;
+        }
+    }
+    print(serial, "  ", pings, " of 10 pings answered at ", PairHost::sck_hz(link_clock) / 1000u,
+          " kHz SCK, one frame per chip-select window", crlf);
+    bench.verdict("the command channel is steady over ten frames", pings == 10u);
+
+    // ---- the four modes and both bit orders, at each of this end's pad classes ----
+    //
+    // A data line's edge coupled into the clock is one sampling edge too
+    // many on the desk's jumper wires, so the matrix is a measurement of
+    // the PADS as much as of the block: it is walked at each slew class of
+    // this end's SCK and MOSI, and judged at the class every pair letter
+    // runs at (pair_host_class, its reason beside it).
+    constexpr PinSpeed speeds[] = {PinSpeed::fast, PinSpeed::medium, PinSpeed::slow};
+    const char* speed_names[] = {"fast (50 MHz)", "medium (10 MHz)", "slow (2 MHz)"};
+    uint8_t good_at_class = 0;
+    uint8_t good_03_at_class = 0;
+    for (uint8_t si = 0; si < 3u; ++si) {
+        PairHost::pad_speed(speeds[si]);
+        PairDma::pad_speed(speeds[si]);
+        (void)link_command_mode();
+        uint8_t good = 0;
+        uint8_t good03 = 0;
+        for (uint8_t m = 0; m < 4; ++m) {
+            for (uint8_t lsb = 0; lsb < 2; ++lsb) {
+                Exchange e{};
+                e.cfg.mode = m;
+                e.cfg.dord = lsb;
+                e.host_mode = static_cast<SpiMode>(m);
+                e.host_lsb = lsb != 0u;
+                e.seed_a = static_cast<uint8_t>(0x13u + 2u * m + lsb);
+                e.seed_b = static_cast<uint8_t>(0x57u + 2u * m + lsb);
+                const Outcome o = run_exchange(e);
+                if (exact(e, o)) {
+                    ++good;
+                    if (m == 0u || m == 3u) {
+                        ++good03;
+                    }
+                } else {
+                    print(serial, "    ", speed_names[si], " mode ", m, lsb ? " LSb" : " MSb", " first:", crlf);
+                    dump(o);
+                }
+            }
+        }
+        print(serial, "  SCK and MOSI at ", speed_names[si], ": ", good,
+              " of 8 (four modes x two bit orders) exact both ways at ", PairHost::sck_hz(SpiClock::div64) / 1000u,
+              " kHz, the far client on its engines", crlf);
+        if (speeds[si] == pair_host_class) {
+            good_at_class = good;
+            good_03_at_class = good03;
+        }
+    }
+    PairHost::pad_speed(pair_host_class);
+    PairDma::pad_speed(pair_host_class);
+    (void)link_command_mode();
+    // THE FAR CLIENT'S OWN ANSWER EDGES: a CH32V203C8T6 client on the
+    // desk's board loses frames in modes 1 and 2 below /8 with its MISO
+    // driven and none with it dark (letter x, the slip statistics) - the
+    // modes whose answer changes while SCK is high and which sample on the
+    // falling edge. Against that client modes 1 and 2 are printed above and
+    // judged by letter x's listening column; modes 0 and 3 are judged here.
+    if (far_is_v203) {
+        print(serial, "  the far client is the CH32V203C8T6: modes 1 and 2 are printed (its own answer edges, "
+                      "letter x), modes 0 and 3 judged",
+              crlf);
+        uint8_t heard12 = 0;
+        for (uint8_t m = 1; m < 3; ++m) {
+            for (uint8_t lsb = 0; lsb < 2; ++lsb) {
+                Exchange e{};
+                e.cfg.mode = m;
+                e.cfg.dord = lsb;
+                e.host_mode = static_cast<SpiMode>(m);
+                e.host_lsb = lsb != 0u;
+                e.spare = spilink::spare_receive_only;
+                e.read = false;
+                e.seed_a = static_cast<uint8_t>(0x23u + 2u * m + lsb);
+                const Outcome o = run_exchange(e);
+                if (heard(e, o)) {
+                    ++heard12;
+                }
+            }
+        }
+        bench.verdict("... and the far CH32V203C8T6 LISTENING (receive-only, its MISO dark) hears modes 1 and 2 "
+                      "exact in both orders - what its own answer edges take away",
+                      heard12 == 4u);
+    }
+    bench.verdict("ALL FOUR TRANSFER MODES AND BOTH BIT ORDERS carry 32 frames exact both ways between the two "
+                  "chips, at the pair's pad class (modes 0 and 3 against a far CH32V203C8T6, whose own answer edges "
+                  "letter x measures)",
+                  far_is_v203 ? good_03_at_class == 4u : good_at_class == 8u);
+
+    Exchange mism{};
+    mism.cfg.dord = 1;      // the far client LSb first
+    mism.host_lsb = false;  // this end MSb first
+    const Outcome mo = run_exchange(mism);
+    print(serial, "  bit-order mismatch: here mism=", mo.mism, ", the far client mism=", mo.r.mism, " of ", mo.r.count,
+          " (both checking the exact bit-reverse)", crlf);
+    bench.verdict("a bit-order mismatch is an EXACT TWO-WAY BIT REVERSAL - each end reads the other's frames "
+                  "with their bits in the opposite order",
+                  exact(mism, mo));
+
+    // ---- THE DUMMY, measured and not assumed ----
+    //
+    // Told not to preload (regime_normal), the far client starts its run
+    // once the first frame has begun - its first answer written inside
+    // that frame's first bit: the peer's turn from the SCK edge to the
+    // store is some tens of cycles, against the 256 cycles of /256's half
+    // period. What goes out is this silicon's answer to "what does a
+    // client too slow for the first frame send?".
+    {
+        Exchange e{};
+        e.cfg.regime = spilink::regime_normal;   // the far client does NOT preload
+        e.rate = link_clock;
+        e.count = 16;
+        e.seed_a = 0x2B;
+        e.seed_b = 0x6D;
+        const Outcome o = run_exchange(e);
+        uint16_t aligned = 0;   // later frames that are the far stream in place
+        uint16_t late = 0;      // ... and one frame late
+        for (uint16_t i = 1; i < e.count; ++i) {
+            if (xrx[i] == spilink::pattern_value(e.pattern, e.seed_b, i)) {
+                ++aligned;
+            }
+            if (xrx[i] == spilink::pattern_value(e.pattern, e.seed_b, static_cast<uint16_t>(i - 1u))) {
+                ++late;
+            }
+        }
+        const uint8_t first = spilink::pattern_value(e.pattern, e.seed_b, 0);
+        const bool bit_late = (xrx[0] & 0x7Fu) == (first >> 1);
+        print(serial, "    read:");
+        for (uint8_t i = 0; i < 8u; ++i) {
+            print(serial, " ", hex(xrx[i]));
+        }
+        print(serial, crlf, "    want:");
+        for (uint8_t i = 0; i < 8u; ++i) {
+            print(serial, " ", hex(spilink::pattern_value(e.pattern, e.seed_b, i)));
+        }
+        print(serial, crlf);
+        print(serial, "  with NO preload the first frame read back is ", hex(xrx[0]), " (the stream starts ", hex(first),
+              ": its top seven bits one place down, the shifter's leftover above them - ",
+              bit_late ? "yes" : "NO", "); of the ", e.count - 1u, " later frames ", aligned, " are the stream in place, ",
+              late, " one place late", crlf);
+        uint16_t bit_behind = 0;   // later frames one BIT late: the frame before's last bit on top
+        for (uint16_t i = 1; i < e.count; ++i) {
+            const uint8_t now = spilink::pattern_value(e.pattern, e.seed_b, i);
+            const uint8_t before = spilink::pattern_value(e.pattern, e.seed_b, static_cast<uint16_t>(i - 1u));
+            if (xrx[i] == static_cast<uint8_t>((now >> 1) | ((before & 1u) << 7))) {
+                ++bit_behind;
+            }
+        }
+        print(serial, "    ", bit_behind, " of the later frames one BIT late; the far client heard ", o.r.count,
+              " mism ", o.r.mism, crlf);
+        // THE CLIENT RESTARTS ITS FRAME AT THE LATE LOAD (both classes, the
+        // same frames from either peer): from there it is one bit behind the
+        // host both ways - every later answer one bit late, and the window's
+        // last frame never completes (n - 1 heard).
+        const bool far_frame_restarted = o.ran && o.reported && bit_behind == e.count - 1u &&
+                                         o.r.count == e.count - 1u;
+        bench.verdict("THE DUMMY IS MEASURED: a client whose first answer comes inside the first frame has it in "
+                      "the SHIFTER AT ONCE, at the next bit - the first frame the leftover's top bit over the "
+                      "answer's seven - and RESTARTS its frame there: one bit behind the host both ways, every "
+                      "later answer one bit late and the last frame unfinished",
+                      bit_late && far_frame_restarted);
+    }
+
+    // ---- sink_slow: what a client that never drains does ----
+    {
+        spilink::Params a{};
+        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_normal};
+        a.count = 32;
+        a.ms = 120;
+        if (peer_act(Op::sink_slow, a)) {
+            settle_ms(10);
+            fill_pattern(xtx, max_exchange, 0x91);
+            (void)link_xfer(xtx, xrx, 16);
+            spilink::Report sr{};
+            const bool rp = peer_report(sr);
+            print(serial, "  sink_slow: the far client retained ", sr.count, " frame(s), its status during the flood ",
+                  hex(sr.sum), ", after the drain ", hex(sr.exp), crlf);
+            bench.verdict("A CLIENT THAT NEVER DRAINS keeps ONE frame and raises the overrun - no FIFO behind it "
+                          "(figure 20-1), seen on the far chip",
+                          rp && sr.count == 1u && (sr.flags & spilink::report_bufovf) != 0u);
+        } else {
+            bench.verdict("the peer accepted sink_slow", false);
+        }
+    }
+
+    // ---- ss_pulse: the select seen from this end ----
+    {
+        spilink::Params a{};
+        a.aux8 = 60;      // the lead-in, long enough for this end to let go
+        a.aux16 = 4000;   // microseconds the peer holds the wire down
+        // THE COMMAND GOES OUT FIRST, and only then does this end let the
+        // wire go: the command travels over the bus this host owns.
+        if (peer_act(Op::ss_pulse, a)) {
+            PairHost::release();
+            PairNss::input(PinPull::up);
+            bool saw_low = false;
+            const uint32_t t0 = Ticker::millis();
+            while (Ticker::millis() - t0 < 300u) {
+                if (!PairNss::read()) {
+                    saw_low = true;
+                    break;
+                }
+            }
+            print(serial, "  ss_pulse: the shared select ", saw_low ? "went LOW" : "stayed high",
+                  " while the peer drove it", crlf);
+            bench.verdict("THE SELECT IS A REAL WIRE: the peer pulling it low is seen at this end", saw_low);
+        } else {
+            bench.verdict("the peer accepted ss_pulse", false);
+        }
+        settle_ms(20);
+        (void)link_command_mode();
+    }
+
+    // ---- ten seconds of traffic, counted at both ends ----
+    {
+        uint32_t rounds = 0, bad = 0, frames = 0;
+        const uint32_t t0 = Ticker::millis();
+        while (Ticker::millis() - t0 < 10'000u) {
+            Exchange e{};
+            e.count = 32;
+            e.rate = SpiClock::div16;
+            e.shape = (rounds & 1u) != 0u ? Shape::engines : Shape::polled;
+            e.seed_a = static_cast<uint8_t>(0x11u + rounds);
+            e.seed_b = static_cast<uint8_t>(0x77u + rounds);
+            if (!exact(e, run_exchange(e))) {
+                ++bad;
+            }
+            frames += e.count;
+            ++rounds;
+        }
+        print(serial, "  ten seconds: ", rounds, " exchanges at ", PairHost::sck_hz(SpiClock::div16) / 1000u,
+              " kHz (polled and engined in turn), ", frames, " frames, ", bad, " not exact at one end or the other",
+              crlf);
+        bench.verdict("A TEN-SECOND STRESS between the two chips: every exchange exact at both ends",
+                      rounds > 0u && bad == 0u);
+    }
+
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after all of that", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
+// j - the ladder: every code, every host shape, both of the far serves
+// ===========================================================================
+
+void tj_ladder() {
+    if (!need_peer()) {
+        return;
+    }
+    print(serial, "  the far client's hearing is judged from /4, this end's read-back from /8, the far polled "
+                  "run from /16 (the section's bounds); cycles are this end's start() to the end, the wire's "
+                  "beside them",
+          crlf);
+    bool heard_all = true;
+    bool read_all = true;
+    bool run_all = true;
+    for (uint8_t code = 8; code-- > 0;) {
+        const SpiClock rate = static_cast<SpiClock>(code);
+        print(serial, "  /", spi_division(rate), " = ", PairHost::sck_hz(rate) / 1000u, " kHz, 64 frames, the wire ",
+              wire_cycles(rate, 64, 8), " cycles:", crlf);
+        for (uint8_t k = 0; k < 4u; ++k) {
+            Exchange e{};
+            e.rate = rate;
+            e.count = 64;
+            e.seed_a = static_cast<uint8_t>(0x21u + code + 16u * k);
+            e.seed_b = static_cast<uint8_t>(0x84u + code + 16u * k);
+            // k: the polled host, the pump, the engines - against the far
+            // engines - and the polled host against the far POLLED run.
+            e.shape = k == 1u ? Shape::pump : (k == 2u ? Shape::engines : Shape::polled);
+            const bool far_run = k == 3u;
+            if (far_run) {
+                e.spare = spilink::spare_polled_pump;
+            }
+            const Outcome o = run_exchange(e);
+            const bool h = heard(e, o);
+            const bool x = exact(e, o);
+            print(serial, "    ", shape_name(e.shape), far_run ? " / far run    " : " / far engines", ": ",
+                  x ? "exact both ways" : (h ? "heard, read back WRONG" : "NOT heard"), ", ", o.cycles, " cycles (",
+                  o.cycles / 64u, " a frame)", crlf);
+            if (!x) {
+                dump(o);
+            }
+            if (far_run) {
+                if (run_judged(rate, false)) {
+                    run_all = run_all && h && (!read_judged(rate) || x);
+                }
+            } else {
+                if (heard_judged(rate)) {
+                    heard_all = heard_all && h;
+                }
+                if (read_judged(rate)) {
+                    read_all = read_all && x;
+                }
+            }
+        }
+        if (rate == SpiClock::div2) {
+            for (uint8_t k = 0; k < 2u; ++k) {
+                Exchange e{};
+                e.rate = rate;
+                e.count = 64;
+                e.high_speed = true;
+                e.shape = k == 0u ? Shape::polled : Shape::engines;
+                e.seed_a = 0x5D;
+                e.seed_b = 0xC3;
+                const Outcome o = run_exchange(e);
+                print(serial, "    ", shape_name(e.shape), " with HSRXEN / far engines: ",
+                      exact(e, o) ? "exact both ways" : (heard(e, o) ? "heard, read back WRONG" : "NOT heard"), ", ",
+                      o.cycles, " cycles (printed, not judged)", crlf);
+                if (!exact(e, o)) {
+                    dump(o);
+                }
+            }
+        }
+    }
+    bench.verdict("THE FAR CLIENT HEARS EVERY CODE from /256 to /4, from every host shape of this end - the "
+                  "polled request, the pump and the engines - on its DMA serve",
+                  heard_all);
+    bench.verdict("THIS END READS THE FAR ANSWERS BACK EXACT from /8 down on every shape, the datasheets' answer "
+                  "timing inside the half period",
+                  read_all);
+    bench.verdict("THE FAR CLIENT'S POLLED RUN keeps up from /16 down behind the polled host (its turn twice "
+                  "inside a frame)",
+                  run_all);
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the ladder", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
+// k - the extended exchange: 16-bit frames, the CRC, the receive-only window
+// ===========================================================================
+
+/// The chapter's CRC over FRAMES, bitwise: each frame's value MSb first
+/// from its top bit, unreflected, from zero - `bytes` low byte first for
+/// 16-bit frames (spi_link.hpp's frame i = P(2i) | P(2i + 1) << 8).
+uint16_t crc_frames(uint16_t poly, bool wide, const uint8_t* bytes, uint16_t frames) {
+    const uint8_t width = wide ? 16u : 8u;
+    uint32_t crc = 0;
+    const uint32_t top = 1UL << (width - 1u);
+    const uint32_t mask = (1UL << width) - 1UL;
+    for (uint16_t k = 0; k < frames; ++k) {
+        const uint32_t v = wide ? (static_cast<uint32_t>(bytes[2u * k]) | (static_cast<uint32_t>(bytes[2u * k + 1u]) << 8))
+                                : bytes[k];
+        for (uint8_t b = width; b-- > 0;) {
+            const bool in = ((v >> b) & 1u) != 0u;
+            const bool out = (crc & top) != 0u;
+            crc = (crc << 1) & mask;
+            if (in != out) {
+                crc ^= poly;
+            }
+        }
+    }
+    return static_cast<uint16_t>(crc);
+}
+
+struct CrcRun {
+    bool accepted = false;
+    bool frames_ok = false;   ///< every frame came back within its budget
+    bool stream_ok = false;   ///< and they were the peer's stream
+    uint16_t tx_crc = 0, rx_crc = 0, frame = 0;
+    uint16_t tx_ref = 0, rx_ref = 0, peer_ref = 0;
+    bool crcerr = false;
+    spilink::Report peer{};
+    bool reported = false;
+};
+
+/// Eight frames to the peer with both CRC units on: this end by hand on
+/// the resource (CRCNEXT after the last data frame, the CRC frame read
+/// back), the peer's CRC run with `peer_poly`.
+CrcRun crc_exchange(bool wide, uint16_t poly, uint16_t peer_poly, uint8_t seed_a, uint8_t seed_b) {
+    CrcRun c{};
+    constexpr uint16_t n = 8;
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+    a.count = n;
+    a.ms = 400;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.spare = static_cast<uint8_t>(spilink::spare_crc | (wide ? spilink::spare_wide : 0u));
+    a.aux16 = peer_poly;
+    c.accepted = peer_act(Op::exchange, a);
+    if (!c.accepted) {
+        return c;
+    }
+    const SpiDataSize bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8;
+    const uint8_t w = wide ? 2u : 1u;
+    uint8_t sent[2 * n], got[2 * n];
+    {
+        spilink::Stream out(a.pattern, a.seed_a);
+        for (uint16_t i = 0; i < n * w; ++i) {
+            sent[i] = out.next();
+        }
+    }
+    settle();
+    // The resource by hand: a host in mode 0 at /64 with the CRC on.
+    PairHost::release();
+    PairS::bus_clock(true);
+    PairS::reset();
+    (void)PairS::remap(pair_code);
+    (void)PairS::configure({.role = SpiRole::host, .mode = SpiMode::mode0, .clock = SpiClock::div64,
+                            .bits = bits, .crc = true, .crc_polynomial = poly});
+    PairSck::function();
+    PairMosi::function();
+    PairMiso::input();
+    PairS::enable();
+    PairS::flush_rx();
+    PairNss::output(true);
+    (void)delay_us(clock, 20);
+    PairNss::clear();
+    link_hold();
+    // Each frame written, spun on RXNE, read back, a gap behind it for the
+    // client's run; CRCNEXT right after the last data frame is written
+    // (20.2.5); then the CRC frame itself comes back.
+    bool frames = true;
+    for (uint16_t i = 0; i < n; ++i) {
+        const uint16_t v = wide ? static_cast<uint16_t>(sent[2u * i] | (sent[2u * i + 1u] << 8)) : sent[i];
+        PairS::data(bits, v);
+        if (i == n - 1u) {
+            PairS::crc_next();
+        }
+        uint32_t spins = 200'000u;
+        while (!PairS::rxne() && spins-- != 0u) {
+        }
+        frames = frames && spins != 0u;
+        const uint16_t r = PairS::data(bits);
+        got[w * i] = static_cast<uint8_t>(r);
+        if (wide) {
+            got[2u * i + 1u] = static_cast<uint8_t>(r >> 8);
+        }
+        (void)delay_us(clock, spilink::gap_us);
+    }
+    uint32_t spins = 200'000u;
+    while (!PairS::rxne() && spins-- != 0u) {
+    }
+    frames = frames && spins != 0u;
+    c.frame = PairS::data(bits);
+    spins = 200'000u;
+    while (PairS::busy() && spins-- != 0u) {
+    }
+    link_hold();
+    PairNss::set();
+    c.tx_crc = PairS::tx_crc();
+    c.rx_crc = PairS::rx_crc();
+    c.crcerr = PairS::crc_error();
+    (void)PairS::disable();
+    PairS::reset();
+    c.frames_ok = frames;
+    uint8_t want[2 * n];
+    for (uint16_t i = 0; i < n * w; ++i) {
+        want[i] = spilink::pattern_value(a.pattern, a.seed_b, i);
+    }
+    c.stream_ok = true;
+    for (uint16_t i = 0; i < n * w; ++i) {
+        c.stream_ok = c.stream_ok && got[i] == want[i];
+    }
+    c.tx_ref = crc_frames(poly, wide, sent, n);
+    c.rx_ref = crc_frames(poly, wide, got, n);
+    c.peer_ref = crc_frames(peer_poly, wide, want, n);
+    c.reported = peer_report(c.peer);
+    return c;
+}
+
+void print_crc(const char* label, const CrcRun& c) {
+    print(serial, "  ", label, ": TCRCR ", hex(c.tx_crc), " (bitwise ", hex(c.tx_ref), "), RCRCR ", hex(c.rx_crc),
+          " (bitwise over what came ", hex(c.rx_ref), "), the CRC frame read ", hex(c.frame), " (the peer's, bitwise ",
+          hex(c.peer_ref), "), CRCERR here ", c.crcerr ? "SET" : "clear", "; the peer heard ", c.peer.count, " mism ",
+          c.peer.mism, " flags ", hex(c.peer.flags), " (CRCERR there ",
+          (c.peer.flags & spilink::report_crcerr) != 0u ? "SET" : "clear", ", its RCRCR low byte ", hex(c.peer.aux3),
+          ")", crlf);
+}
+
+void tk_extended() {
+    if (!need_peer()) {
+        return;
+    }
+    // ---- 16-bit frames, every shape, both of the far serves ----
+    {
+        uint8_t ok = 0;
+        uint8_t ext = 0;
+        constexpr uint8_t runs = 8;
+        for (uint8_t k = 0; k < runs; ++k) {
+            Exchange e{};
+            e.spare = spilink::spare_wide;
+            e.count = 32;
+            e.rate = (k & 1u) != 0u ? SpiClock::div8 : SpiClock::div32;
+            e.shape = k < 2u ? Shape::polled : (k < 4u ? Shape::pump : (k < 6u ? Shape::engines : Shape::polled));
+            if (k >= 6u) {
+                // the far POLLED run, at its 16-bit bound and below (the
+                // section's bounds)
+                e.spare = static_cast<uint8_t>(e.spare | spilink::spare_polled_pump);
+                e.rate = (k & 1u) != 0u ? SpiClock::div8 : SpiClock::div32;
+            }
+            e.cfg.mode = (k & 2u) != 0u ? 3u : 0u;
+            e.host_mode = static_cast<SpiMode>(e.cfg.mode);
+            e.seed_a = static_cast<uint8_t>(0x31u + k);
+            e.seed_b = static_cast<uint8_t>(0xA7u + k);
+            const Outcome o = run_exchange(e);
+            if ((o.r.flags & spilink::report_extended) != 0u) {
+                ++ext;
+            }
+            if (exact(e, o)) {
+                ++ok;
+            } else {
+                print(serial, "    16-bit ", shape_name(e.shape), (k >= 6u) ? " / far run" : " / far engines", " /",
+                      spi_division(e.rate), " mode ", e.cfg.mode, ":", crlf);
+                dump(o);
+            }
+        }
+        print(serial, "  16-bit frames: ", ok, " of ", runs,
+              " exchanges of 32 frames exact both ways (polled, pump, engines against the far engines; the polled "
+              "host against the far run), report_extended in ",
+              ext, crlf);
+        bench.verdict("16-BIT FRAMES cross exact both ways on every shape of this end and both far serves, and the "
+                      "peer says it served the extended exchange",
+                      ok == runs && ext == runs);
+    }
+
+    // ---- the CRC, against a foreign unit ----
+    {
+        const CrcRun c8 = crc_exchange(false, 0x0007u, 0x0007u, 0x31, 0xA7);
+        print_crc("CRC-8 (0x07), eight frames", c8);
+        const CrcRun c16 = crc_exchange(true, 0x8005u, 0x8005u, 0x52, 0x2D);
+        print_crc("CRC-16 (0x8005), eight 16-bit frames", c16);
+        auto agree = [](const CrcRun& c) {
+            return c.accepted && c.frames_ok && c.stream_ok && c.reported &&
+                   (c.peer.flags & spilink::report_extended) != 0u && c.peer.count == 8u && c.peer.mism == 0u;
+        };
+        bench.verdict("the peer served both CRC exchanges (report_extended) and the frames went both ways exact",
+                      agree(c8) && agree(c16));
+        bench.verdict("THE HARDWARE CRC IS THE ARITHMETIC at both widths: TCRCR over what went, RCRCR over what came",
+                      c8.tx_crc == c8.tx_ref && c8.rx_crc == c8.rx_ref && c16.tx_crc == c16.tx_ref &&
+                          c16.rx_crc == c16.rx_ref);
+        bench.verdict("A FOREIGN CRC UNIT AGREES: the CRC frame read is the peer's bitwise CRC, CRCERR down here",
+                      c8.frame == c8.peer_ref && !c8.crcerr && c16.frame == c16.peer_ref && !c16.crcerr);
+        bench.verdict("and the peer checked THIS end's CRC frame and found it right (no CRCERR there)",
+                      c8.reported && c16.reported && (c8.peer.flags & spilink::report_crcerr) == 0u &&
+                          (c16.peer.flags & spilink::report_crcerr) == 0u);
+        // THE CHECK IS REAL: the two units on different polynomials - each
+        // end's CRC frame is then wrong for the other, and both must say so.
+        const CrcRun bad = crc_exchange(false, 0x0007u, 0x0031u, 0x44, 0x9A);
+        print_crc("CRC-8 here 0x07, the peer 0x31", bad);
+        bench.verdict("a POLYNOMIAL MISMATCH is caught at BOTH ends: CRCERR set here and in the peer's report",
+                      bad.accepted && bad.reported && bad.crcerr && (bad.peer.flags & spilink::report_crcerr) != 0u);
+        (void)link_command_mode();
+    }
+
+    // ---- the receive-only window: this end's WRITE witnessed ----
+    {
+        uint8_t ok = 0;
+        constexpr uint8_t runs = 6;
+        for (uint8_t k = 0; k < runs; ++k) {
+            Exchange e{};
+            e.spare = static_cast<uint8_t>(spilink::spare_receive_only | ((k & 1u) != 0u ? spilink::spare_wide : 0u));
+            e.count = 64;
+            e.read = false;   // a WRITE: no in buffer, two frames in flight at every code
+            e.rate = k < 2u ? SpiClock::div16 : (k < 4u ? SpiClock::div4 : SpiClock::div2);
+            e.shape = (k & 2u) != 0u ? Shape::engines : Shape::polled;
+            e.seed_a = static_cast<uint8_t>(0x61u + k);
+            const Outcome o = run_exchange(e);
+            const uint8_t w = (k & 1u) != 0u ? 16u : 8u;
+            print(serial, "    receive-only, this end a ", shape_name(e.shape), " write of 64 ", w, "-bit frames at /",
+                  spi_division(e.rate), ": the peer heard ", o.r.count, " mism ", o.r.mism, ", ", o.cycles,
+                  " cycles against the wire's ", wire_cycles(e.rate, 64, w), crlf);
+            if (heard(e, o) && (o.r.flags & spilink::report_extended) != 0u) {
+                ++ok;
+            } else {
+                dump(o);
+            }
+        }
+        bench.verdict("THE WRITE SHAPE IS WITNESSED: a client that only listens (receive-only, MISO dark) hears this "
+                      "end's two-in-flight writes exact, polled and engined, both widths, to /2",
+                      ok == runs);
+    }
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the extended exchange", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
+// l - the roles invert: this chip's client runs under the far host
+// ===========================================================================
+
+alignas(4) uint8_t c_out[2u * max_exchange];
+alignas(4) uint8_t c_in[2u * max_exchange];
+
+struct ClientRun {
+    bool accepted = false;
+    PairClient::Run run{};
+    uint16_t mism = 0;
+    spilink::Report r{};
+    bool reported = false;
+    bool released = false;
+};
+
+/// This end as the CLIENT: the peer becomes the host after its lead-in and
+/// clocks `count` frames of seed_a, one polled frame a request gap_us
+/// apart, under a select it frames from its own NSS pad; this end answers
+/// seed_b through SpiClient::exchange() - one frame ahead, preloaded with
+/// the select high - and judges what it heard.
+ClientRun as_client(SpiMode mode, bool lsb, bool wide, PinSpeed miso, uint8_t seed_a, uint8_t seed_b,
+                    bool listen = false) {
+    ClientRun c{};
+    constexpr uint16_t n = 16;
+    spilink::Params a{};
+    a.cfg = spilink::Cfg{.apply = 1, .mode = static_cast<uint8_t>(mode), .dord = static_cast<uint8_t>(lsb ? 1u : 0u),
+                         .regime = spilink::regime_buffer_wait};
+    a.count = n;
+    a.ms = 400;
+    a.seed_a = seed_a;
+    a.seed_b = seed_b;
+    a.pattern = spilink::pattern_prbs;
+    a.aux8 = 40;    // the lead-in: this end becomes a client inside it
+    a.aux16 = 64;   // the instrument's SCK: at most HCLK/64 on its bus
+    a.spare = wide ? spilink::spare_wide : uint8_t{0};
+    c.accepted = peer_act(Op::host_burst, a);
+    if (!c.accepted) {
+        return c;
+    }
+    const uint8_t w = wide ? 2u : 1u;
+    {
+        spilink::Stream out(a.pattern, a.seed_b);
+        for (uint16_t i = 0; i < n * w; ++i) {
+            c_out[i] = out.next();
+            c_in[i] = 0xEE;
+        }
+    }
+    PairHost::release();
+    PairNss::release();
+    PairClient::pad_speed(miso);
+    const bool up = PairClient::init(clock, {.mode = mode,
+                                             .bits = wide ? SpiDataSize::bits16 : SpiDataSize::bits8,
+                                             .lsb_first = lsb,
+                                             .nss = SpiNss::hardware_input,
+                                             .drive_output = !listen});
+    Pfic::disable(PairS::irq);   // polled: the run is the whole of it
+    if (up && listen) {
+        PairClient::enable();
+        const uint32_t spins = 900u * (SysClock::hz / 30'000u);
+        c.run = PairClient::receive(std::span<uint8_t>(c_in, n), spins);
+    } else if (up) {
+        PairClient::enable();
+        const uint32_t spins = 900u * (SysClock::hz / 30'000u);   // the lead-in and the burst, with room
+        if (wide) {
+            c.run = PairClient::exchange(std::span<const uint16_t>(reinterpret_cast<const uint16_t*>(c_out), n),
+                                         std::span<uint16_t>(reinterpret_cast<uint16_t*>(c_in), n), spins);
+        } else {
+            c.run = PairClient::exchange(std::span<const uint8_t>(c_out, n), std::span<uint8_t>(c_in, n), spins);
+        }
+    }
+    // The dark listener's half: the answer line handed back to the bus.
+    const uint32_t t0 = Ticker::millis();
+    while (PairClient::selected() && Ticker::millis() - t0 < 100u) {
+    }
+    PairClient::drive_output(false);
+    c.released = !PairClient::output_driven();
+    PairClient::release();
+    PairClient::pad_speed(PinSpeed::fast);
+    {
+        const bool reversed = false;
+        for (uint16_t i = 0; i < n * w; ++i) {
+            if (c_in[i] != spilink::wide_byte(a.pattern, a.seed_a, i, wide, reversed)) {
+                ++c.mism;
+            }
+        }
+    }
+    settle_ms(20);
+    c.reported = peer_report(c.r);
+    return c;
+}
+
+bool client_exact(const ClientRun& c) {
+    return c.accepted && c.run.count == 16u && c.mism == 0u && c.reported && c.r.count == 16u && c.r.mism == 0u &&
+           c.released;
+}
+/// A listening client: what it heard alone is judged.
+bool client_heard(const ClientRun& c) { return c.accepted && c.run.count == 16u && c.mism == 0u; }
+
+void tl_client() {
+    if (!need_peer()) {
+        return;
+    }
+    // ---- the answer line's slew class, at mode 0 ----
+    constexpr PinSpeed speeds[] = {PinSpeed::fast, PinSpeed::medium, PinSpeed::slow};
+    const char* names[] = {"fast (50 MHz)", "medium (10 MHz)", "slow (2 MHz)"};
+    bool slow_ok = false;
+    for (uint8_t si = 0; si < 3u; ++si) {
+        uint8_t good = 0;
+        for (uint8_t k = 0; k < 3u; ++k) {
+            const ClientRun c = as_client(SpiMode::mode0, false, false, speeds[si], static_cast<uint8_t>(0x3Bu + k),
+                                          static_cast<uint8_t>(0x6Du + k));
+            if (client_exact(c)) {
+                ++good;
+            }
+        }
+        print(serial, "  this end's MISO at ", names[si], ": ", good, " of 3 bursts exact both ways", crlf);
+        slow_ok = si == 2u && good == 3u;
+    }
+    bench.verdict("THIS CLIENT'S MISO AT THE SLOWEST CLASS carries every burst exact both ways - the class the "
+                  "letters below and the far peer use (a faster edge couples into the client's own SCK input on "
+                  "the desk's wires: printed above, not judged)",
+                  slow_ok);
+
+    // ---- every mode, both orders, and 16-bit frames ----
+    // THIS END'S OWN ANSWER EDGES, on the CH32V203C8T6 end of the pair:
+    // its client loses frames in modes 1 and 2 with its MISO driven (letter
+    // d's and x's finding, seen from the far end), so there modes 1 and 2
+    // are printed and judged LISTENING; modes 0 and 3 are judged answering.
+    constexpr bool own_edges = pair_spi == 2u;
+    uint8_t good = 0;
+    uint8_t good03 = 0;
+    for (uint8_t m = 0; m < 4; ++m) {
+        for (uint8_t lsb = 0; lsb < 2; ++lsb) {
+            const ClientRun c = as_client(static_cast<SpiMode>(m), lsb != 0u, false, PinSpeed::slow,
+                                          static_cast<uint8_t>(0x45u + 2u * m + lsb), static_cast<uint8_t>(0x9Au + 2u * m + lsb));
+            if (client_exact(c)) {
+                ++good;
+                if (m == 0u || m == 3u) {
+                    ++good03;
+                }
+            } else {
+                print(serial, "    mode ", m, lsb ? " LSb" : " MSb", ": the run took ", c.run.count, " (end ",
+                      static_cast<uint8_t>(c.run.end), "), here mism=", c.mism, ", the far host read ", c.r.count,
+                      " mism ", c.r.mism, crlf);
+            }
+        }
+    }
+    print(serial, "  this chip as the CLIENT: ", good, " of 8 (four modes x two orders) bursts exact both ways", crlf);
+    bench.verdict("THE ROLES INVERT: this chip's SpiClient answers ONE FRAME AHEAD under the far chip's host in all "
+                  "four modes and both bit orders (modes 0 and 3 on the CH32V203C8T6 end), both ends agreeing frame "
+                  "for frame, and hands its MISO back after",
+                  own_edges ? good03 == 4u : good == 8u);
+    if constexpr (own_edges) {
+        uint8_t heard12 = 0;
+        for (uint8_t m = 1; m < 3; ++m) {
+            for (uint8_t lsb = 0; lsb < 2; ++lsb) {
+                const ClientRun c = as_client(static_cast<SpiMode>(m), lsb != 0u, false, PinSpeed::slow,
+                                              static_cast<uint8_t>(0x51u + 2u * m + lsb),
+                                              static_cast<uint8_t>(0xA1u + 2u * m + lsb), true);
+                if (client_heard(c)) {
+                    ++heard12;
+                }
+            }
+        }
+        bench.verdict("... and LISTENING (its MISO dark) this client hears modes 1 and 2 exact in both orders",
+                      heard12 == 4u);
+    }
+    uint8_t wide_good = 0;
+    for (uint8_t m = 0; m < 4; m += 3) {
+        const ClientRun c = as_client(static_cast<SpiMode>(m), false, true, PinSpeed::slow, static_cast<uint8_t>(0x71u + m),
+                                      static_cast<uint8_t>(0x1Fu + m));
+        if (client_exact(c)) {
+            ++wide_good;
+        } else {
+            print(serial, "    16-bit mode ", m, ": the run took ", c.run.count, " (end ", static_cast<uint8_t>(c.run.end),
+                  "), here mism=", c.mism, ", the far host read ", c.r.count, " mism ", c.r.mism, " flags ",
+                  hex(c.r.flags), crlf);
+        }
+    }
+    bench.verdict("... and in 16-bit frames (modes 0 and 3), the run over half-words", wide_good == 2u);
+    (void)link_command_mode();
+    bench.verdict("the command channel is back after the roles inverted", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
+// m - the hardware select: MODF from a second chip, and SSOE framing a client
+// ===========================================================================
+
+void tm_select() {
+    if (!need_peer()) {
+        return;
+    }
+    // ---- MODF: a host whose NSS pad is the multi-host INPUT ----
+    {
+        spilink::Params a{};
+        a.aux8 = 60;      // the lead-in
+        a.aux16 = 2000;   // the far chip holds the select low this long
+        const bool acked = peer_act(Op::ss_pulse, a);
+        PairHost::release();
+        PairS::bus_clock(true);
+        PairS::reset();
+        (void)PairS::remap(pair_code);
+        (void)PairS::configure({.role = SpiRole::host, .clock = SpiClock::div64, .nss = SpiNss::hardware_input});
+        PairSck::function();
+        PairMosi::function();
+        PairMiso::input();
+        PairNss::input(PinPull::up);   // table 10-5: the NSS input pulled or floating
+        pair_err_entries = 0;
+        pair_err_flags = 0;
+        pair_err_live = true;
+        PairS::error_interrupt(true);
+        Pfic::enable(PairS::irq);
+        PairS::enable();
+        const bool host_before = PairS::role() == SpiRole::host && PairS::enabled() && !PairS::mode_fault();
+        const uint32_t t0 = Ticker::millis();
+        uint32_t at = 0;
+        while (Ticker::millis() - t0 < 300u) {
+            if (PairS::mode_fault()) {
+                at = Ticker::millis() - t0;
+                break;
+            }
+        }
+        const bool modf = PairS::mode_fault();
+        const uint16_t ctlr1 = PairS::regs().CTLR1;
+        const uint16_t statr = PairS::status();
+        settle_ms(10);   // the pulse is over and the pad high again
+        const bool chapter_clears = PairS::clear_mode_fault();
+        PairS::error_interrupt(false);
+        pair_err_live = false;
+        Pfic::disable(PairS::irq);
+        PairS::reset();
+        const bool reset_clears = !PairS::mode_fault();
+        print(serial, "  MODF from the far chip's ss_pulse: ", modf ? "SET" : "not seen", " ", at,
+              " ms after this end's enable (the peer's lead-in ", a.aux8, " ms), CTLR1=", hex(ctlr1), " STATR=",
+              hex(statr), ", the error vector entered ", pair_err_entries, " time(s) with ", hex(pair_err_flags),
+              "; 20.2.7's sequence ", chapter_clears ? "cleared it" : "LEFT IT STANDING", ", the reset pulse ",
+              reset_clears ? "cleared it" : "did not", crlf);
+        bench.verdict("A SECOND HOST ON THE HARDWARE NSS INPUT: the far chip's low select raises MODF on this "
+                      "host",
+                      acked && host_before && modf);
+        bench.verdict("... it is the DEMOTION - MSTR and SPE gone with it - and it reaches the instance's vector "
+                      "under ERRIE",
+                      (ctlr1 & spi_mstr) == 0u && (ctlr1 & spi_spe) == 0u && pair_err_entries >= 1u &&
+                          (pair_err_flags & SpiFlag::mode_fault) != 0u);
+        bench.verdict("... and the block's RCC reset pulse puts it down (the chapter's sequence is printed, the "
+                      "finding of letter e)",
+                      reset_clears);
+        PairSck::release();
+        PairMosi::release();
+        PairNss::release();
+        settle_ms(20);
+        (void)link_command_mode();
+    }
+
+    // ---- SSOE: the host's own select pad framing the far client ----
+    {
+        constexpr uint16_t n = 16;
+        spilink::Params a{};
+        a.cfg = spilink::Cfg{.apply = 1, .mode = 0, .dord = 0, .regime = spilink::regime_buffer_wait};
+        a.count = n;
+        a.ms = 400;
+        a.seed_a = 0x4E;
+        a.seed_b = 0xB1;
+        a.pattern = spilink::pattern_prbs;
+        const bool acked = peer_act(Op::exchange, a);
+        {
+            spilink::Stream out(a.pattern, a.seed_a);
+            for (uint16_t i = 0; i < n; ++i) {
+                xtx[i] = out.next();
+                xrx[i] = 0xEE;
+            }
+        }
+        settle();
+        PairHost::release();
+        PairNss::release();
+        PairS::bus_clock(true);
+        PairS::reset();
+        (void)PairS::remap(pair_code);
+        (void)PairS::configure({.role = SpiRole::host, .clock = SpiClock::div64, .nss = SpiNss::hardware_output});
+        PairSck::function();
+        PairMosi::function();
+        PairMiso::input();
+        PairNss::function();   // SSOE drives it while SPE stands
+        const bool high_before = PairNss::read();
+        PairS::enable();
+        (void)delay_us(clock, 30);
+        const bool low_enabled = !PairNss::read();
+        bool frames = true;
+        for (uint16_t i = 0; i < n; ++i) {
+            PairS::data8(xtx[i]);
+            uint32_t spins = 200'000u;
+            while (!PairS::rxne() && spins-- != 0u) {
+            }
+            frames = frames && spins != 0u;
+            xrx[i] = PairS::data8();
+            (void)delay_us(clock, spilink::gap_us);
+        }
+        const bool low_between = !PairNss::read();
+        (void)PairS::disable();
+        (void)delay_us(clock, 30);
+        const bool high_after = PairNss::read();
+        PairS::reset();
+        PairSck::release();
+        PairMosi::release();
+        PairNss::release();
+        uint16_t mism = 0;
+        for (uint16_t i = 0; i < n; ++i) {
+            if (xrx[i] != spilink::pattern_value(a.pattern, a.seed_b, i)) {
+                ++mism;
+            }
+        }
+        spilink::Report r{};
+        settle_ms(20);
+        const bool rp = peer_report(r);
+        print(serial, "  SSOE: the select pad ", high_before ? "high" : "LOW", " before SPE, ", low_enabled ? "LOW" : "high",
+              " with SPE up, ", low_between ? "LOW" : "high", " between frames, ", high_after ? "high" : "LOW",
+              " after SPE came down; this end read ", n - mism, " of ", n, " exact, the far client heard ", r.count,
+              " mism ", r.mism, crlf);
+        bench.verdict("SSOE IS THE HOST'S OWN SELECT: the pad high under SPE until the first frame, low from it to "
+                      "SPE down, and the far client it frames carries the exchange exact both ways",
+                      acked && frames && high_before && !low_enabled && low_between && high_after && mism == 0u &&
+                          rp && r.count == n && r.mism == 0u);
+        settle_ms(20);
+        (void)link_command_mode();
+    }
+    bench.verdict("the command channel is back after the select's letters", command(Op::ping));
+    pair_done();
+}
+
+// ===========================================================================
+// x - the slip statistics (by name): each mode against both far serves
+// ===========================================================================
+
+/// Each transfer mode four times on each far serve - its engines and its
+/// polled run - behind the polled host at /64 and behind the pump, the
+/// count of exchanges not exact printed per cell. No verdict: the
+/// instrument behind letter d's matrix.
+void tx_slips() {
+    if (!need_peer()) {
+        return;
+    }
+    PairHost::pad_speed(pair_host_class);
+    constexpr SpiClock rates[] = {SpiClock::div256, SpiClock::div64, SpiClock::div8};
+    for (uint8_t ri = 0; ri < 3u; ++ri)
+    for (uint8_t m = 0; m < 4; ++m) {
+        print(serial, "  /", spi_division(rates[ri]), " mode ", m, ":");
+        for (uint8_t cell = 0; cell < 5u; ++cell) {
+            uint8_t bad = 0;
+            uint16_t worst_count = 0xFFFF;
+            for (uint8_t k = 0; k < 4u; ++k) {
+                Exchange e{};
+                e.cfg.mode = m;
+                e.host_mode = static_cast<SpiMode>(m);
+                e.rate = rates[ri];
+                e.shape = (cell & 1u) != 0u ? Shape::pump : Shape::polled;
+                if ((cell & 2u) != 0u) {
+                    e.spare = spilink::spare_polled_pump;
+                }
+                if (cell == 4u) {
+                    // the far client LISTENING, its MISO dark
+                    e.spare = spilink::spare_receive_only;
+                    e.read = false;
+                    e.shape = Shape::polled;
+                }
+                e.seed_a = static_cast<uint8_t>(0x21u + 16u * m + 4u * cell + k);
+                e.seed_b = static_cast<uint8_t>(0x93u + 16u * m + 4u * cell + k);
+                const Outcome o = run_exchange(e);
+                if (!exact(e, o)) {
+                    ++bad;
+                    if (o.r.count < worst_count) {
+                        worst_count = o.r.count;
+                    }
+                }
+            }
+            print(serial, "  ", cell == 4u ? "write/far listening " : ((cell & 1u) != 0u ? "pump" : "polled"),
+                  cell == 4u ? "" : ((cell & 2u) != 0u ? "/far run " : "/far dma "), bad, " of 4 bad");
+            if (bad != 0u) {
+                print(serial, " (the far client heard as few as ", worst_count, ")");
+            }
+        }
+        print(serial, crlf);
+    }
+    pair_done();
+}
+
+/// The pair's letters, the second set, registered where the part links.
+template <bool on = has_pair>
+void register_pair_letters() {
+    if constexpr (on) {
+        bench.second_letter('d', "THE PEER: the command channel, the matrix, the dummy, the loss, the select, a "
+                                 "stress",
+                            td_peer);
+        bench.second_letter('j', "THE LADDER: every code, every host shape, the far engines and the far run",
+                            tj_ladder);
+        bench.second_letter('k', "THE EXTENDED EXCHANGE: 16-bit frames, the CRC, the receive-only window",
+                            tk_extended);
+        bench.second_letter('l', "THE ROLES INVERT: this chip's client runs under the far host", tl_client);
+        bench.second_letter('m', "THE HARDWARE SELECT: MODF from a second chip, SSOE framing the far client",
+                            tm_select);
+        bench.letter('x', "the slip statistics against the peer: each mode, both far serves (no verdict)", tx_slips,
+                     false);
     }
 }
 
@@ -2975,15 +3414,18 @@ void register_spi3_letters() {
 // ===========================================================================
 
 void banner() {
-    print(serial, crlf, "test_vx03_spi - the SPI of RM ch. 20, both instances", crlf,
+    print(serial, crlf, "test_vx03_spi - the SPI of RM ch. 20", crlf,
           "  SPI1: the PA7-PA6 strap is the loopback (PA8 is the node's third pad and is never "
           "driven); PA4 is left an input, so SPI1 is software-selected only",
-          crlf,
-          "  SPI2: PB12..PB15 to a peer board running `spi_peer`; letter d skips when it does "
-          "not answer",
           crlf);
+    if constexpr (has_pair) {
+        print(serial, "  THE PAIR on SPI", pair_spi, " column ", pair_code, ": NSS P", pair_pins.nss.port,
+              pair_pins.nss.pin, ", SCK P", pair_pins.sck.port, pair_pins.sck.pin, ", MISO P", pair_pins.miso.port,
+              pair_pins.miso.pin, ", MOSI P", pair_pins.mosi.port, pair_pins.mosi.pin,
+              " to the far board running `spi_peer` - the letters of `y`, which FAIL without it", crlf);
+    }
     if constexpr (has_spi3) {
-        print(serial, "  SPI3: PA15/PB3/PB4/PB5 wired to SPI2's PB12..PB15 for letters f..i, "
+        print(serial, "  SPI3: PA15/PB3/PB4/PB5 wired to SPI2's PB12..PB15 for letters h and i, "
                       "each wire looked for first",
               crlf);
     }
@@ -3023,21 +3465,37 @@ BRIO_CH32_VECTOR(spi1_handler) {
 }
 
 BRIO_CH32_VECTOR(spi2_handler) {
-    if (served_on_spi2()) {
-        return;   // the CH32V303's letters g: SPI2 as the client of SPI3
+    if constexpr (pair_spi == 2u) {
+        if (pair_err_live) {
+            pair_err_entries = pair_err_entries + 1u;
+            pair_err_flags = pair_err_flags | PairS::isr();
+            PairS::error_interrupt(false);
+            return;
+        }
     }
-    if (peer_client_live) {
-        (void)PeerClient::isr();
-        return;
-    }
-    if (PeerHost::isr()) {
+    // SPI2's pump: letter a's host, and on the CH32V203 the pair's (the
+    // same class there - SPI2's one column is the pair's link).
+    if (Spi2Host::isr()) {
         host_done = true;
     }
 }
 
-/// SPI3's vector, the CH32V303's: the client of letter f. On the other
-/// series the body is empty and nothing in the vector table names it.
-BRIO_CH32_LEAF_VECTOR(spi3_handler) { served_on_spi3(); }
+/// SPI3's vector, the CH32V303's: the pair's pump and its error source. On
+/// the other series the body is empty and nothing in the vector table
+/// names it.
+BRIO_CH32_VECTOR(spi3_handler) {
+    if constexpr (pair_spi == 3u) {
+        if (pair_err_live) {
+            pair_err_entries = pair_err_entries + 1u;
+            pair_err_flags = pair_err_flags | PairS::isr();
+            PairS::error_interrupt(false);
+            return;
+        }
+        if (pair_pump_live && PairHost::isr()) {
+            host_done = true;
+        }
+    }
+}
 
 /// SPI1's engines: one vector per channel on this family, each servicing
 /// its own - the receive channel's the transaction's one interrupt, the
@@ -3055,15 +3513,33 @@ BRIO_CH32_VECTOR(dma1_channel3_handler) {
     }
 }
 
-/// SPI2's engines, the same way round.
+/// SPI2's engines, the same way round: letter a's, and on the CH32V203 the
+/// pair's (the same class there).
 BRIO_CH32_VECTOR(dma1_channel4_handler) {
-    if (dma_host_live && PeerDma::dma_rx_isr()) {
+    if ((dma_host_live || pair_dma_live) && Spi2Dma::dma_rx_isr()) {
         host_done = true;
     }
 }
 BRIO_CH32_VECTOR(dma1_channel5_handler) {
-    if (dma_host_live && PeerDma::dma_tx_isr()) {
+    if ((dma_host_live || pair_dma_live) && Spi2Dma::dma_tx_isr()) {
         host_done = true;
+    }
+}
+
+/// SPI3's engines on DMA2, the CH32V303's pair; nothing names them on the
+/// other series.
+BRIO_CH32_VECTOR(dma2_channel1_handler) {
+    if constexpr (pair_spi == 3u) {
+        if (pair_dma_live && PairDma::dma_rx_isr()) {
+            host_done = true;
+        }
+    }
+}
+BRIO_CH32_VECTOR(dma2_channel2_handler) {
+    if constexpr (pair_spi == 3u) {
+        if (pair_dma_live && PairDma::dma_tx_isr()) {
+            host_done = true;
+        }
     }
 }
 
@@ -3074,15 +3550,16 @@ int main() {
     brio::enable_interrupts();
 
     third_pad_idle();
+    // The pair's engines' controller: DMA1 for SPI2, DMA2 for SPI3.
+    Dma<PairS::dma_tx_slot.controller>::open();
 
     bench.letter('a', "the rates: every BR code, and the clock counted on its own pad", ta_rates);
     bench.letter('b', "the host with its MISO held by its own port, no wire", tb_held);
-    bench.letter('c', "THE LOOPBACK on SPI1: the pump, the CRC, the engines, the arbiter",
+    bench.letter('c', "THE LOOPBACK on SPI1: the pump, the ladder to 36 MHz, the engines, the arbiter",
                  tc_loop);
-    bench.letter('d', "THE PEER on SPI2: the matrix, the dummy, the roles inverted, a stress",
-                 td_peer);
     bench.letter('e', "the flags, the vectors, the line modes, the disable rule", te_flags);
     register_spi3_letters();
+    register_pair_letters();
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

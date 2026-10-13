@@ -51,7 +51,12 @@ reads `0x20310500` and the unique identifier's two factory words
 
   The CH32V303's PA4 is not 5 V tolerant (the CH32V303 datasheet's pin
   table) and this board's SPI2 select idles high, so this board does not
-  run an SPI2 image while the other board is unpowered.
+  run an SPI2 image while the other board is unpowered. As an SPI CLIENT
+  on these wires this board's own MISO edge (PB14) reaches its SCK and
+  select inputs: it answers at the slowest slew class, and even so loses
+  frames in modes 1 and 2 below 9 MHz while answering - exact while only
+  listening ([../ch32vx03/spi.md](../ch32vx03/spi.md), the pair's
+  section).
 - **The jumpers on the board itself**, each kept because a letter no peer
   can judge rides it: USART2 crossed with UART4 on their default pads
   (PA2 to PB1, PB0 to PA3: the fourth port and DMA1's eighth channel),

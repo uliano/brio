@@ -2242,10 +2242,13 @@ public:
 
     /// SPE up and the FIRST ANSWER in the buffer before the host's clock
     /// can arrive. Call it with NSS still high.
-    static void enable(uint16_t first = 0xFFFFu) {
+    static void enable(uint16_t first) {
         S::enable();
         write(first);
     }
+    /// SPE up with the transmit buffer EMPTY: the opening of a run, which
+    /// writes its own first answer.
+    static void enable() { S::enable(); }
     static bool disable() { return S::disable(); }
 
     /// How many answers must be queued ahead of the frame the host is
@@ -2282,6 +2285,163 @@ public:
     static bool crc_error() { return S::crc_error(); }
     static void clear_crc_error() { S::clear_crc_error(); }
     static uint16_t status() { return S::status(); }
+
+    // ---- the polled runs ---------------------------------------------------
+    //
+    // A client's unit is the RUN: the answers to a transaction, or what it
+    // brings, served polled in one call - the per-frame verbs above being
+    // its degenerate case. What bounds a run is figure 20-1's one transmit
+    // buffer in front of the shifter: 20.2.3's client moves the buffer into
+    // the shifter on the frame's first sampling edge and raises TXE, so the
+    // answer to frame k + 1 may be written from then until frame k + 1's
+    // first edge - most of a frame of window; the receive buffer is ONE
+    // frame deep, so a run that reads must read each frame inside the
+    // next one. THE SELECT PAD IS THE WINDOW (the peripheral publishes no
+    // select status): a run waits for the pad to FALL before it takes a
+    // high pad for the close, and reads it once for every four polls of the
+    // flag - a STATR load is an APB load and the pad's a GPIO one, and the
+    // flag's own load, test and branch is then the whole path from the
+    // flag to the store; a run without an NSS pad ends on its count or its
+    // budget alone. They are ALWAYS INLINE, so the caller's frame width and
+    // buffers are constants of the loop.
+
+    /// How a run ended.
+    enum class RunEnd : uint8_t {
+        complete,   ///< every frame of the run moved
+        closed,     ///< the host raised the select (the NSS pad read high)
+        stalled,    ///< the spin budget ran out first
+    };
+
+    /// What a run did: `count` frames - answers written for answer(),
+    /// frames received for exchange() and receive() - and how it ended.
+    struct Run {
+        uint16_t count;
+        RunEnd end;
+    };
+
+    /**
+     * ANSWER a transaction with `out`, polled on TXE alone, reading
+     * nothing. Call it with SPE up (`enable()`), the buffer EMPTY and the
+     * select still HIGH: the first answer goes into the buffer at once,
+     * every later one on the TXE of the frame before it. Ends when the host
+     * raises the select; the frames past the run's end carry what the
+     * shifter is left with. The receive buffer overruns from the second
+     * frame (nothing is read) and the tail's DATAR-then-STATR read clears
+     * it (20.2.7).
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run answer(std::span<const T> out, uint32_t spins) {
+        static_assert(run_frame<T>, "a frame of this block is eight bits or sixteen (DFF): uint8_t or uint16_t");
+        SpiRegs& regs = S::regs();
+        const T* const first = out.data();
+        const T* const end = first + out.size();
+        const T* p = first;
+        RunEnd how = RunEnd::closed;
+        if (p != end) {
+            regs.DATAR = *p++;
+        }
+        if (!await_select(spins)) {
+            how = RunEnd::stalled;
+            S::flush_rx();
+            return {static_cast<uint16_t>(p - first), how};
+        }
+        for (; p != end; ++p) {
+            const T next = *p;
+            if (!await<spi_txe>(spins, how)) {
+                break;
+            }
+            regs.DATAR = next;
+        }
+        if (p == end) {
+            if constexpr (has_nss_pad) {
+                while (!pad_closed()) {
+                    if (--spins == 0u) {
+                        how = RunEnd::stalled;
+                        break;
+                    }
+                }
+            } else {
+                how = RunEnd::complete;
+            }
+        }
+        S::flush_rx();
+        return {static_cast<uint16_t>(p - first), how};
+    }
+
+    /**
+     * EXCHANGE: answer with `out` and keep what the host sends in `in`, the
+     * run's length the shorter of the two. The answers go as answer()'s;
+     * each turn then reads, on its RXNE, the frame whose TXE it wrote on -
+     * frame k is read while frame k + 1 shifts, inside the receive buffer's
+     * one frame of grace. Ends `complete` when the last frame is in,
+     * `closed` when the host raised the select first (what arrived before
+     * is in `in`), `stalled` on the budget. The receive side is cleared at
+     * the start, the select high.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run exchange(std::span<const T> out, std::span<T> in, uint32_t spins) {
+        static_assert(run_frame<T>, "a frame of this block is eight bits or sixteen (DFF): uint8_t or uint16_t");
+        const uint32_t len = out.size() < in.size() ? out.size() : in.size();
+        if (len == 0u) {
+            return {0, RunEnd::complete};
+        }
+        SpiRegs& regs = S::regs();
+        S::flush_rx();
+        const T* p = out.data();
+        const T* const p_end = p + len;
+        T* const first = in.data();
+        T* const q_end = first + len;
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        regs.DATAR = *p++;
+        if (!await_select(spins)) {
+            return {0, RunEnd::stalled};
+        }
+        for (; p != p_end; ++p, ++q) {
+            const T next = *p;
+            if (!await<spi_txe>(spins, how)) {
+                return drained(q, first, q_end, how);
+            }
+            regs.DATAR = next;
+            if (!await<spi_rxne>(spins, how)) {
+                return drained(q, first, q_end, how);
+            }
+            *q = static_cast<T>(regs.DATAR);
+        }
+        if (!await<spi_rxne>(spins, how)) {
+            return drained(q, first, q_end, how);
+        }
+        *q++ = static_cast<T>(regs.DATAR);
+        return {static_cast<uint16_t>(q - first), RunEnd::complete};
+    }
+
+    /**
+     * RECEIVE a run into `in`, polled on RXNE alone, writing nothing. The
+     * receive buffer is NOT flushed at the start, so a frame standing in it
+     * when the run began is the run's first. Ends as exchange() does.
+     */
+    template <typename T>
+    [[gnu::always_inline]] static Run receive(std::span<T> in, uint32_t spins) {
+        static_assert(run_frame<T>, "a frame of this block is eight bits or sixteen (DFF): uint8_t or uint16_t");
+        SpiRegs& regs = S::regs();
+        T* const first = in.data();
+        T* const q_end = first + in.size();
+        T* q = first;
+        RunEnd how = RunEnd::complete;
+        if ((regs.STATR & spi_rxne) == 0u && !await_select(spins)) {
+            return {0, RunEnd::stalled};
+        }
+        for (; q != q_end; ++q) {
+            if (!await<spi_rxne>(spins, how)) {
+                if ((regs.STATR & spi_rxne) != 0u) {
+                    *q++ = static_cast<T>(regs.DATAR);
+                }
+                break;
+            }
+            *q = static_cast<T>(regs.DATAR);
+        }
+        return {static_cast<uint16_t>(q - first), how};
+    }
 
     /// The ISR body: the raised-and-enabled sources, for the app's glue.
     [[gnu::always_inline]] static uint32_t isr() { return S::isr(); }
@@ -2327,6 +2487,91 @@ private:
         } else {
             return false;
         }
+    }
+
+    template <typename T>
+    static constexpr bool run_frame = std::is_same_v<T, uint8_t> || std::is_same_v<T, uint16_t>;
+
+    /// The NSS pad read low, the window open (yes at once without a pad).
+    [[gnu::always_inline]] static bool pad_low() {
+        if constexpr (has_nss_pad) {
+            return (NssPin::P::in() & NssPin::mask) == 0u;
+        } else {
+            return true;
+        }
+    }
+
+    /// THE WINDOW CLOSES ON TWO READS. A high read is taken for the host's
+    /// close only when the pad still reads high at the next look: on a
+    /// board-to-board bus the select wire carries the transients of the
+    /// other three, and a run that took one high read for the close ended
+    /// mid-window - measured on the CH32V203C8T6 against a CH32V303VCT6
+    /// host, 3 to 17 frames of 32 taken in runs the block itself served
+    /// whole (its own NSS input never saw the glitch: the DMA-fed serves on
+    /// the same wire were exact). The second read is the next look's own,
+    /// so a flag wait pays one register clear for it, and a real close is
+    /// seen one look late; a host's real close stands for the rest of the
+    /// gap between windows.
+    /// pad_closed() is the same rule for a loop that does nothing else:
+    /// eight reads in a row, all high.
+    [[gnu::always_inline]] static bool pad_closed() {
+        for (uint8_t k = 0; k < 8u; ++k) {
+            if (pad_low()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[gnu::always_inline]] static bool await_select(uint32_t& spins) {
+        while (!pad_low()) {
+            if (--spins == 0u) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Poll STATR until `flag` stands: true. False when the host raised the
+    /// select - two looks in a row reading it high (pad_closed()'s reason) -
+    /// or the budget ran out, `how` saying which. FOUR POLLS A LOOK (the
+    /// runs' comment).
+    template <uint16_t flag>
+    [[gnu::always_inline]] static bool await(uint32_t& spins, RunEnd& how) {
+        SpiRegs& regs = S::regs();
+        bool high_once = false;
+        for (;;) {
+            if ((regs.STATR & flag) != 0u) { return true; }
+            if ((regs.STATR & flag) != 0u) { return true; }
+            if ((regs.STATR & flag) != 0u) { return true; }
+            if ((regs.STATR & flag) != 0u) { return true; }
+            if constexpr (has_nss_pad) {
+                if (!pad_low()) {
+                    if (high_once) {
+                        how = RunEnd::closed;
+                        return false;
+                    }
+                    high_once = true;
+                } else {
+                    high_once = false;
+                }
+            }
+            if (--spins == 0u) {
+                how = RunEnd::stalled;
+                return false;
+            }
+        }
+    }
+
+    /// An exchange that ended early: the frame standing in the receive
+    /// buffer, if any, is the run's last.
+    template <typename T>
+    [[gnu::always_inline]] static Run drained(T* q, T* first, T* q_end, RunEnd how) {
+        SpiRegs& regs = S::regs();
+        if (q != q_end && (regs.STATR & spi_rxne) != 0u) {
+            *q++ = static_cast<T>(regs.DATAR);
+        }
+        return {static_cast<uint16_t>(q - first), how};
     }
 
     static inline SpiDataSize bits_ = SpiDataSize::bits8;
