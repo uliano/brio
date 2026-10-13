@@ -13,7 +13,7 @@ CH32V307EVT package, whose `SCHPCB/CH32V303VCT6-R0` holds its sources.
 Silicon identity, read over the debug port: the chip id at 0x1FFFF704
 reads `0x30300514`, `misa` `0x40901125` (I, M, A, F, C, user mode and
 WCH's own extension), the flash-capacity signature 288 KB, and the
-unique identifier's two factory words `0x0C9BABCD` `0x74B0BC48` - its
+unique identifier's two factory words `0xB23CABCD` `0x1A51BC48` - its
 third reads the array's erased pattern
 ([../ch32vx03/nvm.md](../ch32vx03/nvm.md)).
 
@@ -32,10 +32,11 @@ third reads the array's erased pattern
 - **Debug**: the 2x5 header **P10** (`LINK`): PA14 = SWCLK on pin 1,
   PA13 = SWDIO on pin 3, the two-wire port this family has, with GND,
   3.3 V and 5 V on the pins below them. The probe brio drives it with
-  is a WCH-LinkE at firmware 2.10 ([../probes/wch-link.md](../probes/wch-link.md):
-  its attach rewrites RCC_CFGR0 and sets the debug module's low-power
-  bits on a running chip), on the two debug pads, the two serial ones
-  and GND; a WCH-Link of the CH549 kind at 2.12 drove it before.
+  is a WCH-Link of the CH549 kind at firmware 2.12
+  ([../probes/wch-link.md](../probes/wch-link.md)), on the two debug
+  pads, the two serial ones and GND, its 5V and 3V3 pins not connected
+  (the board runs on P14); a WCH-LinkE at 2.10 attaches it too, its
+  serial bridge transmitting a quarter fast.
 - **Console**: USART1 on PA9 (TX, P10 pin 2) and PA10 (RX, pin 4), the
   instance's default pads, wired to the probe's own serial: one cable
   carries the debug port and the console, at 115200.
@@ -80,14 +81,35 @@ third reads the array's erased pattern
   which are the flash medium's zone
   ([../ch32vx03/nvm.md](../ch32vx03/nvm.md)); the 224 KB tail above the
   window is named in the linker script and holds nothing.
+- **The wires to the WeAct CH32V203C8T6 board**
+  ([weact-ch32v203c8.md](weact-ch32v203c8.md)), the two boards being each
+  other's peers - eight signal wires and two grounds, the I2C pair's
+  2.2 kOhm pull-ups hanging from that board's 3.3 V:
+
+  | this board | the CH32V203 | carries |
+  |---|---|---|
+  | PA4 | PB12 | SPI3's NSS on its second column - SPI2's NSS, both hardware NSS |
+  | PC10 | PB13 | SCK |
+  | PC11 | PB14 | MISO |
+  | PC12 | PB15 | MOSI |
+  | PB6 | PB6 | I2C1's SCL - I2C1's SCL |
+  | PB7 | PB7 | I2C1's SDA - I2C1's SDA |
+  | PB1 | PB10 | UART4's RX on its second column, from USART3's TX |
+  | PB0 | PB11 | UART4's TX on its second column, into USART3's RX |
+
+  PA4 is NOT 5 V tolerant (the datasheet's pin table: an I/O/A pad, no
+  FT), and the far board's SPI2 select idles high: S1 stays on whenever
+  the CH32V203 board runs, so the select never back-feeds an unpowered
+  chip through PA4's clamp. The I2C pull-ups are the far board's, so a
+  bus with that board unpowered has none.
 - **The jumpers the suites want**, every one on the board itself - SPI2
-  against SPI3 (PB12-PA15, PB13-PB3, PB14-PB4, PB15-PB5, the same four
-  pads carrying I2S2 against I2S3 and - SPI3's default column being
-  SPI1's second one - SPI1 against SPI2), USART2 crossed with UART4 on
-  its default pads (PA2 to PC11, PC10 to PA3), TIM3's channel 1 into
-  TIM2's channel 2 (PA6 to PA1, the same wire an EXTI edge), TIM8's
-  channel 1 into TIM4's channel 3 (PC6 to PB8), and I2C1 against I2C2
-  (PB6-PB10 and PB7-PB11, each pair with a 4.7 kOhm pull-up to 3.3 V).
-  `wire_check` finds exactly these ten over the twenty pads, and no
+  against SPI3 on SPI3's default column (PB12-PA15, PB13-PB3, PB14-PB4,
+  PB15-PB5, the same four pads carrying I2S2 against I2S3 and - SPI3's
+  default column being SPI1's second one - SPI1 against SPI2), TIM3's
+  channel 1 into TIM2's channel 2 (PA6 to PA1, the same wire an EXTI
+  edge), TIM8's channel 1 into TIM4's channel 3 (PC6 to PB8), and P1's
+  two (LED1 to PB2, the KEY to PA0). SPI3's two columns are one AFIO
+  field: a program moves it only with the other column's pads released.
+  `wire_check` finds exactly these and the eight wires above, and no
   stray. - Manifest type `v303vc`; the project is `ch32vx03/`, preset
   `ch32v303vc-release` ([../ch32vx03/README.md](../ch32vx03/README.md)).

@@ -373,11 +373,14 @@ already locked from the first.
   none.
 - **The remaps on the CH32V203C8T6**: nine columns written, read back
   and restored (SPI1, I2C1, UART4, TIM1, TIM2, TIM3's partial, both of
-  CAN1's and the oscillator's pads as GPIO); seven refused as absent
-  (USART2's and USART3's remapped columns, TIM3's full one, TIM4's,
-  TIM5's channel 4, TIM2's internal trigger and the Ethernet's
-  pulse-per-second); USART3_RM and TIM2ITR1_RM written RAW read back
-  zero, which is why the driver refuses them there.
+  CAN1's and the oscillator's pads as GPIO); twenty-six refused as absent
+  (USART2's and USART3's remapped columns, UART4's codes 2 and 3, TIM1's
+  port-E column, TIM3's full one, TIM4's, TIM5's channel 4, TIM2's
+  internal trigger, the Ethernet's pulse-per-second and the CH32V303's
+  fields); USART3_RM and TIM2ITR1_RM written RAW read back zero, which is
+  why the driver refuses them there - and so did UART4's field's high
+  bit: its code 2, table 10-27's x0 with that bit set, read back 0, so
+  the class's codes 2 and 3 name no column and are refused.
 - **The remaps on the CH32V303VCT6**: thirty-one columns written, read
   back and restored - every field the chapter gives the class, TIM8's,
   TIM9's and TIM10's, UART4..UART8's, SPI3's, the four ADC trigger

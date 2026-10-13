@@ -540,6 +540,11 @@ inline uint16_t esig_flash_kbytes() {
 inline uint32_t esig_uid_word(int n) {
     return *reinterpret_cast<volatile const uint32_t*>(0x1FFFF7E8UL + 4UL * static_cast<uint32_t>(n));
 }
+/// THE CHIP IDENTIFIER, a word the reference manual V2.3 does not name:
+/// its address is WCH's own peripheral library's (DBGMCU_GetCHIPID in
+/// both EVT packages), and what it says - the part and its revision - is
+/// read on the die (docs/ch32vx03/nvm.md, "The signature").
+inline uint32_t esig_chip_id() { return *reinterpret_cast<volatile const uint32_t*>(0x1FFFF704UL); }
 
 // ---- EXTEN (RM ch. 33) ----------------------------------------------------
 /// One register on the HB bus, reset only by a system reset, holding

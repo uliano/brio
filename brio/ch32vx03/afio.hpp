@@ -311,7 +311,10 @@ inline constexpr UsartPadSet afio_usart3_table[afio_usart3_codes] = {
 // Table 10-26 is every class's but the D6's (TX/RX alone, from PC10/PC11);
 // table 10-27 is named for the CH32V203C8 and carries five signals from
 // PB0..PB4. A part with no fourth USART at all (device::has_usart(4))
-// reaches neither.
+// reaches neither. Table 10-27 spells its two columns x0 and x1, and the
+// field's high bit is READ-ONLY AT ZERO on the CH32V203C8 (measured: a
+// code of 2 written reads back 0), so the D6's codes 2 and 3 name no
+// column of their own and are refused, as USART3's are (the header).
 inline constexpr uint8_t afio_uart4_codes = 4;
 inline constexpr UsartPadSet afio_uart4_table_d8[afio_uart4_codes] = {
     {{'C', 10}, {'C', 11}, {}, {}, {}},                        // 00 default
@@ -322,8 +325,8 @@ inline constexpr UsartPadSet afio_uart4_table_d8[afio_uart4_codes] = {
 inline constexpr UsartPadSet afio_uart4_table_d6[afio_uart4_codes] = {
     {{'B', 0}, {'B', 1}, {'B', 2}, {'B', 3}, {'B', 4}},        // x0 default
     {{'A', 5}, {'B', 5}, {'A', 6}, {'A', 7}, {'A', 15}},       // x1
-    {{'B', 0}, {'B', 1}, {'B', 2}, {'B', 3}, {'B', 4}},
-    {{'A', 5}, {'B', 5}, {'A', 6}, {'A', 7}, {'A', 15}},
+    {},                                                         // 1x: the high bit reads zero
+    {},
 };
 
 // ---- UART5..UART8 (tables 10-28..10-31), the CH32V303RC's and VC's ----------

@@ -2,9 +2,10 @@
 // CH32V203 and the CH32V303: ch32vx03/i2c.hpp over RM ch. 19, the host
 // engine under its two vectors, the client half addressed by a real
 // controller, the DMA engines, and util/i2c_bus.hpp's arbiter with not
-// one line changed. Letters a..k are both series'; letters l..q are a
-// board's that wires the chip's two controllers onto one bus, registered
-// on every part with I2C2 and compiled out of every other image.
+// one line changed - every letter on I2C1, and every far end a second
+// chip running `twi_peer`. I2C2 reaches no wire on the desk this suite is
+// written for (its pads carry a serial link there): its block is
+// compiled in the stratum's fixture and declared in docs/ch32vx03/i2c.md.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -29,12 +30,13 @@
 //    external clock mode 1 the same channel COUNTS SCL edges, which is
 //    what prices an unstick().
 //
-//  - A PEER BOARD running `twi_peer` (a Nucleo-F446RE, or a board of
-//    the other series of this stratum running this project's own port
-//    of it; the peer's ident says which), commanded IN BAND over the
-//    bus under test through avrdx/src/apps/twi_link.hpp, included by
-//    relative path: one source of truth for the wire format on every
-//    architecture. Three wires, both boards at 3.3 V:
+//  - A PEER BOARD running `twi_peer` (a board of the other series of
+//    this stratum, the desk partner - the CH32V303 of a CH32V203 and the
+//    other way round - or a board of another family; the peer's ident
+//    says which), commanded IN BAND over the bus under test through
+//    avrdx/src/apps/twi_link.hpp, included by relative path: one source
+//    of truth for the wire format on every architecture. Three wires,
+//    both boards at 3.3 V:
 //
 //      PB6 (SCL)  <->  the peer's SCL
 //      PB7 (SDA)  <->  the peer's SDA
@@ -43,37 +45,25 @@
 //    THE PULL-UPS ARE NOT THIS BOARD'S. An open-drain pad has no pull
 //    in any output mode on this family (the pin chapter), so nothing
 //    here holds the bus up - and nothing on a CH32 peer does either,
-//    for the same reason: the wire wants resistors, or a peer whose
-//    pads pull, and letter a measures what they are worth in
-//    nanoseconds of rise. The peer's command-mode client answers ONE
-//    address (0x6B) with no general call and no second address, which
-//    is why every wireless letter can run with it attached.
+//    for the same reason: the wire wants resistors (the desk's pair
+//    carries a 2.2 kOhm pair, docs/boards/), and letter a measures what
+//    they are worth in nanoseconds of rise. The peer's command-mode
+//    client answers ONE address (0x6B) with no general call and no
+//    second address, which is why every wireless letter can run with it
+//    attached.
 //
 //    Every peer letter asks for a ping first and SKIPS (with no
 //    verdict claimed) when three command retries fail: a suite that
 //    hangs on an absent instrument is worse than one that says so.
 //
-//  - ON A BOARD THAT WIRES THEM, THE CHIP'S OWN I2C2. WCH's CH32V303
-//    evaluation board wires I2C2's pads to I2C1's - PB10 to PB6, PB11 to
-//    PB7 - with a 4.7 kOhm pull-up on each line, and a CH32V203C8 board
-//    can carry the same two wires and resistors: one chip's two
-//    controllers share a bus, and letters l..q make one the host and the
-//    other the target,
-//    the target POLLED from the loop that waits for the host (its clock
-//    stretching holds the bus while the loop comes round). The wires are
-//    looked for before a byte moves, and a peer letter that finds the
-//    bus pulled up by them and no peer answering declines instead of
-//    failing.
-//
-// THE PADS. PB6 and PB7 - and on a part with I2C2 PB10 and PB11, I2C2's,
-// driven only after letters l..q have found the two wires to PB6/PB7 -
-// and, in letter p alone, USART2's PA2 (its transmitter, driving whatever
-// input a strap puts there) and PA3 (its receiver, pulled up), released
-// at the letter's end. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14
-// (the debug port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the
-// crystals), PB12..PB15 (the SPI link), the rest of PA0..PA8 (other
-// phases' straps) - and PB2, the LED, left undriven, as in every suite of
-// this target.
+// THE PADS. PB6 and PB7 - and, in letter p alone, USART2's PA2 (its
+// transmitter) and PA3 (its receiver), claimed by that letter's
+// transport and released at its end. NEVER TOUCHED: PA9/PA10 (the
+// console), PA13/PA14 (the debug port), PA11/PA12 (the USB pads),
+// PC14/PC15 and the crystal's pins, PB10..PB15 (the pair's serial and SPI
+// links on the CH32V203, the SPI2-SPI3 jumpers on the CH32V303), the rest
+// of PA0..PA8 - and PB2, the LED, left undriven, as in every suite of this
+// target.
 //
 // What is exercised, letter by letter:
 //   a  THE BLOCK AND THE ARITHMETIC: the reset values, the three
@@ -103,42 +93,36 @@
 //   j  the flags, both vectors, the client's addresses and the PE
 //      cycle that drops an unclocked byte
 //   k  a ten-second stress with the error counters at both ends
-// and on every part with I2C2, over the board's two wires:
-//   l  THE SELF-LINK: I2C1 the host, I2C2 the target - the probe, an
-//      absent address, a write, reads of one, two, three, four and
-//      eight bytes (the host's receive procedures, and THE TARGET AS A
-//      TRANSMITTER), a write-then-read, at 100 kHz and at 400 kHz in both
-//      duty shapes, and a write of 32 at each rung timed on the core's
-//      counter against the rate asked - two controllers of one bus cannot
-//      tell a wrong one; the second address and the general call; the DMA
-//      host's write - timed the same way - read and write-then-read
-//   m  the same shapes with the roles swapped: I2C2 the host, its SCL
-//      timed the same way
-//   n  A TARGET STUCK MID-BYTE: the chip's own target left holding SDA
-//      low by a host taken off the bus through its reset line, and
-//      unstick()'s clocks counted on the pad by the timer
-//   o  THE REFUSED LAST BYTE: I2C2 the target SERVED FROM ITS OWN VECTOR,
-//      refusing the last written byte of a write-then-read (one to four
-//      written, two read) - the NACK arriving with the repeated START
-//      already requested - through the pump and the engines, at 100 and
-//      400 kHz, the core at 96, 48 and 8 MHz (the console and the tick
-//      re-made at each, and back at 96): the status, the controller a
-//      millisecond on (START, STOP, MSL), the next tenure on the same
-//      host; each count also acknowledged whole, the control; and at each
-//      core a write of sixteen through the pump and the engines timed on
-//      the core's counter against the rate asked, PB1 another rate at
-//      each, a data bit's SCL period read on the pad mid-write beside it
+//   l  THIS BOARD'S TARGET under the peer's controller: its second
+//      address and the general call written to, and THE TARGET AS A
+//      TRANSMITTER - the peer's host reading one, two, three, four and
+//      eight bytes, twice each, and every byte the shifter asked for
+//      beyond the closing NACK dropped by flush()
+//   n  A FAR TARGET STUCK MID-BYTE: the peer's target serving zeros, left
+//      holding SDA low by this host taken off the bus through its reset
+//      line, and unstick()'s clocks counted on the pad by the timer
+//   o  THE REFUSED LAST BYTE: the peer's target refusing the last written
+//      byte of a write-then-read (one to four written, two read) - the
+//      NACK arriving with the repeated START already requested - through
+//      the pump and the engines, at 100 and 400 kHz, the core at 96, 48
+//      and 8 MHz (the console and the tick re-made at each, and back at
+//      96): the status, the controller two milliseconds on (START, STOP,
+//      MSL), the next tenure on the same host, the far end's own word that
+//      it refused; each count also acknowledged whole, the control; and at
+//      each core a write of sixteen through the pump and the engines timed
+//      on the core's counter against the rate CCR makes, PB1 another rate
+//      at each
 //   p  THE HAND-OVER ON CHANNEL 7, the OR of USART2's transmit request and
 //      I2C1's receive one: USART2's transport with its transmit engine
-//      run and released, then I2C1's DMA read of sixteen judged
-//      byte-exact, both owners timed against the rate asked; and the
-//      mirror - I2C1's DMA read abandoned with RxNE standing under DMAEN
-//      and the host released, then USART2's run judged out whole in its
-//      wire time at 115200 on the core's counter
+//      run and released, then I2C1's DMA read of sixteen from the peer
+//      judged byte-exact, both owners timed against the rate asked; and
+//      the mirror - I2C1's DMA read abandoned with RxNE standing under
+//      DMAEN and the host released, then USART2's run judged out whole in
+//      its wire time at 115200 on the core's counter
 //   q  A CHANNEL THAT DOES NOT SERVE, staged by a request held on it by a
 //      peripheral gated without its reset (TIM3's on channel 6, USART2's
-//      on 7): a DMA write answered i2c_dma_fault with the target short of
-//      the block, and a DMA read with the event vector entered for the
+//      on 7): a DMA write answered i2c_dma_fault with the far target short
+//      of the block, and a DMA read with the event vector entered for the
 //      START and the address alone, the tenure answered by the caller's
 //      bound and recover(); each again with the request let go by the
 //      holder's reset line, whole
@@ -165,15 +149,15 @@
 // tier. So the four 32 KB parts build it as one image per GROUP of
 // letters (the groups line below; design/overview.md, "A suite's image
 // fits the family's smallest chip"). The CH32V203C8 builds two images of
-// its own (the groups.v203c8 line: the wireless and peer letters, then the
-// self-link's l to q); the CH32V303 builds one.
+// its own (the groups.v203c8 line); the CH32V303 builds one.
 // build: boards = v203c6,v203c8,v303vc
-// build: groups = abcd,efgh,ijkr
-// build: groups.v203c8 = abcdefgh,ijklmnopqr
+// build: groups = abcd,efgh,ijkr,ln,o,pq
+// build: groups.v203c8 = abcdefgh,ijklnopqr
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <type_traits>
 #include <variant>
 
 #include "ch32vx03/clock.hpp"
@@ -631,13 +615,6 @@ bool ensure_link() {
     return false;
 }
 
-/// Whether this part has the I2C2 a board can wire to I2C1 (letters l..q
-/// below), and the question a peer letter asks when no peer answered on
-/// a pulled-up bus. The wiring is the BOARD's, looked for at run time.
-constexpr bool self_link_part = device::i2c_count >= 2u;
-template <bool on = self_link_part>
-bool self_link_present();
-
 /// Every wire letter asks first and declines with the reason.
 bool need_peer() {
     if (!wire_pulled_up()) {
@@ -649,14 +626,6 @@ bool need_peer() {
     }
     if (ensure_link()) {
         return true;
-    }
-    // A bus pulled up by THIS board's resistors, on the wires to its own
-    // I2C2, has no peer on it by construction: the letter declines.
-    if (self_link_present()) {
-        print(serial, "  SKIPPED, no verdict claimed: the pull-ups are this board's own, on the "
-                      "wires to its own I2C2 (letters l..q) - no peer board is on this bus.",
-              crlf);
-        return false;
     }
     bench.verdict("the peer answers on the command address (the peer board running twi_peer)",
                   false);
@@ -937,16 +906,26 @@ void tb_no_answer() {
     bench.verdict("... and the timer counted the same clocks on the pad, plus the STOP's own "
                   "rise: the count is a MEASUREMENT of the remedy, not its own report",
                   edges >= pulses && edges <= static_cast<uint32_t>(pulses) + 2u);
+    // THE STOP unstick() MAKES BY HAND raises STOPF on this instance's own
+    // target half, and the event vector is the TENURE's (raised by start(),
+    // down at the completion: docs/ch32vx03/i2c.md), so the flag stands in
+    // silence until the next tenure's first entry takes it.
     settle_ms(450);
     const uint32_t idle_entries = host_isr_entries;
+    const bool stopf_left = (H::status1() & i2c_stopf) != 0u;
     print(serial, "  the event vector, idle, after the hand-made STOP: ", idle_entries,
-          " entries, STAR1=", hex(H::status1()), crlf);
-    bench.verdict("the STOPF the hand-made STOP leaves is taken once and cleared - no storm "
-                  "on the event vector",
-                  idle_entries <= 2u && storms == storms_before &&
-                      (H::status1() & i2c_stopf) == 0u);
+          " entries, STOPF ", stopf_left ? "standing" : "down", " (STAR1=", hex(H::status1()),
+          ")", crlf);
+    bench.verdict("the STOPF the hand-made STOP leaves stands in silence: the event vector, "
+                  "down between tenures, never enters for it - no storm",
+                  idle_entries == 0u && storms == storms_before);
     bench.verdict("with the wire free again unstick() clocks nothing", Host::unstick() == 0u);
-    bench.verdict("and the command channel is back", command(Op::ping));
+    const bool back = command(Op::ping);
+    print(serial, "  after the next tenures: STOPF ",
+          (H::status1() & i2c_stopf) != 0u ? "STILL STANDING" : "taken", crlf);
+    bench.verdict("and the command channel is back, its first tenure's vector taking the "
+                  "standing STOPF",
+                  back && (H::status1() & i2c_stopf) == 0u);
 }
 
 // ===========================================================================
@@ -1124,6 +1103,59 @@ void td_shapes() {
 // e - the vocabulary on the wire, and commanded stretching
 // ===========================================================================
 
+/// How many SCL low spans of a tenure the profile keeps.
+constexpr uint8_t stretch_spans = 12;
+
+/// THE STRETCH ON THE WIRE: one write's SCL low spans longer than 100 us,
+/// in core cycles, in order - read from the pad by polling it from the
+/// loop that waits for the tenure (the vectors do the tenure), so a span
+/// is measured to a poll's few cycles.
+struct StretchProfile {
+    uint8_t status = no_answer;
+    uint8_t n = 0;
+    uint32_t span[stretch_spans] = {};
+};
+
+StretchProfile stretched_write(const uint8_t* w, uint8_t n) {
+    StretchProfile p{};
+    Host::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(w);
+    r.tx_len = n;
+    r.speed = link_speed;
+    host_done = false;
+    host_isr_entries = 0;
+    if (Host::start(r)) {
+        p.status = Host::status();
+        return p;
+    }
+    const uint32_t min_span = SysClock::hz / 10'000u;   // 100 us
+    const uint32_t c0 = Ticker::cycles();
+    bool low = false;
+    uint32_t fell = 0;
+    while (!host_done && Ticker::cycles() - c0 < SysClock::hz / 10u) {
+        const bool now_low = !SclPin::read();
+        if (now_low && !low) {
+            fell = Ticker::cycles();
+        } else if (!now_low && low) {
+            const uint32_t span = Ticker::cycles() - fell;
+            if (span >= min_span) {
+                if (p.n < stretch_spans) {
+                    p.span[p.n] = span;
+                }
+                ++p.n;
+            }
+        }
+        low = now_low;
+    }
+    if (!host_done) {
+        (void)Host::recover();
+        return p;
+    }
+    p.status = Host::status();
+    return p;
+}
+
 void te_vocabulary() {
     if (!need_peer()) {
         return;
@@ -1194,8 +1226,14 @@ void te_vocabulary() {
         return;
     }
     t0 = Ticker::millis();
-    const uint8_t s2 = host_tenure(twilink::dut_addr, w8, 8, nullptr, 0, link_speed);
+    const StretchProfile prof = stretched_write(w8, 8);
+    const uint8_t s2 = prof.status;
     const uint32_t stretched_ms = Ticker::millis() - t0;
+    print(serial, "  the clock held low ON THE WIRE, span by span (us):");
+    for (uint8_t i = 0; i < prof.n && i < stretch_spans; ++i) {
+        print(serial, " ", prof.span[i] / (SysClock::hz / 1'000'000u));
+    }
+    print(serial, "; ", prof.n, " span(s) of more than 100 us", crlf);
     settle_ms(300);
     twilink::Report sr{};
     const bool srep = peer_report(sr);
@@ -1203,10 +1241,37 @@ void te_vocabulary() {
           " ms; ONE 8-byte tenure at 2 ms per byte: ", stretched_ms, " ms; peer count=",
           sr.count, crlf);
     bench.verdict("the unstretched baseline tenures all complete i2c_ok", base_ok);
-    bench.verdict("a client stretching every data byte by 2 ms stretches the WALL TIME the "
-                  "model predicts (16 ms or more for 8 bytes) and the tenure still completes "
-                  "i2c_ok - stretching is flow control and the controller simply waits",
-                  s2 == i2c_ok && stretched_ms >= 16u && srep && sr.count >= 8u);
+    // WHERE A POLLED CH32 TARGET'S HOLD LANDS ON THE WIRE (twi_peer's header:
+    // the hold is spent at the address match and before each byte taken,
+    // and the receiver stretches one byte late). The address match holds
+    // SCL for the whole hold, h, plus the ninth clock's low half (T/2) and
+    // the far loop's pass to the flag and from the hold to the release -
+    // under two periods together; a hold before byte k is taken
+    // overlaps byte k+1 entering the shifter (at most nine periods), and
+    // SCL is held from that byte's BTF to the take: h - 9T to h; the hold
+    // before byte 7 holds the clock only after this host's completion (its
+    // BTF on byte 8) and the last falls after the tenure entirely. So a
+    // write of 8 shows the address span and SIX byte spans inside the
+    // tenure. The slack: the far end's hold is delay_us() in 500 us chunks,
+    // each a fraction of a microsecond late, and this end polls the pad in
+    // under one. Measured over twenty runs: 2008 to 2014 us at the address,
+    // 1919 to 1929 at the bytes.
+    constexpr uint32_t h_us = 2000;
+    constexpr uint32_t t_us = 10;   // one period at 100 kHz
+    constexpr uint32_t slack_us = 5;
+    const uint32_t per_us = SysClock::hz / 1'000'000u;
+    bool spans_ok = prof.n == 7u;
+    for (uint8_t i = 0; i < prof.n && i < stretch_spans && spans_ok; ++i) {
+        const uint32_t us = prof.span[i] / per_us;
+        spans_ok = i == 0u ? (us + slack_us >= h_us && us <= h_us + 2u * t_us + slack_us)
+                           : (us + slack_us >= h_us - 9u * t_us && us <= h_us + slack_us);
+    }
+    bench.verdict("a target stretching by 2 ms holds SCL where its model says - the address "
+                  "match for the whole hold, then six byte spans of the hold less the byte the "
+                  "shifter takes meanwhile (1910 to 2000 us, the derivation above) - and the "
+                  "tenure still completes i2c_ok: stretching is flow control and the controller "
+                  "simply waits",
+                  s2 == i2c_ok && spans_ok && srep && sr.count >= 8u);
 }
 
 // ===========================================================================
@@ -2219,48 +2284,29 @@ void tr_late_start() {
 }
 
 // ===========================================================================
-// The self-link: the chip's two controllers on one bus (l..q)
+// l..q - the subjects a second chip on the wire judges
 // ===========================================================================
 //
-// On a board that wires I2C2's pads to I2C1's - PB10 to PB6 (SCL) and
-// PB11 to PB7 (SDA) - with a pull-up on each line (WCH's CH32V303
-// evaluation board has them, 4.7 kOhm; a CH32V203C8 board can carry them):
-// ONE CHIP'S TWO CONTROLLERS ON ONE BUS, one the host and the other the
-// target. These letters are registered on every part with I2C2, and the
-// two wires are looked for before a byte moves: a board without them
-// declines by name. THE TARGET IS POLLED from the loop that waits for
-// the host's tenure (I2cClientOptions::interrupts false): its clock
-// stretching holds the bus while the loop comes round, which is what lets
-// one core be both ends. Every name below hangs on the letters' template
-// parameter, so a part without I2C2 forms none of it - its state included.
+// Letters l to q run against the peer like every letter above: the
+// chip's I2C2 reaches no wire on the desk this suite is written for (its
+// pads PB10/PB11 carry a serial link there), so every far end below is
+// the peer's - a target the core under test does not serve, polled by
+// its own core, or a controller of its own.
 
-/// The target's addresses on the self-link: its own and its second
-/// (dual addressing); the general call is the third.
-constexpr uint8_t self_addr = 0x3A;
-constexpr uint8_t self_second = 0x4B;
+/// THIS BOARD'S SECOND ADDRESS (dual addressing) for letter l: no letter
+/// of the single-board half sends it, and it is neither the command
+/// address nor one the peer takes.
+constexpr uint8_t dut_second = 0x4B;
+static_assert(dut_second != twilink::command_addr && dut_second != twilink::dut_addr &&
+                  dut_second != twilink::low_addr && dut_second != twilink::deaf_addr &&
+                  dut_second != twilink::shared_addr && dut_second != nobody_addr,
+              "the second address is one nobody else on this bus answers");
 
-/// Drive one pad, read the other against the OPPOSITE pull; both left
-/// floating afterwards.
-template <typename Driver, typename Reader>
-bool pads_linked() {
-    Reader::input(PinPull::down);
-    Driver::output(true);
-    (void)delay_us(clock, 20);
-    const bool high = Reader::read();
-    Reader::input(PinPull::up);
-    Driver::clear();
-    (void)delay_us(clock, 20);
-    const bool low = !Reader::read();
-    Driver::release();
-    Reader::release();
-    return high && low;
-}
-
-/// What a POLLED target did: the bytes it took, the ones it was asked to
-/// give - its shifter asks one ahead of the wire - and the events that
-/// framed them.
+/// What this board's POLLED target did while the peer's controller
+/// addressed it: the bytes it took, the ones its shifter asked for, and
+/// the events that framed them.
 struct TargetLog {
-    uint8_t in[32];
+    uint8_t in[16];
     uint8_t in_n;
     uint8_t served;
     uint8_t addressed;
@@ -2270,570 +2316,301 @@ struct TargetLog {
     uint8_t stops;
     uint8_t nacks;
     uint8_t flushed;
-    uint8_t errors;
 };
 
-/// The tenure shapes one host and one polled target exchange, judged at
-/// both ends.
-struct SelfShapes {
-    uint8_t probe;
-    uint8_t absent;
-    uint8_t write;
-    bool write_exact;
-    uint8_t reads_ok;      ///< of the five receive counts, byte-exact
-    uint8_t combined;
-    bool combined_exact;
-    uint8_t served_over;   ///< bytes the target gave beyond what the host read
-    uint8_t flushed;
-    uint8_t addressed;
-};
-
-template <bool on>
-struct Self {
-    using H2 = I2c<on ? 2 : 2>;
-    using Host2 = I2cHost<on ? 2 : 2>;
-    using Client2 = I2cClient<on ? 2 : 2>;
-    using Scl2 = Pin<'B', on ? 10 : 10>;
-    using Sda2 = Pin<'B', on ? 11 : 11>;
-
-    /// True while I2C2's vectors belong to letter m's host.
-    static inline volatile bool host2_live = false;
-    static inline TargetLog log{};
-    /// What the target transmits: one byte per ask, a pattern from a seed
-    /// that restarts with every read tenure.
-    static inline uint8_t seed = 0x60;
-    static inline uint8_t pos = 0;
-    /// The last tenure's length in core cycles, start() to its end seen.
-    static inline uint32_t last_cycles = 0;
-
-    static uint8_t value(uint8_t s, uint8_t i) { return static_cast<uint8_t>(s + 0x1Du * i); }
-
-    static void clear() {
-        log = TargetLog{};
-        pos = 0;
-    }
-
-    /// The two wires, each driven from I2C1's pad and read at I2C2's
-    /// against the opposite pull. The board's pull-ups sit on the same
-    /// net, so a push-pull high and a push-pull low are what decide.
-    static bool wired() {
-        const bool scl = pads_linked<SclPin, Scl2>();
-        const bool sda = pads_linked<SdaPin, Sda2>();
-        print(serial, "  the wires PB6-PB10 ", scl ? "in place" : "ABSENT", ", PB7-PB11 ",
-              sda ? "in place" : "ABSENT", crlf);
-        return scl && sda;
-    }
-
-    /// Both controllers back to their reset state with their gates shut,
-    /// the four pads floating, every vector of the two silenced.
-    static void all_released() {
-        host2_live = false;
-        client_live = false;
-        dma_host_live = false;
-        bus_ao_live = false;
-        Pfic::disable(H::event_irq());
-        Pfic::disable(H::error_irq());
-        Pfic::disable(H2::event_irq());
-        Pfic::disable(H2::error_irq());
-        H::bus_clock(true);
-        H::reset();
-        H::bus_clock(false);
-        H2::bus_clock(true);
-        H2::reset();
-        H2::bus_clock(false);
-        SclPin::release();
-        SdaPin::release();
-        Scl2::release();
-        Sda2::release();
-    }
-
-    /// One pass of the target's polled surface: the event the ISR body
-    /// would report, acted on the way 19.4 prescribes - and the closing
-    /// NACK of a read followed by flush(), which drops the byte the
-    /// shifter asked for and the host never clocked.
-    template <typename C>
-    static void poll() {
-        switch (C::service()) {
-            case I2cClientEvent::addressed:
-                ++log.addressed;
-                if (C::host_reads()) {
-                    ++log.reads;
-                    pos = 0;
-                }
-                if (C::second_address_matched()) {
-                    ++log.second;
-                }
-                if (C::general_call_matched()) {
-                    ++log.general;
-                }
-                break;
-            case I2cClientEvent::byte_received: {
-                const uint8_t v = C::take();
-                if (log.in_n < sizeof log.in) {
-                    log.in[log.in_n] = v;
-                }
-                ++log.in_n;
-                break;
+/// The rendezvous of every peer host action (twi_link.hpp's `arb` and
+/// `host_read`): the plain host gone, this board's target up at its own
+/// address - and at the second one and the general call when asked - and
+/// the bus made busy by hand and freed, the STOP on which the peer's
+/// controller starts. Then the target is POLLED until `tenures` read or
+/// write tenures have closed or the bound runs out. A read tenure gives
+/// `seed`, `seed + 1`, ... from its first byte, the pattern the peer
+/// checks.
+TargetLog serve_peer_host(bool dual, uint8_t tenures, uint8_t seed, uint32_t bound_ms) {
+    TargetLog log{};
+    Host::release();
+    client_live = true;
+    (void)Client::init(clock,
+                       dual ? I2cAddressConfig{.own = twilink::dut_addr,
+                                               .second = dut_second,
+                                               .general_call = true}
+                            : I2cAddressConfig{.own = twilink::dut_addr},
+                       {.no_stretch = false, .interrupts = false});
+    hold_bus_busy(400);
+    uint8_t pos = 0;
+    uint8_t closed = 0;
+    // A tenure is OPEN from its address match to its close - a read's
+    // NACK, a write's STOP. The hand-made STOP above raised STOPF on this
+    // target too (letter b) and closes nothing.
+    bool open = false;
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < bound_ms && closed < tenures) {
+        if (Client::data_ready()) {
+            const uint8_t v = Client::take();
+            if (log.in_n < sizeof log.in) {
+                log.in[log.in_n] = v;
             }
-            case I2cClientEvent::byte_wanted:
-                C::give(value(seed, pos));
-                ++pos;
-                ++log.served;
-                break;
-            case I2cClientEvent::stop:
-                ++log.stops;
-                break;
-            default:
-                break;
+            ++log.in_n;
+            continue;
         }
-        const I2cClientEvent err = C::error_service();
-        if (err == I2cClientEvent::nacked) {
+        if (Client::addressed()) {
+            ++log.addressed;
+            open = true;
+            if (Client::answer_address()) {
+                ++log.reads;
+                pos = 0;
+            }
+            if (Client::second_address_matched()) {
+                ++log.second;
+            }
+            if (Client::general_call_matched()) {
+                ++log.general;
+            }
+            continue;
+        }
+        if (Client::host_nacked()) {
+            // A read tenure's close: the byte the shifter asked for beyond
+            // the NACK is dropped, and the peer's STOP follows.
+            Client::clear_nack();
             ++log.nacks;
-            if (C::flush()) {
+            if (Client::flush()) {
                 ++log.flushed;
             }
-        } else if (err == I2cClientEvent::error) {
-            ++log.errors;
-        }
-    }
-
-    /// One tenure of `HostT` into a POLLED target `C`: started, then
-    /// waited out with the target served on every pass, and the target
-    /// polled a while longer so it sees the STOP or the NACK that closed
-    /// the tenure.
-    template <typename HostT, typename C>
-    static uint8_t tenure(uint8_t addr, const uint8_t* tx, uint8_t tx_len, uint8_t* rx,
-                          uint8_t rx_len, I2cSpeed speed) {
-        typename HostT::Request r{};
-        r.addr = addr;
-        r.tx = lend<Lease::reply>(tx);
-        r.tx_len = tx_len;
-        r.rx = lend<Lease::reply>(rx);
-        r.rx_len = rx_len;
-        r.speed = speed;
-        host_done = false;
-        host_isr_entries = 0;
-        uint8_t st = no_answer;
-        const uint32_t c0 = Ticker::cycles();
-        if (HostT::start(r)) {
-            st = HostT::status();
-            last_cycles = Ticker::cycles() - c0;
-        } else {
-            const uint32_t t0 = Ticker::millis();
-            while (!host_done && Ticker::millis() - t0 < 50u) {
-                poll<C>();
+            if (open) {
+                ++closed;
+                open = false;
             }
-            last_cycles = Ticker::cycles() - c0;
-            st = host_done ? HostT::status() : no_answer;
+            continue;
         }
-        const uint32_t t1 = Ticker::millis();
-        while (Ticker::millis() - t1 < 2u) {
-            poll<C>();
+        if (Client::data_wanted() && log.reads > log.nacks) {
+            Client::give(twilink::pattern_value(twilink::pattern_counting, seed, pos));
+            ++pos;
+            ++log.served;
+            continue;
         }
-        if (st == no_answer) {
-            print(serial, "    STALL: the host's tenure never answered; recovered", crlf);
-            (void)HostT::recover();
-        }
-        return st;
-    }
-
-    template <typename HostT, typename C>
-    static SelfShapes shapes(I2cSpeed speed) {
-        SelfShapes s{};
-        clear();
-        s.probe = tenure<HostT, C>(self_addr, nullptr, 0, nullptr, 0, speed);
-        s.absent = tenure<HostT, C>(nobody_addr, nullptr, 0, nullptr, 0, speed);
-
-        // A write of eight: the target takes them all, then the STOP.
-        for (uint8_t i = 0; i < 8u; ++i) {
-            tx_buf[i] = static_cast<uint8_t>(0x11u * (i + 1u));
-        }
-        clear();
-        s.write = tenure<HostT, C>(self_addr, tx_buf, 8, nullptr, 0, speed);
-        bool same = log.in_n == 8u && log.stops >= 1u;
-        for (uint8_t i = 0; i < 8u && same; ++i) {
-            same = log.in[i] == tx_buf[i];
-        }
-        s.write_exact = same;
-
-        // THE TARGET AS A TRANSMITTER, at the counts the host's receive
-        // procedure switches on: one, two, three, four and eight bytes.
-        const uint8_t counts[5] = {1, 2, 3, 4, 8};
-        uint8_t over = 0;
-        uint8_t flushed = 0;
-        for (uint8_t c : counts) {
-            clear();
-            seed = static_cast<uint8_t>(0x60u + c);
-            for (uint8_t i = 0; i < 8u; ++i) {
-                rx_buf[i] = 0xEE;
+        if (Client::stop_seen()) {
+            Client::clear_stop();
+            ++log.stops;
+            if (open) {
+                ++closed;   // a write tenure closes on its STOP
+                open = false;
             }
-            const uint8_t st = tenure<HostT, C>(self_addr, nullptr, 0, rx_buf, c, speed);
-            bool exact = st == i2c_ok;
-            for (uint8_t i = 0; i < c && exact; ++i) {
-                exact = rx_buf[i] == value(seed, i);
-            }
-            if (exact) {
-                ++s.reads_ok;
-            }
-            over = static_cast<uint8_t>(over + (log.served > c ? log.served - c : 0u));
-            flushed = static_cast<uint8_t>(flushed + log.flushed);
+            continue;
         }
-        s.served_over = over;
-        s.flushed = flushed;
-
-        // Write-then-read: two bytes out, a repeated START, four back.
-        clear();
-        seed = 0x90;
-        tx_buf[0] = 0x5A;
-        tx_buf[1] = 0xA5;
-        for (uint8_t i = 0; i < 4u; ++i) {
-            rx_buf[i] = 0xEE;
+        const uint16_t errs = static_cast<uint16_t>(H::status1() & i2c_errors & ~i2c_af);
+        if (errs != 0u) {
+            H::clear_errors(errs);
         }
-        s.combined = tenure<HostT, C>(self_addr, tx_buf, 2, rx_buf, 4, speed);
-        bool cx = s.combined == i2c_ok && log.in_n == 2u && log.in[0] == 0x5Au &&
-                  log.in[1] == 0xA5u;
-        for (uint8_t i = 0; i < 4u && cx; ++i) {
-            cx = rx_buf[i] == value(0x90, i);
-        }
-        s.combined_exact = cx;
-        s.addressed = log.addressed;
-        return s;
     }
-
-    /// THE RATE ON THE WIRE, which the self-link cannot tell - both of its
-    /// controllers divide PB1: a write of 32 bytes, 297 SCL periods with
-    /// the address, timed on the core's counter, in thousandths of the rate
-    /// asked; 0 when the target did not take it whole.
-    template <typename HostT, typename C>
-    static uint32_t write_permille(I2cSpeed speed) {
-        for (uint8_t i = 0; i < 32u; ++i) {
-            tx_buf[i] = static_cast<uint8_t>(0x35u + 7u * i);
-        }
-        clear();
-        const uint8_t st = tenure<HostT, C>(self_addr, tx_buf, 32, nullptr, 0, speed);
-        if (st != i2c_ok || log.in_n != 32u) {
-            return 0;
-        }
-        return scl_permille(last_cycles, 9u * 33u, speed, SysClock::hz);
-    }
-
-    static bool shapes_exact(const SelfShapes& s) {
-        return s.probe == i2c_ok && s.absent == i2c_nack_addr && s.write == i2c_ok &&
-               s.write_exact && s.reads_ok == 5u && s.combined_exact;
-    }
-
-    static void print_shapes(const char* rung, const SelfShapes& s, uint32_t scl_asked) {
-        print(serial, "    ", rung, ": probe=", s.probe, " absent=", s.absent, " write=",
-              s.write, s.write_exact ? " (8 taken exactly)" : " (NOT exact)",
-              "; reads of 1/2/3/4/8 exact: ", s.reads_ok, " of 5; write-then-read=",
-              s.combined, s.combined_exact ? " exact" : " NOT exact", " with ", s.addressed,
-              " address matches; SCL asked ", scl_asked / 1000u, " kHz", crlf);
-        print(serial, "      the target gave ", s.served_over,
-              " byte(s) beyond what the host read across the five reads, and flush() dropped ",
-              s.flushed, crlf);
-    }
-};
-
-/// The three rungs every self-link letter runs.
-struct SelfRung {
-    I2cSpeed speed;
-    I2cDuty duty;
-    const char* name;
-};
-constexpr SelfRung self_rungs[3] = {{I2cSpeed::standard_100k, I2cDuty::ratio_2, "100k      "},
-                                    {I2cSpeed::fast_400k, I2cDuty::ratio_2, "400k d2   "},
-                                    {I2cSpeed::fast_400k, I2cDuty::ratio_16_9, "400k d16/9"}};
-
-// ---------------------------------------------------------------------------
-// l - I2C1 the host, I2C2 the target
-// ---------------------------------------------------------------------------
-
-template <bool on = self_link_part>
-void tl_self_link() {
-    if constexpr (on) {
-        using L = Self<on>;
-        using C = typename L::Client2;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the self-link wants its two wires, and says so", true);
-            return;
-        }
-        print(serial, "  the bus now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
-              SdaPin::read() ? "high" : "LOW", " - the board's own pull-ups", crlf);
-
-        // The target: I2C2 with its own address, a second one and the
-        // general call, POLLED.
-        const bool target_up =
-            C::init(clock, {.own = self_addr, .second = self_second, .general_call = true},
-                    {.no_stretch = false, .interrupts = false});
-
-        uint8_t exact = 0;
-        uint8_t over_all = 0;
-        uint8_t flushed_all = 0;
-        uint8_t on_rate = 0;
-        for (const SelfRung& g : self_rungs) {
-            (void)Host::init(clock, g.duty);
-            const SelfShapes s = L::template shapes<Host, C>(g.speed);
-            const uint32_t pm = L::template write_permille<Host, C>(g.speed);
-            L::print_shapes(g.name, s, Host::scl_hz(g.speed));
-            print(serial, "      a write of 32 in ", pm, " thousandths of the SCL rate asked", crlf);
-            console_drain();
-            if (scl_ok(pm)) {
-                ++on_rate;
-            }
-            if (L::shapes_exact(s)) {
-                ++exact;
-            }
-            over_all = static_cast<uint8_t>(over_all + s.served_over);
-            flushed_all = static_cast<uint8_t>(flushed_all + s.flushed);
-        }
-        bench.verdict("I2C1 as the host and I2C2 as the target on the chip's own wires: the "
-                      "probe, an absent address, an eight-byte write, reads of one, two, three, "
-                      "four and eight bytes and a write-then-read, byte-exact at 100 kHz and at "
-                      "400 kHz in both duty shapes",
-                      target_up && exact == 3u);
-        bench.verdict("THE TARGET AS A TRANSMITTER: every byte a read took came out of I2C2's "
-                      "own data register, and every byte its shifter asked for beyond the "
-                      "host's NACK was dropped by flush()",
-                      target_up && exact == 3u && flushed_all == over_all);
-        bench.verdict("AND SCL RUNS AT THE RATE ASKED, which a link between two controllers of "
-                      "one bus cannot tell: a write of 32 at each rung, timed on the core's "
-                      "counter, never above 100 or 400 kHz by more than 2 % and within a quarter "
-                      "below",
-                      on_rate == 3u);
-
-        // The second address and the general call reach the target.
-        (void)Host::init(clock);
-        L::clear();
-        const uint8_t w2[2] = {0x21, 0x43};
-        const uint8_t st_second = L::template tenure<Host, C>(self_second, w2, 2, nullptr, 0,
-                                                              I2cSpeed::standard_100k);
-        const uint8_t second_hits = L::log.second;
-        const bool second_bytes =
-            L::log.in_n == 2u && L::log.in[0] == 0x21u && L::log.in[1] == 0x43u;
-        L::clear();
-        const uint8_t st_gc =
-            L::template tenure<Host, C>(0x00, w2, 2, nullptr, 0, I2cSpeed::standard_100k);
-        const uint8_t gc_hits = L::log.general;
-        const bool gc_bytes = L::log.in_n == 2u;
-        print(serial, "  the second address: ", st_second, " with ", second_hits,
-              " DUALF match(es); the general call: ", st_gc, " with ", gc_hits,
-              " GENCALL match(es)", crlf);
-        bench.verdict("the second address and the general call each open a write tenure on the "
-                      "target, which says which one matched",
-                      st_second == i2c_ok && second_hits == 1u && second_bytes &&
-                          st_gc == i2c_ok && gc_hits == 1u && gc_bytes);
-
-        // The DMA host on channels 6 and 7 against the same target.
-        C::release();
-        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
-        Host::release();
-        dma_host_live = true;
-        (void)DmaHost::init(clock);
-        for (uint8_t i = 0; i < 16u; ++i) {
-            tx_buf[i] = static_cast<uint8_t>(0x80u + 3u * i);
-            rx_buf[i] = 0xEE;
-        }
-        L::clear();
-        L::seed = 0x33;
-        const uint8_t dw = L::template tenure<DmaHost, C>(self_addr, tx_buf, 16, nullptr, 0,
-                                                          I2cSpeed::fast_400k);
-        const uint32_t dw_pm = scl_permille(L::last_cycles, 9u * 17u, I2cSpeed::fast_400k,
-                                            SysClock::hz);
-        bool dw_exact = L::log.in_n == 16u;
-        for (uint8_t i = 0; i < 16u && dw_exact; ++i) {
-            dw_exact = L::log.in[i] == tx_buf[i];
-        }
-        L::clear();
-        const uint8_t dr = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
-                                                          I2cSpeed::fast_400k);
-        bool dr_exact = dr == i2c_ok;
-        for (uint8_t i = 0; i < 16u && dr_exact; ++i) {
-            dr_exact = rx_buf[i] == L::value(0x33, i);
-        }
-        // And the two halves in one tenure: three bytes out on channel 6,
-        // the repeated START, eight back on channel 7.
-        L::clear();
-        L::seed = 0x44;
-        for (uint8_t i = 0; i < 8u; ++i) {
-            rx_buf[i] = 0xEE;
-        }
-        const uint8_t dc = L::template tenure<DmaHost, C>(self_addr, tx_buf, 3, rx_buf, 8,
-                                                          I2cSpeed::fast_400k);
-        bool dc_exact = dc == i2c_ok && L::log.in_n == 3u;
-        for (uint8_t i = 0; i < 3u && dc_exact; ++i) {
-            dc_exact = L::log.in[i] == tx_buf[i];
-        }
-        for (uint8_t i = 0; i < 8u && dc_exact; ++i) {
-            dc_exact = rx_buf[i] == L::value(0x44, i);
-        }
-        dma_host_live = false;
-        DmaHost::release();
-        print(serial, "  the DMA host at 400 kHz: a write of 16 ", dw,
-              dw_exact ? " exact" : " NOT exact", ", a read of 16 ", dr,
-              dr_exact ? " exact" : " NOT exact", ", a write of 3 then a read of 8 ", dc,
-              dc_exact ? " exact" : " NOT exact", " (the target took ", L::log.in_n,
-              "), unwedged ", DmaHost::unwedges(), " time(s); the write in ", dw_pm,
-              " thousandths of the SCL rate asked", crlf);
-        bench.verdict("the DMA host - channels 6 and 7 - writes sixteen bytes into the chip's "
-                      "own target, reads sixteen back, and carries a write-then-read whole, "
-                      "byte-exact",
-                      dw == i2c_ok && dw_exact && dr_exact && dc_exact);
-        bench.verdict("and the engines run the bus at the rate asked: the write of 16 never above "
-                      "400 kHz by more than 2 % and within a quarter below",
-                      scl_ok(dw_pm));
-        C::release();
-        L::all_released();
-        host_ready();
-    }
+    Client::release();
+    client_live = false;
+    return log;
 }
 
 // ---------------------------------------------------------------------------
-// m - I2C2 the host, I2C1 the target
+// l - this board's target under the peer's controller
 // ---------------------------------------------------------------------------
 
-template <bool on = self_link_part>
-void tm_self_swapped() {
-    if constexpr (on) {
-        using L = Self<on>;
-        using H2 = typename L::Host2;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the swapped self-link wants its two wires, and says so", true);
+void tl_target() {
+    if (!need_peer()) {
+        return;
+    }
+
+    // ---- THE SECOND ADDRESS AND THE GENERAL CALL, written by the peer ----
+    const uint8_t w_seed = 0x21;
+    struct Aim {
+        uint8_t target;
+        const char* name;
+    };
+    const Aim aims[2] = {{dut_second, "the second address"}, {0x00, "the general call"}};
+    uint8_t hits[2] = {};
+    bool bytes_ok[2] = {};
+    for (uint8_t k = 0; k < 2u; ++k) {
+        link_ready();
+        twilink::Params a{};
+        a.ms = 800;
+        a.addr = twilink::dut_addr;
+        a.target = aims[k].target;
+        a.count = 2;
+        a.seed = w_seed;
+        a.aux16 = 400;   // time for this end to put its target up
+        if (!peer_act(Op::arb, a)) {
+            bench.verdict("the peer accepted the host command that addresses this board", false);
             return;
         }
-        client_live = true;   // I2C1's vectors stay quiet: its target is polled
-        const bool target_up = Client::init(clock, {.own = self_addr},
-                                            {.no_stretch = false, .interrupts = false});
-        uint8_t exact = 0;
-        uint8_t on_rate = 0;
-        for (const SelfRung& g : self_rungs) {
-            L::host2_live = true;
-            (void)H2::init(clock, g.duty);
-            const SelfShapes s = L::template shapes<H2, Client>(g.speed);
-            const uint32_t pm = L::template write_permille<H2, Client>(g.speed);
-            L::print_shapes(g.name, s, H2::scl_hz(g.speed));
-            print(serial, "      a write of 32 in ", pm, " thousandths of the SCL rate asked", crlf);
-            console_drain();
-            if (L::shapes_exact(s)) {
-                ++exact;
-            }
-            if (scl_ok(pm)) {
-                ++on_rate;
-            }
-        }
-        bench.verdict("I2C2 ON A WIRE AS THE HOST, I2C1 as its target: the same shapes, "
-                      "byte-exact at 100 kHz and at 400 kHz in both duty shapes",
-                      target_up && exact == 3u);
-        bench.verdict("and I2C2's SCL runs at the rate asked: a write of 32 at each rung never "
-                      "above 100 or 400 kHz by more than 2 % and within a quarter below",
-                      on_rate == 3u);
-        L::host2_live = false;
-        H2::release();
-        Client::release();
-        L::all_released();
-        host_ready();
+        const TargetLog log = serve_peer_host(true, 1, 0, 900);
+        hits[k] = k == 0u ? log.second : log.general;
+        bytes_ok[k] = log.in_n == 2u && log.in[0] == w_seed &&
+                      log.in[1] == static_cast<uint8_t>(w_seed + 1u) && log.addressed == 1u;
+        print(serial, "  ", aims[k].name, " (", hex(aims[k].target), "): ", log.addressed,
+              " match(es), DUALF ", log.second, ", GENCALL ", log.general, ", ", log.in_n,
+              " byte(s) taken, ", log.stops, " STOP(s)", crlf);
+        settle_ms(200);
     }
+    host_ready();
+    bench.verdict("the second address and the general call each open a write tenure on this "
+                  "board's target from ANOTHER CHIP's controller, the bytes taken exact, and the "
+                  "target says which one matched (DUALF, GENCALL)",
+                  hits[0] == 1u && bytes_ok[0] && hits[1] == 1u && bytes_ok[1]);
+
+    // ---- THE TARGET AS A TRANSMITTER, read by the peer's controller ----
+    // The counts the peer's own receive procedure switches on, two reads
+    // back to back each (twi_link.hpp's host_read).
+    const uint8_t counts[5] = {1, 2, 3, 4, 8};
+    uint8_t exact = 0;
+    uint8_t over_all = 0;
+    uint8_t flushed_all = 0;
+    for (uint8_t c : counts) {
+        link_ready();
+        const uint8_t seed = static_cast<uint8_t>(0x60u + c);
+        twilink::Params a{};
+        a.ms = 800;
+        a.addr = twilink::dut_addr;
+        a.target = twilink::dut_addr;
+        a.count = c;
+        a.aux8 = 2;
+        a.seed = seed;
+        a.aux16 = 400;
+        if (!peer_act(Op::host_read, a)) {
+            print(serial, "  the peer refused host_read (a peer before the extended repertoire)",
+                  crlf);
+            break;
+        }
+        const TargetLog log = serve_peer_host(false, 2, seed, 900);
+        settle_ms(200);
+        host_ready();
+        twilink::Report r{};
+        const bool rep = peer_report(r);
+        uint16_t want_sum = 0;
+        for (uint8_t i = 0; i < c; ++i) {
+            want_sum = static_cast<uint16_t>(
+                want_sum + twilink::pattern_value(twilink::pattern_counting, seed, i));
+        }
+        want_sum = static_cast<uint16_t>(2u * want_sum);
+        const bool ok = rep && r.mstatus == i2c_ok && r.addr_hits == 2u &&
+                        r.count == static_cast<uint16_t>(2u * c) && r.sum == want_sum &&
+                        r.first == seed && r.aux0 == seed;
+        const uint8_t over = log.served > 2u * c ? static_cast<uint8_t>(log.served - 2u * c) : 0u;
+        print(serial, "  read of ", c, " twice: the peer's host ", ok ? "exact" : "NOT exact",
+              " (status ", r.mstatus, ", reads ", r.addr_hits, ", bytes ", r.count, ", sum ",
+              hex(r.sum), " of ", hex(want_sum), "); this target served ", log.served,
+              ", flushed ", log.flushed, " at ", log.nacks, " closing NACK(s)", crlf);
+        if (ok) {
+            ++exact;
+        }
+        over_all = static_cast<uint8_t>(over_all + over);
+        flushed_all = static_cast<uint8_t>(flushed_all + log.flushed);
+    }
+    bench.verdict("THE TARGET AS A TRANSMITTER: another chip's controller read one, two, three, "
+                  "four and eight bytes out of this board's data register, twice each, "
+                  "byte-exact",
+                  exact == 5u);
+    bench.verdict("... and every byte the shifter asked for beyond the host's closing NACK was "
+                  "dropped by flush()",
+                  exact == 5u && flushed_all == over_all);
+    bench.verdict("the command channel is back after the role swaps", command(Op::ping));
 }
 
 // ---------------------------------------------------------------------------
 // n - a target stuck mid-byte, and unstick()
 // ---------------------------------------------------------------------------
 
-template <bool on = self_link_part>
 void tn_unstick() {
-    if constexpr (on) {
-        using L = Self<on>;
-        using C = typename L::Client2;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the stuck target wants the two wires, and says so", true);
-            return;
-        }
-        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
-        (void)Host::init(clock);
-        const uint8_t clean = Host::unstick();
-        bench.verdict("unstick() on a healthy bus clocks nothing and says so", clean == 0u);
+    if (!need_peer()) {
+        return;
+    }
+    host_ready();
+    const uint8_t clean = Host::unstick();
+    bench.verdict("unstick() on a healthy bus clocks nothing and says so", clean == 0u);
 
-        // A READ OF ZEROS, CUT OFF MID-BYTE: the target drives SDA low for
-        // every data bit, and the host is taken off the bus through its
-        // reset line a few bit times into the first byte - the one way this
-        // silicon lets a controller's pads go - which leaves the target
-        // holding SDA down with SCL released high.
-        L::clear();
-        L::seed = 0x00;
-        Host::Request r{};
-        r.addr = self_addr;
-        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
-        r.tx_len = 0;
-        r.rx = lend<Lease::reply>(rx_buf);
-        r.rx_len = 4;
-        r.speed = I2cSpeed::standard_100k;
-        host_done = false;
-        (void)Host::start(r);
-        // The target served until its first byte is in the shifter; then
-        // the host clocks some four of its bits (10 us each at 100 kHz).
-        const uint32_t t0 = Ticker::millis();
-        while (L::log.served == 0u && Ticker::millis() - t0 < 20u) {
-            L::template poll<C>();
-        }
-        (void)delay_us(clock, 40);
-        Pfic::disable(H::event_irq());
-        Pfic::disable(H::error_irq());
-        H::reset();
-        (void)delay_us(clock, 20);
-        const bool scl_high = SclPin::read();
-        const bool sda_low = !SdaPin::read();
-        print(serial, "  the host cut off ", L::log.served == 0u ? "BEFORE the byte" : "mid-byte",
-              ": SCL ", scl_high ? "high" : "LOW", ", SDA ", sda_low ? "LOW - held" : "high",
-              crlf);
-        bench.verdict("the chip's own target holds SDA low mid-byte once its host is gone - a "
-                      "stuck bus with no foreign chip on it",
-                      L::log.served != 0u && scl_high && sda_low);
+    // A READ OF ZEROS, CUT OFF MID-BYTE: the peer's target serves 0x00 for
+    // every byte, so it drives SDA low for every data bit, and this host
+    // is taken off the bus through its reset line a few bit times into the
+    // first byte - the one way this silicon lets a controller's pads go -
+    // which leaves the far target holding SDA down with SCL released high.
+    twilink::Params a{};
+    a.ms = 400;
+    a.addr = twilink::dut_addr;
+    a.seed = 0x00;
+    a.pattern = twilink::pattern_fixed;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve the stuck target needs", false);
+        return;
+    }
+    Host::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.tx_len = 0;
+    r.rx = lend<Lease::reply>(rx_buf);
+    r.rx_len = 4;
+    r.speed = I2cSpeed::standard_100k;
+    host_done = false;
+    host_isr_entries = 0;
+    (void)Host::start(r);
+    // The event vector's SECOND entry is the address's ADDR, cleared there:
+    // the first data byte starts as the far target answers its own ADDR,
+    // and some four of its bits (10 us each at 100 kHz) go by before the cut.
+    const uint32_t c0 = Ticker::cycles();
+    while (host_isr_entries < 2u && Ticker::cycles() - c0 < SysClock::hz / 200u) {
+    }
+    const bool reached = host_isr_entries >= 2u;
+    (void)delay_us(clock, 45);
+    Pfic::disable(H::event_irq());
+    Pfic::disable(H::error_irq());
+    H::reset();
+    (void)delay_us(clock, 20);
+    const bool scl_high = SclPin::read();
+    const bool sda_low = !SdaPin::read();
+    print(serial, "  the host cut off ", reached ? "after its ADDR" : "BEFORE its ADDR",
+          ": SCL ", scl_high ? "high" : "LOW", ", SDA ", sda_low ? "LOW - held" : "high", crlf);
+    bench.verdict("ANOTHER CHIP's target holds SDA low mid-byte once its host is gone - the "
+                  "stuck bus a reset controller leaves",
+                  reached && scl_high && sda_low);
 
-        // The remedy, its clocks COUNTED on the pad by TIM4.
-        (void)Host::init(clock);
-        (void)edges_arm();
-        Meter::set_count(0);
-        const uint8_t pulses = Host::unstick();
-        const uint32_t edges = Meter::count();
-        meter_off();
-        // The target took the pulses as the rest of its byte and the ninth
-        // clock as the host's NACK: its closing error is taken and the byte
-        // its shifter asked for dropped, the way every read of letter l
-        // ends.
-        for (uint16_t i = 0; i < 200u; ++i) {
-            L::template poll<C>();
-        }
-        const bool free_now = SclPin::read() && SdaPin::read();
-        print(serial, "  unstick() reported ", pulses, " pulse(s) and TIM4 counted ", edges,
-              " SCL rising edges on the pad; the bus is ", free_now ? "free" : "STILL HELD",
-              "; the target saw ", L::log.nacks, " NACK(s)", crlf);
-        bench.verdict("unstick() clocked the stuck target out - a handful of pulses, never "
-                      "0xFF - and the timer counted them on the pad, plus the STOP's own rise",
-                      pulses >= 1u && pulses <= 9u && edges >= pulses &&
-                          edges <= static_cast<uint32_t>(pulses) + 2u && free_now);
+    // The remedy, its clocks COUNTED on the pad by TIM4.
+    (void)Host::init(clock);
+    (void)edges_arm();
+    Meter::set_count(0);
+    const uint8_t pulses = Host::unstick();
+    const uint32_t edges = Meter::count();
+    meter_off();
+    const bool free_now = SclPin::read() && SdaPin::read();
+    print(serial, "  unstick() reported ", pulses, " pulse(s) and TIM4 counted ", edges,
+          " SCL rising edges on the pad; the bus is ", free_now ? "free" : "STILL HELD", crlf);
+    bench.verdict("unstick() clocked the stuck target out - a handful of pulses, never "
+                  "0xFF - and the timer counted them on the pad, plus the STOP's own rise",
+                  pulses >= 1u && pulses <= 9u && edges >= pulses &&
+                      edges <= static_cast<uint32_t>(pulses) + 2u && free_now);
+    settle_ms(450);   // past the serve's deadline: the peer is back
+    host_ready();
+    twilink::Report pr{};
+    const bool prep = peer_report(pr);
+    print(serial, "  the peer's target: ", prep ? "reported" : "NO REPORT", ", served ", pr.aux1,
+          ", ", pr.addr_hits, " address match(es), at the closing NACK STAR1-lo ",
+          hex(pr.mstatus), crlf);
 
-        // The bus is usable again: a read of four, byte-exact.
-        (void)Host::recover();
-        L::clear();
-        L::seed = 0x71;
+    // The bus is usable again: a read of four from the same far target.
+    twilink::Params b{};
+    b.ms = 300;   // the deadline alone ends it (arm_serve's reason)
+    b.addr = twilink::dut_addr;
+    b.seed = 0x71;
+    bool exact = false;
+    uint8_t after = no_answer;
+    if (peer_act(Op::serve, b)) {
         for (uint8_t i = 0; i < 4u; ++i) {
             rx_buf[i] = 0xEE;
         }
-        const uint8_t after = L::template tenure<Host, C>(self_addr, nullptr, 0, rx_buf, 4,
-                                                          I2cSpeed::standard_100k);
-        bool exact = after == i2c_ok;
+        after = host_tenure(twilink::dut_addr, nullptr, 0, rx_buf, 4, link_speed);
+        exact = after == i2c_ok;
         for (uint8_t i = 0; i < 4u && exact; ++i) {
-            exact = rx_buf[i] == L::value(0x71, i);
+            exact = rx_buf[i] == twilink::pattern_value(twilink::pattern_counting, 0x71, i);
         }
-        bench.verdict("... and the same two controllers carry a read of four byte-exact right "
-                      "after",
-                      exact);
-        C::release();
-        L::all_released();
-        host_ready();
+        settle_ms(350);
     }
+    print(serial, "  the read of four after: status ", after, ", ", hex(rx_buf[0]), " ",
+          hex(rx_buf[1]), " ", hex(rx_buf[2]), " ", hex(rx_buf[3]), crlf);
+    bench.verdict("... and the same two chips carry a read of four byte-exact right after",
+                  prep && exact);
 }
 
 // ---------------------------------------------------------------------------
@@ -2854,212 +2631,240 @@ struct RefusalTally {
     uint8_t nack_data;   ///< answered i2c_nack_data
     uint8_t let_go;      ///< START and STOP down and MSL clear a millisecond on
     uint8_t next_ok;     ///< the probe that followed on the same host: i2c_ok
-    uint8_t missed;      ///< i2c_ok: the TARGET was late with its NACK, the byte taken
+    uint8_t taken;       ///< refusals the far target reports as such (report_nacked)
     uint8_t acked_ok;    ///< the controls - every byte acknowledged - exact
     uint16_t first_bad_c1;   ///< CTLR1 and STAR2 of the first refusal not let go
     uint16_t first_bad_s2;
     uint8_t first_bad_st;
 };
 
-template <bool on>
-struct Refusal {
-    using L = Self<on>;
-    using C = typename L::Client2;
+/// The refusing target's deadline: the action ends on it, since after a
+/// refused byte the far target sees no Stop it was addressed in (19.12.6).
+constexpr uint16_t refusal_ms = 40;
 
-    /// True while I2C2's vectors belong to this letter's target.
-    static inline volatile bool live = false;
-    /// The written byte the target refuses, counted from one; 0 = none.
-    static inline volatile uint8_t refuse_at = 0;
-    static inline volatile uint8_t took = 0;
-    static inline uint8_t pos = 0;
-
-    /// THE TARGET, SERVED FROM ITS OWN VECTOR, refusing byte `refuse_at`:
-    /// 19.12.1's ACK governs the byte being received, so it goes down as
-    /// the byte BEFORE the refused one is taken (or at the address match,
-    /// for the first) and back up once the refused one has arrived, so the
-    /// next address is answered.
-    [[gnu::always_inline]] static void event() {
-        switch (C::service()) {
-            case I2cClientEvent::addressed:
-                pos = 0;
-                if (!C::host_reads() && refuse_at == 1u) {
-                    C::acknowledge(false);
-                }
-                break;
-            case I2cClientEvent::byte_received:
-                (void)C::take();
-                took = static_cast<uint8_t>(took + 1u);
-                if (took == refuse_at) {
-                    C::acknowledge(true);
-                } else if (refuse_at != 0u && took + 1u == refuse_at) {
-                    C::acknowledge(false);
-                }
-                break;
-            case I2cClientEvent::byte_wanted:
-                C::give(L::value(0x70, pos));
-                pos = static_cast<uint8_t>(pos + 1u);
-                break;
-            default:
-                break;
-        }
-    }
-    [[gnu::always_inline]] static void error() {
-        if (C::error_service() == I2cClientEvent::nacked) {
-            (void)C::flush();
-        }
-        C::acknowledge(true);
-    }
-
-    /// One tenure, waited out on the tick for at most 20 ms.
-    template <typename HostT>
-    static uint8_t run(uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
-        typename HostT::Request r{};
-        r.addr = self_addr;
-        r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
-        r.tx_len = tx_len;
-        r.rx = lend<Lease::reply>(rx_buf);
-        r.rx_len = rx_len;
-        r.speed = speed;
-        host_done = false;
-        host_isr_entries = 0;
-        if (HostT::start(r)) {
-            return HostT::status();
-        }
-        const uint32_t t0 = Ticker::millis();
-        while (!host_done && Ticker::millis() - t0 < 20u) {
-        }
-        return host_done ? HostT::status() : no_answer;
-    }
-
-    /// One to four bytes written then two read, at one speed through one
-    /// host: each count once acknowledged whole (the control) and four
-    /// times with its last written byte refused.
-    template <typename HostT>
-    static RefusalTally point(I2cSpeed speed) {
-        RefusalTally t{};
-        for (uint8_t n = 1; n <= 4u; ++n) {
-            refuse_at = 0;
-            took = 0;
-            rx_buf[0] = 0xEE;
-            rx_buf[1] = 0xEE;
-            C::acknowledge(true);
-            const uint8_t ack_st = run<HostT>(n, 2, speed);
-            if (ack_st == i2c_ok && took == n && rx_buf[0] == L::value(0x70, 0) &&
-                rx_buf[1] == L::value(0x70, 1)) {
-                ++t.acked_ok;
-            }
-            for (uint8_t trial = 0; trial < 4u; ++trial) {
-                refuse_at = n;
-                took = 0;
-                C::acknowledge(true);
-                const uint8_t st = run<HostT>(n, 2, speed);
-                const uint32_t t0 = Ticker::millis();
-                while (Ticker::millis() - t0 < 2u) {
-                }
-                const uint16_t c1 = H::regs().CTLR1;
-                const uint16_t s2 = H::status2();
-                refuse_at = 0;
-                C::acknowledge(true);
-                const uint8_t next = run<HostT>(0, 0, speed);
-                const bool gone = (c1 & (i2c_start | i2c_stop)) == 0u && (s2 & i2c_msl) == 0u;
-                ++t.refused;
-                t.nack_data = static_cast<uint8_t>(t.nack_data + (st == i2c_nack_data ? 1u : 0u));
-                t.missed = static_cast<uint8_t>(t.missed + (st == i2c_ok ? 1u : 0u));
-                t.let_go = static_cast<uint8_t>(t.let_go + (gone ? 1u : 0u));
-                t.next_ok = static_cast<uint8_t>(t.next_ok + (next == i2c_ok ? 1u : 0u));
-                if ((!gone || next != i2c_ok) && t.first_bad_c1 == 0u) {
-                    t.first_bad_c1 = c1;
-                    t.first_bad_s2 = s2;
-                    t.first_bad_st = static_cast<uint8_t>(st << 4 | (next & 0x0Fu));
-                }
-                if (!gone || next != i2c_ok) {
-                    (void)HostT::recover();
-                    (void)HostT::unstick();
-                }
-            }
-        }
-        return t;
-    }
-
-    /// One host at one speed, its counts printed; true when every refusal
-    /// was answered i2c_nack_data with the bus let go and the next tenure
-    /// running, and every control was exact.
-    [[gnu::noinline]] static bool report(const char* core, I2cSpeed speed, bool engines) {
-        dma_host_live = engines;
-        const RefusalTally t = engines ? point<DmaHost>(speed) : point<Host>(speed);
-        dma_host_live = false;
-        print(serial, "  ", core, speed == I2cSpeed::fast_400k ? " 400 kHz " : " 100 kHz ",
-              engines ? "engines" : "pump   ", ": acked exact ", t.acked_ok, "/4; refused ",
-              t.refused, ": nack_data ", t.nack_data, " (target late ", t.missed, "), let go ",
-              t.let_go, ", next ok ", t.next_ok);
-        if (t.first_bad_c1 != 0u) {
-            print(serial, "; first stuck: status|next ", hex(t.first_bad_st), " CTLR1 ",
-                  hex(t.first_bad_c1), " STAR2 ", hex(t.first_bad_s2));
-        }
-        print(serial, crlf);
-        console_drain();
-        return t.acked_ok == 4u && t.nack_data != 0u && t.nack_data + t.missed == t.refused &&
-               t.let_go == t.refused && t.next_ok == t.refused;
-    }
-};
-
-/// Every core of the letter: the console and the tick re-made at it, the
-/// target and each host brought up at its rate - the one part of the
-/// letter that knows the clock.
-/// A write of sixteen, every byte acknowledged, through `HostT` at `speed`
-/// with the core at `Clk`: SCL's mean rate over its 153 periods on the
-/// core's counter, in thousandths of the rate asked - PB1 is another rate
-/// at each core, and the core's counter is the one ruler here that does
-/// not run on it.
-template <typename Clk, typename HostT>
-uint32_t refusal_rate(I2cSpeed speed) {
-    using R = Refusal<self_link_part>;
-    R::refuse_at = 0;
-    R::took = 0;
-    R::C::acknowledge(true);
-    const uint32_t c0 = Ticker::cycles();
-    const uint8_t st = R::template run<HostT>(16, 0, speed);
-    const uint32_t took = Ticker::cycles() - c0;
-    return st == i2c_ok && R::took == 16u ? scl_permille(took, 9u * 17u, speed, Clk::hz) : 0u;
+/// The far target armed for one write-then-read: `refuse` false
+/// acknowledges all `n` written bytes and serves the two read, true
+/// refuses the n-th - the last - written byte. No early exit: the
+/// deadline alone ends the serve (arm_serve's reason).
+bool arm_refusal(uint8_t n, bool refuse) {
+    twilink::Params a{};
+    a.ms = refusal_ms;
+    a.addr = twilink::dut_addr;
+    a.seed = 0x70;
+    a.nack_at = refuse ? n : uint8_t{0};
+    return peer_act(Op::serve, a);
 }
 
-/// One SCL period on the pad, read by TIM4's capture in the MIDDLE of a
-/// write of sixteen through the pump - eight bytes' clocks after its start,
-/// a data bit's period and not a condition's - in nanoseconds of this
-/// core's timer clock; 0 when the meter or the tenure would not start.
-template <typename Clk>
-uint32_t mid_period_ns(I2cSpeed speed) {
-    using R = Refusal<self_link_part>;
-    if (!meter_arm()) {
+/// One tenure through `HostT`, waited out on the tick for at most 20 ms.
+template <typename HostT>
+uint8_t refusal_run(uint8_t addr, uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
+    typename HostT::Request r{};
+    r.addr = addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(rx_buf);
+    r.rx_len = rx_len;
+    r.speed = speed;
+    host_done = false;
+    host_isr_entries = 0;
+    if (HostT::start(r)) {
+        return HostT::status();
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (!host_done && Ticker::millis() - t0 < 20u) {
+    }
+    return host_done ? HostT::status() : no_answer;
+}
+
+/// THE COMMAND CHANNEL IS THE PLAIN ENGINE'S: a letter measuring through
+/// the engined one hands the instance over for each command and back.
+template <typename HostT, typename Clk>
+void measuring_host_up(const Clk& clk) {
+    if constexpr (std::is_same_v<HostT, DmaHost>) {
+        Host::release();
+        dma_host_live = true;
+        (void)DmaHost::init(clk);
+    } else {
+        dma_host_live = false;
+        (void)Host::init(clk);
+    }
+}
+template <typename HostT, typename Clk>
+void command_host_up(const Clk& clk) {
+    if constexpr (std::is_same_v<HostT, DmaHost>) {
+        DmaHost::release();
+        dma_host_live = false;
+    }
+    (void)Host::init(clk);
+}
+
+/// One to four bytes written then two read, at one speed through one
+/// host: each count once acknowledged whole (the control) and four times
+/// with its last written byte refused by the far target.
+template <typename HostT, typename Clk>
+RefusalTally refusal_point(const Clk& clk, I2cSpeed speed) {
+    RefusalTally t{};
+    for (uint8_t n = 1; n <= 4u; ++n) {
+        command_host_up<HostT>(clk);
+        if (arm_refusal(n, false)) {
+            measuring_host_up<HostT>(clk);
+            rx_buf[0] = 0xEE;
+            rx_buf[1] = 0xEE;
+            const uint8_t ack_st = refusal_run<HostT>(twilink::dut_addr, n, 2, speed);
+            settle_ms(refusal_ms + 5u);
+            command_host_up<HostT>(clk);
+            twilink::Report r{};
+            if (ack_st == i2c_ok && rx_buf[0] == 0x70u && rx_buf[1] == 0x71u &&
+                peer_report(r) && r.aux0 == n) {
+                ++t.acked_ok;
+            }
+        }
+        for (uint8_t trial = 0; trial < 4u; ++trial) {
+            command_host_up<HostT>(clk);
+            if (!arm_refusal(n, true)) {
+                continue;
+            }
+            measuring_host_up<HostT>(clk);
+            const uint8_t st = refusal_run<HostT>(twilink::dut_addr, n, 2, speed);
+            settle_ms(2);
+            const uint16_t c1 = H::regs().CTLR1;
+            const uint16_t s2 = H::status2();
+            settle_ms(refusal_ms + 5u);   // past the far target's deadline
+            // The next tenure on the same host: a probe of the command
+            // address, which the far target answers again once its
+            // deadline has put it back.
+            const uint8_t next = refusal_run<HostT>(twilink::command_addr, 0, 0, speed);
+            command_host_up<HostT>(clk);
+            twilink::Report r{};
+            const bool rep = peer_report(r);
+            const bool gone = (c1 & (i2c_start | i2c_stop)) == 0u && (s2 & i2c_msl) == 0u;
+            ++t.refused;
+            t.nack_data = static_cast<uint8_t>(t.nack_data + (st == i2c_nack_data ? 1u : 0u));
+            t.taken = static_cast<uint8_t>(
+                t.taken + (rep && (r.flags & twilink::report_nacked) != 0u ? 1u : 0u));
+            t.let_go = static_cast<uint8_t>(t.let_go + (gone ? 1u : 0u));
+            t.next_ok = static_cast<uint8_t>(t.next_ok + (next == i2c_ok ? 1u : 0u));
+            if ((!gone || next != i2c_ok) && t.first_bad_c1 == 0u) {
+                t.first_bad_c1 = c1;
+                t.first_bad_s2 = s2;
+                t.first_bad_st = static_cast<uint8_t>(st << 4 | (next & 0x0Fu));
+            }
+            if (!gone || next != i2c_ok) {
+                (void)Host::recover();
+                (void)Host::unstick();
+            }
+        }
+    }
+    command_host_up<HostT>(clk);
+    return t;
+}
+
+/// One host at one speed, its counts printed; true when every refusal
+/// was answered i2c_nack_data with the bus let go and the next tenure
+/// running, the far target reporting each refusal, and every control
+/// exact.
+template <typename HostT, typename Clk>
+[[gnu::noinline]] bool refusal_report(const Clk& clk, const char* core, I2cSpeed speed) {
+    constexpr bool engines = std::is_same_v<HostT, DmaHost>;
+    const RefusalTally t = refusal_point<HostT>(clk, speed);
+    print(serial, "  ", core, speed == I2cSpeed::fast_400k ? " 400 kHz " : " 100 kHz ",
+          engines ? "engines" : "pump   ", ": acked exact ", t.acked_ok, "/4; refused ",
+          t.refused, ": nack_data ", t.nack_data, " (the far target refused ", t.taken,
+          "), let go ", t.let_go, ", next ok ", t.next_ok);
+    if (t.first_bad_c1 != 0u) {
+        print(serial, "; first stuck: status|next ", hex(t.first_bad_st), " CTLR1 ",
+              hex(t.first_bad_c1), " STAR2 ", hex(t.first_bad_s2));
+    }
+    print(serial, crlf);
+    console_drain();
+    return t.acked_ok == 4u && t.refused == 16u && t.nack_data == t.refused &&
+           t.taken == t.refused && t.let_go == t.refused && t.next_ok == t.refused;
+}
+
+/// THE RATE ON THE WIRE AT THIS CORE. A write of sixteen, every byte
+/// acknowledged by the far target, through `HostT` at `speed`: SCL's mean
+/// rate over its 153 periods (sixteen bytes and the address, nine clocks
+/// each) on the core's counter, in thousandths of the rate asked - PB1 is
+/// another rate at each core, and the core's counter is the one ruler here
+/// that does not run on it. 0 when the far target did not take it whole.
+template <typename HostT, typename Clk>
+uint32_t refusal_rate(const Clk& clk, I2cSpeed speed) {
+    for (uint8_t i = 0; i < 16u; ++i) {
+        tx_buf[16u + i] = static_cast<uint8_t>(0x35u + 7u * i);
+    }
+    command_host_up<HostT>(clk);
+    twilink::Params a{};
+    a.ms = refusal_ms;
+    a.addr = twilink::dut_addr;
+    if (!peer_act(Op::serve, a)) {
         return 0;
     }
-    R::refuse_at = 0;
-    R::took = 0;
-    R::C::acknowledge(true);
-    Host::Request r{};
-    r.addr = self_addr;
-    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf));
+    measuring_host_up<HostT>(clk);
+    typename HostT::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(tx_buf + 16));
     r.tx_len = 16;
     r.speed = speed;
     host_done = false;
-    uint32_t ticks = 0;
-    if (!Host::start(r)) {
-        const uint32_t c0 = Ticker::cycles();
-        const uint32_t half = 9u * 8u * (Clk::hz / asked_hz(speed));
-        while (!host_done && Ticker::cycles() - c0 < half) {
+    const uint32_t c0 = Ticker::cycles();
+    uint8_t st = no_answer;
+    if (HostT::start(r)) {
+        st = HostT::status();
+    } else {
+        while (!host_done && Ticker::cycles() - c0 < Clk::hz / 50u) {
         }
-        ticks = SclMeter::period_ticks();
-        const uint32_t t0 = Ticker::millis();
-        while (!host_done && Ticker::millis() - t0 < 20u) {
-        }
+        st = host_done ? HostT::status() : no_answer;
     }
-    meter_off();
-    return ticks * 1000u / (Clk::timclk1_hz / 1'000'000u);
+    const uint32_t took = Ticker::cycles() - c0;
+    settle_ms(refusal_ms + 5u);
+    command_host_up<HostT>(clk);
+    twilink::Report pr{};
+    const bool whole = st == i2c_ok && peer_report(pr) && pr.aux0 == 16u;
+    return whole ? scl_permille(took, 9u * 17u, speed, Clk::hz) : 0u;
+}
+
+/// The longest service of a host vector, hardware entry included, in core
+/// cycles: 164 for the event vector's longest entry and 165 for the error
+/// one's, measured by bench_vx03's letter i (docs/ch32vx03/i2c.md), and a
+/// margin for the entry itself. The image runs from the zero-wait window,
+/// so a cycle count holds at every core clock.
+constexpr uint32_t service_cycles = 180;
+
+/**
+ * THE BRACKET OF A TENURE'S MEAN RATE on the core's counter (17 bytes of
+ * nine clocks: a write or a read of 16 and its address), DERIVED:
+ *
+ *  - the rate MADE is CCR's, `made_hz` (the engine's scl_hz()): the rate
+ *    asked at 48 MHz of PB1, and at 8 MHz 100 kHz exact but 400 kHz CCR 7,
+ *    381 kHz - rounded up, never fast; SCL and the counter share HCLK, so
+ *    no clock error enters;
+ *  - ABOVE: the interval may end half a period short of the 153 counted
+ *    (the completion is the last byte's BTF, on the ninth clock's
+ *    falling edge), so a reading is at most 153 / 152.5 of the rate made;
+ *  - BELOW: the interval also holds the START's lead (SB a period and a
+ *    half after START at 400 kHz, one at 100 - the engine's figures) and
+ *    the completion's own half period, 2.5 periods, plus FOUR vector
+ *    services that hold the bus or the completion back (SB, ADDR, the
+ *    channel's or the last TxE's, BTF), each at most `service_cycles` of
+ *    the core under test - 0.75 of a period at 400 kHz on a 96 MHz core,
+ *    nine at 8 MHz. The far target, a polled core of its own at 96 MHz,
+ *    takes or gives each byte within a byte time and stretches nothing it
+ *    has not been told to. Anything slower is a clock someone held.
+ */
+bool mean_rate_ok(uint32_t permille, I2cSpeed speed, uint32_t core_hz, uint32_t made_hz) {
+    const uint64_t asked = asked_hz(speed);
+    // The rate made, in thousandths of the rate asked, times 1530: the
+    // reading's scale.
+    const uint64_t made = 1530ULL * 1000u * made_hz / asked;
+    // The floor's denominator in tenths of a period.
+    const uint64_t den10 = 1530u + 25u + (40ULL * service_cycles * made_hz) / core_hz;
+    const bool above_ok = static_cast<uint64_t>(permille) * 1525u <= made;
+    const bool below_ok = static_cast<uint64_t>(permille) * den10 >= made;
+    return above_ok && below_ok;
 }
 
 template <typename Clk>
 bool refusal_core(const char* core, bool& on_rate) {
-    using R = Refusal<self_link_part>;
     constexpr Clk clk;
     console_drain();
     const bool up = Clk::init();
@@ -3067,71 +2872,55 @@ bool refusal_core(const char* core, bool& on_rate) {
     (void)Ticker::init(clk);
     print(serial, "  the core at ", core, " (", up ? "up" : "FAILED", "), PB1 ",
           Clk::pclk1_hz / 1'000'000u, " MHz", crlf);
-    (void)R::C::init(clk, {.own = self_addr}, {.no_stretch = false, .interrupts = true});
-    R::live = true;
-    bool clean = up;
     (void)Host::init(clk);
-    const uint32_t pm100 = refusal_rate<Clk, Host>(I2cSpeed::standard_100k);
-    const uint32_t pm400 = refusal_rate<Clk, Host>(I2cSpeed::fast_400k);
-    print(serial, "  ", core, " a write of 16 through the pump in ", pm100,
-          " thousandths of 100 kHz and ", pm400, " of 400 kHz", crlf);
-    on_rate = scl_ok(pm100) && scl_ok(pm400);
-    // What the mean is made of: one SCL period on the pad in the middle of
-    // the same write, a data bit's, printed beside it.
-    print(serial, "  ", core, " a data bit's SCL period on the pad mid-write: ",
-          mid_period_ns<Clk>(I2cSpeed::standard_100k), " ns at 100 kHz, ",
-          mid_period_ns<Clk>(I2cSpeed::fast_400k), " ns at 400 kHz", crlf);
-    clean = R::report(core, I2cSpeed::standard_100k, false) && clean;
-    clean = R::report(core, I2cSpeed::fast_400k, false) && clean;
-    Host::release();
-    (void)DmaHost::init(clk);
-    dma_host_live = true;
-    const uint32_t dm100 = refusal_rate<Clk, DmaHost>(I2cSpeed::standard_100k);
-    const uint32_t dm400 = refusal_rate<Clk, DmaHost>(I2cSpeed::fast_400k);
-    dma_host_live = false;
-    print(serial, "  ", core, " the same through the engines in ", dm100,
-          " thousandths of 100 kHz and ", dm400, " of 400 kHz", crlf);
-    on_rate = on_rate && scl_ok(dm100) && scl_ok(dm400);
-    clean = R::report(core, I2cSpeed::standard_100k, true) && clean;
-    clean = R::report(core, I2cSpeed::fast_400k, true) && clean;
-    DmaHost::release();
-    R::live = false;
-    R::C::release();
+    const uint32_t pm100 = refusal_rate<Host>(clk, I2cSpeed::standard_100k);
+    const uint32_t pm400 = refusal_rate<Host>(clk, I2cSpeed::fast_400k);
+    const uint32_t dm100 = refusal_rate<DmaHost>(clk, I2cSpeed::standard_100k);
+    const uint32_t dm400 = refusal_rate<DmaHost>(clk, I2cSpeed::fast_400k);
+    print(serial, "  ", core, " a write of 16 in thousandths of the rate asked: the pump ", pm100,
+          " at 100 kHz and ", pm400, " at 400 kHz, the engines ", dm100, " and ", dm400, crlf);
+    (void)Host::init(clk);
+    const uint32_t made100 = Host::scl_hz(I2cSpeed::standard_100k);
+    const uint32_t made400 = Host::scl_hz(I2cSpeed::fast_400k);
+    print(serial, "  ", core, " CCR makes ", made100, " Hz and ", made400, " Hz", crlf);
+    on_rate = mean_rate_ok(pm100, I2cSpeed::standard_100k, Clk::hz, made100) &&
+              mean_rate_ok(pm400, I2cSpeed::fast_400k, Clk::hz, made400) &&
+              mean_rate_ok(dm100, I2cSpeed::standard_100k, Clk::hz, made100) &&
+              mean_rate_ok(dm400, I2cSpeed::fast_400k, Clk::hz, made400);
+    bool clean = up;
+    clean = refusal_report<Host>(clk, core, I2cSpeed::standard_100k) && clean;
+    clean = refusal_report<Host>(clk, core, I2cSpeed::fast_400k) && clean;
+    clean = refusal_report<DmaHost>(clk, core, I2cSpeed::standard_100k) && clean;
+    clean = refusal_report<DmaHost>(clk, core, I2cSpeed::fast_400k) && clean;
+    command_host_up<Host>(clk);
     return clean;
 }
 
-template <bool on = self_link_part>
 void to_refusal() {
-    if constexpr (on) {
-        using L = Self<on>;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the refusal wants the self-link's two wires, and says so", true);
-            return;
-        }
-        for (uint8_t i = 0; i < 4u; ++i) {
-            tx_buf[i] = static_cast<uint8_t>(0xC1u + i);
-        }
-        bool fast_rate = false;
-        bool mid_rate = false;
-        bool slow_rate = false;
-        bool again_rate = false;
-        const bool fast = refusal_core<SysClock>("96 MHz", fast_rate);
-        const bool mid = refusal_core<Core48>("48 MHz", mid_rate);
-        const bool slow = refusal_core<Core8>(" 8 MHz", slow_rate);
-        (void)refusal_core<SysClock>("96 MHz again", again_rate);
-        bench.verdict("the last written byte refused at 96 MHz: i2c_nack_data, the bus let "
-                      "go, the next tenure ok",
-                      fast);
-        bench.verdict("... and at 48 MHz", mid);
-        bench.verdict("... and at 8 MHz", slow);
-        bench.verdict("AND SCL RUNS AT THE RATE ASKED AT EVERY CORE - PB1 at 48 and at 8 MHz: a "
-                      "write of 16 through the pump never above 100 or 400 kHz by more than 2 % "
-                      "and within a quarter below, on the core's counter",
-                      fast_rate && mid_rate && slow_rate);
-        L::all_released();
-        host_ready();
+    if (!need_peer()) {
+        return;
     }
+    for (uint8_t i = 0; i < 4u; ++i) {
+        tx_buf[i] = static_cast<uint8_t>(0xC1u + i);
+    }
+    bool fast_rate = false;
+    bool mid_rate = false;
+    bool slow_rate = false;
+    bool again_rate = false;
+    const bool fast = refusal_core<SysClock>("96 MHz", fast_rate);
+    const bool mid = refusal_core<Core48>("48 MHz", mid_rate);
+    const bool slow = refusal_core<Core8>(" 8 MHz", slow_rate);
+    (void)refusal_core<SysClock>("96 MHz again", again_rate);
+    host_ready();
+    bench.verdict("the last written byte refused by ANOTHER CHIP's target at 96 MHz: "
+                  "i2c_nack_data, the bus let go, the next tenure ok",
+                  fast);
+    bench.verdict("... and at 48 MHz", mid);
+    bench.verdict("... and at 8 MHz", slow);
+    bench.verdict("AND SCL RUNS AT THE RATE ASKED AT EVERY CORE - PB1 at 48 and at 8 MHz: a "
+                  "write of 16 through the pump and through the engines inside the bracket "
+                  "derived above, on the core's counter",
+                  fast_rate && mid_rate && slow_rate);
 }
 
 // ---------------------------------------------------------------------------
@@ -3141,7 +2930,8 @@ void to_refusal() {
 /// THE OTHER OWNER OF CHANNEL 7. Table 11-5 wires USART2's transmit
 /// request and I2C1's receive request to the same channel of DMA1 - an OR
 /// - so USART2's transport with its transmit engine there is what letter
-/// p hands the channel to and takes it from.
+/// p hands the channel to and takes it from. USART2's pads (PA2, PA3) are
+/// claimed by that transport for the letter and released at its end.
 constexpr uint8_t shared_channel = DmaRequestOf<DmaRequest::usart2_tx>::channel;
 static_assert(shared_channel == DmaRequestOf<DmaRequest::i2c1_rx>::channel,
               "table 11-5: USART2's transmit request and I2C1's receive request share a "
@@ -3161,7 +2951,7 @@ volatile bool handed_live = false;
 /// compare with CC1DE (table 11-5's TIM3_CH1 row), one match, the counter
 /// stopped and the gate closed. Neither touches a pad, and each is let go
 /// by its block's reset line, which acts with the clock gated.
-[[maybe_unused]] void hold_channel7() {
+void hold_channel7() {
     using U = Usart<2>;
     U::bus_clock(true);
     U::reset();
@@ -3171,14 +2961,14 @@ volatile bool handed_live = false;
     (void)delay_us(clock, 20);
     U::bus_clock(false);
 }
-[[maybe_unused]] void free_channel7() { Usart<2>::reset(); }
+void free_channel7() { Usart<2>::reset(); }
 
 using Holder6 = Tim<3>;
 static_assert(DmaRequestOf<DmaRequest::tim3_ch1>::channel ==
                   DmaRequestOf<DmaRequest::i2c1_tx>::channel,
               "table 11-5: TIM3's channel 1 request and I2C1's transmit request share a "
               "channel");
-[[maybe_unused]] void hold_channel6() {
+void hold_channel6() {
     Holder6::init();
     (void)Holder6::configure(TimConfig{.prescaler = 0, .period = 0xFFFF});
     (void)Holder6::set_compare(0, 16);
@@ -3188,42 +2978,19 @@ static_assert(DmaRequestOf<DmaRequest::tim3_ch1>::channel ==
     Holder6::enable(false);
     Holder6::bus_clock(false);
 }
-[[maybe_unused]] void free_channel6() { Holder6::reset(); }
-
-/// Channel 7's and USART2's vectors while letter p's transport owns them.
-template <bool on = self_link_part>
-void handed_dma() {
-    if constexpr (on) {
-        (void)Handed::dma_isr();
-    }
-}
-template <bool on = self_link_part>
-void handed_isr() {
-    if constexpr (on) {
-        (void)Handed::isr();
-    }
-}
+void free_channel6() { Holder6::reset(); }
 
 /// A run out through USART2's transmit engine, waited for: true when the
 /// port drained it within `budget_ms`; `took` what it took in core cycles,
 /// from the queue to tx_idle() - the last stop bit's end.
-template <bool on = self_link_part>
 bool handed_run(const uint8_t* run, uint16_t n, uint32_t budget_ms, uint32_t& took) {
-    if constexpr (on) {
-        const uint32_t c0 = Ticker::cycles();
-        (void)Handed::write_bulk(std::span<const uint8_t>(run, n));
-        const uint32_t t0 = Ticker::millis();
-        while (!Handed::tx_idle() && Ticker::millis() - t0 < budget_ms) {
-        }
-        took = Ticker::cycles() - c0;
-        return Handed::tx_idle();
-    } else {
-        (void)run;
-        (void)n;
-        (void)budget_ms;
-        took = 0;
-        return false;
+    const uint32_t c0 = Ticker::cycles();
+    (void)Handed::write_bulk(std::span<const uint8_t>(run, n));
+    const uint32_t t0 = Ticker::millis();
+    while (!Handed::tx_idle() && Ticker::millis() - t0 < budget_ms) {
     }
+    took = Ticker::cycles() - c0;
+    return Handed::tx_idle();
 }
 
 /// A run's time in thousandths of its wire: `n` 8N1 frames at 115200,
@@ -3238,287 +3005,234 @@ uint32_t handed_permille(uint32_t cycles, uint16_t n) {
 constexpr uint8_t handed_note[] = "channel 7 is the OR of USART2's and I2C1's requests";
 constexpr uint16_t handed_len = sizeof(handed_note) - 1u;
 
-template <bool on = self_link_part>
+/// One DMA read of `n` from the far target, waited out.
+uint8_t engined_read(uint8_t n, I2cSpeed speed, uint32_t& cycles) {
+    for (uint8_t i = 0; i < n; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    const uint32_t c0 = Ticker::cycles();
+    const uint8_t st = dma_tenure(twilink::dut_addr, nullptr, 0, rx_buf, n, speed);
+    cycles = Ticker::cycles() - c0;
+    return st;
+}
+
 void tp_handover() {
-    if constexpr (on) {
-        using L = Self<on>;
-        using C = typename L::Client2;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the hand-over wants the self-link's two wires, and says so", true);
-            return;
-        }
+    if (!need_peer()) {
+        return;
+    }
 
-        // THE OUTGOING OWNER: USART2's transport with its transmit engine,
-        // a run out through channel 7, then released. With DMAT set and the
-        // transmitter idle its request stands on the channel the moment
-        // the run is out - at init() already.
-        handed_live = true;
-        const bool up = Handed::init(clock, 115200);
-        uint32_t took = 0;
-        const bool sent = handed_run(handed_note, handed_len, 20, took);
-        Handed::release();
-        handed_live = false;
+    // THE OUTGOING OWNER: USART2's transport with its transmit engine, a
+    // run out through channel 7, then released. With DMAT set and the
+    // transmitter idle its request stands on the channel the moment the
+    // run is out - at init() already.
+    host_ready();
+    handed_live = true;
+    const bool up = Handed::init(clock, 115200);
+    uint32_t took = 0;
+    const bool sent = handed_run(handed_note, handed_len, 20, took);
+    Handed::release();
+    handed_live = false;
 
-        // THE INCOMING OWNER: I2C1's DMA host, a read of sixteen on the same
-        // channel from the chip's own target.
-        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
-        dma_host_live = true;
-        (void)DmaHost::init(clock);
-        L::clear();
-        L::seed = 0x27;
-        for (uint8_t i = 0; i < 16u; ++i) {
-            rx_buf[i] = 0xEE;
-        }
-        host_stormed = false;
-        const uint8_t rd = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
-                                                          I2cSpeed::fast_400k);
-        const uint32_t rd_pm = scl_permille(L::last_cycles, 9u * 17u, I2cSpeed::fast_400k,
-                                            SysClock::hz);
-        bool rd_exact = rd == i2c_ok;
-        for (uint8_t i = 0; i < 16u && rd_exact; ++i) {
-            rd_exact = rx_buf[i] == L::value(0x27, i);
-        }
-        const uint16_t left7 = SharedCh::remaining();
-        print(serial, "  USART2's run of ", handed_len, sent ? " sent" : " NOT SENT",
-              " and the port released; then I2C1's DMA read of 16 on channel ", shared_channel,
-              ": status ", rd, rd_exact ? ", byte-exact" : ", NOT exact", ", the channel's count ",
-              left7, host_stormed ? ", the event vector STORMED" : "", crlf);
-        print(serial, "  in thousandths of the rate asked: USART2's run ",
-              handed_permille(took, handed_len), " of its wire at 115200, the read's SCL ", rd_pm,
-              " of 400 kHz", crlf);
-        bench.verdict("THE HAND-OVER: USART2's transmit engine released, then I2C1's DMA read of "
-                      "sixteen bytes on the same channel 7, byte-exact - the port's release() "
-                      "left no request held on the channel's OR",
-                      up && sent && rd_exact && left7 == 0u);
-        bench.verdict("and both owners run at the rate asked: USART2's run in its wire time at "
-                      "115200, -1 % to +3 %, and the read's SCL never above 400 kHz by more than "
-                      "2 % and within a quarter below",
-                      handed_permille(took, handed_len) >= 990u &&
-                          handed_permille(took, handed_len) <= 1030u && scl_ok(rd_pm));
+    // THE INCOMING OWNER: I2C1's DMA host, a read of sixteen on the same
+    // channel from the far target.
+    const PeerServe s = arm_serve(0x27);
+    dma_host_up();
+    host_stormed = false;
+    uint32_t rd_cycles = 0;
+    const uint8_t rd = s.armed ? engined_read(16, I2cSpeed::fast_400k, rd_cycles) : no_answer;
+    const uint32_t rd_pm = scl_permille(rd_cycles, 9u * 17u, I2cSpeed::fast_400k, SysClock::hz);
+    bool rd_exact = rd == i2c_ok;
+    for (uint8_t i = 0; i < 16u && rd_exact; ++i) {
+        rd_exact = rx_buf[i] == twilink::pattern_value(twilink::pattern_counting, 0x27, i);
+    }
+    const uint16_t left7 = SharedCh::remaining();
+    dma_host_down();
+    PeerServe got = s;
+    (void)collect_serve(got);
+    print(serial, "  USART2's run of ", handed_len, sent ? " sent" : " NOT SENT",
+          " and the port released; then I2C1's DMA read of 16 on channel ", shared_channel,
+          ": status ", rd, rd_exact ? ", byte-exact" : ", NOT exact", ", the channel's count ",
+          left7, host_stormed ? ", the event vector STORMED" : "", crlf);
+    print(serial, "  in thousandths of the rate asked: USART2's run ",
+          handed_permille(took, handed_len), " of its wire at 115200, the read's SCL ", rd_pm,
+          " of 400 kHz", crlf);
+    bench.verdict("THE HAND-OVER: USART2's transmit engine released, then I2C1's DMA read of "
+                  "sixteen bytes from another chip on the same channel 7, byte-exact - the "
+                  "port's release() left no request held on the channel's OR",
+                  up && sent && rd_exact && left7 == 0u);
+    bench.verdict("and both owners run at the rate asked: USART2's run in its wire time at "
+                  "115200, -1 % to +3 %, and the read's SCL inside the mean-rate bracket "
+                  "letter o derives",
+                  handed_permille(took, handed_len) >= 990u &&
+                      handed_permille(took, handed_len) <= 1030u &&
+                      mean_rate_ok(rd_pm, I2cSpeed::fast_400k, SysClock::hz,
+                                   Host::scl_hz(I2cSpeed::fast_400k)));
 
-        // Each half from a clean slate: what a failed first half leaves - a
-        // stalled tenure, a target mid-byte, a held request - goes with the
-        // three blocks' reset lines, which act with their clocks gated.
-        dma_host_live = false;
-        DmaHost::release();
-        C::release();
-        L::all_released();
-        Usart<2>::reset();
-        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
-        dma_host_live = true;
-        (void)DmaHost::init(clock);
+    // THE MIRROR: I2C1's read abandoned mid-block with RxNE standing under
+    // DMAEN - its channel stopped under it, the far target serving on until
+    // the data register and the shifter both hold a byte - and the host
+    // released. I2C1's block is not touched again until USART2 has run, its
+    // reset being what the question is about.
+    Usart<2>::reset();
+    const PeerServe m = arm_serve(0x51);
+    dma_host_up();
+    DmaHost::Request r{};
+    r.addr = twilink::dut_addr;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
+    r.tx_len = 0;
+    r.rx = lend<Lease::reply>(rx_buf);
+    r.rx_len = 32;
+    r.speed = I2cSpeed::standard_100k;
+    host_done = false;
+    host_isr_entries = 0;
+    if (m.armed) {
+        (void)DmaHost::start(r);
+    }
+    // A millisecond into the block - some ten bytes at 100 kHz - the channel
+    // is stopped under it: the next byte lands in DATAR and the one after it
+    // in the shifter, BTF holding the clock.
+    settle_ms(1);
+    DmaRxEngine<1, shared_channel>::stop();
+    settle_ms(3);
+    const uint16_t star1 = H::status1();
+    const uint16_t ctlr2 = H::regs().CTLR2;
+    const bool standing = (star1 & i2c_rxne) != 0u && (ctlr2 & i2c_dmaen) != 0u;
+    dma_host_live = false;
+    DmaHost::release();
 
-        // THE MIRROR: I2C1's read abandoned mid-block with RxNE standing
-        // under DMAEN - its channel stopped under it, the target served on
-        // until the data register and the shifter both hold a byte - and
-        // the host released. The target is let go with its own release;
-        // I2C1's block is not touched again until USART2 has run, its reset
-        // being what the question is about.
-        L::clear();
-        L::seed = 0x51;
+    handed_live = true;
+    const bool up2 = Handed::init(clock, 115200);
+    uint32_t took2 = 0;
+    const bool mirrored = handed_run(handed_note, handed_len, 20, took2);
+    const uint16_t faults = Handed::dma_faults();
+    Handed::release();
+    handed_live = false;
+    // The far target was left mid-byte by the released host: the wire is
+    // clocked free before the command channel needs it.
+    (void)Host::init(clock);
+    (void)Host::unstick();
+    settle_ms(350);   // past the serve's deadline: the peer is back
+    host_ready();
+    // 52 frames of ten bits at 115200 baud: 4.5 ms on the wire.
+    const uint32_t pm2 = handed_permille(took2, handed_len);
+    print(serial, "  I2C1's read stopped under its block (STAR1 ", hex(star1), ", CTLR2 ",
+          hex(ctlr2), "), the host released; then USART2's run of ", handed_len, " on channel ",
+          shared_channel, ": ", mirrored ? "out" : "NOT OUT", " in ", pm2,
+          " thousandths of its wire time, the channel's count ", SharedCh::remaining(),
+          ", faults ", faults, crlf);
+    bench.verdict("THE MIRROR: I2C1's DMA read abandoned with RxNE standing under DMAEN and "
+                  "the host released, then USART2's transmit engine on channel 7 sends its "
+                  "whole run in its wire time at 115200, -1 % to +3 % on the core's counter - "
+                  "the host's release() left no request held",
+                  m.armed && standing && up2 && mirrored && pm2 >= 990u && pm2 <= 1030u &&
+                      faults == 0u);
+    bench.verdict("the command channel is back", command(Op::ping));
+}
+
+void tq_dead_channel() {
+    if (!need_peer()) {
+        return;
+    }
+
+    // A WRITE OVER A TRANSMIT CHANNEL THAT DOES NOT SERVE: TIM3's request
+    // held on channel 6, the gate closed under it. The channel moves one
+    // item on its enable and waits for that request to fall, which it never
+    // does: BTF comes with the block's count standing.
+    for (uint8_t i = 0; i < 32u; ++i) {
+        tx_buf[i] = static_cast<uint8_t>(0x30u + i);
+    }
+    PeerServe w = arm_serve(0x00);
+    hold_channel6();
+    dma_host_up();
+    const uint8_t wr = w.armed ? dma_tenure(twilink::dut_addr, tx_buf, 32, nullptr, 0,
+                                            I2cSpeed::fast_400k)
+                               : no_answer;
+    const uint16_t left6 = Ch6::remaining();
+    free_channel6();
+    dma_host_down();
+    (void)collect_serve(w);
+    print(serial, "  a DMA write of 32 over channel 6 held by TIM3: status ", wr,
+          wr == i2c_dma_fault ? " (i2c_dma_fault)" : "", ", the far target took ", w.received,
+          ", the channel's count ", left6, crlf);
+    bench.verdict("A WRITE OVER A CHANNEL THAT DOES NOT SERVE is answered i2c_dma_fault, its "
+                  "STOP on the wire - never i2c_ok with the bytes missing: BTF with the "
+                  "block's count standing is a stalled channel",
+                  wr == i2c_dma_fault && w.received < 32u);
+    PeerServe w2 = arm_serve(0x00);
+    dma_host_up();
+    const uint8_t wr2 = w2.armed ? dma_tenure(twilink::dut_addr, tx_buf, 32, nullptr, 0,
+                                              I2cSpeed::fast_400k)
+                                 : no_answer;
+    dma_host_down();
+    (void)collect_serve(w2);
+    bench.verdict("... and with the held request let go by TIM3's reset line, the same "
+                  "write lands whole",
+                  wr2 == i2c_ok && w2.received == 32u);
+
+    // A READ OVER A RECEIVE CHANNEL THAT DOES NOT SERVE: USART2's request
+    // held on channel 7. RxNE and BTF stand with nothing to take them, and
+    // the event vector must not be what hears them: the tenure is the
+    // caller's bound to answer, and recover() - the verb the per-bus
+    // timeout calls - puts the host back.
+    PeerServe rs = arm_serve(0x63);
+    hold_channel7();
+    dma_host_up();
+    host_stormed = false;
+    uint8_t rd = no_answer;
+    uint32_t entries = 0;
+    if (rs.armed) {
         DmaHost::Request r{};
-        r.addr = self_addr;
+        r.addr = twilink::dut_addr;
         r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(nullptr));
         r.tx_len = 0;
         r.rx = lend<Lease::reply>(rx_buf);
-        r.rx_len = 32;
-        r.speed = I2cSpeed::standard_100k;
+        r.rx_len = 16;
+        r.speed = I2cSpeed::fast_400k;
         host_done = false;
         host_isr_entries = 0;
-        (void)DmaHost::start(r);
-        const uint32_t t1 = Ticker::millis();
-        while (L::log.served < 4u && Ticker::millis() - t1 < 20u) {
-            L::template poll<C>();
+        if (DmaHost::start(r)) {
+            rd = DmaHost::status();
+        } else {
+            const uint32_t t0 = Ticker::millis();
+            while (!host_done && Ticker::millis() - t0 < 50u) {
+            }
+            rd = host_done ? DmaHost::status() : no_answer;
         }
-        DmaRxEngine<1, shared_channel>::stop();
-        const uint32_t t2 = Ticker::millis();
-        while (Ticker::millis() - t2 < 3u) {
-            L::template poll<C>();
-        }
-        const uint16_t star1 = H::status1();
-        const uint16_t ctlr2 = H::regs().CTLR2;
-        const bool standing = (star1 & i2c_rxne) != 0u && (ctlr2 & i2c_dmaen) != 0u;
-        dma_host_live = false;
-        DmaHost::release();
-        C::release();
-
-        handed_live = true;
-        const bool up2 = Handed::init(clock, 115200);
-        uint32_t took2 = 0;
-        const bool mirrored = handed_run(handed_note, handed_len, 20, took2);
-        const uint16_t faults = Handed::dma_faults();
-        Handed::release();
-        handed_live = false;
-        // 52 frames of ten bits at 115200 baud: 4.5 ms on the wire.
-        const uint32_t pm2 = handed_permille(took2, handed_len);
-        print(serial, "  I2C1's read stopped after ", L::log.served, " byte(s) asked (STAR1 ",
-              hex(star1), ", CTLR2 ", hex(ctlr2), "), the host released; then USART2's run of ",
-              handed_len, " on channel ", shared_channel, ": ", mirrored ? "out" : "NOT OUT",
-              " in ", pm2, " thousandths of its wire time, the channel's count ",
-              SharedCh::remaining(), ", faults ", faults, crlf);
-        bench.verdict("THE MIRROR: I2C1's DMA read abandoned with RxNE standing under DMAEN and "
-                      "the host released, then USART2's transmit engine on channel 7 sends its "
-                      "whole run in its wire time at 115200, -1 % to +3 % on the core's counter - "
-                      "the host's release() left no request held",
-                      standing && up2 && mirrored && pm2 >= 990u && pm2 <= 1030u &&
-                          faults == 0u);
-        L::all_released();
-        host_ready();
-    }
-}
-
-template <bool on = self_link_part>
-void tq_dead_channel() {
-    if constexpr (on) {
-        using L = Self<on>;
-        using C = typename L::Client2;
-        L::all_released();
-        if (!L::wired()) {
-            bench.verdict("the dead channels want the self-link's two wires, and say so", true);
-            return;
-        }
-        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
-        dma_host_live = true;
-        (void)DmaHost::init(clock);
-
-        // A WRITE OVER A TRANSMIT CHANNEL THAT DOES NOT SERVE: TIM3's
-        // request held on channel 6, the gate closed under it. The channel
-        // moves one item on its enable and waits for that request to fall,
-        // which it never does: BTF comes with the block's count standing.
-        hold_channel6();
-        for (uint8_t i = 0; i < 32u; ++i) {
-            tx_buf[i] = static_cast<uint8_t>(0x30u + i);
-        }
-        L::clear();
-        const uint8_t wr = L::template tenure<DmaHost, C>(self_addr, tx_buf, 32, nullptr, 0,
-                                                          I2cSpeed::fast_400k);
-        const uint8_t took = L::log.in_n;
-        const uint16_t left6 = Ch6::remaining();
-        free_channel6();
-        print(serial, "  a DMA write of 32 over channel 6 held by TIM3: status ", wr,
-              wr == i2c_dma_fault ? " (i2c_dma_fault)" : "", ", the target took ", took,
-              ", the channel's count ", left6, crlf);
-        bench.verdict("A WRITE OVER A CHANNEL THAT DOES NOT SERVE is answered i2c_dma_fault, its "
-                      "STOP on the wire - never i2c_ok with the bytes missing: BTF with the "
-                      "block's count standing is a stalled channel",
-                      wr == i2c_dma_fault && took < 32u);
-        L::clear();
-        const uint8_t wr2 = L::template tenure<DmaHost, C>(self_addr, tx_buf, 32, nullptr, 0,
-                                                           I2cSpeed::fast_400k);
-        bool whole = wr2 == i2c_ok && L::log.in_n == 32u;
-        for (uint8_t i = 0; i < 32u && whole; ++i) {
-            whole = L::log.in[i] == tx_buf[i];
-        }
-        bench.verdict("... and with the held request let go by TIM3's reset line, the same "
-                      "write lands whole",
-                      whole);
-
-        // A READ OVER A RECEIVE CHANNEL THAT DOES NOT SERVE: USART2's
-        // request held on channel 7. RxNE and BTF stand with nothing to take
-        // them, and the event vector must not be what hears them: the
-        // tenure is the caller's bound to answer, and recover() - the verb
-        // the per-bus timeout calls - puts the host back.
-        hold_channel7();
-        L::clear();
-        L::seed = 0x63;
-        host_stormed = false;
-        const uint8_t rd = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
-                                                          I2cSpeed::fast_400k);
-        const uint32_t entries = host_isr_entries;
-        const bool stormed = host_stormed;
-        print(serial, "  a DMA read of 16 over channel 7 held by USART2: status ", rd,
-              rd == no_answer ? " (no answer: the caller's bound)" : "", ", the event vector ",
-              entries, " entries", stormed ? " - STORMED, silenced by the suite" : "",
-              ", the channel's count ", SharedCh::remaining(), crlf);
-        bench.verdict("A READ OVER A CHANNEL THAT DOES NOT SERVE leaves the thread running: the "
-                      "event vector entered for the START and the address alone, no storm, "
-                      "and the tenure answered by the caller's bound and recover()",
-                      rd == no_answer && !stormed && entries <= 4u);
-
-        // The target, mid-byte when the host was reset, let go; the wire
-        // clocked free; the channel freed; the same read again.
-        C::release();
-        (void)DmaHost::unstick();
-        free_channel7();
-        (void)C::init(clock, {.own = self_addr}, {.no_stretch = false, .interrupts = false});
-        (void)DmaHost::init(clock);
-        L::clear();
-        L::seed = 0x63;
-        for (uint8_t i = 0; i < 16u; ++i) {
-            rx_buf[i] = 0xEE;
-        }
-        const uint8_t rd2 = L::template tenure<DmaHost, C>(self_addr, nullptr, 0, rx_buf, 16,
-                                                           I2cSpeed::fast_400k);
-        bool exact = rd2 == i2c_ok;
-        for (uint8_t i = 0; i < 16u && exact; ++i) {
-            exact = rx_buf[i] == L::value(0x63, i);
-        }
-        bench.verdict("... and with the held request let go by USART2's reset line, a read of "
-                      "sixteen byte-exact",
-                      exact);
-        dma_host_live = false;
-        DmaHost::release();
-        C::release();
-        L::all_released();
-        host_ready();
-    }
-}
-
-/// The self-link's letters, registered where the part has I2C2.
-template <bool on = self_link_part>
-void register_self_link_letters() {
-    if constexpr (on) {
-        bench.letter('l', "THE SELF-LINK: I2C1 the host, I2C2 the target, on the chip's own "
-                          "wires",
-                     tl_self_link<>);
-        bench.letter('m', "the self-link swapped: I2C2 the host, I2C1 the target",
-                     tm_self_swapped<>);
-        bench.letter('n', "a target stuck mid-byte, and unstick()'s clocks counted",
-                     tn_unstick<>);
-        bench.letter('o', "THE REFUSED LAST BYTE, the core at 96, 48 and 8 MHz",
-                     to_refusal<>);
-        bench.letter('p', "THE HAND-OVER on channel 7: USART2 released, then I2C1's DMA read; "
-                          "and the mirror",
-                     tp_handover<>);
-        bench.letter('q', "a channel that does not serve: a DMA write answered i2c_dma_fault, a "
-                          "DMA read with the event vector quiet",
-                     tq_dead_channel<>);
-    }
-}
-
-/// Whether the wire's pull-ups are the self-link's - asked by a peer
-/// letter whose peer did not answer, so it declines instead of failing.
-template <bool on>
-bool self_link_present() {
-    if constexpr (on) {
-        return Self<on>::wired();
-    } else {
-        return false;
-    }
-}
-
-/// I2C2's two vectors: letter m's host and letter o's target, and nothing
-/// on any other part.
-template <bool on = self_link_part>
-void host2_event() {
-    if constexpr (on) {
-        if (Refusal<on>::live) {
-            Refusal<on>::event();
-        } else if (Self<on>::host2_live && Self<on>::Host2::isr()) {
-            host_done = true;
+        entries = host_isr_entries;
+        if (rd == no_answer) {
+            (void)DmaHost::recover();
         }
     }
-}
-template <bool on = self_link_part>
-void host2_error() {
-    if constexpr (on) {
-        if (Refusal<on>::live) {
-            Refusal<on>::error();
-        } else if (Self<on>::host2_live && Self<on>::Host2::error_isr()) {
-            host_done = true;
-        }
+    const bool stormed = host_stormed;
+    print(serial, "  a DMA read of 16 over channel 7 held by USART2: status ", rd,
+          rd == no_answer ? " (no answer: the caller's 50 ms bound)" : "", ", the event vector ",
+          entries, " entries", stormed ? " - STORMED, silenced by the suite" : "",
+          ", the channel's count ", SharedCh::remaining(), crlf);
+    bench.verdict("A READ OVER A CHANNEL THAT DOES NOT SERVE leaves the thread running: the "
+                  "event vector entered for the START and the address alone, no storm, "
+                  "and the tenure answered by the caller's bound and recover()",
+                  rd == no_answer && !stormed && entries <= 4u);
+
+    // The far target, mid-byte when the host was reset, clocked free; the
+    // channel freed; the same read again.
+    (void)DmaHost::unstick();
+    free_channel7();
+    dma_host_down();
+    (void)collect_serve(rs);
+    PeerServe rs2 = arm_serve(0x63);
+    dma_host_up();
+    uint32_t cycles = 0;
+    const uint8_t rd2 = rs2.armed ? engined_read(16, I2cSpeed::fast_400k, cycles) : no_answer;
+    bool exact = rd2 == i2c_ok;
+    for (uint8_t i = 0; i < 16u && exact; ++i) {
+        exact = rx_buf[i] == twilink::pattern_value(twilink::pattern_counting, 0x63, i);
     }
+    dma_host_down();
+    (void)collect_serve(rs2);
+    bench.verdict("... and with the held request let go by USART2's reset line, a read of "
+                  "sixteen byte-exact",
+                  exact);
+    bench.verdict("the command channel is back", command(Op::ping));
 }
 
 // ===========================================================================
@@ -3529,8 +3243,8 @@ void banner() {
     print(serial, crlf, "test_vx03_i2c - the I2C of RM ch. 19 on I2C1 (PB6/PB7), on ",
           device::part_name, crlf,
           "  the bus goes to a peer board running `twi_peer` (command address ",
-          hex(twilink::command_addr), ") - letters b..k skip when it does not answer - or, "
-          "where the board wires them, to the chip's own I2C2 (letters l..q)",
+          hex(twilink::command_addr), ") - every letter but a and j skips when it does not "
+          "answer",
           crlf, "  PB1 runs at ", SysClock::pclk1_hz / 1'000'000u,
           " MHz: CTLR2.FREQ cannot state more than 60 (19.12.2)", crlf,
           "  the wire now: SCL ", SclPin::read() ? "high" : "LOW", ", SDA ",
@@ -3594,10 +3308,6 @@ BRIO_CH32_VECTOR(i2c1_er_handler) {
     }
 }
 
-// I2C2's vectors: letter m's host on a part with I2C2, empty on every
-// other part.
-BRIO_CH32_VECTOR(i2c2_ev_handler) { host2_event<>(); }
-BRIO_CH32_VECTOR(i2c2_er_handler) { host2_error<>(); }
 
 BRIO_CH32_VECTOR(dma1_channel6_handler) {
     if (dma_host_live && DmaHost::dma_isr()) {
@@ -3606,16 +3316,15 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
 }
 BRIO_CH32_VECTOR(dma1_channel7_handler) {
     if (handed_live) {
-        handed_dma<>();
+        (void)Handed::dma_isr();
         return;
     }
     if (dma_host_live && DmaHost::dma_isr()) {
         host_done = true;
     }
 }
-// USART2's: letter p's transport, its interrupt receiver idle on a pulled
-// pad, and nothing on any other part.
-BRIO_CH32_VECTOR(usart2_handler) { handed_isr<>(); }
+// USART2's: letter p's transport, its interrupt receiver idle.
+BRIO_CH32_LEAF_VECTOR(usart2_handler) { (void)Handed::isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -3650,7 +3359,20 @@ int main() {
                  tj_flags);
     bench.letter('k', "a ten-second stress at fast mode with the counters at both ends",
                  tk_stress);
-    register_self_link_letters();
+    bench.letter('l', "THIS BOARD'S TARGET under the peer's controller: the second address, the "
+                      "general call, and the target as a TRANSMITTER",
+                 tl_target);
+    bench.letter('n', "a far target stuck mid-byte by a host taken off the bus, and unstick()'s "
+                      "clocks counted",
+                 tn_unstick);
+    bench.letter('o', "THE REFUSED LAST BYTE from the peer's target, the core at 96, 48 and 8 MHz",
+                 to_refusal);
+    bench.letter('p', "THE HAND-OVER on channel 7: USART2 released, then I2C1's DMA read; "
+                      "and the mirror",
+                 tp_handover);
+    bench.letter('q', "a channel that does not serve: a DMA write answered i2c_dma_fault, a "
+                      "DMA read with the event vector quiet",
+                 tq_dead_channel);
     bench.letter('r', "THE LATE REPEATED START against the peer: the START after BTF by hand, "
                       "the target's tally printed and nothing judged",
                  tr_late_start, false);

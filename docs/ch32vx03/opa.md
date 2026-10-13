@@ -206,8 +206,12 @@ the CH32V303's port E, as a level. On the CH32V203C8T6 the five letters
 of that part: **21 verdicts in `z`**. On the CH32V303VCT6 all eight:
 **30 pass, 0 fail**, with the evaluation board's own wires on several of
 those pads (each to another pad left a floating input, which the driven
-pad drives with it). Where one number is given below it is the
-CH32V203C8T6's unless the CH32V303VCT6 is named.
+pad drives with it). On the bench pair some of the suite's pads are the
+link's wires to the other board - PB10, PB11, PB14 and PB15 on the
+CH32V203C8T6, PB0 and PB1 on the CH32V303VCT6 - and the other board runs
+its dark console meanwhile, its ends of them floating inputs. Where one
+number is given below it is the CH32V203C8T6's unless the CH32V303VCT6
+is named.
 
 - **The amplifier is a comparator with no wire, and it saturates.** With
   its positive input at the rail and its negative at ground the output
@@ -220,8 +224,10 @@ CH32V203C8T6's unless the CH32V303VCT6 is named.
 - **The output reaches the converter THROUGH THE PAD.** Both of OPA2's
   output pads and both of OPA1's were read on their own ADC channels;
   moving the selection from one output to the other moved the level with
-  it, and the pad it left stopped being driven (4095 -> 153 counts while
-  the newly selected one took 9).
+  it (the newly selected pad 10 or 11 counts with the CH1 pair holding
+  the output low), and the pad it left stopped being driven: floating, it
+  kept 3 to 109 counts of its last level, which says nothing, and its own
+  pull-up took it once it was made an input - ten runs of ten.
 - **Each selection is a pad and the output follows it.** OPA2 with its
   CH0 pair driven high-over-low read 4095 counts, and the same amplifier
   switched to its CH1 pair, driven low-over-high, read 9 - one bit each,

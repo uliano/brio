@@ -761,10 +761,10 @@ Driver gaps, each with its reason:
   a rig with a counter on the clock pad is what would measure them there.
 - **USART3 on a wire**: the instance is on both parts, and its default
   column is PB10 and PB11 - the same two pads I2C2 answers on
-  ([i2c.md](i2c.md)), which carry another link on the CH32V203C8's board
-  and I2C1's two wires on the evaluation board. Nothing on either board
-  speaks to a third serial port; it arrives with the first program that
-  needs one.
+  ([i2c.md](i2c.md)). On the bench pair the CH32V203C8T6's two are wired
+  to the CH32V303VCT6's UART4 on its second column, and no program of
+  this stratum speaks over that link yet: a serial peer on the far board
+  is what would measure it.
 
 Implemented but not bench-verified, each with what would measure it:
 

@@ -980,15 +980,14 @@ Implemented but not bench-verified, each with what would measure it:
   the count at half the timer's clock is the silicon's or the wire's.
 - **SPI3's second column (PA4/PC10/PC11/PC12), and I2S3's on it**: the
   code is written by `remap()` and refused where the package bonds none
-  of its pads, and no suite drives it - on the evaluation board PC10 and
-  PC11 carry the crossed pair between USART2 and UART4. A strap from
-  that column to SPI2's four pads, with the pair lifted, would measure
-  it.
-- **SPI1's hardware NSS input and output on its own pad.** On the
-  CH32V203's board PA4 is strapped to PA5, so a hardware NSS input on
-  SPI1 would read its own clock and demote the host at the first edge -
-  a strap's consequence and not a silicon fact. A bench with PA4 free
-  would measure it.
+  of its pads, and no suite drives it yet: on the bench pair that column
+  is the CH32V303VCT6's link to the CH32V203C8T6's SPI2, and a peer on
+  the far board is what would measure it.
+- **SPI1's hardware NSS input and output on its own pad.** No letter
+  arranges SPI1's select in hardware: on the CH32V203C8T6's board PA4 is
+  a free pad, on the CH32V303VCT6's it is the pair's SPI select wire. A
+  letter on the CH32V203C8T6 driving SSOE's output on PA4, and a second
+  host's select into it, would measure it.
 - **`recover()` after a wedged transaction, and the arbiter's per-bus
   timeout with it**: a lost completion has to be staged, and that wants
   a second device that can hold the bus.

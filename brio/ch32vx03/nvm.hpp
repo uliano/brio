@@ -504,6 +504,14 @@ struct DeviceUid {
  */
 inline uint16_t flash_size_kbytes() { return esig_flash_kbytes(); }
 
+/**
+ * The CHIP IDENTIFIER the factory leaves at 0x1FFF F704: not a register
+ * of the reference manual, which names no such word, but the one WCH's
+ * library reads as the part's (docs/ch32vx03/nvm.md, "The signature"):
+ * the part and its revision, where the UID names the die.
+ */
+inline uint32_t chip_id() { return esig_chip_id(); }
+
 // =============================================================================
 // The engine
 // =============================================================================

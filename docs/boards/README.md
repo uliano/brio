@@ -16,6 +16,7 @@ the user's own manifest, below.
 | ST Nucleo-G031K8 | `g031k8` | [nucleo-g031k8.md](nucleo-g031k8.md) |
 | a CH32V006K8U6 module | `v006k8` | [ch32v006k8.md](ch32v006k8.md) |
 | WCH's CH32V003F4P6 evaluation board | `v003f4` | [ch32v003f4.md](ch32v003f4.md) |
+| a WeAct CH32V203C8T6 core board | `v203c8` | [weact-ch32v203c8.md](weact-ch32v203c8.md) |
 | WCH's CH32V303 evaluation board (CH32xx0xV-R0-1v0, a CH32V303VCT6) | `v303vc` | [ch32v303-evt.md](ch32v303-evt.md) |
 | WCH's CH32X035 evaluation board, QFN20 edition (a CH32X035F8U6) | `x035f8` | [ch32x035-evt-f8u6.md](ch32x035-evt-f8u6.md) |
 | Raspberry Pi Pico | `pico` | [pico.md](pico.md) |

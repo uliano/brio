@@ -437,6 +437,15 @@ bool wave_self_capture(uint16_t period, uint16_t compare) {
         return false;
     }
     WavePad::claim();
+    // THE PAD'S OWN EDGE FIRST. Before the claim the pad floats (on the
+    // CH32V203C8T6's board it shares a node with PA7 and PA8, inputs
+    // here), so the claim itself can be a falling edge - and the capture
+    // latches an edge with the counter stopped, so it would read as a
+    // high time of zero (measured: two first duties of five). Two
+    // microseconds - the pad's switch, its node's charge and the input
+    // synchronizer's few timer clocks with no filter, all well under one -
+    // let that edge land before the flags are cleared below.
+    wait_us(2);
     // THE COMPARE IS PRELOADED: a value written into CHxCVR reaches the
     // shadow register at the next update event and not before, so
     // without this the first period of every new duty would be made

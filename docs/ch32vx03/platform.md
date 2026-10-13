@@ -139,6 +139,37 @@ this document keeps in its place.
   less than with every vector attributed (4552 for the trampolines, 312
   for the leaves bound without one).
 
+### Code in SRAM buys nothing here
+
+Other families let a program place a driver's hot path in SRAM, opt-in
+per driver ([../../brio/util/placement.hpp](../../brio/util/placement.hpp)),
+because their code flash answers behind wait states. This one's does
+not where the image runs: both datasheets count a part's flash as its
+ZERO-WAIT run area (the CH32V203's note 1 to table 2-1, the CH32V303's
+to table 2-1-1), which the hardware loads at boot - the CH32V303
+datasheet's table 4-18 counts that "code load time" in a wake from
+Standby ([nvm.md](nvm.md), "The window and the tail") - and every
+linker script of this project places the image inside it. WCH's own
+startup puts its `.highcode` section in the code flash, ahead of
+`.text`, and not in SRAM (the EVT packages' `Link.ld`). Measured on both
+dies, the same code timed on the STK from the window and from SRAM
+(the function copied there with `.data`), the best of sixteen runs:
+
+| the code | window | SRAM |
+|---|---|---|
+| a four-instruction loop with its taken branch, 32-bit or compressed, per iteration | 5.00 cycles | 5.01 |
+| 64 straight 32-bit `addi` and a `ret`, a call | 72 (73 at 96 and 8 MHz) | 77 (78) |
+| a loop of calls to an empty function, from the window, per call | 9 at 144 MHz on the CH32V203C8T6, 11 on the CH32V303VCT6; 8 at 96 and 8 MHz on both | 13 at 144 MHz, 14 at 96 and 8 |
+
+Identical on the CH32V203C8T6 and the CH32V303VCT6 but for the call's
+rate at 144 MHz: SRAM never fetches faster than the window, it is a
+cycle slower on straight code and four to six slower on a call into it
+from the image. So the platform does not say `places_fast_text`, no
+driver of this stratum takes a placement tag, and `InRam` on this
+platform does not compile (util/placement.hpp's `HotPlacement`). The
+tail above the window is the one code flash here behind a wait - 20
+cycles a word read (nvm.md) - and no script places code there.
+
 ## Types and verbs
 
 `Ch32vx03Platform<TB>`

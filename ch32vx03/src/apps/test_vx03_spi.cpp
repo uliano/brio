@@ -23,14 +23,13 @@
 //    that needs it (a plain output on PA7 read on PA6 against the
 //    opposite pull), never cached: a wire can leave the desk between
 //    two letters.
-//    SPI1's NSS pad PA4 is strapped to its own SCK pad PA5, so SPI1
-//    runs SOFTWARE SELECT ONLY here - a hardware NSS input would read
-//    the clock and demote the host at the first edge. The three NSS
-//    arrangements are exercised on SPI2 instead, where the select is a
-//    real wire.
+//    SPI1 runs SOFTWARE SELECT ONLY here: its NSS pad PA4 is left an
+//    input (on the CH32V303 board it is the pair's SPI select wire, to
+//    the CH32V203's PB12), and the three NSS arrangements are exercised
+//    on SPI2 instead, where the select is a real wire.
 //
-//  - SPI2 against a PEER BOARD running `spi_peer` (a Nucleo-F446RE; the
-//    peer's ident says which), commanded IN BAND over the bus under
+//  - SPI2 against a PEER BOARD running `spi_peer` (the peer's ident
+//    says which), commanded IN BAND over the bus under
 //    test through avrdx/src/apps/spi_link.hpp, included by relative
 //    path: one source of truth for the wire format on every
 //    architecture. Five wires, both boards at 3.3 V:
@@ -318,13 +317,13 @@ void host_ready() {
     dma_host_live = false;
     bus_ao_live = false;
     (void)Host1::init(clock);
-    NssPad::release();   // the select pad is SCK's neighbour on this board
+    NssPad::release();   // the select pad stays an input (the header)
 }
 
 uint8_t host_xfer(const uint8_t* cmd, uint8_t cmd_len, const uint8_t* tx, uint8_t* rx, uint16_t len,
                   SpiMode mode, SpiClock rate, SpiDataSize bits, bool polled) {
     Host1::Request r{};
-    r.cs = {};   // PA4 is strapped to PA5 here: the suite frames nothing with it
+    r.cs = {};   // software select: the suite frames nothing with PA4 (the header)
     r.cmd = lend<Lease::reply>(cmd);
     r.cmd_len = cmd_len;
     r.tx = lend<Lease::reply>(tx);
@@ -627,7 +626,7 @@ void ta_rates() {
     Dma<1>::open();
     dma_host_live = true;
     (void)Dma1::init(clock);
-    NssPad::release();   // the select pad is SCK's neighbour on this board
+    NssPad::release();   // the select pad stays an input (the header)
     const uint32_t s1_d4 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div4,
                                                 SpiDataSize::bits8);
     const uint32_t s1_d16 = frame_permille<Dma1>(SysClock::pclk2_hz, SpiClock::div16,
@@ -2978,7 +2977,7 @@ void register_spi3_letters() {
 void banner() {
     print(serial, crlf, "test_vx03_spi - the SPI of RM ch. 20, both instances", crlf,
           "  SPI1: the PA7-PA6 strap is the loopback (PA8 is the node's third pad and is never "
-          "driven); PA4 is strapped to PA5, so SPI1 is software-selected only",
+          "driven); PA4 is left an input, so SPI1 is software-selected only",
           crlf,
           "  SPI2: PB12..PB15 to a peer board running `spi_peer`; letter d skips when it does "
           "not answer",

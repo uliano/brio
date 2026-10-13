@@ -512,8 +512,8 @@ partner's handlers included where they run on the same core.
 | STM32F429ZI (180 MHz; the board's STMPE811 on I2C3; the F429's figures, its board not on the desk) | 139 (961), three interrupts (seven) | 389 (816), five (ten) | 1.00 through the pump and the engines | - (the device answers no read a write did not open: reads are register reads) | 708 | HAL: 387 and 1171 fixed; 148 and 153 cycles a byte written and read, against 80 and 99 | 203 |
 | STM32F446RE (180 MHz; FMPI2C1 on the self-link, served on the same core) | 230, three interrupts | 611, five | 1.00 through the pump (256 interrupts, 98 cycles a byte) and the engines (4) | 256 through the pump (117 cycles a byte), 3 through the engines | 1225 | - | 214 |
 | STM32F446RE's FMPI2C1 (180 MHz; I2C1 on the self-link, served on the same core, its address-match stretch inside the figure) | 1131, two interrupts | 1680, four | 1.00 through the pump (256 interrupts, 128 cycles a byte) and the engines (2) | 256 through the pump (141 cycles a byte), 2 through the engines | 1168 | - | 509 |
-| CH32V203C8T6 (120 MHz for the letter - the bus clock's 60 MHz ceiling; I2C2 on the self-link, served on the same core) | 1072 (1787), three interrupts (five) | 2006 (2394), five (seven) | 1.00 through the pump (256 interrupts) and the engine (4, the core kept awake under a DMA block: 495 k busy against the pump's 70 k) | - | 1055 | the EVT: 1865 fixed in seven interrupts; 174 and 227 cycles a byte written and read, against 116 and 131 | 166 |
-| CH32V303VCT6 (120 MHz for the letter, as the CH32V203; I2C2 on the self-link, served on the same core) | 973, three interrupts | 1889, five | 1.00 through the pump (256 interrupts) and the engine (4, the core kept awake: 505 k busy against the pump's 61 k) | - | 946 | not run on this board | 176 |
+| CH32V203C8T6 (120 MHz for the letter - the bus clock's 60 MHz ceiling; the CH32V303VCT6's `twi_peer`, its target polled by its own core) | 835, three interrupts | 1468, five | 1.00 through the pump (256 interrupts, 118 cycles a byte) and the engine (4, the core kept awake under a DMA block: 486 k busy against the pump's 51 k) | - | 838 | the EVT, against a target on the same core: 174 and 227 cycles a byte written and read, against 118 and 131 | 165 |
+| CH32V303VCT6 (120 MHz for the letter, as the CH32V203; the CH32V203C8T6's `twi_peer`, polled by its own core) | 767, three interrupts | 1393, five | 1.00 through the pump (256 interrupts, 93 cycles a byte) and the engine (4, the core kept awake: 505 k busy against the pump's 44 k) | - | 746 | not run on this board | 183 |
 | CH32V006K8U6 (48 MHz; the STM32G0's `twi_peer`) | 1373 (1896), four interrupts (five) | 1905 through the pump (2456) | 1.00 through the pump (264 interrupts) and the engine (9) | 262 through the pump, 9 through the engine | 1488 | WCH's polled master, its library having no interrupt-driven tenure: 766 and 907 fixed, the core held the whole tenure (3103 and 5581 busy) | 190 to 225 |
 | STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 369.9 kHz on the desk's wire) | 1028 (1554), one interrupt (two) | 1651 (2377), two interrupts (four) | 1.00 through the pump (255 interrupts, 123 cycles a byte against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1189 | HAL v1.4.7: 1362 and 2289 fixed | 509, an engined write to an absent address |
 | RP2040 (125 MHz; I2C1 on the self-link) | 832 (967), the same at 100 kHz and 1 MHz (1529 at 100 kHz before) | 903 (1011) | 1.00, 31 | 32 (285), 13 378 (54 955) | 651 (802 at 100 kHz) | pico-sdk 2.3.1, polled: 538 fixed with the core held the whole wire (6680 busy); its 255-byte read 20 834 fixed against 1375 | 439 (574) |
@@ -542,10 +542,10 @@ What the rows say:
   one-byte write costs 139 cycles beyond the wire, the HAL's 387. The
   wait in `start()` for the last STOP stays - nothing in either chapter
   signals it leaving - and costs about one bit period when a tenure
-  follows another at once. On the CH32V203 the pump's busy is 70 k for
-  255 bytes since the idle path takes one turn per wake (86 k when a
-  stale event made two), and the CH32V006's one-byte write 1488 where it
-  was 1759, the same cause.
+  follows another at once. On the CH32V203 the pump's busy is 51 k for
+  255 bytes against the far board's target, the idle path taking one turn
+  per wake, and the CH32V006's one-byte write 1488 where it was 1759, the
+  same cause.
 - The AVR's TWI holds SCL from each flag until the software answers, so
   a long tenure at 400 kHz runs at the handler's pace - 1.12, the data
   sheet's own loop 1.11 ([../avrdx/twi.md](../avrdx/twi.md)).

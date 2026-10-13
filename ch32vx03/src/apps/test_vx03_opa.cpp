@@ -27,7 +27,7 @@
 // PLL on the HSI at 96 MHz exactly as test_vx03_adc does: ADCCLK
 // 12 MHz, in specification, no crystal needed.
 //
-// THE PADS, all of them free on the CH32V203's board. OPA1: PB15 and PB0
+// THE PADS. OPA1: PB15 and PB0
 // are its two positive inputs, PB11 and PA6 its two negative ones, PA3
 // (channel 3) and PB1 (channel 9) its two outputs. OPA2: PB14 and PA7,
 // PB10 and PA5, PA2 (channel 2) and PA4 (channel 4). On the CH32V303 the
@@ -37,7 +37,11 @@
 // PE8; on that board's evaluation wiring several of them carry a wire to
 // another pad left a floating input, which a pad driven by its own port or
 // by an amplifier drives with it, and PB2 is BOOT1 behind ten kilohms to
-// ground. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug
+// ground. On the CH32V203's board PA2 and PB0 are strapped to PB1 and PA3
+// (the crossed serial pair, inputs here) and PA6 and PA7 share a node with
+// PA8, never driven; and on the bench pair PB10, PB11, PB14 and PB15 there,
+// PB0 and PB1 on the CH32V303, are wires to the other board, which runs its
+// dark console while this suite does. NEVER TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug
 // port), PA11/PA12 (the USB pads), PC14/PC15 and PD0/PD1 (the crystals),
 // PA0 on the CH32V203's board (its KEY) - and PB2, left undriven, as in
 // every suite of this target.
@@ -305,12 +309,22 @@ void tb_selections() {
         const uint16_t other_after = read_channel(O2b::adc_channel);
         const uint16_t first_after = read_channel(O2a::adc_channel);
         const uint8_t routed = Opa<2>::adc_channel();
+        // OUT0, left behind, is no longer driven - and a pad nobody drives
+        // keeps the charge of its last level, so the converter's reading
+        // of it says nothing: its own pull-up is what decides, the CH1
+        // pair holding the amplifier's output low. 200 us is some two
+        // hundred time constants of the pull's tens of kiloohms against a
+        // pad and its wire.
+        O2a::pin::input(PinPull::up);
+        wait_us(200);
+        const bool first_released = O2a::pin::read();
 
         print(serial, "  the CH0 pair (PB14 high, PB10 low) puts the output at ", pair0,
               " counts; the CH1 pair (PA7 low, PA5 high) at ", pair1, crlf);
         print(serial, "  moved to OUT1 (PA4, channel ", O2b::adc_channel, "): that pad read ",
-              other_before, " counts before and ", other_after, " after, while OUT0 fell to ",
-              first_after, crlf);
+              other_before, " counts before and ", other_after, " after; OUT0 left behind read ",
+              first_after, " counts, then ", first_released ? "its pull-up" : "LOW",
+              " as an input", crlf);
         bench.verdict("the positive input is a choice of two pads, and the choice is what the "
                       "output follows",
                       pair0 >= 3900u);
@@ -320,7 +334,8 @@ void tb_selections() {
         bench.verdict("the output is a choice of two pads too: the one just selected carries the "
                       "level",
                       other_after <= 100u && other_before != other_after);
-        bench.verdict("and the one it left stops being driven", first_after > other_after + 100u);
+        bench.verdict("and the one it left stops being driven: its own pull-up takes it",
+                      first_released);
         bench.verdict("the driver says which channel the selected output lands on",
                       routed == O2b::adc_channel);
     } else {
