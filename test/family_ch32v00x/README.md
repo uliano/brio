@@ -21,3 +21,15 @@ accepts every C++23 construct brio's kernel and services are written
 with (the other three targets compile with gcc 16.2), which is what
 `util_all.cpp` exists for - it includes EVERY kernel and util header
 and instantiates each service over this target's platform.
+
+THE PLACEMENT (util/placement.hpp): `platform.cpp`, `spi.cpp`,
+`dma.cpp` and `i2c.cpp` each place a plain function of the program -
+a vector - in `.fast_text` (`platform.cpp` in `.ram_text`) in the same
+unit that emits the drivers' `InRam` instances in `.fast_text.brio` or
+the platform's own SRAM body in `.ram_text.brio`: the two names are
+what lets GCC take a plain and a grouped function in one unit, and a
+regression to one name fails to compile here. The negatives refuse an
+unknown tag (`hot_placement_unknown`, `spi_host_placement_unknown`),
+`InRam` on a platform that does not place `.fast_text`
+(`uart_placement_platform_cannot`) and on a port with nothing to place
+(`uart_placement_without_engine`).

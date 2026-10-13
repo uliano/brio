@@ -81,7 +81,7 @@ the pads).
   write), the CRC verbs (`crc_next()`, `tx_crc()`, `rx_crc()`),
   `software_select()`, `high_speed_read()`, `dma_requests()`, the
   three interrupt enables and `isr()`, the raised-and-enabled sources.
-- `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles>` is the
+- `SpiHost<1, pins, TxEngine, RxEngine, hold_off_cycles, Placement>` is the
   engine `SpiBus` (= `BusMaster`) drives. Its `Request` carries the other strata's fields
   name for name: a chip select `PinRef` and a D/C line, a command phase
   (D/C low), a data phase with an optional out buffer (null = 0xFF
@@ -105,6 +105,12 @@ the pads).
   at, that the image keeps the host's vector from running - the longer
   of its longest handler and its longest masked window - with a default
   of 320 and a zero refused at compile time (the next section).
+  `Placement` is where the two polled loops run from,
+  util/placement.hpp's `InFlash` (the default) or `InRam` - each width
+  of each loop then one instance in SRAM, a call a phase
+  ([platform.md](platform.md), "A handler in SRAM"); any other tag is
+  refused at compile time. The pump is not placed: it is inline in the
+  vector under either tag (the next section).
   The engine slots are `DmaTxEngine<3, Elem>` and `DmaRxEngine<2,
   Elem>`, both or neither, on those two channels and no others (refused
   at compile time otherwise). Their `Elem` is the widest beat:
@@ -208,6 +214,26 @@ statement - lies on the bus's dead time (letter r).
   bus is only a slower one. Both loops spend ONE bounded budget of poll
   turns for the whole transaction (a frame's cycles per frame, a shift
   and no multiply) and end with `spi_stalled` when a flag never comes.
+- **The loops from SRAM** (`Placement` = `InRam`, measured in the same
+  letter through a twin host): the transmit-only loop at the wire from
+  HCLK/2, 16.0 cycles an 8-bit frame against the flash's 24.9 (the
+  wire's 16) and 33.7 a 16-bit one against 37.9 (32); the receive loop
+  42.8 cycles an 8-bit frame at HCLK/4 against 56.8 - 11 cycles of dead
+  bus a frame where the flash leaves 25 - 148.4 against 166.7 at
+  HCLK/16, 83.5 against 104.1 a 16-bit frame at HCLK/4, and 32.9
+  against 34.9 at HCLK/2, where the poll's turn is the wire's frame.
+  446 bytes of SRAM a host type, both loops at both widths, each called
+  once a phase. The polled threshold follows the placement:
+  `dma_min_frames_polled` 20 from the flash, 45 from SRAM (the same
+  engines' fixed cost over 11 cycles a frame).
+- **The pump is not placed by the host.** Inline in the vector, 167
+  cycles of metered body a frame; the same body as an instance in SRAM
+  behind the same vector in the flash took 176 (274.4 cycles a frame
+  at HCLK/4 against 259.4): the call into SRAM and the return into the
+  flash behind its wait states cost the short body more than SRAM saves
+  it. A program that wants it from SRAM places the vector
+  ([platform.md](platform.md), "A handler in SRAM"): 174.7 cycles a
+  frame at HCLK/4, 5.5 times the wire against 8.1.
 - **The select and D/C edges** are one store each into BSHR and BCR
   (RM 7.3.1.4, 7.3.1.5), inline, the null D/C a branch; `cs_setup_us`
   is tested before anything is called; no flush of the receive buffer
@@ -335,7 +361,7 @@ to back under its engines, every rung from /64 to /2, and judges each end.
 | the NSS pad (16.2.1) | yes, the window | the chapter has no flag for a client's window end: the pad is read once for every four polls of a flag |
 | DMA requests on channels 2 and 3 (table 8-2) | not in a run | a DMA serve is the program's composition of the engines over the resource - its binding, its channels and the latched-request rule (What the silicon does) are the program's - and `spi_peer`'s default serve, at the wire to 24 MHz; a run is the polled serve, with nothing to arm |
 | RXNE and TXE interrupts (16.2.8) | not in a run | an interrupt a frame pays the hardware prologue and epilogue, 54 cycles, before a body, against frames of 64 cycles at 6 MHz; `isr()` stands for a program that wants them |
-| SRAM execution | the program's | the runs are always inline and the stratum places nothing in SRAM (8 KB); ld/ch32v006k8.ld carries no `.ram_text`, so from the flash, behind two wait states at 48 MHz (RM 18.3.1), the fetch is a run's ceiling (measured, below) |
+| SRAM execution | the program's | the runs are always inline, so a program places the function that calls them: a plain function with `[[gnu::section(".fast_text")]]`, an inline or template one through `Hot<InRam>::run` ([platform.md](platform.md), "A handler in SRAM"); `spi_peer` keeps its caller in the flash, behind two wait states at 48 MHz (RM 18.3.1), where the fetch is a run's ceiling (measured, below) |
 
 THE COST, in the steady state with each flag found at its first poll,
 no call anywhere in a run:
@@ -401,7 +427,11 @@ them: from SRAM the same receive run hears 24 MHz back to back (below).
   peer's serve in `.data`, about 1.1 KB a frame width for the three runs
   inlined) - the exchange exact to 12 MHz in 8-bit frames under both
   hosts, the receive run to 24 MHz back to back, every 16-bit run to 24
-  MHz: one rung, a factor of two, over the flash for the exchange.
+  MHz: one rung, a factor of two, over the flash for the exchange. A
+  program takes it by placing the function that calls the runs - a
+  plain one with `[[gnu::section(".fast_text")]]`, an inline or template
+  one through `Hot<InRam>::run` ([platform.md](platform.md), "A handler
+  in SRAM"); the runs themselves stay inline in it.
 
 ## How to use it
 
@@ -653,11 +683,6 @@ Driver gaps, each with its reason:
   has SSOE and the multi-host input for a program that wants them.
 - The CRC as part of a Request: the resource's verbs exist, born into a
   tenure shape with a device that checks one.
-- A run's caller in SRAM: ld/ch32v006k8.ld carries no `.ram_text` (the
-  stratum places nothing in SRAM, 8 KB of it), so a program that wants
-  the exchange's rung over the flash's (The client's runs) has no section
-  to place its caller in - a decision for the ld, a rung for about 1.1 KB
-  a frame width.
 - The CH32V003F4P6's client in modes 1 and 2: `SpiClient` refuses them on
   the CH32V006 alone, where they were measured served neither way; the
   CH32V003 shares the block and has not answered on its own die, and a
@@ -671,6 +696,11 @@ Implemented but not bench-verified, each with what would measure it:
 - A run on a client with no NSS pad (it ends on its count or its budget
   alone): it compiles; a client whose pins name no select, under a host
   framing its own, would run it.
+- A run's caller placed in `.fast_text`: the rung it buys was measured
+  with the caller moved into `.data` by hand (the exchange to 12 MHz in
+  8-bit frames, about 1.1 KB of SRAM a frame width); `spi_peer` built
+  with its `polled_serve()` in `.fast_text`, under `test_x035_spi`'s
+  letter k, would measure the spelling.
 
 - The suite on the CH32V003F4P6: its fifteen group images link and fit
   (`brio fit`); the part is off the desk, and a CH32V003 wired to the

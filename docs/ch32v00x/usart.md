@@ -202,7 +202,7 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   TE or RE is set; the CK pad is the caller's to hand over
   (`afio_usart1_pads(code).ck`). The modes refuse each other's
   company as 14.4 and 14.5 say.
-- `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts>` is
+- `Uart<n, P, rx_size, tx_size, TxEngine, RxEngine, remap, opts, Placement>` is
   the transport task, on the resource: `init(clock, baud)`, `isr()`
   (the edge), `write_byte()`/`write_bulk()` (a run: as many as fit,
   its first byte pushed and TXEIE armed before the rest is copied and
@@ -230,7 +230,12 @@ the CH32V003 its reference manual V1.9 (12.4 for the synchronous mode,
   flag register read once; its true is the receive edge, as `isr()`'s),
   `harvest()` (the same edge asked from the consumer's side, and a
   stopped ring started again; it reads neither STATR nor DATAR),
-  `dma_faults()`, and `actual_baud()`/`divisor_for()`. `init()` puts the
+  `dma_faults()`, and `actual_baud()`/`divisor_for()`. `Placement`,
+  after `opts`, is where the transmit engine's block restart runs from:
+  util/placement.hpp's `InFlash` (the default, flattened into the
+  channel's vector) or `InRam` (one instance in SRAM, a call from the
+  vector), refused on a port without a transmit engine; `isr()` takes no
+  placement (Bench findings). `init()` puts the
   block through its reset line first. `write_bulk()` copies a run of 16
   bytes or more whose source and ring slot share their alignment with
   the runtime's memcpy, any other with its byte loop.
@@ -314,6 +319,17 @@ extern "C" BRIO_CH32_INTERRUPT void dma1_channel7_handler() {
 extern "C" BRIO_CH32_INTERRUPT void dma1_channel6_handler() { (void)Link::dma_isr(); }
 ```
 
+The same port with its block restart in SRAM - and, for an
+interrupt-driven port, its vector placed by the program instead
+([platform.md](platform.md), "A handler in SRAM"):
+
+```cpp
+using Fast = brio::Uart<2, P, 256, 256, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>, 3, brio::UartOptions{},
+                        brio::InRam>;
+using Irq = brio::Uart<2, P, 64, 512, brio::NoDmaEngine, brio::NoDmaEngine, 3>;
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void usart2_handler() { (void)Irq::isr(); }
+```
+
 A one-wire bus (a pull-up on the wire; what this node sends, it does
 not hear back):
 
@@ -343,10 +359,10 @@ stress`) on the CH32V006K8U6 at 48 MHz, with USART2 on column 3 as the
 instrument and the console untouched on USART1; and its TWO-BOARD KEY
 `w` (letters 1 to 8, 59 verdicts) on column 4 against the CH32X035's
 `usart_peer`. The whole suite does not fit the CH32V006K8's 40 KB, so on
-that part it is two images (the build's group axis): `-1` the
-single-board letters on the HSI's PLL, `-2` the two-board key on the
-module's 24 MHz crystal doubled - the reference it calibrates the far
-chip by. Every fact above with
+that part it is three images (the build's group axis): `-1` and `-2`
+the single-board letters on the HSI's PLL, `-3` the two-board key on
+the module's 24 MHz crystal doubled - the reference it calibrates the
+far chip by. Every fact above with
 a number is its measurement; the shape of the instrument is the
 suite's header comment - the RX pad as a bit-banged transmitter paced
 on the STK, the capture on the jumper as the ruler, no loop-back. On
@@ -431,6 +447,24 @@ out there.
   bytes); the interrupt transmitter is wire-bound at 115200, 1.08 at
   1 Mbaud and 1.40 at 3 Mbaud, its entry of about 133 cycles a byte
   longer than the 160-cycle frame leaves room for beside the tick.
+- **Where the hot paths run from** (`bench_ch32` letter u, each port's
+  vector metered alone, the stamps' 46 cycles inside): the transmit
+  engine's block restart - the channel's vector, the ring's consume, the
+  next run read and launched, flattened into it - takes 239 to 247 cycles
+  from the flash (290 with the run's start a call out of the vector) and
+  207 to 210 as the `InRam` instance behind the same vector, 212 bytes of
+  SRAM; with the vector itself placed by the program, 141. At 3 Mbaud the
+  engine's line over 23 blocks of 4096 bytes idles some 24 cycles less a
+  block from SRAM; at the thousandths of letter i (1024 frames, four laps
+  of a 256-byte ring) it reads 1004 from the flash. The interrupt
+  transmitter's `isr()` is 135 to 136 cycles an entry inline in a vector
+  in the flash and 76 in a vector the program placed, which takes it
+  from 1.07 times the wire at 1 Mbaud and 1.42 at 3 Mbaud to 1.00 and
+  1.08; the same body as an instance in SRAM behind a vector in the
+  flash took 145 - the call and the return into the flash cost it more
+  than SRAM saves - so `isr()` takes no placement, and `InRam` is
+  refused on a port without a transmit engine
+  ([platform.md](platform.md), "A handler in SRAM").
 - **Measured once while the round was written** (`bench_ch32`, before
   the transport's `init()` put the block through its reset line): a
   receive engine's session started after the plain console's on the

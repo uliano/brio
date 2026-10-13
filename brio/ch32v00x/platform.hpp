@@ -267,6 +267,17 @@ struct Ch32v00xPlatform {
     /// access, which is what lets util/ring.hpp take its lock-free path.
     static constexpr unsigned atomic_width = 4;
 
+    /// This family places `.fast_text` in SRAM, on both parts: the two
+    /// linker scripts collect it first in .data, which the crt copies
+    /// before main(), and the vector table holds absolute addresses, so
+    /// code there is entered and called without a veneer
+    /// (docs/ch32v00x/platform.md, "A handler in SRAM"). A driver of this
+    /// stratum may therefore be given util/placement.hpp's InRam - an
+    /// opt-in the program spends its SRAM on, 8 KB on the CH32V006 and
+    /// 2 KB on the CH32V003, and a link that does not fit is refused by
+    /// the scripts' `ram` region.
+    static constexpr bool places_fast_text = true;
+
     /**
      * Panic breadcrumb in .noinit: the linker script places the section
      * and the crt neither loads nor zeroes it, so a record written just
@@ -281,10 +292,16 @@ struct Ch32v00xPlatform {
 
 private:
     /// The CH32V003's wfi (THE CH32V003, above): executed masked from
-    /// SRAM (`.ram_text`, which ld/ch32v003f4.ld carries in .data) with
-    /// the spin after it, so that nothing is fetched from flash in the
-    /// first cycles after a wake - twelve bytes of RAM.
-    [[gnu::section(".ram_text"), gnu::noinline]] static void wfi_from_sram() {
+    /// SRAM with the spin after it, so that nothing is fetched from flash
+    /// in the first cycles after a wake - twelve bytes of RAM. Code that
+    /// MUST run from SRAM, so `.ram_text` (util/placement.hpp's two
+    /// names), which ld/ch32v003f4.ld carries in .data - as
+    /// `.ram_text.brio`, never cloned: a member of a class template is
+    /// emitted in a COMDAT group, and GCC refuses one section name for a
+    /// grouped function and a program's plain one in the same translation
+    /// unit ("section type conflict", WCH's gcc 15.2), so the brio name is
+    /// for header functions and a program's own names `.ram_text`.
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone]] static void wfi_from_sram() {
         uint32_t n = sram_wake_spin_turns;
         __asm__ volatile("wfi\n1:\taddi %0, %0, -1\n\tbnez %0, 1b" : "+r"(n)::"memory");
     }

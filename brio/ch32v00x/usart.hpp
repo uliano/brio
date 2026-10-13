@@ -142,6 +142,22 @@
  * default column puts TX on PA7, the CH32V006K8's reset pin, so USART2
  * is REFUSED at code 0 on this part and takes codes 1..6.
  *
+ * WHERE THE HOT PATHS RUN FROM: the port's placement, its last template
+ * parameter (util/placement.hpp) - inline in the vector that binds them by
+ * default, one instance in SRAM (`.fast_text.brio`, which ld/ copies there
+ * with .data) under InRam, where the fetch skips the code flash's two wait
+ * states at 48 MHz (RM 18.3.1). ONE PATH TAKES IT, THE TRANSMIT ENGINE'S
+ * BLOCK BOUNDARY: a block's completion releases its bytes and starts the
+ * next run while the shifter still holds about a frame and a half,
+ * flattened (the ring's consume and read_span and the engine's launch
+ * inlined, no call left on the path) - from SRAM a third shorter behind a
+ * vector in the flash. The interrupt transport's isr() is not placed: a
+ * call into SRAM and the return into the flash cost its short body more
+ * than SRAM saves it (measured). A program that places the VECTOR itself
+ * (`.fast_text`) runs either inline body from SRAM with it, no call at
+ * all - the fastest of the three (docs/ch32v00x/platform.md, "A handler
+ * in SRAM"; docs/ch32v00x/usart.md).
+ *
  * THE MODES EXCLUDE EACH OTHER THE WAY 14.4 AND 14.5 SAY: half duplex
  * is refused while LIN or IrDA is on, IrDA while LIN or half duplex is
  * on or the stop bits are not one, LIN while either of the other two
@@ -156,6 +172,7 @@
 
 #include <atomic>
 #include <span>
+#include <type_traits>
 
 #include "ch32v00x/afio.hpp"
 #include "ch32v00x/device.hpp"
@@ -163,6 +180,7 @@
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/pin.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
 
@@ -679,6 +697,8 @@ struct UartOptions {
  *
  * `P` is the platform, which the rings need to know whether an index
  * can be shared with a handler bare (atomic_width) or wants a guard.
+ * `Placement` is where the hot paths run from (util/placement.hpp; the
+ * file header): InFlash, the default, or InRam.
  */
 /**
  * The receive ring a transport keeps: a SkipRing, which the interrupt
@@ -704,8 +724,15 @@ struct UartRxRing<true, Owner, size, Engine, P> {
 
 template <uint8_t instance, typename P, uint16_t rx_size = 64, uint16_t tx_size = 64,
           typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine, uint8_t remap = 0,
-          UartOptions opts = {}>
+          UartOptions opts = {}, typename Placement = InFlash>
 struct Uart {
+    static_assert(HotPlacement<Placement, P>,
+                  "brio Uart: the placement is util/placement.hpp's InFlash (the default) or InRam, and "
+                  "InRam only on a platform whose linker scripts place .fast_text");
+    static_assert(!std::is_same_v<Placement, InRam> || TxEngine::present,
+                  "brio Uart: InRam places the transmit engine's block restart - a port without a "
+                  "transmit engine has nothing to place (its isr() is the vector's: a program that "
+                  "wants it in SRAM places the vector)");
     static_assert(usart_base_for(instance) != 0,
                   "brio Uart: this family has USART1 and USART2 (the CH32V005/006/007)");
     static_assert(uart_format_valid(opts.format) && opts.format.bits != UartBits::nine,
@@ -886,8 +913,7 @@ struct Uart {
                 (void)TxEngine::abandon();
                 m_dma_faults = m_dma_faults + 1u;
             } else if ((f & TxEngine::flag_complete) != 0u) {
-                m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
-                pump_tx();
+                tx_block_done();
             }
         }
         if constexpr (has_rx_engine) {
@@ -953,7 +979,11 @@ struct Uart {
      * util/serial_port.hpp posts on.
      */
     // always_inline: one call site (the app's vector binding), so the
-    // compiler saves only the registers this body uses.
+    // compiler saves only the registers this body uses. INLINE IN THE VECTOR
+    // UNDER EITHER PLACEMENT (the file header): a call into SRAM from a
+    // vector in the flash, and the return, cost this short body more than
+    // SRAM saves it - measured. A program that wants it in SRAM places the
+    // vector.
     [[gnu::always_inline]] static bool isr() {
         bool rx_edge = false;
         bool waited = false;
@@ -1283,6 +1313,16 @@ struct Uart {
     }
 
 private:
+    /// The transmit block's completion: its bytes released from the ring,
+    /// the next run started - one flattened function of the port's
+    /// placement (the file header).
+    [[gnu::always_inline]] static void tx_block_done() {
+        Hot<Placement>::run([] {
+            m_tx.consume(static_cast<typename decltype(m_tx)::index_t>(TxEngine::complete()));
+            pump_tx();
+        });
+    }
+
     /// Start the next contiguous run of the TX ring on the engine, if it
     /// is idle and there is one. THE MASK COVERS THE CLAIM AND NOTHING
     /// ELSE: the engine's busy flag tested and set under the guard - the

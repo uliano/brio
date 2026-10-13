@@ -52,6 +52,7 @@
 #include "util/nv_record.hpp"
 #include "util/nv_writer.hpp"
 #include "util/persistent_panic.hpp"
+#include "util/placement.hpp"
 #include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/proto/line_parser.hpp"
@@ -83,6 +84,8 @@ using namespace brio;
 using P = Ch32v00xPlatform<>;
 using SysClock = Clock<ClockSource::pll, 48'000'000>;
 using Serial = Uart<1, P>;
+// The placements this family's drivers take (util/placement.hpp): both.
+static_assert(HotPlacement<InFlash, P> && HotPlacement<InRam, P>);
 
 // ---- storage: an NvStore with a ready interrupt, a FlashMedia ---------------
 struct FakeStore {

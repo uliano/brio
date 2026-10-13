@@ -11,9 +11,8 @@
  *    the configuration under the rules the chapter states, the data
  *    and status verbs, the ISR body that reads the raised-and-enabled
  *    sources. It decides nothing.
- *  - `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>` is the
- *    ENGINE util/
- *    spi_bus.hpp's SpiBus drives: the Request's fields are the other
+ *  - `SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles, Placement>`
+ *    is the ENGINE util/spi_bus.hpp's SpiBus drives: the Request's fields are the other
  *    strata's, name for name (chip select, D/C, a command phase, a
  *    data phase with optional out and in, the per-request mode/rate/
  *    frame size, the polled or ISR-pumped completion), so an
@@ -63,6 +62,24 @@
  * a STATR read followed by a CTLR1 write; clearing OVR a DATAR read
  * followed by a STATR read - two sequences the resource keeps.
  *
+ * WHERE THE POLLED LOOPS RUN FROM: the host's placement, its last template
+ * parameter (util/placement.hpp). The code flash answers behind two wait
+ * states at 48 MHz (RM 18.3.1), and every taken branch of a loop is a
+ * fetch the core waits for there. Under `InFlash`, the default, the two
+ * loops are inline in the phase that runs them, as if there were no
+ * trampoline; under `InRam` each width of each is ONE out-of-line
+ * instance in `.fast_text.brio`, which ld/ collects into .data and the crt
+ * copies to SRAM, flattened (no call left on the path), a call a phase.
+ * The receive loop's dead bus a frame then falls from 25 cycles to 11 at
+ * HCLK/4, and the transmit-only loop holds the wire at HCLK/2 (measured,
+ * docs/ch32v00x/spi.md); the cost constant the engines' polled threshold
+ * is drawn from follows the placement. THE PUMP IS NOT PLACED: inline in
+ * the vector under either tag, because a call into SRAM from a vector in
+ * the flash and the return cost its short body more than SRAM saves it
+ * (measured: 176 cycles an entry against 167 inline); a program that wants
+ * it in SRAM places the vector (`.fast_text`), 175 cycles a frame at
+ * HCLK/4 against 259.
+ *
  * NOT COVERED YET: the simplex modes (BIDIMODE/BIDIOE, RXONLY) beyond
  * the resource's configuration bits - no user; the hardware NSS
  * arrangements as the engine's select (the resource has them, the
@@ -92,9 +109,11 @@
 #include "ch32v00x/dma_engine.hpp"
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/pin.hpp"
+#include "ch32v00x/platform.hpp"
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/spi_bus.hpp"
 
 namespace brio {
@@ -618,7 +637,7 @@ constexpr SpiClock spi_write_ahead_from(SpiDataSize bits, uint32_t hold_off_cycl
 }
 
 /**
- * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles>
+ * SpiHost<n, pins, TxEngine, RxEngine, hold_off_cycles, Placement>
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives. Its Request
  * is the other strata's: the bus AO asserts the request's own chip
@@ -709,9 +728,13 @@ constexpr SpiClock spi_write_ahead_from(SpiDataSize bits, uint32_t hold_off_cycl
  * it declared was too short.
  */
 template <uint8_t n, SpiPins pins = spi1_default_pins, typename TxEngine = NoDmaEngine,
-          typename RxEngine = NoDmaEngine, uint32_t hold_off_cycles = spi_default_hold_off_cycles>
+          typename RxEngine = NoDmaEngine, uint32_t hold_off_cycles = spi_default_hold_off_cycles,
+          typename Placement = InFlash>
 class SpiHost {
     using S = Spi<n>;
+
+    static_assert(HotPlacement<Placement, Ch32v00xPlatform<>>,
+                  "brio SpiHost: the placement is util/placement.hpp's InFlash (the default) or InRam");
 
     static_assert(hold_off_cycles > 0u,
                   "brio SpiHost: a hold-off of zero cycles is no image's - an image with no "
@@ -810,22 +833,25 @@ public:
     /// inside the stopwatch, BenchIdle, the stopwatch, the handler's stamp
     /// pair: 360) - 504. The pump's cost per frame: the handler's metered
     /// body for an 8-bit frame with an in buffer, letter e's 256-frame
-    /// write - 177 (176.3 to 176.7). A data phase of fewer frames than
-    /// their quotient costs less on the pump.
+    /// write - 177 (176.3 to 176.7). Neither is placed (the file header):
+    /// both run from the flash under either placement. A data phase of
+    /// fewer frames than their quotient costs less on the pump.
     static constexpr uint32_t engine_fixed_cycles = 504;
     static constexpr uint32_t pump_frame_cycles = 177;
     static constexpr uint16_t dma_min_frames =
         static_cast<uint16_t>((engine_fixed_cycles + pump_frame_cycles - 1u) / pump_frame_cycles);
+    /// Are the polled loops placed in SRAM (the file header)?
+    static constexpr bool placed_in_ram = std::is_same_v<Placement, InRam>;
     /// The receive loop's dead bus per frame - the poll's last turn, the
-    /// DATAR read, the DATAR write: 25 cycles measured at HCLK/4 in the
-    /// same session (56.7 a frame against the wire's 32) - against the
-    /// same fixed cost: a polled request with an in buffer rides the
-    /// engines from this many frames on. The transmit-only loop never
-    /// does: it runs at the wire.
-    static constexpr uint32_t polled_gap_cycles = 25;
+    /// DATAR read, the DATAR write - at HCLK/4, against the wire's 32: 25
+    /// cycles from the flash (56.7 a frame), 11 from SRAM (42.8), each in
+    /// its placement - against the same fixed cost: a polled request with
+    /// an in buffer rides the engines from this many frames on. The
+    /// transmit-only loop never does: it runs at the wire.
+    static constexpr uint32_t polled_gap_cycles = placed_in_ram ? 11u : 25u;
     static constexpr uint16_t dma_min_frames_polled = static_cast<uint16_t>(engine_fixed_cycles / polled_gap_cycles);
-    static_assert(dma_min_frames == 3u && dma_min_frames_polled == 20u,
-                  "the two thresholds the measured costs give (docs/ch32v00x/spi.md)");
+    static_assert(dma_min_frames == 3u && dma_min_frames_polled == (placed_in_ram ? 45u : 20u),
+                  "the two thresholds the measured costs give, per placement (docs/ch32v00x/spi.md)");
 
     // ---- lifecycle ----------------------------------------------------------
 
@@ -1062,6 +1088,11 @@ public:
     /// DATAR sees every overrun up to the read, and DATAR-then-STATR is
     /// 16.2.7's clear: the flag goes down in the same handler, never left
     /// standing for the next transaction's first. One APB load a frame.
+    ///
+    /// INLINE IN THE VECTOR UNDER EITHER PLACEMENT (the file header): a
+    /// call into SRAM from a vector in the flash, and the return into the
+    /// flash, cost this short body more than SRAM saves it - measured. A
+    /// program that wants the pump in SRAM places the vector.
     [[gnu::always_inline]] static bool isr() {
         if ((S::regs().STATR & spi_rxne) == 0u) {
             return false;
@@ -1257,14 +1288,32 @@ private:
         return (frames + 2u) << log2_frame;
     }
 
-    static bool poll_write_phase(SpiDataSize bits, const uint8_t* out, uint16_t count, uint32_t& budget) {
-        return spi_frame_is_halfword(bits) ? poll_write<uint16_t>(out, count, budget)
-                                           : poll_write<uint8_t>(out, count, budget);
+    /// The loops' two widths, each one function of the host's placement
+    /// (the file header): inline in the phase under InFlash, the
+    /// trampoline's instance for that width's lambda under InRam - a call
+    /// a phase, the loop flattened into it. The closure (the buffers, the
+    /// count, the budget's address) is built once and passed by address.
+    /// NOT INLINED into start(), which calls them from three places: there
+    /// both widths of a loop would be copied into it, measured a kilobyte
+    /// more of flash on the CH32V003's suite images.
+    [[gnu::noinline]] static bool poll_write_phase(SpiDataSize bits, const uint8_t* out, uint16_t count, uint32_t& budget) {
+        return spi_frame_is_halfword(bits) ? poll_write_at<uint16_t>(out, count, budget)
+                                           : poll_write_at<uint8_t>(out, count, budget);
     }
-    static bool poll_duplex_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in, uint16_t count,
-                                  uint32_t& budget) {
-        return spi_frame_is_halfword(bits) ? poll_duplex<uint16_t>(out, in, count, budget)
-                                           : poll_duplex<uint8_t>(out, in, count, budget);
+    [[gnu::noinline]] static bool poll_duplex_phase(SpiDataSize bits, const uint8_t* out, uint8_t* in,
+                                                    uint16_t count, uint32_t& budget) {
+        return spi_frame_is_halfword(bits) ? poll_duplex_at<uint16_t>(out, in, count, budget)
+                                           : poll_duplex_at<uint8_t>(out, in, count, budget);
+    }
+    template <typename T>
+    [[gnu::always_inline]] static bool poll_write_at(const uint8_t* out, uint16_t count, uint32_t& budget) {
+        return Hot<Placement>::run([out, count, &budget] { return poll_write<T>(out, count, budget); });
+    }
+    template <typename T>
+    [[gnu::always_inline]] static bool poll_duplex_at(const uint8_t* out, uint8_t* in, uint16_t count,
+                                                      uint32_t& budget) {
+        return Hot<Placement>::run(
+            [out, in, count, &budget] { return poll_duplex<T>(out, in, count, budget); });
     }
 
     /// THE TRANSMIT-ONLY LOOP (16.2.2): a frame written whenever TXE says
@@ -1275,7 +1324,7 @@ private:
     /// BSY (out of it); the DATAR-then-STATR read clears RXNE and OVR.
     /// A null `out` clocks 0xFF dummies from a fixed cell. `count` >= 1.
     template <typename T>
-    static bool poll_write(const uint8_t* out, uint16_t count, uint32_t& budget) {
+    [[gnu::always_inline]] static bool poll_write(const uint8_t* out, uint16_t count, uint32_t& budget) {
         const uint8_t* p = out != nullptr ? out : dummy_bytes_;
         const uint32_t step = out != nullptr ? sizeof(T) : 0u;
         SpiRegs& regs = S::regs();
@@ -1314,7 +1363,7 @@ private:
     /// and the DATAR write back to back, the store of the frame read.
     /// The last frame is read after the loop. `count` >= 1.
     template <typename T>
-    static bool poll_duplex(const uint8_t* out, uint8_t* in, uint16_t count, uint32_t& budget) {
+    [[gnu::always_inline]] static bool poll_duplex(const uint8_t* out, uint8_t* in, uint16_t count, uint32_t& budget) {
         const uint8_t* p = out != nullptr ? out : dummy_bytes_;
         const uint32_t step = out != nullptr ? sizeof(T) : 0u;
         SpiRegs& regs = S::regs();

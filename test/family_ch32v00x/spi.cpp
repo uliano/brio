@@ -30,6 +30,17 @@ using HostNoMiso = SpiHost<1, write_only>;
 // two frames in flight to a slower code, the default keeping /64 and /32.
 using HostSlowHandlers = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 600>;
 using Client = SpiClient<1>;
+// Both placements (util/placement.hpp): the default above, and a plain and
+// an engined host whose polled loops run from SRAM.
+using RamHost = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
+using RamHost16 = SpiHost<1, spi1_default_pins, DmaTxEngine<3, uint16_t>, DmaRxEngine<2, uint16_t>, 600, InRam>;
+static_assert(!Host::placed_in_ram && RamHost::placed_in_ram && RamHost16::placed_in_ram);
+// The loops' cost follows the placement, and so does the polled threshold
+// drawn from it; the pump's, the hold-off and the write-ahead do not.
+static_assert(RamHost::polled_gap_cycles < Host::polled_gap_cycles &&
+              RamHost::dma_min_frames_polled > Host::dma_min_frames_polled &&
+              RamHost::pump_frame_cycles == Host::pump_frame_cycles &&
+              RamHost::write_ahead_from(SpiDataSize::bits8) == Host::write_ahead_from(SpiDataSize::bits8));
 
 static_assert(Host::write_ahead_from(SpiDataSize::bits8) == SpiClock::div64 &&
               Host::write_ahead_from(SpiDataSize::bits16) == SpiClock::div32);
@@ -104,6 +115,19 @@ void all_hosts() {
     host_verbs<HostDma16>(buf);
     host_verbs<HostNoMiso>(buf);
     host_verbs<HostSlowHandlers>(buf);
+    host_verbs<RamHost>(buf);
+    host_verbs<RamHost16>(buf);
+}
+
+// A program places one of its own plain functions (`.fast_text`), in the
+// translation unit that also emits the InRam hosts' trampolines
+// (`.fast_text.brio`): the two names are what lets GCC take both kinds in
+// one unit (util/placement.hpp, docs/ch32v00x/platform.md, "A handler in
+// SRAM").
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void spi1_handler() {
+    (void)Host::isr();
+    (void)RamHost::isr();
+    (void)RamHost16::isr();
 }
 
 void client_verbs() {

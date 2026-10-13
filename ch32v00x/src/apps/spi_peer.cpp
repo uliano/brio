@@ -111,6 +111,14 @@
 // ident.xtal says whether the 24 MHz crystal started (the PLL doubles it
 // to 48 MHz, the HSI's PLL the fallback at the same rate).
 //
+// NOTHING PLACED IN SRAM (util/placement.hpp, docs/ch32v00x/platform.md,
+// "A handler in SRAM"): the host of Op::host_burst keeps the default
+// placement, its loops in the flash - one polled frame a request, the gap
+// between requests the protocol's, so the loop's frame is never the bound
+// - and polled_serve(), the caller of the client's runs, stays in the
+// flash too: from SRAM it would take the 8-bit exchange a rung higher (12
+// MHz, measured), above the 6 MHz every suite of the pair judges.
+//
 // build: boards = v006k8
 // build: monitor_speed = 115200
 

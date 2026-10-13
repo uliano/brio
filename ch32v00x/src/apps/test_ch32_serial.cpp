@@ -144,11 +144,11 @@
 //      of an open-drain wire under its collide
 //   8  mute by address mark and by idle line, IrDA between two WCH codecs
 //
-// THE CH32V006K8's 40 KB HOLD THE SUITE AS TWO IMAGES (the build's group
-// axis): -1 the single-board letters, -2 the two-board key. -2 runs on the
-// module's crystal, its reference; -1 on the HSI's PLL, because the
-// crystal's pads are PA1 and PA2 and letter h's RTS is PA1 (the clock's
-// comment below).
+// THE CH32V006K8's 40 KB HOLD THE SUITE AS THREE IMAGES (the build's group
+// axis): -1 and -2 the single-board letters, -3 the two-board key. -3 runs
+// on the module's crystal, its reference; -1 and -2 on the HSI's PLL,
+// because the crystal's pads are PA1 and PA2 and letter h's RTS is PA1
+// (the clock's comment below).
 //
 // THE CH32V003 BUILD carries letter k alone (one group image): its
 // USART is the console's, there being no second instance to be the
@@ -156,7 +156,7 @@
 //
 // build: boards = v006k8,v003f4
 // build: groups = k
-// build: groups.v006k8 = abcdefghijkqrstuy,12345678
+// build: groups.v006k8 = abcdefgh,ijkqrstuy,12345678
 // build: monitor_speed = 115200
 
 #include <stdint.h>

@@ -400,6 +400,16 @@ a tenure longer than a tick period may hold one of the tick's.)
   TxE, one read) takes seven entries and 1970 cycles of fixed cost; under
   the engines its write half is the pump's too (the inventory), and the
   same tenure costs 2060.
+- **The pump takes no placement**: measured in the same letter through
+  a twin host whose event pump was an instance in SRAM behind the same
+  vector in the flash, an entry of a 255-byte write took 161 cycles
+  between the stamps against 154 inline from the flash, and of a read
+  177 against 182 - the call into SRAM and the return into the flash's
+  two wait states (RM 18.3.1) eat what SRAM saves. With the VECTOR
+  placed by the program in `.fast_text` the inline pump takes 92 and 106
+  ([platform.md](platform.md), "A handler in SRAM"), so `I2cHost` takes
+  no placement parameter on this family and a program that wants the
+  pump from SRAM places its event vector.
 - **Against the EVT** the comparison is between two contracts: the
   polled loop's fixed cost is 340 to 770 cycles under this engine's
   (no vector entry, no idle turn, no instrument stamp inside it) and its

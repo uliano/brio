@@ -94,6 +94,16 @@
  * receive block takes, 15.10.2); a one-byte read stays on the pump,
  * whose ACK-before-ADDR sequence the DMA path cannot express.
  *
+ * THE EVENT PUMP TAKES NO PLACEMENT (util/placement.hpp), unlike this
+ * family's SPI host and USART: it is inline in the vector that binds it,
+ * and a program that wants it in SRAM places that vector (`.fast_text`) -
+ * measured on the CH32V006K8U6 at 48 MHz, an entry of a 255-byte write
+ * about 154 cycles between the stamps from the flash and 92 from SRAM with
+ * the vector, while the same body as an out-of-line instance in SRAM
+ * behind a vector in the flash took 161: the call and the return into the
+ * flash's two wait states (RM 18.3.1) cost the entry more than SRAM saves
+ * it (docs/ch32v00x/i2c.md).
+ *
  * NOT COVERED YET: 10-bit addressing on the host side (the resource
  * has the mode and the client matches such an address; the host's
  * header-byte sequence, EV9, has no user); PEC (the resource has the

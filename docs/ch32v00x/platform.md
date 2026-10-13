@@ -312,7 +312,7 @@ masked order.
 
 `idle()` on the CH32V003 is that shape (platform.hpp, THE CH32V003):
 masked throughout, each `wfi` executed from SRAM with the 19-turn spin
-after it (`wfi_from_sram()`, twelve bytes of RAM in `.ram_text`), with
+after it (`wfi_from_sram()`, twelve bytes of RAM in `.ram_text.brio`), with
 two more parts the masked order needs - the latch the last wake left
 is emptied FIRST (SETEVENT and a `wfi` it ends at once, 5 cycles) and
 the PFIC asked whether an enabled line is pending, because after the
@@ -341,6 +341,107 @@ interrupt made EVENTS for the Standby's span (5.2's item (1), the
 vendor's deep WFE doing the same): with the unmasked entry the sleep
 suite's Standby walk ended in the net's reboot, with this one 12800
 Standbys all came back ([sleep.md](sleep.md)).
+
+## A handler in SRAM
+
+**What the silicon does.** At 48 MHz the code flash answers behind two
+wait states (RM 18.3.1), and a taken branch is a fetch the core waits
+for: the SPI host's transmit-only loop takes 24.9 cycles a frame at
+HCLK/2 from it, and 16.0 from SRAM - the wire's 16 ([spi.md](spi.md)).
+The vector table's words after the first are ABSOLUTE addresses (the
+QingKe V2's vectored mode, RM 6.3), so a handler placed in SRAM is
+entered from its vector directly, and a call between SRAM and the flash
+is an `auipc` and a `jalr`, which reach 2 GB either side: no veneer
+either way.
+
+**The option and its spelling: opt-in, per driver, and per vector.**
+Both linker scripts place the input sections `.fast_text` and
+`.fast_text.*`, then `.ram_text` and `.ram_text.*`, first in `.data`
+([../../ch32v00x/ld/ch32v006k8.ld](../../ch32v00x/ld/ch32v006k8.ld)),
+so the crt's copy of `.data` moves them into SRAM before `main()`, and
+the platform says so (`Ch32v00xPlatform::places_fast_text`) - on both
+parts, the CH32V003's 2 KB included: the placement is a program's
+choice and its cost the program's to weigh (below), and a link that
+does not fit is refused by the script's `ram` region. A driver of this
+stratum takes util/placement.hpp's `InFlash` (the default) or `InRam`
+where a path of its own pays from SRAM, measured: `SpiHost`'s polled
+loops and the `Uart`'s transmit engine block restart (a port without a
+transmit engine refuses `InRam`: it has nothing to place). Under
+`InRam` each such path is ONE out-of-line instance in `.fast_text.brio`,
+flattened; under `InFlash` it is inline where it is called, as if there
+were no trampoline:
+
+```cpp
+using Bus = brio::SpiHost<1, brio::spi1_default_pins, brio::NoDmaEngine, brio::NoDmaEngine,
+                          brio::spi_default_hold_off_cycles, brio::InRam>;
+using Link = brio::Uart<2, P, 256, 256, brio::DmaTxEngine<6>, brio::DmaRxEngine<7>, 3, brio::UartOptions{},
+                        brio::InRam>;
+```
+
+A program places a function of its own - the vector it binds, above
+all - with one attribute, `.fast_text`:
+
+```cpp
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
+    if (Bus::isr()) { brio::post<I2cBus>(brio::TransferDone{Bus::status()}); }
+}
+```
+
+THE NAME IS TWO NAMES. A function defined in a header is emitted in a
+COMDAT group, and GCC refuses one section name for a grouped function
+and a plain one in the same translation unit ("section type conflict",
+WCH's gcc 15.2), so the trampoline's instances name `.fast_text.brio`
+and are never cloned, and a program's plain function names
+`.fast_text`; a program's own inline or template function goes through
+`Hot<InRam>::run` rather than an attribute. `.ram_text` is the name of
+code that MUST run from SRAM for correctness - on this family the
+CH32V003's sleep entry (above), as `.ram_text.brio` for the same
+reason, so that a program may place a plain function of its own in
+`.ram_text` in a unit that emits `idle()`; the family fixtures compile
+both kinds in one unit (`test/family_ch32v00x/platform.cpp`, `spi.cpp`,
+`dma.cpp`, `i2c.cpp`).
+
+**Which placement buys what.** Behind a vector in the flash, a driver's
+body as an instance in SRAM is a CALL from the vector and a return into
+the flash, and on this core the call and the return's refetch behind the
+wait states cost about twenty to thirty cycles: a short body loses them
+whole, a long or looping one repays them. So the driver places what
+repays it - the polled loops, a call a phase, and the transmit engine's
+block restart - and leaves inline in the vector what does not: the SPI
+pump, the USART's `isr()` and the I2C's event pump, which a program
+moves by placing the vector, the fastest of the three ways (no call at
+all). Measured on the CH32V006K8U6 at 48 MHz, a handler's body between
+the meter's stamps (about 46 cycles of them inside) and the hardware
+prologue's entry and exit outside:
+
+| path | placed by | from the flash | from SRAM | SRAM bytes |
+|---|---|---|---|---|
+| the SPI transmit-only loop, a frame at HCLK/2, 8 and 16 bits (the wire 16, 32) | the driver (`InRam`) | 24.9, 37.9 | 16.0, 33.7 | 446 a host type, both loops at both widths |
+| the SPI receive loop, an 8-bit frame at HCLK/2, /4, /16 (the wire 16, 32, 128) | the driver | 34.9, 56.8, 166.7 | 32.9, 42.8, 148.4 | (above) |
+| the USART transmit engine's block restart, the channel's vector | the driver | 239 to 247 | 207 to 210; 141 with the vector placed instead | 212 |
+| the USART interrupt transmitter's `isr()` | the program's vector | 135 to 136 | 76 with the vector placed (145 as an instance behind the flash's vector) | the vector |
+| the SPI pump, an 8-bit frame at HCLK/4 with an in buffer | the program's vector | 259.4 a frame, 167 an entry | 174.7 a frame with the vector placed (274.4 as an instance behind the flash's vector) | 1114, the benchmark's vector with four hosts inline |
+| the I2C event pump, an entry of a 255-byte write and read | the program's vector | 154, 182 | 92, 106 with the vector placed (161, 177 as an instance behind the flash's vector) | 1818, the benchmark's vector with three hosts inline |
+
+At the wire's level: the transmit-only loop holds HCLK/2 from SRAM, the
+receive loop's dead bus a frame falls from 25 cycles to 11 at HCLK/4,
+the interrupt transmitter goes from 1.42 times the wire at 3 Mbaud to
+1.08 with its vector placed, and the engine's line at a block boundary
+idles about 24 cycles less a block at 3 Mbaud (`bench_ch32` letters e
+and u, [spi.md](spi.md), [usart.md](usart.md), [i2c.md](i2c.md)).
+
+**What it costs.** The bytes in the last column, of the part's SRAM -
+the load image stays in the flash beside them. On the CH32V003's 2 KB
+the loops are 448 bytes a host type and the restart 208: with every
+eligible path placed, that part's SPI suite images would reach 2044 to
+2048 bytes of the 2048, and the benchmark's letter-e image would
+overflow by 316, which is why nothing is placed by default. A placed
+function exists only from the crt's copy on, and the crt enters
+`main()` with interrupts masked, so no vector reaches SRAM the copy has
+not written. THE HOLD-OFF the SPI host draws its write-ahead from is a
+fact of the image: its default counts handlers in the flash, and a
+program that places its handlers may state a shorter one
+([spi.md](spi.md)).
 
 ## Not covered yet
 

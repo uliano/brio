@@ -56,6 +56,19 @@ SECTIONS
     {
         . = ALIGN(4);
         __data_start = .;
+        /* Code that runs from SRAM, copied by the crt with the data -
+           two names, two meanings. `.fast_text` is code that MAY run
+           from SRAM, for speed: what a program opts into,
+           util/placement.hpp's Hot<InRam> and a program's own placed
+           function; what it buys is the fetch, the code flash answering
+           behind two wait states at 48 MHz (RM 18.3.1) and the SRAM
+           without them (docs/ch32v00x/platform.md, "A handler in SRAM").
+           `.ram_text` is code that MUST, for correctness - nothing on
+           this part, whose sleep entry runs from the flash; the name
+           kept for what the family's own pieces may need. */
+        *(.fast_text .fast_text.*)
+        *(.ram_text .ram_text.*)
+        . = ALIGN(4);
         *(.data .data.*)
         . = ALIGN(8);
         /* The global pointer addresses 4 KB around itself, so it is

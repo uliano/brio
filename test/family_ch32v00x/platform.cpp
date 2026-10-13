@@ -8,6 +8,7 @@
 #include "ch32v00x/clock.hpp"
 #include "ch32v00x/pfic.hpp"
 #include "ch32v00x/platform.hpp"
+#include "util/placement.hpp"
 #include "ch32v00x/ticker.hpp"
 #include "kernel/event_queue.hpp"
 #include "kernel/tenuto.hpp"
@@ -99,4 +100,13 @@ void interrupt_verbs() {
 }
 
 // The handler attribute is one spelling, whichever way the image is built.
-extern "C" BRIO_CH32_INTERRUPT void software_handler() { Pfic::clear_pending(Irq::software); }
+// The handler placed by the program in `.ram_text` in the unit that emits
+// the platform's own SRAM body (the CH32V003's wfi, idle() above, in
+// `.ram_text.brio`): the two names are what lets GCC take a plain and a
+// grouped function in one unit (brio/ch32v00x/platform.hpp).
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".ram_text")]] void software_handler() {
+    Pfic::clear_pending(Irq::software);
+}
+// This family places .fast_text, on both parts: both placements are its
+// drivers'.
+static_assert(HotPlacement<InFlash, P> && HotPlacement<InRam, P>);

@@ -69,6 +69,11 @@
 // pad): VDD read from VREFINT; below 3000 mV the peer stays dark and says
 // so on its console, its link never opened.
 //
+// NOTHING PLACED IN SRAM (util/placement.hpp): the link is the raw
+// resource this program drives polled, its loops this file's own and
+// measured from the flash at every rate the suites ask, and the console is
+// the default Uart, which has no transmit engine to place.
+//
 // build: boards = v006k8
 // build: monitor_speed = 115200
 

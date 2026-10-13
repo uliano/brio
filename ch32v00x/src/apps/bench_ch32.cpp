@@ -207,6 +207,13 @@
 //                      flag read off STATR: an overrun is the one thing
 //                      the write-ahead can cost, and the recovery
 //                      session reads it here.
+//        ram.spi.poll  THE POLLED LOOPS FROM SRAM (V006 only: the 16 KB
+//                      part's image has no room): the same polled lines
+//                      through SpiHost<1>'s twin whose loops are placed
+//                      (util/placement.hpp's InRam), at HCLK/2, /4 and
+//                      /16; then SpiPoll's own polled lines at HCLK/2, the
+//                      flash's figure beside them. The pump is not placed
+//                      (ch32v00x/spi.hpp) and has no such line.
 //        spi.req       THE FIXED COST OF A REQUEST, the number a DCS
 //                      command pays: a polled request of 1, 3 and 16
 //                      bytes - a one-byte command (D/C low) and 0, 2 and
@@ -886,6 +893,11 @@ using SpiPoll = SpiHost<1>;   // no engines: the polled loops and the pump alone
 /// spi.held's second host: the same, DECLARING a hold-off of 100 cycles -
 /// shorter than this image's console handler with its stamps, about 300.
 using SpiShort = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, 100>;
+/// The polled loops placed in SRAM (util/placement.hpp's InRam, `ram.`
+/// lines), beside SpiPoll's flash: carried where the image has room - the
+/// 16 KB part's letter-e image would overflow its flash.
+using SpiRam = SpiHost<1, spi1_default_pins, NoDmaEngine, NoDmaEngine, spi_default_hold_off_cycles, InRam>;
+constexpr bool ram_twin_carried = device::flash_bytes > 16u * 1024u;
 using CsPin = Pin<'C', 3>;    // the select, as test_ch32_spi scripts it
 using DcPin = Pin<'C', 4>;    // the D/C line: a pad no jumper and no other letter uses
 
@@ -902,8 +914,9 @@ volatile uint8_t spi1_serves = spi1_dma;
 
 /// A request on the work buffer: `frames` frames of `bits`, the out
 /// buffer the buffer's lower half, the in buffer its upper half or none.
-SpiPoll::Request poll_request(uint16_t frames, SpiClock clock, SpiDataSize bits, bool with_rx, bool polled) {
-    SpiPoll::Request r{};
+template <typename H = SpiPoll>
+typename H::Request poll_request(uint16_t frames, SpiClock clock, SpiDataSize bits, bool with_rx, bool polled) {
+    typename H::Request r{};
     r.tx = Borrowed<const uint8_t, Lease::reply>{ram};
     r.rx = with_rx ? Borrowed<uint8_t, Lease::reply>{ram + ram_bytes / 2u} : Borrowed<uint8_t, Lease::reply>{};
     r.len = frames;
@@ -914,14 +927,15 @@ SpiPoll::Request poll_request(uint16_t frames, SpiClock clock, SpiDataSize bits,
 }
 
 /// A polled transaction on a Stopwatch around start(), the best of `runs`.
+template <typename H>
 BenchSample poll_best(uint8_t runs, uint16_t frames, SpiClock clock, SpiDataSize bits, bool with_rx) {
     BenchSample best{0xFFFF'FFFFu, 0, 0, 0};
     for (uint8_t run = 0; run < runs; ++run) {
-        const SpiPoll::Request r = poll_request(frames, clock, bits, with_rx, true);
+        const typename H::Request r = poll_request<H>(frames, clock, bits, with_rx, true);
         const BenchCounters before = counters();
         Stopwatch<Ruler> sw;
         sw.start();
-        (void)SpiPoll::start(r);
+        (void)H::start(r);
         const uint32_t wall = sw.elapsed();
         const BenchSample s = bench_sample(wall, before, counters());
         if (s.wall < best.wall) {
@@ -931,17 +945,23 @@ BenchSample poll_best(uint8_t runs, uint16_t frames, SpiClock clock, SpiDataSize
     return best;
 }
 
-/// The polled lines of one rate: both widths, both shapes, two sizes.
+/// The polled lines of one rate: both widths, both shapes, two sizes;
+/// `ram.` before the op names SpiRam's.
+template <typename H>
 void poll_lines(SpiClock clock, uint8_t div) {
+    constexpr bool in_ram = H::placed_in_ram;
     const uint32_t wire = SysClock::hz / div / 8u;   // bytes a second
     for (const bool with_rx : {false, true}) {
         for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
             const uint32_t bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
-            const char* const op = with_rx ? (bits == SpiDataSize::bits16 ? "spi.poll16.rx" : "spi.poll.rx")
-                                           : (bits == SpiDataSize::bits16 ? "spi.poll16" : "spi.poll");
-            (void)poll_best(1, 16, clock, bits, with_rx);   // a warm-up: apply() reconfigures on a change
-            const BenchSample s16 = poll_best(4, 16, clock, bits, with_rx);
-            const BenchSample s256 = poll_best(4, 256, clock, bits, with_rx);
+            const char* const op =
+                with_rx ? (bits == SpiDataSize::bits16 ? (in_ram ? "ram.spi.poll16.rx" : "spi.poll16.rx")
+                                                       : (in_ram ? "ram.spi.poll.rx" : "spi.poll.rx"))
+                        : (bits == SpiDataSize::bits16 ? (in_ram ? "ram.spi.poll16" : "spi.poll16")
+                                                       : (in_ram ? "ram.spi.poll" : "spi.poll"));
+            (void)poll_best<H>(1, 16, clock, bits, with_rx);   // a warm-up: apply() reconfigures on a change
+            const BenchSample s16 = poll_best<H>(4, 16, clock, bits, with_rx);
+            const BenchSample s256 = poll_best<H>(4, 256, clock, bits, with_rx);
             bench_line(serial, op, 16u * bytes, s16, Ruler::hz(), wire);
             bench_line(serial, op, 256u * bytes, s256, Ruler::hz(), wire);
             const uint32_t per_frame = (s256.wall - s16.wall) * 10u / 240u;
@@ -953,23 +973,27 @@ void poll_lines(SpiClock clock, uint8_t div) {
 
 /// One pumped transaction, the loop idling until the vector reports the
 /// end; the overrun flag and the host's status read after it.
+template <typename H>
 BenchSample pump_run(uint16_t frames, SpiClock clock, SpiDataSize bits) {
-    const SpiPoll::Request r = poll_request(frames, clock, bits, true, false);
-    return dma_sample(pump_done, [&r] { (void)SpiPoll::start(r); });
+    const typename H::Request r = poll_request<H>(frames, clock, bits, true, false);
+    return dma_sample(pump_done, [&r] { (void)H::start(r); });
 }
 
+template <typename H>
 void pump_lines(SpiClock clock, uint8_t div) {
+    constexpr bool in_ram = H::placed_in_ram;
     const uint32_t wire = SysClock::hz / div / 8u;
     for (const SpiDataSize bits : {SpiDataSize::bits8, SpiDataSize::bits16}) {
         const uint32_t bytes = bits == SpiDataSize::bits16 ? 2u : 1u;
-        const char* const op = bits == SpiDataSize::bits16 ? "spi.pump16" : "spi.pump";
-        (void)pump_run(16, clock, bits);   // a warm-up
-        const BenchSample s16 = pump_run(16, clock, bits);
+        const char* const op = bits == SpiDataSize::bits16 ? (in_ram ? "ram.spi.pump16" : "spi.pump16")
+                                                           : (in_ram ? "ram.spi.pump" : "spi.pump");
+        (void)pump_run<H>(16, clock, bits);   // a warm-up
+        const BenchSample s16 = pump_run<H>(16, clock, bits);
         const bool ovr16 = Spi<1>::overrun();
-        const uint8_t st16 = SpiPoll::status();
-        const BenchSample s256 = pump_run(256, clock, bits);
+        const uint8_t st16 = H::status();
+        const BenchSample s256 = pump_run<H>(256, clock, bits);
         const bool ovr256 = Spi<1>::overrun();
-        const uint8_t st256 = SpiPoll::status();
+        const uint8_t st256 = H::status();
         bench_line(serial, op, 16u * bytes, s16, Ruler::hz(), wire);
         bench_line(serial, op, 256u * bytes, s256, Ruler::hz(), wire);
         const uint32_t per_frame = (s256.wall - s16.wall) * 10u / 240u;
@@ -1168,16 +1192,34 @@ void te_spi_host() {
     console_drain();
     print(serial, "  SpiHost<1> with no engines, MISO floating, the select on PC3, D/C on PC4", crlf);
     console_drain();
-    poll_lines(SpiClock::div4, 4);
+    poll_lines<SpiPoll>(SpiClock::div4, 4);
     console_drain();
-    poll_lines(SpiClock::div16, 16);
+    poll_lines<SpiPoll>(SpiClock::div16, 16);
     console_drain();
-    pump_lines(SpiClock::div4, 4);
+    pump_lines<SpiPoll>(SpiClock::div4, 4);
     console_drain();
-    pump_lines(SpiClock::div16, 16);
+    pump_lines<SpiPoll>(SpiClock::div16, 16);
     console_drain();
-    pump_lines(SpiClock::div64, 64);
+    pump_lines<SpiPoll>(SpiClock::div64, 64);
     console_drain();
+    if constexpr (ram_twin_carried) {
+        // The polled lines with the loops in SRAM, HCLK/2 first; the pump
+        // is not placed (ch32v00x/spi.hpp), so it has no line of its own.
+        (void)SpiRam::init(clock);
+        print(serial, "  SpiRam: the same host, its polled loops in SRAM (InRam)", crlf);
+        console_drain();
+        poll_lines<SpiRam>(SpiClock::div2, 2);
+        console_drain();
+        poll_lines<SpiRam>(SpiClock::div4, 4);
+        console_drain();
+        poll_lines<SpiRam>(SpiClock::div16, 16);
+        console_drain();
+        spi1_serves = spi1_poll;
+        (void)SpiPoll::init(clock);
+        print(serial, "  SpiPoll again, from the flash, at HCLK/2", crlf);
+        poll_lines<SpiPoll>(SpiClock::div2, 2);
+        console_drain();
+    }
     request_line(0);
     request_line(2);
     request_line(15);
@@ -1199,12 +1241,21 @@ void te_spi_host() {
 // halfway through the board's window) - this board has no loop. On the
 // CH32V003 there is no second instance and the letter declines by name.
 // USART1's channels are 4 out and 5 in, USART2's 6 and 7 (table 8-2).
+// Each transmit line is followed by the port's own vector alone - its
+// entries and its body's cycles an entry - and the engined port runs twice,
+// its block restart in the flash (`uart.tx.dma`) and in SRAM
+// (`ram.uart.tx.dma`, util/placement.hpp's InRam).
 constexpr bool has_usart2 = device::has_usart2;
 
 template <bool on = has_usart2>
 struct LoopTypes {
     using Irq = Uart<2, Plat, 64, 512, NoDmaEngine, NoDmaEngine, 3>;
     using Txe = Uart<2, Plat, 64, 512, DmaTxEngine<6>, NoDmaEngine, 3>;
+    /// The engined one with its block restart in SRAM (util/placement.hpp's
+    /// InRam, `ram.` lines). On the family's platform itself - BenchIdle's
+    /// adapter does not carry the placement trait - whose guard is the same
+    /// mask.
+    using TxeRam = Uart<2, Ch32v00xPlatform<>, 64, 512, DmaTxEngine<6>, NoDmaEngine, 3, UartOptions{}, InRam>;
 };
 
 /// The console swapped for a measured receive: rings of 512 with the
@@ -1214,7 +1265,7 @@ using ConsoleDma = Uart<1, Plat, 512, 64, NoDmaEngine, DmaRxEngine<5>>;
 using ConsoleRxChannel = DmaChannel<5>;
 
 /// Which transport owns USART1 now: 0 Serial, 1 ConsoleBig, 2 ConsoleDma;
-/// and USART2: 0 none, 1 LoopIrq, 2 LoopTxe.
+/// and USART2: 0 none, 1 LoopIrq, 2 LoopTxe, 4 TxeRam.
 volatile uint8_t console_owner = 0;
 volatile uint8_t loop_owner = 0;
 volatile bool rx_edge = false;
@@ -1273,6 +1324,21 @@ BenchSample loop_tx(uint32_t n) {
     return bench_sample(w, c0, loop_counters());
 }
 
+/// One uart.tx line and, after it, the port's own vector alone - USART2's
+/// for the interrupt transmitter, channel 6's for the engine: its entries
+/// and its body's cycles an entry, the tick and the console left out.
+template <typename Port, typename Engine>
+void loop_tx_line(const char* op, uint32_t n, uint32_t wire) {
+    const Meter& m = Engine::present ? loop_dma_meter : loop_meter;
+    const uint32_t n0 = m.count();
+    const uint32_t c0 = m.cycles();
+    bench_line(serial, op, n, loop_tx<Port, Engine>(n), Ruler::hz(), wire);
+    const uint32_t entries = m.count() - n0;
+    const uint32_t tenths = entries == 0u ? 0u : (m.cycles() - c0) * 10u / entries;
+    print(serial, "  ", op, " ", n, ": the port's vector ", entries, " entries, ", tenths / 10u, '.', tenths % 10u,
+          " cycles each between the stamps", crlf);
+}
+
 template <bool on = has_usart2>
 void loop_tx_rates() {
     if constexpr (on) {
@@ -1285,14 +1351,19 @@ void loop_tx_rates() {
             const uint32_t wire = L::Irq::actual_baud(SysClock::hz) / 10u;
             print(serial, "  USART2 at ", L::Irq::actual_baud(SysClock::hz), " baud", crlf);
             for (const uint32_t n : {256u, 4096u}) {
-                bench_line(serial, "uart.tx", n, loop_tx<typename L::Irq, NoDmaEngine>(n), Ruler::hz(), wire);
+                loop_tx_line<typename L::Irq, NoDmaEngine>("uart.tx", n, wire);
             }
             loop_owner = 2;
             (void)L::Txe::init(clock, baud);
             Pin<'D', 3>::input(PinPull::up);
             for (const uint32_t n : {256u, 4096u}) {
-                bench_line(serial, "uart.tx.dma", n, loop_tx<typename L::Txe, DmaTxEngine<6>>(n),
-                           Ruler::hz(), wire);
+                loop_tx_line<typename L::Txe, DmaTxEngine<6>>("uart.tx.dma", n, wire);
+            }
+            loop_owner = 4;
+            (void)L::TxeRam::init(clock, baud);
+            Pin<'D', 3>::input(PinPull::up);
+            for (const uint32_t n : {256u, 4096u}) {
+                loop_tx_line<typename L::TxeRam, DmaTxEngine<6>>("ram.uart.tx.dma", n, wire);
             }
         }
         loop_owner = 0;
@@ -1612,10 +1683,13 @@ template <bool on = has_usart2 && brio::test_letter_carried('u')>
 [[gnu::always_inline]] inline void loop_usart_vector() {
     if constexpr (on) {
         loop_meter.enter();
-        if (loop_owner == 1u) {
+        const uint8_t owner = loop_owner;
+        if (owner == 1u) {
             (void)LoopTypes<on>::Irq::isr();
-        } else if (loop_owner == 2u) {
+        } else if (owner == 2u) {
             (void)LoopTypes<on>::Txe::isr();
+        } else if (owner == 4u) {
+            (void)LoopTypes<on>::TxeRam::isr();
         }
         loop_meter.leave();
     }
@@ -1624,8 +1698,11 @@ template <bool on = has_usart2 && brio::test_letter_carried('u')>
 [[gnu::always_inline]] inline void loop_dma_vector() {
     if constexpr (on) {
         loop_dma_meter.enter();
-        if (loop_owner == 2u) {
+        const uint8_t owner = loop_owner;
+        if (owner == 2u) {
             (void)LoopTypes<on>::Txe::dma_isr();
+        } else if (owner == 4u) {
+            (void)LoopTypes<on>::TxeRam::dma_isr();
         }
         loop_dma_meter.leave();
     }

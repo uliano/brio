@@ -85,6 +85,14 @@ void all_hosts() {
     host_verbs<HostDma>(buf);
 }
 
+// The host takes no placement (brio/ch32v00x/i2c.hpp): a program that
+// wants the event pump in SRAM places the vector it binds (`.fast_text`),
+// the pump inline in it.
+extern "C" BRIO_CH32_INTERRUPT [[gnu::section(".fast_text")]] void i2c1_ev_handler() {
+    (void)Host::isr();
+    (void)HostDma::isr();
+}
+
 void client_verbs() {
     constexpr Slow clock;
     (void)Client::init(clock, {.own = 0x48, .second = 0x49});

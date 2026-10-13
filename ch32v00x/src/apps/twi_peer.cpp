@@ -96,6 +96,12 @@
 // ident.xtal says whether the 24 MHz crystal started (the PLL doubles it
 // to 48 MHz, the HSI's PLL the fallback at the same rate).
 //
+// NOTHING PLACED IN SRAM (docs/ch32v00x/platform.md, "A handler in SRAM"):
+// the host takes no placement on this family, and its vector stays in the
+// flash - its tenures are the `arb` and `host_read` actions' few bytes,
+// the wire stretched while an entry runs, and SRAM would buy core share
+// this peer has no use for.
+//
 // build: boards = v006k8
 // build: monitor_speed = 115200
 
