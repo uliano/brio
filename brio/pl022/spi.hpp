@@ -133,10 +133,18 @@
  * above the bus's ceiling is clamped on the slow path alone.
  *
  * THE SELECTS. The host's chip select is a pin the Request carries
- * (docs/design/spi-bus.md's arrangement on every target), never the
- * block's own SSPFSSOUT, which in Motorola format PULSES BETWEEN FRAMES
- * - a device reading a multi-frame transaction inside one select window
- * cannot take that. The CLIENT's select IS the pad: the PL022 in slave
+ * (docs/design/spi-bus.md's arrangement on every target): a device
+ * reading a multi-frame transaction inside one select window wants a
+ * select that stays low, which the block's own frame signal SSPFSSOUT is
+ * not in every mode - with SPH = 0 it PULSES HIGH BETWEEN the frames of a
+ * continuous transfer, with SPH = 1 it stays low through one and rises
+ * only after the last frame (RP2040 4.4.3.10 to 4.4.3.13). A host whose
+ * pin set NAMES `cs` hands that pad to the block all the same, as the
+ * frame signal and nothing else: a select per frame in modes 0 and 2,
+ * per run of back-to-back frames in modes 1 and 3, the request's own
+ * `cs` then left null - exactly what a client of this block takes in
+ * modes 0 and 2, and what a device whose every frame is a transaction
+ * wants. The CLIENT's select IS the pad: the PL022 in slave
  * mode frames on SSPFSSIN, so a client's `cs` goes to the peripheral and
  * `selected()` reads the same pad. And with SPH = 0 (modes 0 and 2) the
  * client frames on the SELECT: it takes ONE frame per select window and
@@ -145,12 +153,16 @@
  * in modes 1 and 3.
  *
  * THE DARK LISTENER IS THE PAD AND NOT SOD. `Pl022Client::drive_output`
- * hands the transmit pad to the peripheral or takes it back as an
- * undriven input, because what SOD does to the PAD is a fact of the chip
- * around the block and not of the block: the block's pad-enable output
- * nSSPOE reaches no pad on either silicon this file has met, so both
- * leave the pad driven under SOD, and a chip that wired it would release
- * it. Releasing the pad is right either way, so that is what this file does;
+ * hands the transmit pad to the peripheral or takes it away to NO
+ * function with the family's dark config - an input with no pull - because
+ * what SOD does to the PAD is a fact of the chip around the block and not
+ * of the block: the block's pad-enable output nSSPOE reaches the pad on
+ * one silicon this file has met and not on the other (the RP2350 tristates
+ * a deselected client and one under SOD, the RP2040 keeps both driven -
+ * each family's document). Taking the pad away is right either way. It is
+ * NOT the pad's reset state: that carries a pull-down on both chips, and a
+ * far host's receive pad carries a pull-up, so a dark line released to
+ * reset sat between the two (measured: a foreign host read neither level).
  * `sod()` stays a bit of the resource, for a program that wants to see
  * what its own silicon does with it.
  *
@@ -169,9 +181,8 @@
  * 8-bit frame, two bytes low-first per 16-bit frame - the other strata's
  * rule, which on a little-endian core IS a half-word in memory.
  *
- * NOT built, each with its reason in docs/pl022/README.md: the block's
- * own frame signal as a host select, the National Semiconductor
- * Microwire transaction (half duplex, a control frame and then the
+ * NOT built, each with its reason in docs/pl022/README.md: the National
+ * Semiconductor Microwire transaction (half duplex, a control frame and then the
  * slave's answer, where this engine's Request is full duplex and one
  * frame wide), the client on the DMA engines.
  */
@@ -298,6 +309,11 @@ concept Pl022Chip =
         C::template Pad<0>::function(C::pad_function, C::host_rx_pad_config());
         C::template Pad<0>::function(C::pad_function, C::client_rx_pad_config());
         C::template Pad<0>::function(C::pad_function, C::cs_pad_config());
+        /// A client's answer line while it listens DARK: handed to NO
+        /// function - nothing drives it - and set up as the dark config
+        /// says, which carries no pull: the far host's own pull on its
+        /// receive pad holds the wire, and a pull here would fight it.
+        C::template Pad<0>::function(C::no_function, C::dark_pad_config());
         { C::template Pad<0>::read() } -> std::same_as<bool>;
         C::template Pad<0>::release();
         /// The run-time pin, driven high and low around a transaction.
@@ -683,11 +699,13 @@ class Pl022Host {
     static constexpr uint8_t sck_pin = Chip::sck_pad(pins);
     static constexpr uint8_t tx_pin = Chip::tx_pad(pins);
     static constexpr uint8_t rx_pin = Chip::rx_pad(pins);
+    static constexpr uint8_t cs_pin = Chip::cs_pad(pins);
     static_assert(tx_pin != Chip::no_pad, "brio SpiHost: a host needs SCK and TX; RX is optional for a write-only bus");
 
     using SckPad = typename Chip::template Pad<sck_pin>;
     using TxPad = typename Chip::template Pad<tx_pin>;
     using RxPad = typename Chip::template Pad<rx_pin != Chip::no_pad ? rx_pin : sck_pin>;
+    using CsPad = typename Chip::template Pad<cs_pin != Chip::no_pad ? cs_pin : sck_pin>;
 
 public:
     Pl022Host() = delete;
@@ -705,6 +723,11 @@ public:
     /// Below how many data frames a request takes the pump even with
     /// engines bound: the family's measured pair (the concept).
     static constexpr uint16_t dma_min_frames = Chip::dma_min_frames;
+    /// The pin set names `cs`: the block's own frame signal SSPFSSOUT
+    /// drives it (the file header's THE SELECTS) - one select a frame in
+    /// modes 0 and 2, one a run of back-to-back frames in modes 1 and 3 -
+    /// and a request's own `cs` is left null.
+    static constexpr bool frame_select = cs_pin != Chip::no_pad;
 
     /// The loop-back (LBM) as part of the applied configuration, so a
     /// request that re-applies mode, rate or width keeps it: the
@@ -799,6 +822,11 @@ public:
         TxPad::function(Chip::pad_function, Chip::tx_pad_config());
         if constexpr (rx_pin != Chip::no_pad) {
             RxPad::function(Chip::pad_function, Chip::host_rx_pad_config());
+        }
+        if constexpr (frame_select) {
+            // The frame signal idles high with the block configured, so
+            // the pad goes over deasserted.
+            CsPad::function(Chip::pad_function, Chip::cs_pad_config());
         }
         S::enable(true);
         S::flush_rx();
@@ -998,6 +1026,9 @@ public:
         TxPad::release();
         if constexpr (rx_pin != Chip::no_pad) {
             RxPad::release();
+        }
+        if constexpr (frame_select) {
+            CsPad::release();
         }
         S::hold();
     }
@@ -1436,8 +1467,9 @@ private:
  * SELECT IS THE PAD: the PL022 in slave mode frames on SSPFSSIN, so
  * `pins.cs` goes to the peripheral and `selected()` reads the same pad.
  * `drive_output(false)` leaves the transmit line undriven, a DARK
- * LISTENER on a shared harness - by releasing the PAD, since what SOD
- * does to a pad is the chip's fact and not the block's (the file header).
+ * LISTENER on a shared harness - the PAD taken away to no function with no
+ * pull, since what SOD does to a pad is the chip's fact and not the
+ * block's (the file header).
  * The family's own header aliases this to `SpiClient<n, pins>`.
  */
 template <Pl022Chip Chip, uint8_t n, typename Chip::Pins pins>
@@ -1501,12 +1533,16 @@ public:
         return true;
     }
 
-    /// The answer line handed to the peripheral, or taken back as an
-    /// undriven input - the dark listener (the file header: the PAD is
-    /// the lever, because SOD's effect on one is the chip's fact).
+    /// The answer line handed to the peripheral, or taken away to no
+    /// function with no pull - the dark listener (the file header: the PAD
+    /// is the lever, because SOD's effect on one is the chip's fact).
     static void drive_output(bool on) {
         if constexpr (tx_pin != Chip::no_pad) {
-            if (on) { TxPad::function(Chip::pad_function, Chip::tx_pad_config()); } else { TxPad::release(); }
+            if (on) {
+                TxPad::function(Chip::pad_function, Chip::tx_pad_config());
+            } else {
+                TxPad::function(Chip::no_function, Chip::dark_pad_config());
+            }
         } else {
             (void)on;
         }

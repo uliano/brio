@@ -37,13 +37,18 @@ disabled by the B2 one).
   `PinPull` (`none`, `up`, `down`, `keeper`), `PinDrive` (2/4/8/12 mA),
   `PinConfig` (pull, drive, slew, schmitt, input enable - the pad's
   reset values by default, pull aside), `PinSel` (a pin and the
-  function it is handed to), `pad_value(cfg)` (the register word).
+  function it is handed to), `pad_value(cfg)` (the register word),
+  `PinStatus` (out_to_pad, oe_to_pad, in_from_pad, irq_to_proc: GPIO_STATUS
+  after the function select and the overrides), `PinOverride` and
+  `PinOeOverride` (CTRL's OUTOVER and OEOVER).
 - `Gpio` - the bank: `ready()` releases both blocks from reset (every
   configuring verb calls it); the SIO word-wide verbs `in`, `out`,
   `out_set`, `out_clear`, `out_toggle`, `oe`, `oe_set`, `oe_clear`;
   `ctrl(n)`, `status(n)`, `pad(n)` the per-pin registers by number;
   `function(n, fn, cfg)` (the pad first, then FUNCSEL with every
   override neutral), `release(n)` (back to the reset state),
+  `pin_status(n)`, `out_override(n, o)` / `oe_override(n, o)` and their
+  read-backs,
   `outputs(mask, cfg)` (every pin of a mask a software output at once).
 - `Pin<n>` - one pin as a type, no port letter: `output(cfg)`,
   `output(level, cfg)`, `input(pull)`, `function(fn, cfg)`, `release()`,
@@ -51,7 +56,9 @@ disabled by the B2 one).
   buffer off, the output disabled, a pull optional - `Gpio::analog(n,
   pull)` by number),
   `set`, `clear`, `toggle`, `read` (the pad, whoever owns it),
-  `read_out`, `is_output`, `function()`, `pull(p)`; a PwmChannel of one
+  `read_out`, `is_output`, `function()`, `status()` (what reached the
+  pad - whether it is DRIVEN read rather than inferred), the two
+  overrides, `pull(p)`; a PwmChannel of one
   level (`max` 1, `duty`).
 
 ## How to use it

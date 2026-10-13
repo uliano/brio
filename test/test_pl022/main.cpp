@@ -327,6 +327,29 @@ TEST_CASE("release puts the pads back and the block into reset") {
     CHECK_FALSE(Block::released());
 }
 
+TEST_CASE("a host whose pin set names cs drives the block's own frame signal there") {
+    // THE SELECTS (the file header): the pad goes to the block after the
+    // three others and before SSE, and goes back at release - while a
+    // host with no cs in its pin set never touches that pad.
+    constexpr SimPl022Pins framed_pins{.sck = 8, .tx = 9, .rx = 10, .cs = 11};
+    using Framed = Pl022Host<SimPl022, 0, framed_pins, SimPl022NoEngine, SimPl022NoEngine>;
+    static_assert(Framed::frame_select && !Host::frame_select);
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Framed::init(clock));
+    CHECK(SimPl022Bench::pad_function[framed_pins.cs] == SimPl022::pad_function);
+    CHECK(SimPl022Bench::pad_claimed_at[framed_pins.rx] < SimPl022Bench::pad_claimed_at[framed_pins.cs]);
+    CHECK(SimPl022Bench::pad_claimed_at[framed_pins.cs] < SimPl022Bench::enabled_at);
+    Framed::release();
+    CHECK(SimPl022Bench::pad_function[framed_pins.cs] == 0u);
+    CHECK(SimPl022Bench::pad_released_at[framed_pins.cs] != 0u);
+
+    fresh();
+    REQUIRE(Host::init(clock));
+    CHECK(SimPl022Bench::pad_function[cs_pin] == 0u);
+    CHECK(SimPl022Bench::pad_claimed_at[cs_pin] == 0u);
+}
+
 TEST_CASE("the engines carry the data phase, and the receive block ends it") {
     fresh();
     constexpr Clock clock;
@@ -530,11 +553,16 @@ TEST_CASE("a client frames on its own select pad, and may listen dark") {
     CHECK(one.SSPDR == 0x5A5u);
     CHECK(Client::writable());
 
-    // THE DARK LISTENER IS THE PAD: drive_output(false) gives the answer
-    // line back, and SOD is left as the block's own bit.
+    // THE DARK LISTENER IS THE PAD: drive_output(false) takes the answer
+    // line away to no function with NO pull - not to the pad's reset state,
+    // whose pull would fight the far host's - and SOD is left as the
+    // block's own bit.
+    const uint32_t before = SimPl022Bench::pad_claimed_at[client_pins.tx];
     Client::drive_output(false);
-    CHECK(SimPl022Bench::pad_function[client_pins.tx] == 0u);
-    CHECK(SimPl022Bench::pad_released_at[client_pins.tx] != 0u);
+    CHECK(SimPl022Bench::pad_function[client_pins.tx] == SimPl022::no_function);
+    CHECK(SimPl022Bench::pad_claimed_at[client_pins.tx] > before);
+    CHECK_FALSE(SimPl022Bench::pad_pulled_up[client_pins.tx]);
+    CHECK(SimPl022Bench::pad_released_at[client_pins.tx] == 0u);
     CHECK((one.SSPCR1 & SpiControl1::output_disable) == 0u);
     Client::sod(true);
     CHECK((one.SSPCR1 & SpiControl1::output_disable) != 0u);

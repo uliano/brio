@@ -50,13 +50,14 @@
  * peripheral tristating its output when deselected in client mode; the
  * idle-level lists of 12.3.4.10 to 12.3.4.14 say, five times in the same
  * words, that the signal "is not connected to the pad in RP2350". THE
- * PADS ANSWER THE SECOND (measured, on stepping A2, by an instrument
- * proven both ways in the same letter): a deselected client and a client
- * with SOD set both leave the transmit pad DRIVEN, as on the RP2040. What
- * SOD does do is keep the answers off the wire - the host clocks a steady
- * 0xFF with frames waiting in the client's FIFO. The driver depends on
- * neither reading: `Pl022Client::drive_output(false)` makes the dark
- * listener by releasing the PAD, and `sod()` stays a bit of the resource.
+ * PADS ANSWER THE FIRST (measured on stepping A2 by test_rp2350_spi's
+ * letter m, the pad's own output enable read in GPIO_STATUS under a
+ * foreign host's burst): a client's transmit pad is released while its
+ * select is high and driven while it is low, and under SOD it is released
+ * selected or not - the far host reading its own pull-up. The RP2040 keeps
+ * both driven. The driver depends on neither: `Pl022Client::drive_output
+ * (false)` makes the dark listener by taking the PAD away, and `sod()`
+ * stays a bit of the resource.
  *
  * THE LINE. The four maskable sources of an instance combine into ONE
  * interrupt line (SPI0_IRQ = 31, SPI1_IRQ = 32, datasheet 3.2); the app
@@ -98,8 +99,11 @@ namespace brio {
 // ---- the pads --------------------------------------------------------------------
 
 /// Which pins carry the four signals: each the instance's own under
-/// function 1, or none (0xFF). The host's `cs` is NOT the peripheral's
-/// (a GPIO the Request carries); the client's IS.
+/// function 1, or none (0xFF). The client's `cs` is the peripheral's
+/// select input; a host's, when named, its frame signal SSPFSSOUT (pulsed
+/// between frames in modes 0 and 2, held through a run in modes 1 and 3) -
+/// the select a multi-frame transaction needs is a GPIO the Request
+/// carries.
 struct SpiPins {
     uint8_t sck = 0xFFu;
     uint8_t tx = 0xFFu;
@@ -238,6 +242,12 @@ struct Rp2350Pl022 {
     static constexpr PinConfig host_rx_pad_config() { return {.pull = PinPull::up}; }
     static constexpr PinConfig client_rx_pad_config() { return {}; }
     static constexpr PinConfig cs_pad_config() { return {.pull = PinPull::up}; }
+    /// The dark listener's answer line: FUNCSEL's null function (nothing
+    /// drives the pad) and no pull - the far host's receive pad carries
+    /// the pull-up that holds the wire, and the pad's reset pull-down
+    /// would fight it.
+    static constexpr PinFunction no_function = PinFunction::none;
+    static constexpr PinConfig dark_pad_config() { return {}; }
 
     /// Two engines of one host must not share a channel: on this chip a
     /// request is a field any channel takes, so the CHANNEL is the

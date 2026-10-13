@@ -42,15 +42,18 @@ transmits on 3, 7, 19, 23, receives on 0, 4, 16, 20, selects on 1, 5,
 17, 21; SPI1 on 10, 14, 26 / 11, 15, 27 / 8, 12, 24, 28 / 9, 13, 25,
 29.
 
-Two facts of the PL022 as a client, from the chapter: with SPH = 0
-(modes 0 and 2) the select freezes the slave's shift register, so the
-host must raise SSPFSSIN between every two frames (4.4.3.10, 4.4.3.12)
-- a host holding a GPIO select for a whole transaction reaches a PL022
-client for more than one frame only in modes 1 and 3; and SOD does not
-release the transmit pad on this chip: 4.4.3.14's list of idle levels
-says the block's pad-enable output nSSPOE is NOT CONNECTED TO THE PAD
-here, so SOD stops the block driving and leaves the pad driving what it
-held. The dark listener is therefore the pad, released.
+Two facts of the PL022 as a client. With SPH = 0 (modes 0 and 2) the
+select freezes the slave's shift register, so the host must raise
+SSPFSSIN between every two frames (4.4.3.10, 4.4.3.12) - a host holding a
+GPIO select for a whole transaction reaches a PL022 client for more than
+one frame only in modes 1 and 3, and a host whose select is the block's
+OWN frame signal reaches it in all four, the signal pulsing between the
+frames in exactly those two modes. And nSSPOE is NOT CONNECTED TO THE PAD
+here (4.4.3.14's list of idle levels): a client's transmit pad stays
+driven while it is deselected and under SOD, the host then clocking the
+client's first answer in every frame (bench findings). The dark listener
+is therefore the pad, taken away - to no function with no pull, not to
+its reset state, whose pull-down would fight the host's pull-up.
 
 ## Types and verbs
 
@@ -89,7 +92,10 @@ held. The dark listener is therefore the pad, released.
   (the IP stratum's page, "The host above the wire"). The request is
   28 bytes here, laid out words first. `init(clock, max_sck_hz)`,
   `rebase(pclk, sys)`, `clock_for(hz)`, `sck_hz`, `ceiling_clock`,
-  `prime()` for a caller framing its own select, `loopback(on)` (kept
+  `prime()` for a caller framing its own select, `frame_select` (the
+  pin set names `cs`: the block's own frame signal drives that pad - a
+  select a frame in modes 0 and 2, one a run of back-to-back frames in
+  modes 1 and 3 - and a Request's `cs` stays null), `loopback(on)` (kept
   through every re-application: the wireless instrument), `isr()`,
   `dma_isr()`, `status()`, `recover()`, `release()`, and
   `dma_min_frames` - the data-phase length below which a request takes
@@ -111,12 +117,14 @@ held. The dark listener is therefore the pad, released.
   drive_output), `enable(first)` with the first answer in the FIFO
   before the host's clock, `write()` on TNF up to `frames_ahead` = 8,
   `poll()`, `selected()` read off the select pad, `drive_output(on)`
-  (the transmit pad handed over or released: the dark listener),
+  (the transmit pad handed over, or taken away to no function and no
+  pull: the dark listener),
   `sod(on)` (the block's own bit, for a program that wants to see
   it), the overrun flag, `isr()` and the interrupt enables.
 - `pin.hpp`'s `PinRef` (a pin named at run time: set, clear, toggle,
   read; `Pin<n>::ref()`) was born with this driver, as on the other
-  families.
+  families; `Pin<n>::status()` (GPIO_STATUS: what reaches the pad, the
+  output enable among it) is how the bench reads a pad's drive.
 
 ## How to use it
 
@@ -161,11 +169,26 @@ extern "C" void isr_spi1() {
 }
 ```
 
+A host for such a client in modes 0 and 2 (on another board, or the
+other instance), the select its own frame signal:
+
+```cpp
+constexpr brio::SpiPins framed{.sck = 18, .tx = 19, .rx = 16, .cs = 17};
+using Feeder = brio::SpiHost<0, framed>;              // Feeder::frame_select
+Feeder::init(clock);
+Feeder::Request r{};                                  // r.cs left null
+r.tx = brio::lend<brio::Lease::reply>(frames); r.len = 64;
+r.mode = brio::SpiMode::mode0;
+r.polled = true;
+(void)Feeder::start(r);
+```
+
 ## Bench findings
 
 The reference suite is `test_rp2040_spi`, green on the WeAct board,
-clk_sys and clk_peri at 125 MHz: 29 verdicts of five letters on the
-loop-back (LBM, no wire).
+clk_sys and clk_peri at 125 MHz: 52 verdicts, 29 of five letters on the
+loop-back (LBM, no wire) and 23 of six on the pair's wire against the
+desk partner's peer (the last group below).
 
 - The rate chooser: clk_peri / 2 at the top (62.5 MHz), 8.93 MHz under
   a 10 MHz ceiling, 992 kHz under 1 MHz, nothing under 1 kHz. The
@@ -302,6 +325,55 @@ loop-back (LBM, no wire).
   request answered once; an idle bus votes for the sleep, a busy one
   against.
 
+ON THE PAIR'S WIRE (letters n, o, p, q, r and m, the two Raspberry Pi
+suites' shared letters, against the WeAct RP2350B's peer on either half: its client a
+PIO program at 150 MHz, its host that chip's PL022):
+
+- THE HOST AGAINST A FOREIGN CLIENT, every window ONE GPIO-held select
+  of sixteen frames: the four modes, the client MSb and LSb first (the
+  LSb rows an exact two-way bit reversal - the PL022 is MSb first and
+  nothing else), 8- and 16-bit frames, the client's DMA and polled
+  serves - 32 exchanges exact both ways; a receive-only client (its
+  answer line dark) hears every frame and this host reads its own
+  pull-up throughout; an answer-only one is read exact. The command
+  channel at clk_peri / 128 (977 kHz) carries ten pings of ten, and 32
+  bytes of noise under a held select wake nothing.
+- THE LADDER, even divisors 256 to 2, the polled host (32 frames) and
+  the engines (64 frames, half-word engines on channels 6 and 7): **exact
+  both ways to clk_peri / 10 (12.5 MHz, a half period of 40 ns)**; at /8
+  (15.6 MHz) this host reads the client's answers wrong while the client
+  still hears this host exact up to /4 (31.25 MHz) - the answer path is
+  the bound, some four of the client's cycles (26.7 ns) and the pads. The
+  letter judges to /12, the derived ceiling (a half period of four of the
+  partner's cycles and 15 ns, derived in the suite); the engines
+  on a wire against a foreign client exact wherever the polled loop is.
+- THE KERNEL against the second chip: four transactions queued from one
+  dispatch inside one held window, one polled among three pumped, every
+  byte read back by the peer.
+- THE ROLES INVERTED: this chip's `SpiClient` under the peer's PL022
+  host, whose select is its own frame signal: 64 frames back to back in
+  every mode, 8- and 16-bit, exact both ways at /64 and /32 of the
+  host's clk_peri (2.34 and 4.69 MHz), judged, and at /16 (9.375 MHz),
+  printed (the RP2350's page says why the rung is not judged) - more than
+  one frame per select in modes 0 and 2 on the terms SPH = 0 sets. The
+  frame signal, counted at this end by a PIO machine: a window a frame in
+  modes 0 and 2, one for the burst in modes 1 and 3; its high pulse
+  between two frames half an SCK period (48 ns at /16, 96 ns at /32); the
+  burst at the wire's time (430 us for 64 16-bit frames at /64 in mode
+  1, 470 in mode 0 with the 1.5-period gap a frame).
+- THE CLIENT'S ANSWER PAD (letter m, its output enable read in
+  GPIO_STATUS): DRIVEN while deselected as while selected, and under SOD
+  - the far host then reading the client's FIRST answer in every frame,
+  0x93 x 32 - which is 4.4.3.14's nSSPOE "not connected to the pad"; the
+  dark listener takes the pad away and the far host reads its own pull-up
+  throughout, the client still hearing every frame.
+- THE DARK LISTENER'S PAD WAS A DRIVER BUG, found on the RP2350's side of
+  this pair: released to its reset state, the pad kept its pull-down
+  against the far host's pull-up, and the line sat between the two (the
+  RP2350 host read 0x02 where it should read 0xFF); this chip's pulls
+  happened to read high. `drive_output(false)` now gives the pad to no
+  function with no pull (the traits' `no_function`, `dark_pad_config()`).
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
@@ -314,22 +386,14 @@ Driver gaps, each with its reason:
 - The client on the DMA engines: `SpiClient` answers from its
   interrupt; a client that streams is born with a program that needs
   one.
-- A client in modes 0 and 2 beyond one frame per select: the PL022
-  needs the select pulsed per frame, which a host's own SSPFSSOUT
-  does and a GPIO select does not; a program that wants it uses the
-  peripheral's select on the host side.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `SpiClient` on a wire - the four modes with the one frame per select
-  window of SPH = 0, multi-frame windows in modes 1 and 3, 16-bit frames,
-  the receive timeout's tail, the rate ladder to the clk_peri / 12
-  ceiling, the dark listener and SOD's pad, the overrun - and the roles
-  inverted: the desk partner's PL022 host driving this chip's client on
-  the pair's SPI1 wires, its own select pulsing per frame.
-- The host on a wire against a foreign client (the four modes under a
-  held GPIO select, the rate asked up the ladder, the engines): the
-  partner's client on the same wires.
+- `SpiClient`'s receive timeout's tail, its overrun flag, its interrupt
+  path (letter r serves it from a polled loop) and the rate ladder
+  between /16 of the far host and this chip's clk_peri / 12 ceiling: the
+  partner's host_burst at the divisions between, against a client served
+  from its vector.
 
 - The split of an engined block's first transaction: `test_rp2040_spi`
   letter d's first 128-byte block takes 152 us where letter d of the

@@ -1,7 +1,12 @@
 // test_rp2350_spi - the reference bench suite for this chip's SPI
 // (rp2350/spi.hpp over datasheet 12.3, the ARM PL022 at revision r1p4):
 // the host on its loop-back, the pump and the polled path, the DMA
-// engines, and util/spi_bus.hpp's arbiter with not one line changed.
+// engines, and util/spi_bus.hpp's arbiter with not one line changed - and,
+// across the desk's link to the WeAct RP2040 running spi_peer, the host
+// against a FOREIGN client in every mode, width and serve, the rate ladder
+// against it on the polled loop and on the engines, the arbiter read back
+// by a second chip, THIS CHIP AS THE CLIENT of a foreign PL022 host, and
+// the client's answer pad in its three states.
 //
 // ONE SOURCE, BOTH ARCHITECTURES. Every letter runs on the Cortex-M33
 // pair and on the Hazard3 pair, built from the rp2350-arm-* and
@@ -9,15 +14,24 @@
 // the block is one, its line is one system line under one numbering
 // (3.8.4.2), and the handler names are the same on both.
 //
-// ONE INSTRUMENT, THE LOOP-BACK: the PL022's LBM feeds the transmitter
-// into the receiver with nothing on the wire, which proves the pump, the
-// frame sizes, the four modes, every rate, the engines and the arbiter
-// with no second peripheral. SPI0 hosts on GP18/19/16 with GP17 as its
-// select; no wire is on those pads. THE CLIENT AND THE WIRE belong to the
-// board's desk partner: SPI1 on GP28/GP30/GP31 with its select pad GP41
-// is wired to the WeAct RP2040 (docs/boards/weact-rp2350b.md), and no
-// letter here drives those pads - a DUT letter on them runs against the
-// partner's peer, never against a second instance of this chip.
+// TWO INSTRUMENTS:
+//
+//  - THE LOOP-BACK (a..e): the PL022's LBM feeds the transmitter into the
+//    receiver with nothing on the wire, which proves the pump, the frame
+//    sizes, the four modes, every rate, the engines and the arbiter with
+//    no second peripheral. SPI0 hosts on GP18/19/16 with GP17 as its
+//    select; no wire is on those pads.
+//  - THE DESK PARTNER (n, o, p, q, r, m and x): SPI1 on GP30 (SCK), GP31
+//    (TX), GP28 (RX) with GP41 the select - 1.5 kOhm to the RP2040's 3V3 -
+//    wired to the WeAct RP2040's GP10 / GP8 / GP11 / GP29
+//    (docs/boards/weact-rp2350b.md). That board runs `spi_peer`
+//    (rp2040/src/apps/spi_peer.cpp: its client a PIO program, its host a
+//    PL022), commanded IN BAND over the bus under test through
+//    avrdx/src/apps/spi_link.hpp; the letters are the ones both Raspberry
+//    Pi suites share, rp2040/src/apps/rp_spi_pair.hpp, whose header says
+//    what they ask of a suite and derives the ceiling letter p judges to.
+//    Every one of them runs through the partner-rail guard
+//    (pair_power.hpp): an RP2040 pad is not failsafe.
 //
 // THE RULER IS TIMER0 (rp2350/timer.hpp): 64 bits of microseconds on a
 // tick generator dividing clk_ref, independent of clk_sys. The platform
@@ -26,8 +40,8 @@
 //
 // THE DMA LETTER IS APART ON PURPOSE (d): rp2350/dma.hpp is
 // itself young, so a fault in an engine must not be able to fail a
-// verdict about the bus. Every other letter runs with both engine slots
-// empty.
+// verdict about the bus. Every other loop-back letter runs with both
+// engine slots empty.
 //
 // What is exercised, letter by letter:
 //   a  the block, WIRELESS: table 645 as the driver states it, the rate
@@ -55,6 +69,21 @@
 //      rate asked, in modes 3 and 0 and at 16 bits
 //   e  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
 //      the rejection, both sleep votes
+//   n  THE PEER: ident (kind 0x08, on its crystal), ten pings, and the
+//      dark listener woken by nothing
+//   o  THE MATRIX: four modes, the client MSb and LSb first, 8- and 16-bit
+//      frames, both of the peer's serves, each one held window; the
+//      receive-only and answer-only serves; the CRC refused
+//   p  THE LADDER: even divisors 256 to 2 on the polled host and the
+//      engines, judged to the PIO client's derived ceiling
+//   q  THE KERNEL against the peer: four transactions in one held window,
+//      read back by the second chip
+//   r  THE ROLES INVERT: this chip's PL022 client under the peer's PL022
+//      host, its select the block's own frame signal - four modes, both
+//      widths, three rates
+//   m  THE PAD FACTS: the client's answer pad driven, under SOD and
+//      released, each under a foreign host's burst
+//   x  (outside z) the slip statistics: each mode ten times, two rates
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
@@ -73,6 +102,7 @@
 #include "rp2350/flash.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
+#include "rp2350/pio.hpp"
 #include "rp2350/platform.hpp"
 #include "rp2350/spi.hpp"
 #include "rp2350/ticker.hpp"
@@ -82,6 +112,12 @@
 #include "util/print.hpp"
 #include "util/spi_bus.hpp"
 #include "util/testbench.hpp"
+
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
+// that speaks it.
+#include "../../../avrdx/src/apps/spi_link.hpp"
+
+#include "pair_power.hpp"
 
 namespace {
 
@@ -107,6 +143,29 @@ constexpr SpiPins host_pins{.sck = 18, .tx = 19, .rx = 16};
 using Host = SpiHost<0, host_pins>;
 using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
 using CsPin = Pin<17>;
+
+// SPI1 on the pair's wires (the header): the host with its GPIO select, the
+// same with half-word engines on channels 6 and 7 (DMA_IRQ_1), the client
+// on its select pad.
+constexpr SpiPins link_host_pins{.sck = 30, .tx = 31, .rx = 28};
+constexpr SpiPins link_client_pins{.sck = 30, .tx = 31, .rx = 28, .cs = 41};
+using LinkHost = SpiHost<1, link_host_pins>;
+using LinkDmaHost = SpiHost<1, link_host_pins, DmaTxEngine<6, uint16_t, 1>, DmaRxEngine<7, uint16_t, 1>>;
+using LinkClient = SpiClient<1, link_client_pins>;
+using LinkCsPin = Pin<41>;
+using LinkTxPin = Pin<31>;
+constexpr uint8_t partner_kind = spilink::peer_rp2040;
+constexpr const char* partner_text = "the WeAct RP2040";
+constexpr uint32_t partner_sys_hz = 125'000'000;
+/// The window counter of letter r: PIO1's machine 0 on the select pad,
+/// the block's window at GPIO16..47 (GPIOBASE 16, 11.1.1).
+using CountBlk = Pio<1>;
+using CountSm = PioSm<1, 0>;
+using GaugeSm = PioSm<1, 1>;
+constexpr uint8_t count_cs_index = 41 - 16;
+void open_count_window() { (void)CountBlk::gpio_base(16); }
+/// nSSPOE reaches the client's answer pad: measured by letter m.
+constexpr bool client_pad_follows_select = true;
 
 // Which task owns each instance's vector at the moment.
 enum class Spi0Owner : uint8_t { none, host, dma_host };
@@ -362,9 +421,15 @@ void tb_pump() {
     // for the polled path, which no letter before this one has walked.
     // Measured, that fill is worth some six microseconds on the Hazard3
     // half and under one on the Cortex-M33 one, which is three per cent
-    // of the 200 us being weighed. One unjudged round warms it.
+    // of the 200 us being weighed. One unjudged round of each warms it -
+    // the second with a wait of its own, for the wait's path (the delay
+    // and the platform timer's reads) is the one the bare transaction
+    // never walks, and cold it was measured at two to three microseconds
+    // more on the Hazard3 half (206 and 207 against 205).
     (void)xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClocks::div16,
                      SpiDataSize::bits8, true);
+    (void)xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0, SpiClocks::div16,
+                     SpiDataSize::bits8, true, CsPin::ref(), 1);
     uint32_t t0 = us_now();
     const uint8_t bare = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode0,
                                     SpiClocks::div16, SpiDataSize::bits8, true);
@@ -713,6 +778,14 @@ void te_kernel() {
     Host::release();
 }
 
+// THE TWO-BOARD LETTERS, over the names above - in a namespace of their
+// own, where CsPin and TxPin are the link's.
+namespace link {
+using CsPin = LinkCsPin;
+using TxPin = LinkTxPin;
+#include "../../../rp2040/src/apps/rp_spi_pair.hpp"
+}  // namespace link
+
 void banner() {
     print(serial, crlf,
           "test_rp2350_spi - the RP2350 SPI (datasheet 12.3, the PL022): SPI0 hosts on "
@@ -757,6 +830,8 @@ extern "C" void isr_spi0() {
     }
 }
 
+extern "C" void isr_spi1() { link::pair_spi_isr(); }
+extern "C" void isr_dma_1() { link::pair_dma_isr(); }
 extern "C" void isr_dma_0() {
     dma_line_entries = dma_line_entries + 1u;
     if (spi0_owner == Spi0Owner::dma_host && DmaHost::dma_isr()) {
@@ -780,6 +855,16 @@ int main() {
     bench.letter('c', "the polled path at every named rate", tc_rates);
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
+    // The two-board letters drive link pads: each behind the partner-rail
+    // guard (pair_power.hpp).
+    bench.letter('n', "the peer: ident, the command channel, the dark listener",
+                 pair::guarded<bench, clock, link::tn_peer>);
+    bench.letter('o', "the matrix against the PIO client", pair::guarded<bench, clock, link::to_matrix>);
+    bench.letter('p', "the ladder, judged to the client's ceiling", pair::guarded<bench, clock, link::tp_ladder>);
+    bench.letter('q', "the kernel read back by the peer", pair::guarded<bench, clock, link::tq_kernel>);
+    bench.letter('r', "the roles invert: this PL022 as the client", pair::guarded<bench, clock, link::tr_roles>);
+    bench.letter('m', "the client's answer pad: driven, SOD, released", pair::guarded<bench, clock, link::tm_pads>);
+    bench.letter('x', "slip statistics (outside z)", pair::guarded<bench, clock, link::tx_slips>, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

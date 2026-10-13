@@ -111,6 +111,7 @@ The verbs over a register, over the pads and over time:
 | `sck_pad(pins)`, `tx_pad(pins)`, `rx_pad(pins)`, `cs_pad(pins)` | which pad number carries each signal, or `no_pad` |
 | `Pad<pin>` | the pad AS A TYPE, with the three verbs the driver calls on one: hand it over (`function(code, config)`), take it back (`release()`) and read its level (`read()`, which is how a client answers `selected()`) |
 | `pad_function` | the function code that routes an SPI to a pad, opaque to this file |
+| `no_function`, `dark_pad_config()` | a CLIENT's answer line while it listens dark: handed to no function, so nothing drives it, with a setup that carries NO PULL. Not the pad's reset state - that carries a pull on the families this file has met (a pull-down on both RP chips), and a far host's receive pad carries a pull-up, so a dark line released to reset sat between the two (measured on the RP pair: the far host read neither level) |
 | `sck_pad_config()`, `tx_pad_config()`, `host_rx_pad_config()`, `client_rx_pad_config()`, `cs_pad_config()` | the electrical setup each signal wants. They are FUNCTIONS returning a value rather than constants, so the driver materializes the configuration at the call, exactly as a family's own driver would have written it there - no object's address is taken and the call folds away. THE TWO RECEIVE PADS ARE ASKED SEPARATELY because they are two electrical situations and not one: a host's answer line may have nothing driving it (no client on the bus, or one listening dark), while a client's command line is driven by the host whenever it matters |
 | `engines_distinct<Tx, Rx>()` | two engines of one host must not name one DMA channel; what "the same channel" means is the family's DMA's |
 | `delay_rate(hz)` | the busy-wait's factor for a rate, recomputed at every clock change so the `cs_setup_us` of a Request costs no division |
@@ -278,6 +279,24 @@ polled loop on the same board is the figure beside them).
 - THE PINS are the family's run-time pin, driven by its own one-store
   verb; a null D/C line is skipped inside that verb; `cs_setup_us` is
   tested before any call.
+- THE BLOCK'S OWN FRAME SIGNAL, WHEN A HOST'S PIN SET NAMES `cs`
+  (`frame_select`): the pad goes to the block after the other three and
+  before SSE, and back at `release()`, and the Request's own `cs` is left
+  null. It is a select a frame in modes 0 and 2 - the block raises it
+  between the frames of a continuous transfer - and one select for a run
+  of back-to-back frames in modes 1 and 3 (RP2040 4.4.3.10 to 4.4.3.13),
+  which is what a PL022 CLIENT takes in the modes it frames on its select
+  and what a device whose every frame is a transaction wants, and not
+  what a device reading a multi-frame transaction under one select can
+  take - that select stays a GPIO the Request carries. Measured on the RP
+  pair (both families' documents): a window a frame in modes 0 and 2 and
+  one for 64 back-to-back frames in modes 1 and 3, counted by a PIO
+  machine at the far end; the high pulse between two frames about HALF AN
+  SCK PERIOD (48 to 53 ns at clk_peri / 16, 96 to 120 ns at / 32, by a
+  PIO gauge of two cycles' resolution), inside the gap of 1.5 periods a
+  frame the engines' paragraph prices. A run in modes 1 and 3 is as long
+  as the transmit FIFO never empties; a host held off past it raises the
+  signal between two frames like any end of a run.
 - THE HOT PATH IS A LIST, FOR A FAMILY'S LINKER SCRIPT TO PLACE. On a
   chip that executes in place out of a flash behind a cache, the first
   transaction after `init()` pays the cache its fill of the host's code
@@ -349,12 +368,6 @@ carries the block, because they are the block's; what each of them would
 COST on a given chip - a wire, a device, a pad - is in that family's own
 document.
 
-- The block's own frame signal (`SSPFSSOUT`) as a host select: in
-  Motorola format it PULSES BETWEEN FRAMES, which a device reading a
-  multi-frame transaction inside one select window cannot take, so the
-  Request carries a pin of the application's instead. A program that
-  wants the pulsed select - a device whose every frame is its own
-  transaction - is the first user.
 - The National Semiconductor Microwire transaction: the framing is a
   code `SpiConfig` takes and the resource reads back, but the host
   engine's Request is full duplex and one frame wide, where Microwire is

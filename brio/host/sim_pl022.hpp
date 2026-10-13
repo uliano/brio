@@ -309,6 +309,10 @@ struct SimPl022 {
     static constexpr SimPl022PadConfig host_rx_pad_config() { return {.pull_up = true}; }
     static constexpr SimPl022PadConfig client_rx_pad_config() { return {}; }
     static constexpr SimPl022PadConfig cs_pad_config() { return {.pull_up = true}; }
+    /// A pad given to nobody, as the bench records it, and the dark
+    /// listener's setup: no pull.
+    static constexpr uint8_t no_function = 0;
+    static constexpr SimPl022PadConfig dark_pad_config() { return {}; }
 
     /// The channel is the identity here too: two present engines of one
     /// host must name two of them.

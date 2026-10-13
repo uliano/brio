@@ -102,6 +102,17 @@ struct PinConfig {
     bool input_enable = true;    ///< the input buffer (off for an analogue pad)
 };
 
+/// What actually reached the pad, and what came back (2.19.6.1's STATUS
+/// register): the four signals AFTER the function select and the
+/// overrides. It is the one place a program can see the difference
+/// between what it asked for and what the pad has.
+struct PinStatus {
+    bool out_to_pad = false;    ///< the level the pad is being driven to
+    bool oe_to_pad = false;     ///< whether it is being driven at all
+    bool in_from_pad = false;   ///< the level read back off the pad
+    bool irq_to_proc = false;   ///< this pin's interrupt, after IRQOVER
+};
+
 /// A pin and the function it is handed to - what a peripheral's pin set
 /// is written in (uart.hpp's UartPins).
 struct PinSel {
@@ -196,6 +207,16 @@ struct Gpio {
         oe_clear(1u << n);
         ctrl(n) = static_cast<uint32_t>(PinFunction::none) << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
         pad(n) = PADS_BANK0_GPIO0_RESET;
+    }
+
+    /// The four signals as they stand at the pad (2.19.6.1's STATUS).
+    static PinStatus pin_status(uint8_t n) {
+        const uint32_t s = status(n);
+        return PinStatus{
+            .out_to_pad = (s & IO_BANK0_GPIO0_STATUS_OUTTOPAD_BITS) != 0u,
+            .oe_to_pad = (s & IO_BANK0_GPIO0_STATUS_OETOPAD_BITS) != 0u,
+            .in_from_pad = (s & IO_BANK0_GPIO0_STATUS_INFROMPAD_BITS) != 0u,
+            .irq_to_proc = (s & IO_BANK0_GPIO0_STATUS_IRQTOPROC_BITS) != 0u};
     }
 
     // ---- the two output overrides, between the function and the pad -----
@@ -313,6 +334,7 @@ struct Pin {
     static PinFunction function() {
         return static_cast<PinFunction>(Gpio::ctrl(n) & IO_BANK0_GPIO0_CTRL_FUNCSEL_BITS);
     }
+    static PinStatus status() { return Gpio::pin_status(n); }
     static void out_override(PinOverride o) { Gpio::out_override(n, o); }
     static PinOverride out_override() { return Gpio::out_override(n); }
     static void oe_override(PinOeOverride o) { Gpio::oe_override(n, o); }

@@ -415,7 +415,13 @@ inline constexpr uint8_t spare_answer_only = 0x02;
 // 16-bit frames and no CRC unit): it serves a receive-only window as
 // asked, refuses (report_cfg_failed) a command that carries wide or crc
 // beside it, and never raises the flag - a host judges such a window by
-// what it received, which is valid either way.
+// what it received, which is valid either way. And a peer may know
+// `spare_wide` and `spare_receive_only` without `spare_crc` (a client with
+// no CRC unit - the rp2040 and rp2350 peers, a PIO program): it serves
+// those two as asked and raises report_extended on every exchange it
+// served, and refuses a command that carries spare_crc (report_cfg_failed,
+// the flag down) - so the flag stands for what was served, and a host that
+// asked for the CRC judges the refusal.
 
 /// `Params::spare` bit 2: 16-BIT FRAMES. Both streams are the usual byte
 /// streams taken two bytes a frame, LOW BYTE FIRST - frame i is P(2i) |

@@ -28,22 +28,28 @@
  * clk_peri for a host, and a client - which needs clk_peri at least
  * twelve times its clock (4.4.3.4) - 10.4 Mbit/s here.
  *
- * SOD DOES NOT RELEASE THE PAD ON THIS CHIP (measured, the suite's wire
- * letters): the transmit line under SOD reads as a driven low, not as
- * the host's pull-up. The datasheet says why in passing, in 4.4.3.14's
- * list of idle levels - the block's pad-enable output nSSPOE IS NOT
- * CONNECTED TO THE PAD HERE - so SOD stops the block driving and leaves
- * the pad driving whatever it held. That is why
- * `SpiClient::drive_output(false)` releases the PAD, the other strata's
- * way, and SOD stays a bit of the resource; the IP file makes the pad
- * the lever for exactly this reason, so a silicon that does wire nSSPOE
- * to its pad needs no other code.
+ * SOD DOES NOT RELEASE THE PAD ON THIS CHIP (measured by
+ * test_rp2040_spi's letter m, the pad's own output enable read in
+ * GPIO_STATUS under a foreign host's burst): a client's transmit pad is
+ * driven whether its select is high or low, and under SOD too - the far
+ * host then reading the client's FIRST answer in every frame. The
+ * datasheet says why in passing, in 4.4.3.14's list of idle levels - the
+ * block's pad-enable output nSSPOE IS NOT CONNECTED TO THE PAD HERE (the
+ * RP2350's is). That is why `SpiClient::drive_output(false)` takes the
+ * PAD away - to no function and no pull, the dark config below - and SOD
+ * stays a bit of the resource; the IP file makes the pad the lever for
+ * exactly this reason.
+ *
+ * A HOST'S `cs`, when its pin set names one, is the block's own frame
+ * signal SSPFSSOUT (pulsed between frames in modes 0 and 2, held through a
+ * run in modes 1 and 3, 4.4.3.10 to 4.4.3.13); a Request's select is a
+ * GPIO.
  *
  * THE PINS are fixed per instance under function 1 (2.19.2, table 279):
  * SPI0 receives on GPIO 0, 4, 16, 20, selects on 1, 5, 17, 21, clocks on
  * 2, 6, 18, 22 and transmits on 3, 7, 19, 23; SPI1 on 8, 12, 24, 28 /
  * 9, 13, 25, 29 / 10, 14, 26 / 11, 15, 27. `spi_pins_valid` is that
- * table. The host's chip select is NOT among them: it is a GPIO the
+ * table. A host's transaction select is NOT among them: it is a GPIO the
  * Request carries (the IP file says why), while the CLIENT's select IS
  * the pad.
  *
@@ -82,8 +88,9 @@ namespace brio {
 // ---- the pads --------------------------------------------------------------------
 
 /// Which pins carry the four signals: each the instance's own under
-/// function 1, or none (0xFF). The host's `cs` is NOT the peripheral's
-/// (a GPIO the Request carries); the client's IS.
+/// function 1, or none (0xFF). The client's `cs` is the peripheral's
+/// select input; a host's, when named, its frame signal SSPFSSOUT - the
+/// select a multi-frame transaction needs is a GPIO the Request carries.
 struct SpiPins {
     uint8_t sck = 0xFFu;
     uint8_t tx = 0xFFu;
@@ -190,6 +197,12 @@ struct Rp2040Pl022 {
     static constexpr PinConfig host_rx_pad_config() { return {.pull = PinPull::up}; }
     static constexpr PinConfig client_rx_pad_config() { return {}; }
     static constexpr PinConfig cs_pad_config() { return {.pull = PinPull::up}; }
+    /// The dark listener's answer line: FUNCSEL's null function (nothing
+    /// drives the pad) and no pull - the far host's receive pad carries
+    /// the pull-up that holds the wire, and the pad's reset pull-down
+    /// would fight it.
+    static constexpr PinFunction no_function = PinFunction::none;
+    static constexpr PinConfig dark_pad_config() { return {}; }
 
     /// Two engines of one host must not share a channel: on this chip a
     /// request is a field any channel takes, so the CHANNEL is the

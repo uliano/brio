@@ -71,7 +71,7 @@ equation printed two paragraphs earlier gives clk_peri / 2, and that is
 what the driver's chooser computes.
 
 **THE CHAPTER SAYS TWO DIFFERENT THINGS ABOUT nSSPOE, AND THE PADS ANSWER
-ONE OF THEM.** 12.3.1 says the output enable of the SSPTXD data output IS
+THE FIRST.** 12.3.1 says the output enable of the SSPTXD data output IS
 controlled by nSSPOE on this chip, and that the peripheral tristates its
 output when deselected in client mode, which it offers as the reason
 software need not manage the output enable even where several clients
@@ -79,12 +79,17 @@ share the data lines. The idle-level list printed under each of the four
 Motorola modes and under Microwire (12.3.4.10 to 12.3.4.14) says the
 opposite, in the same words all five times: the nSSPOE pad enable signal
 is forced high, "this is not connected to the pad in RP2350" - which is
-what the RP2040's chapter says too ([../rp2040/spi.md](../rp2040/spi.md)).
-Which of the two holds is the pad's question, and it takes a host on a
-wire to the client to answer (Not covered yet). The driver depends on
-neither: `SpiClient::drive_output(false)` makes the dark listener by
-releasing the PAD, which is right under both readings and is why the IP
-file made the pad the lever - and `sod()` stays a bit of the resource.
+what the RP2040's chapter says, and what the RP2040's pads do
+([../rp2040/spi.md](../rp2040/spi.md)). On this chip 12.3.1 holds: the
+pad's own output enable, read in GPIO_STATUS under a foreign host's
+burst, is OFF while the client's select is high and ON while it is low,
+and under SOD it is off selected or not - the far host reading its own
+pull-up where the RP2040's client repeats its first answer (bench
+findings). The driver depends on neither: `SpiClient::drive_output
+(false)` makes the dark listener by taking the PAD away - to no function
+with no pull, the traits' dark config, because the pad's reset state
+carries a pull-down that fights the far host's pull-up - and `sod()`
+stays a bit of the resource.
 
 **THE PADS COME UP ISOLATED** (9.11, and [README.md](README.md)): a pad
 answers nothing until the isolation latch is cleared, which every
@@ -94,8 +99,9 @@ DOWN: a HOST's receive pad, so an answer line with nothing driving it
 reads as the idle ones a bus expects rather than as zeros, and a CLIENT's
 select pad, so an unwired select reads not-selected. And because erratum
 RP2350-E9 is live on the A2 stepping, an idle LEVEL on a pad of this chip
-is history and not a measurement: telling a released transmit pad from a
-driven one takes two reads, one under each pull.
+is history and not a measurement: whether a transmit pad is driven is
+read where the pad sees it, in GPIO_STATUS's output enable
+(`Pin<n>::status()`), and never from the level a wire holds.
 
 **THE THREE NUMBER TABLES ARE NOT THE RP2040'S**, and each has its own
 reason. The DREQ rows are 24..27 where they were 16..19, because a third
@@ -118,8 +124,10 @@ Request and its two ISR bodies, the client's surface) is in
 
 - `SpiPins` - the four pad numbers, each the instance's own or `0xFF` for
   a signal the set leaves out. A host with no receive pad is a write-only
-  bus; the host's chip select is NOT here (it is a GPIO the Request
-  carries), while the CLIENT's select IS.
+  bus; a host's transaction select is NOT here (it is a GPIO the Request
+  carries) - a host whose set names `cs` drives the block's own frame
+  signal there (`frame_select`, [../pl022/README.md](../pl022/README.md))
+  - while the CLIENT's select IS its select pad.
 - `spi_pad_instance(pin)` - which instance the four pads of that pin's
   group belong to: bit 3 of the pad number.
 - `spi_rx_pin(n, pin)`, `spi_cs_pin(n, pin)`, `spi_sck_pin(n, pin)`,
@@ -218,8 +226,10 @@ extern "C" void isr_spi1() {
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 and clk_peri at 150 MHz, and all of them on BOTH architectures, from one
-source: `test_rp2350_spi` carries 30 verdicts, the loop-back letters
-a..e, green on the Cortex-M33 pair and on the Hazard3 pair. Where a
+source: `test_rp2350_spi` carries 54 verdicts, 30 of the loop-back
+letters a..e and 24 of six letters on the pair's wire against the desk
+partner's peer (the last group below), green on the Cortex-M33 pair and
+on the Hazard3 pair. Where a
 number differs between the halves both are given; every verdict reads
 the same.
 
@@ -475,12 +485,65 @@ the same.
   six exactly once, and vote for a sleep when idle and against one when
   busy - on both architectures, with no line changed for either.
 
+ON THE PAIR'S WIRE (letters n, o, p, q, r and m, the two Raspberry Pi
+suites' shared letters, against the WeAct RP2040's peer: its client a
+PIO program at 125 MHz, its host that chip's PL022), every figure the
+same on both halves:
+
+- THE HOST AGAINST A FOREIGN CLIENT, every window ONE GPIO-held select
+  of sixteen frames: the four modes, the client MSb and LSb first (an
+  exact two-way bit reversal), 8- and 16-bit frames, both of the
+  client's serves - 32 exchanges exact both ways; receive-only (the
+  client's answer line dark, this host reading its own pull-up) and
+  answer-only exact; the command channel at clk_peri / 128 (1.17 MHz)
+  ten pings of ten; noise under a held select wakes nothing.
+- THE LADDER AND THE ENGINES ON THE WIRE: the polled host (32 frames) and
+  the half-word engines on channels 6 and 7 (64 frames) **exact both ways
+  to clk_peri / 14 (10.7 MHz, a half period of 46.7 ns)**; at /12 (12.5
+  MHz) this host reads the answers wrong while the client hears it exact
+  to /6 (25 MHz) - the answer path, four of the client's cycles (32 ns)
+  and the pads, is the bound. Judged to /16, the derived ceiling (a half
+  period of four of the partner's cycles and 15 ns).
+- THE KERNEL against the second chip: four transactions in one held
+  window, every byte read back by the peer.
+- THE ROLES INVERTED: this chip's `SpiClient` under the RP2040's PL022
+  host, its select that block's own frame signal: 64 frames back to back
+  in every mode, 8- and 16-bit, exact both ways at /64 and /32 of the
+  host's clk_peri (1.95 and 3.91 MHz); a window a frame in modes 0 and 2
+  and one for the burst in modes 1 and 3, counted at this end by a PIO
+  machine; the frame signal's high pulse half an SCK period (53 ns at
+  /16, 120 ns at /32); the burst at the wire's time.
+- **AT /16 OF THE RP2040 (7.8 MHz) THIS CLIENT LOSES A FRAME NOW AND
+  THEN.** In 16-bit frames in modes 0 and 3 - the two whose data lines
+  change on SCK's falling edge - a burst of 64 receives 63 and both ends
+  read wrong from that frame on: 22 bursts of 278, 8 %; none of 238 in
+  modes 1 and 2, none of 156 in 8-bit frames, none of some 940 at /32
+  and /64.
+  In some of them this end's PIO gauge catches a high pulse of two
+  machine cycles (13 ns) on the select, far shorter than any the frame
+  signal makes; with this client's answer line RELEASED the same mode-3
+  bursts lost nothing (0 of 40, against 2 of 40 driven in the same run),
+  and the RP2040 as the client under this chip's host at /16 lost nothing
+  in 280. So the lead is this end's own answer line, wire 3 between the
+  far host's MOSI and the select, coupling into an input at the edges it
+  shares with the clock - a fact of the wire, not of either block, and
+  not yet closed (Not covered yet). Letter r judges /64 and /32 and
+  prints /16; letter x (outside z) counts it.
+- THE CLIENT'S ANSWER PAD (letter m, its output enable read in
+  GPIO_STATUS): OFF while deselected, ON while selected, OFF under SOD
+  selected or not - the far host reading its own pull-up, 0xFF x 32 -
+  so nSSPOE does reach the pad here (12.3.1), the RP2040's opposite. The
+  dark listener takes the pad away and the far host reads its own
+  pull-up, the client hearing every frame. Taken to the pad's RESET state
+  as the driver did before, the pad's pull-down fought the far host's
+  pull-up and the host read 0x02 and the like (sum 0xEBE where a steady
+  0xFF gives 0x1FE0): the driver now gives it to no function with no pull.
+
 ## Not covered yet
 
 Driver gaps, each with its reason. The ones that belong to the block
-rather than to this chip - the block's own frame signal as a host select,
-the Microwire transaction, frame widths other than 8 and 16 in the
-Request, a client on the DMA engines - are in
+rather than to this chip - the Microwire transaction, frame widths other
+than 8 and 16 in the Request, a client on the DMA engines - are in
 [../pl022/README.md](../pl022/README.md) and are not repeated here.
 
 - The DMA engines' own verbs and the DMA line's handler in SRAM: with
@@ -508,16 +571,14 @@ Request, a client on the DMA engines - are in
 
 Implemented but not bench-verified, each with what would measure it:
 
-- `SpiClient` on a wire - the four modes with the one frame per select
-  window of SPH = 0 (12.3.4.10, 12.3.4.12), multi-frame windows in modes
-  1 and 3, the rate ladder against the clk_peri / 12 ceiling, the dark
-  listener, the overrun - and THE nSSPOE QUESTION above, a deselected
-  client and a client under SOD read floating or driven by the two-pull
-  instrument: the desk partner's PL022 host on the pair's SPI1 wires.
-- The host on a wire against a foreign client - the four modes under a
-  held GPIO select, the rate asked up the ladder, and the two engines in
-  the half-word shape, which the loop-back letters and the bench measure
-  and no wire has carried: the partner's client on the same wires.
+- `SpiClient`'s receive timeout's tail, its overrun flag, its interrupt
+  path (letter r serves it from a polled loop) and the rate ladder
+  between /32 of the far host and this chip's clk_peri / 12 ceiling,
+  where the lost frame above comes first: a scope on the select and SCK
+  at this end during a mode-3 16-bit burst at /16, the answer pad at 2 mA
+  against 4, and the wire run with a ground beside it, to tell the
+  coupling from the pads; then the partner's host_burst at the divisions
+  between, against a client served from its vector.
 
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no
