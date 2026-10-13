@@ -199,7 +199,7 @@ def wch_openocd_args(prog, elffile):
     argv = [openocd]
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
-    return argv + ["-f", cfg,
+    return argv + NO_SERVER_PORTS + ["-f", cfg,
                    "-c", "program %s verify" % elffile,
                    "-c", "reset halt",
                    "-c", "resume",
@@ -311,6 +311,17 @@ def wch_probe_reset(prog, console):
     if console and not os.path.exists(console):
         print("bench: %s did not come back after the probe's reset" % console)
 
+# NO SERVER PORTS. A flash session needs no gdb, telnet or tcl server,
+# and OpenOCD opens all three at fixed ports (3333, 4444, 6666) unless
+# told otherwise - so two sessions on two probes at once, each board's
+# own, collide on the bind: measured, one RP2040 flash failed on port
+# 3333 held by a WCH session started a moment before. Every invocation
+# in this file disables them, before the target script opens them.
+NO_SERVER_PORTS = ["-c", "gdb_port disabled",
+                   "-c", "telnet_port disabled",
+                   "-c", "tcl_port disabled"]
+
+
 def openocd_interface(prog):
     """The `-f interface/... -c adapter serial ...` half of an OpenOCD
     command line, from the manifest's programmer entry. The HID backend
@@ -329,7 +340,7 @@ def openocd_interface(prog):
         die("programmer type '%s' is not an OpenOCD probe" % kind)
     if prog.get("serial"):
         argv += ["-c", "adapter serial %s" % prog["serial"]]
-    return argv
+    return argv + NO_SERVER_PORTS
 
 
 def msd_flash(prog, binfile, app):
