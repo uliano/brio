@@ -1055,7 +1055,7 @@ public:
                 }
                 if ((up & I2cInterrupt::stop_det) != 0u) {
                     S::clear_pending(I2cInterrupt::stop_det);
-                    if (issued_ >= total_entries()) {
+                    if (issued_ >= total_entries() && own_stop()) {
                         S::dma_requests(false, false);
                         dma_active_ = false;
                         received_ = read_len();
@@ -1089,7 +1089,7 @@ public:
         // requester hears, and the next start() finds the block idle.
         if ((up & I2cInterrupt::stop_det) != 0u) {
             S::clear_pending(I2cInterrupt::stop_det);
-            if (issued_ >= total_entries()) {
+            if (issued_ >= total_entries() && own_stop()) {
                 return finish(received_ >= read_len() ? i2c_ok : i2c_bus_error);
             }
         }
@@ -1268,6 +1268,17 @@ private:
         const uint16_t reads = issued_ > req_.tx_len ? static_cast<uint16_t>(issued_ - req_.tx_len) : 0u;
         return static_cast<uint16_t>(reads - received_) < rx_level;
     }
+
+    /// Was the STOP just detected THIS tenure's? STOP_DET is raised for
+    /// every STOP on the wire, another host's included: a tenure written
+    /// while another host holds the bus waits for its STOP (the block's
+    /// multi-master rule, RP2040 4.3.8), and that STOP is detected with
+    /// this tenure's entries still queued. This tenure's own STOP follows
+    /// its last entry, so the transmit FIFO is empty then and only then
+    /// (measured on the RP pair: a two-byte write to an absent address,
+    /// written inside a window held by hand, ended i2c_ok on the window's
+    /// STOP before it had clocked a bit).
+    static bool own_stop() { return S::tx_empty(); }
 
     static bool finish(uint8_t st) {
         status_ = st;
@@ -1552,6 +1563,7 @@ public:
         SclPad::function(Chip::pad_function, Chip::pad_config);
         SdaPad::function(Chip::pad_function, Chip::pad_config);
         host_reads_ = false;
+        general_call_masked_ = false;
         S::enable();
         Chip::Interrupts::enable(S::irq());
         return true;
@@ -1620,7 +1632,14 @@ public:
             return I2cClientEvent::overrun;
         }
         if ((up & I2cInterrupt::gen_call) != 0u) {
+            // GEN_CALL STANDS THROUGH THE ADDRESS'S ACKNOWLEDGE: a clear
+            // inside that bit does not hold (measured on the RP pair: two
+            // to seventeen entries in the 8 us after the address at
+            // 100 kHz). Masked from here to the general call's first data
+            // byte, which always follows, so the call is one event.
             S::clear_pending(I2cInterrupt::gen_call);
+            S::interrupts(I2cInterrupt::gen_call, false);
+            general_call_masked_ = true;
             return I2cClientEvent::general_call;
         }
         if ((up & I2cInterrupt::rd_req) != 0u) {
@@ -1629,6 +1648,11 @@ public:
         }
         if ((up & I2cInterrupt::rx_full) != 0u) {
             host_reads_ = false;
+            if (general_call_masked_) {
+                general_call_masked_ = false;
+                S::clear_pending(I2cInterrupt::gen_call);
+                S::interrupts(I2cInterrupt::gen_call, true);
+            }
             return I2cClientEvent::byte_received;
         }
         if ((up & I2cInterrupt::rx_done) != 0u) {
@@ -1661,6 +1685,9 @@ public:
 
 private:
     static inline bool host_reads_ = false;
+    /// GEN_CALL masked by service() between a general call's address and
+    /// its first data byte.
+    static inline bool general_call_masked_ = false;
 };
 
 // =============================================================================

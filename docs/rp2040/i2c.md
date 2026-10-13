@@ -22,10 +22,13 @@ this chip's device description held against the bits the IP file spells
 itself, and the PUBLIC NAMES `DwApbI2c<n>` (the resource), `I2cHost`
 (the engine `I2cBus` drives) and `I2cClient` (the other end), this
 chip's aliases of the three templates there. The reference suite:
-`test_rp2040_i2c`, the block wireless; the wire is the desk partner's,
-I2C1 on GP2 (SDA) / GP3 (SCL) with 1.5 kOhm to this board's 3V3 on
-each, to the WeAct RP2350B
-([../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
+`test_rp2040_i2c`, the block wireless and then the wire, which is the
+desk partner's: I2C1 on GP2 (SDA) / GP3 (SCL) with 1.5 kOhm to this
+board's 3V3 on each, to the WeAct RP2350B
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), whose peer of
+the twi_link protocol is commanded over the bus under test; the same
+board's own suite, `test_rp2350_i2c`, judges this chip's block as that
+peer.
 
 ## What the silicon does
 
@@ -74,9 +77,21 @@ RESTART_DET, the STOP is STOP_DET (for its own tenures alone under
 STOP_DET_IFADDRESSED). Bytes queued beyond what the host takes are
 flushed at its NACK and reported as an abort (ABRT_SLVFLUSH_TXFIFO). A
 full receive FIFO holds SCL instead of overflowing
-(RX_FIFO_FULL_HLD_CTRL). IC_SLV_DATA_NACK_ONLY makes the client
-refuse every data byte, written with the block disabled and the
-client idle. There is no address-match event.
+(RX_FIFO_FULL_HLD_CTRL): the client holds SCL as a TRANSMITTER, at an
+empty transmit FIFO, and as a receiver only with its receive FIFO full.
+IC_SLV_DATA_NACK_ONLY makes the client refuse every data byte, written
+with the block disabled and the client idle; a refusal mid-tenure is a
+disable, which "stops the current transfer at the end of the current
+byte and does not acknowledge" (4.3.17, IC_ENABLE) and leaves
+SLV_RX_DATA_LOST set. A general call raises GEN_CALL and NO STOP_DET
+under STOP_DET_IFADDRESSED (the note on IC_CON bit 7). There is no
+address-match event.
+
+TWO HOSTS (4.3.8): a host's START waits while the bus is busy - a START
+on the wire not yet closed by its STOP - so two hosts whose STARTs wait
+on one STOP leave together and the wired-AND decides, the loser aborting
+with ARB_LOST. STOP_DET is raised in host mode for every STOP on the
+wire, another host's included.
 
 THE PINS are fixed per instance under function 3 (table 279): I2C0
 has SDA on GPIO 0, 4, 8, 12, 16, 20, 24, 28 and SCL on 1, 5, 9, 13,
@@ -151,8 +166,9 @@ enable in this chip's IC_CON: the unstick is by hand.
   `clear_stop`, `host_nacked` / `clear_nack`, `overrun`,
   `general_call_seen`, `acknowledge(on)` (a disable/enable pair),
   `flush_tx`, `service()` (one `I2cClientEvent` per call:
-  byte_received, byte_wanted, stop, restart, nacked, general_call,
-  flushed, overrun, error), `host_reads`, `release`.
+  byte_received, byte_wanted, stop, restart, nacked, general_call -
+  once a call, GEN_CALL masked from its report to the call's first data
+  byte -, flushed, overrun, error), `host_reads`, `release`.
 
 ## How to use it
 
@@ -197,12 +213,12 @@ extern "C" void isr_i2c1() {
 
 ## Bench findings
 
-The reference suite is `test_rp2040_i2c`, green on the WeAct board:
-8 verdicts of its one letter, the block wireless. The cost figures
-below are `bench_rp2040` letter i's, on a SELF-LINK the pair desk does
-not carry (GP12 to GP14 and GP13 to GP15, 4.7 kOhm to 3V3, I2C0 the
-host and I2C1 the client at 0x42): the letter runs by name when it is
-fitted.
+The reference suite is `test_rp2040_i2c`, green on the WeAct board
+against the WeAct RP2350B's peer over the pair's I2C wires, on either
+of that chip's halves: **57 verdicts** in its letters a..l. The same block as the PEER, the RP2040 the
+far end, is judged by `test_rp2350_i2c` (docs/rp2350/i2c.md), so every
+client finding below is measured from both sides. The cost figures are
+`bench_rp2040` letter i's, against the same peer.
 
 - The block's reset state is a host with its client half disabled at
   the fast speed code with restarts enabled (IC_CON 0x65), the spike
@@ -212,45 +228,92 @@ fitted.
   disable. Configuration, timing, target and own address are refused
   while enabled; the disable of an idle block is reported within a
   few microseconds.
-- THE HOST'S COST, `bench_rp2040` letter i on that self-link, the
-  I2C vectors in SRAM, the client served from its own vector and kept
-  out of the counts; the wire's time at the SCL period measured (316.6
-  cycles at 400 kHz: 3.6 cycles, 28 ns, over the counts - the pull-ups'
-  rise, the same at every speed, which keeps fast-mode-plus inside its
-  120 ns). Each figure the best of five; the fixed cost is wall less the
-  wire's time, in clk_sys cycles at 125 MHz:
+- THE WIRE. The scan of 0x08..0x77 finds the peer's 0x6B alone; nobody
+  home is `i2c_nack_addr` in 110 to 111 us at 100 kHz - the address's 94 us of
+  wire and the disable cycle a new address pays. The three speeds run
+  byte-exact both ways against the second chip and measure, on the
+  system timer over a 64-byte tenure, 99, 393 and 963 to 966 kHz for
+  100, 400 and 1000 asked (the counts give 100, 399.4 and 1000 on an
+  ideal wire); the bench's SCL period at 400 kHz is 315.9 cycles against
+  the counts' 313, the 1.5 kOhm pull-ups' rise adding 23 ns a period at
+  every speed.
+- THE TENURE SHAPES against a second chip: a write, a read, a
+  write-then-read whose repeated START the peer counts as a tenure of its
+  own (RESTART_DET), the probe, reads of 1, 2, 17 and 40 bytes across the
+  peer's refills, and a 200-byte write in ONE tenure through the pump in
+  **24** interrupts - ceil(184 / 8) refills at half the FIFO and the
+  STOP. The peer's tally (count, sum, first byte, tenures) agrees with
+  every one.
+- THE GENERAL CALL, both ways. A host Request to address 0x00 - IC_TAR
+  holding 0 with SPECIAL clear - goes out as the general call: the
+  peer's client takes it and its two bytes. This block as the CLIENT,
+  IC_ACK_GENERAL_CALL on, takes the peer host's three-byte general call
+  - and GEN_CALL STANDS THROUGH THE ADDRESS'S ACKNOWLEDGE: a read of
+  IC_CLR_GEN_CALL inside that bit does not hold, the line re-entering
+  two to seventeen times in the 8 us after the address at 100 kHz
+  (traced: six entries 1 us apart, then RX_FULL a byte later). The
+  client's service() masks the source until the call's first data byte
+  and reports one event. No STOP_DET follows a general call
+  (STOP_DET_IFADDRESSED, the note on IC_CON bit 7), on either chip.
+- THE VOCABULARY: a deaf client is `i2c_nack_addr` on a write, the probe
+  and a read; a client refusing from its first data byte
+  (IC_SLV_DATA_NACK_ONLY) and from its third (a disable once the second
+  is taken, which refuses the byte in flight and sets SLV_RX_DATA_LOST)
+  is `i2c_nack_data`, with nothing and two bytes stored. THE CLIENT'S
+  STRETCH IS A READ'S: 100 us held before each of eight bytes given
+  lengthens this host's read by 746 to 752 us - eight holds less the
+  host's own 6 us low phase each overlaps - and leaves a write under the
+  same client within 7 us of the plain one (the block holds SCL as a
+  receiver only with its receive FIFO full).
+- THE ENGINES against the second chip: a 64-byte read at 400 kHz in
+  1487 to 1494 us (391 to 393 kHz) with two host interrupts - the second
+  engined read in a row; the first is the open item below -, a write-then-read,
+  the short reads on the pump, a deaf client on an engined read, and
+  eight 255-byte reads at 1 MHz byte-exact with TX_OVER never raised.
+- I2cBus OVER I2cHost: four queued tenures, the NACK in its place, the
+  rejection of what a four-deep queue cannot hold, both votes, and THE
+  TIMED BUS - the peer holding SCL 30 ms before the first byte of a read
+  - answered `i2c_timeout` at the arbiter's 20 ms with SCL still held,
+  the recover()ed engine carrying the next two tenures.
+- THE STUCK BUS: the peer holding SDA until its fourth SCL fall is freed
+  by unstick() in exactly four pulses; a line nine pulses cannot free is
+  0xFF in 115 to 118 us (twenty waits of 5 us on SysTick's delay, and the pads
+  handed over), the bus working after the far end lets go.
+- TWO HOSTS (4.3.8), measured both ways: both STARTs written while a
+  START made by hand holds the bus busy, released by the one STOP that
+  closes it - this host aiming at 0x6B loses the wired-AND to the peer's
+  0x2C at its first address bit (`i2c_arb_lost`), and aiming at 0x11 it
+  keeps the bus and the PEER reports the loss. THE HOST'S STOP_DET IS
+  EVERY STOP ON THE WIRE: a tenure written inside the window ended
+  `i2c_ok` on the window's own STOP before it had clocked a bit, until
+  the engine required its transmit FIFO empty at the STOP (its own STOP
+  follows its last entry; the IP stratum's page). A new address written
+  while another node holds the bus costs a disable of 94 us at 100 kHz.
+- THIS BLOCK AS THE PEER HOST'S CLIENT: six bytes written to it exact
+  with their STOP; two reads of six served one byte a read request, the
+  peer's count, sum and both first bytes the run given, nothing flushed.
+- THE HOST'S COST, `bench_rp2040` letter i against the peer's client,
+  the host's vector in SRAM, nothing of the far end on this core. Each
+  figure the best of five; the fixed cost is wall less the wire's time,
+  in clk_sys cycles at 125 MHz:
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 6974 (x 1.13) | 1 | 149 | 802 | 832 |
-  | write of 255 | 730 732 (x 1.00) | 31 | 8413 | 14 570 | 815 |
-  | read of 16 | 49 843 (x 1.01) | 2 | 580 | 1562 | 959 |
-  | read of 255 | 731 292 (x 1.00) | 32 | 13 378 | 21 927 | 1375 |
-  | register read, 1 + 1 | 13 174 (x 1.07) | 1 | 203 | 1052 | 890 |
-  | read of 255 on the engines | 730 671 (x 1.00) | 3 | 569 | 4842 | 754 |
+  | write of 1 | 6852 (x 1.11) | 1 | 156 | 754 | 722 |
+  | write of 255 | 729 223 (x 1.00) | 31 | 8450 | 14 595 | 719 |
+  | read of 16 | 49 661 (x 1.01) | 2 | 587 | 1655 | 871 |
+  | read of 255 | 729 362 (x 1.00) | 32 | 13 385 | 19 652 | 858 |
+  | register read, 1 + 1 | 13 046 (x 1.06) | 1 | 210 | 853 | 786 |
+  | read of 255 on the engines | 729 151 (x 1.00) | 3 | 581 | 2610 | 647 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
-  read is one every eight bytes, where one a byte took 285 interrupts and
-  four times the handler cycles for 255. The fixed cost is the same at
-  the three speeds (832, 832, 834 for a one-byte write) because the
-  address and the speed stay in the block between tenures: the cycle of
-  disable, IC_TAR and enable, which a new address still pays
-  (`i2c.write.readdr`), costs 736 cycles more at 100 kHz, 174 at 400 kHz
-  and 67 at 1 MHz - the disable waits on the block's own shutdown, which
-  follows the bus timing. A one-byte write's fixed cost is the thread's
-  start() (291 cycles with a ruler read), the one handler (149 with its
-  stamps) and the way out of the idle loop.
-- THE VENDOR, the pico-sdk 2.3.1's `i2c_write_blocking` /
-  `i2c_read_blocking` on the same wire (its own `i2c_init`, then this
-  driver's counts written over its own so the SCL is the same): a
-  one-byte write 6680 cycles, fixed 538, busy the whole wall - the
-  polled loop has no interrupt to enter and no idle to leave, and holds
-  the core 6680 cycles where this driver holds it 802. A long read is
-  where the polled loop pays: one command in flight, the bus held a
-  turn of the loop every byte - 255 bytes 750 723 cycles (x 1.02) and a
-  fixed cost of 20 834. The SDK's own counts give 96, 376 and 912 kHz on
-  an ideal wire and a spike filter of 46 cycles (368 ns) at 100 kHz,
-  its `lcnt / 16`.
+  read is one every eight bytes. The fixed cost is the same at the three
+  speeds (722, 722, 722 for a one-byte write) because the address and
+  the speed stay in the block between tenures: the cycle of disable,
+  IC_TAR and enable, which a new address still pays (`i2c.write.readdr`),
+  costs 960 cycles more at 100 kHz, 174 at 400 kHz and 65 at 1 MHz - the
+  disable waits on the block's own shutdown, which follows the bus
+  timing. The longest host entry is 439 cycles, a 255-byte read's.
 
 ## Not covered yet
 
@@ -259,11 +322,8 @@ Driver gaps, each with its reason:
 - 10-bit addressing on the host side: the resource has the mode and
   IC_TAR takes ten bits; the Request's `addr` is 7 bits on every
   stratum, and a 10-bit device is the first user.
-- The general call and the START byte as host verbs: `target(addr,
-  general_call)` is in the resource; no tenure shape asks for either.
-- Multi-master arbitration on the wire: ARB_LOST is decoded to
-  i2c_arb_lost; a second host on the wire is the desk partner's, through
-  a peer of the twi_link protocol.
+- The START byte as a host verb: `target(addr, general_call)` is in the
+  resource; no tenure shape asks for it.
 - A write phase on the DMA engines: an entry is a command word with a
   flag, which a byte buffer cannot carry; a halfword staging copy the
   size of the request is declined until a program needs a bulk write
@@ -272,23 +332,33 @@ Driver gaps, each with its reason:
   client is born with a program that needs one.
 - The receive-side hold (`sda_rx_hold`) and a client's `ten_bit`: a
   verb and a field, waiting for a wire that asks for them.
+- Two clients on one address with a third party reading (twi_link's
+  `coll`): this desk has no third node on the wire, and a DW block is a
+  host or a client, never both.
 
 Implemented but not bench-verified, each with what would measure it:
 
-- The host and the client on a wire: the scan and the probe as this
-  silicon serves it, the tenure shapes with the repeated START counted
-  from the far end, the vocabulary (nack_addr, nack_data, the stretch,
-  the flush), the three speeds' rate on the wire, the engines, I2cBus
-  with its timed bus, the stuck bus, the roles inverted: the desk
-  partner's peer over the pair's I2C wires.
-
+- THE FIRST ENGINED READ AFTER OTHER CODE HAS RUN is up to 8 per cent
+  slow: 1562 to 1629 us for 64 bytes at 400 kHz, with one to three host
+  interrupts, where the read right after it takes 1487 to 1494 us and two
+  - every time, in 16 passes of the whole suite and the first pass after
+  each of 3 flashes of letter g alone (the later passes of g alone all
+  fast); the RP2350's first is 30 us slow the same way. The command
+  channel's DREQ credits read zero before both reads, and IC_DMA_TDLR at
+  half the FIFO changed nothing; what the pattern points at is the
+  handlers' code fetched cold through the XIP cache. The suite's letter g
+  prints that read and judges the next. What would decide it: the XIP
+  cache's misses over the first tenure, and the same tenure with the DMA
+  line's handler in SRAM.
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
-- The client's general call (IC_ACK_GENERAL_CALL, the `general_call`
-  event) and the client's `overrun` event: a host tenure to address
-  0x00 through the resource's `target(0, true)`, and a client
-  configured without the hold when its receive FIFO is full.
+- The client's `overrun` event: a client configured without the hold
+  when its receive FIFO is full.
 - `dma_isr()`'s fault path (i2c_dma_fault): a bus error on a channel,
   staged with an address the fabric refuses.
-- The client tenure cut by a disable (`client_disabled_while_busy`,
-  `client_rx_data_lost`): a disable timed inside a host's write.
+- `client_disabled_while_busy`, read after a disable timed inside a
+  host's read (its write-side twin, SLV_RX_DATA_LOST, is measured
+  above).
+- The vendor's tenure on this wire: the pico-sdk 2.3.1's polled
+  `i2c_write_blocking` / `i2c_read_blocking` in a scratch program
+  against the same peer.

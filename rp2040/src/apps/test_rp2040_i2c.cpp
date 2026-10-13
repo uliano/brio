@@ -1,20 +1,27 @@
 // test_rp2040_i2c - the reference bench suite for the RP2040's I2C
-// (rp2040/i2c.hpp over datasheet 4.3, the Synopsys DW_apb_i2c): the
-// block WIRELESS - the pin table, the timing arithmetic, the reset state,
-// the FIFO depth, the refusals, the enable and the disable.
+// (rp2040/i2c.hpp over datasheet 4.3, the Synopsys DW_apb_i2c): the block
+// wireless, then the host and the client on a wire to a SECOND CHIP - every
+// tenure shape, the vocabulary produced on the wire, the three speeds
+// measured, the DMA engines, util/i2c_bus.hpp's arbiter with its timed
+// bus, the stuck bus, arbitration between two hosts, and this board as the
+// far host's client, its general call included.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp). It is a REFERENCE test.
 //
-// THE WIRE IS THE DESK PARTNER'S. This chip's I2C has no loop-back, so a
-// tenure needs a far end; on this desk it is the WeAct RP2350B over the
-// pair's I2C wires (I2C1 on GP2 SDA / GP3 SCL here, 1.5 kOhm to this
-// board's 3V3 on each - docs/boards/weact-rp2040.md), and a letter on
-// them runs against that board's peer, never against the chip's other
-// instance. No letter here routes a pad.
+// THE WIRE IS THE DESK PARTNER'S: I2C1 on GP2 (SDA) / GP3 (SCL), each line
+// with 1.5 kOhm to THIS board's 3V3, to the WeAct RP2350B's I2C0 on
+// GP36/GP37 (docs/boards/weact-rp2040.md). That board runs `twi_peer`
+// (rp2350/src/apps/twi_peer.cpp, on either half), commanded IN BAND over
+// the bus under test through avrdx/src/apps/twi_link.hpp; the letters are
+// the ones both Raspberry Pi suites share, rp_i2c_pair.hpp beside this
+// file, whose header states what they ask of a suite. No letter here
+// drives a link pad but the I2C's two.
 //
-// THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp).
+// THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp), one microsecond; the
+// unstick's half bit is paced by SysTick's delay (rp2040/delay.hpp), which
+// the ticker starts.
 //
 // What is exercised, letter by letter:
 //   a  the block, WIRELESS: table 279 as the driver states it, the
@@ -22,21 +29,61 @@
 //      floors reproduced), the reset state, the FIFO depths the block
 //      reports, the refusals, the enable and the disable through
 //      IC_ENABLE_STATUS
+//   b  THE SCAN: every address 0x08..0x77 probed, the peer's 0x6B alone
+//      answering, nobody-home as i2c_nack_addr at the address's NACK
+//   c  THE PEER: ident (kind 0x09, on its crystal), thirty command round
+//      trips, ten at each speed
+//   d  the tenure shapes against the peer: write, read, write-then-read
+//      with the repeated START counted from the far end, the probe, reads
+//      across the peer's refills, a 200-byte write through the pump, the
+//      general call
+//   e  the vocabulary: nack_addr from a deaf client, nack_data at the first
+//      and at the third data byte, the client's stretch priced on a read
+//      and absent on a write
+//   f  THE THREE SPEEDS byte-exact both ways and MEASURED on the ruler
+//   g  THE DMA ENGINES (channels 4 and 5): a 64-byte read timed, a
+//      write-then-read, the short reads on the pump, the bursts
+//   h  THE KERNEL: I2cBus over I2cHost, the NACK in its place, the
+//      rejection, both votes, and THE TIMED BUS - the peer holding SCL -
+//      answered by the arbiter's per-bus timeout
+//   i  THE STUCK BUS: the peer holding SDA, unstick() counting the clocks
+//      until it lets go, then a line nine clocks cannot free
+//   k  ARBITRATION on the wire, both directions
+//   l  THE ROLES INVERT: this board's client written to and read from by
+//      the peer's host, and its GENERAL CALL
+//   x  (outside z) the hand-made window traced: what the block reports of
+//      a START and a STOP it did not make, and a tenure written inside it
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <variant>
+
+#include "kernel/event_queue.hpp"
+#include "kernel/fsm.hpp"
+#include "kernel/post.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
+#include "rp2040/dma.hpp"
 #include "rp2040/i2c.hpp"
 #include "rp2040/nvic.hpp"
+#include "rp2040/pin.hpp"
 #include "rp2040/platform.hpp"
 #include "rp2040/ticker.hpp"
 #include "rp2040/timer.hpp"
 #include "rp2040/uart.hpp"
+#include "util/i2c_bus.hpp"
+#include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
+// that speaks it.
+#include "../../../avrdx/src/apps/twi_link.hpp"
 
 namespace {
 
@@ -44,6 +91,7 @@ using namespace brio;
 
 using SysClock = Clock<ClockSource::pll, 125'000'000>;
 constexpr SysClock clock;
+using P = Rp2040Platform<>;
 
 constexpr UartPins console_pins{
     .tx = {0, PinFunction::uart},
@@ -55,6 +103,20 @@ constexpr Serial serial;
 TestBench<Serial, 16> bench;
 
 uint32_t us_now() { return Timer::now_low(); }
+
+// I2C1 on the pair's wires: GP3 (SCL), GP2 (SDA).
+constexpr I2cPins link_pins{.scl = 3, .sda = 2};
+using Host = I2cHost<1, link_pins>;
+using DmaHost = I2cHost<1, link_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5>>;
+using Client = I2cClient<1, link_pins>;
+using Raw = DwApbI2c<1>;
+using SdaPin = Pin<2>;
+using SclPin = Pin<3>;
+constexpr uint8_t partner_kind = twilink::peer_rp2350;
+constexpr const char* partner_text = "the WeAct RP2350B";
+
+// THE TWO-BOARD LETTERS, over the names above.
+#include "rp_i2c_pair.hpp"
 
 // =============================================================================
 // a - the block, wireless
@@ -143,8 +205,8 @@ void ta_block() {
 }
 
 void banner() {
-    print(serial, crlf, "test_rp2040_i2c - the RP2040 I2C (datasheet 4.3, DW_apb_i2c), the block wireless; clk_sys=",
-          SysClock::hz, " Hz", crlf);
+    print(serial, crlf, "test_rp2040_i2c - the RP2040 I2C (datasheet 4.3, DW_apb_i2c): the block wireless, then "
+          "I2C1 on GP3/GP2 against the RP2350B's twi_peer; clk_sys=", SysClock::hz, " Hz", crlf);
     bench.menu();
 }
 
@@ -153,19 +215,34 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
+extern "C" void isr_i2c1() { pair_i2c_isr(); }
+extern "C" void isr_dma_0() { pair_dma_isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
     const bool timer_ok = brio::Timer::init(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    const bool dma_ok = brio::Dma::init();
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless", ta_block);
+    bench.letter('b', "the scan", tb_scan);
+    bench.letter('c', "the peer: ident and the command channel", tc_peer);
+    bench.letter('d', "the tenure shapes, the general call", td_shapes);
+    bench.letter('e', "the vocabulary on the wire, the stretch priced", te_vocabulary);
+    bench.letter('f', "the three speeds, measured", tf_speeds);
+    bench.letter('g', "the DMA engines", tg_dma);
+    bench.letter('h', "the kernel: I2cBus over I2cHost, the timed bus", th_kernel);
+    bench.letter('i', "the stuck bus", ti_unstick);
+    bench.letter('k', "arbitration on the wire", tk_arbitration);
+    bench.letter('l', "the roles invert: this board as the peer's client", tl_roles);
+    bench.letter('x', "the hand-made window, traced (outside z)", tx_window, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",
-                    " tick=", tick_ok ? "SysTick" : "FAILED", brio::crlf);
+                    " tick=", tick_ok ? "SysTick" : "FAILED",
+                    " dma=", dma_ok ? "released" : "FAILED", brio::crlf);
         banner();
         bench.prompt();
     }

@@ -1,10 +1,15 @@
 // test_rp2350_i2c - the reference bench suite for this chip's I2C
 // (rp2350/i2c.hpp over datasheet 12.2, the Synopsys DW_apb_i2c v2.03a):
-// the block WIRELESS, and THIS CHIP'S PADS - the isolation latch, the pad
+// the block WIRELESS, THIS CHIP'S PADS - the isolation latch, the pad
 // register the driver writes, the unstick's hand-over - on the high half
-// of the bank, above GP31. ONE SOURCE, BOTH ARCHITECTURES: nothing in
-// chapter 12.2 is a processor's, so every verdict below is expected to
-// read the same on the Cortex-M33 half and on the Hazard3 half.
+// of the bank, above GP31, and then the host and the client on a wire to a
+// SECOND CHIP: every tenure shape, the vocabulary produced on the wire, the
+// three speeds measured, the DMA engines, util/i2c_bus.hpp's arbiter with
+// its timed bus, the stuck bus, arbitration between two hosts, and this
+// board as the far host's client, its general call included. ONE SOURCE,
+// BOTH ARCHITECTURES: nothing in chapter 12.2 is a processor's, so every
+// verdict below is expected to read the same on the Cortex-M33 half and on
+// the Hazard3 half.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
@@ -12,13 +17,15 @@
 //
 // THE WIRE IS THE DESK PARTNER'S. I2C0 on GP36 (SDA) / GP37 (SCL) is
 // wired to the WeAct RP2040's I2C1, each line with 1.5 kOhm to THAT
-// board's 3V3 (docs/boards/weact-rp2350b.md). A tenure's far end is that
-// board's peer, never this chip's other instance; what this suite judges
-// on the wire needs no far end - the pads, and an address nobody on the
-// bus answers. Letter j reads the pull-ups first through
+// board's 3V3 (docs/boards/weact-rp2350b.md). That board runs `twi_peer`
+// (rp2040/src/apps/twi_peer.cpp), commanded IN BAND over the bus under
+// test through avrdx/src/apps/twi_link.hpp; the two-board letters are the
+// ones both Raspberry Pi suites share, rp2040/src/apps/rp_i2c_pair.hpp,
+// whose header states what they ask of a suite. Every letter that drives
+// the link reads the partner's rail first through
 // rp2350/src/apps/pair_power.hpp (erratum RP2350-E9's own workaround: the
-// pad's pull-down, its input buffer pulsed), which is also the proof the
-// RP2040 is powered, and drives nothing when they read low.
+// pad's pull-down, its input buffer pulsed) and drives nothing when it
+// reads low; letter j reads it as one of its verdicts.
 //
 // THE RULER IS SYSTEM TIMER 0 (rp2350/timer.hpp). THE UNSTICK HAS A
 // RULER OF ITS OWN - the platform timer, which rp2350/delay.hpp counts
@@ -31,6 +38,25 @@
 //      bank, the timing arithmetic at this clk_sys (table 1053's floors
 //      reproduced), the reset state, the FIFO depths the block reports,
 //      the refusals, the enable and the disable through IC_ENABLE_STATUS
+//   b  THE SCAN: every address 0x08..0x77 probed, the peer's 0x6B alone
+//      answering, nobody-home as i2c_nack_addr at the address's NACK
+//   c  THE PEER: ident (kind 0x08, on its crystal), thirty command round
+//      trips, ten at each speed
+//   d  the tenure shapes against the peer: write, read, write-then-read
+//      with the repeated START counted from the far end, the probe, reads
+//      across the peer's refills, a 200-byte write through the pump, the
+//      general call
+//   e  the vocabulary: nack_addr from a deaf client, nack_data at the first
+//      and at the third data byte, the client's stretch priced on a read
+//      and absent on a write
+//   f  THE THREE SPEEDS byte-exact both ways and MEASURED on the ruler
+//   g  THE DMA ENGINES (channels 4 and 5): a 64-byte read timed, a
+//      write-then-read, the short reads on the pump, the bursts
+//   h  THE KERNEL: I2cBus over I2cHost, the NACK in its place, the
+//      rejection, both votes, and THE TIMED BUS - the peer holding SCL -
+//      answered by the arbiter's per-bus timeout
+//   i  THE STUCK BUS: the peer holding SDA, unstick() counting the clocks
+//      until it lets go, then a line nine clocks cannot free
 //   j  THE PADS, which is where this chip differs from its predecessor,
 //      on GP36/GP37: the link's pull-ups read the way E9 forces, the
 //      isolation latch dropped by the driver's own hand-over, the whole
@@ -38,14 +64,28 @@
 //      answers carried by them, the unstick's hand-over through the HIGH
 //      half's SIO registers and back, and both pads left isolated again
 //      by release()
+//   k  ARBITRATION on the wire, both directions
+//   l  THE ROLES INVERT: this board's client written to and read from by
+//      the peer's host, and its GENERAL CALL
+//   x  (outside z) the hand-made window traced: what the block reports of
+//      a START and a STOP it did not make, and a tenure written inside it
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <variant>
+
+#include "kernel/event_queue.hpp"
+#include "kernel/fsm.hpp"
+#include "kernel/post.hpp"
+#include "kernel/tenuto.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
+#include "rp2350/dma.hpp"
 #include "rp2350/i2c.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
@@ -53,8 +93,14 @@
 #include "rp2350/ticker.hpp"
 #include "rp2350/timer.hpp"
 #include "rp2350/uart.hpp"
+#include "util/i2c_bus.hpp"
+#include "util/power.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: one file for every board
+// that speaks it.
+#include "../../../avrdx/src/apps/twi_link.hpp"
 
 #include "pair_power.hpp"
 
@@ -64,6 +110,7 @@ using namespace brio;
 
 using SysClock = Clock<ClockSource::pll, 150'000'000>;
 constexpr SysClock clock;
+using P = Rp2350Platform<>;
 
 constexpr UartPins console_pins{
     .tx = {0, PinFunction::uart},
@@ -76,48 +123,24 @@ using Ruler = Timer<0>;
 TestBench<Serial> bench;
 
 // I2C0 on the pair's wires: GP37 (SCL), GP36 (SDA).
-constexpr I2cPins host_pins{.scl = 37, .sda = 36};
-using Host = I2cHost<0, host_pins>;
-using SdaPad = Pin<36>;
-using SclPad = Pin<37>;
-/// An address nothing on the pair's bus answers: the RP2040's peer
-/// listens at 0x6B alone (avrdx/src/apps/twi_link.hpp), and its dark
-/// images listen at none.
-constexpr uint8_t nobody = 0x42;
-
-volatile bool host_live = false;
-volatile bool transfer_done = false;
-volatile uint8_t transfer_status = 0;
+constexpr I2cPins link_pins{.scl = 37, .sda = 36};
+using Host = I2cHost<0, link_pins>;
+using DmaHost = I2cHost<0, link_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5>>;
+using Client = I2cClient<0, link_pins>;
+using Raw = DwApbI2c<0>;
+using SdaPin = Pin<36>;
+using SclPin = Pin<37>;
+constexpr uint8_t partner_kind = twilink::peer_rp2040;
+constexpr const char* partner_text = "the WeAct RP2040";
 
 uint32_t us_now() { return Ruler::now_low(); }
 const char* arch_name() { return core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33"; }
 
-void host_ready() {
-    host_live = false;
-    (void)Host::init(clock);
-    host_live = true;
-}
+// THE TWO-BOARD LETTERS, over the names above.
+#include "../../../rp2040/src/apps/rp_i2c_pair.hpp"
 
-/// One address-only tenure (the probe) through the host, waited out. The
-/// status, or 0xFE for a tenure that never answered (the engine
-/// recover()ed).
-uint8_t probe(uint8_t addr) {
-    Host::Request r{};
-    r.addr = addr;
-    r.speed = I2cSpeed::fast_400k;
-    transfer_done = false;
-    if (Host::start(r)) {
-        return Host::status();
-    }
-    const uint32_t t0 = us_now();
-    while (!transfer_done && us_now() - t0 < 200'000u) {
-    }
-    if (!transfer_done) {
-        (void)Host::recover();
-        return 0xFEu;
-    }
-    return transfer_status;
-}
+/// One address-only tenure (the probe) at 400 kHz, waited out.
+uint8_t probe(uint8_t addr) { return tenure<Host>(addr, nullptr, 0, nullptr, 0, I2cSpeed::fast_400k); }
 
 
 // =============================================================================
@@ -236,13 +259,13 @@ void tj_pads() {
     host_ready();
     const uint32_t pad36 = Gpio::pad(36);
     const uint32_t pad37 = Gpio::pad(37);
-    const bool fn_ok = SdaPad::function() == PinFunction::i2c && SclPad::function() == PinFunction::i2c;
-    const bool iso_ok = !SdaPad::isolated() && !SclPad::isolated();
-    const bool ie_ok = SdaPad::input_enabled() && SclPad::input_enabled();
+    const bool fn_ok = SdaPin::function() == PinFunction::i2c && SclPin::function() == PinFunction::i2c;
+    const bool iso_ok = !SdaPin::isolated() && !SclPin::isolated();
+    const bool ie_ok = SdaPin::input_enabled() && SclPin::input_enabled();
     const uint32_t wanted = pad_value(i2c_pad_config);
     print(serial, "  after init: GP36 pad=", hex(pad36), " GP37 pad=", hex(pad37), " (the driver asks for ",
-          hex(wanted), "), FUNCSEL ", static_cast<uint32_t>(SdaPad::function()), "/",
-          static_cast<uint32_t>(SclPad::function()), ", isolated ", SdaPad::isolated(), "/", SclPad::isolated(),
+          hex(wanted), "), FUNCSEL ", static_cast<uint32_t>(SdaPin::function()), "/",
+          static_cast<uint32_t>(SclPin::function()), ", isolated ", SdaPin::isolated(), "/", SclPin::isolated(),
           crlf);
     bench.verdict("THE HAND-OVER DROPS THE ISOLATION LATCH: both pads read back FUNCSEL 3 with ISO clear, "
                   "the input buffer on, and the whole pad register exactly what 12.2.1.3 asks for - the "
@@ -260,28 +283,28 @@ void tj_pads() {
     const uint8_t cleared = Host::unstick();
     const uint32_t pad36_after = Gpio::pad(36);
     const uint32_t pad37_after = Gpio::pad(37);
-    const bool fn_back = SdaPad::function() == PinFunction::i2c && SclPad::function() == PinFunction::i2c;
+    const bool fn_back = SdaPin::function() == PinFunction::i2c && SclPin::function() == PinFunction::i2c;
     const uint8_t st2 = probe(nobody);
     print(serial, "  after unstick() (", cleared, "): GP36 pad=", hex(pad36_after), " GP37 pad=", hex(pad37_after),
           ", the next probe ", st2, crlf);
     bench.verdict("the unstick reads a healthy bus above GP31 (0), takes both pads to SIO and hands them back "
                   "to the block with the same pad register: the probe after it lands unchanged",
                   cleared == 0u && pad36_after == wanted && pad37_after == wanted && fn_back && st2 == i2c_nack_addr);
-    host_live = false;
+    owner = Owner::none;
     Host::release();
     const uint32_t pad36_released = Gpio::pad(36);
     print(serial, "  after release(): GP36 pad=", hex(pad36_released), " FUNCSEL ",
-          static_cast<uint32_t>(SdaPad::function()), crlf);
+          static_cast<uint32_t>(SdaPin::function()), crlf);
     bench.verdict("release() puts the pads back where a reset leaves them (9.11's 0x116: isolated, the "
                   "input buffer off, a pull-down) with no owner",
-                  pad36_released == PADS_BANK0_GPIO0_RESET && SdaPad::isolated() && !SdaPad::input_enabled() &&
-                      SdaPad::function() == PinFunction::none && SclPad::isolated() &&
-                      SclPad::function() == PinFunction::none);
+                  pad36_released == PADS_BANK0_GPIO0_RESET && SdaPin::isolated() && !SdaPin::input_enabled() &&
+                      SdaPin::function() == PinFunction::none && SclPin::isolated() &&
+                      SclPin::function() == PinFunction::none);
 }
 
 void banner() {
     print(serial, crlf, "test_rp2350_i2c - the RP2350 I2C (datasheet 12.2, DW_apb_i2c v2.03a) on the ",
-          arch_name(), " half: the block wireless, I2C0's pads on GP37/GP36 (the pair's wires); clk_sys=",
+          arch_name(), " half: the block wireless, then I2C0 on GP37/GP36 against the RP2040's twi_peer; clk_sys=",
           SysClock::hz, " Hz", crlf);
     bench.menu();
 }
@@ -291,17 +314,8 @@ void banner() {
 // ---- target glue ------------------------------------------------------------
 extern "C" void isr_uart0() { (void)Serial::isr(); }
 extern "C" void isr_systick() { brio::Ticker::tick(); }
-extern "C" void isr_i2c0() {
-    if (host_live) {
-        if (Host::isr()) {
-            transfer_status = Host::status();
-            transfer_done = true;
-        }
-    } else {
-        brio::DwApbI2c<0>::interrupts_only(0);
-        brio::DwApbI2c<0>::clear_all();
-    }
-}
+extern "C" void isr_i2c0() { pair_i2c_isr(); }
+extern "C" void isr_dma_0() { pair_dma_isr(); }
 
 int main() {
     const bool clock_ok = SysClock::init();
@@ -313,15 +327,30 @@ int main() {
     const bool ruler_ok = brio::Mtime::start(clock);
     const bool serial_ok = Serial::init(clock, 115200);
     const bool tick_ok = brio::Ticker::init(clock);
+    const bool dma_ok = brio::Dma::init();
     brio::enable_interrupts();
 
+    // Every letter that drives the link reads the partner's rail first
+    // (pair_power.hpp); j reads it itself, as one of its verdicts.
+    using pair::guarded;
     bench.letter('a', "the block, wireless", ta_block);
+    bench.letter('b', "the scan", guarded<bench, clock, tb_scan>);
+    bench.letter('c', "the peer: ident and the command channel", guarded<bench, clock, tc_peer>);
+    bench.letter('d', "the tenure shapes, the general call", guarded<bench, clock, td_shapes>);
+    bench.letter('e', "the vocabulary on the wire, the stretch priced", guarded<bench, clock, te_vocabulary>);
+    bench.letter('f', "the three speeds, measured", guarded<bench, clock, tf_speeds>);
+    bench.letter('g', "the DMA engines", guarded<bench, clock, tg_dma>);
+    bench.letter('h', "the kernel: I2cBus over I2cHost, the timed bus", guarded<bench, clock, th_kernel>);
+    bench.letter('i', "the stuck bus", guarded<bench, clock, ti_unstick>);
     bench.letter('j', "the pads and the isolation latch, above GP31", tj_pads);
+    bench.letter('k', "arbitration on the wire", guarded<bench, clock, tk_arbitration>);
+    bench.letter('l', "the roles invert: this board as the peer's client", guarded<bench, clock, tl_roles>);
+    bench.letter('x', "the hand-made window, traced (outside z)", guarded<bench, clock, tx_window>, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: arch=", arch_name(), " clk=", clock_ok ? "PLL150" : "FAILED",
                     " timer0=", timer_ok ? "1us" : "FAILED", " ruler=", ruler_ok ? "1us" : "FAILED",
-                    " tick=", tick_ok ? "on" : "FAILED", brio::crlf);
+                    " tick=", tick_ok ? "on" : "FAILED", " dma=", dma_ok ? "released" : "FAILED", brio::crlf);
         banner();
         bench.prompt();
     }

@@ -176,34 +176,30 @@
 //      (UARTRIS read raw after ten frames of silence), and the copy into
 //      the ring: write_bulk's byte loop against the runtime's memcpy.
 //   i  THE I2C HOST ABOVE THE WIRE (dw_apb_i2c/i2c.hpp over rp2040/i2c.hpp)
-//      on a SELF-LINK: GP12 (I2C0 SDA) to GP14 (I2C1
-//      SDA), GP13 (I2C0 SCL) to GP15 (I2C1 SCL), 4.7 kOhm to 3V3 on each.
-//      THIS DESK DOES NOT CARRY THAT SELF-LINK (the board is wired to its
-//      desk partner and every self-link is retired), so the letter runs BY
-//      NAME ONLY, outside z, and with no wire it says so and fails.
-//      I2C0 is the host; I2C1 answers 0x42 from its own vector - its
-//      RX_TL raised to a level of eight and a read answered with as many
-//      bytes as its FIFO takes per read request - and is an INSTRUMENT:
-//      its interrupts (`peer_meter`) are printed beside each line and kept
-//      out of busy, irq and isr, which are the host's vector and the DMA
-//      line's. 0x43 is nobody. At 100 kHz, 400 kHz and 1 MHz: i2c.write of
-//      1, 2, 16 and 255 bytes, i2c.read of the same, i2c.wr (one byte
-//      written, a repeated START, 1, 2 and 16 read), i2c.probe (an ACK -
-//      a one-byte read on this block) and i2c.probe.nack, i2c.write.readdr
-//      (a one-byte write right after a probe of 0x43, so its start() finds
-//      another address in the block), then on the engined host
-//      (DmaTxEngine<6, uint16_t>, DmaRxEngine<7>) i2c.read.dma of 16 and
-//      255 and i2c.wr.dma of 1 + 16. Each the best of five after one
-//      thrown away, every run judged byte-exact against what the client
-//      heard or gave. Under each line: fixed = wall less the wire's time,
-//      start = the thread inside start(), the client's interrupts and
-//      cycles, the XIP cache's misses over the tenure and the longest
-//      host entry. BOTH I2C VECTORS RUN FROM SRAM, flattened into
-//      .ram_text, so that a line reads the code and not the XIP cache's
-//      state at that instant: from flash the one-STOP handler measured
-//      188 to 365 cycles on the RP2350's Cortex-M33 across builds, with up
-//      to six cache misses of about seventy cycles each a tenure, against
-//      84 from SRAM.
+//      against THE DESK PARTNER: I2C1 on GP2 (SDA) / GP3 (SCL), the pair's I2C
+//      wires to the WeAct RP2350B, which runs `twi_peer` and is commanded over
+//      the same bus (avrdx/src/apps/twi_link.hpp): one `serve` a speed at
+//      twilink's dut_addr (0x2C), every read answered with one fixed byte
+//      given a FIFO ahead, so the far end's own pace is the wire's and
+//      nothing of it runs on this core. The letter runs BY NAME ONLY,
+//      outside z: it needs the partner on twi_peer, and without it says
+//      so and fails. 0x43 is nobody. At 100 kHz, 400 kHz and 1 MHz:
+//      i2c.write of 1, 2, 16 and 255 bytes, i2c.read of the same, i2c.wr
+//      (one byte written, a repeated START, 1, 2 and 16 read), i2c.probe
+//      (an ACK - a one-byte read on this block) and i2c.probe.nack,
+//      i2c.write.readdr (a one-byte write right after a probe of 0x43, so
+//      its start() finds another address in the block), then on the
+//      engined host (DmaTxEngine<6, uint16_t>, DmaRxEngine<7>)
+//      i2c.read.dma of 16 and 255 and i2c.wr.dma of 1 + 16. Each the best
+//      of five after one thrown away, every run judged: its status, and
+//      every byte read the serve's fixed byte. Under each line: fixed =
+//      wall less the wire's time, start = the thread inside start(), the
+//      XIP cache's misses over the tenure and the longest host entry. THE
+//      HOST'S VECTOR RUNS FROM SRAM, flattened into .ram_text, so that a
+//      line reads the code and not the XIP cache's state at that instant:
+//      from flash the one-STOP handler measured 188 to 365 cycles on the
+//      RP2350's Cortex-M33 across builds, with up to six cache misses of
+//      about seventy cycles each a tenure, against 84 from SRAM.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -282,6 +278,10 @@
 #include "util/bench.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+// THE PROTOCOL HEADER IS SHARED, NOT COPIED: letter i commands the partner's
+// twi_peer through it.
+#include "../../../avrdx/src/apps/twi_link.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 125'000'000>;
 constexpr SysClock clock;
@@ -1386,69 +1386,92 @@ void tu_uart() {
 
 // =============================================================================
 // i - the I2C host above the wire (dw_apb_i2c/i2c.hpp over rp2040/i2c.hpp),
-//     on the self-link: I2C0 the host, I2C1 the client
+//     against the partner's twi_peer
 // =============================================================================
-constexpr I2cPins i2c_host_pins{.scl = 13, .sda = 12};
-constexpr I2cPins i2c_peer_pins{.scl = 15, .sda = 14};
-using I2cPump = I2cHost<0, i2c_host_pins>;
-using I2cEngined = I2cHost<0, i2c_host_pins, DmaTxEngine<6, uint16_t>, DmaRxEngine<7>>;
-using I2cPeer = I2cClient<1, i2c_peer_pins>;
-constexpr uint8_t i2c_peer_addr = 0x42;
+constexpr I2cPins i2c_host_pins{.scl = 3, .sda = 2};
+using I2cPump = I2cHost<1, i2c_host_pins>;
+using I2cEngined = I2cHost<1, i2c_host_pins, DmaTxEngine<6, uint16_t>, DmaRxEngine<7>>;
+constexpr uint8_t i2c_peer_addr = twilink::dut_addr;
 constexpr uint8_t i2c_nobody = 0x43;
+/// What the far end answers every read with (twilink's pattern_fixed).
+constexpr uint8_t i2c_seed = 0xA5;
 
-/// Which host type owns I2C0's bodies (both are instance 0, each with its
-/// own statics: one at a time, each brought up by its own init()).
+/// Which host type owns I2C1's bodies (both are instance 1, each with
+/// its own statics: one at a time, each brought up by its own init()).
 enum class I2cMode : uint8_t { none, pump, engined };
 volatile I2cMode i2c_mode = I2cMode::none;
-volatile bool i2c_peer_live = false;
 volatile bool i2c_done = false;
 volatile uint8_t i2c_status = 0;
-IsrMeter<Ruler, Idle> i2c_meter;    // I2C0's vector: the host
-IsrMeter<Ruler, Idle> peer_meter;   // I2C1's vector: the client, an instrument and not the host's cost
+IsrMeter<Ruler, Idle> i2c_meter;    // I2C1's vector: the host
 uint32_t i2c_isr_sum = 0;            // the meter's sum after the last entry, for the longest one
-volatile uint32_t i2c_isr_max = 0;   // the longest I2C0 entry since the op began (stamps included)
+volatile uint32_t i2c_isr_max = 0;   // the longest host entry since the op began (stamps included)
 
 uint8_t i2c_out[256];
 uint8_t i2c_in[256];
-uint8_t peer_heard[256];
-volatile uint16_t peer_count = 0;
-volatile uint16_t peer_given = 0;
 
-constexpr uint8_t peer_answer(uint16_t i) { return static_cast<uint8_t>(0xA0u + 5u * i); }
-
-/// The client's service, from its own vector: a written run taken eight at
-/// a time (its RX_TL raised by the letter) and whatever stands at any
-/// other event - the STOP, the read request of a write-then-read, before
-/// the abort that flushes its unread answers flushes the receive FIFO
-/// with them -, a read answered with as many bytes as its FIFO takes per
-/// read request.
-void peer_drain() {
-    uint16_t k = peer_count;
-    while (I2cPeer::data_ready()) {
-        const uint8_t b = I2cPeer::take();
-        if (k < 256u) {
-            peer_heard[k] = b;
-        }
-        ++k;
+/// One tenure on the pump for the far end's command channel, waited out
+/// on the tick: the status, or 0xFE.
+uint8_t link_tenure(const uint8_t* tx, uint8_t tx_len, uint8_t* rx, uint8_t rx_len) {
+    I2cPump::Request r{};
+    r.addr = twilink::command_addr;
+    r.tx = lend<Lease::reply>(tx);
+    r.tx_len = tx_len;
+    r.rx = lend<Lease::reply>(rx);
+    r.rx_len = rx_len;
+    i2c_done = false;
+    if (I2cPump::start(r)) {
+        return I2cPump::status();
     }
-    peer_count = k;
+    const uint32_t t0 = Ticker::ticks();
+    while (!i2c_done && Ticker::ticks() - t0 < 100u) {
+    }
+    if (!i2c_done) {
+        (void)I2cPump::recover();
+        return 0xFEu;
+    }
+    return i2c_status;
 }
-void peer_serve() {
-    const I2cClientEvent ev = I2cPeer::service();
-    peer_drain();
-    if (ev == I2cClientEvent::byte_wanted) {
-        uint16_t k = peer_given;
-        while (I2cPeer::writable()) {
-            I2cPeer::give(peer_answer(k));
-            ++k;
+
+/// The far end told to serve for `ms` (twi_link's `serve`, the frame
+/// written and its ack read back, three attempts), then arm_ms waited:
+/// true when it acknowledged.
+bool far_serve(uint16_t ms) {
+    twilink::Params a{};
+    a.ms = ms;
+    a.addr = i2c_peer_addr;
+    a.seed = i2c_seed;
+    a.pattern = twilink::pattern_fixed;
+    uint8_t p[twilink::params_size];
+    twilink::put_params(p, a);
+    uint8_t frame[twilink::params_size + 4];
+    uint8_t n = 0;
+    twilink::write_frame([&](uint8_t b) { frame[n++] = b; }, twilink::Op::serve, p, twilink::params_size);
+    for (uint8_t k = 0; k < 3u; ++k) {
+        uint8_t answer[twilink::response_bytes] = {};
+        if (link_tenure(frame, n, nullptr, 0) == i2c_ok &&
+            link_tenure(nullptr, 0, answer, twilink::response_bytes) == i2c_ok) {
+            twilink::Decoder dec;
+            for (const uint8_t b : answer) {
+                if (dec.feed(b) == twilink::Decoder::Result::frame) {
+                    if (dec.frame().op == twilink::Op::ack) {
+                        const uint32_t t0 = Ticker::ticks();
+                        while (Ticker::ticks() - t0 <= twilink::arm_ms) {
+                        }
+                        return true;
+                    }
+                    break;
+                }
+            }
         }
-        peer_given = k;
-        I2cPeer::clear_read_request();
+        const uint32_t t0 = Ticker::ticks();
+        while (Ticker::ticks() - t0 < 400u) {
+        }
     }
+    return false;
 }
 
 /// The host's counters: its own vector and the DMA line, nothing else -
-/// the client's interrupts and the tick land in the idle windows.
+/// the tick lands in the idle windows.
 BenchCounters i2c_counters() {
     const Idle::CriticalSection cs;
     return bench_counters<Idle>(i2c_meter, dma_meter);
@@ -1457,8 +1480,6 @@ BenchCounters i2c_counters() {
 struct I2cOp {
     BenchSample s;
     uint32_t start_cycles;   ///< the thread inside start() alone
-    uint32_t peer_irq;       ///< the client's interrupts, on the same core
-    uint32_t peer_isr;       ///< and their cycles
     uint32_t xip_miss;       ///< the XIP cache's misses over the tenure, every context (two
                              ///< counters read apart: a count of -1 or -2 is none)
     uint32_t isr_max;        ///< the longest host entry, stamps included
@@ -1467,8 +1488,8 @@ struct I2cOp {
 };
 
 /// One tenure through host H, the core idling to its completion with the
-/// flag read under the mask (the kernel loop's shape); then judged
-/// against what the client heard or gave.
+/// flag read under the mask (the kernel loop's shape); then judged: its
+/// status, and every byte read the far end's fixed byte.
 template <typename H>
 I2cOp i2c_once(uint8_t addr, uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
     typename H::Request r{};
@@ -1481,13 +1502,9 @@ I2cOp i2c_once(uint8_t addr, uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
     for (uint16_t i = 0; i < rx_len; ++i) {
         i2c_in[i] = 0;
     }
-    peer_count = 0;
-    peer_given = 0;
     drain();
     i2c_done = false;
     std::atomic_signal_fence(std::memory_order_seq_cst);
-    const uint32_t p0 = peer_meter.count();
-    const uint32_t q0 = peer_meter.cycles();
     const BenchCounters c0 = i2c_counters();
     i2c_isr_sum = i2c_meter.cycles();
     i2c_isr_max = 0;
@@ -1510,38 +1527,23 @@ I2cOp i2c_once(uint8_t addr, uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
     const uint32_t xip_miss = Xip::accesses() - xip_hits;
     const BenchCounters c1 = i2c_counters();
     std::atomic_signal_fence(std::memory_order_seq_cst);
-    I2cOp op{bench_sample(wall, c0, c1), t1 - t0, 0, 0, xip_miss, i2c_isr_max, sync ? H::status() : i2c_status, false};
+    I2cOp op{bench_sample(wall, c0, c1), t1 - t0, xip_miss, i2c_isr_max, sync ? H::status() : i2c_status, false};
     if (!done) {
         using B = typename H::Resource;
         print(serial, "    STALLED: raw ", hex(B::raw_pending()), " mask ", hex(B::interrupts()), " status ",
               hex(B::flags()), " txflr ", B::tx_count(), " rxflr ", B::rx_count(), " abort ", hex(B::abort_source()),
-              " con ", hex(B::con()), " tl ", B::regs().IC_RX_TL, '/', B::regs().IC_TX_TL, " i2c0 irq ",
-              i2c_meter.count(), " peer given ", peer_given, crlf);
+              " con ", hex(B::con()), " tl ", B::regs().IC_RX_TL, '/', B::regs().IC_TX_TL, " host irq ", i2c_meter.count(), crlf);
         op.status = 0xFEu;
         (void)H::recover();
     }
-    // The client's last service (its STOP) may follow the host's
-    // completion: let it land before judging.
-    const uint32_t t2 = Ruler::now();
-    while (Ruler::now() - t2 < Ruler::hz() / 5000u) {
-    }
-    op.peer_irq = peer_meter.count() - p0;
-    op.peer_isr = peer_meter.cycles() - q0;
     bool exact = op.status == (addr == i2c_peer_addr ? i2c_ok : i2c_nack_addr);
-    if (exact && addr == i2c_peer_addr) {
-        exact = peer_count == tx_len;
-        for (uint16_t i = 0; exact && i < tx_len; ++i) {
-            exact = peer_heard[i] == i2c_out[i];
-        }
-        for (uint16_t i = 0; exact && i < rx_len; ++i) {
-            exact = i2c_in[i] == peer_answer(i);
-        }
+    for (uint16_t i = 0; exact && addr == i2c_peer_addr && i < rx_len; ++i) {
+        exact = i2c_in[i] == i2c_seed;
     }
     op.exact = exact;
     if (!exact && addr == i2c_peer_addr) {
-        print(serial, "    MISMATCH: status ", op.status, " heard ", peer_count, " of ", tx_len, " [", hex(peer_heard[0]),
-              ' ', hex(peer_heard[1]), "] sent [", hex(i2c_out[0]), ' ', hex(i2c_out[1]), "] read [", hex(i2c_in[0]), ' ',
-              hex(i2c_in[1]), "] given ", peer_given, crlf);
+        print(serial, "    MISMATCH: status ", op.status, " read [", hex(i2c_in[0]), ' ', hex(i2c_in[1]), "] of ",
+              rx_len, crlf);
     }
     return op;
 }
@@ -1607,7 +1609,7 @@ void i2c_print(const char* op, uint32_t n, const I2cOp& o, uint32_t periods_x10,
         n == 0u || wire_cycles == 0u ? 0u : static_cast<uint32_t>(static_cast<uint64_t>(n) * Ruler::hz() / wire_cycles);
     bench_line(serial, op, n, o.s, Ruler::hz(), wire_bps);
     print(serial, "    fixed=", static_cast<int32_t>(o.s.wall - wire_cycles), " (wire ", wire_cycles, " = ", periods_x10 / 10u, '.', periods_x10 % 10u,
-          " SCL) start=", o.start_cycles, " peer_irq=", o.peer_irq, " peer_isr=", o.peer_isr, " xip_miss=", static_cast<int32_t>(o.xip_miss), " isr_max=", o.isr_max, " status=", o.status,
+          " SCL) start=", o.start_cycles, " xip_miss=", static_cast<int32_t>(o.xip_miss), " isr_max=", o.isr_max, " status=", o.status,
           o.exact ? " exact" : " MISMATCH", crlf);
 }
 
@@ -1658,45 +1660,43 @@ void i2c_engined_group(I2cSpeed speed, uint32_t period_x1000) {
 }
 
 void ti_i2c() {
-    drain();
-    i2c_mode = I2cMode::none;
-    i2c_peer_live = true;   // before init(), as the host's mode below
-    const bool peer_ok =
-        I2cPeer::init(clock, {.address = i2c_peer_addr, .speed = I2cSpeed::fast_plus_1m});
-    DwApbI2c<1>::rx_threshold(7);   // the instrument's own: a written run taken eight at a time
-    I2cPeer::interrupts(I2cPeer::events, true);
     i2c_mode = I2cMode::pump;   // before init(): a stale pending line lands in the idle engine
     const bool host_ok = I2cPump::init(clock);
     for (uint16_t i = 0; i < 256u; ++i) {
         i2c_out[i] = static_cast<uint8_t>(0x11u + 3u * i);
     }
-    print(serial, "  I2C0 hosts on GP13/GP12, I2C1 answers ", hex(i2c_peer_addr),
-          " on GP15/GP14 from its own vector (not metered into busy, irq or isr); ", hex(i2c_nobody),
-          " is nobody. init: host=", host_ok, " client=", peer_ok, crlf);
-    const I2cOp p = i2c_once<I2cPump>(i2c_peer_addr, 0, 0, I2cSpeed::fast_400k);
-    if (!peer_ok || !host_ok || p.status != i2c_ok) {
-        print(serial, "  NO SELF-LINK: the probe of 0x42 answered ", p.status,
-              " - wire GP12-GP14 and GP13-GP15 with 4.7 kOhm to 3V3", crlf);
-        bench.verdict("ran", false);
-    } else {
-        for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k, I2cSpeed::fast_plus_1m}) {
-            const uint32_t period = i2c_group<I2cPump>(speed);
-            i2c_mode = I2cMode::none;
-            I2cPump::release();
-            i2c_mode = I2cMode::engined;
-            (void)I2cEngined::init(clock);
-            i2c_engined_group(speed, period);
-            i2c_mode = I2cMode::none;
-            I2cEngined::release();
-            i2c_mode = I2cMode::pump;
-            (void)I2cPump::init(clock);
+    // One serve a speed, its lines inside it, the rest of it waited out
+    // so the far end's command channel is back for the next.
+    constexpr uint16_t serve_ms = 3000;
+    print(serial, "  I2C1 hosts on GP2 (SDA) / GP3 (SCL); the WeAct RP2350B's twi_peer serves ", hex(i2c_peer_addr),
+          " for ", serve_ms, " ms a speed, every read answered ", hex(i2c_seed), "; ", hex(i2c_nobody),
+          " is nobody. init: host=", host_ok, crlf);
+    bool ran = host_ok;
+    for (const I2cSpeed speed : {I2cSpeed::standard_100k, I2cSpeed::fast_400k, I2cSpeed::fast_plus_1m}) {
+        if (!ran || !far_serve(serve_ms)) {
+            print(serial, "  NO FAR END: nothing answered the serve command on ", hex(twilink::command_addr),
+                  " - the partner must run twi_peer", crlf);
+            ran = false;
+            break;
         }
-        bench.verdict("ran", true);
+        const uint32_t s0 = Ticker::ticks();
+        const uint32_t period = i2c_group<I2cPump>(speed);
+        i2c_mode = I2cMode::none;
+        I2cPump::release();
+        i2c_mode = I2cMode::engined;
+        (void)I2cEngined::init(clock);
+        i2c_engined_group(speed, period);
+        i2c_mode = I2cMode::none;
+        I2cEngined::release();
+        i2c_mode = I2cMode::pump;
+        (void)I2cPump::init(clock);
+        print(serial, "  the serve's lines took ", Ticker::ticks() - s0, " ms of its ", serve_ms, crlf);
+        while (Ticker::ticks() - s0 < serve_ms + 100u) {
+        }
     }
+    bench.verdict("ran", ran);
     i2c_mode = I2cMode::none;
     I2cPump::release();
-    i2c_peer_live = false;
-    I2cPeer::release();
 }
 
 void banner() {
@@ -1762,8 +1762,8 @@ extern "C" void isr_dma_0() {
     }
     dma_meter.leave();
 }
-// Letter i's two I2C vectors run from SRAM, flattened (the file header).
-extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c0() {
+// Letter i's host vector runs from SRAM, flattened (the file header).
+extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c1() {
     i2c_meter.enter();
     bool edge = false;
     switch (i2c_mode) {
@@ -1778,7 +1778,7 @@ extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c0() {
         default:
             // Nothing of ours is up: silence the block, not the line, so
             // that the next init() finds it as it left it.
-            DwApbI2c<0>::interrupts_only(0);
+            DwApbI2c<1>::interrupts_only(0);
             break;
     }
     if (edge) {
@@ -1790,15 +1790,6 @@ extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c0() {
         i2c_isr_max = sum - i2c_isr_sum;
     }
     i2c_isr_sum = sum;
-}
-extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c1() {
-    peer_meter.enter();
-    if (i2c_peer_live) {
-        peer_serve();
-    } else {
-        DwApbI2c<1>::interrupts_only(0);
-    }
-    peer_meter.leave();
 }
 extern "C" void isr_spi0() {
     spi_meter.enter();
@@ -1845,7 +1836,7 @@ int main() {
     bench.letter('d', "the DMA engines: copy, fill, paced, spi.dma", td_dma);
     bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
     bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", tu_uart);
-    bench.letter('i', "the I2C host above the wire on the self-link: a tenure's price", ti_i2c, false);
+    bench.letter('i', "the I2C host above the wire, against the partner's twi_peer: a tenure's price", ti_i2c, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED",

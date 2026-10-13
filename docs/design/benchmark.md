@@ -516,9 +516,9 @@ partner's handlers included where they run on the same core.
 | CH32V303VCT6 (120 MHz for the letter, as the CH32V203; the CH32V203C8T6's `twi_peer`, polled by its own core) | 767, three interrupts | 1393, five | 1.00 through the pump (256 interrupts, 93 cycles a byte) and the engine (4, the core kept awake: 505 k busy against the pump's 44 k) | - | 746 | not run on this board | 183 |
 | CH32V006K8U6 (48 MHz; the STM32G0's `twi_peer`) | 1373 (1896), four interrupts (five) | 1905 through the pump (2456) | 1.00 through the pump (264 interrupts) and the engine (9) | 262 through the pump, 9 through the engine | 1488 | WCH's polled master, its library having no interrupt-driven tenure: 766 and 907 fixed, the core held the whole tenure (3103 and 5581 busy) | 190 to 225 |
 | STM32G0B1RE (64 MHz; I2C2 on the self-link; the 400 kHz rung 369.9 kHz on the desk's wire) | 1028 (1554), one interrupt (two) | 1651 (2377), two interrupts (four) | 1.00 through the pump (255 interrupts, 123 cycles a byte against the HAL's 168) and the engine (1) | 255 through the pump, 1 through the engine | 1189 | HAL v1.4.7: 1362 and 2289 fixed | 509, an engined write to an absent address |
-| RP2040 (125 MHz; I2C1 on the self-link) | 832 (967), the same at 100 kHz and 1 MHz (1529 at 100 kHz before) | 903 (1011) | 1.00, 31 | 32 (285), 13 378 (54 955) | 651 (802 at 100 kHz) | pico-sdk 2.3.1, polled: 538 fixed with the core held the whole wire (6680 busy); its 255-byte read 20 834 fixed against 1375 | 439 (574) |
-| RP2350, Cortex-M33 (150 MHz; the same) | 474 (699) | 519 (393, which answered at the last byte, a period before the bus was free) | 1.00, 31 | 32 (285), 9007 (32 319) | 583 | pico-sdk: 459 fixed, 7811 busy; its 255-byte read 13 713 fixed against 676 | 298 (353) |
-| RP2350, Hazard3 (150 MHz; the same) | 484 (731) | 520 (417) | 1.00, 31 | 32 (285), 8439 (30 597) | 303 | pico-sdk: 486 fixed, 7838 busy | 280 (316) |
+| RP2040 (125 MHz; the WeAct RP2350B's `twi_peer` over the pair's wires) | 722, the same at 100 kHz and 1 MHz | 786 | 1.00, 31 | 32, 13 385 | 754 | not run on the pair | 439 |
+| RP2350, Cortex-M33 (150 MHz; the WeAct RP2040's `twi_peer`) | 392, the same at 100 kHz and 1 MHz | 441 | 1.00, 31 | 32, 9008 | 767 | not run on the pair | 298 |
+| RP2350, Hazard3 (150 MHz; the same) | 403 | 447 | 1.00, 31 | 32, 8417 | 385 | not run on the pair | 279 |
 
 What the rows say:
 
@@ -529,10 +529,9 @@ What the rows say:
   timing sets, 1.5 us at 400 kHz and 6 at 100 - is paid only when the
   address or the speed moves, which is what made the fixed cost the
   same at every speed ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md)).
-  The SDK's polled loop is cheaper by 55 per cent on the M0+ for a
-  one-byte tenure - no exception entry, no idle wake - and holds the
-  core for the whole wire time to get it; on the M33 and the Hazard3
-  the two are within a fifth.
+  The far end of the RP rows is the desk partner's polled client, which
+  gives a FIFO ahead and runs on the other chip, so nothing of it is in
+  the figures.
 - On the F1 lineage's event machine - the STM32F4, the CH32V203, the
   CH32V303, the CH32V006 - one interrupt a byte is the silicon's, and the
   tenure's fixed cost is the engine's: the event interrupt raised by

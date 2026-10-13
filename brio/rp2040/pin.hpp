@@ -9,7 +9,9 @@
  *  - IO_BANK0 (2.19.2): a CTRL register per pin whose FUNCSEL chooses
  *    WHICH PERIPHERAL owns the pad's direction, level and input - a
  *    UART, an SPI, an I2C, a PWM slice, a PIO, a clock, USB control,
- *    or SIO for software - plus overrides nothing here uses. The
+ *    or SIO for software - plus the overrides that sit between the
+ *    function and the pad (2.19.6.1's OUTOVER and OEOVER; INOVER and
+ *    IRQOVER are not offered here). The
  *    peripheral's function number is the same on every pin it reaches
  *    (F2 is UART on every UART pin, F5 SIO everywhere), and WHICH
  *    instance and signal a pin carries under that number is table 279,
@@ -70,6 +72,25 @@ enum class PinPull : uint8_t { none, up, down, keeper };
 
 /// Output drive strength (2.19.4).
 enum class PinDrive : uint8_t { ma2 = 0, ma4 = 1, ma8 = 2, ma12 = 3 };
+
+/// What the IO mux does to the function's output level on its way to the
+/// pad (2.19.6.1, GPIOn_CTRL.OUTOVER): let it through, invert it, or
+/// force it either way whatever the function says.
+enum class PinOverride : uint8_t {
+    pass = IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_NORMAL,
+    invert = IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_INVERT,
+    low = IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_LOW,
+    high = IO_BANK0_GPIO0_CTRL_OUTOVER_VALUE_HIGH,
+};
+
+/// The same for the OUTPUT ENABLE (OEOVER), whose two forced values are
+/// named for what they do rather than for a level.
+enum class PinOeOverride : uint8_t {
+    pass = IO_BANK0_GPIO0_CTRL_OEOVER_VALUE_NORMAL,
+    invert = IO_BANK0_GPIO0_CTRL_OEOVER_VALUE_INVERT,
+    disable = IO_BANK0_GPIO0_CTRL_OEOVER_VALUE_DISABLE,
+    enable = IO_BANK0_GPIO0_CTRL_OEOVER_VALUE_ENABLE,
+};
 
 /// A pad's electrical setup. The defaults are the pad's own reset
 /// values, pull aside.
@@ -177,6 +198,32 @@ struct Gpio {
         pad(n) = PADS_BANK0_GPIO0_RESET;
     }
 
+    // ---- the two output overrides, between the function and the pad -----
+
+    /// The output level the chosen function drives, passed, inverted or
+    /// forced. Forcing one leaves the function owning the pad - its INPUT
+    /// still reaches it - and `pass` gives the level back: with OEOVER
+    /// forced `enable` and OUTOVER `low`, a line an I2C owns is pulled
+    /// down under the block's own eyes.
+    static void out_override(uint8_t n, PinOverride o) {
+        hw_write_masked(ctrl(n), static_cast<uint32_t>(o) << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB,
+                        IO_BANK0_GPIO0_CTRL_OUTOVER_BITS);
+    }
+    static PinOverride out_override(uint8_t n) {
+        return static_cast<PinOverride>((ctrl(n) & IO_BANK0_GPIO0_CTRL_OUTOVER_BITS) >>
+                                        IO_BANK0_GPIO0_CTRL_OUTOVER_LSB);
+    }
+    /// The output ENABLE: `disable` floats the pad whatever the function
+    /// wants, `enable` drives it whatever the function wants.
+    static void oe_override(uint8_t n, PinOeOverride o) {
+        hw_write_masked(ctrl(n), static_cast<uint32_t>(o) << IO_BANK0_GPIO0_CTRL_OEOVER_LSB,
+                        IO_BANK0_GPIO0_CTRL_OEOVER_BITS);
+    }
+    static PinOeOverride oe_override(uint8_t n) {
+        return static_cast<PinOeOverride>((ctrl(n) & IO_BANK0_GPIO0_CTRL_OEOVER_BITS) >>
+                                          IO_BANK0_GPIO0_CTRL_OEOVER_LSB);
+    }
+
     /// Every pin of `mask` a software-driven output at once (the pin
     /// check's wave): SIO on each, then the output enables in one word.
     static void outputs(uint32_t mask, const PinConfig& cfg = {}) {
@@ -266,6 +313,10 @@ struct Pin {
     static PinFunction function() {
         return static_cast<PinFunction>(Gpio::ctrl(n) & IO_BANK0_GPIO0_CTRL_FUNCSEL_BITS);
     }
+    static void out_override(PinOverride o) { Gpio::out_override(n, o); }
+    static PinOverride out_override() { return Gpio::out_override(n); }
+    static void oe_override(PinOeOverride o) { Gpio::oe_override(n, o); }
+    static PinOeOverride oe_override() { return Gpio::oe_override(n); }
 
     /// The pad's pulls alone, the rest of the pad untouched.
     static void pull(PinPull p) {

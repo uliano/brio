@@ -273,6 +273,31 @@ TEST_CASE("every tenure's last entry carries STOP, and the address is the target
     }
 }
 
+TEST_CASE("a STOP another host made does not end a tenure still queued") {
+    // A tenure written while another host holds the bus waits for that
+    // host's STOP, and the STOP is detected with this tenure's entries
+    // still in the transmit FIFO: STOP_DET then is not this tenure's end.
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Host::init(clock));
+    const uint8_t out[2] = {0x11, 0x22};
+    Host::Request r{};
+    r.addr = 0x42;
+    r.tx = lend<Lease::reply>(static_cast<const uint8_t*>(out));
+    r.tx_len = 2;
+    CHECK_FALSE(Host::start(r));
+    regs().IC_STATUS = I2cFlag::tx_not_full;   // two entries queued
+    regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK_FALSE(Host::isr());
+    CHECK_FALSE(Host::idle());
+    // The tenure's own STOP follows its last entry: the FIFO is empty.
+    regs().IC_STATUS = I2cFlag::tx_not_full | I2cFlag::tx_empty;
+    regs().IC_INTR_STAT = I2cInterrupt::stop_det;
+    CHECK(Host::isr());
+    CHECK(Host::status() == i2c_ok);
+    CHECK(Host::idle());
+}
+
 TEST_CASE("the speed of a tenure is written into the block, once") {
     fresh();
     constexpr Clock clock;
@@ -691,6 +716,10 @@ TEST_CASE("a client answers its own address and reports one event per call") {
     CHECK(Client::service() == I2cClientEvent::overrun);
     peer_regs().IC_INTR_STAT = I2cInterrupt::gen_call | I2cInterrupt::rd_req;
     CHECK(Client::service() == I2cClientEvent::general_call);
+    // GEN_CALL stands through the address's acknowledge, so the call masks
+    // it until the call's first data byte: one event, however many entries
+    // that bit would have made.
+    CHECK((peer_regs().IC_INTR_MASK & I2cInterrupt::gen_call) == 0u);
 
     // A read request outranks a byte received, and each says which way
     // the tenure is going.
@@ -700,6 +729,8 @@ TEST_CASE("a client answers its own address and reports one event per call") {
     peer_regs().IC_INTR_STAT = I2cInterrupt::rx_full;
     CHECK(Client::service() == I2cClientEvent::byte_received);
     CHECK_FALSE(Client::host_reads());
+    // ... and the first byte received gives GEN_CALL back.
+    CHECK(peer_regs().IC_INTR_MASK == Client::events);
 
     peer_regs().IC_INTR_STAT = I2cInterrupt::rx_done;
     CHECK(Client::service() == I2cClientEvent::nacked);

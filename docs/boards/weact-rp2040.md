@@ -52,7 +52,9 @@ two header rows. Design files: WeAct's own repository
   the RP2350B reads these pull-ups to know this board is powered before
   it drives a link pad. ONE DRIVER PER WIRE: while one board runs a
   suite on a link pad the other runs a dark image (its pads inputs) or
-  the peer of the same subject. No other wire is on this board: every
+  the peer of the same subject - the two I2C suites, `test_rp2040_i2c`
+  and `test_rp2350_i2c`, each against the other board's peer of the
+  twi_link protocol. No other wire is on this board: every
   wire between two of its own pads is retired, and the letters that
   judged one run by name only.
 - **Pins a Pico uses otherwise**: GP24 and GP29 are plain header pins

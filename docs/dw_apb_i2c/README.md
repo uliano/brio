@@ -221,7 +221,13 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   requester hears when the bus is free and the next `start()` finds the
   block idle with nothing standing. A host's STOP_DET is raised for
   any STOP on the bus (`STOP_DET_IF_MASTER_ACTIVE` reads 0 on these
-  chips): a second host's STOP is the multi-master gap's.
+  chips), and a tenure written while another host holds the bus WAITS
+  for that host's STOP - the block's multi-master rule - with its entries
+  still queued; so a STOP ends a tenure only with the transmit FIFO empty
+  (`IC_STATUS.TFE`, one read at the STOP), its own STOP following its
+  last entry. Without that test a two-byte write to an absent address,
+  written inside a window another node held, ended `i2c_ok` on that
+  window's STOP before it had clocked a bit (measured on the RP pair).
 - **`RX_FIFO_FULL_HLD_CTRL`** - used: a full receive FIFO holds SCL
   instead of overrunning, and an empty command FIFO with no STOP holds it
   too (the block's own rule), so a handler that comes late stretches the
@@ -255,11 +261,44 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
 - **`IC_ENABLE.TX_CMD_BLOCK`** - declined for tenures: entries written
   ahead of a START are what the FIFO is for, and the fast path already
   writes them into an idle, enabled block.
+- **The multi-master rule** - used as the block gives it: a host's
+  START waits while the bus is busy (a START another node made, not yet
+  closed by its STOP), so two hosts whose STARTs wait on one STOP leave
+  together and the wired-AND decides; the loser's abort is ARB_LOST,
+  `i2c_arb_lost`. Measured both ways between an RP2040 and an RP2350
+  (each chip's document). A new address written while another node holds
+  the bus pays a slower disable: 94 us at 100 kHz on the RP2040 against
+  the 6 us of an idle bus.
 - **The interrupt decode** - one `IC_INTR_STAT` read an entry; the
   sources not armed for the tenure never reach the handler, and a mask
   bit is written only when it changes (a mirror of TX_EMPTY's and
   RX_FULL's, written by `start()` with every source masked and by the
   handler after).
+
+## The client: what the block does that the event stream must hide
+
+- **No STOP_DET for a general call** under `STOP_DET_IFADDRESSED` (the
+  register's own note: the interrupt follows a match of `IC_SAR` alone),
+  which `I2cConfig` sets: a general call's end is not an event, its
+  bytes are.
+- **GEN_CALL stands through the address's acknowledge**: a read of
+  `IC_CLR_GEN_CALL` inside that bit does not hold, and the line re-enters
+  - two to seventeen times in the 8 us after the address at 100 kHz,
+  measured on the RP2040. `service()` masks the source at the first
+  report and gives it back at the call's first data byte, which always
+  follows: one `general_call` event a call.
+- **The block holds SCL as a transmitter only**: RD_REQ holds it until
+  the transmit FIFO has a byte; a receiver holds it only with its
+  receive FIFO full. A client's stretch is a read's, and a byte given a
+  FIFO ahead is taken without RD_REQ.
+- **A disable refuses the byte in flight**: "if the module is receiving,
+  it stops the current transfer at the end of the current byte and does
+  not acknowledge" (RP2040 4.3.17, `IC_ENABLE`), and
+  `IC_ENABLE_STATUS.SLV_RX_DATA_LOST` says so afterwards. It is the only
+  data NACK the block can give mid-tenure: `IC_SLV_DATA_NACK_ONLY` takes
+  a write with the block disabled and its client idle; so a refusal of
+  the n-th byte is a disable once byte n - 1 is taken (measured, the two
+  RP suites' letter e).
 
 ## Not covered yet
 
