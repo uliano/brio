@@ -101,8 +101,7 @@ def openocd_args(prog, elffile, target_cfg):
         # Measured: a program that launched core 1 at boot found it back
         # in the bootrom a moment later (OpenOCD's second reset), and a
         # panic on core 1 froze core 0's time. With USE_CORE 0 OpenOCD
-        # never touches core 1: the chip reset core 0 requests puts core
-        # 1 into the bootrom's wait loop, and nothing enables its debug.
+        # never touches core 1, and nothing enables its debug.
         argv += ["-c", "set USE_CORE 0"]
     argv += ["-f", target_cfg]
     if "rp2040" in target_cfg:
@@ -119,7 +118,27 @@ def openocd_args(prog, elffile, target_cfg):
         # opened with the core held in reset and no program running -
         # the same connection whatever state the last image left.
         argv += ["-c", "reset_config srst_only srst_nogate connect_assert_srst"]
+    if "rp2040" in target_cfg:
+        # CORE 1 HELD OFF THROUGH THE PROGRAMMING, THEN BACK TO THE
+        # BOOTROM. The resets OpenOCD issues are core 0's SYSRESETREQ, and
+        # "the NVIC only resets the Cortex-M0+ processor core" (RP2040
+        # datasheet 2.4.2.9) - its own: proc0 and proc1 are separate
+        # domains of the power-on state machine (2.13), and core 1 goes on
+        # running the PREVIOUS image - out of the flash being rewritten -
+        # where the new image expects it in the bootrom's wait loop.
+        # Measured: test_rp2040_sleep failed two runs of two right after
+        # test_rp2040_multicore had left core 1 running, none of five
+        # after any other image - and three of three passed after it
+        # once core 1 was held off and released as here. So the PSM's
+        # FRCE_OFF holds proc1 down before `program` (a register outside
+        # both cores' domains, kept through core 0's resets), is cleared
+        # after it - core 1 powers up into the bootrom and waits there,
+        # as after a power-on - and only then is core 0 run.
+        argv += ["-c", "init",
+                 "-c", "mww 0x40010004 0x00010000"]
     argv += ["-c", "program %s verify" % elffile]
+    if "rp2040" in target_cfg:
+        argv += ["-c", "mww 0x40010004 0x00000000"]
     if "stm32g0" in target_cfg:
         # AND THE DEBUG-IN-STOP BITS ARE TAKEN BACK DOWN, AFTER THE LAST
         # RESET. OpenOCD's own target/stm32g0x.cfg sets DBGMCU_CR.DBG_STOP
