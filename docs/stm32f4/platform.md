@@ -233,6 +233,56 @@ verdicts on the Nucleo-F446RE):
   handler and 133 the turn's own - `process()`, `step()` over three
   empty queues, the masked check.
 
+**Code in SRAM, measured: it does not pay here.** At 180 MHz the flash
+answers at five wait states (RM0390 3.4) behind the ART accelerator
+(3.5: the prefetch, a 64-line instruction cache, an 8-line data cache),
+all three on as the clock task leaves them. Whether a hot path runs
+faster from SRAM - the question
+[../../brio/util/placement.hpp](../../brio/util/placement.hpp) asks of
+a family - was measured on the Nucleo-F446RE with `bench_stm32f4`'s
+letters `e`, `u`, `i` and `p` in builds whose linker script collected
+`.fast_text` into `.data`, each path three ways: in the flash as the
+stratum builds it; its VECTOR placed (`.fast_text` on the program's
+handler, every body inline in it moved with it); and the driver's body
+alone as a `Hot<InRam>` instance called from a vector left in the
+flash. The flash column was run again with PRFTEN, ICEN and DCEN
+clear, to show what the accelerator hides. HCLK cycles, a handler's
+figure per entry with the meter's stamps inside it:
+
+| path | flash | flash, ART off | SRAM, vector placed | SRAM, body `InRam` behind a flash vector | SRAM bytes |
+|---|---|---|---|---|---|
+| SPI frame pump, an entry (one 8-bit frame, SCK 45 MHz) | 103 | 152 | 123 | 158 | 368 the body, 880 an engined host's |
+| the same pump, 256 frames, the wall (the wire 8192) | 38199 | 56807 | 46386 | 51502 | |
+| SPI receive loop, 256 8-bit frames at SCK 45 / 22.5 MHz (the wire 8192 / 16384) | 19110 / 26278 | 17714 / 25394 | - | 21764 / 28420 | 500 a host's polled loops |
+| SPI transmit-only loop, 256 8-bit frames at SCK 45 / 22.5 MHz | 9392 / 16568 | 10012 / 16659 | - | 8472 / 16681 | |
+| USART per-byte transmit, 5.625 Mbaud | 64 | 97 | 83 | 111 | 316 |
+| USART per-byte receive, 1 Mbaud | 100 | 171 | 118 | 144 | 316 |
+| USART transmit engine's completion, 5.625 Mbaud (the tick's entries mixed in alike) | 123 | 216 | 145 | 146 | 364 |
+| the console's interrupt, a print of 4096 bytes (the tick's entries mixed in alike) | 61 | 88 | 67 | 101 | 312 |
+| I2C1 event pump, a byte written / read | 103 / 122 | - | 91 / 118 | - | 2104 the suite's vector |
+| FMPI2C1 event pump, a byte written / read | 136 / 151 | - | 164 / 166 | - | 1060 the suite's vector |
+
+The accelerator hides the five wait states: a warm handler runs from
+the flash faster than from SRAM, the pump a fifth faster. The core's
+own bus map says why SRAM cannot win it back: code at 0x20000000 is
+fetched over the System interface, which also carries every SRAM and
+peripheral data access the handler makes, data first (DDI 0439B
+2.2.1), where code in the flash comes over ICode beside them. The
+exceptions are small and mixed with losses on the same paths - the
+transmit-only loop at 45 MHz 9392 -> 8472 (the wire 8192) against the
+receive loop 19110 -> 21764, I2C1's byte 103 -> 91 against FMPI2C1's
+136 -> 164 - and the flash loops themselves move with layout (the
+receive loop is FASTER with the accelerator off, 17714). A body behind
+a flash vector pays the call besides: SRAM lies out of a BL's 16 MB
+reach, so GNU ld puts an 8-byte stub in the path, `ldr.w pc, [pc]` and
+the target's address - LDR to PC 2+P cycles against the BL's 1+P
+(DDI 0439B 3.3.1, table 3-1, P 1 to 3) - and the pump's body there is
+35 cycles an entry above the vector placed.
+
+RECOMMENDATION: decline util/placement.hpp's opt-in on this stratum -
+the ART already hides the wait states, and SRAM execution shares the
+System bus with the handler's own data.
+
 Two desk facts outside the letters: OpenOCD's HLA transport returns
 garbage for memory read while the core sleeps in WFI (the vector table
 as ASCII, 0x101 in every USART register) and exact values after a halt;
@@ -256,6 +306,10 @@ Driver gaps (this chapter's option space the stratum does not touch):
 - The reset causes, the watchdogs and the breadcrumb across a real
   reset: the reset chapter's suite.
 - A per-package pin-bonding table - [port.md](port.md) says why not.
+- Code run from SRAM aliased at address 0 (SYSCFG_MEMRMP), which the
+  core would fetch over ICode rather than the System interface the
+  Bench findings' "Code in SRAM" measured: not measured, because what
+  is mapped at 0 is a boot decision and `syscfg.hpp` only reads it.
 
 Implemented, not bench-verified: letters `w` and `k` on the F429ZI, the
 F411CE and the F469NI (the same image, run there, is the measurement);
