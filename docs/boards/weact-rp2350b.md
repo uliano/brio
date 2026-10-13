@@ -39,6 +39,43 @@ every user GPIO on its header rows. Design files: WeAct's own repository
   board on its own USB, two regulators never in parallel). No reset
   wire: the board is reset, and RECOVERED FROM ANY STATE, by the chip's
   rescue reset over the debug port alone ([../rp2350/README.md](../rp2350/README.md)).
+- **The desk partner**: this board is wired to a WeAct RP2040
+  ([weact-rp2040.md](weact-rp2040.md)) by ten signal wires and two
+  grounds, each board on its own USB-C, both on one hub, no 3V3 wire
+  between them:
+
+  | wire | here | RP2040 | carries |
+  |---|---|---|---|
+  | 1 | GP30 | GP10 | SPI1 SCK |
+  | 2 | GP28 | GP11 | the RP2040's SPI1 TX -> this SPI1 RX |
+  | 3 | GP31 | GP8 | this SPI1 TX -> the RP2040's SPI1 RX |
+  | 4 | GP41 | GP29 | SPI1 CSn, 1.5 kOhm to the RP2040's 3V3 |
+  | 5 | GP36 | GP2 | I2C SDA (I2C0 here), 1.5 kOhm to the RP2040's 3V3 |
+  | 6 | GP37 | GP3 | I2C SCL, 1.5 kOhm to the RP2040's 3V3 |
+  | 7 | GP5 | GP4 | the RP2040's UART1 TX -> this UART1 RX |
+  | 8 | GP4 | GP5 | this UART1 TX -> the RP2040's UART1 RX |
+  | 9 | GP20 | GP21 | the RP2040's GPOUT0 -> this GPIN0 |
+  | 10 | GP21 | GP20 | this GPOUT0 -> the RP2040's GPIN0 |
+
+  THIS BOARD'S GP29 DOES NOT DRIVE: its output reads 1 while driven low
+  at 12 mA, with or without a wire on it, so the select is on GP41 (an
+  SPI1 CSn pad as well, and the converter's input 1); nothing here
+  drives GP29. GP41 READS THE SELECT'S PULL-UP, which is why the
+  converter's suite prints input 1 and never judges it. The I2C link sits
+  above GP31 on purpose: its pads are the high half of the bank. AN
+  RP2040 PAD IS NOT FAILSAFE where this chip's is (RP2040 datasheet
+  5.5.3.1), so a link pad driven high while the RP2040 is unpowered feeds
+  that chip: every image here that drives a link pad first reads the
+  RP2040's rail through the I2C link's pull-ups
+  (`rp2350/src/apps/pair_power.hpp`, erratum E9's own read: the pad's
+  pull-down, its buffer pulsed) and drives nothing when it reads low.
+  ERRATUM E9 ON A RELEASED WIRE: a link line nobody drives keeps its
+  last level on a pad whose buffer is on, so an undriven wire is judged
+  after driving it, or with the buffer pulsed. ONE DRIVER PER WIRE: while
+  one board runs a suite on a link pad the other runs a dark image (its
+  pads inputs) or the peer of the same subject. No other wire is on this
+  board: every wire between two of its own pads is retired, and the
+  letters that judged one run by name only.
 - **The package is a build fact here**: `RP2350_PACKAGE=b` is what makes
   GP30..GP47 legal and puts the ADC's inputs on GP40..GP47 rather than
   on GP26..GP29.

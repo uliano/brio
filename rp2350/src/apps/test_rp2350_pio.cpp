@@ -14,17 +14,19 @@
 // meant to keep passing through every later restructuring of the code
 // under it.
 //
-// TWO WIRES, both part of the standing self-links of this board:
+// TWO WIRES BETWEEN THE CHIP'S OWN PADS, which this desk does NOT
+// carry: the board is wired to its desk partner (docs/boards/
+// weact-rp2350b.md) and every self-link is retired, so letters c..g, i, k
+// and l run BY NAME ONLY, outside z, and decline with that reason when a
+// wire is missing. Fitted, the wires are
 //
 //   GP13  ->  GP15   (the serial port: PIO0 machine 0 sends, machine 1
-//                     receives; the square wave and the sampler; the net
-//                     carries a pull-up to 3V3, which a push-pull output
-//                     drives through)
+//                     receives; the square wave and the sampler)
 //   GP17  ->  GP9    (the PIO PWM into a level-counting machine)
 //
-// With a wire missing its input reads HIGH and not low - erratum
-// RP2350-E9 on this stepping - so the wire check DRIVES both levels, and
-// a letter that finds no wire declines with the reason.
+// - no pad the pair uses. With a wire missing its input reads HIGH and
+// not low - erratum RP2350-E9 on this stepping - so the wire check DRIVES
+// both levels.
 //
 // THE RULERS ARE PIO'S OWN MACHINES. This chapter needs a frequency
 // counter and a duty counter at the far end of each wire, and on this
@@ -191,14 +193,14 @@ bool wire_13_15() {
     if (wire_present<13, 15>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP13 -> GP15 is not wired", false);
+    bench.verdict("DECLINED: GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
     return false;
 }
 bool wire_17_9() {
     if (wire_present<17, 9>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP17 -> GP9 is not wired", false);
+    bench.verdict("DECLINED: GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
     return false;
 }
 
@@ -1251,16 +1253,16 @@ int main() {
 
     bench.letter('a', "the block, wireless", ta_block);
     bench.letter('b', "the GPIO window", tb_window);
-    bench.letter('c', "the square wave, counted on the wire", tc_square_wave);
-    bench.letter('d', "the serial port at three rates, the frame error", td_serial);
-    bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm);
-    bench.letter('f', "the interrupts and all eight flags", tf_interrupts);
-    bench.letter('g', "the sampler at clk_sys", tg_sampler);
+    bench.letter('c', "the square wave, counted on the wire", tc_square_wave, false);
+    bench.letter('d', "the serial port at three rates, the frame error", td_serial, false);
+    bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm, false);
+    bench.letter('f', "the interrupts and all eight flags", tf_interrupts, false);
+    bench.letter('g', "the sampler at clk_sys", tg_sampler, false);
     bench.letter('h', "the three blocks: the ring and the neighbour masks", th_blocks);
-    bench.letter('i', "the serial port on two DMA engines", ti_serial_dma);
+    bench.letter('i', "the serial port on two DMA engines", ti_serial_dma, false);
     bench.letter('j', "the receive FIFO as four registers", tj_putget);
-    bench.letter('k', "the masked input and the new pin forms", tk_pins);
-    bench.letter('l', "the logic analyser on a DMA engine", tl_sampler_dma);
+    bench.letter('k', "the masked input and the new pin forms", tk_pins, false);
+    bench.letter('l', "the logic analyser on a DMA engine", tl_sampler_dma, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED", " mtime=",

@@ -23,7 +23,10 @@
 // NOTHING TO WIRE for `z`. The console is a Debug Probe's UART bridge on
 // GP0 (TX) / GP1 (RX) = UART0. The two letters outside `z` use the clock
 // link to a peer board: GPOUT0 (GP21) of one into GPIN0 (GP20) of the
-// other, one wire each way and a common ground.
+// other, one wire each way and a common ground - on this desk the WeAct
+// RP2040 (docs/boards/weact-rp2350b.md), whose pads are not failsafe, so
+// letter o reads that board's rail first (rp2350/src/apps/pair_power.hpp)
+// and drives nothing when it is down.
 //
 // TWO RULERS, AND THEY SHARE A CRYSTAL. The FREQUENCY COUNTER (8.1.4)
 // counts any root or generator against clk_ref, which is the crystal
@@ -115,6 +118,8 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "pair_power.hpp"
 
 namespace {
 
@@ -929,7 +934,7 @@ int main() {
     bench.letter('n', "the frequency counter itself: intervals, bounds, a dead source",
                  tn_counter);
     bench.letter('q', "the resus circuit, armed and forced", tq_resus);
-    bench.letter('o', "GPOUT0 on GP21 = the crystal / 12, left running", to_output, false);
+    bench.letter('o', "GPOUT0 on GP21 = the crystal / 12, left running", pair::guarded<bench, clock, to_output>, false);
     bench.letter('p', "GPIN0 on GP20 counted: the peer board's crystal", tp_input, false);
 
     if (serial_ok) {

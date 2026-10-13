@@ -148,8 +148,9 @@ as the known voltages, the DMA as the reader.
   pad: it latches through the digital input buffer, which the analog
   claim turns off, and reads as the pull-down whatever the pad had.
   GPIO 29 is printed for the record: a Pico's VSYS / 3 reads 1767
-  counts, 1424 mV (a supply of 4.27 V through the probe's power), a
-  WeAct board's bare header pin whatever it floats to.
+  counts, 1424 mV (a supply of 4.27 V through the probe's power); on
+  the WeAct board it carries the pair's SPI select and reads that
+  wire's pull-up ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
 - THE RATE, 256 conversions into a DMA block: 2.003 us each at DIV 0
   (the chapter's 96 cycles), 100 ksps, 10 ksps and a fractional 44.1
   ksps each within a tenth of a per cent of the timer; 8.0 us each on

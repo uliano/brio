@@ -22,7 +22,10 @@ this chip's device description held against the bits the IP file spells
 itself, and the PUBLIC NAMES `DwApbI2c<n>` (the resource), `I2cHost`
 (the engine `I2cBus` drives) and `I2cClient` (the other end), this
 chip's aliases of the three templates there. The reference suite:
-`test_rp2040_i2c`, on two wires between the chip's two instances.
+`test_rp2040_i2c`, the block wireless; the wire is the desk partner's,
+I2C1 on GP2 (SDA) / GP3 (SCL) with 1.5 kOhm to this board's 3V3 on
+each, to the WeAct RP2350B
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
 
 ## What the silicon does
 
@@ -194,11 +197,12 @@ extern "C" void isr_i2c1() {
 
 ## Bench findings
 
-The reference suite is `test_rp2040_i2c`, green on the Pico and the
-WeAct board: I2C0 hosting on GP13/GP12 and I2C1 listening at 0x42 on
-GP15/GP14, two wires between them with 4.7 kOhm pull-ups, the client
-served from its own interrupt, both instances' interrupts on one core,
-the roles inverted for the last letter.
+The reference suite is `test_rp2040_i2c`, green on the WeAct board:
+8 verdicts of its one letter, the block wireless. The cost figures
+below are `bench_rp2040` letter i's, on a SELF-LINK the pair desk does
+not carry (GP12 to GP14 and GP13 to GP15, 4.7 kOhm to 3V3, I2C0 the
+host and I2C1 the client at 0x42): the letter runs by name when it is
+fitted.
 
 - The block's reset state is a host with its client half disabled at
   the fast speed code with restarts enabled (IC_CON 0x65), the spike
@@ -208,51 +212,7 @@ the roles inverted for the last letter.
   disable. Configuration, timing, target and own address are refused
   while enabled; the disable of an idle block is reported within a
   few microseconds.
-- THE COUNTS PRODUCE THE ASKED RATE. With the block's added cycles
-  subtracted, a 64-byte tenure on the ruler gives 99 kHz, 391 kHz
-  and 960 kHz for the three speeds on this wire - the remainder is
-  the pull-ups' rise time. Counts that ignore the added cycles (the
-  vendor's arithmetic) would run at 96, 376 and 912 on an ideal wire.
-- THE SCAN of 0x08..0x77 finds the one client; nobody home is
-  i2c_nack_addr inside 34 to 38 us at 400 kHz; the probe is served as one
-  read request and one STOP at the client.
-- THE SHAPES: a write of eight heard byte-exact with one STOP; a read
-  of eight served as eight read requests, the host's NACK seen once;
-  a write-then-read with ONE repeated START counted from the far end;
-  a 200-byte write in one tenure through the pump in 4.6 ms and 27
-  interrupts, no overrun at the client.
-- THE VOCABULARY: a deaf address is i2c_nack_addr on a write, on the
-  probe and on a read; a client refusing data (IC_SLV_DATA_NACK_ONLY)
-  is i2c_nack_data on the first byte, which it does not store; the
-  client's clock stretch is priced on the wire (100 us before each of
-  eight bytes lengthens a 240 us read to 1027); bytes queued beyond a
-  two-byte read are flushed at the host's NACK and reported
-  (ABRT_SLVFLUSH_TXFIFO), the next read clean.
-- THE ENGINES, both at the normal level (the block holds SCL behind a
-  starved channel either way, [dma.md](dma.md)): a 64-byte read at
-  400 kHz in 1.6 ms with one host interrupt (the STOP), its SCL 361 kHz
-  on the ruler - letter e's bracket, never above the rate asked;
-  a write-then-read with the write on the pump; the
-  two-byte read and the probe on the pump of an engined host; a deaf
-  address answered with the engines put away; eight 255-byte reads at
-  1 MHz exact with TX_OVER never raised. THE REQUEST IS A LEVEL the
-  DMA banks credits on while the transmit FIFO is empty and spends in
-  a burst that fills it - a STOP entry pushed by hand at the block's
-  completion was dropped with TX_OVER, which is why the last entry
-  goes through the pump on TX_EMPTY.
-- THE KERNEL over it, unchanged: four tenure shapes through I2cBus
-  with four replies; the NACK of a deaf address delivered in its
-  place; six posted into a four-deep queue, one rejected at once and
-  every request answered once; an idle bus votes for the sleep, a busy
-  one against. THE TIMED BUS: a client holding SCL through a read
-  request it never serves is answered i2c_timeout at the arbiter's 20
-  ms with SCL still held - no silicon on this chip answers a held
-  clock - and the recover()ed engine carries the next tenures clean.
-- THE STUCK BUS: unstick() answers 0 on a healthy wire, 0xFF with SDA
-  held low by a GPIO through nine clocks and a STOP, 0 again once
-  released, and the bus works after it. THE ROLES INVERT on the same
-  two wires: sixteen bytes exact both ways.
-- THE HOST'S COST, `bench_rp2040` letter i on the same self-link, the
+- THE HOST'S COST, `bench_rp2040` letter i on that self-link, the
   I2C vectors in SRAM, the client served from its own vector and kept
   out of the counts; the wire's time at the SCL period measured (316.6
   cycles at 400 kHz: 3.6 cycles, 28 ns, over the counts - the pull-ups'
@@ -302,8 +262,8 @@ Driver gaps, each with its reason:
 - The general call and the START byte as host verbs: `target(addr,
   general_call)` is in the resource; no tenure shape asks for either.
 - Multi-master arbitration on the wire: ARB_LOST is decoded to
-  i2c_arb_lost; the self-link's other instance is the client, and a
-  second host needs a peer board.
+  i2c_arb_lost; a second host on the wire is the desk partner's, through
+  a peer of the twi_link protocol.
 - A write phase on the DMA engines: an entry is a command word with a
   flag, which a byte buffer cannot carry; a halfword staging copy the
   size of the request is declined until a program needs a bulk write
@@ -314,6 +274,13 @@ Driver gaps, each with its reason:
   verb and a field, waiting for a wire that asks for them.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The host and the client on a wire: the scan and the probe as this
+  silicon serves it, the tenure shapes with the repeated START counted
+  from the far end, the vocabulary (nack_addr, nack_data, the stretch,
+  the flush), the three speeds' rate on the wire, the engines, I2cBus
+  with its timed bus, the stuck bus, the roles inverted: the desk
+  partner's peer over the pair's I2C wires.
 
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.

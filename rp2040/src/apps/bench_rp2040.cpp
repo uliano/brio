@@ -176,8 +176,11 @@
 //      (UARTRIS read raw after ten frames of silence), and the copy into
 //      the ring: write_bulk's byte loop against the runtime's memcpy.
 //   i  THE I2C HOST ABOVE THE WIRE (dw_apb_i2c/i2c.hpp over rp2040/i2c.hpp)
-//      on the SELF-LINK the I2C suite uses: GP12 (I2C0 SDA) to GP14 (I2C1
+//      on a SELF-LINK: GP12 (I2C0 SDA) to GP14 (I2C1
 //      SDA), GP13 (I2C0 SCL) to GP15 (I2C1 SCL), 4.7 kOhm to 3V3 on each.
+//      THIS DESK DOES NOT CARRY THAT SELF-LINK (the board is wired to its
+//      desk partner and every self-link is retired), so the letter runs BY
+//      NAME ONLY, outside z, and with no wire it says so and fails.
 //      I2C0 is the host; I2C1 answers 0x42 from its own vector - its
 //      RX_TL raised to a level of eight and a read answered with as many
 //      bytes as its FIFO takes per read request - and is an INSTRUMENT:
@@ -1842,7 +1845,7 @@ int main() {
     bench.letter('d', "the DMA engines: copy, fill, paced, spi.dma", td_dma);
     bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
     bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", tu_uart);
-    bench.letter('i', "the I2C host above the wire on the self-link: a tenure's price", ti_i2c);
+    bench.letter('i', "the I2C host above the wire on the self-link: a tenure's price", ti_i2c, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED",

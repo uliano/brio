@@ -7,6 +7,11 @@
 // Lamp owns it), so its console sends the SetLed to core 0's Lamp
 // through util/inbox.hpp, and core 0's doorbell drain posts it.
 //
+// THE SECOND BRIDGE IS NOT ON THIS DESK: GP4/GP5 are wired to the desk
+// partner (docs/boards/weact-rp2040.md), and a probe's bridge on the same
+// pads would be a second driver on each wire. Core 1's console then has
+// no listener; core 0's works as ever.
+//
 // Type on either console at 115200 8N1:
 //   HELP | LED ON|OFF|TOG | UPTIME | ERR | CORE
 // UPTIME is the answering core's own ticker; CORE says which core

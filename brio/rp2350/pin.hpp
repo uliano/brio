@@ -590,16 +590,21 @@ struct Pin {
     /// configured `{.input_enable = false}`; on a pad whose buffer is on
     /// already it costs two pad writes and reads the same thing.
     ///
-    /// NO SETTLE IS NEEDED BETWEEN THE ENABLE AND THE READ, and that is
-    /// a measurement and not an assumption: the enable is a write to the
-    /// pad register on the APB, which takes four cycles to land, while
-    /// the read is a single-cycle SIO access - by the time it happens
-    /// the buffer is awake and the synchronizer has the pad. The first
-    /// of eight consecutive samples already reads the pad's level
-    /// (docs/rp2350/pin.md).
+    /// THE ENABLE IS READ BACK BEFORE THE PAD IS READ. The enable is a
+    /// store to the pad register, across the bus fabric and the APB
+    /// bridge; the read is a load from the SIO, on the core's own port.
+    /// Nothing orders the two: on the Hazard3 half, with the code warm in
+    /// the cache, the load completes before the store has landed and
+    /// reads the pad with its buffer still off - a 0 (measured, docs/
+    /// rp2350/pin.md). A read of the pad register is answered only once
+    /// the write before it is done, so it is the fence, on both
+    /// architectures: one APB read. Past it no settle is needed - the
+    /// buffer is awake and the synchronizer has the pad, and the first of
+    /// eight consecutive samples already reads the pad's level.
     static bool read_pulsed() {
         const bool was_on = Gpio::input_enabled(n);
         Gpio::input_enable(n, true);
+        (void)Gpio::input_enabled(n);   // the fence: the enable has landed
         const bool level = read();
         if (!was_on) {
             Gpio::input_enable(n, false);

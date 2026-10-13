@@ -12,7 +12,9 @@ block, `PwmSlice<n>` the resource, the tasks `PwmOutput`, `PwmPair`,
 `PwmEdgeCounter`, `PwmLevelCounter`, `PwmPeriodicTick`) over
 `pin.hpp`, `resets.hpp` and `dma_engine.hpp`. The reference suite:
 `test_rp2040_pwm`, wireless and on two wires between the chip's own
-slices.
+slices - wires the pair desk does not carry
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the six wire
+letters run by name only, outside z, when they are fitted.
 
 ## What the silicon does
 
@@ -113,8 +115,9 @@ both levels per period.
 
 ## Bench findings
 
-The reference suite is `test_rp2040_pwm`, green on the Pico and the
-WeAct board: two wireless letters, six on two wires between the
+The reference suite is `test_rp2040_pwm`, green on the WeAct board:
+two wireless letters in z (11 verdicts), and six by name on two wires
+between the
 chip's own slices - slice 6's B output on GP13 into slice 7's B input
 on GP15, slice 0's B output on GP17 into slice 4's B input on GP9 -
 with the measuring slice counting edges or the divided clock while

@@ -15,14 +15,24 @@
 // (util/testbench.hpp owns that grammar). It is a REFERENCE test.
 //
 // WHAT IS WIRED. The console is a Debug Probe's UART bridge on GP0 (TX)
-// / GP1 (RX) = UART0. Four pads are wired to four others, one wire each
-// - GP19 to GP8, GP11 to GP16, GP18 to GP10, GP17 to GP9 - and two pads
-// are wired to two more WITH A REAL PULL-UP TO 3V3 ON THE NET: GP12 to
-// GP14 and GP13 to GP15. Those pull-ups are the only thing on this bench
-// that can hold a pad high without the chip's help, which is what makes
-// them the witness in the pull letter. GP22 is free and is where the
-// erratum is shown; GP40 is free and is where the high half of the bank
-// is driven.
+// / GP1 (RX) = UART0. The board is wired to its desk partner, the WeAct
+// RP2040 (docs/boards/weact-rp2350b.md): three of those wires carry a
+// REAL PULL-UP, 1.5 kOhm to the RP2040's 3V3 at the far end - GP36 and
+// GP37 (the I2C link), GP41 (the SPI link's select). Those pull-ups are
+// the only thing on this bench that can hold a pad high without the
+// chip's help, which is what makes them the witness in the pull letter;
+// they are read first through rp2350/src/apps/pair_power.hpp, which is
+// also the proof that the far chip is powered before its pads are
+// driven, and the far board stays dark while this suite runs. GP22 is
+// free and is where the erratum is shown; GP40 is free and is where the
+// high half of the bank is driven.
+//
+// FOUR WIRES BETWEEN THE CHIP'S OWN PADS - GP19 to GP8, GP11 to GP16,
+// GP18 to GP10, GP17 to GP9 - are what letters b and f..j judge a pad
+// by, the far end of each wire the witness; this desk does NOT carry
+// them (every self-link is retired), so those letters run BY NAME ONLY,
+// outside z, and decline with that reason when a wire is missing. No pad
+// of the four is one the pair uses.
 //
 // THE RULER is the platform timer (rp2350/mtime.hpp), microseconds off
 // clk_ref: it times the interrupt path. A microsecond is its grain, and
@@ -35,8 +45,9 @@
 //      back to the reset value the datasheet states
 //   b  the four wires, both ways: every pad drives its neighbour and
 //      reads it back, then the roles swap - a wire has no direction
-//   c  the pulls: the two nets with a real pull-up on them, read high
-//      with both ends listening and low when one end drives; then the
+//   c  the pulls: the three link nets with a real pull-up on them, read
+//      high through the pad's own pull-down with the buffer pulsed (E9),
+//      low when the pad drives, high again once it lets go; then the
 //      chip's own pull-up on a free pad
 //   d  ERRATUM RP2350-E9, KEYED ON THE STEPPING: with its input buffer
 //      enabled a free pad idles HIGH against its own pull-down, and the
@@ -80,6 +91,8 @@
 #include "util/print.hpp"
 #include "util/testbench.hpp"
 
+#include "pair_power.hpp"
+
 namespace {
 
 using namespace brio;
@@ -104,11 +117,10 @@ using DriveC = Pin<18>;
 using ListenC = Pin<10>;
 using DriveD = Pin<17>;
 using ListenD = Pin<9>;
-// The two nets that carry a real pull-up to 3V3.
-using PullNet0A = Pin<12>;
-using PullNet0B = Pin<14>;
-using PullNet1A = Pin<13>;
-using PullNet1B = Pin<15>;
+// The three link nets that carry a real pull-up, to the partner's 3V3.
+using LinkSda = Pin<36>;
+using LinkScl = Pin<37>;
+using LinkCs = Pin<41>;
 // A pad with nothing on it at all, and one in the high half of the bank.
 using Free = Pin<22>;
 using High = Pin<40>;
@@ -163,10 +175,9 @@ void release_all() {
     (void)ListenC::release();
     (void)DriveD::release();
     (void)ListenD::release();
-    (void)PullNet0A::release();
-    (void)PullNet0B::release();
-    (void)PullNet1A::release();
-    (void)PullNet1B::release();
+    (void)LinkSda::release();
+    (void)LinkScl::release();
+    (void)LinkCs::release();
     (void)Free::release();
     (void)High::release();
 }
@@ -185,6 +196,34 @@ void wire_both_levels(const char* name) {
     print(serial, "  ", name, ": driven high the far pad reads ", high ? 1 : 0,
           ", driven low ", low ? 1 : 0, crlf);
     bench.verdict(name, ": the far pad follows the near one", high && !low);
+}
+
+/// One wire, quietly: driven low then high, the far pad following both.
+/// A missing wire's far pad holds what the reset left it (E9 cannot lift
+/// a pad that was held low), so the high fails.
+template <typename Out, typename In>
+bool wire_fitted() {
+    (void)Out::output(false);
+    (void)In::input();
+    (void)delay_us(clock, 5);
+    const bool low = In::read();
+    Out::set();
+    (void)delay_us(clock, 5);
+    const bool high = In::read();
+    return high && !low;
+}
+
+/// The four wires between the chip's own pads, or the letter declines.
+bool self_wires_or_decline() {
+    const bool ok = wire_fitted<DriveA, ListenA>() && wire_fitted<DriveB, ListenB>() &&
+                    wire_fitted<DriveC, ListenC>() && wire_fitted<DriveD, ListenD>();
+    release_all();
+    if (!ok) {
+        bench.verdict("DECLINED: GP19-GP8, GP11-GP16, GP18-GP10 and GP17-GP9 are not all wired - the pair "
+                      "desk carries no self-link (fit the jumpers to run this letter)",
+                      false);
+    }
+    return ok;
 }
 
 // -----------------------------------------------------------------------------
@@ -227,6 +266,9 @@ void ta_bank() {
 
 // -----------------------------------------------------------------------------
 void tb_wires() {
+    if (!self_wires_or_decline()) {
+        return;
+    }
     wire_both_levels<DriveA, ListenA>("GP19 to GP8");
     wire_both_levels<DriveB, ListenB>("GP11 to GP16");
     wire_both_levels<DriveC, ListenC>("GP18 to GP10");
@@ -240,34 +282,39 @@ void tb_wires() {
 }
 
 // -----------------------------------------------------------------------------
-template <typename A, typename B>
+/// One link net, judged from its one pad here: the far end is the
+/// partner's pad, at reset under the dark image it runs, and the 1.5 kOhm
+/// to its 3V3. Every read is taken the way E9 forces - the pad's own
+/// pull-down on, the buffer off and pulsed for the read alone - so a HIGH
+/// is the resistor and never the pad's history.
+template <typename Pad>
 void pulled_net(const char* name) {
-    (void)A::input();
-    (void)B::input();
-    (void)delay_us(clock, 20);
-    const bool idle_a = A::read();
-    const bool idle_b = B::read();
-    (void)A::output(false);
-    (void)delay_us(clock, 20);
-    const bool pulled_a = A::read();
-    const bool pulled_b = B::read();
-    (void)A::input();
+    (void)Pad::input({.pull = PinPull::down, .input_enable = false});
     (void)delay_us(clock, 50);
-    const bool back_a = A::read();
-    const bool back_b = B::read();
-    print(serial, "  ", name, ": both listening ", idle_a ? 1 : 0, idle_b ? 1 : 0,
-          ", one end driving low ", pulled_a ? 1 : 0, pulled_b ? 1 : 0, ", released again ",
-          back_a ? 1 : 0, back_b ? 1 : 0, crlf);
-    bench.verdict(name, ": the external pull-up holds both pads high with nothing driving",
-                  idle_a && idle_b);
-    bench.verdict(name, ": one pad driving low takes the whole net down",
-                  !pulled_a && !pulled_b);
-    bench.verdict(name, ": released, the pull-up brings it back", back_a && back_b);
+    const bool idle = Pad::read_pulsed();
+    (void)Pad::output(false);
+    (void)delay_us(clock, 20);
+    const bool pulled = Pad::read();
+    (void)Pad::input({.pull = PinPull::down, .input_enable = false});
+    (void)delay_us(clock, 50);
+    const bool back = Pad::read_pulsed();
+    (void)Pad::release();
+    print(serial, "  ", name, ": listening on its own pull-down ", idle ? 1 : 0, ", driving low ",
+          pulled ? 1 : 0, ", released again ", back ? 1 : 0, crlf);
+    bench.verdict(name, ": the external pull-up holds the pad high against its own pull-down",
+                  idle);
+    bench.verdict(name, ": the pad driving low takes the net down", !pulled);
+    bench.verdict(name, ": released, the pull-up brings it back", back);
 }
 
 void tc_pulls() {
-    pulled_net<PullNet0A, PullNet0B>("GP12 and GP14, with 3V3 through a resistor");
-    pulled_net<PullNet1A, PullNet1B>("GP13 and GP15, the same");
+    if (pair::partner_rail_up(clock, [](const char* why) { print(serial, why, crlf); })) {
+        pulled_net<LinkSda>("GP36 (the I2C link's SDA, 1.5 kOhm to the partner's 3V3)");
+        pulled_net<LinkScl>("GP37 (its SCL, the same)");
+        pulled_net<LinkCs>("GP41 (the SPI link's select, the same)");
+    } else {
+        bench.verdict("the link nets' pull-ups are up: the partner board is powered", false);
+    }
 
     // The chip's own pull-up, on a pad with nothing else on it.
     (void)Free::input(PinPull::up);
@@ -365,6 +412,9 @@ void te_keeper() {
 
 // -----------------------------------------------------------------------------
 void tf_pad_controls() {
+    if (!self_wires_or_decline()) {
+        return;
+    }
     // Every electrical control written and read back on a pad with a
     // listener on the other end of the wire, so that the wire can be
     // seen not to move.
@@ -419,6 +469,9 @@ void tf_pad_controls() {
 
 // -----------------------------------------------------------------------------
 void tg_function_and_status() {
+    if (!self_wires_or_decline()) {
+        return;
+    }
     print(serial, "  the console's own pads: GP0 carries function ",
           static_cast<uint32_t>(Pin<0>::function()), ", GP1 function ",
           static_cast<uint32_t>(Pin<1>::function()), " (2 is the first UART column)", crlf);
@@ -457,6 +510,9 @@ void tg_function_and_status() {
 
 // -----------------------------------------------------------------------------
 void th_overrides() {
+    if (!self_wires_or_decline()) {
+        return;
+    }
     (void)DriveA::output(false);
     (void)ListenA::input();
     (void)delay_us(clock, 5);
@@ -520,6 +576,9 @@ void th_overrides() {
 
 // -----------------------------------------------------------------------------
 void ti_interrupts() {
+    if (!self_wires_or_decline()) {
+        return;
+    }
     (void)DriveA::output(false);
     (void)ListenA::input();
     (void)DriveC::output(false);
@@ -653,6 +712,9 @@ void ti_interrupts() {
 
 // -----------------------------------------------------------------------------
 void tj_isolation() {
+    if (!self_wires_or_decline()) {
+        return;
+    }
     // The latch freezes what the switched core presents to the pad: the
     // level, the direction and the pull. It is the one thing in this
     // chapter the RP2040 has not, and this is what it does.
@@ -798,16 +860,16 @@ int main() {
     brio::enable_interrupts();
 
     bench.letter('a', "the bank, the package, a pad's reset state", ta_bank);
-    bench.letter('b', "the four wires, driven and read both ways", tb_wires);
-    bench.letter('c', "the pulls, against the two nets that carry a real pull-up", tc_pulls);
+    bench.letter('b', "the four wires, driven and read both ways", tb_wires, false);
+    bench.letter('c', "the pulls, against the three link nets that carry a real pull-up", tc_pulls);
     bench.letter('d', "erratum RP2350-E9 on a free pad, keyed on the stepping", td_erratum_e9);
     bench.letter('e', "the bus keeper", te_keeper);
-    bench.letter('f', "the pad's electrical controls, written and read back", tf_pad_controls);
-    bench.letter('g', "the function select and the STATUS register", tg_function_and_status);
-    bench.letter('h', "the four overrides of the IO multiplexer", th_overrides);
+    bench.letter('f', "the pad's electrical controls, written and read back", tf_pad_controls, false);
+    bench.letter('g', "the function select and the STATUS register", tg_function_and_status, false);
+    bench.letter('h', "the four overrides of the IO multiplexer", th_overrides, false);
     bench.letter('i', "the pin interrupts: edges, a level, two pads, the summary, a force",
-                 ti_interrupts);
-    bench.letter('j', "the isolation latch", tj_isolation);
+                 ti_interrupts, false);
+    bench.letter('j', "the isolation latch", tj_isolation, false);
     bench.letter('k', "the package's edges and the high half of the bank", tk_package);
 
     if (serial_ok) {

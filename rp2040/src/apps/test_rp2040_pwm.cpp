@@ -10,16 +10,19 @@
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp). It is a REFERENCE test.
 //
-// TWO WIRES, both part of the standing self-links of this board:
+// TWO WIRES BETWEEN THE CHIP'S OWN PADS, which this desk does NOT
+// carry: the board is wired to its desk partner (docs/boards/
+// weact-rp2040.md) and every self-link is retired, so letters c..h run
+// BY NAME ONLY, outside z, and decline with that reason when the wire is
+// missing. Fitted, the wires are
 //
 //   GP13 (slice 6 B, an output)  ->  GP15 (slice 7 B, an INPUT)
 //   GP17 (slice 0 B, an output)  ->  GP9  (slice 4 B, an INPUT)
 //
-// Only a B pin is a PWM input (table 515), which is why both wires end
-// on an odd GPIO. The measuring slice counts the edges of the wire
-// (the frequency) or the divided clock while the wire is high (the
-// duty) over a window the system timer times. With a wire missing its
-// input reads low and the letter declines with the reason.
+// - no pad the pair uses. Only a B pin is a PWM input (table 515), which
+// is why both wires end on an odd GPIO. The measuring slice counts the
+// edges of the wire (the frequency) or the divided clock while the wire
+// is high (the duty) over a window the system timer times.
 //
 // THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp).
 //
@@ -161,14 +164,14 @@ bool wire_6b_7b() {
     if (wire_present<13, 15>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP13 -> GP15 is not wired (the I2C self-link's SCL wire)", false);
+    bench.verdict("DECLINED: GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
     return false;
 }
 bool wire_0b_4b() {
     if (wire_present<17, 9>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP17 -> GP9 is not wired (the SPI self-link's select wire)", false);
+    bench.verdict("DECLINED: GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
     return false;
 }
 
@@ -837,12 +840,12 @@ int main() {
 
     bench.letter('a', "the block, wireless", ta_block);
     bench.letter('b', "the wrap as a tick and as a DMA pace", tb_wrap);
-    bench.letter('c', "the wire: frequency and duty", tc_wire);
-    bench.letter('d', "phase-correct, inversion, the buffered level", td_modes);
-    bench.letter('e', "the pair with its dead time", te_pair);
-    bench.letter('f', "the second wire, lockstep", tf_second_wire);
-    bench.letter('g', "the divider ladder", tg_ladder);
-    bench.letter('h', "the lamp over three outputs", th_lamp);
+    bench.letter('c', "the wire: frequency and duty", tc_wire, false);
+    bench.letter('d', "phase-correct, inversion, the buffered level", td_modes, false);
+    bench.letter('e', "the pair with its dead time", te_pair, false);
+    bench.letter('f', "the second wire, lockstep", tf_second_wire, false);
+    bench.letter('g', "the divider ladder", tg_ladder, false);
+    bench.letter('h', "the lamp over three outputs", th_lamp, false);
     bench.letter('y', "polarity, edges against wraps, the settle (diagnostics, outside z)", ty_probe, false);
 
     if (serial_ok) {

@@ -45,6 +45,15 @@
 // button to ground on a driven output would be a short. SWCLK/SWDIO and
 // the six QSPI flash pins are not user GPIOs and are not in this bank.
 //
+// THE DESK PARTNER. Ten of these pads are wired to the WeAct RP2040
+// (docs/boards/weact-rp2350b.md) - GP4, GP5, GP20, GP21, GP28, GP30,
+// GP31, GP36, GP37, GP41 - and an RP2040 pad is not failsafe, so the
+// rail of that board is read first (rp2350/src/apps/pair_power.hpp, the
+// I2C link's pull-ups): with it down the link pads are left out of the
+// wave and the banner says so. With it up they wave like the rest, which
+// wants the partner DARK (its pads inputs) while this runs - one driver
+// per wire.
+//
 // PINS WIRED TO EACH OTHER ARE SAFE HERE, which is worth stating because
 // a bench board usually has a few: the whole of a half is toggled by ONE
 // word write, so two pins of the same half that are strapped together sit
@@ -78,6 +87,8 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 
+#include "pair_power.hpp"
+
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
 
@@ -107,8 +118,12 @@ constexpr uint32_t high_half_pins() {
 
 constexpr uint32_t console_mask = bit(0) | bit(1);
 constexpr uint32_t key_mask = bit(23);
-constexpr uint32_t wave_low = low_half_pins() & ~console_mask & ~key_mask;
-constexpr uint32_t wave_high = high_half_pins();
+/// The pads wired to the desk partner, by half.
+constexpr uint32_t link_low = bit(4) | bit(5) | bit(20) | bit(21) | bit(28) | bit(30) | bit(31);
+constexpr uint32_t link_high = high_half_pins() & (bit(36 - 32) | bit(37 - 32) | bit(41 - 32));
+uint32_t wave_low = low_half_pins() & ~console_mask & ~key_mask;
+uint32_t wave_high = high_half_pins();
+bool partner_up = false;
 
 bool on_crystal = false;
 
@@ -136,6 +151,10 @@ void banner() {
     print(serial, "wave 100 Hz, bit = pin: low half ", hex(wave_low), ", high half ",
           hex(wave_high), " (bit 0 = GP32)", crlf);
     print(serial, "not driven: GP0/GP1 (this console), GP23 (the KEY)", crlf);
+    print(serial, partner_up ? "the partner's rail is up: the link pads wave too (the partner must be dark)"
+                             : "THE PARTNER IS UNPOWERED: the link pads are not driven (an RP2040 pad is not "
+                               "failsafe)",
+          crlf);
     print(serial, "GP25 is the LED - half brightness is the wave", crlf);
     print(serial, "rx errors: frame ", Serial::frame_errors(), " parity ",
           Serial::parity_errors(), " break ", Serial::break_errors(), " hw-overrun ",
@@ -191,6 +210,11 @@ int main() {
     const bool serial_ok = Serial::init(clock, 115200);
     enable_interrupts();
 
+    partner_up = pair::partner_rail(clock).up();
+    if (!partner_up) {
+        wave_low &= ~link_low;
+        wave_high &= ~link_high;
+    }
     Gpio::outputs(wave_low);
     Gpio::outputs_hi(wave_high);
 

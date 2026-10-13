@@ -15,7 +15,9 @@ table 279, the `Rp2040Pl022` chip traits over `pin.hpp`, `resets.hpp`,
 `Pl022<n>` (the resource), `SpiHost<n, pins, ...>` (the engine `SpiBus`
 drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
 the three templates there. The reference suite: `test_rp2040_spi`, on
-the loop-back and on four wires between the chip's two instances.
+the loop-back; the wire is the desk partner's, SPI1 on GP10 / GP11 /
+GP8 with GP29 its select, to the WeAct RP2350B
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)).
 
 ## What the silicon does
 
@@ -40,16 +42,15 @@ transmits on 3, 7, 19, 23, receives on 0, 4, 16, 20, selects on 1, 5,
 17, 21; SPI1 on 10, 14, 26 / 11, 15, 27 / 8, 12, 24, 28 / 9, 13, 25,
 29.
 
-Two facts of the PL022 as a client, measured: with SPH = 0 (modes 0
-and 2) the slave takes ONE frame per select window and ignores the
-rest while the select stays low, so a host holding a GPIO select for
-a whole transaction reaches it for more than one frame only in modes
-1 and 3; and SOD does not release the transmit pad on this chip - the
-line reads as a driven level, not as the host's pull-up. The datasheet
-says why in passing, in 4.4.3.14's list of idle levels: the block's
-pad-enable output nSSPOE is NOT CONNECTED TO THE PAD here, so SOD stops
-the block driving and leaves the pad driving what it held. The dark
-listener is therefore the pad, released.
+Two facts of the PL022 as a client, from the chapter: with SPH = 0
+(modes 0 and 2) the select freezes the slave's shift register, so the
+host must raise SSPFSSIN between every two frames (4.4.3.10, 4.4.3.12)
+- a host holding a GPIO select for a whole transaction reaches a PL022
+client for more than one frame only in modes 1 and 3; and SOD does not
+release the transmit pad on this chip: 4.4.3.14's list of idle levels
+says the block's pad-enable output nSSPOE is NOT CONNECTED TO THE PAD
+here, so SOD stops the block driving and leaves the pad driving what it
+held. The dark listener is therefore the pad, released.
 
 ## Types and verbs
 
@@ -162,13 +163,9 @@ extern "C" void isr_spi1() {
 
 ## Bench findings
 
-The reference suite is `test_rp2040_spi`, green on the Pico and the
-WeAct board, clk_sys and clk_peri at 125 MHz: 38 verdicts, the 27 of
-five letters on the loop-back (LBM, no wire) and the 11 of five on
-four wires between SPI0 and SPI1 of the same chip - SPI0's TX, SCK
-and GPIO select into SPI1's RX, SCK and select pad, SPI1's TX back
-into SPI0's RX - with the client served from its own interrupt and
-the roles inverted on the same wires for the last letter.
+The reference suite is `test_rp2040_spi`, green on the WeAct board,
+clk_sys and clk_peri at 125 MHz: 29 verdicts of five letters on the
+loop-back (LBM, no wire).
 
 - The rate chooser: clk_peri / 2 at the top (62.5 MHz), 8.93 MHz under
   a 10 MHz ceiling, 992 kHz under 1 MHz, nothing under 1 kHz. The
@@ -304,33 +301,6 @@ the roles inverted on the same wires for the last letter.
   posted into a four-deep queue, one rejected at once and every
   request answered once; an idle bus votes for the sleep, a busy one
   against.
-- ON THE WIRE, modes 1 and 3: sixteen frames both ways pumped at 1.95
-  MHz and polled at 3.9, at 8 and at 16 bits, four frames delivered by
-  the receive timeout, the client's select pad reading not-selected
-  between transactions. MODES 0 AND 2: the PL022 client takes ONE
-  frame per select window (sixteen clocked, one heard), the fact a
-  multi-frame transaction under a held select must know.
-- THE LADDER on the wire, the host polled: exact both ways at 15.6
-  MHz (clk_peri / 8) and below, wrong at 31.25 and 62.5 - the client's
-  ceiling is clk_peri / 12.
-- THE DARK LISTENER: a client with its transmit pad released reads as
-  the host's pull-up (0xFF) and still hears every frame; SOD set with
-  the pad on the peripheral reads 0x80 repeated - the line is driven,
-  not released - and the transmit FIFO is not consumed under it (the
-  answers loaded before it are still there after sixteen frames). A
-  client nobody reads overruns its FIFO, says so, and the flag clears
-  by writing one.
-- THE ENGINES ON THE WIRE at 1.95 MHz, 64 bytes each way, the client
-  on its interrupt: both directions exact. THE ROLES INVERT on the
-  same four wires: SPI1 hosting with its select on GP9, SPI0 listening
-  on GP17, both directions exact.
-- ONE CORE SERVING BOTH ENDS is the suite's arrangement and its
-  limit: a pumped host at 3.9 MHz fills its next four frames before
-  the client's interrupt has refilled its answers (the client's FIFO
-  runs dry at the ninth frame and overruns), and the first interrupt
-  of a cold client pays the cache fill - so the pumped and engined
-  wire rounds run at 1.95 MHz after one warming round. Two cores, or
-  two boards, would not compete.
 
 ## Not covered yet
 
@@ -341,7 +311,7 @@ Driver gaps, each with its reason:
 - Frame widths other than 8 and 16 in the Request: the other strata's
   Request speaks two, the resource takes 4..16; a device with a
   12-bit frame is the first user.
-- The client on the DMA engines: the suite's client answers from its
+- The client on the DMA engines: `SpiClient` answers from its
   interrupt; a client that streams is born with a program that needs
   one.
 - A client in modes 0 and 2 beyond one frame per select: the PL022
@@ -350,6 +320,16 @@ Driver gaps, each with its reason:
   peripheral's select on the host side.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- `SpiClient` on a wire - the four modes with the one frame per select
+  window of SPH = 0, multi-frame windows in modes 1 and 3, 16-bit frames,
+  the receive timeout's tail, the rate ladder to the clk_peri / 12
+  ceiling, the dark listener and SOD's pad, the overrun - and the roles
+  inverted: the desk partner's PL022 host driving this chip's client on
+  the pair's SPI1 wires, its own select pulsing per frame.
+- The host on a wire against a foreign client (the four modes under a
+  held GPIO select, the rate asked up the ladder, the engines): the
+  partner's client on the same wires.
 
 - The split of an engined block's first transaction: `test_rp2040_spi`
   letter d's first 128-byte block takes 152 us where letter d of the

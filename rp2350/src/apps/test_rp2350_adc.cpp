@@ -17,7 +17,10 @@
 //
 // NOTHING TO WIRE, and the pads this suite reads are the EIGHT the
 // QFN-80 gives the converter - GP40..GP47, inputs 0..7 - which must be
-// free; the sensor is input 8. In the QFN-60 the same letters read four
+// free but one: GP41 (input 1) carries the pair's SPI select, 1.5 kOhm to
+// the desk partner's 3V3 (docs/boards/weact-rp2350b.md), so its pull
+// readings are PRINTED and never judged, and the sampler reads input 2
+// instead; the sensor is input 8. In the QFN-60 the same letters read four
 // pads and a sensor on input 4, and the suite says which package it is
 // running in. GP0/GP1 are the console's, GP25 the LED.
 //
@@ -107,6 +110,12 @@ TestBench<Serial> bench;
 using In0 = AnalogIn<Pin<adc_first_pin>>;
 using In1 = AnalogIn<Pin<adc_first_pin + 1u>>;
 using In2 = AnalogIn<Pin<adc_first_pin + 2u>>;
+
+/// The input whose pad a link wire holds: GP41, the pair's SPI select
+/// with its pull-up to the partner's rail, on the QFN-80. Printed, never
+/// judged. On the QFN-60 the converter's pads (GP26..GP29) carry no link.
+constexpr uint8_t link_input = adc_first_pin == 40u ? 1u : 0xFFu;
+constexpr uint8_t judged_inputs = link_input < adc_pad_inputs ? adc_pad_inputs - 1u : adc_pad_inputs;
 
 using Block = DmaRxEngine<10, uint16_t>;
 using ByteBlock = DmaRxEngine<11, uint8_t>;
@@ -336,18 +345,22 @@ void tc_pads() {
               adc_mv(static_cast<uint16_t>(u.mean), adc_steps, vref), " mV), down ", d.mean, " (",
               adc_mv(static_cast<uint16_t>(d.mean), adc_steps, vref), " mV), floating ", f.mean, " (",
               adc_mv(static_cast<uint16_t>(f.mean), adc_steps, vref), " mV)", crlf);
+        if (k == link_input) {
+            print(serial, "    (GP", adc_first_pin + k, " is the link's select, held by its pull-up: not judged)", crlf);
+            continue;
+        }
         if (u.mean > 3000u) { ++up; }
         if (d.mean < 1000u) { ++down; }
         if (u.mean > d.mean + 2000u) { ++separated; }
     }
     bench.verdict("every pad the package gives the converter reads high through its pull-up (over 3000 of 4095)",
-                  up == adc_pad_inputs);
+                  up == judged_inputs);
     bench.verdict("... and low through its pull-down (under 1000): an analog claim disables the pad's digital input "
                   "buffer, which is what 12.4 asks for and what closes erratum RP2350-E9's leakage path, so the "
                   "pull-down holds",
-                  down == adc_pad_inputs);
+                  down == judged_inputs);
     bench.verdict("... and the two pulls are more than 2000 counts apart on every input",
-                  separated == adc_pad_inputs);
+                  separated == judged_inputs);
     Adc::release();
 }
 
@@ -454,6 +467,8 @@ void te_round_robin() {
         bool good = false;
         if (slot == adc_temperature_code) {
             good = v > 400u && v < 1400u;              // the sensor's diode
+        } else if (slot == link_input) {
+            good = true;                               // the link's pull-up, not judged
         } else if ((slot & 1u) == 0u) {
             good = v > 3000u;                          // a pulled-up pad
         } else {
@@ -611,7 +626,7 @@ public:
     }
 };
 
-using Sampler = AnalogSampler<Adc, P, Subscribers<Probe>, AdcInput::temperature, In0{}, In1{}>;
+using Sampler = AnalogSampler<Adc, P, Subscribers<Probe>, AdcInput::temperature, In0{}, In2{}>;
 using SamplerKernel = Tenuto<P, Probe, Sampler>;
 
 void pump() {
@@ -626,7 +641,7 @@ void pump() {
 void tg_sampler() {
     (void)adc_up();
     (void)In0::claim(PinPull::up);
-    (void)In1::claim(PinPull::down);
+    (void)In2::claim(PinPull::down);
     spin_us(1000);
     (void)Adc::fifo({.enable = true, .dreq = false, .error_flag = true, .shift = false, .threshold = 1});
     Adc::drain();
@@ -648,7 +663,7 @@ void tg_sampler() {
     const uint32_t n2 = sm::Probe::per_input[2];
     print(serial, "  the sampler at 5 ms over the sensor and two pads for 200 ms: ", sm::Probe::total, " samples, ",
           n0, " of the sensor (mean ", n0 ? sm::Probe::sum[0] / n0 : 0u, "), ", n1, " of input 0 pulled up (mean ",
-          n1 ? sm::Probe::sum[1] / n1 : 0u, "), ", n2, " of input 1 pulled down (mean ",
+          n1 ? sm::Probe::sum[1] / n1 : 0u, "), ", n2, " of input 2 pulled down (mean ",
           n2 ? sm::Probe::sum[2] / n2 : 0u, "), ", sm::Sampler::unknown_inputs(), " unknown", crlf);
     bench.verdict("AnalogSampler walks three inputs on a 5 ms software pace: about thirteen samples each in 200 ms, "
                   "the sensor's near its count, the pulled-up pad's high and the pulled-down pad's low, none of them "
@@ -658,7 +673,7 @@ void tg_sampler() {
                       sm::Probe::sum[1] / n1 > 3000u && sm::Probe::sum[2] / n2 < 1000u &&
                       sm::Sampler::unknown_inputs() == 0u);
     (void)In0::release();
-    (void)In1::release();
+    (void)In2::release();
     Adc::release();
 }
 

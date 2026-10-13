@@ -25,8 +25,39 @@ two header rows. Design files: WeAct's own repository
   3V3 - takes the Debug Probe's port D on three wires; THE 3V3 PIN
   STAYS UNCONNECTED (each board on its own USB, two regulators never
   in parallel). Reset over SWD (SYSRESETREQ); no reset wire.
+- **The desk partner**: this board is wired to a WeAct RP2350B
+  ([weact-rp2350b.md](weact-rp2350b.md)) by ten signal wires and two
+  grounds, each board on its own USB-C, both on one hub, NO 3V3 wire
+  between them. The links and this board's pads:
+
+  | wire | here | RP2350B | carries |
+  |---|---|---|---|
+  | 1 | GP10 | GP30 | SPI1 SCK |
+  | 2 | GP11 | GP28 | this SPI1 TX -> the RP2350B's SPI1 RX |
+  | 3 | GP8 | GP31 | the RP2350B's SPI1 TX -> this SPI1 RX |
+  | 4 | GP29 | GP41 | SPI1 CSn, 1.5 kOhm to this board's 3V3 |
+  | 5 | GP2 | GP36 | I2C SDA (I2C1 here), 1.5 kOhm to this board's 3V3 |
+  | 6 | GP3 | GP37 | I2C SCL, 1.5 kOhm to this board's 3V3 |
+  | 7 | GP4 | GP5 | this UART1 TX -> the RP2350B's UART1 RX |
+  | 8 | GP5 | GP4 | the RP2350B's UART1 TX -> this UART1 RX |
+  | 9 | GP21 | GP20 | this GPOUT0 -> the RP2350B's GPIN0 |
+  | 10 | GP20 | GP21 | the RP2350B's GPOUT0 -> this GPIN0 |
+
+  THE THREE PULL-UPS HANG FROM THIS BOARD'S 3V3 HEADER PIN: a load on
+  this board's regulator (6.6 mA at most, the three lines held low), not
+  a feed between the boards, so the 3V3 pin still joins nothing. They sit
+  on this side because an RP2040 pad is NOT failsafe (datasheet 5.5.3.1:
+  no pad above IOVDD + 0.5 V) where an RP2350's is, so a line pulled to
+  the other board's rail would feed this chip whenever it is unpowered;
+  the RP2350B reads these pull-ups to know this board is powered before
+  it drives a link pad. ONE DRIVER PER WIRE: while one board runs a
+  suite on a link pad the other runs a dark image (its pads inputs) or
+  the peer of the same subject. No other wire is on this board: every
+  wire between two of its own pads is retired, and the letters that
+  judged one run by name only.
 - **Pins a Pico uses otherwise**: GP24 and GP29 are plain header pins
-  here (a Pico's VBUS sense and VSYS/3), GP23 is the button (a Pico's
+  here (a Pico's VBUS sense and VSYS/3; GP29 carries the partner's
+  select above), GP23 is the button (a Pico's
   regulator PS pin). ADC_VREF is on the header.
 - **Identity**: the RP2040 has no die serial; the flash chip's unique
   id (`Flash::unique_id()`, 4Bh over the SSI) is the board's. The

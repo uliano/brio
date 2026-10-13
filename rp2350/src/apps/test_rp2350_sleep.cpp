@@ -22,9 +22,12 @@
 // are printed.
 //
 // NOTHING TO WIRE for `z`. The console is the Debug Probe's UART bridge
-// on GP0 (TX) / GP1 (RX) = UART0. One by-name letter uses the board's
-// own standing wire GP19 -> GP8 to wake itself from a dormant by an
-// edge it drives with its own other pad.
+// on GP0 (TX) / GP1 (RX) = UART0. One by-name letter, o, wants a wire
+// between two of the board's own pads, GP19 -> GP8, to wake itself from
+// a dormant by an edge it drives with its other pad; this desk does NOT
+// carry it (the board is wired to its desk partner and every self-link
+// is retired), and with no wire the letter declines before the dormant
+// it could not leave.
 //
 // A NOTE ON THE DEBUGGER, which letter a measures and every deep letter
 // re-states: the debug port's CSYSPWRUPREQ powers every domain and
@@ -1024,6 +1027,16 @@ void to_dormant_gpio() {
     bench.verdict("a GPIO wake armed on the pad is a way back the site accepts, and the "
                   "wire carries the level",
                   pad_high && DormantWake::any_enabled() && Plain::dormant_wake_ready());
+    if (!pad_high) {
+        // No wire, no wake: a dormant with no alarm would never end.
+        print(serial, "  DECLINED: GP19 -> GP8 is not wired - the pair desk carries no self-link "
+              "(fit the jumper to run this letter); the dormant is not entered", crlf);
+        (void)Waker::output(false);
+        (void)Waker::release();
+        (void)Woken::release();
+        quiesce();
+        return;
+    }
 
     const DormantSpan roused = dormant_leg("dormant/pad high", false, 0u);
     print(serial, "  the wake logic's raw flags on the pad: ",

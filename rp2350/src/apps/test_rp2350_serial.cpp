@@ -15,7 +15,13 @@
 // PL011 has a LOOP-BACK (UARTCR.LBE) that feeds the transmitter into the
 // receiver with the RX pad ignored, so every format, every rate of the
 // ladder, the FIFOs, the receive timeout, a break and an overrun are
-// measured on the instance alone.
+// measured on the instance alone. But GP4 and GP21 are link wires to the
+// desk partner, the WeAct RP2040 (docs/boards/weact-rp2350b.md), and
+// UART1's transmitter idles HIGH on GP4 in every letter: an RP2040 pad is
+// not failsafe, so every letter that hands GP4 or GP21 over reads that
+// board's rail first (rp2350/src/apps/pair_power.hpp) and drives nothing
+// when it is down, and the partner runs a dark image (its pads inputs)
+// for the loop-back letters - one driver per wire.
 //
 // WHAT THIS CHIP ADDS TO THE RP2040'S SAME BLOCK, and what letter f is
 // for: a SECOND FUNCTION COLUMN. The pads march in groups of four - TX,
@@ -108,6 +114,8 @@
 #include "rp2350/uart.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "pair_power.hpp"
 
 namespace {
 
@@ -981,17 +989,17 @@ int main() {
     const bool tick_ok = brio::Ticker::init(clock);
     brio::enable_interrupts();
 
-    bench.letter('a', "the facts: both pin columns, the divisor, the reset state", ta_facts);
+    bench.letter('a', "the facts: both pin columns, the divisor, the reset state", pair::guarded<bench, clock, ta_facts>);
     bench.letter('b', "THE INSTRUMENT: the loop-back, every frame format",
-                 tb_loopback_formats);
-    bench.letter('c', "the baud ladder on the loop-back, floor to ceiling", tc_ladder);
-    bench.letter('d', "the FIFOs: timeout vs level, a break, an overrun", td_fifos);
-    bench.letter('e', "bulk traffic on the loop, five rungs to 3 Mbaud", te_bulk);
-    bench.letter('t', "tx_idle() on the pad: the last stop bit", tt_tx_idle);
+                 pair::guarded<bench, clock, tb_loopback_formats>);
+    bench.letter('c', "the baud ladder on the loop-back, floor to ceiling", pair::guarded<bench, clock, tc_ladder>);
+    bench.letter('d', "the FIFOs: timeout vs level, a break, an overrun", pair::guarded<bench, clock, td_fifos>);
+    bench.letter('e', "bulk traffic on the loop, five rungs to 3 Mbaud", pair::guarded<bench, clock, te_bulk>);
+    bench.letter('t', "tx_idle() on the pad: the last stop bit", pair::guarded<bench, clock, tt_tx_idle>);
     bench.letter('f', "THE SECOND FUNCTION COLUMN: UART1 on GP6/GP7", tf_second_column);
-    bench.letter('p', "the wire against the peer, 512 bytes", tp_wire, false);
+    bench.letter('p', "the wire against the peer, 512 bytes", pair::guarded<bench, clock, tp_wire>, false);
     bench.letter('s', "the error attribution on the wire: 7E1 against the peer's 8N1",
-                 ts_wire_errors, false);
+                 pair::guarded<bench, clock, ts_wire_errors>, false);
     bench.letter('y', "HOST: the console's ladder through the probe's bridge (brio stress)",
                  ty_console_ladder, false);
     bench.letter('w', "HOST: the console at 8N1 fed 8E1 (brio stress)", tw_console_errors,

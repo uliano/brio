@@ -15,7 +15,10 @@
 // and released on the line-0 interrupt. Its receive side stays on the
 // interrupt (a keystroke at a time wants no block). The INSTRUMENT is
 // UART1 on GP4/GP5 under its loop-back (the serial suite's), with an
-// engine in EACH slot, channels 2 and 3. NOTHING TO WIRE.
+// engine in EACH slot, channels 2 and 3. NOTHING TO WIRE - but GP4 is
+// a link wire to the desk partner (docs/boards/weact-rp2040.md), driven
+// high by UART1's idle line, so the partner runs a dark image (its pads
+// inputs) while this suite runs: one driver per wire.
 //
 // THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp).
 //

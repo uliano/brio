@@ -546,9 +546,9 @@ Implemented but not bench-verified, each with what would measure it:
   polls it; a letter that waits on the line's handler.
 - The DW_apb_i2c host's read phase on these engines - the transmit engine
   pouring a half-word command cell, the receive engine collecting the
-  bytes: compiled for both halves, and run by the I2C suite's letter on
-  the I2C0 x I2C1 self-link with its two pull-ups, which is what would
-  measure it ([i2c.md](i2c.md)).
+  bytes: compiled for both halves; a tenure against the desk partner's
+  peer on the pair's I2C wires is what would measure it
+  ([i2c.md](i2c.md)).
 
 - A WRITE bus error (WRITE_ERROR): letter `h` provokes a read error; a
   block writing into an address the fabric cannot decode would be the

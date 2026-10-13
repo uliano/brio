@@ -217,7 +217,9 @@
 //      spi.cold apart - there the one run IS the measurement.
 //      THE WIRE is the SCK rate over eight bits a byte, as in d.
 //   u  THE SERIAL TRANSPORT ON A LOOP OF ITS OWN (pl011/uart.hpp's
-//      Pl011Transport): UART1 on GP4/GP5 under UARTCR.LBE, its vector
+//      Pl011Transport): UART1 on GP4/GP5 under UARTCR.LBE (GP4 a link
+//      wire to the desk partner, whose rail the letter reads first:
+//      rp2350/src/apps/pair_power.hpp), its vector
 //      metered apart (`loop_meter`), DMA channels 2 and 3 for its
 //      engines. uart.tx: 256 and 4096 bytes through write_bulk() at
 //      115200, 1 Mbaud and UARTCLK / 16, the receiver's two interrupts
@@ -234,8 +236,11 @@
 //      (UARTRIS read raw after ten frames of silence), and the copy into
 //      the ring: write_bulk's byte loop against the runtime's memcpy.
 //   i  THE I2C HOST ABOVE THE WIRE (dw_apb_i2c/i2c.hpp over rp2350/i2c.hpp)
-//      on the SELF-LINK the I2C suite uses: GP12 (I2C0 SDA) to GP14 (I2C1
+//      on a SELF-LINK: GP12 (I2C0 SDA) to GP14 (I2C1
 //      SDA), GP13 (I2C0 SCL) to GP15 (I2C1 SCL), 4.7 kOhm to 3V3 on each.
+//      THIS DESK DOES NOT CARRY THAT SELF-LINK (the board is wired to its
+//      desk partner and every self-link is retired), so the letter runs BY
+//      NAME ONLY, outside z, and with no wire it says so and fails.
 //      I2C0 is the host; I2C1 answers 0x42 from its own vector - its
 //      RX_TL raised to a level of eight and a read answered with as many
 //      bytes as its FIFO takes per read request - and is an INSTRUMENT:
@@ -316,6 +321,8 @@
 #include "util/bench.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "pair_power.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::pll, 150'000'000UL>;
 constexpr SysClock clock;
@@ -2106,8 +2113,8 @@ int main() {
     bench.letter('t', "the tick's floor: one second of idle", tt_tick);
     bench.letter('d', "the DMA: copy, fill, a paced block, the SPI engines", td_dma);
     bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
-    bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", tu_uart);
-    bench.letter('i', "the I2C host above the wire on the self-link: a tenure's price", ti_i2c);
+    bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", pair::guarded<bench, clock, tu_uart>);
+    bench.letter('i', "the I2C host above the wire on the self-link: a tenure's price", ti_i2c, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

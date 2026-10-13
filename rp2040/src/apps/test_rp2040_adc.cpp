@@ -10,7 +10,8 @@
 //
 // NOTHING TO WIRE. GP26, GP27 and GP28 (inputs 0..2) are read through
 // their pad pulls and must be free; GP29 (input 3) is printed and never
-// judged - a Pico has VSYS / 3 on it, a WeAct board a bare header pin.
+// judged - a Pico has VSYS / 3 on it, the WeAct board on this desk the
+// pair's SPI select, 1.5 kOhm to its own 3V3 (docs/boards/weact-rp2040.md).
 // GP0/GP1 are the console's, GP25 the LED.
 //
 // THE RULERS: the system timer for the rates, the clock chapter's
@@ -295,8 +296,8 @@ void tc_pads() {
     spin_us(200);
     const Stat s3 = sample(8);
     In3::release();
-    print(serial, "  GP29 (input 3): ", s3.mean, " counts = ", adc_mv(s3.mean, adc_steps, vref), " mV (a Pico: VSYS / 3; a WeAct "
-          "board: a bare header pin)", crlf);
+    print(serial, "  GP29 (input 3): ", s3.mean, " counts = ", adc_mv(s3.mean, adc_steps, vref), " mV (a Pico: VSYS / 3; the WeAct "
+          "board: the pair's select, pulled up)", crlf);
     Adc::release();
 }
 

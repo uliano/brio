@@ -18,7 +18,13 @@
 // on the line-0 interrupt. Its receive side stays on the interrupt (a
 // keystroke at a time wants no block). The INSTRUMENT is UART1 on GP4/GP5
 // under the PL011's own loop-back (UARTCR.LBE, which ignores the RX pad),
-// with an engine in EACH slot, channels 2 and 3. NOTHING TO WIRE.
+// with an engine in EACH slot, channels 2 and 3. NOTHING TO WIRE - but
+// GP4 is a link wire to the desk partner, the WeAct RP2040
+// (docs/boards/weact-rp2350b.md), driven high by UART1's idle line: an
+// RP2040 pad is not failsafe, so every letter that hands GP4 over reads
+// that board's rail first (rp2350/src/apps/pair_power.hpp) and drives
+// nothing when it is down, and the partner runs a dark image (its pads
+// inputs) meanwhile - one driver per wire.
 //
 // THE RULER IS THE PLATFORM TIMER (rp2350/mtime.hpp), the crystal's
 // microseconds, the same on both halves.
@@ -137,6 +143,8 @@
 #include "util/crc.hpp"
 #include "util/print.hpp"
 #include "util/testbench.hpp"
+
+#include "pair_power.hpp"
 
 namespace {
 
@@ -1979,17 +1987,17 @@ int main() {
     bench.letter('g', "the sniffer: sum, CRC-16, CRC-32", tg_sniffer);
     bench.letter('h', "a bus error", th_bus_error);
     bench.letter('i', "THE COUNT MODES: trigger-self, then endless", ti_count_modes);
-    bench.letter('j', "the instrument's two engines on the loop-back", tj_instrument);
+    bench.letter('j', "the instrument's two engines on the loop-back", pair::guarded<bench, clock, tj_instrument>);
     bench.letter('k', "this console's transmit engine under a burst", tk_console_engine);
     bench.letter('l', "the engines: the beat per block, errors alone, copy and fill", tl_engines);
-    bench.letter('t', "tx_idle() on the pad under the transmit engine", tt_tx_idle);
-    bench.letter('v', "K breaks in N slots: the interrupt receiver and the engine", tv_breaks);
-    bench.letter('o', "the overrun a stalled receive engine leaves: no storm", to_stalled_overrun);
+    bench.letter('t', "tx_idle() on the pad under the transmit engine", pair::guarded<bench, clock, tt_tx_idle>);
+    bench.letter('v', "K breaks in N slots: the interrupt receiver and the engine", pair::guarded<bench, clock, tv_breaks>);
+    bench.letter('o', "the overrun a stalled receive engine leaves: no storm", pair::guarded<bench, clock, to_stalled_overrun>);
     bench.letter('r', "a released requester: what reaches the next owner", tr_released_requester);
     bench.letter('p', "HOST: the console's ring beside copies at each level (brio stress)",
-                 tp_ring_beside_copies, false);
-    bench.letter('m', "diagnostic: the transmit engine alone", tm_tx_only, false);
-    bench.letter('n', "diagnostic: the receive engine alone", tn_rx_only, false);
+                 pair::guarded<bench, clock, tp_ring_beside_copies>, false);
+    bench.letter('m', "diagnostic: the transmit engine alone", pair::guarded<bench, clock, tm_tx_only>, false);
+    bench.letter('n', "diagnostic: the receive engine alone", pair::guarded<bench, clock, tn_rx_only>, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL150" : "FAILED",

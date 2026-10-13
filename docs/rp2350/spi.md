@@ -23,7 +23,10 @@ holds what this chip owes it - the pin table of table 645, the
 `Pl022<n>` (the resource), `SpiHost<n, pins, ...>` (the engine `SpiBus`
 drives) and `SpiClient<n, pins>` (the other end), this chip's aliases of
 the three templates there. The reference suite: `test_rp2350_spi`, which
-runs on BOTH of this chip's architectures from one source.
+runs on BOTH of this chip's architectures from one source, on the
+loop-back; the wire is the desk partner's, SPI1 on GP30 / GP28 / GP31
+with GP41 its select, to the WeAct RP2040
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)).
 
 This page says what is the RP2350's. What the block itself does - the
 prescaler pair, the disabled-write rule, the pump's batching, the phase
@@ -75,17 +78,13 @@ software need not manage the output enable even where several clients
 share the data lines. The idle-level list printed under each of the four
 Motorola modes and under Microwire (12.3.4.10 to 12.3.4.14) says the
 opposite, in the same words all five times: the nSSPOE pad enable signal
-is forced high, "this is not connected to the pad in RP2350". MEASURED ON
-STEPPING A2 IT IS THE SECOND THAT HOLDS. A deselected client and a client
-with SOD set both leave their transmit pad DRIVEN, and driven HIGH - the
-same arrangement as the RP2040 ([../rp2040/spi.md](../rp2040/spi.md)),
-where nSSPOE reached no pad either. What SOD does do is keep the block's
-answers off the wire: the host clocks a steady 0xFF out of a client whose
-FIFO is full of frames. The driver depends on none of it -
-`SpiClient::drive_output(false)` makes the dark listener by releasing the
-PAD, which is right on both silicons and is why the IP file made the pad
-the lever - and `sod()` stays a bit of the resource, which is what the
-suite points at the question.
+is forced high, "this is not connected to the pad in RP2350" - which is
+what the RP2040's chapter says too ([../rp2040/spi.md](../rp2040/spi.md)).
+Which of the two holds is the pad's question, and it takes a host on a
+wire to the client to answer (Not covered yet). The driver depends on
+neither: `SpiClient::drive_output(false)` makes the dark listener by
+releasing the PAD, which is right under both readings and is why the IP
+file made the pad the lever - and `sod()` stays a bit of the resource.
 
 **THE PADS COME UP ISOLATED** (9.11, and [README.md](README.md)): a pad
 answers nothing until the isolation latch is cleared, which every
@@ -96,8 +95,7 @@ reads as the idle ones a bus expects rather than as zeros, and a CLIENT's
 select pad, so an unwired select reads not-selected. And because erratum
 RP2350-E9 is live on the A2 stepping, an idle LEVEL on a pad of this chip
 is history and not a measurement: telling a released transmit pad from a
-driven one takes two reads, one under each pull, which is the instrument
-the suite's letter h builds.
+driven one takes two reads, one under each pull.
 
 **THE THREE NUMBER TABLES ARE NOT THE RP2040'S**, and each has its own
 reason. The DREQ rows are 24..27 where they were 16..19, because a third
@@ -220,11 +218,10 @@ extern "C" void isr_spi1() {
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 and clk_peri at 150 MHz, and all of them on BOTH architectures, from one
-source: `test_rp2350_spi` carries 43 verdicts, the 30 of the loop-back
-letters a..e green on the Cortex-M33 pair and on the Hazard3 pair, and
-the 13 of the wire letters f..j green on the four self-link wires (letter
-i, the engines on the wire, is the one gap below). Where a number differs
-between the halves both are given; every verdict reads the same.
+source: `test_rp2350_spi` carries 30 verdicts, the loop-back letters
+a..e, green on the Cortex-M33 pair and on the Hazard3 pair. Where a
+number differs between the halves both are given; every verdict reads
+the same.
 
 - **THE BLOCK IS THE RP2040'S, AND SAYS SO.** SSPPERIPHID 0..3 read 0x22,
   0x10, 0x34, 0x00 - the revision field 3, which is r1p4 - and SSPPCELLID
@@ -472,40 +469,11 @@ between the halves both are given; every verdict reads the same.
   misses, 1158 to 1996 cycles - because it touches six to seven times
   fewer lines; this host's first transaction after `init()` pays 10161 /
   8549.
-- **THE CLIENT KEEPS UP ONE RUNG ABOVE THE CHAPTER'S CEILING.** On the
-  four wires, the host polled and the client served from its own
-  interrupt, 32 frames are exact both ways at **clk_peri / 8, 18.75 MHz**,
-  and wrong at 37.5 and 75 - where 12.3.4.4 puts a client's limit at
-  clk_peri / 12, 12.5 MHz. That is the same generosity the RP2040 showed.
-  The frame period on those rounds is 1125 to 1218 ns whatever the rate,
-  because one core is serving both ends and the client's interrupt, not
-  the clock, is the pace.
-- **WITH SPH = 0 THE PL022 CLIENT TAKES ONE FRAME PER SELECT WINDOW.**
-  Sixteen frames clocked under one held select in modes 0 and 2 are heard
-  as **one**; in modes 1 and 3 all sixteen arrive. It is the fact a
-  multi-frame transaction under a GPIO select must know, and it is the
-  block's and not this chip's.
-- **THE TRANSMIT PAD'S OUTPUT ENABLE - the one verdict that was expected
-  to differ from the RP2040's, and does not.** The instrument is proved
-  both ways first on the GP11 -> GP16 wire: a pad driven low reads not
-  floating and low, the same pad released reads floating. Then a
-  DESELECTED client reads **not floating, level high**, and a client with
-  SOD set reads **not floating, level high** while the host clocks
-  **0xFF** out of it with 0x80, 0x85, 0x8A waiting in its FIFO. So nSSPOE
-  reaches no pad on this stepping, as the modes' own idle lists say and
-  12.3.1's paragraph denies; SOD keeps the answers off the wire without
-  releasing the line. A dark client - the pad released - reads 0xFF at the
-  host and still hears all sixteen frames, and a client nobody reads
-  raises its overrun, which clears by writing one.
 - **THE ARBITER IS UNTOUCHED.** `util/spi_bus.hpp` and
   `util/bus_master.hpp` carry four transactions with pumped and polled
   interleaved, reject the fifth of a four-deep queue while answering all
   six exactly once, and vote for a sleep when idle and against one when
   busy - on both architectures, with no line changed for either.
-- **THE ROLES INVERT** on the same four wires, SPI1 hosting on GP9's
-  select and SPI0 listening on GP17, sixteen frames exact both ways; and
-  the two engines on the wire carry 64 bytes each way at 2.3 MHz exact
-  with the client on its own interrupt.
 
 ## Not covered yet
 
@@ -524,9 +492,9 @@ Request, a client on the DMA engines - are in
   program that needs one cold; none does yet.
 - The TI and the Microwire framings ON THE WIRE: both are codes
   `SpiConfig` takes and the resource reads back, and no device on this
-  desk speaks either. The pair of instances could speak TI to each other
-  on the four wires they share; the letter that would do it is born with
-  a reason to.
+  desk speaks either. The desk partner's PL022 could speak TI to this one
+  on the pair's wires; the letter that would do it is born with a reason
+  to.
 - A second device on one bus: the Request's per-transaction mode, rate
   and width exist so that two devices can share a host, and the desk
   carries one peripheral instance and no third party, so nothing measures
@@ -540,10 +508,16 @@ Request, a client on the DMA engines - are in
 
 Implemented but not bench-verified, each with what would measure it:
 
-- Letter i, the host's engines on the wire against the client, with the
-  engines in the half-word shape: the loop-back letters and the bench
-  measure them, the wire has not carried them. The four self-link wires
-  and the letter.
+- `SpiClient` on a wire - the four modes with the one frame per select
+  window of SPH = 0 (12.3.4.10, 12.3.4.12), multi-frame windows in modes
+  1 and 3, the rate ladder against the clk_peri / 12 ceiling, the dark
+  listener, the overrun - and THE nSSPOE QUESTION above, a deselected
+  client and a client under SOD read floating or driven by the two-pull
+  instrument: the desk partner's PL022 host on the pair's SPI1 wires.
+- The host on a wire against a foreign client - the four modes under a
+  held GPIO select, the rate asked up the ladder, and the two engines in
+  the half-word shape, which the loop-back letters and the bench measure
+  and no wire has carried: the partner's client on the same wires.
 
 - The QFN-60's pin table and its compile-time refusals: the stratum
   compiles for that package and refuses the pads it has not got, and no

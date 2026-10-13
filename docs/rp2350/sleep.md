@@ -166,10 +166,14 @@ says whether the SLEEP state was reached.
   AFTER THE ALARM and not on it, which is what the disarm in the alarm's
   body is for: an alarm posts nothing to any queue, so the machine is
   handed back to a ticking sleep and the tick finishes the job.
-- **A DORMANT ENDED BY A PAD** needs no clock anywhere. With the board's
-  own standing wire GP19 -> GP8 driven high and a level wake armed on
-  GP8, the chip stops and comes back in 1 ms of the always-on timer with
-  no alarm armed at all, the crystal stable and the PLL relocked.
+- **A DORMANT ENDED BY A PAD** needs no clock anywhere. With a wire
+  between two of the board's own pads, GP19 -> GP8, driven high and a
+  level wake armed on GP8, the chip stops and comes back in 1 ms of the
+  always-on timer with no alarm armed at all, the crystal stable and the
+  PLL relocked. The pair desk does not carry that wire
+  ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)): with none
+  fitted, letter o reads GP8 low and declines BEFORE the dormant, which
+  nothing could end.
 - **A DORMANT ENDED BY THE ALARM: THE WAKE PATH NEEDS clk_ref RUNNING.**
   This is the chapter's finding and it cost four measured variants. With
   clk_ref on the crystal and the crystal stopped - the RP2040's own
@@ -250,10 +254,11 @@ Implemented but not bench-verified, each with what would measure it:
   whose gate is shut while the program runs, reading its registers as
   static. Nothing here prunes the awake mask.
 - **The four dormant-wake events on any pad but GP8, and `pending()`.**
-  The level wake is measured on the board's own standing wire; the two
-  edges and the low level want a pad something else drives, and on this
-  desk both ends of every wire are this chip's own pads - which a dormant
-  chip cannot move.
+  The level wake is measured on a wire between two of the board's own
+  pads; the two edges and the low level want a pad something else drives
+  - the desk partner over a link wire (GP20, its GPOUT0, is the one
+  reaching an input here), with a program on that board that moves it
+  while this one sleeps.
 - **A dormant on the ring oscillator ended by a pad**, and a crystal
   dormant with both a pad and an alarm armed at once: each wake path is
   measured on its own site, and the pair has not been.

@@ -15,7 +15,10 @@ assembler, `Pio<n>` the block, `PioSm<n, sm>` the machine, the four
 tasks) over `pin.hpp`, `resets.hpp`, `core.hpp` and `dma_engine.hpp`; and
 `util/pwm_channel.hpp` for the PwmChannel the PIO PWM satisfies. The
 reference suite: `test_rp2350_pio` - letters a, b, h and j wireless, c,
-d, e, g, i, k and l on two of the standing wires, and f on both. Two of
+d, e, g, i, k and l on two wires between the chip's own pads, and f on
+both; the pair desk does not carry those wires
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), so the wire
+letters run by name only, outside z, when they are fitted. Two of
 those letters put a [dma.md](dma.md) engine on a machine's FIFO, which is
 what the request numbers here are for.
 
@@ -232,8 +235,9 @@ brio::Pio<0>::enable_across(0x1, {.next = 0x8});
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, and all of them on BOTH architectures: `test_rp2350_pio`
-reports **30 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
-pair, from one source, each on three flash-and-run cycles. No verdict of
+reported **30 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+pair, from one source, each on three flash-and-run cycles, with the two
+wires fitted; its z, the four wireless letters, reports 15. No verdict of
 this chapter reads differently between the halves.
 
 - **VERSION 1 ON ALL THREE BLOCKS**, with thirty-two instructions, four

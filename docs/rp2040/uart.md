@@ -178,12 +178,6 @@ extern "C" void isr_uart0() {
     back in 66664 us of the 66666 they occupy, the receiver having the
     last byte before its stop bit ends, which the rung's lower bound
     allows.
-- ON THE CROSS LINK (this board's GP4 to the other's GP5 and back):
-  512 bytes to a peer's echo and back byte-exact in 46 ms with no
-  error counted; listening at 7E1 to the peer's 64 frames at 8N1,
-  the eighth data bit lands where the parity bit is expected - 30
-  parity errors counted and dropped, 34 frames accepted, no frame
-  error - the attribution per entry, on a real wire.
 - THE ENGINES (`test_rp2040_dma`): 4096 bytes through the loop-back
   at 3 Mbaud with an engine in each slot, byte-exact, 22 interrupts;
   the two traps of a receive engine - a break taken at enable over a
@@ -269,6 +263,13 @@ Driver gaps, each with its reason:
   program with a reason to move them; the resource writes any pair.
 
 Implemented but not bench-verified, each with what would measure it:
+
+- The transport on a wire against a foreign peer: an echo of 512 bytes
+  byte-exact, and the error attribution of 7E1 listening to 8N1 frames,
+  per entry - the serial suite's cross-link letters, whose far end on
+  this desk is the WeAct RP2350B over the pair's UART1 wires
+  ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), which runs
+  no RP2040 suite: a peer there that echoes and sends.
 
 - The bridge's ceiling board to host (the suite measures host to
   board): a `source` leg of the same host letter.

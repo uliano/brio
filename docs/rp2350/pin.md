@@ -12,8 +12,11 @@ controller), 3.2 (the interrupt lines), 12.15.1 (SYSINFO's PACKAGE_SEL)
 and appendix E's **RP2350-E9**, which is live on the bench silicon and
 changes what a pull-down means. The driver: `brio/rp2350/pin.hpp`. The
 reference suite: `test_rp2350_pin`, which runs on BOTH of this chip's
-architectures from one source, over four wires and two nets that carry a
-real pull-up.
+architectures from one source: its pull letter on three of the desk
+partner's link nets, which carry a real pull-up to that board's 3V3
+([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)); its six wire
+letters on four wires between the chip's own pads that the pair desk
+does not carry, by name only, outside z, when they are fitted.
 
 ## What the silicon does
 
@@ -186,9 +189,10 @@ Pin<19>::isolate(false);             // now it does
 ## Bench findings
 
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, at
-3.3 V, and all of them on BOTH architectures: `test_rp2350_pin` reports
-**51 pass, 0 fail** on the Cortex-M33 pair and **51 pass, 0 fail** on the
-Hazard3 pair, from one source.
+3.3 V, and all of them on BOTH architectures: `test_rp2350_pin`'s z
+reports **24 pass, 0 fail** on the Cortex-M33 pair and on the Hazard3
+pair, from one source; the wire letters (b, f..j) reported their findings
+below with the four wires fitted.
 
 - **The reset state, seen**: a pad this image has never configured reads
   0x116, which is the datasheet's own reset value. Configured as an
@@ -199,10 +203,11 @@ Hazard3 pair, from one source.
 - **Eight wire directions**: each of the four wires drives and reads
   correctly in BOTH directions - a wire has no direction, and neither
   does a pad.
-- **The pulls**: on the two nets that carry a real pull-up to 3V3, both
-  pads read high with both ends listening, both read low when one end
-  drives low, and both come back high when it lets go. The chip's own
-  pull-up holds a free pad high.
+- **The pulls**: on the three link nets that carry a real pull-up -
+  GP36, GP37 and GP41, 1.5 kOhm to the partner's 3V3 - each pad reads
+  high on its own pull-down with the buffer pulsed (so the HIGH is the
+  resistor and never E9's history), low while it drives low, and high
+  again once it lets go. The chip's own pull-up holds a free pad high.
 - **ERRATUM RP2350-E9, MEASURED FOUR WAYS.** On this A2 die a free pad
   with its input buffer enabled and its own pull-down on reads **1**
   after having been driven high and released, and **0** after having been
@@ -214,12 +219,19 @@ Hazard3 pair, from one source.
   its pull-down, reads high as long as the NEAR pad's buffer is on and
   its driver has let go. Every letter that lets a driver go now turns
   both buffers off.
-- **The input buffer costs nothing to wake**: on a pad its own pull-up
-  holds high, the eight SIO reads taken as fast as they can be issued
-  after the enable ALL read the pad's level (0xFF, first sample
-  included). The enable is an APB write of four cycles and the read a
-  single-cycle SIO access, so the buffer is awake before it can be asked
-  - which is why `read_pulsed()` needs no settle.
+- **The input buffer costs nothing to wake, once the enable has
+  landed**: on a pad its own pull-up holds high, the eight SIO reads
+  taken as fast as they can be issued after the enable ALL read the
+  pad's level (0xFF, first sample included). But nothing ORDERS the
+  enable - a store across the bus fabric and the APB bridge - before the
+  read, a load from the SIO on the core's own port: on the Hazard3 half,
+  with the code warm in the cache, a `read_pulsed()` whose load followed
+  its store at once read a pad held high by 1.5 kOhm as 0 on every call
+  but the first (the first, fetched cold from the flash, gave the store
+  time to land). `read_pulsed()` therefore reads the pad register back
+  between the two - one APB read, answered only once the write before
+  it is done - and with it the same image read the pad high on every
+  call, on both halves.
 - **The bus keeper** holds the level the pad last had, in both
   directions, on a free pad with nothing else on it.
 - **The pad's electrical controls**: all four drive strengths, both slew

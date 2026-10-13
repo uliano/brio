@@ -10,14 +10,17 @@
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp). It is a REFERENCE test.
 //
-// TWO WIRES, both part of the standing self-links of this board:
+// TWO WIRES BETWEEN THE CHIP'S OWN PADS, which this desk does NOT
+// carry: the board is wired to its desk partner (docs/boards/
+// weact-rp2040.md) and every self-link is retired, so letters b..g run
+// BY NAME ONLY, outside z, and decline with that reason when the wire is
+// missing. Fitted, the wires are
 //
 //   GP13  ->  GP15   (the serial port: PIO0 machine 0 sends, machine 1
 //                     receives; the square wave and the sampled PWM)
 //   GP17  ->  GP9    (the PIO PWM into the PWM block's level counter)
 //
-// With a wire missing its input reads low and the letter declines with
-// the reason.
+// - no pad the pair uses.
 //
 // THE RULERS: the system timer, the PWM block's edge and level
 // counters (rp2040/pwm.hpp) on the far end of each wire.
@@ -145,14 +148,14 @@ bool wire_13_15() {
     if (wire_present<13, 15>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP13 -> GP15 is not wired", false);
+    bench.verdict("DECLINED: GP13 -> GP15 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
     return false;
 }
 bool wire_17_9() {
     if (wire_present<17, 9>()) {
         return true;
     }
-    bench.verdict("DECLINED: GP17 -> GP9 is not wired", false);
+    bench.verdict("DECLINED: GP17 -> GP9 is not wired - the pair desk carries no self-link (fit the jumper to run this letter)", false);
     return false;
 }
 
@@ -632,12 +635,12 @@ int main() {
     brio::enable_interrupts();
 
     bench.letter('a', "the block, wireless", ta_block);
-    bench.letter('b', "the square wave by edges", tb_square_wave);
-    bench.letter('c', "the serial port at three rates, the frame error", tc_serial);
-    bench.letter('d', "the serial port on the DMA", td_dma);
-    bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm);
-    bench.letter('f', "the interrupts and the flags", tf_interrupts);
-    bench.letter('g', "the sampler", tg_sampler);
+    bench.letter('b', "the square wave by edges", tb_square_wave, false);
+    bench.letter('c', "the serial port at three rates, the frame error", tc_serial, false);
+    bench.letter('d', "the serial port on the DMA", td_dma, false);
+    bench.letter('e', "the PIO PWM as a PwmChannel", te_pwm, false);
+    bench.letter('f', "the interrupts and the flags", tf_interrupts, false);
+    bench.letter('g', "the sampler", tg_sampler, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

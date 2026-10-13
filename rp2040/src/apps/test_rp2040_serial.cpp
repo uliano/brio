@@ -14,10 +14,16 @@
 // PL011 has a LOOP-BACK (UARTCR.LBE) that feeds the transmitter into
 // the receiver with the RX pad ignored, so every format, every rate of
 // the ladder, the FIFOs, the receive timeout, a break and an overrun
-// are measured on the instance alone. The two letters that need a
-// second RP2040 use the cross link (this board's GP4 to the other's
-// GP5 and back, a common ground); the two that need the host use the
-// console itself, with `brio stress` at the other end.
+// are measured on the instance alone. The letters that need a second
+// RP2040 use the cross link (this board's GP4 to the other's GP5 and
+// back, a common ground); on this desk GP4/GP5 are wired to the WeAct
+// RP2350B instead (docs/boards/weact-rp2040.md), which runs no RP2040
+// suite, so they have no partner here. The two that need the host use
+// the console itself, with `brio stress` at the other end.
+//
+// UART1's transmitter idles HIGH on GP4 in every letter, the loop-back
+// ones too, and GP4 is a link wire: the partner board runs a dark image
+// (its pads inputs) while this suite runs - one driver per wire.
 //
 // THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp): the crystal's
 // microseconds, for every latency and every rate on the loop.

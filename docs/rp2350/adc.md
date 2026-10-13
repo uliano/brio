@@ -267,8 +267,11 @@ flash-and-run cycles. Every verdict reads the same on the two halves.
   conversion's pace and not its result. With the bias off the same input
   reads **705 to 708**, some 160 counts away, so the diode is what the
   bias connects.
-- **EVERY PAD THE PACKAGE GIVES THE CONVERTER**, GP40..GP47, read through
-  its own pulls with the digital input buffer off: **3894 to 3899 counts
+- **EVERY PAD THE PACKAGE GIVES THE CONVERTER**, GP40..GP47 but GP41 -
+  which carries the pair's SPI select and its pull-up to the partner's
+  3V3 ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), printed
+  and never judged - read through its own pulls with the digital input
+  buffer off: **3894 to 3899 counts
   (3137 to 3141 mV) pulled up, 58 to 60 counts (47 to 48 mV) pulled
   down**, and **397 to 434 counts (320 to 350 mV) floating** - the last
   a number and not a level, and well clear of both pulls.

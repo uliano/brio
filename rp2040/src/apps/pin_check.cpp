@@ -36,6 +36,12 @@
 // header: the wave lands on an unpowered chip (GP23 below keeps it
 // so) and no LED - that board's LED is on the radio.
 //
+// THE DESK PARTNER. On the WeAct board ten of the waved pads are wired
+// to the WeAct RP2350B (docs/boards/weact-rp2040.md) - GP2, GP3, GP4,
+// GP5, GP8, GP10, GP11, GP20, GP21, GP29 - so the partner runs a dark
+// image (its pads inputs) while this one waves: one driver per wire. The
+// RP2350B's pads are failsafe, so its rail need not be up.
+//
 // Not toggling: GP0/GP1, the console; GP23 - a WeAct board's user KEY
 // (a button to ground on a driven output would be a short), a Pico's
 // regulator PS pin (toggling its power-save mode at 100 Hz says

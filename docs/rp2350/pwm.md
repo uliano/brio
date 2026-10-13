@@ -13,7 +13,10 @@ this block. `util/pwm_channel.hpp` for the PwmChannel contract. The
 driver: `brio/rp2350/pwm.hpp` (`Pwm` the block, `PwmSlice<n>` the
 resource, the tasks `PwmOutput`, `PwmPair`, `PwmEdgeCounter`,
 `PwmLevelCounter`, `PwmPeriodicTick`) over `pin.hpp`, `resets.hpp` and
-`dma_engine.hpp`. The reference suite: `test_rp2350_pwm`.
+`dma_engine.hpp`. The reference suite: `test_rp2350_pwm` - its wire
+letters on three wires between the chip's own pads that the pair desk
+does not carry ([../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)),
+so they run by name only, outside z, when they are fitted.
 
 ## What the silicon does
 
@@ -169,8 +172,9 @@ levels per period.
 All of them on an RP2350 in the QFN-80 package, **stepping A2**, clk_sys
 at 150 MHz, over the board's own wires GP13 -> GP15, GP17 -> GP9 and
 GP12 <-> GP14, and all of them on BOTH architectures: `test_rp2350_pwm`
-reports **41 pass, 0 fail** on the Cortex-M33 pair and **41 pass, 0
-fail** on the Hazard3 pair, from one source. NOTHING IN THIS CHAPTER
+reported **41 pass, 0 fail** on the Cortex-M33 pair and **41 pass, 0
+fail** on the Hazard3 pair, from one source, with the wires fitted; its
+z, the three wireless letters, reports 21. NOTHING IN THIS CHAPTER
 DIFFERS BETWEEN THE TWO HALVES - the block is one, its two interrupt
 lines are two system lines under one numbering, and the handler names are
 the same on both.

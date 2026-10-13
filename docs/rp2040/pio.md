@@ -12,7 +12,10 @@ util/pwm_channel.hpp for the PwmChannel the PIO PWM satisfies. The
 driver: `brio/rp2040/pio.hpp` (the assembler, `Pio<n>` the block,
 `PioSm<n, sm>` the machine, the four tasks) over `pin.hpp`,
 `resets.hpp` and `dma_engine.hpp`. The reference suite:
-`test_rp2040_pio`, wireless and on two of the standing wires.
+`test_rp2040_pio`, wireless and on two wires between the chip's own
+pads - wires the pair desk does not carry
+([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), so the six wire
+letters run by name only, outside z, when they are fitted.
 
 ## What the silicon does
 
@@ -139,10 +142,9 @@ Sm::enable(true);
 
 ## Bench findings
 
-The reference suite is `test_rp2040_pio`, green on the Pico and the
-WeAct board:
-one letter wireless, six on two of the standing wires (GP13 into
-GP15, GP17 into GP9) with the PWM block's counters at the far ends.
+The reference suite is `test_rp2040_pio`, green on the WeAct board:
+one letter wireless in z (8 verdicts), six by name on two wires (GP13
+into GP15, GP17 into GP9) with the PWM block's counters at the far ends.
 
 - THE ENCODINGS: the transmitter's four words (0x9FA0 0xF727 0x6001
   0x0642) and the receiver's nine are the vendor's assembled ones;

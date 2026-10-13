@@ -1,30 +1,21 @@
 // test_rp2040_spi - the reference bench suite for the RP2040's SPI
 // (rp2040/spi.hpp over datasheet 4.4, the ARM PL022): the host on its
-// loop-back and on a wire to the chip's OTHER instance as the client,
-// the pump and the polled path, the DMA engines, the roles inverted,
-// and util/spi_bus.hpp's arbiter with not one line changed.
+// loop-back, the pump and the polled path, the DMA engines, and
+// util/spi_bus.hpp's arbiter with not one line changed.
 //
 // A test_<target>_<subject> suite is a menu of single-letter tests over
 // the console, judged by brio's "ALL: N pass, M fail" grammar
 // (util/testbench.hpp). It is a REFERENCE test.
 //
-// TWO INSTRUMENTS. THE LOOP-BACK (letters a..e): the PL022's LBM feeds
-// the transmitter into the receiver with nothing on the wire, which
-// proves the pump, the frame sizes, the four modes, every rate, the
-// engines and the arbiter with no second peripheral. THE WIRE (letters
-// f..j): SPI0 as the host and SPI1 as the client on ONE BOARD, four
-// wires between the two instances' pads:
-//
-//   GP19 (SPI0 TX)  ->  GP8  (SPI1 RX)
-//   GP11 (SPI1 TX)  ->  GP16 (SPI0 RX)
-//   GP18 (SPI0 SCK) ->  GP10 (SPI1 SCK)
-//   GP17 (the host's chip select, a GPIO)  ->  GP9 (SPI1 CS, the pad)
-//
-// The roles invert on the same four wires (letter j): SPI1 hosts with
-// GP9 as its GPIO select, SPI0 listens with GP17 as its select pad.
-// The client is served from ITS OWN interrupt: what the host clocks is
-// read there and the next answers written ahead, so the host's
-// transactions - polled or pumped - see a client that keeps up.
+// ONE INSTRUMENT, THE LOOP-BACK: the PL022's LBM feeds the transmitter
+// into the receiver with nothing on the wire, which proves the pump, the
+// frame sizes, the four modes, every rate, the engines and the arbiter
+// with no second peripheral. SPI0 hosts on GP18/19/16 with GP17 as its
+// select; no wire is on those pads. THE CLIENT AND THE WIRE belong to the
+// board's desk partner: SPI1 on GP8/GP10/GP11 with its select pad GP29
+// is wired to the WeAct RP2350B (docs/boards/weact-rp2040.md), and no
+// letter here drives those pads - a DUT letter on them runs against the
+// partner's peer, never against a second instance of this chip.
 //
 // THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp).
 //
@@ -50,20 +41,6 @@
 //      modes 3 and 0 and at 16 bits
 //   e  THE KERNEL: SpiBus (= BusMaster) over SpiHost, replies in order,
 //      the rejection, both sleep votes
-//   f  THE WIRE: sixteen frames both ways in modes 1 and 3 and at 16
-//      bits, the client's answers written eight ahead, its select pad
-//      read - and modes 0 and 2 as the PL022 slave has them: ONE frame
-//      per select window (SPH = 0 frames on the select), stated as a
-//      verdict
-//   g  the rate ladder on the wire, div2 downwards: where the client
-//      (clk_peri / 12 at most) keeps up and where it does not
-//   h  the dark listener and the overrun: a client with its answer pad
-//      released reads as the host's pull-up (0xFF), then speaks; what
-//      SOD does on this chip is REPORTED; a client that does not read
-//      overruns its FIFO and says so
-//   i  THE DMA ENGINES ON THE WIRE: 64 bytes each way through the host's
-//      two engines at 1.95 MHz, the client on its interrupt
-//   j  THE ROLES INVERT on the same wires: SPI1 hosts, SPI0 listens
 //
 // build: boards = pico,weact2040
 // build: monitor_speed = 115200
@@ -108,28 +85,18 @@ constexpr Serial serial;
 
 TestBench<Serial, 16> bench;
 
-// SPI0 hosts on GP18/19/16 with GP17 as the select; SPI1 listens on
-// GP10/11/8 with GP9 as its select pad. And the other way round.
+// SPI0 hosts on GP18/19/16 with GP17 as the select, on the loop-back:
+// no wire is on those pads.
 constexpr SpiPins host_pins{.sck = 18, .tx = 19, .rx = 16};
-constexpr SpiPins client_pins{.sck = 10, .tx = 11, .rx = 8, .cs = 9};
-constexpr SpiPins host_b_pins{.sck = 10, .tx = 11, .rx = 8};
-constexpr SpiPins client_a_pins{.sck = 18, .tx = 19, .rx = 16, .cs = 17};
 using Host = SpiHost<0, host_pins>;
 using DmaHost = SpiHost<0, host_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
-using Client = SpiClient<1, client_pins>;
-using HostB = SpiHost<1, host_b_pins>;
-using ClientA = SpiClient<0, client_a_pins>;
 using CsPin = Pin<17>;
-using CsPinB = Pin<9>;
 
 // Which task owns each instance's vector at the moment.
-enum class Spi0Owner : uint8_t { none, host, dma_host, client_a };
-enum class Spi1Owner : uint8_t { none, client, host_b };
+enum class Spi0Owner : uint8_t { none, host, dma_host };
 volatile Spi0Owner spi0_owner = Spi0Owner::none;
-volatile Spi1Owner spi1_owner = Spi1Owner::none;
 volatile uint32_t spi0_isr_entries = 0;
 volatile uint32_t dma_isr_entries = 0;
-volatile uint32_t spi1_isr_entries = 0;
 volatile bool transfer_done = false;
 volatile uint8_t transfer_status = 0;
 bool bus_ao_live = false;
@@ -151,49 +118,6 @@ bool same(const uint8_t* a, const uint8_t* b, uint16_t n) {
             return false;
         }
     }
-    return true;
-}
-
-// ---- the client, served from its interrupt ----------------------------------
-// What it will answer (frame k) and what it heard, on either instance.
-uint16_t client_answers[64];
-uint16_t client_heard[64];
-volatile uint16_t client_next = 0;    // the next answer to queue
-volatile uint16_t client_count = 0;   // frames heard
-uint16_t client_limit = 0;            // answers to queue in all
-
-template <typename C>
-void client_serve() {
-    while (const auto f = C::poll()) {
-        if (client_count < 64u) {
-            client_heard[client_count] = *f;
-        }
-        client_count = client_count + 1u;
-    }
-    while (client_next < client_limit && C::writable()) {
-        C::write(client_answers[client_next]);
-        client_next = client_next + 1u;
-    }
-}
-
-/// Bring the client up on `C` with `limit` answers of pattern `seed`,
-/// eight of them in the FIFO before the host's clock.
-template <typename C>
-bool client_ready(uint16_t limit, uint16_t seed, SpiMode mode, uint8_t bits, bool drive = true) {
-    client_limit = limit;
-    client_next = 0;
-    client_count = 0;
-    for (uint16_t i = 0; i < 64u; ++i) {
-        client_answers[i] = static_cast<uint16_t>((seed + 5u * i) & ((1u << bits) - 1u));
-        client_heard[i] = 0xEEEEu;
-    }
-    if (!C::init(clock, {.mode = mode, .bits = bits, .drive_output = drive})) {
-        return false;
-    }
-    C::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, true);
-    C::enable(client_answers[0]);
-    client_next = 1;
-    client_serve<C>();
     return true;
 }
 
@@ -615,287 +539,9 @@ void te_kernel() {
     bus_ao_live = false;
 }
 
-// =============================================================================
-// f - the wire: host SPI0, client SPI1
-// =============================================================================
-
-/// One wire transaction of `n` frames at `mode`/`bits`/`rate`: the host
-/// sends pattern `seed`, the client answers its own; both directions
-/// compared. Returns how many of the two directions were exact (0..2).
-uint8_t wire_round(uint16_t n, SpiMode mode, uint8_t bits, SpiClock rate, uint8_t seed, bool polled, uint16_t* frames_ns = nullptr,
-                   bool trace = true) {
-    spi1_owner = Spi1Owner::none;
-    (void)client_ready<Client>(n, static_cast<uint16_t>(0x100u + seed), mode, bits);
-    spi1_isr_entries = 0;
-    spi1_owner = Spi1Owner::client;
-    const SpiDataSize size = bits == 16u ? SpiDataSize::bits16 : SpiDataSize::bits8;
-    const uint16_t bytes = static_cast<uint16_t>(n * (bits == 16u ? 2u : 1u));
-    fill_pattern(tx_buf, bytes, seed);
-    for (uint16_t i = 0; i < bytes; ++i) {
-        rx_buf[i] = 0xEE;
-    }
-    const uint32_t t0 = us_now();
-    const uint8_t st = xfer<Host>(nullptr, 0, tx_buf, rx_buf, n, mode, rate, size, polled);
-    const uint32_t took = us_now() - t0;
-    if (frames_ns != nullptr) {
-        *frames_ns = static_cast<uint16_t>(took * 1000u / n);
-    }
-    // Let the client's interrupt take the tail.
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 200u) {
-    }
-    bool heard = st == spi_ok && client_count == n;
-    bool answered = st == spi_ok;
-    int32_t first_bad_rx = -1;
-    int32_t first_bad_heard = -1;
-    for (uint16_t i = 0; i < n; ++i) {
-        const uint16_t sent = bits == 16u ? static_cast<uint16_t>(tx_buf[2u * i] | (tx_buf[2u * i + 1u] << 8)) : tx_buf[i];
-        const uint16_t got = bits == 16u ? static_cast<uint16_t>(rx_buf[2u * i] | (rx_buf[2u * i + 1u] << 8)) : rx_buf[i];
-        if (client_heard[i] != sent && first_bad_heard < 0) { first_bad_heard = i; }
-        if (got != client_answers[i] && first_bad_rx < 0) { first_bad_rx = i; }
-        heard = heard && client_heard[i] == sent;
-        answered = answered && got == client_answers[i];
-    }
-    if (trace && (!heard || !answered)) {
-        print(serial, "    [status ", st, " client isr entries ", spi1_isr_entries, " overrun ", Client::overrun(),
-              "; host rx first bad at ", first_bad_rx, ": ", first_bad_rx >= 0 ? hex(rx_buf[first_bad_rx]) : hex(0u),
-              " for ", first_bad_rx >= 0 ? hex(client_answers[first_bad_rx]) : hex(0u), "; heard first bad at ",
-              first_bad_heard, ": ", first_bad_heard >= 0 ? hex(client_heard[first_bad_heard]) : hex(0u), " for ",
-              first_bad_heard >= 0 ? hex(tx_buf[first_bad_heard]) : hex(0u), "]", crlf);
-    }
-    spi1_owner = Spi1Owner::none;
-    Client::release();
-    return static_cast<uint8_t>((heard ? 1u : 0u) + (answered ? 1u : 0u));
-}
-
-void tf_wire() {
-    host_ready();
-    Host::loopback(false);
-    // ONE CORE SERVES BOTH ENDS here: the host's interrupt and the
-    // client's compete for it, and a pumped host at 3.9 MHz fills its
-    // next four frames before the client's interrupt has refilled its
-    // answers (measured: the client's FIFO runs dry at the ninth frame,
-    // its own FIFO overruns). So the pumped rounds run at 1.95 MHz,
-    // where the client's interrupt has four microseconds a frame; the
-    // polled rounds, whose host takes no interrupt, run at 3.9.
-    // THE FIRST INTERRUPT OF A COLD ROUTINE PAYS THE CACHE FILL (the
-    // platform suite's finding): a client whose first interrupt ever
-    // comes eight frames into a burst overruns and answers nothing. One
-    // unjudged round warms both paths.
-    (void)wire_round(16, SpiMode::mode1, 8, SpiClocks::div64, 0x2F, false, nullptr, false);
-    uint8_t exact = 0;
-    const SpiMode phased[] = {SpiMode::mode1, SpiMode::mode3};
-    for (uint8_t k = 0; k < 4u; ++k) {
-        const SpiMode m = phased[k & 1u];
-        const bool polled = k >= 2u;
-        const SpiClock rate = polled ? SpiClocks::div32 : SpiClocks::div64;
-        const uint8_t r = wire_round(16, m, 8, rate, static_cast<uint8_t>(0x30u + k), polled);
-        print(serial, "  mode ", static_cast<uint8_t>(m), " at 8 bits, ", polled ? "polled at 3.9 MHz" : "pumped at 1.95 MHz",
-              ": the client heard ", client_count, " frames, ",
-              r == 2u ? "both directions exact" : r == 1u ? "ONE DIRECTION WRONG" : "BOTH WRONG", crlf);
-        exact = static_cast<uint8_t>(exact + r);
-    }
-    bench.verdict("sixteen frames both ways in modes 1 and 3, pumped and polled, the client eight answers "
-                  "ahead from its interrupt: every direction exact",
-                  exact == 8u);
-    const uint8_t w = wire_round(16, SpiMode::mode3, 16, SpiClocks::div64, 0x40, false);
-    bench.verdict("sixteen 16-bit frames both ways", w == 2u);
-    const uint8_t s = wire_round(4, SpiMode::mode1, 8, SpiClocks::div32, 0x50, true);
-    bench.verdict("four frames, fewer than a FIFO: both ways (the tail by the receive timeout)", s == 2u);
-    // SPH = 0: the PL022 slave frames on the select and takes one frame
-    // per window.
-    (void)wire_round(16, SpiMode::mode0, 8, SpiClocks::div32, 0x38, true, nullptr, false);
-    const uint16_t heard0 = client_count;
-    (void)wire_round(16, SpiMode::mode2, 8, SpiClocks::div32, 0x3A, true, nullptr, false);
-    print(serial, "  modes 0 and 2 under one select window of sixteen frames: the client heard ", heard0, " and ",
-          client_count, crlf);
-    bench.verdict("with SPH = 0 the PL022 slave takes ONE frame per select window (the fact a multi-frame "
-                  "transaction under a held select must know)",
-                  heard0 == 1u && client_count == 1u);
-    spi1_owner = Spi1Owner::none;
-    (void)client_ready<Client>(4, 0x60, SpiMode::mode0, 8);
-    bench.verdict("the client's select pad reads not-selected between transactions", !Client::selected());
-    Client::release();
-}
-
-// =============================================================================
-// g - the ladder on the wire
-// =============================================================================
-void tg_ladder() {
-    host_ready();
-    Host::loopback(false);
-    const SpiClock rates[] = {SpiClocks::div2, SpiClocks::div4, SpiClocks::div8, SpiClock{2, 5},
-                              SpiClocks::div16, SpiClocks::div32, SpiClocks::div64};
-    const char* names[] = {"div2 (62.5 MHz)", "div4 (31.25)", "div8 (15.6)", "div12 (10.4, the client's ceiling)",
-                           "div16 (7.8)", "div32 (3.9)", "div64 (1.95)"};
-    uint8_t first_good = 0xFF;
-    for (uint8_t k = 0; k < 7u; ++k) {
-        uint16_t ns = 0;
-        const uint8_t r = wire_round(32, SpiMode::mode1, 8, rates[k], static_cast<uint8_t>(0x70u + k), true, &ns, false);
-        print(serial, "  ", names[k], ": ", r == 2u ? "both ways exact" : r == 1u ? "one way wrong" : "both ways wrong",
-              " (", ns, " ns a frame)", crlf);
-        if (r == 2u && first_good == 0xFFu) {
-            first_good = k;
-        }
-    }
-    bench.verdict("the wire holds both ways at 7.8 MHz and below (the client's clk_peri / 12 ceiling is 10.4)",
-                  first_good != 0xFFu && first_good <= 4u);
-}
-
-// =============================================================================
-// h - SOD and the overrun
-// =============================================================================
-void th_sod_overrun() {
-    host_ready();
-    Host::loopback(false);
-    spi1_owner = Spi1Owner::none;
-    (void)client_ready<Client>(16, 0x80, SpiMode::mode1, 8, false);   // dark: the pad released
-    spi1_owner = Spi1Owner::client;
-    fill_pattern(tx_buf, 16, 0x81);
-    for (uint16_t i = 0; i < 16; ++i) {
-        rx_buf[i] = 0x00;
-    }
-    const uint8_t st = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode1, SpiClocks::div32, SpiDataSize::bits8, true);
-    bool ff = true;
-    for (uint16_t i = 0; i < 16; ++i) {
-        ff = ff && rx_buf[i] == 0xFFu;
-    }
-    const uint32_t t0 = us_now();
-    while (us_now() - t0 < 200u) {
-    }
-    print(serial, "  a dark client (its answer pad released): the host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]),
-          "..., the client heard ", client_count, " frames", crlf);
-    bench.verdict("a dark client answers nothing (the host's pull-up reads 0xFF) and still hears everything",
-                  st == spi_ok && ff && client_count == 16u);
-    // SOD, measured: the pad handed over, the block's own output disable set.
-    Client::drive_output(true);
-    Client::sod(true);
-    client_count = 0;
-    client_next = 0;
-    client_serve<Client>();
-    for (uint16_t i = 0; i < 16; ++i) {
-        rx_buf[i] = 0x00;
-    }
-    (void)xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode1, SpiClocks::div32, SpiDataSize::bits8, true);
-    print(serial, "  SOD set with the pad on the peripheral: the host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ",
-          hex(rx_buf[2]), " (the answers would be ", hex(client_answers[0]), " ", hex(client_answers[1]), " ",
-          hex(client_answers[2]), "; a released pad reads 0xFF)", crlf);
-    // Under SOD the transmit FIFO was NOT consumed (measured: the eight
-    // answers loaded before it are still there after sixteen frames),
-    // so the client comes up again for the round that judges it.
-    Client::sod(false);
-    spi1_owner = Spi1Owner::none;
-    (void)client_ready<Client>(16, 0x80, SpiMode::mode1, 8, true);
-    spi1_owner = Spi1Owner::client;
-    for (uint16_t i = 0; i < 16; ++i) {
-        rx_buf[i] = 0x00;
-    }
-    const uint8_t st2 = xfer<Host>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode1, SpiClocks::div32, SpiDataSize::bits8, true);
-    bool answered = st2 == spi_ok;
-    for (uint16_t i = 0; i < 16; ++i) {
-        answered = answered && rx_buf[i] == client_answers[i];
-    }
-    int32_t bad3 = -1;
-    for (uint16_t i = 0; i < 16u && bad3 < 0; ++i) {
-        if (rx_buf[i] != client_answers[i]) { bad3 = i; }
-    }
-    print(serial, "  after SOD: status ", st2, ", the host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ... first bad at ",
-          bad3, ": ", bad3 >= 0 ? hex(rx_buf[bad3]) : hex(0u), " for ", bad3 >= 0 ? hex(client_answers[bad3]) : hex(0u),
-          "; client heard ", client_count, ", next answer ", client_next, ", isr entries ", spi1_isr_entries, crlf);
-    bench.verdict("SOD clear and the client up again, it answers (its FIFO was not consumed under SOD)", answered);
-    // The overrun: the client's interrupt silenced, sixteen frames into
-    // its eight-deep FIFO.
-    spi1_owner = Spi1Owner::none;
-    Client::clear_overrun();
-    (void)xfer<Host>(nullptr, 0, tx_buf, nullptr, 16, SpiMode::mode1, SpiClocks::div32, SpiDataSize::bits8, true);
-    const bool over = Client::overrun();
-    Client::clear_overrun();
-    print(serial, "  sixteen frames at a client nobody reads: overrun=", over, ", cleared=", !Client::overrun(), crlf);
-    bench.verdict("a client that does not read overruns its FIFO, says so, and the flag clears by writing one",
-                  over && !Client::overrun());
-    Client::release();
-}
-
-// =============================================================================
-// i - the DMA engines on the wire
-// =============================================================================
-void ti_dma_wire() {
-    spi0_owner = Spi0Owner::none;
-    (void)DmaHost::init(clock);
-    CsPin::output(true);
-    DmaHost::loopback(false);
-    spi0_owner = Spi0Owner::dma_host;
-    spi1_owner = Spi1Owner::none;
-    (void)client_ready<Client>(64, 0x90, SpiMode::mode1, 8);
-    spi1_owner = Spi1Owner::client;
-    fill_pattern(tx_buf, 64, 0x91);
-    for (uint16_t i = 0; i < 64; ++i) {
-        rx_buf[i] = 0xEE;
-    }
-    // 1.95 MHz: the client's interrupt refills its answers four at a
-    // time, and the engines clock without a gap (letter f says why).
-    const uint8_t st = xfer<DmaHost>(nullptr, 0, tx_buf, rx_buf, 64, SpiMode::mode1, SpiClocks::div64, SpiDataSize::bits8, false);
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 200u) {
-    }
-    bool heard = client_count == 64u;
-    bool answered = st == spi_ok;
-    for (uint16_t i = 0; i < 64u; ++i) {
-        heard = heard && client_heard[i] == tx_buf[i];
-        answered = answered && rx_buf[i] == client_answers[i];
-    }
-    int32_t bad = -1;
-    for (uint16_t i = 0; i < 64u && bad < 0; ++i) {
-        if (rx_buf[i] != client_answers[i]) { bad = i; }
-    }
-    print(serial, "  64 bytes on the engines at 1.95 MHz: status ", st, ", the client heard ", client_count, " (",
-          heard ? "exact" : "WRONG", "), the host read its answers ", answered ? "exact" : "WRONG", " (first bad at ",
-          bad, ": ", bad >= 0 ? hex(rx_buf[bad]) : hex(0u), " for ", bad >= 0 ? hex(client_answers[bad]) : hex(0u),
-          "; rx[0..3] ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ", hex(rx_buf[2]), " ", hex(rx_buf[3]), ")", crlf);
-    bench.verdict("the host's two engines and the client's interrupt: both directions exact", heard && answered);
-    spi1_owner = Spi1Owner::none;
-    Client::release();
-    spi0_owner = Spi0Owner::none;
-    DmaHost::release();
-}
-
-// =============================================================================
-// j - the roles invert
-// =============================================================================
-void tj_roles() {
-    spi0_owner = Spi0Owner::none;
-    spi1_owner = Spi1Owner::none;
-    (void)client_ready<ClientA>(16, 0xA0, SpiMode::mode3, 8);
-    spi0_owner = Spi0Owner::client_a;
-    (void)HostB::init(clock);
-    CsPinB::output(true);
-    spi1_owner = Spi1Owner::host_b;
-    fill_pattern(tx_buf, 16, 0xA1);
-    for (uint16_t i = 0; i < 16; ++i) {
-        rx_buf[i] = 0xEE;
-    }
-    const uint8_t st = xfer<HostB>(nullptr, 0, tx_buf, rx_buf, 16, SpiMode::mode3, SpiClocks::div32, SpiDataSize::bits8, true, CsPinB::ref());
-    const uint32_t t1 = us_now();
-    while (us_now() - t1 < 200u) {
-    }
-    bool heard = client_count == 16u;
-    bool answered = st == spi_ok;
-    for (uint16_t i = 0; i < 16u; ++i) {
-        heard = heard && client_heard[i] == tx_buf[i];
-        answered = answered && rx_buf[i] == client_answers[i];
-    }
-    print(serial, "  SPI1 hosting on GP9's select, SPI0 listening on GP17: the client heard ", client_count, " (",
-          heard ? "exact" : "WRONG", "), the host read ", answered ? "exact" : "WRONG", crlf);
-    bench.verdict("the roles invert on the same four wires: both directions exact", heard && answered);
-    spi1_owner = Spi1Owner::none;
-    HostB::release();
-    spi0_owner = Spi0Owner::none;
-    ClientA::release();
-}
-
 void banner() {
     print(serial, crlf, "test_rp2040_spi - the RP2040 SPI (datasheet 4.4, PL022): SPI0 hosts on GP18/19/16 + GP17, "
-          "SPI1 listens on GP10/11/8 + GP9; clk_peri=", SysClock::pclk_hz, " Hz", crlf);
+          "on the loop-back; clk_peri=", SysClock::pclk_hz, " Hz", crlf);
     bench.menu();
 }
 
@@ -922,30 +568,8 @@ extern "C" void isr_spi0() {
                 transfer_done = true;
             }
             break;
-        case Spi0Owner::client_a:
-            (void)ClientA::isr();
-            client_serve<ClientA>();
-            break;
         default:
             brio::Pl022<0>::interrupts(brio::SpiInterrupt::all, false);
-            break;
-    }
-}
-extern "C" void isr_spi1() {
-    spi1_isr_entries = spi1_isr_entries + 1u;
-    switch (spi1_owner) {
-        case Spi1Owner::client:
-            (void)Client::isr();
-            client_serve<Client>();
-            break;
-        case Spi1Owner::host_b:
-            if (HostB::isr()) {
-                transfer_status = HostB::status();
-                transfer_done = true;
-            }
-            break;
-        default:
-            brio::Pl022<1>::interrupts(brio::SpiInterrupt::all, false);
             break;
     }
 }
@@ -970,11 +594,6 @@ int main() {
     bench.letter('c', "the polled path at every named rate", tc_rates);
     bench.letter('d', "the DMA engines on the loop", td_dma);
     bench.letter('e', "the kernel: SpiBus over SpiHost", te_kernel);
-    bench.letter('f', "the wire: SPI0 hosts, SPI1 listens", tf_wire);
-    bench.letter('g', "the rate ladder on the wire", tg_ladder);
-    bench.letter('h', "SOD and the overrun", th_sod_overrun);
-    bench.letter('i', "the DMA engines on the wire", ti_dma_wire);
-    bench.letter('j', "the roles invert", tj_roles);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED", " timer=", timer_ok ? "1us" : "FAILED",

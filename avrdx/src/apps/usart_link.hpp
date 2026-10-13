@@ -512,8 +512,10 @@ struct Ident {
     /// allocates its own: 0x01 the avrdx peer, 0x02 the samc21 peer, 0x03
     /// the stm32g0 peer, 0x04 the stm32f4 peer, 0x05 the ch32vx03 peer
     /// (twi_link.hpp's, reserved here), 0x06 the ch32v00x peer, 0x07 the
-    /// ch32x035 peer. The low byte is that peer's own revision. A DUT may use the high byte
-    /// to expect a capability, never to decide correctness: what a peer
+    /// ch32x035 peer, 0x08 the rp2040 peer, 0x09 the rp2350 peer (one
+    /// kind for both of its architectures, the label naming the half).
+    /// The low byte is that peer's own revision. A DUT may use the high
+    /// byte to expect a capability, never to decide correctness: what a peer
     /// can do it answers with, and what it cannot it refuses.
     uint16_t version = 0;
 };
@@ -526,6 +528,8 @@ inline constexpr uint8_t peer_stm32f4 = 0x04;
 inline constexpr uint8_t peer_ch32vx03 = 0x05;   ///< reserved: twi_link.hpp's peer
 inline constexpr uint8_t peer_ch32v00x = 0x06;
 inline constexpr uint8_t peer_ch32x035 = 0x07;
+inline constexpr uint8_t peer_rp2040 = 0x08;
+inline constexpr uint8_t peer_rp2350 = 0x09;   ///< both architectures; the label names the half
 
 /// Which implementation answered: the version's high byte.
 constexpr uint8_t peer_kind(uint16_t version) { return static_cast<uint8_t>(version >> 8); }
