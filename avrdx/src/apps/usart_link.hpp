@@ -510,8 +510,8 @@ struct Ident {
     /// IMPLEMENTATION and is allocated here, once, for every
     /// architecture that speaks this protocol - as spi_link.hpp
     /// allocates its own: 0x01 the avrdx peer, 0x02 the samc21 peer, 0x03
-    /// the stm32g0 peer, 0x04 the stm32f4 peer, 0x05 the ch32vx03 peer
-    /// (twi_link.hpp's, reserved here), 0x06 the ch32v00x peer, 0x07 the
+    /// the stm32g0 peer, 0x04 the stm32f4 peer, 0x05 the ch32vx03 peer,
+    /// 0x06 the ch32v00x peer, 0x07 the
     /// ch32x035 peer, 0x08 the rp2040 peer, 0x09 the rp2350 peer (one
     /// kind for both of its architectures, the label naming the half).
     /// The low byte is that peer's own revision. A DUT may use the high
@@ -525,7 +525,7 @@ inline constexpr uint8_t peer_avrdx = 0x01;
 inline constexpr uint8_t peer_samc21 = 0x02;
 inline constexpr uint8_t peer_stm32g0 = 0x03;
 inline constexpr uint8_t peer_stm32f4 = 0x04;
-inline constexpr uint8_t peer_ch32vx03 = 0x05;   ///< reserved: twi_link.hpp's peer
+inline constexpr uint8_t peer_ch32vx03 = 0x05;
 inline constexpr uint8_t peer_ch32v00x = 0x06;
 inline constexpr uint8_t peer_ch32x035 = 0x07;
 inline constexpr uint8_t peer_rp2040 = 0x08;
