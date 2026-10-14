@@ -339,6 +339,14 @@ A queue is two arrays, and the whole design is in keeping them apart.
   another: what moves is three cursors, and what is written is one byte
   at a time.
 
+Both arrays live inside the queue, in the AO's static object: the
+linker places them and nothing allocates a slot at run time -
+"allocating" is taking the number at `alloc`. A static queue starts all
+zero, in `.bss`: each number is stored XOR its place in the array and
+the slots are numbered from 1, so an all-zero ring reads as every slot
+in the free run, in order, and no code fills it
+([../../brio/kernel/event_queue.hpp](../../brio/kernel/event_queue.hpp)).
+
 ### Three runs, three cursors
 
 The cursors cut the ring, in ring order, into three runs:
@@ -365,6 +373,9 @@ The cursors cut the ring, in ring order, into three runs:
   outstanding, and each test reads one pair of cursors: the pending run
   is empty when `take` meets `alloc`, the free run when `alloc` meets
   `free`. No count is shared between the two sides.
+- The code names the `free` cursor `fence_`: the position after the
+  free run, where the next release writes - zero at the start, when the
+  free run is every slot.
 
 ### The example, step by step
 
