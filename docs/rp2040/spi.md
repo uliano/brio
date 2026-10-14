@@ -80,7 +80,7 @@ its reset state, whose pull-down would fight the host's pull-up.
   `flush_rx`, the interrupt trio through the atomic aliases, `isr()`
   (the raised-and-enabled sources, the two clearable ones cleared),
   `dma_requests`, `dreq_tx` / `dreq_rx`, `irq()`.
-- `SpiHost<n, pins, TxEngine, RxEngine>`: the engine `SpiBus`
+- `SpiHost<n, pins, TxEngine, RxEngine, Placement>`: the engine `SpiBus`
   (= `BusMaster`) drives. Its `Request` is the other strata's: a chip
   select `PinRef` and a D/C line, a command phase (D/C low), a data
   phase with an optional out buffer (null = 0xFF dummies) and an
@@ -113,6 +113,10 @@ its reset state, whose pull-down would fight the host's pull-up.
   not half-word aligned goes to the pump. Frames in a byte buffer: one
   byte per 8-bit frame, two bytes low-first per 16-bit frame - on this
   little-endian core, a half-word in memory.
+- `Placement`, the last parameter: util/placement.hpp's tag, `InFlash`
+  by default, `InRam` making `start()`, the pump and the DMA line's body
+  one flattened instance each in SRAM ([platform.md](platform.md), "A
+  handler in SRAM").
 - `SpiClient<n, pins>`: `init(clock, Config)` (mode, format, bits,
   drive_output), `enable(first)` with the first answer in the FIFO
   before the host's clock, `write()` on TNF up to `frames_ahead` = 8,
@@ -265,9 +269,10 @@ desk partner's peer (the last group below).
   transmit engine's fixed 0xFF cell; 16-bit frames riding the half-word
   engines exact with no SPI interrupt and one DMA interrupt; and a 16-bit
   request on buffers one byte off a half-word going to the pump, exact
-  there. The letter's first engined block, timed, takes **152 us** where
+  there. The letter's first engined block, timed, takes **257 us** where
   letter d's walls give 46 warm and the wire 33: the cache's fill of what
-  an engined transaction still runs from the flash (two items down).
+  an engined transaction runs from the flash, the host's code included in
+  the default placement (the placement item below splits it).
 - **WHAT AN ENGINED TRANSACTION COSTS, `bench_rp2040` letter d**, on the
   loop-back, the half-word engines on channels 4 and 5, the core asleep
   in the idle path between the start and the completion, the best of
@@ -291,34 +296,32 @@ desk partner's peer (the last group below).
   mode 3, 999 of nine and a half in mode 0 - the frame gap - and 999 of
   sixteen in 16-bit frames, each against clk_peri over the divisor
   asked; and no polled rate of letter c faster than its wire.
-- **THE HOST'S HOT PATH LIVES IN SRAM, AND A FIRST REQUEST PAYS THE
-  CACHE NOTHING OF IT.** `rp2040/ld/rp2040_2m.ld` places the same ten
-  members the RP2350's script places
-  ([../pl022/README.md](../pl022/README.md), "The host above the wire")
-  into .data, listed before the code because an input section goes to
-  the first statement that matches it - so the flash holds the stage,
-  the vector table, the load image of .data and then the code, and every
-  image above booted that way. `bench_rp2040` letter e's `spi.cold` is
-  the instrument: `spi.req`'s three-byte polled request as the host's
-  VERY FIRST after `init()`, and again after every line of the XIP cache
-  is flushed (`Xip::flush()`), under the mask, the cache's misses
-  (accesses less hits) read around each: **2896 cycles and 40 misses
-  both times, against 849 and 0 warm**. An empty request through the
-  same call site, `start()` returning at its head, reads **2140 cycles
-  and 40 misses after a flush, 94 warm** (a build of the bench's binding):
-  every miss and 2046 of the 2047 extra cycles are the CALLER's - the
-  ruler's reads, the call site, the flash-side veneer and the counters'
-  read, some 51 cycles a miss - and the host's own code misses nothing.
-  THE SRAM IT COSTS: 1120 bytes for a host without engines and 1732 for
-  one with them, plus 16 bytes of veneer for each function that code
-  calls back in the flash (`clamp`, `configure`, `flush_rx`, `delay_us`
-  and the engines' verbs, eleven in the bench) - the bench's two hosts
-  take .data from 512 bytes to 3544. Every call across the boundary goes
-  through such a veneer (a push, a literal load, a move into ip, a pop, a
-  `bx`): the Cortex-M0+'s `bl` reaches 16 MB, and the SRAM lies 256 MB
-  from the flash. WHAT STILL PAYS THE FILL: the caller's lines, and on an
-  engined transaction the family's engine verbs (`program`, `begin`), the
-  DMA line's handler and the app's vector glue, which stay in the flash.
+- **WHERE THE HOST'S HOT PATH RUNS IS THE PROGRAM'S CHOICE, and the
+  choice is about the COLD request.** `SpiHost`'s last template parameter
+  is util/placement.hpp's tag: `InFlash`, the default, leaves `start()`,
+  the pump and the DMA line's body in the flash (the pump inline in the
+  app's vector), `InRam` makes each ONE flattened instance in
+  `.fast_text.brio`, copied to SRAM with `.data` - the engines' own verbs
+  and the launch folded in, so an engined transaction's driver code is in
+  SRAM whole ([platform.md](platform.md), "A handler in SRAM", has the
+  table and the rule). `bench_rp2040` letter e's `spi.cold` is the
+  instrument for the request: `spi.req`'s three-byte polled request
+  after every line of the XIP cache is flushed (`Xip::flush()`), under
+  the mask, the cache's misses (accesses less hits) read around it -
+  **11363 cycles and 136 misses with the host in the flash, 2942 and 41
+  with it InRam, against 791 and 803 warm**; the 41 are the caller's
+  (the ruler's reads, the call site, the veneer). Warm the two read the
+  same but for the veneer, 13 cycles a request. The engined block cold
+  (letter d, 16 frames at 31.25 MHz, warm 1450 to 1630) splits the same
+  way: 34002 cycles from the flash, 18028 with the host InRam, 22782 with
+  the vectors placed, 10768 with both - the host's code some 16000 of
+  the difference, the vectors' some 11000, the caller's the rest. THE
+  SRAM IT COSTS under InRam: `start()` 944 bytes without engines and 1344
+  with them, the shared engine launch 568, the pump 268 to 320, the DMA
+  line's body 540. Every call across the boundary goes through
+  a veneer (a push, a literal load, a move into ip, a pop, a `bx`): the
+  Cortex-M0+'s `bl` reaches 16 MB, and the SRAM lies 256 MB from the
+  flash.
 - THE KERNEL over it, unchanged: four transactions through SpiBus
   with four replies, pumped and polled interleaved on one bus; six
   posted into a four-deep queue, one rejected at once and every
@@ -395,12 +398,6 @@ Implemented but not bench-verified, each with what would measure it:
   partner's host_burst at the divisions between, against a client served
   from its vector.
 
-- The split of an engined block's first transaction: `test_rp2040_spi`
-  letter d's first 128-byte block takes 152 us where letter d of the
-  bench reads 46 warm - the cache's fill of the family's engine verbs,
-  the DMA line's handler and the caller's lines. The letter timing the
-  block twice, the first run and a repeat, with `Xip`'s two counters
-  beside each, as the RP2350's suite does, would split it.
 - The vendor's loop on this board: the pinned pico-sdk's
   `spi_write_read_blocking` and `spi_write_blocking`, SRAM-resident by
   the SDK's own placement, against letter e's 37 and 21 cycles a frame

@@ -195,7 +195,7 @@ using Pl011 = Pl011Uart<Rp2040Pl011, n>;
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine / DmaRxEngine.
  */
 template <uint8_t n, UartPins pins, uint32_t rx_size = 64, uint32_t tx_size = 256,
-          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
-using Uart = Pl011Transport<Rp2040Pl011, n, pins, rx_size, tx_size, TxEngine, RxEngine>;
+          typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine, typename Placement = InFlash>
+using Uart = Pl011Transport<Rp2040Pl011, n, pins, rx_size, tx_size, TxEngine, RxEngine, Placement>;
 
 } // namespace brio

@@ -205,7 +205,14 @@ struct FlashRom {
     // flash, and FLATTENED so that nothing it calls is a call into flash
     // (the CMSIS intrinsics fold in; the bootrom's functions and the
     // stage are reached through pointers). No switch (its jump table
-    // would be in .rodata), no library call.
+    // would be in .rodata), no library call. THE SECTION IS SPELLED
+    // `.ram_text.brio`, and nothing is cloned: these are a header's
+    // functions, which GCC emits in a COMDAT group, and it refuses one
+    // section name for a grouped function and a program's plain one in
+    // the same translation unit ("section type conflict"); a clone
+    // leaves the group and meets the same refusal (util/placement.hpp
+    // says the same of its own instances). The script's `.ram_text.*`
+    // collects it, and a program's own function names plain `.ram_text`.
 
     /// The stage as a function: it returns here because the link
     /// register is not zero.
@@ -214,7 +221,7 @@ struct FlashRom {
         stage_fn();
     }
 
-    [[gnu::section(".ram_text"), gnu::noinline, gnu::flatten]]
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void erase_in_ram(uint32_t addr, uint32_t count, uint32_t block_size, uint8_t block_cmd) {
         const uint32_t primask = __get_PRIMASK();
         __disable_irq();
@@ -226,7 +233,7 @@ struct FlashRom {
         __set_PRIMASK(primask);
     }
 
-    [[gnu::section(".ram_text"), gnu::noinline, gnu::flatten]]
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void program_in_ram(uint32_t addr, const uint8_t* data, uint32_t count) {
         const uint32_t primask = __get_PRIMASK();
         __disable_irq();
@@ -244,7 +251,7 @@ struct FlashRom {
     /// bytes clocked out are tx[], the bytes clocked in land in rx[],
     /// as many as go out. The transmit FIFO is kept two short of full
     /// so the receive side never overflows.
-    [[gnu::section(".ram_text"), gnu::noinline, gnu::flatten]]
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void command_in_ram(const uint8_t* tx, uint8_t* rx, uint32_t n) {
         volatile uint32_t& ss = *reinterpret_cast<volatile uint32_t*>(IO_QSPI_BASE + IO_QSPI_GPIO_QSPI_SS_CTRL_OFFSET);
         volatile uint32_t& sr = *reinterpret_cast<volatile uint32_t*>(SSI_BASE + SSI_SR_OFFSET);

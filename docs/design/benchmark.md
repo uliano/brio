@@ -377,9 +377,11 @@ What the rows say:
   brio's write shape is ahead of every one of them and its read shape
   within a fifth or ahead, the gaps named in each family's SPI document.
 - The request's fixed cost fell with the pin edges made inline
-  (`PinRef::set/clear`) and, on the RP2350, the PL022 host's hot path
-  placed in SRAM: the SAM's 608 to 568, the CH32V203's 280 to 263, the
-  G0's 399 to 384, the Hazard3's 301 to 277; the M33's stays at 312.
+  (`PinRef::set/clear`): the SAM's 608 to 568, the CH32V203's 280 to 263,
+  the G0's 399 to 384. On the RP2350 the host's place is the program's
+  (util/placement.hpp): warm, the flash and SRAM read within the call's
+  few cycles, and what SRAM buys is the cold request
+  ([../rp2350/platform.md](../rp2350/platform.md), "A handler in SRAM").
   The SAM's pump reads 12.64 and 3.16 because the bench's SERCOM1 vector
   serves letter u's loop too: its dispatch and a larger prologue stand
   in front of every pumped character (404 cycles a character, 377 with
@@ -558,8 +560,10 @@ What the rows say:
   rung's).
 - On the RP2350's Cortex-M33 a handler's cost from flash moves with
   where the linker puts it - 188 to 365 cycles across three builds of
-  one handler, up to six XIP misses a tenure; from SRAM 84. The bench
-  runs both I2C vectors from SRAM, before and after alike.
+  one handler, up to six XIP misses a tenure; from SRAM 84. The default
+  benches run both I2C vectors from the flash and their `_ram` images
+  from SRAM, warm and cold side by side in the two families' platform
+  documents ("A handler in SRAM").
 
 ## Not covered yet
 

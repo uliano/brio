@@ -122,7 +122,8 @@ none:
 ## The include contract
 
 `dw_apb_i2c/i2c.hpp` includes `kernel/borrowed.hpp`, `kernel/post.hpp`,
-`util/clock.hpp` and `util/i2c_bus.hpp`, and nothing else: no vendor
+`util/clock.hpp`, `util/i2c_bus.hpp` and `util/placement.hpp`, and
+nothing else: no vendor
 header, no family header, no device include. It may therefore be included
 anywhere, in any order, and a family's `i2c.hpp` includes it beside its
 own headers. Apps and family drivers keep including the FAMILY's header,
@@ -138,8 +139,15 @@ which is also what makes the host suite below possible.
 The pin table and its function code; the pad configuration; the reset or
 clock gate; the interrupt line and its controller; the crt's handler name
 an app binds; the DMA request numbers and the engine types that fill the
-slots; which rate is ic_clk; the FIFO depth; the microsecond ruler; and
-THE PUBLIC NAMES - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine>`
+slots; which rate is ic_clk; the FIFO depth; the microsecond ruler;
+whether the family places `.fast_text` (its traits' `places_fast_text`:
+the host's last template parameter is util/placement.hpp's tag, and
+`start()`, `isr()` and `dma_isr()` run their bodies through `Hot<P>` -
+where they were under `InFlash`, the default, one flattened instance
+each in `.fast_text.brio` under `InRam`;
+[../rp2040/platform.md](../rp2040/platform.md), "A handler in SRAM",
+has what it buys); and
+THE PUBLIC NAMES - `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>`
 and `I2cClient<n, pins>`, the family's aliases of the three templates
 here, with the family's own defaults for the empty engine slots. An
 application that says `brio::I2cHost<0, pins>` has no idea this stratum
@@ -203,7 +211,16 @@ family's ([../rp2040/i2c.md](../rp2040/i2c.md),
   used at half the FIFO: a long write refills eight entries an interrupt,
   the other eight the wire's slack. TX_EMPTY is armed only while entries
   remain and, on a read, only while fewer than half a FIFO of read
-  commands are out.
+  commands are out. THE HANDLER MASKS IT BEFORE IT PUSHES and arms it
+  again only when room is still wanted: the level is the FIFO's, an entry
+  pushed into an empty FIFO that the block takes at once lowers and raises
+  it again while the handler runs, and with the source still armed the
+  line was pending again when the handler returned - one more entry, which
+  found nothing
+  - measured on the RP2040, a third host entry reading IC_INTR_STAT zero
+  on test_rp2040_i2c letter g's second engined read after every boot,
+  which reading the mask back after the store did not cure. Two stores on
+  an entry that keeps TX_EMPTY armed, none added to one that does not.
 - **The receive threshold (`IC_RX_TL`, RX_FULL) and its level
   (`IC_RXFLR`)** - used at half the FIFO, written once at `init()`: a
   long read takes eight bytes an interrupt (one level read, then loads)
@@ -307,6 +324,14 @@ carries the block, because they are the block's; what each of them would
 COST on a given chip - a wire, a peer board, a device - is in that
 family's own document.
 
+- The engined read's command cell in RAM: the transmit engine pours the
+  plain read command from a constant, which on a chip that executes in
+  place lives in the flash and is read through its cache once an entry.
+  The PL022 host's dummy moved to RAM for that reason, measured
+  ([../pl022/README.md](../pl022/README.md)); at an I2C rate - an entry
+  every 22 us at 400 kHz - the contention was not measured, and the move
+  costs every engined image RAM, so it waits for a measurement that shows
+  the cost.
 - The high-speed mode (3.4 Mbit/s, `IC_HS_SCL_*` and the master code):
   no chip this stratum has run on synthesizes it, and the speed
   vocabulary would grow a row that no silicon here can produce.

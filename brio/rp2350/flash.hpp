@@ -1113,7 +1113,15 @@ struct FlashRom {
     // that lives in flash, and FLATTENED so that what it calls is folded
     // in: the bootrom's functions and the setup copy are reached through
     // pointers, the register accesses are stores. No switch (its jump
-    // table would be .rodata), no library call - memcpy is in flash.
+    // table would be .rodata), no library call - memcpy is in flash. THE
+    // SECTION IS SPELLED `.ram_text.brio`, and nothing is cloned: these
+    // are a header's functions, which GCC emits in a COMDAT group, and it
+    // refuses one section name for a grouped function and a program's
+    // plain one in the same translation unit ("section type conflict"); a
+    // clone leaves the group and meets the same refusal
+    // (util/placement.hpp says the same of its own instances). The
+    // script's `.ram_text.*` collects it, and a program's own function
+    // names plain `.ram_text`.
 
     /// The way back: the bootrom's setup function if this image has a
     /// good copy, else the ROM's own 03h mode. Bit 0 is set because the
@@ -1180,7 +1188,7 @@ struct FlashRom {
         }
     }
 
-    [[gnu::section(".ram_text"), gnu::noinline, gnu::flatten]]
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void erase_in_ram(uint32_t addr, uint32_t count, uint32_t block_size, uint8_t block_cmd) {
         InterruptGuard guard;
         const Saved s = save();
@@ -1192,7 +1200,7 @@ struct FlashRom {
         restore_state(s);
     }
 
-    [[gnu::section(".ram_text"), gnu::noinline, gnu::flatten]]
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void program_in_ram(uint32_t addr, const uint8_t* data, uint32_t count) {
         InterruptGuard guard;
         const Saved s = save();
@@ -1217,7 +1225,7 @@ struct FlashRom {
      * rather than dropping a byte (12.14.5), so the only rule is to pop
      * while pushing, which this loop does.
      */
-    [[gnu::section(".ram_text"), gnu::noinline, gnu::flatten]]
+    [[gnu::section(".ram_text.brio"), gnu::noinline, gnu::noclone, gnu::flatten]]
     static void command_in_ram(const uint8_t* head, uint32_t head_len, uint8_t* rx, uint32_t rx_len) {
         InterruptGuard guard;
         const Saved s = save();

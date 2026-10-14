@@ -81,6 +81,7 @@
 #include "rp2040/dma_engine.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
+#include "rp2040/platform.hpp"
 #include "rp2040/resets.hpp"
 
 namespace brio {
@@ -146,6 +147,10 @@ struct Rp2040Pl022 {
     /// Cortex-M0+'s handler is the dearer term, not the launch - so the
     /// two cost the same at twelve and a half frames.
     static constexpr uint16_t dma_min_frames = 13;
+    /// Whether a host may be given util/placement.hpp's InRam: the
+    /// family's platform answers (its linker script collects
+    /// `.fast_text`).
+    static constexpr bool places_fast_text = Rp2040Platform<>::places_fast_text;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? SPI0 : SPI1); }
@@ -248,8 +253,9 @@ using Pl022 = Pl022Ssp<Rp2040Pl022, n>;
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine / DmaRxEngine
  * on any two channels, both or neither.
  */
-template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
-using SpiHost = Pl022Host<Rp2040Pl022, n, pins, TxEngine, RxEngine>;
+template <uint8_t n, SpiPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
+          typename Placement = InFlash>
+using SpiHost = Pl022Host<Rp2040Pl022, n, pins, TxEngine, RxEngine, Placement>;
 
 /**
  * The other end of the wire, over Pl022<n>: the select goes to the

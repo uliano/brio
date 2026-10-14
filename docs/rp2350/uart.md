@@ -100,8 +100,10 @@ the register bit layouts, the resource's and the transport's verbs) is in
   The transport's receive engine arms at HIGH_PRIORITY and its transmit
   engine at normal; the Uart takes no level option ([dma.md](dma.md)).
 - `Pl011<n>` and `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine,
-  RxEngine>` - the public names, this chip's aliases of the two IP
-  templates, with `NoDmaEngine` in both slots by default.
+  RxEngine, Placement>` - the public names, this chip's aliases of the
+  two IP templates, with `NoDmaEngine` in both slots and `InFlash` by
+  default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
+  "A handler in SRAM").
 
 ## How to use it
 

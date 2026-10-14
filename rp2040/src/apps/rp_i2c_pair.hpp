@@ -19,6 +19,8 @@
 //                                client, the resource
 //   SdaPin, SclPin               the link's pads
 //   us_now()                     the microsecond ruler (the system timer)
+//   xip_empty()                  every line of the XIP cache dropped (the
+//                                family's Xip verb): letter g's cold read
 //   partner_kind, partner_text   twi_link's kind byte of the peer, its name
 //
 // and binds its I2C vector to `pair_i2c_isr()` and isr_dma_0 to
@@ -747,9 +749,12 @@ void tg_dma() {
     owner = Owner::dma_host;
     uint16_t served = 0;
     // THE FIRST ENGINED READ AFTER OTHER CODE HAS RUN is printed and not
-    // judged: on the RP2040 it ran at 360 to 375 kHz with one to three host
-    // interrupts where the next ran at 391 to 393 kHz with two, every time
-    // (docs/rp2040/i2c.md's open finding). The judged read is the second.
+    // judged: it fetches the host's start(), its vector's and the DMA
+    // line's code through the XIP cache, which the code that ran before
+    // has evicted, and runs slower than the next - the same read with
+    // every line of the cache dropped first, printed third, shows the same
+    // cost (docs/rp2040/platform.md, "A handler in SRAM"). The judged read
+    // is the second.
     for (uint8_t i = 0; i < 64u; ++i) {
         rx_buf[i] = 0xEE;
     }
@@ -776,6 +781,19 @@ void tg_dma() {
     // The host's own vector: the STOP, and TX_EMPTY when the transmit
     // block's end found no room for the STOP entry (dma_isr() arms it) -
     // one or two; the block's end itself is the DMA line's.
+    // THE SAME READ COLD: the XIP cache emptied right before it.
+    for (uint8_t i = 0; i < 64u; ++i) {
+        rx_buf[i] = 0xEE;
+    }
+    xip_empty();
+    t0 = us_now();
+    const uint8_t stc = tenure<DmaHost>(twilink::dut_addr, nullptr, 0, rx_buf, 64, I2cSpeed::fast_400k, 20'000u);
+    const uint32_t tookc = us_now() - t0;
+    const uint32_t entriesc = isr_entries;
+    const uint8_t mc = pattern_mismatches(rx_buf, 64, a.seed, served);
+    served = static_cast<uint16_t>(served + 64u);
+    print(serial, "  the same read with the XIP cache emptied first: status ", stc, " in ", tookc, " us, ",
+          entriesc, " host interrupts, ", mc, " wrong", crlf);
     bench.verdict("a 64-byte read on the two engines: the commands poured from a fixed cell, the bytes "
                   "collected, byte-exact, the host's own vector entered once or twice (the STOP, and TX_EMPTY "
                   "for the STOP entry when the block's end found no room)",

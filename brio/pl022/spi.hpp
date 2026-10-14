@@ -18,7 +18,7 @@
  *                        the data and status verbs, the interrupt trio
  *                        and the ISR body that reads the raised-and-
  *                        enabled sources. It decides nothing.
- *  Pl022Host<Chip, n, pins, TxEngine, RxEngine>
+ *  Pl022Host<Chip, n, pins, TxEngine, RxEngine, Placement>
  *                        the ENGINE util/spi_bus.hpp's SpiBus drives.
  *                        Its Request is the other strata's VERBATIM (a
  *                        chip select, a D/C line, a command phase, a data
@@ -181,6 +181,19 @@
  * 8-bit frame, two bytes low-first per 16-bit frame - the other strata's
  * rule, which on a little-endian core IS a half-word in memory.
  *
+ * WHERE THE HOT PATH RUNS is the program's choice, by the host's last
+ * template parameter, util/placement.hpp's tag: start(), the pump (isr())
+ * and the DMA line's body (dma_isr()) each run through `Hot<Placement>`
+ * - where they would be without it under `InFlash`, the default (the
+ * pump and the DMA body inline in the app's vectors, start() a function
+ * in the flash), one flattened instance each in `.fast_text.brio` under
+ * `InRam`, on a family whose chip traits say `places_fast_text`. On a
+ * core executing in place behind a cache what that buys is the COLD
+ * transaction, the one whose code the cache has not got (the family's
+ * platform document, "A handler in SRAM"). The engines' launch is one
+ * body under either tag (shared()), and a change of mode, rate or width
+ * and a polled wait that ran out stay out of line in the flash.
+ *
  * NOT built, each with its reason in docs/pl022/README.md: the National
  * Semiconductor Microwire transaction (half duplex, a control frame and then the
  * slave's answer, where this engine's Request is full duplex and one
@@ -199,6 +212,7 @@
 #include "kernel/borrowed.hpp"
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/spi_bus.hpp"
 
 namespace brio {
@@ -653,7 +667,7 @@ static_assert(spi_control_word(SpiClocks::div2, SpiMode::mode1, SpiDataSize::bit
               ((2u << 16) | spi_cr0_of({.mode = SpiMode::mode1, .bits = 8, .clock = SpiClocks::div2})));
 
 /**
- * Pl022Host<Chip, n, pins, TxEngine, RxEngine>
+ * Pl022Host<Chip, n, pins, TxEngine, RxEngine, Placement>
  *
  * The engine SpiBus (util/spi_bus.hpp = BusMaster) drives; the family's
  * own header aliases it to `SpiHost<n, pins, ...>` and carries the
@@ -667,7 +681,8 @@ static_assert(spi_control_word(SpiClocks::div2, SpiMode::mode1, SpiDataSize::bit
  * is the PL022's (most significant first, no other) and no verb offers
  * another.
  */
-template <Pl022Chip Chip, uint8_t n, typename Chip::Pins pins, typename TxEngine, typename RxEngine>
+template <Pl022Chip Chip, uint8_t n, typename Chip::Pins pins, typename TxEngine, typename RxEngine,
+          typename Placement = InFlash>
 class Pl022Host {
     using S = Pl022Ssp<Chip, n>;
     using Regs = typename Chip::Regs;
@@ -681,6 +696,9 @@ class Pl022Host {
                   "its completion is the RECEIVE block's");
     static_assert(Chip::template engines_distinct<TxEngine, RxEngine>(),
                   "brio SpiHost: the two engines must ride two different DMA channels");
+    static_assert(HotPlacement<Placement, Chip>,
+                  "brio SpiHost: the placement is InFlash, or InRam on a family whose chip traits say "
+                  "places_fast_text (util/placement.hpp)");
     static_assert(Pl022ChipDelay<Chip>,
                   "the family's chip traits must hand over a DelayRate its own delay_us takes: "
                   "a Request's cs_setup_us is spent on it (Pl022ChipDelay)");
@@ -868,65 +886,7 @@ public:
     /// call: the polled path reads it and keeps nothing, the asynchronous
     /// one copies what its tenure needs (the file header).
     static bool start(const Request& r) {
-        status_ = spi_ok;
-        const uint16_t total = static_cast<uint16_t>(static_cast<uint16_t>(r.cmd_len) + r.len);
-        if (total == 0u) {
-            return true;
-        }
-        apply(r);
-        const bool has_cmd = r.cmd_len != 0u;
-        if (has_cmd) {
-            r.dc.clear();
-        } else {
-            r.dc.set();
-        }
-        r.cs.clear();   // assert, active low
-        if (r.cs_setup_us != 0u) {
-            (void)delay_us(cs_rate_, r.cs_setup_us);
-        }
-        if (r.polled) {
-            // THE POLLED PATH. This instance's line is quiet already: the
-            // pump arms it for its own tenure and disarms it at the end,
-            // and the arbiter never overlaps two tenures.
-            uint32_t budget = spin_budget(total);
-            bool ok = true;
-            if (has_cmd) {
-                ok = run_polled(r.cmd.get(), nullptr, r.cmd_len, r.bits, budget);
-                r.dc.set();
-            }
-            if (ok && r.len != 0u) {
-                if constexpr (has_engines) {
-                    if (engines_serve(r)) {
-                        take_tenure(r, total);
-                        launch_dma();
-                        spin_dma();
-                        r.cs.set();
-                        return true;
-                    }
-                }
-                ok = run_polled(r.tx.get(), r.rx.get(), r.len, r.bits, budget);
-            }
-            if (!ok) {
-                settle_fault();
-            }
-            r.cs.set();
-            return true;
-        }
-        // THE ASYNCHRONOUS PATH: the tenure's fields copied, the FIFO
-        // filled, and only THEN the line armed (the file header).
-        take_tenure(r, total);
-        if constexpr (has_engines) {
-            if (engines_serve(r)) {
-                tenure_.engines = true;
-                if (!has_cmd) {
-                    launch_dma();
-                    return false;   // dma_isr() is the completion edge
-                }
-            }
-        }
-        fill();
-        S::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, true);
-        return false;
+        return Hot<Placement>::run([&r] { return start_body(r); });
     }
 
     /// The instance's interrupt body - call from its vector. The receive
@@ -935,28 +895,7 @@ public:
     /// just completed (CS released): the edge the app's glue posts
     /// TransferDone on.
     [[gnu::always_inline]] static bool isr() {
-        const uint32_t up = S::isr();
-        if ((up & (SpiInterrupt::rx | SpiInterrupt::rx_timeout)) == 0u) {
-            return false;
-        }
-        take();
-        Tenure& t = tenure_;
-        if constexpr (has_engines) {
-            if (t.engines && !t.in_cmd && !dma_active_) {
-                // The command phase is done on the pump: the engines take
-                // the data phase.
-                S::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, false);
-                launch_dma();
-                return false;
-            }
-        }
-        if (t.received >= t.total) {
-            S::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, false);
-            t.req.cs.set();
-            return true;
-        }
-        fill();
-        return false;
+        return Hot<Placement>::run([] { return isr_body(); });
     }
 
     /// The DMA line's interrupt body - call it from the line the engines
@@ -967,21 +906,10 @@ public:
     /// the line IS an error.
     [[gnu::always_inline]] static bool dma_isr() {
         if constexpr (has_engines) {
-            if ((TxEngine::service() & TxEngine::flag_error) != 0u) {
-                (void)TxEngine::abandon();
-                return finish_dma(spi_dma_fault);
-            }
-            const uint8_t rx = RxEngine::service();
-            if (rx != 0u && dma_active_) {
-                if ((rx & RxEngine::flag_error) != 0u) {
-                    return finish_dma(spi_dma_fault);
-                }
-                if ((rx & RxEngine::flag_complete) != 0u) {
-                    return finish_dma(spi_ok);
-                }
-            }
+            return Hot<Placement>::run([] { return dma_isr_body(); });
+        } else {
+            return false;
         }
-        return false;
     }
 
     /// The engine's completion status, for the TransferDone payload.
@@ -1031,6 +959,131 @@ public:
             CsPad::release();
         }
         S::hold();
+    }
+
+private:
+    /// start()'s body, written once (util/placement.hpp: inline where
+    /// the placement puts it).
+    [[gnu::always_inline]] static bool start_body(const Request& r) {
+        status_ = spi_ok;
+        const uint16_t total = static_cast<uint16_t>(static_cast<uint16_t>(r.cmd_len) + r.len);
+        if (total == 0u) {
+            return true;
+        }
+        apply(r);
+        const bool has_cmd = r.cmd_len != 0u;
+        if (has_cmd) {
+            r.dc.clear();
+        } else {
+            r.dc.set();
+        }
+        r.cs.clear();   // assert, active low
+        if (r.cs_setup_us != 0u) {
+            (void)delay_us(cs_rate_, r.cs_setup_us);
+        }
+        if (r.polled) {
+            // THE POLLED PATH. This instance's line is quiet already: the
+            // pump arms it for its own tenure and disarms it at the end,
+            // and the arbiter never overlaps two tenures. The two phases
+            // run through ONE call of the polled loop, the command phase's
+            // turn and then the data phase's, so the flattened body
+            // carries one copy of each loop shape and not two.
+            uint32_t budget = spin_budget(total);
+            bool data = !has_cmd;
+            const uint8_t* out = data ? r.tx.get() : r.cmd.get();
+            uint8_t* in = data ? r.rx.get() : nullptr;
+            uint16_t count = data ? r.len : static_cast<uint16_t>(r.cmd_len);
+            bool ok = true;
+            for (;;) {
+                if constexpr (has_engines) {
+                    if (data && engines_serve(r)) {
+                        take_tenure(r, total);
+                        launch_dma();
+                        spin_dma();
+                        r.cs.set();
+                        return true;
+                    }
+                }
+                ok = run_polled(out, in, count, r.bits, budget);
+                if (!ok || data) {
+                    break;
+                }
+                r.dc.set();
+                if (r.len == 0u) {
+                    break;
+                }
+                data = true;
+                out = r.tx.get();
+                in = r.rx.get();
+                count = r.len;
+            }
+            if (!ok) {
+                settle_fault();
+            }
+            r.cs.set();
+            return true;
+        }
+        // THE ASYNCHRONOUS PATH: the tenure's fields copied, the FIFO
+        // filled, and only THEN the line armed (the file header).
+        take_tenure(r, total);
+        if constexpr (has_engines) {
+            if (engines_serve(r)) {
+                tenure_.engines = true;
+                if (!has_cmd) {
+                    launch_dma();
+                    return false;   // dma_isr() is the completion edge
+                }
+            }
+        }
+        fill();
+        S::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, true);
+        return false;
+    }
+
+    /// isr()'s body.
+    [[gnu::always_inline]] static bool isr_body() {
+        const uint32_t up = S::isr();
+        if ((up & (SpiInterrupt::rx | SpiInterrupt::rx_timeout)) == 0u) {
+            return false;
+        }
+        take();
+        Tenure& t = tenure_;
+        if constexpr (has_engines) {
+            if (t.engines && !t.in_cmd && !dma_active_) {
+                // The command phase is done on the pump: the engines take
+                // the data phase.
+                S::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, false);
+                launch_dma();
+                return false;
+            }
+        }
+        if (t.received >= t.total) {
+            S::interrupts(SpiInterrupt::rx | SpiInterrupt::rx_timeout, false);
+            t.req.cs.set();
+            return true;
+        }
+        fill();
+        return false;
+    }
+
+    /// dma_isr()'s body.
+    [[gnu::always_inline]] static bool dma_isr_body() {
+        if constexpr (has_engines) {
+            if ((TxEngine::service() & TxEngine::flag_error) != 0u) {
+                (void)TxEngine::abandon();
+                return finish_dma(spi_dma_fault);
+            }
+            const uint8_t rx = RxEngine::service();
+            if (rx != 0u && dma_active_) {
+                if ((rx & RxEngine::flag_error) != 0u) {
+                    return finish_dma(spi_dma_fault);
+                }
+                if ((rx & RxEngine::flag_complete) != 0u) {
+                    return finish_dma(spi_ok);
+                }
+            }
+        }
+        return false;
     }
 
 private:
@@ -1101,7 +1154,14 @@ private:
         }
     }
 
+    /// The engines' launch: three call sites (the polled request, the
+    /// asynchronous one, the pump at the phase boundary), ONE body under
+    /// either placement - flattened, a launch is some 1 KB of the
+    /// engines' programming, which every site inlining it would carry.
     static void launch_dma() {
+        shared([] { launch_dma_body(); });
+    }
+    [[gnu::always_inline]] static void launch_dma_body() {
         dma_done_ = false;
         dma_active_ = true;
         if constexpr (wide_engines) {
@@ -1111,6 +1171,23 @@ private:
             }
         }
         launch_frames<uint8_t>();
+    }
+
+    /// A hot path's helper with more than one call site, kept as one body
+    /// under either placement: out of line in the flash under InFlash,
+    /// its own instance in `.fast_text.brio` under InRam - which the
+    /// placed instances reach SRAM to SRAM, with no veneer.
+    template <class F>
+    [[gnu::always_inline]] static auto shared(F&& f) {
+        if constexpr (std::is_same_v<Placement, InRam>) {
+            return Hot<InRam>::run(f);
+        } else {
+            return out_of_line(f);
+        }
+    }
+    template <class F>
+    [[gnu::noinline, gnu::flatten]] static auto out_of_line(F&& f) {
+        return f();
     }
 
     /// The data phase as one block each way, F the frame's beat. THE
@@ -1216,7 +1293,11 @@ private:
 
     /// The control registers are written with SSE clear, so any change
     /// costs a disable/enable pair - paid only when something moved.
-    static void reconfigure(SpiClock c, SpiMode m, SpiDataSize bits) {
+    /// OUT OF LINE under either placement: a change of mode, rate or width
+    /// is not a transaction's own path, and the hot body's flatten would
+    /// otherwise carry it (with the resource's configure()) into the
+    /// placed instance.
+    [[gnu::noinline]] static void reconfigure(SpiClock c, SpiMode m, SpiDataSize bits) {
         const uint32_t word = spi_control_word(c, m, bits);
         if (word == applied_word_) {
             return;
@@ -1371,7 +1452,7 @@ private:
     /// After a polled wait ran out: the block is left as it is (the
     /// arbiter's recover() is the way back), the frames still in the
     /// FIFOs let out and thrown away, the status says what happened.
-    static void settle_fault() {
+    [[gnu::noinline, gnu::cold]] static void settle_fault() {
         status_ = spi_dma_fault;
         uint32_t spins = 200'000u;
         while (S::busy() && spins-- != 0u) {
@@ -1440,9 +1521,16 @@ private:
     static inline volatile bool dma_done_ = false;
     static inline volatile bool dma_active_ = false;
     // One cell each serves both beats: a byte access at a half-word's
-    // address is its low byte on these little-endian cores.
+    // address is its low byte on these little-endian cores. THE DUMMY
+    // LIVES IN RAM, never as a constant: the transmit engine reads it once
+    // a frame, and a cell in a flash executed in place is a read through
+    // the XIP cache for every frame, which competes there with the core's
+    // own instruction fetches - measured on the RP2040, polled engined
+    // blocks at clk_peri / 4 ran up to five per cent under the wire with
+    // the host's code in the flash beside them, the wire's own rate with
+    // the cell in RAM (docs/pl022/README.md).
     static inline uint16_t rx_sink_ = 0;
-    static constexpr uint16_t tx_dummy_ = 0xFFFFu;
+    static inline uint16_t tx_dummy_ = 0xFFFFu;
     static inline SpiConfig applied_{};
     static inline uint32_t applied_word_ = 0;
     static inline uint32_t pclk_hz_ = 0;

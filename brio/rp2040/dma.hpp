@@ -395,8 +395,12 @@ public:
      * transfers in flight land in a few cycles), the completion the
      * landing may have raised cleared raw and on both lines, the routes
      * restored. False when BUSY never fell.
+     *
+     * OUT OF LINE AND COLD, with stop(): a fault's or a bring-up's
+     * path, never a block's, which a flattened hot body
+     * (util/placement.hpp) would otherwise carry inline.
      */
-    static bool abort() {
+    [[gnu::noinline, gnu::cold]] static bool abort() {
         const bool on0 = routed(0);
         const bool on1 = routed(1);
         route(0, false);
@@ -419,7 +423,7 @@ public:
 
     /// Everything of the channel's back to nothing: aborted, disabled,
     /// off both lines, the errors and the status cleared.
-    static void stop() {
+    [[gnu::noinline, gnu::cold]] static void stop() {
         (void)abort();
         route(0, false);
         route(1, false);
@@ -653,7 +657,9 @@ struct DmaBinding {
     /// The channel stopped and bound: CTRL with EN through the
     /// non-trigger alias, and the route to `line` when the engine's
     /// completions or errors are served there.
-    static void bind(uint32_t word, uint8_t line, bool routed) {
+    /// Out of line and cold with release(): an arm()'s or a fault's
+    /// path (util/placement.hpp's flatten would carry it inline).
+    [[gnu::noinline, gnu::cold]] static void bind(uint32_t word, uint8_t line, bool routed) {
         Channel::stop();
         ctrl = word;
         Channel::ctrl() = word;
@@ -663,7 +669,7 @@ struct DmaBinding {
     }
 
     /// Back to nothing, the held word with it.
-    static void release() {
+    [[gnu::noinline, gnu::cold]] static void release() {
         Channel::stop();
         ctrl = 0;
     }

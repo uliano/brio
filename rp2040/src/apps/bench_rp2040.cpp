@@ -194,12 +194,13 @@
 //      of five after one thrown away, every run judged: its status, and
 //      every byte read the serve's fixed byte. Under each line: fixed =
 //      wall less the wire's time, start = the thread inside start(), the
-//      XIP cache's misses over the tenure and the longest host entry. THE
-//      HOST'S VECTOR RUNS FROM SRAM, flattened into .ram_text, so that a
-//      line reads the code and not the XIP cache's state at that instant:
-//      from flash the one-STOP handler measured 188 to 365 cycles on the
-//      RP2350's Cortex-M33 across builds, with up to six cache misses of
-//      about seventy cycles each a tenure, against 84 from SRAM.
+//      XIP cache's misses over the tenure and the longest host entry.
+//      Where the host's code and its vector run is the image's (the
+//      placement, below): a warm line reads the code, and letter c's cold
+//      one what the XIP cache's fill adds to it.
+//   c  COLD (not in z): a switch, toggled - every timed run of letters d,
+//      e, u and i then begins with every line of the XIP cache dropped,
+//      so their lines read the paths cold; the default reads them warm.
 //
 // THE WIRES (the `wire` field, bytes per second, and why it is the
 // limit):
@@ -263,6 +264,7 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <type_traits>
 
 #include "rp2040/clock.hpp"
 #include "rp2040/delay.hpp"
@@ -298,6 +300,48 @@ using Serial = Uart<0, console_pins>;  // rings 64/256 (defaults)
 constexpr Serial serial;
 
 constexpr uint32_t console_baud = 115200;
+
+// ---- the placement ------------------------------------------------------------
+
+// WHERE THE MEASURED PATHS RUN FROM (docs/rp2040/platform.md, "A handler in
+// SRAM"). This file defines neither switch, so every line reads the default
+// image: every driver InFlash, every vector in the flash. BENCH_HOT_IN_RAM
+// gives the drivers of letters d, e, u and i util/placement.hpp's InRam (one
+// instance a hot path in `.fast_text.brio`); BENCH_VECTORS_IN_SRAM puts the
+// four vectors those letters bind - UART1's, DMA_IRQ_0's, I2C1's, SPI0's -
+// in `.fast_text`, flattened, so a body inline in them (InFlash's) runs from
+// SRAM with no call. bench_rp2040_ram.cpp defines both; each alone is a
+// define away. The console (UART0) and the tick stay as they are in every
+// image.
+#if !defined(BENCH_IMAGE)
+#define BENCH_IMAGE "bench_rp2040"
+#endif
+constexpr const char* bench_image = BENCH_IMAGE;
+#if defined(BENCH_HOT_IN_RAM)
+using HotPath = InRam;
+#else
+using HotPath = InFlash;
+#endif
+#if defined(BENCH_VECTORS_IN_SRAM)
+#define BENCH_VECTOR [[gnu::section(".fast_text"), gnu::flatten]]
+constexpr bool vectors_in_sram = true;
+#else
+#define BENCH_VECTOR
+constexpr bool vectors_in_sram = false;
+#endif
+
+/// LETTER c's switch: when set, every timed run of letters d, e, u and i
+/// begins with every line of the XIP cache flushed (Xip::flush(),
+/// 2.6.3.2), so a line reads the path COLD - what a program meets after
+/// init() or once other code has evicted it - where the default reads it
+/// warm (every op of those letters throws a run away first, or takes the
+/// best of several).
+bool xip_cold = false;
+[[gnu::always_inline]] inline void cold_point() {
+    if (xip_cold) {
+        Xip::flush();
+    }
+}
 
 // ---- the ruler ---------------------------------------------------------------
 
@@ -547,7 +591,7 @@ using Paced = DmaTxEngine<9, uint32_t>;
 
 constexpr SpiPins spi_pins{.sck = 18, .tx = 19, .rx = 16};
 /// Half-word engines: SSPDR's width, so 16-bit frames ride them too.
-using DmaHost = SpiHost<0, spi_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>>;
+using DmaHost = SpiHost<0, spi_pins, DmaTxEngine<4, uint16_t>, DmaRxEngine<5, uint16_t>, HotPath>;
 
 /// Set by the handler that ends the block under measure.
 volatile bool dma_done = false;
@@ -587,6 +631,7 @@ template <typename Launch>
 BenchSample timed_block(Launch launch) {
     Stopwatch<Ruler> sw;
     dma_done = false;
+    cold_point();
     const BenchCounters c0 = counters();
     sw.start();
     const bool started = launch();
@@ -768,7 +813,7 @@ void td_dma() {
 // =============================================================================
 // e - the SPI host above the wire: the polled loop, the pump, a request's price
 // =============================================================================
-using Plain = SpiHost<0, spi_pins>;   // no engines: the polled loop and the pump
+using Plain = SpiHost<0, spi_pins, NoDmaEngine, NoDmaEngine, HotPath>;   // no engines: the polled loop and the pump
 using SpiSelect = Pin<17>;
 using SpiDc = Pin<22>;
 volatile bool plain_live = false;
@@ -812,6 +857,7 @@ SpiReqRun e_once(uint8_t cmd_len, uint16_t frames, SpiClock rate, SpiMode mode, 
     plain_done = false;
     const uint32_t irq0 = spi_meter.count();
     const uint32_t isr0 = spi_meter.cycles();
+    cold_point();
     const BenchCounters before = counters();
     const uint32_t t0 = Ruler::now();
     bool done = H::start(r);
@@ -1057,10 +1103,10 @@ constexpr UartPins loop_pins{
 };
 using LoopTx = DmaTxEngine<2>;
 using LoopRx = DmaRxEngine<3>;
-using TxPlain = Uart<1, loop_pins, 16, 256>;
-using TxEngined = Uart<1, loop_pins, 16, 256, LoopTx>;
-using RxPlain = Uart<1, loop_pins, 512, 256, LoopTx>;
-using RxEngined = Uart<1, loop_pins, 512, 256, LoopTx, LoopRx>;
+using TxPlain = Uart<1, loop_pins, 16, 256, NoDmaEngine, NoDmaEngine, HotPath>;
+using TxEngined = Uart<1, loop_pins, 16, 256, LoopTx, NoDmaEngine, HotPath>;
+using RxPlain = Uart<1, loop_pins, 512, 256, LoopTx, NoDmaEngine, HotPath>;
+using RxEngined = Uart<1, loop_pins, 512, 256, LoopTx, LoopRx, HotPath>;
 
 enum class LoopMode : uint8_t { none, tx_plain, tx_engined, rx_plain, rx_engined };
 volatile LoopMode loop_mode = LoopMode::none;   // read by the vectors
@@ -1133,6 +1179,7 @@ void run_uart_tx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
         return;
     }
     Stopwatch<Ruler> sw;
+    cold_point();
     const BenchCounters c0 = counters();
     const LoopSnap v0 = loop_snap();
     uint32_t thread = 0;
@@ -1172,6 +1219,7 @@ void run_uart_rx(const char* op, LoopMode mode, uint32_t baud, uint32_t n) {
         return;
     }
     Stopwatch<Ruler> sw;
+    cold_point();
     const BenchCounters c0 = counters();
     const LoopSnap v0 = loop_snap();
     sw.start();
@@ -1392,8 +1440,8 @@ void tu_uart() {
 //     against the partner's twi_peer
 // =============================================================================
 constexpr I2cPins i2c_host_pins{.scl = 3, .sda = 2};
-using I2cPump = I2cHost<1, i2c_host_pins>;
-using I2cEngined = I2cHost<1, i2c_host_pins, DmaTxEngine<6, uint16_t>, DmaRxEngine<7>>;
+using I2cPump = I2cHost<1, i2c_host_pins, NoDmaEngine, NoDmaEngine, HotPath>;
+using I2cEngined = I2cHost<1, i2c_host_pins, DmaTxEngine<6, uint16_t>, DmaRxEngine<7>, HotPath>;
 constexpr uint8_t i2c_peer_addr = twilink::dut_addr;
 constexpr uint8_t i2c_nobody = 0x43;
 /// What the far end answers every read with (twilink's pattern_fixed).
@@ -1511,6 +1559,7 @@ I2cOp i2c_once(uint8_t addr, uint8_t tx_len, uint8_t rx_len, I2cSpeed speed) {
     const BenchCounters c0 = i2c_counters();
     i2c_isr_sum = i2c_meter.cycles();
     i2c_isr_max = 0;
+    cold_point();
     Xip::reset_counters();
     const uint32_t t0 = Ruler::now();
     const bool sync = H::start(r);
@@ -1702,9 +1751,18 @@ void ti_i2c() {
     I2cPump::release();
 }
 
+void tc_cold() {
+    xip_cold = !xip_cold;
+    print(serial, "  every timed run of letters d, e, u and i now reads ", xip_cold ? "COLD" : "warm",
+          xip_cold ? " (the XIP cache flushed before it)" : "", crlf);
+    bench.verdict("ran", true);
+}
+
 void banner() {
-    print(serial, crlf, "bench_rp2040 - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
-          " Hz, console UART0 ", console_baud, " 8N1, ruler SysTick cycles", crlf);
+    print(serial, crlf, bench_image, " - the benchmark skeleton (util/bench.hpp), clk=", SysClock::hz,
+          " Hz, console UART0 ", console_baud, " 8N1, ruler SysTick cycles; drivers ",
+          std::is_same_v<HotPath, InRam> ? "InRam" : "InFlash", ", vectors in ",
+          vectors_in_sram ? "SRAM" : "the flash", xip_cold ? ", COLD" : "", crlf);
     bench.menu();
 }
 
@@ -1716,7 +1774,7 @@ extern "C" void isr_uart0() {
     (void)Serial::isr();
     uart_meter.leave();
 }
-extern "C" void isr_uart1() {
+extern "C" BENCH_VECTOR void isr_uart1() {
     loop_meter.enter();
     bool edge = false;
     switch (loop_mode) {
@@ -1736,7 +1794,7 @@ extern "C" void isr_uart1() {
         edge_count = edge_count + 1u;
     }
 }
-extern "C" void isr_dma_0() {
+extern "C" BENCH_VECTOR void isr_dma_0() {
     dma_meter.enter();
     bool edge = false;
     switch (loop_mode) {
@@ -1765,8 +1823,7 @@ extern "C" void isr_dma_0() {
     }
     dma_meter.leave();
 }
-// Letter i's host vector runs from SRAM, flattened (the file header).
-extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c1() {
+extern "C" BENCH_VECTOR void isr_i2c1() {
     i2c_meter.enter();
     bool edge = false;
     switch (i2c_mode) {
@@ -1794,7 +1851,7 @@ extern "C" [[gnu::section(".ram_text"), gnu::flatten]] void isr_i2c1() {
     }
     i2c_isr_sum = sum;
 }
-extern "C" void isr_spi0() {
+extern "C" BENCH_VECTOR void isr_spi0() {
     spi_meter.enter();
     if (dma_host_live && DmaHost::isr()) {
         dma_done = true;
@@ -1840,6 +1897,7 @@ int main() {
     bench.letter('e', "the SPI host above the wire: the polled loop, the pump, a request's price", te_host);
     bench.letter('u', "the serial transport on UART1's own loop: tx, rx, the edge", tu_uart);
     bench.letter('i', "the I2C host above the wire, against the partner's twi_peer: a tenure's price", ti_i2c, false);
+    bench.letter('c', "toggle COLD: every timed run of d, e, u, i after an XIP flush", tc_cold, false);
 
     if (serial_ok) {
         brio::print(serial, brio::crlf, "boot: clk=", clock_ok ? "PLL125" : "FAILED",

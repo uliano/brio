@@ -152,9 +152,11 @@ stratum adds:
   their controller, the DREQ numbers, the atomic aliases, the pad type
   and its function, the microsecond ruler, and ic_clk = clk_sys
   (12.2.1.2).
-- `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine>` and
+- `DwApbI2c<n>`, `I2cHost<n, pins, TxEngine, RxEngine, Placement>` and
   `I2cClient<n, pins>` - the public names, this chip's aliases of the
-  three IP templates, with `NoDmaEngine` in both slots by default.
+  three IP templates, with `NoDmaEngine` in both slots and `InFlash` by
+  default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
+  "A handler in SRAM").
 
 The family header also holds THE VOCABULARY CHECK: every bit the IP file
 spells for itself, held by `static_assert` against the macro this chip's
@@ -278,13 +280,11 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   all of it through GP36/GP37 and the unstick's verbs on the HIGH half
   of SIO. The client's stretch prices at 754 to 763 us for eight holds of
   100 us, a write under it within 4 us of the plain one.
-- **THE ENGINES' FIRST READ.** A 64-byte engined read at 400 kHz takes
-  1485 to 1492 us (392 to 393 kHz) with two host interrupts; the first
-  one after the suite's other letters have run takes 1517 to 1524 us,
-  the RP2040's open item in a smaller size (docs/rp2040/i2c.md).
 - **THE HOST'S COST**, `bench_rp2350` letter i against the peer's
-  client, the same image built for both halves, the host's vector in
-  SRAM, nothing of the far end on this core; the wire's time at the SCL
+  client, the same image built for both halves, the host's vector placed
+  in SRAM (the V image of [platform.md](platform.md), "A handler in SRAM",
+  `BENCH_VECTORS_IN_SRAM` in bench_rp2350.cpp), nothing of the far end on
+  this core; the wire's time at the SCL
   period measured (379.0 cycles at 400 kHz against the counts' 375: the
   pull-ups' rise, 26 ns a period at every speed). The best of five each,
   clk_sys cycles at 150 MHz, Cortex-M33 / Hazard3:
@@ -306,13 +306,26 @@ cost figures are `bench_rp2350` letter i's, against the same peer.
   100 kHz, 240 at 400 kHz and 105 at 1 MHz on the M33 (1861, 251, 116 on
   the Hazard3) - the disable waits on the block's own shutdown, which
   follows the bus timing. The longest host entry is 298 / 279 cycles, a
-  255-byte read's. **A HANDLER IN FLASH IS A LOTTERY ON THE
+  255-byte read's. With the vector in the flash too (`bench_rp2350`, the
+  default image) the one-byte write's fixed cost reads 491 / 671 and its
+  handler 87 / 236, a 255-byte write 31 / 35 interrupts. **A HANDLER IN FLASH IS A LOTTERY ON THE
   CORTEX-M33**: the one-STOP handler measured 188 to 365 cycles across
   three flash builds of the bench, with up to six XIP cache misses of
   about seventy cycles each in a tenure, against 84 from SRAM; the
-  Hazard3 builds of the same source ranged 57 to 287. The driver places
-  nothing (the application binds the vector); the bench measures its
-  handler from SRAM so that a line reads the code.
+  Hazard3 builds of the same source ranged 57 to 287. Where it runs is the
+  program's: the vector it binds, and `I2cHost`'s placement tag for
+  `start()` and the bodies ([platform.md](platform.md), "A handler in
+  SRAM", has the one-byte write's longest entry WARM / COLD: 88 / 2960 on
+  the M33 and 226 / 1669 on Hazard3 with both in the flash, 110 / 110
+  and 71 / 71 with both placed). `bench_rp2350` runs the handler from
+  the flash, `bench_rp2350_ram` from SRAM.
+- **THE ENGINES' FIRST READ IS THE XIP CACHE'S FILL.** A 64-byte engined
+  read at 400 kHz takes 1485 to 1492 us (392 to 393 kHz) with two host
+  interrupts; letter g's first after a flash takes 1543 / 1530 us
+  (Cortex-M33 / Hazard3), and the same read with every line of the cache
+  invalidated first, printed third, 1529 / 1518 - two passes on each
+  half; the RP2040's reading in a smaller size
+  ([../rp2040/i2c.md](../rp2040/i2c.md)). The letter judges the second.
 
 ## Not covered yet
 

@@ -61,7 +61,10 @@ the mask stays.
   it `jedec_id()` -> `FlashJedecId` (manufacturer, type, capacity;
   `bytes()`), `unique_id()` (4Bh, eight bytes), `status_register()`
   (05h). Every operation is one window: interrupts masked, the code
-  in `.ram_text`, the stage re-entered on the way back.
+  in `.ram_text` - spelled `.ram_text.brio`, never cloned, the rule for
+  a header's function in a placed section (util/placement.hpp), so a
+  program's own `.ram_text` function compiles beside it - the stage
+  re-entered on the way back.
 - `Xip`: `enabled` / `enable`, `power_down` / `powered_down`,
   `fault_on_bad_write` / `faults_on_bad_write`, `flush` (waits),
   `flush_ready`, `hits` / `accesses` / `reset_counters`.

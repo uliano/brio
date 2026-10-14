@@ -112,8 +112,8 @@ none:
 
 ## The include contract
 
-`pl011/uart.hpp` includes `kernel/platform.hpp`, `util/clock.hpp` and
-`util/ring.hpp`, and nothing else: no vendor header, no family header,
+`pl011/uart.hpp` includes `kernel/platform.hpp`, `util/clock.hpp`,
+`util/placement.hpp` and `util/ring.hpp`, and nothing else: no vendor header, no family header,
 no device include. It may therefore be included anywhere, in any order,
 and a family's `uart.hpp` includes it beside its own headers. Apps and
 family drivers keep including the FAMILY's header, never this one - the
@@ -129,8 +129,14 @@ which is also what makes the host suite below possible.
 The pin table and its function code; the reset or clock gate; the
 interrupt line and its controller; the crt's handler name an app binds;
 the DMA request numbers and the engine types that fill the slots; which
-rate is UARTCLK; the FIFO depth; and THE PUBLIC NAMES - `Pl011<n>` and
-`Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine>`, the family's
+rate is UARTCLK; the FIFO depth; whether the family places `.fast_text`
+(its platform's `places_fast_text`: the transport's last template
+parameter is util/placement.hpp's tag, and `isr()` and `dma_isr()` run
+their bodies through `Hot<P>` - inline in the app's vectors under
+`InFlash`, the default, one flattened instance each in `.fast_text.brio`
+under `InRam`; [../rp2040/platform.md](../rp2040/platform.md), "A
+handler in SRAM", has what it buys); and THE PUBLIC NAMES - `Pl011<n>` and
+`Uart<n, pins, rx_size, tx_size, TxEngine, RxEngine, Placement>`, the family's
 aliases of the two templates here, with the family's own defaults for
 the ring sizes and the empty engine slots. An application that says
 `brio::Uart<0, console_pins>` has no idea this stratum exists, which is

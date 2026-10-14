@@ -86,6 +86,7 @@
 #include "rp2350/clock.hpp"
 #include "rp2350/core.hpp"
 #include "rp2350/dma.hpp"
+#include "rp2350/flash.hpp"
 #include "rp2350/i2c.hpp"
 #include "rp2350/mtime.hpp"
 #include "rp2350/pin.hpp"
@@ -134,6 +135,8 @@ constexpr uint8_t partner_kind = twilink::peer_rp2040;
 constexpr const char* partner_text = "the WeAct RP2040";
 
 uint32_t us_now() { return Ruler::now_low(); }
+/// Every line of the XIP cache dropped: letter g's cold read.
+void xip_empty() { Xip::invalidate_all(); }
 const char* arch_name() { return core_kind == CoreKind::hazard3 ? "Hazard3" : "Cortex-M33"; }
 
 // THE TWO-BOARD LETTERS, over the names above.

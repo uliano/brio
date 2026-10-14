@@ -35,34 +35,28 @@
  *    symbol back and closes the storage if a script ever grew past it.
  *
  *  - CODE THAT RUNS FROM SRAM lives in .data, so that the crt's copy
- *    loop moves it there with the initialized data - two kinds of it.
- *    `.ram_text`, an input section a function names for itself:
- *    brio/rp2040/flash.hpp's engine calls the bootrom's flash functions
- *    from there, because while a sector is erased or a page programmed
- *    the XIP window is not there to fetch from. And THE SPI HOST'S HOT
- *    PATH (brio/pl022/spi.hpp), placed here BY THE NAMES OF ITS
- *    FUNCTIONS' SECTIONS: the first transaction after the host's init()
- *    otherwise pays the XIP cache its fill of that code, a cost measured
- *    on the RP2350 (docs/rp2350/spi.md) and owed to this board
- *    (docs/rp2040/spi.md). The IP stratum cannot place its own code: a
- *    section attribute takes a string literal and that file knows no
- *    family and no linker script. `-ffunction-sections` names every
- *    function's section for its mangled symbol, so this script names the
- *    members it wants in SRAM, one pattern each, every instantiation of
- *    the host at once.
+ *    loop moves it there with the initialized data - two kinds of it,
+ *    under two names (util/placement.hpp). `.fast_text` is code that MAY
+ *    run from SRAM, for speed: a driver's hot path the program gave
+ *    util/placement.hpp's InRam (its instance in `.fast_text.brio`), a
+ *    program's own function or vector. On this chip what SRAM buys is
+ *    the XIP cache's fill - a path that runs cold, after init() or after
+ *    the cache has been evicted, fetches every 8-byte line it misses at
+ *    some fifty cycles a line - and not a warm path's speed, which the
+ *    cache serves at the SRAM's pace (docs/rp2040/platform.md, "A
+ *    handler in SRAM"). `.ram_text` is code that MUST: brio/rp2040/
+ *    flash.hpp's engine (`.ram_text.brio`) calls the bootrom's flash
+ *    functions from there, because while a sector is erased or a page
+ *    programmed the XIP window is not there to fetch from.
+ *    Rp2040Platform says `places_fast_text` because of this statement.
  *
- *  - THE ORDER OF THE OUTPUT SECTIONS IS THE LINKER'S RULE AND NOT A
- *    TASTE. An input section goes to the FIRST statement whose pattern
- *    matches it, in the order the script lists them (ld's manual, "Input
- *    Section Wildcard Patterns"): a pattern over `.text.*` names that
- *    comes after the statement sweeping `.text .text.*` into the flash
- *    would match nothing. So .data, which carries those patterns, is
- *    listed BEFORE the code, and since an output section's load address
- *    follows the same order within the flash region, the flash holds in
- *    this order: the second stage, the vector table, the load image of
- *    .data, then the bulk of the code and the read-only data. Nothing
- *    reads the flash in that order but the crt's copy loop, which takes
- *    .data by its symbols; the stage asks only for the table at 0x100.
+ *  - THE ORDER OF THE OUTPUT SECTIONS: .data is listed BEFORE the code,
+ *    and since an output section's load address follows the same order
+ *    within the flash region, the flash holds in this order: the second
+ *    stage, the vector table, the load image of .data, then the bulk of
+ *    the code and the read-only data. Nothing reads the flash in that
+ *    order but the crt's copy loop, which takes .data by its symbols;
+ *    the stage asks only for the table at 0x100.
  *
  * The .data/.bss/.noinit sections take the main 256 KB. .noinit is
  * NOLOAD and excluded from the crt's zero-fill: kernel/platform.hpp's
@@ -105,26 +99,11 @@ SECTIONS
     {
         . = ALIGN(4);
         __data_start = .;
+        /* What MAY run from SRAM, for speed (util/placement.hpp's InRam
+           instances in .fast_text.brio, a program's own .fast_text), then
+           what MUST - the flash engine's window (.ram_text.brio). */
+        *(.fast_text .fast_text.*)
         *(.ram_text .ram_text.*)
-        /* The SPI host's hot path (the file header), one member each:
-           start() with what it inlines (apply, the pin edges), the polled
-           shapes behind run_polled(), the pump's fill() and take() - its
-           isr() is inlined into the app's vector -, the tenure's copy,
-           the engines' serve test, launch and completion, the polled
-           wait on them. Left in the flash on purpose: init(), release(),
-           recover(), the fault settling, the rate chooser and the clamp,
-           the resource's configure() and flush_rx() - a rate change or a
-           fault, never a transaction's own path - and the client whole. */
-        *(.text._ZN4brio9Pl022Host*5startE*
-          .text._ZN4brio9Pl022Host*10run_polledE*
-          .text._ZN4brio9Pl022Host*4fillEv*
-          .text._ZN4brio9Pl022Host*4takeEv*
-          .text._ZN4brio9Pl022Host*11take_tenureE*
-          .text._ZN4brio9Pl022Host*13engines_serveE*
-          .text._ZN4brio9Pl022Host*10launch_dmaEv*
-          .text._ZN4brio9Pl022Host*13launch_framesI*
-          .text._ZN4brio9Pl022Host*10finish_dmaEh*
-          .text._ZN4brio9Pl022Host*8spin_dmaEv*)
         . = ALIGN(4);
         *(.data .data.*)
         . = ALIGN(4);

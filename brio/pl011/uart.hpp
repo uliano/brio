@@ -112,6 +112,15 @@
  * burst path with an edge. The DMA and the handler never touch one FIFO
  * at once.
  *
+ * WHERE THE VECTORS' BODIES RUN is the program's choice, by the
+ * transport's last template parameter, util/placement.hpp's tag: isr()
+ * and dma_isr() run their bodies through `Hot<Placement>` - inline in the
+ * app's vectors under `InFlash`, the default, one flattened instance each
+ * in `.fast_text.brio` under `InRam`, on a family whose platform says
+ * `places_fast_text` (what it buys: the family's platform document, "A
+ * handler in SRAM"). The thread's verbs (write_byte, write_bulk, harvest)
+ * stay where the program's code is.
+ *
  * NOT built, each with its reason in docs/pl011/README.md: hardware flow
  * control, IrDA, the modem status inputs and outputs, the stick-parity
  * bit. The slots for DMA engines ARE here, empty, so the type's shape
@@ -128,6 +137,7 @@
 
 #include "kernel/platform.hpp"
 #include "util/clock.hpp"
+#include "util/placement.hpp"
 #include "util/ring.hpp"
 #include "util/stream.hpp"
 
@@ -562,7 +572,7 @@ struct Pl011Uart {
  * which are not a ceiling.
  */
 template <Pl011Chip Chip, uint8_t n, typename Chip::Pins pins, uint32_t rx_size, uint32_t tx_size,
-          typename TxEngine, typename RxEngine>
+          typename TxEngine, typename RxEngine, typename Placement = InFlash>
 class Pl011Transport {
     using U = Pl011Uart<Chip, n>;
 
@@ -574,6 +584,9 @@ class Pl011Transport {
                   "the engine slots must name a complete type");
     static_assert(Chip::template engines_distinct<TxEngine, RxEngine>(),
                   "the transmit and receive engines must use DIFFERENT DMA channels");
+    static_assert(HotPlacement<Placement, typename Chip::Platform>,
+                  "the placement is InFlash, or InRam on a family whose platform says "
+                  "places_fast_text (util/placement.hpp)");
 
     static constexpr uint8_t tx_pin = Chip::tx_pad(pins);
     static constexpr uint8_t rx_pin = Chip::rx_pad(pins);
@@ -842,6 +855,13 @@ public:
     /// the consumer only empties the ring by draining it, so no wakeup
     /// is ever lost. Plain (non-kernel) apps may ignore the return value.
     [[gnu::always_inline]] static bool isr() {
+        return Hot<Placement>::run([] { return isr_body(); });
+    }
+
+private:
+    /// isr()'s body (util/placement.hpp: inline where the placement puts
+    /// it).
+    [[gnu::always_inline]] static bool isr_body() {
         const uint32_t active = U::pending();
         bool edge = false;
         if constexpr (has_rx_engine) {
@@ -902,6 +922,7 @@ public:
         return edge;
     }
 
+public:
     /**
      * The ISR body of the DMA LINE this transport's engines report on -
      * the app binds that line's handler to it.
@@ -925,6 +946,16 @@ public:
      * time-out's, is the burst path with an edge.
      */
     [[gnu::always_inline]] static bool dma_isr() {
+        if constexpr (has_tx_engine || has_rx_engine) {
+            return Hot<Placement>::run([] { return dma_isr_body(); });
+        } else {
+            return false;
+        }
+    }
+
+private:
+    /// dma_isr()'s body.
+    [[gnu::always_inline]] static bool dma_isr_body() {
         bool edge = false;
         if constexpr (has_tx_engine) {
             const uint8_t f = TxEngine::service();
@@ -955,6 +986,7 @@ public:
         return edge;
     }
 
+public:
     /**
      * Ask the receive engine what has arrived, and publish it (the file
      * header). Returns the same edge isr() does - the ring went from

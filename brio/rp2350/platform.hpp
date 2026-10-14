@@ -127,6 +127,18 @@ struct Rp2350Platform {
     /// the bridge that crosses carries its own fences.
     static constexpr unsigned atomic_width = 4;
 
+    /// This family places `.fast_text` in SRAM, under both architectures:
+    /// rp2350/ld/rp2350_16m.ld collects it first in .data, which both crts
+    /// copy before main(); a vector there is entered directly (the Arm
+    /// table and the Hazard3 dispatch's table hold absolute addresses),
+    /// and a CALL from the flash into SRAM is, on the Cortex-M33, out of a
+    /// BL's 16 MB and goes through the linker's veneer, while Hazard3's
+    /// auipc and jalr reach it. What it buys here is the XIP cache's fill
+    /// on a cold path, not a warm path's speed (docs/rp2350/platform.md,
+    /// "A handler in SRAM"). A driver of this stratum may therefore be
+    /// given util/placement.hpp's InRam.
+    static constexpr bool places_fast_text = true;
+
     /// Which core runs this: SIO.CPUID, 0 or 1, whichever architecture
     /// asks.
     static uint8_t core_id() { return brio::core_id(); }

@@ -69,7 +69,7 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   `rx_empty`, `busy`), `read_data`/`write_data`, the receive status,
   the interrupt mask/pending/clear trio through the atomic aliases,
   `dma_requests`, `irq()`.
-- `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine, RxEngine>` -
+- `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine, RxEngine, Placement>` -
   the task, every target's Uart surface: `init(clock, baud, format,
   rx)` (`rx` the PL011's own: `UartRx::pad`, or `UartRx::loopback` for a
   loop-back from the first sample), `isr()` (true on the receive ring's
@@ -102,6 +102,10 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   vector ends a burst under an engine
   ([../pl011/README.md](../pl011/README.md), "The receive side");
   `dma_faults()` counts the blocks abandoned after a bus error.
+- `Placement`, the last parameter: util/placement.hpp's tag, `InFlash`
+  by default, `InRam` making the bodies of `isr()` and `dma_isr()` one
+  flattened instance each in SRAM ([platform.md](platform.md), "A
+  handler in SRAM").
 
 HOW THE TRANSMITTER STARTS, because the interrupt is an edge that
 stays latched (the IP stratum's page, [../pl011/README.md](../pl011/README.md),

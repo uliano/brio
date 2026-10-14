@@ -869,10 +869,63 @@ struct ClientRun {
 /// How a client run treats its answer line.
 enum class Answer : uint8_t { driven, sod, released };
 
+/// THE CLIENT'S LOOP, one status read a turn serving both FIFOs: at /16 of
+/// the far host's 125 or 150 MHz a frame is 853 to 1024 ns back to back, 107
+/// cycles of this core's at the least, and the receive FIFO is eight frames
+/// deep. The bound is counted in turns, never a clock: some 300 ms at one
+/// turn per ten cycles. IT RUNS FROM SRAM, the program's own `.fast_text`
+/// (util/placement.hpp), flattened so that nothing it calls is fetched from
+/// the flash: out of the flash, the loop's first turns of a burst fetch its
+/// lines through the XIP cache, some fifty cycles a line on the RP2040, while
+/// the far host clocks on - the first role-inverted burst after a flash once
+/// overran (55 frames of 64) and once ran dry after the eight preloaded and
+/// one more; with the cache emptied before every burst and only this loop in
+/// SRAM, the wait for the select and the pad read before it, cold in the
+/// flash, still left the loop behind at /32 in modes 1 and 3. So the WAIT for
+/// the far host's select is in here too, with the read of the answer pad's
+/// enable it is followed by: nothing between the select falling and the
+/// loop's first turn is fetched from the flash. The wait is bounded in turns
+/// as the loop is (some 200 ms). Returns the frames received; `sent` the
+/// answers written, `oe_selected` the pad's output enable once the window
+/// opened.
+[[gnu::section(".fast_text"), gnu::noinline, gnu::flatten]] uint16_t serve_client(bool wide, uint16_t count,
+                                                                                uint16_t& sent,
+                                                                                bool& oe_selected) {
+    using S = Pl022<1>;
+    for (uint32_t spins = SysClock::hz / 50u; CsPin::read() && spins != 0u; --spins) {
+    }
+    oe_selected = TxPin::status().oe_to_pad;
+    uint16_t got = 0;
+    uint16_t out = sent;
+    uint32_t turns = SysClock::hz / 33u;
+    while (got < count && turns-- != 0u) {
+        const uint32_t sr = S::flags();
+        if ((sr & SpiFlag::rx_not_empty) != 0u) {
+            const uint16_t f = S::read_data();
+            if (wide) {
+                crx[2u * got] = static_cast<uint8_t>(f);
+                crx[2u * got + 1u] = static_cast<uint8_t>(f >> 8);
+            } else {
+                crx[got] = static_cast<uint8_t>(f);
+            }
+            ++got;
+        }
+        if ((sr & SpiFlag::tx_not_full) != 0u && out < count) {
+            const uint16_t v = wide ? static_cast<uint16_t>(ctx[2u * out] | (static_cast<uint16_t>(ctx[2u * out + 1u]) << 8))
+                                    : ctx[out];
+            S::write_data(v);
+            ++out;
+        }
+        gauge_take();
+    }
+    sent = out;
+    return got;
+}
+
 /// One burst with this chip as the client: `count` frames back to back in
 /// `mode`, the peer's PL022 host at `div` of its clk_peri, its select the
 /// block's frame signal. The client preloads its FIFO with the select high
-/// and keeps it fed from a polled loop.
+/// and keeps it fed from serve_client().
 ClientRun client_burst(uint8_t mode, bool wide, uint16_t count, uint16_t div, uint8_t seed_a, uint8_t seed_b,
                        Answer answer = Answer::driven) {
     ClientRun out{};
@@ -919,35 +972,11 @@ ClientRun client_burst(uint8_t mode, bool wide, uint16_t count, uint16_t div, ui
     while (sent < count && sent < LinkClient::frames_ahead && LinkClient::writable()) {
         LinkClient::write(frame_at(sent++));
     }
-    // The pad's output enable once the far host has the select down: the
-    // first window open.
-    (void)wait_until([] { return !CsPin::read(); }, 200'000u);
-    out.oe_selected = TxPin::status().oe_to_pad;
-    // THE CLIENT'S LOOP, one status read a turn serving both FIFOs: at /16
-    // of the far host's 125 or 150 MHz a frame is 853 to 1024 ns back to
-    // back, 107 cycles of this core's at the least, and the receive FIFO is
-    // eight frames deep. The bound is counted in turns, never a clock: some
-    // 300 ms at one turn per ten cycles.
-    using S = Pl022<1>;
-    uint16_t got = 0;
-    uint32_t turns = SysClock::hz / 33u;
-    while (got < count && turns-- != 0u) {
-        const uint32_t sr = S::flags();
-        if ((sr & SpiFlag::rx_not_empty) != 0u) {
-            const uint16_t f = S::read_data();
-            if (wide) {
-                crx[2u * got] = static_cast<uint8_t>(f);
-                crx[2u * got + 1u] = static_cast<uint8_t>(f >> 8);
-            } else {
-                crx[got] = static_cast<uint8_t>(f);
-            }
-            ++got;
-        }
-        if ((sr & SpiFlag::tx_not_full) != 0u && sent < count) {
-            S::write_data(frame_at(sent++));
-        }
-        gauge_take();
-    }
+    // The pad's output enable once the far host has the select down - the
+    // first window open - is read in serve_client(), after its wait.
+    bool oe_selected = false;
+    const uint16_t got = serve_client(wide, count, sent, oe_selected);
+    out.oe_selected = oe_selected;
     (void)wait_until([] { return CsPin::read(); }, 100'000u);
     out.windows = static_cast<uint16_t>(windows_seen());
     out.pulse_min = gauge_min;

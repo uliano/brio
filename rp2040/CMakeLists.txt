@@ -152,7 +152,7 @@ function(rp2040_add_app name)
         -nodefaultlibs
         -T${CMAKE_SOURCE_DIR}/ld/${RP2040_LD}.ld
         -Wl,--gc-sections
-        -Wl,--no-warn-rwx-segments   # .data carries .ram_text, the code that runs with the flash disconnected (ld/)
+        -Wl,--no-warn-rwx-segments   # .data carries code: .fast_text (placed for speed) and .ram_text (the flash engine's window) (ld/)
         -Wl,-Map,$<TARGET_FILE_DIR:${name}>/firmware-${name}.map
         -Wl,--defsym,__nvheap_build_id=${RP2040_NVHEAP_BUILD_ID}
     )

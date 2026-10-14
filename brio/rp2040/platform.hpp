@@ -142,6 +142,16 @@ struct Rp2040Platform {
     /// ordering, and the bridge that crosses carries its own fences.
     static constexpr unsigned atomic_width = 4;
 
+    /// This family places `.fast_text` in SRAM: rp2040/ld/rp2040_2m.ld
+    /// collects it first in .data, which the crt copies before main(), and
+    /// the vector table holds absolute addresses, so a vector placed there
+    /// is entered directly; a CALL between the flash and SRAM is out of a
+    /// BL's 16 MB and goes through the linker's long-branch veneer. What it
+    /// buys here is the XIP cache's fill on a cold path, not a warm path's
+    /// speed (docs/rp2040/platform.md, "A handler in SRAM"). A driver of
+    /// this stratum may therefore be given util/placement.hpp's InRam.
+    static constexpr bool places_fast_text = true;
+
     /// Which core runs this: SIO.CPUID, 0 or 1 (2.3.1.1).
     static uint8_t core_id() { return static_cast<uint8_t>(SIO->CPUID); }
 

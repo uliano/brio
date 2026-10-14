@@ -69,6 +69,7 @@
 #include "kernel/time_event.hpp"
 #include "rp2040/clock.hpp"
 #include "rp2040/dma.hpp"
+#include "rp2040/flash.hpp"
 #include "rp2040/i2c.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
@@ -103,6 +104,8 @@ constexpr Serial serial;
 TestBench<Serial, 16> bench;
 
 uint32_t us_now() { return Timer::now_low(); }
+/// Every line of the XIP cache dropped: letter g's cold read.
+void xip_empty() { Xip::flush(); }
 
 // I2C1 on the pair's wires: GP3 (SCL), GP2 (SDA).
 constexpr I2cPins link_pins{.scl = 3, .sda = 2};

@@ -665,8 +665,12 @@ public:
      * A channel in a CHAIN wants Dma::abort() over the whole chain's mask
      * instead: this verb knows one channel, and the erratum's other half
      * is the chainee re-triggering it.
+     *
+     * OUT OF LINE AND COLD, with stop(): a fault's or a bring-up's
+     * path, never a block's, which a flattened hot body
+     * (util/placement.hpp) would otherwise carry inline.
      */
-    static bool abort() {
+    [[gnu::noinline, gnu::cold]] static bool abort() {
         uint32_t was_routed = 0;
         for (uint8_t line = 0; line < dma_line_count; ++line) {
             if (routed(line)) {
@@ -685,7 +689,7 @@ public:
 
     /// Everything of the channel's back to nothing: aborted, disabled,
     /// off every line, the errors and the status cleared.
-    static void stop() {
+    [[gnu::noinline, gnu::cold]] static void stop() {
         (void)abort();
         for (uint8_t line = 0; line < dma_line_count; ++line) {
             route(line, false);
@@ -994,7 +998,9 @@ struct DmaBinding {
     /// The channel stopped and bound: CTRL with EN through the non-trigger
     /// alias, and the route to `line` when the engine's completions or
     /// errors are served there.
-    static void bind(uint32_t word, uint8_t line, bool routed) {
+    /// Out of line and cold with release(): an arm()'s or a fault's
+    /// path (util/placement.hpp's flatten would carry it inline).
+    [[gnu::noinline, gnu::cold]] static void bind(uint32_t word, uint8_t line, bool routed) {
         Channel::stop();
         ctrl = word;
         Channel::ctrl() = word;
@@ -1004,7 +1010,7 @@ struct DmaBinding {
     }
 
     /// Back to nothing, the held word with it.
-    static void release() {
+    [[gnu::noinline, gnu::cold]] static void release() {
         Channel::stop();
         ctrl = 0;
     }

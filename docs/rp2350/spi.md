@@ -143,9 +143,11 @@ Request and its two ISR bodies, the client's surface) is in
   this target, which counts on the PLATFORM TIMER and not on a core
   counter, so a Request's `cs_setup_us` is served once `Mtime::start` has
   run and refused (with no time spent) before that.
-- `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine>` and `SpiClient<n,
-  pins>` - the public names, this chip's aliases of the three IP
-  templates, with `NoDmaEngine` in both slots by default.
+- `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine, Placement>` and
+  `SpiClient<n, pins>` - the public names, this chip's aliases of the
+  three IP templates, with `NoDmaEngine` in both slots and `InFlash` by
+  default (`Placement`: util/placement.hpp's tag, [platform.md](platform.md),
+  "A handler in SRAM").
 - `Rp2350Pl022::dma_min_frames`, the data-phase length below which a
   request takes the pump even with engines bound - TEN frames here, the
   quotient of two of this chip's measurements (the bench findings). The
@@ -389,72 +391,37 @@ the same.
   with 34 / 33. The core spinning on a flag in RAM or on a register behind
   the APB bridge while the engines run changes a 256-byte block by under
   a hundredth.
-- **THE FIRST TRANSACTION PAYS THE XIP CACHE ITS FILL, SO THE HOST'S HOT
-  PATH LIVES IN SRAM.** A line of 8 bytes costs 66 to 82 cycles at the
-  boot's XIP setting (EBh at CLKDIV 3, [flash.md](flash.md)) - the price
-  the vendor's library pays too (the next item) - and the first
-  transaction after `init()` fetches every line of the code it runs,
-  while a rate change costs 90 cycles (`apply()`'s SSE pair around
+- **THE FIRST TRANSACTION PAYS THE XIP CACHE ITS FILL, AND WHERE THE
+  HOST'S HOT PATH RUNS IS THE PROGRAM'S CHOICE.** A line of 8 bytes costs
+  66 to 82 cycles at the boot's XIP setting (EBh at CLKDIV 3,
+  [flash.md](flash.md)) - the price the vendor's library pays too (the
+  next item) - and a cold transaction fetches every line of the code it
+  runs, while a rate change costs 90 cycles (`apply()`'s SSE pair around
   `configure()`) and the DMA's first block after `arm()` and the PL022's
   first frame after SSE cost nothing measurable, split on a build of the
   bench's binding with the cache's two counters (`Xip::hits()`,
-  `Xip::accesses()`) read around each transaction. `bench_rp2350` letter
-  e's `spi.cold` is the instrument: `spi.req`'s three-byte polled request
-  as the host's VERY FIRST after `init()`, the counters cleared before
-  the start and read after the wall, and the same request again with
-  every line of the cache invalidated first (`Xip::invalidate_all()`, the
-  repeatable reading), under the mask so that no tick's handler lands
-  in the one shot. WITH THE HOST'S CODE IN THE FLASH that first request
-  costs **4723 / 4523 cycles and misses 66 / 67 lines** (Cortex-M33 /
-  Hazard3), after an invalidate 4912 / 4610 with 67 / 69, against 690 /
-  664 warm. THE FAMILY'S LINKER SCRIPT PLACES THE HOST'S HOT PATH INTO
-  .data, so the crt's copy carries it to SRAM with the initialized data
-  (`rp2350/ld/rp2350_16m.ld`, the same ten patterns on the RP2040's):
-  `-ffunction-sections` names every function's section for its symbol,
-  and the script names the members a transaction runs
-  ([../pl022/README.md](../pl022/README.md), "The host above the wire"
-  lists them) for every instantiation of the host at once, while
-  `init()`, `release()`, `recover()`, the clamp, the rate chooser, the
-  resource's `configure()` and `flush_rx()` and the client stay in the
-  flash. The IP stratum cannot do this itself - a section attribute
-  takes a string literal and that file knows no linker script - and the
-  script's order is the linker's rule: an input section goes to the
-  first statement that matches it, so .data, which carries the patterns,
-  is listed before the statement that sweeps `.text.*` into the flash,
-  and the load image of .data sits in the flash right behind the vector
-  table. MEASURED WITH THE HOST IN SRAM: **the first request after
-  `init()` 809 / 755 cycles missing 5 lines, the same after an invalidate
-  809 / 755 missing 5** - the five being the caller's own (the call site
-  with the ruler's two reads around it and the counters' read; on the
-  Cortex-M33 the branch veneer too), 120 / 94 cycles over the warm
-  request. THE SRAM IT COSTS, per instantiation of the host: 1116 / 1282
-  bytes for a host without engines, 1678 / 1858 for one with them - the
-  bench's two hosts take .data from 264 / 276 bytes to 3160 / 3420, the
-  Cortex-M33's 96 bytes of veneers included. THE WARM PRICE: on the
+  `Xip::accesses()`) read around each transaction. `SpiHost`'s last
+  template parameter is util/placement.hpp's tag: `InFlash`, the
+  default, leaves `start()`, the pump and the DMA line's body in the
+  flash, `InRam` makes each ONE flattened instance in `.fast_text.brio`,
+  the engines' verbs and the launch folded in ([platform.md](platform.md),
+  "A handler in SRAM", the table and the rule for both architectures).
+  `bench_rp2350` letter e's `spi.cold` is the instrument: `spi.req`'s
+  three-byte polled request with every line of the cache invalidated
+  first (`Xip::invalidate_all()`), under the mask so that no tick's
+  handler lands in the one shot, the counters cleared before the start
+  and read after the wall - **5089 / 4327 cycles missing 70 / 64 lines
+  with the host in the flash (Cortex-M33 / Hazard3), 909 / 729 missing
+  5 / 3 with it InRam, against 665 to 739 warm**; the few left are the
+  caller's (the call site with the ruler's reads around it, and on the
+  Cortex-M33 the veneer). THE WARM PRICE of InRam is the call: on the
   Cortex-M33 a `bl` reaches 16 MB and the SRAM is 256 MB from the flash,
-  so every call across the boundary goes through a stub the linker
-  inserts (`ldr.w pc, [pc]` and a word - into SRAM for the app's calls
-  to `start()`, `fill()` and `take()`, back to the flash for the clamp,
-  the configure, the engines' verbs and `delay_us`): a request 5 cycles
-  dearer (690 to 695), a pump handler 10 (two stubs; 383 to 393 at 75
-  MHz), and the receive shape at 75 MHz 24.00 to 24.25 cycles a frame,
-  the fetch and the stores sharing the striped banks at the one rate
-  where the loop and not the wire sets the pace - every other line of
-  letter e within 10 cycles of its reading with the host in the flash.
-  On Hazard3 `auipc` and `jalr` reach, no stub exists, the request reads
-  3 cycles cheaper (664 to 661), and at 75 MHz the receive shape reads
-  28 to 27 cycles an 8-bit frame and 32.0 to 33.5 a 16-bit one - the
-  fetch out of the striped SRAM against the cache's hit path, at the
-  one rate where the loop and not the wire sets the pace; every other
-  line within the band. WHAT STILL PAYS THE FILL: the caller's lines, and on an engined
-  transaction the family's engine verbs (`begin`, `program`), the DMA
-  line's handler and the app's vector glue, which stay in the flash -
-  `test_rp2350_spi` letter d's 128-byte engined block costs 75 / 63 us
-  cold missing 78 / 75 lines against 41 / 39 warm (120 / 103 us and
-  160 / 156 lines with the host in the flash), the polled request on the
-  engined host 18 / 17 us missing 13 against 14 warm (36 / 31 and 51 /
-  49), the 16-bit block 45 / 45 missing 31 / 36 against 33 / 34 (53 / 49
-  and 43 / 43).
+  so a call across goes through a stub the linker inserts (`ldr.w pc,
+  [pc]` and a word), a request 5 cycles dearer and a pump handler some
+  20 an entry; on Hazard3 `auipc` and `jalr` reach, and the request
+  reads 4 cycles dearer. The engined block cold (letter d, 16 frames)
+  from the flash 12525 / 9980 cycles, with the host InRam 4192 / 3700,
+  with both placements 1776 / 2439, against 770 to 1433 warm.
 - **THE VENDOR'S LIBRARY DOING THE SAME TRANSFER ON THE SAME BOARD** is
   the oracle for both numbers: the pico-sdk 2.3.1's `hardware_spi` and
   `hardware_dma`, built by its own CMake with its own crt, SPI0 on the
@@ -546,13 +513,6 @@ rather than to this chip - the Microwire transaction, frame widths other
 than 8 and 16 in the Request, a client on the DMA engines - are in
 [../pl022/README.md](../pl022/README.md) and are not repeated here.
 
-- The DMA engines' own verbs and the DMA line's handler in SRAM: with
-  the host's hot path there, an engined transaction's first run after
-  `init()` still misses 75 to 78 lines (the bench findings), the
-  family's `begin` and `program` and the app's vector glue being what
-  it fetches from the flash. Those verbs are the DMA chapter's, and
-  whether a line of SRAM is worth a cold engined block is decided by a
-  program that needs one cold; none does yet.
 - The TI and the Microwire framings ON THE WIRE: both are codes
   `SpiConfig` takes and the resource reads back, and no device on this
   desk speaks either. The desk partner's PL022 could speak TI to this one

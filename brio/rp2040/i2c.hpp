@@ -53,6 +53,7 @@
 #include "rp2040/dma_engine.hpp"
 #include "rp2040/nvic.hpp"
 #include "rp2040/pin.hpp"
+#include "rp2040/platform.hpp"
 #include "rp2040/resets.hpp"
 
 namespace brio {
@@ -111,6 +112,10 @@ struct Rp2040DwApbI2c {
     /// component parameter register is not implemented here).
     static constexpr uint8_t instances = 2;
     static constexpr uint8_t fifo_depth = 16;
+    /// Whether a host may be given util/placement.hpp's InRam: the
+    /// family's platform answers (its linker script collects
+    /// `.fast_text`).
+    static constexpr bool places_fast_text = Rp2040Platform<>::places_fast_text;
 
     template <uint8_t i>
     static Regs& regs() { return *(i == 0 ? I2C0 : I2C1); }
@@ -200,8 +205,9 @@ using DwApbI2c = DwApbI2cBlock<Rp2040DwApbI2c, n>;
  * The two engine slots take rp2040/dma.hpp's DmaTxEngine<ch, uint16_t>
  * and DmaRxEngine<ch> on any two channels, both or neither.
  */
-template <uint8_t n, I2cPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine>
-using I2cHost = DwApbI2cHost<Rp2040DwApbI2c, n, pins, TxEngine, RxEngine>;
+template <uint8_t n, I2cPins pins, typename TxEngine = NoDmaEngine, typename RxEngine = NoDmaEngine,
+          typename Placement = InFlash>
+using I2cHost = DwApbI2cHost<Rp2040DwApbI2c, n, pins, TxEngine, RxEngine, Placement>;
 
 /// The target side, over DwApbI2c<n>: a polled surface and one ISR body
 /// the app binds to isr_i2c0 / isr_i2c1.

@@ -297,27 +297,39 @@ polled loop on the same board is the figure beside them).
   frame the engines' paragraph prices. A run in modes 1 and 3 is as long
   as the transmit FIFO never empties; a host held off past it raises the
   signal between two frames like any end of a run.
-- THE HOT PATH IS A LIST, FOR A FAMILY'S LINKER SCRIPT TO PLACE. On a
-  chip that executes in place out of a flash behind a cache, the first
-  transaction after `init()` pays the cache its fill of the host's code
-  - on the RP2350 some 4700 cycles for a three-byte request that costs
-  690 warm, 66 lines of 8 bytes. This file cannot put its own code in
-  SRAM: a section attribute takes a string literal, and this file knows
-  no linker script. What it offers instead is that every member a
-  transaction runs is a function of its own under `-ffunction-sections`,
-  named for its symbol, so a family's script can place the set by
-  pattern: `start()` (with `apply()` and the pin edges inlined in it),
-  `run_polled()` (both polled loops inlined), `fill()` and `take()`
-  (`isr()` is inlined into the app's vector and calls them),
-  `take_tenure()`, `engines_serve()`, `launch_dma()`, `launch_frames()`,
-  `finish_dma()` and `spin_dma()`. `init()`, `release()`, `recover()`,
-  `clamp()`, the rate chooser, the resource's `configure()` and
-  `flush_rx()` and the client are a bring-up's, a rate change's or a
-  fault's, and belong in the flash. Both RP families place the set
-  ([../rp2350/spi.md](../rp2350/spi.md) has the numbers, the SRAM it
-  costs and the price a core pays for calls across the boundary); a
-  family whose code runs from SRAM or from a zero-wait flash places
-  nothing.
+- THE HOT PATH'S PLACE IS THE PROGRAM'S, BY A TAG. On a chip that
+  executes in place out of a flash behind a cache, a cold transaction
+  pays the cache its fill of the host's code - on the RP2350 some 4400
+  cycles more than the warm 665 for a three-byte request, 70 lines of 8
+  bytes. A section attribute takes a string literal and this file knows
+  no family, so it places nothing by itself: `Pl022Host`'s last template
+  parameter is util/placement.hpp's tag, and three paths run through its
+  `Hot<P>` - `start()` (the polled loops, the tenure's copy, the
+  engines' launch and wait all folded in), the pump (`isr()`, its fill
+  and take) and the DMA line's body (`dma_isr()`). `InFlash`, the
+  default, leaves each where it would be without the trampoline - the
+  pump and the DMA body inline in the app's vectors, `start()` a
+  function in the flash; `InRam` makes each ONE flattened instance in
+  `.fast_text.brio`, which a family that can place code in SRAM
+  collects into `.data`. The engines' launch has three call sites and
+  stays ONE body under either tag (out of line in the flash, or its own
+  instance in SRAM - flattened it is some 1 KB of the engines'
+  programming); a change of mode, rate or width (`reconfigure()`) and a
+  polled wait that ran out (`settle_fault()`) stay out of line in the
+  flash under both. `InRam` compiles only where the family's chip
+  traits say `places_fast_text` (`HotPlacement`); a third tag does not
+  compile. THE ENGINES' DUMMY CELL IS IN RAM, never a constant: the
+  transmit engine reads it once a frame of a read with no out buffer, and
+  a constant in a flash executed in place is an XIP read every frame,
+  competing there with the core's own fetches - measured on the RP2040,
+  `test_rp2040_spi` letter d's rate inside an engined block at clk_peri /
+  4 read 1046 and 1052 thousandths of the wire in two passes of ten with
+  the host's code in the flash, 998 to 1007 in ten of ten with the cell
+  in RAM. Both RP families place
+  ([../rp2040/platform.md](../rp2040/platform.md) and
+  [../rp2350/platform.md](../rp2350/platform.md), "A handler in SRAM",
+  have the numbers: on these cores the placement buys the cold path and
+  costs the warm one its call).
 
 ## What stays per family
 
@@ -325,8 +337,8 @@ The pin table and its function code; the reset or clock gate; the
 interrupt line and its controller; the crt's handler name an app binds;
 the DMA request numbers and the engine types that fill the slots; which
 rate is SSPCLK; the FIFO depth; the run-time pin type and the busy-wait;
-what SOD does to a pad on that silicon; where the host's hot path runs
-(its linker script's business, the item above); and THE PUBLIC NAMES -
+what SOD does to a pad on that silicon; whether the family places
+`.fast_text` (its traits' `places_fast_text`, the item above); and THE PUBLIC NAMES -
 `Pl022<n>`, `SpiHost<n, pins, TxEngine, RxEngine>` and `SpiClient<n,
 pins>`, the family's aliases of the three templates here, with the
 family's own defaults for the empty engine slots. An application that

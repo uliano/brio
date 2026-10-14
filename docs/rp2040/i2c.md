@@ -136,7 +136,7 @@ enable in this chip's IC_CON: the unstick is by hand.
   `flushed_entries` / `clear_abort`, `isr()` (the raised-and-enabled
   sources, nothing cleared), `dma_requests`, `dma_levels`,
   `dreq_tx` / `dreq_rx`, `irq()`.
-- `I2cHost<n, pins, TxEngine, RxEngine>`: the engine `I2cBus`
+- `I2cHost<n, pins, TxEngine, RxEngine, Placement>`: the engine `I2cBus`
   (= `BusMaster`) drives. Its `Request` is the other strata's: `addr`,
   `tx` / `tx_len`, `rx` / `rx_len`, `reply`, `speed`. `init(clock)`
   (clk_sys, the three speeds solved), `rebase(hz)`, `speed_ok`,
@@ -159,6 +159,10 @@ enable in this chip's IC_CON: the unstick is by hand.
   collected by a receive engine armed to report a bus error alone, the
   first entry (RESTART) and the last (STOP) through the pump. A write
   phase stays on the pump.
+- `Placement`, the last parameter: util/placement.hpp's tag, `InFlash`
+  by default, `InRam` making `start()`, the vector's body and the DMA
+  line's one flattened instance each in SRAM
+  ([platform.md](platform.md), "A handler in SRAM").
 - `I2cClient<n, pins>`: `init(clock, Config)` (address, 10-bit, the
   general call, the fastest speed it will see), `events` (the sources
   `service()` reports on), `data_ready` / `take`, `data_wanted` /
@@ -292,28 +296,53 @@ client finding below is measured from both sides. The cost figures are
 - THIS BLOCK AS THE PEER HOST'S CLIENT: six bytes written to it exact
   with their STOP; two reads of six served one byte a read request, the
   peer's count, sum and both first bytes the run given, nothing flushed.
+- THE FIRST ENGINED READ IS THE XIP CACHE'S FILL. Letter g's first
+  64-byte read at 400 kHz after a boot takes 1632 us with ONE host
+  interrupt where the read right after it takes 1492 to 1500 us with two,
+  and the same read with every line of the XIP cache flushed first (the
+  letter's third, printed) takes 1637 to 1646 us with one - the first
+  read after a boot is the cold one, in each of five boots, and the
+  letter run again in the same boot reads its first read 1507 to 1513,
+  warm. The 140 us are the host's `start()`, its vector's
+  and the DMA line's code fetched line by line out of the flash, and the
+  late handler finding room for the STOP entry is why one entry stands
+  for two. The placement is what takes it away: `bench_rp2040` letter i's
+  16-byte engined read at 400 kHz reads 49498 cycles warm and 69460 cold
+  with the default image, 54576 cold with the hosts InRam and the vectors
+  placed ([platform.md](platform.md), "A handler in SRAM"). The letter
+  judges the second read.
+- TX_EMPTY IS MASKED BEFORE THE PUSH ([../dw_apb_i2c/README.md](../dw_apb_i2c/README.md),
+  the transmit threshold): masked after it, the engined read's second
+  read took a third host entry reading IC_INTR_STAT zero after every
+  boot - the letter's verdict failed seven passes in seven - and reading
+  the mask back after the store changed nothing; masked first, ten passes
+  in ten read two entries.
 - THE HOST'S COST, `bench_rp2040` letter i against the peer's client,
-  the host's vector in SRAM, nothing of the far end on this core. Each
+  the host's vector in the flash (the default image, warm), nothing of
+  the far end on this core. Each
   figure the best of five; the fixed cost is wall less the wire's time,
   in clk_sys cycles at 125 MHz:
 
   | at 400 kHz | wall | interrupts | handler cycles | busy | fixed cost |
   |---|---|---|---|---|---|
-  | write of 1 | 6852 (x 1.11) | 1 | 156 | 754 | 722 |
-  | write of 255 | 729 223 (x 1.00) | 31 | 8450 | 14 595 | 719 |
-  | read of 16 | 49 661 (x 1.01) | 2 | 587 | 1655 | 871 |
-  | read of 255 | 729 362 (x 1.00) | 32 | 13 385 | 19 652 | 858 |
-  | register read, 1 + 1 | 13 046 (x 1.06) | 1 | 210 | 853 | 786 |
-  | read of 255 on the engines | 729 151 (x 1.00) | 3 | 581 | 2610 | 647 |
+  | write of 1 | 6830 (x 1.11) | 1 | 155 | 709 | 700 |
+  | write of 255 | 729 200 (x 1.00) | 31 | 8958 | 14 924 | 696 |
+  | read of 16 | 49 637 (x 1.01) | 2 | 581 | 1604 | 847 |
+  | read of 255 | 729 338 (x 1.00) | 32 | 13 085 | 19 300 | 834 |
+  | register read, 1 + 1 | 13 023 (x 1.06) | 1 | 209 | 816 | 763 |
+  | read of 255 on the engines | 729 216 (x 1.00) | 3 | 571 | 2406 | 712 |
 
   A tenure of half a FIFO or less is ONE interrupt, its STOP; a long
   read is one every eight bytes. The fixed cost is the same at the three
-  speeds (722, 722, 722 for a one-byte write) because the address and
+  speeds (700, 700, 700 for a one-byte write) because the address and
   the speed stay in the block between tenures: the cycle of disable,
   IC_TAR and enable, which a new address still pays (`i2c.write.readdr`),
-  costs 960 cycles more at 100 kHz, 174 at 400 kHz and 65 at 1 MHz - the
+  costs 968 cycles more at 100 kHz, 186 at 400 kHz and 73 at 1 MHz - the
   disable waits on the block's own shutdown, which follows the bus
-  timing. The longest host entry is 439 cycles, a 255-byte read's.
+  timing. The longest host entry is 429 cycles, a 255-byte read's. Cold,
+  the same one-byte write's `start()` reads 12429 cycles and its entry
+  6182 with both in the flash ([platform.md](platform.md), "A handler in
+  SRAM").
 
 ## Not covered yet
 
@@ -338,18 +367,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified, each with what would measure it:
 
-- THE FIRST ENGINED READ AFTER OTHER CODE HAS RUN is up to 8 per cent
-  slow: 1562 to 1629 us for 64 bytes at 400 kHz, with one to three host
-  interrupts, where the read right after it takes 1487 to 1494 us and two
-  - every time, in 16 passes of the whole suite and the first pass after
-  each of 3 flashes of letter g alone (the later passes of g alone all
-  fast); the RP2350's first is 30 us slow the same way. The command
-  channel's DREQ credits read zero before both reads, and IC_DMA_TDLR at
-  half the FIFO changed nothing; what the pattern points at is the
-  handlers' code fetched cold through the XIP cache. The suite's letter g
-  prints that read and judges the next. What would decide it: the XIP
-  cache's misses over the first tenure, and the same tenure with the DMA
-  line's handler in SRAM.
 - `rebase()`: this stratum has no dynamic clock yet; measured when the
   clock chapter grows one, a tenure exact after a switch.
 - The client's `overrun` event: a client configured without the hold

@@ -13,7 +13,8 @@ itself), `core.hpp` with `core_m33.hpp` and `core_hazard3.hpp` (the one
 file of the stratum that asks which processor is in the socket, and its
 two halves), `ticker.hpp` (the kernel timebase, one per core),
 `mtime.hpp` (the microsecond ruler), `resets.hpp`, `sysinfo.hpp` and
-`device.hpp`. The reference suite: `test_rp2350_platform`, which runs on
+`device.hpp`; 4.4.1 (the XIP cache) and `brio/util/placement.hpp` for
+the placement. The reference suite: `test_rp2350_platform`, which runs on
 BOTH architectures from one source and is judged the same way on each.
 
 ## What the silicon does
@@ -300,10 +301,97 @@ architectures from one source. Where the halves differ, both numbers:
   included, while TBMAN's reads 0x00000001; the two registers and what
   each is for are in the findings above.
 
+## A handler in SRAM
+
+**What the silicon does.** Both architectures execute the flash in place
+through the XIP cache (4.4.1): 16 kB, two-way set-associative, lines of
+8 bytes, a hit in one cycle, in front of the QSPI flash the bootrom left
+at EBh and CLKDIV 3 ([flash.md](flash.md)). Warm code runs at about the
+SRAM's pace; a MISS fetches its line over the QSPI bus - 66 to 82 cycles
+a line at 150 MHz ([spi.md](spi.md)). A path runs cold the first time
+after `init()`, after an invalidate, or once other code has evicted its
+lines. On the Cortex-M33 a `bl` reaches 16 MB and the SRAM lies 256 MB
+from the flash, so a call between the two goes through a linker veneer
+(`ldr.w pc, [pc]` and the address); Hazard3's `auipc` and `jalr` reach
+anywhere, and a call across is an ordinary call. A vector placed in
+SRAM is entered with no veneer on either: the Arm table and the Hazard3
+dispatch's table (`startup_rp2350_riscv.S`) hold absolute addresses -
+but on Hazard3 THE DISPATCH ITSELF, the trap entry, the register save
+and the `meinext` loop, stays in the flash.
+
+**The option and its spelling** are the RP2040's
+([../rp2040/platform.md](../rp2040/platform.md), "A handler in SRAM"):
+`rp2350_16m.ld` collects `.fast_text` then `.ram_text` first in `.data`,
+copied by both crts, the platform says `places_fast_text`, and the
+program either places the vector it binds or gives `SpiHost`, `Uart` or
+`I2cHost` util/placement.hpp's `InRam` - one flattened instance in
+`.fast_text.brio` a path, `InFlash` the default.
+
+**What it buys, measured** (`bench_rp2350` and `bench_rp2350_ram` on
+each architecture; cycles at 150 MHz, each cell WARM / COLD, cold read by
+letter c, every line of the XIP cache invalidated before every timed
+run; F the default, R the drivers InRam, V the vectors placed, B both):
+
+| Cortex-M33 | F | R | V | B |
+|---|---|---|---|---|
+| SPI polled request, a command byte and 2 data bytes | 671 / 5333 | 676 / 1241 | 671 / 5404 | 676 / 1241 |
+| SPI pump, 16 frames at clk_peri / 2, wall | 945 / 8810 | 980 / 3294 | 946 / 5088 | 973 / 1812 |
+| ... its handler, two entries | 608 / 3785 | 647 / 1577 | 607 / 610 | 639 / 642 |
+| SPI on the engines, 16 frames, wall | 1433 / 12525 | 791 / 4192 | 770 / 7800 | 788 / 1776 |
+| ... the DMA line's handler | 342 / 5010 | 139 / 1877 | 116 / 116 | 135 / 135 |
+| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 1278 / 6390 | 549 / 3160 | 487 / 487 | 543 / 543 |
+| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1107 / 4129 | 286 / 1956 | 290 / 1124 | 314 / 1148 |
+| I2C one-byte write at 400 kHz, `start()` | 182 / 4354 | 189 / 477 | 184 / 4311 | 189 / 477 |
+| ... its longest handler entry | 88 / 2960 | 114 / 1158 | 88 / 88 | 110 / 110 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58903 / 66330 | 58935 / 61564 | 58905 / 62598 | 58930 / 59548 |
+
+| Hazard3 | F | R | V | B |
+|---|---|---|---|---|
+| SPI polled request, a command byte and 2 data bytes | 633 / 4621 | 637 / 1034 | 639 / 4610 | 637 / 1034 |
+| SPI pump, 16 frames at clk_peri / 2, wall | 948 / 8490 | 988 / 3731 | 964 / 5481 | 988 / 2590 |
+| ... its handler, two entries | 603 / 3192 | 635 / 1302 | 615 / 1261 | 633 / 636 |
+| SPI on the engines, 16 frames, wall | 844 / 9980 | 749 / 3700 | 737 / 7072 | 748 / 2439 |
+| ... the DMA line's handler | 100 / 2657 | 119 / 1104 | 99 / 99 | 119 / 762 |
+| UART interrupt receiver, 16 bytes at 1 Mbaud, handler | 2214 / 5421 | 460 / 2840 | 454 / 454 | 460 / 460 |
+| UART transmit engine, 256 bytes at 1 Mbaud, completions | 1296 / 3385 | 269 / 1827 | 222 / 894 | 272 / 991 |
+| I2C one-byte write at 400 kHz, `start()` | 178 / 4009 | 185 / 1831 | 176 / 3963 | 185 / 1831 |
+| ... its longest handler entry | 226 / 1669 | 72 / 488 | 70 / 70 | 71 / 71 |
+| I2C 16-byte read on the engines at 400 kHz, wall | 58924 / 64414 | 58945 / 61864 | 58923 / 62333 | 58945 / 60751 |
+
+What the rows say - the RP2040's reading on both halves:
+
+- WARM, the placement buys nothing on a path the cache holds and costs
+  the call: 4 to 40 cycles under InRam. A warm figure that differs more
+  is one image's set conflicts, not the place: the F column's engined
+  SPI block (1433 against 770 to 791) and its UART and I2C handlers miss
+  lines warm that the other three images do not.
+- COLD it pays on every path, on both cores: a three-byte request 5333
+  cycles from the flash against 1241 with the host InRam on the M33, a
+  handler cold from the flash 2000 to 5000 cycles, from SRAM what it
+  costs warm.
+- The vector placed reaches what the vector runs; InRam reaches
+  `start()`; BOTH is the image whose cold transaction is closest to its
+  warm one. On Hazard3 the dispatch in front of a placed vector still
+  misses, and two of its placed bodies read cold above warm (the pump's
+  handler under V 1261 against 615, the DMA line's under B 762 against
+  119) with no call into the flash in their listings - a residue this
+  chapter has not split.
+
 ## Not covered yet
 
 Driver gaps, each with its reason:
 
+- PINNED XIP CACHE LINES (4.4.1: a line marked never to be evicted, and
+  4.4.1.3's cache-as-SRAM): the other way to keep a path warm, by set and
+  way at run time, every line pinned a line of the 16 kB no other path
+  can use. `.fast_text` is the one placement this
+  stratum offers; a pin is born with a program whose hot code will not
+  fit the SRAM it can spare.
+- The Hazard3 dispatch in SRAM: the crt's trap entry, its register save
+  and its `meinext` loop run from the flash in front of every vector, a
+  placed one too ("A handler in SRAM"), and the residue measured there on
+  two placed bodies is not split. A placed copy of the dispatch is born
+  with a program whose handlers must answer cold within a deadline.
 - `delay_us`. The microsecond busy-wait wants a measured fact per family
   and a ruler both halves share; the ruler exists and the fact does not,
   and nothing yet needs the verb - every wait in the suite is a spin on

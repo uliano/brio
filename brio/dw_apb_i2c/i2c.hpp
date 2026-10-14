@@ -19,7 +19,7 @@
  *                          register, the flags, the thirteen interrupt
  *                          sources with their read-to-clear registers,
  *                          the abort source decoded. It decides nothing.
- *  DwApbI2cHost<Chip, n, pins, TxEngine, RxEngine>
+ *  DwApbI2cHost<Chip, n, pins, TxEngine, RxEngine, Placement>
  *                          the ENGINE util/i2c_bus.hpp's I2cBus drives:
  *                          the Request is the other strata's VERBATIM -
  *                          {addr, tx span, rx span, reply, speed}, one
@@ -86,6 +86,14 @@
  * request's bytes with a flag each, and a byte buffer cannot carry the
  * flag.
  *
+ * WHERE THE HOST'S HOT PATH RUNS is the program's choice, by the host's
+ * last template parameter, util/placement.hpp's tag: start(), isr() and
+ * dma_isr() run their bodies through `Hot<Placement>` - where they would
+ * be without it under `InFlash`, the default, one flattened instance each
+ * in `.fast_text.brio` under `InRam`, on a family whose chip traits say
+ * `places_fast_text` (what it buys: the family's platform document, "A
+ * handler in SRAM"). The client is the program's own code to place.
+ *
  * NOT built, each with its reason in docs/dw_apb_i2c/README.md: the
  * high-speed mode, SMBus, the stuck-bus timeouts, the bus clear of the
  * blocks that have one. The slots for DMA engines ARE here, empty, so
@@ -103,6 +111,7 @@
 #include "kernel/post.hpp"
 #include "util/clock.hpp"
 #include "util/i2c_bus.hpp"
+#include "util/placement.hpp"
 
 namespace brio {
 
@@ -779,7 +788,7 @@ struct DwApbI2cBlock {
 inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
 
 /**
- * DwApbI2cHost<Chip, n, pins, TxEngine, RxEngine>
+ * DwApbI2cHost<Chip, n, pins, TxEngine, RxEngine, Placement>
  *
  * The engine I2cBus (util/i2c_bus.hpp = BusMaster) drives. One Request
  * is one bus tenure: START, the address, tx_len bytes written, then - if
@@ -829,7 +838,8 @@ inline constexpr uint8_t i2c_dma_fault = bus_engine_status + 4;
  * block's end and the STOP.
  */
 template <DwApbI2cChip Chip, uint8_t n, typename Chip::Pins pins,
-          typename TxEngine = DwApbI2cAbsentEngine, typename RxEngine = DwApbI2cAbsentEngine>
+          typename TxEngine = DwApbI2cAbsentEngine, typename RxEngine = DwApbI2cAbsentEngine,
+          typename Placement = InFlash>
 class DwApbI2cHost {
     using S = DwApbI2cBlock<Chip, n>;
     static_assert(Chip::pins_valid(n, pins),
@@ -842,6 +852,9 @@ class DwApbI2cHost {
                   "and the bytes collected");
     static_assert(Chip::template engines_distinct<TxEngine, RxEngine>(),
                   "brio I2cHost: the two engines must ride two different DMA channels");
+    static_assert(HotPlacement<Placement, Chip>,
+                  "brio I2cHost: the placement is InFlash, or InRam on a family whose chip traits say "
+                  "places_fast_text (util/placement.hpp)");
     static_assert([] {
         if constexpr (TxEngine::present) {
             return std::is_same_v<typename TxEngine::element, uint16_t> &&
@@ -955,6 +968,37 @@ public:
     /// (i2c_bus_error) - answered through status(), the I2cHost
     /// contract (docs/design/i2c-bus.md).
     static bool start(const Request& r) {
+        return Hot<Placement>::run([&r] { return start_body(r); });
+    }
+
+    /// The engine's completion status, for the TransferDone payload.
+    static uint8_t status() { return status_; }
+
+    /// The instance's interrupt body - call from its vector. True when
+    /// the tenure just completed: the edge the app's glue posts
+    /// TransferDone on.
+    [[gnu::always_inline]] static bool isr() {
+        return Hot<Placement>::run([] { return isr_body(); });
+    }
+
+    /// The DMA line's interrupt body - call it from the line the engines
+    /// report on. The transmit block ending hands the pump the STOP
+    /// entry; a bus error on either channel ends the tenure with
+    /// i2c_dma_fault; the receive engine is armed quiet and its block's
+    /// end is the STOP's business (isr()). Compiles away on an
+    /// engineless host. True when the tenure just completed.
+    [[gnu::always_inline]] static bool dma_isr() {
+        if constexpr (has_engines) {
+            return Hot<Placement>::run([] { return dma_isr_body(); });
+        } else {
+            return false;
+        }
+    }
+
+private:
+    /// start()'s body (util/placement.hpp: inline where the placement
+    /// puts it).
+    [[gnu::always_inline]] static bool start_body(const Request& r) {
         req_ = r;
         want_ = r.tx_len == 0u && r.rx_len == 0u ? uint8_t{1} : r.rx_len;
         total_ = static_cast<uint16_t>(r.tx_len + want_);
@@ -1019,13 +1063,9 @@ public:
         return false;
     }
 
-    /// The engine's completion status, for the TransferDone payload.
-    static uint8_t status() { return status_; }
-
-    /// The instance's interrupt body - call from its vector. True when
-    /// the tenure just completed: the edge the app's glue posts
-    /// TransferDone on.
-    [[gnu::always_inline]] static bool isr() {
+    /// isr()'s body (util/placement.hpp: inline where the placement puts
+    /// it).
+    [[gnu::always_inline]] static bool isr_body() {
         const uint32_t up = S::isr();
         if (phase_ == Phase::idle) {
             // Nothing in flight: whatever stands is stale (a STOP_DET
@@ -1049,9 +1089,24 @@ public:
                 // (armed quiet): its run ends with the last byte, a bit
                 // and a STOP before STOP_DET, so the STOP is the tenure's
                 // end here too.
-                if ((up & I2cInterrupt::tx_empty) != 0u && !fill()) {
+                if ((up & I2cInterrupt::tx_empty) != 0u) {
+                    // THE MASK BEFORE THE PUSH. TX_EMPTY is a level the FIFO holds: an entry pushed
+                    // into an empty FIFO takes it down, and the block, waiting with SCL held, takes
+                    // the entry at once and raises it again - an edge on the line WHILE its handler
+                    // runs, which the interrupt controller can latch as a new pending entry if the
+                    // source is still armed then. Masked after the push, the handler returned to an
+                    // entry that found nothing (measured on the RP2040: IC_INTR_STAT zero, a third
+                    // host entry on test_rp2040_i2c letter g's second engined read after every
+                    // boot, and reading the mask back after the store did not cure it). So the
+                    // handler masks TX_EMPTY before it pushes and arms it again only when room is
+                    // still wanted - two stores on an entry that keeps it, none added to one that
+                    // does not.
                     S::interrupts(I2cInterrupt::tx_empty, false);
                     tx_armed_ = false;
+                    if (fill()) {
+                        S::interrupts(I2cInterrupt::tx_empty, true);
+                        tx_armed_ = true;
+                    }
                 }
                 if ((up & I2cInterrupt::stop_det) != 0u) {
                     S::clear_pending(I2cInterrupt::stop_det);
@@ -1079,10 +1134,16 @@ public:
             }
         }
         if ((up & (I2cInterrupt::tx_empty | I2cInterrupt::rx_full)) != 0u && issued_ < total_entries()) {
-            const bool arm = wants_room(fill());
-            if (arm != tx_armed_) {
-                tx_armed_ = arm;
-                S::interrupts(I2cInterrupt::tx_empty, arm);
+            // THE MASK BEFORE THE PUSH (the engines' branch above): an armed
+            // TX_EMPTY is taken down first and raised again when room is
+            // still wanted.
+            if (tx_armed_) {
+                S::interrupts(I2cInterrupt::tx_empty, false);
+                tx_armed_ = false;
+            }
+            if (wants_room(fill())) {
+                S::interrupts(I2cInterrupt::tx_empty, true);
+                tx_armed_ = true;
             }
         }
         // EVERY TENURE ENDS ON ITS STOP: the bus is released when the
@@ -1096,13 +1157,8 @@ public:
         return false;
     }
 
-    /// The DMA line's interrupt body - call it from the line the engines
-    /// report on. The transmit block ending hands the pump the STOP
-    /// entry; a bus error on either channel ends the tenure with
-    /// i2c_dma_fault; the receive engine is armed quiet and its block's
-    /// end is the STOP's business (isr()). Compiles away on an
-    /// engineless host. True when the tenure just completed.
-    [[gnu::always_inline]] static bool dma_isr() {
+    /// dma_isr()'s body.
+    [[gnu::always_inline]] static bool dma_isr_body() {
         if constexpr (has_engines) {
             const uint8_t tx = TxEngine::service();
             if ((tx & TxEngine::flag_error) != 0u) {
@@ -1138,6 +1194,7 @@ public:
         return false;
     }
 
+public:
     /// The classic bus unstick: nine SCL pulses and a STOP, by hand,
     /// open-drain through the family's own software path (the pad driven
     /// low or released to the pull-up), with the pads reclaimed from the

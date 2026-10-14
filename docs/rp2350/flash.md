@@ -157,7 +157,9 @@ WHAT A WINDOW COSTS, AND WHAT IT ASKS. While the QMI is in direct mode
 the windows are gone: an access to them is a bus error, for the
 processor, for the debugger and for the other core alike (5.4.8.10). So
 every operation runs from `.ram_text` - an input section the linker
-script folds into .data, copied to SRAM by the crt - with this core's
+script folds into .data, copied to SRAM by the crt, spelled
+`.ram_text.brio` and never cloned as a header's function must be
+(util/placement.hpp) - with this core's
 interrupts masked for the whole of it. The rest cannot be enforced from
 here and is therefore stated: THE OTHER CORE MUST NOT FETCH OR READ
 FLASH while a window is open, and no DMA channel may have the window as
