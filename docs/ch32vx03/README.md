@@ -534,11 +534,6 @@ Driver gaps, each with its reason:
 
 Implemented but not bench-verified:
 
-- **The CH32V203C8's group images**: the I2C suite and the benchmark
-  skeleton, whole within a few bytes of the part's 60 KB, as two
-  images each, and the skeleton's serial-transport and I2C letters no
-  longer in the image of its other letters. `brio check ch32vx03`
-  links them; one run of each image on the board measures it.
 - **The eleven parts other than the CH32V203C8 and the CH32V303VC.**
   Every one has its table, its linker script and its preset, and the
   whole stratum compiles for all thirteen both ways the hardware
