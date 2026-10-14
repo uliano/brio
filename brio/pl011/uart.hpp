@@ -264,6 +264,15 @@ constexpr bool uart_format_valid(const UartFormat& f) {
     return bits >= 5u && bits <= 8u && (f.stop_bits == 1u || f.stop_bits == 2u);
 }
 
+/// WHERE THE RECEIVER LISTENS, chosen when the transport is brought up:
+/// its pad, or the block's own transmitter (UARTCR.LBE, the loop-back).
+/// Chosen there, the loop-back is set while the UART is still disabled,
+/// so the receiver never samples its pad at all; switched on later under
+/// the running port (`loopback(true)`), it leaves the receiver on the pad
+/// from the enable to the switch, and what it took there is delivered at
+/// the head of the loop's traffic (Pl011Transport::init).
+enum class UartRx : uint8_t { pad, loopback };
+
 // ---- the baud arithmetic ----------------------------------------------------------
 
 /// IBRD and FBRD: the divisor UARTCLK / (16 x baud) as an integer and
@@ -615,12 +624,16 @@ public:
     /// family's traits say which of its rates is UARTCLK - so the
     /// divisor never comes from a second statement of the rate.
     ///
+    /// `rx` says where the receiver listens (UartRx): the pad, or the
+    /// loop-back from the first byte on.
+    ///
     /// False when the rate cannot be produced at this clock or the
     /// block did not come out of reset - the caller then knows the
     /// transport is NOT up, rather than printing into a ring nothing
     /// will drain.
     template <typename Clock>
-    static bool init(Clock clock, uint32_t baud, const UartFormat& format = {}) {
+    static bool init(Clock clock, uint32_t baud, const UartFormat& format = {},
+                     UartRx rx = UartRx::pad) {
         static_assert(Pl011ChipClock<Chip, Clock>,
                       "the family's chip traits must say which rate of this Clock type is "
                       "UARTCLK (Pl011ChipClock's uartclk_hz)");
@@ -657,6 +670,19 @@ public:
         if constexpr (!has_rx_engine) {
             U::interrupts(UartInterrupt::rx | UartInterrupt::rx_timeout, true);
         }
+        // THE LOOP-BACK, when asked for, BEFORE THE ENABLE, so the
+        // receiver's first sample is the transmitter's idle line and never
+        // the pad. Switched on after the enable, it leaves a window in
+        // which a receiver on its pad takes what the pad does - and an RX
+        // pad facing a far end that drives nothing (its pad at reset,
+        // pulled down) is still rising through this end's pull-up when the
+        // receiver comes on: a start bit, and at 3 Mbaud a whole frame
+        // (measured on two boards wired pad to pad, the far one dark: a
+        // 0xFF, or a 0x00 the engine moves, at the head of the loop's
+        // first run, in every bring-up or in three of five).
+        if (rx == UartRx::loopback) {
+            (void)U::loopback(true);
+        }
         // THE RX PAD FIRST, in the setup the family states for it,
         // before the receiver is enabled: where that setup is a pull-up
         // over a pad that comes up pulled down, a receiver enabled over
@@ -672,7 +698,9 @@ public:
         TxPad::function(Chip::pad_function, Chip::tx_pad_config());
         // And the receive FIFO is EMPTIED before an engine takes it:
         // whatever a peer put on the line between the reset and here
-        // is not this life's traffic.
+        // is not this life's traffic. A frame the receiver is still
+        // TAKING at this point is not here yet, and lands after the
+        // flush - the reason a loop-back is chosen above, not after.
         while (!U::rx_empty()) {
             (void)U::read_data();
         }
@@ -755,7 +783,9 @@ public:
     }
 
     /// The loop-back on or off under the running port: the transmitter
-    /// into the receiver, the RX pad ignored while on. Main context.
+    /// into the receiver, the RX pad ignored while on. What the receiver
+    /// took from its pad before the switch is still delivered; a loop
+    /// from the first byte is init()'s UartRx::loopback. Main context.
     static bool loopback(bool on) {
         drain();
         port(false);

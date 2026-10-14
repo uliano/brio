@@ -203,6 +203,30 @@ sixteen characters plus the time-out's, the tail of a burst delivered 32
 bit periods - 3.2 frames - after its last stop bit: the block's own
 time-out, which nothing programs.
 
+THE RECEIVER'S FIRST SAMPLE IS TAKEN AT ITS ENABLE. The bring-up hands
+the RX pad over in the family's setup before it enables the receiver,
+and empties the FIFO after; but a receiver enabled over a low line takes
+the level for a start bit, and a pad that comes up pulled down is still
+rising through its pull-up when the receiver comes on if the far end
+drives nothing (its own pad at reset). Measured on the two Raspberry Pi
+chips wired pad to pad, the far board dark, at 3 Mbaud: a byte nobody
+sent at the head of the first run of a receive engine, in five bring-ups
+of five on the RP2350 (a 0xFF) and in three of five on the RP2040 - a
+frame still being taken at the flush, landing after it; the far end's
+transmitter idling high instead, none in five; and in a bench letter's
+bring-ups at 115200, 1 M and 9.375 Mbaud on the RP2350's two halves, a
+0xFC or a 0xFF in 8 of 60, all at the two higher rates. So THE LOOP-BACK
+IS CHOSEN AT THE BRING-UP (`init()`'s `UartRx::loopback`): LBE set while
+the UART is still disabled, the receiver's first sample the
+transmitter's idle line - the same letters, the far board dark, twelve
+of twelve on each chip and on both RP2350 architectures, and none in the
+bench letter's 60. `loopback(on)` under a running port stays, and what
+the receiver took from its pad before the switch is delivered. UNDER THE
+LOOP-BACK THE TRANSMIT PAD STILL CARRIES THE FRAMES (both chips: eight
+frames looped back and eight start bits on the pad, read through the
+bank), so a loop-back's traffic reaches whatever receiver the pad is
+wired to.
+
 EVERY LOSS IS REPORTED TO THE RING (util/ring.hpp's `SkipRing`), whose
 consumer's next look skips everything queued, and `rx_skips()` counts
 the skips, never cleared - util/serial_port.hpp's epoch, moving between

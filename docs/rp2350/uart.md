@@ -17,8 +17,8 @@ chip's aliases of the two templates there. The reference suite:
 `test_rp2350_serial`, which runs on BOTH of this chip's architectures
 from one source (the second instance under the loop-back for the formats,
 the ladder, the FIFOs, a break, an overrun and bulk traffic; the second
-function column on its own pads; a peer board on the cross link; the host
-at the console's other end).
+function column on its own pads; the desk partner's `uart_peer` on the
+pair's UART wires; the host at the console's other end).
 
 This page says what is the RP2350's. What the block itself does - the
 fractional divider, the disabled-write rule, the transmit interrupt that
@@ -235,16 +235,33 @@ a number is given for each.
   whoever owns it, the line idles HIGH, a break pulls it LOW and clearing
   the break lets it back up. The block is the same block there: 256 bytes
   round the loop byte-exact in 22254 us.
-- ON THE CROSS LINK to a peer board (this board's GP4 to the peer's
-  receiver and the peer's transmitter to this board's GP5, with GP21 as a
-  mode line into the peer): 512 bytes to the peer's echo and back
-  byte-exact in 45969 us on the Cortex-M33 half and 45884 us on the
-  Hazard3 half, no error counted. Listening at 7E1 to the peer's 64
-  frames at 8N1, the eighth data bit lands where the parity bit is
-  expected - 30 parity errors counted and dropped, 34 frames accepted, no
-  frame error - the attribution per entry, on a real wire. The peer is
-  the `uart_peer` firmware, which has no console of its own and takes its
-  role from that wire.
+- ON THE PAIR'S WIRES, against the WeAct RP2040's `uart_peer` (UART1
+  crossed, the peer's role chosen on GP21 into its mode line,
+  [../boards/weact-rp2350b.md](../boards/weact-rp2350b.md)), the suite's
+  letters p and s at 115200 8N1, each end on its own crystal:
+  - 512 bytes to the peer's echo and back byte-exact, no error, in 45854
+    to 45861 us on the Cortex-M33 half and 45851 to 45853 on the Hazard3
+    half against the 45830 derived - 528 frames at 115207 baud, the peer
+    echoing a run of sixteen (its receive level) behind this end: the two
+    crystals agree on the rate, which no loop-back can show;
+  - listening at 7E1 to the peer's 64 pattern frames at 8N1: a parity
+    error counted, and the frame dropped, exactly where the byte has an
+    odd number of ones (30 of 64), no frame error - and nothing handed
+    out, since every run of sixteen the handler moved held an error and
+    the ring skipped each whole (four skips, the receive ring's contract,
+    [../pl011/README.md](../pl011/README.md));
+  - the other way round, 64 frames sent at 7E1 into the peer's 8N1 echo
+    back exact with no error, in 6963 to 6966 us on both halves against
+    the 6944 of 80 frames: a 7E1 frame is an 8N1 frame whose eighth bit is
+    the parity.
+- THE LOOP-BACK IS ASKED FOR AT THE BRING-UP in every suite letter on
+  it: with the far board dark, a 3 Mbaud receive engine brought up on the
+  pad and switched to the loop-back after took a 0xFF nobody sent at the
+  head of its run in five bring-ups of five (`test_rp2350_dma` letter j),
+  and none in twelve on either half once the loop-back was chosen at
+  `init()`; and under the loop-back the GP4 pad still carries every frame
+  (eight start bits for eight frames) - the IP's findings
+  ([../pl011/README.md](../pl011/README.md)).
 - THROUGH THE DEBUG PROBE'S BRIDGE, the console's own ladder fed by the
   host: byte-exact at 115200, 460800, 921600, 1 M, 2 M and 3 Mbaud, with
   no frame error, no hardware overrun and no ring overrun at any rung
@@ -291,15 +308,15 @@ a number is given for each.
   the runtime's `memcpy` about 27 (M33) and 29 (Hazard3) and under one a
   byte with the two ends aligned alike - the loop ahead at 8 bytes,
   `memcpy` at 12 on each: one `copy_crossover` for the chip.
-- AT UARTCLK / 16 A FRAME ARRIVES THAT NOBODY SENT: brought up at 9.375
-  Mbaud and switched to the loop-back, the instance holds a 0xFF in its
-  receive FIFO before a byte is written - seen on the M33 image in
-  each of three runs, and not on the Hazard3 image of the same source, not at
-  1 Mbaud, not on the RP2040 at its own UARTCLK / 16; which of the two
-  steps makes it is not separated. The interrupt receiver takes it as a
-  byte like any other and a receive engine moves it into its run: letter
-  u publishes and drains it before it measures, and a program bringing a
-  port up at that rate drains it too.
+- A FRAME NOBODY SENT, from the pad and not from the loop-back: brought
+  up on its pad and switched to the loop-back after, the instance held a
+  byte in its receive FIFO before one was written - a 0xFC in six
+  bring-ups of eight at 9.375 Mbaud on the Cortex-M33 half; on the
+  Hazard3 half a 0xFC in one of eight at 9.375 Mbaud and a 0xFF in one of
+  eleven at 1 Mbaud (`bench_rp2350` letter u, the far board's pad at reset) -
+  and none in thirty on each half with the loop-back chosen at the
+  bring-up: the receiver's own enable over a pad still rising, the IP's
+  finding ([../pl011/README.md](../pl011/README.md)).
 - AGAINST THE VENDOR: the pico-sdk 2.3.1's `uart_read_blocking` and
   `uart_write_blocking`, POLLED loops, on the same board and loop in a
   scratch program: 34 and 29 cycles a byte reading characters already in
@@ -336,7 +353,3 @@ Implemented but not bench-verified, each with what would measure it:
 - `rebase` under a dynamic clock: this target has no dynamic clock yet,
   so the verb is exercised only at a rate that does not change.
 - The bridge's ceiling board to host: the suite measures host to board.
-- The stray 0xFF at 9.375 Mbaud (above): which step - the bring-up or
-  the switch to the loop-back - puts it in the FIFO, and why on one
-  architecture's image and not the other's; a run that reads the FIFO
-  between the two steps on each image would separate it.

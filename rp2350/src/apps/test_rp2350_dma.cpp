@@ -718,7 +718,7 @@ void ti_count_modes() {
 // j - the instrument's two engines
 // =============================================================================
 void tj_instrument() {
-    const bool up = Instrument::init(clock, 3'000'000) && Instrument::loopback(true);
+    const bool up = Instrument::init(clock, 3'000'000, {}, UartRx::loopback);
     bench.verdict("the instrument comes up with an engine in each slot, on its loop-back", up);
     uint32_t tx_state = 0x12345678u;
     uint32_t rx_state = 0x12345678u;
@@ -1020,7 +1020,7 @@ volatile IsrFn uart1_isr = nullptr;
 template <typename T>
 void half_loop(const char* name) {
     uart1_isr = &T::isr;
-    const bool up = T::init(clock, 3'000'000) && T::loopback(true);
+    const bool up = T::init(clock, 3'000'000, {}, UartRx::loopback);
     uint8_t out[512];
     fill(out, 512, 0x3131u);
     uint8_t in[512] = {};
@@ -1120,7 +1120,7 @@ uint32_t breaks_wire = 0;
 template <typename T>
 uint32_t breaks_through(uint8_t* got, uint32_t room, uint32_t& kept) {
     constexpr uint32_t frame_us = 10u * 1'000'000u / 115200u + 1u;
-    const bool up = T::init(clock, 115200) && T::loopback(true);
+    const bool up = T::init(clock, 115200, {}, UartRx::loopback);
     breaks_wire = wire_permille<T>(115200, 10u, 256u);
     spin_us(20 * frame_us);
     uint8_t junk[32];
@@ -1279,7 +1279,7 @@ uint32_t overrun_episode() {
 
 void to_stalled_overrun() {
     uart1_isr = &Instrument::isr;
-    const bool up = Instrument::init(clock, 3'000'000) && Instrument::loopback(true);
+    const bool up = Instrument::init(clock, 3'000'000, {}, UartRx::loopback);
     Instrument::clear_errors();
     uint32_t during[3] = {0, 0, 0};
     uint32_t after = 0;

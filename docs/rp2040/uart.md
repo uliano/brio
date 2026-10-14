@@ -13,8 +13,9 @@ table 279, the `Rp2040Pl011` chip traits over `pin.hpp`, `resets.hpp`,
 `Pl011<n>` (the resource) and `Uart<n, pins, ...>` (the task), this
 chip's aliases of the two templates there. The reference suite:
 `test_rp2040_serial` (the second instance under the loop-back for the
-formats, the ladder, the FIFOs, a break, an overrun and bulk traffic; a
-peer board on the cross link; the host at the console's other end).
+formats, the ladder, the FIFOs, a break, an overrun and bulk traffic;
+the desk partner's `uart_peer` on the pair's UART wires; the host at the
+console's other end).
 
 ## What the silicon does
 
@@ -69,10 +70,12 @@ function 2: UART0 transmits on GPIO 0, 12, 16, 28 and receives on 1,
   the interrupt mask/pending/clear trio through the atomic aliases,
   `dma_requests`, `irq()`.
 - `Uart<n, pins, rx_size = 64, tx_size = 256, TxEngine, RxEngine>` -
-  the task, every target's Uart surface: `init(clock, baud, format)`,
-  `isr()` (true on the receive ring's empty-to-non-empty edge),
-  `write_byte`, `write_bulk`, `read_byte`, `read_bulk`, `read_span`
-  and `consume` (the receive run in place), `rx_pending`, `tx_idle`, `rebase(hz)`, `set_baud(hz, baud)`,
+  the task, every target's Uart surface: `init(clock, baud, format,
+  rx)` (`rx` the PL011's own: `UartRx::pad`, or `UartRx::loopback` for a
+  loop-back from the first sample), `isr()` (true on the receive ring's
+  empty-to-non-empty edge), `write_byte`, `write_bulk`, `read_byte`,
+  `read_bulk`, `read_span` and `consume` (the receive run in place),
+  `rx_pending`, `tx_idle`, `rebase(hz)`, `set_baud(hz, baud)`,
   `set_format(format)`, `loopback(on)` (each under the running port,
   after a drain), `min_hz_for`, `can_baud`, `actual_baud(hz)`,
   `release()`; the counters `rx_overruns` (ring), `frame_errors`,
@@ -178,6 +181,31 @@ extern "C" void isr_uart0() {
     back in 66664 us of the 66666 they occupy, the receiver having the
     last byte before its stop bit ends, which the rung's lower bound
     allows.
+- ON THE PAIR'S WIRES, against the WeAct RP2350B's `uart_peer` (UART1
+  crossed, the peer's role chosen on GP21 into its mode line,
+  [../boards/weact-rp2040.md](../boards/weact-rp2040.md)), the suite's
+  letters p and s at 115200 8N1, each end on its own crystal:
+  - 512 bytes to the peer's echo and back byte-exact, no error, in 45861
+    to 45865 us against the 45830 derived - 528 frames at 115207 baud, the
+    peer echoing a run of sixteen (its receive level) behind this end -
+    with the peer on either RP2350 architecture: the two crystals agree
+    on the rate, which no loop-back can show;
+  - listening at 7E1 to the peer's 64 pattern frames at 8N1: a parity
+    error counted, and the frame dropped, exactly where the byte has an
+    odd number of ones (30 of 64), no frame error - and nothing handed
+    out, since every run of sixteen the handler moved held an error and
+    the ring skipped each whole (four skips, the receive ring's contract,
+    [../pl011/README.md](../pl011/README.md));
+  - the other way round, 64 frames sent at 7E1 into the peer's 8N1 echo
+    back exact with no error, in 6972 to 6974 us against the 6944 of 80
+    frames: a 7E1 frame is an 8N1 frame whose eighth bit is the parity.
+- THE LOOP-BACK IS ASKED FOR AT THE BRING-UP in every suite letter on
+  it: with the far board dark, a 3 Mbaud receive engine brought up on the
+  pad and switched to the loop-back after took a byte nobody sent at the
+  head of its run in three bring-ups of five, and none in twelve once the
+  loop-back was chosen at `init()`; and under the loop-back the GP4 pad
+  still carries every frame (eight start bits for eight frames) - the
+  IP's findings ([../pl011/README.md](../pl011/README.md)).
 - THE ENGINES (`test_rp2040_dma`): 4096 bytes through the loop-back
   at 3 Mbaud with an engine in each slot, byte-exact, 22 interrupts;
   the two traps of a receive engine - a break taken at enable over a
@@ -263,13 +291,6 @@ Driver gaps, each with its reason:
   program with a reason to move them; the resource writes any pair.
 
 Implemented but not bench-verified, each with what would measure it:
-
-- The transport on a wire against a foreign peer: an echo of 512 bytes
-  byte-exact, and the error attribution of 7E1 listening to 8N1 frames,
-  per entry - the serial suite's cross-link letters, whose far end on
-  this desk is the WeAct RP2350B over the pair's UART1 wires
-  ([../boards/weact-rp2040.md](../boards/weact-rp2040.md)), which runs
-  no RP2040 suite: a peer there that echoes and sends.
 
 - The bridge's ceiling board to host (the suite measures host to
   board): a `source` leg of the same host letter.

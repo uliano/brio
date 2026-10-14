@@ -43,6 +43,7 @@ void uart_verbs() {
     constexpr SysClock clock;
     (void)Console::init(clock, 115200);
     (void)Aux::init(clock, 9600, {.bits = UartBits::seven, .parity = UartParity::even, .stop_bits = 2});
+    (void)Aux::init(clock, 3'000'000, {}, UartRx::loopback);
     (void)Console::isr();
     (void)Aux::isr();
     static_assert(BulkSink<Console> && SpanSource<Console>);

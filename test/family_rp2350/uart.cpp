@@ -137,6 +137,7 @@ void uart_transport_verbs() {
     constexpr SysClock clock;
     (void)Instrument::init(clock, 115200);
     (void)Instrument::init(clock, 9600, {.bits = UartBits::five, .parity = UartParity::odd});
+    (void)Instrument::init(clock, 3'000'000, {}, UartRx::loopback);
     Instrument::rebase(SysClock::pclk_hz);
     (void)Instrument::set_baud(SysClock::pclk_hz, 460800);
     (void)Instrument::set_format({});

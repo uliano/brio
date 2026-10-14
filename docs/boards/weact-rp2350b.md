@@ -78,7 +78,12 @@ every user GPIO on its header rows. Design files: WeAct's own repository
   peer of the twi_link protocol, and the two SPI suites,
   `test_rp2350_spi` and `test_rp2040_spi`, each against the other board's
   spi_link peer (a PIO client, the roles inverted on the PL022 with its
-  own frame signal on the select). No other wire is on this
+  own frame signal on the select), and the two serial suites,
+  `test_rp2350_serial` and `test_rp2040_serial`, each against the other
+  board's `uart_peer` (its role chosen on wire 9 or 10, the driving
+  board's GP21 into the peer's GP20; this board's peer reads its GP20
+  with the buffer pulsed, E9's way, and brings UART1 up only once the
+  RP2040's rail reads up). No other wire is on this
   board: every wire between two of its own pads is retired, and the
   letters that judged one run by name only.
 - **The package is a build fact here**: `RP2350_PACKAGE=b` is what makes

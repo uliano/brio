@@ -10,20 +10,23 @@
 // under it.
 //
 // THE INSTRUMENT IS UART1 ON GP4 (TX) / GP5 (RX), the console UART0 on
-// GP0/GP1 through the Debug Probe's bridge. NOTHING TO WIRE for `z`: the
-// PL011 has a LOOP-BACK (UARTCR.LBE) that feeds the transmitter into
-// the receiver with the RX pad ignored, so every format, every rate of
-// the ladder, the FIFOs, the receive timeout, a break and an overrun
-// are measured on the instance alone. The letters that need a second
-// RP2040 use the cross link (this board's GP4 to the other's GP5 and
-// back, a common ground); on this desk GP4/GP5 are wired to the WeAct
-// RP2350B instead (docs/boards/weact-rp2040.md), which runs no RP2040
-// suite, so they have no partner here. The two that need the host use
-// the console itself, with `brio stress` at the other end.
+// GP0/GP1 through the Debug Probe's bridge. The PL011 has a LOOP-BACK
+// (UARTCR.LBE) that feeds the transmitter into the receiver with the RX
+// pad ignored, so every format, every rate of the ladder, the FIFOs, the
+// receive timeout, a break and an overrun are measured on the instance
+// alone - the loop-back asked for at the bring-up (UartRx::loopback), so
+// the receiver never samples the pad. GP4/GP5 are the pair's UART wires
+// to the WeAct RP2350B (docs/boards/weact-rp2040.md), and `z` runs with
+// that board on its `uart_peer` firmware: the letters on the wire, p and
+// s, take it for their far end, choosing its role on GP21 - this board's
+// end of the wire into the peer's mode line, low for echo and high for
+// send. The two that need the host use the console itself, with `brio
+// stress` at the other end.
 //
-// UART1's transmitter idles HIGH on GP4 in every letter, the loop-back
-// ones too, and GP4 is a link wire: the partner board runs a dark image
-// (its pads inputs) while this suite runs - one driver per wire.
+// ONE DRIVER PER WIRE: UART1's transmitter idles HIGH on GP4 in every
+// letter, into the peer's receiver; the peer's transmitter idles high on
+// GP5, into this one's; GP21 is driven by p and s alone and is an input
+// on the peer. Nothing else of the link is touched.
 //
 // THE RULER IS THE SYSTEM TIMER (rp2040/timer.hpp): the crystal's
 // microseconds, for every latency and every rate on the loop.
@@ -60,22 +63,22 @@
 //   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
 //      the pad read through SIO, and tx_idle() turning true at the last
 //      stop bit's end - never before it, within a bit time after - and
-//      the start bits seven frames apart at the rate asked
+//      the start bits seven frames apart at the rate asked; and the
+//      same frames under the loop-back still on the pad
 //
-//   q  (by name only) THE PEER: UART1 echoes whatever it receives, at
-//      115200 8N1, for thirty seconds after the prompt returns - run it
-//      on the other board first
-//   p  (by name only) the wire against the peer: 512 bytes sent on GP4,
-//      their echo read on GP5 byte-exact, no error counted
-//   r  (by name only) THE PEER'S WRONG FRAMES: three seconds after the
-//      prompt returns, UART1 sends 64 pattern bytes at 115200 8N1 - run
-//      it on the other board first
-//   s  (by name only) the error attribution on the wire: this board
-//      listens at 7E1 to the peer's 8N1 frames - the eighth data bit
-//      lands where a parity bit is expected, so about half the frames
-//      are parity errors, counted and dropped, and no frame error (an
-//      ECHO could not show this: an echo returns the same bits, parity
-//      included, which is why r sends rather than echoes)
+//   p  THE WIRE against the peer: 512 bytes sent on GP4, their echo read
+//      on GP5 byte-exact, no error counted, and the round trip in the
+//      wire's time - two crystals agreeing on one rate, which no loop
+//      can show
+//   s  THE ERROR ATTRIBUTION on the wire: this board listens at 7E1 to the
+//      peer's 64 pattern frames at 8N1 - the eighth data bit lands where
+//      a parity bit is expected, so exactly the frames whose byte has an
+//      odd number of ones are parity errors, counted and dropped, and
+//      nothing is handed out joined across a drop (a run of sixteen
+//      holding one is skipped whole); no frame error (an ECHO could
+//      not show this: an echo returns the same bits, parity included,
+//      which is why the peer sends for this letter); and the other way
+//      round, 64 frames sent at 7E1 into the peer's 8N1 echo back exact
 //   y  (by name only, brio stress) the CONSOLE's own ladder, host-fed:
 //      115200 to 3 Mbaud through the Debug Probe's bridge, the bytes
 //      verified on the board; the rungs to 921600 are verdicts, the
@@ -94,6 +97,7 @@
 
 #include <stdint.h>
 
+#include <bit>
 #include <optional>
 #include <span>
 
@@ -262,11 +266,10 @@ uint32_t frame_bits(const UartFormat& f) {
     return 1u + static_cast<uint32_t>(f.bits) + (f.parity != UartParity::none ? 1u : 0u) + f.stop_bits;
 }
 
+/// The instrument up, on its loop-back (asked for at the bring-up, so the
+/// receiver never samples the pad) or on the wire.
 bool instrument_up(uint32_t baud, const UartFormat& fmt = {}, bool loop = true) {
-    if (!Instrument::init(clock, baud, fmt)) {
-        return false;
-    }
-    return !loop || Instrument::loopback(true);
+    return Instrument::init(clock, baud, fmt, loop ? UartRx::loopback : UartRx::pad);
 }
 
 const char* fmt_name(const UartFormat& f) {
@@ -571,101 +574,17 @@ void te_bulk() {
 }
 
 // -----------------------------------------------------------------------------
-// The two-board letters (by name): the peer's echo lives in the main loop.
+// p, s - the two-board letters, against the partner's uart_peer
+// -----------------------------------------------------------------------------
+using ModeLine = Pin<21>;   // into the peer's GP20: low = echo, high = send
+constexpr const char* mode_line_text = "GP21";
 
-uint32_t peer_until = 0;
-uint32_t peer_send_at = 0;   // r: when the 64 frames go out (0 = never)
-
-void peer_service() {
-    if (peer_send_at != 0u && static_cast<int32_t>(us_now() - peer_send_at) >= 0) {
-        peer_send_at = 0;
-        Lfsr tx;
-        uint8_t out[64];
-        for (uint8_t& b : out) {
-            b = tx.next();
-        }
-        (void)Instrument::write_bulk(out);
-    }
-    if (peer_until == 0u) {
-        return;
-    }
-    if (static_cast<int32_t>(us_now() - peer_until) >= 0) {
-        peer_until = 0;
-        Instrument::release();
-        return;
-    }
-    if (peer_send_at != 0u) {
-        return;   // the sender's window: nothing to echo
-    }
-    uint8_t buf[64];
-    const uint32_t n = Instrument::read_bulk(buf);
-    if (n != 0u) {
-        (void)Instrument::write_bulk(std::span<const uint8_t>(buf, n));
-    }
+uint32_t link_round_trip(uint32_t count, UartBits bits, uint32_t budget_us, uint32_t* took) {
+    return round_trip(count, bits, budget_us, took);
 }
 
-void tr_peer_sender() {
-    const bool up = instrument_up(115200, {}, false);
-    peer_send_at = us_now() + 3'000'000u;
-    if (peer_send_at == 0u) {
-        peer_send_at = 1;
-    }
-    peer_until = peer_send_at + 5'000'000u;
-    print(serial, "  UART1 sends 64 pattern bytes at 115200 8N1 on GP4 in three seconds", crlf);
-    bench.verdict("the peer is up", up);
-}
-
-void tq_peer() {
-    const bool up = instrument_up(115200, {}, false);
-    Instrument::clear_errors();
-    peer_until = us_now() + 30'000'000u;
-    if (peer_until == 0u) {
-        peer_until = 1;
-    }
-    print(serial, "  UART1 echoes on GP4 what arrives on GP5 at 115200 8N1 for the next 30 s",
-          crlf);
-    bench.verdict("the peer is up", up);
-}
-
-void tp_wire() {
-    if (!instrument_up(115200, {}, false)) {
-        bench.verdict("the instrument on the wire", false);
-        return;
-    }
-    Instrument::clear_errors();
-    uint32_t took = 0;
-    const uint32_t good = round_trip(512, UartBits::eight, 2'000'000u, &took);
-    print(serial, "  512 bytes to the peer and back on the cross link: ", good, " exact in ", took,
-          " us; FE ", Instrument::frame_errors(), " PE ", Instrument::parity_errors(), " BE ",
-          Instrument::break_errors(), " OE ", Instrument::hw_overruns(), crlf);
-    bench.verdict("every byte comes back exact from the peer, no error counted",
-                  good == 512u && Instrument::frame_errors() == 0u && Instrument::break_errors() == 0u &&
-                      Instrument::hw_overruns() == 0u);
-    Instrument::release();
-}
-
-void ts_wire_errors() {
-    if (!instrument_up(115200, {.bits = UartBits::seven, .parity = UartParity::even}, false)) {
-        bench.verdict("the instrument at 7E1", false);
-        return;
-    }
-    Instrument::clear_errors();
-    print(serial, "  listening at 7E1 for the peer's 64 frames at 8N1 (up to 6 s) ...", crlf);
-    const uint32_t t0 = us_now();
-    uint32_t accepted = 0;
-    while (accepted + Instrument::parity_errors() + Instrument::frame_errors() < 64u &&
-           us_now() - t0 < 6'000'000u) {
-        uint8_t in[64];
-        accepted += Instrument::read_bulk(in);
-    }
-    print(serial, "  ", accepted, " bytes accepted, PE ", Instrument::parity_errors(), " FE ",
-          Instrument::frame_errors(), " BE ", Instrument::break_errors(), crlf);
-    bench.verdict("the peer's eighth data bit lands where this end expects parity: parity "
-                  "errors counted and those frames dropped, no frame error",
-                  Instrument::parity_errors() >= 8u && Instrument::frame_errors() == 0u &&
-                      accepted + Instrument::parity_errors() == 64u);
-    Instrument::release();
-}
+// THE LETTERS, over the names above (the two suites' one body).
+#include "rp_uart_pair.hpp"
 
 // -----------------------------------------------------------------------------
 // The host-assisted letters (brio stress), by name.
@@ -823,6 +742,15 @@ void tt_tx_idle() {
                   "bit, within a per cent of 9600 baud",
                   falls == 8u && span * 100u >= frames_us * 99u && span * 100u <= frames_us * 101u);
     Instrument::release();
+
+    // AND UNDER THE LOOP-BACK: does the pad still carry the frames?
+    uint32_t looped = 0;
+    const uint32_t lbe_falls = loopback_pad_falls<Pin<4>>(&looped);
+    print(serial, "  the same 8 frames with the loop-back on: ", looped, " looped back, ", lbe_falls,
+          " falls on GP4", crlf);
+    bench.verdict("UNDER THE LOOP-BACK THE TRANSMIT PAD STILL CARRIES THE FRAMES: all eight looped back "
+                  "and eight start bits on GP4 - a loop-back letter's traffic reaches the far end",
+                  looped == 8u && lbe_falls == 8u);
 }
 
 void banner() {
@@ -854,10 +782,8 @@ int main() {
     bench.letter('d', "the FIFOs: timeout vs level, a break, an overrun", td_fifos);
     bench.letter('e', "bulk traffic at 3 Mbaud on the loop", te_bulk);
     bench.letter('t', "tx_idle() on the pad: the last stop bit", tt_tx_idle);
-    bench.letter('q', "PEER: echo on UART1 for 30 s (run on the other board first)", tq_peer, false);
-    bench.letter('p', "the wire against the peer, 512 bytes", tp_wire, false);
-    bench.letter('r', "PEER: 64 frames at 8N1 on UART1 in three seconds (the other board first)", tr_peer_sender, false);
-    bench.letter('s', "the error attribution on the wire: listening at 7E1 to the peer's 8N1", ts_wire_errors, false);
+    bench.letter('p', "the wire against the partner's uart_peer, 512 bytes", tp_wire);
+    bench.letter('s', "the error attribution on the wire: 7E1 against the peer's 8N1", ts_wire_errors);
     bench.letter('y', "HOST: the console's ladder through the probe's bridge (brio stress)", ty_console_ladder, false);
     bench.letter('w', "HOST: the console at 8N1 fed 8E1 (brio stress)", tw_console_errors, false);
 
@@ -870,7 +796,6 @@ int main() {
     }
 
     for (;;) {
-        peer_service();
         uint8_t c = 0;
         if (!Serial::read_byte(c)) {
             continue;

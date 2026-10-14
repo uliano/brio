@@ -102,6 +102,7 @@ void pl011_transport_verbs() {
 void pl011_engine_verbs() {
     constexpr Clock clock;
     (void)Engined::init(clock, 3'000'000);
+    (void)Engined::init(clock, 3'000'000, {}, UartRx::loopback);
     (void)Engined::isr();
     (void)Engined::dma_isr();
     (void)Engined::harvest();

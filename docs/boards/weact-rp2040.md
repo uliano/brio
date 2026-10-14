@@ -57,9 +57,15 @@ two header rows. Design files: WeAct's own repository
   twi_link protocol, and the two SPI suites, `test_rp2040_spi` and
   `test_rp2350_spi`, each against the other board's spi_link peer (a PIO
   client, the roles inverted on the PL022 with its own frame signal on
-  the select). No other wire is on this board: every
-  wire between two of its own pads is retired, and the letters that
-  judged one run by name only.
+  the select), and the two serial suites, `test_rp2040_serial` and
+  `test_rp2350_serial`, each against the other board's `uart_peer` (its
+  role chosen on wire 9 or 10, the driving board's GP21 into the peer's
+  GP20). A dark image is dark only after a power-on here: the flash's
+  reset is core 0's alone, and a block the previous image brought up -
+  a UART1 driving GP4 - runs on under an image that does not use it
+  ([../rp2040/platform.md](../rp2040/platform.md)). No other wire is on
+  this board: every wire between two of its own pads is retired, and the
+  letters that judged one run by name only.
 - **Pins a Pico uses otherwise**: GP24 and GP29 are plain header pins
   here (a Pico's VBUS sense and VSYS/3; GP29 carries the partner's
   select above), GP23 is the button (a Pico's

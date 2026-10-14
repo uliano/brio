@@ -1090,7 +1090,7 @@ std::span<const uint8_t> payload_bytes(uint32_t from, uint32_t n) {
 template <typename T>
 bool loop_up(LoopMode mode, uint32_t baud, bool receiver) {
     loop_mode = mode;   // the vector serves T from its init on
-    const bool ok = T::init(clock, baud) && T::loopback(true);
+    const bool ok = T::init(clock, baud, {}, UartRx::loopback);
     if (!receiver) {
         T::Resource::interrupts(UartInterrupt::rx | UartInterrupt::rx_timeout, false);
     }
@@ -1099,10 +1099,13 @@ bool loop_up(LoopMode mode, uint32_t baud, bool receiver) {
     sw.start();
     while (sw.elapsed() < 4u * frame) {
     }
-    // Whatever the switch to the loop-back put in the FIFO is junk - at
-    // UARTCLK / 16 the change of the receiver's input reads as a frame of
-    // 0xFF (measured on the RP2350) - and under an engine it sits in the
-    // run until harvest() publishes it.
+    // NOTHING SHOULD BE HERE: the loop-back is chosen at the bring-up, so
+    // the receiver's first sample is the transmitter's idle line (measured
+    // on the RP2350: none in 30 bring-ups on each half, where a bring-up
+    // on the pad switched to the loop-back after left a 0xFC or a 0xFF in
+    // 8 of 60 - docs/pl011/README.md). Four frames waited and the receive
+    // side drained all the same - under an engine a byte would sit in the
+    // run until harvest() published it - so no letter measures one.
     (void)T::harvest();
     uint8_t junk = 0;
     while (T::read_byte(junk)) {

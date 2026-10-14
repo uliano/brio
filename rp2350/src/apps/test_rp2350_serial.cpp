@@ -11,17 +11,22 @@
 // under it.
 //
 // THE INSTRUMENT IS UART1 ON GP4 (TX) / GP5 (RX), the console UART0 on
-// GP0/GP1 through a Debug Probe's bridge. NOTHING TO WIRE for `z`: the
-// PL011 has a LOOP-BACK (UARTCR.LBE) that feeds the transmitter into the
-// receiver with the RX pad ignored, so every format, every rate of the
-// ladder, the FIFOs, the receive timeout, a break and an overrun are
-// measured on the instance alone. But GP4 and GP21 are link wires to the
-// desk partner, the WeAct RP2040 (docs/boards/weact-rp2350b.md), and
-// UART1's transmitter idles HIGH on GP4 in every letter: an RP2040 pad is
-// not failsafe, so every letter that hands GP4 or GP21 over reads that
-// board's rail first (rp2350/src/apps/pair_power.hpp) and drives nothing
-// when it is down, and the partner runs a dark image (its pads inputs)
-// for the loop-back letters - one driver per wire.
+// GP0/GP1 through a Debug Probe's bridge. The PL011 has a LOOP-BACK
+// (UARTCR.LBE) that feeds the transmitter into the receiver with the RX
+// pad ignored, so every format, every rate of the ladder, the FIFOs, the
+// receive timeout, a break and an overrun are measured on the instance
+// alone - the loop-back asked for at the bring-up (UartRx::loopback), so
+// the receiver never samples the pad. GP4/GP5 are the pair's UART wires
+// to the desk partner, the WeAct RP2040 (docs/boards/weact-rp2350b.md),
+// and `z` runs with that board on its `uart_peer` firmware: the letters on
+// the wire, p and s, take it for their far end, choosing its role on GP21
+// - this board's end of the wire into the peer's mode line, low for echo
+// and high for send. UART1's transmitter idles HIGH on GP4 in every
+// letter, and GP21 is driven by p and s: an RP2040 pad is not failsafe,
+// so every letter that hands GP4 or GP21 over reads that board's rail
+// first (rp2350/src/apps/pair_power.hpp) and drives nothing when it is
+// down. ONE DRIVER PER WIRE: the peer's transmitter idles high on GP5,
+// into this one's receiver, and its GP20 is an input.
 //
 // WHAT THIS CHIP ADDS TO THE RP2040'S SAME BLOCK, and what letter f is
 // for: a SECOND FUNCTION COLUMN. The pads march in groups of four - TX,
@@ -71,17 +76,22 @@
 //   t  tx_idle() ON THE PAD: eight frames on GP4 with the loop-back off,
 //      the pad read through SIO, and tx_idle() turning true at the last
 //      stop bit's end - never before it, within a bit time after - and
-//      the start bits seven frames apart at the rate asked
+//      the start bits seven frames apart at the rate asked; and the
+//      same frames under the loop-back still on the pad
 //
-//   p  (by name only) THE WIRE against the peer board: 512 bytes out on
-//      GP4, their echo read on GP5 byte-exact, no error counted
-//   s  (by name only) THE ERROR ATTRIBUTION on the wire: this board
-//      listens at 7E1 to the peer's 8N1 frames - the eighth data bit
-//      lands where a parity bit is expected, so about half the frames are
-//      parity errors, counted and dropped, and no frame error. An ECHO
-//      cannot show this, since an echo returns the bits it was given, so
-//      the peer SENDS for this letter: GP21 is a mode line into the peer,
-//      low for echo and high for send
+//   p  THE WIRE against the peer: 512 bytes out on GP4, their echo read
+//      on GP5 byte-exact, no error counted, and the round trip in the
+//      wire's time - two crystals agreeing on one rate, which no loop
+//      can show
+//   s  THE ERROR ATTRIBUTION on the wire: this board listens at 7E1 to the
+//      peer's 64 pattern frames at 8N1 - the eighth data bit lands where
+//      a parity bit is expected, so exactly the frames whose byte has an
+//      odd number of ones are parity errors, counted and dropped, and
+//      nothing is handed out joined across a drop (a run of sixteen
+//      holding one is skipped whole); no frame error. An ECHO cannot
+//      show this, since an echo returns the bits it was given, so the peer
+//      SENDS for this letter; and the other way round, 64 frames sent at
+//      7E1 into the peer's 8N1 echo back exact
 //   y  (by name only, brio stress) the CONSOLE's own ladder, host-fed:
 //      115200 to 3 Mbaud through the probe's bridge, the bytes verified
 //      on the board; the rungs to 921600 are verdicts, the ones above
@@ -93,16 +103,15 @@
 //      the bytes arrived and PRINTS the attribution; the console's own
 //      error counting is proven on the wire by s and on the loop by d
 //
-// The peer letters want the other board running its own fixed-role peer
-// firmware, which needs no console of its own; the wire is this board's
-// GP4 to the peer's RX and the peer's TX to this board's GP5, with GP21
-// into the peer's mode line and a common ground.
+// p and s are the two suites' one body (rp2040/src/apps/rp_uart_pair.hpp),
+// the far end the partner's uart_peer (rp2040/src/apps/rp_uart_peer.hpp).
 //
 // build: boards = weact2350b,weact2350b-rv
 // build: monitor_speed = 115200
 
 #include <stdint.h>
 
+#include <bit>
 #include <span>
 
 #include "rp2350/clock.hpp"
@@ -150,7 +159,7 @@ constexpr UartPins alt_pins{
 };
 using AltInstrument = Uart<1, alt_pins, 512, 512>;
 
-using ModeLine = Pin<21>;   // into the peer: low = echo, high = send
+using ModeLine = Pin<21>;   // into the peer's GP20: low = echo, high = send
 
 TestBench<Serial, 16> bench;
 
@@ -292,11 +301,10 @@ uint32_t frame_bits(const UartFormat& f) {
     return 1u + static_cast<uint32_t>(f.bits) + (f.parity != UartParity::none ? 1u : 0u) + f.stop_bits;
 }
 
+/// The instrument up, on its loop-back (asked for at the bring-up, so the
+/// receiver never samples the pad) or on the wire.
 bool instrument_up(uint32_t baud, const UartFormat& fmt = {}, bool loop = true) {
-    if (!Instrument::init(clock, baud, fmt)) {
-        return false;
-    }
-    return !loop || Instrument::loopback(true);
+    return Instrument::init(clock, baud, fmt, loop ? UartRx::loopback : UartRx::pad);
 }
 
 const char* fmt_name(const UartFormat& f) {
@@ -749,57 +757,16 @@ void tf_second_column() {
 }
 
 // =============================================================================
-// p, s - the two-board letters (by name)
+// p, s - the two-board letters, against the partner's uart_peer
 // =============================================================================
-void tp_wire() {
-    ModeLine::output(false);   // the peer echoes while this is low
-    spin_us(20'000);
-    if (!instrument_up(115200, {}, false)) {
-        bench.verdict("the instrument on the wire", false);
-        return;
-    }
-    Instrument::clear_errors();
-    uint32_t took = 0;
-    const uint32_t good = round_trip<Instrument>(512, UartBits::eight, 2'000'000u, &took);
-    print(serial, "  512 bytes to the peer and back on the cross link: ", good, " exact in ",
-          took, " us; FE ", Instrument::frame_errors(), " PE ", Instrument::parity_errors(),
-          " BE ", Instrument::break_errors(), " OE ", Instrument::hw_overruns(), crlf);
-    bench.verdict("every byte comes back exact from the peer, no error counted",
-                  good == 512u && Instrument::frame_errors() == 0u &&
-                      Instrument::break_errors() == 0u && Instrument::hw_overruns() == 0u);
-    Instrument::release();
-    (void)ModeLine::release();
+constexpr const char* mode_line_text = "GP21";
+
+uint32_t link_round_trip(uint32_t count, UartBits bits, uint32_t budget_us, uint32_t* took) {
+    return round_trip<Instrument>(count, bits, budget_us, took);
 }
 
-void ts_wire_errors() {
-    if (!instrument_up(115200, {.bits = UartBits::seven, .parity = UartParity::even},
-                       false)) {
-        bench.verdict("the instrument at 7E1", false);
-        return;
-    }
-    Instrument::clear_errors();
-    print(serial, "  listening at 7E1; the peer is asked for its 64 frames at 8N1 (up to "
-          "6 s) ...", crlf);
-    ModeLine::output(false);
-    spin_us(50'000);
-    ModeLine::set();           // the rising edge is the peer's cue to send
-    const uint32_t t0 = us_now();
-    uint32_t accepted = 0;
-    while (accepted + Instrument::parity_errors() + Instrument::frame_errors() < 64u &&
-           us_now() - t0 < 6'000'000u) {
-        uint8_t in[64];
-        accepted += Instrument::read_bulk(in);
-    }
-    ModeLine::clear();
-    print(serial, "  ", accepted, " bytes accepted, PE ", Instrument::parity_errors(),
-          " FE ", Instrument::frame_errors(), " BE ", Instrument::break_errors(), crlf);
-    bench.verdict("the peer's eighth data bit lands where this end expects parity: parity "
-                  "errors counted and those frames dropped, no frame error",
-                  Instrument::parity_errors() >= 8u && Instrument::frame_errors() == 0u &&
-                      accepted + Instrument::parity_errors() == 64u);
-    Instrument::release();
-    (void)ModeLine::release();
-}
+// THE LETTERS, over the names above (the two suites' one body).
+#include "../../../rp2040/src/apps/rp_uart_pair.hpp"
 
 // =============================================================================
 // y, w - the host-assisted letters (brio stress), by name
@@ -958,6 +925,15 @@ void tt_tx_idle() {
                   "bit, within a per cent of 9600 baud",
                   falls == 8u && span * 100u >= frames_us * 99u && span * 100u <= frames_us * 101u);
     Instrument::release();
+
+    // AND UNDER THE LOOP-BACK: does the pad still carry the frames?
+    uint32_t looped = 0;
+    const uint32_t lbe_falls = loopback_pad_falls<Pin<4>>(&looped);
+    print(serial, "  the same 8 frames with the loop-back on: ", looped, " looped back, ", lbe_falls,
+          " falls on GP4", crlf);
+    bench.verdict("UNDER THE LOOP-BACK THE TRANSMIT PAD STILL CARRIES THE FRAMES: all eight looped back "
+                  "and eight start bits on GP4 - a loop-back letter's traffic reaches the far end",
+                  looped == 8u && lbe_falls == 8u);
 }
 
 void banner() {
@@ -997,9 +973,9 @@ int main() {
     bench.letter('e', "bulk traffic on the loop, five rungs to 3 Mbaud", pair::guarded<bench, clock, te_bulk>);
     bench.letter('t', "tx_idle() on the pad: the last stop bit", pair::guarded<bench, clock, tt_tx_idle>);
     bench.letter('f', "THE SECOND FUNCTION COLUMN: UART1 on GP6/GP7", tf_second_column);
-    bench.letter('p', "the wire against the peer, 512 bytes", pair::guarded<bench, clock, tp_wire>, false);
+    bench.letter('p', "the wire against the partner's uart_peer, 512 bytes", pair::guarded<bench, clock, tp_wire>);
     bench.letter('s', "the error attribution on the wire: 7E1 against the peer's 8N1",
-                 pair::guarded<bench, clock, ts_wire_errors>, false);
+                 pair::guarded<bench, clock, ts_wire_errors>);
     bench.letter('y', "HOST: the console's ladder through the probe's bridge (brio stress)",
                  ty_console_ladder, false);
     bench.letter('w', "HOST: the console at 8N1 fed 8E1 (brio stress)", tw_console_errors,

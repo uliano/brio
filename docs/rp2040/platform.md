@@ -133,6 +133,14 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
   bootrom and the stage - core 0 alone: SYSRESETREQ is one core's
   ([reset.md](reset.md)); the DHCSR write after it leaves the core
   faulting on BKPT as a probe-less power-on would.
+  AND IT RESETS NO PERIPHERAL: a block the previous image brought up and
+  the next does not touch runs on under it. Measured on the WeAct
+  RP2040: under a console image, UART1 found enabled (UARTCR 0x301, out
+  of reset) with GP4 under its function and idling high, left by a serial
+  peer flashed before it - the desk partner's receiver saw a driven line
+  where a dark board would have left its pad pulled down. Every brio
+  driver resets its own block at `init()`; what an image does not use is
+  the previous image's until a power-on or a chip reset.
 - The kernel console runs: three active objects over UART0, the
   SysTick ticker at 1000 Hz, WFI between events, the `LED` command
   toggling GP25 (read back through SIO), the uptime advancing with the

@@ -213,6 +213,28 @@ TEST_CASE("a bring-up leaves the block set up, in the order it promises") {
     CHECK(Port::min_hz_for(115200) == 1'843'200u);
 }
 
+TEST_CASE("a loop-back asked for at bring-up is set before the receiver ever comes on") {
+    fresh();
+    constexpr Clock clock;
+    REQUIRE(Port::init(clock, 115200, {}, UartRx::loopback));
+    CHECK(regs().UARTCR == (UartControl::enable | UartControl::tx_enable |
+                            UartControl::rx_enable | UartControl::loopback));
+    CHECK(Block::loopback());
+    // THE ORDER: LBE with the UART still disabled, so no sample of the pad.
+    CHECK(SimPl011Bench::loopback_at != 0u);
+    CHECK(SimPl011Bench::loopback_at < SimPl011Bench::enabled_at);
+    // The pads are handed over as in any bring-up.
+    CHECK(SimPl011Bench::pad_function[1] == SimPl011::pad_function);
+    CHECK(SimPl011Bench::pad_function[0] == SimPl011::pad_function);
+
+    // The default is the pad, and a bring-up after a loop-back is one too:
+    // the reset in init() clears LBE.
+    REQUIRE(Port::init(clock, 115200));
+    CHECK_FALSE(Block::loopback());
+    CHECK(regs().UARTCR == (UartControl::enable | UartControl::tx_enable |
+                            UartControl::rx_enable));
+}
+
 TEST_CASE("release puts the pads back and the block into reset") {
     fresh();
     constexpr Clock clock;

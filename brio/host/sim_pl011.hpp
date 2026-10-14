@@ -42,9 +42,10 @@
  *
  * WHAT IT RECORDS, beside the registers: the order of the observable
  * acts of a bring-up - which pad was claimed when, and when UARTCR's
- * enable went up - so a test can assert the ORDER the IP file's init()
- * promises (the receive pad before the enable, the transmit pad after
- * it), which is a thing no bench can see.
+ * enable and its loop-back went up - so a test can assert the ORDER the
+ * IP file's init() promises (the receive pad before the enable, the
+ * transmit pad after it, a loop-back asked for before the enable), which
+ * is a thing no bench can see.
  */
 
 #pragma once
@@ -185,6 +186,7 @@ struct SimPl011Bench {
 
     static inline uint32_t stamp = 0;        ///< ticks on every recorded act
     static inline uint32_t enabled_at = 0;   ///< when UARTCR's enable last went up
+    static inline uint32_t loopback_at = 0;  ///< when UARTCR's LBE last went up
     static inline uint32_t resets = 0;
     static inline bool held[2]{};
 
@@ -199,6 +201,7 @@ struct SimPl011Bench {
         }
         stamp = 0;
         enabled_at = 0;
+        loopback_at = 0;
         resets = 0;
         held[0] = held[1] = false;
     }
@@ -296,6 +299,9 @@ struct SimPl011 {
         reg = reg | bits;
         if (is_control(reg) && (bits & UartControl::enable) != 0u) {
             SimPl011Bench::enabled_at = SimPl011Bench::tick();
+        }
+        if (is_control(reg) && (bits & UartControl::loopback) != 0u) {
+            SimPl011Bench::loopback_at = SimPl011Bench::tick();
         }
         refresh_all();
     }
