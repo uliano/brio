@@ -140,7 +140,9 @@ if (!brio::Resets::cycle(brio::ResetBlock::uart0)) { /* the block never came rea
   peer flashed before it - the desk partner's receiver saw a driven line
   where a dark board would have left its pad pulled down. Every brio
   driver resets its own block at `init()`; what an image does not use is
-  the previous image's until a power-on or a chip reset.
+  the previous image's until a power-on or a chip reset - which is why
+  `brio flash` restarts the power-on state machine through the rescue
+  debug port before it programs (cli/bench/flash.py).
 - The kernel console runs: three active objects over UART0, the
   SysTick ticker at 1000 Hz, WFI between events, the `LED` command
   toggling GP25 (read back through SIO), the uptime advancing with the

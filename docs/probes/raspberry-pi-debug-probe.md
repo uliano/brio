@@ -47,8 +47,18 @@ any RP2040 board (SWD on GP2/GP3, the UART on GP4/GP5).
   four cores, serves gdb on either architecture and flashes from either
   side ([../rp2350/README.md](../rp2350/README.md) carries the table and
   the core selection).
-- **The state-independent flash verb**, the RP2350's and no other
-  target's: `brio flash` runs TWO sessions there. The first is a DAP
+- **The rescue before an RP2040 is programmed**: `brio flash` first
+  runs the target script's `RESCUE` path, which restarts the chip's
+  power-on state machine through the rescue debug port and leaves the
+  bootrom halted, then programs and runs core 0 in a second session -
+  so the new image meets core 1 in the bootrom's wait loop and every
+  block in reset, as after a power-on. An SWD reset alone is core 0's
+  SYSRESETREQ, which touches neither core 1 nor any peripheral: core 1
+  went on running the previous image out of the flash being rewritten,
+  and a UART1 the previous image had enabled stayed driving its pad. The
+  `-upload` target and the debug launch do not rescue.
+- **The state-independent flash verb**, the RP2350's: `brio flash` runs
+  TWO sessions there. The first is a DAP
   with NO TARGET behind it, which sets and clears the rescue-restart
   bit in the RP-AP's control register - the one reset that works with
   the clocks stopped and the core power domain down, and the reason it

@@ -60,9 +60,11 @@ two header rows. Design files: WeAct's own repository
   the select), and the two serial suites, `test_rp2040_serial` and
   `test_rp2350_serial`, each against the other board's `uart_peer` (its
   role chosen on wire 9 or 10, the driving board's GP21 into the peer's
-  GP20). A dark image is dark only after a power-on here: the flash's
-  reset is core 0's alone, and a block the previous image brought up -
-  a UART1 driving GP4 - runs on under an image that does not use it
+  GP20). `brio flash` rescues the chip before programming it, so a
+  freshly flashed image starts from the power-on state - core 1 in the
+  bootrom, every block in reset; an SWD reset alone is core 0's and
+  resets no peripheral, so a block the previous image brought up (a
+  UART1 driving GP4) runs on under one that does not use it
   ([../rp2040/platform.md](../rp2040/platform.md)). No other wire is on
   this board: every wire between two of its own pads is retired, and the
   letters that judged one run by name only.

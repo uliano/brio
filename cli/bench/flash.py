@@ -118,27 +118,7 @@ def openocd_args(prog, elffile, target_cfg):
         # opened with the core held in reset and no program running -
         # the same connection whatever state the last image left.
         argv += ["-c", "reset_config srst_only srst_nogate connect_assert_srst"]
-    if "rp2040" in target_cfg:
-        # CORE 1 HELD OFF THROUGH THE PROGRAMMING, THEN BACK TO THE
-        # BOOTROM. The resets OpenOCD issues are core 0's SYSRESETREQ, and
-        # "the NVIC only resets the Cortex-M0+ processor core" (RP2040
-        # datasheet 2.4.2.9) - its own: proc0 and proc1 are separate
-        # domains of the power-on state machine (2.13), and core 1 goes on
-        # running the PREVIOUS image - out of the flash being rewritten -
-        # where the new image expects it in the bootrom's wait loop.
-        # Measured: test_rp2040_sleep failed two runs of two right after
-        # test_rp2040_multicore had left core 1 running, none of five
-        # after any other image - and three of three passed after it
-        # once core 1 was held off and released as here. So the PSM's
-        # FRCE_OFF holds proc1 down before `program` (a register outside
-        # both cores' domains, kept through core 0's resets), is cleared
-        # after it - core 1 powers up into the bootrom and waits there,
-        # as after a power-on - and only then is core 0 run.
-        argv += ["-c", "init",
-                 "-c", "mww 0x40010004 0x00010000"]
     argv += ["-c", "program %s verify" % elffile]
-    if "rp2040" in target_cfg:
-        argv += ["-c", "mww 0x40010004 0x00000000"]
     if "stm32g0" in target_cfg:
         # AND THE DEBUG-IN-STOP BITS ARE TAKEN BACK DOWN, AFTER THE LAST
         # RESET. OpenOCD's own target/stm32g0x.cfg sets DBGMCU_CR.DBG_STOP
@@ -168,6 +148,27 @@ def openocd_args(prog, elffile, target_cfg):
     argv += ["-c", "mww 0xE000EDF0 0xA05F0000",
              "-c", "exit"]
     return argv
+
+
+def rp2040_rescue_args(prog, target_cfg):
+    """THE RESCUE BEFORE AN RP2040 IS PROGRAMMED: the whole chip reset, as a
+    power-on would leave it. The resets OpenOCD issues are core 0's
+    SYSRESETREQ, and "the NVIC only resets the Cortex-M0+ processor core"
+    (RP2040 datasheet 2.4.2.9) - its own, touching neither core 1 nor any
+    peripheral. So core 1 went on running the PREVIOUS image out of the
+    flash being rewritten, where the new image expects it in the
+    bootrom's wait loop (measured: test_rp2040_sleep failed two runs of
+    two right after test_rp2040_multicore), and a block the previous image
+    had brought up stayed up under the new one (measured: UART1 enabled
+    under a console image, still driving the pair's wire, since a
+    uart_peer flashed hours before). The rescue debug port instead
+    restarts the power-on state machine (2.13, the target script's
+    `RESCUE` path), every domain with it; the bootrom then halts on the
+    rescue flag, and the programming session that follows starts from a
+    chip in its power-on state - core 1 waiting in the bootrom, every
+    block in reset. One extra OpenOCD session of about a second."""
+    return ([prog.get("openocd") or manifest.OPENOCD] + openocd_interface(prog)
+            + ["-c", "adapter speed 1000", "-c", "set RESCUE 1", "-f", target_cfg])
 
 
 def wch_openocd_args(prog, elffile):
@@ -498,6 +499,12 @@ def cmd_flash(args):
         elffile = os.path.join("build-cmake", preset, args.app + ".elf")
         if not os.path.isfile(os.path.join(ROOT, elffile)):
             die("no %s after the build" % elffile)
+        if "rp2040" in spec["target_cfg"]:
+            rescue = rp2040_rescue_args(prog, spec["target_cfg"])
+            print("bench: " + " ".join(rescue))
+            rc = subprocess.call(rescue, cwd=ROOT)
+            if rc != 0:
+                return rc
         argv = openocd_args(prog, elffile, spec["target_cfg"])
     elif spec["flash"] == "wch_openocd":
         elffile = os.path.join("build-cmake", preset, args.app + ".elf")
