@@ -610,4 +610,10 @@ on most paths ([../samc21/platform.md](../samc21/platform.md)); the
 STM32G0 places it too, its SPI host and USART task gaining behind a
 vector left in the flash, and the STM32F4 is measured to lose
 ([../stm32g0/platform.md](../stm32g0/platform.md),
-[../stm32f4/platform.md](../stm32f4/platform.md)).
+[../stm32f4/platform.md](../stm32f4/platform.md)); on the RP2040 and
+the RP2350, which execute in place behind a cache, the placement buys
+the cold path and costs the warm one its call
+([../rp2040/platform.md](../rp2040/platform.md),
+[../rp2350/platform.md](../rp2350/platform.md)); the CH32V203 and the
+CH32V303 run from a zero-wait window SRAM never beats, and do not
+offer it ([../ch32vx03/platform.md](../ch32vx03/platform.md)).
