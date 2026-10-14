@@ -101,7 +101,10 @@ third reads the array's erased pattern
   FT), and the far board's SPI2 select idles high: S1 stays on whenever
   the CH32V203 board runs, so the select never back-feeds an unpowered
   chip through PA4's clamp. The I2C pull-ups are the far board's, so a
-  bus with that board unpowered has none.
+  bus with that board unpowered has none. The two serial wires carry 4.5
+  Mbaud both ways with this board's transmit pad at the fast class and
+  at the slow one ([../ch32vx03/usart.md](../ch32vx03/usart.md), the
+  pair's section).
 - **The jumpers the suites want**, every one on the board itself - SPI2
   against SPI3 on SPI3's default column (PB12-PA15, PB13-PB3, PB14-PB4,
   PB15-PB5, the same four pads carrying I2S2 against I2S3 and - SPI3's

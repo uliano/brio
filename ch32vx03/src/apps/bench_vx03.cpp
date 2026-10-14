@@ -1556,10 +1556,15 @@ using LoopTxe = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, 
 using LoopDma = Uart<2, Plat, loop_ring, loop_ring, UartFormat{}, LoopTxEngine, LoopRxEngine>;
 using LoopRes = Usart<2>;
 
-/// Whether the part has the fourth port the pair needs: UART4 is the
-/// CH32V203C8's, RB's and the CH32V303's, and not the 32 KB tier's
-/// (parts/<part>.hpp). A part without it declines the letter by name.
-constexpr bool uart_pair_part = device::has_usart(4u);
+/// Whether the part has the fourth port the pair needs and a board that
+/// keeps the pair: UART4 is the CH32V203C8's, RB's and the CH32V303's, and
+/// not the 32 KB tier's (parts/<part>.hpp); the CH32V303 board's crossed
+/// pair is retired - its UART4 default pads PC10/PC11 are the SPI link of
+/// the desk pair (docs/boards/ch32v303-evt.md) - and the serial transport's
+/// cost there is the two-board key's (test_vx03_serial). A part without it
+/// declines the letter by name.
+constexpr bool v303_bench = device::device_class == DeviceClass::v30x_d8;
+constexpr bool uart_pair_part = device::has_usart(4u) && !v303_bench;
 
 /// The stimulus side of the pair, formed only where the fourth port
 /// exists: every name depends on `on`, so a part without UART4 never
@@ -1842,9 +1847,15 @@ void tu_uart() {
         }
         bench.verdict("the pair came up at every rate", all_up);
     } else {
-        print(serial, "  letter u declined on this part: no UART4, so no crossed pair to measure the "
-                      "transport against",
-              crlf);
+        if constexpr (v303_bench) {
+            print(serial, "  letter u declined on the CH32V303: the board's crossed pair is retired - UART4's "
+                          "default pads PC10/PC11 are the SPI link of the desk pair",
+                  crlf);
+        } else {
+            print(serial, "  letter u declined on this part: no UART4, so no crossed pair to measure the "
+                          "transport against",
+                  crlf);
+        }
     }
     bench.verdict("ran", true);
 }
@@ -2543,9 +2554,10 @@ BRIO_CH32_VECTOR(dma1_channel6_handler) {
 
 BRIO_CH32_LEAF_VECTOR(usart2_handler) { loop_usart_vector(); }
 
-/// The stimulus's slot on the CH32V303; nothing in the CH32V203's vector
-/// table names this body.
-BRIO_CH32_VECTOR(dma2_channel5_handler) { (void)stim_dma_vector<2, 5>(); }
+/// The stimulus's slot on the CH32V303, where letter u declines and the
+/// body is empty: bound LEAF (the vector guard's candidate); nothing in the
+/// CH32V203's vector table names it.
+BRIO_CH32_LEAF_VECTOR(dma2_channel5_handler) { (void)stim_dma_vector<2, 5>(); }
 
 BRIO_CH32_LEAF_VECTOR(uart4_handler) { stim_isr(); }
 

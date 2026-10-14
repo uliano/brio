@@ -17,9 +17,9 @@
 // PB1 at 48 (CCR exact at both speeds) and the timers of both buses at 96
 // MHz - FOUR TIMES the 24 MHz tick usart_link.hpp counts time in, so a
 // timer at prescaler 3 counts protocol ticks exactly (the static_asserts
-// below). The SPI peer, which has no I2C, runs the same crystal at 144
-// MHz instead (its own time base below: a client's bus at twice the
-// fastest host's SCK).
+// below). The SPI peer and the serial peer, which have no I2C, run the
+// same crystal at 144 MHz instead (their time bases below: a client's bus
+// at twice the fastest host's SCK, a port's at the far port's 4.5 Mbaud).
 //
 // THE LABEL is the part number after its CH32 prefix ("V203C8",
 // "V303VC"), NUL padded to eight characters: with two parts of this
@@ -85,6 +85,21 @@ inline bool start_spi_clock(bool& crystal) {
     crystal = SpiPeerClock::init();
     return crystal || SpiHsiClock::init();
 }
+
+/// THE SERIAL PEER'S TIME BASE is the same 144 MHz: USART3 and UART4
+/// count PCLK1, and 18.3's divisor floor of 16 on a 72 MHz bus is the 4.5
+/// Mbaud both desk ports reach - the far port's top, so the peer's bus
+/// must be as fast; and a PB1 timer then counts 144 MHz, SIX core cycles
+/// a protocol tick, so every edge the waveform engine places and every
+/// span the receiver stamps converts to ticks exactly.
+using UsartPeerClock = SpiPeerClock;
+static_assert(UsartPeerClock::pclk1_hz == 72'000'000u && UsartPeerClock::pclk1_hz / 16u == 4'500'000u,
+              "18.3: a divisor of 16 on a 72 MHz PB1 is 4.5 Mbaud");
+static_assert(UsartPeerClock::timclk1_hz == UsartPeerClock::hz && UsartPeerClock::hz % tick_hz == 0u,
+              "a PB1 timer counts HCLK, a whole number of cycles a protocol tick");
+inline constexpr uint32_t usart_cycles_per_tick = UsartPeerClock::hz / tick_hz;
+
+inline bool start_usart_clock(bool& crystal) { return start_spi_clock(crystal); }
 
 /// The part number after its CH32 prefix, NUL padded (the header).
 inline void label(char out[8]) {

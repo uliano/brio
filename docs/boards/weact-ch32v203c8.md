@@ -56,7 +56,10 @@ reads `0x20310500` and the unique identifier's two factory words
   select inputs: it answers at the slowest slew class, and even so loses
   frames in modes 1 and 2 below 9 MHz while answering - exact while only
   listening ([../ch32vx03/spi.md](../ch32vx03/spi.md), the pair's
-  section).
+  section). The two serial wires carry 4.5 Mbaud both ways with this
+  board's transmit pad at every class measured - fast, medium and slow -
+  every rung of the two-board ladder exact
+  ([../ch32vx03/usart.md](../ch32vx03/usart.md), the pair's section).
 - **The jumpers on the board itself**, each kept because a letter no peer
   can judge rides it: USART2 crossed with UART4 on their default pads
   (PA2 to PB1, PB0 to PA3: the fourth port and DMA1's eighth channel),

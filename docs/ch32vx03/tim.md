@@ -121,6 +121,21 @@ CH32V30x_D8 for the four CH32V303. Driver:
   two channels on one input - which is PWM input mode - or, on a
   CH32V303 whose lot has it, the dual-edge register above, which is a
   different register and not a CCER code.
+- **A FORCED LEVEL OR A TOGGLE WAITS FOR A RUNNING COUNTER.** An output
+  channel's OCyREF is evaluated while the counter runs and held while it
+  is stopped: on TIM2 (the CH32V203C8T6) and TIM3 (the CH32V303VCT6), a
+  channel forced active on a running counter drives its pad high; the
+  counter stopped, the pad stays high, and forced inactive it STILL stays
+  high, until the counter runs again; a configure() with its update event,
+  the counter stopped, moves nothing either. A counter that NEVER RAN
+  holds its outputs LOW, forced active or not. So a program that forces a
+  level - the serial peer's waveform engine, which hands a pad to a
+  timer - starts the counter first and stops it only with the pad at the
+  level it is to keep ([usart.md](usart.md), "This part as the desk's instrument").
+- **The one pulse returns the line by itself**: OPM with PWM mode 1, a
+  144-count pulse low from the compare to the reload - the pad 144 to 160
+  cycles low on an 8-cycle sampler on both parts, CEN cleared by the
+  update and the pad high again with the counter stopped at zero.
 - **The input path of a channel is live whatever CCyS says**, so a
   channel driving its own pad is captured by another channel of the same
   timer through the INDIRECT mapping. That is the wireless instrument of
@@ -245,6 +260,14 @@ CH32V30x_D8 for the four CH32V303. Driver:
   the enables (`*_dma`) are this driver's verbs and the channel is the
   DMA chapter's, which measures TIM5's, TIM6's and TIM7's updates on
   DMA2 ([dma.md](dma.md)).
+- **A compare request keeps up with edges 14 core cycles apart and not
+  12.** Sixty-four toggles a list, the next compare value streamed by
+  DMA1 at very_high into CHxCVR on each match (CCyDE, no preload), the
+  counter at 144 MHz with no prescaler and the core polling the channel's
+  flag: at 14 cycles apart and above every list completed on time, on
+  both channels and both parts; at 12 and below a toggle was missed and
+  the list completed a counter wrap late. A list whose edges come closer
+  than that is not one this path can play.
 
 ## Types and verbs
 

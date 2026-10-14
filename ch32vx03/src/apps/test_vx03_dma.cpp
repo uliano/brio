@@ -28,17 +28,24 @@
 // round trip: the letter says whether the strap is there (a plain output
 // on one pad read on the other, both levels), bangs the line when it is
 // not and goes round it when it is; the transmit half needs no listener
-// and runs either way. On the CH32V303's evaluation board the same two
-// pads are wired to UART4's instead (PA2 to PC11, PC10 to PA3): letter g
-// finds no strap there and says so, and letter n takes those two wires,
-// each one looked for the same way before it is used.
+// and runs either way; neither desk board carries it.
+//
+// THE CH32V303'S PAIR LETTERS TAKE THE FAR CHIP. The evaluation board's
+// crossed pair is retired - UART4's default pads PC10/PC11 are the desk
+// pair's SPI link - so on that part letters n, q and r are the SECOND
+// KEY `y`'s (util/testbench.hpp's TwoKeyTestBench): UART4 on its second
+// column (PB0/PB1, DMA2's channels 5 and 3), the far CH32V203C8's
+// usart_peer the sender and the echo, driven in band over the link
+// (vx03_link_dut.hpp); they fail loudly with nobody there, so `z` never
+// runs them. On the CH32V203 letters q and r stay in `z`, on the core
+// board's crossed pair.
 //
 // THE PADS. PA2 and PA3 in letters g and p (PA3 the banged line when the
-// strap is absent), and on the CH32V303 PA2, PA3, PC10 and PC11 in letter n;
-// in letters q and r PA3 and the fourth port's TX pad - PC10 on the
-// CH32V303, PB0 on the CH32V203 - which the board's crossed pair wires to
-// it (each letter looks for that wire first, and says so when it is not
-// there). NEVER
+// strap is absent); on the CH32V203, in letters q and r, PA3 and the
+// fourth port's TX pad PB0, which the board's crossed pair wires to it
+// (each letter looks for that wire first, and says so when it is not
+// there); on the CH32V303, in letters n, q and r, PB0 and PB1 - the
+// pair's serial link. NEVER
 // TOUCHED: PA9/PA10 (the console), PA13/PA14 (the debug port), PA11/PA12
 // (the USB pads), PC14/PC15 and PD0/PD1 (the crystals), PA0 (the CH32V203
 // board's KEY) - and PB2, the CH32V203 board's LED, left undriven, as in
@@ -111,7 +118,11 @@
 //      DMA1's channel 3, a lower number than the ring's 6, at the copy
 //      engine's default level: every byte in order, no overrun, no channel
 //      given up; the copy's rate against its rate alone; and the CONTROL,
-//      the same load against a ring told rx_priority = low, which overruns
+//      the same load against a ring told rx_priority = low, which overruns.
+//      ON THE CH32V303 (the second key): the far chip's counting blast into
+//      UART4's ring of 512 on DMA2's channel 3, the copy on DMA2's channel
+//      1, the far chip stating its rate and UART4's transmit engine timed
+//      into its sink
 //   r  AN OVERRUN AT A MESSAGE'S TAIL, both ends timed against the wire
 //      at 1 Mbaud first: a copy at the ring's own level on a
 //      lower channel starving the ring under a message's last frames, the
@@ -121,7 +132,11 @@
 //      counted once, the bytes before it delivered; the next message whole;
 //      and a frame the CPU reads from under a starved channel - what the
 //      overrun's clear would do to a frame landing between its two loads -
-//      followed to see what the channel does with the request it raised
+//      followed to see what the channel does with the request it raised.
+//      ON THE CH32V303 (the second key): the far chip's messages into
+//      UART4's ring on DMA2, the copy on DMA2's channel 1 started when 28
+//      have landed, and the staged frame's copy started on its start bit's
+//      fall, seen on the pad
 // and on the CH32V303 alone, the second controller:
 //   i  MEMORY TO MEMORY ON DMA2: its gate, a kilobyte copied on each of
 //      the eleven channels and verified, and every completion flag found
@@ -139,13 +154,12 @@
 //      refused by DMA1 (11.2.3's note) and moved by DMA2 - and then handed
 //      to DMA1 through the piecewise verbs, which never see a transfer
 //      whole, to show whether this die's lot is one the note restricts
-//   n  TWO CONTROLLERS ON ONE PAIR OF WIRES: USART2's engines on DMA1 and
-//      UART4's on DMA2, a run each way across the board's two wires -
-//      when the wires are there - with what each receiver framed while
-//      its pad floated drained and counted first, each transmit engine
-//      timed against the wire after, and both ports released
-//      at the end, since a receiver left running keeps its request on
-//      its channel
+//   n  UART4'S ENGINES ON DMA2 (the second key): a run out of the transmit
+//      engine on channel 5 round the far chip's echo and back through the
+//      receive engine on channel 3, byte for byte - table 11-3's slots
+//      answering real requests - and the transmit engine timed against the
+//      wire into the far chip's sink, the port released at the end, since a
+//      receiver left running keeps its request on its channel
 //
 // build: boards = v203c6,v203c8,v303vc
 // build: groups = abcdef,gho,pqr
@@ -166,6 +180,10 @@
 #include "util/ring.hpp"
 #include "util/testbench.hpp"
 
+// The DUT's half of the desk pair's serial link: the CH32V303's letters n,
+// q and r take the far chip through it.
+#include "vx03_link_dut.hpp"
+
 namespace {
 
 using namespace brio;
@@ -177,7 +195,7 @@ constexpr Serial serial;
 using SysClock = Clock<ClockSource::pll, 144'000'000>;
 constexpr SysClock clock;
 
-TestBench<Serial> bench;
+TwoKeyTestBench<Serial, 'y'> bench;
 
 /// The transport letter g drives: USART2 with both engines, each on the
 /// channel table 11-5 gives that direction (7 out, 6 in). The console
@@ -1744,7 +1762,7 @@ void to_ring() {
 
 /// What DMA2's handlers serve besides the bare channel: the two block
 /// engines of letter l, and UART4's transport in letter n.
-enum class Dma2Role : uint8_t { bare, player, source, uart4 };
+enum class Dma2Role : uint8_t { bare, player, source };
 
 template <uint8_t C = 2>
 struct Dma2State {
@@ -1782,26 +1800,6 @@ struct Dma2Engines {
     using Paced = Tim<timer>;
     using Player = DmaLoopEngine<C, Row::channel, uint16_t>;
     using Source = DmaPingPongEngine<C, Row::channel, uint16_t>;
-};
-
-/// UART4 with both its engines, where table 11-3 puts them: DMA2's channel
-/// 5 out and channel 3 in. The receive engine's edge states live in the
-/// port's own vector, which uart4_vector() serves.
-template <uint8_t C = 2, DmaRequest tx = DmaRequest::uart4_tx, DmaRequest rx = DmaRequest::uart4_rx>
-struct Dma2Cross {
-    using TxRow = DmaRequestOf<tx>;
-    using RxRow = DmaRequestOf<rx>;
-    static_assert(TxRow::controller == C && RxRow::controller == C,
-                  "table 11-3: UART4's two requests are DMA2's on this class");
-    using Tx = DmaTxEngine<C, TxRow::channel>;
-    using Rx = DmaRxEngine<C, RxRow::channel>;
-    using Port = Uart<4, P, 128, 128, UartFormat{}, Tx, Rx>;
-    /// The two wires between the ports: USART2's pads and UART4's
-    /// default column, whose port C only the larger packages bond.
-    using Out2 = Pin<'A', 2>;
-    using In2 = Pin<'A', 3>;
-    using Out4 = Pin<Port::pads.tx.port, Port::pads.tx.pin>;
-    using In4 = Pin<Port::pads.rx.port, Port::pads.rx.pin>;
 };
 
 template <uint8_t C>
@@ -2277,121 +2275,6 @@ void tm_dma_64k() {
     }
 }
 
-// ===========================================================================
-// n - two controllers on one pair of wires: USART2 on DMA1, UART4 on DMA2
-// ===========================================================================
-template <uint8_t C = 2>
-void tn_dma2_uart4() {
-    if constexpr (C <= device::dma_controller_count && device::has_usart(4)) {
-        all_off();
-        all_off2<C>();
-        using X = Dma2Cross<C>;
-        using Port4 = typename X::Port;
-        using S = Dma2State<C>;
-        // UART4's default column is PC10/PC11; USART2's is PA2/PA3.
-        static_assert(Port4::pads.tx == Pad{'C', 10} && Port4::pads.rx == Pad{'C', 11});
-        const bool forth = strapped<typename X::Out2, typename X::In4>();
-        const bool back = strapped<typename X::Out4, typename X::In2>();
-        print(serial, "  the wires: PA2 to PC11 ", forth ? "in place" : "ABSENT",
-              ", PC10 to PA3 ", back ? "in place" : "ABSENT", crlf);
-        if (!forth || !back) {
-            bench.verdict("the round trip across the two controllers is skipped and says so: it "
-                          "needs USART2's pads wired to UART4's",
-                          true);
-            all_off2<C>();
-            return;
-        }
-
-        uart_mode = true;
-        S::role = Dma2Role::uart4;
-        const bool opened = Loop::init(clock, 115200) && Port4::init(clock, 115200);
-        X::In2::input(PinPull::up);
-        X::In4::input(PinPull::up);
-
-        // WHAT A RECEIVER TAKES WHILE ITS PAD FLOATS. Each port's init
-        // leaves its receive pad a floating input for the peer to drive,
-        // and between the first port's init and the second's the peer's
-        // transmit pad is not driven yet: whatever the receiver framed
-        // then is in its ring. It is drained - and counted - before either
-        // direction is measured.
-        wait_us(2000);
-        const uint16_t stale2 = drain<Loop>();
-        const uint16_t stale4 = drain<Port4>();
-
-        // USART2 out on DMA1's channel 7, UART4 in on DMA2's channel 3.
-        static const uint8_t forth_msg[] = "one controller out, the other one in";
-        constexpr uint16_t forth_len = sizeof(forth_msg) - 1u;
-        (void)Loop::write_bulk(std::span<const uint8_t>(forth_msg, forth_len));
-        uint8_t seen[64] = {};
-        uint16_t got = 0;
-        Stopwatch w;
-        while (got < forth_len && w.us() < 50'000UL) {
-                uint8_t b = 0;
-            while (got < forth_len && Port4::read_byte(b)) {
-                seen[got++] = b;
-            }
-        }
-        bool same_forth = got == forth_len;
-        for (uint16_t i = 0; i < got && same_forth; ++i) {
-            same_forth = seen[i] == forth_msg[i];
-        }
-        print(serial, "  USART2 (DMA1) to UART4 (DMA2): ", got, " of ", forth_len, " bytes", crlf);
-
-        // UART4 out on DMA2's channel 5, USART2 in on DMA1's channel 6.
-        static const uint8_t back_msg[] = "and back the other way";
-        constexpr uint16_t back_len = sizeof(back_msg) - 1u;
-        (void)Port4::write_bulk(std::span<const uint8_t>(back_msg, back_len));
-        got = 0;
-        Stopwatch r;
-        while (got < back_len && r.us() < 50'000UL) {
-            uint8_t b = 0;
-            while (got < back_len && Loop::read_byte(b)) {
-                seen[got++] = b;
-            }
-        }
-        bool same_back = got == back_len;
-        for (uint16_t i = 0; i < got && same_back; ++i) {
-            same_back = seen[i] == back_msg[i];
-        }
-        print(serial, "  UART4 (DMA2) to USART2 (DMA1): ", got, " of ", back_len,
-              " bytes; faults ", Loop::dma_faults(), " and ", Port4::dma_faults(), crlf);
-        print(serial, "  drained before the runs, framed while a pad floated: ", stale2,
-              " bytes in USART2's ring and ", stale4, " in UART4's", crlf);
-        if (!same_back) {
-            print(serial, "  USART2 received:");
-            for (uint16_t i = 0; i < got; ++i) {
-                print(serial, " ", hex(seen[i]));
-            }
-            print(serial, crlf);
-        }
-        bench.verdict("a run poured out by USART2's engine on DMA1 comes in through UART4's on "
-                      "DMA2, byte for byte - the slots of table 11-3 answering a real request",
-                      opened && same_forth);
-        bench.verdict("and the way back, UART4's transmit engine on DMA2 into USART2's receive "
-                      "engine on DMA1, with no fault counted on either port",
-                      same_back && Loop::dma_faults() == 0u && Port4::dma_faults() == 0u);
-        // The two ends divide PB1 by one arithmetic: each transmit engine's
-        // run timed against the wire at the rate asked.
-        const uint32_t pm2 = wire_permille<Loop>(115200, 256);
-        const uint32_t pm4 = wire_permille<Port4>(115200, 256);
-        print(serial, "  256 frames in ", pm2, " (USART2 on DMA1) and ", pm4,
-              " (UART4 on DMA2) thousandths of their wire time at 115200", crlf);
-        bench.verdict("and both run at the rate asked: each transmit engine's 256 frames in their "
-                      "wire time at 115200, -1 % to +3 %",
-                      wire_ok(pm2) && wire_ok(pm4));
-        // Both ports stopped, not only their channels: a receiver left
-        // running with DMAR set raises its request again on the first noise
-        // frame, and a request that stands on DMA2's channel 3 is what a
-        // later letter's timer request on the same channel would be served
-        // by instead - sixteen items in a few microseconds.
-        uart_mode = false;
-        Port4::release();
-        Loop::release();
-        all_off2<C>();
-        all_off();
-    }
-}
-
 /// The letters of the second controller, registered where there is one:
 /// a template, so a part without DMA2 carries neither their code nor
 /// their prose.
@@ -2404,8 +2287,6 @@ void register_dma2_letters() {
                      tk_dma2_requests<>);
         bench.letter('l', "DMA2: the loop and ping-pong engines", tl_dma2_engines<>);
         bench.letter('m', "the 64 KB rule: DMA1 refuses the span, DMA2 moves it", tm_dma_64k<>);
-        bench.letter('n', "two controllers on one pair of wires: USART2 and UART4",
-                     tn_dma2_uart4<>);
     }
 }
 
@@ -2997,6 +2878,695 @@ void tr_overrun_tail() {
     }
 }
 
+// ===========================================================================
+// THE PAIR'S LETTERS ON THE CH32V303 (the second key `y`): n, q and r with
+// the far chip's usart_peer as the sender
+// ===========================================================================
+//
+// The evaluation board's crossed pair is retired - UART4's default pads
+// PC10/PC11 are the desk pair's SPI link - so on the CH32V303 these three
+// letters take the pair's serial link instead (vx03_link_dut.hpp): UART4 on
+// its SECOND column (PB0/PB1), whose requests are DMA2's channels 5 out
+// and 3 in (table 11-3), and the far chip's usart_peer the sender - its
+// blast a counting stream, gapless, on its crystal. They FAIL loudly when
+// nobody answers, so they run under `y` and never under `z`.
+
+template <bool on>
+struct FarSide {
+    using D = vx03link::Dut<Serial, SysClock>;
+    using TxRow = DmaRequestOf<on ? DmaRequest::uart4_tx : DmaRequest::uart4_tx>;
+    using RxRow = DmaRequestOf<on ? DmaRequest::uart4_rx : DmaRequest::uart4_rx>;
+    static_assert(!on || (TxRow::controller == 2u && RxRow::controller == 2u),
+                  "table 11-3: UART4's two requests are DMA2's on this class");
+    using TxEngine = DmaTxEngine<TxRow::controller, TxRow::channel>;
+    using RxEngine = DmaRxEngine<RxRow::controller, RxRow::channel>;
+    /// The ring of letters q and r, 512 as USART2's is on the CH32V203,
+    /// at the transport's default level; and the same port told low.
+    using Port = Uart<4, P, 512, 64, UartFormat{}, TxEngine, RxEngine, vx03link::column>;
+    using PortLow = Uart<4, P, 512, 64, UartFormat{}, TxEngine, RxEngine, vx03link::column,
+                         UartOptions{.rx_priority = DmaPriority::low}>;
+    using RxChannel = DmaChannel<RxRow::controller, RxRow::channel>;
+    /// THE LOAD: a memory-to-memory copy on DMA2's channel 1, a lower number
+    /// than the ring's 3 - the CH32V203 letters' arrangement on the other
+    /// controller.
+    using Copier = DmaCopyEngine<2, 1>;
+};
+
+/// Which port the link's vectors serve while a far letter runs: 1 Port,
+/// 2 PortLow, 0 neither; and whether DMA2's channel 1 is the far copier's.
+volatile uint8_t far_mode = 0;
+volatile bool far_copy_mode = false;
+volatile bool far_copy_loop = false;
+volatile uint32_t far_copies_done = 0;
+
+template <bool on>
+void far_copy_once() {
+    (void)FarSide<on>::Copier::copy(destination + copy_bytes, destination, copy_bytes);
+}
+
+/// The far letters' prologue: the board's DMA2 and the link found, the far
+/// chip's peer on the far side.
+template <bool on>
+bool far_ready() {
+    using D = typename FarSide<on>::D;
+    all_off();
+    all_off2<2>();
+    if (!D::ensure()) {
+        bench.verdict("the peer is reachable on the pair's serial link", false);
+        return false;
+    }
+    link::Ident d{};
+    if (!D::ident(d) || !D::far_peer(d)) {
+        bench.verdict("the far chip's usart_peer answers", false);
+        return false;
+    }
+    return true;
+}
+
+template <bool on>
+void far_done() {
+    using D = typename FarSide<on>::D;
+    far_mode = 0;
+    far_copy_mode = false;
+    (void)D::command_mode();
+    D::release();
+    all_off2<2>();
+    all_off();
+}
+
+/// What the consumer read of a counting stream, judged byte by byte.
+struct SeqSink {
+    uint32_t got = 0;
+    uint32_t bad = 0;
+    uint8_t expect = 0;
+};
+
+template <typename T>
+void take_seq(SeqSink& s) {
+    for (;;) {
+        const std::span<const uint8_t> run = T::read_span();
+        if (run.empty()) {
+            return;
+        }
+        for (const uint8_t b : run) {
+            if (b != s.expect) {
+                s.bad = s.bad + 1u;
+            }
+            s.expect = static_cast<uint8_t>(b + 1u);
+            s.got = s.got + 1u;
+        }
+        (void)T::consume(static_cast<uint32_t>(run.size()));
+    }
+}
+
+/// The far chip's blast of `blocks` x 4096 counting frames at `baud`,
+/// gapless, into the ring of `T` - the copies back to back on DMA2's
+/// channel 1 beside it when `load`.
+template <bool on, typename T, uint8_t mode>
+Cell far_cell(uint32_t baud, uint16_t blocks, bool load) {
+    using F = FarSide<on>;
+    using D = typename F::D;
+    Cell c{};
+    link::Params a{};
+    a.cfg.rate = baud;
+    a.count = 4096;
+    a.aux16 = blocks;
+    a.ms = 4000;
+    a.value = 0;
+    a.pattern = link::pattern_counting;
+    const bool acted = D::act(link::Op::blast, a);
+    F::D::W::bus_clock(true);
+    F::D::W::reset();
+    far_mode = mode;
+    const bool opened = acted && T::init(clock, baud);
+    F::D::WRx::input(PinPull::up);
+    c.level = static_cast<uint8_t>(F::RxChannel::configuration().priority);
+    const uint16_t f0 = T::dma_faults();
+    far_copies_done = 0;
+    if (load) {
+        F::Copier::stop();
+        F::Copier::arm(DmaPriority::low, true);   // the copy engine's default, the rule's
+        far_copy_mode = true;
+        far_copy_loop = true;
+        far_copy_once<on>();
+    }
+    ring_entries = 0;
+    ring_budget = 0xFFFF'FFFFUL;   // counted, never silenced: the control's starvation is the point
+    ring_watch = true;
+    SeqSink s{};
+    const uint32_t total = static_cast<uint32_t>(blocks) * 4096u;
+    const uint32_t budget_us = 40'000UL + (total * 10UL * 1000UL) / (baud / 1000UL);
+    Stopwatch w;
+    Stopwatch quiet;
+    uint32_t last_got = 0;
+    while (opened && w.us() < budget_us && s.got < total) {
+        take_seq<T>(s);
+        if (s.got != last_got) {
+            last_got = s.got;
+            quiet.start();
+        } else if (s.got != 0u && quiet.us() > 3'000UL) {
+            break;
+        }
+    }
+    far_copy_loop = false;
+    {
+        Stopwatch q;
+        while (F::Copier::busy() && q.us() < 5'000UL) {
+        }
+    }
+    ring_watch = false;
+    ring_budget = ring_entry_budget;
+    take_seq<T>(s);
+    c.us = w.us();
+    c.sent = total;
+    c.got = s.got;
+    c.bad = s.bad;
+    c.entries = ring_entries;
+    c.copies = far_copies_done;
+    c.hw = T::hw_overruns();
+    c.ring = T::rx_overruns();
+    c.faults = static_cast<uint16_t>(T::dma_faults() - f0);
+    T::release();
+    F::Copier::stop();
+    Pfic::disable(dma_channel_irq(2, 1));
+    far_copy_mode = false;
+    far_mode = 0;
+    link::Report r{};
+    (void)D::report(r, 5);
+    return c;
+}
+
+void print_far_cell(const char* what, const Cell& c) {
+    print(serial, "  ", what, ": ", c.got, " of ", c.sent, " bytes, ", c.bad, " out of order, ", c.hw,
+          " hardware overruns, ", c.ring, " ring overruns, ", c.faults, " channels given up; ", c.copies,
+          " copies in ", c.us, " us; UART4's vector ", c.entries, " entries", crlf);
+}
+
+// ---------------------------------------------------------------------------
+// n - UART4's engines on DMA2 against the far chip
+// ---------------------------------------------------------------------------
+
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+void tn_far_uart4() {
+    if constexpr (on) {
+        using F = FarSide<on>;
+        using D = typename F::D;
+        if (!far_ready<on>()) {
+            far_done<on>();
+            return;
+        }
+        static_assert(F::Port::pads.tx == Pad{'B', 0} && F::Port::pads.rx == Pad{'B', 1},
+                      "table 10-26: UART4's second column is PB0/PB1");
+        // A run poured out by the transmit engine on DMA2's channel 5 into
+        // the far chip's echo, and back in through the receive engine on
+        // channel 3.
+        static const uint8_t msg[] = "DMA2 out on channel 5, round the far echo, in on channel 3";
+        constexpr uint16_t len = sizeof(msg) - 1u;
+        link::Params a{};
+        a.cfg.rate = 115'200;
+        a.count = len;
+        a.ms = D::bound_ms(115'200, 2u * len);
+        const bool acted = D::act(link::Op::echo, a);
+        D::W::bus_clock(true);
+        D::W::reset();
+        far_mode = 1;
+        const bool opened = acted && F::Port::init(clock, 115'200);
+        D::WRx::input(PinPull::up);
+        D::wait_for_window();
+        uint8_t b = 0;
+        while (F::Port::read_byte(b)) {
+        }
+        (void)F::Port::write_bulk(std::span<const uint8_t>(msg, len));
+        uint8_t seen[64] = {};
+        uint16_t got = 0;
+        Stopwatch w;
+        while (got < len && w.us() < 50'000UL) {
+            while (got < len && F::Port::read_byte(b)) {
+                seen[got++] = b;
+            }
+        }
+        bool same = got == len;
+        for (uint16_t i = 0; i < got && same; ++i) {
+            same = seen[i] == msg[i];
+        }
+        const uint16_t faults = F::Port::dma_faults();
+        F::Port::release();
+        far_mode = 0;
+        link::Report r{};
+        const bool have = D::report(r, 5);
+        print(serial, "  ", got, " of ", len, " bytes back round the far echo, ", same ? "exact" : "WRONG",
+              "; the far chip counted ", r.count, ", faults ", faults, crlf);
+        bench.verdict("a run poured out by UART4's transmit engine on DMA2 comes back through its receive engine "
+                      "on DMA2 after a second chip echoed it, byte for byte - the slots of table 11-3 answering "
+                      "real requests",
+                      opened && same && have && r.count == len && r.ferr == 0u && faults == 0u);
+        // The engine's run timed on the core's counter, the far chip
+        // sinking it.
+        a = link::Params{};
+        a.cfg.rate = 115'200;
+        a.count = 256;
+        a.ms = D::bound_ms(115'200, 512);
+        const bool sunk = D::act(link::Op::sink, a);
+        D::W::bus_clock(true);
+        D::W::reset();
+        far_mode = 1;
+        const bool up = sunk && F::Port::init(clock, 115'200);
+        D::WRx::input(PinPull::up);
+        D::wait_for_window();
+        const uint32_t pm = up ? wire_permille<typename F::Port>(115'200, 256) : 0u;
+        F::Port::release();
+        far_mode = 0;
+        link::Report s{};
+        (void)D::report(s, 5);
+        print(serial, "  256 frames in ", pm, " thousandths of their wire time at 115200; the far chip counted ",
+              s.count, crlf);
+        bench.verdict("and the transmit engine runs at the rate asked: 256 frames in their wire time at 115200, "
+                      "-1 % to +3 %, every one counted at the far end",
+                      wire_ok(pm) && s.count == 256u && s.ferr == 0u);
+        far_done<on>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// q - the priority rule, the far chip pouring into UART4's ring
+// ---------------------------------------------------------------------------
+
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+void tq_far_priority() {
+    if constexpr (on) {
+        using F = FarSide<on>;
+        using D = typename F::D;
+        if (!far_ready<on>()) {
+            far_done<on>();
+            return;
+        }
+        // The defaults the transport arms: the ring at very_high, its
+        // transmit channel at high (DmaPriority's rule), and the knob.
+        far_mode = 1;
+        (void)F::Port::init(clock, 115200);
+        const DmaPriority ring_level = F::RxChannel::configuration().priority;
+        F::Port::release();
+        far_mode = 2;
+        (void)F::PortLow::init(clock, 115200);
+        const DmaPriority low_level = F::RxChannel::configuration().priority;
+        F::PortLow::release();
+        far_mode = 0;
+        print(serial, "  CFGR.PL of UART4's ring on DMA2: ", static_cast<uint8_t>(ring_level),
+              ", told rx_priority = low ", static_cast<uint8_t>(low_level), crlf);
+        bench.verdict("a Uart arms its receive ring at very_high by default on DMA2 too, and rx_priority moves it",
+                      ring_level == DmaPriority::very_high && low_level == DmaPriority::low);
+
+        // THE TWO ENDS' RATES, which the stream alone cannot tell: the far
+        // chip STATES its blast's rate - its PCLK1 over its divisor, on its
+        // crystal - and UART4's own transmit engine is timed on this core's
+        // counter, the far chip sinking and counting its frames.
+        bool rates_ok = true;
+        for (const uint32_t baud : {1'000'000UL, 4'500'000UL}) {
+            link::Params a{};
+            a.cfg.rate = baud;
+            a.count = 64;
+            a.ms = 200;
+            const bool acted = D::act(link::Op::blast, a);
+            D::W::bus_clock(true);
+            D::W::reset();
+            far_mode = 1;
+            const bool up = acted && F::Port::init(clock, baud);
+            D::WRx::input(PinPull::up);
+            // The far chip starts settle_ms + 2 ms after its ack in its
+            // ticks: the 64 frames awaited, bounded.
+            SeqSink junk{};
+            {
+                Stopwatch w;
+                while (junk.got < 64u && w.us() < 20'000UL) {
+                    take_seq<typename F::Port>(junk);
+                }
+            }
+            F::Port::release();
+            far_mode = 0;
+            link::Report r{};
+            const bool have = D::report(r, 2);
+            const int32_t stated = static_cast<int16_t>(r.aux16);
+            a = link::Params{};
+            a.cfg.rate = baud;
+            a.count = 1024;
+            a.ms = D::bound_ms(baud, 2048);
+            const bool sunk = D::act(link::Op::sink, a);
+            D::W::bus_clock(true);
+            D::W::reset();
+            far_mode = 1;
+            const bool up2 = sunk && F::Port::init(clock, baud);
+            D::WRx::input(PinPull::up);
+            D::wait_for_window();
+            const uint32_t pm = up2 ? wire_permille<typename F::Port>(baud, 1024) : 0u;
+            F::Port::release();
+            far_mode = 0;
+            link::Report k{};
+            (void)D::report(k, 5);
+            print(serial, "  at ", baud, " baud: the far blast's rate stated ",
+                  (r.flags & link::report_rate_stated) != 0u ? "" : "NOT ", stated, " ppm (", junk.got,
+                  " frames here); UART4's transmit engine 1024 frames in ", pm,
+                  " thousandths of their wire time, the far chip counting ", k.count, crlf);
+            rates_ok = rates_ok && up && have && (r.flags & link::report_rate_stated) != 0u &&
+                       stated == D::divisor_ppm(baud) && junk.got == 64u && wire_ok(pm) && k.count == 1024u &&
+                       k.ferr == 0u;
+        }
+        bench.verdict("BOTH ENDS RUN AT THE RATE ASKED, which the stream alone cannot tell: the far chip states its "
+                      "rate exact at 1 and 4.5 Mbaud, and UART4's transmit engine runs in its wire time on this "
+                      "core's counter, -1 % to +3 %, every frame counted at the far end",
+                      rates_ok);
+
+        // The copy alone: its own rate, the reference for its cost.
+        F::Copier::stop();
+        F::Copier::arm(DmaPriority::low, true);
+        far_copy_mode = true;
+        far_copies_done = 0;
+        far_copy_loop = true;
+        Stopwatch w;
+        far_copy_once<on>();
+        while (w.us() < 50'000UL) {
+        }
+        far_copy_loop = false;
+        while (F::Copier::busy()) {
+        }
+        const uint32_t alone = far_copies_done;
+        const uint32_t alone_us = w.us();
+        F::Copier::stop();
+        Pfic::disable(dma_channel_irq(2, 1));
+        far_copy_mode = false;
+        print(serial, "  the copy alone: ", alone, " copies of ", copy_bytes, " bytes in ", alone_us, " us", crlf);
+
+        const Cell m1 = far_cell<on, typename F::Port, 1>(1'000'000UL, 4, true);
+        print_far_cell("1 Mbaud, the copies back to back", m1);
+        bench.verdict("AN UNPACED COPY ON A LOWER DMA2 CHANNEL, BACK TO BACK, DOES NOT STARVE UART4'S RING AT 1 "
+                      "MBAUD: every byte of the far chip's 16 KB in order, no overrun, no channel given up",
+                      m1.got == m1.sent && m1.bad == 0u && m1.hw == 0u && m1.ring == 0u && m1.faults == 0u &&
+                          m1.copies > 0u);
+        const Cell m4 = far_cell<on, typename F::Port, 1>(4'500'000UL, 16, true);
+        print_far_cell("4.5 Mbaud, the copies back to back", m4);
+        bench.verdict("... nor at 4.5 Mbaud, the link's top rate: every byte of 64 KB in order, no overrun, no "
+                      "channel given up",
+                      m4.got == m4.sent && m4.bad == 0u && m4.hw == 0u && m4.ring == 0u && m4.faults == 0u &&
+                          m4.copies > 0u);
+        const auto per_mille = [&](const Cell& c) {
+            return static_cast<uint32_t>((static_cast<uint64_t>(c.copies) * alone_us * 1000ULL) /
+                                         (static_cast<uint64_t>(c.us) * (alone != 0u ? alone : 1u)));
+        };
+        print(serial, "  the copy's rate beside the ring, against alone: ", per_mille(m1), "/1000 at 1 Mbaud, ",
+              per_mille(m4), "/1000 at 4.5 Mbaud", crlf);
+        // THE CONTROL: the same load against the ring told low - the copy
+        // on channel 1 wins every tie against channel 3.
+        const Cell l1 = far_cell<on, typename F::PortLow, 2>(1'000'000UL, 2, true);
+        print_far_cell("1 Mbaud, the ring at low (the control)", l1);
+        bench.verdict("and the load is real: with the ring told rx_priority = low the same copies overrun it",
+                      l1.level == static_cast<uint8_t>(DmaPriority::low) && l1.hw > 0u);
+        far_done<on>();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// r - an overrun at a message's tail, the far chip the sender
+// ---------------------------------------------------------------------------
+
+/// The bytes the ring's channel has written since `at`.
+template <bool on>
+uint16_t far_arrived_since(uint16_t at) {
+    return static_cast<uint16_t>((at - FarSide<on>::RxChannel::remaining()) & (fat_ring - 1u));
+}
+
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+void tr_far_overrun_tail() {
+    if constexpr (on) {
+        using F = FarSide<on>;
+        using D = typename F::D;
+        using Port = typename F::Port;
+        if (!far_ready<on>()) {
+            far_done<on>();
+            return;
+        }
+        constexpr uint16_t msg = 32;
+        constexpr uint16_t lead = 28;
+        // One message from the far chip: `act` it, the ring brought up, and
+        // the first frame awaited with the mask on - the far chip starts
+        // settle_ms + 2 ms after its ack, this end's init in between.
+        const auto message = [&](uint8_t seed, uint16_t count) {
+            link::Params a{};
+            a.cfg.rate = 1'000'000;
+            a.count = count;
+            a.ms = 200;
+            a.value = seed;
+            a.pattern = link::pattern_counting;
+            return D::act(link::Op::blast, a);
+        };
+        // The ring on the link, opened once for the whole letter; the
+        // command path below borrows the port between messages and gives it
+        // back to the ring through init().
+        const auto ring_up = [&]() {
+            D::W::bus_clock(true);
+            D::W::reset();
+            far_mode = 1;
+            const bool ok = Port::init(clock, 1'000'000UL);
+            D::WRx::input(PinPull::up);
+            return ok;
+        };
+        F::Copier::stop();
+        F::Copier::arm(DmaPriority::very_high, false);   // the ring's level, on a lower channel: it wins the tie
+
+        // 1. THE OVERRUN AT A MESSAGE'S TAIL: when 28 of 32 have landed the
+        // copy starves the ring for nine frame times, the tail overruns it,
+        // and the copy's end lets the channel take the frame DATAR held -
+        // ORE left up with RXNE down and no frame after it - all under the
+        // mask, so the vector first looks after that.
+        const bool sent1 = message(0x40, msg);
+        const bool opened = sent1 && ring_up();
+        const uint16_t hw0 = Port::hw_overruns();
+        const uint16_t f0 = Port::dma_faults();
+        const uint32_t k0 = Port::rx_skips();
+        const uint16_t at0 = F::RxChannel::remaining();
+        uint16_t before_copy = 0;
+        bool copied = false;
+        {
+            P::CriticalSection cs;
+            Stopwatch w;
+            while (far_arrived_since<on>(at0) < lead && w.us() < 20'000UL) {
+            }
+            before_copy = far_arrived_since<on>(at0);
+            copied = F::Copier::copy(destination + copy_bytes, destination, copy_bytes);
+            while (F::Copier::busy()) {
+            }
+            Stopwatch t;
+            while (t.us() < 300UL) {   // the tail sent and the line idle
+            }
+            ring_entries = 0;
+            ring_watch = true;
+        }
+        wait_us(3'000);
+        ring_watch = false;
+        const uint32_t entries = ring_entries;
+        const uint16_t hw = static_cast<uint16_t>(Port::hw_overruns() - hw0);
+        const uint16_t faults = static_cast<uint16_t>(Port::dma_faults() - f0);
+        const uint32_t skips = Port::rx_skips() - k0;
+        uint16_t got1 = 0;
+        bool lead_in_order = true;
+        {
+            uint8_t b = 0;
+            while (Port::read_byte(b)) {
+                if (got1 < lead && b != static_cast<uint8_t>(0x40u + got1)) {
+                    lead_in_order = false;
+                }
+                ++got1;
+            }
+        }
+        lead_in_order = lead_in_order && got1 >= lead && got1 < msg;
+        const uint16_t ctlr1 = Port::Resource::regs().CTLR1;
+        const bool waiting_for_the_end = (ctlr1 & usart_idleie) != 0u && (ctlr1 & usart_rxneie) == 0u;
+        print(serial, "  a message of ", msg, " from the far chip, the copy at its tail (", before_copy,
+              " landed, the copy ", copied ? "run" : "REFUSED", "): ", got1, " bytes delivered, UART4's vector ",
+              entries, " entries, ", hw, " overruns counted, ", skips, " gaps, ", faults,
+              " channels given up; the vector ", waiting_for_the_end ? "waiting for the end" : "NOT waiting for the end",
+              crlf);
+        bench.verdict("AN OVERRUN AT A MESSAGE'S TAIL, ORE up with nothing in DATAR, on DMA2: no storm - a handful of "
+                      "entries, no channel given up - the overrun counted once and the gap once, the bytes before "
+                      "it delivered in order",
+                      opened && copied && entries <= 8u && faults == 0u && hw == 1u && skips == 1u && lead_in_order &&
+                          waiting_for_the_end);
+        Port::release();
+        far_mode = 0;
+        link::Report r{};
+        (void)D::report(r, 2);
+
+        // 2. The next message, whole, on a ring opened again.
+        const bool sent2 = message(0x80, msg) && ring_up();
+        wait_us(4'000);
+        uint16_t second = 0;
+        bool second_in_order = true;
+        {
+            uint8_t b = 0;
+            while (Port::read_byte(b)) {
+                if (second < msg && b != static_cast<uint8_t>(0x80u + second)) {
+                    second_in_order = false;
+                }
+                ++second;
+            }
+        }
+        const uint16_t hw2 = Port::hw_overruns();
+        const uint16_t faults2 = Port::dma_faults();
+        print(serial, "  the next message: ", second, " of ", msg, second_in_order ? " in order" : " NOT in order",
+              ", overruns ", hw2, ", faults ", faults2, crlf);
+        bench.verdict("... and the next message arrives whole, nothing counted",
+                      sent2 && second == msg && second_in_order && hw2 == 0u && faults2 == 0u);
+        Port::release();
+        far_mode = 0;
+        (void)D::report(r, 2);
+
+        // 3. THE WINDOW, STAGED WIDE: one frame from the far chip lands while
+        // the ring is starved - the copy started on the start bit's fall,
+        // seen on the pad - and the CPU reads STATR and then DATAR under
+        // it, what the overrun's clear would do to a frame landing between
+        // its two loads. What the channel does with the request that frame
+        // raised, once the copy lets it go, is the measurement.
+        const bool sent3 = message(0xA5, 1) && ring_up();
+        uint16_t c0 = 0, c1 = 0, c2 = 0, st = 0;
+        uint8_t cpu = 0;
+        bool fell = false;
+        {
+            P::CriticalSection cs;
+            c0 = F::RxChannel::remaining();
+            Stopwatch w;
+            while (D::WRx::read() && w.us() < 20'000UL) {
+            }
+            fell = !D::WRx::read();
+            (void)F::Copier::copy(destination + copy_bytes, destination, copy_bytes);
+            Stopwatch f;
+            while (!Port::Resource::rx_ready() && f.us() < 200UL) {
+            }
+            st = Port::Resource::status();
+            cpu = Port::Resource::read_data();
+            c1 = F::RxChannel::remaining();
+            while (F::Copier::busy()) {
+            }
+            Stopwatch t;
+            while (t.us() < 50UL) {
+            }
+            c2 = F::RxChannel::remaining();
+        }
+        wait_us(500);
+        uint16_t ring_after = 0;
+        uint8_t ring_byte = 0;
+        {
+            uint8_t b = 0;
+            while (Port::read_byte(b)) {
+                ring_byte = b;
+                ++ring_after;
+            }
+        }
+        print(serial, "  a far frame read by the CPU under a starved channel (the start bit ",
+              fell ? "seen" : "NOT SEEN", ", STATR ", hex(st), ", the CPU read ", hex(cpu), "): the channel moved ",
+              static_cast<uint16_t>((c0 - c1) & (fat_ring - 1u)), " before the copy ended and ",
+              static_cast<uint16_t>((c1 - c2) & (fat_ring - 1u)), " after; the ring then held ", ring_after,
+              ring_after != 0u ? " byte(s), the last " : " bytes", crlf);
+        if (ring_after != 0u) {
+            print(serial, "    ", hex(ring_byte), crlf);
+        }
+        Port::release();
+        far_mode = 0;
+        (void)D::report(r, 2);
+        bench.verdict("the staging ran: the far frame's start bit seen and read from under the starved channel",
+                      sent3 && fell && cpu == 0xA5u);
+
+        // 4. And the port is whole after it.
+        const bool sent4 = message(0xC0, msg) && ring_up();
+        wait_us(4'000);
+        uint16_t third = 0;
+        bool third_in_order = true;
+        {
+            uint8_t b = 0;
+            while (Port::read_byte(b)) {
+                if (third < msg && b != static_cast<uint8_t>(0xC0u + third)) {
+                    third_in_order = false;
+                }
+                ++third;
+            }
+        }
+        bench.verdict("... and after a frame read from under the channel, the next message whole too",
+                      sent4 && third == msg && third_in_order && Port::dma_faults() == 0u);
+        Port::release();
+        F::Copier::stop();
+        far_done<on>();
+    }
+}
+
+/// The link's vector body while a far letter owns UART4; true when it was
+/// theirs.
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+bool far_isr() {
+    if constexpr (on) {
+        const uint8_t m = far_mode;
+        if (m == 1u) {
+            if (FarSide<on>::Port::isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+        if (m == 2u) {
+            if (FarSide<on>::PortLow::isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// UART4's two DMA2 channels' body while a far letter owns the port.
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+bool far_dma_isr() {
+    if constexpr (on) {
+        const uint8_t m = far_mode;
+        if (m == 1u) {
+            if (FarSide<on>::Port::dma_isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+        if (m == 2u) {
+            if (FarSide<on>::PortLow::dma_isr()) {
+                loop_edges = loop_edges + 1u;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// DMA2's channel 1 while letter q's copies run on it.
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+bool far_copy_vector() {
+    if constexpr (on) {
+        if (far_copy_mode) {
+            if (FarSide<on>::Copier::service() != 0u) {
+                far_copies_done = far_copies_done + 1u;
+                if (far_copy_loop) {
+                    far_copy_once<on>();
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The far letters, in the second set, on the CH32V303.
+template <bool on = (device::dma_controller_count >= 2u && vx03link::present)>
+void register_far_letters() {
+    if constexpr (on) {
+        bench.second_letter('n', "UART4'S ENGINES ON DMA2 against the far chip: a round trip, the rate", tn_far_uart4<>);
+        bench.second_letter('q', "THE PRIORITY RULE: the far chip pouring into UART4's ring beside an unpaced copy",
+                            tq_far_priority<>);
+        bench.second_letter('r', "AN OVERRUN AT A MESSAGE'S TAIL on DMA2, the far chip the sender",
+                            tr_far_overrun_tail<>);
+    }
+}
+
 /// USART2's vector body while letter q or r owns the port; true when it
 /// was theirs. Compiled only into an image that carries one of them.
 [[gnu::always_inline]] inline bool fat_isr() {
@@ -3087,27 +3657,35 @@ void dma2_vector() {
                 }
             }
         }
-        if constexpr (device::has_usart(4)) {
-            if constexpr (ch == Dma2Cross<C>::TxRow::channel ||
-                          ch == Dma2Cross<C>::RxRow::channel) {
-                if (role == Dma2Role::uart4) {
-                    (void)Dma2Cross<C>::Port::dma_isr();
-                    return;
-                }
+        if constexpr (ch == 3u || ch == 5u) {   // UART4's two (table 11-3)
+            if (far_dma_isr<>()) {
+                return;
+            }
+        }
+        if constexpr (ch == 1u) {   // the far letters' copier
+            if (far_copy_vector<>()) {
+                return;
             }
         }
         S::note(static_cast<uint8_t>(ch - 1u), DmaChannel<C, ch>::isr());
     }
 }
 
-/// UART4's own vector while letter n's transport owns the port: the
-/// receive engine's two states live there (ch32vx03/usart.hpp).
-template <uint8_t C = 2>
+/// UART4's own vector while a far letter's transport owns the port: the
+/// receive engine's two states live there (ch32vx03/usart.hpp); its entries
+/// counted, and silenced past the budget, as USART2's are.
+template <bool on = device::has_usart(4)>
 void uart4_vector() {
-    if constexpr (device::has_usart(4) && C <= device::dma_controller_count) {
-        if (Dma2State<C>::role == Dma2Role::uart4) {
-            (void)Dma2Cross<C>::Port::isr();
+    if constexpr (on) {
+        if (ring_watch) {
+            ring_entries = ring_entries + 1u;
+            if (ring_entries > ring_budget) {
+                ring_stormed = true;
+                brio::Usart<on ? 4 : 4>::rxne_interrupt(false);
+                return;
+            }
         }
+        (void)far_isr<>();
     }
 }
 
@@ -3233,8 +3811,13 @@ int main() {
     register_dma2_letters();
     bench.letter('o', "the receive ring at speed: a timer's staircase, lap after lap", to_ring);
     bench.letter('p', "the receive ring over a channel that never takes the frame", tp_dead_ring);
-    bench.letter('q', "the priority rule: an unpaced copy beside the receive ring", tq_priority<>);
-    bench.letter('r', "an overrun at a message's tail: no storm, counted once", tr_overrun_tail<>);
+    // Letters q and r on the CH32V203 board's crossed pair; on the CH32V303
+    // the pair is retired and they take the far chip in the second set.
+    if constexpr (device::dma_controller_count < 2u) {
+        bench.letter('q', "the priority rule: an unpaced copy beside the receive ring", tq_priority<>);
+        bench.letter('r', "an overrun at a message's tail: no storm, counted once", tr_overrun_tail<>);
+    }
+    register_far_letters();
 
     if (serial_ok) {
         print(serial, crlf, "boot: clk=", clock_ok ? "PLL144" : "FAILED",

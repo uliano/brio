@@ -644,11 +644,14 @@ four-kilobyte pattern in the image itself and the core's own counter the
 ruler. On the CH32V203C8T6 the twelve letters of a part with one
 controller run with the board bare but for the core board's crossed pair
 to the fourth port (PB0 to PA3, which letters q and r take): **51
-verdicts in `z`**. On the CH32V303VCT6 DMA2's six letters run beside
-DMA1's with the evaluation board's two crossed wires in place (PA2 to
-PC11, PC10 to PA3): **70 verdicts in `z`**, letter n and the receive
-ring of letters g, o, q and r among them. Where one number is given
-below it is both parts'; where they differ each is named.
+verdicts in `z`**. On the CH32V303VCT6 DMA2's five single-board letters
+run beside DMA1's with the far board dark: **58 verdicts in `z`**; that
+board's crossed pair is retired (UART4's default pads PC10/PC11 are the
+desk pair's SPI link), and its letters n, q and r are the two-board key
+`y` against the far chip's usart_peer - UART4 on its second column,
+PB0/PB1, its engines DMA2's channels 5 and 3: **11 verdicts**. Where one
+number is given below it is both parts'; where they differ each is
+named.
 
 - **Six cycles an item at every width, and the width is the rate.** Four
   kilobytes copied flash to RAM take 24809 cycles as 4096 bytes, 12530
@@ -743,18 +746,22 @@ below it is both parts'; where they differ each is named.
   queue to the last stop bit's end on the STK, which counts HCLK, in
   thousandths of the run's time at the rate ASKED, -1 % to +3 %. USART2's
   transmit engine, 256 frames at 115200: 1000 in letters g and p on both
-  parts, and 1000 beside UART4's on DMA2 in letter n on the CH32V303VCT6;
-  the fourth port's bare engine pouring one 4 KB block: 1000 at 1 Mbaud
-  and at 4.5 Mbaud (letters q and r, both parts); USART2's transmit engine
-  through letter q's transport, 1024 frames: 1000 at 1 Mbaud and 1002 to
-  1003 at 4.5 Mbaud - that transport's transmit ring is 64 bytes, so the
-  run goes out in sixteen or more blocks, each started by the last one's
-  completion vector, and the two or three frames over are a fifth of a
-  frame a block, what that restart would cost (not measured apart). TE's
-  idle frame after an init (18.2) is out before a
-  run is timed. Every rate here divides PB1 whole: the readings are the
-  wire's, and a ruler that runs from the HSI as the buses do cannot see
-  the HSI's own error ([usart.md](usart.md)).
+  parts; UART4's on DMA2 into the far chip's sink, 256 frames at 115200:
+  1000 in letter n on the CH32V303VCT6; the CH32V203C8T6's fourth port's
+  bare engine pouring one 4 KB block: 1000 at 1 Mbaud and at 4.5 Mbaud
+  (letters q and r), where on the CH32V303VCT6 the sender is the far chip,
+  which STATES its rate - its PCLK1 over its divisor on its crystal, 0 ppm
+  at both; the ring port's own transmit engine through letter q's
+  transport, 1024 frames: 1000 at 1 Mbaud on both parts and 1002 to 1003
+  at 4.5 Mbaud on the CH32V203C8T6, 1005 to 1006 on the CH32V303VCT6 -
+  that transport's transmit ring is 64 bytes, so the run goes out in
+  sixteen or more blocks, each started by the last one's completion
+  vector, and the frames over are what that restart costs a block (not
+  measured apart; the CH32V303's completion vector is a trampoline under
+  ilp32f, [platform.md](platform.md)). TE's idle frame after an init
+  (18.2) is out before a run is timed. Every rate here divides PB1 whole:
+  the readings are the wire's, and a ruler that runs from the HSI as the
+  buses do cannot see the HSI's own error ([usart.md](usart.md)).
 - **THE RECEIVE RING, WITH NO WIRE** (letter g, the CH32V203C8T6). From
   `init()` the receive channel runs circular over the whole 128-byte
   storage, its count at 128 with nothing arrived and one bus master
@@ -795,18 +802,14 @@ below it is both parts'; where they differ each is named.
   against 131072 updates; seven stalls and seven overruns; four held
   runs refused; the count never above 256, and zero read once in
   100000 across 98 laps in one run and never in another.
-- **TWO CONTROLLERS ON ONE PAIR OF WIRES.** On the CH32V303VCT6, USART2's
-  engines on DMA1 against UART4's on DMA2 across the board's crossed
-  pair: thirty-six bytes out of USART2's transmit engine into UART4's
-  receive engine and twenty-two back the other way, each run byte for
-  byte, no fault on either port. Before the runs each receiver's ring
-  was drained: zero or one byte, framed while its pad floated between
-  the first port's initialization and the second's.
-- **A standing request serves the wrong transfer**: the UART4 receiver of
-  that letter, left enabled with DMAR set, made a later TIM6 staircase on
-  the same DMA2 channel move all sixteen items at once (the section
-  above); with the port released at the end of the letter, the staircase
-  ran at the timer's pace again.
+- **UART4'S ENGINES ON DMA2 ANSWER REAL REQUESTS** (letter n, the
+  CH32V303VCT6): fifty-eight bytes out of the transmit engine on channel
+  5, echoed by the far chip and back in through the receive engine on
+  channel 3, byte for byte, no fault.
+- **A standing request serves the wrong transfer**: a UART4 receiver left
+  enabled with DMAR set made a later TIM6 staircase on the same DMA2
+  channel move all sixteen items at once (the section above); with the
+  port released, the staircase ran at the timer's pace again.
 - **A released requester hands over clean, and a held request is
   answered** (`test_vx03_i2c` letters p and q, `test_vx03_dma` letter p,
   on the CH32V303VCT6 and the CH32V203C8T6 alike): USART2's transmit
@@ -829,22 +832,27 @@ below it is both parts'; where they differ each is named.
   item of an I2C1 write on channel 6 and stalled it (count 31 of 32, the
   target holding one byte); TIM3's reset line, pulsed with the gate
   closed, let it go and the same write landed whole.
-- **THE PRIORITY RULE ON THE BENCH** (letter q, both parts): the fourth
-  port's transmitter fed by a bare engine poured 16 KB at 1 Mbaud and 64
-  KB at 4.5 Mbaud into USART2's ring of 512 on channel 6 while a 2 KB copy
-  ran back to back on channel 3 at the copy engine's default level - the
-  ring at very_high, the transport's default: every byte in order, no
-  overrun of either kind, no channel given up, the copy at 0.96 to 1.00
-  of its rate alone at 1 Mbaud and 0.92 to 0.98 at 4.5 Mbaud (the lower
-  figures the CH32V203C8T6's, whose sender shares DMA1 with the ring).
+- **THE PRIORITY RULE ON THE BENCH** (letter q, both parts): 16 KB at 1
+  Mbaud and 64 KB at 4.5 Mbaud poured into a ring of 512 while a 2 KB copy
+  ran back to back on a lower channel at the copy engine's default level
+  - on the CH32V203C8T6 the fourth port's transmitter, fed by a bare
+  engine, into USART2's ring on DMA1's channel 6 beside a copy on channel
+  3; on the CH32V303VCT6 the far chip's blast into UART4's ring on DMA2's
+  channel 3 beside a copy on DMA2's channel 1 - the ring at very_high, the
+  transport's default: every byte in order, no overrun of either kind, no
+  channel given up, the copy at 0.96 to 1.00 of its rate alone at 1 Mbaud
+  and 0.92 to 0.98 at 4.5 Mbaud (the lower figures the CH32V203C8T6's,
+  whose sender shares DMA1 with the ring).
   The CONTROL, the ring told `rx_priority = low` - every engine at the
   lowest level, the arrangement the rule replaced, channel 3 winning
   every tie against 6 - lost about seven bytes in eight to some nine
   hundred overruns at 1 Mbaud. The CFGR read back carries the levels: PL
   3 for the ring, 2 for its transmit channel after its first block, 0
   for the ring told low.
-- **AN OVERRUN AT A MESSAGE'S TAIL** (letter r, both parts): a copy at
-  the ring's own level on a lower channel, the vector held off until the
+- **AN OVERRUN AT A MESSAGE'S TAIL** (letter r, both parts; on the
+  CH32V303VCT6 the far chip's messages into UART4's ring on DMA2, the
+  staged frame's copy started on its start bit's fall, read off the pad):
+  a copy at the ring's own level on a lower channel, the vector held off until the
   channel took the frame DATAR held - no storm, three entries, the
   overrun counted once - and a frame read by the CPU from under a starved
   channel still arrived through the ring, the request it raised served
@@ -951,8 +959,8 @@ Implemented but not bench-verified, each with what would measure it:
   themselves carry a wire's data in the two bus chapters - sixteen bytes
   each way through SPI2's pair and a tenure's shapes through I2C1's,
   byte-exact against a peer board ([spi.md](spi.md), [i2c.md](i2c.md)) -
-  and on the CH32V303VCT6 a serial run crosses the two controllers over
-  the board's wires. What has no listener on the CH32V203 is USART2's
+  and USART3's and UART4's receive rings take the far chip's blast at 4.5
+  Mbaud ([usart.md](usart.md)). What has no listener on the CH32V203 is USART2's
   pair to itself: a strap between PA2 and PA3 is what the suite's letter
   g detects and what would close it in one run.
 - **Widening and truncation between unequal widths** (table 11-1): the

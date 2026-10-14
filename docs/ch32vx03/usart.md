@@ -7,7 +7,10 @@ the smartcard, the synchronous clock, the flow-control pair, two DMA
 requests, every flag and both interrupt sources, and on the CH32V303 the
 MARK and SPACE parity and the short words of a LOT - and the
 interrupt-driven byte transport every brio console is, sitting on that
-resource with its options costing nothing. Documents of record: the
+resource with its options costing nothing; and the desk pair's serial
+link, the CH32V203C8's USART3 crossed to UART4 on the CH32V303's second
+column, each chip the other's DUT and, through its usart_peer, the
+other's instrument. Documents of record: the
 CH32FV2x_V3xRM reference manual V2.3 (the chapter's opening for which
 ports are USARTs, 18.2 for the frame and TE's idle frame, 18.3 for the
 baud generator, 18.4 for the synchronous mode, 18.5 for half duplex,
@@ -15,7 +18,9 @@ baud generator, 18.4 for the synchronous mode, 18.5 for half duplex,
 interrupts, 18.10 for the registers with 18.10.1, 18.10.4 and 18.10.8's
 notes for the lot's four features; 3.4.7 and 3.4.8 for the gates and the
 two peripheral buses; 11.2.3's tables 11-2 to 11-5 for the DMA slots;
-9.5.1 and table 9-2 for the vectors) with its CLASS RULE - three classes
+9.5.1 and table 9-2 for the vectors; 15.3.10 and 15.4.7 for the one
+pulse and the output modes of the peer's waveform engine) with its CLASS
+RULE - three classes
 read the chapter here: CH32V20x_D6 for every CH32V203 up to the
 CH32V203C8, CH32V20x_D8 for the CH32V203RB and CH32V30x_D8 for the four
 CH32V303 - the CH32V203 datasheet V2.8 (table 2-1 for how many serial
@@ -24,7 +29,7 @@ datasheet V3.5 (table 2-1-1, the pin tables of 3.2 and the alternate
 functions of 3.3), AFIO's tables 10-23 to 10-31 (the columns,
 [pin.md](pin.md)), the driver
 [brio/ch32vx03/usart.hpp](../../brio/ch32vx03/usart.hpp) and the
-reference suite `test_vx03_serial`.
+reference suite `test_vx03_serial` with its two-board key.
 
 ## What the silicon does
 
@@ -90,8 +95,8 @@ reference suite `test_vx03_serial`.
 
 Measured on the CH32V203C8T6 and the CH32V303VCT6 with the same
 numbers, the instrument USART2 on its default pads: the block is one
-register file on both series, and the bench suite's letters a..m run on
-both parts.
+register file on both series, and the bench suite's single-board letters
+a..l and r run on both parts.
 
 - **The bit IS the divisor.** BRR counts peripheral clocks per
   sixteenth of a bit, so the whole register is pclk/baud and a start bit
@@ -313,10 +318,10 @@ loses nothing - the rule of [../design/dma.md](../design/dma.md).
 `UartOptions::rx_priority` is the one knob, for a program that ranks
 another channel above its ring; a port with no receive engine refuses
 it at compile time.
-Measured on the CH32V303VCT6's crossed pair:
-USART2's two engines on DMA1 against UART4's on DMA2, a message each way
-and then four kilobytes each way at 921600 baud, every byte in order and
-no error, overrun or fault counted at either end.
+Measured on the CH32V303VCT6 against the far chip: UART4's two engines on
+DMA2, on its second column, a message round the far chip's echo and then
+four kilobytes each way at 921600 baud, every byte in order and no error,
+overrun or fault counted at either end.
 
 ### The lot's four features (the CH32V303's)
 
@@ -363,6 +368,162 @@ and with M_EXT's seven- and five-bit codes stored raw a zero word stayed
 nine bits low, eight data bits and the start. It is the lot the other
 lot-keyed registers of this die already said it is
 ([README.md](README.md)).
+
+### The pair: what a second chip measures
+
+The desk pair's serial link - the CH32V203C8's USART3 on its default
+column (TX PB10, RX PB11) crossed to UART4 on the CH32V303's SECOND column
+(TX PB0, RX PB1), both on PCLK1 at 72 MHz, each board on its 8 MHz
+crystal - carries the two-board key of the reference suite both ways:
+each chip's receiver and transmitter judged by the OTHER chip's, which
+neither a loop nor a crossed pair on one board can do (both divide one
+bus by one arithmetic, and agree with themselves). The same numbers came
+from both directions unless one is named.
+
+- **The two crystals agree to a few ppm.** A gapless run of 4000 frames
+  at 1 Mbaud (a divisor of 72, exact at both ends) timed by the far
+  receiver read -9 to -3 ppm from the CH32V203C8T6 and +1 to +6 from the
+  CH32V303VCT6 over ten runs each way, and the far chip's blast timed here
+  the opposite (0 to +5, -6 to -3): one pair of crystals seen from its two
+  ends, each span good to 24 ppm (the two polled stamps, about 30 cycles
+  each, over 40 ms). Either die on its HSI would read 3000
+  ppm and more ([clock.md](clock.md)).
+- **Every rate is PCLK1 over BRR on the wire, 9600 baud to 4.5 Mbaud.**
+  Sixteen bytes echoed exact at 9600, 115200, 921600, 1, 2, 3 and 3.6
+  Mbaud and at 4.5 - 18.3's divisor floor of 16 on a 72 MHz bus, both
+  ports' top - and at each a gapless run timed by the far receiver against
+  a 1 Mbaud run back to back, ten runs each way: within 33 ppm of the
+  divisor's 0 at every exact rung (the stamps' bound 52 to 94 ppm at these
+  spans), and +1593 to +1611 at 921600, where BRR 78 gives 923077 baud
+  (+1602).
+- **THE HALF STOP CODES ARE ROUNDED UP ON THE WIRE**, as the single-board
+  measurement above found on the transmitter's own pad, and now by a
+  foreign receiver: gapless runs at 1 Mbaud under the four codes, the 0.5
+  code's span within 8 ppm of the 1 code's, the 1.5 code's within 3 of
+  the 2 code's, and the 2 code 1.1 of the 1 (22 half bits against 20, read
+  +99992 to +100006 ppm).
+- **The receiver's tolerance is four to five per cent.** 0x00 frames DRAWN
+  by the far engine at 9600 x (1 + e) - the rate its crystal's and not a
+  divisor's - into a receiver at 9600: clean from -4 % to +5 %, broken
+  from +6 % (NE and wrong data, a fast frame's stop sampled late) and
+  from -5 % (FE), on both receivers. 18.3 promises not less than 3 %.
+- **The start bit's filter**: a single low pulse of the far timer's one
+  pulse, 1250 ticks wide at 9600 (half a bit), is no start bit; 1875
+  (three quarters) is one, with the frame it begins; nothing under 300.
+- **THE SAMPLING, and its rule left open.** One low pulse walked across a
+  data bit of 0xFF frames at 9600 finds three sensitive instants a
+  sixteenth apart, the first between 37 % and 44 % of the bit, the three
+  moving together by up to a sixteenth from one burst to the next (the 16x
+  clock runs free of the line, the start edge found on its tick); within
+  one train of frames the phase holds. A pulse over all three flips the
+  bit with no NE, one over none changes nothing, one over one or two of
+  them raises NE - and which way the bit then goes is NOT the three
+  samples' majority, the STM32F1's documented rule, in every case: on the
+  CH32V203C8T6's receiver a 1 % pulse over the first or the last instant
+  alone flipped the bit (with NE) and one over the middle one kept it,
+  wherever the census hit them, and a 14 % pulse over the first one or two
+  instants flipped it in seven runs of ten there and in four of ten on the
+  CH32V303VCT6's, keeping it in the others.
+- **The errors from drawn trains**: a parity cell drawn the other way
+  raises PE on every frame with the byte delivered; a stop cell drawn low
+  raises FE with the data intact; a zero frame with its stop low is a
+  ten-bit break, LBD under LBDL 0 and the 0x00 frame with FE; a run of
+  eight read late leaves ORE with RXNE, DATAR keeping the run's first
+  frame; and the LIN detector against the far engine's breaks - nine bits
+  at neither length, thirteen at both, ten not at eleven.
+- **HALF DUPLEX ON A BUS WITH A SECOND CHIP.** HDSEL on the TX pad - an
+  alternate-function open drain, TE clear - hears the four frames the far
+  chip drives onto that wire from its receive pad, at 9600, 115200 and 1
+  Mbaud; and THE WIRED AND: this end's 0xF0 on its open drain, the far
+  chip's 0x3C pulled into it as an emulated open drain on its pad's
+  pull-up - the wire's only pull - and the far receiver reads 0x30.
+- **IrDA between two WCH codecs** at 115200, eight bytes echoed exact
+  through both decoders and both encoders; mute woken by an address mark
+  (this node 5 among the far chip's three groups: the address frame 0x105
+  and its three data) and by an idle line (muted after the first frame,
+  awake for the next run).
+- **The receive engine at 4.5 Mbaud**: a second of the far chip's
+  gapless blast through each chip's receive ring - USART3's on DMA1's
+  channel 3, UART4's on DMA2's channel 3 - 450000 bytes in sequence with
+  no overrun, no frame error and no fault, the vector entered twice a
+  512-byte lap (1757 edges for 450000 bytes) and never a byte.
+- **UART4's engines on DMA2, on its second column** (the CH32V303VCT6):
+  a message round the far chip's echo byte for byte; four kilobytes out of
+  the transmit engine at 921600 counted clean and summed exact by the far
+  chip, the run 998 thousandths of its wire time on this core's counter
+  and +1601 ppm on the far one's (the divisor's +1602); four kilobytes in
+  from the far blast, every byte in order and nothing counted. The
+  transport's `remap` parameter on a column other than the default is
+  what carries all of it (UART4's code 1).
+- **The lot's registers on the wire** (the CH32V303VCT6): with CTLR4
+  stored raw, UART4's zero bytes reach a far EVEN receiver under MARK and a
+  far ODD one under SPACE with no parity error - the bit computed, as
+  without the register; with M_EXT's five-bit code stored raw, zero words
+  arrive as zero bytes, eight bits long; RX_BUSY read clear in 94953
+  polls while the far frame arrived at 1200 baud.
+
+### This part as the desk's instrument: usart_peer
+
+One peer for the stratum, on the port and the timer the part links:
+USART3 with TIM2 on its code 10 (CH3 PB10, CH4 PB11, DMA1's channels 1
+and 7) on the CH32V203C8, UART4 on its second column with TIM3 on its code
+00 (CH3 PB0, CH4 PB1, DMA1's channels 2 and 3) on the CH32V303RC and VC -
+the timer's channels 3 and 4 on the port's own two pads. It runs the
+crystal at 144 MHz (PCLK1 72, the timers 144: six core cycles a 24 MHz
+protocol tick, so every span and edge converts exactly), answers
+`Ident::xtal` = 1 and adopts nothing at `calibrate` (a crystal peer
+reports the DUT's rate against its own), states its `send` and `blast`
+rates from its divisor, and serves the protocol's ops but onewire (no
+transmitter of the peer reaches the DUT's transmit wire but through the
+peer's receive pad, which drive_rxd and collide drive instead), the
+synchronous modes and a clock pad (no CK on the link), the five- and
+six-bit words and clk2x (no OVER8 on this block).
+
+What the silicon taught the peer's bring-up (a scratch probe, both
+chips, the far board dark):
+
+- **AN ENABLED TRANSMITTER OWNS ITS PAD.** With the TX pad in
+  alternate-function push-pull and a timer's channel enabled on the same
+  pad, a port with UE and TE set holds the pad at its own level - the
+  timer's forced low does not reach it; with TE clear (or UE, or the port
+  in reset) the timer's channel drives the pad; with neither driving, the
+  CH32V303's pad reads LOW and the CH32V203's high. So the waveform
+  engine's tenure parks the pad as a GPIO output high, forces the
+  timer's channel high on a running counter, clears TE, and only then
+  hands the pad back to the alternate function; the way back is the same
+  steps reversed, TE set again first (its idle frame is high). USART3
+  has no other column the LQFP48 bonds, so nothing is remapped.
+- **No low pulse as TE rises**: the TX pad sampled every 8 cycles for
+  228 us across a hand-over, TE set before or after the alternate
+  function's nibble - no low sample in 4096, on both chips. A port is
+  opened with the pad parked high across its reset, and needs no wait
+  after TE.
+- The timer's own facts - a forced level or a toggle waits for a running
+  counter, a counter that never ran holds its output low, the compare
+  request streams edges 14 cycles apart and misses one 12 apart, the one
+  pulse returns the line high by itself - are [tim.md](tim.md)'s.
+
+The offer, used or declined for the instrument:
+
+| offer | answer |
+|---|---|
+| DATAR, one level, polled | the peer's loops: no interrupt, nothing masked; the receive turn 14 instructions with two APB loads (STATR, DATAR), the echo's 22 with four, an idle turn 12 with one; DATAR read before the first and the last frame's stamp, which is a call (a frame completing between the status read and the data read is lost with ORE cleared unseen, 18.10.1's pair) |
+| the timer's toggle mode with CCxDE (15.4.7) | THE WAVEFORM ENGINE: an edge list as absolute compare values streamed by DMA into CHxCVR on each match - one beat an edge, no CPU between edges; the counter free over its sixteen bits, an edge's value modulo the counter, so a list is bounded by its table (640 edges) and not by the counter, its prescaler the smallest that keeps its longest interval under 0xF000 counts (one core cycle a count for every frame a UART sends); the floor 16 cycles between two edges |
+| OPM with PWM mode 1 (15.3.10) | the glitch: one pulse exact to a count |
+| a timer's update request writing BSHR | declined: a fixed sample rate is one table entry a sample, some hundred a bit for a 1 % pulse, where the toggle list costs one entry an edge |
+| SBK | declined for `brk` and the auto-baud break: ten or thirteen bits only, and the transmitter sends its last byte again after it (the bench findings) |
+| CTLR2.STOP's four codes | served as the register takes them; the halves leave as whole stops (above) |
+| IREN, IRLP and the prescaler | served |
+| M_EXT, OVER8, CK | refused: absent on this desk's die, not on this block, not on the link |
+
+**The cost**, counted in the release listing and measured on the pair:
+the echo at 4.5 Mbaud - a frame every 320 core cycles - takes 22
+instructions and four APB accesses a frame; `send` and `blast` are
+flattened (the protocol's pattern stream is out of line at -Os, a call a
+frame), the stream's few instructions, the TXE poll and the store a
+frame; the receive ring of the far DUT under the peer's blast took 450000
+bytes in a second with nothing lost. The engine costs no CPU between
+edges and one DMA beat an edge.
 
 ## Types and verbs
 
@@ -546,11 +707,14 @@ U::enable(true);
 
 ## Bench findings
 
-The reference suite is `test_vx03_serial`, at 144 MHz - PCLK2 144, PCLK1
-72 - with USART2 as the instrument on its default pads and the console
-untouched on USART1: 63 verdicts in `z` on the CH32V203C8T6 with the
-crossed pair strapped, and 70 on the CH32V303VCT6, whose letters n..p are
-that series' own. Almost every
+The reference suite is `test_vx03_serial`, at 144 MHz on each board's
+crystal - PCLK2 144, PCLK1 72 - with USART2 as the instrument on its
+default pads and the console untouched on USART1: 64 verdicts in `z` on
+the CH32V203C8T6 with the crossed pair strapped and 44 on the
+CH32V303VCT6 (its letter p that series' own), the far board dark; and the
+two-board key `y` against the far chip's usart_peer (the pair's section
+above): 67 verdicts on the CH32V203C8T6, 80 on the CH32V303VCT6 with its
+letters n and o. Almost every
 letter needs no wire, and three facts of this silicon are why: the
 receive pad is a bit-banged transmitter (an input follows its own pull,
 which the output data register moves in a few cycles), a pad driven by a
@@ -559,9 +723,10 @@ TX is TIM2's channel 3, the fourth port's remapped CK is TIM3's channel
 1), and the fourth serial port is a USART whose clock pad can be counted.
 Every fact above with a number is this suite's measurement. The letters
 that want a strap detect its absence and say so: the loopback PA2 to PA3, and the
-crossed pair of USART2's pads with UART4's default ones - PA2-PB1 with
-PB0-PA3 on the CH32V203C8T6's board, PA2-PC11 with PC10-PA3 on the
-CH32V303 evaluation board - and the second is measured on both below.
+crossed pair of USART2's pads with UART4's default ones, PA2-PB1 with
+PB0-PA3 on the CH32V203C8T6's board - measured below; the CH32V303
+evaluation board's pair is retired, its UART4 default pads PC10/PC11 being
+the desk pair's SPI link, and that part's letters m, q and s with it.
 
 - **The baud table**, printed by the suite: twenty-eight rows, every
   standard rate from 1200 to 3 Mbaud against both peripheral clocks,
@@ -592,12 +757,12 @@ CH32V303 evaluation board - and the second is measured on both below.
   | letter | port, path | rate, frames | reading |
   |---|---|---|---|
   | b | USART2 bare, 8N1 | 9600 x 16, 115200 x 256, 921600 x 1024, 3 Mbaud x 1024 | 1006, 1000, 998, 1000 |
-  | m | USART2 and the fourth port bare | 8N1 115200 x 256; 8E2 19200 x 32 | 1000 and 1000; 1000 and 1001 |
-  | q | the fourth port bare; USART2's transmit engine | 115200 x 256 | 1000; 1000 |
+  | m (CH32V203C8T6) | USART2 and the fourth port bare | 8N1 115200 x 256; 8E2 19200 x 32 | 1000 and 1000; 1000 and 1001 |
+  | q (CH32V203C8T6) | the fourth port bare; USART2's transmit engine | 115200 x 256 | 1000; 1000 |
   | r | USART2's interrupt transmitter; its transmit engine | 115200 x 256, 1 Mbaud x 1024 | 1000, 1000; 1000, 1000 |
-  | s | the fourth port bare; USART2's transmit engine | 1 Mbaud x 1024 | 1000; 1000 |
-  | n (CH32V303VCT6) | USART2's engine on DMA1; UART4's on DMA2 | 921600 x 1024 | 999; 999 |
-  | o (CH32V303VCT6) | USART2 and UART4 bare, 8E1; USART2 bare | 9600 x 16; 1200 x 16 | 1001 and 1005; 1006 |
+  | s (CH32V203C8T6) | the fourth port bare; USART2's transmit engine | 1 Mbaud x 1024 | 1000; 1000 |
+  | n (CH32V303VCT6) | UART4's engine on DMA2, into the far chip | 921600 x 4096 | 998 |
+  | o (CH32V303VCT6) | USART2 bare, UART4 bare into the far chip, 8E1 | 9600 x 16 | 1001 and 1004 to 1005 |
   | p (CH32V303VCT6) | UART5 to UART8 bare | 9600 x 16 | 1001 each |
 
   The 998 and 999 at 921600 are the divisor's own rounding - 78 of a
@@ -608,10 +773,11 @@ CH32V303 evaluation board - and the second is measured on both below.
   apart. A run is started on a port whose previous frame has ended by
   TIME: TC stood from a frame before, a write that follows no STATR read
   leaving it set, and a run started on it read a whole frame long (1056
-  at 9600). What no counter on the chip can tell is the HSI's own error:
-  the PLL and with it HCLK, both buses and every timer run from it, so a
-  trim off by a per cent moves the wire and the ruler together; a run on
-  the board's crystal or a counter on the pad would measure it.
+  at 9600). The suite runs on the board's crystal, so the counter's
+  cycles are the crystal's; what a counter on the same chip cannot tell -
+  its own clock's error, which moves the wire and the ruler together - is
+  the far chip's to time, and the pair's section above has it: every rate
+  within a few ppm of PCLK1 over BRR on the other board's crystal.
 - **A stale CTS enable spins the vector.** With CTSIE armed and the CTS
   pad moved by software the handler was re-entered without end, although
   it cleared the flag on every pass; the suite's body drops the enable
@@ -622,11 +788,7 @@ CH32V303 evaluation board - and the second is measured on both below.
   the fourth port's TX to USART2's RX: the two instances talk to each
   other in both directions at 8N1 and 115200 baud and at 8E2 and 19200,
   sixty-four xorshift bytes each way with every byte arriving in order
-  and no error flag on either side - on both parts.
-- **The crossed pair's engines** (the CH32V303VCT6): four kilobytes each
-  way at 921600 baud - 923076 really, the divisor 78 of a 72 MHz bus - in
-  44378 us each way, against 44373 for the bits alone, so the two
-  controllers feed the two ports back to back.
+  and no error flag on either side - the CH32V203C8T6's board.
 - **Errors under the receive engine** (letter q, the CH32V203C8T6's
   crossed pair, the fourth port the sender): 120 data bytes with 14
   breaks between them in a continuous stream - every data byte delivered
@@ -652,8 +814,9 @@ CH32V303 evaluation board - and the second is measured on both below.
   cycles after its last stop bit (1.1 frames) with two USART interrupts
   and none a byte; four laps of the 256-byte ring with no silence read
   whole on the lap's marks.
-- **The cost** (`bench_vx03` letter u, USART2 on the crossed pair, the
-  fourth port's engine the stimulus): the receive engine takes two USART
+- **The cost** (`bench_vx03` letter u on the CH32V203C8T6, USART2 on the
+  crossed pair, the fourth port's engine the stimulus; the CH32V303's
+  letter u declines by name, its pair retired): the receive engine takes two USART
   interrupts a burst and one channel interrupt a half lap, each entry
   about 165 to 190 cycles between the bench's stamps - the idle-line one
   reading STATR once, CNTR twice and writing CTLR1 and CTLR3, the
@@ -687,7 +850,9 @@ CH32V303 evaluation board - and the second is measured on both below.
   counted, and the thread ran on; with TIM3's reset pulsed the consumer's
   next look started the ring again and ten frames arrived whole.
 - **An overrun at a message's tail** (`test_vx03_dma` letter r, both
-  parts, USART2's ring fed by the fourth port at 1 Mbaud): a 2 KB copy at
+  parts: on the CH32V203C8T6 USART2's ring fed by the fourth port at 1
+  Mbaud, on the CH32V303VCT6 UART4's ring on DMA2 fed by the far chip's
+  usart_peer, the copy on DMA2's channel 1): a 2 KB copy at
   the ring's own level on a lower channel starving it under a message's
   last frames, the vector held off until the channel had taken the frame
   DATAR held - ORE up, RXNE down, no frame after it. The vector entered
@@ -695,7 +860,7 @@ CH32V303 evaluation board - and the second is measured on both below.
   no channel was given up, the overrun and the gap were each counted
   once, the 28 bytes that landed before the copy arrived in order with
   the frame DATAR held (29 bytes on the CH32V303, whose sender is the
-  other controller's and ran on through the copy; 31 on the CH32V203,
+  far chip and ran on through the copy; 31 on the CH32V203,
   whose sender the copy starved too, so that only one frame overran),
   and the next message arrived whole with nothing else counted. THE CONTROL, the same
   image with the clear disabled: 256 entries, the live channel given up
@@ -710,25 +875,19 @@ CH32V303 evaluation board - and the second is measured on both below.
   go, and the ring then held the frame: the request a frame raises
   outlives a CPU read of its data, so the byte is not lost, and only its
   error flags go with the clear.
-- **The ring against a copy** (`test_vx03_dma` letter q, both parts): the
-  fourth port pouring 16 KB at 1 Mbaud and 64 KB at 4.5 Mbaud into
-  USART2's ring of 512 while a 2 KB copy ran back to back on DMA1's
-  channel 3 - a lower number than the ring's 6 - at the copy engine's
-  default level: every byte in order, no overrun of either kind, no
-  channel given up, USART2's vector entered once; the copy at 0.96 to
-  1.00 of its rate alone at 1 Mbaud and 0.92 to 0.98 at 4.5 Mbaud. The
-  ring told `rx_priority = low` under the same copies: some nine hundred
-  overruns in 8 KB at 1 Mbaud, about a thousand bytes of 8192 delivered,
-  and the vector entered 145 to 150 thousand times in 85 ms, a starved
-  channel re-entering it back to back.
-- **The receive engine's edge and its error counts on the CH32V303**
-  (`test_vx03_serial` letters q and s on the evaluation board's crossed
-  pair): 120 data bytes and 14 breaks in a stream, every data byte in
-  order, each break stored as its 0x00 frame and counted, back-to-back
-  breaks counting every other one (two count 1, three count 2) - the
-  CH32V203C8T6's numbers, so this USART clears as that one does; a burst
-  of one frame told every time, a burst of 16 told within 1.1 frames of
-  its last stop bit with two USART interrupts.
+- **The ring against a copy** (`test_vx03_dma` letter q, both parts): 16
+  KB at 1 Mbaud and 64 KB at 4.5 Mbaud poured into a ring of 512 while a 2
+  KB copy ran back to back on a lower channel at the copy engine's default
+  level - on the CH32V203C8T6 the fourth port into USART2's ring on DMA1's
+  channel 6 beside a copy on channel 3, on the CH32V303VCT6 the far chip's
+  blast into UART4's ring on DMA2's channel 3 beside a copy on DMA2's
+  channel 1: every byte in order, no overrun of either kind, no channel
+  given up, the vector entered once; the copy at 0.96 to 1.00 of its rate
+  alone at 1 Mbaud and 0.92 to 0.98 at 4.5 Mbaud. The ring told
+  `rx_priority = low` under the same copies: some nine hundred overruns in
+  8 KB at 1 Mbaud, about a thousand bytes of 8192 delivered, and the
+  vector entered 145 to 155 thousand times in 85 ms, a starved channel
+  re-entering it back to back.
 - **The receive ring** is `test_vx03_dma`'s letter g, with no wire: the
   channel circular over the storage from `init()`, a burst across the
   storage's end delivered whole with nobody reading, a lap the consumer
@@ -742,11 +901,17 @@ Driver gaps, each with its reason:
 - **Exact error counts under the receive engine**: bounded, not exact
   (above) - an exact count would need the CPU's read of DATAR, which the
   engine's rule forbids; declined.
-- **A single-wire bus with a peer**, and with the pull-up the chapter
-  asks for: the mode is armed and its exclusions hold, but the wire is
-  released between frames and nothing on either board holds it - a
-  resistor to the supply on the TX pad is what would make the frame's
-  timing and the receiver's own echo measurable.
+- **The receiver's bit under partial noise**: the census above finds
+  the three instants and their spread, but which way the bit goes when a
+  pulse covers one or two of them is not settled by one pulse a frame of
+  an unknown phase - a train with TWO pulses in a frame, one on each of
+  two instants of a phase the frame itself fixes, is what would, and
+  usart_link.hpp's stage draws one; no verdict reads the word there.
+- **The half duplex's own echo on a held wire**: HDSEL hears a second
+  chip's frames on the pair's wire (above), and the instance's own frames
+  are what the single-board letter f prints and does not judge - the wire
+  is released between frames with no resistor on either board; one to
+  the supply on the TX pad is what would make that echo measurable.
 - **The smartcard's data path**: the register face, the guard time, the
   NACK bit and the card clock are measured, but ISO 7816-3 itself - the
   answer to reset, the NACK a parity error provokes, the guard time
@@ -759,12 +924,6 @@ Driver gaps, each with its reason:
   CK pad PA4 is no timer's channel-1 input the clock letters count on,
   and USART3's CK PB12 is the SPI select wire of the evaluation board -
   a rig with a counter on the clock pad is what would measure them there.
-- **USART3 on a wire**: the instance is on both parts, and its default
-  column is PB10 and PB11 - the same two pads I2C2 answers on
-  ([i2c.md](i2c.md)). On the bench pair the CH32V203C8T6's two are wired
-  to the CH32V303VCT6's UART4 on its second column, and no program of
-  this stratum speaks over that link yet: a serial peer on the far board
-  is what would measure it.
 
 Implemented but not bench-verified, each with what would measure it:
 
@@ -772,15 +931,18 @@ Implemented but not bench-verified, each with what would measure it:
   transmit engine is timed against the wire like every other loop, and
   neither board carries the PA2-PA3 strap while the crossed pair is
   wired; the strap in place of the pair is what would run it.
-- **The lot's four features on a die that has them**: the MARK and
-  SPACE parity on the wire and the far receiver's MS_ERR, the short
-  words across the pair and RX_BUSY under a frame are letter o's, and
-  the CH32V303VCT6 answered no to each; what would measure them is a
+- **The lot's four features on a die that has them**: the MARK parity
+  judged by the far chip's parity check, the short words reaching its
+  8N1 receiver with their top bits the stop's, and RX_BUSY under its
+  frame are letter o's branches for a die that has them, and the
+  CH32V303VCT6 answered no to each; what would measure them is a
   CH32V303 of a lot whose penultimate sixth digit is not zero.
-- **The transport's `remap` parameter on a column other than the
-  default**: the resource's `remap()` is measured through the fourth
-  port's second column, and the transport's own path is compiled and
-  not run.
+- **The receive engine's error counts and its burst edge on the
+  CH32V303**: letters q and s run on the CH32V203C8T6's crossed pair, the
+  same block's, and the two-board key's ring counts only the CH32V303's
+  laps (two edges a lap at 4.5 Mbaud); its own pair retired, the far
+  chip's stage trains with breaks and its bursts of one and of sixteen
+  into UART4's ring are what would measure them there.
 - **The debug-port columns once the port is given up**: the refusal is
   measured with the probe attached; a program that gives the port up
   and then brings UART8 up on PA14/PA15 is what would measure the other
