@@ -166,7 +166,10 @@ def rp2040_rescue_args(prog, target_cfg):
     `RESCUE` path), every domain with it; the bootrom then halts on the
     rescue flag, and the programming session that follows starts from a
     chip in its power-on state - core 1 waiting in the bootrom, every
-    block in reset. One extra OpenOCD session of about a second."""
+    block in reset. One extra OpenOCD session of about a second.
+    Measured on the WeAct RP2040 after it: test_rp2040_sleep right after
+    test_rp2040_multicore three runs of three, and UART1 in reset with
+    GP4 under no function after a console flashed over a uart_peer."""
     return ([prog.get("openocd") or manifest.OPENOCD] + openocd_interface(prog)
             + ["-c", "adapter speed 1000", "-c", "set RESCUE 1", "-f", target_cfg])
 
