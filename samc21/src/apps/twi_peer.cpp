@@ -277,18 +277,24 @@ twilink::Report run_serve(const twilink::Params& a, bool fixed_byte) {
             r.flags |= twilink::report_timed_out;
             break;
         }
-        if (a.count != 0 && static_cast<uint16_t>(rx + tx) >= a.count && r.stops != 0) {
-            break;
-        }
         if (Client::addressed()) {
             ++r.addr_hits;
-            r.last_addr = Client::matched_byte();
+            // The 7-bit address, as the Report carries it (the avrdx
+            // peer's convention): the matched byte holds it in bits 7:1.
+            r.last_addr = static_cast<uint8_t>(Client::matched_byte() >> 1);
             Client::answer_address(true);
             continue;
         }
         if (Client::stop_seen()) {
             if (r.stops < 255) ++r.stops;
             Client::clear_stop();
+            // A COUNTED serve ends here, on the STOP of the tenure that
+            // reached the count (twi_link.hpp) - never at the byte that
+            // reaches it: a read's last byte is still in the shifter when
+            // it is handed over, and the re-init behind the action's end
+            // would cut it off mid-byte (measured: test_avr_twi r's plain
+            // read lost its last byte at Sm and Fm).
+            if (a.count != 0 && static_cast<uint16_t>(rx + tx) >= a.count) break;
             continue;
         }
         if (!Client::data_ready()) {

@@ -119,6 +119,20 @@ an ISR's edge on PC7, placed by a `level_low` storm on PD3 at each of
 - the same sweep over a read-modify-write of `OUT` through the pointer
 (the shape a VPORT descriptor compiles to) undoes it at 18 of the 64.
 
+**A fully asynchronous pin wakes STANDBY on any edge; a partially
+asynchronous one on both edges only** (`test_avr_spi` w, table 18-4).
+The edges come from the other board - its SPI host's select on PE3 and
+its clock on PE2 - with this chip in STANDBY, CLK_PER stopped and the RTC
+PIT the only other wake-up (counted, a backstop 500 ms away): PE2
+RISING and PE2 FALLING each end the sleep with PE2's own interrupt, the
+backstop silent; PE3 FALLING does NOT - the select really fell, the peer
+clocked its whole burst, and the backstop ended the sleep with no pin
+interrupt at all; PE3 on BOTH edges wakes it with PE3's interrupt. The
+both-edges wake needs the level to outlast the wake-up (the table's
+note): the select is held 4.9 ms against the 1.77 ms a standby wake
+takes on the crystal ([platform.md](platform.md)). Fourteen runs, no
+exception.
+
 ## Not covered yet
 
 Driver gaps:
@@ -131,6 +145,6 @@ Implemented but not bench-verified:
 - The INLVL thresholds (needs analog levels) and the slew rate's
   electrical effect (needs a scope) - both are configuration
   read-back only today.
-- The fully-async wake of Px2/Px6 from STANDBY: it is measured from
-  power-down, the deeper mode ([platform.md](platform.md)), and not
-  separately witnessed from standby.
+- The fully-async wake of a Px6 position: Px2's is witnessed above
+  (PE2); no wire of this desk reaches a Px6 pad - a peer driving one
+  would measure it the same way.

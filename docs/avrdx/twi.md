@@ -685,11 +685,31 @@ the same protocol) the SCL is what the bus makes with the DUT alone: the
 mean in-byte period 98.36 kHz (983 thousandths) at Sm, 292.6 kHz (731)
 at Fm and 705.0 kHz (705) at Fm+ through letter r's exchanges, and
 98.36 kHz (983) at every step of letter s's 24 -> 12 -> 24 MHz rebase,
-every exchange of s exact. Letter r's plain four-byte read there is NOT
-exact at Sm and Fm: the first three bytes right and the last wrong -
-0x00 with `i2c_bus_error` at Sm, 0x2F for 0x27 at Fm - and exact at
-Fm+, run after run, the same with the suite as it stood before its
-rate verdicts were added. It is not isolated.
+every exchange of s exact - and letter r's plain four-byte read exact
+at all three speeds. (It once lost its last byte at Sm and Fm: the
+instrument ended its counted serve at the byte that reached the count
+and re-initialized its client while that byte was still in the shifter;
+a counted serve now ends on the STOP of the tenure that reached it.)
+Against that peer letter n has no race to stage - its held START does
+not fire when a phantom hold releases ([../samc21/i2c.md](../samc21/i2c.md),
+"A tenure into a busy bus parks in hardware") - and the live race
+between the two chips is staged from the SAM C21's side, behind a real
+STOP: collisions lost by either end, decided by the address
+([../samc21/i2c.md](../samc21/i2c.md), "TWO LIVE HOSTS").
+
+**A WEDGED TENURE IS THE ARBITER'S TO ANSWER, AND IT DOES (letter t).**
+`I2cBus` with a 35 ms `timeout_ticks` over this engine, against the
+SAM C21's `twi_peer` holding SDA low from its PORT for 60 ms: the
+tenure's START parks behind the held line (the address never goes out,
+as above), no interrupt follows, and the reply comes back `i2c_timeout`
+on the arbiter's clock (the RTC PIT at 1024 Hz, 36 ticks) at 35 ms
+WITH SDA STILL LOW - the diagnosis is the timeout's, not the release's.
+The arbiter's `recover()` (the ENABLE cycle and a forced Idle) runs in
+that same dispatch, and once the line is free the same bus AO carries
+the next tenure `i2c_ok` with no hand on the engine and no stale
+completion to drain. A client stretching every byte by 1 ms under the
+same limit completes `i2c_ok` in 9 ms: stretching is flow control, and
+the limit sits above a whole tenure.
 
 **A CLIENT WAKES ITS CHIP ON THE ADDRESS MATCH, AND THE WIRE PAYS FOR
 IT.** Measured by `test_avr_sleep` test m, which owns the sleep modes:
@@ -736,14 +756,6 @@ implement):
 
 **Implemented but not bench-verified**:
 
-- **The timed bus on THIS silicon.** `I2cBus`'s per-bus `timeout_ticks`
-  notices a tenure that never answers, calls this engine's `recover()`
-  (the errata's ENABLE cycle - exactly the verb the contract names as
-  its model) and replies `i2c_timeout`
-  ([i2c-bus.md](../design/i2c-bus.md)). It is host-tested and
-  compile-proven over `I2cHost` on every package; no AVR bench has
-  staged the wedge - a peer holding SDA through a tenure, as the SAM
-  C21's suite does, is the staging.
 - CTRLA.SDASETUP: the knob that shapes the client's own setup-time
   stretch is exposed and written, but its two settings are not measured
   apart on the wire;
@@ -751,10 +763,6 @@ implement):
   written, but the input transition level itself is not measured;
 - DBGCTRL.DBGRUN;
 - the timings of electricals 39.16 as numbers;
-- letter r's plain read against the SAM C21's `twi_peer`: its last byte
-  is wrong at Sm and Fm (above) - a logic analyser on the node through
-  that byte and its NACK, or the same letter against the AVR's
-  `twi_peer`, would tell the host's sample from the peer's drive;
 - TWI1, and every route other than TWI0 DEFAULT/ALT1/ALT2, are compiled
   for all eight packages and refused where they must be, but only TWI0's
   DEFAULT pair has carried traffic on this desk.

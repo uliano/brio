@@ -9,7 +9,8 @@ repository in preparation.
   a 24 MHz crystal on PA14/PA15 (XIN/XOUT) is what puts a scale on the
   board - OSC48M is half a per cent off nominal, the sign the die's -
   and the suites that want it arm it and hand it back. A 32.768 kHz
-  crystal on PA00/PA01 (XOSC32K) is optional on the design.
+  crystal on PA00/PA01 (XOSC32K) is optional on the design and NOT
+  fitted on the bench board: no suite may enable XOSC32K there.
 - **Supply**: jumper-selectable 3.3 V / 5 V; at 5 V the rail reads
   about 5.1 V (located by the supply suite through the comparator's
   VDD scaler against the bandgap). The analog suites locate the supply

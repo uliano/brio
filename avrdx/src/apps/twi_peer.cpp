@@ -252,7 +252,6 @@ twilink::Report run_serve(const twilink::Params& a) {
     const uint32_t t0 = Ticker::millis();
     for (;;) {
         if (Ticker::millis() - t0 >= a.ms) { r.flags |= twilink::report_timed_out; break; }
-        if (a.count != 0 && static_cast<uint16_t>(rx + tx) >= a.count && r.stops != 0) break;
         const auto s = Client::isr();
         if (s.address_or_stop()) {
             if (s.is_address()) {
@@ -263,6 +262,11 @@ twilink::Report run_serve(const twilink::Params& a) {
             } else {
                 if (r.stops < 255) ++r.stops;
                 Client::complete();
+                // A COUNTED serve ends here, on the STOP of the tenure
+                // that reached the count (twi_link.hpp) - never at the
+                // byte that reaches it, which a read still has in the
+                // shifter when it is handed over.
+                if (a.count != 0 && static_cast<uint16_t>(rx + tx) >= a.count) break;
             }
             continue;
         }

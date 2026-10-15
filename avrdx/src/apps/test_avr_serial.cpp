@@ -2846,6 +2846,61 @@ void ts_irda() {
                 up && have && !(r.count == 6 && r.sum == sum && r.ferr == 0));
         (void)link_command_mode();
     }
+
+    // EVCTRL.IREI: the IRCOM receiver fed from an EVENT CHANNEL, "which will
+    // disable the RxD input from the USART pin" (27.3.3.2.7). The peer's
+    // 3/16 pulses still arrive on PE1, and PE1's own pin event (channel 5,
+    // a PORTE channel - through PE1's INVEN where the peer's coder pulses the
+    // other way: the input buffer inverts before the event) carries them to
+    // the receiver: the echo reads clean. Then the CONTROL, the same echo
+    // with the channel fed from PE3 instead - an input held high by its
+    // pull-up, the IRCOM line's idle level - and IREI still on: the frames
+    // are on PE1, the peer echoes all six, and the receiver hears none of
+    // them - the pin is disconnected.
+    {
+        bool via_event = false, pin_cut = false;
+        for (uint8_t leg = 0; leg < 2; ++leg) {
+            link::Cfg pc{};
+            pc.mode = link::Mode::ircom;
+            pc.rate = 115'200;
+            link::Params a{};
+            a.cfg = pc;
+            a.count = 6;
+            // The control's six round trips each wait out the echo they
+            // never hear (U4::wait's 400 000 spins: the peer, given 1.5 s,
+            // was still echoing at the fifth and not at the sixth), so the
+            // peer is given 3 s to be echoing at the sixth.
+            a.ms = leg == 0 ? bound_ms(115'200, 24) : 3000;
+            if (!peer_act(link::Op::echo, a)) { (void)link_command_mode(); continue; }
+            bool up = dut_ircom(0x00, 0x00, 115'200, inv);
+            if (leg == 0) {
+                Ch2::source(EvPin<RxPin>{});
+            } else {
+                XdirPin::input(PinPull::up);
+                Ch2::source(EvPin<XdirPin>{});
+            }
+            Irda::receive_on(Ch2{});
+            U4::flush_rx();
+            up = up && !shared_line();
+            const uint16_t bad = up ? echo_mismatches(8, 6) : 6;
+            link::Report r{};
+            const bool have = peer_report(r, 10);
+            print(serial, "  IREI, the receiver on channel 5 ", leg == 0 ? "(PE1's pin event)"
+                                                                      : "(PE3, idle high)",
+                  ": wrong=", bad, " peer count=", have ? r.count : 0, crlf);
+            if (leg == 0) via_event = up && bad == 0 && have && r.count == 6;
+            else pin_cut = up && bad == 6 && have && r.count == 6;
+            Ch2::off();
+            XdirPin::input(PinPull::none);
+            (void)link_command_mode();
+        }
+        verdict("the IRCOM receiver reads the peer's pulses through an EVENT CHANNEL (IREI, "
+                "PE1's pin event)",
+                via_event);
+        verdict("and with IREI on the RxD pin is disconnected: the channel fed from an idle "
+                "pin, the same echo on PE1 is not read",
+                pin_cut);
+    }
     quiesce();
     (void)link_command_mode();
 }
@@ -3050,6 +3105,206 @@ void tw_onewire() {
     (void)link_command_mode();
 }
 
+// ---- B: the peer's repeated blast through the Uart task ---------------------------
+// usart_link.hpp's REPEATED blast: `count` gapless frames, repeated aux16
+// times with the counting pattern RUNNING ON across the repeats, so a lost
+// frame anywhere is a jump in the sequence. The receiver is the Uart task
+// (U4Tx, its 32-entry ring, the RXC vector bound plain), the consumer a
+// loop over read_span()/consume() comparing every byte with the next of
+// the stream.
+//
+// THE TASK CARRIES ITS OWN COMMAND. Uart::init() ends in a 10 ms hold of
+// TXD idle with the receiver already live, and the peer starts its action
+// settle_ms + 2 ms after its ack - so a task initialized after the command
+// opens on a ring that overflowed during its own init (measured: the
+// first look skips, the stream already a hundred frames on). So the task
+// is brought up FIRST, at the command rate, the frame written through it
+// and the ack read from its ring; then set_baud() moves it to the blast's
+// rate - no wait but the transmitter's idle - before the peer starts.
+// The crossed pair only (the shared line turns the transmitter around).
+//
+// 1. A SECOND OF IT, at 115200, 500000, 1000000 and 1500000 baud (the
+//    last the 16-sample ceiling at 24 MHz, BAUD 64): blocks of a hundredth
+//    of a second, a hundred of them, and every byte must arrive in
+//    sequence with no skip, no ring or hardware overrun and no frame
+//    error - the peer's count (modulo 2^16) the same.
+// 2. THE SKIP, at 115200: the consumer stalls once, 10 ms after 2000
+//    bytes, while the stream runs on. The ring fills (32), the rest of
+//    the stall's frames are refused, and the consumer's next look discards
+//    what the ring held: EXACTLY ONE skip (rx_skips) and ONE jump in the
+//    sequence, every byte after it in sequence again. THE JUMP, derived:
+//    what was not handed out is everything that arrived from the last
+//    consume to the look - the stall's 10 ms of frames, timed on the
+//    ruler (wall time, whatever the receive entries take of it), 10 ms /
+//    86.8 us = 115.2 frames at 115200 8N1 (the peer's rate from its
+//    crystal and this board's ruler on its own: parts per million, nothing
+//    at this scale) - plus or minus one frame for where the stall falls in
+//    a frame, and the ruler's poll and the look's few microseconds, a
+//    fraction of one: a jump in [114, 117].
+
+/// One command written through the TASK and its ack read from the task's
+/// ring: the command channel's frame, at the rate the task runs.
+bool task_command(link::Op op, const link::Params& a) {
+    uint8_t p[link::max_payload] = {};
+    link::put_params(p, a);
+    uint8_t frame[link::max_payload + 4];
+    uint8_t n = 0;
+    link::write_frame([&](uint8_t b) { frame[n++] = b; }, op, p, link::params_size);
+    for (std::span<const uint8_t> old = U4Tx::read_span(); !old.empty();
+         old = U4Tx::read_span()) {
+        U4Tx::consume(old.size());
+    }
+    uint8_t queued = 0;
+    for (uint32_t k = 0; k < 400'000u && queued < n; ++k) {
+        queued = static_cast<uint8_t>(
+            queued + U4Tx::write_bulk({frame + queued, static_cast<size_t>(n - queued)}));
+    }
+    link::Decoder d;
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < 80u) {
+        const std::span<const uint8_t> run = U4Tx::read_span();
+        for (const uint8_t b : run) {
+            if (d.feed(b) == link::Decoder::Result::frame) {
+                U4Tx::consume(run.size());
+                const link::Frame& f = d.frame();
+                return f.op == link::Op::ack && f.len == 2 && f.data[0] == link::byte_of(op);
+            }
+        }
+        U4Tx::consume(run.size());
+    }
+    return false;
+}
+
+/// The task up at the command rate, the blast commanded through it, the
+/// task moved to the blast's rate. False: no blast to receive.
+bool blast_on_task(uint32_t rate, uint16_t block, uint16_t repeats, uint8_t value) {
+    if (shared_line() || !U4Tx::can_baud(SysClock::hz, rate)) return false;
+    U4Tx::init(clock, link::command_baud);
+    link::Cfg pc{};
+    pc.rate = rate;
+    link::Params a{};
+    a.cfg = pc;
+    a.count = block;
+    a.aux16 = repeats;
+    a.aux8 = 0;
+    a.ms = 3000;
+    a.value = value;
+    a.pattern = link::pattern_counting;
+    for (uint8_t k = 0; k < 3; ++k) {
+        if (task_command(link::Op::blast, a)) {
+            return U4Tx::set_baud(SysClock::hz, rate);
+        }
+        delay_us(clock, 70'000);
+    }
+    return false;
+}
+
+void tB_blast() {
+    print(serial, "B the peer's repeated blast through the Uart task: a second of it per "
+                  "rate, then one stalled consumer", crlf);
+    quiesce();
+    if (!ensure_link()) { verdict("the peer is reachable", false); return; }
+    static constexpr uint32_t rates[] = {115'200u, 500'000u, 1'000'000u, 1'500'000u};
+    for (const uint32_t rate : rates) {
+        const uint16_t block = static_cast<uint16_t>(rate / 1000u);   // 10 ms of frames
+        const uint16_t repeats = 100;
+        const uint32_t total = static_cast<uint32_t>(block) * repeats;
+        const bool up = blast_on_task(rate, block, repeats, 0x30);
+        U4Tx::clear_errors();
+        const uint32_t skips0 = U4Tx::rx_skips();
+        uint32_t got = 0;
+        uint8_t expect = 0x30;
+        bool broken = false;
+        uint8_t wrong = 0;
+        const uint32_t t0 = Ticker::millis();
+        while (up && got < total && !broken && Ticker::millis() - t0 < 2500u) {
+            const std::span<const uint8_t> run = U4Tx::read_span();
+            uint32_t n = 0;
+            for (const uint8_t b : run) {
+                if (b != expect) {
+                    wrong = b;
+                    broken = true;
+                    break;
+                }
+                ++expect;
+                ++n;
+            }
+            got += n;
+            U4Tx::consume(n);
+        }
+        const uint32_t skips = (U4Tx::rx_skips() - skips0) & 0xFFu;
+        const uint8_t fe = U4Tx::frame_errors(), ring = U4Tx::rx_overruns(),
+                      hw = U4Tx::hw_overruns();
+        U4Tx::release();
+        link::Report r{};
+        // A stream that broke early is still running at the peer: its
+        // report waits the rest of the second out.
+        const bool have = peer_report(r, got == total ? 20 : 1500);
+        print(serial, "  ", rate, ": ", got, " of ", total, " bytes in sequence");
+        if (broken) print(serial, " - BROKEN, ", hex(wrong), " where ", hex(expect), " was due");
+        print(serial, ", skips ", skips, ", ring ", ring, ", hw ", hw, ", ferr ", fe,
+              "; the peer sent ", have ? r.count : 0, " (mod 65536)", crlf);
+        verdict(num(rate), " baud: a second of the peer's repeated blast through the Uart task, "
+                "every byte in sequence",
+                up && have && got == total && !broken && skips == 0u && fe == 0u && ring == 0u &&
+                    hw == 0u && r.count == static_cast<uint16_t>(total));
+    }
+
+    // 2. The stalled consumer.
+    {
+        const uint16_t block = 1152;
+        const uint16_t repeats = 10;
+        const uint32_t total = static_cast<uint32_t>(block) * repeats;
+        const bool up = blast_on_task(115'200u, block, repeats, 0x00);
+        U4Tx::clear_errors();
+        const uint32_t skips0 = U4Tx::rx_skips();
+        uint32_t got = 0;
+        uint8_t expect = 0x00;
+        uint8_t jumps = 0;
+        uint8_t jump = 0;
+        bool stalled = false;
+        const uint32_t t0 = Ticker::millis();
+        while (up && Ticker::millis() - t0 < 1500u) {
+            if (!stalled && got >= 2000u) {
+                // 10 ms of WALL time on the ruler: a cycle-counted delay
+                // would stretch by every receive entry it is interrupted
+                // by (measured: a jump of 120 for a delay_us of 10 ms).
+                stalled = true;
+                ruler_up();
+                while (Ruler::read() < SysClock::hz / 100u) {
+                }
+                ruler_down();
+            }
+            const std::span<const uint8_t> run = U4Tx::read_span();
+            for (const uint8_t b : run) {
+                if (b != expect) {
+                    ++jumps;
+                    jump = static_cast<uint8_t>(b - expect);
+                }
+                expect = static_cast<uint8_t>(b + 1u);
+            }
+            got += run.size();
+            U4Tx::consume(run.size());
+        }
+        const uint32_t skips = (U4Tx::rx_skips() - skips0) & 0xFFu;
+        const uint8_t ring = U4Tx::rx_overruns(), hw = U4Tx::hw_overruns();
+        U4Tx::release();
+        link::Report r{};
+        const bool have = peer_report(r, 20);
+        print(serial, "  115200, the consumer stalled 10 ms after 2000 bytes: ", got, " of ", total,
+              " delivered, ", jumps, " jump(s) of ", jump, ", skips ", skips, ", ring ", ring,
+              ", hw ", hw, "; the peer sent ", have ? r.count : 0, crlf);
+        verdict("a stalled consumer costs ONE skip and ONE jump in the sequence, every byte "
+                "after it in sequence",
+                up && have && r.count == static_cast<uint16_t>(total) && skips == 1u &&
+                    jumps == 1u);
+        verdict("and the jump is the stall's frames: 10 ms of 115200 8N1, in [114, 117]",
+                jumps == 1u && jump >= 114u && jump <= 117u && got + jump == total);
+    }
+    quiesce();
+    (void)link_command_mode();
+}
+
 // ---- the menu ------------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -3062,9 +3317,10 @@ constexpr Test tests[] = {
     {'n', tn_waveforms}, {'o', to_autobaud_foreign}, {'p', tp_mpcm_cross},
     {'q', tq_sync}, {'r', tr_rs485}, {'s', ts_irda}, {'t', tt_rebase_traffic},
     {'u', tu_lbme_pad}, {'v', tv_wiring}, {'w', tw_onewire}, {'x', tx_clocks},
+    {'B', tB_blast},
 };
 constexpr char single_board[] = "abcdefghiIT";
-constexpr char two_board[] = "jklmnopqrstu";
+constexpr char two_board[] = "jklmnopqrstuB";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -3079,7 +3335,8 @@ void help() {
                   "i host spi | I injected errors | T tx_idle on the pad", crlf);
     print(serial, "  two boards (needs usart_peer on the peer board): j link | k baud matrix | "
                   "l frame matrix | m errors | n waveforms | o auto-baud foreign | "
-                  "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad",
+                  "p mpcm | q sync roles | r rs-485 | s ircom | t rebase | u lbme pad | "
+                  "B the repeated blast through the Uart task",
           crlf);
     print(serial, "  v wiring probe (with the peer board's '2') | w one-wire (a PE0-PE0 "
                   "jumper, or a samc21 peer) | x clock comparison (ppm); none of these is in y",

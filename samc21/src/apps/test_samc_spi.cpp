@@ -133,6 +133,7 @@
 // second source of truth for a wire format, which is exactly the thing
 // that drifts.
 #include "../../../avrdx/src/apps/spi_link.hpp"
+#include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock{};
@@ -2386,67 +2387,14 @@ void print_burst(const char* name, const ClientBurst& c) {
     print(serial, crlf);
 }
 
-// ---- the RTC: the sleeping legs' backstop -----------------------------------
+// ---- the sleeping legs' backstop and sleep: bench_sleep.hpp ------------------
 //
-// The RTC on OSCULP32K is the wake-up test_samc_sleep proves in STANDBY;
-// here it is the one nobody should need, armed 300 ms ahead of every sleep
-// and counted.
-
-volatile bool rtc_fired = false;
-
-bool rtc_backstop_up() {
-    if (!Rtc::init()) return false;
-    (void)Rtc::enable(false);
-    Osc32kctrl::rtc_clock(RtcClock::ulp_32k);
-    if (!Rtc::init()) return false;
-    if (!Rtc::configure(RtcConfig{.mode = RtcMode::count32, .prescaler = RtcPrescaler::div1})) {
-        return false;
-    }
-    if (!Rtc::enable(true)) return false;
-    Rtc::disarm(RtcFlag::all);
-    Rtc::clear_flags(RtcFlag::all);
-    Rtc::arm(RtcFlag::compare0);
-    Nvic::enable(Rtc::irq());
-    return true;
-}
-
-/// COMP0 `ticks` of 32768 Hz ahead; false when it is not in the future
-/// once armed (no sleep on it then).
-bool rtc_arm(uint32_t ticks) {
-    const uint32_t c = Rtc::count32();
-    rtc_fired = false;
-    Rtc::clear_flags(RtcFlag::compare0);
-    if (!Rtc::set_comp32(c + ticks)) return false;
-    return static_cast<int32_t>(Rtc::count32() - (c + ticks)) < 0;
-}
-
-/// Sleep in `mode` until the select's fall (or the backstop), race-free:
-/// PRIMASK set, the condition re-tested, WFI wakes on a pending interrupt
-/// even masked, the unmask lets the handler run. The tick's interrupt is
-/// off for the whole wait, so only SSL, the console and the backstop can
-/// wake it - and the console is silent. Returns the WFIs it took.
-uint32_t first_pending = 0;     ///< NVIC->ISPR[0] at the first wake-up: which lines woke it
+// The RTC on OSCULP32K as the counted backstop, armed 300 ms ahead of every
+// sleep, and the race-free sleep until the select's fall - the samc21
+// suites' shared tools.
 
 uint8_t sleep_for_select(SleepMode mode) {
-    uint8_t wakes = 0;
-    // The console drained first: its transmitter's DRE is a wake-up too
-    // (measured: an unfinished line woke the core once a character).
-    for (uint32_t k = 0; k < 2'000'000u && !Serial::tx_idle(); ++k) {
-    }
-    if (!Pm::set_sleep_mode(mode)) return 0;
-    SysTickInterruptGuard quiet_tick;
-    first_pending = 0;
-    while (ssl_seen == 0 && !rtc_fired && wakes < 32u) {
-        __disable_irq();
-        if (ssl_seen == 0 && !rtc_fired) {
-            Pm::sleep();
-            if (wakes == 0) first_pending = NVIC->ISPR[0];
-            ++wakes;
-        }
-        __enable_irq();
-    }
-    (void)Pm::set_sleep_mode(SleepMode::idle0);
-    return wakes;
+    return benchsleep::sleep_until<Serial>(mode, [] { return ssl_seen != 0; });
 }
 
 void tj_client_edges() {
@@ -2614,7 +2562,7 @@ void tj_client_edges() {
     // The select's fall as the WAKE-UP: IDLE first, and STANDBY only once
     // IDLE has proven the source. The burst's lead-in is 60 ms; the RTC's
     // backstop 300 ms.
-    if (!rtc_backstop_up()) {
+    if (!benchsleep::backstop_up()) {
         bench.verdict("the RTC backstop comes up", false);
         return;
     }
@@ -2623,14 +2571,14 @@ void tj_client_edges() {
     Peer::Config idle_cfg = bare;
     c = client_burst(JRun::receive, idle_cfg, 12, 0x67, 0x00, 0x66, 60, [] {
         arm_ssl(0);
-        backstop = !rtc_arm(9830);
+        backstop = !benchsleep::backstop_arm(9830);
         wakes = sleep_for_select(SleepMode::idle0);
-        backstop = backstop || rtc_fired;
+        backstop = backstop || benchsleep::rtc_fired;
     });
     print_burst("IDLE until the select's fall, then receive", c);
     print(serial, "    ", wakes, " WFI, SSL ", ssl_seen, ", the backstop ",
           backstop ? "FIRED" : "silent", "; the lines pending at the first wake-up ",
-          hex(first_pending), crlf);
+          hex(benchsleep::first_pending), crlf);
     const bool idle_ok = c.commanded && ssl_seen == 1 && !backstop && wakes == 1;
     bench.verdict("the select's fall (SSL) wakes the core from IDLE, the one wake-up", idle_ok);
     bench.verdict("and the burst is received whole after it",
@@ -2641,14 +2589,14 @@ void tj_client_edges() {
         stby_cfg.run_standby = true;
         c = client_burst(JRun::receive, stby_cfg, 12, 0x78, 0x00, 0x77, 60, [] {
             arm_ssl(0);
-            backstop = !rtc_arm(9830);
+            backstop = !benchsleep::backstop_arm(9830);
             wakes = sleep_for_select(SleepMode::standby);
-            backstop = backstop || rtc_fired;
+            backstop = backstop || benchsleep::rtc_fired;
         });
         print_burst("STANDBY until the select's fall, then receive", c);
         print(serial, "    ", wakes, " WFI, SSL ", ssl_seen, ", the backstop ",
               backstop ? "FIRED" : "silent", "; the lines pending at the first wake-up ",
-              hex(first_pending), crlf);
+              hex(benchsleep::first_pending), crlf);
         bench.verdict("the select's fall wakes the core from STANDBY with CTRLA.RUNSTDBY set, "
                       "the one wake-up",
                       c.commanded && ssl_seen == 1 && !backstop && wakes == 1);
@@ -2658,7 +2606,7 @@ void tj_client_edges() {
         print(serial, "  STANDBY not entered: IDLE did not prove the select's fall as a wake-up",
               crlf);
     }
-    Rtc::disarm(RtcFlag::all);
+    benchsleep::backstop_down();
     (void)link_command_mode();
     bench.verdict("the command channel survives the client legs", command(Op::ping));
 }
@@ -2937,10 +2885,7 @@ extern "C" void TC4_Handler() {
 }
 
 /// Letter j's backstop: a wake-up nobody should need, counted.
-extern "C" void RTC_Handler() {
-    (void)brio::Rtc::isr();
-    rtc_fired = true;
-}
+extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
 
 int main() {
     SysClock::init();

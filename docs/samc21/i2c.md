@@ -8,7 +8,7 @@ beside the SPI view). Family fixture `test/family_samc21/i2c.cpp` +
 seven negatives (the per-bus timeout adds an
 eighth at the util level: an engine without `recover()` refused);
 bench suite `test_samc_i2c`, bench letter `bench_samc` i
-(12 letters, two-board: the peer board runs `twi_peer` on an AVR128DB48
+(15 letters, two-board: the peer board runs `twi_peer` on an AVR128DB48
 or on a second SAM C21, one `twi_link.hpp` wire format between them -
 commanded in band over the bus under test).
 
@@ -106,12 +106,14 @@ the idle guard rather than returned to.
 
 **A tenure into a busy bus parks in hardware.** Writing ADDR while
 another agent holds the wire parks the START until the bus idles
-(33.6.2.4.2). Measured with the peer pinning SDA low: the bus reads
-BUSY for the hold's whole length and not one byte moves; ON THIS
-SILICON the parked START does NOT fire when the hold releases (the
-phantom Start keeps the state machine BUSY and even a configured
-INACTOUT does not walk it back) - the way out is the engine's own
-re-init, and the suite prints the timeline.
+(33.6.2.4.2). Behind a REAL foreign tenure it fires at that tenure's
+STOP: started 1 ms into the peer's 16-byte write, a tenure waits it out
+and completes (letter o). Behind a PHANTOM - the peer pinning SDA low
+from a pin, no tenure around it - the bus reads BUSY for the hold's
+whole length, not one byte moves, and ON THIS SILICON the parked START
+does NOT fire when the hold releases (the phantom Start keeps the state
+machine BUSY and even a configured INACTOUT does not walk it back): the
+way out is the engine's own re-init, and letter g prints the timeline.
 
 **Writing ADDR is the clear ceremony.** BUSERR, ARBLOST, LENERR and
 the time-out statuses auto-clear on the next tenure's ADDR write
@@ -162,7 +164,7 @@ ACK back first.
 | smart mode | 33.6.3.2 | USED, always: a pumped read byte is one DATA load, no command and no SYSOP wait |
 | the two DMA requests (TX, RX) | 33.6.4.1.2, table 33-2 | DECLINED: erratum 1.10.4 ([dmac.md](dmac.md)) - this stratum drives the DMAC for the Uart's transmitter alone |
 | ADDR.LEN + LENEN | 33.10.9 | DECLINED: its use would be to close a DMA phase; the pump closes a read by smart mode and a write by its last MB, every byte software's anyway. The resource keeps the verb (`I2cm::start_address_len`), its behaviour measured above |
-| quick command (QCEN) | 33.6.3.4 | DECLINED for the probe: an empty request costs one MB either way |
+| quick command (QCEN) | 33.6.3.4 | DECLINED for the probe: an empty request costs one MB either way. On the wire (letter m) it changes a READ alone: SB after the address's acknowledge, nine SCL rises, where a plain read clocks the byte in first (seventeen); a write raises MB at the acknowledge either way |
 | SCLSM = 1 | 33.6.2.4.5 | DECLINED: the engine's decisions are taken before the acknowledge (SCLSM = 0), and erratum 1.17.13 refuses it beside QCEN |
 | High-speed mode | 33.6.2.4.6 | REFUSED: errata 1.17.7 and 1.17.9 |
 | the SMBus time-outs | 33.6.3.1 | the caller's, over `configuration()` (the finding above); the engine answers a time-out's ERROR with `i2c_bus_error` |
@@ -173,9 +175,22 @@ when they are armed, on a slow clock weighed to 32 kHz.** Under LOWTOUTEN
 and SEXTTOEN a client stretching every byte by 40 ms ends the tenure at
 29 ms, inside the 25..35 ms window, and the engine answers
 `i2c_bus_error` (letter j). They bound the host's OWN unserviced hold as
-well: MB left unserviced trips LOWTOUT at 30 ms measured, with the
+well: MB left unserviced trips LOWTOUT at 29 ms measured, with the
 chapter's exact signature - STATUS.LOWTOUT + BUSERR and INTFLAG.ERROR
-beside the still-standing MB. TWO OPERATIONAL RULES the chapter does not
+beside the still-standing MB. MEXTTOEN, the host's own extend, polices
+that same unserviced hold alone - STATUS.MEXTTOUT + BUSERR and
+INTFLAG.ERROR, LOWTOUT never reached - and does NOT see a client's
+stretch: two bytes stretched 15 ms each complete `i2c_ok` under it.
+**THE THREE COUNTS ARE NOT THE CHAPTER'S NUMBERS.** Timed in
+microseconds on the meter FREQM weighs (33.1 to 33.2 kHz, the factory
+trim), every shot of fifteen runs: LOWTOUT at 962 to 964 meter cycles,
+SEXTTOEN alone (one 40 ms stretch, counted from its start) at 960 or
+961, MEXTTOEN at 482 to 484 (sixteen shots a run, a spread of 30 us).
+At 32.768 kHz those are 29.3, 29.3 and 14.7 ms: LOWTOUT inside its
+25..35 ms window, but SEXT and MEXT late against the 25 and 10 ms
+33.6.3.1 states - MEXT exactly half of the other two - and both errata
+documents silent. A design that leans on SMBus's T_LOW:SEXT and
+T_LOW:MEXT gets them from this silicon at those counts. TWO OPERATIONAL RULES the chapter does not
 state: THE COUNTER ARMS AT configure() - the enables left in CTRLA by an
 earlier configuration time nothing until a fresh disable/write/enable
 cycle - and A WRONG-RATE METER IS MUTE, not scaled: with
@@ -250,8 +265,8 @@ with no workaround, and no bench wire here could carry 3.4 MHz).
   and a Stop by hand, which leaves a HEALTHY wire untouched (SDA read
   first; zero pulses is the answer and the action) - and `recover()`,
   the init() tail re-run from the cached configuration: what a timed I2cBus calls on a tenure that never answered,
-  and the ONLY way out of a parked START on this silicon (the release
-  does not fire it - letter g). recover() fixes the PERIPHERAL;
+  and the ONLY way out of a START parked behind a phantom hold on this
+  silicon (the release does not fire it - letter g). recover() fixes the PERIPHERAL;
   unstick() fixes the wire; neither replaces the other. NO PLACEMENT
   PARAMETER: the event entry is inline in the vector that binds it, and
   a program that wants it in SRAM places that vector in `.fast_text`
@@ -372,15 +387,20 @@ What the rows say:
   16-byte write over the IOBUS (single-cycle, 28.6.5, the pin's group in
   continuous sampling, 28.8.10), four instructions a sample, and takes
   SysTick's count at every rising edge; the mean of the rise-to-rise
-  intervals within a quarter of their median is the host's unhindered
+  intervals within a quarter of their lower quartile is the host's unhindered
   period (the holds and stretches fall between bytes and before an
-  acknowledge). With the node's 166 ns rise given to `init()`: 100 kHz
-  at 997 to 998 thousandths of the rate asked (480.6 to 481.3 cycles a
-  period), 400 kHz at 1012 (118.5), Fm+ at 934 (51.3) - inside the
+  acknowledge). With the node's 166 ns rise given to `init()`, twelve
+  runs: 100 kHz at 994 to 996 thousandths of the rate asked (481.6 to
+  482.8 cycles a period), 400 kHz at 1009 to 1012 (118.5 to 118.8), Fm+
+  at 932 to 934 (51.3 to 51.5) - inside the
   bracket, never more than 2 % above the rate asked and within a quarter
   below it. At Fm+ the sampler is at its limit: an edge's own path and a
-  period nearly meet, so some 110 of 152 rises are caught and the reading
-  is the coarsest of the three.
+  period nearly meet, so some 115 of 154 rises are caught, about half the
+  intervals then a single period and the rest two or more. Every
+  disturbance lengthens an interval, so the reference is the LOWER
+  QUARTILE, not the median - which fell on the doubled intervals in 4 of
+  15 runs, where the quartile held in 12 of 12 - and the reading is the
+  coarsest of the three.
 - A RISE BUDGET IS NOT A MARGIN. The formula (33.6.2.4.1) subtracts the
   rise from the period the register pair makes, so a budget longer than
   the bus's rise runs SCL FAST by the difference: the same letter with
@@ -409,6 +429,40 @@ What the rows say:
   race legs (a stale timeout, a straggler completion) are the host
   suite's, deterministic on the virtual clock.
 
+- THE CLIENT ROLE (letter h): the peer's host writes ten bytes to this
+  board's client, which takes them byte-exact by polling - AMATCH, the
+  direction, the data, the Stop - while the peer's host reads every byte
+  acknowledged. The choreography's one trap: the tenure that arms the
+  peer goes to an address NOBODY holds; aimed at the peer's own parked
+  client, that client stretches it through the whole lead-in and the
+  peer's held START fires on its STOP, before this board is a client.
+- THE QUICK COMMAND (letter m), counted on SCL through the pad's input
+  buffer: with QCEN a READ raises SB after nine rises - the address and
+  its acknowledge - and the STOP is one more; the plain read clocks the
+  byte in first, seventeen rises, then the owed NACK and the STOP. A
+  write raises MB after nine either way. The peer saw four matches and
+  four Stops, every tenure acknowledged and ended IDLE.
+- THE ADDRESS-MATCH WAKE (letter n): this board's client asleep, the
+  peer's host writing ten bytes to it 30 ms after the bus went Busy. In
+  IDLE0, and in STANDBY with CTRLA.RUNSTDBY, the match is the one
+  wake-up - SERCOM3's line the pending one, the RTC backstop silent -
+  and the client holds SCL from the match until the polled loop answers,
+  so the burst lands whole after the wake-up. Without RUNSTDBY the
+  client is deaf in STANDBY (33.6.5, "all receptions will be dropped"):
+  no match, the backstop ends the sleep, the peer's host reads an
+  address NACK.
+- TWO LIVE HOSTS (letter o): this board's tenure T1 to the peer's
+  client, the peer's START armed behind it, and T2 started a LAG after
+  T1 completes - both STARTs queued behind T1's one STOP. Below a lag of
+  some 535 core cycles T2 goes first, above some 575 the peer does and
+  T2 waits behind its tenure; between them the two STARTs land inside
+  each other's detection and the wired AND arbitrates on the address:
+  aiming 0x7A above the peer's 0x11, T2 comes back `i2c_arb_lost` and the
+  peer's tenure completes; aiming 0x08 below it, the peer reports ARBLOST
+  and T2 completes. Swept every two cycles across the crossover the
+  letter finds by itself: 17 to 19 collisions of 81 attempts each way,
+  in every one of fifteen runs, none wedged.
+
 ## Not covered yet
 
 Driver gaps (not built), each with its reason:
@@ -426,25 +480,10 @@ Driver gaps (not built), each with its reason:
 
 Implemented but not bench-verified:
 
-- **Multi-host arbitration with both hosts LIVE** - and the two-node
-  C21 desk has a REASONED wall in front of it: the AVR's deterministic
-  race arms both held STARTs against a bit-banged Busy and releases them
-  on one edge, but ON THIS SILICON a START parked behind a phantom-Start
-  hold DOES NOT FIRE when the hold releases (measured, letter g's
-  timeline) - the rendezvous primitive itself is absent. A real race
-  here wants a third node (or the AVR back on the bus as the injector).
-  The parked-START behaviour and the ARBLOST/BUSERR classification are
-  measured; a live collision is not.
-- **MEXTTOEN** on silicon (the host's own cumulative-extend flavour;
-  LOWTOUT and SEXT are measured - see the findings - and MEXT shares
-  their machinery by the same CTRLA wording).
 - **XOSC32K as the time-outs' 32 kHz source**: the letter runs on a
-  FREQM-weighed OSC32K with the factory trim; the crystal source waits
-  for the 32 kHz pass of [osc32kctrl.md](osc32kctrl.md).
-- **The quick command** on silicon: written and read back, no tenure
-  has used it.
-- **Sleep and RUNSTDBY**, the address-match wake included: no letter
-  sleeps this bus.
+  FREQM-weighed OSC32K with the factory trim; the crystal source needs a
+  32.768 kHz crystal, which the bench board has not got fitted (the
+  board's page) - a board with one would measure it.
 
 Stated, not enforced: `SercomPadPin`'s pin-reaches-pad claim and table
 6-7's I2C-capable list both remain the caller's obligations.

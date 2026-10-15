@@ -181,8 +181,10 @@ one polled request of this engine, beside a gapped control - from 1.5
 to 12 MHz, the rungs between the crystal's divisions run with this
 board on its internal oscillator at 16 and 20 MHz; it judges a SAM C21
 peer to 8 MHz and prints every other peer's ladder; letter `v` makes this
-board the CLIENT of the peer's burst (The client's runs, below). Measured: `z` 193 of
-193 with that peer attached, `y` 110 of 110 - `l` read a dummy leading
+board the CLIENT of the peer's burst (The client's runs, below), and
+letter `w` uses that burst's select and clock as pin edges out of
+STANDBY ([port.md](port.md)). Measured: `z` 193 of
+193 with that peer attached, `y` 114 of 114 - `l` read a dummy leading
 every normal and buffer combination of that peer and none of its
 buffer+BUFWR, `m` exact through CLK_PER/4 and its answers broken at
 CLK_PER/2, `u` exact back to back to 8 MHz and broken at 10 and 12

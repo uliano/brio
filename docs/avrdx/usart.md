@@ -279,8 +279,8 @@ U::disarm_start_of_frame();         // first thing on the way back
 
 `test_avr_serial` runs on an AVR128DB48 rev. A5 (24 MHz crystal, 5 V)
 and has two halves: `z` is the SINGLE-BOARD set (11 tests,
-163 verdicts, nothing to wire) and `y` is the TWO-BOARD set (12 tests,
-110 verdicts and one SKIPPED leg against this desk's peer)
+163 verdicts, nothing to wire) and `y` is the TWO-BOARD set (13 tests,
+118 verdicts and one SKIPPED leg against this desk's peer)
 against a peer board driven IN BAND over the very link under test
 (`usart_link.hpp`). On this desk the peer is a SAM C21, its SERCOM1 on
 the four link wires as the crossed pair - PE0 to its RxD, PE1 to its
@@ -386,6 +386,31 @@ the listing's count above.
   3 Mbaud. The bench app's metered vectors run 282 to 410 cycles on
   their longest pass; the console's longest is its RXC with the post,
   182 with the response.
+- **A second of a foreign stream arrives whole** (`test_avr_serial` B):
+  the peer's REPEATED blast - a hundred gapless blocks of ten
+  milliseconds each, the counting pattern running on across them, so a
+  lost frame anywhere is a jump in the sequence - into `Uart` with a
+  consumer over `read_span()`/`consume()`, at 115200, 500 000, 1 000 000
+  and 1 500 000 baud (the 16-sample ceiling): every byte in sequence at
+  every rate, no skip, no ring or hardware overrun, no frame error, the
+  peer's count the same.
+- **A stalled consumer costs one skip and one jump, the stall's frames
+  exactly.** The same stream at 115200 with the consumer away for 10 ms
+  of wall time after 2000 bytes: the ring filled, the rest of the stall's
+  frames were refused, and the next look discarded what the ring held -
+  ONE `rx_skips`, ONE discontinuity of 115 frames (10 ms / 86.8 us =
+  115.2), every byte after it in sequence, delivered plus lost equal to
+  what the peer sent. Timed with a cycle-counted `delay_us` the same
+  stall cost 120 frames: the receive entries that interrupt the delay
+  stretch it.
+- **`Uart::init()` holds TXD idle for 10 ms with the receiver already
+  live.** Initialized while a stream is already arriving, the task opens
+  on a ring that overflowed inside its own init - the first look skips,
+  the stream a hundred frames on at 115200. A receiver that must catch a
+  stream from its first frame is brought up before the far end starts,
+  or moved there with `set_baud()`, which waits only for the transmitter
+  (letter B takes its command and the ack through the task itself, then
+  `set_baud()`s it to the blast's rate).
 
 ### The two boards
 
@@ -605,6 +630,13 @@ the listing's count above.
   clean - but the IRCOM RECEIVER still expects pulses, and a plain
   asynchronous sender is NOT readable by it (five echoes of six wrong). A
   pulse-coded transmitter into a plain receiver is not readable either.
+- **IREI moves the IRCOM receiver to an event channel, and takes it off
+  the pin.** With `IrdaLink::receive_on()` on channel 5 fed by PE1's own
+  pin event, the peer's 3/16 pulses read clean - through PE1's INVEN,
+  which the event sees as every peripheral on the pin does. Fed instead
+  from PE3, an input held idle-high by its pull-up, the same six echoes
+  stand on PE1 and not one is read: with IREI set the RxD pin is
+  disconnected (27.3.3.2.7).
 - **RXPL counts PERIPHERAL CLOCK cycles, not receiver samples.** At
   115 200 on a 24 MHz CLK_PER a bit is 208 peripheral clocks and the
   3/16 pulse is 39 of them. Sweeping this board's RXPL against the peer's
@@ -761,9 +793,6 @@ bench-verified:
   `avrdx/spi.hpp`'s client, `test_avr_spi` r): this desk's SPI peer is a
   SAM C21, whose SERCOM is not a USART while it is an SPI - an avrdx SPI
   peer would measure it;
-- **the repeated blast** of `usart_link.hpp`: no letter of `y` repeats
-  one;
-- **the IRCOM receiver fed from an event channel** (`EVCTRL.IREI`);
 - **routes**: USART0 ALT1, USART1 default, USART3 ALT1 and USART4
   default were driven, on 48-pin silicon only. USART2 is the bench
   console and the suites never reconfigure it.

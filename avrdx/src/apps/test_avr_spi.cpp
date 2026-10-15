@@ -43,7 +43,10 @@
 // THIS board as the CLIENT of the peer's host_burst, its runs in both
 // modes and their rare ends staged: a burst shorter than the run, a run
 // nobody selects and one whose select is held with no clock, a handler
-// timed into the run (TCA1, started by the select's fall).
+// timed into the run (TCA1, started by the select's fall) - and (w) the
+// peer's burst as a pin edge out of STANDBY: PE2, a fully asynchronous
+// pin, on either edge, against PE3, a partially asynchronous one, on both
+// edges only.
 //
 // THE PEER IS AN AVR128DB48 OR A SAM C21, and the half asks which
 // (ident's version, its high byte: spi_link.hpp). Some of its verdicts
@@ -92,6 +95,7 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/rtc.hpp"
 #include "avrdx/sleep.hpp"
 #include "avrdx/spi.hpp"
 #include "avrdx/tca.hpp"
@@ -3422,6 +3426,147 @@ void tv_client() {
     quiesce();
 }
 
+// ---- w: a pin edge out of STANDBY - the fully asynchronous Px2 ----------------
+//
+// The I/O multiplexing note of DS40002247B (port.md: "Px2 and Px6 are
+// FULLY asynchronous"): a fully asynchronous pin senses an edge with every
+// clock stopped, so it wakes the device from any sleep mode on ANY sense;
+// a partially asynchronous one, with CLK_PER stopped, wakes only on BOTH
+// edges or a level, and then only if the level is still there when the
+// wake-up has restarted CLK_PER (18.3.3.1, table 18-4 and its note). The
+// edges come from the OTHER board: its host_burst (spi_link.hpp) drives
+// PE3 low for the burst - the select - and clocks SCK on PE2, mode 0 (SCK
+// idles low, its first edge rising), with this board's SPI released and
+// the four pads plain inputs. One burst per leg, the core in STANDBY
+// through the lead-in, the RTC PIT (CLK_RTC, alive in standby) the
+// counted backstop - CLK_PER is stopped, nothing else can end the sleep:
+// PE2 RISING, PE2 FALLING, PE3 FALLING (the control: the select's fall
+// happens - the peer's report says it clocked the burst - and no
+// interrupt follows), PE3 BOTHEDGES. THE BURST'S LENGTH IS THE NOTE'S: a
+// standby wake on the crystal with its RUNSTDBY clear takes 1.77 ms
+// (docs/avrdx/platform.md, the latency table), so the select is held low
+// for 160 characters at the peer's 750 kHz and 20 us gaps - 4.9 ms.
+
+volatile bool wake_watch = false;     ///< PORTE's vector counts the wake (letter w)
+volatile uint8_t wake_pins = 0;       ///< bit 0 PE2's flag, bit 1 PE3's, at the entry
+volatile uint8_t wake_irqs = 0;
+volatile uint8_t pit_irqs = 0;
+
+struct PinWake {
+    bool commanded = false;
+    uint8_t wfis = 0;
+    uint8_t pins = 0;
+    uint8_t irqs = 0;
+    bool backstop = false;
+    bool reported = false;
+    spilink::Report host{};
+};
+
+PinWake pin_wake(PinSense sck, PinSense ss) {
+    PinWake w{};
+    // The backstop: the PIT on OSC32K at 2 Hz, synchronized to one of its
+    // own interrupts first (its first one lands anywhere in a period,
+    // 26.5.2.2), so the sleep below has 500 ms ahead of it against a burst
+    // some 50 ms away (the command's round trip, then 40 ms of lead).
+    RtcClock::select(RtcSource::osc32k);
+    Pit::init(PitPeriod::cyc16384);
+    const uint8_t p0 = pit_irqs;
+    for (uint32_t i = 0; i < 4'000'000u && pit_irqs == p0; ++i) {
+    }
+    spilink::Params a{};
+    a.count = 160;
+    a.ms = 300;
+    a.seed_a = 0x31;
+    a.seed_b = 0x00;
+    a.pattern = spilink::pattern_counting;
+    a.aux8 = 40;
+    a.aux16 = 64;
+    w.commanded = peer_act(spilink::Op::host_burst, a);
+    if (!w.commanded) {
+        Pit::enable_interrupt(false);
+        return w;
+    }
+    S0::release();
+    Ss::invert(false);
+    Ss::input(PinPull::up);
+    Sck::input();
+    Mosi::input();
+    Miso::input();
+    Sck::sense(PinSense::none);
+    Ss::sense(PinSense::none);
+    Sck::clear_flag();
+    Ss::clear_flag();
+    wake_pins = 0;
+    wake_irqs = 0;
+    wake_watch = true;
+    Sck::sense(sck);
+    Ss::sense(ss);
+    quiet();
+    const uint8_t p1 = pit_irqs;
+    while (w.wfis < 8u) {
+        cli();
+        if (wake_irqs != 0u || pit_irqs != p1) {
+            sei();
+            break;
+        }
+        Sleep::arm(SleepMode::standby);
+        sei();
+        Sleep::sleep();
+        Sleep::disarm();
+        ++w.wfis;
+    }
+    wake_watch = false;
+    Sck::sense(PinSense::none);
+    Ss::sense(PinSense::none);
+    Pit::enable_interrupt(false);
+    w.pins = wake_pins;
+    w.irqs = wake_irqs;
+    w.backstop = pit_irqs != p1;
+    delay_us(clock, 20'000u);             // the burst over before this end hosts again
+    (void)link_command_mode();
+    w.reported = peer_report(w.host);
+    return w;
+}
+
+void print_wake(const char* name, const PinWake& w) {
+    print(serial, "  ", name, ": ", w.wfis, " sleep(s), pin interrupts ", w.irqs, " (PE2 ",
+          (w.pins & 1u) ? 1 : 0, ", PE3 ", (w.pins & 2u) ? 1 : 0, "), the backstop ",
+          w.backstop ? "FIRED" : "silent", "; the peer clocked ", w.host.count, crlf);
+}
+
+void tw_pin_wake() {
+    print(serial, "w a pin edge out of STANDBY: PE2 (fully asynchronous) on every sense, PE3 "
+                  "(partially) on both edges only - the peer's host_burst driving them", crlf);
+    quiesce();
+    if (!ensure_link()) {
+        verdict("the peer answers a ping", false);
+        return;
+    }
+    const PinWake r = pin_wake(PinSense::rising, PinSense::none);
+    print_wake("PE2 rising", r);
+    verdict("PE2 RISING wakes STANDBY: one sleep, its own interrupt, the backstop silent",
+            r.commanded && r.wfis == 1u && r.irqs == 1u && r.pins == 1u && !r.backstop &&
+                r.reported && r.host.count == 160u);
+    const PinWake f = pin_wake(PinSense::falling, PinSense::none);
+    print_wake("PE2 falling", f);
+    verdict("PE2 FALLING wakes STANDBY too: a fully asynchronous pin on either edge",
+            f.commanded && f.wfis == 1u && f.irqs == 1u && f.pins == 1u && !f.backstop &&
+                f.reported && f.host.count == 160u);
+    const PinWake c = pin_wake(PinSense::none, PinSense::falling);
+    print_wake("PE3 falling", c);
+    verdict("THE CONTROL: PE3's falling edge - the select really fell, the peer clocked its "
+            "burst - does NOT wake STANDBY: a partially asynchronous pin's edge sense needs "
+            "CLK_PER, and the backstop ends the sleep",
+            c.commanded && c.irqs == 0u && c.backstop && c.reported && c.host.count == 160u);
+    const PinWake b = pin_wake(PinSense::none, PinSense::both);
+    print_wake("PE3 both edges", b);
+    verdict("and PE3 on BOTH edges does wake it: the partially asynchronous pin's one way out",
+            b.commanded && b.wfis == 1u && b.irqs == 1u && b.pins == 2u && !b.backstop &&
+                b.reported && b.host.count == 160u);
+    quiesce();
+    (void)link_command_mode();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -3432,10 +3577,10 @@ constexpr Test tests[] = {
     {'i', ti_rebase}, {'j', tj_engine}, {'t', tt_untaken},
     {'k', tk_bringup}, {'l', tl_matrix}, {'m', tm_rates}, {'n', tn_mismatch},
     {'o', to_ss_midbyte}, {'p', tp_loss}, {'q', tq_demotion}, {'r', tr_mspi},
-    {'s', ts_rebase}, {'u', tu_back_to_back}, {'v', tv_client},
+    {'s', ts_rebase}, {'u', tu_back_to_back}, {'v', tv_client}, {'w', tw_pin_wake},
 };
 constexpr char single_board[] = "abcdefghijt";
-constexpr char two_board[] = "klmnopqrsuv";
+constexpr char two_board[] = "klmnopqrsuvw";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -3464,7 +3609,8 @@ void help() {
     print(serial, "  two boards: k bring-up | l client matrix | m rates and the client "
                   "ceiling | n mismatches | o SS mid-byte | p undrained client | "
                   "q real demotion | r Host SPI | s rebase | u back to back | "
-                  "v this board as the client    -> y = k..s, u and v", crlf);
+                  "v this board as the client | w a pin edge out of STANDBY    -> y = k..s, u, "
+                  "v and w", crlf);
     print(serial, "  NO WIRES of its own: PE0..PE3 (SPI0 ALT1) to the peer board's SPI - "
                   "an AVR's PE0..PE3 straight across, or a SAM C21's PA16, PA18, PA19, PA17. "
                   "The peer board runs `spi_peer`, which stays DARK - it drives MISO only for "
@@ -3507,6 +3653,16 @@ ISR(TCB2_INT_vect) {
 /// The select's falling edge (letter v's hold): TCA1 started for the
 /// offset, the edge's sense dropped so the burst's close does not count.
 ISR(PORTE_PORT_vect) {
+    if (wake_watch) {
+        // Letter w: which pad woke the core, then both senses off.
+        wake_pins = static_cast<uint8_t>((Sck::flag() ? 1u : 0u) | (Ss::flag() ? 2u : 0u));
+        wake_irqs = static_cast<uint8_t>(wake_irqs + 1u);
+        Sck::sense(PinSense::none);
+        Ss::sense(PinSense::none);
+        Sck::clear_flag();
+        Ss::clear_flag();
+        return;
+    }
     Ss::clear_flag();
     Ss::sense(PinSense::none);
     if (hold_shape == HoldShape::off || hold_shape == HoldShape::backstop) return;
@@ -3538,6 +3694,11 @@ ISR(TCA1_OVF_vect) {
         ok = sck_gap(budget);                 // the last of them is over
     }
     if (!ok) hold_lost = static_cast<uint8_t>(hold_lost + 1u);
+}
+
+ISR(RTC_PIT_vect) {
+    (void)Pit::take_flag();
+    pit_irqs = static_cast<uint8_t>(pit_irqs + 1u);
 }
 
 ISR(TCB0_INT_vect) {

@@ -57,6 +57,7 @@
 // register, and every architecture on this link compiles the same
 // file.
 #include "../../../avrdx/src/apps/twi_link.hpp"
+#include "bench_sleep.hpp"
 
 using SysClock = brio::Clock<brio::ClockSource::internal, 48'000'000>;
 constexpr SysClock clock{};
@@ -196,6 +197,20 @@ void settle_ms(uint32_t ms) {
     const uint32_t t0 = Ticker::millis();
     while (Ticker::millis() - t0 < ms) {
     }
+}
+
+/// Microseconds on SysTick: the millisecond count and the counter's
+/// position inside the millisecond, read until the count did not move
+/// across the read (a reload between the two reads moves it; the tick's
+/// handler runs at once, interrupts being on wherever this is used).
+uint32_t us_now() {
+    uint32_t m = 0, v = 0;
+    do {
+        m = Ticker::millis();
+        v = SysTick->VAL;
+    } while (m != Ticker::millis());
+    const uint32_t per = SysTick->LOAD + 1u;
+    return m * 1000u + (per - 1u - v) * 1000u / per;
 }
 
 bool send_frame(Op op, const uint8_t* p, uint8_t len) {
@@ -681,12 +696,16 @@ void te_stretch() {
 // one tenure and takes the SysTick count at every RISING edge, and the
 // interval between two rises is one SCL period wherever neither end held
 // the clock low. The host's own hold (its MB/SB, the pump's entry) and the
-// client's stretch fall between bytes and before an acknowledge, so most
-// intervals of a byte are the host's unhindered period: the median is
-// one, and the mean of the intervals within a quarter of it - the
-// sampler's grain of some eight cycles averaged out over a hundred and
-// more - is the period, against 1 / the rate ASKED. An interrupt landing
-// on the sampler stretches an interval out of the band and is dropped.
+// client's stretch fall between bytes and before an acknowledge, and a
+// rise the sampler misses joins two periods into one interval - every
+// disturbance LENGTHENS an interval, none shortens one. So the shortest
+// common interval is the host's unhindered period: the LOWER QUARTILE is
+// one (at Fm+ the sampler catches only some of the rises and the doubled
+// intervals can be the majority - the median then fell on them, in 4 of
+// 15 runs), and the mean of the intervals within a quarter of it - the
+// sampler's grain of some eight cycles averaged out over fifty and more -
+// is the period, against 1 / the rate ASKED. An interrupt landing on the
+// sampler stretches an interval out of the band and is dropped.
 
 using SclPad = Pin<'A', 23>;
 constexpr uint16_t scl_cap = 320;
@@ -762,7 +781,7 @@ uint16_t scl_iv[scl_cap];
 struct SclReading {
     uint8_t status;
     uint16_t edges;       ///< intervals recorded
-    uint16_t used;        ///< within a quarter of the median
+    uint16_t used;        ///< within a quarter of the lower quartile
     uint32_t period_x16;  ///< their mean, in sixteenths of a core cycle
     uint32_t permille;    ///< the SCL rate in thousandths of the rate asked
 };
@@ -806,8 +825,8 @@ SclReading sampled_write(const uint8_t* p, uint8_t n, I2cSpeed speed, uint32_t a
     if (r.edges == 0u) {
         return r;
     }
-    // The median by a counting pass over a sorted copy (insertion sort:
-    // a few hundred entries, once).
+    // The lower quartile from a sorted copy (insertion sort: a few
+    // hundred entries, once).
     static uint16_t sorted[scl_cap];
     for (uint16_t i = 0; i < r.edges; ++i) {
         uint16_t v = scl_iv[i];
@@ -818,11 +837,11 @@ SclReading sampled_write(const uint8_t* p, uint8_t n, I2cSpeed speed, uint32_t a
         }
         sorted[j] = v;
     }
-    const uint32_t median = sorted[r.edges / 2u];
+    const uint32_t quartile = sorted[r.edges / 4u];
     uint32_t sum = 0;
     for (uint16_t i = 0; i < r.edges; ++i) {
         const uint32_t v = scl_iv[i];
-        if (4u * v >= 3u * median && 4u * v <= 5u * median) {
+        if (4u * v >= 3u * quartile && 4u * v <= 5u * quartile) {
             sum += v;
             ++r.used;
         }
@@ -1030,9 +1049,13 @@ void th_client() {
     }
 
     // Make the bus Busy so the peer arms: one tiny tenure to an address
-    // its client just left (an address NACK - content-free traffic).
+    // NOBODY holds (an address NACK - content-free traffic). Not the
+    // peer's own low_addr: a peer whose client stays live through `arb`
+    // (the avrdx peer, a combined TWI) matches it and STRETCHES the
+    // dummy through its whole lead-in, its held START then firing on the
+    // dummy's own STOP - before this board has become a client.
     uint8_t dummy[1] = {0};
-    const uint8_t dummy_st = write_tenure(twilink::low_addr, dummy, 1);
+    const uint8_t dummy_st = write_tenure(twilink::deaf_addr, dummy, 1);
 
     // NOW FLIP, inside the 20 ms lead: engine down, client up.
     I2cHw::release();
@@ -1088,36 +1111,14 @@ void th_client() {
           r.addr_hits, "; pads muxed sda=", sda_muxed, " scl=", scl_muxed, crlf);
     bench.verdict("this board came up as an I2C CLIENT and back",
                   client_up && engine_back);
-    const bool burst_landed = amatch_seen && was_write && stop_seen &&
-                              got == a.count && mism == 0u && rep &&
-                              (r.flags & twilink::report_host_ok) != 0u;
-    if (burst_landed) {
-        bench.verdict("the foreign host's burst arrived byte-exact through the "
-                      "client (AMATCH, direction, data, Stop)",
-                      true);
-    } else {
-        // THE DECLINED HALF, and it is a WIRE fact, not a driver one:
-        // print what is known and claim nothing the desk cannot
-        // support. On a BUNDLED cable the C21 CLIENT cannot follow a
-        // foreign 100 kHz host at any core rate (6 and 48 MHz alike):
-        // per-edge crosstalk resets its start/address machinery, so it
-        // hears nothing while the far host reads a clean address NACK
-        // (MSTATUS 0x72, this bus's nobody-home signature). THE CLIENT
-        // ITSELF IS SOUND: the same registers, the same pads, the same
-        // silicon match a bit-banged address and stretch SCL for it
-        // (the record is in samc21/i2c.md, with the physical fix: take
-        // the I2C pair out of the bundle).
-        print(serial, "  DECLINED on this desk: the client is deaf to the peer's "
-                      "100 kHz on the bundled wire (its function is proven by the "
-                      "bit-bang record - see samc21/i2c.md); fix the wire and this "
-                      "letter tightens back into three verdicts",
-              crlf);
-        bench.verdict("the choreography itself held: the peer armed, its host ran "
-                      "and reported the nobody-home signature, and this board's "
-                      "client came up clean and went back",
-                      rep && (r.flags & twilink::report_host_ran) != 0u &&
-                          client_up && engine_back);
-    }
+    bench.verdict("the dummy that arms the peer is an address NACK (nobody holds "
+                  "deaf_addr), so nothing stretched it",
+                  dummy_st == i2c_nack_addr);
+    bench.verdict("the foreign host's burst arrived byte-exact through the client "
+                  "(AMATCH, direction, data, Stop) and the peer's host saw it "
+                  "acknowledged",
+                  amatch_seen && was_write && stop_seen && got == a.count && mism == 0u &&
+                      rep && (r.flags & twilink::report_host_ok) != 0u);
 }
 
 // ===========================================================================
@@ -1186,12 +1187,13 @@ bool move_slow(uint8_t generator) {
 /// through the proper configure() while disabled. The SPEED stays the
 /// engine's cached standard_100k, so its apply() will not rewrite
 /// CTRLA underneath these bits on same-speed tenures.
-bool timeouts_on(bool low, bool sext) {
-    // The engine's own configuration, the two enables added: the engine
+bool timeouts_on(bool low, bool sext, bool mext = false) {
+    // The engine's own configuration, the enables added: the engine
     // keeps relying on what it set (smart mode, the INACTOUT escape).
     I2cmConfig c = I2cHw::configuration(I2cSpeed::standard_100k);
     c.scl_low_timeout = low;
     c.client_extend_timeout = sext;
+    c.host_extend_timeout = mext;
     if (!Raw::configure(c) || !Raw::enable(true)) return false;
     return Raw::force_idle();
 }
@@ -1341,19 +1343,21 @@ void tj_timeouts() {
     Nvic::disable(I2cHw::Resource::irq());
     uint16_t seen = 0;
     (void)I2cm<3>::start_address(twilink::command_addr, false);
-    const uint32_t t0 = Ticker::millis();
-    uint32_t fired_at = 0;
-    while (Ticker::millis() - t0 < 60u) {
+    const uint32_t t0 = us_now();
+    uint32_t fired_us = 0;
+    while (us_now() - t0 < 60'000u) {
         const uint16_t st = I2cm<3>::status();
         seen = static_cast<uint16_t>(seen | st);
-        if ((st & I2cmStatus::low_timeout) != 0u && fired_at == 0u) {
-            fired_at = Ticker::millis() - t0;
+        if ((st & I2cmStatus::low_timeout) != 0u && fired_us == 0u) {
+            fired_us = us_now() - t0;
         }
     }
+    const uint32_t fired_at = fired_us / 1000u;
     const uint8_t flags_after = I2cm<3>::flags();
     print(serial, "  the host's OWN unserviced hold: STATUS bits over 60 ms=",
-          hex(seen), " INTFLAG=", hex(flags_after), " LOWTOUT at ", fired_at,
-          " ms", crlf);
+          hex(seen), " INTFLAG=", hex(flags_after), " LOWTOUT at ", fired_us,
+          " us = ", static_cast<uint32_t>(static_cast<uint64_t>(fired_us) * slow_hz / 1'000'000u),
+          " cycles of the meter", crlf);
     bench.verdict("the host's own unserviced clock hold IS bounded: LOWTOUT "
                   "fires inside the 25..35 ms window on the 32 kHz meter, with "
                   "STATUS.LOWTOUT + BUSERR and INTFLAG.ERROR - the watchdog on "
@@ -1365,6 +1369,152 @@ void tj_timeouts() {
                       (flags_after & I2cmFlag::error) != 0u);
     Nvic::enable(I2cHw::Resource::irq());
     (void)engine_up();
+
+    // MEXTTOEN, THE HOST'S OWN EXTEND (33.6.3.1: T_LOW:MEXT, the
+    // cumulative SCL low extend by the HOST within one byte, START-to-ACK,
+    // ACK-to-ACK or ACK-to-STOP, 10 ms). The same unserviced MB as above,
+    // MEXTTOEN alone armed, SIXTEEN shots (each re-armed: the counter arms
+    // at configure()), timed in microseconds from the ADDR store. The
+    // chapter's floor, derived: the count is 10 ms of a 32768 Hz clock,
+    // run here at slow_hz, so no shot may end before 10 * 32768 / slow_hz
+    // ms after the extend begins - which is the address's ACK, ten SCL
+    // periods (0.1 ms) after the store. The chapter states no ceiling;
+    // the shots' spread is the measurement, judged against the other
+    // counter's floor: MEXT must end every shot below LOWTOUT's 25 ms, or
+    // it adds nothing to it.
+    const uint32_t mext_floor_us = slow_hz != 0u ? 10'000ull * 32768u / slow_hz + 100u : 0u;
+    uint32_t mext_min = 0xFFFFFFFFu, mext_max = 0;
+    uint8_t mext_shots = 0;
+    bool mext_sig = true;
+    for (uint8_t shot = 0; shot < 16u; ++shot) {
+        if (!timeouts_on(false, false, true)) {
+            mext_sig = false;
+            break;
+        }
+        Nvic::disable(I2cHw::Resource::irq());
+        uint16_t mseen = 0;
+        (void)I2cm<3>::start_address(twilink::command_addr, false);
+        const uint32_t tm = us_now();
+        uint32_t at = 0;
+        while (us_now() - tm < 40'000u) {
+            const uint16_t st = I2cm<3>::status();
+            mseen = static_cast<uint16_t>(mseen | st);
+            if ((st & I2cmStatus::mext_timeout) != 0u) {
+                at = us_now() - tm;
+                break;
+            }
+        }
+        const uint8_t mflags = I2cm<3>::flags();
+        // The automatic STOP the chapter promises, and the ERROR flag.
+        settle_ms(1);
+        mseen = static_cast<uint16_t>(mseen | I2cm<3>::status());
+        if (at == 0u || (mseen & I2cmStatus::bus_error) == 0u ||
+            (mseen & I2cmStatus::low_timeout) != 0u || (mflags & I2cmFlag::error) == 0u) {
+            mext_sig = false;
+            print(serial, "  MEXT shot ", shot, ": at ", at, " us, STATUS bits ", hex(mseen),
+                  " INTFLAG ", hex(mflags), crlf);
+        }
+        if (at != 0u) {
+            ++mext_shots;
+            if (at < mext_min) mext_min = at;
+            if (at > mext_max) mext_max = at;
+        }
+        Raw::clear_flags(I2cmFlag::all);
+        Nvic::enable(I2cHw::Resource::irq());
+    }
+    (void)engine_up();
+    settle_ms(5);
+    print(serial, "  MEXTTOEN alone, the host's own unserviced hold, 16 shots: MEXTTOUT at ",
+          mext_min, " .. ", mext_max, " us = ",
+          static_cast<uint32_t>(static_cast<uint64_t>(mext_min) * slow_hz / 1'000'000u), " .. ",
+          static_cast<uint32_t>(static_cast<uint64_t>(mext_max) * slow_hz / 1'000'000u),
+          " cycles of the meter (", mext_shots, " fired; the chapter's 10 ms on this "
+          "meter from the store: ", mext_floor_us, " us)", crlf);
+    bench.verdict("THE HOST'S EXTEND IS BOUNDED: MEXTTOEN alone ends every one of 16 unserviced "
+                  "holds with STATUS.MEXTTOUT + BUSERR and INTFLAG.ERROR, never before the "
+                  "chapter's 10 ms on the weighed meter and always below LOWTOUT's 25 ms floor",
+                  mext_sig && mext_shots == 16u && mext_floor_us != 0u &&
+                      mext_min >= mext_floor_us && mext_max < 25'000u);
+
+    // And what it does NOT police: a CLIENT's stretch. 15 ms a byte - past
+    // MEXT's 10, under LOWTOUT's window and with no SEXT armed - and the
+    // tenure must complete i2c_ok: the extend MEXT counts is the host's
+    // own, the client's being SEXT's (33.6.3.1).
+    twilink::Params ms15{};
+    ms15.count = 64;
+    ms15.ms = 400;
+    ms15.addr = twilink::dut_addr;
+    ms15.hold_us = 15000;
+    bool mext_client_ok = false;
+    TimedTenure mc{};
+    if (peer_act(Op::serve, ms15) && timeouts_on(false, false, true)) {
+        mc = timed_write(twilink::dut_addr, 2, 300);
+        mext_client_ok = true;
+    }
+    settle_ms(450);
+    print(serial, "  MEXTTOEN alone, the client stretching 15 ms/byte: status=", hex(mc.status),
+          " in ", mc.ms, " ms, STATUS bits seen live=", hex(mc.status_seen), crlf);
+    bench.verdict("MEXT does not see a CLIENT's stretch: 2 bytes at 15 ms each complete "
+                  "i2c_ok in at least 30 ms with MEXTTOEN armed - the host's extend is the "
+                  "host's, the client's is SEXT's",
+                  mext_client_ok && mc.status == i2c_ok && mc.ms >= 30u &&
+                      (mc.status_seen & I2cmStatus::mext_timeout) == 0u);
+    (void)engine_up();
+
+    // SEXTTOEN ALONE, timed: the client's cumulative extend from START to
+    // STOP (T_LOW:SEXT, 25 ms). The client stretches its first data byte
+    // 40 ms - one stretch, so the cumulative is the single one - which
+    // begins after the address and eight bits, 0.17 ms into the tenure.
+    // THE BOUND, derived: no earlier than the chapter's 25 ms on the
+    // weighed meter plus those 0.17 ms, and before the 40 ms stretch
+    // itself ends (a counter that had not fired by then saw nothing).
+    const uint32_t sext_floor_us = slow_hz != 0u ? 25'000ull * 32768u / slow_hz + 170u : 0u;
+    twilink::Params s40{};
+    s40.count = 64;
+    s40.ms = 400;
+    s40.addr = twilink::dut_addr;
+    s40.hold_us = 40000;
+    uint32_t sext_us = 0;
+    uint16_t sseen = 0;
+    uint8_t sstatus_end = 0xEE;
+    if (peer_act(Op::serve, s40) && timeouts_on(false, true)) {
+        for (uint8_t i = 0; i < 2; ++i) txbuf[i] = static_cast<uint8_t>(0x31u + i);
+        xfer_done = false;
+        const uint32_t ts = us_now();
+        if (!I2cHw::start({.addr = twilink::dut_addr,
+                           .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
+                           .tx_len = 2,
+                           .rx = {},
+                           .rx_len = 0,
+                           .reply = {},
+                           .speed = I2cSpeed::standard_100k})) {
+            // The time-out's ERROR completes the tenure inside the vector,
+            // whose finish() sweeps the W1C statuses before this loop can
+            // see them: the completion's instant is the trip's.
+            while (!xfer_done && us_now() - ts < 120'000u) {
+                sseen = static_cast<uint16_t>(sseen | I2cm<3>::status());
+            }
+            if (xfer_done) sext_us = us_now() - ts;
+            sstatus_end = xfer_done ? xfer_status : 0xEE;
+            if (!xfer_done) {
+                I2cHw::release();
+            }
+        }
+    }
+    settle_ms(450);
+    (void)engine_up();
+    print(serial, "  SEXTTOEN alone, the client stretching 40 ms: status=", hex(sstatus_end),
+          ", SEXTTOUT at ", sext_us, " us = ",
+          static_cast<uint32_t>(static_cast<uint64_t>(sext_us) * slow_hz / 1'000'000u),
+          " cycles of the meter (the completion's instant), STATUS bits seen live=", hex(sseen),
+          " (the chapter's 25 ms "
+          "on this meter, plus the address and a byte: ", sext_floor_us, " us)", crlf);
+    bench.verdict("THE CLIENT'S EXTEND IS BOUNDED: SEXTTOEN alone ends a 40 ms client stretch "
+                  "as i2c_bus_error, never before the chapter's 25 ms on the weighed meter and "
+                  "before the stretch itself ends",
+                  sstatus_end == i2c_bus_error && sext_floor_us != 0u &&
+                      sext_us >= sext_floor_us && sext_us < 40'000u &&
+                      (sseen & I2cmStatus::low_timeout) == 0u);
 
     // THE WRONG METER, on the case that counts - and the answer is
     // WORSE than scaling: with the SLOW channel on generator 0 the
@@ -1819,6 +1969,497 @@ void tl_timed() {
                   tl::TimedBus::stale_events() == 0);
 }
 
+// ===========================================================================
+// m - THE QUICK COMMAND: the R/W bit as the whole message (CTRLB.QCEN)
+// ===========================================================================
+//
+// 33.6.3.4: with QCEN the host raises SB or MB "immediately after the
+// client acknowledges the address". For a WRITE that is where MB rises
+// anyway (the host waits for DATA); for a READ it is the difference - the
+// plain host clocks the first data byte in before SB, the quick one stops
+// at the acknowledge. THE WITNESS IS SCL ITSELF: the pad's input buffer
+// stays on under the SERCOM function, so PORT counts the rising edges up
+// to the flag and on through the STOP. A START followed by the address
+// and its acknowledge is NINE rises; a byte read is eight more before SB
+// (the host holds the clock ahead of its own ACK bit); the STOP is one
+// rise, and a NACK the host still owes the byte read is one more. So:
+// quick read 9 then 10, plain read 17 then 19, a write 9 then 10 either
+// way. Exact counts - no timing is judged.
+//
+// The peer serves at dut_addr with the Stop counted; its answer byte has
+// its top bit SET (0xC5): a client transmitter holding a 0 on SDA would
+// keep the host's STOP from being one.
+
+struct QuickRun {
+    uint16_t to_flag = 0;     ///< SCL rises up to the MB/SB/ERROR flag
+    uint16_t total = 0;       ///< and to the bus going IDLE after the STOP
+    uint8_t flags = 0;        ///< INTFLAG at the flag
+    uint16_t status = 0;      ///< STATUS at the flag
+    bool idle = false;        ///< the bus went IDLE after the STOP
+    bool flagged = false;
+};
+
+QuickRun quick_tenure(bool qcen, bool read) {
+    QuickRun q{};
+    I2cmConfig c = I2cHw::configuration(I2cSpeed::standard_100k);
+    c.quick_command = qcen;
+    Nvic::disable(I2cHw::Resource::irq());
+    if (!Raw::configure(c) || !Raw::enable(true) || !Raw::force_idle()) {
+        Nvic::enable(I2cHw::Resource::irq());
+        return q;
+    }
+    // The loop's bound: a pass is two PORT reads over the APB and one
+    // INTFLAG read, some forty cycles at 48 MHz, so 100000 passes are
+    // 80 ms against a tenure of under 0.3 ms at 100 kHz.
+    bool prev = SclPad::read();
+    (void)Raw::start_address(twilink::dut_addr, read);
+    for (uint32_t k = 0; k < 100'000u; ++k) {
+        const bool now = SclPad::read();
+        if (now && !prev) ++q.to_flag;
+        prev = now;
+        const uint8_t f = Raw::flags();
+        if ((f & I2cmFlag::all) != 0u) {
+            q.flags = f;
+            q.status = Raw::status();
+            q.flagged = true;
+            break;
+        }
+    }
+    q.total = q.to_flag;
+    (void)Raw::stop(true);
+    for (uint32_t k = 0; k < 100'000u; ++k) {
+        const bool now = SclPad::read();
+        if (now && !prev) ++q.total;
+        prev = now;
+        if (Raw::bus_state() == I2cBusState::idle) {
+            q.idle = true;
+            break;
+        }
+    }
+    Raw::clear_flags(I2cmFlag::all);
+    Nvic::enable(I2cHw::Resource::irq());
+    return q;
+}
+
+void tm_quick() {
+    if (!engine_up()) {
+        bench.verdict("the engine comes up", false);
+        return;
+    }
+    if (!need_peer()) return;
+
+    twilink::Params a{};
+    a.count = 100;   // never reached; the deadline ends the serve
+    a.ms = 300;
+    a.addr = twilink::dut_addr;
+    a.seed = 0xC5;
+    a.pattern = twilink::pattern_fixed;
+    a.flags = twilink::flag_stop_interrupt;
+    if (!peer_act(Op::serve, a)) {
+        bench.verdict("the peer accepted the serve", false);
+        return;
+    }
+    const QuickRun qr = quick_tenure(true, true);
+    const QuickRun pr = quick_tenure(false, true);
+    const QuickRun qw = quick_tenure(true, false);
+    const QuickRun pw = quick_tenure(false, false);
+    settle_ms(320);
+    (void)engine_up();
+    twilink::Report r{};
+    const bool rep = peer_report(r);
+    const QuickRun* runs[] = {&qr, &pr, &qw, &pw};
+    const char* const names[] = {"quick read", "plain read", "quick write", "plain write"};
+    for (uint8_t i = 0; i < 4; ++i) {
+        print(serial, "  ", names[i], ": ", runs[i]->to_flag, " SCL rises to the flag (INTFLAG=",
+              hex(runs[i]->flags), " STATUS=", hex(runs[i]->status), "), ", runs[i]->total,
+              " to IDLE", runs[i]->idle ? "" : " (NEVER IDLE)", crlf);
+    }
+    print(serial, "  the peer: ", r.addr_hits, " address matches, ", r.stops, " Stops, rx ", r.aux0,
+          " tx ", r.aux1, ", flags ", hex(r.flags), ", SSTATUS ", hex(r.sstatus), crlf);
+    const auto acked = [](const QuickRun& q) {
+        return q.flagged && q.idle && (q.status & SERCOM_I2CM_STATUS_RXNACK_Msk) == 0u &&
+               (q.status & (I2cmStatus::bus_error | I2cmStatus::arb_lost)) == 0u &&
+               (q.flags & I2cmFlag::error) == 0u;
+    };
+    bench.verdict("every tenure was acknowledged by the peer and ended IDLE, no bus error",
+                  acked(qr) && acked(pr) && acked(qw) && acked(pw));
+    bench.verdict("A QUICK READ STOPS AT THE ACKNOWLEDGE: SB after nine SCL rises (the "
+                  "address and its ACK), the STOP one more - no data byte clocked",
+                  qr.to_flag == 9u && qr.total == 10u && (qr.flags & I2cmFlag::sb) != 0u);
+    bench.verdict("the plain read clocks the byte in first: SB after seventeen rises, the "
+                  "owed NACK and the STOP two more",
+                  pr.to_flag == 17u && pr.total == 19u && (pr.flags & I2cmFlag::sb) != 0u);
+    bench.verdict("a write raises MB at the acknowledge with or without QCEN: nine rises, "
+                  "the STOP one more",
+                  qw.to_flag == 9u && qw.total == 10u && pw.to_flag == 9u && pw.total == 10u &&
+                      (qw.flags & I2cmFlag::mb) != 0u && (pw.flags & I2cmFlag::mb) != 0u);
+    bench.verdict("the client end saw four address matches and four Stops",
+                  rep && r.addr_hits == 4u && r.stops == 4u);
+    bench.verdict("and the engine carries a command round trip after the raw tenures",
+                  command(Op::ping));
+}
+
+// ===========================================================================
+// n - THE ADDRESS-MATCH WAKE: this board's client asleep, the peer's host
+// ===========================================================================
+//
+// 33.6.5: a client with CTRLA.RUNSTDBY = 1 lets the address match wake
+// the device from STANDBY; with RUNSTDBY = 0 "all receptions will be
+// dropped". Letter h's choreography (the peer's `arb` spent for its HOST
+// half, a lead-in after this board's dummy makes the bus Busy) with the
+// client ASLEEP through the lead: the AMATCH interrupt is the wake-up, its
+// vector branch masks it and returns, and the polled loop of letter h
+// answers the match and takes the burst - the client holds SCL from the
+// match until the answer, so the host waits out the wake-up. IDLE first,
+// STANDBY only once IDLE has proven the source; then STANDBY without
+// RUNSTDBY as the control. The backstop is the RTC on OSCULP32K, 300 ms.
+
+volatile bool client_live = false;      ///< SERCOM3 wears its CLIENT face (letters n, o)
+volatile uint8_t client_wakes = 0;      ///< AMATCH entries of the vector in that face
+
+struct WakeRun {
+    bool commanded = false;
+    bool client_up = false;
+    uint8_t wfis = 0;
+    bool backstop = false;
+    uint32_t pending = 0;
+    uint8_t wakes = 0;
+    bool amatch = false;
+    bool write = false;
+    bool stop = false;
+    uint16_t got = 0;
+    uint8_t mism = 0;
+    uint8_t dummy = 0xEE;
+    bool rep = false;
+    twilink::Report r{};
+};
+
+WakeRun wake_burst(SleepMode mode, bool run_standby, uint8_t seed) {
+    WakeRun w{};
+    twilink::Params a{};
+    a.count = 10;
+    a.ms = 2000;
+    a.addr = twilink::low_addr;     // its client parks out of the way
+    a.target = twilink::dut_addr;   // its HOST writes to us
+    a.seed = seed;
+    a.pattern = twilink::pattern_counting;
+    a.aux16 = 30000;                // 30 ms after the bus goes Busy: this board is asleep by then
+    a.flags = twilink::flag_host;
+    w.commanded = peer_act(Op::arb, a);
+    if (!w.commanded) return w;
+    uint8_t dummy[1] = {0};
+    w.dummy = write_tenure(twilink::deaf_addr, dummy, 1);
+
+    I2cHw::release();
+    client_wakes = 0;
+    w.client_up = Client::init(clock, {.address_mode = I2cAddressMode::mask,
+                                       .address = twilink::dut_addr,
+                                       .run_standby = run_standby});
+    client_live = true;
+    Client::enable_amatch_interrupt(true);
+    w.backstop = !benchsleep::backstop_arm(9830);   // 300 ms of 32768 Hz
+    w.wfis = benchsleep::sleep_until<Serial>(mode, [] { return client_wakes != 0u; });
+    w.backstop = w.backstop || benchsleep::rtc_fired;
+    w.pending = benchsleep::first_pending;
+    w.wakes = client_wakes;
+    Client::enable_amatch_interrupt(false);
+    client_live = false;
+
+    // Letter h's application: answer the match, take the burst.
+    const uint32_t t0 = Ticker::millis();
+    while (Ticker::millis() - t0 < 400u && !w.stop) {
+        if (Client::addressed()) {
+            w.amatch = true;
+            w.write = !Client::host_reads();
+            Client::answer_address(true);
+        } else if (Client::data_ready()) {
+            const uint8_t v = Client::take(true);
+            if (v != twilink::pattern_value(a.pattern, a.seed, w.got)) ++w.mism;
+            ++w.got;
+        } else if (Client::stop_seen()) {
+            Client::clear_stop();
+            if (w.got != 0u) w.stop = true;
+        }
+    }
+    Client::release();
+    settle_ms(50);
+    (void)engine_up();
+    w.rep = peer_report(w.r);
+    return w;
+}
+
+void print_wake(const char* name, const WakeRun& w) {
+    print(serial, "  ", name, ": dummy ", hex(w.dummy), ", ", w.wfis, " WFI, AMATCH wakes ", w.wakes,
+          ", the backstop ", w.backstop ? "FIRED" : "silent", ", lines pending at the first wake-up ",
+          hex(w.pending), "; the burst: amatch=", w.amatch, " write=", w.write, " got=", w.got,
+          " mism=", w.mism, " stop=", w.stop, "; the peer's host: flags ", hex(w.r.flags),
+          " MSTATUS ", hex(w.r.mstatus), " in ", w.r.ms, " ms", crlf);
+}
+
+constexpr uint32_t sercom3_line = 1u << static_cast<uint32_t>(SERCOM3_IRQn);
+
+bool woke_and_landed(const WakeRun& w) {
+    return w.commanded && w.client_up && w.dummy == i2c_nack_addr && w.wfis == 1u &&
+           w.wakes == 1u && !w.backstop && (w.pending & sercom3_line) != 0u && w.amatch &&
+           w.write && w.stop && w.got == 10u && w.mism == 0u && w.rep &&
+           (w.r.flags & twilink::report_host_ok) != 0u;
+}
+
+void tn_wake() {
+    if (!engine_up()) {
+        bench.verdict("the engine comes up", false);
+        return;
+    }
+    if (!need_peer()) return;
+    if (!benchsleep::backstop_up()) {
+        bench.verdict("the RTC backstop comes up", false);
+        return;
+    }
+    const WakeRun idle = wake_burst(SleepMode::idle0, false, 0x30);
+    print_wake("IDLE0", idle);
+    const bool idle_ok = woke_and_landed(idle);
+    bench.verdict("the address match wakes the core from IDLE, the one wake-up, and the "
+                  "burst lands whole after it",
+                  idle_ok);
+    if (idle_ok) {
+        const WakeRun stby = wake_burst(SleepMode::standby, true, 0x50);
+        print_wake("STANDBY, RUNSTDBY", stby);
+        bench.verdict("with CTRLA.RUNSTDBY the address match wakes the core from STANDBY, the "
+                      "one wake-up, and the burst lands whole - the client held SCL through "
+                      "the wake-up",
+                      woke_and_landed(stby));
+        const WakeRun dark = wake_burst(SleepMode::standby, false, 0x70);
+        print_wake("STANDBY, no RUNSTDBY", dark);
+        bench.verdict("without RUNSTDBY the client is DEAF in STANDBY: no match, the "
+                      "backstop ends the sleep, and the peer's host reads an address NACK "
+                      "(33.6.5: all receptions dropped)",
+                      dark.commanded && dark.wakes == 0u && dark.backstop && !dark.amatch &&
+                          dark.got == 0u && dark.rep &&
+                          (dark.r.flags & twilink::report_host_ran) != 0u &&
+                          (dark.r.flags & twilink::report_host_ok) == 0u);
+    } else {
+        print(serial, "  STANDBY not entered: IDLE did not prove the address match as a "
+                      "wake-up", crlf);
+    }
+    benchsleep::backstop_down();
+    bench.verdict("the command channel survives the sleeping legs", command(Op::ping));
+}
+
+// ===========================================================================
+// o - TWO LIVE HOSTS: a START parked behind a real tenure, and the race
+// ===========================================================================
+//
+// Letter g measured that a START parked behind a PHANTOM (an SDA held low
+// from a pin, released with no tenure around it) never fires on this
+// silicon. A real second host answers the two questions left.
+//
+// FIRST: does a START parked behind a REAL foreign tenure fire at its
+// STOP? The peer's `arb` (its host writing 16 bytes to its own client -
+// a combined TWI addresses itself - 2 ms after this board's dummy makes
+// the bus Busy) is the foreign tenure; this board's engine starts a
+// tenure to deaf_addr 1 ms into it. Fired, it ends i2c_nack_addr after
+// the foreign STOP; never fired, the suite's deadline ends it (0xEE).
+//
+// SECOND: THE RACE, both STARTs queued behind ONE STOP: this board's
+// tenure T1 to the peer's client - which the peer leaves unanswered,
+// stretching it, until its own START is armed behind it, 0.2 ms after T1
+// made the bus Busy - and, a LAG after T1's completion, T2. The peer's
+// START fires when its bus monitor has seen T1's STOP; this board's T2
+// START when its own STOP has left and the lag has passed. Below some lag
+// T2 goes first and the peer's START waits behind it; above it the peer
+// goes first and T2 parks behind the peer's tenure (the FIRST leg's
+// answer is what lets it complete); AT it the two STARTs fall inside each
+// other's detection and the wired AND arbitrates: the host whose address
+// has the first 1 where the other has a 0 loses. That lag is the two
+// chips' latencies and nothing the letter assumes: a coarse pass (every
+// 32 core cycles from 0 to 2048) finds the first lag at which the peer
+// goes first, and a fine pass sweeps the 128 cycles below
+// it to 32 above in steps of 2, TWICE: this board aiming deaf_addr 0x7A
+// (above the peer's 0x11: a collision is this board's i2c_arb_lost, the
+// peer's tenure complete) and aiming 0x08 (below it: the peer's
+// report_arblost, this board's T2 complete - an address NACK, nobody
+// holds 0x08). Every attempt is classified by its statuses and T2's
+// duration: alone, T2 is START, nine bits and STOP, some 115 us at
+// 100 kHz; behind the peer's four bytes it is five bytes of the wire,
+// 450 us at least - 300 us is the line between them.
+
+struct RaceRun {
+    uint8_t t1 = 0xEE;
+    uint8_t t2 = 0xEE;
+    uint32_t t2_us = 0;   ///< T2 from its start() to its completion
+    bool rep = false;
+    twilink::Report r{};
+};
+
+/// Spin `cycles` core cycles on SysTick's count (a poll some ten cycles
+/// long: the grain of the wait).
+void wait_cycles(uint32_t cycles) {
+    const uint32_t per = SysTick->LOAD + 1u;
+    const uint32_t v0 = SysTick->VAL;
+    for (;;) {
+        const uint32_t v = SysTick->VAL;
+        const uint32_t d = v0 >= v ? v0 - v : v0 + per - v;
+        if (d >= cycles) break;
+    }
+}
+
+/// The peer's `arb` deadline in the race: armed at once (T1 follows the
+/// ack), 0.2 ms of lead, its four bytes and its 3 ms drain - 60 ms is an
+/// order of magnitude over it.
+constexpr uint16_t race_peer_ms = 60;
+
+RaceRun race_once(uint8_t t2_addr, uint32_t lag_cycles) {
+    RaceRun x{};
+    twilink::Params a{};
+    a.count = 4;
+    a.ms = race_peer_ms;
+    a.addr = twilink::low_addr;
+    a.target = twilink::low_addr;   // the peer's host writes its own client
+    a.seed = 0x40;
+    a.pattern = twilink::pattern_counting;
+    a.aux16 = 200;                  // armed 0.2 ms after T1 made the bus Busy
+    a.flags = twilink::flag_host;
+    if (!peer_act(Op::arb, a)) return x;
+    uint8_t w[2] = {0xA1, 0xA2};
+    for (uint8_t i = 0; i < 2; ++i) txbuf[i] = w[i];
+    xfer_done = false;
+    if (I2cHw::start({.addr = twilink::low_addr,
+                      .tx = lend<Lease::reply>(static_cast<const uint8_t*>(txbuf)),
+                      .tx_len = 2,
+                      .rx = {},
+                      .rx_len = 0,
+                      .reply = {},
+                      .speed = I2cSpeed::standard_100k})) {
+        x.t1 = I2cHw::status();
+        return x;
+    }
+    const uint32_t t0 = Ticker::millis();
+    while (!xfer_done && Ticker::millis() - t0 < 100u) {
+    }
+    if (!xfer_done) {
+        I2cHw::release();
+        (void)engine_up();
+        return x;
+    }
+    x.t1 = xfer_status;
+    if (lag_cycles != 0u) wait_cycles(lag_cycles);
+    const uint32_t t2_at = us_now();
+    x.t2 = write_tenure(t2_addr, w, 1, I2cSpeed::standard_100k, 100);
+    x.t2_us = us_now() - t2_at;
+    settle_ms(race_peer_ms + 10u);   // the peer's action over, its command client back
+    x.rep = peer_report(x.r);
+    return x;
+}
+
+enum class Race : uint8_t { here_first, there_first, lost_here, lost_there, broken };
+
+Race classify(const RaceRun& x) {
+    if (x.t1 != i2c_ok || !x.rep) return Race::broken;
+    const bool peer_ok = (x.r.flags & twilink::report_host_ok) != 0u;
+    const bool peer_lost = (x.r.flags & twilink::report_arblost) != 0u;
+    if (x.t2 == i2c_arb_lost && peer_ok && !peer_lost) return Race::lost_here;
+    if (x.t2 != i2c_nack_addr) return Race::broken;
+    if (peer_lost && !peer_ok && x.t2_us < 300u) return Race::lost_there;
+    if (!peer_ok || peer_lost) return Race::broken;
+    return x.t2_us < 300u ? Race::here_first : Race::there_first;
+}
+
+void to_two_hosts() {
+    if (!engine_up()) {
+        bench.verdict("the engine comes up", false);
+        return;
+    }
+    if (!need_peer()) return;
+
+    // FIRST: a START parked behind a real foreign tenure.
+    twilink::Params a{};
+    a.count = 16;
+    a.ms = 400;
+    a.addr = twilink::low_addr;
+    a.target = twilink::low_addr;
+    a.seed = 0x20;
+    a.pattern = twilink::pattern_counting;
+    a.aux16 = 2000;
+    a.flags = twilink::flag_host;
+    uint8_t parked = 0xEE;
+    uint32_t parked_us = 0;
+    uint8_t dummy_st = 0xEE;
+    uint8_t bus_then = 0;
+    if (peer_act(Op::arb, a)) {
+        uint8_t dummy[1] = {0};
+        dummy_st = write_tenure(twilink::deaf_addr, dummy, 1);
+        settle_ms(3);   // 2 ms of the peer's lead, then its 16 bytes: about 1 ms in
+        bus_then = static_cast<uint8_t>(Raw::bus_state());
+        const uint32_t t0 = us_now();
+        parked = write_tenure(twilink::deaf_addr, dummy, 1, I2cSpeed::standard_100k, 100);
+        parked_us = us_now() - t0;
+    }
+    settle_ms(420);
+    twilink::Report pr{};
+    const bool prep = peer_report(pr);
+    print(serial, "  behind the peer's real tenure (BUSSTATE ", bus_then, " at the start): status ",
+          hex(parked), " after ", parked_us, " us; the peer's tenure: flags ", hex(pr.flags),
+          ", its client took ", pr.count, " bytes", crlf);
+    bench.verdict("A START PARKED BEHIND A REAL TENURE FIRES AT ITS STOP: started into the "
+                  "peer's tenure (the bus BUSY), this board's tenure waits it out and ends "
+                  "i2c_nack_addr - the phantom of letter g is the one wall",
+                  dummy_st == i2c_nack_addr && bus_then == static_cast<uint8_t>(I2cBusState::busy) &&
+                      parked == i2c_nack_addr && parked_us >= 300u && prep &&
+                      (pr.flags & twilink::report_host_ok) != 0u && pr.count == 16u);
+
+    // SECOND: the race. The coarse pass: the first lag at which the peer
+    // goes first.
+    uint32_t cross = 0;
+    uint8_t coarse_broken = 0;
+    for (uint32_t lag = 0; lag <= 2048u && cross == 0u; lag += 32u) {
+        const Race k = classify(race_once(twilink::deaf_addr, lag));
+        if (k == Race::broken) ++coarse_broken;
+        if (k == Race::there_first) cross = lag;
+    }
+    print(serial, "  the coarse pass: the peer first from a lag of ", cross, " cycles (",
+          coarse_broken, " broken)", crlf);
+    uint8_t count[2][5] = {};
+    uint32_t first_hit[2] = {0, 0}, last_hit[2] = {0, 0};
+    if (cross != 0u) {
+        const uint32_t from = cross > 128u ? cross - 128u : 0u;
+        for (uint8_t dir = 0; dir < 2; ++dir) {
+            const uint8_t t2_addr = dir == 0 ? twilink::deaf_addr : 0x08u;
+            for (uint32_t lag = from; lag <= cross + 32u; lag += 2u) {
+                const RaceRun x = race_once(t2_addr, lag);
+                const Race k = classify(x);
+                ++count[dir][static_cast<uint8_t>(k)];
+                const bool hit = k == (dir == 0 ? Race::lost_here : Race::lost_there);
+                if (hit) {
+                    if (first_hit[dir] == 0u) first_hit[dir] = lag;
+                    last_hit[dir] = lag;
+                }
+                if (k == Race::broken) {
+                    print(serial, "    broken at lag ", lag, ": T1 ", hex(x.t1), " T2 ", hex(x.t2),
+                          " in ", x.t2_us, " us, the peer's flags ", hex(x.r.flags), " MSTATUS ",
+                          hex(x.r.mstatus), crlf);
+                }
+            }
+        }
+    }
+    for (uint8_t dir = 0; dir < 2; ++dir) {
+        print(serial, "  aiming ", dir == 0 ? "0x7A" : "0x08", ": this board first ",
+              count[dir][0], ", the peer first ", count[dir][1], ", COLLISIONS lost here ",
+              count[dir][2], ", lost there ", count[dir][3], " (lags ", first_hit[dir], "..",
+              last_hit[dir], "), broken ", count[dir][4], crlf);
+    }
+    bench.verdict("the two hosts' latencies cross: below some lag this board's T2 goes first, "
+                  "above it the peer's START, and T2 waits behind the peer's tenure",
+                  cross != 0u && coarse_broken == 0u);
+    bench.verdict("A LIVE COLLISION, LOST HERE: aiming above the peer's address, attempts "
+                  "inside the window come back i2c_arb_lost while the peer's tenure completes",
+                  count[0][2] != 0u && count[0][3] == 0u && count[0][4] == 0u);
+    bench.verdict("A LIVE COLLISION, LOST THERE: aiming below it, the peer reports ARBLOST "
+                  "while this board's tenure completes - the wired AND decides by the address",
+                  count[1][3] != 0u && count[1][2] == 0u && count[1][4] == 0u);
+    bench.verdict("and the bus is whole after the races: a command round trip is clean",
+                  command(Op::ping));
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -1828,6 +2469,13 @@ void tl_timed() {
 extern "C" void SysTick_Handler() { brio::Ticker::tick(); }
 
 extern "C" void SERCOM3_Handler() {
+    if (client_live) {
+        // The client's AMATCH as the wake-up (letter n): masked and left
+        // standing for the polled loop that answers it.
+        Client::enable_amatch_interrupt(false);
+        client_wakes = static_cast<uint8_t>(client_wakes + 1u);
+        return;
+    }
     if (I2cHw::isr()) {
         if (timed_ao_live) {
             brio::post<tl::TimedBus>(brio::TransferDone{I2cHw::status()});
@@ -1842,6 +2490,8 @@ extern "C" void SERCOM3_Handler() {
 }
 
 extern "C" void SERCOM5_Handler() { (void)Serial::isr(); }
+
+extern "C" void RTC_Handler() { benchsleep::backstop_isr(); }
 
 int main() {
     SysClock::init();
@@ -1885,6 +2535,12 @@ int main() {
     bench.letter('k', "THE KERNEL: I2cBus over I2cHost, util unchanged (peer)",
                  tk_kernel);
     bench.letter('l', "THE TIMED BUS: a wedged tenure as a reply (peer)", tl_timed);
+    bench.letter('m', "THE QUICK COMMAND: the R/W bit as the message, counted on SCL (peer)",
+                 tm_quick);
+    bench.letter('n', "THE ADDRESS-MATCH WAKE: IDLE, STANDBY with and without RUNSTDBY (peer)",
+                 tn_wake);
+    bench.letter('o', "TWO LIVE HOSTS: a START parked behind a real tenure, the race (peer)",
+                 to_two_hosts);
 
     bench.menu();
     bench.prompt();

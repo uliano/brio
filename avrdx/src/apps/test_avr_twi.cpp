@@ -44,7 +44,7 @@
 // third tap; this desk does not fit it, and test h says so out loud
 // instead of assuming either way. TWI1 stays DISABLED throughout.
 //
-// TWO BOARDS (k..s, `y`): a second board runs `twi_peer` and taps the
+// TWO BOARDS (k..t, `y`): a second board runs `twi_peer` and taps the
 // same node with its own PA2/PA3. The DUT drives it IN BAND over the
 // bus itself - a write tenure to `twilink::command_addr` carries one
 // command frame, a read tenure collects the answer
@@ -53,7 +53,9 @@
 // address or data NACK, multi-host arbitration with both boards
 // combined, the collision case S4 with two clients on one address, a
 // really stuck SDA against `Twi<0>::unstick()`, a General Call
-// answered by two chips, the three bus speeds and a clock rebase.
+// answered by two chips, the three bus speeds, a clock rebase, and a
+// tenure parked behind the peer's held SDA answered by the timed I2cBus
+// (letter t, the one letter that runs the RTC PIT as the kernel's clock).
 // The peer's command-mode client answers ONE address exactly, with no
 // General Call, no mask, no PMEN and no PIEN, so the single-board half
 // above cannot see it at all - which is why `z` runs unchanged with the
@@ -71,12 +73,16 @@
 #include "avrdx/delay.hpp"
 #include "avrdx/evsys.hpp"
 #include "avrdx/pin.hpp"
+#include "avrdx/rtc.hpp"
 #include "avrdx/tcb.hpp"
+#include "avrdx/ticker.hpp"
 #include "avrdx/twi.hpp"
 #include "avrdx/usart.hpp"
 #include "avrdx/userrow.hpp"
 #include "kernel/active_object.hpp"
 #include "kernel/event_queue.hpp"
+#include "kernel/time.hpp"
+#include "kernel/time_event.hpp"
 #include "util/print.hpp"
 
 #include "twi_link.hpp"
@@ -135,6 +141,13 @@ using ChSnap = EventChannel<3>;
 using Bus = I2cBus<Host, P>;
 static_assert(ActiveObject<Bus>,
               "the I2cBus/BusMaster stratum must still fit over this engine");
+
+/// Letter t's TIMED arbiter: 35 ms per tenure on the kernel's clock (the
+/// RTC PIT at 1024 Hz, started by that letter alone) - above a whole
+/// stretched tenure of the letter (8 bytes at 1 ms) and below the peer's
+/// 60 ms hold of SDA, so the reply lands while the wire is still held.
+constexpr uint32_t timed_ms = 35;
+using TimedBus = I2cBus<Host, P, 3, BusPassThrough, ticks_from_ms<P>(timed_ms)>;
 
 using DynClock = DynamicClock<SysClock, Serial, Host, Client, SclFreq>;
 
@@ -1321,6 +1334,7 @@ void th_busstate() {
 
 volatile bool isr_mode = false;
 volatile bool bus_mode = false;    ///< the completion also goes to the arbiter (test j)
+volatile bool timed_mode = false;  ///< ... or to the TIMED arbiter (test t)
 volatile bool host_done = false;
 volatile uint16_t host_ints = 0;
 
@@ -1507,7 +1521,7 @@ void tj_rebase() {
     quiesce();
 }
 
-// ==== TWO BOARDS (k..s): the far board runs twi_peer ==========================
+// ==== TWO BOARDS (k..t): the far board runs twi_peer ==========================
 
 /// Is `label` (an Ident's NUL-padded USERROW label) this board's own id?
 bool same_board(const char* label, std::string_view mine) {
@@ -1618,6 +1632,26 @@ void peer_settle() { wait_ms(12); }
 bool link_up() {
     if (!host_polled()) return false;
     return link_cmd(Op::ping);
+}
+
+/// Which implementation the peer is: Ident::version's high byte
+/// (twi_link.hpp), 0 when ident does not come back. A few verdicts of this
+/// half are facts about an AVR128DB peer (a raw register bit of its
+/// report, its held START released by a bit-banged STOP): drawn against
+/// that peer, read the peer's own way or SKIPPED, with the reason, against
+/// another.
+uint8_t peer_kind() {
+    if (!link_cmd(Op::ident)) return 0;
+    wait_ms(2);
+    if (!link_collect() || link_ans.op != Op::ident_data) return 0;
+    return twilink::peer_kind(twilink::get_ident(link_ans.data).version);
+}
+
+/// The client's RXACK in the peer's own SSTATUS, which a Report carries
+/// raw: the AVR TWI's SSTATUS.RXACK, or the SAM C21 SERCOM's
+/// I2CS STATUS.RXNACK - bit 2 (DS60001479M, the client's STATUS register).
+uint8_t peer_rxack_bit(uint8_t kind) {
+    return kind == twilink::peer_samc21 ? 0x04u : static_cast<uint8_t>(TWI_RXACK_bm);
 }
 
 // ---- k: bring-up over the wire -----------------------------------------------
@@ -1855,10 +1889,11 @@ void tm_nacks() {
     verdict("four bytes read back exactly from the peer", exact);
     peer_settle();
     if (peer_report(rep)) print_report(rep);
+    const uint8_t rxack = peer_rxack_bit(peer_kind());
     print(serial, "  the peer's SSTATUS at the host's closing NACK = ",
-          hex(rep.mstatus), " (RXACK = ", (rep.mstatus & TWI_RXACK_bm) ? 1 : 0, ")", crlf);
+          hex(rep.mstatus), " (RXACK = ", (rep.mstatus & rxack) ? 1 : 0, ")", crlf);
     verdict("the client saw the host's closing NACK as RXACK",
-            (rep.mstatus & TWI_RXACK_bm) != 0);
+            (rep.mstatus & rxack) != 0);
 
     quiesce();
 }
@@ -1921,6 +1956,19 @@ void tn_arbitration() {
                   "by the same edge", crlf);
     quiesce();
     verdict("link up", link_up());
+    if (const uint8_t kind = peer_kind(); kind != twilink::peer_avrdx) {
+        // The rendezvous is a START HELD by each host behind a bit-banged
+        // Busy and released by the injected STOP. A SAM C21's held START
+        // does not fire when a phantom hold releases (docs/samc21/i2c.md,
+        // its letter g), so against it there is no race to stage here;
+        // the live race between these two chips is staged from the SAM
+        // C21's side, behind a real STOP (test_samc_i2c o).
+        print(serial, "  SKIPPED, no verdict claimed: the peer (kind ", kind,
+              ") does not fire a START held behind a phantom hold - the race "
+              "is test_samc_i2c's letter o there", crlf);
+        quiesce();
+        return;
+    }
     verdict("this board's client joins its host (combined)",
             client_polled(twilink::dut_addr));
 
@@ -1996,6 +2044,11 @@ void tn_arbitration() {
 
 // ---- o: the client collision, case S4 ----------------------------------------
 
+/// The peer's `coll` deadline, waited out before every report: a client
+/// that collides drops out of the tenure (the SAM C21's does) and never
+/// reaches its count, so only the deadline ends its action.
+constexpr uint16_t coll_ms = 100;
+
 void to_collision() {
     print(serial, "o case S4: two clients on ONE address, one host reading - the wire is "
                   "the AND of the two answers", crlf);
@@ -2013,7 +2066,7 @@ void to_collision() {
         cl_tx_seed = mine[round];
         T::clear_client_flags(TWI_COLL_bm);
         twilink::Params a{};
-        a.ms = 300;
+        a.ms = coll_ms;
         a.addr = twilink::shared_addr;
         a.seed = theirs[round];
         a.count = 4;
@@ -2027,14 +2080,14 @@ void to_collision() {
         const uint16_t served = cl_sent;
         const uint16_t a_hits = cl_addr_hits;   // the report command resets these
         twilink::Report rep{};
-        peer_settle();
+        wait_ms(coll_ms + 10u);   // a client that collided may never reach its count
         const bool got = peer_report(rep);
         const bool b_coll = got && (rep.flags & twilink::report_coll) != 0;
         print(serial, "  A serves ", hex(mine[round]), ", B serves ", hex(theirs[round]),
               ": host read ", hex(rx_buf[0]), " ", hex(rx_buf[1]), " ", hex(rx_buf[2]),
               " ", hex(rx_buf[3]), " (status ", st, "); A COLL=", a_coll ? 1 : 0,
               " matched ", a_hits, " served ", served, " | B COLL=", b_coll ? 1 : 0,
-              " matched ", rep.addr_hits, " served ", rep.aux0, crlf);
+              " matched ", rep.addr_hits, " served ", rep.aux1, crlf);
         verdict("both clients acknowledged the address", st == i2c_ok && a_hits == 1 &&
                 got && rep.addr_hits >= 1);
         verdict("the host read the wired-AND of the two answers",
@@ -2053,7 +2106,7 @@ void to_collision() {
     cl_tx_seed = 0xFF;
     T::clear_client_flags(TWI_COLL_bm);
     twilink::Params a{};
-    a.ms = 300;
+    a.ms = coll_ms;
     a.addr = twilink::shared_addr;
     a.seed = 0x55;
     a.count = 4;
@@ -2067,7 +2120,7 @@ void to_collision() {
           ", after the NEXT Start condition = ", coll_after ? 1 : 0, crlf);
     verdict("COLL stood after the collision", coll_now);
     verdict("and cleared itself on the next Start condition", !coll_after);
-    peer_settle();
+    wait_ms(coll_ms + 10u);
     quiesce();
 }
 
@@ -2378,6 +2431,132 @@ void ts_rebase() {
     quiesce();
 }
 
+// ---- t: the timed bus over a wedge -------------------------------------------
+//
+// util/bus_master.hpp's per-bus timeout over THIS engine on a real wedge:
+// the peer holds SDA low from its PORT, a START written into that bus
+// parks in hardware (letter p: the address never goes out) and no
+// interrupt follows, so only the arbiter's own clock can answer. Three
+// legs on one timed I2cBus: a client stretching every byte by 1 ms (flow
+// control: completes i2c_ok under the limit); a tenure into the held wire
+// (i2c_timeout ON THE ARBITER'S CLOCK, recover() - the ENABLE cycle and
+// force-idle - run in the same dispatch, SDA still held at the reply); and
+// the give-back, the same bus AO carrying the next tenure once the wire is
+// free. The kernel's clock is the RTC PIT at 1024 Hz, started here and
+// stopped at the end: no other letter of this suite runs with it.
+//
+// THE BOUND on the reply, derived: the limit is ticks_from_ms(35) = 36
+// ticks of 1024 Hz = 35.16 ms; the time event armed at start() matures on
+// the 36th tick boundary after it, so between 35.16 and 36.13 ms after the
+// post; millis() reads that through its own jitter of up to one tick
+// (0.98 ms) - a reading in [34, 38] ms. The hold ends no earlier than 60
+// ms: the reply lands while SDA is still low, read on the pad.
+
+struct TimedRun {
+    bool replied = false;
+    uint8_t status = 0xFE;
+    uint32_t ms = 0;
+};
+
+TimedRun timed_request(uint8_t len, uint32_t deadline_ms) {
+    TimedRun t{};
+    for (uint8_t i = 0; i < len; ++i) tx_buf[i] = static_cast<uint8_t>(0x11u * (i + 1u));
+    cli();
+    host_done = false;
+    isr_mode = true;
+    timed_mode = true;
+    T::enable_read_interrupt(true);
+    T::enable_write_interrupt(true);
+    sei();
+    post<TimedBus>(Host::Request{twilink::command_addr, lend<Lease::reply>(tx_buf), len, {}, 0,
+                                 reply_to<Sink, I2cDone>()});
+    const uint32_t t0 = Ticker::millis();
+    while (!t.replied && Ticker::millis() - t0 < deadline_ms) {
+        TimeEvents<P>::process();
+        (void)serve_one<TimedBus>();
+        if (const auto r = Sink::queue.pop()) {
+            t.replied = true;
+            t.status = r->status;
+            t.ms = Ticker::millis() - t0;
+        }
+    }
+    cli();
+    isr_mode = false;
+    timed_mode = false;
+    T::enable_read_interrupt(false);
+    T::enable_write_interrupt(false);
+    sei();
+    return t;
+}
+
+void tt_timed() {
+    print(serial, "t the timed bus: a wedged tenure answered i2c_timeout on the arbiter's clock",
+          crlf);
+    quiesce();
+    verdict("link up", link_up());
+    Ticker::init();
+    TimedBus::init();
+    while (Sink::queue.pop()) {
+    }
+
+    // Leg 1: legal stretching under the timed arbiter.
+    twilink::Params st{};
+    st.count = 64;
+    st.ms = 400;
+    st.addr = twilink::command_addr;
+    st.hold_us = 1000;
+    verdict("the peer commanded to stretch every byte by 1 ms", peer_action(Op::serve, st));
+    const TimedRun s1 = timed_request(8, 400);
+    wait_ms(450);
+    print(serial, "  stretched tenure (1 ms/byte, 8 bytes) under a ", timed_ms,
+          " ms arbiter: status ", s1.status, " in ", s1.ms, " ms", crlf);
+    verdict("a client stretching every byte completes i2c_ok UNDER the timed arbiter: "
+            "stretching is flow control and the limit sits above the tenure",
+            s1.replied && s1.status == i2c_ok && s1.ms >= 8u && s1.ms < timed_ms);
+
+    // Leg 2: the wedge.
+    twilink::Params h{};
+    h.ms = 60;        // the peer's hold: its deadline, nothing on SCL releases it
+    h.aux16 = 60000;  // the same bound for a peer that reads it here
+    h.aux8 = 0;
+    verdict("the peer commanded to hold SDA for 60 ms", peer_action(Op::hold_sda, h));
+    wait_ms(2);
+    const bool held_before = !Sda::read();
+    const TimedRun w = timed_request(2, 200);
+    const bool held_after = !Sda::read();
+    print(serial, "  tenure into the held wire: status ", w.status, " (i2c_timeout = ",
+          i2c_timeout, ") at ", w.ms, " ms, SDA low before ", held_before, " and at the reply ",
+          held_after, ", stale ", TimedBus::stale_events(), ", BUSSTATE after ",
+          static_cast<uint8_t>(T::bus_state()), crlf);
+    verdict("the wedged tenure comes back i2c_timeout ON THE ARBITER'S CLOCK, inside [34, 38] "
+            "ms of the post",
+            held_before && w.replied && w.status == i2c_timeout && w.ms >= 34u && w.ms <= 38u);
+    verdict("and it lands while SDA is STILL HELD: the diagnosis is the timeout's, not the "
+            "release's",
+            held_after);
+
+    // Leg 3: the give-back, through the same arbiter.
+    wait_ms(120);     // the hold over, the peer back on its command address
+    verdict("SDA is free again", Sda::read());
+    twilink::Params a{};
+    a.count = 64;
+    a.ms = 300;
+    a.addr = twilink::command_addr;
+    verdict("the peer commanded to serve", peer_action(Op::serve, a));
+    const TimedRun g = timed_request(4, 300);
+    wait_ms(320);
+    print(serial, "  after the release: status ", g.status, " in ", g.ms, " ms, stale ",
+          TimedBus::stale_events(), crlf);
+    verdict("the bus SURVIVED its own diagnosis: the recover()ed engine carries the next "
+            "tenure i2c_ok through the same arbiter",
+            g.replied && g.status == i2c_ok);
+    verdict("no stale event: the parked tenure never completed, there was no straggler",
+            TimedBus::stale_events() == 0u);
+    Pit::enable_interrupt(false);
+    verdict("and the command channel is whole", link_cmd(Op::ping));
+    quiesce();
+}
+
 // ---- the menu ----------------------------------------------------------------
 
 using TestFn = void (*)();
@@ -2388,10 +2567,10 @@ constexpr Test tests[] = {
     {'i', ti_interrupts}, {'j', tj_rebase},
     {'k', tk_bringup}, {'l', tl_stretch}, {'m', tm_nacks}, {'n', tn_arbitration},
     {'o', to_collision}, {'p', tp_recovery}, {'q', tq_general_call}, {'r', tr_speeds},
-    {'s', ts_rebase},
+    {'s', ts_rebase}, {'t', tt_timed},
 };
 constexpr char single_board[] = "abcdefghij";
-constexpr char two_board[] = "klmnopqrs";
+constexpr char two_board[] = "klmnopqrst";
 
 void run(TestFn fn) {
     passed = failed = 0;
@@ -2420,7 +2599,7 @@ void help() {
     print(serial, "  TWO BOARDS (the peer board running twi_peer): k bring-up | l clock "
                   "stretching | m NACK injection | n multi-host arbitration | "
                   "o collision S4 | p bus recovery | q general call | r the three "
-                  "speeds | s rebase    -> y = all of k..s", crlf);
+                  "speeds | s rebase | t the timed bus    -> y = all of k..t", crlf);
     print(serial, "  ONE open-drain bus, three taps of this board: PA2/PA3 (the host and "
                   "the combined client), PC2/PC3 (the DUAL client, and the bit-bang "
                   "injector of tests h and n while Dual mode is off) and PB2/PB3; the "
@@ -2445,10 +2624,13 @@ ISR(TWI0_TWIM_vect) {
     if (Host::isr()) {
         host_done = true;
         if (bus_mode) post<Bus>(TransferDone{Host::status()});
+        if (timed_mode) post<TimedBus>(TransferDone{Host::status()});
     }
 }
 
 ISR(TWI0_TWIS_vect) { service_client<Client>(); }
+
+ISR(RTC_PIT_vect) { Ticker::pit(); }
 
 ISR(TCB0_INT_vect) {
     const uint16_t t = meter_mode == 0 ? SclFreq::period_ticks() : SclLow::width_ticks();
